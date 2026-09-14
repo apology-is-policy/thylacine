@@ -1759,6 +1759,13 @@ cap-stamp is the unforgeable substrate, exactly as seL4 CNodes / Zircon handles 
   CAP_CHOWN, CAP_KILL}` (bits 3,7,8,9). All four are acquired ONLY through the `cap`
   device and are **rfork-stripped**. `CAP_ALL` gains only `CAP_GRANT_CLEARANCE` (bit 6);
   the elevation-only four stay excluded.
+  - **"Four" is A-4's history, not today's count.** The set has since taken
+    `CAP_DEBUG` (I-39) and `CAP_JIT` (I-42), and `CAP_POST_SERVICE` is DESIGNED
+    as a seventh (IMPERIUM-DESIGN.md §6.5). The paragraphs below are preserved
+    as the A-4-pre record; **`caps.h:193` is authoritative for the membership**,
+    and a prose list of it goes stale the moment anyone adds a bit — which is
+    exactly what happened to the `ARCHITECTURE.md` I-2 row, uncorrected for
+    months.
 - **Why `CAP_KILL` is elevation-only (rfork-stripped), not fork-grantable:** a kill-anyone
   right must not leak to a legate's children; the supervisor/debugger Proc itself holds it;
   killing your OWN children never needs it (parent authority already covers that, A-4b). A

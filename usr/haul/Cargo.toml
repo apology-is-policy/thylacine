@@ -1,0 +1,59 @@
+# haul -- mount a remote 9P2000.L tree served over TCP, optionally on npxf's
+# authenticated + encrypted channel.
+#
+# Native (libthyla-rs) per the Plan 9 split: authored within Thylacine, so no
+# musl and no pouch boundary-line. The /net TCP client, SYS_PIPE, SYS_ATTACH_9P
+# and SYS_MOUNT are all the transport needs.
+#
+# LIB + BIN, and the reason is the same one tapestryd's manifest gives: a no_std
+# BIN crate's tests never run, because the host cannot even assemble
+# libthyla-rs. The LIB is `npxf` -- the key schedule, the handshake and the
+# record layer, pure and syscall-free, pinned to known-answer vectors from
+# npxf's own implementation. The BIN (the `guest` feature, default) is the
+# sockets, the pipes, the pumps and the mount.
+#
+#   cargo test -p haul --lib --no-default-features --target aarch64-apple-darwin
+[package]
+name = "haul"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lib]
+name = "haul"
+path = "src/lib.rs"
+
+[[bin]]
+name = "haul"
+path = "src/main.rs"
+required-features = ["guest"]
+
+# `guest` gates the syscall body so the lib stays host-buildable. A bin whose
+# required-features are unmet is SKIPPED SILENTLY rather than failing, so
+# `--no-default-features` builds the lib alone -- which is exactly what the host
+# test invocation above wants.
+[features]
+default = ["guest"]
+guest = ["dep:libthyla-rs"]
+
+[dependencies]
+libthyla-rs = { path = "../lib/libthyla-rs", optional = true }
+
+# The npxf channel's primitives. default-features = false throughout: the
+# defaults pull `getrandom`, which has no bare-metal backend, and `std`. The
+# ephemeral scalar is supplied by the caller from SYS_GETRANDOM instead, so this
+# crate needs no RNG of its own.
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+x25519-dalek = { version = "2", default-features = false, features = ["alloc", "precomputed-tables", "zeroize"] }
+sha2 = { version = "0.10", default-features = false }
+hmac = { version = "0.12", default-features = false }
+hkdf = { version = "0.12", default-features = false }
+subtle = { version = "2", default-features = false }
+# `alloc` is REQUIRED, not incidental: `Zeroize for Vec` lives behind it, and
+# that impl is what wipes the token's FULL CAPACITY (not just its length) on
+# drop. Without the feature `Zeroizing<Vec<u8>>` stops resolving -- a build
+# error, so it fails loud -- but relying on another crate's feature selection
+# to enable it means the token's zeroization is a property of the dependency
+# graph rather than of this manifest.
+zeroize = { version = "1", default-features = false, features = ["alloc"] }

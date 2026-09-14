@@ -484,7 +484,7 @@ EOF
     # P4-Ia2: copy any built Rust-side userspace binaries from
     # build/usr-rs/<target>/release/. Same curation discipline.
     # Binary name = crate's [[bin]] name = directory under usr/.
-    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "nocturned" "nocturne-probe" "nocturne-vol" "nocturne-vol-probe" "nocturne-tap-probe" "nocturne-capture-probe" "ring-voice-probe" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "halcyon" "halcyond" "view" "gallery" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "diorama" "diorama-probe" "viv" "viv-probe" "viv-pheno-probe" "ptyhost" "jc-probe" "susp-mask-child" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "exec-probe" "fork-probe" "coreutil-smoke" "fs-mut-smoke" "symlink-probe" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "ps" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "aurora-push" "pipe-src" "pipe-sink" "legate-prover" "imperium-probe" "imperium" "jit-prover" "login" "ut" "nora" "prowl" "quarry" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" "warp-prove" "kaua-term" "kaua-term-probe" "caps-probe" )
+    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "nocturned" "nocturne-probe" "nocturne-vol" "nocturne-vol-probe" "nocturne-tap-probe" "nocturne-capture-probe" "ring-voice-probe" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "halcyon" "halcyond" "view" "gallery" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "diorama" "diorama-probe" "viv" "viv-probe" "viv-pheno-probe" "ptyhost" "jc-probe" "susp-mask-child" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "exec-probe" "fork-probe" "coreutil-smoke" "fs-mut-smoke" "symlink-probe" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "ps" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "aurora-push" "pipe-src" "pipe-sink" "legate-prover" "imperium-probe" "imperium" "jit-prover" "login" "ut" "nora" "prowl" "quarry" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" "warp-prove" "haul" "kaua-term" "kaua-term-probe" "caps-probe" )
     local rs_release="$USR_RS_BUILD/$USR_RS_TARGET/release"
     for bin in "${usr_rs_bins[@]}"; do
         local src="$rs_release/$bin"
@@ -3233,7 +3233,11 @@ build_stratum_pool_fixture() {
         echo "    minting this pool WITHOUT /clade (the on-device C/C++ toolchain)."
         forage_hint clade "the Clade toolchain" "$BUILD_DIR/clade/stage/bin"
     fi
+    local bake_goroot=0
     if [[ "${THYLACINE_BAKE_GOROOT:-1}" == "1" && -d "$BUILD_DIR/go/goroot" ]]; then
+        bake_goroot=1
+    fi
+    if [[ "$bake_goroot" == "1" ]]; then
         # Sized against MEASURED consumption (2026-07-03, task #39): the bake
         # itself uses ~575M for ~170M logical (~3.3x FS amplification) and the
         # boot's go4c build + suite burned the ~960M that remained free in a
@@ -3312,6 +3316,20 @@ build_stratum_pool_fixture() {
     fi
     echo "==> stratum pool fixture: $(wc -c < "$pool_img" | tr -d ' ') bytes ($pool_img), $(wc -c < "$keyfile" | tr -d ' ') bytes ($keyfile)"
     ledger "pool.img + system.key: REGENERATED (fresh random key, seed=$mkfs_seed) -- the ramfs MUST be re-baked so /system.key matches"
+
+    # WHAT ACTUALLY WENT INTO THIS POOL, written where a HOST-side gate can read
+    # it. The #101/#139 family keeps recurring because the optional payloads have
+    # a TWO-part bake condition (the lever AND the staged tree) and every cheap
+    # host-side check so far has tested ONE of them. `ls-gfx-gl.exp` tested only
+    # `build/clade/stage/bin/gl-sdl-prove`, over a comment asserting "its
+    # presence here is the same condition" -- it is not, and on this machine
+    # (tree staged since Sep 1, lever unset) the guard passed, the scenario ran
+    # against a pool with no /clade, and it FAILED at 180s reporting a
+    # regression that did not exist. That is the #245 class inverted: a gate that
+    # cannot tell "not built" from "broken" reports the wrong one, loudly.
+    #
+    # A guard must ask what the MINT decided, not re-derive it from an input.
+    printf 'clade=%s\ngoroot=%s\n' "$bake_clade" "$bake_goroot" > "$BUILD_DIR/pool-contents"
 
     # P6-pouch-stratumd-boot 16c: populate the freshly-formatted pool with
     # the boot binary corpus + a sentinel for joey's post-pivot probe. The
@@ -3825,6 +3843,74 @@ populate_stratum_pool() {
         else
             echo "==> populate pool: no usr/view/testdata/test.jpg -- JPEG E2E fixture skipped"
         fi
+    fi
+
+    # HALCYON-THEME TH-5: ship the second theme. `/lib/halcyon/themes/` is
+    # the gallery; `/lib/halcyon/theme.toml` is the one in force, and there
+    # is none by default (the built-in Daylight IS the default installation,
+    # HALCYON-THEME 4.1). An operator switches by copying a gallery file over
+    # theme.toml. Baked UNCONDITIONALLY: it is content, not a lever, and a
+    # theme nobody can reach has not been shipped.
+    # EVERY *.toml in the gallery, not a hand-listed one: a theme added to the
+    # source tree and not to this line would simply not ship, silently, and
+    # "a theme nobody can reach has not been shipped" applies to the annotated
+    # TEMPLATE.toml exactly as much as to nightjar.
+    local themes_dir="$REPO_ROOT/usr/lib/halcyon/themes"
+    if compgen -G "$themes_dir/*.toml" >/dev/null; then
+        # /lib/halcyon may or may not exist yet (the renderer lever above
+        # makes it only under THYLACINE_HALCYON): tolerate EEXIST.
+        "$stratum_fs_bin" -s "$sock_path" mkdir /lib/halcyon >/dev/null 2>&1 || true
+        "$stratum_fs_bin" -s "$sock_path" mkdir /lib/halcyon/themes >/dev/null 2>&1 || true
+        local theme_src theme_base baked=0
+        for theme_src in "$themes_dir"/*.toml; do
+            theme_base="$(basename "$theme_src")"
+            "$stratum_fs_bin" -s "$sock_path" write "/lib/halcyon/themes/$theme_base" < "$theme_src" \
+                || { echo "==> populate pool: write $theme_base FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+            baked=$((baked + 1))
+        done
+        "$stratum_fs_bin" -s "$sock_path" sync \
+            || { echo "==> populate pool: sync (themes) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        # Readback-verified like the verb table: a theme that arrived
+        # TRUNCATED would still be valid TOML, and the loader would refuse it
+        # for its size rather than tell anyone the bake was short.
+        for theme_src in "$themes_dir"/*.toml; do
+            theme_base="$(basename "$theme_src")"
+            "$stratum_fs_bin" -s "$sock_path" read "/lib/halcyon/themes/$theme_base" | cmp -s - "$theme_src" \
+                || { echo "==> populate pool: $theme_base readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        done
+        echo "==> populate pool: $baked theme(s) baked + readback-verified into /lib/halcyon/themes (HALCYON-THEME TH-5)"
+    fi
+
+    # TH-5b: put a gallery theme IN FORCE. `THYLACINE_HALCYON_THEME=<name>`
+    # copies `/lib/halcyon/themes/<name>.toml` to `/lib/halcyon/theme.toml`,
+    # which is what both renderers and tapestryd actually read. A lever rather
+    # than a default because the default installation has NO theme file (4.1)
+    # -- and without it nothing in a guest has ever loaded a theme from disk,
+    # so the whole load path would ship unwitnessed.
+    #
+    # DELIBERATELY OUTSIDE the nightjar `-f` guard above (TH-6 F9). It used to
+    # be nested inside it, which meant that if that ONE file went missing the
+    # lever became a silent no-op for EVERY theme name -- its own hard-fail on
+    # a missing theme unreachable, nothing written, nothing said. A lever that
+    # can be disabled by the absence of an unrelated file is not a lever.
+    if [[ -n "${THYLACINE_HALCYON_THEME:-}" ]]; then
+        # Constrain the name to a single gallery component before it is pasted
+        # into a path: every use is quoted, so this was not injectable, but
+        # `../../etc/foo` resolved outside the gallery and "contained by the
+        # forced .toml suffix" is a coincidence, not a bound.
+        [[ "${THYLACINE_HALCYON_THEME}" =~ ^[A-Za-z0-9_-]+$ ]] \
+            || { echo "==> populate pool: THYLACINE_HALCYON_THEME must be [A-Za-z0-9_-]+ (got '${THYLACINE_HALCYON_THEME}')" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        local want_theme="$REPO_ROOT/usr/lib/halcyon/themes/${THYLACINE_HALCYON_THEME}.toml"
+        [[ -f "$want_theme" ]] \
+            || { echo "==> populate pool: no such theme ${THYLACINE_HALCYON_THEME}" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" mkdir /lib/halcyon >/dev/null 2>&1 || true
+        "$stratum_fs_bin" -s "$sock_path" write /lib/halcyon/theme.toml < "$want_theme" \
+            || { echo "==> populate pool: write theme.toml FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" sync \
+            || { echo "==> populate pool: sync (theme.toml) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" read /lib/halcyon/theme.toml | cmp -s - "$want_theme" \
+            || { echo "==> populate pool: theme.toml readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        echo "==> populate pool: HALCYON theme lever ENABLED (/lib/halcyon/theme.toml = ${THYLACINE_HALCYON_THEME})"
     fi
 
     # KT-1.5d-1a (HALCYON 14.12): the per-user session lever. Under

@@ -46,6 +46,7 @@ void test_dev9p_prw_wire_offset_and_cursor(void);
 void test_dev9p_wstat_readonly_fd(void);
 void test_dev9p_wstat_size(void);
 void test_dev9p_walk_attrs(void);
+void test_dev9p_wga_unsupported_latches_by_errno(void);
 void test_dev9p_page_cache_serve_and_gate(void);
 void test_dev9p_cached_open(void);
 void test_dev9p_cached_open_fallbacks(void);
@@ -170,6 +171,7 @@ static bool g_wga_size_ov_on;
 static u64  g_wga_size_ov;
 static u32  g_wga_vers_ov;    // 0 = the canonical body (version 0)
 static u8   g_wga_type_ov;    // 0 = the canonical P9_QTFILE
+static u32  g_wga_lerror_ecode;  // != 0: the NEXT Twalkgetattr answers Rlerror, then clears
 
 // Canonical responder — synthesizes valid Rmsgs for every op type
 // dev9p might issue. Mirrors the responder used in test_9p_client.c
@@ -492,6 +494,22 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
     }
     if (type == P9_TWALKGETATTR) {
         g_wga_seen++;
+        // Inject an Rlerror for the fused walk, so a test can drive the
+        // capability latch by ERRNO. A foreign server that does not implement
+        // message 140 answers here, and WHICH code it picks is not ours to
+        // choose -- npxf says EOPNOTSUPP, our native servers say ENOSYS.
+        if (g_wga_lerror_ecode) {
+            u32 ec = g_wga_lerror_ecode;
+            g_wga_lerror_ecode = 0;                   // one-shot, like the siblings
+            size_t etotal = P9_HDR_LEN + 4;
+            if (resp_cap < etotal) return -1;
+            resp[0] = 11; resp[1] = 0; resp[2] = 0; resp[3] = 0;
+            resp[4] = P9_RLERROR;
+            resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+            resp[7] = (u8)(ec & 0xff);         resp[8] = (u8)((ec >> 8) & 0xff);
+            resp[9] = (u8)((ec >> 16) & 0xff); resp[10] = (u8)((ec >> 24) & 0xff);
+            return (int)etotal;
+        }
         // POUNCE: Rwalkgetattr = nwqid(2) + nwqid * getattr_body(153). Echo
         // the requested component count (or one fewer under g_wga_partial --
         // the session layer then leaves newfid unbound). Body offsets:
@@ -1992,6 +2010,66 @@ void test_dev9p_walk_attrs(void) {
     }
 
     teardown(root);
+}
+
+// POUNCE capability latch, BY ERRNO. A server that does not implement message
+// 140 answers Rlerror, and WHICH code it picks is not ours to choose: our native
+// servers say ENOSYS, npxf says EOPNOTSUPP. Both mean the one thing that matters
+// here -- this server cannot do the fused walk -- so both must latch
+// `wga_unsupported` and hand back the fallback sentinel, NOT a walk failure.
+//
+// Latching EOPNOTSUPP was missing until 2026-09-10, and the cost was not a
+// slow path: the fused walk was reported as a WALK FAILURE, so userspace saw
+// `no such file or namespace entry` and two separate investigations went after
+// the wrong subsystem (first a nested-mount theory, then a spawn-inheritance
+// one) because the diagnostic named a missing FILE for a missing OPERATION.
+//
+// THE THIRD ARM IS THE POINT. Latching on any error at all would "fix" the bug
+// and silently convert every transport failure into "this server lacks POUNCE",
+// which would then disable the Larder for the session (the L1e cacheability
+// gate) on a single EIO. So EIO must NOT latch.
+void test_dev9p_wga_unsupported_latches_by_errno(void) {
+    const char  *names[1] = { "fileB" };
+    const size_t lens[1]  = { 5 };
+
+    struct {
+        u32  ecode;
+        bool want_latch;
+        const char *what;
+    } cases[] = {
+        { 38, true,  "ENOSYS latches (the native-server spelling)" },
+        { 95, true,  "EOPNOTSUPP latches (the npxf spelling -- the 2026-09-10 fix)" },
+        { 5,  false, "EIO does NOT latch (a transport error is not a capability answer)" },
+    };
+
+    for (unsigned i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        struct Spoor *root = make_open_client_and_root();
+        TEST_ASSERT(root != NULL, "client + root");
+        struct p9_client *cl = dev9p_priv_of(root)->client;
+        TEST_ASSERT(!cl->wga_unsupported, "latch starts clear");
+
+        g_wga_lerror_ecode = cases[i].ecode;
+        struct Spoor *nc = spoor_clone(root);
+        TEST_ASSERT(nc != NULL, "clone");
+        struct t_stat sts[1];
+        struct Walkqid *w = dev9p.walk_attrs(root, nc, names, lens, 1, sts);
+
+        if (cases[i].want_latch) {
+            TEST_ASSERT(w == DEV_WALK_ATTRS_UNSUPPORTED, cases[i].what);
+            TEST_ASSERT(cl->wga_unsupported, "latched for the session");
+        } else {
+            TEST_ASSERT(w != DEV_WALK_ATTRS_UNSUPPORTED, cases[i].what);
+            TEST_ASSERT(!cl->wga_unsupported, "a real error leaves the latch clear");
+            if (w != NULL) walkqid_free(w);
+        }
+        // Each iteration builds a fresh client + root (make_open_client_and_root
+        // re-inits the file-scope g_client/g_loopback), so each must be torn
+        // down before the next -- and the fresh client is also what makes the
+        // "latch starts clear" assertion above meaningful per case rather than
+        // only on the first.
+        spoor_clunk(nc);
+        teardown(root);
+    }
 }
 
 // L1e integration: a read on a CACHEABLE client populates the page cache; a

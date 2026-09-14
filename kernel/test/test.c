@@ -1381,6 +1381,7 @@ void test_dev9p_prw_wire_offset_and_cursor(void);
 void test_dev9p_wstat_readonly_fd(void);
 void test_dev9p_wstat_size(void);
 void test_dev9p_walk_attrs(void);
+void test_dev9p_wga_unsupported_latches_by_errno(void);
 void test_dev9p_page_cache_serve_and_gate(void);
 void test_dev9p_read_align_heals_partial(void);
 void test_dev9p_read_align_short_not_eof(void);
@@ -1607,6 +1608,16 @@ void test_burrow_dma_holds_kobj_ref(void);
 void test_burrow_dma_lifecycle_round_trip(void);
 void test_dma_map_install_vma(void);
 void test_dma_map_proc_free_releases_kobj(void);
+void test_skein_blocks_tile_the_buffer(void);
+void test_skein_offset_resolution(void);
+void test_skein_small_weave_stays_one_block(void);
+void test_skein_scope_plain_never_scatters(void);
+void test_skein_gpu_bo_scatters(void);
+void test_skein_full_envelope_weave(void);
+void test_skein_zero_init_across_blocks(void);
+void test_skein_one_block_resolves_throughout(void);
+void test_skein_stride_is_the_objects_not_the_constant(void);
+void test_dma_segments_refuses_rather_than_truncates(void);
 void test_handle_hw_mmio_dup_rejected(void);
 void test_handle_hw_irq_dup_rejected(void);
 void test_handle_hw_mmio_close_releases_claim(void);
@@ -3266,6 +3277,7 @@ struct test_case g_tests[] = {
     { "dev9p.wstat_readonly_fd",       test_dev9p_wstat_readonly_fd,          false, NULL },
     { "dev9p.wstat_size",              test_dev9p_wstat_size,                 false, NULL },
     { "dev9p.walk_attrs",              test_dev9p_walk_attrs,                 false, NULL },
+    { "dev9p.wga_unsupported_by_errno", test_dev9p_wga_unsupported_latches_by_errno, false, NULL },
     { "dev9p.page_cache_serve_and_gate", test_dev9p_page_cache_serve_and_gate, false, NULL },
     { "dev9p.read_align_heals_partial", test_dev9p_read_align_heals_partial,    false, NULL },
     { "dev9p.read_align_short_not_eof", test_dev9p_read_align_short_not_eof,    false, NULL },
@@ -3573,6 +3585,26 @@ struct test_case g_tests[] = {
     { "dma_map.install_vma",           test_dma_map_install_vma,           false, NULL },
     { "dma_map.proc_free_releases_kobj",
                                        test_dma_map_proc_free_releases_kobj,
+                                                                           false, NULL },
+    { "skein.blocks_tile_the_buffer",  test_skein_blocks_tile_the_buffer,  false, NULL },
+    { "skein.offset_resolution",       test_skein_offset_resolution,       false, NULL },
+    { "skein.small_weave_stays_one_block",
+                                       test_skein_small_weave_stays_one_block,
+                                                                           false, NULL },
+    { "skein.scope_plain_never_scatters",
+                                       test_skein_scope_plain_never_scatters,
+                                                                           false, NULL },
+    { "skein.gpu_bo_scatters",         test_skein_gpu_bo_scatters,         false, NULL },
+    { "skein.full_envelope_weave",     test_skein_full_envelope_weave,     false, NULL },
+    { "skein.zero_init_across_blocks", test_skein_zero_init_across_blocks, false, NULL },
+    { "skein.one_block_resolves_throughout",
+                                       test_skein_one_block_resolves_throughout,
+                                                                           false, NULL },
+    { "skein.stride_is_the_objects_not_the_constant",
+                                       test_skein_stride_is_the_objects_not_the_constant,
+                                                                           false, NULL },
+    { "dma_segments.refuses_not_truncates",
+                                       test_dma_segments_refuses_rather_than_truncates,
                                                                            false, NULL },
     { "perm.check_owner_group_other",  test_perm_check_owner_group_other,  false, NULL },
     { "perm.check_owner_first",        test_perm_check_owner_first_authoritative, false, NULL },

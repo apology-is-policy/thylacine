@@ -37,7 +37,7 @@ use halcyond::tiles::{plan_tiles, tile_command};
 use kaua_term::wire::{encode_input, parse_record, FrameDecoder, Input};
 use kaua_term::{Record, ScreenMode};
 use libhalcyon::scale;
-use libhalcyon::theme::{daylight_env_palette, daylight_palette};
+use libhalcyon::theme::{self, env_palette};
 use libthyla_rs::fs::{self, File};
 use libthyla_rs::io::Write;
 use libthyla_rs::process::{Child, Command, Stdio};
@@ -263,6 +263,10 @@ impl SessionTile {
         argv: &[String],
         budget: usize,
         place_addr: Option<&str>,
+        // The RESOLVED theme's terminal palette (HALCYON-THEME 3.4). The tile
+        // is born in it AND the child is told it, from this one value, so the
+        // grid and the transcript beside it cannot disagree.
+        palette: vt::Palette,
     ) -> Option<SessionTile> {
         let cols = ((surf.w as i32 / geom.cell_w).max(1)) as u16;
         let rows = ((surf.h as i32 / geom.cell_h).max(1)) as u16;
@@ -274,13 +278,8 @@ impl SessionTile {
         // resolved RGB, so this is the only moment the theme can be chosen).
         // Built by `session_init::tile_argv`, which is host-tested against the
         // parser the child actually runs.
-        for a in session_init::tile_argv(
-            kaua_term::cmdline::Tier::Rich,
-            &daylight_palette(),
-            cols,
-            rows,
-            argv,
-        ) {
+        for a in session_init::tile_argv(kaua_term::cmdline::Tier::Rich, &palette, cols, rows, argv)
+        {
             cmd.arg(a);
         }
         // The identity axis stops here whatever the parent holds: a tile's
@@ -344,7 +343,7 @@ impl SessionTile {
             up_fd,
             down: DownQueue::new(),
             drop_said: false,
-            tile: Tile::with_budget(cols as usize, rows as usize, daylight_palette(), budget),
+            tile: Tile::with_budget(cols as usize, rows as usize, palette, budget),
             dec: FrameDecoder::new(),
             cols,
             rows,
@@ -981,6 +980,9 @@ fn reconcile(
     geom: Geom,
     home: Option<&str>,
     places: &mut Option<PanePlaceServer>,
+    // The session's resolved terminal palette: a tile created LATER must be
+    // born in the same theme as the ones already up.
+    palette: vt::Palette,
 ) {
     let layout = match read_file(troot, "layout") {
         Some(s) => s,
@@ -1045,6 +1047,7 @@ fn reconcile(
             &argv,
             budget,
             place_addr.as_deref(),
+            palette,
         ) {
             Some(t) => {
                 tiles.insert(leaf, t);
@@ -1064,6 +1067,47 @@ fn reconcile(
     for t in tiles.values_mut() {
         t.tile.scrollback.set_max_cost(share);
     }
+}
+
+/// HALCYON-THEME 3.4: push our RESOLVED theme to the compositor, so the
+/// chrome it paints and the content we paint are the same theme.
+///
+/// Only a DECLARED session may: the verb is seat-gated exactly like `scale`.
+/// And only a push can carry it -- the user's theme file lives in the user's
+/// home, which tapestryd is not entitled to read, so the compositor would
+/// otherwise be stuck on the system file while the pane inside it was
+/// something else.
+///
+/// A refusal is SAID, never silently absorbed: the visible result would be a
+/// pane in one theme inside chrome in another, and the operator deserves to
+/// know which half failed.
+/// `pub(crate)` so the CONSOLE renderer uses this one too. It had its own
+/// inline version with no `Busy` arm at all, so a push landing in a service
+/// pass whose four-verb layout budget was already spent got exactly one
+/// attempt and gave up for the life of the boot -- and the console's push is
+/// the LOAD-BEARING one, since tapestryd comes up before the pool it would
+/// read the theme file from is mounted. One implementation, both renderers.
+pub(crate) fn push_theme(ring: &EventRing, theme: &libhalcyon::theme::Theme) {
+    let cmd = format!("theme {}", libhalcyon::theme::to_wire(theme));
+    for _ in 0..VERB_RETRIES {
+        match ring.global_ctl(&cmd) {
+            Ok(()) => {
+                say!("halcyond: theme pushed to the compositor");
+                return;
+            }
+            Err(TapError::Busy) => {
+                let _ = sleep(Duration::from_millis(VERB_NAP_MS));
+            }
+            Err(e) => {
+                say!(
+                    "halcyond: theme push refused ({:?}) -- the chrome keeps its own",
+                    e
+                );
+                return;
+            }
+        }
+    }
+    say!("halcyond: theme push kept busy -- the chrome keeps its own");
 }
 
 /// HALCYON-SCALE 6: the user's `/env/HALCYON_SCALE` preference, written
@@ -1248,10 +1292,37 @@ pub fn run(home: Option<String>) -> i64 {
     });
     gs.set_scale(display.scale);
     gs.set_display(display.w, display.h);
-    // THE ONE PLACE the session resolves its theme (HALCYON-THEME 3.2);
-    // TH-4's loader lands here, and it is also where the user's theme file
-    // will be pushed to tapestryd so the chrome and the content agree.
-    let theme = libhalcyon::theme::builtin();
+    // THE ONE PLACE the session resolves its theme (HALCYON-THEME 3.2/3.4):
+    // the system file, then the user's own, with the built-in as the floor
+    // nothing can remove. Every note is SAID -- a refused theme file that
+    // fell back quietly is indistinguishable from one that applied and
+    // happened to look the same (4.2).
+    let resolved = theme::resolve(
+        read_file(libthyla_rs::T_WALK_OPEN_FROM_ROOT, theme::SYSTEM_THEME_PATH).as_deref(),
+        home.as_deref()
+            .map(|h| alloc::format!("{}{}", h.trim_end_matches('/'), theme::USER_THEME_REL))
+            .and_then(|p| read_file(libthyla_rs::T_WALK_OPEN_FROM_ROOT, &p))
+            .as_deref(),
+    );
+    for n in &resolved.notes {
+        say!("halcyond: {}", n);
+    }
+    say!(
+        "halcyond: theme {} ({:?}, {} inherited)",
+        if resolved.name.is_empty() {
+            "built-in"
+        } else {
+            &resolved.name
+        },
+        resolved.source,
+        resolved.inherited.len()
+    );
+    let theme = resolved.theme;
+    // The compositor paints the chrome around our panes and cannot read the
+    // user's file; a declared seat is the only party that can tell it.
+    if declared {
+        push_theme(&ring, &theme);
+    }
     let mut sheet = sheet_for(&theme, display.scale);
     gs.set_smooth(sheet.smooth_mem);
     let (cell_w, cell_h, _) = gs.mono_cell();
@@ -1291,7 +1362,9 @@ pub fn run(home: Option<String>) -> i64 {
     // session theme. Written BEFORE the first tile spawn, so every descendant
     // inherits it via /env; best-effort, an unset value just leaves the program
     // on its own default.
-    let palette = daylight_env_palette();
+    // DERIVED from the resolved theme (3.5), not a second hand-kept list:
+    // one direction, file -> Theme -> env, never back.
+    let palette = env_palette(&theme);
     match File::create(HALCYON_PALETTE_ENV_PATH).and_then(|mut f| f.write_all(palette.as_bytes())) {
         Ok(()) => say!(
             "halcyond: palette published ({} bytes) to {}",
@@ -1322,6 +1395,7 @@ pub fn run(home: Option<String>) -> i64 {
         &shell,
         SESSION_SCROLLBACK_BUDGET,
         root_addr.as_deref(),
+        theme.terminal,
     ) {
         Some(t) => {
             tiles.insert(root_leaf, t);
@@ -1593,6 +1667,7 @@ pub fn run(home: Option<String>) -> i64 {
                 geom,
                 home.as_deref(),
                 &mut places,
+                sheet.theme.terminal,
             );
             if tiles.is_empty() {
                 break;

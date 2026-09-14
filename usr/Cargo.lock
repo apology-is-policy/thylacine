@@ -690,6 +690,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "haul"
+version = "0.1.0"
+dependencies = [
+ "chacha20poly1305",
+ "hkdf",
+ "hmac",
+ "libthyla-rs",
+ "sha2",
+ "subtle",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
 name = "heapless"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

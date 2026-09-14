@@ -104,10 +104,15 @@ fn strip_comment(s: &str) -> &str {
 /// (unquoted, unterminated, trailing junk, or containing a backslash).
 fn parse_string(s: &str) -> Option<&str> {
     let s = s.trim();
+    // A lone `"` is already refused by the pair above: `strip_prefix` leaves
+    // `""`, and `"".strip_suffix('"')` is `None`. (The comment here used to
+    // claim it got through both and needed a length guard -- it does not, and
+    // a `s.len() < 2` check would have been unreachable. Kept accurate rather
+    // than kept.) What remains to refuse is an interior quote (`"a"b"`, which
+    // strips to `a"b`) and a backslash, since this subset has no escapes and a
+    // backslash therefore cannot mean what it looks like.
     let body = s.strip_prefix('"')?.strip_suffix('"')?;
-    // `"` alone strips to `""` -> prefix ok, suffix ok, body "" -- but that is
-    // the SAME quote counted twice, so require at least the two quotes.
-    if s.len() < 2 || body.contains('"') || body.contains('\\') {
+    if body.contains('"') || body.contains('\\') {
         return None;
     }
     Some(body)
@@ -308,7 +313,7 @@ mod tests {
         let src = "\
 # a comment
 [meta]
-name = \"Nocturne\"   # trailing comment
+name = \"Nightjar\"   # trailing comment
 base = \"daylight\"
 
 [palette]
@@ -330,7 +335,7 @@ bevel = 2
         assert_eq!(e.len(), 7);
         assert_eq!(e[0].table, "meta");
         assert_eq!(e[0].key, "name");
-        assert_eq!(e[0].value, Value::Str("Nocturne"));
+        assert_eq!(e[0].value, Value::Str("Nightjar"));
         assert_eq!(e[0].line, 3, "the line number is the SOURCE line");
         assert_eq!(e[2].table, "palette");
         assert_eq!(e[3].table, "palette.sage", "a two-segment header");

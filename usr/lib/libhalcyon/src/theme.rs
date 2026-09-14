@@ -13,7 +13,7 @@
 //
 // A second theme is a FILE, not a second const (HALCYON-THEME 3.3): the struct
 // is theme-agnostic (HALCYON-VISUAL section 1.4/4/9 -- only the palette differs
-// between themes), so Nocturne and Frutiger Aero are TOML, parsed into this
+// between themes), so Nightjar and Frutiger Aero are TOML, parsed into this
 // exact shape. `DAYLIGHT` is the built-in floor, reachable through `builtin()`.
 
 use alloc::string::String;
@@ -283,8 +283,27 @@ const DAYLIGHT_THEME: Theme = Theme {
 // binaries do not (resolver 2 keeps a dev-only feature out of `cargo build`
 // -- the same mechanism TY-4 used for cornucopia's atlases).
 //
+// THE SPLIT'S EXACT BOUNDARY, measured at TH-6 (F5). It is enforced by
+// `cargo build` -- the shipped artifact, and what `tools/build.sh` runs -- and
+// NOT by a workspace `cargo test`: `usr/Cargo.toml` is a virtual manifest, so
+// a bare `cargo test` there is `--workspace`, dev-dependencies are built, and
+// their features unify across the graph. For the duration of that build
+// halcyond's `theme-fixture` dev-dep publicizes this const to EVERY member's
+// production code, tapestryd and halcyon included. So a violation lands green
+// under the command a developer runs and red at the next bake. When the
+// question is "does this reference violate 3.2", the answer comes from
+// `cargo build -p <crate> --target aarch64-unknown-none`, not from a test.
+//
+// No `cfg` closes that half -- a looser predicate cannot fix an
+// over-permissive one -- and converting the consumers to `builtin()` would
+// delete the guard rather than tighten it.
+//
 // The loader's floor is `builtin()`, which is public on purpose: something
-// must be able to say "no theme file, use the built-in".
+// must be able to say "no theme file, use the built-in". That is also the
+// split's standing RESIDUE: it bounds the NAME, not the VALUES. TH-6's F1 went
+// through exactly that gap by a third route -- `daylight_palette()` was `pub`
+// unconditionally and handed out `DAYLIGHT.terminal` without naming the const
+// -- which is why that function is now gated too.
 
 /// Daylight (HALCYON-VISUAL section 1). Values are the doc's #rrggbb widened to
 /// opaque Argb; the test below pins every one against the scripture.
@@ -399,6 +418,14 @@ pub enum LoadError {
     OutOfRange { line: u32 },
     /// `base` names a theme that does not exist.
     UnknownBase { line: u32 },
+    /// `[meta] name` carries a control byte or is too long to present.
+    BadName { line: u32 },
+    /// A key sitting before any `[table]` header. Distinct from `UnknownTable`
+    /// because there is no table to name and no header line to point at: the
+    /// root table's `table_line` is 0, which is not a line in any file, so
+    /// reporting it as an unknown table sent the author looking at nothing.
+    /// Forgetting the `[palette]` header is a very likely first mistake.
+    NoTable { line: u32 },
     /// No `base`, so every key was required, and these were not set (4.3).
     /// Named, not counted: "some hardcoded daylight colour kicked in" is
     /// impossible when the loader tells you exactly which keys you owe.
@@ -415,6 +442,62 @@ pub struct Loaded {
     /// Empty when the file set everything. This is what `halcyon theme lint`
     /// reports (4.3), so the convenient mode stays auditable.
     pub inherited: alloc::vec::Vec<String>,
+}
+
+/// The longest `[meta] name` that will load. It is a display label, not a
+/// document.
+pub const NAME_MAX: usize = 64;
+
+/// Is a `[meta] name` safe to PRESENT? It is the one piece of theme-file
+/// content that reaches a screen verbatim -- `halcyon theme lint` prints it,
+/// and halcyond, the session and tapestryd each `say!` it to their console
+/// stream at startup.
+///
+/// The TOML subset only refuses `"` and `\` inside a string, so without this
+/// an ESC, CR, BEL or NUL rides straight through to a terminal (measured in
+/// the TH-6 round: `name` accepted the bytes `ESC [ 3 1 m F O R G E D CR S A K
+/// BEL`). That is an I-27 concern, not merely a cosmetic one: a theme file can
+/// be another user's -- `halcyon theme lint /home/other/lib/halcyon/theme.toml`
+/// is a supported invocation -- so the bytes reaching the inspector's terminal
+/// are not necessarily the inspector's.
+///
+/// The asymmetry is what makes this a defect rather than an omission: the
+/// arc already filters the sibling operand for exactly this reason
+/// (`halcyon::path_is_usable` refuses control bytes so "a path with a newline
+/// cannot forge report lines") -- and then left the CONTENT operand, the one a
+/// hostile party actually authors, unfiltered.
+///
+/// Refused at LOAD, not sanitised at each render site: 4.2 says a file is
+/// accepted whole or refused whole, and a chokepoint cannot be forgotten at
+/// the next place someone prints a theme's name.
+fn name_is_presentable(s: &str) -> bool {
+    // Length first: it is the cheap discriminator, so a 32 KB "name" is
+    // refused without scanning it.
+    s.len() <= NAME_MAX && !s.chars().any(is_forgeable)
+}
+
+/// Characters that can forge or scramble a rendered line.
+///
+/// `char::is_control()` is Unicode category **Cc only** -- it catches ESC, CR,
+/// BEL and NUL, which is what the round-1 finding named. It does NOT catch
+/// category **Cf**: a bidi override (U+202E) reverses the remainder of the
+/// line it lands in, and zero-width joiners/spaces hide text. In-guest that is
+/// inert -- neither `vt`'s cell grid nor the outline path implements bidi, so
+/// an override renders as one absent glyph -- but `halcyon theme lint` prints
+/// this name to whatever terminal the operator is on, and a HOST emulator does
+/// implement bidi. The name sits mid-line inside `path: OK -- "<name>", ...`,
+/// so an override there reverses the rest of the report's line.
+fn is_forgeable(c: char) -> bool {
+    c.is_control()
+        || matches!(c,
+            '\u{00AD}'                      // soft hyphen
+            | '\u{200B}'..='\u{200F}'       // zero-width + LRM/RLM
+            | '\u{202A}'..='\u{202E}'       // bidi embedding + overrides
+            | '\u{2060}'..='\u{2064}'       // word joiner + invisible operators
+            | '\u{2066}'..='\u{2069}'       // bidi isolates
+            | '\u{FEFF}'                    // BOM / zero-width no-break
+            | '\u{E0000}'..='\u{E007F}'     // tag characters
+        )
 }
 
 /// `"#RRGGBB"` -> opaque `Argb`. Rejects any other shape, INCLUDING
@@ -437,6 +520,21 @@ fn parse_colour(s: &str) -> Option<Argb> {
 /// the compositor's own carve still has the last word; this only refuses
 /// values that are wrong at any size. The floors match `Metrics::at`'s
 /// (COMPOSITION 1: a hairline is at least 1 px, a bevel at least 2).
+/// The bounds `[type] smooth` must satisfy, in thousandths of an em. 0 is the
+/// dark-theme value; 200 (0.2 em) is far past any legible stroke and bounds the
+/// raster dilation.
+///
+/// A FUNCTION, not a literal at each reader, for the reason this whole arc
+/// exists: the file path (`set_key`) and the wire path (`from_wire`) each has
+/// to check it, and they had `(0..=200)` written out separately. Every GEOMETRY
+/// bound already came from `geometry_bounds`, so only this one could drift --
+/// and drifting on one path only would let a PUSHED theme carry a stroke a FILE
+/// could not. A hand-copied constant is a symptom of a layering fault; this arc
+/// began by deleting one.
+pub const fn smooth_bounds() -> (i64, i64) {
+    (0, 200)
+}
+
 fn geometry_bounds(key: &str) -> (i64, i64) {
     match key {
         "bevel" => (2, 64),
@@ -539,9 +637,9 @@ fn set_key(
             _ => return Err(LoadError::BadShape { line }),
         },
         ("type", "smooth") => match v {
-            // Thousandths of an em. 0 is the dark-theme value; 200 (0.2 em)
-            // is far past any legible stroke and bounds the raster dilation.
-            Value::Int(n) if (0..=200).contains(n) => t.smooth_mem = *n as u16,
+            Value::Int(n) if (smooth_bounds().0..=smooth_bounds().1).contains(n) => {
+                t.smooth_mem = *n as u16
+            }
             Value::Int(_) => return Err(LoadError::OutOfRange { line }),
             _ => return Err(LoadError::BadShape { line }),
         },
@@ -600,6 +698,18 @@ impl Theme {
     /// a caller's theme: the result is a new value, so a refusal cannot leave
     /// a half-applied visual behind.
     pub fn from_toml(src: &str) -> Result<Loaded, LoadError> {
+        // A file this big is refused BEFORE parsing, and the bound is not
+        // about memory -- the parser's own caps handle that. It is about
+        // TRUNCATION: a caller's slurp stops at its own limit and returns
+        // what it got, and a truncated theme can be perfectly valid TOML,
+        // which is worse than malformed because 4.2 never fires. Refusing
+        // anything that could have been cut is the only way to tell.
+        if src.len() > THEME_MAX {
+            return Err(LoadError::Syntax(crate::toml::Error {
+                line: 1,
+                kind: crate::toml::Kind::TooLarge,
+            }));
+        }
         let entries = crate::toml::parse(src).map_err(LoadError::Syntax)?;
 
         // `base` first: it decides the starting point AND whether the file
@@ -616,7 +726,12 @@ impl Theme {
                     return Err(LoadError::UnknownBase { line: e.line })
                 }
                 ("base", _) => return Err(LoadError::BadShape { line: e.line }),
-                ("name", crate::toml::Value::Str(s)) => name = String::from(*s),
+                ("name", crate::toml::Value::Str(s)) => {
+                    if !name_is_presentable(s) {
+                        return Err(LoadError::BadName { line: e.line });
+                    }
+                    name = String::from(*s);
+                }
                 ("name", _) => return Err(LoadError::BadShape { line: e.line }),
                 _ => return Err(LoadError::UnknownKey { line: e.line }),
             }
@@ -630,12 +745,24 @@ impl Theme {
         // field changes `size_of::<Theme>()` and fails the test, pointing the
         // author at KEYS), not merely intended.
         let mut t = builtin();
-        let mut seen = [false; 64];
-        debug_assert!(KEYS.len() <= 64);
+        // Sized FROM the registry. This was `[false; 64]` with a
+        // `debug_assert!(KEYS.len() <= 64)` beside it, and `usr/Cargo.toml`
+        // sets no `debug-assertions`, so in the shipped release build that
+        // assert was compiled out and the only surviving check was the array
+        // bound -- turning a 65th key into a runtime panic on every theme load
+        // (`panic = "abort"`) in tapestryd, halcyond and halcyon, rather than a
+        // test failure. A guard that is absent from the build it guards is not
+        // a guard.
+        let mut seen = [false; KEYS.len()];
 
         for e in &entries {
             if e.table == "meta" {
                 continue;
+            }
+            if e.table.is_empty() {
+                // Before any header at all: point at the KEY, since there is
+                // no header line to point at.
+                return Err(LoadError::NoTable { line: e.line });
             }
             if !TABLES.contains(&e.table) {
                 // The HEADER's line: a mistyped `[palete]` is one typo, and
@@ -690,16 +817,23 @@ pub const fn hairline(t: &Theme) -> Argb {
     t.header
 }
 
-/// The transcript's vt palette: Daylight's own `terminal`.
+/// Daylight's own `terminal` palette. **FIXTURE-ONLY since the TH-6 round.**
 ///
-/// It AGREES with the `Sheet` built from `DAYLIGHT` (bg == surface, fg == fg)
-/// BY CONSTRUCTION since HALCYON-THEME TH-1 -- `light_terminal` is handed the
-/// same two consts the chrome tokens use, so there is nothing left to drift.
-/// The agreement is load-bearing: halcyond's "default ink" test
-/// (`st.fg == sheet.ink`, the hook that applies the obj/dim semantic colours)
-/// only fires when the pen's default fg -- which comes from THIS palette --
-/// equals `sheet.ink`. Foreign-program SGR renders through this; halcyon's own
-/// output renders through the Sheet.
+/// It was `pub` unconditionally, and that was the hole F1 went through: a
+/// production caller could reach the Daylight VALUES here without ever naming
+/// the gated `DAYLIGHT` const, so the 3.2 visibility split could not see it.
+/// `main.rs` seeded the console transcript's pen from this twelve lines after
+/// threading the resolved theme into its sheet, and under any non-Daylight
+/// theme every `st.fg == sheet.ink` / `st.bg != sheet.theme.terminal.bg`
+/// comparison then compared two different themes' colours -- em-dim, object
+/// colouring and the raw dim step silently off, Daylight's parchment painted
+/// as a literal background on a dark pane.
+///
+/// The agreement it documents is still true and still load-bearing -- a pen's
+/// default fg must equal its sheet's ink or those hooks do not fire -- but the
+/// way to GET that agreement is `theme.terminal` for whatever theme built the
+/// sheet, never a constant. Gated so the compiler says so.
+#[cfg(any(test, feature = "theme-fixture"))]
 pub const fn daylight_palette() -> vt::Palette {
     DAYLIGHT.terminal
 }
@@ -739,9 +873,372 @@ pub fn env_palette(theme: &Theme) -> String {
     s
 }
 
-/// `env_palette(&DAYLIGHT)` -- the session's Daylight roles as /env text.
+/// `env_palette(&DAYLIGHT)` -- the built-in's roles as /env text.
+///
+/// TEST-ONLY since TH-4a: the session publishes `env_palette(&resolved)`, so
+/// the export is a RENDERING of the theme in force (3.5) rather than a second
+/// hand-kept list. A production caller here would publish Daylight's roles to
+/// a hosted program while the session itself painted something else.
+#[cfg(test)]
 pub fn daylight_env_palette() -> String {
     env_palette(&DAYLIGHT)
+}
+
+/// The largest theme file that will be read. Comfortably above any real one
+/// (the full 57-key Nightjar is a few KiB) and comfortably BELOW any reader's
+/// truncation point, so a file that was cut short is refused rather than
+/// parsed as a valid prefix.
+pub const THEME_MAX: usize = 64 * 1024;
+
+/// The system theme file (HALCYON-THEME 3.4). `/lib/halcyon/` is already the
+/// established home (`/lib/halcyon/renderer`, `/lib/halcyon/layouts`), so this
+/// adds a file rather than a convention.
+pub const SYSTEM_THEME_PATH: &str = "/lib/halcyon/theme.toml";
+/// The user's, relative to `$HOME`. Read by the user's SESSION only: the
+/// console renderer is not anyone's session and takes the system file.
+pub const USER_THEME_REL: &str = "/lib/halcyon/theme.toml";
+
+/// The RESOLVED theme as one line, for the seam that pushes it to another
+/// process (HALCYON-THEME 3.4's display coherence).
+///
+/// 72 comma-separated fields in a fixed order: 64 colours as `RRGGBB` (the
+/// opaque alpha is not on the wire), then `smooth`, then the 7 geometry
+/// integers. Both ends call THIS pair, so the format cannot drift between
+/// them, and `a_distinct_theme_survives_the_wire` round-trips a theme whose
+/// every field differs -- so a field left out of `to_wire` comes back as the
+/// built-in's and fails, which is the only way to catch an omission here.
+///
+/// Why not push the TOML text instead: a ctl verb is one LINE, TOML is not,
+/// and the user's file may be up to `THEME_MAX`. This is bounded at ~500
+/// bytes and needs no parser on the far side.
+pub fn to_wire(t: &Theme) -> String {
+    let mut s = String::new();
+    let mut c = |v: Argb| {
+        if !s.is_empty() {
+            s.push(',');
+        }
+        let _ = write!(s, "{:06x}", v & 0x00FF_FFFF);
+    };
+    for v in [
+        t.floor,
+        t.surface,
+        t.header,
+        t.raised,
+        t.border,
+        t.blank,
+        t.selection,
+        t.island_rule,
+        t.fg,
+        t.fg_dim,
+        t.fg_muted,
+        t.fg_subtle,
+        t.bevel_top,
+        t.bevel_left,
+        t.bevel_right,
+        t.bevel_bottom,
+        t.ember,
+        t.ember_dim,
+        t.ember_deep,
+        t.status_bg,
+        t.status_fg,
+        t.status_muted,
+        t.status_idle,
+        t.sage.key,
+        t.sage.tint,
+        t.sage.raised,
+        t.sage.border,
+        t.sage.fg,
+        t.sage.fg_dim,
+        t.sage.fg_muted,
+        t.cinnabar.key,
+        t.cinnabar.tint,
+        t.cinnabar.raised,
+        t.cinnabar.border,
+        t.cinnabar.fg,
+        t.cinnabar.fg_dim,
+        t.cinnabar.fg_muted,
+        t.syntax.slate,
+        t.syntax.sage,
+        t.syntax.sand,
+        t.syntax.moss,
+        t.syntax.ash,
+        t.syntax.dusk,
+        t.syntax.smoke,
+        t.syntax.fen,
+        t.syntax.cinnabar,
+        t.terminal.bg,
+        t.terminal.fg,
+    ] {
+        c(v);
+    }
+    for v in t.terminal.ansi {
+        c(v);
+    }
+    for n in [
+        t.smooth_mem as i32,
+        t.metrics.bevel,
+        t.metrics.gap,
+        t.metrics.hairline,
+        t.metrics.header_h,
+        t.metrics.status_h,
+        t.metrics.tag_pad_x,
+        t.metrics.tab_strip_h,
+    ] {
+        let _ = write!(s, ",{n}");
+    }
+    s
+}
+
+/// The number of fields `to_wire` emits. A short line is refused rather than
+/// applied to whatever it reached, so a truncated push cannot half-theme a
+/// display.
+pub const WIRE_FIELDS: usize = 72;
+
+/// The inverse of `to_wire`. `None` on any deviation -- a wrong count, a bad
+/// colour, a geometry value outside the same bounds the FILE must satisfy.
+///
+/// The bounds are re-checked here on purpose: this arrives from another
+/// process, so it is untrusted input in its own right, and a display whose
+/// hairline came over a wire it did not validate is a `scale`-class hazard
+/// wearing a theme's clothes.
+pub fn from_wire(line: &str) -> Option<Theme> {
+    let line = line.trim();
+    // COUNT before COLLECT. The count is the cheap discriminator and the Vec
+    // is proportional to the input, so materializing first let a hostile line
+    // of N commas build an N-entry Vec before anything looked at N. Bounded in
+    // practice by the ctl write's `SRV_MSIZE` (32 KiB), so this was never a
+    // DoS -- but the container's bound lived in another process's constant,
+    // which is exactly the I-32 shape the project refuses to rely on.
+    if line.split(',').count() != WIRE_FIELDS {
+        return None;
+    }
+    let f: alloc::vec::Vec<&str> = line.split(',').collect();
+    let col = |i: usize| -> Option<Argb> {
+        let h = f[i];
+        if h.len() != 6 || !h.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        let mut v = 0u32;
+        for ch in h.chars() {
+            v = (v << 4) | ch.to_digit(16)?;
+        }
+        Some(0xFF00_0000 | v)
+    };
+    let num = |i: usize, key: &str| -> Option<i32> {
+        let n: i64 = f[i].parse().ok()?;
+        let (lo, hi) = geometry_bounds(key);
+        if lo == 0 && hi == 0 {
+            return None;
+        }
+        if n < lo || n > hi {
+            return None;
+        }
+        Some(n as i32)
+    };
+    let mut ansi = [0u32; 16];
+    for (j, slot) in ansi.iter_mut().enumerate() {
+        *slot = col(48 + j)?;
+    }
+    let smooth: i64 = f[64].parse().ok()?;
+    let (slo, shi) = smooth_bounds();
+    if !(slo..=shi).contains(&smooth) {
+        return None;
+    }
+    Some(Theme {
+        floor: col(0)?,
+        surface: col(1)?,
+        header: col(2)?,
+        raised: col(3)?,
+        border: col(4)?,
+        blank: col(5)?,
+        selection: col(6)?,
+        island_rule: col(7)?,
+        fg: col(8)?,
+        fg_dim: col(9)?,
+        fg_muted: col(10)?,
+        fg_subtle: col(11)?,
+        bevel_top: col(12)?,
+        bevel_left: col(13)?,
+        bevel_right: col(14)?,
+        bevel_bottom: col(15)?,
+        ember: col(16)?,
+        ember_dim: col(17)?,
+        ember_deep: col(18)?,
+        status_bg: col(19)?,
+        status_fg: col(20)?,
+        status_muted: col(21)?,
+        status_idle: col(22)?,
+        sage: LiveKey {
+            key: col(23)?,
+            tint: col(24)?,
+            raised: col(25)?,
+            border: col(26)?,
+            fg: col(27)?,
+            fg_dim: col(28)?,
+            fg_muted: col(29)?,
+        },
+        cinnabar: LiveKey {
+            key: col(30)?,
+            tint: col(31)?,
+            raised: col(32)?,
+            border: col(33)?,
+            fg: col(34)?,
+            fg_dim: col(35)?,
+            fg_muted: col(36)?,
+        },
+        syntax: Syntax {
+            slate: col(37)?,
+            sage: col(38)?,
+            sand: col(39)?,
+            moss: col(40)?,
+            ash: col(41)?,
+            dusk: col(42)?,
+            smoke: col(43)?,
+            fen: col(44)?,
+            cinnabar: col(45)?,
+        },
+        terminal: vt::Palette {
+            bg: col(46)?,
+            fg: col(47)?,
+            ansi,
+        },
+        smooth_mem: smooth as u16,
+        metrics: Metrics {
+            bevel: num(65, "bevel")?,
+            gap: num(66, "gap")?,
+            hairline: num(67, "hairline")?,
+            header_h: num(68, "header_h")?,
+            status_h: num(69, "status_h")?,
+            tag_pad_x: num(70, "tag_pad_x")?,
+            tab_strip_h: num(71, "tab_strip_h")?,
+        },
+    })
+}
+
+/// Where a resolved theme came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// No theme file, or none that loaded. The default installation.
+    BuiltIn,
+    /// `/lib/halcyon/theme.toml`.
+    System,
+    /// `$HOME/lib/halcyon/theme.toml`.
+    User,
+}
+
+/// A resolved theme plus what the resolution is owed to say.
+#[derive(Clone, Debug)]
+pub struct Resolved {
+    pub theme: Theme,
+    pub source: Source,
+    /// `[meta] name`, or empty.
+    pub name: String,
+    /// What to SAY. A missing file is silent (4.1); a malformed one is LOUD
+    /// and names its line and its tier, because a theme that quietly did not
+    /// apply is indistinguishable from one that did nothing.
+    pub notes: alloc::vec::Vec<String>,
+    /// Keys the winning file inherited from its base -- what
+    /// `halcyon theme lint` reports (4.3).
+    pub inherited: alloc::vec::Vec<String>,
+}
+
+/// One line of English for a refusal. The author reads this and knows where
+/// to look, which is the entire point of refusing whole rather than partly.
+pub fn describe(e: &LoadError) -> String {
+    let mut s = String::new();
+    let _ = match e {
+        LoadError::Syntax(p) => {
+            let what = match p.kind {
+                crate::toml::Kind::BadTable => "malformed [table] header",
+                crate::toml::Kind::BadKey => "not a key = value line",
+                crate::toml::Kind::BadValue => {
+                    "unsupported value (no floats, bools, dates or inline tables)"
+                }
+                crate::toml::Kind::BadString => "malformed string (no escapes in this subset)",
+                crate::toml::Kind::BadInt => "malformed integer",
+                crate::toml::Kind::BadArray => "malformed array",
+                crate::toml::Kind::Duplicate => "the same key twice in one table",
+                crate::toml::Kind::TooLarge => "too large",
+            };
+            write!(s, "line {}: {}", p.line, what)
+        }
+        LoadError::UnknownTable { line } => write!(s, "line {line}: unknown [table]"),
+        LoadError::NoTable { line } => write!(
+            s,
+            "line {line}: this key is not under any [table] -- add the header it belongs to"
+        ),
+        LoadError::UnknownKey { line } => write!(s, "line {line}: unknown key"),
+        LoadError::BadColour { line } => write!(s, "line {line}: not a \"#RRGGBB\" colour"),
+        LoadError::BadShape { line } => write!(s, "line {line}: wrong kind of value for this key"),
+        LoadError::OutOfRange { line } => write!(s, "line {line}: value out of range"),
+        LoadError::UnknownBase { line } => write!(s, "line {line}: unknown base theme"),
+        // Deliberately does NOT echo the offending name -- the whole reason it
+        // was refused is that its bytes must not reach a terminal.
+        LoadError::BadName { line } => write!(
+            s,
+            "line {line}: [meta] name has a control character or is over {NAME_MAX} bytes"
+        ),
+        LoadError::Incomplete { missing } => {
+            let _ = write!(
+                s,
+                "no [meta] base, so every key is required; {} missing:",
+                missing.len()
+            );
+            // Name them -- capped, because a file that set nothing would
+            // otherwise print the whole schema at a console.
+            for k in missing.iter().take(8) {
+                let _ = write!(s, " {k}");
+            }
+            if missing.len() > 8 {
+                let _ = write!(s, " ... and {} more", missing.len() - 8);
+            }
+            Ok(())
+        }
+    };
+    s
+}
+
+/// Resolve the session's theme from the two file tiers (HALCYON-THEME 3.4).
+///
+/// Pure: the CONTENTS are injected, so the policy is host-tested and the I/O
+/// stays at the caller. `None` means the file is absent, which is not an
+/// error (4.1) -- the default installation has neither.
+///
+/// The user's file wins over the system's. A file that fails to load falls
+/// through to the NEXT TIER DOWN rather than to the built-in directly: a user
+/// whose own file has a typo still gets the system theme, which is what they
+/// were seeing before they wrote it.
+pub fn resolve(system: Option<&str>, user: Option<&str>) -> Resolved {
+    let mut notes: alloc::vec::Vec<String> = alloc::vec::Vec::new();
+    for (src, source, tier) in [
+        (user, Source::User, "user"),
+        (system, Source::System, "system"),
+    ] {
+        let Some(text) = src else { continue };
+        match Theme::from_toml(text) {
+            Ok(l) => {
+                return Resolved {
+                    theme: l.theme,
+                    source,
+                    name: l.name,
+                    notes,
+                    inherited: l.inherited,
+                }
+            }
+            Err(e) => {
+                let mut n = String::new();
+                let _ = write!(n, "theme: {tier} theme.toml REFUSED -- {}", describe(&e));
+                notes.push(n);
+            }
+        }
+    }
+    Resolved {
+        theme: builtin(),
+        source: Source::BuiltIn,
+        name: String::new(),
+        notes,
+        inherited: alloc::vec::Vec::new(),
+    }
 }
 
 #[cfg(test)]
@@ -749,6 +1246,429 @@ mod tests {
     use super::*;
 
     // ---- the theme file (HALCYON-THEME 3.3 / 4) ----
+
+    /// The shipped dark theme, compiled in for the test only -- the guest
+    /// reads it off the filesystem.
+    const NIGHTJAR: &str = include_str!("../../halcyon/themes/nightjar.toml");
+    const TEMPLATE: &str = include_str!("../../halcyon/themes/TEMPLATE.toml");
+
+    // The annotated template is a theme AUTHOR's starting point, and it says
+    // of itself that it "loads as-is". A template that does not load is worse
+    // than no template: it teaches the format wrong and burns the author's
+    // first attempt on a defect that is not theirs.
+    //
+    // It also carries no `base`, so this is the standing check that the
+    // template still sets EVERY key -- a key added to the schema and not added
+    // here makes this fail, naming it, which is exactly the reminder the
+    // author of that key needs.
+    #[test]
+    /// EVERY theme in the gallery loads -- discovered by reading the directory,
+    /// not by an `include_str!` per file, because the pool bake installs
+    /// whatever `*.toml` is there and a hand-listed set here would pass while
+    /// the newest theme was broken. This is the host-side check for "does the
+    /// theme I just wrote load": `cargo test -p libhalcyon` names the file and
+    /// the reason. (`std` only under `cfg(test)`; the crate stays `no_std`.)
+    #[test]
+    fn every_shipped_theme_loads() {
+        extern crate std;
+        use std::string::String;
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../halcyon/themes");
+        let mut seen = 0usize;
+        let mut names: std::vec::Vec<String> = std::vec::Vec::new();
+        for ent in std::fs::read_dir(&dir).expect("themes dir must exist") {
+            let path = ent.expect("readable dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            let file = path.file_name().unwrap().to_string_lossy().into_owned();
+            let text = std::fs::read_to_string(&path).expect("readable theme");
+            let l = Theme::from_toml(&text)
+                .unwrap_or_else(|e| panic!("{} does not load: {}", file, describe(&e)));
+            // A gallery theme carries no `base`, so it must set every key --
+            // that is the whole point of the no-base mode (a forgotten key
+            // would otherwise arrive as a Daylight colour).
+            assert!(
+                l.inherited.is_empty(),
+                "{} sets no `base`, so it must set every key; missing: {:?}",
+                file,
+                l.inherited
+            );
+            names.push(file);
+            seen += 1;
+        }
+        // The CONTROL: a directory read that silently matched nothing would
+        // pass every assertion above. Two themes have shipped since the arc
+        // closed, so anything less means the read, not the themes, is broken.
+        assert!(
+            seen >= 2,
+            "expected to find the shipped gallery themes, found {} in {:?} -- \
+             the directory read is broken, not the themes",
+            seen,
+            dir
+        );
+    }
+
+    fn the_annotated_template_loads_and_sets_every_key() {
+        let l = Theme::from_toml(TEMPLATE)
+            .unwrap_or_else(|e| panic!("TEMPLATE.toml does not load: {}", describe(&e)));
+        assert!(
+            l.inherited.is_empty(),
+            "TEMPLATE.toml has no `base`, so it must set every key; missing: {:?}",
+            l.inherited
+        );
+        // It ships the built-in's values, so an author who changes nothing
+        // gets exactly Daylight -- the claim its header makes.
+        assert_eq!(
+            l.theme, DAYLIGHT,
+            "TEMPLATE.toml is meant to BE Daylight until edited, so a reader can \
+             change one key and see only that key move"
+        );
+        // And its own advice holds in it: the two terminal keys agree with
+        // their palette twins (the template's "bite #1").
+        assert_eq!(l.theme.terminal.bg, l.theme.surface);
+        assert_eq!(l.theme.terminal.fg, l.theme.fg);
+    }
+
+    // TH-5: THE ARC'S PROOF. An arc that ships only the theme it started with
+    // has proved nothing -- every mechanism could be subtly Daylight-shaped
+    // and nobody would know. Nightjar is written with NO `base`, so the
+    // loader requires all 57 keys and this test fails, naming them, the day
+    // one is forgotten.
+    #[test]
+    fn nightjar_is_complete_coherent_and_nothing_like_daylight() {
+        let l = Theme::from_toml(NIGHTJAR).unwrap_or_else(|e| {
+            panic!("the shipped Nightjar must load: {}", describe(&e));
+        });
+        assert_eq!(l.name, "Nightjar");
+        assert!(
+            l.inherited.is_empty(),
+            "no base means nothing may be inherited, but {:?} were",
+            l.inherited
+        );
+        let n = l.theme;
+        let d = builtin();
+
+        // It is a DIFFERENT theme, not a retint of two roles: every ground
+        // and every ink differs from Daylight's.
+        for (name, a, b) in [
+            ("floor", n.floor, d.floor),
+            ("surface", n.surface, d.surface),
+            ("header", n.header, d.header),
+            ("raised", n.raised, d.raised),
+            ("border", n.border, d.border),
+            ("blank", n.blank, d.blank),
+            ("selection", n.selection, d.selection),
+            ("island_rule", n.island_rule, d.island_rule),
+            ("fg", n.fg, d.fg),
+            ("fg_dim", n.fg_dim, d.fg_dim),
+            ("fg_muted", n.fg_muted, d.fg_muted),
+            ("fg_subtle", n.fg_subtle, d.fg_subtle),
+            ("status_bg", n.status_bg, d.status_bg),
+            ("terminal.bg", n.terminal.bg, d.terminal.bg),
+        ] {
+            assert_ne!(a, b, "{name} is still Daylight's");
+        }
+
+        // It is DARK: every ground is darker than every ink. This is the
+        // property a "dark theme" actually names, and it catches a paste
+        // error no colour-by-colour comparison would.
+        let lum = |c: Argb| {
+            let (r, g, b) = ((c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF);
+            (2 * r + 5 * g + b) / 8
+        };
+        for (gn, gc) in [
+            ("floor", n.floor),
+            ("surface", n.surface),
+            ("header", n.header),
+            ("blank", n.blank),
+            ("status_bg", n.status_bg),
+        ] {
+            for (inn, ic) in [
+                ("fg", n.fg),
+                ("fg_dim", n.fg_dim),
+                ("status_fg", n.status_fg),
+            ] {
+                assert!(
+                    lum(gc) < lum(ic),
+                    "ground {gn} ({:#08x}) is not darker than ink {inn} ({:#08x})",
+                    gc,
+                    ic
+                );
+            }
+        }
+        assert!(lum(n.blank) <= lum(n.floor), "an empty pane is a hole");
+        assert!(
+            lum(n.floor) < lum(n.surface),
+            "a pane is lifted off the floor"
+        );
+
+        // HALCYON-VISUAL 1.3: the ember is shared VERBATIM. It is how the
+        // surfaces read as one system, so it is the one colour a theme may
+        // not move.
+        assert_eq!(n.ember, d.ember, "the ember is shared verbatim");
+
+        // 2.1: four distinct bevel faces from ONE light direction, and the
+        // lit pair really is lighter than the shadowed pair.
+        assert!(n.bevel_top != n.bevel_left && n.bevel_right != n.bevel_bottom);
+        assert!(lum(n.bevel_top) > lum(n.bevel_left));
+        assert!(lum(n.bevel_left) > lum(n.bevel_right));
+        assert!(lum(n.bevel_right) > lum(n.bevel_bottom));
+
+        // HALCYON-TYPE 4.2's per-theme rule: light ink on dark already reads
+        // heavy, so a dark theme takes no smoothing stroke.
+        assert_eq!(n.smooth_mem, 0, "a dark ground takes 0");
+
+        // The terminal agreements TH-1 makes true by construction for the
+        // built-in must be true by AUTHORSHIP here -- a file can set them
+        // apart, and halcyond's default-ink hook only fires when they match.
+        assert_eq!(n.terminal.bg, n.surface, "bg is the pane surface");
+        assert_eq!(n.terminal.fg, n.fg, "fg is the ink");
+        // vt's slot-uniqueness rule, checked for the AUTHORED palette: no two
+        // slots share a value except ansi[15] == fg. A violation mis-slots
+        // cells across a `set_theme` remap.
+        for (i, c) in n.terminal.ansi.iter().enumerate() {
+            for (j, e) in n.terminal.ansi.iter().enumerate() {
+                assert!(i == j || c != e, "nightjar ansi[{i}] and ansi[{j}] collide");
+            }
+            assert!(i == 15 || *c != n.fg, "ansi[{i}] aliases fg but is not 15");
+        }
+        assert_eq!(n.terminal.ansi[15], n.fg);
+
+        // And it survives the push seam, so a Nightjar session can actually
+        // hand its theme to the compositor.
+        assert_eq!(from_wire(&to_wire(&n)), Some(n));
+    }
+
+    // The sheet built from Nightjar carries no Daylight colour -- the TH-2
+    // retint test's claim, made against a REAL second theme rather than a
+    // synthetic inversion.
+    #[test]
+    fn a_nightjar_sheet_carries_nothing_of_daylight() {
+        let n = Theme::from_toml(NIGHTJAR).unwrap().theme;
+        let d = builtin();
+        let daylight: &[Argb] = &[
+            d.surface,
+            d.header,
+            d.fg,
+            d.fg_dim,
+            d.ember,
+            d.border,
+            d.selection,
+            d.island_rule,
+            d.syntax.slate,
+            d.syntax.fen,
+            d.cinnabar.key,
+        ];
+        for (name, c) in [
+            ("surface", n.surface),
+            ("header", n.header),
+            ("fg", n.fg),
+            ("fg_dim", n.fg_dim),
+            ("border", n.border),
+            ("selection", n.selection),
+            ("island_rule", n.island_rule),
+            ("syntax.slate", n.syntax.slate),
+            ("syntax.fen", n.syntax.fen),
+            ("cinnabar.key", n.cinnabar.key),
+        ] {
+            assert!(
+                !daylight.contains(&c),
+                "nightjar {name} ({c:#08x}) is a Daylight colour"
+            );
+        }
+        // The ember is the deliberate exception, and it must still be there.
+        assert!(daylight.contains(&n.ember));
+    }
+
+    // A theme file big enough to have been TRUNCATED by its reader is refused
+    // whole. A cut file can be valid TOML -- so 4.2 would never fire, and the
+    // author would get a silently half-applied visual, which is the exact
+    // outcome the whole refusal policy exists to prevent.
+    #[test]
+    fn an_oversized_file_is_refused_before_it_can_be_a_valid_prefix() {
+        let mut big = String::from("[meta]\nbase = \"daylight\"\n[palette]\n");
+        // Legal, parseable content -- the point is that SIZE alone refuses it.
+        while big.len() <= THEME_MAX {
+            big.push_str("# a comment line that is entirely valid\n");
+        }
+        assert!(matches!(
+            Theme::from_toml(&big),
+            Err(LoadError::Syntax(crate::toml::Error {
+                kind: crate::toml::Kind::TooLarge,
+                ..
+            }))
+        ));
+        // The control: the same content just under the cap loads fine, so the
+        // refusal is the SIZE's and not the content's.
+        let ok = &big[..THEME_MAX];
+        assert!(Theme::from_toml(ok).is_ok(), "just under the cap must load");
+    }
+
+    // THE PUSH SEAM (3.4's display coherence). A theme whose EVERY field
+    // differs from the built-in must survive the round trip -- so a field
+    // left out of `to_wire` comes back as the built-in's and this fails,
+    // which is the only way to catch an omission in a hand-written codec.
+    #[test]
+    fn a_distinct_theme_survives_the_wire() {
+        // Build it from a file setting all 57 keys to distinct values: the
+        // same machinery the registry sweep uses, so the two cannot disagree
+        // about what "every field" means.
+        let mut full = String::new();
+        let mut last = "";
+        let mut n = 0u32;
+        for (table, key) in KEYS {
+            if *table != last {
+                full.push('[');
+                full.push_str(table);
+                full.push_str("]\n");
+                last = table;
+            }
+            full.push_str(key);
+            full.push_str(" = ");
+            // A distinct value per key, so no two fields can be confused.
+            if *key == "ansi" {
+                full.push('[');
+                for i in 0..16u32 {
+                    let _ = core::fmt::write(
+                        &mut full,
+                        format_args!("\"#{:02x}{:02x}{:02x}\",", 0x40 + i, i, 0x80 + i),
+                    );
+                }
+                full.push(']');
+            } else if *table == "geometry" || *table == "type" {
+                // Inside each token's own bounds, and distinct where it can be.
+                let v = match *key {
+                    "bevel" => 5,
+                    "gap" => 6,
+                    "hairline" => 7,
+                    "header_h" => 31,
+                    "status_h" => 33,
+                    "tag_pad_x" => 11,
+                    "tab_strip_h" => 13,
+                    _ => 9, // type.smooth
+                };
+                let _ = core::fmt::write(&mut full, format_args!("{v}"));
+            } else {
+                n += 1;
+                let _ = core::fmt::write(&mut full, format_args!("\"#{:06x}\"", 0x112200 + n));
+            }
+            full.push('\n');
+        }
+        let t = Theme::from_toml(&full)
+            .expect("the all-keys file must load")
+            .theme;
+        assert!(t != builtin(), "the fixture must differ from the built-in");
+
+        let wire = to_wire(&t);
+        assert_eq!(wire.split(',').count(), WIRE_FIELDS);
+        assert_eq!(from_wire(&wire), Some(t), "a field did not survive to_wire");
+        assert!(wire.len() < 700, "the line is bounded: {}", wire.len());
+    }
+
+    // Untrusted in its own right: this arrives from ANOTHER PROCESS, so a
+    // display whose hairline came over an unvalidated wire is a scale-class
+    // hazard in a theme's clothes.
+    #[test]
+    fn a_malformed_wire_is_refused_with_its_bounds_rechecked() {
+        let good = to_wire(&builtin());
+        assert!(from_wire(&good).is_some(), "the control must pass");
+        assert_eq!(from_wire(""), None);
+        assert_eq!(from_wire(&good[..good.len() - 1]), None, "a truncated push");
+        assert_eq!(
+            from_wire(&alloc::format!("{good},0")),
+            None,
+            "one field too many"
+        );
+        // Mutate a NAMED FIELD, never a substring: `replacen("ff", ..)` on
+        // this line finds nothing (the alpha byte is not on the wire), so it
+        // would have re-tested the unmodified control and passed.
+        let mut f: alloc::vec::Vec<&str> = good.split(',').collect();
+        let was = f[0];
+        f[0] = "zz1122";
+        assert_ne!(f[0], was, "the mutation must actually mutate");
+        assert_eq!(from_wire(&f.join(",")), None, "non-hex");
+        f[0] = was;
+        assert!(
+            from_wire(&f.join(",")).is_some(),
+            "the control, one field back"
+        );
+        // The geometry bounds are re-checked HERE, not trusted from the far
+        // side: a hairline of 0 is refused on the wire exactly as in a file.
+        f[67] = "0";
+        assert_eq!(from_wire(&f.join(",")), None, "hairline 0 on the wire");
+        f[67] = "1";
+        assert!(
+            from_wire(&f.join(",")).is_some(),
+            "the control, one field back"
+        );
+        f[64] = "999";
+        assert_eq!(from_wire(&f.join(",")), None, "smooth out of range");
+    }
+
+    // 3.4: the user's file wins, and a REFUSED file falls through to the next
+    // tier DOWN -- not straight to the built-in. A user whose own file has a
+    // typo keeps the system theme, which is what they were seeing before they
+    // wrote it.
+    #[test]
+    fn the_tiers_resolve_in_order_and_a_refusal_falls_one_step() {
+        let sys = "[meta]\nbase = \"daylight\"\nname = \"Sys\"\n[palette]\nsurface = \"#111111\"\n";
+        let usr = "[meta]\nbase = \"daylight\"\nname = \"Usr\"\n[palette]\nsurface = \"#222222\"\n";
+        let bad = "[meta]\nbase = \"daylight\"\n[palette]\nsurface = \"nope\"\n";
+
+        let r = resolve(None, None);
+        assert_eq!(r.source, Source::BuiltIn);
+        assert!(r.notes.is_empty(), "a MISSING file is silent (4.1)");
+
+        let r = resolve(Some(sys), None);
+        assert_eq!((r.source, r.theme.surface), (Source::System, 0xFF111111));
+
+        let r = resolve(Some(sys), Some(usr));
+        assert_eq!((r.source, r.theme.surface), (Source::User, 0xFF222222));
+        assert_eq!(r.name, "Usr");
+
+        // The user's is refused: the SYSTEM one wins, and the refusal is LOUD.
+        let r = resolve(Some(sys), Some(bad));
+        assert_eq!((r.source, r.theme.surface), (Source::System, 0xFF111111));
+        assert_eq!(r.notes.len(), 1);
+        assert!(r.notes[0].contains("user"), "{}", r.notes[0]);
+        assert!(r.notes[0].contains("line 4"), "{}", r.notes[0]);
+
+        // Both refused: the built-in, and BOTH said -- a silent fallback here
+        // is indistinguishable from a theme that applied and looked the same.
+        let r = resolve(Some(bad), Some(bad));
+        assert_eq!(r.source, Source::BuiltIn);
+        assert_eq!(r.notes.len(), 2);
+        assert!(r.notes[0].contains("user") && r.notes[1].contains("system"));
+    }
+
+    // Every refusal produces a line a person can act on: a tier, a line
+    // number, and what was wrong. A note that just said "theme failed" would
+    // satisfy the LOUD requirement while helping nobody.
+    #[test]
+    fn every_refusal_describes_itself_usefully() {
+        let cases = [
+            "[palette\n",
+            "[meta]\nbase = \"daylight\"\n[palette]\nsurface = \"nope\"\n",
+            "[meta]\nbase = \"daylight\"\n[palette]\nnope = \"#111111\"\n",
+            "[meta]\nbase = \"twilight\"\n",
+            "[meta]\nbase = \"daylight\"\n[geometry]\nhairline = 0\n",
+            "[palette]\nsurface = \"#111111\"\n",
+        ];
+        for src in cases {
+            let e = Theme::from_toml(src).unwrap_err();
+            let d = describe(&e);
+            assert!(!d.is_empty(), "for {src:?}");
+            assert!(
+                d.contains("line") || d.contains("missing"),
+                "{d:?} names neither a line nor the missing keys"
+            );
+        }
+        // The incomplete case names actual keys, capped so a file that set
+        // nothing cannot print the whole schema at a console.
+        let d = describe(&Theme::from_toml("[palette]\nsurface = \"#111111\"\n").unwrap_err());
+        assert!(d.contains("palette.floor"), "{d}");
+        assert!(d.contains("more"), "the list is capped: {d}");
+    }
 
     /// A minimal file setting exactly one key, for the registry sweep.
     fn only(table: &str, key: &str, val: &str) -> String {
@@ -820,18 +1740,237 @@ mod tests {
     // the mode meant to make that impossible -- and no behavioural test can see
     // it, because the field it would have to check is the one nobody wrote.
     //
-    // So: pin the STRUCT SIZE. Adding a field changes it, this fails, and the
-    // message says where to look. The compile-time-invariant pattern CLAUDE.md
-    // prescribes for format changes, applied to a registry instead.
+    // TH-6 S4: the FILE path and the WIRE path must admit exactly the same
+    // `smooth`. They each carried their own `(0..=200)` literal while every
+    // geometry bound already came from one function, so only this token could
+    // drift -- and drifting on one side would let a PUSHED theme carry a
+    // stroke a FILE could not. Both now read `smooth_bounds()`; this walks the
+    // boundary from both directions so the agreement is measured, not assumed.
+    #[test]
+    fn the_file_and_the_wire_admit_the_same_smooth() {
+        let (lo, hi) = smooth_bounds();
+        let via_file = |n: i64| {
+            Theme::from_toml(&alloc::format!(
+                "[meta]\nbase = \"daylight\"\n[type]\nsmooth = {n}\n"
+            ))
+            .is_ok()
+        };
+        let via_wire = |n: i64| {
+            let mut w = to_wire(&builtin());
+            // Field 64 is `smooth` (64 colours precede it).
+            let mut f: alloc::vec::Vec<alloc::string::String> =
+                w.split(',').map(alloc::string::String::from).collect();
+            f[64] = alloc::format!("{n}");
+            w = f.join(",");
+            from_wire(&w).is_some()
+        };
+        for n in [lo, lo + 1, hi - 1, hi] {
+            assert!(via_file(n), "file must admit {n}");
+            assert!(via_wire(n), "wire must admit {n}");
+        }
+        for n in [lo - 1, hi + 1, 100_000] {
+            assert!(!via_file(n), "file must refuse {n}");
+            assert!(!via_wire(n), "wire must refuse {n}");
+        }
+    }
+
+    // TH-6 F7: a key before any `[table]` header used to be reported as an
+    // unknown table at "line 0", which is not a line in any file -- so the
+    // author who forgot `[palette]`, a very likely first mistake, was pointed
+    // at nothing.
+    #[test]
+    fn a_key_outside_any_table_names_its_own_line() {
+        let e = Theme::from_toml("# a comment\n\nfg = \"#010203\"\n")
+            .expect_err("a key with no table must be refused");
+        assert!(matches!(e, LoadError::NoTable { line: 3 }), "{e:?}");
+        let d = describe(&e);
+        assert!(d.starts_with("line 3:"), "{d}");
+        assert!(d.contains("[table]"), "{d}");
+        // The sibling still points at the HEADER, not at the key under it.
+        let e2 = Theme::from_toml("[palete]\nfg = \"#010203\"\n").expect_err("typo'd table");
+        assert!(matches!(e2, LoadError::UnknownTable { line: 1 }), "{e2:?}");
+    }
+
+    // TH-6 F4: `[meta] name` is the one piece of file CONTENT that reaches a
+    // terminal verbatim (the lint prints it; three daemons `say!` it). The
+    // TOML subset refuses only `"` and `\`, so ESC/CR/BEL/NUL rode straight
+    // through -- and a theme file can be another user's, since
+    // `halcyon theme lint <their path>` is supported.
+    #[test]
+    fn a_name_carrying_a_control_byte_is_refused_and_a_plain_one_is_not() {
+        let based = |name: &str| {
+            alloc::format!(
+                "[meta]\nbase = \"daylight\"\nname = \"{name}\"\n[palette]\nfg = \"#010203\"\n"
+            )
+        };
+        // THE POSITIVE CONTROL, one variable away: the identical file with an
+        // ordinary name must load, or "refused" would be satisfied by any
+        // broken fixture rather than by the name.
+        let ok = Theme::from_toml(&based("Nightjar")).expect("a plain name must load");
+        assert_eq!(ok.name, "Nightjar");
+        // Non-ASCII is fine -- the rule is about CONTROL, not about alphabet.
+        assert_eq!(
+            Theme::from_toml(&based("Nachtschwalbe \u{2014} dusk"))
+                .expect("a printable non-ASCII name must load")
+                .name,
+            "Nachtschwalbe \u{2014} dusk"
+        );
+        // Each of these forges terminal output if it reaches a console.
+        for (label, bad) in [
+            ("ESC", "\u{1b}[31mFORGED"),
+            ("CR", "safe\rSAK: enter password"),
+            ("BEL", "ding\u{7}"),
+            ("NUL", "a\u{0}b"),
+        ] {
+            assert!(
+                matches!(
+                    Theme::from_toml(&based(bad)),
+                    Err(LoadError::BadName { .. })
+                ),
+                "{label} must be refused"
+            );
+        }
+        // A bare LF never reaches the name check at all: it is a LINE break to
+        // `src.lines()`, so the parser sees an unterminated string and refuses
+        // one layer earlier. Asserted as "refused", not as `BadName`, because
+        // pinning it to the wrong layer would break the day the parser changed
+        // -- and the property that matters is that it does not get through.
+        assert!(Theme::from_toml(&based("line one\nline two")).is_err());
+        // Round 2 (R2-F4): category Cf too, not just Cc. A bidi override in a
+        // name reverses the rest of the lint's line on a host terminal.
+        for (label, bad) in [
+            ("RLO", "safe\u{202e}desrever"),
+            ("LRI", "a\u{2066}b"),
+            ("ZWSP", "a\u{200b}b"),
+            ("BOM", "a\u{feff}b"),
+            ("soft hyphen", "a\u{00ad}b"),
+            ("tag char", "a\u{e0041}b"),
+        ] {
+            assert!(
+                matches!(
+                    Theme::from_toml(&based(bad)),
+                    Err(LoadError::BadName { .. })
+                ),
+                "{label} must be refused"
+            );
+        }
+        // Bounded, so a 60 KB "name" cannot be printed at a console.
+        let long = "x".repeat(NAME_MAX + 1);
+        assert!(matches!(
+            Theme::from_toml(&based(&long)),
+            Err(LoadError::BadName { .. })
+        ));
+        assert!(Theme::from_toml(&based(&"x".repeat(NAME_MAX))).is_ok());
+        // And the refusal must not quote back what it refused.
+        let d = describe(&LoadError::BadName { line: 3 });
+        assert!(d.contains("line 3") && !d.contains('\u{1b}'), "{d}");
+    }
+
+    // THE GUARD IS THE DESTRUCTURE BELOW, not the size pin that used to stand
+    // here alone. The TH-6 round MEASURED that pin blind: `Theme`'s fields sum
+    // to 286 bytes at align 4, so it carries 2 bytes of tail padding, and
+    // `Theme + u16` and `Theme + bool` both still `size_of` to 288 -- the pin
+    // passes while the registry has a hole. That is not a corner: `smooth_mem`
+    // IS a `u16`, so the next token of its family (another thousandths-of-an-em
+    // amount, a percent, a boolean switch) is exactly the case it could not
+    // see. A binding list with no `..` cannot be fooled by padding: adding a
+    // field of ANY size fails to COMPILE here until someone names it.
     #[test]
     fn the_registry_covers_every_field() {
+        let Theme {
+            floor,
+            surface,
+            header,
+            raised,
+            border,
+            blank,
+            selection,
+            island_rule,
+            fg,
+            fg_dim,
+            fg_muted,
+            fg_subtle,
+            bevel_top,
+            bevel_left,
+            bevel_right,
+            bevel_bottom,
+            ember,
+            ember_dim,
+            ember_deep,
+            status_bg,
+            status_fg,
+            status_muted,
+            status_idle,
+            sage,
+            cinnabar,
+            syntax,
+            metrics,
+            terminal,
+            smooth_mem,
+        } = builtin();
+        // Bound so the compiler checks the list; touched so it does not warn.
+        // If you are here because this stopped compiling: a field was added to
+        // `Theme`. Add it to KEYS and to `set_key` (both directions), extend
+        // this list, and update the count below.
+        let _ = (
+            floor,
+            surface,
+            header,
+            raised,
+            border,
+            blank,
+            selection,
+            island_rule,
+            fg,
+            fg_dim,
+            fg_muted,
+            fg_subtle,
+            bevel_top,
+            bevel_left,
+            bevel_right,
+            bevel_bottom,
+            ember,
+            ember_dim,
+            ember_deep,
+            status_bg,
+            status_fg,
+            status_muted,
+            status_idle,
+            sage,
+            cinnabar,
+            syntax,
+            metrics,
+            terminal,
+            smooth_mem,
+        );
+        // 23 scalar palette + sage 7 + cinnabar 7 + syntax 9 + terminal 3
+        // + type 1 + geometry 7. The destructure catches a field that gained no
+        // key; this catches a key list that did not grow with it.
+        assert_eq!(
+            KEYS.len(),
+            57,
+            "KEYS changed size -- if a field was added, it needs a row here \
+             AND an arm in `set_key`, in both directions."
+        );
+        // Kept as documentation of the layout, no longer load-bearing as the
+        // guard: a size that moves is informative, a size that does not is not
+        // evidence. It KEEPS ITS MESSAGE, though -- a bare `288 != 292` with
+        // nothing to read invites the reader to bump the number, which is the
+        // opposite of what a failure here means.
         assert_eq!(
             core::mem::size_of::<Theme>(),
             288,
-            "Theme changed size -- a field was added or removed. Add it to \
-             KEYS and to `set_key` (both, in both directions), update the \
-             KEYS.len() pin, then update this number."
+            "Theme's layout moved. If a FIELD was added, the destructure above \
+             already told you; add it to KEYS and to `set_key` in both \
+             directions, then update this number."
         );
+        // The nested types carry their own pins because the destructure above
+        // cannot see INTO them -- it names `sage`, not `sage.key`. Metrics,
+        // LiveKey and Syntax have no tail padding, so any added field grows
+        // them and trips these. `vt::Palette` had NO pin at all, and it is the
+        // one that also escapes `KEYS.len()`, since its sixteen ANSI slots sit
+        // under a single `("terminal","ansi")` row.
+        assert_eq!(core::mem::size_of::<vt::Palette>(), 72, "bg + fg + 16 ansi");
         assert_eq!(core::mem::size_of::<Metrics>(), 28, "7 x i32");
         assert_eq!(core::mem::size_of::<LiveKey>(), 28, "7 x Argb");
         assert_eq!(core::mem::size_of::<Syntax>(), 36, "9 x Argb");

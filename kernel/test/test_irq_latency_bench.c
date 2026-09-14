@@ -232,7 +232,7 @@ void test_irq_latency_bench(void) {
 
     // Pre-fill control block via the kernel direct map.
     struct irq_bench_shared *kshared =
-        (struct irq_bench_shared *)pa_to_kva(dma->pa);
+        (struct irq_bench_shared *)pa_to_kva(kobj_dma_pa_at(dma, 0));
     kshared->num_iter   = (u64)IRQ_BENCH_NUM_ITER;
     kshared->ready      = 0;
     kshared->completed  = 0;

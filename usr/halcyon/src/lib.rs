@@ -35,6 +35,9 @@ pub enum Cmd<'a> {
     /// `halcyon welcome` -- the first-launch tour, then the user's shell
     /// (the device `default` layout's left tile, H-4d).
     Welcome,
+    /// `halcyon theme lint [<path>]` -- check a theme file (TH-4c). With no
+    /// path, the two tiers the session actually resolves.
+    ThemeLint { path: Option<&'a str> },
     /// `halcyon`, `halcyon help`, `--help`, `-h`.
     Help,
 }
@@ -53,6 +56,10 @@ pub enum CmdError {
     ExtraOperand,
     /// The name is not a safe single path component.
     BadName,
+    /// `theme` with no verb, or a verb that is not `lint`.
+    BadThemeVerb,
+    /// The theme-file operand is not usable as a path.
+    BadPath,
 }
 
 /// Parse argv[1..] (`tokens`) into a [`Cmd`]. Pure: the name is borrowed from
@@ -61,6 +68,7 @@ pub fn parse_cmd<'a>(tokens: &[&'a str]) -> Result<Cmd<'a>, CmdError> {
     match tokens.first().copied() {
         None | Some("help") | Some("--help") | Some("-h") => Ok(Cmd::Help),
         Some("layout") => parse_layout(&tokens[1..]),
+        Some("theme") => parse_theme(&tokens[1..]),
         Some("welcome") => {
             if tokens.len() > 1 {
                 Err(CmdError::ExtraOperand)
@@ -95,6 +103,31 @@ fn parse_layout<'a>(rest: &[&'a str]) -> Result<Cmd<'a>, CmdError> {
         "restore" => Cmd::LayoutRestore { name },
         _ => Cmd::LayoutDelete { name },
     })
+}
+
+fn parse_theme<'a>(rest: &[&'a str]) -> Result<Cmd<'a>, CmdError> {
+    let verb = rest.first().copied().ok_or(CmdError::BadThemeVerb)?;
+    if verb != "lint" {
+        return Err(CmdError::BadThemeVerb);
+    }
+    if rest.len() > 2 {
+        return Err(CmdError::ExtraOperand);
+    }
+    match rest.get(1).copied() {
+        None => Ok(Cmd::ThemeLint { path: None }),
+        Some(p) if path_is_usable(p) => Ok(Cmd::ThemeLint { path: Some(p) }),
+        Some(_) => Err(CmdError::BadPath),
+    }
+}
+
+/// Is a theme-file operand usable as a path? Unlike a layout name this IS a
+/// path, so `/` is fine and no traversal check applies -- the file is read as
+/// the user, who may read any file they own. Refused: empty; option-shaped
+/// (`halcyon theme lint --help` is a mistyped help request, and reading a file
+/// literally called `--help` is never what was meant); and any control byte,
+/// which could only ever mangle the report's own lines.
+pub fn path_is_usable(p: &str) -> bool {
+    !p.is_empty() && !p.starts_with('-') && !p.bytes().any(|b| b < 0x20 || b == 0x7F)
 }
 
 /// A layout name is a single safe path component: non-empty, <= MAX_NAME_LEN,
@@ -252,6 +285,157 @@ pub fn session_dir_chain(home: &str) -> Vec<String> {
             s
         })
         .collect()
+}
+
+// =============================================================================
+// theme lint (TH-4c) -- HALCYON-THEME 4.3's promise, made readable
+// =============================================================================
+//
+// The loader already computes everything this reports: `Theme::from_toml`
+// returns the keys a based file did NOT set, and `theme::describe` renders any
+// refusal as one line naming the line number. So the lint is a RENDERER, not a
+// second implementation of the schema -- which is the point: a lint that
+// re-derived "is this file valid" could disagree with the loader, and then the
+// tool that exists to build confidence would be the thing undermining it.
+//
+// It deliberately does NOT try to guess whether an inherited key is a MISTAKE
+// (say, a light Daylight grey inherited into a dark theme). That check would
+// have to be a heuristic, and a heuristic that says OK is worse than no check
+// at all. 4.3's structural answer is to omit `base`, which makes the loader
+// itself name every unset key -- so the lint's job is to make the inheritance
+// VISIBLE, and let the author decide.
+
+/// One file for the lint to check.
+pub struct ThemeFile<'a> {
+    /// The tier's name (`system` / `user`), or empty when a path was named
+    /// explicitly and there is no tier to speak of.
+    pub label: &'a str,
+    pub path: &'a str,
+    /// The file's text; `None` = it is not there, which for a TIER is not an
+    /// error (HALCYON-THEME 4.1). A path named on the command line that does
+    /// not exist never reaches here -- that is an I/O failure at the caller.
+    pub text: Option<&'a str>,
+}
+
+/// What `halcyon theme lint` prints, and whether it failed.
+pub struct LintReport {
+    pub lines: Vec<String>,
+    /// A file was present and did not load -- the tool's exit status. An
+    /// ABSENT tier is not a refusal.
+    pub refused: bool,
+}
+
+/// Columns the inherited-key list wraps at. A console is 80 wide; the list is
+/// indented four, so this leaves margin rather than filling to the edge.
+const LINT_WRAP: usize = 72;
+
+/// Render one line per file (plus the indented inherited-key list where a
+/// based file left keys unset). Pure -- the contents are injected, so every
+/// verdict in the report is host-testable without a filesystem.
+pub fn lint_files(files: &[ThemeFile]) -> LintReport {
+    use core::fmt::Write as _;
+    let mut lines: Vec<String> = Vec::new();
+    let mut refused = false;
+
+    for f in files {
+        let mut head = String::new();
+        if !f.label.is_empty() {
+            head.push_str(f.label);
+            head.push(' ');
+        }
+        head.push_str(f.path);
+        head.push_str(": ");
+
+        let Some(text) = f.text else {
+            head.push_str("absent");
+            lines.push(head);
+            continue;
+        };
+
+        match libhalcyon::theme::Theme::from_toml(text) {
+            Err(e) => {
+                refused = true;
+                let _ = write!(head, "REFUSED -- {}", libhalcyon::theme::describe(&e));
+                lines.push(head);
+            }
+            Ok(l) => {
+                let name: &str = if l.name.is_empty() {
+                    "(unnamed)"
+                } else {
+                    &l.name
+                };
+                let total = libhalcyon::theme::KEYS.len();
+                if l.inherited.is_empty() {
+                    let _ = write!(head, "OK -- \"{name}\", all {total} keys set");
+                    lines.push(head);
+                } else {
+                    let _ = write!(
+                        head,
+                        "OK -- \"{name}\", base daylight, {} of {total} keys inherited",
+                        l.inherited.len()
+                    );
+                    lines.push(head);
+                    for w in wrap_tokens(&l.inherited, "    ", LINT_WRAP) {
+                        lines.push(w);
+                    }
+                }
+            }
+        }
+    }
+    LintReport { lines, refused }
+}
+
+/// The `active:` line: which tier a renderer would actually paint from.
+///
+/// It calls [`libhalcyon::theme::resolve`] rather than re-deciding the tier
+/// order, so the line cannot drift from what the compositor and the session
+/// really do -- including the fall-ONE-tier-down rule (a user file with a typo
+/// leaves the system theme in place, not the built-in).
+pub fn lint_active_line(system: Option<&str>, user: Option<&str>) -> String {
+    use libhalcyon::theme::Source;
+    let r = libhalcyon::theme::resolve(system, user);
+    let mut s = String::from("active: ");
+    match r.source {
+        Source::BuiltIn => {
+            s.push_str("built-in (Daylight)");
+            return s;
+        }
+        Source::System => s.push_str("system"),
+        Source::User => s.push_str("user"),
+    }
+    s.push_str(" -- \"");
+    s.push_str(if r.name.is_empty() {
+        "(unnamed)"
+    } else {
+        &r.name
+    });
+    s.push('"');
+    s
+}
+
+/// Wrap space-separated tokens into `indent`-prefixed lines of at most `width`
+/// columns. A token longer than the width gets its own line rather than being
+/// split -- a key name is an identifier, and half of one helps nobody.
+fn wrap_tokens(tokens: &[String], indent: &str, width: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::from(indent);
+    let mut empty = true;
+    for t in tokens {
+        if !empty && cur.len() + 1 + t.len() > width {
+            out.push(cur);
+            cur = String::from(indent);
+            empty = true;
+        }
+        if !empty {
+            cur.push(' ');
+        }
+        cur.push_str(t);
+        empty = false;
+    }
+    if !empty {
+        out.push(cur);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -448,6 +632,254 @@ mod tests {
         );
         assert!(argv_of("").is_empty());
         assert!(argv_of("   ").is_empty());
+    }
+
+    // ----- theme lint (TH-4c) ------------------------------------------------
+
+    /// A COMPLETE theme file, built FROM the key registry rather than
+    /// transcribed. Transcribing 57 keys would mean this fixture silently
+    /// stops being complete the day a key is added -- and then every test
+    /// below would keep passing while measuring a DIFFERENT thing (a based
+    /// file's inheritance instead of a complete file's completeness). Built
+    /// from `KEYS`, it cannot drift.
+    fn complete_theme_toml() -> String {
+        use libhalcyon::theme::KEYS;
+        let mut s = String::from("[meta]\nname = \"fixture\"\n");
+        let mut table = "";
+        for (i, (tb, k)) in KEYS.iter().enumerate() {
+            if *tb != table {
+                s.push_str("\n[");
+                s.push_str(tb);
+                s.push_str("]\n");
+                table = tb;
+            }
+            s.push_str(k);
+            s.push_str(" = ");
+            match (*tb, *k) {
+                ("terminal", "ansi") => {
+                    s.push('[');
+                    for j in 0..16u32 {
+                        if j > 0 {
+                            s.push_str(", ");
+                        }
+                        s.push_str(&alloc::format!("\"#{:02X}20{:02X}\"", j * 9 + 1, j * 7 + 3));
+                    }
+                    s.push(']');
+                }
+                ("type", "smooth") => s.push_str("12"),
+                ("geometry", g) => s.push_str(match g {
+                    "bevel" => "2",
+                    "gap" => "2",
+                    "hairline" => "1",
+                    "header_h" | "status_h" => "20",
+                    "tag_pad_x" => "6",
+                    _ => "5",
+                }),
+                _ => s.push_str(&alloc::format!("\"#{:02X}{:02X}40\"", i * 3 + 1, i * 5 + 2)),
+            }
+            s.push('\n');
+        }
+        s
+    }
+
+    #[test]
+    fn a_complete_file_lints_as_complete() {
+        let src = complete_theme_toml();
+        let r = lint_files(&[ThemeFile {
+            label: "system",
+            path: "/lib/halcyon/theme.toml",
+            text: Some(&src),
+        }]);
+        assert!(!r.refused, "{:?}", r.lines);
+        assert_eq!(r.lines.len(), 1, "a complete file needs no key list");
+        let n = libhalcyon::theme::KEYS.len();
+        assert_eq!(
+            r.lines[0],
+            alloc::format!("system /lib/halcyon/theme.toml: OK -- \"fixture\", all {n} keys set")
+        );
+    }
+
+    #[test]
+    fn a_bad_colour_is_refused_by_line_and_the_same_file_fixed_is_not() {
+        // The POSITIVE control, one variable away: a `refused == true`
+        // assertion is satisfied by ANY broken fixture, so the identical file
+        // with the single mutation undone must lint clean.
+        let good = complete_theme_toml();
+        let bad = good.replacen("ember = \"#", "ember = \"@", 1);
+        assert_ne!(good, bad, "the mutation did not mutate");
+
+        let ok = lint_files(&[ThemeFile {
+            label: "",
+            path: "/t.toml",
+            text: Some(&good),
+        }]);
+        assert!(!ok.refused, "the control must load: {:?}", ok.lines);
+
+        let r = lint_files(&[ThemeFile {
+            label: "",
+            path: "/t.toml",
+            text: Some(&bad),
+        }]);
+        assert!(r.refused);
+        assert_eq!(r.lines.len(), 1);
+        // Names the file, the verdict, and where to look.
+        assert!(
+            r.lines[0].starts_with("/t.toml: REFUSED -- line "),
+            "{}",
+            r.lines[0]
+        );
+        assert!(r.lines[0].contains("#RRGGBB"), "{}", r.lines[0]);
+    }
+
+    #[test]
+    fn a_based_file_names_every_key_it_inherited() {
+        let src = "[meta]\nname = \"dusk\"\nbase = \"daylight\"\n\n\
+                   [palette]\nsurface = \"#101010\"\nfg = \"#EEEEEE\"\n";
+        let r = lint_files(&[ThemeFile {
+            label: "user",
+            path: "/home/cora/lib/halcyon/theme.toml",
+            text: Some(src),
+        }]);
+        assert!(!r.refused);
+        let n = libhalcyon::theme::KEYS.len();
+        assert_eq!(
+            r.lines[0],
+            alloc::format!(
+                "user /home/cora/lib/halcyon/theme.toml: OK -- \"dusk\", base daylight, {} of {n} keys inherited",
+                n - 2
+            )
+        );
+        // The keys themselves, wrapped -- this IS 4.3's promise: the
+        // convenient mode stays auditable because the tool NAMES what was
+        // inherited rather than counting it.
+        let body: String = r.lines[1..].join(" ");
+        for k in [
+            "palette.floor",
+            "palette.status_muted",
+            "geometry.bevel",
+            "terminal.ansi",
+        ] {
+            assert!(body.contains(k), "inherited list omitted {k}");
+        }
+        // ...and NOT the two the file actually set.
+        assert!(!body.contains("palette.surface"), "{body}");
+        assert!(!body.contains("palette.fg "), "{body}");
+        for l in &r.lines[1..] {
+            assert!(l.starts_with("    "), "unindented: {l}");
+            assert!(l.len() <= LINT_WRAP, "{} cols: {l}", l.len());
+        }
+    }
+
+    #[test]
+    fn an_absent_tier_is_not_a_refusal() {
+        let r = lint_files(&[ThemeFile {
+            label: "user",
+            path: "/home/cora/lib/halcyon/theme.toml",
+            text: None,
+        }]);
+        assert!(!r.refused, "4.1: no file is the default installation");
+        assert_eq!(
+            r.lines,
+            vec![String::from(
+                "user /home/cora/lib/halcyon/theme.toml: absent"
+            )]
+        );
+    }
+
+    #[test]
+    fn the_active_line_follows_resolve_including_the_fall_one_tier_down() {
+        let good = complete_theme_toml();
+        let bad = good.replacen("ember = \"#", "ember = \"@", 1);
+        assert_ne!(good, bad);
+
+        assert_eq!(lint_active_line(None, None), "active: built-in (Daylight)");
+        assert_eq!(
+            lint_active_line(Some(&good), None),
+            "active: system -- \"fixture\""
+        );
+        assert_eq!(
+            lint_active_line(None, Some(&good)),
+            "active: user -- \"fixture\""
+        );
+        // The user's own file wins over the system's.
+        assert_eq!(
+            lint_active_line(Some(&good), Some(&good)),
+            "active: user -- \"fixture\""
+        );
+        // A user typo falls ONE TIER DOWN, not to the built-in: the user keeps
+        // seeing the system theme they had before they wrote their file.
+        assert_eq!(
+            lint_active_line(Some(&good), Some(&bad)),
+            "active: system -- \"fixture\""
+        );
+        // Nothing below a refused system file: the built-in.
+        assert_eq!(
+            lint_active_line(Some(&bad), None),
+            "active: built-in (Daylight)"
+        );
+        // A file with no [meta] name still resolves; it is just unnamed.
+        let anon = good.replacen("name = \"fixture\"\n", "", 1);
+        assert_ne!(good, anon);
+        assert_eq!(
+            lint_active_line(None, Some(&anon)),
+            "active: user -- \"(unnamed)\""
+        );
+    }
+
+    #[test]
+    fn wrap_never_exceeds_the_width_and_never_splits_a_token() {
+        let toks: Vec<String> = (0..12)
+            .map(|i| alloc::format!("palette.key_{i:02}"))
+            .collect();
+        let out = wrap_tokens(&toks, "    ", 40);
+        assert!(out.len() > 1, "12 keys must not fit on one 40-col line");
+        for l in &out {
+            assert!(l.len() <= 40, "{} cols: {l}", l.len());
+        }
+        // Every token survives, in order, exactly once.
+        assert_eq!(
+            out.join(" ").split_whitespace().collect::<Vec<_>>(),
+            toks.iter().map(|s| s.as_str()).collect::<Vec<_>>()
+        );
+        // A token wider than the line gets its own line rather than a split.
+        let long = vec![String::from("x".repeat(60)), String::from("y")];
+        let out = wrap_tokens(&long, "  ", 20);
+        assert_eq!(out.len(), 2);
+        assert!(out[0].ends_with(&"x".repeat(60)));
+        assert!(wrap_tokens(&[], "  ", 20).is_empty());
+    }
+
+    #[test]
+    fn parse_theme_forms() {
+        assert_eq!(
+            parse_cmd(&["theme", "lint"]),
+            Ok(Cmd::ThemeLint { path: None })
+        );
+        assert_eq!(
+            parse_cmd(&["theme", "lint", "/lib/halcyon/themes/nightjar.toml"]),
+            Ok(Cmd::ThemeLint {
+                path: Some("/lib/halcyon/themes/nightjar.toml")
+            })
+        );
+        assert_eq!(parse_cmd(&["theme"]), Err(CmdError::BadThemeVerb));
+        assert_eq!(parse_cmd(&["theme", "show"]), Err(CmdError::BadThemeVerb));
+        assert_eq!(
+            parse_cmd(&["theme", "lint", "a", "b"]),
+            Err(CmdError::ExtraOperand)
+        );
+        // An option is never a path -- otherwise `--help` reads as a filename.
+        assert_eq!(
+            parse_cmd(&["theme", "lint", "--help"]),
+            Err(CmdError::BadPath)
+        );
+        assert_eq!(parse_cmd(&["theme", "lint", ""]), Err(CmdError::BadPath));
+        assert_eq!(
+            parse_cmd(&["theme", "lint", "bad\nname"]),
+            Err(CmdError::BadPath)
+        );
+        // A path is a PATH: slashes and dots are fine, unlike a layout name.
+        assert!(path_is_usable("./theme.toml"));
+        assert!(path_is_usable("/a/b/../c.toml"));
     }
 
     #[test]

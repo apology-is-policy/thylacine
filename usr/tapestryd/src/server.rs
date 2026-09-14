@@ -100,11 +100,13 @@ use alloc::vec::Vec;
 use libthyla_rs::ninep as p9;
 use libthyla_rs::time::Instant;
 use libthyla_rs::{
-    t_burrow_detach, t_close, t_dma_create_gpu_bo, t_dma_create_weave, t_dma_map,
-    t_hostmem_refcount, t_srv_peer, t_weft_share, t_weft_unshare, TSrvPeerInfo, T_GID_SYSTEM,
-    T_PRINCIPAL_INVALID, T_PRINCIPAL_NONE, T_PRINCIPAL_SYSTEM, T_PROT_READ, T_PROT_WRITE,
-    T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_WRITE, T_SRV_PEER_FLAG_CONSOLE_RENDERER,
+    t_burrow_detach, t_close, t_dma_create_gpu_bo, t_dma_create_weave, t_dma_map, t_dma_segments,
+    t_hostmem_refcount, t_srv_peer, t_weft_share, t_weft_unshare, TDmaSeg, TSrvPeerInfo,
+    T_DMA_MAP_PA_SCATTERED, T_GID_SYSTEM, T_PRINCIPAL_INVALID, T_PRINCIPAL_NONE,
+    T_PRINCIPAL_SYSTEM, T_PROT_READ, T_PROT_WRITE, T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_WRITE,
+    T_SRV_PEER_FLAG_CONSOLE_RENDERER,
 };
+use tapestryd::skein::{self, Seg};
 
 /// Present-pressure window for the idle throttle (#164): two adjacent
 /// buckets of this width approximate a sliding window, so `animating()`
@@ -118,11 +120,11 @@ use libthyla_rs::{
 const PRESENT_BURST_WINDOW_MS: u64 = 250;
 const PRESENT_BURST_MIN: u32 = 4;
 
-use crate::chords::{ChordAction, Chords};
+use tapestryd::chords::{ChordAction, Chords};
 use libhalcyon::scale;
 use libhalcyon::theme::Metrics;
 use crate::gpu::{FenceTag, FencedErr, Gpu};
-use crate::pane::{self, Dir, Layout, Mode, Rect, Role, Status};
+use tapestryd::pane::{self, Dir, Layout, Mode, Rect, Role, Status};
 use libdriver::Error;
 
 pub const MAX_CONNS: usize = 8;
@@ -384,6 +386,12 @@ const WARP_BO_MAX_BPP: u64 = 16;
 
 /// Triple buffering (D1): one weave carries three page-aligned slots.
 const WEAVE_SLOTS: u32 = 3;
+
+/// WEAVE-SKEIN: the most backing runs a weave can have -- the kernel's
+/// KOBJ_DMA_MAX_BLOCKS, i.e. the 64 MiB weave envelope at 2 MiB granularity.
+/// The virtio-gpu REQ region holds 78 mem entries, so a full-envelope weave
+/// uses 32 of them and no transport change is required.
+const WEAVE_MAX_SEGS: usize = 32;
 
 /// R2-F4: the bounded per-surface event queue. FRAME coalesces; a
 /// non-droppable overflow wedges the surface.
@@ -2120,7 +2128,11 @@ struct WarpBo {
     res_id: u32,
     dma_fd: i64,
     va: u64,
-    pa: u64,
+    // WEAVE-SKEIN deleted the `pa` field. It was written once and read nowhere,
+    // and a dead base PA on an I-45 surface is exactly the shape
+    // burrow_create_dma's `v->pa = 0` comment exists to prevent: a
+    // plausible-looking base is what a future reader adds an offset to, which
+    // now addresses another object's pages, because a GPU BO scatters.
     size: u64,
     /// The lazy Tweft mint (the weft_ensure precedent); disarmed at retire
     /// BEFORE any backing free (the R2-F5 ordering).
@@ -2344,7 +2356,7 @@ struct GlAdopt {
 const NO_SURFACE: Option<Surface> = None;
 
 impl Comp {
-    pub fn new(gpu: Gpu, declared: Option<u16>) -> Comp {
+    pub fn new(gpu: Gpu, declared: Option<u16>, theme: libhalcyon::theme::Theme) -> Comp {
         let (derived, src) = match declared {
             Some(p) => (p, "declared"),
             None => (
@@ -2371,8 +2383,8 @@ impl Comp {
             scale,
             scale_override: None,
             declared,
-            metrics: libhalcyon::theme::builtin().metrics.at(scale),
-            theme: libhalcyon::theme::builtin(),
+            metrics: theme.metrics.at(scale),
+            theme,
             surfaces: [NO_SURFACE; MAX_SURFACES],
             gen_seq: 0,
             conn_seq: 0,
@@ -2572,6 +2584,64 @@ impl Comp {
         self.res_seq
     }
 
+    /// WEAVE-SKEIN: map ANY kernel DMA object and read its backing SEGMENT
+    /// LIST. Weaves and GPU BOs both, since both scatter above SKEIN_BLOCK.
+    ///
+    /// ONE path for contiguous and scattered objects, and THE ONLY PLACE that
+    /// knows about T_DMA_MAP_PA_SCATTERED. t_dma_map's PA return is
+    /// deliberately discarded: the segment list is authoritative for both
+    /// shapes, so there is no branch here that only a large object takes and
+    /// that therefore rots. A 1280x800 triple-buffered weave is already 6
+    /// blocks, so the scattered path is the ordinary one, not the exotic one.
+    ///
+    /// Every caller goes through here rather than calling t_dma_map itself,
+    /// because the `-2` unwind differs from the `-1` one in the way that
+    /// matters: -1 leaves nothing to release, -2 leaves a LIVE MAPPING. A site
+    /// that treats them alike leaks a VMA, and one that also rewinds a VA
+    /// bump-allocator hands the same address out twice.
+    ///
+    /// CONTRACT ON None: nothing is installed. If the map succeeded and the
+    /// segment read then failed, this detaches the VA before returning, so
+    /// every caller's existing "close the handle" unwind stays correct and
+    /// complete.
+    fn map_dma(handle: i64, va: u64, size: u64, out: &mut [Seg]) -> Option<usize> {
+        let rc = unsafe { t_dma_map(handle, va, T_PROT_READ | T_PROT_WRITE) };
+        // A skein has no single PA, so the kernel refuses to invent one rather
+        // than returning the first block's -- which a caller would embed in a
+        // device descriptor and the device would then walk off the end of.
+        // T_DMA_MAP_PA_SCATTERED means THE MAPPING SUCCEEDED and the VA is
+        // ours; only a genuinely failed map leaves nothing to detach.
+        if rc < 0 && rc != T_DMA_MAP_PA_SCATTERED {
+            return None;
+        }
+
+        let mut raw = [TDmaSeg::default(); WEAVE_MAX_SEGS];
+        let n = unsafe { t_dma_segments(handle, &mut raw) };
+        // The kernel REFUSES rather than truncating when the object has more
+        // runs than the buffer holds, so a positive n is a complete list.
+        if n <= 0 || (n as usize) > out.len() {
+            // Named, because the two ways to get here have very different
+            // causes and the failure is otherwise a silent E_NOMEM: a kernel
+            // KOBJ_DMA_MAX_BLOCKS raise past WEAVE_MAX_SEGS shows up ONLY as
+            // the second arm, and nothing links the two constants.
+            say!(
+                "tapestryd: t_dma_segments({}) -> {} (cap {})",
+                size,
+                n,
+                out.len()
+            );
+            unsafe { t_burrow_detach(va, size) };
+            return None;
+        }
+        for i in 0..n as usize {
+            out[i] = Seg {
+                pa: raw[i].pa,
+                len: raw[i].len,
+            };
+        }
+        Some(n as usize)
+    }
+
     /// Allocate one weave GENERATION: DMA chunk + map + zero + one 2D
     /// resource PER SLOT, each backed by its slot, then -- on a GL host --
     /// the C-2c import of every slot resource into the compositor's own
@@ -2603,31 +2673,46 @@ impl Comp {
         }
         let va = self.weave_va_next;
         self.weave_va_next += (size + PAGE - 1) & !(PAGE - 1);
-        let pa = unsafe { t_dma_map(handle, va, T_PROT_READ | T_PROT_WRITE) };
-        if pa < 0 {
-            unsafe { t_close(handle) };
-            return Err(p9::E_NOMEM);
-        }
+        let mut segs = [Seg::default(); WEAVE_MAX_SEGS];
+        let nsegs = match Self::map_dma(handle, va, size, &mut segs) {
+            Some(n) => n,
+            None => {
+                unsafe { t_close(handle) };
+                return Err(p9::E_NOMEM);
+            }
+        };
         // Zero the weave: DMA chunk content must never leak a prior
-        // occupant's bytes into a client mapping.
+        // occupant's bytes into a client mapping. The VA range is contiguous
+        // whatever the physical backing does, so this is unchanged by the
+        // skein -- scatter is invisible above the page tables.
         unsafe { core::ptr::write_bytes(va as *mut u8, 0, size as usize) };
 
-        // ONE RESOURCE PER SLOT (4.5.8), each backed by its own slot at
-        // `pa + i*slot_stride` rather than by the whole weave -- that is what
-        // makes slot <-> resource 1:1. The weave's PA is contiguous (the
-        // whole-weave attach this replaces relied on exactly that), so the
-        // per-slot offsets are sound.
+        // ONE RESOURCE PER SLOT (4.5.8), each backed by its own slot rather
+        // than by the whole weave -- that is what makes slot <-> resource 1:1.
+        //
+        // WEAVE-SKEIN: the slot's backing is now the weave's segment list
+        // SLICED to that slot's byte range, because a slot boundary does not
+        // land on a block boundary (a 2560x1664 slot is 16.25 MiB against
+        // 2 MiB blocks). This replaces `pa + i*slot_stride`, which was only
+        // ever correct because the weave was one contiguous span.
         let mut res_ids = [0u32; WEAVE_SLOTS as usize];
         for i in 0..WEAVE_SLOTS as usize {
             let res = self.next_res_id();
-            let ok = self.gpu.resource_create_2d(res, w, h).is_ok()
+            let mut slot_segs = [Seg::default(); WEAVE_MAX_SEGS];
+            let nslot = match skein::subrange(
+                &segs[..nsegs],
+                (i as u64) * slot_stride,
+                slot_stride,
+                &mut slot_segs,
+            ) {
+                Ok(k) => k,
+                Err(_) => 0,   // handled by the rollback below, like any step
+            };
+            let ok = nslot > 0
+                && self.gpu.resource_create_2d(res, w, h).is_ok()
                 && self
                     .gpu
-                    .attach_backing(
-                        res,
-                        pa as u64 + (i as u64) * slot_stride,
-                        slot_stride as u32,
-                    )
+                    .attach_backing(res, &slot_segs[..nslot])
                     .is_ok();
             if !ok {
                 // Roll back THIS mint (a create that succeeded with a failed
@@ -3934,11 +4019,14 @@ impl Comp {
         }
         let va = self.weave_va_next;
         self.weave_va_next += size;
-        let pa = unsafe { t_dma_map(fd, va, T_PROT_READ | T_PROT_WRITE) };
-        if pa < 0 {
-            unsafe { t_close(fd) };
-            return None;
-        }
+        let mut segs = [Seg::default(); WEAVE_MAX_SEGS];
+        let nsegs = match Self::map_dma(fd, va, size, &mut segs) {
+            Some(n) => n,
+            None => {
+                unsafe { t_close(fd) };
+                return None;
+            }
+        };
         unsafe { core::ptr::write_bytes(va as *mut u8, 0, size as usize) };
         let res = self.next_res_id();
         let h = if kind == 2 { CONV_ROWS as u32 } else { 4 };
@@ -3969,7 +4057,7 @@ impl Comp {
         }
         if self
             .gpu
-            .attach_backing(res, pa as u64, size as u32)
+            .attach_backing(res, &segs[..nsegs])
             .is_err()
         {
             let _ = self.gpu.resource_unref(res);
@@ -4071,6 +4159,35 @@ impl Comp {
     /// next read, and the STRUCTURAL relayout re-carves every strip and
     /// fans every surface its CONFIGURE. `why` names the source on the
     /// line (edid / verb / auto / chord / mode).
+    /// Adopt a theme pushed by the declared session (HALCYON-THEME 3.4).
+    ///
+    /// The GEOMETRY may move, so this is a structural change and takes the
+    /// same shape as `apply_scale`: re-derive the scaled metrics, owe the
+    /// fan, retire a status bar whose height no longer matches so its owner
+    /// re-mints at the new one, and reconcile. A theme that changes only
+    /// COLOURS still needs the fan -- every painted surface is now wrong,
+    /// and no geometry moved to trigger a redraw on its own (the scale
+    /// round's F3 lesson: a fan keyed on geometry misses every change that
+    /// moves no geometry).
+    fn apply_theme(&mut self, t: libhalcyon::theme::Theme, who: &str) {
+        if t == self.theme {
+            return; // idempotent: a re-push of the same theme fans nothing
+        }
+        self.theme = t;
+        self.metrics = self.theme.metrics.at(self.scale);
+        say!("tapestryd: theme applied ({} push)", who);
+        self.rescale_fan_due = true;
+        if let Some(st) = self.status {
+            let stale = self
+                .surf(st.n)
+                .is_some_and(|s| s.h != self.metrics.status_h as u32);
+            if stale {
+                self.retire(st.n);
+            }
+        }
+        self.reconcile();
+    }
+
     fn apply_scale(&mut self, pct: u16, why: &str) {
         if pct == self.scale || !scale::is_valid_pct(pct) {
             return;
@@ -4566,23 +4683,23 @@ impl Comp {
         // display width by the one vertical unit -- never cropped or
         // letterboxed (HALCYON.md 13.6). Judged before the weave allocation.
         if is_status {
-            let unit = self.metrics.status_h as u32;
-            if self.status.is_some() || w != disp_w || h != unit || disp_h <= unit {
-                return Err(p9::E_INVAL);
-            }
-            // The display's bar belongs to whoever owns the display. While a
-            // session is declared, a SYSTEM principal -- the console
-            // renderer, which is backgrounded and showing nothing -- may not
-            // TAKE the slot. Retiring its bar at the declare is necessary and
-            // NOT sufficient on its own: the console sees the CLOSE, re-arms
-            // on the very relayout that retire causes, and races the session
-            // for the slot it was just relieved of. Whoever wins is then the
-            // owner, which is a coin toss deciding whether the user has a
-            // status bar. Refused here, the console simply stays bar-less
-            // while it is invisible and re-mints from the relayout that
-            // foregrounds it at logout.
-            if !self.session_conns.is_empty() && !principal_is_session(s.owner_principal) {
-                return Err(p9::E_PERM);
+            // The rule itself is `pane::admit_status_bar` -- pure over
+            // scalars, so it is host-testable; see it for why refusing the
+            // SYSTEM taker is not redundant with retiring its bar.
+            let req = pane::StatusReq {
+                bar_registered: self.status.is_some(),
+                w,
+                h,
+                disp_w,
+                disp_h,
+                status_h: self.metrics.status_h as u32,
+                session_declared: !self.session_conns.is_empty(),
+                requester_is_session: principal_is_session(s.owner_principal),
+            };
+            match pane::admit_status_bar(&req) {
+                pane::StatusAdmit::Admit => {}
+                pane::StatusAdmit::Malformed => return Err(p9::E_INVAL),
+                pane::StatusAdmit::NotYours => return Err(p9::E_PERM),
             }
         }
         // H-3b-2: a chrome binding names a LIVE LEAF (E_NOENT otherwise),
@@ -4990,11 +5107,16 @@ impl Comp {
         }
         let va = self.weave_va_next;
         self.weave_va_next += size;
-        let pa = unsafe { t_dma_map(handle, va, T_PROT_READ | T_PROT_WRITE) };
-        if pa < 0 {
-            unsafe { t_close(handle) };
-            return None;
-        }
+        // WEAVE-SKEIN: the screen is a weave too (1280x800x4 is 3.9 MiB, so it
+        // scatters at the default geometry, not only at large ones).
+        let mut segs = [Seg::default(); WEAVE_MAX_SEGS];
+        let nsegs = match Self::map_dma(handle, va, size, &mut segs) {
+            Some(n) => n,
+            None => {
+                unsafe { t_close(handle) };
+                return None;
+            }
+        };
         // Zero: the buffer scans out before the first chrome paint on a
         // mode change -- never a prior occupant's bytes.
         unsafe { core::ptr::write_bytes(va as *mut u8, 0, size as usize) };
@@ -5054,7 +5176,7 @@ impl Comp {
                 )
                 .is_ok();
             let attached = created && self.gpu.ctx_attach_resource(COMPOSITOR_CTX, res).is_ok();
-            let backed = attached && self.gpu.attach_backing(res, pa as u64, size as u32).is_ok();
+            let backed = attached && self.gpu.attach_backing(res, &segs[..nsegs]).is_ok();
             if backed && self.screen_3d_roundtrip(res, va, dw) {
                 is3d = true;
             } else {
@@ -5086,11 +5208,7 @@ impl Comp {
                 unsafe { t_close(handle) };
                 return None;
             }
-            if self
-                .gpu
-                .attach_backing(res, pa as u64, size as u32)
-                .is_err()
-            {
+            if self.gpu.attach_backing(res, &segs[..nsegs]).is_err() {
                 let _ = self.gpu.resource_unref(res);
                 unsafe { t_burrow_detach(va, size) };
                 unsafe { t_close(handle) };
@@ -7896,7 +8014,7 @@ impl Comp {
             }
             return false;
         }
-        let super_held = mods & crate::keymap::MOD_SUPER != 0;
+        let super_held = mods & tapestryd::keymap::MOD_SUPER != 0;
         if value == 2 {
             // Repeat: follows its press's disposition; a repeat while
             // Super is held is plane-reserved regardless.
@@ -7909,7 +8027,7 @@ impl Comp {
         // H-3c: a chord dismisses a placed menu first, then acts -- the
         // environment's plane outranks a modal.
         self.menu_dismiss("chord");
-        self.chord_action(code, mods & crate::keymap::MOD_SHIFT != 0);
+        self.chord_action(code, mods & tapestryd::keymap::MOD_SHIFT != 0);
         true
     }
 
@@ -8808,11 +8926,14 @@ impl Comp {
         }
         let va = self.weave_va_next;
         self.weave_va_next += (size + PAGE - 1) & !(PAGE - 1);
-        let pa = unsafe { t_dma_map(fd, va, T_PROT_READ | T_PROT_WRITE) };
-        if pa < 0 {
-            unsafe { t_close(fd) };
-            return None;
-        }
+        let mut segs = [Seg::default(); WEAVE_MAX_SEGS];
+        let nsegs = match Self::map_dma(fd, va, size, &mut segs) {
+            Some(n) => n,
+            None => {
+                unsafe { t_close(fd) };
+                return None;
+            }
+        };
         self.res_seq = self.res_seq.wrapping_add(1);
         let res_id = self.res_seq;
         let undo = |gpu: &mut Gpu, stage: u32, res_id: u32| {
@@ -8864,7 +8985,7 @@ impl Comp {
         }
         if self
             .gpu
-            .attach_backing(res_id, pa as u64, size as u32)
+            .attach_backing(res_id, &segs[..nsegs])
             .is_err()
         {
             undo(&mut self.gpu, 2, res_id);
@@ -9236,7 +9357,6 @@ impl Comp {
             res_id: 0,
             dma_fd: -1,
             va: 0,
-            pa: 0,
             size: 0,
             share_id: None,
             w: 0,
@@ -9594,15 +9714,16 @@ impl Comp {
         }
         let va = self.weave_va_next;
         self.weave_va_next += (size + PAGE - 1) & !(PAGE - 1);
-        let pa = unsafe { t_dma_map(fd, va, T_PROT_READ | T_PROT_WRITE) };
-        if pa < 0 {
+        let mut segs = [Seg::default(); WEAVE_MAX_SEGS];
+        let nsegs = Self::map_dma(fd, va, size, &mut segs).unwrap_or(0);
+        if nsegs == 0 {
             unsafe { t_close(fd) };
             self.wbo_diag_once(
                 ctx_pub,
                 conn,
                 Self::WDIAG_DMA_MAP,
                 "dma-map",
-                pa,
+                -1,
                 format,
                 w,
                 h,
@@ -9674,7 +9795,7 @@ impl Comp {
         }
         if self
             .gpu
-            .attach_backing(res_id, pa as u64, size as u32)
+            .attach_backing(res_id, &segs[..nsegs])
             .is_err()
         {
             unwind(&mut self.gpu, 2, res_id);
@@ -9700,7 +9821,6 @@ impl Comp {
                 b.res_id = res_id;
                 b.dma_fd = fd;
                 b.va = va;
-                b.pa = pa as u64;
                 b.size = size;
                 b.w = w;
                 b.h = h;
@@ -10090,12 +10210,39 @@ impl Comp {
         }
         let va = self.weave_va_next;
         self.weave_va_next += (bytes + PAGE - 1) & !(PAGE - 1);
-        let pa = unsafe { t_dma_map(fd, va, T_PROT_READ | T_PROT_WRITE) };
-        if pa < 0 {
-            self.weave_va_next = va; // audit F5: nothing mapped here -- reclaim the VA
+        // A ring is capped at WARP_RING_MAX (1 MiB), which a _Static_assert-
+        // equivalent bound keeps under SKEIN_BLOCK, so it is single-block by
+        // construction -- which is what the blob path below REQUIRES, since
+        // RESOURCE_CREATE_BLOB carries one mem entry. Going through map_dma
+        // anyway means this site never has to know that.
+        let mut segs = [Seg::default(); WEAVE_MAX_SEGS];
+        let nsegs = match Self::map_dma(fd, va, bytes, &mut segs) {
+            Some(n) => n,
+            None => {
+                // The VA rewind is sound ONLY because map_dma's contract says
+                // nothing is installed on None. It was written when a failed
+                // t_dma_map was the only way here; the skein's -2 (mapping
+                // SUCCEEDED, no single PA) would have made the old `pa < 0`
+                // test rewind a bump allocator over a LIVE mapping and hand
+                // the same VA out twice.
+                self.weave_va_next = va;
+                unsafe { t_close(fd) };
+                return Err(p9::E_NOMEM);
+            }
+        };
+        if nsegs != 1 {
+            // Fail closed: create_ring_blob emits a single mem entry, so a
+            // scattered ring would be given a PARTIAL backing the device reads
+            // past. Unreachable while WARP_RING_MAX <= SKEIN_BLOCK; asserted
+            // rather than assumed, because the two constants live in different
+            // repositories and nothing links them.
+            say!("tapestryd: ring backing scattered ({} segs) -- refusing", nsegs);
+            unsafe { t_burrow_detach(va, bytes) };
+            self.weave_va_next = va;
             unsafe { t_close(fd) };
             return Err(p9::E_NOMEM);
         }
+        let pa = segs[0].pa as i64;
         // Zero the control header; the host starts idle (the guest kicks on
         // its first submit). Release-ordered so a client that maps and polls
         // immediately observes the initialized header.
@@ -16210,13 +16357,43 @@ impl Conn {
         let session_scale_verb = s.starts_with("scale ")
             && comp.session_declared(self.conn_id)
             && comp.conn_hosts(self.conn_id);
+        // HALCYON-THEME 3.4: the theme is the SEAT's, on exactly the `scale`
+        // terms. tapestryd paints the chrome and halcyond paints the content,
+        // and they must agree or the bevel does not match the pane -- but the
+        // user's theme file lives in the user's home, which this process is
+        // not entitled to read. So a DECLARED session that is hosting pushes
+        // its resolved theme. A per-process client re-theming another
+        // principal's display is the same cfg-3 lie `scale` refuses.
+        let session_theme_verb = s.starts_with("theme ")
+            && comp.session_declared(self.conn_id)
+            && comp.conn_hosts(self.conn_id);
         if !Self::is_ungated_ctl(s)
             && !self.peer_is_renderer()
             && !session_menu_verb
             && !session_status_verb
             && !session_scale_verb
+            && !session_theme_verb
         {
             return Err(p9::E_PERM);
+        }
+        if let Some(rest) = s.strip_prefix("theme ") {
+            // Budgeted like a layout verb: it IS one -- the metrics may move,
+            // so every carve is re-decided.
+            self.layout_verb_budget()?;
+            // UNTRUSTED INPUT even past the gate: the sender is the seat, but
+            // a seat is still another process, and `from_wire` re-checks the
+            // geometry bounds rather than trusting the far side (a display
+            // whose hairline arrived unvalidated is a scale-class hazard).
+            let Some(t) = libhalcyon::theme::from_wire(rest) else {
+                return Err(p9::E_INVAL);
+            };
+            let who = if self.peer_is_renderer() {
+                "renderer"
+            } else {
+                "session"
+            };
+            comp.apply_theme(t, who);
+            return Ok(());
         }
         if let Some(rest) = s.strip_prefix("scale ") {
             // `scale auto` re-derives (the declaration, else the EDID);

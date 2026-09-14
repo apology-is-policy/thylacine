@@ -1,3 +1,18 @@
+# tapestryd -- the compositor. lib + bin, for the reason halcyond's manifest
+# already states: THE H-2a LESSON -- A no_std BIN CRATE'S TESTS ARE DORMANT.
+# Until 2026-09-09 this crate was bin-only with an unconditional libthyla-rs
+# dependency, so `cargo test -p tapestryd` could not COMPILE on the host
+# (libthyla-rs's inline aarch64 asm emits ELF-only `.size`/`.type` directives
+# that the Mach-O assembler rejects), and chords.rs's four tests had therefore
+# never run once. A test that cannot be compiled is indistinguishable from one
+# that passes -- neither produces a failure.
+#
+# The LIB is what thinks and never syscalls: `pane` (the layout tree, the
+# geometry, the roles), `chords` (the binding table), `keymap` (the scancode
+# vocabulary). Host-tested via
+#   cargo test -p tapestryd --lib --no-default-features --target aarch64-apple-darwin
+# The BIN (the `guest` feature, on by default) is the body: the driver, the
+# GPU, the 9P server, the event loop.
 [package]
 name = "tapestryd"
 version = "0.1.0"
@@ -5,19 +20,30 @@ edition.workspace = true
 publish.workspace = true
 license.workspace = true
 
+[lib]
+name = "tapestryd"
+path = "src/lib.rs"
+
 [[bin]]
 name = "tapestryd"
 path = "src/main.rs"
+required-features = ["guest"]
 
 # Section 18.6 determinism mode (test-mode/tick/HOLD/release) is a BUILD-time
-# gate (the #880 strip-for-production class): default-on for the dev tree; a
-# production profile builds with --no-default-features and the verbs answer
-# E_OPNOTSUPP.
+# gate (the #880 strip-for-production class): default-on for the dev tree.
+#
+# `guest` gates the syscall body so the lib stays host-buildable. NOTE the
+# consequence for the production strip: `--no-default-features` alone now
+# drops `guest` too, and a bin whose `required-features` are unmet is SKIPPED
+# SILENTLY rather than failing -- so the determinism-stripped production build
+# is `--no-default-features --features guest`, never `--no-default-features`
+# by itself.
 [features]
-default = ["test-mode"]
+default = ["guest", "test-mode"]
+guest = ["dep:libdriver", "dep:libthyla-rs"]
 test-mode = []
 
 [dependencies]
-libdriver = { path = "../lib/libdriver" }
-libthyla-rs = { path = "../lib/libthyla-rs" }
 libhalcyon = { path = "../lib/libhalcyon" }
+libdriver = { path = "../lib/libdriver", optional = true }
+libthyla-rs = { path = "../lib/libthyla-rs", optional = true }

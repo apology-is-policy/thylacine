@@ -131,6 +131,62 @@ impl Role {
     }
 }
 
+/// H-3d: what a `role=status` registration asks for. A struct rather than a
+/// positional argument list because the two `bool`s and the four `u32`s are
+/// mutually transposable and the compiler would not catch a swap: at the call
+/// site each field is named, so `disp_w`/`disp_h` and the two principal bools
+/// cannot be silently exchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatusReq {
+    /// A bar is already registered on this display.
+    pub bar_registered: bool,
+    pub w: u32,
+    pub h: u32,
+    pub disp_w: u32,
+    pub disp_h: u32,
+    /// The one vertical unit the strip occupies (`Metrics::status_h`).
+    pub status_h: u32,
+    /// At least one session connection is declared on this display.
+    pub session_declared: bool,
+    /// The requesting surface's owner is a session principal (i.e. not
+    /// SYSTEM / NONE / INVALID).
+    pub requester_is_session: bool,
+}
+
+/// The verdict on a status-bar registration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusAdmit {
+    Admit,
+    /// A bar already exists, or the geometry is not exactly the strip.
+    Malformed,
+    /// The display belongs to a declared session; a SYSTEM renderer may not
+    /// take the slot.
+    NotYours,
+}
+
+/// H-3d: whether a `role=status` surface may become THE display's status bar.
+///
+/// The second arm is the one worth having as a seam. Retiring the console's
+/// bar when a session declares is necessary and NOT sufficient on its own:
+/// the console observes the CLOSE, re-arms on the very relayout the retire
+/// causes, and races the session for the slot it was just relieved of.
+/// Whoever wins owns it, which makes "does the user have a status bar" a coin
+/// toss. Refused here, the console stays bar-less while it is invisible and
+/// re-mints from the relayout that foregrounds it at logout.
+///
+/// Pure over scalars, so the rule is testable without a compositor -- which
+/// is the point: the fix this encodes landed at `9d5f38ee` with no witness of
+/// any kind, host or guest.
+pub fn admit_status_bar(r: &StatusReq) -> StatusAdmit {
+    if r.bar_registered || r.w != r.disp_w || r.h != r.status_h || r.disp_h <= r.status_h {
+        return StatusAdmit::Malformed;
+    }
+    if r.session_declared && !r.requester_is_session {
+        return StatusAdmit::NotYours;
+    }
+    StatusAdmit::Admit
+}
+
 /// A tile's recorded status (HALCYON.md 13.6; HALCYON-VISUAL 1.4): the exit
 /// of the last command completed in it. `Resting` = none recorded (a fresh
 /// tile; "nothing has run yet"). The DISPLAY key is derived, never stored:
@@ -1742,5 +1798,130 @@ impl Layout {
                 self.render_pane(s, c, depth + 1);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A well-formed status-bar registration on an undeclared display: the
+    /// console renderer's own case. Every test below moves exactly ONE field
+    /// off this base, so a verdict change names its cause.
+    fn base() -> StatusReq {
+        StatusReq {
+            bar_registered: false,
+            w: 1280,
+            h: 20,
+            disp_w: 1280,
+            disp_h: 800,
+            status_h: 20,
+            session_declared: false,
+            requester_is_session: false,
+        }
+    }
+
+    #[test]
+    fn the_console_may_take_the_bar_while_no_session_is_declared() {
+        assert_eq!(admit_status_bar(&base()), StatusAdmit::Admit);
+    }
+
+    #[test]
+    fn a_second_bar_is_refused() {
+        let r = StatusReq {
+            bar_registered: true,
+            ..base()
+        };
+        assert_eq!(admit_status_bar(&r), StatusAdmit::Malformed);
+    }
+
+    #[test]
+    fn the_bar_is_exactly_the_strip() {
+        // Not the display width -- neither narrower nor wider, since the bar
+        // is never cropped or letterboxed (HALCYON.md 13.6).
+        for w in [1279u32, 1281] {
+            let r = StatusReq { w, ..base() };
+            assert_eq!(admit_status_bar(&r), StatusAdmit::Malformed, "w={}", w);
+        }
+        // Not the one vertical unit.
+        for h in [19u32, 21] {
+            let r = StatusReq { h, ..base() };
+            assert_eq!(admit_status_bar(&r), StatusAdmit::Malformed, "h={}", h);
+        }
+    }
+
+    #[test]
+    fn a_display_no_taller_than_its_own_strip_has_no_room_for_one() {
+        // The carve would leave zero rows for content, so the request is
+        // refused rather than producing a bar-only display.
+        for disp_h in [19u32, 20] {
+            let r = StatusReq {
+                disp_h,
+                h: 20,
+                ..base()
+            };
+            assert_eq!(admit_status_bar(&r), StatusAdmit::Malformed, "disp_h={}", disp_h);
+        }
+        // One row of content is enough.
+        let r = StatusReq {
+            disp_h: 21,
+            ..base()
+        };
+        assert_eq!(admit_status_bar(&r), StatusAdmit::Admit);
+    }
+
+    /// THE HANDOVER RULE (@9d5f38ee), which had no witness of any kind until
+    /// this test: while a session is declared, the backgrounded SYSTEM
+    /// console renderer may not take the display's status-bar slot. Retiring
+    /// its bar at the declare does not close this on its own -- the console
+    /// re-arms on the relayout the retire causes and races for the slot.
+    #[test]
+    fn a_system_renderer_may_not_take_a_declared_sessions_bar() {
+        let r = StatusReq {
+            session_declared: true,
+            requester_is_session: false,
+            ..base()
+        };
+        assert_eq!(admit_status_bar(&r), StatusAdmit::NotYours);
+    }
+
+    /// The positive control one variable away: the SAME declared display
+    /// admits the SESSION's own bar. Without this, the test above is
+    /// satisfied by a rule that refuses every request once a session exists.
+    #[test]
+    fn the_declared_session_may_take_its_own_bar() {
+        let r = StatusReq {
+            session_declared: true,
+            requester_is_session: true,
+            ..base()
+        };
+        assert_eq!(admit_status_bar(&r), StatusAdmit::Admit);
+    }
+
+    /// The other control: a session-principal requester is not what admits
+    /// the base case, so `requester_is_session` alone changes nothing while
+    /// no session is declared.
+    #[test]
+    fn the_principal_axis_is_inert_while_no_session_is_declared() {
+        let r = StatusReq {
+            requester_is_session: true,
+            ..base()
+        };
+        assert_eq!(admit_status_bar(&r), StatusAdmit::Admit);
+    }
+
+    /// Order matters and is load-bearing at the call site: the malformed
+    /// arms answer E_INVAL and the ownership arm answers E_PERM, so a
+    /// refactor that judged ownership first would change the errno a client
+    /// sees for a malformed request. Pinned here because nothing else looks.
+    #[test]
+    fn malformed_is_judged_before_ownership() {
+        let r = StatusReq {
+            bar_registered: true,
+            session_declared: true,
+            requester_is_session: false,
+            ..base()
+        };
+        assert_eq!(admit_status_bar(&r), StatusAdmit::Malformed);
     }
 }

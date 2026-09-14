@@ -230,7 +230,12 @@ struct Burrow *burrow_create_dma(struct KObj_DMA *kobj_dma) {
     v->pages         = NULL;         // DMA: page chunk lives on the KObj_DMA
     v->order         = 0;
     v->kobj_dma      = kobj_dma;
-    v->pa            = kobj_dma->pa;
+    // WEAVE-SKEIN: a DMA Burrow has NO single base PA -- the backing is a
+    // skein of contiguous runs, resolved per page through kobj_dma_pa_at (the
+    // fault arm). Left 0 DELIBERATELY rather than set to blk[0].pa: a
+    // plausible-looking base is exactly what would let a future reader add an
+    // offset to it and address another object's pages once the weave scatters.
+    v->pa            = 0;
     g_vmo_created++;
     return v;
 }

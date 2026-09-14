@@ -50,6 +50,7 @@ wz_group_title() {
     case "$1" in
         compile) echo "Compile-time shape -- what the kernel IS" ;;
         bake)    echo "Bake content -- what ships IN the image" ;;
+        display) echo "Display -- which UI boots, and how it looks" ;;
         pool)    echo "Pool / disk control" ;;
         *)       echo "$1" ;;
     esac
@@ -153,6 +154,92 @@ wz_pick_preset() {
     done
 }
 
+# --- the theme picker ---------------------------------------------------------
+# The list is DISCOVERED at run time and never hard-coded here, for the same
+# reason the schema types HALCYON_THEME as a free string: the pool bake installs
+# whatever `*.toml` is in the directory, so a list written into this file would
+# refuse a theme the bake would happily take. Drop a file in, it appears here.
+# Overridable for the same reason BC_DIR_CONFIGS is: so tools/test-configure.sh
+# can point the discovery at a temp dir and prove it READS one, rather than
+# proving only that today's real directory happens to contain what it expects.
+WZ_DIR_THEMES="${WZ_DIR_THEMES:-$REPO_ROOT/usr/lib/halcyon/themes}"
+wz_theme_dir() { printf '%s' "$WZ_DIR_THEMES"; }
+
+# One bare name per line (basename minus .toml), or nothing if the dir is empty.
+wz_theme_names() {
+    local f b
+    for f in "$(wz_theme_dir)"/*.toml; do
+        [[ -e "$f" ]] || continue          # the literal glob when nothing matches
+        b="${f##*/}"; printf '%s\n' "${b%.toml}"
+    done
+}
+
+# A theme's own [meta] name, so the menu reads "aero -- Frutiger Aero" rather
+# than making the operator open the file to find out what it is.
+wz_theme_label() {
+    local f="$(wz_theme_dir)/$1.toml" line
+    [[ -f "$f" ]] || return 0
+    line="$(grep -m1 '^[[:space:]]*name[[:space:]]*=' "$f" 2>/dev/null)" || return 0
+    case "$line" in *'"'*) line="${line#*\"}"; line="${line%%\"*}" ;; *) line="" ;; esac
+    printf '%s' "$line"
+}
+
+# Prompt for HALCYON_THEME as a numbered menu over the discovered files, with 0
+# = the built-in. Accepts a number OR a bare name (a name that is not on disk is
+# WARNED about, not refused -- the schema's type is string, and a profile may
+# legitimately name a theme that gets added later; wz_flag_absent_chunks sets
+# the same precedent for absent bake inputs).
+wz_ask_theme() {
+    local cur="$1" ans i lbl count=0
+    local names=()
+    while IFS= read -r n; do [[ -n "$n" ]] && names+=("$n"); done <<EOF
+$(wz_theme_names)
+EOF
+    count="${#names[@]}"
+    printf '    0) (built-in Daylight -- the compiled-in light theme; no file baked)\n'
+    for ((i = 0; i < count; i++)); do
+        lbl="$(wz_theme_label "${names[$i]}")"
+        if [[ -n "$lbl" ]]; then
+            printf '    %d) %-12s -- %s\n' "$((i + 1))" "${names[$i]}" "$lbl"
+        else
+            printf '    %d) %s\n' "$((i + 1))" "${names[$i]}"
+        fi
+    done
+    [[ "$count" == 0 ]] && printf '    (no *.toml found in %s)\n' "$(wz_theme_dir)"
+    while true; do
+        printf '  HALCYON_THEME [%s] (number or name, ? help): ' "${cur:-built-in}"
+        ans=""; IFS= read -r ans || true
+        [[ -z "$ans" ]] && return 0
+        if [[ "$ans" == '?' ]]; then
+            printf '\n    %s\n\n' "$(wz_help_of HALCYON_THEME)"; continue
+        fi
+        case "$ans" in
+            0)  bc_set_one HALCYON_THEME "" >/dev/null; return 0 ;;
+            [1-9]|[1-9][0-9])
+                if (( ans <= count )); then
+                    bc_set_one HALCYON_THEME "${names[$((ans - 1))]}" >/dev/null; return 0
+                fi
+                printf '    -- no such entry; pick 0..%d, or type a name.\n' "$count"; continue ;;
+        esac
+        if bc_set_one HALCYON_THEME "$ans"; then
+            [[ -f "$(wz_theme_dir)/$ans.toml" ]] \
+                || printf '    ! no %s.toml in %s yet -- the build will refuse until it exists.\n' \
+                          "$ans" "$(wz_theme_dir)"
+            return 0
+        fi
+        printf '    -- not a valid theme name.\n'
+    done
+}
+
+# The help text for a symbol, by name (the walk has it by index; the theme
+# picker does not).
+wz_help_of() {
+    local i
+    for i in "${!BC_NAME[@]}"; do
+        [[ "${BC_NAME[$i]}" == "$1" ]] && { printf '%s' "${BC_HELP[$i]}"; return 0; }
+    done
+}
+
 wz_walk() {
     local i n type grp last="" cur ans forced
     printf '\nEnter = keep the [default].  Type a value to change it.  ? = full help.\n'
@@ -170,6 +257,7 @@ wz_walk() {
         cur="$(bc_get "$n")"
         printf '\n  %s -- %s\n' "$n" "${BC_DESC[$i]}"
         printf '    %s\n' "${BC_HELP[$i]}"
+        if [[ "$n" == HALCYON_THEME ]]; then wz_ask_theme "$cur"; continue; fi
         while true; do
             printf '  %s [%s] (%s, ? help): ' "$n" "$cur" "$(wz_type_hint "$type")"
             ans=""; IFS= read -r ans || true

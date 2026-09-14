@@ -133,9 +133,39 @@ The rule, and the thing that makes a second theme actually work:
 > fixture the scripture tests pin — reachable from tests and from the
 > loader's fallback, and nowhere else.
 
-Mechanically enforced, not merely stated: a `#[cfg(not(test))]` visibility
-split, so that a production reference does not compile. That is the only
-form of this rule that cannot rot.
+Mechanically enforced, not merely stated: a `#[cfg(not(feature =
+"theme-fixture"))]` visibility split, so that a production reference does not
+compile. That is the only form of this rule that cannot rot.
+
+**Its exact boundary, measured at TH-6 (F5) — because an overstated guard is
+worse than a stated convention.** The predicate above is the *feature*, not
+`cfg(test)` (this paragraph said `#[cfg(not(test))]` until TH-6; that is a
+different predicate with different semantics, and the code never had it).
+The consequence is that the rule holds where it matters and not everywhere:
+
+- **`cargo build` enforces it.** Resolver 2 keeps a dev-only feature out of a
+  normal build, so the shipped artifact — and `tools/build.sh`'s
+  `cargo build --release` — refuses a production reference with `E0603`.
+  This is the load-bearing case and it genuinely holds.
+- **A workspace `cargo test` does not.** `usr/Cargo.toml` is a virtual
+  manifest, so a bare `cargo test` in `usr/` is `--workspace`; dev-dependencies
+  are built and their features unified across the graph, so halcyond's
+  `theme-fixture` dev-dep publicizes `DAYLIGHT` to *every* member's production
+  code for the duration of that build. A §3.2 violation therefore lands green
+  under the command a developer actually runs and red at the next bake.
+
+So the one-command check, when the question is "does this reference violate
+§3.2", is a **build**, not a test:
+
+```
+cd usr && cargo build -p <crate> --target aarch64-unknown-none
+```
+
+There is no `cfg` that closes the test-build half: a looser predicate cannot
+fix an over-permissive one, and converting the fixture's consumers to
+`builtin()` would remove the guard rather than tighten it (`builtin()` is
+public — the residue §3.2 has always had, since the split bounds the *name*,
+not the *values*).
 
 ### 3.3 The file
 
@@ -144,7 +174,7 @@ is small enough to parse in `no_std` without vendoring a crate (§5).
 
 ```toml
 [meta]
-name = "Nocturne"
+name = "Nightjar"
 base = "daylight"        # inherit every unset key; omit to require all (§4.2)
 
 [palette]
@@ -274,8 +304,12 @@ but the user is not always the author.
   tapestryd, `/env/HALCYON_PALETTE` as a derived export, and a
   `halcyon theme lint` reporting inherited/missing keys.
 - **TH-5** — A second theme, shipped, as the proof the arc worked: a dark
-  Nocturne written with **no** `base`, so it must set all 61 colours. A
-  theme arc that ships only the theme it started with has proved nothing.
+  Nightjar written with **no** `base`, so it must set every key. A theme arc
+  that ships only the theme it started with has proved nothing. *(This said
+  "all 61 colours" at design time; the built schema is **57 keys**, carrying
+  64 colour values — `terminal.ansi` is one key holding sixteen. The
+  authority is `theme::KEYS`, which the loader counts; a number transcribed
+  here can only go stale.)*
 - **TH-6** — The audit. The surfaces: a new on-disk format parsed in
   `no_std` (format-fuzz class), a display-wide visual pushed over a ctl
   verb (the `scale` precedent's gate applies), and the §3.2 rule's

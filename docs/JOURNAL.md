@@ -3669,6 +3669,806 @@ SMP soundness inherited from c83da249 (aux-3's kernel is the byte-identical
 binary main gated 40 boots / 0 corruption -- not re-run on identical bits). The
 operator's 3-part bar is met: aux-2 merged, aux-3 fresh off merged-main, both
 build+test green. Role split: aux -> viv on aux-3, main -> KT-1.
+## Run 46m (2026-09-10, Opus 5 max) -- the audit close: ten findings, and a lexer bug the whole tree had written around
+
+**Where it sits.** Run 46l built haul's npxf channel and got an audit back that
+closed **dirty**: 0 P0 / 4 P1 / 6 P2 / 4 P3, none fixed. Three commits sat
+unpushed because CLAUDE.md says P0/P1/P2 are fixed before merge. This run
+closed them, in the order the operator ratified: the `ut` `!` fix, then the npxf
+macOS port, then the P1 pass.
+
+### The `!` fix, and what it says about coverage
+
+`ut` lexed a bare `!` as its own `Bang` token, so `10.0.2.2!5640` -- the way
+Plan 9 writes an address, and the way *every* dial/con/nc/ping/nslookup example
+in this tree writes it -- died at the prompt with `parse error: UnexpectedToken`.
+
+**The form appears all over the tree and had never once been typed.** It lives
+in C string literals (joey's cs probes, the netd docs), so it reached the
+kernel through `argv` and never through the lexer. The shell had been unable to
+accept the project's own address syntax for its entire life.
+
+The fix mirrors the `?` rule three lines above it, with a different
+discriminator: `?` has a real postfix operator (`cmd?` is a Question), `!` does
+not, so `!` can be kept in a word unconditionally except before `=`. That also
+fixed `echo done!`, which was equally a parse error. `TokenKind::Bang` has
+exactly ONE consumer in the whole parser (`expr.rs:841`), which is what makes
+"unary NOT is untouched" a proof rather than a hope. `308bb26e`.
+
+**Then the tests could not run.** libutopia's 397 `#[test]` functions cannot
+compile for a host: libthyla-rs's two `global_asm!` blocks use ELF
+`.type`/`.size`, which the Mach-O assembler rejects, so the crate will not build
+for a host target at all. I gated them on `target_os = "none"` to see how far
+that got -- it got past the assembler and straight into `panic_impl` duplicated
+against std, plus missing `alloc::vec` imports. So host-testable libutopia is a
+real bounded chunk, not a one-liner. **I reverted the exploratory gate**: a
+partial enabler that enables nothing is worse than none, because it looks like
+the problem is solved.
+
+Before writing that up as a finding I checked whether anyone already knew --
+the lesson from the tapestryd episode, where I published a fabricated defect
+because a measurement cannot tell you what someone had already decided. The
+vault's `sub-utopia-parser` dossier is titled *"an rc-shape grammar, three
+recursion bounds, and 189 tests that cannot compile"*. **They knew.** So the
+contribution is the measured cause and the size, which I rang vault with
+(yip 0083), not the discovery.
+
+Verification moved to the guest instead: `haul-npxf.exp` now types the address
+**unquoted**, which is the only execution those two lexer tests will get. Nine
+`u-*` suites green in the boot console, zero parse errors.
+
+### "Port npxf to macOS" was the wrong shape, and measuring said so in one command
+
+My own resume note called this "the highest-leverage item on the arc" and listed
+six blockers -- `sys/statfs.h`, `getrandom`, `SOCK_CLOEXEC`, `SOCK_NONBLOCK`,
+`O_PATH`, `accept4` -- as if they were a shim. They are the first six errors,
+not the list. Behind them: `server_ops.cpp` has **18 Linux-specific sites** and
+**5 `/proc/self/fd` reopens**, built on an `O_PATH` descriptor *as the fid
+representation*, plus `linkat(AT_EMPTY_PATH)`, `statx` and `SYS_fchmodat2`.
+Darwin has neither `O_PATH` nor `/proc`. Porting the server means replacing the
+fid model, which is a redesign of its containment story.
+
+**The split is what mattered.** `crypto` / `channel` / `ninep` / `net` -- the
+whole of what haul interoperates with -- port with two changes: `getrandom` ->
+`getentropy` behind one helper, and the socket flags behind a `socket_ce()`
+wrapper. `./build.sh npxf-selftest` now builds and runs on macOS, **9/9 green**.
+The thyla-pi round trip is gone for the protocol; only the server still needs it.
+
+A method note: the first build reported `error: call to deleted constructor of
+'Fd'` at three `return fd;` sites. Those were **cascades** from the
+`SOCK_CLOEXEC` errors above them, and they disappeared without my touching them.
+Worth naming because fixing a cascade is how you "fix" a non-bug and then
+believe you understand the file.
+
+### The ten findings
+
+Full disposition in `memory/audit_haul_npxf_closed_list.md`. The three worth
+reading:
+
+**F3, the zero-byte write.** `write_exact` treated `n == 0` as fatal. netd's TCP
+send is `send_slice(data).unwrap_or(0)` and `dev9p_write` returns `accepted`
+straight to EL0, so a full transmit buffer tore the mount down under nothing
+worse than back-pressure -- possibly mid-record, leaving a truncated AEAD frame
+on the wire. I re-derived both ends of that chain rather than trusting the
+finding.
+
+The interesting part is that **the fix cannot be a retry count.**
+`unwrap_or(0)` also swallows a dead socket's error, so the same zero means
+"full" and "gone" and no amount of retrying separates them. Readiness does:
+POLLOUT is netd's `can_send()`, which a dead socket never reports. *When a count
+conflates two states, stop counting and ask the readiness question.*
+
+**F6, the fixture's provenance.** The KAT generator `#include`s npxf's
+`channel.cpp` precisely so the vectors come from npxf's real code -- and then
+hand-assembled the record framing, the nonce and the counter, duplicating
+`Channel::send` and `make_nonce`, *the latter sitting in the very translation
+unit already included*. The rationale held one layer and leaked at the next.
+
+Those now come from `Channel::send` itself, pointed at a socketpair. **Every
+vector was byte-identical before and after** -- so the transcription had been
+right, and is now not a transcription. That is a fourth independent derivation
+agreeing with the other three.
+
+The direction-swap half needed a *different* fix, and this is the part worth
+keeping: `k_c2s` is the client's SEND key, but that binding is made in
+`client_handshake`, not in `derive()`. **A swap there leaves every vector
+byte-identical while inverting what they mean.** The generator now runs npxf's
+own client and server handshakes against each other over a socketpair and
+refuses to emit unless the keys cross. Sabotage-verified as two *separate*
+discriminators: the direction swap is caught by the handshake check with the
+vectors unchanged; an HKDF label change is caught by the diff. Neither catches
+the other's case.
+
+**F10, argument capture.** `haul a!p /mnt /bin/foo -t /path` let an argument
+written for the *child* choose the credential haul authenticates with. Fixed by
+stopping option parsing at the command word -- and the rule moved out of the
+binary into `haul::cmdline` as a pure function with 11 tests, because `main.rs`
+is a no_std bin whose tests are dormant and a security-relevant grammar must not
+live only where nothing can run it.
+
+The guest assertion for it is the one I am happiest with: the E2E runs
+`haul -t npxf.token ... /bin/echo child-argv -t /nonexistent-token` and expects
+the decoy back. **One token discriminates both halves** -- haul used the real
+credential (`npxf encrypted` on the second mount) *and* passed the fake through.
+An argument both sides would have handled identically would have asserted
+nothing.
+
+### Two sabotages that passed, and why only one was a lesson
+
+The `!` trim sabotage on haul's side **passed**, which is the finding-shaped
+outcome. It passed because my compound command was
+`python3 apply && cargo test ; cp restore` -- cargo failed on a `Cargo.toml`
+path error, the `;` ran the restore unconditionally, and the test I then ran was
+against the *fixed* file. **A sabotage that passes is either a real gap or a
+sabotage that never applied, and those are indistinguishable from the result
+alone.** Redone in separate steps with the applied state printed back: both
+tests fail, restore, green.
+
+The second was smaller and the same species: I checked for `/bin/haul` in the
+ramfs with `cd build && cpio -it | grep "^bin/"` and got nothing. The `cd` had
+failed and the names are flat anyway. Twice in one run **the instrument was the
+broken thing, not the subject** -- and both times the tell was a result that was
+*too clean*: a sabotage with no failures, an archive with no matches.
+
+Same species a third time: `tools/test.sh` returned 0 and my grep for the `u-*`
+suites found nothing, which read as "the CI image does not run the parser
+tests." It runs all nine. I had grepped the harness summary
+(`/tmp/boot.log`, 29 lines) instead of the guest console
+(`build/test-boot.log`). **An absence is a claim about where you looked.**
+
+### Round 2, and the check that could not fail
+
+Round 2 came back 1 P0 / 1 P1 / 4 P2 / 5 P3. **The P0 and P1 were the
+readiness-fd defect above** -- the same root cause, reached from the opposite
+direction while I was fixing it. Two independent derivations agreeing is the
+strongest thing this arc produced, and it is what the audit-in-flight discipline
+is for.
+
+Its residuals were mine and I had missed them: both bounds were per-wait, not
+cumulative. My comment defended that with "the flights here are 64 bytes, so
+there is nothing to dribble." **64 bytes is exactly 64 dribbles** -- one byte
+every 14 seconds stretches a 15-second bracket to sixteen minutes, per
+connection, before authentication.
+
+**Then the finding that lands hardest.** The direction check I added to the KAT
+generator -- the one I had just written up as sabotage-verified -- was VACUOUS
+under the exact swap it names. Running npxf's client and server against each
+other and asserting `client.send == server.recv` proves the two halves agree
+WITH EACH OTHER. Apply the swap consistently to BOTH and they still agree, every
+vector stays byte-identical, and every gate goes green. **A symmetric check
+cannot detect a symmetric fault** -- and my sabotage "verified" it only because
+the sabotage was one-sided too, which proved detection and got written down as
+discrimination.
+
+Fixed by pinning the responder's ephemeral, so with both secrets known the check
+can call npxf's own `derive()` and assert the LABEL (`ckeys.send == d_srv.c2s`)
+rather than a symmetry. Both swaps now caught, each proven separately.
+
+**And one finding I refuted rather than fixed.** Round 2 claimed the E2E's
+argument-boundary assertion matched the shell's echo of the typed line rather
+than the child's output. Measured false: the transcript -- which IS expect's
+match stream -- holds the token exactly once and holds ZERO occurrences of any
+typed command, exactly as `lib.exp` documents. I took its *recommendation*
+anyway (type lowercase, assert uppercase through `tr`), because holding by a
+property of the line editor is not holding by construction. Refuting a finding
+and adopting its advice are not in tension.
+
+I also committed a file that did not compile (`2914182c`): an unescaped `"` in
+usage text closed a Rust string literal. The `cargo test` I cited was from
+before that edit. **A posture line has to be measured on the tree being
+committed, not recalled.**
+
+### One measurement that changed a severity
+
+The back-pressure path has no test, and I had been calling it unexercised. It is
+also **reachable**: netd's TX buffer is 65536 and the session allows 64
+in-flight tags at msize 4096, so the guest can put 256 KiB in flight -- sixteen
+concurrent full-msize writes overflow it. A reachable path with no test is a
+different and worse thing than a path nobody can take.
+
+The first constant I reached for was `P9_CTL_INFLIGHT_MAX` = 8, which would have
+made the path unreachable and the finding latent. It is the `/ctl` snapshot's
+reporting width, and its own comment says so. **A constant whose name contains
+the right words is not thereby the right constant.**
+
+### What landed
+
+- `308bb26e` -- ut: `!` stays inside a word
+- `fb2c3c47` -- haul: npxf audit round-1 close (4 P1 + 6 P2 + 3 of 4 P3)
+- `f378c801` -- vault/views re-render
+- `295a8d76` -- the readiness fd is not the data fd (self-found)
+- `3adb7598` -- zeroize's alloc feature pinned; the KAT's bound named
+- `6dfe9a28` -- phase-7 status rows + the AUDIT-TRIGGERS round-1 addenda
+- `2914182c` -- round-2 close (4 P2 + 5 P3)
+- `5236f3e0` -- the build `2914182c` broke
+- `28e7a7aa` -- the round-2 addenda + the reachability correction
+
+Posture: 45 haul host tests (was 32), `kat/regen.sh` PASS re-deriving 23
+vectors, npxf-selftest 9/9 on macOS, guest E2E PASS [30s] against the real
+npxf-server, boot suite green with nine `u-*` suites all OK.
+
+### The full suite, and four failures I did not resolve
+
+`tools/test-interactive.sh` over all 50 scenarios: **43 PASS / 3 SKIP / 4 FAIL**,
+every failure burning all three attempts.
+
+`haul-npxf` passed, and so did every other shell-driving scenario -- `ls-ci`,
+`ls-3a/3b/3c`, `ls-5`, `ls-7`, `ls-8c`, `pty-4`, `prowl`, `quarry`,
+`viv-console-ctrlc`, the go set. That is the coverage that bears on the lexer
+change, and it is green.
+
+Three of the four look **lever-shaped**: `ls-gfx-gl` and `ls-gfx-glquake` invoke
+`/clade/bin/*` while the boot log says `clade CL-4 /clade absent
+(THYLACINE_BAKE_CLADE not set)`, and `git-shell` waits on the git port. Each
+FAILED rather than SKIPPED -- burning 180-240 s times three and reporting a
+regression. Two of them *have* skip guards that did not fire; `git-shell` has
+none. **That is the #245 class inverted: a gate that cannot tell "not built"
+from "broken" reports the wrong one, loudly.** `ls-halcyon` and `ls-gfx-chords`
+skipped correctly in the same run and name the lever to set -- that is the shape
+these should have.
+
+The fourth, `ls-gfx-age`, is **unexplained**, and it is the one that blocks the
+push: it fails with "no line-editor redraw within 15 s" after a screen-fill, the
+VM alive and the relay reporting no stall. The line editor is the subsystem this
+run touched. A causal link is implausible -- none of the typed commands contain
+a `!`, and the new branch is reachable only from a word that does -- but
+implausible is exactly what the nested-mount hypothesis was.
+
+I did not reach for host contention, and the next session should not either. It
+is a tempting story (three concurrent VMs against a 15 s window) and it is
+forbidden as a first explanation. Worth adding: three attempts under the *same*
+contention are not three independent trials, so the harness's "deterministic"
+verdict rules out a per-attempt coin flip and nothing more. The way to settle it
+is to check out `2c14a0c3` and run the scenario there. Enqueued, push blocked on
+it, and handed over rather than guessed at.
+
+### Open, and named
+
+- **F11 deferred on the record**: residual `Copy` duplicates of the ephemeral
+  and PSK on intermediate stack frames. Not closable by wiping one more value --
+  it needs a secret-carrying newtype through the call chain.
+- **A tree-wide sibling of F3**: `libthyla-rs`'s `io::Write::write_all` has the
+  identical `Ok(0) -> Err(WriteZero)` conflation (`io.rs:130`). Deliberately not
+  fixed inside a haul commit.
+- **The SYS_SPAWN mount question** is the operator's ratified next chunk. haul's
+  help text and comments no longer claim a child sees the mount, and the E2E
+  asserts around it rather than pinning the bug.
+- **libutopia's 397 dormant tests** now have a measured cause and a size. Rang
+  vault; not mine to land from a code track.
+- **npxf's tree has no version control.** Six files changed there this run and
+  they exist only on disk.
+
+### Round 3, and the check that a fix deleted (`2ce3ebcd`)
+
+Round 3 audited round 2's fixes. **0 P0 / 1 P1 / 5 P2 / 5 P3, dirty again.** The
+finding worth the whole round is F1, because it lands on the previous round's
+repair rather than on the original code.
+
+Round 2 had found that the KAT's direction check was vacuous — it asserted that
+npxf's client and server agree with *each other*, which survives a swap applied
+to both halves. The repair pinned the responder's ephemeral so the CLIENT's
+label became assertable. That was right about the client, and in the same stroke
+it stopped calling `server_handshake` at all, leaving behind:
+
+```c
+if (server_send != d_srv.s2c) die("a server's send key is not s2c");
+```
+
+`server_send` *is* `d_srv.s2c`, assigned by the shim three lines earlier. A
+tautology, wearing a message that describes a check it is not performing. The
+prosecutor did not argue this — it applied a one-sided swap to `server_handshake`
+on a copy of npxf and ran the real gate: **byte-identical vectors, `regen.sh:
+PASS`.** And the vacuous version it replaced *had* caught that swap.
+
+So the repair traded one coverage for another while reading as though it kept
+both. **Three checks in this arc could not fail, and the shape is identical every
+time: the sabotage was designed alongside the check, so it tested the hole the
+check already covered.** A one-sided sabotage proves a check detects one-sided
+faults and says nothing about symmetric ones. Design the sabotage from the
+threat, never from the check.
+
+The gate now runs two legs, one per handshake, each pinning the *other* side's
+ephemeral so npxf's own `derive()` produces the labels to compare against. Four
+cases measured: clean PASSes 23 vectors; client-half, server-half and both-halves
+swaps each FAIL, naming the half. That table is in `HAUL-DESIGN.md` now, so a
+future simplification has something to reproduce rather than a claim to trust.
+
+F4 is the same lesson in the argument grammar. Round 2 moved the option boundary
+from three positionals to two, fixing an argv where `-t` at the command position
+silently overrode the operator's token. Round 3 found the mirror: an option
+written *after* the operands — which every getopt-shaped tool accepts — now
+became the command, silently dropping the token and **mounting in the clear**.
+Neither boundary is right, because both guess at intent; each merely picks which
+argv fails silently. haul refuses now and points at `--`.
+
+F5 (P1) is a hang in the one call that sits between `t_mount` and the park loop
+whose entire job is to bound exactly that: a blocking 9P round trip under `-v`
+with no STOPPED check. If the peer dies there, both pumps die, and a pump closes
+nothing by design (the fd-recycle race), so the kernel never sees EOF —
+and the Spoor transport sets `set_recv_deadline = NULL`. Guarding on STOPPED
+closes the reachable window; the residue can't be closed here without a deadline
+the transport doesn't offer, so it is *announced* — the step prints before the
+call, so a hang has a location instead of being a silent stop.
+
+F6: `make test-haul-kat`, added last round as the thing that makes the fixture a
+checked recording, was red-by-construction on every checkout but this one. make
+maps any non-zero recipe status to exit 2, so a skip and a vector mismatch were
+the same verdict — and npxf lives outside version control. Its comment claimed
+this was "the same shape as test-venus-verdict"; that script has zero `exit 77`
+sites, having no external dependency to be missing. A model cited without being
+read.
+
+### The blocker cleared, and it was a dead gate
+
+The push was held on `ls-gfx-age`, the one LS-CI failure I could not explain —
+"no line-editor redraw within 15s", in a run that had just changed the line
+editor. Built `2c14a0c3` in a separate worktree and ran it alone on a quiet host:
+**it fails identically**, 3/3, 129 s. Pre-existing, and not contention either,
+since it fails with the machine to itself.
+
+Then the diagnosis, which is better than the attribution. The detector matches
+one literal, `ESC[K`. The failing 197,734-byte log contains **zero `ESC[K` and
+256 `ESC[J`**. `line_editor.rs:786` dispatches on whether the terminal width is
+known: unknown gives `render_unwrapped` and per-line `ESC[K`; known gives
+`render_wrapped` and one `ESC[J` for the block — and that render says so in as
+many words, *"No per-line `\x1b[K` — (2) cleared already"*. Under aurora the
+width is known. **The gate is welded to a path the guest no longer takes, so it
+cannot pass on any tree.** The redraw it reports missing is happening.
+
+Same class as `ls-gfx-compose.exp` being Daylight-literal: an instrument pinned
+to a presentation detail that then moved. Worse than no gate, because it spends
+three attempts to report a regression that isn't there. Fixed by matching what
+the phase means — either erase counts as a repaint.
+
+Introduced by `0a7e4c18`, whose subject calls the wrapped render a "dormant
+foundation". The measurement says it is what reaches the wire.
+
+### Found by accident: a fresh clone cannot build, twice over
+
+Making the attribution worktree turned up something unrelated and worse. `git
+worktree add` doesn't materialize ignored files, and two vendored crates'
+`.cargo-checksum.json` list files this tree's own `.gitignore` excludes —
+`smoltcp/.vscode/settings.json` and `thiserror/build/probe.rs`. Cargo aborts
+before compiling anything.
+
+Fixing that revealed a second, independent cause: `build.sh:4446` makes a network
+fetch of Quake shareware, from a third-party FTP mirror, a **hard build failure**
+with no skip lever. No network, a dead mirror, or a moved URL and Thylacine does
+not build at all — including the kernel-only paths that have nothing to do with
+it.
+
+Every tree on this machine predates the ignore rules or was populated before
+them, so the files are present-but-untracked wherever anyone builds. The failure
+needs a tree git actually populated from scratch — a new contributor, a CI
+runner, a fresh machine. **The tree agrees with itself and disagrees with a clean
+checkout of itself.** Enqueued, not fixed: the `.gitignore` change decides what
+else gets committed, and `third_party/` is shared with two other tracks. The
+verification bar for that fix is a fresh clone that builds end to end, not a
+green `git status` — fixing one cause and stopping is how the second one hid.
+
+### All of it verified in the guest, and the push released
+
+The re-bake carried every round-2 and round-3 fix, and both owed scenarios ran on
+a quiet host:
+
+- **`haul-npxf` PASS [29s]**, closing round-3's F11. The witnesses are what
+  matter, not the verdict: `CHILD-ARGV` appears once (the leg that had never
+  executed), `child-argv` **zero** times (so the assertion cannot be satisfied by
+  the shell echoing the typed line — round 2's F4 refutation still holds against
+  a real run), `npxf encrypted` twice, `PLAIN 9P` never.
+- **`ls-gfx-age` PASS [41s], first attempt** — the same scenario that failed 3/3
+  an hour earlier, on a one-line detector change **with no guest change
+  whatever**. That is the cleanest possible proof the guest was never at fault.
+  And not a trivial pass: the assertion it reached is "negative leg — region
+  exactly bg on 8/8 slot-rotated dumps after clear (worst 0 px)", so the whole
+  buffer-age body ran.
+- **The pool marker wrote itself correctly**: `clade=0`, `goroot=1` — right for
+  this machine, and `clade=0` is precisely the value that turns the two gl gates
+  from a 240-second false failure into a one-line skip.
+
+One self-found defect in my own round-3 fix, caught before it ever ran: the new
+dash-word refusal sat *before* the `--` arm, so `haul h!1 /m -- foo` — an
+operator reaching for the exact escape hatch the refusal's message points at —
+was itself refused. An error message that names a remedy the code rejects is
+worse than the ambiguity it replaced. Fixed at `6864ebbc`.
+
+### The blocker behind the blocker: an unimplemented operation wearing ENOENT's clothes
+
+With the push out, the queued next item was the SYS_SPAWN mount question — a
+recorded finding that "a spawned child does not receive its parent's mounts",
+which would be an I-1 violation. It had survived a day partly because it was
+*already* the second hypothesis: the first blamed nested mounts, and a
+one-variable control had refuted that by reproducing on plain ramfs.
+
+But every kernel mechanism, read twice independently, said the child should
+inherit — `rfork_internal` clones unconditionally, `territory_clone` copies
+`mounts[i]` wholesale, `exec.c` contains "territory" zero times. **When every
+reading contradicts the measurement, the measurement's premise is what to test.**
+
+The untested premise: haul had only ever *listed* the mount point, while the
+child *walked through* it. Two operations, never separated. The probe separates
+them in one boot — leg A has the child list, leg B has the same child in the
+same configuration walk through:
+
+| leg | child does | result |
+|---|---|---|
+| A | `ls /tmp/probe` | `HELLO.TXT SECOND.TXT SUB` |
+| B | `cat /tmp/probe/hello.txt` | `no such file or namespace entry` |
+
+Leg A exonerates spawn outright: the child has the mount and resolution crosses
+it. Both hypotheses were wrong, and both had survived because the original
+measurement differed in **more than one variable** — parent-vs-child *and*
+list-vs-walk — with the conclusion attached to the wrong one.
+
+The npxf server was running with `-v -v -v`, and its log named the cause in three
+lines nobody had read:
+
+```
+<- T??? tag=0 len=36
+unsupported message type 140
+-> Rlerror tag=0 errno=95 (Operation not supported)
+```
+
+Message 140 is `Twalkgetattr` — POUNCE's fused walk. `dev9p` has a per-session
+`wga_unsupported` latch for exactly this, and it fired only on `-T_E_NOSYS`.
+npxf, the first foreign 9P server this tree has ever mounted, answers
+EOPNOTSUPP. Unlatched, the rejection fell through to the generic error arm and
+became a **walk failure** — so an unimplemented *operation* surfaced to userspace
+as a missing *path*. That diagnostic is what sent two investigations after the
+wrong subsystem.
+
+The comment at that very site had predicted it, before a server existed to
+trigger it: *"A future foreign server replying EOPNOTSUPP would need that code
+appended to the errno registry and classified here."* No registry change was
+needed after all — `T_E_OPNOTSUPP` was already ABI-pinned at 95, reserved in as
+many words for this — so only the classification half was ever owed.
+
+Post-fix, leg B returns `THE THYLACINE IS REAL`: the fixture's actual content,
+read by a spawned child, through the mount, over the encrypted channel. Same
+probe, same fixture, one kernel change.
+
+The regression test drives the latch by errno through the loopback responder,
+and its third arm is the one that matters: **EIO must not latch.** Latching on
+any error would "fix" the bug while silently marking a healthy session
+non-cacheable for its lifetime on one transport blip — the L1e cacheability gate
+hangs off this same flag. Reverting the fix yields exactly one failure, naming
+this case; the ENOSYS and EIO arms pass pre-fix too, so the test is aimed at the
+defect rather than at the area.
+
+One more instrument caught lying, for the third time this run: I counted suite
+failures with `grep -c "\.\.\. FAIL"` and got zero on a run that had failed.
+The harness prints `FAIL: <message>` on its own line. The test was fine; the
+count was fiction.
+
+### On contention, said properly
+
+aux reported (yip 0084) that our two HVF guests had been mutually OOM-contending,
+and that the runtime OOM-killed an aux guest boot under my build. That is a
+measured mechanism and it plausibly bears on a three-way-parallel LS-CI run. It
+explains nothing about `ls-gfx-age`, which fails alone on a quiet host, and it is
+not offered for the three `/clade` failures either — a missing binary is not a
+timing condition. Recorded as measured, not reached for.
+
+---
+
+## Run 46l (2026-09-09, Opus 5 max, after a self-compaction) -- FORAGE: the npxf secure channel, and the first byte ever to cross the transport
+
+**Where it sits.** The operator asked for Thylacine to mount their own tool's
+9P2000.L endpoint "as a directory, transparently." They had already answered two
+ballots: terminate the encrypted channel **in the guest**, and build the
+plain-9P transport first. The plain half landed last run (`5094f1ad`) with an
+honest caveat in its own commit message -- **no byte had ever crossed it**,
+because there was no plain 9P2000.L endpoint to point it at and npxf's server
+has no plaintext mode by design.
+
+So this chunk is not "add encryption to a proven transport". The channel is what
+made the transport provable at all.
+
+**The interop discipline, which is the reusable part.** A second implementation
+of a hand-rolled protocol is exactly where "my reading of their code" becomes a
+silent wire incompatibility. Three layers, each catching what the one below
+cannot:
+
+1. **Known-answer vectors generated from npxf's OWN code.** `kat/npxf_kat.cpp`
+   `#include`s npxf's `channel.cpp` so it calls the reference
+   `derive()`/`absorb()`/`confirm_tag()`. The tempting shortcut -- reimplement
+   the schedule in the generator from the public primitives -- is the trap: a
+   generator that encodes my *reading* would agree with the Rust that shares the
+   same misreading, and the two would ratify each other instead of npxf. 27 host
+   tests pin the PSK, the clamping, the DH from both sides, the transcript, all
+   three keys, both confirmation tags, both flights and two sealed records.
+   **Sabotage-verified**: one character changed in an HKDF label fails exactly
+   the two key tests; a frozen nonce fails exactly the counter test -- and it is
+   the SECOND record that catches that, which is why emitting `record_c2s1`
+   mattered.
+2. **Live interop against the real binary.** A fixture is a recording and cannot
+   prove interoperation. `interoperates_with_a_live_npxf_server` drives the
+   actual `npxf-server` over TCP with a **random** ephemeral, completes the
+   handshake, seals a Tversion and decrypts an authenticated Rversion. Server
+   log: `authenticated` / `<- Tversion` / `-> Rversion` / `version 9P2000.L,
+   msize 8192`. Wrong token -> `ServerAuth` on our side, `token mismatch` on
+   theirs. It discriminates.
+3. **The guest E2E** -- the plumbing the other two cannot see.
+
+**npxf is Linux-only** (`sys/statfs.h`, `getrandom`, `SOCK_CLOEXEC`, `O_PATH`,
+`accept4`); it does not build on the macOS dev host. It builds clean on thyla-pi
+with `CXX=g++` (clang++ is absent there), so the server runs on the Pi with an
+`ssh -L` tunnel presenting it on `127.0.0.1` -- the guestfwd only ever sees a
+local port, so the tunnel is transparent to the guest.
+
+**Three wrong turns, all mine, all caught.**
+
+*The guestfwd comment was false.* `run-vm.sh` claimed a missing host server was
+"inert (a closed target RSTs) ... a fast SKIP, never a hang." qemu actually
+connects to every guestfwd target **eagerly at startup** and refuses to launch:
+`Failed to connect to '127.0.0.1:5642': Connection refused` / `Could not open
+guest forwarding device 'guestfwd.tcp.7822'`. It installed three rules
+unconditionally; np3-bench always starts all three, so it never met the case its
+own comment described. Fixed with `THYLACINE_GUESTFWD_RULES` (default 3).
+
+*Then the boot wedged before login* at `netperf: NET-PERF NP-3`, past 13
+minutes. joey's boot probe dials `10.0.2.100:7820` expecting an **echo** server,
+and I had pointed 7820 at npxf-server, which waits for a 40-byte handshake. The
+probe connected and waited forever. **The guest port is a rendezvous, not a
+private address** -- forwarding it to the wrong kind of server does not make the
+probe skip, it makes it hang. Fixed with `THYLACINE_GUESTFWD_GUESTPORT`;
+forage-npxf uses 7830, leaving the probe's ports refused so it takes its real
+fast-SKIP path.
+
+*And my own scenario reported a green that meant nothing.* Its first draft
+exited **0** when the server was absent, and the gate printed
+`PASS: forage-npxf [0s]`. The harness has a real convention -- exit **77** plus
+an `LS-CI SKIP:` line, which it reports as SKIP and annotates "NOT a guest
+result, and NOT coverage". This surfaced the moment an `ssh -L` tunnel died
+underneath it (killed by my own earlier `ssh -O exit`, which drops the
+multiplexed session). A skip that reads as a pass is strictly worse than a red.
+
+**The finding that changed the tool's shape.** With the channel finally up, both
+of these were true at once and both were correct:
+
+```
+forage: 10.0.2.2!5640 mounted at /home/cora/host (aname /, npxf encrypted)
+cat: /home/cora/host/hello.txt: no such file or namespace entry
+```
+
+**A mount lands in the calling Proc's Territory and nowhere else** -- I-1,
+working exactly as specified -- and a child inherits its parent's namespace,
+never the reverse. `forage ... &` is a CHILD of the shell, so it mounted into
+its own namespace and the shell could not see it. (`login` gets this right by
+construction: it mounts the home and THEN spawns the shell.) So forage's
+original shape -- background it, use the tree from the shell -- cannot work, and
+the operator's request was exactly "mount that endpoint transparently as a
+directory".
+
+The obvious answer -- Plan 9's `rfork; mount; exec`, i.e.
+`forage <addr> <mnt> [cmd ...]` -- was built, and **it does not work either**,
+which is the more interesting half. forage lists the remote tree from its own
+namespace (`mount check: 5 entr(y/ies) here` -- a real Twalk + Treaddir through
+the channel) and its own CHILD still gets `no such file or namespace entry`.
+Measured at `/home/cora/host` (inside another mount) AND at `/tmp/host` (plain
+ramfs): **a SYS_SPAWN child does not appear to receive its parent's mounts at
+all**, despite `territory_clone` deep-copying the mount table and despite login
+mounting a home and then spawning a shell into it. Kernel-side question, tracked,
+NOT forage's to answer -- so the E2E now asserts what forage itself proves and
+leaves the reader out of it. The interactive answer remains posting to `/srv`;
+own chunk, operator's vote.
+
+**And the method note, because it cost a boot and would have cost more.** The
+nested-mount explanation fit the first measurement perfectly -- forage's mount
+point was inside the home's 9P mount, login's is in the ramfs root, and a
+mount-cross keyed on Spoor identity would plausibly fail across a clone. I wrote
+it into a memory note as the finding. It was WRONG, and the one-variable control
+(same scenario, ramfs mount point) refuted it in a single run. **One measurement
+plus a plausible mechanism is not a cause**; the note now leads with the
+refutation rather than the story.
+
+**And the E2E earned its cost on the first real invocation.** forage
+**advertised one address syntax and implemented another**: its usage line, its
+doc comments and its design doc all said Plan 9's `host!port`, while the code
+handed the string to `SocketAddrV4::parse`, which wants `a.b.c.d:port`. The
+documented form was rejected with `forage: address (want host!port)` -- an error
+message asking for exactly what it had just refused. Nothing caught it (not the
+type checker, not clippy, not a review, not a boot) because until the channel
+gave forage a server to talk to, no byte had ever crossed it. **A whole surface
+can agree with itself about a syntax it does not implement, for as long as
+nothing ever runs it.** Fixed by `usr/forage/src/addr.rs` -- pure, host-tested,
+both forms, splitting from the right so a `tcp!host!port` prefix fails visibly
+rather than truncating into something that happens to parse.
+
+**The self-audit found four, before any formal round.** The PRK was left on the
+stack (`Hkdf::extract` returns a `Copy` `GenericArray`, so `into()` copies and
+zeroizing only the original covered nothing -- the single visible `zeroize()`
+call is what makes that survive a reading). A failed seal left the **plaintext**
+in the caller's output buffer, since encryption is in place. `open` did not
+poison on a length violation although the contract three lines above said "ANY
+failure poisons" -- true about the tag path, false about the length path. And a
+pump closed an fd the other pump could be writing, with the fd *number*
+recyclable in between; a CAS-elected single closer removes the double close but
+not that race, so a pump now closes **nothing** and the process exit does it,
+from outside both threads.
+
+**Open, and named rather than buried.** Where the guest gets the token is still
+`-t FILE` / `--token-env` (mirroring npxf's own two mechanisms, the least
+surprising interface for the operator who designed them). Neither is the right
+long-term home: Thylacine's answer to "who holds a credential" is **corvus**,
+and that is its own chunk and wants the operator's vote. `forage` remains an
+unratified name. And both WEAVE-SKEIN audit rounds plus this one run on the Opus
+fallback -- **a Fable-diversity pass is owed and currently unpayable** (credits
+exhausted, measured).
+
+---
+
+## Run 46k (2026-09-09, Opus 5 max, after a self-compaction) -- WEAVE-SKEIN: the fix landed, and the diagnosis it was built on was wrong
+
+**Where it sits.** The operator could not boot a 2560x1664 display:
+`tapestryd: t_dma_create_weave(51118080) failed -1`, no scanout, fall back to
+serial. The previous run diagnosed it, took the design to a four-item ballot,
+got all four ratified as recommended (`903fc5a7`), and deliberately did not
+open the implementation at 570k context. This run implemented it -- and
+measured that the diagnosis was wrong.
+
+### What the design said, and what was actually true
+
+The ratified design named the buddy allocator. `order_for_pages` rounds a
+48.75 MiB weave up to order 14, so one span demands **64 MiB contiguous and
+naturally aligned**; the failing guest showed 1889 MiB free, which read as
+fragmentation. That reasoning is in `docs/WEAVE-SKEIN-DESIGN.md` section 1, and
+it survived a ballot.
+
+The real bound is in `usr/warden/src/main.rs`: tapestryd's manifest granted
+`dma = "pool: 32 MiB"`. `allowance_permits` refuses a 48.75 MiB weave inside
+`sys_dma_create_weave_handler` and returns -1 **before
+`kobj_dma_create_weave` is ever called**. The allocator was never reached. The
+change that fixes the operator's display is one line.
+
+**How it surfaced, which was luck shaped like method.** After the kernel side
+landed, the 2560x1664 boot still printed the identical
+`t_dma_create_weave(51118080) failed -1`. The CREATE was failing, not the map --
+and the boot log names the grant on every boot, one line above the failure:
+`warden: bind virtio-pci:18 ... dma=0x2000000`. It had been printing that on
+every boot of this system's life.
+
+### Why the wrong cause was so convincing
+
+**The two bounds sit at the same 32 MiB threshold.** The allowance cap is
+32 MiB. The buddy's order 13 -> 14 boundary is 32 MiB. So the boot evidence --
+2048x1280 (30 MiB) works, 2560x1664 (48.75 MiB) does not -- fits *both* stories
+exactly, and no amount of re-reading it could separate them. **Two causes, one
+reading: only a second axis can help.** The second axis turned out to be
+changing the allocator and watching the failure not move.
+
+The design's elimination list also carried a false entry, and that is how the
+allowance escaped: *"tapestryd's allowance is BROAD so it passes."* It is
+narrowed. The item was listed as checked without being read. **A negative over
+a set you did not enumerate is a guess** -- and putting it inside a list headed
+"ruled out by elimination" is exactly what makes a guess look like diligence.
+
+### The sabotage that measured the wrong thing
+
+The design's test plan said: force `nblk = 1`, confirm 2560x1664 fails again.
+Done -- and tapestryd SEGVed at `addr=0x2600000`, which looked like
+confirmation.
+
+It was not. Forcing `nblk = 1` while leaving the resolver's stride at 2 MiB
+produces a state that **never existed**: `kobj_dma_pa_at` divides the offset by
+`SKEIN_BLOCK` regardless of `nblk`, so it refuses every offset past the first
+2 MiB. The run proved the resolver is live. It said nothing about whether the
+allocator would have coped, which was the question.
+
+The honest sabotage is `SKEIN_BLOCK` = 64 MiB -- `nblk == 1` **and** a matching
+stride, i.e. exact pre-skein semantics. **That run passes**: `exit=0`, 0
+weave-create failures, `scanout direct 0 slot 0 (2560x1664)`. The order-14
+allocation succeeds on a freshly-booted 2 GiB guest.
+
+**A sabotage must reproduce the OLD behaviour, not merely break the new one.**
+Breaking it proves the code runs; it never proves the code was needed. Both
+sabotages "confirmed" the change -- one by measuring the right thing.
+
+### So what did the skein earn
+
+Stated exactly, because a run that reads as uniformly successful is usually one
+written up carelessly: **the skein is a fragility fix, not the bug fix.**
+
+What is real: `order_for_pages` does round up, so a 48.75 MiB weave does depend
+on a free 64 MiB *naturally-aligned* block. That is luck about when in a
+system's life the compositor starts -- and tapestryd is `restart = on-crash`,
+so a restart on a long-uptime fragmented box is precisely the unlucky case. The
+skein removes the dependence and cuts waste from 15.25 MiB (24%) to 0.25 MiB
+(0.5%). Landing it was right; describing it as the bug fix would not have been.
+
+### The implementation, and two choices the design left open
+
+All four ratified decisions landed as ratified: `SYS_DMA_SEGMENTS` = 110 that
+refuses rather than truncates; `SYS_DMA_MAP` fail-closed at -2 on a skein;
+`SKEIN_BLOCK` = 2 MiB; the name `skein`; weave-only scope.
+
+Two choices the design marked as the implementer's:
+
+- **`blk[]` is an inline fixed array**, not the sketch's pointer. Same field
+  names and `k->blk[i]` at every use, so the deviation is invisible at call
+  sites -- and it removes an allocation, a free, and the whole double-free /
+  dangling-array finding class from an I-40/I-45 surface, for 768 bytes on a
+  handful of live objects.
+- **The tail block is sized to its own buddy order**, not padded. Section 3.3
+  expected that to cost complexity; it costs none, because `order` is already
+  per-block for `free_pages` and the fault formula is stride-uniform (the tail
+  is last, so no later index depends on its length). The 2560x1664 weave wastes
+  0.25 MiB instead of 1.25 MiB.
+
+`Burrow.pa` is now 0 for a DMA Burrow, deliberately: a plausible-looking base
+is what a future reader would add an offset to and address another object's
+pages once a weave scatters.
+
+### The count that wobbled
+
+The PASS-line grep read 1470 on one run and 1469 on the next at the same
+geometry. A vanishing test is not something to shrug at, so: stash, build the
+base, diff test NAMES rather than counts. Base 1512, now 1518, **+6 skein and
+nothing lost** -- the wobble was in my grep against a shared UART log, not in
+the suite.
+
+### Two audit rounds, and the fix that deleted its own regression test
+
+**Round 1** (Opus fallback; the Fable spawn died on credit exhaustion mid-run)
+independently derived the same P0 the self-audit had just fixed — it
+transcribed the arithmetic into a host harness and walked 14 object classes
+before discovering the fix existed. Two prosecutions converging is itself
+evidence. It added three facts the self-audit lacked: the bug reaches the
+**console** (`gl_adoption` returns tapestryd's *own* mapping), it fires at the
+**default** 1280x800 geometry, and the header comment claiming the resolver and
+the segment copy-out "cannot drift apart" was false the day it was written.
+
+Its F2 is the one that changed the design. The grant raise doubled the
+client-triggered contiguous demand from order 13 to order 14 on GPU BOs — the
+one class the skein did not cover. The ratified scope said "weave only", but
+that wording justified leaving a class unscattered by *plain DMA's* 1 MiB
+envelope and virtqueue contiguity; the document does not mention GPU BOs
+anywhere. A 64 MiB envelope on a client-chosen size was on the wrong side of a
+line drawn for a different subtype — and it was the asymmetry that produced the
+P0. So the skein was extended, and the amendment recorded rather than absorbed.
+
+**Round 2** prosecuted the fixes, and its sharpest finding was mine. Round 1's
+F4 objected that the P0's regression test demanded a 16 MiB naturally-aligned
+block on every boot — the exact allocation this chunk calls unreliable, on the
+assertion path of the test certifying the fix. Correct objection. The fix
+shrank the subject to exactly one block, where `off / SKEIN_BLOCK` is 0 for
+every in-range offset — **so it passes on the buggy resolver.** A fix for a
+fragile fixture had quietly deleted the only test that could fail.
+
+Restored by building the object directly, and sabotage-measured: with the
+constant stride back, **exactly one of ten tests fails**, and it is that one.
+The restored fixture then caught its own bug on first run — the suggested
+`order = 11` is 8 MiB for a 16 MiB object, and the resolver's
+bound-against-the-block guard correctly refused. The guard working, not the fix
+failing. *A suggested fix is a hypothesis.*
+
+Round 2 also found the file header still denying GPU-BO scatter **inside the
+comment block round 1's own correction was appended to** — the third false
+comment in one chunk, two lines above an edit. Re-read the block, not the line.
+
+**F12 was the one that could not be fixed by typing.** All four re-routed
+tapestryd sites are GL-gated, and local QEMU is `virgl=0` — so nothing this
+close reported had executed any of them. Fixed by running the prove gate on
+thyla-pi's real V3D over KVM: `WARP-2 GATE: VERIFIED`. Before writing up the
+residue as a hole, I measured it: a 1280x800 weave is 5.86 blocks and one slot
+spans 2, so **multi-entry ATTACH_BACKING is exercised on every boot already**
+and the console gate verifies the pixels. What is genuinely unwitnessed is a
+multi-segment list that came from a *GPU BO* rather than a weave — and the
+device call is byte-identical. A thin residue, not a hole.
+
+### Posture and what is open
+
+`6761d536`. 1522 kernel test names, 0 FAIL, no extinction; 2560x1664 boots with
+the full suite green at that geometry. **SMP gate PASS** — 40 boots across
+default/ubsan x smp4/smp8, zero corruption. Host suites: tapestryd 21 (was 12),
+libhalcyon 81, halcyond 209, libtapestry 10, halcyon 21, vt 62, kaua-term 44.
+
+Both prosecutor rounds ran on the Opus fallback — the Fable spawn died on
+credit exhaustion (HTTP 429), and mid-session the `holotype-reviewer` agent
+definition stopped resolving, so round 2's prosecute discipline was inlined in
+the prompt instead. **A Fable-diversity pass on this surface is owed and
+currently unpayable**, the same debt HALCYON-THEME carries.
+
 ## Run 46j (2026-09-09, Opus 5 max) -- HALCYON-THEME TH-1 + TH-2: the palette had two owners and neither was in charge
 
 **Where it sits.** The operator asked, after seeing the TY-4 type work: *"The
@@ -3777,15 +4577,512 @@ halcyond's *built* args through kaua-term's *real* parser -- the TY-4 lesson
 applied, since a unit test of either half alone passes with the halves
 disagreeing. Dropping the flag fails exactly 2 tests by the palette compare.
 
+### TH-3 through TH-5b: the file, the load path, and a second theme
+
+**TH-3a, the parser.** A `no_std` TOML subset -- exactly this format's grammar
+and nothing else. Everything outside it is REFUSED rather than ignored, because
+silently skipping `x = 1.5` applies a theme the author did not write, which is
+the half-applied theme 4.2 forbids. **The test caught a real bug in my own
+parser**: `strip_comment` was a naive `find('#')`, which turns
+`surface = "#1A1714"` into `surface = "` -- every colour in this format begins
+with `#`, so the one construct certain to appear was the one the first draft
+could not read.
+
+The fuzz bar is seeded so a failure is reproducible. Its first form was 4000
+pure-garbage inputs, and **the discrimination assertion I added on a hunch
+failed immediately: 98% were refusals at line 1**, so the accepting paths were
+barely exercised. Half the corpus is now a valid theme file under 1-3 byte
+mutations, and the test fails if the corpus degenerates to one arm again.
+
+**TH-3b, `from_toml`.** Geometry moved into the theme -- a bevel's width and its
+four face colours are one decision. 57 keys through a `KEYS` registry sited
+beside the struct, with the registry and the setter proven to agree in BOTH
+directions. And a **struct-size pin** for the thing no behavioural test can
+reach: a baseless load starts from the built-in and relies entirely on KEYS
+covering every field, so a field added and forgotten would inherit Daylight
+silently -- in exactly the mode that exists to prevent that. No test can check a
+field nobody wrote, so `size_of::<Theme>()` is pinned with a message naming
+KEYS.
+
+**TH-4a/b, the load path.** `resolve` is pure, so the tier policy is host-tested;
+a refused file falls to the next tier DOWN, not to the built-in, so a user with
+a typo keeps the system theme. A self-audit catch: `read_file` TRUNCATES at its
+cap rather than failing, and a truncated theme can be perfectly valid TOML --
+worse than malformed, because 4.2 never fires. `THEME_MAX` refuses anything that
+could have been cut.
+
+**Then two gates in a row taught the same lesson from opposite sides.**
+
+The first compose run passed with `tapestryd: theme` absent from the capture
+entirely -- the absent-file path returned early and silently, so nothing proved
+the read had run. Added a line to every path.
+
+Those two lines then broke `ls-halcyon` 3/3, deterministically. The gate's own
+comment already knew why: its dominant-colour check is keyed on how many rows
+precede the shell, so the boot-log island moved back under the sampled band. The
+previous round *moved the band*; that only changes which line count breaks it.
+The check now asserts the property it claims -- the dominant ground is a
+Daylight ground -- which is a whitelist of two exact light colours, so
+discrimination against Bonfire dark is unchanged by construction.
+
+**TH-5/5b, Nightjar.** An arc that ships only the theme it started with has
+proved nothing. It is written with **no `base`**, so the loader requires
+all 57 keys and names any that are missing.
+
+TH-5 shipped it; TH-5b loaded it. `nightjar loaded from
+/lib/halcyon/theme.toml and PAINTED (ground 42,36,34)` -- and nothing in the
+tree but a file read off disk, parsed, resolved and painted can put that value
+on that screen, so the pixels are the proof rather than a proxy for it.
+
+**It immediately found a defect worth the boot.** `tapestryd: theme built-in (no
+/lib/halcyon/theme.toml)` -- while halcyond, started later, loaded the very same
+path. The compositor comes up before the pool it lives in is mounted, so the
+chrome kept Daylight's bevel around a dark pane and *nothing failed*. That
+is how it would have shipped. The console renderer pushes now, carrying the
+system tier the compositor could not reach in time.
+
+**And a finding about the theme, not the harness.** The run refused the theme's
+first cinnabar (Bonfire's `#C06050`) because it sits (32,24,16) from the shared
+ember and the condition-ink check could not tell them apart -- which is the gate
+saying a *person* could not either. An error state must never read as the
+accent.
+
+The dark-theme run stops after the legs it can prove soundly, and says so: below
+that point `no_strip_at_left` returns "no strip present" when it cannot
+recognise the strip's colours, so a dark-theme run would satisfy a strip-ABSENT
+assertion with a strip plainly there. A hollow pass, not a failure. The Daylight
+run still exercises every leg.
+
 ### Open, and not claimed as proven
 
 - **tapestryd's chrome has no host-testable seam.** `server.rs` carries no test
   module, so the compositor half of the retint claim rests on the build plus the
-  compose gate -- an owed witness, not a proven one.
+  compose and Nightjar gates -- a real witness now, but not a unit one.
+- **The dark-theme gate run stops early**, by design and stated above. Widening
+  the remaining legs to be theme-aware is real work nobody has done.
+- **TH-6 closed DIRTY** (below): 0 P0 / 1 P1 / 5 P2 / 3 P3 + 4 self, all fixed,
+  and a round 2 is owed on the fixes by the project's own (P1+P2)>=6 rule.
+
+### The wrong turn nobody caught but the operator
+
+The dark theme shipped as **Nocturne** through eight commits, a design doc, a
+bake, a gate lever and a boot. `docs/NOCTURNE.md` is the operator's own name
+for the Thylacine **audio system** -- ratified 2026-09-06, with a landed arc
+through N-3c-2 -- and `MEMORY.md` carries a pinned line saying so, which the
+session had loaded. The design commit picked the name, and every chunk after
+it inherited the collision without anyone re-checking it against the project's
+existing names.
+
+Nothing failed, because nothing could: a theme's name is a string in a TOML
+file, and no test in the tree knows what other subsystems are called. The
+operator caught it in one line -- *"Nocturne is the audio system, how does it
+paint?"*
+
+Renamed to **Nightjar**, which is free in both trees. The lesson is narrow and
+reusable: **a NAME is a global namespace with no compiler.** Everything else
+in this arc was checked for collisions by a build that would refuse them; the
+one identifier with no such check was the one that collided. A grep across
+`docs/*.md` before committing a name costs seconds and was never run.
+
+The eight commits keep "Nocturne" in their messages -- history is not
+rewritten -- so `git log` and the tree disagree on this name before
+`docs/halcyon-status.md`'s rename row.
 - The workspace is not `rustfmt`-clean at HEAD (raster.rs 56 diffs,
   transcript.rs 54, and so on) and was not made so here. "Clean on every line
   this chunk touched" was verified by intersecting `cargo fmt --check` output
   against `git diff`, not by running rustfmt over files this chunk does not own.
+
+### TH-4c: the lint is a renderer, and that is the whole design
+
+`halcyon theme lint` looked like it might want a schema checker. It does not,
+and building one would have been the mistake. The loader already computes
+everything the tool reports: `Theme::from_toml` returns the keys a based file
+did not set, and `describe(&LoadError)` turns any refusal into one line naming
+the line to fix. So the lint renders the loader's own verdict and adds nothing
+of its own. A lint that re-derived "is this file valid" could disagree with the
+loader -- and then the tool whose entire job is to build confidence in a theme
+file would be the thing undermining it.
+
+The same reasoning decided the `active:` line. It could have re-implemented the
+tier order in four lines; instead it calls `theme::resolve` and renders what
+comes back, so it cannot drift from what a renderer actually paints -- including
+the fall-one-tier-down rule, where a user file with a typo leaves the *system*
+theme in force rather than dropping to the built-in.
+
+Two decisions worth recording because they went the non-obvious way:
+
+- **An absent tier is not a refusal; an absent named path is.** The default
+  installation has neither file, and 4.1 says that is correct, so `halcyon theme
+  lint` on a stock image exits zero and reports `active: built-in (Daylight)`.
+  But `halcyon theme lint /some/path` that finds nothing exits 1 -- you asked
+  about *that* file, and a lint that printed nothing would read as approval.
+- **It does not guess whether an inherited key is a mistake.** The tempting
+  feature is a warning when a dark theme inherits a light Daylight grey. That
+  check can only be a heuristic, and a heuristic that says OK is worse than no
+  check at all -- an author would stop reading the list. 4.3's answer is
+  structural (omit `base` and the loader names every unset key), so the tool's
+  job is to make the inheritance *visible*, not to have an opinion about it.
+
+**The fixture is built from the registry, not transcribed.** A complete theme
+file is 57 keys. Writing them into a test file would mean the fixture silently
+stops being complete the day a key is added -- and then every test using it
+keeps passing while measuring something different (a *based* file's inheritance
+instead of a complete file's completeness). Built from `theme::KEYS`, it cannot
+drift. The refusal test carries its positive control one variable away: the same
+file with the single mutation undone must lint clean, because `assert!(refused)`
+is satisfied by any broken fixture, and the mutation itself is `assert_ne!`-
+checked to have actually mutated. Sabotaging the wrap guard to `width * 3`
+fails two tests by name.
+
+**The guest legs went into `ls-ci` rather than a new scenario**, for exactly
+the reason #139 already rides there: the pure half is host-tested to death, but
+nothing in the tree ever *ran* the binary, and a new scenario buys one boot's
+coverage at one boot's wall clock. What only a guest can prove is the I/O half
+-- that a missing file maps to "absent" rather than an error (the default
+installation's path), that `$HOME` joins to a real user-tier path, and that the
+exit status a script would branch on is the documented one. The status legs
+send lower-case tokens through `tr`, so a match cannot be the line editor's echo
+of the command. Leg (b) is also the standing check that `nightjar.toml` still
+sets every key: it carries no `base`, so a lost key would be refused outright.
+
+### The leg that passed for the wrong reason
+
+The first version of the refusal leg linted `/lib/halcyon/layouts/default` --
+picked because it is a real file that is definitely not TOML, so no fixture had
+to be written. The gate went green on the first attempt, all five legs PASS.
+
+Reading the guest's actual output rather than the verdict showed what had
+happened:
+
+```
+/lib/halcyon/layouts/default: no such file
+```
+
+That bake rides the **session lever**, which was off for this image. The file
+was not there, the tool took its missing-file path, exited non-zero for a
+reason that had nothing to do with a refusal, and the leg's `TH4C-REFUSED`
+token printed anyway. An unconstructed state, green -- and nothing in the run
+would ever have said so, because the leg asserted only the exit status and the
+exit status was right.
+
+The fix is to construct the state instead of scavenging for one:
+`echo th4c-not-a-theme > $HOME/th4c-bad.toml`, then lint that, with a hard-fail
+arm on `no such file` so a failed write is named immediately instead of burning
+the command timeout. The guest now says
+`REFUSED -- line 1: not a key = value line`, which is the claim.
+
+The missing-path case kept a leg of its own, where it is the *claim* rather
+than an accident -- and the pairing turns out to be the stronger test: leg (a)
+proves an absent **tier** is not an error, leg (c) proves an absent **named
+path** is. Neither proves the distinction alone, and the distinction is the
+actual design decision.
+
+One figure was wrong in scripture and is fixed: `HALCYON-THEME.md` said TH-5's
+theme must set "all 61 colours". The built schema is **57 keys** carrying 64
+colour values -- `terminal.ansi` is one key holding sixteen. The authority is
+`theme::KEYS`, which the loader counts; a number transcribed into prose can only
+go stale, so the doc now says so instead of carrying a second number.
+
+### TH-6: the round found the operator's own question, unanswered
+
+The arc exists to answer one sentence: *"if a theme is made and all colors are
+changed to form a dark theme, some hardcoded daylight color won't kick it in
+somewhere."* The audit found a hardcoded Daylight colour kicking in somewhere.
+
+`main.rs` seeded the console transcript's pen from `daylight_palette()` **twelve
+lines after** threading the resolved theme into its sheet and pushing that theme
+to the compositor. Every one of halcyond's semantic hooks is an equality test
+against the sheet -- `st.fg == sheet.ink` gates em-dim, object colouring and the
+raw dim step; `st.bg != sheet.theme.terminal.bg` decides whether a cell has a
+background -- so with the pen seeded from a *different* theme, all of them
+compare two palettes that never agree. The hooks went silently dead and every
+run became a full-height Daylight parchment box on a dark pane.
+
+**Three separate guards should have caught it and none could**, which is the
+part worth keeping:
+
+- The §3.2 visibility split bounds the *name* `DAYLIGHT`. `daylight_palette()`
+  was `pub` unconditionally and handed out `DAYLIGHT.terminal` without naming
+  it. The TH-2 addendum had predicted exactly this residue class and named only
+  `builtin()` as the hole.
+- The colour-literal census cannot see it: there is no hex here to grep for.
+  F1 was found by reading a **call site**, not by searching for constants.
+- The Nightjar pixel gate passed. Its transcript leg asserts `off >= 300`
+  non-ground pixels — and that was *satisfied by the parchment boxes
+  themselves*. A green that was not merely irrelevant but was being produced by
+  the defect.
+
+The fix is one line. The regression leg is also one line, and it was free:
+`region`'s reference colour is already Daylight's parchment, so `off` already
+counts pixels that are *not* it, and under any other theme every pixel must be
+one. Sabotaging it back — reverting the fix *and* un-gating the accessor so it
+would compile — gives **22,031 of 272,800 pixels** of Daylight parchment in a
+Nightjar transcript, deterministic across 3 attempts; with the fix,
+272,800/272,800. That reachability is not luck: Nightjar's lightest ink
+(232,224,212) is darker than parchment in every channel, so no blend can
+produce it.
+
+**A second unconstructed-state catch, and this one failed loudly.** F6 asked
+for a pixel painted by *tapestryd* on the dark run, since every existing chrome
+check sat below the early exit and hardcoded Daylight. The first placement of
+that leg sampled the pre-split screen and read pane surface. Ground truth from
+the capture: columns 0–8 all surface, rows 0–24 all tag-bar header — a single
+full-bleed pane has no floor gap and therefore no bevel, which the scenario's
+own `no_strip_at_left` control already states two hundred lines further down.
+Unlike the ls-ci leg earlier in this run, this one *failed* rather than passing
+hollowly, because it asserts a thing is present. That is the safe direction, and
+it is worth designing for.
+
+**The correction I made to the prosecutor's own suggestion.** F5 reported that
+the visibility split leaks under a workspace `cargo test` (dev-dependency
+feature unification turns the fixture on for every member) and suggested gating
+on `cfg(any(test, feature = "theme-fixture"))`. That is *strictly more
+permissive* — a looser predicate cannot close an over-permissive one. Nor can
+the consumers be converted to `builtin()`: that deletes the guard rather than
+tightening it, since `builtin()` is public and always was. There is no `cfg`
+that fixes this, so it was fixed as a **claim**: the doc's predicate corrected
+(it named `cfg(not(test))`, which the code never had), the exact boundary
+written down in both doc and code, and the one command that does enforce it
+named. An overstated guard is worse than an honest convention.
+
+The close is **dirty** by the project's own rule — P1 + P2 = 6 — so a round 2 is
+owed, scoped to the fixes: F1's touches the console renderer's content path,
+F3's a shared transport used by two verbs, and F2's replaces the guard behind
+the arc's central claim. And the round itself was an Opus fallback: it was
+spawned on Fable and died of credit exhaustion before emitting a line, so a
+Fable-diversity pass on this surface is still owed.
+
+### Round 2: the fix was right and its correctness had quietly become conditional
+
+Round 2 came back **0 P0 / 1 P1 / 1 P2 / 6 P3** — a clean close by the rule, so
+no round 3. The three named fixes were structurally sound; none of them broke
+anything. But the P1 is the interesting kind.
+
+`sheet.ink` is `[palette] fg`. The pen's default is `[terminal] fg`. **They are
+separate keys in separate tables**, and the three hooks that decide "this cell
+chose no colour" compared across that boundary. So F1's fix — moving the pen
+from a constant to `theme.terminal` — left the hooks correct only *by
+authorship convention*: both shipped themes happen to set the two equal. An
+author who sets them apart, which the format explicitly permits, silently loses
+em-dim, object-reference colouring and the raw dim step. That is F1's exact
+symptom class, reachable through a **supported input** rather than through a
+constant.
+
+Two things make this worth writing down. First, the bg half of the very same
+test already got it right one screen below, and its comment names the exact
+freedom the fg half ignored — the codebase knew. Second, **no test built a
+sheet and a pen from different tiers of one theme**, which is precisely why
+comparing against `sheet.ink` looked correct: every existing test used a theme
+where the two agree, so they all agreed with the wrong comparison. The
+regression test now constructs the theme an author is free to write.
+
+Its sibling, found in a *fourth* file the round hadn't been pointed at: session
+tiles tested only `bg != sheet.ground`, so under such a theme every cell emitted
+a rectangle and the same content rendered on a different ground in a tile than
+in the transcript.
+
+And R2-F2 is the shape worth remembering: F3's fix repaired the errno mapping
+and *one* of the two callers of the same verb. The console renderer's push —
+the load-bearing one, since the compositor comes up before the pool it would
+read the theme file from is mounted — still had no retry arm at all. Both
+renderers now share one `push_theme`.
+
+### The template, and the test that caught me writing it wrong
+
+The operator asked, mid-run, whether the TOML was stable and documented enough
+to hand to another Claude for authoring themes. The format is stable; the
+documentation was scattered across four places, with the best per-key notes
+being Rust comments in `theme.rs`. So: `usr/lib/halcyon/themes/TEMPLATE.toml` —
+all 57 keys with a one-line what-it-paints, the format rules, and five named
+traps, the first of which is R2-F1's freedom.
+
+Its header claims the file "loads as-is" and *is* Daylight until edited, so the
+test asserts exactly that — and it failed immediately. I had hand-approximated
+the values from memory of the palette's character, and I was wrong in ways that
+matter: Daylight's `floor` is a mid-tone `#8A7660`, not a light one; its `blank`
+is near-black `#101014` (which the template's own trap #5 warns about); and its
+right and bottom bevel faces are genuinely dark, `#362410` and `#221405`, where
+I had written near-neighbours of the surface and flattened the light direction
+the bevel exists to encode. Regenerated from `to_wire(&DAYLIGHT)`.
+
+A documentation file that lies about the thing it documents is worse than no
+file, and the only reason this one doesn't is that it is loaded and compared by
+a test rather than proofread.
+
+### The arc closes on pixels, and the one debt that could not be paid
+
+The last owed item was not a fix, it was a *measurement*. Round 2's R2-F1
+changed `usr/halcyond/src/layout.rs`'s ink-hook comparison -- the console
+renderer's content path -- and that is a place where the host suites are
+structurally unable to see the result. 209 green halcyond tests say nothing
+about which colour actually landed in a cell. Only a booted guest does.
+
+Both levers, one bake each, on a quiet mac (7 minutes of held machine, against
+the 50-70 I had budgeted):
+
+- **Nightjar**, 33 s: `not one Daylight pixel in the nightjar transcript
+  (272800/272800)`. The number is worth stating precisely because of what it is
+  *not*: it is not a gauge that only ever reads zero. The same leg read
+  22031/272800 when F1 was deliberately reintroduced during the round-1 close,
+  deterministically, three times out of three. So a zero here is a
+  discriminating result rather than the absence of one. Alongside it,
+  `TAPESTRYD painted the nightjar bevel under nightjar (left 58 51 46 != top
+  78 69 62 -- four-value NNW)` -- the compositor's own half, four distinct
+  values, so the light direction survived the theme swap.
+- **Daylight**, 119 s: 49 of 49 legs, zero failures, against a pre-round-2
+  baseline of 118 s and 49 legs.
+
+Both bakes were verified by content and not by exit code, which on this project
+is not a formality: the Nightjar log carries `populate pool: HALCYON theme lever
+ENABLED (/lib/halcyon/theme.toml = nightjar)` and the Daylight log carries that
+string zero times. A bake failure here presents as *absent content*, never as a
+non-zero status, so the exit code would have been happy either way.
+
+**The debt that could not be paid, and why no substitute was accepted.** A
+Fable-diversity pass was owed on this surface: both audit rounds ran on Opus,
+the implementation family. Re-attempted this run across the whole arc with
+`model: fable` passed explicitly -- and it died before emitting a line. The
+failure names its own evidence: `model sent to the API: claude-fable-5-1`,
+`rate_limit`, HTTP 429, `req_011CeskGU2DXcngZoR48ifm3`, "out of usage credits."
+That the override *reached* the API is the part worth recording, because a
+subagent cannot observe its own model fallback; without that line, account-level
+exhaustion and a silent reroute look identical from here.
+
+No third round was spawned, and the reasoning deserves stating because it wears
+the shape of the dodge the "never skip a round for want of Fable" rule exists to
+forbid. That rule's own stated purpose is *do not leave the surface unreviewed*.
+This surface is not unreviewed -- two full rounds, 2 P1 + 6 P2 + 9 P3, all
+fixed, round 2 clean. What is missing is specifically the **family** axis, and
+no available fallback can supply it: Sonnet and Haiku share Opus's lineage. A
+same-family third round would have spent budget without touching the debt while
+producing a close that *reads* as though the debt were paid. The debt stays
+open and labelled unpayable-for-now, which is the honest disposition.
+
+**A staleness finding fell out of the closing sweep.** Running the mandatory
+`quaestor owner` step over the arc's surfaces turned up
+`abi-halcyon-palette` -- the pin for the `/env/HALCYON_PALETTE` contract, last
+updated 2026-09-06, before the arc. It names `daylight_env_palette` as a live
+mirror in `usr/halcyond/src/session.rs`. It is not there: session.rs:1251 calls
+`env_palette(&theme)` on the *resolved* theme, and `daylight_env_palette` is
+`#[cfg(test)]` (theme.rs:882), so it does not exist in a production build at
+all. Its 11-role table still heads its source column `DAYLIGHT field`.
+
+The reason to chase this rather than note it: if that export had still been
+hardcoded, it would have been F1 again one layer out -- a built-in Daylight
+palette published to every hosted program while the session painted something
+else. It wasn't; TH-4a had already handled it, and the function's own doc
+comment names that exact failure mode. But the pin describing it had rotted into
+saying the opposite, and a pin that describes a hazard as present when it was
+closed is the same defect class as one that describes it as closed when it is
+present. Filed to the vault on call 0076 with the three specific errors; the
+`surface <- header` mapping the note calls "the one mapping worth pinning" is
+unchanged and still correct.
+
+### I fabricated a defect, and the code had told me so before I started
+
+Both TH-6 rounds named `usr/tapestryd/src/server.rs` (17941 lines) the
+least-covered surface, so it was the obvious thing to open next. The chunk
+turned out to rest on a premise that does not hold.
+
+`usr/tapestryd/src/chords.rs` carries a `#[cfg(test)] mod tests` with four
+test functions. They had never run, and could not:
+
+```
+cargo test -p tapestryd --target aarch64-apple-darwin
+  -> error: unknown directive   .size _start
+     error: unknown directive   .type __thyla_rfork_spawn
+     error: could not compile `libthyla-rs` (lib) due to 4 previous errors
+```
+
+tapestryd was a bin-only crate with an **unconditional** `libthyla-rs`
+dependency, so the test harness build pulls in the whole guest body and dies
+on inline aarch64 asm whose ELF-only `.size`/`.type` directives the Mach-O
+assembler rejects. The guest target is no escape either -- `aarch64-unknown-none`
+has no test runner. And `grep -rn "cargo test" tools/ Makefile` returns
+nothing, so no gate was ever going to report them as skipped.
+
+I wrote that up as an unnoticed hazard -- "four plausible-looking cases sitting
+there reading as coverage", "a lesson recorded in one crate's manifest does not
+reach its sibling", "a test that cannot be compiled is indistinguishable from
+one that passes". Committed it, pushed it, and put it in a status row and an
+AUDIT-TRIGGERS addendum.
+
+**Every word of that framing is false, and the file I had just read said so.**
+Directly above the test module:
+
+```rust
+// DORMANT host-harness tests (the G-4f named seam: tapestryd is no_std +
+// aarch64-asm, so `cargo test` cannot host-build it -- these document the
+// grammar + the rebind/swallow-set invariant; the in-guest witness is
+// ls-gfx-chords.exp).
+```
+
+That comment names the dormancy, diagnoses the mechanism EXACTLY -- "no_std +
+aarch64-asm, so cargo test cannot host-build it", which is precisely what I
+then "discovered" by running the compiler -- states that the tests exist to
+DOCUMENT an invariant rather than to cover it, and names a real in-guest
+witness. `tools/interactive/ls-gfx-chords.exp` exists and does witness the
+chord grammar; I checked, rather than assuming, before writing this correction.
+
+The same `DORMANT ... G-4f named seam` comment sits in four places
+(`tapestryd/src/chords.rs:256`, `aurora/src/{config,osd,render}.rs`). It is a
+named convention traceable to the G-4f audit close (`5cc97785`), whose own
+status row calls it a "dormant host-harness seam". So the lesson did not fail
+to propagate -- it propagated to both crates deliberately, and I mistook a
+recorded decision for an oversight.
+
+**The mechanism of the error is the reusable part: I ran the compiler before I
+read the file.** The measurement was real; the conclusion drawn from it was
+confident and wrong, because a measurement cannot tell you whether someone
+already knew. And the failure was self-concealing -- the chunk around it was
+sabotage-measured and gated, so it *looked* like exactly the kind of rigorous
+work whose conclusions you would not re-examine. **Rigour on the fix does not
+validate the framing of the finding.** On this project a fabricated defect
+outranks a missed one; this was a fabricated one, wearing a green test suite.
+
+What the change is actually worth, stated without the false framing: applying
+halcyond's lib+bin pattern (`[lib]` carrying `pane` / `chords` / `keymap`, each
+verified to reference no syscall crate; `[[bin]] required-features = ["guest"]`;
+guest deps optional) turns four DOCUMENTARY tests into EXECUTING ones. That is
+a real gain -- a test that only documents can drift silently from the code it
+describes, and one that runs cannot -- but it is an improvement to a considered
+design, not the closure of a defect. And it is the enabler for the part that
+does stand on its own, below.
+
+That change has a trap of its own, which the manifest now records: a bin whose
+`required-features` are unmet is **skipped silently** rather than failing, and
+this crate's comment had advertised `--no-default-features` as the production
+strip -- which would now drop `guest` and ship nothing. So the guest artifact
+was verified by moving it aside and confirming it is *reproduced* (542760
+bytes), never by an exit code. The first attempt at that verification was
+itself wrong and worth recording: building via `--manifest-path` from the repo
+root silently targeted the **host**, because `usr/.cargo/config.toml` is
+directory-scoped, and the resulting libthyla-rs failure looked exactly like a
+real breakage until I noticed the target.
+
+Then the actual deliverable, because a manifest edit that turns four dormant
+tests green would read as a win while leaving server.rs exactly as uncovered:
+the status-bar admission rule is now `pane::admit_status_bar(&StatusReq)`,
+pure over eight scalars, with `create` reduced to filling the struct and
+mapping the verdict (`Malformed` -> E_INVAL, `NotYours` -> E_PERM). A struct
+rather than a positional argument list because the two bools and the four
+u32s are mutually transposable and the compiler would not catch a swap.
+
+This is the rule from `9d5f38ee`, and this half needs no reframing: the
+audit-trigger row records it as having no witness of any kind, host or guest,
+*independently of any DORMANT comment*, and runs 46f and 46h both left it owed. Eight tests now cover it, each one field off a valid base, and the
+two non-obvious ones are sabotage-measured in isolation: deleting the
+ownership arm fails `a_system_renderer_may_not_take_a_declared_sessions_bar`
+and **nothing else** -- both positive controls stay green, so the test
+discriminates that rule rather than any edit to the function -- and swapping
+the arms' order fails `malformed_is_judged_before_ownership` alone. The order
+matters because it decides which errno a malformed request from a SYSTEM
+principal sees, and nothing else was looking.
+
+What this does **not** close, stated plainly: the two halves' interaction
+across a live declare/undeclare cycle is still a guest-only claim, the
+both-levers leg is still owed, and `Comp` as a whole is still untestable. Half
+of item (f) on that row, not all of it.
 
 ---
 

@@ -400,10 +400,48 @@ pub extern "C" fn rs_main() -> i64 {
     });
     gs.set_scale(display.scale);
     gs.set_display(display.w, display.h);
-    // THE ONE PLACE this renderer resolves its theme (HALCYON-THEME 3.2);
-    // TH-4's loader lands here. Everything downstream is handed the resolved
-    // `&Theme` -- through the sheet, which carries it.
-    let theme = libhalcyon::theme::builtin();
+    // THE ONE PLACE this renderer resolves its theme (HALCYON-THEME 3.2/3.4).
+    // The SYSTEM file only: the console renderer is nobody's session, so
+    // there is no user tier to read -- and reading one would mean a console
+    // wearing whichever user happened to log in last. Everything downstream
+    // is handed the resolved `&Theme`, through the sheet that carries it.
+    let resolved = libhalcyon::theme::resolve(
+        chromeset::read_file(T_WALK_OPEN_FROM_ROOT, libhalcyon::theme::SYSTEM_THEME_PATH)
+            .as_deref(),
+        None,
+    );
+    for n in &resolved.notes {
+        say!("halcyond: {}", n);
+    }
+    // One line naming the theme in force, on every path including the absent
+    // one -- the witness that this renderer's load path ran at all.
+    say!(
+        "halcyond: theme {} ({:?})",
+        if resolved.name.is_empty() {
+            "built-in"
+        } else {
+            &resolved.name
+        },
+        resolved.source
+    );
+    let theme = resolved.theme;
+    // The compositor cannot read this file. Measured 2026-09-09 on the
+    // Nightjar lever: `tapestryd: theme built-in (no /lib/halcyon/theme.toml)`
+    // while THIS process, started later, loaded the very same path -- because
+    // tapestryd comes up before the pool it lives in is mounted. So the
+    // chrome kept Daylight's bevel and floor around a Nightjar pane, and
+    // nothing failed, which is how it would have shipped.
+    //
+    // The renderer is admitted to the `theme` verb unconditionally
+    // (`peer_is_renderer`), so it pushes too -- the session's push is for the
+    // USER tier, this one is for the system tier the compositor could not
+    // reach in time.
+    // The SAME helper the session uses, deliberately: this had its own inline
+    // version with no `Busy` arm, so a push arriving in a service pass whose
+    // per-pass layout budget was already spent got one attempt and gave up
+    // permanently -- on the very path that exists because the compositor
+    // cannot read the file itself.
+    session::push_theme(&ring, &theme);
     let mut sheet = sheet_for(&theme, display.scale);
     gs.set_smooth(sheet.smooth_mem);
     {
@@ -416,7 +454,17 @@ pub extern "C" fn rs_main() -> i64 {
             gs.evict_pages()
         );
     }
-    let mut t = Transcript::new(libhalcyon::theme::daylight_palette());
+    // The pen's default fg/bg MUST be the RESOLVED theme's, never a constant.
+    // halcyond's semantic hooks are equality tests against the sheet --
+    // `st.fg == sheet.ink` gates em-dim, object colouring and the raw dim
+    // step, and `st.bg != sheet.theme.terminal.bg` decides "this cell has a
+    // background". Seeded from a different theme's palette, every one of those
+    // comparisons is false under any non-Daylight theme: the hooks go silently
+    // dead and the foreign ground paints through as a literal colour. This
+    // line said `daylight_palette()` until the TH-6 round, twelve lines after
+    // the resolved theme was threaded into the sheet and pushed to the
+    // compositor.
+    let mut t = Transcript::new(theme.terminal);
     let mut cache = LayoutCache::new();
 
     // I-47 slice 1b: the inline-image witness. When the boot declares
