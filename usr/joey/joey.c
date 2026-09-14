@@ -481,6 +481,89 @@ static int smoke_drain(long rd, unsigned char *acc, size_t acc_cap,
     }
 }
 
+// PROBE_REAP_MAX_SEC -- the bound on how long joey waits for a boot probe to
+// exit before it force-kills it and moves on. Generous versus any probe's real
+// runtime (the pouch hellos and nocturne-probe all finish in a second or two,
+// even under -smp8 contention) yet well under the 300s harness timeout, so a
+// HUNG probe becomes a fast diagnosable failure instead of a boot-wide
+// black-box stall with no banner.
+#define PROBE_REAP_MAX_SEC 120
+
+// KILL_GRACE_SEC -- after force-killing a hung child, how long to wait for the
+// corpse before giving up and returning anyway. A killed child dies promptly
+// (kill is non-catchable, I-19); this only bounds the pathological case where
+// the kill could not be issued or the child ignores it, so the reap here is
+// ALSO bounded -- never an unbounded block, which would re-introduce the hang.
+#define KILL_GRACE_SEC 5
+
+// REAP_PARK_MS -- how long reap_bounded sleeps between WNOHANG polls. A TIMED
+// park (t_torpor_wait), not a busy t_yield: joey is init and runs on every boot,
+// and a yield with nothing else runnable on this vCPU spins -- a hot poll loop
+// beside every probe is the very -smp8 pressure this arc removes. 10 ms keeps
+// the reap latency imperceptible while the vCPU idles between polls.
+#define REAP_PARK_MS 10
+
+// reap_bounded -- reap `pid`, but never block on it forever. Poll WAIT_WNOHANG,
+// sleeping REAP_PARK_MS on a PRIVATE stack word between checks (t_torpor_wait --
+// the kernel DOES have a timed park, and joey already uses it elsewhere). On the
+// `max_sec` deadline, kill the child via /proc/<pid>/ctl and reap the corpse
+// (also bounded). Returns `pid` (>0) on a clean exit with *status set, -2 if it
+// had to kill on the deadline, -1 on a wait error. The deadline is time-based
+// (t_clock_gettime) with an iteration-count BACKSTOP, so a kernel whose clock is
+// unavailable cannot make this unbounded. WHY it exists: a boot probe that hangs
+// must not hold the boot forever -- an unbounded t_wait_pid_for once turned a
+// nocturned busy-spin into a 300s -smp8 timeout with no diagnosis.
+static long reap_bounded(long pid, int *status, unsigned long max_sec) {
+    struct t_timespec t0 = { 0, 0 }, now = { 0, 0 };
+    int have_t0 = (t_clock_gettime(T_CLOCK_MONOTONIC, &t0) == 0);
+    // Iteration backstop (F3): each pass parks ~REAP_PARK_MS, so a count bounds
+    // real time even if every t_clock_gettime fails. Sized to match max_sec; the
+    // park is on a private word nothing wakes, so passes are not shortened and
+    // per-pass overhead makes the time deadline fire first when the clock works.
+    unsigned long iters = 0;
+    const unsigned long max_iters = max_sec * (1000UL / REAP_PARK_MS);
+    unsigned pacer = 0;
+    for (;;) {
+        long r = t_wait_pid_for((int)pid, WAIT_WNOHANG, status);
+        if (r == pid) return pid;
+        if (r < 0) return -1;
+        unsigned long el = 0;
+        if (have_t0 && t_clock_gettime(T_CLOCK_MONOTONIC, &now) == 0 && now.tv_sec >= t0.tv_sec)
+            el = (unsigned long)(now.tv_sec - t0.tv_sec);
+        if ((have_t0 && el >= max_sec) || ++iters >= max_iters) {
+            char ctl[64];
+            unsigned ctl_len = 0;
+            char nb[24];
+            const char *ns = itoa_dec(pid, nb, sizeof(nb));
+            const char pfx[] = "/proc/";
+            for (unsigned k = 0; k < sizeof(pfx) - 1; k++) ctl[ctl_len++] = pfx[k];
+            for (unsigned k = 0; ns[k]; k++) ctl[ctl_len++] = ns[k];
+            const char sfx[] = "/ctl";
+            for (unsigned k = 0; k < sizeof(sfx) - 1; k++) ctl[ctl_len++] = sfx[k];
+            long kfd = t_open(T_WALK_OPEN_FROM_ROOT, ctl, ctl_len, T_OWRITE);
+            if (kfd >= 0) {
+                (void)t_write(kfd, "kill", 4);
+                (void)t_close(kfd);
+            }
+            // Reap the corpse with a BOUNDED grace -- never an unbounded block:
+            // if the kill could not be issued (open failed) or the child ignores
+            // it, blocking here would re-introduce the very hang we are bounding.
+            // Iteration-bounded (KILL_GRACE_SEC worth of parks), clock-independent.
+            unsigned long kiters = 0;
+            const unsigned long max_kiters =
+                (unsigned long)KILL_GRACE_SEC * (1000UL / REAP_PARK_MS);
+            for (;;) {
+                long kr = t_wait_pid_for((int)pid, WAIT_WNOHANG, status);
+                if (kr == pid || kr < 0) break;
+                if (++kiters >= max_kiters) break;
+                (void)t_torpor_wait(&pacer, 0u, (long)REAP_PARK_MS * 1000L);
+            }
+            return -2;
+        }
+        (void)t_torpor_wait(&pacer, 0u, (long)REAP_PARK_MS * 1000L);
+    }
+}
+
 // pouch_smoke_core — pouch_smoke_one's body, parameterized by optional
 // cap_mask and optional perm_flags. If both are 0, uses t_spawn_with_fds
 // (no extra caps, no perm stamps). If cap_mask != 0 and perm_flags == 0,
@@ -550,7 +633,12 @@ static int pouch_smoke_core(const char *name, size_t name_len,
             (void)t_close(rd);
             return -1;
         }
-        long reaped = t_wait_pid_for((int)pid, 0, &status);
+        long reaped = reap_bounded(pid, &status, PROBE_REAP_MAX_SEC);
+        if (reaped == -2) {
+            t_putstr("joey: pouch-smoke child did not exit within the deadline -- killed\n");
+            (void)t_close(rd);
+            return -1;
+        }
         if (reaped != pid) {
             t_putstr("joey: pouch-smoke t_wait_pid wrong pid\n");
             (void)t_close(rd);
@@ -561,7 +649,12 @@ static int pouch_smoke_core(const char *name, size_t name_len,
         // an adopted-orphan zombie must not be consumed here -- 2B-F3), then
         // drain. Sound ONLY because these children write < the 4 KiB ring before
         // exit; see the ordering note above pouch_smoke_core.
-        long reaped = t_wait_pid_for((int)pid, 0, &status);
+        long reaped = reap_bounded(pid, &status, PROBE_REAP_MAX_SEC);
+        if (reaped == -2) {
+            t_putstr("joey: pouch-smoke child did not exit within the deadline -- killed\n");
+            (void)t_close(rd);
+            return -1;
+        }
         if (reaped != pid) {
             t_putstr("joey: pouch-smoke t_wait_pid wrong pid\n");
             (void)t_close(rd);
