@@ -92,13 +92,39 @@ This run read the kit whole and checked it against the tree before any code.
 - Scrollbars: initially a position indicator into the buffer.
 - The kit is committed for the record; our own interpreted docs follow.
 
+### Later the same day: the scripture, I-0's first pieces, and Astra's reply
+
+`docs/HALCYON-INSTRUMENT.md` landed (`66a65f98`): the kit read against the
+tree (section 1's ground-truth table, every row a file:line), the rulings,
+the model (profile x theme x scale; ONE loader dispatching on `[meta]
+profile`; two projections so any theme renders under either profile), the
+exact carve, the stack, the state matrix, the rails on our facts, input on
+the Super plane, effects last, slices I-0..I-9, and section 13 for the
+operator. The one conflict it could not settle: a shell tile's default
+presentation -- HALCYON.md 14.13's proportional-live (ratified 2026-09-06)
+against the mockup's mono shell tiles; recommended: the mechanism of both
+with the ratified default. Two more rulings arrived while it was written:
+**tag-bar pills stay**, and Astra's round-2 package was handed over.
+
+I-0 began: Plex Sans Regular / Medium / SemiBold vendored from the Mac's
+v3.005 files (the same version as the tree's four; OFL); and
+`tools/halcyon/instrument-ansi.py`, the ANSI-16 designer the operator asked
+main to write ("you are the more capable model"): OKLCH, the appendix's
+rule as code, a per-slot check (hue within 30 degrees of its name, 3:1
+against `terminal_bg`, sixteen distinct). It keeps a theme's own role
+where the hue is already right (Carbon's red/green/yellow/magenta, every
+theme's red and green) and synthesises the rest at the theme's register.
+
 ### Owed at the end of the run
 
-- The request to Astra (`docs/halcyon-carbon-handoff/REQUEST-TO-ASTRA.md`):
-  goldens and geometry dumps, the git bundle, designed ANSI-16 tables, the
-  missing-surface designs, the scrollbar.
-- The interpreted scripture (HALCYON-INSTRUMENT) carrying the kit's section-2
-  amendments as ratified above; then slice I-0.
+- **Ingest Astra's round 2** (`~/Downloads/halcyon-astra-round2`, 47 files:
+  `RESPONSE-TO-FABLE.md`, a git bundle for the pinned commit, a Playwright
+  capture script, ANSI16 tables of Astra's own, contrast amendments, round-2
+  palettes) -- read it whole, compare its ANSI tables with ours, verify the
+  bundle's commit, commit the package for the record beside the kit.
+- The operator's word on HALCYON-INSTRUMENT section 13.
+- Then I-1 (the second schema, the bundle, the wire) -- the EFFORT GATE
+  fires there (a new strict parser).
 - Unchanged from 46n: the IRQ fork, the back-pressure gap, S1 [P3], the ut
   `mount` one-liner, vault calls 0082 / 0087.
 
