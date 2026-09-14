@@ -6,7 +6,14 @@ for every program that draws chrome on Thylacine's own framebuffer. Consumed by
 and nowhere else.
 
 **STATUS**: ADOPTED 2026-09-07 — Daylight, IBM Plex Sans dual-weight and the
-§8 heading/emphasis hierarchy included.
+§8 heading/emphasis hierarchy included. **Since 2026-09-14 this is the
+LEGACY profile's visual**: the Instrument profile (`docs/HALCYON-INSTRUMENT.md`,
+Carbon Optics and twelve more themes, the Astra mockup) amends the bevel,
+the focus treatment, the header anatomy, the type map and the prompt for
+its own profile only — its §3 table names each amendment. Everything here
+that is not a colour or a metric (the amber discipline, content never
+dimmed, two status states, mono means preformatted output, heading rank
+by size) stands under both.
 
 **Companion**: UTOPIA-VISUAL U-2 (*Bonfire*). Bonfire lights the Utopia terminal
 at night; Daylight is the calm day around it. The two are not alternatives —

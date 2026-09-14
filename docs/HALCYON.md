@@ -570,6 +570,15 @@ inline).** The visual identity is `docs/HALCYON-VISUAL.md` (Daylight), ratified
 this pass as binding scripture for the H-3 chrome. This section is the
 mechanics; Daylight is the look.
 
+> **2026-09-14: a second profile.** `docs/HALCYON-INSTRUMENT.md` (the
+> Instrument profile: Carbon Optics + twelve themes, the Astra mockup) keeps
+> every mechanism below — the chrome-surface path, the gates, the pane
+> tree's trust model, the status verb, the menu, the seat — and changes the
+> LOOK for its own profile: a flat 1 px frame instead of the ring, 32 px
+> headers for every tile of a stack (collapsed ones included, the
+> HALCYON-VISUAL §3.2 rule finally built), two rails, weighted splits with
+> divider tracks. Daylight stays the legacy profile's look, unchanged.
+
 **Survey ground truth** (tapestryd, verified 2026-09-01 — so no future session
 re-derives it): the pane tree (`pane.rs`) already carries per-leaf `tag: String`
 + `role: Role{Content,Chrome,PinTarget}` + `focusable`, but **`Role` is inert**
