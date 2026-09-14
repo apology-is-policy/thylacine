@@ -1176,6 +1176,7 @@ mod tests {
         let s = crate::layout::sheet_for(
             &libhalcyon::instrument::Bundle::builtin(libhalcyon::instrument::Profile::Instrument),
             100,
+            crate::layout::TEST_DISPLAY_W,
         );
         let mut gs = GlyphSource::new_vendored(64);
         let m = tile_menu(7, "renderer.rs", 3, true);

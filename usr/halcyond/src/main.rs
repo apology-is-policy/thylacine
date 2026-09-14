@@ -446,7 +446,7 @@ pub extern "C" fn rs_main() -> i64 {
     // permanently -- on the very path that exists because the compositor
     // cannot read the file itself.
     session::push_theme(&ring, &bundle);
-    let mut sheet = sheet_for(&bundle, display.scale);
+    let mut sheet = sheet_for(&bundle, display.scale, display.w);
     gs.set_smooth(sheet.smooth_mem);
     {
         let (cw, ch, _) = gs.mono_cell();
@@ -486,6 +486,9 @@ pub extern "C" fn rs_main() -> i64 {
 
     let mut mode = Mode::Insert;
     let mut scroll_up: i32 = 0; // px above the bottom anchor (0 = anchored)
+    // 7.7: whether the last frame reserved the indicator's lane (the
+    // content overflowed the view); the layout width follows it.
+    let mut lane_reserved = false;
     let mut last_seq: u64 = u64::MAX;
     let mut dirty = true;
     // Helix-modal selection (v0, row-wise): the flat row list + the
@@ -538,7 +541,7 @@ pub extern "C" fn rs_main() -> i64 {
                 if di.scale != sheet.scale {
                     let from = sheet.scale;
                     let gen = sheet.gen + 1;
-                    sheet = sheet_for(&sheet.bundle(), di.scale);
+                    sheet = sheet_for(&sheet.bundle(), di.scale, di.w);
                     sheet.gen = gen;
                     gs.set_scale(di.scale);
                     gs.set_smooth(sheet.smooth_mem);
@@ -554,6 +557,18 @@ pub extern "C" fn rs_main() -> i64 {
                     dirty = true;
                     let (cw, ch, _) = gs.mono_cell();
                     say!("halcyond: scale {} -> {} (cell {}x{})", from, di.scale, cw, ch);
+                } else if di.w != sheet.display_w {
+                    // HALCYON-INSTRUMENT 7.5: the document's paddings and
+                    // H1 follow the DISPLAY width, so a resize at the same
+                    // scale rebuilds the sheet (a new generation: every
+                    // cached layout is stale by key).
+                    let gen = sheet.gen + 1;
+                    sheet = sheet_for(&sheet.bundle(), sheet.scale, di.w);
+                    sheet.gen = gen;
+                    cache.clear();
+                    frame.clear();
+                    last_open_laid = None;
+                    dirty = true;
                 }
             }
         }
@@ -578,15 +593,12 @@ pub extern "C" fn rs_main() -> i64 {
                 }
                 cache.evict_missing(&|id| live.contains(&id));
             }
-            let widthi = w as i32;
             // Lay everything; measure heights + each block's y RELATIVE to
             // the content top (the emit pass and the selection follow both
-            // key off it).
-            let mut heights: Vec<(u64, i32, i32)> = Vec::new(); // (id, h, rel_y)
-            let mut total: i32 = sheet.block_gap;
-            // The gap after a block depends on the pair (a prompt runs into
-            // its output as one entry) and a block that laid nothing takes
-            // none -- the same rule the tile path applies (Tile::render).
+            // key off it). The gap after a block depends on the pair (a
+            // prompt runs into its output as one entry) and a block that
+            // laid nothing takes none -- the same rule the tile path
+            // applies (Tile::render).
             let gap_after = |i: usize, lh: i32| -> i32 {
                 if lh == 0 {
                     return 0;
@@ -596,22 +608,37 @@ pub extern "C" fn rs_main() -> i64 {
                 let next = frozen.get(i + 1).map(|b| b.kind).unwrap_or(t.open_block().kind);
                 halcyond::layout::block_gap_between(this, next, &sheet)
             };
-            for (i, b) in t.frozen_blocks().iter().enumerate() {
-                let lh = cache.get(b, widthi, &sheet, &mut gs).height;
-                heights.push((b.id, lh, total));
-                total += lh + gap_after(i, lh);
-            }
-            let open_rel = total;
-            let open_laid = layout_block(t.open_block(), widthi, &sheet, &mut gs);
-            let pending_laid = layout_pending(
-                t.pending_line(),
-                &t.open_block().styles,
-                widthi,
-                &sheet,
-                &mut gs,
-            );
-            let open_h = open_laid.height + pending_laid.height;
-            total += open_h;
+            // 7.7: the indicator's lane is reserved INSIDE the viewport on
+            // overflow; the layout width follows the last frame's decision
+            // and a flip re-lays once, here (Tile::render's rule: narrowing
+            // never shortens wrapped content, so the decision is stable).
+            let lane = halcyond::indicator::lane(&sheet);
+            let (widthi, heights, total, open_rel, open_laid, pending_laid, open_h) = loop {
+                let widthi = w as i32 - if lane_reserved { lane } else { 0 };
+                let mut heights: Vec<(u64, i32, i32)> = Vec::new(); // (id, h, rel_y)
+                let mut total: i32 = sheet.pad_top;
+                for (i, b) in t.frozen_blocks().iter().enumerate() {
+                    let lh = cache.get(b, widthi, &sheet, &mut gs).height;
+                    heights.push((b.id, lh, total));
+                    total += lh + gap_after(i, lh);
+                }
+                let open_rel = total;
+                let open_laid = layout_block(t.open_block(), widthi, &sheet, &mut gs);
+                let pending_laid = layout_pending(
+                    t.pending_line(),
+                    &t.open_block().styles,
+                    widthi,
+                    &sheet,
+                    &mut gs,
+                );
+                let open_h = open_laid.height + pending_laid.height;
+                total += open_h + sheet.pad_bottom;
+                let overflow = total > h as i32;
+                if lane == 0 || overflow == lane_reserved {
+                    break (widthi, heights, total, open_rel, open_laid, pending_laid, open_h);
+                }
+                lane_reserved = overflow;
+            };
 
             let viewh = h as i32;
             let max_up = (total - viewh).max(0);
@@ -676,7 +703,7 @@ pub extern "C" fn rs_main() -> i64 {
             cart.ops.push(cartoon::Op::Clear {
                 color: sheet.ground,
             });
-            let mut y = y0 + sheet.block_gap;
+            let mut y = y0 + sheet.pad_top;
             frame.clear();
             for (bi, b) in t.frozen_blocks().iter().enumerate() {
                 let lh = heights
@@ -755,6 +782,22 @@ pub extern "C" fn rs_main() -> i64 {
                 h: ch2.max(sheet.ipx(4)) as u32,
                 color: ccol,
             });
+            // 7.7: the position indicator, over everything, only while the
+            // content overflows (its lane is already reserved).
+            if lane_reserved {
+                let scroll = (total - viewh) - scroll_up;
+                if let Some((x, y, tw, th)) =
+                    halcyond::indicator::thumb_rect(w as i32, 0, viewh, total, scroll, &sheet)
+                {
+                    cart.ops.push(cartoon::Op::Rect {
+                        x,
+                        y,
+                        w: tw as u32,
+                        h: th as u32,
+                        color: sheet.inst.dim,
+                    });
+                }
+            }
 
             let px = surf.pixels();
             cartoon::execute(

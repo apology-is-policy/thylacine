@@ -1072,6 +1072,7 @@ mod tests {
         crate::layout::sheet_for(
             &libhalcyon::instrument::Bundle::builtin(libhalcyon::instrument::Profile::Instrument),
             100,
+            crate::layout::TEST_DISPLAY_W,
         )
     }
 

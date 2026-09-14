@@ -37,7 +37,7 @@ use crate::transcript::{
 };
 use cartoon::{Cartoon, Op};
 use kaua_term::{Control, Record, ScreenMode};
-use vt::{Palette, ATTR_REVERSE, ATTR_UNDERLINE};
+use vt::{Palette, ATTR_ITALIC, ATTR_REVERSE, ATTR_UNDERLINE};
 
 /// PL-4b-ii: a render's cached proportional live tail -- the laid live block,
 /// the per-grid-row provenance `(item, row within the item, start column)`
@@ -99,6 +99,10 @@ pub struct Tile {
     /// a stale cache never outlives one frame; a click uses the last frame's
     /// layout exactly as the block `frame` does.
     live_laid: Option<LiveLaid>,
+    /// 7.7: whether the last render reserved the indicator's lane (the
+    /// content overflowed the view). The layout width follows it, and a
+    /// flip re-lays once in the frame that sees it.
+    lane: bool,
 }
 
 impl Tile {
@@ -135,6 +139,7 @@ impl Tile {
             laid_last: 0,
             laid_lines_last: 0,
             live_laid: None,
+            lane: false,
         }
     }
 
@@ -413,9 +418,18 @@ impl Tile {
         mark: Option<Mark>,
     ) -> i32 {
         cart.reset();
-        cart.ops.push(Op::Clear {
-            color: sheet.ground,
-        });
+        // HALCYON-INSTRUMENT 14.7 under the Instrument profile: the raw
+        // application grid fills the content rect in `terminal_bg`, the
+        // right/bottom remainder included (the grid rounds down to whole
+        // cells); the rich document sits on `open` (the sheet's ground),
+        // and the legacy pane keeps its surface in both modes.
+        let inst = sheet.profile == libhalcyon::instrument::Profile::Instrument;
+        let ground = if inst && self.mode == ScreenMode::AltScreen {
+            sheet.theme.terminal.bg
+        } else {
+            sheet.ground
+        };
+        cart.ops.push(Op::Clear { color: ground });
         let (_cw, cell_h, _base) = gs.mono_cell();
         let grid_h = self.grid.dims().1 as i32 * cell_h;
         self.laid_last = 0;
@@ -425,7 +439,6 @@ impl Tile {
         // legacy affordance is byte-identical): a DISCONNECTED tile's body
         // is prepended a notice strip, so the view starts below it; an
         // ENDED tile's content grows by its final line.
-        let inst = sheet.profile == libhalcyon::instrument::Profile::Instrument;
         let top = if inst && self.fate == crate::chrome::Fate::Disconnected {
             notice_strip_h(sheet, gs)
         } else {
@@ -445,7 +458,7 @@ impl Tile {
             // proportional cache -- drop any stale normal-mode layout so
             // `grid_hit` takes the mono path.
             self.live_laid = None;
-            paint_grid(cart, &self.grid, 0, top, gs, sheet);
+            paint_grid(cart, &self.grid, 0, top, gs, sheet, ground);
             if top > 0 {
                 paint_notice_strip(cart, w, top, sheet, gs);
             }
@@ -455,14 +468,12 @@ impl Tile {
         let widthi = w as i32;
         let view_end = h as i32;
         let viewh = h as i32 - top;
-        self.laid_last += self.sync_heights(widthi, sheet, gs);
-
-        // The exact content height from the cached heights: a leading gap,
-        // every frozen block plus its trailing gap, then the open block (the
-        // newest, un-frozen history; no trailing gap -- the grid follows it
-        // directly as the live tail). The gap after a block depends on the
-        // pair (a prompt runs into its output as one entry), so it is read
-        // per index by the three walks below.
+        // The gap after a block depends on the pair (a prompt runs into
+        // its output as one entry), so it is read per index by the walks
+        // below. A frozen block that laid nothing (cells mode keeps a
+        // zone-less block alive for its obj table even when its text is
+        // still on the grid) takes no gap either -- else every such block
+        // is a phantom band.
         let frozen_kinds: Vec<BlockKind> = self
             .scrollback
             .frozen_blocks()
@@ -470,10 +481,6 @@ impl Tile {
             .map(|b| b.kind)
             .collect();
         let open_kind = self.scrollback.open_block().kind;
-        // A frozen block that laid nothing (cells mode keeps a zone-less
-        // block alive for its obj table even when its text is still on the
-        // grid) takes no gap either -- else every such block is a phantom
-        // band.
         let gap_after = |i: usize, hgt: i32| -> i32 {
             if hgt == 0 {
                 return 0;
@@ -482,43 +489,74 @@ impl Tile {
             let this = frozen_kinds.get(i).copied().unwrap_or(open_kind);
             block_gap_between(this, next, sheet)
         };
-        let mut total = sheet.block_gap;
-        for (i, &(_, _, hgt)) in self.heights.iter().enumerate() {
-            total += hgt + gap_after(i, hgt);
-        }
-        let open_lb = layout_block(self.scrollback.open_block(), widthi, sheet, gs);
-        self.laid_last += 1;
-        self.laid_lines_last += open_lb.lines.len();
-        total += open_lb.height;
+        // 7.7: the indicator's lane is reserved INSIDE the viewport on
+        // overflow, so the layout width follows the last frame's decision
+        // and a flip re-lays once, here. Stable, because narrowing never
+        // shortens wrapped content: what overflows at the full width
+        // overflows at the narrower one, and what fits at the narrower fits
+        // at the full. Nothing under legacy (the lane is 0).
+        let lane = crate::indicator::lane(sheet);
+        let (lay_w, open_lb, live_lb, prov, total, content_h) = loop {
+            let lay_w = widthi - if self.lane { lane } else { 0 };
+            self.laid_last += self.sync_heights(lay_w, sheet, gs);
+            // The exact content height from the cached heights: the top
+            // padding, every frozen block plus its trailing gap, then the
+            // open block (the newest, un-frozen history; no trailing gap --
+            // the grid follows it directly as the live tail), the tail, and
+            // the bottom padding.
+            let mut total = sheet.pad_top;
+            for (i, &(_, _, hgt)) in self.heights.iter().enumerate() {
+                total += hgt + gap_after(i, hgt);
+            }
+            let open_lb = layout_block(self.scrollback.open_block(), lay_w, sheet, gs);
+            self.laid_last += 1;
+            self.laid_lines_last += open_lb.lines.len();
+            total += open_lb.height;
 
-        // PL-4: the live grid renders PROPORTIONALLY as the normal-mode tail
-        // (HALCYON 14.13) -- its soft-wrapped rows joined into logical lines and
-        // re-wrapped at the tile width, replacing the fixed mono grid. Laid only
-        // through the content rows so a screen of trailing blanks below the
-        // prompt is not painted (the bottom-anchored view would else float the
-        // prompt mid-tile). `prov` maps a grid row -> (logical line, start col).
+            // PL-4: the live grid renders PROPORTIONALLY as the normal-mode
+            // tail (HALCYON 14.13) -- its soft-wrapped rows joined into
+            // logical lines and re-wrapped at the tile width, replacing the
+            // fixed mono grid. Laid only through the content rows so a
+            // screen of trailing blanks below the prompt is not painted
+            // (the bottom-anchored view would else float the prompt
+            // mid-tile). `prov` maps a grid row -> (logical line, start col).
+            let live_cols = self.grid.dims().0;
+            let live_rows = self.grid.content_rows();
+            let live_wrapped = self.grid.wrapped();
+            let (live_b, prov) = self.scrollback.live_block(
+                self.grid.cells(),
+                live_cols,
+                live_rows,
+                live_wrapped,
+                &self.spans,
+                self.grid.top_continues(),
+            );
+            let live_lb = layout_block(&live_b, lay_w, sheet, gs);
+            self.laid_last += 1;
+            self.laid_lines_last += live_lb.lines.len();
+
+            let content_h =
+                total + live_lb.height + ended_line.map_or(0, |(_, lh)| lh) + sheet.pad_bottom;
+            let overflow = content_h > viewh;
+            if lane == 0 {
+                // No indicator on this sheet (legacy, or a switch back to
+                // it): the flag clears so a later Instrument sheet decides
+                // afresh rather than inheriting a stale reservation.
+                self.lane = false;
+                break (lay_w, open_lb, live_lb, prov, total, content_h);
+            }
+            if overflow == self.lane {
+                break (lay_w, open_lb, live_lb, prov, total, content_h);
+            }
+            self.lane = overflow;
+        };
         let live_cols = self.grid.dims().0;
-        let live_rows = self.grid.content_rows();
-        let live_wrapped = self.grid.wrapped();
-        let (live_b, prov) = self.scrollback.live_block(
-            self.grid.cells(),
-            live_cols,
-            live_rows,
-            live_wrapped,
-            &self.spans,
-            self.grid.top_continues(),
-        );
-        let live_lb = layout_block(&live_b, widthi, sheet, gs);
-        self.laid_last += 1;
-        self.laid_lines_last += live_lb.lines.len();
-
-        let content_h = total + live_lb.height + ended_line.map_or(0, |(_, lh)| lh);
 
         // The mark's row drags the view: locate its content-relative span
         // (a frozen block's from the cached heights; the open block's is
         // laid already) and adjust scroll_up so it is visible.
         if let Some(m) = mark {
-            let mut rel = sheet.block_gap;
+            let mut rel = sheet.pad_top;
             let mut span: Option<(i32, i32)> = None;
             for (i, (b, &(_, _, hgt))) in self
                 .scrollback
@@ -528,7 +566,7 @@ impl Tile {
                 .enumerate()
             {
                 if b.id == m.block {
-                    let lb = layout_block(b, widthi, sheet, gs);
+                    let lb = layout_block(b, lay_w, sheet, gs);
                     span = Some(match laid_line_for(&lb, m.item, m.row) {
                         Some((ly, lh)) => (rel + ly, lh),
                         None => (rel, hgt.max(1)),
@@ -570,7 +608,7 @@ impl Tile {
 
         // Bottom-anchor [scrollback][grid]: walk the blocks by their cached
         // heights, laying out + rendering only those that intersect the view.
-        let mut y = y0 + sheet.block_gap;
+        let mut y = y0 + sheet.pad_top;
         for (i, (b, &(_, _, hgt))) in self
             .scrollback
             .frozen_blocks()
@@ -580,7 +618,7 @@ impl Tile {
         {
             self.frame.push((b.id, y, hgt));
             if y + hgt >= 0 && y <= view_end {
-                let lb = layout_block(b, widthi, sheet, gs);
+                let lb = layout_block(b, lay_w, sheet, gs);
                 debug_assert_eq!(lb.height, hgt, "a frozen block's height is deterministic");
                 paint_mark(cart, &lb, y, w, sheet, mark.filter(|m| m.block == b.id));
                 render_block(cart, &lb, y, gs);
@@ -668,6 +706,22 @@ impl Tile {
         }
         if top > 0 {
             paint_notice_strip(cart, w, top, sheet, gs);
+        }
+        // 7.7: the position indicator, over everything, only while the
+        // content overflows (the lane it sits in is already reserved).
+        if self.lane {
+            let scroll = (content_h - viewh) - su;
+            if let Some((x, y, tw, th)) =
+                crate::indicator::thumb_rect(widthi, top, viewh, content_h, scroll, sheet)
+            {
+                cart.ops.push(Op::Rect {
+                    x,
+                    y,
+                    w: tw as u32,
+                    h: th as u32,
+                    color: sheet.inst.dim,
+                });
+            }
         }
         // Cache this frame's proportional tail for the click inverse (`y` is the
         // tail's screen-y). Moved in AFTER every read above (`live_lb` / `prov`
@@ -993,6 +1047,7 @@ fn paint_grid(
     y0: i32,
     gs: &mut GlyphSource,
     sheet: &Sheet,
+    ground: u32,
 ) {
     let (cw, ch, base) = gs.mono_cell();
     let (cols, rows) = grid.dims();
@@ -1015,7 +1070,7 @@ fn paint_grid(
             // intent is "only cells with an explicit background" -- and painted
             // that terminal ground over the pane's, so the same content
             // rendered differently in a tile than in the console transcript.
-            if bg != sheet.ground && bg != sheet.theme.terminal.bg {
+            if bg != ground && bg != sheet.theme.terminal.bg {
                 cart.ops.push(Op::Rect {
                     x: cx,
                     y: cy,
@@ -1027,8 +1082,15 @@ fn paint_grid(
             if cell.ch != ' ' && cell.ch != '\0' {
                 // The GRID mono (advance 10 at 100%): a full-screen program
                 // owns its cells at the pts geometry, not the document's
-                // island size.
-                if let Some(gref) = gs.glyph(FACE_MONO, sheet.mono_grid_px, cell.ch) {
+                // island size. An SGR italic is the true Italic cell under
+                // Instrument (the Regular's under legacy, where the role
+                // resolves to it -- 7.2).
+                let face = if cell.attrs & ATTR_ITALIC != 0 {
+                    sheet.face_mono_italic
+                } else {
+                    FACE_MONO
+                };
+                if let Some(gref) = gs.glyph(face, sheet.mono_grid_px, cell.ch) {
                     cart.push_glyphs(gen, cx, cy + base, fg, &[gref]);
                 }
             }
@@ -1454,6 +1516,7 @@ mod tests {
             laid_last: 0,
             laid_lines_last: 0,
             live_laid: None,
+            lane: false,
         }
     }
 
@@ -2180,6 +2243,7 @@ mod tests {
         let inst = crate::layout::sheet_for(
             &libhalcyon::instrument::Bundle::builtin(libhalcyon::instrument::Profile::Instrument),
             100,
+            crate::layout::TEST_DISPLAY_W,
         );
         let legacy = crate::layout::daylight_sheet(100);
         let (_, ch, _) = gs.mono_cell();
@@ -2259,5 +2323,221 @@ mod tests {
         let c = render(&mut t, &inst, &mut gs);
         assert!(!caret(&c, inst.accent));
         assert!(!c.ops.iter().any(|op| matches!(op, Op::Rect { x: 0, y: 0, color, .. } if *color == inst.inst.header)));
+    }
+    /// The pre-I-5b legacy RENDER, pinned as a fingerprint over the cartoon
+    /// (every op's geometry and colour, the glyph runs' advances -- never
+    /// an atlas id, which packing order owns) for a history tile in normal
+    /// mode with a mark, and in alt-screen. Read off 69f71541 with the
+    /// constants at 0; the I-5b paddings, inks and grounds must leave it.
+    fn render_fingerprint(sheet: &Sheet) -> u64 {
+        use crate::layout::tests::{fnv, fp_i32, fp_u32};
+        let mut gs = GlyphSource::new_vendored(512);
+        let mut h: u64 = 0xcbf29ce484222325;
+        let mut hash_cart = |c: &Cartoon, content: i32, su: i32| {
+            fp_i32(&mut h, content);
+            fp_i32(&mut h, su);
+            fp_u32(&mut h, c.ops.len() as u32);
+            for op in c.ops.iter() {
+                match *op {
+                    Op::Clear { color } => {
+                        fnv(&mut h, b"C");
+                        fp_u32(&mut h, color);
+                    }
+                    Op::Rect { x, y, w, h: rh, color } => {
+                        fnv(&mut h, b"R");
+                        fp_i32(&mut h, x);
+                        fp_i32(&mut h, y);
+                        fp_u32(&mut h, w);
+                        fp_u32(&mut h, rh);
+                        fp_u32(&mut h, color);
+                    }
+                    Op::Glyphs { baseline_x, baseline_y, color, start, count, .. } => {
+                        fnv(&mut h, b"G");
+                        fp_i32(&mut h, baseline_x);
+                        fp_i32(&mut h, baseline_y);
+                        fp_u32(&mut h, color);
+                        for r in c.runs[start as usize..(start + count) as usize].iter() {
+                            fp_i32(&mut h, r.advance);
+                        }
+                    }
+                    _ => fnv(&mut h, b"?"),
+                }
+            }
+        };
+        let (cw, ch, _) = gs.mono_cell();
+        let mut t = history_tile(24, 8, 64);
+        push_history(&mut t, 12, 3, 'h');
+        t.apply(Record::CellDiff {
+            changed: vec![(0, 0, cell('l')), (0, 1, cell('i')), (0, 2, cell('v')), (0, 3, cell('e')), (2, 0, cell('x'))],
+            cursor: (2, 1, true),
+            wrapped: vec![],
+            top_continues: false,
+        });
+        let (w, hh) = ((24 * cw) as usize, (8 * ch) as usize);
+        for (su0, mark) in [
+            (0, None),
+            (37, None),
+            (0, Some(Mark { block: GRID_KEY, item: 0, row: usize::MAX, obj: None })),
+        ] {
+            let mut cart = Cartoon::new();
+            let mut su = su0;
+            let content = t.render(&mut cart, w, hh, &mut gs, sheet, &mut su, mark);
+            hash_cart(&cart, content, su);
+        }
+        t.apply(Record::Mode(ScreenMode::AltScreen));
+        let mut cart = Cartoon::new();
+        let content = t.render(&mut cart, w, hh, &mut gs, sheet, &mut 0, None);
+        hash_cart(&cart, content, 0);
+        h
+    }
+
+    #[test]
+    fn legacy_render_is_byte_identical_to_the_pre_i5b_tree() {
+        let fp = render_fingerprint(&crate::layout::daylight_sheet(100));
+        assert_eq!(fp, LEGACY_RENDER_FP, "legacy render drifted: got {fp:#018x}");
+    }
+
+    const LEGACY_RENDER_FP: u64 = 0xcc2ecb507103e963;
+    // ---- I-5b: the document in the tile (7.5 / 7.7 / 14.7) ----
+
+    fn inst_sheet() -> Sheet {
+        crate::layout::sheet_for(
+            &libhalcyon::instrument::Bundle::builtin(libhalcyon::instrument::Profile::Instrument),
+            100,
+            crate::layout::TEST_DISPLAY_W,
+        )
+    }
+
+    /// 7.5 / 7.7: the Instrument tile pads the flow (28 / 38 / 50 at the
+    /// reference display) and, once the content overflows, reserves the 8
+    /// px lane -- the blocks re-lay narrower -- and paints the `dim` thumb
+    /// ending 4 above the view's bottom while following the tail, higher
+    /// while in history. Nothing of it under legacy.
+    #[test]
+    fn the_instrument_tile_pads_the_document_and_indicates_its_position_on_overflow() {
+        let mut gs = GlyphSource::new_vendored(512);
+        let s = inst_sheet();
+        let (cw, ch, _) = gs.mono_cell();
+        let (w, h) = ((60 * cw) as usize, (30 * ch) as usize);
+        let thumb = |c: &Cartoon| -> Option<(i32, i32, i32)> {
+            c.ops.iter().find_map(|op| match op {
+                Op::Rect { x, y, w: 3, h, color } if *color == s.inst.dim => Some((*x, *y, *h as i32)),
+                _ => None,
+            })
+        };
+        // A short history: the flow is padded, nothing overflows.
+        let mut t = history_tile(60, 30, 64);
+        push_history(&mut t, 2, 1, 'h');
+        let mut cart = Cartoon::new();
+        let content = t.render(&mut cart, w, h, &mut gs, &s, &mut 0, None);
+        assert!(content < h as i32);
+        assert!(!t.lane);
+        assert_eq!(t.heights_width, w as i32, "the full width");
+        assert_eq!(thumb(&cart), None, "no indicator while the content fits");
+        // pad_top + 2 blocks (24 + gap 15 each) + the tail + pad_bottom.
+        assert!(content >= 28 + 50, "the paddings are in the content height ({content})");
+        let first_glyph_y = cart.ops.iter().find_map(|op| match op {
+            Op::Glyphs { baseline_y, .. } => Some(*baseline_y),
+            _ => None,
+        }).expect("a glyph");
+        // The history is un-annotated: raw output, the terminal view -- 14
+        // in, the row's 3, the ascent 11 -- under the top padding.
+        assert_eq!(first_glyph_y, 28 + 14 + 3 + 11, "the first row sits under the top padding");
+        // A long history: overflow.
+        push_history(&mut t, 60, 1, 'h');
+        let mut cart = Cartoon::new();
+        let mut su = 0;
+        let content = t.render(&mut cart, w, h, &mut gs, &s, &mut su, None);
+        assert!(content > h as i32);
+        assert!(t.lane, "the lane is reserved");
+        assert_eq!(t.heights_width, w as i32 - 8, "the blocks re-laid inside the lane");
+        let (x, y, th) = thumb(&cart).expect("the thumb");
+        assert_eq!(x, w as i32 - 6);
+        assert_eq!(y + th, h as i32 - 4, "following the tail: the end edge at V - 4");
+        assert!(th >= 24);
+        // In history: the thumb rises with the view.
+        let mut cart = Cartoon::new();
+        let mut su = 100;
+        t.render(&mut cart, w, h, &mut gs, &s, &mut su, None);
+        let (_, y2, th2) = thumb(&cart).expect("the thumb");
+        assert!(y2 + th2 < h as i32 - 4, "not at the end while in history");
+        assert_eq!(th2, th);
+        // Legacy: neither the paddings nor the lane.
+        let l = crate::layout::daylight_sheet(100);
+        let mut t = history_tile(60, 30, 64);
+        push_history(&mut t, 62, 1, 'h');
+        let mut cart = Cartoon::new();
+        t.render(&mut cart, w, h, &mut gs, &l, &mut 0, None);
+        assert!(!t.lane);
+        assert_eq!(t.heights_width, w as i32);
+        assert!(!cart.ops.iter().any(|op| matches!(op, Op::Rect { w: 3, color, .. } if *color == l.inst.dim)));
+    }
+
+    /// 7.7's stability: the lane decision, once taken, holds across frames
+    /// (one re-lay at the flip, then a cache hit), and clears when the
+    /// content fits again (a taller view).
+    #[test]
+    fn the_lane_decision_is_stable_across_frames_and_clears_when_the_content_fits() {
+        let mut gs = GlyphSource::new_vendored(512);
+        let s = inst_sheet();
+        let (cw, ch, _) = gs.mono_cell();
+        let (w, h) = ((60 * cw) as usize, (30 * ch) as usize);
+        let mut t = history_tile(60, 30, 64);
+        push_history(&mut t, 40, 1, 'h');
+        let mut cart = Cartoon::new();
+        t.render(&mut cart, w, h, &mut gs, &s, &mut 0, None);
+        assert!(t.lane);
+        let laid_first = t.laid_last;
+        t.render(&mut cart, w, h, &mut gs, &s, &mut 0, None);
+        assert!(t.lane);
+        assert!(t.laid_last < laid_first, "the second frame lays no frozen block again ({} < {})", t.laid_last, laid_first);
+        // A view tall enough for everything: the lane clears and the
+        // blocks re-lay at the full width.
+        t.render(&mut cart, w, h * 40, &mut gs, &s, &mut 0, None);
+        assert!(!t.lane);
+        assert_eq!(t.heights_width, w as i32);
+    }
+
+    /// 14.7: the raw application grid fills its rect in `terminal_bg` under
+    /// Instrument (the remainder included; no rect for a cell on that
+    /// ground) and an SGR italic cell is the Italic face; legacy keeps the
+    /// pane surface and the Regular.
+    #[test]
+    fn the_alt_screen_is_terminal_bg_with_the_italic_cell_under_instrument() {
+        let mut gs = GlyphSource::new_vendored(512);
+        let s = inst_sheet();
+        let (cw, ch, _) = gs.mono_cell();
+        let mut t = Tile::new(20, 4, s.theme.terminal);
+        t.apply(Record::Mode(ScreenMode::AltScreen));
+        let mut ital = Cell { ch: 'x', fg: s.theme.terminal.fg, bg: s.theme.terminal.bg, attrs: ATTR_ITALIC, span: 0 };
+        let mut roman = ital;
+        roman.attrs = 0;
+        roman.ch = 'y';
+        t.apply(Record::CellDiff {
+            changed: vec![(0, 0, ital), (0, 1, roman)],
+            cursor: (0, 2, true),
+            wrapped: vec![],
+            top_continues: false,
+        });
+        let id_i = gs.glyph(crate::raster::FACE_MONO_ITALIC, s.mono_grid_px, 'x').unwrap().glyph;
+        let id_r = gs.glyph(FACE_MONO, s.mono_grid_px, 'y').unwrap().glyph;
+        let id_x_roman = gs.glyph(FACE_MONO, s.mono_grid_px, 'x').unwrap().glyph;
+        assert_ne!(id_i, id_x_roman, "the Italic cell is a distinct raster");
+        let mut cart = Cartoon::new();
+        let (w, h) = ((20 * cw) as usize, (4 * ch) as usize);
+        t.render(&mut cart, w, h, &mut gs, &s, &mut 0, None);
+        assert!(matches!(cart.ops.first(), Some(Op::Clear { color }) if *color == s.theme.terminal.bg), "terminal_bg");
+        assert!(!cart.ops.iter().any(|op| matches!(op, Op::Rect { color, .. } if *color == s.theme.terminal.bg)), "no per-cell rect on the ground");
+        let ids: Vec<u32> = cart.runs.iter().map(|r| r.glyph).collect();
+        assert!(ids.contains(&id_i) && ids.contains(&id_r), "the italic cell paints the Italic face, the roman the Regular ({ids:?})");
+        assert!(!ids.contains(&id_x_roman));
+        ital.attrs = ATTR_ITALIC;
+        // Legacy: the surface, and the Regular for both.
+        let l = crate::layout::daylight_sheet(100);
+        let mut cart = Cartoon::new();
+        t.render(&mut cart, w, h, &mut gs, &l, &mut 0, None);
+        assert!(matches!(cart.ops.first(), Some(Op::Clear { color }) if *color == l.ground));
+        let ids: Vec<u32> = cart.runs.iter().map(|r| r.glyph).collect();
+        assert!(ids.contains(&id_x_roman) && !ids.contains(&id_i));
     }
 }

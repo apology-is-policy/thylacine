@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**434 owned · 65 unowned · 499 files (86% owned) · ~21802 unswept lines.**
+**434 owned · 66 unowned · 500 files (86% owned) · ~21947 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **66 files, ~30518 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -75,7 +75,7 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30518 lin
 | usr/pouch-hello | 0 | 22 | 3384 |
 | usr/lib | 58 | 5 | 2834 |
 | usr/haul | 0 | 5 | 2557 |
-| usr/halcyond | 19 | 3 | 2271 |
+| usr/halcyond | 19 | 4 | 2416 |
 | kernel | 123 | 15 | 2118 |
 | usr/ports | 14 | 4 | 1631 |
 | usr/quarry | 0 | 1 | 1028 |
@@ -154,6 +154,7 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30518 lin
 | usr/ports/gnumake/generated/glob.h | 163 |
 | kernel/include/thylacine/9p_srvconn_transport.h | 160 |
 | kernel/cpio.c | 152 |
+| usr/halcyond/src/indicator.rs | 145 |
 | usr/susp-mask-child/src/main.rs | 139 |
 | usr/pouch-hello/pouch-hello-reentry.c | 133 |
 | usr/pouch-hello/pouch-hello-spawn.c | 127 |

@@ -507,6 +507,17 @@ and §4.2–4.4 are properties of the pages, not of who samples them.
   box glyphs BEFORE the face, so a font box glyph never enters a cell.
   `the_subset_carries_every_baked_codepoint` still holds (207 baked, all
   present); `the_derived_cell_table_is_the_baked_one` unchanged.
+
+  **Amended at HALCYON-INSTRUMENT I-5b (2026-09-14).** Two rules for the
+  Instrument document that the legacy path does not take: a mono ROW in
+  the fractional flow is placed by the face's hhea content box (11 + 2 at
+  12 px — the browser's 13 px fragment), not by the cell (14 rows, cut to
+  the OS/2 Windows descent), so the baseline lands where the golden's
+  does and the cell paints its extra row under it; and a symbol the
+  Instrument Sans lacks (ut's turnstile) is served by the free-running
+  Cornucopia at the SAME px, the mirror of `FACE_MONO_TEXT`'s Sans
+  fallback — the legacy cuts keep the island cell. `FACE_MONO_ITALIC`
+  gained its consumers: an SGR 3 in a mono run and in the raw grid.
 - **TY-5** The hinting lever (if voted).
 - **TY-6** The audit: the atlas bound under phases + stroke (I-32's
   in-process face); a hostile stream cannot make a stroke raster exceed

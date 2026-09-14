@@ -73,6 +73,13 @@ pub fn is_mono_face(face: u8) -> bool {
     is_cell_face(face) || face == FACE_MONO_TEXT
 }
 
+/// Whether `face` is one of the Instrument Sans cuts (whose missing
+/// symbols the free-running mono serves at the same px).
+#[inline]
+pub fn is_instrument_sans(face: u8) -> bool {
+    face == FACE_SANS || face == FACE_SANS_MEDIUM || face == FACE_SANS_SEMIBOLD
+}
+
 /// The `faces[]` slot of a proportional id; None for a mono id or an
 /// unknown one. Explicit, so the mono sentinel sitting in the middle of
 /// the id space can never be mistaken for a slot.
@@ -705,6 +712,16 @@ impl GlyphSource {
         // per lay, measured at 2.4x the cached integer path.
         let gid = f.glyph_id(ch);
         if gid.to_u32() == 0 && ch != '\u{FFFD}' && self.mono_has(ch) {
+            // A codepoint the proportional face lacks, served by Cornucopia:
+            // the legacy cuts take the island CELL (byte-pinned); the
+            // Instrument cuts take the free-running face AT THE SAME PX
+            // (I-5b: the prompt's turnstile at the body size, 7.4), the
+            // mirror of `FACE_MONO_TEXT`'s Sans fallback -- terminating,
+            // because that arm is taken only when the mono face HAS the
+            // codepoint and this one only when it does.
+            if is_instrument_sans(face) {
+                return self.advance_f(FACE_MONO_TEXT, px, ch);
+            }
             return Some(self.island.w as f32);
         }
         Some(f.advance(gid, px))
@@ -852,6 +869,11 @@ impl GlyphSource {
         // One charmap query for the whole path (TY-6 F9).
         let gid = f.glyph_id(ch);
         if gid.to_u32() == 0 && ch != '\u{FFFD}' && self.mono_has(ch) {
+            if is_instrument_sans(face) {
+                // The free-running mono's entry at this px (cached under ITS
+                // key; `advance_f` took the same branch).
+                return self.glyph_at(FACE_MONO_TEXT, px, ch, phase);
+            }
             let cell = self.island;
             let smooth = self.smooth_mem;
             let alpha = self
@@ -2461,5 +2483,25 @@ mod tests {
                 assert!(rows_at_x0(&gs, heavy.glyph, cw, chh) > want_light, "{pct}% cell {cw}: heavy outweighs light");
             }
         }
+    }
+    /// I-5b: a symbol the Instrument Sans lacks (ut's turnstile) is served
+    /// by the free-running mono AT THE SAME PX -- the prompt's glyphs at
+    /// the body size (7.4) -- where the legacy cuts keep the island cell;
+    /// a codepoint neither face has is the Sans's .notdef, not a loop.
+    #[test]
+    fn the_instrument_sans_serves_a_missing_symbol_from_the_free_running_mono() {
+        let mut gs = GlyphSource::new_vendored(64);
+        assert_eq!(gs.advance_f(FACE_SANS, 15.0, '\u{22a2}'), Some(7.5), "Cornucopia's 0.5 em at 15");
+        assert_eq!(gs.advance_f(FACE_SANS_MEDIUM, 34.0, '\u{22a2}'), Some(17.0));
+        assert_eq!(gs.advance_f(FACE_BODY, 11.5, '\u{22a2}'), Some(6.0), "legacy: the island cell");
+        let via_sans = gs.glyph_at(FACE_SANS, 15.0, '\u{22a2}', 1).expect("served");
+        let direct = gs.glyph_at(FACE_MONO_TEXT, 15.0, '\u{22a2}', 1).expect("served");
+        assert_eq!((via_sans.glyph, via_sans.advance), (direct.glyph, direct.advance), "the mono's own entry");
+        // Neither face: Plex's .notdef, finite, terminating.
+        let none = gs.advance_f(FACE_SANS, 15.0, '\u{4e2d}').expect("the .notdef advance");
+        assert!(none > 0.0 && none < 15.0);
+        assert!(gs.glyph_at(FACE_SANS, 15.0, '\u{4e2d}', 0).is_some());
+        // And the mono's own fallback still goes the other way.
+        assert_eq!(gs.advance_f(FACE_MONO_TEXT, 15.0, '\u{4e2d}'), Some(none));
     }
 }

@@ -816,10 +816,26 @@ count against `raster::VENDORED_FACES`, derived from the one list — the
 literal `4` they carried refused to start on the first seven-face image
 (the first gate run measured it; no host test can see a bin's guard).
 Binary 2,140,744 → 2,785,000 bytes (+644 KB: the three Plex cuts and the
-two subsets, accepted at §7.1). Not yet (I-5b): the document's own type
-— body 15 / 1.62, the headings, inline code at 0.86 × body, the italic
-in mono runs (`ATTR_ITALIC`, which neither the layout nor the grid reads
-today — an SGR 3 is silently roman everywhere), the paddings of §7.5.
+two subsets, accepted at §7.1).
+
+**As built at I-5b (the document; JOURNAL run 46o "I-5b").** The `Sheet`
+carries the document's column of the table: body and prompt 15, H1
+clamp(23, 2.4 vw, 34) (34 at 1440, 30.72 at 1280) / H2 17 / H3 15 (the
+kit defines no H3; a step under H2 in its ratios, ruled here — §13's
+addendum), the line factors 1.62 / 1.12 / 1.3 / 1.3, inline code
+`FACE_MONO_TEXT` at 0.86 × the body (12.9) on the body baseline
+inheriting its box, the `pre` row 12 × 1.65 and the terminal row 12 × 1.6
+on the CELL faces; the roles' faces (headings `FACE_SANS_MEDIUM` roman,
+prose `FACE_SANS`, emph the Regular Italic, strong the Bold), the default
+inks of §7.3 by role, and — new in the type — the italic: an SGR 3 in a
+mono run takes the Italic cell (`FACE_MONO_ITALIC`, the raw grid
+included) and on an annotated proportional run the italic face, under
+Instrument (legacy never read the attribute and is byte-pinned on that).
+The prompt's turnstile, which Plex Sans lacks, is served by the
+free-running Cornucopia at the body size (the mirror of the text face's
+Sans fallback; the legacy cuts keep the cell). MEASURED: the golden's
+`expandedTile` inline-code fragment, 77.578 wide at 12.9, reproduces at
+77; the rows are §7.5's as-built note.
 
 ### 7.3 Colour: the state matrix and the derived opaques
 
@@ -895,6 +911,40 @@ lookups only, no shaping) is ~300 lines in `raster.rs` and closes the gap
 for Latin text; ligatures stay off in both the browser capture (request
 them off, §11) and here. Whether it lands in this arc or after is §13.4.
 
+**As built at I-5b (JOURNAL run 46o "I-5b").** The flow is PROFILE-KEYED
+(`Sheet.flow`): legacy rounds each line box to whole pixels and stacks
+integers (byte-pinned by a fingerprint over a rich transcript at two
+widths and two scales, read off the tree BEFORE the change); Instrument
+accumulates FRACTIONAL boxes in 1/64 px — Blink's LayoutUnit, truncated
+where it truncates (24.3 → 24.296875) — rounds each line's top to a row
+at paint and places the glyphs at the line top plus the FLOORED
+half-leading, so the golden's rows reproduce: the H1's 44 px content in
+its 38.08 box (fragment tops 3 above the line), the paragraph's glyphs 2
+under its line top, the H2 flush, the `pre`'s 13 px content box 3 under
+each 19.8 row. Cornucopia's CELL is 14 rows (cut to the OS/2 Windows
+descent) but the ROW is placed by the hhea content box, 11 + 2 — what the
+browser measures — and the cell paints its extra row under the baseline.
+Every margin of this section is the sheet's `Rhythm`, collapsed pairwise:
+consecutive prose lines are ONE paragraph (nothing between them); the
+EMPTY line is the paragraph break — zero height, margins that collapse
+THROUGH (two blanks open one 15, as an empty `<p>` does); a `pre` opens
+18, a table 15, the rule the UA's 8; raw output opens 0, and a prompt runs
+straight into what follows it — in the live tail, which straddles zones,
+and between the frozen prompt and output blocks alike, so a line never
+moves by a margin when it freezes. The paddings are `vw` of the LOGICAL
+display width, scaled then rounded once (32 / 43 / 50 at 1440 × 100; 28 /
+38 at 1280; 63 / 86 at 2880 × 200); both owners rebuild the sheet on a
+display resize, not only on a rescale. The measure: H1, prose, the prompt
+and a `pre` cap at 720 (each block); H2, H3, a table, a rule and raw
+output run the width. The `pre` never wraps and — the cartoon has no clip
+— is CUT at its box's inner edge (the kit scrolls it; §7.7's horizontal
+twin is not built). The kit's `ul` / `li` and doc-path have no Beacon
+element and no producer. The block boundary is an integer (each block's
+flow rounds once at its end: ±0.5 px against one continuous flow, within
+the pin). Host witnesses: the golden's rows, the paragraph break, the cap,
+the inks, the italic; the gate's document leg (`ls-halcyon-instrument`:
+the terminal view, the code block's ground and rule, the thumb).
+
 ### 7.6 Presentation: terminal view vs rich document
 
 A tile's content has ONE presentation under Instrument, as under legacy
@@ -908,6 +958,17 @@ the mono grid, full-body (§14.7), as ratified. There is no per-tile
 presentation flag and no toggle pill; a program that wants the mockup's
 look emits preformatted output, which is mono by the standing rule
 (HALCYON-VISUAL §7).
+
+**As built at I-5b.** Raw output (a program's un-annotated bytes,
+HALCYON.md §14.13's RAW class) is the terminal view INSIDE the flow:
+`terminal_bg` behind it, `terminal_text` as its default ink, 14 / 16
+inside, the 12 × 1.6 row, no rule, the width uncapped, no margin to its
+prompt; a Beacon `pre` is the code block: `code_bg`, the 2 px
+`amber_muted` rule at the text inset, 15 / 17 inside the rule, the 12 ×
+1.65 row, `code_body`, 18 either side, capped at 720. The terminal view's
+bottom padding is the box's own 14 (symmetric), not the mockup tile's 36,
+which is that tile's end — the flow's end is the document's 50 (§13's
+addendum).
 
 ### 7.7 The position indicator (round 2 §6; ruling 7)
 
@@ -940,6 +1001,23 @@ application owns its grid and gets no indicator (§14.7); a terminal-history
 overlay shows it once the shell owns the view. A wide `pre` block may carry
 the horizontal twin (3 px, an 8 px lane reserved on overflow only, the same
 rules, no drag affordance).
+
+**As built at I-5b.** `halcyond::indicator` (pure, host-tested: hidden
+while C ≤ V; L, T with the 24 floor, the travel, the leading edge rounded
+along it, the end at V − 4 at the tail; the lane and the thumb through
+`ipx`). Both owners — the tile and the console path — reserve the lane by
+re-laying at W − 8 once the content overflows and paint the thumb over
+everything, in `dim` (Carbon `#737A76`); the decision persists across
+frames and a flip re-lays once (narrowing never shortens wrapped content,
+so what overflows at W overflows at W − 8, and what fits at W − 8 fits at
+W). The scroll model is the existing bottom-anchored one (`scroll_up`
+pixels above the tail): while the reader is in history an append keeps
+their distance from the tail, so the thumb never reports the end until
+they return — that distance is the "retained anchor" here; a top-anchored
+history is a scroll-model change beyond this slice. The horizontal twin
+for a wide `pre` is not built (the block is cut at its box). The gate
+reads the thumb's three columns, the columns either side and the lane's
+top.
 
 ## 8. The rails
 
@@ -1381,13 +1459,18 @@ start)` with opacity 0 at 55 % — reduced-motion honoured (§9.5).
   cell, the `Sheet`'s role table, the rails / headers / placard / menu on
   the map, the golden-width witnesses, the startup guard derived; the
   as-built notes in §7.1, §7.2, §6.4, §8.1–8.3, §14.2; JOURNAL run 46o
-  "I-5a"). Remaining: **I-5b** the document's `Sheet` (§7.2's body / H1 /
-  H2 / code sizes, §7.5's paddings and collapse, the `pre` block, the
-  terminal view's colours and default inks, the caret, the raw grid §14.7,
-  the position indicator §7.7, the italic in mono runs); **I-5c** the
-  producers (`λ … ⊢` in `ut` and nora's nine roles through the palette
-  export); **I-5d** GPOS kerning. §14.4 waits for the inline-media arc's
-  merge (it lives on aux-3, `53fcc14c`).
+  "I-5a"). **I-5b LANDED** (the document: the profile-keyed fractional
+  flow and the `Sheet`'s document column — the type map's body / H1 / H2 /
+  H3 / inline code, §7.3's default inks, §7.5's paddings, collapse, the
+  paragraph break and the 720 measure, the terminal view and the code
+  block, the italic in mono runs and the raw grid, the Sans' turnstile
+  from the free-running mono, the position indicator §7.7 in both owners,
+  the raw grid's ground §14.7; legacy byte-pinned by two fingerprints read
+  off the tree before the change; the as-built notes in §7.2, §7.5, §7.6,
+  §7.7, §14.7 and §13's addendum; JOURNAL run 46o "I-5b"). Remaining:
+  **I-5c** the producers (`λ … ⊢` in `ut` and nora's nine roles through
+  the palette export); **I-5d** GPOS kerning. §14.4 waits for the
+  inline-media arc's merge (it lives on aux-3, `53fcc14c`).
 - **I-6 — dividers and minima.** Capture, drag, double-click, the clamps
   and refusals; winsize through the existing path.
 - **I-7 — the picker and live switching.** The menu surface, the
@@ -1451,6 +1534,17 @@ stand.
    `tools/halcyon/ansi16.json`; a revert is two values — for the
    operator's eye when I-1's gallery lands ("warmer and drier" is that
    theme's stated design).
+
+**I-5b residues (recorded 2026-09-14 evening; ruled by the implementer
+where the kit is silent — each reversal is a constant):** H3 = Sans 15 /
+1.3 / 500, margins 22 / 8 (the kit has no H3); the terminal view inside
+the flow pads 14 top and bottom (the mockup tile's 36 is that tile's
+end); the document's bottom padding 50 stands under the live prompt (the
+kit's `.editor`: once the transcript overflows, the caret line sits 50
+above the tile's bottom); a wide `pre` is cut at its box (no horizontal
+scroll — the cartoon cannot clip); the kit's list and doc-path elements
+have no Beacon producer; the alt screen's cursor stays the bar until the
+VT core tracks the application's shape.
 
 ## 14. The round-2 surfaces (Astra §7, adopted 2026-09-14 with the deltas named)
 
@@ -1686,6 +1780,14 @@ underline derive from the Cornucopia cell, not the specimen's 7 × 14. No
 the text's colours under the existing cursor-visibility policy, no grid
 dimming; the return to normal mode restores the prompt and the transcript
 position through the mode protocol, never from a picture of old pixels.
+
+**As built at I-5b.** The tile's alt-screen render clears the content rect
+to `terminal_bg` under Instrument (the remainder outside the whole cells
+included; a cell on that ground paints no rect) and an SGR italic cell
+paints the Italic face; legacy keeps the pane surface and the Regular.
+The cursor is the existing 2 px bar in `amber` at the cell — the
+application's shape (block / bar / underline) is not tracked by the VT
+core yet, a recorded residue (§13's addendum).
 
 ### 14.8 Login and the pre-login console — unchanged
 

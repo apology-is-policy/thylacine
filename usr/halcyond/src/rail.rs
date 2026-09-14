@@ -1038,7 +1038,7 @@ mod tests {
     use libhalcyon::instrument::{Bundle, Profile};
 
     fn carbon() -> Sheet {
-        crate::layout::sheet_for(&Bundle::builtin(Profile::Instrument), 100)
+        crate::layout::sheet_for(&Bundle::builtin(Profile::Instrument), 100, crate::layout::TEST_DISPLAY_W)
     }
 
     fn model() -> RailModel {

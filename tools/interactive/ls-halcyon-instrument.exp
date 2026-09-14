@@ -65,6 +65,17 @@
 #             runs, `EXIT 0` with the check after it, `EXIT 1` with the bang
 #             after a failure -- and the pane count that follows the split.
 #
+# I-5b (HALCYON-INSTRUMENT 7.2 / 7.3 / 7.5 / 7.7; the I-5b status row), on
+# the same image:
+#
+#   document: raw output sits on `terminal_bg` (the terminal view); `ls -l`
+#             lays the code block -- `code_bg` across its 720-capped box,
+#             the 2 px `amber_muted` rule at the text inset (x = 42 at
+#             1280: the body's 4 plus clamp(20, 3 vw, 48) = 38); once the
+#             listing overflows the view, the 3 px `dim` thumb sits in the
+#             8 px lane at W-10..W-7, ending 4 above the body's bottom
+#             while the view follows the tail, nothing beside it.
+#
 # HVF like ls-halcyon (bare TCG hangs at the pre-existing hwwatch E2E).
 
 set ::env(THYLACINE_ACCEL) hvf
@@ -605,12 +616,99 @@ expect {
     eof     { lc_fail "EOF waiting for the rail's leave" }
 }
 
+# --- I-5b: the rich document's composition, the terminal view, the code
+# block and the position indicator (HALCYON-INSTRUMENT 7.2 / 7.3 / 7.5 /
+# 7.7; the I-5b status row). The console tile's body is (4, 70, W-8, H-99)
+# (the carve above); at 1280 the document's paddings are 28 / 38 / 50
+# (clamp(18, 2.2 vw, 34), clamp(20, 3 vw, 48), 50 of the LOGICAL display
+# width), so the text and a code block's box start at x = 42, the block's
+# 2 px `amber_muted` rule at 42..43, and the block is capped at 720 (its
+# right edge at 762). The indicator's thumb (7.7) is 3 px wide, inset 3
+# from the body's right edge (x = W-10..W-7) and 4 from its bottom (ending
+# at y = H-33) while the view follows the tail. Carbon's inks: `open`
+# 18,21,22; `code_bg` 9,11,12; `amber_muted` 129,120,93; `terminal_bg`
+# 9,12,13; `dim` 115,122,118 -- none of which a blend of an ink over
+# another ground can produce (a blend from `terminal_bg` only raises G).
+# ----------------------------------------------------------------------------
+# Pixels of the rect that ARE (r,g,b): total - off. -1 on a dump error.
+proc ink_of {x0 y0 x1 y1 r g b} {
+    set v [region $x0 $y0 $x1 $y1 $r $g $b]
+    if {[regexp {^(\d+) (\d+) } $v -> off tot]} { return [expr {$tot - $off}] }
+    return -1
+}
+# At least `min` pixels of (r,g,b) in the rect, retried: the console paints
+# on its own cadence after a command's output lands.
+proc want_ink {x0 y0 x1 y1 r g b min what} {
+    set n -1
+    for {set i 0} {$i < 12} {incr i} {
+        set n [ink_of $x0 $y0 $x1 $y1 $r $g $b]
+        if {$n >= $min} { return $n }
+        after 500
+    }
+    lc_fail "$what: region $x0,$y0-$x1,$y1 never held >= $min pixels of $r,$g,$b (last: $n)"
+}
+set body_y1 [expr {$H - 29}]
+# The sampled box: right of the listing's widest line (its box-drawing
+# border ends near x = 570) and inside the block's 720 cap (x < 762);
+# rows 100..450, because the block ends ABOVE the view's last ~230 rows on
+# this image -- under the block sit the `pwd` line, the prompt with the
+# console's test-mode say text wrapped under it (three rows), the caret
+# line and the document's 50 px bottom padding (measured: the block's
+# ground ran to row 567 of 800 on the first run, which sampled to 660).
+set box_x0 600; set box_x1 740; set box_y0 100; set box_y1 450
+# Controls, BEFORE the listing: no code block in the body, no rule column.
+set n [ink_of $box_x0 $box_y0 $box_x1 $box_y1 9 11 12]
+if {$n != 0} { lc_fail "control: the body already holds $n code_bg pixels before any pre" }
+set n [ink_of 42 70 44 $body_y1 129 120 93]
+if {$n > 20} { lc_fail "control: the rule column already holds $n amber_muted pixels before any pre" }
+lc_step "controls: no code block and no rule column before the listing"
+# Each command below ends in a quoted echo whose OUTPUT joins the words
+# ("I5B RAW-DONE") while the typed line and the status bar's say text carry
+# them quoted -- a token only the command's own output can produce, read
+# AFTER the burst it follows. It matters here more than usual: expect
+# reads the console only inside an `expect`, and the screendump loops
+# below sleep for seconds; a token satisfied early (by stale buffer text
+# -- the first run's `pwd`) leaves a 13 KB listing unread, the pty fills,
+# the relay blocks, and the guest's console DROPS the rest after its 20 ms
+# room-wait (kernel/cons.c, the #67 posture) -- measured: the serial log
+# stopped mid-say before the listing while the screendumps (QMP) showed it
+# painted. So: drain the buffer, send, read to the token.
+expect -timeout 1 -re {.*} {}
+# A raw command: the terminal view (7.3 / 7.6) -- `terminal_bg` behind
+# un-annotated output, distinct from the code block's `code_bg`.
+lc_run_expect "cat /dev/winsize; echo 'I5B' 'RAW-DONE'" "I5B RAW-DONE"
+want_ink 42 70 [expr {$W - 50}] $body_y1 9 12 13 1000 "the terminal view's ground under raw output"
+lc_pass "instrument: raw output sits on terminal_bg -- the terminal view (7.3 / 7.6)"
+# The listing: `ls -l` speaks Beacon's `pre` -- the code block: `code_bg`
+# across the box where no text is, the 2 px `amber_muted` rule down its
+# left edge at the text inset, the frame on the wire (the tgrep below).
+expect -timeout 1 -re {.*} {}
+lc_run_expect "ls -l /bin; echo 'I5B' 'LIST-DONE'" "I5B LIST-DONE"
+set tot [lindex [region $box_x0 $box_y0 $box_x1 $box_y1 9 11 12] 1]
+want_ink $box_x0 $box_y0 $box_x1 $box_y1 9 11 12 [expr {$tot * 9 / 10}] "the code block's ground (code_bg) across the box"
+want_ink 42 70 44 $body_y1 129 120 93 400 "the code block's 2 px amber_muted rule at x = 42..43"
+lc_pass "instrument: ls -l lays the code block -- code_bg across the box, the amber_muted rule at the text inset (7.3 / 7.5)"
+# The listing overflows the view: the indicator (7.7). Following the tail
+# the thumb ENDS at H-33, is at least 24 tall and 3 wide at W-10..W-7,
+# solid `dim`; the columns either side of it and the lane's top carry none.
+set tx0 [expr {$W - 10}]; set tx1 [expr {$W - 7}]
+set ty0 [expr {$H - 57}]; set ty1 [expr {$H - 33}]
+want_dom $tx0 $ty0 $tx1 $ty1 115 122 118 "the indicator's thumb (solid dim, ending 4 above the body's bottom)" 0
+set n [ink_of [expr {$tx0 - 1}] $ty0 $tx0 $ty1 115 122 118]
+if {$n != 0} { lc_fail "the thumb bleeds left of its lane ($n dim pixels at x = [expr {$tx0 - 1}])" }
+set n [ink_of $tx1 $ty0 [expr {$tx1 + 1}] $ty1 115 122 118]
+if {$n != 0} { lc_fail "the thumb bleeds right of its inset ($n dim pixels at x = $tx1)" }
+set n [ink_of $tx0 74 $tx1 82 115 122 118]
+if {$n != 0} { lc_fail "the lane's top is under the thumb ($n dim pixels): the thumb is not following the tail, or fills the lane" }
+lc_pass "instrument: the position indicator -- a 3 px dim thumb in the reserved lane, ending 4 above the body's bottom while the view follows the tail (7.7)"
+
 # --- The push: how the profile reached a compositor that cannot read the
 # pool at boot --------------------------------------------------------------
 tgrep "halcyond: theme pushed to the compositor" "halcyond pushed the bundle (the profile rides the 127-field wire)"
 tgrep "tapestryd: theme applied (renderer push)" "the compositor applied it (the carve re-decided under `instrument`)"
 tgrep "profile instrument" "halcyond resolved the profile word"
+tgrep "1936;v1;pre" "ls -l emitted the rich pre frame on the wire (the code block's source, I-5b)"
 
-lc_pass "ls-halcyon-instrument: the I-2 carve, the I-3 headers and the I-4 rails verified end to end -- the profile through the wire, the stack-of-one frame under two rails, the files, the header as a pointer target (focus, the protected final tile, the tile menu, the leave), the 1:1 split made by the rail's SPLIT H with a snapped track, the rule and the 7 x 7 joint, the focus frame, the empty pane's placard, zoom, the stack's collapsed and open headers, expand by press, close by `x`, the rail's brand mark / label / clock pixels, the footer's READY / RUNNING / EXIT 0 / EXIT 1 and its pane count, RESET, the workspace list, the theme control's refusal"
+lc_pass "ls-halcyon-instrument: the I-2 carve, the I-3 headers and the I-4 rails verified end to end -- the profile through the wire, the stack-of-one frame under two rails, the files, the header as a pointer target (focus, the protected final tile, the tile menu, the leave), the 1:1 split made by the rail's SPLIT H with a snapped track, the rule and the 7 x 7 joint, the focus frame, the empty pane's placard, zoom, the stack's collapsed and open headers, expand by press, close by `x`, the rail's brand mark / label / clock pixels, the footer's READY / RUNNING / EXIT 0 / EXIT 1 and its pane count, RESET, the workspace list, the theme control's refusal; I-5b: the terminal view under raw output, the code block's ground and rule under ls -l, the position indicator following the tail"
 lc_quit
 exit 0

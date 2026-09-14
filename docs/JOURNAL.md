@@ -684,6 +684,119 @@ tree, not a pattern) and relaunched on the fixed image.
 Binary: 2,140,744 → 2,785,000 bytes (+644 KB, the three Plex cuts and the
 two subsets; accepted at §7.1). Host: halcyond 228 → 235.
 
+### I-5b: the document -- a flow keyed on the profile, a cell one row taller than the browser's box, and two fingerprints read before the change
+
+**What landed** (`*(pending)*`; HALCYON-INSTRUMENT §7.2 / §7.5 / §7.6 /
+§7.7 / §14.7 as built, §12, §13's addendum; HALCYON-TYPE TY-4 amended).
+The `Sheet` grew the document's column: the type map's body 15 / 1.62,
+H1 clamp(23, 2.4 vw, 34) / 1.12, H2 17 / 1.3, an H3 the kit does not
+define (15 / 1.3, recorded as mine), inline code free-running at 0.86 ×
+the body, the `pre` and terminal rows on the cell; the paddings as `vw`
+of the LOGICAL display width, so `sheet_for` now takes the display width
+and both owners rebuild the sheet on a resize; the rhythm as a table
+(`Rhythm`) with the kit's margins collapsed pairwise; the 720 measure;
+the two islands -- raw output as the terminal view (`terminal_bg`, no
+rule, 14 / 16) and a Beacon `pre` as the code block (`code_bg`, the 2 px
+`amber_muted` rule, 15 / 17); the default inks by role; the italic
+(`ATTR_ITALIC` had no reader anywhere; now the Italic cell in mono runs
+and the raw grid, the italic face on an annotated proportional run); the
+Instrument Sans serving the turnstile from the free-running mono at the
+body size; `halcyond::indicator` (§7.7) in both owners; the alt screen
+cleared to `terminal_bg`. Host halcyond 235 → 253.
+
+**The design decision that carried it: the flow is keyed on the
+profile, not parameterised.** The legacy composition rounds each line
+box to whole pixels and stacks integers; the kit's document is the
+browser's flow -- fractional line boxes accumulated in Blink's 1/64 px
+LayoutUnit, each line's top rounded to a row at paint, the glyphs at the
+line top plus a FLOORED half-leading (which goes negative for the H1: its
+44 px content overflows the 38.08 box, and the golden's fragment tops sit
+exactly 3 above its line). One rule at two sets of numbers would have
+moved the legacy gates; two rules behind one `Flow` enum keep the legacy
+arm byte-identical BY CONSTRUCTION (its boxes are whole multiples of the
+scale, so the rounding is the identity) -- and the construction was then
+MEASURED rather than trusted: before touching the builder I wrote two
+fingerprint tests (FNV over every laid number of a rich transcript at 600
+/ 300 × 100 / 200, and over every op of a history tile's render with and
+without a mark and in alt-screen), ran them on `69f71541` with the
+constants at 0 to read the values, pinned them, and only then changed the
+code. They passed unchanged through every edit that followed. A
+fingerprint asserted AFTER the change would have pinned whatever the
+change produced.
+
+**Four things the witnesses found that the reasoning had not.** (1) The
+golden-row test asserted Cornucopia's 12 px cell is 13 rows with the
+baseline at 11 -- the browser's fragment. It is 14: the cell is cut to
+the OS/2 Windows descent (208 / 1000), the browser's content box is the
+hhea pair (170 / 1000 → 2). Placing the `pre` row by the cell puts the
+baseline one row high; the row is now placed by the hhea content box and
+the cell paints its extra descent row under it (HALCYON-TYPE TY-4
+amended). (2) The inks test asked em-dim for `dim` and got `body_text`:
+the em-dim hook reads `sheet.dim`, which is the legacy projection's
+`fg_dim`, which `project_legacy` maps to `body_text` -- correct for the
+legacy painters that read it, wrong as the Instrument document's dim
+step. The role table now carries `ink_dim` (= `fg_dim` under legacy, so
+the bytes stand). (3) Zeroing the prose margin -- so a paragraph's lines
+sit at the pitch -- also zeroed the H1 → paragraph gap to the H1's own
+14 where the kit has 15 (the paragraph's top margin wins the collapse).
+The rule is now a NEIGHBOUR rule: a prose line carries the paragraph
+margin and the flow opens nothing only between two consecutive prose
+lines; the same mechanism makes a prompt run straight into whatever
+follows it in the live tail, which straddles zones, so a line never moves
+by a margin when it freezes into two blocks. (4) Five new tests failed
+together on their first run: their transcripts were built with the
+DAYLIGHT palette and laid under the Instrument sheet, so no cell read as
+default ink and no role ink applied. The fixture, not the code -- but the
+same lesson the ink-hooks test recorded at TH-6: the terminal tier is a
+declared palette the tile is built with, not a constant, and a test that
+forgets that tests nothing about the inks.
+
+**The lane.** The indicator's 8 px lane is reserved INSIDE the viewport on
+overflow, which changes the wrap width, which changes the height, which
+is what decides the overflow. The tile keeps the decision across frames
+and re-lays once when it flips; the argument that this terminates and
+never thrashes is that narrowing never shortens wrapped content (a `pre`
+is cut, not wrapped; a table is its widest cell; a raw line wraps at the
+character), so what overflows at W overflows at W − 8 and what fits at W
+− 8 fits at W -- pinned by a test that counts the second frame's lays.
+The console path (`main.rs`, the `guest` feature the host suite cannot
+see) carries the same loop by hand; the gates are its witness.
+
+**The gate's two lessons, both mine.** The document leg failed twice
+before it passed, and neither failure was the renderer's. First, its
+sampling box for the code block's ground ran to row 660 of 800; on the
+test image the block ends at row 567, because under it sit the `pwd`
+line, the prompt with the console's TEST-MODE say text wrapped to three
+rows, the caret line and the document's 50 px bottom padding -- the
+screendump showed the document exactly as designed, the block, its rule,
+the prose line in Plex 15, the thumb at rows 743..766 (four above the
+body's bottom, as §7.7 says). The box now samples rows 100..450. Second,
+after that fix the pixel witnesses passed and the transcript grep for the
+`pre` frame failed: the serial log had stopped MID-SAY just before the
+listing command while the screendumps (over QMP) showed it painted. The
+kernel's console drops output after a 20 ms room-wait when the host stops
+consuming the UART (the audited #67 posture: lossy beats wedged), and the
+host had stopped consuming because of the leg itself -- its `pwd`
+sync-token matched STALE buffer text (an OSC 7 line from the previous
+command), expect returned at once and then slept through the screendump
+loops, reading nothing; a 13 KB listing filled the unread pty, the relay
+blocked, the guest dropped. The standing rule ("one unique expect token
+per leg") in its purest form: a token satisfied by residue does not merely
+mis-sequence a leg, it stops the reader, and on this console a stopped
+reader is lost bytes. The leg now drains expect's buffer before each
+send and reads to a token only the command's own output can produce (a
+quoted echo whose output joins the words the typed line and the say text
+carry quoted).
+
+**Recorded, not decided** (§13's addendum): the H3, the terminal view's
+symmetric 14 (the mockup tile's 36 is that tile's end), the document's 50
+under the live prompt, the cut `pre` (the cartoon cannot clip; the kit
+scrolls), the kit's lists and doc-path with no Beacon producer, the alt
+screen's cursor shape. Owed to the vault track: a dossier for
+`indicator.rs` and the gate (unowned), sub-halcyond stale (the trailer).
+
+**Gates**: ls-halcyon-instrument PASS 69 s (its third run: the first two failed inside the new document leg -- the sampling box, then the stale sync token -- never the renderer), ls-halcyon-session-instrument 56 s (55 s on the final tree), ls-ci 29 s, ls-halcyon 121 s (the legacy identity), ls-gfx-compose 73 s; the three legacy images ran on the tree one Instrument-only edit before the commit (the lane reset, the break caret; both host-tested and provably inert under legacy by the fingerprint).
+
 ## Run 46n (2026-09-10 + 2026-09-14, Opus 5 max, across a self-compaction) -- the syscall collision, a merge gate's one red boot, and a hang the obvious fix would not have closed
 
 Newest first within the JOURNAL; this entry is chronological inside (Sep 10, then Sep 14).

@@ -1160,6 +1160,7 @@ fn request_env_scale(ring: &EventRing) {
 /// bar and the menu are the caller's (they live beside the tiles).
 fn rescale(
     pct: u16,
+    display_w: u32,
     sheet: &mut Sheet,
     gs: &mut GlyphSource,
     geom: &mut Geom,
@@ -1168,7 +1169,7 @@ fn rescale(
 ) {
     let from = sheet.scale;
     let gen = sheet.gen + 1;
-    *sheet = sheet_for(&sheet.bundle(), pct);
+    *sheet = sheet_for(&sheet.bundle(), pct, display_w);
     sheet.gen = gen;
     gs.set_scale(pct);
     gs.set_smooth(sheet.smooth_mem);
@@ -1354,7 +1355,7 @@ pub fn run(home: Option<String>) -> i64 {
     if declared {
         push_theme(&ring, &bundle);
     }
-    let mut sheet = sheet_for(&bundle, display.scale);
+    let mut sheet = sheet_for(&bundle, display.scale, display.w);
     gs.set_smooth(sheet.smooth_mem);
     let (cell_w, cell_h, _) = gs.mono_cell();
     let (disp_w, disp_h) = (root_surf.w, root_surf.h);
@@ -1727,13 +1728,25 @@ pub fn run(home: Option<String>) -> i64 {
                     gs.set_display(di.w, di.h);
                 }
                 if di.scale != sheet.scale {
-                    rescale(di.scale, &mut sheet, &mut gs, &mut geom, &mut tiles, &mut wire_out);
+                    rescale(di.scale, di.w, &mut sheet, &mut gs, &mut geom, &mut tiles, &mut wire_out);
                     display.scale = di.scale;
                     menus.close();
                     menu_leaf = None;
                     chrome.invalidate();
                     status.invalidate();
                     rail.invalidate();
+                } else if di.w != sheet.display_w {
+                    // HALCYON-INSTRUMENT 7.5: the document's paddings and
+                    // H1 follow the DISPLAY width, so a resize at the same
+                    // scale rebuilds the sheet (a new generation) and every
+                    // tile re-lays.
+                    let gen = sheet.gen + 1;
+                    sheet = sheet_for(&sheet.bundle(), sheet.scale, di.w);
+                    sheet.gen = gen;
+                    for t in tiles.values_mut() {
+                        t.tile.invalidate_heights();
+                        t.dirty = true;
+                    }
                 }
             }
             hints = hints_from_chords(&read_file(troot, "chords").unwrap_or_default());
