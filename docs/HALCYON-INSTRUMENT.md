@@ -230,6 +230,9 @@ profile = "instrument-v1"
 id = "carbon"                 # [a-z][a-z0-9_-]{0,31}; the gallery filename and the picker's key
 name = "Carbon Optics"        # the legacy name rule: presentable Unicode, <= 64 bytes
 color_scheme = "dark"         # dark | light; selects the smoothing default and the ANSI polarity checks
+group = "dark"                # OPTIONAL since I-7: dark | terminal | light -- the picker's group (absent = a trailing OTHER)
+tagline = "High contrast · pale champagne"  # OPTIONAL since I-7: the picker's subtitle, the name rule (absent = the id)
+rank = 1                      # OPTIONAL since I-7: 0..255, the order within the group (absent = 255, then the id)
 
 [color]                       # exactly the 35 roles of resolved-tokens.json, #RRGGBB, opaque
 desktop = "#050607"
@@ -246,6 +249,18 @@ Every key required; no `base`; unknown keys and tables refused; duplicate
 keys refused; file ≤ 16 KiB; no geometry section (geometry is the
 profile's). The parser is the existing `no_std` subset (HALCYON-THEME §5)
 with one more table; it joins the same format-fuzz corpus.
+
+**Amended at I-7 (2026-09-15, under the standing authorization).** The
+`[meta]` table gained three OPTIONAL keys — `group`, `tagline`, `rank` —
+because the picker's grouping, subtitles and order are facts of the mockup's
+DOM that no sidecar carries, and the registry the scripture names is the
+gallery itself (§9.4). The five keys above stay required; the three are
+validated when present (`group` one of the three words, `tagline` the name
+rule, `rank` 0..255) and refused otherwise, like every other key. An older
+binary refuses a file carrying them at the line, whole — the gallery ships
+with the binary, so nothing half-applies. The generator writes them from
+`tools/halcyon/picker.json` (the DOM's 13 rows transcribed: id, group,
+tagline, rank); a user-authored gallery theme may carry them or not.
 
 ### 4.3 The two projections (pure functions, host-tested)
 
@@ -1395,6 +1410,24 @@ Input priority is unchanged in shape: trusted system chord > modal >
 placed menu > divider capture > the Super plane > the focused tile. The
 consumed chords never reach a pts (the plane's swallow set).
 
+**As built at I-7.** Ruling 13's defaults are in `chords.rs`: `Super+T`
+opens the picker, `Super+Shift+T` is `SetMode Tabbed`, `Super+/` asks for
+help (`slash` joined the key grammar, `picker` and `help` the action
+vocabulary, so the `chords` file and a rebind name them like any other).
+A picker or help chord is not the compositor's to act on — the picker is
+halcyond's — so the compositor delivers it: a new event kind, `TEV_CHORD`
+(12; `code` 1 = picker, 2 = help, `value` 1), pushed to the REGISTERED
+RAIL's surface, whose owner is exactly the party that owns the picker on
+that seat (the session on its own, the renderer on the console's). The
+chord layer's standing rule runs first — any placed menu is dismissed —
+so `Super+T` over an open picker re-opens it rather than toggling it (a
+toggle would need the owner to pair a CLOSE on one surface with a CHORD on
+another across one ring drain, which is exact only within one wake; the
+re-open is deterministic and said). With no rail registered (the legacy
+profile, or a seat whose rail is not up) the chord is said and dropped.
+The help chord reaches the owner and is refused visibly until the help
+modal lands (I-7b).
+
 ### 9.4 The theme picker and live switching
 
 The picker is a `Role::Menu` surface halcyond paints and the compositor
@@ -1421,6 +1454,90 @@ existing cooperative channel (`/env/HALCYON_PALETTE` for future spawns; a
 running `nora` re-reads on its notification); an uncooperative truecolor
 program keeps its own pixels and is reported, never respawned. Busy is
 retried on the bounded cadence; E_PERM is final.
+
+**As built at I-7 (2026-09-15, under the standing authorization; every
+decision below is auto-ratified and named).**
+
+*The registry is the gallery directory.* The picker lists every
+`/lib/halcyon/themes/*.toml` that loads as an Instrument theme — 13 today;
+the two legacy-schema files there (Nightjar, Frutiger Aero) are not
+Instrument themes and are not listed; a file that fails to load is said
+and skipped — grouped and ordered by the three optional `[meta]` keys of
+§4.2: `group` (DARK FIELD / TERMINAL STUDIES / LIGHT FIELD; a file without
+one lands in a trailing OTHER group), `rank` within the group, then the
+id. The heading's count is the number of rows listed. The gallery is
+re-read at every open (the cost is 13 small files), so a theme dropped
+into the directory appears without a restart.
+
+*The surface.* `halcyond::picker` (pure, host-tested) is the model and the
+painter; `menuset` carries it as a second model on the ONE `Role::Menu`
+surface (`Model::{Verbs, Picker, Dialog}`), so the compositor's grab,
+click-away and Esc are exactly H-3c's. Anchored at (the control's right
+edge − 286, `rail_h` + 5), +44 at ≤ 820 (§8.3), the compositor clamping
+into the display as it clamps every menu; 286 wide; `min(list, display −
+72)` tall. On overflow the list scrolls: the wheel by one row per notch,
+the keys to keep the selection in view; the 8 px lane is reserved INSIDE
+the rows (the title column absorbs it) and the thumb is §7.7's with the
+18 px floor (`indicator::thumb_min`).
+
+*The rows*, logical px through the sheet: the menu pads 5 inside a 1 px
+`structure` frame on `pane`; the heading 27 tall (`DISPLAY THEME` left, the
+count right, mono 9 tracked .11 em in `dim`, a `separator` below); a
+group row 21 tall on `header` (mono 8 tracked .13 em in `dim`, a
+`separator` below); an option 52 tall, padding 6 / 8, the 42 | 1fr | 16
+grid with gap 10, a `separator` below every option but the last; at rest
+`secondary`, the selected one on `hover` in `text`. The miniature is
+38 × 28: padding 4, gap 2, ground = the theme's `desktop`, a 1 px
+`structure` frame, three bars of its `open` each with a 1 px `structure`
+left rule — the first 1.45 wide (10 / 7 / 7 at 100 %, the CSS flex
+arithmetic snapped) with a 2 px `amber` left rule, the last carrying a
+1 px `amber` line at 45 % of its height at 70 % (`over(open, amber, 179)`
+precomputed, §7.3's rule). The four colours are the THEME'S OWN, read off
+its file: the mockup's `--pv-*` table is exactly `desktop` / `open` /
+`structure` / `amber` of each theme (verified against all 13). The title
+is Sans 500 12 in `text`, the subtitle mono 9 in `dim`, gap 3, the pair
+centred in the row; the check is U+2713 in mono 12 `amber` on the current
+theme's row only.
+
+*Keys.* Up / Down WRAP over the options (the mockup's), Home / End, Enter
+or Space commit, Escape and click-away are the compositor's dismiss
+(nothing changes); the wheel scrolls the list. Opening selects the
+current theme's row and applies nothing. `Super+T` opens it through
+`TEV_CHORD` (§9.3). There is no keyboard focus on the rail, so the
+mockup's `toggle.focus()` after a close has no counterpart.
+
+*The transaction.* The owner stages the bundle from the gallery file it
+re-reads at commit (`theme::load`; the profile stays the seat's, the theme
+changes), pushes it over the gated `theme` verb through the bounded Busy
+cadence; a refusal (E_PERM final, or the cadence exhausted) keeps the
+previous bundle, check and colours, says why and shows `THEME REFUSED` in
+the footer. On success the seat rebuilds its sheet at a new generation
+(every cached layout re-lays) and RE-THEMES the retained content in place
+rather than respawning anything: every transcript style and grid cell
+whose ink or ground equals an entry of the old palette (`fg`, `bg`, the
+ANSI sixteen) takes the same entry of the new one — a truecolor value
+that happens to equal a palette entry is remapped too, the known cost —
+and the tile's pts host is told the new palette over the down wire
+(`Input::Palette`, a new record) and remaps its own screen the same way
+(`Vt::set_palette`, aurora's `set_theme` generalised), so the seam's next
+diff agrees with the tile's; a raw full-screen program's own truecolor
+pixels stay its own, reported by nothing since nothing can tell them
+apart. `/env/HALCYON_PALETTE` is re-published for FUTURE spawns; a
+RUNNING program is not reached (per-Proc `/env`; nora reads it at start
+only — §13). The rail's name and swatch, the headers, the footer and the
+placards repaint from the new sheet. Then, on the session seat, `$HOME/lib/
+halcyon/theme` is written with the durable idiom (`mkdir -p
+$HOME/lib/halcyon`; tmp, fsync, rename, fsync) and the footer says
+`THEME · <NAME>`; a write failure is said and the footer reads `THEME ·
+<NAME> (NOT SAVED)` — the theme is in force either way. The console seat
+(nobody's session: the system tier only) applies live and persists
+nothing: `THEME · <NAME> (NOT SAVED)`, by design.
+
+*Test-mode says*: the one menu placement say with `for picker <current-id>`;
+`halcyond: picker sel <id>` per selection move; `halcyond: picker commit
+<id>`; `halcyond: theme <id> staged` / `applied` / `written` / `not
+written (<why>)` / `refused (<why>)`; `tapestryd: chord picker -> rail
+owner` / `tapestryd: chord picker: no rail`.
 
 ### 9.5 Production behaviour the mockup only simulates
 
@@ -1637,6 +1754,12 @@ start)` with opacity 0 at 55 % — reduced-motion honoured (§9.5).
 - **I-7 — the picker and live switching.** The menu surface, the
   transaction, persistence, the cooperative repaint; the dialog family
   (§14.5).
+- **I-7b — deferred at I-7 (2026-09-15, labelled; §13 carries it):** the
+  help modal of §9.5 (its own frame: 540 wide, the 190 / rest key grid
+  from the `chords` file — a different frame from §14.5's family, so its
+  own slice), and `Super+Q` asking before a running job (the chord
+  delivered to the owner as the picker's now is, the owner asking, the
+  owner closing by verb).
 - **I-8 — effects and motion.** The two ops, the glows, the backdrop, the
   transitions.
 - **I-9 — parity gate, audit, rollout.** ACCEPTANCE-TESTS in full against
@@ -1749,6 +1872,22 @@ I-8-class addition — vote whether the live ratio is wanted at all. (3) A
 divider is not keyboard-focusable (§9.2's v1 rule stands); a `±0.025`
 arrow step would ride a chord. (4) The double-click window is 500 ms,
 wall-clock, press to press, on the same track; not a setting.
+
+**I-7 residues (recorded 2026-09-15):** the console seat's picker applies
+live and persists nothing (there is no home on that seat and the system
+word is the bake's) — the footer says so; a running program is not told of
+a theme change (`/env` is per-Proc; nora reads `HALCYON_PALETTE` at start
+only — §9.4's "re-reads on its notification" names a channel that does
+not exist yet; a notes-based nudge is the candidate), so a hosted program
+follows the theme it was spawned under until it restarts, while the seam's
+own screen and the retained transcript are re-themed in place; a
+truecolor value that equals an entry of the old palette is remapped with
+it (the cost of remapping resolved cells; the alternative — carrying the
+SGR index through the seam — is a wire change beyond this slice); the two
+legacy-schema gallery files are not offered by the picker (a user's
+`theme.toml` still selects one); `Super+T` re-opens rather than toggles
+(§9.3); the help modal and the `Super+Q` confirmation are I-7b (§12); the
+dirty-close dialog and the one-line prompt wait on a producer.
 
 ## 14. The round-2 surfaces (Astra §7, adopted 2026-09-14 with the deltas named)
 
@@ -1919,6 +2058,40 @@ focus, the existing selection role; an error below at gap 6 in Sans 12
 `error`; `Cancel` · `Apply`, Apply disabled while invalid; Enter submits
 only when valid and no IME composition is active. Caret and selection
 belong to the field, never to the terminal beneath.
+
+**As built at I-7.** `halcyond::dialog` (pure, host-tested): `Dialog {
+eyebrow, title, body, buttons }` painted on the menu surface as the third
+model (§9.4), centred on the display by the owner (the compositor clamps),
+the backdrop I-8's. Width min(480, display − 32); the header 18 / 20 / 12
+with the eyebrow in mono 10 tracked .12 em `amber` and the title Sans 500
+23 at margin-top 7; the body Sans 14 at 1.5 in `secondary`, wrapped at the
+width; the footer a 1 px `separator`, padding 12 / 20, gap 8, the buttons
+right-aligned, 30 tall, padding 0 / 12, Sans 500 12, a 1 px `structure`
+border, transparent; the DEFAULT button an `amber` border and `text` ink;
+the focused button an `amber` outline inset 2; a destructive button
+`error` border and ink, never pre-focused. Keys: Left / Right / Tab /
+Shift+Tab move the focus over the buttons (wrapping), Enter or Space
+activate the focused one, Escape cancels (the compositor's dismiss — the
+owner sees a closed stream and treats it as Cancel); a click on a button
+activates it; a click elsewhere is the compositor's click-away, i.e.
+Cancel. Consumers as built: RESET on the rail opens `Reset workspace
+layout?` / `Rearrange this workspace. Running tiles will remain open.` with
+`Cancel` · `Reset layout` (eyebrow `WORKSPACE`; `Reset layout` the default
+and pre-focused — the dialog exists to make the geometry change
+deliberate, not to bias against it; the mockup's reset asks nothing at
+all), and the plan runs on `Reset layout` exactly as before. The header's
+× and the tile menu's Close on a tile whose LAST COMMAND IS RUNNING (the
+footer's RUNNING fact, §14.3) open `Close <tile>?` / `A process is still
+running.` + the command under §8.2's sanitising rule, with `Cancel`
+(default, pre-focused) · `Close tile` (destructive); a tile that is not
+running closes at once as before. `Super+Q` stays the compositor's
+structural close: the chord acts in the compositor, and asking first needs
+the chord delivered to the owner, which `TEV_CHORD` now makes a small
+follow-up (§13). The dirty-close variant (`This tile has unsaved changes.`)
+and the one-line prompt have no producer yet (no program declares
+"unsaved"; Rename waits on the workspaces mechanism) and are not built.
+Test-mode says: the placement say with `for dialog <kind>`;
+`halcyond: dialog <kind> -> <label>` / `-> cancel`.
 
 ### 14.6 Empty, disconnected, crashed and ended tiles (H-3b's status feed; the exit latch)
 
