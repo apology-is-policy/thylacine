@@ -1007,6 +1007,26 @@ fn layout_restore(name: &str) -> i64 {
                     return 1;
                 }
             }
+            // HALCYON-INSTRUMENT 5.3: a v2 file's weights, on the nodes the
+            // splits made (the plan orders them after their nodes exist).
+            Op::Weight { target, w } => {
+                let id = match target {
+                    skeleton::NodeRef::Leaf(l) => leaf_ids[*l],
+                    skeleton::NodeRef::Cont(c) => cont_ids[*c],
+                };
+                let id = match id {
+                    Some(id) => id,
+                    None => {
+                        eprintln!("halcyon: plan weights an unbuilt node");
+                        return 1;
+                    }
+                };
+                let rc = tap.verb(&format!("weight {} {}", id, w));
+                if rc < 0 {
+                    eprintln!("halcyon: weight {} {} refused ({})", id, w, rc);
+                    return 1;
+                }
+            }
         }
     }
 

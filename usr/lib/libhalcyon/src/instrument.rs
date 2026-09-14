@@ -229,15 +229,49 @@ pub const fn builtin() -> InstrumentTheme {
 /// the kit's stock files carry exactly this table, and `project_legacy`
 /// reproduces them byte for byte. It is evidence of why a palette install is
 /// not the migration -- top 34 is absent, the 7 px track is a 3 px gap.
-pub const LEGACY_PROJECTED_METRICS: Metrics = Metrics {
-    bevel: 2,
-    gap: 3,
+pub const LEGACY_PROJECTED_METRICS: Metrics = Metrics::legacy(2, 3, 1, 32, 25, 0, 0);
+
+/// The Instrument profile's geometry (HALCYON-INSTRUMENT 5.1 / 5.7): the ONE
+/// table, a compiled constant no file carries -- an Instrument theme has no
+/// `[geometry]`, so the carve cannot move under a theme. The legacy fields
+/// it shares: `header_h` 32 (the tile header), `status_h` 25 (the bottom
+/// rail), `hairline` 1 (the separator and the index rule); `bevel`, `gap`
+/// and `tab_strip_h` are ABSENT (0), which is how the legacy painters and
+/// the legacy carve stay inert under this profile.
+pub const INSTRUMENT_BASE: Metrics = Metrics {
+    bevel: 0,
+    gap: 0,
     hairline: 1,
     header_h: 32,
     status_h: 25,
     tag_pad_x: 0,
     tab_strip_h: 0,
+    rail_h: 34,
+    outer_pad: 3,
+    track: 7,
+    rule: 2,
+    rule_off: 2,
+    joint: 7,
+    frame: 1,
+    index_w: 32,
+    header_gap: 7,
+    action_w: 28,
+    mark_w: 2,
+    mark_inset_y: 6,
+    min_pane_w: crate::carve::MIN_PANE_W,
+    min_body_h: crate::carve::MIN_BODY_H,
 };
+
+/// The logical geometry table a profile carves and paints with (4.4 /
+/// 5.7): a legacy theme's own `[geometry]` under `legacy`, the compiled
+/// `INSTRUMENT_BASE` under `instrument` -- whatever the theme's projected
+/// table says. The one function `Bundle::at` and halcyond's sheet share.
+pub fn metrics_base(profile: Profile, legacy: &Theme) -> Metrics {
+    match profile {
+        Profile::Legacy => legacy.metrics,
+        Profile::Instrument => INSTRUMENT_BASE,
+    }
+}
 
 /// An Instrument theme file, loaded.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -675,16 +709,24 @@ impl Bundle {
         }
     }
 
-    /// The bundle at a display scale. The metrics table is the legacy
-    /// theme's until I-2 lands the Instrument carve (HALCYON-INSTRUMENT 5.7);
-    /// nothing paints differently under `instrument` yet, by design.
+    /// The bundle at a display scale: the PROFILE picks the geometry table
+    /// (HALCYON-INSTRUMENT 4.4 / 5.7) -- the theme's own `[geometry]` under
+    /// `legacy`, the compiled `INSTRUMENT_BASE` under `instrument`, each
+    /// through the one `Metrics::at`. This is the function both the
+    /// compositor's carve and halcyond's sheet read, so a profile flip moves
+    /// both painters together or neither.
     pub fn at(&self, pct: u16) -> Visual {
         Visual {
             profile: self.profile,
             theme: self.theme,
             inst: self.inst,
-            metrics: self.theme.metrics.at(pct),
+            metrics: self.metrics_base().at(pct),
         }
+    }
+
+    /// The profile's logical geometry table (the base `at` scales).
+    pub fn metrics_base(&self) -> Metrics {
+        metrics_base(self.profile, &self.theme)
     }
 }
 
@@ -1190,11 +1232,56 @@ mod tests {
         assert_eq!(b.theme, DAYLIGHT);
         assert_eq!(Bundle::builtin(Profile::Legacy).theme, DAYLIGHT);
         assert_eq!(Bundle::builtin(Profile::Instrument).inst, CARBON);
-        // At a scale: the metrics are the legacy table's, scaled (I-2 swaps
-        // the table under `instrument`).
+        // At a scale the PROFILE picks the table (HALCYON-INSTRUMENT 4.4 /
+        // 5.7): `INSTRUMENT_BASE` under `instrument` whatever the theme's
+        // own `[geometry]` says, the theme's under `legacy`.
         let v = Bundle::builtin(Profile::Instrument).at(200);
-        assert_eq!(v.metrics, LEGACY_PROJECTED_METRICS.at(200));
+        assert_eq!(v.metrics, INSTRUMENT_BASE.at(200));
+        assert_ne!(v.metrics, LEGACY_PROJECTED_METRICS.at(200), "the projected legacy table is not the carve's");
         assert_eq!(Bundle::builtin(Profile::Legacy).at(100).metrics, DAYLIGHT.metrics);
+        // The same THEME under the other profile: only the table moves.
+        let li = Bundle::from_legacy(Profile::Instrument, DAYLIGHT).at(150);
+        assert_eq!(li.metrics, INSTRUMENT_BASE.at(150));
+        assert_eq!(li.theme, DAYLIGHT);
+        let il = Bundle::from_instrument(Profile::Legacy, CARBON).at(150);
+        assert_eq!(il.metrics, LEGACY_PROJECTED_METRICS.at(150), "an Instrument theme under legacy carves the kit's projected table");
+    }
+
+    /// HALCYON-INSTRUMENT 5.1 / 5.7: the Instrument table is the scripture's
+    /// numbers, the identity at 100 (its absent legacy marks stay absent --
+    /// no floor lifts a 0 bevel to 2), and scales by the one rule with its
+    /// own floors above it.
+    #[test]
+    fn the_instrument_table_is_the_scripture_and_the_identity_at_100() {
+        let b = INSTRUMENT_BASE;
+        assert_eq!(
+            (b.rail_h, b.status_h, b.outer_pad, b.track, b.rule, b.rule_off, b.joint, b.frame),
+            (34, 25, 3, 7, 2, 2, 7, 1)
+        );
+        assert_eq!(
+            (b.header_h, b.index_w, b.header_gap, b.action_w, b.mark_w, b.mark_inset_y, b.hairline),
+            (32, 32, 7, 28, 2, 6, 1)
+        );
+        assert_eq!((b.bevel, b.gap, b.tab_strip_h, b.tag_pad_x), (0, 0, 0, 0), "absent under Instrument");
+        assert_eq!((b.min_pane_w, b.min_body_h), (260, 54), "the minima ride the table (5.2)");
+        assert_eq!((b.at(200).min_pane_w, b.at(200).min_body_h), (520, 108));
+        assert_eq!(b.at(100), b, "at(100) is the table exactly");
+        let m125 = b.at(125);
+        assert_eq!((m125.rail_h, m125.status_h, m125.outer_pad, m125.track), (43, 31, 4, 9), "42.5 up, 31.25 down, 3.75 up, 8.75 up");
+        assert_eq!((m125.rule, m125.rule_off, m125.joint, m125.frame), (3, 3, 9, 1), "a 2 px rule is 3 at 125 (the kit's own example)");
+        assert_eq!((m125.header_h, m125.index_w, m125.header_gap, m125.action_w, m125.mark_w, m125.mark_inset_y), (40, 40, 9, 35, 3, 8));
+        assert_eq!((m125.bevel, m125.gap, m125.tab_strip_h), (0, 0, 0), "absent stays absent");
+        let m200 = b.at(200);
+        assert_eq!((m200.rail_h, m200.status_h, m200.outer_pad, m200.track, m200.rule, m200.joint, m200.frame, m200.header_h), (68, 50, 6, 14, 4, 14, 2, 64));
+        assert_eq!((m200.hairline, m200.bevel, m200.gap), (2, 0, 0));
+        let m150 = b.at(150);
+        assert_eq!((m150.rail_h, m150.status_h, m150.track, m150.rule, m150.joint, m150.frame, m150.header_h), (51, 38, 11, 3, 11, 2, 48), "37.5 up; 10.5 up; 1.5 up");
+        let m175 = b.at(175);
+        assert_eq!((m175.rail_h, m175.status_h, m175.track, m175.rule, m175.joint, m175.frame, m175.header_h), (60, 44, 12, 4, 12, 2, 56), "59.5 up; 43.75 up; 12.25 down; 3.5 up; 1.75 up");
+        // The floors bite below 100 (not a v1 scale; the function is total).
+        let m25 = b.at(25);
+        assert_eq!((m25.rule, m25.joint, m25.frame, m25.mark_w, m25.hairline), (2, 3, 1, 2, 1));
+        assert_eq!(m25.bevel, 0, "an absent mark is never floored into existence");
     }
 
     #[test]

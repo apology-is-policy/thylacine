@@ -430,7 +430,7 @@ pub extern "C" fn rs_main() -> i64 {
     // permanently -- on the very path that exists because the compositor
     // cannot read the file itself.
     session::push_theme(&ring, &bundle);
-    let mut sheet = sheet_for(&theme, display.scale);
+    let mut sheet = sheet_for(&theme, bundle.profile, display.scale);
     gs.set_smooth(sheet.smooth_mem);
     {
         let (cw, ch, _) = gs.mono_cell();
@@ -523,7 +523,7 @@ pub extern "C" fn rs_main() -> i64 {
                     let from = sheet.scale;
                     let gen = sheet.gen + 1;
                     let t = sheet.theme;
-                    sheet = sheet_for(&t, di.scale);
+                    sheet = sheet_for(&t, sheet.profile, di.scale);
                     sheet.gen = gen;
                     gs.set_scale(di.scale);
                     gs.set_smooth(sheet.smooth_mem);

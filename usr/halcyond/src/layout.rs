@@ -23,6 +23,7 @@
 // (400) italic, ranked by SIZE never weight; em emph is Text italic;
 // everything else is the Text-weight (450) body.
 
+use libhalcyon::instrument::Profile;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
@@ -71,6 +72,9 @@ pub struct Sheet {
     /// The display scale in percent (`libhalcyon::scale`): the compositor's
     /// value, read off its ctl; 100 is the identity on every size here.
     pub scale: u16,
+    /// The profile the sheet was built for (HALCYON-INSTRUMENT 4): what
+    /// `metrics` below is the table of, and what a rescale rebuilds under.
+    pub profile: Profile,
     /// The chrome metrics at `scale` (`Metrics::at`): the tag-bar padding,
     /// the hairline, the bar heights -- the SAME table the compositor
     /// carves with, so the two painters agree by construction.
@@ -135,11 +139,17 @@ impl Sheet {
 /// Daylight-specific constructor (HALCYON-THEME 3.2).
 #[cfg(test)]
 pub fn daylight_sheet(scale: u16) -> Sheet {
-    sheet_for(&libhalcyon::theme::builtin(), scale)
+    sheet_for(&libhalcyon::theme::builtin(), Profile::Legacy, scale)
 }
 
-pub fn sheet_for(d: &libhalcyon::theme::Theme, scale: u16) -> Sheet {
-    let metrics = d.metrics.at(scale);
+/// The sheet for a resolved theme under `profile` at `scale`. The metrics
+/// come through `instrument::metrics_base` -- the PROFILE picks the table
+/// (HALCYON-INSTRUMENT 4.4 / 5.7: the theme's own `[geometry]` under
+/// legacy, the compiled Instrument table under instrument), scaled by the
+/// one `Metrics::at` the compositor's carve also reads, so the two painters
+/// cannot drift.
+pub fn sheet_for(d: &libhalcyon::theme::Theme, profile: Profile, scale: u16) -> Sheet {
+    let metrics = libhalcyon::instrument::metrics_base(profile, d).at(scale);
     let (island, grid) = mono_advances(scale);
     let px = |v: f32| libhalcyon::scale::px(v, scale);
     let ipx = |v: i32| libhalcyon::scale::ipx(v, scale);
@@ -158,6 +168,7 @@ pub fn sheet_for(d: &libhalcyon::theme::Theme, scale: u16) -> Sheet {
         island_ground: d.header,
         island_rule: d.island_rule,
         scale,
+        profile,
         metrics,
         hairline: metrics.hairline,
         mark_w: ipx(2),
@@ -1638,7 +1649,7 @@ mod tests {
             assert!(!daylight.contains(&c), "the retint collided with Daylight");
         }
 
-        let s = sheet_for(&t, 100);
+        let s = sheet_for(&t, Profile::Legacy, 100);
         for (name, c) in [
             ("ground", s.ground),
             ("ink", s.ink),
@@ -2506,7 +2517,7 @@ mod tests {
         // from its chrome ink.
         d.terminal.fg = 0xFFFF_FFFF;
         assert_ne!(d.terminal.fg, d.fg, "the fixture must actually split them");
-        let sheet = sheet_for(&d, 100);
+        let sheet = sheet_for(&d, Profile::Legacy, 100);
         assert_eq!(sheet.ink, d.fg, "the sheet's ink is the PALETTE tier");
 
         // A cell that set no colour carries the PEN's default.
@@ -2531,7 +2542,7 @@ mod tests {
         // The control, one variable away: with the tiers equal -- every theme
         // shipped today -- the same hooks fire, so this is not a behaviour
         // change for Daylight or Nightjar.
-        let agreed = sheet_for(&libhalcyon::theme::DAYLIGHT, 100);
+        let agreed = sheet_for(&libhalcyon::theme::DAYLIGHT, Profile::Legacy, 100);
         let ab = Style { fg: agreed.theme.terminal.fg, bg: 0, attrs: 0, em: 0, obj: 0, hdr: 0 };
         assert_eq!(color_for(&Style { em: EM_DIM, ..ab }, &agreed), agreed.dim);
         assert_eq!(color_for(&Style { obj: 1, ..ab }, &agreed), agreed.obj);

@@ -32,6 +32,7 @@ mirrors:
   - "tools/interactive/ls-gfx-age.exp"
   - "tools/interactive/ls-gfx-restore.exp"
   - "tools/interactive/ls-gfx-session.exp"
+  - "tools/interactive/ls-halcyon-instrument.exp"
   - "tools/interactive/ls-halcyon.exp"
   - "tools/interactive/pty-susp-pouch.exp"
   - "tools/interactive/r5f9-ash.exp"
@@ -49,7 +50,7 @@ literal-mentions:
   - "tools/warp-host.sh (a usage comment)"
   - "tools/interactive/go8d.exp (a prose note)"
 created: 2026-08-01
-updated: 2026-09-07
+updated: 2026-09-14
 ---
 ## The surface
 
@@ -118,10 +119,10 @@ match a literal (verified by grep); by which:
 
 - **`Thylacine boot OK`** (5): `check-arc-gates.sh`, `verify-console-mode.exp`,
   `verify-gpu-headless-1b.exp`, `test-smp-classify.sh`, `real-pass-harness.log`.
-- **`EXTINCTION:`** (10): `verify-gpu-headless-1b.exp`, `item10-ctrlc.exp`,
+- **`EXTINCTION:`** (11): `verify-gpu-headless-1b.exp`, `item10-ctrlc.exp`,
   `ls-gfx-age.exp`, `ls-gfx-restore.exp`, `ls-gfx-session.exp`, `ls-halcyon.exp`,
-  `pty-susp-pouch.exp`, `r5f9-ash.exp`, `test-smp-classify.sh`,
-  `composed-screen.exp`.
+  `ls-halcyon-instrument.exp`, `pty-susp-pouch.exp`, `r5f9-ash.exp`,
+  `test-smp-classify.sh`, `composed-screen.exp`.
 - **`kernel base:`** — none; `stall-watch.py` remains the sole matcher.
 
 By the four-class taxonomy above (program / document / inert / phantom), eleven

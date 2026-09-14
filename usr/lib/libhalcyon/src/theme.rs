@@ -122,7 +122,12 @@ pub struct Theme {
     pub smooth_mem: u16,
 }
 
-/// Chrome metrics (HALCYON-VISUAL section 3.1 / 4.3). Pixels.
+/// Chrome metrics (HALCYON-VISUAL section 3.1 / 4.3; HALCYON-INSTRUMENT 5.7).
+/// Pixels. The first seven are the legacy profile's and a legacy theme file's
+/// `[geometry]`; the rest are the Instrument profile's marks (5.1), which no
+/// file carries -- `instrument::INSTRUMENT_BASE` is the one table -- and
+/// which are 0 in every legacy table: a zero base is an ABSENT mark, and
+/// `at` keeps it absent at every scale rather than lifting it to a floor.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Metrics {
     pub bevel: i32,       // pane bevel width (2)
@@ -132,17 +137,82 @@ pub struct Metrics {
     pub status_h: i32,    // status bar height (20)
     pub tag_pad_x: i32,   // tag bar horizontal padding (6)
     pub tab_strip_h: i32, // tab/stack indicator strip (5); glyph-free, G-6c/D7
+    // Instrument (HALCYON-INSTRUMENT 5.1 / 5.7); 0 = absent under legacy.
+    pub rail_h: i32,       // the top rail (34); the bottom one is `status_h`
+    pub outer_pad: i32,    // the workspace's padding (3), independent of the track
+    pub track: i32,        // the divider track (7): real layout space, never an overlay
+    pub rule: i32,         // the divider's visible rule (2; floor 2)
+    pub rule_off: i32,     // the rule's offset from the track's leading edge (2)
+    pub joint: i32,        // the joint's OUTER box (7 = a 1 px border around a 5 px fill; floor 3)
+    pub frame: i32,        // the pane frame (1; floor 1)
+    pub index_w: i32,      // the header's index column (32)
+    pub header_gap: i32,   // the gap between header regions (7)
+    pub action_w: i32,     // the header's action column (28)
+    pub mark_w: i32,       // the focus mark's width (2; floor 2)
+    pub mark_inset_y: i32, // the focus mark's vertical inset (6)
+    pub min_pane_w: i32,   // a pane's minimum outer width (260; 5.2)
+    pub min_body_h: i32,   // a stack's minimum open body (54; 5.2)
 }
 
-const METRICS_BASE: Metrics = Metrics {
-    bevel: 2,
-    gap: 2,
-    hairline: 1,
-    header_h: 20,
-    status_h: 20,
-    tag_pad_x: 6,
-    tab_strip_h: 5,
-};
+impl Metrics {
+    /// A legacy table: the seven `[geometry]` keys, every Instrument mark
+    /// absent. The one constructor the base table, the kit's projected
+    /// table and the wire share, so the twelve absent marks are written
+    /// once.
+    pub const fn legacy(
+        bevel: i32,
+        gap: i32,
+        hairline: i32,
+        header_h: i32,
+        status_h: i32,
+        tag_pad_x: i32,
+        tab_strip_h: i32,
+    ) -> Metrics {
+        Metrics {
+            bevel,
+            gap,
+            hairline,
+            header_h,
+            status_h,
+            tag_pad_x,
+            tab_strip_h,
+            rail_h: 0,
+            outer_pad: 0,
+            track: 0,
+            rule: 0,
+            rule_off: 0,
+            joint: 0,
+            frame: 0,
+            index_w: 0,
+            header_gap: 0,
+            action_w: 0,
+            mark_w: 0,
+            mark_inset_y: 0,
+            min_pane_w: 0,
+            min_body_h: 0,
+        }
+    }
+}
+
+const METRICS_BASE: Metrics = Metrics::legacy(2, 2, 1, 20, 20, 6, 5);
+
+/// A structural mark at `pct`: round half up, never below `floor`
+/// (COMPOSITION 1) -- unless the base is 0, which says the mark is ABSENT
+/// from this table (the Instrument table has no bevel, the legacy one no
+/// rail) and stays absent at every scale. Every production base is at or
+/// above its floor already (the loader's and the wire's bounds), so the
+/// floor bites only below 100, which is not a v1 scale.
+const fn mark(base: i32, pct: u16, floor: i32) -> i32 {
+    if base == 0 {
+        return 0;
+    }
+    let v = crate::scale::ipx(base, pct);
+    if v < floor {
+        floor
+    } else {
+        v
+    }
+}
 
 /// The built-in geometry. A CONSTANT, so the TH-2 rule applies: production
 /// reaches it through `Theme.metrics`, and this is the test fixture.
@@ -167,17 +237,36 @@ impl Metrics {
     /// Takes `&self` since TH-3b: geometry is a THEME decision (a bevel's
     /// width and its four face colours are one decision), so the base comes
     /// from `Theme.metrics` rather than from a module constant.
+    ///
+    /// The Instrument marks scale by the same rule with their own floors
+    /// (HALCYON-INSTRUMENT 5.7): the rule and the focus mark never below 2,
+    /// the joint never below 3, the frame never below 1; an absent mark (a
+    /// zero base) stays absent, so a table's `at(100)` is the table itself
+    /// under either profile.
     pub const fn at(&self, pct: u16) -> Metrics {
-        let hair = crate::scale::ipx(self.hairline, pct);
-        let bevel = crate::scale::ipx(self.bevel, pct);
+        let ipx = crate::scale::ipx;
         Metrics {
-            bevel: if bevel < 2 { 2 } else { bevel },
-            gap: crate::scale::ipx(self.gap, pct),
-            hairline: if hair < 1 { 1 } else { hair },
-            header_h: crate::scale::ipx(self.header_h, pct),
-            status_h: crate::scale::ipx(self.status_h, pct),
-            tag_pad_x: crate::scale::ipx(self.tag_pad_x, pct),
-            tab_strip_h: crate::scale::ipx(self.tab_strip_h, pct),
+            bevel: mark(self.bevel, pct, 2),
+            gap: ipx(self.gap, pct),
+            hairline: mark(self.hairline, pct, 1),
+            header_h: ipx(self.header_h, pct),
+            status_h: ipx(self.status_h, pct),
+            tag_pad_x: ipx(self.tag_pad_x, pct),
+            tab_strip_h: ipx(self.tab_strip_h, pct),
+            rail_h: ipx(self.rail_h, pct),
+            outer_pad: ipx(self.outer_pad, pct),
+            track: ipx(self.track, pct),
+            rule: mark(self.rule, pct, 2),
+            rule_off: ipx(self.rule_off, pct),
+            joint: mark(self.joint, pct, 3),
+            frame: mark(self.frame, pct, 1),
+            index_w: ipx(self.index_w, pct),
+            header_gap: ipx(self.header_gap, pct),
+            action_w: ipx(self.action_w, pct),
+            mark_w: mark(self.mark_w, pct, 2),
+            mark_inset_y: ipx(self.mark_inset_y, pct),
+            min_pane_w: ipx(self.min_pane_w, pct),
+            min_body_h: ipx(self.min_body_h, pct),
         }
     }
 }
@@ -1259,15 +1348,17 @@ pub fn from_wire(line: &str) -> Option<crate::instrument::Bundle> {
             ansi,
         },
         smooth_mem: smooth_at(64)?,
-        metrics: Metrics {
-            bevel: num(65, "bevel")?,
-            gap: num(66, "gap")?,
-            hairline: num(67, "hairline")?,
-            header_h: num(68, "header_h")?,
-            status_h: num(69, "status_h")?,
-            tag_pad_x: num(70, "tag_pad_x")?,
-            tab_strip_h: num(71, "tab_strip_h")?,
-        },
+        // A legacy table only: the Instrument marks never cross the wire
+        // (the profile's constant table is the same in both processes).
+        metrics: Metrics::legacy(
+            num(65, "bevel")?,
+            num(66, "gap")?,
+            num(67, "hairline")?,
+            num(68, "header_h")?,
+            num(69, "status_h")?,
+            num(70, "tag_pad_x")?,
+            num(71, "tab_strip_h")?,
+        ),
     };
     let profile = Profile::parse(f[72])?;
     let light = match f[73] {
@@ -2264,7 +2355,7 @@ mod tests {
         // opposite of what a failure here means.
         assert_eq!(
             core::mem::size_of::<Theme>(),
-            288,
+            344,
             "Theme's layout moved. If a FIELD was added, the destructure above \
              already told you; add it to KEYS and to `set_key` in both \
              directions, then update this number."
@@ -2276,7 +2367,10 @@ mod tests {
         // one that also escapes `KEYS.len()`, since its sixteen ANSI slots sit
         // under a single `("terminal","ansi")` row.
         assert_eq!(core::mem::size_of::<vt::Palette>(), 72, "bg + fg + 16 ansi");
-        assert_eq!(core::mem::size_of::<Metrics>(), 28, "7 x i32");
+        // 7 legacy keys + the 12 Instrument marks (HALCYON-INSTRUMENT 5.7),
+        // none of which is a `[geometry]` key: the registry stays at 7 there
+        // because the Instrument table is the profile's constant, not a file's.
+        assert_eq!(core::mem::size_of::<Metrics>(), 84, "21 x i32");
         assert_eq!(core::mem::size_of::<LiveKey>(), 28, "7 x Argb");
         assert_eq!(core::mem::size_of::<Syntax>(), 36, "9 x Argb");
     }
@@ -2552,6 +2646,22 @@ mod tests {
         assert_eq!(METRICS.header_h, 20);
         assert_eq!(METRICS.status_h, 20);
         assert_eq!(METRICS.tab_strip_h, 5);
+        // HALCYON-INSTRUMENT 5.7: the Instrument marks are ABSENT from the
+        // legacy table (0), at every scale -- so the legacy carve, which
+        // never reads them, has nothing to read.
+        for pct in [100u16, 125, 150, 175, 200] {
+            let m = METRICS.at(pct);
+            assert_eq!(
+                (m.rail_h, m.outer_pad, m.track, m.rule, m.rule_off, m.joint, m.frame),
+                (0, 0, 0, 0, 0, 0, 0),
+                "at {pct}"
+            );
+            assert_eq!(
+                (m.index_w, m.header_gap, m.action_w, m.mark_w, m.mark_inset_y, m.min_pane_w, m.min_body_h),
+                (0, 0, 0, 0, 0, 0, 0),
+                "at {pct}"
+            );
+        }
     }
 
     // HALCYON-SCALE 5: the scaled metrics -- the identity at 100 (nothing at

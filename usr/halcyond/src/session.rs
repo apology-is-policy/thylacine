@@ -1053,7 +1053,7 @@ fn rescale(
     let from = sheet.scale;
     let gen = sheet.gen + 1;
     let t = sheet.theme;
-    *sheet = sheet_for(&t, pct);
+    *sheet = sheet_for(&t, sheet.profile, pct);
     sheet.gen = gen;
     gs.set_scale(pct);
     gs.set_smooth(sheet.smooth_mem);
@@ -1233,7 +1233,7 @@ pub fn run(home: Option<String>) -> i64 {
     if declared {
         push_theme(&ring, &bundle);
     }
-    let mut sheet = sheet_for(&theme, display.scale);
+    let mut sheet = sheet_for(&theme, bundle.profile, display.scale);
     gs.set_smooth(sheet.smooth_mem);
     let (cell_w, cell_h, _) = gs.mono_cell();
     let (disp_w, disp_h) = (root_surf.w, root_surf.h);

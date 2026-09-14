@@ -515,6 +515,10 @@ const PFK_CLAIM: u64 = 9;
 /// or an empty leaf's recorded owner (0 = the environment). The session
 /// tool's `layout save` reads it to mark the tiles it must never respawn.
 const PFK_OWNER: u64 = 10;
+/// HALCYON-INSTRUMENT 5.5: the enclosing pane frame's rect (a stacked leaf's
+/// is its stack's) and a split container's divider tracks, one per line.
+const PFK_FRAME: u64 = 11;
+const PFK_DIVIDERS: u64 = 12;
 
 fn make_surf(n: usize, fk: u64) -> u64 {
     SURF_FLAG | ((n as u64 & N_MASK) << 8) | (fk & FK_MASK)
@@ -1502,9 +1506,12 @@ pub struct Comp {
     pub theme: libhalcyon::theme::Theme,
     /// The RESOLVED BUNDLE (HALCYON-INSTRUMENT 4.4): the profile in force
     /// and both themes, one native and one projected. `theme` and `metrics`
-    /// above are derived from it in `new` and `apply_theme` and nowhere
-    /// else; until I-2 lands the Instrument carve every painter still reads
-    /// the legacy pair, so nothing paints differently under `instrument`.
+    /// above are derived from it in `new`, `apply_theme` and `apply_scale`
+    /// and nowhere else -- `metrics` through `Bundle::at`, so the PROFILE
+    /// picks the table (I-2): the legacy painters read `theme` and the
+    /// legacy carve reads the legacy fields; the Instrument carve and
+    /// painter (`recompute_instrument`, `paint_instrument`) read `inst` and
+    /// the Instrument marks. Which pair runs is `bundle.profile`.
     pub bundle: libhalcyon::instrument::Bundle,
     surfaces: [Option<Surface>; MAX_SURFACES],
     gen_seq: u32,
@@ -2364,7 +2371,7 @@ impl Comp {
             scale,
             scale_override: None,
             declared,
-            metrics: theme.metrics.at(scale),
+            metrics: bundle.at(scale).metrics,
             theme,
             bundle,
             surfaces: [NO_SURFACE; MAX_SURFACES],
@@ -4107,7 +4114,11 @@ impl Comp {
         if let Some(pid) = s.chrome_bind {
             let slot = self.layout.slot_of_id(pid)?;
             let p = self.layout.get(slot)?;
-            if !p.visible || p.tagbar.is_empty() {
+            // The header rect whenever it is non-empty (HALCYON-INSTRUMENT
+            // 6.3): under Instrument a COLLAPSED tile is not visible yet
+            // has a header; under legacy a hidden leaf's tag bar is ZERO,
+            // so dropping the visibility demand changes nothing there.
+            if p.tagbar.is_empty() {
                 return None;
             }
             return Some(p.tagbar);
@@ -4156,7 +4167,7 @@ impl Comp {
         }
         self.bundle = b;
         self.theme = b.theme;
-        self.metrics = self.theme.metrics.at(self.scale);
+        self.metrics = self.bundle.at(self.scale).metrics;
         say!("tapestryd: theme applied ({} push)", who);
         self.rescale_fan_due = true;
         if let Some(st) = self.status {
@@ -4176,7 +4187,7 @@ impl Comp {
         }
         let from = self.scale;
         self.scale = pct;
-        self.metrics = self.theme.metrics.at(pct);
+        self.metrics = self.bundle.at(pct).metrics;
         say!("tapestryd: scale {} -> {} ({})", from, pct, why);
         // The fan is owed whatever the geometry does (the scale round's
         // F3). Set BEFORE the bar retire: the retire's own reconcile
@@ -4221,6 +4232,67 @@ impl Comp {
             w: dw,
             h: unit,
         })
+    }
+
+    /// The rectangle the pane tree is carved in: under legacy the display
+    /// at the origin less a registered status bar (`layout_h`); under
+    /// Instrument (HALCYON-INSTRUMENT 5.1) the space between the two rails,
+    /// which are always carved -- `rail_h` at the top, `status_h` at the
+    /// bottom -- even with nothing registered on them. A display too short
+    /// for both rails yields an empty area (nothing to carve; the rails
+    /// still paint what fits).
+    fn workspace_area(&self, dw: u32, dh: u32, layout_h: u32) -> Rect {
+        match self.bundle.profile {
+            libhalcyon::instrument::Profile::Legacy => Rect {
+                x: 0,
+                y: 0,
+                w: dw,
+                h: layout_h,
+            },
+            libhalcyon::instrument::Profile::Instrument => {
+                let top = self.metrics.rail_h.max(0) as u32;
+                let bottom = self.metrics.status_h.max(0) as u32;
+                Rect {
+                    x: 0,
+                    y: top.min(dh),
+                    w: dw,
+                    h: dh.saturating_sub(top).saturating_sub(bottom),
+                }
+            }
+        }
+    }
+
+    /// Instrument only: the two rails' rects (top, bottom) on the display,
+    /// clipped to it. None under legacy (the bottom strip there is
+    /// `status_rect`, which exists only while a bar is registered).
+    fn rail_rects(&self) -> Option<(Rect, Rect)> {
+        if self.bundle.profile != libhalcyon::instrument::Profile::Instrument {
+            return None;
+        }
+        let (dw, dh) = (self.gpu.width, self.gpu.height);
+        let disp = Rect {
+            x: 0,
+            y: 0,
+            w: dw,
+            h: dh,
+        };
+        let top = self.metrics.rail_h.max(0) as u32;
+        let bottom = self.metrics.status_h.max(0) as u32;
+        let t = Rect {
+            x: 0,
+            y: 0,
+            w: dw,
+            h: top,
+        }
+        .intersect(disp);
+        let b = Rect {
+            x: 0,
+            y: dh.saturating_sub(bottom),
+            w: dw,
+            h: bottom,
+        }
+        .intersect(disp);
+        Some((t, b))
     }
 
     /// Every showable NON-HOSTED surface with its target -- chrome at its
@@ -5380,11 +5452,17 @@ impl Comp {
             None => return,
         };
         let px = va as *mut u32;
+        // The ground: the legacy blank, or under Instrument the workspace's
+        // `desktop` (HALCYON-INSTRUMENT 5.1 -- the pads and tracks are it).
+        let ground = match self.bundle.profile {
+            libhalcyon::instrument::Profile::Legacy => self.theme.blank,
+            libhalcyon::instrument::Profile::Instrument => self.bundle.inst.desktop,
+        };
         // SAFETY: the screen buffer is dw*dh*4 bytes, mapped RW for the
         // process lifetime.
         unsafe {
             for i in 0..(dw * dh) as usize {
-                *px.add(i) = self.theme.blank;
+                *px.add(i) = ground;
             }
         }
         let _ = self.paint_borders(true);
@@ -5793,6 +5871,9 @@ impl Comp {
     }
 
     fn paint_borders(&mut self, fill_tagbars: bool) -> Vec<Rect> {
+        if self.bundle.profile == libhalcyon::instrument::Profile::Instrument {
+            return self.paint_instrument(fill_tagbars);
+        }
         let th = self.theme;
         let th = &th;
         let mut painted: Vec<Rect> = Vec::new();
@@ -5991,6 +6072,254 @@ impl Comp {
                 w: inset,
                 h: r.h,
             });
+        }
+        painted
+    }
+
+    /// The Instrument profile's compositor-owned chrome (HALCYON-INSTRUMENT
+    /// 5.1; I-2): the two rails (`rail`, each with its 1 px `structure`
+    /// line facing the workspace), the outer pad ring (`desktop`), every
+    /// divider track (`desktop`, the 2 px `structure` rule at its offset, the
+    /// 7 x 7 joint at its leading corner -- a `structure` border around a
+    /// `desktop` fill), every pane frame (1 px `pane_border`, `focus_neutral`
+    /// on the frame holding the focused leaf) and, when `structural`, the
+    /// resting `header` fill under every tile header (collapsed ones too)
+    /// and the `pane` fill of an empty tile's body. Returns every rect it
+    /// painted so a focus-only repaint and the menu heal push exactly those
+    /// (the composed path's rule: never the whole buffer). No bevel, no
+    /// hairline, no shadow, no status-keyed outline (3, the amendment
+    /// table): status moved to the header's ink and the bottom rail.
+    fn paint_instrument(&mut self, structural: bool) -> Vec<Rect> {
+        let inst = self.bundle.inst;
+        let m = self.metrics;
+        let mut painted: Vec<Rect> = Vec::new();
+        if self.screen.is_none() {
+            return painted;
+        }
+        let (dw, dh) = (self.gpu.width, self.gpu.height);
+        let disp = Rect {
+            x: 0,
+            y: 0,
+            w: dw,
+            h: dh,
+        };
+        let hair = m.hairline.max(0) as u32;
+        let frame_w = m.frame.max(0) as u32;
+        // The rails: the fill, then the structure line on the workspace
+        // side (inside the rail's own box: 5.1).
+        if let Some((top, bottom)) = self.rail_rects() {
+            if !top.is_empty() {
+                self.fill_rect(top, inst.rail);
+                let line = Rect {
+                    x: top.x,
+                    y: (top.y + top.h).saturating_sub(hair),
+                    w: top.w,
+                    h: hair.min(top.h),
+                };
+                self.fill_rect(line, inst.structure);
+                painted.push(top);
+            }
+            if !bottom.is_empty() {
+                self.fill_rect(bottom, inst.rail);
+                let line = Rect {
+                    x: bottom.x,
+                    y: bottom.y,
+                    w: bottom.w,
+                    h: hair.min(bottom.h),
+                };
+                self.fill_rect(line, inst.structure);
+                painted.push(bottom);
+            }
+        }
+        // The pad ring between the workspace and the root: `desktop`.
+        let area = self.layout.area;
+        let pad = m.outer_pad.max(0) as u32;
+        if !area.is_empty() {
+            for r in [
+                Rect {
+                    x: area.x,
+                    y: area.y,
+                    w: area.w,
+                    h: pad,
+                },
+                Rect {
+                    x: area.x,
+                    y: (area.y + area.h).saturating_sub(pad),
+                    w: area.w,
+                    h: pad,
+                },
+                Rect {
+                    x: area.x,
+                    y: area.y,
+                    w: pad,
+                    h: area.h,
+                },
+                Rect {
+                    x: (area.x + area.w).saturating_sub(pad),
+                    y: area.y,
+                    w: pad,
+                    h: area.h,
+                },
+            ] {
+                let r = r.intersect(area);
+                if !r.is_empty() {
+                    self.fill_rect(r, inst.desktop);
+                    painted.push(r);
+                }
+            }
+        }
+        let focused = self.layout.focused;
+        let focused_parent = self.layout.get(focused).and_then(|p| p.parent);
+        for (slot, _id) in self.layout.live_ids() {
+            let (kind_split, vertical_track, is_frame_owner, rect, dividers, tagbar, empty_body, content, visible) = {
+                let Some(p) = self.layout.get(slot) else { continue };
+                let (kind_split, vertical_track, is_frame_owner, empty_body) = match &p.kind {
+                    pane::Kind::Container { mode, .. } => (
+                        matches!(mode, Mode::SplitH | Mode::SplitV),
+                        *mode == Mode::SplitH,
+                        matches!(mode, Mode::Tabbed | Mode::Stacked),
+                        false,
+                    ),
+                    pane::Kind::Leaf { surface } => {
+                        // A lone leaf owns its frame; a stacked or tabbed
+                        // leaf's frame is its container's.
+                        let under_stack = p.parent.is_some_and(|pi| {
+                            matches!(
+                                self.layout.get(pi).map(|q| &q.kind),
+                                Some(pane::Kind::Container {
+                                    mode: Mode::Tabbed | Mode::Stacked,
+                                    ..
+                                })
+                            )
+                        });
+                        (false, false, !under_stack, surface.is_none())
+                    }
+                };
+                (
+                    kind_split,
+                    vertical_track,
+                    is_frame_owner,
+                    p.rect,
+                    p.dividers.clone(),
+                    p.tagbar,
+                    empty_body,
+                    p.content,
+                    p.visible,
+                )
+            };
+            // Headers rest on `header` whether the tile is open or collapsed
+            // (a collapsed tile is not visible, and has one).
+            if structural && !tagbar.is_empty() {
+                let r = tagbar.intersect(disp);
+                self.fill_rect(r, inst.header);
+                painted.push(r);
+            }
+            if !visible {
+                continue;
+            }
+            if kind_split {
+                let rule_w = m.rule.max(0) as u32;
+                let rule_off = m.rule_off.max(0) as u32;
+                let joint = m.joint.max(0) as u32;
+                for d in dividers {
+                    let d = d.intersect(disp);
+                    if d.is_empty() {
+                        continue;
+                    }
+                    self.fill_rect(d, inst.desktop);
+                    let rule = if vertical_track {
+                        Rect {
+                            x: d.x + rule_off,
+                            y: d.y,
+                            w: rule_w,
+                            h: d.h,
+                        }
+                    } else {
+                        Rect {
+                            x: d.x,
+                            y: d.y + rule_off,
+                            w: d.w,
+                            h: rule_w,
+                        }
+                    };
+                    self.fill_rect(rule.intersect(d), inst.structure);
+                    // The joint at the track's leading corner, offset by the
+                    // frame width (1,1): the OUTER box in `structure`, the
+                    // fill inside a `hairline` border in `desktop`. It spans
+                    // past the track by the frame, over the trailing pane's
+                    // frame -- the divider paints above the panes (3.1).
+                    let j = Rect {
+                        x: d.x + frame_w,
+                        y: d.y + frame_w,
+                        w: joint,
+                        h: joint,
+                    }
+                    .intersect(disp);
+                    if !j.is_empty() {
+                        self.fill_rect(j, inst.structure);
+                        if j.w > 2 * hair && j.h > 2 * hair {
+                            self.fill_rect(
+                                Rect {
+                                    x: j.x + hair,
+                                    y: j.y + hair,
+                                    w: j.w - 2 * hair,
+                                    h: j.h - 2 * hair,
+                                },
+                                inst.desktop,
+                            );
+                        }
+                        painted.push(j);
+                    }
+                    painted.push(d);
+                }
+                continue;
+            }
+            if empty_body && structural && !content.is_empty() {
+                let r = content.intersect(disp);
+                self.fill_rect(r, inst.pane);
+                painted.push(r);
+            }
+            if !is_frame_owner || rect.is_empty() {
+                continue;
+            }
+            let r = rect.intersect(disp);
+            let focus = slot == focused || Some(slot) == focused_parent;
+            let colour = if focus {
+                inst.focus_neutral
+            } else {
+                inst.pane_border
+            };
+            let fw = frame_w.min(r.w).min(r.h);
+            let bands = [
+                Rect {
+                    x: r.x,
+                    y: r.y,
+                    w: r.w,
+                    h: fw,
+                },
+                Rect {
+                    x: r.x,
+                    y: (r.y + r.h).saturating_sub(fw),
+                    w: r.w,
+                    h: fw,
+                },
+                Rect {
+                    x: r.x,
+                    y: r.y,
+                    w: fw,
+                    h: r.h,
+                },
+                Rect {
+                    x: (r.x + r.w).saturating_sub(fw),
+                    y: r.y,
+                    w: fw,
+                    h: r.h,
+                },
+            ];
+            for b in bands {
+                self.fill_rect(b, colour);
+                painted.push(b);
+            }
         }
         painted
     }
@@ -6196,6 +6525,12 @@ impl Comp {
             Some(sr) => dh - sr.h,
             None => dh,
         };
+        // HALCYON-INSTRUMENT 5.1: under Instrument BOTH rails are carved
+        // whether or not anything is registered on them (the compositor
+        // fills `rail` under them from the carve on), and the layout lives
+        // between them. Under legacy the area is the display less a
+        // registered bar, at the origin -- the line above, unchanged.
+        let area = self.workspace_area(dw, dh, layout_h);
         // F2 (d-1b tiling completion): determine backgrounding from the TREE
         // BEFORE recompute so layout_pane can exclude a backgrounded leaf from
         // tiling. A leaf is backgrounded iff it hosts a NON-session surface AND
@@ -6224,7 +6559,7 @@ impl Comp {
             Vec::new()
         };
         self.layout.apply_backgrounded(&bg_tiling);
-        self.layout.recompute(dw, layout_h, self.chords.gaps, self.metrics);
+        self.layout.recompute(area, self.chords.gaps, self.metrics, self.bundle.profile);
         let vis = self.layout.visible_hosted();
         let nleaves = self.layout.visible_leaf_count();
 
@@ -6746,8 +7081,9 @@ impl Comp {
 
     /// The `layout` file grammar (G-6): `<verb> <pane-id> [args]` --
     /// `split <id> h|v`, `close <id>`, `focus <id>`, `mode <id> <mode>`,
-    /// `move <id> <dir>`, `zoom <id>` -- plus the id-less verbs acting on
-    /// the focused leaf (G-6c): `focusdir <dir>`, `tab next|prev`.
+    /// `move <id> <dir>`, `zoom <id>`, `weight <id> <1..65535>` (I-2) --
+    /// plus the id-less verbs acting on the focused leaf (G-6c):
+    /// `focusdir <dir>`, `tab next|prev`.
     /// The pane tree's trust model (HALCYON.md 13.6; the H-3b round F2 /
     /// R2-F1): the actor may MUTATE the subtree at `slot` iff every hosted
     /// surface in it is its own -- empty leaves belong to nobody and never
@@ -6914,7 +7250,7 @@ impl Comp {
             .ok_or(p9::E_INVAL)?;
         let args = it2.next().unwrap_or("").trim();
         let cmd = match verb {
-            "split" | "mode" | "move" => {
+            "split" | "mode" | "move" | "weight" => {
                 if args.is_empty() {
                     return Err(p9::E_INVAL);
                 }
@@ -6956,6 +7292,13 @@ impl Comp {
             }
             if !self.actor_owns_subtree(actor, slot) {
                 return Err(p9::E_PERM);
+            }
+            // HALCYON-INSTRUMENT 5.2: a split that cannot satisfy every
+            // minimum is refused ATOMICALLY -- judged before the tree
+            // changes, the same errno as a full pane table (the tree cannot
+            // grow here). Always fits under legacy.
+            if !self.layout.split_fits(slot, mode) {
+                return Err(p9::E_NOMEM);
             }
             self.layout.unzoom();
             let new_leaf = self.layout.split(slot, mode).ok_or(p9::E_NOMEM)?;
@@ -7038,6 +7381,23 @@ impl Comp {
             }
             self.layout.unzoom();
             if !self.layout.set_mode(slot, mode) {
+                return Err(p9::E_INVAL);
+            }
+        } else if let Some(w) = cmd.strip_prefix("weight ") {
+            // HALCYON-INSTRUMENT 5.2: the pane's weight in its parent's
+            // division. Syntax first (`1..=65535`; a root has no division),
+            // then authority: it re-divides the PARENT, so the parent's
+            // subtree is what the actor must own -- the `mode` rule.
+            let w: u16 = match w.trim().parse::<u32>() {
+                Ok(v) if (1..=u16::MAX as u32).contains(&v) => v as u16,
+                _ => return Err(p9::E_INVAL),
+            };
+            let parent = self.layout.get(slot).and_then(|p| p.parent).ok_or(p9::E_INVAL)?;
+            if !self.actor_owns_subtree(actor, parent) {
+                return Err(p9::E_PERM);
+            }
+            self.layout.unzoom();
+            if !self.layout.set_weight(slot, w) {
                 return Err(p9::E_INVAL);
             }
         } else {
@@ -13763,6 +14123,8 @@ impl Conn {
                     b"status" => PFK_STATUS,
                     b"claim" => PFK_CLAIM,
                     b"owner" => PFK_OWNER,
+                    b"frame" => PFK_FRAME,
+                    b"dividers" => PFK_DIVIDERS,
                     _ => return None,
                 };
                 Some((make_pane(id, fk), 0))
@@ -15198,6 +15560,19 @@ impl Conn {
             PFK_TAGBAR => {
                 let t = comp.layout.get(slot).unwrap().tagbar;
                 let _ = core::fmt::write(&mut s, format_args!("{} {} {} {}\n", t.x, t.y, t.w, t.h));
+            }
+            PFK_FRAME => {
+                // The pane's outer rect: under Instrument the frame's box
+                // (5.5), under legacy the ring's outside. ZERO when hidden.
+                let r = comp.layout.get(slot).unwrap().rect;
+                let _ = core::fmt::write(&mut s, format_args!("{} {} {} {}\n", r.x, r.y, r.w, r.h));
+            }
+            PFK_DIVIDERS => {
+                // One `x y w h` per track, in child order; empty for a leaf,
+                // a stack, or under legacy.
+                for d in &comp.layout.get(slot).unwrap().dividers {
+                    let _ = core::fmt::write(&mut s, format_args!("{} {} {} {}\n", d.x, d.y, d.w, d.h));
+                }
             }
             PFK_STATUS => {
                 // The RECORDED status (resting|ok|err), not the display key:
@@ -17582,6 +17957,8 @@ impl Conn {
                         (&b"status"[..], PFK_STATUS),
                         (&b"claim"[..], PFK_CLAIM),
                         (&b"owner"[..], PFK_OWNER),
+                        (&b"frame"[..], PFK_FRAME),
+                        (&b"dividers"[..], PFK_DIVIDERS),
                     ] {
                         names.push((nm.to_vec(), make_pane(id, fk)));
                     }
@@ -17799,7 +18176,14 @@ impl Conn {
         let ro = is_pane(f.path)
             && matches!(
                 pane_fk(f.path),
-                PFK_SURFACE | PFK_GEOMETRY | PFK_TAGBAR | PFK_STATUS | PFK_CLAIM | PFK_OWNER
+                PFK_SURFACE
+                    | PFK_GEOMETRY
+                    | PFK_TAGBAR
+                    | PFK_STATUS
+                    | PFK_CLAIM
+                    | PFK_OWNER
+                    | PFK_FRAME
+                    | PFK_DIVIDERS
             );
         let (mode, nlink) = if is_dir(f.path) {
             (DIR_MODE, 2u64)

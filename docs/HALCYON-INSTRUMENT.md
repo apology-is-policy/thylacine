@@ -206,7 +206,9 @@ existing gated `theme` verb (§4.5). A malformed component fails the whole
 candidate loudly and the next tier is tried (system, then built-in — the
 TH-4a policy); a runtime selection that fails leaves the current bundle in
 place and says so. A display with no declared session keeps the system's
-bundle.
+bundle. The system word is baked by `THYLACINE_HALCYON_PROFILE=<legacy|instrument>`
+(`tools/build.sh`, I-2; constrained to the two words before it is written);
+absent, no file is written and the floor is `legacy`.
 
 ### 4.2 One loader, two schemas
 
@@ -296,13 +298,19 @@ pub struct Visual {           // what every painter is handed; nothing else read
 *(As built at I-1: `inst` is never absent — a bundle always carries both
 sides, one native and one projected, so the `Option` this section first
 proposed was dropped; `Bundle` is the wire's type and `Visual` = `Bundle`
-+ the scaled metrics. Until I-2 the metrics are the legacy theme's table
-under either profile.)* `Sheet` carries a `Visual` instead of a bare
-`Theme` (`layout.rs:49`) from I-2; at I-1 `Comp` gains `Comp.bundle` and
-derives its `theme` and `metrics` from it in `new` and `apply_theme`
-alone, so nothing paints differently. The TH-2 rule holds: no production
-site names `DAYLIGHT`, `CARBON` or a metrics constant; both are
-`theme-fixture`-gated.
++ the scaled metrics.)* **As built at I-2:** `Bundle::at(pct)` picks the
+table by the PROFILE through one free function,
+`instrument::metrics_base(profile, &theme)` — the theme's own
+`[geometry]` under `legacy`, the compiled `INSTRUMENT_BASE` under
+`instrument`, whatever the projected table says — and both painters read
+it: `Comp.metrics` is `bundle.at(scale).metrics` in `new`, `apply_theme`
+and `apply_scale`; halcyond's `Sheet` carries the `profile` beside its
+`theme` and builds its metrics through the same function
+(`sheet_for(&theme, profile, scale)`), so a profile flip moves both
+painters together or neither. (The sheet keeps the pieces it needs rather
+than a whole `Visual`; `inst` joins it with the Instrument `Sheet` of
+I-5.) The TH-2 rule holds: no production site names `DAYLIGHT`, `CARBON`
+or a metrics constant; both are `theme-fixture`-gated.
 
 ### 4.5 The wire
 
@@ -388,6 +396,38 @@ shadow of this rule and is kept as the drag clamp where it is tighter.
 **Bounds (I-32).** Weights are `u16`; depth ≤ `MAX_DEPTH` (32); nodes ≤
 `MAX_NODES` (256); a `weight` verb rides the per-pass layout-verb budget.
 
+**As built at I-2.** The arithmetic is `libhalcyon::carve` (pure,
+host-tested). `split_spans` computes every boundary as an exact rational
+over the weight sum and snaps it ONCE (`(num + S/2) / S`, round half up);
+children are differences of snapped boundaries. The minima are enforced
+there as the flex rule: a child whose ideal share falls below its minimum
+is frozen at it and the rest re-share the remainder; when the minima
+alone exceed the usable extent every child is laid at its minimum from
+the origin and the caller clips — a display that small keeps its data and
+never drops a tile. The two-child result IS the mockup's `r·(E−7)`
+(pinned). The reference boundaries — the root track on columns 738..744
+and the right column's on rows 443..449 at 1440 × 900 — are where the
+browser's raster put them (the golden PNG's pixels measured, JOURNAL run
+46o "I-2"), and the 200 % row doubles to 1476..1489. The minima are
+judged BEFORE a split: `Layout::split_fits(slot, mode)` evaluates the
+tree's minimum with the leaf hypothetically split (flattened into a
+same-mode parent as one more sibling, nested as a fresh two-way container
+otherwise) against the padded workspace; the `split` verb refuses with
+`ENOMEM` — the pane-table class: the tree cannot grow here — and nothing
+changes. The compositor's own placement (`host_for`, a new surface into an
+occupied focused leaf) tries the aspect split, then a STACK when that will
+not fit (a same-mode split flattens into an existing stack, so the tile
+joins it), then refuses like a full table. The two minima ride `Metrics`
+(`min_pane_w` 260, `min_body_h` 54; §5.7) so they scale with the rest.
+Weights live on the pane (`Pane.weight`): a newcomer to a container takes
+the MEAN of its siblings (an equal share, the siblings' ratios untouched —
+i3's `con_fix_percent`); a nesting split's container takes the leaf's
+weight and the two inside halve; a dissolved container's survivor takes
+the container's; a swap moves the weight with the pane. The verb is
+`weight <id> <1..65535>` on the pane ctl and in the `layout` file (the
+per-pass budget; authority = the parent's subtree, the `mode` rule, since
+it re-divides the parent).
+
 ### 5.3 The layout file: v2
 
 `halcyon-layout v2` = v1 plus `w=<weight>` per child row. The v1 reader
@@ -395,6 +435,19 @@ stays; a v1 file loads with equal weights; the writer emits v2 only when a
 weight is non-default (a saved tree with equal weights is byte-identical
 v1, so old readers keep reading it). A `stacked` container's `active` is
 already the expanded tile. Nothing else in the format moves.
+
+**As built at I-2.** The token ends its row (after `env`); it is refused
+under a v1 header, at 0, above 65535 or with anything but digits
+(`ParseError::BadWeight`). The compositor's `layout` dump carries
+` w=<n>` after the rect when non-default (every older reader reads past
+it; the equal-weight dump is byte-identical), and `from_render_text` reads
+it, so `layout save` writes v2 exactly when the tree has a weight. The
+restore planner emits `skeleton::Op::Weight { target, w }` once the
+node exists (a leaf, or the container a nesting split created; a
+container that flattened into its parent is not a node and its weight has
+nothing to land on — a saved compositor tree never has one) and the
+session tool executes it as the `weight` verb. `prune_env` hands a
+dissolved container's weight to its survivor, the compositor's own rule.
 
 ### 5.4 The stack's header/body allocation
 
@@ -410,6 +463,11 @@ tile has no separator; bodies clip to their rectangles. The CSS clips the
 collapsed header's last row under its own border — that is the reference's
 border-box accounting, reproduced, not corrected.
 
+*As built at I-2: `carve::stack_alloc`, pinned against the reference's
+three panes (p1: headers at 38 / 70 / 807 / 839, the body 102..806; p2:
+38 / 378 / 410, the body 70..377; p3: 451 / 483 / 839, the body
+515..838 — the browser's rows).*
+
 ### 5.5 Who computes, and where it is published
 
 **tapestryd computes every rectangle once** (`recompute`): the rails'
@@ -423,11 +481,39 @@ rect — the stack's, for a stacked leaf) and a new per-container `dividers`
 goldens' reader all read those; no painter subtracts a second header or a
 legacy ring.
 
+**As built at I-2.** `Layout::recompute(area, gaps, metrics, profile)`
+dispatches to the pre-profile legacy carve, untouched, or to
+`recompute_instrument`; the `area` is the compositor's
+(`Comp::workspace_area`: the display less a registered bar under legacy;
+the space between the two rails under Instrument, ALWAYS, whether or not
+anything is registered on them). Per pane: `rect` is the frame's box (a
+stacked or tabbed leaf's is its container's), `tagbar` the header — set
+for a collapsed tile too, which is not `visible` and whose `content` is
+ZERO (dormancy, §6.2 #5) — `content` the open body, `dividers` a split
+container's tracks in child order. Every rect is clipped to its parent's.
+The files: `pane/<id>/frame` (`x y w h`, the pane's outer rect — under
+legacy the ring's outside) and `pane/<id>/dividers` (one `x y w h` per
+track; empty for a leaf, a stack, or under legacy), both read-only. The
+joint is derived from its track by every painter (at the track's
+(`frame`, `frame`) corner, `joint` square), never published.
+`surface_target`'s chrome arm no longer demands visibility, so a
+collapsed header is a CONFIGURE target. The compositor's Instrument
+painter (`paint_instrument`): the two rails (`rail`, each with its
+`structure` line facing the workspace), the pad ring and the tracks
+(`desktop`), the rule, the joint (a `hairline` `structure` border around
+`desktop`), the frames (`pane_border`; `focus_neutral` on the frame
+holding the focused leaf), the resting `header` under every header and
+`pane` under an empty body; it returns its rects so the focus-only repaint
+and the menu heal push exactly those. A zoomed leaf fills the workspace
+between the rails, frame-less.
+
 ### 5.6 The lone tile
 
 One tile on a display is still a stack of one inside a frame under two
 rails. The legacy "single fullscreen leaf is borderless and bar-free"
-gate (`pane.rs:1462`) is profile-conditional: off under Instrument. An
+gate (the legacy carve's `foreground_leaf_count() > 1`,
+`recompute_legacy`) is the legacy carve's alone: the Instrument carve has
+no such branch (as built at I-2). An
 application fullscreen (zoom) stays a separate, explicit command and
 hides the frame as today.
 
@@ -456,6 +542,26 @@ pub struct Metrics {
 separator/index rule) and `bevel`/`gap`/`tab_strip_h` 0; `Metrics::at`
 scales the new fields with the same rule and floors. Nothing at 100 moves
 for the legacy table (`Metrics::at(100) == METRICS_BASE` stays pinned).
+
+**As built at I-2** (two amendments to the struct above). (1) Two more
+fields, `min_pane_w` (260) and `min_body_h` (54), carry §5.2's minima so
+they scale with the table (`Metrics` is 21 × i32; the legacy `[geometry]`
+registry stays at 7 — no file carries an Instrument mark, the table is the
+profile's constant, `instrument::INSTRUMENT_BASE`). (2) The zero-base
+rule in `Metrics::at`: a mark whose base is 0 is ABSENT from that table
+and stays 0 at every scale rather than being lifted to its floor — so the
+Instrument table has no bevel at any scale and the legacy table no rail,
+and each table's `at(100)` is the table itself (`INSTRUMENT_BASE.at(100)
+== INSTRUMENT_BASE`, pinned). The legacy floors are unchanged in effect:
+every production legacy base is at or above its floor already (the
+loader's and the wire's bounds), so the floors bit only below 100, which
+is not a v1 scale. `Metrics::legacy(bevel, gap, hairline, header_h,
+status_h, tag_pad_x, tab_strip_h)` is the one constructor of a legacy
+table (the base, the kit's projected table, the wire). The scaled tables
+are pinned: at 125 rail 43, status 31, pad 4, track 9, rule 3, joint 9,
+frame 1, header 40; at 150 rail 51, status 38, track 11, rule 3, joint
+11, frame 2; at 175 rail 60, status 44, track 12, rule 4, joint 12, frame
+2; at 200 everything doubled.
 
 ## 6. The stack — one container, every header visible
 
@@ -497,8 +603,8 @@ no second container type is invented.
 Each tile's header is its **existing tag-bar surface** (`Role::Chrome`
 bound to the leaf), placed at the leaf's header rect — which now exists
 while the body is collapsed. `surface_target`'s chrome arm returns the
-header rect whenever it is non-empty (today it also demands the leaf be
-visible, `server.rs:4102`); the CONFIGURE fan and the structural repaint
+header rect whenever it is non-empty (it demanded visibility until I-2);
+the CONFIGURE fan and the structural repaint
 reach collapsed headers the same way. No new surface role, no strip-list
 surface per stack: the stack's authority over the header GEOMETRY lives in
 `recompute`; the header's PIXELS stay halcyond's, whole and opaque (the H-3
@@ -967,7 +1073,15 @@ start)` with opacity 0 at 55 % — reduced-motion honoured (§9.5).
   with PIDs, order, expansion and scroll preserved; the seat's negative
   controls for `role=rail`, `weight` and `theme`; the crash of one
   kaua-term contained to its tile. The pixel reader is `gfx_compose.py`'s,
-  extended.
+  extended. Its first slice exists since I-2:
+  `tools/interactive/ls-halcyon-instrument.exp` boots the console-lever
+  image with the profile lever (`THYLACINE_HALCYON=1
+  THYLACINE_HALCYON_SESSION=0 THYLACINE_HALCYON_PROFILE=instrument`; it
+  SKIPs on any other) and reads the carve back through the compositor's
+  own files and pixels — the profile arriving through the wire, the
+  stack-of-one frame under two rails, the 1:1 split's snapped track, the
+  rule, the joint counted as 24 `structure` around 25 `desktop`, the
+  focus frame, the empty body, zoom.
 - **Host suites.** libhalcyon: the second schema's mutation suite with a
   positive twin per case, both projections, the wire round trip, the
   weighted split arithmetic (partition, snap, minima, the two-child flex
@@ -998,7 +1112,12 @@ start)` with opacity 0 at 55 % — reduced-motion honoured (§9.5).
   (rails, outer pad, tracks, joints, frame, headers — collapsed included,
   the lone-tile rule); the `frame` / `dividers` files; weights and the
   arithmetic; `halcyon-layout v2`. The legacy carve byte-identical under
-  `legacy`. *Audit-bearing: the compositor's geometry + I-32.*
+  `legacy`. *Audit-bearing: the compositor's geometry + I-32.* **LANDED**
+  (`libhalcyon::carve`, `INSTRUMENT_BASE` + `Bundle::at` by profile,
+  `recompute_instrument` + `paint_instrument`, the `weight` verb and the
+  minima refusal, the v2 format through the planner and the tool, the
+  `THYLACINE_HALCYON_PROFILE` lever, `ls-halcyon-instrument`; the
+  as-built notes in §4.4, §5.2–5.7; JOURNAL run 46o "I-2").
 - **I-3 — the stack and the headers.** Collapsed headers placed and fanned;
   the header list (index / name / pills / metadata / ×), the state matrix,
   pointer routing to chrome, expand / close / final-tile, the successor

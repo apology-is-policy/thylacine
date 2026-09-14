@@ -3754,6 +3754,31 @@ populate_stratum_pool() {
         echo "==> populate pool: HALCYON theme lever ENABLED (/lib/halcyon/theme.toml = ${THYLACINE_HALCYON_THEME})"
     fi
 
+    # HALCYON-INSTRUMENT 4.1 (I-2): the system PROFILE word.
+    # `THYLACINE_HALCYON_PROFILE=<legacy|instrument>` writes
+    # `/lib/halcyon/profile` -- the one word tapestryd and both halcyond
+    # resolvers read to pick the painters' state machine, geometry and type
+    # map (a user's `$HOME/lib/halcyon/profile` outranks it). Absent = no
+    # file = `legacy` (the built-in floor), so every existing image and gate
+    # is untouched; the flip to `instrument` for fresh images is I-9's.
+    # The word is constrained to the two the loader admits BEFORE it is
+    # written: a misspelt lever must fail the bake, not bake a file the
+    # loader refuses one tier down at every boot.
+    if [[ -n "${THYLACINE_HALCYON_PROFILE:-}" ]]; then
+        case "${THYLACINE_HALCYON_PROFILE}" in
+            legacy|instrument) ;;
+            *) echo "==> populate pool: THYLACINE_HALCYON_PROFILE must be legacy or instrument (got '${THYLACINE_HALCYON_PROFILE}')" >&2; kill -TERM "$stratumd_pid"; exit 1 ;;
+        esac
+        "$stratum_fs_bin" -s "$sock_path" mkdir /lib/halcyon >/dev/null 2>&1 || true
+        printf '%s\n' "${THYLACINE_HALCYON_PROFILE}" | "$stratum_fs_bin" -s "$sock_path" write /lib/halcyon/profile \
+            || { echo "==> populate pool: write /lib/halcyon/profile FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" sync \
+            || { echo "==> populate pool: sync (profile) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        [[ "$("$stratum_fs_bin" -s "$sock_path" read /lib/halcyon/profile)" == "${THYLACINE_HALCYON_PROFILE}" ]] \
+            || { echo "==> populate pool: /lib/halcyon/profile readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        echo "==> populate pool: HALCYON profile lever ENABLED (/lib/halcyon/profile = ${THYLACINE_HALCYON_PROFILE})"
+    fi
+
     # KT-1.5d-1a (HALCYON 14.12): the per-user session lever. Under
     # THYLACINE_HALCYON_SESSION=1 the device boots the per-user Halcyon
     # SESSION -- login reads the one-token /lib/halcyon/session file and, when

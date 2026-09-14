@@ -253,14 +253,105 @@ Fifteen minutes to learn that the recipe is one image per gate's lever,
 and the session default (2026-09-09) changed what the console lever's
 image is.
 
+### I-2: the profile's geometry -- the browser's pixels as the oracle, and two carves that share only the tree
+
+Landed the same evening across the second self-compaction (effort `max`,
+confirmed before the first line). The question I-2 had to settle before
+any code was which snap rule reproduces Chromium, and the scripture said
+to measure it once rather than per element. The golden PNG answered in a
+few columns: at 1440 x 900 the root divider's track occupies columns
+738..744 and the rule 740..741; the right column's track occupies rows
+443..449 and the rule 445..446; the joint is a 7 x 7 box at the track's
+(1,1) whose border is 24 pixels of `structure` around 25 of `desktop`,
+and its last column overpaints the trailing pane's frame exactly as round
+2 said. Every one of those is "compute the boundary as a rational, snap
+it once, round half up" -- the kit's own prescription -- applied to the
+browser's fractional layout (the dump's 737.90625 is 737 + 58/64).
+`libhalcyon::carve::split_spans` does exactly that over the weight sum
+(no floats: `(num + S/2) / S`), and the pane test builds the reference
+tree through the same verbs a session uses and asserts EVERY rect --
+three frames, ten headers, three bodies, two tracks -- at 100 and again
+at 200 in a 2880 x 1800 framebuffer, where the boundary 1475.81 snaps to
+1476 as the browser's device-pixel edge did.
+
+**Two carves, one tree.** The legacy division is the pre-profile code
+moved into `recompute_legacy` byte for byte; `recompute(area, gaps,
+metrics, profile)` dispatches. The Instrument carve is its own walk:
+the compositor hands it the space between the rails (both always
+carved, whether or not a surface sits on them), the walk pads it 3,
+divides split containers by weight with 7 px tracks, and lays every
+leaf as a stack of one -- a 1 px frame, a 32 px header, a body -- with a
+stack's collapsed tiles hidden behind a header rect and a ZERO body (the
+dormancy the invariants ask for: no input, no damage, no FRAME). Every
+rect is clipped to its parent's, so nothing published leaves the display
+however small the area gets; the test drives a 5 x 5 workspace and an
+empty one to say so. The legacy identity is witnessed by ls-halcyon (the
+20 px strip, the leaf carve, the tag bars, the bevel: unchanged) and the
+compose gate at 1.0 and 2.0, and pinned in a pane test at 1280 x 780 at
+both scales.
+
+**The minima are judged before the mutation.** `split_fits` computes
+the tree's minimum with the leaf HYPOTHETICALLY split -- flattened into
+a same-mode parent as one more sibling, nested otherwise -- against the
+padded workspace, and the `split` verb refuses with ENOMEM (the
+pane-table class: the tree cannot grow here) leaving the tree untouched;
+the compositor's own placement of a new surface tries the aspect split,
+then a STACK when that will not fit (a same-mode split flattens into an
+existing stack, so the tile joins it -- the mockup's own answer to a
+full pane), then refuses. Inside the carve the minima are the flex
+rule: a child below its minimum is frozen there and the rest re-share.
+
+**Weights as i3 does them.** A newcomer to a container takes the MEAN
+of its siblings (an equal share, their ratios untouched --
+`con_fix_percent`); a nesting split's container takes the leaf's weight
+and the two inside halve; a dissolved container's survivor takes the
+container's. `halcyon-layout v2` carries a ` w=<n>` at the end of a
+row, refused under a v1 header, and the compositor's dump carries the
+same token after the rect so `layout save` writes v2 exactly when the
+tree has a weight; the restore planner emits `weight` verbs once the
+nodes exist.
+
+**Two amendments to the scripture's struct, recorded as such.** The
+minima ride `Metrics` (`min_pane_w`, `min_body_h`) so they scale with
+the table -- fourteen new fields rather than twelve. And `Metrics::at`
+gained the zero-base rule: a mark whose base is 0 is absent and stays 0
+at every scale, so the Instrument table has no bevel at 200 % and
+`INSTRUMENT_BASE.at(100) == INSTRUMENT_BASE`; the legacy floors are
+inert in effect because every legacy base is already at or above them
+(the loader's and the wire's bounds), which the audit row asks the
+prosecutor to prove rather than believe.
+
+**What the first runs of the new gate taught, twice.**
+`ls-halcyon-instrument` SKIPPED on a correctly baked image -- halcyond's
+line read `profile instrument (System)` and the guest printed
+`instrument` -- and it took two runs to read the transcript right. First
+the regex wanted a newline before the word, but the transcript renderer's
+first output byte follows the OSC frame's terminating backslash
+(ls-halcyon's statusbar regex anchors on `[\r\n\\]` for exactly this
+reason). Then, fixed, it SKIPped again: the sequencing marker was typed
+as an argument (`echo profile-read-done`), so it matched its own echo in
+the cmd mark before the output arrived and the expect block exited with
+nothing -- the #60 class ls-halcyon's `; pwd` idiom exists to avoid, and
+the same hole would have made the post-split layout read fail and the
+dividers negative check pass hollowly. Every marker is output-only now.
+A SKIP that reads as "the lever is not baked" when the lever IS baked is
+the quiet failure the fleet's SKIP code exists to make loud -- it was
+loud enough, twice. Gates: ls-ci PASS (29 s); ls-halcyon PASS (120 s);
+ls-gfx-compose PASS 73 s (the compose gate at 1.0 and 2.0 on the session image: both legacy tables measured unchanged); PASS 37 s (the carve read back through the compositor's files and pixels on the profile-lever image). Host: libhalcyon 94 -> 111,
+tapestryd 21 -> 26, halcyond 209, halcyon 21.
+
 ### Owed at the end of the run
 
 - Round 2 INGESTED, section 13 RULED, the goldens CAPTURED (above): I-0
   is complete. Owed from it: the by-eye review of all 98 captures with
   the diff tool at I-9; the historical-mode run if Plex Mono ever
   matters; where the 1.0 GB run should live beyond this Mac.
-- I-1 (the second schema, the bundle, the wire) -- the EFFORT GATE fires
-  there (a new strict parser); effort was `max` all afternoon.
+- I-1 LANDED (`457faee5`); I-2 LANDED (the geometry; above). Next I-3
+  (the stack and the headers), I-4 (the rails), then the first Fable
+  round over I-1..I-4. Owed from I-2: a vault dossier for
+  `libhalcyon::carve` beside the one owed for `libhalcyon::instrument`;
+  the audit row's (e) question (the focus frame of a leaf nested inside
+  a container tile) and (h) (the first carve after the renderer's push).
 - Unchanged from 46n: the IRQ fork, the back-pressure gap, S1 [P3], the ut
   `mount` one-liner, vault calls 0082 / 0087.
 

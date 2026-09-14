@@ -1,0 +1,258 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-halcyon-instrument.exp -- HALCYON-INSTRUMENT I-2: the
+# profile's geometry, carved by the compositor and read back through its own
+# files (docs/HALCYON-INSTRUMENT.md 5; the I-2 status row).
+#
+# GATED ON TWO BAKED LEVERS: the console renderer (THYLACINE_HALCYON=1, as
+# ls-halcyon) AND the profile word (THYLACINE_HALCYON_PROFILE=instrument ->
+# /lib/halcyon/profile). On any other image it SKIPs (exit 77). On the lever
+# image it proves, against the numbers of section 5.1 / 5.2 / 5.4 and the
+# browser's snapped boxes the pane-tree tests reproduce:
+#
+#   push    : halcyond resolved `instrument` and pushed the bundle; the
+#             compositor, which cannot read the pool at boot, APPLIED it
+#             (the profile reaches the carve through the wire, not a file).
+#   carve   : one console tile = a stack of one inside a 1 px frame under
+#             two rails: the frame at (3, 37, W-6, H-65), the header at
+#             (4, 38, W-8, 32), the body at (4, 70, W-8, H-99); the bottom
+#             rail is the 25 px status strip halcyond registered.
+#   pixels  : the top rail's `rail`, its 1 px `structure` line, the pad's
+#             `desktop`, the focused frame's `focus_neutral` -- Carbon's
+#             values, which nothing else on this screen can produce.
+#   split   : Super+H divides the root at 1:1 with a 7 px track whose
+#             boundary is snapped ONCE (round half up): the `dividers` file
+#             of the root reads the track, both frames partition the root
+#             minus it, the 2 px rule sits at offset 2, and the 7 x 7 joint
+#             at (1,1) reads exactly 24 `structure` pixels around 25 of
+#             `desktop`; the new empty tile's body is `pane`.
+#   zoom    : Super+F fills the workspace between the rails, frame-less.
+#
+# HVF like ls-halcyon (bare TCG hangs at the pre-existing hwwatch E2E).
+
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+
+set transcript /tmp/ls-halcyon-instrument-[pid].log
+catch {file delete -force $transcript}
+log_file -a $transcript
+
+proc tgrep {pat what} {
+    global transcript
+    if {[catch {exec grep -q -- $pat $transcript}]} {
+        lc_fail "transcript missing: $what ($pat)"
+    }
+    lc_pass "instrument: $what"
+}
+
+proc hkey {chord} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $chord} err]} {
+        lc_fail "qmp-sendtext -k $chord failed: $err"
+    }
+    after 1500
+}
+
+# Screendump + region verdict: "<off> <total> <dom_r> <dom_g> <dom_b>".
+proc region {x0 y0 x1 y1 r g b} {
+    global repo qmp
+    set out /tmp/ls-halcyon-instrument-[pid].png
+    file delete -force $out
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} err]} {
+        return "DUMP-ERR $err"
+    }
+    if {![file exists $out]} { return "DUMP-MISSING" }
+    if {[catch {exec python3 $repo/tools/interactive/gfx_region.py $out $x0 $y0 $x1 $y1 $r $g $b} verdict]} {
+        return "REGION-ERR $verdict"
+    }
+    return $verdict
+}
+
+# The rect's dominant colour must be (r,g,b); with `want_off` >= 0 the
+# count of other pixels must be exactly that (the joint's 24). Retried: the
+# compositor composes on its own cadence after a chord.
+proc want_dom {x0 y0 x1 y1 r g b what {want_off -1}} {
+    set v ""
+    for {set i 0} {$i < 12} {incr i} {
+        set v [region $x0 $y0 $x1 $y1 $r $g $b]
+        if {[regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $v -> off tot dr dg db]} {
+            if {$dr == $r && $dg == $g && $db == $b && ($want_off < 0 || $off == $want_off)} {
+                return "$off $tot"
+            }
+        }
+        after 500
+    }
+    lc_fail "$what: region $x0,$y0-$x1,$y1 never read dominant $r,$g,$b with off=$want_off (last: $v)"
+}
+
+# Read one `x y w h` file of the pane tree. The first output byte follows
+# the transcript's OSC frame terminator (a backslash), not a newline -- the
+# anchor class says so (the ls-halcyon statusbar idiom).
+proc rect_of {path what} {
+    global timeout lc_cmd_timeout
+    lc_send "cat $path"
+    set timeout $lc_cmd_timeout
+    expect {
+        -re {[\r\n\\](\d+) (\d+) (\d+) (\d+)[\r\n]} {
+            return [list $expect_out(1,string) $expect_out(2,string) $expect_out(3,string) $expect_out(4,string)]
+        }
+        timeout { lc_fail "$what: no rect from $path" }
+        eof     { lc_fail "$what: EOF reading $path" }
+    }
+}
+
+proc want_rect {path want what} {
+    set got [rect_of $path $what]
+    if {$got ne $want} { lc_fail "$what: $path reads [join $got { }], expected [join $want { }]" }
+    lc_step "$what: $path = [join $got { }]"
+}
+
+lc_boot
+
+set timeout $lc_boot_timeout
+expect {
+    -ex "joey: halcyond spawned" { lc_step "joey chose halcyond (lever image)" }
+    -ex "joey: aurora spawned" {
+        puts "\nLS-CI SKIP: default image (aurora fbcon) -- bake with THYLACINE_HALCYON=1\
+ THYLACINE_HALCYON_SESSION=0 THYLACINE_HALCYON_PROFILE=instrument to run this scenario."
+        lc_quit
+        exit 77
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction before the renderer spawn" }
+    timeout { lc_fail "no renderer spawn line within ${lc_boot_timeout}s" }
+    eof     { lc_fail "qemu exited before the renderer spawn" }
+}
+
+lc_login michael correct-horse-battery-staple-v1
+
+# The profile lever: the word file, read off the pool. Absent or `legacy`
+# => SKIP (never a red on a console-lever image baked without it).
+# The sequencing marker is OUTPUT-ONLY (`; pwd` -> /home/michael, the
+# ls-halcyon idiom): a marker typed as an argument matches its own echo in
+# the transcript's cmd mark before the output arrives (the #60 class) --
+# which is exactly how this scenario's first two runs SKIPped on a
+# correctly baked image.
+lc_send "cat /lib/halcyon/profile; pwd"
+set timeout $lc_cmd_timeout
+set profile ""
+expect {
+    -re {[\r\n\\](instrument|legacy)[\r\n]} { set profile $expect_out(1,string); exp_continue }
+    -re {[\r\n\\]/home/michael[\r\n]} {}
+    timeout { lc_fail "no answer reading /lib/halcyon/profile" }
+    eof     { lc_fail "EOF reading /lib/halcyon/profile" }
+}
+if {$profile ne "instrument"} {
+    puts "\nLS-CI SKIP: /lib/halcyon/profile is '$profile' -- bake with\
+ THYLACINE_HALCYON_PROFILE=instrument to run this scenario."
+    lc_quit
+    exit 77
+}
+lc_step "profile lever baked: /lib/halcyon/profile = instrument"
+
+# The display.
+lc_send "cat /dev/tapestry/ctl"
+set W 0; set H 0
+expect {
+    -re {display (\d+) (\d+)[\r\n]} { set W $expect_out(1,string); set H $expect_out(2,string) }
+    timeout { lc_fail "no display line from the tapestry ctl" }
+}
+if {$W < 840 || $H < 300} { lc_fail "display ${W}x$H is below the carve's minima" }
+
+# --- The carve of one tile (5.1 / 5.4 / 5.6) --------------------------------
+# The console leaf's body, from the compositor's own dump: x 4 (pad 3 +
+# frame 1), y 70 (rail 34 + pad 3 + frame 1 + header 32), w W-8, h H-99
+# (H - 34 - 25 - 6 - 2 - 32).
+lc_send "cat /dev/tapestry/layout"
+set leaf ""
+expect {
+    -re {[\r\n] *(\d+)\*? leaf surface=\d+ \[(\d+),(\d+),(\d+),(\d+)\]} {
+        set leaf $expect_out(1,string)
+        set body [list $expect_out(2,string) $expect_out(3,string) $expect_out(4,string) $expect_out(5,string)]
+    }
+    timeout { lc_fail "no console leaf row in the layout file" }
+    eof     { lc_fail "EOF reading the layout" }
+}
+set want_body [list 4 70 [expr {$W - 8}] [expr {$H - 99}]]
+if {$body ne $want_body} { lc_fail "the console body is [join $body { }], expected [join $want_body { }] (rail 34 + pad 3 + frame 1 + header 32; H - 59 - 6 - 2 - 32)" }
+lc_pass "instrument: the console tile's body is the stack-of-one carve ([join $body { }] of ${W}x$H)"
+want_rect /dev/tapestry/pane/$leaf/frame [list 3 37 [expr {$W - 6}] [expr {$H - 65}]] "the frame is the padded workspace root"
+want_rect /dev/tapestry/pane/$leaf/tagbar [list 4 38 [expr {$W - 8}] 32] "the header is 32 inside the frame"
+want_rect /dev/tapestry/pane/$leaf/geometry $want_body "the geometry file agrees with the dump"
+lc_send "cat /dev/tapestry/pane/$leaf/dividers; pwd"
+expect {
+    -re {[\r\n\\]\d+ \d+ \d+ \d+[\r\n]} { lc_fail "a leaf's dividers file is not empty" }
+    -re {[\r\n\\]/home/michael[\r\n]} {}
+    timeout { lc_fail "no answer reading the leaf's dividers file" }
+}
+lc_pass "instrument: frame / tagbar / geometry / dividers files publish the carve (5.5)"
+want_rect /dev/tapestry/statusbar [list 0 [expr {$H - 25}] $W 25] "halcyond's status bar is the 25 px bottom rail"
+
+# --- The pixels (Carbon: rail #07090A, structure #454B48, desktop #050607,
+# focus_neutral #555B58) -------------------------------------------------
+want_dom 40 4 [expr {$W - 40}] 30 7 9 10 "the top rail is `rail`"
+want_dom 40 33 [expr {$W - 40}] 34 69 75 72 "the top rail's bottom line is `structure`" 0
+want_dom 40 34 [expr {$W - 40}] 37 5 6 7 "the pad above the frame is `desktop`" 0
+want_dom 3 60 4 [expr {$H - 60}] 85 91 88 "the focused tile's left frame is `focus_neutral`" 0
+want_dom 40 37 [expr {$W - 40}] 38 85 91 88 "the focused tile's top frame is `focus_neutral`" 0
+lc_pass "instrument: the rails, the pad and the focused frame are Carbon's own values on screen"
+
+# --- The split (5.2): 1:1, the boundary snapped once ------------------------
+# E = W - 6, U = E - 7; the first child ends at 3 + round(U / 2); the track
+# is 7 from there; the second child starts 7 later and ends at W - 3.
+hkey "meta_l+h"
+set u [expr {$W - 13}]
+set aend [expr {3 + ($u + 1) / 2}]
+set bx [expr {$aend + 7}]
+lc_send "cat /dev/tapestry/layout; pwd"
+set root ""; set empty ""
+expect {
+    -re {[\r\n](\d+)\*? splith n=2 active=\d+ \[(\d+),(\d+),(\d+),(\d+)\]} {
+        set root $expect_out(1,string)
+        set rr [list $expect_out(2,string) $expect_out(3,string) $expect_out(4,string) $expect_out(5,string)]
+        exp_continue
+    }
+    -re {[\r\n] *(\d+)\*? leaf empty \[} { set empty $expect_out(1,string); exp_continue }
+    -re {[\r\n\\]/home/michael[\r\n]} {}
+    timeout { lc_fail "no answer reading the layout after Super+H" }
+    eof     { lc_fail "EOF reading the layout after Super+H" }
+}
+if {$root eq "" || $empty eq ""} { lc_fail "after Super+H the layout has no splith root with an empty leaf (root '$root', empty '$empty')" }
+set want_root [list 3 37 [expr {$W - 6}] [expr {$H - 65}]]
+if {$rr ne $want_root} { lc_fail "the root container reads [join $rr { }], expected [join $want_root { }]" }
+want_rect /dev/tapestry/pane/$root/dividers [list $aend 37 7 [expr {$H - 65}]] "the root's track"
+want_rect /dev/tapestry/pane/$leaf/frame [list 3 37 [expr {$aend - 3}] [expr {$H - 65}]] "the console pane's frame (first child)"
+want_rect /dev/tapestry/pane/$empty/frame [list $bx 37 [expr {$W - 3 - $bx}] [expr {$H - 65}]] "the new pane's frame (second child)"
+want_rect /dev/tapestry/pane/$empty/geometry [list [expr {$bx + 1}] 70 [expr {$W - 5 - $bx}] [expr {$H - 99}]] "the new tile's body"
+lc_pass "instrument: Super+H divided the root 1:1 with a 7 px track at $aend (snapped once; frames partition the root minus the track)"
+# The rule: 2 px at offset 2 into the track, full height.
+want_dom [expr {$aend + 2}] 60 [expr {$aend + 4}] [expr {$H - 60}] 69 75 72 "the divider rule is 2 px of `structure` at offset 2" 0
+want_dom [expr {$aend}] 60 [expr {$aend + 2}] [expr {$H - 60}] 5 6 7 "the track before the rule is `desktop`" 0
+# The joint: 7 x 7 at the track's (1,1): a 1 px structure border (24 px)
+# around 25 px of desktop -- the round-2 correction, counted exactly.
+want_dom [expr {$aend + 1}] 38 [expr {$aend + 8}] 45 5 6 7 "the 7 x 7 joint at (1,1): 25 desktop inside 24 structure" 24
+# The new tile is focused (a split focuses the new leaf): its frame neutral,
+# the console's plain; its empty body is `pane` (#0B0D0E).
+want_dom [expr {$bx}] 60 [expr {$bx + 1}] [expr {$H - 60}] 85 91 88 "the new pane's left frame is `focus_neutral`" 0
+want_dom 3 60 4 [expr {$H - 60}] 27 31 30 "the console pane's left frame dropped to `pane_border`" 0
+want_dom [expr {$bx + 20}] 100 [expr {$W - 20}] [expr {$H - 60}] 11 13 14 "the empty tile's body is `pane`" 0
+lc_pass "instrument: rule, joint (24 around 25), focus frame and the empty body are Carbon's values on screen"
+
+# --- Zoom (5.6): the workspace between the rails, frame-less ----------------
+hkey "meta_l+f"
+want_rect /dev/tapestry/pane/$empty/geometry [list 0 34 $W [expr {$H - 59}]] "the zoomed tile fills the workspace"
+hkey "meta_l+f"
+want_rect /dev/tapestry/pane/$empty/geometry [list [expr {$bx + 1}] 70 [expr {$W - 5 - $bx}] [expr {$H - 99}]] "un-zoomed: the body is back"
+lc_pass "instrument: zoom fills the workspace between the rails and restores"
+
+# --- The push: how the profile reached a compositor that cannot read the
+# pool at boot --------------------------------------------------------------
+tgrep "halcyond: theme pushed to the compositor" "halcyond pushed the bundle (the profile rides the 127-field wire)"
+tgrep "tapestryd: theme applied (renderer push)" "the compositor applied it (the carve re-decided under `instrument`)"
+tgrep "profile instrument" "halcyond resolved the profile word"
+
+lc_pass "ls-halcyon-instrument: the I-2 carve verified end to end -- the profile through the wire, the stack-of-one frame under two rails, the files, the 1:1 split with a snapped track, the rule and the 7 x 7 joint, the focus frame, the empty body, zoom"
+lc_quit
+exit 0

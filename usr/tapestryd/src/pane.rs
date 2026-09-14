@@ -20,13 +20,22 @@
 //     never removed (an empty root leaf is the blank screen).
 //   - pane PUBLIC ids are monotonic and never reused (the net-3d
 //     discipline for free: a stale pane fid resolves to nothing).
-//   - geometry: equal division (remainder to the last child); the Daylight
-//     chrome ring per pane iff more than one pane is visible (the
-//     single-fullscreen root leaf keeps the stage-0 borderless look).
+//   - geometry, under the LEGACY profile: equal division (remainder to the
+//     last child); the Daylight chrome ring per pane iff more than one pane
+//     is visible (the single-fullscreen root leaf keeps the stage-0
+//     borderless look). Under the INSTRUMENT profile (HALCYON-INSTRUMENT 5;
+//     I-2): a weighted N-ary division with 7 px tracks between siblings,
+//     every leaf a stack of one inside a 1 px frame with a 32 px header, a
+//     stack's collapsed tiles given their header rects, the workspace
+//     padded 3 inside the two rails the compositor carves off the display.
+//     The two carves share nothing but the tree: the legacy one is
+//     byte-identical to what it was before the profile existed.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use libhalcyon::carve::{self, DEFAULT_WEIGHT};
+use libhalcyon::instrument::Profile;
 use libhalcyon::theme;
 
 pub const MAX_PANES: usize = 32;
@@ -220,7 +229,7 @@ impl Status {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Rect {
     pub x: u32,
     pub y: u32,
@@ -264,6 +273,21 @@ impl Rect {
     }
 }
 
+/// `r` shrunk by `by` on every side; ZERO when it cannot hold that (the
+/// Instrument carve's frame and pad insets, 5.1).
+fn inset(r: Rect, by: u32) -> Rect {
+    if r.w > 2 * by && r.h > 2 * by {
+        Rect {
+            x: r.x + by,
+            y: r.y + by,
+            w: r.w - 2 * by,
+            h: r.h - 2 * by,
+        }
+    } else {
+        Rect::ZERO
+    }
+}
+
 pub enum Kind {
     Leaf {
         surface: Option<usize>,
@@ -292,7 +316,21 @@ pub struct Pane {
     /// ZERO when none -- a single fullscreen leaf, a container, or a leaf too
     /// small to carve. A Role::Chrome surface binds here (H-3b); the
     /// compositor paints it `header`-bg as the resting fallback.
+    /// Under Instrument (HALCYON-INSTRUMENT 5.4 / 6.3) it is the tile's
+    /// HEADER rect -- set for a collapsed tile too, whose `content` is ZERO
+    /// and which is not `visible`.
     pub tagbar: Rect,
+    /// The pane's weight in its parent's division (HALCYON-INSTRUMENT 5.2:
+    /// `u16`, sum-normalised, `DEFAULT_WEIGHT` when equal). Carried by the
+    /// pane, so a swap moves it with the pane; a newcomer to a container
+    /// takes the mean of its siblings (an equal share, the siblings' ratios
+    /// untouched); a dissolved container's survivor takes the container's.
+    /// Read only by the Instrument carve; the legacy division ignores it.
+    pub weight: u16,
+    /// A split container's divider tracks after the last recompute, in
+    /// child order (the per-container `dividers` file, 5.5). Empty for a
+    /// leaf, a stack, and under the legacy profile.
+    pub dividers: Vec<Rect>,
     /// The tile's recorded last-command status (see `Status`).
     pub status: Status,
     /// Visible under the current layout (tab-inactive subtrees are not).
@@ -360,6 +398,13 @@ pub struct Layout {
     /// `Metrics::at(scale)`, handed in by Comp -- the one table both the
     /// carve and the paint read).
     pub metrics: theme::Metrics,
+    /// The profile the last recompute carved for (HALCYON-INSTRUMENT 4):
+    /// which of the two carves ran, and which minima a split is held to.
+    pub profile: Profile,
+    /// The workspace the last recompute carved (the display under legacy,
+    /// less a registered status bar; the space between the rails under
+    /// Instrument). The minima are judged against it.
+    pub area: Rect,
 }
 
 impl Layout {
@@ -372,6 +417,8 @@ impl Layout {
             epoch: 1,
             zoomed_id: None,
             metrics: theme::builtin().metrics,
+            profile: Profile::Legacy,
+            area: Rect::ZERO,
         };
         let root = l
             .alloc(None, Kind::Leaf { surface: None })
@@ -408,6 +455,8 @@ impl Layout {
             creator_conn: 0,
             creator_peer: 0,
             backgrounded: false,
+            weight: DEFAULT_WEIGHT,
+            dividers: Vec::new(),
         };
         let slot = match self.panes.iter().position(|s| s.is_none()) {
             Some(i) => {
@@ -564,6 +613,10 @@ impl Layout {
             let same = matches!(self.get(pi)?.kind,
                 Kind::Container { mode: m, .. } if m == mode);
             if same {
+                // The newcomer takes an equal share of the container: the
+                // mean of its siblings' weights, computed BEFORE it joins,
+                // so the siblings' ratios among themselves stand.
+                let share = self.sibling_mean(pi);
                 let new_leaf = self.alloc(Some(pi), Kind::Leaf { surface: None })?;
                 if let Some(Kind::Container {
                     children, active, ..
@@ -573,12 +626,16 @@ impl Layout {
                     children.insert(at + 1, new_leaf);
                     *active = at + 1;
                 }
+                self.get_mut(new_leaf).unwrap().weight = share;
                 self.focused = new_leaf;
                 self.epoch += 1;
                 return Some(new_leaf);
             }
         }
         // Nest: the leaf's position becomes a container [leaf, new-leaf].
+        // The container stands where the leaf stood, so it takes the leaf's
+        // weight in the parent; inside it the two halve (equal defaults).
+        let leaf_weight = self.get(slot)?.weight;
         let container = self.alloc(
             parent,
             Kind::Container {
@@ -607,6 +664,8 @@ impl Layout {
             None => self.root = container,
         }
         self.get_mut(slot).unwrap().parent = Some(container);
+        self.get_mut(slot).unwrap().weight = DEFAULT_WEIGHT;
+        self.get_mut(container).unwrap().weight = leaf_weight;
         if let Some(Kind::Container { children, .. }) = self.get_mut(container).map(|p| &mut p.kind)
         {
             children.push(slot);
@@ -615,6 +674,37 @@ impl Layout {
         self.focused = new_leaf;
         self.epoch += 1;
         Some(new_leaf)
+    }
+
+    /// The mean of `container`'s children's weights, round half up, at
+    /// least 1 -- the equal share a newcomer takes (5.2). `DEFAULT_WEIGHT`
+    /// for a container with no children or a non-container.
+    fn sibling_mean(&self, container: usize) -> u16 {
+        let kids: Vec<usize> = match self.get(container).map(|p| &p.kind) {
+            Some(Kind::Container { children, .. }) if !children.is_empty() => children.clone(),
+            _ => return DEFAULT_WEIGHT,
+        };
+        let sum: u64 = kids.iter().map(|&c| self.get(c).map_or(1, |p| p.weight) as u64).sum();
+        let n = kids.len() as u64;
+        (((sum + n / 2) / n).clamp(1, u16::MAX as u64)) as u16
+    }
+
+    /// HALCYON-INSTRUMENT 5.2: set `slot`'s weight in its parent's division
+    /// (`1..=65535`; a root has no division). False = refused; the epoch
+    /// moves only when the value did.
+    pub fn set_weight(&mut self, slot: usize, w: u16) -> bool {
+        if w == 0 {
+            return false;
+        }
+        let p = match self.get_mut(slot) {
+            Some(p) if p.parent.is_some() => p,
+            _ => return false,
+        };
+        if p.weight != w {
+            p.weight = w;
+            self.epoch += 1;
+        }
+        true
     }
 
     /// Host surface `n` into the focused leaf if empty, else split the
@@ -653,11 +743,24 @@ impl Layout {
             }
         }
         let r = self.get(f)?.content;
-        let mode = if r.w >= r.h {
+        let mut mode = if r.w >= r.h {
             Mode::SplitH
         } else {
             Mode::SplitV
         };
+        // HALCYON-INSTRUMENT 5.2: the minima hold on every growth. When the
+        // aspect split would leave a pane below them, the new tile joins the
+        // focused leaf's STACK instead (a same-mode split flattens into an
+        // existing stack; a fresh one nests) -- the mockup's own answer to a
+        // full pane; and when even that will not fit, the host is refused
+        // like a full pane table.
+        if self.profile == Profile::Instrument && !self.split_fits(f, mode) {
+            if self.split_fits(f, Mode::Stacked) {
+                mode = Mode::Stacked;
+            } else {
+                return None;
+            }
+        }
         let leaf = self.split(f, mode)?;
         if let Some(Kind::Leaf { surface }) = self.get_mut(leaf).map(|p| &mut p.kind) {
             *surface = Some(n);
@@ -749,6 +852,8 @@ impl Layout {
                 p.kind = Kind::Leaf { surface: None };
                 p.status = Status::Resting;
                 p.claim_token = None;
+                p.weight = DEFAULT_WEIGHT;
+                p.dividers.clear();
             }
             // Free every other pane (the subtree was the whole tree).
             for i in 0..self.panes.len() {
@@ -840,14 +945,18 @@ impl Layout {
     /// A container left with one child dissolves: the child takes its
     /// place (in the grandparent, or as root).
     fn dissolve_if_single(&mut self, slot: usize) {
-        let (only, gp) = match self.get(slot) {
+        let (only, gp, weight) = match self.get(slot) {
             Some(Pane {
                 kind: Kind::Container { children, .. },
                 parent,
+                weight,
                 ..
-            }) if children.len() == 1 => (children[0], *parent),
+            }) if children.len() == 1 => (children[0], *parent, *weight),
             _ => return,
         };
+        // The survivor stands where the container stood, and takes its
+        // share of the grandparent's division (5.2).
+        self.get_mut(only).unwrap().weight = weight;
         match gp {
             Some(g) => {
                 if let Some(Kind::Container { children, .. }) = self.get_mut(g).map(|p| &mut p.kind)
@@ -1165,6 +1274,9 @@ impl Layout {
                     }
                     self.get_mut(oldroot).unwrap().parent = Some(c);
                     self.get_mut(slot).unwrap().parent = Some(c);
+                    // A fresh two-way division: equal halves.
+                    self.get_mut(oldroot).unwrap().weight = DEFAULT_WEIGHT;
+                    self.get_mut(slot).unwrap().weight = DEFAULT_WEIGHT;
                     self.root = c;
                     self.epoch += 1;
                     self.focus(slot);
@@ -1217,11 +1329,14 @@ impl Layout {
             // REPLACED in place at its own index).
             let at = if before { i } else { i + 1 };
             self.detach_leaf(slot);
+            // The leaf joins `anc`'s division as a newcomer: an equal share.
+            let share = self.sibling_mean(anc);
             if let Some(Kind::Container { children, .. }) = self.get_mut(anc).map(|p| &mut p.kind) {
                 let at = at.min(children.len());
                 children.insert(at, slot);
             }
             self.get_mut(slot).unwrap().parent = Some(anc);
+            self.get_mut(slot).unwrap().weight = share;
             self.epoch += 1;
             self.focus(slot);
             return true;
@@ -1409,16 +1524,33 @@ impl Layout {
             .count()
     }
 
-    /// Recompute geometry + visibility for the whole tree.
-    pub fn recompute(&mut self, disp_w: u32, disp_h: u32, gaps: u32, metrics: theme::Metrics) {
+    /// Recompute geometry + visibility for the whole tree inside `area`
+    /// (the display under legacy, less a registered status bar -- always at
+    /// the origin; the workspace between the rails under Instrument), for
+    /// `profile`. The two carves are separate functions on purpose: the
+    /// legacy one is the pre-profile code, byte for byte (the compose gate
+    /// at 1.0 and 2.0 and ls-halcyon witness it).
+    pub fn recompute(&mut self, area: Rect, gaps: u32, metrics: theme::Metrics, profile: Profile) {
         self.metrics = metrics;
+        self.profile = profile;
+        self.area = area;
         // Pass 1: mark everything hidden, then walk the visible tree.
         for p in self.panes.iter_mut().flatten() {
             p.visible = false;
             p.rect = Rect::ZERO;
             p.content = Rect::ZERO;
             p.tagbar = Rect::ZERO;
+            p.dividers.clear();
         }
+        match profile {
+            Profile::Legacy => self.recompute_legacy(area.w, area.h, gaps),
+            Profile::Instrument => self.recompute_instrument(area),
+        }
+    }
+
+    /// The legacy carve (Tapestry G-6; HALCYON-VISUAL 2-4), on the display
+    /// (`disp_w` x `disp_h` at the origin) -- unchanged by the profile.
+    fn recompute_legacy(&mut self, disp_w: u32, disp_h: u32, gaps: u32) {
         // A zoomed leaf preempts the walk: it alone fills the display
         // (one visible leaf -> no inset -> borderless, the stage-0 look).
         // A stale zoom target (closed/retired) self-clears here.
@@ -1502,6 +1634,379 @@ impl Layout {
                 p.content = r;
             }
         }
+    }
+
+
+    /// The Instrument carve (HALCYON-INSTRUMENT 5): the workspace `area`
+    /// (between the rails) padded `outer_pad`, then the tree -- a split
+    /// container divides its rect among its foreground children by weight
+    /// with a track between each pair (5.2); a stack, and every lone leaf,
+    /// which renders as a stack of one (6.1), is a 1 px frame holding its
+    /// tiles' headers and the open tile's body (5.4); a tabbed container is
+    /// the legacy mode, its active child shown as a stack of one (6.6).
+    /// Every rect is clipped to its parent's, so nothing published leaves
+    /// the display however small the area gets. A zoomed leaf fills the
+    /// workspace alone, frame-less (5.6).
+    fn recompute_instrument(&mut self, area: Rect) {
+        if let Some(zid) = self.zoomed_id {
+            match self.slot_of_id(zid) {
+                Some(z) if self.is_leaf(z) => {
+                    let p = self.get_mut(z).unwrap();
+                    p.visible = true;
+                    p.rect = area;
+                    p.content = area;
+                    return;
+                }
+                _ => self.zoomed_id = None,
+            }
+        }
+        let root = self.root;
+        let pad = self.metrics.outer_pad.max(0) as u32;
+        self.carve(root, inset(area, pad));
+    }
+
+    fn carve(&mut self, slot: usize, rect: Rect) {
+        enum Next {
+            Leaf,
+            Split(Mode, Vec<usize>),
+            Tab(Vec<usize>, usize),
+            Stack(Vec<usize>, usize),
+        }
+        let next = match self.get(slot).map(|p| &p.kind) {
+            Some(Kind::Leaf { .. }) => Next::Leaf,
+            Some(Kind::Container {
+                mode,
+                children,
+                active,
+            }) => match mode {
+                Mode::SplitH | Mode::SplitV => Next::Split(*mode, children.clone()),
+                Mode::Tabbed => Next::Tab(children.clone(), *active),
+                Mode::Stacked => Next::Stack(children.clone(), *active),
+            },
+            None => return,
+        };
+        match next {
+            Next::Leaf => self.place_frame(rect, &[slot], 0),
+            Next::Split(mode, children) => {
+                self.show_container(slot, rect);
+                if children.is_empty() {
+                    return;
+                }
+                // F2 structural transparency, exactly as the legacy division:
+                // a backgrounded subtree is out of the division (a zero rect,
+                // kept visible) unless every child is.
+                let divide: Vec<usize> = {
+                    let fg: Vec<usize> = children
+                        .iter()
+                        .copied()
+                        .filter(|&c| !self.is_bg_subtree(c))
+                        .collect();
+                    if fg.is_empty() {
+                        children.clone()
+                    } else {
+                        fg
+                    }
+                };
+                for &c in children.iter() {
+                    if !divide.contains(&c) {
+                        self.carve(c, Rect::ZERO);
+                    }
+                }
+                let horizontal = mode == Mode::SplitH;
+                let t = self.metrics.track.max(0) as u32;
+                let weights: Vec<u16> = divide
+                    .iter()
+                    .map(|&c| self.get(c).map_or(DEFAULT_WEIGHT, |p| p.weight))
+                    .collect();
+                let minima: Vec<u32> = divide
+                    .iter()
+                    .map(|&c| {
+                        let (w, h) = self.min_size_hyp(c, None);
+                        if horizontal {
+                            w
+                        } else {
+                            h
+                        }
+                    })
+                    .collect();
+                let (origin, extent) = if horizontal {
+                    (rect.x, rect.w)
+                } else {
+                    (rect.y, rect.h)
+                };
+                let spans = carve::split_spans(origin, extent, t, &weights, &minima);
+                let mut dividers: Vec<Rect> = Vec::new();
+                for (i, &c) in divide.iter().enumerate() {
+                    let sp = spans[i];
+                    let child = if horizontal {
+                        Rect {
+                            x: sp.start,
+                            y: rect.y,
+                            w: sp.len(),
+                            h: rect.h,
+                        }
+                    } else {
+                        Rect {
+                            x: rect.x,
+                            y: sp.start,
+                            w: rect.w,
+                            h: sp.len(),
+                        }
+                    };
+                    self.carve(c, child.intersect(rect));
+                    if i + 1 < divide.len() {
+                        let track = if horizontal {
+                            Rect {
+                                x: sp.end,
+                                y: rect.y,
+                                w: t,
+                                h: rect.h,
+                            }
+                        } else {
+                            Rect {
+                                x: rect.x,
+                                y: sp.end,
+                                w: rect.w,
+                                h: t,
+                            }
+                        };
+                        dividers.push(track.intersect(rect));
+                    }
+                }
+                self.get_mut(slot).unwrap().dividers = dividers;
+            }
+            Next::Tab(children, active) => {
+                self.show_container(slot, rect);
+                let eff: Vec<usize> = children
+                    .iter()
+                    .copied()
+                    .filter(|&c| !self.is_bg_subtree(c))
+                    .collect();
+                let shown = children
+                    .get(active)
+                    .copied()
+                    .filter(|&a| !self.is_bg_subtree(a))
+                    .or_else(|| eff.first().copied());
+                if let Some(a) = shown {
+                    self.place_frame(rect, &[a], 0);
+                }
+            }
+            Next::Stack(children, active) => {
+                self.show_container(slot, rect);
+                let eff: Vec<usize> = children
+                    .iter()
+                    .copied()
+                    .filter(|&c| !self.is_bg_subtree(c))
+                    .collect();
+                if eff.is_empty() {
+                    return;
+                }
+                let open = children
+                    .get(active)
+                    .and_then(|&a| eff.iter().position(|&c| c == a))
+                    .unwrap_or(0);
+                self.place_frame(rect, &eff, open);
+            }
+        }
+    }
+
+    fn show_container(&mut self, slot: usize, rect: Rect) {
+        if let Some(p) = self.get_mut(slot) {
+            p.visible = true;
+            p.rect = rect;
+            p.content = rect;
+        }
+    }
+
+    /// A frame at `rect` holding `tiles` (a stack's effective children, or
+    /// one lone leaf) with `tiles[open]` expanded: the 1 px frame, each
+    /// tile's header rect (5.4: the collapsed ones stacked before and after
+    /// the open one, the open one directly above its body), the open body.
+    /// A collapsed leaf is hidden with a ZERO body and its header; a tile
+    /// that is itself a container takes the header slot and, when open, has
+    /// its subtree carved into the body.
+    fn place_frame(&mut self, rect: Rect, tiles: &[usize], open: usize) {
+        let m = self.metrics;
+        let f = m.frame.max(0) as u32;
+        let inner = inset(rect, f);
+        let (headers, body) = carve::stack_alloc(
+            inner.y,
+            inner.h,
+            tiles.len(),
+            open,
+            m.header_h.max(0) as u32,
+            m.hairline.max(0) as u32,
+        );
+        let body_rect = Rect {
+            x: inner.x,
+            y: body.start,
+            w: inner.w,
+            h: body.len(),
+        }
+        .intersect(inner);
+        for (i, &t) in tiles.iter().enumerate() {
+            let header = Rect {
+                x: inner.x,
+                y: headers[i].start,
+                w: inner.w,
+                h: headers[i].len(),
+            }
+            .intersect(inner);
+            let is_open = i == open;
+            if self.is_leaf(t) {
+                let p = self.get_mut(t).unwrap();
+                p.visible = is_open;
+                p.rect = rect;
+                p.tagbar = header;
+                p.content = if is_open { body_rect } else { Rect::ZERO };
+            } else {
+                if is_open {
+                    self.carve(t, body_rect);
+                }
+                let p = self.get_mut(t).unwrap();
+                p.tagbar = header;
+                if !is_open {
+                    p.rect = rect;
+                }
+            }
+        }
+    }
+
+    /// A subtree's minimum outer size under Instrument (5.2): a pane is
+    /// `min_pane_w` wide and, as a stack of N tiles, `2 + 32 N + 1 + 54`
+    /// tall (the separator only when N > 1); a split sums its foreground
+    /// children's minima along its axis plus the tracks and takes the max
+    /// across; a container tile inside a stack or tab adds its own minimum
+    /// to the body's. With `hyp = Some((leaf, mode))` the leaf is judged
+    /// as if already split in `mode` -- flattened into a same-mode parent
+    /// as one more sibling, nested as a fresh two-way container otherwise
+    /// -- which is how a split is refused before it is made.
+    fn min_size_hyp(&self, slot: usize, hyp: Option<(usize, Mode)>) -> (u32, u32) {
+        let m = self.metrics;
+        let f = m.frame.max(0) as u32;
+        let t = m.track.max(0) as u32;
+        let hdr = m.header_h.max(0) as u32;
+        let sep = m.hairline.max(0) as u32;
+        let pane_w = m.min_pane_w.max(0) as u32;
+        let body_h = m.min_body_h.max(0) as u32;
+        let leaf_min = (pane_w, carve::stack_min_h(1, hdr, sep, body_h, f));
+        let nested = |mode: Mode| -> (u32, u32) {
+            match mode {
+                Mode::SplitH => (2 * leaf_min.0 + t, leaf_min.1),
+                Mode::SplitV => (leaf_min.0, 2 * leaf_min.1 + t),
+                Mode::Tabbed => leaf_min,
+                Mode::Stacked => (pane_w, carve::stack_min_h(2, hdr, sep, body_h, f)),
+            }
+        };
+        let is_hyp = |c: usize| matches!(hyp, Some((l, _)) if l == c);
+        match self.get(slot).map(|p| &p.kind) {
+            None => (0, 0),
+            Some(Kind::Leaf { .. }) => match hyp {
+                Some((l, mode)) if l == slot => nested(mode),
+                _ => leaf_min,
+            },
+            Some(Kind::Container { mode, children, .. }) => {
+                let eff: Vec<usize> = {
+                    let fg: Vec<usize> = children
+                        .iter()
+                        .copied()
+                        .filter(|&c| !self.is_bg_subtree(c))
+                        .collect();
+                    if fg.is_empty() {
+                        children.clone()
+                    } else {
+                        fg
+                    }
+                };
+                match mode {
+                    Mode::SplitH | Mode::SplitV => {
+                        let horizontal = *mode == Mode::SplitH;
+                        let mut parts: Vec<(u32, u32)> = Vec::with_capacity(eff.len() + 1);
+                        for &c in &eff {
+                            // The hypothetical leaf under a same-mode split
+                            // flattens: one more leaf beside it.
+                            let flat = matches!(hyp, Some((l, hm)) if l == c && hm == *mode);
+                            if flat {
+                                parts.push(leaf_min);
+                                parts.push(leaf_min);
+                            } else {
+                                parts.push(self.min_size_hyp(c, hyp));
+                            }
+                        }
+                        let n = parts.len() as u32;
+                        let (along, across) = parts.iter().fold((0u32, 0u32), |(a, x), &(w, h)| {
+                            let (pa, px) = if horizontal { (w, h) } else { (h, w) };
+                            (a.saturating_add(pa), x.max(px))
+                        });
+                        let along = along.saturating_add(n.saturating_sub(1).saturating_mul(t));
+                        if horizontal {
+                            (along, across)
+                        } else {
+                            (across, along)
+                        }
+                    }
+                    Mode::Stacked => {
+                        let mut n = eff.len();
+                        let mut w = pane_w;
+                        let mut body = body_h;
+                        for &c in &eff {
+                            if matches!(hyp, Some((l, Mode::Stacked)) if l == c) {
+                                n += 1; // one more tile in this stack
+                                continue;
+                            }
+                            if self.is_leaf(c) && !is_hyp(c) {
+                                continue;
+                            }
+                            // A container tile (or a leaf about to become
+                            // one): its subtree must fit the body.
+                            let (cw, ch) = self.min_size_hyp(c, hyp);
+                            w = w.max(cw.saturating_add(2 * f));
+                            body = body.max(ch);
+                        }
+                        (w, carve::stack_min_h(n, hdr, sep, body, f))
+                    }
+                    Mode::Tabbed => {
+                        let mut w = pane_w;
+                        let mut body = body_h;
+                        for &c in &eff {
+                            if matches!(hyp, Some((l, Mode::Tabbed)) if l == c) {
+                                continue; // one more tab: nothing grows
+                            }
+                            if self.is_leaf(c) && !is_hyp(c) {
+                                continue;
+                            }
+                            let (cw, ch) = self.min_size_hyp(c, hyp);
+                            w = w.max(cw.saturating_add(2 * f));
+                            body = body.max(ch);
+                        }
+                        (w, carve::stack_min_h(1, hdr, sep, body, f))
+                    }
+                }
+            }
+        }
+    }
+
+    /// The tree's minimum outer size under the current carve (5.2); (0, 0)
+    /// under legacy, which has no minima.
+    pub fn min_size(&self) -> (u32, u32) {
+        if self.profile != Profile::Instrument {
+            return (0, 0);
+        }
+        self.min_size_hyp(self.root, None)
+    }
+
+    /// HALCYON-INSTRUMENT 5.2: would splitting leaf `slot` in `mode` keep
+    /// every minimum inside the workspace? Judged on the tree as it WOULD
+    /// be, before anything changes, so a refusal leaves the tree untouched.
+    /// Always true under legacy.
+    pub fn split_fits(&self, slot: usize, mode: Mode) -> bool {
+        if self.profile != Profile::Instrument || !self.is_leaf(slot) {
+            return true;
+        }
+        let pad = self.metrics.outer_pad.max(0) as u32;
+        let root = inset(self.area, pad);
+        let (w, h) = self.min_size_hyp(self.root, Some((slot, mode)));
+        w <= root.w && h <= root.h
     }
 
     fn layout_pane(&mut self, slot: usize, rect: Rect) {
@@ -1782,17 +2287,14 @@ impl Layout {
             }
         }
         let c = p.content;
-        let _ = core::fmt::write(
-            s,
-            format_args!(
-                " [{},{},{},{}]{}\n",
-                c.x,
-                c.y,
-                c.w,
-                c.h,
-                if p.visible { "" } else { " hidden" }
-            ),
-        );
+        let _ = core::fmt::write(s, format_args!(" [{},{},{},{}]", c.x, c.y, c.w, c.h));
+        // HALCYON-INSTRUMENT 5.3: a non-default weight rides after the rect
+        // (`layout save` reads it; every older reader reads past it), so
+        // the equal-weight dump is byte-identical to the pre-I-2 one.
+        if p.weight != DEFAULT_WEIGHT {
+            let _ = core::fmt::write(s, format_args!(" w={}", p.weight));
+        }
+        let _ = core::fmt::write(s, format_args!("{}\n", if p.visible { "" } else { " hidden" }));
         if let Kind::Container { children, .. } = &p.kind {
             for &c in children {
                 self.render_pane(s, c, depth + 1);
@@ -1804,6 +2306,7 @@ impl Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     /// A well-formed status-bar registration on an undeclared display: the
     /// console renderer's own case. Every test below moves exactly ONE field
@@ -1923,5 +2426,245 @@ mod tests {
             ..base()
         };
         assert_eq!(admit_status_bar(&r), StatusAdmit::Malformed);
+    }
+
+    // ---------------------------------------------------------------------
+    // HALCYON-INSTRUMENT 5 (I-2): the Instrument carve, the weights, the
+    // minima -- and the legacy carve pinned where it was.
+    // ---------------------------------------------------------------------
+
+    fn r(x: u32, y: u32, w: u32, h: u32) -> Rect {
+        Rect { x, y, w, h }
+    }
+    fn inst100() -> theme::Metrics {
+        libhalcyon::instrument::INSTRUMENT_BASE.at(100)
+    }
+    fn weight(l: &Layout, slot: usize) -> u16 {
+        l.get(slot).unwrap().weight
+    }
+    fn parent(l: &Layout, slot: usize) -> usize {
+        l.get(slot).unwrap().parent.unwrap()
+    }
+
+    /// The reference layout (`fixtures.json`, the 1440 x 900 golden): the
+    /// root divides [p1 | [p2 / p3]] at 515:485 and 49:51; p1 a stack of
+    /// four with the second open (focused), p2 of three with the first
+    /// open, p3 of three with the second open. Built through the same verbs
+    /// a session would use, so the weight rules are exercised on the way.
+    fn reference() -> (Layout, [usize; 3], [Vec<usize>; 3]) {
+        let mut l = Layout::new();
+        let p1 = l.root;
+        let p2 = l.split(p1, Mode::SplitH).unwrap();
+        let p3 = l.split(p2, Mode::SplitV).unwrap();
+        let splitv = parent(&l, p2);
+        assert!(l.set_weight(p1, 515) && l.set_weight(splitv, 485));
+        assert!(l.set_weight(p2, 49) && l.set_weight(p3, 51));
+        let t2 = l.split(p1, Mode::Stacked).unwrap();
+        let t3 = l.split(t2, Mode::Stacked).unwrap();
+        let t4 = l.split(t3, Mode::Stacked).unwrap();
+        let u2 = l.split(p2, Mode::Stacked).unwrap();
+        let u3 = l.split(u2, Mode::Stacked).unwrap();
+        let v2 = l.split(p3, Mode::Stacked).unwrap();
+        let v3 = l.split(v2, Mode::Stacked).unwrap();
+        assert!(l.focus(p2) && l.focus(v2) && l.focus(t2));
+        (l, [p1, p2, p3], [vec![p1, t2, t3, t4], vec![p2, u2, u3], vec![p3, v2, v3]])
+    }
+
+    /// Every rect the browser laid out for the reference (the geometry
+    /// dump + the PNG, JOURNAL run 46o "I-2"), reproduced: the workspace
+    /// root, both dividers, the three frames, every header and both open
+    /// bodies -- at 1440 x 900 with the rails carved off (34 + 25).
+    #[test]
+    fn the_instrument_carve_reproduces_the_reference_layout() {
+        let (mut l, [p1, p2, p3], [s1, s2, s3]) = reference();
+        l.recompute(r(0, 34, 1440, 841), 1, inst100(), Profile::Instrument);
+        let root = l.root;
+        assert_eq!(l.get(root).unwrap().rect, r(3, 37, 1434, 835), "the root: the workspace padded 3");
+        assert_eq!(l.get(root).unwrap().dividers, vec![r(738, 37, 7, 835)], "the root track on columns 738..744");
+        // p1: the focused stack of four, the second open.
+        let f1 = parent(&l, p1);
+        assert_eq!(l.get(f1).unwrap().rect, r(3, 37, 735, 835));
+        assert_eq!(l.get(f1).unwrap().dividers, Vec::<Rect>::new());
+        let heads: Vec<Rect> = s1.iter().map(|&t| l.get(t).unwrap().tagbar).collect();
+        assert_eq!(heads, vec![r(4, 38, 733, 32), r(4, 70, 733, 32), r(4, 807, 733, 32), r(4, 839, 733, 32)]);
+        let vis: Vec<bool> = s1.iter().map(|&t| l.get(t).unwrap().visible).collect();
+        assert_eq!(vis, vec![false, true, false, false], "one open tile");
+        assert_eq!(l.get(s1[1]).unwrap().content, r(4, 102, 733, 704), "the open body: 737 - 32 - 1");
+        for &t in [s1[0], s1[2], s1[3]].iter() {
+            assert_eq!(l.get(t).unwrap().content, Rect::ZERO, "a collapsed body is ZERO");
+            assert_eq!(l.get(t).unwrap().rect, r(3, 37, 735, 835), "a stacked leaf's frame is its stack's");
+        }
+        // The right column and its track.
+        let splitv = parent(&l, parent(&l, p2));
+        assert_eq!(l.get(splitv).unwrap().rect, r(745, 37, 692, 835));
+        assert_eq!(l.get(splitv).unwrap().dividers, vec![r(745, 443, 692, 7)], "the column's track on rows 443..449");
+        // p2: three tiles, the first open.
+        let f2 = parent(&l, p2);
+        assert_eq!(l.get(f2).unwrap().rect, r(745, 37, 692, 406));
+        let heads: Vec<Rect> = s2.iter().map(|&t| l.get(t).unwrap().tagbar).collect();
+        assert_eq!(heads, vec![r(746, 38, 690, 32), r(746, 378, 690, 32), r(746, 410, 690, 32)]);
+        assert_eq!(l.get(p2).unwrap().content, r(746, 70, 690, 307));
+        assert!(l.get(p2).unwrap().visible && !l.get(s2[1]).unwrap().visible);
+        // p3: three tiles, the second open.
+        let f3 = parent(&l, p3);
+        assert_eq!(l.get(f3).unwrap().rect, r(745, 450, 692, 422));
+        let heads: Vec<Rect> = s3.iter().map(|&t| l.get(t).unwrap().tagbar).collect();
+        assert_eq!(heads, vec![r(746, 451, 690, 32), r(746, 483, 690, 32), r(746, 839, 690, 32)]);
+        assert_eq!(l.get(s3[1]).unwrap().content, r(746, 515, 690, 323));
+        // Focus: p1's open tile; its stack is the focused pane.
+        assert_eq!(l.focused, s1[1]);
+        // The dump carries the weights after the rects, nothing else moved.
+        let t = l.render_text();
+        assert!(t.contains(" w=515\n") && t.contains(" w=485\n") && t.contains(" w=49\n") && t.contains(" w=51\n"), "{t}");
+        assert!(t.contains("[4,102,733,704]\n"), "{t}");
+        assert!(t.contains("[0,0,0,0] hidden\n"), "{t}");
+        // At 200 % in a 2880 x 1800 framebuffer the same tree doubles: the
+        // root track at 1476, the frames 2 px, the headers 64.
+        l.recompute(r(0, 68, 2880, 1682), 1, libhalcyon::instrument::INSTRUMENT_BASE.at(200), Profile::Instrument);
+        assert_eq!(l.get(root).unwrap().rect, r(6, 74, 2868, 1670));
+        assert_eq!(l.get(root).unwrap().dividers, vec![r(1476, 74, 14, 1670)]);
+        assert_eq!(l.get(s1[1]).unwrap().tagbar, r(8, 140, 1466, 64));
+        assert_eq!(l.get(s1[1]).unwrap().content, r(8, 204, 1466, 1408), "1670 - 4 - 3 x 64 - 64 - 2");
+    }
+
+    /// One tile on a display is still a stack of one inside a frame under
+    /// two rails (5.6): frame, header, body -- never the legacy borderless
+    /// leaf. A zoom is the explicit exception and fills the workspace.
+    #[test]
+    fn a_lone_tile_is_framed_and_a_zoom_fills_the_workspace() {
+        let mut l = Layout::new();
+        let a = l.root;
+        l.recompute(r(0, 34, 1280, 661), 1, inst100(), Profile::Instrument);
+        let p = l.get(a).unwrap();
+        assert!(p.visible);
+        assert_eq!(p.rect, r(3, 37, 1274, 655));
+        assert_eq!(p.tagbar, r(4, 38, 1272, 32));
+        assert_eq!(p.content, r(4, 70, 1272, 621));
+        assert!(p.dividers.is_empty());
+        assert!(l.zoom_toggle(a));
+        l.recompute(r(0, 34, 1280, 661), 1, inst100(), Profile::Instrument);
+        let p = l.get(a).unwrap();
+        assert_eq!((p.rect, p.content, p.tagbar), (r(0, 34, 1280, 661), r(0, 34, 1280, 661), Rect::ZERO));
+        // A workspace too small for anything: nothing published leaves it,
+        // nothing panics.
+        l.unzoom();
+        l.recompute(r(0, 34, 5, 5), 1, inst100(), Profile::Instrument);
+        let p = l.get(a).unwrap();
+        assert!(p.rect.is_empty() && p.content.is_empty() && p.tagbar.is_empty());
+        l.recompute(Rect::ZERO, 1, inst100(), Profile::Instrument);
+        assert!(l.get(a).unwrap().rect.is_empty());
+    }
+
+    /// The legacy carve is what it was before the profile existed: the
+    /// same numbers the compose gate and ls-halcyon measure -- a single
+    /// leaf borderless and bar-free, two leaves each with the 4 px ring
+    /// (gap 1 + bevel 2 + hairline 1) and the 20 px tag bar, at 1.0 and
+    /// 2.0; no dividers, no weights in the dump.
+    #[test]
+    fn the_legacy_carve_is_pinned() {
+        let m = theme::builtin().metrics;
+        let mut l = Layout::new();
+        let a = l.root;
+        l.recompute(r(0, 0, 1280, 780), 1, m.at(100), Profile::Legacy);
+        let p = l.get(a).unwrap();
+        assert_eq!((p.rect, p.content, p.tagbar), (r(0, 0, 1280, 780), r(0, 0, 1280, 780), Rect::ZERO));
+        let b = l.split(a, Mode::SplitH).unwrap();
+        l.recompute(r(0, 0, 1280, 780), 1, m.at(100), Profile::Legacy);
+        let pa = l.get(a).unwrap();
+        let pb = l.get(b).unwrap();
+        assert_eq!((pa.rect, pa.tagbar, pa.content), (r(0, 0, 640, 780), r(4, 4, 632, 20), r(4, 24, 632, 752)));
+        assert_eq!((pb.rect, pb.tagbar, pb.content), (r(640, 0, 640, 780), r(644, 4, 632, 20), r(644, 24, 632, 752)));
+        assert!(l.get(l.root).unwrap().dividers.is_empty());
+        assert!(!l.render_text().contains(" w="), "{}", l.render_text());
+        // 2.0: ring 1 + 4 + 2 = 7, the bar 40.
+        l.recompute(r(0, 0, 2560, 1560), 1, m.at(200), Profile::Legacy);
+        let pa = l.get(a).unwrap();
+        assert_eq!((pa.rect, pa.tagbar, pa.content), (r(0, 0, 1280, 1560), r(7, 7, 1266, 40), r(7, 47, 1266, 1506)));
+        // A weight set under legacy changes no legacy rect (the division
+        // is equal) but travels to the dump for a later Instrument carve.
+        assert!(l.set_weight(a, 3));
+        l.recompute(r(0, 0, 1280, 780), 1, m.at(100), Profile::Legacy);
+        assert_eq!(l.get(a).unwrap().rect, r(0, 0, 640, 780));
+        assert!(l.render_text().contains(" w=3\n"));
+        assert_eq!(l.min_size(), (0, 0), "no minima under legacy");
+        assert!(l.split_fits(a, Mode::SplitH) && l.split_fits(b, Mode::SplitV));
+    }
+
+    /// The weight rules (5.2): a newcomer to a container takes the mean of
+    /// its siblings; a nesting split's container takes the leaf's weight
+    /// and the two inside halve; a dissolved container's survivor takes the
+    /// container's; a root has no division; 0 is refused.
+    #[test]
+    fn weights_follow_the_split_and_dissolve_rules() {
+        let mut l = Layout::new();
+        let a = l.root;
+        let b = l.split(a, Mode::SplitH).unwrap();
+        assert_eq!((weight(&l, a), weight(&l, b)), (1, 1));
+        assert!(l.set_weight(a, 3) && l.set_weight(b, 5));
+        let c = l.split(b, Mode::SplitH).unwrap();
+        assert_eq!(weight(&l, c), 4, "the mean of 3 and 5");
+        let d = l.split(c, Mode::SplitV).unwrap();
+        let cont = parent(&l, c);
+        assert_eq!((weight(&l, cont), weight(&l, c), weight(&l, d)), (4, 1, 1));
+        let _ = l.close(d);
+        assert_eq!(weight(&l, c), 4, "the survivor takes the container's share");
+        assert_eq!(parent(&l, c), l.root);
+        assert!(!l.set_weight(l.root, 7), "a root has no division");
+        assert!(!l.set_weight(a, 0));
+        let e = l.epoch;
+        assert!(l.set_weight(a, 3) && l.epoch == e, "the same value moves no epoch");
+        assert!(l.set_weight(a, 65535) && l.epoch == e + 1);
+        // The mean rounds half up and never reads 0: siblings 1 and 2 -> 2.
+        let mut l = Layout::new();
+        let a = l.root;
+        let b = l.split(a, Mode::SplitV).unwrap();
+        assert!(l.set_weight(b, 2));
+        let c = l.split(b, Mode::SplitV).unwrap();
+        assert_eq!(weight(&l, c), 2);
+    }
+
+    /// The minima (5.2): a split that cannot keep every pane at 260 wide,
+    /// every stack at its header budget plus a 54 px body, is refused
+    /// before the tree changes; a host that cannot split stacks instead.
+    #[test]
+    fn a_split_past_the_minima_is_refused_untouched_and_a_host_stacks_instead() {
+        let mut l = Layout::new();
+        let area = r(0, 34, 600, 300); // root 594 x 235
+        l.recompute(area, 1, inst100(), Profile::Instrument);
+        let a = l.root;
+        assert_eq!(l.min_size(), (260, 88));
+        assert!(l.split_fits(a, Mode::SplitH), "2 x 260 + 7 = 527 <= 594");
+        let b = l.split(a, Mode::SplitH).unwrap();
+        l.recompute(area, 1, inst100(), Profile::Instrument);
+        assert_eq!(l.min_size(), (527, 88));
+        assert!(!l.split_fits(b, Mode::SplitH), "3 x 260 + 14 = 794 > 594");
+        assert!(l.split_fits(b, Mode::SplitV), "b's column: 2 x 88 + 7 = 183 <= 235");
+        assert!(l.split_fits(b, Mode::Stacked), "2 + 64 + 1 + 54 = 121 <= 235");
+        assert!(l.split_fits(b, Mode::Tabbed));
+        // The compositor's own placement: b is focused and empty, so a
+        // host lands in it; the next host must split b -- by aspect that is
+        // a horizontal split, which does not fit, so the tile joins a stack.
+        assert_eq!(l.host(1), Some(b));
+        let c = l.host(2).unwrap();
+        let stack = parent(&l, c);
+        assert!(matches!(l.get(stack).unwrap().kind, Kind::Container { mode: Mode::Stacked, .. }));
+        assert_eq!(parent(&l, b), stack);
+        l.recompute(area, 1, inst100(), Profile::Instrument);
+        assert_eq!(l.min_size(), (527, 121));
+        // A stack of two in 235 rows: the open tile is c (the newcomer).
+        assert!(l.get(c).unwrap().visible && !l.get(b).unwrap().visible);
+        assert_eq!(l.get(b).unwrap().tagbar.h, 32);
+        // A workspace that fits nothing: every host past the first is refused.
+        let mut l = Layout::new();
+        l.recompute(r(0, 34, 300, 150), 1, inst100(), Profile::Instrument);
+        let a = l.root;
+        assert!(!l.split_fits(a, Mode::SplitH) && !l.split_fits(a, Mode::SplitV));
+        assert!(l.split_fits(a, Mode::Stacked), "2 + 64 + 1 + 54 = 121 <= 144");
+        assert_eq!(l.host(1), Some(a));
+        assert!(l.host(2).is_some(), "the second tile stacks");
+        l.recompute(r(0, 34, 300, 150), 1, inst100(), Profile::Instrument);
+        let (e, n) = (l.epoch, l.live_ids().len());
+        assert_eq!(l.host(3), None, "a third tile would need 2 + 96 + 1 + 54 = 153 > 144: refused");
+        assert_eq!((l.epoch, l.live_ids().len()), (e, n), "and the tree is untouched");
     }
 }
