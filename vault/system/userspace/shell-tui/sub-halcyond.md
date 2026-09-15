@@ -352,6 +352,26 @@ the footer drops its hints and yields its label. The footer's hints follow the
 `chords` file rather than a private copy, so a chord and its hint cannot
 disagree.
 
+**The SUCCESS square carries section 10's glow, and only it (I-8b).** The
+footer's condition square is where the effects slice first paints: `success`
+at .25 under a box blur of 8, both scaled, pushed BEFORE the check so the
+executor's list order puts the glow underneath it. WHICH state carries it was
+not derivable from the text -- section 10 pins a sage value, 8.2 describes the
+square as amber (RUNNING) or hollow `secondary` (READY) and keeps RUNNING
+explicitly pulse-free, and the kit's sage-filled square at READY is the
+fixture state 8.2 REPLACES, with I-9's parity mask exempting it -- so it was
+put to the operator and recorded in section 10's I-8 amendment: SUCCESS
+(EXIT 0) alone. The alpha is `pct256(250)` = 64, the same rounding `Derived`
+takes, so a glow and a derived opaque that both say ".25" agree to the byte
+rather than drifting by one.
+
+Its test carries three NEGATIVES beside the positive (READY, RUNNING and
+FAILURE each glow-free), and that asymmetry is deliberate: a witness asserting
+only that the glow EXISTS would pass a renderer that glowed every condition,
+which is exactly what 8.2 forbids. Both halves are sabotage-measured --
+removing the glow fails the positive, and adding the same glow to the RUNNING
+arm (the plausible WRONG fix) fails the negatives.
+
 ### The outline path -- ONE rasterizer for every tier (HALCYON-TYPE 4; TY-1)
 
 `outline.rs` is the type path: skrifa reads a face and scales its glyph outlines

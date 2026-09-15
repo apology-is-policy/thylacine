@@ -1230,6 +1230,54 @@ over `Op` is `halcyond/src/tile.rs`'s legacy-equality projection, a test
 helper; every other consumer filters with `_ => None`, so two new variants
 were a one-site change the compiler found.
 
+### I-8b-1: the sage glow, and three negatives that had to be sabotaged
+
+The effects slice's first painted effect, and the smallest possible one on
+purpose: halcyond already depends on cartoon, so the rail footer's condition
+square proves `Op::Glow` in a real host-tested painter before tapestryd takes
+the dependency the compositor-side effects need.
+
+**The interesting part was deciding WHERE it goes, and I could not.** Section
+10 pins the glow's colour as `rgba(112,161,124,.25)`, which is the `success`
+colour. But 8.2 describes the condition square as amber (RUNNING) or hollow
+`secondary` (READY), says RUNNING has "no pulse" in as many words, and calls
+the kit's sage-FILLED square at READY "a fixture state this design replaces"
+-- with I-9's parity mask exempting the pulse outright. 14.3 restates the four
+conditions and mentions no glow at all. Four sections read, and the text
+genuinely does not say which state carries a sage glow. That is the line
+between the arc's two standing rules: *do not escalate what the code can
+answer* had been the lesson four times running, and this is the case where
+the code cannot. It went to the operator batched with I-8c's fork so the run
+stopped once rather than twice, and the answer is SUCCESS (EXIT 0) alone --
+the one state where section 10's literal sage is the semantically right ink.
+
+**Two of the survey's homes did not exist, and one effect was already built.**
+The status glow's home is not `status.rs`: `status_list` early-returns to
+`rail::footer_list` under Instrument, so the legacy list would never have
+painted it. And section 10's seventh effect -- "the swatch's white .12 inset
+border" -- is not the picker's, because the picker has no swatches; it has
+MINIATURES (`paint_miniature`, `picker.rs:431`). The real home is the rail's
+theme control at 8.1, where it has been painting since I-4 as
+`Derived.swatch_ring = over(amber, white, 12 %)` (`rail.rs:562`, asserted at
+`rail.rs:1196`, pinned `#CDC199` at `instrument.rs:1138`). Six effects remain,
+not seven. Both errors were mine, in a memory note written this same session:
+a plan is a claim like any other and decays the moment it meets the tree.
+
+**The witness needed a second sabotage, and that is the whole lesson.** The
+obvious measurement -- delete the glow, watch the test fail -- proves the
+positive fires and nothing else. It would pass just as happily against a
+renderer that glowed EVERY condition, which is precisely what 8.2 forbids. So
+the second sabotage is the WRONG FIX: add the same glow to the RUNNING arm.
+Both fired (1 test, FAILED each), `rail.rs` restored byte-identical (md5
+`21c0d4ee`), 301 host tests green, up one. This is F8's lesson from the W arc
+reused rather than re-learned: a control that passes both ways has to be
+sabotaged with the plausible wrong change, or the negatives in it are
+decoration.
+
+**Alpha 64 is not a magic number**: it is `pct256(250)`, the same rounding
+`Derived` already takes for its opaques, so a glow and a derived opaque that
+both say ".25" agree to the byte instead of drifting apart by one.
+
 ## Run 46o (2026-09-14, Fable 5.1 max) -- the Halcyon Instrument arc opens: reading the Carbon Optics kit against the tree
 
 ### What this run was for

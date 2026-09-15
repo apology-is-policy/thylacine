@@ -79,6 +79,13 @@ const CHIP_EDGE_INSET: i32 = 4;
 const FOOT_PAD: i32 = 10;
 const GLYPH_BOX: i32 = 6;
 const GLYPH_GAP: i32 = 8;
+
+/// Section 10 (amended at I-8): the SUCCESS condition's glow -- `success`
+/// at .25 under a box blur of 8, both scaled. The alpha is 64/256, the same
+/// rounding `Derived` takes for its opaques, so a glow and a derived opaque
+/// of the same stated percentage agree.
+const GLOW_ALPHA: u8 = 64;
+const GLOW_BLUR: i32 = 8;
 const HINT_GAP: i32 = 8;
 const RUN_SQUARE: i32 = 4;
 
@@ -326,6 +333,23 @@ fn ring(cart: &mut Cartoon, x: i32, y: i32, w: i32, h: i32, t: i32, color: Argb)
     rect(cart, x, y + h - t, w, t, color);
     rect(cart, x, y, t, h, color);
     rect(cart, x + w - t, y, t, h, color);
+}
+
+/// Section 10's glow: `color` at `alpha` under a box blur of `radius`,
+/// spreading `radius` past the rect on every side. Pushed BEFORE what it
+/// sits under, since the executor paints in list order.
+fn glow(cart: &mut Cartoon, x: i32, y: i32, w: i32, h: i32, color: Argb, alpha: u8, radius: i32) {
+    if w > 0 && h > 0 && radius >= 0 {
+        cart.ops.push(Op::Glow {
+            x,
+            y,
+            w: w as u32,
+            h: h as u32,
+            color,
+            alpha,
+            radius: radius as u32,
+        });
+    }
 }
 
 fn push(cart: &mut Cartoon, gen: u32, x: i32, base: i32, color: Argb, run: &Run) {
@@ -863,6 +887,12 @@ pub fn footer_list(
                     rect(&mut cart, gx + centre(gb, sq), gy + centre(gb, sq), sq, sq, i.amber);
                 }
                 FooterState::Success => {
+                    // 10 (amended at I-8): the sage glow is the SUCCESS
+                    // square's ALONE -- 8.2 keeps RUNNING explicitly
+                    // pulse-free and replaces the kit's sage-filled READY
+                    // square with a hollow `secondary` one, so `success` is
+                    // the one state where 10's literal sage is the right ink.
+                    glow(&mut cart, gx, gy, gb, gb, i.success, GLOW_ALPHA, sheet.ipx(GLOW_BLUR));
                     let run = tracked(gs, mono, mono_px, "\u{2713}");
                     push(&mut cart, gen, (gx + (gb - run.width) / 2).max(0), base, i.success, &run);
                 }
@@ -1088,6 +1118,17 @@ mod tests {
             .iter()
             .filter_map(|o| match *o {
                 Op::Rect { x, y, w, h, color } => Some((x, y, w, h, color)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// (x, y, w, h, colour, alpha, radius) per glow.
+    fn glows(c: &Cartoon) -> Vec<(i32, i32, u32, u32, u32, u8, u32)> {
+        c.ops
+            .iter()
+            .filter_map(|o| match *o {
+                Op::Glow { x, y, w, h, color, alpha, radius } => Some((x, y, w, h, color, alpha, radius)),
                 _ => None,
             })
             .collect()
@@ -1363,6 +1404,49 @@ mod tests {
             (String::from("SUPER + TAB"), String::from("TILES")),
         ];
         m
+    }
+
+    /// 10 (amended at I-8, operator-answered): the sage glow is the SUCCESS
+    /// square's ALONE. The positive is one glow on the 6 x 6 glyph box in
+    /// `success` at .25 / blur 8; the three NEGATIVES are what make this a
+    /// witness of "success alone" rather than of "a glow exists at all" --
+    /// 8.2 keeps RUNNING explicitly pulse-free and replaced the kit's
+    /// sage-filled READY square with a hollow `secondary` one.
+    #[test]
+    fn the_sage_glow_belongs_to_the_success_square_alone() {
+        let s = carbon();
+        let mut gs = GlyphSource::new_vendored(64);
+        let mut ok = footer_model();
+        ok.condition = Condition::Ok;
+        ok.cmd = String::from("make");
+        let (c, _) = footer_list(&ok, 1440, 25, &s, &mut gs);
+        assert_eq!(
+            glows(&c),
+            alloc::vec![(10, 10, 6, 6, s.inst.success, 64u8, 8u32)],
+            "the success square's glow, on the golden's 6 x 6 at (10, 10)"
+        );
+        // UNDER the check, not over it: the executor paints in list order.
+        let gi = c.ops.iter().position(|o| matches!(o, Op::Glow { .. })).unwrap();
+        let ci = c
+            .ops
+            .iter()
+            .position(|o| matches!(o, Op::Glyphs { color, .. } if *color == s.inst.success))
+            .unwrap();
+        assert!(gi < ci, "the glow is pushed before the check it sits under");
+
+        // The three states that must carry NO glow.
+        let ready = footer_model();
+        let mut running = footer_model();
+        running.condition = Condition::Ok;
+        running.cmd = String::from("make");
+        running.running = true;
+        let mut failed = footer_model();
+        failed.condition = Condition::Err;
+        failed.cmd = String::from("make");
+        for (name, m) in [("ready", ready), ("running", running), ("failure", failed)] {
+            let (c, _) = footer_list(&m, 1440, 25, &s, &mut gs);
+            assert!(glows(&c).is_empty(), "{} carries no glow", name);
+        }
     }
 
     /// 8.2 at 100 % on the golden's 1440 x 25: the `structure` first row;
