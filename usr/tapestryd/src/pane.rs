@@ -706,6 +706,19 @@ impl Layout {
             .collect()
     }
 
+    /// The parentless ancestor of `slot`: the root of whatever workspace it
+    /// lives in, active or not. `self.root()` answers only for the ACTIVE
+    /// one, and every caller that used it to mean "this pane's root" was
+    /// silently asking a narrower question -- which is F8, and was `reseat_root`
+    /// and `close_inner` before it.
+    fn top_of(&self, slot: usize) -> usize {
+        let mut cur = slot;
+        while let Some(p) = self.get(cur).and_then(|p| p.parent) {
+            cur = p;
+        }
+        cur
+    }
+
     /// Is `slot` inside the ACTIVE workspace's tree? Walks to its top, so it
     /// answers for a container as well as a leaf. Used where a global,
     /// id-addressed lookup (`slot_of_id`) could otherwise reach across
@@ -2644,7 +2657,12 @@ impl Layout {
         }
         let pad = self.metrics.outer_pad.max(0) as u32;
         let root = inset(self.area, pad);
-        let (w, h) = self.min_size_hyp(self.root(), Some((slot, mode)));
+        // F8: from the SLOT'S OWN root. `self.root()` is the ACTIVE root, so
+        // a split in a dormant workspace was judged against a tree the
+        // hypothetical leaf is not in -- `min_size_hyp` never encountered it,
+        // the walk returned the active tree's ordinary minima, and the check
+        // passed VACUOUSLY. A dormant split was unbounded.
+        let (w, h) = self.min_size_hyp(self.top_of(slot), Some((slot, mode)));
         w <= root.w && h <= root.h
     }
 
@@ -2785,16 +2803,17 @@ impl Layout {
         }
     }
 
-    /// Does the tree's minimum fit the padded workspace (5.2)? Always under
-    /// legacy.
-    fn min_fits(&self) -> bool {
+    /// Does the workspace rooted at `root` fit the padded area (5.2)? Always
+    /// under legacy. Every workspace is carved to the SAME area (the carve is
+    /// display-level), so one area serves them all.
+    fn min_fits_root(&self, root: usize) -> bool {
         if self.profile != Profile::Instrument {
             return true;
         }
         let pad = self.metrics.outer_pad.max(0) as u32;
-        let root = inset(self.area, pad);
-        let (w, h) = self.min_size();
-        w <= root.w && h <= root.h
+        let area = inset(self.area, pad);
+        let (w, h) = self.min_size_hyp(root, None);
+        w <= area.w && h <= area.h
     }
 
     /// HALCYON-INSTRUMENT 5.2 (r1 A-F1's owed half, I-6): would `mutate`
@@ -2806,14 +2825,47 @@ impl Layout {
     /// mutations. True when the mutation itself is a no-op (the real call
     /// answers with its own refusal). Always true under legacy.
     pub fn fits_after(&self, mutate: impl FnOnce(&mut Layout) -> bool) -> bool {
-        if self.profile != Profile::Instrument || !self.min_fits() {
+        if self.profile != Profile::Instrument {
             return true;
         }
+        // F8: judged PER WORKSPACE. This walked from `self.root()` -- the
+        // ACTIVE root -- so a mutation in a DORMANT workspace was measured
+        // against a tree it does not live in and was never refused, however
+        // far it overflowed. `set_mode` carries no active-root guard and the
+        // `mode` verb gates on OWNERSHIP, so that path is reachable by verb.
+        //
+        // Keyed by NUMBER rather than index: a mutation may create or vanish
+        // a workspace, and S4 made the number the identity while the index
+        // shifts under an insert.
+        //
+        // NOT "every root must fit" -- the tempting one-liner, wrong in the
+        // other direction: a dormant workspace already past its minima (a
+        // layout restored onto a smaller display) would freeze the workspace
+        // the user is actually looking at. 5.2's rule is preserved PER ROOT,
+        // so only a workspace that FIT before and does not after is refused.
+        let before: Vec<(u8, bool)> = self
+            .workspaces
+            .iter()
+            .map(|w| (w.number, self.min_fits_root(w.root)))
+            .collect();
         let mut trial = self.clone();
         if !mutate(&mut trial) {
             return true;
         }
-        trial.min_fits()
+        for w in trial.workspaces.iter() {
+            if trial.min_fits_root(w.root) {
+                continue;
+            }
+            let fit_before = before
+                .iter()
+                .find(|(n, _)| *n == w.number)
+                .map(|(_, f)| *f)
+                .unwrap_or(true);
+            if fit_before {
+                return false;
+            }
+        }
+        true
     }
 
     fn layout_pane(&mut self, slot: usize, rect: Rect) {
@@ -3576,6 +3628,100 @@ mod tests {
         // Legacy has no minima.
         l.recompute(r(0, 0, 1440, 900), 1, theme::builtin().metrics.at(100), Profile::Legacy);
         assert!(l.fits_after(|t| t.set_mode(root, Mode::SplitV)));
+    }
+
+    /// F8 (tracked from round 1, fixed here): the minima were judged from
+    /// `self.root()` -- the ACTIVE root -- in BOTH directions, so a mutation
+    /// in a DORMANT workspace was measured against a tree it does not live
+    /// in. `min_size_hyp` never encountered the hypothetical leaf, so the
+    /// walk returned the active tree's ordinary minima and the check passed
+    /// VACUOUSLY: a dormant split was unbounded.
+    ///
+    /// SABOTAGE: restore `self.root()` in `split_fits` and the dormant leg
+    /// returns true.
+    #[test]
+    fn a_split_in_a_dormant_workspace_is_still_bounded() {
+        let mut l = Layout::new();
+        let area = r(0, 34, 600, 300); // root 594 x 235
+        l.recompute(area, 1, inst100(), Profile::Instrument);
+        let a = l.root();
+        let b = l.split(a, Mode::SplitH).unwrap();
+        l.recompute(area, 1, inst100(), Profile::Instrument);
+
+        // THE CONTROL, while it is still active: 3 x 260 + 14 = 794 > 594.
+        assert!(!l.split_fits(b, Mode::SplitH), "refused while active");
+
+        assert!(l.switch_workspace(2), "workspace 1 goes dormant");
+        l.recompute(area, 1, inst100(), Profile::Instrument);
+        assert!(!l.in_active_root(b), "the premise: b is in the dormant tree");
+
+        // Same tree, same area, same answer -- the walk must start from B's
+        // OWN root, not from whichever workspace happens to be on screen.
+        assert!(
+            !l.split_fits(b, Mode::SplitH),
+            "a dormant split is bounded by ITS workspace, not the active one"
+        );
+    }
+
+    /// F8's other direction: `fits_after` judged the ACTIVE tree only, so a
+    /// `mode` verb naming a dormant container (server.rs gates it on
+    /// ownership, not on the active root, and `set_mode` has no such guard)
+    /// was never refused however far it overflowed.
+    ///
+    /// SABOTAGE: restore the active-root-only `min_fits` and this returns
+    /// true.
+    #[test]
+    fn a_mode_flip_in_a_dormant_workspace_is_still_judged() {
+        let (mut l, [_, _, _], _) = reference();
+        l.recompute(r(0, 34, 1440, 400), 1, inst100(), Profile::Instrument);
+        let ws1_root = l.root();
+
+        // THE CONTROL, while active: turning it vertical needs 505 > 394.
+        assert!(!l.fits_after(|t| t.set_mode(ws1_root, Mode::SplitV)), "505 > 394");
+
+        assert!(l.switch_workspace(2), "workspace 1 goes dormant");
+        l.recompute(r(0, 34, 1440, 400), 1, inst100(), Profile::Instrument);
+        assert!(!l.in_active_root(ws1_root), "the premise: it is dormant");
+
+        assert!(
+            !l.fits_after(|t| t.set_mode(ws1_root, Mode::SplitV)),
+            "the overflow it would create is still an overflow when dormant"
+        );
+    }
+
+    /// THE INVERSE CONTROL, and the reason F8 is not a one-liner. Widening
+    /// the check to "every root must fit" would close the hole above and open
+    /// a worse one: a DORMANT workspace already past its minima -- a layout
+    /// restored onto a smaller display, say -- would freeze the workspace the
+    /// user is actually looking at.
+    ///
+    /// This passes BEFORE the fix as well as after; it is not a regression
+    /// witness, it is a guard against over-correcting. Its sabotage is the
+    /// WRONG fix: make `fits_after` require every root to fit and it fails.
+    #[test]
+    fn a_dormant_overflow_does_not_freeze_the_active_workspace() {
+        let (mut l, [_, _, _], _) = reference();
+        // 294 rows against the reference's 313: workspace 1 is already past
+        // its minima and, per 5.2, stays mutable rather than being frozen.
+        l.recompute(r(0, 34, 1440, 300), 1, inst100(), Profile::Instrument);
+        let ws1_root = l.root();
+        assert!(
+            l.fits_after(|t| t.set_mode(ws1_root, Mode::SplitV)),
+            "the premise: already past its minima, so still mutable"
+        );
+
+        assert!(l.switch_workspace(2), "and now it is dormant AND overflowing");
+        let b_root = l.root();
+        let _ = l.split(b_root, Mode::SplitH).expect("a container to act on");
+        l.recompute(r(0, 34, 1440, 300), 1, inst100(), Profile::Instrument);
+        let c = l.root();
+        assert!(matches!(l.get(c).unwrap().kind, Kind::Container { .. }));
+
+        assert!(
+            l.fits_after(|t| t.set_mode(c, Mode::SplitV)),
+            "the ACTIVE workspace stays mutable -- a dormant overflow is not \
+             the active tree's problem"
+        );
     }
 
     /// The chrome bind's judgement (9.1; r1 A-F6): a session may decorate

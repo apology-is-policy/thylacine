@@ -2114,3 +2114,46 @@ arm's comment.
 
 **Coverage.** tapestryd lib 68 (was 65). Every round-3 fix sabotage-measured in
 isolation, `pane.rs` and `libhalcyon/layout.rs` restored byte-identical.
+
+## F8: the minima judged the ACTIVE root in both directions (2026-09-15)
+
+Tracked from the workspace round 1, carried through rounds 2 and 3, fixed
+here. `split_fits`, `min_size`, `min_fits` and `fits_after` all walked from
+`self.root()` -- the ACTIVE root -- so a mutation in a DORMANT workspace was
+measured against a tree it does not live in. `min_size_hyp` never encountered
+the hypothetical leaf, the walk returned the active tree's ordinary minima,
+and the check passed VACUOUSLY: a dormant split was unbounded.
+
+**Reachable by verb, not hypothetical.** Most callers pass `self.focused`,
+which `Layout::focus` chokepoints to the active root, so they were never the
+problem. Two caller-supplied paths were: the `split` verb (`server.rs`, gated
+on ownership rather than on the active root) and the `mode` verb through
+`fits_after(|l| l.set_mode(slot, mode))` -- and `set_mode` carries no
+active-root guard of its own. Round 2's F1 guard had already closed the third,
+`move_dir`.
+
+**The fix is per-workspace, and F8 is on record as NOT a one-liner for a
+reason.** Widening the check to "every root must fit" is the tempting
+one-liner and is wrong in the other direction: a dormant workspace already past
+its minima -- a layout restored onto a smaller display -- would freeze the
+workspace the user is actually looking at. So 5.2's "already past its minima
+stays mutable" rule is preserved PER ROOT, and only a workspace that FIT before
+and does not after is a refusal.
+
+As built: a new `top_of(slot)` returns the parentless ancestor (no such helper
+existed anywhere in the crate -- measured); `split_fits` walks from
+`self.top_of(slot)`; `min_fits` became `min_fits_root(root)`; and `fits_after`
+compares each workspace's fit before and after, keyed by NUMBER rather than
+index, because a mutation may create or vanish a workspace and S4 made the
+number the identity while the index shifts under an insert.
+
+**The measurement that makes the inverse control a guard.** Three sabotages,
+all fired: restoring `self.root()` in `split_fits`; restoring the
+active-root-only `fits_after`; and -- the one that matters --
+IMPLEMENTING THE WRONG FIX, the every-root widening, which fails
+`a_dormant_overflow_does_not_freeze_the_active_workspace`. Without that third
+sabotage the inverse control would be decoration; with it, the test
+discriminates the over-correction and not merely the absence of a fix.
+
+tapestryd lib 71 (was 68). `pane.rs` restored byte-identical after each.
+

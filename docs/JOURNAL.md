@@ -1089,6 +1089,60 @@ it would have written itself, and said a Fable round on that function would be
 worth more than its own clearing of it. Three rounds on this surface have now
 run on the same family as the author.
 
+### F8: the arc's last residue, and the fix that was nearly the wrong one
+
+F8 was found in round 1, carried through rounds 2 and 3 as tracked-not-fixed,
+and closed here. The minima gate -- `split_fits`, `min_size`, `min_fits`,
+`fits_after` -- walked from `self.root()`, the ACTIVE root, in BOTH
+directions. So a mutation in a dormant workspace was measured against a tree it
+does not live in: `min_size_hyp` never encountered the hypothetical leaf, the
+walk returned the active tree's ordinary minima, and the check passed
+VACUOUSLY. A dormant split was unbounded.
+
+**It was reachable by verb, which is what made it worth closing rather than
+carrying a fourth time.** A census of the call sites was the useful step: most
+callers pass `self.focused`, which `Layout::focus` chokepoints to the active
+root, so they were never the problem. Exactly two were caller-supplied -- the
+`split` verb, gated on ownership rather than on the active root, and the `mode`
+verb through `fits_after(|l| l.set_mode(slot, mode))`, where `set_mode` carries
+no active-root guard of its own. Round 2's F1 had already closed the third,
+`move_dir`. Three verbs, three different answers, and only the census
+distinguished them.
+
+**The fix I nearly wrote was wrong, and I had said so a day earlier.** When F8
+was first triaged I recorded that it was "not a one-liner" because widening the
+walk so every root must fit would make a DORMANT overflow block ACTIVE
+mutations -- freezing the workspace the user is looking at because some other
+one was restored onto a smaller display. That note is the only reason I did not
+reach for the one-liner when I finally sat down to it. The real fix keeps
+5.2's "already past its minima stays mutable" rule PER ROOT: only a workspace
+that fit before and does not after is a refusal. It is keyed by NUMBER rather
+than index, because a mutation may create or vanish a workspace and S4 made the
+number the identity while the index shifts under an insert.
+
+**The measurement I am gladdest about.** I wrote an inverse control -- a
+dormant overflow must not freeze the active workspace -- which PASSES both
+before and after the fix, so on its own it proves nothing. Then I sabotaged it
+with the WRONG FIX, the every-root widening, and it fired. That is the
+difference between a control and decoration: without that third sabotage the
+test would have shown only that A fix exists, not that the RIGHT one does. All
+three F8 sabotages fired; `pane.rs` restored byte-identical.
+
+A new `top_of(slot)` returns the parentless ancestor. There was no such helper
+anywhere in the crate -- measured, not assumed -- which is itself the tell: the
+same confusion that produced F8 had already produced `reseat_root`'s and
+`close_inner`'s bugs in round 1, each of them a caller using `self.root()` to
+mean "this pane's root" when it answers only for the active one.
+
+**Posture**: tapestryd lib 71 (was 68), halcyond 300, libhalcyon 119, four
+crates guest-clean. Gates by their steps files, one attempt each, zero retries
+and byte-identical to their pre-F8 numbers: `ls-gfx-panes` PASS 50/50 legs at
+47 s, `ls-halcyon-session-instrument` PASS 17/17 legs at 109 s with the SPLIT H
+leg -- the one `split_fits` actually gates -- green.
+
+**The HALCYON-WORKSPACES arc now carries no open findings.** Three adversarial
+rounds, every finding fixed, every fix sabotage-measured.
+
 ## Run 46o (2026-09-14, Fable 5.1 max) -- the Halcyon Instrument arc opens: reading the Carbon Optics kit against the tree
 
 ### What this run was for
