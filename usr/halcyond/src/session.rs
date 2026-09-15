@@ -1570,7 +1570,9 @@ pub fn run(home: Option<String>) -> i64 {
     let mut restart_req: Option<u32> = None;
     // HALCYON-INSTRUMENT 14.5 (I-7): the tile a running-close confirmation is
     // asking about ((id, count)); the plan runs on the dialog's `close` tag.
-    let mut pending_close: Option<(u32, u32)> = None;
+    // (pane, count, protected): `protected` is 6.5's final-tile rule, which
+    // the header's x carries and the Super+Q chord deliberately does not.
+    let mut pending_close: Option<(u32, u32, bool)> = None;
     let inst_profile = bundle.profile == instrument::Profile::Instrument;
     // H-3b/H-3d: the per-leaf tag bars + the one display status bar, on the SAME
     // session ring (the H-3c-2 event set: their CONFIGUREs wake the unified
@@ -1765,11 +1767,15 @@ pub fn run(home: Option<String>) -> i64 {
                         }
                     }
                     "close" => {
-                        if let Some((id, _)) = pending_close.take() {
+                        if let Some((id, _, protected)) = pending_close.take() {
                             // Re-derive the count at resolution, not the snapshot
                             // taken when the dialog opened: the final-tile
                             // protection must hold against the CURRENT tree.
-                            if tile_count(troot, id) <= 1 {
+                            // Super+Q carries no such protection (6.5): it is
+                            // the structural act, and the only reading under
+                            // which a pane holding a RETAINED tile can be
+                            // removed at all.
+                            if protected && tile_count(troot, id) <= 1 {
                                 status.notify("FINAL TILE IS PROTECTED", true);
                             } else {
                                 layout_verb(troot, &format!("close {}", id));
@@ -1781,6 +1787,15 @@ pub fn run(home: Option<String>) -> i64 {
                         // Cancel (or an unknown tag): nothing.
                         pending_close = None;
                     }
+                }
+            }
+            MenuEvent::HelpClosed => {
+                // The reference's own x (or Enter / Space): this side
+                // dismisses, and the tile it covered repaints.
+                menus.close();
+                say!("halcyond: help closed");
+                if let Some(t) = menu_leaf.take().and_then(|l| tiles.get_mut(&l)) {
+                    t.dirty = true;
                 }
             }
             MenuEvent::Closed => {
@@ -2088,7 +2103,7 @@ pub fn run(home: Option<String>) -> i64 {
                                 String::from(t.tile.title.trim())
                             };
                             let cmd = halcyond::rail::sanitise_cmd(t.tile.scrollback.last_command().unwrap_or(""));
-                            pending_close = Some((id, count));
+                            pending_close = Some((id, count, true));
                             if !menus.open_dialog(halcyond::dialog::Dialog::close_running(&name, &cmd), &sheet, &mut gs) {
                                 // The confirmation surface could not be minted
                                 // (surfaces scarce): refuse rather than close a
@@ -2276,8 +2291,48 @@ pub fn run(home: Option<String>) -> i64 {
                         }
                     }
                     railset::RailAction::Help => {
-                        say!("halcyond: the keyboard reference is not available yet");
-                        status.notify("HELP NOT AVAILABLE", true);
+                        // HALCYON-INSTRUMENT 9.5 (I-7b): the keyboard
+                        // reference. Its rows are read from the compositor's
+                        // `chords` file at every open, so they name the
+                        // bindings in force -- never a literal, and a rebind
+                        // is a rebind of the reference.
+                        let text = read_file(troot, "chords").unwrap_or_default();
+                        let h = halcyond::help::Help::from_chords(&text);
+                        if h.rows.is_empty() {
+                            say!("halcyond: no chords published -- no reference to show");
+                            status.notify("NO CHORDS PUBLISHED", true);
+                        } else if menus.open_help(h, &sheet, &mut gs) {
+                            menu_leaf = None;
+                        }
+                    }
+                    railset::RailAction::CloseFocused(id) => {
+                        // 9.5 / 14.5 / 6.5 (I-7b): Super+Q, delivered here so
+                        // that a running job can be asked about -- only this
+                        // side knows there is one. NO final-tile protection
+                        // (6.5): the chord is the structural act.
+                        if let Some(t) = tiles.get(&id).filter(|t| t.tile.scrollback.running()) {
+                            let name = if t.tile.title.trim().is_empty() {
+                                t.program.clone()
+                            } else {
+                                String::from(t.tile.title.trim())
+                            };
+                            let cmd = halcyond::rail::sanitise_cmd(t.tile.scrollback.last_command().unwrap_or(""));
+                            pending_close = Some((id, 0, false));
+                            if !menus.open_dialog(halcyond::dialog::Dialog::close_running(&name, &cmd), &sheet, &mut gs) {
+                                // The same refusal the header's x makes: never
+                                // close a RUNNING tile unasked (14.5 (i)).
+                                pending_close = None;
+                                status.notify("CANNOT CONFIRM CLOSE -- TRY AGAIN", true);
+                            }
+                        } else if layout_verb(troot, &format!("close {}", id)) {
+                            relayout = true;
+                        } else {
+                            // The compositor refused it (a pane this seat does
+                            // not own). Say so: a chord that silently does
+                            // nothing is worse than one that reports.
+                            say!("halcyond: close of pane {} refused", id);
+                            status.notify("CLOSE REFUSED", true);
+                        }
                     }
                     railset::RailAction::Workspaces { x, y } => {
                         if menus.open(workspace_menu(1, 0), x, y, (x, y, 0, 0), &sheet, &mut gs) {

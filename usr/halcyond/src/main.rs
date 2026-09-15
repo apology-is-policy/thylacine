@@ -432,7 +432,9 @@ pub extern "C" fn rs_main() -> i64 {
         resolved.name.clone()
     };
     // HALCYON-INSTRUMENT 14.5 (I-7): the running-close confirmation's target.
-    let mut pending_close: Option<(u32, u32)> = None;
+    // (pane, count, protected): `protected` is 6.5's final-tile rule, which
+    // the header's x carries and the Super+Q chord deliberately does not.
+    let mut pending_close: Option<(u32, u32, bool)> = None;
     let bundle = resolved.bundle;
     let theme = bundle.theme;
     // The compositor cannot read this file. Measured 2026-09-09 on the
@@ -904,7 +906,7 @@ pub extern "C" fn rs_main() -> i64 {
                             // dialog's `close` tag.
                             let name = halcyond::chrome::console_name();
                             let cmd = halcyond::rail::sanitise_cmd(t.last_command().unwrap_or(""));
-                            pending_close = Some((id, count));
+                            pending_close = Some((id, count, true));
                             if !menus.open_dialog(halcyond::dialog::Dialog::close_running(&name, &cmd), &sheet, &mut gs) {
                                 // The confirmation surface could not be minted:
                                 // refuse rather than close a RUNNING console
@@ -1063,8 +1065,34 @@ pub extern "C" fn rs_main() -> i64 {
                         }
                     }
                     railset::RailAction::Help => {
-                        say!("halcyond: the keyboard reference is not available yet");
-                        status.notify("HELP NOT AVAILABLE", true);
+                        // 9.5 (I-7b): the keyboard reference, its rows read
+                        // from the compositor's `chords` file so they name
+                        // the bindings in force, never a literal.
+                        let text = chromeset::read_file(troot, "chords").unwrap_or_default();
+                        let h = halcyond::help::Help::from_chords(&text);
+                        if h.rows.is_empty() {
+                            say!("halcyond: no chords published -- no reference to show");
+                            status.notify("NO CHORDS PUBLISHED", true);
+                        } else {
+                            menus.open_help(h, &sheet, &mut gs);
+                        }
+                    }
+                    railset::RailAction::CloseFocused(id) => {
+                        // 9.5 / 14.5 / 6.5 (I-7b): Super+Q, delivered here so
+                        // a running job can be asked about. NO final-tile
+                        // protection (6.5): the chord is the structural act.
+                        // The console seat knows only its OWN pane's job.
+                        if Some(id) == chrome.own_pane() && t.running() {
+                            let name = halcyond::chrome::console_name();
+                            let cmd = halcyond::rail::sanitise_cmd(t.last_command().unwrap_or(""));
+                            pending_close = Some((id, 0, false));
+                            if !menus.open_dialog(halcyond::dialog::Dialog::close_running(&name, &cmd), &sheet, &mut gs) {
+                                pending_close = None;
+                                status.notify("CANNOT CONFIRM CLOSE -- TRY AGAIN", true);
+                            }
+                        } else if chromeset::pane_verb(troot, id, "close") {
+                            relayout = true;
+                        }
                     }
                     railset::RailAction::Workspaces { x, y } => {
                         menus.open(workspace_menu(1, 0), x, y, (x, y, 0, 0), &sheet, &mut gs);
@@ -1235,11 +1263,12 @@ pub extern "C" fn rs_main() -> i64 {
                         }
                     }
                     "close" => {
-                        if let Some((id, _)) = pending_close.take() {
+                        if let Some((id, _, protected)) = pending_close.take() {
                             // Re-derive at resolution, not the snapshot taken when
                             // the dialog opened: the final-tile protection must
-                            // hold against the CURRENT tree.
-                            if session::tile_count(troot, id) <= 1 {
+                            // hold against the CURRENT tree. Super+Q carries no
+                            // such protection (6.5): it is the structural act.
+                            if protected && session::tile_count(troot, id) <= 1 {
                                 status.notify("FINAL TILE IS PROTECTED", true);
                             } else if chromeset::pane_verb(troot, id, "close") {
                                 relayout = true;
@@ -1248,6 +1277,13 @@ pub extern "C" fn rs_main() -> i64 {
                     }
                     _ => pending_close = None,
                 }
+                dirty = true;
+            }
+            menuset::MenuEvent::HelpClosed => {
+                // The reference's own x (or Enter / Space): this side
+                // dismisses, and the transcript under it repaints.
+                menus.close();
+                say!("halcyond: help closed");
                 dirty = true;
             }
             menuset::MenuEvent::Closed => {

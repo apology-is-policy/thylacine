@@ -11,13 +11,15 @@
 // acts on it.
 //
 // Since I-7 the surface carries a `Model`: the verb Menu (H-3c), the theme
-// Picker (9.4), or a modal Dialog (14.5). One surface, one grab, one dismiss
-// path; the model only changes what is painted and how a key/click reads.
+// Picker (9.4), a modal Dialog (14.5), or -- since I-7b -- the keyboard
+// reference Help (9.5). One surface, one grab, one dismiss path; the model
+// only changes what is painted and how a key/click reads.
 
 use alloc::format;
 use alloc::string::String;
 
 use halcyond::dialog::{self, Dialog};
+use halcyond::help::{self, Help};
 use halcyond::layout::Sheet;
 use halcyond::menu::{menu_key, menu_list, menu_size, Action, Menu};
 use halcyond::picker::{self, Picker};
@@ -66,16 +68,21 @@ pub enum MenuEvent {
     ThemeChosen(String),
     /// A dialog: the user activated a button (its tag).
     Dialog(String),
+    /// The keyboard reference: the user closed it from inside (its x, Enter
+    /// or Space). The compositor's own dismiss is `Closed`, as for every
+    /// model -- and for the reference the two mean the same thing.
+    HelpClosed,
     /// The compositor dismissed it (Esc, click-away, a chord, a wedge). For
     /// a dialog this is Cancel; for the picker, applied nothing.
     Closed,
 }
 
-/// The three models on the menu surface.
+/// The four models on the menu surface.
 enum Model {
     Verbs(Menu),
     Picker(Picker),
     Dialog(Dialog),
+    Help(Help),
 }
 
 struct Open {
@@ -154,6 +161,19 @@ impl MenuSet {
         self.summon(Model::Dialog(d), w, h, x, y, &desc, sheet, gs)
     }
 
+    /// Summon the keyboard reference, centred on the display (9.5, I-7b);
+    /// the compositor clamps. Its frame is the help card's, not 14.5's.
+    pub fn open_help(&mut self, h: Help, sheet: &Sheet, gs: &mut GlyphSource) -> bool {
+        let (dw, dh) = display_dims(self.troot);
+        let dwf = if dw == u32::MAX { 1440 } else { dw };
+        let dhf = if dh == u32::MAX { 900 } else { dh };
+        let (w, hh) = help::help_size(&h, sheet, dwf, dhf, gs);
+        let x = dwf.saturating_sub(w) / 2;
+        let y = dhf.saturating_sub(hh) / 2;
+        let desc = format!("help {} rows", h.rows.len());
+        self.summon(Model::Help(h), w, hh, x, y, &desc, sheet, gs)
+    }
+
     fn summon(
         &mut self,
         model: Model,
@@ -210,7 +230,7 @@ impl MenuSet {
                     TEV_KEY => {
                         if e.value >= 1 {
                             let shift = e.mods & MOD_SHIFT != 0;
-                            match model_key(&mut o.model, e.code, e.rune, shift) {
+                            match model_key(&mut o.model, e.code, e.rune, shift, w, h, sheet, gs) {
                                 Some(ev) => {
                                     chosen = Some(ev);
                                     break;
@@ -249,7 +269,7 @@ impl MenuSet {
                         break;
                     }
                     TEV_SCROLL => {
-                        model_wheel(&mut o.model, e.value as i32);
+                        model_wheel(&mut o.model, e.value as i32, w, h, sheet, gs);
                         repaint = true;
                     }
                     _ => {}
@@ -286,19 +306,34 @@ impl MenuSet {
     }
 }
 
-fn model_key(m: &mut Model, code: u16, rune: u32, shift: bool) -> Option<MenuEvent> {
+fn model_key(
+    m: &mut Model,
+    code: u16,
+    rune: u32,
+    shift: bool,
+    w: u32,
+    h: u32,
+    sheet: &Sheet,
+    gs: &mut GlyphSource,
+) -> Option<MenuEvent> {
     match m {
         Model::Verbs(menu) => menu.key(menu_key(code, rune)).map(MenuEvent::Chosen),
         Model::Picker(p) => p.key(picker::picker_key(code, rune)).map(MenuEvent::ThemeChosen),
         Model::Dialog(d) => d.key(dialog::dialog_key(code, rune, shift)).map(MenuEvent::Dialog),
+        // The reference's scroll keys need the surface to clamp against, so
+        // they take the geometry the caller already holds.
+        Model::Help(hp) => hp
+            .key(help::help_key(code, rune), w, h, sheet, gs)
+            .map(|()| MenuEvent::HelpClosed),
     }
 }
 
-fn model_wheel(m: &mut Model, delta: i32) {
+fn model_wheel(m: &mut Model, delta: i32, w: u32, h: u32, sheet: &Sheet, gs: &mut GlyphSource) {
     match m {
         Model::Verbs(menu) => menu.wheel(delta),
         Model::Picker(p) => p.wheel(delta),
         Model::Dialog(_) => {}
+        Model::Help(hp) => hp.wheel(delta, w, h, sheet, gs),
     }
 }
 
@@ -321,6 +356,15 @@ fn model_hover(m: &mut Model, x: i32, y: i32, w: u32, h: u32, sheet: &Sheet, gs:
             }
             _ => false,
         },
+        Model::Help(hp) => {
+            let over = hp.close_at(x, y, w, sheet);
+            if hp.close_hover != over {
+                hp.close_hover = over;
+                true
+            } else {
+                false
+            }
+        }
     }
 }
 
@@ -340,6 +384,9 @@ fn model_click(m: &mut Model, x: i32, y: i32, w: u32, h: u32, sheet: &Sheet, gs:
             d.focus = i;
             d.buttons.get(i).map(|b| MenuEvent::Dialog(b.tag.clone()))
         }
+        // The reference's only control is its x; a press anywhere else in it
+        // is inert (the compositor owns click-AWAY).
+        Model::Help(hp) => hp.close_at(x, y, w, sheet).then_some(MenuEvent::HelpClosed),
     }
 }
 
@@ -352,6 +399,7 @@ fn paint(o: &mut Open, sheet: &Sheet, gs: &mut GlyphSource) {
         Model::Verbs(m) => menu_list(m, w, h, sheet, gs),
         Model::Picker(p) => picker::picker_list(p, w, h, sheet, gs),
         Model::Dialog(d) => dialog::dialog_list(d, w, h, sheet, gs),
+        Model::Help(hp) => help::help_list(hp, w, h, sheet, gs),
     };
     let px = o.surf.pixels();
     cartoon::execute(

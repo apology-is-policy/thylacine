@@ -350,6 +350,81 @@ the dossiers for the surfaces it touches (or adopts unowned ones) and updates
 them itself; and **all vault interaction goes through quaestor**, reads and
 writes, never raw grep/edit.
 
+### I-7b: the keyboard reference, the asking Super+Q, and a gate that could not report
+
+Same run, continued after a self-compaction. I-7b was the slice I-7 carved off:
+the help modal of §9.5 and the `Super+Q` confirmation §14.5 named as a small
+follow-up once `TEV_CHORD` existed.
+
+**The design decision worth recording** is that the rows are *derived*. The kit
+gives a key list; the lazy build is a literal one. Instead `Help::from_chords`
+parses the compositor's `chords` file at every open — the same text §8.2's
+footer hints already read — so a rebind is a rebind of the reference, an
+unbound action has no row at all, and the footer and the card cannot disagree
+about the bindings in force. The four-arrow sets collapse to one `SUPER +
+ARROWS` row using `hints_from_chords`' own rule rather than a second copy of
+it. The caps spell arrows as words because the mono subset carries no arrow
+glyphs — checked, not assumed, before writing the painter.
+
+**Super+Q** stopped being the compositor's act: `exec_chord` now delivers it
+(code 3, the focused pane's id in `value`, so the owner acts on the
+compositor's focus rather than a `layout` file it may have read a wake ago) and
+the owner asks when that tile's job is running. It deliberately keeps no
+final-tile protection — §6.5 reads the chord as the structural act — so
+`pending_close` grew a `protected` flag the header's × sets and the chord
+clears, letting both paths share one dialog without sharing that rule. And
+`deliver_chord` now *reports* delivery: with no rail, or a rail whose queue is
+full, the compositor closes the pane itself, so the chord can never degrade
+into a no-op.
+
+**The self-audit earned its keep.** It found that `dialog.rs` had been painting
+its eyebrow in Sans at five sites since I-7, while its own header comment ("an
+`amber` eyebrow in Cornucopia"), §14.5, and the kit's CSS (`.eyebrow { font:
+500 10px/1 "IBM Plex Mono" }`) all said mono — three sources against the code,
+and nothing had compared them.
+
+**Then the console gate went red, and the interesting part began.** It had
+passed on the pre-fix tree and failed three attempts after. The tempting
+reading was my own change. It was not: the I-7b compositor diff greps *empty*
+for `drag|track|hover|ptr_`, and the failing legs were I-6's dividers.
+
+Two of the three failures had a mechanical cause. `want_drag_end`'s pattern
+ended in an **unanchored** `(\d+)`; expect matches as soon as the buffer
+satisfies a pattern, so a line arriving in chunks matched `-> 988:27` before
+the `9` landed. The tell was unmistakable once looked at: the two failures
+reported `988:27` against an expected `988:279`, and `733:53` against `733:534`
+— each the expected value **minus its final digit**. Every divider leg had been
+a coin flip since I-6 landed. Both twins now anchor on `\r`. Sweeping the rest
+of both gates found five same-shaped captures, all benign — three have empty
+bodies, two assert a field the pattern anchors with trailing literal text — so
+`want_drag_end` was the only real one. Closing that sweep by *reading* rather
+than assuming is the only reason I can say so.
+
+**What the anchor fix did not explain** is the third failure, `Escape: no drag
+end` — a timeout. With the witness working, the drag and clamp legs pass and
+only Escape fails, which makes it a real defect and a recurrence of the tracked
+I-6 stall *after* F-A1 was believed to cure it. Four readings died against
+ground truth, in order: the VM was not frozen (the harness recorded the relay
+alive); Escape is not broken (there is no third `drag start` in the log at all,
+so `drag_end` had nothing to end); F-A1's timed wait *is* wired to the
+compositor (`gpu.rs:1505`, and the kernel's level-INTx tests pass this boot);
+and the bounded wait cannot spin silently (a timeout returns Ok(0),
+`stale_since` arms on the first wake, and a 500 ms deadline would have said
+`gpu command never retired` — that line is absent). The compositor's last
+output is `divider hover pane 2 track 0 at 994,404`, log line 3166 of 3168,
+and then nothing for the gate's full 30 s. It is not in the GPU wait, not
+dead, not frozen, and still stopped dispatching. The next axis — the one none
+of those four could separate — is a say at the *top* of the ptr-btn path, to
+tell "the event never arrived" from "it arrived and was swallowed".
+
+**Cost and honesty.** One host kill (low memory) interrupted a retry loop —
+an external kill, not a result. One re-run of mine was a SKIP wearing the word
+PASS, because I re-ran a lever gate without re-baking its lever image; that is
+recorded, because a SKIP misread as a green is the gauge-reading-zero failure.
+I-7b itself is verified on the committed tree by the session gate (100 s, 15
+legs, both halves captured) and 289 host tests, and is **not pushed**: the
+standing rule is push only after all-green, and the console gate is not green.
+
 ---
 
 ## Run 46o (2026-09-14, Fable 5.1 max) -- the Halcyon Instrument arc opens: reading the Carbon Optics kit against the tree

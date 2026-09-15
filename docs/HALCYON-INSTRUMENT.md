@@ -719,6 +719,15 @@ reading under which a pane holding a retained tile can be removed at all
 (a §9.3 delta for the operator: its "with the §6.5 protections" is read as
 §9.5's dirty-document / foreground-job ask, I-7's dialog).
 
+**As built at I-7b.** That ask is now wired: the compositor delivers the
+chord to the rail's owner (§9.3 `code` 3) rather than acting on it, and the
+owner opens §14.5's running-close dialog when the focused tile's last
+command is RUNNING. The lack of a final-tile protection is preserved
+DELIBERATELY and explicitly — `pending_close` carries a `protected` flag
+that the header's × sets and the chord clears, so the two paths share one
+dialog and one resolution without sharing that rule. With no rail to ask,
+the compositor closes the pane itself, so the chord never becomes a no-op.
+
 ### 6.6 Migration
 
 Every existing leaf becomes a stack of one visually with no tree change.
@@ -1425,8 +1434,17 @@ toggle would need the owner to pair a CLOSE on one surface with a CHORD on
 another across one ring drain, which is exact only within one wake; the
 re-open is deterministic and said). With no rail registered (the legacy
 profile, or a seat whose rail is not up) the chord is said and dropped.
-The help chord reaches the owner and is refused visibly until the help
-modal lands (I-7b).
+
+**Widened at I-7b.** `code` 3 is the structural CLOSE (`Super+Q`), whose
+`value` is the FOCUSED PANE's id rather than the 1 the other two carry —
+the owner then acts on the compositor's focus instead of re-deriving it
+from a `layout` file it may have read a wake ago. It is the one delivered
+chord with a fallback: the picker and the reference exist only in the
+environment, so with no rail there is nothing to do but say it, while a
+close with no rail (or onto a rail whose queue is too full, which retires
+it) is performed by the compositor itself, exactly as before I-7b. So
+`deliver_chord` returns whether the owner actually has the chord, and
+only the close arm reads that answer.
 
 ### 9.4 The theme picker and live switching
 
@@ -1561,6 +1579,59 @@ owner` / `tapestryd: chord picker: no rail`.
   control, and no key of it reaches a pts. Its rows name OUR chords.
 - **Reduced motion**: a static caret and no transient animation are the
   production default until the effects slice; nothing else changes.
+
+**As built at I-7b.** `halcyond::help` (pure, host-tested) is the FOURTH
+model on the one `Role::Menu` surface (§9.4's three plus this), centred on
+the display by the owner, the compositor clamping. The frame is the kit's
+§9 verbatim: min(540, display − 32) wide; a header whose 78 is a
+BORDER-BOX minimum (the reference sets `* { box-sizing: border-box }`, so
+it covers the 17 / 18 / 15 / 22 padding AND the 1 px `structure` rule under
+it), the eyebrow `CONTROL REFERENCE` in mono 10 tracked .12 em `amber`, the
+title `Workspace keys` in Sans 500 23 at margin-top 7, and a 29 × 29 close
+control bordered `structure` (`amber_muted` with `text` ink on hover)
+carrying the same multiplication sign the header's × uses; a key list
+padded 12 / 22 whose rows are a 190 / rest grid at gap 18 with 10 px
+vertical padding and a `separator` under each; key caps min-width 26,
+padded 4 / 6, on `kbd_bg` inside a 1 px `focus_neutral` frame, in mono 10
+`text`, joined by a ` + ` in `text`; descriptions Sans 13 `secondary`,
+elided to their column; the footer paragraph padded 15 / 22 / 20 at 1.55 in
+`secondary`. Ground `dialog_bg`, a 1 px `focus_neutral` frame.
+
+**The rows are OUR chords.** `Help::from_chords` reads the compositor's
+`chords` file at every open — the same text §8.2's footer hints read — so
+the reference names the bindings IN FORCE: a rebind is a rebind of the
+reference, an unbound action has no row at all, and the four-arrow focus
+and move sets each collapse to one `SUPER + ARROWS` row exactly when all
+four sit on the four arrow keys (the footer hint's rule). The caps spell
+the arrows as words rather than glyphs because the mono subset carries none
+(§7.1's extras are the lambda, the check, the guillemets, the minus, the
+command mark and the box drawing set); the grammar's punctuation names read
+as the glyph they stand for (`slash` → `/`). An empty or unreadable
+`chords` file opens nothing and says `NO CHORDS PUBLISHED` rather than
+presenting an empty card.
+
+It traps focus BY CONSTRUCTION — it is the one grabbed surface, so no key
+of it reaches a pts (H-3c's grab, unchanged) — closes on Esc (the
+compositor's dismiss) and on its × (this side's, `MenuEvent::HelpClosed` →
+`menu dismiss`), with Enter and Space closing it too, the × being its only
+control. A card the display is too short for SCROLLS its body under the
+fixed header (wheel, arrows, j/k, Home/End, clamped at both ends) rather
+than putting rows out of reach, and the body is painted BEFORE the header
+so a scrolled row can never show through it. Test-mode says: the placement
+say with `for help <n> rows`, and `halcyond: help closed`.
+
+**`Super+Q` now asks.** The compositor stopped acting on `ChordAction::Close`
+itself: it DELIVERS it to the registered rail's owner as `TEV_CHORD` code 3
+with the focused pane's id in `value` — the owner acts on the compositor's
+focus rather than re-deriving it from a `layout` file it may have read a
+wake ago. The owner asks with §14.5's running-close dialog when that tile's
+last command is RUNNING, and otherwise closes at once, by verb, under its
+own authority. It carries NO final-tile protection: §6.5 reads Super+Q as
+the structural act, and that is the only reading under which a pane holding
+a retained tile can be removed at all. With NO rail — the legacy profile,
+or a seat whose rail is not up — there is nobody to ask, so the compositor
+closes the pane itself exactly as before; the same fallback catches a rail
+whose event queue was too full to take the chord (which retires it).
 
 ## 10. Effects (the last slice)
 
@@ -1754,12 +1825,21 @@ start)` with opacity 0 at 55 % — reduced-motion honoured (§9.5).
 - **I-7 — the picker and live switching.** The menu surface, the
   transaction, persistence, the cooperative repaint; the dialog family
   (§14.5).
-- **I-7b — deferred at I-7 (2026-09-15, labelled; §13 carries it):** the
-  help modal of §9.5 (its own frame: 540 wide, the 190 / rest key grid
-  from the `chords` file — a different frame from §14.5's family, so its
-  own slice), and `Super+Q` asking before a running job (the chord
-  delivered to the owner as the picker's now is, the owner asking, the
-  owner closing by verb).
+- **I-7b — the help modal and the asking `Super+Q`.** **LANDED**
+  (`halcyond::help` as the FOURTH model on the one `Role::Menu` surface:
+  the kit's §9 frame — 540 wide, the header's border-box 78 with its close
+  ×, the 190 / rest key grid at gap 18, caps on `kbd_bg` inside a
+  `focus_neutral` frame, the 1.55 footer paragraph — with its ROWS READ
+  FROM THE `chords` FILE at every open, so a rebind is a rebind of the
+  reference and an unbound action has no row; the four-arrow sets collapse
+  to one `SUPER + ARROWS` row each on the footer hint's rule; focus trapped
+  by the existing grab, Esc and × and Enter/Space closing it, the body
+  scrolling under the fixed header when the display is too short. And
+  `Super+Q` delivered to the rail owner as `TEV_CHORD` code 3 carrying the
+  focused pane's id, the owner asking with §14.5's running-close dialog
+  when that tile's job is RUNNING and closing by verb otherwise, with no
+  final-tile protection (§6.5) and the compositor's own close as the
+  no-rail fallback; the as-built notes in §9.5, §9.3, §14.5 and §6.5).
 - **I-8 — effects and motion.** The two ops, the glows, the backdrop, the
   transitions.
 - **I-9 — parity gate, audit, rollout.** ACCEPTANCE-TESTS in full against
@@ -2087,10 +2167,14 @@ all), and the plan runs on `Reset layout` exactly as before. The header's
 footer's RUNNING fact, §14.3) open `Close <tile>?` / `A process is still
 running.` + the command under §8.2's sanitising rule, with `Cancel`
 (default, pre-focused) · `Close tile` (destructive); a tile that is not
-running closes at once as before. `Super+Q` stays the compositor's
-structural close: the chord acts in the compositor, and asking first needs
-the chord delivered to the owner, which `TEV_CHORD` now makes a small
-follow-up (§13). The dirty-close variant (`This tile has unsaved changes.`)
+running closes at once as before. **`Super+Q` asks too, since I-7b**: the
+compositor no longer acts on `ChordAction::Close` itself but delivers it
+(§9.3's `code` 3, the focused pane's id in `value`), and the owner opens
+this same `Close <tile>?` dialog when that tile's last command is RUNNING
+— `Cancel` default and pre-focused, `Close tile` destructive — closing at
+once by verb otherwise. The chord's close carries NO final-tile
+protection (§6.5), which is the one way it differs from the header's ×;
+with no rail to ask, the compositor closes the pane itself as before. The dirty-close variant (`This tile has unsaved changes.`)
 and the one-line prompt have no producer yet (no program declares
 "unsaved"; Rename waits on the workspaces mechanism) and are not built.
 Test-mode says: the placement say with `for dialog <kind>`;

@@ -48,8 +48,14 @@ pub enum RailAction {
     Theme { x: u32, y: u32 },
     /// Reset (9.5).
     Reset,
-    /// The keyboard reference (the help dialog, I-7).
+    /// The keyboard reference (the help modal, I-7b).
     Help,
+    /// The structural close chord (Super+Q) the compositor DELIVERED here
+    /// rather than acting on it (9.5 / 14.5, I-7b), carrying the pane it
+    /// says is focused. The owner asks first when that tile's job is
+    /// running, then closes by verb under its own authority -- without 6.5's
+    /// final-tile protection, which Super+Q deliberately does not carry.
+    CloseFocused(u32),
     /// The mark: the workspace list, at display point (x, y).
     Workspaces { x: u32, y: u32 },
     /// A chip: switch to workspace `n` (0-based).
@@ -244,15 +250,17 @@ impl RailBar {
                             }
                             repaint = true;
                         }
-                        // HALCYON-INSTRUMENT 9.3 (I-7): a picker/help chord the
-                        // compositor delivered here (TEV_CHORD; code 1 = picker,
-                        // 2 = help) -- the same action a press on the control
-                        // produces, so the owner opens the picker at the same
-                        // anchor. A chord with an unknown code is ignored.
+                        // HALCYON-INSTRUMENT 9.3 (I-7 / I-7b): a chord the
+                        // compositor delivered here (TEV_CHORD; code 1 =
+                        // picker, 2 = help, 3 = close the focused pane, whose
+                        // id rides in `value`) -- for 1 and 2 the same action
+                        // a press on the control produces, so the owner opens
+                        // at the same anchor. An unknown code is ignored.
                         TEV_CHORD => {
                             let a = match e.code {
                                 1 => Some(Self::theme_anchor(&self.zones, surf.w as i32, surf.h as i32, sheet)),
                                 2 => Some(RailAction::Help),
+                                3 => Some(RailAction::CloseFocused(e.value)),
                                 _ => None,
                             };
                             if let Some(a) = a {

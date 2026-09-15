@@ -3,7 +3,10 @@
 // surface, so the compositor's grab, click-away (= Cancel) and Esc (=
 // Cancel) are exactly H-3c's. This file thinks; it never syscalls.
 //
-// A dialog is square: a header (an `amber` eyebrow in Cornucopia, a Sans
+// A dialog is square: a header (an `amber` eyebrow in Cornucopia -- the MONO
+// face, per 14.5 and the kit's `.eyebrow { font: 500 10px/1 "IBM Plex Mono" }`;
+// it painted in Sans from I-7 until the I-7b self-audit caught the code
+// disagreeing with its own comment, this doc and the kit at once -- a Sans
 // title), a `secondary` body wrapped at the width, and a right-aligned
 // footer of buttons. The default button carries an `amber` border and
 // `text` ink (never a filled amber rectangle); a destructive one `error`
@@ -238,7 +241,7 @@ fn layout(d: &Dialog, w: u32, h: u32, sheet: &Sheet, gs: &mut GlyphSource) -> La
     let content_w = wi - 2 * sheet.ipx(BODY_PAD_X);
     let body_lines = wrap(gs, sheet.face_body, sheet.px(BODY_PX), &d.body, content_w);
     let head_h = sheet.ipx(HEAD_PAD_TOP)
-        + line_h(gs, sheet.face_medium, sheet.px(EYEBROW_PX))
+        + line_h(gs, sheet.face_mono_text, sheet.px(EYEBROW_PX))
         + sheet.ipx(TITLE_GAP)
         + line_h(gs, sheet.face_medium, sheet.px(TITLE_PX))
         + sheet.ipx(HEAD_PAD_BOT);
@@ -280,7 +283,7 @@ pub fn dialog_size(d: &Dialog, sheet: &Sheet, display_w: u32, display_h: u32, gs
     let content_w = w as i32 - 2 * sheet.ipx(BODY_PAD_X);
     let body_lines = wrap(gs, sheet.face_body, sheet.px(BODY_PX), &d.body, content_w);
     let head_h = sheet.ipx(HEAD_PAD_TOP)
-        + line_h(gs, sheet.face_medium, sheet.px(EYEBROW_PX))
+        + line_h(gs, sheet.face_mono_text, sheet.px(EYEBROW_PX))
         + sheet.ipx(TITLE_GAP)
         + line_h(gs, sheet.face_medium, sheet.px(TITLE_PX))
         + sheet.ipx(HEAD_PAD_BOT);
@@ -318,13 +321,13 @@ pub fn dialog_list(d: &Dialog, w: u32, h: u32, sheet: &Sheet, gs: &mut GlyphSour
     let l = layout(d, w, h, sheet, gs);
     // Eyebrow.
     let ex = sheet.ipx(HEAD_PAD_X);
-    let ey = sheet.ipx(HEAD_PAD_TOP) + gs.line_metrics(sheet.face_medium, sheet.px(EYEBROW_PX)).map(|m| m.ascent).unwrap_or(8);
-    let (erefs, _) = gs.shape_run_spaced(sheet.face_medium, sheet.px(EYEBROW_PX), EYEBROW_TRACK * sheet.px(EYEBROW_PX), d.eyebrow.chars());
+    let ey = sheet.ipx(HEAD_PAD_TOP) + gs.line_metrics(sheet.face_mono_text, sheet.px(EYEBROW_PX)).map(|m| m.ascent).unwrap_or(8);
+    let (erefs, _) = gs.shape_run_spaced(sheet.face_mono_text, sheet.px(EYEBROW_PX), EYEBROW_TRACK * sheet.px(EYEBROW_PX), d.eyebrow.chars());
     if !erefs.is_empty() {
         cart.push_glyphs(gen, ex, ey, i.amber, &erefs);
     }
     // Title.
-    let ty = sheet.ipx(HEAD_PAD_TOP) + line_h(gs, sheet.face_medium, sheet.px(EYEBROW_PX)) + sheet.ipx(TITLE_GAP)
+    let ty = sheet.ipx(HEAD_PAD_TOP) + line_h(gs, sheet.face_mono_text, sheet.px(EYEBROW_PX)) + sheet.ipx(TITLE_GAP)
         + gs.line_metrics(sheet.face_medium, sheet.px(TITLE_PX)).map(|m| m.ascent).unwrap_or(18);
     let (trefs, _) = gs.shape_run(sheet.face_medium, sheet.px(TITLE_PX), d.title.chars());
     if !trefs.is_empty() {

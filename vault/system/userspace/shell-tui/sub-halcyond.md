@@ -25,6 +25,7 @@ code:
   - usr/halcyond/src/downq.rs
   - usr/halcyond/src/picker.rs
   - usr/halcyond/src/dialog.rs
+  - usr/halcyond/src/help.rs
   - usr/halcyond/src/rail.rs
   - usr/halcyond/src/railset.rs
   - usr/halcyond/src/outline.rs
@@ -282,6 +283,33 @@ console lay a Beacon line identically.
   trusting the snapshot taken when the dialog was summoned, so the final-tile
   protection holds against the CURRENT tree even if the layout changed while the
   modal was up; a dismissed dialog drops the pending close.
+- **The keyboard reference (I-7b; HALCYON-INSTRUMENT 9.5)**: the FOURTH model,
+  and a DIFFERENT frame from the dialog family's -- 540 wide against 480, a
+  header carrying a close x, a two-column key grid, a footer paragraph -- which
+  is why `help` is its own module rather than a `Dialog` variant.
+
+  **Its rows are the chords IN FORCE, not a literal.** `Help::from_chords`
+  parses the compositor's `chords` file (the same text `rail::hints_from_chords`
+  reads for the footer hints) at EVERY open, so a rebind is a rebind of the
+  reference, an action with no binding has no row at all, and an empty or
+  unreadable file opens nothing and says `NO CHORDS PUBLISHED` rather than
+  presenting an empty card. The four-arrow focus and move sets each collapse to
+  one `SUPER + ARROWS` row exactly when all four sit on the four arrow keys --
+  the footer hint's own rule, so the two surfaces cannot disagree. The caps
+  spell the arrows as WORDS because the mono subset carries no arrow glyphs
+  (its extras are the lambda, the check, the guillemets, the minus, the command
+  mark and the box set); the grammar's punctuation names read as the glyph they
+  stand for (`slash` -> `/`).
+
+  **Focus is trapped by construction**: the reference is the one grabbed
+  surface, so no key of it reaches a pts -- H-3c's grab, not a second
+  mechanism. Esc is the compositor's dismiss, its x is this side's
+  (`MenuEvent::HelpClosed` -> `menu dismiss`), and Enter/Space close it too
+  since the x is its only control. When the display is too short for the whole
+  card the BODY scrolls under the fixed header (wheel, arrows, j/k, Home/End,
+  clamped at both ends) rather than putting rows out of reach; the body is
+  painted BEFORE the header in the display list, so a scrolled row can never
+  show through it -- an ordered list is the clip the executor does not give us.
 - **Status bar (H-3d)**: `status` + `statusset` (one `Surface::status_on`): the
   focused leaf's name + status, the transcript's cwd + last command (OSC 7 + ut's
   `mark k=cmd`), the UTC clock; paints only on a change (a say line lands in the
@@ -477,8 +505,10 @@ presents are a recorded optimization.
   executor + the display-list wire (H-6), images/`Embed` (H-7) are unbuilt; the
   executor carries `Image`/`Embed` ops no transcript path emits yet.
 - The session-tier settings verbs (the settings push) are unbuilt.
-- The help modal (I-7b) is unbuilt -- `RailAction::Help` says
-  `HELP NOT AVAILABLE`; its frame differs from the 14.5 dialog's.
+- The 14.5 dialog family's DIRTY-close variant (`This tile has unsaved
+  changes.`) and its one-line prompt have no producer: no program declares
+  itself unsaved, and Rename waits on the workspaces mechanism. The
+  running-job variant and the keyboard reference both landed at I-7b.
 - Damage-rect presents are the recorded present-path optimization.
 
 ## Caveats
@@ -497,10 +527,10 @@ presents are a recorded optimization.
 
 ## Tests
 
-- **Host: 279 `#[test]`, all green** (measured 2026-09-15: transcript 54,
+- **Host: 287 `#[test]`, all green** (measured 2026-09-15: transcript 54,
   raster 42, layout 37, tile 30, chrome 16, input 12, grid 11, tiles 10, rail 10,
-  status 10, menu 9, outline 7, picker 7, session_init 6, dialog 5, downq 5,
-  indicator 4, select 4). **The command needs an explicit host target** --
+  status 10, menu 9, help 8, outline 7, picker 7, session_init 6, dialog 5,
+  downq 5, indicator 4, select 4). **The command needs an explicit host target** --
   `cargo test -p halcyond --lib --no-default-features --target
   aarch64-apple-darwin`, run from `usr/`: `usr/.cargo/config.toml` pins
   `[build] target = "aarch64-unknown-none"`, so without the override the run dies
@@ -531,7 +561,15 @@ presents are a recorded optimization.
   not a stub -- a commit switches the theme live and the rail re-themes under it;
   the console seat says NOT SAVED while the session seat writes
   `$HOME/lib/halcyon/theme`; Super+T reaches the rail owner as a compositor chord
-  and Esc dismisses).
+  and Esc dismisses. **I-7b**: the rail's `?` and `Super+/` each open the
+  keyboard reference, asserted at the kit's 540 wide AND at a ROW COUNT taken
+  from the placement say -- the derivation's witness, since a stub or a literal
+  row list falls through the floor the leg checks; Esc dismisses it and its own
+  x closes it from this side (`halcyond: help closed`); and on the session seat
+  `Super+Q` over a live `sleep` is DELIVERED (`tapestryd: chord close -> rail
+  owner`), ASKS with the 14.5 confirmation rather than closing, and a Cancel
+  leaves the tile alive to report its job finishing -- the positive witness that
+  the cancelled close closed nothing).
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

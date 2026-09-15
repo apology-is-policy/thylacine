@@ -386,6 +386,87 @@ expect {
 }
 lc_pass "session-instrument: the footer shows RUNNING, EXIT 0 and EXIT 1 from the tile's own facts (8.2 / 14.3)"
 
+# --- I-7b (9.5 / 9.3): the keyboard reference on the session's seat ------------
+exec $repo/tools/qmp-sendtext.sh -s $qmp -k "meta_l+slash"
+expect {
+    -re {tapestryd: chord help -> rail owner} {}
+    -re {tapestryd: chord help: no rail} { lc_fail "the session had no rail for the help chord" }
+    timeout { lc_fail "Super+/ did not deliver a help chord to the rail owner" }
+    eof     { lc_fail "EOF waiting for the help chord" }
+}
+expect {
+    -re {halcyond: menu (\d+) placed at (\d+) (\d+) \((\d+)x(\d+)\) for help (\d+) rows} {
+        if {$expect_out(4,string) != 540} { lc_fail "the reference is $expect_out(4,string) wide, expected 540 (9.5)" }
+        if {$expect_out(6,string) < 12} { lc_fail "the reference has only $expect_out(6,string) rows: not read from the compositor's chords (9.5)" }
+        lc_step "the reference ($expect_out(4,string) x $expect_out(5,string)) placed, $expect_out(6,string) rows from the chords in force"
+    }
+    -re {halcyond: no chords published} { lc_fail "the compositor published no chords, so the reference had no rows (9.5)" }
+    timeout { lc_fail "Super+/ did not open the reference on the session seat" }
+    eof     { lc_fail "EOF waiting for the session reference" }
+}
+hkey "esc"
+expect {
+    -re {tapestryd: menu \d+ dismissed \(esc\)} {}
+    timeout { lc_fail "Esc did not dismiss the reference" }
+    eof     { lc_fail "EOF waiting for the reference dismiss" }
+}
+lc_pass "session-instrument: Super+/ opens the 540-wide keyboard reference on the session's seat, its rows read from the compositor's chords (9.5 / 9.3)"
+
+# --- I-7b (9.5 / 14.5): Super+Q ASKS while a job runs; Cancel keeps both -------
+# The chord is no longer the compositor's act: it is DELIVERED to the rail's
+# owner with the focused pane's id, because only the owner knows a command is
+# running. Cancel (the compositor's Esc dismiss) must keep the tile AND its
+# job -- the ^C below is the positive witness for both, since it can only be
+# taken by a shell that is still alive in a tile that was not closed.
+set timeout 60
+htype "sleep 30\n"
+expect {
+    -re "halcyond: status bar \\d+ painted \[^\\r\\n\]*running true panes $N" {}
+    -re {EXTINCTION:} { lc_extinction_fail "extinction during the long sleep" }
+    timeout { lc_fail "the footer never showed RUNNING for the long sleep" }
+    eof     { lc_fail "qemu exited during the long sleep" }
+}
+hkey "meta_l+shift+q"
+expect {
+    -re {tapestryd: chord close -> rail owner} {}
+    -re {tapestryd: chord close: no rail} { lc_fail "the session had no rail for the close chord (I-7b)" }
+    timeout { lc_fail "Super+Q was not delivered to the rail owner (I-7b)" }
+    eof     { lc_fail "qemu exited on the close chord" }
+}
+expect {
+    -re {halcyond: menu (\d+) placed at (\d+) (\d+) \((\d+)x(\d+)\) for dialog close} {
+        lc_step "Super+Q over a running job opened the 14.5 confirmation"
+    }
+    -re "halcyond: tile \\d+ hung up" { lc_fail "Super+Q CLOSED a running tile without asking (9.5 / 14.5)" }
+    timeout { lc_fail "Super+Q over a running job did not ask (9.5 / 14.5)" }
+    eof     { lc_fail "qemu exited waiting for the close confirmation" }
+}
+hkey "esc"
+expect {
+    -re {tapestryd: menu \d+ dismissed \(esc\)} {}
+    timeout { lc_fail "Esc did not dismiss the close confirmation" }
+    eof     { lc_fail "EOF waiting for the confirmation dismiss" }
+}
+# Cancel kept the tile AND its job. The witness is the sleep reaching its own
+# end: only a live tile whose shell was never hung up can report that exit, and
+# the footer must still count $N panes when it does.
+#
+# An explicit ^C would be the faster witness, but this seat's input arrives as
+# QMP KEY EVENTS: `htype` goes through qmp-sendtext's text path, which has no
+# mapping for a control byte (measured -- it exits with "unsupported char
+# '\x03'"), and `lc_ctrlc` writes raw 0x03 to the SERIAL console, which is not
+# this seat's input path at all. Waiting out the job needs neither.
+set timeout 90
+expect {
+    -re "halcyond: status bar \\d+ painted \[^\\r\\n\]*running false panes $N" {}
+    -re "halcyond: tile \\d+ hung up" { lc_fail "the CANCELLED close closed the tile anyway (9.5 / 14.5)" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction after the cancelled close" }
+    timeout { lc_fail "after Cancel the tile never reported its job finishing on $N panes: the cancel did not keep it" }
+    eof     { lc_fail "qemu exited after the cancelled close" }
+}
+set timeout 60
+lc_pass "session-instrument: Super+Q over a RUNNING job asks first (the 14.5 dialog) and Cancel keeps the tile AND its job (9.5 / 14.5 / I-7b)"
+
 # --- A divider drag reaches the tiles as a resize (9.2 / I-6) ------------------
 # The welcome root is [tour | shell] (tour-left, shell-right: `halcyon
 # welcome`'s shape); the track sits after the first child's frame, the
@@ -450,7 +531,7 @@ while {(!$fit1 || !$fit2 || !$ended) && $tries < 12} {
                 set fit2 1
             }
         }
-        -re "tapestryd: divider drag end pane (\\d+) track 0 release -> (\\d+):(\\d+)" {
+        -re "tapestryd: divider drag end pane (\\d+) track 0 release -> (\\d+):(\\d+)\r" {
             if {$expect_out(2,string) != $a2 || $expect_out(3,string) != $P - $a2} {
                 lc_fail "the drag ended at $expect_out(2,string):$expect_out(3,string), expected $a2:[expr {$P - $a2}] (origin $origin, P $P, F $F)"
             }

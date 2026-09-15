@@ -17,6 +17,7 @@ extern crate alloc;
 pub mod chrome;
 pub mod downq;
 pub mod grid;
+pub mod help;
 pub mod indicator;
 pub mod input;
 pub mod layout;

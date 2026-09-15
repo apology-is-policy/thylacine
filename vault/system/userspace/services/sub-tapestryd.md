@@ -1628,3 +1628,34 @@ aux's real-DOSBox-X re-run. Folded from [[chg-2026-09-06-harc-audit-close-r1]]
 (the KT-1 inheritance: the peer's `no-dossier-change` deferred the vault prose to
 this track; the UI + beacon-relay half landed in [[chg-2026-09-06-harc-r1-fold-ui]]).
 
+## The delivered close chord -- Super+Q asks before it acts (2026-09-15, I-7b)
+
+`ChordAction::Close` is no longer performed here. `exec_chord` DELIVERS it to
+the registered rail's owner (`deliver_chord(3, id)`, the [[sub-libtapestry]]
+`TEV_CHORD` kind) carrying the FOCUSED PANE's id in `value` -- only the
+environment knows whether that tile has a job running, and only it owns the
+HALCYON-INSTRUMENT section 14.5 dialog that asks. The owner then closes by verb
+under its own authority, WITHOUT section 6.5's final-tile protection, which
+Super+Q deliberately does not carry: it is the structural act, and the only
+reading under which a pane holding a retained tile can be removed at all.
+
+The id rides in `value` rather than being re-derived by the owner because the
+owner's view of focus comes from the `layout` file it may have read a wake ago;
+the compositor's is authoritative at the instant the chord fires.
+
+**`deliver_chord` now REPORTS whether the owner actually has the chord**, and
+the close arm is the only caller that reads the answer. With no rail -- the
+legacy profile, or a seat whose rail is not up -- or onto a rail whose event
+queue was too full to take it (which retires the rail), the compositor closes
+the pane itself, exactly as it did before I-7b, so the chord can never degrade
+into a no-op. The picker (1) and help (2) chords have no such fallback BY
+DESIGN: both live only in the environment, so a false there is said and
+dropped, unchanged.
+
+Ground truth: `usr/tapestryd/src/server.rs` (`exec_chord`'s `Close` arm and
+`deliver_chord`); the code vocabulary is pinned in the `TEV_CHORD` contract
+comment in `usr/lib/libtapestry/src/lib.rs`. Witnessed in-guest by
+`ls-halcyon-session-instrument`'s I-7b legs -- `tapestryd: chord close -> rail
+owner`, then the confirmation dialog, then a Cancel that keeps both the tile
+and its job.
+

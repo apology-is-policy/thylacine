@@ -9251,9 +9251,20 @@ impl Comp {
                 }
             }
             ChordAction::Close => {
+                // HALCYON-INSTRUMENT 9.5 / 14.5 (I-7b): the environment asks
+                // before discarding a running job, and only the environment
+                // knows there is one -- so the chord goes to the rail's owner
+                // with the pane the compositor says is focused, and the owner
+                // closes by verb under its own authority (WITHOUT 6.5's
+                // final-tile protection: Super+Q is the structural act, 6.5).
+                // With no rail -- the legacy profile, or a seat whose rail is
+                // not up -- there is nobody to ask, so the compositor closes
+                // it here exactly as it always did.
                 let f = self.layout.focused;
                 if let Some(id) = self.layout.id_of(f) {
-                    let _ = self.pane_cmd(Actor::Renderer, (0, 0), id, "close");
+                    if !self.deliver_chord(3, id) {
+                        let _ = self.pane_cmd(Actor::Renderer, (0, 0), id, "close");
+                    }
                 }
             }
             // HALCYON-INSTRUMENT 9.3 (I-7): the picker and help are the
@@ -9261,23 +9272,35 @@ impl Comp {
             // already dismissed any placed menu above (so Super+T over an
             // open picker re-opens it), and here the compositor only
             // DELIVERS the request to the registered rail's owner.
-            ChordAction::Picker => self.deliver_chord(1),
-            ChordAction::Help => self.deliver_chord(2),
+            ChordAction::Picker => {
+                self.deliver_chord(1, 1);
+            }
+            ChordAction::Help => {
+                self.deliver_chord(2, 1);
+            }
         }
     }
 
-    /// Deliver a picker (code 1) or help (code 2) chord to the registered
-    /// rail's owner as TEV_CHORD (9.3). No rail (the legacy profile, or a
-    /// seat whose rail is not up): said and dropped -- the environment has
-    /// no picker to open there.
-    fn deliver_chord(&mut self, code: u16) {
-        let name = if code == 1 { "picker" } else { "help" };
+    /// Deliver a picker (1), help (2) or close (3) chord to the registered
+    /// rail's owner as TEV_CHORD (9.3); `value` is 1 for the first two and
+    /// the focused pane's id for the close. Returns whether the owner
+    /// actually has it: false with no rail (the legacy profile, or a seat
+    /// whose rail is not up) and false when the queue was too full to take
+    /// it, which retires the rail. Only the CLOSE chord has anything to do
+    /// on a false -- the compositor closes the pane itself -- because the
+    /// picker and the reference live in the environment and nowhere else.
+    fn deliver_chord(&mut self, code: u16, value: u32) -> bool {
+        let name = match code {
+            1 => "picker",
+            2 => "help",
+            _ => "close",
+        };
         match self.rail {
             Some(r) => {
                 let ev = Tevent {
                     kind: TEV_CHORD,
                     code,
-                    value: 1,
+                    value,
                     rune: 0,
                     mods: 0,
                     flags: 0,
@@ -9285,10 +9308,16 @@ impl Comp {
                 };
                 if !self.push_event(r.n, ev) {
                     self.retire(r.n);
+                    say!("tapestryd: chord {}: the rail's queue was full -- retired", name);
+                    return false;
                 }
                 say!("tapestryd: chord {} -> rail owner", name);
+                true
             }
-            None => say!("tapestryd: chord {}: no rail", name),
+            None => {
+                say!("tapestryd: chord {}: no rail", name);
+                false
+            }
         }
     }
 

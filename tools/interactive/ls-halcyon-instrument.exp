@@ -57,9 +57,11 @@
 #             the two `amber` strokes, `WORKSPACE 01` beside it, the clock
 #             at the right; the rail is a POINTER TARGET: its SPLIT H
 #             button is the split chord's twin (the split below is made by
-#             it), RESET re-equalises and says LAYOUT RESET, the mark opens
-#             the workspace list (a 14.2 menu; Esc dismisses it), the theme
-#             control says the picker is not yet available.
+#             it), RESET opens the 14.5 confirmation whose default runs the
+#             plan, the mark opens the workspace list (a 14.2 menu; Esc
+#             dismisses it), the theme control opens the REAL 286-wide
+#             picker and a commit switches the theme live, and `?` opens the
+#             540-wide keyboard reference whose rows are OUR chords (I-7b).
 #   footer  : the bottom rail's four conditions from the console's own
 #             facts -- the hollow READY square, `RUNNING` while a command
 #             runs, `EXIT 0` with the check after it, `EXIT 1` with the bang
@@ -484,11 +486,19 @@ proc drag_a {p} {
     global P F
     return [expr {(2 * ($p - 3) * $P + $F) / (2 * $F)}]
 }
+# The trailing capture MUST be anchored. expect matches as soon as the buffer
+# satisfies the pattern, so an unterminated final `(\d+)` fires on a PARTIALLY
+# ARRIVED line: `-> 988:279` matches as `988:27` the instant the `27` lands and
+# before the `9` does. That is not hypothetical -- it is what made this witness
+# report `988:27` (expected `988:279`) and `733:53` (expected `733:534`) on
+# 2026-09-15, each the expected value minus its last digit, which is the
+# signature. The `\r` is the serial line ending, so the match now waits for a
+# WHOLE line. (Recorded class: an unanchored `(\d+)` fires on a partial chunk.)
 proc want_drag_end {reason a what} {
     global P timeout lc_cmd_timeout
     set timeout $lc_cmd_timeout
     expect {
-        -re "tapestryd: divider drag end pane (\\d+) track 0 $reason -> (\\d+):(\\d+)" {
+        -re "tapestryd: divider drag end pane (\\d+) track 0 $reason -> (\\d+):(\\d+)\r" {
             if {$expect_out(2,string) != $a || $expect_out(3,string) != $P - $a} {
                 lc_fail "$what: the drag ended at $expect_out(2,string):$expect_out(3,string), expected $a:[expr {$P - $a}]"
             }
@@ -893,6 +903,75 @@ expect {
     eof     { lc_fail "EOF waiting for the picker dismiss" }
 }
 lc_pass "instrument: Super+T opens the picker via a compositor chord to the rail owner; Esc dismisses it (9.3 / 9.4)"
+
+# --- I-7b (9.5): the keyboard reference -- the `?` control, Super+/ and its x
+# The rail's `?` opens the 540-wide help card. Its rows are DERIVED from the
+# compositor's `chords` file, so the placement say reports how many bindings
+# that file yielded -- a stub would report none.
+set rz [rail_zones]
+set hc [zone_centre [dict get $rz help]]
+click [lindex $hc 0] [lindex $hc 1]
+expect {
+    -re {halcyond: rail press Help} {}
+    timeout { lc_fail "the `?` control's press did not reach halcyond" }
+    eof     { lc_fail "EOF waiting for the help press" }
+}
+set hx 0; set hy 0; set hw 0; set hh 0; set hrows 0
+expect {
+    -re {halcyond: menu (\d+) placed at (\d+) (\d+) \((\d+)x(\d+)\) for help (\d+) rows} {
+        set hx $expect_out(2,string); set hy $expect_out(3,string)
+        set hw $expect_out(4,string); set hh $expect_out(5,string)
+        set hrows $expect_out(6,string)
+        lc_step "the reference ($hw x $hh) placed at $hx $hy, $hrows rows from the chords in force"
+    }
+    -re {halcyond: no chords published} { lc_fail "the compositor published no chords, so the reference had no rows (9.5)" }
+    -re {halcyond: menu (surface failed|place refused)} { lc_fail "the reference was not placed: $expect_out(0,string)" }
+    timeout { lc_fail "the `?` control did not open the keyboard reference" }
+    eof     { lc_fail "EOF waiting for the reference" }
+}
+# The card is the kit's 540 wide (a real card, not a stub).
+if {$hw != 540} { lc_fail "the reference is $hw wide, expected 540 (9.5)" }
+# Its rows came from the file: the default table binds 22 combos, which fold
+# to 16 rows (the two four-arrow groups collapse). A floor rather than an
+# equality so adding a chord does not fail the gate -- but a stub, an empty
+# file, or a literal row list all fall through it.
+if {$hrows < 12} { lc_fail "the reference has only $hrows rows: they are not being read from the compositor's chords (9.5)" }
+hkey "esc"
+expect {
+    -re {tapestryd: menu \d+ dismissed \(esc\)} {}
+    timeout { lc_fail "Esc did not dismiss the reference" }
+    eof     { lc_fail "EOF waiting for the reference dismiss" }
+}
+lc_pass "instrument: the `?` control opens the 540-wide keyboard reference, its $hrows rows read from the compositor's chords; Esc dismisses it (9.5)"
+# Super+/ opens it too (ruling 13), delivered as a compositor chord; and its
+# own x closes it from the owner's side (no Esc involved).
+exec $repo/tools/qmp-sendtext.sh -s $qmp -k "meta_l+slash"
+expect {
+    -re {tapestryd: chord help -> rail owner} {}
+    -re {tapestryd: chord help: no rail} { lc_fail "the console seat had no rail for the help chord" }
+    timeout { lc_fail "Super+/ did not deliver a help chord to the rail owner" }
+    eof     { lc_fail "EOF waiting for the help chord" }
+}
+set hx 0; set hy 0; set hw 0; set hh 0
+expect {
+    -re {halcyond: menu (\d+) placed at (\d+) (\d+) \((\d+)x(\d+)\) for help} {
+        set hx $expect_out(2,string); set hy $expect_out(3,string)
+        set hw $expect_out(4,string); set hh $expect_out(5,string)
+    }
+    timeout { lc_fail "Super+/ did not open the keyboard reference" }
+    eof     { lc_fail "EOF waiting for the Super+/ reference" }
+}
+# The close x is 29 x 29 inside the header's right (18) and top (17)
+# paddings: click its centre, in display coordinates.
+set cxr [expr {$hx + $hw - 18 - 15}]
+set cyr [expr {$hy + 17 + 15}]
+click $cxr $cyr
+expect {
+    -re {halcyond: help closed} {}
+    timeout { lc_fail "the reference's x did not close it (clicked $cxr $cyr for a card at $hx $hy, ${hw}x${hh})" }
+    eof     { lc_fail "EOF waiting for the x to close the reference" }
+}
+lc_pass "instrument: Super+/ opens the reference via a compositor chord to the rail owner; its own x closes it (9.3 / 9.5)"
 
 lc_pass "ls-halcyon-instrument: the I-2 carve, the I-3 headers and the I-4 rails verified end to end -- the profile through the wire, the stack-of-one frame under two rails, the files, the header as a pointer target (focus, the protected final tile, the tile menu, the leave), the 1:1 split made by the rail's SPLIT H with a snapped track, the rule and the 7 x 7 joint, the focus frame, the empty pane's placard, zoom, the stack's collapsed and open headers, expand by press, close by `x`, the rail's brand mark / label / clock pixels, the footer's READY / RUNNING / EXIT 0 / EXIT 1 and its pane count, RESET (now a 14.5 confirmation), the workspace list, the theme picker with a live commit and Super+T (9.4 / 9.3); I-5b: the terminal view under raw output, the code block's ground and rule under ls -l, the position indicator following the tail"
 lc_quit
