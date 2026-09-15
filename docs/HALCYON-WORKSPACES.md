@@ -92,8 +92,20 @@ the H-4 file format at v1 (a save is the active workspace's tree).
 - **Chords** (free in the default table): Super+1..9 switch to workspace
   N (creating it when N == count + 1, i3), Super+Shift+1..9 move the
   focused leaf there. Keycodes 2..10 are unbound today.
-- **Vanishing**: an inactive workspace with no hosted leaf is dropped at
-  the next reconcile (i3); the active one never is. **Bound** (I-32):
+- **Vanishing**: an inactive workspace with no hosted leaf **and no
+  RESERVED leaf** is dropped at the next reconcile (i3); the active one
+  never is. The reservation half is round 1's S5: H-4d stamps
+  `creator_conn` (and the claim mint a one-shot token) on the empty
+  skeleton a restore tool builds, precisely so the session's own
+  compositor cannot fill it mid-build -- and a rule testing only for
+  HOSTED surfaces destroyed exactly what that reservation protects.
+  **OPEN, an operator design fork (round 1 S4)**: a workspace's identity
+  is currently its VECTOR INDEX -- the header is positional and Super+N
+  maps to N-1 -- so a vanish RENUMBERS every higher workspace, and the
+  user's Super+3 stops reaching their work. i3, the cited precedent,
+  keeps numbers stable across a vanish. Stable identity here means a
+  `Workspace.number` field and a sparse set, which changes what the
+  header's first number means; nothing is changed until that is ratified. **Bound** (I-32):
   `MAX_WORKSPACES` = 9 -- Super+N is the whole keyboard's worth, and a
   hostile client's `workspace` verb cannot mint more. **The verb's home,
   ratified 2026-09-15 after an architecture review**: the `layout` file,

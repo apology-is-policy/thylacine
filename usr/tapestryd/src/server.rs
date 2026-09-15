@@ -7829,10 +7829,22 @@ impl Comp {
                 };
                 // Cycling reveals another child of the tab container: the
                 // actor must own that whole container.
-                if let Some(anc) = self.layout.tab_ancestor(self.layout.focused) {
-                    if !self.actor_owns_subtree(actor, anc) {
-                        return Err(p9::E_PERM);
-                    }
+                //
+                // The check used to sit INSIDE this `if let`, so a focused
+                // leaf with NO tab ancestor -- the ordinary split tree --
+                // skipped authority entirely and still reached `unzoom()`
+                // below. That made `tab` the only arm of this file that
+                // mutated state with no authority predicate on any path, and
+                // it was reachable by `Actor::Client(0)`, the stripe every
+                // other predicate here hard-denies: an unauthenticated conn
+                // could cancel another principal's zoom. With no ancestor
+                // there is nothing to cycle, so the honest answer is a no-op.
+                let anc = match self.layout.tab_ancestor(self.layout.focused) {
+                    Some(a) => a,
+                    None => return Ok(()),
+                };
+                if !self.actor_owns_subtree(actor, anc) {
+                    return Err(p9::E_PERM);
                 }
                 // Revealing another tab is meaningless zoomed: restore
                 // the layout first (the tmux rule).
@@ -8348,7 +8360,12 @@ impl Comp {
                 Some(s) => s,
                 None => continue, // freed by an earlier close's collapse
             };
-            if slot == self.layout.root() {
+            // Round 1 F7: `self.layout.root()` is the ACTIVE root, so an
+            // empty leaf that was an INACTIVE workspace's root matched
+            // neither arm -- it was not handed back to the environment, and
+            // the `close` no-oped on F1's early return, leaving the departed
+            // principal's ownership stamp in place.
+            if self.layout.is_workspace_root(slot) {
                 self.layout.set_owner_principal(slot, 0);
             } else {
                 let _ = self.layout.close(slot);

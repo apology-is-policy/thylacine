@@ -1057,6 +1057,23 @@ fn reconcile(
         if read_file(troot, &format!("pane/{}/geometry", leaf)).is_some() {
             continue;
         }
+        // Round 1 F5: `read_file` answers None for a failed OPEN, a failed
+        // READ and non-UTF-8 alike, so "it is gone" and "I could not ask"
+        // were the same answer. A transient failure (fid budget, a wedged
+        // conn, an interrupted read) during the reconcile that follows a
+        // switch would drop EVERY tile, latch each id into `closed`
+        // PERMANENTLY (ids are never reused), and then break the session
+        // loop on `tiles.is_empty()` -- the same full logout W-3 fixed,
+        // reached from an error instead of a keystroke.
+        //
+        // A negative needs a POSITIVE CONTROL one variable away: `layout` is
+        // served by the same conn and always exists, so if it cannot be read
+        // either, this is "could not ask" and nothing is torn down this pass.
+        // A tile wrongly kept costs one reconcile; TEV_CLOSE remains the
+        // authoritative teardown signal either way.
+        if read_file(troot, "layout").is_none() {
+            continue;
+        }
         if let Some(t) = tiles.remove(&leaf) {
             closed.insert(leaf);
             t.teardown();
@@ -1670,9 +1687,12 @@ pub fn run(home: Option<String>) -> i64 {
                 // `tile <verb> <id>`, interpreted here under the session's
                 // own authority -- never a shell command.
                 if let Some(n) = act.strip_prefix("workspace ") {
-                    // 14.1: the workspace list's choice -- one workspace
-                    // exists, and it is the active one.
-                    say!("halcyond: workspace {} is active", n.trim());
+                    // 14.1: the workspace list's choice, acted on under this
+                    // session's own authority -- the compositor's `workspace`
+                    // verb on the layout file (W-2b). This used to only SAY
+                    // the choice, which read as working precisely because the
+                    // list it came from was itself hardcoded to one row.
+                    let _ = layout_verb(troot, &format!("workspace {}", n.trim()));
                     continue;
                 }
                 match tile_verb(&act) {
@@ -2262,12 +2282,23 @@ pub fn run(home: Option<String>) -> i64 {
                 .or_else(|| chrome.focused().map(|f| f.1.clone()))
                 .unwrap_or_default();
             let (hour, minute) = statusset::clock_hm();
+            // Round 1 F6: the rail's chips and the workspace list were BOTH
+            // pinned to a single workspace -- `RailModel::empty()` sets
+            // `workspaces: 1` and the list opened with `workspace_menu(1, 0)`
+            // -- so neither could ever show a second workspace, and the
+            // session gate's leg (the menu opens, Esc dismisses) passed
+            // either way. The real pair already existed on the ChromeSet,
+            // feeding the bar; it simply never reached here. The header's
+            // `active` is ONE-based, `RailModel.active` zero-based.
+            let (ws_n, ws_k1) = chrome.workspaces().unwrap_or((1, 1));
             let rm = RailModel {
                 cwd: cwd.clone(),
                 title,
                 theme: theme_name.clone(),
                 hour,
                 minute,
+                workspaces: ws_n,
+                active: ws_k1.saturating_sub(1),
                 ..RailModel::empty()
             };
             rail.refresh(&rm, &sheet, &mut gs);
@@ -2351,11 +2382,18 @@ pub fn run(home: Option<String>) -> i64 {
                         }
                     }
                     railset::RailAction::Workspaces { x, y } => {
-                        if menus.open(workspace_menu(1, 0), x, y, (x, y, 0, 0), &sheet, &mut gs) {
+                        let wm = workspace_menu(ws_n, ws_k1.saturating_sub(1));
+                        if menus.open(wm, x, y, (x, y, 0, 0), &sheet, &mut gs) {
                             menu_leaf = None;
                         }
                     }
-                    railset::RailAction::Workspace(n) => say!("halcyond: workspace {} is active", n as u32 + 1),
+                    railset::RailAction::Workspace(n) => {
+                        // The chip ACTS, under this session's own authority,
+                        // the way every other rail button does: the
+                        // compositor's `workspace` verb on the layout file
+                        // (W-2b), one-based on the wire. It used to only log.
+                        let _ = layout_verb(troot, &format!("workspace {}", n as u32 + 1));
+                    }
                     railset::RailAction::ChipsScroll(_) => {}
                 }
             }

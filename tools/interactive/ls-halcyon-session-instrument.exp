@@ -606,6 +606,42 @@ expect {
 }
 lc_pass "session-instrument: Super+2 created workspace 2 and the bar reads it (W-1a's switch through W-2a's feed)"
 
+# --- The workspace list, opened WHILE two workspaces exist (14.1; round 1 F6) ----
+# Opened HERE, before the return, because the row COUNT is the only thing that
+# separates a list built from the header from the hardcoded `workspace_menu(1, 0)`
+# this leg used to accept. Round 1 found both owners opening the list with that
+# literal while `RailModel::empty()` pinned the chips at one -- and this leg
+# asserted only that the menu opened and Esc dismissed it, so it passed with the
+# count stuck at 1 forever: an assertion that cannot fail.
+#
+# The placement say already carries the menu's pixel size, so no new witness is
+# needed in the guest: a two-row list is TALLER than a one-row list. Taking both
+# heights makes this a control ONE VARIABLE AWAY -- hardcode the count again and
+# h2 == h1, which is the failure the old leg could not see.
+after 1000
+click 15 15
+expect {
+    -re {halcyond: rail press Workspaces} {}
+    timeout { lc_fail "the press on the mark did not reach halcyond in workspace 2" }
+    eof     { lc_fail "EOF waiting for the mark press in workspace 2" }
+}
+set h2 0
+expect {
+    -re {halcyond: menu (\d+) placed at (\d+) (\d+) \((\d+)x(\d+)\) for Workspaces} {
+        set h2 $expect_out(5,string)
+    }
+    -re {halcyond: menu (surface failed|place refused)} { lc_fail "the session could not place the workspace list in workspace 2: $expect_out(0,string)" }
+    timeout { lc_fail "the workspace list was not placed in workspace 2" }
+    eof     { lc_fail "EOF waiting for the workspace list in workspace 2" }
+}
+lc_step "the workspace list with TWO workspaces is ${h2}px tall"
+hkey "esc"
+expect {
+    -re {tapestryd: menu \d+ dismissed \(esc\)} {}
+    timeout { lc_fail "Esc did not dismiss the workspace list in workspace 2" }
+    eof     { lc_fail "EOF waiting for the dismiss in workspace 2" }
+}
+
 hkey "meta_l+1"
 expect {
     -re "halcyond: status bar \\d+ painted \[^\\r\\n\]*workspaces 1 active0 0" {}
@@ -615,7 +651,7 @@ expect {
 }
 lc_pass "session-instrument: Super+1 returned and the empty workspace 2 VANISHED -- the bar reads 1/1 (the i3 rule)"
 
-# --- The workspace list from the mark (14.1) -------------------------------------
+# --- The same list with ONE workspace: the control half (14.1 / 14.2) -----------
 after 1000
 click 15 15
 expect {
@@ -623,19 +659,26 @@ expect {
     timeout { lc_fail "the press on the mark did not reach halcyond" }
     eof     { lc_fail "EOF waiting for the mark press" }
 }
+set h1 0
 expect {
-    -re {halcyond: menu (\d+) placed at (\d+) (\d+) \((\d+)x(\d+)\) for Workspaces} {}
+    -re {halcyond: menu (\d+) placed at (\d+) (\d+) \((\d+)x(\d+)\) for Workspaces} {
+        set h1 $expect_out(5,string)
+    }
     -re {halcyond: menu (surface failed|place refused)} { lc_fail "the session could not place the workspace list: $expect_out(0,string)" }
     timeout { lc_fail "the workspace list was not placed" }
     eof     { lc_fail "EOF waiting for the workspace list" }
 }
+lc_step "the workspace list with ONE workspace is ${h1}px tall"
 hkey "esc"
 expect {
     -re {tapestryd: menu \d+ dismissed \(esc\)} {}
     timeout { lc_fail "Esc did not dismiss the workspace list" }
     eof     { lc_fail "EOF waiting for the dismiss" }
 }
-lc_pass "session-instrument: the mark opens the workspace list on the session's seat; Esc dismisses it (14.1 / 14.2)"
+if {$h2 <= $h1} {
+    lc_fail "the workspace list did not grow with the workspace count (two-workspace list ${h2}px, one-workspace list ${h1}px): it is still reading a hardcoded count rather than the compositor's header (round 1 F6)"
+}
+lc_pass "session-instrument: the workspace list is BUILT FROM THE HEADER -- two workspaces give a taller list than one (${h2}px vs ${h1}px) -- and Esc dismisses it (14.1 / 14.2 / round 1 F6)"
 
 # --- Super+T: the picker, a live commit, and the durable write (9.4 / I-7) ------
 after 800

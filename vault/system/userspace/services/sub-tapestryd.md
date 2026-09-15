@@ -1865,3 +1865,80 @@ Ground truth: `layout_cmd`'s `workspace` arm and `actor_may_switch` in
 the expect arms in `tools/interactive/ls-gfx-panes.exp`; and `halcyon
 workspace <n>` in `usr/halcyon/src/{lib,main}.rs`, which needed no new channel
 because the tool's own `/srv/tapestry` conn is already `Session(principal)`.
+
+## The workspace round: one P0 and the guard that was only ever in the carve (2026-09-15, HALCYON-WORKSPACES round 1)
+
+The first adversarial round over the whole W arc closed **DIRTY -- 1 P0 / 3 P1
+/ 2 P2 / 2 P3**. Every finding below is fixed and sabotage-measured in both
+directions (each fix reverted alone, its test run, the file restored and
+md5-verified). The round ran on the **Opus-5 fallback tier**: Fable 5.1 died on
+its first call to credit exhaustion, and a round is never skipped for want of
+Fable.
+
+**The one sentence that explains four of the findings.** `slot_of_id` is
+global BY DESIGN -- pane ids address panes in every workspace, and W-1a chose
+that deliberately so `pane/` readdir and `live_ids` remain resource and
+addressability facts. The consequence nobody drew at the time: **every verb
+that resolves an id must decide for itself whether a foreign-workspace target
+is legal.** Before this round `in_active_root` had exactly TWO non-test call
+sites, and both were carves. Not one verb used it. W-1a F2 had fixed what got
+DRAWN and left what could be REACHED.
+
+- **F1 [P0] -- `close()` on an inactive root was a no-op that still reported
+  the surfaces released.** `close_inner`'s root arm tested `slot ==
+  self.root()`, the ACTIVE root, so an inactive workspace's root fell through
+  to the parentless early return -- after `collect_surfaces` had already
+  filled the out-parameter. `retire` discards the return value (`let _ =
+  self.layout.close(leaf)`) and `mint` takes the first free surface slot, so
+  the leaf went on naming an index that was handed to the next client: another
+  principal's surface, composed and given the keyboard inside the first
+  principal's pane. `subtree_hosted` also stayed non-empty forever, so the
+  workspace could never be reaped. This is the EXACT INVERSE of the W-1a
+  defect, where the same arm was too BROAD and freed the whole pool -- both
+  from `self.root()` silently meaning "active". The arm now keys on
+  `workspace_of_root(slot)`, and an inactive root's collapse updates THAT
+  workspace's remembered focus.
+- **F2 [P1] -- the focus side-effects crossed workspaces.** `focus`,
+  `zoom_toggle` (which calls `focus`) and `split` (which assigns
+  `self.focused` directly) all took a global slot. Beyond keys routed to an
+  invisible tile, `host_for` places the next surface at `self.focused`, so the
+  NEXT CLIENT was hosted into the dormant workspace. `Layout::focus` is now a
+  refusing chokepoint, with the setter guarded too. Note `split` moves focus
+  in **two** places -- same-mode parents FLATTEN, different-mode NEST -- and
+  guarding one is not a property of the function; that is the W-1a F2 shape
+  recurring inside the fix for W-1a F2.
+- **F3 [P1] -- `Workspace.focused` stored a SLOT.** `alloc` hands out the
+  first FREE slot, so a pane created in another workspace could land on the
+  remembered slot and pass the `is_leaf` restore guard as a genuinely live
+  leaf. The field now stores a pane ID -- monotonic, never reused, so a dead
+  remembered focus resolves to nothing, which is exactly the fallback wanted.
+- **F4 [P1] -- `move_focused_to_workspace` detached before its last
+  allocation**, so an exhausted pane table orphaned the leaf: parentless, in
+  no tree, still hosting its surface, un-reapable, and still addressable by
+  id. `move_dir` already had the ordering right. Every pane the move needs is
+  now allocated before any mutation, with rollback.
+- **F7 [P3] -- `reap_session_empties`'s root arm** had the same
+  `self.root()`-means-active confusion; it uses `is_workspace_root` now.
+- **S5 [P2] -- the vanish rule freed RESERVED leaves.** It tested only for
+  hosted surfaces, so a workspace holding nothing but a half-built restore
+  skeleton -- empty leaves stamped with `creator_conn` by H-4d precisely so
+  the session's own compositor cannot fill them mid-build -- read as empty and
+  was destroyed. `subtree_reserved` now guards it.
+- **S2 [P2] -- `tab` mutated with no authority check on one path.** The check
+  sat INSIDE `if let Some(anc) = tab_ancestor(focused)`, so a focused leaf
+  with no tab ancestor skipped authority entirely and still reached
+  `unzoom()`. It was the only arm of `layout_cmd` reaching a mutation with no
+  authority predicate on any path, and `Actor::Client(0)` -- denied by every
+  other predicate in the file -- could cancel another principal's zoom. With
+  no ancestor there is nothing to cycle, so the arm now returns Ok(()) first.
+
+**Coverage gap, stated rather than implied**: `server.rs` has no test module,
+so S2 and F7 carry NO inline test and are witnessed by reasoning and the
+interactive gates only.
+
+**Still open**: F8 [P3] `split_fits` / `min_size` walk from the ACTIVE root, so
+a hypothetical leaf in another workspace is never encountered and the minima
+check passes vacuously -- a dormant split is unbounded. Bounded in consequence
+by the dormancy net. And S4 [P2], an operator design fork: the vanish rule
+RENUMBERS surviving workspaces, because a workspace's identity is its vector
+index.

@@ -474,10 +474,18 @@ pub struct Pane {
 /// One workspace (HALCYON-WORKSPACES 4, mechanism (A)): its LIVE root and
 /// the leaf to restore focus to on return -- focus is per workspace and
 /// remembered across a switch (the i3 rule).
+///
+/// `focused` is a pane ID, never a slot. Slots are REUSED -- `alloc` takes
+/// the first free one -- so a remembered slot can be resurrected by an
+/// unrelated pane allocated in ANOTHER workspace while this one was away,
+/// and an `is_leaf` restore guard cannot tell the difference, because the
+/// reused slot genuinely is a live leaf. Ids are monotonic and never reused
+/// (the file header's rule), so a dead id resolves to nothing -- which is
+/// exactly the fallback the restore wants.
 #[derive(Clone, Copy)]
 struct Workspace {
     root: usize,
-    focused: usize,
+    focused: u32,
 }
 
 #[derive(Clone)]
@@ -533,9 +541,10 @@ impl Layout {
         let root = l
             .alloc(None, Kind::Leaf { surface: None })
             .expect("root pane");
+        let root_id = l.id_of(root).expect("root id");
         l.workspaces.push(Workspace {
             root,
-            focused: root,
+            focused: root_id,
         });
         l.focused = root;
         l
@@ -559,9 +568,44 @@ impl Layout {
     /// `close` in a workspace nobody was looking at. `slot_of_id` is global,
     /// so that close is reachable from any conn that owns the pane.
     fn reseat_root(&mut self, old: usize, new: usize) {
-        if let Some(i) = self.workspaces.iter().position(|w| w.root == old) {
+        if let Some(i) = self.workspace_of_root(old) {
             self.workspaces[i].root = new;
         }
+    }
+
+    /// Which workspace has `slot` as its root, if any.
+    ///
+    /// `self.root()` answers only for the ACTIVE one, and every caller that
+    /// used it as "is this a root" was silently asking a narrower question.
+    /// That confusion is what left `close_inner` unable to see an inactive
+    /// workspace's root (round 1 F1, a P0: the close became a no-op that
+    /// still reported the surface unhosted) and `reap_session_empties`
+    /// unable to hand one back (F7).
+    fn workspace_of_root(&self, slot: usize) -> Option<usize> {
+        self.workspaces.iter().position(|w| w.root == slot)
+    }
+
+    /// Is `slot` the root of SOME workspace (not merely the active one)?
+    pub fn is_workspace_root(&self, slot: usize) -> bool {
+        self.workspace_of_root(slot).is_some()
+    }
+
+    /// Does any pane in this subtree carry a live PLACEMENT RESERVATION -- a
+    /// one-shot claim token, or a creator conn that has not gone? An empty
+    /// leaf under reservation is spoken for even though it hosts nothing.
+    fn subtree_reserved(&self, slot: usize) -> bool {
+        let p = match self.get(slot) {
+            Some(p) => p,
+            None => return false,
+        };
+        if p.claim_token.is_some() || p.creator_conn != 0 {
+            return true;
+        }
+        let kids: Vec<usize> = match &p.kind {
+            Kind::Container { children, .. } => children.clone(),
+            _ => Vec::new(),
+        };
+        kids.iter().any(|&c| self.subtree_reserved(c))
     }
 
     /// How many workspaces exist, and which is active (the `layout` header's
@@ -622,20 +666,29 @@ impl Layout {
                 Some(r) => r,
                 None => return false,
             };
+            let root_id = match self.id_of(root) {
+                Some(i) => i,
+                None => return false,
+            };
             self.workspaces.push(Workspace {
                 root,
-                focused: root,
+                focused: root_id,
             });
         }
         let a = self.active;
-        self.workspaces[a].focused = self.focused;
+        self.workspaces[a].focused = self.id_of(self.focused).unwrap_or(0);
         self.active = k;
+        // Round 1 F3: resolve the remembered ID, and accept it only if it is
+        // a live leaf INSIDE the workspace just entered. Storing a SLOT let a
+        // reused slot resurrect a stale focus -- `alloc` hands out the first
+        // free one, so a pane created in another workspace could land on the
+        // remembered slot and pass an `is_leaf` guard as a genuinely live
+        // leaf. A dead id resolves to nothing, which is the fallback we want.
         let want = self.workspaces[k].focused;
-        self.focused = if self.is_leaf(want) {
-            want
-        } else {
-            let r = self.root();
-            self.first_leaf(r).unwrap_or(r)
+        let r = self.root();
+        self.focused = match self.slot_of_id(want) {
+            Some(s) if self.is_leaf(s) && self.in_active_root(s) => s,
+            _ => self.first_leaf(r).unwrap_or(r),
         };
         // A zoom belongs to the tree it was made in, and `zoomed_id` is one
         // global field: carrying it across would put an id in the `layout`
@@ -659,7 +712,13 @@ impl Layout {
                 continue;
             }
             let r = self.workspaces[i].root;
-            if self.subtree_hosted(r).is_empty() {
+            // A workspace holding a RESERVED empty leaf is not empty. H-4d
+            // stamps `creator_conn` (and the claim mint a one-shot token) on
+            // the skeleton a restore tool builds, precisely so its own session
+            // compositor cannot fill it mid-build -- so testing only for
+            // HOSTED surfaces let the vanish rule destroy exactly what that
+            // reservation exists to protect.
+            if self.subtree_hosted(r).is_empty() && !self.subtree_reserved(r) {
                 self.free_subtree(r);
                 self.workspaces.remove(i);
                 if self.active > i {
@@ -698,30 +757,29 @@ impl Layout {
                 Some(r) => r,
                 None => return false,
             };
-            self.workspaces.push(Workspace {
-                root,
-                focused: root,
-            });
-        }
-        if self.get(leaf).and_then(|p| p.parent).is_some() {
-            self.detach_leaf(leaf); // may dissolve, and may re-seat the root
-        } else {
-            let fresh = match self.alloc(None, Kind::Leaf { surface: None }) {
-                Some(f) => f,
+            let root_id = match self.id_of(root) {
+                Some(i) => i,
                 None => return false,
             };
-            let a = self.active;
-            self.workspaces[a].root = fresh;
+            self.workspaces.push(Workspace {
+                root,
+                focused: root_id,
+            });
         }
-        let tr = self.workspaces[k].root;
-        if self.is_leaf(tr) && self.leaf_surface(tr).is_none() {
-            // The target is a bare placeholder: the arriving leaf becomes
-            // its root outright rather than nesting under an empty tile.
-            self.workspaces[k].root = leaf;
-            self.get_mut(leaf).unwrap().parent = None;
-            self.free_subtree(tr);
+        // Round 1 F4: allocate EVERY pane this move needs BEFORE detaching
+        // the leaf. `detach_leaf`'s contract is that a leaf is never exposed
+        // un-reinserted, and the old order broke it -- on an exhausted pool
+        // the container alloc failed AFTER the detach and returned false with
+        // the leaf parentless, in no tree, still hosting its surface:
+        // invisible, un-reapable, and addressable by id through the global
+        // `pane/` readdir. `move_dir` already had this ordering right
+        // ("pane table full: untouched"); this path had inverted it.
+        let tr_now = self.workspaces[k].root;
+        let target_is_placeholder = self.is_leaf(tr_now) && self.leaf_surface(tr_now).is_none();
+        let pre_container = if target_is_placeholder {
+            None
         } else {
-            let c = match self.alloc(
+            match self.alloc(
                 None,
                 Kind::Container {
                     mode: Mode::SplitH,
@@ -729,21 +787,56 @@ impl Layout {
                     active: 0,
                 },
             ) {
-                Some(c) => c,
-                None => return false,
-            };
-            if let Some(Kind::Container { children, .. }) = self.get_mut(c).map(|p| &mut p.kind) {
-                children.push(tr);
-                children.push(leaf);
+                Some(c) => Some(c),
+                None => return false, // pane table full: untouched
             }
-            for s in [tr, leaf] {
-                let p = self.get_mut(s).unwrap();
-                p.parent = Some(c);
-                p.weight = DEFAULT_WEIGHT;
+        };
+        let pre_fresh = if self.get(leaf).and_then(|p| p.parent).is_some() {
+            None
+        } else {
+            match self.alloc(None, Kind::Leaf { surface: None }) {
+                Some(f) => Some(f),
+                None => {
+                    if let Some(c) = pre_container {
+                        self.panes[c] = None; // roll back the container
+                    }
+                    return false; // pane table full: untouched
+                }
             }
-            self.workspaces[k].root = c;
+        };
+        // Past this line nothing can fail, so the tree is mutated only once
+        // every pane the move needs is in hand.
+        match pre_fresh {
+            None => self.detach_leaf(leaf), // may dissolve, and may re-seat the root
+            Some(fresh) => {
+                let a = self.active;
+                self.workspaces[a].root = fresh;
+            }
         }
-        self.workspaces[k].focused = leaf;
+        let tr = self.workspaces[k].root;
+        match pre_container {
+            // The target is a bare placeholder: the arriving leaf becomes
+            // its root outright rather than nesting under an empty tile.
+            None => {
+                self.workspaces[k].root = leaf;
+                self.get_mut(leaf).unwrap().parent = None;
+                self.free_subtree(tr);
+            }
+            Some(c) => {
+                if let Some(Kind::Container { children, .. }) = self.get_mut(c).map(|p| &mut p.kind)
+                {
+                    children.push(tr);
+                    children.push(leaf);
+                }
+                for s in [tr, leaf] {
+                    let p = self.get_mut(s).unwrap();
+                    p.parent = Some(c);
+                    p.weight = DEFAULT_WEIGHT;
+                }
+                self.workspaces[k].root = c;
+            }
+        }
+        self.workspaces[k].focused = self.id_of(leaf).unwrap_or(0);
         // Focus stays HERE, on what is left behind -- the tile went away,
         // the eye did not follow it (i3's move, not its move-and-follow).
         let r = self.root();
@@ -953,7 +1046,15 @@ impl Layout {
                     *active = at + 1;
                 }
                 self.get_mut(new_leaf).unwrap().weight = share;
-                self.focused = new_leaf;
+                // Round 1 F2, the FLATTEN branch. `split` moves focus in TWO
+                // places, and a guard on one of them is not a property of the
+                // function -- the same shape as W-1a F2, where the zoom guard
+                // went on one carve of two and the other was the one that
+                // shipped. Same reason as the nest branch: `host_for` places
+                // the next surface at `self.focused`.
+                if self.in_active_root(new_leaf) {
+                    self.focused = new_leaf;
+                }
                 self.epoch += 1;
                 return Some(new_leaf);
             }
@@ -997,7 +1098,13 @@ impl Layout {
             children.push(slot);
             children.push(new_leaf);
         }
-        self.focused = new_leaf;
+        // Round 1 F2: a split of a DORMANT pane must not drag focus out of
+        // the active tree. Not cosmetic -- `host_for` places the next surface
+        // at `self.focused`, so the next client would be hosted into an
+        // invisible workspace and never seen.
+        if self.in_active_root(new_leaf) {
+            self.focused = new_leaf;
+        }
         self.epoch += 1;
         Some(new_leaf)
     }
@@ -1172,7 +1279,7 @@ impl Layout {
     fn close_inner(&mut self, slot: usize, unhosted: &mut Vec<usize>) {
         // Collect the subtree's hosted surfaces first.
         self.collect_surfaces(slot, unhosted);
-        if slot == self.root() {
+        if let Some(wi) = self.workspace_of_root(slot) {
             // The root never leaves; it collapses back to an empty leaf.
             let kids: Vec<usize> = match self.get(slot).map(|p| &p.kind) {
                 Some(Kind::Container { children, .. }) => children.clone(),
@@ -1195,7 +1302,19 @@ impl Layout {
             for c in kids {
                 self.free_subtree(c);
             }
-            self.focused = slot;
+            // Round 1 F1 (P0): this arm tested `slot == self.root()` -- the
+            // ACTIVE root -- so an INACTIVE workspace's root fell through to
+            // the parentless early return below and freed nothing, unhosted
+            // nothing, and still handed the caller every surface
+            // `collect_surfaces` had collected. The leaf went on naming a
+            // surface slot the caller then freed, and surface slots ARE
+            // reused (first-free), so the next client's surface surfaced
+            // inside another principal's pane.
+            if wi == self.active {
+                self.focused = slot;
+            } else if let Some(id) = self.id_of(slot) {
+                self.workspaces[wi].focused = id;
+            }
             return;
         }
         let parent = match self.get(slot).and_then(|p| p.parent) {
@@ -1352,6 +1471,16 @@ impl Layout {
     /// Focus a leaf (containers focus their first leaf). False = no
     /// focusable leaf there.
     pub fn focus(&mut self, slot: usize) -> bool {
+        // Round 1 F2: `slot_of_id` is global BY DESIGN, so an id names a pane
+        // in any workspace -- and every focus-moving verb funnels through
+        // here. A dormant target routed keys to an invisible tile, pulled
+        // `host_for` (which places the next surface at `self.focused`) into
+        // the wrong tree, and was then PERSISTED as the workspace's
+        // remembered focus by the next switch. W-1a's guard fixed what got
+        // DRAWN; this fixes what can be REACHED.
+        if !self.in_active_root(slot) {
+            return false;
+        }
         match self.first_leaf(slot) {
             Some(l) => {
                 if self.focused != l {
@@ -1421,7 +1550,12 @@ impl Layout {
     /// hides everything else; the tree is untouched). Zooming focuses the
     /// leaf; re-zooming the zoomed pane restores the layout.
     pub fn zoom_toggle(&mut self, slot: usize) -> bool {
-        if !self.is_leaf(slot) {
+        // Refuse a target outside the active tree at the SETTER. Both carves
+        // already decline to honour such a zoom, but relying on two
+        // independent carves to ignore a bad value is precisely the shape
+        // that produced W-1a F2, where one of the two forgot -- and the
+        // shipped one was the one that forgot.
+        if !self.is_leaf(slot) || !self.in_active_root(slot) {
             return false;
         }
         let id = match self.id_of(slot) {
@@ -3780,15 +3914,46 @@ mod tests {
     /// SABOTAGE: drop `&& self.in_active_root(z)` from `recompute_legacy` and
     /// the dormant pane is painted at the full display rect over the active
     /// tree.
+    /// ROUND 1 F2, the SETTER half. The test below used to construct its
+    /// state with `zoom_toggle(dormant)` and assert only on the carve -- so
+    /// it passed while the reaching defect was live, which is exactly how the
+    /// round found it. The setter now refuses, and this pins that.
+    ///
+    /// SABOTAGE: drop `|| !self.in_active_root(slot)` from `zoom_toggle` and
+    /// the first assertion fails.
+    #[test]
+    fn a_zoom_targeting_another_workspace_is_refused_at_the_setter() {
+        let mut l = Layout::new();
+        let dormant = l.host_for(7, 0, 0).expect("workspace 1's tile");
+        assert!(l.switch_workspace(1), "to workspace 2");
+        assert!(
+            !l.zoom_toggle(dormant),
+            "a pane in another workspace is not zoomable"
+        );
+        assert!(l.zoom_id().is_none(), "and nothing was recorded");
+    }
+
+    /// F2 (the W-2b architecture review, verified): the cross-workspace zoom
+    /// guard was added to `recompute_instrument` ONLY, while
+    /// `recompute_legacy` -- the profile that SHIPS -- had none, and the W-1a
+    /// commit body and audit row both claimed "the zoom" was guarded.
+    ///
+    /// The public path can no longer reach this state (the setter refuses,
+    /// and a switch clears `zoomed_id`), so the field is set DIRECTLY here.
+    /// That is deliberate: the carve guard is defence in depth for a state
+    /// the tree should never hold, and a guard worth keeping is worth
+    /// testing even once its reachability is closed.
+    ///
+    /// SABOTAGE: drop `&& self.in_active_root(z)` from `recompute_legacy` and
+    /// the dormant pane is painted at the full display rect over the active
+    /// tree.
     #[test]
     fn the_legacy_carve_refuses_a_zoom_that_lives_in_another_workspace() {
         let mut l = Layout::new();
         let dormant = l.host_for(7, 0, 0).expect("workspace 1's tile");
+        let dormant_id = l.id_of(dormant).expect("its id");
         assert!(l.switch_workspace(1), "to workspace 2");
-        // The TREE permits zooming a foreign slot -- the authority check is
-        // the server's `actor_hosts`. The carve is what must refuse to paint.
-        assert!(l.zoom_toggle(dormant), "zoom a pane in the dormant workspace");
-        assert!(l.zoom_id().is_some());
+        l.zoomed_id = Some(dormant_id); // unreachable via the verbs; see above
         ws_lay(&mut l); // Profile::Legacy -- the shipped one
         let z = l.get(dormant).expect("the dormant leaf outlives the switch");
         assert!(!z.visible, "a dormant workspace's zoom must not be painted");
@@ -3796,6 +3961,232 @@ mod tests {
         assert!(
             l.get(l.root()).unwrap().visible,
             "while the active workspace carves normally"
+        );
+    }
+
+    /// ROUND 1 F1 [P0]. `close_inner`'s root arm tested `slot == self.root()`
+    /// -- the ACTIVE root -- so an INACTIVE workspace's root fell through to
+    /// the parentless early return, freeing nothing and unhosting nothing,
+    /// while `collect_surfaces` had ALREADY handed the caller every surface
+    /// in it. The leaf went on naming a surface slot the caller then freed,
+    /// and surface slots are reused first-free.
+    ///
+    /// SABOTAGE: restore `if slot == self.root()` and the leaf keeps hosting
+    /// surface 8 after the close.
+    #[test]
+    fn closing_an_inactive_workspace_root_really_collapses_it() {
+        let mut l = Layout::new();
+        let _ = l.host_for(7, 0, 0).expect("workspace 1's tile");
+        assert!(l.switch_workspace(1), "to workspace 2");
+        let ws2_root = l.root();
+        let _ = l.host_for(8, 0, 0).expect("workspace 2's tile");
+        assert_eq!(l.leaf_surface(ws2_root), Some(8));
+        assert!(l.switch_workspace(0), "back to workspace 1");
+
+        let unhosted = l.close(ws2_root);
+        assert_eq!(unhosted, alloc::vec![8], "the surface is reported unhosted");
+        assert!(l.get(ws2_root).is_some(), "the root itself never leaves");
+        assert_eq!(
+            l.leaf_surface(ws2_root),
+            None,
+            "and it must NOT still name the surface it just released"
+        );
+        // The I-32 half: a workspace stuck hosting a dead index could never
+        // be reaped, leaking the workspace and its pane slots for the session.
+        assert_eq!(
+            l.reap_empty_workspaces(),
+            1,
+            "an emptied inactive workspace can now vanish"
+        );
+    }
+
+    /// ROUND 1 F2, the FOCUS half. `slot_of_id` is global by design, so every
+    /// focus-moving verb could name a pane in a dormant workspace; keys then
+    /// routed to an invisible tile.
+    ///
+    /// SABOTAGE: drop the `in_active_root` guard at the head of `focus` and
+    /// the focus moves into workspace 1.
+    #[test]
+    fn focus_refuses_a_pane_in_another_workspace() {
+        let mut l = Layout::new();
+        let dormant = l.host_for(7, 0, 0).expect("workspace 1's tile");
+        assert!(l.switch_workspace(1), "to workspace 2");
+        let here = l.focused;
+        assert!(!l.focus(dormant), "a dormant pane is not focusable");
+        assert_eq!(l.focused, here, "and focus did not move");
+        assert!(l.in_active_root(l.focused));
+    }
+
+    /// ROUND 1 F2, the SPLIT half -- and the one with teeth: `host_for`
+    /// places the next surface at `self.focused`, so a split that dragged
+    /// focus into a dormant workspace hosted the NEXT CLIENT there, where it
+    /// was never seen.
+    ///
+    /// SABOTAGE: restore the bare `self.focused = new_leaf;` in `split` and
+    /// the new surface lands in workspace 1.
+    #[test]
+    fn a_split_in_a_dormant_workspace_does_not_capture_focus() {
+        let mut l = Layout::new();
+        let dormant = l.host_for(7, 0, 0).expect("workspace 1's tile");
+        assert!(l.switch_workspace(1), "to workspace 2");
+        let here = l.focused;
+        // The NEST branch: `dormant` is workspace 1's parentless root.
+        let made = l.split(dormant, Mode::SplitH).expect("the tree still splits");
+        assert!(!l.in_active_root(made), "the new leaf is in workspace 1");
+        assert_eq!(l.focused, here, "but focus stayed in workspace 2");
+
+        // The FLATTEN branch, which is a DIFFERENT assignment in the same
+        // function: `made` now has a same-mode parent, so this one inserts a
+        // sibling instead of nesting. Guarding only the nest branch would
+        // leave this path live, and no test above would have said so.
+        let flat = l.split(made, Mode::SplitH).expect("a same-mode sibling");
+        assert!(!l.in_active_root(flat), "still workspace 1");
+        assert_eq!(l.focused, here, "and focus STILL stayed in workspace 2");
+
+        let landed = l.host_for(9, 0, 0).expect("the next client");
+        assert!(
+            l.in_active_root(landed),
+            "so the next surface is hosted where the user is looking"
+        );
+    }
+
+    /// ROUND 1 F4. `move_focused_to_workspace` ran `detach_leaf` BEFORE its
+    /// last allocation, so on an exhausted pane table the container alloc
+    /// failed AFTER the detach and the function returned false with the leaf
+    /// PARENTLESS: in no tree, still hosting its surface, invisible,
+    /// un-reapable, and still addressable by id through the global `pane/`
+    /// readdir. `move_dir` already had this ordering right ("pane table
+    /// full: untouched"); this path had inverted it.
+    ///
+    /// The parent must keep >= 2 children after the detach, or the dissolve
+    /// frees a slot, the old code's alloc SUCCEEDS, and this passes for the
+    /// wrong reason. Same-mode splits FLATTEN, so repeated SplitH builds one
+    /// wide container rather than a binary chain.
+    ///
+    /// SABOTAGE: restore the detach-then-alloc order and the leaf is orphaned.
+    #[test]
+    fn a_move_refused_by_a_full_pane_table_leaves_the_leaf_attached() {
+        let mut l = Layout::new();
+        let _ = l.host_for(7, 0, 0).expect("workspace 1's tile");
+        assert!(l.switch_workspace(1), "to workspace 2");
+        let _ = l
+            .host_for(8, 0, 0)
+            .expect("workspace 2's tile -- so its root is NOT a placeholder");
+        assert!(l.switch_workspace(0), "back to workspace 1");
+
+        let mut last = l.focused;
+        while let Some(made) = l.split(l.focused, Mode::SplitH) {
+            last = made;
+        }
+        assert_eq!(l.focused, last, "focus followed the last split");
+        // The move refuses an EMPTY tile outright -- `!is_leaf ||
+        // leaf_surface().is_none()` is its first line -- so without a surface
+        // here the refusal would come from THAT guard and the test would pass
+        // having never reached the allocation it exists to constrain. The
+        // sabotage caught exactly this: asserting the shape is not exercising
+        // the bound.
+        let _ = l.host_for(9, 0, 0).expect("host into the focused empty leaf");
+        assert_eq!(l.leaf_surface(last), Some(9), "the tile is occupied");
+        let parent = l
+            .get(last)
+            .and_then(|p| p.parent)
+            .expect("the filled tree gave it a parent");
+        let kids = match l.get(parent).map(|p| &p.kind) {
+            Some(Kind::Container { children, .. }) => children.len(),
+            _ => 0,
+        };
+        assert!(
+            kids >= 3,
+            "the premise: a detach here must dissolve nothing (children={})",
+            kids
+        );
+
+        assert!(
+            !l.move_focused_to_workspace(1),
+            "an exhausted pane table refuses the move"
+        );
+        assert_eq!(
+            l.get(last).and_then(|p| p.parent),
+            Some(parent),
+            "and a refused move must leave the leaf IN the tree"
+        );
+        assert!(l.in_active_root(last), "exactly where it was");
+    }
+
+    /// ROUND 1 F3. `Workspace.focused` stored a SLOT, and `alloc` hands out
+    /// the first FREE slot -- so a pane created in another workspace could
+    /// land on the remembered slot and sail through the `is_leaf` restore
+    /// guard as a genuinely live leaf. Ids are never reused, so storing the
+    /// id makes a dead remembered focus resolve to nothing, which is exactly
+    /// the fallback wanted.
+    ///
+    /// SABOTAGE: store `self.focused` (the slot) in `switch_workspace` and
+    /// restore with `is_leaf(want)` -- focus comes back on a workspace-1 leaf.
+    #[test]
+    fn a_reused_slot_cannot_resurrect_a_remembered_focus() {
+        let mut l = Layout::new();
+        let _ = l.host_for(7, 0, 0).expect("workspace 1's tile");
+        assert!(l.switch_workspace(1), "to workspace 2");
+        let ws2_root = l.root();
+        let t2 = l.split(ws2_root, Mode::SplitH).expect("a second tile here");
+        assert!(l.focus(t2));
+        let remembered = l.focused;
+        assert!(l.switch_workspace(0), "to workspace 1 -- t2's slot is saved");
+
+        // t2 dies while we are away, and workspace 1 then allocates enough
+        // panes to reuse its slot.
+        let _ = l.close(t2);
+        assert!(l.get(remembered).is_none(), "the slot really is free");
+        let mut reused = false;
+        for _ in 0..4 {
+            if let Some(made) = l.split(l.focused, Mode::SplitH) {
+                if made == remembered {
+                    reused = true;
+                }
+            }
+        }
+        assert!(reused, "the premise: workspace 1 took the freed slot");
+
+        assert!(l.switch_workspace(1), "back to workspace 2");
+        assert!(
+            l.in_active_root(l.focused),
+            "focus must not be resurrected onto another workspace's pane"
+        );
+    }
+
+    /// ROUND 1 S5 (my own self-audit, not the agent's). The vanish rule
+    /// tested only for HOSTED surfaces, so a workspace holding nothing but a
+    /// RESERVED empty leaf -- the skeleton a layout-restore tool builds,
+    /// stamped with its `creator_conn` by H-4d precisely so the session's own
+    /// compositor cannot fill it mid-build -- read as empty and was destroyed
+    /// at the next reconcile. The vanish rule was deleting the very thing
+    /// that reservation exists to protect.
+    ///
+    /// SABOTAGE: drop `&& !self.subtree_reserved(r)` and the first assertion
+    /// fails -- the half-built workspace vanishes under its builder.
+    #[test]
+    fn a_workspace_holding_a_reserved_skeleton_does_not_vanish() {
+        let mut l = Layout::new();
+        let _ = l.host_for(7, 0, 0).expect("workspace 1's tile");
+        assert!(l.switch_workspace(1), "to workspace 2");
+        let skeleton = l.root();
+        l.set_creator(skeleton, 42, 7); // a restore tool is building here
+        assert!(l.switch_workspace(0), "back to workspace 1");
+
+        assert_eq!(
+            l.reap_empty_workspaces(),
+            0,
+            "a reserved skeleton is not an empty workspace"
+        );
+        assert_eq!(l.workspace_count(), 2);
+
+        // The builder goes: the reservation lifts and the ordinary rule
+        // applies again.
+        l.release_creator(42);
+        assert_eq!(
+            l.reap_empty_workspaces(),
+            1,
+            "and once nothing is reserved, the empty workspace vanishes"
         );
     }
 

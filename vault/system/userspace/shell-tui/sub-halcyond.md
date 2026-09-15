@@ -657,5 +657,50 @@ made a missing conversion invisible -- the witness would echo the compositor
 and agree with itself. (`ws [..]` earlier in the same line is the workspace
 SLOT's geometry, an unrelated field that happens to share three letters.)
 
+## The existence probe needed a control, and the chips were never wired (2026-09-15, HALCYON-WORKSPACES round 1)
+
+The W-arc's first adversarial round (Opus-5 fallback tier; Fable 5.1 died on
+its first call to credit exhaustion) returned two findings on this side of the
+seam. Both are fixed.
+
+**F5 [P2] -- the W-3 existence probe read "gone" from ANY read failure.** W-3
+had correctly established that absence from the `layout` rows is a statement
+about the VIEW, not about existence, and probed `pane/<id>/geometry` against
+the global tree instead. But `read_file` returns `None` for a failed open, a
+failed read and non-UTF-8 alike, so *"it is gone"* and *"I could not ask"*
+were the same answer. A transient failure -- fid budget, a wedged conn, an
+interrupted read -- during the reconcile that follows a switch would therefore
+drop EVERY tile, latch each id into `closed` permanently (ids are never
+reused), and then break the session loop on `tiles.is_empty()`: the same full
+logout W-3 fixed, reached from an error rather than a keystroke.
+
+The fix is a **positive control one variable away**, not an errno: no errno is
+reachable here (`T_E_NOENT` exists only in libthyla-rs comments). `layout` is
+served by the same conn and always exists, so if the geometry probe says
+absent AND `layout` cannot be read either, the honest answer is "could not
+ask" and nothing is torn down this pass. A tile wrongly kept costs one
+reconcile; `TEV_CLOSE` remains the authoritative teardown signal regardless.
+
+**F6 [P2] -- the workspace list and the rail chips were pinned to one
+workspace, and the gate leg could not fail.** W-2a fed the header's two
+numbers to the BAR and nothing else. Both menu owners opened the list with the
+literal `workspace_menu(1, 0)`; `RailModel::empty()` sets `workspaces: 1` and
+neither construction overrode it; and choosing a row or clicking a chip only
+emitted a `say!`. The real pair was already on the `ChromeSet`, feeding the
+bar -- it simply never reached the rail. Because the session gate's leg
+asserts only that the menu OPENS and Esc DISMISSES, it passed with the count
+pinned at 1 forever: an assertion that cannot fail.
+
+The session renderer now passes `chrome.workspaces()` into both `RailModel`
+and `workspace_menu`, and routes both the chip click and the menu choice
+through `layout_verb(troot, "workspace <n>")` -- the compositor's W-2b verb,
+under this session's own authority, the way every other rail button acts. The
+header's `active` is ONE-based and `RailModel.active` zero-based; that
+conversion lives at the one construction site.
+
+The **console** renderer (`main.rs`) deliberately stays at one workspace --
+`docs/HALCYON-WORKSPACES.md` section 4: *"The console (pre-login halcyond)
+shows one."*
+
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

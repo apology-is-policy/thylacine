@@ -761,6 +761,96 @@ choosing one, and no amount of prosecuting the gate would have surfaced that
 the state's reader and its writer had been split across two files.
 
 
+### The W-arc round: two prosecutors, and neither alone would have closed it
+
+The arc's ratified bar is one adversarial round over W-1..W-3. It closed
+**DIRTY -- 1 P0 / 3 P1 / 2 P2 / 2 P3**.
+
+**It did not run on Fable.** The round was spawned on Fable 5.1 and died on
+its *first* call: credit exhaustion. The standing rule is that a round is
+never skipped for want of Fable, so it re-ran immediately on the highest
+available Opus at max effort -- the same family as the author of every line in
+scope. I amended the brief to say exactly what that costs rather than let the
+report read as an ordinary round: family diversity is forfeited, context
+independence is retained in full, and the one reflex the prosecutor must fight
+is agreeing with a construction *because it is the construction it would also
+have written*. It reported `MODEL(start) == MODEL(end) == Opus 5`, no mid-run
+fallback, and it closed its own report by naming the degradation unprompted.
+
+**The merge is the part worth keeping.** CLAUDE.md requires a self-audit in
+parallel with the round, on the same surface, with both sets of findings
+dispositioned together. That discipline paid in both directions this time:
+
+- The agent **confirmed my S3 and raised it from P1 to P0.** I had found that
+  `close` on an inactive workspace's root is a tree no-op that still reports
+  its surfaces unhosted. What I missed is that surface slots are reused
+  first-free (`mint` takes `position(|s| s.is_none())`), so the dangling index
+  the leaf keeps naming is handed to the *next* client -- another principal's
+  surface, composed and given the keyboard, inside the first principal's pane.
+  I had graded the consequence; it measured the consequence.
+- It found **three I missed entirely**: `Workspace.focused` storing a reusable
+  slot (F3), the alloc-after-detach orphan (F4), and the W-3 probe treating
+  any read failure as "gone" (F5).
+- It **missed one I found**: S2, `tab` reaching `unzoom()` with no authority
+  check at all when the focused leaf has no tab ancestor -- the only arm of
+  `layout_cmd` that mutates with no predicate on any path, reachable by
+  `Actor::Client(0)`, the stripe every other predicate in that file denies.
+
+One sentence explains four of the nine findings. `slot_of_id` is global **by
+design** -- W-1a chose that so `pane/` readdir and `live_ids` stay resource
+and addressability facts -- and the consequence nobody drew was that *every
+verb resolving an id must itself decide whether a foreign-workspace target is
+legal*. Before this round `in_active_root` had exactly two non-test call
+sites, and both were carves. Not one verb used it. **W-1a's F2 fix bought what
+gets DRAWN and left what can be REACHED**, and its commit body was written as
+though it had bought both.
+
+**A correction against myself.** My self-audit listed
+`move_focused_to_workspace` as *verified sound*. It is not -- F4 is real, and
+it sits in a region I had already read and quoted in this very session. I
+checked the aliasing case (a focused leaf that is its own workspace's root),
+found it handled, and wrote the whole function off. A "verified sound" list is
+a claim like any other, and that entry was false.
+
+**The fix repeated the defect it was fixing.** `split` moves focus in *two*
+places -- same-mode parents FLATTEN via sibling insert, different-mode ones
+NEST -- and I guarded the nest branch, ran the test, and watched it pass. The
+test splits a parentless root, which takes the nest path. That is precisely
+the W-1a F2 shape (a guard on one of two implementations, with the unguarded
+one live) occurring *inside the fix for W-1a F2*. The compiler could not see
+it and the test could not see it; reading `split`'s head for an unrelated
+reason did.
+
+**Two harness faults, caught because everything failed at once.** All nine
+sabotages came back "COMPILE ERROR" or "DID NOT FIRE", which is not nine
+independent problems -- it is one problem in the checker, and the rule is to
+suspect the check when everything fails.
+
+1. The classifier tested `"error:" in stderr`. Cargo prints `error: test
+   failed, to rerun pass ...` on **stderr for an ordinary failing test** -- I
+   had seen that exact line earlier in the session. So every correctly-firing
+   sabotage was relabelled a compile error: a guard on the reporting path
+   fabricating the defect it reports. Rewritten to classify on `test result:`
+   presence, and to assert `running 1 test` so a filter matching nothing
+   cannot read as a pass.
+2. F4's sabotage **genuinely did not fire**, and that one was mine.
+   `move_focused_to_workspace` opens with `if !is_leaf(leaf) ||
+   leaf_surface(leaf).is_none() { return false; }`, and my test's focused leaf
+   was an empty split product -- so the move refused because the tile was
+   empty and never reached the allocation the fix is about. The test asserted
+   the leaf keeps its parent, which was true because nothing had happened.
+   Asserting the shape is not exercising the bound, and only the sabotage
+   could have shown it.
+
+All nine fired after both repairs, with `pane.rs` restored md5-identical.
+
+**Posture**: tapestryd host 57 (was 50), halcyond 295, halcyon 26; all three
+crates guest-clean on `aarch64-unknown-none`. Still open: F8 [P3], a dormant
+split is unbounded because `split_fits` walks from the active root only; and
+S4 [P2], the vanish rule RENUMBERS surviving workspaces because a workspace's
+identity is its vector index -- an operator design fork, not a silent fix,
+since stable identity changes what the header's first number means.
+
 ## Run 46o (2026-09-14, Fable 5.1 max) -- the Halcyon Instrument arc opens: reading the Carbon Optics kit against the tree
 
 ### What this run was for
