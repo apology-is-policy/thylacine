@@ -895,6 +895,38 @@ void gic_set_spi_edge_triggered(u32 intid) {
     __asm__ __volatile__("dsb sy" ::: "memory");
 }
 
+void gic_set_spi_level_triggered(u32 intid) {
+    // F-A1: configure a specific SPI to level-triggered (ICFGR 0b00). GIC init
+    // already defaults all SPIs to level, but kobj_irq_create calls this
+    // EXPLICITLY so a reused INTID (a freed edge IRQ, then a level claim on the
+    // same line) never inherits a stale edge config. The sibling
+    // gic_set_spi_edge_triggered documents the preconditions, the 2-bit ICFGR
+    // encoding, the RMW-vs-neighbor rationale, and the F200 dsb ordering; this
+    // is the same, writing 0b00 (both bits clear) instead of 0b10.
+    if (intid < GIC_SPI_MIN || intid > g_max_intid)
+        extinction("gic_set_spi_level_triggered: intid out of SPI range "
+                   "(precondition broken -- kernel-internal bug)");
+    if (g_dist_base == 0)
+        extinction("gic_set_spi_level_triggered: GIC not initialized "
+                   "(precondition broken -- boot-order discipline)");
+
+    _Static_assert((0x0u & 0x1u) == 0,
+                   "ICFGR level encoding 0b00 must keep SBZ bit clear");
+
+    u32 reg     = GICD_ICFGR(intid / 16);
+    u32 bit_off = (intid % 16) * 2;
+    u32 mask    = 0x3u << bit_off;
+    u32 val     = 0x0u << bit_off;  // 0b00 = level-triggered
+    if (g_version == GIC_VERSION_V2) {
+        u32 cur = v2_r32(g_dist_base, reg);
+        v2_w32(g_dist_base, reg, (cur & ~mask) | val);
+    } else {
+        u32 cur = mmio_r32(g_dist_base, reg);
+        mmio_w32(g_dist_base, reg, (cur & ~mask) | val);
+    }
+    __asm__ __volatile__("dsb sy" ::: "memory");
+}
+
 bool gic_set_pending_spi(u32 intid) {
     // P4-Ic5-IRQ-probe: write GICD_ISPENDR<n>.bit to mark this SPI as
     // pending. SPI-only because the distributor frame's GICD_ISPENDR
@@ -928,6 +960,26 @@ bool gic_disable_irq(u32 intid) {
         mmio_w32(g_dist_base, GICD_ICENABLER(n), 1u << bit);
     }
     return true;
+}
+
+// gic_intid_enabled -- read-only query of the ISENABLER bit for `intid`
+// (F-A1 test support + general introspection). true = the line is enabled
+// (unmasked) at the distributor (SPI) or the calling CPU's redistributor
+// (SGI/PPI); the mirror of gic_enable_irq / gic_disable_irq's write. Lets a
+// test observe the level mask+ack: a level SPI reads DISABLED after
+// kobj_irq_dispatch masks it and ENABLED after kobj_irq_wait re-arms.
+bool gic_intid_enabled(u32 intid) {
+    if (intid >= GIC_NUM_INTIDS) return false;
+    u32 n = intid / 32, bit = intid % 32;
+    u32 v;
+    if (g_version == GIC_VERSION_V2) {
+        v = v2_r32(g_dist_base, GICD_ISENABLER(n));
+    } else if (intid < 32) {
+        v = mmio_r32(cpu_redist_base(smp_cpu_idx_self()), GICR_ISENABLER0);
+    } else {
+        v = mmio_r32(g_dist_base, GICD_ISENABLER(n));
+    }
+    return ((v >> bit) & 1u) != 0;
 }
 
 // ---------------------------------------------------------------------------

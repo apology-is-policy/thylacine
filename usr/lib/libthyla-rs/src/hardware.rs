@@ -74,8 +74,9 @@ use crate::err::{Error, Result};
 use crate::handle::{Handle, Rights};
 use crate::poll::AsFd;
 use crate::{
-    t_burrow_from_hostmem, t_dma_create, t_dma_map, t_irq_create, t_irq_wait, t_mmio_create,
-    t_mmio_map, t_pci_claim, t_pci_info, t_pci_map_bar, TPciInfo, T_PROT_READ, T_PROT_WRITE,
+    t_burrow_from_hostmem, t_dma_create, t_dma_map, t_irq_create, t_irq_wait, t_irq_wait_timeout,
+    t_mmio_create, t_mmio_map, t_pci_claim, t_pci_info, t_pci_map_bar, TPciInfo, T_PROT_READ,
+    T_PROT_WRITE,
 };
 
 // =============================================================================
@@ -414,6 +415,21 @@ impl Irq {
     /// so no IRQ is dropped between consume and the next dispatch.
     pub fn wait(&self) -> Result<u32> {
         let rc = unsafe { t_irq_wait(self.handle.raw() as i64) };
+        if rc < 0 {
+            return Err(hw_error(rc));
+        }
+        Ok(rc as u32)
+    }
+
+    /// Like [`wait`](Self::wait), bounded by `timeout_ns` relative nanoseconds
+    /// (0 == wait forever). On a timeout the returned count is `0` -- the same
+    /// value a death-interrupt returns, and treated the same way: no IRQ is
+    /// pending, so the caller re-checks the device (e.g. the virtqueue used
+    /// ring) and continues, or unwinds. F-A1 (C): a bounded wait turns a lost
+    /// completion on a level line into a said, recoverable event instead of a
+    /// silent forever-hang; a nonzero return is a genuine collapsed IRQ count.
+    pub fn wait_timeout(&self, timeout_ns: u64) -> Result<u32> {
+        let rc = unsafe { t_irq_wait_timeout(self.handle.raw() as i64, timeout_ns) };
         if rc < 0 {
             return Err(hw_error(rc));
         }

@@ -154,6 +154,14 @@ bool dtb_get_compat_prop(const char *compat, const char *prop,
 // matched entry is not a GIC SPI, or no row matches (pin out of range).
 bool dtb_pci_intx_route(u8 pci_dev, u8 pin, u32 *out_gic_intid);
 
+// Reverse of dtb_pci_intx_route (F-A1 / I-15): given a GIC SPI `intid` that
+// resolves through the PCIe `interrupt-map`, report whether the DTB declares
+// it LEVEL-triggered (the flags cell the forward function discards). virtio-PCI
+// legacy INTx is level; virtio-mmio is edge. Returns true + *out_level on a
+// match; false if `intid` is not a PCI-INTx line in the map -- the caller then
+// keeps the edge default (kobj_irq_create; the I-15-argued fallback, ARCH 9.3.1).
+bool dtb_pci_intid_is_level(u32 intid, bool *out_level);
+
 // PCIe 32-bit non-prefetchable MMIO window (pci-1a) -- the CPU-PA range
 // from the host bridge's `ranges` from which the kernel assigns BARs (we
 // boot bare, so no UEFI/firmware assigns them). Returns true + *out_base /

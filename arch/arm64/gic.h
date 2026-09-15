@@ -129,6 +129,10 @@ bool gic_attach(u32 intid, gic_irq_handler_t handler, void *arg);
 bool gic_enable_irq(u32 intid);
 bool gic_disable_irq(u32 intid);
 
+// Read-only query of the ISENABLER bit: true = `intid` is enabled (unmasked).
+// The mirror of enable/disable; used to observe the F-A1 level mask+ack cycle.
+bool gic_intid_enabled(u32 intid);
+
 // Acknowledge the highest-priority pending INTID. On v3 reads ICC_IAR1_EL1
 // (returns the INTID portion, lower 24 bits); on v2 reads GICC_IAR (returns
 // the lower 10-bit INTID and stashes the raw IAR per-CPU so gic_eoi can echo
@@ -222,6 +226,12 @@ bool gic_set_pending_spi(u32 intid);
 // after the ICFGR write so the distributor's internal latching is
 // observable to a subsequent GICD_ISENABLER<n> write.
 void gic_set_spi_edge_triggered(u32 intid);
+
+// F-A1: the level-triggered sibling (ICFGR 0b00). GIC init already defaults
+// SPIs to level; kobj_irq_create calls this explicitly for a DTB-declared
+// level line (virtio-PCI INTx) so a reused INTID never keeps a stale edge
+// config. Same preconditions + dsb ordering as the edge form.
+void gic_set_spi_level_triggered(u32 intid);
 
 // P2-Cdc: send a Software Generated Interrupt (SGI) to a target CPU.
 // SGIs are GIC INTIDs 0..15 — used as cross-CPU IPI vectors. Target

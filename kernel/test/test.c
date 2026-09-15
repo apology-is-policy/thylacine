@@ -75,6 +75,7 @@ void test_kthread_join_free(struct Thread *t, volatile bool *exited) {
 void test_kaslr_mix64_avalanche(void);
 void test_dtb_chosen_kaslr_seed_present(void);
 void test_dtb_pci_intx_route(void);
+void test_dtb_pci_intid_is_level(void);
 void test_dtb_pci_mem_window(void);
 void test_dtb_pci_mem_window64(void);
 void test_phys_alloc_smoke(void);
@@ -1090,6 +1091,8 @@ void test_irqfwd_refcount_lifecycle(void);
 void test_irqfwd_wait_wakes_on_sgi(void);
 void test_irqfwd_collapses_concurrent_fires(void);
 void test_irqfwd_second_waiter_refused(void);
+void test_irqfwd_level_mask_ack(void);
+void test_irqfwd_wait_timeout(void);
 void test_virtio_pci_init_called(void);
 void test_virtio_pci_count_within_bound(void);
 void test_virtio_pci_devices_have_vendor(void);
@@ -1616,6 +1619,7 @@ struct test_case g_tests[] = {
     { "kaslr.mix64_avalanche",         test_kaslr_mix64_avalanche,         false, NULL },
     { "dtb.chosen_kaslr_seed_present", test_dtb_chosen_kaslr_seed_present, false, NULL },
     { "dtb.pci_intx_route",            test_dtb_pci_intx_route,            false, NULL },
+    { "dtb.pci_intid_is_level",        test_dtb_pci_intid_is_level,        false, NULL },
     { "dtb.pci_mem_window",            test_dtb_pci_mem_window,            false, NULL },
     { "dtb.pci_mem_window64",          test_dtb_pci_mem_window64,          false, NULL },
     { "phys.alloc_smoke",              test_phys_alloc_smoke,              false, NULL },
@@ -2775,6 +2779,8 @@ struct test_case g_tests[] = {
     { "irqfwd.collapses_concurrent_fires",
                                        test_irqfwd_collapses_concurrent_fires, false, NULL },
     { "irqfwd.second_waiter_refused",  test_irqfwd_second_waiter_refused,  false, NULL },
+    { "irqfwd.level_mask_ack",         test_irqfwd_level_mask_ack,         false, NULL },
+    { "irqfwd.wait_timeout",           test_irqfwd_wait_timeout,           false, NULL },
     { "virtio_pci.init_called",        test_virtio_pci_init_called,        false, NULL },
     { "virtio_pci.count_within_bound", test_virtio_pci_count_within_bound, false, NULL },
     { "virtio_pci.devices_have_vendor",

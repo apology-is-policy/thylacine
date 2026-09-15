@@ -71,6 +71,33 @@ void test_dtb_pci_intx_route(void) {
                 "NULL out_gic_intid should return false");
 }
 
+void test_dtb_pci_intid_is_level(void) {
+    TEST_ASSERT(dtb_is_ready(), "DTB must be initialized post-phys_init");
+
+    // F-A1 / I-15: QEMU virt declares the PCIe INTx lines (GIC INTID 35..38,
+    // the full swizzle set from test_dtb_pci_intx_route) as LEVEL-triggered in
+    // the interrupt-map flags cell. dtb_pci_intid_is_level must resolve each to
+    // LEVEL -- the trigger kobj_irq_create derives + configures for a PCI line.
+    for (u32 intid = 35; intid <= 38; intid++) {
+        bool level = false;
+        bool got = dtb_pci_intid_is_level(intid, &level);
+        TEST_ASSERT(got, "PCI INTx INTID 35..38 found in the interrupt-map");
+        TEST_ASSERT(level, "PCI INTx is LEVEL-triggered per the DTB flags cell");
+    }
+
+    // A non-PCI SPI (96, the irqfwd/irq-probe test line) is absent from the
+    // interrupt-map -> false; kobj_irq_create then keeps the EDGE default (the
+    // I-15-argued fallback, ARCH 9.3.1), leaving *out_level untouched.
+    bool l = true;
+    TEST_ASSERT(!dtb_pci_intid_is_level(96, &l),
+                "a non-PCI SPI is not in the interrupt-map");
+    TEST_EXPECT_EQ((u64)l, (u64)1u, "a failed lookup must not write *out_level");
+
+    // NULL out -> false.
+    TEST_ASSERT(!dtb_pci_intid_is_level(35, NULL),
+                "NULL out_level should return false");
+}
+
 // pci-1a: the PCIe 32-bit MMIO window (the `ranges` entry the kernel
 // assigns BARs from). QEMU virt: base 0x10000000, ~768 MiB.
 void test_dtb_pci_mem_window(void) {

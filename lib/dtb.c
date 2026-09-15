@@ -736,6 +736,82 @@ bool dtb_pci_intx_route(u8 pci_dev, u8 pin, u32 *out_gic_intid) {
     return false;
 }
 
+// The GIC DT interrupt-flags cell (the 3rd of `<type intid flags>`) low nibble
+// encodes the trigger sense: 1 = edge-rising, 2 = edge-falling, 4 = level-high,
+// 8 = level-low (Linux dt-bindings/interrupt-controller/irq.h). The GIC honours
+// level-high + edge-rising; classify 4/8 as level, anything else as edge.
+#define DTB_IRQ_SENSE_MASK   0xfu
+#define DTB_IRQ_LEVEL_HIGH   0x4u
+#define DTB_IRQ_LEVEL_LOW    0x8u
+
+// Reverse of dtb_pci_intx_route (F-A1 / I-15): given a GIC SPI INTID that
+// resolves through the PCIe interrupt-map, report whether the DTB declares it
+// LEVEL-triggered (virtio-PCI INTx) via the row's flags cell -- the cell
+// dtb_pci_intx_route loads-adjacent but discards. Returns true + *out_level on a
+// match; false if `intid` is not a PCI-INTx line in the map, in which case the
+// caller keeps the edge default (the I-15-argued fallback; ARCH 9.3.1). Same
+// interrupt-map walk + stride derivation as dtb_pci_intx_route, kept a separate
+// self-contained query per this file's one-query-one-walk idiom.
+bool dtb_pci_intid_is_level(u32 intid, bool *out_level) {
+    if (!out_level) return false;
+
+    const uint8_t *mask_d, *map_d;
+    uint32_t mask_len, map_len;
+    if (!dtb_get_compat_prop(DTB_PCI_COMPAT, "interrupt-map-mask",
+                             &mask_d, &mask_len))
+        return false;
+    if (!dtb_get_compat_prop(DTB_PCI_COMPAT, "interrupt-map",
+                             &map_d, &map_len))
+        return false;
+
+    if (mask_len == 0 || (mask_len % 4) != 0) return false;
+    uint32_t child_cells = mask_len / 4;
+    if (child_cells < 1 || child_cells > DTB_PCI_CHILD_MAX) return false;
+
+    if (map_len == 0 || (map_len % 4) != 0) return false;
+    uint32_t total_cells = map_len / 4;
+    if (total_cells < child_cells + 1 + DTB_GIC_INT_CELLS) return false;
+
+    // Per-row stride: identical derivation to dtb_pci_intx_route -- the first
+    // clean recurrence of the parent phandle that divides the table, else the
+    // documented QEMU-virt layout (child + phandle + 2 parent-addr + 3 int).
+    uint32_t phandle = be32_load(map_d + (size_t)child_cells * 4);
+    uint32_t stride = 0;
+    if (phandle != 0) {
+        for (uint32_t i = child_cells + 1; i < total_cells; i++) {
+            if (be32_load(map_d + (size_t)i * 4) != phandle) continue;
+            uint32_t s = i - child_cells;
+            if (s >= child_cells + 1 + DTB_GIC_INT_CELLS &&
+                (total_cells % s) == 0) {
+                stride = s;
+                break;
+            }
+        }
+    }
+    if (stride == 0) {
+        stride = child_cells + 1u + 2u + DTB_GIC_INT_CELLS;
+        if ((total_cells % stride) != 0) return false;
+    }
+
+    // Scan every row for the first GIC SPI whose resolved INTID matches. All
+    // PCI INTx rows declare the same sense (level), so first-match is sound
+    // even when several (dev,pin) rows swizzle to one shared line.
+    uint32_t nrows = total_cells / stride;
+    for (uint32_t r = 0; r < nrows; r++) {
+        const uint8_t *row = map_d + (size_t)r * stride * 4;
+        uint32_t itype = be32_load(row + (size_t)(stride - 3) * 4);
+        uint32_t rid   = be32_load(row + (size_t)(stride - 2) * 4);
+        uint32_t flags = be32_load(row + (size_t)(stride - 1) * 4);
+        if (itype != DTB_GIC_SPI_TYPE) continue;
+        if (rid > 1019u - DTB_GIC_SPI_BASE) continue;
+        if (DTB_GIC_SPI_BASE + rid != intid) continue;
+        uint32_t sense = flags & DTB_IRQ_SENSE_MASK;
+        *out_level = (sense == DTB_IRQ_LEVEL_HIGH) || (sense == DTB_IRQ_LEVEL_LOW);
+        return true;
+    }
+    return false;
+}
+
 // Shared walker for both MMIO windows. `want_space` is the phys.hi[25:24]
 // code: 0b10 = 32-bit MMIO, 0b11 = 64-bit MMIO.
 static bool dtb_pci_window_of(uint32_t want_space, u64 *out_base, u64 *out_size) {

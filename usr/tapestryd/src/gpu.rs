@@ -460,17 +460,27 @@ const VIRTQ_DESC_F_NEXT: u16 = 1;
 const VIRTQ_DESC_F_WRITE: u16 = 2;
 
 // Wall-clock bound on the STALE-WAKE regime before the submit is declared
-// wedged (the G-5 F1 close). Anchored LAZILY at the first stale wake -- a
-// device that never interrupts at all still blocks in irq.wait() forever
-// (the pre-existing all-virtio-drivers posture) -- so the deadline trips
-// only on EVENT-ful non-progress: >= this many ms of interrupt-ish events
-// (a config-IRQ train from host window resizes, re-latched levels) with
-// used.idx never retiring our command. A healthy device retires a 2D
-// command in microseconds, so 500 ms is 5+ orders of margin; the first-cut
-// bound here was a wake COUNT (16), which a resize config-storm during one
-// slow-but-healthy present could exhaust -- a false dead-latch whose
-// consequence is exactly the permanent console loss #31 exists to prevent.
+// wedged (the G-5 F1 close). Anchored LAZILY at the first stale wake -- so the
+// deadline trips on EVENT-ful non-progress: >= this many ms of wakes (an
+// interrupt-ish train from host window resizes / re-latched levels, OR the
+// GPU_IRQ_WAIT_TIMEOUT_NS re-poll below) with used.idx never retiring our
+// command. A healthy device retires a 2D command in microseconds, so 500 ms is
+// 5+ orders of margin; the first-cut bound here was a wake COUNT (16), which a
+// resize config-storm during one slow-but-healthy present could exhaust -- a
+// false dead-latch whose consequence is exactly the permanent console loss #31
+// exists to prevent. F-A1 (C): before the timed wait, a device that never
+// interrupted blocked in irq.wait() FOREVER and this deadline was unreachable
+// (stale_since was only set on a post-wake iteration) -- the silent no-wake
+// hang. The timeout now converts a no-wake hang into periodic timeout wakes,
+// so the loop iterates, drains (catching a lost completion), and reaches this
+// deadline -- the F-A1 mask+ack cures the cause; this bounds the class.
 const SUBMIT_DEADLINE_MS: u64 = 500;
+// F-A1 (C): the per-wait timeout that paces the stale-wake re-poll. Short vs
+// SUBMIT_DEADLINE_MS so several drains (each a chance to catch a lost
+// completion) run before the engine is declared dead. A healthy present
+// returns on the real IRQ in microseconds -- this fires only when a completion
+// is late or its interrupt was lost, so its cost is paid only off the normal path.
+const GPU_IRQ_WAIT_TIMEOUT_NS: u64 = 100_000_000; // 100 ms
 // Bounded used.idx re-poll between stale wakes. If the wake WAS our
 // completion's notification but the used.idx store is still propagating
 // (the #31 live-display window), no further interrupt is coming -- the
@@ -1487,7 +1497,12 @@ impl Controlq {
         let mut wakes = 0u32;
         let mut stale_since: Option<Instant> = None;
         'wait: loop {
-            if self.irq.wait().is_err() {
+            // F-A1 (C): a BOUNDED wait. A timeout returns Ok(0) -- NOT an error;
+            // the loop then reads the ISR, drains (catching a completion whose
+            // interrupt was lost), and advances the stale-wake deadline, instead
+            // of blocking forever on a never-delivered IRQ. Only an ABI error
+            // (bad handle / a 2nd concurrent waiter) latches dead here.
+            if self.irq.wait_timeout(GPU_IRQ_WAIT_TIMEOUT_NS).is_err() {
                 say!("tapestryd: gpu SYS_IRQ_WAIT returned error");
                 self.dead = true;
                 return Err(());

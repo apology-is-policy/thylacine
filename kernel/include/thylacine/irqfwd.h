@@ -58,6 +58,10 @@ struct KObj_IRQ {
     u64           magic;        // KOBJ_IRQ_MAGIC
     u32           intid;        // GIC INTID (SGI / PPI / SPI)
     int           ref;          // refcount (kobj_irq_create starts at 1)
+    bool          level;        // F-A1: DTB-derived trigger. true = level (mask
+                                //   on dispatch, unmask on re-wait); false = edge
+                                //   (the no-mask fast path). Immutable post-create,
+                                //   published before gic_attach -> read lock-free.
     struct Rendez rendez;       // single-waiter; lock guards the fields below
     u32           pending_count; // collapsed-IRQ count since last wait
     bool          waiting;      // RW-7 R1-F1: a kobj_irq_wait holds the slot
@@ -108,6 +112,15 @@ void kobj_irq_destroy(struct KObj_IRQ *k);
 // Spurious wake from a non-IRQ source is ABSENT — sleep's cond loop
 // guarantees we only return when pending_count > 0.
 u32 kobj_irq_wait(struct KObj_IRQ *k);
+
+// Like kobj_irq_wait, bounded by `timeout_ns` (relative nanoseconds;
+// 0 == wait forever, i.e. exactly kobj_irq_wait). On a timeout the return
+// is a collapsed count of 0 -- a driver treats 0 the same on timeout as on
+// death (re-check the device used-ring and continue / unwind), so the two
+// need not be distinguished at the ABI. F-A1 (C): a level driver's timeout
+// wake re-checks the device, catching a lost completion instead of hanging
+// forever on a never-delivered interrupt. kobj_irq_wait is this with 0.
+u32 kobj_irq_wait_timed(struct KObj_IRQ *k, u64 timeout_ns);
 
 // Diagnostic: cumulative IRQ counter (every fire ever observed) +
 // live KObj_IRQ count.

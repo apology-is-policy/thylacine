@@ -362,11 +362,14 @@ static s64 sys_irq_create_handler(u64 intid, u64 rights) {
 // SYS_IRQ_WAIT — block until at least one IRQ has fired since last wait.
 // =============================================================================
 //
-// AArch64 ABI: x0 = handle index.
+// AArch64 ABI: x0 = handle index, x1 = timeout in nanoseconds (0 = wait
+// forever). F-A1 (C): a nonzero timeout bounds a lost completion -- the wait
+// then returns count 0 (indistinguishable from death at the ABI, which is
+// intended: both mean "no IRQ to service; re-check the device or unwind").
 //
-// Returns: count of collapsed IRQs that fired (always >= 1), or
-// (u64)-1 on bad handle / wrong kind / missing right.
-static s64 sys_irq_wait_handler(u64 hraw) {
+// Returns: count of collapsed IRQs that fired (always >= 1), 0 on timeout,
+// or (u64)-1 on bad handle / wrong kind / missing right.
+static s64 sys_irq_wait_handler(u64 hraw, u64 timeout_ns) {
     struct Thread *t = current_thread();
     if (!t)                                          return -1;
     struct Proc *p = t->proc;
@@ -395,7 +398,7 @@ static s64 sys_irq_wait_handler(u64 hraw) {
     struct KObj_IRQ *k = (struct KObj_IRQ *)hh.obj;
     if (!k)                                { handle_put(&hh); return -1; }
 
-    u32 count = kobj_irq_wait(k);
+    u32 count = kobj_irq_wait_timed(k, timeout_ns);
     handle_put(&hh);
     // RW-7 R1-F1: a 2nd concurrent waiter on the single-waiter KObj_IRQ is
     // refused (would otherwise extinct the kernel at sleep's single-waiter
@@ -14280,7 +14283,7 @@ void syscall_dispatch(struct exception_context *ctx) {
         return;
 
     case SYS_IRQ_WAIT:
-        ctx->regs[0] = (u64)sys_irq_wait_handler(ctx->regs[0]);
+        ctx->regs[0] = (u64)sys_irq_wait_handler(ctx->regs[0], ctx->regs[1]);
         return;
 
     case SYS_MMIO_MAP:

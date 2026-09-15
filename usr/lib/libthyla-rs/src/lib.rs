@@ -1085,15 +1085,37 @@ pub unsafe fn t_irq_create(intid: u32, rights: u32) -> i64 {
 // rendez lock); -1 on validation failure (bad handle, missing
 // RIGHT_SIGNAL).
 //
-// Edge-triggered: multiple fires while the waiter is blocked collapse
-// to a single counter increment per actual GIC dispatch, but the
-// returned value reflects the count seen at wake time.
+// Multiple fires while the waiter is blocked collapse to a single counter
+// increment per actual GIC dispatch, but the returned value reflects the
+// count seen at wake time. x1 = 0 (wait forever); use t_irq_wait_timeout for
+// a bounded wait (F-A1 C -- SYS_IRQ_WAIT reads x1 as a ns timeout, so x1 MUST
+// be set even for the forever case, else a stale register reads as a timeout).
 #[inline(always)]
 pub unsafe fn t_irq_wait(handle: i64) -> i64 {
     let mut x0: i64 = handle;
     asm!(
         "svc #0",
         inlateout("x0") x0,
+        in("x1") 0u64,
+        in("x8") T_SYS_IRQ_WAIT,
+        options(nostack)
+    );
+    x0
+}
+
+// t_irq_wait_timeout — like t_irq_wait but bounded by `timeout_ns` relative
+// nanoseconds (0 == forever). On a timeout the return is a collapsed count of
+// 0 (indistinguishable from death at the ABI, which is intended: both mean "no
+// IRQ to service -- re-check the device or unwind"). F-A1 (C): a level driver's
+// timeout wake re-checks the device used-ring, catching a lost completion
+// instead of hanging forever on a never-delivered interrupt.
+#[inline(always)]
+pub unsafe fn t_irq_wait_timeout(handle: i64, timeout_ns: u64) -> i64 {
+    let mut x0: i64 = handle;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") timeout_ns,
         in("x8") T_SYS_IRQ_WAIT,
         options(nostack)
     );

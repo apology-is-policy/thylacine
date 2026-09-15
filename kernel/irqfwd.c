@@ -18,6 +18,7 @@
 //     zero pending_count (an IRQ that fires between sleep's return
 //     and our zeroing must NOT be lost).
 
+#include <thylacine/dtb.h>                   // F-A1: dtb_pci_intid_is_level
 #include <thylacine/extinction.h>
 #include <thylacine/irqfwd.h>
 #include <thylacine/rendez.h>
@@ -169,8 +170,20 @@ static void kobj_irq_dispatch(u32 intid, void *arg) {
     irq_state_t s = spin_lock_irqsave(&k->rendez.lock);
     if (k->dying) {
         spin_unlock_irqrestore(&k->rendez.lock, s);
-        return;             // teardown owns *k now
+        return;             // teardown owns *k now (it already masked the line)
     }
+    // F-A1: a LEVEL line (virtio-PCI INTx) stays asserted until the driver acks
+    // the device, so mask it at the GIC HERE -- inside gic_dispatch, before the
+    // exception vector's EOI -- so the still-high line does not immediately
+    // re-fire (an unrecoverable storm) after the EOImode=0 deactivate.
+    // kobj_irq_wait unmasks on re-arm once the driver has acked + re-waits.
+    // gic_disable_irq is a lock-free write-1-to-clear to ICENABLER, safe under
+    // rendez.lock. EDGE keeps the no-mask fast path (an edge latches a pending
+    // bit that survives). k->level is immutable post-create (published before
+    // gic_attach). A dispatch that raced teardown returns above WITHOUT masking:
+    // free_internal already called gic_disable_irq (kobj_irq_free_internal),
+    // so the line is masked either way.
+    if (k->level) gic_disable_irq(k->intid);
     // RW-7 round-2 F3: saturate at 0xFFFFFFFE so a pathological un-drained count
     // can never equal KOBJ_IRQ_WAIT_BUSY (0xFFFFFFFF). Drivers handle collapsed
     // IRQs via used-ring state anyway, so the exact count past the cap is moot.
@@ -209,18 +222,30 @@ struct KObj_IRQ *kobj_irq_create(u32 intid) {
     rendez_init(&k->rendez);
     k->pending_count = 0;
 
-    // P4-Ic5b2: SPIs claimed via kobj_irq_create are edge-triggered by
-    // default. The kernel GIC init pre-configures all SPIs to level
-    // (the safer unknown-signalling default); the device-driver layer
-    // knows its IRQ is edge-triggered (QEMU virt's virtio-mmio +
-    // typical real-ARM virtio devices) and flips ICFGR here. Phase 5+
-    // can add a `bool edge_triggered` parameter or a DTB-driven default
-    // when level-triggered userspace IRQs become a real use case. For
-    // SGIs/PPIs (intid < 32) the helper is a no-op — SGIs are always
-    // edge per IHI 0069 §12.9.7, and PPIs are kernel-reserved at v1.0
-    // (timer at 30, IPIs at 0).
+    // F-A1: derive the SPI trigger from the DTB (I-15) rather than forcing
+    // edge. virtio-PCI legacy INTx is LEVEL; virtio-mmio is EDGE. A level line
+    // forced to edge drops an overlapping re-assertion (the line stays high ->
+    // no fresh rising edge -> the GIC latches no new pending), and the driver's
+    // kobj_irq_wait then blocks forever -- on the single-threaded compositor a
+    // synchronous GPU present wedges the display (the intermittent console-gate
+    // silence). Read the trigger from the PCIe interrupt-map's flags cell; an
+    // SPI absent from the map keeps the edge default -- the I-15-argued fallback
+    // (QEMU-virt declares virtio-mmio EDGE_RISING; SGIs are always edge; a
+    // strict superset of the old universal-edge). ICFGR is set EXPLICITLY both
+    // ways so a reused INTID never inherits a stale config. SGIs/PPIs
+    // (intid < 32) skip ICFGR -- SGIs are always edge (IHI 0069 12.9.7); PPIs
+    // are kernel-reserved at v1.0 (timer at 27, IPIs at 0). k->level is set
+    // BEFORE gic_attach so the dispatch/wait mask+ack reads a published value
+    // (no fire can route here until gic_attach + gic_enable_irq below).
+    k->level = false;
     if (intid >= 32) {
-        gic_set_spi_edge_triggered(intid);
+        bool lvl = false;
+        if (dtb_pci_intid_is_level(intid, &lvl) && lvl) {
+            k->level = true;
+            gic_set_spi_level_triggered(intid);
+        } else {
+            gic_set_spi_edge_triggered(intid);
+        }
     }
 
     // Register handler + enable the IRQ. gic_attach binds (intid →
@@ -347,12 +372,12 @@ static int kobj_irq_pending_cond(void *arg) {
     return k->pending_count > 0;
 }
 
-u32 kobj_irq_wait(struct KObj_IRQ *k) {
+u32 kobj_irq_wait_timed(struct KObj_IRQ *k, u64 timeout_ns) {
     if (!k) return 0;
     if (k->magic != KOBJ_IRQ_MAGIC)
         extinction("kobj_irq_wait of corrupted KObj_IRQ");
 
-    // RW-7 R1-F1: the Rendez is single-waiter -- sleep() EXTINCTS the kernel
+    // RW-7 R1-F1: the Rendez is single-waiter -- tsleep() EXTINCTS the kernel
     // on a 2nd concurrent sleeper (sched.c "rendez already has a waiter"). But
     // the KObj_IRQ handle lives in the per-Proc handle table, SHARED across a
     // multi-thread Proc's peer Threads, so two of them could both reach a
@@ -367,6 +392,17 @@ u32 kobj_irq_wait(struct KObj_IRQ *k) {
     k->waiting = true;
     spin_unlock_irqrestore(&k->rendez.lock, s);
 
+    // F-A1: re-arm a LEVEL line before sleeping. kobj_irq_dispatch masked it on
+    // the last fire; the driver has since acked the device (deasserting the
+    // line) and re-entered here. gic_enable_irq is a lock-free write-1-to-set to
+    // ISENABLER; if a new completion arrived while masked the still-high level
+    // re-triggers at once (no loss), otherwise the deasserted line stays quiet.
+    // I-9 holds: the unmask can only CAUSE a dispatch (which increments
+    // pending_count under rendez.lock), and tsleep's cond re-checks
+    // pending_count under the same lock, so no wakeup is lost. EDGE lines are
+    // never masked, so the branch is skipped for them.
+    if (k->level) gic_enable_irq(k->intid);
+
     // RW-11 SA-1b: an IRQ-service thread is latency-critical -- its wake should
     // preempt NORMAL work. Promote it to the INTERACTIVE band (ARCH 8.3) so the
     // pending IRQ runs it ahead of any NORMAL thread sharing its CPU (closes the
@@ -374,20 +410,36 @@ u32 kobj_irq_wait(struct KObj_IRQ *k) {
     // threads; the driver thread is the current thread here (pre-sleep).
     sched_mark_interactive(current_thread());
 
-    // Block until pending_count > 0. sleep's cond loop guarantees no
-    // spurious return. #811 (ARCH §8.8.1): a death-interrupted sleep means the
-    // Proc is group-terminating -- return so the Thread unwinds to its EL0-
-    // return die-check (the count is immaterial; the Thread never reaches EL0).
-    int rc = sleep(&k->rendez, kobj_irq_pending_cond, k);
+    // Block until pending_count > 0, bounded by the deadline (F-A1 C). tsleep's
+    // cond loop guarantees no spurious return; cond has precedence over the
+    // deadline. deadline_ns == 0 -> no deadline (exactly sleep()). #811 (ARCH
+    // §8.8.1): TSLEEP_INTR means the Proc is group-terminating -- return so the
+    // Thread unwinds to its EL0-return die-check (the count is immaterial; the
+    // Thread never reaches EL0). TSLEEP_TIMEDOUT means no IRQ arrived within the
+    // timeout; the driver treats the count-0 return as "re-check the device
+    // used-ring + continue", catching a lost completion instead of hanging.
+    u64 deadline_ns = 0;
+    if (timeout_ns != 0) {
+        u64 now = timer_now_ns();
+        deadline_ns = now + timeout_ns;
+        if (deadline_ns < now) deadline_ns = ~0ull;  // u64 overflow: clamp, never 0 (= "no deadline")
+    }
+    int rc = tsleep(&k->rendez, kobj_irq_pending_cond, k, deadline_ns);
 
     // Re-take the lock to clear the waiter slot AND atomically read + zero
-    // pending_count. An IRQ that fires between sleep's return and this read
+    // pending_count. An IRQ that fires between tsleep's return and this read
     // MUST NOT be lost -- it is reflected in the next wait; `count` returned
-    // here captures only the IRQs that arrived BEFORE the lock acquire.
+    // here captures only the IRQs that arrived BEFORE the lock acquire. On
+    // TSLEEP_TIMEDOUT cond had precedence, so pending_count is 0 (count 0);
+    // TSLEEP_INTR (death) also returns 0.
     s = spin_lock_irqsave(&k->rendez.lock);
     k->waiting = false;
-    u32 count = (rc == SLEEP_INTR) ? 0u : k->pending_count;
+    u32 count = (rc == TSLEEP_INTR) ? 0u : k->pending_count;
     k->pending_count = 0;
     spin_unlock_irqrestore(&k->rendez.lock, s);
     return count;
+}
+
+u32 kobj_irq_wait(struct KObj_IRQ *k) {
+    return kobj_irq_wait_timed(k, 0);
 }
