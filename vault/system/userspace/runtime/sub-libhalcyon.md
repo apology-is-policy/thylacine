@@ -509,5 +509,26 @@ steps, the pixel helpers' rounding, the EDID parse's fail-safe arms, a short
 millimetre axis never truncating off the table (the clamp-ordering regression),
 and the declaration being the last whole-word token with a table value.
 
+## `halcyon workspace <n>` -- the tool verb that needed no new channel (2026-09-15, W-2b)
+
+`Cmd::Workspace { n }` and its `parse_cmd` arm. One-based, bounded 1..=9 in
+the PARSER as well as in the compositor -- the tool should name what is wrong
+rather than forward a number the tree refuses with an errno the user never
+sees.
+
+**The part worth recording is what did NOT have to be built.** The verb rides
+the `layout` file, and the tool's own `/srv/tapestry` conn already resolves to
+`Actor::Session(principal)` -- the same actor halcyond gets, and the route
+HALCYON.md 13.7 ratified for `halcyon layout restore`. So no service, no
+`SPAWN_PERM_MAY_POST_SERVICE`, no protocol, no new authority model. An earlier
+claim of mine -- that the tool had to reach the switch "through halcyond, the
+way the theme picker's word travels" -- was disproved: the picker is a menu
+INSIDE halcyond and `write_user_pick` is halcyond WRITING the user's file, so
+that precedent runs the opposite way, and halcyond posts no service at all.
+
+Five parser tests, one of them the control: `workspace` must be its OWN
+subcommand and not fall through to the unknown-command arm, which is the
+failure the other four would all still pass under.
+
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)
