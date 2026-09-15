@@ -23,6 +23,149 @@ needed the operator.
 
 ---
 
+## Run 47 (2026-09-15, Fable 5.1 max, then Opus 4.8 mid-run) -- Halcyon Instrument I-7: the theme picker, live switching, and the dialog family
+
+### What this run was for
+
+I-7 of the Instrument arc: the display-theme picker the mockup's rail
+control opens, LIVE theme switching (no restart), and the first members of
+the section-14.5 dialog family (the RESET confirmation and the
+running-close confirmation). The help modal was already carved off to
+I-7b in the scripture. The design was settled under the standing
+operator-away authorization on Fable and landed as a scripture commit
+(`4f95fff8`) before any code -- 9.4 (the picker + transaction), 14.5 (the
+dialogs), 9.3 (the chords), 4.2 (the schema's three optional keys), 7.3
+(the picker's colours), 8.1 (the control).
+
+### The model change mid-run, and what it did to the rules
+
+The session started on Fable 5.1 and switched to **Opus 4.8** partway
+through (the harness re-stamped the attribution footer and the model
+line). Two standing rules turn on the family: the operator-away policy
+auto-ratifies a heritage-aligned design ONLY on Fable (on Opus, stop at
+the first user-input item), and the reviewer-diversity math counts "the
+author". The I-7 DESIGN was already ratified and committed as scripture
+under Fable, so implementing it was ordinary work and continued; from the
+switch on, no NEW design fork was auto-ratified. The commits from the
+switch carry the Opus footer; the scripture commit carries Fable's.
+
+### What landed
+
+- **The schema (libhalcyon).** `instrument::Group` (dark/terminal/light)
+  and three OPTIONAL `[meta]` keys -- `group`, `tagline`, `rank` --
+  validated when present, defaulted when absent. The picker's grouping,
+  subtitles and order are DOM facts no sidecar carried, so a new
+  `tools/halcyon/picker.json` (the mockup's 13 rows) feeds the generator,
+  which writes the keys into each gallery file; the 13 files were
+  regenerated. An older binary still refuses a file carrying the new keys,
+  whole -- the required five are unchanged.
+- **The pure models (host-tested).** `picker.rs` -- the registry is the
+  gallery DIRECTORY (read at every open; a theme dropped in appears with
+  no restart), sorted by (group order, rank, id), the miniature in EACH
+  theme's own four colours (`desktop`/`open`/`structure`/`amber`, verified
+  against the mockup's `--pv-*` table for all 13), keys wrap, Space and
+  Enter commit, the overflow thumb through a factored `indicator::thumb_raw`
+  (min 18). `dialog.rs` -- the 14.5 frame, the default button amber, a
+  destructive one error and never pre-focused.
+- **One surface, three models.** `menuset` now carries a `Model` enum
+  (Verbs | Picker | Dialog) on the ONE Role::Menu surface, so the
+  compositor's grab, click-away and Esc (H-3c) serve all three unchanged;
+  a click commits the picker / activates a dialog button.
+- **The chord.** A new `TEV_CHORD` (12) the compositor DELIVERS to the
+  registered rail's owner rather than acting on -- the picker and help live
+  in the environment. Super+T picker, Super+Shift+T tabbed, Super+/ help;
+  the chord layer dismisses any placed menu first, so Super+T over an open
+  picker RE-OPENS it (deterministic within one wake) rather than toggling
+  across two surfaces.
+- **The live transaction.** Stage the gallery bundle, push the `theme`
+  verb, rebuild the seat's sheet at a new generation, RE-THEME the retained
+  transcript and grid in place, tell each pts host the new palette over a
+  new down-wire record (`Input::Palette`; kaua-term applies it with a new
+  `Vt::set_palette` and re-emits), re-publish `/env` for future spawns,
+  then -- on the SESSION seat only -- durably write `$HOME/lib/halcyon/theme`.
+  The console seat applies live and persists nothing (says NOT SAVED). The
+  old->new cell remap is ONE function (`vt::remap_color`) at all three
+  sites, so the seam and the scrollback beside it cannot disagree; a
+  truecolor value equal to an old palette entry is remapped with it, the
+  documented cost.
+- **RESET and close now ask.** RESET opens the 14.5 confirmation (default
+  `Reset layout`); the header x / tile-menu Close on a RUNNING tile asks
+  (Cancel default, Close tile destructive, never pre-focused). Super+Q
+  stays the compositor's structural close.
+
+### The wrong turn the self-audit caught (before the gate)
+
+The transaction rebuilt the seat's sheet UNCONDITIONALLY after
+`push_theme` -- but `push_theme` returned nothing, so a compositor refusal
+would have left the chrome on the old theme while the panes switched, a
+partial state that violates 9.4's invariant (b) ("a refusal keeps the
+previous colours"). In practice a declared session and the renderer are
+never refused, so it is a latent-P1 reachable-but-undriven path, not a
+live break -- exactly the class the self-audit exists to catch before a
+prosecutor does. The fix makes `push_theme` return whether the push was
+accepted and gates the rebuild on it; on refusal the seat keeps its
+bundle and says THEME REFUSED (`push_theme` returns whether the compositor accepted; the ThemeChosen arm's guard gates the rebuild on it).
+
+### The second wrong turn: a gate assertion the code satisfied but the pattern refused
+
+The first five-image fleet came back `rc=1` -- ls-halcyon-instrument alone,
+on the new theme leg's footer-notice assertion ("the footer did not report
+the live theme"). The commit say had fired, the picker had opened and
+committed Signal live; only the assertion missed. Ground truth settled it:
+the notice WAS in the transcript, painted exactly as
+`notice "THEME . SIGNAL AMBER (NOT SAVED)"`. Testing the exact regexp
+against the exact line in `tclsh` -- and then each sub-pattern -- showed
+every piece matched except the whole: the pattern ended `NOT SAVED"`, a
+closing quote demanded immediately after "NOT SAVED", but the painted text
+is `(NOT SAVED)"` -- a `)` sits between. An over-specified gate assertion,
+not a code defect; the fix drops the trailing quote. The lesson is the old
+one in a new place: a red gate is a finding about EITHER the code OR the
+check, and the cheap decisive experiment (the pattern in isolation) tells
+you which before you touch the code. The other four images passed the
+first time; the re-gate over the two Instrument images (the regexp fix + the
+push_theme accept-gate) came back with the SESSION gate green [68s] and the
+CONSOLE gate red -- but on the I-6 DIVIDER Escape leg, not the theme leg:
+the tracked I-6 compositor-silence bug recurred (the new `divider hover`
+witness fired at 994,404, then the press produced no output). The code read
+advanced it: `wait_sync_done` has a deadline that SAYS on trip
+(gpu.rs:1530), and the silent run said nothing for 90 s, so the compositor
+is not stuck in a GPU present -- virtio-input eventq starvation after the
+gate's heavy pointer traffic (hypothesis a) is now favored over a re-fit
+stall (b). Not an I-7 regression: the divider path is byte-identical to the
+first fleet, which passed every divider leg. See
+`bug_i6_console_gate_compositor_silent_once` for the advanced hunt.
+
+### Posture at hand-off
+
+The I-7 code is complete and host-green (libhalcyon 119, tapestryd 41,
+halcyond 279, nora 249, vt 63, kaua-term 44) and gate-verified for its own
+surface: the SESSION gate -- which fully exercises the picker, Super+T, the
+live commit and the durable write -- passed green TWICE (the first fleet and
+the re-gate); ci / halcyon / compose passed the first fleet; the console
+gate reached the picker/RESET-dialog/theme legs in the first fleet and my
+one console-gate defect (an over-specified notice regexp) is fixed and
+verified against the exact transcript line in tclsh. The push is HELD: the
+console gate is red THIS run on the pre-existing I-6 divider-silence bug, so
+the tree is not all-green, and a push is an escalation-worthy outward action
+the operator should weigh (I-6 itself was pushed only on a green landing
+run). Owed: a clean console-gate run (without re-running-to-green to paper
+over I-6) or the operator's call, then push `5a7c0539`+ to both mirrors.
+
+### What is open
+
+- I-7b: the help modal (its own 540-wide frame, different from 14.5's
+  family) and Super+Q asking before a running job (the chord delivered to
+  the owner as the picker's now is).
+- The residues recorded in 13: the console seat's non-persistence, a
+  running program not told of a theme change (`/env` is per-Proc; the
+  cooperative nudge for a running `nora` is a channel that does not exist
+  yet), the two legacy-schema gallery files the picker does not offer.
+- Round 3 (the doubled-distance batch) over I-6 + I-7 + the r2 fixes, on
+  Opus prosecutors -- the AUDIT-TRIGGERS I-7 row's (a)-(i) are the
+  invariants.
+
+---
+
 ## Run 46o (2026-09-14, Fable 5.1 max) -- the Halcyon Instrument arc opens: reading the Carbon Optics kit against the tree
 
 ### What this run was for

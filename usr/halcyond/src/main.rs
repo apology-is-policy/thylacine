@@ -451,7 +451,7 @@ pub extern "C" fn rs_main() -> i64 {
     // per-pass layout budget was already spent got one attempt and gave up
     // permanently -- on the very path that exists because the compositor
     // cannot read the file itself.
-    session::push_theme(&ring, &bundle);
+    let _ = session::push_theme(&ring, &bundle);
     let mut sheet = sheet_for(&bundle, display.scale, display.w);
     gs.set_smooth(sheet.smooth_mem);
     gs.set_kerning(sheet.kerning);
@@ -1168,9 +1168,10 @@ pub extern "C" fn rs_main() -> i64 {
                 // system word is the bake's) -- it says so.
                 menus.close();
                 match session::gallery_bundle(&id, sheet.bundle().profile) {
-                    Some((newb, name)) => {
+                    Some((newb, name)) if session::push_theme(&ring, &newb) => {
+                        // 9.4 (b): the seat moves only on an ACCEPTED push, so
+                        // the chrome and the panes cannot disagree.
                         let old_term = sheet.theme.terminal;
-                        session::push_theme(&ring, &newb);
                         let gen = sheet.gen + 1;
                         sheet = sheet_for(&newb, sheet.scale, sheet.display_w);
                         sheet.gen = gen;
@@ -1194,6 +1195,11 @@ pub extern "C" fn rs_main() -> i64 {
                         };
                         say!("halcyond: theme {} applied (console; not persisted)", id);
                         status.notify(&alloc::format!("THEME \u{b7} {} (NOT SAVED)", theme_name.to_uppercase()), true);
+                    }
+                    Some(_) => {
+                        say!("halcyond: theme {} refused by the compositor -- keeping the current", id);
+                        status.notify("THEME REFUSED", true);
+                        dirty = true;
                     }
                     None => {
                         say!("halcyond: theme {} refused (no gallery file)", id);

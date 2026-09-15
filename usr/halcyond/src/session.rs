@@ -1114,13 +1114,13 @@ fn reconcile(
 /// attempt and gave up for the life of the boot -- and the console's push is
 /// the LOAD-BEARING one, since tapestryd comes up before the pool it would
 /// read the theme file from is mounted. One implementation, both renderers.
-pub(crate) fn push_theme(ring: &EventRing, bundle: &libhalcyon::instrument::Bundle) {
+pub(crate) fn push_theme(ring: &EventRing, bundle: &libhalcyon::instrument::Bundle) -> bool {
     let cmd = format!("theme {}", libhalcyon::theme::to_wire(bundle));
     for _ in 0..VERB_RETRIES {
         match ring.global_ctl(&cmd) {
             Ok(()) => {
                 say!("halcyond: theme pushed to the compositor");
-                return;
+                return true;
             }
             Err(TapError::Busy) => {
                 let _ = sleep(Duration::from_millis(VERB_NAP_MS));
@@ -1130,11 +1130,12 @@ pub(crate) fn push_theme(ring: &EventRing, bundle: &libhalcyon::instrument::Bund
                     "halcyond: theme push refused ({:?}) -- the chrome keeps its own",
                     e
                 );
-                return;
+                return false;
             }
         }
     }
     say!("halcyond: theme push kept busy -- the chrome keeps its own");
+    false
 }
 
 /// HALCYON-INSTRUMENT 9.4 (I-7): the picker's registry -- every
@@ -1468,7 +1469,7 @@ pub fn run(home: Option<String>) -> i64 {
     // The compositor paints the chrome around our panes and cannot read the
     // user's file; a declared seat is the only party that can tell it.
     if declared {
-        push_theme(&ring, &bundle);
+        let _ = push_theme(&ring, &bundle);
     }
     let mut sheet = sheet_for(&bundle, display.scale, display.w);
     gs.set_smooth(sheet.smooth_mem);
@@ -1666,11 +1667,12 @@ pub fn run(home: Option<String>) -> i64 {
                 menus.close();
                 menu_leaf = None;
                 match gallery_bundle(&id, sheet.bundle().profile) {
-                    Some((newb, name)) => {
+                    Some((newb, name)) if push_theme(&ring, &newb) => {
                         let old_term = sheet.theme.terminal;
-                        // The chrome first: the compositor validates
-                        // independently and either refuses or fans.
-                        push_theme(&ring, &newb);
+                        // The push was ACCEPTED by the compositor (9.4 (b)):
+                        // only now does the seat move, so the chrome and the
+                        // panes can never disagree. A refused push (the arm
+                        // below) keeps the previous bundle whole.
                         // Rebuild the render brain at the new theme (a new
                         // generation: every cached layout re-lays in the new
                         // colours); the geometry does not move.
@@ -1710,6 +1712,13 @@ pub fn run(home: Option<String>) -> i64 {
                             say!("halcyond: theme {} not written (no home or write failed)", id);
                             status.notify(&format!("THEME \u{b7} {} (NOT SAVED)", theme_name.to_uppercase()), true);
                         }
+                    }
+                    Some(_) => {
+                        // gallery_bundle succeeded but the compositor refused
+                        // the push (E_PERM final, or the busy cadence spent):
+                        // the previous bundle, check and colours stand (9.4 (b)).
+                        say!("halcyond: theme {} refused by the compositor -- keeping the current", id);
+                        status.notify("THEME REFUSED", true);
                     }
                     None => {
                         say!("halcyond: theme {} refused (no gallery file)", id);

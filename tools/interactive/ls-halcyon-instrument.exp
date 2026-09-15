@@ -867,7 +867,7 @@ expect {
     eof     { lc_fail "EOF waiting for the theme commit" }
 }
 expect {
-    -re {halcyond: status bar \d+ painted .*notice "THEME[^"]*SIGNAL[^"]*NOT SAVED"} {}
+    -re {halcyond: status bar \d+ painted .*notice "THEME[^"]*SIGNAL[^"]*NOT SAVED\)} {}
     timeout { lc_fail "the footer did not report the live theme" }
     eof     { lc_fail "EOF waiting for the theme notice" }
 }
