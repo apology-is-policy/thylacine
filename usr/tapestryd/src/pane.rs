@@ -236,6 +236,52 @@ pub struct RailReq {
 /// more malformed case: no rail under legacy -- refused as malformed (there
 /// is no strip to be exactly), never as an authority question. The order
 /// is the status bar's: geometry before ownership.
+/// HALCYON-INSTRUMENT 10: the divider drag glow's geometry and values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrackGlow {
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+    /// Section 10's LITERAL, never the `amber` token -- Carbon's amber is
+    /// `#C7B98B` and this is `#D59A42`.
+    pub color: u32,
+    pub alpha: u8,
+    /// Scaled by the same `ipx` the metrics take, so the glow agrees with
+    /// the rule it sits on. NOT clamped here: the executor clamps on the
+    /// read side (`cartoon::GLOW_RADIUS_MAX`), and a second copy of that
+    /// bound is a second thing to keep in step.
+    pub radius: u32,
+}
+
+/// Whether the divider rule at `rule` glows, and how.
+///
+/// `None` unless the Instrument profile is in force AND this is the track
+/// under the DRAG. 9.2 gives the dragged rule `amber` and the merely
+/// hovered one `amber_muted`, but only the drag carries the effect, so the
+/// caller must pass the drag state EXPLICITLY -- inferring it from the ink
+/// would key an effect on a colour, and a token is not a state.
+///
+/// Pure over scalars, so the rule is testable without a compositor. That is
+/// the point: `server.rs` is not in this crate's lib, so a decision made
+/// there has no host witness at all (the same trap that left `chords.rs`'s
+/// tests dormant). `paint_track` executes this; it does not decide it.
+pub fn track_glow(rule: Rect, dragged: bool, instrument: bool, pct: u16) -> Option<TrackGlow> {
+    if !instrument || !dragged || rule.w == 0 || rule.h == 0 {
+        return None;
+    }
+    let blur = libhalcyon::instrument::effects::DIVIDER_DRAG_BLUR;
+    Some(TrackGlow {
+        x: rule.x as i32,
+        y: rule.y as i32,
+        w: rule.w,
+        h: rule.h,
+        color: libhalcyon::instrument::effects::DIVIDER_DRAG,
+        alpha: libhalcyon::instrument::effects::DIVIDER_DRAG_ALPHA,
+        radius: libhalcyon::scale::ipx(blur, pct).max(0) as u32,
+    })
+}
+
 pub fn admit_rail(r: &RailReq) -> StatusAdmit {
     if !r.instrument
         || r.rail_h == 0
@@ -3205,6 +3251,50 @@ impl Layout {
 mod tests {
     use super::*;
     use alloc::vec;
+
+    /// A dragged rule under Instrument at 100 %: section 10's literal, its
+    /// .25 alpha and blur 10, on exactly the rule's own box.
+    #[test]
+    fn a_dragged_rule_glows_with_section_tens_literal() {
+        let rule = Rect { x: 640, y: 70, w: 2, h: 600 };
+        let g = track_glow(rule, true, true, 100).expect("the dragged rule glows");
+        assert_eq!(g.color, 0xFFD5_9A42, "10's rgba(213,154,66)");
+        assert_eq!(g.alpha, 64, ".25");
+        assert_eq!(g.radius, 10, "blur 10 at 100 %");
+        assert_eq!((g.x, g.y, g.w, g.h), (640, 70, 2, 600), "the rule's own box");
+    }
+
+    /// The three states that carry NO glow. Without these the positive is
+    /// satisfied by a rule that glows everything.
+    #[test]
+    fn only_the_dragged_rule_glows() {
+        let rule = Rect { x: 640, y: 70, w: 2, h: 600 };
+        assert_eq!(track_glow(rule, false, true, 100), None, "hovered or resting");
+        assert_eq!(track_glow(rule, true, false, 100), None, "legacy has no tracks");
+        let empty = Rect { x: 640, y: 70, w: 0, h: 600 };
+        assert_eq!(track_glow(empty, true, true, 100), None, "a degenerate rule");
+    }
+
+    /// The blur follows the display scale through the SAME `ipx` the
+    /// metrics take, so the glow cannot drift a pixel from the rule it
+    /// sits on. Not clamped here -- the executor owns that bound.
+    #[test]
+    fn the_glow_radius_follows_the_display_scale() {
+        let rule = Rect { x: 640, y: 70, w: 2, h: 600 };
+        assert_eq!(track_glow(rule, true, true, 200).unwrap().radius, 20, "blur 10 at 200 %");
+        assert_eq!(track_glow(rule, true, true, 150).unwrap().radius, 15);
+    }
+
+    /// Section 10: the effect is a LITERAL, not a token. This is the
+    /// control whose absence let the status glow ship as `inst.success`;
+    /// written here BEFORE the same mistake could be made twice.
+    #[test]
+    fn the_drag_glow_is_not_the_amber_token() {
+        let rule = Rect { x: 640, y: 70, w: 2, h: 600 };
+        let g = track_glow(rule, true, true, 100).unwrap();
+        assert_ne!(g.color, libhalcyon::instrument::builtin().amber, "not `amber`");
+        assert_ne!(g.color, libhalcyon::instrument::builtin().amber_muted, "not `amber_muted`");
+    }
 
     /// A well-formed status-bar registration on an undeclared display: the
     /// console renderer's own case. Every test below moves exactly ONE field

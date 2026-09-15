@@ -1752,6 +1752,7 @@ dependencies = [
 name = "tapestryd"
 version = "0.1.0"
 dependencies = [
+ "cartoon",
  "libdriver",
  "libhalcyon",
  "libthyla-rs",

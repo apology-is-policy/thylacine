@@ -6451,7 +6451,8 @@ impl Comp {
                     // the dragged one `amber` (the source's hover and
                     // `.dragging` inks; its glow is the effects slice's).
                     let ink = self.track_ink(id, i);
-                    if let Some((d, j)) = self.paint_track(d, vertical_track, ink) {
+                    let dragged = self.track_dragged(id, i);
+                    if let Some((d, j)) = self.paint_track(d, vertical_track, ink, dragged) {
                         // The joint at the track's leading corner, painted
                         // AFTER the walk: it overpaints 1 px of the trailing
                         // pane's frame (3.1), so it must land above every
@@ -6525,6 +6526,15 @@ impl Comp {
 
     /// The divider track's ink for its rule (9.2): `amber` while it is
     /// dragged, `amber_muted` under the pointer, `structure` at rest.
+    /// Is this the track under the DRAG? The sibling of `track_ink`, and
+    /// deliberately separate from it: 9.2 paints the dragged rule `amber`
+    /// and section 10 glows only the dragged one, so a painter that inferred
+    /// the state from the ink would key an effect on a colour. A token is
+    /// not a state.
+    fn track_dragged(&self, cid: u32, idx: usize) -> bool {
+        self.drag.is_some_and(|d| d.cid == cid && d.idx == idx)
+    }
+
     fn track_ink(&self, cid: u32, idx: usize) -> u32 {
         let inst = self.bundle.inst;
         if self.drag.is_some_and(|d| d.cid == cid && d.idx == idx) {
@@ -6541,7 +6551,7 @@ impl Comp {
     /// and the joint's rect (the OUTER box at the track's leading corner
     /// offset by the frame; the caller paints it -- after every frame on a
     /// structural repaint, at once on a hover repaint). None off-display.
-    fn paint_track(&mut self, d: Rect, vertical: bool, ink: u32) -> Option<(Rect, Rect)> {
+    fn paint_track(&mut self, d: Rect, vertical: bool, ink: u32, dragged: bool) -> Option<(Rect, Rect)> {
         let m = self.metrics;
         let inst = self.bundle.inst;
         let (dw, dh) = (self.gpu.width, self.gpu.height);
@@ -6575,6 +6585,27 @@ impl Comp {
                 h: rule_w,
             }
         };
+        // 10: the dragged rule's glow, painted UNDER the rule and CLIPPED
+        // TO THE TRACK. The blur wants to spread past the 7 px track onto
+        // the neighbouring panes, but those are client pixels: on the
+        // GPU-composed path the screen buffer holds none of them and on the
+        // CPU path it mirrors them, so a spreading glow would look
+        // different on the two paths -- the one thing 4.5.9 forbids. A
+        // tighter glow is the cost of staying inside what we own.
+        let instrument = self.bundle.profile == libhalcyon::instrument::Profile::Instrument;
+        if let Some(g) = pane::track_glow(rule.intersect(d), dragged, instrument, self.scale) {
+            let mut cart = cartoon::Cartoon::new();
+            cart.ops.push(cartoon::Op::Glow {
+                x: g.x,
+                y: g.y,
+                w: g.w,
+                h: g.h,
+                color: g.color,
+                alpha: g.alpha,
+                radius: g.radius,
+            });
+            self.paint_cartoon(&cart, d);
+        }
         self.fill_rect(rule.intersect(d), ink);
         let j = Rect {
             x: d.x + frame_w,
@@ -6584,6 +6615,46 @@ impl Comp {
         }
         .intersect(disp);
         Some((d, j))
+    }
+
+    /// Execute a display list into the screen BUFFER through cartoon's own
+    /// executor -- the SAME bounded implementation halcyond paints with,
+    /// rather than a second box blur here (section 10 as amended at
+    /// `a861ca2b`). The ops carry no atlas and no blobs, so the empty
+    /// stores are the whole source: nothing else references the screen for
+    /// this call.
+    fn paint_cartoon(&mut self, cart: &cartoon::Cartoon, clip: Rect) {
+        let va = match &self.screen {
+            Some(s) => s.va,
+            None => return,
+        };
+        let (dw, dh) = (self.gpu.width, self.gpu.height);
+        if dw == 0 || dh == 0 {
+            return;
+        }
+        let clip = clip.intersect(Rect { x: 0, y: 0, w: dw, h: dh });
+        if clip.is_empty() {
+            return;
+        }
+        // SAFETY: `alloc_screen` maps dw*dh*4 bytes rounded UP to a page, so
+        // dw*dh u32 lie inside the mapping; the executor clamps every write
+        // to the clip below, and no other reference into the screen is live.
+        let px = unsafe {
+            core::slice::from_raw_parts_mut(va as *mut u32, (dw as usize) * (dh as usize))
+        };
+        cartoon::execute(
+            cart,
+            &cartoon::AtlasStore { gen: 0, pages: alloc::vec::Vec::new(), glyphs: alloc::vec::Vec::new() },
+            &cartoon::BlobStore::new(),
+            px,
+            dw as usize,
+            Some(cartoon::ClipRect {
+                x0: clip.x as i32,
+                y0: clip.y as i32,
+                x1: (clip.x + clip.w) as i32,
+                y1: (clip.y + clip.h) as i32,
+            }),
+        );
     }
 
     /// The joint: the OUTER box in `structure`, the fill inside a
@@ -6633,7 +6704,8 @@ impl Comp {
             _ => return,
         };
         let ink = self.track_ink(cid, idx);
-        if let Some((d, j)) = self.paint_track(d, vertical, ink) {
+        let dragged = self.track_dragged(cid, idx);
+        if let Some((d, j)) = self.paint_track(d, vertical, ink, dragged) {
             self.paint_joint(j);
             self.screen_push(d);
         }

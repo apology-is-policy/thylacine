@@ -1329,6 +1329,68 @@ One distinction the fix had to keep: the check GLYPH's ink stays
 literal. A correction that swept both would have been a second defect
 wearing the first one's clothes.
 
+### I-8b-2: the compositor gets a blur, and a scope check that re-cut the chunk
+
+The three effects that cannot be painted by the client whose surface they
+decorate now have a home. A drop shadow at (0,20) blur 55 lies OUTSIDE its
+card; a card is a `Role::Menu` surface; `compose_cpu`'s 1:1 arm is a raw
+`copy_nonoverlapping` with no alpha. So a surface cannot carry transparent
+margin, and its own cartoon can never reach those pixels. The compositor
+paints them, which leaves section 10's "two executor ops carry them"
+literally true -- the compositor runs the ops.
+
+**A scope check re-cut the chunk before I built the wrong thing.** I had been
+carrying "the cartoon dependency covers all four compositor effects" as an
+assumption. Testing it: `Op::Glow` blurs a RECT'S COVERAGE MASK, which is
+exactly what a drop shadow and a divider glow are -- but section 10's backdrop
+is a blur of ARBITRARY EXISTING SCREEN PIXELS, which no cartoon op performs.
+tapestryd has no scratch pixel buffer (measured: every `Vec<u32>` in
+`server.rs` is an id or coordinate list; `scratch_events` is event bytes) and
+`libhalcyon::place` offers only sampling helpers. So the backdrop is its own
+machinery and its own sub-chunk, and I-8b-2 is the dependency plus the divider
+glow. That is the second time this run that testing an assumption changed the
+plan rather than confirming it.
+
+**The decision had to leave `server.rs`.** tapestryd's lib is `chords` /
+`keymap` / `pane` / `skein` -- `server.rs` is bin-only, so a rule decided in
+`paint_track` has NO host witness of any kind. That is the precise trap that
+left `chords.rs`'s four tests dormant for the crate's life, and the crate
+already carries its own cure: `admit_status_bar`, whose comment says it is
+"Pure over scalars, so the rule is testable without a compositor -- which is
+the point: the fix this encodes landed at `9d5f38ee` with no witness of any
+kind." So `pane::track_glow` is a pure verdict and `paint_track` only executes
+it.
+
+**Two small refusals worth naming.** The drag state is threaded explicitly to
+both of `paint_track`'s callers rather than inferred from the ink -- 9.2
+paints the dragged rule `amber`, and recovering a state from a colour keys an
+effect on a token. And the glow is CLIPPED TO THE TRACK: a radius-10 blur
+wants to spread past the 7 px track onto client pixels, which the screen
+buffer holds on the CPU path and does not hold on the GPU-composed path, so a
+spreading glow would look different on the two paths -- the one thing 4.5.9
+forbids. The tighter glow is the honest cost of staying inside what the
+compositor owns, and it is recorded as a deviation rather than left to look
+like an oversight.
+
+**The not-a-token control was written in from the start this time.** Having
+just shipped the sage glow tokenised, `track_glow`'s witnesses include
+`the_drag_glow_is_not_the_amber_token` before anyone could make the same
+mistake twice -- and the sibling values show why it matters: Carbon's `amber`
+is `#C7B98B`, a pale sand, against section 10's `#D59A42`. Both sabotages
+fired (dropping the `dragged` conjunct; setting the literal to Carbon's
+amber), sources restored byte-identical.
+
+**What the tests cannot reach, stated rather than closed.** The two-caller
+threading is bin-side and has no unit witness: a future third caller that
+forgets `dragged` would be caught by nothing host-side. The guest gate does
+drive a real drag -- `ls-halcyon-session-instrument` PASS 17/17 legs 0 FAIL at
+109 s, attempt 1, verified in the steps file rather than from the exit line,
+with leg 20 re-fitting both tiles (731 / 532) through the CONFIGURE path -- so
+`paint_cartoon`, the compositor's only slice-over-the-screen and its one new
+unsafe block, ran on live drag frames without fault. But no leg reads
+sub-pixel ink. The gate proves the path RUNS; it does not prove the glow LOOKS
+right, and I am not going to write that it does.
+
 ## Run 46o (2026-09-14, Fable 5.1 max) -- the Halcyon Instrument arc opens: reading the Carbon Optics kit against the tree
 
 ### What this run was for

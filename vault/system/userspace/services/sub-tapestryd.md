@@ -3,7 +3,7 @@ id: sub-tapestryd
 type: sub
 title: "tapestryd — the compositor: the weave lifecycle, the present engine, and the retire ordering"
 parent: moc-userspace
-code: [usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs]
+code: [usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs, usr/tapestryd/Cargo.toml]
 audit: hard
 guarded-by: [inv-i40, inv-i5, inv-i34, inv-i1, inv-i45, inv-i9]
 validated-by: [spec-tapestry-present, prose, gate-smp]
@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
-updated: 2026-09-06
+updated: 2026-09-15
 ---
 ## Purpose
 
@@ -2157,3 +2157,58 @@ discriminates the over-correction and not merely the absence of a fix.
 
 tapestryd lib 71 (was 68). `pane.rs` restored byte-identical after each.
 
+
+## The effects the compositor paints, and why there is ONE blur (2026-09-15, I-8b-2)
+
+Some of section 10's effects cannot be painted by the client whose surface
+they decorate, and that is forced by the compose model rather than chosen. A
+drop shadow at (0,20) blur 55 lies OUTSIDE its card; a card is a `Role::Menu`
+surface; and `compose_cpu`'s 1:1 arm is a raw `copy_nonoverlapping` with no
+alpha, so a surface cannot carry transparent margin and its own cartoon can
+never reach those pixels. The compositor therefore paints them -- which keeps
+section 10's "two executor ops carry them" literally true, because the
+compositor RUNS the ops.
+
+**tapestryd depends on `cartoon` for exactly this** (operator-ratified
+2026-09-15; the scripture commit is `a861ca2b`). The alternative was a second
+box blur written here, and a second implementation of a bounded resource is
+the shape that produced three HALCYON-WORKSPACES defects -- a guard on one of
+two carves, a field cleared on set but not on reset, a pairing kept on write
+but not on clear. The second implementation is always the one nobody
+sabotages. `paint_cartoon` builds a `&mut [u32]` over the screen at stride
+`gpu.width` and hands it to the same executor halcyond paints with;
+`alloc_screen` maps `dw*dh*4` rounded UP to a page, so the slice is inside the
+mapping, and the executor clamps every write to the clip.
+
+**The glow is CLIPPED TO THE TRACK, and the reason is 4.5.9.** A blur of
+radius 10 wants to spread past the 7 px track onto the neighbouring panes, but
+those are client pixels: on the GPU-composed path the screen buffer holds none
+of them, and on the CPU path it mirrors them. A spreading glow would therefore
+look different on the two paths, which is the one thing GPU-DESIGN 4.5.9
+forbids. The tighter glow is the cost of staying inside what the compositor
+owns, and it is a deliberate deviation from the source's spread rather than an
+oversight.
+
+**The DECISION lives in `pane.rs`, not here.** `server.rs` is not in this
+crate's lib (the lib is `chords` / `keymap` / `pane` / `skein`), so a rule
+decided in `paint_track` would have no host witness at all -- the same trap
+that left `chords.rs`'s four tests dormant for the crate's life. So
+`pane::track_glow` is a pure verdict over scalars, in the shape
+`admit_status_bar` established, and `paint_track` only executes it. Its four
+witnesses cover the positive, the three states that must NOT glow, the scale
+following the same `ipx` the metrics take, and -- written in from the start --
+that the colour is section 10's LITERAL and not the `amber` token.
+
+**The drag state is threaded EXPLICITLY to both callers.** `paint_track` has
+exactly two (the structural walk and `repaint_track`), and both already hold
+`(cid, idx)` and call `track_ink`, the one discriminator. `track_dragged` is
+its sibling rather than an inference from the ink, because 9.2 paints the
+dragged rule `amber` and a painter reading the state back out of the colour
+would key an effect on a token. A token is not a state.
+
+**What the host tests cannot reach.** The two-caller threading is bin-side and
+so has no unit witness; the guest gate `ls-halcyon-session-instrument` does
+drive a real divider drag (press the track, `divider drag start`, a 100 px
+drag, `divider drag end ... release`), which exercises `paint_cartoon` on real
+drag frames -- but no leg reads sub-pixel ink, so the gate witnesses that the
+path RUNS, never that the glow LOOKS right. That gap is stated, not closed.
