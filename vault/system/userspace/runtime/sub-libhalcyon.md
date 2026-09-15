@@ -530,5 +530,20 @@ Five parser tests, one of them the control: `workspace` must be its OWN
 subcommand and not fall through to the unknown-command arm, which is the
 failure the other four would all still pass under.
 
+## The tool's help outlived the rule it described (2026-09-15, round 2, F7)
+
+S4 retired "only the next free number may be made" -- a property of the old
+DENSE representation, not of the design -- and `ea53ac57` touched 21 files
+without reaching `usr/halcyon/`. The tool's VERB was already correct: it
+writes `workspace <n>` to the `layout` file and the compositor decides, so
+nothing misbehaved. What diverged was the user-facing help text and two doc
+comments, which went on telling the operator a rule the system no longer
+enforces. Corrected to "creating it if it does not exist".
+
+Recorded because it is the cheap half of a recurring shape: a behaviour change
+lands in the MECHANISM and leaves its DESCRIPTION behind, where no compiler
+checks it and no test reads it. Round 2 found it only because the prosecutor
+looked outside the fourteen files it was handed.
+
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)
