@@ -1015,6 +1015,80 @@ measured. Still open: F8, unchanged and now better understood -- it is not a
 one-liner, because widening the minima walk to every root would make a dormant
 overflow block ACTIVE mutations.
 
+### The W-arc round 3: the streak broke, and a probe that could not see
+
+Round 2 closed dirty, so a third round was owed on its fixes. **0 P0 / 0 P1 /
+1 P2 / 4 P3** -- no P0 could be constructed against the reordering or the new
+refusal, and the prosecutor prosecuted both explicitly rather than
+pattern-matching them. By the count rule this close is CLEAN and no round 4 is
+owed: the arc's audit obligation ends at three. The round also withdrew three
+of its own draft findings on re-derivation, one of which had asserted an
+arithmetic difference between `len.max(1) as u8` and `(len as u8).max(1)` and
+then found both yield the same value. A round that retracts its own drafts is
+worth more than one that does not, and it said so in its report.
+
+**Its P2 was aimed at me.** Round 2 cleared `creator_conn` at THREE sites,
+wrote TWO isolating witnesses, and its commit body read: *"each site got its
+own isolating test and BOTH now fire."* Two tests, three sites. The word
+"both" sat in a paragraph whose entire subject was that a property needs a
+per-site witness, and I did not re-read my own sentence against my own fix. I
+confirmed it by measurement before touching anything -- reverting the
+`host_for` clear left all 65 tests green -- and it matters because `host_for`
+is the GENERAL production fill path: the claim-less create, and a claimed
+create whose `host_into` failed, both land there.
+
+**The lesson cost me a wrong conclusion first, which is why it is worth
+keeping.** F4 replaced a hand-copied `MAX_WORKSPACES` with one definition in
+the crate both sides already link. The sabotage that proves such a move is to
+CHANGE the constant and watch a test in every consumer go red. It fired in
+halcyond and **not** in tapestryd, and my first reading was that the link was
+not live. It was live. Every bound assertion in `pane.rs` is written
+`MAX_WORKSPACES as u8 + 1` -- RELATIVE to the constant -- so lowering the
+constant moves the goalpost with it and no such assertion can ever notice. **A
+VALUE'S WITNESS MUST BE ABSOLUTE.** An absolute pin now fires in both crates,
+which is the only actual proof each crate reads the shared definition rather
+than a private copy that agrees today. When a sabotage does not fire, ask
+whether the PROBE can discriminate before concluding the code is unwired;
+twice now the code was fine and the probe was wrong.
+
+That is the third variant of one shape in this arc, and naming the family is
+the point: a guard implemented on one of two paths; a property defended at N
+sites with fewer than N witnesses; and now an assertion phrased in terms of the
+value it is supposed to pin. All three are checks expressed in terms of the
+thing they are meant to constrain.
+
+**The convergence.** My parallel self-audit and the prosecutor found the same
+rail defect independently -- and the honest reading is that round 2 made it
+WORSE. Round 2's F6 gave the chip arm a list paired with the zones on the
+WRITE, and left both standing where the SURFACE goes away. Before F6 that
+window swallowed the press; after F6 it yields a real workspace number from a
+dead rail's paint, and under S4 any number 1..9 is creatable, so it does not
+fail closed -- it can mint a workspace that had just vanished. I had turned a
+fail-safe window fail-unsafe while fixing something else. Cleared now at both
+surface-change sites, and deliberately NOT in `invalidate`: those fields
+describe a SURFACE, and a sheet change leaves the surface and its zones valid.
+
+**A second false claim of mine, retracted.** The round-2 sentence I wrote into
+the AUDIT-TRIGGERS row ("each site now has its own isolating witness") is
+corrected in place and marked as corrected -- the second time this arc that a
+claim of mine had to be pulled back out of as-built documentation.
+
+**Posture**: tapestryd lib 68 (was 65), halcyond lib 300, libhalcyon 119, four
+crates guest-clean on `aarch64-unknown-none`. Every round-3 fix
+sabotage-measured in isolation with `pane.rs` and `libhalcyon/layout.rs`
+restored byte-identical; F3 lives in a bin module and can have no unit witness,
+so the gates carry it. Gates by their steps files, one attempt each:
+`ls-gfx-panes` PASS 50/50 legs 0 FAIL at 47 s; `ls-halcyon-session-instrument`
+PASS 17/17 legs 0 FAIL at 109 s, the height control discriminating 89 px
+against 61 px.
+
+**Still open**: F8, unchanged. And the round named its own blind spot without
+being asked -- it called `move_focused_to_workspace`'s allocate-then-mutate
+shape the construction it was least able to view adversarially, being the one
+it would have written itself, and said a Fable round on that function would be
+worth more than its own clearing of it. Three rounds on this surface have now
+run on the same family as the author.
+
 ## Run 46o (2026-09-14, Fable 5.1 max) -- the Halcyon Instrument arc opens: reading the Carbon Optics kit against the tree
 
 ### What this run was for

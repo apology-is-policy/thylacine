@@ -28,6 +28,18 @@ use core::fmt::Write;
 
 use crate::carve::DEFAULT_WEIGHT;
 
+/// How many workspaces may exist (HALCYON-WORKSPACES 4). It lives HERE for
+/// the reason this module already lives here: the compositor ENFORCES the
+/// bound and the renderer must not accept a header that exceeds it, and both
+/// link libhalcyon while neither links the other.
+///
+/// It was two hand-copied consts until 2026-09-15 (r3 F4). That drift is
+/// fail-closed but INVISIBLE: had the compositor's bound risen alone, the
+/// reader would have rejected legal headers and the bar would have silently
+/// kept its default -- wrong at the only place a user can see it. A comment
+/// naming the hazard does not prevent it; one definition does.
+pub const MAX_WORKSPACES: usize = 9;
+
 /// The format's first line (exact match required): v1, every weight default.
 pub const FMT_HEADER: &str = "halcyon-layout v1";
 /// The v2 header: rows may carry ` w=<weight>` (HALCYON-INSTRUMENT 5.3).

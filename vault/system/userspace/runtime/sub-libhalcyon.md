@@ -545,5 +545,29 @@ lands in the MECHANISM and leaves its DESCRIPTION behind, where no compiler
 checks it and no test reads it. Round 2 found it only because the prosecutor
 looked outside the fourteen files it was handed.
 
+
+## `MAX_WORKSPACES` -- one definition for two crates (2026-09-15, round 3, F4)
+
+The workspace bound existed as two independent `const MAX_WORKSPACES: usize =
+9` -- one in the compositor, one in the renderer's header reader -- with a
+comment in the reader explaining that halcyond cannot import the compositor's.
+That comment documented the hazard without preventing it: the standing "a guard
+pinned to a NAME is re-pointed by hand" class.
+
+It lives here now for the reason `layout` itself lives here: the compositor
+ENFORCES the bound, the renderer must not accept a header that exceeds it, and
+both link libhalcyon while neither links the other. `pane.rs` re-exports it so
+`pane::MAX_WORKSPACES` still names it.
+
+**The drift direction is what made it worth fixing.** Had the compositor's
+bound risen alone, the reader would have rejected legal headers, so
+`parse_workspaces` would return `None` and the bar would silently keep its
+default -- fail-closed, but invisible at the only place a user can see it.
+
+Proven LINKED rather than merely compiling: setting this constant to 8 fires a
+test in BOTH crates. The tapestryd side needed a new absolute assertion to
+manage it, because every bound assertion there had been written relative to the
+constant and so could not see it move.
+
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

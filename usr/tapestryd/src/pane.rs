@@ -44,7 +44,9 @@ pub const MAX_PANES: usize = 32;
 /// Super+1..9 is the whole keyboard's worth and a client verb must not be
 /// able to mint more. Workspaces PARTITION the `MAX_PANES` pool -- they never
 /// enlarge it, so the resource floor is unchanged by this feature.
-pub const MAX_WORKSPACES: usize = 9;
+// r3 F4: the ONE definition lives in libhalcyon (which this crate and
+// halcyond both link); re-exported so `pane::MAX_WORKSPACES` still names it.
+pub use libhalcyon::layout::MAX_WORKSPACES;
 
 // The blank/empty-pane fill moved to `Theme.blank` at HALCYON-THEME TH-2: it
 // was the last chrome colour outside the token source, and a near-black hole
@@ -818,6 +820,14 @@ impl Layout {
         if !self.is_leaf(leaf) || self.leaf_surface(leaf).is_none() {
             return false;
         }
+        // r3 F5: judge the NUMBER before allocating for it. `ensure_workspace`
+        // range-checks as its first act, so an out-of-range `n` would otherwise
+        // allocate a pane, roll it back and burn a monotonic id for a move that
+        // was never legal -- contradicting this function's own "pane table
+        // full: untouched" contract.
+        if n == 0 || n as usize > MAX_WORKSPACES {
+            return false;
+        }
         // r2 F4: allocate the replacement root BEFORE ensuring the target.
         // `ensure_workspace` mints a workspace whose root is an empty
         // placeholder, so `pre_container` below is only ever needed for a
@@ -1378,6 +1388,15 @@ impl Layout {
                 // r2 F2 (P0): a collapsed root is a PRISTINE root -- the rest
                 // of this block already says so. A reservation that outlived
                 // the tile it was stamped beside pinned the workspace forever.
+                //
+                // r3 F2, the cost, recorded rather than hidden: any peer may
+                // close an EMPTY leaf (`subtree_surfaces` is empty, so the
+                // ownership walk's `.all()` is vacuously true -- deliberate,
+                // see server.rs), so a peer closing a reserved skeleton root
+                // now lets that workspace VANISH where it used to persist.
+                // Accepted: the `claim_token = None` on the line above already
+                // destroyed the tool's placement, and a stale claim degrades
+                // to focus placement rather than failing.
                 p.creator_conn = 0;
                 p.creator_peer = 0;
                 p.weight = DEFAULT_WEIGHT;
@@ -4638,5 +4657,102 @@ mod tests {
 
         assert!(l.switch_workspace(1), "back to workspace 1");
         assert_eq!(l.reap_empty_workspaces(), 1, "so the workspace vanishes");
+    }
+
+    /// r3 F1: the THIRD clear site. The r2 fix touched `host_for`, `host_into`
+    /// and `close_inner`, and r2 wrote witnesses for the last two while its
+    /// own commit body said "each site got its own isolating test and BOTH now
+    /// fire" -- two tests for three sites, and the word "both" was the tell.
+    /// MEASURED before writing this: reverting the `host_for` clear left all
+    /// 65 tests green, so the site was genuinely unwitnessed.
+    ///
+    /// `host_for` is the GENERAL production fill path -- the claim-less create
+    /// AND a claimed create whose `host_into` failed both land here.
+    ///
+    /// SABOTAGE: drop the `creator_conn` clear in `host_for` and the last
+    /// assert fails.
+    #[test]
+    fn filling_a_reserved_leaf_through_host_for_spends_its_reservation() {
+        let mut l = Layout::new();
+        let a = l.host_for(7, 0, 0).expect("a tile");
+        let b = l.split(a, Mode::SplitH).expect("the split's new leaf");
+        l.set_creator(b, 99, 5);
+        assert!(l.focus(b), "focus the reserved leaf");
+        assert_eq!(l.focused, b, "the premise: host_for fills the FOCUSED leaf");
+        assert!(l.subtree_reserved(b), "and it is reserved");
+
+        // The SAME conn fills its own reservation, so `reserved_elsewhere` is
+        // false and the fill arm runs rather than splitting beside it.
+        let got = l.host_for(9, 99, 5).expect("the reserving conn fills it");
+        assert_eq!(got, b, "it filled that leaf rather than splitting beside it");
+        assert!(
+            !l.subtree_reserved(b),
+            "a FILLED leaf is no longer spoken for, on this path too"
+        );
+    }
+
+    /// r3 F5: an out-of-range number must be refused BEFORE anything is
+    /// allocated for it. `ensure_workspace` range-checks as its first act, so
+    /// with the alloc hoisted above it (r2 F4) a bad `n` allocated a pane,
+    /// rolled it back, and burned a monotonic id for a move that was never
+    /// legal -- contradicting this function's own "untouched" contract.
+    ///
+    /// The refusal ALREADY returned false before the fix, so asserting that
+    /// proves nothing; the burned id is the only observable. Two layouts built
+    /// identically but for the refused calls is the control ONE VARIABLE away.
+    ///
+    /// SABOTAGE: drop the hoisted range check and the ids diverge.
+    #[test]
+    fn an_out_of_range_move_allocates_nothing() {
+        let probe_id = |refuse: bool| -> Option<u32> {
+            let mut l = Layout::new();
+            let a = l.host_for(7, 0, 0).expect("a hosted root leaf");
+            assert!(
+                l.get(a).and_then(|p| p.parent).is_none(),
+                "the premise: the focused leaf IS the root, so a move would \
+                 have to allocate a replacement for it"
+            );
+            if refuse {
+                assert!(!l.move_focused_to_workspace(0), "zero is not a workspace");
+                assert!(
+                    !l.move_focused_to_workspace(MAX_WORKSPACES as u8 + 1),
+                    "past the bound"
+                );
+            }
+            let probe = l.split(a, Mode::SplitH).expect("a probe pane");
+            l.id_of(probe)
+        };
+        assert_eq!(
+            probe_id(true),
+            probe_id(false),
+            "a refused out-of-range move allocated nothing and burned no id"
+        );
+    }
+
+    /// r3 F4's witness ON THIS SIDE -- and a real claim in its own right: the
+    /// ratified bound is NINE, because Super+1..9 is the whole keyboard's
+    /// worth (HALCYON-WORKSPACES 4).
+    ///
+    /// Every other bound assertion in this file is written RELATIVE to the
+    /// constant (`MAX_WORKSPACES as u8 + 1`), so lowering it moves the
+    /// goalposts with it and none of them can notice. MEASURED, not supposed:
+    /// setting the shared const to 8 left the whole tapestryd suite green
+    /// while the halcyond suite went red. **A VALUE'S WITNESS MUST BE
+    /// ABSOLUTE**; a test phrased in terms of the value can never see it move.
+    ///
+    /// SABOTAGE: set `libhalcyon::layout::MAX_WORKSPACES` to 8 and this fails
+    /// -- which is also the only proof that THIS crate reads the shared
+    /// definition rather than a private copy that merely agrees today.
+    #[test]
+    fn the_ratified_bound_is_nine_workspaces() {
+        assert_eq!(MAX_WORKSPACES, 9, "HALCYON-WORKSPACES 4: Super+1..9");
+        let mut l = Layout::new();
+        assert!(l.switch_workspace(9), "workspace 9 is reachable");
+        assert_eq!(l.active_number(), 9);
+        assert_eq!(
+            l.workspace_numbers(),
+            alloc::vec![1u8, 9],
+            "and the set is sparse, 1 and 9 with nothing between"
+        );
     }
 }

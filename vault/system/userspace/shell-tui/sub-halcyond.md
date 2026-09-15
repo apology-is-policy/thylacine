@@ -798,5 +798,34 @@ Two models, two resolutions -- the exact shape that has already produced two
 defects in this arc, both of them a guard on one of two chip painters. The
 comment now names both.
 
+
+## The rail's hit map outlived its surface (2026-09-15, round 3, F3)
+
+Round 2's F6 gave the chip arm a `painted_ws` list written beside `zones`, so
+the two agree whenever a paint SUCCEEDS. It did not touch the paths where the
+SURFACE goes away: the death arm and `ensure`'s re-mint both null `painted` and
+left `zones` and `painted_ws` standing. A press arriving on the NEW rail before
+its first paint therefore hit-tested against the DEAD rail's zones and resolved
+a number from the dead rail's list.
+
+**Round 2 made that worse, not better, and this is the honest reading.** Before
+F6 the same window resolved through an empty `painted` and SWALLOWED the press.
+After F6 it yields a real `RailAction::Workspace(n)` -- and under S4 any number
+in 1..=9 is CREATABLE, so the compositor does not refuse it: a stale chip press
+could mint a workspace that had just vanished. A fail-safe window had been
+turned fail-unsafe.
+
+Fixed by clearing `zones` and `painted_ws` wherever the surface changes.
+**Deliberately NOT cleared in `invalidate`**, and the distinction is the point:
+those fields describe a SURFACE, and `invalidate` is a SHEET change -- the
+surface is unchanged and its zones are still true of it. Clearing there would
+have broken the picker anchor a Super+T chord computes from the same zones.
+
+Both the defect and the fix live in a BIN module, so `cargo test --lib` never
+compiles them: the guest build and the interactive gates are the only
+witnesses, as they were for round 1's F5/F6 and round 2's F6.
+
+`MAX_WORKSPACES` is no longer hand-copied here -- see [[sub-libhalcyon]].
+
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

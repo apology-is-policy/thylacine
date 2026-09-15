@@ -2067,3 +2067,50 @@ sabotage-measured in isolation with `pane.rs` restored byte-identical.
 `server.rs` still has no test module, so `layout_cmd`'s workspace arm, the
 chord arms and `reap_session_empties` remain witnessed by the gates alone.
 
+## The workspace round 3: the streak broke, and a witness that could not witness (2026-09-15, round 3)
+
+Round 2 closed DIRTY, so a third round was owed on ITS fixes. Result:
+**0 P0 / 0 P1 / 1 P2 / 4 P3** -- the two-round run of "the previous round's fix
+is the next round's P0" is **broken**; no P0 could be constructed against
+`move_focused_to_workspace`'s reordering or `move_dir`'s new refusal. The round
+also WITHDREW three of its own draft findings on re-derivation, including one
+that had asserted an arithmetic difference between `len.max(1) as u8` and
+`(len as u8).max(1)` and then found both yield the same value.
+
+**F1 [P2] -- the P0's third clear site had no witness, and the close said it
+did.** Round 2 cleared `creator_conn` at THREE sites (`host_for`, `host_into`,
+`close_inner`) and wrote TWO isolating tests, while its own commit body read
+"each site got its own isolating test and BOTH now fire". The word "both" for
+three sites was the tell, and nobody re-read it. CONFIRMED BY MEASUREMENT
+before fixing: reverting the `host_for` clear left all 65 tests green. It
+matters because `host_for` is the GENERAL production fill path -- the
+claim-less create and a claimed create whose `host_into` failed both land
+there. A third witness now exists and fires.
+
+**A VALUE'S WITNESS MUST BE ABSOLUTE.** Every bound assertion in `pane.rs` was
+phrased `MAX_WORKSPACES as u8 + 1`, i.e. RELATIVE to the constant -- so
+lowering the constant moves the goalpost with it and no test can notice.
+Measured: setting the shared bound to 8 left the entire tapestryd suite green
+while halcyond's went red. `the_ratified_bound_is_nine_workspaces` now pins the
+value absolutely, which is simultaneously the only proof this crate reads the
+SHARED definition rather than a private copy that merely agrees today.
+
+**F5 [P3]** -- the move allocated its replacement leaf before validating `n`,
+so an out-of-range number allocated a pane, rolled it back, and burned a
+monotonic id for a move that was never legal. Range check hoisted above the
+alloc. Its witness had to compare two identically-built layouts' probe ids,
+because the refusal ALREADY returned false before the fix: the burned id is the
+only observable, so asserting the refusal would have been a check that cannot
+fail.
+
+**F2 [P3], recorded rather than hidden** -- the round-2 root-collapse clear has
+a cost. Any peer may close an EMPTY leaf (`subtree_surfaces` is empty, so the
+ownership walk's `.all()` is vacuously true, which the server does
+deliberately), so a peer closing a reserved skeleton root now lets that
+workspace VANISH where it used to persist. Accepted: the pre-existing
+`claim_token = None` on the same arm already destroyed the tool's placement,
+and a stale claim degrades to focus placement rather than failing. Noted in the
+arm's comment.
+
+**Coverage.** tapestryd lib 68 (was 65). Every round-3 fix sabotage-measured in
+isolation, `pane.rs` and `libhalcyon/layout.rs` restored byte-identical.

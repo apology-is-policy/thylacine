@@ -124,11 +124,11 @@ pub struct Leaf {
 /// `active=1` with an equals sign and could never be mistaken for the
 /// header's bare `active`, but reading one line makes that structural rather
 /// than a property of the spelling.
-/// The compositor's own bound (`tapestryd::pane::MAX_WORKSPACES`), restated
-/// because halcyond does not link the compositor. A reader that accepts more
-/// than the writer can ever emit is fail-OPEN: it would paint a chip for a
-/// workspace that cannot exist, whose press the compositor then refuses.
-const MAX_WORKSPACES: usize = 9;
+// r3 F4: the compositor's bound, taken from the crate BOTH sides link rather
+// than hand-copied. A reader that accepts more than the writer can ever emit
+// is fail-OPEN -- it would paint a chip for a workspace that cannot exist,
+// whose press the compositor then refuses.
+use libhalcyon::layout::MAX_WORKSPACES;
 
 pub fn parse_workspaces(layout: &str) -> Option<(Vec<u8>, u8)> {
     let head = layout.lines().next()?;

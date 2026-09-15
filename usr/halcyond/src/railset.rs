@@ -166,6 +166,10 @@ impl RailBar {
                 say(&format!("halcyond: rail {} minted ({}x{})", s.id, dw, h));
                 self.surf = Some(s);
                 self.painted = None;
+                // r3 F3: the zones and their list describe a SURFACE. This is
+                // a NEW one, so the old paint's hit map must not answer for it.
+                self.zones = RailZones::default();
+                self.painted_ws.clear();
                 self.said_zones = None;
                 self.failed_said = false;
                 self.hover = None;
@@ -302,6 +306,12 @@ impl RailBar {
         if dead {
             self.surf = None; // Drop: destroy + leave + fds
             self.painted = None;
+            // r3 F3: the surface is gone; its hit map goes with it. Leaving
+            // these standing let a press on the REPLACEMENT rail resolve a
+            // workspace number from the dead one's paint -- and under S4 that
+            // number is creatable, so it would not fail closed.
+            self.zones = RailZones::default();
+            self.painted_ws.clear();
             self.want_mint = true;
             self.hover = None;
             self.ink = RailInk::default();
