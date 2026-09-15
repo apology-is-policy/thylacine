@@ -11,6 +11,7 @@ code:
   - usr/lib/libhalcyon/src/place.rs
   - usr/lib/libhalcyon/src/tag.rs
   - usr/lib/libhalcyon/src/instrument.rs
+  - usr/lib/libhalcyon/src/toml.rs
   - usr/lib/libhalcyon/Cargo.toml
   - usr/halcyon/src/lib.rs
   - usr/halcyon/src/main.rs
@@ -29,7 +30,7 @@ updated: 2026-09-15
 
 The Halcyon environment library (HALCYON.md 13): the shared pieces of the
 graphical environment that must not fork between the compositor and its
-clients. Five modules, each a thing that must not fork between the compositor
+clients. Six modules, each a thing that must not fork between the compositor
 and a client:
 
 - `theme` is the Daylight visual scripture as code (HALCYON-VISUAL.md) --
@@ -46,9 +47,15 @@ and a client:
   and the tapestry-battery's sample points, so a letterboxed present and its
   test's expected pixels derive from ONE function (the fullscreen-zoom fix; see
   its section below).
+- `instrument` (2026-09-14) is the SECOND theme schema, the two projections and
+  the resolved `Bundle` -- so a display's profile, not a theme file, owns the
+  geometry (see its section below).
+- `toml` is the crate's own restricted TOML subset, the parser BOTH schemas'
+  loaders consume -- the actual substrate of the format-fuzz surface.
 
 It depends only on [[sub-lib-vt]] (for `vt::Palette`, which `theme` produces);
-everything else is pure `no_std` + `alloc`.
+everything else is pure `no_std` + `alloc` -- the TOML subset is the crate's
+OWN module, not a dependency.
 
 ## Contract
 
@@ -360,6 +367,50 @@ They pin the strict meta, the partial file naming every missing key, the ANSI
 slot rule, the registry covering every field, the dispatcher routing on the
 profile word, the sidecar-to-stock projection equality, the tier ladder falling
 one step per refusal, and a gallery id being a path ONLY when it is an id.
+
+## `toml` -- the restricted parser under BOTH schemas
+
+`toml.rs` sits under BOTH loaders: `theme.rs`'s legacy 57-key schema and
+`instrument.rs`'s Instrument one both consume its `Entry`/`Value`, and
+`theme::load` parses ONCE before dispatching on `[meta] profile`. So a gallery
+file of either schema crosses this parser and no other -- which makes this
+module, not either loader, the actual substrate of the format-fuzz surface, and
+the reason the crate takes no TOML dependency.
+
+**It is a subset by REFUSAL, not a parser with gaps.** Entries are borrowed
+(`Entry<'a>` / `Value<'a>` over the source, no copy). A table header must be one
+plain name: nested `[a.b.c]`, empty `[]` and `[a b]` are `BadTable` at their
+line. A key must be bare and followed by `=`. A value is a quoted string, an
+integer, or an array of strings; floats, booleans, dates, inline tables and bare
+words are each `BadValue`. Every refusal carries its LINE, which is what lets a
+loader tell a user WHICH line of their theme was wrong.
+
+**A duplicate key is REFUSED, not last-one-wins.** The ordinary TOML-ish
+behaviour lets a later line silently override an earlier one; for a file that
+decides what colour a trusted surface paints, a silent override is the wrong
+failure mode. Pinned by `a_duplicate_key_is_refused_rather_than_last_one_wins`.
+
+**A `#` inside a string is a colour, not a comment** -- the one lexing subtlety
+a theme parser must get right, since every colour literal begins with `#`.
+Pinned by `a_hash_inside_a_string_is_a_colour_not_a_comment`.
+
+**The bounds here and the bounds above it do DIFFERENT jobs, and both are
+load-bearing.** This module caps what a parse can allocate: `MAX_ENTRIES` 512,
+`MAX_ARRAY` 64, `MAX_ARRAY_LINES` 64, each `TooLarge` at its line. The callers'
+caps (`theme::THEME_MAX` 64 KiB, `instrument::INSTRUMENT_MAX` 16 KiB) are NOT
+about memory -- they refuse a file BEFORE parsing, because a caller's slurp stops
+at its own limit and returns what it got, and **a truncated theme can be
+perfectly valid TOML**. That is worse than malformed, because the whole-file
+completeness check never fires and the user gets a silently half-applied theme.
+Refusing anything that COULD have been cut is the only way to tell the two
+apart, so dropping either layer leaves a real hole.
+
+**Tests.** 11 host tests, and they are the robustness set rather than a feature
+set: `arbitrary_input_never_panics` and `a_seeded_corpus_of_garbage_always_
+returns` (in a no_std tool a panic is a silent `exit(1)` -- the failure these
+parsers exist to avoid), `every_unsupported_construct_is_refused_with_its_line`,
+the duplicate-key and hash-in-string rules above, the oversized and unclosed
+array bounds, and a key before any header being rooted.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)
