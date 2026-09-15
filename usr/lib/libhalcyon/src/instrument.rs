@@ -822,6 +822,70 @@ impl Derived {
     }
 }
 
+/// HALCYON-INSTRUMENT 10's effect literals -- the SOURCE's own effect
+/// colours, which DO NOT tokenise.
+///
+/// Section 10 is explicit: they "stay amber / green literals on every theme
+/// (the CSS does not tokenise them)". That is why they live here as
+/// constants rather than as `InstrumentTheme` fields, and the distinction is
+/// not cosmetic -- it is MEASURABLE. Carbon's `amber` is `#C7B98B`, a pale
+/// sand; the divider glow is `#D59A42`, a saturated orange. Carbon's
+/// `success` is `#819B85`; the status glow is `#70A17C`. A painter reaching
+/// for the token paints the wrong colour under Carbon and a DIFFERENT wrong
+/// colour under every other theme, which is exactly the drift section 10
+/// forbids. The tests below pin each literal against its token so a
+/// re-tokenisation fails loudly instead of looking plausible.
+///
+/// Alphas are `pct256` of the stated percentage, the same rounding
+/// `Derived` takes, so an effect and a derived opaque that both say ".25"
+/// agree to the byte.
+pub mod effects {
+    use super::{Argb, pct256};
+
+    /// The divider drag glow: `rgba(213,154,66,.25)`, blur 10 (9.2's
+    /// `.dragging` rule).
+    pub const DIVIDER_DRAG: Argb = 0xFFD5_9A42;
+    pub const DIVIDER_DRAG_ALPHA: u8 = pct256(250);
+    pub const DIVIDER_DRAG_BLUR: i32 = 10;
+
+    /// The split flash: `rgba(213,154,66,.04)` for 250 ms, with a 1 px
+    /// `amber` border inset 5 (that border IS the token -- only the fill is
+    /// a literal).
+    pub const SPLIT_FLASH: Argb = 0xFFD5_9A42;
+    pub const SPLIT_FLASH_ALPHA: u8 = pct256(40);
+    pub const SPLIT_FLASH_MS: u32 = 250;
+
+    /// The status condition glow: `rgba(112,161,124,.25)`, blur 8. Carried
+    /// by SUCCESS alone (8.2 keeps RUNNING pulse-free; section 10's I-8
+    /// amendment).
+    pub const STATUS_SUCCESS: Argb = 0xFF70_A17C;
+    pub const STATUS_SUCCESS_ALPHA: u8 = pct256(250);
+    pub const STATUS_SUCCESS_BLUR: i32 = 8;
+
+    /// The picker's drop shadow: black .32 at (0, 20), blur 55.
+    pub const PICKER_SHADOW: Argb = 0xFF00_0000;
+    pub const PICKER_SHADOW_ALPHA: u8 = pct256(320);
+    pub const PICKER_SHADOW_DY: i32 = 20;
+    pub const PICKER_SHADOW_BLUR: i32 = 55;
+
+    /// The help card's drop shadow: black .35 at (0, 24), blur 80.
+    pub const HELP_SHADOW: Argb = 0xFF00_0000;
+    pub const HELP_SHADOW_ALPHA: u8 = pct256(350);
+    pub const HELP_SHADOW_DY: i32 = 24;
+    pub const HELP_SHADOW_BLUR: i32 = 80;
+
+    /// The modal backdrop: `rgb(3,4,4)` at .72 over a 3 px blur of the
+    /// scene. The BLUR is the compositor's own machinery (no cartoon op
+    /// blurs existing pixels); this is the tint composited over it.
+    pub const BACKDROP: Argb = 0xFF03_0404;
+    pub const BACKDROP_ALPHA: u8 = pct256(720);
+    pub const BACKDROP_BLUR: i32 = 3;
+
+    // The seventh effect -- the swatch's white .12 inset border -- is NOT
+    // here: its substrate is known (`amber`), so 7.3 resolves it once as
+    // `Derived.swatch_ring` instead of compositing it per frame.
+}
+
 impl Bundle {
     /// A native legacy theme; the Instrument side projected.
     pub fn from_legacy(profile: Profile, theme: Theme) -> Bundle {
@@ -1049,6 +1113,28 @@ pub fn resolve_bundle(src: Sources<'_>) -> ResolvedBundle {
 
 #[cfg(test)]
 mod tests {
+    /// Section 10: the effect literals are LITERALS, and the proof is that
+    /// each differs from the token a painter would otherwise reach for.
+    /// This is the assertion whose absence let the status glow ship
+    /// tokenised as `inst.success` -- plausible because Carbon's success and
+    /// the kit's sage sit close together, and wrong on every theme.
+    #[test]
+    fn the_effect_literals_are_not_theme_tokens() {
+        use super::effects;
+        assert_eq!(effects::DIVIDER_DRAG, 0xFFD5_9A42, "10's rgba(213,154,66)");
+        assert_eq!(effects::STATUS_SUCCESS, 0xFF70_A17C, "10's rgba(112,161,124)");
+        assert_eq!(effects::BACKDROP, 0xFF03_0404, "10's rgb(3,4,4)");
+        // The discriminating half: a painter reaching for the token paints
+        // something else, under Carbon and under every other theme.
+        assert_ne!(effects::DIVIDER_DRAG, CARBON.amber, "the glow is not `amber`");
+        assert_ne!(effects::STATUS_SUCCESS, CARBON.success, "the glow is not `success`");
+        // The alphas are pct256 of the stated percentage, Derived's rounding.
+        assert_eq!(effects::STATUS_SUCCESS_ALPHA, 64, ".25");
+        assert_eq!(effects::PICKER_SHADOW_ALPHA, 82, ".32");
+        assert_eq!(effects::HELP_SHADOW_ALPHA, 90, ".35");
+        assert_eq!(effects::BACKDROP_ALPHA, 184, ".72");
+    }
+
     use super::*;
     use crate::theme::{describe, DAYLIGHT};
     extern crate std;

@@ -1278,6 +1278,57 @@ decoration.
 `Derived` already takes for its opaques, so a glow and a derived opaque that
 both say ".25" agree to the byte instead of drifting apart by one.
 
+### The glow I had just shipped was tokenised, and section 10 forbids it
+
+I-8b-1 was committed AND pushed before I found this, which is the only
+reason it is worth a section.
+
+Section 10's effect list ends with a sentence I had read, quoted in my own
+plan, and then disobeyed: the effects "stay amber / green literals on every
+theme (the CSS does not tokenise them)". My plan note even said "Do NOT fold
+them into `Theme`". I painted the sage glow with `i.success` -- a theme
+token -- and wrote a test asserting `s.inst.success`, so the witness agreed
+with the code instead of with the specification and the whole thing looked
+green.
+
+**Carbon's `success` is `#819B85`. The kit's sage is `#70A17C`.** Off by
+(17, -6, 9) per channel: close enough that nothing looked wrong, far enough
+that every pixel was. And under any other theme it would have been a
+different wrong colour again, because `instrument.rs:626` makes `success`
+the source of the whole sage family -- precisely the drift section 10 exists
+to forbid.
+
+**The sibling case is what settles the reading, and it is not close.**
+Carbon's `amber` is `#C7B98B`, a pale sand; section 10's divider drag glow
+is `#D59A42`, a saturated orange. Nobody would mistake those for each other.
+So the literals are genuinely the source mockup's own effect colours, held
+fixed across themes exactly as the text says -- and I-8b-2 would have walked
+into the identical trap with `inst.amber` had the sage near-miss not exposed
+the class first.
+
+The fix gives the literals a home that cannot be mistaken for a palette:
+`libhalcyon::instrument::effects`, with the alphas derived through the same
+`pct256` the `Derived` opaques use, so an effect and a derived opaque that
+both say ".25" agree to the byte. The witness is the assertion whose absence
+allowed this: each literal is pinned to its value AND asserted NOT EQUAL to
+the token a painter would otherwise reach for. Sabotaging the production
+site back to `i.success` fails the rail witness; setting the literal to
+Carbon's success value fails the libhalcyon one. Both fired; both files
+restored byte-identical. libhalcyon 120 (+1), halcyond 301.
+
+**What generalises is not "read the spec".** I did read it, twice, and wrote
+it down. What failed is that the test was derived from the implementation
+rather than from the document -- `assert_eq!(glow, s.inst.success)` can only
+ever confirm that the code does what the code does. A witness written from
+the spec would have said `#70A17C` and failed on the first run. That is the
+fifth claim of mine this arc to need correcting against the tree, and the
+first where the test was complicit rather than merely absent.
+
+One distinction the fix had to keep: the check GLYPH's ink stays
+`i.success`, because 8.2 specifies that one as a token. Only the glow is a
+literal. A correction that swept both would have been a second defect
+wearing the first one's clothes.
+
 ## Run 46o (2026-09-14, Fable 5.1 max) -- the Halcyon Instrument arc opens: reading the Carbon Optics kit against the tree
 
 ### What this run was for

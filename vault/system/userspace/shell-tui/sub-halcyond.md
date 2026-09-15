@@ -353,9 +353,22 @@ the footer drops its hints and yields its label. The footer's hints follow the
 disagree.
 
 **The SUCCESS square carries section 10's glow, and only it (I-8b).** The
-footer's condition square is where the effects slice first paints: `success`
-at .25 under a box blur of 8, both scaled, pushed BEFORE the check so the
-executor's list order puts the glow underneath it. WHICH state carries it was
+footer's condition square is where the effects slice first paints: section
+10's sage LITERAL at .25 under a box blur of 8, both scaled, pushed BEFORE
+the check so the executor's list order puts the glow underneath it.
+
+**The glow's colour is a literal and the check's ink is a token, and getting
+that backwards is a real defect -- it shipped once.** Section 10 says its
+effects "stay amber / green literals on every theme (the CSS does not
+tokenise them)", so the glow is `instrument::effects::STATUS_SUCCESS`
+(`#70A17C`); the check GLYPH is `inst.success`, which 8.2 does specify. The
+first cut painted the glow with `inst.success` too. That is wrong on every
+theme and wrong even on Carbon, whose success is `#819B85` -- close enough to
+the kit's sage to look correct, which is exactly why it passed review. The
+sibling case is not close at all and settles the reading: Carbon's `amber` is
+`#C7B98B`, a pale sand, against the divider glow's `#D59A42`. The literals
+now live in one module with a test pinning each against the token it would
+otherwise be mistaken for. WHICH state carries it was
 not derivable from the text -- section 10 pins a sage value, 8.2 describes the
 square as amber (RUNNING) or hollow `secondary` (READY) and keeps RUNNING
 explicitly pulse-free, and the kit's sage-filled square at READY is the

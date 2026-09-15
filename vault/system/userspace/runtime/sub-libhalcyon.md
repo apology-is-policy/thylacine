@@ -374,6 +374,33 @@ slot rule, the registry covering every field, the dispatcher routing on the
 profile word, the sidecar-to-stock projection equality, the tier ladder falling
 one step per refusal, and a gallery id being a path ONLY when it is an id.
 
+**`effects` -- section 10's literals, which are NOT theme fields (I-8).** The
+module carries the seven effect colours the source defines (the divider drag
+glow, the split flash, the status glow, the picker and help shadows, the
+backdrop) with their alphas and blur radii. They are constants rather than
+`InstrumentTheme` fields on purpose: section 10 says they "stay amber / green
+literals on every theme (the CSS does not tokenise them)", and the difference
+is MEASURABLE, not stylistic. Carbon's `amber` is `#C7B98B`, a pale sand; the
+divider glow is `#D59A42`, a saturated orange. Carbon's `success` is
+`#819B85`; the status glow is `#70A17C`. A painter that reaches for the token
+paints the wrong colour under Carbon and a DIFFERENT wrong colour under every
+other theme, because `success` is the source of the whole sage family.
+
+That is not hypothetical: the status glow SHIPPED tokenised at `ebf8cab6` and
+was corrected immediately after. It passed because the sage pair are close
+enough to look right, and because the test asserted `s.inst.success` -- a
+witness derived from the implementation, which can only ever confirm that the
+code does what the code does. So the module's test pins each literal to its
+value AND asserts it NOT EQUAL to the token it would be mistaken for; that
+second half is the assertion whose absence allowed the defect.
+
+The alphas are `pct256` of the stated percentage -- the same rounding the
+`Derived` opaques take -- so an effect and a derived opaque that both say
+".25" agree to the byte rather than drifting by one. The seventh effect, the
+swatch's white .12 inset border, is deliberately absent: its substrate is
+known (`amber`), so 7.3 resolves it once as `Derived.swatch_ring` instead of
+compositing it per frame.
+
 ## `toml` -- the restricted parser under BOTH schemas
 
 `toml.rs` sits under BOTH loaders: `theme.rs`'s legacy 57-key schema and

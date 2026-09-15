@@ -79,13 +79,6 @@ const CHIP_EDGE_INSET: i32 = 4;
 const FOOT_PAD: i32 = 10;
 const GLYPH_BOX: i32 = 6;
 const GLYPH_GAP: i32 = 8;
-
-/// Section 10 (amended at I-8): the SUCCESS condition's glow -- `success`
-/// at .25 under a box blur of 8, both scaled. The alpha is 64/256, the same
-/// rounding `Derived` takes for its opaques, so a glow and a derived opaque
-/// of the same stated percentage agree.
-const GLOW_ALPHA: u8 = 64;
-const GLOW_BLUR: i32 = 8;
 const HINT_GAP: i32 = 8;
 const RUN_SQUARE: i32 = 4;
 
@@ -892,7 +885,22 @@ pub fn footer_list(
                     // pulse-free and replaces the kit's sage-filled READY
                     // square with a hollow `secondary` one, so `success` is
                     // the one state where 10's literal sage is the right ink.
-                    glow(&mut cart, gx, gy, gb, gb, i.success, GLOW_ALPHA, sheet.ipx(GLOW_BLUR));
+                    // The glow is section 10's LITERAL, never `i.success`:
+                    // 10 says these "stay amber / green literals on every
+                    // theme", and Carbon's success (#819B85) is NOT the
+                    // kit's sage (#70A17C) -- close enough to look right and
+                    // wrong on every theme. The check's INK below is the
+                    // token, because 8.2 does specify that one.
+                    glow(
+                        &mut cart,
+                        gx,
+                        gy,
+                        gb,
+                        gb,
+                        libhalcyon::instrument::effects::STATUS_SUCCESS,
+                        libhalcyon::instrument::effects::STATUS_SUCCESS_ALPHA,
+                        sheet.ipx(libhalcyon::instrument::effects::STATUS_SUCCESS_BLUR),
+                    );
                     let run = tracked(gs, mono, mono_px, "\u{2713}");
                     push(&mut cart, gen, (gx + (gb - run.width) / 2).max(0), base, i.success, &run);
                 }
@@ -1420,11 +1428,16 @@ mod tests {
         ok.condition = Condition::Ok;
         ok.cmd = String::from("make");
         let (c, _) = footer_list(&ok, 1440, 25, &s, &mut gs);
+        use libhalcyon::instrument::effects;
         assert_eq!(
             glows(&c),
-            alloc::vec![(10, 10, 6, 6, s.inst.success, 64u8, 8u32)],
+            alloc::vec![(10, 10, 6, 6, effects::STATUS_SUCCESS, 64u8, 8u32)],
             "the success square's glow, on the golden's 6 x 6 at (10, 10)"
         );
+        // The assertion whose ABSENCE let this ship tokenised: section 10's
+        // literal is not the theme's `success`, so a painter that reaches
+        // for the token paints the wrong colour on every theme.
+        assert_ne!(effects::STATUS_SUCCESS, s.inst.success, "the glow is a literal, not a token");
         // UNDER the check, not over it: the executor paints in list order.
         let gi = c.ops.iter().position(|o| matches!(o, Op::Glow { .. })).unwrap();
         let ci = c
