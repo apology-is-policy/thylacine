@@ -947,7 +947,11 @@ RATIFIED (H-3d design, 2026-09-02; the operator present -- two votes below):
 - **The four slots (Daylight 6), their sources.** *Workspaces*: **ONE filled
   `ember` indicator ("1") until H-4's layouts supply the list -- VOTE
   (2026-09-02): "one filled indicator" over an empty slot or pulling the
-  workspace model forward.** *Focused context*: the focused leaf's tag name
+  workspace model forward. SUPERSEDED 2026-09-15: the workspace model is
+  RATIFIED (HALCYON-WORKSPACES mechanism (A) -- live pane trees, per-workspace
+  focus, the i3 vanish rule, bound 9, Super+1..9); the slot reads the `layout`
+  file's `workspaces N active K` header once W-1..W-3 land, and shows one
+  until then.** *Focused context*: the focused leaf's tag name
   (`pane/<id>/tag`; "transcript" for the console) `·` its working directory
   `·` its last command -- the directory and the command are known only for
   the console (the transcript's own session), so another program's focused

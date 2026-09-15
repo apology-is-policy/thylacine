@@ -1933,7 +1933,10 @@ The chip painter for N > 1 is built and host-tested
 the active one's `hover` ground and inset amber edge, the ‹ › reveal past
 189 with a 157 viewport, the active chip always in view) but nothing yet
 produces N > 1; the keyboard-focus ring, `Super+1..9`, the `WORKSPACE 03`
-status and the footer's workspace hint wait on HALCYON-WORKSPACES.
+status and the footer's workspace hint waited on HALCYON-WORKSPACES, **RATIFIED 2026-09-15** (mechanism (A), the
+defaults package as proposed). They land with W-1..W-3, and W MUST precede
+I-9: the bar showing `1` against a mockup showing `1 2 3` is exactly the
+parity failure the acceptance run against Astra's goldens exists to catch.
 
 ### 14.2 The object verb menu (H-3c's `Role::Menu` surface in the round-2 look)
 

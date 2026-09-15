@@ -1,6 +1,10 @@
-# Halcyon workspaces -- a PROPOSAL for the operator's vote (2026-09-08)
+# Halcyon workspaces -- RATIFIED 2026-09-15: mechanism (A), live roots
 
-**Status: PROPOSAL, NOT SCRIPTURE. Nothing in it is built.** The 2026-09-02
+**Status: RATIFIED SCRIPTURE 2026-09-15 (operator vote, AskUserQuestion):
+mechanism (A) with the section 4 defaults package accepted AS PROPOSED.
+Not yet built -- the build is W-1..W-3 (section 5).** The record of how it
+got here follows; the 2026-09-02 vote had DEFERRED the model, and this
+document did the research that fork needed. The 2026-09-02
 vote deferred the workspace model ("one filled indicator" over "pulling the
 workspace model forward" -- HALCYON.md 13's status-bar slots), and a vote
 that defers is a decision, so this document does the research the fork
@@ -141,7 +145,23 @@ Super+1 returns, the bar reads 2/1). One Fable round over W-1..W-3.
 Both are registry amendments with a producer in nora and a consumer in
 halcyond; neither changes authority. Neither is built.
 
-## 7. For the operator
+## 7. For the operator -- ANSWERED 2026-09-15
+
+1. **(A) live workspaces**, with layout names as the naming. (B) was
+   declined on the doc's own argument: a switch that spawns the layout's
+   tags and abandons the live tree is a layout menu, not a workspace.
+2. **The section 4 package accepted AS PROPOSED**: the i3 vanish rule (an
+   inactive workspace with no hosted leaf drops at the next reconcile, the
+   active one never), `MAX_WORKSPACES` = 9 as the I-32 bound, Super+1..9 to
+   switch and Super+Shift+1..9 to move the focused leaf, and the `layout`
+   header line (`workspaces N active K`) as the channel -- NO `workspace/`
+   subtree.
+3. **Both marks ratified as BEACON 12.2 amendments, build sequenced AFTER
+   I-8/I-9** -- neither is needed to close the composition mockup (the
+   welcome shows no pills and a plain ok condition), so they are the
+   editor's delta and land with nora's chrome work, not inside this arc.
+
+The questions as they were put:
 
 1. (A) live workspaces with layout names, or (B) layouts as the list, or
    keep the deferral.
