@@ -245,6 +245,11 @@ pub struct ChromeSet {
     /// HALCYON-INSTRUMENT 8.2: the workspace's panes as of the last
     /// reconcile (`rail::pane_count`), the footer's right group.
     pane_count: u32,
+    /// HALCYON-WORKSPACES W-2: the `layout` header's `workspaces N active K`
+    /// as of the last read, ONE-BASED and unconverted. None means the header
+    /// carried no workspace tokens, and the bar keeps its own default rather
+    /// than painting a guess.
+    workspaces: Option<(u8, u8)>,
 }
 
 impl ChromeSet {
@@ -258,12 +263,20 @@ impl ChromeSet {
             focused: None,
             actions: Vec::new(),
             pane_count: 1,
+            workspaces: None,
         }
     }
 
     /// 8.2: the panes of the last layout read (a stack counts once).
     pub fn pane_count(&self) -> u32 {
         self.pane_count
+    }
+
+    /// W-2: the layout header's workspace pair (count, active), ONE-BASED --
+    /// the bar's two numbers. None until a layout carrying the tokens has
+    /// been read.
+    pub fn workspaces(&self) -> Option<(u8, u8)> {
+        self.workspaces
     }
 
     /// The public id of the leaf hosting the console surface, once a
@@ -328,6 +341,11 @@ impl ChromeSet {
             say(&format!("halcyond: pane count {} (leaves {:?})", panes, ids));
         }
         self.pane_count = panes;
+        // W-2: the same read feeds the bar's two numbers. Read from the
+        // HEADER, which is the ratified channel -- there is no `workspace/`
+        // subtree to walk, and the per-pane rows below are the ACTIVE root's
+        // only, so they can never say how many workspaces exist.
+        self.workspaces = halcyond::chrome::parse_workspaces(&layout);
         if let Some(mine) = tree.iter().find(|t| t.leaf.surface == Some(own_surface)) {
             self.own_pane = Some(mine.leaf.id);
             if !self.own_named

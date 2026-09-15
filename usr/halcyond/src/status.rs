@@ -49,7 +49,10 @@ pub fn condition_for(status: &str) -> Condition {
     }
 }
 
-/// What the bar shows. `workspaces`/`active` are 1/0 until H-4.
+/// What the bar shows. `workspaces` is the count and `active` is ZERO-BASED
+/// (the painter compares `i == active` over `0..workspaces`); both are fed
+/// from the `layout` header's ONE-BASED `workspaces N active K` since W-2,
+/// and the conversion happens once, in `statusset::model_from`.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct StatusModel {
     pub workspaces: u8,

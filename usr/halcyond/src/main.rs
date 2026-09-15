@@ -1006,6 +1006,7 @@ pub extern "C" fn rs_main() -> i64 {
                 notice,
                 t.running(),
                 chrome.pane_count(),
+                chrome.workspaces(),
                 hints.clone(),
             );
             status.refresh(&sm, &sheet, &mut gs);

@@ -111,6 +111,83 @@ pub struct Leaf {
     pub hidden: bool,
 }
 
+/// The `layout` header's workspace pair -- `workspaces N active K`, ONE-BASED
+/// exactly as the compositor writes it (HALCYON-WORKSPACES 4, the ratified
+/// channel: there is no `workspace/` subtree). Returned with K still
+/// one-based; `StatusModel.active` is ZERO-based, so the caller subtracts at
+/// the point it fills the model, and that conversion lives in exactly one
+/// place.
+///
+/// None when the first line carries neither token -- a compositor older than
+/// W-1a, or a malformed header -- so the caller keeps its own default rather
+/// than painting a guess. Only the FIRST line is read: a container row says
+/// `active=1` with an equals sign and could never be mistaken for the
+/// header's bare `active`, but reading one line makes that structural rather
+/// than a property of the spelling.
+pub fn parse_workspaces(layout: &str) -> Option<(u8, u8)> {
+    let head = layout.lines().next()?;
+    let (mut n, mut k) = (None, None);
+    let mut it = head.split_ascii_whitespace();
+    while let Some(tok) = it.next() {
+        match tok {
+            "workspaces" => n = it.next().and_then(|t| t.parse::<u8>().ok()),
+            "active" => k = it.next().and_then(|t| t.parse::<u8>().ok()),
+            _ => {}
+        }
+    }
+    let (n, k) = (n?, k?);
+    // A pair that cannot describe a tree is refused whole: the bar would
+    // otherwise light a chip with no workspace behind it.
+    if n == 0 || k == 0 || k > n {
+        return None;
+    }
+    Some((n, k))
+}
+
+#[cfg(test)]
+mod workspace_header_tests {
+    use super::parse_workspaces;
+
+    #[test]
+    fn reads_the_pair_one_based() {
+        let l = "epoch 8 focused 5 workspaces 3 active 2\n1 splith n=2 active=1 [0,0,1,1]\n";
+        assert_eq!(parse_workspaces(l), Some((3, 2)));
+    }
+
+    #[test]
+    fn a_pre_w1a_header_is_none_not_a_guess() {
+        let l = "epoch 7 focused 3\n1 splith n=2 active=1 [0,0,1,1]\n";
+        assert_eq!(parse_workspaces(l), None);
+    }
+
+    /// THE CONTROL: a container row's `active=1` must never be read as the
+    /// header's `active`. Without the first-line-only rule this returns
+    /// Some and the bar lights a chip off a pane row.
+    #[test]
+    fn container_rows_are_not_the_header() {
+        let l = "epoch 7 focused 3\n1 splith n=2 active=1 [0,0,1,1]\n  2 leaf surface=0 [0,0,1,1]\n";
+        assert_eq!(parse_workspaces(l), None);
+    }
+
+    #[test]
+    fn a_malformed_number_is_refused() {
+        assert_eq!(parse_workspaces("epoch 1 focused 1 workspaces x active 1\n"), None);
+        assert_eq!(parse_workspaces("epoch 1 focused 1 workspaces 2 active y\n"), None);
+    }
+
+    #[test]
+    fn an_impossible_pair_is_refused_whole() {
+        assert_eq!(parse_workspaces("epoch 1 focused 1 workspaces 1 active 2\n"), None);
+        assert_eq!(parse_workspaces("epoch 1 focused 1 workspaces 0 active 0\n"), None);
+    }
+
+    #[test]
+    fn the_single_workspace_default_reads_one_one() {
+        let l = "epoch 2 focused 1 workspaces 1 active 1\n1 leaf surface=0 [0,0,1,1]\n";
+        assert_eq!(parse_workspaces(l), Some((1, 1)));
+    }
+}
+
 /// Parse the leaf lines of the `layout` text: "<id>[*] leaf surface=<n>|empty
 /// [x,y,w,h][ hidden]" (tapestryd pane.rs render_pane), visible leaves only
 /// -- the chrome's input (a hidden leaf carves no strip). Containers and the

@@ -571,5 +571,50 @@ presents are a recorded optimization.
   leaves the tile alive to report its job finishing -- the positive witness that
   the cancelled close closed nothing).
 
+## The bar's two numbers -- reading the workspace header (2026-09-15, W-2a)
+
+The status bar has carried `StatusModel.workspaces` / `active` since I-4, and
+the painter has always drawn one chip per workspace with the active one as an
+ember box (`status.rs`). Both fields were nevertheless assigned NOWHERE: they
+sat at their 1/0 defaults, and `rail.rs`'s footer read the same dead 1. W-2a
+is the feed, not the paint.
+
+**Where the numbers come from.** `chrome::parse_workspaces` reads the `layout`
+file's HEADER -- `workspaces N active K` -- which is the ratified channel for
+this (HALCYON-WORKSPACES 4: no `workspace/` subtree exists, and the per-pane
+rows below the header describe the ACTIVE root only, so they could never say
+how many workspaces there are). `ChromeSet` stores the pair in the same
+refresh that already reads the layout for `parse_tree`, exposes it exactly as
+`pane_count()` is exposed, and both `model_from` call sites (the session's and
+the console's) pass it through.
+
+**Two decisions worth stating, because both could have been made carelessly.**
+
+The parser reads ONLY the first line. A container row says `active=1` with an
+equals sign and so could never collide with the header's bare `active` token
+-- but reading one line makes that a structural property rather than a
+property of the spelling, which is what a later format tweak would break. The
+test that pins it is the control of the set: a layout whose header lacks the
+tokens but whose rows carry `active=1` must parse as None, and without the
+first-line rule it returns Some and the bar lights a chip off a pane row.
+
+`parse_workspaces` returns `Option`, and that Option is carried all the way to
+`model_from` rather than being resolved at the parse. A compositor older than
+W-1a emits no workspace tokens, and the honest response is "keep whatever
+default the model has", not "paint a guess". Resolving it at the parse would
+have scattered that decision across two call sites; carried, it is made once.
+
+**The one conversion.** The header is ONE-BASED (`active K`, K in 1..=N)
+because it sits beside one-based pane ids and the `01`..`09` the rail paints;
+`StatusModel.active` is ZERO-BASED because the painter compares `i ==
+m.active` over `0..workspaces`. The subtraction lives in `model_from` and
+nowhere else -- an off-by-one here lights the wrong chip, and one site is the
+only way to keep that checkable.
+
+**Status: UNGATED.** Host tests 295 (289 before; the six new ones are the
+parser's) and the guest build is clean, but no runtime witness reads the bar
+yet -- that is W-3's `ls-gfx-session` leg (Super+2 creates, the bar reads 2/2,
+Super+1 returns, the bar reads 2/1). Compiling is not verifying.
+
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

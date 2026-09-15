@@ -374,12 +374,25 @@ pub fn model_from(
     notice: Option<(String, bool)>,
     running: bool,
     pane_count: u32,
+    // HALCYON-WORKSPACES W-2: the `layout` header's pair, ONE-BASED as the
+    // compositor writes it, or None when the header carries no workspace
+    // tokens (a compositor older than W-1a). None is carried this far rather
+    // than resolved at the parse so the "keep the default" decision is made
+    // once, here, instead of becoming a guess at the boundary.
+    workspaces: Option<(u8, u8)>,
     hints: alloc::vec::Vec<(String, String)>,
 ) -> StatusModel {
     let mut m = StatusModel::empty();
     m.notice = notice;
     m.pane_count = pane_count;
     m.hints = hints;
+    if let Some((n, k)) = workspaces {
+        m.workspaces = n;
+        // THE conversion, in exactly one place: the header counts workspaces
+        // from 1 (`active K`, K in 1..=N) and the bar compares `i == m.active`
+        // over `0..workspaces`, so an off-by-one here lights the wrong chip.
+        m.active = k.saturating_sub(1);
+    }
     if let Some((id, name, status)) = focused {
         m.name = name.clone();
         m.condition = condition_for(status);

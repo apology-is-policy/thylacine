@@ -2223,6 +2223,7 @@ pub fn run(home: Option<String>) -> i64 {
                 notice,
                 running,
                 chrome.pane_count(),
+                chrome.workspaces(),
                 hints.clone(),
             );
             status.refresh(&sm, &sheet, &mut gs);
