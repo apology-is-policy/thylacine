@@ -164,6 +164,60 @@ over I-6) or the operator's call, then push `5a7c0539`+ to both mirrors.
   Opus prosecutors -- the AUDIT-TRIGGERS I-7 row's (a)-(i) are the
   invariants.
 
+
+### Continuation -- round 3 spawned, and the I-6 silence re-diagnosed (the prior favoring of hypothesis (a) was on a false premise)
+
+Round 3 (the doubled-distance batch) is running: three Opus prosecutors in
+parallel, by the operator's standing design for this arc (the author is
+Fable 5.1, so Opus supplies the family diversity; for the I-7 parts authored
+on Opus 4.8 the diversity is inverted and each prompt says to lean on context
+independence -- re-derive from code, fight agreeing with a construction because
+it is one you would also write). The split matches rounds 1/2: A = the
+compositor (I-6 `c7bf9c7c` + the I-7 compositor half + the cross-thread
+palette), B = the halcyond theme surface (I-7 `5a7c0539`/`6f69f5a4`: the
+renderer models, the transaction, the gallery read, the durable write), C =
+the I-5 round-2 fix residue (`7c3c8289`, re-prosecuted per the dirty-close
+rule). Prompts in `scratchpad/instrument-r3-{common,A,B,C}-prompt.md`.
+
+While they run, the parallel self-audit made one real advance and three
+verified-sound confirmations (`scratchpad/instrument-r3-selfaudit.md`):
+
+- **The I-6 silence: the ruling-out of a lost GPU completion was on a false
+  premise -- a wrong turn this run's own entry (above) repeated.** That entry
+  says "wait_sync_done has a deadline that SAYS on trip (gpu.rs:1530) and the
+  silent run said nothing, so the compositor is not stuck in a GPU present --
+  eventq starvation (a) is now favored." Reading the code as ground truth
+  refutes the inference. The hover present ends in `wait_sync_done`, whose loop
+  blocks on `self.irq.wait()` = SYS_IRQ_WAIT, a wait with NO timeout
+  (kernel/syscall.c:362; kobj_irq_wait sleeps on pending_count). The "gpu
+  command never retired" say is INSIDE the loop body, reached only AFTER
+  irq.wait() returns, and `stale_since` is set on the first post-wake iteration
+  -- so it is a STALE-WAKE deadline. On a NO-WAKE hang (the GPU INTx never
+  delivered) the loop never iterates and the say NEVER fires. So "the deadline
+  said nothing -> not a GPU present" is invalid; a lost/absent GPU completion
+  INTx produces exactly the observed silence. The root-cause lead is a TRACKED
+  bug: irqfwd.c:212-223 forces every kobj_irq_create SPI to EDGE
+  (`gic_set_spi_edge_triggered`), assuming virtio-mmio; virtio-PCI INTx is
+  LEVEL (bug_irqfwd_forces_edge_on_level_intx). Two rapid ctrl-queue completions
+  whose INTx line never dips low drop the second edge under EDGE config, and
+  wait_sync_done then blocks forever -- fits the divider gate (one ctrl submit
+  per pointer-motion repaint) and the ~1-in-6 race. The kstack prediction is
+  now sharp: a live occurrence shows tapestryd in kobj_irq_wait on the GPU's
+  INTID (35) with the GPU used.idx already past used_seen. The FIX is a kernel
+  IRQ-ABI fork = the operator's call. This also means the console-gate red that
+  holds the I-7 push is caused by a PRE-EXISTING kernel IRQ bug, not by I-7 --
+  corroborating that I-7 is clean on the divider path.
+- **Verified sound** (re-prosecuted from code): the gallery format-fuzz size /
+  traversal / panic legs (read_file caps the read at 1 MiB above theme::load's
+  16 KiB decode cap, so the cap is not a phantom; is_gallery_id re-validates the
+  committed id before it is a path component); the push_theme accept-gate (the
+  refused arm rebuilds nothing, nothing is mutated before the guard's
+  push_theme returns -- the r2 fix holds); the durable write within (h)'s
+  stated old-or-none tolerance.
+
+The push remains HELD for the operator. Round-3 findings (when the prosecutors
+report) precede it.
+
 ---
 
 ## Run 46o (2026-09-14, Fable 5.1 max) -- the Halcyon Instrument arc opens: reading the Carbon Optics kit against the tree
