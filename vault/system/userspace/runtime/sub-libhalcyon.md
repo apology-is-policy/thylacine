@@ -10,6 +10,7 @@ code:
   - usr/lib/libhalcyon/src/skeleton.rs
   - usr/lib/libhalcyon/src/place.rs
   - usr/lib/libhalcyon/src/tag.rs
+  - usr/lib/libhalcyon/src/instrument.rs
   - usr/lib/libhalcyon/Cargo.toml
   - usr/halcyon/src/lib.rs
   - usr/halcyon/src/main.rs
@@ -20,15 +21,15 @@ validated-by: [prose]
 locks: []
 hazards: []
 abis: [abi-halcyon-palette]
-design: ["docs/HALCYON.md section 13", "docs/HALCYON-VISUAL.md"]
+design: ["docs/HALCYON.md section 13", "docs/HALCYON-VISUAL.md", "docs/HALCYON-INSTRUMENT.md"]
 created: 2026-09-05
-updated: 2026-09-07
+updated: 2026-09-15
 ---
 ## Purpose
 
 The Halcyon environment library (HALCYON.md 13): the shared pieces of the
 graphical environment that must not fork between the compositor and its
-clients. Four modules, each a thing that must not fork between the compositor
+clients. Five modules, each a thing that must not fork between the compositor
 and a client:
 
 - `theme` is the Daylight visual scripture as code (HALCYON-VISUAL.md) --
@@ -277,6 +278,88 @@ authority is the user's own principal).
   in-flight restore only -- no escalation, no crash. The fix (blocking a subtree
   with a foreign-owned empty leaf) lands with the multi-seat hardening. Prosecuted
   where the rule lives: [[sub-tapestryd]].
+
+## `instrument` -- the second schema, the projections, the bundle (HALCYON-INSTRUMENT 4)
+
+`instrument.rs` is the fifth module: the Instrument profile's theme schema, the
+projections between it and the legacy one, the profile word, and the `Bundle` a
+session resolves. `theme::load` DISPATCHES on `[meta] profile` -- absent is the
+57-key legacy schema `theme.rs` owns; `instrument-v1` is this one, the 35 colour
+roles of the Astra kit's `resolved-tokens.json` exactly, plus the authored
+ANSI-16 and the smoothing stroke.
+
+**A theme file carries NO geometry, and that is the identity rule.** Geometry
+belongs to the PROFILE -- a compiled table (`INSTRUMENT_BASE` / `metrics_base`),
+never a file a theme could name. HALCYON-THEME 2's rule extended by one axis: a
+theme may restyle the display, never re-lay it.
+
+**The loader is whole-file accept-or-refuse.** `from_entries` bounds truncation
+at `INSTRUMENT_MAX` (16 KiB) as `theme::THEME_MAX` does; the meta is strict
+(`schema = 1`, `profile` exactly the word, `id` a gallery id, `name`
+presentable, `color_scheme` dark|light) with `group`/`tagline`/`rank` the
+optional three; an unknown key, an unknown table, or a bare key outside a table
+is refused by name and line; and every colour key is REQUIRED, so a partial file
+returns `Incomplete { missing }` NAMING each absent key rather than silently
+inheriting a floor. It starts from `builtin()` anyway -- not because anything of
+it survives (nothing does: every key is required) but so the type stays total
+without an all-`Option` mirror of itself.
+
+**The projections are approximations BY CONSTRUCTION and say so.**
+`project_legacy` / `project_instrument` are pure and total, so ANY theme renders
+under EITHER profile -- a file in the other schema is projected, never refused.
+Exactness holds only in a theme's native profile; the kit sidecars are pinned to
+project to their stock twins exactly, which is what keeps "approximate" from
+drifting into "wrong".
+
+**`Bundle` -> `Visual` is the "nothing else reads a constant" rule.** The
+`Bundle` (profile + both themes, one native and one projected) is the scale-free
+thing that crosses the wire; `at(pct)` turns it into the `Visual` a painter is
+handed -- profile, both themes, `Metrics`, and the derived opaques. A painter
+reads the `Visual` and nothing else, which is the I-1 restatement of the H-3
+single-token-source contract this dossier already enforces for `theme`.
+
+**`Derived` resolves the 7.3 opaques once, through a DELIBERATE copy of the
+executor's lerp.** The mockup states several colours as an alpha over a KNOWN
+substrate (`open_header`, `selection`, the two focus insets, the swatch ring);
+`Derived::of` resolves them per theme so every painter fills them flat and none
+blends where the substrate is known. `over()` is `cartoon::blend`'s exact
+arithmetic (a/256, per lane, truncating), repeated here rather than depended on
+so this crate stays free of the painter's crate -- and
+`carbon_derives_the_kits_opaques` pins the two against the kit's own figure
+(Carbon's `#151819`), which is what stops the duplication becoming a fork.
+
+**`resolve_bundle` falls ONE step per refusal, loudly.** Profile: the user's
+word, then the system's, then the `legacy` floor. Theme: the picker's gallery
+pick, then the user file, then the system file, then the profile's floor. Each
+refused tier emits a note (a MISSING file is silent; a REFUSED one is not). Two
+judgements worth keeping: a pick word that is not a gallery id is refused **even
+when the caller supplied a file for it** -- the word is user-authored and the
+path it would form is not -- and a valid id with NO file behind it is said too,
+because a stale pick after a gallery change would otherwise read as "the picker
+did nothing". `Sources` injects the file contents so the policy is pure and
+host-tested, with the I/O left at the caller exactly as `theme::resolve` does.
+
+**Why this module is `audit: light` though it parses authored bytes.** The same
+reason the rest of the crate is: it holds no authority, makes no syscall, and
+takes its input as an injected `&str`. The untrusted READ -- walking
+`/lib/halcyon/themes` and deciding what may become a path -- happens in
+[[sub-halcyond]], which is `audit: hard` and where the format-fuzz prosecution
+belongs. The split is the same one this dossier already draws for
+`layout`/`skeleton` vs the H-4b gate in [[sub-tapestryd]].
+
+**Coverage note.** `carve.rs`, `scale.rs` and `toml.rs` are NOT yet carried.
+`toml.rs` is the one to fold next: it is the parser this loader consumes, so it
+is the actual substrate of the format-fuzz surface, and it already carries the
+tests that say so (`arbitrary_input_never_panics`,
+`a_seeded_corpus_of_garbage_always_returns`).
+
+**Tests.** 16 of the crate's 119 host tests are this module's (measured green
+2026-09-15, `cargo test -p libhalcyon --lib --target aarch64-apple-darwin` from
+`usr/` -- the workspace pins the guest target, so the override is required).
+They pin the strict meta, the partial file naming every missing key, the ANSI
+slot rule, the registry covering every field, the dispatcher routing on the
+profile word, the sidecar-to-stock projection equality, the tier ladder falling
+one step per refusal, and a gallery id being a path ONLY when it is an id.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)
