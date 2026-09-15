@@ -233,6 +233,7 @@ struct Layout {
 }
 
 fn layout(d: &Dialog, w: u32, h: u32, sheet: &Sheet, gs: &mut GlyphSource) -> Layout {
+    gs.set_kerning(sheet.kerning);
     let wi = w as i32;
     let content_w = wi - 2 * sheet.ipx(BODY_PAD_X);
     let body_lines = wrap(gs, sheet.face_body, sheet.px(BODY_PX), &d.body, content_w);
@@ -271,6 +272,7 @@ fn footer_h(sheet: &Sheet) -> i32 {
 /// The dialog's surface size (14.5): min(480, display - 32) wide; the header
 /// + wrapped body + footer tall, clamped to display - 32.
 pub fn dialog_size(d: &Dialog, sheet: &Sheet, display_w: u32, display_h: u32, gs: &mut GlyphSource) -> (u32, u32) {
+    gs.set_kerning(sheet.kerning);
     let w = sheet
         .ipx(MAX_W)
         .min(display_w as i32 - sheet.ipx(VIEW_MARGIN))

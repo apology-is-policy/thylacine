@@ -906,10 +906,11 @@ pub extern "C" fn rs_main() -> i64 {
                             let cmd = halcyond::rail::sanitise_cmd(t.last_command().unwrap_or(""));
                             pending_close = Some((id, count));
                             if !menus.open_dialog(halcyond::dialog::Dialog::close_running(&name, &cmd), &sheet, &mut gs) {
+                                // The confirmation surface could not be minted:
+                                // refuse rather than close a RUNNING console
+                                // unasked (14.5 (i)); retry once a surface frees.
                                 pending_close = None;
-                                if chromeset::pane_verb(troot, id, "close") {
-                                    relayout = true;
-                                }
+                                status.notify("CANNOT CONFIRM CLOSE -- TRY AGAIN", true);
                             }
                         } else if chromeset::pane_verb(troot, id, "close") {
                             relayout = true;
@@ -1234,8 +1235,11 @@ pub extern "C" fn rs_main() -> i64 {
                         }
                     }
                     "close" => {
-                        if let Some((id, count)) = pending_close.take() {
-                            if count <= 1 {
+                        if let Some((id, _)) = pending_close.take() {
+                            // Re-derive at resolution, not the snapshot taken when
+                            // the dialog opened: the final-tile protection must
+                            // hold against the CURRENT tree.
+                            if session::tile_count(troot, id) <= 1 {
                                 status.notify("FINAL TILE IS PROTECTED", true);
                             } else if chromeset::pane_verb(troot, id, "close") {
                                 relayout = true;

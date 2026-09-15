@@ -643,12 +643,16 @@ impl Repl {
     /// stdout, exactly like `open_notes` / `install_completion`, so the
     /// bare-spawn boot check + host tests never probe.
     pub fn probe_winsize(&mut self, out: &mut dyn IoWrite) {
-        // pts: the ldisc ctl render carries "... winsize <cols> <rows>". Read
-        // the fd the dance opened (offset 0, never yet read); no CPR.
+        // pts: the ldisc ctl render carries "... winsize <cols> <rows>". The
+        // fd the dance opened was already read at offset 0 by the startup probe
+        // (its offset is advanced), and ptyfs re-renders the ctl per read, so
+        // read at 0 EXPLICITLY (t_pread does not consume the fd offset) -- else a
+        // winch re-probe reads past the current render and never re-learns the
+        // resized width. No CPR.
         if self.env.job_control.is_some() {
             if let Some(fd) = self.env.consctl_fd {
                 let mut buf = [0u8; 128];
-                let n = unsafe { libthyla_rs::t_read(fd as i64, buf.as_mut_ptr(), buf.len()) };
+                let n = unsafe { libthyla_rs::t_pread(fd as i64, buf.as_mut_ptr(), buf.len(), 0) };
                 if n > 0 {
                     if let Some((c, r)) = parse_winsize(&buf[..n as usize]) {
                         if c > 0 && r > 0 {

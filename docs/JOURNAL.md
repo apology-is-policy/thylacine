@@ -218,6 +218,49 @@ verified-sound confirmations (`scratchpad/instrument-r3-selfaudit.md`):
 The push remains HELD for the operator. Round-3 findings (when the prosecutors
 report) precede it.
 
+
+### Round 3 closed (the autonomous part) -- one P1 held for the operator
+
+All three Opus prosecutors reported (A compositor 0/1/0/2, B theme surface
+0/0/1/3, C the I-5 residue 0/0/1/1; every MODEL start==end, no fallback). The
+round is a clean autonomous close with ONE open escalation:
+
+- **F-A1 [P1, HELD FOR THE OPERATOR]** -- the I-6 compositor-silence, now
+  confirmed by two prosecutors + the self-audit and pinned to its cause: I-6
+  made every hover crossing over a divider track a synchronous BLOCKING GPU
+  present on the single-threaded loop, and the "gpu command never retired"
+  deadline is a stale-wake deadline that stays silent on a no-wake hang -- so a
+  lost GPU completion (irqfwd forces virtio-PCI's LEVEL INTx to EDGE) wedges the
+  whole display. The in-scope palliative (batch the hover present into
+  frame_tick) reduces but does not cure; the cure is a kernel/ABI change (the
+  operator's call). NOT fixed this round; surfaced as a coupled decision. The
+  push stays held (the console gate cannot green until the cure).
+- **Fixed (autonomous, landed):** F-C1 [P2] the doubled-prompt fix's pts winch
+  re-probe was INERT -- it re-read consctl_fd at the advanced offset the startup
+  probe left, so a pts editor never re-learned its width after a resize; fixed
+  by reading offset 0 explicitly (t_pread; ptyfs re-renders the ctl per read).
+  Plus five P3s: F-C2 (note_is_silent keyed on a name allowlist, not the
+  print-nothing property -> a spurious prompt on Ctrl-Z at the idle prompt);
+  C's cross-scope catch that the I-7 dialog MEASURE path lacked set_kerning
+  while the LAY path had it (the round-2 A-F2 measure-vs-lay class); B-2 (the
+  gallery dirent filename composed with no single-component check); B-3 (the
+  running-close confirmation silently skipped on a dialog-mint failure -> now
+  refuses); B-4 (the final-tile protection used a snapshot count -> now
+  re-derived). Two doc amendments (F-A2/F-A3) softened two overclaimed invariant
+  texts.
+- **Withdrawn on ground truth:** B-1 [P2] -- the durable write's missing
+  parent-dir fsync is a non-issue on Stratum, whose Tfsync is a full pool-wide
+  commit (31-durability-commit.md 31.6), so the rename is durable. The
+  prosecutor raised it with an explicit confidence gap; verifying the FS
+  semantics rather than assuming closed it in the benign direction.
+- **The round-2 fixes STAND:** C re-prosecuted the P0 (B-F1 layout monotonicity)
+  and confirmed it terminates AND that no other layout rule is non-monotone in
+  width; every named kern fix and legacy byte-identity hold.
+
+Posture: userspace guest build green; halcyond host lib tests 279/279. The
+push and the F-A1 kernel cure are both the operator's calls; neither was taken
+autonomously, and the console gate was not re-run to manufacture a green.
+
 ---
 
 ## Run 46o (2026-09-14, Fable 5.1 max) -- the Halcyon Instrument arc opens: reading the Carbon Optics kit against the tree

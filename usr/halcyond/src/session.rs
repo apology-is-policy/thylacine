@@ -189,7 +189,7 @@ fn tile_verb(act: &str) -> Option<(&str, u32)> {
 /// The size of the stack holding leaf `id`, off the layout (1 for a stack
 /// of one; the final-tile rule's input when a menu choice, not a header
 /// press, asks for a close).
-fn tile_count(troot: i64, id: u32) -> u32 {
+pub(crate) fn tile_count(troot: i64, id: u32) -> u32 {
     read_file(troot, "layout")
         .map(|l| {
             halcyond::chrome::parse_tree(&l)
@@ -1152,7 +1152,15 @@ pub(crate) fn read_gallery() -> Vec<halcyond::picker::PickerTheme> {
     };
     for ent in rd.flatten() {
         let name = ent.file_name();
-        if !name.ends_with(".toml") {
+        // The preview set must equal the committable set: require the stem to be
+        // a gallery id (gallery_bundle re-validates the same at commit), which
+        // also holds the dirent name to a single path component -- a hostile 9P
+        // server bound over the gallery dir cannot inject a "../" name here
+        // (defense in depth; halcyond has only the user's own authority).
+        let Some(stem) = name.strip_suffix(".toml") else {
+            continue;
+        };
+        if !instrument::is_gallery_id(stem) {
             continue;
         }
         let mut path = String::from(instrument::GALLERY_DIR);
@@ -1757,8 +1765,11 @@ pub fn run(home: Option<String>) -> i64 {
                         }
                     }
                     "close" => {
-                        if let Some((id, count)) = pending_close.take() {
-                            if count <= 1 {
+                        if let Some((id, _)) = pending_close.take() {
+                            // Re-derive the count at resolution, not the snapshot
+                            // taken when the dialog opened: the final-tile
+                            // protection must hold against the CURRENT tree.
+                            if tile_count(troot, id) <= 1 {
                                 status.notify("FINAL TILE IS PROTECTED", true);
                             } else {
                                 layout_verb(troot, &format!("close {}", id));
@@ -2079,9 +2090,12 @@ pub fn run(home: Option<String>) -> i64 {
                             let cmd = halcyond::rail::sanitise_cmd(t.tile.scrollback.last_command().unwrap_or(""));
                             pending_close = Some((id, count));
                             if !menus.open_dialog(halcyond::dialog::Dialog::close_running(&name, &cmd), &sheet, &mut gs) {
+                                // The confirmation surface could not be minted
+                                // (surfaces scarce): refuse rather than close a
+                                // RUNNING tile unasked (14.5 (i)); the user can
+                                // retry once a surface frees.
                                 pending_close = None;
-                                layout_verb(troot, &format!("close {}", id));
-                                relayout = true;
+                                status.notify("CANNOT CONFIRM CLOSE -- TRY AGAIN", true);
                             }
                         } else {
                             layout_verb(troot, &format!("close {}", id));

@@ -2437,7 +2437,11 @@ pub fn dispatch_notes(env: &mut Env, notes: &[Note]) -> bool {
 /// `tty:winch` / `tty:cont` is discarded by `dispatch_note`, so servicing
 /// it at the idle prompt must not move the prompt to a fresh line.
 pub fn note_is_silent(env: &Env, note: &Note) -> bool {
-    matches!(note.name.as_str(), "tty:winch" | "tty:cont") && !env.note_handler_defined(&note.name)
+    // Silent == dispatch_note prints/cancels nothing: no handler runs, and it is
+    // neither the printing tty:hup nor the line-cancelling interrupt. Keyed on the
+    // PROPERTY, not a name allowlist, so tty:susp (and any future discarded note)
+    // is classified silent -- no spurious prompt redraw at the idle prompt.
+    !env.note_handler_defined(&note.name) && note.name != "tty:hup" && note.name != "interrupt"
 }
 
 /// How often (in iterations) `eval_while` / `eval_for` poll the note queue for
