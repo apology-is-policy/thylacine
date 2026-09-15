@@ -582,14 +582,20 @@ static inline long t_irq_create(unsigned long intid, unsigned long rights) {
 // t_irq_wait — block until at least one IRQ has fired on the subscription
 // represented by handle `h`. Returns the collapsed-fire count (>=1), or
 // -1 on bad handle / wrong kind / missing T_RIGHT_SIGNAL.
+//
+// F-A1 (C): SYS_IRQ_WAIT reads x1 as a ns timeout (0 = wait forever), so x1
+// MUST be set even here -- else a stale register reads as a bogus timeout.
+// This C FFI has no timed variant (the timed wait is a Rust-driver concern);
+// it always waits forever.
 __attribute__((always_inline))
 static inline long t_irq_wait(long h) {
     register long x0 __asm__("x0") = h;
+    register long x1 __asm__("x1") = 0;   // timeout_ns = 0 (forever)
     register long x8 __asm__("x8") = T_SYS_IRQ_WAIT;
     __asm__ volatile (
         "svc #0"
         : "+r"(x0)
-        : "r"(x8)
+        : "r"(x1), "r"(x8)
         : "memory", "cc"
     );
     return x0;
