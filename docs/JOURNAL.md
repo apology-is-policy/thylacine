@@ -520,6 +520,68 @@ force. The operator then lifted the ask-before-push condition standing.
 
 
 
+### W-1a: the live workspaces, and two defects that only exist once there are two roots
+
+With both gates green and I-7b pushed, the arc moved to W-1 -- the live
+workspaces the operator ratified as mechanism (A). The design was already
+scripture (`docs/HALCYON-WORKSPACES.md`), so this was a build, not a fork.
+
+**The one design choice worth recording** is what did not happen. `Layout.root`
+could have stayed a field kept in step with `workspaces[active].root`. It
+became an accessor and the field was deleted instead, because the single
+failure a workspace switch must not have is leaving a stale root behind, and a
+value that is never copied cannot go stale. That also handed the blast radius
+to the compiler -- which earned its keep immediately: my grep had reported
+thirty-odd `.root` sites, but it **missed line-broken calls** (rustfmt splits
+`self.panes` from `.iter()`) and **mis-attributed three `Conn.root` hits** on an
+unrelated type. The compiler found exactly 34 in the lib and exactly one in the
+server. The grep would have had me "fix" three unrelated sites and miss real
+ones.
+
+**A census that failed its own control.** Before writing anything I tried to
+enumerate every whole-pool traversal that could now cross workspaces, with the
+rule that the census must return three scanners I had already read by hand. It
+returned two. The pattern `self\.panes\.iter()` cannot match a call rustfmt has
+split across lines, so `hosted_leaves` was invisible to it. Two-of-three came
+back and I nearly read that as a pass. Re-run multiline-safe and function-aware
+it found 27 accesses across 22 functions -- and the classification is the useful
+part: most are safe *by construction* because they filter on `visible`, which
+`recompute`'s first pass clears for inactive roots. That is a real invariant and
+the dossier now states it rather than leaving it to be rediscovered.
+
+**The six that do not filter on visibility** were judged one at a time, and one
+of them was a bug: the zoom resolves by id through the global `slot_of_id`, and
+the carve never checked the target belonged to the active root -- so a zoom made
+in workspace 1 would still match after switching to workspace 2 and fill the
+display with the other workspace's pane. The worse one was `close_inner`'s root
+arm, which freed the **whole pane pool** under the comment "the subtree was the
+whole tree". True with one root; with nine it annihilates every other workspace
+and leaves `workspaces` pointing at freed slots. Neither is reachable today --
+both are latent until a second root exists, which is exactly why they had to be
+found by reading rather than by running.
+
+**The regression test is sabotage-measured**, which is the only reason it
+counts: restoring the old pool-nuking loop fails it by name ("the other root
+SURVIVES the close"), reverting passes. A test guarding a catastrophe that has
+never been seen to fail proves nothing.
+
+**A stale guard caught by its own subject.** The chords round-trip test pinned
+`text.lines().count()` to the literal 22 and went red the moment eighteen
+workspace chords landed. The fix was not to write 40 -- that is the same defect
+one rotation later -- but to derive the count from `binds.len()`, which keeps
+the claim (render emits one line per bind, none dropped or duplicated) while
+making it unable to go stale. `action_of` likewise *parses* `workspace-N`
+rather than listing eighteen arms, so the render and parse directions cannot
+drift apart.
+
+Landed as `6ae3c405`, pushed to both mirrors. tapestryd host 48 (41 before),
+halcyond 289, guest build clean. **W-1b is owed and not claimed**: the
+seat-gated `workspace N` ctl verb and the battery leg (switch, dormant, return,
+vanish) -- the battery is a client and cannot inject a chord, so the leg needs
+that verb as its driver. N is still 1 on screen until W-2 feeds the two numbers
+to the bar; the chip painter has been ready since I-4.
+
+
 ## Run 46o (2026-09-14, Fable 5.1 max) -- the Halcyon Instrument arc opens: reading the Carbon Optics kit against the tree
 
 ### What this run was for
