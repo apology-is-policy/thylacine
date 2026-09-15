@@ -1840,6 +1840,22 @@ start)` with opacity 0 at 55 % — reduced-motion honoured (§9.5).
   when that tile's job is RUNNING and closing by verb otherwise, with no
   final-tile protection (§6.5) and the compositor's own close as the
   no-rail fallback; the as-built notes in §9.5, §9.3, §14.5 and §6.5).
+- **W-1 — the live workspaces (HALCYON-WORKSPACES mechanism (A)).** One
+  live root per workspace with per-workspace focus; the switch as a
+  structural reconcile (the leaving tree dormant, keeping its last
+  present); the `layout` header's `workspaces N active K`; the i3 vanish
+  rule; `MAX_WORKSPACES` = 9 partitioning the existing pane pool. Chords
+  Super+1..9 / Super+Shift+1..9. *Audit-bearing: the dormancy predicate
+  widened, I-32 on the count, the switch's fan.* **W-1a LANDED** (`Layout.
+  workspaces` + `active`, `root()` as an accessor rather than a stored
+  mirror, `switch_workspace` / `move_focused_to_workspace` /
+  `reap_empty_workspaces`, the widened `apply_backgrounded`, the
+  `in_active_root` zoom guard, the eighteen chords, and the `close_inner`
+  root-arm fix — it freed the whole pane pool, which with several live
+  roots annihilates every other workspace; the as-built note in §14.1).
+  **W-1b owes** the seat-gated `workspace N` ctl verb and the battery leg
+  (switch / dormant / return / vanish), since the battery is a client and
+  cannot inject a chord.
 - **I-8 — effects and motion.** The two ops, the glows, the backdrop, the
   transitions.
 - **I-9 — parity gate, audit, rollout.** ACCEPTANCE-TESTS in full against
@@ -2017,6 +2033,24 @@ status and the footer's workspace hint waited on HALCYON-WORKSPACES, **RATIFIED 
 defaults package as proposed). They land with W-1..W-3, and W MUST precede
 I-9: the bar showing `1` against a mockup showing `1 2 3` is exactly the
 parity failure the acceptance run against Astra's goldens exists to catch.
+
+**As built at W-1a.** The compositor now carries the workspaces themselves:
+`Layout.workspaces` is one LIVE root each with its own remembered focus, and
+`root()` is an accessor over the active entry rather than a stored mirror — a
+switch cannot leave a stale root because there is no second copy to leave.
+`recompute`'s existing first pass already zero-rects every pane before walking
+the active root, so an inactive workspace goes dark for free; what it needed
+was the d-1b dormancy predicate one workspace wider, stamped inside
+`apply_backgrounded` because only the tree knows its own roots. Focus is per
+workspace (the i3 rule), an inactive EMPTY workspace vanishes and the active
+one never does, and `MAX_WORKSPACES` = 9 partitions the existing 32-pane pool
+rather than enlarging it — workspaces add no resource ceiling. The `layout`
+header carries `workspaces N active K`, ONE-BASED to match the ids beside it
+and the `01`..`09` the rail paints; the per-pane rows stay the active root's.
+Super+1..9 switch (creating only the next free number) and Super+Shift+1..9
+move, ownership-preserving. **Still N = 1 on screen** until W-1b gives the
+switch a client-reachable driver (the seat-gated `workspace N` verb) and W-2
+feeds the two numbers to the bar — the chip painter has been ready since I-4.
 
 ### 14.2 The object verb menu (H-3c's `Role::Menu` surface in the round-2 look)
 

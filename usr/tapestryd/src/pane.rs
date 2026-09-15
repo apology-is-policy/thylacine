@@ -40,6 +40,12 @@ use libhalcyon::theme;
 
 pub const MAX_PANES: usize = 32;
 
+/// HALCYON-WORKSPACES 4 (the ratified bound; I-32): nine workspaces, because
+/// Super+1..9 is the whole keyboard's worth and a client verb must not be
+/// able to mint more. Workspaces PARTITION the `MAX_PANES` pool -- they never
+/// enlarge it, so the resource floor is unchanged by this feature.
+pub const MAX_WORKSPACES: usize = 9;
+
 // The blank/empty-pane fill moved to `Theme.blank` at HALCYON-THEME TH-2: it
 // was the last chrome colour outside the token source, and a near-black hole
 // is exactly what a light theme must be able to retint. Every chrome colour
@@ -465,11 +471,28 @@ pub struct Pane {
     pub backgrounded: bool,
 }
 
+/// One workspace (HALCYON-WORKSPACES 4, mechanism (A)): its LIVE root and
+/// the leaf to restore focus to on return -- focus is per workspace and
+/// remembered across a switch (the i3 rule).
+#[derive(Clone, Copy)]
+struct Workspace {
+    root: usize,
+    focused: usize,
+}
+
 #[derive(Clone)]
 pub struct Layout {
     panes: Vec<Option<Pane>>,
-    pub root: usize,
-    /// The focused LEAF slot.
+    /// One live root per workspace, in order. There is deliberately NO
+    /// second copy of the active root: `root()` reads it through this Vec,
+    /// so a switch cannot leave a stale mirror behind.
+    workspaces: Vec<Workspace>,
+    /// Index into `workspaces`. Invariant: `active < workspaces.len()` and
+    /// `workspaces` is never empty (`new` seeds one, the vanish rule never
+    /// drops the active one).
+    active: usize,
+    /// The focused LEAF slot -- the ACTIVE workspace's. An inactive
+    /// workspace's focus lives in its `Workspace` entry until it returns.
     pub focused: usize,
     id_seq: u32,
     /// Bumped on every structural / geometry / focus mutation; Comp
@@ -497,7 +520,8 @@ impl Layout {
     pub fn new() -> Layout {
         let mut l = Layout {
             panes: Vec::new(),
-            root: 0,
+            workspaces: Vec::new(),
+            active: 0,
             focused: 0,
             id_seq: 0,
             epoch: 1,
@@ -509,9 +533,216 @@ impl Layout {
         let root = l
             .alloc(None, Kind::Leaf { surface: None })
             .expect("root pane");
-        l.root = root;
+        l.workspaces.push(Workspace {
+            root,
+            focused: root,
+        });
         l.focused = root;
         l
+    }
+
+    /// The ACTIVE workspace's root (HALCYON-WORKSPACES 4). Deliberately an
+    /// accessor rather than a stored field: the one thing a workspace switch
+    /// must not be able to do is leave a stale root behind, and a value that
+    /// is never copied cannot go stale.
+    pub fn root(&self) -> usize {
+        self.workspaces[self.active].root
+    }
+
+    /// Re-seat the active workspace's root (a dissolve or a collapse moved
+    /// it). The invariant above makes the index safe.
+    fn set_root(&mut self, slot: usize) {
+        let a = self.active;
+        self.workspaces[a].root = slot;
+    }
+
+    /// How many workspaces exist, and which is active (the `layout` header's
+    /// two numbers, HALCYON-WORKSPACES 4).
+    pub fn workspace_count(&self) -> usize {
+        self.workspaces.len()
+    }
+
+    pub fn active_workspace(&self) -> usize {
+        self.active
+    }
+
+    /// Every root EXCEPT the active one -- the subtrees `recompute` leaves
+    /// dark and `apply_backgrounded` stamps dormant.
+    fn inactive_roots(&self) -> Vec<usize> {
+        self.workspaces
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != self.active)
+            .map(|(_, w)| w.root)
+            .collect()
+    }
+
+    /// Is `slot` inside the ACTIVE workspace's tree? Walks to its top, so it
+    /// answers for a container as well as a leaf. Used where a global,
+    /// id-addressed lookup (`slot_of_id`) could otherwise reach across
+    /// workspaces -- the zoom target being the case that bites.
+    pub fn in_active_root(&self, slot: usize) -> bool {
+        let mut cur = slot;
+        loop {
+            if cur == self.root() {
+                return true;
+            }
+            match self.get(cur).and_then(|p| p.parent) {
+                Some(p) => cur = p,
+                None => return false,
+            }
+        }
+    }
+
+    /// Switch to workspace `k` (0-based). `k == count` CREATES it -- the i3
+    /// rule that Super+N on the next free number makes that workspace --
+    /// bounded by `MAX_WORKSPACES`; any number past the next free one is
+    /// refused rather than silently creating a run of empties.
+    ///
+    /// Focus is per workspace: the outgoing one's is saved and the incoming
+    /// one's restored. A remembered leaf that died while the workspace was
+    /// away falls back to the arriving root's first leaf, so a switch can
+    /// never land focus on a freed slot.
+    pub fn switch_workspace(&mut self, k: usize) -> bool {
+        if k >= MAX_WORKSPACES || k == self.active || k > self.workspaces.len() {
+            return false;
+        }
+        if k == self.workspaces.len() {
+            // An exhausted pane table refuses the switch rather than leaving
+            // a half-made workspace behind (I-32: creation fails clean).
+            let root = match self.alloc(None, Kind::Leaf { surface: None }) {
+                Some(r) => r,
+                None => return false,
+            };
+            self.workspaces.push(Workspace {
+                root,
+                focused: root,
+            });
+        }
+        let a = self.active;
+        self.workspaces[a].focused = self.focused;
+        self.active = k;
+        let want = self.workspaces[k].focused;
+        self.focused = if self.is_leaf(want) {
+            want
+        } else {
+            let r = self.root();
+            self.first_leaf(r).unwrap_or(r)
+        };
+        // A zoom belongs to the tree it was made in, and `zoomed_id` is one
+        // global field: carrying it across would put an id in the `layout`
+        // header that the carve (guarded by `in_active_root`) refuses to
+        // honour -- a file saying something the screen does not.
+        self.zoomed_id = None;
+        self.epoch += 1;
+        true
+    }
+
+    /// The i3 vanish rule (HALCYON-WORKSPACES 4): an INACTIVE workspace with
+    /// no hosted leaf is dropped; the active one never is, however empty.
+    /// Returns how many went. Walks backwards so a removal cannot shift an
+    /// index still to be visited.
+    pub fn reap_empty_workspaces(&mut self) -> usize {
+        let mut dropped = 0usize;
+        let mut i = self.workspaces.len();
+        while i > 0 {
+            i -= 1;
+            if i == self.active {
+                continue;
+            }
+            let r = self.workspaces[i].root;
+            if self.subtree_hosted(r).is_empty() {
+                self.free_subtree(r);
+                self.workspaces.remove(i);
+                if self.active > i {
+                    self.active -= 1;
+                }
+                dropped += 1;
+            }
+        }
+        if dropped > 0 {
+            self.epoch += 1;
+        }
+        dropped
+    }
+
+    /// Move the FOCUSED leaf to workspace `k` (0-based) -- i3's
+    /// Super+Shift+N. OWNERSHIP-PRESERVING: the leaf keeps its id, its
+    /// surface and its status, and nothing is saved, restored or respawned
+    /// (HALCYON-WORKSPACES 4). `k == count` creates it, as the switch does.
+    ///
+    /// The subtle case is a focused leaf that IS this workspace's root:
+    /// `detach_leaf` no-ops on a parentless pane, so moving it without
+    /// re-seating would leave the SAME SLOT rooted in two workspaces at
+    /// once. That branch mints a fresh empty root to leave behind.
+    pub fn move_focused_to_workspace(&mut self, k: usize) -> bool {
+        if k >= MAX_WORKSPACES || k == self.active || k > self.workspaces.len() {
+            return false;
+        }
+        let leaf = self.focused;
+        // An empty tile is not worth moving: it would trade one placeholder
+        // for another and could strand the workspace it left.
+        if !self.is_leaf(leaf) || self.leaf_surface(leaf).is_none() {
+            return false;
+        }
+        if k == self.workspaces.len() {
+            let root = match self.alloc(None, Kind::Leaf { surface: None }) {
+                Some(r) => r,
+                None => return false,
+            };
+            self.workspaces.push(Workspace {
+                root,
+                focused: root,
+            });
+        }
+        if self.get(leaf).and_then(|p| p.parent).is_some() {
+            self.detach_leaf(leaf); // may dissolve, and may re-seat the root
+        } else {
+            let fresh = match self.alloc(None, Kind::Leaf { surface: None }) {
+                Some(f) => f,
+                None => return false,
+            };
+            let a = self.active;
+            self.workspaces[a].root = fresh;
+        }
+        let tr = self.workspaces[k].root;
+        if self.is_leaf(tr) && self.leaf_surface(tr).is_none() {
+            // The target is a bare placeholder: the arriving leaf becomes
+            // its root outright rather than nesting under an empty tile.
+            self.workspaces[k].root = leaf;
+            self.get_mut(leaf).unwrap().parent = None;
+            self.free_subtree(tr);
+        } else {
+            let c = match self.alloc(
+                None,
+                Kind::Container {
+                    mode: Mode::SplitH,
+                    children: Vec::new(),
+                    active: 0,
+                },
+            ) {
+                Some(c) => c,
+                None => return false,
+            };
+            if let Some(Kind::Container { children, .. }) = self.get_mut(c).map(|p| &mut p.kind) {
+                children.push(tr);
+                children.push(leaf);
+            }
+            for s in [tr, leaf] {
+                let p = self.get_mut(s).unwrap();
+                p.parent = Some(c);
+                p.weight = DEFAULT_WEIGHT;
+            }
+            self.workspaces[k].root = c;
+        }
+        self.workspaces[k].focused = leaf;
+        // Focus stays HERE, on what is left behind -- the tile went away,
+        // the eye did not follow it (i3's move, not its move-and-follow).
+        let r = self.root();
+        self.focused = self.first_leaf(r).unwrap_or(r);
+        self.zoomed_id = None;
+        self.epoch += 1;
+        true
     }
 
     fn alloc(&mut self, parent: Option<usize>, kind: Kind) -> Option<usize> {
@@ -748,7 +979,7 @@ impl Layout {
                     }
                 }
             }
-            None => self.root = container,
+            None => self.set_root(container),
         }
         self.get_mut(slot).unwrap().parent = Some(container);
         self.get_mut(slot).unwrap().weight = DEFAULT_WEIGHT;
@@ -933,8 +1164,12 @@ impl Layout {
     fn close_inner(&mut self, slot: usize, unhosted: &mut Vec<usize>) {
         // Collect the subtree's hosted surfaces first.
         self.collect_surfaces(slot, unhosted);
-        if slot == self.root {
+        if slot == self.root() {
             // The root never leaves; it collapses back to an empty leaf.
+            let kids: Vec<usize> = match self.get(slot).map(|p| &p.kind) {
+                Some(Kind::Container { children, .. }) => children.clone(),
+                _ => Vec::new(),
+            };
             if let Some(p) = self.get_mut(slot) {
                 p.kind = Kind::Leaf { surface: None };
                 p.status = Status::Resting;
@@ -943,11 +1178,14 @@ impl Layout {
                 p.dividers.clear();
                 p.separator = Rect::ZERO;
             }
-            // Free every other pane (the subtree was the whole tree).
-            for i in 0..self.panes.len() {
-                if i != slot {
-                    self.panes[i] = None;
-                }
+            // HALCYON-WORKSPACES 4: free only THIS root's descendants.
+            // Before workspaces this freed the WHOLE POOL -- "the subtree was
+            // the whole tree" was true with one root and is false with nine:
+            // it would annihilate every other workspace's tree and leave
+            // `workspaces` pointing at freed slots. The children must be read
+            // BEFORE the kind above is replaced, or there is nothing to walk.
+            for c in kids {
+                self.free_subtree(c);
             }
             self.focused = slot;
             return;
@@ -979,7 +1217,7 @@ impl Layout {
         }
         // Fix focus if it pointed into the closed subtree.
         if self.get(self.focused).is_none() {
-            let f = self.first_leaf(parent).unwrap_or(self.root);
+            let f = self.first_leaf(parent).unwrap_or(self.root());
             self.focused = f;
         }
         self.dissolve_if_single(parent);
@@ -1065,13 +1303,13 @@ impl Layout {
                 self.get_mut(only).unwrap().parent = Some(g);
             }
             None => {
-                self.root = only;
+                self.set_root(only);
                 self.get_mut(only).unwrap().parent = None;
             }
         }
         self.panes[slot] = None;
         if self.focused == slot {
-            self.focused = self.first_leaf(only).unwrap_or(self.root);
+            self.focused = self.first_leaf(only).unwrap_or(self.root());
         }
     }
 
@@ -1357,7 +1595,7 @@ impl Layout {
                         None => return false, // pane table full: untouched
                     };
                     self.detach_leaf(slot);
-                    let oldroot = self.root; // re-read: detach may dissolve
+                    let oldroot = self.root(); // re-read: detach may dissolve
                     if let Some(Kind::Container { children, .. }) =
                         self.get_mut(c).map(|p| &mut p.kind)
                     {
@@ -1374,7 +1612,7 @@ impl Layout {
                     // A fresh two-way division: equal halves.
                     self.get_mut(oldroot).unwrap().weight = DEFAULT_WEIGHT;
                     self.get_mut(slot).unwrap().weight = DEFAULT_WEIGHT;
-                    self.root = c;
+                    self.set_root(c);
                     self.epoch += 1;
                     self.focus(slot);
                     return true;
@@ -1670,7 +1908,7 @@ impl Layout {
                 _ => self.zoomed_id = None,
             }
         }
-        let root = self.root;
+        let root = self.root();
         self.layout_pane(
             root,
             Rect {
@@ -1748,7 +1986,11 @@ impl Layout {
     fn recompute_instrument(&mut self, area: Rect) {
         if let Some(zid) = self.zoomed_id {
             match self.slot_of_id(zid) {
-                Some(z) if self.is_leaf(z) => {
+                // HALCYON-WORKSPACES 4: `slot_of_id` is GLOBAL, so without
+                // this the zoom set in one workspace would still resolve
+                // after a switch and zoom another workspace's pane over the
+                // active tree. A zoom belongs to the tree it was made in.
+                Some(z) if self.is_leaf(z) && self.in_active_root(z) => {
                     let p = self.get_mut(z).unwrap();
                     p.visible = true;
                     p.rect = area;
@@ -1758,7 +2000,7 @@ impl Layout {
                 _ => self.zoomed_id = None,
             }
         }
-        let root = self.root;
+        let root = self.root();
         let pad = self.metrics.outer_pad.max(0) as u32;
         self.carve(root, inset(area, pad));
     }
@@ -2118,7 +2360,7 @@ impl Layout {
         if self.profile != Profile::Instrument {
             return (0, 0);
         }
-        self.min_size_hyp(self.root, None)
+        self.min_size_hyp(self.root(), None)
     }
 
     /// HALCYON-INSTRUMENT 5.2: would splitting leaf `slot` in `mode` keep
@@ -2131,7 +2373,7 @@ impl Layout {
         }
         let pad = self.metrics.outer_pad.max(0) as u32;
         let root = inset(self.area, pad);
-        let (w, h) = self.min_size_hyp(self.root, Some((slot, mode)));
+        let (w, h) = self.min_size_hyp(self.root(), Some((slot, mode)));
         w <= root.w && h <= root.h
     }
 
@@ -2487,6 +2729,27 @@ impl Layout {
                 p.backgrounded = bg.contains(&i);
             }
         }
+        // HALCYON-WORKSPACES 4: the d-1b predicate, ONE WORKSPACE WIDER --
+        // every pane of an inactive root is dormant too. Stamped here rather
+        // than by the caller because only the tree knows its own roots, and a
+        // caller-supplied set would be a second copy able to fall out of step.
+        for r in self.inactive_roots() {
+            self.stamp_bg_subtree(r);
+        }
+    }
+
+    /// Stamp `backgrounded` on a whole subtree (an inactive workspace's).
+    fn stamp_bg_subtree(&mut self, slot: usize) {
+        let kids: Vec<usize> = match self.get(slot).map(|p| &p.kind) {
+            Some(Kind::Container { children, .. }) => children.clone(),
+            _ => Vec::new(),
+        };
+        if let Some(p) = self.get_mut(slot) {
+            p.backgrounded = true;
+        }
+        for c in kids {
+            self.stamp_bg_subtree(c);
+        }
     }
 
     /// F2: is `slot` a backgrounded LEAF (the structural-transparency
@@ -2530,16 +2793,22 @@ impl Layout {
         let _ = core::fmt::write(
             &mut s,
             format_args!(
-                "epoch {} focused {}",
+                // HALCYON-WORKSPACES 4: the ratified channel for the bar and
+                // the tool -- one header line, no `workspace/` subtree. `active`
+                // is ONE-BASED, matching the ids beside it and the `01`..`09`
+                // the rail paints; the rows below stay the ACTIVE root's.
+                "epoch {} focused {} workspaces {} active {}",
                 self.epoch,
-                self.id_of(self.focused).unwrap_or(0)
+                self.id_of(self.focused).unwrap_or(0),
+                self.workspaces.len(),
+                self.active + 1
             ),
         );
         if let Some(z) = self.zoomed_id {
             let _ = core::fmt::write(&mut s, format_args!(" zoomed {}", z));
         }
         s.push('\n');
-        self.render_pane(&mut s, self.root, 0);
+        self.render_pane(&mut s, self.root(), 0);
         s
     }
 
@@ -2817,7 +3086,7 @@ mod tests {
     /// a session would use, so the weight rules are exercised on the way.
     fn reference() -> (Layout, [usize; 3], [Vec<usize>; 3]) {
         let mut l = Layout::new();
-        let p1 = l.root;
+        let p1 = l.root();
         let p2 = l.split(p1, Mode::SplitH).unwrap();
         let p3 = l.split(p2, Mode::SplitV).unwrap();
         let splitv = parent(&l, p2);
@@ -2842,7 +3111,7 @@ mod tests {
     fn the_instrument_carve_reproduces_the_reference_layout() {
         let (mut l, [p1, p2, p3], [s1, s2, s3]) = reference();
         l.recompute(r(0, 34, 1440, 841), 1, inst100(), Profile::Instrument);
-        let root = l.root;
+        let root = l.root();
         assert_eq!(l.get(root).unwrap().rect, r(3, 37, 1434, 835), "the root: the workspace padded 3");
         assert_eq!(l.get(root).unwrap().dividers, vec![r(738, 37, 7, 835)], "the root track on columns 738..744");
         // p1: the focused stack of four, the second open.
@@ -2903,7 +3172,7 @@ mod tests {
     fn a_track_is_hit_and_names_its_pair() {
         let (mut l, [p1, p2, p3], _) = reference();
         l.recompute(r(0, 34, 1440, 841), 1, inst100(), Profile::Instrument);
-        let root = l.root;
+        let root = l.root();
         let f1 = parent(&l, p1);
         let splitv = parent(&l, parent(&l, p2));
         assert_eq!(l.track_at(738, 400), Some((root, 0)), "the root track's first column");
@@ -2929,7 +3198,7 @@ mod tests {
     fn a_drag_moves_the_track_and_the_weights_become_the_extents() {
         let (mut l, [p1, p2, p3], _) = reference();
         l.recompute(r(0, 34, 1440, 841), 1, inst100(), Profile::Instrument);
-        let root = l.root;
+        let root = l.root();
         let f1 = parent(&l, p1);
         let splitv = parent(&l, parent(&l, p2));
         assert_eq!(l.drag_track(root, 0, (841, 400)), DragVerdict::Changed);
@@ -2960,7 +3229,7 @@ mod tests {
     fn a_drag_is_clamped_and_the_overflow_is_refused() {
         let (mut l, [p1, p2, _], _) = reference();
         l.recompute(r(0, 34, 1440, 841), 1, inst100(), Profile::Instrument);
-        let root = l.root;
+        let root = l.root();
         let f1 = parent(&l, p1);
         let splitv = parent(&l, parent(&l, p2));
         assert_eq!(l.drag_track(root, 0, (5000, 400)), DragVerdict::Changed);
@@ -2971,7 +3240,7 @@ mod tests {
         // The overflow: at 500 wide the root's usable 487 is short of 520.
         let (mut l, _, _) = reference();
         l.recompute(r(0, 34, 500, 841), 1, inst100(), Profile::Instrument);
-        let root = l.root;
+        let root = l.root();
         let before: Vec<u16> = l.divide_of(root).iter().map(|&c| weight(&l, c)).collect();
         assert_eq!(l.drag_track(root, 0, (300, 400)), DragVerdict::Refused);
         assert_eq!(l.equalise_track(root, 0), DragVerdict::Refused);
@@ -2988,7 +3257,7 @@ mod tests {
     fn a_double_click_equalises_the_pair() {
         let (mut l, [p1, p2, _], _) = reference();
         l.recompute(r(0, 34, 1440, 841), 1, inst100(), Profile::Instrument);
-        let root = l.root;
+        let root = l.root();
         let f1 = parent(&l, p1);
         let splitv = parent(&l, parent(&l, p2));
         assert_eq!(l.equalise_track(root, 0), DragVerdict::Changed);
@@ -3008,7 +3277,7 @@ mod tests {
     fn a_mutation_that_would_create_an_overflow_is_judged_on_a_copy() {
         let (mut l, [p1, _, _], _) = reference();
         l.recompute(r(0, 34, 1440, 841), 1, inst100(), Profile::Instrument);
-        let root = l.root;
+        let root = l.root();
         assert!(l.fits_after(|t| t.set_mode(root, Mode::SplitV)), "505 <= 835");
         l.recompute(r(0, 34, 1440, 400), 1, inst100(), Profile::Instrument);
         let epoch = l.epoch;
@@ -3044,7 +3313,7 @@ mod tests {
     #[test]
     fn a_lone_tile_is_framed_and_a_zoom_fills_the_workspace() {
         let mut l = Layout::new();
-        let a = l.root;
+        let a = l.root();
         // A TILE: hosted (an empty lone leaf is the 14.6 placard, tested
         // beside this one).
         assert_eq!(l.host_into(1, a), Some(a));
@@ -3078,7 +3347,7 @@ mod tests {
     fn the_legacy_carve_is_pinned() {
         let m = theme::builtin().metrics;
         let mut l = Layout::new();
-        let a = l.root;
+        let a = l.root();
         l.recompute(r(0, 0, 1280, 780), 1, m.at(100), Profile::Legacy);
         let p = l.get(a).unwrap();
         assert_eq!((p.rect, p.content, p.tagbar), (r(0, 0, 1280, 780), r(0, 0, 1280, 780), Rect::ZERO));
@@ -3088,7 +3357,7 @@ mod tests {
         let pb = l.get(b).unwrap();
         assert_eq!((pa.rect, pa.tagbar, pa.content), (r(0, 0, 640, 780), r(4, 4, 632, 20), r(4, 24, 632, 752)));
         assert_eq!((pb.rect, pb.tagbar, pb.content), (r(640, 0, 640, 780), r(644, 4, 632, 20), r(644, 24, 632, 752)));
-        assert!(l.get(l.root).unwrap().dividers.is_empty());
+        assert!(l.get(l.root()).unwrap().dividers.is_empty());
         assert!(!l.render_text().contains(" w="), "{}", l.render_text());
         // 2.0: ring 1 + 4 + 2 = 7, the bar 40.
         l.recompute(r(0, 0, 2560, 1560), 1, m.at(200), Profile::Legacy);
@@ -3111,7 +3380,7 @@ mod tests {
     #[test]
     fn weights_follow_the_split_and_dissolve_rules() {
         let mut l = Layout::new();
-        let a = l.root;
+        let a = l.root();
         let b = l.split(a, Mode::SplitH).unwrap();
         assert_eq!((weight(&l, a), weight(&l, b)), (1, 1));
         assert!(l.set_weight(a, 3) && l.set_weight(b, 5));
@@ -3122,15 +3391,15 @@ mod tests {
         assert_eq!((weight(&l, cont), weight(&l, c), weight(&l, d)), (4, 1, 1));
         let _ = l.close(d);
         assert_eq!(weight(&l, c), 4, "the survivor takes the container's share");
-        assert_eq!(parent(&l, c), l.root);
-        assert!(!l.set_weight(l.root, 7), "a root has no division");
+        assert_eq!(parent(&l, c), l.root());
+        assert!(!l.set_weight(l.root(), 7), "a root has no division");
         assert!(!l.set_weight(a, 0));
         let e = l.epoch;
         assert!(l.set_weight(a, 3) && l.epoch == e, "the same value moves no epoch");
         assert!(l.set_weight(a, 65535) && l.epoch == e + 1);
         // The mean rounds half up and never reads 0: siblings 1 and 2 -> 2.
         let mut l = Layout::new();
-        let a = l.root;
+        let a = l.root();
         let b = l.split(a, Mode::SplitV).unwrap();
         assert!(l.set_weight(b, 2));
         let c = l.split(b, Mode::SplitV).unwrap();
@@ -3147,7 +3416,7 @@ mod tests {
         let mut l = Layout::new();
         let area = r(0, 34, 1280, 741); // 1280x800 between the rails: 1274 usable
         l.recompute(area, 1, inst100(), Profile::Instrument);
-        let mut f = l.root;
+        let mut f = l.root();
         let mut refused_at = None;
         for i in 0..6 {
             if refused_at.is_none() && !l.split_fits(f, Mode::SplitH) {
@@ -3195,7 +3464,7 @@ mod tests {
             let mut l = Layout::new();
             let area = r(0, 34, 1280, h);
             l.recompute(area, 1, inst100(), Profile::Instrument);
-            let p = l.get(l.root).unwrap();
+            let p = l.get(l.root()).unwrap();
             assert_eq!(p.visible, !dormant, "placard h={}: visible", h);
         }
     }
@@ -3208,7 +3477,7 @@ mod tests {
         let mut l = Layout::new();
         let area = r(0, 34, 600, 300); // root 594 x 235
         l.recompute(area, 1, inst100(), Profile::Instrument);
-        let a = l.root;
+        let a = l.root();
         assert_eq!(l.min_size(), (260, 88));
         assert!(l.split_fits(a, Mode::SplitH), "2 x 260 + 7 = 527 <= 594");
         let b = l.split(a, Mode::SplitH).unwrap();
@@ -3234,7 +3503,7 @@ mod tests {
         // A workspace that fits nothing: every host past the first is refused.
         let mut l = Layout::new();
         l.recompute(r(0, 34, 300, 150), 1, inst100(), Profile::Instrument);
-        let a = l.root;
+        let a = l.root();
         assert!(!l.split_fits(a, Mode::SplitH) && !l.split_fits(a, Mode::SplitV));
         assert!(l.split_fits(a, Mode::Stacked), "2 + 64 + 1 + 54 = 121 <= 144");
         assert_eq!(l.host(1), Some(a));
@@ -3253,7 +3522,7 @@ mod tests {
     #[test]
     fn an_empty_lone_leaf_is_the_placard_and_the_separator_follows_an_open_body() {
         let mut l = Layout::new();
-        let root = l.root;
+        let root = l.root();
         l.recompute(r(0, 34, 1280, 741), 1, inst100(), Profile::Instrument);
         let p = l.get(root).unwrap();
         assert!(p.visible && l.is_empty_leaf(root));
@@ -3310,7 +3579,7 @@ mod tests {
     #[test]
     fn closing_a_stacked_tile_keeps_or_hands_on_the_open_one_by_the_successor_rule() {
         let stack = |l: &mut Layout| -> Vec<usize> {
-            let a = l.root;
+            let a = l.root();
             let b = l.split(a, Mode::Stacked).unwrap();
             let c = l.split(b, Mode::Stacked).unwrap();
             let d = l.split(c, Mode::Stacked).unwrap();
@@ -3353,5 +3622,136 @@ mod tests {
         l.close(t[3]);
         assert_eq!(active_of(&l, t[0]), t[0]);
         assert_eq!(l.focused, t[0]);
+    }
+
+    // ---- HALCYON-WORKSPACES 4 (W-1): the live roots ----
+
+    fn ws_disp() -> Rect {
+        Rect {
+            x: 0,
+            y: 0,
+            w: 1280,
+            h: 800,
+        }
+    }
+
+    fn ws_lay(l: &mut Layout) {
+        l.apply_backgrounded(&[]);
+        l.recompute(ws_disp(), 1, theme::builtin().metrics, Profile::Legacy);
+    }
+
+    #[test]
+    fn a_switch_creates_the_next_workspace_and_focus_is_per_workspace() {
+        let mut l = Layout::new();
+        let a_root = l.root();
+        assert_eq!(l.workspace_count(), 1);
+        assert_eq!(l.active_workspace(), 0);
+        assert!(!l.switch_workspace(2), "a SKIPPED number is refused");
+        assert!(l.switch_workspace(1), "the next free number creates it (i3)");
+        assert_eq!(l.workspace_count(), 2);
+        assert_eq!(l.active_workspace(), 1);
+        assert_ne!(l.root(), a_root, "the new workspace has its own root");
+        assert!(!l.in_active_root(a_root), "the old root is not in this tree");
+        assert!(!l.switch_workspace(MAX_WORKSPACES), "past the bound");
+        assert!(!l.switch_workspace(1), "already active");
+        let b_focus = l.focused;
+        assert!(l.switch_workspace(0));
+        assert_eq!(l.focused, a_root, "workspace 1's focus came back");
+        assert!(l.switch_workspace(1));
+        assert_eq!(l.focused, b_focus, "and workspace 2's did too");
+    }
+
+    #[test]
+    fn an_inactive_workspace_is_dormant_and_carves_to_nothing() {
+        let mut l = Layout::new();
+        let a_root = l.root();
+        let _ = l.host_for(7, 0, 0);
+        assert!(l.switch_workspace(1));
+        let _ = l.host_for(8, 0, 0);
+        ws_lay(&mut l);
+        let a = l.get(a_root).expect("the other root outlives the switch");
+        assert!(a.backgrounded, "an inactive root is stamped dormant");
+        assert!(!a.visible, "and the carve leaves it invisible");
+        assert!(a.rect.is_empty(), "with no pixels");
+        let b = l.get(l.root()).unwrap();
+        assert!(!b.backgrounded, "the active root is not dormant");
+        assert!(b.visible);
+    }
+
+    #[test]
+    fn closing_the_active_root_leaves_every_other_workspace_alive() {
+        // The defect this exists for: `close_inner`'s root arm used to free
+        // the WHOLE POOL -- "the subtree was the whole tree" was true with
+        // one root and annihilates every other workspace with nine.
+        let mut l = Layout::new();
+        let _ = l.host_for(7, 0, 0);
+        assert!(l.switch_workspace(1));
+        let _ = l.host_for(8, 0, 0);
+        let b_root = l.root();
+        assert!(l.switch_workspace(0));
+        let a_root = l.root();
+        l.close(a_root);
+        assert!(l.get(b_root).is_some(), "the other root SURVIVES the close");
+        assert_eq!(l.workspace_count(), 2);
+        assert!(l.switch_workspace(1));
+        assert_eq!(l.root(), b_root);
+        assert_eq!(l.leaf_surface(b_root), Some(8), "and still hosts its tile");
+    }
+
+    #[test]
+    fn an_empty_inactive_workspace_vanishes_and_the_active_one_never_does() {
+        let mut l = Layout::new();
+        let _ = l.host_for(7, 0, 0);
+        assert!(l.switch_workspace(1)); // empty AND active
+        assert_eq!(l.reap_empty_workspaces(), 0, "the active one never goes");
+        assert_eq!(l.workspace_count(), 2);
+        assert!(l.switch_workspace(0)); // now the empty one is inactive
+        assert_eq!(l.reap_empty_workspaces(), 1, "i3: the empty one goes");
+        assert_eq!(l.workspace_count(), 1);
+        assert_eq!(l.active_workspace(), 0);
+    }
+
+    #[test]
+    fn the_layout_header_carries_the_two_numbers_one_based() {
+        let mut l = Layout::new();
+        let first = l.render_text();
+        let head = first.lines().next().unwrap();
+        assert!(head.contains("workspaces 1 active 1"), "{}", head);
+        assert!(l.switch_workspace(1));
+        let second = l.render_text();
+        let head = second.lines().next().unwrap();
+        assert!(head.contains("workspaces 2 active 2"), "{}", head);
+    }
+
+    #[test]
+    fn a_zoom_does_not_survive_a_workspace_switch() {
+        let mut l = Layout::new();
+        let a_root = l.root();
+        let _ = l.host_for(7, 0, 0);
+        assert!(l.zoom_toggle(a_root));
+        assert!(l.zoom_id().is_some());
+        assert!(l.switch_workspace(1));
+        assert!(l.zoom_id().is_none(), "the zoom belonged to the tree it was made in");
+        ws_lay(&mut l);
+        assert!(!l.get(a_root).unwrap().visible, "the other tree stays dark");
+        assert!(l.get(l.root()).unwrap().visible, "this one carves normally");
+    }
+
+    #[test]
+    fn a_moved_tile_keeps_its_surface_and_leaves_no_aliased_root() {
+        let mut l = Layout::new();
+        let a_root = l.root();
+        let _ = l.host_for(7, 0, 0);
+        assert!(l.switch_workspace(1));
+        assert!(l.switch_workspace(0));
+        // The focused leaf IS this workspace's root: `detach_leaf` no-ops on
+        // a parentless pane, so without the re-seat this slot would end up
+        // rooted in BOTH workspaces.
+        assert_eq!(l.focused, a_root);
+        assert!(l.move_focused_to_workspace(1));
+        assert_ne!(l.root(), a_root, "the workspace it left was re-seated");
+        assert!(l.switch_workspace(1));
+        assert_eq!(l.leaf_surface(a_root), Some(7), "the tile kept its surface");
+        assert!(l.in_active_root(a_root), "and lives in the target tree now");
     }
 }

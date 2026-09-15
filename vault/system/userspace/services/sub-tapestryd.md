@@ -1724,3 +1724,66 @@ Ground truth: `usr/tapestryd/src/server.rs` (`ptr_btn`, `hover_update`),
 `usr/tapestryd/src/input.rs` (`drain`), `usr/tapestryd/src/main.rs` (the serve
 loop's pass clock). The defect these were built for is OPEN and intermittent;
 the green run above is a verdict, not a diagnosis.
+
+## The live workspaces -- one root each, and the traversals that had to be re-judged (2026-09-15, W-1a)
+
+`Layout` grew `workspaces: Vec<Workspace>` (a live root plus a remembered
+focus each) and `active`. The notable choice is what did NOT happen: `root`
+was not kept as a stored field synced to `workspaces[active].root`. It became
+an ACCESSOR and the field was deleted, because the one failure a switch must
+not have is leaving a stale root behind, and a value that is never copied
+cannot go stale. Deleting the field also handed the blast radius to the
+compiler, which is why this is worth recording: a grep for `.root` had
+reported thirty-odd sites, but it MISSED line-broken calls (rustfmt splits
+`self.panes` from `.iter()`) and mis-attributed three `Conn.root` hits on an
+unrelated type. The compiler found exactly 34 in the lib and exactly ONE in
+the server.
+
+**What actually had to change, and what came free.** `recompute`'s first pass
+already marks every pane hidden and zero-rects it before walking from the
+root, so an inactive workspace goes dark with no new code -- and because that
+pass also clears `dividers`, `track_at` cannot match an inactive track either.
+The real work was the d-1b dormancy predicate: `apply_backgrounded` now also
+stamps every inactive root's subtree. It is stamped THERE rather than by the
+caller in `reconcile` because only the tree knows its own roots; a
+caller-supplied set would be a second copy able to drift.
+
+**The traversals that are safe only by construction.** Most whole-pool scans
+filter on `visible`, which pass 1 clears for inactive roots -- `visible_strips`,
+`visible_leaf_count`, `foreground_leaf_count`, `visible_hosted`, and
+`neighbor_dir` via `live_ids`. That is a real invariant and should be stated
+rather than rediscovered: *an inactive root's panes are invisible and
+zero-rect after every recompute.* The scans that do NOT filter on visibility
+are the ones that needed judging one at a time: `hosted_leaves` (feeds the
+d-1b session test, correctly spanning workspaces), `find_hosting` /
+`surface_at` / `find_claim` (a surface lives in exactly one leaf, so global is
+right), `live_ids` (the 9P `pane/` listing and `ctl`'s `panes` count stay
+GLOBAL on purpose -- those are resource and addressability facts, while the
+`layout` dump is the active root's; do not later "reconcile" the two), and
+`slot_of_id`, which is where the bug was.
+
+**Two defects this found.** The zoom resolves by id through the global
+`slot_of_id`, and `recompute` never checked the target belonged to the active
+root -- so a zoom made in one workspace would still match after a switch and
+fill the display with another workspace's pane. Guarded by `in_active_root`,
+and the switch clears the zoom as well, since `zoomed_id` is one field and a
+carried-over id would put a number in the `layout` header that the carve
+refuses to honour. The worse one: `close_inner`'s root arm freed the WHOLE
+pane pool, commented "the subtree was the whole tree" -- true with one root,
+and with nine it annihilates every other workspace and leaves `workspaces`
+pointing at freed slots. It now frees only that root's descendants, reading
+the children BEFORE the kind is replaced. The regression test is
+sabotage-measured in both directions.
+
+**The channel and the bound.** The `layout` header carries `workspaces N
+active K`, ONE-BASED to match the pane ids beside it and the `01`..`09` the
+rail paints; the per-pane rows stay the active root's, so the H-4b file-walk
+is unchanged. `MAX_WORKSPACES` = 9 PARTITIONS the existing `MAX_PANES` = 32
+pool -- workspaces add no resource ceiling, which is the honest I-32 story.
+
+Ground truth: `usr/tapestryd/src/pane.rs`, `usr/tapestryd/src/chords.rs` (the
+eighteen chords; `action_of` PARSES `workspace-N` / `move-to-N` rather than
+listing eighteen arms, so the render and parse directions cannot drift), and
+the two `exec_chord` arms in `server.rs`. Host-tested at 48 (41 before).
+OWED in W-1b: the seat-gated `workspace N` ctl verb and the battery leg --
+the battery is a client and cannot inject a chord.

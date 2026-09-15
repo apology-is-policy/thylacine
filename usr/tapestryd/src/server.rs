@@ -7072,6 +7072,18 @@ impl Comp {
         } else {
             Vec::new()
         };
+        // HALCYON-WORKSPACES 4, the i3 vanish rule: an INACTIVE workspace
+        // with no hosted leaf goes at the next reconcile -- HERE, before the
+        // dormancy stamp and the carve, so neither spends a pass on a tree
+        // about to cease existing. The ACTIVE workspace never vanishes,
+        // however empty, or a seat could be left with no root at all.
+        let vanished = self.layout.reap_empty_workspaces();
+        #[cfg(feature = "test-mode")]
+        if vanished > 0 {
+            say!("tapestryd: {} empty workspace(s) vanished", vanished);
+        }
+        #[cfg(not(feature = "test-mode"))]
+        let _ = vanished;
         self.layout.apply_backgrounded(&bg_tiling);
         self.layout.recompute(area, self.chords.gaps, self.metrics, self.bundle.profile);
         // HALCYON-INSTRUMENT 9.2 (I-6): the split a drag holds may have
@@ -8271,7 +8283,7 @@ impl Comp {
                 Some(s) => s,
                 None => continue, // freed by an earlier close's collapse
             };
-            if slot == self.layout.root {
+            if slot == self.layout.root() {
                 self.layout.set_owner_principal(slot, 0);
             } else {
                 let _ = self.layout.close(slot);
@@ -9165,6 +9177,35 @@ impl Comp {
                 self.scale_override = None;
                 let p = self.derive_scale();
                 self.apply_scale(p, "chord-reset");
+            }
+            // HALCYON-WORKSPACES 4 (ratified): the chord carries the key's
+            // own digit, so it is ONE-BASED; the tree indexes from 0. A
+            // refused switch or move (the bound, the pane table, the same
+            // workspace) leaves the current root exactly as it was.
+            ChordAction::Workspace(n) => {
+                if self.layout.switch_workspace((n as usize).saturating_sub(1)) {
+                    #[cfg(feature = "test-mode")]
+                    say!(
+                        "tapestryd: workspace switch -> {} of {}",
+                        self.layout.active_workspace() + 1,
+                        self.layout.workspace_count()
+                    );
+                    self.reconcile();
+                }
+            }
+            ChordAction::MoveToWorkspace(n) => {
+                if self
+                    .layout
+                    .move_focused_to_workspace((n as usize).saturating_sub(1))
+                {
+                    #[cfg(feature = "test-mode")]
+                    say!(
+                        "tapestryd: workspace move -> {} of {}",
+                        n,
+                        self.layout.workspace_count()
+                    );
+                    self.reconcile();
+                }
             }
             ChordAction::FocusDir(d) => {
                 if self.layout.focus_dir(d) {
