@@ -950,8 +950,12 @@ RATIFIED (H-3d design, 2026-09-02; the operator present -- two votes below):
   workspace model forward. SUPERSEDED 2026-09-15: the workspace model is
   RATIFIED (HALCYON-WORKSPACES mechanism (A) -- live pane trees, per-workspace
   focus, the i3 vanish rule, bound 9, Super+1..9); the slot reads the `layout`
-  file's `workspaces N active K` header once W-1..W-3 land, and shows one
-  until then.** *Focused context*: the focused leaf's tag name
+  file's `workspaces <list> active <n>` header. **W-1..W-3 HAVE LANDED**
+  (`667128ec`), so "shows one until then" no longer applies to the session
+  bar; the header's first token is the ASCENDING LIST of live workspace
+  numbers rather than a count, since S4 ratified stable gapped numbers
+  (2026-09-15) and a count cannot label a gapped set. The PRE-LOGIN CONSOLE
+  bar still shows one, by design rather than by absence.** *Focused context*: the focused leaf's tag name
   (`pane/<id>/tag`; "transcript" for the console) `·` its working directory
   `·` its last command -- the directory and the command are known only for
   the console (the transcript's own session), so another program's focused

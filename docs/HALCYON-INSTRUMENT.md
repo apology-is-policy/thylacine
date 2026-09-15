@@ -2004,7 +2004,10 @@ share the theme's inks; no new saturated colour anywhere.
 ### 14.1 Workspaces (HALCYON-WORKSPACES mechanism (A): live roots, per-workspace focus, bound 9)
 
 In the top rail's 212-wide brand cluster (§8.1): N = 1 keeps the mockup's
-`WORKSPACE 01`; N > 1 replaces the word with chips `01`..`09` in a
+`WORKSPACE 01`; N > 1 replaces the word with ONE CHIP PER LIVE
+WORKSPACE NUMBER — `01`, `03`, `04` when the set is gapped, never a dense
+`01`..`0N` (S4, ratified 2026-09-15: a number is an identity, so the chips
+are the numbers themselves) — in a
 189-wide horizontal viewport — chips 26 × 24 at y 5, gap 4, mono 10, no
 outline, no capsule; active = `hover` ground, `text` label, a 2 px `amber`
 bottom edge inset 4; inactive = transparent, `secondary`; hover on an
@@ -2022,22 +2025,41 @@ it); the status `WORKSPACE 03 · <name>` for 1800 ms (no dot and no name
 when unnamed); the footer centre `SUPER + 1–9  WORKSPACES` while N > 1 —
 labels from the binding lookup, never a string assumed correct. Model:
 dormant processes kept; an inactive EMPTY workspace may vanish, the active
-one never; after a compaction the next switch message announces the new
-number and the Super digits follow the displayed labels; a tile move is an
+one never; there is NO compaction and NO renumbering, so a
+workspace's number and its Super digit are the same for the whole session
+(S4, operator-ratified 2026-09-15 — **this clause previously anticipated a
+compaction and is superseded by that vote**; the renumbering was not merely
+an unratified consequence of the representation, it was written down here); a tile move is an
 ownership-preserving structural operation, never save / restore / respawn;
 a failed switch or create keeps the current root and reports `WORKSPACE
 UNAVAILABLE`. Layout names name layouts, not workspaces.
 
-**As built at I-4.** N = 1 today (no workspace mechanism exists): the rail
-shows `WORKSPACE 01` and the mark opens `menu::workspace_menu` — one
-enabled row, `01`, whose choice is a no-op said as `workspace 1 is active`.
+**As built at I-4 — SUPERSEDED; see "as built at W-1..W-3" below.** The
+sentence that stood here said "N = 1 today (no workspace mechanism
+exists)", and W-1a falsified it the day it landed; the round 1 prosecutor
+flagged it under F6 while only the code was fixed. Recorded rather than
+quietly overwritten, because a stale as-built note is how a reader learns
+to distrust the whole section.
+
+**As built at W-1..W-3 + round 1.** The mechanism exists: live roots, per
+workspace focus, Super+1..9 and Super+Shift+1..9, the i3 vanish rule, and
+the `layout` header as the channel. The rail's chips and the mark's list
+are FED from that header (round 1 F6 — both had been pinned to the literal
+one-workspace case, and the gate leg asserted only that the menu opened,
+so it could not fail); the mark's list and a chip click now ACT through
+the compositor's `workspace` verb rather than logging. The list's row
+count is witnessed by the session gate comparing its height with two
+workspaces against one (89px vs 61px, one row apart).
 The chip painter for N > 1 is built and host-tested
 (`the_chips_lay_out_and_scroll_to_the_active_one`: 26 × 24 chips at y 5,
 the active one's `hover` ground and inset amber edge, the ‹ › reveal past
-189 with a 157 viewport, the active chip always in view) but nothing yet
-produces N > 1; the keyboard-focus ring, `Super+1..9`, the `WORKSPACE 03`
-status and the footer's workspace hint waited on HALCYON-WORKSPACES, **RATIFIED 2026-09-15** (mechanism (A), the
-defaults package as proposed). They land with W-1..W-3, and W MUST precede
+189 with a 157 viewport, the active chip always in view) and the header now PRODUCES N > 1 (round 1
+F6). Its MODEL changes under S4, though: a chip carries a live NUMBER, not
+a position in a dense count, so `RailModel.workspaces` and that host test
+move with the implementation. `Super+1..9` landed with W-1a. **STILL
+UNBUILT and owed**: the chip keyboard-focus ring, the transient `WORKSPACE
+03` status, and the footer's `SUPER + 1–9  WORKSPACES` hint — "the chips
+are fed" must not be read as those having shipped. W MUST precede
 I-9: the bar showing `1` against a mockup showing `1 2 3` is exactly the
 parity failure the acceptance run against Astra's goldens exists to catch.
 

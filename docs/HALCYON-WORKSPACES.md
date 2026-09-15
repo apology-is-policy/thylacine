@@ -85,13 +85,42 @@ the H-4 file format at v1 (a save is the active workspace's tree).
   arriving tree's surfaces get their CONFIGUREs (a same-size one is the
   redraw request; the atlas F1 rule holds -- a dormant surface paints
   nothing until asked). The Direct/Composed decision reads the active root
-  only. The `layout` file's header grows `workspaces N active K`; the
-  per-pane rows are the active root's (the D decision's file-walk keeps
-  working unchanged); a `workspace/<k>` subtree is NOT proposed -- one
-  line is enough for the bar and the tool.
+  only. The `layout` file's header grows `workspaces <list> active <n>`;
+  the per-pane rows are the active root's (the D decision's file-walk
+  keeps working unchanged); a `workspace/<k>` subtree is NOT proposed --
+  one line is enough for the bar and the tool.
+
+  **The channel's exact spelling, amended by the S4 ratification.** It was
+  `workspaces N active K`, with N the COUNT and K the active INDEX plus
+  one. Once the set is sparse a count can no longer label the chips -- a
+  bar told "3" cannot know whether that means 1,2,3 or 1,3,4 -- so the
+  token after `workspaces` is the ASCENDING COMMA-SEPARATED LIST of the
+  live numbers (no spaces, each 1..=9, never empty: there is always at
+  least one workspace), and `active` is the active workspace's stable
+  NUMBER rather than a position. The count is the list's length, so
+  nothing is lost. A header whose `active` is absent from its own list is
+  refused WHOLE by the reader, exactly as the old `k > n` pair was: a bar
+  that lights a chip with no workspace behind it is worse than a bar that
+  keeps its default.
+
+  This is a format change on a ratified channel, so it is named here
+  rather than left to the diff. An older reader fails CLOSED on it -- the
+  list does not parse as an integer, so `parse_workspaces` returns None
+  and the bar holds its default -- which is the honest degradation, and
+  both ends ship together in one image regardless.
 - **Chords** (free in the default table): Super+1..9 switch to workspace
-  N (creating it when N == count + 1, i3), Super+Shift+1..9 move the
+  N, **creating it if it does not exist**, and Super+Shift+1..9 move the
   focused leaf there. Keycodes 2..10 are unbound today.
+
+  The earlier rule -- "creating it when N == count + 1" -- is RETIRED with
+  the S4 ratification, and it is worth saying why it existed and why it
+  was wrong. It existed to keep a DENSE vector hole-free, which is a
+  property of the representation, not of the design; and it was attributed
+  to i3, which does no such thing -- i3 creates workspace 5 on Super+5
+  whether or not 2, 3 and 4 exist. With a sparse set numbered by identity
+  the constraint buys nothing, so the ratified choice makes the switch
+  SIMPLER rather than more complex. The bound is still `MAX_WORKSPACES`
+  = 9, which the digit row enforces on its own.
 - **Vanishing**: an inactive workspace with no hosted leaf **and no
   RESERVED leaf** is dropped at the next reconcile (i3); the active one
   never is. The reservation half is round 1's S5: H-4d stamps
@@ -99,13 +128,16 @@ the H-4 file format at v1 (a save is the active workspace's tree).
   skeleton a restore tool builds, precisely so the session's own
   compositor cannot fill it mid-build -- and a rule testing only for
   HOSTED surfaces destroyed exactly what that reservation protects.
-  **OPEN, an operator design fork (round 1 S4)**: a workspace's identity
-  is currently its VECTOR INDEX -- the header is positional and Super+N
-  maps to N-1 -- so a vanish RENUMBERS every higher workspace, and the
-  user's Super+3 stops reaching their work. i3, the cited precedent,
-  keeps numbers stable across a vanish. Stable identity here means a
-  `Workspace.number` field and a sparse set, which changes what the
-  header's first number means; nothing is changed until that is ratified. **Bound** (I-32):
+  **A workspace's NUMBER is its identity, and a vanish never renumbers
+  the survivors (operator-ratified 2026-09-15, round 1 S4).** Identity was
+  the VECTOR INDEX until then, so dropping an empty middle workspace
+  shifted every higher one down and the user's Super+3 stopped reaching
+  their work -- it made a fresh empty one instead. Both cited precedents
+  refuse that: i3 treats workspace numbers as NAMES rather than
+  positions, and tmux keeps stable numbers with gaps
+  (`renumber-windows` is opt-in and off by default). So `Workspace`
+  carries a `number` (1..=9) and the set is SPARSE: 1, 3, 4 is an
+  ordinary state, not a broken one. **Bound** (I-32):
   `MAX_WORKSPACES` = 9 -- Super+N is the whole keyboard's worth, and a
   hostile client's `workspace` verb cannot mint more. **The verb's home,
   ratified 2026-09-15 after an architecture review**: the `layout` file,
