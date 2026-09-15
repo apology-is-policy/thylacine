@@ -2053,6 +2053,88 @@ pub extern "C" fn rs_main() -> i64 {
     // from here: focusing a pane we do not own is exactly what the pane-tree
     // gate refuses (the H-3b round F2), and when our last surface retires
     // its leaf closes and the layout re-focuses the survivor.
+    // ---- HALCYON-WORKSPACES W-1b: switch, dormant, return, vanish ----
+    // This harness is a CLIENT: it cannot inject Super+N, which lives on the
+    // compositor's own key path, so the switch is driven by the `workspace N`
+    // ctl verb. Client `a`'s tile is the witness -- the `layout` rows are the
+    // ACTIVE root's, so a live tile must LEAVE those rows while another
+    // workspace is up and come back when its own returns.
+    {
+        let ws_header = |s: &str| -> Option<(u32, u32)> {
+            let head = s.lines().next()?;
+            let (mut n, mut k) = (None, None);
+            let mut it = head.split_ascii_whitespace();
+            while let Some(tok) = it.next() {
+                match tok {
+                    "workspaces" => n = it.next().and_then(|t| t.parse().ok()),
+                    "active" => k = it.next().and_then(|t| t.parse().ok()),
+                    _ => {}
+                }
+            }
+            Some((n?, k?))
+        };
+        let lay0 = read_file(root, "layout").unwrap_or_default();
+        let Some((n0, k0)) = ws_header(&lay0) else {
+            say!("tapestry-battery: FAIL workspaces: no `workspaces N active K` header");
+            return 1;
+        };
+        if (n0, k0) != (1, 1) {
+            say!("tapestry-battery: FAIL workspaces: header {} {}, want 1 1", n0, k0);
+            return 1;
+        }
+        if find_pane(&lay0, a.id).is_none() {
+            say!("tapestry-battery: FAIL workspaces: our tile is not in workspace 1");
+            return 1;
+        }
+        // SWITCH (and create: 2 is the next free number, the i3 rule).
+        let rc = raw_ctl(root, "workspace 2");
+        if rc < 0 {
+            say!("tapestry-battery: FAIL workspaces: `workspace 2` rc {}", rc);
+            return 1;
+        }
+        let lay1 = read_file(root, "layout").unwrap_or_default();
+        match ws_header(&lay1) {
+            Some((2, 2)) => {}
+            other => {
+                say!("tapestry-battery: FAIL workspaces: header {:?} after the switch, want 2 2", other);
+                return 1;
+            }
+        }
+        // DORMANT: workspace 1's tile is no longer in the active root's rows.
+        if find_pane(&lay1, a.id).is_some() {
+            say!("tapestry-battery: FAIL workspaces: the dormant tile is still tiled");
+            return 1;
+        }
+        say!("battery: workspace 2 created and switched to; workspace 1 dormant");
+        // A SKIPPED number is refused -- only the next free one may be made.
+        if raw_ctl(root, "workspace 9") >= 0 {
+            say!("tapestry-battery: FAIL workspaces: a skipped number was accepted");
+            return 1;
+        }
+        // RETURN, which also VANISHES the empty inactive workspace 2 (i3).
+        let rc = raw_ctl(root, "workspace 1");
+        if rc < 0 {
+            say!("tapestry-battery: FAIL workspaces: `workspace 1` rc {}", rc);
+            return 1;
+        }
+        let lay2 = read_file(root, "layout").unwrap_or_default();
+        if find_pane(&lay2, a.id).is_none() {
+            say!("tapestry-battery: FAIL workspaces: our tile did not come back");
+            return 1;
+        }
+        match ws_header(&lay2) {
+            Some((1, 1)) => {}
+            other => {
+                say!(
+                    "tapestry-battery: FAIL workspaces: header {:?} after the return, want 1 1 (the empty one must vanish)",
+                    other
+                );
+                return 1;
+            }
+        }
+        say!("battery: workspace 1 returned with its tile; the empty workspace vanished");
+    }
+
     unsafe { t_close(root) };
     say!("tapestry-battery: PASS");
     // `a` drops on return (`b` already did, scenario 3): the surfaces

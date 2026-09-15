@@ -17690,6 +17690,32 @@ impl Conn {
             comp.apply_theme(b, who);
             return Ok(());
         }
+        if let Some(rest) = s.strip_prefix("workspace ") {
+            // HALCYON-WORKSPACES 4 (W-1b): switch to workspace N, creating it
+            // when N is the next free number (i3). ONE-BASED, like the header
+            // it moves and the `01`..`09` the rail paints. Budgeted like
+            // `scale` below, and for the same reason -- it IS a structural
+            // relayout. Not principal-gated: it can do nothing a Super+N the
+            // same seat already sends cannot, and the bound lives in the tree
+            // (`MAX_WORKSPACES`), not in the caller.
+            let n: usize = rest.trim().parse().map_err(|_| p9::E_INVAL)?;
+            self.layout_verb_budget()?;
+            if n == 0 || n > pane::MAX_WORKSPACES {
+                return Err(p9::E_INVAL);
+            }
+            if n - 1 == comp.layout.active_workspace() {
+                return Ok(()); // already there: idempotent, not an error
+            }
+            // A refusal is the tree's: a SKIPPED number (only the next free
+            // one may be created) or an exhausted pane table. Either way
+            // nothing moved, so the caller gets E_INVAL rather than a silent
+            // success that leaves it believing it switched.
+            if !comp.layout.switch_workspace(n - 1) {
+                return Err(p9::E_INVAL);
+            }
+            comp.reconcile();
+            return Ok(());
+        }
         if let Some(rest) = s.strip_prefix("scale ") {
             // `scale auto` re-derives (the declaration, else the EDID);
             // `scale <pct>` is one of the five values or E_INVAL. Budgeted
