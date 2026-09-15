@@ -7,14 +7,15 @@ code:
   - kernel/irqfwd.c
   - kernel/include/thylacine/irqfwd.h
 audit: hard
-guarded-by: [inv-i9]
+guarded-by: [inv-i9, inv-i15]
 validated-by: [prose, gate-smp]
 locks: [lock-rendez]
 abis: []
 design:
   - "docs/ARCHITECTURE.md section 9.3"
+  - "docs/ARCHITECTURE.md section 9.3.1"
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-09-15
 ---
 ## Purpose
 
@@ -43,6 +44,15 @@ own queue state.
 A second concurrent waiter is refused with a distinct sentinel rather than
 being allowed to proceed.
 
+Each interrupt's **trigger mode is derived from the device tree**, not assumed:
+a level-triggered line (virtio-PCI legacy INTx) is masked while a driver
+services it and re-armed when it waits again; an edge-triggered line (virtio-mmio)
+keeps the older no-mask fast path. The wait also takes an **optional timeout**
+(zero meaning wait forever, the default): on expiry it returns a count of zero,
+the same as a death-interrupt, so a driver treats both as "no interrupt to
+service — re-check the device or unwind". The timeout bounds a completion whose
+interrupt was lost, so a driver never blocks forever on one that will not arrive.
+
 ## Mechanism
 
 **Exclusive claim.** The interrupt controller has one handler slot per number
@@ -67,10 +77,33 @@ reports at bring-up, not the architectural maximum, because register writes past
 an implementation's real line count are undefined. The architectural bound
 remains underneath.
 
+**Trigger, derived from the device tree.** Creation reads whether the number is
+level- or edge-triggered from the PCIe interrupt-map's flags cell — the same map
+row that already resolves an INTx pin to its number, whose trigger cell was
+previously loaded and discarded. virtio-PCI legacy INTx is level; a number
+absent from that map keeps the edge default, the documented argued fallback (the
+QEMU-virt device tree declares virtio-mmio edge-rising, and the pre-change
+behaviour was universal edge — so this only *adds* correct level configuration
+for PCI). The controller register is written **explicitly for both modes**, so a
+number reused after an edge object's teardown never inherits a stale level
+configuration or the reverse. The resolved mode is recorded on the object,
+written before the handler is attached, so the arrival hook reads a published
+value. Numbers below the shared-interrupt range skip this entirely — those are
+architecturally fixed (inter-processor interrupts are always edge, the timer is
+kernel-reserved).
+
 **Arrival.** The controller calls a hook with the object as its argument. The
-hook takes the object's wait lock, increments the pending count, drops the lock,
-then wakes. Dropping before waking is required, not stylistic — the wake path
-takes the same lock, and holding it through would deadlock by recursion.
+hook takes the object's wait lock and, for a **level** line, masks the number at
+the controller **before** the vector end-of-interrupt — the still-asserted line
+would otherwise re-fire in a storm the moment the vector deactivates it; the
+wait re-arms it once the driver has acknowledged the device. (An edge line is
+never masked — its pending bit is latched and survives, the fast path.) Then it
+increments the pending count, drops the lock, and wakes. Dropping before waking
+is required, not stylistic — the wake path takes the same lock, and holding it
+through would deadlock by recursion. The mask is a single controller register
+write, lock-free per bit, so it is safe under the wait lock; a dispatch that
+raced teardown returns before masking, but teardown has already masked, so the
+line is quiet either way.
 
 The count **saturates just below the maximum**, so that a pathologically
 un-drained counter can never coincidentally equal the sentinel that means "a
@@ -78,13 +111,30 @@ second waiter was refused". Two different meanings sharing one return type is
 the hazard; the saturation keeps them disjoint.
 
 **Waiting.** Claim the single waiter slot under the lock, refusing if taken.
-Promote the thread to the interactive scheduling band — a thread servicing an
-interrupt should preempt ordinary work, and without it the wake could sit behind
-a compute-bound peer for a full scheduling slice. Then sleep on the condition
-that the count is positive. On waking, re-take the lock to release the waiter
-slot and read-and-zero the count in one critical section, so an interrupt
-arriving between the sleep returning and the lock being taken is carried into
-the *next* wait rather than lost.
+For a **level** line, re-arm it — unmask the number at the controller — now, on
+entry: the arrival hook masked it on the last fire, the driver has since
+acknowledged the device (deasserting the line) and returned to wait, so a
+still-asserted line (a fresh completion) re-triggers at once and an acknowledged
+one stays quiet. The unmask is lock-free and sits outside the wait lock; it can
+only *cause* an arrival, and an arrival does its counting under the lock that the
+sleep's condition also re-checks, so no wake is lost (see [[inv-i9]]). Promote
+the thread to the interactive scheduling band — a thread servicing an interrupt
+should preempt ordinary work, and without it the wake could sit behind a
+compute-bound peer for a full scheduling slice. Then sleep on the condition that
+the count is positive, **bounded by the deadline** if a timeout was given. On
+waking, re-take the lock to release the waiter slot and read-and-zero the count
+in one critical section, so an interrupt arriving between the sleep returning and
+the lock being taken is carried into the *next* wait rather than lost. The
+condition has precedence over the deadline, so a timeout return always carries a
+count of zero.
+
+The requested timeout is **capped to a sane maximum** (an hour) before the
+deadline is formed. A caller that fails to set the timeout register — a
+hand-wrapped syscall that omits the argument — would otherwise pass an
+indeterminate value the kernel reads as a bogus deadline; the cap degrades any
+absurd value to a bounded wait rather than a wrapped, already-past deadline that
+returns an immediate spurious zero. A genuine timeout is far below the cap; a
+wait that means to block indefinitely passes zero.
 
 A sleep interrupted by the process being terminated returns zero: the thread is
 unwinding to its death check and will never reach userspace, so the count is
@@ -121,8 +171,14 @@ dying flag plus the magic clobber are what stand in for it.
 ## Data structures
 
 One object per lent interrupt, allocated zeroed: a magic value, the interrupt
-number, an atomic reference count, an embedded wait structure, the pending
-count, and three booleans — waiting, dying, in-flight.
+number, an atomic reference count, a level-trigger boolean, an embedded wait
+structure, the pending count, and three booleans — waiting, dying, in-flight.
+
+The level boolean sits with the number, not with the lock-guarded fields,
+because it is written once at creation (before the handler is attached, so
+before any arrival can read it) and never mutated — the arrival hook and the
+wait read it lock-free, the same publication the number and magic already rely
+on.
 
 The in-flight marker is a plain boolean because at most one dispatch per
 interrupt number is ever in flight: handlers run masked and do not nest, and a
@@ -156,7 +212,16 @@ code could trigger.
 is incremented under the lock before the wake, and the waiter's condition is
 evaluated under the same lock, so an arrival cannot slip between the waiter
 deciding to sleep and sleeping. The read-and-zero after waking closes the
-symmetric window on the other side.
+symmetric window on the other side. The level re-arm preserves this: the unmask
+sits outside the lock but can only *cause* an arrival, and that arrival counts
+under the lock the condition re-checks — so the added mask/unmask cannot lose a
+wake. For a level line the read-and-zero window is additionally quiet, because
+the line stays masked from the waking arrival until the next wait re-arms it.
+
+**[[inv-i15]]** — the hardware view derives from the device tree. The interrupt
+trigger is now part of that view: it is read from the interrupt-map flags cell
+rather than assumed, with the edge default for numbers absent from the map as
+the argued fallback (the same class as the documented serial-console fallback).
 
 Exclusive ownership of an interrupt number is enforced by the claim bitmap. It
 is the hardware analogue of the handle-table rules and is checked by the
@@ -243,3 +308,16 @@ sites across the tree, the scheduler's cross-CPU notification paths, the
 interrupt-number definitions, and the five registered tests.
 
 Absorbed `docs/reference/36-irqfwd.md`.
+
+Revised 2026-09-15 at `12d154eb` (irqfwd.c 463 lines, irqfwd.h 137) for the F-A1
+cure (docs/ARCHITECTURE.md 9.3.1): the device-tree-derived trigger, the level
+mask+ack (arrival masks before end-of-interrupt, wait re-arms), and the bounded
+timeout (`kobj_irq_wait_timed` over `tsleep`, capped). The device-tree trigger
+read is `lib/dtb.c dtb_pci_intid_is_level`; the controller level configuration is
+`gic_set_spi_level_triggered` and its enable-state query `gic_intid_enabled`
+(see [[sub-kernel-gic]]); the syscall gained the timeout argument (see
+[[sub-kernel-syscall-dispatch]]). Two new discriminating tests
+(`irqfwd.level_mask_ack`, `irqfwd.wait_timeout`) plus `dtb.pci_intid_is_level`.
+The Opus-fallback audit closed 0 P0 / 1 P1 / 0 P2 / 2 P3; the P1 was a cross-tree
+caller (Stratum's virtio-blk `t_irq_wait` omitted the new timeout argument);
+the SMP soundness gate passed 0-corruption across default/ubsan x smp4/smp8.
