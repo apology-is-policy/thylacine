@@ -23,6 +23,8 @@ code:
   - usr/halcyond/src/tiles.rs
   - usr/halcyond/src/grid.rs
   - usr/halcyond/src/downq.rs
+  - usr/halcyond/src/picker.rs
+  - usr/halcyond/src/dialog.rs
   - usr/halcyond/Cargo.toml
 audit: hard
 guarded-by: []
@@ -30,9 +32,9 @@ validated-by: [prose, gate-interactive]
 locks: []
 hazards: [haz-budget-stored-not-derived]
 abis: [abi-halcyon-palette]
-design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md"]
+design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md", "docs/HALCYON-INSTRUMENT.md"]
 created: 2026-09-05
-updated: 2026-09-07
+updated: 2026-09-15
 ---
 ## Purpose
 
@@ -230,7 +232,52 @@ console lay a Beacon line identically.
   `MenuSet::open` mints `Surface::menu_on`, writes `menu place`, THEN paints +
   presents once. A `Command` choice feeds `^E ^U` + the command (preserving a
   half-typed draft). The compositor owns the dismiss (proven against a wedged
-  owner by `#wedge`).
+  owner by `#wedge`). Since I-7 `menuset` carries a `Model` -- the verb menu,
+  the theme Picker, or a modal Dialog -- so ONE surface, one grab and one
+  dismiss path serve all three; the model decides only what is painted and how
+  a key / wheel / hover / click reads (`model_key` / `model_wheel` /
+  `model_hover` / `model_click`).
+- **The picker and the dialog family (I-7; HALCYON-INSTRUMENT 9.4 / 14.5)**:
+  two more models on that one surface. `picker` is the display-theme control --
+  the registry IS the gallery directory, re-read at every open (`read_gallery`,
+  so a theme dropped in appears without a restart), grouped and ordered by the
+  optional `[meta]` group/rank with the id breaking a tie, each row's miniature
+  painted in THAT theme's own four colours (desktop / open / structure / amber).
+  `dialog` is the modal family (the RESET confirmation, the running-close
+  confirmation): a header, a wrapped `secondary` body, right-aligned buttons; the
+  default carries an `amber` border and `text` ink, a destructive one `error` and
+  is NEVER pre-focused. Esc and click-away are the compositor's, and for a dialog
+  both read as Cancel.
+
+  **A commit moves the seat only after the compositor ACCEPTS the push (9.4 (b)).**
+  `push_theme` writes the gated `theme <wire>` verb, retrying `VERB_RETRIES` on
+  `Busy`; only on `Ok` does the sheet advance a generation and the chrome, rail
+  and status invalidate -- so chrome and panes can never disagree, and a refusal
+  (`E_PERM`, or the busy cadence spent) leaves the previous bundle whole and says
+  so. An empty gallery opens nothing (`NO THEMES`).
+
+  **The two seats are deliberately asymmetric.** The SESSION seat also persists
+  the pick -- `write_user_pick` does tmp -> `t_fsync` -> rename -> fsync into
+  `$HOME/lib/halcyon/theme` -- re-themes each tile's retained history in place
+  (`set_palette`) and queues an `Input::Palette` to its pts host, then re-publishes
+  [[abi-halcyon-palette]] to `/env` for FUTURE spawns only (a running program is
+  not reached). The CONSOLE seat has no user home, so it applies live and persists
+  NOTHING, re-themes its own `Transcript` via `remap_palette`, and says
+  `(console; not persisted)` / `NOT SAVED` rather than leaving the user to wonder.
+
+  **The registry read is a format-fuzz surface, and the preview set equals the
+  committable set.** A dirent's stem must pass `is_gallery_id` before it is read,
+  which `gallery_bundle` re-validates at commit; that also holds the name to a
+  single path component, so a hostile 9P server bound over the gallery directory
+  cannot inject a `../` name (defense in depth -- halcyond holds only the user's
+  own authority). A file that fails to load, or is a legacy-schema theme, is
+  skipped.
+
+  **The close dialog re-derives its guard at RESOLUTION, not at open.** The
+  `close` tag re-reads `tile_count` when the button is activated rather than
+  trusting the snapshot taken when the dialog was summoned, so the final-tile
+  protection holds against the CURRENT tree even if the layout changed while the
+  modal was up; a dismissed dialog drops the pending close.
 - **Status bar (H-3d)**: `status` + `statusset` (one `Surface::status_on`): the
   focused leaf's name + status, the transcript's cwd + last command (OSC 7 + ut's
   `mark k=cmd`), the UTC clock; paints only on a change (a say line lands in the
@@ -358,6 +405,8 @@ presents are a recorded optimization.
   executor + the display-list wire (H-6), images/`Embed` (H-7) are unbuilt; the
   executor carries `Image`/`Embed` ops no transcript path emits yet.
 - The session-tier settings verbs (the settings push) are unbuilt.
+- The help modal (I-7b) is unbuilt -- `RailAction::Help` says
+  `HELP NOT AVAILABLE`; its frame differs from the 14.5 dialog's.
 - Damage-rect presents are the recorded present-path optimization.
 
 ## Caveats
@@ -376,10 +425,15 @@ presents are a recorded optimization.
 
 ## Tests
 
-- **Host: 127 `#[test]` across the thirteen lib modules** (`cargo test -p
-  halcyond --lib --no-default-features`; transcript 39, tile 17, input 12, tiles
-  10, layout 8, grid 8, menu 7, raster 6, chrome 5, status/select/downq 4 each,
-  session_init 3). They pin the streaming determinism, wrap/alignment/boxes, the
+- **Host: 279 `#[test]`, all green** (measured 2026-09-15: transcript 54,
+  raster 42, layout 37, tile 30, chrome 16, input 12, grid 11, tiles 10, rail 10,
+  status 10, menu 9, outline 7, picker 7, session_init 6, dialog 5, downq 5,
+  indicator 4, select 4). **The command needs an explicit host target** --
+  `cargo test -p halcyond --lib --no-default-features --target
+  aarch64-apple-darwin`, run from `usr/`: `usr/.cargo/config.toml` pins
+  `[build] target = "aarch64-unknown-none"`, so without the override the run dies
+  at `E0463: can't find crate for 'test'` (this row said otherwise until
+  2026-09-15 -- the stated invocation had never been runnable as written). They pin the streaming determinism, wrap/alignment/boxes, the
   word-through-executor leg, the held-feed arms, the obj-run walk +
   `run_rect`/`hit_run` agreement, the menu cap + window, the windowed render (a
   warm render lays <= 4 blocks / <= 12 lines for 200 blocks of history; the
@@ -397,7 +451,12 @@ presents are a recorded optimization.
   `ls-gfx-session` (the session tile spawn, the ingest, caps-probe's two-arm
   identity witness, zoom survival, the geometry legs); `ls-gfx-panes` (the
   negative twins: `role=chrome`/`role=menu` create -> E_PERM/E_INVAL, the gated
-  verbs -> E_PERM).
+  verbs -> E_PERM); `ls-halcyon-instrument` + `ls-halcyon-session-instrument`
+  (I-7: the theme control opens a REAL picker -- the mockup's 286 wide, asserted,
+  not a stub -- a commit switches the theme live and the rail re-themes under it;
+  the console seat says NOT SAVED while the session seat writes
+  `$HOME/lib/halcyon/theme`; Super+T reaches the rail owner as a compositor chord
+  and Esc dismisses).
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)
