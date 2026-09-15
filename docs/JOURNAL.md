@@ -501,6 +501,24 @@ legitimate here: the previous run was **externally killed** and produced no
 verdict, and this one carries an instrument. It is being run to *observe*, not
 to turn a red into a green.
 
+**It passed, and that is a verdict rather than a diagnosis.**
+`ls-halcyon-instrument` PASS 89 s, 42 legs, attempt 1; then the session seat
+re-baked to its own lever and `ls-halcyon-session-instrument` PASS 102 s, 15
+legs, attempt 1, both I-7b legs green. Host halcyond 289/289, tapestryd lib
+41/41. The stall did not fire, so nothing here is fixed -- but the instrument
+is now *calibrated*, which is the part that makes the next occurrence worth
+something: across both seats `ptr btn code` fired 32 and 8 times while
+`input eventq LOW`, `serve pass took` and `gpu command never retired` fired
+ZERO. Those three are nowhere near their thresholds in normal operation, so a
+future firing is signal and not noise. The witnesses landed as `bd06c0ef` with
+the `sub-tapestryd` dossier co-staged (audit: hard).
+
+With both gates green on the exact tree, the three commits went to both mirrors
+-- `fdfa8749..bd06c0ef`, pushed per-URL because `git push origin` is not atomic
+across the two, `ls-remote`-verified identical on each, clean fast-forward, no
+force. The operator then lifted the ask-before-push condition standing.
+
+
 
 ## Run 46o (2026-09-14, Fable 5.1 max) -- the Halcyon Instrument arc opens: reading the Carbon Optics kit against the tree
 
