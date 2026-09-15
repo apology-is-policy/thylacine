@@ -654,13 +654,6 @@ expect {
     timeout { lc_fail "the workspace return never reported" }
 }
 expect {
-    -ex "battery: an undeclared client cannot switch workspaces (the seat gate holds)" {
-        lc_pass "panes: the workspace verb is the seat's -- an undeclared client is refused"
-    }
-    -ex "tapestry-battery: FAIL" { lc_fail_detail "the undeclared-switch control failed" }
-    timeout { lc_fail "the undeclared-switch control never reported" }
-}
-expect {
     -ex "tapestry-battery: PASS" { lc_pass "panes: battery PASS" }
     -ex "tapestry-battery: FAIL" { lc_fail_detail "battery failed after the declare control" }
     timeout { lc_fail "battery never finished" }

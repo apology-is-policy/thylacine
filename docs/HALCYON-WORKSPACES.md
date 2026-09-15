@@ -95,8 +95,17 @@ the H-4 file format at v1 (a save is the active workspace's tree).
 - **Vanishing**: an inactive workspace with no hosted leaf is dropped at
   the next reconcile (i3); the active one never is. **Bound** (I-32):
   `MAX_WORKSPACES` = 9 -- Super+N is the whole keyboard's worth, and a
-  hostile client's `workspace` verb (if one is admitted at all -- the seat
-  class, like `scale`) cannot mint more.
+  hostile client's `workspace` verb cannot mint more. **The verb's home,
+  ratified 2026-09-15 after an architecture review**: the `layout` file,
+  authorized by PRINCIPAL (`Renderer`, or a `Session` whose principal hosts
+  a tile anywhere in the tree) -- NOT the conn-scoped seat `scale`/`theme`
+  carry. Those two are seat-gated because two painters must agree on one
+  rendering contract; there is no second painter for "which workspace is
+  shown". `zoom` is the precedent: the same blast radius (one leaf fills the
+  display, every other tile vanishes), authorized on `layout` by owning one
+  tile. The earlier phrase here -- "the seat class, like `scale`" -- was an
+  analogy from surface form rather than cause, and it produced W-1b's
+  mis-measurement before it was caught.
 - **The bar**: `StatusModel.workspaces`/`active` (already fields, 1/0
   today) read from the header line by the session's reconcile; the
   rendering is unchanged (HALCYON-VISUAL 6). The console (pre-login
@@ -104,14 +113,18 @@ the H-4 file format at v1 (a save is the active workspace's tree).
 - **H-4**: `halcyon layout save <name>` saves the ACTIVE workspace's tree
   (v1 format, unchanged); `restore` rebuilds into the active workspace.
   `halcyon.rc` may `halcyon workspace N` (a new tool verb, the seat-gated
-  ctl `workspace N` behind it) before a restore to fill several. **W-1b
-  measured what "seat-gated" costs the tool**: the ctl verb passes the
-  cfg-3 apply-authority gate only for the renderer, or for a DECLARED
-  session conn that hosts -- and a `halcyon` CLI is a per-process client
-  that is neither, so it cannot write tapestryd's `ctl` itself. The tool
-  verb must reach the switch THROUGH halcyond (the declared session),
-  the way the theme picker's word already travels. Saving every workspace
-  at once (a v2 format with a `workspace` header) is named, not proposed.
+  `layout` verb behind it) before a restore to fill several. **CORRECTION
+  (2026-09-15, operator-ratified after an architecture review):** an
+  earlier revision of this bullet said the tool must reach the switch
+  "THROUGH halcyond, the way the theme picker's word already travels."
+  Both halves were wrong. The picker is a menu INSIDE halcyond, and
+  `write_user_pick` is halcyond WRITING `$HOME/lib/halcyon/theme` -- the
+  precedent runs in the opposite direction, and halcyond posts no service
+  at all. The tool reaches the switch DIRECTLY, because the verb now lives
+  on the `layout` file, which a `Session(principal)` conn already drives
+  (HALCYON.md 13.7's ratified route, the one `halcyon layout restore`
+  uses at every session start). Saving every workspace at once (a v2
+  format with a `workspace` header) is named, not proposed.
 - **Under a session**: the workspaces are the SESSION's (the console leaf
   stays backgrounded in every one, as today). On logout the tree collapses
   to the console as today, workspaces and all.
@@ -120,8 +133,8 @@ the H-4 file format at v1 (a save is the active workspace's tree).
 
 `usr/tapestryd/src/pane.rs` (roots/active; recompute; the vanish rule),
 `server.rs` (the switch as a structural pass; the backgrounding predicate;
-the chords; the header line; an admitted `workspace N` verb under the seat
-gate), `chords.rs` (the nine keys), `usr/halcyond/src/{session,status}.rs`
+the chords; the header line; the `workspace N` verb on the LAYOUT file under
+`actor_may_switch`), `chords.rs` (the nine keys), `usr/halcyond/src/{session,status}.rs`
 (the two numbers), `usr/halcyon` (the tool verb), `docs/HALCYON.md` 13 +
 `HALCYON-VISUAL` 6 (the model, once ratified), AUDIT-TRIGGERS (a new row:
 the dormancy predicate widened; I-32 on the count; the switch's fan).

@@ -1042,6 +1042,21 @@ fn reconcile(
     let plan = plan_tiles(&leaves, &have, &closed_v);
 
     for leaf in plan.drop {
+        // HALCYON-WORKSPACES W-3: `plan.drop` is a CANDIDATE list -- it means
+        // only "absent from the rows we were given", and since W-1a those rows
+        // are the ACTIVE root's. Absence therefore means "not on screen", never
+        // "gone". The global `pane/` tree is the existence oracle: W-1a kept
+        // `live_ids` workspace-spanning on purpose and the readdir enumerates
+        // it, so a DORMANT tile still walks and a closed one does not.
+        //
+        // Without this probe a workspace switch dropped EVERY tile, tore each
+        // one down, and then broke the session loop on `tiles.is_empty()` --
+        // a full logout on a single keystroke. That is the same class as the
+        // two defects W-1a found by reading: invisible until a second root
+        // exists.
+        if read_file(troot, &format!("pane/{}/geometry", leaf)).is_some() {
+            continue;
+        }
         if let Some(t) = tiles.remove(&leaf) {
             closed.insert(leaf);
             t.teardown();

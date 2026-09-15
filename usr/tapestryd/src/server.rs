@@ -7659,6 +7659,37 @@ impl Comp {
     /// surface in it is its own -- empty leaves belong to nobody and never
     /// block, an all-empty subtree is anyone's. The renderer is the
     /// environment and may act anywhere.
+    /// HALCYON-WORKSPACES 4 (W-2b, operator-ratified 2026-09-15): who may
+    /// change WHICH workspace is shown. PRINCIPAL-scoped, not conn-scoped --
+    /// the display is in use by principal p, so p's programs may change which
+    /// of p's workspaces sits on it. `hosted_leaves` spans workspaces by
+    /// design (W-1a), so a principal whose every tile sits in the workspace it
+    /// just LEFT still qualifies and can switch back.
+    ///
+    /// NOT the seat gate `scale`/`theme` carry. Those are seat-scoped for a
+    /// reason that does not transfer: two painters (the compositor's chrome,
+    /// the session's content) must agree on one rendering contract, so exactly
+    /// one party may decide it. There is no second painter for "which
+    /// workspace is active" -- the tree is the compositor's alone and every
+    /// client re-reads `layout`. And this same actor may already `close` these
+    /// tiles, which is destructive and irreversible; refusing it a reversible
+    /// view switch would make the authority non-monotonic in blast radius.
+    /// `zoom` settles it by precedent: same blast radius (one leaf fills the
+    /// display, every other tile vanishes), authorized by owning ONE tile.
+    fn actor_may_switch(&self, actor: Actor) -> bool {
+        match actor {
+            Actor::Renderer => true,
+            // Per-process and mutually walled (SYSTEM, unauthenticated,
+            // unknown): never the user's view state.
+            Actor::Client(_) => false,
+            Actor::Session(p) => self
+                .layout
+                .hosted_leaves()
+                .iter()
+                .any(|&(_, n)| self.surf(n).is_some_and(|s| s.owner_principal == p)),
+        }
+    }
+
     fn actor_owns_subtree(&self, actor: Actor, slot: usize) -> bool {
         match actor {
             Actor::Renderer => true,
@@ -7809,6 +7840,40 @@ impl Comp {
                 if self.layout.tab_cycle(fwd) {
                     self.reconcile();
                 }
+                return Ok(());
+            }
+            "workspace" => {
+                // HALCYON-WORKSPACES 4 (W-2b, ratified 2026-09-15): the switch
+                // lives HERE, on the file that renders the `workspaces N
+                // active K` header it moves, and is authorized by what the
+                // principal owns rather than by the conn-scoped seat. W-1b put
+                // it on `ctl` reasoning from the design's phrase "the seat
+                // class, like `scale`" -- an analogy drawn from surface form,
+                // not from cause, and it had already misled once.
+                //
+                // ONE-BASED, matching the header, the pane ids beside it, and
+                // the `01`..`09` the rail paints. Syntax first, then authority
+                // -- this file's convention (see `pane_cmd`), the inverse of
+                // the `ctl` gate's.
+                let n: usize = rest.parse().map_err(|_| p9::E_INVAL)?;
+                if n == 0 || n > pane::MAX_WORKSPACES {
+                    return Err(p9::E_INVAL);
+                }
+                if !self.actor_may_switch(actor) {
+                    return Err(p9::E_PERM);
+                }
+                if n - 1 == self.layout.active_workspace() {
+                    return Ok(()); // already there: idempotent, not an error
+                }
+                // The TREE's refusal: a SKIPPED number (only the next free one
+                // may be made, the i3 rule) or an exhausted pane table (I-32:
+                // creation fails clean). Nothing moved, so the caller gets
+                // E_INVAL rather than a silent success that would leave it
+                // believing it had switched.
+                if !self.layout.switch_workspace(n - 1) {
+                    return Err(p9::E_INVAL);
+                }
+                self.reconcile();
                 return Ok(());
             }
             _ => {}
@@ -17662,26 +17727,12 @@ impl Conn {
         let session_theme_verb = s.starts_with("theme ")
             && comp.session_declared(self.conn_id)
             && comp.conn_hosts(self.conn_id);
-        // HALCYON-WORKSPACES 4 (W-1b): the switch is the SEAT's on exactly
-        // the `scale` and `theme` terms -- a display-level structural act,
-        // and a per-process client moving another principal's workspace is
-        // the same cfg-3 lie those two refuse. This conjunct is what makes
-        // the verb reachable at all past a DEFAULT-DENY gate: without it only
-        // the renderer could switch, so the declared session compositor --
-        // the only driver the product actually has -- was refused by its own
-        // verb. `conn_hosts` scans `hosted_leaves`, which spans workspaces by
-        // design, so a seat whose tiles all sit in the workspace it just LEFT
-        // still holds the seat and can switch back.
-        let session_workspace_verb = s.starts_with("workspace ")
-            && comp.session_declared(self.conn_id)
-            && comp.conn_hosts(self.conn_id);
         if !Self::is_ungated_ctl(s)
             && !self.peer_is_renderer()
             && !session_menu_verb
             && !session_status_verb
             && !session_scale_verb
             && !session_theme_verb
-            && !session_workspace_verb
         {
             return Err(p9::E_PERM);
         }
@@ -17702,32 +17753,6 @@ impl Conn {
                 "session"
             };
             comp.apply_theme(b, who);
-            return Ok(());
-        }
-        if let Some(rest) = s.strip_prefix("workspace ") {
-            // HALCYON-WORKSPACES 4 (W-1b): switch to workspace N, creating it
-            // when N is the next free number (i3). ONE-BASED, like the header
-            // it moves and the `01`..`09` the rail paints. The SEAT's, by the
-            // apply-authority gate above (the renderer, or a declared session
-            // while it hosts), and budgeted like `scale` -- the same class: a
-            // structural relayout. The bound lives in the tree
-            // (`MAX_WORKSPACES`), not in the caller.
-            let n: usize = rest.trim().parse().map_err(|_| p9::E_INVAL)?;
-            self.layout_verb_budget()?;
-            if n == 0 || n > pane::MAX_WORKSPACES {
-                return Err(p9::E_INVAL);
-            }
-            if n - 1 == comp.layout.active_workspace() {
-                return Ok(()); // already there: idempotent, not an error
-            }
-            // A refusal is the tree's: a SKIPPED number (only the next free
-            // one may be created) or an exhausted pane table. Either way
-            // nothing moved, so the caller gets E_INVAL rather than a silent
-            // success that leaves it believing it switched.
-            if !comp.layout.switch_workspace(n - 1) {
-                return Err(p9::E_INVAL);
-            }
-            comp.reconcile();
             return Ok(());
         }
         if let Some(rest) = s.strip_prefix("scale ") {

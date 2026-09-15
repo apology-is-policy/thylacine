@@ -1853,13 +1853,16 @@ start)` with opacity 0 at 55 % — reduced-motion honoured (§9.5).
   `in_active_root` zoom guard, the eighteen chords, and the `close_inner`
   root-arm fix — it freed the whole pane pool, which with several live
   roots annihilates every other workspace; the as-built note in §14.1).
-  **W-1b LANDED** the `workspace N` ctl verb — the SEAT's, on exactly the
-  `scale`/`theme` terms (the renderer, or a declared session while it hosts),
-  budgeted like `scale` — and the battery leg (switch / dormant / return /
-  vanish / the undeclared-refusal control), since the battery is a client and
-  cannot inject a chord. The first cut of the verb sat below the cfg-3
-  apply-authority gate without its conjunct, which left it renderer-only and
-  so unreachable by the session compositor; the gate leg caught it.
+  **W-1b then W-2b LANDED** the `workspace N` verb and the battery leg,
+  since the battery is a client and cannot inject a chord. W-1b put the verb
+  on `ctl` (reasoning from "the seat class, like `scale`") and the gate found
+  two defects: it sat below the cfg-3 apply-authority gate with no conjunct,
+  leaving it renderer-only; and once that was added, the seat proved to be a
+  CONN, so a declaration on one session and the verb on another was refused
+  identically. **W-2b moved it to the `layout` file under `actor_may_switch`**
+  (operator-ratified after an architecture review): principal-scoped, which
+  dissolves the conn problem by construction and gives `halcyon workspace <n>`
+  a route with no new mechanism.
 - **I-8 — effects and motion.** The two ops, the glows, the backdrop, the
   transitions.
 - **I-9 — parity gate, audit, rollout.** ACCEPTANCE-TESTS in full against
@@ -2053,12 +2056,15 @@ header carries `workspaces N active K`, ONE-BASED to match the ids beside it
 and the `01`..`09` the rail paints; the per-pane rows stay the active root's.
 Super+1..9 switch (creating only the next free number) and Super+Shift+1..9
 move, ownership-preserving. **W-1b gave the switch its client-reachable
-driver**: the `workspace N` verb, one-based, the SEAT's on the `scale`/`theme`
-terms (the renderer, or a declared session while it hosts — a per-process
-client switching another principal's workspace is the cfg-3 lie that gate
-exists to refuse), budgeted like `scale`, and refusing a skipped number or an
-exhausted pane table with `E_INVAL` rather than a silent success that would
-leave the caller believing it had switched.
+driver**: the `workspace N` verb, one-based, on the **`layout`** file beside
+`focusdir`/`tab` and authorized by `actor_may_switch` — the renderer, or a
+`Session(p)` owning a hosted surface anywhere in the tree — refusing a skipped
+number or an exhausted pane table with `E_INVAL` rather than a silent success
+that would leave the caller believing it had switched. Not the seat gate
+`scale`/`theme` carry: those are conn-scoped because two painters must agree
+on one rendering contract, and there is no second painter for which workspace
+is shown. `zoom` is the precedent — the same blast radius, authorized on
+`layout` by owning one tile.
 **Still N = 1 on the bar** until W-2 feeds the two numbers to it — the chip
 painter has been ready since I-4.
 

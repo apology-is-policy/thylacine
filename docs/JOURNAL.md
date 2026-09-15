@@ -666,6 +666,100 @@ the next run and they were already gone; the decisive lines survive only
 because they had been quoted at the time. Copy the evidence before launching
 the retry.
 
+### W-2b: the operator bought a second opinion, and it moved the verb
+
+The W-1b hunt above ended with the verb working on `ctl` and a gate green over
+it. The operator then asked for something I had not thought to ask for: an
+**Opus-4.8 architecture review**, explicitly told to find the right answer
+regardless of cost. It changed the design, found two P1s I had shipped, and
+corrected two claims I had written into scripture that same afternoon.
+
+**What it saw that I did not.** The `workspaces N active K` header is
+RENDERED on the `layout` file; halcyond reads it there; the verb that changes
+it was on `ctl`. One piece of state, read on one file, written on another --
+in a 9P-heritage system that is the tell. Three more arguments closed it:
+`zoom` already has a workspace switch's exact blast radius (one leaf fills the
+display, every other tile vanishes) and is authorized on `layout` by owning
+ONE tile; the session model already grants same-principal `close`, which is
+destructive and irreversible, so refusing a reversible view switch is
+non-monotonic in blast radius; and `scale`/`theme` are seat-gated for a reason
+that does not transfer -- two painters must agree on one rendering contract,
+and there is no second painter for which workspace is shown. The design's
+phrase "the seat class, like `scale`" was an analogy from surface form, and it
+had already produced W-1b's mis-measurement once.
+
+The operator ratified moving it. `workspace N` now lives in `layout_cmd`
+beside `focusdir`/`tab` under a new `actor_may_switch` -- `Renderer`, or a
+`Session(p)` owning a hosted surface anywhere in the tree. Principal-scoped,
+which dissolves W-1b's two-conn defect by construction, and `halcyon
+workspace <n>` then needed **no new mechanism at all**: the tool's own
+`/srv/tapestry` conn is already `Session(principal)`. ~35 lines reverted, ~25
+added, and a CLI verb that is 15.
+
+**Two P1s in W-1a, both verified before I repeated them.** F1:
+`dissolve_if_single` called `set_root`, which re-seats `workspaces[active]` --
+so dissolving an INACTIVE workspace's root moved the ACTIVE workspace onto a
+pane in another tree and then freed the slot the inactive one still named.
+Both corrupted, from one `close` in a workspace nobody was looking at, and no
+test could catch it because every workspace test closes the ACTIVE root. Fixed
+as `reseat_root(old, new)`, which finds the OWNING workspace -- and I changed
+all THREE call sites, not the one prosecuted, because all three carried the
+same assumption. F2: W-1a's cross-workspace zoom guard was on
+`recompute_instrument` only; `recompute_legacy` -- **the profile that
+ships** -- had none, while the W-1a commit body and the AUDIT-TRIGGERS row
+both said "the zoom" was guarded. A sentence true of the code I was looking at
+and false of the system.
+
+**Both now have sabotage-measured regression tests.** Restoring the
+active-based `set_root` fails F1's test; deleting `&& in_active_root(z)` from
+the legacy carve fails F2's; the file came back byte-identical afterwards
+(md5-checked), and the suite went 48 -> 50.
+
+**And a third defect, found by reading, measured before the fix.** Building
+W-3's gate leg I read halcyond's `reconcile`: its tile plan comes from
+`parse_leaves_all(&layout)`, and since W-1a those rows are the ACTIVE root's.
+So on a switch every tile is absent from them, `plan.drop` takes all of them,
+each gets `teardown()`, and the loop breaks on `tiles.is_empty()`. **A
+workspace switch destroyed the session.** Measured before touching it:
+`workspace switch -> 2 of 2`, then `session logout (code 0)`. The oracle was
+already there and W-1a had said so in writing -- `live_ids`, and the `pane/`
+readdir over it, is global ON PURPOSE, "do not later reconcile the two".
+halcyond was the consumer that reconciled them by accident. Fixed with a
+`pane/<id>/geometry` probe per drop candidate: a dormant tile still walks, a
+closed one does not. I corrected the inference rather than deleting it in
+favour of `TEV_CLOSE`, because I could not establish that every removal path
+emits it, and an unproven claim is not a licence to drop leak protection.
+
+**Two things I had written that were wrong, corrected in place.** I told the
+operator, and wrote into HALCYON-WORKSPACES 4, that the tool must reach the
+switch "through halcyond, the way the theme picker's word already travels."
+Both halves false: the picker is a menu INSIDE halcyond and `write_user_pick`
+is halcyond WRITING the user's file, so the precedent runs the opposite way,
+and halcyond posts no service at all. And I had claimed `scale` was not
+principal-gated, measured from its bare arm, when its authority was decided
+thirty lines above.
+
+**What the gates say.** `ls-gfx-panes` PASS 48 s one attempt on the re-homed
+verb; `ls-halcyon-session-instrument` PASS 104 s one attempt, with the bar
+reading `workspaces 2 active0 1` on Super+2 and `workspaces 1 active0 0` on
+the return -- which also measures that halcyond does NOT auto-host a new
+workspace's empty root, so the i3 vanish still fires in a live session. Host:
+tapestryd 50, halcyond 295, halcyon 26.
+
+**What the E2E cannot witness, stated so it is not mistaken for coverage.**
+The authority axis. Refusal needs a non-session principal or a session hosting
+nothing, and the battery is michael and hosts a tile -- it can construct
+neither. W-1b's "an undeclared client is refused" control was DELETED rather
+than re-aimed: under a principal rule it could no longer fail, and a check
+that cannot fail is worse than no check, because it reads as coverage. That
+gap is recorded in the audit row instead.
+
+**The lesson I want to keep.** Both W-1b defects were failures to read a gate;
+the review found a failure *above* them -- I never asked whether the verb
+belonged on that file at all. Debugging a placement is not the same as
+choosing one, and no amount of prosecuting the gate would have surfaced that
+the state's reader and its writer had been split across two files.
+
 
 ## Run 46o (2026-09-14, Fable 5.1 max) -- the Halcyon Instrument arc opens: reading the Carbon Optics kit against the tree
 

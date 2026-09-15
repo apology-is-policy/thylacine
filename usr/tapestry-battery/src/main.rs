@@ -2060,19 +2060,20 @@ pub extern "C" fn rs_main() -> i64 {
     // ACTIVE root's, so a live tile must LEAVE those rows while another
     // workspace is up and come back when its own returns.
     {
-        // The verb is the SEAT's (the apply-authority gate: the renderer, or
-        // a DECLARED session while it hosts), so the leg declares exactly as
-        // the control above did. Two findings came out of this leg failing:
-        // the verb had been written BELOW that default-deny gate without its
-        // conjunct, leaving the session compositor -- the real driver --
-        // unable to switch at all; and the SEAT IS A CONN, so both the
-        // declaration and the verb must ride the same one (`a`'s ring), which
-        // the first attempt got wrong by declaring on the ring and switching
-        // on the driver session.
-        if let Err(e) = a.global_ctl("session on") {
-            say!("tapestry-battery: FAIL workspaces: session on refused {:?}", e);
-            return 1;
-        }
+        // The verb lives on the LAYOUT file (W-2b, ratified 2026-09-15) and is
+        // authorized by PRINCIPAL, not by the conn-scoped seat -- so no
+        // declaration is needed and the driver session drives it, exactly as
+        // it drives `split`/`mode`/`tab`. W-1b put the verb on `ctl` and this
+        // leg failed twice: once because the verb sat below a default-deny
+        // gate with no conjunct, and once because the seat was a CONN and the
+        // declaration rode a different session than the verb. The principal
+        // rule dissolves both.
+        //
+        // NOT WITNESSED HERE: the authority axis. Refusal needs either a
+        // non-session principal or a session hosting nothing, and this harness
+        // is michael and hosts `a` -- it can construct neither. The old
+        // "undeclared is refused" control was deleted rather than left to pass
+        // for the wrong reason.
         let ws_header = |s: &str| -> Option<(u32, u32)> {
             let head = s.lines().next()?;
             let (mut n, mut k) = (None, None);
@@ -2106,11 +2107,8 @@ pub extern "C" fn rs_main() -> i64 {
         // so). Driving the verb through `root` is what failed twice -- the
         // gate saw an undeclared conn that hosts nothing and refused E_PERM,
         // which `raw_ctl`'s flat `rc -1` could not tell from a tree refusal.
-        if let Err(e) = a.global_ctl("workspace 2") {
-            say!(
-                "tapestry-battery: FAIL workspaces: `workspace 2` refused {:?}",
-                e
-            );
+        if !write_file(root, "layout", "workspace 2") {
+            say!("tapestry-battery: FAIL workspaces: `workspace 2` refused");
             return 1;
         }
         let lay1 = read_file(root, "layout").unwrap_or_default();
@@ -2130,16 +2128,13 @@ pub extern "C" fn rs_main() -> i64 {
         // A SKIPPED number is refused -- only the next free one may be made.
         // Same session as the switch that just worked, so a refusal here is
         // the TREE's rule and not the seat gate.
-        if a.global_ctl("workspace 9").is_ok() {
+        if write_file(root, "layout", "workspace 9") {
             say!("tapestry-battery: FAIL workspaces: a skipped number was accepted");
             return 1;
         }
         // RETURN, which also VANISHES the empty inactive workspace 2 (i3).
-        if let Err(e) = a.global_ctl("workspace 1") {
-            say!(
-                "tapestry-battery: FAIL workspaces: `workspace 1` refused {:?}",
-                e
-            );
+        if !write_file(root, "layout", "workspace 1") {
+            say!("tapestry-battery: FAIL workspaces: `workspace 1` refused");
             return 1;
         }
         let lay2 = read_file(root, "layout").unwrap_or_default();
@@ -2158,19 +2153,6 @@ pub extern "C" fn rs_main() -> i64 {
             }
         }
         say!("battery: workspace 1 returned with its tile; the empty workspace vanished");
-        // The control ONE VARIABLE away from the four legs above: undeclare,
-        // and the same verb that just worked must be refused. Without it the
-        // legs prove only that a switch CAN happen, never that the gate holds
-        // -- and a gate that quietly stopped refusing would read as green.
-        if let Err(e) = a.global_ctl("session off") {
-            say!("tapestry-battery: FAIL workspaces: session off refused {:?}", e);
-            return 1;
-        }
-        if a.global_ctl("workspace 2").is_ok() {
-            say!("tapestry-battery: FAIL workspaces: an UNDECLARED client switched the seat's workspace");
-            return 1;
-        }
-        say!("battery: an undeclared client cannot switch workspaces (the seat gate holds)");
     }
 
     unsafe { t_close(root) };

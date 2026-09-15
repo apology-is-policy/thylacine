@@ -589,6 +589,32 @@ expect {
 }
 lc_pass "session-instrument: the rail's SPLIT H spawned a new tile (leaf $B) under the session's authority; the footer counts $N1 (8.1 / 9.5)"
 
+# --- HALCYON-WORKSPACES W-3: the switch, and the bar's two numbers ---------------
+# Super+2 CREATES workspace 2 (the i3 rule: only the next free number may be
+# made) and switches to it. The session's tiles go DORMANT with the root they
+# live in rather than closing, so the bar is the thing that can report the
+# move: it reads the compositor's `layout` header, the ratified channel.
+# `active0` is the model's ZERO-BASED field printed raw -- asserting the
+# one-based number the header carries would pass even with the conversion
+# missing, which is a check that cannot fail.
+hkey "meta_l+2"
+expect {
+    -re "halcyond: status bar \\d+ painted \[^\\r\\n\]*workspaces 2 active0 1" {}
+    -re {EXTINCTION:} { lc_extinction_fail "extinction after Super+2" }
+    timeout { lc_fail "the bar never read workspace 2 after Super+2 (the switch, the header, or the feed)" }
+    eof     { lc_fail "qemu exited after Super+2" }
+}
+lc_pass "session-instrument: Super+2 created workspace 2 and the bar reads it (W-1a's switch through W-2a's feed)"
+
+hkey "meta_l+1"
+expect {
+    -re "halcyond: status bar \\d+ painted \[^\\r\\n\]*workspaces 1 active0 0" {}
+    -re {EXTINCTION:} { lc_extinction_fail "extinction after Super+1" }
+    timeout { lc_fail "the bar never returned to workspace 1, or the EMPTY workspace 2 did not vanish" }
+    eof     { lc_fail "qemu exited after Super+1" }
+}
+lc_pass "session-instrument: Super+1 returned and the empty workspace 2 VANISHED -- the bar reads 1/1 (the i3 rule)"
+
 # --- The workspace list from the mark (14.1) -------------------------------------
 after 1000
 click 15 15

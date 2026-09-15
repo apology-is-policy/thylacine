@@ -549,11 +549,19 @@ impl Layout {
         self.workspaces[self.active].root
     }
 
-    /// Re-seat the active workspace's root (a dissolve or a collapse moved
-    /// it). The invariant above makes the index safe.
-    fn set_root(&mut self, slot: usize) {
-        let a = self.active;
-        self.workspaces[a].root = slot;
+    /// Re-seat the root of the workspace that OWNS `old` -- a dissolve, a
+    /// split of a root, or a collapse moved it.
+    ///
+    /// NEVER the active workspace by assumption. This read `self.active`
+    /// until 2026-09-15, so dissolving an INACTIVE workspace's root re-seated
+    /// the ACTIVE workspace onto a pane in another tree and then freed the
+    /// slot the inactive workspace still named -- both corrupted, from one
+    /// `close` in a workspace nobody was looking at. `slot_of_id` is global,
+    /// so that close is reachable from any conn that owns the pane.
+    fn reseat_root(&mut self, old: usize, new: usize) {
+        if let Some(i) = self.workspaces.iter().position(|w| w.root == old) {
+            self.workspaces[i].root = new;
+        }
     }
 
     /// How many workspaces exist, and which is active (the `layout` header's
@@ -979,7 +987,7 @@ impl Layout {
                     }
                 }
             }
-            None => self.set_root(container),
+            None => self.reseat_root(slot, container),
         }
         self.get_mut(slot).unwrap().parent = Some(container);
         self.get_mut(slot).unwrap().weight = DEFAULT_WEIGHT;
@@ -1303,7 +1311,7 @@ impl Layout {
                 self.get_mut(only).unwrap().parent = Some(g);
             }
             None => {
-                self.set_root(only);
+                self.reseat_root(slot, only);
                 self.get_mut(only).unwrap().parent = None;
             }
         }
@@ -1612,7 +1620,7 @@ impl Layout {
                     // A fresh two-way division: equal halves.
                     self.get_mut(oldroot).unwrap().weight = DEFAULT_WEIGHT;
                     self.get_mut(slot).unwrap().weight = DEFAULT_WEIGHT;
-                    self.set_root(c);
+                    self.reseat_root(oldroot, c);
                     self.epoch += 1;
                     self.focus(slot);
                     return true;
@@ -1892,7 +1900,15 @@ impl Layout {
         // A stale zoom target (closed/retired) self-clears here.
         if let Some(zid) = self.zoomed_id {
             match self.slot_of_id(zid) {
-                Some(z) if self.is_leaf(z) => {
+                // HALCYON-WORKSPACES 4: the SAME guard the Instrument carve
+                // carries, and it has to be on BOTH. `slot_of_id` is global,
+                // so without it a zoom made in a dormant workspace resolves
+                // here and paints that pane over the active tree. W-1a added
+                // it to one carve and then claimed, in the commit body and in
+                // the AUDIT-TRIGGERS row, that "the zoom" was guarded -- true
+                // of the carve I was reading, false of the system, and Legacy
+                // is the profile that actually ships.
+                Some(z) if self.is_leaf(z) && self.in_active_root(z) => {
                     let full = Rect {
                         x: 0,
                         y: 0,
@@ -3709,6 +3725,78 @@ mod tests {
         assert_eq!(l.reap_empty_workspaces(), 1, "i3: the empty one goes");
         assert_eq!(l.workspace_count(), 1);
         assert_eq!(l.active_workspace(), 0);
+    }
+
+    /// F1 (the W-2b architecture review, verified): `dissolve_if_single`
+    /// re-seated `workspaces[active].root` UNCONDITIONALLY, so dissolving an
+    /// INACTIVE workspace's root moved the ACTIVE workspace onto a pane in
+    /// another tree and then freed the slot the inactive one still named --
+    /// both corrupted, from one `close` in a workspace nobody was looking at.
+    /// Reachable because `slot_of_id` is global.
+    ///
+    /// SABOTAGE: restore the active-based `set_root(only)` and the first
+    /// assertion fails. No existing workspace test could catch this -- every
+    /// one of them closes the ACTIVE root.
+    #[test]
+    fn a_dissolve_in_an_inactive_workspace_leaves_the_active_root_alone() {
+        let mut l = Layout::new();
+        let one = l.host_for(7, 0, 0).expect("workspace 1, first tile");
+        let two = l.host_for(8, 0, 0).expect("workspace 1, second tile");
+        assert_ne!(one, two, "the premise: workspace 1's root is a container");
+        assert!(l.switch_workspace(1), "to workspace 2");
+        let ws2_root = l.root();
+        // Close a tile INSIDE the dormant workspace. Its root then has one
+        // child left and dissolves -- the moment the old code re-seated the
+        // wrong workspace.
+        let _ = l.close(one);
+        assert_eq!(
+            l.root(),
+            ws2_root,
+            "the ACTIVE workspace's root must not move when another workspace dissolves"
+        );
+        assert!(l.in_active_root(ws2_root));
+        assert!(l.switch_workspace(0), "back to workspace 1");
+        assert!(
+            l.get(l.root()).is_some(),
+            "workspace 1's root is a live slot, not the freed container"
+        );
+        assert_eq!(
+            l.leaf_surface(l.root()),
+            Some(8),
+            "and it is the tile that survived the close"
+        );
+    }
+
+    /// F2 (the same review, verified): the cross-workspace zoom guard was
+    /// added to `recompute_instrument` ONLY, while `recompute_legacy` -- the
+    /// profile that SHIPS -- had none, and the W-1a commit body and audit row
+    /// both claimed "the zoom" was guarded.
+    ///
+    /// NOTE THE ORDER: a switch CLEARS `zoomed_id` (the test above pins
+    /// that), so this state is reachable only by zooming a foreign slot
+    /// AFTER the switch. Zoom-then-switch would pass with the guard deleted,
+    /// which is the check that cannot fail.
+    ///
+    /// SABOTAGE: drop `&& self.in_active_root(z)` from `recompute_legacy` and
+    /// the dormant pane is painted at the full display rect over the active
+    /// tree.
+    #[test]
+    fn the_legacy_carve_refuses_a_zoom_that_lives_in_another_workspace() {
+        let mut l = Layout::new();
+        let dormant = l.host_for(7, 0, 0).expect("workspace 1's tile");
+        assert!(l.switch_workspace(1), "to workspace 2");
+        // The TREE permits zooming a foreign slot -- the authority check is
+        // the server's `actor_hosts`. The carve is what must refuse to paint.
+        assert!(l.zoom_toggle(dormant), "zoom a pane in the dormant workspace");
+        assert!(l.zoom_id().is_some());
+        ws_lay(&mut l); // Profile::Legacy -- the shipped one
+        let z = l.get(dormant).expect("the dormant leaf outlives the switch");
+        assert!(!z.visible, "a dormant workspace's zoom must not be painted");
+        assert!(z.rect.is_empty(), "and must claim no pixels");
+        assert!(
+            l.get(l.root()).unwrap().visible,
+            "while the active workspace carves normally"
+        );
     }
 
     #[test]

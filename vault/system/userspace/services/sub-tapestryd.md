@@ -1787,85 +1787,81 @@ listing eighteen arms, so the render and parse directions cannot drift), and
 the two `exec_chord` arms in `server.rs`. Host-tested at 48 (41 before).
 The `workspace N` ctl verb and the battery leg landed in W-1b, below.
 
-## The workspace verb -- the switch a CLIENT can reach (2026-09-15, W-1b)
+## The workspace verb -- two homes, and why the second one is right (2026-09-15, W-1b then W-2b)
 
 W-1a gave the tree live roots but only one driver: `Super+N` on the
 compositor's own key path, intercepted ABOVE the event stream. A 9P client
-cannot inject that, so the acceptance battery had no way to exercise a switch
--- and a leg that drove one through QMP keys would be testing the key path,
-not the workspace tree. `global_ctl` therefore gains `workspace N`,
-one-based like the header it moves and the `01`..`09` the rail paints,
-sitting just above `scale`.
+cannot inject that, so the acceptance battery had no way to exercise a switch.
+The verb exists to be that driver. **It was built twice, and the second
+placement is the one to read.**
 
-**The gating question was measured WRONG first, and the gate is the reason
-this section exists.** The verb was written directly above `scale`, whose arm
-carries nothing but `layout_verb_budget()` -- from which the first reading
-concluded that `scale` was not principal-gated and that "the seat class" named
-only a verb CLASS. That was false. Thirty lines further up sits the cfg-3
-apply-authority gate: DEFAULT-DENY over every global verb, passed
-unconditionally only by `peer_is_renderer()`, with each exemption spelled out
-as its own conjunct (`menu`, `tag <id> status`, `scale`, `theme` -- each
-`session_declared(conn) && conn_hosts(conn)`). `scale`'s arm is bare precisely
-BECAUSE its authority was already decided above it. Reading an arm's body and
-concluding an absence of gating is the error to avoid here: in this handler,
-authority comes before syntax.
+**W-1b put it on `ctl`, reasoning from the design's phrase "the seat class,
+like `scale`".** Two defects followed, both found by the gate rather than by
+the compiler or the host suite (`server.rs` carries no inline tests). First,
+`global_ctl`'s cfg-3 apply-authority gate is DEFAULT-DENY with one
+hand-written conjunct per exemption, and the new verb had none -- so it was
+reachable by the RENDERER ALONE and the declared session compositor could not
+switch at all. Second, once a conjunct was added the leg still failed
+identically: every conjunct is `conn_id`-scoped, and the battery holds TWO
+sessions (its own driver session plus libtapestry's per-client ring), so
+declaring on one and acting on the other is correctly refused. Both failures
+presented as the same flat `rc -1`, because the harness's raw write path
+collapses every errno.
 
-A verb added below that gate without its own conjunct is therefore reachable
-by the RENDERER ALONE. That is what shipped in the first W-1b commit, and its
-consequence was not a test artefact: the declared session compositor --
-halcyond, the only driver the product actually has, and the one W-2's bar
-would have used -- could not switch workspaces at all. `session_workspace_verb`
-closes it on exactly the `scale`/`theme` terms. One interaction is worth
-stating because it holds by construction rather than by care: `conn_hosts`
-scans `hosted_leaves`, which spans workspaces by design (W-1a), so a seat
-whose every tile sits in the workspace it just LEFT still holds the seat and
-can switch back -- had that scan been filtered to visible panes, a switch away
-would have revoked the authority needed to switch home.
+**The lesson that survives from W-1b, because it generalizes:** in that
+handler authority comes BEFORE syntax, so reading a verb arm's body proves
+nothing about whether the verb is gated. `scale`'s arm carries only
+`layout_verb_budget()` -- not because it is ungated, but because its authority
+was decided thirty lines above it.
 
-**Three dispositions, and the reason the middle one is not an error.**
-`n == 0` or `n > MAX_WORKSPACES` is `E_INVAL` at the door. Switching to the
-workspace already active returns `Ok` -- idempotent, because a caller that
-asks for where it already is has not failed at anything. Everything else is
-the TREE's verdict: `switch_workspace` refuses a SKIPPED number (only the
-next free one may be created, the i3 rule) and refuses an exhausted pane
-table (I-32: creation fails clean rather than leaving a half-made workspace),
-and both come back as `E_INVAL` rather than a silent success that would leave
-the caller believing it had switched when nothing moved.
+**W-2b moved it to the `layout` file, authorized by PRINCIPAL**
+(operator-ratified after an architecture review). `actor_may_switch` admits
+`Renderer`, or a `Session(p)` where p owns a hosted surface anywhere in the
+tree; `Actor::Client` is refused. Four things drive that, and they are worth
+keeping because the surface-level analogy to `scale` is genuinely seductive:
 
-The verb ends in `comp.reconcile()`, which is where the switch becomes
-visible: `reconcile` reaps empty inactive workspaces before
-`apply_backgrounded` stamps the dormancy, so the i3 vanish and the darkening
-of the workspace just left both ride the one relayout rather than needing
-their own.
+1. **The reader and the writer must be the same file.** The `workspaces N
+   active K` header is rendered on `layout`, and halcyond parses it from
+   there. A verb on `ctl` changing state that only `layout` reports is the
+   split a 9P-heritage system exists to avoid.
+2. **`zoom` is the controlling precedent.** It has a workspace switch's exact
+   blast radius -- one leaf fills the display, every other tile vanishes --
+   and it is authorized on `layout` by owning ONE tile.
+3. **The session model already grants strictly more.** A same-principal
+   program may `close` the user's tiles: destructive and irreversible.
+   Refusing it a reversible view switch is non-monotonic in blast radius.
+4. **The `scale`/`theme` seat gate does not transfer.** Those are seat-scoped
+   because two painters -- the compositor's chrome and the session's content
+   -- must agree on one rendering contract, so exactly one party may decide
+   it. There is no second painter for which workspace is shown: the tree is
+   the compositor's alone and every client re-reads `layout`.
 
-**The seat is a CONN, and that is sharper than it sounds.** Every conjunct
-above is `self.conn_id`-scoped, so the authority belongs to a *connection*,
-not to a process or a principal. A client holding more than one session to
-the compositor therefore has the seat on at most one of them -- and the
-acceptance battery is exactly such a client: it opens its own "driver
-session" for global reads and writes, while `Surface::open` goes through
-libtapestry's `EventRing::connect`, which is one 9P session plus one Loom
-ring per client (H-3c-2). The first fix declared `session on` through the
-ring and then issued `workspace 2` through the driver session, and the gate
-correctly refused a conn that had declared nothing and hosted nothing. The
-symptom was indistinguishable from the original defect -- same leg, same
-flat `rc -1` -- because the harness's raw write path collapses every errno
-to -1; routing the verb through `Surface::global_ctl`, which returns a typed
-`TapError`, is what makes a future refusal name itself. Declaration and act
-must ride the same conn.
+Principal scoping also dissolves W-1b's second defect by construction: a
+client with several conns has one principal, so declaration and act can no
+longer disagree.
+
+**The bound and the dispositions.** ONE-BASED at the door (`0` or
+`> MAX_WORKSPACES` is `E_INVAL`); switching to the active workspace is
+idempotent, not an error; and a SKIPPED number or an exhausted pane table is
+the TREE's refusal, returned as `E_INVAL` rather than a silent success that
+would leave the caller believing it had switched. Syntax first, then authority
+-- this file's convention, and the inverse of `ctl`'s.
 
 **The witness is tile PRESENCE, not a pixel.** The `layout` per-pane rows are
 the active root's, so a live tile must LEAVE those rows while another
-workspace is up and come back when its own returns -- `find_pane(&layout,
-a.id)` reads exactly that. The battery leg asserts the header
-`workspaces N active K` at each step (`1 1` -> `2 2` -> `1 1`), that the
-dormant tile is absent from the rows in between, that `workspace 9` is
-REFUSED while workspace 2 is up (the skip), and that the empty workspace 2
-VANISHES on the return -- the header reading `1 1` rather than `1 2` is what
-proves the vanish happened.
+workspace is up and come back when its own returns. The battery asserts the
+header at each step (`1 1` -> `2 2` -> `1 1`), the dormant tile's absence in
+between, the refusal of a skipped number, and the vanish of the empty
+workspace on the return. Gated: `ls-gfx-panes` PASS 48 s, one attempt.
 
-Ground truth: the verb in `usr/tapestryd/src/server.rs`; the leg in
-`usr/tapestry-battery/src/main.rs` (unowned by the vault -- the sweep is
-filed); the two expect arms in `tools/interactive/ls-gfx-panes.exp`, placed
-BEFORE the `tapestry-battery: PASS` block, since expect consumes its arms in
-order and an arm after the PASS could never match.
+**What the E2E CANNOT witness, stated so it is not mistaken for coverage:**
+the authority axis. Refusal needs either a non-session principal or a session
+hosting nothing, and the battery is michael and hosts a tile -- it can
+construct neither. W-1b's "an undeclared client is refused" control was
+DELETED rather than left to pass for the wrong reason.
+
+Ground truth: `layout_cmd`'s `workspace` arm and `actor_may_switch` in
+`usr/tapestryd/src/server.rs`; the leg in `usr/tapestry-battery/src/main.rs`;
+the expect arms in `tools/interactive/ls-gfx-panes.exp`; and `halcyon
+workspace <n>` in `usr/halcyon/src/{lib,main}.rs`, which needed no new channel
+because the tool's own `/srv/tapestry` conn is already `Session(principal)`.

@@ -114,7 +114,8 @@ pub struct StatusBar {
     /// (the fixed slots, the condition, the notice, running, the pane count
     /// -- the count is in the key because `2 PANES` and `4 PANES` are one
     /// width and would share a `clock` slot).
-    said_slots: Option<(halcyond::status::Slots, Condition, Option<(String, bool)>, bool, u32)>,
+    said_slots:
+        Option<(halcyond::status::Slots, Condition, Option<(String, bool)>, bool, u32, (u8, u8))>,
     failed_said: bool,
     /// Whether a mint should be attempted: true at start and after a CLOSE
     /// (the compositor dropped the bar), cleared by each attempt. A FAILED
@@ -333,12 +334,19 @@ impl StatusBar {
                     model.notice.clone(),
                     inst && model.running,
                     if inst { model.pane_count } else { 0 },
+                    // W-3: the workspace pair is part of what the bar SHOWS,
+                    // so it must be part of what decides a re-say. Without it
+                    // a switch that changes nothing else -- which is the
+                    // normal case, since the tiles go dormant rather than
+                    // away -- would repaint silently and no gate could see
+                    // the move.
+                    if inst { (model.workspaces, model.active) } else { (0, 0) },
                 );
                 #[cfg(feature = "test-mode")]
                 if self.said_slots.as_ref() != Some(&key) {
                     self.said_slots = Some(key);
                     say(&format!(
-                    "halcyond: status bar {} painted ws [{} {}] ctx [{} {}] cond [{} {}] clock [{} {}] context \"{}\" condition {:?} clock {:02}:{:02} ctxink [{} {}] exit {} notice \"{}\" running {} panes {}",
+                    "halcyond: status bar {} painted ws [{} {}] ctx [{} {}] cond [{} {}] clock [{} {}] context \"{}\" condition {:?} clock {:02}:{:02} ctxink [{} {}] exit {} notice \"{}\" running {} panes {} workspaces {} active0 {}",
                     surf.id,
                     slots.ws.0, slots.ws.1, slots.ctx.0, slots.ctx.1, slots.cond.0, slots.cond.1,
                     slots.clock.0, slots.clock.1,
@@ -347,7 +355,14 @@ impl StatusBar {
                     slots.ctx_ink.0, slots.ctx_ink.1,
                     model.exit_code.map(|c| format!("{}", c)).unwrap_or_else(|| String::from("-")),
                     model.notice.as_ref().map(|n| n.0.as_str()).unwrap_or(""),
-                    model.running, model.pane_count
+                    model.running, model.pane_count,
+                    // `active0` is the MODEL's field, ZERO-BASED, printed RAW.
+                    // Printing the one-based number the header carries would
+                    // make a missing conversion invisible -- the witness would
+                    // echo the compositor and agree with itself. Note `ws [..]`
+                    // above is the workspaces SLOT's geometry, a different
+                    // thing entirely.
+                    model.workspaces, model.active
                     ));
                 }
                 let _ = slots;

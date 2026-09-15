@@ -38,6 +38,12 @@ pub enum Cmd<'a> {
     /// `halcyon theme lint [<path>]` -- check a theme file (TH-4c). With no
     /// path, the two tiers the session actually resolves.
     ThemeLint { path: Option<&'a str> },
+    /// `halcyon workspace <n>` -- switch to workspace n, creating it when n
+    /// is the next free number (the i3 rule). ONE-BASED, matching the
+    /// `layout` header and the `01`..`09` the rail paints. The verb rides the
+    /// LAYOUT file, which a `Session(principal)` conn already drives, so the
+    /// tool needs no new channel (HALCYON-WORKSPACES 4, W-2b).
+    Workspace { n: u32 },
     /// `halcyon`, `halcyon help`, `--help`, `-h`.
     Help,
 }
@@ -48,6 +54,10 @@ pub enum Cmd<'a> {
 pub enum CmdError {
     /// The first token was not a known subcommand.
     UnknownCommand,
+    /// `workspace` with no number.
+    MissingWorkspace,
+    /// `workspace <n>` where n is not 1..=9.
+    BadWorkspace,
     /// `layout` with no verb, or a verb that is not save/restore/list/delete.
     BadLayoutVerb,
     /// `layout save|restore|delete` with no name operand.
@@ -68,6 +78,17 @@ pub fn parse_cmd<'a>(tokens: &[&'a str]) -> Result<Cmd<'a>, CmdError> {
     match tokens.first().copied() {
         None | Some("help") | Some("--help") | Some("-h") => Ok(Cmd::Help),
         Some("layout") => parse_layout(&tokens[1..]),
+        Some("workspace") => match tokens.get(1) {
+            None => Err(CmdError::MissingWorkspace),
+            Some(_) if tokens.len() > 2 => Err(CmdError::ExtraOperand),
+            // Bounded HERE as well as in the compositor: the tool should say
+            // what is wrong rather than forward a number the tree will refuse
+            // with an errno the user never sees.
+            Some(t) => match t.parse::<u32>() {
+                Ok(n) if (1..=9).contains(&n) => Ok(Cmd::Workspace { n }),
+                _ => Err(CmdError::BadWorkspace),
+            },
+        },
         Some("theme") => parse_theme(&tokens[1..]),
         Some("welcome") => {
             if tokens.len() > 1 {
@@ -77,6 +98,44 @@ pub fn parse_cmd<'a>(tokens: &[&'a str]) -> Result<Cmd<'a>, CmdError> {
             }
         }
         Some(_) => Err(CmdError::UnknownCommand),
+    }
+}
+
+#[cfg(test)]
+mod workspace_parse_tests {
+    use super::*;
+
+    #[test]
+    fn a_number_parses_one_based() {
+        assert_eq!(parse_cmd(&["workspace", "1"]), Ok(Cmd::Workspace { n: 1 }));
+        assert_eq!(parse_cmd(&["workspace", "9"]), Ok(Cmd::Workspace { n: 9 }));
+    }
+
+    #[test]
+    fn the_bound_is_the_compositors_and_is_checked_here_too() {
+        assert_eq!(parse_cmd(&["workspace", "0"]), Err(CmdError::BadWorkspace));
+        assert_eq!(parse_cmd(&["workspace", "10"]), Err(CmdError::BadWorkspace));
+    }
+
+    #[test]
+    fn a_non_number_is_refused_rather_than_forwarded() {
+        assert_eq!(parse_cmd(&["workspace", "next"]), Err(CmdError::BadWorkspace));
+        assert_eq!(parse_cmd(&["workspace", "-1"]), Err(CmdError::BadWorkspace));
+    }
+
+    #[test]
+    fn missing_and_extra_operands_are_distinct_errors() {
+        assert_eq!(parse_cmd(&["workspace"]), Err(CmdError::MissingWorkspace));
+        assert_eq!(parse_cmd(&["workspace", "2", "3"]), Err(CmdError::ExtraOperand));
+    }
+
+    /// THE CONTROL: `workspace` must not be swallowed by the layout parser or
+    /// the unknown-command arm. Without its own arm in `parse_cmd` this is
+    /// `UnknownCommand`, and the CLI would report the wrong thing while every
+    /// other test above still passed.
+    #[test]
+    fn workspace_is_its_own_subcommand() {
+        assert_ne!(parse_cmd(&["workspace", "2"]), Err(CmdError::UnknownCommand));
     }
 }
 

@@ -616,5 +616,46 @@ parser's) and the guest build is clean, but no runtime witness reads the bar
 yet -- that is W-3's `ls-gfx-session` leg (Super+2 creates, the bar reads 2/2,
 Super+1 returns, the bar reads 2/1). Compiling is not verifying.
 
+## A workspace switch tore down the session (2026-09-15, W-3)
+
+Found by reading while building W-3's gate leg, then measured end to end
+before the fix: on `Super+2` the compositor logged `workspace switch -> 2 of
+2` and halcyond logged `session logout (code 0)`. A workspace switch
+destroyed the user's whole session.
+
+**The mechanism is one wrong oracle.** `session::reconcile` builds its tile
+plan from `parse_leaves_all(&layout)`, and `plan_tiles` computes `drop = have
+- leaves`. Since HALCYON-WORKSPACES W-1a the `layout` file's per-pane rows are
+**the ACTIVE root's only**, so after a switch every existing tile is absent
+from them: `plan.drop` takes all of them, each gets `teardown()`, and the loop
+then breaks on `tiles.is_empty()`. Absence from the rows means "not on
+screen"; halcyond read it as "gone".
+
+**The right oracle already existed, and W-1a had said so in writing.**
+`live_ids` -- and therefore the `pane/` 9P directory, whose readdir
+enumerates it -- is global ON PURPOSE: *"those are resource and addressability
+facts, while the `layout` dump is the active root's; do not later reconcile
+the two."* halcyond was the consumer that reconciled them by accident. The fix
+probes `pane/<id>/geometry` per drop candidate: a dormant tile still walks, a
+closed one does not.
+
+**Why the inference was corrected rather than deleted.** `TEV_CLOSE` is
+already handled (`session.rs`, the `reap` push) and is the authoritative
+signal, so the drop arm is a second, weaker witness for one fact -- normally a
+thing to remove. But I could not establish that every path by which a leaf
+leaves the tree emits `send_close`, and an unproven claim is not a licence to
+drop leak protection. `plan_tiles` keeps its pure contract and its host tests;
+its `drop` is now documented as CANDIDATES, and the caller confirms.
+
+**The bar's witness, same chunk.** `statusset`'s painted say carries the two
+workspace numbers, and -- the part that matters -- they were added to the
+`key` tuple that decides whether the line is re-emitted. Without that a switch
+changing nothing else would repaint silently and no gate could observe the
+move. They print RAW: `workspaces N active0 K`, where `active0` is the model's
+ZERO-BASED field. Printing the one-based number the header carries would have
+made a missing conversion invisible -- the witness would echo the compositor
+and agree with itself. (`ws [..]` earlier in the same line is the workspace
+SLOT's geometry, an unrelated field that happens to share three letters.)
+
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

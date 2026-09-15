@@ -121,6 +121,11 @@ usage: halcyon layout save <name>
   resolves (/lib/halcyon/theme.toml, then $HOME/lib/halcyon/theme.toml) and
   says which is active. Exits non-zero if a file is present and refused.
 
+  halcyon workspace <n>
+  Switch the display to workspace n, creating it when n is the next free
+  number. One-based, as the bar and the rail show them. Usable from
+  $HOME/lib/halcyon.rc to fill several workspaces at session start.
+
   halcyon --help
 ";
 
@@ -150,6 +155,7 @@ fn run() -> i64 {
         Ok(Cmd::LayoutRestore { name }) => layout_restore(name),
         Ok(Cmd::LayoutList) => layout_list(),
         Ok(Cmd::LayoutDelete { name }) => layout_delete(name),
+        Ok(Cmd::Workspace { n }) => workspace(n),
         Ok(Cmd::Welcome) => welcome(),
         Ok(Cmd::ThemeLint { path }) => theme_lint(path),
         Err(e) => {
@@ -159,9 +165,28 @@ fn run() -> i64 {
     }
 }
 
+/// `halcyon workspace <n>`: switch the display to workspace n, creating it
+/// when n is the next free number (the i3 rule). The verb rides the LAYOUT
+/// file, which a `Session(principal)` conn already drives -- which is why the
+/// tool needs no service of its own (HALCYON-WORKSPACES 4, W-2b).
+fn workspace(n: u32) -> i64 {
+    let Some(tap) = Tap::open() else {
+        eprintln!("halcyon: no compositor at /srv/tapestry");
+        return 1;
+    };
+    let rc = tap.verb(&format!("workspace {}", n));
+    if rc < 0 {
+        eprintln!("halcyon: workspace {}: refused (rc {})", n, rc);
+        return 1;
+    }
+    0
+}
+
 fn report_cmd_error(e: CmdError) {
     match e {
         CmdError::UnknownCommand => eprintln!("halcyon: unknown command (try `halcyon --help`)"),
+        CmdError::MissingWorkspace => eprintln!("halcyon: workspace: missing <n>"),
+        CmdError::BadWorkspace => eprintln!("halcyon: workspace: <n> must be 1..9"),
         CmdError::BadLayoutVerb => eprintln!("halcyon: layout: expected `save` or `restore`"),
         CmdError::MissingName => eprintln!("halcyon: layout: missing <name>"),
         CmdError::ExtraOperand => eprintln!("halcyon: layout: too many operands"),
