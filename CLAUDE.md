@@ -58,7 +58,7 @@ These documents are binding. Implementation deviations either update scripture f
 | `docs/ARCHITECTURE.md` | How we're building it. Foundational decisions with rationale. 20 enumerated invariants. Audit-trigger surface table. |
 | `docs/ROADMAP.md` | In what order. 8 phases with deliverables, exit criteria, risks, dependencies. Risk register. |
 | `docs/TOOLING.md` | Development tooling and agentic loop. QEMU + 9P host share + agent protocol. |
-| the vault (`../thylacine-vault/vault/`) + `docs/reference/NN-*.md` (LEGACY) | As-built technical reference. Per-subsystem; deep; binding. **Being retired into the vault (2026-09-06): `docs/reference` is frozen; new prose goes to a dossier.** See "Reference documentation discipline" Part A. |
+| the vault (`vault/`, in-tree on `main`) + `docs/reference/NN-*.md` (LEGACY) | As-built technical reference. Per-subsystem; deep; binding. **Being retired into the vault (2026-09-06): `docs/reference` is frozen; new prose goes to a dossier.** The vault lives in-tree on `main`, so you edit it in your own worktree. See "Reference documentation discipline" Part A. |
 | `docs/USER-MANUAL.md` + `docs/manual/NN-*.md` | User-facing reference. Per-topic; deep; binding. Updated per user-visible change. |
 | `docs/AUDIT-TRIGGERS.md` | The full audit-trigger surface table (moved verbatim from this file 2026-08-05). One row per audit-bearing surface: files + invariants + the per-chunk prosecution addenda. Cumulative; binding. |
 | `docs/ERRORS.md` | Error-code system. Errno registry (Thylacine-wide, POSIX-aligned values), `snare:*` fault-note family (thematic; replaces EL0-unhandled-fault extinction with per-Proc termination), exit-status semantics, boundary-line translation policy. ABI-bearing; updates require user signoff. |
@@ -810,7 +810,7 @@ same as a missing status row: the work is not finished without it.
 
 **Two parallel references, both maintained continuously, both binding for every PR**:
 
-### A. Technical reference — the vault (`../thylacine-vault/vault/`), absorbing `docs/reference/NN-*.md`
+### A. Technical reference — the vault (`vault/`, in-tree on `main`), absorbing `docs/reference/NN-*.md`
 
 **RETIREMENT IN PROGRESS (operator-ratified 2026-09-06).** The technical reference is moving into **the vault**: the registrar-linted, code-verified graph of per-surface dossiers under `vault/system/`. `docs/reference/` is now the **legacy** tree — frozen (no new content) and being absorbed subsystem-by-subsystem into redirect stubs (see `docs/reference/18-territory.md` for the shape: an `[ABSORBED INTO THE VAULT]` pointer to the owning dossier, plus what the old file got wrong by the time it was absorbed). New technical-reference prose goes to a **dossier**, never a new `docs/reference` section (the routing is enforced by step 0 below). ~32 of 157 files were absorbed as of the flip; the rest carry full parallel content until the sweep reaches them.
 
@@ -861,21 +861,27 @@ Like the technical reference, the user manual is **detailed and deep**. The bar:
 
 When a chunk lands (bug fix, refactor, new module, new feature), the author updates **both references** in the same PR:
 
-0. **Check the vault first.** Before writing or extending a `docs/reference/NN-*.md` section, run:
+0. **Check the vault first.** Before documenting a changed surface, run quaestor
+   **from your own worktree** — `main` carries the code, the whole vault under
+   `vault/`, AND quaestor's own source, so your worktree already has everything
+   current. There is no separate vault checkout to `cd` into and no vault session
+   to route through:
 
    ```bash
-   cd ~/projects/thylacine-vault && vault/meta/quaestor/quaestor owner <changed paths>
+   go -C vault/meta/quaestor run . owner <changed paths> --root "$(pwd)"
    ```
 
-   **Since 2026-09-06 (operator-ratified) the answer is ALWAYS the vault** — `docs/reference` is frozen and being retired (Part A). **Exit 0** — the vault carries that surface: update the owning dossier **yourself** (you own the surfaces your chunk touches; the vault agent is retired). **Exit 1** — no dossier yet: a **new dossier** is owed for the surface — **author it yourself, taking ownership**, never a new `docs/reference` section. **With several paths the answer is usually MIXED and the exit status reports only half of it** — read the summary line, which names both sets; a dossier is owed for each either way (update for the covered, create for the uncovered).
+   **Since 2026-09-06 (operator-ratified) the technical reference IS the vault** — `docs/reference` is frozen legacy (Part A). **Exit 0** — the vault carries that surface: update the owning dossier **yourself, in this worktree, co-staged with the code**. **Exit 1** — no dossier yet: a **new dossier** is owed — **author it yourself** under `vault/system/`, never a new `docs/reference` section. **With several paths the answer is usually MIXED and the exit status reports only half of it** — read the summary line, which names both sets; a dossier is owed for each either way (update for the covered, create for the uncovered).
+
+   **The vault agent is RETIRED (2026-09-15, operator-ratified): every track owns and updates the dossiers it touches, in its own worktree.** There is no "ring vault" delegation any more — the mediator model let the separate `vault/bootstrap` checkout rot 150+ commits behind `main`, so quaestor there could not see the very files a track had just changed, and tracks read that as "not mine to do." Because the vault is in-tree, you edit the dossier in the same worktree and the same commit as the code; the render + lint below run locally.
 
    Read any `ALSO named by` line in the output. A note that merely **pins** a file (an `abi-*` registry pins VALUES or STRINGS) cannot hold a description of a mechanism — so the reference section is still owed, AND that note may need the same change.
 
    This step exists because the alternative is a protocol whose first move is remembering to tell someone. It rides the doc-update step precisely so it cannot be skipped separately from it.
 
-   **Since 2026-09-06 this is enforced mechanically, not only by convention** (operator-ratified). A `commit-msg` hook runs `quaestor dossier-gate`: staging code owned by an `audit: hard` dossier **blocks** the commit unless that dossier is co-staged OR the message carries a `No-dossier-change: <why>` trailer (non-empty reason required); any other owned surface **warns**. So the reminder to update — or consciously defer — a dossier fires the moment the code lands, on every track sharing the hook. The dossiers live in a SEPARATE repo, so a main-repo code commit cannot literally co-stage vault prose: it carries the trailer, and the `<why>` names the same-chunk vault-repo dossier update the touching agent now owns (the vault agent is retired -- Part A), e.g. `No-dossier-change: sub-kernel-irqfwd updated in the vault repo`. Details + the fail-open/commit-msg-placement rationale: `vault/meta/schema.md` section 8 (check 9). `--no-verify` skips it and is the sanctioned emergency bypass.
+   **Since 2026-09-06 this is enforced mechanically, not only by convention** (operator-ratified). A `commit-msg` hook runs `quaestor dossier-gate`: staging code owned by an `audit: hard` dossier **blocks** the commit unless that dossier is co-staged OR the message carries a `No-dossier-change: <why>` trailer (non-empty reason required); any other owned surface **warns**. So the reminder to update — or consciously defer — a dossier fires the moment the code lands, on every track sharing the hook. A track **co-stages the owning dossier itself**, in its own worktree; the pre-commit `quaestor lint --staged` runs in every worktree too, so a broken or incomplete dossier (dangling link, missing section, absent `code:` path) blocks the commit wherever you author it. The `No-dossier-change:` trailer is the escape for a fold that genuinely belongs to a later chunk — not a way to hand the dossier off, which is what the retired "ring vault" delegation used to mean. Details + the fail-open/commit-msg-placement rationale: `vault/meta/schema.md` section 8 (check 9). `--no-verify` skips it and is the sanctioned emergency bypass.
 
-1. **Technical reference (the vault)**: extend or create the owning dossier under `vault/system/` — **you update or create it yourself** (you own the surfaces your chunk touches; take ownership if it is unowned), per step 0. New module → new dossier. Bug fix that touches a documented invariant → update the dossier after the spec. New term / acronym → a vault glossary note. **`docs/reference` is frozen legacy — never add to it or create a new `NN-*.md`;** it is being absorbed into redirect stubs subsystem-by-subsystem (Part A).
+1. **Technical reference (the vault)**: extend or create the owning dossier under `vault/system/` **in your own worktree, co-staged with the code**, per step 0. New module → new dossier. Bug fix that touches a documented invariant → update the dossier after the spec. New term / acronym → a vault glossary note. **`docs/reference` is frozen legacy — never add to it or create a new `NN-*.md`;** it is being absorbed into redirect stubs subsystem-by-subsystem (Part A).
 2. **User reference**: extend or update the relevant `docs/manual/NN-*.md` section if the change is user-visible (new syscall, new admin command, new error case, behavior change). Internal refactors typically don't touch the user manual; user-visible changes always do.
 3. **Snapshot block** in `docs/REFERENCE.md` — refresh figures (test count, spec count, tip hash) on every chunk that changes them. Refresh the user-facing snapshot in `docs/USER-MANUAL.md` at the same cadence.
 
