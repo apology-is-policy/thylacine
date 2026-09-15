@@ -14,7 +14,7 @@ hazards: []
 abis: []
 design: ["docs/HALCYON.md section 13.2", "docs/TAPESTRY.md section 14"]
 created: 2026-09-05
-updated: 2026-09-05
+updated: 2026-09-15
 ---
 ## Purpose
 
@@ -55,6 +55,27 @@ property the whole "dumb executor" premise rests on: the author is trusted to
 be correct, but the executor is written so that even a wrong list is only
 wrong-looking, never out-of-bounds.
 
+**A glow's radius is clamped in the EXECUTOR, not merely where the op is
+built.** `Op::Glow` paints `color` at `alpha` under the rect's coverage run
+through a separable box blur, and the paint reaches `radius` pixels past the
+rect on every side -- so the radius is a *work* bound, not a cosmetic knob,
+and `GLOW_RADIUS_MAX` (32) is applied on the READ side, where a list the
+executor did not author arrives. It clamps DOWN rather than skipping, which
+matches the executor's geometric discipline everywhere else: an oversize
+`Rect` is clipped, not dropped. The 32 is section 10's 16-at-100 % doubled,
+because the display scale tops out at 200 % (`libhalcyon::scale`); cartoon
+carries zero dependencies, so that derivation is written out here instead of
+imported, and the test asserts the 32 absolutely -- a bound asserted in terms
+of its own constant moves when the constant does.
+
+**The blurred coverage needs no mask buffer.** A rect's indicator function is
+separable and so is a box blur, so the coverage at a pixel is exactly the
+product of a horizontal and a vertical 1-D window overlap: two O(1) counts
+per pixel, exact rather than approximate, no allocation. One consequence is
+worth stating because it reads as a shortfall and is not: a rect smaller than
+`2*radius+1` on an axis never reaches full coverage anywhere, since no pixel
+ever sees a full window.
+
 **The atlas generation makes a stale page reference impossible by
 construction** (the 13.2 stale rule). A `Glyphs` op carries the `atlas_gen` it
 was authored against; the executor paints it only when that equals the store's
@@ -85,8 +106,8 @@ precisely where the short-circuits did not reach.
 
 ## Data structures
 
-`Op` is the drawing op (Clear / Rect / Glyphs / Image / Embed) with
-surface-local signed coordinates. `GlyphRef` is one glyph's atlas index +
+`Op` is the drawing op (Clear / Rect / RectAlpha / Glyphs / Image / Embed /
+Glow) with surface-local signed coordinates. `GlyphRef` is one glyph's atlas index +
 advance. `Cartoon` is `ops` + the flat `runs` pool -- flat because it keeps
 the in-process form allocation-light and is already the shape the H-6 wire
 form serializes. `AtlasPage` is a w-tight 8-bit alpha page; `GlyphEntry` is a
@@ -110,6 +131,9 @@ handle. Its own load-bearing rules:
   clamp is the executor's whole safety story.
 - **A glyph op paints only against the atlas generation it was authored for**,
   so a repacked page can never be misread.
+- **A glow's blur radius is bounded at the executor** (`GLOW_RADIUS_MAX`),
+  because the spread past the rect is work that the list -- not the executor
+  -- chooses.
 - **The executor stays knowledge-free** (no shaping, no measuring, no diff);
   the moment it needs to *decide* something, the division of knowledge has
   been violated and the vk executor could not mirror it.
@@ -143,6 +167,10 @@ executor honours it but does not compute it.
   desyncs the rest of the run's positions.
 - **The blend must stay the shift form.** A divide over the packed word
   reintroduces the [[sub-aurora]] edge-colour corruption.
+- **The glow radius must be clamped where the list is READ.** Bounding it only
+  at the author leaves the executor honouring whatever the next author -- or
+  the H-6 wire -- hands it. A bound that does not hold on the read side is not
+  a bound.
 - **The executor must not grow knowledge.** Any text measurement, damage
   computation, or theme decision belongs in the author; adding it here breaks
   the CPU/vk equivalence the op set is shaped for.
@@ -152,7 +180,11 @@ executor honours it but does not compute it.
 - `Embed` is a v0 no-op (flow-space reservation only); actual inline-surface
   placement is the compositor's (TAPESTRY 14).
 - The vk executor (H-6) is unbuilt; the wire encoding (little-endian,
-  length-prefixed, carrying `CARTOON_V0`) is designed for but not yet emitted.
+  length-prefixed, carrying `CARTOON_V0`) is designed for but not yet emitted
+  -- which is why `CARTOON_V0` stays 0 while the op set grows. A version
+  discriminates serialized streams, and there are none to tell apart: no v0
+  stream can exist that predates a variant. The first encoder to ship freezes
+  the number; growth after that bumps it.
 - Sub-pixel positioning is not modelled -- glyph advances and blit origins are
   integer pixels.
 

@@ -31,7 +31,25 @@ use alloc::vec::Vec;
 
 /// The op-set version. In-process consumers ignore it; the H-6 wire
 /// encoding (little-endian, length-prefixed) carries it per list.
+///
+/// It stays 0 while the op set grows, and that is not an oversight: a
+/// version discriminates SERIALIZED streams, and no encoder exists yet
+/// (there is no `encode`/`decode` in the tree; every consumer is an
+/// in-process painter). So no v0 stream can exist that predates a variant,
+/// and there is nothing for a bump to tell apart. The first encoder to ship
+/// freezes this number; growth after that bumps it.
 pub const CARTOON_V0: u32 = 0;
+
+/// The `Op::Glow` blur radius cap, in surface pixels — the executor's hard
+/// bound, applied on the READ side (see `Op::Glow`).
+///
+/// Section 10 of HALCYON-INSTRUMENT bounds the radius at 16 "at 100 %,
+/// scaled", and the display scale tops out at 200 % (`libhalcyon::scale`'s
+/// `SCALE_MAX`), so an author scaling the limit lands at 32. cartoon carries
+/// zero dependencies, so that derivation lives here as a number rather than
+/// as an import; the test asserts the 32 ABSOLUTELY, because a bound
+/// asserted in terms of its own constant moves when the constant does.
+pub const GLOW_RADIUS_MAX: u32 = 32;
 
 /// One drawing op. Coordinates are surface-local pixels, signed because
 /// scrolled content legitimately starts above/left of the viewport; every
@@ -41,6 +59,28 @@ pub enum Op {
     Clear { color: u32 },
     /// Filled rectangle: fills, rules, selection bands, strip segments.
     Rect { x: i32, y: i32, w: u32, h: u32, color: u32 },
+    /// Translucent fill: `color` over the destination at `alpha` coverage,
+    /// through the same sRGB `blend` the glyph blit uses. Clipped and
+    /// bounded exactly like `Rect`; `alpha` 255 is `Rect` and 0 paints
+    /// nothing. The §7.3 overlays over client bodies and the flat effects
+    /// of §10.
+    RectAlpha { x: i32, y: i32, w: u32, h: u32, color: u32, alpha: u8 },
+    /// A soft glow: `color` at `alpha`, masked by the rect's coverage run
+    /// through a separable box blur of `radius` (§10's shadows and glows).
+    ///
+    /// The mask is the rect's indicator function, which is itself separable,
+    /// so the blurred coverage is exactly the product of a horizontal and a
+    /// vertical 1-D box blur — no mask buffer is allocated and the result is
+    /// exact rather than approximate. Paint reaches `radius` pixels beyond
+    /// the rect on every side, and that spread is the work bound: `radius`
+    /// is clamped to `GLOW_RADIUS_MAX` HERE, in the executor, not merely
+    /// where the op is built, because an executor consumes a display list it
+    /// did not author.
+    ///
+    /// The radius is a BOX-blur radius, not a CSS `blur()` length: an author
+    /// mapping §10's literal blur values (10, 55, 80) picks the radius, and
+    /// the cap genuinely truncates the two large shadows.
+    Glow { x: i32, y: i32, w: u32, h: u32, color: u32, alpha: u8, radius: u32 },
     /// A resolved glyph run: `runs[start .. start+count]` blit left to
     /// right from `(baseline_x, baseline_y)`, each entry advancing the pen
     /// AFTER its blit. `color` is the text color; pages carry alpha only.
@@ -359,6 +399,74 @@ impl Exec<'_> {
         }
     }
 
+    /// Fill an already-clipped rect with `color` at `alpha` coverage.
+    #[inline]
+    fn fill_alpha(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, color: u32, alpha: u8) {
+        if x0 >= x1 || y0 >= y1 || alpha == 0 {
+            return;
+        }
+        for y in y0..y1 {
+            let row = y as usize * self.w;
+            for p in self.px[row + x0 as usize..row + x1 as usize].iter_mut() {
+                *p = blend(*p, color, alpha);
+            }
+        }
+    }
+
+    /// Paint `color` at `alpha` under the box-blurred coverage of the rect
+    /// `(rx, ry, rw, rh)`, spread by `radius` (clamped to `GLOW_RADIUS_MAX`
+    /// here -- the executor is handed a list it did not author).
+    ///
+    /// The rect's mask is separable, and so is a box blur, so the blurred
+    /// coverage at a pixel is exactly the product of the two 1-D window
+    /// overlaps: no mask buffer, no approximation, two O(1) counts per
+    /// pixel. Rect bounds are taken in i64 because `rw`/`rh` are u32 and an
+    /// author may hand over anything.
+    fn glow(&mut self, rx: i32, ry: i32, rw: u32, rh: u32, color: u32, alpha: u8, radius: u32) {
+        if alpha == 0 || rw == 0 || rh == 0 {
+            return;
+        }
+        let r = radius.min(GLOW_RADIUS_MAX);
+        let (gx, gy) = (rx.saturating_sub(r as i32), ry.saturating_sub(r as i32));
+        let (gw, gh) = (rw.saturating_add(r * 2), rh.saturating_add(r * 2));
+        let (x0, y0, x1, y1) = self.isect(gx, gy, gw, gh);
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        let (mx0, my0) = (rx as i64, ry as i64);
+        let (mx1, my1) = (mx0 + rw as i64, my0 + rh as i64);
+        let n = 2 * r as i64 + 1;
+        let denom = (n * n) as u64;
+        // Taps of the window [p-r, p+r] landing inside [lo, hi); <= n.
+        let cov = |p: i32, lo: i64, hi: i64| -> u32 {
+            let a = (p as i64 - r as i64).max(lo);
+            let b = (p as i64 + r as i64).min(hi - 1);
+            if b < a { 0 } else { (b - a + 1) as u32 }
+        };
+        for y in y0..y1 {
+            let vcov = cov(y, my0, my1);
+            if vcov == 0 {
+                continue;
+            }
+            let row = y as usize * self.w;
+            for x in x0..x1 {
+                let hcov = cov(x, mx0, mx1);
+                if hcov == 0 {
+                    continue;
+                }
+                // u64 so the arithmetic is sound INDEPENDENTLY of the
+                // clamp: in u32 this overflows once n passes ~4100
+                // (255*n*n), which would quietly make the radius bound
+                // carry a second, unrelated obligation. Two guards, one
+                // job each. The quotient is <= 255*n*n/n^2 == 255, so the
+                // u8 is exact.
+                let a = (alpha as u64 * hcov as u64 * vcov as u64) / denom;
+                let d = &mut self.px[row + x as usize];
+                *d = blend(*d, color, a as u8);
+            }
+        }
+    }
+
     /// Blit one glyph's alpha rect at (dx, dy), blending `color` over dst.
     #[inline]
     fn blit_alpha(&mut self, page: &AtlasPage, ge: &GlyphEntry, dx: i32, dy: i32, color: u32) {
@@ -414,6 +522,13 @@ pub fn execute(
             Op::Rect { x, y, w: rw, h: rh, color } => {
                 let (x0, y0, x1, y1) = ex.isect(x, y, rw, rh);
                 ex.fill(x0, y0, x1, y1, color);
+            }
+            Op::RectAlpha { x, y, w: rw, h: rh, color, alpha } => {
+                let (x0, y0, x1, y1) = ex.isect(x, y, rw, rh);
+                ex.fill_alpha(x0, y0, x1, y1, color, alpha);
+            }
+            Op::Glow { x, y, w: rw, h: rh, color, alpha, radius } => {
+                ex.glow(x, y, rw, rh, color, alpha, radius);
             }
             Op::Glyphs { atlas_gen, baseline_x, baseline_y, color, start, count } => {
                 // The 13.2 stale rule: paint only against the store the
@@ -614,6 +729,171 @@ mod tests {
         execute(&c, &AtlasStore { gen: 0, pages: Vec::new(), glyphs: Vec::new() },
                 &BlobStore::new(), &mut px, 2, None);
         assert!(px.iter().all(|&p| p == BG));
+    }
+
+    const BLACK: u32 = 0xFF00_0000;
+    const WHITE: u32 = 0xFFFF_FFFF;
+
+    fn empty_atlas() -> AtlasStore {
+        AtlasStore { gen: 0, pages: Vec::new(), glyphs: Vec::new() }
+    }
+
+    #[test]
+    fn rect_alpha_blends_by_hand_derived_values() {
+        // HAND-DERIVED from the blend formula (na = 256-a, >>8), not
+        // recomputed through the code under test. bg 0xFF102030 under fg
+        // 0xFFFF0000 at a=127 (na=129):
+        //   R: (0xFF*127 + 0x10*129) >> 8 = (32385+2064)>>8 = 134 = 0x86
+        //   G: (0x00*127 + 0x20*129) >> 8 =          4128>>8 =  16 = 0x10
+        //   B: (0x00*127 + 0x30*129) >> 8 =          6192>>8 =  24 = 0x18
+        let mut px = surface(2, 1);
+        let mut c = Cartoon::new();
+        c.ops.push(Op::RectAlpha { x: 0, y: 0, w: 1, h: 1, color: RED, alpha: 127 });
+        execute(&c, &empty_atlas(), &BlobStore::new(), &mut px, 2, None);
+        assert_eq!(px[0], 0xFF86_1018, "a=127 hand-derived");
+        assert_eq!(px[1], BG, "outside the rect");
+    }
+
+    #[test]
+    fn rect_alpha_at_the_extremes_is_a_fill_or_nothing() {
+        let mut px = surface(2, 1);
+        let mut c = Cartoon::new();
+        c.ops.push(Op::RectAlpha { x: 0, y: 0, w: 1, h: 1, color: RED, alpha: 255 });
+        c.ops.push(Op::RectAlpha { x: 1, y: 0, w: 1, h: 1, color: RED, alpha: 0 });
+        execute(&c, &empty_atlas(), &BlobStore::new(), &mut px, 2, None);
+        assert_eq!(px[0], RED, "a=255 is an opaque fill");
+        assert_eq!(px[1], BG, "a=0 paints nothing");
+    }
+
+    #[test]
+    fn rect_alpha_clips_at_every_edge() {
+        // Opaque, so the clip is the only thing under test (the twin of
+        // `rect_clips_at_every_edge`).
+        let mut px = surface(4, 4);
+        let mut c = Cartoon::new();
+        c.ops.push(Op::RectAlpha { x: -2, y: -2, w: 4, h: 4, color: RED, alpha: 255 });
+        c.ops.push(Op::RectAlpha { x: 0, y: 10, w: 2, h: 2, color: RED, alpha: 255 });
+        execute(&c, &empty_atlas(), &BlobStore::new(), &mut px, 4, None);
+        for y in 0..4usize {
+            for x in 0..4usize {
+                let want = if x < 2 && y < 2 { RED } else { BG };
+                assert_eq!(px[y * 4 + x], want, "({},{})", x, y);
+            }
+        }
+    }
+
+    #[test]
+    fn glow_coverage_is_the_product_of_two_box_blurs() {
+        // A 2x2 rect at (2,2), radius 1: n=3 taps per axis, denom 9.
+        // Horizontal coverage by column is 1,2,2,1 across x=1..=4 and zero
+        // elsewhere; vertical the same. Effective alpha is 255*hcov*vcov/9,
+        // and WHITE over BLACK makes every channel (255*a)>>8 -- so the
+        // expected pixels are HAND-DERIVED end to end:
+        //   (2,2): a = 255*2*2/9 = 113 -> (255*113)>>8 = 112 = 0x70
+        //   (1,2): a = 255*1*2/9 =  56 -> (255*56 )>>8 =  55 = 0x37
+        //   (1,1): a = 255*1*1/9 =  28 -> (255*28 )>>8 =  27 = 0x1B
+        let mut px = vec![BLACK; 6 * 6];
+        let mut c = Cartoon::new();
+        c.ops.push(Op::Glow { x: 2, y: 2, w: 2, h: 2, color: WHITE, alpha: 255, radius: 1 });
+        execute(&c, &empty_atlas(), &BlobStore::new(), &mut px, 6, None);
+        assert_eq!(px[2 * 6 + 2], 0xFF70_7070, "the interior");
+        assert_eq!(px[2 * 6 + 1], 0xFF37_3737, "one column outside");
+        assert_eq!(px[1 * 6 + 1], 0xFF1B_1B1B, "the diagonal corner");
+        assert_eq!(px[0], BLACK, "past the spread");
+        assert_eq!(px[5 * 6 + 5], BLACK, "past the spread");
+    }
+
+    #[test]
+    fn a_zero_radius_glow_is_a_flat_alpha_fill() {
+        // n=1, denom=1: coverage is 1 inside the rect and 0 outside, so the
+        // op must be pixel-identical to the RectAlpha of the same rect.
+        let mut a = surface(5, 5);
+        let mut b = surface(5, 5);
+        let mut cg = Cartoon::new();
+        cg.ops.push(Op::Glow { x: 1, y: 1, w: 2, h: 3, color: RED, alpha: 96, radius: 0 });
+        let mut cr = Cartoon::new();
+        cr.ops.push(Op::RectAlpha { x: 1, y: 1, w: 2, h: 3, color: RED, alpha: 96 });
+        execute(&cg, &empty_atlas(), &BlobStore::new(), &mut a, 5, None);
+        execute(&cr, &empty_atlas(), &BlobStore::new(), &mut b, 5, None);
+        assert_ne!(a[1 * 5 + 1], BG, "the control must actually paint");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn the_glow_radius_cap_is_thirty_two() {
+        // ABSOLUTE, deliberately: every assertion below is written against
+        // the cap, so a bound stated only in terms of GLOW_RADIUS_MAX would
+        // move with it and witness nothing. 16 at 100 %, doubled because the
+        // display scale tops out at 200 %.
+        assert_eq!(GLOW_RADIUS_MAX, 32);
+    }
+
+    #[test]
+    fn an_oversize_glow_radius_is_clamped_to_the_cap() {
+        // The bound holds on the READ side: a list asking for radius 4000
+        // paints EXACTLY what 32 paints and reaches no further. The rect
+        // starts at x=40, so the cap puts the spread's first painted column
+        // at x=8 -- and x=7 must stay untouched. Both halves matter: the
+        // equality alone is satisfied by two renders that painted nothing.
+        let mk = |radius: u32| {
+            let mut px = vec![BLACK; 120 * 120];
+            let mut c = Cartoon::new();
+            c.ops.push(Op::Glow { x: 40, y: 40, w: 40, h: 40, color: WHITE, alpha: 255, radius });
+            execute(&c, &empty_atlas(), &BlobStore::new(), &mut px, 120, None);
+            px
+        };
+        let capped = mk(32);
+        let asked = mk(4000);
+        // The centre is NOT fully covered, and that is correct box-blur
+        // behaviour rather than a shortfall: the window is 2r+1 = 65 wide
+        // while the rect is 40, so no pixel ever sees 65 taps. At (60,60)
+        // the window [28,92] meets [40,80) in 40 taps on each axis, so
+        // a = 255*40*40/4225 = 96 and the channel is (255*96)>>8 = 95.
+        assert_eq!(capped[60 * 120 + 60], 0xFF5F_5F5F, "the centre, hand-derived");
+        assert_eq!(capped[60 * 120 + 7], BLACK, "one column short of the cap's reach");
+        assert_ne!(capped[60 * 120 + 8], BLACK, "the cap's reach is painted");
+        assert_eq!(asked, capped, "an oversize radius is the cap, not the ask");
+    }
+
+    #[test]
+    fn glow_is_bounded_by_the_caller_clip() {
+        let mut px = vec![BLACK; 8 * 8];
+        let mut c = Cartoon::new();
+        c.ops.push(Op::Glow { x: 3, y: 3, w: 2, h: 2, color: WHITE, alpha: 255, radius: 3 });
+        execute(&c, &empty_atlas(), &BlobStore::new(), &mut px, 8,
+                Some(ClipRect { x0: 3, y0: 3, x1: 5, y1: 5 }));
+        for y in 0..8usize {
+            for x in 0..8usize {
+                let inside = (3..5).contains(&x) && (3..5).contains(&y);
+                if inside {
+                    assert_ne!(px[y * 8 + x], BLACK, "({},{}) inside the clip", x, y);
+                } else {
+                    assert_eq!(px[y * 8 + x], BLACK, "({},{}) outside the clip", x, y);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn extreme_glow_geometry_cannot_panic() {
+        // The expansion saturates and the overlap counts are i64, so an
+        // author's i32::MIN origin / u32::MAX extent clips instead of
+        // wrapping. A degenerate rect paints nothing at all.
+        let mut px = surface(4, 4);
+        let mut c = Cartoon::new();
+        c.ops.push(Op::Glow { x: i32::MIN, y: i32::MIN, w: u32::MAX, h: u32::MAX,
+                              color: RED, alpha: 255, radius: 32 });
+        c.ops.push(Op::Glow { x: 0, y: 0, w: 0, h: 4, color: RED, alpha: 255, radius: 4 });
+        c.ops.push(Op::Glow { x: 0, y: 0, w: 4, h: 4, color: RED, alpha: 0, radius: 4 });
+        execute(&c, &empty_atlas(), &BlobStore::new(), &mut px, 4, None);
+        assert!(px.iter().all(|&p| p == BG), "nothing painted");
+        // A huge extent anchored inside the surface still paints, clipped.
+        let mut px2 = surface(4, 4);
+        let mut c2 = Cartoon::new();
+        c2.ops.push(Op::Glow { x: 0, y: 0, w: u32::MAX, h: u32::MAX,
+                               color: RED, alpha: 255, radius: 32 });
+        execute(&c2, &empty_atlas(), &BlobStore::new(), &mut px2, 4, None);
+        assert!(px2.iter().all(|&p| p != BG), "the whole surface is covered");
     }
 
     #[test]

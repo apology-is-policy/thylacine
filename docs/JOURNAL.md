@@ -1143,6 +1143,93 @@ leg -- the one `split_fits` actually gates -- green.
 **The HALCYON-WORKSPACES arc now carries no open findings.** Three adversarial
 rounds, every finding fixed, every fix sabotage-measured.
 
+### I-8a: the two effect ops, and a baseline that reported nothing
+
+The effects slice opens. Section 10 carves it into two executor ops, seven
+literal effects, a compositor-side backdrop and a motion layer, and that is
+three separable pieces rather than one chunk, so it splits: **I-8a** the ops
+(this), **I-8b** the effects at their homes, **I-8c** motion. Only I-8a is
+built.
+
+**Both of the survey's open questions were answerable from the tree, and one
+answer was better than the question.** Does the menu's compose path already
+downsample? Partly, and the nuance is the point: `menu_reassert`
+(`server.rs:6015`) hands `compose_cpu` (`server.rs:4785`) a `ComposeOp` whose
+src and dst are the same size, but `compose_cpu` *does* carry a scaling arm --
+when they differ it maps through `libhalcyon::place::nearest_src`, which the
+letterboxed fullscreen path already uses. So nearest-neighbour downsampling
+exists and is proven; what does not exist anywhere is a BLUR. I-8b's backdrop
+therefore needs new compositor work for the blur only. Where does the
+reduced-motion preference come from? Nowhere -- zero hits across `usr/` for
+any spelling of it. Section 10's "reduced-motion honoured (9.5)" points at 9.5
+for what reduced motion MEANS, not for where it lives, so I-8c must introduce
+a channel. The heritage-aligned shape is obvious (`/env/HALCYON_SCALE` at
+`session.rs:134` is the precedent), but the fork is not the channel, it is the
+DEFAULT: 9.5 makes "no transient animation" the production default *until this
+slice*, so I-8 either flips it for everyone or lands inert. That is a user
+decision, and I am on Opus rather than Fable, so under the standing
+operator-away rule I-8c stops and asks rather than choosing.
+
+**The glow needs no mask buffer, and that is a real result rather than an
+optimisation.** A rect's indicator function is separable, and so is a box
+blur, so the blurred coverage at a pixel is exactly the product of a
+horizontal and a vertical 1-D window overlap -- two O(1) counts per pixel,
+exact rather than approximate, zero allocation in a no_std executor. The
+radius is clamped to `GLOW_RADIUS_MAX` = 32 **in the executor**, not at
+construction, because the paint reaches `radius` past the rect on every side:
+the radius is work the AUTHOR picks, and an executor consumes a list it did
+not author. It clamps DOWN rather than skipping, which is the discipline the
+rest of the executor already keeps -- an oversize `Rect` is clipped, never
+dropped. The 32 is section 10's "16 at 100 %, scaled" taken against
+`SCALE_MAX` = 200; cartoon carries zero dependencies, so that derivation is
+written out instead of imported, and the test asserts the 32 absolutely
+because every other assertion is phrased against the cap and would move with
+it. That is round 3's lesson applied before a prosecutor had to teach it again.
+
+**My test was wrong and the code was right -- the first time this arc that
+the correction went that direction.** I asserted a 40x40 rect at radius 32
+would reach full coverage at its centre. It reaches 96/255. At radius 32 the
+window is 65 wide while the rect is 40, so no pixel ever sees a full window:
+hcov at x=60 is 40 taps, a = 255*40*40/4225 = 96, and the channel is
+(255*96)>>8 = 95 -- exactly the 0xFF5F5F5F the failure printed. Correct
+box-blur behaviour that reads as a shortfall, so it is now written into the
+test, the dossier and the trigger row, because the next person to see a soft
+centre will otherwise "fix" it.
+
+**The sabotage BASELINE caught a compile error, which is the whole reason a
+baseline leg exists.** Wanting the clamp to be a work bound and nothing else,
+I moved the coverage product to u64 -- in u32 it overflows once `2r+1` passes
+~4100, which would have left the radius clamp silently responsible for
+arithmetic soundness as well, one guard doing two jobs. The edit did not
+compile: `denom` was still u32 and Rust does not coerce `u64 / u32`. The
+sabotage run then printed **no `test result:` line at all** -- not for either
+sabotage, and not for the baseline I had measured green twenty minutes
+earlier. A baseline that reports nothing is a broken probe, not a pass, and
+the only reason that was legible in one glance is that the script runs the
+baseline as its own labelled leg. Fixed, re-run, and the measurement is
+clean: dropping the executor clamp fails `an_oversize_glow_radius_is_clamped_to_the_cap`
+(1 test, FAILED); moving the constant 32 -> 16 fails
+`the_glow_radius_cap_is_thirty_two` (1 test, FAILED); restored byte-identical,
+md5 `e869ce99`.
+
+**`CARTOON_V0` stays 0, which corrects my own survey.** I had written that
+adding variants bumps it. Reading it says otherwise: a version discriminates
+SERIALIZED streams, there is no encoder in the tree, so no v0 stream can exist
+that predates a variant and a bump would have nothing to tell apart. The first
+encoder to ship freezes the number. That is the fourth claim of mine this arc
+that needed correcting against the code -- after the S4 strand claim, round 2's
+"both sites now fire", and the I-8 wire-format flag I nearly escalated -- and
+the pattern in all four is identical: I believed a document's implication
+instead of reading the source.
+
+**Posture**: cartoon 20 (was 11), halcyond lib 300 (UNCHANGED, correctly --
+I-8a adds no halcyond consumer, which is I-8b's job), guest-clean on
+`aarch64-unknown-none`. No gate ran and none was owed: nothing guest-visible
+changes until an effect is actually painted. The tree's only exhaustive match
+over `Op` is `halcyond/src/tile.rs`'s legacy-equality projection, a test
+helper; every other consumer filters with `_ => None`, so two new variants
+were a one-site change the compiler found.
+
 ## Run 46o (2026-09-14, Fable 5.1 max) -- the Halcyon Instrument arc opens: reading the Carbon Optics kit against the tree
 
 ### What this run was for

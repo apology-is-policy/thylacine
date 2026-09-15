@@ -2316,6 +2316,12 @@ mod tests {
                     }
                     Op::Image { blob_id, x, y, w, h } => (3, blob_id as i64, x as i64, y as i64, w as i64, h as i64, 0),
                     Op::Embed { surface_ref, x, y, w, h } => (4, surface_ref as i64, x as i64, y as i64, w as i64, h as i64, 0),
+                    Op::RectAlpha { x, y, w, h, color, alpha } => (5, x as i64, y as i64, w as i64, h as i64, color as i64, alpha as i64),
+                    // Seven fields into six slots: alpha and radius share
+                    // the last, which is a projection for equality only.
+                    Op::Glow { x, y, w, h, color, alpha, radius } => {
+                        (6, x as i64, y as i64, w as i64, h as i64, color as i64, ((alpha as i64) << 32) | radius as i64)
+                    }
                 })
                 .collect();
             let runs = c.runs.iter().map(|r| (r.glyph, r.advance)).collect();
