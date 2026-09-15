@@ -7874,15 +7874,17 @@ impl Comp {
                 if !self.actor_may_switch(actor) {
                     return Err(p9::E_PERM);
                 }
-                if n - 1 == self.layout.active_workspace() {
+                if n as u8 == self.layout.active_number() {
                     return Ok(()); // already there: idempotent, not an error
                 }
-                // The TREE's refusal: a SKIPPED number (only the next free one
-                // may be made, the i3 rule) or an exhausted pane table (I-32:
-                // creation fails clean). Nothing moved, so the caller gets
+                // The TREE's refusal: an exhausted pane table or the count
+                // bound (I-32: creation fails clean). S4 RETIRED the "only the
+                // next free number" rule -- a number is an IDENTITY now, so
+                // Super+5 makes workspace 5 whether or not 2..4 exist, which
+                // is what i3 actually does. Nothing moved, so the caller gets
                 // E_INVAL rather than a silent success that would leave it
                 // believing it had switched.
-                if !self.layout.switch_workspace(n - 1) {
+                if !self.layout.switch_workspace(n as u8) {
                     return Err(p9::E_INVAL);
                 }
                 self.reconcile();
@@ -9264,22 +9266,24 @@ impl Comp {
             // own digit, so it is ONE-BASED; the tree indexes from 0. A
             // refused switch or move (the bound, the pane table, the same
             // workspace) leaves the current root exactly as it was.
+            // S4: the chord's digit IS the workspace number, so it is passed
+            // straight through -- no index conversion, and no "next free
+            // number" constraint. The say's shape is unchanged (a gate may
+            // read it); only its source moved from a position to an identity,
+            // so with a sparse set it can honestly read "3 of 2".
             ChordAction::Workspace(n) => {
-                if self.layout.switch_workspace((n as usize).saturating_sub(1)) {
+                if self.layout.switch_workspace(n) {
                     #[cfg(feature = "test-mode")]
                     say!(
                         "tapestryd: workspace switch -> {} of {}",
-                        self.layout.active_workspace() + 1,
+                        self.layout.active_number(),
                         self.layout.workspace_count()
                     );
                     self.reconcile();
                 }
             }
             ChordAction::MoveToWorkspace(n) => {
-                if self
-                    .layout
-                    .move_focused_to_workspace((n as usize).saturating_sub(1))
-                {
+                if self.layout.move_focused_to_workspace(n) {
                     #[cfg(feature = "test-mode")]
                     say!(
                         "tapestryd: workspace move -> {} of {}",

@@ -2290,15 +2290,21 @@ pub fn run(home: Option<String>) -> i64 {
             // either way. The real pair already existed on the ChromeSet,
             // feeding the bar; it simply never reached here. The header's
             // `active` is ONE-based, `RailModel.active` zero-based.
-            let (ws_n, ws_k1) = chrome.workspaces().unwrap_or((1, 1));
+            let (ws_list, ws_active) = chrome
+                .workspaces()
+                .unwrap_or_else(|| (alloc::vec![1], 1));
+            // S4: the model paints from POSITIONS and labels from NUMBERS, so
+            // the active number is resolved to its position here -- the same
+            // resolution `statusset::model_from` does for the bar.
+            let ws_pos = ws_list.iter().position(|&n| n == ws_active).unwrap_or(0) as u8;
             let rm = RailModel {
                 cwd: cwd.clone(),
                 title,
                 theme: theme_name.clone(),
                 hour,
                 minute,
-                workspaces: ws_n,
-                active: ws_k1.saturating_sub(1),
+                workspaces: ws_list.clone(),
+                active: ws_pos,
                 ..RailModel::empty()
             };
             rail.refresh(&rm, &sheet, &mut gs);
@@ -2382,7 +2388,7 @@ pub fn run(home: Option<String>) -> i64 {
                         }
                     }
                     railset::RailAction::Workspaces { x, y } => {
-                        let wm = workspace_menu(ws_n, ws_k1.saturating_sub(1));
+                        let wm = workspace_menu(&ws_list, ws_pos);
                         if menus.open(wm, x, y, (x, y, 0, 0), &sheet, &mut gs) {
                             menu_leaf = None;
                         }
@@ -2391,8 +2397,14 @@ pub fn run(home: Option<String>) -> i64 {
                         // The chip ACTS, under this session's own authority,
                         // the way every other rail button does: the
                         // compositor's `workspace` verb on the layout file
-                        // (W-2b), one-based on the wire. It used to only log.
-                        let _ = layout_verb(troot, &format!("workspace {}", n as u32 + 1));
+                        // (W-2b). It used to only log.
+                        //
+                        // S4: `n` is already the workspace NUMBER -- railset
+                        // maps the chip's position through the model's list --
+                        // so it goes on the wire as-is. Adding one here would
+                        // switch to the wrong workspace the moment the set is
+                        // sparse.
+                        let _ = layout_verb(troot, &format!("workspace {}", n as u32));
                     }
                     railset::RailAction::ChipsScroll(_) => {}
                 }

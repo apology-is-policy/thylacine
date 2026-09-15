@@ -124,24 +124,57 @@ pub struct Leaf {
 /// `active=1` with an equals sign and could never be mistaken for the
 /// header's bare `active`, but reading one line makes that structural rather
 /// than a property of the spelling.
-pub fn parse_workspaces(layout: &str) -> Option<(u8, u8)> {
+pub fn parse_workspaces(layout: &str) -> Option<(Vec<u8>, u8)> {
     let head = layout.lines().next()?;
-    let (mut n, mut k) = (None, None);
+    let (mut list, mut active) = (None, None);
     let mut it = head.split_ascii_whitespace();
     while let Some(tok) = it.next() {
         match tok {
-            "workspaces" => n = it.next().and_then(|t| t.parse::<u8>().ok()),
-            "active" => k = it.next().and_then(|t| t.parse::<u8>().ok()),
+            "workspaces" => list = it.next().map(parse_number_list),
+            "active" => active = it.next().and_then(|t| t.parse::<u8>().ok()),
             _ => {}
         }
     }
-    let (n, k) = (n?, k?);
-    // A pair that cannot describe a tree is refused whole: the bar would
-    // otherwise light a chip with no workspace behind it.
-    if n == 0 || k == 0 || k > n {
+    let (list, active) = (list??, active?);
+    // A header that cannot describe a tree is refused WHOLE: the bar would
+    // otherwise light a chip with no workspace behind it. This generalizes
+    // the old `k > n` check, which was the same question when the token was
+    // a count -- an ACTIVE that is not one of the live numbers.
+    if !list.contains(&active) {
         return None;
     }
-    Some((n, k))
+    Some((list, active))
+}
+
+/// `1,3,4` -> [1, 3, 4]. None on an empty field, a zero, a non-number, a
+/// repeat or a descent.
+///
+/// The reader does NOT sort or dedupe a malformed header into a plausible
+/// one: a compositor that emitted `3,1` is wrong about something, and
+/// quietly repairing it would hide that while painting confident chips.
+///
+/// This is also where an OLDER compositor fails closed. Its count-shaped
+/// `workspaces 3 active 2` parses as the single-element list [3], and 2 is
+/// not in it, so `parse_workspaces` returns None and the bar keeps its
+/// default rather than painting a guess.
+fn parse_number_list(s: &str) -> Option<Vec<u8>> {
+    let mut out: Vec<u8> = Vec::new();
+    for part in s.split(',') {
+        let n: u8 = part.parse().ok()?;
+        if n == 0 {
+            return None;
+        }
+        if let Some(&last) = out.last() {
+            if n <= last {
+                return None;
+            }
+        }
+        out.push(n);
+    }
+    if out.is_empty() {
+        return None;
+    }
+    Some(out)
 }
 
 #[cfg(test)]
@@ -149,9 +182,36 @@ mod workspace_header_tests {
     use super::parse_workspaces;
 
     #[test]
-    fn reads_the_pair_one_based() {
-        let l = "epoch 8 focused 5 workspaces 3 active 2\n1 splith n=2 active=1 [0,0,1,1]\n";
-        assert_eq!(parse_workspaces(l), Some((3, 2)));
+    fn reads_the_list_and_the_active_number() {
+        let l = "epoch 8 focused 5 workspaces 1,2,3 active 2\n1 splith n=2 active=1 [0,0,1,1]\n";
+        assert_eq!(parse_workspaces(l), Some((alloc::vec![1, 2, 3], 2)));
+    }
+
+    /// S4's point: the set is SPARSE, and the list is the only token that can
+    /// say so. A count would read "3" here and the rail would label its chips
+    /// 01 02 03 -- none of which is workspace 4.
+    #[test]
+    fn a_sparse_set_reads_its_actual_numbers() {
+        let l = "epoch 8 focused 5 workspaces 1,3,4 active 3\n";
+        assert_eq!(parse_workspaces(l), Some((alloc::vec![1, 3, 4], 3)));
+    }
+
+    /// An OLDER compositor emits the count-shaped `workspaces 3 active 2`.
+    /// That parses as the list [3], and 2 is not in it, so the reader fails
+    /// CLOSED and the bar keeps its default -- the degradation scripture
+    /// promises, asserted rather than assumed.
+    #[test]
+    fn a_pre_s4_count_header_fails_closed() {
+        let l = "epoch 8 focused 5 workspaces 3 active 2\n";
+        assert_eq!(parse_workspaces(l), None);
+    }
+
+    /// A malformed ORDER is refused, never repaired: a reader that sorted
+    /// `3,1` into `1,3` would hide a compositor bug behind confident chips.
+    #[test]
+    fn a_descending_or_repeating_list_is_refused() {
+        assert_eq!(parse_workspaces("epoch 1 focused 1 workspaces 3,1 active 1\n"), None);
+        assert_eq!(parse_workspaces("epoch 1 focused 1 workspaces 2,2 active 2\n"), None);
     }
 
     #[test]
@@ -172,19 +232,23 @@ mod workspace_header_tests {
     #[test]
     fn a_malformed_number_is_refused() {
         assert_eq!(parse_workspaces("epoch 1 focused 1 workspaces x active 1\n"), None);
+        assert_eq!(parse_workspaces("epoch 1 focused 1 workspaces 1,x active 1\n"), None);
         assert_eq!(parse_workspaces("epoch 1 focused 1 workspaces 2 active y\n"), None);
     }
 
+    /// The generalized `k > n`: an ACTIVE that is not one of the live
+    /// numbers cannot describe a tree, so the header is refused WHOLE.
     #[test]
-    fn an_impossible_pair_is_refused_whole() {
+    fn an_active_outside_the_list_is_refused_whole() {
         assert_eq!(parse_workspaces("epoch 1 focused 1 workspaces 1 active 2\n"), None);
+        assert_eq!(parse_workspaces("epoch 1 focused 1 workspaces 1,3 active 2\n"), None);
         assert_eq!(parse_workspaces("epoch 1 focused 1 workspaces 0 active 0\n"), None);
     }
 
     #[test]
     fn the_single_workspace_default_reads_one_one() {
         let l = "epoch 2 focused 1 workspaces 1 active 1\n1 leaf surface=0 [0,0,1,1]\n";
-        assert_eq!(parse_workspaces(l), Some((1, 1)));
+        assert_eq!(parse_workspaces(l), Some((alloc::vec![1], 1)));
     }
 }
 

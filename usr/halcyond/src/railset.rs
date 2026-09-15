@@ -58,7 +58,9 @@ pub enum RailAction {
     CloseFocused(u32),
     /// The mark: the workspace list, at display point (x, y).
     Workspaces { x: u32, y: u32 },
-    /// A chip: switch to workspace `n` (0-based).
+    /// A chip: switch to workspace NUMBER `n` (S4 -- an identity, not a
+    /// position, so the handler can hand it straight to the compositor's
+    /// `workspace` verb without knowing where the chip sat).
     Workspace(u8),
     /// The ‹ / › reveal: scroll the chips by one.
     ChipsScroll(i8),
@@ -230,7 +232,17 @@ impl RailBar {
                                         x: x.max(0) as u32,
                                         y: y.max(0) as u32,
                                     }),
-                                    Some(RailHit::Chip(n)) => Some(RailAction::Workspace(n)),
+                                    // S4: the hit is a POSITION among the
+                                    // painted chips; the action carries the
+                                    // NUMBER that chip stands for. A sparse
+                                    // set makes these differ, and sending the
+                                    // position would switch to the wrong
+                                    // workspace.
+                                    Some(RailHit::Chip(n)) => self
+                                        .painted
+                                        .as_ref()
+                                        .and_then(|(m, _)| m.workspaces.get(n as usize).copied())
+                                        .map(RailAction::Workspace),
                                     Some(RailHit::ChipsPrev) => Some(RailAction::ChipsScroll(-1)),
                                     Some(RailHit::ChipsNext) => Some(RailAction::ChipsScroll(1)),
                                     Some(RailHit::SplitH) => Some(RailAction::SplitH),

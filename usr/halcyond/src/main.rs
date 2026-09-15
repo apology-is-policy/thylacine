@@ -1096,9 +1096,19 @@ pub extern "C" fn rs_main() -> i64 {
                         }
                     }
                     railset::RailAction::Workspaces { x, y } => {
-                        menus.open(workspace_menu(1, 0), x, y, (x, y, 0, 0), &sheet, &mut gs);
+                        // The console shows ONE workspace by design
+                        // (HALCYON-WORKSPACES section 4), so the list is the
+                        // single-number literal rather than a feed -- stated
+                        // here because "hardcoded to one" is exactly what
+                        // round 1 F6 found wrong on the SESSION side, and the
+                        // two cases must not be confused again.
+                        menus.open(workspace_menu(&[1], 0), x, y, (x, y, 0, 0), &sheet, &mut gs);
                     }
-                    railset::RailAction::Workspace(n) => say!("halcyond: workspace {} is active", n as u32 + 1),
+                    // S4: `n` is already the workspace NUMBER (railset maps the
+                    // chip's position through the model's list), so it is said
+                    // as-is. The console does not act on it -- it renders one
+                    // workspace.
+                    railset::RailAction::Workspace(n) => say!("halcyond: workspace {} is active", n as u32),
                     railset::RailAction::ChipsScroll(_) => {}
                 }
             }

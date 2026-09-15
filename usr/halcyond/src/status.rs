@@ -49,13 +49,18 @@ pub fn condition_for(status: &str) -> Condition {
     }
 }
 
-/// What the bar shows. `workspaces` is the count and `active` is ZERO-BASED
-/// (the painter compares `i == active` over `0..workspaces`); both are fed
-/// from the `layout` header's ONE-BASED `workspaces N active K` since W-2,
-/// and the conversion happens once, in `statusset::model_from`.
+/// What the bar shows. `workspaces` is the ascending list of live workspace
+/// NUMBERS and `active` is a POSITION into it (the painter compares
+/// `i == active` over the chips it lays out), both fed from the `layout`
+/// header's `workspaces <list> active <number>` since S4, with the
+/// number-to-position resolution happening once, in `statusset::model_from`.
+///
+/// The split is deliberate: a position is the right thing for PAINTING, and
+/// the number is the right thing for the LABEL. Before S4 they were the same
+/// value plus one, which is exactly why a sparse set broke the labels.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct StatusModel {
-    pub workspaces: u8,
+    pub workspaces: Vec<u8>,
     pub active: u8,
     /// The focused tile's program (its strip's name); empty when nothing is
     /// focused.
@@ -94,7 +99,7 @@ pub struct StatusModel {
 impl StatusModel {
     pub fn empty() -> StatusModel {
         StatusModel {
-            workspaces: 1,
+            workspaces: alloc::vec![1],
             active: 0,
             name: String::new(),
             cwd: String::new(),
@@ -301,9 +306,16 @@ pub fn status_list(
     // the active one an ember box with the number in the bar's own dark,
     // the rest the number in `status_idle` on the bar.
     let mut x = pad;
-    for i in 0..m.workspaces.max(1) {
+    // S4: one indicator per LIVE NUMBER. The bound is the list's length and
+    // the label is the number itself -- `i + 1` was the number only while the
+    // set was dense. `m.active` stays a POSITION, so the active test is
+    // unchanged. (The rail carries the other painter of this pair; a fix to
+    // one of them is not a property of the system.)
+    let ws_count = m.workspaces.len().max(1) as u8;
+    for i in 0..ws_count {
+        let label_num = m.workspaces.get(i as usize).copied().unwrap_or(i + 1);
         let mut num = String::new();
-        let _ = core::fmt::write(&mut num, format_args!("{}", i + 1));
+        let _ = core::fmt::write(&mut num, format_args!("{}", label_num));
         let nrun = shape(gs, px, &num);
         let box_w = nrun.width + 2 * ws_pad;
         if i == m.active {
@@ -374,7 +386,7 @@ mod tests {
 
     fn model() -> StatusModel {
         StatusModel {
-            workspaces: 1,
+            workspaces: alloc::vec![1],
             active: 0,
             name: String::from("transcript"),
             cwd: String::from("/lib/aurora"),

@@ -246,10 +246,13 @@ pub struct ChromeSet {
     /// reconcile (`rail::pane_count`), the footer's right group.
     pane_count: u32,
     /// HALCYON-WORKSPACES W-2: the `layout` header's `workspaces N active K`
-    /// as of the last read, ONE-BASED and unconverted. None means the header
-    /// carried no workspace tokens, and the bar keeps its own default rather
-    /// than painting a guess.
-    workspaces: Option<(u8, u8)>,
+    /// as of the last read: the ascending list of LIVE NUMBERS and the ACTIVE
+    /// number, both identities rather than positions (S4, 2026-09-15), and
+    /// unconverted. None means the header carried no usable workspace tokens
+    /// -- including a pre-S4 compositor's count-shaped header, which fails
+    /// closed -- and the bar keeps its own default rather than painting a
+    /// guess.
+    workspaces: Option<(Vec<u8>, u8)>,
 }
 
 impl ChromeSet {
@@ -275,8 +278,11 @@ impl ChromeSet {
     /// W-2: the layout header's workspace pair (count, active), ONE-BASED --
     /// the bar's two numbers. None until a layout carrying the tokens has
     /// been read.
-    pub fn workspaces(&self) -> Option<(u8, u8)> {
-        self.workspaces
+    /// Cloned rather than borrowed: the list is at most `MAX_WORKSPACES`
+    /// bytes, and a borrow here would fight every caller that also mutates
+    /// the set while holding it.
+    pub fn workspaces(&self) -> Option<(Vec<u8>, u8)> {
+        self.workspaces.clone()
     }
 
     /// The public id of the leaf hosting the console surface, once a

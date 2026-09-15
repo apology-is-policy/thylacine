@@ -295,13 +295,22 @@ pub fn tile_menu(id: u32, name: &str, count: u32, retained: bool) -> Menu {
 /// row per workspace (`01`..), the active one selected, each an INTERNAL
 /// action `workspace <n>` (1-based) the owner interprets. Width 160 is the
 /// painter's minimum-width clamp's business; the title reads `Workspaces`.
-pub fn workspace_menu(count: u8, active: u8) -> Menu {
+pub fn workspace_menu(numbers: &[u8], active: u8) -> Menu {
+    // S4: one row per LIVE NUMBER, labelled and actioned by that number. A
+    // row used to be labelled by its position plus one, which is the same
+    // value only while the set is dense.
+    //
+    // An empty list floors to [1] rather than producing zero rows: `sel`
+    // below would underflow on `items.len() - 1`, and a list with no
+    // workspaces cannot describe a running compositor anyway.
+    let fallback = [1u8];
+    let numbers = if numbers.is_empty() { &fallback[..] } else { numbers };
     let mut items = Vec::new();
-    for i in 0..count.max(1) {
+    for &n in numbers {
         let mut label = String::new();
-        let _ = core::fmt::write(&mut label, format_args!("{:02}", i as u32 + 1));
+        let _ = core::fmt::write(&mut label, format_args!("{:02}", n as u32));
         let mut act = String::from("workspace ");
-        let _ = core::fmt::write(&mut act, format_args!("{}", i as u32 + 1));
+        let _ = core::fmt::write(&mut act, format_args!("{}", n as u32));
         items.push(MenuItem::new(&label, Action::Internal(act)));
     }
     Menu {

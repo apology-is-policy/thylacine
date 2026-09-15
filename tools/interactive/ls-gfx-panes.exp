@@ -634,10 +634,10 @@ expect {
     -ex "tapestry-battery: FAIL" { lc_fail_detail "the undeclare control failed" }
     timeout { lc_fail "session off never restored the console leaf" }
 }
-# HALCYON-WORKSPACES W-1b: the live-workspace leg -- the switch (creating the
-# next free number, i3), the leaving tree DORMANT (its live tile leaves the
-# active root's rows), the return, and the vanish of the empty inactive one.
-# Driven through the `workspace N` ctl verb: the battery is a client and
+# HALCYON-WORKSPACES: the live-workspace leg -- the switch, the leaving tree
+# DORMANT (its live tile leaves the active root's rows), a SPARSE create, the
+# return, and the vanish of the empty inactive ones. Driven through the
+# `workspace N` verb on the `layout` file (W-2b): the battery is a client and
 # cannot inject Super+N, which lives on the compositor's own key path.
 expect {
     -ex "battery: workspace 2 created and switched to; workspace 1 dormant" {
@@ -645,6 +645,21 @@ expect {
     }
     -ex "tapestry-battery: FAIL" { lc_fail_detail "the workspace switch/dormant leg failed" }
     timeout { lc_fail "the workspace switch never reported" }
+}
+# S4: a number is an IDENTITY, so a skipped one is CREATED rather than refused
+# -- the inverse of the rule this leg used to assert.
+#
+# The set reads 1,9 rather than 1,2,9: leaving the empty workspace 2 VANISHED
+# it (the i3 rule, firing at the reconcile the switch triggers). That gap is
+# the sharper witness -- 1 and 9 are not contiguous, so a COUNT would render
+# `2` and the rail would label chips that do not exist, which is exactly what
+# the list form exists to prevent.
+expect {
+    -ex "battery: workspace 9 created from a gap; the header lists 1,9" {
+        lc_pass "panes: a skipped number is created and the header lists the sparse set (S4)"
+    }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the sparse-create leg failed" }
+    timeout { lc_fail "the sparse create never reported" }
 }
 expect {
     -ex "battery: workspace 1 returned with its tile; the empty workspace vanished" {

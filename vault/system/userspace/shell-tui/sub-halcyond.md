@@ -702,5 +702,56 @@ The **console** renderer (`main.rs`) deliberately stays at one workspace --
 `docs/HALCYON-WORKSPACES.md` section 4: *"The console (pre-login halcyond)
 shows one."*
 
+## Reading a sparse workspace set (2026-09-15, S4)
+
+The compositor's `layout` header stopped carrying a COUNT and started carrying
+the ascending LIST of live workspace numbers, because S4 made a number an
+identity and the set sparse. Everything on this side moved with it.
+
+**`parse_workspaces` -> `Option<(Vec<u8>, u8)>`.** The old `k > n` refusal
+generalizes to *an `active` that is not one of the live numbers*, and the
+header is still refused WHOLE on that: a bar lighting a chip with no workspace
+behind it is worse than a bar showing its default. `parse_number_list` refuses
+an empty field, a zero, a non-number, a repeat or a DESCENT -- it does not sort
+or dedupe a malformed header into a plausible one, because a compositor that
+emitted `3,1` is wrong about something and repairing it quietly would hide that
+while painting confident chips. A pre-S4 compositor's `workspaces 3 active 2`
+parses as the single-element list [3] and 2 is not in it, so the reader fails
+CLOSED -- asserted by a test, not assumed.
+
+**The models keep POSITIONS and gain NUMBERS.** `StatusModel.workspaces` and
+`RailModel.workspaces` are the list; `active` stays a POSITION into it. The
+split is deliberate: a position is what a painter needs (`i == active` over the
+chips it lays out) and a number is what a LABEL needs. Before S4 they were the
+same value plus one, which is exactly why a sparse set broke the labels. The
+number-to-position resolution happens once per consumer -- `statusset::model_from`
+for the bar, the rail feed for the rail.
+
+**BOTH chip painters moved.** There are two -- the bar's in `status.rs` and the
+rail's in `rail.rs` -- and each labelled by `position + 1`. Fixing one would
+have repeated W-1a's F2 shape exactly (a guard on one of two implementations,
+with the shipped one forgotten), so both take their label from the list.
+
+**A chip click carries a NUMBER, not a position.** `railset` maps
+`RailHit::Chip(position)` through the painted model's list before emitting
+`RailAction::Workspace(n)`, so the session hands `n` to the compositor's
+`workspace` verb unchanged. Sending the position would switch to the wrong
+workspace the moment the set is sparse. That mapping is BIN-ONLY and therefore
+has no unit test; the gate is its only witness.
+
+**The test-mode say.** `workspaces <list> active0 <position>`. `active0` is now
+the DERIVED position rather than a raw zero-based field, which preserves and
+sharpens the original anti-echo rule: the header already carries the active
+number, so printing it would merely agree with the compositor, while the
+position is a value the compositor never sends. With `workspaces 1,3 active 3`
+the witness reads `active0 1` -- neither the number nor a count.
+
+**Bin versus lib, stated because it was quoted wrongly.** `chromeset`,
+`menuset`, `railset`, `session` and `statusset` are BIN modules;
+`cargo test --lib` never compiles them. Any "halcyond N tests green" figure
+covers the lib only -- including through round 1, where F5 (the existence
+probe) and F6 (the rail/menu feed) live in bin modules and were witnessed by
+the guest build and the interactive gates, never by that count.
+
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

@@ -761,6 +761,91 @@ choosing one, and no amount of prosecuting the gate would have surfaced that
 the state's reader and its writer had been split across two files.
 
 
+### S4: workspace numbers became identities, and four things I believed were wrong
+
+The operator ratified **stable numbers with gaps** over the status quo and over
+abolishing the vanish rule. The research had largely collapsed the fork before
+the vote: i3 treats workspace numbers as NAMES rather than positions, and tmux
+keeps stable numbers with gaps (`renumber-windows` is opt-in, off by default).
+Both cited precedents already refused the renumbering.
+
+Scripture landed FIRST (`5eae48f5`, pushed) with no code, per the
+design-conversation rule, and the implementation references it.
+
+**I was wrong about how the decision reached us.** I had called the renumbering
+"an unratified consequence of the representation". It was not: HALCYON-INSTRUMENT
+section 14.1 contained *"after a compaction the next switch message announces
+the new number"* -- scripture had anticipated compaction in writing. The vote
+supersedes that clause, and I marked the supersession in place rather than
+quietly overwriting it.
+
+**The decision made the code simpler, not more complex.** The "only the next
+free number may be made" rule existed to keep a DENSE vector hole-free -- a
+property of the representation -- and it mis-attributed i3, which creates
+workspace 5 on Super+5 whether or not 2, 3 and 4 exist. Retiring it removed a
+check rather than adding one.
+
+**The compiler-enumeration lever failed, and that is the lesson.** W-1a's win
+was making `root()` an accessor so the compiler listed every consumer. I
+expected the same from `switch_workspace(usize)` -> `(u8)`. It did not happen:
+integer literals COERCE, so all 28 test call sites still compiled while their
+meaning silently flipped from index to number. One error surfaced, and only
+because `MAX_WORKSPACES` is a `usize` constant. The lever works when the type
+change is INCOMPATIBLE; `(u8, u8)` -> `(Vec<u8>, u8)` later enumerated its
+consumers perfectly. I converted the 28 by hand, in one regex pass -- never
+sequential replaces, which would have cascaded 0->1->2.
+
+**Two tests failed on false premises, and both times the measurement was
+right.** The seat test asserted the workspace's root was unchanged after moving
+its only tile away -- but that leaf WAS the root, and `detach_leaf` no-ops on a
+parentless pane, so the design deliberately mints a fresh root to leave behind.
+The battery's sparse leg asserted `[1,2,9]`; the gate returned `[1,9]`, because
+leaving the empty workspace 2 VANISHED it at the reconcile the switch triggers.
+That second one taught me something I have now written into scripture: merely
+PASSING THROUGH an empty workspace does not leave it behind. The gap is also
+the sharper witness, since 1 and 9 are not contiguous and a count would render
+`2`.
+
+**A verification gap in my own reporting.** Every "halcyond N tests green"
+figure quoted across this arc covers the LIB only. `chromeset`, `menuset`,
+`railset`, `session` and `statusset` are BIN modules, and `cargo test --lib`
+never compiles them -- so round 1's F5 and F6, which live in those modules,
+were witnessed by the guest build and the interactive gates and never by that
+number. The work stands; the number was not the evidence I implied.
+
+**Both chip painters moved.** There are two -- the bar's in `status.rs` and the
+rail's in `rail.rs` -- and both labelled by `position + 1`. Fixing one would
+have been the W-1a F2 shape a third time in one arc.
+
+**The burned retry, diagnosed by ordering rather than by re-running.** Gate B
+failed attempt 1 at `the welcome never settled (panes2=0 init=1)` and passed
+attempt 2. The evidence was two line numbers in the failing log: the bar's say
+sat at 3022 and the rails leg matched at 3027 -- the witness arrived five lines
+BEFORE the leg that would wait for it, and `expect` consumed it while scanning
+for its own pattern. It could never repeat, because the say is EDGE-TRIGGERED
+on a key change and that attempt stalled with no further churn. The passing
+attempt had the same say at 3036, after the leg. A harness race, not an S4
+regression: for a single workspace the old `(count, active)` key and the new
+`(list, position)` key change at identical moments.
+
+Fixed cooperatively -- the rails leg now records that say in passing with
+`exp_continue`, so the witness is captured wherever it lands. `exp_continue` is
+load-bearing: without it the new branch would satisfy the enclosing `expect`
+and become a consumer itself, which is the same bug wearing a different hat. I
+also wrote `//` comments into a Tcl block on the first attempt at that fix and
+caught it with a static parse check before booting anything.
+
+**Posture**: tapestryd 59, halcyond lib 298, four crates guest-clean on
+`aarch64-unknown-none`. Three S4 sabotages fired, each needing its OWN revert
+(the vanish test reads `workspace_numbers()`, the header test builds its list
+from `w.number` directly, the seat test turns on one line in
+`ensure_workspace`); `pane.rs` md5-restored. `ls-gfx-panes` PASS 47 s, 65 legs,
+one attempt, with the sparse leg confirmed by its own text -- a grep for
+"workspace" had missed it, because that leg's wording contains no such word.
+`ls-halcyon-session-instrument` PASS 109 s, 37 legs, one attempt after the
+harness fix. That last green is a verdict, not a proof: the fix is structural,
+so its correctness rests on the mechanism.
+
 ### The W-arc round: two prosecutors, and neither alone would have closed it
 
 The arc's ratified bar is one adversarial round over W-1..W-3. It closed

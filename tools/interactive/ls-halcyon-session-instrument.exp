@@ -199,6 +199,20 @@ lc_step "session up on ${W}x$H"
 set timeout 60
 set saw_rail_created 0; set saw_rail_minted 0; set saw_bar_created 0; set saw_bar_minted 0
 set tries 0
+# The welcome leg below waits for a `running false panes >= 2` bar say, and
+# that say is EDGE-TRIGGERED: statusset emits only when its key CHANGES. This
+# `expect` scans past everything that is not one of its own four markers, so
+# if the bar's say lands HERE it is consumed and the later leg can never see
+# it -- re-expecting cannot recover output already eaten.
+#
+# MEASURED, not theorised (2026-09-15): in a burned attempt the say sat at log
+# line 3022 and this leg matched at 3027 -- five lines later. The passing
+# attempt had the same say at 3036, after the leg. Same image, same code, only
+# the interleaving differed.
+#
+# So the state is hoisted ABOVE this leg and the branch below records it in
+# passing. The witness is captured wherever it lands.
+set saw_panes2 0; set N 0
 while {(!$saw_rail_created || !$saw_rail_minted || !$saw_bar_created || !$saw_bar_minted) && $tries < 12} {
     incr tries
     expect {
@@ -219,6 +233,18 @@ while {(!$saw_rail_created || !$saw_rail_minted || !$saw_bar_created || !$saw_ba
         }
         -re {halcyond: rail failed} { lc_fail "the session's rail mint was refused: $expect_out(0,string)" }
         -re {halcyond: status bar failed} { lc_fail "the session's bar mint was refused: $expect_out(0,string)" }
+        # COOPERATIVE: record the welcome leg's witness if it flies past here,
+        # then KEEP SCANNING. `exp_continue` is load-bearing -- without it this
+        # branch would satisfy the enclosing expect and become a consumer
+        # itself, swallowing the rails markers it sits beside.
+        -re {halcyond: status bar \d+ painted [^\r\n]*running false panes (\d+)} {
+            if {$expect_out(1,string) >= 2} {
+                set N $expect_out(1,string)
+                set saw_panes2 1
+                lc_step "the footer's pane count ($N) arrived before the welcome leg; recorded in passing"
+            }
+            exp_continue
+        }
         -re {EXTINCTION:} { lc_extinction_fail "extinction before the rails" }
         timeout { lc_fail "the rails never came up (rail created=$saw_rail_created minted=$saw_rail_minted; bar created=$saw_bar_created minted=$saw_bar_minted)" }
         eof     { lc_fail "qemu exited before the rails" }
@@ -238,7 +264,10 @@ set timeout 90
 # The count the parse reports for the welcome's tree is read, not assumed
 # (the tree carries the leaves the restore left, visible or not); the
 # split and the close below are asserted RELATIVE to it.
-set saw_panes2 0; set saw_init 0; set tries 0; set N 0
+# `saw_panes2` and `N` are NOT reset here: the rails leg above may already
+# have recorded them in passing, and re-initialising would erase exactly the
+# capture that fix exists for.
+set saw_init 0; set tries 0
 while {(!$saw_panes2 || !$saw_init) && $tries < 12} {
     incr tries
     expect {
@@ -590,16 +619,22 @@ expect {
 lc_pass "session-instrument: the rail's SPLIT H spawned a new tile (leaf $B) under the session's authority; the footer counts $N1 (8.1 / 9.5)"
 
 # --- HALCYON-WORKSPACES W-3: the switch, and the bar's two numbers ---------------
-# Super+2 CREATES workspace 2 (the i3 rule: only the next free number may be
-# made) and switches to it. The session's tiles go DORMANT with the root they
-# live in rather than closing, so the bar is the thing that can report the
-# move: it reads the compositor's `layout` header, the ratified channel.
-# `active0` is the model's ZERO-BASED field printed raw -- asserting the
-# one-based number the header carries would pass even with the conversion
-# missing, which is a check that cannot fail.
+# Super+2 CREATES workspace 2 and switches to it. The session's tiles go
+# DORMANT with the root they live in rather than closing, so the bar is the
+# thing that can report the move: it reads the compositor's `layout` header,
+# the ratified channel.
+#
+# S4: the header carries the ascending LIST of live numbers, so a dense pair
+# reads `workspaces 1,2`, and `active0` is the model's DERIVED POSITION into
+# that list, printed raw. Printing the active NUMBER instead would merely echo
+# the compositor and agree with itself -- the position is a value the
+# compositor never sends, so a broken number-to-position resolution fails
+# here. (The i3 rule this comment used to cite -- "only the next free number
+# may be made" -- was retired by S4: a number is an identity, so Super+5 makes
+# workspace 5 whether or not 2..4 exist.)
 hkey "meta_l+2"
 expect {
-    -re "halcyond: status bar \\d+ painted \[^\\r\\n\]*workspaces 2 active0 1" {}
+    -re "halcyond: status bar \\d+ painted \[^\\r\\n\]*workspaces 1,2 active0 1" {}
     -re {EXTINCTION:} { lc_extinction_fail "extinction after Super+2" }
     timeout { lc_fail "the bar never read workspace 2 after Super+2 (the switch, the header, or the feed)" }
     eof     { lc_fail "qemu exited after Super+2" }

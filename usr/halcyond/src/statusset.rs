@@ -11,6 +11,7 @@
 
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use halcyond::layout::Sheet;
 use halcyond::raster::GlyphSource;
@@ -75,7 +76,12 @@ fn legacy_same(a: &StatusModel, b: &StatusModel) -> bool {
             hints: _,
         } = m;
         (
-            *workspaces,
+            // S4: the list is a Vec now, so it clones like the strings below
+            // rather than copying. This site is exactly why the destructure
+            // above carries no `..` -- the guard made a type change in the
+            // model fail to compile here instead of silently dropping the
+            // workspaces from the legacy bar's sameness key.
+            workspaces.clone(),
             *active,
             name.clone(),
             cwd.clone(),
@@ -114,8 +120,18 @@ pub struct StatusBar {
     /// (the fixed slots, the condition, the notice, running, the pane count
     /// -- the count is in the key because `2 PANES` and `4 PANES` are one
     /// width and would share a `clock` slot).
-    said_slots:
-        Option<(halcyond::status::Slots, Condition, Option<(String, bool)>, bool, u32, (u8, u8))>,
+    /// S4: the workspace half of the key is the LIST plus the active
+    /// position, not a count -- a switch between two workspaces of an equal
+    /// count would otherwise not change the key, and the re-say W-3 added
+    /// would stop firing on exactly the move it exists to witness.
+    said_slots: Option<(
+        halcyond::status::Slots,
+        Condition,
+        Option<(String, bool)>,
+        bool,
+        u32,
+        (Vec<u8>, u8),
+    )>,
     failed_said: bool,
     /// Whether a mint should be attempted: true at start and after a CLOSE
     /// (the compositor dropped the bar), cleared by each attempt. A FAILED
@@ -340,11 +356,25 @@ impl StatusBar {
                     // normal case, since the tiles go dormant rather than
                     // away -- would repaint silently and no gate could see
                     // the move.
-                    if inst { (model.workspaces, model.active) } else { (0, 0) },
+                    if inst {
+                        (model.workspaces.clone(), model.active)
+                    } else {
+                        (Vec::new(), 0)
+                    },
                 );
                 #[cfg(feature = "test-mode")]
                 if self.said_slots.as_ref() != Some(&key) {
                     self.said_slots = Some(key);
+                    // S4: a Vec has no Display, and the witness wants the list
+                    // VERBATIM -- `1,3` must never be summarised to `2`, which
+                    // is the whole reason the header stopped being a count.
+                    let mut ws_list = String::new();
+                    for (i, n) in model.workspaces.iter().enumerate() {
+                        if i > 0 {
+                            ws_list.push(',');
+                        }
+                        let _ = core::fmt::write(&mut ws_list, format_args!("{}", n));
+                    }
                     say(&format!(
                     "halcyond: status bar {} painted ws [{} {}] ctx [{} {}] cond [{} {}] clock [{} {}] context \"{}\" condition {:?} clock {:02}:{:02} ctxink [{} {}] exit {} notice \"{}\" running {} panes {} workspaces {} active0 {}",
                     surf.id,
@@ -356,13 +386,20 @@ impl StatusBar {
                     model.exit_code.map(|c| format!("{}", c)).unwrap_or_else(|| String::from("-")),
                     model.notice.as_ref().map(|n| n.0.as_str()).unwrap_or(""),
                     model.running, model.pane_count,
-                    // `active0` is the MODEL's field, ZERO-BASED, printed RAW.
-                    // Printing the one-based number the header carries would
-                    // make a missing conversion invisible -- the witness would
-                    // echo the compositor and agree with itself. Note `ws [..]`
-                    // above is the workspaces SLOT's geometry, a different
-                    // thing entirely.
-                    model.workspaces, model.active
+                    // S4: `workspaces` is the model's LIST of live numbers and
+                    // `active0` is the DERIVED POSITION into it, printed raw.
+                    //
+                    // The anti-echo property is preserved and sharpened. The
+                    // header now carries the active NUMBER, so a witness that
+                    // printed that number would merely agree with the
+                    // compositor; the position is a value the compositor never
+                    // sends, so a broken number-to-position resolution shows
+                    // up here. With `workspaces 1,3 active 3` this reads
+                    // `active0 1` -- neither the number nor a count.
+                    //
+                    // Note `ws [..]` above is the workspaces SLOT's geometry,
+                    // a different thing entirely.
+                    ws_list, model.active
                     ));
                 }
                 let _ = slots;
@@ -394,19 +431,25 @@ pub fn model_from(
     // tokens (a compositor older than W-1a). None is carried this far rather
     // than resolved at the parse so the "keep the default" decision is made
     // once, here, instead of becoming a guess at the boundary.
-    workspaces: Option<(u8, u8)>,
+    workspaces: Option<(Vec<u8>, u8)>,
     hints: alloc::vec::Vec<(String, String)>,
 ) -> StatusModel {
     let mut m = StatusModel::empty();
     m.notice = notice;
     m.pane_count = pane_count;
     m.hints = hints;
-    if let Some((n, k)) = workspaces {
-        m.workspaces = n;
-        // THE conversion, in exactly one place: the header counts workspaces
-        // from 1 (`active K`, K in 1..=N) and the bar compares `i == m.active`
-        // over `0..workspaces`, so an off-by-one here lights the wrong chip.
-        m.active = k.saturating_sub(1);
+    if let Some((list, active)) = workspaces {
+        // S4, and still THE resolution in exactly one place: the header
+        // carries the active NUMBER, the bar compares `i == m.active` over
+        // the chips it lays out, so the number is resolved to its POSITION
+        // here. Getting this wrong lights the wrong chip -- and with a sparse
+        // set `number - 1` is no longer that position.
+        //
+        // `parse_workspaces` refuses a header whose active is absent from its
+        // own list, so the position exists by the time we are called; the
+        // fallback is a floor, not a guess.
+        m.active = list.iter().position(|&n| n == active).unwrap_or(0) as u8;
+        m.workspaces = list;
     }
     if let Some((id, name, status)) = focused {
         m.name = name.clone();

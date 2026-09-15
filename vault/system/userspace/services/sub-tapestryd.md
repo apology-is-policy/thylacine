@@ -1942,3 +1942,54 @@ check passes vacuously -- a dormant split is unbounded. Bounded in consequence
 by the dormancy net. And S4 [P2], an operator design fork: the vanish rule
 RENUMBERS surviving workspaces, because a workspace's identity is its vector
 index.
+
+## Workspace numbers became identities (2026-09-15, S4)
+
+Operator-ratified after round 1 surfaced it. Scripture landed first
+(`5eae48f5`), then this.
+
+**What was wrong.** A workspace's identity was its position in
+`Layout.workspaces`. `reap_empty_workspaces` removes by index, so dropping an
+empty MIDDLE workspace shifted every higher one down: the user's tiles stayed
+alive but Super+3 no longer reached them -- it made a fresh empty workspace
+instead. Both cited precedents refuse that. i3 treats workspace numbers as
+NAMES rather than positions; tmux keeps stable numbers with gaps
+(`renumber-windows` is opt-in and off by default).
+
+**As built.** `Workspace` carries `number: u8` (1..=`MAX_WORKSPACES`) and the
+vector is kept SORTED ASCENDING by it; the set is sparse, so 1, 3, 4 is an
+ordinary state. `active` stays an internal INDEX -- positions are the right
+thing for the carve and the painters, numbers are the right thing for identity
+and labels -- with `active_number()` exposing the identity and
+`workspace_numbers()` the list.
+
+`ensure_workspace(n) -> Option<usize>` is the ONE find-or-create, and it exists
+as one function because the subtle part is local to it: a sorted set means a
+create INSERTS rather than pushes, and **an insert at or below `active` shifts
+the active index**, which must move with it or the seat silently changes
+workspace under the user. `switch_workspace` and `move_focused_to_workspace`
+both route through it and both read `self.active` AFTER the call for that
+reason. The move still judges its empty-tile refusal BEFORE ensuring the
+target, so a refused move cannot leave a freshly-minted empty workspace behind.
+
+**The retired rule, and why it was wrong twice over.** "Only the next free
+number may be made" existed to keep a DENSE vector hole-free -- a property of
+the representation, not of the design -- and it was attributed to i3, which
+creates workspace 5 on Super+5 whether or not 2, 3 and 4 exist. So the ratified
+choice made the switch SIMPLER: `n` goes straight through from the chord and
+from the `layout` verb, with no index conversion and no skip check. The bound
+is still `MAX_WORKSPACES` = 9, which the digit row enforces on its own, and
+`ensure_workspace` states the count bound explicitly rather than leaving it as
+an inference from uniqueness.
+
+**The header is a format change on the ratified channel.** `workspaces N
+active K` became `workspaces <ascending,csv,of,numbers> active <number>`. A
+count cannot label a gapped set: a bar told "3" cannot know whether that means
+1,2,3 or 1,3,4. The count is the list's length, so nothing is lost, and an
+older reader fails CLOSED (the list does not parse as an integer).
+
+**Coverage note.** `creating_a_lower_number_keeps_the_seat_where_it_was` is the
+only test that reaches the index-shift line: every other workspace test creates
+in ascending order, so without it that line is unexercised and a sabotage there
+does not fire. `server.rs` still has no test module, so the `layout_cmd` arm
+and the chord arms are witnessed by the battery and the gates only.

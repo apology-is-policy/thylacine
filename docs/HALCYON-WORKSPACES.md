@@ -123,7 +123,12 @@ the H-4 file format at v1 (a save is the active workspace's tree).
   = 9, which the digit row enforces on its own.
 - **Vanishing**: an inactive workspace with no hosted leaf **and no
   RESERVED leaf** is dropped at the next reconcile (i3); the active one
-  never is. The reservation half is round 1's S5: H-4d stamps
+  never is. **A consequence worth stating, because it surprises**: the
+  reconcile a switch triggers is "the next reconcile", so merely PASSING
+  THROUGH an empty workspace does not leave it behind -- switching 1 -> 2
+  -> 9 lands on a set of {1, 9}, not {1, 2, 9}, because 2 was empty the
+  moment it stopped being active. Measured, not reasoned: a battery leg
+  asserted {1,2,9} and the gate corrected it. The reservation half is round 1's S5: H-4d stamps
   `creator_conn` (and the claim mint a one-shot token) on the empty
   skeleton a restore tool builds, precisely so the session's own
   compositor cannot fill it mid-build -- and a rule testing only for

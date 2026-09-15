@@ -482,10 +482,18 @@ pub struct Pane {
 /// reused slot genuinely is a live leaf. Ids are monotonic and never reused
 /// (the file header's rule), so a dead id resolves to nothing -- which is
 /// exactly the fallback the restore wants.
+///
+/// `number` is the workspace's IDENTITY (S4, operator-ratified 2026-09-15),
+/// not its position: the set is SPARSE and kept sorted ascending, so 1, 3, 4
+/// is an ordinary state. Identity used to be the vector index, and a vanish
+/// therefore renumbered every higher workspace -- the user's tiles stayed
+/// alive but Super+3 stopped reaching them. i3 treats numbers as names and
+/// tmux keeps stable numbers with gaps; both refuse the renumbering.
 #[derive(Clone, Copy)]
 struct Workspace {
     root: usize,
     focused: u32,
+    number: u8,
 }
 
 #[derive(Clone)]
@@ -545,6 +553,7 @@ impl Layout {
         l.workspaces.push(Workspace {
             root,
             focused: root_id,
+            number: 1,
         });
         l.focused = root;
         l
@@ -618,6 +627,72 @@ impl Layout {
         self.active
     }
 
+    /// The ACTIVE workspace's number -- its identity, and what the `layout`
+    /// header's `active` token carries (S4). Distinct from
+    /// `active_workspace`, which is the internal index into a sparse set.
+    pub fn active_number(&self) -> u8 {
+        self.workspaces[self.active].number
+    }
+
+    /// The live workspace numbers, ascending -- the `layout` header's list.
+    /// A COUNT cannot stand in for this once the set is sparse: a bar told
+    /// "3" cannot know whether that means 1,2,3 or 1,3,4.
+    pub fn workspace_numbers(&self) -> Vec<u8> {
+        self.workspaces.iter().map(|w| w.number).collect()
+    }
+
+    /// Find workspace `n`, CREATING it if absent; returns its index, or None
+    /// when the number is out of range or the pane table is full.
+    ///
+    /// One place, because the create is where this gets subtle. The set is
+    /// sorted by number, so a create INSERTS rather than pushes -- and an
+    /// insert at or below `active` shifts the active index, which must move
+    /// with it or the seat silently changes workspace under the user.
+    ///
+    /// Super+N creates N DIRECTLY: the old "only the next free number" rule
+    /// existed to keep a dense vector hole-free (a property of the
+    /// representation) and mis-attributed i3, which creates workspace 5 on
+    /// Super+5 whether or not 2, 3 and 4 exist.
+    fn ensure_workspace(&mut self, n: u8) -> Option<usize> {
+        if n == 0 || n as usize > MAX_WORKSPACES {
+            return None;
+        }
+        if let Some(i) = self.workspaces.iter().position(|w| w.number == n) {
+            return Some(i);
+        }
+        // I-32: the count is bounded and creation fails CLEAN. Unique numbers
+        // in 1..=MAX_WORKSPACES bound the length on their own; the explicit
+        // check keeps that a stated invariant rather than an inference.
+        if self.workspaces.len() >= MAX_WORKSPACES {
+            return None;
+        }
+        let root = self.alloc(None, Kind::Leaf { surface: None })?;
+        let root_id = match self.id_of(root) {
+            Some(i) => i,
+            None => {
+                self.panes[root] = None; // roll back: no half-made workspace
+                return None;
+            }
+        };
+        let at = self
+            .workspaces
+            .iter()
+            .position(|w| w.number > n)
+            .unwrap_or(self.workspaces.len());
+        self.workspaces.insert(
+            at,
+            Workspace {
+                root,
+                focused: root_id,
+                number: n,
+            },
+        );
+        if at <= self.active {
+            self.active += 1;
+        }
+        Some(at)
+    }
+
     /// Every root EXCEPT the active one -- the subtrees `recompute` leaves
     /// dark and `apply_backgrounded` stamps dormant.
     fn inactive_roots(&self) -> Vec<usize> {
@@ -646,35 +721,23 @@ impl Layout {
         }
     }
 
-    /// Switch to workspace `k` (0-based). `k == count` CREATES it -- the i3
-    /// rule that Super+N on the next free number makes that workspace --
-    /// bounded by `MAX_WORKSPACES`; any number past the next free one is
-    /// refused rather than silently creating a run of empties.
+    /// Switch to workspace NUMBER `n` (1..=`MAX_WORKSPACES`), creating it if
+    /// it does not exist -- the actual i3 rule (S4).
     ///
     /// Focus is per workspace: the outgoing one's is saved and the incoming
     /// one's restored. A remembered leaf that died while the workspace was
     /// away falls back to the arriving root's first leaf, so a switch can
     /// never land focus on a freed slot.
-    pub fn switch_workspace(&mut self, k: usize) -> bool {
-        if k >= MAX_WORKSPACES || k == self.active || k > self.workspaces.len() {
-            return false;
+    pub fn switch_workspace(&mut self, n: u8) -> bool {
+        if self.workspaces.get(self.active).map(|w| w.number) == Some(n) {
+            return false; // already there
         }
-        if k == self.workspaces.len() {
-            // An exhausted pane table refuses the switch rather than leaving
-            // a half-made workspace behind (I-32: creation fails clean).
-            let root = match self.alloc(None, Kind::Leaf { surface: None }) {
-                Some(r) => r,
-                None => return false,
-            };
-            let root_id = match self.id_of(root) {
-                Some(i) => i,
-                None => return false,
-            };
-            self.workspaces.push(Workspace {
-                root,
-                focused: root_id,
-            });
-        }
+        // `ensure_workspace` may INSERT below `active` and bump it, so the
+        // outgoing index is read AFTER the call, never before.
+        let k = match self.ensure_workspace(n) {
+            Some(k) => k,
+            None => return false,
+        };
         let a = self.active;
         self.workspaces[a].focused = self.id_of(self.focused).unwrap_or(0);
         self.active = k;
@@ -733,39 +796,34 @@ impl Layout {
         dropped
     }
 
-    /// Move the FOCUSED leaf to workspace `k` (0-based) -- i3's
-    /// Super+Shift+N. OWNERSHIP-PRESERVING: the leaf keeps its id, its
-    /// surface and its status, and nothing is saved, restored or respawned
-    /// (HALCYON-WORKSPACES 4). `k == count` creates it, as the switch does.
+    /// Move the FOCUSED leaf to workspace NUMBER `n` -- i3's Super+Shift+N.
+    /// OWNERSHIP-PRESERVING: the leaf keeps its id, its surface and its
+    /// status, and nothing is saved, restored or respawned
+    /// (HALCYON-WORKSPACES 4). The target is CREATED if absent (S4).
     ///
     /// The subtle case is a focused leaf that IS this workspace's root:
     /// `detach_leaf` no-ops on a parentless pane, so moving it without
     /// re-seating would leave the SAME SLOT rooted in two workspaces at
     /// once. That branch mints a fresh empty root to leave behind.
-    pub fn move_focused_to_workspace(&mut self, k: usize) -> bool {
-        if k >= MAX_WORKSPACES || k == self.active || k > self.workspaces.len() {
-            return false;
+    pub fn move_focused_to_workspace(&mut self, n: u8) -> bool {
+        if self.workspaces.get(self.active).map(|w| w.number) == Some(n) {
+            return false; // already here
         }
         let leaf = self.focused;
         // An empty tile is not worth moving: it would trade one placeholder
         // for another and could strand the workspace it left.
+        //
+        // Judged BEFORE the target is ensured, or a refused move would leave
+        // a freshly-minted empty workspace behind it.
         if !self.is_leaf(leaf) || self.leaf_surface(leaf).is_none() {
             return false;
         }
-        if k == self.workspaces.len() {
-            let root = match self.alloc(None, Kind::Leaf { surface: None }) {
-                Some(r) => r,
-                None => return false,
-            };
-            let root_id = match self.id_of(root) {
-                Some(i) => i,
-                None => return false,
-            };
-            self.workspaces.push(Workspace {
-                root,
-                focused: root_id,
-            });
-        }
+        // May INSERT below `active` and bump it, so every index used below is
+        // read AFTER this point.
+        let k = match self.ensure_workspace(n) {
+            Some(k) => k,
+            None => return false,
+        };
         // Round 1 F4: allocate EVERY pane this move needs BEFORE detaching
         // the leaf. `detach_leaf`'s contract is that a leaf is never exposed
         // un-reinserted, and the old order broke it -- on an exhausted pool
@@ -2940,18 +2998,30 @@ impl Layout {
     /// depth-indented; `*` marks the focused leaf.
     pub fn render_text(&self) -> String {
         let mut s = String::new();
+        // S4: the ascending list of LIVE NUMBERS, never a count. The set is
+        // sparse, so a reader told "3" cannot know whether that means 1,2,3
+        // or 1,3,4 -- and the rail has to label its chips from this.
+        let mut nums = String::new();
+        for (i, w) in self.workspaces.iter().enumerate() {
+            if i > 0 {
+                nums.push(',');
+            }
+            let _ = core::fmt::write(&mut nums, format_args!("{}", w.number));
+        }
         let _ = core::fmt::write(
             &mut s,
             format_args!(
                 // HALCYON-WORKSPACES 4: the ratified channel for the bar and
-                // the tool -- one header line, no `workspace/` subtree. `active`
-                // is ONE-BASED, matching the ids beside it and the `01`..`09`
-                // the rail paints; the rows below stay the ACTIVE root's.
+                // the tool -- one header line, no `workspace/` subtree.
+                // `workspaces` is the ascending comma-separated list of live
+                // workspace NUMBERS, and `active` is the active workspace's
+                // NUMBER (S4, 2026-09-15): both are identities, never
+                // positions. The rows below stay the ACTIVE root's.
                 "epoch {} focused {} workspaces {} active {}",
                 self.epoch,
                 self.id_of(self.focused).unwrap_or(0),
-                self.workspaces.len(),
-                self.active + 1
+                nums,
+                self.active_number()
             ),
         );
         if let Some(z) = self.zoomed_id {
@@ -3791,24 +3861,112 @@ mod tests {
     }
 
     #[test]
-    fn a_switch_creates_the_next_workspace_and_focus_is_per_workspace() {
+    fn a_switch_creates_any_free_number_and_focus_is_per_workspace() {
         let mut l = Layout::new();
         let a_root = l.root();
         assert_eq!(l.workspace_count(), 1);
-        assert_eq!(l.active_workspace(), 0);
-        assert!(!l.switch_workspace(2), "a SKIPPED number is refused");
-        assert!(l.switch_workspace(1), "the next free number creates it (i3)");
+        assert_eq!(l.active_number(), 1);
+
+        // S4: a SKIPPED number is CREATED, not refused -- the INVERSE of the
+        // assertion this replaces. The old "only the next free number" rule
+        // kept a dense vector hole-free, a property of the representation,
+        // and it was attributed to i3, which creates workspace 5 on Super+5
+        // whether or not 2, 3 and 4 exist.
+        assert!(l.switch_workspace(3), "a skipped number is CREATED (i3)");
         assert_eq!(l.workspace_count(), 2);
-        assert_eq!(l.active_workspace(), 1);
+        assert_eq!(l.active_number(), 3);
+        assert_eq!(l.workspace_numbers(), alloc::vec![1u8, 3], "the set is SPARSE");
         assert_ne!(l.root(), a_root, "the new workspace has its own root");
         assert!(!l.in_active_root(a_root), "the old root is not in this tree");
-        assert!(!l.switch_workspace(MAX_WORKSPACES), "past the bound");
-        assert!(!l.switch_workspace(1), "already active");
+
+        assert!(!l.switch_workspace(MAX_WORKSPACES as u8 + 1), "past the bound");
+        assert!(!l.switch_workspace(0), "zero is not a workspace");
+        assert!(!l.switch_workspace(3), "already active");
+
         let b_focus = l.focused;
-        assert!(l.switch_workspace(0));
-        assert_eq!(l.focused, a_root, "workspace 1's focus came back");
         assert!(l.switch_workspace(1));
-        assert_eq!(l.focused, b_focus, "and workspace 2's did too");
+        assert_eq!(l.focused, a_root, "workspace 1's focus came back");
+        assert!(l.switch_workspace(3));
+        assert_eq!(l.focused, b_focus, "and workspace 3's did too");
+    }
+
+    /// `ensure_workspace` INSERTS by number to keep the set sorted, and an
+    /// insert at or below `active` shifts the active index -- which must move
+    /// with it, or the seat silently changes workspace under the user.
+    ///
+    /// Creating a LOWER number while a higher one is active is the only way
+    /// to reach that line, and every other workspace test creates in
+    /// ascending order, so without this one it is unexercised: a sabotage
+    /// there would not fire and the coverage would be shape, not bound.
+    ///
+    /// SABOTAGE: drop `if at <= self.active { self.active += 1; }` and the
+    /// active number becomes 2 -- the seat moved on its own.
+    #[test]
+    fn creating_a_lower_number_keeps_the_seat_where_it_was() {
+        let mut l = Layout::new();
+        assert!(l.switch_workspace(4), "to 4, skipping 2 and 3");
+        let four_root = l.root();
+        assert_eq!(l.active_number(), 4);
+        let _ = l.host_for(7, 0, 0).expect("a tile to move");
+
+        // Creating 2 sorts it BELOW the active workspace 4, shifting 4's
+        // index from 1 to 2.
+        assert!(l.move_focused_to_workspace(2), "create 2 below the active 4");
+        assert_eq!(
+            l.workspace_numbers(),
+            alloc::vec![1u8, 2, 4],
+            "inserted in order, not appended"
+        );
+        assert_eq!(l.active_number(), 4, "and the seat stayed on 4");
+
+        // The moved leaf WAS workspace 4's root, and `detach_leaf` no-ops on a
+        // parentless pane -- so that branch mints a FRESH empty root to leave
+        // behind rather than leaving one slot rooted in two workspaces.
+        // Asserting the root was UNCHANGED would contradict that design (it is
+        // what this test first claimed, and the failure was the premise, not
+        // the code). What must hold: 4 keeps a root of its own, now empty, and
+        // the tile is found in 2.
+        assert_ne!(l.root(), four_root, "workspace 4 got a fresh root");
+        assert!(
+            l.leaf_surface(l.root()).is_none(),
+            "and it is an empty placeholder"
+        );
+        assert!(l.switch_workspace(2));
+        assert_eq!(
+            l.leaf_surface(l.root()),
+            Some(7),
+            "the tile landed in workspace 2"
+        );
+    }
+
+    /// S4 (operator-ratified 2026-09-15): a workspace's NUMBER is its
+    /// identity, so a vanish must not renumber the survivors. Identity was
+    /// the vector index, and dropping an empty MIDDLE workspace shifted every
+    /// higher one down -- the user's tiles stayed alive but Super+4 stopped
+    /// reaching them and made a fresh empty workspace instead.
+    ///
+    /// SABOTAGE: have `ensure_workspace` push instead of inserting by number
+    /// (or drop `Workspace.number` and index again) and the survivor comes
+    /// back as 2 rather than 4.
+    #[test]
+    fn a_vanish_does_not_renumber_the_survivors() {
+        let mut l = Layout::new();
+        let _ = l.host_for(7, 0, 0).expect("workspace 1's tile");
+        assert!(l.switch_workspace(2), "workspace 2, left empty");
+        assert!(l.switch_workspace(4), "workspace 4");
+        let four = l.host_for(8, 0, 0).expect("workspace 4's tile");
+        assert_eq!(l.workspace_numbers(), alloc::vec![1u8, 2, 4]);
+
+        assert!(l.switch_workspace(1), "back to 1, so 2 is inactive AND empty");
+        assert_eq!(l.reap_empty_workspaces(), 1, "the empty middle one goes");
+        assert_eq!(
+            l.workspace_numbers(),
+            alloc::vec![1u8, 4],
+            "and 4 is STILL 4 -- a vanish never renumbers the survivors"
+        );
+        assert_eq!(l.active_number(), 1, "the seat did not move");
+        assert!(l.switch_workspace(4), "Super+4 still reaches the same work");
+        assert_eq!(l.leaf_surface(four), Some(8), "with its tile intact");
     }
 
     #[test]
@@ -3816,7 +3974,7 @@ mod tests {
         let mut l = Layout::new();
         let a_root = l.root();
         let _ = l.host_for(7, 0, 0);
-        assert!(l.switch_workspace(1));
+        assert!(l.switch_workspace(2));
         let _ = l.host_for(8, 0, 0);
         ws_lay(&mut l);
         let a = l.get(a_root).expect("the other root outlives the switch");
@@ -3835,15 +3993,15 @@ mod tests {
         // one root and annihilates every other workspace with nine.
         let mut l = Layout::new();
         let _ = l.host_for(7, 0, 0);
-        assert!(l.switch_workspace(1));
+        assert!(l.switch_workspace(2));
         let _ = l.host_for(8, 0, 0);
         let b_root = l.root();
-        assert!(l.switch_workspace(0));
+        assert!(l.switch_workspace(1));
         let a_root = l.root();
         l.close(a_root);
         assert!(l.get(b_root).is_some(), "the other root SURVIVES the close");
         assert_eq!(l.workspace_count(), 2);
-        assert!(l.switch_workspace(1));
+        assert!(l.switch_workspace(2));
         assert_eq!(l.root(), b_root);
         assert_eq!(l.leaf_surface(b_root), Some(8), "and still hosts its tile");
     }
@@ -3852,13 +4010,13 @@ mod tests {
     fn an_empty_inactive_workspace_vanishes_and_the_active_one_never_does() {
         let mut l = Layout::new();
         let _ = l.host_for(7, 0, 0);
-        assert!(l.switch_workspace(1)); // empty AND active
+        assert!(l.switch_workspace(2)); // empty AND active
         assert_eq!(l.reap_empty_workspaces(), 0, "the active one never goes");
         assert_eq!(l.workspace_count(), 2);
-        assert!(l.switch_workspace(0)); // now the empty one is inactive
+        assert!(l.switch_workspace(1)); // now the empty one is inactive
         assert_eq!(l.reap_empty_workspaces(), 1, "i3: the empty one goes");
         assert_eq!(l.workspace_count(), 1);
-        assert_eq!(l.active_workspace(), 0);
+        assert_eq!(l.active_number(), 1);
     }
 
     /// F1 (the W-2b architecture review, verified): `dissolve_if_single`
@@ -3877,7 +4035,7 @@ mod tests {
         let one = l.host_for(7, 0, 0).expect("workspace 1, first tile");
         let two = l.host_for(8, 0, 0).expect("workspace 1, second tile");
         assert_ne!(one, two, "the premise: workspace 1's root is a container");
-        assert!(l.switch_workspace(1), "to workspace 2");
+        assert!(l.switch_workspace(2), "to workspace 2");
         let ws2_root = l.root();
         // Close a tile INSIDE the dormant workspace. Its root then has one
         // child left and dissolves -- the moment the old code re-seated the
@@ -3889,7 +4047,7 @@ mod tests {
             "the ACTIVE workspace's root must not move when another workspace dissolves"
         );
         assert!(l.in_active_root(ws2_root));
-        assert!(l.switch_workspace(0), "back to workspace 1");
+        assert!(l.switch_workspace(1), "back to workspace 1");
         assert!(
             l.get(l.root()).is_some(),
             "workspace 1's root is a live slot, not the freed container"
@@ -3925,7 +4083,7 @@ mod tests {
     fn a_zoom_targeting_another_workspace_is_refused_at_the_setter() {
         let mut l = Layout::new();
         let dormant = l.host_for(7, 0, 0).expect("workspace 1's tile");
-        assert!(l.switch_workspace(1), "to workspace 2");
+        assert!(l.switch_workspace(2), "to workspace 2");
         assert!(
             !l.zoom_toggle(dormant),
             "a pane in another workspace is not zoomable"
@@ -3952,7 +4110,7 @@ mod tests {
         let mut l = Layout::new();
         let dormant = l.host_for(7, 0, 0).expect("workspace 1's tile");
         let dormant_id = l.id_of(dormant).expect("its id");
-        assert!(l.switch_workspace(1), "to workspace 2");
+        assert!(l.switch_workspace(2), "to workspace 2");
         l.zoomed_id = Some(dormant_id); // unreachable via the verbs; see above
         ws_lay(&mut l); // Profile::Legacy -- the shipped one
         let z = l.get(dormant).expect("the dormant leaf outlives the switch");
@@ -3977,11 +4135,11 @@ mod tests {
     fn closing_an_inactive_workspace_root_really_collapses_it() {
         let mut l = Layout::new();
         let _ = l.host_for(7, 0, 0).expect("workspace 1's tile");
-        assert!(l.switch_workspace(1), "to workspace 2");
+        assert!(l.switch_workspace(2), "to workspace 2");
         let ws2_root = l.root();
         let _ = l.host_for(8, 0, 0).expect("workspace 2's tile");
         assert_eq!(l.leaf_surface(ws2_root), Some(8));
-        assert!(l.switch_workspace(0), "back to workspace 1");
+        assert!(l.switch_workspace(1), "back to workspace 1");
 
         let unhosted = l.close(ws2_root);
         assert_eq!(unhosted, alloc::vec![8], "the surface is reported unhosted");
@@ -4010,7 +4168,7 @@ mod tests {
     fn focus_refuses_a_pane_in_another_workspace() {
         let mut l = Layout::new();
         let dormant = l.host_for(7, 0, 0).expect("workspace 1's tile");
-        assert!(l.switch_workspace(1), "to workspace 2");
+        assert!(l.switch_workspace(2), "to workspace 2");
         let here = l.focused;
         assert!(!l.focus(dormant), "a dormant pane is not focusable");
         assert_eq!(l.focused, here, "and focus did not move");
@@ -4028,7 +4186,7 @@ mod tests {
     fn a_split_in_a_dormant_workspace_does_not_capture_focus() {
         let mut l = Layout::new();
         let dormant = l.host_for(7, 0, 0).expect("workspace 1's tile");
-        assert!(l.switch_workspace(1), "to workspace 2");
+        assert!(l.switch_workspace(2), "to workspace 2");
         let here = l.focused;
         // The NEST branch: `dormant` is workspace 1's parentless root.
         let made = l.split(dormant, Mode::SplitH).expect("the tree still splits");
@@ -4068,11 +4226,11 @@ mod tests {
     fn a_move_refused_by_a_full_pane_table_leaves_the_leaf_attached() {
         let mut l = Layout::new();
         let _ = l.host_for(7, 0, 0).expect("workspace 1's tile");
-        assert!(l.switch_workspace(1), "to workspace 2");
+        assert!(l.switch_workspace(2), "to workspace 2");
         let _ = l
             .host_for(8, 0, 0)
             .expect("workspace 2's tile -- so its root is NOT a placeholder");
-        assert!(l.switch_workspace(0), "back to workspace 1");
+        assert!(l.switch_workspace(1), "back to workspace 1");
 
         let mut last = l.focused;
         while let Some(made) = l.split(l.focused, Mode::SplitH) {
@@ -4102,7 +4260,7 @@ mod tests {
         );
 
         assert!(
-            !l.move_focused_to_workspace(1),
+            !l.move_focused_to_workspace(2),
             "an exhausted pane table refuses the move"
         );
         assert_eq!(
@@ -4126,12 +4284,12 @@ mod tests {
     fn a_reused_slot_cannot_resurrect_a_remembered_focus() {
         let mut l = Layout::new();
         let _ = l.host_for(7, 0, 0).expect("workspace 1's tile");
-        assert!(l.switch_workspace(1), "to workspace 2");
+        assert!(l.switch_workspace(2), "to workspace 2");
         let ws2_root = l.root();
         let t2 = l.split(ws2_root, Mode::SplitH).expect("a second tile here");
         assert!(l.focus(t2));
         let remembered = l.focused;
-        assert!(l.switch_workspace(0), "to workspace 1 -- t2's slot is saved");
+        assert!(l.switch_workspace(1), "to workspace 1 -- t2's slot is saved");
 
         // t2 dies while we are away, and workspace 1 then allocates enough
         // panes to reuse its slot.
@@ -4147,7 +4305,7 @@ mod tests {
         }
         assert!(reused, "the premise: workspace 1 took the freed slot");
 
-        assert!(l.switch_workspace(1), "back to workspace 2");
+        assert!(l.switch_workspace(2), "back to workspace 2");
         assert!(
             l.in_active_root(l.focused),
             "focus must not be resurrected onto another workspace's pane"
@@ -4168,10 +4326,10 @@ mod tests {
     fn a_workspace_holding_a_reserved_skeleton_does_not_vanish() {
         let mut l = Layout::new();
         let _ = l.host_for(7, 0, 0).expect("workspace 1's tile");
-        assert!(l.switch_workspace(1), "to workspace 2");
+        assert!(l.switch_workspace(2), "to workspace 2");
         let skeleton = l.root();
         l.set_creator(skeleton, 42, 7); // a restore tool is building here
-        assert!(l.switch_workspace(0), "back to workspace 1");
+        assert!(l.switch_workspace(1), "back to workspace 1");
 
         assert_eq!(
             l.reap_empty_workspaces(),
@@ -4190,16 +4348,24 @@ mod tests {
         );
     }
 
+    /// S4: the header carries the ascending LIST of live numbers and the
+    /// ACTIVE number -- identities, not positions.
+    ///
+    /// The sparse case is the load-bearing one: with workspaces 1 and 3 a
+    /// COUNT would render "2", so asserting "1,3" is the only form a count
+    /// cannot satisfy. Asserting the dense case alone would pass under either
+    /// design, which is a check that cannot fail.
     #[test]
-    fn the_layout_header_carries_the_two_numbers_one_based() {
+    fn the_layout_header_carries_the_list_and_the_active_number() {
         let mut l = Layout::new();
         let first = l.render_text();
         let head = first.lines().next().unwrap();
         assert!(head.contains("workspaces 1 active 1"), "{}", head);
-        assert!(l.switch_workspace(1));
+
+        assert!(l.switch_workspace(3), "skip 2 -- the set goes sparse");
         let second = l.render_text();
         let head = second.lines().next().unwrap();
-        assert!(head.contains("workspaces 2 active 2"), "{}", head);
+        assert!(head.contains("workspaces 1,3 active 3"), "{}", head);
     }
 
     #[test]
@@ -4209,7 +4375,7 @@ mod tests {
         let _ = l.host_for(7, 0, 0);
         assert!(l.zoom_toggle(a_root));
         assert!(l.zoom_id().is_some());
-        assert!(l.switch_workspace(1));
+        assert!(l.switch_workspace(2));
         assert!(l.zoom_id().is_none(), "the zoom belonged to the tree it was made in");
         ws_lay(&mut l);
         assert!(!l.get(a_root).unwrap().visible, "the other tree stays dark");
@@ -4221,15 +4387,15 @@ mod tests {
         let mut l = Layout::new();
         let a_root = l.root();
         let _ = l.host_for(7, 0, 0);
+        assert!(l.switch_workspace(2));
         assert!(l.switch_workspace(1));
-        assert!(l.switch_workspace(0));
         // The focused leaf IS this workspace's root: `detach_leaf` no-ops on
         // a parentless pane, so without the re-seat this slot would end up
         // rooted in BOTH workspaces.
         assert_eq!(l.focused, a_root);
-        assert!(l.move_focused_to_workspace(1));
+        assert!(l.move_focused_to_workspace(2));
         assert_ne!(l.root(), a_root, "the workspace it left was re-seated");
-        assert!(l.switch_workspace(1));
+        assert!(l.switch_workspace(2));
         assert_eq!(l.leaf_surface(a_root), Some(7), "the tile kept its surface");
         assert!(l.in_active_root(a_root), "and lives in the target tree now");
     }

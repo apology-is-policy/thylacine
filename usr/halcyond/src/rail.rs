@@ -105,9 +105,13 @@ pub const READY: &str = "READY";
 /// What the top rail shows (8.1); the sources are the bin's.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct RailModel {
-    /// The workspaces, at least one (14.1: chips past one).
-    pub workspaces: u8,
-    /// The active workspace, 0-based.
+    /// The live workspace NUMBERS, ascending, at least one (14.1: chips past
+    /// one). S4: the set is sparse, so this is the identities themselves --
+    /// a count could not label `01 03 04`.
+    pub workspaces: Vec<u8>,
+    /// The active workspace's POSITION in `workspaces` (not its number): the
+    /// painter compares `i == active` over the chips it lays out, and the
+    /// label comes from the list.
     pub active: u8,
     /// The first chip shown when the strip scrolls (14.1: the ‹ › reveal);
     /// the painter clamps it so the active chip is always in view.
@@ -126,7 +130,7 @@ pub struct RailModel {
 impl RailModel {
     pub fn empty() -> RailModel {
         RailModel {
-            workspaces: 1,
+            workspaces: alloc::vec![1],
             active: 0,
             chip_scroll: 0,
             cwd: String::new(),
@@ -377,12 +381,15 @@ pub fn rail_list(
     rect(&mut cart, pad_l + at, my + at, hair, stroke, i.amber);
     rect(&mut cart, pad_l + at, my + at + stroke - hair, stroke, hair, i.amber);
     let label_x = pad_l + mark + sheet.ipx(BRAND_GAP);
-    let n = m.workspaces.max(1);
+    let n = (m.workspaces.len() as u8).max(1);
     let cluster_w = sheet.ipx(if narrow { BRAND_NARROW_W } else { BRAND_W });
     if narrow || n == 1 {
         let (run, face, fpx) = if narrow {
             let mut num = String::new();
-            let _ = core::fmt::write(&mut num, format_args!("{:02}", m.active as u32 + 1));
+            // S4: the ACTIVE NUMBER, read from the list -- `active` is a
+            // position, and with a sparse set position + 1 is not the number.
+            let active_num = m.workspaces.get(m.active as usize).copied().unwrap_or(1);
+            let _ = core::fmt::write(&mut num, format_args!("{:02}", active_num as u32));
             (tracked(gs, mono, mono_px, &num), mono, mono_px)
         } else {
             (tracked(gs, brand, px, "WORKSPACE 01"), brand, px)
@@ -453,7 +460,10 @@ pub fn rail_list(
                 rect(&mut cart, cx + inset, chip_y + chip_h - eh, chip_w - 2 * inset, eh, i.amber);
             }
             let mut num = String::new();
-            let _ = core::fmt::write(&mut num, format_args!("{:02}", c as u32 + 1));
+            // S4: the chip's LABEL is the number it stands for, not its
+            // position in the strip.
+            let chip_num = m.workspaces.get(c as usize).copied().unwrap_or(c + 1);
+            let _ = core::fmt::write(&mut num, format_args!("{:02}", chip_num as u32));
             let run = tracked(gs, mono, mono_px, &num);
             let base = chip_y + centred_in(gs, mono, mono_px, chip_h);
             let color = if active || hovered { i.text } else { i.secondary };
@@ -1062,7 +1072,7 @@ mod tests {
 
     fn model() -> RailModel {
         RailModel {
-            workspaces: 1,
+            workspaces: alloc::vec![1],
             active: 0,
             chip_scroll: 0,
             cwd: String::from("~/systems/compositor"),
@@ -1316,7 +1326,7 @@ mod tests {
     fn the_chips_lay_out_and_scroll_to_the_active_one() {
         let s = carbon();
         let mut gs = GlyphSource::new_vendored(64);
-        let three = RailModel { workspaces: 3, active: 1, ..model() };
+        let three = RailModel { workspaces: alloc::vec![1, 2, 3], active: 1, ..model() };
         let (c, z) = rail_list(&three, RailInk::default(), 1440, 34, &s, &mut gs);
         assert_eq!(z.chips.len(), 3);
         assert_eq!(z.chips[0].1, (32, 5, 26, 24));
@@ -1327,7 +1337,12 @@ mod tests {
         assert!(r.contains(&(66, 5 + 24 - 2, 18, 2, CARBON_AMBER)), "its amber edge inset 4");
         assert_eq!(rail_hit(&z, 70, 10), Some(RailHit::Chip(1)));
         assert_eq!(rail_hit(&z, 15, 10), Some(RailHit::Brand));
-        let nine = RailModel { workspaces: 9, active: 8, chip_scroll: 0, ..model() };
+        let nine = RailModel {
+            workspaces: alloc::vec![1, 2, 3, 4, 5, 6, 7, 8, 9],
+            active: 8,
+            chip_scroll: 0,
+            ..model()
+        };
         let (_, z) = rail_list(&nine, RailInk::default(), 1440, 34, &s, &mut gs);
         assert_eq!(z.chips_prev, Some((32, 0, 16, 33)));
         assert_eq!(z.chips_next, Some((32 + 16 + 157, 0, 16, 33)));
