@@ -2060,6 +2060,19 @@ pub extern "C" fn rs_main() -> i64 {
     // ACTIVE root's, so a live tile must LEAVE those rows while another
     // workspace is up and come back when its own returns.
     {
+        // The verb is the SEAT's (the apply-authority gate: the renderer, or
+        // a DECLARED session while it hosts), so the leg declares exactly as
+        // the control above did. Two findings came out of this leg failing:
+        // the verb had been written BELOW that default-deny gate without its
+        // conjunct, leaving the session compositor -- the real driver --
+        // unable to switch at all; and the SEAT IS A CONN, so both the
+        // declaration and the verb must ride the same one (`a`'s ring), which
+        // the first attempt got wrong by declaring on the ring and switching
+        // on the driver session.
+        if let Err(e) = a.global_ctl("session on") {
+            say!("tapestry-battery: FAIL workspaces: session on refused {:?}", e);
+            return 1;
+        }
         let ws_header = |s: &str| -> Option<(u32, u32)> {
             let head = s.lines().next()?;
             let (mut n, mut k) = (None, None);
@@ -2087,9 +2100,17 @@ pub extern "C" fn rs_main() -> i64 {
             return 1;
         }
         // SWITCH (and create: 2 is the next free number, the i3 rule).
-        let rc = raw_ctl(root, "workspace 2");
-        if rc < 0 {
-            say!("tapestry-battery: FAIL workspaces: `workspace 2` rc {}", rc);
+        // On `a`'s RING session, never the driver session `root`: the seat is
+        // a CONN, the declaration above was made on the ring, and this
+        // harness holds two sessions (its own comment at the `root` open says
+        // so). Driving the verb through `root` is what failed twice -- the
+        // gate saw an undeclared conn that hosts nothing and refused E_PERM,
+        // which `raw_ctl`'s flat `rc -1` could not tell from a tree refusal.
+        if let Err(e) = a.global_ctl("workspace 2") {
+            say!(
+                "tapestry-battery: FAIL workspaces: `workspace 2` refused {:?}",
+                e
+            );
             return 1;
         }
         let lay1 = read_file(root, "layout").unwrap_or_default();
@@ -2107,14 +2128,18 @@ pub extern "C" fn rs_main() -> i64 {
         }
         say!("battery: workspace 2 created and switched to; workspace 1 dormant");
         // A SKIPPED number is refused -- only the next free one may be made.
-        if raw_ctl(root, "workspace 9") >= 0 {
+        // Same session as the switch that just worked, so a refusal here is
+        // the TREE's rule and not the seat gate.
+        if a.global_ctl("workspace 9").is_ok() {
             say!("tapestry-battery: FAIL workspaces: a skipped number was accepted");
             return 1;
         }
         // RETURN, which also VANISHES the empty inactive workspace 2 (i3).
-        let rc = raw_ctl(root, "workspace 1");
-        if rc < 0 {
-            say!("tapestry-battery: FAIL workspaces: `workspace 1` rc {}", rc);
+        if let Err(e) = a.global_ctl("workspace 1") {
+            say!(
+                "tapestry-battery: FAIL workspaces: `workspace 1` refused {:?}",
+                e
+            );
             return 1;
         }
         let lay2 = read_file(root, "layout").unwrap_or_default();
@@ -2133,6 +2158,19 @@ pub extern "C" fn rs_main() -> i64 {
             }
         }
         say!("battery: workspace 1 returned with its tile; the empty workspace vanished");
+        // The control ONE VARIABLE away from the four legs above: undeclare,
+        // and the same verb that just worked must be refused. Without it the
+        // legs prove only that a switch CAN happen, never that the gate holds
+        // -- and a gate that quietly stopped refusing would read as green.
+        if let Err(e) = a.global_ctl("session off") {
+            say!("tapestry-battery: FAIL workspaces: session off refused {:?}", e);
+            return 1;
+        }
+        if a.global_ctl("workspace 2").is_ok() {
+            say!("tapestry-battery: FAIL workspaces: an UNDECLARED client switched the seat's workspace");
+            return 1;
+        }
+        say!("battery: an undeclared client cannot switch workspaces (the seat gate holds)");
     }
 
     unsafe { t_close(root) };

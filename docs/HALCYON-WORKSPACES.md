@@ -104,9 +104,14 @@ the H-4 file format at v1 (a save is the active workspace's tree).
 - **H-4**: `halcyon layout save <name>` saves the ACTIVE workspace's tree
   (v1 format, unchanged); `restore` rebuilds into the active workspace.
   `halcyon.rc` may `halcyon workspace N` (a new tool verb, the seat-gated
-  ctl `workspace N` behind it) before a restore to fill several. Saving
-  every workspace at once (a v2 format with a `workspace` header) is
-  named, not proposed.
+  ctl `workspace N` behind it) before a restore to fill several. **W-1b
+  measured what "seat-gated" costs the tool**: the ctl verb passes the
+  cfg-3 apply-authority gate only for the renderer, or for a DECLARED
+  session conn that hosts -- and a `halcyon` CLI is a per-process client
+  that is neither, so it cannot write tapestryd's `ctl` itself. The tool
+  verb must reach the switch THROUGH halcyond (the declared session),
+  the way the theme picker's word already travels. Saving every workspace
+  at once (a v2 format with a `workspace` header) is named, not proposed.
 - **Under a session**: the workspaces are the SESSION's (the console leaf
   stays backgrounded in every one, as today). On logout the tree collapses
   to the console as today, workspaces and all.

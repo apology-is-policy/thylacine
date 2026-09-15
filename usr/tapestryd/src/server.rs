@@ -17662,12 +17662,26 @@ impl Conn {
         let session_theme_verb = s.starts_with("theme ")
             && comp.session_declared(self.conn_id)
             && comp.conn_hosts(self.conn_id);
+        // HALCYON-WORKSPACES 4 (W-1b): the switch is the SEAT's on exactly
+        // the `scale` and `theme` terms -- a display-level structural act,
+        // and a per-process client moving another principal's workspace is
+        // the same cfg-3 lie those two refuse. This conjunct is what makes
+        // the verb reachable at all past a DEFAULT-DENY gate: without it only
+        // the renderer could switch, so the declared session compositor --
+        // the only driver the product actually has -- was refused by its own
+        // verb. `conn_hosts` scans `hosted_leaves`, which spans workspaces by
+        // design, so a seat whose tiles all sit in the workspace it just LEFT
+        // still holds the seat and can switch back.
+        let session_workspace_verb = s.starts_with("workspace ")
+            && comp.session_declared(self.conn_id)
+            && comp.conn_hosts(self.conn_id);
         if !Self::is_ungated_ctl(s)
             && !self.peer_is_renderer()
             && !session_menu_verb
             && !session_status_verb
             && !session_scale_verb
             && !session_theme_verb
+            && !session_workspace_verb
         {
             return Err(p9::E_PERM);
         }
@@ -17693,10 +17707,10 @@ impl Conn {
         if let Some(rest) = s.strip_prefix("workspace ") {
             // HALCYON-WORKSPACES 4 (W-1b): switch to workspace N, creating it
             // when N is the next free number (i3). ONE-BASED, like the header
-            // it moves and the `01`..`09` the rail paints. Budgeted like
-            // `scale` below, and for the same reason -- it IS a structural
-            // relayout. Not principal-gated: it can do nothing a Super+N the
-            // same seat already sends cannot, and the bound lives in the tree
+            // it moves and the `01`..`09` the rail paints. The SEAT's, by the
+            // apply-authority gate above (the renderer, or a declared session
+            // while it hosts), and budgeted like `scale` -- the same class: a
+            // structural relayout. The bound lives in the tree
             // (`MAX_WORKSPACES`), not in the caller.
             let n: usize = rest.trim().parse().map_err(|_| p9::E_INVAL)?;
             self.layout_verb_budget()?;

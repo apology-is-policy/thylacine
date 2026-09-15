@@ -1853,9 +1853,13 @@ start)` with opacity 0 at 55 % — reduced-motion honoured (§9.5).
   `in_active_root` zoom guard, the eighteen chords, and the `close_inner`
   root-arm fix — it freed the whole pane pool, which with several live
   roots annihilates every other workspace; the as-built note in §14.1).
-  **W-1b owes** the seat-gated `workspace N` ctl verb and the battery leg
-  (switch / dormant / return / vanish), since the battery is a client and
-  cannot inject a chord.
+  **W-1b LANDED** the `workspace N` ctl verb — the SEAT's, on exactly the
+  `scale`/`theme` terms (the renderer, or a declared session while it hosts),
+  budgeted like `scale` — and the battery leg (switch / dormant / return /
+  vanish / the undeclared-refusal control), since the battery is a client and
+  cannot inject a chord. The first cut of the verb sat below the cfg-3
+  apply-authority gate without its conjunct, which left it renderer-only and
+  so unreachable by the session compositor; the gate leg caught it.
 - **I-8 — effects and motion.** The two ops, the glows, the backdrop, the
   transitions.
 - **I-9 — parity gate, audit, rollout.** ACCEPTANCE-TESTS in full against
@@ -2048,9 +2052,15 @@ rather than enlarging it — workspaces add no resource ceiling. The `layout`
 header carries `workspaces N active K`, ONE-BASED to match the ids beside it
 and the `01`..`09` the rail paints; the per-pane rows stay the active root's.
 Super+1..9 switch (creating only the next free number) and Super+Shift+1..9
-move, ownership-preserving. **Still N = 1 on screen** until W-1b gives the
-switch a client-reachable driver (the seat-gated `workspace N` verb) and W-2
-feeds the two numbers to the bar — the chip painter has been ready since I-4.
+move, ownership-preserving. **W-1b gave the switch its client-reachable
+driver**: the `workspace N` verb, one-based, the SEAT's on the `scale`/`theme`
+terms (the renderer, or a declared session while it hosts — a per-process
+client switching another principal's workspace is the cfg-3 lie that gate
+exists to refuse), budgeted like `scale`, and refusing a skipped number or an
+exhausted pane table with `E_INVAL` rather than a silent success that would
+leave the caller believing it had switched.
+**Still N = 1 on the bar** until W-2 feeds the two numbers to it — the chip
+painter has been ready since I-4.
 
 ### 14.2 The object verb menu (H-3c's `Role::Menu` surface in the round-2 look)
 

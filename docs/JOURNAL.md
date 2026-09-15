@@ -581,6 +581,91 @@ vanish) -- the battery is a client and cannot inject a chord, so the leg needs
 that verb as its driver. N is still 1 on screen until W-2 feeds the two numbers
 to the bar; the chip painter has been ready since I-4.
 
+### W-1b: the verb, the gate it was missing, and the seat that turned out to be a conn
+
+W-1a left the switch with exactly one driver -- `Super+N`, intercepted on the
+compositor's own key path above the event stream. A 9P client cannot inject
+that, so the acceptance battery had no way to exercise a workspace switch.
+W-1b adds the `workspace N` ctl verb as that driver, plus the battery leg and
+its expect arms.
+
+It was committed UNGATED at the 600k self-compaction (`bc416b20`, deliberately
+unpushed) and the gate then failed it **deterministically, three attempts,
+identically**: `workspaces: `workspace 2` rc -1`. Two separate defects were
+hiding behind that one message, and the second was invisible until the first
+was fixed.
+
+**Finding 1 -- the missing conjunct, and a false claim of my own.**
+`global_ctl` puts the cfg-3 apply-authority gate about thirty lines ABOVE its
+`strip_prefix` chain: DEFAULT-DENY, passed unconditionally only by
+`peer_is_renderer()`, with every exemption spelled out as its own conjunct
+(`menu`, `tag <id> status`, `scale`, `theme` -- each `session_declared(conn)
+&& conn_hosts(conn)`). I had written `workspace N` directly above `scale`,
+read `scale`'s arm, found nothing there but `layout_verb_budget()`, and wrote
+in the commit message -- as MEASURED -- that `scale` is not principal-gated.
+That was false. `scale`'s arm is bare precisely BECAUSE its authority was
+already decided above it. **Authority comes before syntax in that handler, so
+reading an arm's body proves nothing about its gating.** The consequence was
+not a test artefact: a verb below that gate without its own conjunct is
+reachable by the RENDERER ALONE, so halcyond -- the declared session
+compositor, the only driver the product actually has, and the one W-2's bar
+needs -- could not switch workspaces at all. Worse, `docs/HALCYON-WORKSPACES.md`
+had said "the seat gate" / "seat-gated" in three places (§4 lines 98, 106,
+118). I measured the code instead of reading the binding design, and measured
+it wrong. Fixed by `session_workspace_verb` on exactly the `scale`/`theme`
+terms.
+
+**Finding 2 -- the seat is a CONN.** With the conjunct in and the leg
+declaring `session on`, the gate failed again at the same leg with the same
+`rc -1`. A byte-identical failure is the ramfs-bake trap's signature, so the
+first question was whether the new binary had shipped -- refuted by
+measurement: the compositor logged a SECOND `session declared by conn 9`
+immediately before the failure, and the bake had REGENERATED the pool and
+rebuilt the ramfs in the same pass. The exhausted-pool branch was refuted too:
+the layout dump showed 5 live panes of 32. What remained was the gate, and the
+mechanism is that every conjunct is `self.conn_id`-scoped. The battery holds
+TWO sessions -- its own "driver session" (`t_open /srv/tapestry`, whose comment
+at the open says exactly that) and libtapestry's `EventRing::connect`, one 9P
+session plus one Loom ring per client (H-3c-2). It declared through the ring
+and switched through the driver session, and the gate correctly refused a conn
+that had declared nothing and hosted nothing. The two failures were
+indistinguishable because the harness's `raw_ctl` flattens every errno to -1:
+E_PERM from the gate and E_INVAL from the tree arrive as the same number. All
+four verbs now ride `Surface::global_ctl`, which returns a typed `TapError`,
+so the next refusal names itself. **Declaration and act must ride the same
+conn.**
+
+**What the fix is worth, measured.** `ls-gfx-panes` PASS **48 s, one attempt,
+hvf**, verified by content rather than exit code (the harness's console log
+does not echo passing legs, and I had already been handed one `exit 0` that
+came from a trailing `tail`): all three battery witnesses in the transcript
+(3204/3210/3216) and all three leg verdicts in the steps file (49/50/51).
+tapestryd host 48/48. The third leg is the one that matters most -- an
+UNDECLARED-refusal control one variable from the other three (same conn, only
+the declaration changes), so a gate that quietly stopped refusing cannot read
+as green.
+
+**The census, because a missing conjunct is a class and not an instance.**
+Every other verb below that gate: `mode`, `mode auto`, `clock-rate`, `chord`,
+`chord-reset`, `gaps` are renderer-only by design, and the battery already
+asserts all four families are refused from a non-renderer. halcyond drives
+only exempt verbs (`theme`, `scale`, `menu place`, `tag <id> status`). aurora
+drives the renderer-only ones and IS the renderer. `halcyon`'s `mode` goes to
+the `layout` file, under the pane-authority gate, not this one. No siblings.
+
+**A W-2 consequence worth having in writing now**: the planned `halcyon
+workspace N` tool verb is a per-process CLI that neither declares nor hosts,
+so it cannot write tapestryd's `ctl` itself -- it must reach the switch through
+halcyond, the way the theme picker's word already travels. Recorded in
+`docs/HALCYON-WORKSPACES.md` §4 rather than left to be rediscovered at W-2.
+
+**An operational note that cost evidence.** `tools/test-interactive.sh` clears
+`ls-ci-<name>.attempt*.log` at scenario start (retention bounded to the last
+run, ~line 508). I went to preserve the failing attempt logs AFTER launching
+the next run and they were already gone; the decisive lines survive only
+because they had been quoted at the time. Copy the evidence before launching
+the retry.
+
 
 ## Run 46o (2026-09-14, Fable 5.1 max) -- the Halcyon Instrument arc opens: reading the Carbon Optics kit against the tree
 

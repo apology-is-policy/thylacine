@@ -1785,5 +1785,87 @@ Ground truth: `usr/tapestryd/src/pane.rs`, `usr/tapestryd/src/chords.rs` (the
 eighteen chords; `action_of` PARSES `workspace-N` / `move-to-N` rather than
 listing eighteen arms, so the render and parse directions cannot drift), and
 the two `exec_chord` arms in `server.rs`. Host-tested at 48 (41 before).
-OWED in W-1b: the seat-gated `workspace N` ctl verb and the battery leg --
-the battery is a client and cannot inject a chord.
+The `workspace N` ctl verb and the battery leg landed in W-1b, below.
+
+## The workspace verb -- the switch a CLIENT can reach (2026-09-15, W-1b)
+
+W-1a gave the tree live roots but only one driver: `Super+N` on the
+compositor's own key path, intercepted ABOVE the event stream. A 9P client
+cannot inject that, so the acceptance battery had no way to exercise a switch
+-- and a leg that drove one through QMP keys would be testing the key path,
+not the workspace tree. `global_ctl` therefore gains `workspace N`,
+one-based like the header it moves and the `01`..`09` the rail paints,
+sitting just above `scale`.
+
+**The gating question was measured WRONG first, and the gate is the reason
+this section exists.** The verb was written directly above `scale`, whose arm
+carries nothing but `layout_verb_budget()` -- from which the first reading
+concluded that `scale` was not principal-gated and that "the seat class" named
+only a verb CLASS. That was false. Thirty lines further up sits the cfg-3
+apply-authority gate: DEFAULT-DENY over every global verb, passed
+unconditionally only by `peer_is_renderer()`, with each exemption spelled out
+as its own conjunct (`menu`, `tag <id> status`, `scale`, `theme` -- each
+`session_declared(conn) && conn_hosts(conn)`). `scale`'s arm is bare precisely
+BECAUSE its authority was already decided above it. Reading an arm's body and
+concluding an absence of gating is the error to avoid here: in this handler,
+authority comes before syntax.
+
+A verb added below that gate without its own conjunct is therefore reachable
+by the RENDERER ALONE. That is what shipped in the first W-1b commit, and its
+consequence was not a test artefact: the declared session compositor --
+halcyond, the only driver the product actually has, and the one W-2's bar
+would have used -- could not switch workspaces at all. `session_workspace_verb`
+closes it on exactly the `scale`/`theme` terms. One interaction is worth
+stating because it holds by construction rather than by care: `conn_hosts`
+scans `hosted_leaves`, which spans workspaces by design (W-1a), so a seat
+whose every tile sits in the workspace it just LEFT still holds the seat and
+can switch back -- had that scan been filtered to visible panes, a switch away
+would have revoked the authority needed to switch home.
+
+**Three dispositions, and the reason the middle one is not an error.**
+`n == 0` or `n > MAX_WORKSPACES` is `E_INVAL` at the door. Switching to the
+workspace already active returns `Ok` -- idempotent, because a caller that
+asks for where it already is has not failed at anything. Everything else is
+the TREE's verdict: `switch_workspace` refuses a SKIPPED number (only the
+next free one may be created, the i3 rule) and refuses an exhausted pane
+table (I-32: creation fails clean rather than leaving a half-made workspace),
+and both come back as `E_INVAL` rather than a silent success that would leave
+the caller believing it had switched when nothing moved.
+
+The verb ends in `comp.reconcile()`, which is where the switch becomes
+visible: `reconcile` reaps empty inactive workspaces before
+`apply_backgrounded` stamps the dormancy, so the i3 vanish and the darkening
+of the workspace just left both ride the one relayout rather than needing
+their own.
+
+**The seat is a CONN, and that is sharper than it sounds.** Every conjunct
+above is `self.conn_id`-scoped, so the authority belongs to a *connection*,
+not to a process or a principal. A client holding more than one session to
+the compositor therefore has the seat on at most one of them -- and the
+acceptance battery is exactly such a client: it opens its own "driver
+session" for global reads and writes, while `Surface::open` goes through
+libtapestry's `EventRing::connect`, which is one 9P session plus one Loom
+ring per client (H-3c-2). The first fix declared `session on` through the
+ring and then issued `workspace 2` through the driver session, and the gate
+correctly refused a conn that had declared nothing and hosted nothing. The
+symptom was indistinguishable from the original defect -- same leg, same
+flat `rc -1` -- because the harness's raw write path collapses every errno
+to -1; routing the verb through `Surface::global_ctl`, which returns a typed
+`TapError`, is what makes a future refusal name itself. Declaration and act
+must ride the same conn.
+
+**The witness is tile PRESENCE, not a pixel.** The `layout` per-pane rows are
+the active root's, so a live tile must LEAVE those rows while another
+workspace is up and come back when its own returns -- `find_pane(&layout,
+a.id)` reads exactly that. The battery leg asserts the header
+`workspaces N active K` at each step (`1 1` -> `2 2` -> `1 1`), that the
+dormant tile is absent from the rows in between, that `workspace 9` is
+REFUSED while workspace 2 is up (the skip), and that the empty workspace 2
+VANISHES on the return -- the header reading `1 1` rather than `1 2` is what
+proves the vanish happened.
+
+Ground truth: the verb in `usr/tapestryd/src/server.rs`; the leg in
+`usr/tapestry-battery/src/main.rs` (unowned by the vault -- the sweep is
+filed); the two expect arms in `tools/interactive/ls-gfx-panes.exp`, placed
+BEFORE the `tapestry-battery: PASS` block, since expect consumes its arms in
+order and an arm after the PASS could never match.
