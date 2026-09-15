@@ -74,6 +74,13 @@ pub struct RailBar {
     painted: Option<(RailModel, RailInk)>,
     /// The zones of the last paint: the hit test's input.
     zones: RailZones,
+    /// The workspace NUMBERS of the last paint, set in the SAME place as
+    /// `zones` so the two cannot disagree (r2 F6). The chip arm resolved its
+    /// number through `painted` instead, which a CONFIGURE nulls (and a
+    /// dropped present never restores) while `zones` stays populated: the
+    /// press then hit-tested fine and resolved to nothing, so it was silently
+    /// swallowed. A hit and its meaning must come from one paint.
+    painted_ws: Vec<u8>,
     /// The zones last said (test builds), keyed on the targets only.
     said_zones: Option<RailZones>,
     failed_said: bool,
@@ -92,6 +99,7 @@ impl RailBar {
             surf: None,
             painted: None,
             zones: RailZones::default(),
+            painted_ws: Vec::new(),
             said_zones: None,
             failed_said: false,
             want_mint: true,
@@ -239,9 +247,9 @@ impl RailBar {
                                     // position would switch to the wrong
                                     // workspace.
                                     Some(RailHit::Chip(n)) => self
-                                        .painted
-                                        .as_ref()
-                                        .and_then(|(m, _)| m.workspaces.get(n as usize).copied())
+                                        .painted_ws
+                                        .get(n as usize)
+                                        .copied()
                                         .map(RailAction::Workspace),
                                     Some(RailHit::ChipsPrev) => Some(RailAction::ChipsScroll(-1)),
                                     Some(RailHit::ChipsNext) => Some(RailAction::ChipsScroll(1)),
@@ -367,6 +375,7 @@ impl RailBar {
                     }
                 }
                 self.zones = zones;
+                self.painted_ws = model.workspaces.clone();
                 self.painted = Some((model.clone(), ink));
             }
             Err(_) => {

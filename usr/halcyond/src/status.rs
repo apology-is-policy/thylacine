@@ -311,7 +311,11 @@ pub fn status_list(
     // set was dense. `m.active` stays a POSITION, so the active test is
     // unchanged. (The rail carries the other painter of this pair; a fix to
     // one of them is not a property of the system.)
-    let ws_count = m.workspaces.len().max(1) as u8;
+    // r2 F5: the floor goes on the u8 side, as the rail's painter already
+    // does it. The two painters were each safe by a DIFFERENT accident; the
+    // parser's bound now covers both, and matching them removes the asymmetry
+    // that made that worth arguing about.
+    let ws_count = (m.workspaces.len() as u8).max(1);
     for i in 0..ws_count {
         let label_num = m.workspaces.get(i as usize).copied().unwrap_or(i + 1);
         let mut num = String::new();

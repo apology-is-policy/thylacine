@@ -818,11 +818,32 @@ impl Layout {
         if !self.is_leaf(leaf) || self.leaf_surface(leaf).is_none() {
             return false;
         }
+        // r2 F4: allocate the replacement root BEFORE ensuring the target.
+        // `ensure_workspace` mints a workspace whose root is an empty
+        // placeholder, so `pre_container` below is only ever needed for a
+        // workspace that ALREADY existed -- making "ensure created it, then a
+        // later alloc failed" the one way a refused move could strand a
+        // freshly-minted empty workspace. Allocating first closes that window
+        // by construction instead of unwinding it, and whether the leaf needs
+        // replacing is knowable here: it does iff it is its workspace's root.
+        let pre_fresh = if self.get(leaf).and_then(|p| p.parent).is_some() {
+            None
+        } else {
+            match self.alloc(None, Kind::Leaf { surface: None }) {
+                Some(f) => Some(f),
+                None => return false, // pane table full: untouched
+            }
+        };
         // May INSERT below `active` and bump it, so every index used below is
         // read AFTER this point.
         let k = match self.ensure_workspace(n) {
             Some(k) => k,
-            None => return false,
+            None => {
+                if let Some(f) = pre_fresh {
+                    self.panes[f] = None; // nothing was made: leave nothing behind
+                }
+                return false;
+            }
         };
         // Round 1 F4: allocate EVERY pane this move needs BEFORE detaching
         // the leaf. `detach_leaf`'s contract is that a leaf is never exposed
@@ -833,7 +854,12 @@ impl Layout {
         // `pane/` readdir. `move_dir` already had this ordering right
         // ("pane table full: untouched"); this path had inverted it.
         let tr_now = self.workspaces[k].root;
-        let target_is_placeholder = self.is_leaf(tr_now) && self.leaf_surface(tr_now).is_none();
+        // r2 F3: `reap_empty_workspaces` was taught to respect a placement
+        // reservation (S5); this path judged "placeholder" on EMPTINESS alone
+        // and freed a restore tool's reserved skeleton root out from under it.
+        let target_is_placeholder = self.is_leaf(tr_now)
+            && self.leaf_surface(tr_now).is_none()
+            && !self.subtree_reserved(tr_now);
         let pre_container = if target_is_placeholder {
             None
         } else {
@@ -846,17 +872,9 @@ impl Layout {
                 },
             ) {
                 Some(c) => Some(c),
-                None => return false, // pane table full: untouched
-            }
-        };
-        let pre_fresh = if self.get(leaf).and_then(|p| p.parent).is_some() {
-            None
-        } else {
-            match self.alloc(None, Kind::Leaf { surface: None }) {
-                Some(f) => Some(f),
                 None => {
-                    if let Some(c) = pre_container {
-                        self.panes[c] = None; // roll back the container
+                    if let Some(f) = pre_fresh {
+                        self.panes[f] = None; // roll back the hoisted leaf
                     }
                     return false; // pane table full: untouched
                 }
@@ -1228,6 +1246,13 @@ impl Layout {
                     // A new program takes the tile: its status starts fresh.
                     p.status = Status::Resting;
                     p.claim_token = None;
+                    // r2 F2 (P0): the H-4d reservation has SERVED ITS PURPOSE
+                    // the moment the leaf is FILLED. Holding it past that made
+                    // `subtree_reserved` true for every leaf halcyond ever
+                    // split -- its session conn outlives the session's tiles --
+                    // which silently disabled the ratified vanish rule.
+                    p.creator_conn = 0;
+                    p.creator_peer = 0;
                     self.epoch += 1;
                     return Some(f);
                 }
@@ -1272,6 +1297,9 @@ impl Layout {
             *s = Some(n);
             p.status = Status::Resting;
             p.claim_token = None;
+            // r2 F2 (P0): filled means the reservation is spent. See `host_for`.
+            p.creator_conn = 0;
+            p.creator_peer = 0;
             self.epoch += 1;
             Some(slot)
         } else {
@@ -1347,6 +1375,11 @@ impl Layout {
                 p.kind = Kind::Leaf { surface: None };
                 p.status = Status::Resting;
                 p.claim_token = None;
+                // r2 F2 (P0): a collapsed root is a PRISTINE root -- the rest
+                // of this block already says so. A reservation that outlived
+                // the tile it was stamped beside pinned the workspace forever.
+                p.creator_conn = 0;
+                p.creator_peer = 0;
                 p.weight = DEFAULT_WEIGHT;
                 p.dividers.clear();
                 p.separator = Rect::ZERO;
@@ -1758,6 +1791,17 @@ impl Layout {
     /// the h axis, Stacked the v axis). The moved leaf keeps focus.
     pub fn move_dir(&mut self, slot: usize, dir: Dir) -> bool {
         if !self.is_leaf(slot) {
+            return false;
+        }
+        // r2 F1: round 1 closed the cross-workspace class at the FOCUS
+        // chokepoint, and this is a STRUCTURAL verb taking a caller-supplied
+        // slot -- `slot_of_id` is global by design, so a dormant pane's id is
+        // reachable by verb. Its root-wrap branch below reads `self.root()`
+        // (the ACTIVE root) unconditionally, so it would graft the pane out of
+        // its own workspace and re-parent a root the caller never named.
+        // Refusing matches `focus`'s precedent; teaching the wrap to re-seat
+        // the pane's OWN workspace root would be a new feature, not a fix.
+        if !self.in_active_root(slot) {
             return false;
         }
         let horiz = dir.horizontal();
@@ -4398,5 +4442,201 @@ mod tests {
         assert!(l.switch_workspace(2));
         assert_eq!(l.leaf_surface(a_root), Some(7), "the tile kept its surface");
         assert!(l.in_active_root(a_root), "and lives in the target tree now");
+    }
+
+    /// r2 F2 (P0): S5 taught the vanish rule to respect a placement
+    /// RESERVATION, but `creator_conn` was never cleared when the leaf it
+    /// reserved was FILLED or when the root it sat on COLLAPSED. The rail's
+    /// SPLIT H stamps halcyond's own session conn -- alive for the whole
+    /// session -- so every workspace a session had split in stopped
+    /// vanishing, silently, for the rest of that session.
+    ///
+    /// The battery cannot see this: it never issues a `split` VERB, so its
+    /// roots keep `creator_conn == 0` and vanish normally.
+    ///
+    /// SABOTAGE: drop the `creator_conn` clear in `host_into` and the reap
+    /// returns 0 -- the emptied workspace is pinned for good.
+    #[test]
+    fn a_workspace_a_session_split_and_emptied_still_vanishes() {
+        let mut l = Layout::new();
+        let _ = l.host_for(7, 0, 0).expect("workspace 1's tile");
+        assert!(l.switch_workspace(2), "to workspace 2");
+        let a = l.host_for(8, 0, 0).expect("tile A");
+
+        // The rail's SPLIT H as `pane_cmd` performs it: the new empty leaf is
+        // RESERVED to the conn that split it (H-4d).
+        let b = l.split(a, Mode::SplitH).expect("the split");
+        l.set_creator(b, 99, 5);
+        let _ = l.host_into(9, b).expect("tile B fills the reserved leaf");
+
+        let _ = l.close(a);
+        assert_eq!(l.root(), b, "the dissolve promoted B to be the root");
+        let _ = l.close(b);
+        assert!(l.is_empty_leaf(b), "the root collapsed back to an empty leaf");
+
+        assert!(l.switch_workspace(1), "back to workspace 1");
+        assert_eq!(
+            l.reap_empty_workspaces(),
+            1,
+            "a workspace whose tiles are gone vanishes -- split in or not"
+        );
+    }
+
+    /// r2 F1: round 1 closed the cross-workspace class at the FOCUS
+    /// chokepoint. `move_dir` is a STRUCTURAL verb and read the ACTIVE root
+    /// unconditionally, so its root-wrap branch grafted a pane out of a
+    /// DORMANT workspace onto the active root -- re-parenting a root the user
+    /// never asked about, and taking a tile from the workspace holding it.
+    /// `slot_of_id` is global by design, so the id is reachable by verb.
+    ///
+    /// The tile needs a PARENT for the walk to reach the wrap branch: a
+    /// parentless one returns false at `sub == slot` and the test would pass
+    /// having never reached the line it exists to constrain.
+    ///
+    /// SABOTAGE: drop the `in_active_root` guard and this returns true with
+    /// the active root re-parented under a fresh container.
+    #[test]
+    fn a_directional_move_refuses_a_pane_in_another_workspace() {
+        let mut l = Layout::new();
+        let _ = l.host_for(7, 0, 0).expect("workspace 1's tile");
+        assert!(l.switch_workspace(2), "to workspace 2");
+        let t1 = l.host_for(8, 0, 0).expect("workspace 2's first tile");
+        let t2 = l.split(t1, Mode::SplitH).expect("a second tile beside it");
+        let _ = l.host_into(9, t2).expect("fill it");
+        assert!(l.get(t2).and_then(|p| p.parent).is_some(), "it has a parent");
+        assert!(l.switch_workspace(1), "back to workspace 1");
+        let a_root = l.root();
+
+        assert!(
+            !l.move_dir(t2, Dir::Up),
+            "a pane in another workspace is not movable from this seat"
+        );
+        assert_eq!(l.root(), a_root, "the active root was not re-parented");
+        assert!(!l.in_active_root(t2), "and the tile stayed where it was");
+    }
+
+    /// r2 F3: `reap_empty_workspaces` was taught to respect a reservation
+    /// (S5); this path was not. The move judges "placeholder" on EMPTINESS
+    /// alone, so an arriving tile freed a restore tool's reserved skeleton
+    /// root and the tool's later `create claim=` found nothing.
+    ///
+    /// SABOTAGE: drop the `subtree_reserved` conjunct and the skeleton slot
+    /// is freed by `free_subtree`.
+    #[test]
+    fn a_move_does_not_destroy_a_reserved_skeleton_root() {
+        let mut l = Layout::new();
+        let _ = l.host_for(7, 0, 0).expect("the tile that will move");
+        assert!(l.switch_workspace(3), "to workspace 3");
+        let skeleton = l.root();
+        l.set_creator(skeleton, 42, 7); // a restore tool is building here
+        assert!(l.switch_workspace(1), "back to workspace 1");
+
+        assert!(l.move_focused_to_workspace(3), "the move lands");
+        assert!(
+            l.get(skeleton).is_some(),
+            "the reserved skeleton survived the arriving tile"
+        );
+    }
+
+    /// r2 F4: a move refused by an exhausted pane table must leave NOTHING
+    /// behind -- and the commit body claimed exactly that, having closed only
+    /// one of the two doors. The empty-tile refusal is judged before the
+    /// ensure; the ALLOCATION refusals were not.
+    ///
+    /// The premise needs care: the strand only occurs when the focused leaf is
+    /// its own workspace's ROOT (so a replacement must be allocated) AND the
+    /// target is absent (so the ensure mints one). Filling the pool from
+    /// ANOTHER workspace keeps workspace 1 a single parentless hosted leaf,
+    /// and freeing exactly one slot leaves room for the ensure but not for
+    /// the leaf after it -- which is the window.
+    ///
+    /// SABOTAGE: move the `pre_fresh` alloc back below the ensure and the
+    /// count goes to 2 -- workspace 5 exists, empty and unasked-for.
+    #[test]
+    fn a_move_refused_by_a_full_pane_table_mints_no_workspace() {
+        let mut l = Layout::new();
+        let home = l.host_for(7, 0, 0).expect("workspace 1's tile");
+        assert!(l.switch_workspace(2), "fill the pool from somewhere else");
+        while l.split(l.focused, Mode::SplitH).is_some() {}
+
+        // Free EXACTLY one slot: a leaf whose parent keeps >= 2 children
+        // dissolves nothing, so one close frees one pane.
+        let parent = l
+            .get(l.focused)
+            .and_then(|p| p.parent)
+            .expect("the fill nested it");
+        let kids = match l.get(parent).map(|p| &p.kind) {
+            Some(Kind::Container { children, .. }) => children.clone(),
+            _ => Vec::new(),
+        };
+        assert!(kids.len() >= 3, "the premise: closing one dissolves nothing");
+        assert!(l.is_leaf(kids[0]), "and the one closed is a leaf");
+        let _ = l.close(kids[0]);
+
+        assert!(l.switch_workspace(1), "back to workspace 1");
+        assert_eq!(l.focused, home, "its focused leaf IS its root");
+        assert!(l.get(home).and_then(|p| p.parent).is_none(), "parentless");
+        let before = l.workspace_count();
+
+        assert!(!l.move_focused_to_workspace(5), "one free slot is not two");
+        assert_eq!(
+            l.workspace_count(),
+            before,
+            "and the refusal minted no workspace"
+        );
+    }
+
+    /// r2 F2, the HOST half in isolation. The end-to-end vanish test covers
+    /// this clear and `close_inner`'s TOGETHER -- measured: reverting either
+    /// one alone leaves that test green, because along its path the other
+    /// still lifts the reservation. A property with no per-site witness is
+    /// shape, not bound, so each site gets its own.
+    ///
+    /// SABOTAGE: drop the clear in `host_into` and the second assert fails.
+    #[test]
+    fn filling_a_reserved_leaf_spends_its_reservation() {
+        let mut l = Layout::new();
+        let a = l.host_for(7, 0, 0).expect("a tile");
+        let b = l.split(a, Mode::SplitH).expect("the split's new leaf");
+        l.set_creator(b, 99, 5);
+        assert!(l.subtree_reserved(b), "the premise: the split reserved it");
+
+        let _ = l.host_into(9, b).expect("a program takes the tile");
+        assert!(
+            !l.subtree_reserved(b),
+            "a FILLED leaf is no longer spoken for -- the reservation existed \
+             to keep it empty until its builder arrived"
+        );
+    }
+
+    /// r2 F2, the COLLAPSE half in isolation. The stamp sits on the root
+    /// CONTAINER, which `host_into` never touches, so only the root-collapse
+    /// arm's clear can lift it.
+    ///
+    /// SABOTAGE: drop the clear in `close_inner`'s root arm and the reap
+    /// returns 0.
+    #[test]
+    fn a_collapsed_root_drops_its_reservation() {
+        let mut l = Layout::new();
+        let _ = l.host_for(7, 0, 0).expect("workspace 1's tile");
+        assert!(l.switch_workspace(2), "to workspace 2");
+        let a = l.host_for(8, 0, 0).expect("tile A");
+        let b = l.split(a, Mode::SplitH).expect("tile B's leaf");
+        let _ = l.host_into(9, b).expect("fill it");
+        let root = l.root();
+        assert!(!l.is_leaf(root), "the premise: the root is a CONTAINER");
+        l.set_creator(root, 99, 5);
+        assert!(l.subtree_reserved(root), "and it is reserved");
+
+        let _ = l.close(root);
+        assert!(l.is_empty_leaf(root), "the root collapsed to an empty leaf");
+        assert!(
+            !l.subtree_reserved(root),
+            "a COLLAPSED root is a pristine root -- its reservation went with \
+             the tiles it was stamped beside"
+        );
+
+        assert!(l.switch_workspace(1), "back to workspace 1");
+        assert_eq!(l.reap_empty_workspaces(), 1, "so the workspace vanishes");
     }
 }

@@ -124,6 +124,12 @@ pub struct Leaf {
 /// `active=1` with an equals sign and could never be mistaken for the
 /// header's bare `active`, but reading one line makes that structural rather
 /// than a property of the spelling.
+/// The compositor's own bound (`tapestryd::pane::MAX_WORKSPACES`), restated
+/// because halcyond does not link the compositor. A reader that accepts more
+/// than the writer can ever emit is fail-OPEN: it would paint a chip for a
+/// workspace that cannot exist, whose press the compositor then refuses.
+const MAX_WORKSPACES: usize = 9;
+
 pub fn parse_workspaces(layout: &str) -> Option<(Vec<u8>, u8)> {
     let head = layout.lines().next()?;
     let (mut list, mut active) = (None, None);
@@ -161,7 +167,13 @@ fn parse_number_list(s: &str) -> Option<Vec<u8>> {
     let mut out: Vec<u8> = Vec::new();
     for part in s.split(',') {
         let n: u8 = part.parse().ok()?;
-        if n == 0 {
+        // r2 F5: zero is not a workspace, and neither is anything past the
+        // compositor's bound. The LENGTH needs no separate rule -- distinct
+        // ASCENDING values in 1..=MAX_WORKSPACES cannot exceed
+        // MAX_WORKSPACES of them -- which is what keeps both chip painters'
+        // `len as u8` loops in range, by one rule rather than two that could
+        // disagree.
+        if n == 0 || n as usize > MAX_WORKSPACES {
             return None;
         }
         if let Some(&last) = out.last() {
@@ -179,7 +191,7 @@ fn parse_number_list(s: &str) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod workspace_header_tests {
-    use super::parse_workspaces;
+    use super::{parse_workspaces, MAX_WORKSPACES};
 
     #[test]
     fn reads_the_list_and_the_active_number() {
@@ -227,6 +239,41 @@ mod workspace_header_tests {
     fn container_rows_are_not_the_header() {
         let l = "epoch 7 focused 3\n1 splith n=2 active=1 [0,0,1,1]\n  2 leaf surface=0 [0,0,1,1]\n";
         assert_eq!(parse_workspaces(l), None);
+    }
+
+    /// r2 F5: the reader must not accept what the writer can never emit. A
+    /// number past the bound would paint a chip that cannot be switched to --
+    /// the press reaches the compositor and is refused there, so the failure
+    /// is silent at the only place a user can see it.
+    #[test]
+    fn a_number_past_the_compositors_bound_is_refused() {
+        assert_eq!(
+            parse_workspaces("epoch 1 focused 1 workspaces 1,200 active 200\n"),
+            None
+        );
+        assert_eq!(
+            parse_workspaces("epoch 1 focused 1 workspaces 10 active 10\n"),
+            None
+        );
+        // THE CONTROL, one variable away: the bound itself still reads.
+        assert_eq!(
+            parse_workspaces("epoch 1 focused 1 workspaces 9 active 9\n"),
+            Some((alloc::vec![9], 9))
+        );
+    }
+
+    /// And the LENGTH follows from that bound plus the ascending rule, so no
+    /// list can outrun a painter's chip loop. Asserted, not argued.
+    #[test]
+    fn the_list_cannot_outrun_the_bound() {
+        let (list, _) =
+            parse_workspaces("epoch 1 focused 1 workspaces 1,2,3,4,5,6,7,8,9 active 5\n")
+                .expect("nine is legal");
+        assert_eq!(list.len(), MAX_WORKSPACES);
+        assert_eq!(
+            parse_workspaces("epoch 1 focused 1 workspaces 1,2,3,4,5,6,7,8,9,10 active 5\n"),
+            None
+        );
     }
 
     #[test]

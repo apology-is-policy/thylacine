@@ -753,5 +753,50 @@ covers the lib only -- including through round 1, where F5 (the existence
 probe) and F6 (the rail/menu feed) live in bin modules and were witnessed by
 the guest build and the interactive gates, never by that count.
 
+## The chip press that resolved to nothing, and a reader with no bound (2026-09-15, HALCYON-WORKSPACES round 2)
+
+**F6 -- a rail chip press was silently swallowed whenever the rail had not
+painted.** `railset`'s hit test reads `self.zones`, but the chip arm alone
+resolved its NUMBER by indexing the last-painted MODEL (`self.painted`). Those
+two are written together on a successful present -- and `painted` is ALSO
+nulled on its own by a `TEV_CONFIGURE`, by `invalidate`, by a fresh mint, and
+never restored by a dropped present. In that window the press hit-tests fine
+against still-valid zones, resolves through an empty `painted` to `None`, and
+produces no action, no log and no notice. Every other hit (the mark, the split
+twins, the theme control, reset, help, the arrows) still fires, which is what
+makes it read as a dead chip rather than a dead rail.
+
+Fixed by keeping the painted workspace LIST in its own field, assigned in the
+same place as `zones`, so a hit and its meaning always come from one paint.
+
+**This is the blind spot, not an accident of it.** `railset` is a BIN module
+and `cargo test --lib` never compiles it -- measured: all five bin modules
+(`chromeset`, `menuset`, `railset`, `session`, `statusset`) carry zero
+`#[cfg(test)]`. The position-to-number mapping the whole sparse design rests
+on has no unit test, and this defect was found by reading, not by a suite.
+
+**F5 -- the header reader accepted what the compositor can never emit.**
+`parse_number_list` refused zero, non-numbers, repeats and descents, but had
+no ceiling: `workspaces 1,200 active 200` parsed, and the rail painted a chip
+labelled `200` whose press the compositor then refuses -- silent at the only
+place a user can see it. The reader now bounds each element by
+`MAX_WORKSPACES`, restated locally because halcyond does not link the
+compositor.
+
+The LENGTH needs no second rule: distinct ASCENDING values in
+`1..=MAX_WORKSPACES` cannot exceed `MAX_WORKSPACES` of them. That matters
+because the two chip painters were each in range by a DIFFERENT accident --
+`status.rs` applied its floor on the `usize` side (`len().max(1) as u8`, which
+at 256 yields zero indicators) and `rail.rs` on the `u8` side. One rule in the
+parser now covers both, and `status.rs`'s floor moved to the `u8` side to
+match its twin rather than leave the asymmetry standing.
+
+**A comment that denied its own second site.** `statusset`'s number-to-position
+resolution described itself as "THE resolution in exactly one place". It is
+not: `session.rs`'s `ws_pos` resolves the same number for the RAIL's model.
+Two models, two resolutions -- the exact shape that has already produced two
+defects in this arc, both of them a guard on one of two chip painters. The
+comment now names both.
+
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

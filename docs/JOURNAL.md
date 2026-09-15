@@ -936,6 +936,85 @@ S4 [P2], the vanish rule RENUMBERS surviving workspaces because a workspace's
 identity is its vector index -- an operator design fork, not a silent fix,
 since stable identity changes what the header's first number means.
 
+### The W-arc round 2: the fix that turned off the vanish rule
+
+Round 1 closed dirty, so the rule owed a round aimed at the fixes themselves.
+It returned **1 P0 / 1 P1 / 1 P2 / 4 P3**, and the P0 was created by a round-1
+fix -- which is the whole reason that rule exists. Opus fallback again; Fable
+5.1 was still credit-exhausted, and the brief said what that costs rather than
+letting the report read as an ordinary round. The agent closed by naming its
+own thin coverage unprompted, including that it had read about 600 of
+`server.rs`'s 19,513 lines.
+
+**The P0.** Round 1's S5 taught the vanish rule to respect a placement
+reservation -- `&& !subtree_reserved(r)`, which keys on `creator_conn != 0`.
+Nothing ever cleared that field when the leaf it reserved was FILLED or the
+root it sat on COLLAPSED. And the rail's SPLIT H stamps the splitting conn,
+which for a session is halcyond's own, alive as long as the session. So: split
+a workspace, fill the tiles, close them, switch away -- and that workspace
+never vanishes again. Ratified scripture, asserted by a battery leg, silently
+stopped firing for exactly the workspaces a *session* builds. The battery
+cannot see it because it never issues a `split` VERB; its roots keep
+`creator_conn == 0` and vanish normally.
+
+**I verified it before fixing it**, because the agent had flagged its own
+step 3 -- whether the dissolve really promotes the survivor to root with the
+stamp intact -- as its least certain link. The regression test asserts exactly
+that step on the way past, and it held; the reap then failed 0 against 1. A
+P0 graded on an unverified step is a hypothesis, and this one survived
+contact.
+
+**The measurement that mattered more than the fix.** I cleared the stamp in
+three places and sabotaged each. Reverting the `host_into` clear alone left
+the end-to-end test GREEN. Reverting the `close_inner` clear alone: also
+green. Only reverting both fired -- along that one path each site covers for
+the other, so the *property* was measured and neither *site* was. That is the
+same "asserting the shape is not exercising the bound" failure the F4 sabotage
+taught this arc a day earlier, wearing different clothes. Each clear now has
+its own isolating witness, and both fire.
+
+**F1, the one that scales.** Round 1 closed the cross-workspace class at the
+FOCUS chokepoint. `move_dir` is a STRUCTURAL verb taking a caller-supplied
+slot, and its root-wrap branch read `self.root()` unconditionally -- so a
+`move` naming a dormant pane detached it, wrapped the ACTIVE root in a fresh
+container beside it, and re-seated the active workspace onto that. One
+sentence still explains this whole family: `slot_of_id` is global BY DESIGN,
+so every verb resolving an id must decide for itself whether a
+foreign-workspace target is legal. Round 1 fixed the verbs it enumerated;
+`move_dir` was not among them.
+
+**A claim I had written twice, and the code never held.** F4: a refused move
+can strand a freshly-minted empty workspace, because the two ALLOCATION
+refusals sit after the ensure. The commit body said otherwise. The dossier
+said otherwise, having inherited the sentence from the commit body. I found
+the same defect independently in my parallel self-audit and graded it P3 for
+the same reason the agent did -- it self-heals at the next reap -- but the
+reusable half is that a false claim propagated from a commit message into
+as-built documentation and was read back as fact. The fix is a REORDER, not an
+unwind: a new workspace's root is always a placeholder, so the container alloc
+can only fail for a workspace that already existed, which makes "ensure
+created it, then the leaf alloc failed" the single window -- and hoisting that
+alloc above the ensure closes it by construction. The dossier sentence was
+corrected in place, marked as corrected.
+
+**What the prosecutor found that I did not**, stated plainly because the split
+is the point of running both: five of seven, including the P0. My parallel
+self-audit found two of them independently and one it missed (a comment
+claiming the number-to-position resolution lives in "exactly one place" while
+`session.rs` holds a second copy -- the agent's own sound-list cites both
+sites without noticing the comment denies one). Its F6 was strictly better
+than my version: I had found only the dropped-present path into the swallowed
+chip press; it found that a CONFIGURE nulls `painted` too, which is a far
+commoner trigger.
+
+**Posture**: tapestryd lib 65 (was 59), halcyond lib 300 (was 298), four
+crates guest-clean on `aarch64-unknown-none` -- and that guest build is the
+ONLY witness for three of the fixes, which live in bin modules `cargo test
+--lib` never compiles. All five bin modules carry zero `#[cfg(test)]`,
+measured. Still open: F8, unchanged and now better understood -- it is not a
+one-liner, because widening the minima walk to every root would make a dormant
+overflow block ACTIVE mutations.
+
 ## Run 46o (2026-09-14, Fable 5.1 max) -- the Halcyon Instrument arc opens: reading the Carbon Optics kit against the tree
 
 ### What this run was for

@@ -1969,8 +1969,9 @@ create INSERTS rather than pushes, and **an insert at or below `active` shifts
 the active index**, which must move with it or the seat silently changes
 workspace under the user. `switch_workspace` and `move_focused_to_workspace`
 both route through it and both read `self.active` AFTER the call for that
-reason. The move still judges its empty-tile refusal BEFORE ensuring the
-target, so a refused move cannot leave a freshly-minted empty workspace behind.
+reason. The move judges its empty-tile refusal BEFORE ensuring the target --
+but that closed only ONE of the two doors, and this paragraph asserted the
+whole claim until round 2 measured it (see the round-2 section below, F4).
 
 **The retired rule, and why it was wrong twice over.** "Only the next free
 number may be made" existed to keep a DENSE vector hole-free -- a property of
@@ -1993,3 +1994,76 @@ only test that reaches the index-shift line: every other workspace test creates
 in ascending order, so without it that line is unexercised and a sabotage there
 does not fire. `server.rs` still has no test module, so the `layout_cmd` arm
 and the chord arms are witnessed by the battery and the gates only.
+
+## The workspace round 2: a round-1 fix that disabled the vanish rule (2026-09-15, HALCYON-WORKSPACES round 2)
+
+Round 1 closed DIRTY (a P0 returned), so the project's re-audit rule owed a
+round aimed at THE FIXES. It found **1 P0 / 1 P1 / 1 P2 / 4 P3**, and the P0
+was created by a round-1 fix -- which is the outcome that rule exists to
+catch. Tier: OPUS fallback (Fable 5.1 credit-exhausted), so family diversity
+was forfeit and context independence was the whole of what the round bought.
+
+**F2 (P0) -- S5 made the vanish rule unreachable for any workspace a session
+had split in.** Round 1's S5 taught `reap_empty_workspaces` to respect a
+placement reservation by adding `&& !self.subtree_reserved(r)`, and
+`subtree_reserved` keys on `creator_conn != 0`. Nothing cleared that field
+when the leaf it reserved was FILLED, or when the root it sat on COLLAPSED --
+`host_for`, `host_into` and `close_inner`'s root arm each cleared
+`claim_token` and left it standing. The rail's SPLIT H stamps the splitting
+conn (H-4d), which for a session is halcyond's own conn, alive as long as the
+session. So: split a workspace, fill both tiles, close them, switch away --
+and the workspace never vanishes again, for the rest of the session. Ratified
+scripture silently stopped firing, and up to 9 roots stayed pinned out of
+`MAX_PANES` = 32.
+
+Fixed by ending the reservation where its purpose is served: cleared in
+`host_for`'s fill arm, in `host_into`, and in `close_inner`'s root-collapse
+reset (which already resets kind, status, claim, weight, dividers and
+separator -- the stamp simply was not on that list).
+
+**Why the battery could not see it.** The gate never issues a `split` VERB,
+so its roots keep `creator_conn == 0` and vanish normally. The chord split
+path does not stamp `creator_conn` either. Only the verb path -- the rail
+button, `halcyon layout restore`, the tile menu -- arms it.
+
+**A measurement worth keeping.** The end-to-end vanish test covers the host
+clear and the collapse clear TOGETHER: reverting either ONE alone left it
+green, because along that path the other still lifts the reservation. A
+property with no per-site witness is shape, not bound, so each site now has
+its own test (`filling_a_reserved_leaf_spends_its_reservation` and
+`a_collapsed_root_drops_its_reservation`), and both fire.
+
+**F1 (P1) -- `move_dir` grafted a pane out of a dormant workspace.** Round 1
+closed the cross-workspace class at the FOCUS chokepoint; `move_dir` is a
+STRUCTURAL verb taking a caller-supplied slot, and its root-wrap branch reads
+`self.root()` -- the ACTIVE root -- unconditionally. A `move` verb naming a
+dormant pane (reachable: `slot_of_id` is global by design, and the ownership
+check passes for a principal that owns the subtree) detached it, wrapped the
+ACTIVE root in a fresh container beside it, and re-seated the active
+workspace onto that container. Now guarded by `in_active_root`, matching
+`focus`'s precedent; teaching the wrap to re-seat the pane's OWN workspace
+root would be a new feature, not a fix.
+
+**F3 (P2) -- the move freed a RESERVED skeleton root.** `reap_empty_workspaces`
+was taught to respect a reservation; `move_focused_to_workspace` was not. It
+judged "placeholder" on emptiness alone, so an arriving tile ran
+`free_subtree` over a restore tool's reserved skeleton and the tool's later
+`create claim=` found nothing. The conjunct is now `&& !subtree_reserved`.
+
+**F4 (P3) -- and the correction to the S4 section above.** A refused move
+could still strand a freshly-minted empty workspace: the empty-tile check is
+judged before the ensure, but the two ALLOCATION refusals sit after it. Fixed
+by REORDERING rather than unwinding -- a newly-created workspace's root is
+always an empty placeholder, so `pre_container` can only fail for a workspace
+that already existed, which makes "ensure created it, then the leaf alloc
+failed" the single strand window; hoisting that alloc above the ensure closes
+it by construction. The stranded workspace was self-healing (the next reap
+drops it), which is why it is P3 -- but the commit body and this dossier both
+asserted an invariant the code did not hold, and that is the part worth
+recording.
+
+**Coverage.** tapestryd lib 65 (was 59): six new tests, every fix
+sabotage-measured in isolation with `pane.rs` restored byte-identical.
+`server.rs` still has no test module, so `layout_cmd`'s workspace arm, the
+chord arms and `reap_session_empties` remain witnessed by the gates alone.
+

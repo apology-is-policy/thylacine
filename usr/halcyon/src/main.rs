@@ -122,8 +122,8 @@ usage: halcyon layout save <name>
   says which is active. Exits non-zero if a file is present and refused.
 
   halcyon workspace <n>
-  Switch the display to workspace n, creating it when n is the next free
-  number. One-based, as the bar and the rail show them. Usable from
+  Switch the display to workspace n, creating it if it does not exist.
+  One-based, as the bar and the rail show them. Usable from
   $HOME/lib/halcyon.rc to fill several workspaces at session start.
 
   halcyon --help
@@ -166,7 +166,9 @@ fn run() -> i64 {
 }
 
 /// `halcyon workspace <n>`: switch the display to workspace n, creating it
-/// when n is the next free number (the i3 rule). The verb rides the LAYOUT
+/// if it does not exist (S4: a number is an IDENTITY, so Super+5 makes
+/// workspace 5 whether or not 2..4 exist -- the "next free number" rule was
+/// retired as a property of the old dense representation). Rides the LAYOUT
 /// file, which a `Session(principal)` conn already drives -- which is why the
 /// tool needs no service of its own (HALCYON-WORKSPACES 4, W-2b).
 fn workspace(n: u32) -> i64 {

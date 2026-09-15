@@ -439,8 +439,8 @@ pub fn model_from(
     m.pane_count = pane_count;
     m.hints = hints;
     if let Some((list, active)) = workspaces {
-        // S4, and still THE resolution in exactly one place: the header
-        // carries the active NUMBER, the bar compares `i == m.active` over
+        // S4: the header carries the active NUMBER and the bar compares
+        // `i == m.active` over
         // the chips it lays out, so the number is resolved to its POSITION
         // here. Getting this wrong lights the wrong chip -- and with a sparse
         // set `number - 1` is no longer that position.
@@ -448,6 +448,12 @@ pub fn model_from(
         // `parse_workspaces` refuses a header whose active is absent from its
         // own list, so the position exists by the time we are called; the
         // fallback is a floor, not a guess.
+        //
+        // NOT the only site, and an earlier comment here claimed it was:
+        // `session.rs`'s `ws_pos` resolves the same number for the RAIL's
+        // model. Two models, two resolutions -- the shape that has already
+        // produced two defects in this arc (a guard on one of two chip
+        // painters, twice). Change one, change the other.
         m.active = list.iter().position(|&n| n == active).unwrap_or(0) as u8;
         m.workspaces = list;
     }

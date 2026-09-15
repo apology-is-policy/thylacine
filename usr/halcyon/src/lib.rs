@@ -38,8 +38,9 @@ pub enum Cmd<'a> {
     /// `halcyon theme lint [<path>]` -- check a theme file (TH-4c). With no
     /// path, the two tiers the session actually resolves.
     ThemeLint { path: Option<&'a str> },
-    /// `halcyon workspace <n>` -- switch to workspace n, creating it when n
-    /// is the next free number (the i3 rule). ONE-BASED, matching the
+    /// `halcyon workspace <n>` -- switch to workspace n, creating it if it
+    /// does not exist (S4: the number is an IDENTITY, not a position; the
+    /// "next free number" rule is retired). ONE-BASED, matching the
     /// `layout` header and the `01`..`09` the rail paints. The verb rides the
     /// LAYOUT file, which a `Session(principal)` conn already drives, so the
     /// tool needs no new channel (HALCYON-WORKSPACES 4, W-2b).
