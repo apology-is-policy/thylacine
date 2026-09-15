@@ -461,6 +461,20 @@ func validateSub(n *Note, fails, warns *[]string) {
 			expect = append(expect, s)
 		}
 	}
+	// A DUPLICATED required heading makes `order` longer than `expect` --
+	// `order` walks the file (so it appends twice), `expect` walks the schema
+	// (so it appends once). Indexing `expect[i]` by `order`'s range then
+	// panics with an index-out-of-range, which is what a duplicated section
+	// used to produce: a crash from BOTH `lint` and `render`, with a Go stack
+	// trace and no mention of the file or the heading at fault. A checker must
+	// report bad input, never die on it.
+	if len(order) != len(expect) {
+		*fails = append(*fails, fmt.Sprintf(
+			"%s: dossier section repeated (%d required headings, %d distinct) -- "+
+				"a duplicated heading, often from an edit that re-appended the file's tail",
+			n.Rel, len(order), len(expect)))
+		return
+	}
 	for i := range order {
 		if order[i] != expect[i] {
 			*warns = append(*warns,
