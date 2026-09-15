@@ -25,6 +25,10 @@ code:
   - usr/halcyond/src/downq.rs
   - usr/halcyond/src/picker.rs
   - usr/halcyond/src/dialog.rs
+  - usr/halcyond/src/rail.rs
+  - usr/halcyond/src/railset.rs
+  - usr/halcyond/src/outline.rs
+  - usr/halcyond/src/indicator.rs
   - usr/halcyond/Cargo.toml
 audit: hard
 guarded-by: []
@@ -293,6 +297,74 @@ at the next frame tick, and a tile's CONFIGURE no longer lands only at the next
 pane-tree RPC (a Loom wait pumps ONE session -- the H-3b two-sessions latency
 bug). See [[sub-libtapestry]] for the ring side.
 
+### The rails (HALCYON-INSTRUMENT 8; I-4)
+
+`rail` (rules) + `railset` (surface) is the fourth lib/bin twin, and it carries
+BOTH rails: the top `Role::Rail` surface the compositor places at the strip its
+carve always reserves, and the bottom rail -- which is H-3d's status bar
+restyled here whenever the sheet's profile is Instrument (`status::status_list`
+dispatches to `footer_list`). Under legacy no rail exists and none is asked for.
+
+**The numbers are a MEASURED golden's, not the kit's CSS believed.** Every box
+in `rail.rs` comes from `build/instrument-goldens/native-r2/matrix-carbon-1440x900-s100-baseDpr1`
+-- the DOM boxes of `geometry-styles.json` and the PNG's own rows -- so the brand
+mark's ring, the 1 x 12 separator at its half pixel snapped up, the 26-tall
+buttons at y 4, the theme swatch with its `Derived.swatch_ring`, and the
+footer's glyph box and centred hints are what a browser actually rastered rather
+than what a stylesheet was read to mean. It is the same evidence class as
+[[sub-libhalcyon]]'s `carve` agreeing with Chromium to the pixel.
+
+**The rail is a POINTER TARGET like a header (9.1).** The compositor routes
+MOVE, BTN and LEAVE to it; `railset`'s pump keeps the hover and the pressed
+button, repaints in place for them, and turns a primary press into a
+`RailAction` the OWNER acts on under ITS own authority -- never the rail's, which
+is what keeps a chrome surface from becoming a second seat. It narrows at
+`NARROW_W` (820): the top rail keeps the mark, the number and the icons while
+the footer drops its hints and yields its label. The footer's hints follow the
+`chords` file rather than a private copy, so a chord and its hint cannot
+disagree.
+
+### The outline path -- ONE rasterizer for every tier (HALCYON-TYPE 4; TY-1)
+
+`outline.rs` is the type path: skrifa reads a face and scales its glyph outlines
+to a pixel size, zeno fills them and STROKES them by the theme's smoothing
+amount -- the em-relative dilation the Mac's "font smoothing" was MEASURED to be
+(+18 % stem weight), unioned into the fill rather than approximated. There is no
+hinting: the outline lands where the design puts it, at the whole-pixel pen the
+atlas caches one raster per (face, size, char) for. Since TY-4 the MONO cells
+come through here too (`mono_cell` gives the grid the bake computes and
+`raster.rs` clips the glyph into it), so there is ONE rasterizer and therefore
+one stroke rule for every tier; the bakes remain only for consumers that must
+carry no rasterizer at all.
+
+**The orientation is written down because it bit once.** Font space is y-UP,
+zeno's default TopLeft origin wants y-DOWN rows, and a BottomLeft mask is stored
+bottom-up. So the pen NEGATES y as it records the outline, the fill renders
+upright with top-down rows, and zeno's `Placement.top` is the mask's top edge in
+rows BELOW the baseline (negative above it) -- which makes the bearing cartoon
+wants, up from the baseline to the first row, its NEGATION. Three conventions
+meeting at one function is exactly where a sign error hides.
+
+### The position indicator (HALCYON-INSTRUMENT 7.7; I-5b)
+
+`indicator.rs` is a STATIC report of scroll position, and it is defined as much
+by what it refuses as by what it draws: no fade, no drag, no click-to-jump, no
+focus of its own, no ink change on hover. Wheel and keys scroll as they always
+did; this only says where the view is. Instrument only -- the legacy tile has
+none, and `Sheet::indicator` is what the painters key on; a raw full-screen
+application owns its grid and gets none either (14.7).
+
+The 8 px lane is reserved INSIDE the content viewport on overflow, so text never
+sits under the thumb -- an explicit, deliberate replacement for the CSS's
+platform-dependent `scrollbar-width: thin`, at the cost that line breaks may
+change when it appears. No track is drawn (the body keeps its own ground); the
+thumb is 3 px wide, inset 3 from the right and 4 from either end, at least 24
+tall, `dim`, rectangular, and scaled through the sheet's `ipx` like every other
+logical size. **Follow-tail puts the thumb's END exactly at the tail inset, and
+while the reader is back in history an append keeps them there -- so the
+indicator never reports "at end" until they return.** The picker reuses the same
+arithmetic through `thumb_raw` with its own smaller floor (`PICKER_MIN_THUMB`).
+
 ## Data structures
 
 - `Transcript` -- zones -> `Block`s (cells + styles + objs + tables); the
@@ -443,6 +515,9 @@ presents are a recorded optimization.
   discrimination-proven -- sabotaging the finalize arm OOB-panics in
   `layout_block` (`len is 0 but the index is 0` for the ScrollOff twin, `index 1`
   for the set_max_cost twin), the arm makes both lay out clean.
+  `railset` has NO host tests and that is not a gap: it is the bin twin of
+  `rail`, and a binary-only module's `#[test]` never runs -- its behaviour is
+  witnessed by the in-guest rail legs below.
 - **In-guest** (`gate-interactive`, all lever-gated + SKIP-clean on a default
   image): `ls-halcyon` (joey's choice, the rich advertisement, the
   screendump/ink, the split/zoom reflow, the tag bars + the section-4.2 keys,

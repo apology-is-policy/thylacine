@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**440 owned · 62 unowned · 502 files (87% owned) · ~19510 unswept lines.**
+**444 owned · 58 unowned · 502 files (88% owned) · ~16769 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **66 files, ~30518 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -73,7 +73,6 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30518 lin
 |---|---:|---:|---:|
 | usr/warp-prove | 0 | 1 | 4349 |
 | usr/pouch-hello | 0 | 22 | 3384 |
-| usr/halcyond | 21 | 4 | 2741 |
 | usr/haul | 0 | 5 | 2557 |
 | kernel | 123 | 15 | 2118 |
 | usr/ports | 14 | 4 | 1631 |
@@ -93,6 +92,7 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30518 lin
 | usr/curl | 3 | 0 | 0 |
 | usr/diorama | 2 | 0 | 0 |
 | usr/halcyon | 2 | 0 | 0 |
+| usr/halcyond | 25 | 0 | 0 |
 | usr/httpd | 1 | 0 | 0 |
 | usr/https | 1 | 0 | 0 |
 | usr/joey | 1 | 0 | 0 |
@@ -122,16 +122,13 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30518 lin
 | file | lines |
 |---|---:|
 | usr/warp-prove/src/main.rs | 4349 |
-| usr/halcyond/src/rail.rs | 1544 |
 | usr/ports/gnumake/config.h | 1357 |
 | usr/haul/src/main.rs | 1125 |
 | usr/quarry/src/main.rs | 1028 |
 | usr/haul/src/npxf.rs | 1005 |
-| usr/halcyond/src/outline.rs | 685 |
 | usr/stratumd-stub/stratumd-stub.c | 453 |
 | kernel/include/thylacine/errno.h | 388 |
 | usr/pouch-hello/pouch-hello-sockets.c | 366 |
-| usr/halcyond/src/railset.rs | 357 |
 | usr/pouch-hello/pouch-hello-fs.c | 350 |
 | usr/haul/src/cmdline.rs | 296 |
 | usr/pouch-hello/pouch-hello-net.c | 284 |
@@ -149,7 +146,6 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30518 lin
 | usr/pouch-hello/pouch-hello-poll.c | 179 |
 | usr/ports/gnumake/generated/glob.h | 163 |
 | kernel/include/thylacine/9p_srvconn_transport.h | 160 |
-| usr/halcyond/src/indicator.rs | 155 |
 | kernel/cpio.c | 152 |
 | usr/susp-mask-child/src/main.rs | 139 |
 | usr/pouch-hello/pouch-hello-reentry.c | 133 |
