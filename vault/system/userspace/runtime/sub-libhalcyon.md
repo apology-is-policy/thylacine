@@ -12,6 +12,8 @@ code:
   - usr/lib/libhalcyon/src/tag.rs
   - usr/lib/libhalcyon/src/instrument.rs
   - usr/lib/libhalcyon/src/toml.rs
+  - usr/lib/libhalcyon/src/carve.rs
+  - usr/lib/libhalcyon/src/scale.rs
   - usr/lib/libhalcyon/Cargo.toml
   - usr/halcyon/src/lib.rs
   - usr/halcyon/src/main.rs
@@ -30,7 +32,7 @@ updated: 2026-09-15
 
 The Halcyon environment library (HALCYON.md 13): the shared pieces of the
 graphical environment that must not fork between the compositor and its
-clients. Six modules, each a thing that must not fork between the compositor
+clients. Eight modules, each a thing that must not fork between the compositor
 and a client:
 
 - `theme` is the Daylight visual scripture as code (HALCYON-VISUAL.md) --
@@ -52,6 +54,10 @@ and a client:
   geometry (see its section below).
 - `toml` is the crate's own restricted TOML subset, the parser BOTH schemas'
   loaders consume -- the actual substrate of the format-fuzz surface.
+- `carve` is the Instrument split and stack arithmetic -- the ONE snap rule, so
+  a container's children partition it exactly minus the tracks.
+- `scale` is the display scale: the percent derived from the display's physical
+  size (or declared on the command line) that every painter follows.
 
 It depends only on [[sub-lib-vt]] (for `vt::Palette`, which `theme` produces);
 everything else is pure `no_std` + `alloc` -- the TOML subset is the crate's
@@ -411,6 +417,97 @@ returns` (in a no_std tool a panic is a silent `exit(1)` -- the failure these
 parsers exist to avoid), `every_unsupported_construct_is_refused_with_its_line`,
 the duplicate-key and hash-in-string rules above, the oversized and unclosed
 array bounds, and a key before any header being rooted.
+
+## `carve` -- the split and stack arithmetic, and the ONE snap rule
+
+`carve.rs` is the Instrument profile's geometry arithmetic (HALCYON-INSTRUMENT
+5.2 / 5.4). [[sub-tapestryd]]'s pane tree calls it with the scaled table and
+stores the rectangles; nothing here knows a pane, a surface or a display, which
+is why it is pure and host-tested while the authority stays in the compositor.
+
+**The one snap rule is the whole point.** `split_spans` divides `extent` among
+`n` children separated by `track`-wide tracks. Boundaries are accumulated as
+exact rationals over a common denominator and snapped ONCE each (round half up);
+each child is then the DIFFERENCE of two snapped boundaries -- never two
+independently rounded widths. That is what makes the children partition the
+parent exactly minus the tracks, with no drifting seam and no off-by-one column
+between a divider and the pane beside it.
+
+**Minima use a flex fixed point, not a single pass.** A child whose ideal share
+`U * w_i / sum(w)` falls below its minimum is FROZEN at that minimum and the
+remainder re-shared among the rest; the loop repeats until no unfrozen child is
+under its minimum. Two degenerate cases fail in DELIBERATELY OPPOSITE
+directions: when the minima alone exceed the usable extent every child is laid
+at its minimum from the origin and the last ones OVERRUN, because the caller
+clips and "a display that small keeps its data and scrolls" -- it never drops a
+child; when every child is frozen the slack is taken by nobody, so the last
+child ends SHORT of the extent and the caller sees a short span, never an
+overrun. A zero weight counts as one (the verb refuses 0; this stays total), a
+missing minimum is 0, and every boundary saturates into `u32`.
+
+**It is checked against a browser, not only against itself.**
+`the_reference_layout_snaps_where_chromium_did` pins the 1440 x 900 reference
+against Chromium's own raster (JOURNAL run 46o): the browser lays out in 1/64 px
+and snaps each box's edges to the nearest device pixel, which is this rule on
+the same boundaries -- the root divider lands on columns 738..744 and the right
+column's on rows 443..449 in both. An independent implementation agreeing to the
+pixel is far stronger evidence than a self-consistent fixture.
+
+**The drag band and the stack.** `drag_pair` follows the pointer under the
+mockup's ratio clamp (`DRAG_RATIO_MIN_PCT` 22 .. `DRAG_RATIO_MAX_PCT` 78) kept
+wherever it is TIGHTER than the minima, and `equalise_pair` is the double-click.
+`stack_alloc` (5.4) lays a stack inside a frame's inner box: headers before the
+open tile stack DOWN from the top, headers after it stack UP from the bottom,
+the body is what remains, and the open tile's separator sits below its body
+unless it is last. `stack_min_h` is the matching minimum -- the frame twice, `n`
+headers, that separator only when `n > 1`, and a body minimum.
+
+**Tests.** 13 host tests: the Chromium reference, the two-child flex identity,
+children partitioning the extent minus the tracks, equal weights dividing with
+the remainder spread by the snap, a minimum freezing a child while the rest
+re-share, minima that overflow stacking from the origin, zero weights counting
+as one, the drag clamped by the tighter of band and minima, the double-click
+equalise, and the stack's allocation, lone-tile case and minimum.
+
+## `scale` -- the display scale every painter follows
+
+`scale.rs` (HALCYON-SCALE 3) is the percent the compositor derives and the
+clients obey: [[sub-tapestryd]] derives, [[sub-halcyond]] consumes. The rule is
+the operator's -- logical pixels at a 96 DPI reference, `scale = DPI / 96`
+snapped to the nearest 0.25, round half up -- and the value carried is that
+scale TIMES 100 (100 / 125 / 150 / 175 / 200), so the ctl line and the verb move
+an INTEGER and no float ever crosses the seam. `round_half_up` exists because
+`f32::round` is not in `core`.
+
+**`scale_pct` takes the SMALLER axis on purpose:** each axis' DPI is snapped
+independently and the lower result wins, so a monitor lying about one dimension
+cannot blow the other up; any zero dimension yields 100.
+
+**The clamp happens BEFORE the narrowing, and that ordering is a landed audit
+fix.** A 1 mm axis under thousands of pixels makes `quarters * 25` exceed `u16`,
+and a wrapped value need not even be a multiple of 25 -- an off-table percent
+from a hostile or garbled EDID. Clamping after the narrowing would clamp the
+ALREADY-WRAPPED value and admit it. See [[haz-latch-keyed-on-proxy]]'s sibling
+lesson: a bound applied on the wrong side of a conversion is not a bound.
+
+**Two untrusted inputs, both fail-safe.** `parse_edid_mm` reads device bytes
+(VESA E-EDID 1.4) and returns `None` unless the block is 128 bytes with the
+fixed header, a wrapping checksum of zero, and BOTH axes within
+`1..=EDID_MM_MAX` (2 m -- larger is not a monitor); the first detailed timing
+descriptor carries the millimetres when its pixel clock is non-zero, otherwise
+the basic parameters' centimetres stand in. `declared_scale` reads the kernel
+command line for the LAST whole-word `thylacine.scale=<pct>` token -- word
+boundaries checked so `xthylacine.scale=` and `thylacine.scalex=` are not it,
+the value terminated by space, NUL, newline or tab because the FDT property
+carries its NUL. A declaration OUTRANKS the EDID, because it exists precisely
+for the display whose EDID cannot say (QEMU's synthetic one) or lies; a token
+that is not one of the five values is `Declared::Invalid`, said once and
+ignored, and the EDID stands.
+
+**Tests.** 6 host tests: the operator's snap rule, the five values and their
+steps, the pixel helpers' rounding, the EDID parse's fail-safe arms, a short
+millimetre axis never truncating off the table (the clamp-ordering regression),
+and the declaration being the last whole-word token with a table value.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**438 owned · 64 unowned · 502 files (87% owned) · ~20291 unswept lines.**
+**440 owned · 62 unowned · 502 files (87% owned) · ~19510 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **66 files, ~30518 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -78,7 +78,6 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30518 lin
 | kernel | 123 | 15 | 2118 |
 | usr/ports | 14 | 4 | 1631 |
 | usr/quarry | 0 | 1 | 1028 |
-| usr/lib | 60 | 3 | 853 |
 | usr/stratumd-stub | 0 | 1 | 453 |
 | usr/kaua-term | 3 | 1 | 276 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
@@ -86,6 +85,7 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30518 lin
 | arch | 36 | 2 | 146 |
 | usr/susp-mask-child | 0 | 1 | 139 |
 | usr/stub-driver | 0 | 1 | 119 |
+| usr/lib | 62 | 1 | 72 |
 | mm | 8 | 0 | 0 |
 | usr/aurora | 4 | 0 | 0 |
 | usr/coreutils | 60 | 0 | 0 |
@@ -128,13 +128,11 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30518 lin
 | usr/quarry/src/main.rs | 1028 |
 | usr/haul/src/npxf.rs | 1005 |
 | usr/halcyond/src/outline.rs | 685 |
-| usr/lib/libhalcyon/src/carve.rs | 479 |
 | usr/stratumd-stub/stratumd-stub.c | 453 |
 | kernel/include/thylacine/errno.h | 388 |
 | usr/pouch-hello/pouch-hello-sockets.c | 366 |
 | usr/halcyond/src/railset.rs | 357 |
 | usr/pouch-hello/pouch-hello-fs.c | 350 |
-| usr/lib/libhalcyon/src/scale.rs | 302 |
 | usr/haul/src/cmdline.rs | 296 |
 | usr/pouch-hello/pouch-hello-net.c | 284 |
 | kernel/include/thylacine/smp.h | 282 |
