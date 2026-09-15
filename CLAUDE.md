@@ -259,6 +259,7 @@ The index (one line per row; refresh with the table):
 - **tapestryd W-3d slice 1a: the one-shot REAL-class compose probe (SET_TYPE; I-45/I-7; Warp-WSI W-3d-1a)** -- `usr/tapestryd/src/server.rs` (`set_type_request` + the `settype` probe param + `real_class_compose_probe_maybe` at the first mem mint), `tools/warp-host.sh` + `tools/test-venus-verdict.sh` (the two-token grammar gates). MEASURED: `settype=latched` on thyla-pi (opaque-fd blobs; composed arm host-unavailable) ...
 - **mesa W-3d: the WSI DIRECT path (patch 0018; I-40 stage-0 / I-45 / I-7; Warp-WSI W-3d)** -- mesa `vn_wsi_thylacine.c` (NEW: headless-slot wsi_interface; marked no-bo dedicated allocs; img registration; the throttle-fence stage-0 bracket) + `vn_device_memory.{c,h}` (the THLW marker + routing) + `vn_renderer_thylacine.c` (img family + poke + the bo-create counter) + `warp_client.{c,h}` + `meson.build` (VN_USE_WSI_PLATFORM now ON) + `thylacine_prove.c` step 10, `tools/warp-host.sh` + `tools/test-venus-verdict.sh` (the `wsi swapchain OK` witness, 83 checks) ...
 - **W-3e: the SDL2 Vulkan glue + the img poke-completion + the first-Vulkan-frame witness (I-40 pbound / I-45 / I-7; Warp-WSI W-3e)** -- `usr/ports/sdl2/thylacine/SDL_thylacinevulkan.{c,h}` (the 5 hooks; WEAK venus externs; the arming CreateSurface: glsrc surface-half THEN set_surface ctx-half; the `-u vk_icdGetInstanceProcAddr` linking model) + `SDL_thylacinevideo.c` (slots wired), `usr/tapestryd/src/server.rs` (`img_poke_complete` -- the img family's present-COMPLETE rides the poke; `flip_in_place`), mesa patch 0020 (`vn_renderer_thylacine_warp_ctx_pub` + `thylacine-vk-sdl-prove`), `usr/joey/joey.c` + `tools/build.sh` (the boot probe + staging), `tools/warp/boot-probe.sh` + `tools/warp-host.sh` + `tools/test-venus-verdict.sh` (both witness halves: app PASS + `scanout direct N img res R`; 89 checks) ...
+- **WEAVE-SKEIN: the scatter-gathered weave (`SYS_DMA_SEGMENTS`=110 + the fail-closed `SYS_DMA_MAP`; I-45/I-40/I-7/I-32/I-34)** -- `kernel/include/thylacine/dma_handle.h` (`struct dma_block` + `SKEIN_BLOCK` + the inline `blk[]`/` ...
 - **MMU user-PTE clear + TLBI** -- `arch/arm64/mmu.c::mmu_uninstall_user_pte / mmu_uninstall_user_range`, `kernel/burrow.c::b ...
 - **Errno ABI surface + `snare:*` fault-note family** -- `kernel/include/thylacine/errno.h` (T_E_* registry; ABI-pinned by `_Static_assert`s to POS ...
 - **Memory-model defense-in-depth (F3 + F4 + F5)** -- `mm/phys.c::phys_init` (RAM cap), `mm/phys.c::alloc_pages` (KP_ZERO barrier), `arch/arm64/ ...
@@ -357,6 +358,16 @@ The index (one line per row; refresh with the table):
 
 - **KT-1.5-kernel: the pollable Loom (`loom_poll` + the KOBJ_LOOM poll arm + halcyond's unified poll; I-9/I-29/I-30/I-5/I-7/I-32)** -- `kernel/loom.c` (`loom_poll`), `kernel/poll.c` (the KOBJ_LOOM arm + the keep_out loom-ref), `usr/lib/libtapestry/src/lib.rs` (`connect_sqpoll`/`poll_fd`), `usr/halcyond/src/{main,session}.rs` ...
 - **KT-1: the kaua-term seam + the per-user session compositor (the pts host producer, the wire codec, halcyond's untrusted ingest, `login -> halcyond --session`, the DECLARED display handoff; format-fuzz class; I-2/I-22/I-19/I-20/I-32)** -- `usr/kaua-term/src/{lib,main,wire}.rs`, `usr/lib/ptyhold`, `usr/ptyhost`, `usr/lib/vt`, `usr/halcyond/src/{chrome,tiles,session,tile,transcript}.rs`, `usr/login/src/main.rs`, `usr/caps-probe` + `tools/interactive/ls-gfx-session.exp` ...
+- **HALCYON-SCALE: the display scale (the EDID-derived percent the compositor owns; `Metrics::at`; the gated `scale` verb + chords; halcyond follows)** -- `usr/lib/libhalcyon/src/{scale,theme}.rs`, `usr/tapestryd/src/{gpu,server,pane,chords}.rs`, `usr/lib/libtapestry/src/lib.rs`, `usr/tapestry-battery/src/main.rs` (SC-2); halcyond's `Sheet.scale`/`Sheet::px`/`ipx` sweep + `GlyphSource::set_scale`/`set_display` + the relayout re-read + `/env/HALCYON_SCALE` (SC-3); `gfx_compose.py --scale` + the compose gate's Super+= leg (SC-4) ...
+- **HALCYON-THEME: one owner for the whole visual -- the terminal palette folded into `Theme`, the palette DECLARED to the tile it themes, and the whole visual loadable from ONE TOML file (TH-1..TH-5b + TH-4c; the row carries three addenda: the visibility split, the FILE, and the lint)** -- `usr/lib/vt/src/lib.rs` (`vt::DAYLIGHT` DELETED; `palette_to_spec`/`_from_spec`, the argv form), `usr/lib/libhalcyon/src/theme.rs` (`Theme.terminal` + `light_terminal`), NEW `usr/kaua-term/src/cmdline.rs` (the argv contract, pure), `usr/kaua-term/src/main.rs`, `usr/halcyond/src/{session_init,session,tile}.rs` ...
+- **HALCYON-TYPE: the outline path -- the rasterizer swap (skrifa + zeno replace fontdue) + the smoothing stroke as a theme token (TY-1 / TY-2)** -- NEW `usr/halcyond/src/outline.rs` (`Face`: the y-negating pen + TopLeft fill, the stroke unioned as f + s - f*s on the explicit union box, the bearing `-placement.top`), `usr/halcyond/src/raster.rs` (`GlyphSource` on it; `smooth_mem` + `set_smooth` regen), `usr/lib/libhalcyon/src/theme.rs` (`Theme.smooth_mem`: thousandths of an em, DAYLIGHT 12), `usr/halcyond/src/layout.rs` (`Sheet.smooth_mem`), the four `set_smooth` sites in `{main,session}.rs`, the vendored `skrifa`/`read-fonts`/`zeno` closure ...
+- **HAUL: the npxf secure channel -- a second implementation of a hand-rolled AEAD protocol, on a network-facing surface (`docs/HAUL-DESIGN.md`)** -- NEW `usr/haul/src/npxf.rs` (PURE, syscall-free: the psk / transcript / X25519+contributory check / HKDF sc ...
+- **HALCYON-INSTRUMENT I-1: the second theme schema + the dispatching loader + the two projections + the 127-field bundle wire (format-fuzz class; the ctl gate's class)** -- NEW `usr/lib/libhalcyon/src/instrument.rs` (`InstrumentTheme`, `from_entries` strict, `project_legacy`/`project_instrument`, `Profile`, `Bundle`/`Visual`, `is_gallery_id`, `resolve_bundle`), `usr/lib/libhalcyon/src/theme.rs` (`load` dispatch; `to_wire`/`from_wire` over a `Bundle`, `WIRE_FIELDS` 127 + `end`), the 13 generated gallery files, `usr/halcyond/src/{session,main}.rs`, `usr/tapestryd/src/{main,server}.rs` (`Comp.bundle`), `usr/halcyon/src/{lib,main}.rs` ...
+- **HALCYON-INSTRUMENT I-2: the profile's geometry -- the Instrument carve (rails, pad, tracks + 7x7 joints, frames, headers incl. collapsed), the weighted N-ary split with ONE snap, the minima judged before the mutation, `halcyon-layout v2` (compositor geometry; I-32)** -- NEW `usr/lib/libhalcyon/src/carve.rs` (`split_spans`/`stack_alloc`/`stack_min_h`), `usr/lib/libhalcyon/src/{theme,instrument,layout,skeleton}.rs` (`Metrics` 21 fields + the zero-base rule, `INSTRUMENT_BASE` + `metrics_base`, v2 weights, `Op::Weight`), `usr/tapestryd/src/pane.rs` (`recompute_instrument`/`carve`/`place_frame`, `split_fits`, the weight rules, `host_for`'s stack fallback), `usr/tapestryd/src/server.rs` (`workspace_area`, `paint_instrument`, `frame`/`dividers`, the `weight` verb, the `split` refusal), `usr/halcyond/src/{layout,session,main}.rs`, `tools/build.sh` (`THYLACINE_HALCYON_PROFILE`), `tools/interactive/ls-halcyon-instrument.exp` ...
+- **HALCYON-INSTRUMENT I-3: the stack and the headers -- pointer routing to chrome (`chrome_at`, `TEV_PTR_LEAVE`), the header actions under the OWNER's pane authority (focus / close / the final tile / the tile menu), the placard carve, the separator row, the successor-rule fix, the retained tiles (compositor input routing; HALCYON.md 13.6; I-32)** -- `usr/tapestryd/src/server.rs` (`chrome_at`/`ptr_target`/`ptr_crossing`, `Comp.ptr_over`, `TEV_PTR_LEAVE`, the placard fill + the separator row, `calc_geom_sig`), `usr/tapestryd/src/pane.rs` (`Pane.separator`, the placard carve, `close_inner`'s index shift), `usr/lib/libtapestry/src/lib.rs`, `usr/lib/libhalcyon/src/instrument.rs` (`Derived`/`over`), `usr/halcyond/src/{chrome,chromeset,session,main,menu,status,statusset,tile,layout}.rs`, `tools/interactive/ls-halcyon-instrument.exp` ...
+- **HALCYON-INSTRUMENT I-4: the rails -- `role=rail` gated like the bar and following the display, the rail as a pointer target, the `chords` file, the top rail's zones and the footer's four conditions from the tile's facts, Reset as a verb plan under the owner's authority (display-level chrome; HALCYON.md 13.6; I-32)** -- `usr/tapestryd/src/server.rs` (`Comp.rail`, the `role=rail` arm + `pane::admit_rail`, `rail_rect`, the Direct conjuncts, the retires, `retire_stale_rail`, `chrome_at` / `ptr_crossing`, the `rail` + `chords` files), `usr/tapestryd/src/{pane,chords}.rs`, `usr/lib/libtapestry/src/lib.rs`, `usr/lib/libhalcyon/src/instrument.rs`, NEW `usr/halcyond/src/{rail,railset}.rs`, `usr/halcyond/src/{raster,status,menu,chromeset,statusset,main,session}.rs`, `tools/interactive/ls-halcyon-instrument.exp`, NEW `tools/interactive/ls-halcyon-session-instrument.exp` ...
+- **HALCYON-INSTRUMENT I-5: type and the rich document -- I-5a the substrate: three Plex cuts and two Cornucopia subsets embedded, the free-running mono face, the Italic cell face, the box-glyph precedence in the cell, the Sheet's role table, the chrome on the type map; I-5b the document: the profile-keyed fractional flow, the Sheet's document column, the terminal view and the code block, the position indicator, the raw grid's ground; I-5c the producers: the profile-keyed palette export with its reader beside the writer, ut's lambda prompt, nora's class roles; I-5d kerning: GPOS pair adjustments with HarfBuzz's semantics, the H1's tracking, the hanging line-end space (halcyond's in-process face, I-32; the /env contract's reader side; the font-table reader)** -- `usr/halcyond/src/raster.rs` (`FACE_SANS` / `FACE_SANS_MEDIUM` / `FACE_SANS_SEMIBOLD` / `FACE_MONO_ITALIC` / `FACE_MONO_TEXT`, `prop_slot`, `VENDORED_FACES`, `italic_shares_the_cell`, the box glyphs before the face, `is_instrument_sans`), `usr/halcyond/src/layout.rs` (`Flow` / `Rhythm`, the document column, `flow_box`), NEW `usr/halcyond/src/indicator.rs`, `usr/halcyond/src/lib.rs`, `usr/lib/cornucopia/src/{lib.rs,cornucopia-subset.ttf,cornucopia-subset-italic.ttf}`, `tools/subset-cornucopia.py` (`--extra`, `--match`), `usr/halcyond/src/{tile,rail,chrome,menu,main,session}.rs`, `tools/interactive/ls-halcyon-instrument.exp`; I-5c: `usr/lib/libhalcyon/src/theme.rs` (`env_palette` over the `Bundle`, `PromptRoles`, `prompt_roles`), `usr/utopia/libutopia/src/{palette,ansi,repl}.rs`, `usr/utopia/shell/src/main.rs`, `usr/nora/src/theme.rs`, `tools/interactive/ls-halcyon-session-instrument.exp`; I-5d: `usr/halcyond/src/outline.rs` (`kern_lookups`, `Face::kern_units`), `usr/halcyond/src/raster.rs` (`set_kerning`, `kern` in 1/256 px), `usr/halcyond/src/layout.rs` (`Sheet.{kerning, hdr_track, hang_spaces}`, `run_width_fx`) ...
+- **HALCYON-INSTRUMENT I-6: dividers and minima -- the compositor's own pointer capture on the published tracks, the weights re-expressed as the children's pixel extents, the mockup's ratio on the pair's frame under the band and the minima, one relayout per frame, the capture's end conditions, the double-click; the `mode` / `move` fits-checks on a copy; the chrome bind re-judged at every reconcile; the two-per-pane allowance (compositor input routing; I-32 on the pool)** -- `usr/lib/libhalcyon/src/carve.rs` (`drag_pair` / `equalise_pair`), `usr/tapestryd/src/pane.rs` (`track_at` / `drag_track` / `equalise_track` / `fits_after` / `chrome_bind_admitted`), `usr/tapestryd/src/server.rs` (`DragState`, `Comp.drag` / `track_hover`, `OWNER_DRAG`, `drag_*`, `hover_update`, `paint_track`, `reap_orphan_chrome`, the caps), `tools/qmp-sendtext.sh` (`dblclick`), both Instrument gates ...
 
 The trigger list is *cumulative*: a chunk that adds an audit-bearing surface appends its full row to `docs/AUDIT-TRIGGERS.md` and a one-line entry to the index above, in the same PR that introduces it.
 
@@ -457,7 +468,7 @@ names).
 | # | Invariant (condensed) | Validation |
 |---|---|---|
 | I-1 | Territory operations in Proc A don't affect Proc B | `territory.tla` |
-| I-2 | Fork-grantable caps monotonically reduce; `CAP_ELEVATION_ONLY` (HOSTOWNER+DAC_OVERRIDE+CHOWN+KILL) stripped at every fork; growth only via the `cap` device (HOSTOWNER console-gated; clearance corvus-side-gated) | `handles.tla` |
+| I-2 | Fork-grantable caps monotonically reduce; `CAP_ELEVATION_ONLY` stripped at every fork; growth only via the `cap` device (HOSTOWNER console-gated; clearance corvus-side-gated). **The set is SIX bits — HOSTOWNER+DAC_OVERRIDE+CHOWN+KILL+DEBUG+JIT — and this row said four until 2026-09-10; re-derive from `caps.h:193`, never from a prose list.** `CAP_POST_SERVICE` (bit 12) is DESIGNED as the seventh (IMPERIUM-DESIGN §6.5), unbuilt | `handles.tla` |
 | I-3 | Mount points form a DAG, never a cycle | `territory.tla` |
 | I-4 | Handles transfer between Procs only via 9P sessions (no direct-transfer syscall; the positive 9P path is still future) | `handles.tla` |
 | I-5 | `KObj_MMIO`/`KObj_IRQ`/`KObj_DMA` (and `KObj_Loom`) non-transferable | `handles.tla` + static_asserts |
@@ -940,11 +951,35 @@ When you spot a candidate while implementing — note it in the chunk's commit m
 
 ## Build + test commands
 
-Per `TOOLING.md`. Top-level wrappers:
+Per `TOOLING.md`. Top-level wrappers.
+
+**A BARE `tools/build.sh` IS NOT THE GATE IMAGE (since 2026-09-09).** With no
+flags it applies `configs/default.config`, and that profile now sets
+`HALCYON_SESSION=y` -- **Halcyon is the default UI**, so after login the image
+runs the tiled environment instead of `ut` on `/dev/cons`. **47 interactive
+scenarios log in and 35 of those then drive a shell** (measured, not
+estimated); those 35 want `ut` and will not find it. So:
+
+- **Product / demo image, or anything a person will use** -> bare
+  `tools/build.sh` (or `--config <your profile>`). This is the Halcyon image.
+- **The gate fleet -- `tools/test-interactive.sh`, and anything asserting on a
+  post-login shell** -> `tools/build.sh --config ci`, which pins
+  `HALCYON_SESSION=n` EXPLICITLY for exactly this reason. A caller-set
+  `THYLACINE_HALCYON_SESSION=0` also wins, since `bc__export_env` does not
+  clobber a pre-set env var.
+
+The two Halcyon levers are separate and only the session one is defaulted:
+`HALCYON_CONSOLE` (halcyond as the PRE-login console renderer) stays off,
+because it is not a pure renderer swap -- it also bakes a `#wedge` test rule
+into `/lib/beacon/verbs`, the #880 strip-for-production class. Full schema +
+the theme picker: `docs/BUILD-CONFIG-DESIGN.md` section 4.2.
 
 ```bash
-# Build the kernel ELF
+# Build the kernel ELF -- the DEFAULT (Halcyon) image
 tools/build.sh kernel
+
+# Build the GATE image (no Halcyon session; what test-interactive expects)
+tools/build.sh kernel --config ci
 
 # Build the musl + sysroot
 tools/build.sh sysroot
@@ -1014,6 +1049,19 @@ WARP_HOST=thyla-pi WARP_ACCEL=kvm tools/warp-host.sh venus   # certify (2 boots)
 WARP_HOST=thyla-gl tools/warp-host.sh venus                  # iterate (2 boots)
 tools/test-venus-verdict.sh         # its verdict, no boot  (or: make test-venus-verdict)
 
+# haul's npxf known-answer vectors (#245 again). Re-derives all 23 from npxf's
+# OWN source and diffs the committed fixture, so kat/vectors.txt is a CHECKED
+# recording rather than a file whose only claim to being npxf's output is that
+# someone once said so. It also refuses to emit unless BOTH direction labels
+# hold -- one leg per handshake, each pinning the other side's ephemeral. One
+# leg is not enough and the reason is instructive: a symmetric check cannot see
+# a swap applied to both halves, and pinning only the responder stops exercising
+# server_handshake entirely. All four sabotage cases are measured in
+# HAUL-DESIGN.md 4. SKIPs cleanly (exit 0 + a SKIP line) where npxf is absent --
+# it lives outside version control, so on any other machine this is a skip, not
+# a failure.
+make test-haul-kat                  # or: usr/haul/kat/regen.sh [--write]
+
 # ARMv8.0 floor guard (#91). The SOURCE + BINARY checks run automatically at the
 # tail of every ramfs bake; these are the extras. `check-floor` adds the big pool
 # payloads (/clade, /goroot, ~6 min); `test-a72` is PORTABILITY.md section 3's
@@ -1032,6 +1080,10 @@ make test-a72                       # boot on -cpu cortex-a72 (ARMv8.0-only)
 # own -- presenting to the other gate as "qemu GONE, guest healthy" -- and both
 # gates restore the same build/fixtures/pool.img. Do not run it alongside the
 # SMP gate in one tree; use a separate worktree.
+# NEEDS THE GATE IMAGE: bake with `--config ci` (or THYLACINE_HALCYON_SESSION=0).
+# A bare build is the Halcyon-default image since 2026-09-09, where login
+# spawns the session compositor and the 35 shell-driving scenarios find no
+# `ut` prompt. See "Build + test commands" above.
 tools/test-interactive.sh               # full set (or: make test-interactive)
 tools/test-interactive.sh ls-ci         # one scenario by name
 

@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "referenceCommit": "074bc5646b2f7a03872859890c2891017ceaaf9d",
+  "defaultTheme": "carbon",
+  "clock": "09:41",
+  "status": "READY",
+  "focusedPane": "p1",
+  "cursor": "visible",
+  "pointer": "outside_active_controls",
+  "scrollOffsets": "all_zero",
+  "contentSource": "reference/app.js: tileCatalog (exact text and spans)",
+  "layout": {
+    "type": "split", "id": "root", "direction": "vertical", "ratio": 0.515,
+    "first": {"type": "pane", "id": "p1", "expanded": "renderer", "tiles": ["notes", "renderer", "build", "refs"]},
+    "second": {
+      "type": "split", "id": "right", "direction": "horizontal", "ratio": 0.49,
+      "first": {"type": "pane", "id": "p2", "expanded": "shell", "tiles": ["shell", "log", "proc"]},
+      "second": {"type": "pane", "id": "p3", "expanded": "compositor", "tiles": ["architecture", "compositor", "tasks"]}
+    }
+  },
+  "cases": [
+    {"start": "initial", "action": "open p1 build", "expected": {"focused": "p1", "expanded": "build", "above": ["notes", "renderer"], "below": ["refs"]}},
+    {"start": "initial", "action": "cycle p1 next", "expected": {"expanded": "build"}},
+    {"start": "initial", "action": "cycle p1 previous", "expected": {"expanded": "notes"}},
+    {"start": "initial", "action": "close p1 renderer", "expected": {"expanded": "build", "tiles": ["notes", "build", "refs"]}},
+    {"start": "initial", "action": "split focused vertical", "expected": {"panes": 4, "focused": "p4", "axis": "left_right", "ratio": 0.5, "fixtureNewContent": "renderer", "productionNewContent": "distinct_shell_process"}},
+    {"start": "initial", "action": "theme genera", "expected": {"theme": "genera", "panes": 3, "focused": "p1", "layoutUnchanged": true}},
+    {"start": "initial", "action": "drag root to 0.62 then Escape", "expected": {"rootRatio": 0.62, "captured": false}},
+    {"start": "initial", "action": "doubleclick root divider", "expected": {"rootRatio": 0.5}}
+  ]
+}

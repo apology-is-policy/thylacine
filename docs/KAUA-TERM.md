@@ -119,11 +119,21 @@ stream down. The record ORDER is load-bearing (it delimits Beacon zones); the
 kaua-term emits in VT-stream order, flushing a pending CellDiff at every boundary.**
 
 kaua-term -> halcyond (ordered):
-- `CellDiff { changed (row,col,cell)[], cursor(row,col,vis), wrapped bool[] }` -- the
+- `CellDiff { changed (row,col,cell)[], cursor(row,col,vis), wrapped bool[], top_continues bool }` -- the
   live screen. `wrapped` is the grid's per-row soft-wrap snapshot (length == rows),
   carried like `cursor` so halcyond can rejoin soft-wrapped live rows into logical
   lines for the normal-mode proportional render (PL-4), the live analogue of
-  ScrollOff's per-row flag (PL-3).
+  ScrollOff's per-row flag (PL-3). `top_continues` is the vt's flag for the row
+  ABOVE row 0 (`wrapped[-1]`, which the vector cannot carry): true iff the row
+  that last scrolled off ended by autowrap and row 0 still holds its
+  continuation. halcyond joins the scrolled-off fragment it holds
+  (`scroll_pending`) to live row 0 only while it is set -- so a line straddling
+  the scrollback edge renders whole, not as a tail beginning mid-word -- and
+  finalizes the fragment as a line of its own the moment a CellDiff clears it
+  (row 0 restarted: a glyph at column 0, an erase reaching its first cell,
+  IL/DL at row 0, a scroll-down, RIS). Always false on the alt screen. On the
+  wire an OPTIONAL trailing byte after `wrapped`: a frame without it decodes
+  as false (2026-09-08).
   (Cells are position-keyed, so intra-batch order is irrelevant -- only the
   boundary order between records matters.)
 - `ScrollOff { rows: cell[][], wrapped: bool[] }` -- normal-mode lines off the top

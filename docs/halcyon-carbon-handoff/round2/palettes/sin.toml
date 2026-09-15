@@ -1,0 +1,75 @@
+# Round 2: authored semantic ANSI16 + explicit contrast corrections.
+# Still a stock-schema compatibility projection, not the full UI profile.
+[meta]
+name = "SiN Network"
+
+[palette]
+floor = "#070908"
+surface = "#141B18"
+header = "#0A0F0D"
+raised = "#1C2621"
+border = "#39483F"
+blank = "#0E1311"
+selection = "#2C2820"
+island_rule = "#79503A"
+fg = "#DCE1D9"
+fg_dim = "#C6CFC6"
+fg_muted = "#8F9B91"
+fg_subtle = "#727F75"
+bevel_top = "#2F3030"
+bevel_left = "#1D1F1E"
+bevel_right = "#050706"
+bevel_bottom = "#040504"
+ember = "#B1724F"
+ember_dim = "#79503A"
+ember_deep = "#79503A"
+status_bg = "#090D0B"
+status_fg = "#DCE1D9"
+status_muted = "#8F9B91"
+status_idle = "#59685D"
+
+[palette.sage]
+key = "#6F895F"
+tint = "#0A0F0D"
+raised = "#1C2621"
+border = "#243029"
+fg = "#DCE1D9"
+fg_dim = "#8F9B91"
+fg_muted = "#727F75"
+
+[palette.cinnabar]
+key = "#B45C50"
+tint = "#0A0F0D"
+raised = "#1C2621"
+border = "#243029"
+fg = "#DCE1D9"
+fg_dim = "#8F9B91"
+fg_muted = "#727F75"
+
+[palette.syntax]
+slate = "#B1724F"
+sage = "#79917B"
+sand = "#B86458"
+moss = "#957463"
+ash = "#6F895F"
+dusk = "#BB805E"
+smoke = "#717E75"
+fen = "#6F895F"
+cinnabar = "#B45C50"
+
+[terminal]
+bg = "#0A100D"
+fg = "#BAC6BC"
+ansi = ["#68756B", "#BC7C70", "#86A078", "#B8A063", "#819AB8", "#A88CAC", "#70A99C", "#C4CCC0", "#94A18E", "#DE9E8B", "#A8C295", "#D9C282", "#A4BADA", "#CAAECC", "#96CABB", "#EBF0E4"]
+
+[type]
+smooth = 0
+
+[geometry]
+bevel = 2
+gap = 3
+hairline = 1
+header_h = 32
+status_h = 25
+tag_pad_x = 0
+tab_strip_h = 0

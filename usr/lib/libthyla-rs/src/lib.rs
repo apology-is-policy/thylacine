@@ -255,6 +255,7 @@ pub const T_SYS_UNLINK: u64           = 58;
 // and composes create-else-open bounded (T_OEXCL / DMDIR are the exclusive
 // arms, server-atomic).
 pub const T_SYS_OPEN_CREATE: u64      = 109;
+pub const T_SYS_DMA_SEGMENTS: u64     = 112;   // WEAVE-SKEIN: a KObj_DMA's backing segment list (110/111 reserved to aux-3)
 // A-2a (IDENTITY-DESIGN.md section 9.5): chmod/chown via Tsetattr.
 pub const T_SYS_WSTAT: u64            = 59;
 pub const T_SYS_EXIT_GROUP: u64       = 60;
@@ -1169,9 +1170,19 @@ pub unsafe fn t_dma_create_gpu_bo(size: u64, rights: u32) -> i64 {
 // the underlying PA. `vaddr` must be page-aligned (4 KiB); `prot` must be
 // non-zero, only R/W bits set (EXEC rejected per W^X), no W-without-R.
 //
-// Returns the buffer's PA on success (always non-negative since PA fits
-// in 40 bits at v1.0), -1 on validation failure. Driver embeds the PA
-// into device-visible descriptors (VirtIO virtqueue rings, etc.).
+// THREE returns, and conflating the two negative ones leaks memory:
+//   >= 0  the buffer's PA (fits in 40 bits at v1.0). Embed it in device-
+//         visible descriptors (VirtIO virtqueue rings, etc.).
+//   -2    T_DMA_MAP_PA_SCATTERED -- THE MAPPING SUCCEEDED. The object is a
+//         SKEIN (physically scattered) and has no single PA, so none is
+//         invented. The VA is live and YOURS: t_burrow_detach it if you give
+//         up. Call t_dma_segments for the backing list.
+//   -1    validation failure. Nothing is installed; nothing to release.
+//
+// Which objects scatter: weaves and GPU BOs above SKEIN_BLOCK (2 MiB). Plain
+// t_dma_create is always contiguous, so a virtio driver cannot see -2 -- but
+// `if rc < 0 { close(h) }` is the WRONG shape the moment a caller's handle
+// comes from anywhere else, because it drops a live mapping on the floor.
 //
 // Safety: handle must be valid + held by the caller.
 #[inline(always)]
@@ -1183,6 +1194,66 @@ pub unsafe fn t_dma_map(handle: i64, vaddr: u64, prot: u32) -> i64 {
         in("x1") vaddr,
         in("x2") prot as u64,
         in("x8") T_SYS_DMA_MAP,
+        options(nostack)
+    );
+    x0
+}
+
+// WEAVE-SKEIN (docs/WEAVE-SKEIN-DESIGN.md): t_dma_map's return when the object
+// is a SKEIN -- physically scattered backing with no single PA.
+//
+// THE MAPPING SUCCEEDED. The VA is live and yours; what does not exist is a
+// base PA, so the kernel returns this rather than inventing one. Distinct from
+// -1 (the map failed, no VA exists) because the unwinds differ: -1 leaves
+// nothing to release, this leaves a mapping you must t_burrow_detach if you
+// give up. Call t_dma_segments for the backing list.
+pub const T_DMA_MAP_PA_SCATTERED: i64 = -2;
+
+// One entry of t_dma_segments' output: a physically-contiguous run of a
+// KObj_DMA's backing. `len` is the run's contribution to the BUFFER, so the
+// entries sum to exactly the object's size.
+#[repr(C)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct TDmaSeg {
+    pub pa: u64,
+    pub len: u64,
+}
+// The kernel pins this record's size and both field offsets with
+// _Static_asserts; the Rust mirror must too. `repr(C)` fixes the ORDER but
+// nothing here would notice a field whose type changed width -- the
+// audit_pci3 F3 class, where the TPciInfo mirror asserted 3 of its offsets
+// and the drift landed in the fourth.
+const _: () = assert!(core::mem::size_of::<TDmaSeg>() == 16);
+const _: () = assert!(core::mem::align_of::<TDmaSeg>() == 8);
+// The OFFSETS are the half that catches the drift actually worth catching.
+// Size and alignment alone are satisfied by a field SWAP -- `{ len, pa }` is
+// still 16 bytes, 8-aligned, and repr(C) lays it out faithfully swapped, so
+// every consumer would read a length where the kernel wrote a PA and hand the
+// device a length as an address. Narrowing `len` to u32 passes them too
+// (12 padded to 16). These are the mirror of the kernel's offsetof asserts.
+const _: () = assert!(core::mem::offset_of!(TDmaSeg, pa) == 0);
+const _: () = assert!(core::mem::offset_of!(TDmaSeg, len) == 8);
+
+// t_dma_segments — read a KObj_DMA's backing segment list (SYS_DMA_SEGMENTS).
+//
+// Fills `out` with the object's contiguous runs in ascending buffer order and
+// returns the count; -1 on failure. REFUSES rather than truncating when the
+// object has more runs than `out` holds, so a short buffer is an error you see
+// instead of a partial backing you attach and believe whole.
+//
+// Same gate as t_dma_map (CAP_HW_CREATE + a RIGHT_MAP handle): it discloses
+// the same thing -- where your own buffer physically lives.
+//
+// Safety: handle must be valid + held by the caller.
+#[inline(always)]
+pub unsafe fn t_dma_segments(handle: i64, out: &mut [TDmaSeg]) -> i64 {
+    let mut x0: i64 = handle;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") out.as_mut_ptr() as u64,
+        in("x2") out.len() as u64,
+        in("x8") T_SYS_DMA_SEGMENTS,
         options(nostack)
     );
     x0

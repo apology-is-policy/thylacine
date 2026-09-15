@@ -1,0 +1,77 @@
+# Stock Halcyon schema: complete 57-key compatibility projection.
+# Not pixel-exact alone: pair with ui-palettes/deusex.toml AFTER implementing Instrument v1.
+# Ember changes are an explicit new-profile policy amendment. No base inheritance.
+# ANSI and bevel faces are DERIVED, not sampled from the mockup.
+[meta]
+name = "Deus Ex Access"
+
+[palette]
+floor = "#05080C"
+surface = "#0D1722"
+header = "#070D14"
+raised = "#142131"
+border = "#304354"
+blank = "#091019"
+selection = "#252A2B"
+island_rule = "#766944"
+fg = "#D9E1E5"
+fg_dim = "#C3CDD2"
+fg_muted = "#8293A0"
+fg_subtle = "#526575"
+bevel_top = "#2D3033"
+bevel_left = "#1C1E22"
+bevel_right = "#040609"
+bevel_bottom = "#030406"
+ember = "#AD955D"
+ember_dim = "#766944"
+ember_deep = "#766944"
+status_bg = "#060B11"
+status_fg = "#D9E1E5"
+status_muted = "#8293A0"
+status_idle = "#526575"
+
+[palette.sage]
+key = "#688878"
+tint = "#070D14"
+raised = "#142131"
+border = "#1A2936"
+fg = "#D9E1E5"
+fg_dim = "#8293A0"
+fg_muted = "#526575"
+
+[palette.cinnabar]
+key = "#A76057"
+tint = "#070D14"
+raised = "#142131"
+border = "#1A2936"
+fg = "#D9E1E5"
+fg_dim = "#8293A0"
+fg_muted = "#526575"
+
+[palette.syntax]
+slate = "#AD955D"
+sage = "#6F91A5"
+sand = "#A76057"
+moss = "#766944"
+ash = "#688878"
+dusk = "#B7A16A"
+smoke = "#526575"
+fen = "#688878"
+cinnabar = "#A76057"
+
+[terminal]
+bg = "#07101A"
+fg = "#B6C3CA"
+ansi = ["#091019", "#A76057", "#688878", "#AD955D", "#6F91A5", "#766944", "#6C8D8F", "#8293A0", "#526575", "#B5847F", "#88A197", "#B9AA83", "#8DA7B7", "#928B71", "#8BA5A7", "#B6C3CA"]
+
+[type]
+smooth = 0
+
+[geometry]
+bevel = 2
+gap = 3
+hairline = 1
+header_h = 32
+status_h = 25
+tag_pad_x = 0
+tab_strip_h = 0

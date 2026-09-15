@@ -216,6 +216,156 @@ root-death teardown -- zero new kernel mechanism. The more elegant "your same
 shell toggles into imperium in place" needs a new "de-escalate-the-root-without-
 killing-it" teardown. **Recommend: ship the sub-shell first, evolve to in-place.**
 
+## 6.5 `CAP_POST_SERVICE` — posting a service under imperium (DESIGNED 2026-09-10)
+
+**Operator-ratified 2026-09-10.** The first capability designed *for* imperium
+rather than inherited by it, and the reason is architectural rather than
+thematic.
+
+**The problem.** `haul` mounts a remote 9P tree. A mount lands in the calling
+Proc's Territory and nowhere else (I-1), and Thylacine **clones** the namespace
+at every fork where Plan 9 **shares** it — so a `mount` *command* can never
+affect the shell that ran it. Plan 9's answer is `srv` + `mount /srv/foo`, which
+works there only because of that sharing. Here the endpoint has to reach the
+shell some other way, and `/srv` is the mechanism: its registry is namespace-
+resident, so a child's post IS visible to the parent.
+
+**Why the existing gate cannot be reused.** Posting to `/srv` is gated on
+`PROC_FLAG_MAY_POST_SERVICE`. That is a **proc flag**, and proc flags "remain
+set-once before EL0 by the Proc's own thread" (`kernel/proc.c:1768`) — the
+single-writer rule that keeps `proc_flags` free of multi-writer RMW against the
+console transitions. So it **cannot be conferred on a running shell by any
+elevation mechanism**, imperium included. Nor would widening it at login help on
+its own: proc flags do not propagate, so `haul` — a child of the shell — would
+not inherit it.
+
+**The shape.** A new elevation-only capability:
+
+```c
+#define CAP_POST_SERVICE (1ull << 13)     /* 12 is CAP_AUDIO_GRAPH on aux-3 */
+/* THREE masks, not one -- see below. MUST NOT join CAP_ALL. */
+```
+
+**The bit number is 13, not 12, and how that was caught is the point.** The
+first draft took bit 12 because 11 is main's high-water mark. Bit 12 is
+`CAP_AUDIO_GRAPH` **on aux-3**, so "free" was true of this branch and false of
+the project. A capability bit is a project-wide ABI allocation and main's
+`caps.h` is not the register -- the union of the live branches is. Caught by
+sweeping both sides during merge prep, hours after the design was ratified.
+
+```c
+```
+
+**THE MEMBERSHIP IS THREE MASKS, and the third is the load-bearing one** (aux,
+2026-09-10, re-derived rather than carried -- the first draft of this section
+said "elevation-only" and that is necessary but NOT sufficient):
+
+1. **`CAP_ELEVATION_ONLY`** -- excluded from `CAP_ALL`, rfork-stripped (I-2).
+2. **`CAP_GRANTABLE_CLEARANCE`** -- corvus's `cap` device may grant it at all.
+3. **`CAP_GRANTABLE_IMPERIUM`** -- may FLOW TO DESCENDANTS under a propagating
+   scope. **Required, and it is the whole point.** `devcap.c:230-231` refuses a
+   PROPAGATING grant whose `cap_mask` is not a subset of this mask, and `haul`
+   is a CHILD of the shell: the shell redeems the imperium, haul must inherit.
+
+So `CAP_POST_SERVICE` joins `CAP_GRANTABLE_IMPERIUM` = {DAC_OVERRIDE, CHOWN,
+KILL} -- the **elevated-session** family. It does NOT belong in the
+clearance-only residue {DEBUG, JIT, AUDIO_GRAPH}, which are deliberately
+NON-propagating (a debugger's child is not a debugger). The design statement is
+therefore stronger than "elevation-only": **posting a service is an
+elevated-SESSION authority, like fs-admin** -- every command run inside the
+imperium can post, which is exactly the semantics `haul` needs.
+
+Every property we want falls out of the existing machinery, which is the
+argument for this shape over a bespoke one:
+
+| Want | Falls out of |
+|---|---|
+| never held by default, never fork-grantable | excluded from `CAP_ALL` |
+| a child never inherits it by accident | in `CAP_ELEVATION_ONLY` → stripped at every fork (I-2) |
+| `haul` CAN inherit it when the user meant it | imperium's propagating scope is exactly the exemption from that strip (§2) |
+| no program can widen it behind your back | the *lex curiata* — SAK, provincia shown on the trusted path before auth (§3) |
+| **a posted service cannot outlive the imperium** | I-25 teardown group-terminates the scope subtree on `abdicate`/term/root-exit |
+
+That last row is the one worth noticing: it answers, structurally, the "who
+unmounts it, what is its lifetime" question the `/srv` design had left open. A
+service posted under imperium dies with the imperium. sudo's backgrounded jobs
+survive a logout; a legate's cannot, and neither can its services.
+
+**The flag is KEPT, not replaced** (operator's choice of the two offered). The
+two are different tiers of one gate, and `devsrv`'s check becomes
+`PROC_FLAG_MAY_POST_SERVICE || CAP_POST_SERVICE`:
+
+- **the flag** — spawn-time, non-propagating, kernel-stamped, joey-granted: the
+  TCB's own servers (corvus, ptyfs, login's per-user home proxy).
+- **the cap** — runtime, scope-propagating, user-elevated: the interactive path.
+
+Two doors to one gate is a smell worth naming rather than hiding, but it mirrors
+a pairing already in the tree: `PROC_FLAG_CONSOLE_ATTACHED` (a stamped role) and
+`CAP_HOSTOWNER` (an elevated authority) coexist for the same reason. Retiring
+the flag in favour of the cap was the rejected alternative: it would touch
+joey's spawn of corvus/ptyfs, login's home proxy and its one-hop delegation, and
+the `CONSOLE_OWNER` gate that keys off the flag — a wide blast radius on a
+security-critical path for a tidiness win.
+
+**THE SLOT BOUND SHIPS WITH THE CAPABILITY, and a corrected fact is why.** I
+argued (yip 0086 turn 3) that a name-allowlist was unnecessary because
+`srv_reserve_in` refuses to displace a LIVE/RESERVING entry (`devsrv.c:311+`) --
+that part holds, and impersonation is genuinely closed. But I also wrote that
+the registry is "namespace-resident (per-Proc), so the blast radius is the
+user's own namespace and its children, not the system." **That is wrong.**
+`/srv` is "the one immortal boot registry, mounted on kproc's `/srv`"
+(`devsrv.c:82-84`): a SINGLE shared `entries[SRV_MAX_SERVICES]` with
+`SRV_MAX_SERVICES = 16` (`devsrv.h:69`), shared across clones by refcount rather
+than re-instantiated.
+
+So exhaustion is **system availability**, not self-DoS: an elevated Proc posting
+junk denies a slot to a future trusted server, another user's shell, or a TCB
+server restart. Sixteen slots makes that cheap.
+
+Hence a modest **per-poster slot bound lands WITH the capability**, not after
+it: the table is shared and small; migration cost is ZERO (TCB servers post via
+the FLAG and there are no existing cap-posters, so a cap-holder bound retrofits
+nothing); and it bounds a buggy `haul` loop as much as malice. It is an I-32
+resource bound (HOW MANY) and never an attenuation (WHICH names stays
+unbounded), so it does not reopen the name-list question. The accounting shape --
+per-Proc vs per-imperium-scope -- follows haul's post-lifetime model in
+HAUL-DESIGN 4.6 and is settled at build time.
+
+**Rejected outright: widening `MAY_POST_SERVICE` to the session shell.** The
+syscall header states the containment in as many words — the shell, "lacking
+MAY_POST_SERVICE, cannot itself re-designate the owner" — so widening it would
+hand every program the user runs both service-posting AND the ability to
+re-designate the console owner. I-27 would survive (the owner bit never confers
+console-attach), but the widening is real and unnecessary given the above.
+
+**Cross-track note, and a HARD SEQUENCING DEPENDENCY.** Imperium is the
+auxiliary track's arc, and as of 2026-09-10 **it is not merged into main**:
+`4c77db6e` (IM-2, the propagating scope) is an ancestor of `aux-3` only, which
+is 126 commits ahead of main while main is 57 ahead of it. Main carries the A-4
+legate (`legate_scope_id`, `legate_valid_until`) but **not** the propagating
+mark.
+
+That is not a citation detail — it decides what can be built. Elevation-only
+caps are stripped at `rfork` **and** at `SYS_SPAWN_WITH_CAPS`, so without the
+propagating scope `CAP_POST_SERVICE` cannot reach a child at all: an elevated
+shell would hold it and `haul` — a child — would not. **The cap is inert for its
+actual purpose until imperium is in main.** The first draft of this section said
+"so this isn't a dependency on unbuilt work"; it is built, but not here, and
+`git merge-base` was the one command that would have said so.
+
+Consequences for sequencing:
+
+- **The `ut` namespace builtins are UNBLOCKED** and should go first. They need
+  no new capability — attaching to a posted service is not gated, only
+  *posting* is — so they can be built and verified against a service that
+  already exists (`/srv/ptyfs`, `/srv/stratum-fs`).
+- **The cap + haul's post mode wait on the merge**, and the merge is the
+  operator's call, not a thing either track should do unilaterally at 126/57
+  divergence.
+- This capability is *designed* here by the main track at the operator's
+  direction and is not main's to land unilaterally into imperium's conferral
+  set regardless.
+
 ## 7. Invariants + audit surface
 
 - Extends **I-25**: a propagating legate's caps flow ONLY within its

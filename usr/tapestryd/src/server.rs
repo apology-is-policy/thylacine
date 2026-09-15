@@ -100,11 +100,13 @@ use alloc::vec::Vec;
 use libthyla_rs::ninep as p9;
 use libthyla_rs::time::Instant;
 use libthyla_rs::{
-    t_burrow_detach, t_close, t_dma_create_gpu_bo, t_dma_create_weave, t_dma_map,
-    t_hostmem_refcount, t_srv_peer, t_weft_share, t_weft_unshare, TSrvPeerInfo, T_GID_SYSTEM,
-    T_PRINCIPAL_INVALID, T_PRINCIPAL_NONE, T_PRINCIPAL_SYSTEM, T_PROT_READ, T_PROT_WRITE,
-    T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_WRITE, T_SRV_PEER_FLAG_CONSOLE_RENDERER,
+    t_burrow_detach, t_close, t_dma_create_gpu_bo, t_dma_create_weave, t_dma_map, t_dma_segments,
+    t_hostmem_refcount, t_srv_peer, t_weft_share, t_weft_unshare, TDmaSeg, TSrvPeerInfo,
+    T_DMA_MAP_PA_SCATTERED, T_GID_SYSTEM, T_PRINCIPAL_INVALID, T_PRINCIPAL_NONE,
+    T_PRINCIPAL_SYSTEM, T_PROT_READ, T_PROT_WRITE, T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_WRITE,
+    T_SRV_PEER_FLAG_CONSOLE_RENDERER,
 };
+use tapestryd::skein::{self, Seg};
 
 /// Present-pressure window for the idle throttle (#164): two adjacent
 /// buckets of this width approximate a sliding window, so `animating()`
@@ -118,9 +120,11 @@ use libthyla_rs::{
 const PRESENT_BURST_WINDOW_MS: u64 = 250;
 const PRESENT_BURST_MIN: u32 = 4;
 
-use crate::chords::{ChordAction, Chords};
+use tapestryd::chords::{ChordAction, Chords};
+use libhalcyon::scale;
+use libhalcyon::theme::Metrics;
 use crate::gpu::{FenceTag, FencedErr, Gpu};
-use crate::pane::{self, Dir, Layout, Mode, Rect, Role, Status};
+use tapestryd::pane::{self, Dir, Layout, Mode, Rect, Role, Status};
 use libdriver::Error;
 
 pub const MAX_CONNS: usize = 8;
@@ -196,6 +200,13 @@ fn actor_owner_principal(actor: Actor) -> u32 {
 /// renderer + system clients)? This is exactly the discriminator `actor()`
 /// applies to a conn's peer_principal, read here off a leaf's stamped
 /// `owner_principal`. A SESSION leaf outranks SYSTEM leaves for the display.
+/// Since I-6 the compositor's surface pool is two per pane for the renderer
+/// AND the session on top of every conn's own; `Comp` is built on the user
+/// stack (`Comp::new` into the server's field), so the pool is pinned to
+/// leave the 1 MiB stack most of its room (the size is a compile-time fact).
+const _: () = assert!(core::mem::size_of::<Comp>() <= 256 * 1024);
+const _: () = assert!(MAX_SURFACES >= MAX_CONNS * MAX_SURFACES_PER_CONN + 2 * (MAX_SURFACES_PER_RENDERER - MAX_SURFACES_PER_CONN));
+
 fn principal_is_session(p: u32) -> bool {
     p != T_PRINCIPAL_INVALID && p != T_PRINCIPAL_SYSTEM && p != T_PRINCIPAL_NONE
 }
@@ -211,6 +222,7 @@ enum Host {
     Chrome { bind: u32 },
     Menu,
     Status,
+    Rail,
 }
 
 /// Layout mutations one conn may land per service pass (the H-3b round
@@ -218,10 +230,15 @@ enum Host {
 /// pipelined batch could land ~1000 in one pass). Beyond it: E_AGAIN --
 /// the next pass takes the rest.
 const LAYOUT_VERBS_PER_PASS: u32 = 4;
-const MAX_SURFACES_PER_RENDERER: usize = MAX_SURFACES_PER_CONN + pane::MAX_PANES;
-// One renderer and one declared session compositor may each hold a tile per
-// pane on top of the per-conn allowance.
-const MAX_SURFACES: usize = MAX_CONNS * MAX_SURFACES_PER_CONN + 2 * pane::MAX_PANES;
+/// Under Instrument every decorated tile costs its owner TWO surfaces -- the
+/// tile and its header -- so the renderer's (and the declared session's)
+/// allowance is two per pane on top of its own (the r1 A-F7 finding: one
+/// per pane admitted 16 decorated tiles against MAX_PANES 32).
+const MAX_SURFACES_PER_RENDERER: usize = MAX_SURFACES_PER_CONN + 2 * pane::MAX_PANES;
+// One renderer and one declared session compositor may each hold two
+// surfaces per pane on top of the per-conn allowance; the pool is sized so
+// every conn can reach its cap at once (nothing starves).
+const MAX_SURFACES: usize = MAX_CONNS * MAX_SURFACES_PER_CONN + 2 * (2 * pane::MAX_PANES);
 
 /// Warp-2c: the GPU-seam slot pools. ONE context per client (the I-45
 /// exposure bound, GPU-DESIGN section 8: no cross-context resource naming,
@@ -383,6 +400,12 @@ const WARP_BO_MAX_BPP: u64 = 16;
 /// Triple buffering (D1): one weave carries three page-aligned slots.
 const WEAVE_SLOTS: u32 = 3;
 
+/// WEAVE-SKEIN: the most backing runs a weave can have -- the kernel's
+/// KOBJ_DMA_MAX_BLOCKS, i.e. the 64 MiB weave envelope at 2 MiB granularity.
+/// The virtio-gpu REQ region holds 78 mem entries, so a full-envelope weave
+/// uses 32 of them and no transport change is required.
+const WEAVE_MAX_SEGS: usize = 32;
+
 /// R2-F4: the bounded per-surface event queue. FRAME coalesces; a
 /// non-droppable overflow wedges the surface.
 const EVENT_QUEUE_CAP: usize = 128;
@@ -469,6 +492,8 @@ const P_SURF_NEW: u64 = 3; // surface/new
 const P_LAYOUT: u64 = 4; // the container tree (G-6)
 const P_PANE_DIR: u64 = 5; // pane/
 const P_STATUSBAR: u64 = 6; // the status bar's rect, "x y w h" (H-3d)
+const P_RAIL: u64 = 7; // the top rail's rect, "x y w h" (HALCYON-INSTRUMENT 8)
+const P_CHORDS: u64 = 8; // the chord table in force, one binding per line (8.2)
 
 const SURF_FLAG: u64 = 1 << 40;
 const PANE_FLAG: u64 = 1 << 41; // pane qids (G-6): PANE_FLAG | id<<8 | fk
@@ -505,6 +530,10 @@ const PFK_CLAIM: u64 = 9;
 /// or an empty leaf's recorded owner (0 = the environment). The session
 /// tool's `layout save` reads it to mark the tiles it must never respawn.
 const PFK_OWNER: u64 = 10;
+/// HALCYON-INSTRUMENT 5.5: the enclosing pane frame's rect (a stacked leaf's
+/// is its stack's) and a split container's divider tracks, one per line.
+const PFK_FRAME: u64 = 11;
+const PFK_DIVIDERS: u64 = 12;
 
 fn make_surf(n: usize, fk: u64) -> u64 {
     SURF_FLAG | ((n as u64 & N_MASK) << 8) | (fk & FK_MASK)
@@ -829,6 +858,11 @@ pub const TEV_CLOSE: u16 = 8;
 /// that claims empties would otherwise learn of them only at an unrelated
 /// event.
 pub const TEV_LAYOUT: u16 = 10;
+/// The pointer left this CHROME surface (HALCYON-INSTRUMENT 9.1, I-3): sent
+/// only to a `Role::Chrome` surface, when the routing moves off it -- onto
+/// another surface, the desktop, a track, or a placed menu's grab. A header
+/// un-hovers on it; content surfaces never receive it.
+pub const TEV_PTR_LEAVE: u16 = 11;
 
 #[derive(Clone, Copy)]
 pub struct Tevent {
@@ -1030,6 +1064,13 @@ struct Surface {
     /// at the bottom strip the layout carves for it. Renderer-gated at
     /// create, one per display.
     is_status: bool,
+    /// HALCYON-INSTRUMENT 8: the Role::Rail surface -- the display-top
+    /// rail. Never hosted, bound to the DISPLAY like the status bar:
+    /// showable only while it is THE registered rail (`Comp.rail`,
+    /// gen-pinned), placed at the top strip the Instrument carve always
+    /// reserves. The same gate as the bar at create; refused under legacy.
+    /// A pointer target like a header (9.1).
+    is_rail: bool,
     /// The slot of this surface's last accepted present: what
     /// `menu_reassert` re-composes when a screen write lands under a placed
     /// menu. None until the first present.
@@ -1448,6 +1489,32 @@ const BTN_BASE: u16 = 0x100;
 /// `btn_owner` state: the press was consumed by the compositor (a
 /// click-away dismiss); its release is consumed too.
 const OWNER_SWALLOWED: u64 = 0xffff;
+/// `btn_owner` state: the press began a divider drag (HALCYON-INSTRUMENT
+/// 9.2); its release ends the drag, or is consumed if the drag already
+/// ended (Escape, a chord, a modal, the split's retirement).
+const OWNER_DRAG: u64 = 0xfffe;
+/// evdev BTN_LEFT: the primary button, the only one that drags a divider.
+const BTN_LEFT: u16 = 0x110;
+/// Two primary presses on the same track within this many milliseconds are
+/// the double-click that equalises the pair (9.2).
+const DBLCLICK_MS: u64 = 500;
+/// ... and within this many pixels of each other on both axes.
+const DBLCLICK_SLOP: u32 = 4;
+
+/// HALCYON-INSTRUMENT 9.2 (I-6): the live divider drag -- the compositor's
+/// own pointer capture. Held by the split container's public ID and the
+/// track's index (slots are reused, ids never; the pair is re-derived from
+/// the live tree at every touch, so a retired or restructured container
+/// ends the drag instead of moving a stranger's boundary).
+#[derive(Clone, Copy)]
+struct DragState {
+    cid: u32,
+    idx: usize,
+    /// The pointer's last display position; applied at most once per frame.
+    pos: (u32, u32),
+    /// A position not yet laid out (the frame cadence coalesces motion).
+    pending: bool,
+}
 fn key_idx(code: u16) -> usize {
     (code as usize) & (KEYCODE_SPAN - 1)
 }
@@ -1459,7 +1526,7 @@ fn owner_pack(n: usize, gen: u32) -> u64 {
 }
 fn owner_unpack(v: u64) -> Option<(usize, u32)> {
     let slot = v & 0xffff;
-    if slot == 0 || slot == OWNER_SWALLOWED {
+    if slot == 0 || slot == OWNER_SWALLOWED || slot == OWNER_DRAG {
         return None;
     }
     Some((slot as usize - 1, (v >> 16) as u32))
@@ -1467,6 +1534,38 @@ fn owner_unpack(v: u64) -> Option<(usize, u32)> {
 
 pub struct Comp {
     pub gpu: Gpu,
+    /// HALCYON-SCALE 4: the display scale in percent (100/125/150/175/200)
+    /// -- derived from the EDID at boot and on `mode auto`, overridden by
+    /// the `scale` verb / chords; published as `scale <pct>` in the ctl.
+    pub scale: u16,
+    /// A `scale <pct>` verb or chord in force for the rest of the session
+    /// (`scale auto` / the reset chord clear it); None = derived.
+    scale_override: Option<u16>,
+    /// HALCYON-SCALE 3 (SC-5): the platform's declaration off the kernel
+    /// command line, read once at probe -- the derived scale's FIRST
+    /// source (a declaration outranks a measurement: it exists for the
+    /// display whose EDID cannot say, QEMU's, or lies). None = the EDID
+    /// derives. Never written after probe.
+    declared: Option<u16>,
+    /// `Metrics::at(scale)`: the ONE table every carve and paint here reads
+    /// (halcyond reads the same function at the same percent).
+    pub metrics: Metrics,
+    /// The RESOLVED theme this compositor paints its chrome in
+    /// (HALCYON-THEME 3.2). Resolved once at construction -- TH-4's loader
+    /// lands there, and a declared session's push re-decides it -- so no
+    /// painter below reaches for a constant. The chrome and the content must
+    /// agree or the bevel does not match the pane, which is why this and
+    /// halcyond's `Sheet.theme` have to come from the same file.
+    pub theme: libhalcyon::theme::Theme,
+    /// The RESOLVED BUNDLE (HALCYON-INSTRUMENT 4.4): the profile in force
+    /// and both themes, one native and one projected. `theme` and `metrics`
+    /// above are derived from it in `new`, `apply_theme` and `apply_scale`
+    /// and nowhere else -- `metrics` through `Bundle::at`, so the PROFILE
+    /// picks the table (I-2): the legacy painters read `theme` and the
+    /// legacy carve reads the legacy fields; the Instrument carve and
+    /// painter (`recompute_instrument`, `paint_instrument`) read `inst` and
+    /// the Instrument marks. Which pair runs is `bundle.profile`.
+    pub bundle: libhalcyon::instrument::Bundle,
     surfaces: [Option<Surface>; MAX_SURFACES],
     gen_seq: u32,
     conn_seq: u64,
@@ -1625,6 +1724,14 @@ pub struct Comp {
     /// focus-only epoch bump redraws borders without blanking content
     /// (idle clients must not lose their pixels to a focus ring move).
     geom_sig: u64,
+    /// HALCYON-SCALE 5: a scale change owes every follower a redraw
+    /// CONFIGURE (+ the session its TEV_LAYOUT) whether or not the geometry
+    /// moved -- the Direct arm carves nothing, a lone leaf under a menu
+    /// keeps its full rect. Set by `apply_scale`, consumed by the next
+    /// `reconcile` in whichever arm it takes; never a second fan after a
+    /// structural pass (a queued CONFIGURE is replaced wholesale, so a
+    /// same-size re-fan would overwrite a resize offer just made).
+    rescale_fan_due: bool,
     /// The conns that DECLARED themselves the display's session compositor
     /// (`session on` on their own ctl). The display handoff keys on this,
     /// never on a surface's principal: a user program drawing a window is
@@ -1658,6 +1765,11 @@ pub struct Comp {
     /// carve), `paint_borders` fills the strip `status_bg`, and no leaf is
     /// Direct-scanned (a leaf is smaller than the display).
     status: Option<StatusState>,
+    /// HALCYON-INSTRUMENT 8: the one top rail on the display, if any. The
+    /// carve does not depend on it (the Instrument workspace always sits
+    /// between the two rails); registration only PLACES the surface there
+    /// and, like the bar, keeps the display off Direct.
+    rail: Option<StatusState>,
     /// H-3c round F1: where each pressed KEY went -- packed (slot+1) |
     /// gen<<16, 0 = none -- so a release or a repeat FOLLOWS ITS PRESS (the
     /// chord layer's rule): to the leaf that saw the press across a grab
@@ -1697,6 +1809,21 @@ pub struct Comp {
     /// the first abs motion (the seed emits no delta -- the initial
     /// (0,0)->position jump is placement, not motion).
     abs_last: Option<(u32, u32)>,
+    /// HALCYON-INSTRUMENT 9.1 (I-3): the CHROME surface the pointer is over
+    /// (slot, gen) as of the last routed motion -- the one that hears
+    /// TEV_PTR_LEAVE when the routing moves off it. None over content, the
+    /// desktop, a track, or under a grab.
+    ptr_over: Option<(usize, u32)>,
+    /// HALCYON-INSTRUMENT 9.2 (I-6): the divider track under the pointer,
+    /// (container id, track index), whose rule paints `amber_muted`. None
+    /// over anything else, under a grab, and during a drag (the dragged
+    /// track paints `amber` instead).
+    track_hover: Option<(u32, usize)>,
+    /// The live divider drag (9.2): the compositor's pointer capture.
+    drag: Option<DragState>,
+    /// The last primary press on a track, for the double-click: (container
+    /// id, track index, when, where).
+    track_press: Option<(u32, usize, Instant, (u32, u32))>,
     /// Section 18.6 determinism mode (dev/test builds only -- the #880
     /// strip-for-production class, enforced by the `test-mode` cargo
     /// feature at BUILD time): the FRAME clock freezes (ticks only on
@@ -2061,7 +2188,11 @@ struct WarpBo {
     res_id: u32,
     dma_fd: i64,
     va: u64,
-    pa: u64,
+    // WEAVE-SKEIN deleted the `pa` field. It was written once and read nowhere,
+    // and a dead base PA on an I-45 surface is exactly the shape
+    // burrow_create_dma's `v->pa = 0` comment exists to prevent: a
+    // plausible-looking base is what a future reader adds an offset to, which
+    // now addresses another object's pages, because a GPU BO scatters.
     size: u64,
     /// The lazy Tweft mint (the weft_ensure precedent); disarmed at retire
     /// BEFORE any backing free (the R2-F5 ordering).
@@ -2285,9 +2416,37 @@ struct GlAdopt {
 const NO_SURFACE: Option<Surface> = None;
 
 impl Comp {
-    pub fn new(gpu: Gpu) -> Comp {
+    pub fn new(gpu: Gpu, declared: Option<u16>, bundle: libhalcyon::instrument::Bundle) -> Comp {
+        let theme = bundle.theme;
+        let (derived, src) = match declared {
+            Some(p) => (p, "declared"),
+            None => (
+                match gpu.edid_mm {
+                    Some((mm_w, mm_h)) => scale::scale_pct(gpu.width, gpu.height, mm_w, mm_h),
+                    None => scale::SCALE_MIN,
+                },
+                "edid",
+            ),
+        };
+        // The same guard the runtime path (`apply_scale`) applies: the seat
+        // runs at one of the five values or at 100, never at whatever the
+        // derivation returned (the scale round's F2: a wrapped percent
+        // reached the ctl through this path alone).
+        let scale = if scale::is_valid_pct(derived) {
+            derived
+        } else {
+            say!("tapestryd: scale {} off the table ({}) -> {}", derived, src, scale::SCALE_MIN);
+            scale::SCALE_MIN
+        };
+        say!("tapestryd: scale {} ({})", scale, src);
         Comp {
             gpu,
+            scale,
+            scale_override: None,
+            declared,
+            metrics: bundle.at(scale).metrics,
+            theme,
+            bundle,
             surfaces: [NO_SURFACE; MAX_SURFACES],
             gen_seq: 0,
             conn_seq: 0,
@@ -2334,6 +2493,7 @@ impl Comp {
             pending_bind_refused_said: false,
             chrome_epoch: 0,
             geom_sig: 0,
+            rescale_fan_due: false,
             session_conns: Vec::new(),
             tick: 0,
             clock_hz: 60,
@@ -2344,6 +2504,7 @@ impl Comp {
             last_focus: None,
             menu: None,
             status: None,
+            rail: None,
             key_owner: [0; KEYCODE_SPAN],
             btn_owner: [0; BTNCODE_SPAN],
             menu_reason: "retire",
@@ -2351,6 +2512,10 @@ impl Comp {
             chords: Chords::new(),
             ptr_x: 0,
             abs_last: None,
+            ptr_over: None,
+            track_hover: None,
+            drag: None,
+            track_press: None,
             ptr_y: 0,
             #[cfg(feature = "test-mode")]
             test_mode: false,
@@ -2466,6 +2631,7 @@ impl Comp {
             chrome_bind: None,
             is_menu: false,
             is_status: false,
+            is_rail: false,
             shown_slot: None,
             comp_attached: false,
             gpu_said: false,
@@ -2483,6 +2649,64 @@ impl Comp {
     fn next_res_id(&mut self) -> u32 {
         self.res_seq = self.res_seq.wrapping_add(1);
         self.res_seq
+    }
+
+    /// WEAVE-SKEIN: map ANY kernel DMA object and read its backing SEGMENT
+    /// LIST. Weaves and GPU BOs both, since both scatter above SKEIN_BLOCK.
+    ///
+    /// ONE path for contiguous and scattered objects, and THE ONLY PLACE that
+    /// knows about T_DMA_MAP_PA_SCATTERED. t_dma_map's PA return is
+    /// deliberately discarded: the segment list is authoritative for both
+    /// shapes, so there is no branch here that only a large object takes and
+    /// that therefore rots. A 1280x800 triple-buffered weave is already 6
+    /// blocks, so the scattered path is the ordinary one, not the exotic one.
+    ///
+    /// Every caller goes through here rather than calling t_dma_map itself,
+    /// because the `-2` unwind differs from the `-1` one in the way that
+    /// matters: -1 leaves nothing to release, -2 leaves a LIVE MAPPING. A site
+    /// that treats them alike leaks a VMA, and one that also rewinds a VA
+    /// bump-allocator hands the same address out twice.
+    ///
+    /// CONTRACT ON None: nothing is installed. If the map succeeded and the
+    /// segment read then failed, this detaches the VA before returning, so
+    /// every caller's existing "close the handle" unwind stays correct and
+    /// complete.
+    fn map_dma(handle: i64, va: u64, size: u64, out: &mut [Seg]) -> Option<usize> {
+        let rc = unsafe { t_dma_map(handle, va, T_PROT_READ | T_PROT_WRITE) };
+        // A skein has no single PA, so the kernel refuses to invent one rather
+        // than returning the first block's -- which a caller would embed in a
+        // device descriptor and the device would then walk off the end of.
+        // T_DMA_MAP_PA_SCATTERED means THE MAPPING SUCCEEDED and the VA is
+        // ours; only a genuinely failed map leaves nothing to detach.
+        if rc < 0 && rc != T_DMA_MAP_PA_SCATTERED {
+            return None;
+        }
+
+        let mut raw = [TDmaSeg::default(); WEAVE_MAX_SEGS];
+        let n = unsafe { t_dma_segments(handle, &mut raw) };
+        // The kernel REFUSES rather than truncating when the object has more
+        // runs than the buffer holds, so a positive n is a complete list.
+        if n <= 0 || (n as usize) > out.len() {
+            // Named, because the two ways to get here have very different
+            // causes and the failure is otherwise a silent E_NOMEM: a kernel
+            // KOBJ_DMA_MAX_BLOCKS raise past WEAVE_MAX_SEGS shows up ONLY as
+            // the second arm, and nothing links the two constants.
+            say!(
+                "tapestryd: t_dma_segments({}) -> {} (cap {})",
+                size,
+                n,
+                out.len()
+            );
+            unsafe { t_burrow_detach(va, size) };
+            return None;
+        }
+        for i in 0..n as usize {
+            out[i] = Seg {
+                pa: raw[i].pa,
+                len: raw[i].len,
+            };
+        }
+        Some(n as usize)
     }
 
     /// Allocate one weave GENERATION: DMA chunk + map + zero + one 2D
@@ -2516,31 +2740,46 @@ impl Comp {
         }
         let va = self.weave_va_next;
         self.weave_va_next += (size + PAGE - 1) & !(PAGE - 1);
-        let pa = unsafe { t_dma_map(handle, va, T_PROT_READ | T_PROT_WRITE) };
-        if pa < 0 {
-            unsafe { t_close(handle) };
-            return Err(p9::E_NOMEM);
-        }
+        let mut segs = [Seg::default(); WEAVE_MAX_SEGS];
+        let nsegs = match Self::map_dma(handle, va, size, &mut segs) {
+            Some(n) => n,
+            None => {
+                unsafe { t_close(handle) };
+                return Err(p9::E_NOMEM);
+            }
+        };
         // Zero the weave: DMA chunk content must never leak a prior
-        // occupant's bytes into a client mapping.
+        // occupant's bytes into a client mapping. The VA range is contiguous
+        // whatever the physical backing does, so this is unchanged by the
+        // skein -- scatter is invisible above the page tables.
         unsafe { core::ptr::write_bytes(va as *mut u8, 0, size as usize) };
 
-        // ONE RESOURCE PER SLOT (4.5.8), each backed by its own slot at
-        // `pa + i*slot_stride` rather than by the whole weave -- that is what
-        // makes slot <-> resource 1:1. The weave's PA is contiguous (the
-        // whole-weave attach this replaces relied on exactly that), so the
-        // per-slot offsets are sound.
+        // ONE RESOURCE PER SLOT (4.5.8), each backed by its own slot rather
+        // than by the whole weave -- that is what makes slot <-> resource 1:1.
+        //
+        // WEAVE-SKEIN: the slot's backing is now the weave's segment list
+        // SLICED to that slot's byte range, because a slot boundary does not
+        // land on a block boundary (a 2560x1664 slot is 16.25 MiB against
+        // 2 MiB blocks). This replaces `pa + i*slot_stride`, which was only
+        // ever correct because the weave was one contiguous span.
         let mut res_ids = [0u32; WEAVE_SLOTS as usize];
         for i in 0..WEAVE_SLOTS as usize {
             let res = self.next_res_id();
-            let ok = self.gpu.resource_create_2d(res, w, h).is_ok()
+            let mut slot_segs = [Seg::default(); WEAVE_MAX_SEGS];
+            let nslot = match skein::subrange(
+                &segs[..nsegs],
+                (i as u64) * slot_stride,
+                slot_stride,
+                &mut slot_segs,
+            ) {
+                Ok(k) => k,
+                Err(_) => 0,   // handled by the rollback below, like any step
+            };
+            let ok = nslot > 0
+                && self.gpu.resource_create_2d(res, w, h).is_ok()
                 && self
                     .gpu
-                    .attach_backing(
-                        res,
-                        pa as u64 + (i as u64) * slot_stride,
-                        slot_stride as u32,
-                    )
+                    .attach_backing(res, &slot_segs[..nslot])
                     .is_ok();
             if !ok {
                 // Roll back THIS mint (a create that succeeded with a failed
@@ -3847,11 +4086,14 @@ impl Comp {
         }
         let va = self.weave_va_next;
         self.weave_va_next += size;
-        let pa = unsafe { t_dma_map(fd, va, T_PROT_READ | T_PROT_WRITE) };
-        if pa < 0 {
-            unsafe { t_close(fd) };
-            return None;
-        }
+        let mut segs = [Seg::default(); WEAVE_MAX_SEGS];
+        let nsegs = match Self::map_dma(fd, va, size, &mut segs) {
+            Some(n) => n,
+            None => {
+                unsafe { t_close(fd) };
+                return None;
+            }
+        };
         unsafe { core::ptr::write_bytes(va as *mut u8, 0, size as usize) };
         let res = self.next_res_id();
         let h = if kind == 2 { CONV_ROWS as u32 } else { 4 };
@@ -3882,7 +4124,7 @@ impl Comp {
         }
         if self
             .gpu
-            .attach_backing(res, pa as u64, size as u32)
+            .attach_backing(res, &segs[..nsegs])
             .is_err()
         {
             let _ = self.gpu.resource_unref(res);
@@ -3948,10 +4190,23 @@ impl Comp {
                 _ => None,
             };
         }
+        if s.is_rail {
+            // HALCYON-INSTRUMENT 8: the rail shows at the top strip the
+            // Instrument carve reserves, and only while it is the registered
+            // one (gen-pinned).
+            return match self.rail {
+                Some(r) if r.n == n && r.gen == s.gen => self.rail_rect(),
+                _ => None,
+            };
+        }
         if let Some(pid) = s.chrome_bind {
             let slot = self.layout.slot_of_id(pid)?;
             let p = self.layout.get(slot)?;
-            if !p.visible || p.tagbar.is_empty() {
+            // The header rect whenever it is non-empty (HALCYON-INSTRUMENT
+            // 6.3): under Instrument a COLLAPSED tile is not visible yet
+            // has a header; under legacy a hidden leaf's tag bar is ZERO,
+            // so dropping the visibility demand changes nothing there.
+            if p.tagbar.is_empty() {
                 return None;
             }
             return Some(p.tagbar);
@@ -3964,12 +4219,115 @@ impl Comp {
         Some(p.content)
     }
 
+    /// HALCYON-SCALE 3: the platform's declaration while one stands, else
+    /// the scale the display's EDID implies for its current pixel geometry
+    /// (100 without one).
+    fn derive_scale(&self) -> u16 {
+        if let Some(p) = self.declared {
+            return p;
+        }
+        match self.gpu.edid_mm {
+            Some((mm_w, mm_h)) => scale::scale_pct(self.gpu.width, self.gpu.height, mm_w, mm_h),
+            None => scale::SCALE_MIN,
+        }
+    }
+
+    /// HALCYON-SCALE 4: make `pct` the display's scale. A no-op at the
+    /// current value; otherwise the metrics table follows, a registered
+    /// status bar of the OLD height is retired (its owner re-mints at the
+    /// new one on the CLOSE -- the H-3d rearm), the ctl republishes on its
+    /// next read, and the STRUCTURAL relayout re-carves every strip and
+    /// fans every surface its CONFIGURE. `why` names the source on the
+    /// line (edid / verb / auto / chord / mode).
+    /// Adopt a theme pushed by the declared session (HALCYON-THEME 3.4).
+    ///
+    /// The GEOMETRY may move, so this is a structural change and takes the
+    /// same shape as `apply_scale`: re-derive the scaled metrics, owe the
+    /// fan, retire a status bar whose height no longer matches so its owner
+    /// re-mints at the new one, and reconcile. A theme that changes only
+    /// COLOURS still needs the fan -- every painted surface is now wrong,
+    /// and no geometry moved to trigger a redraw on its own (the scale
+    /// round's F3 lesson: a fan keyed on geometry misses every change that
+    /// moves no geometry).
+    fn apply_theme(&mut self, b: libhalcyon::instrument::Bundle, who: &str) {
+        if b == self.bundle {
+            return; // idempotent: a re-push of the same bundle fans nothing
+        }
+        self.bundle = b;
+        self.theme = b.theme;
+        self.metrics = self.bundle.at(self.scale).metrics;
+        say!("tapestryd: theme applied ({} push)", who);
+        self.rescale_fan_due = true;
+        if let Some(st) = self.status {
+            let stale = self
+                .surf(st.n)
+                .is_some_and(|s| s.h != self.metrics.status_h as u32);
+            if stale {
+                self.retire(st.n);
+            }
+        }
+        self.retire_stale_rail();
+        self.reconcile();
+    }
+
+    fn apply_scale(&mut self, pct: u16, why: &str) {
+        if pct == self.scale || !scale::is_valid_pct(pct) {
+            return;
+        }
+        let from = self.scale;
+        self.scale = pct;
+        self.metrics = self.bundle.at(pct).metrics;
+        say!("tapestryd: scale {} -> {} ({})", from, pct, why);
+        // The fan is owed whatever the geometry does (the scale round's
+        // F3). Set BEFORE the bar retire: the retire's own reconcile
+        // consumes it inside the structural pass the carve change forces,
+        // and the reconcile below then finds the signature unchanged and
+        // fans nothing more -- ONE fan per change.
+        self.rescale_fan_due = true;
+        if let Some(st) = self.status {
+            let stale = self
+                .surf(st.n)
+                .is_some_and(|s| s.h != self.metrics.status_h as u32);
+            if stale {
+                self.retire(st.n);
+            }
+        }
+        self.retire_stale_rail();
+        self.reconcile();
+    }
+
+    /// HALCYON-INSTRUMENT 8: a registered rail whose height is no longer the
+    /// carve's `rail_h` (a scale or theme change), or that a legacy bundle
+    /// leaves without a strip, is retired -- its owner re-mints at the new
+    /// height (the bar's rule).
+    fn retire_stale_rail(&mut self) {
+        if let Some(r) = self.rail {
+            let legacy = self.bundle.profile != libhalcyon::instrument::Profile::Instrument;
+            let stale = self
+                .surf(r.n)
+                .is_some_and(|s| legacy || s.h != self.metrics.rail_h.max(0) as u32);
+            if stale {
+                self.retire(r.n);
+            }
+        }
+    }
+
+    /// The re-derivation after a geometry change (`mode`): the same
+    /// millimetres over new pixels is a new DPI -- unless a verb/chord
+    /// override is in force, which stands until `scale auto`.
+    fn rescale_after_mode(&mut self) {
+        if self.scale_override.is_none() {
+            let p = self.derive_scale();
+            self.apply_scale(p, "mode");
+        }
+    }
+
     /// H-3d: the status strip -- the display's bottom `status_h` rows
     /// (Daylight 6/8: == the tag bar's height, one vertical unit) -- while a
     /// status bar is registered. The layout is recomputed above it.
     fn status_rect(&self) -> Option<Rect> {
         self.status?;
-        let unit = libhalcyon::theme::METRICS.status_h as u32;
+        let unit = self.metrics.status_h as u32;
         let (dw, dh) = (self.gpu.width, self.gpu.height);
         if dh <= unit || dw == 0 {
             return None;
@@ -3982,6 +4340,79 @@ impl Comp {
         })
     }
 
+    /// HALCYON-INSTRUMENT 8: the top rail's strip while a rail is registered
+    /// (None under legacy, where no rail exists, and on a display too short
+    /// to hold one).
+    fn rail_rect(&self) -> Option<Rect> {
+        self.rail?;
+        let (top, _) = self.rail_rects()?;
+        if top.is_empty() {
+            return None;
+        }
+        Some(top)
+    }
+
+    /// The rectangle the pane tree is carved in: under legacy the display
+    /// at the origin less a registered status bar (`layout_h`); under
+    /// Instrument (HALCYON-INSTRUMENT 5.1) the space between the two rails,
+    /// which are always carved -- `rail_h` at the top, `status_h` at the
+    /// bottom -- even with nothing registered on them. A display too short
+    /// for both rails yields an empty area (nothing to carve; the rails
+    /// still paint what fits).
+    fn workspace_area(&self, dw: u32, dh: u32, layout_h: u32) -> Rect {
+        match self.bundle.profile {
+            libhalcyon::instrument::Profile::Legacy => Rect {
+                x: 0,
+                y: 0,
+                w: dw,
+                h: layout_h,
+            },
+            libhalcyon::instrument::Profile::Instrument => {
+                let top = self.metrics.rail_h.max(0) as u32;
+                let bottom = self.metrics.status_h.max(0) as u32;
+                Rect {
+                    x: 0,
+                    y: top.min(dh),
+                    w: dw,
+                    h: dh.saturating_sub(top).saturating_sub(bottom),
+                }
+            }
+        }
+    }
+
+    /// Instrument only: the two rails' rects (top, bottom) on the display,
+    /// clipped to it. None under legacy (the bottom strip there is
+    /// `status_rect`, which exists only while a bar is registered).
+    fn rail_rects(&self) -> Option<(Rect, Rect)> {
+        if self.bundle.profile != libhalcyon::instrument::Profile::Instrument {
+            return None;
+        }
+        let (dw, dh) = (self.gpu.width, self.gpu.height);
+        let disp = Rect {
+            x: 0,
+            y: 0,
+            w: dw,
+            h: dh,
+        };
+        let top = self.metrics.rail_h.max(0) as u32;
+        let bottom = self.metrics.status_h.max(0) as u32;
+        let t = Rect {
+            x: 0,
+            y: 0,
+            w: dw,
+            h: top,
+        }
+        .intersect(disp);
+        let b = Rect {
+            x: 0,
+            y: dh.saturating_sub(bottom),
+            w: dw,
+            h: bottom,
+        }
+        .intersect(disp);
+        Some((t, b))
+    }
+
     /// Every showable NON-HOSTED surface with its target -- chrome at its
     /// strip, the placed menu at its rect (H-3c), the status bar at the
     /// bottom strip (H-3d) -- the second half of the CONFIGURE + frame fans
@@ -3990,7 +4421,7 @@ impl Comp {
         let mut out = Vec::new();
         for n in 0..MAX_SURFACES {
             if self.surf(n).map_or(false, |s| {
-                s.chrome_bind.is_some() || s.is_menu || s.is_status
+                s.chrome_bind.is_some() || s.is_menu || s.is_status || s.is_rail
             }) {
                 if let Some(r) = self.surface_target(n) {
                     out.push((n, r));
@@ -4176,7 +4607,7 @@ impl Comp {
                 s.w,
                 s.h,
                 s.patchwork,
-                s.chrome_bind.is_some() || s.is_menu || s.is_status,
+                s.chrome_bind.is_some() || s.is_menu || s.is_status || s.is_rail,
             ),
             _ => return None,
         };
@@ -4405,11 +4836,12 @@ impl Comp {
     /// `create W H`: the spec's WeaveFirst -- allocate + zero the weave,
     /// create the 2D resource, attach the whole weave as its backing.
     fn create(&mut self, n: usize, w: u32, h: u32, host: Host) -> Result<(), u32> {
-        let (chrome_bind, is_menu, is_status, claim) = match host {
-            Host::Content { claim } => (None, false, false, claim),
-            Host::Chrome { bind } => (Some(bind), false, false, None),
-            Host::Menu => (None, true, false, None),
-            Host::Status => (None, false, true, None),
+        let (chrome_bind, is_menu, is_status, is_rail, claim) = match host {
+            Host::Content { claim } => (None, false, false, false, claim),
+            Host::Chrome { bind } => (Some(bind), false, false, false, None),
+            Host::Menu => (None, true, false, false, None),
+            Host::Status => (None, false, true, false, None),
+            Host::Rail => (None, false, false, true, None),
         };
         let (disp_w, disp_h) = (self.gpu.width, self.gpu.height);
         let s = self.surf(n).ok_or(p9::E_BADF)?;
@@ -4424,9 +4856,45 @@ impl Comp {
         // display width by the one vertical unit -- never cropped or
         // letterboxed (HALCYON.md 13.6). Judged before the weave allocation.
         if is_status {
-            let unit = libhalcyon::theme::METRICS.status_h as u32;
-            if self.status.is_some() || w != disp_w || h != unit || disp_h <= unit {
-                return Err(p9::E_INVAL);
+            // The rule itself is `pane::admit_status_bar` -- pure over
+            // scalars, so it is host-testable; see it for why refusing the
+            // SYSTEM taker is not redundant with retiring its bar.
+            let req = pane::StatusReq {
+                bar_registered: self.status.is_some(),
+                w,
+                h,
+                disp_w,
+                disp_h,
+                status_h: self.metrics.status_h as u32,
+                session_declared: !self.session_conns.is_empty(),
+                requester_is_session: principal_is_session(s.owner_principal),
+            };
+            match pane::admit_status_bar(&req) {
+                pane::StatusAdmit::Admit => {}
+                pane::StatusAdmit::Malformed => return Err(p9::E_INVAL),
+                pane::StatusAdmit::NotYours => return Err(p9::E_PERM),
+            }
+        }
+        // HALCYON-INSTRUMENT 8: ONE top rail per display, exactly the top
+        // strip -- the display width by `rail_h` -- and only where the carve
+        // reserves one (Instrument); the bar's rule with the profile beside
+        // it (`pane::admit_rail`, pure and host-tested).
+        if is_rail {
+            let req = pane::RailReq {
+                rail_registered: self.rail.is_some(),
+                w,
+                h,
+                disp_w,
+                disp_h,
+                rail_h: self.metrics.rail_h.max(0) as u32,
+                instrument: self.bundle.profile == libhalcyon::instrument::Profile::Instrument,
+                session_declared: !self.session_conns.is_empty(),
+                requester_is_session: principal_is_session(s.owner_principal),
+            };
+            match pane::admit_rail(&req) {
+                pane::StatusAdmit::Admit => {}
+                pane::StatusAdmit::Malformed => return Err(p9::E_INVAL),
+                pane::StatusAdmit::NotYours => return Err(p9::E_PERM),
             }
         }
         // H-3b-2: a chrome binding names a LIVE LEAF (E_NOENT otherwise),
@@ -4463,7 +4931,36 @@ impl Comp {
         s.chrome_bind = chrome_bind;
         s.is_menu = is_menu;
         s.is_status = is_status;
+        s.is_rail = is_rail;
         let gen = s.gen;
+        let owner_p = s.owner_principal;
+        if is_rail {
+            // HALCYON-INSTRUMENT 8: the rail is neither hosted nor pane-bound
+            // -- its bind is the display. The carve already reserves the
+            // strip, so registering it moves no leaf; surface_target places
+            // it there, the redraw request below tells it, and the reconcile
+            // leaves Direct (as for the bar: a second visible thing).
+            self.rail = Some(StatusState { n, gen });
+            #[cfg(feature = "test-mode")]
+            say!(
+                "tapestryd: rail {} created ({}x{}) for principal {}; the display carves {}",
+                n,
+                w,
+                h,
+                owner_p,
+                self.metrics.rail_h
+            );
+            self.reconcile();
+            // The strip is carved with or without a rail (I-2), so this
+            // registration moves no rect and the reconcile fans nothing
+            // (r1 A-F5): hand the new rail its redraw request here.
+            if let Some(t) = self.surface_target(n) {
+                if !self.emit_configure_to(n, t.w, t.h) {
+                    self.retire(n);
+                }
+            }
+            return Ok(());
+        }
         if is_status {
             // H-3d: the status bar is neither hosted nor pane-bound -- its
             // bind is the display. Registering it carves the layout
@@ -4473,11 +4970,16 @@ impl Comp {
             self.status = Some(StatusState { n, gen });
             #[cfg(feature = "test-mode")]
             say!(
-                "tapestryd: status bar {} created ({}x{}); the display carves {}",
+                // The owner's principal is on the line because without it the
+                // log cannot answer "whose bar is this?" -- and with two
+                // halcyonds alive (a console renderer and a session), that is
+                // exactly the question a status-bar failure poses.
+                "tapestryd: status bar {} created ({}x{}) for principal {}; the display carves {}",
                 n,
                 w,
                 h,
-                libhalcyon::theme::METRICS.status_h
+                owner_p,
+                self.metrics.status_h
             );
             self.reconcile();
             return Ok(());
@@ -4828,11 +5330,16 @@ impl Comp {
         }
         let va = self.weave_va_next;
         self.weave_va_next += size;
-        let pa = unsafe { t_dma_map(handle, va, T_PROT_READ | T_PROT_WRITE) };
-        if pa < 0 {
-            unsafe { t_close(handle) };
-            return None;
-        }
+        // WEAVE-SKEIN: the screen is a weave too (1280x800x4 is 3.9 MiB, so it
+        // scatters at the default geometry, not only at large ones).
+        let mut segs = [Seg::default(); WEAVE_MAX_SEGS];
+        let nsegs = match Self::map_dma(handle, va, size, &mut segs) {
+            Some(n) => n,
+            None => {
+                unsafe { t_close(handle) };
+                return None;
+            }
+        };
         // Zero: the buffer scans out before the first chrome paint on a
         // mode change -- never a prior occupant's bytes.
         unsafe { core::ptr::write_bytes(va as *mut u8, 0, size as usize) };
@@ -4892,7 +5399,7 @@ impl Comp {
                 )
                 .is_ok();
             let attached = created && self.gpu.ctx_attach_resource(COMPOSITOR_CTX, res).is_ok();
-            let backed = attached && self.gpu.attach_backing(res, pa as u64, size as u32).is_ok();
+            let backed = attached && self.gpu.attach_backing(res, &segs[..nsegs]).is_ok();
             if backed && self.screen_3d_roundtrip(res, va, dw) {
                 is3d = true;
             } else {
@@ -4924,11 +5431,7 @@ impl Comp {
                 unsafe { t_close(handle) };
                 return None;
             }
-            if self
-                .gpu
-                .attach_backing(res, pa as u64, size as u32)
-                .is_err()
-            {
+            if self.gpu.attach_backing(res, &segs[..nsegs]).is_err() {
                 let _ = self.gpu.resource_unref(res);
                 unsafe { t_burrow_detach(va, size) };
                 unsafe { t_close(handle) };
@@ -5118,11 +5621,17 @@ impl Comp {
             None => return,
         };
         let px = va as *mut u32;
+        // The ground: the legacy blank, or under Instrument the workspace's
+        // `desktop` (HALCYON-INSTRUMENT 5.1 -- the pads and tracks are it).
+        let ground = match self.bundle.profile {
+            libhalcyon::instrument::Profile::Legacy => self.theme.blank,
+            libhalcyon::instrument::Profile::Instrument => self.bundle.inst.desktop,
+        };
         // SAFETY: the screen buffer is dw*dh*4 bytes, mapped RW for the
         // process lifetime.
         unsafe {
             for i in 0..(dw * dh) as usize {
-                *px.add(i) = pane::BG_COLOR;
+                *px.add(i) = ground;
             }
         }
         let _ = self.paint_borders(true);
@@ -5171,6 +5680,9 @@ impl Comp {
             Some(s) if s.is_menu && s.weave.is_some() => (s.w, s.h, s.gen),
             _ => return Err(p9::E_NOENT),
         };
+        // 9.2: a modal opening ends a divider drag (the grab takes the
+        // pointer from the capture).
+        self.drag_end("menu");
         // The same surface placed again (a move): its old rect is healed
         // below, after the new placement composes (SA-1).
         let old_rect = match self.menu {
@@ -5282,13 +5794,13 @@ impl Comp {
                 }
                 let tb = p.tagbar.intersect(r);
                 if !tb.is_empty() {
-                    fills.push((tb, libhalcyon::theme::DAYLIGHT.header));
+                    fills.push((tb, self.theme.header));
                 }
                 match &p.kind {
                     pane::Kind::Leaf { surface: None } => {
                         let c = p.content.intersect(r);
                         if !c.is_empty() {
-                            fills.push((c, pane::BG_COLOR));
+                            fills.push((c, self.theme.blank));
                         }
                     }
                     // The bars around a letterboxed or cropped surface are
@@ -5301,7 +5813,7 @@ impl Comp {
                         for bar in Self::bars_around(c, inner) {
                             let b = bar.intersect(r);
                             if !b.is_empty() {
-                                fills.push((b, pane::BG_COLOR));
+                                fills.push((b, self.theme.blank));
                             }
                         }
                     }
@@ -5315,10 +5827,38 @@ impl Comp {
             // status_bg is the bar's Clear colour, so the strip reads
             // correct-minus-glyphs at once; the CONFIGURE fan below repaints the
             // glyphs (visible_chrome includes the bar).
-            if let Some(sr) = self.status_rect() {
+            if let Some((top, bottom)) = self.rail_rects() {
+                // HALCYON-INSTRUMENT 8 (r1 A-F3): both rails heal like the
+                // legacy strip -- the fill, then the structure line on the
+                // workspace side, as paint_instrument lays them.
+                let inst = self.bundle.inst;
+                let hair = self.metrics.hairline.max(0) as u32;
+                let top_line = Rect {
+                    x: top.x,
+                    y: (top.y + top.h).saturating_sub(hair),
+                    w: top.w,
+                    h: hair.min(top.h),
+                };
+                let bottom_line = Rect {
+                    x: bottom.x,
+                    y: bottom.y,
+                    w: bottom.w,
+                    h: hair.min(bottom.h),
+                };
+                for (strip, line) in [(top, top_line), (bottom, bottom_line)] {
+                    let i = strip.intersect(r);
+                    if !i.is_empty() {
+                        fills.push((i, inst.rail));
+                        let l = line.intersect(r);
+                        if !l.is_empty() {
+                            fills.push((l, inst.structure));
+                        }
+                    }
+                }
+            } else if let Some(sr) = self.status_rect() {
                 let i = sr.intersect(r);
                 if !i.is_empty() {
-                    fills.push((i, libhalcyon::theme::DAYLIGHT.status_bg));
+                    fills.push((i, self.theme.status_bg));
                 }
             }
             for (fr, color) in fills {
@@ -5390,7 +5930,7 @@ impl Comp {
         let inner = self.placement_rect(n, c).unwrap_or(Rect::ZERO);
         for bar in Self::bars_around(c, inner) {
             if !bar.is_empty() {
-                self.fill_rect(bar, pane::BG_COLOR);
+                self.fill_rect(bar, self.theme.blank);
             }
         }
         self.screen_flush_rect(c);
@@ -5531,7 +6071,11 @@ impl Comp {
     }
 
     fn paint_borders(&mut self, fill_tagbars: bool) -> Vec<Rect> {
-        use libhalcyon::theme::{DAYLIGHT as D, METRICS as M};
+        if self.bundle.profile == libhalcyon::instrument::Profile::Instrument {
+            return self.paint_instrument(fill_tagbars);
+        }
+        let th = self.theme;
+        let th = &th;
         let mut painted: Vec<Rect> = Vec::new();
         let dw = self.gpu.width as u64;
         let va = match &self.screen {
@@ -5540,8 +6084,8 @@ impl Comp {
         };
         let px = va as *mut u32;
         let focused = self.layout.focused;
-        let bevel = M.bevel as u32;
-        let hair = M.hairline as u32;
+        let bevel = self.metrics.bevel as u32;
+        let hair = self.metrics.hairline as u32;
         // H-3d: the status strip's resting fill (`status_bg`, Daylight 6):
         // the bar is dark from the carve on, before and between the
         // renderer's presents (its OPAQUE Role::Status surface composites on
@@ -5553,7 +6097,7 @@ impl Comp {
                 for y in sr.y..sr.y + sr.h {
                     for x in sr.x..sr.x + sr.w {
                         unsafe {
-                            *px.add((y as u64 * dw + x as u64) as usize) = D.status_bg;
+                            *px.add((y as u64 * dw + x as u64) as usize) = th.status_bg;
                         }
                     }
                 }
@@ -5567,19 +6111,19 @@ impl Comp {
         let ring_color = |dl: u32, dr: u32, dt: u32, db: u32, floor_w: u32| -> u32 {
             let d = dl.min(dr).min(dt).min(db);
             if d < floor_w {
-                D.floor
+                th.floor
             } else if d < floor_w + bevel {
                 if dt == d {
-                    D.bevel_top
+                    th.bevel_top
                 } else if db == d {
-                    D.bevel_bottom
+                    th.bevel_bottom
                 } else if dl == d {
-                    D.bevel_left
+                    th.bevel_left
                 } else {
-                    D.bevel_right
+                    th.bevel_right
                 }
             } else {
-                D.header // the inner hairline (section 2.4, == header)
+                th.header // the inner hairline (section 2.4, == header)
             }
         };
         for (slot, _id) in self.layout.live_ids() {
@@ -5617,8 +6161,8 @@ impl Comp {
             // not.
             let live: Option<(u32, u32)> = if slot == focused {
                 let k = match p.status {
-                    Status::Err => &D.cinnabar,
-                    _ => &D.sage,
+                    Status::Err => &th.cinnabar,
+                    _ => &th.sage,
                 };
                 Some((k.key, k.tint))
             } else {
@@ -5636,7 +6180,12 @@ impl Comp {
                         let dr = (x1 - 1) - x;
                         let d = dl.min(dr).min(dt).min(db);
                         let c = match live {
-                            Some((key, tint)) if d == hair_d => {
+                            // The hairline band is `hair` px wide (Metrics::at:
+                            // 1 at 1.0, 2 from 150%): the key/tint covers ALL of
+                            // it, never one ring of it (at 2.0 the second ring
+                            // stayed `header` -- the profile the compose gate
+                            // reads at 200% caught it).
+                            Some((key, tint)) if d >= hair_d && d < hair_d + hair => {
                                 if !tb.is_empty() && y < content_y {
                                     tint
                                 } else {
@@ -5664,10 +6213,16 @@ impl Comp {
                                            // a zero-gap config skips it (focus still shows in the strip +
                                            // the H-3b status key).
             if slot == focused && floor_w >= 1 {
-                let sy = y1 - floor_w; // innermost floor row (d == floor_w-1)
-                for x in (r.x + floor_w)..(x1 - floor_w) {
-                    unsafe {
-                        *px.add((sy as u64 * dw + x as u64) as usize) = D.border;
+                // A hairline at the scale (COMPOSITION 1; the scale round's
+                // F5): `hair` floor rows from the innermost (d == floor_w-1)
+                // outward, bounded by the floor itself.
+                let band = hair.min(floor_w);
+                for row in 0..band {
+                    let sy = y1 - floor_w + row;
+                    for x in (r.x + floor_w)..(x1 - floor_w) {
+                        unsafe {
+                            *px.add((sy as u64 * dw + x as u64) as usize) = th.border;
+                        }
                     }
                 }
             }
@@ -5677,7 +6232,7 @@ impl Comp {
             // hairline+strip read as one header band). halcyond's OPAQUE
             // Role::Chrome surface composites ON TOP when present (H-3b-3);
             // absent it (aurora, or before halcyond binds) the strip is never
-            // bare BG_COLOR. Inside the ring, above `content` -- disjoint from
+            // the bare blank fill. Inside the ring, above `content` -- disjoint from
             // the bands and the shadow. STRUCTURAL repaints only
             // (`fill_tagbars`): a focus-only repaint changes nothing in the
             // strip, and refilling + pushing it there would paint over a
@@ -5687,7 +6242,7 @@ impl Comp {
                 for y in tb.y..tb.y + tb.h {
                     for x in tb.x..tb.x + tb.w {
                         unsafe {
-                            *px.add((y as u64 * dw + x as u64) as usize) = D.header;
+                            *px.add((y as u64 * dw + x as u64) as usize) = th.header;
                         }
                     }
                 }
@@ -5719,6 +6274,530 @@ impl Comp {
             });
         }
         painted
+    }
+
+    /// The Instrument profile's compositor-owned chrome (HALCYON-INSTRUMENT
+    /// 5.1; I-2): the two rails (`rail`, each with its 1 px `structure`
+    /// line facing the workspace), the outer pad ring (`desktop`), every
+    /// divider track (`desktop`, the 2 px `structure` rule at its offset, the
+    /// 7 x 7 joint at its leading corner -- a `structure` border around a
+    /// `desktop` fill), every pane frame (1 px `pane_border`, `focus_neutral`
+    /// on the frame holding the focused leaf) and, when `structural`, the
+    /// resting `header` fill under every tile header (collapsed ones too)
+    /// and the `pane` fill of an empty tile's body. Returns every rect it
+    /// painted so a focus-only repaint and the menu heal push exactly those
+    /// (the composed path's rule: never the whole buffer). No bevel, no
+    /// hairline, no shadow, no status-keyed outline (3, the amendment
+    /// table): status moved to the header's ink and the bottom rail.
+    fn paint_instrument(&mut self, structural: bool) -> Vec<Rect> {
+        let inst = self.bundle.inst;
+        let m = self.metrics;
+        let mut painted: Vec<Rect> = Vec::new();
+        if self.screen.is_none() {
+            return painted;
+        }
+        let (dw, dh) = (self.gpu.width, self.gpu.height);
+        let disp = Rect {
+            x: 0,
+            y: 0,
+            w: dw,
+            h: dh,
+        };
+        let hair = m.hairline.max(0) as u32;
+        let frame_w = m.frame.max(0) as u32;
+        // The rails: the fill, then the structure line on the workspace
+        // side (inside the rail's own box: 5.1). STRUCTURAL repaints only,
+        // as the legacy strip (H-3d): the rail and the bar are their
+        // owners' OPAQUE surfaces composited on top, and a focus-only
+        // repaint must not paint over their pixels -- measured at I-4: the
+        // rail's owner presents once at mint and then only on a CONFIGURE,
+        // so an ungated fill here wiped the rail on every focus-only
+        // repaint (each command's `tag status` is one) and the bar survived
+        // only because its own model changed per command. The structural
+        // fill is healed by the CONFIGURE fan (visible_chrome includes both).
+        if let Some((top, bottom)) = self.rail_rects().filter(|_| structural) {
+            if !top.is_empty() {
+                self.fill_rect(top, inst.rail);
+                let line = Rect {
+                    x: top.x,
+                    y: (top.y + top.h).saturating_sub(hair),
+                    w: top.w,
+                    h: hair.min(top.h),
+                };
+                self.fill_rect(line, inst.structure);
+                painted.push(top);
+            }
+            if !bottom.is_empty() {
+                self.fill_rect(bottom, inst.rail);
+                let line = Rect {
+                    x: bottom.x,
+                    y: bottom.y,
+                    w: bottom.w,
+                    h: hair.min(bottom.h),
+                };
+                self.fill_rect(line, inst.structure);
+                painted.push(bottom);
+            }
+        }
+        // The pad ring between the workspace and the root: `desktop`. Not
+        // under a zoom: the zoomed leaf fills the workspace between the
+        // rails, frame-less (5.6), and the ring would land inside its
+        // content (r1 A-F2).
+        let area = self.layout.area;
+        let pad = m.outer_pad.max(0) as u32;
+        let zoomed = self.layout.zoom_id().is_some();
+        if !area.is_empty() && !zoomed {
+            for r in [
+                Rect {
+                    x: area.x,
+                    y: area.y,
+                    w: area.w,
+                    h: pad,
+                },
+                Rect {
+                    x: area.x,
+                    y: (area.y + area.h).saturating_sub(pad),
+                    w: area.w,
+                    h: pad,
+                },
+                Rect {
+                    x: area.x,
+                    y: area.y,
+                    w: pad,
+                    h: area.h,
+                },
+                Rect {
+                    x: (area.x + area.w).saturating_sub(pad),
+                    y: area.y,
+                    w: pad,
+                    h: area.h,
+                },
+            ] {
+                let r = r.intersect(area);
+                if !r.is_empty() {
+                    self.fill_rect(r, inst.desktop);
+                    painted.push(r);
+                }
+            }
+        }
+        let focused = self.layout.focused;
+        let focused_parent = self.layout.get(focused).and_then(|p| p.parent);
+        // The joints, painted AFTER the walk: a joint overpaints 1 px of the
+        // trailing pane's frame (3.1), so it must land above every frame
+        // whatever the slot order the walk visits them in (r1 A-F4).
+        let mut joints: Vec<Rect> = Vec::new();
+        for (slot, id) in self.layout.live_ids() {
+            let (kind_split, vertical_track, is_frame_owner, rect, dividers, tagbar, empty_body, content, visible, separator) = {
+                let Some(p) = self.layout.get(slot) else { continue };
+                let (kind_split, vertical_track, is_frame_owner, empty_body) = match &p.kind {
+                    pane::Kind::Container { mode, .. } => (
+                        matches!(mode, Mode::SplitH | Mode::SplitV),
+                        *mode == Mode::SplitH,
+                        matches!(mode, Mode::Tabbed | Mode::Stacked),
+                        false,
+                    ),
+                    pane::Kind::Leaf { surface } => {
+                        // A lone leaf owns its frame; a stacked or tabbed
+                        // leaf's frame is its container's.
+                        let under_stack = p.parent.is_some_and(|pi| {
+                            matches!(
+                                self.layout.get(pi).map(|q| &q.kind),
+                                Some(pane::Kind::Container {
+                                    mode: Mode::Tabbed | Mode::Stacked,
+                                    ..
+                                })
+                            )
+                        });
+                        (false, false, !under_stack, surface.is_none())
+                    }
+                };
+                (
+                    kind_split,
+                    vertical_track,
+                    is_frame_owner,
+                    p.rect,
+                    p.dividers.clone(),
+                    p.tagbar,
+                    empty_body,
+                    p.content,
+                    p.visible,
+                    p.separator,
+                )
+            };
+            // Headers rest on `header` whether the tile is open or collapsed
+            // (a collapsed tile is not visible, and has one); an EMPTY leaf's
+            // `tagbar` is its placard (14.6) and rests on `pane`.
+            if structural && !tagbar.is_empty() {
+                let r = tagbar.intersect(disp);
+                let placard = empty_body && visible && content.is_empty();
+                self.fill_rect(r, if placard { inst.pane } else { inst.header });
+                painted.push(r);
+            }
+            // The 1 px `separator` row after an open body, before the header
+            // that follows it (6.4, measured on the golden).
+            if structural && !separator.is_empty() {
+                let r = separator.intersect(disp);
+                self.fill_rect(r, inst.separator);
+                painted.push(r);
+            }
+            if !visible {
+                continue;
+            }
+            if kind_split {
+                for (i, d) in dividers.into_iter().enumerate() {
+                    // 9.2 (I-6): the rule under the pointer is `amber_muted`,
+                    // the dragged one `amber` (the source's hover and
+                    // `.dragging` inks; its glow is the effects slice's).
+                    let ink = self.track_ink(id, i);
+                    if let Some((d, j)) = self.paint_track(d, vertical_track, ink) {
+                        // The joint at the track's leading corner, painted
+                        // AFTER the walk: it overpaints 1 px of the trailing
+                        // pane's frame (3.1), so it must land above every
+                        // frame whatever the slot order (r1 A-F4).
+                        if !j.is_empty() {
+                            joints.push(j);
+                        }
+                        painted.push(d);
+                    }
+                }
+                continue;
+            }
+            if empty_body && structural && !content.is_empty() {
+                let r = content.intersect(disp);
+                self.fill_rect(r, inst.pane);
+                painted.push(r);
+            }
+            // The zoomed leaf's content IS its rect (5.6): no frame, as the
+            // legacy painter's `rect == content` exemption (r1 A-F2). Only
+            // under a zoom: a stack container's content is its rect BY
+            // CONSTRUCTION (`show_container`), and it is exactly the frame
+            // owner every stacked leaf relies on (r2 C-F2).
+            if !is_frame_owner || rect.is_empty() || (zoomed && rect == content) {
+                continue;
+            }
+            let r = rect.intersect(disp);
+            let focus = slot == focused || Some(slot) == focused_parent;
+            let colour = if focus {
+                inst.focus_neutral
+            } else {
+                inst.pane_border
+            };
+            let fw = frame_w.min(r.w).min(r.h);
+            let bands = [
+                Rect {
+                    x: r.x,
+                    y: r.y,
+                    w: r.w,
+                    h: fw,
+                },
+                Rect {
+                    x: r.x,
+                    y: (r.y + r.h).saturating_sub(fw),
+                    w: r.w,
+                    h: fw,
+                },
+                Rect {
+                    x: r.x,
+                    y: r.y,
+                    w: fw,
+                    h: r.h,
+                },
+                Rect {
+                    x: (r.x + r.w).saturating_sub(fw),
+                    y: r.y,
+                    w: fw,
+                    h: r.h,
+                },
+            ];
+            for b in bands {
+                self.fill_rect(b, colour);
+                painted.push(b);
+            }
+        }
+        for j in joints {
+            self.paint_joint(j);
+            painted.push(j);
+        }
+        painted
+    }
+
+    /// The divider track's ink for its rule (9.2): `amber` while it is
+    /// dragged, `amber_muted` under the pointer, `structure` at rest.
+    fn track_ink(&self, cid: u32, idx: usize) -> u32 {
+        let inst = self.bundle.inst;
+        if self.drag.is_some_and(|d| d.cid == cid && d.idx == idx) {
+            inst.amber
+        } else if self.track_hover == Some((cid, idx)) {
+            inst.amber_muted
+        } else {
+            inst.structure
+        }
+    }
+
+    /// Paint one divider track (5.1 / 5.7): the track `desktop`, the rule
+    /// `rule` wide at `rule_off` in `ink`. Returns the track's clipped rect
+    /// and the joint's rect (the OUTER box at the track's leading corner
+    /// offset by the frame; the caller paints it -- after every frame on a
+    /// structural repaint, at once on a hover repaint). None off-display.
+    fn paint_track(&mut self, d: Rect, vertical: bool, ink: u32) -> Option<(Rect, Rect)> {
+        let m = self.metrics;
+        let inst = self.bundle.inst;
+        let (dw, dh) = (self.gpu.width, self.gpu.height);
+        let disp = Rect {
+            x: 0,
+            y: 0,
+            w: dw,
+            h: dh,
+        };
+        let d = d.intersect(disp);
+        if d.is_empty() {
+            return None;
+        }
+        let rule_w = m.rule.max(0) as u32;
+        let rule_off = m.rule_off.max(0) as u32;
+        let joint = m.joint.max(0) as u32;
+        let frame_w = m.frame.max(0) as u32;
+        self.fill_rect(d, inst.desktop);
+        let rule = if vertical {
+            Rect {
+                x: d.x + rule_off,
+                y: d.y,
+                w: rule_w,
+                h: d.h,
+            }
+        } else {
+            Rect {
+                x: d.x,
+                y: d.y + rule_off,
+                w: d.w,
+                h: rule_w,
+            }
+        };
+        self.fill_rect(rule.intersect(d), ink);
+        let j = Rect {
+            x: d.x + frame_w,
+            y: d.y + frame_w,
+            w: joint,
+            h: joint,
+        }
+        .intersect(disp);
+        Some((d, j))
+    }
+
+    /// The joint: the OUTER box in `structure`, the fill inside a
+    /// `hairline` border in `desktop` (5.7; round 2's 7 x 7).
+    fn paint_joint(&mut self, j: Rect) {
+        let inst = self.bundle.inst;
+        let hair = self.metrics.hairline.max(0) as u32;
+        self.fill_rect(j, inst.structure);
+        if j.w > 2 * hair && j.h > 2 * hair {
+            self.fill_rect(
+                Rect {
+                    x: j.x + hair,
+                    y: j.y + hair,
+                    w: j.w - 2 * hair,
+                    h: j.h - 2 * hair,
+                },
+                inst.desktop,
+            );
+        }
+    }
+
+    // ---- HALCYON-INSTRUMENT 9.2 (I-6): dividers -- hover, capture, drag ----
+
+    /// The track under a display point as (container id, index), or None.
+    fn track_under(&self, px: u32, py: u32) -> Option<(u32, usize)> {
+        if self.bundle.profile != libhalcyon::instrument::Profile::Instrument {
+            return None;
+        }
+        let (slot, idx) = self.layout.track_at(px, py)?;
+        self.layout.id_of(slot).map(|id| (id, idx))
+    }
+
+    /// Repaint one track's rule by its current state and push it -- the
+    /// hover's own repaint (a crossing, not a relayout): the joint at once,
+    /// since no frame is repainted after it. Composed only: on a Direct
+    /// scanout no compositor chrome is on the display.
+    fn repaint_track(&mut self, cid: u32, idx: usize) {
+        if self.scanout != Scanout::Composed || self.screen.is_none() {
+            return;
+        }
+        let Some(slot) = self.layout.slot_of_id(cid) else { return };
+        let (d, vertical) = match self.layout.get(slot) {
+            Some(p) if p.visible => match (&p.kind, p.dividers.get(idx)) {
+                (pane::Kind::Container { mode, .. }, Some(&d)) => (d, *mode == Mode::SplitH),
+                _ => return,
+            },
+            _ => return,
+        };
+        let ink = self.track_ink(cid, idx);
+        if let Some((d, j)) = self.paint_track(d, vertical, ink) {
+            self.paint_joint(j);
+            self.screen_push(d);
+        }
+    }
+
+    /// The hover follows the pointer: under no grab and no drag, the track
+    /// under it lights and the one it left goes back to rest.
+    fn hover_update(&mut self) {
+        let now = if self.menu.is_none() && self.drag.is_none() {
+            self.track_under(self.ptr_x, self.ptr_y)
+        } else {
+            None
+        };
+        let prev = self.track_hover;
+        if prev == now {
+            return;
+        }
+        self.track_hover = now;
+        // The crossing's witness (test builds), said BEFORE the repaint: a
+        // gate that then sees no press on the track knows the motion reached
+        // the compositor and the fault is past this line. (The console
+        // gate's first I-6 run went silent after a clamp drag -- no hover,
+        // no press, no key -- once in six; unexplained, JOURNAL run 46o
+        // "I-6".)
+        #[cfg(feature = "test-mode")]
+        if let Some((c, i)) = now {
+            say!("tapestryd: divider hover pane {} track {} at {},{}", c, i, self.ptr_x, self.ptr_y);
+        }
+        if let Some((c, i)) = prev {
+            self.repaint_track(c, i);
+        }
+        if let Some((c, i)) = now {
+            self.repaint_track(c, i);
+        }
+    }
+
+    /// Does the drag's split still exist as a split with that track?
+    fn drag_valid(&self) -> bool {
+        let Some(d) = self.drag else { return false };
+        let Some(slot) = self.layout.slot_of_id(d.cid) else { return false };
+        match self.layout.get(slot) {
+            Some(p) if p.visible => match &p.kind {
+                pane::Kind::Container {
+                    mode: Mode::SplitH | Mode::SplitV,
+                    ..
+                } => d.idx < p.dividers.len(),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// A primary press on a track: capture the pointer for that split. The
+    /// hovered track becomes the dragged one (its rule turns `amber`).
+    fn drag_begin(&mut self, cid: u32, idx: usize) {
+        self.drag_end("replaced");
+        self.track_hover = None;
+        self.drag = Some(DragState {
+            cid,
+            idx,
+            pos: (self.ptr_x, self.ptr_y),
+            pending: false,
+        });
+        say!(
+            "tapestryd: divider drag start pane {} track {} at {},{}",
+            cid,
+            idx,
+            self.ptr_x,
+            self.ptr_y
+        );
+        self.repaint_track(cid, idx);
+    }
+
+    /// Motion under the capture: remember the position for the frame.
+    fn drag_motion(&mut self, px: u32, py: u32) {
+        if let Some(d) = self.drag.as_mut() {
+            if d.pos != (px, py) {
+                d.pos = (px, py);
+                d.pending = true;
+            }
+        }
+    }
+
+    /// Lay the drag's last position out (at most once per position): the
+    /// pair's weights follow the pointer through the one mutation path the
+    /// verb uses (`Layout::drag_track` -> `set_weight`), then a reconcile
+    /// -- the structural repaint and the CONFIGURE fan every resize takes.
+    /// A refused position (the pair at its minima) is said once per drag.
+    fn drag_apply(&mut self) {
+        let Some(d) = self.drag else { return };
+        if !d.pending {
+            return;
+        }
+        if !self.drag_valid() {
+            self.drag_end("retired");
+            return;
+        }
+        if let Some(x) = self.drag.as_mut() {
+            x.pending = false;
+        }
+        let Some(slot) = self.layout.slot_of_id(d.cid) else { return };
+        match self.layout.drag_track(slot, d.idx, d.pos) {
+            pane::DragVerdict::Changed => self.reconcile(),
+            pane::DragVerdict::Unchanged => {}
+            pane::DragVerdict::Refused => {
+                say!("tapestryd: divider drag refused: the minima (pane {})", d.cid);
+            }
+        }
+    }
+
+    /// End the capture: the final position is laid out (never dropped), the
+    /// track goes back to rest (or to hover, if the pointer is still on
+    /// it), and the reason is said. A no-op with no drag up.
+    fn drag_end(&mut self, reason: &'static str) {
+        let Some(d) = self.drag else { return };
+        if d.pending && self.drag_valid() {
+            self.drag_apply();
+        }
+        self.drag = None;
+        let pair = self
+            .layout
+            .slot_of_id(d.cid)
+            .map(|slot| {
+                let kids = self.layout.divide_of(slot);
+                let ext = |c: Option<&usize>| {
+                    c.and_then(|&c| self.layout.get(c)).map_or(0, |p| {
+                        if matches!(self.layout.get(slot).map(|q| &q.kind), Some(pane::Kind::Container { mode: Mode::SplitH, .. })) {
+                            p.rect.w
+                        } else {
+                            p.rect.h
+                        }
+                    })
+                };
+                (ext(kids.get(d.idx)), ext(kids.get(d.idx + 1)))
+            })
+            .unwrap_or((0, 0));
+        say!(
+            "tapestryd: divider drag end pane {} track {} {} -> {}:{}",
+            d.cid,
+            d.idx,
+            reason,
+            pair.0,
+            pair.1
+        );
+        self.hover_update();
+        if self.track_hover != Some((d.cid, d.idx)) {
+            self.repaint_track(d.cid, d.idx);
+        }
+    }
+
+    /// Double-click on a track (9.2): the pair equalised through the same
+    /// mutation path; a reconcile when anything moved.
+    fn equalise_track(&mut self, slot: usize, idx: usize) {
+        let cid = self.layout.id_of(slot).unwrap_or(0);
+        match self.layout.equalise_track(slot, idx) {
+            pane::DragVerdict::Changed => {
+                say!("tapestryd: divider double-click pane {} track {} -> equal", cid, idx);
+                self.reconcile();
+            }
+            pane::DragVerdict::Unchanged => {
+                say!("tapestryd: divider double-click pane {} track {} -> equal already", cid, idx);
+            }
+            pane::DragVerdict::Refused => {
+                say!("tapestryd: divider double-click refused: the minima (pane {})", cid);
+            }
+        }
     }
 
     /// Paint the tab/stack indicator strips (G-6c; D7 glyph-free -- pure
@@ -5759,16 +6838,17 @@ impl Comp {
             if n == 0 {
                 continue;
             }
+            let theme = self.theme;
             let seg_color = |i: usize| {
-                use libhalcyon::theme::DAYLIGHT as D;
+                let th = &theme;
                 if i == active {
                     if hot == Some(children[i]) {
-                        D.ember
+                        th.ember
                     } else {
-                        D.ember_deep
+                        th.ember_deep
                     }
                 } else {
-                    D.header
+                    th.header
                 }
             };
             match mode {
@@ -5781,7 +6861,13 @@ impl Comp {
                         } else {
                             each
                         };
-                        let gap = if i as u32 == n - 1 || w == 0 { 0 } else { 1 };
+                        // The segment gap is a hairline at the scale (the
+                        // scale round's F5), never wider than the segment.
+                        let gap = if i as u32 == n - 1 || w == 0 {
+                            0
+                        } else {
+                            (self.metrics.hairline as u32).min(w)
+                        };
                         fill(
                             Rect {
                                 x,
@@ -5795,7 +6881,7 @@ impl Comp {
                     }
                 }
                 Mode::Stacked => {
-                    let row_h = libhalcyon::theme::METRICS.tab_strip_h as u32;
+                    let row_h = self.metrics.tab_strip_h as u32;
                     for (i, _) in children.iter().enumerate() {
                         fill(
                             Rect {
@@ -5835,6 +6921,15 @@ impl Comp {
             let c = p.content;
             fold((c.x as u64) << 32 | c.y as u64);
             fold((c.w as u64) << 32 | c.h as u64);
+            // The header rect too (I-3): an empty pane's placard is a
+            // chrome surface sized by its `tagbar` with a ZERO content rect,
+            // so a resize that moves only it would otherwise read as
+            // non-structural and fan it no CONFIGURE. Under legacy the
+            // header is a function of the content rect, so nothing new
+            // folds there.
+            let t = p.tagbar;
+            fold((t.x as u64) << 32 | t.y as u64);
+            fold((t.w as u64) << 32 | t.h as u64);
             if let pane::Kind::Leaf { surface } = &p.kind {
                 // What a leaf SHOWS is geometry too: a hosting into an
                 // already-split empty leaf changes no rect, and a signature
@@ -5887,7 +6982,29 @@ impl Comp {
         for n in 0..MAX_SURFACES {
             if let Some(s) = self.surf(n) {
                 if let Some(pid) = s.chrome_bind {
-                    if self.layout.slot_of_id(pid).is_none() {
+                    // The bound pane is gone -- or (r1 A-F6, I-6) it is
+                    // hosting another principal's surface now, which the
+                    // admission would refuse today: a session's header must
+                    // never stand over a tile that is not the session's (an
+                    // identity claim, if no authority). The same judgement
+                    // the create arm makes, on the same class -- a DECLARED
+                    // session's surface (the renderer's admission is
+                    // unconditional there, so its chrome is exempt here) --
+                    // so a re-mint is refused where the reap orphaned, never
+                    // re-orphaned in a loop.
+                    let stale = match self.layout.slot_of_id(pid) {
+                        None => true,
+                        Some(slot) => {
+                            self.session_declared(s.owner_conn)
+                                && principal_is_session(s.owner_principal)
+                                && !pane::chrome_bind_admitted(
+                                    s.owner_principal,
+                                    self.layout.leaf_surface(slot).and_then(|h| self.surf(h)).map(|h| h.owner_principal),
+                                    self.layout.pane_owner_principal(slot),
+                                )
+                        }
+                    };
+                    if stale {
                         orphans.push(n);
                     }
                 }
@@ -5915,6 +7032,12 @@ impl Comp {
             Some(sr) => dh - sr.h,
             None => dh,
         };
+        // HALCYON-INSTRUMENT 5.1: under Instrument BOTH rails are carved
+        // whether or not anything is registered on them (the compositor
+        // fills `rail` under them from the carve on), and the layout lives
+        // between them. Under legacy the area is the display less a
+        // registered bar, at the origin -- the line above, unchanged.
+        let area = self.workspace_area(dw, dh, layout_h);
         // F2 (d-1b tiling completion): determine backgrounding from the TREE
         // BEFORE recompute so layout_pane can exclude a backgrounded leaf from
         // tiling. A leaf is backgrounded iff it hosts a NON-session surface AND
@@ -5943,7 +7066,49 @@ impl Comp {
             Vec::new()
         };
         self.layout.apply_backgrounded(&bg_tiling);
-        self.layout.recompute(dw, layout_h, self.chords.gaps);
+        self.layout.recompute(area, self.chords.gaps, self.metrics, self.bundle.profile);
+        // HALCYON-INSTRUMENT 9.2 (I-6): the split a drag holds may have
+        // gone (its retirement, a close, a logout collapsing the tree) --
+        // the capture ends with it, here, before the paint reads it; no
+        // relayout is owed (this one is in progress). The hovered track is
+        // re-read at the pointer: a chord that moved the tracks under a
+        // still pointer must not leave the old one lit.
+        if self.drag.is_some() && !self.drag_valid() {
+            let d = self.drag.take().unwrap();
+            say!("tapestryd: divider drag end pane {} track {} retired", d.cid, d.idx);
+        }
+        self.track_hover = if self.menu.is_none() && self.drag.is_none() {
+            self.track_under(self.ptr_x, self.ptr_y)
+        } else {
+            None
+        };
+        // HALCYON-INSTRUMENT 5.2 (r1 A-F1): a leaf carved to ZERO (the tree
+        // outgrew the minima through a path the fits-check does not guard --
+        // `mode`, `move`, a scale change, a restore onto a smaller display)
+        // is dormant, so it must not keep input focus: the user's keys would
+        // vanish into a tile with no pixels. Move focus to the first leaf
+        // that has some. Instrument only: the legacy carve zeroes no leaf.
+        if self.bundle.profile == libhalcyon::instrument::Profile::Instrument {
+            // Dormancy is the carve's verdict (`visible` is false for a leaf
+            // whose body the clip took, r2 C-F1 -- a 34-row rect holds a
+            // frame and a header and nothing to paint), not the frame rect.
+            let f = self.layout.focused;
+            let dormant = self.layout.is_leaf(f)
+                && self.layout.get(f).map_or(false, |p| !p.visible || p.rect.is_empty());
+            if dormant {
+                let rescue = self.layout.live_ids().into_iter().find(|&(slot, _)| {
+                    self.layout.is_leaf(slot)
+                        && self
+                            .layout
+                            .get(slot)
+                            .map_or(false, |p| p.visible && !p.rect.is_empty())
+                });
+                if let Some((slot, id)) = rescue {
+                    self.layout.focus(slot);
+                    say!("tapestryd: focus rescued from a dormant leaf to pane {}", id);
+                }
+            }
+        }
         let vis = self.layout.visible_hosted();
         let nleaves = self.layout.visible_leaf_count();
 
@@ -6047,6 +7212,7 @@ impl Comp {
             && active_nleaves <= 1
             && self.menu.is_none()
             && self.status.is_none()
+            && self.rail.is_none()
         {
             match self.scanout {
                 Scanout::Boot => Scanout::Boot,
@@ -6056,6 +7222,7 @@ impl Comp {
             && active_nleaves == 1
             && self.menu.is_none()
             && self.status.is_none()
+            && self.rail.is_none()
         {
             // H-3c: a placed menu is a second visible thing -- it composes
             // over the leaf, so Direct is off while one is up.
@@ -6082,8 +7249,13 @@ impl Comp {
         };
 
         match want {
-            Scanout::Boot => {}
+            // Nothing showable in either arm: a client coming up reads the
+            // ctl at its start and again at its first relayout.
+            Scanout::Boot => {
+                self.rescale_fan_due = false;
+            }
             Scanout::Off => {
+                self.rescale_fan_due = false;
                 if self.pending_direct.is_some() {
                     say!("tapestryd: scanout off clears pending-direct");
                 }
@@ -6096,7 +7268,21 @@ impl Comp {
             Scanout::Direct(n) => {
                 if self.scanout == Scanout::Direct(n) {
                     self.pending_direct = None;
-                } else if self.pending_direct != Some(n) {
+                    // This arm has no geometry to move, so a scale change
+                    // would fan nothing (the scale round's F3): the redraw
+                    // request + the session's TEV_LAYOUT ride here.
+                    if core::mem::take(&mut self.rescale_fan_due) {
+                        self.fan_scale_redraw_direct(n, dw, dh);
+                    }
+                } else if self.pending_direct == Some(n) {
+                    // Pending, and a scale change landed meanwhile: the
+                    // edge's CONFIGURE may already have been consumed at the
+                    // old scale -- a fresh redraw request (same size; a
+                    // still-queued one is replaced).
+                    if core::mem::take(&mut self.rescale_fan_due) {
+                        self.fan_scale_redraw_direct(n, dw, dh);
+                    }
+                } else {
                     // Defer to n's next present-COMPLETE (F16). Until then
                     // the current scanout (composed frame / boot pattern)
                     // stays -- transitional content, compositor policy.
@@ -6111,6 +7297,13 @@ impl Comp {
                     self.pending_bind_refused_said = false; // new episode
                     if !self.emit_configure_to(n, dw, dh) {
                         self.retire(n); // wedged; retire clears pending
+                    } else if core::mem::take(&mut self.rescale_fan_due) {
+                        // The edge's CONFIGURE is the redraw request already;
+                        // the session's TEV_LAYOUT is still owed, and the
+                        // emission is said for the gate.
+                        let serial = self.surf(n).map_or(0, |s| s.cfg_serial);
+                        say!("tapestryd: scale fan direct {} configure serial {}", n, serial);
+                        self.notify_session_layout();
                     }
                 }
             }
@@ -6124,7 +7317,13 @@ impl Comp {
                 }
                 let entering = self.scanout != Scanout::Composed;
                 let sig = self.calc_geom_sig();
-                let structural = entering || sig != self.geom_sig;
+                // A scale change is structural whatever the geometry did
+                // (the scale round's F3): a lone leaf under a menu keeps its
+                // full content rect, and the fan below is the only way its
+                // follower learns the new percent. Consumed here, after
+                // `ensure_screen` -- a degraded pass keeps it for the next.
+                let rescaled = core::mem::take(&mut self.rescale_fan_due);
+                let structural = entering || sig != self.geom_sig || rescaled;
                 if structural {
                     // Structural: full repaint, then every visible pane
                     // pre-filled from its client's last-presented slot
@@ -6433,8 +7632,9 @@ impl Comp {
 
     /// The `layout` file grammar (G-6): `<verb> <pane-id> [args]` --
     /// `split <id> h|v`, `close <id>`, `focus <id>`, `mode <id> <mode>`,
-    /// `move <id> <dir>`, `zoom <id>` -- plus the id-less verbs acting on
-    /// the focused leaf (G-6c): `focusdir <dir>`, `tab next|prev`.
+    /// `move <id> <dir>`, `zoom <id>`, `weight <id> <1..65535>` (I-2) --
+    /// plus the id-less verbs acting on the focused leaf (G-6c):
+    /// `focusdir <dir>`, `tab next|prev`.
     /// The pane tree's trust model (HALCYON.md 13.6; the H-3b round F2 /
     /// R2-F1): the actor may MUTATE the subtree at `slot` iff every hosted
     /// surface in it is its own -- empty leaves belong to nobody and never
@@ -6601,7 +7801,7 @@ impl Comp {
             .ok_or(p9::E_INVAL)?;
         let args = it2.next().unwrap_or("").trim();
         let cmd = match verb {
-            "split" | "mode" | "move" => {
+            "split" | "mode" | "move" | "weight" => {
                 if args.is_empty() {
                     return Err(p9::E_INVAL);
                 }
@@ -6644,6 +7844,13 @@ impl Comp {
             if !self.actor_owns_subtree(actor, slot) {
                 return Err(p9::E_PERM);
             }
+            // HALCYON-INSTRUMENT 5.2: a split that cannot satisfy every
+            // minimum is refused ATOMICALLY -- judged before the tree
+            // changes, the same errno as a full pane table (the tree cannot
+            // grow here). Always fits under legacy.
+            if !self.layout.split_fits(slot, mode) {
+                return Err(p9::E_NOMEM);
+            }
             self.layout.unzoom();
             let new_leaf = self.layout.split(slot, mode).ok_or(p9::E_NOMEM)?;
             // H-4b-2: the new empty leaf records its creator's principal, so
@@ -6675,6 +7882,13 @@ impl Comp {
             let d = Dir::parse(rest.trim()).ok_or(p9::E_INVAL)?;
             if !self.actor_owns_subtree(actor, slot) {
                 return Err(p9::E_PERM);
+            }
+            // HALCYON-INSTRUMENT 5.2 (r1 A-F1's owed half, I-6): a move that
+            // would push the tree past the minima it clears today is refused
+            // atomically, judged on a copy -- the split's errno, since the
+            // tree cannot grow that way here. Always fits under legacy.
+            if !self.layout.fits_after(|l| l.move_dir(slot, d)) {
+                return Err(p9::E_NOMEM);
             }
             self.layout.unzoom();
             if !self.layout.move_dir(slot, d) {
@@ -6723,8 +7937,30 @@ impl Comp {
             if !self.actor_owns_subtree(actor, target) {
                 return Err(p9::E_PERM);
             }
+            // 5.2 (I-6): a mode that would overflow the minima (a wide row
+            // turned into a column) is refused on a copy, as `move`.
+            if !self.layout.fits_after(|l| l.set_mode(slot, mode)) {
+                return Err(p9::E_NOMEM);
+            }
             self.layout.unzoom();
             if !self.layout.set_mode(slot, mode) {
+                return Err(p9::E_INVAL);
+            }
+        } else if let Some(w) = cmd.strip_prefix("weight ") {
+            // HALCYON-INSTRUMENT 5.2: the pane's weight in its parent's
+            // division. Syntax first (`1..=65535`; a root has no division),
+            // then authority: it re-divides the PARENT, so the parent's
+            // subtree is what the actor must own -- the `mode` rule.
+            let w: u16 = match w.trim().parse::<u32>() {
+                Ok(v) if (1..=u16::MAX as u32).contains(&v) => v as u16,
+                _ => return Err(p9::E_INVAL),
+            };
+            let parent = self.layout.get(slot).and_then(|p| p.parent).ok_or(p9::E_INVAL)?;
+            if !self.actor_owns_subtree(actor, parent) {
+                return Err(p9::E_PERM);
+            }
+            self.layout.unzoom();
+            if !self.layout.set_weight(slot, w) {
                 return Err(p9::E_INVAL);
             }
         } else {
@@ -6762,11 +7998,20 @@ impl Comp {
             self.status = None;
             say!("tapestryd: status bar {} retired; the display returns", n);
         }
+        // HALCYON-INSTRUMENT 8: the registered rail dies with its surface;
+        // the strip stays carved (the compositor's own `rail` fill shows).
+        if self.rail.map_or(false, |r| r.n == n) {
+            self.rail = None;
+            say!("tapestryd: rail {} retired", n);
+        }
         // A stale last_focus naming this slot would suppress the gained
         // event for a FUTURE surface minted into it -- clear it (the
         // reconcile below re-emits for whatever takes focus).
         if self.last_focus == Some(n) {
             self.last_focus = None;
+        }
+        if self.ptr_over.map_or(false, |(o, _)| o == n) {
+            self.ptr_over = None;
         }
         // (0) The pane side (G-6): the hosting leaf closes (single-child
         // containers collapse; the root collapses to an empty leaf). Done
@@ -6902,6 +8147,23 @@ impl Comp {
         }
     }
 
+    /// HALCYON-SCALE 5 (the scale round's F3): the Direct arm carves
+    /// nothing and fans nothing, so a scale change there reached its
+    /// follower only at the next unrelated relayout. The redraw CONFIGURE
+    /// (same-size by construction: Direct requires the surface
+    /// display-sized) + the session's TEV_LAYOUT; said with the serial so a
+    /// gate can witness the emission -- a same-size CONFIGURE is never
+    /// acked, so the queueing is the observable half.
+    fn fan_scale_redraw_direct(&mut self, n: usize, dw: u32, dh: u32) {
+        if !self.emit_configure_to(n, dw, dh) {
+            self.retire(n); // wedged; retire reconciles
+            return;
+        }
+        let serial = self.surf(n).map_or(0, |s| s.cfg_serial);
+        say!("tapestryd: scale fan direct {} configure serial {}", n, serial);
+        self.notify_session_layout();
+    }
+
     /// Fan one TEV_LAYOUT to the declared session conn (its lowest-slot
     /// surface) outside a reconcile: a tree-state change with no geometry
     /// in it (a reservation release). A push that wedges retires the
@@ -6941,6 +8203,19 @@ impl Comp {
             .hosted_leaves()
             .iter()
             .any(|&(_, n)| self.surf(n).is_some_and(|s| s.owner_conn == conn))
+    }
+
+    /// Is the pane with public id `id` a leaf whose hosted surface `conn`
+    /// owns? False for an unknown id, a container, an empty leaf, and a
+    /// leaf hosted by any other conn.
+    fn leaf_hosted_by_conn(&self, id: u32, conn: u64) -> bool {
+        self.layout.slot_of_id(id).is_some_and(|slot| {
+            self.layout.is_leaf(slot)
+                && self
+                    .layout
+                    .leaf_surface(slot)
+                    .is_some_and(|n| self.surf(n).is_some_and(|s| s.owner_conn == conn))
+        })
     }
 
     /// H-4b-2: reap a departed session's empty scaffolding. `retire_conn`
@@ -7156,6 +8431,10 @@ impl Comp {
     pub fn frame_tick(&mut self) {
         self.tick += 1;
         let t = self.tick;
+        // HALCYON-INSTRUMENT 9.2 (I-6): a divider drag re-lays at most once
+        // per frame -- the motion between ticks coalesces to its last
+        // position; the release and Escape apply the final one themselves.
+        self.drag_apply();
         // Warp-C C-3: a GPU-composition latch asked for a structural repaint
         // (chrome + the redraw CONFIGURE fan). Run it HERE, at the tick,
         // never inline in the present dispatch that found the latch: the
@@ -7279,6 +8558,16 @@ impl Comp {
                 }
                 m.n
             }
+            // 9.2 (I-6): Escape ENDS a divider drag at the current ratio (the
+            // source's behaviour; no rollback), swallowed like the menu's --
+            // its release and repeats through the chord swallow-set, so no
+            // stray Esc reaches the leaf that keeps focus underneath. Every
+            // other key flows: a drag is a pointer capture, not a key grab.
+            None if self.drag.is_some() && value >= 1 && (code == KEY_ESC || rune == 0x1b) => {
+                self.chord_bit_set(code, true);
+                self.drag_end("esc");
+                return;
+            }
             None => match self.layout.focused_surface() {
                 Some(n) => n,
                 None => {
@@ -7367,6 +8656,76 @@ impl Comp {
         Some((n, sx, sy))
     }
 
+    /// HALCYON-INSTRUMENT 9.1 (I-3): the chrome surface under a display
+    /// point -- a header, or an empty pane's placard, placed at its bound
+    /// pane's `tagbar` -- with surface-relative coordinates, clamped into
+    /// the surface as `ptr_hit` clamps (a stale size before its CONFIGURE
+    /// lands must not put a point past the owner's buffer). Chrome is placed
+    /// only where `surface_target` says, so the hit IS the placement; and a
+    /// header never overlaps a content rect (both are carved from one tree),
+    /// so trying chrome first is a preference, never a contest.
+    fn chrome_at(&self, px: u32, py: u32) -> Option<(usize, u16, u16)> {
+        for n in 0..MAX_SURFACES {
+            let Some(s) = self.surf(n) else { continue };
+            if !(s.chrome_bind.is_some() || s.is_rail) || s.w == 0 || s.h == 0 {
+                continue;
+            }
+            let Some(t) = self.surface_target(n) else { continue };
+            if t.contains(px, py) {
+                let sx = (px - t.x).min(s.w - 1).min(0xFFFF) as u16;
+                let sy = (py - t.y).min(s.h - 1).min(0xFFFF) as u16;
+                return Some((n, sx, sy));
+            }
+        }
+        None
+    }
+
+    /// Where a pointer event goes with no grab up: the chrome surface under
+    /// the point (9.1: a header is a pointer target), else the hosted
+    /// content surface under it (`ptr_hit`).
+    fn ptr_target(&self, px: u32, py: u32) -> Option<(usize, u16, u16)> {
+        self.chrome_at(px, py).or_else(|| self.ptr_hit(px, py))
+    }
+
+    /// The crossing: a chrome surface hears TEV_PTR_LEAVE when the routing
+    /// moves off it (onto content, another header, nothing, or a grab), so
+    /// a hovered header can un-hover -- its hover ground and its `x` would
+    /// otherwise stay lit when the pointer crossed onto a track or the
+    /// desktop, which route no MOVE back to it. Only chrome tracks hover,
+    /// so only chrome is told; a content surface's stream is unchanged. The
+    /// record is (slot, gen), so a retire-and-remint of the slot is never
+    /// mistaken for the same surface.
+    fn ptr_crossing(&mut self, now: Option<usize>, mods: u16) {
+        let now_chrome = now.and_then(|n| {
+            self.surf(n)
+                .filter(|s| s.chrome_bind.is_some() || s.is_rail)
+                .map(|s| (n, s.gen))
+        });
+        let prev = self.ptr_over;
+        if prev == now_chrome {
+            return;
+        }
+        if let Some((n, gen)) = prev {
+            if self.surf(n).is_some_and(|s| s.gen == gen) {
+                let ev = Tevent {
+                    kind: TEV_PTR_LEAVE,
+                    code: 0,
+                    value: 0,
+                    rune: 0,
+                    mods,
+                    flags: 0,
+                    tick: self.tick,
+                };
+                if !self.push_event(n, ev) {
+                    self.retire(n);
+                }
+                #[cfg(feature = "test-mode")]
+                say!("tapestryd: ptr leave chrome {}", n);
+            }
+        }
+        self.ptr_over = now_chrome;
+    }
+
     /// ABSOLUTE pointer motion at display coords (G-7c; the tablet
     /// drain). Also synthesizes the TEV_PTR_REL delta from the previous
     /// abs position -- the abs-only-frontend mouse-look path (QEMU cocoa
@@ -7411,6 +8770,11 @@ impl Comp {
     /// a focus companion like keys, decoupled from the pointer position;
     /// PTR_MOVE keeps the under-pointer rule). Deltas clamp to i16.
     fn ptr_rel_emit(&mut self, dx: i32, dy: i32, mods: u16) {
+        // 9.2: a divider drag captures the pointer -- the focused leaf must
+        // not see motion that is moving a boundary.
+        if self.drag.is_some() {
+            return;
+        }
         // H-3c: the grab takes the deltas too (a menu ignores them; the
         // leaf underneath must not see motion it cannot act on).
         let n = match self
@@ -7456,14 +8820,32 @@ impl Comp {
                     .min(0xFFFF) as u16;
                 Some((m.n, sx, sy))
             }
-            None => self.ptr_hit(px, py),
+            None => self.ptr_target(px, py),
         }
     }
 
     fn ptr_commit(&mut self, px: u32, py: u32, mods: u16) {
         self.ptr_x = px;
         self.ptr_y = py;
-        if let Some((n, sx, sy)) = self.ptr_route(px, py) {
+        // HALCYON-INSTRUMENT 9.2 (I-6): a drag captures every motion -- the
+        // boundary follows, nothing under the pointer hears a MOVE, and a
+        // header under it hears LEAVE (the crossing judged on no target).
+        if self.drag.is_some() {
+            if !self.drag_valid() {
+                self.drag_end("retired");
+            } else {
+                self.drag_motion(px, py);
+                self.ptr_crossing(None, mods);
+                return;
+            }
+        }
+        self.hover_update();
+        let route = self.ptr_route(px, py);
+        // A grab routes everything to the menu: the header under the
+        // pointer is left as it was (the crossing is judged on the routed
+        // target, so it hears LEAVE the moment routing goes elsewhere).
+        self.ptr_crossing(route.map(|(n, _, _)| n), mods);
+        if let Some((n, sx, sy)) = route {
             let ev = Tevent {
                 kind: TEV_PTR_MOVE,
                 code: 0,
@@ -7491,6 +8873,18 @@ impl Comp {
         if !pressed {
             let v = self.btn_owner[bi];
             self.btn_owner[bi] = 0;
+            if v == OWNER_DRAG {
+                // 9.2: the release ends the drag at the final position; a
+                // drag that already ended (Escape, a chord, a modal, the
+                // split's retirement) leaves a release nobody may act on.
+                if self.drag.is_some() {
+                    self.drag_end("release");
+                } else {
+                    #[cfg(feature = "test-mode")]
+                    say!("tapestryd: divider drag release swallowed (btn {})", code);
+                }
+                return;
+            }
             if v == OWNER_SWALLOWED {
                 #[cfg(feature = "test-mode")]
                 {
@@ -7527,7 +8921,57 @@ impl Comp {
                 Some(m.n)
             }
             None => {
-                let hit = self.ptr_hit(self.ptr_x, self.ptr_y).map(|(n, _, _)| n);
+                // 9.2 (I-6): a divider track is the compositor's own target.
+                // The primary press captures the pointer for that split (or,
+                // twice within DBLCLICK_MS on the same track, equalises the
+                // pair); any other button on a track is swallowed on both
+                // edges -- there is nothing under a track to act.
+                if pressed {
+                    if let Some((slot, idx)) = self.layout.track_at(self.ptr_x, self.ptr_y) {
+                        let cid = self.layout.id_of(slot).unwrap_or(0);
+                        if code != BTN_LEFT || self.drag.is_some() {
+                            self.btn_owner[bi] = OWNER_SWALLOWED;
+                            return;
+                        }
+                        // The second press within the window, on the same
+                        // track AND within a few pixels of the first (a
+                        // quick re-grab after a drag is not a double-click).
+                        let here = (self.ptr_x, self.ptr_y);
+                        let twice = self.track_press.is_some_and(|(c, i, at, from)| {
+                            c == cid
+                                && i == idx
+                                && at.elapsed().as_millis() as u64 <= DBLCLICK_MS
+                                && from.0.abs_diff(here.0) <= DBLCLICK_SLOP
+                                && from.1.abs_diff(here.1) <= DBLCLICK_SLOP
+                        });
+                        if twice {
+                            self.track_press = None;
+                            self.btn_owner[bi] = OWNER_SWALLOWED;
+                            self.equalise_track(slot, idx);
+                            return;
+                        }
+                        self.track_press = Some((cid, idx, Instant::now(), here));
+                        self.btn_owner[bi] = OWNER_DRAG;
+                        self.drag_begin(cid, idx);
+                        return;
+                    }
+                }
+                // 9.1: a header under the point takes the press (its owner
+                // decides by x); a content surface takes it as before.
+                let hit = self.ptr_target(self.ptr_x, self.ptr_y).map(|(n, _, _)| n);
+                #[cfg(feature = "test-mode")]
+                if let Some(n) = hit {
+                    if self.surf(n).is_some_and(|s| s.chrome_bind.is_some() || s.is_rail) {
+                        say!(
+                            "tapestryd: ptr btn {} {} -> chrome {} at {},{}",
+                            code,
+                            pressed as u8,
+                            n,
+                            self.ptr_x,
+                            self.ptr_y
+                        );
+                    }
+                }
                 // Click-to-focus (HALCYON.md 6): a press in a hosted leaf
                 // that is not the focused one focuses it -- and still
                 // reaches the client (i3 passes the click through). A pane
@@ -7570,6 +9014,11 @@ impl Comp {
     /// Wheel scroll (signed delta) at the current pointer position.
     /// Non-droppable (discrete steps; losing one skips content).
     pub fn ptr_scroll(&mut self, delta: i32, mods: u16) {
+        // 9.2: the capture takes the wheel too (nothing under a moving
+        // boundary may scroll by it).
+        if self.drag.is_some() {
+            return;
+        }
         if let Some((n, _, _)) = self.ptr_route(self.ptr_x, self.ptr_y) {
             // The H-3c round F4: wheel deltas to the placed MENU sum at the
             // back of its queue (the REL discipline): its owner reads the
@@ -7635,7 +9084,7 @@ impl Comp {
             }
             return false;
         }
-        let super_held = mods & crate::keymap::MOD_SUPER != 0;
+        let super_held = mods & tapestryd::keymap::MOD_SUPER != 0;
         if value == 2 {
             // Repeat: follows its press's disposition; a repeat while
             // Super is held is plane-reserved regardless.
@@ -7646,9 +9095,12 @@ impl Comp {
         }
         self.chord_bit_set(code, true);
         // H-3c: a chord dismisses a placed menu first, then acts -- the
-        // environment's plane outranks a modal.
+        // environment's plane outranks a modal. 9.2: it ends a divider drag
+        // the same way (at the current ratio), so a structural chord never
+        // races a capture over the tree it is about to change.
+        self.drag_end("chord");
         self.menu_dismiss("chord");
-        self.chord_action(code, mods & crate::keymap::MOD_SHIFT != 0);
+        self.chord_action(code, mods & tapestryd::keymap::MOD_SHIFT != 0);
         true
     }
 
@@ -7669,6 +9121,21 @@ impl Comp {
     /// reconciles; a no-op (edge/degenerate) does not.
     fn exec_chord(&mut self, action: ChordAction) {
         match action {
+            // HALCYON-SCALE 6: the live scale controls (Super+= / Super+- /
+            // Super+0 by default). A chord acts in the compositor, so no
+            // admission; the step is clamped, the reset re-derives.
+            ChordAction::ScaleStep(dir) => {
+                let p = scale::step(self.scale, dir);
+                if p != self.scale {
+                    self.scale_override = Some(p);
+                    self.apply_scale(p, "chord");
+                }
+            }
+            ChordAction::ScaleReset => {
+                self.scale_override = None;
+                let p = self.derive_scale();
+                self.apply_scale(p, "chord-reset");
+            }
             ChordAction::FocusDir(d) => {
                 if self.layout.focus_dir(d) {
                     self.reconcile();
@@ -7676,14 +9143,34 @@ impl Comp {
             }
             ChordAction::MoveDir(d) => {
                 let f = self.layout.focused;
+                // 5.2 (I-6): the chord meets the minima the verb meets,
+                // judged on a copy before the tree changes.
+                if !self.layout.fits_after(|l| l.move_dir(f, d)) {
+                    say!(
+                        "tapestryd: chord move refused: the minima (pane {})",
+                        self.layout.id_of(f).unwrap_or(0)
+                    );
+                    return;
+                }
                 self.layout.unzoom();
                 if self.layout.move_dir(f, d) {
                     self.reconcile();
                 }
             }
             ChordAction::Split(mode) => {
-                self.layout.unzoom();
                 let f = self.layout.focused;
+                // HALCYON-INSTRUMENT 5.2: the chord is the `split` verb's twin
+                // and meets the same minima, judged BEFORE the tree changes
+                // (the r1 A-F1 finding: this arm alone grew ZERO-rect leaves
+                // past them). Always fits under legacy.
+                if !self.layout.split_fits(f, mode) {
+                    say!(
+                        "tapestryd: chord split refused: the minima (pane {})",
+                        self.layout.id_of(f).unwrap_or(0)
+                    );
+                    return;
+                }
+                self.layout.unzoom();
                 // The new empty leaf must record the owner of the leaf being
                 // split (its hosted surface's principal), so a SESSION that
                 // Super+H-splits its own tile can later mint the placement
@@ -7716,8 +9203,15 @@ impl Comp {
                 }
             }
             ChordAction::SetMode(mode) => {
-                self.layout.unzoom();
                 let f = self.layout.focused;
+                if !self.layout.fits_after(|l| l.set_mode(f, mode)) {
+                    say!(
+                        "tapestryd: chord mode refused: the minima (pane {})",
+                        self.layout.id_of(f).unwrap_or(0)
+                    );
+                    return;
+                }
+                self.layout.unzoom();
                 if self.layout.set_mode(f, mode) {
                     self.reconcile();
                 }
@@ -7736,6 +9230,13 @@ impl Comp {
                     Some(Mode::SplitH) => Mode::SplitV,
                     _ => Mode::SplitH,
                 };
+                if !self.layout.fits_after(|l| l.set_mode(f, want)) {
+                    say!(
+                        "tapestryd: chord mode refused: the minima (pane {})",
+                        self.layout.id_of(f).unwrap_or(0)
+                    );
+                    return;
+                }
                 self.layout.unzoom();
                 if self.layout.set_mode(f, want) {
                     self.reconcile();
@@ -8532,11 +10033,14 @@ impl Comp {
         }
         let va = self.weave_va_next;
         self.weave_va_next += (size + PAGE - 1) & !(PAGE - 1);
-        let pa = unsafe { t_dma_map(fd, va, T_PROT_READ | T_PROT_WRITE) };
-        if pa < 0 {
-            unsafe { t_close(fd) };
-            return None;
-        }
+        let mut segs = [Seg::default(); WEAVE_MAX_SEGS];
+        let nsegs = match Self::map_dma(fd, va, size, &mut segs) {
+            Some(n) => n,
+            None => {
+                unsafe { t_close(fd) };
+                return None;
+            }
+        };
         self.res_seq = self.res_seq.wrapping_add(1);
         let res_id = self.res_seq;
         let undo = |gpu: &mut Gpu, stage: u32, res_id: u32| {
@@ -8588,7 +10092,7 @@ impl Comp {
         }
         if self
             .gpu
-            .attach_backing(res_id, pa as u64, size as u32)
+            .attach_backing(res_id, &segs[..nsegs])
             .is_err()
         {
             undo(&mut self.gpu, 2, res_id);
@@ -8960,7 +10464,6 @@ impl Comp {
             res_id: 0,
             dma_fd: -1,
             va: 0,
-            pa: 0,
             size: 0,
             share_id: None,
             w: 0,
@@ -9318,15 +10821,16 @@ impl Comp {
         }
         let va = self.weave_va_next;
         self.weave_va_next += (size + PAGE - 1) & !(PAGE - 1);
-        let pa = unsafe { t_dma_map(fd, va, T_PROT_READ | T_PROT_WRITE) };
-        if pa < 0 {
+        let mut segs = [Seg::default(); WEAVE_MAX_SEGS];
+        let nsegs = Self::map_dma(fd, va, size, &mut segs).unwrap_or(0);
+        if nsegs == 0 {
             unsafe { t_close(fd) };
             self.wbo_diag_once(
                 ctx_pub,
                 conn,
                 Self::WDIAG_DMA_MAP,
                 "dma-map",
-                pa,
+                -1,
                 format,
                 w,
                 h,
@@ -9398,7 +10902,7 @@ impl Comp {
         }
         if self
             .gpu
-            .attach_backing(res_id, pa as u64, size as u32)
+            .attach_backing(res_id, &segs[..nsegs])
             .is_err()
         {
             unwind(&mut self.gpu, 2, res_id);
@@ -9424,7 +10928,6 @@ impl Comp {
                 b.res_id = res_id;
                 b.dma_fd = fd;
                 b.va = va;
-                b.pa = pa as u64;
                 b.size = size;
                 b.w = w;
                 b.h = h;
@@ -9814,12 +11317,39 @@ impl Comp {
         }
         let va = self.weave_va_next;
         self.weave_va_next += (bytes + PAGE - 1) & !(PAGE - 1);
-        let pa = unsafe { t_dma_map(fd, va, T_PROT_READ | T_PROT_WRITE) };
-        if pa < 0 {
-            self.weave_va_next = va; // audit F5: nothing mapped here -- reclaim the VA
+        // A ring is capped at WARP_RING_MAX (1 MiB), which a _Static_assert-
+        // equivalent bound keeps under SKEIN_BLOCK, so it is single-block by
+        // construction -- which is what the blob path below REQUIRES, since
+        // RESOURCE_CREATE_BLOB carries one mem entry. Going through map_dma
+        // anyway means this site never has to know that.
+        let mut segs = [Seg::default(); WEAVE_MAX_SEGS];
+        let nsegs = match Self::map_dma(fd, va, bytes, &mut segs) {
+            Some(n) => n,
+            None => {
+                // The VA rewind is sound ONLY because map_dma's contract says
+                // nothing is installed on None. It was written when a failed
+                // t_dma_map was the only way here; the skein's -2 (mapping
+                // SUCCEEDED, no single PA) would have made the old `pa < 0`
+                // test rewind a bump allocator over a LIVE mapping and hand
+                // the same VA out twice.
+                self.weave_va_next = va;
+                unsafe { t_close(fd) };
+                return Err(p9::E_NOMEM);
+            }
+        };
+        if nsegs != 1 {
+            // Fail closed: create_ring_blob emits a single mem entry, so a
+            // scattered ring would be given a PARTIAL backing the device reads
+            // past. Unreachable while WARP_RING_MAX <= SKEIN_BLOCK; asserted
+            // rather than assumed, because the two constants live in different
+            // repositories and nothing links them.
+            say!("tapestryd: ring backing scattered ({} segs) -- refusing", nsegs);
+            unsafe { t_burrow_detach(va, bytes) };
+            self.weave_va_next = va;
             unsafe { t_close(fd) };
             return Err(p9::E_NOMEM);
         }
+        let pa = segs[0].pa as i64;
         // Zero the control header; the host starts idle (the guest kicks on
         // its first submit). Release-ordered so a client that maps and polls
         // immediately observes the initialized header.
@@ -13349,6 +14879,10 @@ impl Conn {
                     Some((P_PANE_DIR, 0))
                 } else if name == b"statusbar" {
                     Some((P_STATUSBAR, 0))
+                } else if name == b"rail" {
+                    Some((P_RAIL, 0))
+                } else if name == b"chords" {
+                    Some((P_CHORDS, 0))
                 } else {
                     None
                 }
@@ -13376,6 +14910,8 @@ impl Conn {
                     b"status" => PFK_STATUS,
                     b"claim" => PFK_CLAIM,
                     b"owner" => PFK_OWNER,
+                    b"frame" => PFK_FRAME,
+                    b"dividers" => PFK_DIVIDERS,
                     _ => return None,
                 };
                 Some((make_pane(id, fk), 0))
@@ -13772,9 +15308,10 @@ impl Conn {
             let _ = core::fmt::write(
                 &mut s,
                 format_args!(
-                    "display {} {}\nsurfaces {}\nclock-rate {}\ntick {}\npanes {}\nfocused {}\nmenu {}\n",
+                    "display {} {}\nscale {}\nsurfaces {}\nclock-rate {}\ntick {}\npanes {}\nfocused {}\nmenu {}\n",
                     comp.gpu.width,
                     comp.gpu.height,
+                    comp.scale,
                     comp.live_count(),
                     comp.clock_hz,
                     comp.tick,
@@ -13846,6 +15383,22 @@ impl Conn {
             let r = comp.status_rect().unwrap_or(Rect::ZERO);
             let mut s = String::new();
             let _ = core::fmt::write(&mut s, format_args!("{} {} {} {}\n", r.x, r.y, r.w, r.h));
+            return self.read_text_snapped(a.fid, f.path, tag, s, a.offset, cap);
+        }
+        if f.path == P_RAIL {
+            // HALCYON-INSTRUMENT 8: the top rail's strip while a rail is
+            // registered -- "x y w h", zeros otherwise (the file always
+            // exists; under legacy it is always zeros).
+            let r = comp.rail_rect().unwrap_or(Rect::ZERO);
+            let mut s = String::new();
+            let _ = core::fmt::write(&mut s, format_args!("{} {} {} {}\n", r.x, r.y, r.w, r.h));
+            return self.read_text_snapped(a.fid, f.path, tag, s, a.offset, cap);
+        }
+        if f.path == P_CHORDS {
+            // HALCYON-INSTRUMENT 8.2: the chord table in force, in the
+            // config grammar -- what an environment derives its hints from
+            // (never a literal). Read-only; ungated like every other read.
+            let s = comp.chords.render();
             return self.read_text_snapped(a.fid, f.path, tag, s, a.offset, cap);
         }
         if is_pane(f.path) && pane_fk(f.path) == PFK_CLAIM {
@@ -14811,6 +16364,19 @@ impl Conn {
                 let t = comp.layout.get(slot).unwrap().tagbar;
                 let _ = core::fmt::write(&mut s, format_args!("{} {} {} {}\n", t.x, t.y, t.w, t.h));
             }
+            PFK_FRAME => {
+                // The pane's outer rect: under Instrument the frame's box
+                // (5.5), under legacy the ring's outside. ZERO when hidden.
+                let r = comp.layout.get(slot).unwrap().rect;
+                let _ = core::fmt::write(&mut s, format_args!("{} {} {} {}\n", r.x, r.y, r.w, r.h));
+            }
+            PFK_DIVIDERS => {
+                // One `x y w h` per track, in child order; empty for a leaf,
+                // a stack, or under legacy.
+                for d in &comp.layout.get(slot).unwrap().dividers {
+                    let _ = core::fmt::write(&mut s, format_args!("{} {} {} {}\n", d.x, d.y, d.w, d.h));
+                }
+            }
             PFK_STATUS => {
                 // The RECORDED status (resting|ok|err), not the display key:
                 // whether it shows is the compositor's focus fact.
@@ -15757,6 +17323,23 @@ impl Conn {
             || s.starts_with("probe-screen ")
     }
 
+    /// The leaf id of a WELL-FORMED tile-status verb (`tag <id> status
+    /// ok|err|resting`, nothing more); None for anything else, so the
+    /// session admission never reaches past a verb the handler would
+    /// refuse anyway.
+    fn status_verb_leaf(s: &str) -> Option<u32> {
+        let mut it = s.strip_prefix("tag ")?.split_ascii_whitespace();
+        let id: u32 = it.next()?.parse().ok()?;
+        if it.next() != Some("status") {
+            return None;
+        }
+        Status::parse(it.next()?)?;
+        if it.next().is_some() {
+            return None;
+        }
+        Some(id)
+    }
+
     fn global_ctl(&mut self, comp: &mut Comp, data: &[u8]) -> Result<(), u32> {
         let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
         let s = s.trim();
@@ -15801,11 +17384,103 @@ impl Conn {
                             self.conn_id
                         );
                         comp.session_conns.clear();
+                        // What the seat minted goes with the seat: the idle
+                        // holder's status bar (the ONE per-display carve,
+                        // which would else refuse the successor's for as
+                        // long as the idle conn lived) and its menu. Its
+                        // chrome binds are pane-owner-gated, not seat-gated,
+                        // and stay.
+                        let minted: Vec<usize> = (0..MAX_SURFACES)
+                            .filter(|&n| {
+                                comp.surf(n).is_some_and(|s| {
+                                    s.owner_conn == other && (s.is_status || s.is_menu || s.is_rail)
+                                })
+                            })
+                            .collect();
+                        for n in minted {
+                            say!(
+                                "tapestryd: session takeover retires surface {} of conn {}",
+                                n,
+                                other
+                            );
+                            comp.retire(n);
+                        }
+                    }
+                    // H-3d + 14.12: the ONE per-display status bar is
+                    // first-come, and the display has just changed hands.
+                    // The console renderer mints its bar at startup and is
+                    // BACKGROUNDED the instant a session hosts a leaf --
+                    // invisible, yet still holding the slot, so the session
+                    // compositor's own `create role=status` is refused for
+                    // as long as the console lives. That is the same denial
+                    // the session-to-session takeover above retires for,
+                    // one case short: a SYSTEM-to-session handover is a
+                    // handover too. The console drops the surface on its
+                    // CLOSE and re-mints from the relayout that foregrounds
+                    // it again at logout, so this is a loan, not a seizure.
+                    // Keyed on the OWNER'S PRINCIPAL, never on backgrounded
+                    // (which is a per-leaf flag the display-bound bar never
+                    // carries) and never on the conn (the console's is a
+                    // different conn by construction, but so is a second
+                    // session's, which the block above already handled).
+                    if let Some(st) = comp.status {
+                        if comp
+                            .surf(st.n)
+                            .is_some_and(|s| !principal_is_session(s.owner_principal))
+                        {
+                            say!(
+                                "tapestryd: session declare retires the system status bar (surface {})",
+                                st.n
+                            );
+                            comp.retire(st.n);
+                        }
+                    }
+                    // HALCYON-INSTRUMENT 8: the top rail follows the display
+                    // exactly as the bar does -- the console's is a loan.
+                    if let Some(r) = comp.rail {
+                        if comp
+                            .surf(r.n)
+                            .is_some_and(|s| !principal_is_session(s.owner_principal))
+                        {
+                            say!(
+                                "tapestryd: session declare retires the system rail (surface {})",
+                                r.n
+                            );
+                            comp.retire(r.n);
+                        }
                     }
                     comp.session_conns.push((self.conn_id, self.peer_principal));
                     say!("tapestryd: session declared by conn {}", self.conn_id);
                 }
-                "off" => comp.session_conns.retain(|&(c, _)| c != self.conn_id),
+                "off" => {
+                    comp.session_conns.retain(|&(c, _)| c != self.conn_id);
+                    // The mirror of the declare above, and TY-6 F7: a seat
+                    // that gives the display back must give the display's
+                    // status bar back with it. Without this the departing
+                    // session's bar outlives its seat -- `session_conns`
+                    // is empty so the E_PERM refusal lifts, but
+                    // `comp.status` still names the live surface, so the
+                    // console's re-mint is E_INVAL for the life of that
+                    // conn and the bar stops following the display in
+                    // exactly the shape this rule exists to prevent.
+                    // (`retire_conn` already covers the ordinary logout;
+                    // this is the conn that stays alive.)
+                    if let Some(st) = comp.status {
+                        if comp.surf(st.n).is_some_and(|s| s.owner_conn == self.conn_id) {
+                            say!(
+                                "tapestryd: session release retires its status bar (surface {})",
+                                st.n
+                            );
+                            comp.retire(st.n);
+                        }
+                    }
+                    if let Some(r) = comp.rail {
+                        if comp.surf(r.n).is_some_and(|s| s.owner_conn == self.conn_id) {
+                            say!("tapestryd: session release retires its rail (surface {})", r.n);
+                            comp.retire(r.n);
+                        }
+                    }
+                }
                 _ => return Err(p9::E_INVAL),
             }
             comp.reconcile();
@@ -15825,16 +17500,98 @@ impl Conn {
         let session_menu_verb = s.starts_with("menu ")
             && comp.session_declared(self.conn_id)
             && comp.conn_hosts(self.conn_id);
-        if !Self::is_ungated_ctl(s) && !self.peer_is_renderer() && !session_menu_verb {
+        // The tile status (`tag <id> status ok|err|resting`) is ALSO the
+        // DECLARED session compositor's, for a leaf THIS CONN HOSTS: the
+        // party hosting a tile is the one that knows how its last command
+        // ended (its transcript's exit mark), exactly as the renderer is for
+        // the console tile. Resolved BEFORE the gate, so a malformed verb, a
+        // foreign or empty leaf, or an undeclared conn all still meet the
+        // default deny -- a client can never record a status on a tile it
+        // does not host, which is the lie the gate exists to refuse.
+        let session_status_verb = s.starts_with("tag ")
+            && comp.session_declared(self.conn_id)
+            && Self::status_verb_leaf(s).is_some_and(|id| comp.leaf_hosted_by_conn(id, self.conn_id));
+        // HALCYON-SCALE 4: the display scale is the SEAT's -- the renderer
+        // unconditionally, the declared session compositor while it hosts
+        // (the seat-held-while-hosting rule the menu and the status bar
+        // carry). A per-process client rescaling another principal's
+        // display is the cfg-3 lie this refuses.
+        let session_scale_verb = s.starts_with("scale ")
+            && comp.session_declared(self.conn_id)
+            && comp.conn_hosts(self.conn_id);
+        // HALCYON-THEME 3.4: the theme is the SEAT's, on exactly the `scale`
+        // terms. tapestryd paints the chrome and halcyond paints the content,
+        // and they must agree or the bevel does not match the pane -- but the
+        // user's theme file lives in the user's home, which this process is
+        // not entitled to read. So a DECLARED session that is hosting pushes
+        // its resolved theme. A per-process client re-theming another
+        // principal's display is the same cfg-3 lie `scale` refuses.
+        let session_theme_verb = s.starts_with("theme ")
+            && comp.session_declared(self.conn_id)
+            && comp.conn_hosts(self.conn_id);
+        if !Self::is_ungated_ctl(s)
+            && !self.peer_is_renderer()
+            && !session_menu_verb
+            && !session_status_verb
+            && !session_scale_verb
+            && !session_theme_verb
+        {
             return Err(p9::E_PERM);
+        }
+        if let Some(rest) = s.strip_prefix("theme ") {
+            // Budgeted like a layout verb: it IS one -- the metrics may move,
+            // so every carve is re-decided.
+            self.layout_verb_budget()?;
+            // UNTRUSTED INPUT even past the gate: the sender is the seat, but
+            // a seat is still another process, and `from_wire` re-checks the
+            // geometry bounds rather than trusting the far side (a display
+            // whose hairline arrived unvalidated is a scale-class hazard).
+            let Some(b) = libhalcyon::theme::from_wire(rest) else {
+                return Err(p9::E_INVAL);
+            };
+            let who = if self.peer_is_renderer() {
+                "renderer"
+            } else {
+                "session"
+            };
+            comp.apply_theme(b, who);
+            return Ok(());
+        }
+        if let Some(rest) = s.strip_prefix("scale ") {
+            // `scale auto` re-derives (the declaration, else the EDID);
+            // `scale <pct>` is one of the five values or E_INVAL. Budgeted
+            // like a layout verb: it IS one (a structural relayout).
+            let rest = rest.trim();
+            self.layout_verb_budget()?;
+            if rest == "auto" {
+                comp.scale_override = None;
+                let p = comp.derive_scale();
+                comp.apply_scale(p, "auto");
+                return Ok(());
+            }
+            let pct: u16 = rest.parse().map_err(|_| p9::E_INVAL)?;
+            if !scale::is_valid_pct(pct) {
+                return Err(p9::E_INVAL);
+            }
+            comp.scale_override = Some(pct);
+            comp.apply_scale(pct, "verb");
+            return Ok(());
         }
         if s == "mode auto" {
             // Re-probe the host's preferred rect and adopt it (base
             // virtio-gpu reports one rect, not a mode list). Absent or
-            // probe-failed: fail soft, current mode stands.
+            // probe-failed: fail soft, current mode stands. The EDID is
+            // re-queried with it (a hotplug is the one time it changes).
             let probed = comp.gpu.query_display_info().ok().flatten();
             return match probed {
-                Some((w, h)) => comp.set_mode(w, h),
+                Some((w, h)) => {
+                    let r = comp.set_mode(w, h);
+                    if r.is_ok() {
+                        comp.gpu.edid_mm = comp.gpu.query_edid().unwrap_or(None);
+                        comp.rescale_after_mode();
+                    }
+                    r
+                }
                 None => Err(p9::E_AGAIN),
             };
         }
@@ -15853,7 +17610,13 @@ impl Conn {
             if it.next().is_some() {
                 return Err(p9::E_INVAL);
             }
-            return comp.set_mode(w, h);
+            // HALCYON-SCALE 4: new pixels over the same millimetres is a
+            // new DPI -- re-derive unless a verb/chord override stands.
+            let r = comp.set_mode(w, h);
+            if r.is_ok() {
+                comp.rescale_after_mode();
+            }
+            return r;
         }
         if let Some(rate) = s.strip_prefix("clock-rate ") {
             let hz: u32 = rate.trim().parse().map_err(|_| p9::E_INVAL)?;
@@ -16103,6 +17866,7 @@ impl Conn {
                         Some(Role::Chrome) => Role::Chrome,
                         Some(Role::Menu) => Role::Menu,
                         Some(Role::Status) => Role::Status,
+                        Some(Role::Rail) => Role::Rail,
                         _ => return Err(p9::E_INVAL), // pin-target is a pane role
                     };
                 } else if let Some(b) = tok.strip_prefix("bind=") {
@@ -16129,8 +17893,31 @@ impl Conn {
             }
             let host = match (role, bind) {
                 (Role::Content, None) => Host::Content { claim },
+                // The DECLARED session compositor (HALCYON.md 14.12, the
+                // user's rio) decorates ITS OWN tiles: a chrome bind is
+                // admitted from it only for a pane the session's principal
+                // owns (`pane_owner_principal`, the H-4b pane-authority
+                // axis) -- so a session can never overlay chrome on another
+                // client's pane, which is the exact threat the renderer gate
+                // closes; the renderer keeps its unconditional admission.
                 (Role::Chrome, Some(pid)) => {
-                    if !self.peer_is_renderer() {
+                    // An occupied leaf's owner is its hosted surface's; an
+                    // empty leaf's the recorded pane owner (H-4b-2). The
+                    // judgement is `chrome_bind_admitted`, shared with the
+                    // reap that re-judges a standing bind (r1 A-F6).
+                    let admitted = self.peer_is_renderer()
+                        || match self.actor() {
+                            Actor::Session(p) => comp.layout.slot_of_id(pid).is_some_and(|slot| {
+                                comp.session_declared(self.conn_id)
+                                    && pane::chrome_bind_admitted(
+                                        p,
+                                        comp.layout.leaf_surface(slot).and_then(|n| comp.surf(n)).map(|s| s.owner_principal),
+                                        comp.layout.pane_owner_principal(slot),
+                                    )
+                            }),
+                            _ => false,
+                        };
+                    if !admitted {
                         return Err(p9::E_PERM);
                     }
                     Host::Chrome { bind: pid }
@@ -16138,12 +17925,32 @@ impl Conn {
                 // H-3d: the status bar takes no bind (its bind is the
                 // display); renderer-gated like every chrome -- an ungated
                 // status role would let any client carve the display and
-                // own the one bar that speaks for the system.
+                // own the one bar that speaks for the system. The declared
+                // session compositor is admitted while it HOSTS (the seat
+                // held only while hosting, as for the menu arm below): it
+                // took the display, so the bar that speaks for it is its
+                // own; an idle declarer carves nothing.
                 (Role::Status, None) => {
-                    if !self.peer_is_renderer() {
+                    if !self.peer_is_renderer()
+                        && !(comp.session_declared(self.conn_id) && comp.conn_hosts(self.conn_id))
+                    {
                         return Err(p9::E_PERM);
                     }
                     Host::Status
+                }
+                // HALCYON-INSTRUMENT 8: the top rail takes no bind (its bind
+                // is the display) and is gated exactly as the bar: the
+                // renderer, or the declared session compositor while it
+                // HOSTS. The profile is judged in `create` (the carve's
+                // fact), after the authority here -- a legacy display
+                // refuses the rail as malformed, not as not-yours.
+                (Role::Rail, None) => {
+                    if !self.peer_is_renderer()
+                        && !(comp.session_declared(self.conn_id) && comp.conn_hosts(self.conn_id))
+                    {
+                        return Err(p9::E_PERM);
+                    }
+                    Host::Rail
                 }
                 // H-3c: a menu takes no bind (the compositor places it at
                 // `menu place`); renderer-gated like chrome -- an ungated
@@ -16966,6 +18773,8 @@ impl Conn {
                 names.push((b"surface".to_vec(), P_SURF_DIR));
                 names.push((b"layout".to_vec(), P_LAYOUT));
                 names.push((b"statusbar".to_vec(), P_STATUSBAR));
+                names.push((b"rail".to_vec(), P_RAIL));
+                names.push((b"chords".to_vec(), P_CHORDS));
                 names.push((b"pane".to_vec(), P_PANE_DIR));
             }
             P_PANE_DIR => {
@@ -16989,6 +18798,8 @@ impl Conn {
                         (&b"status"[..], PFK_STATUS),
                         (&b"claim"[..], PFK_CLAIM),
                         (&b"owner"[..], PFK_OWNER),
+                        (&b"frame"[..], PFK_FRAME),
+                        (&b"dividers"[..], PFK_DIVIDERS),
                     ] {
                         names.push((nm.to_vec(), make_pane(id, fk)));
                     }
@@ -17206,7 +19017,14 @@ impl Conn {
         let ro = is_pane(f.path)
             && matches!(
                 pane_fk(f.path),
-                PFK_SURFACE | PFK_GEOMETRY | PFK_TAGBAR | PFK_STATUS | PFK_CLAIM | PFK_OWNER
+                PFK_SURFACE
+                    | PFK_GEOMETRY
+                    | PFK_TAGBAR
+                    | PFK_STATUS
+                    | PFK_CLAIM
+                    | PFK_OWNER
+                    | PFK_FRAME
+                    | PFK_DIVIDERS
             );
         let (mode, nlink) = if is_dir(f.path) {
             (DIR_MODE, 2u64)
@@ -17473,3 +19291,4 @@ fn parse_u32(name: &[u8]) -> Option<u32> {
     }
     Some(v)
 }
+

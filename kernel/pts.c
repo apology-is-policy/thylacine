@@ -3,6 +3,7 @@
 // the binding design.
 
 #include <thylacine/pts.h>
+#include <thylacine/cons.h>
 #include <thylacine/9p_client.h>
 #include <thylacine/9p_srvconn_transport.h>
 #include <thylacine/dev9p.h>
@@ -303,6 +304,28 @@ s64 pts_resolve_spoor(struct Spoor *sp, bool *is_master_out) {
 // PTY-1d: the tty seam + controlling-terminal cores (pts.h contracts).
 // =============================================================================
 
+// The carrier-loss witness: one diag line per hangup the seam routes (or
+// cannot route), so a pts whose leader outlives its master can be read off
+// the console log rather than inferred.
+static void pts_hup_diag(u64 pts_id, u32 ct_sid, u32 fg, s64 posted) {
+    struct cons_diag_line dl;
+    cons_diag_line_init(&dl);
+    cons_diag_line_puts(&dl, "pts: carrier loss pts_id=");
+    cons_diag_line_putdec(&dl, pts_id);
+    cons_diag_line_puts(&dl, " ct_sid=");
+    cons_diag_line_putdec(&dl, (u64)ct_sid);
+    cons_diag_line_puts(&dl, " fg=");
+    cons_diag_line_putdec(&dl, (u64)fg);
+    if (posted < 0) {
+        cons_diag_line_puts(&dl, " -> nobody controls it\n");
+    } else {
+        cons_diag_line_puts(&dl, " -> tty:hup posted to ");
+        cons_diag_line_putdec(&dl, (u64)posted);
+        cons_diag_line_puts(&dl, "\n");
+    }
+    cons_diag_line_emit(&dl);
+}
+
 s64 pts_tty_signal(struct Proc *server, u64 pts_id, u32 sig_class) {
     if (!server) return -T_E_INVAL;
     if (sig_class < TTY_SIG_INT || sig_class > TTY_SIG_HUP) return -T_E_INVAL;
@@ -340,7 +363,10 @@ s64 pts_tty_signal(struct Proc *server, u64 pts_id, u32 sig_class) {
     case TTY_SIG_WINCH: name = NOTE_NAME_TTY_WINCH; break;
     default:            name = NOTE_NAME_TTY_HUP;   break;
     }
-    if (ct_sid == 0 || fg == 0) return 0;   // nobody controls this terminal
+    if (ct_sid == 0 || fg == 0) {
+        if (sig_class == TTY_SIG_HUP) pts_hup_diag(pts_id, ct_sid, fg, -1);
+        return 0;   // nobody controls this terminal
+    }
 
     s64 n = (s64)notes_post_pgrp(fg, name, 0);
     if (sig_class == TTY_SIG_HUP) {
@@ -351,6 +377,7 @@ s64 pts_tty_signal(struct Proc *server, u64 pts_id, u32 sig_class) {
         s64 lp = proc_getpgid(server, (int)ct_sid);
         if (lp > 0 && (u32)lp != fg)
             n += (s64)notes_post_pid((int)ct_sid, name, 0);
+        pts_hup_diag(pts_id, ct_sid, fg, n);
     }
     return n;
 }

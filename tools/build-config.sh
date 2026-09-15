@@ -89,6 +89,22 @@ bc_def bake CHUNK_AURORA_CFG bool n "env:THYLACINE_AURORA_CFG4" \
   "Aurora config-4 payload" \
   "An opt-in Aurora renderer config-4 payload."
 
+# display --------------------------------------------------------------------
+# The Halcyon axes. Two SEPARATE levers, and the difference decides what a user
+# actually sees: SESSION is the per-user Halcyon environment after login (the
+# forward path); CONSOLE replaces aurora as the pre-login system renderer and is
+# marked "being retired" in build.sh's own bake comment. THEME applies to
+# whichever of them runs.
+bc_def display HALCYON_SESSION bool n "env:THYLACINE_HALCYON_SESSION" \
+  "Halcyon session (per-user environment)" \
+  "After login, spawn halcyond --session as the user instead of ut on /dev/cons -- the tiled Halcyon environment with its welcome, tag bars and status bar. aurora stays the pre-login console renderer. This is the forward path and the one that means 'Halcyon as the UI'. Off = the proven ut path (fail-safe): login just runs the shell."
+bc_def display HALCYON_CONSOLE bool n "env:THYLACINE_HALCYON" \
+  "Halcyon as the pre-login console renderer" \
+  "Bakes /lib/halcyon/renderer=halcyond so joey boots halcyond instead of aurora for the SYSTEM console. Distinct from the session lever above, and build.sh marks it 'being retired'. NOTE it is not a pure renderer swap: it also bakes a wedge-test rule into /lib/beacon/verbs (the #wedge lever the gate needs), so it is a DEV/TEST shape, not a shipping one. Off = aurora, which every interactive scenario but ls-halcyon assumes."
+bc_def display HALCYON_THEME string "" "env:THYLACINE_HALCYON_THEME" \
+  "Halcyon theme" \
+  "Name of a theme in usr/lib/halcyon/themes/ (without .toml) to bake as /lib/halcyon/theme.toml. Empty = the built-in Daylight (light). The TYPE here is a free string rather than a choice on purpose -- the bake installs whatever *.toml is in that directory, so an enumerated list would refuse a theme the bake would take. The WIZARD reads the directory at run time and offers the real files as a numbered menu, so dropping a .toml in is all it takes to make it selectable. Needs a Halcyon renderer (either lever above) to be visible; on a pure-aurora image the file is baked and simply unread."
+
 # pool-control ----------------------------------------------------------------
 bc_def pool DISK_SIZE string 16M "env:THYLACINE_DISK_SIZE" \
   "Scratch disk size" \

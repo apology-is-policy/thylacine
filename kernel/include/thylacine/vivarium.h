@@ -503,11 +503,23 @@ enum {
 // and SYS_BURROW_FROM_HOSTMEM (107) landing above it. Re-pinned to 107; #50
 // then landed SYS_OPEN_CREATE (108) and moved the ceiling IN THE SAME COMMIT --
 // the "add a syscall includes move the ceiling" obligation discharged the way
-// the vivarium.c assert's own comment demands. Now 109, the true top --
+// the vivarium.c assert's own comment demands. Then 109 --
 // the 2026-09-03 aux->main merge renumbered SYS_OPEN_CREATE 108->109 to clear a
 // collision with main's SYS_HOSTMEM_REFCOUNT (also minted at 108), moving the
 // ceiling with it.
-#define VIV_NATIVE_CEILING 109
+//
+// AND IT WENT STALE A SIXTH AND SEVENTH TIME, on both branches at once and
+// neither noticed: WEAVE-SKEIN landed SYS_DMA_SEGMENTS above it here, while
+// aux-3 independently landed two of its own above its identical copy. That is
+// the drift the paragraph above admits the assert cannot catch, recurring twice
+// more after being written down -- which is the evidence that the remedy was
+// never going to be a person remembering. The assert is now pinned to the
+// SYS__NATIVE_TOP sentinel, which the compiler recomputes on every append.
+//
+// 112 is the post-renumber top: main's SYS_DMA_SEGMENTS moved 110 -> 112 to
+// clear the collision with aux-3's SYS_CONSOLE_EPISODE (110), decided on
+// measured edit cost -- 2 mirror sites here against 6 there.
+#define VIV_NATIVE_CEILING 112
 
 // -----------------------------------------------------------------------------
 // TIER 2 — translators (V-2b).

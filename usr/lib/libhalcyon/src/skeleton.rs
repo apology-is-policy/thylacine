@@ -27,6 +27,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use crate::carve::DEFAULT_WEIGHT;
 use crate::layout::{LayoutMode, LayoutNode};
 
 /// A symbolic leaf (0 = the anchor); the executor maps it to a pane id.
@@ -65,6 +66,14 @@ impl SplitDir {
     }
 }
 
+/// A node a `weight` verb targets: a planned leaf, or a container a nesting
+/// split created.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NodeRef {
+    Leaf(LeafRef),
+    Cont(ContRef),
+}
+
 /// One compositor verb.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Op {
@@ -80,6 +89,13 @@ pub enum Op {
     },
     /// `mode <cont> <mode>` on a container a nesting split created.
     SetMode { cont: ContRef, mode: LayoutMode },
+    /// `weight <node> <w>`: a child's non-default weight in its parent
+    /// (HALCYON-INSTRUMENT 5.2 / 5.3), emitted once the child exists. A
+    /// container that FLATTENED into its parent is not a compositor node,
+    /// so a weight written on it has nothing to land on and is dropped --
+    /// a saved compositor tree never has one (same-mode nesting dissolves
+    /// at the split).
+    Weight { target: NodeRef, w: u16 },
 }
 
 /// A leaf of the finished skeleton and the command line it should host
@@ -139,9 +155,18 @@ pub fn plan(root: &LayoutNode, anchor_parent: Option<LayoutMode>) -> Plan {
         leaf_count: 1,
         ..Default::default()
     };
-    let last = build(root, 0, anchor_parent, &mut p);
+    let last = build(root, 0, anchor_parent, &mut p).active;
     push_focus(&mut p, last);
     p
+}
+
+/// What `build` made of a node: the leaf on its active path, and the
+/// compositor node standing where it stands -- the leaf itself, the
+/// container a nesting split created, or None for a container that
+/// flattened into its parent (its children are the parent's now).
+struct Built {
+    active: LeafRef,
+    node: Option<NodeRef>,
 }
 
 /// Append a focus step, skipping an immediate repeat (a container whose
@@ -153,20 +178,25 @@ fn push_focus(p: &mut Plan, leaf: LeafRef) {
 }
 
 /// Grow `node` at `leaf` (whose parent container has mode `parent`); returns
-/// the leaf on the node's active path (the leaf `focus` reveals it by).
-fn build(node: &LayoutNode, leaf: LeafRef, parent: Option<LayoutMode>, p: &mut Plan) -> LeafRef {
+/// the leaf on the node's active path (the leaf `focus` reveals it by) and
+/// the node the verbs made of it.
+fn build(node: &LayoutNode, leaf: LeafRef, parent: Option<LayoutMode>, p: &mut Plan) -> Built {
     match node {
         LayoutNode::Leaf { tag, .. } => {
             p.leaves.push(PlannedLeaf {
                 leaf,
                 tag: tag.clone(),
             });
-            leaf
+            Built {
+                active: leaf,
+                node: Some(NodeRef::Leaf(leaf)),
+            }
         }
         LayoutNode::Container {
             mode,
             active,
             children,
+            ..
         } => {
             // A one-child container cannot exist in the compositor (it
             // dissolves); the child takes the slot and the mode is dropped.
@@ -174,7 +204,10 @@ fn build(node: &LayoutNode, leaf: LeafRef, parent: Option<LayoutMode>, p: &mut P
                 return build(&children[0], leaf, parent, p);
             }
             if children.is_empty() {
-                return leaf; // unreachable past the parser; nothing to grow
+                return Built {
+                    active: leaf,
+                    node: None,
+                }; // unreachable past the parser; nothing to grow
             }
             let dir = SplitDir::of(*mode).unwrap_or_else(|| away_from(parent));
             let nests = parent != Some(dir.mode());
@@ -212,12 +245,24 @@ fn build(node: &LayoutNode, leaf: LeafRef, parent: Option<LayoutMode>, p: &mut P
             // modes agree in that case).
             let mut actives: Vec<LeafRef> = Vec::with_capacity(children.len());
             for (c, r) in children.iter().zip(refs.iter()) {
-                actives.push(build(c, *r, Some(*mode), p));
+                let b = build(c, *r, Some(*mode), p);
+                // The child's weight in THIS container, once the child
+                // exists (its own subtree's verbs are already out).
+                if let (Some(target), true) = (b.node, c.weight() != DEFAULT_WEIGHT) {
+                    p.ops.push(Op::Weight {
+                        target,
+                        w: c.weight(),
+                    });
+                }
+                actives.push(b.active);
             }
             let a = (*active as usize).min(children.len() - 1);
             let mine = actives[a];
             push_focus(p, mine);
-            mine
+            Built {
+                active: mine,
+                node: cont.map(NodeRef::Cont),
+            }
         }
     }
 }
@@ -232,6 +277,7 @@ mod tests {
         LayoutNode::Leaf {
             tag: t.to_string(),
             env: false,
+            weight: DEFAULT_WEIGHT,
         }
     }
     fn cont(m: LayoutMode, a: u32, c: Vec<LayoutNode>) -> LayoutNode {
@@ -239,7 +285,14 @@ mod tests {
             mode: m,
             active: a,
             children: c,
+            weight: DEFAULT_WEIGHT,
         }
+    }
+    fn weighted(mut n: LayoutNode, w: u16) -> LayoutNode {
+        match &mut n {
+            LayoutNode::Leaf { weight, .. } | LayoutNode::Container { weight, .. } => *weight = w,
+        }
+        n
     }
     fn split(at: LeafRef, dir: SplitDir, new_leaf: LeafRef, nests: Option<ContRef>) -> Op {
         Op::Split {
@@ -488,5 +541,54 @@ mod tests {
         assert_eq!(p.leaf_count, n);
         assert_eq!(p.cont_count, 1);
         refs_are_a_permutation(&p);
+    }
+
+    /// HALCYON-INSTRUMENT 5.3: a child's non-default weight becomes a
+    /// `weight` verb on the node the splits made of it, after the node
+    /// exists; default weights emit nothing (the v1 plans above are exact).
+    #[test]
+    fn weights_are_applied_once_their_nodes_exist() {
+        let t = cont(
+            LayoutMode::SplitH,
+            0,
+            vec![
+                weighted(leaf("a"), 515),
+                weighted(
+                    cont(LayoutMode::SplitV, 1, vec![weighted(leaf("b"), 49), weighted(leaf("c"), 51)]),
+                    485,
+                ),
+            ],
+        );
+        let p = plan(&t, Some(LayoutMode::SplitH));
+        assert_eq!(
+            p.ops,
+            vec![
+                // The root's flatten split first; leaf 0 (the anchor) exists
+                // from the start, so its weight lands before the splitv is
+                // grown; the splitv's own weight lands after its subtree.
+                split(0, SplitDir::H, 1, None),
+                Op::Weight {
+                    target: NodeRef::Leaf(0),
+                    w: 515
+                },
+                split(1, SplitDir::V, 2, Some(0)),
+                Op::Weight {
+                    target: NodeRef::Leaf(1),
+                    w: 49
+                },
+                Op::Weight {
+                    target: NodeRef::Leaf(2),
+                    w: 51
+                },
+                Op::Weight {
+                    target: NodeRef::Cont(0),
+                    w: 485
+                },
+            ]
+        );
+        refs_are_a_permutation(&p);
+        // A root's weight has no parent to live in: nothing emitted.
+        let r = plan(&weighted(cont(LayoutMode::SplitH, 0, vec![leaf("a"), leaf("b")]), 9), Some(LayoutMode::SplitH));
+        assert_eq!(r.ops, vec![split(0, SplitDir::H, 1, None)]);
     }
 }

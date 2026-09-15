@@ -77,11 +77,28 @@ proc age_region {png} {
 # One line-editor redraw (`\r ESC[K prompt buffer`) -- the shell emits
 # exactly one per keystroke, so expecting it keeps the rounds in lockstep
 # with the guest instead of trusting a sleep.
+# BOTH erase forms count, and pinning this to one of them is what killed this
+# gate for however long. The line editor picks its erase by whether it knows the
+# terminal width (`line_editor.rs:786`): unknown -> render_unwrapped, per-line
+# `ESC[K`; known -> render_wrapped, ONE `ESC[J` for the whole block, and that
+# render says so in as many words ("No per-line \x1b[K -- (2) cleared already").
+# Under aurora the width IS known, so this scenario only ever sees `ESC[J` --
+# measured: a failing 197,734-byte attempt log held ZERO `ESC[K` and 256
+# `ESC[J`. The redraw was happening the whole time and the instrument could not
+# see it, so the gate reported a regression that did not exist, on every tree,
+# burning 3 attempts x 43s to do it.
+#
+# What this phase actually wants to know is "did the line editor repaint", and
+# both sequences answer yes. Matching the MEANING rather than one spelling is
+# also what keeps the next render-strategy change from re-killing it. `ESC[2J`
+# (the `clear` step) does not contain `ESC[J` as a substring, so the exact-match
+# arms cannot alias onto it.
 proc age_expect_redraw {phase} {
     global timeout
     set timeout 15
     expect {
         -ex "\x1b\[K"     {}
+        -ex "\x1b\[J"     {}
         -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during '$phase'" }
         timeout           { lc_fail "no line-editor redraw within 15s during '$phase'" }
         eof               { lc_fail "unexpected EOF during '$phase'" }

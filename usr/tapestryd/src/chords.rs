@@ -28,6 +28,10 @@ pub enum ChordAction {
     SplitToggle,
     TabCycle(bool), // true = forward
     Close,
+    /// HALCYON-SCALE 6: one 25% step of the display scale (+1 / -1).
+    ScaleStep(i8),
+    /// Back to the EDID-derived scale (`scale auto`).
+    ScaleReset,
 }
 
 #[derive(Clone, Copy)]
@@ -49,6 +53,9 @@ pub struct Chords {
 
 // evdev key codes (linux/input-event-codes.h). Only the codes the default
 // chord set + the config grammar name.
+const KEY_0: u16 = 11;
+const KEY_MINUS: u16 = 12;
+const KEY_EQUAL: u16 = 13;
 const KEY_TAB: u16 = 15;
 const KEY_Q: u16 = 16;
 const KEY_E: u16 = 18;
@@ -99,8 +106,80 @@ fn key_code(name: &str) -> Option<u16> {
         "left" => KEY_LEFT,
         "right" => KEY_RIGHT,
         "down" => KEY_DOWN,
+        "0" => KEY_0,
+        "minus" => KEY_MINUS,
+        "equal" => KEY_EQUAL,
         _ => return None,
     })
+}
+
+/// The inverse of `key_code`: an evdev code -> its config NAME (the one
+/// `key_code` accepts for it). None for a code the grammar cannot name.
+pub fn key_name(code: u16) -> Option<&'static str> {
+    Some(match code {
+        30 => "a",
+        48 => "b",
+        46 => "c",
+        32 => "d",
+        18 => "e",
+        33 => "f",
+        34 => "g",
+        35 => "h",
+        23 => "i",
+        36 => "j",
+        37 => "k",
+        38 => "l",
+        50 => "m",
+        49 => "n",
+        24 => "o",
+        25 => "p",
+        16 => "q",
+        19 => "r",
+        31 => "s",
+        20 => "t",
+        22 => "u",
+        47 => "v",
+        17 => "w",
+        45 => "x",
+        21 => "y",
+        44 => "z",
+        KEY_TAB => "tab",
+        KEY_UP => "up",
+        KEY_LEFT => "left",
+        KEY_RIGHT => "right",
+        KEY_DOWN => "down",
+        KEY_0 => "0",
+        KEY_MINUS => "minus",
+        KEY_EQUAL => "equal",
+        _ => return None,
+    })
+}
+
+/// The inverse of `action_of`: an action -> its config NAME.
+pub fn action_name(a: ChordAction) -> &'static str {
+    match a {
+        ChordAction::FocusDir(Dir::Left) => "focus-left",
+        ChordAction::FocusDir(Dir::Right) => "focus-right",
+        ChordAction::FocusDir(Dir::Up) => "focus-up",
+        ChordAction::FocusDir(Dir::Down) => "focus-down",
+        ChordAction::MoveDir(Dir::Left) => "move-left",
+        ChordAction::MoveDir(Dir::Right) => "move-right",
+        ChordAction::MoveDir(Dir::Up) => "move-up",
+        ChordAction::MoveDir(Dir::Down) => "move-down",
+        ChordAction::Split(Mode::SplitH) => "split-h",
+        ChordAction::Split(Mode::SplitV) => "split-v",
+        ChordAction::Split(_) => "split-h",
+        ChordAction::SplitToggle => "split-toggle",
+        ChordAction::Zoom => "zoom",
+        ChordAction::SetMode(Mode::Tabbed) => "tab",
+        ChordAction::SetMode(_) => "stack",
+        ChordAction::TabCycle(true) => "cycle",
+        ChordAction::TabCycle(false) => "cycle-back",
+        ChordAction::Close => "close",
+        ChordAction::ScaleStep(s) if s > 0 => "scale-up",
+        ChordAction::ScaleStep(_) => "scale-down",
+        ChordAction::ScaleReset => "scale-reset",
+    }
 }
 
 /// An action NAME (config grammar) -> the action, or `None` for the special
@@ -124,6 +203,9 @@ fn action_of(name: &str) -> Option<Option<ChordAction>> {
         "cycle" => ChordAction::TabCycle(true),
         "cycle-back" => ChordAction::TabCycle(false),
         "close" => ChordAction::Close,
+        "scale-up" => ChordAction::ScaleStep(1),
+        "scale-down" => ChordAction::ScaleStep(-1),
+        "scale-reset" => ChordAction::ScaleReset,
         "none" => return Some(None), // the unbind token
         _ => return None,
     }))
@@ -153,6 +235,11 @@ impl Chords {
                 d(KEY_TAB, false, TabCycle(true)),
                 d(KEY_TAB, true, TabCycle(false)),
                 d(KEY_Q, true, Close),
+                // HALCYON-SCALE 6: the universal zoom keys (browsers,
+                // terminals); free in this table; remappable like the rest.
+                d(KEY_EQUAL, false, ScaleStep(1)),
+                d(KEY_MINUS, false, ScaleStep(-1)),
+                d(KEY_0, false, ScaleReset),
             ],
             gaps: 1,
         }
@@ -195,6 +282,28 @@ impl Chords {
             });
         }
         Ok(())
+    }
+
+    /// HALCYON-INSTRUMENT 8.2: the table as text, one binding per line in
+    /// the config grammar (`super+[shift+]<key> <action>`), in table order
+    /// -- what the `chords` file publishes, so an environment derives its
+    /// chord hints from the bindings in force and never from a literal. A
+    /// binding on a key the grammar cannot name is skipped (none exists in
+    /// the default table; a config line cannot make one).
+    pub fn render(&self) -> alloc::string::String {
+        let mut out = alloc::string::String::new();
+        for b in &self.binds {
+            let Some(key) = key_name(b.key) else { continue };
+            out.push_str("super+");
+            if b.shift {
+                out.push_str("shift+");
+            }
+            out.push_str(key);
+            out.push(' ');
+            out.push_str(action_name(b.action));
+            out.push('\n');
+        }
+        out
     }
 
     pub fn set_gaps(&mut self, px: u32) -> Result<(), ()> {
@@ -269,6 +378,16 @@ mod tests {
             Some(ChordAction::TabCycle(false))
         ));
         assert!(matches!(c.lookup(KEY_Q, true), Some(ChordAction::Close)));
+        // HALCYON-SCALE 6: the scale chords (Super+= / Super+- / Super+0),
+        // shift-free, and their config names.
+        assert!(matches!(c.lookup(KEY_EQUAL, false), Some(ChordAction::ScaleStep(1))));
+        assert!(matches!(c.lookup(KEY_MINUS, false), Some(ChordAction::ScaleStep(-1))));
+        assert!(matches!(c.lookup(KEY_0, false), Some(ChordAction::ScaleReset)));
+        assert!(matches!(action_of("scale-up"), Some(Some(ChordAction::ScaleStep(1)))));
+        assert!(matches!(action_of("scale-reset"), Some(Some(ChordAction::ScaleReset))));
+        assert_eq!(key_code("equal"), Some(KEY_EQUAL));
+        assert_eq!(key_code("minus"), Some(KEY_MINUS));
+        assert_eq!(key_code("0"), Some(KEY_0));
         // An unbound key (no default) -> plane-reserved, no action.
         assert!(c.lookup(34 /* g */, false).is_none());
         assert_eq!(c.gaps, 1);
@@ -323,6 +442,49 @@ mod tests {
             c.lookup(KEY_RIGHT, true),
             Some(ChordAction::MoveDir(Dir::Right))
         ));
+    }
+
+    /// HALCYON-INSTRUMENT 8.2: the rendered table round-trips through the
+    /// grammar it is written in -- every line re-binds to the same action --
+    /// and the two name maps are each other's inverse over the whole
+    /// vocabulary, so a hint derived from the file names the binding in
+    /// force.
+    #[test]
+    fn render_is_the_grammar_and_the_names_invert() {
+        let c = Chords::new();
+        let text = c.render();
+        assert!(text.contains("super+left focus-left\n"));
+        assert!(text.contains("super+shift+left move-left\n"));
+        assert!(text.contains("super+tab cycle\n"));
+        assert!(text.contains("super+shift+tab cycle-back\n"));
+        assert!(text.contains("super+shift+q close\n"));
+        assert!(text.contains("super+equal scale-up\n"));
+        assert_eq!(text.lines().count(), 20, "every default binding, one line each");
+        let mut d = Chords::new();
+        d.binds.clear();
+        for line in text.lines() {
+            let (combo, action) = line.split_once(' ').expect("two words");
+            assert!(d.bind(combo, action).is_ok(), "{} re-binds", line);
+        }
+        assert_eq!(d.render(), text, "a round trip is the identity");
+        // A rebind shows up; an unbind disappears.
+        assert!(d.bind("super+g", "zoom").is_ok());
+        assert!(d.render().contains("super+g zoom\n"));
+        assert!(d.bind("super+f", "none").is_ok());
+        assert!(!d.render().contains("super+f "));
+        // The name maps invert over the vocabulary.
+        for name in ["a", "z", "tab", "up", "left", "right", "down", "0", "minus", "equal"] {
+            assert_eq!(key_name(key_code(name).unwrap()), Some(name));
+        }
+        for name in [
+            "focus-left", "focus-right", "focus-up", "focus-down", "move-left", "move-right",
+            "move-up", "move-down", "split-h", "split-v", "split-toggle", "zoom", "tab", "stack",
+            "cycle", "cycle-back", "close", "scale-up", "scale-down", "scale-reset",
+        ] {
+            let a = action_of(name).unwrap().unwrap();
+            assert_eq!(action_name(a), name);
+        }
+        assert_eq!(key_name(1), None, "a code the grammar cannot name");
     }
 
     #[test]

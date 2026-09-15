@@ -1,0 +1,838 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-halcyon-instrument.exp -- HALCYON-INSTRUMENT I-2: the
+# profile's geometry, carved by the compositor and read back through its own
+# files (docs/HALCYON-INSTRUMENT.md 5; the I-2 status row).
+#
+# GATED ON TWO BAKED LEVERS: the console renderer (THYLACINE_HALCYON=1, as
+# ls-halcyon) AND the profile word (THYLACINE_HALCYON_PROFILE=instrument ->
+# /lib/halcyon/profile). On any other image it SKIPs (exit 77). On the lever
+# image it proves, against the numbers of section 5.1 / 5.2 / 5.4 and the
+# browser's snapped boxes the pane-tree tests reproduce:
+#
+#   push    : halcyond resolved `instrument` and pushed the bundle; the
+#             compositor, which cannot read the pool at boot, APPLIED it
+#             (the profile reaches the carve through the wire, not a file).
+#   carve   : one console tile = a stack of one inside a 1 px frame under
+#             two rails: the frame at (3, 37, W-6, H-65), the header at
+#             (4, 38, W-8, 32), the body at (4, 70, W-8, H-99); the bottom
+#             rail is the 25 px status strip halcyond registered.
+#   pixels  : the top rail's `rail`, its 1 px `structure` line, the pad's
+#             `desktop`, the focused frame's `focus_neutral` -- Carbon's
+#             values, which nothing else on this screen can produce.
+#   split   : Super+H divides the root at 1:1 with a 7 px track whose
+#             boundary is snapped ONCE (round half up): the `dividers` file
+#             of the root reads the track, both frames partition the root
+#             minus it, the 2 px rule sits at offset 2, and the 7 x 7 joint
+#             at (1,1) reads exactly 24 `structure` pixels around 25 of
+#             `desktop`; the new empty tile's body is `pane`.
+#   zoom    : Super+F fills the workspace between the rails, frame-less.
+#
+# I-3 (HALCYON-INSTRUMENT 6 / 9.1 / 14.6 / 14.9; the I-3 status row), on the
+# same image:
+#
+#   header  : the console tile's header is a POINTER TARGET -- the
+#             compositor routes a press on it to halcyond (`ptr btn ... ->
+#             chrome`), which acts by x under its own authority: the name
+#             focuses; the `x` on a stack's FINAL tile is refused with the
+#             status notice FINAL TILE IS PROTECTED; a secondary press
+#             summons the tile verb menu, which Esc dismisses; leaving the
+#             header is told to it (`ptr leave chrome`).
+#   placard : the empty pane Super+H makes has NO header -- its `tagbar` is
+#             the whole interior, its body ZERO -- and paints the 14.6
+#             placard (text present above an all-`pane` body; no action on
+#             the console path, which never spawns).
+#   stack   : Super+S turns the split into a stack: the console collapses
+#             to a 32 px `header` row with a `separator` last row, the empty
+#             tile expands on `open_header`; a press on the collapsed header
+#             expands the console (focus IS the container's active) and the
+#             empty tile collapses to the LAST row (no separator); the empty
+#             tile's `x` (count 2) closes it and the stack dissolves.
+#
+# I-4 (HALCYON-INSTRUMENT 8 / 8.1 / 8.2 / 14.1 / 14.3; the I-4 status row),
+# on the same image:
+#
+#   rail    : halcyond minted the `role=rail` surface at the display width by
+#             34 (the `rail` file says so); its pixels are the golden's --
+#             the brand mark's 13 x 13 `amber_muted` ring at (10, 10) with
+#             the two `amber` strokes, `WORKSPACE 01` beside it, the clock
+#             at the right; the rail is a POINTER TARGET: its SPLIT H
+#             button is the split chord's twin (the split below is made by
+#             it), RESET re-equalises and says LAYOUT RESET, the mark opens
+#             the workspace list (a 14.2 menu; Esc dismisses it), the theme
+#             control says the picker is not yet available.
+#   footer  : the bottom rail's four conditions from the console's own
+#             facts -- the hollow READY square, `RUNNING` while a command
+#             runs, `EXIT 0` with the check after it, `EXIT 1` with the bang
+#             after a failure -- and the pane count that follows the split.
+#
+# I-5b (HALCYON-INSTRUMENT 7.2 / 7.3 / 7.5 / 7.7; the I-5b status row), on
+# the same image:
+#
+#   document: raw output sits on `terminal_bg` (the terminal view); `ls -l`
+#             lays the code block -- `code_bg` across its 720-capped box,
+#             the 2 px `amber_muted` rule at the text inset (x = 42 at
+#             1280: the body's 4 plus clamp(20, 3 vw, 48) = 38); once the
+#             listing overflows the view, the 3 px `dim` thumb sits in the
+#             8 px lane at W-10..W-7, ending 4 above the body's bottom
+#             while the view follows the tail, nothing beside it.
+#
+# HVF like ls-halcyon (bare TCG hangs at the pre-existing hwwatch E2E).
+
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+
+set transcript /tmp/ls-halcyon-instrument-[pid].log
+catch {file delete -force $transcript}
+log_file -a $transcript
+
+proc tgrep {pat what} {
+    global transcript
+    if {[catch {exec grep -q -- $pat $transcript}]} {
+        lc_fail "transcript missing: $what ($pat)"
+    }
+    lc_pass "instrument: $what"
+}
+
+proc hkey {chord} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $chord} err]} {
+        lc_fail "qmp-sendtext -k $chord failed: $err"
+    }
+    after 1500
+}
+
+# The virtio tablet: QEMU's absolute axis is 0..32767 and the compositor's
+# tablet drain maps it as px = ax * (W - 1) / 32767, so the axis value for
+# the CENTRE of display pixel x is (2x + 1) * 32767 / (2 (W - 1)).
+proc ptr_op {op} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -p $op} err]} {
+        lc_fail "qmp-sendtext -p $op failed: $err"
+    }
+}
+proc ptr_to {x y} {
+    global W H
+    set ax [expr {((2 * $x + 1) * 32767) / (2 * ($W - 1))}]
+    set ay [expr {((2 * $y + 1) * 32767) / (2 * ($H - 1))}]
+    ptr_op "abs $ax $ay"
+    after 400
+}
+proc click {x y {btn left}} {
+    ptr_to $x $y
+    ptr_op "btn $btn down"
+    after 250
+    ptr_op "btn $btn up"
+    after 900
+}
+
+# Screendump + region verdict: "<off> <total> <dom_r> <dom_g> <dom_b>".
+proc region {x0 y0 x1 y1 r g b} {
+    global repo qmp
+    set out /tmp/ls-halcyon-instrument-[pid].png
+    file delete -force $out
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} err]} {
+        return "DUMP-ERR $err"
+    }
+    if {![file exists $out]} { return "DUMP-MISSING" }
+    if {[catch {exec python3 $repo/tools/interactive/gfx_region.py $out $x0 $y0 $x1 $y1 $r $g $b} verdict]} {
+        return "REGION-ERR $verdict"
+    }
+    return $verdict
+}
+
+# The rect's dominant colour must be (r,g,b); with `want_off` >= 0 the
+# count of other pixels must be exactly that (the joint's 24). Retried: the
+# compositor composes on its own cadence after a chord.
+proc want_dom {x0 y0 x1 y1 r g b what {want_off -1}} {
+    set v ""
+    for {set i 0} {$i < 12} {incr i} {
+        set v [region $x0 $y0 $x1 $y1 $r $g $b]
+        if {[regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $v -> off tot dr dg db]} {
+            if {$dr == $r && $dg == $g && $db == $b && ($want_off < 0 || $off == $want_off)} {
+                return "$off $tot"
+            }
+        }
+        after 500
+    }
+    lc_fail "$what: region $x0,$y0-$x1,$y1 never read dominant $r,$g,$b with off=$want_off (last: $v)"
+}
+
+# Read one `x y w h` file of the pane tree. The first output byte follows
+# the transcript's OSC frame terminator (a backslash), not a newline -- the
+# anchor class says so (the ls-halcyon statusbar idiom).
+proc rect_of {path what} {
+    global timeout lc_cmd_timeout
+    lc_send "cat $path"
+    set timeout $lc_cmd_timeout
+    expect {
+        -re {[\r\n\\](\d+) (\d+) (\d+) (\d+)[\r\n]} {
+            return [list $expect_out(1,string) $expect_out(2,string) $expect_out(3,string) $expect_out(4,string)]
+        }
+        timeout { lc_fail "$what: no rect from $path" }
+        eof     { lc_fail "$what: EOF reading $path" }
+    }
+}
+
+# The rail's targets, off halcyond's LAST `rail N painted` say line in the
+# transcript (test builds): brand [x y w h], ctx [x w], the five buttons
+# [x y w h] each, the clock [x w]. Returns a dict keyed by name.
+proc rail_zones {} {
+    global transcript
+    set lines [split [exec grep -a {halcyond: rail [0-9]* painted} $transcript] "\n"]
+    set line [lindex $lines end]
+    if {![regexp {rail (\d+) painted brand \[(\d+) (\d+) (\d+) (\d+)\] ctx \[(\d+) (\d+)\] splith \[(\d+) (\d+) (\d+) (\d+)\] splitv \[(\d+) (\d+) (\d+) (\d+)\] theme \[(\d+) (\d+) (\d+) (\d+)\] reset \[(\d+) (\d+) (\d+) (\d+)\] help \[(\d+) (\d+) (\d+) (\d+)\] clock \[(\d+) (\d+)\]} $line -> id bx by bw bh cx cw shx shy shw shh svx svy svw svh tx ty tw th rx ry rw rh hx hy hw hh kx kw]} {
+        lc_fail "no rail zones line in the transcript (last: '$line')"
+    }
+    return [dict create id $id brand [list $bx $by $bw $bh] ctx [list $cx $cw] splith [list $shx $shy $shw $shh] splitv [list $svx $svy $svw $svh] theme [list $tx $ty $tw $th] reset [list $rx $ry $rw $rh] help [list $hx $hy $hw $hh] clock [list $kx $kw]]
+}
+proc zone_centre {z} {
+    return [list [expr {[lindex $z 0] + [lindex $z 2] / 2}] [expr {[lindex $z 1] + [lindex $z 3] / 2}]]
+}
+
+proc want_rect {path want what} {
+    set got [rect_of $path $what]
+    if {$got ne $want} { lc_fail "$what: $path reads [join $got { }], expected [join $want { }]" }
+    lc_step "$what: $path = [join $got { }]"
+}
+
+lc_boot
+
+set timeout $lc_boot_timeout
+expect {
+    -ex "joey: halcyond spawned" { lc_step "joey chose halcyond (lever image)" }
+    -ex "joey: aurora spawned" {
+        puts "\nLS-CI SKIP: default image (aurora fbcon) -- bake with THYLACINE_HALCYON=1\
+ THYLACINE_HALCYON_SESSION=0 THYLACINE_HALCYON_PROFILE=instrument to run this scenario."
+        lc_quit
+        exit 77
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction before the renderer spawn" }
+    timeout { lc_fail "no renderer spawn line within ${lc_boot_timeout}s" }
+    eof     { lc_fail "qemu exited before the renderer spawn" }
+}
+
+lc_login michael correct-horse-battery-staple-v1
+
+# The profile lever: the word file, read off the pool. Absent or `legacy`
+# => SKIP (never a red on a console-lever image baked without it).
+# The sequencing marker is OUTPUT-ONLY (`; pwd` -> /home/michael, the
+# ls-halcyon idiom): a marker typed as an argument matches its own echo in
+# the transcript's cmd mark before the output arrives (the #60 class) --
+# which is exactly how this scenario's first two runs SKIPped on a
+# correctly baked image.
+lc_send "cat /lib/halcyon/profile; pwd"
+set timeout $lc_cmd_timeout
+set profile ""
+expect {
+    -re {[\r\n\\](instrument|legacy)[\r\n]} { set profile $expect_out(1,string); exp_continue }
+    -re {[\r\n\\]/home/michael[\r\n]} {}
+    timeout { lc_fail "no answer reading /lib/halcyon/profile" }
+    eof     { lc_fail "EOF reading /lib/halcyon/profile" }
+}
+if {$profile ne "instrument"} {
+    puts "\nLS-CI SKIP: /lib/halcyon/profile is '$profile' -- bake with\
+ THYLACINE_HALCYON_PROFILE=instrument to run this scenario."
+    lc_quit
+    exit 77
+}
+lc_step "profile lever baked: /lib/halcyon/profile = instrument"
+
+# The display.
+lc_send "cat /dev/tapestry/ctl"
+set W 0; set H 0
+expect {
+    -re {display (\d+) (\d+)[\r\n]} { set W $expect_out(1,string); set H $expect_out(2,string) }
+    timeout { lc_fail "no display line from the tapestry ctl" }
+}
+if {$W < 840 || $H < 300} { lc_fail "display ${W}x$H is below the carve's minima" }
+
+# --- The carve of one tile (5.1 / 5.4 / 5.6) --------------------------------
+# The console leaf's body, from the compositor's own dump: x 4 (pad 3 +
+# frame 1), y 70 (rail 34 + pad 3 + frame 1 + header 32), w W-8, h H-99
+# (H - 34 - 25 - 6 - 2 - 32).
+lc_send "cat /dev/tapestry/layout"
+set leaf ""
+expect {
+    -re {[\r\n] *(\d+)\*? leaf surface=\d+ \[(\d+),(\d+),(\d+),(\d+)\]} {
+        set leaf $expect_out(1,string)
+        set body [list $expect_out(2,string) $expect_out(3,string) $expect_out(4,string) $expect_out(5,string)]
+    }
+    timeout { lc_fail "no console leaf row in the layout file" }
+    eof     { lc_fail "EOF reading the layout" }
+}
+set want_body [list 4 70 [expr {$W - 8}] [expr {$H - 99}]]
+if {$body ne $want_body} { lc_fail "the console body is [join $body { }], expected [join $want_body { }] (rail 34 + pad 3 + frame 1 + header 32; H - 59 - 6 - 2 - 32)" }
+lc_pass "instrument: the console tile's body is the stack-of-one carve ([join $body { }] of ${W}x$H)"
+want_rect /dev/tapestry/pane/$leaf/frame [list 3 37 [expr {$W - 6}] [expr {$H - 65}]] "the frame is the padded workspace root"
+want_rect /dev/tapestry/pane/$leaf/tagbar [list 4 38 [expr {$W - 8}] 32] "the header is 32 inside the frame"
+want_rect /dev/tapestry/pane/$leaf/geometry $want_body "the geometry file agrees with the dump"
+lc_send "cat /dev/tapestry/pane/$leaf/dividers; pwd"
+expect {
+    -re {[\r\n\\]\d+ \d+ \d+ \d+[\r\n]} { lc_fail "a leaf's dividers file is not empty" }
+    -re {[\r\n\\]/home/michael[\r\n]} {}
+    timeout { lc_fail "no answer reading the leaf's dividers file" }
+}
+lc_pass "instrument: frame / tagbar / geometry / dividers files publish the carve (5.5)"
+want_rect /dev/tapestry/statusbar [list 0 [expr {$H - 25}] $W 25] "halcyond's status bar is the 25 px bottom rail"
+# I-4 (8): the top rail is halcyond's `role=rail` surface -- the display
+# width by 34, registered once, placed by the compositor at the strip.
+want_rect /dev/tapestry/rail [list 0 0 $W 34] "halcyond's rail is the 34 px top rail"
+tgrep "halcyond: rail \[0-9\]* minted (${W}x34)" "halcyond minted the rail at the display width by rail_h (8)"
+tgrep "tapestryd: rail \[0-9\]* created (${W}x34) for principal" "the compositor admitted ONE rail for the display (the bar's gate)"
+
+# --- The pixels (Carbon: rail #07090A, structure #454B48, desktop #050607,
+# focus_neutral #555B58) -------------------------------------------------
+want_dom 40 4 [expr {$W - 40}] 30 7 9 10 "the top rail is `rail`"
+want_dom 40 33 [expr {$W - 40}] 34 69 75 72 "the top rail's bottom line is `structure`" 0
+want_dom 40 34 [expr {$W - 40}] 37 5 6 7 "the pad above the frame is `desktop`" 0
+want_dom 3 60 4 [expr {$H - 60}] 85 91 88 "the focused tile's left frame is `focus_neutral`" 0
+want_dom 40 37 [expr {$W - 40}] 38 85 91 88 "the focused tile's top frame is `focus_neutral`" 0
+lc_pass "instrument: the rails, the pad and the focused frame are Carbon's own values on screen"
+# I-4 (8.1): the rail's own pixels, the golden's boxes -- the brand mark's
+# 13 x 13 `amber_muted` (#81785D) ring at (10, 10) with its two `amber`
+# (#C7B98B) strokes (57 non-rail pixels of 169), the label's ink beside
+# it, the clock's ink where halcyond said it landed.
+want_dom 10 10 23 11 129 120 93 "the brand mark's top edge is amber_muted" 0
+want_dom 14 14 15 19 199 185 139 "the mark's vertical stroke is amber, 5 tall at (14, 14)" 0
+want_dom 10 10 23 23 7 9 10 "the mark is a ring and two strokes on rail (57 of 169)" 57
+set rz [rail_zones]
+set v [want_dom 32 8 130 26 7 9 10 "the brand label's band"]
+if {[lindex $v 0] == 0} { lc_fail "no ink in the brand label's band: WORKSPACE 01 was not painted" }
+set kz [dict get $rz clock]
+set v [want_dom [lindex $kz 0] 8 [expr {[lindex $kz 0] + [lindex $kz 1]}] 26 7 9 10 "the clock's band"]
+if {[lindex $v 0] == 0} { lc_fail "no ink in the clock's band at [lindex $kz 0]: the clock was not painted" }
+lc_pass "instrument: the rail paints the golden's brand mark, its label and the clock (8.1)"
+# I-4 (8.2): the footer's condition from the console's facts -- the reads
+# above ran commands, so the state is EXIT 0 (the check in `success` in the
+# 6 x 6 glyph box at (10, H - 25 + 10); READY's hollow square shows only
+# before anything ran and is host-tested); the pane count says one pane.
+set fy [expr {$H - 25 + 10}]
+set v [want_dom 8 $fy 18 [expr {$fy + 6}] 7 9 10 "the success glyph's box"]
+if {[lindex $v 0] == 0} { lc_fail "no ink in the glyph box after the reads: the check was not painted" }
+tgrep {halcyond: status bar [0-9]* painted .*condition Ok .*exit 0 .*running false panes 1} "the footer's model: EXIT 0, not running, one pane"
+lc_pass "instrument: the footer shows EXIT 0 with the check after the reads (8.2)"
+
+# --- The header as a pointer target (9.1 / 6.5 / 14.9), on the lone tile --
+# The console header is (4, 38, W-8, 32): its name region starts at 39
+# (index 32 + gap 7); its action box is the last 28 px, 24 tall at y 4.
+set hx [expr {$W / 2}]
+set hy 54
+set cx [expr {$W - 4 - 14}]
+# A primary press on the name: routed to the chrome surface, acted on as a
+# focus (already focused: the layout does not move, the verb is admitted).
+click $hx $hy
+set timeout $lc_cmd_timeout
+expect {
+    -re {tapestryd: ptr btn 272 1 -> chrome (\d+) at (\d+),(\d+)} {
+        lc_step "the compositor routed the press to chrome surface $expect_out(1,string) at $expect_out(2,string),$expect_out(3,string)"
+    }
+    timeout { lc_fail "the press on the header was not routed to a chrome surface" }
+    eof     { lc_fail "EOF waiting for the header press" }
+}
+expect {
+    -re {halcyond: header (\d+) press Focus\((\d+)\)} {
+        if {$expect_out(1,string) ne $leaf} { lc_fail "the header press named pane $expect_out(1,string), expected the console's $leaf" }
+    }
+    timeout { lc_fail "halcyond did not act on the header press" }
+    eof     { lc_fail "EOF waiting for halcyond's header action" }
+}
+lc_pass "instrument: a press on the header's name reached halcyond as a focus (9.1)"
+# The `x` on the console -- a stack of one: refused, said, shown.
+click $cx $hy
+expect {
+    -re {halcyond: header (\d+) press Close \{ id: (\d+), count: 1 \}} {}
+    timeout { lc_fail "the press on the `x` did not reach halcyond as a close" }
+    eof     { lc_fail "EOF waiting for the close press" }
+}
+expect {
+    -re {halcyond: final tile is protected \(pane (\d+)\)} {
+        if {$expect_out(1,string) ne $leaf} { lc_fail "the protection named pane $expect_out(1,string), expected $leaf" }
+    }
+    timeout { lc_fail "the final tile was not protected" }
+    eof     { lc_fail "EOF waiting for the protection" }
+}
+expect {
+    -re {halcyond: status bar \d+ painted .*notice "FINAL TILE IS PROTECTED"} {}
+    timeout { lc_fail "the status bar did not show the FINAL TILE IS PROTECTED notice" }
+    eof     { lc_fail "EOF waiting for the notice paint" }
+}
+lc_pass "instrument: the final tile's `x` is refused and the status notice says so (6.5 / 8.2)"
+# A secondary press on the name: the tile verb menu, placed by the
+# compositor; Esc dismisses it compositor-side.
+click $hx $hy right
+expect {
+    -re {halcyond: header (\d+) press Menu \{ id: (\d+), count: 1, x: (\d+), y: (\d+) \}} {
+        set mx $expect_out(3,string); set my $expect_out(4,string)
+        if {$mx < 39 || $mx >= $W || $my < 38 || $my >= 70} { lc_fail "the menu point $mx,$my is not on the header" }
+    }
+    timeout { lc_fail "the secondary press did not reach halcyond as a menu request" }
+    eof     { lc_fail "EOF waiting for the menu press" }
+}
+expect {
+    -re {halcyond: menu (\d+) placed at (\d+) (\d+) \((\d+)x(\d+)\) for tile halcyon} {
+        lc_step "the tile menu ($expect_out(4,string)x$expect_out(5,string)) placed at $expect_out(2,string) $expect_out(3,string)"
+    }
+    timeout { lc_fail "the tile menu was not placed" }
+    eof     { lc_fail "EOF waiting for the menu placement" }
+}
+hkey "esc"
+expect {
+    -re {tapestryd: menu \d+ dismissed \(esc\)} {}
+    timeout { lc_fail "Esc did not dismiss the tile menu" }
+    eof     { lc_fail "EOF waiting for the menu dismiss" }
+}
+lc_pass "instrument: the header's secondary press summons the tile verb menu on the H-3c surface; Esc dismisses it (14.9)"
+# Leaving the header: the compositor tells the chrome surface.
+ptr_to $hx 20
+expect {
+    -re {tapestryd: ptr leave chrome (\d+)} {}
+    timeout { lc_fail "leaving the header was not told to its chrome surface" }
+    eof     { lc_fail "EOF waiting for the leave" }
+}
+lc_pass "instrument: the pointer's leaving the header is told to it (the hover ends)"
+
+# --- The split (5.2): 1:1, the boundary snapped once ------------------------
+# E = W - 6, U = E - 7; the first child ends at 3 + round(U / 2); the track
+# is 7 from there; the second child starts 7 later and ends at W - 3.
+# I-4 (8.1 / 9.5): the rail's SPLIT H button is the chord's pointer twin --
+# a press on it is routed to the rail's chrome surface and halcyond splits
+# the focused pane as the renderer.
+set shz [dict get $rz splith]
+set shc [zone_centre $shz]
+click [lindex $shc 0] [lindex $shc 1]
+set timeout $lc_cmd_timeout
+expect {
+    -re {tapestryd: ptr btn 272 1 -> chrome (\d+) at (\d+),(\d+)} {}
+    timeout { lc_fail "the press on SPLIT H was not routed to the rail's chrome surface" }
+    eof     { lc_fail "EOF waiting for the SPLIT H press" }
+}
+expect {
+    -re {halcyond: rail press SplitH} {}
+    timeout { lc_fail "halcyond did not act on the SPLIT H press" }
+    eof     { lc_fail "EOF waiting for halcyond's rail action" }
+}
+set u [expr {$W - 13}]
+set aend [expr {3 + ($u + 1) / 2}]
+set bx [expr {$aend + 7}]
+lc_send "cat /dev/tapestry/layout; pwd"
+set root ""; set empty ""
+expect {
+    -re {[\r\n](\d+)\*? splith n=2 active=\d+ \[(\d+),(\d+),(\d+),(\d+)\]} {
+        set root $expect_out(1,string)
+        set rr [list $expect_out(2,string) $expect_out(3,string) $expect_out(4,string) $expect_out(5,string)]
+        exp_continue
+    }
+    -re {[\r\n] *(\d+)\*? leaf empty \[} { set empty $expect_out(1,string); exp_continue }
+    -re {[\r\n\\]/home/michael[\r\n]} {}
+    timeout { lc_fail "no answer reading the layout after Super+H" }
+    eof     { lc_fail "EOF reading the layout after Super+H" }
+}
+if {$root eq "" || $empty eq ""} { lc_fail "after Super+H the layout has no splith root with an empty leaf (root '$root', empty '$empty')" }
+set want_root [list 3 37 [expr {$W - 6}] [expr {$H - 65}]]
+if {$rr ne $want_root} { lc_fail "the root container reads [join $rr { }], expected [join $want_root { }]" }
+want_rect /dev/tapestry/pane/$root/dividers [list $aend 37 7 [expr {$H - 65}]] "the root's track"
+want_rect /dev/tapestry/pane/$leaf/frame [list 3 37 [expr {$aend - 3}] [expr {$H - 65}]] "the console pane's frame (first child)"
+want_rect /dev/tapestry/pane/$empty/frame [list $bx 37 [expr {$W - 3 - $bx}] [expr {$H - 65}]] "the new pane's frame (second child)"
+# 14.6 (I-3): the new pane is EMPTY -- no tile, no header: its `tagbar` is
+# the whole interior (the placard's surface) and its body ZERO.
+want_rect /dev/tapestry/pane/$empty/tagbar [list [expr {$bx + 1}] 38 [expr {$W - 5 - $bx}] [expr {$H - 67}]] "the empty pane's placard is its interior"
+want_rect /dev/tapestry/pane/$empty/geometry [list 0 0 0 0] "the empty pane has no body"
+lc_pass "instrument: the rail's SPLIT H divided the root 1:1 with a 7 px track at $aend (snapped once; frames partition the root minus the track)"
+tgrep {halcyond: status bar [0-9]* painted .*panes 2} "the footer's pane count followed the split (8.2)"
+# The rule: 2 px at offset 2 into the track, full height.
+want_dom [expr {$aend + 2}] 60 [expr {$aend + 4}] [expr {$H - 60}] 69 75 72 "the divider rule is 2 px of `structure` at offset 2" 0
+want_dom [expr {$aend}] 60 [expr {$aend + 2}] [expr {$H - 60}] 5 6 7 "the track before the rule is `desktop`" 0
+# The joint: 7 x 7 at the track's (1,1): a 1 px structure border (24 px)
+# around 25 px of desktop -- the round-2 correction, counted exactly.
+want_dom [expr {$aend + 1}] 38 [expr {$aend + 8}] 45 5 6 7 "the 7 x 7 joint at (1,1): 25 desktop inside 24 structure" 24
+# The new tile is focused (a split focuses the new leaf): its frame neutral,
+# the console's plain; its empty body is `pane` (#0B0D0E).
+want_dom [expr {$bx}] 60 [expr {$bx + 1}] [expr {$H - 60}] 85 91 88 "the new pane's left frame is `focus_neutral`" 0
+want_dom 3 60 4 [expr {$H - 60}] 27 31 30 "the console pane's left frame dropped to `pane_border`" 0
+# (The placard's two text lines sit at the 20 px inset: the title's line
+# box from 58 and the hint's to about 105 at 100 %, so the all-`pane` band
+# starts below them.)
+want_dom [expr {$bx + 20}] 130 [expr {$W - 20}] [expr {$H - 60}] 11 13 14 "the empty pane's ground below the placard's text is `pane`" 0
+lc_pass "instrument: rule, joint (24 around 25), focus frame and the empty body are Carbon's values on screen"
+# The placard's text (14.6): `Empty pane` at the 20 px inset -- ink over
+# `pane` where the title sits, none below it (no action on the console path).
+set px0 [expr {$bx + 1 + 20}]
+set v [want_dom $px0 [expr {38 + 20}] [expr {$px0 + 120}] [expr {38 + 40}] 11 13 14 "the placard's title band is pane with text on it"]
+if {[lindex $v 0] == 0} { lc_fail "the placard's title band has no ink on it (off=0): no `Empty pane` was painted" }
+lc_pass "instrument: the empty pane paints its placard (14.6: text at the inset, no header, no action here)"
+
+# --- Dividers (9.2 / I-6): hover, the drag, the clamp, Escape, double-click --
+# The root's track sits on $aend..$aend+6 (the split above); its rule is the
+# 2 px of `structure` at offset 2 (checked above). The pointer over it paints
+# the rule `amber_muted` (129 120 93); a primary press captures the pointer
+# for the split and the rule turns `amber` (199 185 139); motion moves the
+# boundary by the mockup's ratio -- r = (p - origin) / F over the FULL extent
+# F = W - 6 including the track, the first child's extent a = round(r * P)
+# with P = W - 13 the pair's usable extent (round half up) -- so the track's
+# leading column lands at 3 + a, the pointer riding it r * 7 in. The clamps:
+# the band 22..78 % of P where it is tighter than the minima (it is, at this
+# width); Escape ends the drag at the current ratio and its release is
+# swallowed; a double-click equalises the pair (the track back at $aend).
+set ty [expr {(34 + $H - 25) / 2}]
+set P [expr {$W - 13}]
+set F [expr {$W - 6}]
+proc drag_a {p} {
+    global P F
+    return [expr {(2 * ($p - 3) * $P + $F) / (2 * $F)}]
+}
+proc want_drag_end {reason a what} {
+    global P timeout lc_cmd_timeout
+    set timeout $lc_cmd_timeout
+    expect {
+        -re "tapestryd: divider drag end pane (\\d+) track 0 $reason -> (\\d+):(\\d+)" {
+            if {$expect_out(2,string) != $a || $expect_out(3,string) != $P - $a} {
+                lc_fail "$what: the drag ended at $expect_out(2,string):$expect_out(3,string), expected $a:[expr {$P - $a}]"
+            }
+            lc_step "$what: drag end ($reason) at $a:[expr {$P - $a}]"
+        }
+        timeout { lc_fail "$what: no drag end ($reason)" }
+        eof     { lc_fail "$what: EOF waiting for the drag end" }
+    }
+}
+set tx [expr {$aend + 3}]
+ptr_to $tx $ty
+want_dom [expr {$aend + 2}] 60 [expr {$aend + 4}] [expr {$H - 60}] 129 120 93 "hover: the rule under the pointer is amber_muted" 0
+lc_pass "instrument: the pointer over the track paints its rule amber_muted (9.2)"
+ptr_op "btn left down"
+set timeout $lc_cmd_timeout
+expect {
+    -re {tapestryd: divider drag start pane (\d+) track 0 at (\d+),(\d+)} {
+        if {$expect_out(1,string) ne $root} { lc_fail "the drag captured pane $expect_out(1,string), expected the root $root" }
+    }
+    timeout { lc_fail "the press on the track did not start a drag" }
+    eof     { lc_fail "EOF waiting for the drag start" }
+}
+set p2 [expr {$tx + 100}]
+ptr_to $p2 $ty
+set a2 [drag_a $p2]
+set nx [expr {3 + $a2}]
+want_dom [expr {$nx + 2}] 60 [expr {$nx + 4}] [expr {$H - 60}] 199 185 139 "dragging: the rule is amber at the track that followed the pointer" 0
+ptr_op "btn left up"
+want_drag_end release $a2 "the drag"
+want_rect /dev/tapestry/pane/$root/dividers [list $nx 37 7 [expr {$H - 65}]] "the root's track followed the pointer by the mockup's ratio"
+want_rect /dev/tapestry/pane/$leaf/frame [list 3 37 $a2 [expr {$H - 65}]] "the console pane grew to the pair's first extent"
+want_rect /dev/tapestry/pane/$empty/frame [list [expr {$nx + 7}] 37 [expr {$P - $a2}] [expr {$H - 65}]] "the empty pane shrank to the rest"
+# The weights ARE the extents now (5.2 as built at I-6): the dump says so.
+lc_send "cat /dev/tapestry/layout; pwd"
+set saw_w 0
+expect {
+    -re "\[\r\n\] *${leaf}\\*? leaf surface=\\d+ \\\[4,70,\\d+,\\d+\\\] w=$a2\[\r\n\]" { incr saw_w; exp_continue }
+    -re "\[\r\n\] *${empty}\\*? leaf empty \\\[0,0,0,0\\\] w=[expr {$P - $a2}]\[\r\n\]" { incr saw_w; exp_continue }
+    -re {[\r\n\\]/home/michael[\r\n]} {}
+    timeout { lc_fail "no answer reading the layout after the drag" }
+    eof     { lc_fail "EOF reading the layout after the drag" }
+}
+if {$saw_w != 2} { lc_fail "the dump does not carry the pair's extents as its weights ($a2 and [expr {$P - $a2}]; saw $saw_w of 2)" }
+# The console's tile followed as a CONFIGURE (the existing path).
+want_rect /dev/tapestry/pane/$leaf/geometry [list 4 70 [expr {$a2 - 2}] [expr {$H - 99}]] "the console's body is the grown frame less the frame and the header"
+lc_pass "instrument: a drag on the root track moves the boundary by the mockup's ratio; the weights become the extents; the release ends the capture (9.2 / 5.2)"
+# The clamp: far right stops at 78 % of P (tighter than the 260 minimum here).
+ptr_to [expr {$nx + 3}] $ty
+ptr_op "btn left down"
+ptr_to [expr {$W - 40}] $ty
+ptr_op "btn left up"
+set amax [expr {78 * $P / 100}]
+want_drag_end release $amax "the clamp"
+want_rect /dev/tapestry/pane/$root/dividers [list [expr {3 + $amax}] 37 7 [expr {$H - 65}]] "the track held at 78 % of the pair"
+lc_pass "instrument: the drag is clamped to the mockup's band (78 % of $P = $amax) (5.2 / 9.2)"
+# Escape ends the drag where it is (no rollback); the release after it is
+# the compositor's to swallow, nothing under the pointer sees it.
+set tx3 [expr {3 + $amax + 3}]
+ptr_to $tx3 $ty
+ptr_op "btn left down"
+set p3 [expr {$tx3 - 300}]
+ptr_to $p3 $ty
+set a3 [drag_a $p3]
+hkey "esc"
+want_drag_end esc $a3 "Escape"
+ptr_op "btn left up"
+expect {
+    -re {tapestryd: divider drag release swallowed \(btn 272\)} {}
+    timeout { lc_fail "the release after Escape was not swallowed" }
+    eof     { lc_fail "EOF waiting for the swallowed release" }
+}
+want_rect /dev/tapestry/pane/$root/dividers [list [expr {3 + $a3}] 37 7 [expr {$H - 65}]] "the track stays where Escape found it"
+lc_pass "instrument: Escape ends the drag at the current ratio and the trailing release is swallowed (9.2)"
+# Double-click: the pair equalised -- P is odd at this width, so the first
+# child takes (P + 1) / 2 and the track is back at $aend.
+ptr_to [expr {3 + $a3 + 3}] $ty
+ptr_op "dblclick left"
+expect {
+    -re "tapestryd: divider double-click pane $root track 0 -> equal\[\r\n\]" {}
+    timeout { lc_fail "the double-click did not equalise the pair" }
+    eof     { lc_fail "EOF waiting for the double-click" }
+}
+want_rect /dev/tapestry/pane/$root/dividers [list $aend 37 7 [expr {$H - 65}]] "the track back at the equal division"
+want_rect /dev/tapestry/pane/$leaf/frame [list 3 37 [expr {$aend - 3}] [expr {$H - 65}]] "the console pane at half again"
+lc_pass "instrument: a double-click on the track restores equal weights (9.2)"
+ptr_to [expr {$W / 2}] [expr {$H / 2}]
+
+# --- Zoom (5.6): the workspace between the rails, frame-less ----------------
+hkey "meta_l+f"
+want_rect /dev/tapestry/pane/$empty/geometry [list 0 34 $W [expr {$H - 59}]] "the zoomed tile fills the workspace"
+hkey "meta_l+f"
+want_rect /dev/tapestry/pane/$empty/tagbar [list [expr {$bx + 1}] 38 [expr {$W - 5 - $bx}] [expr {$H - 67}]] "un-zoomed: the placard is back"
+lc_pass "instrument: zoom fills the workspace between the rails and restores"
+
+# --- The stack (6.1 / 6.2 / 6.4 / 6.5): collapsed headers, expand, close --
+# Super+S: the split container becomes a stack [console, empty] with the
+# empty tile (focused) open: the console's header is the first 32 px row
+# (collapsed: `header` with a `separator` last row), the empty tile's the
+# second (open: `open_header`), its body below.
+hkey "meta_l+s"
+want_rect /dev/tapestry/pane/$leaf/tagbar [list 4 38 [expr {$W - 8}] 32] "the console's collapsed header is the first row"
+want_rect /dev/tapestry/pane/$leaf/geometry [list 0 0 0 0] "a collapsed tile has no body"
+want_rect /dev/tapestry/pane/$empty/tagbar [list 4 70 [expr {$W - 8}] 32] "the open empty tile's header follows"
+want_rect /dev/tapestry/pane/$empty/geometry [list 4 102 [expr {$W - 8}] [expr {$H - 131}]] "its body: H - 34 - 25 - 6 - 2 - 64"
+set mid0 [expr {$W / 3}]
+set mid1 [expr {2 * $W / 3}]
+want_dom $mid0 40 $mid1 66 8 10 11 "the collapsed console header rests on `header`" 0
+want_dom $mid0 69 $mid1 70 41 45 43 "its last row is the `separator` (not last in the stack)" 0
+want_dom $mid0 72 $mid1 100 21 24 25 "the open tile's header rests on `open_header` (text at 1.5 % over open)" 0
+lc_pass "instrument: Super+S stacked the two tiles -- collapsed header on `header` with its separator row, open header on `open_header` (6.4, the golden's rows)"
+# r2 C-F2: the stack CONTAINER owns the frame its leaves rely on, and the
+# round-1 zoom exemption (`rect == content`) skipped it -- a container's
+# content is its rect by construction. The root container is the focused
+# tile's parent, so its 1 px frame at the root rect (3, 37, W-6, H-65) is
+# `focus_neutral`: the top row and the left column, read as pixels.
+want_dom 4 37 [expr {$W - 4}] 38 85 91 88 "the stack container's top frame row is painted focus_neutral"
+want_dom 3 38 4 [expr {$H - 29}] 85 91 88 "the stack container's left frame column is painted focus_neutral"
+lc_pass "instrument: the stack container paints its frame -- the zoom exemption is a zoom's alone (6.1; r2 C-F2)"
+# A press on the collapsed header's name: focus, and so expand -- the
+# container's active follows the focus (6.1); the empty tile collapses to
+# the LAST row (6.2 #2: later headers below the open body), no separator.
+click $hx $hy
+expect {
+    -re {halcyond: header (\d+) press Focus\((\d+)\)} {
+        if {$expect_out(1,string) ne $leaf} { lc_fail "the collapsed header press named pane $expect_out(1,string), expected the console's $leaf" }
+    }
+    timeout { lc_fail "the press on the collapsed header did not reach halcyond" }
+    eof     { lc_fail "EOF waiting for the collapsed header press" }
+}
+want_rect /dev/tapestry/pane/$leaf/geometry [list 4 70 [expr {$W - 8}] [expr {$H - 132}]] "the console expanded: its body under its header, above the last header + the separator"
+want_rect /dev/tapestry/pane/$empty/tagbar [list 4 [expr {$H - 61}] [expr {$W - 8}] 32] "the empty tile collapsed to the last row"
+want_dom $mid0 40 $mid1 66 21 24 25 "the console's header is open now" 0
+want_dom $mid0 [expr {$H - 59}] $mid1 [expr {$H - 31}] 8 10 11 "the collapsed empty tile's header rests on `header`" 0
+want_dom $mid0 [expr {$H - 30}] $mid1 [expr {$H - 29}] 8 10 11 "the stack's last header has no separator row" 0
+want_dom $mid0 [expr {$H - 62}] $mid1 [expr {$H - 61}] 41 45 43 "the row after the open body is the `separator`" 0
+lc_pass "instrument: a press on a collapsed header expands its tile; the other collapses below the body; the separator sits after the body and not under the last header (6.2 / 6.4)"
+# The empty tile's `x` (count 2: admitted): the leaf closes, the stack
+# dissolves, the console is a stack of one again.
+click $cx [expr {$H - 61 + 16}]
+expect {
+    -re {halcyond: header (\d+) press Close \{ id: (\d+), count: 2 \}} {
+        if {$expect_out(1,string) ne $empty} { lc_fail "the `x` press named pane $expect_out(1,string), expected the empty tile's $empty" }
+    }
+    timeout { lc_fail "the press on the empty tile's `x` did not reach halcyond" }
+    eof     { lc_fail "EOF waiting for the `x` press" }
+}
+want_rect /dev/tapestry/pane/$leaf/frame [list 3 37 [expr {$W - 6}] [expr {$H - 65}]] "the stack dissolved: the console's frame is the root again"
+want_rect /dev/tapestry/pane/$leaf/geometry [list 4 70 [expr {$W - 8}] [expr {$H - 99}]] "the console's body is the stack-of-one carve again"
+lc_pass "instrument: the `x` on a stacked tile closes it through the tile's lifecycle and the stack dissolves (6.5)"
+
+# --- I-4 (8.2 / 14.3): the footer's conditions from the console's facts ----
+# A running command shows RUNNING (the filled 4 x 4 amber square), then its
+# exit: EXIT 0 with the check; a failing one EXIT 1 with the bang.
+# (The bar's say line is the sequencing witness here -- no `; pwd`, whose
+# exit would replace the line's.)
+lc_send "sleep 3"
+set timeout $lc_cmd_timeout
+expect {
+    -re {halcyond: status bar \d+ painted [^\r\n]*condition Ok [^\r\n]*running true panes 1} {}
+    timeout { lc_fail "the footer never showed the running command" }
+    eof     { lc_fail "EOF waiting for RUNNING" }
+}
+set sy [expr {$H - 25 + 11}]
+want_dom 11 $sy 15 [expr {$sy + 4}] 199 185 139 "the RUNNING square is 4 x 4 amber at (11, +11)" 0
+expect {
+    -re {halcyond: status bar \d+ painted [^\r\n]*condition Ok [^\r\n]*exit 0 [^\r\n]*running false panes 1} {}
+    timeout { lc_fail "the footer never showed EXIT 0 after the command" }
+    eof     { lc_fail "EOF waiting for EXIT 0" }
+}
+lc_pass "instrument: the footer showed RUNNING with the amber square, then EXIT 0 (8.2)"
+lc_send "false"
+expect {
+    -re {halcyond: status bar \d+ painted [^\r\n]*condition Err [^\r\n]*exit 1 [^\r\n]*running false} {}
+    timeout { lc_fail "the footer never showed EXIT 1 after `false`" }
+    eof     { lc_fail "EOF waiting for EXIT 1" }
+}
+# The bang: `error` (#BD7770) ink in the 6 x 6 glyph box.
+set v [want_dom 8 $fy 18 [expr {$fy + 6}] 7 9 10 "the failure glyph's box"]
+if {[lindex $v 0] == 0} { lc_fail "no ink in the failure glyph's box: the bang was not painted" }
+lc_pass "instrument: a failed command shows EXIT 1 with the bang (8.2)"
+
+# --- I-4 (8.1 / 9.5): RESET, the workspace list, the theme control -------
+# Reset over a stack of one: nothing to re-equalise, said and shown.
+set rc [zone_centre [dict get $rz reset]]
+click [lindex $rc 0] [lindex $rc 1]
+expect {
+    -re {halcyond: rail press Reset} {}
+    timeout { lc_fail "the RESET press did not reach halcyond" }
+    eof     { lc_fail "EOF waiting for RESET" }
+}
+expect {
+    -re {halcyond: reset: (\d+) verb\(s\)} { lc_step "reset planned $expect_out(1,string) verb(s)" }
+    timeout { lc_fail "halcyond planned no reset" }
+    eof     { lc_fail "EOF waiting for the reset plan" }
+}
+expect {
+    -re {halcyond: status bar \d+ painted .*notice "LAYOUT RESET"} {}
+    timeout { lc_fail "the footer did not show LAYOUT RESET" }
+    eof     { lc_fail "EOF waiting for the reset notice" }
+}
+lc_pass "instrument: RESET is a rail action that says what it did (9.5)"
+# The mark opens the workspace list (14.1) as a 14.2 menu; Esc dismisses it.
+set bc [zone_centre [dict get $rz brand]]
+click [lindex $bc 0] [lindex $bc 1]
+expect {
+    -re {halcyond: rail press Workspaces \{ x: (\d+), y: (\d+) \}} {}
+    timeout { lc_fail "the press on the mark did not reach halcyond" }
+    eof     { lc_fail "EOF waiting for the mark press" }
+}
+expect {
+    -re {halcyond: menu (\d+) placed at (\d+) (\d+) \((\d+)x(\d+)\) for Workspaces} {
+        lc_step "the workspace list ($expect_out(4,string)x$expect_out(5,string)) placed at $expect_out(2,string) $expect_out(3,string)"
+    }
+    timeout { lc_fail "the workspace list was not placed" }
+    eof     { lc_fail "EOF waiting for the workspace list" }
+}
+hkey "esc"
+expect {
+    -re {tapestryd: menu \d+ dismissed \(esc\)} {}
+    timeout { lc_fail "Esc did not dismiss the workspace list" }
+    eof     { lc_fail "EOF waiting for the list's dismiss" }
+}
+lc_pass "instrument: the mark opens the workspace list on the menu surface; Esc dismisses it (14.1)"
+# The theme control: the picker lands at I-7; until then the press is
+# refused visibly (this leg is rewritten with the picker).
+set tc [zone_centre [dict get $rz theme]]
+click [lindex $tc 0] [lindex $tc 1]
+expect {
+    -re {halcyond: rail press Theme} {}
+    timeout { lc_fail "the theme control's press did not reach halcyond" }
+    eof     { lc_fail "EOF waiting for the theme press" }
+}
+expect {
+    -re {halcyond: status bar \d+ painted .*notice "THEME PICKER NOT AVAILABLE"} {}
+    timeout { lc_fail "the footer did not refuse the picker visibly" }
+    eof     { lc_fail "EOF waiting for the picker refusal" }
+}
+lc_pass "instrument: the theme control is routed and refused visibly until the picker lands (I-7)"
+# Off the rail (34 tall) onto the console body: the LEAVE.
+ptr_to [expr {$W / 2}] 200
+expect {
+    -re {tapestryd: ptr leave chrome (\d+)} {}
+    timeout { lc_fail "leaving the rail was not told to its chrome surface" }
+    eof     { lc_fail "EOF waiting for the rail's leave" }
+}
+
+# --- I-5b: the rich document's composition, the terminal view, the code
+# block and the position indicator (HALCYON-INSTRUMENT 7.2 / 7.3 / 7.5 /
+# 7.7; the I-5b status row). The console tile's body is (4, 70, W-8, H-99)
+# (the carve above); at 1280 the document's paddings are 28 / 38 / 50
+# (clamp(18, 2.2 vw, 34), clamp(20, 3 vw, 48), 50 of the LOGICAL display
+# width), so the text and a code block's box start at x = 42, the block's
+# 2 px `amber_muted` rule at 42..43, and the block is capped at 720 (its
+# right edge at 762). The indicator's thumb (7.7) is 3 px wide, inset 3
+# from the body's right edge (x = W-10..W-7) and 4 from its bottom (ending
+# at y = H-33) while the view follows the tail. Carbon's inks: `open`
+# 18,21,22; `code_bg` 9,11,12; `amber_muted` 129,120,93; `terminal_bg`
+# 9,12,13; `dim` 115,122,118 -- none of which a blend of an ink over
+# another ground can produce (a blend from `terminal_bg` only raises G).
+# ----------------------------------------------------------------------------
+# Pixels of the rect that ARE (r,g,b): total - off. -1 on a dump error.
+proc ink_of {x0 y0 x1 y1 r g b} {
+    set v [region $x0 $y0 $x1 $y1 $r $g $b]
+    if {[regexp {^(\d+) (\d+) } $v -> off tot]} { return [expr {$tot - $off}] }
+    return -1
+}
+# At least `min` pixels of (r,g,b) in the rect, retried: the console paints
+# on its own cadence after a command's output lands.
+proc want_ink {x0 y0 x1 y1 r g b min what} {
+    set n -1
+    for {set i 0} {$i < 12} {incr i} {
+        set n [ink_of $x0 $y0 $x1 $y1 $r $g $b]
+        if {$n >= $min} { return $n }
+        after 500
+    }
+    lc_fail "$what: region $x0,$y0-$x1,$y1 never held >= $min pixels of $r,$g,$b (last: $n)"
+}
+set body_y1 [expr {$H - 29}]
+# The sampled box: right of the listing's widest line (its box-drawing
+# border ends near x = 570) and inside the block's 720 cap (x < 762);
+# rows 100..450, because the block ends ABOVE the view's last ~230 rows on
+# this image -- under the block sit the `pwd` line, the prompt with the
+# console's test-mode say text wrapped under it (three rows), the caret
+# line and the document's 50 px bottom padding (measured: the block's
+# ground ran to row 567 of 800 on the first run, which sampled to 660).
+set box_x0 600; set box_x1 740; set box_y0 100; set box_y1 450
+# Controls, BEFORE the listing: no code block in the body, no rule column.
+set n [ink_of $box_x0 $box_y0 $box_x1 $box_y1 9 11 12]
+if {$n != 0} { lc_fail "control: the body already holds $n code_bg pixels before any pre" }
+set n [ink_of 42 70 44 $body_y1 129 120 93]
+if {$n > 20} { lc_fail "control: the rule column already holds $n amber_muted pixels before any pre" }
+lc_step "controls: no code block and no rule column before the listing"
+# Each command below ends in a quoted echo whose OUTPUT joins the words
+# ("I5B RAW-DONE") while the typed line and the status bar's say text carry
+# them quoted -- a token only the command's own output can produce, read
+# AFTER the burst it follows. It matters here more than usual: expect
+# reads the console only inside an `expect`, and the screendump loops
+# below sleep for seconds; a token satisfied early (by stale buffer text
+# -- the first run's `pwd`) leaves a 13 KB listing unread, the pty fills,
+# the relay blocks, and the guest's console DROPS the rest after its 20 ms
+# room-wait (kernel/cons.c, the #67 posture) -- measured: the serial log
+# stopped mid-say before the listing while the screendumps (QMP) showed it
+# painted. So: drain the buffer, send, read to the token.
+expect -timeout 1 -re {.*} {}
+# A raw command: the terminal view (7.3 / 7.6) -- `terminal_bg` behind
+# un-annotated output, distinct from the code block's `code_bg`.
+# r2 B-F12: the control is the count BEFORE the command (the body already
+# holds earlier raw output), and the witness is its GROWTH by the command's
+# own island -- one row of terminal_bg is ~50 k pixels across the body.
+set raw0 [ink_of 42 70 [expr {$W - 50}] $body_y1 9 12 13]
+lc_step "control: the body holds $raw0 terminal_bg pixels before the raw command"
+lc_run_expect "cat /dev/winsize; echo 'I5B' 'RAW-DONE'" "I5B RAW-DONE"
+want_ink 42 70 [expr {$W - 50}] $body_y1 9 12 13 [expr {$raw0 + 3000}] "the terminal view's ground GREW under the command's raw output"
+lc_pass "instrument: raw output sits on terminal_bg -- the terminal view (7.3 / 7.6)"
+# The listing: `ls -l` speaks Beacon's `pre` -- the code block: `code_bg`
+# across the box where no text is, the 2 px `amber_muted` rule down its
+# left edge at the text inset, the frame on the wire (the tgrep below).
+expect -timeout 1 -re {.*} {}
+lc_run_expect "ls -l /bin; echo 'I5B' 'LIST-DONE'" "I5B LIST-DONE"
+set tot [lindex [region $box_x0 $box_y0 $box_x1 $box_y1 9 11 12] 1]
+want_ink $box_x0 $box_y0 $box_x1 $box_y1 9 11 12 [expr {$tot * 9 / 10}] "the code block's ground (code_bg) across the box"
+want_ink 42 70 44 $body_y1 129 120 93 400 "the code block's 2 px amber_muted rule at x = 42..43"
+lc_pass "instrument: ls -l lays the code block -- code_bg across the box, the amber_muted rule at the text inset (7.3 / 7.5)"
+# The listing overflows the view: the indicator (7.7). Following the tail
+# the thumb ENDS at H-33, is at least 24 tall and 3 wide at W-10..W-7,
+# solid `dim`; the columns either side of it and the lane's top carry none.
+set tx0 [expr {$W - 10}]; set tx1 [expr {$W - 7}]
+set ty0 [expr {$H - 57}]; set ty1 [expr {$H - 33}]
+want_dom $tx0 $ty0 $tx1 $ty1 115 122 118 "the indicator's thumb (solid dim, ending 4 above the body's bottom)" 0
+set n [ink_of [expr {$tx0 - 1}] $ty0 $tx0 $ty1 115 122 118]
+if {$n != 0} { lc_fail "the thumb bleeds left of its lane ($n dim pixels at x = [expr {$tx0 - 1}])" }
+set n [ink_of $tx1 $ty0 [expr {$tx1 + 1}] $ty1 115 122 118]
+if {$n != 0} { lc_fail "the thumb bleeds right of its inset ($n dim pixels at x = $tx1)" }
+set n [ink_of $tx0 74 $tx1 82 115 122 118]
+if {$n != 0} { lc_fail "the lane's top is under the thumb ($n dim pixels): the thumb is not following the tail, or fills the lane" }
+lc_pass "instrument: the position indicator -- a 3 px dim thumb in the reserved lane, ending 4 above the body's bottom while the view follows the tail (7.7)"
+
+# --- The push: how the profile reached a compositor that cannot read the
+# pool at boot --------------------------------------------------------------
+tgrep "halcyond: theme pushed to the compositor" "halcyond pushed the bundle (the profile rides the 127-field wire)"
+tgrep "tapestryd: theme applied (renderer push)" "the compositor applied it (the carve re-decided under `instrument`)"
+tgrep "profile instrument" "halcyond resolved the profile word"
+tgrep "1936;v1;pre" "ls -l emitted the rich pre frame on the wire (the code block's source, I-5b)"
+
+lc_pass "ls-halcyon-instrument: the I-2 carve, the I-3 headers and the I-4 rails verified end to end -- the profile through the wire, the stack-of-one frame under two rails, the files, the header as a pointer target (focus, the protected final tile, the tile menu, the leave), the 1:1 split made by the rail's SPLIT H with a snapped track, the rule and the 7 x 7 joint, the focus frame, the empty pane's placard, zoom, the stack's collapsed and open headers, expand by press, close by `x`, the rail's brand mark / label / clock pixels, the footer's READY / RUNNING / EXIT 0 / EXIT 1 and its pane count, RESET, the workspace list, the theme control's refusal; I-5b: the terminal view under raw output, the code block's ground and rule under ls -l, the position indicator following the tail"
+lc_quit
+exit 0

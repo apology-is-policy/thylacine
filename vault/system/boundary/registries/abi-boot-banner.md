@@ -32,6 +32,8 @@ mirrors:
   - "tools/interactive/ls-gfx-age.exp"
   - "tools/interactive/ls-gfx-restore.exp"
   - "tools/interactive/ls-gfx-session.exp"
+  - "tools/interactive/ls-halcyon-instrument.exp"
+  - "tools/interactive/ls-halcyon-session-instrument.exp"
   - "tools/interactive/ls-halcyon.exp"
   - "tools/interactive/pty-susp-pouch.exp"
   - "tools/interactive/r5f9-ash.exp"
@@ -49,7 +51,7 @@ literal-mentions:
   - "tools/warp-host.sh (a usage comment)"
   - "tools/interactive/go8d.exp (a prose note)"
 created: 2026-08-01
-updated: 2026-09-07
+updated: 2026-09-14
 ---
 ## The surface
 
@@ -93,14 +95,16 @@ It is the whole agentic loop's success signal, and the mirror set above is
 what that means concretely. The 2026-09 resync grew the set to twenty-eight
 (it added thirteen consumer gates — see "The resync grew the set to
 twenty-eight" below); the s7 F3 gate `s7-nora-probe.exp` then added one more
-(see "s7-nora-probe" below), so the set is now **twenty-nine**:
-**twenty-eight mirrors match one or both of `Thylacine boot OK` /
-`EXTINCTION:`** — one of those twenty-eight, `real-pass-harness.log`, is a
-captured-log fixture, data not a program — plus `stall-watch.py` on `kernel
-base:`. Two more mention the literals in comments only
-(`tools/warp-host.sh`, `tools/interactive/go8d.exp`) — they become wrong
-rather than broken, so they are not mirrors. 29 mirrors + 2 mentions = the 31
-files under `tools/` that carry a literal.
+(see "s7-nora-probe" below), and the two HALCYON-INSTRUMENT gates
+`ls-halcyon-instrument.exp` (I-2) and `ls-halcyon-session-instrument.exp`
+(I-4) two more (see below), so the set is now **thirty-one**: **thirty
+mirrors match one or both of `Thylacine boot OK` / `EXTINCTION:`** — one of
+those thirty, `real-pass-harness.log`, is a captured-log fixture, data not a
+program — plus `stall-watch.py` on `kernel base:`. Two more mention the
+literals in comments only (`tools/warp-host.sh`,
+`tools/interactive/go8d.exp`) — they become wrong rather than broken, so they
+are not mirrors. 31 mirrors + 2 mentions = the 33 files under `tools/` that
+carry a literal.
 
 **Reading the counts below.** The dated measurements further down (the 2026-08-18
 main#245 census, the delivery classification) describe the **fifteen-member set
@@ -118,10 +122,10 @@ match a literal (verified by grep); by which:
 
 - **`Thylacine boot OK`** (5): `check-arc-gates.sh`, `verify-console-mode.exp`,
   `verify-gpu-headless-1b.exp`, `test-smp-classify.sh`, `real-pass-harness.log`.
-- **`EXTINCTION:`** (10): `verify-gpu-headless-1b.exp`, `item10-ctrlc.exp`,
+- **`EXTINCTION:`** (11): `verify-gpu-headless-1b.exp`, `item10-ctrlc.exp`,
   `ls-gfx-age.exp`, `ls-gfx-restore.exp`, `ls-gfx-session.exp`, `ls-halcyon.exp`,
-  `pty-susp-pouch.exp`, `r5f9-ash.exp`, `test-smp-classify.sh`,
-  `composed-screen.exp`.
+  `ls-halcyon-instrument.exp`, `pty-susp-pouch.exp`, `r5f9-ash.exp`,
+  `test-smp-classify.sh`, `composed-screen.exp`.
 - **`kernel base:`** — none; `stall-watch.py` remains the sole matcher.
 
 By the four-class taxonomy above (program / document / inert / phantom), eleven
@@ -155,6 +159,22 @@ table's `EXTINCTION:` matchers 24 -> 25 (boot-OK and kernel-base unchanged). It
 is a post-resync add, not one of that subsection's thirteen. Recorded by
 [[chg-2026-09-07-boot-banner-s7-nora-probe]], which carries `mirrors-checked`
 for the full twenty-nine under the same R6 grandfather rule.
+
+### The two HALCYON-INSTRUMENT gates: two EXTINCTION deliverers added (2026-09-14)
+
+The HALCYON-INSTRUMENT I-2 chunk added `tools/interactive/ls-halcyon-
+instrument.exp` to `mirrors` (the console-lever + profile image) without
+bumping the counts here, and the I-4 chunk added
+`tools/interactive/ls-halcyon-session-instrument.exp` (the session + profile
+image) — both `expect` gates that boot a real guest through `lib.exp` and fail
+on `EXTINCTION:` in each of their phases (before login, during the session
+spawn, before the root tile and the rails, through the footer's conditions,
+the rail's buttons, the retained tile and its restart, the logout). Each
+matches `EXTINCTION:` only (0 `Thylacine boot OK`, 0 `kernel base:`), so each
+is a **program that delivers**: a reworded extinction prefix fails to match
+real boot output and is caught. Together they bring the set to thirty-one and
+the delivery table's `EXTINCTION:` matchers 25 -> 27 (boot-OK and kernel-base
+unchanged).
 
 ### The co-update list has never described that population
 
@@ -342,17 +362,17 @@ what the guarantee is worth:
 ### The protected string has the narrower readership
 
 Forced to enumerate by the mirror rule, and the answer inverts the fix's value.
-Classifying all twenty-nine mirrors by which literal each actually matches
+Classifying all thirty-one mirrors by which literal each actually matches
 (a mirror matching two literals is counted in both rows):
 
 | Literal | Delivery | Mirrors matching |
 |---|---|---|
 | `Thylacine boot OK` | **serialized** (writer role) | 13 |
-| `EXTINCTION:` | **unserialized** — lock-free, no role | **25** |
+| `EXTINCTION:` | **unserialized** — lock-free, no role | **27** |
 | `kernel base:` | unserialized | 1 |
 
-**Almost every consumer of this ABI matches an unserialized string** — 25 of
-the 29 match `EXTINCTION:` and one matches `kernel base:`, both emitted without
+**Almost every consumer of this ABI matches an unserialized string** — 27 of
+the 31 match `EXTINCTION:` and one matches `kernel base:`, both emitted without
 the writer role — while the one string that got a delivery guarantee, the
 banner, is matched by under half of them. The crash path emits through the same lock-free byte-at-a-time put the
 banner used, does **not** stop peer processors first, and its pre-emit flush is

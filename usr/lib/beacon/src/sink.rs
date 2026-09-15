@@ -69,6 +69,14 @@ impl Em {
     }
 }
 
+/// A heading's role (12.2 `hdr class=`): a section heading, or a title
+/// page's heading (the herald).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HdrClass {
+    Section,
+    Title,
+}
+
 /// A presentation: this run of text presents an object of a type,
 /// canonically named by its ref (a cleaned ABSOLUTE 9P path for `Path`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -165,15 +173,29 @@ impl<'a> Sink<'a> {
         }
     }
 
-    /// A heading wrapping its text.
+    /// A section heading wrapping its text.
     pub fn hdr(&mut self, level: u8, s: &str) {
+        self.hdr_class(level, HdrClass::Section, s);
+    }
+
+    /// A heading of a stated ROLE (12.2 `class=`): `Title` names a title
+    /// page's heading -- the herald that opens a splash or welcome -- which
+    /// a rich stylesheet sets apart (centred, its own top margin, the dim
+    /// lines under it read as its deck); `Section` is the default heading.
+    /// A role, never a layout op: the plain realization is the same text.
+    pub fn hdr_class(&mut self, level: u8, class: HdrClass, s: &str) {
         let lvl = match level {
             1 => "1",
             2 => "2",
             _ => "3",
         };
         if self.tier == Tier::Rich {
-            wire::open(&mut self.buf, Op::Hdr, &[("level", lvl)]);
+            match class {
+                HdrClass::Section => wire::open(&mut self.buf, Op::Hdr, &[("level", lvl)]),
+                HdrClass::Title => {
+                    wire::open(&mut self.buf, Op::Hdr, &[("level", lvl), ("class", "title")])
+                }
+            }
             self.flush_frame();
         }
         self.text(s);
@@ -272,11 +294,13 @@ fn fmt_i64(buf: &mut [u8; 24], v: i64) -> &str {
 // Table
 // ---------------------------------------------------------------------------
 
-/// One table cell: the shown text, optionally presenting an object.
+/// One table cell: the shown text, optionally presenting an object or
+/// carrying an emphasis class (a dim value column).
 #[derive(Clone, Debug, Default)]
 pub struct Cell {
     pub text: String,
     pub obj: Option<(ObjType, String)>,
+    pub em: Option<Em>,
 }
 
 impl Cell {
@@ -284,6 +308,7 @@ impl Cell {
         Cell {
             text: String::from(text),
             obj: None,
+            em: None,
         }
     }
 
@@ -291,6 +316,15 @@ impl Cell {
         Cell {
             text: String::from(text),
             obj: Some((ty, String::from(obj_ref))),
+            em: None,
+        }
+    }
+
+    pub fn em(class: Em, text: &str) -> Cell {
+        Cell {
+            text: String::from(text),
+            obj: None,
+            em: Some(class),
         }
     }
 }
@@ -380,9 +414,10 @@ impl Table {
                     wire::open(&mut s.buf, Op::Cell, &[]);
                     s.flush_frame();
                 }
-                match &c.obj {
-                    Some((ty, r)) => s.obj(*ty, r, &c.text),
-                    None => s.text(&c.text),
+                match (&c.obj, c.em) {
+                    (Some((ty, r)), _) => s.obj(*ty, r, &c.text),
+                    (None, Some(class)) => s.em(class, &c.text),
+                    (None, None) => s.text(&c.text),
                 }
                 if rich {
                     wire::close(&mut s.buf, Op::Cell);

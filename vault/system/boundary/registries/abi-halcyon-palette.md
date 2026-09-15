@@ -10,12 +10,15 @@ mirrors:
   - "usr/halcyond/src/session.rs (the writer -- HALCYON_PALETTE_ENV_PATH, daylight_env_palette)"
   - "usr/nora/src/theme.rs (a reader -- Palette::with_overrides, the role->field map)"
   - "usr/nora/src/main.rs (a reader -- adopt_session_palette)"
+  - "usr/utopia/shell/src/main.rs (a reader since HALCYON-INSTRUMENT I-5c -- the pts-path ut: /env/HALCYON_PALETTE -> libhalcyon::theme::prompt_roles -> Repl::set_prompt_roles)"
+literal-mentions:
+  - "usr/lib/libhalcyon/src/instrument.rs (a doc comment on project_legacy naming the export as the reason the projection exists -- goes stale, never breaks)"
 literals:
   - "HALCYON_PALETTE"
 literal-scan:
   - "usr"
 created: 2026-09-06
-updated: 2026-09-06
+updated: 2026-09-14
 ---
 ## The contract
 
@@ -33,6 +36,16 @@ the compositor plumbs its resolved palette to the programs it hosts.)
 lines (`#...`) and blanks -- a hostile or partial source degrades to the roles it
 could parse, never a failure. The same `role=RRGGBB` grammar is reused by a
 program's own palette dotfile (e.g. nora's `$HOME/.config/nora/palette`).
+
+**Extended at HALCYON-INSTRUMENT I-5c (2026-09-14, main track; the full
+rewrite of this note is the vault track's):** `env_palette` now takes the
+resolved `Bundle` and is keyed on the PROFILE -- under `instrument` the
+eleven below are followed by `prompt_glyph` / `prompt_path` / `prompt_delim`
+(amber / terminal_path / secondary) and the nine `syntax_*` roles by class
+name (23 lines); under `legacy` the eleven, byte-identical. The prompt
+roles' reader is `libhalcyon::theme::prompt_roles` (beside the writer;
+all three or none); `ut` reads them on the pts path, `nora` maps five of
+the nine class roles onto `Palette.hl_*`. docs/HALCYON-INSTRUMENT.md 7.4.
 
 **The 11 roles** (the `env_palette` set, `libhalcyon::theme`):
 

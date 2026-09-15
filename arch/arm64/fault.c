@@ -17,6 +17,7 @@
 #include "mmu.h"
 
 #include <thylacine/dev.h>           // REVENANT R-2: struct Dev (spoor->dev->read) for the FILE fault arm
+#include <thylacine/dma_handle.h>    // WEAVE-SKEIN: kobj_dma_pa_at for the DMA fault arm
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
@@ -429,9 +430,11 @@ static enum fault_result demand_page_locked(struct Proc *p,
     //    - BURROW_TYPE_MMIO: pa is the device PA (page-aligned, fixed);
     //      page i is at burrow->pa + i * PAGE_SIZE.
     //      PTE attrs are MAIR_IDX_DEVICE (nGnRnE).
-    //    - BURROW_TYPE_DMA (P4-Ic5b1b): pa is the buddy-chosen PA of the
-    //      pinned page chunk owned by the underlying KObj_DMA; page i is
-    //      at burrow->pa + i * PAGE_SIZE. PTE attrs are
+    //    - BURROW_TYPE_DMA (P4-Ic5b1b): the backing is the pinned skein owned
+    //      by the underlying KObj_DMA — one contiguous run for plain DMA, N
+    //      for a large weave — so page i resolves through kobj_dma_pa_at
+    //      rather than off a single burrow->pa (which is 0 for a DMA Burrow
+    //      precisely so nothing can read it as a base). PTE attrs are
     //      MAIR_IDX_NORMAL_WB (cacheable RAM) — DMA buffers are
     //      coherent on QEMU virt's VirtIO transports, so the CPU writes
     //      with normal cache attributes and the device sees the same
@@ -470,8 +473,16 @@ static enum fault_result demand_page_locked(struct Proc *p,
         break;
     case BURROW_TYPE_DMA:
         if (!vma->burrow->kobj_dma)         return FAULT_UNHANDLED_USER;
-        page_pa = vma->burrow->pa +
-                  (burrow_byte_off & ~(u64)(PAGE_SIZE - 1));
+        // WEAVE-SKEIN: the backing is a LIST of contiguous runs, so the page
+        // is resolved through the skein rather than by adding an offset to a
+        // single base. kobj_dma_pa_at handles nblk == 1 (plain DMA, and any
+        // weave that fits one block) as the same division, so there is no
+        // separate contiguous arm here that could drift. A 0 return is
+        // out-of-range or a malformed skein -- fail the fault rather than
+        // install a PTE to a page this object does not own.
+        page_pa = kobj_dma_pa_at(vma->burrow->kobj_dma,
+                                 burrow_byte_off & ~(u64)(PAGE_SIZE - 1));
+        if (page_pa == 0)                   return FAULT_UNHANDLED_USER;
         mair_idx = MAIR_IDX_NORMAL_WB;
         break;
     case BURROW_TYPE_HOSTMEM:

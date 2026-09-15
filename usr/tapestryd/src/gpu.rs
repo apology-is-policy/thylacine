@@ -22,6 +22,7 @@
 // the G-6+ lift.
 
 use libdriver::Error;
+use tapestryd::skein::Seg;   // WEAVE-SKEIN: the scatter-gather backing entry
 use libthyla_rs::handle::Rights;
 use libthyla_rs::hardware::{
     mmio_read16, mmio_read32, mmio_read8, mmio_write16, mmio_write32, mmio_write64, mmio_write8,
@@ -101,12 +102,15 @@ const VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
 const VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING: u32 = 0x0107;
 const VIRTIO_GPU_CMD_GET_CAPSET_INFO: u32 = 0x0108;
 const VIRTIO_GPU_CMD_GET_CAPSET: u32 = 0x0109;
-// Still the 2D command group, not the 3D one: GET_EDID (0x010a) and
-// RESOURCE_ASSIGN_UUID (0x010b) sit between GET_CAPSET and this, both unused
-// here, so the value is 0x010c and NOT contiguous with 0x0109 (VIRTIO 1.2
-// section 5.7.6.7). Venus's command ring is a guest blob (GPU-DESIGN section
-// 2.4), so this is Warp-6's real prerequisite -- the V-2 host3d/hostmem
-// mapping path (MAP_BLOB, 0x0208) is a later, separate rung.
+/// GET_EDID (HALCYON-SCALE 3: the display's physical size): `{ hdr; u32
+/// scanout; u32 padding }`, legal only with VIRTIO_GPU_F_EDID negotiated.
+const VIRTIO_GPU_CMD_GET_EDID: u32 = 0x010a;
+// Still the 2D command group, not the 3D one: GET_EDID (0x010a, above) and
+// RESOURCE_ASSIGN_UUID (0x010b) sit between GET_CAPSET and this, so the
+// value is 0x010c and NOT contiguous with 0x0109 (VIRTIO 1.2 section
+// 5.7.6.7). Venus's command ring is a guest blob (GPU-DESIGN section 2.4),
+// so this is Warp-6's real prerequisite -- the V-2 host3d/hostmem mapping
+// path (MAP_BLOB, 0x0208) is a later, separate rung.
 const VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB: u32 = 0x010c;
 
 // blob_mem (section 5.7.6.7): GUEST = the blob's storage IS the guest
@@ -414,6 +418,13 @@ const VIRTIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
 const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
 const VIRTIO_GPU_RESP_OK_CAPSET_INFO: u32 = 0x1102;
 const VIRTIO_GPU_RESP_OK_CAPSET: u32 = 0x1103;
+/// GET_EDID's reply (VIRTIO 1.2 section 5.7.6.7): `{ hdr; u32 size; u32
+/// padding; u8 edid[1024] }`.
+const VIRTIO_GPU_RESP_OK_EDID: u32 = 0x1104;
+const GPU_RESP_EDID_LEN: u32 = GPU_CTRL_HDR_LEN + 8 + 1024;
+/// The base EDID block: the only part the scale reads (extensions carry
+/// no image size the base does not).
+const EDID_BLOCK_LEN: usize = 128;
 const VIRTIO_GPU_RESP_OK_MAP_INFO: u32 = 0x1106;
 // The W-3a probe's discriminator set, pub so the server-side probe can read
 // a raw resp_type verdict: INVALID_RESOURCE_ID on a bogus id proves the
@@ -690,6 +701,9 @@ struct DevInit {
     notify_va: u64,
     /// VIRTIO_GPU_F_VIRGL: the 3D command path exists.
     virgl: bool,
+    /// VIRTIO_GPU_F_EDID negotiated: GET_EDID is legal on the wire (the
+    /// display scale's physical-size source, HALCYON-SCALE 3).
+    edid: bool,
     /// VIRTIO_GPU_F_CONTEXT_INIT: `context_init` selects a ctx capset.
     ctxinit: bool,
     /// VIRTIO_GPU_F_RESOURCE_BLOB: RESOURCE_CREATE_BLOB is legal. Only then
@@ -755,9 +769,17 @@ fn init_device(
         // guest-blob create both needs this and self-skips without it. It is
         // orthogonal to virgl and ctxinit -- a host may offer any subset.
         let blob = dev_feat_lo & VIRTIO_GPU_F_RESOURCE_BLOB_BIT_LO != 0;
+        // Accepted on the same accept-if-offered footing: GET_EDID is legal
+        // only once the feature is negotiated (VIRTIO 1.2 section 5.7.3),
+        // and it is the display scale's only physical-size source
+        // (HALCYON-SCALE 3). Orthogonal to the three above.
+        let edid = dev_feat_lo & VIRTIO_GPU_F_EDID_BIT_LO != 0;
         let mut want_lo = 0u32;
         if virgl {
             want_lo |= VIRTIO_GPU_F_VIRGL_BIT_LO;
+        }
+        if edid {
+            want_lo |= VIRTIO_GPU_F_EDID_BIT_LO;
         }
         if ctxinit {
             want_lo |= VIRTIO_GPU_F_CONTEXT_INIT_BIT_LO;
@@ -828,6 +850,7 @@ fn init_device(
         Ok(DevInit {
             notify_va: notify_base + u64::from(ctrl_off) * notify_mul,
             virgl,
+            edid,
             ctxinit,
             blob,
         })
@@ -1775,6 +1798,12 @@ pub struct Gpu {
     /// VIRTIO_GPU_F_VIRGL negotiated (the -gl device models). Warp-1 keys
     /// the capset probe on it; Warp-2 keys the 3D context path.
     pub virgl: bool,
+    /// FEATURES_OK'd `VIRTIO_GPU_F_EDID`: GET_EDID is legal (HALCYON-SCALE).
+    pub edid: bool,
+    /// The scanout's image size in millimetres from its EDID (`query_edid`),
+    /// None when the feature is absent, the query refused, or the block is
+    /// garbage -- the scale then falls to 100 (HALCYON-SCALE 3).
+    pub edid_mm: Option<(u32, u32)>,
     /// FEATURES_OK'd `VIRTIO_GPU_F_CONTEXT_INIT`. Gates capset-selected
     /// context creation: without it the device ignores `context_init`, so
     /// attempting a capset there yields a success response over a context
@@ -1947,6 +1976,7 @@ impl Gpu {
         let DevInit {
             notify_va,
             virgl,
+            edid,
             ctxinit,
             blob,
         } = init_device(
@@ -2006,6 +2036,8 @@ impl Gpu {
             width: DEFAULT_DISPLAY_W,
             height: DEFAULT_DISPLAY_H,
             virgl,
+            edid,
+            edid_mm: None,
             ctxinit,
             blob,
             cmd_seq: 0,
@@ -2036,6 +2068,15 @@ impl Gpu {
         };
 
         gpu.read_display_info()?;
+        // HALCYON-SCALE 3: the physical size, once, beside the geometry
+        // (re-queried by `mode auto`). A refusal or garbage is None -- the
+        // scale then stands at 100 -- and either way the line says the
+        // measurement, so the claim about this host's EDID is never a memory.
+        gpu.edid_mm = gpu.query_edid().unwrap_or(None);
+        match gpu.edid_mm {
+            Some((w, h)) => say!("tapestryd: edid {}x{} mm for {}x{} px", w, h, gpu.width, gpu.height),
+            None => say!("tapestryd: edid none (feature {}); scale 100", gpu.edid as u32),
+        }
         if gpu.virgl {
             gpu.probe_capsets()?;
             gpu.blob_probe(blob_probe_va)?;
@@ -2651,6 +2692,48 @@ impl Gpu {
         }
     }
 
+    /// HALCYON-SCALE 3: scanout 0's image size in millimetres from its EDID
+    /// -- Ok(None) when the feature was not negotiated, the device refuses
+    /// the command, the reply is shorter than a base block, or the block is
+    /// garbage (`libhalcyon::scale::parse_edid_mm`: the header, the
+    /// checksum, the range). The caller falls soft to 100; the boot line
+    /// says which it got. Untrusted device input: the reply is read within
+    /// its declared size and the ring's response region, never past.
+    pub fn query_edid(&mut self) -> Result<Option<(u32, u32)>, Error> {
+        if !self.edid {
+            return Ok(None);
+        }
+        let req_va = self.ring_va + REQ_OFF;
+        unsafe {
+            write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_GET_EDID);
+            w32(req_va + 24, 0); // scanout 0
+            w32(req_va + 28, 0); // padding
+        };
+        if self
+            .ctrl
+            .step(
+                "GET_EDID",
+                GPU_CTRL_HDR_LEN + 8,
+                GPU_RESP_EDID_LEN,
+                VIRTIO_GPU_RESP_OK_EDID,
+            )
+            .is_err()
+        {
+            return Ok(None); // refused: the scale stands at 100, said by the caller
+        }
+        let resp = self.ring_va + RESP_OFF;
+        let size = unsafe { r32(resp + GPU_CTRL_HDR_LEN as u64) } as usize;
+        if size < EDID_BLOCK_LEN || size > 1024 {
+            return Ok(None);
+        }
+        let mut block = [0u8; EDID_BLOCK_LEN];
+        let base = resp + GPU_CTRL_HDR_LEN as u64 + 8;
+        for (i, b) in block.iter_mut().enumerate() {
+            *b = unsafe { r8(base + i as u64) };
+        }
+        Ok(libhalcyon::scale::parse_edid_mm(&block))
+    }
+
     /// cfg-3: probe GET_DISPLAY_INFO WITHOUT adopting -- the `mode auto`
     /// re-probe (the boot path adopts via read_display_info above).
     /// Ok(None) = scanout 0 absent or absurd (the caller fails soft).
@@ -2693,26 +2776,55 @@ impl Gpu {
         )
     }
 
-    /// Attach the whole weave (one physically-contiguous KObj_DMA chunk) as
-    /// the resource's guest backing. Per-present slot selection rides the
-    /// TRANSFER offset, so one attach serves all slots.
-    pub fn attach_backing(&mut self, resource_id: u32, pa: u64, len: u32) -> Result<(), Error> {
+    /// Attach `segs` as the resource's guest backing -- the physically-
+    /// contiguous runs behind it, in ascending buffer order.
+    ///
+    /// WEAVE-SKEIN: this took a single `(pa, len)` pair and hardcoded
+    /// `nr_entries = 1` until 2026-09-09, which is the ONLY reason a weave had
+    /// to be one contiguous span. RESOURCE_ATTACH_BACKING has always taken an
+    /// ARRAY of virtio_gpu_mem_entry; the device never asked for contiguity,
+    /// we imposed it on ourselves, and the buddy could not serve a 64 MiB
+    /// naturally-aligned block on a fragmented heap.
+    ///
+    /// The caller is responsible for the I-45 obligation this widens: EVERY
+    /// entry must belong to this resource's own object, and the lengths must
+    /// sum to the resource's size. skein::subrange is what produces a list
+    /// with that property.
+    pub fn attach_backing(&mut self, resource_id: u32, segs: &[Seg]) -> Result<(), Error> {
+        // A zero-entry backing would leave the resource unbacked while the
+        // device answers OK; refuse rather than emit it.
+        if segs.is_empty() {
+            return Err(Error::Hardware);
+        }
+        // The entry array shares the REQ region with the header. Overrunning
+        // it walks into the DEVICE-WRITABLE response region (the same hazard
+        // the capset/stream paths guard). 32 entries at 2 MiB covers the whole
+        // 64 MiB weave envelope against the 78 the region holds.
+        let req_len = GPU_CTRL_HDR_LEN as usize + 8 + segs.len() * 16;
+        if req_len > REQ_REGION_LEN as usize {
+            return Err(Error::Hardware);
+        }
+
         let req_va = self.ring_va + REQ_OFF;
         unsafe {
             write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING);
             w32(req_va + 24, resource_id);
-            w32(req_va + 28, 1); // nr_entries
-            w64(req_va + 32, pa);
-            w32(req_va + 40, len);
-            w32(req_va + 44, 0);
+            w32(req_va + 28, segs.len() as u32); // nr_entries
+            for (i, s) in segs.iter().enumerate() {
+                let e = req_va + 32 + (i as u64) * 16;
+                w64(e, s.pa);
+                w32(e + 8, s.len as u32);
+                w32(e + 12, 0); // padding
+            }
         };
         self.ctrl.step(
             "ATTACH_BACKING",
-            GPU_CTRL_HDR_LEN + 8 + 16,
+            req_len as u32,
             GPU_CTRL_HDR_LEN,
             VIRTIO_GPU_RESP_OK_NODATA,
         )
     }
+
 
     pub fn detach_backing(&mut self, resource_id: u32) -> Result<(), Error> {
         let req_va = self.ring_va + REQ_OFF;

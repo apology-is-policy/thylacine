@@ -9,7 +9,7 @@
 #
 # PURE no_std + alloc, ZERO dependencies (the vt/beacon crate pattern):
 # host-tested (`cargo test -p cartoon --target aarch64-apple-darwin`).
-# fontdue and every other rasterizer live in the AUTHOR (halcyond) -- an
+# The rasterizer -- any rasterizer -- lives in the AUTHOR (halcyond); an
 # executor only ever sees finished alpha pages.
 [package]
 name = "cartoon"

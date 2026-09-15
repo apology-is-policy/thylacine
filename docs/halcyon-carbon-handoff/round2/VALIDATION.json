@@ -1,0 +1,18 @@
+{
+  "themes": 13,
+  "ansi_slots": 208,
+  "minimum_ansi_contrast": 3.4624,
+  "changed_pairs": 45,
+  "carbon_unchanged": true,
+  "all_ansi_distinct": true,
+  "bright_polarity": "PASS",
+  "black_white_order_per_ramp": "PASS",
+  "stock_schema": "PASS 57-key template shape",
+  "stock_ansi": "PASS 16 distinct authored slots per theme",
+  "contrast_amendments": "PASS 45 pairs >=4.6:1",
+  "reference_commit": "074bc5646b2f7a03872859890c2891017ceaaf9d",
+  "capture_harness": "SYNTAX-CHECKED ONLY; not run in authoring workspace",
+  "goldens": "NOT CAPTURED; exact font bytes and controlled browser matrix were unavailable",
+  "cornucopia": "MANIFEST-REQUIRED; TTF not attached",
+  "native_halcyon": "NOT RUN; native OS repository not attached"
+}

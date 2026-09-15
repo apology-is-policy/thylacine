@@ -12,6 +12,7 @@
 use alloc::format;
 use alloc::string::String;
 
+use halcyond::layout::Sheet;
 use halcyond::menu::{menu_key, menu_list, menu_size, Action, Menu};
 use halcyond::raster::GlyphSource;
 use tapestry::{EventRing, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_KEY, TEV_SCROLL};
@@ -71,10 +72,11 @@ impl MenuSet {
         x: u32,
         y: u32,
         run: (u32, u32, u32, u32),
+        sheet: &Sheet,
         gs: &mut GlyphSource,
     ) -> bool {
         self.close();
-        let (w, h) = menu_size(&model, gs, display_h(self.ring.root()));
+        let (w, h) = menu_size(&model, sheet, gs, display_h(self.ring.root()));
         let surf = match Surface::menu_on(&self.ring, w, h) {
             Ok(s) => s,
             Err(e) => {
@@ -94,7 +96,7 @@ impl MenuSet {
         // `present` would show the next slot's zeros (a black menu, caught
         // on the lever). The compositor's redraw CONFIGURE repaints again;
         // harmless.
-        paint(&mut o, gs);
+        paint(&mut o, sheet, gs);
         say(&format!(
             "halcyond: menu {} placed at {} {} ({}x{}) for {} {} run at {} {} {} {}",
             o.surf.id, x, y, w, h, o.model.ty, o.model.refv, run.0, run.1, run.2, run.3
@@ -112,7 +114,7 @@ impl MenuSet {
     /// menu's own ring while a menu was up, because a 9P session's replies
     /// are read only by a thread waiting on that session (the lever found
     /// the console-parked loop never saw a menu key).
-    pub fn service(&mut self, gs: &mut GlyphSource) -> MenuEvent {
+    pub fn service(&mut self, sheet: &Sheet, gs: &mut GlyphSource) -> MenuEvent {
         let o = match self.open.as_mut() {
             Some(o) => o,
             None => return MenuEvent::None,
@@ -178,10 +180,11 @@ impl MenuSet {
             return MenuEvent::Chosen(a);
         }
         if repaint {
-            paint(o, gs);
+            paint(o, sheet, gs);
         }
         MenuEvent::None
     }
+
 
     /// This side's dismiss (after a choice): tell the compositor, drop the
     /// surface. Nothing to do when the compositor already closed it.
@@ -192,12 +195,12 @@ impl MenuSet {
     }
 }
 
-fn paint(o: &mut Open, gs: &mut GlyphSource) {
+fn paint(o: &mut Open, sheet: &Sheet, gs: &mut GlyphSource) {
     let (w, h) = (o.surf.w, o.surf.h);
     if w == 0 || h == 0 {
         return;
     }
-    let cart = menu_list(&o.model, w, h, gs);
+    let cart = menu_list(&o.model, w, h, sheet, gs);
     let px = o.surf.pixels();
     cartoon::execute(
         &cart,

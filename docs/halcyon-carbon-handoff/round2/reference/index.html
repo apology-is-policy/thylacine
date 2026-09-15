@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b0d0e">
+  <meta name="description" content="Interactive concept for an Acme-inspired tiled workspace.">
+  <title>Instrument Panel Workspace</title>
+  <script>try{document.documentElement.dataset.theme=localStorage.getItem("instrument-theme")||"signal"}catch(e){document.documentElement.dataset.theme="signal"}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='2' fill='%230b0d0e'/%3E%3Cpath d='M4 5h15v10H4zm0 13h15v9H4zM22 5h6v22h-6z' fill='none' stroke='%23d59a42' stroke-width='2'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="desktop" aria-label="Tiled workspace prototype">
+    <header class="system-rail">
+      <div class="brand" aria-label="Workspace identity"><span class="brand-mark" aria-hidden="true"></span><span>WORKSPACE 01</span></div>
+      <nav class="context" aria-label="Workspace context"><span class="muted">~/systems/</span><strong>compositor</strong><span class="rail-sep"></span><span id="focus-path">renderer.rs</span></nav>
+      <div class="rail-actions">
+        <button class="rail-button" id="split-h" title="Split focused pane horizontally (Alt+H)"><span aria-hidden="true">═</span><span class="button-label">Split H</span></button>
+        <button class="rail-button" id="split-v" title="Split focused pane vertically (Alt+V)"><span aria-hidden="true">║</span><span class="button-label">Split V</span></button>
+        <div class="theme-control">
+          <button class="rail-button theme-toggle" id="theme-toggle" aria-haspopup="menu" aria-expanded="false" aria-controls="theme-menu" title="Choose display theme">
+            <span class="current-swatch" aria-hidden="true"></span><span class="button-label" id="current-theme">Signal Amber</span><span class="chevron" aria-hidden="true">⌄</span>
+          </button>
+          <div class="theme-menu" id="theme-menu" role="menu" aria-label="Display theme" hidden>
+            <div class="theme-menu-heading">DISPLAY THEME <span>13</span></div>
+            <div class="theme-group-label">DARK FIELD</div>
+            <button class="theme-option" role="menuitemradio" aria-checked="true" data-theme="signal">
+              <span class="theme-preview preview-signal" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span><strong>Signal Amber</strong><small>Graphite · industrial amber</small></span><b aria-hidden="true">✓</b>
+            </button>
+            <button class="theme-option" role="menuitemradio" aria-checked="false" data-theme="carbon">
+              <span class="theme-preview preview-carbon" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span><strong>Carbon Optics</strong><small>High contrast · pale champagne</small></span><b aria-hidden="true">✓</b>
+            </button>
+            <button class="theme-option" role="menuitemradio" aria-checked="false" data-theme="abyssal">
+              <span class="theme-preview preview-abyssal" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span><strong>Abyssal Sonar</strong><small>Blue-black · sea glass</small></span><b aria-hidden="true">✓</b>
+            </button>
+            <button class="theme-option" role="menuitemradio" aria-checked="false" data-theme="oxide">
+              <span class="theme-preview preview-oxide" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span><strong>Oxidized Archive</strong><small>Iron-black · verdigris</small></span><b aria-hidden="true">✓</b>
+            </button>
+            <div class="theme-group-label">TERMINAL STUDIES</div>
+            <button class="theme-option" role="menuitemradio" aria-checked="false" data-theme="combine">
+              <span class="theme-preview preview-combine" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span><strong>Combine Relay</strong><small>Occupation steel · cold relay</small></span><b aria-hidden="true">✓</b>
+            </button>
+            <button class="theme-option" role="menuitemradio" aria-checked="false" data-theme="deusex">
+              <span class="theme-preview preview-deusex" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span><strong>Deus Ex Access</strong><small>Midnight blue · aged gold</small></span><b aria-hidden="true">✓</b>
+            </button>
+            <button class="theme-option" role="menuitemradio" aria-checked="false" data-theme="shock">
+              <span class="theme-preview preview-shock" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span><strong>System Shock Node</strong><small>Machine violet · surgical teal</small></span><b aria-hidden="true">✓</b>
+            </button>
+            <button class="theme-option" role="menuitemradio" aria-checked="false" data-theme="sin">
+              <span class="theme-preview preview-sin" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span><strong>SiN Network</strong><small>Petrol black · warning orange</small></span><b aria-hidden="true">✓</b>
+            </button>
+            <button class="theme-option" role="menuitemradio" aria-checked="false" data-theme="mesa">
+              <span class="theme-preview preview-mesa" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span><strong>Black Mesa Lab</strong><small>Lab graphite · aged amber</small></span><b aria-hidden="true">✓</b>
+            </button>
+            <button class="theme-option" role="menuitemradio" aria-checked="false" data-theme="strogg">
+              <span class="theme-preview preview-strogg" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span><strong>Strogg Process</strong><small>Black iron · dried oxide</small></span><b aria-hidden="true">✓</b>
+            </button>
+            <div class="theme-group-label">LIGHT FIELD</div>
+            <button class="theme-option" role="menuitemradio" aria-checked="false" data-theme="genera">
+              <span class="theme-preview preview-genera" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span><strong>Genera Ivory</strong><small>Cool ivory · ink blue</small></span><b aria-hidden="true">✓</b>
+            </button>
+            <button class="theme-option" role="menuitemradio" aria-checked="false" data-theme="mineral">
+              <span class="theme-preview preview-mineral" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span><strong>Mineral Sage</strong><small>Gray green · deep teal</small></span><b aria-hidden="true">✓</b>
+            </button>
+            <button class="theme-option" role="menuitemradio" aria-checked="false" data-theme="logic">
+              <span class="theme-preview preview-logic" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span><strong>Warm Logic</strong><small>Putty paper · aubergine</small></span><b aria-hidden="true">✓</b>
+            </button>
+          </div>
+        </div>
+        <button class="rail-button" id="reset-layout" title="Reset workspace"><span aria-hidden="true">↺</span><span class="button-label">Reset</span></button>
+        <button class="rail-button icon-only" id="open-help" aria-label="Open keyboard reference" title="Keyboard reference">?</button>
+        <time id="clock" datetime="09:41">09:41</time>
+      </div>
+    </header>
+
+    <section id="workspace" class="workspace" aria-label="Pane layout"></section>
+
+    <footer class="status-rail">
+      <div><span class="status-pulse" aria-hidden="true"></span><span id="status-text">READY</span></div>
+      <div class="status-center"><span>ALT + ARROWS</span><span>FOCUS</span><span class="divider-dot">·</span><span>ALT + J/K</span><span>TILES</span></div>
+      <div><span id="pane-count">3 PANES</span><span class="rail-sep"></span><span>LOCAL</span></div>
+    </footer>
+  </main>
+
+  <dialog id="help-dialog" aria-labelledby="help-title">
+    <form method="dialog" class="help-card">
+      <header><div><span class="eyebrow">CONTROL REFERENCE</span><h1 id="help-title">Workspace keys</h1></div><button class="close-dialog" aria-label="Close reference">×</button></header>
+      <dl>
+        <div><dt><kbd>Alt</kbd> + <kbd>← ↑ ↓ →</kbd></dt><dd>Focus a neighboring pane</dd></div>
+        <div><dt><kbd>Alt</kbd> + <kbd>J / K</kbd></dt><dd>Open the next or previous tile</dd></div>
+        <div><dt><kbd>Alt</kbd> + <kbd>H</kbd></dt><dd>Split the focused pane horizontally</dd></div>
+        <div><dt><kbd>Alt</kbd> + <kbd>V</kbd></dt><dd>Split the focused pane vertically</dd></div>
+        <div><dt><kbd>Esc</kbd></dt><dd>Cancel an active resize</dd></div>
+      </dl>
+      <p>Drag a structural divider to resize. Double-click it to restore the default ratio. Every pane keeps exactly one tile open.</p>
+    </form>
+  </dialog>
+  <script src="app.js"></script>
+</body>
+</html>

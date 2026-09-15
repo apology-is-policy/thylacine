@@ -1,0 +1,77 @@
+# Stock Halcyon schema: complete 57-key compatibility projection.
+# Not pixel-exact alone: pair with ui-palettes/logic.toml AFTER implementing Instrument v1.
+# Ember changes are an explicit new-profile policy amendment. No base inheritance.
+# ANSI and bevel faces are DERIVED, not sampled from the mockup.
+[meta]
+name = "Warm Logic"
+
+[palette]
+floor = "#D5D0C7"
+surface = "#F3F0E8"
+header = "#DDD8CF"
+raised = "#CEC8BE"
+border = "#81776F"
+blank = "#E7E3DA"
+selection = "#DDD7D4"
+island_rule = "#826F84"
+fg = "#211E1C"
+fg_dim = "#403A35"
+fg_muted = "#5A524C"
+fg_subtle = "#80766E"
+bevel_top = "#DCD8D0"
+bevel_left = "#D9D4CC"
+bevel_right = "#A6A29B"
+bevel_bottom = "#73706B"
+ember = "#624C65"
+ember_dim = "#826F84"
+ember_deep = "#826F84"
+status_bg = "#E0DCD3"
+status_fg = "#211E1C"
+status_muted = "#5A524C"
+status_idle = "#80766E"
+
+[palette.sage]
+key = "#557158"
+tint = "#DDD8CF"
+raised = "#CEC8BE"
+border = "#C6C0B6"
+fg = "#211E1C"
+fg_dim = "#5A524C"
+fg_muted = "#80766E"
+
+[palette.cinnabar]
+key = "#8F5047"
+tint = "#DDD8CF"
+raised = "#CEC8BE"
+border = "#C6C0B6"
+fg = "#211E1C"
+fg_dim = "#5A524C"
+fg_muted = "#80766E"
+
+[palette.syntax]
+slate = "#624C65"
+sage = "#6F5B3E"
+sand = "#8F5047"
+moss = "#826F84"
+ash = "#557158"
+dusk = "#674D68"
+smoke = "#80766E"
+fen = "#557158"
+cinnabar = "#8F5047"
+
+[terminal]
+bg = "#E9E5DC"
+fg = "#302B28"
+ansi = ["#E7E3DA", "#8F5047", "#557158", "#624C65", "#6F5B3E", "#826F84", "#62664B", "#5A524C", "#80766E", "#70423B", "#465A47", "#503F51", "#594A34", "#675867", "#50523E", "#302B28"]
+
+[type]
+smooth = 12
+
+[geometry]
+bevel = 2
+gap = 3
+hairline = 1
+header_h = 32
+status_h = 25
+tag_pad_x = 0
+tab_strip_h = 0

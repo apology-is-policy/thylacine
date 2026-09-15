@@ -18,11 +18,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use beacon::verbs::{expand, is_internal, rules_for, Rule};
-use cartoon::{Cartoon, GlyphRef, Op};
-use libhalcyon::theme::DAYLIGHT;
+use cartoon::{Cartoon, Op};
 
 use crate::chrome::NAME_PX;
-use crate::layout::LaidBlock;
+use crate::layout::{LaidBlock, Sheet};
 use crate::raster::{GlyphSource, FACE_BODY, FACE_MONO};
 use crate::select::FlatRow;
 use crate::transcript::{Block, Item, TCell, Transcript};
@@ -208,6 +207,23 @@ pub enum Action {
 pub struct MenuItem {
     pub label: String,
     pub action: Action,
+    /// HALCYON-INSTRUMENT 14.2 / 14.9: an unavailable item is shown
+    /// disabled -- `dim` ink, no fill, no mark, skipped by the keyboard,
+    /// still legible -- never hidden.
+    pub enabled: bool,
+    /// A 1 px `separator` rule above this item (14.2).
+    pub separator_before: bool,
+}
+
+impl MenuItem {
+    pub fn new(label: &str, action: Action) -> MenuItem {
+        MenuItem {
+            label: String::from(label),
+            action,
+            enabled: true,
+            separator_before: false,
+        }
+    }
 }
 
 /// The open menu: the obj's type + resolved ref, the offered verbs, the
@@ -227,15 +243,9 @@ pub fn build_menu(rules: &[Rule], ty: &str, refv: &str) -> Menu {
     let mut items = Vec::new();
     for r in rules_for(rules, ty) {
         if is_internal(&r.template) {
-            items.push(MenuItem {
-                label: r.label.clone(),
-                action: Action::Internal(r.template.clone()),
-            });
+            items.push(MenuItem::new(&r.label, Action::Internal(r.template.clone())));
         } else if let Some(cmd) = expand(&r.template, refv) {
-            items.push(MenuItem {
-                label: r.label.clone(),
-                action: Action::Command(cmd),
-            });
+            items.push(MenuItem::new(&r.label, Action::Command(cmd)));
         }
     }
     Menu {
@@ -246,11 +256,69 @@ pub fn build_menu(rules: &[Rule], ty: &str, refv: &str) -> Menu {
     }
 }
 
+/// HALCYON-INSTRUMENT 14.9: the tile verb menu -- the program-provided
+/// commands first (none registers yet: no `pill` mark is assumed built),
+/// then the shell-owned Rename tile / Move to workspace / Restart / Close,
+/// each an INTERNAL action the owner interprets (`tile <verb> <id>`), never
+/// a shell command; unavailable ones disabled visibly. Restart is for a
+/// retained tile (14.6: a distinct NEW process); Close needs a sibling
+/// (6.5: the final tile is protected); Rename and Move wait on the dialog
+/// family (I-7) and the workspace mechanism (I-4). The title row carries
+/// `tile` + the tile's name (a label, bounded by the painter's ellipsis).
+pub fn tile_menu(id: u32, name: &str, count: u32, retained: bool) -> Menu {
+    let act = |verb: &str| {
+        let mut a = String::from("tile ");
+        a.push_str(verb);
+        let _ = core::fmt::write(&mut a, format_args!(" {}", id));
+        Action::Internal(a)
+    };
+    let mut restart = MenuItem::new("Restart", act("restart"));
+    restart.enabled = retained;
+    let mut close = MenuItem::new("Close", act("close"));
+    close.enabled = count > 1;
+    let mut rename = MenuItem::new("Rename tile\u{2026}", act("rename"));
+    rename.enabled = false;
+    rename.separator_before = true;
+    let mut mv = MenuItem::new("Move to workspace\u{2026}", act("move"));
+    mv.enabled = false;
+    let items = alloc::vec![restart, close, rename, mv];
+    let sel = items.iter().position(|i| i.enabled).unwrap_or(0);
+    Menu {
+        ty: String::from("tile"),
+        refv: String::from(name),
+        items,
+        sel,
+    }
+}
+
+/// HALCYON-INSTRUMENT 14.1: the workspace list the brand mark opens -- one
+/// row per workspace (`01`..), the active one selected, each an INTERNAL
+/// action `workspace <n>` (1-based) the owner interprets. Width 160 is the
+/// painter's minimum-width clamp's business; the title reads `Workspaces`.
+pub fn workspace_menu(count: u8, active: u8) -> Menu {
+    let mut items = Vec::new();
+    for i in 0..count.max(1) {
+        let mut label = String::new();
+        let _ = core::fmt::write(&mut label, format_args!("{:02}", i as u32 + 1));
+        let mut act = String::from("workspace ");
+        let _ = core::fmt::write(&mut act, format_args!("{}", i as u32 + 1));
+        items.push(MenuItem::new(&label, Action::Internal(act)));
+    }
+    Menu {
+        ty: String::from("Workspaces"),
+        refv: String::new(),
+        sel: (active as usize).min(items.len() - 1),
+        items,
+    }
+}
+
 /// A key on the menu surface.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MenuKey {
     Up,
     Down,
+    Home,
+    End,
     Enter,
     None,
 }
@@ -264,6 +332,8 @@ pub fn menu_key(code: u16, rune: u32) -> MenuKey {
         _ => match code {
             103 => MenuKey::Up,
             108 => MenuKey::Down,
+            102 => MenuKey::Home,
+            107 => MenuKey::End,
             28 | 96 => MenuKey::Enter,
             _ => MenuKey::None,
         },
@@ -288,59 +358,136 @@ impl Menu {
         };
     }
 
-    /// Apply a key: Up/Down move the selection (clamped); Enter yields the
-    /// selected item's action (None on an empty menu).
+    /// Apply a key: Up/Down move the selection (clamped), skipping
+    /// disabled items (14.2; a menu whose every item is disabled keeps
+    /// its selection where it is); Home/End go to the first/last enabled;
+    /// Enter yields the selected item's action -- None on an empty menu or
+    /// a disabled selection (a disabled item is never activated).
     pub fn key(&mut self, k: MenuKey) -> Option<Action> {
+        let enabled = |i: usize, items: &[MenuItem]| items.get(i).is_some_and(|it| it.enabled);
         match k {
             MenuKey::Up => {
-                self.sel = self.sel.saturating_sub(1);
-                None
-            }
-            MenuKey::Down => {
-                if self.sel + 1 < self.items.len() {
-                    self.sel += 1;
+                let mut i = self.sel;
+                while i > 0 {
+                    i -= 1;
+                    if enabled(i, &self.items) {
+                        self.sel = i;
+                        break;
+                    }
                 }
                 None
             }
-            MenuKey::Enter => self.items.get(self.sel).map(|i| i.action.clone()),
+            MenuKey::Down => {
+                let mut i = self.sel;
+                while i + 1 < self.items.len() {
+                    i += 1;
+                    if enabled(i, &self.items) {
+                        self.sel = i;
+                        break;
+                    }
+                }
+                None
+            }
+            MenuKey::Home => {
+                if let Some(i) = self.items.iter().position(|it| it.enabled) {
+                    self.sel = i;
+                }
+                None
+            }
+            MenuKey::End => {
+                if let Some(i) = self.items.iter().rposition(|it| it.enabled) {
+                    self.sel = i;
+                }
+                None
+            }
+            MenuKey::Enter => self
+                .items
+                .get(self.sel)
+                .filter(|i| i.enabled)
+                .map(|i| i.action.clone()),
             MenuKey::None => None,
         }
     }
 }
 
 /// Menu metrics (Daylight: the tag bar's padding family; the menu is the
-/// raised ground with the border stroke -- chrome, not content).
+/// raised ground with the border stroke -- chrome, not content), LOGICAL:
+/// the sheet scales them (HALCYON-SCALE 6).
 pub const MENU_PAD_X: i32 = 8;
 pub const MENU_PAD_Y: i32 = 4;
-pub const MENU_MAX_W: u32 = 640;
+pub const MENU_MAX_W: i32 = 640;
 const ROW_PAD: i32 = 4;
 const NO_VERBS: &str = "no verbs";
 
-fn body_width(gs: &mut GlyphSource, s: &str) -> i32 {
-    s.chars()
-        .filter_map(|c| gs.glyph(FACE_BODY, NAME_PX, c))
-        .map(|g| g.advance)
-        .sum()
+fn body_width(gs: &mut GlyphSource, sheet: &Sheet, s: &str) -> i32 {
+    // The sub-pixel pen's width, so the menu measures what it paints
+    // (HALCYON-TYPE 4.3; `push_body` shapes with the same call).
+    let px = sheet.px(NAME_PX);
+    gs.shape_run(FACE_BODY, px, s.chars()).1
 }
 
 fn mono_width(gs: &GlyphSource, s: &str) -> i32 {
-    let (cw, _, _) = gs.mono_cell();
+    let (cw, _, _) = gs.island_cell();
     cw * s.chars().count() as i32
 }
 
-fn row_h(gs: &GlyphSource) -> i32 {
-    let (_, ch, _) = gs.mono_cell();
-    ch + ROW_PAD
+fn row_h(gs: &GlyphSource, sheet: &Sheet) -> i32 {
+    if sheet.profile == libhalcyon::instrument::Profile::Instrument {
+        return sheet.ipx(INST_ROW_H);
+    }
+    let (_, ch, _) = gs.island_cell();
+    ch + sheet.ipx(ROW_PAD)
 }
 
-/// The menu's surface size for its content: the widest of the title (type
-/// label + ref) and the items, padded; one row per item (or the "no verbs"
-/// row) under the title row and its rule. Capped at MENU_MAX_W wide and at
-/// `max_h` tall (the display: the compositor refuses a taller surface -- the
-/// H-3c round F3); past the cap the item list scrolls (`menu_list`).
-pub fn menu_size(m: &Menu, gs: &mut GlyphSource, max_h: u32) -> (u32, u32) {
-    let (cw, _, _) = gs.mono_cell();
-    let title_w = body_width(gs, &m.ty) + 2 * cw + mono_width(gs, &m.refv);
+/// The title row's height: the legacy one is an item row; the Instrument
+/// one is 14.2's 24.
+fn title_h(gs: &GlyphSource, sheet: &Sheet) -> i32 {
+    if sheet.profile == libhalcyon::instrument::Profile::Instrument {
+        return sheet.ipx(INST_TITLE_H);
+    }
+    row_h(gs, sheet)
+}
+
+/// A separator row's height under Instrument (14.2: 1 px with a 4 px
+/// vertical margin either side); legacy menus have no separators.
+fn sep_h(sheet: &Sheet) -> i32 {
+    if sheet.profile == libhalcyon::instrument::Profile::Instrument {
+        return sheet.hairline + 2 * sheet.ipx(INST_SEP_MARGIN);
+    }
+    0
+}
+
+// HALCYON-INSTRUMENT 14.2, the object verb menu in the round-2 look
+// (logical): square; min-width 224, max-width 320, padding 4; the title
+// row 24 tall, horizontal padding 10, Sans 500 11; items 28 tall, padding
+// 10, Sans 13; the 2 px `amber` mark at y 6..22 of the focused row;
+// separators 1 px with margin 4, inset 8.
+const INST_MIN_W: i32 = 224;
+const INST_MAX_W: i32 = 320;
+const INST_PAD: i32 = 4;
+const INST_PAD_X: i32 = 10;
+const INST_TITLE_H: i32 = 24;
+const INST_TITLE_PX: f32 = 11.0;
+const INST_ROW_H: i32 = 28;
+const INST_ITEM_PX: f32 = 13.0;
+const INST_MARK_W: i32 = 2;
+const INST_MARK_Y: i32 = 6;
+const INST_MARK_H: i32 = 16;
+const INST_SEP_MARGIN: i32 = 4;
+const INST_SEP_INSET: i32 = 8;
+
+/// The menu's surface size for its content at the sheet's scale: the
+/// widest of the title (type label + ref) and the items, padded; one row
+/// per item (or the "no verbs" row) under the title row and its rule.
+/// Capped at MENU_MAX_W (scaled) wide and at `max_h` tall (the display: the
+/// compositor refuses a taller surface -- the H-3c round F3); past the cap
+/// the item list scrolls (`menu_list`).
+pub fn menu_size(m: &Menu, sheet: &Sheet, gs: &mut GlyphSource, max_h: u32) -> (u32, u32) {
+    if sheet.profile == libhalcyon::instrument::Profile::Instrument {
+        return menu_size_inst(m, sheet, gs, max_h);
+    }
+    let (cw, _, _) = gs.island_cell();
+    let title_w = body_width(gs, sheet, &m.ty) + 2 * cw + mono_width(gs, &m.refv);
     let mut w = title_w;
     if m.items.is_empty() {
         w = w.max(mono_width(gs, NO_VERBS));
@@ -349,70 +496,117 @@ pub fn menu_size(m: &Menu, gs: &mut GlyphSource, max_h: u32) -> (u32, u32) {
         w = w.max(mono_width(gs, &it.label));
     }
     let rows = 1 + m.items.len().max(1) as i32;
-    let h = 2 * MENU_PAD_Y + rows * row_h(gs) + 1;
-    let w = (w + 2 * MENU_PAD_X).max(1) as u32;
-    (w.min(MENU_MAX_W), (h.max(1) as u32).min(max_h.max(1)))
+    let h = 2 * sheet.ipx(MENU_PAD_Y) + rows * row_h(gs, sheet) + sheet.hairline;
+    let w = (w + 2 * sheet.ipx(MENU_PAD_X)).max(1) as u32;
+    (
+        w.min(sheet.ipx(MENU_MAX_W).max(1) as u32),
+        (h.max(1) as u32).min(max_h.max(1)),
+    )
 }
 
 /// How many item rows fit under the title row and its rule in `h`, and the
 /// first item shown so the selection stays inside them.
-pub fn item_window(m: &Menu, h: u32, gs: &GlyphSource) -> (usize, usize) {
-    let rh = row_h(gs).max(1);
-    let fit = ((h as i32 - 2 * MENU_PAD_Y - 1 - rh) / rh).max(1) as usize;
+pub fn item_window(m: &Menu, h: u32, sheet: &Sheet, gs: &GlyphSource) -> (usize, usize) {
+    let rh = row_h(gs, sheet).max(1);
+    let pad_y = if sheet.profile == libhalcyon::instrument::Profile::Instrument {
+        sheet.ipx(INST_PAD)
+    } else {
+        sheet.ipx(MENU_PAD_Y)
+    };
+    let fit = ((h as i32 - 2 * pad_y - sheet.hairline - title_h(gs, sheet)) / rh).max(1) as usize;
     let first = if m.sel >= fit { m.sel + 1 - fit } else { 0 };
     (first, fit)
+}
+
+/// 14.2: the Instrument menu's surface size -- the widest of the title and
+/// the items in their faces plus the padding, clamped to [224, 320]; the
+/// title row, its rule, one row per item (or the "no verbs" row), the
+/// separators, the padding; capped at `max_h`.
+fn menu_size_inst(m: &Menu, sheet: &Sheet, gs: &mut GlyphSource, max_h: u32) -> (u32, u32) {
+    let tpx = sheet.px(INST_TITLE_PX);
+    let ipx = sheet.px(INST_ITEM_PX);
+    let (title_face, item_face) = (sheet.face_medium, sheet.face_body);
+    let mut w = gs.shape_run(title_face, tpx, m.ty.chars()).1
+        + sheet.ipx(INST_PAD_X)
+        + gs.shape_run(title_face, tpx, m.refv.chars()).1;
+    if m.items.is_empty() {
+        w = w.max(gs.shape_run(item_face, ipx, NO_VERBS.chars()).1);
+    }
+    for it in m.items.iter() {
+        w = w.max(gs.shape_run(item_face, ipx, it.label.chars()).1);
+    }
+    let w = (w + 2 * sheet.ipx(INST_PAD_X) + 2 * sheet.ipx(INST_PAD))
+        .clamp(sheet.ipx(INST_MIN_W), sheet.ipx(INST_MAX_W))
+        .max(1) as u32;
+    let seps = m.items.iter().filter(|i| i.separator_before).count() as i32;
+    let h = 2 * sheet.ipx(INST_PAD)
+        + title_h(gs, sheet)
+        + sheet.hairline
+        + m.items.len().max(1) as i32 * row_h(gs, sheet)
+        + seps * sep_h(sheet);
+    (w, (h.max(1) as u32).min(max_h.max(1)))
 }
 
 fn push_body(
     cart: &mut Cartoon,
     gs: &mut GlyphSource,
+    sheet: &Sheet,
     x: i32,
     baseline: i32,
     color: u32,
     s: &str,
 ) -> i32 {
-    let mut refs: Vec<GlyphRef> = Vec::new();
-    for c in s.chars() {
-        if let Some(g) = gs.glyph(FACE_BODY, NAME_PX, c) {
-            refs.push(g);
-        }
-    }
-    let adv: i32 = refs.iter().map(|g| g.advance).sum();
+    let px = sheet.px(NAME_PX);
+    let (refs, adv) = gs.shape_run(FACE_BODY, px, s.chars());
     if !refs.is_empty() {
         cart.push_glyphs(gs.gen(), x, baseline, color, &refs);
     }
     adv
 }
 
-fn push_mono(cart: &mut Cartoon, gs: &mut GlyphSource, x: i32, baseline: i32, color: u32, s: &str) {
-    let mut refs: Vec<GlyphRef> = Vec::new();
-    for c in s.chars() {
-        if let Some(g) = gs.glyph(FACE_MONO, 0.0, c) {
-            refs.push(g);
-        }
-    }
+fn push_mono(
+    cart: &mut Cartoon,
+    gs: &mut GlyphSource,
+    sheet: &Sheet,
+    x: i32,
+    baseline: i32,
+    color: u32,
+    s: &str,
+) {
+    // FACE_MONO refuses a phase (a fixed cell has none), so this is the
+    // whole-cell run it always was -- routed through the one shaper so
+    // there is a single place the pen lives.
+    let (refs, _) = gs.shape_run(FACE_MONO, sheet.mono_island_px, s.chars());
     if !refs.is_empty() {
         cart.push_glyphs(gs.gen(), x, baseline, color, &refs);
     }
 }
 
-/// The menu display list for a w x h surface: raised ground, 1px border
-/// stroke, the title row (type in the proportional face, muted; the
-/// resolved ref in monospace, full ink), a rule, then the items in
-/// monospace -- the selected one on a `header` band.
-pub fn menu_list(m: &Menu, w: u32, h: u32, gs: &mut GlyphSource) -> Cartoon {
-    let d = &DAYLIGHT;
+/// The menu display list for a w x h surface at the sheet's scale: raised
+/// ground, the hairline border stroke, the title row (type in the
+/// proportional face, muted; the resolved ref in monospace, full ink), a
+/// rule, then the items in monospace -- the selected one on a `header`
+/// band.
+pub fn menu_list(m: &Menu, w: u32, h: u32, sheet: &Sheet, gs: &mut GlyphSource) -> Cartoon {
+    // The source follows the sheet in force at every painter entry (r2 A-F2).
+    gs.set_kerning(sheet.kerning);
+    if sheet.profile == libhalcyon::instrument::Profile::Instrument {
+        return menu_list_inst(m, w, h, sheet, gs);
+    }
+    let d = &sheet.theme;
     let mut cart = Cartoon::new();
     if w == 0 || h == 0 {
         return cart;
     }
     cart.ops.push(Op::Clear { color: d.raised });
     let (wi, hi) = (w as i32, h as i32);
+    let hair = sheet.hairline;
+    let hu = hair as u32;
     for r in [
-        (0, 0, w, 1),
-        (0, hi - 1, w, 1),
-        (0, 0, 1, h),
-        (wi - 1, 0, 1, h),
+        (0, 0, w, hu),
+        (0, (hi - hair).max(0), w, hu),
+        (0, 0, hu, h),
+        ((wi - hair).max(0), 0, hu, h),
     ] {
         cart.ops.push(Op::Rect {
             x: r.0,
@@ -422,68 +616,197 @@ pub fn menu_list(m: &Menu, w: u32, h: u32, gs: &mut GlyphSource) -> Cartoon {
             color: d.border,
         });
     }
-    let (cw, _, mono_base) = gs.mono_cell();
-    let rh = row_h(gs);
+    let (cw, _, mono_base) = gs.island_cell();
+    let rh = row_h(gs, sheet);
+    let (pad_x, pad_y, row_pad) = (
+        sheet.ipx(MENU_PAD_X),
+        sheet.ipx(MENU_PAD_Y),
+        sheet.ipx(ROW_PAD),
+    );
     let body_asc = gs
-        .line_metrics(FACE_BODY, NAME_PX)
+        .line_metrics(FACE_BODY, sheet.px(NAME_PX))
         .map(|lm| lm.ascent)
         .unwrap_or(8);
-    let mut y = MENU_PAD_Y;
+    let mut y = pad_y;
     // Title: "<type>  <ref>".
-    let mut x = MENU_PAD_X;
+    let mut x = pad_x;
     x += push_body(
         &mut cart,
         gs,
+        sheet,
         x,
-        y + ROW_PAD / 2 + body_asc,
+        y + row_pad / 2 + body_asc,
         d.fg_muted,
         &m.ty,
     );
     x += 2 * cw;
-    push_mono(&mut cart, gs, x, y + ROW_PAD / 2 + mono_base, d.fg, &m.refv);
+    push_mono(&mut cart, gs, sheet, x, y + row_pad / 2 + mono_base, d.fg, &m.refv);
     y += rh;
     cart.ops.push(Op::Rect {
-        x: 1,
+        x: hair,
         y,
-        w: w - 2,
-        h: 1,
+        w: (wi - 2 * hair).max(0) as u32,
+        h: hu,
         color: d.border,
     });
-    y += 1;
+    y += hair;
     if m.items.is_empty() {
         push_mono(
             &mut cart,
             gs,
-            MENU_PAD_X,
-            y + ROW_PAD / 2 + mono_base,
+            sheet,
+            pad_x,
+            y + row_pad / 2 + mono_base,
             d.fg_muted,
             NO_VERBS,
         );
         return cart;
     }
-    let (first, fit) = item_window(m, h, gs);
+    let (first, fit) = item_window(m, h, sheet, gs);
     for (i, it) in m.items.iter().enumerate().skip(first).take(fit) {
         if i == m.sel {
             cart.ops.push(Op::Rect {
-                x: 1,
+                x: hair,
                 y,
-                w: w - 2,
+                w: (wi - 2 * hair).max(0) as u32,
                 h: rh as u32,
                 color: d.header,
             });
         }
         let ink = match it.action {
-            Action::Command(_) => d.fg,
-            Action::Internal(_) => d.fg_dim,
+            Action::Command(_) if it.enabled => d.fg,
+            _ => d.fg_dim,
         };
         push_mono(
             &mut cart,
             gs,
-            MENU_PAD_X,
-            y + ROW_PAD / 2 + mono_base,
+            sheet,
+            pad_x,
+            y + row_pad / 2 + mono_base,
             ink,
             &it.label,
         );
+        y += rh;
+    }
+    cart
+}
+
+/// 14.2: the Instrument menu's display list -- `pane` ground, a 1 px
+/// `structure` border; the title row (`tile` + the label in Sans 11
+/// `text`), a 1 px `separator` rule; items in Sans 13: `text`, or `dim`
+/// when disabled (no fill, no mark); the selected row on `hover` with the
+/// 2 px `amber` mark at y 6..22; a disabled selection paints nothing (the
+/// keyboard never rests on one). Separators 1 px `separator`, margin 4,
+/// inset 8. The list window follows the selection (`item_window`).
+fn menu_list_inst(m: &Menu, w: u32, h: u32, sheet: &Sheet, gs: &mut GlyphSource) -> Cartoon {
+    let i = &sheet.inst;
+    let mut cart = Cartoon::new();
+    if w == 0 || h == 0 {
+        return cart;
+    }
+    cart.ops.push(Op::Clear { color: i.pane });
+    let (wi, hi) = (w as i32, h as i32);
+    let hair = sheet.hairline;
+    let hu = hair as u32;
+    for r in [
+        (0, 0, w, hu),
+        (0, (hi - hair).max(0), w, hu),
+        (0, 0, hu, h),
+        ((wi - hair).max(0), 0, hu, h),
+    ] {
+        cart.ops.push(Op::Rect {
+            x: r.0,
+            y: r.1,
+            w: r.2,
+            h: r.3,
+            color: i.structure,
+        });
+    }
+    let gen = gs.gen();
+    let (pad, pad_x) = (sheet.ipx(INST_PAD), sheet.ipx(INST_PAD_X));
+    let (tpx, ipx) = (sheet.px(INST_TITLE_PX), sheet.px(INST_ITEM_PX));
+    // 14.2: the title row Sans 500 11, the items Sans 400 13 -- the
+    // sheet's `face_medium` / `face_body` (since I-5).
+    let (title_face, item_face) = (sheet.face_medium, sheet.face_body);
+    let th = title_h(gs, sheet);
+    let rh = row_h(gs, sheet);
+    let centre = |gs: &mut GlyphSource, face: u8, px: f32, rows: i32| -> i32 {
+        let (asc, desc) = gs
+            .line_metrics(face, px)
+            .map(|lm| (lm.ascent, lm.descent))
+            .unwrap_or((8, 2));
+        (rows - (asc + desc)) / 2 + asc
+    };
+    let mut y = pad;
+    // The title: the type, then the label.
+    let mut x = pad + pad_x;
+    let (refs, adv) = gs.shape_run(title_face, tpx, m.ty.chars());
+    let tbase = y + centre(gs, title_face, tpx, th);
+    if !refs.is_empty() {
+        cart.push_glyphs(gen, x, tbase, i.secondary, &refs);
+    }
+    x += adv + pad_x;
+    let avail = wi - pad - pad_x - x;
+    if avail > 0 && !m.refv.is_empty() {
+        let label = crate::chrome::fit_end_pub(gs, title_face, tpx, &m.refv, avail);
+        let (refs, _) = gs.shape_run(title_face, tpx, label.chars());
+        if !refs.is_empty() {
+            cart.push_glyphs(gen, x, tbase, i.text, &refs);
+        }
+    }
+    y += th;
+    cart.ops.push(Op::Rect {
+        x: hair,
+        y,
+        w: (wi - 2 * hair).max(0) as u32,
+        h: hu,
+        color: i.separator,
+    });
+    y += hair;
+    if m.items.is_empty() {
+        let (refs, _) = gs.shape_run(item_face, ipx, NO_VERBS.chars());
+        if !refs.is_empty() {
+            let base = y + centre(gs, item_face, ipx, rh);
+            cart.push_glyphs(gen, pad + pad_x, base, i.dim, &refs);
+        }
+        return cart;
+    }
+    let (first, fit) = item_window(m, h, sheet, gs);
+    for (idx, it) in m.items.iter().enumerate().skip(first).take(fit) {
+        if it.separator_before && idx > first {
+            let margin = sheet.ipx(INST_SEP_MARGIN);
+            let inset = sheet.ipx(INST_SEP_INSET);
+            cart.ops.push(Op::Rect {
+                x: pad + inset,
+                y: y + margin,
+                w: (wi - 2 * pad - 2 * inset).max(0) as u32,
+                h: hu,
+                color: i.separator,
+            });
+            y += sep_h(sheet);
+        }
+        if idx == m.sel && it.enabled {
+            cart.ops.push(Op::Rect {
+                x: pad,
+                y,
+                w: (wi - 2 * pad).max(0) as u32,
+                h: rh as u32,
+                color: i.hover,
+            });
+            cart.ops.push(Op::Rect {
+                x: pad,
+                y: y + sheet.ipx(INST_MARK_Y),
+                w: sheet.ipx(INST_MARK_W).max(1) as u32,
+                h: sheet.ipx(INST_MARK_H).max(1) as u32,
+                color: i.amber,
+            });
+        }
+        let (refs, _) = gs.shape_run(item_face, ipx, it.label.chars());
+        if !refs.is_empty() {
+            let base = y + centre(gs, item_face, ipx, rh);
+            let ink = if it.enabled { i.text } else { i.dim };
+            cart.push_glyphs(gen, pad + pad_x, base, ink, &refs);
+        }
         y += rh;
     }
     cart
@@ -493,6 +816,10 @@ pub fn menu_list(m: &Menu, w: u32, h: u32, gs: &mut GlyphSource) -> Cartoon {
 mod tests {
     use super::*;
     use crate::layout::{daylight_sheet, layout_block};
+
+    fn sheet() -> Sheet {
+        daylight_sheet(100)
+    }
     use crate::select::flatten;
     use beacon::verbs::parse;
     use beacon::wire::{self, Op as BOp};
@@ -607,7 +934,7 @@ mod tests {
         let t = corpus();
         let flat = flatten(&t);
         let b = &t.frozen_blocks()[flat[1].block];
-        let sheet = daylight_sheet();
+        let sheet = daylight_sheet(100);
         let mut gs = GlyphSource::new_vendored(64);
         let laid = layout_block(b, 800, &sheet, &mut gs);
         let runs = runs_on_row(&t, flat[1]);
@@ -680,15 +1007,15 @@ mod tests {
         let rules = parse("path ls ls {}\npath cat cat {}\n", false);
         let m = build_menu(&rules, "path", "/lib/aurora/config");
         let mut gs = GlyphSource::new_vendored(64);
-        let (w, h) = menu_size(&m, &mut gs, 800);
+        let (w, h) = menu_size(&m, &sheet(), &mut gs, 800);
         assert!(w > 40 && h > 20, "{}x{}", w, h);
-        let (w0, h0) = menu_size(&build_menu(&rules, "pid", "1"), &mut gs, 800);
+        let (w0, h0) = menu_size(&build_menu(&rules, "pid", "1"), &sheet(), &mut gs, 800);
         assert!(
             h0 < h,
             "no verbs = one placeholder row; two verbs = two rows"
         );
         assert!(w0 > 0);
-        let c = menu_list(&m, w, h, &mut gs);
+        let c = menu_list(&m, w, h, &sheet(), &mut gs);
         assert!(
             matches!(c.ops[0], Op::Clear { color: 0xFFBDB0A0 }),
             "raised ground"
@@ -723,7 +1050,7 @@ mod tests {
                 >= 4,
             "type + ref + two labels"
         );
-        assert!(menu_list(&m, 0, 0, &mut gs).ops.is_empty());
+        assert!(menu_list(&m, 0, 0, &sheet(), &mut gs).ops.is_empty());
     }
 
     // The H-3c round F3: a verb-rich type must not ask the compositor for a
@@ -738,25 +1065,25 @@ mod tests {
         let mut m = build_menu(&rules, "path", "/x");
         assert_eq!(m.items.len(), 40);
         let mut gs = GlyphSource::new_vendored(64);
-        let (_, uncapped) = menu_size(&m, &mut gs, u32::MAX);
-        let (w, h) = menu_size(&m, &mut gs, 200);
+        let (_, uncapped) = menu_size(&m, &sheet(), &mut gs, u32::MAX);
+        let (w, h) = menu_size(&m, &sheet(), &mut gs, 200);
         assert!(
             uncapped > 200 && h == 200,
             "uncapped {} capped {}",
             uncapped,
             h
         );
-        let (first, fit) = item_window(&m, h, &gs);
+        let (first, fit) = item_window(&m, h, &sheet(), &gs);
         assert_eq!(first, 0);
         assert!(fit >= 2 && fit < 40, "fit {}", fit);
         for _ in 0..39 {
             m.key(MenuKey::Down);
         }
         assert_eq!(m.sel, 39);
-        let (first, _) = item_window(&m, h, &gs);
+        let (first, _) = item_window(&m, h, &sheet(), &gs);
         assert_eq!(first, 40 - fit, "the window ends at the selection");
         // The selected band lies inside the surface.
-        let c = menu_list(&m, w, h, &mut gs);
+        let c = menu_list(&m, w, h, &sheet(), &mut gs);
         let band = c
             .ops
             .iter()
@@ -798,5 +1125,99 @@ mod tests {
         let mut empty = build_menu(&rules, "pid", "1");
         empty.wheel(-1);
         assert_eq!(empty.sel, 0);
+    }
+    /// HALCYON-INSTRUMENT 14.9: the tile verb menu's four shell-owned items,
+    /// enabled by the tile's state (Restart for a retained tile, Close with
+    /// a sibling), the two unbuilt ones disabled behind a separator; the
+    /// keyboard skips disabled items and never activates one.
+    #[test]
+    fn the_tile_menu_offers_restart_and_close_by_state_and_skips_the_disabled() {
+        let m = tile_menu(7, "ut", 1, false);
+        assert_eq!((m.ty.as_str(), m.refv.as_str()), ("tile", "ut"));
+        let labels: Vec<&str> = m.items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, ["Restart", "Close", "Rename tile\u{2026}", "Move to workspace\u{2026}"]);
+        assert!(!m.items[0].enabled, "a live tile does not restart");
+        assert!(!m.items[1].enabled, "a lone tile is protected");
+        assert!(!m.items[2].enabled && !m.items[3].enabled);
+        assert!(m.items[2].separator_before && !m.items[1].separator_before);
+        let mut m2 = tile_menu(7, "ut", 3, true);
+        assert!(m2.items[0].enabled && m2.items[1].enabled);
+        assert_eq!(m2.sel, 0);
+        assert_eq!(m2.key(MenuKey::Down), None);
+        assert_eq!(m2.sel, 1);
+        assert_eq!(m2.key(MenuKey::Down), None);
+        assert_eq!(m2.sel, 1, "the disabled tail is skipped");
+        assert_eq!(m2.key(MenuKey::End), None);
+        assert_eq!(m2.sel, 1);
+        assert_eq!(m2.key(MenuKey::Home), None);
+        assert_eq!(m2.sel, 0);
+        assert_eq!(m2.key(MenuKey::Enter), Some(Action::Internal(String::from("tile restart 7"))));
+        m2.sel = 1;
+        assert_eq!(m2.key(MenuKey::Enter), Some(Action::Internal(String::from("tile close 7"))));
+        m2.sel = 2;
+        assert_eq!(m2.key(MenuKey::Enter), None, "a disabled item never activates");
+        assert_eq!(m2.key(MenuKey::Up), None);
+        assert_eq!(m2.sel, 1);
+        // Every item disabled: Enter yields nothing, the selection stays.
+        let mut m3 = tile_menu(1, "x", 1, false);
+        assert_eq!(m3.sel, 0);
+        assert_eq!(m3.key(MenuKey::Enter), None);
+        assert_eq!(m3.key(MenuKey::Down), None);
+        assert_eq!(m3.sel, 0);
+        assert_eq!(menu_key(102, 0), MenuKey::Home);
+        assert_eq!(menu_key(107, 0), MenuKey::End);
+    }
+
+    /// 14.2 on Carbon: the Instrument menu's geometry and inks -- `pane`
+    /// ground, the `structure` border, the 24 title row, 28 rows, the
+    /// selected row on `hover` with the 2 x 16 `amber` mark at y 6, a
+    /// separator inset 8 with a 4 margin, disabled labels in `dim`; a
+    /// disabled selection paints no band; the legacy list is unchanged.
+    #[test]
+    fn the_instrument_menu_is_the_round_two_look() {
+        let s = crate::layout::sheet_for(
+            &libhalcyon::instrument::Bundle::builtin(libhalcyon::instrument::Profile::Instrument),
+            100,
+            crate::layout::TEST_DISPLAY_W,
+        );
+        let mut gs = GlyphSource::new_vendored(64);
+        let m = tile_menu(7, "renderer.rs", 3, true);
+        let (w, h) = menu_size(&m, &s, &mut gs, 900);
+        assert!((224..=320).contains(&w), "clamped to 14.2's width: {}", w);
+        // 4 + 24 + 1 + 4 x 28 + (4 + 1 + 4) + 4
+        assert_eq!(h, 154);
+        let c = menu_list(&m, w, h, &s, &mut gs);
+        assert!(matches!(c.ops[0], Op::Clear { color: 0xFF0B_0D0E }), "pane ground");
+        let rects: Vec<(i32, i32, u32, u32, u32)> = c
+            .ops
+            .iter()
+            .filter_map(|op| match *op {
+                Op::Rect { x, y, w, h, color } => Some((x, y, w, h, color)),
+                _ => None,
+            })
+            .collect();
+        assert!(rects.contains(&(0, 0, w, 1, 0xFF45_4B48)), "the structure border: {:?}", rects);
+        assert!(rects.contains(&(4, 29, w - 8, 28, 0xFF19_1C1D)), "the selected row's band: {:?}", rects);
+        assert!(rects.contains(&(4, 35, 2, 16, 0xFFC7_B98B)), "the amber mark: {:?}", rects);
+        assert!(rects.contains(&(12, 89, w - 24, 1, 0xFF29_2D2B)), "the separator: {:?}", rects);
+        let inks: Vec<u32> = c
+            .ops
+            .iter()
+            .filter_map(|op| match *op {
+                Op::Glyphs { color, .. } => Some(color),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(inks.iter().filter(|&&k| k == 0xFF73_7A76).count(), 2, "two disabled labels: {:?}", inks);
+        assert!(inks.iter().filter(|&&k| k == 0xFFF2_F3EF).count() >= 3, "the label + two enabled items: {:?}", inks);
+        let mut m2 = m.clone();
+        m2.sel = 2;
+        let c2 = menu_list(&m2, w, h, &s, &mut gs);
+        assert!(!c2.ops.iter().any(|op| matches!(op, Op::Rect { color: 0xFF19_1C1D, .. })));
+        let ls = sheet();
+        let lc = menu_list(&m, 200, 100, &ls, &mut gs);
+        assert!(matches!(lc.ops[0], Op::Clear { color } if color == ls.theme.raised), "the legacy ground");
+        let (lw, lh) = menu_size(&m, &ls, &mut gs, 900);
+        assert!(lw < 224 || lh < 154, "the legacy size is the legacy size");
     }
 }

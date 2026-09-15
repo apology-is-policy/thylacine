@@ -1,0 +1,150 @@
+# Frutiger Aero -- the deferred second Halcyon theme (HALCYON-VISUAL.md,
+# "Deferred to H-2: Frutiger Aero... its structure is identical to Daylight's;
+# only the palette differs."). Cloud white with sky chrome -- the aqua accent
+# of that era's "living technology" aesthetic, VT panes going deep navy
+# rather than black.
+#
+# PROVENANCE. Several values here are RECOVERED verbatim from the session
+# that settled them (floor, surface, header, all four bevel faces). Most of
+# the rest -- the ink scale, raised/border/blank/selection/island_rule, both
+# state keys, the syntax tier, and the terminal block -- were never taken
+# past the verbal-description stage and are GENERATED here to complete the
+# 57-key schema, following the same derivation logic Daylight and Nightjar
+# already use. Read this file as a first full draft to correct, not as a
+# recovered original.
+#
+# THE EMBER PROBLEM. The original design used a dedicated aqua accent,
+# #28B8D0 -- explicitly praised at the time as carrying "the living-technology
+# optimism of that era." That predates the rule now governing every other
+# theme in this system: THE EMBER IS SHARED VERBATIM ACROSS THEMES
+# (HALCYON-VISUAL 1.3; TEMPLATE.toml bite #2) -- #E07840/#B85F2A/#C86030,
+# unchanged, because it is how the compositor, the terminal, and the console
+# read as one system. Nightjar already honours this. This file does too,
+# below -- which means Aero's own signature colour is NOT in it. That is a
+# real loss against the original vision, not a rounding error, and it is a
+# decision this file makes for you rather than one it was asked to make.
+# The alternative is to amend 1.3 with a named, deliberate exception for
+# this one theme; that amendment does not exist yet, so this file does not
+# assume it.
+#
+# NAMING. "Frutiger Aero" names the aesthetic movement, not a themed choice
+# the way Nightjar's naming discipline expects (see nightjar.toml's own
+# header) -- it was never run through a candidate set or checked for
+# collisions. Left as-is below; renaming it is still open.
+#
+# THERE IS NO `base` KEY, DELIBERATELY -- same reasoning as nightjar.toml.
+
+[meta]
+name = "Frutiger Aero"
+
+[palette]
+# Ground. RECOVERED: floor, surface, header (the settled Daylight/Aero
+# comparison table). GENERATED: raised, border, blank, selection,
+# island_rule.
+floor       = "#6A90AC"
+surface     = "#EEF4F8"
+header      = "#C2D8E8"
+raised      = "#ACC8DC"
+border      = "#93B8CE"
+# Darker than the floor, same cool family -- an empty pane is a hole, not a
+# lit surface (TEMPLATE.toml bite #5).
+blank       = "#05080C"
+# Deliberately warm against an all-cool chrome, so a selection reads as a
+# selection rather than another pane tone -- Nightjar picks its outlier hue
+# the same way, in the opposite direction.
+selection   = "#E8DCC8"
+island_rule = "#4A7690"
+
+# Ink. GENERATED: a cool navy scale in the same relationship Daylight's warm
+# scale has to its own ground -- four steps, dark to lightest-legible, on a
+# light surface.
+fg        = "#0A1826"
+fg_dim    = "#1E3040"
+fg_muted  = "#4C6478"
+fg_subtle = "#7E96AA"
+
+# Bevel, NNW. RECOVERED verbatim from the settled comparison table.
+bevel_top    = "#F0F8FF"
+bevel_left   = "#CFE4F4"
+bevel_right  = "#14364E"
+bevel_bottom = "#061E34"
+
+# Accent. NOT aero's own aqua -- see "THE EMBER PROBLEM" above. Shared
+# verbatim with Daylight, Nightjar, and Bonfire.
+ember      = "#E07840"
+ember_dim  = "#B85F2A"
+ember_deep = "#C86030"
+
+# Status bar. GENERATED, mirroring Daylight's derivation (bg/fg/idle reuse
+# the ink scale; muted is its own bespoke value) rather than Nightjar's
+# lifted-strip approach, since Aero is light-ground like Daylight, not
+# dark-ground like Nightjar.
+status_bg    = "#0A1826"
+status_fg    = "#EEF4F8"
+status_muted = "#9CB4C8"
+status_idle  = "#1E3040"
+
+# Live-tile keys. GENERATED, following Daylight's light-ground shape: the key
+# stays saturated, the tint is a light wash of the same hue.
+[palette.sage]
+key      = "#1E6858"
+tint     = "#C8E4DC"
+raised   = "#B4D8CC"
+border   = "#8CBCAC"
+fg       = "#0C3428"
+fg_dim   = "#164438"
+fg_muted = "#3C7460"
+
+# Checked against the shared ember the same way Nightjar's was: this must
+# read as a clear red against #E07840's orange, not a near-miss of it.
+[palette.cinnabar]
+key      = "#B8342A"
+tint     = "#F0D4CE"
+raised   = "#E8C0B8"
+border   = "#D4A29A"
+fg       = "#4A1810"
+fg_dim   = "#5E2418"
+fg_muted = "#8C5448"
+
+# Syntax. GENERATED as a direct reuse of Daylight's own role table --
+# HALCYON-VISUAL 1.5 describes this tier as one underlying role table that
+# themes darken or lighten for their ground, not one they re-hue; Aero is
+# light-ground exactly as Daylight is, so nothing here needs to move.
+[palette.syntax]
+slate    = "#3A4878"
+sage     = "#1E5844"
+sand     = "#7A5020"
+moss     = "#3A5818"
+ash      = "#6A3828"
+dusk     = "#4A3868"
+smoke    = "#6A7060"
+fen      = "#1E5828"
+cinnabar = "#982818"
+
+# Terminal. bg/fg follow Aero's OWN surface/fg (so inline ANSI output sits on
+# the same ground as everything else -- TEMPLATE.toml bite #1); the sixteen
+# are Bonfire's fixed role assignments, unchanged, with bright-white aliased
+# to this theme's own fg instead of Nightjar's or Daylight's.
+[terminal]
+bg = "#EEF4F8"
+fg = "#0A1826"
+ansi = [
+  "#2A1F1C", "#C06050", "#6A9A6A", "#C8A882",
+  "#8A9AC8", "#A898C8", "#8AB8A8", "#C8BDB8",
+  "#5A4E48", "#E07840", "#B8D098", "#E0C090",
+  "#A0B0E0", "#C0B0E0", "#A0D0C0", "#0A1826",
+]
+
+# Light-ground: same reasoning as Daylight's 12, not Nightjar's 0.
+[type]
+smooth = 12
+
+# Unchanged from the built-in -- a change of light, not of proportion.
+[geometry]
+bevel = 2
+gap = 2
+hairline = 1
+header_h = 20
+status_h = 20
+tag_pad_x = 6
+tab_strip_h = 5

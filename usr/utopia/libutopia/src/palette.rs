@@ -94,6 +94,19 @@ impl Rgb {
     }
 }
 
+/// The prompt's three inks when a Halcyon session hands them down
+/// (HALCYON-INSTRUMENT 7.4, the `λ <cwd> ⊢ ` shape): the glyph, the path, the
+/// delimiter. RESOLVED colours, not roles -- the session's palette export is
+/// the authority and the shell paints exactly what it was handed. Absent
+/// (the console, a legacy-profile session) the prompt keeps the Bonfire
+/// roles above and its legacy shape.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct PromptRoles {
+    pub glyph: Rgb,
+    pub path: Rgb,
+    pub delim: Rgb,
+}
+
 // Foundation (UTOPIA-VISUAL.md section 1.1).
 /// Background: `#0e0c0c` -- warm near-black, the Bonfire backdrop.
 pub const BG: Rgb = Rgb::new(0x0e, 0x0c, 0x0c);

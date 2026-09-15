@@ -13,8 +13,16 @@ path = "src/lib.rs"
 # libutopia is the application-helpers layer for the Utopia surface
 # (palette + ANSI emission + path display). It depends on libthyla-rs
 # for the alloc plumbing (the consumer binary declares ThylaAlloc as
-# its #[global_allocator]); it does NOT call kernel surfaces directly --
-# the consumer handles syscalls.
+# its #[global_allocator]).
+#
+# It DOES call kernel surfaces, and the line above used to claim otherwise --
+# false since job control landed (`t_tty_cont` in eval/builtin.rs) and more so
+# since the namespace built-ins. Both are syscall-bearing for the same
+# structural reason: a built-in exists precisely when the effect must land on
+# the SHELL'S OWN Proc -- its terminal foreground group, its Territory -- which
+# a spawned command cannot do. The layering rule that survives is narrower:
+# PARSING and formatting stay pure (and testable); only the built-ins whose
+# whole purpose is to mutate this Proc reach for a syscall.
 libthyla-rs = { path = "../../lib/libthyla-rs" }
 # H-1c: the Beacon zone frames (wire emission only -- pure bytes, no
 # syscalls; the ut binary resolves the tier and hands Repl the flag, so

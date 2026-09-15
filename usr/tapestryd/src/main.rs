@@ -46,11 +46,10 @@ macro_rules! say {
     }};
 }
 
-mod chords;
+// `chords`, `keymap` and `pane` live in the LIB half (src/lib.rs) so they are
+// host-testable; these are the bin-only modules, which syscall.
 mod gpu;
 mod input;
-mod keymap;
-mod pane;
 mod server;
 
 use alloc::vec::Vec;
@@ -62,16 +61,16 @@ use libthyla_rs::hardware::PCI_BAR_VA_STRIDE;
 use libthyla_rs::io::Write;
 use libthyla_rs::time::Instant;
 use libthyla_rs::{
-    t_close, t_open, t_poll, t_srv_accept, t_walk_create, TPollFd, T_OPATH, T_OREAD, T_POLLHUP,
-    T_POLLIN, T_WALK_OPEN_FROM_ROOT,
+    t_close, t_open, t_poll, t_read, t_srv_accept, t_walk_create, TPollFd, T_OPATH, T_OREAD,
+    T_POLLHUP, T_POLLIN, T_WALK_OPEN_FROM_ROOT,
 };
 
 use crate::input::{
     InputDev, RawInputEvent, ABS_X, ABS_Y, BTN_LEFT, EV_ABS, EV_KEY, EV_REL, EV_SYN, REL_WHEEL,
     REL_X, REL_Y,
 };
-use crate::keymap::Mods;
 use crate::server::{Comp, Conn, MAX_CONNS, MAX_WARP_CONNS, ROOT_TAPESTRY, ROOT_WARP};
+use tapestryd::keymap::{self, Mods};
 
 // =============================================================================
 // User-VA layout (driver-private): the BAR windows + the device rings; the
@@ -177,6 +176,112 @@ fn post_srv_warp() -> Result<i64, ()> {
     Ok(listener)
 }
 
+/// HALCYON-SCALE 3 (SC-5): the platform's scale declaration off the kernel
+/// command line -- `/hw/chosen/bootargs` (QEMU's -append; the channel joey's
+/// opt-outs and aurora's display mode already read). None when the file is
+/// absent or unreadable, when the read FILLS the buffer (a token cut at the
+/// end must never parse as a shorter valid percent), or when the token's
+/// value is not one of the five (said once).
+/// The SYSTEM theme file, read once at startup (HALCYON-THEME 3.4).
+///
+/// tapestryd is system-spawned, so the USER's file cannot reach it by being
+/// read -- a user's home is that user's, and this process is not them. The
+/// user tier arrives as a PUSH from their declared session instead, over the
+/// `theme` ctl verb, which is why the display and the content can agree at
+/// all.
+///
+/// Refused-or-absent is not fatal: the built-in stands, loudly if a file was
+/// there and would not load.
+fn system_theme() -> libhalcyon::instrument::Bundle {
+    // The system profile word first, then the system theme file: since I-1
+    // the compositor holds a BUNDLE (HALCYON-INSTRUMENT 4.1), no user tier.
+    let profile = read_system_file(libhalcyon::instrument::SYSTEM_PROFILE_PATH, "profile");
+    let text = read_system_file(libhalcyon::theme::SYSTEM_THEME_PATH, "theme");
+    let r = libhalcyon::instrument::resolve_bundle(libhalcyon::instrument::Sources {
+        system_profile: profile.as_deref(),
+        system_file: text.as_deref(),
+        ..Default::default()
+    });
+    for n in &r.notes {
+        say!("tapestryd: {}", n);
+    }
+    say!(
+        "tapestryd: theme {} ({:?}, {:?}); profile {} ({:?})",
+        if r.name.is_empty() {
+            "built-in"
+        } else {
+            &r.name
+        },
+        r.theme_tier,
+        r.schema,
+        r.bundle.profile.word(),
+        r.profile_tier
+    );
+    r.bundle
+}
+
+/// One system file, whole, or `None`: absent (4.1, one line said, since an
+/// absent path is otherwise indistinguishable from a read that never ran --
+/// measured: this left NO trace in the first gate capture) or not UTF-8.
+fn read_system_file(path: &str, what: &str) -> Option<alloc::string::String> {
+    // SAFETY: SVC wrappers over a path literal and an owned buffer.
+    let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, path.as_ptr(), path.len(), T_OREAD) };
+    if fd < 0 {
+        say!("tapestryd: {} built-in (no {})", what, path);
+        return None;
+    }
+    // One byte past the cap, so a file AT the cap is distinguishable from one
+    // that was cut: the loader refuses anything over it, and a short read
+    // that filled the buffer would otherwise be a valid truncated prefix.
+    let mut buf = alloc::vec![0u8; libhalcyon::theme::THEME_MAX + 1];
+    let mut got = 0usize;
+    loop {
+        let n = unsafe { t_read(fd, buf.as_mut_ptr().add(got), buf.len() - got) };
+        if n <= 0 {
+            break;
+        }
+        got += n as usize;
+        if got == buf.len() {
+            break;
+        }
+    }
+    unsafe { t_close(fd) };
+    buf.truncate(got);
+    match alloc::string::String::from_utf8(buf) {
+        Ok(t) => Some(t),
+        Err(_) => {
+            say!("tapestryd: {} is not utf-8; the built-in {} stands", path, what);
+            None
+        }
+    }
+}
+
+fn declared_scale() -> Option<u16> {
+    // SAFETY: SVC wrappers over a path literal and an owned buffer.
+    let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/hw/chosen/bootargs".as_ptr(), 19, T_OREAD) };
+    if fd < 0 {
+        return None;
+    }
+    let mut buf = [0u8; 1024];
+    let n = unsafe { t_read(fd, buf.as_mut_ptr(), buf.len()) };
+    unsafe { t_close(fd) };
+    if n <= 0 {
+        return None;
+    }
+    if n as usize >= buf.len() {
+        say!("tapestryd: bootargs longer than {} bytes; a scale declaration is ignored", buf.len());
+        return None;
+    }
+    match libhalcyon::scale::declared_scale(&buf[..n as usize]) {
+        libhalcyon::scale::Declared::Scale(p) => Some(p),
+        libhalcyon::scale::Declared::Invalid => {
+            say!("tapestryd: thylacine.scale ignored: not one of 100/125/150/175/200");
+            None
+        }
+        libhalcyon::scale::Declared::None => None,
+    }
+}
+
 struct Tapestryd {
     comp: Comp,
     kbd: Option<InputDev>,
@@ -266,7 +371,7 @@ impl Driver for Tapestryd {
             .unwrap_or((0x7FFF, 0x7FFF));
 
         Ok(Tapestryd {
-            comp: Comp::new(g),
+            comp: Comp::new(g, declared_scale(), system_theme()),
             kbd,
             tablet,
             mouse,

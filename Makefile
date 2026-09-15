@@ -4,7 +4,7 @@
 # Per ARCHITECTURE.md §3: real build system is CMake (kernel) + Cargo (Rust).
 # This Makefile is just for muscle memory (`make kernel`, `make test`, etc.).
 
-.PHONY: all kernel production everything sysroot userspace disk pool clean test test-tcg test-cross-reboot test-interactive test-classify check-arc-gates check-production smp-gate idle-gate check-floor test-a72 test-fault verify-kaslr test-venus-verdict run run-tcg gdb specs help
+.PHONY: all kernel production everything sysroot userspace disk pool clean test test-tcg test-cross-reboot test-interactive test-classify check-arc-gates check-production smp-gate idle-gate check-floor test-a72 test-fault verify-kaslr test-venus-verdict test-haul-kat run run-tcg gdb specs help
 
 all:
 	@tools/build.sh all
@@ -121,6 +121,23 @@ verify-kaslr:
 test-venus-verdict:
 	@tools/test-venus-verdict.sh
 
+# haul's npxf known-answer vectors, re-derived from npxf's OWN source and
+# diffed against the committed fixture. Without a caller, kat/vectors.txt is a
+# RECORDING -- a file whose only claim to being npxf's output is that someone
+# once said so (#245: a checker reachable only by hand rots).
+#
+# The recipe ABSORBS regen.sh's exit 77 rather than letting make see it. make
+# maps any non-zero recipe status to a build failure ("Error 77", exit 2), so
+# without this a skip and a vector MISMATCH are the same verdict, and since npxf
+# lives outside version control the target would be red on every checkout but
+# the one machine that has the tree. The comment here previously claimed this
+# was "the same shape as test-venus-verdict" -- that script has no exit 77 site
+# at all, having no external dependency to be missing.
+test-haul-kat:
+	@usr/haul/kat/regen.sh; rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "test-haul-kat: SKIP (npxf absent)"; exit 0; fi; \
+	exit $$rc
+
 run:
 	@tools/run-vm.sh
 
@@ -228,6 +245,7 @@ help:
 	@echo "  verify-kaslr — #245: I-16's only runtime witness -- the slide must vary"
 	@echo "               across N=10 boots; a single boot cannot see a fixed slide."
 	@echo "  test-venus-verdict — Warp-6 V-0: the venus gate discriminates (no boot)."
+	@echo "  test-haul-kat      — re-derive haul's npxf vectors from npxf and diff (no boot)."
 	@echo "               Proves capset id=4 present WITH venus=on and ABSENT without,"
 	@echo "               plus the positive control -- the real verdict verb, sabotaged."
 	@echo "  run        — launch a dev VM (interactive UART)"

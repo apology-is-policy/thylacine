@@ -1,0 +1,77 @@
+# Stock Halcyon schema: complete 57-key compatibility projection.
+# Not pixel-exact alone: pair with ui-palettes/mesa.toml AFTER implementing Instrument v1.
+# Ember changes are an explicit new-profile policy amendment. No base inheritance.
+# ANSI and bevel faces are DERIVED, not sampled from the mockup.
+[meta]
+name = "Black Mesa Lab"
+
+[palette]
+floor = "#070A0A"
+surface = "#151B1A"
+header = "#0B1010"
+raised = "#1B2422"
+border = "#39433D"
+blank = "#0E1313"
+selection = "#2E2D23"
+island_rule = "#7D653D"
+fg = "#DDE1DA"
+fg_dim = "#C6CCC3"
+fg_muted = "#929A90"
+fg_subtle = "#5D665C"
+bevel_top = "#2F3131"
+bevel_left = "#1D2020"
+bevel_right = "#050808"
+bevel_bottom = "#040505"
+ember = "#BC9458"
+ember_dim = "#7D653D"
+ember_deep = "#7D653D"
+status_bg = "#090D0D"
+status_fg = "#DDE1DA"
+status_muted = "#929A90"
+status_idle = "#5D665C"
+
+[palette.sage]
+key = "#64816A"
+tint = "#0B1010"
+raised = "#1B2422"
+border = "#252D29"
+fg = "#DDE1DA"
+fg_dim = "#929A90"
+fg_muted = "#5D665C"
+
+[palette.cinnabar]
+key = "#A96258"
+tint = "#0B1010"
+raised = "#1B2422"
+border = "#252D29"
+fg = "#DDE1DA"
+fg_dim = "#929A90"
+fg_muted = "#5D665C"
+
+[palette.syntax]
+slate = "#BC9458"
+sage = "#6D8A81"
+sand = "#A96258"
+moss = "#7D653D"
+ash = "#64816A"
+dusk = "#C09C67"
+smoke = "#5D665C"
+fen = "#64816A"
+cinnabar = "#A96258"
+
+[terminal]
+bg = "#0A100F"
+fg = "#BDC4BC"
+ansi = ["#0E1313", "#A96258", "#64816A", "#BC9458", "#6D8A81", "#7D653D", "#698676", "#929A90", "#5D665C", "#B8867C", "#869C89", "#C5AA7C", "#8CA29A", "#988869", "#899F92", "#BDC4BC"]
+
+[type]
+smooth = 0
+
+[geometry]
+bevel = 2
+gap = 3
+hairline = 1
+header_h = 32
+status_h = 25
+tag_pad_x = 0
+tab_strip_h = 0

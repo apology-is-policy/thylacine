@@ -11,6 +11,7 @@
 #include <thylacine/burrow.h>  // G-2: burrow_unmap for the weave clunk-unmap
 #include <thylacine/dev.h>
 #include <thylacine/dev9p.h>
+#include <thylacine/cons.h>
 #include <thylacine/proc.h>    // G-2: the mapping Proc's vma_lock + pid
 #include <thylacine/sched.h>   // sched() -- the wb single-flight yield-wait
 #include <thylacine/thread.h>  // G-2: current_thread for the clunk-unmap pid match
@@ -982,7 +983,7 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
                                    P9_GETATTR_BASIC, (u16)nname,
                                    (const u8 *const *)name, name_lens,
                                    &nwqid, qids, attrs);
-    if (rc == -T_E_NOSYS) {
+    if (rc == -T_E_NOSYS || rc == -T_E_OPNOTSUPP) {
         // The server does not speak the extension: its unknown-op arm answers
         // Rlerror E_NOSYS. That is the MAJORITY case, not an exception --
         // Stratum is the only v1.0 server that implements the op, and every
@@ -995,9 +996,27 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
         // for the session and hand the resolver the fallback sentinel -- this
         // is NOT a walk failure
         // (nothing about the path was learned). The abandoned new_fid number
-        // is benign (monotonic allocator). A future foreign server replying
-        // EOPNOTSUPP would need that code appended to the errno registry
-        // (ERRORS.md signoff) and classified here.
+        // is benign (monotonic allocator).
+        //
+        // EOPNOTSUPP IS THE SECOND SPELLING, and this comment predicted it
+        // before a server that used it existed: "a future foreign server
+        // replying EOPNOTSUPP would need that code appended to the errno
+        // registry and classified here". It arrived -- npxf answers its
+        // unknown-op arm with errno 95, and until this line it was not
+        // classified, so the latch never fired and the fused walk was reported
+        // as a WALK FAILURE. What userspace then saw was `no such file or
+        // namespace entry`, which sent two separate investigations after the
+        // wrong subsystem (a nested-mount theory, then a spawn-inheritance
+        // theory) because the diagnostic named a missing FILE for what was
+        // really a missing OPERATION.
+        //
+        // No registry change was needed after all: T_E_OPNOTSUPP was already
+        // ABI-pinned at 95 (errno.h), reserved in as many words for "future
+        // not-yet-supported dispositions". Both spellings mean one thing here --
+        // this server cannot do the fused walk -- so both take the fallback.
+        // A THIRD spelling is likely (ENOTSUP aliases 95 on Linux, but a server
+        // could answer EINVAL): the durable fix is that an unimplemented
+        // OPERATION must never surface as a missing PATH, whatever the code.
         src_priv->client->wga_unsupported = true;
         kfree(attrs);
         walkqid_free(w);
@@ -1171,10 +1190,14 @@ static struct Spoor *dev9p_open_cached(struct Spoor *c, const char *const *names
                                        P9_GETATTR_BASIC, (u16)nname,
                                        (const u8 *const *)names, name_lens,
                                        &nwqid, qids, attrs);
-        if (rc == -T_E_NOSYS) {
+        if (rc == -T_E_NOSYS || rc == -T_E_OPNOTSUPP) {
             // The same per-session latch dev9p_walk_attrs maintains (a server
             // that does not speak the extension never reaches the hint anyway
             // -- it is never latched cacheable -- but keep the latch coherent).
+            // Both spellings of "I cannot do that" latch here for the reason
+            // given at the other site: coherence between the two is what stops
+            // one path deciding the server speaks POUNCE while the other has
+            // already decided it does not.
             client->wga_unsupported = true;
             kfree(attrs);
             return NULL;
@@ -1646,8 +1669,19 @@ static void dev9p_close(struct Spoor *c) {
             if (vic >= 0)
                 (void)p9_client_clunk_async(p->client, (u32)vic);
         }
-        if (!parked)
-            (void)p9_client_clunk_async(p->client, p->fid);
+        if (!parked) {
+            int crc = p9_client_clunk_async(p->client, p->fid);
+            if (crc < 0) {
+                struct cons_diag_line dl;
+                cons_diag_line_init(&dl);
+                cons_diag_line_puts(&dl, "9p: close: clunk of fid ");
+                cons_diag_line_putdec(&dl, (u64)p->fid);
+                cons_diag_line_puts(&dl, " refused rc ");
+                cons_diag_line_putdec(&dl, (u64)(-crc));
+                cons_diag_line_puts(&dl, "\n");
+                cons_diag_line_emit(&dl);
+            }
+        }
     }
 
     if (p->attached_owner) {

@@ -17,7 +17,7 @@
 extern crate alloc;
 
 // A 64 MiB LAZY heap (demand-zero; physical pages commit as touched):
-// halcyond's working set -- two parsed DejaVu faces, atlas pages, the
+// halcyond's working set -- four parsed IBM Plex Sans faces, atlas pages, the
 // transcript's 13.3 content budget -- does not fit the 4 MiB default,
 // and the death is a SILENT exit(1) (the no_std OOM panics into
 // t_exits). Found the honest way: the first on-device boot died between
@@ -26,7 +26,6 @@ extern crate alloc;
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAllocN<{ 64 * 1024 * 1024 }> =
     libthyla_rs::alloc::ThylaAllocN;
 
-use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use beacon::verbs::{parse as parse_verbs, Rule};
@@ -35,9 +34,13 @@ use halcyond::input::{
     FEED_PENDING_MAX, FEED_RETRY_MS,
 };
 use halcyond::layout::{
-    cursor_pos, daylight_sheet, layout_block, layout_pending, render_block, LaidBlock, Sheet,
+    cursor_pos, layout_block, layout_pending, render_block, sheet_for, LaidBlock, LayoutCache,
+    Sheet,
 };
-use halcyond::menu::{build_menu, hit_run, obj_of, run_rect, runs_on_row, step_run, Action, Menu};
+use halcyond::chrome::Described;
+use halcyond::menu::{build_menu, hit_run, obj_of, run_rect, runs_on_row, step_run, tile_menu, workspace_menu, Action, Menu};
+use halcyond::rail::{hints_from_chords, reset_plan, RailModel};
+use crate::chromeset::ChromeAction;
 use halcyond::raster::GlyphSource;
 use halcyond::select::{FlatRow, Sel};
 use halcyond::transcript::Transcript;
@@ -46,7 +49,7 @@ use libthyla_rs::{
     t_open, t_poll, t_read, t_write, TPollFd, T_OREAD, T_OWRITE, T_POLLIN, T_WALK_OPEN_FROM_ROOT,
 };
 use tapestry::{
-    EventRing, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FOCUS, TEV_KEY, TEV_PTR_BTN,
+    DisplayInfo, EventRing, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FOCUS, TEV_KEY, TEV_PTR_BTN,
     TEV_PTR_MOVE,
 };
 
@@ -64,6 +67,7 @@ macro_rules! say {
 
 mod chromeset;
 mod menuset;
+mod railset;
 mod session;
 mod statusset;
 
@@ -190,6 +194,7 @@ fn summon(
     ax: i32,
     ay: i32,
     run: (i32, i32, i32, i32),
+    sheet: &Sheet,
     gs: &mut GlyphSource,
 ) {
     let (gx, gy) = own_pane
@@ -204,62 +209,9 @@ fn summon(
         run.2.max(0) as u32,
         run.3.max(0) as u32,
     );
-    menus.open(model, d(ax, gx), d(ay, gy), run_d, gs);
+    menus.open(model, d(ax, gx), d(ay, gy), run_d, sheet, gs);
 }
 
-struct CacheEnt {
-    width: i32,
-    sheet_gen: u32,
-    atlas_gen: u32,
-    laid: LaidBlock,
-}
-
-/// Frozen-block layout, cached by block id (stable identity; the open
-/// block + pending line never cache -- they change every feed).
-struct LayoutCache {
-    map: BTreeMap<u64, CacheEnt>,
-}
-
-impl LayoutCache {
-    fn new() -> LayoutCache {
-        LayoutCache {
-            map: BTreeMap::new(),
-        }
-    }
-
-    fn get(
-        &mut self,
-        b: &halcyond::transcript::Block,
-        width: i32,
-        sheet: &Sheet,
-        gs: &mut GlyphSource,
-    ) -> &LaidBlock {
-        let gen = gs.gen();
-        let hit = matches!(self.map.get(&b.id),
-            Some(e) if e.width == width && e.sheet_gen == sheet.gen && e.atlas_gen == gen);
-        if !hit {
-            if self.map.len() > 512 {
-                // Crude LRU stand-in: reset and re-lay the visible set.
-                self.map.clear();
-            }
-            let laid = layout_block(b, width, sheet, gs);
-            self.map.insert(
-                b.id,
-                CacheEnt {
-                    width,
-                    sheet_gen: sheet.gen,
-                    atlas_gen: gen,
-                    laid,
-                },
-            );
-        }
-        &self.map.get(&b.id).unwrap().laid
-    }
-
-    fn evict_missing(&mut self, live: &dyn Fn(u64) -> bool) {
-        self.map.retain(|id, _| live(*id));
-    }
-}
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
@@ -270,6 +222,15 @@ pub extern "C" fn rs_main() -> i64 {
     // session in tapestryd (later: pts tiles), never the console mirror. The
     // console-renderer body below is unchanged (the proven aurora-shaped path,
     // still selected by joey when the device names halcyond as the renderer).
+    // The system mono face is a compiled-in build input; a failure here is
+    // a broken artifact, surfaced loudly rather than discovered as an empty
+    // grid. Ahead of the session branch so BOTH renderer paths are covered
+    // -- the atlas `verify_all` this replaced sat below the branch and so
+    // guarded only the console one.
+    if !halcyond::raster::mono_face_ok() {
+        say!("halcyond: FAIL system mono face (cornucopia subset)");
+        return 1;
+    }
     if libthyla_rs::env::args()
         .operands()
         .any(|a| a == b"--session")
@@ -289,11 +250,6 @@ pub extern "C" fn rs_main() -> i64 {
         }
         return session::run(home);
     }
-    if !cornucopia::verify_all() {
-        say!("halcyond: FAIL atlas magic/version");
-        return 1;
-    }
-
     // The renderer role: drain/feed first (fail loudly without the grant --
     // leave the scanout to whoever else presents).
     let drain = open_path("/dev/consdrain", T_OREAD);
@@ -387,6 +343,9 @@ pub extern "C" fn rs_main() -> i64 {
     // cheap retry per command is the right posture).
     let mut pending_exit: Option<i64> = None;
     let mut status_refusal_said = false;
+    // The working directory the console strip's trail last showed: a `cd`
+    // moves the trail with no relayout behind it, so the loop compares.
+    let mut trail_painted = alloc::string::String::new();
     // H-3c: the verb table (BEACON.md 7; the system tier, read once) + the
     // one menu, the last frame's block placement (the hit map for
     // click-a-path and the keyboard menu's anchor: block id, screen y,
@@ -401,33 +360,139 @@ pub extern "C" fn rs_main() -> i64 {
     // H-3d: the status bar -- one Role::Status surface on the same ring,
     // minted once the console is up (step 0d).
     let mut status = statusset::StatusBar::new(ring.clone());
+    // HALCYON-INSTRUMENT 8: the top rail -- one Role::Rail surface on the
+    // same ring under the Instrument profile (none under legacy), and the
+    // footer's chord hints from the compositor's `chords` file, re-read
+    // with every relayout.
+    let mut rail = railset::RailBar::new(ring.clone());
+    let mut hints: Vec<(alloc::string::String, alloc::string::String)> = Vec::new();
     let mut frame: Vec<(u64, i32, i32)> = Vec::new();
     let mut last_open_laid: Option<LaidBlock> = None;
     let mut ptr: (i32, i32) = (0, 0);
 
     let mut gs = GlyphSource::new_vendored(512);
-    if gs.face_count() != 3 {
+    if gs.face_count() != halcyond::raster::VENDORED_FACES {
         say!("halcyond: FAIL vendored face parse");
         return 1;
     }
-    let sheet = daylight_sheet();
-    let mut t = Transcript::new(libhalcyon::theme::daylight_palette());
+    // HALCYON-SCALE 6: the render brain at the COMPOSITOR's scale -- read
+    // off its ctl beside the display (the compositor is the authority, the
+    // ctl the channel), re-read on every relayout below; a change rebuilds
+    // the sheet (a new generation), the glyph source (the mono bakes for
+    // the scale; the atlas regens) and the winsize. The atlas bound follows
+    // the display area (HALCYON-SCALE 7).
+    // A scale the table does not know is kept out of the sheet (r2 B-F11:
+    // the /env path validated, the compositor's did not); said once per value.
+    let mut scale_refused: Option<u16> = None;
+    let mut display = ring.display_info().unwrap_or(DisplayInfo {
+        w: w as u32,
+        h: h as u32,
+        scale: 100,
+    });
+    gs.set_scale(display.scale);
+    gs.set_display(display.w, display.h);
+    // THE ONE PLACE this renderer resolves its theme (HALCYON-THEME 3.2/3.4).
+    // The SYSTEM file only: the console renderer is nobody's session, so
+    // there is no user tier to read -- and reading one would mean a console
+    // wearing whichever user happened to log in last. Everything downstream
+    // is handed the resolved `&Theme`, through the sheet that carries it.
+    // Since I-1 the resolution is a bundle (HALCYON-INSTRUMENT 4.1): the
+    // system profile word and the system theme file, no user tier.
+    let system_profile =
+        chromeset::read_file(T_WALK_OPEN_FROM_ROOT, libhalcyon::instrument::SYSTEM_PROFILE_PATH);
+    let system_file =
+        chromeset::read_file(T_WALK_OPEN_FROM_ROOT, libhalcyon::theme::SYSTEM_THEME_PATH);
+    let resolved = libhalcyon::instrument::resolve_bundle(libhalcyon::instrument::Sources {
+        system_profile: system_profile.as_deref(),
+        system_file: system_file.as_deref(),
+        ..Default::default()
+    });
+    for n in &resolved.notes {
+        say!("halcyond: {}", n);
+    }
+    // One line naming the theme in force, on every path including the absent
+    // one -- the witness that this renderer's load path ran at all.
+    say!(
+        "halcyond: theme {} ({:?}, {:?}); profile {} ({:?})",
+        if resolved.name.is_empty() {
+            "built-in"
+        } else {
+            &resolved.name
+        },
+        resolved.theme_tier,
+        resolved.schema,
+        resolved.bundle.profile.word(),
+        resolved.profile_tier
+    );
+    // HALCYON-INSTRUMENT 8.1: the theme's name, the rail's theme control.
+    let theme_name = if resolved.name.is_empty() {
+        alloc::string::String::from("built-in")
+    } else {
+        resolved.name.clone()
+    };
+    let bundle = resolved.bundle;
+    let theme = bundle.theme;
+    // The compositor cannot read this file. Measured 2026-09-09 on the
+    // Nightjar lever: `tapestryd: theme built-in (no /lib/halcyon/theme.toml)`
+    // while THIS process, started later, loaded the very same path -- because
+    // tapestryd comes up before the pool it lives in is mounted. So the
+    // chrome kept Daylight's bevel and floor around a Nightjar pane, and
+    // nothing failed, which is how it would have shipped.
+    //
+    // The renderer is admitted to the `theme` verb unconditionally
+    // (`peer_is_renderer`), so it pushes too -- the session's push is for the
+    // USER tier, this one is for the system tier the compositor could not
+    // reach in time.
+    // The SAME helper the session uses, deliberately: this had its own inline
+    // version with no `Busy` arm, so a push arriving in a service pass whose
+    // per-pass layout budget was already spent got one attempt and gave up
+    // permanently -- on the very path that exists because the compositor
+    // cannot read the file itself.
+    session::push_theme(&ring, &bundle);
+    let mut sheet = sheet_for(&bundle, display.scale, display.w);
+    gs.set_smooth(sheet.smooth_mem);
+    gs.set_kerning(sheet.kerning);
+    {
+        let (cw, ch, _) = gs.mono_cell();
+        say!(
+            "halcyond: scale {} (cell {}x{}, atlas bound {} pages)",
+            display.scale,
+            cw,
+            ch,
+            gs.evict_pages()
+        );
+    }
+    // The pen's default fg/bg MUST be the RESOLVED theme's, never a constant.
+    // halcyond's semantic hooks are equality tests against the sheet --
+    // `st.fg == sheet.ink` gates em-dim, object colouring and the raw dim
+    // step, and `st.bg != sheet.theme.terminal.bg` decides "this cell has a
+    // background". Seeded from a different theme's palette, every one of those
+    // comparisons is false under any non-Daylight theme: the hooks go silently
+    // dead and the foreign ground paints through as a literal colour. This
+    // line said `daylight_palette()` until the TH-6 round, twelve lines after
+    // the resolved theme was threaded into the sheet and pushed to the
+    // compositor.
+    let mut t = Transcript::new(theme.terminal);
     let mut cache = LayoutCache::new();
 
     // The winsize report: the transcript is flowed, but programs wrap to a
     // COLUMN count -- report the mono-grid equivalent (foreign/plain
-    // content is mono, so this is the terminal-compatible answer).
-    let (cell_w, cell_h, _) = gs.mono_cell();
-    let report_winsize = |ctl: i64, w: usize, h: usize| {
+    // content is mono, so this is the terminal-compatible answer). The cell
+    // is the glyph source's CURRENT grid cell (it follows the scale).
+    let report_winsize = |ctl: i64, w: usize, h: usize, gs: &GlyphSource| {
+        let (cell_w, cell_h, _) = gs.mono_cell();
         let cols = (w as i32 / cell_w).max(1);
         let rows = (h as i32 / cell_h).max(1);
         let cmd = alloc::format!("winsize {} {}", cols, rows);
         let _ = write_ctl(ctl, &cmd);
     };
-    report_winsize(consctl, w, h);
+    report_winsize(consctl, w, h, &gs);
 
     let mut mode = Mode::Insert;
     let mut scroll_up: i32 = 0; // px above the bottom anchor (0 = anchored)
+    // 7.7: whether the last frame reserved the indicator's lane (the
+    // content overflowed the view); the layout width follows it.
+    let mut lane_reserved = false;
     let mut last_seq: u64 = u64::MAX;
     let mut dirty = true;
     // Helix-modal selection (v0, row-wise): the flat row list + the
@@ -458,11 +523,80 @@ pub extern "C" fn rs_main() -> i64 {
         // (0b) Retry held input unconditionally (#129/#135).
         feed_drain(feed, &mut feed_pending, &mut feed_dropped, &mut feed_logged);
 
+        // (0b') HALCYON-SCALE 6: the display + the scale, re-read whenever
+        // a relayout is pending -- BEFORE the render, not beside the chrome
+        // reconcile below it: the CONFIGURE that carries a scale change
+        // lands at (1), and a render at (0c) ahead of this re-read would
+        // present one frame at the OLD sheet into the re-carved surface
+        // (the scale round's F6; the session path orders it this way and
+        // never does). A scale change rebuilds the render brain: the sheet
+        // at the new percent (a new generation -- every cached layout is
+        // stale by key), the mono bakes + a fresh atlas, every cache that
+        // held a size, the winsize, a menu sized at the old scale, and a
+        // repaint of every surface (the compositor re-carved them; their
+        // CONFIGUREs deliver the new sizes).
+        if announced && relayout {
+            if let Some(di) = ring.display_info() {
+                if (di.w, di.h) != (display.w, display.h) {
+                    display.w = di.w;
+                    display.h = di.h;
+                    gs.set_display(di.w, di.h);
+                }
+                if di.scale != sheet.scale && !libhalcyon::scale::is_valid_pct(di.scale) {
+                    if scale_refused != Some(di.scale) {
+                        say!("halcyond: display scale {} refused (not in the table); keeping {}", di.scale, sheet.scale);
+                        scale_refused = Some(di.scale);
+                    }
+                } else if di.scale != sheet.scale {
+                    let from = sheet.scale;
+                    let gen = sheet.gen + 1;
+                    sheet = sheet_for(&sheet.bundle(), di.scale, di.w);
+                    sheet.gen = gen;
+                    gs.set_scale(di.scale);
+                    gs.set_smooth(sheet.smooth_mem);
+                    gs.set_kerning(sheet.kerning);
+                    display.scale = di.scale;
+                    cache.clear();
+                    frame.clear();
+                    last_open_laid = None;
+                    menus.close();
+                    chrome.invalidate();
+                    status.invalidate();
+                    rail.invalidate();
+                    report_winsize(consctl, w, h, &gs);
+                    dirty = true;
+                    let (cw, ch, _) = gs.mono_cell();
+                    say!("halcyond: scale {} -> {} (cell {}x{})", from, di.scale, cw, ch);
+                } else if di.w != sheet.display_w {
+                    // HALCYON-INSTRUMENT 7.5: the document's paddings and
+                    // H1 follow the DISPLAY width, so a resize at the same
+                    // scale rebuilds the sheet (a new generation: every
+                    // cached layout is stale by key).
+                    let gen = sheet.gen + 1;
+                    sheet = sheet_for(&sheet.bundle(), sheet.scale, di.w);
+                    sheet.gen = gen;
+                    // The source follows the sheet in force at EVERY rebuild
+                    // (r2 B-F7), not only the scale's.
+                    gs.set_smooth(sheet.smooth_mem);
+                    gs.set_kerning(sheet.kerning);
+                    cache.clear();
+                    frame.clear();
+                    last_open_laid = None;
+                    dirty = true;
+                }
+            }
+        }
+
         // (0c) Render when the transcript moved or the view is dirty
         // (pass 1 always: dirty starts true -- the first present).
         if t.seq != last_seq || dirty {
             last_seq = t.seq;
             dirty = false;
+            // The atlas bound, between frames. The layout cache does NOT
+            // key on the generation: a laid block holds codepoints, not
+            // atlas ids, so an eviction re-resolves only what the frame
+            // paints -- never re-lays the history.
+            gs.evict_if_full();
             // Evict layouts for blocks the budget dropped.
             {
                 let frozen = t.frozen_blocks();
@@ -473,28 +607,70 @@ pub extern "C" fn rs_main() -> i64 {
                 }
                 cache.evict_missing(&|id| live.contains(&id));
             }
-            let widthi = w as i32;
             // Lay everything; measure heights + each block's y RELATIVE to
             // the content top (the emit pass and the selection follow both
-            // key off it).
-            let mut heights: Vec<(u64, i32, i32)> = Vec::new(); // (id, h, rel_y)
-            let mut total: i32 = sheet.block_gap;
-            for b in t.frozen_blocks().iter() {
-                let lh = cache.get(b, widthi, &sheet, &mut gs).height;
-                heights.push((b.id, lh, total));
-                total += lh + sheet.block_gap;
-            }
-            let open_rel = total;
-            let open_laid = layout_block(t.open_block(), widthi, &sheet, &mut gs);
-            let pending_laid = layout_pending(
-                t.pending_line(),
-                &t.open_block().styles,
-                widthi,
-                &sheet,
-                &mut gs,
-            );
-            let open_h = open_laid.height + pending_laid.height;
-            total += open_h;
+            // key off it). The gap after a block depends on the pair (a
+            // prompt runs into its output as one entry) and a block that
+            // laid nothing takes none -- the same rule the tile path
+            // applies (Tile::render).
+            let gap_after = |i: usize, lh: i32| -> i32 {
+                if lh == 0 {
+                    return 0;
+                }
+                let frozen = t.frozen_blocks();
+                let this = frozen.get(i).map(|b| b.kind).unwrap_or(t.open_block().kind);
+                let next = frozen.get(i + 1).map(|b| b.kind).unwrap_or(t.open_block().kind);
+                halcyond::layout::block_gap_between(this, next, &sheet)
+            };
+            // 7.7: the indicator's lane is reserved INSIDE the viewport on
+            // overflow; the layout width follows the last frame's decision
+            // and a flip re-lays once, here (Tile::render's rule: narrowing
+            // never shortens wrapped content, so the decision is stable).
+            let lane = halcyond::indicator::lane(&sheet);
+            let mut passes = 0u8;
+            let (widthi, heights, total, open_rel, open_laid, pending_laid, open_h) = loop {
+                passes += 1;
+                let widthi = w as i32 - if lane_reserved { lane } else { 0 };
+                let mut heights: Vec<(u64, i32, i32)> = Vec::new(); // (id, h, rel_y)
+                let mut total: i32 = sheet.pad_top;
+                for (i, b) in t.frozen_blocks().iter().enumerate() {
+                    let lh = cache.get(b, widthi, &sheet, &mut gs).height;
+                    heights.push((b.id, lh, total));
+                    total += lh + gap_after(i, lh);
+                }
+                let open_rel = total;
+                let open_laid = layout_block(t.open_block(), widthi, &sheet, &mut gs);
+                let pending_laid = layout_pending(
+                    t.pending_line(),
+                    &t.open_block().styles,
+                    widthi,
+                    &sheet,
+                    &mut gs,
+                );
+                let open_h = open_laid.height + pending_laid.height;
+                total += open_h + sheet.pad_bottom;
+                let overflow = total > h as i32;
+                if lane == 0 {
+                    // No lane on this sheet: the flag clears so a later
+                    // Instrument sheet decides afresh, as the tile's does
+                    // (r2 B-F4: a stale reservation laid 8 px narrow forever).
+                    lane_reserved = false;
+                    break (widthi, heights, total, open_rel, open_laid, pending_laid, open_h);
+                }
+                if overflow == lane_reserved {
+                    break (widthi, heights, total, open_rel, open_laid, pending_laid, open_h);
+                }
+                // BOUNDED, the lane winning a disagreement (r2 B-F1; the
+                // rule and its reasons are at `Tile::render`'s loop).
+                if passes >= 2 {
+                    if lane_reserved {
+                        break (widthi, heights, total, open_rel, open_laid, pending_laid, open_h);
+                    }
+                    lane_reserved = true;
+                    continue;
+                }
+                lane_reserved = overflow;
+            };
 
             let viewh = h as i32;
             let max_up = (total - viewh).max(0);
@@ -559,7 +735,7 @@ pub extern "C" fn rs_main() -> i64 {
             cart.ops.push(cartoon::Op::Clear {
                 color: sheet.ground,
             });
-            let mut y = y0 + sheet.block_gap;
+            let mut y = y0 + sheet.pad_top;
             frame.clear();
             for (bi, b) in t.frozen_blocks().iter().enumerate() {
                 let lh = heights
@@ -583,18 +759,18 @@ pub extern "C" fn rs_main() -> i64 {
                         }
                     }
                     let laid = cache.get(b, widthi, &sheet, &mut gs);
-                    render_block(&mut cart, laid, y, &gs);
+                    render_block(&mut cart, laid, y, &mut gs);
                     if let Some(r) = run_mark(mode, sel.as_ref(), &flat, bi, laid) {
                         cart.ops.push(cartoon::Op::Rect {
                             x: r.0,
-                            y: y + r.1 + r.3 - 2,
+                            y: y + r.1 + r.3 - sheet.mark_w,
                             w: r.2.max(1) as u32,
-                            h: 2,
-                            color: libhalcyon::theme::DAYLIGHT.ember,
+                            h: sheet.mark_w as u32,
+                            color: sheet.accent,
                         });
                     }
                 }
-                y += lh + sheet.block_gap;
+                y += lh + gap_after(bi, lh);
             }
             frame.push((u64::MAX, y, open_h));
             if y + open_h >= 0 && y <= viewh {
@@ -609,20 +785,20 @@ pub extern "C" fn rs_main() -> i64 {
                         });
                     }
                 }
-                render_block(&mut cart, &open_laid, y, &gs);
+                render_block(&mut cart, &open_laid, y, &mut gs);
                 if let Some(r) = run_mark(mode, sel.as_ref(), &flat, usize::MAX, &open_laid) {
                     cart.ops.push(cartoon::Op::Rect {
                         x: r.0,
-                        y: y + r.1 + r.3 - 2,
+                        y: y + r.1 + r.3 - sheet.mark_w,
                         w: r.2.max(1) as u32,
-                        h: 2,
-                        color: libhalcyon::theme::DAYLIGHT.ember,
+                        h: sheet.mark_w as u32,
+                        color: sheet.accent,
                     });
                 }
             }
             let py = y + open_laid.height;
             last_open_laid = Some(open_laid);
-            render_block(&mut cart, &pending_laid, py, &gs);
+            render_block(&mut cart, &pending_laid, py, &mut gs);
             // The cursor: a beam at the pending column (Insert ink; Normal
             // renders it hollow-dim -- the mode is visible at a glance).
             let (cx, cy, ch2) = cursor_pos(&pending_laid, t.pending_col(), &sheet);
@@ -634,10 +810,26 @@ pub extern "C" fn rs_main() -> i64 {
             cart.ops.push(cartoon::Op::Rect {
                 x: cx,
                 y: py + cy,
-                w: 2,
-                h: ch2.max(4) as u32,
+                w: sheet.mark_w as u32,
+                h: ch2.max(sheet.ipx(4)) as u32,
                 color: ccol,
             });
+            // 7.7: the position indicator, over everything, only while the
+            // content overflows (its lane is already reserved).
+            if lane_reserved {
+                let scroll = (total - viewh) - scroll_up;
+                if let Some((x, y, tw, th)) =
+                    halcyond::indicator::thumb_rect(w as i32, 0, viewh, total, scroll, &sheet)
+                {
+                    cart.ops.push(cartoon::Op::Rect {
+                        x,
+                        y,
+                        w: tw as u32,
+                        h: th as u32,
+                        color: sheet.inst.dim,
+                    });
+                }
+            }
 
             let px = surf.pixels();
             cartoon::execute(
@@ -653,6 +845,7 @@ pub extern "C" fn rs_main() -> i64 {
                     present_fails = 0;
                     if !announced {
                         announced = true;
+                        let (cell_w, cell_h, _) = gs.mono_cell();
                         say!(
                             "halcyond: console up {}x{} px (rich transcript; mono grid {}x{})",
                             w,
@@ -684,16 +877,79 @@ pub extern "C" fn rs_main() -> i64 {
         // relayout; the pump is per pass (FRAME never queues, CONFIGURE
         // coalesces, so this is cheap when idle).
         if announced {
-            if chrome.pump() {
+            if chrome.pump(&sheet, &mut gs) {
                 relayout = true;
             }
+            // HALCYON-INSTRUMENT 9.1 / 6.5 / 14.9: the header actions, each a
+            // pane verb on the console renderer's conn (the renderer acts
+            // anywhere -- the environment's authority). The console never
+            // spawns into an empty pane, so the placard offers no action.
+            for a in chrome.take_actions() {
+                match a {
+                    ChromeAction::Focus(id) => {
+                        if chromeset::pane_verb(troot, id, "focus") {
+                            relayout = true;
+                        }
+                    }
+                    ChromeAction::Close { id, count } => {
+                        if count <= 1 {
+                            say!("halcyond: final tile is protected (pane {})", id);
+                            status.notify("FINAL TILE IS PROTECTED", true);
+                        } else if chromeset::pane_verb(troot, id, "close") {
+                            relayout = true;
+                        }
+                    }
+                    ChromeAction::Menu { id, count, x, y } => {
+                        let name = if Some(id) == chrome.own_pane() {
+                            halcyond::chrome::console_name()
+                        } else {
+                            chromeset::read_file(troot, &alloc::format!("pane/{}/tag", id))
+                                .map(|s| alloc::string::String::from(s.trim()))
+                                .unwrap_or_default()
+                        };
+                        menus.open(tile_menu(id, &name, count, false), x, y, (x, y, 0, 0), &sheet, &mut gs);
+                    }
+                    ChromeAction::OpenShell(_) => {}
+                }
+            }
+            if t.cwd() != trail_painted {
+                relayout = true;
+            }
+            // The console tile's word on itself (HALCYON-VISUAL 4.1): its
+            // program as the strip's name, its working directory as the
+            // trail; under Instrument its command facts too (the header's
+            // metadata). Captured by value: the reconcile borrows the chrome
+            // set.
+            let describe = {
+                let own = chrome.own_pane();
+                let cwd = alloc::string::String::from(t.cwd());
+                let running = t.running();
+                let last_exit = t.last_exit_code();
+                move |id: u32| {
+                    (Some(id) == own).then(|| Described {
+                        name: halcyond::chrome::console_name(),
+                        trail: cwd.clone(),
+                        fate: halcyond::chrome::Fate::Live,
+                        running,
+                        last_exit,
+                        dirty: false,
+                    })
+                }
+            };
             if relayout {
                 relayout = false;
-                chrome.reconcile(troot, surf.id, &mut gs);
-                // A relayout re-arms the status bar's mint retry (H-3d F5):
-                // a prior mint failure may now succeed, ChromeSet's cadence.
-                status.rearm();
+                chrome.reconcile(troot, surf.id, &sheet, &mut gs, &describe, false);
+                trail_painted = alloc::string::String::from(t.cwd());
+                hints = hints_from_chords(&chromeset::read_file(troot, "chords").unwrap_or_default());
             }
+            // The status bar's mint retry, UNCONDITIONALLY (TY-6 F8; it
+            // was inside the `relayout` arm above): a session taking the
+            // display's bar refuses this console's mint, and the console
+            // is not reliably fanned a relayout when the session ends --
+            // its own surface can hold one full-display rect across the
+            // whole session. Free while the bar is up (`rearm` returns at
+            // once), one refused mint per pass while it is down.
+            status.rearm();
             // The status feed: tell the compositor the console tile's last
             // exit (it draws the live hairline + shadow from it; the strip
             // re-reads it on the reconcile below). Rides the console
@@ -704,7 +960,7 @@ pub extern "C" fn rs_main() -> i64 {
                 let st = if code == 0 { "ok" } else { "err" };
                 pending_exit = None;
                 match surf.global_ctl(&alloc::format!("tag {} status {}", pane, st)) {
-                    Ok(()) => chrome.reconcile(troot, surf.id, &mut gs),
+                    Ok(()) => chrome.reconcile(troot, surf.id, &sheet, &mut gs, &describe, false),
                     Err(e) => {
                         if !status_refusal_said {
                             status_refusal_said = true;
@@ -719,15 +975,99 @@ pub extern "C" fn rs_main() -> i64 {
             // leaf's name + status (the last reconcile), the console's
             // directory + running-or-last command (the transcript), the
             // minute -- and painted only on a change.
-            status.ensure();
+            status.ensure(&sheet);
             status.pump();
+            let notice = status.notice();
             let sm = statusset::model_from(
                 chrome.focused(),
                 chrome.own_pane(),
                 t.cwd(),
                 t.last_command(),
+                t.last_exit_code(),
+                notice,
+                t.running(),
+                chrome.pane_count(),
+                hints.clone(),
             );
-            status.refresh(&sm, &mut gs);
+            status.refresh(&sm, &sheet, &mut gs);
+            // HALCYON-INSTRUMENT 8.1: the top rail -- its context is the
+            // focused tile's directory and name (the console's own, or
+            // another leaf's tag), the theme in force, the minute; its
+            // buttons act here as the renderer (pane ctl), the picker and
+            // the help say what they are not yet.
+            rail.rearm();
+            rail.ensure(&sheet);
+            let _ = rail.pump(&sheet, &mut gs);
+            let (cwd, title) = match chrome.focused() {
+                Some((id, _, _)) if Some(*id) == chrome.own_pane() => {
+                    (alloc::string::String::from(t.cwd()), halcyond::chrome::console_name())
+                }
+                Some((_, name, _)) => (alloc::string::String::new(), name.clone()),
+                None => (alloc::string::String::new(), alloc::string::String::new()),
+            };
+            let (hour, minute) = statusset::clock_hm();
+            let rm = RailModel {
+                cwd,
+                title,
+                theme: theme_name.clone(),
+                hour,
+                minute,
+                ..RailModel::empty()
+            };
+            rail.refresh(&rm, &sheet, &mut gs);
+            for a in rail.take_actions() {
+                match a {
+                    railset::RailAction::SplitH | railset::RailAction::SplitV => {
+                        let verb = if a == railset::RailAction::SplitH { "split h" } else { "split v" };
+                        if let Some((id, _, _)) = chrome.focused() {
+                            if chromeset::pane_verb(troot, *id, verb) {
+                                relayout = true;
+                            } else {
+                                status.notify("SPLIT REFUSED", true);
+                            }
+                        }
+                    }
+                    railset::RailAction::Reset => {
+                        let plan = chromeset::read_file(troot, "layout")
+                            .map(|l| reset_plan(&l))
+                            .unwrap_or_default();
+                        say!("halcyond: reset: {} verb(s)", plan.len());
+                        let planned = plan.len();
+                        let mut landed = 0usize;
+                        // One retry budget for the whole plan (r2 C-F8).
+                        let mut budget = chromeset::VerbBudget::pass();
+                        for (id, verb) in plan {
+                            if chromeset::pane_verb_in(troot, id, &verb, &mut budget) {
+                                relayout = true;
+                                landed += 1;
+                            }
+                        }
+                        // The notice tells the truth: a plan no verb of which
+                        // landed is a refused reset (the r1 B-F3 finding), and
+                        // one half of which landed is a PARTIAL one (r2 C-F8).
+                        if planned == 0 || landed == planned {
+                            status.notify("LAYOUT RESET", false);
+                        } else if landed > 0 {
+                            status.notify("LAYOUT RESET (PARTIAL)", true);
+                        } else {
+                            status.notify("RESET REFUSED", true);
+                        }
+                    }
+                    railset::RailAction::Theme => {
+                        say!("halcyond: the theme picker is not available yet");
+                        status.notify("THEME PICKER NOT AVAILABLE", true);
+                    }
+                    railset::RailAction::Help => {
+                        say!("halcyond: the keyboard reference is not available yet");
+                        status.notify("HELP NOT AVAILABLE", true);
+                    }
+                    railset::RailAction::Workspaces { x, y } => {
+                        menus.open(workspace_menu(1, 0), x, y, (x, y, 0, 0), &sheet, &mut gs);
+                    }
+                    railset::RailAction::Workspace(n) => say!("halcyond: workspace {} is active", n as u32 + 1),
+                    railset::RailAction::ChipsScroll(_) => {}
+                }
+            }
         }
 
         // (0e) H-3c: the menu. A choice closes it from this side and types
@@ -737,7 +1077,7 @@ pub extern "C" fn rs_main() -> i64 {
         // While a menu is up `MenuSet::service` drains the menu's events
         // NON-blockingly off the one shared ring (the H-3c-2 event set);
         // the loop's unified poll wakes for them like the console's own.
-        match menus.service(&mut gs) {
+        match menus.service(&sheet, &mut gs) {
             menuset::MenuEvent::Chosen(Action::Command(cmd)) => {
                 menus.close();
                 say!("halcyond: menu ran: {}", cmd);
@@ -755,6 +1095,41 @@ pub extern "C" fn rs_main() -> i64 {
                 feed_pending.extend_from_slice(cmd.as_bytes());
                 feed_pending.push(b'\n');
                 feed_drain(feed, &mut feed_pending, &mut feed_dropped, &mut feed_logged);
+            }
+            menuset::MenuEvent::Chosen(Action::Internal(act)) if act.starts_with("workspace ") => {
+                // HALCYON-INSTRUMENT 14.1: the workspace list's choice -- one
+                // workspace exists, and it is the active one.
+                menus.close();
+                say!("halcyond: workspace {} is active", act["workspace ".len()..].trim());
+                dirty = true;
+            }
+            menuset::MenuEvent::Chosen(Action::Internal(act)) if act.starts_with("tile ") => {
+                // HALCYON-INSTRUMENT 14.9: the tile verb menu's choice --
+                // `tile close <id>` under the final-tile rule; a restart has
+                // no meaning for the console's own tile.
+                menus.close();
+                let mut it = act["tile ".len()..].split_ascii_whitespace();
+                match (it.next(), it.next().and_then(|v| v.parse::<u32>().ok())) {
+                    (Some("close"), Some(id)) => {
+                        let count = chromeset::read_file(troot, "layout")
+                            .map(|l| {
+                                halcyond::chrome::parse_tree(&l)
+                                    .iter()
+                                    .find(|x| x.leaf.id == id)
+                                    .map_or(1, |x| x.count)
+                            })
+                            .unwrap_or(1);
+                        if count <= 1 {
+                            say!("halcyond: final tile is protected (pane {})", id);
+                            status.notify("FINAL TILE IS PROTECTED", true);
+                        } else if chromeset::pane_verb(troot, id, "close") {
+                            relayout = true;
+                        }
+                    }
+                    (Some(verb), Some(id)) => say!("halcyond: tile {} {} is not available here", verb, id),
+                    _ => say!("halcyond: malformed tile action {}", act),
+                }
+                dirty = true;
             }
             menuset::MenuEvent::Chosen(Action::Internal(act)) => {
                 // THE GATE's lever (test builds only, the #880 strip class):
@@ -834,7 +1209,12 @@ pub extern "C" fn rs_main() -> i64 {
                             revents: 0,
                         },
                     ];
-                    if unsafe { t_poll(waitfds.as_mut_ptr(), 2, -1) } < 0 {
+                    // A transient status notice expires on the clock (8.2):
+                    // wake for it, so the live model returns; and the
+                    // rails' clocks turn with the minute.
+                    let clock = statusset::clock_timeout_ms();
+                    let timeout = status.notice_timeout_ms().map_or(clock, |ms| ms.min(clock));
+                    if unsafe { t_poll(waitfds.as_mut_ptr(), 2, timeout) } < 0 {
                         say!("halcyond: unified poll failed (compositor gone); exiting");
                         return 1;
                     }
@@ -866,7 +1246,7 @@ pub extern "C" fn rs_main() -> i64 {
                                     s.clamp(flat.len());
                                 }
                             }
-                            let page_rows = ((h as i32 / cell_h) / 2).max(1);
+                            let page_rows = ((h as i32 / gs.mono_cell().1) / 2).max(1);
                             let act = normal_key(e.code, e.rune);
                             match act {
                                 NormalAct::ScrollLines(n) => {
@@ -1005,7 +1385,7 @@ pub extern "C" fn rs_main() -> i64 {
                                                     gy + by + ry,
                                                     rw,
                                                     rh,
-                                                    cell_h
+                                                    gs.mono_cell().1
                                                 );
                                             }
                                         }
@@ -1073,6 +1453,7 @@ pub extern "C" fn rs_main() -> i64 {
                                                         rx,
                                                         by + ry + rh,
                                                         (rx, by + ry, rw, rh),
+                                                        &sheet,
                                                         &mut gs,
                                                     );
                                                 }
@@ -1177,6 +1558,7 @@ pub extern "C" fn rs_main() -> i64 {
                                         ptr.0,
                                         ptr.1,
                                         (rx, by + ry, rw, rh),
+                                        &sheet,
                                         &mut gs,
                                     );
                                 }
@@ -1200,8 +1582,8 @@ pub extern "C" fn rs_main() -> i64 {
                             // Width changed: every cached layout is stale
                             // by key; drop them wholesale (the reflow
                             // E2E's moment).
-                            cache.map.clear();
-                            report_winsize(consctl, w, h);
+                            cache.clear();
+                            report_winsize(consctl, w, h, &gs);
                             dirty = true;
                             relayout = true;
                         }

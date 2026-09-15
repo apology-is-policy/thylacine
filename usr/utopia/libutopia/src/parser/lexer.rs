@@ -363,6 +363,21 @@ impl<'a> Lexer<'a> {
                 }
                 break;
             }
+            if b == b'!' {
+                // Plan 9 spells a network address `host!port`, so `!`
+                // has to survive inside a word; a trailing one is
+                // ordinary text (`echo done!`). `!=` is the only
+                // operator that can follow a word, so it is the only
+                // reason to stop. A token-initial `!` never reaches
+                // here -- the dispatcher only enters scan_word on a
+                // word char -- so unary NOT is untouched.
+                if self.peek_byte_at(1) == Some(b'=') {
+                    break;
+                }
+                text.push('!');
+                self.pos += 1;
+                continue;
+            }
             if is_word_char_byte(b) {
                 let char_len = self.peek_char_len();
                 text.push_str(&self.source[self.pos..self.pos + char_len]);
@@ -1228,6 +1243,59 @@ mod tests {
         assert_eq!(
             kinds_no_eof("cmd ?"),
             vec![TokenKind::Word("cmd".into()), TokenKind::Question]
+        );
+    }
+
+    #[test]
+    fn bang_stays_inside_a_word() {
+        // A Plan 9 dial string is one argument, not word-Bang-word.
+        assert_eq!(
+            kinds_no_eof("10.0.2.2!5640"),
+            vec![TokenKind::Word("10.0.2.2!5640".into())]
+        );
+        assert_eq!(
+            kinds_no_eof("tcp!host!port"),
+            vec![TokenKind::Word("tcp!host!port".into())]
+        );
+        // A trailing `!` is ordinary text -- there is no postfix `!`
+        // operator, unlike `?`.
+        assert_eq!(
+            kinds_no_eof("echo done!"),
+            vec![
+                TokenKind::Word("echo".into()),
+                TokenKind::Word("done!".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn bang_still_yields_not_equal_and_unary_not() {
+        // `!=` after a word must stay an operator, spaced or not.
+        assert_eq!(
+            kinds_no_eof("a!=b"),
+            vec![
+                TokenKind::Word("a".into()),
+                TokenKind::NotEqual,
+                TokenKind::Word("b".into()),
+            ]
+        );
+        assert_eq!(
+            kinds_no_eof("a != b"),
+            vec![
+                TokenKind::Word("a".into()),
+                TokenKind::NotEqual,
+                TokenKind::Word("b".into()),
+            ]
+        );
+        // Unary NOT is always token-initial, so it never entered
+        // scan_word and is unaffected.
+        assert_eq!(
+            kinds_no_eof("!x"),
+            vec![TokenKind::Bang, TokenKind::Word("x".into())]
+        );
+        assert_eq!(
+            kinds_no_eof("! x"),
+            vec![TokenKind::Bang, TokenKind::Word("x".into())]
         );
     }
 

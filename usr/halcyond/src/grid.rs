@@ -32,6 +32,11 @@ pub struct Grid {
     /// normal-mode proportional render can rejoin soft-wrapped rows into logical
     /// lines (the live analogue of `push_scrolled_rows`, PL-3). Length == `rows`.
     wrapped: Vec<bool>,
+    /// The producer's flag for the row ABOVE row 0 (`Vt::top_continues`,
+    /// carried on the CellDiff): the scrolled-off fragment the transcript
+    /// holds continues into row 0. `wrapped[-1]`, the one flag the vector
+    /// cannot carry.
+    top_continues: bool,
     /// blank fill for clears / the grown region on resize.
     fg: u32,
     bg: u32,
@@ -54,6 +59,7 @@ impl Grid {
             ],
             cursor: (0, 0, true),
             wrapped: vec![false; rows],
+            top_continues: false,
             fg,
             bg,
         }
@@ -90,6 +96,13 @@ impl Grid {
     /// iff grid row y ended by autowrap and continues into y+1.
     pub fn wrapped(&self) -> &[bool] {
         &self.wrapped
+    }
+
+    /// Whether the row that last scrolled off continues into row 0 (the
+    /// producer's `Vt::top_continues`, as last reported): the live render
+    /// joins the transcript's held fragment to row 0 exactly then.
+    pub fn top_continues(&self) -> bool {
+        self.top_continues
     }
 
     /// The whole grid, row-major (`rows * cols`) -- the PL-4 proportional render
@@ -132,6 +145,7 @@ impl Grid {
         changed: &[(u16, u16, Cell)],
         cursor: (u16, u16, bool),
         wrapped: &[bool],
+        top_continues: bool,
     ) {
         for &(r, c, cell) in changed {
             let (r, c) = (r as usize, c as usize);
@@ -148,13 +162,43 @@ impl Grid {
         for i in 0..self.rows {
             self.wrapped[i] = wrapped.get(i).copied().unwrap_or(false);
         }
+        self.top_continues = top_continues;
     }
 
     /// Resize to new dims (halcyond drives this on a tile relayout; the tile
-    /// then repaints with a full CellDiff). Preserve the overlapping top-left
-    /// block so the frame between resize and that repaint does not flash, blank
-    /// the grown region, and clamp the cursor into the new dims.
-    pub fn resize(&mut self, cols: usize, rows: usize) {
+    /// then repaints with a full CellDiff), so the frame between the resize
+    /// and that repaint does not flash. With `reflow` (the normal screen) the
+    /// mirror re-cuts its rows exactly as the producer's vt will
+    /// (`vt::reflow`, the one algorithm both run), so that frame already
+    /// shows the re-wrapped lines the repaint then confirms; the rows the
+    /// cursor anchor slides past are dropped here -- the producer's own
+    /// ScrollOff delivers them -- and until it does the top flag is cleared,
+    /// since the transcript's held fragment is not yet row 0's head.
+    /// Without it (the alt screen, which the TUI repaints) the overlapping
+    /// top-left block is preserved, the grown region blanked, and the
+    /// cursor clamped into the new dims.
+    pub fn resize(&mut self, cols: usize, rows: usize, reflow: bool) {
+        if reflow && cols > 0 && rows > 0 {
+            let (cr, cc, cv) = self.cursor();
+            let rf = vt::reflow(
+                &self.cells,
+                &self.wrapped,
+                self.cols,
+                self.rows,
+                (cc, cr),
+                self.top_continues,
+                cols,
+                rows,
+                self.blank(),
+            );
+            self.cells = rf.cells;
+            self.wrapped = rf.wrapped;
+            self.cols = cols;
+            self.rows = rows;
+            self.cursor = (rf.cursor.1 as u16, rf.cursor.0.min(cols - 1) as u16, cv);
+            self.top_continues = rf.scrolled.is_empty() && rf.top_continues;
+            return;
+        }
         let blank = self.blank();
         let mut next = vec![blank; cols * rows];
         let copy_rows = self.rows.min(rows);
@@ -215,7 +259,7 @@ mod tests {
     #[test]
     fn celldiff_writes_and_moves_cursor() {
         let mut g = Grid::new(4, 2, 0xFFFFFF, 0);
-        g.apply_celldiff(&[(0, 1, c('h')), (1, 3, c('i'))], (1, 3, true), &[false, false]);
+        g.apply_celldiff(&[(0, 1, c('h')), (1, 3, c('i'))], (1, 3, true), &[false, false], false);
         assert_eq!(g.row(0)[1].ch, 'h');
         assert_eq!(g.row(1)[3].ch, 'i');
         assert_eq!(g.row(0)[0].ch, ' ', "untouched cell stays blank");
@@ -225,7 +269,7 @@ mod tests {
     #[test]
     fn celldiff_last_write_to_a_cell_wins() {
         let mut g = Grid::new(3, 1, 0xFFFFFF, 0);
-        g.apply_celldiff(&[(0, 0, c('a')), (0, 0, c('b'))], (0, 1, true), &[false]);
+        g.apply_celldiff(&[(0, 0, c('a')), (0, 0, c('b'))], (0, 1, true), &[false], false);
         assert_eq!(g.row(0)[0].ch, 'b');
     }
 
@@ -237,6 +281,7 @@ mod tests {
             &[(9, 0, c('x')), (0, 9, c('y')), (1, 1, c('z'))],
             (9, 9, true),
             &[false, false],
+            false,
         );
         assert_eq!(g.row(1)[1].ch, 'z', "the in-bounds write still landed");
         // an out-of-range cursor is clamped by the accessor, never indexes.
@@ -246,15 +291,15 @@ mod tests {
     #[test]
     fn resize_preserves_overlap_blanks_growth_clamps_cursor() {
         let mut g = Grid::new(3, 2, 0xFFFFFF, 0);
-        g.apply_celldiff(&[(0, 0, c('a')), (1, 2, c('b'))], (1, 2, true), &[false, false]);
+        g.apply_celldiff(&[(0, 0, c('a')), (1, 2, c('b'))], (1, 2, true), &[false, false], false);
         // shrink to 2x1: (0,0)='a' kept; (1,2)='b' falls outside; cursor clamps.
-        g.resize(2, 1);
+        g.resize(2, 1, false);
         assert_eq!(g.dims(), (2, 1));
         assert_eq!(g.row(0)[0].ch, 'a');
         assert_eq!(g.row(0)[1].ch, ' ');
         assert_eq!(g.cursor(), (0, 1, true), "cursor clamped into 2x1");
         // grow to 4x3: old top-left kept, new region blank.
-        g.resize(4, 3);
+        g.resize(4, 3, false);
         assert_eq!(g.dims(), (4, 3));
         assert_eq!(g.row(0)[0].ch, 'a', "overlap preserved across grow");
         assert_eq!(g.row(2)[3].ch, ' ', "grown region blank");
@@ -265,16 +310,16 @@ mod tests {
         // PL-4: the grid holds the per-row soft-wrap snapshot the CellDiff
         // carries, pinned to `rows`; resize preserves it for the kept rows.
         let mut g = Grid::new(4, 3, 0xFFFFFF, 0);
-        g.apply_celldiff(&[], (0, 0, true), &[true, false, true]);
+        g.apply_celldiff(&[], (0, 0, true), &[true, false, true], false);
         assert_eq!(g.wrapped(), &[true, false, true]);
         // a short wire vec pads false to `rows` (never indexes past the grid).
-        g.apply_celldiff(&[], (0, 0, true), &[true]);
+        g.apply_celldiff(&[], (0, 0, true), &[true], false);
         assert_eq!(g.wrapped(), &[true, false, false]);
         // shrink keeps the top rows' flags; grow blanks the new rows false.
-        g.apply_celldiff(&[], (0, 0, true), &[true, true, true]);
-        g.resize(4, 2);
+        g.apply_celldiff(&[], (0, 0, true), &[true, true, true], false);
+        g.resize(4, 2, false);
         assert_eq!(g.wrapped(), &[true, true]);
-        g.resize(4, 4);
+        g.resize(4, 4, false);
         assert_eq!(g.wrapped(), &[true, true, false, false]);
     }
 
@@ -285,11 +330,11 @@ mod tests {
         // are not painted.
         let mut g = Grid::new(4, 4, 0xFFFFFF, 0);
         assert_eq!(g.content_rows(), 1, "blank grid, cursor home -> 1 row");
-        g.apply_celldiff(&[(1, 0, c('x'))], (1, 1, true), &[]);
+        g.apply_celldiff(&[(1, 0, c('x'))], (1, 1, true), &[], false);
         assert_eq!(g.content_rows(), 2, "content + cursor on row 1 -> 2 rows");
         // cursor past the content still extends through the cursor.
         let mut g2 = Grid::new(4, 4, 0xFFFFFF, 0);
-        g2.apply_celldiff(&[], (3, 0, true), &[]);
+        g2.apply_celldiff(&[], (3, 0, true), &[], false);
         assert_eq!(g2.content_rows(), 4, "cursor at row 3 -> 4 rows even if blank");
     }
 
@@ -297,5 +342,80 @@ mod tests {
     fn row_out_of_range_is_empty() {
         let g = Grid::new(3, 2, 0xFFFFFF, 0);
         assert!(g.row(5).is_empty());
+    }
+
+    #[test]
+    fn a_normal_screen_resize_reflows_and_the_alt_screen_crops() {
+        // The mirror at a CONFIGURE, before the producer's repaint lands:
+        // the normal screen re-cuts its soft-wrapped line at the new width
+        // (the frame in between shows the line whole), the alt screen keeps
+        // the old top-left crop (its TUI repaints).
+        let row = |s: &str, r: u16| -> Vec<(u16, u16, Cell)> {
+            s.chars().enumerate().map(|(i, ch)| (r, i as u16, c(ch))).collect()
+        };
+        let mut g = Grid::new(10, 4, 0xFFFFFF, 0);
+        let mut changed = row("prompt> ab", 0);
+        changed.extend(row("c", 1));
+        g.apply_celldiff(&changed, (1, 1, true), &[true, false, false, false], false);
+        g.resize(6, 4, true);
+        let text = |g: &Grid, r: usize| g.row(r).iter().map(|c| c.ch).collect::<alloc::string::String>();
+        assert_eq!(text(&g, 0), "prompt");
+        assert_eq!(text(&g, 1), "> abc ");
+        assert_eq!(g.wrapped(), &[true, false, false, false]);
+        assert_eq!(g.cursor(), (1, 5, true), "the cursor keeps its logical cell");
+        // The same grid as an alt screen: cropped, flags kept, cursor clamped.
+        let mut g = Grid::new(10, 4, 0xFFFFFF, 0);
+        g.apply_celldiff(&changed, (1, 1, true), &[true, false, false, false], false);
+        g.resize(6, 4, false);
+        assert_eq!(text(&g, 0), "prompt");
+        assert_eq!(text(&g, 1), "c     ");
+        assert_eq!(g.wrapped(), &[true, false, false, false]);
+    }
+
+    #[test]
+    fn the_mirror_reflow_agrees_with_the_producer_cell_for_cell() {
+        // One algorithm, two runners: whatever the producer's vt makes of a
+        // resize, the mirror makes of the same screen -- cells, flags and
+        // cursor -- so the frame before the repaint IS the repaint.
+        let mut v = vt::Vt::new(40, 6);
+        v.feed(b"Super+H / Super+V split, Super+F zooms; halcyon layout save <name> keeps an arrangement\r\nls\r\n");
+        let mut g = Grid::new(40, 6, v.pal.fg, v.pal.bg);
+        let all: Vec<(u16, u16, Cell)> = v
+            .cells
+            .iter()
+            .enumerate()
+            .map(|(i, c)| ((i / 40) as u16, (i % 40) as u16, *c))
+            .collect();
+        g.apply_celldiff(&all, (v.cy as u16, v.cx as u16, true), v.wrapped(), false);
+        for &(w, h) in &[(17usize, 6usize), (100, 3), (9, 30), (40, 6)] {
+            v.resize(w, h);
+            g.resize(w, h, true);
+            assert_eq!(g.cells(), &v.cells[..], "{w}x{h}");
+            assert_eq!(g.wrapped(), v.wrapped(), "{w}x{h}");
+            assert_eq!(g.cursor().0, v.cy, "{w}x{h}");
+            assert_eq!(g.cursor().1, v.cx.min(w - 1), "{w}x{h}");
+        }
+    }
+
+    #[test]
+    fn a_mirror_reflow_that_slides_rows_off_clears_the_top_flag_until_the_repaint() {
+        // The rows the anchor slides past are the producer's ScrollOff to
+        // deliver; until it lands the transcript's held fragment is not row
+        // 0's head, so the join is off. A reflow that slides nothing keeps
+        // the flag it was told.
+        let row = |s: &str, r: u16| -> Vec<(u16, u16, Cell)> {
+            s.chars().enumerate().map(|(i, ch)| (r, i as u16, c(ch))).collect()
+        };
+        let mut g = Grid::new(8, 2, 0xFFFFFF, 0);
+        let mut changed = row("abcdefgh", 0);
+        changed.extend(row("ij", 1));
+        g.apply_celldiff(&changed, (1, 2, true), &[true, false], true);
+        assert!(g.top_continues());
+        g.resize(10, 2, true); // "abcdefghij" fits row 0: nothing slides
+        assert!(g.top_continues(), "kept: row 0 still starts the same line");
+        g.resize(4, 2, true); // abcd|efgh|ij: the cursor row 2 slides one off
+        assert!(!g.top_continues(), "cleared until the producer's ScrollOff + repaint");
+        g.apply_celldiff(&[], (1, 2, true), &[true, false], true);
+        assert!(g.top_continues(), "the repaint restores the producer's answer");
     }
 }

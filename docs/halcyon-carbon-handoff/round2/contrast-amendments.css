@@ -1,0 +1,70 @@
+/* Overlay only for revised native target, NEVER for historical v5 goldens. */
+:root[data-theme="signal"] {
+  --dim: #7A807D;
+  --syntax-number: #997849;
+  --syntax-comment: #797F7C;
+}
+:root[data-theme="abyssal"] {
+  --dim: #6F817D;
+  --syntax-number: #5D857D;
+  --syntax-comment: #6F817D;
+}
+:root[data-theme="oxide"] {
+  --dim: #857A72;
+  --syntax-number: #66807A;
+  --syntax-comment: #837970;
+}
+:root[data-theme="combine"] {
+  --dim: #6F7F84;
+  --syntax-number: #678087;
+  --syntax-comment: #6E7E84;
+}
+:root[data-theme="deusex"] {
+  --dim: #6D7D8B;
+  --syntax-number: #857A59;
+  --syntax-attribute: #AC6860;
+  --syntax-comment: #6C7D8A;
+}
+:root[data-theme="shock"] {
+  --dim: #817786;
+  --syntax-number: #86748D;
+  --syntax-attribute: #B66166;
+  --syntax-comment: #817786;
+}
+:root[data-theme="sin"] {
+  --dim: #727F75;
+  --syntax-number: #957463;
+  --syntax-attribute: #B86458;
+  --syntax-comment: #717E75;
+}
+:root[data-theme="mesa"] {
+  --dim: #777F76;
+  --syntax-number: #8D7854;
+  --syntax-attribute: #AD695F;
+  --syntax-comment: #757D75;
+}
+:root[data-theme="strogg"] {
+  --dim: #827A72;
+  --syntax-keyword: #AD6752;
+  --syntax-number: #967168;
+  --syntax-attribute: #BD5D54;
+  --syntax-comment: #80786F;
+}
+:root[data-theme="genera"] {
+  --dim: #5C635F;
+  --syntax-function: #4C6C56;
+  --syntax-number: #5B657A;
+  --syntax-comment: #5F6662;
+}
+:root[data-theme="mineral"] {
+  --dim: #57615B;
+  --syntax-function: #43694D;
+  --syntax-number: #496661;
+  --syntax-comment: #59635D;
+}
+:root[data-theme="logic"] {
+  --dim: #645C56;
+  --syntax-function: #4D6650;
+  --syntax-number: #6B5B6D;
+  --syntax-comment: #675F59;
+}

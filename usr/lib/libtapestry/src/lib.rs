@@ -141,6 +141,11 @@ pub const TEV_CLOSE: u16 = 8;
 /// without this the new empties waited for an unrelated event. `value` is
 /// the layout epoch.
 pub const TEV_LAYOUT: u16 = 10;
+/// The pointer left this CHROME surface (HALCYON-INSTRUMENT 9.1, I-3): sent
+/// only to a `Role::Chrome` surface, when the compositor's routing moves off
+/// it -- onto another surface, the desktop, a track, or a placed menu's grab.
+/// A header un-hovers on it; content surfaces never receive it.
+pub const TEV_PTR_LEAVE: u16 = 11;
 
 /// A decoded tevent record (section 18.4; 24 bytes on the wire).
 #[derive(Clone, Copy, Debug)]
@@ -174,10 +179,31 @@ pub enum TapError {
     Loom,
     Present,
     Closed,
-    /// A resize ack answered E_AGAIN: the serial went stale (a newer
-    /// CONFIGURE superseded it -- drain events and ack that one) or a
-    /// prior reweave is still draining (present a frame, then re-ack).
+    /// The compositor answered E_AGAIN -- routine backpressure, RETRY.
+    /// Either a resize ack whose serial went stale (a newer CONFIGURE
+    /// superseded it -- drain events and ack that one), a prior reweave still
+    /// draining (present a frame, then re-ack), or a ctl verb that landed in a
+    /// service pass whose per-pass layout budget was already spent.
     Busy,
+}
+
+/// E_AGAIN as the syscall layer returns it.
+const E_AGAIN: i64 = -11;
+
+/// A negative syscall return as a `TapError`, PRESERVING E_AGAIN as `Busy`.
+///
+/// Every write path that can be budgeted must go through this. Flattening
+/// E_AGAIN into `Protocol` does not merely lose a detail -- it makes the
+/// caller's retry arm UNREACHABLE, so a routine backpressure refusal ends the
+/// operation and gets logged as a protocol error. Two `global_ctl`s shipped
+/// that way and their callers' `Busy` arms were dead code; `reweave` had the
+/// mapping inline and worked, which is what made the difference invisible.
+fn errno_to_taperror(rc: i64) -> TapError {
+    if rc == E_AGAIN {
+        TapError::Busy
+    } else {
+        TapError::Protocol
+    }
 }
 
 // The ring's ONE registered buffer: an EV_REGION-byte event landing zone per
@@ -274,10 +300,29 @@ fn parse_two(text: &str, key: &str) -> Option<(u32, u32)> {
     None
 }
 
+/// The compositor's display as its global ctl reports it: the scanout
+/// geometry and the display scale in percent (HALCYON-SCALE 4).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct DisplayInfo {
+    pub w: u32,
+    pub h: u32,
+    pub scale: u16,
+}
+
+/// One integer off the ctl line that starts with `key` (`scale 150`).
+fn parse_one(text: &str, key: &str) -> Option<u32> {
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix(key) {
+            return rest.split_ascii_whitespace().next()?.parse().ok();
+        }
+    }
+    None
+}
+
 /// What `create` mints: a hosted content surface, a Role::Chrome surface
 /// bound to a pane's tag bar (H-3b), a Role::Menu surface (H-3c), the
-/// Role::Status bar (H-3d), or a content surface steered into a claimed
-/// empty leaf (H-4b).
+/// Role::Status bar (H-3d), the Role::Rail top rail (HALCYON-INSTRUMENT
+/// 8), or a content surface steered into a claimed empty leaf (H-4b).
 #[cfg(feature = "guest")]
 #[derive(Clone, Copy)]
 enum Mint {
@@ -285,6 +330,7 @@ enum Mint {
     Chrome(u32),
     Menu,
     Status,
+    Rail,
     Claim(u128),
 }
 
@@ -344,6 +390,18 @@ impl Surface {
     /// new width on a display resize.
     pub fn status_on(ring: &EventRing, w: u32, h: u32) -> Result<Surface, TapError> {
         Self::open_on_bound(ring, w, h, Mint::Status)
+    }
+
+    /// HALCYON-INSTRUMENT 8: the Role::Rail surface on `ring` -- the
+    /// display-top rail the Instrument carve always reserves, placed there
+    /// by the compositor while it is THE registered rail. `w` must be the
+    /// display width and `h` the profile's `rail_h`, else E_INVAL; refused
+    /// under the legacy profile (no top rail exists there); one per
+    /// display; the same gate as the status bar (the renderer, or the
+    /// declared session while it hosts). Never hosted, never focusable;
+    /// pointer-routed like a header (9.1) for its buttons.
+    pub fn rail_on(ring: &EventRing, w: u32, h: u32) -> Result<Surface, TapError> {
+        Self::open_on_bound(ring, w, h, Mint::Rail)
     }
 
     /// H-4b: a W x H content surface hosted into the SPECIFIC empty leaf
@@ -422,7 +480,7 @@ impl Surface {
             None => return fail(&[ctl], TapError::Protocol),
         };
 
-        // create W H [role=chrome bind=<pane-id> | role=menu | role=status | claim=<tok>]
+        // create W H [role=chrome bind=<pane-id> | role=menu | role=status | role=rail | claim=<tok>]
         let mut cmd = alloc::string::String::new();
         let _ = core::fmt::write(&mut cmd, format_args!("create {} {}", w, h));
         match mint {
@@ -432,6 +490,7 @@ impl Surface {
             }
             Mint::Menu => cmd.push_str(" role=menu"),
             Mint::Status => cmd.push_str(" role=status"),
+            Mint::Rail => cmd.push_str(" role=rail"),
             // The 32-hex form `pane/<id>/claim` minted (the server refuses
             // any other width).
             Mint::Claim(tok) => {
@@ -578,11 +637,7 @@ impl Surface {
         let _ = core::fmt::write(&mut cmd, format_args!("resize {} {} {}", w, h, serial));
         let rc = unsafe { t_write(self.ctl, cmd.as_ptr(), cmd.len()) };
         if rc < 0 {
-            return Err(if rc == -11 {
-                TapError::Busy
-            } else {
-                TapError::Protocol
-            });
+            return Err(errno_to_taperror(rc));
         }
 
         let mut path = alloc::string::String::new();
@@ -766,7 +821,7 @@ impl Surface {
         let rc = unsafe { t_write(ctl, cmd.as_ptr(), cmd.len()) };
         unsafe { t_close(ctl) };
         if rc < 0 {
-            return Err(TapError::Protocol);
+            return Err(errno_to_taperror(rc));
         }
         Ok(())
     }
@@ -927,7 +982,13 @@ pub fn global_ctl_once(cmd: &str) -> Result<(), TapError> {
     unsafe { t_close(ctl) };
     unsafe { t_close(root) };
     if rc < 0 {
-        return Err(TapError::Protocol);
+        // Through the helper like every other ctl write, even though no verb
+        // this function carries today can return E_AGAIN: the rule is "every
+        // write path that can be budgeted goes through here", and a rule kept
+        // by the current caller's choice of verb is not kept at all. Leaving
+        // it flattened would put F3's defect back the day a pre-Surface
+        // one-shot carries `theme` or `scale`.
+        return Err(errno_to_taperror(rc));
     }
     Ok(())
 }
@@ -1096,7 +1157,7 @@ impl EventRing {
         let rc = unsafe { t_write(ctl, cmd.as_ptr(), cmd.len()) };
         unsafe { t_close(ctl) };
         if rc < 0 {
-            return Err(TapError::Protocol);
+            return Err(errno_to_taperror(rc));
         }
         Ok(())
     }
@@ -1122,6 +1183,46 @@ impl EventRing {
         unsafe { t_close(gctl) };
         let text = core::str::from_utf8(&buf[..n]).ok()?;
         parse_two(text, "display ")
+    }
+
+    /// The display geometry AND scale off ONE read of this session's global
+    /// ctl (HALCYON-SCALE 4/6: a follower re-reads both on every relayout,
+    /// so one RPC serves both). None when the ctl is unreadable or carries
+    /// no `display` line; the scale is 100 when its line is absent.
+    pub fn display_info(&self) -> Option<DisplayInfo> {
+        let root = self.root();
+        let gctl = unsafe { t_open(root, b"ctl".as_ptr(), 3, T_OREAD) };
+        if gctl < 0 {
+            return None;
+        }
+        let mut buf = [0u8; 256];
+        let n = read_all(gctl, &mut buf);
+        unsafe { t_close(gctl) };
+        let text = core::str::from_utf8(&buf[..n]).ok()?;
+        let (w, h) = parse_two(text, "display ")?;
+        let scale = parse_one(text, "scale ")
+            .and_then(|v| u16::try_from(v).ok())
+            .unwrap_or(100);
+        Some(DisplayInfo { w, h, scale })
+    }
+
+    /// HALCYON-SCALE 4: the display scale in percent off this session's
+    /// global ctl (`scale <pct>`; 100 on a compositor that predates the
+    /// line, so a follower never misreads an absent value as zero).
+    pub fn display_scale(&self) -> u16 {
+        let root = self.root();
+        let gctl = unsafe { t_open(root, b"ctl".as_ptr(), 3, T_OREAD) };
+        if gctl < 0 {
+            return 100;
+        }
+        let mut buf = [0u8; 256];
+        let n = read_all(gctl, &mut buf);
+        unsafe { t_close(gctl) };
+        core::str::from_utf8(&buf[..n])
+            .ok()
+            .and_then(|t| parse_one(t, "scale "))
+            .map(|v| v as u16)
+            .unwrap_or(100)
     }
 
     /// How many surfaces are on the ring (a retiring slot counts until its
@@ -1249,6 +1350,40 @@ impl<T> PopFirst<T> for Vec<T> {
             None
         } else {
             Some(self.remove(0))
+        }
+    }
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+
+    // The TH-6 round's F3: `global_ctl` flattened every negative return into
+    // `Protocol`, which did not merely lose a detail -- it made both callers'
+    // `Err(TapError::Busy) => retry` arms UNREACHABLE. A theme or scale push
+    // that landed in a service pass whose layout budget was already spent got
+    // one attempt, gave up, and logged routine backpressure as a protocol
+    // error. `reweave` had the mapping inline and worked, which is exactly
+    // what made the difference invisible: one path retried, two did not, and
+    // nothing compared them.
+    //
+    // This pins the mapping so there is one named place to be right. It cannot
+    // by itself prove a given call site USES it -- that is a wiring property,
+    // and the wiring's witness is that `errno_to_taperror` is now the only
+    // construction of `Busy` outside this test.
+    #[test]
+    fn e_again_survives_as_busy_so_a_retry_arm_stays_reachable() {
+        assert!(
+            matches!(errno_to_taperror(E_AGAIN), TapError::Busy),
+            "E_AGAIN must reach the caller as Busy or its retry arm is dead code"
+        );
+        // Everything else is a real failure and must NOT be retried -- a
+        // permission refusal retried 400 times is a hang, not a recovery.
+        for rc in [-1i64, -2, -13, -22, -105] {
+            assert!(
+                matches!(errno_to_taperror(rc), TapError::Protocol),
+                "rc {rc} must not be mistaken for backpressure"
+            );
         }
     }
 }

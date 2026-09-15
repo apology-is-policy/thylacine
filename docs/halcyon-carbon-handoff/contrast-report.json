@@ -1,0 +1,1094 @@
+[
+  {
+    "theme": "signal",
+    "token": "text",
+    "fg": "#E4E7E5",
+    "bg": "#101315",
+    "ratio": 14.974
+  },
+  {
+    "theme": "signal",
+    "token": "secondary",
+    "fg": "#929996",
+    "bg": "#101315",
+    "ratio": 6.411
+  },
+  {
+    "theme": "signal",
+    "token": "dim",
+    "fg": "#606764",
+    "bg": "#101315",
+    "ratio": 3.216
+  },
+  {
+    "theme": "signal",
+    "token": "syntax-keyword",
+    "fg": "#D59A42",
+    "bg": "#0F1213",
+    "ratio": 7.642
+  },
+  {
+    "theme": "signal",
+    "token": "syntax-type",
+    "fg": "#83A7A0",
+    "bg": "#0F1213",
+    "ratio": 7.167
+  },
+  {
+    "theme": "signal",
+    "token": "syntax-function",
+    "fg": "#70A17C",
+    "bg": "#0F1213",
+    "ratio": 6.341
+  },
+  {
+    "theme": "signal",
+    "token": "syntax-string",
+    "fg": "#D9B374",
+    "bg": "#0F1213",
+    "ratio": 9.541
+  },
+  {
+    "theme": "signal",
+    "token": "syntax-number",
+    "fg": "#8C6732",
+    "bg": "#0F1213",
+    "ratio": 3.674
+  },
+  {
+    "theme": "signal",
+    "token": "syntax-attribute",
+    "fg": "#C86B62",
+    "bg": "#0F1213",
+    "ratio": 5.138
+  },
+  {
+    "theme": "signal",
+    "token": "syntax-lifetime",
+    "fg": "#929996",
+    "bg": "#0F1213",
+    "ratio": 6.467
+  },
+  {
+    "theme": "signal",
+    "token": "syntax-comment",
+    "fg": "#606764",
+    "bg": "#0F1213",
+    "ratio": 3.244
+  },
+  {
+    "theme": "signal",
+    "token": "syntax-punctuation",
+    "fg": "#929996",
+    "bg": "#0F1213",
+    "ratio": 6.467
+  },
+  {
+    "theme": "carbon",
+    "token": "text",
+    "fg": "#F2F3EF",
+    "bg": "#080A0B",
+    "ratio": 17.8
+  },
+  {
+    "theme": "carbon",
+    "token": "secondary",
+    "fg": "#AFB4B0",
+    "bg": "#080A0B",
+    "ratio": 9.426
+  },
+  {
+    "theme": "carbon",
+    "token": "dim",
+    "fg": "#737A76",
+    "bg": "#080A0B",
+    "ratio": 4.51
+  },
+  {
+    "theme": "carbon",
+    "token": "syntax-keyword",
+    "fg": "#C7B98B",
+    "bg": "#090B0C",
+    "ratio": 10.087
+  },
+  {
+    "theme": "carbon",
+    "token": "syntax-type",
+    "fg": "#8EA4B8",
+    "bg": "#090B0C",
+    "ratio": 7.656
+  },
+  {
+    "theme": "carbon",
+    "token": "syntax-function",
+    "fg": "#91AA98",
+    "bg": "#090B0C",
+    "ratio": 7.896
+  },
+  {
+    "theme": "carbon",
+    "token": "syntax-string",
+    "fg": "#B99A7B",
+    "bg": "#090B0C",
+    "ratio": 7.486
+  },
+  {
+    "theme": "carbon",
+    "token": "syntax-number",
+    "fg": "#A693AD",
+    "bg": "#090B0C",
+    "ratio": 6.948
+  },
+  {
+    "theme": "carbon",
+    "token": "syntax-attribute",
+    "fg": "#B58B70",
+    "bg": "#090B0C",
+    "ratio": 6.472
+  },
+  {
+    "theme": "carbon",
+    "token": "syntax-lifetime",
+    "fg": "#9D8FA5",
+    "bg": "#090B0C",
+    "ratio": 6.486
+  },
+  {
+    "theme": "carbon",
+    "token": "syntax-comment",
+    "fg": "#77807C",
+    "bg": "#090B0C",
+    "ratio": 4.849
+  },
+  {
+    "theme": "carbon",
+    "token": "syntax-punctuation",
+    "fg": "#A6ACA8",
+    "bg": "#090B0C",
+    "ratio": 8.535
+  },
+  {
+    "theme": "abyssal",
+    "token": "text",
+    "fg": "#DCE8E5",
+    "bg": "#081215",
+    "ratio": 15.092
+  },
+  {
+    "theme": "abyssal",
+    "token": "secondary",
+    "fg": "#92A5A1",
+    "bg": "#081215",
+    "ratio": 7.33
+  },
+  {
+    "theme": "abyssal",
+    "token": "dim",
+    "fg": "#5C706C",
+    "bg": "#081215",
+    "ratio": 3.601
+  },
+  {
+    "theme": "abyssal",
+    "token": "syntax-keyword",
+    "fg": "#78AFA4",
+    "bg": "#071214",
+    "ratio": 7.658
+  },
+  {
+    "theme": "abyssal",
+    "token": "syntax-type",
+    "fg": "#7E9DB0",
+    "bg": "#071214",
+    "ratio": 6.636
+  },
+  {
+    "theme": "abyssal",
+    "token": "syntax-function",
+    "fg": "#7A9D80",
+    "bg": "#071214",
+    "ratio": 6.297
+  },
+  {
+    "theme": "abyssal",
+    "token": "syntax-string",
+    "fg": "#91BBB3",
+    "bg": "#071214",
+    "ratio": 9.011
+  },
+  {
+    "theme": "abyssal",
+    "token": "syntax-number",
+    "fg": "#507B73",
+    "bg": "#071214",
+    "ratio": 3.999
+  },
+  {
+    "theme": "abyssal",
+    "token": "syntax-attribute",
+    "fg": "#BB726E",
+    "bg": "#071214",
+    "ratio": 5.196
+  },
+  {
+    "theme": "abyssal",
+    "token": "syntax-lifetime",
+    "fg": "#92A5A1",
+    "bg": "#071214",
+    "ratio": 7.343
+  },
+  {
+    "theme": "abyssal",
+    "token": "syntax-comment",
+    "fg": "#5C706C",
+    "bg": "#071214",
+    "ratio": 3.608
+  },
+  {
+    "theme": "abyssal",
+    "token": "syntax-punctuation",
+    "fg": "#92A5A1",
+    "bg": "#071214",
+    "ratio": 7.343
+  },
+  {
+    "theme": "oxide",
+    "token": "text",
+    "fg": "#E8DED2",
+    "bg": "#110E0C",
+    "ratio": 14.479
+  },
+  {
+    "theme": "oxide",
+    "token": "secondary",
+    "fg": "#AA9C8E",
+    "bg": "#110E0C",
+    "ratio": 7.194
+  },
+  {
+    "theme": "oxide",
+    "token": "dim",
+    "fg": "#70645A",
+    "bg": "#110E0C",
+    "ratio": 3.351
+  },
+  {
+    "theme": "oxide",
+    "token": "syntax-keyword",
+    "fg": "#79A097",
+    "bg": "#0F0B09",
+    "ratio": 6.798
+  },
+  {
+    "theme": "oxide",
+    "token": "syntax-type",
+    "fg": "#B09271",
+    "bg": "#0F0B09",
+    "ratio": 6.712
+  },
+  {
+    "theme": "oxide",
+    "token": "syntax-function",
+    "fg": "#7F9D7B",
+    "bg": "#0F0B09",
+    "ratio": 6.54
+  },
+  {
+    "theme": "oxide",
+    "token": "syntax-string",
+    "fg": "#A9A48B",
+    "bg": "#0F0B09",
+    "ratio": 7.807
+  },
+  {
+    "theme": "oxide",
+    "token": "syntax-number",
+    "fg": "#526F69",
+    "bg": "#0F0B09",
+    "ratio": 3.578
+  },
+  {
+    "theme": "oxide",
+    "token": "syntax-attribute",
+    "fg": "#B56B58",
+    "bg": "#0F0B09",
+    "ratio": 4.858
+  },
+  {
+    "theme": "oxide",
+    "token": "syntax-lifetime",
+    "fg": "#AA9C8E",
+    "bg": "#0F0B09",
+    "ratio": 7.327
+  },
+  {
+    "theme": "oxide",
+    "token": "syntax-comment",
+    "fg": "#70645A",
+    "bg": "#0F0B09",
+    "ratio": 3.413
+  },
+  {
+    "theme": "oxide",
+    "token": "syntax-punctuation",
+    "fg": "#AA9C8E",
+    "bg": "#0F0B09",
+    "ratio": 7.327
+  },
+  {
+    "theme": "combine",
+    "token": "text",
+    "fg": "#D7E2E4",
+    "bg": "#091015",
+    "ratio": 14.489
+  },
+  {
+    "theme": "combine",
+    "token": "secondary",
+    "fg": "#889AA0",
+    "bg": "#091015",
+    "ratio": 6.545
+  },
+  {
+    "theme": "combine",
+    "token": "dim",
+    "fg": "#56696F",
+    "bg": "#091015",
+    "ratio": 3.325
+  },
+  {
+    "theme": "combine",
+    "token": "syntax-keyword",
+    "fg": "#79A7B2",
+    "bg": "#080E12",
+    "ratio": 7.379
+  },
+  {
+    "theme": "combine",
+    "token": "syntax-type",
+    "fg": "#AD8456",
+    "bg": "#080E12",
+    "ratio": 5.742
+  },
+  {
+    "theme": "combine",
+    "token": "syntax-function",
+    "fg": "#66897B",
+    "bg": "#080E12",
+    "ratio": 5.018
+  },
+  {
+    "theme": "combine",
+    "token": "syntax-string",
+    "fg": "#8DB6BF",
+    "bg": "#080E12",
+    "ratio": 8.851
+  },
+  {
+    "theme": "combine",
+    "token": "syntax-number",
+    "fg": "#536F77",
+    "bg": "#080E12",
+    "ratio": 3.612
+  },
+  {
+    "theme": "combine",
+    "token": "syntax-attribute",
+    "fg": "#AD704E",
+    "bg": "#080E12",
+    "ratio": 4.811
+  },
+  {
+    "theme": "combine",
+    "token": "syntax-lifetime",
+    "fg": "#889AA0",
+    "bg": "#080E12",
+    "ratio": 6.634
+  },
+  {
+    "theme": "combine",
+    "token": "syntax-comment",
+    "fg": "#56696F",
+    "bg": "#080E12",
+    "ratio": 3.37
+  },
+  {
+    "theme": "combine",
+    "token": "syntax-punctuation",
+    "fg": "#889AA0",
+    "bg": "#080E12",
+    "ratio": 6.634
+  },
+  {
+    "theme": "deusex",
+    "token": "text",
+    "fg": "#D9E1E5",
+    "bg": "#070D14",
+    "ratio": 14.723
+  },
+  {
+    "theme": "deusex",
+    "token": "secondary",
+    "fg": "#8293A0",
+    "bg": "#070D14",
+    "ratio": 6.158
+  },
+  {
+    "theme": "deusex",
+    "token": "dim",
+    "fg": "#526575",
+    "bg": "#070D14",
+    "ratio": 3.229
+  },
+  {
+    "theme": "deusex",
+    "token": "syntax-keyword",
+    "fg": "#AD955D",
+    "bg": "#060B11",
+    "ratio": 6.801
+  },
+  {
+    "theme": "deusex",
+    "token": "syntax-type",
+    "fg": "#6F91A5",
+    "bg": "#060B11",
+    "ratio": 5.894
+  },
+  {
+    "theme": "deusex",
+    "token": "syntax-function",
+    "fg": "#688878",
+    "bg": "#060B11",
+    "ratio": 5.059
+  },
+  {
+    "theme": "deusex",
+    "token": "syntax-string",
+    "fg": "#B7A16A",
+    "bg": "#060B11",
+    "ratio": 7.821
+  },
+  {
+    "theme": "deusex",
+    "token": "syntax-number",
+    "fg": "#766944",
+    "bg": "#060B11",
+    "ratio": 3.642
+  },
+  {
+    "theme": "deusex",
+    "token": "syntax-attribute",
+    "fg": "#A76057",
+    "bg": "#060B11",
+    "ratio": 4.187
+  },
+  {
+    "theme": "deusex",
+    "token": "syntax-lifetime",
+    "fg": "#8293A0",
+    "bg": "#060B11",
+    "ratio": 6.233
+  },
+  {
+    "theme": "deusex",
+    "token": "syntax-comment",
+    "fg": "#526575",
+    "bg": "#060B11",
+    "ratio": 3.269
+  },
+  {
+    "theme": "deusex",
+    "token": "syntax-punctuation",
+    "fg": "#8293A0",
+    "bg": "#060B11",
+    "ratio": 6.233
+  },
+  {
+    "theme": "shock",
+    "token": "text",
+    "fg": "#E0DBE3",
+    "bg": "#0C0A0F",
+    "ratio": 14.458
+  },
+  {
+    "theme": "shock",
+    "token": "secondary",
+    "fg": "#9A8E9F",
+    "bg": "#0C0A0F",
+    "ratio": 6.327
+  },
+  {
+    "theme": "shock",
+    "token": "dim",
+    "fg": "#685B6E",
+    "bg": "#0C0A0F",
+    "ratio": 3.105
+  },
+  {
+    "theme": "shock",
+    "token": "syntax-keyword",
+    "fg": "#9978A5",
+    "bg": "#0B090E",
+    "ratio": 5.27
+  },
+  {
+    "theme": "shock",
+    "token": "syntax-type",
+    "fg": "#699996",
+    "bg": "#0B090E",
+    "ratio": 6.226
+  },
+  {
+    "theme": "shock",
+    "token": "syntax-function",
+    "fg": "#668D7B",
+    "bg": "#0B090E",
+    "ratio": 5.342
+  },
+  {
+    "theme": "shock",
+    "token": "syntax-string",
+    "fg": "#A98BB2",
+    "bg": "#0B090E",
+    "ratio": 6.628
+  },
+  {
+    "theme": "shock",
+    "token": "syntax-number",
+    "fg": "#705A78",
+    "bg": "#0B090E",
+    "ratio": 3.23
+  },
+  {
+    "theme": "shock",
+    "token": "syntax-attribute",
+    "fg": "#B45E63",
+    "bg": "#0B090E",
+    "ratio": 4.456
+  },
+  {
+    "theme": "shock",
+    "token": "syntax-lifetime",
+    "fg": "#9A8E9F",
+    "bg": "#0B090E",
+    "ratio": 6.364
+  },
+  {
+    "theme": "shock",
+    "token": "syntax-comment",
+    "fg": "#685B6E",
+    "bg": "#0B090E",
+    "ratio": 3.124
+  },
+  {
+    "theme": "shock",
+    "token": "syntax-punctuation",
+    "fg": "#9A8E9F",
+    "bg": "#0B090E",
+    "ratio": 6.364
+  },
+  {
+    "theme": "sin",
+    "token": "text",
+    "fg": "#DCE1D9",
+    "bg": "#0A0F0D",
+    "ratio": 14.549
+  },
+  {
+    "theme": "sin",
+    "token": "secondary",
+    "fg": "#8F9B91",
+    "bg": "#0A0F0D",
+    "ratio": 6.684
+  },
+  {
+    "theme": "sin",
+    "token": "dim",
+    "fg": "#59685D",
+    "bg": "#0A0F0D",
+    "ratio": 3.278
+  },
+  {
+    "theme": "sin",
+    "token": "syntax-keyword",
+    "fg": "#B1724F",
+    "bg": "#090D0B",
+    "ratio": 5.018
+  },
+  {
+    "theme": "sin",
+    "token": "syntax-type",
+    "fg": "#79917B",
+    "bg": "#090D0B",
+    "ratio": 5.725
+  },
+  {
+    "theme": "sin",
+    "token": "syntax-function",
+    "fg": "#6F895F",
+    "bg": "#090D0B",
+    "ratio": 5.046
+  },
+  {
+    "theme": "sin",
+    "token": "syntax-string",
+    "fg": "#BB805E",
+    "bg": "#090D0B",
+    "ratio": 5.924
+  },
+  {
+    "theme": "sin",
+    "token": "syntax-number",
+    "fg": "#79503A",
+    "bg": "#090D0B",
+    "ratio": 2.813
+  },
+  {
+    "theme": "sin",
+    "token": "syntax-attribute",
+    "fg": "#B45C50",
+    "bg": "#090D0B",
+    "ratio": 4.271
+  },
+  {
+    "theme": "sin",
+    "token": "syntax-lifetime",
+    "fg": "#8F9B91",
+    "bg": "#090D0B",
+    "ratio": 6.765
+  },
+  {
+    "theme": "sin",
+    "token": "syntax-comment",
+    "fg": "#59685D",
+    "bg": "#090D0B",
+    "ratio": 3.317
+  },
+  {
+    "theme": "sin",
+    "token": "syntax-punctuation",
+    "fg": "#8F9B91",
+    "bg": "#090D0B",
+    "ratio": 6.765
+  },
+  {
+    "theme": "mesa",
+    "token": "text",
+    "fg": "#DDE1DA",
+    "bg": "#0B1010",
+    "ratio": 14.47
+  },
+  {
+    "theme": "mesa",
+    "token": "secondary",
+    "fg": "#929A90",
+    "bg": "#0B1010",
+    "ratio": 6.613
+  },
+  {
+    "theme": "mesa",
+    "token": "dim",
+    "fg": "#5D665C",
+    "bg": "#0B1010",
+    "ratio": 3.213
+  },
+  {
+    "theme": "mesa",
+    "token": "syntax-keyword",
+    "fg": "#BC9458",
+    "bg": "#090D0C",
+    "ratio": 6.994
+  },
+  {
+    "theme": "mesa",
+    "token": "syntax-type",
+    "fg": "#6D8A81",
+    "bg": "#090D0C",
+    "ratio": 5.214
+  },
+  {
+    "theme": "mesa",
+    "token": "syntax-function",
+    "fg": "#64816A",
+    "bg": "#090D0C",
+    "ratio": 4.551
+  },
+  {
+    "theme": "mesa",
+    "token": "syntax-string",
+    "fg": "#C09C67",
+    "bg": "#090D0C",
+    "ratio": 7.625
+  },
+  {
+    "theme": "mesa",
+    "token": "syntax-number",
+    "fg": "#7D653D",
+    "bg": "#090D0C",
+    "ratio": 3.537
+  },
+  {
+    "theme": "mesa",
+    "token": "syntax-attribute",
+    "fg": "#A96258",
+    "bg": "#090D0C",
+    "ratio": 4.258
+  },
+  {
+    "theme": "mesa",
+    "token": "syntax-lifetime",
+    "fg": "#929A90",
+    "bg": "#090D0C",
+    "ratio": 6.745
+  },
+  {
+    "theme": "mesa",
+    "token": "syntax-comment",
+    "fg": "#5D665C",
+    "bg": "#090D0C",
+    "ratio": 3.276
+  },
+  {
+    "theme": "mesa",
+    "token": "syntax-punctuation",
+    "fg": "#929A90",
+    "bg": "#090D0C",
+    "ratio": 6.745
+  },
+  {
+    "theme": "strogg",
+    "token": "text",
+    "fg": "#D7D0C6",
+    "bg": "#0D0B09",
+    "ratio": 12.842
+  },
+  {
+    "theme": "strogg",
+    "token": "secondary",
+    "fg": "#918679",
+    "bg": "#0D0B09",
+    "ratio": 5.51
+  },
+  {
+    "theme": "strogg",
+    "token": "dim",
+    "fg": "#62584E",
+    "bg": "#0D0B09",
+    "ratio": 2.83
+  },
+  {
+    "theme": "strogg",
+    "token": "syntax-keyword",
+    "fg": "#A75B45",
+    "bg": "#0A0807",
+    "ratio": 4.022
+  },
+  {
+    "theme": "strogg",
+    "token": "syntax-type",
+    "fg": "#8B835E",
+    "bg": "#0A0807",
+    "ratio": 5.24
+  },
+  {
+    "theme": "strogg",
+    "token": "syntax-function",
+    "fg": "#728060",
+    "bg": "#0A0807",
+    "ratio": 4.732
+  },
+  {
+    "theme": "strogg",
+    "token": "syntax-string",
+    "fg": "#B36D57",
+    "bg": "#0A0807",
+    "ratio": 4.989
+  },
+  {
+    "theme": "strogg",
+    "token": "syntax-number",
+    "fg": "#723F34",
+    "bg": "#0A0807",
+    "ratio": 2.357
+  },
+  {
+    "theme": "strogg",
+    "token": "syntax-attribute",
+    "fg": "#B4473D",
+    "bg": "#0A0807",
+    "ratio": 3.721
+  },
+  {
+    "theme": "strogg",
+    "token": "syntax-lifetime",
+    "fg": "#918679",
+    "bg": "#0A0807",
+    "ratio": 5.606
+  },
+  {
+    "theme": "strogg",
+    "token": "syntax-comment",
+    "fg": "#62584E",
+    "bg": "#0A0807",
+    "ratio": 2.879
+  },
+  {
+    "theme": "strogg",
+    "token": "syntax-punctuation",
+    "fg": "#918679",
+    "bg": "#0A0807",
+    "ratio": 5.606
+  },
+  {
+    "theme": "genera",
+    "token": "text",
+    "fg": "#171A19",
+    "bg": "#DEE0DA",
+    "ratio": 13.17
+  },
+  {
+    "theme": "genera",
+    "token": "secondary",
+    "fg": "#4E5753",
+    "bg": "#DEE0DA",
+    "ratio": 5.612
+  },
+  {
+    "theme": "genera",
+    "token": "dim",
+    "fg": "#747D78",
+    "bg": "#DEE0DA",
+    "ratio": 3.19
+  },
+  {
+    "theme": "genera",
+    "token": "syntax-keyword",
+    "fg": "#3D526F",
+    "bg": "#E3E5DF",
+    "ratio": 6.277
+  },
+  {
+    "theme": "genera",
+    "token": "syntax-type",
+    "fg": "#3D6764",
+    "bg": "#E3E5DF",
+    "ratio": 4.978
+  },
+  {
+    "theme": "genera",
+    "token": "syntax-function",
+    "fg": "#4F7059",
+    "bg": "#E3E5DF",
+    "ratio": 4.359
+  },
+  {
+    "theme": "genera",
+    "token": "syntax-string",
+    "fg": "#344C69",
+    "bg": "#E3E5DF",
+    "ratio": 6.938
+  },
+  {
+    "theme": "genera",
+    "token": "syntax-number",
+    "fg": "#6C7890",
+    "bg": "#E3E5DF",
+    "ratio": 3.499
+  },
+  {
+    "theme": "genera",
+    "token": "syntax-attribute",
+    "fg": "#8E4E4B",
+    "bg": "#E3E5DF",
+    "ratio": 4.95
+  },
+  {
+    "theme": "genera",
+    "token": "syntax-lifetime",
+    "fg": "#4E5753",
+    "bg": "#E3E5DF",
+    "ratio": 5.881
+  },
+  {
+    "theme": "genera",
+    "token": "syntax-comment",
+    "fg": "#747D78",
+    "bg": "#E3E5DF",
+    "ratio": 3.343
+  },
+  {
+    "theme": "genera",
+    "token": "syntax-punctuation",
+    "fg": "#4E5753",
+    "bg": "#E3E5DF",
+    "ratio": 5.881
+  },
+  {
+    "theme": "mineral",
+    "token": "text",
+    "fg": "#17201B",
+    "bg": "#D6DDD5",
+    "ratio": 12.045
+  },
+  {
+    "theme": "mineral",
+    "token": "secondary",
+    "fg": "#46544C",
+    "bg": "#D6DDD5",
+    "ratio": 5.759
+  },
+  {
+    "theme": "mineral",
+    "token": "dim",
+    "fg": "#6C7971",
+    "bg": "#D6DDD5",
+    "ratio": 3.288
+  },
+  {
+    "theme": "mineral",
+    "token": "syntax-keyword",
+    "fg": "#2F625B",
+    "bg": "#D9E0D8",
+    "ratio": 5.169
+  },
+  {
+    "theme": "mineral",
+    "token": "syntax-type",
+    "fg": "#49647B",
+    "bg": "#D9E0D8",
+    "ratio": 4.6
+  },
+  {
+    "theme": "mineral",
+    "token": "syntax-function",
+    "fg": "#456D50",
+    "bg": "#D9E0D8",
+    "ratio": 4.388
+  },
+  {
+    "theme": "mineral",
+    "token": "syntax-string",
+    "fg": "#305C55",
+    "bg": "#D9E0D8",
+    "ratio": 5.597
+  },
+  {
+    "theme": "mineral",
+    "token": "syntax-number",
+    "fg": "#5C817A",
+    "bg": "#D9E0D8",
+    "ratio": 3.2
+  },
+  {
+    "theme": "mineral",
+    "token": "syntax-attribute",
+    "fg": "#8D514B",
+    "bg": "#D9E0D8",
+    "ratio": 4.575
+  },
+  {
+    "theme": "mineral",
+    "token": "syntax-lifetime",
+    "fg": "#46544C",
+    "bg": "#D9E0D8",
+    "ratio": 5.927
+  },
+  {
+    "theme": "mineral",
+    "token": "syntax-comment",
+    "fg": "#6C7971",
+    "bg": "#D9E0D8",
+    "ratio": 3.384
+  },
+  {
+    "theme": "mineral",
+    "token": "syntax-punctuation",
+    "fg": "#46544C",
+    "bg": "#D9E0D8",
+    "ratio": 5.927
+  },
+  {
+    "theme": "logic",
+    "token": "text",
+    "fg": "#211E1C",
+    "bg": "#DDD8CF",
+    "ratio": 11.678
+  },
+  {
+    "theme": "logic",
+    "token": "secondary",
+    "fg": "#5A524C",
+    "bg": "#DDD8CF",
+    "ratio": 5.389
+  },
+  {
+    "theme": "logic",
+    "token": "dim",
+    "fg": "#80766E",
+    "bg": "#DDD8CF",
+    "ratio": 3.126
+  },
+  {
+    "theme": "logic",
+    "token": "syntax-keyword",
+    "fg": "#624C65",
+    "bg": "#E1DDD4",
+    "ratio": 5.653
+  },
+  {
+    "theme": "logic",
+    "token": "syntax-type",
+    "fg": "#6F5B3E",
+    "bg": "#E1DDD4",
+    "ratio": 4.78
+  },
+  {
+    "theme": "logic",
+    "token": "syntax-function",
+    "fg": "#557158",
+    "bg": "#E1DDD4",
+    "ratio": 3.984
+  },
+  {
+    "theme": "logic",
+    "token": "syntax-string",
+    "fg": "#674D68",
+    "bg": "#E1DDD4",
+    "ratio": 5.459
+  },
+  {
+    "theme": "logic",
+    "token": "syntax-number",
+    "fg": "#826F84",
+    "bg": "#E1DDD4",
+    "ratio": 3.401
+  },
+  {
+    "theme": "logic",
+    "token": "syntax-attribute",
+    "fg": "#8F5047",
+    "bg": "#E1DDD4",
+    "ratio": 4.549
+  },
+  {
+    "theme": "logic",
+    "token": "syntax-lifetime",
+    "fg": "#5A524C",
+    "bg": "#E1DDD4",
+    "ratio": 5.643
+  },
+  {
+    "theme": "logic",
+    "token": "syntax-comment",
+    "fg": "#80766E",
+    "bg": "#E1DDD4",
+    "ratio": 3.273
+  },
+  {
+    "theme": "logic",
+    "token": "syntax-punctuation",
+    "fg": "#5A524C",
+    "bg": "#E1DDD4",
+    "ratio": 5.643
+  }
+]
