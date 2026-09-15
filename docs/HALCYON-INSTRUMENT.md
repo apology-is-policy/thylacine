@@ -1579,6 +1579,10 @@ owner` / `tapestryd: chord picker: no rail`.
   control, and no key of it reaches a pts. Its rows name OUR chords.
 - **Reduced motion**: a static caret and no transient animation are the
   production default until the effects slice; nothing else changes.
+  **Amended at I-8 (2026-09-15, operator-answered):** I-8 IS the effects
+  slice, so the default flips — motion is on, and `/env/HALCYON_MOTION=0`
+  restores exactly the behaviour this bullet describes. The preference is
+  read at session start like `/env/HALCYON_SCALE`; I-8c builds it.
 
 **As built at I-7b.** `halcyond::help` (pure, host-tested) is the FOURTH
 model on the one `Role::Menu` surface (§9.4's three plus this), centred on
@@ -1652,6 +1656,42 @@ translucent overlays of §7.3 over client bodies use `RectAlpha`. Motion:
 tile expansion 180 ms `cubic-bezier(.2,.8,.2,1)` on the allocated size,
 hover 120 ms, body opacity 100 ms after 70 ms, caret 1100 ms `steps(2,
 start)` with opacity 0 at 55 % — reduced-motion honoured (§9.5).
+
+**Amended at I-8 (2026-09-15, operator-answered).** Three things this slice
+needed that the text above did not settle.
+
+**The picker and help shadows are the COMPOSITOR's, beside the backdrop.** A
+drop shadow at (0,20) blur 55 lies OUTSIDE its card, and a card is a
+`Role::Menu` surface the compositor composes with an opaque
+`copy_nonoverlapping` (`compose_cpu`'s 1:1 arm) — there is no alpha in that
+blit, so a surface cannot carry transparent margin and its own cartoon can
+never reach the pixels a shadow needs. "Two executor ops carry them" stays
+exactly true: the compositor runs the ops. tapestryd therefore takes a
+`cartoon` dependency rather than growing a second box blur, because a second
+implementation of a bounded resource is the shape that produced three
+HALCYON-WORKSPACES defects. Alpha in the compose path was the rejected
+alternative: it changes the compositor's core blit and makes every present
+pay a blend it does not need.
+
+**Motion is ON by default; `/env/HALCYON_MOTION=0` is the opt-out.** §9.5
+made a static caret and no transient animation the production default *until
+the effects slice* — this is that slice, so the default flips. The channel
+follows `/env/HALCYON_SCALE`'s shape exactly (read by the session at startup,
+the compositor following), which is what "reduced-motion honoured" resolves
+to: a user's stated preference rather than a guess made on their behalf.
+
+**The sage glow belongs to SUCCESS (EXIT 0) alone.** The
+`rgba(112,161,124,.25)` above is the `success` colour, and §8.2 replaces the
+kit's sage-filled square at READY with a hollow `secondary` one while keeping
+RUNNING explicitly pulse-free. So the glow attaches to the `✓` state, where
+its literal colour is the semantically right one, and to no other; §8.2's
+"the square's glow is an effect" reads as the success square's.
+
+**Already built, and NOT owed by this slice.** The swatch's white .12 inset
+border is `Derived.swatch_ring` = `over(amber, white, 12 %)`, painted by the
+rail's theme control (§8.1) since I-4 and pinned at `#CDC199`. It is not the
+picker's — the picker has miniatures, not swatches. Six effects remain, not
+seven.
 
 ## 11. Evidence: the goldens and the gates
 
