@@ -384,5 +384,30 @@ damage from it is a hint, not a rotating accumulator's patchwork, and
 client); this is the brace. See [[sub-tapestryd]]'s fullscreen-zoom section and
 [[haz-latch-keyed-on-proxy]].
 
+## `TEV_CHORD` widened: the delivered close (2026-09-15, I-7b)
+
+`TEV_CHORD` (kind 12) carries the Super chords the compositor does NOT act on
+itself, because they live in the environment rather than in the compositor.
+I-7 defined `code` 1 = picker and 2 = help, both with `value` 1. I-7b adds
+**`code` 3 = close the focused pane**, and it is the one whose `value` is not
+1: it carries the FOCUSED PANE's id, so the owner acts on the compositor's
+focus at the instant the chord fired rather than re-deriving it from a
+`layout` file it may have read a wake ago.
+
+It is also the only delivered chord with a FALLBACK, and that asymmetry is
+deliberate. The picker and the keyboard reference exist nowhere but the
+environment, so with no registered rail there is nothing to do but say so and
+drop them. A close must still HAPPEN: [[sub-tapestryd]]'s `deliver_chord`
+therefore reports whether the rail actually took the event, and its `Close`
+arm performs the structural close itself when there is no rail (the legacy
+profile, or a seat whose rail is not up) or when the rail's queue was too full
+to take it -- which retires that rail. So the chord can never degrade into a
+no-op, which is the property a client of this ABI should rely on.
+
+The owner's half belongs to [[sub-halcyond]]: it asks with the
+HALCYON-INSTRUMENT 14.5 running-close dialog when the named tile's last
+command is RUNNING, and closes by verb otherwise, carrying NO final-tile
+protection -- section 6.5 reads `Super+Q` as the structural act.
+
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)
