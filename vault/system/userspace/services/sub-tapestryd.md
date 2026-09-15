@@ -1659,3 +1659,68 @@ comment in `usr/lib/libtapestry/src/lib.rs`. Witnessed in-guest by
 owner`, then the confirmation dialog, then a Cancel that keeps both the tile
 and its job.
 
+
+## The pointer path's witnesses -- a lost press could not be told from a swallowed one (2026-09-15, the I-6 hunt)
+
+`ptr_btn` had one say on its way in (`ptr btn ... -> chrome`, and only for a
+chrome or rail target) and none at all on the arms that decline to act. The
+`code != BTN_LEFT || drag.is_some()` swallow returned silently; a `track_at`
+MISS fell through to the general routing silently; and an event that never
+reached the compositor is silent by definition. `hover_update` compounded it:
+its witness was gated on `now`, so a pointer LEAVING a track said nothing
+either, and the motion after a press was as quiet as the press.
+
+The consequence is a documentation-worthy property of this service rather than
+a mere gap: **three different faults produced a byte-identical log.** Four
+successive readings of the I-6 divider stall (the compositor emitting a hover
+say and then no `drag start` for the press that followed) were each refuted by
+ground truth without any of them being separable from the others -- not for
+want of reasoning, but because no arm of the press path could report. A
+hypothesis set that cannot be discriminated by the instrument is not a
+reasoning problem.
+
+**The witnesses now in the tree** are `#[cfg(feature = "test-mode")]` only; no
+production arm changed. `tapestryd: ptr btn code C P at X,Y drag D menu M
+track T` sits at the TOP of `ptr_btn`, before any routing decision: absent, the
+event never reached the compositor; present, the fault is past that line and
+`drag`/`menu`/`track` name the arm that took it. `divider press swallowed
+(btn C drag D)` speaks for the formerly silent swallow. `divider hover left at
+X,Y` speaks for the crossing off a track.
+
+**The eventq low-water mark** is read at the top of `InputDev::drain`, BEFORE
+the recycle and BEFORE the nothing-new early return, because the device can
+only deliver into descriptors this driver has published and it has not yet
+consumed: `avail_idx - cur_used` is exactly what the transport had to work with
+while the serve loop was away, and `QUEUE_SIZE` is 16. At zero it had none, and
+an event it could not place did not arrive -- a guest-side fact that holds
+whatever the transport chooses to do with such an event.
+
+**The slow-pass say** belongs with it because of a property of this loop worth
+stating plainly: the input devices are POLL-MODE and are NOT in the pollfd set,
+so nothing about an arriving event wakes the serve loop. The drain interval IS
+the pass period -- bounded by the frame tick, so <= ~67 ms at `IDLE_HZ` -- and a
+HELD pass is therefore the only condition under which a 16-deep eventq can run
+out of descriptors between drains. `serve pass took N ms` names such a pass.
+
+**Calibration (the control that makes a future firing mean something).** On a
+healthy run -- `ls-halcyon-instrument` PASS, 42 legs, 89 s -- `ptr btn code`
+fired 32 times while `input eventq LOW`, `serve pass took` and `gpu command
+never retired` fired ZERO times. Those three are nowhere near their thresholds
+in normal operation, so a future occurrence is signal rather than noise. The
+healthy shape of the leg that has been failing reads:
+
+    divider hover pane 2 track 0 at 994,404
+    ptr btn code 272 1 at 994,404 drag 0 menu 0 track 1
+    divider drag start pane 2 track 0 at 994,404
+    divider drag end pane 2 track 0 esc -> 687:580
+
+Reading the next occurrence: no `ptr btn` line means the event never arrived,
+and the eventq/slow-pass says then state whether a held pass starved the ring;
+a `ptr btn` line carrying `track 0` means the press arrived and `track_at`
+disagreed with the hover that had just fired; `drag 1` means a stale drag
+swallowed it.
+
+Ground truth: `usr/tapestryd/src/server.rs` (`ptr_btn`, `hover_update`),
+`usr/tapestryd/src/input.rs` (`drain`), `usr/tapestryd/src/main.rs` (the serve
+loop's pass clock). The defect these were built for is OPEN and intermittent;
+the green run above is a verdict, not a diagnosis.

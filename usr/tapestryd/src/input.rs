@@ -358,6 +358,25 @@ impl InputDev {
         let pool_va = self.dma_va + EVENT_POOL_OFF;
 
         let cur_used = unsafe { r16(used_va + 2) };
+        // I-6: the low-water mark, read BEFORE the recycle below AND before
+        // the nothing-new return. The device can only deliver into
+        // descriptors this driver has published and it has not yet consumed,
+        // so `avail_idx - cur_used` is exactly what it had to work with while
+        // the serve loop was away. At zero it had none, and an event it could
+        // not place did not arrive -- whatever the transport did with it.
+        #[cfg(feature = "test-mode")]
+        {
+            let free = self.avail_idx.wrapping_sub(cur_used);
+            if free <= 3 {
+                say!(
+                    "tapestryd: input eventq LOW: {} free of {} (avail {} used {})",
+                    free,
+                    QUEUE_SIZE,
+                    self.avail_idx,
+                    cur_used
+                );
+            }
+        }
         if cur_used == self.last_used_idx {
             return;
         }

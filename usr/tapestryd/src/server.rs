@@ -6659,8 +6659,13 @@ impl Comp {
         // no press, no key -- once in six; unexplained, JOURNAL run 46o
         // "I-6".)
         #[cfg(feature = "test-mode")]
-        if let Some((c, i)) = now {
-            say!("tapestryd: divider hover pane {} track {} at {},{}", c, i, self.ptr_x, self.ptr_y);
+        match now {
+            Some((c, i)) => {
+                say!("tapestryd: divider hover pane {} track {} at {},{}", c, i, self.ptr_x, self.ptr_y);
+            }
+            // The crossing OFF a track said nothing, so a motion that left
+            // one was indistinguishable from a motion that never arrived.
+            None => say!("tapestryd: divider hover left at {},{}", self.ptr_x, self.ptr_y),
         }
         if let Some((c, i)) = prev {
             self.repaint_track(c, i);
@@ -8867,6 +8872,23 @@ impl Comp {
     /// Non-droppable (a lost release strands a drag).
     pub fn ptr_btn(&mut self, code: u16, pressed: bool, mods: u16) {
         let bi = btn_idx(code);
+        // I-6: the top-of-path witness, BEFORE any routing decision. Every
+        // arm below that does not start a drag is silent -- both swallows, a
+        // `track_at` miss, and the general routing -- so a press that goes
+        // nowhere cannot be told from one that never arrived. Absent, the
+        // event never reached the compositor; present, the fault is past
+        // this line and the fields name the arm that took it.
+        #[cfg(feature = "test-mode")]
+        say!(
+            "tapestryd: ptr btn code {} {} at {},{} drag {} menu {} track {}",
+            code,
+            pressed as u8,
+            self.ptr_x,
+            self.ptr_y,
+            self.drag.is_some() as u8,
+            self.menu.is_some() as u8,
+            self.layout.track_at(self.ptr_x, self.ptr_y).is_some() as u8
+        );
         // A release FOLLOWS ITS PRESS (the H-3c round F1): the surface that
         // saw the press -- a menu that has since been dismissed drops it --
         // or, for a click-away's, the compositor, which consumed the press
@@ -8933,6 +8955,12 @@ impl Comp {
                         let cid = self.layout.id_of(slot).unwrap_or(0);
                         if code != BTN_LEFT || self.drag.is_some() {
                             self.btn_owner[bi] = OWNER_SWALLOWED;
+                            #[cfg(feature = "test-mode")]
+                            say!(
+                                "tapestryd: divider press swallowed (btn {} drag {})",
+                                code,
+                                self.drag.is_some() as u8
+                            );
                             return;
                         }
                         // The second press within the window, on the same

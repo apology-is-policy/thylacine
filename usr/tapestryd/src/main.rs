@@ -129,6 +129,12 @@ const GPU_FLANE_VA: u64 = 0x0220_0000;
 // docs/reference/139-tapestryd.md "Idle throttle".
 const IDLE_HZ: u32 = 15;
 const IDLE_AFTER_MS: u64 = 250;
+// I-6: a serve pass longer than this is said under test-mode. At IDLE_HZ the
+// poll is bounded to ~67 ms, so anything past 250 ms means the loop was held
+// somewhere -- the only condition under which the 16-deep input eventq can
+// run out of descriptors between drains.
+#[cfg(feature = "test-mode")]
+const SLOW_PASS_MS: u64 = 250;
 
 const _: () = {
     assert!(GPU_BAR_WINDOW_VA + 6 * PCI_BAR_VA_STRIDE <= KBD_BAR_WINDOW_VA);
@@ -449,8 +455,22 @@ impl Driver for Tapestryd {
         // Residual-2 idle throttle: the last time real INPUT arrived. Init to
         // now so bring-up runs at the ctl rate until the console settles.
         let mut last_input = Instant::now();
+        // I-6: the pass clock. The input devices are poll-mode and are NOT in
+        // the pollfd set, so nothing about an arriving event wakes this loop
+        // -- the drain interval IS the pass period, and a held pass is the
+        // only way the 16-deep eventq can fill. This names such a pass.
+        #[cfg(feature = "test-mode")]
+        let mut pass_mark = Instant::now();
 
         loop {
+            #[cfg(feature = "test-mode")]
+            {
+                let d = pass_mark.elapsed().as_millis() as u64;
+                if d > SLOW_PASS_MS {
+                    say!("tapestryd: serve pass took {} ms", d);
+                }
+                pass_mark = Instant::now();
+            }
             // Residual-2: did any input device drain a raw event this pass?
             // Set after each of the three drains below; bumps last_input.
             let mut input_seen = false;

@@ -427,6 +427,81 @@ standing rule is push only after all-green, and the console gate is not green.
 
 ---
 
+### The I-6 hunt: four readings could not separate anything, because the press path could not report
+
+Continued after the 600k self-compaction. The one thing holding the I-7b push
+is `ls-halcyon-instrument`, which my own resume note recorded as "RED at I-6's
+Escape leg". Re-deriving from the artifacts rather than the note corrected
+three of my own claims before any new work started.
+
+**The gate had no verdict at all.** The last run made two attempts on one
+image. `attempt1` failed `Escape: no drag end (esc)`. `attempt2`, on the
+byte-identical image, *passed that leg* -- `divider drag start pane 2 track 0
+at 994,404` -> `drag end ... esc -> 687:580` -> the swallowed release -> `PASS:
+Escape ends the drag ...` -- then passed the double-click leg too and stopped
+mid-zoom with no verdict line, which is the host's low-memory kill. So the gate
+was neither red nor green: it was **unreported**, and I had been quoting
+attempt1's result as the run's. The stall is *intermittent* (here 1 in 2;
+historically ~1 in 6), which is a far better position than a stable red -- an
+intermittent repro at a known leg is huntable.
+
+**"The log ends" was the gate aborting, not the guest dying.** Both this
+journal and the bug record read attempt1's trailing silence as the compositor
+"stopping dispatching" for the full 30 s budget. It shows nothing of the kind:
+`lc_fail` aborts the scenario, so after the FAIL the harness sends nothing
+more. The absence of later compositor output is *expected* and carries zero
+information about whether the compositor recovered.
+
+**The real finding: the press path could not have reported.** In
+`ptr_btn` (`usr/tapestryd/src/server.rs:8868`) every arm that does not start a
+drag is silent -- the `code != BTN_LEFT || drag.is_some()` swallow returns with
+no say, a `track_at` miss falls through to the general routing with no say, and
+an event that never arrived is silent by definition. Worse,
+`hover_update`'s witness was gated on `now`, so the crossing *off* a track said
+nothing either: the move after the press was as silent as the press. **All
+three surviving hypotheses predicted a byte-identical log.** The four readings
+refuted earlier were not refuted by better reasoning available at the time --
+they were indistinguishable by construction. The gap was the instrument.
+
+**The starvation lead, measured rather than assumed.** The bug record's
+hypothesis (a) names a virtio-input eventq drop, and the ring is indeed small:
+`QUEUE_SIZE = 16` (`usr/tapestryd/src/input.rs`). But the serve loop bounds its
+`t_poll` by the frame period (`IDLE_HZ = 15` -> <= ~67 ms) and the gate paces
+pointer ops at 400 ms at 2-3 records each, so filling 16 descriptors needs the
+loop **held for >2 s** -- and after F-A1 a GPU hold that long announces itself
+(`gpu command never retired`, 500 ms stale deadline), a line absent from the
+log. Starvation therefore requires a long hold somewhere that is *not* the GPU
+wait. That is now a measurable claim instead of a guess.
+
+**One axis closed for good.** The passing session gate's log also ends on a
+trailing `divider hover ... 740,404`, which I had flagged as possibly the same
+silence. It is not: that line is at log line 3098 and the log continues for
+~100 more lines of compositor work -- the chord close, two retires, the rail
+and status-bar retirement, the logout chain, the final PASS. It is simply the
+last divider event in a scenario that performs one drag and never reaches an
+Escape leg, so that seat cannot witness this bug at all.
+
+**The instrument** (six witnesses, `#[cfg(feature = "test-mode")]` only, no
+production arm changed) is chosen so each surviving hypothesis prints something
+*different* instead of all printing nothing: a say at the very top of `ptr_btn`
+before any routing decision, carrying `drag`/`menu`/`track` so its absence
+means the event never arrived and its presence names the arm that ate it; a say
+on the formerly silent swallow arm; the hover's crossing *off* a track; the
+eventq low-water mark read at the top of the drain, before the recycle and
+before the nothing-new return, where `avail_idx - used_idx` is exactly what the
+device had to work with while the loop was away; and a slow-serve-pass say,
+because the input devices are poll-mode and are *not* in the pollfd set -- so
+nothing about an arriving event wakes the loop, the drain interval **is** the
+pass period, and a held pass is the only way a 16-deep queue can fill.
+
+The gate is re-running on a freshly baked lever image (renderer lever on,
+`profile = instrument`, session lever absent -- the recorded one-image-per-lever
+recipe, verified in the bake log). To be explicit about why a re-run is
+legitimate here: the previous run was **externally killed** and produced no
+verdict, and this one carries an instrument. It is being run to *observe*, not
+to turn a red into a green.
+
+
 ## Run 46o (2026-09-14, Fable 5.1 max) -- the Halcyon Instrument arc opens: reading the Carbon Optics kit against the tree
 
 ### What this run was for
