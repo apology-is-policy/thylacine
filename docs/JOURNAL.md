@@ -261,6 +261,95 @@ Posture: userspace guest build green; halcyond host lib tests 279/279. The
 push and the F-A1 kernel cure are both the operator's calls; neither was taken
 autonomously, and the console gate was not re-run to manufacture a green.
 
+### The F-A1 kernel cure -- the operator voted, the research collapsed the fork, and the cure landed
+
+The operator returned and voted the F-A1 mechanism fork (AskUserQuestion):
+**(A) DTB-derived trigger + (C) the timed SYS_IRQ_WAIT safety net**, alongside
+the settled level mask+ack. Before surfacing the fork I did the fit-check the
+research-prior-art rule demands, and it **collapsed the A-vs-B choice**: the
+kernel's PCIe interrupt-map parser (`lib/dtb.c:660 dtb_pci_intx_route`) already
+walks the full 3-cell GIC specifier `<type intid flags>` and reads type+intid
+but **discards the flags cell** -- exactly where level/edge lives. So (A) was
+not "more work" (the design doc's tentative cost) but a few lines reading a cell
+already loaded; (B)'s "simpler" rationale evaporated. I surfaced (A) as a
+recommendation to ratify, not an open fork, plus (C) as the one genuine residue.
+
+Scripture first (`225fa7d7`, ARCH 9.3.1), then the implementation (`bfbaf942`):
+- **(A)** `dtb_pci_intid_is_level` (the reverse walk, reading the flags cell);
+  `kobj_irq_create` derives `KObj_IRQ.level` and sets ICFGR EXPLICITLY both ways
+  (new `gic_set_spi_level_triggered`) so a reused INTID never keeps a stale
+  config; SPIs absent from the map keep the edge default (the I-15-argued
+  fallback, the same shape as the PL011 exception).
+- **level mask+ack**: `kobj_irq_dispatch` masks the SPI (under `rendez.lock`,
+  before the vector's EOI); `kobj_irq_wait` unmasks on re-arm before `tsleep`.
+  I-9 holds because the mask + `pending_count++` are under the lock and the
+  unmask precedes a `tsleep` whose cond re-checks under the same lock.
+- **(C)** `SYS_IRQ_WAIT` gains `x1 = timeout_ns`; `kobj_irq_wait_timed` uses
+  `tsleep`; the GPU passes 100 ms, making its pre-existing "command never
+  retired" deadline reachable on a no-wake hang (it was stale-wake-only, so the
+  silent forever-hang produced no diagnostic -- the exact F-A1 signature).
+
+**The blast radius was verified against ground truth, not assumed.** The design
+doc's "the drivers don't change" was optimistic: level requires every waiter to
+ACK (deassert) between waits, or the unmask-on-re-wait storms. Reading each
+level consumer: the GPU + all seven virtio-PCI probe/driver binaries already
+read InterruptStatus (the universal virtio level-hygiene), and netd services its
+NIC by MMIO polling and never waits on the IRQ (a masked line cannot stall it).
+So the DTB-wide level conversion is correct for every actual waiter with ZERO
+driver changes -- they were already written to the discipline level requires.
+The full boot corroborates: `warden: 5 bound, 4 up` with the GPU on the level
+path.
+
+**The wrong turn the self-audit caught.** SA-7: the C-side `libt` FFI
+(`usr/lib/libt/include/thyla/syscall.h`) `t_irq_wait` set x0+x8 but NOT x1 --
+under the new ABI the kernel reads x1 as the timeout, so a C caller would pass a
+stale register as a bogus timeout. Latent (no current C `.c` caller), fixed
+proactively (`495d8a90`) since the header ships the ABI. The Rust FFI I had
+already fixed; the C twin is exactly the kind of second site a same-file focus
+misses.
+
+Three regression tests, all PASS, suite **1525/1525** (no regression):
+`dtb.pci_intid_is_level` (PCI INTx 35..38 -> level; a non-PCI SPI -> edge
+fallback), `irqfwd.level_mask_ack` (a level SPI is MASKED by dispatch -- the
+discriminator, via a new read-only `gic_intid_enabled` -- and re-fires after a
+re-assertion), `irqfwd.wait_timeout` (a no-IRQ timed wait returns 0 near the
+deadline, not forever).
+
+**The audit closed clean, and it caught what my self-audit missed.** The Fable
+reviewer died on credit exhaustion (429) before any finding, so per the
+reviewer-model rule the round re-spawned on the **Opus fallback** at max (family
+shared with the author, so I told it context-independence is its edge -- re-derive
+from code). Verdict: **0 P0 / 1 P1 / 0 P2 / 2 P3**, MODEL start==end (no silent
+downgrade). The P1 (F1) is the payoff of the independent read: my self-audit had
+found the C `libt` `t_irq_wait` missing x1 and I asserted "no C caller" -- true
+for the Thylacine tree, **false for Stratum**. `stratumd`'s virtio-blk driver
+hand-wraps `SYS_IRQ_WAIT` through musl's varargs `syscall()` and passed an
+**uninitialized x1** as the new timeout; on a green boot it was benign by luck,
+but it is UB on a load-bearing surface (the pool). Fixed in the Stratum tree
+(`bdev_thylacine.c`: `syscall(__NR_irq_wait, handle, 0L)`). The two P3s were
+fixed too: the kernel now **caps** `timeout_ns` (1 h, `KOBJ_IRQ_WAIT_MAX_TIMEOUT_NS`)
+so any garbage x1 degrades to a bounded wait rather than a wrapped-deadline
+immediate timeout (this also replaced a buggy `~0ull` overflow clamp that would
+itself overflow the ns->counter conversion); and the ARCH 9.3.1 blast-radius
+wording was corrected (the standalone probes are virtio-MMIO/edge, not PCI) with
+an ABI-hygiene note (a register arg on an existing syscall breaks hand-wrapped
+callers; prefer a distinct syscall number next time). NOT a dirty close (0 P0,
+P1+P2 < 6, no structural fix), so no round-2 owed. The **SMP soundness gate
+PASSED -- 0 corruption across default/ubsan x smp4/smp8, N=10 each** -- the
+concurrency of the mask/unmask/dispatch/tsleep path is sound (the cap is a pure
+value-clamp, so the verdict carries). Suite 1525/1525 after the fixes; the pool
+still populates + mounts (stratumd's I/O works with the x1 fix).
+
+**The push stays HELD** -- the operator's call; it unblocks on the console gate
+greening or an explicit OK, and I did not re-run the console gate to manufacture
+a green.
+
+Mid-run the operator also gave two standing policy directives, codified in
+CLAUDE.md (`11f2fdda`): the **vault agent is retired** -- each agent now owns
+the dossiers for the surfaces it touches (or adopts unowned ones) and updates
+them itself; and **all vault interaction goes through quaestor**, reads and
+writes, never raw grep/edit.
+
 ---
 
 ## Run 46o (2026-09-14, Fable 5.1 max) -- the Halcyon Instrument arc opens: reading the Carbon Optics kit against the tree

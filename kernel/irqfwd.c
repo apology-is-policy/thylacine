@@ -34,6 +34,13 @@
 #include "../arch/arm64/uart.h"
 #include "../mm/slub.h"
 
+// F-A1 (C): the upper bound on a SYS_IRQ_WAIT timeout. Any legitimate IRQ wait
+// is far below this (the GPU's is 100 ms); a wait genuinely wanting to block
+// indefinitely passes 0 (forever). The cap is defense-in-depth against a caller
+// that passes an indeterminate x1 -- it degrades an absurd value to a bounded,
+// safe wait rather than a wrapped-deadline immediate timeout. 1 hour, in ns.
+#define KOBJ_IRQ_WAIT_MAX_TIMEOUT_NS  3600000000000ull
+
 // =============================================================================
 // INTID claim tracking (P4-Ib).
 // =============================================================================
@@ -418,11 +425,22 @@ u32 kobj_irq_wait_timed(struct KObj_IRQ *k, u64 timeout_ns) {
     // Thread never reaches EL0). TSLEEP_TIMEDOUT means no IRQ arrived within the
     // timeout; the driver treats the count-0 return as "re-check the device
     // used-ring + continue", catching a lost completion instead of hanging.
+    // Cap the requested timeout to a sane maximum before forming the deadline
+    // (defense-in-depth). SYS_IRQ_WAIT reads x1 as timeout_ns; a caller that
+    // fails to zero x1 (a hand-wrapped varargs syscall -- see ARCH 9.3.1's ABI
+    // note) passes an indeterminate value. Without a cap, a garbage-huge value
+    // could overflow `now + timeout_ns` OR the ns->counter conversion in tsleep
+    // and read as an IMMEDIATE timeout (a spurious 0-count return). The cap
+    // degrades any absurd value to a bounded, safe wait; a genuine timeout is
+    // far below it (the GPU's is 100 ms) and forever is still timeout_ns == 0.
+    // A driver that legitimately wants longer simply re-waits (a timed wait is
+    // a backstop that loops). now is monotonic-since-boot, so now + cap never
+    // wraps u64.
     u64 deadline_ns = 0;
     if (timeout_ns != 0) {
-        u64 now = timer_now_ns();
-        deadline_ns = now + timeout_ns;
-        if (deadline_ns < now) deadline_ns = ~0ull;  // u64 overflow: clamp, never 0 (= "no deadline")
+        if (timeout_ns > KOBJ_IRQ_WAIT_MAX_TIMEOUT_NS)
+            timeout_ns = KOBJ_IRQ_WAIT_MAX_TIMEOUT_NS;
+        deadline_ns = timer_now_ns() + timeout_ns;
     }
     int rc = tsleep(&k->rendez, kobj_irq_pending_cond, k, deadline_ns);
 
