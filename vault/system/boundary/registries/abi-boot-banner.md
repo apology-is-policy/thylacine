@@ -54,6 +54,7 @@ mirrors:
   - "tools/interactive/ls-imperium.exp"
   - "tools/interactive/ls-bghome-stall.exp"
   - "tools/interactive/s7-nora-probe.exp"
+  - "tools/interactive/manual.exp"
 literals:
   - "Thylacine boot OK"
   - "EXTINCTION:"
@@ -64,7 +65,7 @@ literal-mentions:
   - "tools/warp-host.sh (a usage comment)"
   - "tools/interactive/go8d.exp (a prose note)"
 created: 2026-08-01
-updated: 2026-09-09
+updated: 2026-09-16
 ---
 ## The surface
 
@@ -125,7 +126,9 @@ main#245 census, the delivery classification, the "resync grew to twenty-eight"
 and "s7-nora-probe" subsections) describe the set **as it stood at each of those
 points** — fifteen, then twenty-eight, then twenty-nine — and are kept as the
 historical record, not re-tallied at every merge. The current authoritative
-total is the **forty mirrors + two mentions = forty-two** above; the DERIVED
+total is the **forty-one mirrors + two mentions = forty-three** above (the
+forty-first, 2026-09-16, is `manual.exp`, whose exit-status proc carries its
+own `EXTINCTION:` arm); the DERIVED
 check (not a hand count) is what holds it correct.
 
 ### The resync grew the set to twenty-eight (2026-09)
