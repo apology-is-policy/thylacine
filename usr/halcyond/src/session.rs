@@ -132,6 +132,13 @@ const HALCYON_PALETTE_ENV_PATH: &str = "/env/HALCYON_PALETTE";
 /// preference, never a source -- the compositor stays the authority and its
 /// ctl the channel, so the carve and the paint cannot disagree.
 const HALCYON_SCALE_ENV_PATH: &str = "/env/HALCYON_SCALE";
+/// The user's motion preference (HALCYON-INSTRUMENT 9.5 as amended at I-8):
+/// motion is ON and `0` is the opt-out. Read at session start exactly as the
+/// scale is, and for the same stated reason -- a user's preference rather
+/// than a guess made on their behalf. Unlike the scale it is NOT forwarded to
+/// the compositor: what it governs here is halcyond's own paint (section 10's
+/// caret blink), and the compositor's own motion reads its own lever.
+const HALCYON_MOTION_ENV_PATH: &str = "/env/HALCYON_MOTION";
 
 /// How many connect iterations tolerate a refused `session on` before the
 /// compositor runs UNDECLARED: the seat may be mid-handover (the previous
@@ -1302,6 +1309,35 @@ fn request_env_scale(ring: &EventRing) {
     say!("halcyond: scale {} not admitted (budget) ({})", pct, HALCYON_SCALE_ENV_PATH);
 }
 
+/// The motion preference's WORD, said once with the posture it resolves to.
+///
+/// The word is kept rather than the verdict because `motion::admitted` folds
+/// it with a live clock sample, and the clock is the second condition:
+/// `monotonic_ns` is fail-soft 0, so a session that cannot read it degrades
+/// to 9.5's static caret -- a mode scripture already specifies -- instead of
+/// to a caret frozen mid-step, which would read as a hung compositor.
+fn env_motion_word() -> Option<String> {
+    let word = read_file(libthyla_rs::T_WALK_OPEN_FROM_ROOT, HALCYON_MOTION_ENV_PATH);
+    let now = libthyla_rs::time::monotonic_ns();
+    // The STATED preference outranks the clock in this message, though both
+    // turn motion off: a user who wrote `0` and is then told the clock is
+    // unreadable would go hunting a fault they caused on purpose.
+    let why = match (word.as_deref().map(str::trim), now) {
+        (Some("0"), _) => "=0",
+        (_, 0) => "monotonic clock unreadable",
+        (None, _) => "absent: on by default since I-8",
+        (Some(w), _) if w.is_empty() => "empty: not the opt-out word",
+        _ => "set",
+    };
+    say!(
+        "halcyond: motion {} ({} {})",
+        if libhalcyon::motion::admitted(word.as_deref(), now) { "on" } else { "off" },
+        HALCYON_MOTION_ENV_PATH,
+        why
+    );
+    word
+}
+
 /// HALCYON-SCALE 6: the compositor's scale changed (its ctl says a new
 /// percent): rebuild the render brain at it -- the Sheet (a new generation,
 /// so every layout cache re-lays), the glyph source (the mono bakes for the
@@ -1438,6 +1474,9 @@ pub fn run(home: Option<String>) -> i64 {
     if declared {
         request_env_scale(&ring);
     }
+    // The motion preference needs no seat and no verb -- it is halcyond's own
+    // paint decision -- so it is read whether or not the declare took.
+    let motion_word = env_motion_word();
     // A scale the table does not know is kept out of the sheet (r2 B-F11:
     // the /env path validated, the compositor's did not); said once per value.
     let mut scale_refused: Option<u16> = None;
@@ -1632,6 +1671,12 @@ pub fn run(home: Option<String>) -> i64 {
     let mut chrome_dirty = true;
     let mut up_announced = false;
     let mut ingest_announced = false;
+    // The blink's POST-marker, in the same shape as the two above: `motion
+    // on` at startup says what was RESOLVED, this says a step actually
+    // reached a tile. Only the second one can tell a live blink from a lever
+    // that parsed and then animated nothing -- the whole chain (clock ->
+    // phase -> `paints_caret` -> dirty) has to have run for it to print.
+    let mut caret_announced = false;
     let mut present_fails: u32 = 0;
     let mut logout: Option<i32> = None;
     // The session init child (H-4c: rio's `-i` idiom), spawned once after the
@@ -1841,6 +1886,39 @@ pub fn run(home: Option<String>) -> i64 {
                 }
             }
             MenuEvent::None => {}
+        }
+
+        // (0e) HALCYON-INSTRUMENT section 10's caret: `steps(2, start)` over
+        // 1100 ms with opacity 0 at 55 %. Resolved ONCE per pass from the
+        // monotonic clock -- the phase is free-running, as a CSS animation
+        // with no restart trigger is, so no caret carries an origin -- and
+        // PUSHED into the tiles, because a tick that marks nothing paints
+        // nothing: `render_if_dirty` returns early unless the tile is dirty,
+        // and the poll wake below would otherwise be a wake for no reason.
+        //
+        // `inst_profile`, not the sheet's, is the profile word here on
+        // purpose: it is what decides whether a dead child's tile is RETAINED
+        // (the two arms below), and `paints_caret`'s 14.6 conjunct reads the
+        // `fate` that retention sets. A caret that judged itself by a
+        // different word than the retention did could suppress on a tile the
+        // session never retained.
+        let now_ns = libthyla_rs::time::monotonic_ns();
+        let motion = libhalcyon::motion::admitted(motion_word.as_deref(), now_ns);
+        // Under reduced motion the caret is STATIC, which is painted, not
+        // absent (9.5) -- so the step's resting value is up, not down.
+        let caret_on = !motion || libhalcyon::motion::caret_visible(now_ns / 1_000_000);
+        for t in tiles.values_mut() {
+            if t.tile.set_caret_on(caret_on, inst_profile) {
+                t.dirty = true;
+                if !caret_announced {
+                    caret_announced = true;
+                    say!(
+                        "halcyond: session caret blink live (leaf {} -> {})",
+                        t.leaf,
+                        if caret_on { "on" } else { "off" }
+                    );
+                }
+            }
         }
 
         // (1) Render dirty tiles at the TOP: the root's first present precedes
@@ -2471,6 +2549,23 @@ pub fn run(home: Option<String>) -> i64 {
         let clock = statusset::clock_timeout_ms();
         let timeout = libhalcyon::motion::fold_timeout(timeout, Some(clock));
         let timeout = libhalcyon::motion::fold_timeout(timeout, status.notice_timeout_ms());
+        // Section 10's caret blink is the THIRD deadline. It is the distance
+        // to the next STEP, not `FRAME_MS`: a two-valued function changes
+        // twice per period, so a frame-rate wake would paint nothing on 33 of
+        // every 34 wakes (68.75 frames per 1100 ms, two of them useful).
+        // Folded only while a caret is
+        // actually on screen -- every tile may be retained, or every child
+        // may have hidden its cursor, and then there is nothing to wake for.
+        // Re-sampled here rather than reused from (0e) so the deadline is
+        // measured from the wait it bounds.
+        let caret_tick = if motion && tiles.values().any(|t| t.tile.paints_caret(inst_profile)) {
+            Some(libhalcyon::motion::caret_next_step_ms(
+                libthyla_rs::time::monotonic_ns() / 1_000_000,
+            ))
+        } else {
+            None
+        };
+        let timeout = libhalcyon::motion::fold_timeout(timeout, caret_tick);
         if unsafe { t_poll(fds.as_mut_ptr(), nfds, timeout) } < 0 {
             say!("halcyond: session poll failed (compositor gone); exiting");
             logout = Some(1);

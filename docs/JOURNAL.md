@@ -1642,6 +1642,113 @@ compiles and no test fires. The guest build naming `(bin "halcyond")` is the
 only witness the adoption has, and it cannot be given a better one without
 moving the loop itself into the lib.
 
+### I-8c-2: the caret blinks, and three things I had planned wrong
+
+The pure motion module from I-8c-1 had no consumer. I-8c-2 gives it one: the
+`/env/HALCYON_MOTION` lever, a frame deadline, and section 10's caret --
+`steps(2, start)` over 1100 ms with opacity 0 at 55 %.
+
+**The plan said "one fold line at each poll site". The grep said one.**
+My resume note had the frame clock going into both halcyond loops. Before
+writing it I grepped the console loop for what it animates, and `main.rs`
+has zero references to `caret` or `cursor()` and never calls `Tile::render`
+at all -- it has its own render path. There is nothing on the pre-login
+console to animate, so a deadline there would have been a wake for nothing.
+It is also the one surface with no user whose preference could be read,
+which is exactly what 9.5's amendment asks against: "a stated preference
+rather than a guess made on their behalf." The lever and the blink are the
+session's, and the console is unchanged rather than deliberately excluded.
+
+**The deadline is the edge, not the frame -- and `FRAME_MS` would have been
+the wrong instrument.** A square wave changes twice per period. 1100 ms
+holds 68.75 frames at 16 ms, so a frame-rate wake fires about 34 times per
+visible change and paints nothing on 33 of them. `caret_next_step_ms`
+returns the distance to the next edge instead: 605 / 495 ms alternating,
+never zero (a zero would spin the poll), and the millisecond truncation in
+`now_ns / 1_000_000` works in the caller's favour, since the sub-millisecond
+remainder makes the wake land AT or AFTER the edge rather than one short of
+it. `FRAME_MS` keeps its consumer -- I-8c-3's continuous tweens -- and the
+disuse is not evidence the cadence was wrong.
+
+I had written "thirty-six wakes out of thirty-seven" in two comments before
+deriving it. 37 is 605/16: the wakes in the ON half, a different quantity
+from wakes-per-change. Deriving it gave 34. That is the sixth expectation
+error of this arc and the first one I caught by deriving BEFORE the reviewer
+did, which is the only part that is progress.
+
+**A tick that marks nothing paints nothing.** Both render loops are
+dirty-gated -- `render_if_dirty` returns early unless the tile is dirty --
+so a deadline alone wakes the loop and changes no pixel. The step is pushed
+into each tile through `Tile::set_caret_on`, whose return value IS the dirty
+decision. `Tile::paints_caret` is then ONE predicate, asked by the painter
+and by the dirty rule, so a step can neither mark a tile that shows no caret
+nor skip one that does.
+
+### The test I wrote could not fail, and its comment said it could
+
+The witness walked the fate x cursor-visibility x profile matrix asserting
+`t.paints_caret(inst) == beam(...)`. Its comment claimed this would catch a
+predicate that disagreed with the painter about retained tiles.
+
+It could not. The painter CALLS `paints_caret`. The assertion compared a
+function to itself through one extra frame of indirection, and no value of
+that predicate could ever make it fail. The single shared predicate is the
+right DESIGN -- it is what stops the rule drifting -- but it makes agreement
+untestable, and I had written a comment claiming otherwise. That is my own
+recorded lesson ("a comment claiming a test catches something is an untested
+claim about a test") committed again, four chunks after recording it.
+
+The fix is an expectation written from the document rather than from the
+code: `want = cursor_on && !(is_inst && fate != Fate::Live)`, then required
+of the predicate AND of the beam. Measured: dropping the 14.6 conjunct now
+trips `14.6 at Ended(3) cursor=true inst=true`. Under the old form it
+tripped nothing.
+
+Six sabotages, each run separately, each naming its witness. One was a gift:
+inverting the resting value at both `Tile` literals trips
+`legacy_render_is_byte_identical_to_the_pre_i5b_tree` -- the same property
+stated positively, that `caret_on: true` leaves the whole pre-blink render
+byte-identical. A seventh sabotage refused to apply at all, because its
+anchor matched TWO `Tile` literals; that is the N-defended-sites hazard
+announcing itself through a tool rather than through a bug.
+
+### A comment changed the binary
+
+I edited two comments after the bake and argued the gate verdict still
+transferred, since comments cannot reach codegen. Then I measured the md5
+instead of trusting that: `d0e7d5ba` -> `f2125fa4`. A debug build embeds
+line tables, and one of my edits changed the line COUNT, so the artifact
+genuinely differed. Re-baked. The later test-only edit was checked the same
+way and came back `f2125fa4` unchanged, so THAT verdict transfers by
+measurement.
+
+### The gate that would have skipped
+
+`ls-halcyon-session-instrument` reads the session's own profile line and
+SKIPs at exit 77 on anything but `instrument` -- and a SKIP leaves the
+harness exiting 0. My own memory file said the session gates take the bare
+bake. They do not: the bare bake writes no `/lib/halcyon/profile` at all,
+and the first bake's log proved it by the ABSENCE of a lever line where the
+session lever had one. Caught before booting, from the bake log, six minutes
+before the gate would have reported a green nothing. The memory is corrected
+to name the lever and to say that absence of the echo IS the finding.
+
+**Result**: PASS 17/17 legs, 0 FAIL at 109 s against a 108 s baseline -- the
+blink costs nothing measurable -- attempt 1, hvf. (The harness banner prints
+`accel=tcg`; QEMU's own command line says `accel=hvf -cpu host`. The banner
+reports the harness default, not what booted.) Both new witnesses are in the
+guest transcript, and the second one is the one that matters: `halcyond:
+session caret blink live (leaf 3 -> off)` requires the whole chain -- clock,
+phase, predicate, dirty flag -- to have run.
+
+**What this costs, stated.** An idle session now wakes and repaints about
+1.8 times a second forever, where it previously slept to the minute clock.
+That is the price of a blinking caret; the lever is the only thing that
+removes it, and under `HALCYON_MOTION=0` no step ever marks anything and no
+deadline is ever folded, so the opt-out costs nothing rather than costing
+less. And no gate leg reads sub-pixel ink, so nothing here proves the caret
+LOOKS right.
+
 ## Run 46o (2026-09-14, Fable 5.1 max) -- the Halcyon Instrument arc opens: reading the Carbon Optics kit against the tree
 
 ### What this run was for

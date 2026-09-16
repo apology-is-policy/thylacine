@@ -219,6 +219,56 @@ a `Command` choice is typed back into the tile it was opened over as ONE
 line). `layout::laid_line_for` is shared with the console bin so a tile and the
 console lay a Beacon line identically.
 
+### The caret's blink and the motion lever (HALCYON-INSTRUMENT 10 + 9.5; I-8c-2)
+
+Section 10 gives the caret `steps(2, start)` over 1100 ms with opacity 0 at
+55 %, and 9.5 as amended at I-8 makes motion ON by default with
+`/env/HALCYON_MOTION=0` the opt-out. Both live in the SESSION
+(`session.rs`): the console renderer paints no caret at all -- `main.rs` has
+its own render path and never calls `Tile::render` -- so at I-8c-2 there is
+nothing on the console to animate and it takes neither the lever nor a
+frame deadline.
+
+The phase is FREE-RUNNING off `monotonic_ns`, with no per-caret origin: the
+mockup's animation has no restart trigger, so there is nothing for an origin
+to be relative to. `caret_on = !motion || caret_visible(now_ms)` is resolved
+once per pass and PUSHED into each tile through `Tile::set_caret_on`, which
+returns whether that tile must repaint. That push is the load-bearing part:
+both render loops are DIRTY-GATED (`render_if_dirty` returns early unless
+`self.dirty`), so **a tick that marks nothing paints nothing** -- a frame
+deadline alone would wake the loop and change no pixel.
+
+`Tile::paints_caret` is ONE predicate answering "is there a caret here at
+all" -- the grid's own cursor visibility, and 14.6's rule that a retained
+tile has none under Instrument -- and both the painter and the dirty rule
+call it. The alternative was a second copy of that conjunction in the
+session loop, which is the shape that has to be re-pointed by hand whenever
+the painter's rule moves. `caret_on` is the separate second conjunct
+("is it up right now"); folding the two would make every step mark every
+tile, caret or no caret.
+
+The profile word here is `inst_profile`, not the sheet's, because it is what
+decides whether a dead child's tile is RETAINED, and `paints_caret` reads
+the `fate` retention sets. A caret judging itself by a different word than
+retention used could suppress on a tile the session never retained.
+
+**The deadline is the STEP, not the frame.** `motion::caret_next_step_ms`
+gives the distance to the next edge (605 / 495 ms alternating, never zero,
+so the fold cannot spin) and it is folded into the session poll only while
+`motion` holds AND some tile actually paints a caret. `FRAME_MS` = 16 is for
+the CONTINUOUS tweens of section 10 (I-8c-3); applied to a square wave it
+would wake about 34 times per visible change and paint nothing on 33 of
+them.
+
+**The cost, stated.** An idle session with a live cursor now wakes and
+repaints about 1.8 times a second forever, where before it slept to the
+minute clock. That is the price of a blinking caret and the lever is the
+only thing that removes it -- under `HALCYON_MOTION=0` the resting value is
+`true` for every tile on every pass, so no step ever marks anything and no
+deadline is ever folded: the opt-out costs nothing rather than costing less.
+A dead clock lands on the same static caret, which is the mode 9.5 already
+specifies.
+
 ### The chrome, the menu, the status bar
 
 - **Chrome (H-3b)**: `chrome` (rules) + `chromeset` (surfaces): one
@@ -504,6 +554,13 @@ anchors are the H-2 / H-3b / H-3c / H-3d / KT-1 trigger rows +
   `layout_block` (`len is 0 but the index is 0`).
 - **The grid containment**: an untrusted tile's OOB cell write is dropped, the
   cursor clamped.
+- **One caret predicate, two consumers** (I-8c-2): `Tile::paints_caret` is
+  what the painter asks AND what the blink's dirty rule asks, so a step can
+  never mark a tile that shows no caret (a retained tile repainting twice a
+  second to display nothing) nor skip one that does. Because the painter calls
+  that predicate, the host witness cannot test the two for AGREEMENT -- that
+  is a function equalling itself -- so it walks the fate x cursor-visibility x
+  profile matrix against an expectation written from 14.6 directly.
 - **Budgets bound memory against any input**: block eviction + stored cost
   (`ITEM_OVERHEAD` per line) + a per-block line cap + `OPEN_BLOCK_MAX_COST`; in
   the session one `SESSION_SCROLLBACK_BUDGET` shared by tile count, evicting AT
@@ -540,6 +597,17 @@ presents are a recorded optimization.
   per-line `ITEM_OVERHEAD`, `OPEN_BLOCK_MAX_COST`, and the shared `set_max_cost`
   (evicting at once) bound the retained set, and the windowed render bounds the
   transient.
+- **The caret's blink at the predicate, not at the painter** (I-8c-2,
+  `the_caret_blink_reaches_the_paint_and_its_predicate_matches_it`). The
+  fate x cursor-visibility x profile matrix is asserted against an expectation
+  written from 14.6 itself, because the painter CALLS `paints_caret` -- so
+  requiring the two to agree requires a function to equal itself and can never
+  fail. Measured: the retained-tile conjunct dropped from the predicate trips
+  the `14.6 at Ended(3) cursor=true inst=true` assertion, which the agreement
+  form could not see. The resting value inverted at both `Tile` literals also
+  trips `legacy_render_is_byte_identical_to_the_pre_i5b_tree`, which is the
+  positive statement of the same thing: `caret_on: true` leaves the whole
+  pre-blink render byte-identical.
 - **The identity of spawned tiles.** halcyond spawns every kaua-term with
   `.caps(!T_CAP_SET_IDENTITY)`; the kernel intersects with login's `SHELL_CAPS`,
   so no tile program can spawn as another principal (the C-F1 P0: `Command`

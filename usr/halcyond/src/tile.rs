@@ -59,6 +59,18 @@ pub struct Tile {
     /// judges the stream); the legacy profile's frozen affordance is
     /// unchanged by it.
     pub fate: crate::chrome::Fate,
+    /// HALCYON-INSTRUMENT section 10: the caret's blink step, as the LAST
+    /// paint used it. `steps(2, start)` is two-valued, so this is the whole
+    /// of the caret's animation state -- there is no per-caret origin,
+    /// because a CSS animation with no restart trigger is free-running and
+    /// the phase comes off the monotonic clock alone.
+    ///
+    /// TRUE is the resting value, and deliberately so: under section 9.5's
+    /// reduced motion the caret is STATIC, which means painted, not absent.
+    /// A tile nobody drives a clock into therefore paints exactly as it did
+    /// before this field existed. Written by the session through
+    /// [`Tile::set_caret_on`]; the console renderer paints no caret at all.
+    pub caret_on: bool,
     exit: Option<i32>,
     /// A pending bell affordance the render consumes once (no kernel bell).
     bell: bool,
@@ -144,6 +156,7 @@ impl Tile {
             mode: ScreenMode::Normal,
             title: String::new(),
             fate: crate::chrome::Fate::Live,
+            caret_on: true,
             exit: None,
             bell: false,
             heights: VecDeque::new(),
@@ -391,6 +404,34 @@ impl Tile {
     /// Take + clear the pending bell affordance (the render rings it once).
     pub fn take_bell(&mut self) -> bool {
         core::mem::replace(&mut self.bell, false)
+    }
+
+    /// Does this tile paint a caret at all, before section 10's blink is
+    /// applied? The grid's own cursor visibility (the child's DECTCEM, which
+    /// 14.7 keeps as the policy across a focus loss) AND 14.6's rule that a
+    /// retained tile has no caret under the Instrument profile.
+    ///
+    /// Public because the blink's DIRTY rule needs exactly this question: a
+    /// step that no tile can show must not repaint anything. `render` asks it
+    /// too, so the two cannot answer differently -- the alternative was a
+    /// second copy of the conjunction in the session loop, which is the shape
+    /// that has to be re-pointed by hand every time the painter's rule moves.
+    pub fn paints_caret(&self, inst: bool) -> bool {
+        self.grid.cursor().2 && !(inst && self.fate != crate::chrome::Fate::Live)
+    }
+
+    /// Advance the caret's blink step; true when the tile must be repainted
+    /// to show it.
+    ///
+    /// The phase is stored unconditionally but only a tile that CAN show the
+    /// step asks for a repaint. Storing it either way matters: a tile whose
+    /// cursor is hidden while the step passes would otherwise keep the phase
+    /// it last painted with, and light up out of step the moment the child
+    /// shows its cursor again.
+    pub fn set_caret_on(&mut self, on: bool, inst: bool) -> bool {
+        let repaint = self.caret_on != on && self.paints_caret(inst);
+        self.caret_on = on;
+        repaint
     }
 
     /// Paint the tile into `cart` (HALCYON.md 14.11.3). Returns the total
@@ -694,10 +735,14 @@ impl Tile {
         // The caret: ONE source of truth (the grid cursor), placed at the
         // proportional x of its character boundary (HALCYON 14.13; subsumes s2,
         // the stray cursor adrift from the rows).
-        let (cr, cc, cvis) = self.grid.cursor();
-        // 14.6: a retained tile has no caret (under Instrument; the legacy
-        // affordance keeps its frozen frame as it was).
-        let caret = cvis && !(inst && self.fate != crate::chrome::Fate::Live);
+        let (cr, cc, _) = self.grid.cursor();
+        // Section 10's blink is the SECOND conjunct, and it is separate from
+        // `paints_caret` on purpose: that predicate answers "is there a caret
+        // here at all", which is what decides whether a blink step has to
+        // repaint this tile, while `caret_on` answers "is it up right now".
+        // Folding the two would make the dirty rule mark every tile at every
+        // step, caret or no caret.
+        let caret = self.paints_caret(inst) && self.caret_on;
         if caret {
             if let Some(&(item, row, start)) = prov.get(cr) {
                 let (cx, cy, chh) = caret_in_block(&live_lb, item, row, start + cc, sheet);
@@ -1542,6 +1587,7 @@ mod tests {
             mode: ScreenMode::Normal,
             title: String::new(),
             fate: crate::chrome::Fate::Live,
+            caret_on: true,
             exit: None,
             bell: false,
             heights: VecDeque::new(),
@@ -2369,6 +2415,101 @@ mod tests {
         assert!(!caret(&c, inst.accent));
         assert!(!c.ops.iter().any(|op| matches!(op, Op::Rect { x: 0, y: 0, color, .. } if *color == inst.inst.header)));
     }
+    /// Section 10's caret blink, at the seam where a STEP becomes a REPAINT.
+    ///
+    /// The second block pins 14.6 to an expectation read off the DOCUMENT,
+    /// and it has to. `paints_caret` is both what the dirty rule consults and
+    /// what the painter calls, so asserting the two AGREE is asserting a
+    /// function equals itself -- it cannot fail, whatever the predicate says.
+    /// Only an independent `want` catches a predicate that drifted, and the
+    /// drift that matters is the retained tile: get it wrong and every dead
+    /// child's tile repaints about twice a second, forever, to show a caret
+    /// it does not have.
+    #[test]
+    fn the_caret_blink_reaches_the_paint_and_its_predicate_matches_it() {
+        use crate::chrome::Fate;
+        let mut gs = GlyphSource::new_vendored(512);
+        let inst = crate::layout::sheet_for(
+            &libhalcyon::instrument::Bundle::builtin(libhalcyon::instrument::Profile::Instrument),
+            100,
+            crate::layout::TEST_DISPLAY_W,
+        );
+        let legacy = crate::layout::daylight_sheet(100);
+        let (_, ch, _) = gs.mono_cell();
+        let (w, h) = (20 * 8, (8 * ch) as usize);
+        let mk = |cursor_on: bool| {
+            let mut t = daylight_tile(20, 8);
+            t.apply(Record::CellDiff {
+                changed: vec![(0, 0, cell('h')), (0, 1, cell('i'))],
+                cursor: (0, 2, cursor_on),
+                wrapped: vec![],
+                top_continues: false,
+            });
+            t
+        };
+        let beam = |t: &mut Tile, sheet: &Sheet, gs: &mut GlyphSource| {
+            let mut c = Cartoon::new();
+            t.render(&mut c, w, h, gs, sheet, &mut 0, None);
+            c.ops
+                .iter()
+                .any(|op| matches!(op, Op::Rect { w: 2, color, .. } if *color == sheet.accent))
+        };
+
+        // Both directions of the step. The first assertion alone would pass
+        // on a painter that ignored the field entirely.
+        let mut t = mk(true);
+        assert!(beam(&mut t, &legacy, &mut gs), "the resting value is UP -- 9.5's static caret is PAINTED");
+        t.caret_on = false;
+        assert!(!beam(&mut t, &legacy, &mut gs), "the off half of the step hides it");
+        t.caret_on = true;
+        assert!(beam(&mut t, &legacy, &mut gs), "and the next cycle brings it back");
+
+        // 14.6 + DECTCEM, stated independently of the code that implements
+        // them, then required of BOTH the predicate and the beam.
+        for fate in [Fate::Live, Fate::Ended(3), Fate::Disconnected, Fate::Crashed] {
+            for cursor_on in [true, false] {
+                for (sheet, is_inst) in [(&legacy, false), (&inst, true)] {
+                    let want = cursor_on && !(is_inst && fate != Fate::Live);
+                    let mut t = mk(cursor_on);
+                    t.fate = fate;
+                    t.caret_on = true;
+                    assert_eq!(
+                        t.paints_caret(is_inst),
+                        want,
+                        "14.6 at {:?} cursor={} inst={}",
+                        fate,
+                        cursor_on,
+                        is_inst
+                    );
+                    assert_eq!(
+                        beam(&mut t, sheet, &mut gs),
+                        want,
+                        "the beam follows it at {:?} cursor={} inst={}",
+                        fate,
+                        cursor_on,
+                        is_inst
+                    );
+                }
+            }
+        }
+
+        // A step dirties only a tile that can show it, and stores the phase
+        // either way.
+        let mut live = mk(true);
+        assert!(live.set_caret_on(false, true), "a live tile with a cursor repaints");
+        assert!(!live.set_caret_on(false, true), "the same step twice is not a second repaint");
+        let mut hidden = mk(false);
+        assert!(!hidden.set_caret_on(false, true), "no cursor to mark, so no repaint");
+        assert!(!hidden.caret_on, "but the phase was stored, so it reappears in step");
+        // The same tile, the same step, opposite profiles, opposite answers:
+        // 14.6 suppresses a retained tile's caret under Instrument ONLY.
+        let mut retained = mk(true);
+        retained.fate = Fate::Ended(0);
+        assert!(!retained.set_caret_on(false, true), "a retained tile has no caret under Instrument");
+        retained.caret_on = true;
+        assert!(retained.set_caret_on(false, false), "the legacy frozen affordance keeps its caret");
+    }
+
     /// The pre-I-5b legacy RENDER, pinned as a fingerprint over the cartoon
     /// (every op's geometry and colour, the glyph runs' advances -- never
     /// an atlas id, which packing order owns) for a history tile in normal

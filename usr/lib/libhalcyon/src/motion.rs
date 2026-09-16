@@ -135,6 +135,26 @@ pub fn caret_visible(elapsed_ms: u64) -> bool {
     elapsed_ms % period < off_at
 }
 
+/// Milliseconds until [`caret_visible`] next changes value.
+///
+/// A poll deadline, and the reason it is not [`FRAME_MS`]. `steps(2, start)`
+/// is a square wave: it changes exactly TWICE per period, and 1100 ms holds
+/// 68.75 frames at 16 ms, so a loop that woke every frame would wake about
+/// 34 times for each change it could see and 33 of those would paint
+/// nothing. The distance to the next edge alternates 605 / 495 ms and is
+/// never zero, so folding it into a poll timeout cannot spin.
+///
+/// The tweens of section 10 are the opposite shape -- continuous over 180 ms
+/// -- and it is THEY that want `FRAME_MS`. One motion, one cadence, chosen
+/// from what the motion actually does.
+pub fn caret_next_step_ms(elapsed_ms: u64) -> i32 {
+    let period = CARET_PERIOD_MS as u64;
+    let off_at = period * CARET_OFF_AT_PCT as u64 / 100;
+    let pos = elapsed_ms % period;
+    let next = if pos < off_at { off_at } else { period };
+    (next - pos) as i32
+}
+
 /// Fold one optional deadline into a poll timeout, where a NEGATIVE timeout
 /// means "block indefinitely".
 ///
@@ -202,6 +222,37 @@ mod tests {
         assert!(!caret_visible(1099), "still off at the end of the cycle");
         assert!(caret_visible(1100), "and the next cycle begins solid");
         assert!(caret_visible(1100 + 604) && !caret_visible(1100 + 605), "it repeats");
+    }
+
+    /// The step deadline lands exactly on the edges, never past one and
+    /// never on zero -- a zero would make the session's poll a spin. The
+    /// last assertion is the load-bearing one: walking a whole period one
+    /// millisecond at a time, the deadline must always point at the next
+    /// disagreement of `caret_visible`, which is what makes a wake at that
+    /// deadline the ONLY wake the caret needs.
+    #[test]
+    fn the_caret_deadline_is_the_distance_to_the_next_edge() {
+        assert_eq!(caret_next_step_ms(0), 605, "a fresh cycle runs to the off step");
+        assert_eq!(caret_next_step_ms(604), 1);
+        assert_eq!(caret_next_step_ms(605), 495, "and from the off step to the next cycle");
+        assert_eq!(caret_next_step_ms(1099), 1);
+        assert_eq!(caret_next_step_ms(1100), 605, "the phase is free-running, not anchored");
+        for pos in 0..CARET_PERIOD_MS as u64 {
+            let d = caret_next_step_ms(pos) as u64;
+            assert!(d > 0, "a zero deadline would spin the poll at {}", pos);
+            assert_eq!(
+                caret_visible(pos),
+                caret_visible(pos + d - 1),
+                "the value must hold right up to the deadline at {}",
+                pos
+            );
+            assert_ne!(
+                caret_visible(pos),
+                caret_visible(pos + d),
+                "and must have changed AT it at {}",
+                pos
+            );
+        }
     }
 
     /// A dead monotonic clock turns motion OFF rather than freezing it, and

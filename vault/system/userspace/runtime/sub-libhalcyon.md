@@ -588,7 +588,23 @@ count would not reproduce. 20 halvings bound the parameter error at 2^-20.
 durations and curves and states no frame rate, so the 16 ms cadence is a
 compositor-independent choice; a later reader must not cite it as scripture.
 
-**Prosecute**: the two poll call sites are bin-side and have NO host witness
+**`caret_next_step_ms` exists because `FRAME_MS` is the wrong cadence for a
+square wave** (I-8c-2). `steps(2, start)` changes exactly twice per period,
+and 1100 ms holds 68.75 frames at 16 ms, so a frame-rate wake would fire
+about 34 times per visible change and paint nothing on 33 of them. The
+deadline is instead the distance to the next EDGE -- 605 / 495 ms
+alternating. It is never zero, which is what lets a poll fold it without
+spinning; and the truncation in `now_ns / 1_000_000` works in the caller's
+favour, since the sub-millisecond remainder makes the wake land AT or AFTER
+the edge, never one millisecond short of it. `FRAME_MS` keeps its consumer:
+the CONTINUOUS tweens of I-8c-3. One motion, one cadence, chosen from what
+the motion actually does.
+
+**Prosecute**: the caret deadline's witness walks a whole period one
+millisecond at a time, asserting `caret_visible` holds to the deadline and
+has changed AT it -- an endpoint-only check would pass a deadline that
+pointed anywhere inside the correct half. The two poll call sites are
+bin-side and have NO host witness
 -- a transposed or dropped fold still compiles and nothing fails, and
 halcyond's lib count does not move across such an edit; the dead-clock rule is
 SILENT, so a user reporting "no animations" may have an unreadable clock
