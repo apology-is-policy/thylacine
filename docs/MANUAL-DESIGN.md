@@ -93,13 +93,15 @@ or the end of the file.
 | Paragraph | One or more lines that begin no other block | Lines are joined with a single space. |
 | Bulleted list | Items begin `- ` | No blank line between items; continuation lines are indented by two spaces; no nesting. |
 | Numbered list | Items begin `1. `, `2. `, … | Numbers run from 1 without gaps; continuation lines are indented to the item text; no nesting. |
-| Code block | A line of exactly three backticks, optionally followed by one word, then content, then a line of three backticks | Content is taken verbatim; the word after the opening fence is ignored. |
+| Code block | A line of exactly three backticks, optionally followed by one word containing no backtick, then content, then a line of three backticks | Content is taken verbatim; the word after the opening fence is ignored. |
 | Table | A header row, a delimiter row, then body rows | Every row begins and ends with `\|` and has the same number of cells; at most 16 columns; the delimiter cells are `---`, `:---`, `---:`, or `:---:`. |
 
 The checker rejects, with a diagnostic naming the line: block quotes, thematic
-breaks, setext headings, headings of level 4 or deeper, indented code blocks,
-bullets written with `*` or `+`, nested lists, raw HTML, link reference
-definitions, footnotes, and front matter.
+breaks, setext headings (a line of `=` or `-` characters directly below a
+paragraph line), headings of level 4 or deeper, indented code blocks, bullets
+written with `*` or `+`, nested lists, raw HTML, link reference definitions,
+footnote definitions, and front matter. A line that does not begin with `|` is not
+a table row, so a table written without its outer pipes is a paragraph.
 
 ### 3.3 Inline forms
 
@@ -108,16 +110,18 @@ definitions, footnotes, and front matter.
 | Code span | `` `text` `` or ``` ``text`` ``` | Content is literal. One leading and one trailing space are removed when both are present. |
 | Emphasis | `*text*` | The opening `*` is followed by a non-space and the closing `*` is preceded by one. |
 | Strong emphasis | `**text**` | As for emphasis. |
-| Escape | `\` before one of `` \ * ` \| < > # _ [ ] `` | Produces the character itself. |
+| Escape | `\` before any ASCII punctuation character, such as `` \ * ` \| < > # _ [ ] `` | Produces the character itself. |
 
 Emphasis does not nest and does not occur inside a code span. A `*` with a space on
 both sides is literal; any other `*` that neither opens nor closes an emphasis is an
-error. An underscore is always literal.
+error. An underscore is literal, except that underscores Markdown would read as
+emphasis (`_text_`) are an error.
 
-The checker rejects links (`[text](target)`), images, autolinks, hard line breaks,
-strikethrough (`~~`), and a raw `<` or `>` outside a code span. Placeholders are
-written in code spans, for example `` `<pid>` ``, which also keeps them visible
-when the file is viewed on a code host that renders HTML.
+The checker rejects links (`[text](target)`), images, autolinks, footnote
+references (`[^label]`), hard line breaks outside a code span, strikethrough
+(`~~`), and a raw `<` or `>` outside a code span. Placeholders are written in code
+spans, for example `` `<pid>` ``, which also keeps them visible when the file is
+viewed on a code host that renders HTML.
 
 ### 3.4 Cross-references
 
@@ -186,8 +190,12 @@ output remains suitable for `grep`. Width is counted in Unicode scalar values.
   emphasis class, a table column specification of at most 16 characters). No
   section text appears in a frame argument, so no frame can exceed the caps in
   `docs/BEACON.md` 12.1.
-- The reader renders into memory and writes the result in chunks of at most
-  64 KiB.
+- The reader checks a whole section before writing any of it. It then reads the
+  section a second time and writes the rendering as it goes, in chunks of at most
+  64 KiB. At any moment it holds the section, the block being rendered, and one
+  chunk of output, so no section within the size limit makes it fail for want of
+  memory, and the time it takes grows linearly with the section's size
+  (section 8.1).
 
 ---
 
@@ -211,15 +219,19 @@ manual --check <file>...
   `NN-<name>.md`. It matches a section whose name equals the operand, whose number
   equals the operand, or whose full `NN-<name>` equals the operand; failing those,
   it matches the single section whose name begins with the operand. Matching ignores
-  letter case. An operand that matches several sections by prefix is an error, and
-  the diagnostic lists the candidates.
+  letter case. An operand that matches several sections is an error, and the
+  diagnostic lists each candidate as `NN-<name>`, which is itself an operand that
+  names one section.
 - An operand containing `/` or ending in `.md` is a file path, which lets an author
   preview a draft.
 - `--check` parses each file against section 3 and prints every diagnostic as
-  `<file>:<line>: <message>`.
+  `<file>:<line>: <message>`, in line order, reporting a problem at most once per
+  line.
 - A file that fails the check is not displayed; the reader prints its diagnostics
-  instead. Installed sections have already passed the check at build time.
-- Diagnostics are written to standard error, prefixed `manual: `.
+  instead. Installed sections have already passed the check at build time
+  (section 6).
+- Diagnostics are written to standard error, prefixed `manual: `. A name or path
+  repeated in a diagnostic has its control characters replaced as in section 4.4.
 - Exit status: 0 on success; 1 when no section matches, a name is ambiguous, a file
   cannot be read or is not valid UTF-8, or a check fails; 2 on a usage error.
 
@@ -227,9 +239,12 @@ manual --check <file>...
 
 ## 6. Installation
 
-- `tools/build.sh`, in the pool population step, creates `/manual` and writes every
-  `docs/manual/NN-<name>.md` file to it, reading each back and comparing it with its
-  source. With no sections, `/manual` is created empty.
+- `tools/build.sh`, in the pool population step, first runs `tools/manual-check`,
+  the reader's checker built for the build host, over `docs/manual/`. The bake
+  fails if any file other than `.gitkeep` is not named `NN-<name>.md` or fails the
+  check, and otherwise installs exactly the sections the checker listed. It creates
+  `/manual` and writes each section to it, reading each back and comparing it with
+  its source. With no sections, `/manual` is created empty.
   This follows the unconditional block that installs `/lib/halcyon/themes`; the
   manual is content, and no configuration key controls it.
 - The binary is a member of the `usr/` workspace (`usr/manual`) and an entry in
@@ -244,12 +259,17 @@ manual --check <file>...
 `usr/manual` follows the `usr/view` shape: a library built for the host and the
 target, and a binary behind the `backend` feature.
 
-- The library is `no_std + alloc` and performs no I/O. `format` parses a section
-  into a document model and diagnostics. `render` turns a document into bytes for a
-  tier and an optional width. `wrap` performs word wrapping. `catalog` resolves
+- The library is `no_std + alloc` and performs no I/O. `format` reads a section
+  and reports what it finds, as it reads, to a consumer: each problem, in line
+  order, and the section's blocks and inline runs. It keeps nothing beyond the
+  block it is reading. The checker is the consumer that keeps the problems;
+  `render` is the consumer that writes the rendering for a tier and an optional
+  width, in chunks. `wrap` performs word wrapping as runs arrive. `catalog` resolves
   operands and builds the contents listing from a list of file names and titles.
 - The binary parses arguments, reads files and directories through `libthyla-rs`,
   resolves the tier and width, and writes the output.
+- `tools/manual-check` is a host program over the same library, which the bake
+  runs (section 6).
 - Dependencies are `beacon` (frame encoding and tier resolution) and, for the
   binary, `libthyla-rs`.
 
@@ -275,6 +295,13 @@ Run with `cd usr && cargo test -p manual --lib --no-default-features --target aa
   absent directory and an empty one would otherwise both pass. Every file in it
   other than `.gitkeep` must be named `NN-<name>.md`, pass the check, and render at
   both tiers. The test reports how many sections it checked.
+- **Bounds.** Sections at the 1 MiB limit that are built to be expensive (blank
+  lines, one-word paragraphs, long lists, tables and code blocks, dense inline
+  forms, a problem on every line, one long line of problems) are checked and
+  rendered at both tiers under the allocator `ThylaAllocN` uses
+  (`linked_list_allocator`), and the heap's high-water mark stays below the
+  reader's heap. The same sections, and the inline forms whose matching searches
+  ahead, are checked and rendered in time that grows linearly with their size.
 - **Controls.** Each hygiene and identity test is shown to fail with its mechanism
   disabled, and the commit records that result.
 
@@ -286,8 +313,9 @@ section under `/tmp` from the shell and exercises the reader against it. It chec
 that `manual` with no sections installed says so and exits 0, that the fixture
 renders by path and prints its title, that an unknown name produces a diagnostic
 and exit status 1, that the rich tier writes an `hdr` frame when the environment's
-tier is `rich`, and that `manual --check` accepts the fixture and rejects a copy
-containing a link. Name resolution against `/manual` is covered by the host tests
+tier is `rich`, that `manual --check` accepts the fixture with exit status 0 and
+rejects a copy containing a link with exit status 1, and that displaying that copy
+prints its diagnostic, exits 1, and writes none of its rendering. Name resolution against `/manual` is covered by the host tests
 until sections are installed, when the scenario gains a by-name case.
 
 ### 8.3 The rendered result
