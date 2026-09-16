@@ -1712,6 +1712,64 @@ declaring its shadow at `menu place` — was rejected: it changes a
 renderer-gated verb's grammar and puts a presentation value on the wire, for a
 difference the cap had already made invisible.
 
+**The backdrop is BOUNDED to the card's surroundings, and the scene under it
+is FROZEN (2026-09-16, operator-answered).** Two things I-8b-3 needed that the
+text above does not settle — and the first corrects a reading this arc had
+already made on its own authority.
+
+*The extent.* Section 10 says "a bounded downsampled blur of the permitted
+scene" and §14.5 says only "the existing backdrop"; no section states how far
+the backdrop reaches. The implementation read "bounded" as bounded EXTENT and
+sized the backdrop to the card's surroundings — but *bounded* plainly modifies
+the blur radius, and that reading was in fact derived from `menu_heal`'s cost
+rather than from the text, which is the design-first rule inverted. Re-put to
+the operator on the text, the answer is unchanged but now ratified: the
+backdrop and the card shadow SHARE ONE BOUNDED REGION around the card
+(`pane::menu_effect_region`). The alternative — a display-wide scrim, which is
+what "backdrop" conventionally means — was rejected for a stated cost: it
+forces a display-sized heal on every dismiss, and `menu_heal` exists precisely
+to prevent the whole-screen flash a structural repaint per menu produces. The
+consequence is recorded rather than glossed: at the card's rect grown by the
+shadow's reach this reads as a vignette rather than a full scrim, and the
+scene stays bright a short distance from the dialog.
+
+*The substrate.* A blend is not idempotent the way the card's own compose is.
+`menu_reassert` may re-run over one region — `screen_flush_rect` provably
+calls it twice, once directly and once through the `screen_push` of its own
+return value — and that is harmless ONLY because it is an opaque
+`copy_nonoverlapping`. An effect blends against the destination, so a second
+application darkens what the first already darkened. There is no single choke
+point to hook: seven functions write the screen buffer directly
+(`blit_composed_pixels`, `fill_rect`, `menu_heal`'s local fill,
+`paint_borders`, `paint_cartoon`, `paint_strips`, `compose_cpu`), so
+"re-apply wherever scene pixels are written" would need a signal threaded
+through all seven — the "N defended sites need N witnesses" hazard this arc's
+own I-8b row records as stated, not closed.
+
+So the effects are painted ONCE, when the menu is placed, and the effect ring
+is PUSH-SUPPRESSED while the menu stands: the screen buffer beneath may drift
+as clients present, the display keeps the effected pixels, and `menu_heal`
+reconciles both at dismiss through the repaint + CONFIGURE fan it already
+performs. Idempotency is obtained by EXCLUDING writes rather than by tracking
+them — which costs no memory and leaves no premise to prove.
+
+*Precedent, and why the modern answer does not fit.* This is rio's answer: a
+Plan 9 menu backs up the region it covers, draws, and restores on dismiss, so
+the scene under a menu is frozen by construction. The modern compositors
+(KWin, Hyprland, picom, `NSVisualEffectView`) instead sample the live scene
+and re-blur it every frame — idempotent for free, because they re-composite
+the whole frame each vsync and never apply an effect incrementally. tapestryd
+is deliberately neither: it is damage-driven, which is what `screen_push(rect)`
+and `menu_reassert` ARE. The SOTA's freedom comes from a frame model this
+compositor does not have, so the heritage answer is the one the architecture
+admits.
+
+*The cost, stated.* A program repainting behind a placed modal is hidden until
+the modal is dismissed — a terminal scrolling behind a dialog freezes. At
+`BACKDROP_ALPHA` 184/255 the scene contributes about 28 % of each pixel, so a
+frozen frame differs from a live one only faintly. That is the whole of what
+the choice gives up, and it is given up knowingly.
+
 ## 11. Evidence: the goldens and the gates
 
 - **Oracle.** `docs/halcyon-carbon-handoff/reference/` (frozen; SHA256SUMS;
