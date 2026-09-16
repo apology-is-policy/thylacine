@@ -1580,6 +1580,68 @@ state, exactly where these legs look. **It does not prove the backdrop or the
 shadow LOOK right** -- no leg reads sub-pixel ink. That gap is stated, not
 closed, and it is the same one I-8b-2 recorded.
 
+### I-8c-1: the motion substrate, and two assumptions the code corrected
+
+I-8c is the last fifth of I-8, and the survey had left it looking like new
+machinery. Reading the tree first shrank it twice and grew it once.
+
+**Shrank: the frame clock is not new.** halcyond already blocks in ONE
+`t_poll` whose timeout is a MIN-reduction over two sources -- the rails'
+minute clock and the status notice's deadline -- so an animation deadline is a
+third source of exactly that shape. **Grew: but a shorter timeout paints
+nothing.** Both loops are DIRTY-GATED (`main.rs` paints iff `t.seq !=
+last_seq || dirty`; `session.rs`'s `render_if_dirty` returns early unless
+`self.dirty`), so a frame tick must also mark the right flag. That is
+favourable -- the flags are granular, per-tile and per-chrome, so an animation
+can mark only what it animates -- but it means "add a timeout" was never the
+whole job, and I would have found that out the expensive way.
+
+**The first assumption the code corrected: floats.** I had decided to write
+the easing in fixed-point, reasoning from cartoon's integer discipline. But
+cartoon is a zero-dependency executor and this is libhalcyon, which already
+interpolates in floating point -- `instrument::mix(a, b, p: f64)`,
+`scale::px(logical: f32, ...) -> f32`, and a `round_half_up` that documents
+working around `f32::round` being absent from `core`. Fixed-point would have
+been the NOVEL choice here, not the conservative one. I was importing a
+discipline from a neighbouring crate that has never had it.
+
+**The second: the poll sites are not interchangeable.** `main.rs` reduces with
+`.min()` because its timeout is always positive; `session.rs` carries a
+`-1`-means-infinite sentinel and needs `timeout < 0 ||` guards. Two forms of
+one idea, and I-8c-2's frame clock would have been folded into both BY HAND.
+So `fold_timeout` went into the pure module and both sites now call it -- the
+session's guarded `match` IS the general case and the console's `min` is its
+positive-`current` specialisation, which is why the adoption expands to the
+originals verbatim and changes no behaviour.
+
+**A dead clock turns motion off rather than freezing it.**
+`libthyla_rs::time::monotonic_ns` is documented fail-soft: 0, forever, when
+the clock is unreadable. Every deadline built on it would then sit permanently
+in the future and no animation would ever complete -- a tile stuck mid-
+expansion, which reads as a hung compositor rather than a broken clock.
+`admitted` refuses on a zero sample and `phase` returns 1.0 instead of 0.0, so
+the degraded state is section 9.5's STATIC DEFAULT. That is not a fallback
+invented for the occasion; it is a mode the scripture already specifies and
+supports, which is what makes it the right degradation rather than a guess.
+
+**The sabotage that tested my own test.** I had written, in
+`the_expansion_curve_is_front_loaded_and_bounded`, that the midpoint assertion
+is what catches a transposed control pair -- a claim about a witness, made in
+a comment, verified by nothing. So I transposed the pair and derived the
+expected outcome first: control points (0.8,0.2)/(1.0,0.2) give a BACK-loaded
+curve where x = 0.5 lands at t ~ 0.255 and y ~ 0.131, far under the `> 0.5`
+bar. It failed exactly there, and the endpoint assertions passed throughout --
+which is the point. **A comment claiming a test catches something is an
+untested claim about a test.** Six sabotages, each run separately, each naming
+its witness; restored byte-identical, md5 `025fe0cb`.
+
+**What the green does NOT cover, stated.** halcyond lib stayed at 301 across
+this change, and that number is evidence about the lib and not about the edit:
+both poll sites are bin-side, where a transposed or dropped fold still
+compiles and no test fires. The guest build naming `(bin "halcyond")` is the
+only witness the adoption has, and it cannot be given a better one without
+moving the loop itself into the lib.
+
 ## Run 46o (2026-09-14, Fable 5.1 max) -- the Halcyon Instrument arc opens: reading the Carbon Optics kit against the tree
 
 ### What this run was for

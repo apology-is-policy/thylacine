@@ -14,6 +14,7 @@ code:
   - usr/lib/libhalcyon/src/toml.rs
   - usr/lib/libhalcyon/src/carve.rs
   - usr/lib/libhalcyon/src/scale.rs
+  - usr/lib/libhalcyon/src/motion.rs
   - usr/lib/libhalcyon/Cargo.toml
   - usr/halcyon/src/lib.rs
   - usr/halcyon/src/main.rs
@@ -26,7 +27,7 @@ hazards: []
 abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md section 13", "docs/HALCYON-VISUAL.md", "docs/HALCYON-INSTRUMENT.md"]
 created: 2026-09-05
-updated: 2026-09-15
+updated: 2026-09-16
 ---
 ## Purpose
 
@@ -545,6 +546,54 @@ ignored, and the EDID stands.
 steps, the pixel helpers' rounding, the EDID parse's fail-safe arms, a short
 millimetre axis never truncating off the table (the clamp-ordering regression),
 and the declaration being the last whole-word token with a table value.
+
+## `motion` -- section 10's movement, and the rule deciding whether it runs
+
+`motion.rs` (HALCYON-INSTRUMENT 10 + 9.5 as amended at I-8) holds what section
+10 MOVES, as `instrument::effects` holds what it PAINTS -- which is why
+`SPLIT_FLASH_MS` stays in `effects` rather than migrating here. It is shared
+for the reason `scale` is: [[sub-halcyond]] animates the tile, the hover, the
+body and the caret, while the split flash is [[sub-tapestryd]]'s.
+
+**A dead monotonic clock turns motion OFF rather than freezing it.**
+`libthyla_rs::time::monotonic_ns` is documented fail-soft -- 0, forever, when
+the clock is unreadable -- so every deadline built on it would sit permanently
+in the future and NO animation would ever complete. A tile stuck mid-expansion
+reads as a hung compositor rather than as a broken clock, so `admitted`
+refuses on a zero sample and `phase` returns 1.0 rather than 0.0. The degraded
+state is section 9.5's STATIC DEFAULT -- a mode that section already specifies
+and supports, so this is a documented behaviour rather than a fallback
+invented for the occasion.
+
+**Motion is ON by default and `0` is the only opt-out** (9.5 as amended at
+I-8, operator-answered): absent, empty, and any other word all mean on,
+trimmed exactly as the scale lever trims.
+
+**`fold_timeout` is one reducer where the two halcyond loops had two.** The
+console's poll timeout is always positive and was reduced with `min`; the
+session's carries the `-1`-means-infinite sentinel and needed a guarded
+`match`. The session's form IS the general case and the console's `min` is its
+positive-`current` specialisation, so both call sites expand to their
+originals verbatim and the adoption changed no behaviour. The frame clock
+(I-8c-2) is then a THIRD fold rather than a second hand-written reducer at
+each site, in two different shapes.
+
+**The easing is deterministic by construction.** `cubic_bezier` bisects over a
+FIXED 20 iterations rather than running Newton to a residual: `core` carries
+no `f32::abs`/`sqrt`/`powi` -- the same gap `round_half_up` works around above
+-- and I-9 compares against goldens, where a convergence-dependent iteration
+count would not reproduce. 20 halvings bound the parameter error at 2^-20.
+
+**`FRAME_MS` is OURS, and says so in its own doc comment.** Section 10 pins
+durations and curves and states no frame rate, so the 16 ms cadence is a
+compositor-independent choice; a later reader must not cite it as scripture.
+
+**Prosecute**: the two poll call sites are bin-side and have NO host witness
+-- a transposed or dropped fold still compiles and nothing fails, and
+halcyond's lib count does not move across such an edit; the dead-clock rule is
+SILENT, so a user reporting "no animations" may have an unreadable clock
+rather than a preference; and any move from bisection to a convergence test
+reopens the golden determinism I-9 depends on.
 
 ## `halcyon workspace <n>` -- the tool verb that needed no new channel (2026-09-15, W-2b)
 

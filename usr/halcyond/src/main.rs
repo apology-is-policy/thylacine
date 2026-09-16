@@ -1353,7 +1353,8 @@ pub extern "C" fn rs_main() -> i64 {
                     // wake for it, so the live model returns; and the
                     // rails' clocks turn with the minute.
                     let clock = statusset::clock_timeout_ms();
-                    let timeout = status.notice_timeout_ms().map_or(clock, |ms| ms.min(clock));
+                    let timeout =
+                        libhalcyon::motion::fold_timeout(clock, status.notice_timeout_ms());
                     if unsafe { t_poll(waitfds.as_mut_ptr(), 2, timeout) } < 0 {
                         say!("halcyond: unified poll failed (compositor gone); exiting");
                         return 1;

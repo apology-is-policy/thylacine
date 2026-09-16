@@ -325,6 +325,27 @@ at the next frame tick, and a tile's CONFIGURE no longer lands only at the next
 pane-tree RPC (a Loom wait pumps ONE session -- the H-3b two-sessions latency
 bug). See [[sub-libtapestry]] for the ring side.
 
+**The poll TIMEOUT is a fold, not a hand-written reducer (I-8c-1).** Two
+sources already shorten the wait -- the rails' minute clock
+(`statusset::clock_timeout_ms`) and a transient status notice's deadline
+(`notice_timeout_ms`) -- and the two loops reduced them DIFFERENTLY: the
+console's timeout is always positive and used `min`, while the session's
+carries a `-1`-means-infinite sentinel and needed `timeout < 0 ||` guards.
+Both now fold through `libhalcyon::motion::fold_timeout`, whose guarded form
+is the general case and of which the console's `min` is the positive-`current`
+specialisation; each call site expands to its original verbatim, so the
+adoption changed no behaviour. It exists because I-8c-2's frame clock is a
+THIRD source, and folding it in by hand would have meant writing the same idea
+twice more in two shapes.
+
+**A timeout wake alone paints NOTHING, and that is the integration point.**
+Both loops are dirty-gated -- the console paints iff `t.seq != last_seq ||
+dirty`, and `render_if_dirty` returns early unless the tile's own `dirty` is
+set -- so an animation frame must also mark the flag for what it animates
+(per-tile `dirty`, `chrome_dirty`). The granularity is the payoff: an
+animation marks only its own surface rather than forcing a whole-display
+repaint per frame.
+
 ### The rails (HALCYON-INSTRUMENT 8; I-4)
 
 `rail` (rules) + `railset` (surface) is the fourth lib/bin twin, and it carries

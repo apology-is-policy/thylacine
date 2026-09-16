@@ -2469,11 +2469,8 @@ pub fn run(home: Option<String>) -> i64 {
         // so the live model returns without waiting on an unrelated event;
         // and the rails' clocks turn with the minute.
         let clock = statusset::clock_timeout_ms();
-        let timeout = if timeout < 0 || clock < timeout { clock } else { timeout };
-        let timeout = match status.notice_timeout_ms() {
-            Some(ms) if timeout < 0 || ms < timeout => ms,
-            _ => timeout,
-        };
+        let timeout = libhalcyon::motion::fold_timeout(timeout, Some(clock));
+        let timeout = libhalcyon::motion::fold_timeout(timeout, status.notice_timeout_ms());
         if unsafe { t_poll(fds.as_mut_ptr(), nfds, timeout) } < 0 {
             say!("halcyond: session poll failed (compositor gone); exiting");
             logout = Some(1);
