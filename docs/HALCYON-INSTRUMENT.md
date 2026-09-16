@@ -1770,14 +1770,45 @@ the modal is dismissed — a terminal scrolling behind a dialog freezes. At
 frozen frame differs from a live one only faintly. That is the whole of what
 the choice gives up, and it is given up knowingly.
 
+**What "tile expansion" IS — corrected 2026-09-16 from the ORACLE, after
+being twice reasoned about from this section's own paraphrase.** The mockup's
+rule is `.tile { transition: flex-basis .18s cubic-bezier(.2,.8,.2,1) }`, and
+`.tile` is a STACK MEMBER: `flex: 0 0 var(--header-h)` collapsed, `flex: 1 1
+auto` under `.expanded`. So the 180 ms is a stacked tile growing from its
+header row to its full allocation and back — §2's stack and §3's collapsed
+headers — and `flex-basis` IS "the allocated size" this section names.
+
+**A SPLIT does not animate at all.** `.pane`, the split child, carries exactly
+one transition — `border-color .12s` — and no size transition of any kind. The
+split's own feedback is the `.split-flash` overlay above, a 250 ms fade-out
+that moves no geometry. Any reading of this section that animates a split is
+reading a rule the kit does not contain.
+
+**The body's fade is the SAME gesture's second half, not a separate one.**
+`.tile-body` is `opacity: 0` with `transition: opacity .1s ease`, and
+`.expanded .tile-body` adds `opacity: 1; transition-delay: .07s` — that delay
+is this section's "after 70 ms". It runs INSIDE the 180 ms expansion, which is
+what forces the client to be configured at the start rather than the end.
+
+**"Hover 120 ms" is three separate `.12s ease` rules**, and only the first is
+hover: `.divider::before`'s background and box-shadow (the drag/hover glow,
+the compositor's), `.pane`'s border-color (a FOCUS change, the compositor's),
+and `.tile`'s background (the collapsed/expanded header tone). `.tile-header`
+itself declares no transition, so its own hover tint SNAPS — do not animate
+it.
+
 **The tile expansion animates the COMPOSITOR'S COPY, and the client is
 configured ONCE (2026-09-16, operator-answered).** "180 ms
 `cubic-bezier(.2,.8,.2,1)` on the allocated size" was written of a CSS box,
 where there is no client and no compositor and the content simply reflows.
 Here the allocated size is not a style — it is a **pts winsize**, a contract
 with a running program, and the literal reading sends that program about a
-dozen `SIGWINCH`es per split, each costing it a full re-lay, for a gesture it
-did not make.
+dozen `SIGWINCH`es per expansion, each costing it a full re-lay, for a gesture
+it did not make. *(This paragraph originally said "per split"; the trigger is
+corrected above. The tradeoff is unchanged and if anything stronger, because a
+stack expand/collapse re-allocates EVERY member of that stack at once, so the
+storm is per-tile rather than per-pair. The ratified mechanism does not depend
+on which event fires it, which is why the decision stands as answered.)*
 
 So the compositor tweens the RECT IT COMPOSITES the client's buffer into, over
 §10's 180 ms and §10's curve, and sends exactly **one** CONFIGURE — at the
@@ -1807,8 +1838,8 @@ not the client's, and this compositor is the one that owns the carve.
 literal text, and it is not unbuildable — a divider drag ALREADY re-carves and
 fans CONFIGUREs at most once per frame (§13.6's coalescing), so the path
 exists. The difference is consent: a drag is a resize the user is performing,
-frame by frame, and a split is one gesture whose consequences should not be
-charged to every program in the layout.
+frame by frame, and expanding one tile of a stack is one gesture whose
+consequences should not be charged to every program in that stack.
 
 *The cost, stated.* For 180 ms the tile's content is a clip or a
 nearest-neighbour scale of its FINAL frame rather than a true reflow, so a
