@@ -894,7 +894,17 @@ When a chunk lands (bug fix, refactor, new module, new feature), the author upda
 
 1. **Technical reference (the vault)**: extend or create the owning dossier under `vault/system/` **in your own worktree, co-staged with the code**, per step 0. New module → new dossier. Bug fix that touches a documented invariant → update the dossier after the spec. New term / acronym → a vault glossary note. **`docs/reference` is frozen legacy — never add to it or create a new `NN-*.md`;** it is being absorbed into redirect stubs subsystem-by-subsystem (Part A).
 2. **User reference**: extend or update the relevant `docs/manual/NN-*.md` section if the change is user-visible (new syscall, new admin command, new error case, behavior change). Internal refactors typically don't touch the user manual; user-visible changes always do.
-3. **Snapshot block** in `docs/REFERENCE.md` — refresh figures (test count, spec count, tip hash) on every chunk that changes them. Refresh the user-facing snapshot in `docs/USER-MANUAL.md` at the same cadence.
+3. **Snapshot blocks — NO LONGER A PER-CHUNK OBLIGATION** (operator-answered
+   2026-09-16). `docs/REFERENCE.md`'s Snapshot follows `docs/reference` into
+   the 2026-09-06 freeze: it is a historical artifact of Phase 5, not a
+   current claim, and must not be refreshed per chunk. The LIVE figures are
+   the quaestor-rendered vault views (`vault/views/view-code-coverage.md`,
+   `view-audit-trigger-coverage.md`), which `quaestor render` regenerates and
+   the pre-commit lint keeps current — self-maintaining, where the old rule's
+   only enforcement was remembering it. That is how it reached six weeks
+   stale, unnoticed, while every chunk quietly skipped it.
+   `docs/USER-MANUAL.md`'s snapshot is likewise not owed: the user manual has
+   been a Phase-0 stub since 2026-05-04 and is deferred to v1.0-rc.
 
 A PR that adds code without updating the relevant reference sections is incomplete. **Treat docs as code: doc-update-per-PR is non-negotiable. Missing docs are reverted along with their code.**
 
