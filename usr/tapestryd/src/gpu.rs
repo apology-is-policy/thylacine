@@ -3354,7 +3354,15 @@ impl Gpu {
     /// `reuse=false` at the next re-mint, indicting the free-list for a teardown
     /// fault.
     pub fn drop_host3d_ring(&mut self, ring: HostRing) {
-        let _ = unsafe { t_burrow_detach(ring.va, ring.size) };
+        let rc = unsafe { t_burrow_detach(ring.va, ring.size) };
+        if rc < 0 {
+            say!(
+                "tapestryd: detach hostmem ring {:#x}+{} refused {} -- its pages stay mapped",
+                ring.va,
+                ring.size,
+                rc
+            );
+        }
         if self.unmap_blob(ring.res_id).is_err() {
             say!(
                 "tapestryd: hostmem ring res {} unmap refused at teardown",

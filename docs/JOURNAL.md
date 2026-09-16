@@ -2249,6 +2249,42 @@ The probe is out of the tree. The review's F1 (the bump reaching the stack)
 stays real, and the churn witness now has to measure memory, not only
 survive.
 
+### The operator chose identity; the cure, and a witness that had to be sabotaged twice
+
+The operator picked **detach by identity**, and **hold the view** for the
+Normal-mode click race, which is queued next. Before posing the question I
+checked the Plan 9 precedent in `sysproc.c` rather than trusting memory:
+`syssegdetach` refuses only `s == up->seg[SSEG]`. aux answered on yip 0095
+with no dependency on the refusal and four useful pointers. Two became work:
+- `PciDev::claim_nth`'s pci-3 F1 comment had argued a partial BAR map was
+  unrecoverable because detach was window-bound, so it now unwinds;
+- the `proc_quiesce_owned_devices` residual is widened, not created, and the
+  audit row now says so.
+
+The scripture landed first (`0fbeaf3c`). The kernel then split the gate into
+shape, window and identity, and the identity arm is bounded by `USER_VA_TOP`
+rather than `BURROW_ATTACH_MAX`, so a 64-bit BAR over 256 MiB stays
+detachable. tapestryd got `VaWindow` wired through every map and release, and
+now checks every detach.
+
+The first cured run passed first time: 410680 -> 417752 free pages across 600
+console relayouts, window peak 28 MiB, kernel 1527/1527.
+
+The witness took two tries to prove. Skipping tapestryd's detaches did fail
+the leg, but on the WINDOW check (peak 764 MB after 60 moves), not the page
+check: a detach that never happens also never frees an address, so that
+sabotage could not reach the check it was meant to test. Keeping the weave
+handles open instead leaks pages while addresses recycle, and the page check
+then failed alone: 181512 pages unreturned, window unchanged. The kernel
+tests discriminate the same way. With the identity arm off they read
+1525/1527 and the boot extincts; an arm that also admits ANON fails the
+ELF/stack control at 1526/1527.
+
+The I-8 review's P3s rode the same change: F2-F6 and F8 are fixed, and F7 is
+documented as a GPU-path halo. Every one of the audit's F4 detach fixes
+("detach before close, or 64 MiB leaks") had been dead code for the same
+reason the weaves leaked.
+
 ## Run 46o (2026-09-14, Fable 5.1 max) -- the Halcyon Instrument arc opens: reading the Carbon Optics kit against the tree
 
 ### What this run was for

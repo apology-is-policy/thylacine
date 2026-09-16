@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**446 owned · 59 unowned · 505 files (88% owned) · ~17035 unswept lines.**
+**447 owned · 58 unowned · 505 files (88% owned) · ~16770 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **66 files, ~30656 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -77,10 +77,10 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30656 lin
 | kernel | 123 | 15 | 2118 |
 | usr/ports | 14 | 4 | 1631 |
 | usr/quarry | 0 | 1 | 1028 |
-| usr/tapestryd | 7 | 3 | 501 |
 | usr/stratumd-stub | 0 | 1 | 453 |
 | usr/kaua-term | 3 | 1 | 276 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
+| usr/tapestryd | 8 | 2 | 236 |
 | arch | 36 | 2 | 146 |
 | usr/susp-mask-child | 0 | 1 | 139 |
 | usr/stub-driver | 0 | 1 | 119 |
@@ -135,7 +135,6 @@ Excluded as harness and counted here rather than dropped: **66 files, ~30656 lin
 | kernel/include/thylacine/smp.h | 282 |
 | usr/pouch-hello/pouch-hello.c | 278 |
 | usr/kaua-term/src/cmdline.rs | 276 |
-| usr/tapestryd/src/va.rs | 265 |
 | usr/gl-sdl-prove/gl-sdl-prove.c | 262 |
 | usr/pouch-hello/pouch-hello-signals.c | 258 |
 | usr/pouch-hello/pouch-hello-pty.c | 231 |

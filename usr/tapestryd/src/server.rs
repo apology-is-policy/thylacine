@@ -107,6 +107,7 @@ use libthyla_rs::{
     T_SRV_PEER_FLAG_CONSOLE_RENDERER,
 };
 use tapestryd::skein::{self, Seg};
+use tapestryd::va::VaWindow;
 
 /// Present-pressure window for the idle throttle (#164): two adjacent
 /// buckets of this width approximate a sliding window, so `animating()`
@@ -474,9 +475,20 @@ const PROBE_MARK: u32 = 0x5741_5250; // "WARP"
 /// "unchanged" cannot be satisfied by a value a PREVIOUS verify left.
 const PROBE_TOKEN_BASE: u32 = 0x2444_3040;
 
-/// The weave-mapping VA window in tapestryd's own AS (bump-allocated;
-/// freed VAs are not reused at stage 0 -- bounded by the surface caps per
-/// generation and the 47-bit user VA space; a free-list is a v1.x seam).
+/// How a `map_dma` failed: `Unmapped` leaves nothing at the address (the map
+/// was refused, or its detach succeeded), `Stranded` means a detach the kernel
+/// refused left the mapping in place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MapFail {
+    Unmapped,
+    Stranded,
+}
+
+/// The weave-mapping VA window in tapestryd's own AS: every DMA object the
+/// compositor maps (weave generations, the screen, GPU BOs, rings, probe
+/// pages) lands at an address `Comp.va` hands out first-fit and takes back
+/// once the kernel has removed the mapping, so the window holds the LIVE set,
+/// never the session's history.
 // 0x0240_0000 since the mouse function (its 6-BAR window ends at
 // 0x0220_0000 -- the main.rs VA-layout asserts pin the whole chain).
 const WEAVE_VA_BASE: u64 = 0x0240_0000;
@@ -1757,7 +1769,9 @@ pub struct Comp {
     present_bucket_start: Option<Instant>,
     present_bucket_count: u32,
     present_prev_count: u32,
-    weave_va_next: u64,
+    /// The mapping window (tapestryd::va): addresses in [WEAVE_VA_BASE,
+    /// WEAVE_VA_TOP) for every DMA map, reused once a detach succeeds.
+    va: VaWindow,
     /// The surface TEV_FOCUS was last emitted for (G-6c): reconcile
     /// compares against the layout's focused surface and emits the
     /// lost/gained pair on every change.
@@ -2519,7 +2533,7 @@ impl Comp {
             present_bucket_start: None,
             present_bucket_count: 0,
             present_prev_count: 0,
-            weave_va_next: WEAVE_VA_BASE,
+            va: VaWindow::new(WEAVE_VA_BASE, WEAVE_VA_TOP),
             last_focus: None,
             menu: None,
             fx_save: None,
@@ -2692,7 +2706,7 @@ impl Comp {
     /// segment read then failed, this detaches the VA before returning, so
     /// every caller's existing "close the handle" unwind stays correct and
     /// complete.
-    fn map_dma(handle: i64, va: u64, size: u64, out: &mut [Seg]) -> Option<usize> {
+    fn map_dma(handle: i64, va: u64, size: u64, out: &mut [Seg]) -> Result<usize, MapFail> {
         let rc = unsafe { t_dma_map(handle, va, T_PROT_READ | T_PROT_WRITE) };
         // A skein has no single PA, so the kernel refuses to invent one rather
         // than returning the first block's -- which a caller would embed in a
@@ -2700,7 +2714,7 @@ impl Comp {
         // T_DMA_MAP_PA_SCATTERED means THE MAPPING SUCCEEDED and the VA is
         // ours; only a genuinely failed map leaves nothing to detach.
         if rc < 0 && rc != T_DMA_MAP_PA_SCATTERED {
-            return None;
+            return Err(MapFail::Unmapped);
         }
 
         let mut raw = [TDmaSeg::default(); WEAVE_MAX_SEGS];
@@ -2718,8 +2732,11 @@ impl Comp {
                 n,
                 out.len()
             );
-            unsafe { t_burrow_detach(va, size) };
-            return None;
+            return Err(if Self::detach_or_say(va, size, "segments") {
+                MapFail::Unmapped
+            } else {
+                MapFail::Stranded
+            });
         }
         for i in 0..n as usize {
             out[i] = Seg {
@@ -2727,7 +2744,78 @@ impl Comp {
                 len: raw[i].len,
             };
         }
-        Some(n as usize)
+        Ok(n as usize)
+    }
+
+    /// Detach a mapping and SAY when the kernel refuses: a refused detach
+    /// leaves the object's pages mapped -- and, through the mapping, allocated
+    /// -- for the life of the process. Every one of these calls discarded its
+    /// result until ARCH 6.5's identity rule, which is how a detach the kernel
+    /// never admitted leaked every weave generation without a word.
+    fn detach_or_say(va: u64, size: u64, what: &str) -> bool {
+        let rc = unsafe { t_burrow_detach(va, size) };
+        if rc < 0 {
+            say!(
+                "tapestryd: detach {} {:#x}+{} refused {} -- its pages stay mapped",
+                what,
+                va,
+                size,
+                rc
+            );
+            return false;
+        }
+        true
+    }
+
+    /// Detach a mapping the window placed and give the range back -- ONLY once
+    /// the kernel removed it. A range whose detach was refused is still
+    /// mapped; handing it out again would steer the next map into a refusal.
+    fn window_unmap(win: &mut VaWindow, va: u64, size: u64, what: &str) -> bool {
+        if !Self::detach_or_say(va, size, what) {
+            return false;
+        }
+        if !win.free(va, size) {
+            say!(
+                "tapestryd: mapping window refused {} {:#x}+{} back -- BUG, not a live range",
+                what,
+                va,
+                size
+            );
+        }
+        true
+    }
+
+    /// Map DMA object `handle` at an address the window chooses. `None` leaves
+    /// nothing mapped and the window as it was, except for a range stranded by
+    /// a refused detach, which stays out of circulation.
+    fn map_in_window(
+        &mut self,
+        handle: i64,
+        size: u64,
+        what: &str,
+        out: &mut [Seg],
+    ) -> Option<(u64, usize)> {
+        let va = match self.va.alloc(size) {
+            Some(va) => va,
+            None => {
+                say!(
+                    "tapestryd: mapping window full for {} ({} bytes): live {} largest free {}",
+                    what,
+                    size,
+                    self.va.live(),
+                    self.va.largest_free()
+                );
+                return None;
+            }
+        };
+        match Self::map_dma(handle, va, size, out) {
+            Ok(n) => Some((va, n)),
+            Err(MapFail::Unmapped) => {
+                let _ = self.va.free(va, size);
+                None
+            }
+            Err(MapFail::Stranded) => None,
+        }
     }
 
     /// Allocate one weave GENERATION: DMA chunk + map + zero + one 2D
@@ -2759,11 +2847,9 @@ impl Comp {
             say!("tapestryd: t_dma_create_weave({}) failed {}", size, handle);
             return Err(p9::E_NOMEM);
         }
-        let va = self.weave_va_next;
-        self.weave_va_next += (size + PAGE - 1) & !(PAGE - 1);
         let mut segs = [Seg::default(); WEAVE_MAX_SEGS];
-        let nsegs = match Self::map_dma(handle, va, size, &mut segs) {
-            Some(n) => n,
+        let (va, nsegs) = match self.map_in_window(handle, size, "weave", &mut segs) {
+            Some(m) => m,
             None => {
                 unsafe { t_close(handle) };
                 return Err(p9::E_NOMEM);
@@ -2811,7 +2897,7 @@ impl Comp {
                     let _ = self.gpu.detach_backing(prev);
                     let _ = self.gpu.resource_unref(prev);
                 }
-                unsafe { t_burrow_detach(va, size) };
+                Self::window_unmap(&mut self.va, va, size, "weave");
                 unsafe { t_close(handle) };
                 return Err(p9::E_NOMEM);
             }
@@ -2917,7 +3003,7 @@ impl Comp {
             let _ = self.gpu.detach_backing(res);
             let _ = self.gpu.resource_unref(res);
         }
-        unsafe { t_burrow_detach(w.va, w.size) };
+        Self::window_unmap(&mut self.va, w.va, w.size, "weave");
         unsafe { t_close(w.handle) };
     }
 
@@ -4105,11 +4191,9 @@ impl Comp {
         if fd < 0 {
             return None;
         }
-        let va = self.weave_va_next;
-        self.weave_va_next += size;
         let mut segs = [Seg::default(); WEAVE_MAX_SEGS];
-        let nsegs = match Self::map_dma(fd, va, size, &mut segs) {
-            Some(n) => n,
+        let (va, nsegs) = match self.map_in_window(fd, size, "conv probe", &mut segs) {
+            Some(m) => m,
             None => {
                 unsafe { t_close(fd) };
                 return None;
@@ -4139,7 +4223,7 @@ impl Comp {
                 .is_ok()
         };
         if !created {
-            unsafe { t_burrow_detach(va, size) };
+            Self::window_unmap(&mut self.va, va, size, "conv probe");
             unsafe { t_close(fd) };
             return None;
         }
@@ -4149,7 +4233,7 @@ impl Comp {
             .is_err()
         {
             let _ = self.gpu.resource_unref(res);
-            unsafe { t_burrow_detach(va, size) };
+            Self::window_unmap(&mut self.va, va, size, "conv probe");
             unsafe { t_close(fd) };
             return None;
         }
@@ -4159,7 +4243,7 @@ impl Comp {
     fn conv_probe_res_undo(&mut self, res: u32, va: u64, fd: i64) {
         let _ = self.gpu.detach_backing(res);
         let _ = self.gpu.resource_unref(res);
-        unsafe { t_burrow_detach(va, PAGE) };
+        Self::window_unmap(&mut self.va, va, PAGE, "conv probe");
         unsafe { t_close(fd) };
     }
 
@@ -4274,6 +4358,13 @@ impl Comp {
         if b == self.bundle {
             return; // idempotent: a re-push of the same bundle fans nothing
         }
+        // Section 10: a standing card's reach was measured at the profile this
+        // replaces (a Legacy flip drops its effects entirely), so a dismiss
+        // after the change would put back the wrong band. Dismissed first, as
+        // `set_mode` and the chord path do.
+        if self.menu.is_some() {
+            self.menu_dismiss("theme");
+        }
         self.bundle = b;
         self.theme = b.theme;
         self.metrics = self.bundle.at(self.scale).metrics;
@@ -4313,6 +4404,12 @@ impl Comp {
     fn apply_scale(&mut self, pct: u16, why: &str) {
         if pct == self.scale || !scale::is_valid_pct(pct) {
             return;
+        }
+        // As in `apply_theme`: the shadow's offset and radius scale with the
+        // display, so a standing card's reach is dismissed at the scale that
+        // measured it.
+        if self.menu.is_some() {
+            self.menu_dismiss("scale");
         }
         let from = self.scale;
         self.scale = pct;
@@ -5368,13 +5465,11 @@ impl Comp {
             );
             return None;
         }
-        let va = self.weave_va_next;
-        self.weave_va_next += size;
         // WEAVE-SKEIN: the screen is a weave too (1280x800x4 is 3.9 MiB, so it
         // scatters at the default geometry, not only at large ones).
         let mut segs = [Seg::default(); WEAVE_MAX_SEGS];
-        let nsegs = match Self::map_dma(handle, va, size, &mut segs) {
-            Some(n) => n,
+        let (va, nsegs) = match self.map_in_window(handle, size, "screen", &mut segs) {
+            Some(m) => m,
             None => {
                 unsafe { t_close(handle) };
                 return None;
@@ -5467,13 +5562,13 @@ impl Comp {
         }
         if !is3d {
             if self.gpu.resource_create_2d(res, dw, dh).is_err() {
-                unsafe { t_burrow_detach(va, size) };
+                Self::window_unmap(&mut self.va, va, size, "screen");
                 unsafe { t_close(handle) };
                 return None;
             }
             if self.gpu.attach_backing(res, &segs[..nsegs]).is_err() {
                 let _ = self.gpu.resource_unref(res);
-                unsafe { t_burrow_detach(va, size) };
+                Self::window_unmap(&mut self.va, va, size, "screen");
                 unsafe { t_close(handle) };
                 return None;
             }
@@ -5543,7 +5638,7 @@ impl Comp {
         }
         let _ = self.gpu.detach_backing(s.res);
         let _ = self.gpu.resource_unref(s.res);
-        unsafe { t_burrow_detach(s.va, s.size) };
+        Self::window_unmap(&mut self.va, s.va, s.size, "screen");
         unsafe { t_close(s.handle) };
     }
 
@@ -5734,6 +5829,14 @@ impl Comp {
             Some(s) if s.is_menu && s.weave.is_some() => (s.w, s.h, s.gen),
             _ => return Err(p9::E_NOENT),
         };
+        // An upload lays the card on only over a save it can take off again,
+        // so a card placed without the scratch would stand INVISIBLE while its
+        // grab took every key and pointer event. Decided here, before anything
+        // changes: the owner learns, and no grab stands.
+        if !self.fx_save_ensure() {
+            say!("tapestryd: menu {} place refused: no save scratch to lay the card on", n);
+            return Err(p9::E_NOMEM);
+        }
         // 9.2: a modal opening ends a divider drag (the grab takes the
         // pointer from the capture).
         self.drag_end("menu");
@@ -5766,8 +5869,15 @@ impl Comp {
         if !self.emit_configure_to(n, sw, sh) {
             self.retire(n);
         }
-        // A wedged owner's retire above has already dismissed the card.
+        // A wedged owner's retire above has already dismissed the card -- and
+        // that unplace uploaded only the NEW reach, so a move's old placement
+        // is put back here or it stays on the display.
         let Some(m) = self.menu.filter(|m| m.n == n && m.gen == gen) else {
+            if let Some(o) = old {
+                let was = rect_union(o.reach, self.menu_reach(&o));
+                self.upload(was, true);
+                self.heal_gl_under(o.rect);
+            }
             return Ok(());
         };
         let reach = self.menu_reach(&m);
@@ -5908,27 +6018,14 @@ impl Comp {
             if t.intersect(area).is_empty() || self.gl_blit_owned(n) {
                 continue;
             }
-            if self.restorable(n) {
-                let _ = self.restore_surface(n);
-            } else {
+            // Composed anyway where there is a slot to compose (an
+            // accumulator's patchwork is closer to its frame than whatever the
+            // buffer last held), and owed a redraw wherever it cannot be exact.
+            if !self.restore_surface(n) {
                 owed.push((n, t));
             }
         }
         owed
-    }
-
-    /// Does surface `n`'s last-presented slot reproduce its whole frame?
-    /// Not for a GL adoption (the frame is host-side), a held (test-mode
-    /// HOLD) slot, a surface that never presented, or an accumulator (#56),
-    /// whose slot is patchwork. Sound otherwise because a client honouring
-    /// the buffer-age contract presents COMPLETE frames -- each slot is
-    /// repainted over the union of the damage since that slot's age
-    /// (GPU-DESIGN 4.5.8b).
-    fn restorable(&self, n: usize) -> bool {
-        self.gl_adoption(n).is_none()
-            && self.surf(n).map_or(false, |s| {
-                s.held.is_none() && s.shown_slot.is_some() && s.weave.is_some() && !s.patchwork
-            })
     }
 
     /// Compose surface `n`'s last-presented slot into the screen buffer at
@@ -5937,7 +6034,9 @@ impl Comp {
     /// unshown as `release` promises, a surface that never presented has
     /// nothing to show, and an accumulator's slot is patchwork (#56) --
     /// composed anyway, as the structural pre-fill always did, but owed a
-    /// redraw.
+    /// redraw. True is sound because a client honouring the buffer-age
+    /// contract presents COMPLETE frames -- each slot is repainted over the
+    /// union of the damage since that slot's age (GPU-DESIGN 4.5.8b).
     fn restore_surface(&mut self, n: usize) -> bool {
         if self.gl_adoption(n).is_some() {
             return false;
@@ -5982,7 +6081,13 @@ impl Comp {
         }
         let mut wedged: Vec<usize> = Vec::new();
         for (_, n, c) in self.layout.visible_hosted() {
-            if c.intersect(card).is_empty() || !self.gl_blit_owned(n) {
+            if !self.gl_blit_owned(n) {
+                continue;
+            }
+            // The PLACEMENT rect, the one `gl_blit_holes` carves: a letterboxed
+            // frame whose content meets the card only through its bars was
+            // never overwritten.
+            if self.placement_rect(n, c).map_or(true, |p| p.intersect(card).is_empty()) {
                 continue;
             }
             if !self.emit_configure_to(n, c.w, c.h) {
@@ -6972,11 +7077,10 @@ impl Comp {
         );
         #[cfg(feature = "test-mode")]
         {
-            let used = self.weave_va_next - WEAVE_VA_BASE;
             say!(
                 "tapestryd: mapping window live {} peak {} of {}",
-                used,
-                used,
+                self.va.live(),
+                self.va.peak(),
                 WEAVE_VA_TOP - WEAVE_VA_BASE
             );
         }
@@ -7868,20 +7972,8 @@ impl Comp {
         if s.is_empty() || s.x as usize + s.w as usize > dw || s.y as usize + s.h as usize > dh {
             return false;
         }
-        let need = ((dw as u64) * (dh as u64) * 4 + PAGE - 1) & !(PAGE - 1);
-        if self.fx_save.map_or(true, |(_, size)| size < need) {
-            if let Some((old_va, old_size)) = self.fx_save.take() {
-                unsafe { t_burrow_detach(old_va, old_size) };
-            }
-            let rc = unsafe { t_burrow_attach_lazy(need) };
-            if rc < 0 {
-                if !self.fx_save_failed_said {
-                    self.fx_save_failed_said = true;
-                    say!("tapestryd: effect save scratch ({} bytes) failed {} -- cards upload without effects", need, rc);
-                }
-                return false;
-            }
-            self.fx_save = Some((rc as u64, need));
+        if !self.fx_save_ensure() {
+            return false;
         }
         let Some((save_va, _)) = self.fx_save else {
             return false;
@@ -7901,6 +7993,38 @@ impl Comp {
             let row = (s.y as usize + k) * dw + s.x as usize;
             save[k * w..(k + 1) * w].copy_from_slice(&screen[row..row + w]);
         }
+        true
+    }
+
+    /// Hold a save scratch that covers the whole display: a lazy burrow, so
+    /// only the rows a save touches are ever committed. False -- said once --
+    /// when it cannot be attached; `menu_place` refuses a card then, so no
+    /// standing card ever meets a missing scratch (the scratch only needs
+    /// replacing on a display-mode change, which dismisses the card first).
+    fn fx_save_ensure(&mut self) -> bool {
+        let (dw, dh) = (self.gpu.width as u64, self.gpu.height as u64);
+        let need = (dw * dh * 4 + PAGE - 1) & !(PAGE - 1);
+        if self.fx_save.map_or(false, |(_, size)| size >= need) {
+            return true;
+        }
+        if let Some((old_va, old_size)) = self.fx_save.take() {
+            // Kernel-placed (a lazy attach in the burrow window), so it is
+            // never the mapping window's to take back.
+            Self::detach_or_say(old_va, old_size, "effect save");
+        }
+        let rc = unsafe { t_burrow_attach_lazy(need) };
+        if rc < 0 {
+            if !self.fx_save_failed_said {
+                self.fx_save_failed_said = true;
+                say!(
+                    "tapestryd: save scratch ({} bytes) failed {} -- cards are refused",
+                    need,
+                    rc
+                );
+            }
+            return false;
+        }
+        self.fx_save = Some((rc as u64, need));
         true
     }
 
@@ -8540,7 +8664,7 @@ impl Comp {
             // (5) Drop the server refs: unmap our own mapping, close the
             // weave handle (serverRef -> FALSE; #847 keeps the pages until
             // the client's mapping ref drops too).
-            unsafe { t_burrow_detach(w.va, w.size) };
+            Self::window_unmap(&mut self.va, w.va, w.size, "weave");
             unsafe { t_close(w.handle) };
         }
         // Warp-4 x C-2c: a GL adoption consented to THIS surface incarnation
@@ -10164,8 +10288,8 @@ impl Comp {
         // compose reads `sw * sh_full * 4` from this `va` with sw/sh taken
         // from the SURFACE -- so a 512x512 BO declared with size 4096 (page
         // aligned, under both caps, admitted) made the compositor read 1 MiB
-        // out of a 4 KiB mapping. `weave_va_next` is a bump allocator, so the
-        // overrun is a neighbouring allocation (another client's pixels,
+        // out of a 4 KiB mapping. The mapping window packs its ranges first-fit,
+        // so the overrun is a neighbouring allocation (another client's pixels,
         // painted onto the attacker's own pane) or unmapped VA -- a fault in
         // the process that IS the console.
         //
@@ -10635,16 +10759,12 @@ impl Comp {
     /// The same mint as a BUFFER resource of `size` bytes (`buffer` = true;
     /// Warp-C C-4, see `PIPE_BUFFER`) or the 1x1 render target (false).
     ///
-    /// The mapping VA rides the shared `weave_va_next` bump and is NEVER
-    /// rewound: `warp_probe_undo_guest` detaches the mapping (the pages and
-    /// the handle are freed) but the VA range stays consumed, so every ctx
-    /// mint/destroy cycle burns 2 pages of tapestryd's VA window for its
-    /// probe pair on top of the weave allocations #171 already tracks (C-0d
-    /// Fable round F3, the same monotonic-VA class with a second, ctx-churn
-    /// driver; the reclaim #171 owes must cover these pages too). Note also
-    /// that the detach names `size` while the bump rounds it up to pages --
-    /// equal today (`size` is PAGE), and a probe of any other size would
-    /// need the detach to name the rounded length.
+    /// The mapping VA comes from the shared mapping window and goes back to it
+    /// when `warp_probe_undo_guest` detaches the mapping, so a ctx mint/destroy
+    /// cycle holds its probe pair's pages only while the ctx lives (C-0d Fable
+    /// round F3's monotonic-VA class, closed by the reusing window). The window
+    /// page-rounds both the alloc and the free, and the kernel page-rounds the
+    /// detach, so a probe `size` that is not a page multiple stays consistent.
     fn warp_probe_res_kind(
         &mut self,
         dev_ctx: u32,
@@ -10655,11 +10775,9 @@ impl Comp {
         if fd < 0 {
             return None;
         }
-        let va = self.weave_va_next;
-        self.weave_va_next += (size + PAGE - 1) & !(PAGE - 1);
         let mut segs = [Seg::default(); WEAVE_MAX_SEGS];
-        let nsegs = match Self::map_dma(fd, va, size, &mut segs) {
-            Some(n) => n,
+        let (va, nsegs) = match self.map_in_window(fd, size, "warp probe", &mut segs) {
+            Some(m) => m,
             None => {
                 unsafe { t_close(fd) };
                 return None;
@@ -10667,14 +10785,14 @@ impl Comp {
         };
         self.res_seq = self.res_seq.wrapping_add(1);
         let res_id = self.res_seq;
-        let undo = |gpu: &mut Gpu, stage: u32, res_id: u32| {
+        let undo = |gpu: &mut Gpu, win: &mut VaWindow, stage: u32, res_id: u32| {
             if stage >= 2 {
                 let _ = gpu.ctx_detach_resource(dev_ctx, res_id);
             }
             if stage >= 1 {
                 let _ = gpu.resource_unref(res_id);
             }
-            unsafe { t_burrow_detach(va, size) };
+            Self::window_unmap(win, va, size, "warp probe");
             unsafe { t_close(fd) };
         };
         let created = if buffer {
@@ -10707,11 +10825,11 @@ impl Comp {
             )
         };
         if created.is_err() {
-            undo(&mut self.gpu, 0, res_id);
+            undo(&mut self.gpu, &mut self.va, 0, res_id);
             return None;
         }
         if self.gpu.ctx_attach_resource(dev_ctx, res_id).is_err() {
-            undo(&mut self.gpu, 1, res_id);
+            undo(&mut self.gpu, &mut self.va, 1, res_id);
             return None;
         }
         if self
@@ -10719,7 +10837,7 @@ impl Comp {
             .attach_backing(res_id, &segs[..nsegs])
             .is_err()
         {
-            undo(&mut self.gpu, 2, res_id);
+            undo(&mut self.gpu, &mut self.va, 2, res_id);
             return None;
         }
         Some((res_id, fd, va))
@@ -10735,7 +10853,7 @@ impl Comp {
     /// path, the guest backing waits for the device-finished proof.
     fn warp_probe_res_undo(&mut self, dev_ctx: u32, res: u32, va: u64, fd: i64, size: u64) {
         self.warp_probe_undo_dev(dev_ctx, res);
-        Self::warp_probe_undo_guest(va, fd, size);
+        Self::warp_probe_undo_guest(&mut self.va, va, fd, size);
     }
 
     fn warp_probe_undo_dev(&mut self, dev_ctx: u32, res: u32) {
@@ -10744,8 +10862,8 @@ impl Comp {
         let _ = self.gpu.resource_unref(res);
     }
 
-    fn warp_probe_undo_guest(va: u64, fd: i64, size: u64) {
-        unsafe { t_burrow_detach(va, size) };
+    fn warp_probe_undo_guest(win: &mut VaWindow, va: u64, fd: i64, size: u64) {
+        Self::window_unmap(win, va, size, "warp probe");
         unsafe { t_close(fd) };
     }
 
@@ -11443,10 +11561,10 @@ impl Comp {
             );
             return false;
         }
-        let va = self.weave_va_next;
-        self.weave_va_next += (size + PAGE - 1) & !(PAGE - 1);
         let mut segs = [Seg::default(); WEAVE_MAX_SEGS];
-        let nsegs = Self::map_dma(fd, va, size, &mut segs).unwrap_or(0);
+        let (va, nsegs) = self
+            .map_in_window(fd, size, "warp bo", &mut segs)
+            .unwrap_or((0, 0));
         if nsegs == 0 {
             unsafe { t_close(fd) };
             self.wbo_diag_once(
@@ -11470,7 +11588,7 @@ impl Comp {
         // mapping ref survives (audit F4 -- dropping only the handle
         // leaked up to 64 MiB of pinned contiguous pages for the life of
         // a PERSISTENT driver).
-        let unwind = |gpu: &mut Gpu, stage: u32, res_id: u32| {
+        let unwind = |gpu: &mut Gpu, win: &mut VaWindow, stage: u32, res_id: u32| {
             if stage >= 3 {
                 let _ = gpu.detach_backing(res_id);
             }
@@ -11480,7 +11598,7 @@ impl Comp {
             if stage >= 1 {
                 let _ = gpu.resource_unref(res_id);
             }
-            unsafe { t_burrow_detach(va, size) };
+            Self::window_unmap(win, va, size, "warp bo");
             unsafe { t_close(fd) };
         };
 
@@ -11493,7 +11611,7 @@ impl Comp {
             )
             .is_err()
         {
-            unwind(&mut self.gpu, 0, res_id);
+            unwind(&mut self.gpu, &mut self.va, 0, res_id);
             self.wbo_diag_once(
                 ctx_pub,
                 conn,
@@ -11509,7 +11627,7 @@ impl Comp {
             return false;
         }
         if self.gpu.ctx_attach_resource(dev_ctx, res_id).is_err() {
-            unwind(&mut self.gpu, 1, res_id);
+            unwind(&mut self.gpu, &mut self.va, 1, res_id);
             self.wbo_diag_once(
                 ctx_pub,
                 conn,
@@ -11529,7 +11647,7 @@ impl Comp {
             .attach_backing(res_id, &segs[..nsegs])
             .is_err()
         {
-            unwind(&mut self.gpu, 2, res_id);
+            unwind(&mut self.gpu, &mut self.va, 2, res_id);
             self.wbo_diag_once(
                 ctx_pub,
                 conn,
@@ -11575,7 +11693,7 @@ impl Comp {
             // record that vanished must not strand the device state just
             // built for it, and must NAME itself (audit F2: this was the
             // one refusal arm still silent).
-            unwind(&mut self.gpu, 3, res_id);
+            unwind(&mut self.gpu, &mut self.va, 3, res_id);
             self.wbo_diag_once(
                 ctx_pub,
                 conn,
@@ -11749,7 +11867,7 @@ impl Comp {
             .as_mut()
             .and_then(|c| c.ring_slots[ri].take());
         if let Some(mut r) = taken {
-            Self::wring_teardown(&mut self.gpu, &mut r);
+            Self::wring_teardown(&mut self.gpu, &mut self.va, &mut r);
         }
         Ok(())
     }
@@ -11939,24 +12057,15 @@ impl Comp {
         if fd < 0 {
             return Err(p9::E_NOMEM);
         }
-        let va = self.weave_va_next;
-        self.weave_va_next += (bytes + PAGE - 1) & !(PAGE - 1);
         // A ring is capped at WARP_RING_MAX (1 MiB), which a _Static_assert-
         // equivalent bound keeps under SKEIN_BLOCK, so it is single-block by
         // construction -- which is what the blob path below REQUIRES, since
         // RESOURCE_CREATE_BLOB carries one mem entry. Going through map_dma
         // anyway means this site never has to know that.
         let mut segs = [Seg::default(); WEAVE_MAX_SEGS];
-        let nsegs = match Self::map_dma(fd, va, bytes, &mut segs) {
-            Some(n) => n,
+        let (va, nsegs) = match self.map_in_window(fd, bytes, "warp ring", &mut segs) {
+            Some(m) => m,
             None => {
-                // The VA rewind is sound ONLY because map_dma's contract says
-                // nothing is installed on None. It was written when a failed
-                // t_dma_map was the only way here; the skein's -2 (mapping
-                // SUCCEEDED, no single PA) would have made the old `pa < 0`
-                // test rewind a bump allocator over a LIVE mapping and hand
-                // the same VA out twice.
-                self.weave_va_next = va;
                 unsafe { t_close(fd) };
                 return Err(p9::E_NOMEM);
             }
@@ -11968,8 +12077,7 @@ impl Comp {
             // rather than assumed, because the two constants live in different
             // repositories and nothing links them.
             say!("tapestryd: ring backing scattered ({} segs) -- refusing", nsegs);
-            unsafe { t_burrow_detach(va, bytes) };
-            self.weave_va_next = va;
+            Self::window_unmap(&mut self.va, va, bytes, "warp ring");
             unsafe { t_close(fd) };
             return Err(p9::E_NOMEM);
         }
@@ -11989,8 +12097,7 @@ impl Comp {
                 .create_ring_blob(rid, pa as u64, bytes as u32)
                 .is_err()
             {
-                unsafe { t_burrow_detach(va, bytes) };
-                self.weave_va_next = va; // audit F5: mapping detached -- reclaim the VA
+                Self::window_unmap(&mut self.va, va, bytes, "warp ring");
                 unsafe { t_close(fd) };
                 return Err(E_IO);
             }
@@ -12029,7 +12136,7 @@ impl Comp {
                 if res_id != 0 {
                     let _ = self.gpu.resource_unref(res_id);
                 }
-                unsafe { t_burrow_detach(va, bytes) };
+                Self::window_unmap(&mut self.va, va, bytes, "warp ring");
                 unsafe { t_close(fd) };
                 Err(p9::E_NOENT)
             }
@@ -12256,7 +12363,7 @@ impl Comp {
     /// covers the mid-life caller. The client-mapping case is already deferred
     /// below: retire_host3d_ring PARKS (never frees) while any client still
     /// references the ring.
-    fn wring_teardown(gpu: &mut Gpu, r: &mut WarpRing) {
+    fn wring_teardown(gpu: &mut Gpu, win: &mut VaWindow, r: &mut WarpRing) {
         if let Some(id) = r.share_id.take() {
             let _ = unsafe { t_weft_unshare(id) };
         }
@@ -12279,7 +12386,7 @@ impl Comp {
             let _ = gpu.resource_unref(r.res_id);
         }
         if r.dma_fd >= 0 {
-            unsafe { t_burrow_detach(r.va, r.size) };
+            Self::window_unmap(win, r.va, r.size, "warp ring");
             unsafe { t_close(r.dma_fd) };
             r.dma_fd = -1;
         }
@@ -13161,7 +13268,7 @@ impl Comp {
     /// the Proc's life (handle + mapping kept: leak-on-wedge, never UAF).
     /// Returns the byte count LEAKED (0 when the backing was freed) so the
     /// caller can keep charging it against the ctx cap (round-2 F3).
-    fn wbo_retire(gpu: &mut Gpu, dev_ctx: u32, b: &mut WarpBo, leak: bool) -> u64 {
+    fn wbo_retire(gpu: &mut Gpu, win: &mut VaWindow, dev_ctx: u32, b: &mut WarpBo, leak: bool) -> u64 {
         if let Some(id) = b.share_id.take() {
             let _ = unsafe { t_weft_unshare(id) };
         }
@@ -13202,7 +13309,7 @@ impl Comp {
                 return b.size;
             }
             b.dma_fd = -1;
-            unsafe { t_burrow_detach(b.va, b.size) };
+            Self::window_unmap(win, b.va, b.size, "warp bo");
             unsafe { t_close(fd) };
         }
         0
@@ -13244,7 +13351,7 @@ impl Comp {
         // reserve stays a no-op.
         for b in self.warp_ctx_leaked[slot].drain(..) {
             if b.dma_fd >= 0 {
-                unsafe { t_burrow_detach(b.va, b.size) };
+                Self::window_unmap(&mut self.va, b.va, b.size, "warp bo");
                 unsafe { t_close(b.dma_fd) };
             }
         }
@@ -13253,7 +13360,7 @@ impl Comp {
         // was waiting on this.
         if let Some(p) = self.warp_ctx_leaked_probe[slot].take() {
             for (va, fd) in [(p.mark_va, p.mark_fd), (p.sent_va, p.sent_fd)] {
-                Self::warp_probe_undo_guest(va, fd, p.size);
+                Self::warp_probe_undo_guest(&mut self.va, va, fd, p.size);
             }
             self.warp_probe_freed = self.warp_probe_freed.saturating_add(1);
         }
@@ -13272,7 +13379,7 @@ impl Comp {
                     Some(b) => b,
                     None => continue,
                 };
-                if Self::wbo_retire(&mut self.gpu, c.dev_ctx, &mut b, leak) > 0 {
+                if Self::wbo_retire(&mut self.gpu, &mut self.va, c.dev_ctx, &mut b, leak) > 0 {
                     self.warp_park_leaked(slot, b);
                 }
             }
@@ -13286,7 +13393,7 @@ impl Comp {
             // not free).
             for j in 0..WARP_RINGS_PER_CTX {
                 if let Some(mut r) = c.ring_slots[j].take() {
-                    Self::wring_teardown(&mut self.gpu, &mut r);
+                    Self::wring_teardown(&mut self.gpu, &mut self.va, &mut r);
                 }
             }
             // V-3b-3c-2: retire every device-memory backing, the SAME guest-safe
@@ -13341,7 +13448,7 @@ impl Comp {
                 ] {
                     self.warp_probe_undo_dev(c.dev_ctx, res);
                     if !leak {
-                        Self::warp_probe_undo_guest(va, fd, p.size);
+                        Self::warp_probe_undo_guest(&mut self.va, va, fd, p.size);
                     }
                 }
                 if leak {
@@ -14246,7 +14353,7 @@ impl Comp {
                     continue;
                 }
                 let mut b = self.warp_ctxs[i].as_mut().unwrap().bos[j].take().unwrap();
-                let leaked = Self::wbo_retire(&mut self.gpu, dev_ctx, &mut b, poisoned);
+                let leaked = Self::wbo_retire(&mut self.gpu, &mut self.va, dev_ctx, &mut b, poisoned);
                 if leaked > 0 {
                     // Park it too (round-5 F1): `leaked_bytes` bounds this
                     // ctx's remaining life, but the ctx dies at wctx_finish
@@ -14319,7 +14426,7 @@ impl Comp {
                 let mut b = self.warp_ctxs[slot].as_mut().unwrap().bos[j]
                     .take()
                     .unwrap();
-                let leaked = Self::wbo_retire(&mut self.gpu, dev_ctx, &mut b, poisoned);
+                let leaked = Self::wbo_retire(&mut self.gpu, &mut self.va, dev_ctx, &mut b, poisoned);
                 if leaked > 0 {
                     self.warp_park_leaked(slot, b);
                 }
@@ -18327,6 +18434,9 @@ impl Conn {
                     if self.peer_stripes == 0 || owner != self.peer_stripes {
                         return Err(p9::E_PERM);
                     }
+                    // Budgeted like a layout verb: a placement reconciles, and a
+                    // dialog's saves, blurs and transfers the whole display.
+                    self.layout_verb_budget()?;
                     return comp.menu_place(id, x, y, class);
                 }
                 Some("dismiss") => {

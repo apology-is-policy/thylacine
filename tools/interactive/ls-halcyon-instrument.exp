@@ -595,14 +595,39 @@ lc_pass "instrument: a double-click on the track restores equal weights (9.2)"
 # Every drag frame re-lays the pair, and every surface whose size changed --
 # the console's content, both headers, the empty pane's placard -- answers its
 # CONFIGURE with a new weave generation the COMPOSITOR maps at an address it
-# chooses. A bump allocator for those addresses spends the drag's HISTORY and
-# walks into the process's own stack under 2 GiB; this leg drags the track
-# back and forth CHURN times in one QMP session and requires every reweave to
-# land (no E_NOMEM refusal, no renderer exit), the console to answer after,
-# and the compositor's mapping window to report a peak that is a small
-# fraction of the window -- the LIVE set, not the sum. The drag runs in the
-# background so expect keeps draining the serial line while it moves.
+# chooses. Two budgets are spent by a drag that leaks: ADDRESSES (a bump
+# allocator spends the drag's history and walks into the process's own stack
+# under 2 GiB) and PAGES (a generation whose mapping is never detached keeps
+# its pages -- every detach below 4 GiB was refused until ARCH 6.5's identity
+# rule, so no weave was ever freed). This leg drags the track back and forth
+# CHURN times in one QMP session and requires every reweave to land (no
+# E_NOMEM refusal, no renderer exit), the console to answer after, the mapping
+# window to report a peak that is a small fraction of the window -- the LIVE
+# set, not the sum -- and the kernel's free-page count to come back: the drag
+# ends where it started, so every generation it made must be gone. The drag
+# runs in the background so expect keeps draining the serial line.
+proc free_pages {label} {
+    global lc_cmd_timeout timeout
+    lc_send "cat /ctl/memory"
+    set timeout $lc_cmd_timeout
+    set n ""
+    expect {
+        -re {free:\s+(\d+) pages} { set n $expect_out(1,string) }
+        timeout { lc_fail "no free-page reading $label" }
+        eof     { lc_fail "EOF reading free pages $label" }
+    }
+    return $n
+}
+set free0 [free_pages "before the churn"]
 set churn 600
+# The page bound, from a measurement: with every generation freed the drag
+# gave back MORE than it took (2026-09-16: 410680 -> 417752 free, the first
+# reading having caught a displaced generation mid-drain), and the churn made
+# 600 relayouts of the console alone. 32 MiB covers two in-flight generations
+# of every reweaving surface plus the renderer's transcript, doubled; a leak of
+# ~14 pages a reweave -- a fortieth of the one this leg was built to catch --
+# already exceeds it.
+set churn_page_bound 8192
 set cx0 [expr {((2 * $tx + 1) * 32767) / (2 * ($W - 1))}]
 set cx1 [expr {((2 * ($tx + 60) + 1) * 32767) / (2 * ($W - 1))}]
 set cy [expr {((2 * $ty + 1) * 32767) / (2 * ($H - 1))}]
@@ -615,7 +640,10 @@ expect {
         lc_fail "the churn: the console renderer's reweave failed and it exited: $expect_out(0,string)"
     }
     -re {tapestryd: resize-ack [^\r\n]* refused Err\(12\)[^\r\n]*} {
-        lc_fail "the churn: the compositor refused a reweave for memory (E_NOMEM): $expect_out(0,string)"
+        lc_fail "the churn: the compositor refused a reweave for memory (E_NOMEM, $free0 pages free before): $expect_out(0,string)"
+    }
+    -re {tapestryd: detach [^\r\n]* refused [^\r\n]*} {
+        lc_fail "the churn: a detach was refused, so its pages stay mapped: $expect_out(0,string)"
     }
     -re {tapestryd: divider drag end pane (\d+) track 0 release -> (\d+):(\d+)\r} {}
     timeout { lc_fail "the churn: no drag end within $timeout s" }
@@ -633,7 +661,12 @@ if {$wpeak * 8 > $wsize} {
     lc_fail "the churn: the mapping window peaked at $wpeak of $wsize bytes -- more than an eighth, so it is tracking the drag's history, not the live set"
 }
 lc_run_expect "pwd" "/home/michael"
-lc_pass "instrument: a $churn-move divider drag reweaved every step within the mapping window (peak $wpeak of $wsize, live $wlive after) and the console answered"
+set free1 [free_pages "after the churn"]
+set spent [expr {$free0 - $free1}]
+if {$spent > $churn_page_bound} {
+    lc_fail "the churn: $spent pages did not come back after a drag that ended where it started ($free0 free before, $free1 after, bound $churn_page_bound) -- generations are leaking"
+}
+lc_pass "instrument: a $churn-move divider drag reweaved every step within the mapping window (peak $wpeak of $wsize, live $wlive after), the console answered, and memory came back ($free0 -> $free1 free pages)"
 ptr_to [expr {$W / 2}] [expr {$H / 2}]
 
 # --- Zoom (5.6): the workspace between the rails, frame-less ----------------

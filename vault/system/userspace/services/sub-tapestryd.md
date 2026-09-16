@@ -3,7 +3,7 @@ id: sub-tapestryd
 type: sub
 title: "tapestryd — the compositor: the weave lifecycle, the present engine, and the retire ordering"
 parent: moc-userspace
-code: [usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs, usr/tapestryd/Cargo.toml]
+code: [usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/va.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs, usr/tapestryd/Cargo.toml]
 audit: hard
 guarded-by: [inv-i40, inv-i5, inv-i34, inv-i1, inv-i45, inv-i9]
 validated-by: [spec-tapestry-present, prose, gate-smp]
@@ -579,8 +579,9 @@ page budget does not bound it), 8 connections, 32 fids, a 128-entry
 per-surface event queue, 64 rects per present.
 
 `Comp` holds the surfaces, the pane `Layout`, the `Gpu`, the scanout
-mode (`Off` / `Direct(n)` / `Composed`), and the bump-allocated weave VA
-window.
+mode (`Off` / `Direct(n)` / `Composed`), and the mapping window (`va`, a
+`VaWindow` over `[WEAVE_VA_BASE, WEAVE_VA_TOP)`: first-fit, a range returned only
+after its detach succeeded).
 
 The `tevent` record is 24 bytes, version-pinned; pointer MOVE packs
 surface-**relative** coordinates, never absolute screen ones.
@@ -775,9 +776,11 @@ construction: one IRQ wait per GPU command.
   and self-inflicted here (tapestryd's fids carry no refcount, so a
   clobbered binding leaks nothing), but it is the guard that carries
   ptyfs's `HupAtMostOnce` argument. Task #47.
-- The weave-mapping VA window is bump-allocated and freed VAs are not
-  reused — bounded by the surface caps per generation against a 47-bit
-  space. A free list is a v1.x seam.
+- **The weave-mapping VA window reuses what is freed (CLOSED 2026-09-16).** It
+  was a bump allocator ("a free list is a v1.x seam"). The I-8 review's F1 showed
+  a divider drag walks it into the exec stack, and the bump was never the real
+  bound: no detach below 4 GiB ever succeeded. See "Every detach below 4 GiB was
+  refused" below.
 - A session peer can close or steal focus from another client's pane.
   The v1.0 trust boundary is the per-territory `/srv`: `/srv/tapestry`
   lives in the driver's territory and only the trusted boot chain
@@ -2796,3 +2799,85 @@ they execute are witnessed; that the bin runs them in that order under those
 clips is the "N defended sites need N witnesses" gap, stated. The GPU composed
 path has no gate on this host (the operator's image and every local gate run
 the 2D screen).
+
+## Every detach below 4 GiB was refused -- the leak, the identity rule, and the mapping window (2026-09-16)
+
+**The finding (measured, not inferred).** The I-8 review's F1 witness is a
+600-move divider drag in one QMP session (`ls-halcyon-instrument`'s churn leg).
+It failed before any fix, and not on F1: `t_dma_create_weave` returned -1 after
+about 133 relayouts. A temporary kernel probe (never committed) measured the
+cause:
+- at the failure, 415 DMA objects were live of 461 created, 13631 pages were
+  free with nothing above order 6, and tapestryd held 22 handles;
+- `created - live` held at exactly **46** from the first Halcyon surface on, so
+  no DMA object was freed in the whole session;
+- a second probe showed the client's clunk-unmap working (`unmap_rc=0`, leaving
+  `hc=0 mc=1`) and tapestryd's detach NEVER reaching `detach_one_locked`.
+
+`detach_args_check` refused every vaddr below `EXEC_USER_BURROW_BASE`, and
+tapestryd has placed its maps at `0x0240_0000`+ since G-3a, discarding each
+`t_burrow_detach` result. So every weave generation, the screen buffer, every
+Warp BO, ring and probe page kept its pages until tapestryd exited. The Warp
+audit F4 fix ("`t_burrow_detach` before `t_close`, else up to 64 MiB leaks")
+had never taken effect for the same reason.
+
+**The kernel rule (operator-ratified; scripture `0fbeaf3c`).**
+`SYS_BURROW_DETACH` admits a DMA- or MMIO-backed VMA wherever it was placed
+(ARCH 6.5; [[sub-kernel-vma]]).
+
+**The compositor side.**
+- `detach_or_say` checks every detach and says a refusal ("its pages stay
+  mapped"). A silent `t_burrow_detach` is what hid this.
+- `map_dma` distinguishes `MapFail::Unmapped` (nothing at the address) from
+  `MapFail::Stranded` (a detach the kernel refused).
+- `map_in_window` takes an address from `Comp.va` and gives it back only when
+  nothing was left mapped there.
+- `window_unmap(win, va, size, what)` frees the range only after a successful
+  detach. A refused range stays out of circulation, since handing it out again
+  would steer the next map into a refusal.
+- The six bump sites and every release site go through them: the closures in
+  `warp_probe_res_kind` / `wbo_create` and the static `wring_teardown` /
+  `wbo_retire` / `warp_probe_undo_guest` take `&mut VaWindow`.
+- The effect save scratch is kernel-placed (a lazy attach in the burrow window),
+  so it uses `detach_or_say` and never touches the window; so does the hostmem
+  ring detach in `gpu.rs`.
+- The test-mode drag-end gauge reports `va.live()` / `va.peak()`.
+
+**The witness.** The churn leg reads `/ctl/memory`'s `free:` before and after,
+and fails on:
+- any `tapestryd: detach ... refused` line;
+- a mapping-window peak above an eighth of the window;
+- more than 8192 pages not returned by a drag that ends where it started.
+
+Measured after the cure: 410680 -> 417752 free pages, live 16 MiB, peak 28 MiB
+of 2011 MiB, 600 console relayouts, kernel suite 1527/1527. Sabotage-measured
+(each alone, restored):
+- the kernel identity arm off fails the two new kernel tests (1525/1527, boot
+  extinct);
+- the arm admitting ANON fails the window-confined control (1526/1527);
+- tapestryd skipping its detaches fails the window peak (764 MB after 60 moves);
+- tapestryd keeping its weave handles fails the page check (181512 pages after
+  60 moves, window unchanged).
+
+**The I-8 review's P3s, dispositioned with the fix:**
+- **F2 (fixed):** `fx_save_ensure` decides at `menu_place` -- no scratch, the
+  placement is refused `E_NOMEM` before anything changes, so a grab never stands
+  over an invisible card. The say names what is dropped.
+- **F3 (fixed):** `restore_under` calls `restore_surface` for every surface under
+  the area and owes a redraw on `false`, so a patchwork slot is composed rather
+  than skipped. The dead `restorable` is gone; its soundness argument moved to
+  `restore_surface`.
+- **F4 (fixed):** `apply_theme` / `apply_scale` dismiss a standing card first, as
+  `set_mode` and the chord path do.
+- **F5 (fixed):** `menu_place`'s wedged-owner early return still uploads a move's
+  old placement.
+- **F6 (fixed):** `menu place` charges `layout_verb_budget`.
+- **F8 (fixed):** `heal_gl_under` judges the placement rect, the one
+  `gl_blit_holes` carves.
+- **F7 (documented, not fixed):** under a dialog on the GPU composed path, the
+  backdrop blur within its clamped radius beside a GL blit hole reads the hole's
+  stale buffer bytes, a 3-6 px halo around a GL surface. No gate reaches it.
+
+**What no host test reaches.** `server.rs` is bin-only. The F2-F6/F8 fixes and
+the window wiring are witnessed by the gates, not host tests; the window itself
+is host-tested in `va.rs` (7 tests, including a 20000-frame drag).
