@@ -1260,15 +1260,30 @@ describing (see `9187455e`).
   over the screen buffer, so `Op::RectAlpha` + `Op::Rect` give the flash its
   fill and border with nothing new.
 
-**What is missing, and is the actual chunk.** A transient per-frame overlay
-needs RESTORE-then-BLEND-then-PUSH, because a blend is not idempotent (the
-I-8b-3c finding). The restore is per surface kind and that is the unsolved
-part: a hosted tile restores from its `shown_slot`, an EMPTY leaf's interior
-is painted by halcyond's CHROME surface (the placard) and so also has one, and
-anything the compositor paints itself (the pane ground, the frame, the
-separator) has neither. A rect-restricted `prefill_from_shown` covers the
-first two; the third needs a per-leaf structural paint that does not exist as
-a callable unit.
+**The restore already exists as a PAIR, and that was the last unknown.** A
+transient per-frame overlay needs RESTORE-then-BLEND-then-PUSH, because a
+blend is not idempotent (the I-8b-3c finding). Two intermediate readings of
+this were wrong and are recorded so nobody repeats them: it is NOT
+`prefill_from_shown` alone (that restores only what clients presented, never
+what the compositor paints itself -- the pane ground, the frame, the
+separator), and the gap is NOT that `paint_instrument` takes no clip.
+
+The structural repaint's own body is the answer, at `server.rs:7515`:
+
+```
+self.paint_chrome();      // everything the compositor paints
+self.prefill_from_shown();// every visible client's last-presented slot
+self.geom_sig = sig;
+self.screen_flush_full();
+```
+
+That pair restores the whole screen buffer from current state and does NOT
+reconcile -- the CONFIGURE fan is separate, below it. So a flash frame is
+`paint_chrome()` + `prefill_from_shown()` + `paint_cartoon(flash ops)` +
+`screen_push(flash_rect)`, with an expiry frame that is the same minus the
+blend. Nothing new is needed; the cost is one structural-repaint-sized buffer
+rebuild per frame for the effect's duration (~16 at 250 ms), pushing only the
+flash rect.
 
 **The trap that is already set.** `main.rs` drops the effective tick to
 `IDLE_HZ` unless the host is `frozen`, has seen input within `IDLE_AFTER_MS`,
