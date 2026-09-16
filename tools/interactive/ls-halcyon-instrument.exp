@@ -312,8 +312,14 @@ lc_pass "instrument: the rail paints the golden's brand mark, its label and the 
 # above ran commands, so the state is EXIT 0 (the check in `success` in the
 # 6 x 6 glyph box at (10, H - 25 + 10); READY's hollow square shows only
 # before anything ran and is host-tested); the pane count says one pane.
+# Since I-8b-1 the success square carries section 10's sage glow
+# (rgba(112,161,124,.25), blur 8): every pixel of this box is inside the
+# glow's plateau, so its dominant is `rail` + sage at 64*36/289 = 7/256 --
+# (9, 13, 13), not the bare ground. halcyond's host test
+# `the_console_gate_reads_the_glow_plateau_in_the_success_box` renders the
+# painter's own list and pins this value; change the two together.
 set fy [expr {$H - 25 + 10}]
-set v [want_dom 8 $fy 18 [expr {$fy + 6}] 7 9 10 "the success glyph's box"]
+set v [want_dom 8 $fy 18 [expr {$fy + 6}] 9 13 13 "the success glyph's box (the glow's plateau)"]
 if {[lindex $v 0] == 0} { lc_fail "no ink in the glyph box after the reads: the check was not painted" }
 tgrep {halcyond: status bar [0-9]* painted .*condition Ok .*exit 0 .*running false panes 1} "the footer's model: EXIT 0, not running, one pane"
 lc_pass "instrument: the footer shows EXIT 0 with the check after the reads (8.2)"

@@ -1661,6 +1661,8 @@ pub extern "C" fn rs_main() -> i64 {
                     // obj run's glyphs -- as the last frame laid them --
                     // opens its verb menu at the pointer.
                     if e.code == BTN_LEFT && e.value == 1 {
+                        #[cfg(feature = "test-mode")]
+                        let mut opened: Option<alloc::string::String> = None;
                         let hit = frame
                             .iter()
                             .find(|f| ptr.1 >= f.1 && ptr.1 < f.1 + f.2)
@@ -1690,6 +1692,10 @@ pub extern "C" fn rs_main() -> i64 {
                                 (block, found)
                             {
                                 if let Some((ty, refv)) = obj_of(&t, bi, obj) {
+                                    #[cfg(feature = "test-mode")]
+                                    {
+                                        opened = Some(alloc::format!("{} {}", ty, refv));
+                                    }
                                     let model = build_menu(&rules, ty, refv);
                                     summon(
                                         troot,
@@ -1705,6 +1711,17 @@ pub extern "C" fn rs_main() -> i64 {
                                 }
                             }
                         }
+                        // The receiver's witness: the compositor says
+                        // nothing for a press it delivers to content, and
+                        // this says after the hit test, so it cannot move
+                        // the rows the press addressed.
+                        #[cfg(feature = "test-mode")]
+                        say!(
+                            "halcyond: click at {},{} -> {}",
+                            ptr.0,
+                            ptr.1,
+                            opened.as_deref().unwrap_or("no run")
+                        );
                     }
                 }
                 TEV_CLOSE => {

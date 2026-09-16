@@ -9308,23 +9308,18 @@ impl Comp {
     /// Non-droppable (a lost release strands a drag).
     pub fn ptr_btn(&mut self, code: u16, pressed: bool, mods: u16) {
         let bi = btn_idx(code);
-        // I-6: the top-of-path witness, BEFORE any routing decision. Every
-        // arm below that does not start a drag is silent -- both swallows, a
-        // `track_at` miss, and the general routing -- so a press that goes
-        // nowhere cannot be told from one that never arrived. Absent, the
-        // event never reached the compositor; present, the fault is past
-        // this line and the fields name the arm that took it.
-        #[cfg(feature = "test-mode")]
-        say!(
-            "tapestryd: ptr btn code {} {} at {},{} drag {} menu {} track {}",
-            code,
-            pressed as u8,
-            self.ptr_x,
-            self.ptr_y,
-            self.drag.is_some() as u8,
-            self.menu.is_some() as u8,
-            self.layout.track_at(self.ptr_x, self.ptr_y).is_some() as u8
-        );
+        // I-6's witnesses, one per arm: every edge the compositor CONSUMES,
+        // or can deliver nowhere, says so where the arm decides, so a press
+        // that went nowhere is never silent. An edge delivered to a CONTENT
+        // surface (or to the placed menu) is the receiver's to witness,
+        // never the compositor's: a say is a console write, and under the
+        // console renderer that write lands in the very transcript the press
+        // addresses -- winning the race against the event's CQE, it scrolled
+        // the rows between the press and the renderer's hit test and the
+        // click missed its run (the ls-halcyon click leg, every run, until
+        // 2026-09-16). Saying after the push cannot fix it: the drain and
+        // the ring are two channels. A header's `-> chrome` say stays -- the
+        // gates key on it, and a header's hit test reads its own surface.
         // A release FOLLOWS ITS PRESS (the H-3c round F1): the surface that
         // saw the press -- a menu that has since been dismissed drops it --
         // or, for a click-away's, the compositor, which consumed the press
@@ -9358,6 +9353,14 @@ impl Comp {
             if let Some((n, gen)) = owner_unpack(v) {
                 if self.surf(n).map_or(false, |s| s.gen == gen) {
                     self.push_btn(n, code, false, mods);
+                } else {
+                    #[cfg(feature = "test-mode")]
+                    say!(
+                        "tapestryd: ptr btn code {} 0 at {},{} release dropped (owner gone)",
+                        code,
+                        self.ptr_x,
+                        self.ptr_y
+                    );
                 }
                 return;
             }
@@ -9426,17 +9429,26 @@ impl Comp {
                 // decides by x); a content surface takes it as before.
                 let hit = self.ptr_target(self.ptr_x, self.ptr_y).map(|(n, _, _)| n);
                 #[cfg(feature = "test-mode")]
-                if let Some(n) = hit {
-                    if self.surf(n).is_some_and(|s| s.chrome_bind.is_some() || s.is_rail) {
-                        say!(
-                            "tapestryd: ptr btn {} {} -> chrome {} at {},{}",
-                            code,
-                            pressed as u8,
-                            n,
-                            self.ptr_x,
-                            self.ptr_y
-                        );
+                match hit {
+                    Some(n) => {
+                        if self.surf(n).is_some_and(|s| s.chrome_bind.is_some() || s.is_rail) {
+                            say!(
+                                "tapestryd: ptr btn {} {} -> chrome {} at {},{}",
+                                code,
+                                pressed as u8,
+                                n,
+                                self.ptr_x,
+                                self.ptr_y
+                            );
+                        }
                     }
+                    None => say!(
+                        "tapestryd: ptr btn code {} {} at {},{} -> nothing",
+                        code,
+                        pressed as u8,
+                        self.ptr_x,
+                        self.ptr_y
+                    ),
                 }
                 // Click-to-focus (HALCYON.md 6): a press in a hosted leaf
                 // that is not the focused one focuses it -- and still

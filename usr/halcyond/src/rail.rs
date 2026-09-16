@@ -1462,6 +1462,52 @@ mod tests {
         }
     }
 
+    /// The console gate reads the success square's 10 x 6 box at (8, 10) and
+    /// wants its DOMINANT colour plus some ink. Since the glow (I-8b-1) the
+    /// dominant is no longer the ground: every pixel of that box is inside
+    /// the glow's plateau (a 17-tap window covers the whole 6 px square on
+    /// both axes), so it reads ground + sage at 64 * 36 / 289 = 7 / 256 --
+    /// (9, 13, 13) over Carbon's `rail` (7, 9, 10). The gate carries that
+    /// value as a literal, so this renders the painter's own list through
+    /// the executor and pins it: a change to the glow's colour, alpha or
+    /// radius fails HERE, naming the gate, instead of reading as a red
+    /// guest run with no cause. The row above the glow's reach still reads
+    /// the ground, which is what makes the plateau the glow's and not a
+    /// ground that moved.
+    #[test]
+    fn the_console_gate_reads_the_glow_plateau_in_the_success_box() {
+        let s = carbon();
+        let mut gs = GlyphSource::new_vendored(64);
+        let mut ok = footer_model();
+        ok.condition = Condition::Ok;
+        ok.cmd = String::from("make");
+        let (w, h) = (1440usize, 25usize);
+        let (c, _) = footer_list(&ok, w as u32, h as u32, &s, &mut gs);
+        let mut px = alloc::vec![0u32; w * h];
+        cartoon::execute(&c, &gs.packer.store, &cartoon::BlobStore::new(), &mut px, w, None);
+        let rgb = |p: u32| ((p >> 16) & 0xff, (p >> 8) & 0xff, p & 0xff);
+        // tools/interactive/ls-halcyon-instrument.exp: region 8,fy-18,fy+6,
+        // fy = H - 25 + 10 -- the footer's rows 10..16, columns 8..18.
+        let mut counts: Vec<((u32, u32, u32), usize)> = Vec::new();
+        for y in 10..16 {
+            for x in 8..18 {
+                let c = rgb(px[y * w + x]);
+                match counts.iter_mut().find(|e| e.0 == c) {
+                    Some(e) => e.1 += 1,
+                    None => counts.push((c, 1)),
+                }
+            }
+        }
+        let (dom, n) = *counts.iter().max_by_key(|e| e.1).unwrap();
+        assert_eq!(
+            dom,
+            (9, 13, 13),
+            "ls-halcyon-instrument.exp's success-glyph leg expects this dominant -- update the gate with the glow"
+        );
+        assert!(n < 60, "the check's ink is in the box ({} of 60 read the plateau)", n);
+        assert_eq!(rgb(px[w + 30]), (7, 9, 10), "row 1 is past the glow's reach: the ground is `rail`");
+    }
+
     /// 8.2 at 100 % on the golden's 1440 x 25: the `structure` first row;
     /// the hollow `secondary` 6 x 6 at (10, 10) and `READY` at 24 while
     /// idle; the hints centred between the end groups, dim / secondary by

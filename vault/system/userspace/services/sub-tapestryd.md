@@ -1888,6 +1888,46 @@ Ground truth: `usr/tapestryd/src/server.rs` (`ptr_btn`, `hover_update`),
 loop's pass clock). The defect these were built for is OPEN and intermittent;
 the green run above is a verdict, not a diagnosis.
 
+**SUPERSEDED IN PART (2026-09-16): the top-of-path `ptr btn code` say is gone,
+and the witness it was stands only where the compositor consumes the edge.**
+That say broke the legacy console gate's click leg on every run from
+`bd06c0ef` on, and the mechanism was MEASURED rather than argued. The console
+renderer mirrors every console write into its own transcript, and a say is a
+console write. So the press witness, printed before `push_btn`, reached
+halcyond by the drain while the press itself was still in transit on the
+ring.
+
+A test-mode dump of halcyond's open block at the press showed the
+`tapestryd: ptr btn c...` line already laid, with the frame current (`seq ==
+laid`). One extra 17 px line moved the addressed run past the gate's one-line
+compensation.
+
+An earlier attempt had printed the say AFTER the push, and it was recorded as
+refuting the mechanism. It could not refute it: the drain and the ring are two
+channels, and the order tapestryd writes to them does not order their
+delivery.
+
+**The rule now:**
+- Every arm that consumes an edge, or can deliver it nowhere, says so where
+  it decides:
+  - the drag start and end, both swallows, the double-click and the
+    click-away (as before);
+  - `ptr btn code C P at X,Y -> nothing` for a targetless press (NEW);
+  - `ptr btn code C 0 ... release dropped (owner gone)` (NEW).
+- A header's `-> chrome` routing say stays. Gates key on it, and a header's
+  hit test reads its own surface, never the transcript.
+- An edge delivered to a CONTENT surface or to the placed menu is the
+  RECEIVER's to witness, after its hit test: halcyond's console says
+  `halcyond: click at X,Y -> <ty ref>|no run`, and a session tile says
+  `halcyond: tile N click -> menu|no run`.
+
+The partition keeps the reading above: a press nobody witnesses never arrived.
+It also removes the observer from the path it observes. The calibration counts
+above (`ptr btn code` 32 times on a healthy run) describe the retired say.
+
+Gates on the change: `ls-halcyon` PASS 49/49, `ls-halcyon-instrument` PASS
+42/42 (its header legs still read `-> chrome`), both first attempt.
+
 ## The live workspaces -- one root each, and the traversals that had to be re-judged (2026-09-15, W-1a)
 
 `Layout` grew `workspaces: Vec<Workspace>` (a live root plus a remembered

@@ -2057,7 +2057,16 @@ pub fn run(home: Option<String>) -> i64 {
                         // press; the menu grabs input while placed).
                         TEV_PTR_BTN if t.exit.is_none() => {
                             if e.code == BTN_LEFT && e.value == 1 {
-                                if let Some(req) = t.click(&rules, &sheet, &mut gs) {
+                                let req = t.click(&rules, &sheet, &mut gs);
+                                // The receiver's witness (the compositor says
+                                // nothing for a press it delivers to content).
+                                #[cfg(feature = "test-mode")]
+                                say!(
+                                    "halcyond: tile {} click -> {}",
+                                    leaf,
+                                    if req.is_some() { "menu" } else { "no run" }
+                                );
+                                if let Some(req) = req {
                                     menu_req = Some((leaf, req));
                                 }
                             }

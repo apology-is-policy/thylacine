@@ -2089,6 +2089,106 @@ and darkens the strip under it.
 
 **Gates, by content.** `ls-halcyon-session-instrument` PASS 18/18 at 126 s, first attempt, hvf, the new ink legs reading {18 21 22} -> {7 8 9} under the reference, 20025 -> 19956 footer ink pixels as a job ended under it, and {18 21 22} unchanged beside the workspace list with {14 16 17} under it. The two red gates are older than this chunk, and the difference between how I know that for each is the part worth keeping: `ls-halcyon`'s click leg fails identically on the base, by a stash-and-rebake run -- attribution by reproduction; `ls-halcyon-instrument`'s success-glyph read is off by the sage glow's own ~7/256 and no card is placed there, so this change's upload is byte-identical to the old push -- attribution by construction, which is weaker and is written as such. Both are queued. The operator's image is the session image this gate ran, its pool restored from the baked snapshot.
 
+### The two red gates, both closed, and a refutation that refuted nothing
+
+The operator was away and authorized replacing the demo image. Both gates
+the I-8e chunk left red are green now, and neither was a product defect. How
+each got closed matters more than that they did.
+
+**`ls-halcyon`'s click leg: an observer that moved the thing it observed.**
+The prior session had "refuted" the obvious suspect. That suspect was
+`bd06c0ef`'s top-of-path `tapestryd: ptr btn code ...` say, which is mirrored
+into the console transcript. The session moved the say after delivery, saw no
+change, and wrote the refutation.
+
+This time I measured instead. Three one-attempt runs carried test-mode dumps
+from halcyond's click handler: the pointer as halcyond held it, the frame
+row hit, the laid lines of the open block, and the transcript sequence
+against the frame's.
+
+The third dump answered it. At the press, the open block already held
+`tapestryd: ptr btn c...` as a laid line, and `seq == laid`: the press
+witness had been drained and rendered before the press was hit-tested. One
+laid line is a 17 px pitch with 2 px between items. The gate compensates
+for exactly one line (the run report), so the second line put its aim 12 px
+under the run. The pointer had arrived intact (`moves 1`, local 65,686 for
+display 69,710).
+
+The refutation was wrong because its experiment could not move the causal
+variable:
+- The say reaches halcyond by cons_emit -> the drain ring -> a poll wake.
+- The press reaches it by push_event -> a 9P reply -> the Loom kthread -> a CQE.
+- The say wins that race whatever order tapestryd writes the two.
+
+A fix that does not work refutes the fix, not the mechanism, unless it
+controls the variable the mechanism runs on. This one did not.
+
+The cure puts each witness with whoever consumes the edge. The compositor
+says what it consumes or can deliver nowhere:
+- the swallows, the drag and the click-away (as before);
+- `-> chrome` (kept: gates key on it, and a header's hit test reads its own
+  surface);
+- NEW `-> nothing` for a targetless press;
+- NEW `release dropped (owner gone)`.
+
+A press delivered to content is the receiver's to witness, after its hit
+test: `halcyond: click at X,Y -> <ty ref>|no run` from the console, and
+`halcyond: tile N click -> menu|no run` from a session tile. Nothing is left
+on the path between a press and the hit test that addresses it.
+
+`ls-halcyon` PASS 49/49, first attempt.
+
+What this leaves OPEN is a product question, and it is the operator's. In
+Normal mode the view is bottom-anchored, so ANY appended output moves the
+rows under a real pointer: a job's output, a daemon's log line. Two
+principled answers change HALCYON.md 13.6's behaviour:
+- hold the view still in Normal mode;
+- stamp each press with the present the compositor was showing and hit-test
+  that frame.
+
+Queued, not decided.
+
+**`ls-halcyon-instrument`'s success glyph: arithmetic instead of a base
+run.** The gate wanted the footer's 10 x 6 glyph box to read dominant
+`rail` (7, 9, 10) and read (9, 13, 13) on all three attempts. Section 10's
+glow runs at .25 = 64/256 with blur 8. Its 17-tap window covers the whole
+6 px square on both axes, so every pixel of the box sits in the plateau at
+64 * 36 / 289 = 7. `blend` then gives (112*7 + 7*249) >> 8 = 9,
+(161*7 + 9*249) >> 8 = 13 and (124*7 + 10*249) >> 8 = 13. That is the
+reading, from the literal alone.
+
+I-8b-1's commit had said "no gate reads the footer's sub-pixel ink"; this
+one does. The fix re-derives the expectation rather than widening it. The gate
+wants (9, 13, 13), and a new halcyond host test renders `footer_list`'s own
+ops through the executor and pins that value next to the ground one row past
+the glow's reach. A glow change now fails on the host, naming the gate
+(sabotaged: a halved alpha reads (8, 10, 11)).
+
+`ls-halcyon-instrument` PASS 42/42, first attempt.
+
+**Also landed, from aux (yip 0094):** `beacon::Tier::parse` trims, because
+`echo rich > /env/BEACON` stores a newline that `ut` already trimmed and the
+coreutils did not (sabotaged). Aux's second finding stays OWED: every native
+panic and heap exhaustion exits 1 silently through libthyla-rs's bare
+`panic_handler`. Found on the way: halcyond's console click and Act paths lay
+frozen blocks at `w` while the render lays them at `w - lane`, inert under
+legacy (OWED).
+
+**The I-8 arc review (Fable 5.1, start == end): 0 P0 / 1 P1 / 0 P2 / 7 P3.**
+The P1 is older than the arc, and I-8e adds a member to it.
+- `WEAVE_VA_BASE`'s bump allocator never reuses a freed VA.
+- A divider drag reweaves every visible surface at frame rate, so the bump
+  walks toward the exec stack at 2 GiB, the vDSO at 3 GiB, and now the
+  effect scratch the kernel places first-fit at 4 GiB.
+- The first collision refuses a map; halcyond reaps the tile whose reweave
+  failed.
+- At the operator's 2560x1664 that is on the order of fifty drag frames.
+
+The review read the chain and did not run it. `wbo_create` rides the same
+bump, so a GL client churning buffers spends every other client's address
+space. The fix is a reusing window pinned below the stack guard. It is the
+next chunk, witnessed first.
+
 ## Run 46o (2026-09-14, Fable 5.1 max) -- the Halcyon Instrument arc opens: reading the Carbon Optics kit against the tree
 
 ### What this run was for

@@ -478,6 +478,33 @@ which is exactly what 8.2 forbids. Both halves are sabotage-measured --
 removing the glow fails the positive, and adding the same glow to the RUNNING
 arm (the plausible WRONG fix) fails the negatives.
 
+**What the glow did to a gate nobody ran (2026-09-16).** I-8b-1's commit said
+no gate reads the footer's sub-pixel ink. One does: `ls-halcyon-instrument`
+reads the success square's 10 x 6 box at (8, 10) and wanted its dominant to be
+the bare `rail` ground. The glow puts every pixel of that box inside its
+plateau: a 17-tap box window covers the whole 6 px square on both axes, so
+coverage is 36/289 and the alpha is 64 * 36 / 289 = 7. That gives
+(9, 13, 13), not (7, 9, 10), which is exactly what the gate read on all three
+attempts.
+
+The gate now expects the plateau. The host test
+`the_console_gate_reads_the_glow_plateau_in_the_success_box` renders
+`footer_list`'s own ops through the executor and pins that value next to the
+ground one row past the reach. A change to the glow's colour, alpha or radius
+therefore fails on the host, naming the gate (a halved alpha reads
+(8, 10, 11), sabotaged), instead of surfacing as a red guest run with no
+stated cause.
+
+**The click witness (2026-09-16).** A left press on the console transcript
+says `halcyond: click at X,Y -> <ty ref>|no run`, and a press on a session
+tile says `halcyond: tile N click -> menu|no run`. Both are test-mode only and
+said AFTER the hit test. They replace the compositor's top-of-path press say,
+whose console write was mirrored into this transcript and rendered before the
+press it witnessed arrived. That moved the rows under the aim, and
+`ls-halcyon`'s click leg missed on every run from `bd06c0ef` until the fix (see
+[[sub-tapestryd]]'s witness section for the measurement). A say emitted here
+after the hit test cannot move what the press addressed.
+
 ### The outline path -- ONE rasterizer for every tier (HALCYON-TYPE 4; TY-1)
 
 `outline.rs` is the type path: skrifa reads a face and scales its glyph outlines
