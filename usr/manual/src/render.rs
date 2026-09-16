@@ -711,11 +711,12 @@ A paragraph that needs to wrap at twenty columns.\n\n\
             "## H\u{2066}eading\n\n",
             "A para\u{202a}graph, `co\u{202b}de`, *em\u{202c}ph* and **st\u{202d}rong**.\n\n",
             "- An it\u{2067}em\n\n",
+            "1. A numbered it\u{2067}em\n\n",
             "```\nco\u{2068}de line\n```\n\n",
             "| ce\u{2069}ll |\n| --- |\n| b\u{202e}ody |\n"
         );
         let planted = src.chars().filter(|&c| crate::is_bidi_control(c)).count();
-        assert_eq!(planted, 10);
+        assert_eq!(planted, 11);
         for (tier, width) in [
             (Tier::Rich, None),
             (Tier::None, None),

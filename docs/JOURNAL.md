@@ -422,6 +422,20 @@ letter" where the rule takes an ASCII letter, and the bidi rendering test has no
 numbered item); then the `/env` bind-at-open kernel fix, which the Utopia section
 waits on; then the Utopia section itself.
 
+**Round 3 closed the review clean** (Fable 5.1 at start and end, static only, since
+main held the Pi and the Mac was mine): 0 P0, 0 P1, 0 P2 and three P3, so the loop
+ends here. It checked the reference rule against all 2,231 HTML5 entity names
+(every one letter-led alphanumeric, so the named form misses none) and the cell
+cap's unit against the padding's. Of the three P3s, one asked for the absolute
+output ceiling, which the 255 KiB measurement above already records alongside the
+linearity assertion; one asked for the in-guest run, done at 8e73a398 after the
+commit it read; and one was the lesson of round 2 applied to my own new code: no
+bounds shape was dense in `&`. The walks are linear by construction, but a bound
+argued without a shape is the class round 2 caught, so two shapes now measure it
+(4.0x time and output from 63 to 255 KiB). The same commit takes my two
+self-found items: 3.3 now says an ASCII letter, and the bidi rendering test
+covers a numbered item.
+
 ---
 ## 2026-09-10 (aux, run 9, post self-compact) -- the Halcyon SESSION-path inline-media channel (I-47, HALCYON 14.7.2): per-pane routing on the existing /srv+9P mechanism
 

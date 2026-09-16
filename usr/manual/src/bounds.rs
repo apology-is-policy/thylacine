@@ -261,6 +261,16 @@ fn expensive(bytes: usize) -> Vec<(&'static str, String, bool)> {
         true,
     );
     add(
+        "ampersands that begin no reference",
+        fill("# T\n\nx", " a&b", bytes),
+        true,
+    );
+    add(
+        "one line of character references",
+        fill("# T\n\nx", "&#1;", bytes),
+        false,
+    );
+    add(
         "benign prose",
         fill(
             "# T\n",

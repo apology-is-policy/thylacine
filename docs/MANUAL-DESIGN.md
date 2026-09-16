@@ -128,12 +128,12 @@ spans, for example `` `<pid>` ``, which also keeps them visible when the file is
 viewed on a code host that renders HTML.
 
 The checker also rejects character references outside a code span. A character
-reference is an ampersand, then a letter followed by letters and digits, `#`
-followed by decimal digits, or `#x` or `#X` followed by hexadecimal digits, then a
-semicolon: `&amp;`, `&#38;`, `&#x26;`. A code host decodes these, while the reader
-would print them as written. A section contains the character itself, or escapes
-the ampersand (`\&amp;`) to show the reference as text. Any other ampersand is
-literal.
+reference is an ampersand, then an ASCII letter followed by ASCII letters and
+digits, `#` followed by decimal digits, or `#x` or `#X` followed by hexadecimal
+digits, then a semicolon: `&amp;`, `&#38;`, `&#x26;`. A code host decodes these,
+while the reader would print them as written. A section contains the character
+itself, or escapes the ampersand (`\&amp;`) to show the reference as text. Any
+other ampersand is literal.
 
 ### 3.4 Cross-references
 
