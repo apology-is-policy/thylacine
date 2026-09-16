@@ -2206,6 +2206,28 @@ its sibling rather than an inference from the ink, because 9.2 paints the
 dragged rule `amber` and a painter reading the state back out of the colour
 would key an effect on a token. A token is not a state.
 
+**`menu_effect_region` landed ahead of its wiring (I-8b-3).** The pure rule
+that says which display region a placed card's EFFECTS cover -- the card
+united with its drop shadow's reach, clamped to the display -- is in
+`pane.rs` with its witnesses, before anything calls it. It takes the
+REQUESTED blur radius rather than the clamped one, because the executor only
+ever clamps DOWN: the region is then always a superset of what is painted,
+and the asymmetry is the point (over-healing costs work; under-healing leaves
+a ring of un-healed backdrop after dismiss). Its arithmetic is i64 because
+`Rect` is u32 and a card at the origin grown by a radius would wrap.
+
+**The census that decides how it wires in, recorded because conflating these
+is the defect.** `MenuState` is built in exactly ONE place and `self.menu` is
+written in three. Its `m.rect` readers serve THREE different roles: the HEAL
+sites, which must cover the effect region -- `menu_place`'s old-rect heal,
+`menu_dismiss`'s fallback, and `retire`, which captures the rect into a local
+and is the path EVERY dismiss actually takes; the COMPOSE/PLACE sites, which
+must NOT grow, since `menu_reassert` maps screen pixels into the weave by
+`inter.x - m.rect.x` and `surface_target` places the card; and the HIT TEST
+sites, which must not grow either, or a click on the SHADOW counts as a click
+on the card. So the effect region becomes a SEPARATE field: one for what is
+painted, one for what the surface is.
+
 **What the host tests cannot reach.** The two-caller threading is bin-side and
 so has no unit witness; the guest gate `ls-halcyon-session-instrument` does
 drive a real divider drag (press the track, `divider drag start`, a 100 px

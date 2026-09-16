@@ -282,6 +282,46 @@ pub fn track_glow(rule: Rect, dragged: bool, instrument: bool, pct: u16) -> Opti
     })
 }
 
+/// HALCYON-INSTRUMENT 10: the display region a placed menu card's EFFECTS
+/// cover -- the card united with its drop shadow's reach, clamped to the
+/// display.
+///
+/// Kept SEPARATE from `MenuState.rect`, and that separation is the whole
+/// point. `rect` is what the surface IS: `menu_reassert` maps screen pixels
+/// into the weave by `inter.x - rect.x`, `surface_target` places the card
+/// there, and the click-away test asks whether the pointer sits inside it.
+/// Widening `rect` to cover the effects would read outside the weave,
+/// misplace the card, and make a click on the SHADOW count as a click on
+/// the card. One field for what is painted, one for what the surface is.
+///
+/// `radius` is the REQUESTED blur, not the clamped one. The executor only
+/// ever clamps down (`cartoon::GLOW_RADIUS_MAX`), so this region is always a
+/// superset of what is actually painted -- and the asymmetry is deliberate:
+/// over-healing costs work, while under-healing leaves a ring of un-healed
+/// backdrop on screen after the card is dismissed.
+///
+/// All arithmetic in i64: `Rect` is u32, and a card near the origin grown by
+/// a radius would otherwise wrap to a near-infinite rect instead of failing.
+pub fn menu_effect_region(card: Rect, dy: i32, radius: u32, disp_w: u32, disp_h: u32) -> Rect {
+    if card.w == 0 || card.h == 0 || disp_w == 0 || disp_h == 0 {
+        return Rect::ZERO;
+    }
+    let (r, d) = (radius as i64, dy as i64);
+    let (cx0, cy0) = (card.x as i64, card.y as i64);
+    let (cx1, cy1) = (cx0 + card.w as i64, cy0 + card.h as i64);
+    // The shadow is the card offset by `dy` and spread by `radius`.
+    let (sx0, sy0) = (cx0 - r, cy0 + d - r);
+    let (sx1, sy1) = (cx1 + r, cy1 + d + r);
+    let x0 = cx0.min(sx0).max(0);
+    let y0 = cy0.min(sy0).max(0);
+    let x1 = cx1.max(sx1).min(disp_w as i64);
+    let y1 = cy1.max(sy1).min(disp_h as i64);
+    if x1 <= x0 || y1 <= y0 {
+        return Rect::ZERO;
+    }
+    Rect { x: x0 as u32, y: y0 as u32, w: (x1 - x0) as u32, h: (y1 - y0) as u32 }
+}
+
 pub fn admit_rail(r: &RailReq) -> StatusAdmit {
     if !r.instrument
         || r.rail_h == 0
@@ -3251,6 +3291,48 @@ impl Layout {
 mod tests {
     use super::*;
     use alloc::vec;
+
+    /// The effect region covers the card AND its shadow's reach, and never
+    /// less than the card: a region short of the card would leave the card's
+    /// own pixels unhealed.
+    #[test]
+    fn the_effect_region_covers_the_card_and_its_shadow() {
+        let card = Rect { x: 400, y: 200, w: 480, h: 300 };
+        let g = menu_effect_region(card, 24, 32, 1280, 800);
+        assert_eq!(g.x, 368, "the card's left less the radius");
+        assert_eq!(g.y, 192, "dy 24 is LESS than radius 32, so the blur reaches 8 px above the card");
+        assert_eq!(g.x + g.w, 912, "right plus the radius");
+        assert_eq!(g.y + g.h, 556, "bottom plus dy plus the radius");
+        assert!(g.x <= card.x && g.y <= card.y, "never inside the card");
+        assert!(g.x + g.w >= card.x + card.w && g.y + g.h >= card.y + card.h);
+    }
+
+    /// A card at the origin: the grow would underflow u32, so the
+    /// arithmetic is i64 and the region clamps at 0 instead of wrapping to
+    /// a near-infinite rect that would heal the whole display.
+    #[test]
+    fn a_card_at_the_origin_does_not_underflow() {
+        let g = menu_effect_region(Rect { x: 0, y: 0, w: 100, h: 80 }, 24, 32, 1280, 800);
+        assert_eq!((g.x, g.y), (0, 0));
+        assert_eq!(g.x + g.w, 132);
+        assert_eq!(g.y + g.h, 136, "80 + 24 + 32");
+    }
+
+    /// And a card against the far edge clamps to the display rather than
+    /// describing a region off-screen.
+    #[test]
+    fn the_effect_region_clamps_to_the_display() {
+        let g = menu_effect_region(Rect { x: 1200, y: 760, w: 80, h: 40 }, 24, 32, 1280, 800);
+        assert_eq!(g.x + g.w, 1280, "clamped at the display's right");
+        assert_eq!(g.y + g.h, 800, "clamped at the display's bottom");
+    }
+
+    /// Degenerate inputs yield nothing to heal rather than a wrapped rect.
+    #[test]
+    fn a_degenerate_card_has_no_effect_region() {
+        assert_eq!(menu_effect_region(Rect { x: 10, y: 10, w: 0, h: 40 }, 24, 32, 1280, 800), Rect::ZERO);
+        assert_eq!(menu_effect_region(Rect { x: 10, y: 10, w: 40, h: 40 }, 24, 32, 0, 800), Rect::ZERO);
+    }
 
     /// A dragged rule under Instrument at 100 %: section 10's literal, its
     /// .25 alpha and blur 10, on exactly the rule's own box.

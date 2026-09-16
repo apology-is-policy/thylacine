@@ -862,17 +862,22 @@ pub mod effects {
     pub const STATUS_SUCCESS_ALPHA: u8 = pct256(250);
     pub const STATUS_SUCCESS_BLUR: i32 = 8;
 
-    /// The picker's drop shadow: black .32 at (0, 20), blur 55.
-    pub const PICKER_SHADOW: Argb = 0xFF00_0000;
-    pub const PICKER_SHADOW_ALPHA: u8 = pct256(320);
-    pub const PICKER_SHADOW_DY: i32 = 20;
-    pub const PICKER_SHADOW_BLUR: i32 = 55;
-
-    /// The help card's drop shadow: black .35 at (0, 24), blur 80.
-    pub const HELP_SHADOW: Argb = 0xFF00_0000;
-    pub const HELP_SHADOW_ALPHA: u8 = pct256(350);
-    pub const HELP_SHADOW_DY: i32 = 24;
-    pub const HELP_SHADOW_BLUR: i32 = 80;
+    /// The ONE drop shadow every menu card takes: black .35 at (0, 24),
+    /// blur 80 (the help card's heavier pair).
+    ///
+    /// Section 10 states TWO -- the picker at .32 / (0,20) / blur 55 -- and
+    /// they collapsed here, operator-answered 2026-09-16 and recorded in
+    /// section 10's amendment. The compositor cannot tell a picker from a
+    /// help card: all four halcyond models ride one `Role::Menu` surface,
+    /// `MenuState` carries only `{n, gen, rect}`, `surf.title` is written
+    /// and never read, and `menu place` takes only coordinates. And the
+    /// radius cap had already erased most of the difference -- it flattens
+    /// blur 55 and blur 80 to the SAME value, leaving alpha 82 vs 90 and
+    /// dy 20 vs 24.
+    pub const CARD_SHADOW: Argb = 0xFF00_0000;
+    pub const CARD_SHADOW_ALPHA: u8 = pct256(350);
+    pub const CARD_SHADOW_DY: i32 = 24;
+    pub const CARD_SHADOW_BLUR: i32 = 80;
 
     /// The modal backdrop: `rgb(3,4,4)` at .72 over a 3 px blur of the
     /// scene. The BLUR is the compositor's own machinery (no cartoon op
@@ -1130,8 +1135,12 @@ mod tests {
         assert_ne!(effects::STATUS_SUCCESS, CARBON.success, "the glow is not `success`");
         // The alphas are pct256 of the stated percentage, Derived's rounding.
         assert_eq!(effects::STATUS_SUCCESS_ALPHA, 64, ".25");
-        assert_eq!(effects::PICKER_SHADOW_ALPHA, 82, ".32");
-        assert_eq!(effects::HELP_SHADOW_ALPHA, 90, ".35");
+        assert_eq!(effects::CARD_SHADOW_ALPHA, 90, ".35 -- the help card's, for every card");
+        // The collapse is deliberate (section 10, amended 2026-09-16): the
+        // radius cap flattens blur 55 and blur 80 alike, so a second shadow
+        // would differ only by 8/256 of alpha and four pixels of offset.
+        assert_eq!(effects::CARD_SHADOW_BLUR, 80, "clamped to GLOW_RADIUS_MAX at paint");
+        assert_eq!(effects::CARD_SHADOW_DY, 24);
         assert_eq!(effects::BACKDROP_ALPHA, 184, ".72");
     }
 

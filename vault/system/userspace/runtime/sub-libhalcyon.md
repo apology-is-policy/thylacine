@@ -394,6 +394,16 @@ code does what the code does. So the module's test pins each literal to its
 value AND asserts it NOT EQUAL to the token it would be mistaken for; that
 second half is the assertion whose absence allowed the defect.
 
+Section 10 states TWO card shadows (the picker at .32 / dy 20 / blur 55, help
+at .35 / dy 24 / blur 80) and the module carries ONE, `CARD_SHADOW`, at the
+help card's heavier pair. That collapse is operator-answered (2026-09-16) and
+recorded in section 10's amendment: the compositor cannot tell a picker from
+a help card -- all four halcyond models ride one `Role::Menu` surface,
+`MenuState` carries only `{n, gen, rect}`, `surf.title` is written and never
+read, and `menu place` takes only coordinates -- and the radius cap had
+already flattened blur 55 and blur 80 to the same value, leaving 8/256 of
+alpha and four pixels of offset between them.
+
 The alphas are `pct256` of the stated percentage -- the same rounding the
 `Derived` opaques take -- so an effect and a derived opaque that both say
 ".25" agree to the byte rather than drifting by one. The seventh effect, the
