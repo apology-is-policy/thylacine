@@ -480,6 +480,12 @@ const PROBE_TOKEN_BASE: u32 = 0x2444_3040;
 // 0x0240_0000 since the mouse function (its 6-BAR window ends at
 // 0x0220_0000 -- the main.rs VA-layout asserts pin the whole chain).
 const WEAVE_VA_BASE: u64 = 0x0240_0000;
+/// The window's exclusive top: the kernel's EXEC_USER_STACK_GUARD_BASE
+/// (exec.h: stack top 0x8000_0000 minus the 1 MiB stack minus the guard
+/// page). Nothing the kernel places for this process lies in
+/// [WEAVE_VA_BASE, WEAVE_VA_TOP): the stack sits above it, the vDSO at
+/// 3 GiB, and every burrow it chooses a gap for starts at 4 GiB.
+const WEAVE_VA_TOP: u64 = 0x7FEF_F000;
 
 // =============================================================================
 // The qid scheme (the ptyfs/netd bit-40 template).
@@ -6964,6 +6970,16 @@ impl Comp {
             pair.0,
             pair.1
         );
+        #[cfg(feature = "test-mode")]
+        {
+            let used = self.weave_va_next - WEAVE_VA_BASE;
+            say!(
+                "tapestryd: mapping window live {} peak {} of {}",
+                used,
+                used,
+                WEAVE_VA_TOP - WEAVE_VA_BASE
+            );
+        }
         self.hover_update();
         if self.track_hover != Some((d.cid, d.idx)) {
             self.repaint_track(d.cid, d.idx);

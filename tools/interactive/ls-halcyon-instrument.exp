@@ -590,6 +590,50 @@ expect {
 want_rect /dev/tapestry/pane/$root/dividers [list $aend 37 7 [expr {$H - 65}]] "the track back at the equal division"
 want_rect /dev/tapestry/pane/$leaf/frame [list 3 37 [expr {$aend - 3}] [expr {$H - 65}]] "the console pane at half again"
 lc_pass "instrument: a double-click on the track restores equal weights (9.2)"
+
+# --- A long drag spends nothing (the I-8 review's F1, 2026-09-16) ------------
+# Every drag frame re-lays the pair, and every surface whose size changed --
+# the console's content, both headers, the empty pane's placard -- answers its
+# CONFIGURE with a new weave generation the COMPOSITOR maps at an address it
+# chooses. A bump allocator for those addresses spends the drag's HISTORY and
+# walks into the process's own stack under 2 GiB; this leg drags the track
+# back and forth CHURN times in one QMP session and requires every reweave to
+# land (no E_NOMEM refusal, no renderer exit), the console to answer after,
+# and the compositor's mapping window to report a peak that is a small
+# fraction of the window -- the LIVE set, not the sum. The drag runs in the
+# background so expect keeps draining the serial line while it moves.
+set churn 600
+set cx0 [expr {((2 * $tx + 1) * 32767) / (2 * ($W - 1))}]
+set cx1 [expr {((2 * ($tx + 60) + 1) * 32767) / (2 * ($W - 1))}]
+set cy [expr {((2 * $ty + 1) * 32767) / (2 * ($H - 1))}]
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -p "drag left $cx0 $cy $cx1 $churn 50" > /dev/null 2>@1 &} err]} {
+    lc_fail "the churn drag did not start: $err"
+}
+set timeout [expr {$churn * 50 / 1000 + 90}]
+expect {
+    -re {halcyond: reweave failed[^\r\n]*} {
+        lc_fail "the churn: the console renderer's reweave failed and it exited: $expect_out(0,string)"
+    }
+    -re {tapestryd: resize-ack [^\r\n]* refused Err\(12\)[^\r\n]*} {
+        lc_fail "the churn: the compositor refused a reweave for memory (E_NOMEM): $expect_out(0,string)"
+    }
+    -re {tapestryd: divider drag end pane (\d+) track 0 release -> (\d+):(\d+)\r} {}
+    timeout { lc_fail "the churn: no drag end within $timeout s" }
+    eof     { lc_fail "EOF during the churn" }
+}
+set timeout $lc_cmd_timeout
+expect {
+    -re {tapestryd: mapping window live (\d+) peak (\d+) of (\d+)\r} {
+        set wlive $expect_out(1,string); set wpeak $expect_out(2,string); set wsize $expect_out(3,string)
+    }
+    timeout { lc_fail "the churn: no mapping-window gauge after the drag" }
+    eof     { lc_fail "EOF waiting for the mapping-window gauge" }
+}
+if {$wpeak * 8 > $wsize} {
+    lc_fail "the churn: the mapping window peaked at $wpeak of $wsize bytes -- more than an eighth, so it is tracking the drag's history, not the live set"
+}
+lc_run_expect "pwd" "/home/michael"
+lc_pass "instrument: a $churn-move divider drag reweaved every step within the mapping window (peak $wpeak of $wsize, live $wlive after) and the console answered"
 ptr_to [expr {$W / 2}] [expr {$H / 2}]
 
 # --- Zoom (5.6): the workspace between the rails, frame-less ----------------

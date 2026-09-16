@@ -15,6 +15,7 @@
 #   tools/qmp-sendtext.sh [-s QMP_SOCK] -p "btn left down|up"
 #   tools/qmp-sendtext.sh [-s QMP_SOCK] -p "wheel up|down"
 #   tools/qmp-sendtext.sh [-s QMP_SOCK] -p "dblclick left|right|middle"
+#   tools/qmp-sendtext.sh [-s QMP_SOCK] -p "drag left X0 Y X1 N MS"
 #
 # Lowercase letters, digits, space, '-', '.', '/' and '\n' only (the
 # scenario vocabulary); anything else is a hard error, not a silent skip.
@@ -139,6 +140,27 @@ if mode == "pointer":
             parts[1] in ("up", "down"):
         b = "wheel-up" if parts[1] == "up" else "wheel-down"
         send_events([{"type": "btn", "data": {"down": True, "button": b}}])
+        send_events([{"type": "btn", "data": {"down": False, "button": b}}])
+    elif parts and parts[0] == "drag" and len(parts) == 7 and \
+            parts[1] in ("left", "right", "middle"):
+        # A held-button drag in ONE QMP session: press at (X0, Y), then N
+        # moves alternating between X1 and X0 at MS ms apart, then release
+        # where the last move left the pointer. One process per move would
+        # spend the step budget on spawns and make the rate the host's, not
+        # the scenario's (the dblclick reasoning, for a long drag).
+        b = parts[1]
+        x0, y, x1, n, ms = (int(v) for v in parts[2:])
+        send_events([
+            {"type": "abs", "data": {"axis": "x", "value": x0}},
+            {"type": "abs", "data": {"axis": "y", "value": y}},
+        ])
+        time.sleep(0.2)
+        send_events([{"type": "btn", "data": {"down": True, "button": b}}])
+        time.sleep(0.2)
+        for i in range(n):
+            send_events([{"type": "abs",
+                          "data": {"axis": "x", "value": x1 if i % 2 == 0 else x0}}])
+            time.sleep(ms / 1000.0)
         send_events([{"type": "btn", "data": {"down": False, "button": b}}])
     elif parts and parts[0] == "rel" and len(parts) == 3:
         # Routed to the relative device (virtio-mouse) uniquely: the
