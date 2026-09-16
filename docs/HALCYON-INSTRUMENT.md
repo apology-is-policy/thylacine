@@ -1781,7 +1781,17 @@ did not make.
 
 So the compositor tweens the RECT IT COMPOSITES the client's buffer into, over
 §10's 180 ms and §10's curve, and sends exactly **one** CONFIGURE — at the
-end, at the final size. `compose_cpu` already carries both arms this needs
+START, at the final size.
+
+*Corrected 2026-09-16, same day, by this section's own words.* The first
+statement of this amendment put that one CONFIGURE at the END of the tween.
+§10 refutes it two clauses earlier: "body opacity 100 ms **after 70 ms**"
+places the body's fade INSIDE the 180 ms expansion, so there must be a body to
+fade — content exists while the tile is still growing. Configuring at the end
+would leave a split's new tile blank for 180 ms and then snap it in, which is
+not what the sentence describes. Configuring at the start costs nothing extra:
+it is still one CONFIGURE, the client renders once at its final size, and the
+compositor animates whatever buffer it has meanwhile. `compose_cpu` already carries both arms this needs
 (`op.clip` for a reveal, `place::nearest_src` / `scaled_clip` for a scale), so
 the mechanism is a new USE of existing machinery rather than new machinery.
 
