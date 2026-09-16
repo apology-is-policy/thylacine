@@ -40,8 +40,10 @@ use alloc::vec::Vec;
 /// freezes this number; growth after that bumps it.
 pub const CARTOON_V0: u32 = 0;
 
-/// The `Op::Glow` blur radius cap, in surface pixels — the executor's hard
-/// bound, applied on the READ side (see `Op::Glow`).
+/// The blur radius cap, in surface pixels — the executor's hard bound,
+/// applied on the READ side. Shared by BOTH blur ops (`Op::Glow`'s coverage
+/// blur and `Op::Blur`'s destination blur): one section-10 derivation, so
+/// one constant rather than two to keep in step.
 ///
 /// Section 10 of HALCYON-INSTRUMENT bounds the radius at 16 "at 100 %,
 /// scaled", and the display scale tops out at 200 % (`libhalcyon::scale`'s
@@ -81,6 +83,27 @@ pub enum Op {
     /// mapping §10's literal blur values (10, 55, 80) picks the radius, and
     /// the cap genuinely truncates the two large shadows.
     Glow { x: i32, y: i32, w: u32, h: u32, color: u32, alpha: u8, radius: u32 },
+    /// Box-blur the DESTINATION in place over the rect (§10's modal
+    /// backdrop), bounded and clipped exactly like `Rect`.
+    ///
+    /// The one op that READS the surface it paints into, and that is why it
+    /// exists: `Glow` blurs a rect's coverage MASK — which is what a drop
+    /// shadow is — and cannot express a blur of whatever happens to lie
+    /// underneath. A second blur implementation inside the compositor was
+    /// the alternative, and it is the shape that produced three
+    /// HALCYON-WORKSPACES defects.
+    ///
+    /// Separable, so two 1-D passes rather than a (2r+1)^2 kernel. Taps
+    /// falling outside the rect are not sampled and the divisor is the tap
+    /// count actually taken, so the edge neither darkens toward black nor
+    /// drags in the un-blurred scene — a constant field is preserved
+    /// EXACTLY, edges included.
+    ///
+    /// §10 says "downsampled"; this is a direct box blur. Downsampling is a
+    /// large-radius GPU optimisation, and at the backdrop's 3 px (6 at the
+    /// 200 % scale ceiling) a direct blur is both cheaper and exact. The
+    /// specified appearance is the blur, not the means.
+    Blur { x: i32, y: i32, w: u32, h: u32, radius: u32 },
     /// A resolved glyph run: `runs[start .. start+count]` blit left to
     /// right from `(baseline_x, baseline_y)`, each entry advancing the pen
     /// AFTER its blit. `color` is the text color; pages carry alpha only.
@@ -467,6 +490,27 @@ impl Exec<'_> {
         }
     }
 
+    /// Box-blur the destination over the rect, in place: a horizontal pass
+    /// across every row, then a vertical pass down every column.
+    fn blur(&mut self, rx: i32, ry: i32, rw: u32, rh: u32, radius: u32) {
+        let r = radius as usize;
+        if r == 0 || rw == 0 || rh == 0 {
+            return;
+        }
+        let (x0, y0, x1, y1) = self.isect(rx, ry, rw, rh);
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        let (bw, bh) = ((x1 - x0) as usize, (y1 - y0) as usize);
+        let stride = self.w;
+        for y in y0..y1 {
+            blur_line(self.px, y as usize * stride + x0 as usize, 1, bw, r);
+        }
+        for x in x0..x1 {
+            blur_line(self.px, y0 as usize * stride + x as usize, stride, bh, r);
+        }
+    }
+
     /// Blit one glyph's alpha rect at (dx, dy), blending `color` over dst.
     #[inline]
     fn blit_alpha(&mut self, page: &AtlasPage, ge: &GlyphEntry, dx: i32, dy: i32, color: u32) {
@@ -483,6 +527,56 @@ impl Exec<'_> {
                 *d = blend(*d, color, a);
             }
         }
+    }
+}
+
+/// Box-blur ONE line of `n` pixels starting at `base`, every `stride`
+/// apart, in place — the arithmetic-sequence form serves both of `blur`'s
+/// passes (stride 1 across a row, stride `w` down a column).
+///
+/// ALLOCATION-FREE, deliberately. A separable in-place blur normally wants
+/// a scratch of the region's area (megabytes for a full-display region),
+/// but only the `r + 1` values already OVERWRITTEN need keeping —
+/// everything at or ahead of the cursor is still original in `px` — so a
+/// fixed ring of `GLOW_RADIUS_MAX + 1` entries serves any permitted radius.
+/// cartoon is `no_std`, where a failed allocation aborts, and an executor
+/// whose contract is "always produces a validly-clamped frame" must not be
+/// able to fail.
+///
+/// Slot `k % (r + 1)` is rewritten at step `k + r + 1`, which is strictly
+/// past every step that still needs it (a window at `i` reaches back only
+/// to `i - r`), so the ring cannot be clobbered under its own reader.
+///
+/// Channels are summed independently in u32: at most `2 * GLOW_RADIUS_MAX
+/// + 1` == 65 taps of one byte each is 16575 per channel, nowhere near
+/// overflow.
+fn blur_line(px: &mut [u32], base: usize, stride: usize, n: usize, r: usize) {
+    // The cap is applied HERE, the one place it is structurally REQUIRED:
+    // `keep` is sized from it, so a larger radius would index past the ring
+    // -- the bound is memory safety, not cosmetics. One guard, at the site
+    // that needs it; clamping in the caller as well would leave neither
+    // testable, since a sabotage of either would be masked by the other.
+    let r = r.min(GLOW_RADIUS_MAX as usize);
+    if n == 0 || r == 0 {
+        return;
+    }
+    let m = r + 1;
+    let mut keep = [0u32; GLOW_RADIUS_MAX as usize + 1];
+    for i in 0..n {
+        keep[i % m] = px[base + i * stride];
+        let lo = i.saturating_sub(r);
+        let hi = (i + r).min(n - 1);
+        let (mut sa, mut sr, mut sg, mut sb) = (0u32, 0u32, 0u32, 0u32);
+        for k in lo..=hi {
+            let p = if k < i { keep[k % m] } else { px[base + k * stride] };
+            sa += p >> 24;
+            sr += (p >> 16) & 0xFF;
+            sg += (p >> 8) & 0xFF;
+            sb += p & 0xFF;
+        }
+        let c = (hi - lo + 1) as u32;
+        px[base + i * stride] =
+            ((sa / c) << 24) | ((sr / c) << 16) | ((sg / c) << 8) | (sb / c);
     }
 }
 
@@ -529,6 +623,9 @@ pub fn execute(
             }
             Op::Glow { x, y, w: rw, h: rh, color, alpha, radius } => {
                 ex.glow(x, y, rw, rh, color, alpha, radius);
+            }
+            Op::Blur { x, y, w: rw, h: rh, radius } => {
+                ex.blur(x, y, rw, rh, radius);
             }
             Op::Glyphs { atlas_gen, baseline_x, baseline_y, color, start, count } => {
                 // The 13.2 stale rule: paint only against the store the
@@ -894,6 +991,138 @@ mod tests {
                                color: RED, alpha: 255, radius: 32 });
         execute(&c2, &empty_atlas(), &BlobStore::new(), &mut px2, 4, None);
         assert!(px2.iter().all(|&p| p != BG), "the whole surface is covered");
+    }
+
+    #[test]
+    fn a_blur_averages_its_neighbourhood() {
+        // HAND-DERIVED end to end, one lone WHITE pixel at (2,2) on BLACK,
+        // radius 1. The horizontal pass rewrites row 2 alone -- windows of
+        // 3 taps at the interior, 2 at the ends:
+        //   i=1,2,3: (0+0+255)/3 = 85 = 0x55;  i=0,4: 0
+        // The vertical pass then rewrites columns 1..3 from [0,0,85,0,0]:
+        //   j=1,2,3: (0+0+85)/3 = 28 = 0x1C;   j=0,4: 0
+        // so the result is a 3x3 block of 0x1C centred on (2,2). Alpha is
+        // 255 in every tap, so it averages to 255 and stays opaque.
+        let mut px = vec![BLACK; 5 * 5];
+        px[2 * 5 + 2] = WHITE;
+        let mut c = Cartoon::new();
+        c.ops.push(Op::Blur { x: 0, y: 0, w: 5, h: 5, radius: 1 });
+        execute(&c, &empty_atlas(), &BlobStore::new(), &mut px, 5, None);
+        for y in 0..5usize {
+            for x in 0..5usize {
+                let inside = (1..4).contains(&x) && (1..4).contains(&y);
+                let want = if inside { 0xFF1C_1C1C } else { BLACK };
+                assert_eq!(px[y * 5 + x], want, "at ({}, {})", x, y);
+            }
+        }
+    }
+
+    #[test]
+    fn a_zero_radius_blur_is_identity() {
+        // The negative alone is satisfied by a blur that never runs, so the
+        // control sits one variable away: the SAME field at radius 1 must
+        // actually move.
+        let mk = |radius: u32| {
+            let mut px = vec![BLACK; 5 * 5];
+            px[2 * 5 + 2] = WHITE;
+            let mut c = Cartoon::new();
+            c.ops.push(Op::Blur { x: 0, y: 0, w: 5, h: 5, radius });
+            execute(&c, &empty_atlas(), &BlobStore::new(), &mut px, 5, None);
+            px
+        };
+        let mut original = vec![BLACK; 5 * 5];
+        original[2 * 5 + 2] = WHITE;
+        assert_eq!(mk(0), original, "radius 0 is a window of one");
+        assert_ne!(mk(1), original, "the control: radius 1 must move it");
+    }
+
+    #[test]
+    fn a_constant_field_survives_the_blur_exactly() {
+        // The divisor is the tap count ACTUALLY TAKEN, so a window hanging
+        // off the edge averages fewer taps rather than averaging in black.
+        // A constant field is therefore preserved EXACTLY, edges and corners
+        // included -- the property that keeps the backdrop from ringing
+        // darker around its own border. Control: a two-tone field at the
+        // same radius must move, or this passes on a blur that does nothing.
+        let run = |seed: &dyn Fn(usize) -> u32| {
+            let mut px: alloc::vec::Vec<u32> = (0..7 * 7).map(|i| seed(i)).collect();
+            let mut c = Cartoon::new();
+            c.ops.push(Op::Blur { x: 0, y: 0, w: 7, h: 7, radius: 3 });
+            execute(&c, &empty_atlas(), &BlobStore::new(), &mut px, 7, None);
+            px
+        };
+        let flat = run(&|_| 0xFF20_3040);
+        assert!(flat.iter().all(|&p| p == 0xFF20_3040), "constant field, edges included");
+        let two_tone = run(&|i| if i % 7 < 3 { BLACK } else { WHITE });
+        let before: alloc::vec::Vec<u32> =
+            (0..7 * 7).map(|i| if i % 7 < 3 { BLACK } else { WHITE }).collect();
+        assert_ne!(two_tone, before, "the control: a non-constant field must move");
+    }
+
+    #[test]
+    fn blur_is_bounded_by_the_caller_clip() {
+        let before: alloc::vec::Vec<u32> =
+            (0..8 * 8).map(|i| if i % 3 == 0 { WHITE } else { BLACK }).collect();
+        let mut px = before.clone();
+        let mut c = Cartoon::new();
+        c.ops.push(Op::Blur { x: 0, y: 0, w: 8, h: 8, radius: 2 });
+        execute(&c, &empty_atlas(), &BlobStore::new(), &mut px, 8,
+                Some(ClipRect { x0: 3, y0: 3, x1: 6, y1: 6 }));
+        let mut moved = false;
+        for y in 0..8usize {
+            for x in 0..8usize {
+                if (3..6).contains(&x) && (3..6).contains(&y) {
+                    moved |= px[y * 8 + x] != before[y * 8 + x];
+                } else {
+                    assert_eq!(px[y * 8 + x], before[y * 8 + x],
+                               "({}, {}) is outside the clip", x, y);
+                }
+            }
+        }
+        assert!(moved, "the clip's interior must actually blur");
+    }
+
+    #[test]
+    fn an_oversize_blur_radius_is_clamped_to_the_cap() {
+        // The bound holds on the READ side, exactly as the glow's does: a
+        // list asking for 4000 paints what 32 paints. The inequality against
+        // the original is the half that matters -- equality alone is
+        // satisfied by two renders that both did nothing.
+        let mk = |radius: u32| {
+            let mut px = vec![BLACK; 120 * 120];
+            for y in 40..80usize {
+                for x in 40..80usize {
+                    px[y * 120 + x] = WHITE;
+                }
+            }
+            let mut c = Cartoon::new();
+            c.ops.push(Op::Blur { x: 0, y: 0, w: 120, h: 120, radius });
+            execute(&c, &empty_atlas(), &BlobStore::new(), &mut px, 120, None);
+            px
+        };
+        let capped = mk(32);
+        assert_ne!(capped[60 * 120 + 60], WHITE, "the cap must actually blur");
+        assert_eq!(mk(4000), capped, "an oversize radius is the cap, not the ask");
+    }
+
+    #[test]
+    fn extreme_blur_geometry_cannot_panic() {
+        // Saturating expansion and a clipped rect, so an author's i32::MIN
+        // origin / u32::MAX extent clips instead of wrapping; a degenerate
+        // rect and a zero radius paint nothing at all.
+        let mut px = surface(4, 4);
+        let before = px.clone();
+        let mut c = Cartoon::new();
+        c.ops.push(Op::Blur { x: 0, y: 0, w: 0, h: 4, radius: 4 });
+        c.ops.push(Op::Blur { x: 0, y: 0, w: 4, h: 4, radius: 0 });
+        execute(&c, &empty_atlas(), &BlobStore::new(), &mut px, 4, None);
+        assert_eq!(px, before, "nothing painted");
+        // A huge extent anchored outside the surface still clips cleanly.
+        let mut px2 = vec![BLACK; 4 * 4];
+        px2[0] = WHITE;
+        let mut c2 = Cartoon::new();
+        c2.ops.push(Op::Blur { x: i32::MIN, y: i32::MIN, w: u32::MAX, h: u32::MAX, radius: 32 });
+        execute(&c2, &empty_atlas(), &BlobStore::new(), &mut px2, 4, None);
     }
 
     #[test]

@@ -2322,6 +2322,9 @@ mod tests {
                     Op::Glow { x, y, w, h, color, alpha, radius } => {
                         (6, x as i64, y as i64, w as i64, h as i64, color as i64, ((alpha as i64) << 32) | radius as i64)
                     }
+                    Op::Blur { x, y, w, h, radius } => {
+                        (7, x as i64, y as i64, w as i64, h as i64, 0, radius as i64)
+                    }
                 })
                 .collect();
             let runs = c.runs.iter().map(|r| (r.glyph, r.advance)).collect();

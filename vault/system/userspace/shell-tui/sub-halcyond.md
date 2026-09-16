@@ -39,7 +39,7 @@ hazards: [haz-budget-stored-not-derived]
 abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md", "docs/HALCYON-INSTRUMENT.md"]
 created: 2026-09-05
-updated: 2026-09-15
+updated: 2026-09-16
 ---
 ## Purpose
 
@@ -531,6 +531,15 @@ presents are a recorded optimization.
 - **The down channel.** The sole-writer POLLOUT one-byte discipline (never
   blocks); the geometry record never dropped; the POLLOUT set capped at
   `POLL_MAX_NFDS`.
+- **The tree's ONLY exhaustive match over `cartoon::Op`.** `tile.rs`'s
+  legacy-equality tuple projection is the single place that enumerates EVERY
+  op -- every other consumer filters with `_ => None` -- so it must gain an
+  arm whenever cartoon's op set grows. It lives under `#[cfg(test)]`, and
+  that is the part to prosecute: **a guest build never catches the omission**,
+  because the match is not compiled for the guest at all. Only a host test
+  run does. Grown at I-8a (`RectAlpha`, `Glow`) and again at I-8b-3b
+  (`Blur`); a future op added without touching it fails nothing until
+  somebody runs the host suite.
 
 ## Seams
 
@@ -560,10 +569,15 @@ presents are a recorded optimization.
 
 ## Tests
 
-- **Host: 287 `#[test]`, all green** (measured 2026-09-15: transcript 54,
-  raster 42, layout 37, tile 30, chrome 16, input 12, grid 11, tiles 10, rail 10,
-  status 10, menu 9, help 8, outline 7, picker 7, session_init 6, dialog 5,
-  downq 5, indicator 4, select 4). **The command needs an explicit host target** --
+- **Host: 301 `#[test]`, all green** (re-measured 2026-09-16: transcript 54,
+  raster 42, layout 37, tile 30, chrome 27, input 12, rail 11, grid 11, tiles 10,
+  status 10, help 10, menu 9, outline 7, picker 7, session_init 6, dialog 5,
+  downq 5, indicator 4, select 4). This row read 287 until 2026-09-16, drifted
+  in three places (chrome 16 -> 27 with the W-arc's `workspace_header_tests`,
+  help 8 -> 10 at I-7b, rail 10 -> 11 at I-8b-1). Re-derive it with `--
+  --list` rather than trusting the figure -- and note that `chrome` carries
+  TWO test modules, so a naive `::tests::` aggregation silently under-reports
+  it by eleven and still sums to a plausible-looking total. **The command needs an explicit host target** --
   `cargo test -p halcyond --lib --no-default-features --target
   aarch64-apple-darwin`, run from `usr/`: `usr/.cargo/config.toml` pins
   `[build] target = "aarch64-unknown-none"`, so without the override the run dies

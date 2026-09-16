@@ -1391,6 +1391,103 @@ unsafe block, ran on live drag frames without fault. But no leg reads
 sub-pixel ink. The gate proves the path RUNS; it does not prove the glow LOOKS
 right, and I am not going to write that it does.
 
+### I-8b-3: a fork I had quietly answered myself, and the op that reads the screen
+
+I picked up I-8b-3 expecting to wire two halves that were already built and
+pushed -- `CARD_SHADOW_*` and `pane::menu_effect_region`, with nothing calling
+them. The wiring census was in hand from the previous session. What I had not
+done was ask what an effect BLENDS AGAINST.
+
+`menu_reassert` re-blits the card over any screen region about to be uploaded,
+and it is safe to repeat because it is an opaque `copy_nonoverlapping`. I had
+been treating that as licence to hang the effects on the same hook. It is not:
+`screen_flush_rect` provably calls `menu_reassert` TWICE on one region -- once
+directly, once through the `screen_push` of its own return value -- and a
+second blend darkens what the first already darkened. Then the census came
+back worse than I hoped: SEVEN functions write the screen buffer directly
+(`blit_composed_pixels`, `fill_rect`, `menu_heal`'s local fill,
+`paint_borders`, `paint_cartoon`, `paint_strips`, `compose_cpu`), so there is
+no choke point to hook. "Re-apply wherever scene pixels are written" would
+need a signal threaded through all seven -- and I-8b's OWN audit row already
+records that hazard as stated, not closed.
+
+**The part worth keeping is that the second thing I found was my own error.**
+Section 10 says the backdrop is "a bounded downsampled blur of the permitted
+scene". The previous session had read *bounded* as bounded EXTENT and sized
+the backdrop to the card's surroundings -- and recorded that reading in a
+memory note as settled. It is not what the text says: *bounded* modifies the
+blur RADIUS, and the extent reading had in fact been derived from
+`menu_heal`'s cost. That is the design-first rule running backwards, the code
+deciding the scripture, and it had already survived one handoff wearing the
+word "settled". A reading that arrives with its own justification attached is
+the hardest kind to re-examine, because the justification is true -- the heal
+cost IS real. It just was not evidence about what section 10 means.
+
+So both questions went to the operator with the prior art attached, which
+sharpened the fork rather than decorating it: rio has no backdrop at all and
+its menus use a save-under -- back up the region, draw, restore on dismiss --
+so the scene under a Plan 9 menu is frozen BY CONSTRUCTION. The modern
+compositors (KWin, Hyprland, picom, `NSVisualEffectView`) sample the live
+scene and re-blur every frame, which is idempotent for free because they
+re-composite the whole frame each vsync and never apply an effect
+incrementally. tapestryd is deliberately neither: it is damage-driven, which
+is what `screen_push(rect)` and `menu_reassert` ARE. The SOTA's freedom comes
+from a frame model this compositor does not have, so the heritage answer was
+the only one the architecture admits. Operator: bounded ring, frozen scene
+(`b62a761b`, scripture before code).
+
+### I-8b-3b: the clamp was in the wrong place, and designing the sabotage found it
+
+"Frozen scene" made the backdrop's 3 px blur tractable for the first time --
+it now runs ONCE, at placement, so it needs no incremental story at all. But
+`Op::Glow` blurs a rect's coverage MASK, which is what a drop shadow is; it
+cannot blur what happens to lie underneath. That is a genuinely different
+operation, and its home is cartoon, not a second blur inside the compositor.
+So the chunk split: **3b = the op** (pure, host-tested, no compositor risk),
+**3c = the wiring** (tint + blur + shadow together, so the backdrop is wired
+once rather than twice).
+
+`Op::Blur` is the first op that READS the surface it paints into. It is also
+allocation-free, and that is soundness rather than frugality: a separable
+in-place blur normally wants a scratch of the region's area -- megabytes for a
+full-display region -- but only the `r + 1` values already OVERWRITTEN need
+keeping, since everything at or ahead of the write cursor is still original in
+`px`. A fixed 33-entry ring serves any permitted radius. cartoon is `no_std`,
+where a failed allocation aborts, and an executor whose contract is "always
+produces a validly-clamped frame" must not be able to fail.
+
+**The wrong turn, caught before it ran.** I clamped the radius in `Exec::blur`,
+the obvious place, mirroring where `Glow` clamps. Then, designing sabotage 2 --
+*remove the clamp, watch the cap test fail* -- I worked out what would actually
+happen: `radius: 4000` makes `m = 4001` against a 33-entry `keep`, so it would
+PANIC, not merely paint wrong. Which means the clamp is memory safety here, not
+the work bound it is for `Glow`, and it was sitting one level above the
+constraint it enforces. It moved into `blur_line`, where `keep`'s size
+structurally requires it. I deliberately did NOT also clamp in the caller: two
+redundant guards mask each other's sabotage, so neither can be shown to be
+load-bearing -- belt-and-braces would have left the real guard unwitnessed.
+**Designing a sabotage is a design review of the thing being sabotaged**, and
+here it paid before a single test ran.
+
+Three sabotages, each run separately so no two guards could alibi each other,
+each naming its intended witness: divisor -> full window fails
+`a_constant_field_survives_the_blur_exactly` (2 FAILED); `blur_line`'s clamp
+removed fails `an_oversize_blur_radius_is_clamped_to_the_cap` (1 FAILED, an
+index panic); the ring ignored fails `a_blur_averages_its_neighbourhood` (1
+FAILED). Sources restored byte-identical, md5 `309d4902` both sides.
+
+Host: cartoon **26** (+6), halcyond lib **301**, tapestryd lib **79**; guest
+build clean on `aarch64-unknown-none`. The `a_blur_averages_its_neighbourhood`
+expectation was hand-derived end to end (85 = 255/3 after the horizontal pass,
+28 = 85/3 after the vertical, a 3x3 block of `0xFF1C1C1C`) and passed first
+run -- the first time this arc that my arithmetic and the code agreed on the
+first try, after three rounds where my expectation was the thing that was
+wrong.
+
+**Still open at this point:** 3c, the wiring itself -- `MenuState.fx`, the
+three heal sites, the push suppression, and the effects painted at placement.
+No compositor line has been changed yet.
+
 ## Run 46o (2026-09-14, Fable 5.1 max) -- the Halcyon Instrument arc opens: reading the Carbon Optics kit against the tree
 
 ### What this run was for

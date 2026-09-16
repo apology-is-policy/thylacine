@@ -14,7 +14,7 @@ hazards: []
 abis: []
 design: ["docs/HALCYON.md section 13.2", "docs/TAPESTRY.md section 14"]
 created: 2026-09-05
-updated: 2026-09-15
+updated: 2026-09-16
 ---
 ## Purpose
 
@@ -76,6 +76,41 @@ worth stating because it reads as a shortfall and is not: a rect smaller than
 `2*radius+1` on an axis never reaches full coverage anywhere, since no pixel
 ever sees a full window.
 
+**`Op::Blur` is the one op that READS the surface it paints into**, and that
+is precisely why it exists: `Glow` blurs a rect's coverage MASK -- which is
+what a drop shadow is -- and cannot express a blur of whatever happens to lie
+underneath, which is what section 10's modal backdrop needs. The alternative
+was a second blur inside the compositor, the shape that produced three
+HALCYON-WORKSPACES defects.
+
+**The destination blur is ALLOCATION-FREE, and that is a soundness property
+rather than a frugality.** A separable in-place blur normally wants a scratch
+of the region's area -- megabytes for a full-display region -- but only the
+`r + 1` values already OVERWRITTEN need keeping, since everything at or ahead
+of the write cursor is still original in `px`. A fixed ring of
+`GLOW_RADIUS_MAX + 1` entries therefore serves any permitted radius. cartoon
+is `no_std`, where a failed allocation aborts, and an executor whose contract
+is "always produces a validly-clamped frame" must not be able to fail. The
+ring cannot be clobbered under its own reader: slot `k % (r + 1)` is rewritten
+at step `k + r + 1`, strictly past every step that still needs it, because a
+window at `i` reaches back only to `i - r`.
+
+**`blur_line` clamps the radius itself, and the clamp lives there and nowhere
+else.** `keep` is sized from `GLOW_RADIUS_MAX`, so an over-large radius would
+index past the ring -- the bound is MEMORY SAFETY here, not the work bound it
+is for `Glow`. Clamping in the caller as well was rejected on a testability
+argument, not a stylistic one: two redundant guards mask each other's
+sabotage, so neither can be shown to be load-bearing.
+
+**The divisor is the tap count actually taken.** A window hanging off the
+rect's edge averages fewer taps rather than averaging in black, so a constant
+field is preserved EXACTLY, edges and corners included -- the property that
+keeps a backdrop from ringing darker around its own border. Section 10 says
+"downsampled"; this is a direct box blur, because downsampling is a
+large-radius GPU optimisation and at the backdrop's 3 px (6 at the 200 %
+scale ceiling) a direct blur is both cheaper and exact. The specified
+appearance is the blur, not the means.
+
 **The atlas generation makes a stale page reference impossible by
 construction** (the 13.2 stale rule). A `Glyphs` op carries the `atlas_gen` it
 was authored against; the executor paints it only when that equals the store's
@@ -107,7 +142,7 @@ precisely where the short-circuits did not reach.
 ## Data structures
 
 `Op` is the drawing op (Clear / Rect / RectAlpha / Glyphs / Image / Embed /
-Glow) with surface-local signed coordinates. `GlyphRef` is one glyph's atlas index +
+Glow / Blur) with surface-local signed coordinates. `GlyphRef` is one glyph's atlas index +
 advance. `Cartoon` is `ops` + the flat `runs` pool -- flat because it keeps
 the in-process form allocation-light and is already the shape the H-6 wire
 form serializes. `AtlasPage` is a w-tight 8-bit alpha page; `GlyphEntry` is a
@@ -133,7 +168,10 @@ handle. Its own load-bearing rules:
   so a repacked page can never be misread.
 - **A glow's blur radius is bounded at the executor** (`GLOW_RADIUS_MAX`),
   because the spread past the rect is work that the list -- not the executor
-  -- chooses.
+  -- chooses. The SAME constant bounds `Op::Blur`, where it is load-bearing
+  for a second reason: the allocation-free ring is sized from it.
+- **The executor cannot fail.** No op allocates, so no op can abort a
+  `no_std` compositor mid-frame.
 - **The executor stays knowledge-free** (no shaping, no measuring, no diff);
   the moment it needs to *decide* something, the division of knowledge has
   been violated and the vk executor could not mirror it.
@@ -171,6 +209,12 @@ executor honours it but does not compute it.
   at the author leaves the executor honouring whatever the next author -- or
   the H-6 wire -- hands it. A bound that does not hold on the read side is not
   a bound.
+- **`blur_line`'s clamp must not be duplicated into its caller.** It is the
+  ring's bounds check; a second copy upstream would mask its sabotage and
+  leave the real guard unwitnessed.
+- **`Op::Blur` must keep normalising by the taps actually taken.** Dividing by
+  the full `2r+1` window instead darkens every edge toward black, which shows
+  as a ring around the backdrop's own border.
 - **The executor must not grow knowledge.** Any text measurement, damage
   computation, or theme decision belongs in the author; adding it here breaks
   the CPU/vk equivalence the op set is shaped for.
