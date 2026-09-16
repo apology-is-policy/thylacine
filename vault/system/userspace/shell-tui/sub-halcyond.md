@@ -302,7 +302,15 @@ specifies.
   the theme Picker, or a modal Dialog -- so ONE surface, one grab and one
   dismiss path serve all three; the model decides only what is painted and how
   a key / wheel / hover / click reads (`model_key` / `model_wheel` /
-  `model_hover` / `model_click`).
+  `model_hover` / `model_click`). Since 2026-09-16 (HALCYON-INSTRUMENT
+  section 10 revised, `2147d618`) the model also names the card's CLASS to the
+  compositor: `summon` writes `menu place <id> <x> <y> dialog` for
+  `Model::Dialog` and `Model::Help` -- which take the kit's backdrop and the
+  help card's shadow -- and a bare placement for `Model::Verbs` and
+  `Model::Picker`, which take only the theme menu's shadow. The word is the
+  whole of halcyond's part: the compositor lays the effects on at upload
+  ([[sub-tapestryd]], "Nothing freezes"), so nothing behind a menu or a dialog
+  stops drawing.
 - **The picker and the dialog family (I-7; HALCYON-INSTRUMENT 9.4 / 14.5)**:
   two more models on that one surface. `picker` is the display-theme control --
   the registry IS the gallery directory, re-read at every open (`read_gallery`,

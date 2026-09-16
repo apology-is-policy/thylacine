@@ -55,7 +55,10 @@ the ring:
   to a pane (H-3b); renderer-gated server-side.
 - `Surface::menu_on(ring, w, h)` — the one ephemeral `Role::Menu` surface
   (H-3c); invisible until the compositor places it, and torn down by the
-  compositor itself.
+  compositor itself. The owner places it with `menu place <id> <x> <y>`, plus
+  the word `dialog` for a card that takes the backdrop (HALCYON-INSTRUMENT
+  section 10 as revised 2026-09-16); the library carries no verb of its own
+  for that, the owner writes it through `global_ctl`.
 - `Surface::status_on(ring, w, h)` — the `Role::Status` bottom bar (H-3d);
   `w` must be the display width and `h` one status unit or the compositor
   refuses.

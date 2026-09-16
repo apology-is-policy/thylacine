@@ -398,15 +398,18 @@ code does what the code does. So the module's test pins each literal to its
 value AND asserts it NOT EQUAL to the token it would be mistaken for; that
 second half is the assertion whose absence allowed the defect.
 
-Section 10 states TWO card shadows (the picker at .32 / dy 20 / blur 55, help
-at .35 / dy 24 / blur 80) and the module carries ONE, `CARD_SHADOW`, at the
-help card's heavier pair. That collapse is operator-answered (2026-09-16) and
-recorded in section 10's amendment: the compositor cannot tell a picker from
-a help card -- all four halcyond models ride one `Role::Menu` surface,
-`MenuState` carries only `{n, gen, rect}`, `surf.title` is written and never
-read, and `menu place` takes only coordinates -- and the radius cap had
-already flattened blur 55 and blur 80 to the same value, leaving 8/256 of
-alpha and four pixels of offset between them.
+Section 10 states TWO card shadows, and the module carries both again:
+`MENU_SHADOW` -- the kit's `.theme-menu`, black .32 / dy 20 / blur 55, for the
+tile verb menu, the picker and the workspace list -- and `DIALOG_SHADOW` -- the
+`.help-card`, .35 / dy 24 / blur 80, for the 14.5 confirmations and the
+keyboard reference, over `BACKDROP`. *For one day (2026-09-16, operator-
+answered) they were collapsed into one `CARD_SHADOW` at the help card's
+pair, because the compositor could not tell the cards apart: every halcyond
+model rides one `Role::Menu` surface and `menu place` took only coordinates.
+Section 10 as revised that afternoon (`2147d618`) gives the placement a CLASS
+word -- `menu place <id> <x> <y> dialog` -- so the compositor can, and the
+collapse is undone.* The test pins all six values absolutely (82 / 20 / 55,
+90 / 24 / 80).
 
 The alphas are `pct256` of the stated percentage -- the same rounding the
 `Derived` opaques take -- so an effect and a derived opaque that both say

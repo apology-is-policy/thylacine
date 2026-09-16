@@ -114,6 +114,23 @@ changed: the modal backdrop became display-sized (section 10 as reversed at
 took 111 / 144 / 182 ms at radius 3 / 6 / 8 against 41 / 32 / 29 ms running
 -- the difference between a menu that opens and one that stalls.
 
+**A blur of a PIECE of a field is exact inside the piece, given a clip grown
+by the radius** -- the property the compositor's upload-time effects rest on
+(HALCYON-INSTRUMENT section 10 as revised 2026-09-16: tapestryd lays a
+dialog's backdrop over only the pixels one upload carries, never over a
+stored scene). A pixel's window reaches at most `r` either way; the vertical
+pass reads horizontal results no further than `r` above or below, each of
+which read no further than `r` across; so every tap lies inside the grown clip,
+and where that clip meets the field's (or the op rect's) own edge, both runs
+clip the window identically. Grown by the CLAMPED radius, because that is how
+far the executor actually reads. Witnessed, not argued:
+`a_blur_clipped_to_the_grown_target_is_exact_inside_the_target` runs 400
+random fields with op rects overhanging the field, targets at every edge and
+radii past the cap, comparing more than 10 000 pixels against the unclipped
+blur -- and a control that the UNGROWN clip is inexact at its edge, so the
+equality is a property of the growth rather than of blurring at all. Growing
+the clip one pixel short fails it (sabotage-measured).
+
 **`blur_line` clamps the radius itself, and the clamp lives there and nowhere
 else.** `keep` is sized from `GLOW_RADIUS_MAX`, so an over-large radius would
 index past the ring -- the bound is MEMORY SAFETY here, not the work bound it

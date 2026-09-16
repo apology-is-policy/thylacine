@@ -2019,6 +2019,76 @@ the next statement saw a reset added at U-6f); aux released it between rounds
 so the operator was not kept waiting.
 
 
+### Nothing freezes: the card and its effects laid on at upload, and the two ways the first design would have failed
+
+The operator's verdict on the full-viewport build was that the freeze "feels
+like a SAK episode". Scripture `2147d618` decided the kit's answer (a menu
+carries only its shadow, a dialog keeps the backdrop, nothing freezes); this is
+the code.
+
+The mechanism is one sentence: the screen buffer is the clean scene at all
+times, and a standing card and its effects are laid over the pixels an upload
+carries -- save, blur, blend, lay the card, transfer, restore -- inside ONE
+function every device-visible step goes through. Two things in that sentence
+were not in the scripture and were forced by the code:
+
+- **The card cannot be stored either.** A dialog's blur beside the card reads
+  the pixels under it. With the card in the buffer (as `menu_reassert` always
+  left it), those are card pixels, and the card's ground would bleed a few
+  pixels into the dim. The kit blurs the page, never the dialog. So the menu's
+  own present composes nothing into the buffer and the card is laid on like an
+  effect -- which also turns every dismiss, legacy included, into a plain
+  upload: no repaint, no redraw fan, no blink.
+- **The save could not be a `Vec`.** Before the first bake I read tapestryd's
+  allocator: `ThylaAlloc`, a FIXED 4 MiB heap. A dialog's full-display save at
+  2560x1664 is 17 MiB. A heap save with `try_reserve` would have failed
+  cleanly -- and silently dropped every dialog's dim, the one class the
+  mechanism exists for, while every menu (small saves) looked right. The save
+  is a lazy display-sized burrow instead.
+
+The exactness the scripture owed is witnessed, not argued: a cartoon test that
+a blur under a clip grown by the radius equals the unclipped blur inside the
+target (400 random fields, with the ungrown clip shown inexact), and an
+end-to-end pane test that lays the overlay over ~160 upload rects per
+configuration and compares every pixel with laying it over the whole display,
+then checks the restore leaves the scene everywhere. Eleven sabotages, each
+alone, each caught -- including the save grown ONE pixel short. One ordering
+the upload witness cannot see (its reference is built from the same op lists)
+is pinned separately: the tint before the shadow.
+
+**Two red gates nobody had run, and a hypothesis a change refuted.** The
+legacy console gate, `ls-halcyon`, PASSED its two menu pixel legs on the new
+card mechanism (the card composes on top; the transcript heals after Esc) and
+then failed 3/3 at the click-a-path leg, the press landing at 69,710 every
+time. My first reading was a test-mode witness added the day before for the
+I-6 hunt (`bd06c0ef`): said at the top of `ptr_btn`, it reaches the console
+renderer's transcript and could scroll it under the pointer. That is a real
+hazard in principle, so I tested it the only way that counts -- by moving the
+say after delivery and re-running. The click still missed. So I stashed the
+whole chunk, rebaked the BASE (`2147d618`) and ran the gate once: identical
+press, identical failure. Pre-existing, proven by reproduction; the witness
+change was reverted rather than shipped as a fix for something it did not fix.
+ls-halcyon had not run since run 46o (09-14), so the window is about twenty
+commits; it is queued with its evidence. `ls-halcyon-instrument` then failed
+3/3 at its first footer ink read -- the success glyph's box reads {9 13 13}
+where the leg wants {7 9 10}, which is the I-8b-1 sage glow's faint spread to
+the unit -- and I did NOT run the base for that one: with no card placed this
+chunk's upload is byte-identical to the old push, so the attribution there is
+by construction, a weaker kind of knowing, written as such and queued.
+
+**A second defect on the way:** `floor_bars_around` (the #56 latch flip's floor,
+`839a966f`) filled its bars and then flushed without transferring, so the fill
+never reached the display on either path. It pushes them now.
+
+**The ink legs the operator's decisions deserve.** No gate had read ink for any
+of this. `ls-halcyon-session-instrument` now reads: a dialog dims a flat region
+to exactly `rgb(3,4,4)` at 184/256 over the ground it read before; the footer's
+ink changes under a standing dialog as a job ends -- the leg the FROZEN design
+fails; after Esc the ground returns; a menu leaves a region beside it unchanged
+and darkens the strip under it.
+
+**Gates, by content.** `ls-halcyon-session-instrument` PASS 18/18 at 126 s, first attempt, hvf, the new ink legs reading {18 21 22} -> {7 8 9} under the reference, 20025 -> 19956 footer ink pixels as a job ended under it, and {18 21 22} unchanged beside the workspace list with {14 16 17} under it. The two red gates are older than this chunk, and the difference between how I know that for each is the part worth keeping: `ls-halcyon`'s click leg fails identically on the base, by a stash-and-rebake run -- attribution by reproduction; `ls-halcyon-instrument`'s success-glyph read is off by the sage glow's own ~7/256 and no card is placed there, so this change's upload is byte-identical to the old push -- attribution by construction, which is weaker and is written as such. Both are queued. The operator's image is the session image this gate ran, its pool restored from the baked snapshot.
+
 ## Run 46o (2026-09-14, Fable 5.1 max) -- the Halcyon Instrument arc opens: reading the Carbon Optics kit against the tree
 
 ### What this run was for

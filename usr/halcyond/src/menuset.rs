@@ -198,7 +198,14 @@ impl MenuSet {
             model,
             ptr: None,
         };
-        let cmd = format!("menu place {} {} {}", o.surf.id, x, y);
+        // Section 10 as revised 2026-09-16: a dialog and the keyboard
+        // reference take the backdrop, and the compositor learns the class
+        // from this one word -- a bare placement is a menu.
+        let class = match o.model {
+            Model::Dialog(_) | Model::Help(_) => " dialog",
+            Model::Verbs(_) | Model::Picker(_) => "",
+        };
+        let cmd = format!("menu place {} {} {}{}", o.surf.id, x, y, class);
         if let Err(e) = o.surf.global_ctl(&cmd) {
             say(&format!("halcyond: menu place refused {:?}", e));
             return false; // Drop destroys the surface

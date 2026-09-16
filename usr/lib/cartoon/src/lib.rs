@@ -1215,6 +1215,82 @@ mod tests {
         assert_ne!(moved, field, "the blur must move a random field");
     }
 
+    /// `Op::Blur` run under a CLIP that is a target rect grown by the
+    /// radius yields, inside the target, exactly the pixels the unclipped
+    /// blur yields there -- the property the compositor relies on to blur
+    /// only the pixels one upload carries (HALCYON-INSTRUMENT 10, revised
+    /// 2026-09-16: effects are laid on at upload, never stored).
+    ///
+    /// Why it holds: a pixel's window reaches at most `r` either way, and
+    /// the vertical pass reads horizontal results no further than `r` above
+    /// or below, each of which read no further than `r` across. So every
+    /// tap lies in the grown clip, and where the clip meets the field's (or
+    /// the op rect's) own edge, both runs clip the window identically.
+    ///
+    /// Random fields, op rects that overhang the field, targets at every
+    /// edge, and radii past the cap -- where the clip must grow by the
+    /// CLAMPED radius, since that is how far the executor actually reads.
+    #[test]
+    fn a_blur_clipped_to_the_grown_target_is_exact_inside_the_target() {
+        let (w, h) = (40usize, 30usize);
+        let mut seed = 0xD1B5_4A32_D192_ED03u64;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut compared = 0u64;
+        for case in 0..400u32 {
+            let field: alloc::vec::Vec<u32> = (0..w * h).map(|_| rnd() as u32).collect();
+            let r = [1u32, 2, 3, 6, 8, 32, 40][(case % 7) as usize];
+            let reach = r.min(GLOW_RADIUS_MAX) as i32;
+            // The op rect: anywhere, overhanging the field on any side.
+            let ox = (rnd() % 50) as i32 - 5;
+            let oy = (rnd() % 40) as i32 - 5;
+            let ow = (rnd() % 45) as u32 + 1;
+            let oh = (rnd() % 35) as u32 + 1;
+            // The target, inside the field (an upload never leaves it).
+            let tx = (rnd() % w as u64) as i32;
+            let ty = (rnd() % h as u64) as i32;
+            let tw = (rnd() % (w as u64 - tx as u64)) as i32 + 1;
+            let th = (rnd() % (h as u64 - ty as u64)) as i32 + 1;
+            let mut c = Cartoon::new();
+            c.ops.push(Op::Blur { x: ox, y: oy, w: ow, h: oh, radius: r });
+            let mut want = field.clone();
+            execute(&c, &AtlasStore { gen: 0, pages: alloc::vec::Vec::new(), glyphs: alloc::vec::Vec::new() }, &BlobStore::new(), &mut want, w, None);
+            let clip = ClipRect {
+                x0: (tx - reach).max(0),
+                y0: (ty - reach).max(0),
+                x1: (tx + tw + reach).min(w as i32),
+                y1: (ty + th + reach).min(h as i32),
+            };
+            let mut got = field.clone();
+            execute(&c, &AtlasStore { gen: 0, pages: alloc::vec::Vec::new(), glyphs: alloc::vec::Vec::new() }, &BlobStore::new(), &mut got, w, Some(clip));
+            for y in ty..ty + th {
+                for x in tx..tx + tw {
+                    let i = y as usize * w + x as usize;
+                    assert_eq!(got[i], want[i], "case {} r {} at ({}, {})", case, r, x, y);
+                    compared += 1;
+                }
+            }
+        }
+        assert!(compared > 10_000, "the comparison ran: {}", compared);
+        // The control: clipped to the target ITSELF, not grown, the edge
+        // pixels read a narrower window and differ -- so the equality above
+        // is a property of the growth, not of blurring anything at all.
+        let field: alloc::vec::Vec<u32> = (0..w * h).map(|_| rnd() as u32).collect();
+        let mut c = Cartoon::new();
+        c.ops.push(Op::Blur { x: 0, y: 0, w: w as u32, h: h as u32, radius: 3 });
+        let mut want = field.clone();
+        execute(&c, &AtlasStore { gen: 0, pages: alloc::vec::Vec::new(), glyphs: alloc::vec::Vec::new() }, &BlobStore::new(), &mut want, w, None);
+        let mut got = field.clone();
+        let tight = ClipRect { x0: 10, y0: 10, x1: 20, y1: 20 };
+        execute(&c, &AtlasStore { gen: 0, pages: alloc::vec::Vec::new(), glyphs: alloc::vec::Vec::new() }, &BlobStore::new(), &mut got, w, Some(tight));
+        let differs = (10..20).any(|y| (10..20).any(|x| got[y * w + x] != want[y * w + x]));
+        assert!(differs, "an ungrown clip must be inexact at its edge");
+    }
+
     #[test]
     fn packer_opens_shelves_and_pages() {
         let mut p = AtlasPacker::new(4, 4);

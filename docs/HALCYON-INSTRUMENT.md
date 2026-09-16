@@ -1824,6 +1824,25 @@ a radius-wide margin from the clean buffer, so it should be exact -- to be
 witnessed, not assumed); the per-upload cost the backdrop's blur adds while a
 dialog stands; and the witness plan, since no gate leg reads ink.
 
+**As built at I-8e (2026-09-16).** The exactness is witnessed twice over:
+cartoon's `a_blur_clipped_to_the_grown_target_is_exact_inside_the_target`
+(400 random fields; an ungrown clip shown inexact), and tapestryd's
+`an_upload_shows_exactly_the_whole_display_overlay`, which lays the card and
+its effects over hundreds of upload rects at both scales and compares every
+pixel with laying them over the whole display. Two things the text above did
+not say, both forced by the code: **the card is not stored in the buffer
+either** -- a dialog's blur beside the card reads the pixels under it, and the
+kit blurs the page, never the dialog -- so a dismiss is a plain upload of what
+the card reached, with no repaint and no redraw request; and **the save is not
+the compositor's heap** (a fixed 4 MiB against a 17 MiB full-display save at
+2560x1664) but a lazy region sized to the display. The witness plan is gate
+ink legs in `ls-halcyon-session-instrument`: a dialog dims a flat region to
+exactly `rgb(3,4,4)` at 184/256 over it, the footer changes under a standing
+dialog as a job ends (the frozen design fails that), and a menu dims nothing
+and casts its shadow. The per-upload cost is estimated from the host blur
+measurement, not measured on the guest. Mechanism in full: the tapestryd dossier
+(`vault/system/userspace/services/sub-tapestryd.md`), "Nothing freezes".
+
 *Superseded by the paragraph above, kept as the record:*
 
 **REVERSED THE SAME DAY: the backdrop covers the WHOLE VIEWPORT (2026-09-16,

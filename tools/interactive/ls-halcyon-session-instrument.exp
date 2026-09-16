@@ -441,6 +441,102 @@ expect {
 }
 lc_pass "session-instrument: Super+/ opens the 540-wide keyboard reference on the session's seat, its rows read from the compositor's chords (9.5 / 9.3)"
 
+# --- Section 10 as revised 2026-09-16: a DIALOG dims the display, and NOTHING
+# behind it freezes ----------------------------------------------------------
+# The operator found the frozen full-viewport backdrop "too dramatic for a
+# menu -- it feels like a SAK episode"; a dialog keeps the kit's backdrop, a
+# menu carries only its shadow, and the compositor lays both on at UPLOAD, so
+# programs behind them keep drawing. Read off screendumps with gfx_region.py's
+# DOMINANT colour. The sample rect sits left of the centred 540-wide reference
+# by 80 px -- beyond the shadow's 32 px of blur -- at mid-height, inside the
+# shell tile: flat ground but for glyphs, so its dominant colour is the ground.
+#   dim  : with the reference up the rect reads EXACTLY rgb(3,4,4) at 184/256
+#          over that ground (a box blur of a constant field is the field). The
+#          frozen design read the same colour, so this alone separates nothing
+#          from it -- the live leg does.
+#   live : a job ENDS while the reference stands, and the footer strip's ink
+#          changes under the dim. The frozen design uploaded nothing outside
+#          the card until the dismiss, so the strip read the same before and
+#          after -- the failure this leg exists to see.
+#   back : after Esc the rect reads the ground it read before.
+proc region_off {png x0 y0 x1 y1 rgb} {
+    global repo
+    if {[catch {exec python3 $repo/tools/interactive/gfx_region.py $png $x0 $y0 $x1 $y1 {*}$rgb} v]} { lc_fail "gfx_region failed: $v" }
+    if {![regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $v -> off tot r g b]} { lc_fail "gfx_region said '$v'" }
+    return [list $off $r $g $b]
+}
+proc dom_of {png x0 y0 x1 y1} {
+    return [lrange [region_off $png $x0 $y0 $x1 $y1 {0 0 0}] 1 3]
+}
+set sx0 40
+set sx1 [expr {($W - 540) / 2 - 80}]
+set sy0 [expr {$H / 2 - 40}]
+set sy1 [expr {$H / 2 + 40}]
+if {$sx1 - $sx0 < 60} { lc_fail "no room left of the reference for the sample rect (W=$W)" }
+set ground [dom_of [dump_screen] $sx0 $sy0 $sx1 $sy1]
+lassign $ground gr gg gb
+set dimmed [list [expr {(3 * 184 + $gr * 72) >> 8}] [expr {(4 * 184 + $gg * 72) >> 8}] [expr {(4 * 184 + $gb * 72) >> 8}]]
+set timeout 60
+htype "sleep 12\n"
+expect {
+    -re "halcyond: status bar \\d+ painted \[^\\r\\n\]*running true panes $N" {}
+    -re {EXTINCTION:} { lc_extinction_fail "extinction during the dim leg's sleep" }
+    timeout { lc_fail "the footer never showed RUNNING for the dim leg's sleep" }
+    eof     { lc_fail "qemu exited during the dim leg's sleep" }
+}
+exec $repo/tools/qmp-sendtext.sh -s $qmp -k "meta_l+slash"
+expect {
+    -re {tapestryd: menu (\d+) class dialog} {}
+    -re {tapestryd: menu (\d+) class menu} { lc_fail "the reference was placed as a MENU: halcyond did not send the dialog word (section 10 as revised 2026-09-16)" }
+    timeout { lc_fail "the reference's placement named no class" }
+    eof     { lc_fail "EOF waiting for the reference's class" }
+}
+expect {
+    -re {halcyond: menu (\d+) placed at (\d+) (\d+) \((\d+)x(\d+)\) for help} {}
+    timeout { lc_fail "Super+/ did not open the reference for the dim leg" }
+    eof     { lc_fail "EOF waiting for the reference (dim leg)" }
+}
+set v ""
+for {set i 0} {$i < 12} {incr i} {
+    set v [dom_of [dump_screen] $sx0 $sy0 $sx1 $sy1]
+    if {$v eq $dimmed} break
+    after 500
+}
+if {$v ne $dimmed} { lc_fail "with the reference up the sample rect read {$v}, not the backdrop over its ground {$ground} = {$dimmed}" }
+lc_step "the reference dims the display: the ground {$ground} reads {$dimmed} beside it"
+set fy0 [expr {$H - 25}]
+set fpng [dump_screen]
+set fground [dom_of $fpng 0 $fy0 $W $H]
+set fbefore [lindex [region_off $fpng 0 $fy0 $W $H $fground] 0]
+expect {
+    -re "halcyond: status bar \\d+ painted \[^\\r\\n\]*running false panes $N" {}
+    -re {EXTINCTION:} { lc_extinction_fail "extinction while the reference stood" }
+    timeout { lc_fail "the job never ended while the reference stood" }
+    eof     { lc_fail "qemu exited while the reference stood" }
+}
+set fafter $fbefore
+for {set i 0} {$i < 12} {incr i} {
+    set fafter [lindex [region_off [dump_screen] 0 $fy0 $W $H $fground] 0]
+    if {$fafter != $fbefore} break
+    after 500
+}
+if {$fafter == $fbefore} { lc_fail "the footer strip kept $fbefore ink pixels across the job's end under the reference: the scene behind a dialog is FROZEN (section 10 as revised 2026-09-16)" }
+lc_step "the footer drew under the reference as the job ended ($fbefore -> $fafter ink pixels)"
+hkey "esc"
+expect {
+    -re {tapestryd: menu \d+ dismissed \(esc\)} {}
+    timeout { lc_fail "Esc did not dismiss the reference (dim leg)" }
+    eof     { lc_fail "EOF waiting for the reference dismiss (dim leg)" }
+}
+set v ""
+for {set i 0} {$i < 12} {incr i} {
+    set v [dom_of [dump_screen] $sx0 $sy0 $sx1 $sy1]
+    if {$v eq $ground} break
+    after 500
+}
+if {$v ne $ground} { lc_fail "after Esc the sample rect read {$v}, not the ground {$ground} it read before the reference" }
+lc_pass "session-instrument: a DIALOG dims the whole display ({$ground} -> {$dimmed}), the scene behind it keeps drawing (the footer changed as a job ended under it), and Esc puts the ground back (section 10 as revised 2026-09-16)"
+
 # --- I-7b (9.5 / 14.5): Super+Q ASKS while a job runs; Cancel keeps both -------
 # The chord is no longer the compositor's act: it is DELIVERED to the rail's
 # owner with the focused pane's id, because only the owner knows a command is
@@ -696,20 +792,51 @@ expect {
 }
 set h1 0
 expect {
+    -re {tapestryd: menu (\d+) class dialog} { lc_fail "the workspace list was placed as a DIALOG (section 10 as revised 2026-09-16: a menu carries only its shadow)" }
+    -re {tapestryd: menu (\d+) class menu} {}
+    timeout { lc_fail "the workspace list's placement named no class" }
+    eof     { lc_fail "EOF waiting for the workspace list's class" }
+}
+expect {
     -re {halcyond: menu (\d+) placed at (\d+) (\d+) \((\d+)x(\d+)\) for Workspaces} {
-        set h1 $expect_out(5,string)
+        set lx $expect_out(2,string); set ly $expect_out(3,string)
+        set lw $expect_out(4,string); set h1 $expect_out(5,string)
     }
     -re {halcyond: menu (surface failed|place refused)} { lc_fail "the session could not place the workspace list: $expect_out(0,string)" }
     timeout { lc_fail "the workspace list was not placed" }
     eof     { lc_fail "EOF waiting for the workspace list" }
 }
 lc_step "the workspace list with ONE workspace is ${h1}px tall"
+# A MENU dims nothing and casts its shadow (section 10 as revised 2026-09-16).
+# Two rects, read with the list up and again after Esc: one right of the list
+# by 100 px -- beyond the 32 px of blur -- must read the SAME dominant colour
+# both times (the frozen full-viewport design dimmed it); one inside the
+# shadow just under the card must read DARKER with the list up. The after-Esc
+# read is the scene without the card, so no pre-card dump has to guess where
+# the list will land.
+set fx0 [expr {$lx + $lw + 100}]; set fx1 [expr {$fx0 + 200}]
+set fy0 [expr {$ly + 40}];        set fy1 [expr {$fy0 + 100}]
+set shx0 [expr {$lx + 40}];       set shx1 [expr {$lx + $lw - 40}]
+set shy0 [expr {$ly + $h1 + 4}];  set shy1 [expr {$ly + $h1 + 16}]
+if {$fx1 > $W || $shx1 - $shx0 < 20} { lc_fail "no room for the menu's sample rects (list at $lx,$ly ${lw}x$h1, W=$W)" }
+after 800
+set upng [dump_screen]
+set far_up [dom_of $upng $fx0 $fy0 $fx1 $fy1]
+set shade_up [dom_of $upng $shx0 $shy0 $shx1 $shy1]
 hkey "esc"
 expect {
     -re {tapestryd: menu \d+ dismissed \(esc\)} {}
     timeout { lc_fail "Esc did not dismiss the workspace list" }
     eof     { lc_fail "EOF waiting for the dismiss" }
 }
+after 800
+set dpng [dump_screen]
+set far_down [dom_of $dpng $fx0 $fy0 $fx1 $fy1]
+set shade_down [dom_of $dpng $shx0 $shy0 $shx1 $shy1]
+if {$far_up ne $far_down} { lc_fail "a MENU dimmed the display: {$far_up} beside the list, {$far_down} once it went (section 10 as revised 2026-09-16)" }
+lassign $shade_up su_r su_g su_b; lassign $shade_down sd_r sd_g sd_b
+if {!($su_r + $su_g + $su_b < $sd_r + $sd_g + $sd_b)} { lc_fail "the list cast no shadow: {$shade_up} under it, {$shade_down} once it went" }
+lc_step "the list dims nothing ({$far_up} beside it either way) and casts its shadow ({$shade_down} -> {$shade_up} under it)"
 if {$h2 <= $h1} {
     lc_fail "the workspace list did not grow with the workspace count (two-workspace list ${h2}px, one-workspace list ${h1}px): it is still reading a hardcoded count rather than the compositor's header (round 1 F6)"
 }

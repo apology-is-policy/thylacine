@@ -282,31 +282,91 @@ pub fn track_glow(rule: Rect, dragged: bool, instrument: bool, pct: u16) -> Opti
     })
 }
 
-/// HALCYON-INSTRUMENT 10: the display region a placed menu card's EFFECTS
-/// cover -- the WHOLE DISPLAY, as the kit's `dialog::backdrop` does
-/// (section 10 as reversed at `c065ec06`, operator-answered).
+/// HALCYON-INSTRUMENT 10 (revised 2026-09-16): the class a placed card
+/// takes, named by the owner's `menu place` word. The compositor interprets
+/// the CLASS; no presentation value travels on the wire.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MenuClass {
+    /// The tile verb menu, the theme picker, the workspace list: a drop
+    /// shadow and nothing else (the kit's `.theme-menu`).
+    Menu,
+    /// The 14.5 confirmations and the keyboard reference: the backdrop over
+    /// the whole display and the help card's shadow (the kit's
+    /// `dialog::backdrop` + `.help-card`).
+    Dialog,
+}
+
+impl MenuClass {
+    pub fn name(self) -> &'static str {
+        match self {
+            MenuClass::Menu => "menu",
+            MenuClass::Dialog => "dialog",
+        }
+    }
+}
+
+/// The `menu place` arguments after the verb word: `<id> <x> <y>`, then an
+/// optional `dialog`. A bare placement is a menu -- so an owner that
+/// predates the class keeps its grammar -- and any other fourth word, or a
+/// fifth, is malformed.
+pub fn menu_place_args<'a, I: Iterator<Item = &'a str>>(mut it: I) -> Option<(usize, u32, u32, MenuClass)> {
+    let id: usize = it.next()?.parse().ok()?;
+    let x: u32 = it.next()?.parse().ok()?;
+    let y: u32 = it.next()?.parse().ok()?;
+    let class = match it.next() {
+        None => MenuClass::Menu,
+        Some("dialog") => MenuClass::Dialog,
+        Some(_) => return None,
+    };
+    if it.next().is_some() {
+        return None;
+    }
+    Some((id, x, y, class))
+}
+
+/// The smallest rect holding both (an empty one contributes nothing).
 ///
-/// It was the card united with its drop shadow's reach until that
-/// reversal, and the reach is why it had to go: the shadow's requested
-/// blur is `CARD_SHADOW_BLUR` scaled (about 200 px on a 2x display), the
-/// region was darkened uniformly at `BACKDROP_ALPHA`, and the scene outside
-/// it was untouched -- a hard-edged dark RECTANGLE by construction. A
-/// region that covers everything has no edge to see. The card's shadow is
-/// still painted, inside this region, by the executor's clamped glow.
-///
-/// Kept SEPARATE from `MenuState.rect`, and that separation is still the
-/// point. `rect` is what the surface IS: `menu_reassert` maps screen pixels
-/// into the weave by `inter.x - rect.x`, `surface_target` places the card
-/// there, and the click-away test asks whether the pointer sits inside it.
-/// One field for what is painted, one for what the surface is.
-///
-/// `Rect::ZERO` for a degenerate card or display, so a caller can never be
-/// handed a region with nothing under it.
-pub fn menu_effect_region(card: Rect, disp_w: u32, disp_h: u32) -> Rect {
-    if card.w == 0 || card.h == 0 || disp_w == 0 || disp_h == 0 {
+/// Lived in `server.rs`, where it had no host witness; moved here, not
+/// copied, when the menu's overlay came to need it too -- the same reason
+/// `bars_around` moved.
+pub fn rect_union(a: Rect, b: Rect) -> Rect {
+    if a.is_empty() {
+        return b;
+    }
+    if b.is_empty() {
+        return a;
+    }
+    let x1 = a.x.min(b.x);
+    let y1 = a.y.min(b.y);
+    let x2 = (a.x + a.w).max(b.x + b.w);
+    let y2 = (a.y + a.h).max(b.y + b.h);
+    Rect {
+        x: x1,
+        y: y1,
+        w: x2 - x1,
+        h: y2 - y1,
+    }
+}
+
+/// `r` grown by `by` on every side, clipped to a `disp_w` x `disp_h`
+/// display; `Rect::ZERO` when nothing of it lies on the display.
+pub fn grow_clamped(r: Rect, by: u32, disp_w: u32, disp_h: u32) -> Rect {
+    if r.is_empty() {
         return Rect::ZERO;
     }
-    Rect { x: 0, y: 0, w: disp_w, h: disp_h }
+    let x0 = r.x.saturating_sub(by);
+    let y0 = r.y.saturating_sub(by);
+    let x1 = r.x.saturating_add(r.w).saturating_add(by).min(disp_w);
+    let y1 = r.y.saturating_add(r.h).saturating_add(by).min(disp_h);
+    if x1 <= x0 || y1 <= y0 {
+        return Rect::ZERO;
+    }
+    Rect {
+        x: x0,
+        y: y0,
+        w: x1 - x0,
+        h: y1 - y0,
+    }
 }
 
 /// The four bands of `outer` around `inner` (top, bottom, left, right;
@@ -316,9 +376,9 @@ pub fn menu_effect_region(card: Rect, disp_w: u32, disp_h: u32) -> Rect {
 /// it had no host witness: tapestryd's lib is `chords`/`keymap`/`pane`/
 /// `skein`, and the bin is not in it. It moved here rather than being
 /// copied, because a second implementation of a geometric primitive is the
-/// shape that produced three HALCYON-WORKSPACES defects -- and its two
-/// existing callers (the floor under a cropped client, the heal under a
-/// dismissed menu) get the witnesses along with the new one.
+/// shape that produced three HALCYON-WORKSPACES defects. Its callers --
+/// the floor under a cropped client, and `subtract_rects`, which carves a
+/// GL blit's placement out of an upload -- share the witnesses.
 ///
 /// An empty `inner` yields `[outer, ZERO, ZERO, ZERO]`: nothing is
 /// subtracted, so the whole of `outer` survives.
@@ -338,89 +398,202 @@ pub fn bars_around(outer: Rect, inner: Rect) -> [Rect; 4] {
     ]
 }
 
-/// HALCYON-INSTRUMENT 10: the parts of screen write `r` that may still be
-/// PUSHED to the display while a menu card stands at `card` with its effect
-/// region `fx`. Since the full-viewport reversal `fx` is the whole display,
-/// so the answer is the card's intersection alone: the scene behind a modal
-/// is FROZEN until the dismiss rebuilds it. The function stays general in
-/// `fx` -- nothing here depends on the region's extent.
-///
-/// The effects are painted ONCE, when the menu is placed (section 10 as
-/// amended at `b62a761b`), and this is what keeps them there. An effect
-/// BLENDS against the destination, so unlike the card's own opaque
-/// `copy_nonoverlapping` it is not idempotent -- and `screen_flush_rect`
-/// provably re-asserts one region twice, once directly and once through the
-/// `screen_push` of its own return. Re-applying per push would darken what
-/// the previous push already darkened; tracking which writes carry fresh
-/// scene pixels would need a signal threaded through all seven functions
-/// that write the screen buffer. So idempotency is obtained by EXCLUDING
-/// writes instead: the effect ring is not uploaded while the menu stands.
-/// The buffer beneath may drift as clients present; the DISPLAY keeps the
-/// effected pixels, and `menu_heal` reconciles both at dismiss.
-///
-/// The card's own rect is re-admitted, and that is what makes the whole
-/// scheme safe rather than merely cheap: `menu_reassert` copies the card
-/// over it opaquely, so any effect applied twice underneath is provably
-/// invisible. Five rects, empties included; `card` is inside `fx` by
-/// construction (`menu_effect_region` is the display the card was clamped
-/// into), so they never overlap.
-pub fn menu_push_allowed(r: Rect, fx: Rect, card: Rect) -> [Rect; 5] {
-    let hidden = r.intersect(fx);
-    if hidden.is_empty() {
-        return [r, Rect::ZERO, Rect::ZERO, Rect::ZERO, Rect::ZERO];
+/// `r` minus every hole, as disjoint rects (empties dropped). Order and
+/// shape are unspecified; what is pinned is the coverage.
+pub fn subtract_rects(r: Rect, holes: &[Rect]) -> Vec<Rect> {
+    let mut out: Vec<Rect> = Vec::new();
+    if !r.is_empty() {
+        out.push(r);
     }
-    let b = bars_around(r, hidden);
-    [b[0], b[1], b[2], b[3], r.intersect(card)]
+    for &h in holes {
+        let mut next: Vec<Rect> = Vec::new();
+        for p in out {
+            let i = p.intersect(h);
+            if i.is_empty() {
+                next.push(p);
+                continue;
+            }
+            for b in bars_around(p, i) {
+                if !b.is_empty() {
+                    next.push(b);
+                }
+            }
+        }
+        out = next;
+    }
+    out
 }
 
-/// HALCYON-INSTRUMENT 10: what the compositor paints under a placed menu
-/// card -- the modal backdrop and the one card shadow, in paint order.
+/// A card's drop shadow: `color` at `alpha` under the box-blurred coverage
+/// of `rect` -- the card displaced by the scaled offset -- spread by
+/// `radius`. The radius is the REQUESTED one; the executor clamps it to
+/// `cartoon::GLOW_RADIUS_MAX`, and `MenuEffects.region` is sized from the
+/// clamped value, because that is how far paint actually reaches.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CardShadow {
+    pub rect: Rect,
+    pub color: u32,
+    pub alpha: u8,
+    pub radius: u32,
+}
+
+/// A dialog's backdrop: a box blur of `radius` over the scene, then `color`
+/// at `alpha` over the blurred result.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Backdrop {
+    pub color: u32,
+    pub alpha: u8,
+    pub radius: u32,
+}
+
+/// HALCYON-INSTRUMENT 10 (revised 2026-09-16): what a placed card's class
+/// lays over the scene. A menu carries the kit's `.theme-menu` shadow and
+/// nothing else; a dialog carries the backdrop across the whole display and
+/// the help card's shadow.
 ///
-/// `None` under the legacy profile (section 10 is the Instrument visual) and
-/// for a degenerate card or region. Every value is section 10's LITERAL, not
-/// a theme token: the effects "stay amber / green literals on every theme",
-/// and painting one with a token is the defect corrected at `a4c9a461`.
-///
-/// Lengths scale through the same `ipx` the metrics take, so an effect and a
-/// derived opaque of the same stated size agree. The shadow's radius is the
-/// REQUESTED one -- 80 scaled -- and the executor clamps it to
-/// `cartoon::GLOW_RADIUS_MAX`; that flattening is what collapsed section
-/// 10's two card shadows into one, and a second copy of the bound here would
-/// be a second thing to keep in step.
+/// Every value is section 10's LITERAL, not a theme token: the effects
+/// "stay amber / green literals on every theme", and painting one with a
+/// token is the defect corrected at `a4c9a461`. Lengths scale through the
+/// same `ipx` the metrics take.
 // No `Eq`: the struct carries `Rect`s, and `Rect` is `PartialEq` only.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MenuEffects {
-    /// The region every effect is clipped to: the whole display (section
-    /// 10 as reversed at `c065ec06`). The display-sized heal that costs is
-    /// paid once, at dismiss, by rebuilding the scene from what every
-    /// surface last presented -- not per frame, and not by a repaint that
-    /// waits on clients.
+    /// Every pixel an effect can change: the shadow's reach for a menu --
+    /// the displaced card grown by the CLAMPED radius, on the display --
+    /// and the whole display for a dialog.
     pub region: Rect,
-    pub backdrop_color: u32,
-    pub backdrop_alpha: u8,
-    pub backdrop_radius: u32,
-    /// The card displaced by the scaled `dy`; the blur spreads from there.
-    pub shadow: Rect,
-    pub shadow_color: u32,
-    pub shadow_alpha: u8,
-    pub shadow_radius: u32,
+    pub backdrop: Option<Backdrop>,
+    pub shadow: CardShadow,
 }
 
-pub fn menu_effects(card: Rect, fx: Rect, instrument: bool, pct: u16) -> Option<MenuEffects> {
-    if !instrument || card.w == 0 || card.h == 0 || fx.is_empty() {
+/// `None` under the legacy profile (section 10 is the Instrument visual),
+/// for a degenerate card or display, and for a menu whose shadow reaches no
+/// pixel of the display.
+pub fn menu_effects(
+    card: Rect,
+    class: MenuClass,
+    instrument: bool,
+    pct: u16,
+    disp_w: u32,
+    disp_h: u32,
+) -> Option<MenuEffects> {
+    use libhalcyon::instrument::effects as fx;
+    if !instrument || card.is_empty() || disp_w == 0 || disp_h == 0 {
         return None;
     }
-    let ipx = |v: i32| libhalcyon::scale::ipx(v, pct).max(0);
-    let dy = ipx(libhalcyon::instrument::effects::CARD_SHADOW_DY) as u32;
-    Some(MenuEffects {
-        region: fx,
-        backdrop_color: libhalcyon::instrument::effects::BACKDROP,
-        backdrop_alpha: libhalcyon::instrument::effects::BACKDROP_ALPHA,
-        backdrop_radius: ipx(libhalcyon::instrument::effects::BACKDROP_BLUR) as u32,
-        shadow: Rect { x: card.x, y: card.y.saturating_add(dy), w: card.w, h: card.h },
-        shadow_color: libhalcyon::instrument::effects::CARD_SHADOW,
-        shadow_alpha: libhalcyon::instrument::effects::CARD_SHADOW_ALPHA,
-        shadow_radius: ipx(libhalcyon::instrument::effects::CARD_SHADOW_BLUR) as u32,
+    let ipx = |v: i32| libhalcyon::scale::ipx(v, pct).max(0) as u32;
+    let (color, alpha, dy, blur) = match class {
+        MenuClass::Menu => (fx::MENU_SHADOW, fx::MENU_SHADOW_ALPHA, fx::MENU_SHADOW_DY, fx::MENU_SHADOW_BLUR),
+        MenuClass::Dialog => (fx::DIALOG_SHADOW, fx::DIALOG_SHADOW_ALPHA, fx::DIALOG_SHADOW_DY, fx::DIALOG_SHADOW_BLUR),
+    };
+    let shadow = CardShadow {
+        rect: Rect {
+            x: card.x,
+            y: card.y.saturating_add(ipx(dy)),
+            w: card.w,
+            h: card.h,
+        },
+        color,
+        alpha,
+        radius: ipx(blur),
+    };
+    let (region, backdrop) = match class {
+        MenuClass::Menu => (
+            grow_clamped(shadow.rect, shadow.radius.min(cartoon::GLOW_RADIUS_MAX), disp_w, disp_h),
+            None,
+        ),
+        MenuClass::Dialog => (
+            Rect { x: 0, y: 0, w: disp_w, h: disp_h },
+            Some(Backdrop {
+                color: fx::BACKDROP,
+                alpha: fx::BACKDROP_ALPHA,
+                radius: ipx(fx::BACKDROP_BLUR),
+            }),
+        ),
+    };
+    if region.is_empty() {
+        return None;
+    }
+    Some(MenuEffects { region, backdrop, shadow })
+}
+
+/// The display lists that lay `e` over the scene, in paint order: the
+/// backdrop's BLUR alone, then everything that blends -- the backdrop's
+/// tint, then the shadow.
+///
+/// Two lists because they take two clips (`overlay_plan`): a blur READS a
+/// radius-wide margin around what it writes, and a blend reads nothing but
+/// its own pixel. Built here, not in the bin, so the host witness exercises
+/// the very ops the compositor runs.
+pub fn effect_cartoons(e: &MenuEffects) -> (cartoon::Cartoon, cartoon::Cartoon) {
+    let mut blur = cartoon::Cartoon::new();
+    let mut blend = cartoon::Cartoon::new();
+    let rg = e.region;
+    if let Some(b) = e.backdrop {
+        blur.ops.push(cartoon::Op::Blur {
+            x: rg.x as i32,
+            y: rg.y as i32,
+            w: rg.w,
+            h: rg.h,
+            radius: b.radius,
+        });
+        blend.ops.push(cartoon::Op::RectAlpha {
+            x: rg.x as i32,
+            y: rg.y as i32,
+            w: rg.w,
+            h: rg.h,
+            color: b.color,
+            alpha: b.alpha,
+        });
+    }
+    let s = e.shadow;
+    blend.ops.push(cartoon::Op::Glow {
+        x: s.rect.x as i32,
+        y: s.rect.y as i32,
+        w: s.rect.w,
+        h: s.rect.h,
+        color: s.color,
+        alpha: s.alpha,
+        radius: s.radius,
+    });
+    (blur, blend)
+}
+
+/// HALCYON-INSTRUMENT 10 (revised 2026-09-16): what ONE upload of screen
+/// rect `r` owes a standing card. Nothing in the screen buffer is ever
+/// effected or carded -- the buffer stays the clean scene -- so a card and
+/// its effects are laid over the pixels an upload carries, AS it carries
+/// them, and taken off again after.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OverlayPlan {
+    /// The part of `r` the card or an effect can change. The blends and the
+    /// card are clipped here.
+    pub touch: Rect,
+    /// Every buffer pixel the application writes: `touch` grown by the
+    /// backdrop blur's CLAMPED radius, on the display. Saved before the
+    /// application and restored after the transfer. It is also the blur's
+    /// clip, and that is what makes the blur exact inside `touch`: a pixel's
+    /// window reaches at most the radius, so every tap it takes is a pixel
+    /// of the clean scene the whole-display blur would have taken.
+    pub save: Rect,
+}
+
+/// `None` when `r` meets neither the card nor the effects -- a plain upload.
+/// `card` is `Rect::ZERO` while the card has no frame to show, so the
+/// effects are laid under where it will stand.
+pub fn overlay_plan(r: Rect, fx: Option<&MenuEffects>, card: Rect, disp_w: u32, disp_h: u32) -> Option<OverlayPlan> {
+    let display = Rect { x: 0, y: 0, w: disp_w, h: disp_h };
+    let reach = rect_union(fx.map_or(Rect::ZERO, |e| e.region), card);
+    let touch = r.intersect(reach).intersect(display);
+    if touch.is_empty() {
+        return None;
+    }
+    let blur = fx
+        .and_then(|e| e.backdrop)
+        .map_or(0, |b| b.radius.min(cartoon::GLOW_RADIUS_MAX));
+    Some(OverlayPlan {
+        touch,
+        save: grow_clamped(touch, blur, disp_w, disp_h),
     })
 }
 
@@ -3683,36 +3856,6 @@ mod tests {
     use super::*;
     use alloc::vec;
 
-    /// The effect region is the whole display wherever the card stands --
-    /// centred, at the origin, against the far corner. The ring it replaced
-    /// was the card grown by the shadow's reach, and its edge was the
-    /// defect; a display-sized region has none.
-    #[test]
-    fn the_effect_region_is_the_whole_display() {
-        let disp = Rect { x: 0, y: 0, w: 1280, h: 800 };
-        for card in [
-            Rect { x: 400, y: 200, w: 480, h: 300 },
-            Rect { x: 0, y: 0, w: 100, h: 80 },
-            Rect { x: 1200, y: 760, w: 80, h: 40 },
-        ] {
-            let g = menu_effect_region(card, 1280, 800);
-            assert_eq!(g, disp, "card {:?}", card);
-            assert_eq!(g.intersect(card), card, "the card is inside its region");
-        }
-        // Absolute, not relative to the card: a region derived from the
-        // card (the old ring) would move with it.
-        assert_eq!(menu_effect_region(Rect { x: 9, y: 9, w: 9, h: 9 }, 2560, 1664), Rect { x: 0, y: 0, w: 2560, h: 1664 });
-    }
-
-    /// Degenerate inputs yield nothing to paint or heal.
-    #[test]
-    fn a_degenerate_card_has_no_effect_region() {
-        assert_eq!(menu_effect_region(Rect { x: 10, y: 10, w: 0, h: 40 }, 1280, 800), Rect::ZERO);
-        assert_eq!(menu_effect_region(Rect { x: 10, y: 10, w: 40, h: 40 }, 0, 800), Rect::ZERO);
-        assert_eq!(menu_effect_region(Rect { x: 10, y: 10, w: 40, h: 40 }, 1280, 0), Rect::ZERO);
-        assert_ne!(menu_effect_region(Rect { x: 10, y: 10, w: 40, h: 40 }, 1280, 800), Rect::ZERO, "the control");
-    }
-
     /// `bars_around` subtracts: the four bands must tile `outer` minus
     /// `inner` exactly, with no overlap and nothing lost. Its two existing
     /// callers had no host witness at all before this.
@@ -3745,99 +3888,331 @@ mod tests {
         assert!(full.iter().all(|r| r.is_empty()), "a hole the size of outer leaves nothing");
     }
 
-    /// While a card stands, only the card's own rect is pushed: the scene
-    /// behind the modal is frozen, which is what lets the effects be painted
-    /// once and stay. A blend is not idempotent the way the card's opaque
-    /// copy is.
+    /// The class is one optional WORD after the coordinates, and only the
+    /// one: a bare placement is a menu (an owner that predates the class
+    /// keeps its grammar), `dialog` is a dialog, and everything else is
+    /// malformed rather than guessed at.
     #[test]
-    fn while_a_card_stands_only_the_card_is_pushed() {
-        let card = Rect { x: 400, y: 200, w: 480, h: 300 };
-        let fx = menu_effect_region(card, 1280, 800);
-        let whole = Rect { x: 0, y: 0, w: 1280, h: 800 };
-        let allowed = menu_push_allowed(whole, fx, card);
-        let covers = |x: u32, y: u32| allowed.iter().any(|r| !r.is_empty() && r.contains(x, y));
-        assert!(covers(402, 202), "the card itself is still pushed");
-        assert!(!covers(10, 10), "the scene far from the card is frozen");
-        assert!(!covers(398, 202), "and so is the pixel just outside it");
-        let area: u32 = allowed.iter().map(|r| r.w * r.h).sum();
-        assert_eq!(area, card.w * card.h, "exactly the card, nothing else");
-        // A write that misses the card uploads nothing at all.
-        let off = menu_push_allowed(Rect { x: 0, y: 0, w: 50, h: 50 }, fx, card);
-        assert!(off.iter().all(|r| r.is_empty()), "{:?}", off);
+    fn menu_place_takes_an_optional_dialog_word() {
+        let p = |s: &str| menu_place_args(s.split_ascii_whitespace());
+        assert_eq!(p("7 10 20"), Some((7, 10, 20, MenuClass::Menu)));
+        assert_eq!(p("7 10 20 dialog"), Some((7, 10, 20, MenuClass::Dialog)));
+        assert_eq!(p("7 10 20 menu"), None, "only the one word: the default is not spelled");
+        assert_eq!(p("7 10 20 Dialog"), None, "exact, not case-folded");
+        assert_eq!(p("7 10 20 dialog x"), None, "a fifth word");
+        assert_eq!(p("7 10"), None, "a missing coordinate");
+        assert_eq!(p("x 10 20"), None);
+        assert_eq!(p("7 -1 20"), None, "coordinates are unsigned");
+        assert_eq!(p(""), None);
+        assert_eq!(MenuClass::Dialog.name(), "dialog");
+        assert_eq!(MenuClass::Menu.name(), "menu");
     }
 
-    /// The function is general in `fx`: with a region SMALLER than the
-    /// write, the parts outside it are admitted, the card is admitted, and
-    /// no two pieces overlap -- or a pixel would be uploaded twice.
+    /// The hull of two rects, where an empty one contributes NOTHING -- the
+    /// case a naive min/max gets wrong, since `Rect::ZERO` sits at the
+    /// origin and would drag every hull to it.
     #[test]
-    fn push_admission_is_general_in_the_region() {
-        let card = Rect { x: 400, y: 200, w: 480, h: 300 };
-        let fx = Rect { x: 300, y: 150, w: 700, h: 450 };
-        let allowed = menu_push_allowed(Rect { x: 0, y: 0, w: 1280, h: 800 }, fx, card);
-        let covers = |x: u32, y: u32| allowed.iter().any(|r| !r.is_empty() && r.contains(x, y));
-        assert!(covers(402, 202), "the card");
-        assert!(!covers(fx.x + 1, fx.y + 1), "the region around the card");
-        assert!(covers(10, 10), "outside the region");
-        for (i, p) in allowed.iter().enumerate() {
-            for (j, q) in allowed.iter().enumerate() {
-                if i < j && !p.is_empty() && !q.is_empty() {
-                    assert!(p.intersect(*q).is_empty(), "pieces {} and {} overlap", i, j);
+    fn rect_union_is_the_hull_and_ignores_empties() {
+        let a = Rect { x: 10, y: 20, w: 30, h: 40 };
+        let b = Rect { x: 50, y: 5, w: 10, h: 10 };
+        assert_eq!(rect_union(a, b), Rect { x: 10, y: 5, w: 50, h: 55 });
+        assert_eq!(rect_union(a, Rect::ZERO), a);
+        assert_eq!(rect_union(Rect::ZERO, b), b);
+        assert_eq!(rect_union(a, Rect { x: 0, y: 0, w: 0, h: 9 }), a, "zero width is empty too");
+        assert_eq!(rect_union(a, a), a);
+    }
+
+    #[test]
+    fn grow_clamped_grows_then_clips_to_the_display() {
+        let g = |x, y, w, h, by| grow_clamped(Rect { x, y, w, h }, by, 1280, 800);
+        assert_eq!(g(100, 100, 50, 40, 3), Rect { x: 97, y: 97, w: 56, h: 46 }, "interior");
+        assert_eq!(g(1, 2, 10, 10, 3), Rect { x: 0, y: 0, w: 14, h: 15 }, "clipped at the origin");
+        assert_eq!(g(1270, 790, 10, 10, 3), Rect { x: 1267, y: 787, w: 13, h: 13 }, "clipped at the far edge");
+        assert_eq!(g(100, 100, 50, 40, 0), Rect { x: 100, y: 100, w: 50, h: 40 }, "by 0 is the rect");
+        assert_eq!(g(1300, 10, 10, 10, 3), Rect::ZERO, "wholly off the display");
+        assert_eq!(g(100, 100, 0, 40, 3), Rect::ZERO, "an empty rect grows to nothing");
+        let huge = grow_clamped(Rect { x: u32::MAX - 5, y: 0, w: 5, h: 5 }, 10, u32::MAX, u32::MAX);
+        assert_eq!(huge.x, u32::MAX - 15, "saturates rather than wrapping");
+    }
+
+    /// Subtraction, pixel by pixel on a small grid: every pixel of `r`
+    /// outside the holes is covered EXACTLY once, and nothing else is -- the
+    /// three ways a piece list can be wrong (a gap, an overlap, a spill).
+    #[test]
+    fn subtract_rects_covers_exactly_what_the_holes_leave() {
+        let r = Rect { x: 2, y: 3, w: 20, h: 15 };
+        let cases: [&[Rect]; 6] = [
+            &[],
+            &[Rect { x: 5, y: 5, w: 4, h: 4 }],
+            &[Rect { x: 0, y: 0, w: 8, h: 30 }, Rect { x: 15, y: 10, w: 20, h: 3 }],
+            &[Rect { x: 6, y: 6, w: 6, h: 6 }, Rect { x: 9, y: 9, w: 6, h: 6 }],
+            &[Rect { x: 0, y: 0, w: 40, h: 40 }],
+            &[Rect { x: 30, y: 30, w: 5, h: 5 }, Rect::ZERO],
+        ];
+        for (ci, holes) in cases.iter().enumerate() {
+            let pieces = subtract_rects(r, holes);
+            for y in 0..40 {
+                for x in 0..40 {
+                    let n = pieces.iter().filter(|p| p.contains(x, y)).count();
+                    let want = r.contains(x, y) && !holes.iter().any(|h| h.contains(x, y));
+                    assert_eq!(n, want as usize, "case {} pixel ({}, {})", ci, x, y);
                 }
             }
+            assert!(pieces.iter().all(|p| !p.is_empty()), "case {}: no empty piece", ci);
+        }
+        assert!(subtract_rects(Rect::ZERO, &[]).is_empty());
+    }
+
+    /// A MENU carries the kit's `.theme-menu` shadow and nothing else: no
+    /// backdrop, and a region that is the shadow's REACH -- the displaced
+    /// card grown by the executor's clamp (32), not by the requested 55.
+    /// Pinned ABSOLUTELY: a painter reaching for a theme token, or a region
+    /// sized from the unclamped radius, reads differently here.
+    #[test]
+    fn a_menu_carries_only_the_theme_menus_shadow() {
+        let card = Rect { x: 100, y: 100, w: 200, h: 150 };
+        let e = menu_effects(card, MenuClass::Menu, true, 100, 1280, 800).expect("instrument, non-degenerate");
+        assert_eq!(e.backdrop, None, "a menu has no backdrop");
+        assert_eq!(e.shadow.color, 0xFF00_0000, "black, not a token");
+        assert_eq!(e.shadow.alpha, 82, ".32");
+        assert_eq!(e.shadow.radius, 55, "the REQUESTED blur; the executor clamps to 32");
+        assert_eq!(e.shadow.rect, Rect { x: 100, y: 120, w: 200, h: 150 }, "straight down by 20");
+        assert_eq!(e.region, Rect { x: 68, y: 88, w: 264, h: 214 }, "the reach at the CLAMPED 32");
+    }
+
+    /// A DIALOG carries the backdrop across the whole display and the help
+    /// card's heavier shadow.
+    #[test]
+    fn a_dialog_carries_the_backdrop_and_the_help_cards_shadow() {
+        let card = Rect { x: 400, y: 200, w: 480, h: 300 };
+        let e = menu_effects(card, MenuClass::Dialog, true, 100, 1280, 800).expect("instrument");
+        let b = e.backdrop.expect("a dialog has a backdrop");
+        assert_eq!(b.color, 0xFF03_0404, "rgb(3,4,4), not a ground token");
+        assert_eq!(b.alpha, 184, ".72");
+        assert_eq!(b.radius, 3);
+        assert_eq!(e.shadow.alpha, 90, ".35");
+        assert_eq!(e.shadow.radius, 80);
+        assert_eq!(e.shadow.rect, Rect { x: 400, y: 224, w: 480, h: 300 }, "straight down by 24");
+        assert_eq!(e.region, Rect { x: 0, y: 0, w: 1280, h: 800 }, "the whole display -- no edge to see");
+        // Paint order is the kit's: the backdrop blurs and tints the scene,
+        // and the card's shadow falls on top of the tinted result. The
+        // upload witness below cannot see an order swap -- its reference is
+        // built from these same lists -- so the order is pinned here.
+        let (blur, blend) = effect_cartoons(&e);
+        assert!(matches!(blur.ops.as_slice(), [cartoon::Op::Blur { radius: 3, .. }]), "the blur alone, first");
+        assert!(
+            matches!(blend.ops.as_slice(), [cartoon::Op::RectAlpha { alpha: 184, .. }, cartoon::Op::Glow { alpha: 90, .. }]),
+            "the tint, then the shadow over it"
+        );
+    }
+
+    /// At 200 % every stated length doubles through the metrics' own `ipx`
+    /// -- and the menu's reach does NOT, because the clamp is a pixel bound
+    /// in the executor, not a stated length.
+    #[test]
+    fn the_card_effects_scale_but_the_reach_keeps_the_clamp() {
+        let card = Rect { x: 100, y: 100, w: 200, h: 150 };
+        let m = menu_effects(card, MenuClass::Menu, true, 200, 2560, 1600).expect("menu");
+        assert_eq!(m.shadow.rect.y, 140, "dy 20 doubled");
+        assert_eq!(m.shadow.radius, 110, "55 doubled, still clamped at paint");
+        assert_eq!(m.region, Rect { x: 68, y: 108, w: 264, h: 214 }, "grown by 32, not 110");
+        let d = menu_effects(card, MenuClass::Dialog, true, 200, 2560, 1600).expect("dialog");
+        assert_eq!(d.backdrop.map(|b| b.radius), Some(6), "3 doubled");
+        assert_eq!(d.shadow.radius, 160);
+        assert_eq!(d.shadow.rect.y, 148, "dy 24 doubled");
+    }
+
+    /// Section 10 is the INSTRUMENT visual: no effects under legacy, none
+    /// for a degenerate card or display, and none for a menu whose shadow
+    /// reaches no pixel of the display -- a card four pixels tall at the
+    /// very bottom at 200 %, where the 40 px offset outruns the 32 px reach.
+    #[test]
+    fn card_effects_are_instrument_only_and_refuse_degenerates() {
+        let card = Rect { x: 100, y: 100, w: 200, h: 150 };
+        for class in [MenuClass::Menu, MenuClass::Dialog] {
+            assert!(menu_effects(card, class, false, 100, 1280, 800).is_none(), "legacy");
+            assert!(menu_effects(Rect::ZERO, class, true, 100, 1280, 800).is_none(), "no card");
+            assert!(menu_effects(card, class, true, 100, 0, 800).is_none(), "no display");
+            assert!(menu_effects(card, class, true, 100, 1280, 800).is_some(), "the control");
+        }
+        let sliver = Rect { x: 0, y: 1596, w: 10, h: 4 };
+        assert!(menu_effects(sliver, MenuClass::Menu, true, 200, 2560, 1600).is_none(), "a shadow off the display");
+        assert!(menu_effects(sliver, MenuClass::Dialog, true, 200, 2560, 1600).is_some(), "a dialog still dims");
+    }
+
+    /// Every pixel the executor's shadow actually changes lies inside the
+    /// menu's region -- the dismiss re-uploads that region, so a painted
+    /// pixel outside it would outlive the menu on the display.
+    #[test]
+    fn a_menus_region_holds_every_pixel_its_shadow_paints() {
+        let (w, h) = (360usize, 300usize);
+        for pct in [100u16, 200] {
+            let card = Rect { x: 120, y: 60, w: 90, h: 50 };
+            let e = menu_effects(card, MenuClass::Menu, true, pct, w as u32, h as u32).expect("menu");
+            let field = alloc::vec![0xFFFF_FFFFu32; w * h];
+            let mut px = field.clone();
+            let (blur, blend) = effect_cartoons(&e);
+            assert!(blur.ops.is_empty(), "a menu blurs nothing");
+            let atlas = cartoon::AtlasStore { gen: 0, pages: Vec::new(), glyphs: Vec::new() };
+            cartoon::execute(&blend, &atlas, &cartoon::BlobStore::new(), &mut px, w, None);
+            let mut painted = 0;
+            for y in 0..h {
+                for x in 0..w {
+                    if px[y * w + x] != field[y * w + x] {
+                        painted += 1;
+                        assert!(e.region.contains(x as u32, y as u32), "pct {} painted ({}, {}) outside {:?}", pct, x, y, e.region);
+                    }
+                }
+            }
+            assert!(painted > 1000, "the control: the shadow painted ({} px)", painted);
         }
     }
 
-    /// With no menu placed the region is empty and NOTHING is suppressed --
-    /// the guard that keeps the ordinary path byte-identical.
+    /// Which part of an upload a card or an effect can change, and what the
+    /// application must save: a menu's is the touched part alone (its blends
+    /// read nothing but their own pixel), a dialog's grows by the backdrop's
+    /// blur, because a blur READS around what it writes.
     #[test]
-    fn no_placed_menu_suppresses_nothing() {
-        let r = Rect { x: 5, y: 5, w: 40, h: 40 };
-        let a = menu_push_allowed(r, Rect::ZERO, Rect::ZERO);
-        assert_eq!(a[0], r);
-        assert!(a[1..].iter().all(|x| x.is_empty()));
+    fn an_overlay_plan_touches_only_what_the_card_or_an_effect_can_change() {
+        let card = Rect { x: 400, y: 200, w: 480, h: 300 };
+        let menu = menu_effects(card, MenuClass::Menu, true, 100, 1280, 800).unwrap();
+        let far = Rect { x: 0, y: 0, w: 40, h: 40 };
+        assert_eq!(overlay_plan(far, Some(&menu), card, 1280, 800), None, "a plain upload");
+        let r = Rect { x: 300, y: 150, w: 200, h: 100 };
+        let p = overlay_plan(r, Some(&menu), card, 1280, 800).expect("touches the shadow");
+        assert_eq!(p.touch, r.intersect(rect_union(menu.region, card)));
+        assert_eq!(p.save, p.touch, "no blur, nothing read beyond the touch");
+        let dialog = menu_effects(card, MenuClass::Dialog, true, 100, 1280, 800).unwrap();
+        let p = overlay_plan(far, Some(&dialog), card, 1280, 800).expect("a dialog covers the display");
+        assert_eq!(p.touch, far);
+        assert_eq!(p.save, Rect { x: 0, y: 0, w: 43, h: 43 }, "grown by the blur's 3, clipped at the origin");
+        // Legacy: the card alone.
+        assert_eq!(overlay_plan(far, None, card, 1280, 800), None);
+        let p = overlay_plan(r, None, card, 1280, 800).expect("touches the card");
+        assert_eq!(p.touch, r.intersect(card));
+        assert_eq!(p.save, p.touch);
+        // No card and no effects: nothing, anywhere.
+        assert_eq!(overlay_plan(r, None, Rect::ZERO, 1280, 800), None);
     }
 
-    /// Section 10's literals, pinned ABSOLUTELY, because a painter reaching
-    /// for a theme token instead is exactly the defect corrected at
-    /// `a4c9a461` -- and a witness written from the code could not see it.
+    /// THE witness for the mechanism: an upload that lays the card and its
+    /// effects over ONLY the pixels it carries -- blur under the grown
+    /// clip, blends and the card under the touch -- shows exactly the pixels
+    /// of laying them over the WHOLE display, and leaves the buffer exactly
+    /// the scene once its save is restored.
+    ///
+    /// Random scenes and cards, both classes at both scales, the legacy
+    /// card-only overlay, a card with no frame yet (`Rect::ZERO`), and
+    /// hundreds of upload rects including the whole field, single pixels at
+    /// the corners and rects straddling the card's edge -- where a backdrop
+    /// blur reads the SCENE under the card, which is only there to read
+    /// because the card is never stored in the buffer.
     #[test]
-    fn the_menu_effects_are_section_tens_literals() {
-        let card = Rect { x: 100, y: 100, w: 200, h: 150 };
-        let fx = menu_effect_region(card, 1280, 800);
-        let e = menu_effects(card, fx, true, 100).expect("instrument, non-degenerate");
-        assert_eq!(e.backdrop_color, 0xFF03_0404, "rgb(3,4,4), not a ground token");
-        assert_eq!(e.backdrop_alpha, 184, ".72");
-        assert_eq!(e.backdrop_radius, 3);
-        assert_eq!(e.shadow_color, 0xFF00_0000, "black .35, not a token");
-        assert_eq!(e.shadow_alpha, 90);
-        assert_eq!(e.shadow_radius, 80, "the REQUESTED blur; the executor clamps to 32");
-        assert_eq!(e.shadow.y, 124, "the card at y 100 displaced by ipx(24, 100) == 24");
-        assert_eq!(e.shadow.x, card.x, "a straight-down shadow: dx is 0");
-        assert_eq!(e.region, fx);
-    }
-
-    /// At 200 % every length doubles through the same `ipx` the metrics
-    /// take, so an effect and a derived opaque of one stated size agree.
-    #[test]
-    fn the_menu_effects_scale_with_the_display() {
-        let card = Rect { x: 100, y: 100, w: 200, h: 150 };
-        let fx = menu_effect_region(card, 2560, 1600);
-        let e = menu_effects(card, fx, true, 200).expect("instrument");
-        assert_eq!(e.backdrop_radius, 6, "3 doubled");
-        assert_eq!(e.shadow_radius, 160, "80 doubled, still clamped at paint");
-        assert_eq!(e.shadow.y, 148, "100 + dy 48");
-    }
-
-    /// Section 10 is the INSTRUMENT visual: no card shadow under legacy, and
-    /// nothing at all for a degenerate card or region.
-    #[test]
-    fn menu_effects_are_instrument_only_and_refuse_degenerates() {
-        let card = Rect { x: 100, y: 100, w: 200, h: 150 };
-        let fx = menu_effect_region(card, 1280, 800);
-        assert!(menu_effects(card, fx, false, 100).is_none(), "legacy has no backdrop");
-        assert!(menu_effects(Rect::ZERO, fx, true, 100).is_none(), "no card");
-        assert!(menu_effects(card, Rect::ZERO, true, 100).is_none(), "no region");
-        assert!(menu_effects(card, fx, true, 100).is_some(), "the control: it does fire");
+    fn an_upload_shows_exactly_the_whole_display_overlay() {
+        let (w, h) = (96usize, 64usize);
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let atlas = cartoon::AtlasStore { gen: 0, pages: Vec::new(), glyphs: Vec::new() };
+        let blobs = cartoon::BlobStore::new();
+        let clip_of = |r: Rect| cartoon::ClipRect {
+            x0: r.x as i32,
+            y0: r.y as i32,
+            x1: (r.x + r.w) as i32,
+            y1: (r.y + r.h) as i32,
+        };
+        let card = Rect { x: 30, y: 20, w: 24, h: 16 };
+        let mut checked = 0u64;
+        let configs: [(Option<MenuClass>, u16, bool); 7] = [
+            (Some(MenuClass::Menu), 100, true),
+            (Some(MenuClass::Menu), 200, true),
+            (Some(MenuClass::Dialog), 100, true),
+            (Some(MenuClass::Dialog), 200, true),
+            (Some(MenuClass::Dialog), 100, false),
+            (Some(MenuClass::Menu), 100, false),
+            (None, 100, true),
+        ];
+        for (class, pct, card_live) in configs {
+            let scene: Vec<u32> = (0..w * h).map(|_| rnd() as u32 | 0xFF00_0000).collect();
+            let face: Vec<u32> = (0..(card.w * card.h) as usize).map(|_| rnd() as u32 | 0xFF00_0000).collect();
+            let fx = class.and_then(|c| menu_effects(card, c, true, pct, w as u32, h as u32));
+            assert_eq!(fx.is_some(), class.is_some(), "the configuration builds what it names");
+            let shown_card = if card_live { card } else { Rect::ZERO };
+            let lay_card = |px: &mut [u32], within: Rect| {
+                let i = within.intersect(shown_card);
+                for y in i.y..i.y + i.h {
+                    for x in i.x..i.x + i.w {
+                        px[y as usize * w + x as usize] = face[((y - card.y) * card.w + (x - card.x)) as usize];
+                    }
+                }
+            };
+            // The whole-display reference.
+            let mut want = scene.clone();
+            if let Some(e) = &fx {
+                let (blur, blend) = effect_cartoons(e);
+                cartoon::execute(&blur, &atlas, &blobs, &mut want, w, None);
+                cartoon::execute(&blend, &atlas, &blobs, &mut want, w, None);
+            }
+            lay_card(&mut want, Rect { x: 0, y: 0, w: w as u32, h: h as u32 });
+            let mut uploads: Vec<Rect> = alloc::vec![
+                Rect { x: 0, y: 0, w: w as u32, h: h as u32 },
+                Rect { x: 0, y: 0, w: 1, h: 1 },
+                Rect { x: w as u32 - 1, y: h as u32 - 1, w: 1, h: 1 },
+                Rect { x: 28, y: 18, w: 5, h: 5 },
+                Rect { x: 52, y: 34, w: 6, h: 6 },
+                Rect { x: 0, y: 25, w: w as u32, h: 1 },
+            ];
+            for _ in 0..150 {
+                let x = (rnd() % w as u64) as u32;
+                let y = (rnd() % h as u64) as u32;
+                let rw = (rnd() % (w as u64 - x as u64)) as u32 + 1;
+                let rh = (rnd() % (h as u64 - y as u64)) as u32 + 1;
+                uploads.push(Rect { x, y, w: rw, h: rh });
+            }
+            for r in uploads {
+                let mut buf = scene.clone();
+                match overlay_plan(r, fx.as_ref(), shown_card, w as u32, h as u32) {
+                    None => {
+                        for y in r.y..r.y + r.h {
+                            for x in r.x..r.x + r.w {
+                                let i = y as usize * w + x as usize;
+                                assert_eq!(want[i], scene[i], "{:?} {} r {:?}: a plain upload owes nothing at ({}, {})", class, pct, r, x, y);
+                            }
+                        }
+                    }
+                    Some(p) => {
+                        if let Some(e) = &fx {
+                            let (blur, blend) = effect_cartoons(e);
+                            cartoon::execute(&blur, &atlas, &blobs, &mut buf, w, Some(clip_of(p.save)));
+                            cartoon::execute(&blend, &atlas, &blobs, &mut buf, w, Some(clip_of(p.touch)));
+                        }
+                        lay_card(&mut buf, r);
+                        for y in r.y..r.y + r.h {
+                            for x in r.x..r.x + r.w {
+                                let i = y as usize * w + x as usize;
+                                assert_eq!(buf[i], want[i], "{:?} {} live {} r {:?} at ({}, {})", class, pct, card_live, r, x, y);
+                                checked += 1;
+                            }
+                        }
+                        // Everything written lies inside the save: restoring it
+                        // returns the buffer to the scene, everywhere.
+                        for y in 0..h as u32 {
+                            for x in 0..w as u32 {
+                                if !p.save.contains(x, y) {
+                                    let i = y as usize * w + x as usize;
+                                    assert_eq!(buf[i], scene[i], "{:?} r {:?}: wrote ({}, {}) outside the save {:?}", class, r, x, y, p.save);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 100_000, "the comparison ran: {}", checked);
     }
 
     /// A dragged rule under Instrument at 100 %: section 10's literal, its

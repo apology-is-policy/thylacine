@@ -1622,7 +1622,9 @@ retired, live-routes only when unrecorded. `chord_down` widened to
 order let retire's arm clear the record -> the release leaked).
 
 **COMPOSITOR-OWNED DISMISS** = `retire`'s menu arm (unplace first,
-`menu N dismissed (<reason>)`, `menu_heal` at the tail), reached by EVERY path
+`menu N dismissed (<reason>)`, `menu_heal` at the tail -- *since 2026-09-16
+`menu_unplaced`, a plain upload of what the card reached; the card is laid on
+at upload and never stored, see "Nothing freezes"*), reached by EVERY path
 including ctl `destroy` / `retire_conn` / WEDGE. `menu_heal` targets the
 intersection: `paint_borders(false)` + strip intersections pushed, tag-bar
 headers + empty-leaf BG_COLOR filled (`placement_rect` = the crop),
@@ -2368,7 +2370,8 @@ dragged rule `amber` and a painter reading the state back out of the colour
 would key an effect on a token. A token is not a state.
 
 **`menu_effect_region`, and the census that decided how it wired in
-(I-8b-3).** *SUPERSEDED 2026-09-16: the region is now the WHOLE DISPLAY and
+(I-8b-3).** *SUPERSEDED TWICE on 2026-09-16 -- finally by "Nothing freezes"
+below, where no effect region is stored at all. Earlier that day: the region is now the WHOLE DISPLAY and
 `MenuState::heal_rect` is gone -- see "The backdrop covers the display" below.
 The census that follows still holds and is why the separate field survived.*
 The pure rule that says which display region a placed card's
@@ -2445,6 +2448,10 @@ drag frames -- but no leg reads sub-pixel ink, so the gate witnesses that the
 path RUNS, never that the glow LOOKS right. That gap is stated, not closed.
 
 ## The backdrop covers the display, the scene is rebuilt at dismiss, and a stack's members are tiles (2026-09-16, the operator's hands-on fixes)
+
+*The backdrop half is SUPERSEDED the same afternoon: nothing freezes, a menu
+takes only its shadow, and the card and its effects are laid on at upload --
+see "Nothing freezes" below. The stack half stands.*
 
 The operator drove the I-8 demo image by hand and found what seventeen green
 gate legs could not, because every leg reads logs and none reads ink. Two of
@@ -2595,3 +2602,157 @@ witnesses" gap, stated. The guest gate places and dismisses menus, so the
 paths RUN on live frames; no leg reads ink, so whether the dismiss leaves the
 screen exact is a thing a person verifies, and the operator's re-check is that
 person.
+
+## Nothing freezes: the card and its effects are laid on at UPLOAD (2026-09-16, section 10 revised again)
+
+The operator drove the full-viewport build and found the frozen, darkened
+screen "too dramatic for a menu -- it feels like a SAK episode". The kit
+agreed all along: `.theme-menu` carries `box-shadow: 0 20px 55px
+rgba(0,0,0,.32)` and nothing else, and `dialog::backdrop` reaches only a
+`<dialog>` opened with `showModal()` -- the help card. Scripture `2147d618`
+decided two classes and NO freeze; this section is the as-built mechanism, and
+it supersedes the frozen-scene design in both of the sections above.
+
+**The class travels as one word.** `menu place <id> <x> <y> [dialog]`, parsed
+by the pure `pane::menu_place_args` (a bare placement is `MenuClass::Menu`;
+`dialog` is `MenuClass::Dialog`; any other fourth word, or a fifth, is
+`E_INVAL`). halcyond's `summon` appends the word for `Model::Dialog` and
+`Model::Help`. `MenuState` is `{n, gen, rect, class, reach}` -- `fx`,
+`heal_rect` and the suppression are gone. The placed line
+(`tapestryd: menu N placed at X,Y WxH`) is byte-identical, because
+`ls-halcyon.exp` anchors a line end right after the size; the class is said on
+its own test-mode line, `tapestryd: menu N class dialog`.
+
+**The effects are the kit's two, not one.** `pane::menu_effects(card, class,
+instrument, pct, disp_w, disp_h)`: a menu takes `MENU_SHADOW` (black .32, dy
+20, blur 55) and NO backdrop, with `region` = the displaced card grown by the
+CLAMPED radius (`min(radius, cartoon::GLOW_RADIUS_MAX)`), on the display; a
+dialog takes `DIALOG_SHADOW` (.35, dy 24, blur 80) and the backdrop (rgb 3,4,4
+at 184/255, blur 3), with `region` = the display. The one-shadow collapse is
+undone -- it existed only because the compositor could not tell the cards
+apart. `pane::effect_cartoons` builds the two lists the compositor runs (the
+backdrop's `Blur` alone; then `RectAlpha` + `Glow`), so the host witness
+exercises the very ops the bin executes.
+
+**The mechanism: the buffer is the clean scene, ALWAYS.** Neither the card nor
+an effect is ever stored in the screen buffer. Every device-visible step goes
+through ONE function, `upload(r, carve_gl)` (`screen_push`,
+`screen_flush_full`, and `screen_flush_rect` under a card all route there),
+and where `r` meets what the card can change, `pane::overlay_plan` says what
+to do:
+
+1. `touch` = `r` ∩ the hull of `region` and the card's rect -- the pixels the
+   card or an effect can change;
+2. `save` = `touch` grown by the backdrop blur's clamped radius, on the
+   display (just `touch` for a menu, whose blends read nothing but their own
+   pixel);
+3. SAVE `save` into the scratch, run the `Blur` under clip `save`, the blends
+   under clip `touch`, lay the card over `r` (`menu_compose_card`, which was
+   `menu_reassert` and now writes only between a save and its restore),
+   TRANSFER `r`, and RESTORE `save`.
+
+So an effect is never applied twice -- by construction, not by excluding
+writes -- programs behind a menu or a dialog keep drawing, and a dismiss has
+nothing to heal. **`menu_unplaced(m)`** is the one step all three dismiss sites
+take (`retire`'s tail, `menu_dismiss`'s fallback, and a move in `menu_place`):
+upload `m.reach` ∪ the current reach, plainly. No repaint, no redraw request,
+no blink. `scene_restore`, `menu_restore`, `menu_heal`, `menu_heal_placement`,
+`menu_paint_effects`, `menu_fx_for`, `screen_push_raw`, `pane::menu_effect_region`
+and `pane::menu_push_allowed` are deleted; `restore_surface` stays (the
+structural pre-fill and `restore_under` use it).
+
+**Why the blur is EXACT on a piece of the display.** A pixel's box window
+reaches the radius either way, and the vertical pass reads horizontal results
+no further than the radius above or below, each of which read no further
+across -- so every tap of a pixel in `touch` lies in `save`, and where `save`
+meets the display's edge both runs clip the window identically. Witnessed, not
+assumed: cartoon's `a_blur_clipped_to_the_grown_target_is_exact_inside_the_target`
+(400 random fields, op rects overhanging the field, radii past the cap) with a
+control that an UNGROWN clip is inexact; and the end-to-end
+`an_upload_shows_exactly_the_whole_display_overlay` here.
+
+**Why the card must not be stored either.** A dialog's backdrop blur next to
+the card reads the pixels UNDER the card. With the card in the buffer, those
+are card pixels, and the card's ground bleeds a few pixels out into the dim --
+the kit blurs the page behind the dialog, never the dialog. Keeping the card
+out of the buffer is what leaves the scene there to read, and it is also what
+makes the legacy card's dismiss a plain upload instead of `menu_heal`'s
+repaint and redraw fan.
+
+**The menu's own present composes NOTHING into the buffer.**
+`blit_composed_pixels` returns the clip for the placed menu without composing,
+and the caller's push lays the card from its shown slot. `menu_card_shown`
+gives `Rect::ZERO` while the card has no frame yet, so the effects are laid
+where it will stand rather than leaving a hole (halcyond places, THEN paints).
+
+**The save scratch is not the heap.** tapestryd's global allocator is
+`ThylaAlloc` -- a fixed 4 MiB heap -- and a dialog's full-display save at
+2560x1664 is 17 MiB, so a `Vec` save would have failed silently for exactly
+the class that needs it. `fx_save` is a LAZY region (`t_burrow_attach_lazy`,
+demand-zero) sized to the display, attached at the first save, re-attached
+when the display outgrows it; only what a save touches is ever committed. If
+the attach fails, the upload lays nothing on (nothing it wrote could be taken
+off) and says so once.
+
+**The GPU composed path.** The overlay is laid over BUFFER pixels, and there
+the buffer does not hold what the GPU composed. Three rules close it, all
+stated in the code at the site:
+
+- **A surface under a standing card composes the CPU way** (`under_card(n)`
+  gates the slot path's `gpu_path`), so its pixels are in the buffer while the
+  card stands; the menu is under its own card by definition.
+- **The placement recomposes what lies under the new reach**
+  (`restore_under`, GPU path only: hosted content then chrome, from shown
+  slots, for every `restorable` surface); the unrestorable get the redraw
+  CONFIGURE. `screen_flush_rect` under a card does the same for its region
+  before `upload` (no CONFIGURE there, or a GL client would be asked to redraw
+  on every frame).
+- **A GL BLIT stays a blit and shows UNAFFECTED**, as scripture states: its
+  frame has no guest pixels. `bo_blit_arm(g)` is now the ONE statement of that
+  arm's condition -- the present dispatch routes by it and `gl_blit_holes`
+  carves by it -- and `upload` transfers `r` minus those placements (flushing
+  all of `r`), except where the card itself stands on one. On a dismiss or a
+  move, `heal_gl_under` asks the GL surfaces under the old card to redraw,
+  since the card's pixels over a host-side frame cannot come back from
+  anywhere else. A HOLD released after a card was placed, and a latch between
+  a blit and its readback, show their region unaffected or stale until the
+  surface's next present -- stated, not handled.
+
+**A defect found on the way, fixed here: `floor_bars_around` never reached
+the display.** It filled the bars around a re-placed client and then called
+`screen_flush_rect(c)`, which FLUSHES without transferring -- on both paths --
+so the #56 latch flip's floor (A-F4 of the H-arc round-1 audit, `839a966f`)
+never showed; the stale scaled projection stayed until the next structural
+repaint. It now pushes each bar.
+
+**Witnesses** (tapestryd lib **96**: 8 removed with the frozen design, 11 added):
+`menu_place_takes_an_optional_dialog_word`, `rect_union_is_the_hull_and_ignores_empties`
+(`rect_union` moved here from the bin), `grow_clamped_grows_then_clips_to_the_display`,
+`subtract_rects_covers_exactly_what_the_holes_leave` (pixel by pixel: no gap,
+no overlap, no spill), `a_menu_carries_only_the_theme_menus_shadow`,
+`a_dialog_carries_the_backdrop_and_the_help_cards_shadow` (with the paint
+ORDER pinned, since the upload witness builds its reference from the same
+lists and cannot see a swap), `the_card_effects_scale_but_the_reach_keeps_the_clamp`,
+`card_effects_are_instrument_only_and_refuse_degenerates`,
+`a_menus_region_holds_every_pixel_its_shadow_paints` (the dismiss re-uploads
+the region, so a painted pixel outside it would outlive the menu),
+`an_overlay_plan_touches_only_what_the_card_or_an_effect_can_change`, and THE
+witness, `an_upload_shows_exactly_the_whole_display_overlay`: random scenes and
+cards, both classes at 100 % and 200 %, legacy card-only, a card with no frame
+yet, ~160 upload rects each including the whole field, corner pixels and rects
+straddling the card's edge -- every uploaded pixel equals laying the overlay
+over the WHOLE display, and after the restore the buffer is the scene
+everywhere. **Sabotage-measured, each alone and restored byte-identical**: the
+save not grown by the blur (2 fail), grown ONE short (2), the reach from the
+unclamped radius (3), the reach not grown (4), a second class word accepted
+(1), a subtraction by the unclipped hole (1), the grow not clipped at the far
+edge (1), a union that counts an empty rect (2), a touch that ignores the card
+(2), the old one-shadow collapse (2).
+
+**What no host test reaches.** `upload`, `fx_save_take` / `fx_save_restore`,
+`menu_place`, `menu_unplaced`, `restore_under`, `heal_gl_under`, the forced CPU
+route and the menu's present arm are bin-side. The pure plan and the op lists
+they execute are witnessed; that the bin runs them in that order under those
+clips is the "N defended sites need N witnesses" gap, stated. The GPU composed
+path has no gate on this host (the operator's image and every local gate run
+the 2D screen).

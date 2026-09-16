@@ -386,7 +386,8 @@ impl Surface {
     }
 
     /// H-3c: a Role::Menu surface on `ring` -- the one ephemeral menu the
-    /// compositor places (`menu place <id> <x> <y>`), grabs input for, and
+    /// compositor places (`menu place <id> <x> <y> [dialog]` -- the word
+    /// makes the card a dialog, with the backdrop), grabs input for, and
     /// tears down itself (Esc / click-away / a chord / the owner's death;
     /// HALCYON.md 13.6). Invisible until placed; renderer-gated server-side.
     /// Never hosted, never focusable.

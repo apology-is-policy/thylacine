@@ -100,7 +100,7 @@ use alloc::vec::Vec;
 use libthyla_rs::ninep as p9;
 use libthyla_rs::time::Instant;
 use libthyla_rs::{
-    t_burrow_detach, t_close, t_dma_create_gpu_bo, t_dma_create_weave, t_dma_map, t_dma_segments,
+    t_burrow_attach_lazy, t_burrow_detach, t_close, t_dma_create_gpu_bo, t_dma_create_weave, t_dma_map, t_dma_segments,
     t_hostmem_refcount, t_srv_peer, t_weft_share, t_weft_unshare, TDmaSeg, TSrvPeerInfo,
     T_DMA_MAP_PA_SCATTERED, T_GID_SYSTEM, T_PRINCIPAL_INVALID, T_PRINCIPAL_NONE,
     T_PRINCIPAL_SYSTEM, T_PROT_READ, T_PROT_WRITE, T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_WRITE,
@@ -124,7 +124,7 @@ use tapestryd::chords::{ChordAction, Chords};
 use libhalcyon::scale;
 use libhalcyon::theme::Metrics;
 use crate::gpu::{FenceTag, FencedErr, Gpu};
-use tapestryd::pane::{self, Dir, Layout, Mode, Rect, Role, Status};
+use tapestryd::pane::{self, rect_union, Dir, Layout, Mode, Rect, Role, Status};
 use libdriver::Error;
 
 pub const MAX_CONNS: usize = 8;
@@ -1074,8 +1074,8 @@ struct Surface {
     /// A pointer target like a header (9.1).
     is_rail: bool,
     /// The slot of this surface's last accepted present: what
-    /// `menu_reassert` re-composes when a screen write lands under a placed
-    /// menu. None until the first present.
+    /// `menu_compose_card` lays over an upload under a placed menu, and what
+    /// `restore_surface` recomposes. None until the first present.
     shown_slot: Option<u32>,
 }
 
@@ -1113,25 +1113,6 @@ enum Held {
     /// two overlap across a reweave or a mid-hold GPU latch, the upload runs
     /// first and wins in the overlap.
     Composed { cpu: Rect, gpu: Rect },
-}
-
-fn rect_union(a: Rect, b: Rect) -> Rect {
-    if a.is_empty() {
-        return b;
-    }
-    if b.is_empty() {
-        return a;
-    }
-    let x1 = a.x.min(b.x);
-    let y1 = a.y.min(b.y);
-    let x2 = (a.x + a.w).max(b.x + b.w);
-    let y2 = (a.y + a.h).max(b.y + b.h);
-    Rect {
-        x: x1,
-        y: y1,
-        w: x2 - x1,
-        h: y2 - y1,
-    }
 }
 
 /// The compositor's own screen buffer (Composed mode). A WEAVE-subtype
@@ -1469,15 +1450,15 @@ struct MenuState {
     n: usize,
     gen: u32,
     rect: Rect,
-    /// HALCYON-INSTRUMENT 10: the display region this card's EFFECTS cover
-    /// -- the whole display since the full-viewport reversal (`c065ec06`).
-    /// SEPARATE from `rect` on purpose: `rect` is what the surface IS (the
-    /// compose source map, the placement, the click-away test), and widening
-    /// it would read outside the weave, misplace the card, and make a click
-    /// on the backdrop count as a click on the card. `Rect::ZERO` under the
-    /// legacy profile, where section 10's effects are not painted -- so
-    /// nothing is suppressed and the old card-sized heal stands.
-    fx: Rect,
+    /// HALCYON-INSTRUMENT 10 (revised 2026-09-16): the class the owner's
+    /// `menu place` named -- a menu takes a drop shadow, a dialog the
+    /// backdrop and the help card's shadow.
+    class: pane::MenuClass,
+    /// Every display pixel an upload has laid the card or an effect over
+    /// while this placement stood: what the dismiss puts back. Kept rather
+    /// than recomputed, because the reach is derived from the scale and the
+    /// profile, and either can change under a standing card.
+    reach: Rect,
 }
 
 /// H-3d: the registered status bar -- the surface the display's bottom
@@ -1781,6 +1762,16 @@ pub struct Comp {
     /// carries the unplace + the heal -- so a wedged or dead owner cannot
     /// strand it.
     menu: Option<MenuState>,
+    /// HALCYON-INSTRUMENT 10 (revised 2026-09-16): the scratch an upload
+    /// saves the buffer pixels into before laying a card and its effects
+    /// over them, and restores them from after -- `(va, size)`, a LAZY
+    /// region sized to the display (demand-zero: only what a save touches
+    /// is ever committed). Not the heap: tapestryd's is 4 MiB and a
+    /// dialog's full-display save is four times that. Attached at the first
+    /// save, re-attached when the display outgrows it.
+    fx_save: Option<(u64, u64)>,
+    /// The scratch could not be attached: said once, not per upload.
+    fx_save_failed_said: bool,
     /// H-3d: the one status bar on the display, if any. While Some the
     /// layout is recomputed on the display MINUS the bottom strip (the
     /// carve), `paint_borders` fills the strip `status_bg`, and no leaf is
@@ -2525,6 +2516,8 @@ impl Comp {
             weave_va_next: WEAVE_VA_BASE,
             last_focus: None,
             menu: None,
+            fx_save: None,
+            fx_save_failed_said: false,
             status: None,
             rail: None,
             key_owner: [0; KEYCODE_SPAN],
@@ -5609,11 +5602,10 @@ impl Comp {
             h,
             self.scanout_name()
         );
-        // Section 10: a placed modal was clamped to -- and has frozen -- the
-        // display this replaces. It cannot survive the swap: its region names
-        // the old geometry, and a frozen upload onto the new, zeroed screen
-        // would show nothing but the card. Dismissed first, as a modal
-        // opening ends a divider drag.
+        // Section 10: a placed card was clamped to the display this replaces,
+        // and what it reached names the old geometry -- a dismiss after the
+        // swap would put back the wrong pixels at the wrong rects. Dismissed
+        // first, as a modal opening ends a divider drag.
         if self.menu.is_some() {
             self.menu_dismiss("mode");
         }
@@ -5720,11 +5712,18 @@ impl Comp {
 
     // ---- H-3c: the menu (HALCYON.md 13.6 "Menus -- THE GATE") -------------
 
-    /// Place menu surface `n` at display point (x, y): clamp its rect into
-    /// the display, make it THE menu (a previously placed one is dismissed
-    /// first -- one at a time), force Composed, and ask the owner for its
-    /// frame (a present before the place composed nowhere).
-    fn menu_place(&mut self, n: usize, x: u32, y: u32) -> Result<(), u32> {
+    /// Place menu surface `n` at display point (x, y) as a card of `class`:
+    /// clamp its rect into the display, make it THE menu (a previously
+    /// placed one is dismissed first -- one at a time), force Composed, and
+    /// ask the owner for its frame (a present before the place composed
+    /// nowhere).
+    ///
+    /// Section 10 as revised 2026-09-16: nothing of the card or its effects
+    /// is ever stored in the screen buffer. Every upload from here to the
+    /// dismiss lays them over the pixels it carries (`upload`), so the
+    /// placement only has to put the display in step once -- the new reach,
+    /// and on a move the old one.
+    fn menu_place(&mut self, n: usize, x: u32, y: u32, class: pane::MenuClass) -> Result<(), u32> {
         let (sw, sh, gen) = match self.surf(n) {
             Some(s) if s.is_menu && s.weave.is_some() => (s.w, s.h, s.gen),
             _ => return Err(p9::E_NOENT),
@@ -5732,8 +5731,8 @@ impl Comp {
         // 9.2: a modal opening ends a divider drag (the grab takes the
         // pointer from the capture).
         self.drag_end("menu");
-        // The same surface placed again (a move): the old placement is healed
-        // below, after the new placement composes (SA-1).
+        // The same surface placed again (a move): the old placement's pixels
+        // are put back below, once the new placement is in force.
         let old = match self.menu {
             Some(m) if m.n == n => Some(m),
             _ => None,
@@ -5747,102 +5746,183 @@ impl Comp {
         let x = x.min(dw - w);
         let y = y.min(dh - h);
         let rect = Rect { x, y, w, h };
-        let fx = self.menu_fx_for(rect);
-        self.menu = Some(MenuState { n, gen, rect, fx });
+        self.menu = Some(MenuState {
+            n,
+            gen,
+            rect,
+            class,
+            reach: Rect::ZERO,
+        });
         say!("tapestryd: menu {} placed at {},{} {}x{}", n, x, y, w, h);
+        #[cfg(feature = "test-mode")]
+        say!("tapestryd: menu {} class {}", n, class.name());
         self.reconcile();
         if !self.emit_configure_to(n, sw, sh) {
             self.retire(n);
         }
-        // A placement that paints effects needs no separate heal of the old
-        // one: its scene rebuild below replaces every pixel the old
-        // placement touched, and healing first would upload the un-dimmed
-        // scene for one push between two dimmed ones.
-        if let Some(o) = old {
-            if fx.is_empty() {
-                self.menu_heal_placement(o);
+        // A wedged owner's retire above has already dismissed the card.
+        let Some(m) = self.menu.filter(|m| m.n == n && m.gen == gen) else {
+            return Ok(());
+        };
+        let reach = self.menu_reach(&m);
+        // The overlay is laid over BUFFER pixels, and on the GPU composed
+        // path the buffer does not hold what the GPU composed: recompose
+        // what lies under the new reach first. The CPU path's buffer already
+        // is the scene.
+        if self.gpu_composes() {
+            let owed = self.restore_under(reach);
+            let mut wedged: Vec<usize> = Vec::new();
+            for (o, t) in owed {
+                if !self.emit_configure_to(o, t.w, t.h) {
+                    wedged.push(o);
+                }
+            }
+            for o in wedged {
+                self.retire(o);
             }
         }
-        // Section 10 as amended at `b62a761b`: the effects are painted ONCE,
-        // here, AFTER the reconcile that repainted the scene beneath them --
-        // and the display is push-suppressed from now until the dismiss, so
-        // nothing re-blends over what this lays down.
-        self.menu_paint_effects();
+        if let Some(o) = old {
+            let was = rect_union(o.reach, self.menu_reach(&o));
+            self.upload(was, true);
+            self.heal_gl_under(o.rect);
+        }
+        self.upload(reach, false);
         Ok(())
     }
 
-    /// Heal the screen under a menu placement that has gone -- the one
-    /// decision every dismiss path takes. A placement WITH effects froze the
-    /// whole display behind it (section 10 as reversed at `c065ec06`), so the
-    /// scene is rebuilt from retained state and uploaded in one push; one
-    /// without (the legacy profile) heals its card's rect as it always did.
-    fn menu_heal_placement(&mut self, m: MenuState) {
-        if m.fx.is_empty() {
-            self.menu_heal(m.rect);
-        } else {
-            self.menu_restore();
+    /// What a standing card can change on the display: the hull of its
+    /// effects' region and its own rect, at the CURRENT profile, scale and
+    /// display.
+    fn menu_reach(&self, m: &MenuState) -> Rect {
+        let fx = self.menu_effects_for(m);
+        rect_union(fx.map_or(Rect::ZERO, |e| e.region), m.rect)
+    }
+
+    /// Section 10's effects for a card, or None where none are laid on (the
+    /// legacy profile, a degenerate card, a shadow that reaches no pixel of
+    /// the display).
+    fn menu_effects_for(&self, m: &MenuState) -> Option<pane::MenuEffects> {
+        let instrument = self.bundle.profile == libhalcyon::instrument::Profile::Instrument;
+        pane::menu_effects(m.rect, m.class, instrument, self.scale, self.gpu.width, self.gpu.height)
+    }
+
+    /// The card's rect while its surface has a frame to show, else
+    /// `Rect::ZERO` -- so an upload before the owner's first present lays
+    /// the effects where the card will stand rather than leaving a hole in
+    /// them. Agrees with `menu_compose_card`'s own refusals.
+    fn menu_card_shown(&self, m: &MenuState) -> Rect {
+        match self.surf(m.n) {
+            Some(s) if s.gen == m.gen && s.weave.is_some() && s.shown_slot.is_some() => m.rect,
+            _ => Rect::ZERO,
         }
     }
 
-    /// The dismiss of a frozen modal: rebuild the scene, upload the whole
-    /// display in ONE push, and send the redraw request only to the surfaces
-    /// the rebuild could not reproduce.
-    ///
-    /// `menu_heal`'s repaint-and-CONFIGURE, run display-wide, would instead
-    /// fill every header and rail with its resting ground and leave every
-    /// tile dimmed until its client re-presented -- a whole-screen blink on
-    /// every dismiss, visible exactly where the backdrop had just been.
-    fn menu_restore(&mut self) {
-        if self.screen.is_none() {
-            return;
+    /// Does surface `n`'s target lie under what a standing card can change?
+    /// Such a surface composes the CPU way while the card stands, so the
+    /// buffer the overlay is laid over holds its pixels.
+    fn under_card(&self, n: usize) -> bool {
+        match (self.menu, self.surface_target(n)) {
+            (Some(m), Some(t)) => !t.intersect(self.menu_reach(&m)).is_empty(),
+            _ => false,
         }
-        let owed = self.scene_restore();
-        self.screen_flush_full();
-        let mut wedged: Vec<usize> = Vec::new();
-        for (n, t) in owed {
-            if !self.emit_configure_to(n, t.w, t.h) {
-                wedged.push(n);
+    }
+
+    /// Can a present on this display be composed GPU-side, leaving the
+    /// screen BUFFER without its pixels? The 3D screen with a healthy
+    /// compositor context -- everywhere else the buffer is the scene.
+    fn gpu_composes(&self) -> bool {
+        self.gpu_compose_ready() && self.screen.as_ref().map_or(false, |s| s.is3d)
+    }
+
+    /// Does GL adoption `g`'s present take the BLIT arm -- its frame
+    /// composed BO -> screen inside the compositor's context, with no guest
+    /// pixels anywhere? The ONE statement of that arm's condition: the
+    /// present dispatch routes by it and `gl_blit_holes` carves by it, so
+    /// the two cannot disagree about where a frame lives.
+    fn bo_blit_arm(&self, g: &GlAdopt) -> bool {
+        matches!(g.kind, AdoptSrc::Bo)
+            && self.gpu_composes()
+            && g.comp_imported
+            && g.composable
+            && g.format != 0
+            && self
+                .comp_conv
+                .map_or(false, |c| c.bo_u.is_some() || c.bo_s.is_some())
+    }
+
+    fn gl_blit_owned(&self, n: usize) -> bool {
+        self.gl_adoption(n).map_or(false, |g| self.bo_blit_arm(&g))
+    }
+
+    /// The placements inside `r` whose frame only the host holds (a GL
+    /// blit): an upload flushes them but never transfers the buffer over
+    /// them. Empty everywhere but the GPU composed path.
+    fn gl_blit_holes(&self, r: Rect) -> Vec<Rect> {
+        let mut holes: Vec<Rect> = Vec::new();
+        if !self.gpu_composes() {
+            return holes;
+        }
+        for (_, n, c) in self.layout.visible_hosted() {
+            if !self.gl_blit_owned(n) {
+                continue;
+            }
+            if let Some(p) = self.placement_rect(n, c) {
+                let i = p.intersect(r);
+                if !i.is_empty() {
+                    holes.push(i);
+                }
             }
         }
-        for n in wedged {
-            self.retire(n);
-        }
+        holes
     }
 
-    /// Rebuild the whole screen BUFFER from retained state, uploading
-    /// nothing: the compositor's own paint, then every visible surface's
-    /// last presented frame at its current target -- hosted content, then
-    /// the chrome (headers, the rails, the bar) beside it, the menu
-    /// excepted. Returns the surfaces whose pixels this could not
-    /// reproduce, with their target rects: the ones still owed a redraw
-    /// request.
-    ///
-    /// Sound because a client honouring the buffer-age contract presents
-    /// COMPLETE frames -- each slot is repainted over the union of the
-    /// damage since that slot's age (GPU-DESIGN 4.5.8b) -- so a surface's
-    /// shown slot is its last frame, not a fragment of one. The exceptions
-    /// are exactly `restore_surface`'s refusals.
-    fn scene_restore(&mut self) -> Vec<(usize, Rect)> {
-        let mut owed: Vec<(usize, Rect)> = Vec::new();
-        self.paint_chrome();
+    /// GPU composed path: recompose into the screen BUFFER, from their
+    /// shown slots, the surfaces whose targets lie under `area` -- hosted
+    /// content, then the chrome beside it; the menu excepted, and a GL blit
+    /// carved out, since it has no guest pixels to recompose. Returns the
+    /// ones whose slot cannot reproduce their frame (`restorable`), with
+    /// their targets: the surfaces owed a redraw request.
+    fn restore_under(&mut self, area: Rect) -> Vec<(usize, Rect)> {
+        let mut targets: Vec<(usize, Rect)> = Vec::new();
         for (_, n, c) in self.layout.visible_hosted() {
             // d-1b: a backgrounded SYSTEM leaf contributes no composed pixels.
             if self.surf(n).map_or(false, |s| s.backgrounded) {
                 continue;
             }
-            if !self.restore_surface(n) {
-                owed.push((n, c));
-            }
+            targets.push((n, c));
         }
         for (n, t) in self.visible_chrome() {
             if self.surf(n).map_or(false, |s| s.is_menu) {
                 continue;
             }
-            if !self.restore_surface(n) {
+            targets.push((n, t));
+        }
+        let mut owed: Vec<(usize, Rect)> = Vec::new();
+        for (n, t) in targets {
+            if t.intersect(area).is_empty() || self.gl_blit_owned(n) {
+                continue;
+            }
+            if self.restorable(n) {
+                let _ = self.restore_surface(n);
+            } else {
                 owed.push((n, t));
             }
         }
         owed
+    }
+
+    /// Does surface `n`'s last-presented slot reproduce its whole frame?
+    /// Not for a GL adoption (the frame is host-side), a held (test-mode
+    /// HOLD) slot, a surface that never presented, or an accumulator (#56),
+    /// whose slot is patchwork. Sound otherwise because a client honouring
+    /// the buffer-age contract presents COMPLETE frames -- each slot is
+    /// repainted over the union of the damage since that slot's age
+    /// (GPU-DESIGN 4.5.8b).
+    fn restorable(&self, n: usize) -> bool {
+        self.gl_adoption(n).is_none()
+            && self.surf(n).map_or(false, |s| {
+                s.held.is_none() && s.shown_slot.is_some() && s.weave.is_some() && !s.patchwork
+            })
     }
 
     /// Compose surface `n`'s last-presented slot into the screen buffer at
@@ -5867,78 +5947,53 @@ impl Comp {
         !patchwork
     }
 
-    /// The effect region for a card at `rect` -- the whole display -- or
-    /// `Rect::ZERO` where section 10's effects are not painted (the legacy
-    /// profile).
-    fn menu_fx_for(&self, rect: Rect) -> Rect {
-        if self.bundle.profile != libhalcyon::instrument::Profile::Instrument {
-            return Rect::ZERO;
-        }
-        pane::menu_effect_region(rect, self.gpu.width, self.gpu.height)
-    }
-
-    /// Paint section 10's modal backdrop and the one card shadow into the
-    /// screen buffer, then push the region ONCE -- through the raw push,
-    /// because `screen_push` is the very thing that suppresses this region.
+    /// Put the display back under a card that has gone -- the one step
+    /// every dismiss path takes.
     ///
-    /// Paint order is the list's order: the backdrop's blur of the scene,
-    /// its tint over the blurred result, then the shadow. The card is then
-    /// copied back over its own rect (a moved card keeps its pixels; a new
-    /// one has none yet and arrives with its owner's first present).
-    ///
-    /// The effects BLEND, so they are only ever laid over a scene rebuilt
-    /// from retained state just before: on a move the buffer still holds the
-    /// previous placement's effects, and on the GPU composed path it holds
-    /// no client pixels at all. Painted over either, a second darkening or a
-    /// stale scene would reach the display.
-    fn menu_paint_effects(&mut self) {
-        let Some(m) = self.menu else { return };
-        let instrument = self.bundle.profile == libhalcyon::instrument::Profile::Instrument;
-        let Some(e) = pane::menu_effects(m.rect, m.fx, instrument, self.scale) else {
-            return;
-        };
+    /// The buffer never held the card or its effects, so on the CPU path
+    /// this is an upload of what the card could have changed and nothing
+    /// else: no repaint, no redraw request, no blink. On the GPU composed
+    /// path the same upload carries what `restore_under` and the forced CPU
+    /// composition under the card kept current in the buffer; a GL blit's
+    /// host-side frame is carved out, and the one class of pixel nothing can
+    /// bring back -- the card's own, laid over that frame -- is healed by
+    /// asking its client to redraw.
+    fn menu_unplaced(&mut self, m: MenuState) {
         if self.screen.is_none() {
             return;
         }
-        // The surfaces this cannot reproduce stay as the ground under the
-        // backdrop; their redraws would be suppressed while the card stands
-        // anyway, and the dismiss asks them then.
-        let _ = self.scene_restore();
-        let mut cart = cartoon::Cartoon::new();
-        cart.ops.push(cartoon::Op::Blur {
-            x: e.region.x as i32,
-            y: e.region.y as i32,
-            w: e.region.w,
-            h: e.region.h,
-            radius: e.backdrop_radius,
-        });
-        cart.ops.push(cartoon::Op::RectAlpha {
-            x: e.region.x as i32,
-            y: e.region.y as i32,
-            w: e.region.w,
-            h: e.region.h,
-            color: e.backdrop_color,
-            alpha: e.backdrop_alpha,
-        });
-        cart.ops.push(cartoon::Op::Glow {
-            x: e.shadow.x as i32,
-            y: e.shadow.y as i32,
-            w: e.shadow.w,
-            h: e.shadow.h,
-            color: e.shadow_color,
-            alpha: e.shadow_alpha,
-            radius: e.shadow_radius,
-        });
-        self.paint_cartoon(&cart, e.region);
-        self.menu_reassert(e.region);
-        self.screen_push_raw(e.region);
+        let area = rect_union(m.reach, self.menu_reach(&m));
+        self.upload(area, true);
+        self.heal_gl_under(m.rect);
+    }
+
+    /// Ask every GL-blitted surface whose content lies under `card` to
+    /// redraw: its frame lives host-side, where an upload of the card
+    /// overwrote it.
+    fn heal_gl_under(&mut self, card: Rect) {
+        if !self.gpu_composes() {
+            return;
+        }
+        let mut wedged: Vec<usize> = Vec::new();
+        for (_, n, c) in self.layout.visible_hosted() {
+            if c.intersect(card).is_empty() || !self.gl_blit_owned(n) {
+                continue;
+            }
+            if !self.emit_configure_to(n, c.w, c.h) {
+                wedged.push(n);
+            }
+        }
+        for n in wedged {
+            self.retire(n);
+        }
     }
 
     /// Compositor-owned dismiss: retire the placed menu's surface. `retire`
-    /// carries the unplace + the heal, so every dismiss path -- this one
-    /// (Esc / click-away / a chord / the owner's verb / a replacement), the
-    /// owner's ctl `destroy`, its conn's death, a WEDGE -- converges on the
-    /// one mechanism, and none of them needs the owner to cooperate.
+    /// carries the unplace + the display's repair, so every dismiss path --
+    /// this one (Esc / click-away / a chord / the owner's verb / a
+    /// replacement), the owner's ctl `destroy`, its conn's death, a WEDGE --
+    /// converges on the one mechanism, and none of them needs the owner to
+    /// cooperate.
     fn menu_dismiss(&mut self, reason: &'static str) -> bool {
         let m = match self.menu {
             Some(m) => m,
@@ -5946,12 +6001,12 @@ impl Comp {
         };
         self.menu_reason = reason;
         self.retire(m.n);
-        if self.menu.map_or(false, |x| x.n == m.n) {
+        if let Some(cur) = self.menu.filter(|x| x.n == m.n) {
             // The slot was already empty (retire returned before its arm):
-            // unplace + heal here so the grab can never outlive the surface.
+            // unplace + repair here so the grab can never outlive the surface.
             self.menu = None;
             self.menu_reason = "retire";
-            self.menu_heal_placement(m);
+            self.menu_unplaced(cur);
         }
         true
     }
@@ -5981,132 +6036,6 @@ impl Comp {
                     *px.add((y as u64 * dw as u64 + x as u64) as usize) = color;
                 }
             }
-        }
-    }
-
-    /// Heal the screen under a dismissed menu's rect `r` WITHOUT a structural
-    /// repaint (which blanks every pane until each re-presents -- a whole-
-    /// screen flash per menu). The compositor's own pixels are repainted and
-    /// pushed within the rect (rings + strips via the painters; the resting
-    /// tag-bar fill; the floor under an empty leaf), and every surface whose
-    /// target intersects the rect gets the same-size CONFIGURE -- the redraw
-    /// request every reveal already heals by. Rio's save-under was rejected:
-    /// on the GPU composed path the screen BUFFER holds no client pixels, so
-    /// a save-under would restore chrome and blank content there, and both
-    /// paths must behave identically from outside (GPU-DESIGN 4.5.9).
-    fn menu_heal(&mut self, r: Rect) {
-        if r.is_empty() {
-            return;
-        }
-        if self.screen.is_some() {
-            let mut rects = self.paint_borders(false);
-            rects.extend(self.paint_strips());
-            for pr in rects {
-                let i = pr.intersect(r);
-                if !i.is_empty() {
-                    self.screen_push(i);
-                }
-            }
-            let mut fills: Vec<(Rect, u32)> = Vec::new();
-            for (slot, _id) in self.layout.live_ids() {
-                let p = match self.layout.get(slot) {
-                    Some(p) => p,
-                    None => continue,
-                };
-                if !p.visible || !self.layout.is_leaf(slot) {
-                    continue;
-                }
-                let tb = p.tagbar.intersect(r);
-                if !tb.is_empty() {
-                    fills.push((tb, self.theme.header));
-                }
-                match &p.kind {
-                    pane::Kind::Leaf { surface: None } => {
-                        let c = p.content.intersect(r);
-                        if !c.is_empty() {
-                            fills.push((c, self.theme.blank));
-                        }
-                    }
-                    // The bars around a letterboxed or cropped surface are
-                    // the compositor's floor, which its client can never
-                    // repaint (SA-7); the placement itself heals by the
-                    // client's redraw CONFIGURE below.
-                    pane::Kind::Leaf { surface: Some(n) } => {
-                        let c = p.content;
-                        let inner = self.placement_rect(*n, c).unwrap_or(Rect::ZERO);
-                        for bar in pane::bars_around(c, inner) {
-                            let b = bar.intersect(r);
-                            if !b.is_empty() {
-                                fills.push((b, self.theme.blank));
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            // H-3d: the menu clamp uses the full display, so a menu can overlap
-            // the status strip. The tag bars above heal immediately (a fill +
-            // push); the strip must too, or the dismissed menu's pixels linger
-            // there until the bar's own redraw CONFIGURE lands a pass later.
-            // status_bg is the bar's Clear colour, so the strip reads
-            // correct-minus-glyphs at once; the CONFIGURE fan below repaints the
-            // glyphs (visible_chrome includes the bar).
-            if let Some((top, bottom)) = self.rail_rects() {
-                // HALCYON-INSTRUMENT 8 (r1 A-F3): both rails heal like the
-                // legacy strip -- the fill, then the structure line on the
-                // workspace side, as paint_instrument lays them.
-                let inst = self.bundle.inst;
-                let hair = self.metrics.hairline.max(0) as u32;
-                let top_line = Rect {
-                    x: top.x,
-                    y: (top.y + top.h).saturating_sub(hair),
-                    w: top.w,
-                    h: hair.min(top.h),
-                };
-                let bottom_line = Rect {
-                    x: bottom.x,
-                    y: bottom.y,
-                    w: bottom.w,
-                    h: hair.min(bottom.h),
-                };
-                for (strip, line) in [(top, top_line), (bottom, bottom_line)] {
-                    let i = strip.intersect(r);
-                    if !i.is_empty() {
-                        fills.push((i, inst.rail));
-                        let l = line.intersect(r);
-                        if !l.is_empty() {
-                            fills.push((l, inst.structure));
-                        }
-                    }
-                }
-            } else if let Some(sr) = self.status_rect() {
-                let i = sr.intersect(r);
-                if !i.is_empty() {
-                    fills.push((i, self.theme.status_bg));
-                }
-            }
-            for (fr, color) in fills {
-                self.fill_rect(fr, color);
-                self.screen_push(fr);
-            }
-        }
-        let mut wedged: Vec<usize> = Vec::new();
-        for (_, n, c) in self.layout.visible_hosted() {
-            // d-1b: a backgrounded SYSTEM leaf is not composited/reconfigured.
-            if self.surf(n).map_or(false, |s| s.backgrounded) {
-                continue;
-            }
-            if !c.intersect(r).is_empty() && !self.emit_configure_to(n, c.w, c.h) {
-                wedged.push(n);
-            }
-        }
-        for (n, t) in self.visible_chrome() {
-            if !t.intersect(r).is_empty() && !self.emit_configure_to(n, t.w, t.h) {
-                wedged.push(n);
-            }
-        }
-        for n in wedged {
-            self.retire(n);
         }
     }
 
@@ -6152,16 +6081,18 @@ impl Comp {
             return;
         };
         let inner = self.placement_rect(n, c).unwrap_or(Rect::ZERO);
+        // Each bar is PUSHED: the floor is compositor-owned buffer pixels on
+        // both paths. It was a flush of the content rect until 2026-09-16,
+        // and a flush uploads nothing -- the fills never reached the display
+        // on either path, so the old scaled projection outside the native
+        // rect this exists to clear stayed until the next structural repaint.
         for bar in pane::bars_around(c, inner) {
             if !bar.is_empty() {
                 self.fill_rect(bar, self.theme.blank);
+                self.screen_push(bar);
             }
         }
-        self.screen_flush_rect(c);
     }
-
-    /// The four bands of `outer` around `inner` (top, bottom, left, right;
-    /// empty ones included) -- the floor a client's placement leaves bare.
 
     /// Compose every visible hosted surface's last-presented slot into the
     /// screen BUFFER at its current placement -- the structural repaint's
@@ -6185,24 +6116,24 @@ impl Comp {
         }
     }
 
-    /// The menu composes LAST: re-compose the placed menu's shown slot into
-    /// the screen buffer wherever a screen write `r` lands under it, and
-    /// return the intersection for the caller to push. Called by every
-    /// device-visible step (`screen_push` before its upload, the GPU path's
-    /// flush, the full flush), so a client present or a chrome repaint under
-    /// the menu can never paint over it -- on either path, by one mechanism.
-    fn menu_reassert(&mut self, r: Rect) -> Option<Rect> {
-        let m = self.menu?;
+    /// The menu composes LAST: lay the placed menu's shown slot into the
+    /// screen buffer over `r` -- ONLY ever between an upload's save and its
+    /// restore (`upload`), so the card is never left in the buffer and the
+    /// scene under it stays there to be read. Every device-visible step goes
+    /// through `upload`, so a client present or a chrome repaint under the
+    /// menu can never reach the display over it, on either path.
+    fn menu_compose_card(&mut self, r: Rect) {
+        let Some(m) = self.menu else { return };
         let inter = r.intersect(m.rect);
         if inter.is_empty() {
-            return None;
+            return;
         }
         let (sw, sh, slot_stride, va, slot) = match self.surf(m.n) {
             Some(s) if s.gen == m.gen => match (&s.weave, s.shown_slot) {
                 (Some(w), Some(slot)) => (s.w, s.h, s.slot_stride, w.va, slot),
-                _ => return None,
+                _ => return,
             },
-            _ => return None,
+            _ => return,
         };
         // Menu-relative source: the rect may be smaller than the surface
         // (a menu larger than the display crops).
@@ -6219,7 +6150,7 @@ impl Comp {
             h: sh,
         });
         if src.is_empty() {
-            return None;
+            return;
         }
         let dst = Rect {
             x: m.rect.x + src.x,
@@ -6233,7 +6164,6 @@ impl Comp {
             clip: dst,
         };
         self.compose_cpu(op, va + (slot as u64) * slot_stride, sw, sh);
-        Some(op.dst)
     }
 
     /// The `ctl` read's menu line: `none` or `<n> <x> <y> <w> <h>`.
@@ -7207,38 +7137,11 @@ impl Comp {
         h
     }
 
-    /// Push the whole screen buffer to the host resource + display.
+    /// Push the whole screen buffer to the host resource + display -- a
+    /// standing card laid over it on the way, like every upload.
     fn screen_flush_full(&mut self) {
         let (dw, dh) = (self.gpu.width, self.gpu.height);
-        let res = match &self.screen {
-            Some(s) => s.res,
-            None => return,
-        };
-        let disp = Rect {
-            x: 0,
-            y: 0,
-            w: dw,
-            h: dh,
-        };
-        self.menu_reassert(disp);
-        // Section 10 (reversed at `c065ec06`): the scene behind a card with
-        // effects is FROZEN until the dismiss, so a structural repaint under
-        // one rebuilds the BUFFER -- its fan's redraws land there too -- and
-        // uploads only the card; `menu_restore` uploads the rest. NOT while
-        // entering Composed: the display is not yet showing this resource,
-        // so it must go up whole before the bind.
-        match self.menu {
-            Some(m) if !m.fx.is_empty() && self.scanout == Scanout::Composed => {
-                for piece in pane::menu_push_allowed(disp, m.fx, m.rect) {
-                    if !piece.is_empty() {
-                        self.screen_push_raw(piece);
-                    }
-                }
-            }
-            _ => {
-                let _ = self.gpu.transfer_then_flush(res, 0, 0, 0, dw, dh);
-            }
-        }
+        self.upload(Rect { x: 0, y: 0, w: dw, h: dh }, false);
     }
 
     /// Reconcile scanout + chrome with the layout (run after every layout
@@ -7817,6 +7720,12 @@ impl Comp {
             None => return None,
         };
         let op = self.compose_geometry(n, x, y, pw, ph)?;
+        // The placed menu is laid on at upload and never stored (section 10
+        // as revised 2026-09-16): its present composes nothing here, and the
+        // caller's push of the region carries the card from its shown slot.
+        if self.menu.map_or(false, |m| m.n == n) {
+            return Some(op.clip);
+        }
         // Orientation: a GL source needs NO flip on this path. The
         // guest-visible readback contract is gallium top-down --
         // osmesa_read_buffer's y_up=FALSE arm copies STRAIGHT and is the
@@ -7840,39 +7749,35 @@ impl Comp {
     /// landed through it. The C-2b special case that re-uploaded the WHOLE
     /// frame per rect on the 3D screen is gone with the CPU fill it served.
     fn screen_push(&mut self, r: Rect) {
-        if r.is_empty() {
+        if r.is_empty() || self.screen.is_none() {
             return;
         }
-        if self.screen.is_none() {
-            return;
-        }
-        // H-3c: the menu composes last -- re-assert it in the buffer under
-        // this push before the upload carries the region.
-        self.menu_reassert(r);
-        // Section 10 (amended at `b62a761b`): while a card stands, the parts
-        // of this write that fall in its effect ring are NOT uploaded. The
-        // effects were blended once at placement and a blend is not
-        // idempotent, so the display keeps them while the buffer beneath is
-        // free to drift; `menu_heal` reconciles the two at dismiss. The
-        // card's own rect is re-admitted -- `menu_reassert` has just copied
-        // it back opaquely, so nothing underneath it can show through.
-        match self.menu {
-            Some(m) if !m.fx.is_empty() => {
-                for piece in pane::menu_push_allowed(r, m.fx, m.rect) {
-                    if !piece.is_empty() {
-                        self.screen_push_raw(piece);
-                    }
-                }
-            }
-            _ => self.screen_push_raw(r),
-        }
+        let t0 = Instant::now();
+        self.upload(r, false);
+        self.cost_add(Cost::Push, t0);
     }
 
-    /// Upload + flush one screen rect with NO menu re-assert and NO effect
-    /// suppression -- the transport half of `screen_push`. Called directly
-    /// only by `screen_push` itself and by `menu_paint_effects`, which must
-    /// push the very region `screen_push` exists to withhold.
-    fn screen_push_raw(&mut self, r: Rect) {
+    /// Upload screen-BUFFER rect `r` to the host resource and flush it --
+    /// the step every buffer write takes to the display, and the ONE place a
+    /// standing card and its effects reach it (section 10 as revised
+    /// 2026-09-16).
+    ///
+    /// The buffer holds the clean scene and never anything else. Where `r`
+    /// meets what the card can change (`pane::overlay_plan`), the pixels the
+    /// application will write are SAVED, the backdrop's blur runs under the
+    /// grown clip that keeps it exact, the blends and the card are laid on
+    /// under the touch, the region is transferred, and the save is put back.
+    /// So no effect is ever applied twice, by construction rather than by
+    /// excluding writes; programs behind the card keep drawing; and a dismiss
+    /// has nothing to heal.
+    ///
+    /// `carve_gl` (the dismiss; implied while a card stands): on the GPU
+    /// composed path a GL blit's frame exists only host-side, so its
+    /// placement is flushed but never transferred over -- except where the
+    /// card itself stands on it, since the card's pixels are guest pixels.
+    fn upload(&mut self, r: Rect, carve_gl: bool) {
+        let (dw, dh) = (self.gpu.width, self.gpu.height);
+        let r = r.intersect(Rect { x: 0, y: 0, w: dw, h: dh });
         if r.is_empty() {
             return;
         }
@@ -7880,17 +7785,144 @@ impl Comp {
             Some(s) => s.res,
             None => return,
         };
-        let dw = self.gpu.width as u64;
-        let off = ((r.y as u64) * dw + r.x as u64) * 4;
-        let t0 = Instant::now();
-        let _ = self.gpu.transfer_then_flush(res, off, r.x, r.y, r.w, r.h);
-        self.cost_add(Cost::Push, t0);
+        let menu = self.menu;
+        let fx = menu.as_ref().and_then(|m| self.menu_effects_for(m));
+        let card = menu.as_ref().map_or(Rect::ZERO, |m| self.menu_card_shown(m));
+        let plan = match menu {
+            Some(_) => pane::overlay_plan(r, fx.as_ref(), card, dw, dh),
+            None => None,
+        };
+        let holes = if carve_gl || menu.is_some() {
+            self.gl_blit_holes(r)
+        } else {
+            Vec::new()
+        };
+        let offset = |q: Rect| ((q.y as u64) * (dw as u64) + q.x as u64) * 4;
+        if plan.is_none() && holes.is_empty() {
+            let _ = self.gpu.transfer_then_flush(res, offset(r), r.x, r.y, r.w, r.h);
+            return;
+        }
+        // Nothing is laid on without a save to take it off again.
+        let laid = match plan {
+            Some(p) if self.fx_save_take(p.save) => Some(p),
+            _ => None,
+        };
+        if let Some(p) = laid {
+            if let Some(e) = &fx {
+                let (blur, blend) = pane::effect_cartoons(e);
+                self.paint_cartoon(&blur, p.save);
+                self.paint_cartoon(&blend, p.touch);
+            }
+            self.menu_compose_card(r);
+            if let Some(m) = self.menu.as_mut() {
+                m.reach = rect_union(m.reach, p.touch);
+            }
+        }
+        if holes.is_empty() {
+            let _ = self.gpu.transfer_then_flush(res, offset(r), r.x, r.y, r.w, r.h);
+        } else {
+            let mut pieces = pane::subtract_rects(r, &holes);
+            if laid.is_some() {
+                for h in &holes {
+                    let c = h.intersect(card);
+                    if !c.is_empty() {
+                        pieces.push(c);
+                    }
+                }
+            }
+            for q in pieces {
+                let _ = self.gpu.transfer(res, offset(q), q.x, q.y, q.w, q.h);
+            }
+            let _ = self.gpu.flush(res, r.x, r.y, r.w, r.h);
+        }
+        if let Some(p) = laid {
+            self.fx_save_restore(p.save);
+        }
+    }
+
+    /// Copy screen-BUFFER rect `s` into the save scratch, row after row.
+    /// False -- said once -- when the scratch cannot be attached: the caller
+    /// then lays nothing on, since nothing it wrote could be taken off.
+    fn fx_save_take(&mut self, s: Rect) -> bool {
+        let va = match &self.screen {
+            Some(sc) => sc.va,
+            None => return false,
+        };
+        let (dw, dh) = (self.gpu.width as usize, self.gpu.height as usize);
+        if s.is_empty() || s.x as usize + s.w as usize > dw || s.y as usize + s.h as usize > dh {
+            return false;
+        }
+        let need = ((dw as u64) * (dh as u64) * 4 + PAGE - 1) & !(PAGE - 1);
+        if self.fx_save.map_or(true, |(_, size)| size < need) {
+            if let Some((old_va, old_size)) = self.fx_save.take() {
+                unsafe { t_burrow_detach(old_va, old_size) };
+            }
+            let rc = unsafe { t_burrow_attach_lazy(need) };
+            if rc < 0 {
+                if !self.fx_save_failed_said {
+                    self.fx_save_failed_said = true;
+                    say!("tapestryd: effect save scratch ({} bytes) failed {} -- cards upload without effects", need, rc);
+                }
+                return false;
+            }
+            self.fx_save = Some((rc as u64, need));
+        }
+        let Some((save_va, _)) = self.fx_save else {
+            return false;
+        };
+        let w = s.w as usize;
+        // SAFETY: `s` lies on the display (checked above); the screen buffer
+        // maps dw*dh u32 (page-rounded up) and the scratch is at least that
+        // (`need`); the two are distinct mappings, and no other reference
+        // into either is live.
+        let (screen, save) = unsafe {
+            (
+                core::slice::from_raw_parts(va as *const u32, dw * dh),
+                core::slice::from_raw_parts_mut(save_va as *mut u32, dw * dh),
+            )
+        };
+        for k in 0..s.h as usize {
+            let row = (s.y as usize + k) * dw + s.x as usize;
+            save[k * w..(k + 1) * w].copy_from_slice(&screen[row..row + w]);
+        }
+        true
+    }
+
+    /// Put rect `s` back into the screen buffer from the save scratch --
+    /// the inverse of the `fx_save_take` that saved it.
+    fn fx_save_restore(&mut self, s: Rect) {
+        let (Some(sc), Some((save_va, _))) = (self.screen.as_ref(), self.fx_save) else {
+            return;
+        };
+        let va = sc.va;
+        let (dw, dh) = (self.gpu.width as usize, self.gpu.height as usize);
+        let w = s.w as usize;
+        // SAFETY: as in `fx_save_take`, which accepted this same `s`.
+        let (screen, save) = unsafe {
+            (
+                core::slice::from_raw_parts_mut(va as *mut u32, dw * dh),
+                core::slice::from_raw_parts(save_va as *const u32, dw * dh),
+            )
+        };
+        for k in 0..s.h as usize {
+            let row = (s.y as usize + k) * dw + s.x as usize;
+            screen[row..row + w].copy_from_slice(&save[k * w..(k + 1) * w]);
+        }
     }
 
     /// The GPU composed path's device-visible step (Warp-C C-3): the pixels
     /// are already in the screen RESOURCE (the blit landed there), so only
     /// the display flush is owed -- an upload here would paint the buffer's
     /// stale bytes over them.
+    ///
+    /// Except under a standing card, whose effects are laid over BUFFER
+    /// pixels: there the region's surfaces are first recomposed into the
+    /// buffer from their shown slots, and the region goes up through
+    /// `upload` -- a GL blit's frame carved out and left as the blit laid
+    /// it. Forcing CPU composition under a card keeps this rare: a GL blit,
+    /// and a held region released after the card was placed. Nothing is
+    /// asked to redraw from here: a GL client presenting under a card would
+    /// otherwise be asked again on every frame.
     fn screen_flush_rect(&mut self, r: Rect) {
         if r.is_empty() {
             return;
@@ -7900,26 +7932,16 @@ impl Comp {
             None => return,
         };
         let t0 = Instant::now();
-        // The same suppression as `screen_push`: a flush of the effect ring
-        // would reveal the GPU's un-effected pixels there.
-        match self.menu {
-            Some(m) if !m.fx.is_empty() => {
-                for piece in pane::menu_push_allowed(r, m.fx, m.rect) {
-                    if !piece.is_empty() {
-                        let _ = self.gpu.flush(res, piece.x, piece.y, piece.w, piece.h);
-                    }
-                }
-            }
-            _ => {
-                let _ = self.gpu.flush(res, r.x, r.y, r.w, r.h);
-            }
+        let under = self
+            .menu
+            .map_or(false, |m| !r.intersect(self.menu_reach(&m)).is_empty());
+        if under {
+            let _ = self.restore_under(r);
+            self.upload(r, false);
+        } else {
+            let _ = self.gpu.flush(res, r.x, r.y, r.w, r.h);
         }
         self.cost_add(Cost::Flush, t0);
-        // H-3c: a GPU-composed region under the placed menu -- put the menu
-        // back on top (buffer + push of just the intersection).
-        if let Some(i) = self.menu_reassert(r) {
-            self.screen_push(i);
-        }
     }
 
     /// Flush surface `n`'s held region (F13 release; also the implicit
@@ -8397,8 +8419,8 @@ impl Comp {
         // H-3c: the placed menu dies with its surface, on EVERY path (the
         // owner's verb, Esc, click-away, a chord, ctl `destroy`, the conn's
         // death, a WEDGE): unplace first so no routing or target names it
-        // while it goes, heal the screen under it at the tail.
-        let menu_heal: Option<MenuState> = match self.menu {
+        // while it goes, put the display back under it at the tail.
+        let unplaced: Option<MenuState> = match self.menu {
             Some(m) if m.n == n => {
                 self.menu = None;
                 say!("tapestryd: menu {} dismissed ({})", n, self.menu_reason);
@@ -8526,8 +8548,8 @@ impl Comp {
         // byte patterns mid-line (it split `/home/michael` in the panes
         // post-battery assert). The error/edge prints above stay.
         let _ = s.presents;
-        if let Some(m) = menu_heal {
-            self.menu_heal_placement(m);
+        if let Some(m) = unplaced {
+            self.menu_unplaced(m);
         }
     }
 
@@ -18266,24 +18288,9 @@ impl Conn {
             let mut it = rest.split_ascii_whitespace();
             match it.next() {
                 Some("place") => {
-                    let id: usize = it
-                        .next()
-                        .ok_or(p9::E_INVAL)?
-                        .parse()
-                        .map_err(|_| p9::E_INVAL)?;
-                    let x: u32 = it
-                        .next()
-                        .ok_or(p9::E_INVAL)?
-                        .parse()
-                        .map_err(|_| p9::E_INVAL)?;
-                    let y: u32 = it
-                        .next()
-                        .ok_or(p9::E_INVAL)?
-                        .parse()
-                        .map_err(|_| p9::E_INVAL)?;
-                    if it.next().is_some() {
-                        return Err(p9::E_INVAL);
-                    }
+                    // `menu place <id> <x> <y> [dialog]` (section 10 as
+                    // revised 2026-09-16: the word names the card's CLASS).
+                    let (id, x, y, class) = pane::menu_place_args(it).ok_or(p9::E_INVAL)?;
                     let owner = comp
                         .surf(id)
                         .filter(|s| s.is_menu)
@@ -18292,7 +18299,7 @@ impl Conn {
                     if self.peer_stripes == 0 || owner != self.peer_stripes {
                         return Err(p9::E_PERM);
                     }
-                    return comp.menu_place(id, x, y);
+                    return comp.menu_place(id, x, y, class);
                 }
                 Some("dismiss") => {
                     if it.next().is_some() {
@@ -19090,14 +19097,11 @@ impl Conn {
                     return Err(p9::E_OPNOTSUPP); // no GL deferral (see the direct arm)
                 }
                 let mut done = false;
-                let bo_gpu = comp.gpu_compose_ready()
-                    && g.comp_imported
-                    && g.composable
-                    && g.format != 0
-                    && scr.map_or(false, |(_, is3d)| is3d)
-                    && comp
-                        .comp_conv
-                        .map_or(false, |c| c.bo_u.is_some() || c.bo_s.is_some());
+                // A GL blit stays a blit under a standing card: its frame has
+                // no guest pixels to lay an effect over, so its placement is
+                // carved out of every upload and shows unaffected (section
+                // 10 as revised 2026-09-16) -- the card itself still covers it.
+                let bo_gpu = comp.bo_blit_arm(&g);
                 if bo_gpu {
                     match comp.compose_geometry(n, 0, 0, w, h) {
                         None => done = true, // hidden / unhosted: nothing to compose either way
@@ -19181,10 +19185,16 @@ impl Conn {
             let mut acc_cpu: Option<Rect> = None;
             let mut acc_gpu: Option<Rect> = None;
             let mut took_gpu = false;
+            // Under a standing card the CPU way, always (section 10 as
+            // revised 2026-09-16): the card and its effects are laid over
+            // BUFFER pixels at upload, and a GPU compose leaves none there.
+            // The placed menu itself is under its own card by definition, so
+            // it never takes this path -- it is laid on at upload too.
             let gpu_path = comp.gpu_compose_ready()
                 && scr.map_or(false, |(_, is3d)| is3d)
                 && comp.surf(n).map_or(false, |s| s.comp_attached)
-                && comp.compose_visible(n);
+                && comp.compose_visible(n)
+                && !comp.under_card(n);
             if gpu_path {
                 let scr_res = scr.map(|(r, _)| r).unwrap_or(0);
                 let res = res_ids[slot as usize];
