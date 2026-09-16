@@ -231,7 +231,9 @@ form a code host decodes that it misses, and a false positive on ordinary prose;
   than that may lose table structure in a tile.
 - The character-reference rule over-approximates: `&foo;` or `AT&T;`, which a code
   host leaves literal, is rejected too; the author writes `\&`.
-- The implicit direction marks (U+061C, U+200E, U+200F) are allowed and printed.
+- The implicit direction marks (U+061C, U+200E, U+200F) are allowed and printed,
+  and so are other invisible characters (U+200B, U+2028, U+2029, the tag block):
+  the 2026-09-16 decision covered the controls that reorder text.
 - The cell limit bounds table output linearly but with a large constant: sixteen
   256-character header cells over 18-byte rows of empty cells write about 227
   bytes per source byte per rendering (measured 116,182 KiB for the rich plus the

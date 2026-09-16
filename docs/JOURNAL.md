@@ -317,6 +317,111 @@ and f are new), a host-test run on the Mac, round 2 of the review (running,
 Fable), and two format questions for the operator: whether `&amp;`-style
 character references and Unicode bidi controls should be rejected.
 
+### Round 2, the operator's three rules, and the section plan (b4f5c822 scripture, 62cba8a3 code)
+
+**Round 2 found what the bounds test could not see.** The prosecutor (Fable 5.1
+at start and end, about 45 minutes, its own probes on the Pi) returned 0 P0,
+0 P1, 1 P2 and 4 P3, all five confirmed against the code before any fix. The P2
+is the instructive one. Every table cell pads to its column's widest cell, so the
+output is rows times the widest cell, which is quadratic in the section: the
+reviewer measured 16.0x output for 4x input, and a 1 MiB section that checks clean
+would print about 31 GiB. My time test asserted linearity over 37 shapes I had
+thought of, none with a wide cell. It was true about those shapes and silent about
+the format. The standing lesson, that a negative over a set you did not enumerate
+is a guess, applied exactly and I had not applied it. A linearity claim needs an
+argument over every loop that writes in proportion to something other than input
+bytes; the shapes then test the argument instead of standing in for it. The
+dossier's prosecution list now carries that as item 7.
+
+**No parallel self-audit ran during round 2.** The context compacted while the
+review was in flight, and on resuming I answered the operator's status question
+and main's detach call (yip 0095) instead. The discipline asks for one. The gap is
+recorded here and in the closed list rather than papered over; round 3, if it
+runs, gets a focus list written before it starts.
+
+**Three decisions from the operator** (AskUserQuestion, each with the research
+attached; recorded in MANUAL-DESIGN 1 and the closed list):
+
+- The nine bidirectional embedding, override and isolate controls are rejected and
+  replaced. That is the set rustc denies by default; the implicit marks (LRM, RLM,
+  ALM) stay, since they cannot reorder letters.
+- Character references are rejected, not decoded. Decoding would reopen the hole
+  the checker closes, since `&#27;` decodes to ESC and `&#x202E;` to an override.
+  The rule deliberately matches any letter-led name, so `AT&T;` is rejected too.
+- A table cell holds at most 256 characters, chosen over 80 (long option
+  descriptions would leave tables) and over withdrawing the linear claim.
+
+The operator also set the section plan, which supersedes "Containers first":
+Utopia, Imperium, Vivarium, Containers, Alpine, Haul, View, Gallery, and the
+bundled games, in that writing order. I had proposed folding Containers into
+Vivarium; the operator kept it separate.
+
+**The fixes.** One predicate, `is_replaced`, now decides what every write site
+turns into U+FFFD, so the bidirectional set has one definition instead of three
+copies of `is_control`. `&` became a special byte in the inline scan, and a
+character reference is recognized by a walk that stops at the first byte outside
+the form, so successive `&`s never re-read the same bytes. `row` measures every
+cell in both parse modes and reports a cell past the limit; the renderer also
+clamps column widths, so the padding bound does not rest on the check having run.
+The round-2 P3s are in the commit: the expect arm order, the 8.2 clause, the
+bounds model, and manual-check's echoes.
+
+**The bounds model was wrong in a way the reviewer undercounted.** Modeling the
+read the binary does when `fstat` gives no length (F4) moved every block-per-line
+shape from 1088 KiB to 2040 KiB, since a doubling buffer leaves about a mebibyte
+of holes below the final one. The reviewer's +440 KiB was true of the one shape it
+probed. The worst case is now 6648 KiB against the 8 MiB working set, the margin
+down from about 2 MiB to 1.5.
+
+**The first full run caught a stale flag of my own.** The round-1 shape "one table
+cell of escaped pipes" became a failing section the moment cells were capped, and
+the heap test stopped at its `passes` assertion, before it reached the two new
+table shapes. The fix keeps the shape as a check-only measurement and adds rows of
+escaped pipes at the width limit, so rendering escaped pipes stays measured.
+
+**Controls, each on a copy on the Pi.** Every one failed exactly the tests aimed at
+it. K1 (no reference check) and K2 (no bidi check) each failed their one format
+test. K3 (bidi dropped from `is_replaced`) failed three, one per site that exposes
+it. K3b and K3c removed the replacement from one write site each, and each was
+caught by the leg that reaches that site: the wrapped leg for `Wrap::feed`, the
+unwrapped legs and the contents title for `put_text`. K4 (no cap) and K5 (no
+clamp) failed their tests. K6 admitted the reviewer's shape, with the cap and the
+clamp both off and one cell an eighth of the section: the time test failed at 9.8x
+the time and 15.9x the output for 4x the input. The time assertion fired first, so
+the new output assertion was not the one that failed; the 15.9x it would have
+judged is past its 8x bound, which makes it a second witness by measurement, not
+by a run in which it fired.
+
+**The expect ordering (F2) was controlled on the Mac without a guest**, which is
+worth recording because the in-guest scenario could not show it: I extracted the
+`manual_status` proc from HEAD and from the working tree and drove each with a
+fake shell. A leaked rendering arriving in one read with its status passed under
+the old order and fails under the new; split across two reads, both fail; a
+correct run passes under both.
+
+**Named residuals, not defects.** Other invisible characters (U+200B, U+2028 and
+U+2029, the tag block) are printed; the operator's decision covered the reordering
+controls. The cell cap still allows a large constant amplification: 255 KiB of
+empty rows under sixteen full-width header cells wrote 116,182 KiB across the rich
+and the plain rendering together. Both are in the dossier's caveats.
+
+**Verified in the guest, then.** On the Mac (main released it early), at 62cba8a3:
+72 of 72 host tests on rustc 1.97.1 with the same bounds figures as the Pi; clippy
+clean, and shown to be linting (a pedantic run reports 136 warnings); a `--config
+ci` bake in which `tools/manual-check` ran over `docs/manual` (0 sections, as
+expected); and `tools/test-interactive.sh manual`, all six legs in 31 s. Leg (c)
+saw the passing fixture's rendered body and the failing fixture's `mfbadbody`
+appears nowhere in the guest log, so the refusal leg is paired with a positive one
+variable away. Main queued for the Pi while my chain still ran on it, so I stopped
+the chain at its last step (the debug suite, which the Mac then ran) and released
+it; the Mac lease went back the moment the scenario finished.
+
+**Open at this entry:** round 3 of the review (running, Fable, on b4f5c822 and
+62cba8a3; my own pass in parallel found two small items for its batch: 3.3 says "a
+letter" where the rule takes an ASCII letter, and the bidi rendering test has no
+numbered item); then the `/env` bind-at-open kernel fix, which the Utopia section
+waits on; then the Utopia section itself.
+
 ---
 ## 2026-09-10 (aux, run 9, post self-compact) -- the Halcyon SESSION-path inline-media channel (I-47, HALCYON 14.7.2): per-pane routing on the existing /srv+9P mechanism
 
