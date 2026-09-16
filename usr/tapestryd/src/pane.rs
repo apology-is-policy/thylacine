@@ -3398,8 +3398,47 @@ impl Layout {
     }
 }
 
+/// The `motion 0|1` verb's word (HALCYON-INSTRUMENT 10 + 9.5 as amended).
+///
+/// Pure, and in the lib for the reason `track_glow` is: `server.rs` is
+/// bin-only, so a verb parsed there has no host witness at all and a
+/// widened or narrowed vocabulary would land unmeasured.
+///
+/// The accepted set is deliberately SMALL and symmetric. It is not
+/// `motion::admitted`'s rule and must not be confused with it: that rule
+/// reads a user's `/env` file, where "absent means on" is the whole point,
+/// and reaching this verb at all means the session HAS decided. A word this
+/// does not know is an error rather than a default, because the sender is
+/// the seat and a seat that cannot spell its own verb is a bug, not a user.
+pub fn motion_word(rest: &str) -> Option<bool> {
+    match rest.trim() {
+        "1" | "on" => Some(true),
+        "0" | "off" => Some(false),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    /// The verb's vocabulary, pinned in BOTH directions -- an accepted word
+    /// that should not be, and a refused word that should not be. The
+    /// `/env` rule is the discrimination that matters: there, absence and an
+    /// empty file both mean ON (section 9.5 as amended), and if this verb
+    /// shared that rule a malformed push from the seat would silently read
+    /// as "animate". It does not; it refuses.
+    #[test]
+    fn the_motion_verb_refuses_what_the_env_rule_would_admit() {
+        assert_eq!(motion_word("1"), Some(true));
+        assert_eq!(motion_word("on"), Some(true));
+        assert_eq!(motion_word("0"), Some(false));
+        assert_eq!(motion_word("off"), Some(false));
+        assert_eq!(motion_word(" 1 \n"), Some(true), "trimmed, as the lever is");
+        assert_eq!(motion_word(""), None, "an empty word is NOT on -- the /env rule's default does not reach here");
+        assert_eq!(motion_word("true"), None);
+        assert_eq!(motion_word("00"), None, "only the exact words");
+        assert_eq!(motion_word("1 1"), None);
+    }
+
     use super::*;
     use alloc::vec;
 

@@ -135,9 +135,14 @@ const HALCYON_SCALE_ENV_PATH: &str = "/env/HALCYON_SCALE";
 /// The user's motion preference (HALCYON-INSTRUMENT 9.5 as amended at I-8):
 /// motion is ON and `0` is the opt-out. Read at session start exactly as the
 /// scale is, and for the same stated reason -- a user's preference rather
-/// than a guess made on their behalf. Unlike the scale it is NOT forwarded to
-/// the compositor: what it governs here is halcyond's own paint (section 10's
-/// caret blink), and the compositor's own motion reads its own lever.
+/// than a guess made on their behalf.
+///
+/// It is read ONCE, here, and used twice: halcyond's own paint (section 10's
+/// caret blink) and the compositor's, which learns it as the `motion` verb.
+/// tapestryd reads no file of any kind, so section 9.5's "the compositor
+/// following" can only mean the seat forwarding what it read -- one reader of
+/// the user's preference, one owner of the motion it drives (section 10 as
+/// amended 2026-09-16).
 const HALCYON_MOTION_ENV_PATH: &str = "/env/HALCYON_MOTION";
 
 /// How many connect iterations tolerate a refused `session on` before the
@@ -1309,6 +1314,35 @@ fn request_env_scale(ring: &EventRing) {
     say!("halcyond: scale {} not admitted (budget) ({})", pct, HALCYON_SCALE_ENV_PATH);
 }
 
+/// Forward the motion preference to the compositor as the gated `motion`
+/// verb (section 10 as amended). The seat-held-while-hosting rule admits it
+/// exactly as it admits `scale`; undeclared it would be refused, so the
+/// caller gates on `declared` and the compositor's own default (on) stands.
+///
+/// Sent even when it agrees with that default: the compositor cannot tell
+/// "the user asked for motion" from "nobody has said anything yet", and a
+/// preference that is only transmitted when it differs is a preference the
+/// receiver can never distinguish from silence.
+fn request_env_motion(ring: &EventRing, on: bool) {
+    let cmd = if on { "motion 1" } else { "motion 0" };
+    for _ in 0..VERB_RETRIES {
+        match ring.global_ctl(cmd) {
+            Ok(()) => {
+                say!("halcyond: {} forwarded ({})", cmd, HALCYON_MOTION_ENV_PATH);
+                return;
+            }
+            Err(TapError::Busy) => {
+                let _ = sleep(Duration::from_millis(VERB_NAP_MS));
+            }
+            Err(e) => {
+                say!("halcyond: {} refused {:?}", cmd, e);
+                return;
+            }
+        }
+    }
+    say!("halcyond: {} not admitted (budget)", cmd);
+}
+
 /// The motion preference's WORD, said once with the posture it resolves to.
 ///
 /// The word is kept rather than the verdict because `motion::admitted` folds
@@ -1474,9 +1508,15 @@ pub fn run(home: Option<String>) -> i64 {
     if declared {
         request_env_scale(&ring);
     }
-    // The motion preference needs no seat and no verb -- it is halcyond's own
-    // paint decision -- so it is read whether or not the declare took.
+    // Read unconditionally -- halcyond's own caret needs it whether or not the
+    // declare took -- but FORWARDED only once declared and hosting, which is
+    // the only state in which the compositor will accept the verb.
     let motion_word = env_motion_word();
+    if declared {
+        // The STATED word, not `admitted`'s verdict: the clock conjunct is
+        // the reader's, and the compositor's clock is its own frame tick.
+        request_env_motion(&ring, libhalcyon::motion::stated(motion_word.as_deref()));
+    }
     // A scale the table does not know is kept out of the sheet (r2 B-F11:
     // the /env path validated, the compositor's did not); said once per value.
     let mut scale_refused: Option<u16> = None;

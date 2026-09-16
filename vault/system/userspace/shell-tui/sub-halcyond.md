@@ -260,6 +260,17 @@ the CONTINUOUS tweens of section 10 (I-8c-3); applied to a square wave it
 would wake about 34 times per visible change and paint nothing on 33 of
 them.
 
+**The preference is read ONCE and used TWICE (I-8c-3a).** `env_motion_word`
+reads `/env/HALCYON_MOTION` unconditionally, because halcyond's own caret
+needs it whether or not the declare took; `request_env_motion` then forwards
+`motion::stated`'s word to the compositor as the gated `motion` verb, but only
+once declared and hosting, which is the only state in which that verb is
+accepted. It is sent even when it agrees with the compositor's default,
+because the compositor cannot otherwise tell "the user asked for motion" from
+"nobody has said anything yet". What travels is the WORD, not `admitted`'s
+verdict: the clock conjunct is the reader's, and the compositor's clock is its
+own frame tick.
+
 **The cost, stated.** An idle session with a live cursor now wakes and
 repaints about 1.8 times a second forever, where before it slept to the
 minute clock. That is the price of a blinking caret and the lever is the

@@ -57,9 +57,22 @@ pub const FRAME_MS: i32 = 16;
 /// fallback invented here: it is a mode section 9.5 already specifies and
 /// supports.
 pub fn admitted(word: Option<&str>, now_ns: u64) -> bool {
-    if now_ns == 0 {
-        return false;
-    }
+    now_ns != 0 && stated(word)
+}
+
+/// The user's STATED preference, from the word ALONE -- [`admitted`] without
+/// its clock conjunct.
+///
+/// Split out because the two conditions belong to different parties. The word
+/// is the USER's and travels: the session reads it once and forwards it to the
+/// compositor, which cannot read the user's `/env` at all. The clock is the
+/// READER's, and the two readers do not even share a substrate -- halcyond
+/// animates against `monotonic_ns` deadlines while tapestryd animates against
+/// its own `Instant`-paced frame tick. Forwarding the folded verdict would
+/// therefore hand the compositor one process's clock fault dressed as the
+/// other process's user preference, and turn animations off on a machine whose
+/// compositor clock is fine.
+pub fn stated(word: Option<&str>) -> bool {
     !matches!(word.map(str::trim), Some("0"))
 }
 
@@ -264,6 +277,23 @@ mod tests {
         assert!(!admitted(None, 0), "monotonic_ns is fail-soft 0; do not animate on it");
         assert!(admitted(None, 1), "the control: a live clock admits motion");
         assert!(!admitted(Some("1"), 0), "an explicit yes does not override a dead clock");
+    }
+
+    /// The word rule and the clock rule come apart exactly where they
+    /// should: a dead clock refuses `admitted` while `stated` still reports
+    /// what the user asked for, which is what the session forwards to a
+    /// compositor whose own clock is a different clock.
+    #[test]
+    fn stated_is_the_word_alone_and_admitted_adds_the_clock() {
+        assert!(stated(None), "absent means on");
+        assert!(!stated(Some("0")));
+        assert!(stated(Some("1")));
+        assert!(!admitted(None, 0), "the clock refuses");
+        assert!(stated(None), "but the user still asked for motion");
+        for w in [None, Some("0"), Some("1"), Some(""), Some(" 0\n")] {
+            assert_eq!(admitted(w, 7), stated(w), "a live clock leaves the word alone: {:?}", w);
+            assert!(!admitted(w, 0), "a dead clock refuses everything: {:?}", w);
+        }
     }
 
     /// Section 9.5 as amended: motion is ON by default and `0` is the

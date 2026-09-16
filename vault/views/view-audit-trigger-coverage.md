@@ -40,13 +40,14 @@ that would catch it — has the owning dossier been updated since the row last
 changed on main? — is the next increment, tracked as task #169.
 
 <!-- generated:begin -->
-**151 declared surfaces · 146 covered by a hard-audit dossier · 4 soft-owned · 1 unowned · 0 unparsed · 18 cited path(s) that do not resolve.**
+**152 declared surfaces · 147 covered by a hard-audit dossier · 4 soft-owned · 1 unowned · 0 unparsed · 19 cited path(s) that do not resolve.**
 
 ### Cited paths that do not resolve
 
 | declared surface | cited path | |
 |---|---|---|
 | **HALCYON-INSTRUMENT I-1: the second theme schema + the dispatching lo… | `usr/lib/halcyon/themes/{13` | no such file in the tree |
+| **HALCYON-INSTRUMENT I-8c-3a: the `motion` verb -- a fifth member of t… | `lib/halcyon` | no such file in the tree |
 | **HAUL: the npxf secure channel -- a second implementation of a hand-r… | `lib/bin` | no such file in the tree |
 | A-5c RECOVER recovery keyslot (corvus) | `usr/corvus-mint` | no such file in the tree |
 | Hardware allowance / I-34 (Menagerie build-arc 2) | `kernel/libt/libthyla-rs` | no such file in the tree |

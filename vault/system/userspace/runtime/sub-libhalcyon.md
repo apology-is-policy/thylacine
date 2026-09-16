@@ -569,6 +569,18 @@ invented for the occasion.
 I-8, operator-answered): absent, empty, and any other word all mean on,
 trimmed exactly as the scale lever trims.
 
+**`stated` and `admitted` came apart at I-8c-3a, because their two conditions
+belong to different parties.** The WORD is the user's and it TRAVELS: the
+session reads it once and forwards it to [[sub-tapestryd]] as the `motion`
+verb, because the compositor cannot read the user's `/env` at all. The CLOCK
+is the reader's, and the two readers do not even share a substrate --
+[[sub-halcyond]] animates against `monotonic_ns` deadlines while the
+compositor animates against its own `Instant`-paced frame tick. Forwarding
+`admitted`'s folded verdict would therefore hand the compositor one process's
+clock fault dressed as the other process's user preference, turning
+animations off on a machine whose compositor clock is fine. `admitted` is now
+`now_ns != 0 && stated(word)`, so the word rule still has exactly one home.
+
 **`fold_timeout` is one reducer where the two halcyond loops had two.** The
 console's poll timeout is always positive and was reduced with `min`; the
 session's carries the `-1`-means-infinite sentinel and needed a guarded

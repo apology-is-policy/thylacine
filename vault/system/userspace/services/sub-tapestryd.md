@@ -1160,6 +1160,49 @@ at v1.0 (one session; trusted system daemons; a hostile same-user program is
 degradation, no crash. The fix (block a subtree containing a FOREIGN-owned
 empty leaf) refines the ratified 13.6 rule and lands with the multi-seat seam.
 
+## The `motion` verb -- a preference the compositor cannot read for itself (2026-09-16, I-8c-3a)
+
+`Comp.motion` decides whether tapestryd's OWN transitions run
+(HALCYON-INSTRUMENT 10 + 9.5 as amended). It is the fifth member of the
+apply-authority gate's seat set, beside `menu`, `tag ... status`, `scale` and
+`theme`, and it is there for the reason `theme` is: the preference lives in
+`/env/HALCYON_MOTION`, in the USER's environment, which this process is not
+entitled to read. **tapestryd reads no file of any kind** -- that is what
+9.5's "the compositor following" resolves to here, and it is why the channel
+is a verb rather than a second reader of the same lever.
+
+It defaults ON, which is 9.5's own default and therefore the right posture
+under the console renderer, where there is no session and so no preference to
+forward.
+
+**Not a layout verb, and so not budgeted like one.** `scale` and `theme` take
+`layout_verb_budget` because they move metrics and force a carve; `motion`
+moves no geometry and forces nothing. It only decides whether transitions the
+frame clock already drives are allowed to run.
+
+**The parse lives in [[sub-tapestryd]]'s lib, not in `server.rs`.** Same
+reason as `track_glow`: the bin has no host witness, so a verb parsed there
+could widen or narrow its vocabulary unmeasured. `pane::motion_word` accepts
+exactly `1`/`on`/`0`/`off` and REFUSES everything else -- deliberately NOT
+`libhalcyon::motion::admitted`'s rule, where absence and an empty word both
+mean ON. That default exists because a user who has written no file has stated
+nothing; reaching this verb at all means the seat HAS decided, so an
+unrecognised word is a sender bug and is answered `E_INVAL`.
+
+**The clock conjunct does not travel with the word.** `motion::admitted` folds
+the user's word with a live `monotonic_ns` sample, but the session forwards
+`motion::stated` -- the word alone. The two readers do not share a clock
+substrate: halcyond animates against `monotonic_ns` deadlines and tapestryd
+against its own `Instant`-paced frame tick, so forwarding the folded verdict
+would hand the compositor one process's clock fault dressed as the other
+process's user preference.
+
+**Said on a change only.** A session re-forwarding the default at every login
+would otherwise print a line per login saying nothing happened. The
+DISCRIMINATING witness is therefore halcyond's side: `motion 1 forwarded`
+prints only on `Ok(())`, so it reports that the gate admitted the verb and the
+parse accepted it -- a missing gate conjunct says `refused E_PERM` instead.
+
 ## Backgrounded-leaf tiling, structural transparency, and the hosting-fan defect (2026-09-05, KT-1.5d-3 F2)
 
 **Context the dossier lacked.** Since KT-1.5d-1b a SESSION (a logged-in

@@ -1792,6 +1792,45 @@ as a gated verb. The comment was a prediction about a mechanism that does not
 exist, and the amendment now says so; correcting it is owed by the next
 commit.
 
+### I-8c-3a: the verb, and the sentence that told me where to put it
+
+The expansion fork left two chunks needing the same thing first -- the
+compositor has to know whether motion is allowed, and it cannot find out. A
+grep settled it: tapestryd reads **no file of any kind**. Zero hits for
+`/env`, for `lib/halcyon`, for `read_file`, anywhere in its sources. So 9.5's
+"the compositor following" was never going to mean a second reader of the same
+lever; it means what it means for the scale, and the scale is a gated verb.
+
+That also made my own I-8c-2 doc comment wrong -- it had predicted "the
+compositor's own motion reads its own lever" -- and the scripture commit says
+so rather than quietly fixing it.
+
+**The verb's vocabulary is deliberately not the lever's.** `/env` reading says
+absence and an empty file both mean ON, because a user who wrote no file has
+stated nothing. If the verb inherited that rule, a malformed push from the seat
+would silently read as "animate". Reaching the verb at all means the seat HAS
+decided, so an unknown word is a sender bug and answers `E_INVAL`. The witness
+asserts exactly that asymmetry, and the sabotage that adds `"" => Some(true)`
+trips it.
+
+**The clock conjunct does not travel with the word.** I first forwarded
+`admitted(word, now)` and then noticed what that means: `admitted` folds the
+user's preference with *halcyond's* `monotonic_ns` sample, and tapestryd does
+not animate on `monotonic_ns` at all -- it animates on its own `Instant`-paced
+frame tick. Forwarding the folded verdict would hand the compositor one
+process's clock fault dressed as the other process's user preference, and turn
+animations off on a machine whose compositor clock is fine. So `admitted` split
+into `stated` (the word) and the clock check, and the session forwards the word.
+
+**A message that was true about the wrong sender.** `set_motion` hard-coded
+"(session)" in its log line, but the renderer passes that gate unconditionally.
+No renderer sends it today -- the console renderer reads no `/env` -- but a line
+that asserts its sender rather than naming it is the shape that goes wrong
+later. It now names the peer, as the theme verb does. That change landed AFTER
+a gate run that had already passed with the witness present, so the image was
+re-baked and re-gated rather than argued equivalent: I had already been wrong
+once this session arguing a delta was invisible.
+
 ## Run 46o (2026-09-14, Fable 5.1 max) -- the Halcyon Instrument arc opens: reading the Carbon Optics kit against the tree
 
 ### What this run was for

@@ -1766,6 +1766,16 @@ pub struct Comp {
     /// The FRAME clock (section 18.4): a synthesized fixed-rate tick.
     pub tick: u64,
     pub clock_hz: u32,
+    /// HALCYON-INSTRUMENT 10 + 9.5 as amended: do the compositor's own
+    /// transitions run? Pushed by the DECLARED session as the `motion` verb,
+    /// on exactly the `scale` terms and for the same reason -- the user's
+    /// preference lives in the user's `/env`, which this process is not
+    /// entitled to read, so the seat reads it once and forwards it.
+    ///
+    /// Defaults ON, which is section 9.5's own default and therefore also
+    /// the right posture under the console renderer, where there is no
+    /// session and so no preference to forward.
+    pub motion: bool,
     /// Present-pressure buckets (#164; see PRESENT_BURST_WINDOW_MS).
     /// Single-threaded like all of Comp -- written by `present()`, read
     /// by the main loop's tick-rate decision, same loop pass.
@@ -2520,6 +2530,7 @@ impl Comp {
             session_conns: Vec::new(),
             tick: 0,
             clock_hz: 60,
+            motion: true,
             present_bucket_start: None,
             present_bucket_count: 0,
             present_prev_count: 0,
@@ -4291,6 +4302,25 @@ impl Comp {
         }
         self.retire_stale_rail();
         self.reconcile();
+    }
+
+    /// Adopt the seat's motion preference. Said on a CHANGE only, like every
+    /// other adopted preference -- a session re-forwarding the default on
+    /// every start would otherwise print a line per login saying nothing
+    /// happened.
+    ///
+    /// Nothing else is owed here yet: no compositor transition exists until
+    /// I-8c-3b, and the flag is read where each one is decided rather than
+    /// latched into anything now. A transition that is RUNNING when this
+    /// flips is a question for the chunk that builds one, and turning motion
+    /// off must land it at its final state rather than freeze it -- the same
+    /// rule `libhalcyon::motion::phase` already takes on a dead clock.
+    pub fn set_motion(&mut self, on: bool, who: &str) {
+        if self.motion == on {
+            return;
+        }
+        self.motion = on;
+        say!("tapestryd: motion {} ({})", if on { "on" } else { "off" }, who);
     }
 
     fn apply_scale(&mut self, pct: u16, why: &str) {
@@ -17923,12 +17953,22 @@ impl Conn {
         let session_theme_verb = s.starts_with("theme ")
             && comp.session_declared(self.conn_id)
             && comp.conn_hosts(self.conn_id);
+        // HALCYON-INSTRUMENT 10 / 9.5 as amended: motion is the SEAT's, on
+        // exactly the `scale` and `theme` terms. The preference lives in the
+        // user's `/env`, which this process cannot read, so the declared
+        // session that is hosting forwards it. A per-process client turning
+        // another principal's animations off is the same cfg-3 lie the three
+        // verbs above refuse.
+        let session_motion_verb = s.starts_with("motion ")
+            && comp.session_declared(self.conn_id)
+            && comp.conn_hosts(self.conn_id);
         if !Self::is_ungated_ctl(s)
             && !self.peer_is_renderer()
             && !session_menu_verb
             && !session_status_verb
             && !session_scale_verb
             && !session_theme_verb
+            && !session_motion_verb
         {
             return Err(p9::E_PERM);
         }
@@ -17949,6 +17989,22 @@ impl Conn {
                 "session"
             };
             comp.apply_theme(b, who);
+            return Ok(());
+        }
+        if let Some(rest) = s.strip_prefix("motion ") {
+            // NOT budgeted like a layout verb, because it is not one: it
+            // moves no geometry and forces no carve. It only decides whether
+            // the transitions the frame clock already drives are allowed to
+            // run.
+            let Some(on) = pane::motion_word(rest) else {
+                return Err(p9::E_INVAL);
+            };
+            // The renderer passes the gate unconditionally, so the sender is
+            // not always the session even though the session is the only one
+            // that has a preference to forward. Named from the peer, as the
+            // theme verb names it, rather than asserted.
+            let who = if self.peer_is_renderer() { "renderer" } else { "session" };
+            comp.set_motion(on, who);
             return Ok(());
         }
         if let Some(rest) = s.strip_prefix("scale ") {
