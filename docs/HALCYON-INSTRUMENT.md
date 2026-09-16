@@ -1778,6 +1778,54 @@ declaring its shadow at `menu place` — was rejected: it changes a
 renderer-gated verb's grammar and puts a presentation value on the wire, for a
 difference the cap had already made invisible.
 
+**REVISED AGAIN THAT AFTERNOON: a MENU carries only the kit's drop shadow, a
+DIALOG keeps the backdrop, and NOTHING FREEZES (2026-09-16, operator-answered,
+after driving the full-viewport build).** The operator: "the freezing and the
+darkening of the whole viewport feels too dramatic for a menu -- it feels like a
+SAK episode." The kit agrees, and had all along: its theme menu is
+`.theme-menu { box-shadow: 0 20px 55px rgba(0,0,0,.32) }` with no backdrop,
+and `dialog::backdrop` reaches only a `<dialog>` opened with `showModal()` --
+the help card. So:
+
+1. **Menus** -- the tile verb menu, the theme picker, the workspace list --
+   carry the kit's drop shadow and nothing else.
+2. **Dialogs** -- the §14.5 confirmations -- and the keyboard reference (the
+   kit's help card) keep the backdrop (`rgb(3,4,4)` at .72, blur 3) and their
+   shadow.
+3. **Nothing freezes, for either.** An effect is applied to pixels AS THEY ARE
+   UPLOADED and never stored in the screen buffer: the pixels an upload
+   carries through an effect's region are saved, blended, transferred and
+   restored. The buffer therefore stays the clean scene at all times, so a
+   second application is impossible by construction rather than by exclusion,
+   programs behind a menu or a dialog keep drawing right up to the card's
+   edge, and a dismiss has no darkened pixels to heal. The blend-once-and-
+   suppress design above -- the frozen scene, in both its ring and its
+   full-viewport forms -- is superseded; its reasoning about why a blend must
+   not be re-applied to its own output stands, and is what this mechanism
+   honours. It is the same mechanism the split flash's wiring needs (§10's
+   restore-then-blend-then-push collapses into blend-at-upload), so it is built
+   once for both.
+4. **The class reaches the compositor as one word.** halcyond places a dialog
+   or the reference with `menu place <id> <x> <y> dialog`; a bare placement is
+   a menu. The word names a CLASS the compositor interprets, not a presentation
+   value on the wire -- which is what the rejected shadow declaration below
+   was -- and it undoes that collapse: the compositor can now tell the two
+   cards apart, so each takes the kit's own literal (a menu black .32 at
+   (0,20) blur 55, a dialog black .35 at (0,24) blur 80).
+5. **The display paths.** On the GPU composed path the uploaded region's
+   client pixels live host-side, so an effect's pieces are first composed from
+   the surfaces' weaves into the buffer; a GL adoption has no guest pixels, and
+   an effect cannot sit over one -- that strip shows unaffected, stated rather
+   than hidden.
+
+**Owed at implementation, not decided here:** that a blur applied to a
+sub-rect of an upload equals the same pixels of a whole-display blur (it reads
+a radius-wide margin from the clean buffer, so it should be exact -- to be
+witnessed, not assumed); the per-upload cost the backdrop's blur adds while a
+dialog stands; and the witness plan, since no gate leg reads ink.
+
+*Superseded by the paragraph above, kept as the record:*
+
 **REVERSED THE SAME DAY: the backdrop covers the WHOLE VIEWPORT (2026-09-16,
 operator-answered, after driving the image by hand).** The bounded extent below
 was wrong, and the evidence was visual: a menu drew a hard-edged black
