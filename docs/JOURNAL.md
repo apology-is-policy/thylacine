@@ -1917,6 +1917,108 @@ audit-trigger surface -- on a shrinking budget is how something gets left
 half-written. The survey is banked in `sub-tapestryd` so the next chunk begins
 from facts instead of repeating the discovery.
 
+### The operator drove the image by hand, and seventeen green legs had missed five things
+
+The operator asked for a build to try before the arc went on, and drove it on
+a 2560x1664 QEMU display. They found five things, and every one had passed
+every gate, because every leg reads log lines, none reads ink, and none builds
+a group inside a stack: no pointer; menus drawing a hard-edged dark RECTANGLE;
+a nested group inside a stack whose tiles vanished; Cmd+Tab eaten by macOS;
+and a brief whole-UI flicker on relayout (theirs to defer, and deferred).
+
+The rectangle was a decision I had recommended. The backdrop's region was the
+card grown by its shadow's reach -- `CARD_SHADOW_BLUR` 80 scaled, about 160 px
+at 200 % -- darkened uniformly while the scene outside it stayed untouched, so
+its edge was straight by construction. The vanishing tiles were `host_for`
+nesting a split inside the stack slot when `tyr-quake` opened its window, and
+`place_frame` never modelling a container member: a blank header, the group's
+own tiles numbered from 01 again, and on collapse no descent at all. Hidden,
+not lost -- `focus` reveals a container's first leaf -- but only Super+Tab
+reached it, which macOS had taken. Three blocking questions, all three
+recommendations taken: the backdrop covers the viewport and freezes the scene
+(scripture `c065ec06`); a stack's members are tiles (same commit); QEMU
+`full-grab` plus a `show-cursor` stopgap (`cfcf003c`).
+
+### The clause I had written wrong, caught by reading the kit's code
+
+`c065ec06` also said "a split performed inside a stack adds a tile" and left
+two questions owed. Designing the code, I read the kit rather than my
+paragraph: `IMPLEMENTATION-SPEC.md`'s control table says "Split V -- left/right
+split of focused PANE", its data contract gives a `Stack` only `Vec<TileRef>`,
+and the reference's `splitFocused` replaces the whole pane. The clause was my
+paraphrase, written an hour after I had recorded "read the oracle, not the
+paraphrase" as this run's lesson -- about section 10. The paraphrase that gets
+you is the one you just wrote. Put back to the operator with the kit quoted,
+they chose the kit's split (the new pane lands beside the whole stack, which
+also answers "how do I split beside a stack") plus a Super+N chord for a new
+tile.
+
+Their answer to the third question was a question: given those two answers,
+can a group inside a stack still happen at all? It can, one way -- Super+S acts
+on the focused tile's PARENT, so on the welcome layout with its right pane
+split, Super+S on the left tile would make the right-hand split a stack member.
+They then asked for the scenario drawn, and chose "refuse" from ASCII previews
+of before, refused, flattened and the defect itself. Scripture `4257a4ab`,
+before any code.
+
+### Making a full-viewport backdrop affordable, and a double blend nobody had seen
+
+A display-sized backdrop moved a cost from invisible to felt. cartoon's blur
+summed every tap per pixel: 144 ms over 2560x1664 at the operator's radius
+(host, release profile, measured). `blur_line` now runs its window -- 32 ms,
+flat in the radius -- and the output is IDENTICAL, which is pinned, not
+claimed: the per-tap sum is kept verbatim in the tests as the oracle and
+compared on 216 random fields. The first sabotage I ran PASSED, and it was not
+a gap: moving the subtraction guard from `i > r` to `i >= r` reads a slot that
+is still zero at `i == r`, so the mutation was equivalent. The one that matters
+-- writing the ring before reading the value leaving the window, since both
+live in slot `i % (r + 1)` -- fails two tests.
+
+The dismiss could not be `menu_heal` run display-wide: that repaints every
+header and rail to its resting ground and leaves every tile dimmed until its
+client re-presents, a whole-screen blink exactly where the backdrop was. So the
+dismiss REBUILDS the buffer from what every surface last presented and uploads
+once (`scene_restore`), redrawing only what that cannot reproduce. It is sound
+because a client honouring the buffer-age contract presents whole frames.
+
+Reading the placement path for that turned up a defect older than this fix. A
+MOVE healed the old placement AFTER the new one was set, so the heal's own
+pushes were suppressed and client pixels in the overlap were blended a second
+time -- a ring-sized double darkening before, a screen-sized one now. Effects
+are now laid only over a freshly rebuilt scene. And two holes a display-sized
+freeze would have made visible: `screen_flush_full` never honoured the
+suppression (a tile closing under an open dialog would un-dim the whole
+screen), and a display mode change would have frozen a zeroed new screen with
+only the card on it. The flush now freezes on an already-composed display, and
+a mode change dismisses the card first.
+
+### Stack members are tiles: three points of enforcement, each sabotaged
+
+`split_target` sits inside `split` itself, so no caller can nest into a stack;
+`host_for` joins a stacked tile's stack; `set_mode` refuses a stacking whose
+target holds a container. `split_fits` judges the node `split` actually
+splits, which needed `min_size_hyp` to learn a container target -- pinned at
+248 for a root stack of three split vertically, where the old leaf-level judge
+would say 282. The attempt test the resume note owed builds eight mutations on
+fresh trees and asserts the tree changed iff the attempt succeeded, so a no-op
+cannot satisfy the walk, with legacy as the control that shows the walk can
+fail. Five sabotages, run separately, each caught. A saved layout holding the
+old shape would have made `halcyon layout restore` diverge at its first split,
+so the tool lays such members flat under Instrument (`flatten_stack_members`,
+every tile kept, the open one still open), resolving the profile through
+`resolve_profile`, extracted unchanged from `resolve_bundle`.
+
+The gate, by content: the Instrument bake with both levers readback-verified,
+then `ls-halcyon-session-instrument` 17/17 at 112 s, first attempt, hvf; the
+keyboard reference read 17 rows where it read 16, and six menus were placed and
+dismissed on live frames. Code `447845d6`. No leg reads ink or drives Super+N,
+a split on a stacked tile or a refused stacking, so the operator's re-check is
+the witness this chunk actually needs. The mac was aux's (the ut `$status`
+fix, whose root cause aux found the same hour: every read of `$status` inside
+the next statement saw a reset added at U-6f); aux released it between rounds
+so the operator was not kept waiting.
+
+
 ## Run 46o (2026-09-14, Fable 5.1 max) -- the Halcyon Instrument arc opens: reading the Carbon Optics kit against the tree
 
 ### What this run was for
