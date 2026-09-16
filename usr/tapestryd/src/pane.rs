@@ -3418,8 +3418,134 @@ pub fn motion_word(rest: &str) -> Option<bool> {
     }
 }
 
+/// The split flash at one instant (HALCYON-INSTRUMENT section 10; the kit's
+/// `.split-flash`).
+///
+/// One rect carries both the translucent fill and the 1 px border, because
+/// the kit draws them on one element: `inset: 5px; border: 1px solid
+/// var(--amber); background: rgba(213,154,66,.04)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SplitFlash {
+    /// The pane's interior inset 5 logical px, at `pct`.
+    pub rect: Rect,
+    /// The fill: section 10's LITERAL amber, its .04 faded by the curve.
+    pub fill: u32,
+    pub fill_alpha: u8,
+    /// The border: the theme's `amber` TOKEN -- section 10 says only the
+    /// fill is a literal -- at full opacity faded by the same curve.
+    pub border: u32,
+    pub border_alpha: u8,
+    pub border_w: u32,
+}
+
+/// The split flash `elapsed_ms` into its 250 ms, or None once it is over.
+///
+/// Pure, and in the lib because `server.rs` has no host witness -- the same
+/// reason `track_glow` and `menu_effects` live here.
+///
+/// The curve fades BOTH inks together, which is what `opacity` on one element
+/// means: the kit's `@keyframes flash { to { opacity: 0 } }` animates the
+/// element, not its background. Writing the fill as fading while the border
+/// held would be a different picture entirely, and a plausible one.
+///
+/// The kit's keyframe also carries `transform: scale(.99)`. Section 10 states
+/// the fill, the border and the duration and NOT the scale, so it is not
+/// built; it is recorded here so a later reader can tell a deliberate
+/// omission from an oversight.
+pub fn split_flash(pane: Rect, amber: u32, pct: u16, elapsed_ms: u64) -> Option<SplitFlash> {
+    use libhalcyon::instrument::effects;
+    let dur = effects::SPLIT_FLASH_MS as u64;
+    if elapsed_ms >= dur {
+        return None;
+    }
+    let inset = libhalcyon::scale::ipx(SPLIT_FLASH_INSET, pct).max(0) as u32;
+    // A pane too small to hold both insets has no interior to flash. Checked
+    // before the subtraction, which is unsigned.
+    if pane.w <= inset * 2 || pane.h <= inset * 2 {
+        return None;
+    }
+    let rect = Rect {
+        x: pane.x + inset,
+        y: pane.y + inset,
+        w: pane.w - inset * 2,
+        h: pane.h - inset * 2,
+    };
+    // opacity 1 -> 0 on CSS `ease-out`, so the remaining opacity is 1 minus
+    // the eased progress.
+    let progress = elapsed_ms as f32 / dur as f32;
+    let opacity = 1.0 - libhalcyon::motion::ease_out(progress);
+    let fade = |a: u8| ((a as f32) * opacity + 0.5) as u8;
+    Some(SplitFlash {
+        rect,
+        fill: effects::SPLIT_FLASH,
+        fill_alpha: fade(effects::SPLIT_FLASH_ALPHA),
+        border: amber,
+        border_alpha: fade(255),
+        border_w: libhalcyon::scale::ipx(1, pct).max(1) as u32,
+    })
+}
+
+/// The kit's `.split-flash { inset: 5px }`, in logical px.
+const SPLIT_FLASH_INSET: i32 = 5;
+
 #[cfg(test)]
 mod tests {
+    /// The flash's geometry and its fade, against the kit's own rule
+    /// (`inset: 5px`, a 1 px amber border, `rgba(213,154,66,.04)`, 250 ms
+    /// `ease-out` to opacity 0).
+    ///
+    /// The assertion that matters is the last block: BOTH inks fade
+    /// together. `opacity` in the kit applies to the element, so a version
+    /// that faded the fill while the border held would be a different and
+    /// entirely plausible picture -- and one no endpoint check would catch,
+    /// since both agree at 0 ms and the whole thing is gone at 250.
+    #[test]
+    fn the_split_flash_insets_five_and_fades_both_inks_together() {
+        use libhalcyon::instrument::effects;
+        let pane = Rect { x: 100, y: 40, w: 400, h: 300 };
+        let amber = 0xFFAB_CDEF;
+
+        let f = split_flash(pane, amber, 100, 0).expect("live at 0 ms");
+        assert_eq!(f.rect, Rect { x: 105, y: 45, w: 390, h: 290 }, "inset 5 on every side");
+        assert_eq!(f.fill, effects::SPLIT_FLASH, "the fill is section 10's literal");
+        assert_eq!(f.border, amber, "the border is the TOKEN, not a literal");
+        assert_eq!(f.fill_alpha, effects::SPLIT_FLASH_ALPHA, "full strength at 0 ms");
+        assert_eq!(f.border_alpha, 255);
+
+        assert!(split_flash(pane, amber, 100, 250).is_none(), "over at the duration");
+        assert!(split_flash(pane, amber, 100, 9_999).is_none());
+
+        // At 200 the inset doubles; the interior shrinks by 2 x 10.
+        let g = split_flash(pane, amber, 200, 0).expect("live at 200 %");
+        assert_eq!(g.rect, Rect { x: 110, y: 50, w: 380, h: 280 });
+
+        // A pane that cannot hold both insets has no interior to flash --
+        // and the guard runs BEFORE an unsigned subtraction that would wrap.
+        assert!(split_flash(Rect { x: 0, y: 0, w: 10, h: 300 }, amber, 100, 0).is_none());
+        assert!(split_flash(Rect { x: 0, y: 0, w: 400, h: 10 }, amber, 100, 0).is_none());
+        assert!(split_flash(Rect::ZERO, amber, 100, 0).is_none());
+
+        // Both inks fade, monotonically, on ONE curve.
+        let mut prev = (255u8, 255u8);
+        for ms in [0u64, 40, 80, 120, 160, 200, 240] {
+            let f = split_flash(pane, amber, 100, ms).expect("live");
+            assert!(f.fill_alpha <= prev.0 && f.border_alpha <= prev.1, "not monotonic at {}", ms);
+            // The ratio the two inks hold is the one they started with: a
+            // border that stopped fading would break this at every step.
+            let want = (effects::SPLIT_FLASH_ALPHA as u32 * f.border_alpha as u32 + 127) / 255;
+            assert!(
+                (f.fill_alpha as i32 - want as i32).abs() <= 1,
+                "the inks came apart at {} ms: fill {} border {} (want ~{})",
+                ms, f.fill_alpha, f.border_alpha, want
+            );
+            prev = (f.fill_alpha, f.border_alpha);
+        }
+        assert!(
+            split_flash(pane, amber, 100, 240).unwrap().border_alpha < 40,
+            "nearly gone at 240 of 250 ms"
+        );
+    }
+
     /// The verb's vocabulary, pinned in BOTH directions -- an accepted word
     /// that should not be, and a refused word that should not be. The
     /// `/env` rule is the discrimination that matters: there, absence and an

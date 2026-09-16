@@ -1863,6 +1863,32 @@ whose document is the kit. The lesson was already on the books -- write the
 witness from the DOCUMENT -- and I had been applying it to tests while
 treating a paraphrase as the source for design.
 
+### I-8c-4a: the half that needs no screen
+
+Having stopped before the wiring, the flash's geometry and fade still do not
+need a screen to decide, so they landed on their own -- the I-8b-3a precedent,
+where the pure halves went first and the wiring chunk then had nothing left to
+get wrong.
+
+The assertion worth having is that BOTH inks fade on one curve. The kit draws
+the fill and the 1 px border on one element and animates its `opacity`, so
+they cannot come apart -- but a version that faded the fill while the border
+held is entirely plausible, and no endpoint check could see it, because both
+agree at 0 ms and both are gone at 250. So the witness pins the RATIO the two
+hold across the span, and the sabotage that freezes the border trips it.
+
+Two smaller things the types forced. `Rect` is all `u32`, so a pane narrower
+than two insets would WRAP rather than clamp -- the guard runs before the
+subtraction, not as a clamp after it, and removing it trips the witness. And
+`ease_out` is named as the CSS keyword's definition rather than spelled
+`cubic-bezier(0, 0, .58, 1)` at the call site, where four control points read
+as a tuning knob; its own witness pins `ease_out(0.5) < ease_expand(0.5)`, so
+the flash's curve and the expansion's cannot be swapped.
+
+The kit's keyframe also carries `transform: scale(.99)`, which section 10 does
+not state. Not built, and written down as a choice rather than left to look
+like an oversight.
+
 ### Surveying the compositor's transitions, and stopping before starting them
 
 With the trigger corrected, four of the five transitions are the compositor's

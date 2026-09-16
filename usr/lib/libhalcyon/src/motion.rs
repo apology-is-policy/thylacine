@@ -130,6 +130,24 @@ pub fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, progress: f32) -> f32 {
     bezier_axis(y1, y2, t)
 }
 
+/// CSS `ease-out`, which is `cubic-bezier(0, 0, .58, 1)` by definition.
+///
+/// The split flash's curve (`animation: flash .25s ease-out forwards` in the
+/// kit). Named as the CSS KEYWORD rather than spelled at its call site,
+/// because the four control points are the keyword's definition and not a
+/// choice anyone made here -- a call site that wrote them inline would read
+/// as a tuning knob.
+pub const EASE_OUT_X1: f32 = 0.0;
+pub const EASE_OUT_Y1: f32 = 0.0;
+pub const EASE_OUT_X2: f32 = 0.58;
+pub const EASE_OUT_Y2: f32 = 1.0;
+
+/// CSS `ease-out` applied to `progress`.
+#[inline]
+pub fn ease_out(progress: f32) -> f32 {
+    cubic_bezier(EASE_OUT_X1, EASE_OUT_Y1, EASE_OUT_X2, EASE_OUT_Y2, progress)
+}
+
 /// Section 10's tile expansion curve applied to `progress`.
 #[inline]
 pub fn ease_expand(progress: f32) -> f32 {
@@ -220,6 +238,34 @@ mod tests {
         for i in 0..=20 {
             let v = ease_expand(i as f32 / 20.0);
             assert!((0.0..=1.0).contains(&v), "left the unit interval at {}: {}", i, v);
+            assert!(v >= prev, "not monotonic at {}", i);
+            prev = v;
+        }
+    }
+
+    /// `ease-out` is FRONT-LOADED like the expansion curve but less so, and
+    /// the two must not be interchangeable: a flash that faded on the
+    /// expansion's curve would hold its ink noticeably longer. The last
+    /// assertion is the discriminating one -- it fails if either curve is
+    /// substituted for the other, which an endpoints-and-monotonicity check
+    /// would not see.
+    #[test]
+    fn ease_out_is_the_css_keyword_and_is_not_the_expansion_curve() {
+        assert_eq!(ease_out(0.0), 0.0);
+        assert_eq!(ease_out(1.0), 1.0);
+        assert_eq!((EASE_OUT_X1, EASE_OUT_Y1, EASE_OUT_X2, EASE_OUT_Y2), (0.0, 0.0, 0.58, 1.0));
+        let mid = ease_out(0.5);
+        assert!(mid > 0.5, "front-loaded, got {}", mid);
+        assert!(
+            mid < ease_expand(0.5),
+            "ease-out rises LESS fast than cubic-bezier(.2,.8,.2,1): {} vs {}",
+            mid,
+            ease_expand(0.5)
+        );
+        let mut prev = 0.0;
+        for i in 0..=20 {
+            let v = ease_out(i as f32 / 20.0);
+            assert!((0.0..=1.0).contains(&v), "left the unit interval at {}", i);
             assert!(v >= prev, "not monotonic at {}", i);
             prev = v;
         }

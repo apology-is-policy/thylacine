@@ -596,6 +596,14 @@ no `f32::abs`/`sqrt`/`powi` -- the same gap `round_half_up` works around above
 -- and I-9 compares against goldens, where a convergence-dependent iteration
 count would not reproduce. 20 halvings bound the parameter error at 2^-20.
 
+**`ease_out` is named as the CSS KEYWORD, not spelled at its call site.**
+`cubic-bezier(0, 0, .58, 1)` is the DEFINITION of `ease-out`, not a choice
+anyone made, and four control points inline at a call site read as a tuning
+knob. It is the split flash's curve (`animation: flash .25s ease-out forwards`
+in the kit) and must not be confused with `ease_expand`: the witness pins
+`ease_out(0.5) < ease_expand(0.5)`, which fails if either is substituted for
+the other and which an endpoints-and-monotonicity check cannot see.
+
 **`FRAME_MS` is OURS, and says so in its own doc comment.** Section 10 pins
 durations and curves and states no frame rate, so the 16 ms cadence is a
 compositor-independent choice; a later reader must not cite it as scripture.

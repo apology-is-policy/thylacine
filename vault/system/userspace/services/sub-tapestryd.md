@@ -1203,6 +1203,35 @@ DISCRIMINATING witness is therefore halcyond's side: `motion 1 forwarded`
 prints only on `Ok(())`, so it reports that the gate admitted the verb and the
 parse accepted it -- a missing gate conjunct says `refused E_PERM` instead.
 
+## `split_flash` -- the flash's geometry and fade, before its wiring (2026-09-16, I-8c-4a)
+
+`pane::split_flash(pane, amber, pct, elapsed_ms) -> Option<SplitFlash>` is the
+whole of section 10's split flash that can be decided without a screen: the
+kit's `.split-flash { inset: 5px; border: 1px solid var(--amber); background:
+rgba(213,154,66,.04) }` faded by `animation: flash .25s ease-out forwards`. In
+the lib for the reason `track_glow` and `menu_effects` are -- `server.rs` is
+bin-only and has no host witness -- and landed BEFORE the wiring on the
+I-8b-3a precedent, so the wiring chunk has no geometry left to get wrong.
+
+**One rect carries both inks**, because the kit draws them on one element, and
+**both fade together**, because `opacity` animates the element and not its
+background. A version fading the fill while the border held is a different and
+entirely plausible picture that no endpoint check would catch -- both agree at
+0 ms and both are gone at 250 -- so the witness pins the RATIO the two inks
+hold across the whole span.
+
+**The fill is section 10's literal and the border is the TOKEN.** Section 10
+says only the fill is a literal, so the border takes the theme's `amber`; the
+sabotage that swaps in the literal trips the witness.
+
+**The degenerate guard runs before an unsigned subtraction.** `Rect` is all
+`u32`, so a pane narrower than two insets would WRAP rather than clamp; the
+check is `pane.w <= inset * 2` before the subtraction, not a clamp after it.
+
+**Not built, and recorded as a choice**: the kit's keyframe also carries
+`transform: scale(.99)`. Section 10 states the fill, the border and the
+duration and NOT the scale, so it is omitted deliberately rather than missed.
+
 ## What a compositor-side TRANSITION would need, surveyed (2026-09-16, ahead of I-8c-3b / I-8c-4)
 
 Four of section 10's five transitions are the compositor's, and all four want
