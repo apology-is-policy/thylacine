@@ -202,6 +202,28 @@ also corrected my own claim in `manual.exp`'s header, which said ut exports
 `BEACON=none` on this image; it exports `cells`, which the reader renders
 identically to plain.
 
+**Operator decision (AskUserQuestion, 2026-09-16): bind the environment at
+open.** An `/env` file handle will act on the environment of the process that
+opened it, whoever later reads or writes through it: Plan 9's `c->aux` shape,
+used there for `#ec`. Rejected: sharing the environment at spawn (a child's
+setenv would change its parent, against what ported POSIX programs expect), and
+keeping the kernel as-is with an `export` builtin in ut (the redirect would stay
+a silent footgun). The work goes design-first because both halves are ratified:
+ARCH 9.7 and the `/env` audit row change before `kernel/devenv.c`, then tests
+and a Fable audit. Main was told on yip 0092, since the kernel is shared.
+
+**The manual reader's focused review** (holotype-reviewer, Fable 5.1 start to
+end) returned 0 P0 / 1 P1 / 2 P2 / 8 P3, all open at this entry. The P1 is the
+one that matters: the binary's 16 MiB heap is exceeded well inside the 1 MiB
+section cap. One-word paragraphs cost about 100 bytes of heap per input byte
+(1 MiB of them peaks at 104 MiB), and the out-of-memory path in libthyla-rs is a
+panic straight to exit 1, so the reader fails silently. `main.rs`'s comment had
+asserted "a small multiple". The P2s: `scan` looks up a character's line by
+walking every line of the block, which is quadratic on ordinary prose (a 1 MiB
+paragraph of one-character lines takes 105 s), and nothing witnesses that a file
+failing the check is not displayed. The full list is in memory
+`audit_manual_closed_list`.
+
 ---
 ## 2026-09-10 (aux, run 9, post self-compact) -- the Halcyon SESSION-path inline-media channel (I-47, HALCYON 14.7.2): per-pane routing on the existing /srv+9P mechanism
 
