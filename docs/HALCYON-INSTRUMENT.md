@@ -607,14 +607,51 @@ had no header, no body and no visibility. They were hidden, not lost —
 Super+Tab, which macOS had taken, and the blank strip is not a hit target. The
 operator found it by running `tyr-quake` in a stacked tile.
 
-**Ratified:** a window opened from a stacked tile JOINS THE STACK as a new tile,
-and a split performed inside a stack adds a tile rather than a sub-pane.
+**Ratified:** a window opened from a stacked tile JOINS THE STACK as a new tile.
 Whether a container member is refused, flattened or prevented upstream is the
 implementation's to decide, but the invariant is the one below: one header per
-TILE, and a stack's children are leaves. **Owed at implementation, and not
+TILE, and a stack's children are leaves.
+
+**The split, and the two questions left owed above, answered the same day
+(2026-09-16, operator-answered, from the kit rather than from this section).**
+The paragraph as first landed also ratified that "a split performed inside a
+stack adds a tile rather than a sub-pane", and that clause was a paraphrase,
+not the kit. The kit's split acts on the PANE: `IMPLEMENTATION-SPEC.md`'s
+control table reads "Split V / Alt+V — left/right split of focused pane", its
+data contract is `SpatialNode::Stack { tiles: Vec<TileRef> }` beside
+`Split { first, second }` — a stack's children are tiles, a split's are nodes —
+and the reference's `splitFocused` replaces the whole pane with a split of it.
+Under the Instrument profile (the legacy profile's i3 tree is unchanged):
+
+1. **A split on a stacked tile splits the whole stack.** Super+H / Super+V and
+   the `split` verb on a leaf whose parent is `Stacked` or `Tabbed` act on that
+   container: the new pane, with its own new tile, lands BESIDE the stack —
+   flattening into the stack's parent when that parent already has the split's
+   mode, nesting otherwise. This is also how a user splits beside a stack: the
+   same chord, so nothing new is owed there.
+2. **Super+N opens a new tile in the focused pane** (`NewTile`, a Halcyon chord
+   the kit does not have, because the kit's tiles are fixtures). The new empty
+   leaf joins the focused tile's stack, or turns a lone tile into a stack of
+   two, and the session fills it with a shell exactly as it fills a split's.
+   A program's window from a stacked tile already joins the stack (above).
+3. **Stacking a group that holds a split is REFUSED.** `Super+S`,
+   `Super+Shift+T` and the `mode` verb act on the focused tile's parent; when
+   that parent has a container child, the mode change is refused and nothing
+   changes (said, like a minima refusal). Stacking still works wherever the
+   siblings are all tiles — from the welcome layout with its right pane split,
+   Super+S on a right-hand tile stacks the right side, and on the left tile it
+   is refused.
+4. **A saved layout that already holds a container member restores FLAT**: the
+   member's tiles, in order, take its place in the stack, so every tile
+   survives (the kit: an already-loaded layout "must retain data ... not delete
+   tiles"). Only the nested arrangement is lost, and it was never renderable.
+
+*As first landed (c065ec06), kept as the record:* "a window opened from a
+stacked tile JOINS THE STACK as a new tile, and a split performed inside a
+stack adds a tile rather than a sub-pane. ... **Owed at implementation, and not
 decided here:** how a user splits a new pane BESIDE a stack, now that a split
 chord on a stacked tile no longer does it — and what becomes of a tree that
-already holds a container member (a saved layout, a restore).
+already holds a container member (a saved layout, a restore)."
 
 ### 6.2 Invariants
 
@@ -636,6 +673,10 @@ already holds a container member (a saved layout, a restore).
    independent facts.
 8. A tile keeps its scroll anchor, selection and process state across
    focus, expansion, theme, resize and header changes.
+9. A stack's children are leaves: no mutation builds a container inside a
+   `Stacked` or `Tabbed` container (§6.1 — the split acts on the stack, a
+   window joins it, a stacking of a group holding a split is refused, a restore
+   lays a saved member flat).
 
 ### 6.3 The header surface
 
@@ -1428,7 +1469,8 @@ user stack at compile time.
 |---|---|
 | Alt + arrows: focus a neighbour | Super + arrows (`FocusDir`; the compositor's own rule, not the mockup's centre-distance — recorded as a deliberate difference) |
 | Alt + J / K: next / previous tile | the cycle chords (`TabCycle`), which walk a stack's children |
-| Alt + H / V: split | Super + H / V (`Split`) — the new pane gets a NEW tile (§9.5) |
+| Alt + H / V: split | Super + H / V (`Split`) — the new pane gets a NEW tile (§9.5); on a stacked tile the split acts on the whole stack (§6.1) |
+| (none — the kit's tiles are fixtures) | Super + N (`NewTile`): a new tile in the focused pane, joining its stack (§6.1) |
 | Close tile | Super + Q (`Close`) on the focused leaf, with the §6.5 protections |
 | Workspace N | Super + 1..9 switches; Super + Shift + 1..9 moves the focused tile (ruling 13; HALCYON-WORKSPACES §4; free keys) |
 | Theme picker | Super + T (ruling 13); `SetMode Tabbed`, which holds Super + T today, moves to Super + Shift + T |
