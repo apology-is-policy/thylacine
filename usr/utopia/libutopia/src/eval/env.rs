@@ -111,6 +111,16 @@ pub struct Env {
     /// register, not a scope binding -- interior mutability models
     /// "every evaluated command updates the register".
     status: Cell<i32>,
+    /// How many command substitutions have run, ever (monotonic). A
+    /// statement that must know whether its own expansion ran a
+    /// substitution compares a reading taken before expanding with one taken
+    /// after: that decides whether the substitution's exit stands as the
+    /// statement's `$status` (scripture 8.7). The status register cannot
+    /// answer this -- a substitution may exit with the very status the
+    /// previous command left -- and a flag cleared before expanding would
+    /// be clobbered by a nested statement. A `Cell` for the same reason as
+    /// `status`.
+    substitutions: Cell<u64>,
     /// $errstr -- last command's error string (rc tradition;
     /// scripture 8.5). Initialized to "".
     errstr: String,
@@ -261,6 +271,7 @@ impl Env {
             fns: BTreeMap::new(),
             note_handlers: BTreeMap::new(),
             status: Cell::new(0),
+            substitutions: Cell::new(0),
             errstr: String::new(),
             cwd: "/".to_string(),
             interactive: false,
@@ -528,6 +539,19 @@ impl Env {
     /// transparently, so every existing call site is unaffected.
     pub fn status_set(&self, code: i32) {
         self.status.set(code);
+    }
+
+    /// The number of command substitutions run so far. Only differences
+    /// between two readings mean anything.
+    pub(crate) fn substitutions(&self) -> u64 {
+        self.substitutions.get()
+    }
+
+    /// Count one command substitution. Called once per substitution, before
+    /// its body runs.
+    pub(crate) fn substitution_ran(&self) {
+        self.substitutions
+            .set(self.substitutions.get().wrapping_add(1));
     }
 
     pub fn errstr(&self) -> &str {

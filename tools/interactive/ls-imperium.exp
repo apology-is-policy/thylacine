@@ -25,10 +25,9 @@
 #       not a tty, so the tool fails fast BEFORE posting.
 #   (6) DENY, an ineligible user: cora (never granted imperium) -> `not eligible`.
 #
-# Witnesses are on the tool's / corvus's / a coreutil's OUTPUT, never on $status
-# (ut does not propagate an external's exit code to $status on the console path
-# -- a pre-existing gap, enqueued separately) and never on the prompt glyph. The
-# fixture key `imperium-key-michael-v1` is joey's boot-ladder grant. Tcl trap:
+# Witnesses are on the tool's / corvus's / a coreutil's OUTPUT, which names what
+# happened where an exit status only says that something failed, and never on
+# the prompt glyph. The fixture key `imperium-key-michael-v1` is joey's boot-ladder grant. Tcl trap:
 # "\001b" is Ctrl-A + b (the monitor BREAK = the SAK); "\x01b" would be ESC.
 
 set ::env(THYLACINE_ACCEL) hvf

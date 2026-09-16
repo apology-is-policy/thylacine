@@ -120,7 +120,8 @@ use libthyla_rs::{t_wait_pid_for, T_WAIT_WNOHANG};
 use super::env::Env;
 use super::error::EvalResult;
 use super::stmt::{
-    eval_source, poll_notes_once, run_foreground_jc, wait_pids_interruptible, StatementFlow,
+    eval_source_as_command, poll_notes_once, run_foreground_jc, wait_pids_interruptible,
+    StatementFlow,
 };
 use super::value::Value;
 
@@ -558,7 +559,7 @@ fn bi_eval(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
     let src = args.join(" ");
     // Evaluate in the CURRENT scope: assignments, exit, and control
     // flow all act on this Env (matching shell `eval`).
-    eval_source(env, &src)
+    eval_source_as_command(env, &src)
 }
 
 // ---------------------------------------------------------------------
@@ -588,7 +589,7 @@ fn bi_source(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
         Ok(s) => s,
         Err(_) => return fail(env, "source: file is not valid UTF-8".to_string(), 1),
     };
-    eval_source(env, src)
+    eval_source_as_command(env, src)
 }
 
 // ---------------------------------------------------------------------

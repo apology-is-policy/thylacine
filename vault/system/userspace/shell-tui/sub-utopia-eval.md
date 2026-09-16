@@ -23,7 +23,7 @@ abis: []
 design:
   - "docs/UTOPIA-SHELL-DESIGN.md sections 5-10"
 created: 2026-08-03
-updated: 2026-09-07
+updated: 2026-09-16
 ---
 ## Purpose
 
@@ -70,11 +70,16 @@ hit wins, a miss falls back to `/bin/<name>` for a clean spawn error; the
 toolchain and phenotype dirs come last so `/bin` stays authoritative, and the
 two `/viv` dirs are `MPHENO_LINUX` mounts so a Linux binary there runs
 seamlessly; a `/`-bearing name is used as-is) and the actual resolution done by
-the kernel against the caller's namespace. There are sixteen builtins (`cd --`
-ends option processing — the one way to enter a directory whose name begins with
+the kernel against the caller's namespace. There are seventeen builtins under
+nineteen names (`source` / `.` and `type` / `whence` are pairs; `cd --` ends
+option processing — the one way to enter a directory whose name begins with
 `-`), and `BUILTIN_NAMES` — the list
 `is_builtin` tests and `type` answers from — agrees exactly with `try_builtin`'s
-dispatch arms.
+dispatch arms. `mount` and `unmount` are builtins for a structural reason their
+module states: Thylacine clones the namespace at every fork, so a mount made by
+a spawned command would land in the child's namespace and vanish with it. They
+landed at `5c22f90d`, whose title says they compile but do not yet work in the
+guest.
 
 ### The external spawn is one chokepoint, and `#!` is shell-side
 
@@ -110,6 +115,41 @@ the block's flow to `Return`, so the failure propagates out of the enclosing
 function or script. Interactive mode suppresses it; the `?` postfix forces it
 regardless of mode. This is `set -e`'s intent with the modes made explicit
 rather than global.
+
+### `$status` is read before it is settled
+
+A statement's words are expanded against the status the *previous* command
+left: `echo $status`, `let saved = $status`, `exit $status`, and a bare `exit`
+(which exits with the current status) all read it. So nothing may reset the
+register before expanding, and what a statement reports is settled afterwards:
+
+- **A command name reports its own exit.** A function body, and the text an
+  `eval` or `source` runs, starts from the caller's status, as in rc and bash,
+  so `fn f { return }` after a failure returns that failure.
+- **A statement with no command of its own** (a `let`, a bare assignment, a
+  line whose words expand to nothing) succeeds, unless a command substitution
+  ran while expanding it. In that case the substitution's exit stands
+  (scripture 8.7: `let output = $(cmd)`). `succeed_unless_substituted` decides
+  this from `Env.substitutions`, a monotonic count bumped once per substitution
+  at `run_command_substitution_script` and read before and after the expansion.
+  Comparing `$status` before and after cannot decide it, because a substitution
+  may exit with the value already in the register.
+- **A body that runs nothing** succeeds: an empty function, an `eval` or
+  `source` whose text holds no statement (`eval_source_as_command`), and an
+  empty `try` body, which therefore never runs its `catch`. `if`, `while`,
+  `for` and `case` already reported 0 when they ran nothing. The REPL calls the
+  plain `eval_source`, so an empty line leaves `$status` alone.
+
+From 2026-06-08 (`e9e0aa92`, command substitution) to 2026-09-16 the order was
+the other way round in `eval_command`, `eval_let` and `eval_assign`: each reset
+`$status` to 0 before expanding, so every read listed above saw 0 while the
+status after each command stayed correct. The multi-element pipeline, redirect
+and substitution-body expansions never had the reset, so `echo $status | tr ...`
+read the true value throughout. Every boot probe read the register from Rust
+(`Env::status`, `Env::get`) rather than through a statement, which is why none
+of them failed. `u-builtin-test` 8b and `u-subst-test` 6b now read it the way a
+script does, one leg per site, and print every failing leg with the value it
+saw.
 
 ### `&&` / `||` short-circuit lists
 
@@ -213,9 +253,10 @@ overflowed anyway. See Prosecution for what that buys and what it costs.
   conversion. `as_int` treats an empty value as 0 and a multi-element value as
   its space-joined form.
 - **`Env`** — the scope stack is a `Vec<BTreeMap<String, Value>>` (BTreeMap
-  because `alloc` has it and `HashMap` would pull in a dependency). `$status`
-  and `eval_depth` are `Cell`s so the `&Env` expression path can write them;
-  every other field is plain.
+  because `alloc` has it and `HashMap` would pull in a dependency). `$status`,
+  `substitutions` (a `u64` count of substitutions run, compared only across two
+  readings) and `eval_depth` are `Cell`s so the `&Env` expression path can
+  write them; every other field is plain.
 - **`JobTable` / `Job`** — a job is a `&`-launched *pipeline*, so it tracks N
   pids and is Done only when all of them are reaped. Specs climb while jobs
   coexist and reset to 1 when the table drains.
@@ -234,9 +275,10 @@ decision about whether a child has finished comes from a `wait_pid_for` call.
 That ordering is what makes a lost, coalesced or mask-deferred note a latency
 event instead of a hang.
 
-Two interior-mutability points exist for one reason each: `$status` so a
+Three interior-mutability points exist for one reason each: `$status` so a
 command substitution reached through `&Env` can record the inner command's exit,
-and `eval_depth` so the same path can charge the shared recursion counter.
+`substitutions` so the same path can count itself, and `eval_depth` so it can
+charge the shared recursion counter.
 
 ## Invariants enforced
 
@@ -301,6 +343,16 @@ one.
   correct by construction rather than by remembering.
 - **Reap truth stays the wait, never the note.** A path that concluded a child
   had exited from a `child_exit` note would break the moment one was coalesced.
+- **A statement settles `$status` after expanding its own words, never before.**
+  A reset placed before the expansion passes every test that reads the register
+  from Rust and silently zeroes every `$status` a script reads. That is exactly
+  how the `e9e0aa92` ordering went unnoticed for three months. A new statement
+  kind, or a new path through an existing one, earns a leg in `u-builtin-test`
+  8b that reads `$status` through a statement.
+- **"A substitution ran" is counted, never inferred.** Any test of the form
+  "`$status` changed during the expansion" misreports a substitution that exits
+  with the value already in the register. `u-subst-test` 6b pins that case
+  (`false` then a bare `$(seq)` line reports 1).
 
 ## Seams
 
@@ -318,6 +370,13 @@ one.
   the deferred half; the table and the expansion already exist.
 - **`**` in a glob is not special-cased** — it behaves as `*`, matching one path
   component, so recursive descent is future work.
+- **Positional parameters are bound but cannot be referenced.**
+  UTOPIA-SHELL-DESIGN 5.5 says *"`$1`, `$2`, ... refer to positional args; `$*`
+  is the list"*, and `invoke_function` and `Repl::run_script` do bind `1`..`N`
+  and `*`. But the lexer starts a variable name only at `[a-zA-Z_]`, so `$1` is
+  a parse error (`EmptyVarName`) and `$*` never lexes. Functions use named
+  parameters (`fn f a b { ... }`). Tracked as #138, a v1.x item in
+  `docs/UT-NORA-ERGONOMICS.md`.
 
 ## Caveats
 

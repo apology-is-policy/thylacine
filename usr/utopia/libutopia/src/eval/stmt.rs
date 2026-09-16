@@ -1265,14 +1265,15 @@ pub fn aggregate_pipefail(elements: &[(i32, bool)]) -> i32 {
 fn eval_command(env: &mut Env, cmd: &Command) -> EvalResult<StatementFlow> {
     match &cmd.kind {
         CommandKind::Simple(simple) => {
-            // Default this command to success BEFORE expanding argv. A
-            // command substitution in the words sets $status to the
-            // inner exit (scripture 8.7); a bare `$(cmd)` line that
-            // expands to nothing must then PRESERVE that exit, while a
-            // substitution-free empty expansion ($undef-only line) still
-            // reports 0. (Setting 0 up front + not resetting on the
-            // empty-argv path achieves both.)
-            env.status_set(0);
+            // The words expand against the status the PREVIOUS command left
+            // (scripture 8.5: `echo $status`), so nothing may reset it before
+            // expanding. This command's own status is decided afterwards: a
+            // command name reports its own exit (a function body starts from
+            // the caller's status, as in rc and bash), and a line that
+            // expands to no command keeps the exit of a substitution it ran
+            // (8.7: a bare `$(cmd)` line) or succeeds if it ran none (a
+            // `$undef`-only line).
+            let substitutions = env.substitutions();
             let argv = evaluate_argv(env, &simple.words)?;
             // SA-1 (RW-9 round-2 self-audit): a Ctrl-C that interrupted a
             // `$(...)` argument latched interrupt_pending while expanding argv.
@@ -1283,6 +1284,7 @@ fn eval_command(env: &mut Env, cmd: &Command) -> EvalResult<StatementFlow> {
                 return Ok(StatementFlow::Normal);
             }
             if argv.is_empty() {
+                succeed_unless_substituted(env, substitutions);
                 return Ok(StatementFlow::Normal);
             }
             // argv[0] is already alias-expanded (evaluate_argv folds it in for
@@ -1354,6 +1356,11 @@ fn invoke_function(
         env.let_set(arg_name.clone(), val);
     }
 
+    // The body starts from the caller's status; one that runs nothing
+    // succeeds.
+    if decl.body.is_empty() {
+        env.status_set(0);
+    }
     let result = eval_block(env, &decl.body);
     env.pop_scope();
 
@@ -1927,6 +1934,9 @@ pub(crate) fn run_command_substitution_script(
     script: &Script,
     span: Span,
 ) -> EvalResult<String> {
+    // Counted before anything can return: `$()` is a substitution too, and
+    // its exit (0) stands for a statement that has no other result.
+    env.substitution_ran();
     // Empty body (`$()` or all-whitespace): a no-op -- empty output, success.
     if script.statements.is_empty() {
         env.status_set(0);
@@ -2189,22 +2199,31 @@ pub(crate) fn split_fields(s: &str) -> Vec<String> {
 // ---------------------------------------------------------------------
 
 fn eval_let(env: &mut Env, stmt: &LetStmt) -> EvalResult<StatementFlow> {
-    // An assignment succeeds (status 0) UNLESS a command substitution in
-    // the RHS fails -- in which case the substitution's non-zero exit
-    // propagates (scripture 8.7: `let output = $(cmd)`). Set the default
-    // 0 BEFORE evaluating, let a substitution override it, and do NOT
-    // reset afterward (a post-eval reset would mask the failure).
-    env.status_set(0);
+    let substitutions = env.substitutions();
     let v = eval_expr(env, &stmt.value)?;
     env.let_set(stmt.name.clone(), v);
+    succeed_unless_substituted(env, substitutions);
     Ok(StatementFlow::Normal)
 }
 
 fn eval_assign(env: &mut Env, stmt: &AssignStmt) -> EvalResult<StatementFlow> {
-    env.status_set(0);
+    let substitutions = env.substitutions();
     let v = eval_expr(env, &stmt.value)?;
     env.assign(stmt.name.clone(), v);
+    succeed_unless_substituted(env, substitutions);
     Ok(StatementFlow::Normal)
+}
+
+/// Settle `$status` for a statement that runs no command of its own -- an
+/// assignment, or a command line that expanded to nothing. Its words were
+/// expanded against the previous command's status (`let saved = $status`), so
+/// the reset cannot come earlier. It succeeds, unless a command substitution
+/// ran while expanding: that exit stands (scripture 8.7: `let output =
+/// $(cmd)`). `before` is `env.substitutions()` read before expanding.
+fn succeed_unless_substituted(env: &Env, before: u64) {
+    if env.substitutions() == before {
+        env.status_set(0);
+    }
 }
 
 fn eval_fn_decl(env: &mut Env, decl: &FnDecl) -> EvalResult<StatementFlow> {
@@ -2322,6 +2341,12 @@ fn eval_case_stmt(env: &mut Env, stmt: &CaseStmt) -> EvalResult<StatementFlow> {
 // ---------------------------------------------------------------------
 
 fn eval_try(env: &mut Env, stmt: &TryStmt) -> EvalResult<StatementFlow> {
+    // The catch decision below reads $status after the body. A body that runs
+    // nothing succeeds, as `if` / `while` / `for` / `case` do when they run
+    // nothing; otherwise the previous command's failure would fire the catch.
+    if stmt.body.is_empty() {
+        env.status_set(0);
+    }
     env.implicit_fail_suppressed = env.implicit_fail_suppressed.saturating_add(1);
     let body_result = eval_block(env, &stmt.body);
     env.implicit_fail_suppressed = env.implicit_fail_suppressed.saturating_sub(1);
@@ -2939,8 +2964,27 @@ fn dispatch_note(env: &mut Env, note: &Note) -> bool {
 /// `Span` derived from the parse failure -- callers that need finer
 /// granularity should call `parse` + `eval_script` directly.
 pub fn eval_source(env: &mut Env, src: &str) -> EvalResult<StatementFlow> {
+    let script = parse_source(env, src)?;
+    eval_script(env, &script)
+}
+
+/// `eval_source` for the `eval` and `source` built-ins, which are commands:
+/// text holding no statement (empty, blank, comments only) still completes a
+/// command, and succeeds. Otherwise the text starts from the status the
+/// caller left, exactly like a function body, so `eval 'echo $status'` reads
+/// the previous command's exit.
+pub(crate) fn eval_source_as_command(env: &mut Env, src: &str) -> EvalResult<StatementFlow> {
+    let script = parse_source(env, src)?;
+    if script.statements.is_empty() {
+        env.status_set(0);
+        return Ok(StatementFlow::Normal);
+    }
+    eval_script(env, &script)
+}
+
+fn parse_source(env: &mut Env, src: &str) -> EvalResult<Script> {
     use crate::parser::parse;
-    let script = parse(src).map_err(|e| {
+    parse(src).map_err(|e| {
         // ParseErrorKind has no Display impl; use Debug to keep
         // the diagnostic readable in $errstr. EvalError::Internal
         // takes a &'static str, so the user-facing detail goes via
@@ -2949,8 +2993,7 @@ pub fn eval_source(env: &mut Env, src: &str) -> EvalResult<StatementFlow> {
         let _ = write!(&mut msg, "parse error: {:?}", e.kind);
         env.errstr_set(msg);
         EvalError::new(EvalErrorKind::Internal("parse failed"), e.span)
-    })?;
-    eval_script(env, &script)
+    })
 }
 
 #[cfg(test)]

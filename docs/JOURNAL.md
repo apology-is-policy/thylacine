@@ -95,6 +95,113 @@ did not cause:
 focused review (MANUAL-DESIGN 9); the Halcyon look (8.3); the console-drain burst
 measurement (8.4); the push; then the Containers section.
 
+### After the self-compaction: the `$status` defect was never in the wait paths
+
+Main did not know the defect and handed it to aux (yip 0092). My diagnosis above
+was wrong in its premise, and one read showed it: `eval_command` resolves
+**function -> builtin -> external**, and `false` is a *builtin*, so it never
+reaches a wait at all. The measurement had already said so (`st-false=0`) and I
+had read it as one more failing external.
+
+The real cause is one ordering. U-6f (`e9e0aa92`, 2026-06-08, command
+substitution) moved `env.status_set(0)` in front of `evaluate_argv` in
+`eval_command`, and in front of `eval_expr` in `eval_let` and `eval_assign`, so
+that a bare `$(cmd)` line and `let x = $(cmd)` would keep the substitution's exit.
+From then on every statement zeroed the register before it read its own words.
+The status *after* each command stayed right, which is why halcyond's `exit N`
+condition never showed anything wrong. Every read broke: `echo $status` (the
+example UTOPIA-SHELL-DESIGN 8.5 itself gives), `let s = $status`, `exit $status`,
+a bare `exit` (which exits with the register and so always exited 0), a function
+body's first read, and `eval 'echo $status'`. Three months, and no gate noticed,
+because every boot probe read the register from Rust (`Env::status`,
+`Env::get("status")`) instead of through a statement. `u-builtin-test` item 2
+does it right for `$cwd` (`let captured = $cwd`, with a comment saying why);
+item 8 never did the same for `$status`.
+
+Two more wrong claims on the way, both mine:
+- **"go6.exp's `go6-build-$status` leg could never fail."** Main adopted it and
+  asked for a control pair. It is false: that leg is `echo ... | tr`, a
+  multi-element pipeline, and `spawn_pipeline_elements` never had the reset (nor
+  did the redirect path or a substitution's body). Retracted on yip 0093 before
+  anyone paid for a go6 run.
+- **An earlier aux session had already seen the symptom.** `ls-imperium.exp`'s
+  header (IM-5, 2026-09-08) read "ut does not propagate an external's exit code to
+  $status on the console path -- a pre-existing gap, enqueued separately". The
+  cause it names is wrong, and nothing was enqueued. I searched memory, the task
+  archive and the docs and found no record. That is the failure the stewardship
+  rule describes: the defect was noticed in prose and walked past. The header is
+  corrected in this chunk.
+
+**The fix** keeps U-6f's intent and restores the read order. Nothing resets before
+expanding. A statement with no command of its own (`let`, an assignment, a line
+that expands to nothing) settles afterwards through `succeed_unless_substituted`:
+0, unless a command substitution ran while expanding it. "Ran" is counted by a
+monotonic `Env.substitutions`, bumped once at `run_command_substitution_script`.
+It cannot be inferred from `$status` changing, because `false` followed by a
+`$(seq)` line exits 1 twice. A command's own dispatch goes back to the pre-U-6f
+shape, which is also rc's and bash's: a function body, and `eval`/`source` text,
+start from the caller's status. Main agreed on yip. The two edges where the
+up-front reset had been doing real work keep their old answer explicitly: an
+empty function body, and `eval`/`source` of text with no statements
+(`eval_source_as_command`), report 0. The REPL still calls the plain
+`eval_source`, so an empty line leaves `$status` alone.
+
+**A leg that could not pass, caught by the clean run.** The first clean boot
+failed `u-builtin-test` on exactly one leg, "`$status` in a command's words". The
+other eight legs, several of which can only pass with the fix, were green, so the
+fix was in the image. The leg's source was `fn cap { seen = $1 }`, and `$1` does
+not lex: a variable name starts at `[a-zA-Z_]`, so the whole source was a parse
+error and `seen` stayed empty. That leg would have "discriminated" under every
+sabotage too, which is why the clean run comes first. The legs now use a named
+parameter, and a failing leg prints what it saw; `leg_src` fails loudly when a
+leg's source does not evaluate at all, so this failure mode names itself next
+time. The `$1` gap is real but already tracked (#138, a v1.x seam in
+`docs/UT-NORA-ERGONOMICS.md`), even though UTOPIA-SHELL-DESIGN 5.5 still promises
+`$1`. The evaluator dossier now says so.
+
+Second clean boot: `u-builtin-test: all OK`, `u-subst-test: all OK`,
+`Thylacine boot OK`. The ci bake takes under 2 minutes, so each sabotage round is
+cheap.
+
+**Every leg discriminates its own site (measured, one boot per sabotage; each
+sabotage written by a helper that checks every replacement matches exactly once
+before writing, and restored byte-identically after):**
+
+| Sabotage | What it does | Failing legs (what each saw) |
+|---|---|---|
+| S1 | libutopia as it was before this fix | the 6 read legs: command words, `let` value, assignment value, function-body start, `eval`-body start, bare `exit` -- each got 0 |
+| S2 | no settling at all | the 5 settle legs: `let` / assignment afterwards, empty function, comment-only `eval`, a line expanding to nothing -- each got 1 |
+| S3 | settle ignores the counter; a substitution resets on entry | `u-builtin-test` all OK; the 3 `u-subst-test` 6b legs -- each got 0 |
+
+The three "runs nothing, succeeds" legs PASS on S1, which is correct: they pin
+behaviour the old up-front reset produced by accident and the fix produces on
+purpose. `manual.exp` passes with its exit-status legs restored (33 s, first
+attempt), and the pairs discriminate: `mfnone 0` and `mfshow 0` against
+`mfmiss 1` and `mfcheck 1`.
+
+**One more, found by the self-audit rather than a test.** `eval_try` decides
+whether to run `catch` from `$status` after the body, so an empty `try { }`
+body ran its catch whenever the previous command had failed. That was already
+true at the top level, and after the fix it is also true at a function body's
+start. `if`, `while`, `for` and `case` already report 0 when they run nothing,
+so `try` now does the same, with a leg in `u-builtin-test` 8b (the catch does not
+run, status 0) and the S1/S2 sabotages re-run to cover it.
+
+**The `/env` measurement, and a design fork it opens.** One scratch scenario
+settled the other open item: before `echo -n rich > /env/BEACON` a child of the
+shell inherits `BEACON=cells`, and after it an EMPTY value. The shell opens the
+redirect target and truncates its own variable. `echo`'s write resolves echo's
+own copy of the environment, because devenv resolves the caller on every
+operation and a spawn copies the environment, so the value dies with echo.
+Both halves of that are ratified (ARCH 9.7 and the `/env` audit row), so the fix
+is a design question and not a patch. ARCH 9.7 also calls copy-on-spawn "the
+Plan 9 default-copy-on-rfork", which is wrong: a Plan 9 fork shares the env
+group unless `RFENVG` asks for a copy, and that sharing is why the idiom works
+there. Enqueued (memory `bug_env_redirect_writes_child_copy`). The measurement
+also corrected my own claim in `manual.exp`'s header, which said ut exports
+`BEACON=none` on this image; it exports `cells`, which the reader renders
+identically to plain.
+
 ---
 ## 2026-09-10 (aux, run 9, post self-compact) -- the Halcyon SESSION-path inline-media channel (I-47, HALCYON 14.7.2): per-pane routing on the existing /srv+9P mechanism
 

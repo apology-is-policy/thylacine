@@ -19,7 +19,8 @@
 //                        out of a called function.
 //
 // The special-var bridge (scripture 8.5) is checked directly: $status /
-// $errstr / $cwd read in-script resolve to their Env fields.
+// $errstr / $cwd read in-script resolve to their Env fields. Item 8b reads
+// $status through every kind of statement that reads or settles it.
 //
 // joey gates the boot on this binary's status==0.
 
@@ -140,6 +141,97 @@ pub extern "C" fn rs_main() -> i64 {
         }
     }
 
+    // 8b. $status read by a STATEMENT, the way a script reads it. Item 8 reads
+    //     the field and cannot see a statement that resets the register
+    //     before expanding its own words -- which made every read below 0
+    //     while item 8 passed. One leg per place a statement reads or settles
+    //     $status, each naming the function it constrains; every leg runs and
+    //     every failure is printed, so a sabotaged build shows each leg
+    //     discriminating its own site.
+    {
+        let mut bad = false;
+
+        // eval_command: a command's words expand against the previous status.
+        // (A named parameter: `$1` does not lex -- a variable name cannot
+        // start with a digit.)
+        let mut e = fresh();
+        bad |= leg_src(&mut e, "fn cap v { seen = $v }\nfalse\ncap $status");
+        bad |= leg_eq(
+            &e.get("seen").as_scalar(),
+            "1",
+            "$status in a command's words",
+        );
+
+        // eval_let: the value expands first; the let itself then succeeds.
+        let mut e = fresh();
+        bad |= leg_src(&mut e, "false\nlet saved = $status");
+        bad |= leg_eq(&e.get("saved").as_scalar(), "1", "$status in a let value");
+        bad |= leg_status(e.status(), 0, "a let after a failure succeeds");
+
+        // eval_assign: the same for a bare assignment.
+        let mut e = fresh();
+        bad |= leg_src(&mut e, "false\nsaved = $status");
+        bad |= leg_eq(
+            &e.get("saved").as_scalar(),
+            "1",
+            "$status in an assignment value",
+        );
+        bad |= leg_status(e.status(), 0, "an assignment after a failure succeeds");
+
+        // invoke_function: a body starts from the caller's status.
+        let mut e = fresh();
+        bad |= leg_src(&mut e, "fn show { seen = $status }\nfalse\nshow");
+        bad |= leg_eq(
+            &e.get("seen").as_scalar(),
+            "1",
+            "$status at a function body's start",
+        );
+
+        // eval_source_as_command (bi_eval): so does eval'd text.
+        let mut e = fresh();
+        bad |= leg_src(&mut e, "false\neval 'seen = $status'");
+        bad |= leg_eq(
+            &e.get("seen").as_scalar(),
+            "1",
+            "$status at an eval body's start",
+        );
+
+        // bi_exit: `exit` with no argument exits with the current status.
+        let mut e = fresh();
+        bad |= leg_src(&mut e, "false\nexit");
+        bad |= leg_status(
+            e.exit_requested().unwrap_or(-1),
+            1,
+            "exit without an argument after a failure",
+        );
+
+        // What a statement that runs no command reports: success, whatever the
+        // previous status (invoke_function's empty body; eval of comment-only
+        // text; eval_command on a line that expands to nothing).
+        let mut e = fresh();
+        bad |= leg_src(&mut e, "fn noop { }\nfalse\nnoop");
+        bad |= leg_status(e.status(), 0, "an empty function body succeeds");
+        let mut e = fresh();
+        bad |= leg_src(&mut e, "false\neval '# nothing to run'");
+        bad |= leg_status(e.status(), 0, "eval of comment-only text succeeds");
+        let mut e = fresh();
+        bad |= leg_src(&mut e, "false\n$no_such_variable_8b");
+        bad |= leg_status(e.status(), 0, "a line that expands to nothing succeeds");
+        // eval_try: an empty body cannot fail, so its catch does not run.
+        let mut e = fresh();
+        bad |= leg_src(&mut e, "false\ntry { } catch { caught = yes }");
+        bad |= leg_eq(
+            &e.get("caught").as_scalar(),
+            "",
+            "an empty try body does not run its catch",
+        );
+        bad |= leg_status(e.status(), 0, "an empty try body succeeds");
+
+        if bad {
+            return 1;
+        }
+    }
+
     // 9. type reports a name's kind (status 0; output to the UART).
     {
         let mut e = fresh();
@@ -183,7 +275,10 @@ pub extern "C" fn rs_main() -> i64 {
     // 12. exit inside a called function unwinds + skips later statements.
     {
         let mut e = fresh();
-        let _ = eval_source(&mut e, "fn quitter { exit 3 }\nquitter\nlet after = reached");
+        let _ = eval_source(
+            &mut e,
+            "fn quitter { exit 3 }\nquitter\nlet after = reached",
+        );
         if e.exit_requested() != Some(3) {
             return fail("exit unwind requested");
         }
@@ -235,4 +330,39 @@ fn fail(tag: &str) -> i64 {
     t_putstr(tag);
     t_putstr("\n");
     1
+}
+
+/// The legs of a block that reports every failure before failing. Each prints
+/// its FAILED line with what it saw, and returns true for a failure.
+///
+/// `leg_src` fails when `src` does not evaluate at all -- without it, a leg
+/// whose source cannot parse reports only the empty value its assertion then
+/// reads.
+fn leg_src(env: &mut Env, src: &str) -> bool {
+    match eval_source(env, src) {
+        Ok(_) => false,
+        Err(_) => {
+            fail(&alloc::format!(
+                "the leg source did not evaluate: {:?}",
+                src
+            ));
+            true
+        }
+    }
+}
+
+fn leg_eq(got: &str, want: &str, tag: &str) -> bool {
+    if got == want {
+        return false;
+    }
+    fail(&alloc::format!("{} (got {:?}, want {:?})", tag, got, want));
+    true
+}
+
+fn leg_status(got: i32, want: i32, tag: &str) -> bool {
+    if got == want {
+        return false;
+    }
+    fail(&alloc::format!("{} (got {}, want {})", tag, got, want));
+    true
 }
