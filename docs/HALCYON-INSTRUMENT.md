@@ -1693,6 +1693,25 @@ rail's theme control (§8.1) since I-4 and pinned at `#CDC199`. It is not the
 picker's — the picker has miniatures, not swatches. Six effects remain, not
 seven.
 
+**The two card shadows collapse to ONE (2026-09-16, operator-answered).**
+Above, the picker takes black .32 at (0,20) blur 55 and the help card black
+.35 at (0,24) blur 80 — but the compositor cannot tell them apart, and the
+difference had already been erased by this section's own bound. All four
+halcyond models (the verb menu, the picker, the dialog, help) ride ONE
+`Role::Menu` surface; `MenuState` carries only `{n, gen, rect}`; `surf.title`
+is written and never read, and halcyond never sets it on a menu; `menu place`
+takes only coordinates. And the radius cap of 32 flattens BOTH blurs to the
+same value, so the only surviving difference was alpha 82 vs 90 and dy 20 vs
+24 — about 3 % and four pixels.
+
+So ONE shadow is painted for every menu card, at the help card's heavier .35
+/ dy 24. The distinction is recorded as COLLAPSED rather than quietly dropped:
+a reader comparing this section with the source will find two values here and
+one in the tree, and this paragraph is why. The alternative — the owner
+declaring its shadow at `menu place` — was rejected: it changes a
+renderer-gated verb's grammar and puts a presentation value on the wire, for a
+difference the cap had already made invisible.
+
 ## 11. Evidence: the goldens and the gates
 
 - **Oracle.** `docs/halcyon-carbon-handoff/reference/` (frozen; SHA256SUMS;
