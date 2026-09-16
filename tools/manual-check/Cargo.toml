@@ -1,0 +1,20 @@
+[package]
+name = "manual-check"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "0BSD"
+
+# Standalone (own workspace) HOST-target build-time tool (MANUAL-DESIGN.md
+# section 6). Checks docs/manual with the reader's own checker -- the `manual`
+# library, built for the host -- so the bake installs only sections that pass,
+# and the format has one implementation. Lives under tools/ so it does NOT
+# inherit usr/.cargo/config.toml's aarch64-unknown-none target pin.
+[workspace]
+
+[[bin]]
+name = "manual-check"
+path = "src/main.rs"
+
+[dependencies]
+manual = { path = "../../usr/manual", default-features = false }

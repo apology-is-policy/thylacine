@@ -13,24 +13,25 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-// A section is at most 1 MiB; its parsed form and rendering are a small
-// multiple of that.
+// The library's working set is bounded by one section and its largest block,
+// and the host test `bounds` holds the worst sections within SECTION_MAX under
+// this heap with the allocator ThylaAllocN uses (MANUAL-DESIGN 8.1).
 #[global_allocator]
-static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAllocN<{ 16 * 1024 * 1024 }> =
+static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAllocN<{ manual::HEAP_BYTES }> =
     libthyla_rs::alloc::ThylaAllocN;
 
 use beacon::{BeaconMode, Tier};
+use libthyla_rs::env;
 use libthyla_rs::eprintln;
 use libthyla_rs::err::Error;
 use libthyla_rs::fs::{self, File};
-use libthyla_rs::{env, io};
+use libthyla_rs::io::{self, Read};
 
 use manual::catalog::{self, Lookup};
 use manual::render::{self, Listed};
-use manual::{format as section, SECTION_MAX};
+use manual::{format as section, sanitize, SECTION_MAX};
 
 const MANUAL_DIR: &str = "/manual";
-const WRITE_CHUNK: usize = 64 * 1024;
 const USAGE: &str =
     "usage: manual [--beacon=auto|always|never] [name | file]\n       manual --check file...\n";
 
@@ -69,7 +70,7 @@ fn parse_args() -> Result<(Mode, BeaconMode), i64> {
                     }
                 }
             } else {
-                eprintln!("manual: unknown option '{}'", arg);
+                eprintln!("manual: unknown option '{}'", sanitize(arg, false));
                 io::err(USAGE.as_bytes());
                 return Err(2);
             }
@@ -115,14 +116,34 @@ fn plain_width(tier: Tier) -> Option<usize> {
     manual::console_width(&bytes)
 }
 
-/// Read a section file, or describe why it cannot be read.
-fn read_section(path: &str) -> Result<String, String> {
-    let mut f = File::open(path).map_err(|e| format!("{}: {}", path, e))?;
-    let bytes = io::slurp_capped(&mut f, SECTION_MAX).map_err(|e| match e {
-        Error::NoMemory => format!("{}: larger than 1 MiB", path),
-        e => format!("{}: {}", path, e),
+/// A file's bytes, at most `SECTION_MAX`. The buffer is sized from the file's
+/// length, so reading a large section does not leave the smaller buffers a
+/// growing one would outgrow behind in the heap.
+fn read_capped(f: &mut File) -> Result<Vec<u8>, Error> {
+    let len = f.metadata().map_or(0, |m| m.len() as usize);
+    let mut v = Vec::with_capacity(len.min(SECTION_MAX));
+    let mut buf = [0u8; 8 * 1024];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            return Ok(v);
+        }
+        if v.len() + n > SECTION_MAX {
+            return Err(Error::NoMemory);
+        }
+        v.extend_from_slice(&buf[..n]);
+    }
+}
+
+/// Read a section file, or describe why it cannot be read. `shown` is the path
+/// as diagnostics print it.
+fn read_section(path: &str, shown: &str) -> Result<String, String> {
+    let mut f = File::open(path).map_err(|e| format!("{}: {}", shown, e))?;
+    let bytes = read_capped(&mut f).map_err(|e| match e {
+        Error::NoMemory => format!("{}: larger than 1 MiB", shown),
+        e => format!("{}: {}", shown, e),
     })?;
-    String::from_utf8(bytes).map_err(|_| format!("{}: not valid UTF-8", path))
+    String::from_utf8(bytes).map_err(|_| format!("{}: not valid UTF-8", shown))
 }
 
 /// The file names in `/manual`; an absent directory has none.
@@ -142,26 +163,16 @@ fn manual_files() -> Result<Vec<String>, String> {
     Ok(names)
 }
 
-fn emit(bytes: &[u8]) -> i64 {
-    let mut out = io::OutSink::new();
-    for chunk in bytes.chunks(WRITE_CHUNK) {
-        out.put(chunk);
-    }
-    if out.failed() {
-        eprintln!("manual: write error");
-        return 1;
-    }
-    0
-}
-
-fn report(path: &str, diags: &[section::Diagnostic]) {
-    for d in diags {
-        eprintln!("manual: {}:{}: {}", path, d.line, d.message);
-    }
-}
-
 fn file_name(path: &str) -> Option<&str> {
     path.rsplit('/').next()
+}
+
+/// Check a section, printing its diagnostics. True when it passes.
+fn passes(path: &str, shown: &str, src: &str) -> bool {
+    let problems = section::check(file_name(path), src, &mut |line, p| {
+        eprintln!("manual: {}:{}: {}", shown, line, p);
+    });
+    problems == 0
 }
 
 fn contents(tier: Tier) -> i64 {
@@ -177,7 +188,7 @@ fn contents(tier: Tier) -> i64 {
         .iter()
         .map(|e| {
             let path = format!("{}/{}", MANUAL_DIR, e.file);
-            let title = read_section(&path)
+            let title = read_section(&path, &path)
                 .ok()
                 .and_then(|src| section::title_text(&src))
                 .unwrap_or_else(|| String::from("?"));
@@ -187,7 +198,13 @@ fn contents(tier: Tier) -> i64 {
             }
         })
         .collect();
-    emit(&render::render_contents(&listed, tier))
+    let mut out = io::OutSink::new();
+    render::render_contents(&listed, tier, &mut |chunk| out.put(chunk));
+    if out.failed() {
+        eprintln!("manual: write error");
+        return 1;
+    }
+    0
 }
 
 fn show(operand: &str, tier: Tier) -> i64 {
@@ -205,43 +222,53 @@ fn show(operand: &str, tier: Tier) -> i64 {
         match catalog::lookup(&entries, operand) {
             Lookup::Found(e) => format!("{}/{}", MANUAL_DIR, e.file),
             Lookup::Missing => {
-                eprintln!("manual: no section named '{}'", operand);
+                eprintln!("manual: no section named '{}'", sanitize(operand, false));
                 return 1;
             }
             Lookup::Ambiguous(v) => {
-                let names: Vec<&str> = v.iter().map(|e| e.name.as_str()).collect();
+                let names: Vec<String> = v
+                    .iter()
+                    .map(|e| format!("{:02}-{}", e.number, e.name))
+                    .collect();
                 eprintln!(
                     "manual: '{}' matches several sections: {}",
-                    operand,
+                    sanitize(operand, false),
                     names.join(", ")
                 );
                 return 1;
             }
         }
     };
-    let src = match read_section(&path) {
+    let shown = sanitize(&path, false);
+    let src = match read_section(&path, &shown) {
         Ok(s) => s,
         Err(m) => {
             eprintln!("manual: {}", m);
             return 1;
         }
     };
-    match section::check_section(file_name(&path), &src) {
-        Ok(doc) => emit(&render::render(&doc, tier, plain_width(tier))),
-        Err(diags) => {
-            report(&path, &diags);
-            1
-        }
+    // A section that fails the check is not displayed (5): nothing is written
+    // until the whole section has passed.
+    if !passes(&path, &shown, &src) {
+        return 1;
     }
+    let width = plain_width(tier);
+    let mut out = io::OutSink::new();
+    render::render(&src, tier, width, &mut |chunk| out.put(chunk));
+    if out.failed() {
+        eprintln!("manual: write error");
+        return 1;
+    }
+    0
 }
 
 fn check(paths: &[String]) -> i64 {
     let mut status = 0;
     for path in paths {
-        match read_section(path) {
+        let shown = sanitize(path, false);
+        match read_section(path, &shown) {
             Ok(src) => {
-                if let Err(diags) = section::check_section(file_name(path), &src) {
-                    report(path, &diags);
+                if !passes(path, &shown, &src) {
                     status = 1;
                 }
             }

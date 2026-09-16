@@ -9,8 +9,11 @@ code:
   - usr/manual/src/render.rs
   - usr/manual/src/wrap.rs
   - usr/manual/src/catalog.rs
+  - usr/manual/src/bounds.rs
   - usr/manual/src/main.rs
   - usr/manual/Cargo.toml
+  - tools/manual-check/src/main.rs
+  - tools/manual-check/Cargo.toml
 audit: light
 guarded-by: []
 validated-by: [prose, gate-interactive]
@@ -42,46 +45,68 @@ host-tested) and a thin libthyla-rs binary behind the `backend` feature.
   installed." and exit 0.
 - `manual <name>` -- `catalog::lookup`: exact name, then number (`5` or `05`),
   then `NN-<name>`, then the only name the operand begins; case-insensitive; a step
-  matching several sections is ambiguous (diagnostic lists them, exit 1).
+  matching several sections is ambiguous (the diagnostic lists each as `NN-<name>`,
+  itself an operand naming one section; exit 1).
 - `manual <file>` -- an operand containing `/` or ending `.md` is a path (author
   preview).
 - `manual --check <file>...` -- diagnostics `manual: <file>:<line>: <message>` on
-  stderr; exit 1 if any.
-- A file that fails the check is never rendered; its diagnostics are printed and
-  the exit status is 1. Exit 2 = usage error. Diagnostics are prefixed `manual: `.
+  stderr, in line order, a problem at most once per line; exit 1 if any.
+- A file that fails the check is never rendered: nothing is written until the whole
+  file has passed. Exit 2 = usage error. Diagnostics are prefixed `manual: `, and a
+  name or path they repeat has its controls replaced (`sanitize`).
+- `tools/manual-check <dir>` -- the same checker built for the build host; the
+  bake runs it over `docs/manual` before the pool opens and installs exactly the
+  sections it lists (misnamed or failing files fail the bake).
 - `--beacon=auto|always|never` resolves the tier exactly as the coreutils do
   (`beacon::effective_tier` over `BEACON` + `fd_devclass(1)`).
 
 ## Mechanism
 
-**format.rs -- parser and checker in one pass.** Lines are classified in
-isolation (`classify` -> `Kind`), then block parsers consume them: `heading`,
-`fence`, `bad_fence` (skips a rejected fence's body so it is not reported as
-Markdown), `list`, `table` (`row_cells` splits on unescaped `|`; `\|` is a
-literal pipe), `paragraph`. Every block must be separated by a blank line; the
-block that ends at a non-blank line reports it once. Inline content is joined
-across source lines with single spaces and scanned by `scan`, which keeps a
-line map so each diagnostic names the line its character came from. Emphasis
-bodies are re-scanned with `in_emphasis` set, which turns a code span or another
-asterisk into a nesting diagnostic. `parse` returns a `Document` only when there
-are no diagnostics; they are de-duplicated per line and sorted by line.
-`check_section` adds the file-name check (a title must not begin with its
-section number).
+**format.rs -- one parser, streamed to a consumer.** `format::read(file_name,
+src, &mut dyn Events)` reads a section front to back and reports as it goes:
+`problem(line, Problem)` in line order and at most once per problem per line
+(the parser keeps only the current line's reported set), and the structure as
+`open(Open)` / `close()` / `run(Run, text)` / `code_line(text)`. Nothing
+outlives the block being read, so no document tree exists. `check` is the
+consumer that counts and forwards problems; `render::render` is the consumer
+that writes. Lines are read with a cursor (`Parser::line`/`after`, no line
+index) and classified in isolation (`classify` -> `Kind`); block parsers
+`heading`, `fence` (finds its closer before checking content, so the opener's
+problems come first), `bad_fence`, `list`, `table`, `paragraph`.
 
-**render.rs -- one writer, two tiers.** `Writer` appends payload always and
-frames only at the rich tier, so stripping frames yields the plain output (the
-BEACON.md 12.1 rule 1 identity). Blocks are separated by exactly one empty line.
-Tables mirror `beacon::sink::Table` byte for byte (two-space gutters, last column
-unpadded, padding outside cell frames) -- asserted by
-`the_table_matches_the_beacon_sink_table`. The implementation writes table
-frames itself because `sink::Cell` holds one run, and a manual cell can mix
-text, code and emphasis.
+A paragraph's or list item's lines are joined into one scratch buffer with `\n`
+between source lines (a setext underline joins as an empty segment), reserved to
+the block's byte span. `scan` treats `\n` as the joining space everywhere a form
+looks at its neighbours (`is_separator`) and emits it as a space. The scan's
+source line advances as it crosses each `\n` (`cross`): entering a line reports
+that line's own structure (`enter`: indentation, setext, nesting, control
+characters), and leaving it reports a hard line break (`leave`) unless the
+crossing is inside a code span. So problems stay in line order even where the old
+tree parser learned them out of order, and a line's number is never searched
+for. A table's header cells are scanned before its delimiter row is checked, for
+the same reason.
 
-**wrap.rs.** Plain tier only, and only when stdout is the console and
-`/dev/winsize` reports at least 20 columns (Aurora). Greedy fill; list items
-hang under their marker; a code span does not break at its own spaces; a word
-longer than the line is split. Pipes, pts and the serial console
-(`winsize 0 0`) get one line per paragraph.
+Searches ahead resume instead of repeating (`Look`, per scan): a code span or
+emphasis closer search that fails records where it started, since a later search
+from a later opener examines a subset of the same runs (every search starts right
+after a maximal run, so escape pairing reads the same); `[`'s `]` search reuses
+its last result; the underscore-emphasis closer is found once per scan.
+
+**render.rs -- the rendering consumer.** `Renderer` implements `Events`, writing
+payload always and frames only at the rich tier through `Chunks` (64 KiB), so
+stripping frames yields the plain output (BEACON.md 12.1 rule 1). Tables mirror
+`beacon::sink::Table` byte for byte; the widths it pads to arrive with the events,
+because a consumer that `measures_tables` makes the parser scan a table's cells
+for their widths before opening it (`Open::Table { widths }`, `Open::Cell {
+width }`). `render_contents` drives the same renderer.
+
+**wrap.rs.** `Wrap` fills greedily as runs arrive (`begin` / `feed` / `end`):
+list items hang under their marker; a code span does not break at its own spaces;
+a word longer than the line is split. A pending word is placed the moment its
+placement is decided, so it never holds more than a line's width. Plain tier
+only, and only on a console reporting at least 20 columns; pipes, pts and the
+serial console get one line per paragraph. The whole-paragraph algorithm it
+replaced is kept in its tests as a differential reference.
 
 **Hygiene.** `sanitize` replaces C0 controls (TAB kept only in code blocks), DEL
 and U+0080-U+009F with U+FFFD at emission, independently of the checker, which
@@ -91,12 +116,15 @@ so no frame can exceed the wire caps.
 
 ## Data structures
 
-`format::Inline` {Text, Code, Emph, Strong} (flat: emphasis never nests);
-`format::Block` {Title, Heading(2|3), Paragraph, Bullets, Numbered, Code(lines),
-Table{align, header, rows}}; `format::Diagnostic {line, message}`;
-`catalog::Entry {number, name, file}`; `render::Listed {name, title}`.
-`SECTION_MAX` = 1 MiB (the binary reads with `slurp_capped`); the binary heap is
-16 MiB (`ThylaAllocN`).
+`format::Open` {Title, Heading(2|3), Paragraph, Bullets, Numbered, Item(n), Code,
+Table{align, widths}, Row, Cell{width}}; `format::Run` {Text, Code, Emph, Strong}
+(flat: emphasis never nests); `format::Problem` (one variant per rejection, the
+message in its `Display`); `catalog::Entry {number, name, file}`;
+`render::Listed {name, title}`. `SECTION_MAX` = 1 MiB; `HEAP_BYTES` = 16 MiB (the
+binary's `ThylaAllocN`). The binary reads into a buffer sized from `fstat`
+(`read_capped`). The test-only `format::tree` rebuilds the old block tree from
+events and asserts they are well formed, in line order, and identical whether or
+not tables are measured.
 
 ## Concurrency
 
@@ -104,8 +132,13 @@ None. Single-threaded, short-lived, no shared state.
 
 ## Invariants enforced
 
-- A rendered section passed the format check (the binary renders only an `Ok`
-  document).
+- A rendered section passed the format check (the binary renders only after
+  `check` returned 0 for the whole file; `manual.exp` leg (f) shows a failing file
+  prints none of its rendering).
+- Memory: the section, at most a few copies of its largest block, and one output
+  chunk (`bounds::the_heap_bounds_hold`, under the guest's `linked_list_allocator`:
+  worst 6207 KiB of an 8 MiB working-set bound at 1 MiB, the 16 MiB heap above it).
+- Time linear in the section (`bounds::the_time_bounds_hold`).
 - Strip identity: `wire::strip(render(Rich)) == render(None)` without wrapping,
   for every fixture and every installed section (host test).
 - Section text cannot inject a frame or a control sequence (`sanitize`; host test
@@ -120,19 +153,30 @@ write latches (`io::OutSink`) and exits 1 with "write error".
 
 ## Performance
 
-Linear in the section size; output rendered into memory and written in 64 KiB
-chunks. The contents listing reads every installed section to take its title.
+Measured on thyla-pi (A72, release) through `bounds`: every expensive shape
+scales 4.0x from 64 to 256 KiB. Heap high-water marks at 1 MiB (the section itself
+is 1024 KiB of it): 1088 KiB for block-per-line shapes, 2112 KiB for one
+1 MiB block, 3136 KiB for one emphasis or code span across it, 6207 KiB with
+wrapping on a console wider than the block. Before the 2026-09-16 rewrite the
+same shapes measured up to 158 MiB against the 16 MiB heap (an allocation
+failure, which exits 1 silently), and a paragraph of one-character lines took
+5.8 s at 256 KiB on the M2. The contents listing reads every installed section to
+take its title.
 
 ## Prosecution
 
 Format-parsing class: the parser is exposed to any file a user names (author
 preview). Prosecute: (1) frame or escape injection through any inline or block
 path, including table cells, emphasis bodies and code blocks; (2) panics on
-adversarial input (index arithmetic in `scan`, `emphasis`, `row_cells`,
-`find_run`, the backslash skips); (3) unbounded work (quadratic scans on long
-lines of asterisks or brackets -- the closing searches are linear per opener, so
-a pathological line is O(n^2) within a 1 MiB cap); (4) a checker/renderer
-disagreement that lets a rejected construct render.
+adversarial input (byte arithmetic in `scan`, `emphasis`, `Cells`,
+`find_code_close`, `find_emphasis_close`, the backslash skips, `char_before`);
+(3) the `Look` resumption arguments -- a cached "nothing from here" that is wrong
+for a later start changes what is accepted; (4) the line-order argument -- a
+problem reported for an earlier line breaks per-line dedup (debug-asserted,
+enforced by `tree`); (5) the rewrite's equivalence with fe79e6c8 on accepted and
+rejected input (the known deliberate changes are in the commit); (6) memory: a
+shape that makes the parser or renderer hold more than a bounded number of
+copies of one block.
 
 ## Seams
 
@@ -150,6 +194,8 @@ disagreement that lets a rejected construct render.
 - A console renderer reads through the 8 KiB drop-oldest console drain; a large
   section written at once may lose bytes on that path (MANUAL-DESIGN 8.4,
   measurement owed).
+- Within one line, a hard line break is reported after that line's inline
+  problems (it is found when the scan leaves the line).
 - halcyond's tile path remembers 32 table specs, so a section with more tables
   than that may lose table structure in a tile.
 

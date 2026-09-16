@@ -1,26 +1,23 @@
 //! The section format (MANUAL-DESIGN.md section 3): a strict Markdown subset in
-//! which every accepted form has both a Beacon and a plain realization. The
-//! parser is also the checker: it reports every rejected construct with its
-//! line, and yields a document only when it reports nothing.
+//! which every accepted form has both a Beacon and a plain realization.
+//!
+//! The parser is also the checker. It reads a section front to back and tells an
+//! [`Events`] consumer what it finds as it goes: each problem, in line order, and
+//! the section's blocks and inline runs. It keeps nothing beyond the block it is
+//! reading, so its memory is bounded by the largest block rather than by the
+//! section, and every search it makes ahead of its position resumes rather than
+//! repeats, so its time grows linearly with the section.
 
-use alloc::format;
-use alloc::string::{String, ToString};
-use alloc::vec;
+use core::fmt;
+use core::mem;
+
+use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::{is_control, SECTION_MAX};
+use crate::{catalog, is_control, SECTION_MAX};
 
 /// The most columns a table may have (3.2).
 pub const TABLE_COLUMNS_MAX: usize = 16;
-
-/// An inline run (3.3). Emphasis never nests, so runs are flat.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Inline {
-    Text(String),
-    Code(String),
-    Emph(String),
-    Strong(String),
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Align {
@@ -29,81 +26,252 @@ pub enum Align {
     Center,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Block {
-    Title(Vec<Inline>),
+/// The form of an inline run (3.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Run {
+    Text,
+    Code,
+    Emph,
+    Strong,
+}
+
+/// A block, or a part of one, as the parser opens it. Each `open` is matched by
+/// one `close`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Open<'a> {
+    Title,
     /// Level 2 or 3.
-    Heading(u8, Vec<Inline>),
-    Paragraph(Vec<Inline>),
-    Bullets(Vec<Vec<Inline>>),
-    Numbered(Vec<Vec<Inline>>),
-    /// Content lines, verbatim.
-    Code(Vec<String>),
+    Heading(u8),
+    Paragraph,
+    Bullets,
+    Numbered,
+    /// A list item, numbered from 1 within its list.
+    Item(usize),
+    Code,
+    /// `widths` holds each column's widest cell, in Unicode scalar values, when
+    /// the consumer measures tables; it is empty otherwise.
     Table {
-        align: Vec<Align>,
-        header: Vec<Vec<Inline>>,
-        rows: Vec<Vec<Vec<Inline>>>,
+        align: &'a [Align],
+        widths: &'a [usize],
+    },
+    /// The first row of a table is its header.
+    Row,
+    /// `width` is the cell's own width when the consumer measures tables.
+    Cell {
+        width: usize,
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Document {
-    pub blocks: Vec<Block>,
+/// The block a line should have been separated from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Above {
+    Heading,
+    CodeBlock,
+    Table,
+    List,
+    Paragraph,
 }
 
-/// A rejected construct: its 1-based line and what is wrong with it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Diagnostic {
-    pub line: usize,
-    pub message: String,
+/// A construct the format rejects (3.1 to 3.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Problem {
+    TooLarge,
+    ByteOrderMark,
+    CarriageReturn,
+    Tab,
+    Control(char),
+    NoTitle,
+    TitleNumber,
+    LevelOneHeading,
+    DeepHeading,
+    HeadingText,
+    ClosingHashes,
+    HeadingSpace,
+    NotSeparated(Above),
+    BadFence,
+    UnclosedFence,
+    EmptyCodeBlock,
+    BadBullet,
+    BadNumbered,
+    /// The number the item should have had.
+    NumberGap(usize),
+    ItemText,
+    ItemSpace,
+    /// The indentation continuation lines of this item take.
+    ContinuationIndent(usize),
+    NestedList,
+    TooManyColumns,
+    NoDelimiterRow,
+    DelimiterCell,
+    CellCount {
+        cells: usize,
+        header: usize,
+    },
+    RowPipes,
+    ParagraphIndent,
+    Indented,
+    BlockQuote,
+    ThematicBreak,
+    Setext,
+    Html,
+    LinkDefinition,
+    Footnote,
+    HardBreak,
+    Angle,
+    CodeInEmphasis,
+    CodeSpanTicks,
+    UnclosedCodeSpan,
+    EmptyCodeSpan,
+    NestedEmphasis,
+    UnmatchedStar,
+    Image,
+    Link,
+    Strikethrough,
+    Underscore,
 }
 
-/// Parse a section. `Err` carries every diagnostic, in line order.
-pub fn parse(src: &str) -> Result<Document, Vec<Diagnostic>> {
-    let mut p = Parser::new(src);
-    p.run();
-    if p.diags.is_empty() {
-        return Ok(Document { blocks: p.blocks });
+impl fmt::Display for Problem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use Problem::*;
+        let m = match *self {
+            TooLarge => "the section is larger than 1 MiB",
+            ByteOrderMark => "the file begins with a byte-order mark",
+            CarriageReturn => "a carriage return; a section uses LF line endings",
+            Tab => "a tab outside a code block",
+            Control(c) => return write!(f, "the control character U+{:04X}", c as u32),
+            NoTitle => "a section begins with its title on line 1, written '# Title'",
+            TitleNumber => {
+                "the title begins with the section number; the number only orders the book"
+            }
+            LevelOneHeading => "only the title, on line 1, is a level-1 heading",
+            DeepHeading => "headings deeper than ### are not supported",
+            HeadingText => "a heading has text after its marker",
+            ClosingHashes => "closing hashes are not supported; end the heading at its text",
+            HeadingSpace => "one space separates a heading's marker from its text",
+            NotSeparated(above) => {
+                let what = match above {
+                    Above::Heading => "heading",
+                    Above::CodeBlock => "code block",
+                    Above::Table => "table",
+                    Above::List => "list",
+                    Above::Paragraph => "paragraph",
+                };
+                return write!(
+                    f,
+                    "a blank line must separate this line from the {} above",
+                    what
+                );
+            }
+            BadFence => "a code block fence is a line of exactly three backticks, optionally followed by one word",
+            UnclosedFence => {
+                "the code block opened here is not closed by a line of three backticks"
+            }
+            EmptyCodeBlock => "a code block has at least one line of content",
+            BadBullet => "a bulleted item begins with '- '",
+            BadNumbered => "a numbered item begins with 'N. '",
+            NumberGap(expected) => {
+                return write!(
+                    f,
+                    "numbered items run from 1 without gaps; expected {}",
+                    expected
+                )
+            }
+            ItemText => "a list item has text after its marker",
+            ItemSpace => "one space separates a list marker from its text",
+            ContinuationIndent(col) => {
+                return write!(
+                    f,
+                    "a continuation line is indented by exactly {} spaces",
+                    col
+                )
+            }
+            NestedList => "nested lists are not supported",
+            TooManyColumns => {
+                return write!(f, "a table has at most {} columns", TABLE_COLUMNS_MAX)
+            }
+            NoDelimiterRow => {
+                "a table's header row is followed by a delimiter row, such as | --- | --- |"
+            }
+            DelimiterCell => "a delimiter cell is ---, :---, ---:, or :---:",
+            CellCount { cells, header } => {
+                return write!(
+                    f,
+                    "this row has {} cells; the header has {}",
+                    cells, header
+                )
+            }
+            RowPipes => "a table row begins and ends with |",
+            ParagraphIndent => "a paragraph's lines start at the left margin",
+            Indented => {
+                "unexpected indentation; a block starts at the left margin (for code, use a ``` fence)"
+            }
+            BlockQuote => "block quotes are not supported",
+            ThematicBreak => {
+                "thematic breaks are not supported; structure a section with headings"
+            }
+            Setext => "setext headings are not supported; write '## Heading'",
+            Html => "raw HTML is not supported",
+            LinkDefinition => "link reference definitions are not supported",
+            Footnote => "footnotes are not supported",
+            HardBreak => "hard line breaks are not supported; end the line without two trailing spaces or a backslash",
+            Angle => "write '<' and '>' inside a code span (a placeholder is written `<name>`) or escape them",
+            CodeInEmphasis => "emphasis cannot contain a code span",
+            CodeSpanTicks => "a code span is delimited by one or two backticks",
+            UnclosedCodeSpan => "this code span is not closed",
+            EmptyCodeSpan => "an empty code span",
+            NestedEmphasis => "emphasis does not nest",
+            UnmatchedStar => "an unmatched '*'; write a literal asterisk as \\*",
+            Image => "images are not supported",
+            Link => "links are not supported; name the section or resource in prose",
+            Strikethrough => "strikethrough is not supported",
+            Underscore => "underscore emphasis is not supported; write *emphasis*",
+        };
+        f.write_str(m)
     }
-    // One report per problem per line: `<b>` is one mistake, not two.
-    let mut unique: Vec<Diagnostic> = Vec::with_capacity(p.diags.len());
-    for d in p.diags {
-        if !unique.contains(&d) {
-            unique.push(d);
+}
+
+/// What the parser reports as it reads. Every method has an empty default.
+pub trait Events {
+    /// A problem on a 1-based line. Problems arrive in line order, and one
+    /// problem is reported at most once per line.
+    fn problem(&mut self, _line: usize, _problem: Problem) {}
+    fn open(&mut self, _block: Open<'_>) {}
+    fn close(&mut self) {}
+    /// Inline content of the innermost open title, heading, paragraph, item or
+    /// cell. Consecutive text runs continue one another.
+    fn run(&mut self, _kind: Run, _text: &str) {}
+    /// One content line of the open code block, verbatim.
+    fn code_line(&mut self, _text: &str) {}
+    /// Whether `Open::Table` and `Open::Cell` carry widths.
+    fn measures_tables(&self) -> bool {
+        false
+    }
+}
+
+/// Read a section, reporting to `events`. `file_name` is the section file's last
+/// path component; when it is `NN-<name>.md`, the title must not begin with the
+/// section number (3.2).
+pub fn read(file_name: Option<&str>, src: &str, events: &mut dyn Events) {
+    let measure = events.measures_tables();
+    Parser::new(src, events, measure).run(file_name);
+}
+
+/// Check a section: `report` receives each problem, in line order. Returns the
+/// number of problems; a section passes when it has none.
+pub fn check(file_name: Option<&str>, src: &str, report: &mut dyn FnMut(usize, Problem)) -> usize {
+    struct Checker<'r> {
+        report: &'r mut dyn FnMut(usize, Problem),
+        count: usize,
+    }
+    impl Events for Checker<'_> {
+        fn problem(&mut self, line: usize, problem: Problem) {
+            self.count += 1;
+            (self.report)(line, problem);
         }
     }
-    unique.sort_by_key(|d| d.line);
-    Err(unique)
-}
-
-/// `parse`, plus the check that needs the file's name: a section's title does
-/// not begin with its number (3.2). `file_name` is the last path component; a
-/// name other than `NN-<name>.md` skips that check.
-pub fn check_section(file_name: Option<&str>, src: &str) -> Result<Document, Vec<Diagnostic>> {
-    let result = parse(src);
-    let number = file_name
-        .and_then(crate::catalog::parse_file_name)
-        .map(|(n, _)| n);
-    let repeats = match (number, title_text(src)) {
-        (Some(n), Some(title)) => repeats_number(&title, n),
-        _ => false,
-    };
-    if !repeats {
-        return result;
-    }
-    let d = Diagnostic {
-        line: 1,
-        message: String::from(
-            "the title begins with the section number; the number only orders the book",
-        ),
-    };
-    match result {
-        Ok(_) => Err(vec![d]),
-        Err(mut ds) => {
-            ds.insert(0, d);
-            Err(ds)
-        }
-    }
+    let mut checker = Checker { report, count: 0 };
+    read(file_name, src, &mut checker);
+    checker.count
 }
 
 /// The title's plain text from line 1, or `None` when line 1 is not a title.
@@ -115,26 +283,17 @@ pub fn title_text(src: &str) -> Option<String> {
     if text.is_empty() {
         return None;
     }
-    let mut scratch = Vec::new();
-    Some(plain_text(&inline(&[(text, 1)], &mut scratch)))
-}
-
-/// The text of a run sequence with its inline structure removed.
-pub fn plain_text(runs: &[Inline]) -> String {
-    let mut s = String::new();
-    for r in runs {
-        match r {
-            Inline::Text(t) | Inline::Code(t) | Inline::Emph(t) | Inline::Strong(t) => {
-                s.push_str(t)
-            }
-        }
-    }
-    s
+    struct Quiet;
+    impl Events for Quiet {}
+    let mut quiet = Quiet;
+    let mut out = String::new();
+    Parser::new(text, &mut quiet, false).inline_one(1, text, false, &mut Sink::Plain(&mut out));
+    Some(out)
 }
 
 fn repeats_number(title: &str, n: u8) -> bool {
     let t = title.trim_start();
-    [format!("{:02}", n), format!("{}", n)]
+    [alloc::format!("{:02}", n), alloc::format!("{}", n)]
         .iter()
         .any(|p| match t.strip_prefix(p.as_str()) {
             Some(rest) => !rest.starts_with(|c: char| c.is_ascii_digit()),
@@ -142,19 +301,16 @@ fn repeats_number(title: &str, n: u8) -> bool {
         })
 }
 
-fn push_diag(diags: &mut Vec<Diagnostic>, line: usize, message: &str) {
-    diags.push(Diagnostic {
-        line,
-        message: String::from(message),
-    });
-}
-
 fn is_blank(line: &str) -> bool {
     line.trim().is_empty()
 }
 
+fn leading_spaces(line: &str) -> usize {
+    line.len() - line.trim_start_matches(' ').len()
+}
+
 // ---------------------------------------------------------------------------
-// Blocks (3.2)
+// Line classification (3.2)
 // ---------------------------------------------------------------------------
 
 /// What a line begins, judged from the line alone.
@@ -174,6 +330,7 @@ enum Kind<'a> {
     Setext,
     Html,
     LinkDef,
+    Footnote,
     Indented,
     Text,
 }
@@ -201,7 +358,7 @@ fn classify(line: &str) -> Kind<'_> {
         };
     }
     if let Some(info) = line.strip_prefix("```") {
-        if info.starts_with('`') || info.contains(char::is_whitespace) {
+        if info.contains('`') || info.contains(char::is_whitespace) {
             return Kind::BadFence;
         }
         return Kind::Fence;
@@ -249,7 +406,11 @@ fn classify(line: &str) -> Kind<'_> {
     if b[0] == b'[' {
         if let Some(close) = line.find("]:") {
             if !line[1..close].contains(']') {
-                return Kind::LinkDef;
+                return if line[1..].starts_with('^') {
+                    Kind::Footnote
+                } else {
+                    Kind::LinkDef
+                };
             }
         }
     }
@@ -287,20 +448,27 @@ fn is_list_marker(text: &str) -> bool {
     )
 }
 
-fn rejected_message(kind: Kind<'_>) -> &'static str {
-    match kind {
-        Kind::BadFence => "a code block fence is a line of exactly three backticks, optionally followed by one word",
-        Kind::BadBullet => "a bulleted item begins with '- '",
-        Kind::BadNumbered => "a numbered item begins with 'N. '",
-        Kind::Quote => "block quotes are not supported",
-        Kind::Break(_) => "thematic breaks are not supported; structure a section with headings",
-        Kind::Setext => "setext headings are not supported; write '## Heading'",
-        Kind::Html => "raw HTML is not supported",
-        Kind::LinkDef => "link reference definitions are not supported",
-        Kind::Indented => {
-            "unexpected indentation; a block starts at the left margin (for code, use a ``` fence)"
-        }
-        _ => "unsupported construct",
+/// How a line after a paragraph's first line takes part in the paragraph.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Cont {
+    Text,
+    Indented,
+    /// A setext underline: rejected, and joins no text.
+    Underline,
+    /// Any other block, which ends the paragraph.
+    Other,
+}
+
+fn continuation(line: &str) -> Cont {
+    let t = line.trim_end_matches(' ');
+    if !t.is_empty() && (t.bytes().all(|c| c == b'-') || t.bytes().all(|c| c == b'=')) {
+        return Cont::Underline;
+    }
+    match classify(line) {
+        Kind::Text => Cont::Text,
+        Kind::Indented => Cont::Indented,
+        Kind::Setext | Kind::Break('-') => Cont::Underline,
+        _ => Cont::Other,
     }
 }
 
@@ -321,619 +489,1055 @@ fn delimiter_align(cell: &str) -> Option<Align> {
     })
 }
 
-struct Parser<'a> {
-    lines: Vec<&'a str>,
-    blocks: Vec<Block>,
-    diags: Vec<Diagnostic>,
-    too_large: bool,
+/// The cells of a table row, each trimmed and with `\|` still escaped. Once
+/// exhausted, `closed` says whether the row ended with an unescaped `|`.
+struct Cells<'a> {
+    row: &'a str,
+    k: usize,
+    start: usize,
+    closed: bool,
+    done: bool,
+}
+
+fn cells(line: &str) -> Cells<'_> {
+    // The leading `|` made the line a row; cells start after it.
+    Cells {
+        row: line.trim_end_matches(' '),
+        k: 1,
+        start: 1,
+        closed: false,
+        done: false,
+    }
+}
+
+impl<'a> Iterator for Cells<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<&'a str> {
+        if self.done {
+            return None;
+        }
+        let b = self.row.as_bytes();
+        while self.k < b.len() {
+            let k = self.k;
+            if b[k] == b'\\' && k + 1 < b.len() {
+                // A backslash pairs with the character after it, so `\|` is not a
+                // separator and neither is the pipe of `\\|`'s second pair.
+                self.k += 2;
+                self.closed = false;
+                continue;
+            }
+            self.k += 1;
+            if b[k] == b'|' {
+                self.closed = true;
+                let cell = self.row[self.start..k].trim();
+                self.start = self.k;
+                return Some(cell);
+            }
+            self.closed = false;
+        }
+        self.done = true;
+        if !self.closed {
+            let tail = self.row.get(self.start..).unwrap_or("").trim();
+            if !tail.is_empty() {
+                return Some(tail);
+            }
+        }
+        None
+    }
+}
+
+/// A row's cell count, and whether it ended with an unescaped `|`.
+fn row_shape(line: &str) -> (usize, bool) {
+    let mut c = cells(line);
+    let n = c.by_ref().count();
+    (n, c.closed)
+}
+
+/// A cell's inline text: `\|` becomes `|`; any other backslash pair is left for
+/// the inline scanner.
+fn cell_text<'c>(cell: &'c str, buf: &'c mut String) -> &'c str {
+    if !cell.contains('|') {
+        return cell;
+    }
+    buf.clear();
+    buf.reserve(cell.len());
+    let b = cell.as_bytes();
+    let mut from = 0;
+    let mut k = 0;
+    while k < b.len() {
+        if b[k] == b'\\' && k + 1 < b.len() {
+            if b[k + 1] == b'|' {
+                buf.push_str(&cell[from..k]);
+                from = k + 1;
+            }
+            k += 2;
+        } else {
+            k += 1;
+        }
+    }
+    buf.push_str(&cell[from..]);
+    buf
+}
+
+// ---------------------------------------------------------------------------
+// The parser
+// ---------------------------------------------------------------------------
+
+/// A line of the section: its text without the LF, its 1-based number, and the
+/// byte offset it starts at.
+#[derive(Clone, Copy, Debug)]
+struct Line<'s> {
+    text: &'s str,
+    no: usize,
+    pos: usize,
+}
+
+/// How the lines of a block map onto its joined inline text, and what each line
+/// checks as the scan enters and leaves it.
+#[derive(Clone, Copy)]
+enum Lines<'s> {
+    /// One line whose own structure is already checked: a heading, a table
+    /// cell, a title's text.
+    One,
+    /// A paragraph from line `first`; `last_text` is its last line that joins
+    /// text (a setext underline joins none).
+    Paragraph { first: usize, last_text: usize },
+    /// A list item: its marker line and the text after the marker, the
+    /// indentation its continuation lines take, and its last line.
+    Item {
+        first: usize,
+        text: &'s str,
+        col: usize,
+        last: usize,
+    },
+}
+
+/// A scan over a block's joined inline text, where each line break of the
+/// source is a `\n`. `line` is the source line holding the scan's position.
+struct Scan<'j, 's> {
+    text: &'j str,
+    lines: Lines<'s>,
+    line: Line<'s>,
+    report: bool,
+}
+
+/// Where a scan's runs go.
+enum Sink<'b> {
+    /// To the consumer, as `run` events.
+    Events,
+    /// Appended as plain text: an emphasis body, a title's text.
+    Plain(&'b mut String),
+    /// Counted in Unicode scalar values: a table cell's width.
+    Count(&'b mut usize),
+    /// Nowhere: inline content checked outside any block.
+    Drop,
+}
+
+/// Where the searches of one scan resume. Each records a position from which a
+/// search is known to find nothing, or what the last search found.
+struct Look {
+    code_none_from: [usize; 3],
+    emph_none_from: [usize; 3],
+    bracket: Option<(usize, Option<usize>)>,
+    underscore_closer: Option<Option<usize>>,
+}
+
+impl Look {
+    fn new() -> Look {
+        Look {
+            code_none_from: [usize::MAX; 3],
+            emph_none_from: [usize::MAX; 3],
+            bracket: None,
+            underscore_closer: None,
+        }
+    }
+}
+
+struct Parser<'s, 'e> {
+    src: &'s str,
+    events: &'e mut dyn Events,
+    measure: bool,
+    /// The line of the last problem reported, and the problems reported on it.
+    problem_line: usize,
+    seen: Vec<Problem>,
     /// A CRLF file is reported once, not once per line.
     cr_reported: bool,
     title_seen: bool,
+    blocks: usize,
+    /// Scratch space kept from block to block.
+    joined: String,
+    body: String,
+    cell: String,
 }
 
-impl<'a> Parser<'a> {
-    fn new(src: &'a str) -> Parser<'a> {
-        let mut p = Parser {
-            lines: Vec::new(),
-            blocks: Vec::new(),
-            diags: Vec::new(),
-            too_large: false,
+impl<'s, 'e> Parser<'s, 'e> {
+    fn new(src: &'s str, events: &'e mut dyn Events, measure: bool) -> Parser<'s, 'e> {
+        Parser {
+            src,
+            events,
+            measure,
+            problem_line: 0,
+            seen: Vec::new(),
             cr_reported: false,
             title_seen: false,
-        };
-        if src.len() > SECTION_MAX {
-            p.too_large = true;
-            p.diag(1, "the section is larger than 1 MiB");
-            return p;
+            blocks: 0,
+            joined: String::new(),
+            body: String::new(),
+            cell: String::new(),
         }
-        let body = match src.strip_prefix('\u{feff}') {
-            Some(rest) => {
-                p.diag(1, "the file begins with a byte-order mark");
-                rest
-            }
-            None => src,
-        };
-        let mut lines: Vec<&'a str> = body.split('\n').collect();
-        if body.ends_with('\n') {
-            lines.pop();
-        }
-        p.lines = lines;
-        p
     }
 
-    fn diag(&mut self, line: usize, message: &str) {
-        push_diag(&mut self.diags, line, message);
+    fn line(&self, pos: usize, no: usize) -> Option<Line<'s>> {
+        let len = self.src.len();
+        if pos > len || (pos == len && len > 0) {
+            return None;
+        }
+        let rest = &self.src[pos..];
+        let text = match rest.find('\n') {
+            Some(i) => &rest[..i],
+            None => rest,
+        };
+        Some(Line { text, no, pos })
     }
 
-    fn run(&mut self) {
-        if self.too_large {
+    fn after(&self, l: Line<'s>) -> Option<Line<'s>> {
+        self.line(l.pos + l.text.len() + 1, l.no + 1)
+    }
+
+    fn problem(&mut self, line: usize, problem: Problem) {
+        debug_assert!(
+            line >= self.problem_line,
+            "{:?} on line {} reported after a problem on line {}",
+            problem,
+            line,
+            self.problem_line
+        );
+        if line != self.problem_line {
+            self.problem_line = line;
+            self.seen.clear();
+        }
+        if self.seen.contains(&problem) {
             return;
         }
-        let n = self.lines.len();
-        if n == 0 || !matches!(classify(self.lines[0]), Kind::Heading(1, _)) {
-            self.diag(
-                1,
-                "a section begins with its title on line 1, written '# Title'",
-            );
+        self.seen.push(problem);
+        self.events.problem(line, problem);
+    }
+
+    fn open_block(&mut self, block: Open<'_>) {
+        self.blocks += 1;
+        self.events.open(block);
+    }
+
+    fn run(&mut self, file_name: Option<&str>) {
+        // The title check reads line 1 on its own, so it is reported first.
+        if let Some((n, _)) = file_name.and_then(catalog::parse_file_name) {
+            if title_text(self.src).is_some_and(|t| repeats_number(&t, n)) {
+                self.problem(1, Problem::TitleNumber);
+            }
         }
-        let mut i = 0;
-        while i < n {
-            let line = self.lines[i];
-            if is_blank(line) {
-                self.check_chars(i + 1, line, false);
-                i += 1;
+        if self.src.len() > SECTION_MAX {
+            self.problem(1, Problem::TooLarge);
+            return;
+        }
+        if let Some(rest) = self.src.strip_prefix('\u{feff}') {
+            self.problem(1, Problem::ByteOrderMark);
+            self.src = rest;
+        }
+        let mut next = self.line(0, 1);
+        if !matches!(next.map(|l| classify(l.text)), Some(Kind::Heading(1, _))) {
+            self.problem(1, Problem::NoTitle);
+        }
+        while let Some(l) = next {
+            if is_blank(l.text) {
+                self.check_chars(l, false);
+                next = self.after(l);
                 continue;
             }
-            i = match classify(line) {
-                Kind::Heading(level, text) => self.heading(i, level, text),
-                Kind::Fence => self.fence(i),
-                Kind::BadFence => self.bad_fence(i),
-                Kind::Bullet(_) | Kind::Numbered(..) => self.list(i),
-                Kind::TableRow => self.table(i),
-                Kind::Text => self.paragraph(i),
-                other => {
-                    self.check_chars(i + 1, line, false);
-                    self.diag(i + 1, rejected_message(other));
-                    i + 1
+            let kind = classify(l.text);
+            let rejected = match kind {
+                Kind::Heading(level, text) => {
+                    next = self.heading(l, level, text);
+                    continue;
                 }
+                Kind::Fence => {
+                    next = self.fence(l);
+                    continue;
+                }
+                Kind::BadFence => {
+                    next = self.bad_fence(l);
+                    continue;
+                }
+                Kind::Bullet(_) | Kind::Numbered(..) => {
+                    next = self.list(l, kind);
+                    continue;
+                }
+                Kind::TableRow => {
+                    next = self.table(l);
+                    continue;
+                }
+                Kind::Text => {
+                    next = self.paragraph(l);
+                    continue;
+                }
+                Kind::BadBullet => Problem::BadBullet,
+                Kind::BadNumbered => Problem::BadNumbered,
+                Kind::Quote => Problem::BlockQuote,
+                Kind::Break(_) => Problem::ThematicBreak,
+                Kind::Setext => Problem::Setext,
+                Kind::Html => Problem::Html,
+                Kind::LinkDef => Problem::LinkDefinition,
+                Kind::Footnote => Problem::Footnote,
+                Kind::Indented => Problem::Indented,
             };
+            self.check_chars(l, false);
+            self.problem(l.no, rejected);
+            next = self.after(l);
         }
     }
 
     /// A carriage return (reported once per file) and the first other control
     /// character on the line (TAB is allowed only inside a code block).
-    fn check_chars(&mut self, ln: usize, line: &str, in_code: bool) {
-        if line.contains('\r') && !self.cr_reported {
+    fn check_chars(&mut self, l: Line<'s>, in_code: bool) {
+        if l.text.contains('\r') && !self.cr_reported {
             self.cr_reported = true;
-            self.diag(ln, "a carriage return; a section uses LF line endings");
+            self.problem(l.no, Problem::CarriageReturn);
         }
-        for c in line.chars() {
+        for c in l.text.chars() {
             if c == '\r' || (c == '\t' && in_code) {
                 continue;
             }
             if c == '\t' {
-                self.diag(ln, "a tab outside a code block");
+                self.problem(l.no, Problem::Tab);
                 return;
             }
             if is_control(c) {
-                let m = format!("the control character U+{:04X}", c as u32);
-                self.diag(ln, &m);
+                self.problem(l.no, Problem::Control(c));
                 return;
             }
         }
     }
 
-    fn expect_blank_at(&mut self, j: usize, what: &str) {
-        if j < self.lines.len() && !is_blank(self.lines[j]) {
-            let m = format!(
-                "a blank line must separate this line from the {} above",
-                what
-            );
-            self.diag(j + 1, &m);
+    fn expect_blank(&mut self, next: Option<Line<'s>>, above: Above) {
+        if let Some(n) = next {
+            if !is_blank(n.text) {
+                self.problem(n.no, Problem::NotSeparated(above));
+            }
         }
     }
 
-    fn heading(&mut self, i: usize, level: usize, text: &'a str) -> usize {
-        let ln = i + 1;
-        self.check_chars(ln, self.lines[i], false);
+    fn heading(&mut self, l: Line<'s>, level: usize, text: &'s str) -> Option<Line<'s>> {
+        self.check_chars(l, false);
         let body = text.trim();
         if body.is_empty() {
-            self.diag(ln, "a heading has text after its marker");
+            self.problem(l.no, Problem::HeadingText);
         }
         let unhashed = body.trim_end_matches('#');
         if unhashed.len() < body.len() && (unhashed.is_empty() || unhashed.ends_with(' ')) {
-            self.diag(
-                ln,
-                "closing hashes are not supported; end the heading at its text",
-            );
+            self.problem(l.no, Problem::ClosingHashes);
         }
         if text.starts_with(' ') {
-            self.diag(ln, "one space separates a heading's marker from its text");
+            self.problem(l.no, Problem::HeadingSpace);
         }
-        let runs = inline(&[(body, ln)], &mut self.diags);
-        match level {
+        let block = match level {
             // A title below line 1 has already been reported by `run`.
-            1 if !self.title_seen && self.blocks.is_empty() => {
+            1 if !self.title_seen && self.blocks == 0 => {
                 self.title_seen = true;
-                self.blocks.push(Block::Title(runs));
+                Some(Open::Title)
             }
-            1 => self.diag(ln, "only the title, on line 1, is a level-1 heading"),
-            2 | 3 => self.blocks.push(Block::Heading(level as u8, runs)),
-            _ => self.diag(ln, "headings deeper than ### are not supported"),
-        }
-        self.expect_blank_at(i + 1, "heading");
-        i + 1
-    }
-
-    fn fence(&mut self, i: usize) -> usize {
-        let ln = i + 1;
-        self.check_chars(ln, self.lines[i], false);
-        let n = self.lines.len();
-        let mut content = Vec::new();
-        let mut j = i + 1;
-        while j < n && self.lines[j] != "```" {
-            let l = self.lines[j];
-            self.check_chars(j + 1, l, true);
-            content.push(String::from(l));
-            j += 1;
-        }
-        if j == n {
-            self.diag(
-                ln,
-                "the code block opened here is not closed by a line of three backticks",
-            );
-            return n;
-        }
-        if content.is_empty() {
-            self.diag(ln, "a code block has at least one line of content");
-        }
-        self.blocks.push(Block::Code(content));
-        self.expect_blank_at(j + 1, "code block");
-        j + 1
-    }
-
-    /// A fence the format rejects (`~~~`, four or more backticks, or a spaced
-    /// info string). Its body is skipped to the matching fence, so the
-    /// content is not reported as Markdown it was never meant to be.
-    fn bad_fence(&mut self, i: usize) -> usize {
-        let line = self.lines[i];
-        self.check_chars(i + 1, line, false);
-        self.diag(i + 1, rejected_message(Kind::BadFence));
-        let closer: String = if line.starts_with("~~~") {
-            String::from("~~~")
-        } else {
-            "`".repeat(line.chars().take_while(|&c| c == '`').count())
+            2 | 3 => Some(Open::Heading(level as u8)),
+            _ => None,
         };
-        let n = self.lines.len();
-        let mut j = i + 1;
-        while j < n {
-            let l = self.lines[j];
-            if l.trim_end() == closer {
-                return j + 1;
+        match block {
+            Some(b) => {
+                self.open_block(b);
+                self.inline_one(l.no, body, true, &mut Sink::Events);
+                self.events.close();
             }
-            self.check_chars(j + 1, l, true);
-            j += 1;
+            None => self.inline_one(l.no, body, true, &mut Sink::Drop),
         }
-        n
+        match level {
+            1 if block.is_none() => self.problem(l.no, Problem::LevelOneHeading),
+            1..=3 => {}
+            _ => self.problem(l.no, Problem::DeepHeading),
+        }
+        let next = self.after(l);
+        self.expect_blank(next, Above::Heading);
+        next
     }
 
-    fn list(&mut self, i: usize) -> usize {
-        let n = self.lines.len();
-        let bullets = matches!(classify(self.lines[i]), Kind::Bullet(_));
-        let mut items: Vec<Vec<Inline>> = Vec::new();
-        let mut j = i;
-        loop {
-            let ln = j + 1;
-            let line = self.lines[j];
-            self.check_chars(ln, line, false);
-            let (text, col) = match classify(line) {
+    fn fence(&mut self, open: Line<'s>) -> Option<Line<'s>> {
+        self.check_chars(open, false);
+        // Find the closing fence first, so the opening line's problems precede
+        // those of the content.
+        let mut close = self.after(open);
+        while let Some(c) = close {
+            if c.text == "```" {
+                break;
+            }
+            close = self.after(c);
+        }
+        let Some(close) = close else {
+            self.problem(open.no, Problem::UnclosedFence);
+            let mut l = self.after(open);
+            while let Some(c) = l {
+                self.check_chars(c, true);
+                l = self.after(c);
+            }
+            return None;
+        };
+        if close.no == open.no + 1 {
+            self.problem(open.no, Problem::EmptyCodeBlock);
+        }
+        self.open_block(Open::Code);
+        let mut l = self.after(open);
+        while let Some(c) = l {
+            if c.no == close.no {
+                break;
+            }
+            self.check_chars(c, true);
+            self.events.code_line(c.text);
+            l = self.after(c);
+        }
+        self.events.close();
+        let next = self.after(close);
+        self.expect_blank(next, Above::CodeBlock);
+        next
+    }
+
+    /// A fence the format rejects (`~~~`, four or more backticks, or an info
+    /// string that is not one word). Its body is skipped to the matching fence,
+    /// so the content is not reported as Markdown it was never meant to be.
+    fn bad_fence(&mut self, open: Line<'s>) -> Option<Line<'s>> {
+        self.check_chars(open, false);
+        self.problem(open.no, Problem::BadFence);
+        let closer = if open.text.starts_with("~~~") {
+            "~~~"
+        } else {
+            &open.text[..open.text.bytes().take_while(|&b| b == b'`').count()]
+        };
+        let mut l = self.after(open);
+        while let Some(c) = l {
+            if c.text.trim_end() == closer {
+                return self.after(c);
+            }
+            self.check_chars(c, true);
+            l = self.after(c);
+        }
+        None
+    }
+
+    fn list(&mut self, first: Line<'s>, first_kind: Kind<'s>) -> Option<Line<'s>> {
+        let bullets = matches!(first_kind, Kind::Bullet(_));
+        self.open_block(if bullets {
+            Open::Bullets
+        } else {
+            Open::Numbered
+        });
+        let mut items = 0usize;
+        let mut l = first;
+        let mut kind = first_kind;
+        let next = loop {
+            self.check_chars(l, false);
+            let (text, col) = match kind {
                 Kind::Bullet(t) => (t, 2),
                 Kind::Numbered(num, width, t) => {
-                    let expected = items.len() as u64 + 1;
-                    if num != expected {
-                        let m = format!(
-                            "numbered items run from 1 without gaps; expected {}",
-                            expected
-                        );
-                        self.diag(ln, &m);
+                    if num != (items + 1) as u64 {
+                        self.problem(l.no, Problem::NumberGap(items + 1));
                     }
                     (t, width)
                 }
-                // The caller and the continuation test below admit only items.
-                _ => break,
+                // Only item lines reach here: `run` and the check below.
+                _ => (l.text, 0),
             };
             if text.trim().is_empty() {
-                self.diag(ln, "a list item has text after its marker");
+                self.problem(l.no, Problem::ItemText);
             }
             if text.starts_with(' ') {
-                self.diag(ln, "one space separates a list marker from its text");
+                self.problem(l.no, Problem::ItemSpace);
             }
-            let mut segs: Vec<(&'a str, usize)> = vec![(text.trim_start(), ln)];
-            let mut k = j + 1;
-            while k < n {
-                let l = self.lines[k];
-                if is_blank(l) {
+            let mut last = l;
+            let mut after = self.after(l);
+            while let Some(c) = after {
+                if is_blank(c.text) || !c.text.starts_with(' ') {
                     break;
                 }
-                let indent = l.len() - l.trim_start_matches(' ').len();
-                if indent == 0 {
-                    break;
-                }
-                self.check_chars(k + 1, l, false);
-                let inner = &l[indent..];
-                if indent != col {
-                    let m = format!("a continuation line is indented by exactly {} spaces", col);
-                    self.diag(k + 1, &m);
-                } else if is_list_marker(inner) {
-                    self.diag(k + 1, "nested lists are not supported");
-                }
-                segs.push((inner, k + 1));
-                k += 1;
+                last = c;
+                after = self.after(c);
             }
-            items.push(inline(&segs, &mut self.diags));
-            j = k;
-            if j >= n || is_blank(self.lines[j]) {
-                break;
+            let mut joined = mem::take(&mut self.joined);
+            joined.clear();
+            joined.reserve(last.pos + last.text.len() - l.pos);
+            joined.push_str(text.trim_start().trim_end_matches(' '));
+            let mut c = l;
+            while c.no < last.no {
+                let Some(n) = self.after(c) else { break };
+                c = n;
+                joined.push('\n');
+                joined.push_str(c.text[leading_spaces(c.text)..].trim_end_matches(' '));
             }
-            let same = match classify(self.lines[j]) {
-                Kind::Bullet(_) => bullets,
-                Kind::Numbered(..) => !bullets,
-                _ => false,
+            items += 1;
+            self.events.open(Open::Item(items));
+            let mut sc = Scan {
+                text: &joined,
+                lines: Lines::Item {
+                    first: l.no,
+                    text,
+                    col,
+                    last: last.no,
+                },
+                line: l,
+                report: true,
             };
-            if !same {
-                self.diag(
-                    j + 1,
-                    "a blank line must separate this line from the list above",
-                );
-                break;
-            }
-        }
-        self.blocks.push(if bullets {
-            Block::Bullets(items)
-        } else {
-            Block::Numbered(items)
-        });
-        j
-    }
-
-    fn table(&mut self, i: usize) -> usize {
-        let n = self.lines.len();
-        let ln = i + 1;
-        self.check_chars(ln, self.lines[i], false);
-        let header_cells = self.row_cells(i);
-        let ncols = header_cells.len();
-        if ncols > TABLE_COLUMNS_MAX {
-            let m = format!("a table has at most {} columns", TABLE_COLUMNS_MAX);
-            self.diag(ln, &m);
-        }
-        if i + 1 >= n || classify(self.lines[i + 1]) != Kind::TableRow {
-            self.diag(
-                ln,
-                "a table's header row is followed by a delimiter row, such as | --- | --- |",
-            );
-            self.expect_blank_at(i + 1, "table");
-            return i + 1;
-        }
-        self.check_chars(i + 2, self.lines[i + 1], false);
-        let delim = self.row_cells(i + 1);
-        let mut align = Vec::new();
-        for c in &delim {
-            match delimiter_align(c) {
-                Some(a) => align.push(a),
-                None => {
-                    self.diag(i + 2, "a delimiter cell is ---, :---, ---:, or :---:");
-                    align.push(Align::Left);
+            self.scan(&mut sc, 0, joined.len(), false, &mut Sink::Events);
+            self.events.close();
+            self.joined = joined;
+            match after {
+                None => break None,
+                Some(c) if is_blank(c.text) => break Some(c),
+                Some(c) => {
+                    let k = classify(c.text);
+                    let same = match k {
+                        Kind::Bullet(_) => bullets,
+                        Kind::Numbered(..) => !bullets,
+                        _ => false,
+                    };
+                    if !same {
+                        self.problem(c.no, Problem::NotSeparated(Above::List));
+                        break Some(c);
+                    }
+                    l = c;
+                    kind = k;
                 }
             }
-        }
-        if delim.len() != ncols {
-            let m = format!(
-                "this row has {} cells; the header has {}",
-                delim.len(),
-                ncols
-            );
-            self.diag(i + 2, &m);
-        }
-        align.resize(ncols, Align::Left);
-        let header: Vec<Vec<Inline>> = header_cells
-            .iter()
-            .map(|c| inline(&[(c.as_str(), ln)], &mut self.diags))
-            .collect();
-        let mut rows = Vec::new();
-        let mut j = i + 2;
-        while j < n && classify(self.lines[j]) == Kind::TableRow {
-            self.check_chars(j + 1, self.lines[j], false);
-            let cells = self.row_cells(j);
-            if cells.len() != ncols {
-                let m = format!(
-                    "this row has {} cells; the header has {}",
-                    cells.len(),
-                    ncols
-                );
-                self.diag(j + 1, &m);
-            }
-            let row: Vec<Vec<Inline>> = cells
-                .iter()
-                .map(|c| inline(&[(c.as_str(), j + 1)], &mut self.diags))
-                .collect();
-            rows.push(row);
-            j += 1;
-        }
-        self.blocks.push(Block::Table {
-            align,
-            header,
-            rows,
-        });
-        self.expect_blank_at(j, "table");
-        j
+        };
+        self.events.close();
+        next
     }
 
-    /// Split a table row into trimmed cells. `\|` is a literal pipe; any
-    /// other backslash pair is kept for the inline parser.
-    fn row_cells(&mut self, idx: usize) -> Vec<String> {
-        let line = self.lines[idx].trim_end_matches(' ');
-        let chars: Vec<char> = line.chars().collect();
-        let mut cells = Vec::new();
-        let mut cur = String::new();
-        let mut closed = false;
-        let mut k = 1;
-        while k < chars.len() {
-            let c = chars[k];
-            if c == '\\' && k + 1 < chars.len() {
-                if chars[k + 1] == '|' {
-                    cur.push('|');
-                } else {
-                    cur.push('\\');
-                    cur.push(chars[k + 1]);
-                }
-                k += 2;
-                closed = false;
-                continue;
-            }
-            if c == '|' {
-                cells.push(core::mem::take(&mut cur).trim().to_string());
-                closed = true;
-            } else {
-                cur.push(c);
-                closed = false;
-            }
-            k += 1;
-        }
+    fn table(&mut self, head: Line<'s>) -> Option<Line<'s>> {
+        self.check_chars(head, false);
+        let (ncols, closed) = row_shape(head.text);
         if !closed {
-            self.diag(idx + 1, "a table row begins and ends with |");
-            if !cur.trim().is_empty() {
-                cells.push(cur.trim().to_string());
-            }
+            self.problem(head.no, Problem::RowPipes);
         }
-        cells
-    }
-
-    fn paragraph(&mut self, i: usize) -> usize {
-        let n = self.lines.len();
-        let mut segs: Vec<(&'a str, usize)> = Vec::new();
-        let mut j = i;
-        while j < n {
-            let l = self.lines[j];
-            if is_blank(l) {
-                break;
+        if ncols > TABLE_COLUMNS_MAX {
+            self.problem(head.no, Problem::TooManyColumns);
+        }
+        let Some(delim) = self
+            .after(head)
+            .filter(|d| classify(d.text) == Kind::TableRow)
+        else {
+            for cell in cells(head.text) {
+                self.cell_inline(head.no, cell, true, &mut Sink::Drop);
             }
-            if j > i {
-                match classify(l) {
-                    Kind::Text => {}
-                    Kind::Indented => {
-                        self.diag(j + 1, "a paragraph's lines start at the left margin");
-                    }
-                    Kind::Setext | Kind::Break('-') => {
-                        self.check_chars(j + 1, l, false);
-                        self.diag(
-                            j + 1,
-                            "setext headings are not supported; write '## Heading'",
-                        );
-                        j += 1;
-                        continue;
-                    }
-                    _ => {
-                        self.diag(
-                            j + 1,
-                            "a blank line must separate this line from the paragraph above",
-                        );
+            self.problem(head.no, Problem::NoDelimiterRow);
+            let next = self.after(head);
+            self.expect_blank(next, Above::Table);
+            return next;
+        };
+        let cols = ncols.min(TABLE_COLUMNS_MAX);
+        let mut align = [Align::Left; TABLE_COLUMNS_MAX];
+        for (c, cell) in cells(delim.text).take(cols).enumerate() {
+            align[c] = delimiter_align(cell).unwrap_or(Align::Left);
+        }
+        let mut widths = [0usize; TABLE_COLUMNS_MAX];
+        if self.measure {
+            let mut row = Some(head);
+            while let Some(r) = row {
+                if r.no != delim.no {
+                    if r.no != head.no && classify(r.text) != Kind::TableRow {
                         break;
                     }
+                    for (c, cell) in cells(r.text).take(cols).enumerate() {
+                        widths[c] = widths[c].max(self.cell_width(cell));
+                    }
                 }
+                row = self.after(r);
             }
-            self.check_chars(j + 1, l, false);
-            segs.push((l.trim_start(), j + 1));
-            j += 1;
         }
-        let runs = inline(&segs, &mut self.diags);
-        self.blocks.push(Block::Paragraph(runs));
-        j
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Inline forms (3.3)
-// ---------------------------------------------------------------------------
-
-/// Parse the inline content of one block, given its source lines. Lines are
-/// joined with a single space; each diagnostic names the line its character
-/// came from.
-fn inline(segs: &[(&str, usize)], diags: &mut Vec<Diagnostic>) -> Vec<Inline> {
-    let mut chars: Vec<char> = Vec::new();
-    let mut starts: Vec<(usize, usize)> = Vec::new();
-    for (idx, (seg, ln)) in segs.iter().enumerate() {
-        let trimmed = seg.trim_end_matches(' ');
-        if idx + 1 < segs.len() {
-            let spaces = seg.len() - trimmed.len();
-            let backslashes = trimmed.chars().rev().take_while(|&c| c == '\\').count();
-            if spaces >= 2 || backslashes % 2 == 1 {
-                push_diag(
-                    diags,
-                    *ln,
-                    "hard line breaks are not supported; end the line without two trailing spaces or a backslash",
+        let widths: &[usize] = if self.measure { &widths[..cols] } else { &[] };
+        self.open_block(Open::Table {
+            align: &align[..cols],
+            widths,
+        });
+        self.row(head);
+        // The delimiter row's problems follow the header's, which are on the
+        // line above.
+        self.check_chars(delim, false);
+        let (dcells, dclosed) = row_shape(delim.text);
+        if !dclosed {
+            self.problem(delim.no, Problem::RowPipes);
+        }
+        if cells(delim.text).any(|c| delimiter_align(c).is_none()) {
+            self.problem(delim.no, Problem::DelimiterCell);
+        }
+        if dcells != ncols {
+            self.problem(
+                delim.no,
+                Problem::CellCount {
+                    cells: dcells,
+                    header: ncols,
+                },
+            );
+        }
+        let mut next = self.after(delim);
+        while let Some(r) = next {
+            if classify(r.text) != Kind::TableRow {
+                break;
+            }
+            self.check_chars(r, false);
+            let (n, closed) = row_shape(r.text);
+            if !closed {
+                self.problem(r.no, Problem::RowPipes);
+            }
+            if n != ncols {
+                self.problem(
+                    r.no,
+                    Problem::CellCount {
+                        cells: n,
+                        header: ncols,
+                    },
                 );
             }
+            self.row(r);
+            next = self.after(r);
         }
-        if idx > 0 {
-            chars.push(' ');
+        self.events.close();
+        self.expect_blank(next, Above::Table);
+        next
+    }
+
+    fn row(&mut self, r: Line<'s>) {
+        self.events.open(Open::Row);
+        for cell in cells(r.text) {
+            let width = if self.measure {
+                self.cell_width(cell)
+            } else {
+                0
+            };
+            self.events.open(Open::Cell { width });
+            self.cell_inline(r.no, cell, true, &mut Sink::Events);
+            self.events.close();
         }
-        starts.push((chars.len(), *ln));
-        chars.extend(trimmed.chars());
+        self.events.close();
     }
-    scan(&chars, 0, &starts, diags, false)
-}
 
-fn line_at(starts: &[(usize, usize)], idx: usize) -> usize {
-    let mut line = starts.first().map_or(1, |s| s.1);
-    for &(at, ln) in starts {
-        if at > idx {
-            break;
+    fn cell_width(&mut self, cell: &str) -> usize {
+        let mut n = 0;
+        self.cell_inline(0, cell, false, &mut Sink::Count(&mut n));
+        n
+    }
+
+    fn cell_inline(&mut self, no: usize, cell: &str, report: bool, sink: &mut Sink<'_>) {
+        let mut buf = mem::take(&mut self.cell);
+        let text = cell_text(cell, &mut buf);
+        self.inline_one(no, text, report, sink);
+        self.cell = buf;
+    }
+
+    fn paragraph(&mut self, first: Line<'s>) -> Option<Line<'s>> {
+        let mut last = first;
+        let mut last_text = first.no;
+        let mut stop = None;
+        let mut next = self.after(first);
+        while let Some(l) = next {
+            if is_blank(l.text) {
+                break;
+            }
+            match continuation(l.text) {
+                Cont::Text | Cont::Indented => last_text = l.no,
+                Cont::Underline => {}
+                Cont::Other => {
+                    stop = Some(l);
+                    break;
+                }
+            }
+            last = l;
+            next = self.after(l);
         }
-        line = ln;
+        let mut joined = mem::take(&mut self.joined);
+        joined.clear();
+        joined.reserve(last.pos + last.text.len() - first.pos);
+        let mut l = first;
+        loop {
+            if l.no == first.no || continuation(l.text) != Cont::Underline {
+                joined.push_str(l.text.trim_start().trim_end_matches(' '));
+            }
+            if l.no >= last.no {
+                break;
+            }
+            let Some(n) = self.after(l) else { break };
+            joined.push('\n');
+            l = n;
+        }
+        self.open_block(Open::Paragraph);
+        let mut sc = Scan {
+            text: &joined,
+            lines: Lines::Paragraph {
+                first: first.no,
+                last_text,
+            },
+            line: first,
+            report: true,
+        };
+        self.enter(&sc, first);
+        self.scan(&mut sc, 0, joined.len(), false, &mut Sink::Events);
+        self.events.close();
+        self.joined = joined;
+        if let Some(s) = stop {
+            self.problem(s.no, Problem::NotSeparated(Above::Paragraph));
+        }
+        next
     }
-    line
-}
 
-fn run_len(chars: &[char], k: usize, ch: char) -> usize {
-    chars[k..].iter().take_while(|&&c| c == ch).count()
-}
+    // -----------------------------------------------------------------------
+    // Inline forms (3.3)
+    // -----------------------------------------------------------------------
 
-fn flush(out: &mut Vec<Inline>, text: &mut String) {
-    if !text.is_empty() {
-        out.push(Inline::Text(core::mem::take(text)));
+    /// Scan one line's inline content, reported against line `no`.
+    fn inline_one(&mut self, no: usize, text: &str, report: bool, sink: &mut Sink<'_>) {
+        let mut sc = Scan {
+            text,
+            lines: Lines::One,
+            line: Line {
+                text: "",
+                no,
+                pos: 0,
+            },
+            report,
+        };
+        self.scan(&mut sc, 0, text.len(), false, sink);
     }
-}
 
-/// The inline scanner. `base` is the offset of `chars[0]` in the block's
-/// joined text (for line numbers). Inside an emphasis body (`in_emphasis`), a
-/// code span or another asterisk is nesting, which 3.3 rejects.
-fn scan(
-    chars: &[char],
-    base: usize,
-    starts: &[(usize, usize)],
-    diags: &mut Vec<Diagnostic>,
-    in_emphasis: bool,
-) -> Vec<Inline> {
-    const ANGLE: &str =
-        "write '<' and '>' inside a code span (a placeholder is written `<name>`) or escape them";
-    let n = chars.len();
-    let mut out: Vec<Inline> = Vec::new();
-    let mut text = String::new();
-    let mut k = 0;
-    while k < n {
-        let c = chars[k];
-        let ln = line_at(starts, base + k);
-        match c {
-            '\\' => {
-                if k + 1 < n && chars[k + 1].is_ascii_punctuation() {
-                    text.push(chars[k + 1]);
-                    k += 2;
+    /// The problems a line carries that its inline content does not, reported
+    /// as the scan reaches the line.
+    fn enter(&mut self, sc: &Scan<'_, 's>, l: Line<'s>) {
+        match sc.lines {
+            Lines::One => {}
+            Lines::Paragraph { first, .. } => {
+                if l.no != first {
+                    match continuation(l.text) {
+                        Cont::Indented => self.problem(l.no, Problem::ParagraphIndent),
+                        Cont::Underline => {
+                            self.check_chars(l, false);
+                            self.problem(l.no, Problem::Setext);
+                            return;
+                        }
+                        Cont::Text | Cont::Other => {}
+                    }
+                }
+                self.check_chars(l, false);
+            }
+            Lines::Item { first, col, .. } => {
+                // The marker line was checked before the item opened.
+                if l.no != first {
+                    self.check_chars(l, false);
+                    let indent = leading_spaces(l.text);
+                    if indent != col {
+                        self.problem(l.no, Problem::ContinuationIndent(col));
+                    } else if is_list_marker(&l.text[indent..]) {
+                        self.problem(l.no, Problem::NestedList);
+                    }
+                }
+            }
+        }
+    }
+
+    /// A line that ends in a hard line break outside a code span, reported as
+    /// the scan leaves the line. A block's last line of text has none.
+    fn leave(&mut self, sc: &Scan<'_, 's>, l: Line<'s>) {
+        let seg = match sc.lines {
+            Lines::One => return,
+            Lines::Paragraph { first, last_text } => {
+                if l.no == last_text || (l.no != first && continuation(l.text) == Cont::Underline) {
+                    return;
+                }
+                l.text.trim_start()
+            }
+            Lines::Item {
+                first, text, last, ..
+            } => {
+                if l.no == last {
+                    return;
+                }
+                if l.no == first {
+                    text.trim_start()
                 } else {
-                    text.push('\\');
+                    &l.text[leading_spaces(l.text)..]
+                }
+            }
+        };
+        let trimmed = seg.trim_end_matches(' ');
+        let spaces = seg.len() - trimmed.len();
+        let backslashes = trimmed.bytes().rev().take_while(|&b| b == b'\\').count();
+        if spaces >= 2 || backslashes % 2 == 1 {
+            self.problem(l.no, Problem::HardBreak);
+        }
+    }
+
+    /// The scan passes a line break.
+    fn cross(&mut self, sc: &mut Scan<'_, 's>, in_code: bool) {
+        let left = sc.line;
+        if sc.report && !in_code {
+            self.leave(sc, left);
+        }
+        if let Lines::One = sc.lines {
+            return;
+        }
+        if let Some(next) = self.after(left) {
+            sc.line = next;
+            if sc.report {
+                self.enter(sc, next);
+            }
+        }
+    }
+
+    fn flag(&mut self, sc: &Scan<'_, 's>, problem: Problem) {
+        if sc.report {
+            self.problem(sc.line.no, problem);
+        }
+    }
+
+    fn emit(&mut self, sink: &mut Sink<'_>, kind: Run, text: &str) {
+        match sink {
+            Sink::Events => self.events.run(kind, text),
+            Sink::Plain(out) => out.push_str(text),
+            Sink::Count(n) => **n += text.chars().count(),
+            Sink::Drop => {}
+        }
+    }
+
+    /// Scan `sc.text[lo..hi]`. Inside an emphasis body (`in_emphasis`), a code
+    /// span or another asterisk is nesting, which 3.3 rejects.
+    fn scan(
+        &mut self,
+        sc: &mut Scan<'_, 's>,
+        lo: usize,
+        hi: usize,
+        in_emphasis: bool,
+        sink: &mut Sink<'_>,
+    ) {
+        let t = sc.text;
+        let b = t.as_bytes();
+        let mut look = Look::new();
+        let mut k = lo;
+        while k < hi {
+            match b[k] {
+                b'\\' => {
+                    if k + 1 < hi && b[k + 1].is_ascii_punctuation() {
+                        self.emit(sink, Run::Text, &t[k + 1..k + 2]);
+                        k += 2;
+                    } else {
+                        self.emit(sink, Run::Text, "\\");
+                        k += 1;
+                    }
+                }
+                b'\n' => {
+                    self.cross(sc, false);
+                    self.emit(sink, Run::Text, " ");
                     k += 1;
                 }
-            }
-            '`' if in_emphasis => {
-                push_diag(diags, ln, "emphasis cannot contain a code span");
-                text.push('`');
-                k += 1;
-            }
-            '`' => {
-                let run = run_len(chars, k, '`');
-                if run > 2 {
-                    push_diag(
-                        diags,
-                        ln,
-                        "a code span is delimited by one or two backticks",
-                    );
-                    k += run;
-                    continue;
+                b'`' if in_emphasis => {
+                    self.flag(sc, Problem::CodeInEmphasis);
+                    self.emit(sink, Run::Text, "`");
+                    k += 1;
                 }
-                match find_run(chars, k + run, '`', run) {
-                    None => {
-                        push_diag(diags, ln, "this code span is not closed");
-                        k += run;
+                b'`' => k = self.code_span(sc, k, hi, &mut look, sink),
+                b'*' if in_emphasis => {
+                    self.flag(sc, Problem::NestedEmphasis);
+                    self.emit(sink, Run::Text, "*");
+                    k += 1;
+                }
+                b'*' => k = self.emphasis(sc, lo, k, hi, &mut look, sink),
+                b'<' | b'>' => {
+                    self.flag(sc, Problem::Angle);
+                    self.emit(sink, Run::Text, &t[k..k + 1]);
+                    k += 1;
+                }
+                b'[' => {
+                    if sc.report {
+                        self.bracket(sc, lo, k, hi, &mut look);
                     }
-                    Some(close) => {
-                        let mut body: String = chars[k + run..close].iter().collect();
-                        if body.len() >= 2
-                            && body.starts_with(' ')
-                            && body.ends_with(' ')
-                            && !body.trim().is_empty()
-                        {
-                            body = String::from(&body[1..body.len() - 1]);
-                        }
-                        if body.trim().is_empty() {
-                            push_diag(diags, ln, "an empty code span");
-                        }
-                        flush(&mut out, &mut text);
-                        out.push(Inline::Code(body));
-                        k = close + run;
+                    self.emit(sink, Run::Text, "[");
+                    k += 1;
+                }
+                b'~' if k + 1 < hi && b[k + 1] == b'~' => {
+                    self.flag(sc, Problem::Strikethrough);
+                    self.emit(sink, Run::Text, "~~");
+                    k += 2;
+                }
+                b'_' => {
+                    if sc.report && underscore_opens(t, lo, k, hi, &mut look) {
+                        self.problem(sc.line.no, Problem::Underscore);
                     }
+                    self.emit(sink, Run::Text, "_");
+                    k += 1;
                 }
-            }
-            '*' if in_emphasis => {
-                push_diag(diags, ln, "emphasis does not nest");
-                text.push('*');
-                k += 1;
-            }
-            '*' => {
-                k = emphasis(chars, base, k, starts, &mut out, &mut text, diags);
-            }
-            '<' | '>' => {
-                push_diag(diags, ln, ANGLE);
-                text.push(c);
-                k += 1;
-            }
-            '[' => {
-                if let Some(p) = chars[k + 1..].iter().position(|&x| x == ']') {
-                    let close = k + 1 + p;
-                    if close + 1 < n && chars[close + 1] == '(' {
-                        let image = k > 0 && chars[k - 1] == '!';
-                        let m = if image {
-                            "images are not supported"
-                        } else {
-                            "links are not supported; name the section or resource in prose"
-                        };
-                        push_diag(diags, ln, m);
-                    }
+                _ => {
+                    // Up to the next byte that can begin a form (every one is
+                    // ASCII, so this ends on a character boundary). A `~` that
+                    // does not begin `~~` is consumed on its own.
+                    let end = b[k + 1..hi]
+                        .iter()
+                        .position(|&c| is_special(c))
+                        .map_or(hi, |p| k + 1 + p);
+                    self.emit(sink, Run::Text, &t[k..end]);
+                    k = end;
                 }
-                text.push('[');
-                k += 1;
-            }
-            '~' if k + 1 < n && chars[k + 1] == '~' => {
-                push_diag(diags, ln, "strikethrough is not supported");
-                text.push_str("~~");
-                k += 2;
-            }
-            '_' => {
-                if underscore_emphasis(chars, k) {
-                    push_diag(
-                        diags,
-                        ln,
-                        "underscore emphasis is not supported; write *emphasis*",
-                    );
-                }
-                text.push('_');
-                k += 1;
-            }
-            _ => {
-                text.push(c);
-                k += 1;
             }
         }
     }
-    flush(&mut out, &mut text);
-    out
+
+    fn code_span(
+        &mut self,
+        sc: &mut Scan<'_, 's>,
+        k: usize,
+        hi: usize,
+        look: &mut Look,
+        sink: &mut Sink<'_>,
+    ) -> usize {
+        let t = sc.text;
+        let b = t.as_bytes();
+        let run = run_len(b, k, hi, b'`');
+        if run > 2 {
+            self.flag(sc, Problem::CodeSpanTicks);
+            return k + run;
+        }
+        let Some(close) = find_code_close(b, k + run, hi, run, look) else {
+            self.flag(sc, Problem::UnclosedCodeSpan);
+            return k + run;
+        };
+        let raw = &t[k + run..close];
+        let breaks = raw.bytes().filter(|&c| c == b'\n').count();
+        let mut buf = mem::take(&mut self.body);
+        let body = if breaks == 0 {
+            raw
+        } else {
+            // A code span's line breaks join with a space, as everywhere else.
+            buf.clear();
+            buf.reserve(raw.len());
+            buf.extend(raw.chars().map(|c| if c == '\n' { ' ' } else { c }));
+            buf.as_str()
+        };
+        let body = if body.len() >= 2
+            && body.starts_with(' ')
+            && body.ends_with(' ')
+            && !body.trim().is_empty()
+        {
+            &body[1..body.len() - 1]
+        } else {
+            body
+        };
+        if body.trim().is_empty() {
+            self.flag(sc, Problem::EmptyCodeSpan);
+        }
+        self.emit(sink, Run::Code, body);
+        self.body = buf;
+        for _ in 0..breaks {
+            self.cross(sc, true);
+        }
+        close + run
+    }
+
+    /// The asterisk run at `k`; returns the offset after what it consumed.
+    fn emphasis(
+        &mut self,
+        sc: &mut Scan<'_, 's>,
+        lo: usize,
+        k: usize,
+        hi: usize,
+        look: &mut Look,
+        sink: &mut Sink<'_>,
+    ) -> usize {
+        let t = sc.text;
+        let b = t.as_bytes();
+        let run = run_len(b, k, hi, b'*');
+        let stars = &t[k..k + run];
+        let space_before = k == lo || is_separator(b[k - 1]);
+        let space_after = k + run >= hi || is_separator(b[k + run]);
+        if space_before && space_after {
+            self.emit(sink, Run::Text, stars);
+            return k + run;
+        }
+        if run > 2 {
+            self.flag(sc, Problem::NestedEmphasis);
+            self.emit(sink, Run::Text, stars);
+            return k + run;
+        }
+        let close = if space_after {
+            None
+        } else {
+            find_emphasis_close(b, k + run, hi, run, look)
+        };
+        let Some(close) = close else {
+            self.flag(sc, Problem::UnmatchedStar);
+            self.emit(sink, Run::Text, stars);
+            return k + run;
+        };
+        let kind = if run == 2 { Run::Strong } else { Run::Emph };
+        match sink {
+            Sink::Events => {
+                let mut body = mem::take(&mut self.body);
+                body.clear();
+                body.reserve(close - (k + run));
+                self.scan(sc, k + run, close, true, &mut Sink::Plain(&mut body));
+                self.events.run(kind, &body);
+                self.body = body;
+            }
+            // Plain text, a count, or nothing: the body's text is all that is kept.
+            _ => self.scan(sc, k + run, close, true, sink),
+        }
+        close + run
+    }
+
+    /// A `[` that begins a link, an image, or a footnote reference.
+    fn bracket(&mut self, sc: &Scan<'_, 's>, lo: usize, k: usize, hi: usize, look: &mut Look) {
+        let b = sc.text.as_bytes();
+        let Some(close) = next_bracket(b, k + 1, hi, look) else {
+            return;
+        };
+        if close + 1 < hi && b[close + 1] == b'(' {
+            let image = k > lo && b[k - 1] == b'!';
+            self.problem(
+                sc.line.no,
+                if image { Problem::Image } else { Problem::Link },
+            );
+        } else if b[k + 1] == b'^' && close > k + 2 {
+            self.problem(sc.line.no, Problem::Footnote);
+        }
+    }
 }
 
-/// The first run of exactly `len` copies of `ch` at or after `from`.
-fn find_run(chars: &[char], from: usize, ch: char, len: usize) -> Option<usize> {
+/// A byte that can begin an inline form, or a line break.
+fn is_special(c: u8) -> bool {
+    matches!(
+        c,
+        b'\\' | b'\n' | b'`' | b'*' | b'<' | b'>' | b'[' | b'~' | b'_'
+    )
+}
+
+/// A space, or a line break, which joins lines as a space.
+fn is_separator(c: u8) -> bool {
+    c == b' ' || c == b'\n'
+}
+
+fn run_len(b: &[u8], k: usize, hi: usize, ch: u8) -> usize {
+    b[k..hi].iter().take_while(|&&c| c == ch).count()
+}
+
+/// The first run of exactly `run` backticks at or after `from`. A search that
+/// finds none records where it started: a later search from there on would
+/// examine a subset of the same runs.
+fn find_code_close(b: &[u8], from: usize, hi: usize, run: usize, look: &mut Look) -> Option<usize> {
+    if from >= look.code_none_from[run] {
+        return None;
+    }
     let mut m = from;
-    while m < chars.len() {
-        if chars[m] == ch {
-            let r = run_len(chars, m, ch);
-            if r == len {
+    while m < hi {
+        if b[m] == b'`' {
+            let r = run_len(b, m, hi, b'`');
+            if r == run {
                 return Some(m);
             }
             m += r;
@@ -941,97 +1545,388 @@ fn find_run(chars: &[char], from: usize, ch: char, len: usize) -> Option<usize> 
             m += 1;
         }
     }
+    look.code_none_from[run] = from;
     None
 }
 
-/// Handle the asterisk run at `k`; returns the index after what it consumed.
-fn emphasis(
-    chars: &[char],
-    base: usize,
-    k: usize,
-    starts: &[(usize, usize)],
-    out: &mut Vec<Inline>,
-    text: &mut String,
-    diags: &mut Vec<Diagnostic>,
-) -> usize {
-    const UNMATCHED: &str = "an unmatched '*'; write a literal asterisk as \\*";
-    let n = chars.len();
-    let ln = line_at(starts, base + k);
-    let run = run_len(chars, k, '*');
-    let space_before = k == 0 || chars[k - 1] == ' ';
-    let space_after = k + run >= n || chars[k + run] == ' ';
-    let literal = |text: &mut String| {
-        for _ in 0..run {
-            text.push('*');
-        }
-    };
-    if space_before && space_after {
-        literal(text);
-        return k + run;
+/// The first run of exactly `run` asterisks at or after `from` that is not
+/// preceded by a space, skipping escaped characters. `from` always follows an
+/// asterisk run, so every search reads the escapes after it the same way, and a
+/// search that finds nothing settles every later one.
+fn find_emphasis_close(
+    b: &[u8],
+    from: usize,
+    hi: usize,
+    run: usize,
+    look: &mut Look,
+) -> Option<usize> {
+    if from >= look.emph_none_from[run] {
+        return None;
     }
-    if run > 2 {
-        push_diag(diags, ln, "emphasis does not nest");
-        literal(text);
-        return k + run;
-    }
-    if space_after {
-        push_diag(diags, ln, UNMATCHED);
-        literal(text);
-        return k + run;
-    }
-    let mut m = k + run;
-    let mut close = None;
-    while m < n {
-        match chars[m] {
-            '\\' => m += 2,
-            '*' => {
-                let r = run_len(chars, m, '*');
-                if r == run && chars[m - 1] != ' ' {
-                    close = Some(m);
-                    break;
+    let mut m = from;
+    while m < hi {
+        match b[m] {
+            b'\\' => {
+                m += 1;
+                if m < hi {
+                    m += utf8_len(b[m]);
+                }
+            }
+            b'*' => {
+                let r = run_len(b, m, hi, b'*');
+                if r == run && !is_separator(b[m - 1]) {
+                    return Some(m);
                 }
                 m += r;
             }
             _ => m += 1,
         }
     }
-    let Some(close) = close else {
-        push_diag(diags, ln, UNMATCHED);
-        literal(text);
-        return k + run;
-    };
-    let body_runs = scan(&chars[k + run..close], base + k + run, starts, diags, true);
-    flush(out, text);
-    let body = plain_text(&body_runs);
-    out.push(if run == 2 {
-        Inline::Strong(body)
+    look.emph_none_from[run] = from;
+    None
+}
+
+/// The first `]` at or after `from`, resuming the previous search when it
+/// already covers `from`.
+fn next_bracket(b: &[u8], from: usize, hi: usize, look: &mut Look) -> Option<usize> {
+    if let Some((start, found)) = look.bracket {
+        if from >= start {
+            match found {
+                Some(q) if from <= q => return Some(q),
+                None => return None,
+                _ => {}
+            }
+        }
+    }
+    let found = b[from.min(hi)..hi]
+        .iter()
+        .position(|&c| c == b']')
+        .map(|p| from + p);
+    look.bracket = Some((from, found));
+    found
+}
+
+fn utf8_len(lead: u8) -> usize {
+    match lead {
+        0x00..=0x7f => 1,
+        0xc0..=0xdf => 2,
+        0xe0..=0xef => 3,
+        _ => 4,
+    }
+}
+
+fn char_before(t: &str, k: usize) -> Option<char> {
+    t[..k].chars().next_back()
+}
+
+fn char_at(t: &str, k: usize, hi: usize) -> Option<char> {
+    if k < hi {
+        t[k..hi].chars().next()
     } else {
-        Inline::Emph(body)
-    });
-    close + run
+        None
+    }
 }
 
 /// An underscore that opens what Markdown elsewhere would render as emphasis:
 /// at a word start, followed by a non-space, with a closing underscore at a
 /// word end.
-fn underscore_emphasis(chars: &[char], k: usize) -> bool {
-    let opens = (k == 0 || !chars[k - 1].is_alphanumeric())
-        && k + 1 < chars.len()
-        && !chars[k + 1].is_whitespace()
-        && chars[k + 1] != '_';
+fn underscore_opens(t: &str, lo: usize, k: usize, hi: usize, look: &mut Look) -> bool {
+    let after_word = k > lo && char_before(t, k).is_some_and(|c| c.is_alphanumeric());
+    let opens =
+        !after_word && char_at(t, k + 1, hi).is_some_and(|c| !c.is_whitespace() && c != '_');
     if !opens {
         return false;
     }
-    (k + 2..chars.len()).any(|m| {
-        chars[m] == '_'
-            && !chars[m - 1].is_whitespace()
-            && (m + 1 == chars.len() || !chars[m + 1].is_alphanumeric())
-    })
+    let last = *look.underscore_closer.get_or_insert_with(|| {
+        let b = t.as_bytes();
+        (lo + 1..hi).rev().find(|&m| {
+            b[m] == b'_'
+                && !char_before(t, m).is_some_and(|c| c.is_whitespace())
+                && !char_at(t, m + 1, hi).is_some_and(|c| c.is_alphanumeric())
+        })
+    });
+    last.is_some_and(|m| m >= k + 2)
+}
+
+#[cfg(test)]
+pub(crate) mod tree {
+    //! A document tree built from the parser's events, and the diagnostics in
+    //! the order they arrived: the shape the format tests assert. Building it
+    //! also checks that the events are well formed.
+
+    use super::*;
+    use alloc::string::ToString;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub enum Inline {
+        Text(String),
+        Code(String),
+        Emph(String),
+        Strong(String),
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub enum Block {
+        Title(Vec<Inline>),
+        Heading(u8, Vec<Inline>),
+        Paragraph(Vec<Inline>),
+        Bullets(Vec<Vec<Inline>>),
+        Numbered(Vec<Vec<Inline>>),
+        Code(Vec<String>),
+        Table {
+            align: Vec<Align>,
+            header: Vec<Vec<Inline>>,
+            rows: Vec<Vec<Vec<Inline>>>,
+        },
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Document {
+        pub blocks: Vec<Block>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Diagnostic {
+        pub line: usize,
+        pub message: String,
+    }
+
+    pub fn plain_text(runs: &[Inline]) -> String {
+        let mut s = String::new();
+        for r in runs {
+            match r {
+                Inline::Text(t) | Inline::Code(t) | Inline::Emph(t) | Inline::Strong(t) => {
+                    s.push_str(t)
+                }
+            }
+        }
+        s
+    }
+
+    enum Frame {
+        Runs(Open<'static>, Vec<Inline>),
+        List(bool, Vec<Vec<Inline>>),
+        Code(Vec<String>),
+        Table(Vec<Align>, Vec<usize>, Vec<Vec<Vec<Inline>>>),
+        Row(Vec<Vec<Inline>>),
+    }
+
+    struct Builder {
+        measure: bool,
+        blocks: Vec<Block>,
+        stack: Vec<Frame>,
+        diags: Vec<(usize, Problem)>,
+        cell_width: Vec<usize>,
+    }
+
+    impl Events for Builder {
+        fn problem(&mut self, line: usize, problem: Problem) {
+            if let Some(&(last, _)) = self.diags.last() {
+                assert!(
+                    line >= last,
+                    "{:?} on line {} after line {}",
+                    problem,
+                    line,
+                    last
+                );
+            }
+            assert!(
+                !self.diags.contains(&(line, problem)),
+                "{:?} reported twice on line {}",
+                problem,
+                line
+            );
+            self.diags.push((line, problem));
+        }
+
+        fn open(&mut self, block: Open<'_>) {
+            let top_level = self.stack.is_empty();
+            let frame = match block {
+                Open::Title => {
+                    assert!(top_level);
+                    Frame::Runs(Open::Title, Vec::new())
+                }
+                Open::Heading(level) => {
+                    assert!(top_level && (level == 2 || level == 3));
+                    Frame::Runs(Open::Heading(level), Vec::new())
+                }
+                Open::Paragraph => {
+                    assert!(top_level);
+                    Frame::Runs(Open::Paragraph, Vec::new())
+                }
+                Open::Bullets | Open::Numbered => {
+                    assert!(top_level);
+                    Frame::List(block == Open::Numbered, Vec::new())
+                }
+                Open::Item(n) => {
+                    match self.stack.last() {
+                        Some(Frame::List(_, items)) => assert_eq!(n, items.len() + 1),
+                        _ => panic!("an item outside a list"),
+                    }
+                    Frame::Runs(Open::Item(n), Vec::new())
+                }
+                Open::Code => {
+                    assert!(top_level);
+                    Frame::Code(Vec::new())
+                }
+                Open::Table { align, widths } => {
+                    assert!(top_level);
+                    assert_eq!(widths.len(), if self.measure { align.len() } else { 0 });
+                    Frame::Table(align.to_vec(), widths.to_vec(), Vec::new())
+                }
+                Open::Row => {
+                    assert!(matches!(self.stack.last(), Some(Frame::Table(..))));
+                    Frame::Row(Vec::new())
+                }
+                Open::Cell { width } => {
+                    assert!(matches!(self.stack.last(), Some(Frame::Row(_))));
+                    self.cell_width.push(width);
+                    Frame::Runs(Open::Cell { width }, Vec::new())
+                }
+            };
+            self.stack.push(frame);
+        }
+
+        fn close(&mut self) {
+            let frame = self.stack.pop().expect("a close without an open");
+            let block = match frame {
+                Frame::Runs(Open::Title, runs) => Block::Title(runs),
+                Frame::Runs(Open::Heading(level), runs) => Block::Heading(level, runs),
+                Frame::Runs(Open::Paragraph, runs) => Block::Paragraph(runs),
+                Frame::Runs(Open::Item(_), runs) => {
+                    match self.stack.last_mut() {
+                        Some(Frame::List(_, items)) => items.push(runs),
+                        _ => unreachable!(),
+                    }
+                    return;
+                }
+                Frame::Runs(Open::Cell { .. }, runs) => {
+                    let width = self.cell_width.pop().unwrap();
+                    if self.measure {
+                        assert_eq!(width, plain_text(&runs).chars().count());
+                    }
+                    match self.stack.last_mut() {
+                        Some(Frame::Row(cells)) => cells.push(runs),
+                        _ => unreachable!(),
+                    }
+                    return;
+                }
+                Frame::Runs(..) => unreachable!(),
+                Frame::List(numbered, items) => {
+                    if numbered {
+                        Block::Numbered(items)
+                    } else {
+                        Block::Bullets(items)
+                    }
+                }
+                Frame::Code(lines) => Block::Code(lines),
+                Frame::Row(cells) => {
+                    match self.stack.last_mut() {
+                        Some(Frame::Table(_, _, rows)) => rows.push(cells),
+                        _ => unreachable!(),
+                    }
+                    return;
+                }
+                Frame::Table(align, widths, mut rows) => {
+                    if self.measure {
+                        for (c, w) in widths.iter().enumerate() {
+                            let widest = rows
+                                .iter()
+                                .filter_map(|r| r.get(c))
+                                .map(|cell| plain_text(cell).chars().count())
+                                .max()
+                                .unwrap_or(0);
+                            assert_eq!(*w, widest, "column {}", c);
+                        }
+                    }
+                    let header = if rows.is_empty() {
+                        Vec::new()
+                    } else {
+                        rows.remove(0)
+                    };
+                    Block::Table {
+                        align,
+                        header,
+                        rows,
+                    }
+                }
+            };
+            self.blocks.push(block);
+        }
+
+        fn run(&mut self, kind: Run, text: &str) {
+            let Some(Frame::Runs(_, runs)) = self.stack.last_mut() else {
+                panic!("a run outside a block that holds runs");
+            };
+            if kind == Run::Text {
+                if let Some(Inline::Text(t)) = runs.last_mut() {
+                    t.push_str(text);
+                    return;
+                }
+            }
+            let s = String::from(text);
+            runs.push(match kind {
+                Run::Text => Inline::Text(s),
+                Run::Code => Inline::Code(s),
+                Run::Emph => Inline::Emph(s),
+                Run::Strong => Inline::Strong(s),
+            });
+        }
+
+        fn code_line(&mut self, text: &str) {
+            let Some(Frame::Code(lines)) = self.stack.last_mut() else {
+                panic!("a code line outside a code block");
+            };
+            lines.push(String::from(text));
+        }
+
+        fn measures_tables(&self) -> bool {
+            self.measure
+        }
+    }
+
+    /// `check_section` for tests: the document when there are no problems,
+    /// otherwise the diagnostics. Both measuring and not measuring are run,
+    /// and they must agree.
+    pub fn check_section(file_name: Option<&str>, src: &str) -> Result<Document, Vec<Diagnostic>> {
+        let mut outcomes = [true, false].map(|measure| {
+            let mut b = Builder {
+                measure,
+                blocks: Vec::new(),
+                stack: Vec::new(),
+                diags: Vec::new(),
+                cell_width: Vec::new(),
+            };
+            read(file_name, src, &mut b);
+            assert!(b.stack.is_empty(), "blocks left open");
+            (b.blocks, b.diags)
+        });
+        let (blocks, diags) = mem::take(&mut outcomes[0]);
+        assert_eq!(blocks, outcomes[1].0);
+        assert_eq!(diags, outcomes[1].1);
+        assert_eq!(check(file_name, src, &mut |_, _| {}), diags.len());
+        if diags.is_empty() {
+            return Ok(Document { blocks });
+        }
+        Err(diags
+            .into_iter()
+            .map(|(line, p)| Diagnostic {
+                line,
+                message: p.to_string(),
+            })
+            .collect())
+    }
+
+    pub fn parse(src: &str) -> Result<Document, Vec<Diagnostic>> {
+        check_section(None, src)
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::tree::{check_section, parse, Block, Document, Inline};
     use super::*;
+    use alloc::vec;
 
     fn t(s: &str) -> Inline {
         Inline::Text(String::from(s))
@@ -1057,6 +1952,21 @@ mod tests {
                 fragment,
                 ds
             ),
+        }
+    }
+
+    /// The diagnostics of `src`, as (line, message fragment) pairs in order.
+    fn diagnoses(src: &str, expected: &[(usize, &str)]) {
+        let ds = parse(src).expect_err("expected diagnostics");
+        assert_eq!(ds.len(), expected.len(), "got {:?}", ds);
+        for (d, (line, fragment)) in ds.iter().zip(expected) {
+            assert!(
+                d.line == *line && d.message.contains(fragment),
+                "expected line {} containing {:?}; got {:?}",
+                line,
+                fragment,
+                ds
+            );
         }
     }
 
@@ -1123,6 +2033,15 @@ mod tests {
     }
 
     #[test]
+    fn any_ascii_punctuation_escapes() {
+        let d = ok("# T\n\nA \\&, a \\~~, a \\[^1], and a \\_x_.\n");
+        assert_eq!(
+            d.blocks[1],
+            Block::Paragraph(vec![t("A &, a ~~, a [^1], and a _x_.")])
+        );
+    }
+
+    #[test]
     fn emphasis_spans_lines_and_adjoins_punctuation() {
         let d = ok("# T\n\nThis is *very\nimportant*.\n");
         assert_eq!(
@@ -1132,6 +2051,45 @@ mod tests {
                 Inline::Emph(String::from("very important")),
                 t(".")
             ])
+        );
+    }
+
+    #[test]
+    fn a_code_span_spans_lines() {
+        let d = ok("# T\n\nRun `manual\n--check` first.\n");
+        assert_eq!(
+            d.blocks[1],
+            Block::Paragraph(vec![
+                t("Run "),
+                Inline::Code(String::from("manual --check")),
+                t(" first.")
+            ])
+        );
+    }
+
+    /// A line break inside a code span is part of the span's content, not a hard
+    /// line break, however the line ends.
+    #[test]
+    fn a_line_break_inside_a_code_span_is_not_a_hard_break() {
+        let d = ok("# T\n\nA `code  \nspan` and `back\\\nslash` here.\n");
+        assert_eq!(
+            d.blocks[1],
+            Block::Paragraph(vec![
+                t("A "),
+                Inline::Code(String::from("code span")),
+                t(" and "),
+                Inline::Code(String::from("back\\ slash")),
+                t(" here."),
+            ])
+        );
+        let d = ok("# T\n\n- An item with `code  \n  span` in it.\n");
+        assert_eq!(
+            d.blocks[1],
+            Block::Bullets(vec![vec![
+                t("An item with "),
+                Inline::Code(String::from("code span")),
+                t(" in it."),
+            ]])
         );
     }
 
@@ -1236,16 +2194,23 @@ mod tests {
             3,
             "link reference definitions",
         );
+        rejects("# T\n\n[^1]: A note.\n", 3, "footnotes");
         rejects("# T\n\n    indented\n", 3, "unexpected indentation");
         rejects("# T\n\n~~~\nx\n~~~\n", 3, "three backticks");
         rejects("# T\n\n````\nx\n````\n", 3, "three backticks");
         rejects("# T\n\n``` sh\nx\n```\n", 3, "three backticks");
+        rejects("# T\n\n```s`h\nx\n```\n", 3, "three backticks");
     }
 
     #[test]
     fn rejects_setext_headings() {
         rejects("# T\n\nHeading\n=======\n", 4, "setext");
         rejects("# T\n\nHeading\n---\n", 4, "setext");
+        rejects("# T\n\nHeading\n--\n", 4, "setext");
+        rejects("# T\n\nHeading\n-\n", 4, "setext");
+        rejects("# T\n\nHeading\n=\n", 4, "setext");
+        // A line of two hyphens that is not under a paragraph is text.
+        ok("# T\n\n--\n");
     }
 
     #[test]
@@ -1322,6 +2287,10 @@ mod tests {
         rejects("# T\n\nA *`code`* run.\n", 3, "cannot contain a code span");
         rejects("# T\n\nAn _underscore_ run.\n", 3, "underscore emphasis");
         rejects("# T\n\nA ~~struck~~ run.\n", 3, "strikethrough");
+        rejects("# T\n\nA note[^1] here.\n", 3, "footnotes");
+        rejects("# T\n\n| a[^n] |\n| --- |\n", 3, "footnotes");
+        // A caret that is not a footnote reference.
+        ok("# T\n\nThe [^] pair and 2^10 [x] stay.\n");
     }
 
     #[test]
@@ -1329,6 +2298,16 @@ mod tests {
         rejects(
             "# T\n\nFirst line,\nsecond <line>,\nthird.\n",
             4,
+            "inside a code span",
+        );
+        rejects(
+            "# T\n\n- An item,\n  a <second> line.\n",
+            4,
+            "inside a code span",
+        );
+        rejects(
+            "# T\n\nA *long\nopen star\nrun, <x>*.\n",
+            5,
             "inside a code span",
         );
     }
@@ -1341,8 +2320,11 @@ mod tests {
             3,
             "hard line breaks",
         );
-        // An escaped backslash at a line end is not a break.
+        rejects("# T\n\n- item  \n  more\n", 3, "hard line breaks");
+        // An escaped backslash at a line end is not a break, and neither are
+        // trailing spaces on a block's last line.
         ok("# T\n\nA literal \\\\\nnext.\n");
+        ok("# T\n\nThe last line  \n");
     }
 
     #[test]
@@ -1363,14 +2345,57 @@ mod tests {
         rejects(&big, 1, "larger than 1 MiB");
     }
 
+    /// Problems are reported in line order even where a block learns of them
+    /// out of order: a table's header cells before its delimiter row, a
+    /// paragraph's line structure between its inline content, an unclosed code
+    /// block before its content, a list item's continuation lines between its
+    /// inline content. The tree builder rejects any other order.
     #[test]
     fn diagnostics_are_in_line_order() {
-        let ds = parse("# T\n\nA <b>.\n\n> q\n\n## H ##\n").unwrap_err();
-        let lines: Vec<usize> = ds.iter().map(|d| d.line).collect();
-        let mut sorted = lines.clone();
-        sorted.sort();
-        assert_eq!(lines, sorted);
-        assert_eq!(lines.len(), 3, "{:?}", ds);
+        diagnoses(
+            "# T\n\nA <b>.\n\n> q\n\n## H ##\n",
+            &[
+                (3, "inside a code span"),
+                (5, "block quotes"),
+                (7, "closing hashes"),
+            ],
+        );
+        diagnoses(
+            "# T\n\n| <a> | b |\n| -- | --- |\n",
+            &[(3, "inside a code span"), (4, "delimiter cell")],
+        );
+        diagnoses(
+            "# T\n\nOne <x>\n  two <y>\n===\nthree [a](b)\n",
+            &[
+                (3, "inside a code span"),
+                (4, "left margin"),
+                (4, "inside a code span"),
+                (5, "setext"),
+                (6, "links are not supported"),
+            ],
+        );
+        diagnoses(
+            "# T\n\n```\nA \x01 control.\n",
+            &[(3, "not closed"), (4, "U+0001")],
+        );
+        diagnoses(
+            "# T\n\n- item <a>  \n   odd <b>\n  - nested\n",
+            &[
+                (3, "inside a code span"),
+                (3, "hard line breaks"),
+                (4, "exactly 2 spaces"),
+                (4, "inside a code span"),
+                (5, "nested lists"),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_header_row_without_a_delimiter_still_has_its_inline_content_checked() {
+        diagnoses(
+            "# T\n\n| <a> |\n",
+            &[(3, "inside a code span"), (3, "delimiter row")],
+        );
     }
 
     #[test]
@@ -1393,5 +2418,25 @@ mod tests {
         );
         assert_eq!(title_text("## Not a title\n"), None);
         assert_eq!(title_text("# \n"), None);
+    }
+
+    #[test]
+    fn row_cells_pair_backslashes() {
+        fn split(row: &str) -> (Vec<&str>, bool) {
+            let mut c = cells(row);
+            let v: Vec<&str> = c.by_ref().collect();
+            (v, c.closed)
+        }
+        assert_eq!(split("| a | b |"), (vec!["a", "b"], true));
+        assert_eq!(split("| a \\| b |"), (vec!["a \\| b"], true));
+        assert_eq!(split("| a \\\\| b |"), (vec!["a \\\\", "b"], true));
+        assert_eq!(split("| a \\\\\\| b |"), (vec!["a \\\\\\| b"], true));
+        assert_eq!(split("| a | b"), (vec!["a", "b"], false));
+        assert_eq!(split("| a |\u{a0}"), (vec!["a"], false));
+        assert_eq!(split("|"), (vec![], false));
+        assert_eq!(split("||"), (vec![""], true));
+        assert_eq!(split("| x \\"), (vec!["x \\"], false));
+        let mut buf = String::new();
+        assert_eq!(cell_text("a \\| b \\\\ c", &mut buf), "a | b \\\\ c");
     }
 }

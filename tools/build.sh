@@ -3389,6 +3389,21 @@ populate_stratum_pool() {
     (cd "$REPO_ROOT" && cargo build --manifest-path "$cm_manifest" --release) \
         || { echo "==> populate pool: corvus-mint BUILD FAILED" >&2; exit 1; }
 
+    # MANUAL-DESIGN 6: check docs/manual with the reader's own checker, built for
+    # this host, BEFORE the pool opens. It fails on any misnamed file or any
+    # section that fails the check, and prints the sections that passed: the
+    # install below writes exactly that list, so a section that was never
+    # checked cannot reach /manual. Built from the repo root for the same
+    # config-discovery reason as corvus-mint above.
+    local mc_manifest="$REPO_ROOT/tools/manual-check/Cargo.toml"
+    local mc_bin="$REPO_ROOT/tools/manual-check/target/release/manual-check"
+    echo "==> populate pool: building manual-check (the manual's section checker)"
+    (cd "$REPO_ROOT" && cargo build --manifest-path "$mc_manifest" --release) \
+        || { echo "==> populate pool: manual-check BUILD FAILED" >&2; exit 1; }
+    local manual_sections
+    manual_sections="$("$mc_bin" "$REPO_ROOT/docs/manual")" \
+        || { echo "==> populate pool: docs/manual FAILS the section check (manual-check above)" >&2; exit 1; }
+
     echo "==> populate pool: starting stratumd on $sock_path"
     # Bind to a deterministic dataset (1, the default). Backlog 4 is
     # plenty for the single sequential stratum-fs caller. Logs go to
@@ -3881,11 +3896,11 @@ populate_stratum_pool() {
         echo "==> populate pool: $baked theme(s) baked + readback-verified into /lib/halcyon/themes (HALCYON-THEME TH-5)"
     fi
 
-    # MANUAL-DESIGN 6: install the Operator's Manual at /manual. EVERY
-    # docs/manual/NN-<name>.md rather than a hand-listed set, so a section
-    # added to the tree ships by existing; `cargo test -p manual` has already
-    # held each one to the format. Unconditional: the manual is content, not a
-    # lever. With no sections the directory is still created, and `manual`
+    # MANUAL-DESIGN 6: install the Operator's Manual at /manual: the sections
+    # manual-check passed before the pool opened (above), which is every file in
+    # docs/manual except .gitkeep, so a section added to the tree ships by
+    # existing and cannot ship unchecked. Unconditional: the manual is content,
+    # not a lever. With no sections the directory is still created, and `manual`
     # reports that none are installed -- so the directory's existence is
     # verified here, since an empty listing cannot tell "no sections" from
     # "no /manual".
@@ -3893,22 +3908,20 @@ populate_stratum_pool() {
     "$stratum_fs_bin" -s "$sock_path" mkdir /manual >/dev/null 2>&1 || true
     "$stratum_fs_bin" -s "$sock_path" stat /manual >/dev/null 2>&1 \
         || { echo "==> populate pool: mkdir /manual FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
-    local section_src section_base sections=0
-    for section_src in "$manual_src"/[0-9][0-9]-*.md; do
-        [[ -f "$section_src" ]] || continue
-        section_base="$(basename "$section_src")"
-        "$stratum_fs_bin" -s "$sock_path" write "/manual/$section_base" < "$section_src" \
+    local section_base sections=0
+    while IFS= read -r section_base; do
+        [[ -n "$section_base" ]] || continue
+        "$stratum_fs_bin" -s "$sock_path" write "/manual/$section_base" < "$manual_src/$section_base" \
             || { echo "==> populate pool: write /manual/$section_base FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
         sections=$((sections + 1))
-    done
+    done <<< "$manual_sections"
     "$stratum_fs_bin" -s "$sock_path" sync \
         || { echo "==> populate pool: sync (manual) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
-    for section_src in "$manual_src"/[0-9][0-9]-*.md; do
-        [[ -f "$section_src" ]] || continue
-        section_base="$(basename "$section_src")"
-        "$stratum_fs_bin" -s "$sock_path" read "/manual/$section_base" | cmp -s - "$section_src" \
+    while IFS= read -r section_base; do
+        [[ -n "$section_base" ]] || continue
+        "$stratum_fs_bin" -s "$sock_path" read "/manual/$section_base" | cmp -s - "$manual_src/$section_base" \
             || { echo "==> populate pool: /manual/$section_base readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
-    done
+    done <<< "$manual_sections"
     echo "==> populate pool: $sections manual section(s) baked + readback-verified into /manual (MANUAL-DESIGN 6)"
 
     # TH-5b: put a gallery theme IN FORCE. `THYLACINE_HALCYON_THEME=<name>`

@@ -13,10 +13,18 @@ pub mod format;
 pub mod render;
 pub mod wrap;
 
+#[cfg(test)]
+mod bounds;
+
 use alloc::string::String;
 
 /// The largest section the reader accepts (MANUAL-DESIGN.md 3.1).
 pub const SECTION_MAX: usize = 1024 * 1024;
+
+/// The reader's heap (MANUAL-DESIGN.md 4.4). The `bounds` test checks and
+/// renders the sections most expensive to hold under the guest's allocator and
+/// asserts they stay below it.
+pub const HEAP_BYTES: usize = 16 * 1024 * 1024;
 
 /// A console narrower than this is treated as width-unknown (4.3).
 pub const WRAP_MIN_COLUMNS: usize = 20;

@@ -31,3 +31,7 @@ required-features = ["backend"]
 [dependencies]
 libthyla-rs = { path = "../lib/libthyla-rs", optional = true }
 beacon = { path = "../lib/beacon" }
+
+# The bounds test runs the reader under the guest heap's allocator.
+[dev-dependencies]
+linked_list_allocator = { version = "0.10", default-features = false }
