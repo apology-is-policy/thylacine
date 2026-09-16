@@ -59,7 +59,7 @@ These documents are binding. Implementation deviations either update scripture f
 | `docs/ROADMAP.md` | In what order. 8 phases with deliverables, exit criteria, risks, dependencies. Risk register. |
 | `docs/TOOLING.md` | Development tooling and agentic loop. QEMU + 9P host share + agent protocol. |
 | the vault (`../thylacine-vault/vault/`) + `docs/reference/NN-*.md` (LEGACY) | As-built technical reference. Per-subsystem; deep; binding. **Being retired into the vault (2026-09-06): `docs/reference` is frozen; new prose goes to a dossier.** See "Reference documentation discipline" Part A. |
-| `docs/USER-MANUAL.md` + `docs/manual/NN-*.md` | User-facing reference. Per-topic; deep; binding. Updated per user-visible change. |
+| `docs/OPERATORS-MANUAL.md` + `docs/manual/NN-*.md` | The Thylacine Operator's Manual (operator-facing; one section per facility; shipped in-OS at `/manual`). Written to `docs/thylacine-operators-manual-writing-guide.md`, which is binding. See Part B below. |
 | `docs/AUDIT-TRIGGERS.md` | The full audit-trigger surface table (moved verbatim from this file 2026-08-05). One row per audit-bearing surface: files + invariants + the per-chunk prosecution addenda. Cumulative; binding. |
 | `docs/ERRORS.md` | Error-code system. Errno registry (Thylacine-wide, POSIX-aligned values), `snare:*` fault-note family (thematic; replaces EL0-unhandled-fault extinction with per-Proc termination), exit-status semantics, boundary-line translation policy. ABI-bearing; updates require user signoff. |
 | `CLAUDE.md` (this) | Operational framework for Claude Code sessions. |
@@ -836,26 +836,15 @@ A dossier covers the same ground the legacy per-file template did (kept here as 
 
 The technical reference is **incredibly detailed and deep**. It is the document a future maintainer reads to understand a subsystem without having to re-derive everything from the code. If a section feels too thorough, it's probably right; if it feels concise, it's probably missing context. Treat the depth as a feature — it's the moat against future regressions.
 
-### B. User reference — `docs/USER-MANUAL.md` + `docs/manual/NN-*.md`
+### B. The Operator's Manual — `docs/OPERATORS-MANUAL.md` + `docs/manual/NN-*.md`
 
-The **user-facing** reference. Audience: people using Thylacine — operators, developers writing programs against Thylacine syscalls, sysadmins, container users, Halcyon end-users. Distinct from the technical reference (developers of Thylacine itself).
+The **operator-facing** reference: the *Thylacine Operator's Manual*. Audience: people who run and use Thylacine — operators, administrators, developers writing programs against it, container users, Halcyon users. Distinct from the technical reference (developers of Thylacine itself).
 
-Each user-facing surface gets its own `docs/manual/NN-<topic>.md` file:
+**LIVE, grown section by section.** Revived 2026-09-05 (operator-directed, superseding the 2026-05-31 deferral to v1.0-rc); renamed from the User Manual 2026-09-16. The index `docs/OPERATORS-MANUAL.md` lists the sections, one file each under `docs/manual/`. The source ships in the OS at `/manual` and is read through a Beacon-emitting reader: rich under Halcyon, plain text on serial and through pipes. **The reader and the `/manual` staging are built BEFORE further sections are written** (operator decision 2026-09-16), and the reader defines the source format — a section uses only the Markdown forms the reader maps onto Beacon, never markup it does not.
 
-- **Getting started** — install, boot, first login.
-- **Shells** — rc, bash, common patterns, namespace navigation.
-- **Coreutils** — what's there, what's not, differences from GNU/BusyBox where they matter.
-- **Namespaces** — how to construct one, how to inspect (`/proc/<pid>/ns`), how to compose with `bind`/`mount`.
-- **Stratum administration** — pools, datasets, snapshots, send/recv, encryption, scrub, the synthetic `/ctl/` interface.
-- **Containers** — `thylacine-run`, OCI image format, namespace construction, what's supported.
-- **Networking** — interface configuration via `/net/`, common admin commands.
-- **POSIX programming** — what works, what's deferred (`epoll`, `inotify`, `io_uring` post-v1.0), gotchas vs Linux.
-- **Linux binary compat** — what runs (musl-static, musl-dynamic), what's best-effort (glibc-dynamic), what doesn't.
-- **Halcyon** (Phase 8+) — usage, scroll buffer, image display, video player, customization.
-- **Troubleshooting** — boot failures, recovery shell, common kernel panics, audit-trigger surfaces from a user perspective.
-- **Reference for syscalls** — every syscall with man-page-quality detail. Argument types, return semantics, errno cases, examples.
+**The writing guide is binding for every manual sentence:** `docs/thylacine-operators-manual-writing-guide.md`. Read it before drafting. It fixes the section shape (an untitled opening, then **In Practice**, then **Technical Details**), the reference voice, the language to avoid, and the verification bar: every command, option, default and error checked against the current tree, and planned, test-only or superseded behaviour never presented as current.
 
-Like the technical reference, the user manual is **detailed and deep**. The bar: a user landing on a topic page should be able to learn how to do the thing without leaving the page; a developer porting a Linux program to Thylacine should be able to find every relevant compat note in one place.
+The bar: an operator landing on a section completes the common tasks without leaving it; a reader of the whole book comes away understanding the system.
 
 ### Maintenance discipline (per-chunk; non-negotiable)
 
@@ -876,8 +865,8 @@ When a chunk lands (bug fix, refactor, new module, new feature), the author upda
    **Since 2026-09-06 this is enforced mechanically, not only by convention** (operator-ratified). A `commit-msg` hook runs `quaestor dossier-gate`: staging code owned by an `audit: hard` dossier **blocks** the commit unless that dossier is co-staged OR the message carries a `No-dossier-change: <why>` trailer (non-empty reason required); any other owned surface **warns**. So the reminder to update — or consciously defer — a dossier fires the moment the code lands, on every track sharing the hook. A code track satisfies the gate by CO-STAGING the dossier it authored via quaestor (the vault agent is INACTIVE since 2026-09-09 -- there is no ring-and-defer; you author + co-stage, or defer with the trailer); the `No-dossier-change: <why>` trailer remains the escape for a conscious deferral. Details + the fail-open/commit-msg-placement rationale: `vault/meta/schema.md` section 8 (check 9). `--no-verify` skips it and is the sanctioned emergency bypass.
 
 1. **Technical reference (the vault)**: extend or create the owning dossier under `vault/system/` yourself via quaestor, per step 0 (the vault agent is INACTIVE since 2026-09-09; every agent self-manages its dossiers -- edit the dossier, `quaestor render`, co-stage with the code). New module → new dossier. Bug fix that touches a documented invariant → update the dossier after the spec. New term / acronym → a vault glossary note. **`docs/reference` is frozen legacy — never add to it or create a new `NN-*.md`;** it is being absorbed into redirect stubs subsystem-by-subsystem (Part A).
-2. **User reference**: extend or update the relevant `docs/manual/NN-*.md` section if the change is user-visible (new syscall, new admin command, new error case, behavior change). Internal refactors typically don't touch the user manual; user-visible changes always do.
-3. **Snapshot block** in `docs/REFERENCE.md` — refresh figures (test count, spec count, tip hash) on every chunk that changes them. Refresh the user-facing snapshot in `docs/USER-MANUAL.md` at the same cadence.
+2. **The Operator's Manual**: when a chunk changes the user-visible behaviour of a facility that HAS a manual section (a new command or option, a new error case, a behaviour change), update that section in the same PR, to the writing guide. Sections for facilities that have none are added deliberately as their surfaces settle, not owed per chunk (2026-09-05). Internal refactors do not touch the manual.
+3. **Snapshot block** in `docs/REFERENCE.md` — refresh figures (test count, spec count, tip hash) on every chunk that changes them. The Operator's Manual index keeps no snapshot.
 
 A PR that adds code without updating the relevant reference sections is incomplete. **Treat docs as code: doc-update-per-PR is non-negotiable. Missing docs are reverted along with their code.**
 
@@ -887,7 +876,7 @@ The audit-trigger surfaces table in this document and in `ARCHITECTURE.md §25.4
 
 ### Why two references, not one
 
-The technical reference (now **the vault**) and the user reference (`docs/manual`) have **different audiences with different needs**, and the retirement does not merge them — it only moves the technical one into the vault. A user wants to know "how do I create a snapshot of my home subvolume?" — they don't care about the Bε-tree commit protocol. A developer wants to know "what happens to outstanding 9P tags when a session is dropped?" — they don't care about the `stratum snapshot` CLI usage. Splitting them keeps each focused; merging them produces a 1000-page document where neither audience finds what they need. (`docs/manual` is a separate track, unaffected by the docs/reference retirement, and is itself deferred to v1.0-rc.)
+The technical reference (now **the vault**) and the user reference (`docs/manual`) have **different audiences with different needs**, and the retirement does not merge them — it only moves the technical one into the vault. A user wants to know "how do I create a snapshot of my home subvolume?" — they don't care about the Bε-tree commit protocol. A developer wants to know "what happens to outstanding 9P tags when a session is dropped?" — they don't care about the `stratum snapshot` CLI usage. Splitting them keeps each focused; merging them produces a 1000-page document where neither audience finds what they need. (The Operator's Manual is a separate track, unaffected by the docs/reference retirement; its status is in Part B.)
 
 Both are first-class. Neither is optional.
 

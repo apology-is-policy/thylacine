@@ -1087,7 +1087,7 @@ Scope:
 - ESP file rotation (current → previous; new → current; old previous deleted).
 - ok-marker discipline (5-min uptime sets marker; subsequent boot checks).
 - Bootloader config update.
-- Documentation in USER-MANUAL.md.
+- Documentation in the Operator's Manual (`docs/manual/`).
 
 Exit criteria: user runs `thyla-pkg kernel-update`, reboots, lands on new kernel; if new kernel fails, previous is one menu pick away; ok-marker discipline tested in QEMU.
 
