@@ -224,6 +224,99 @@ paragraph of one-character lines takes 105 s), and nothing witnesses that a file
 failing the check is not displayed. The full list is in memory
 `audit_manual_closed_list`.
 
+### The review fixes: a reader that streams (9c6211e9 scripture, d5a0e160 code)
+
+**Measured before designing.** The prosecutor's heap figures came from a
+byte-counting allocator, which is a lower bound. The guest heap is
+`linked_list_allocator` (first fit) inside a lazily committed `ThylaAllocN`, and
+what a lazy heap costs is its high-water mark, fragmentation included. So the
+first step ran the reader at 3fa1f814 under that allocator on the host (a scratch
+global allocator routing the measured thread into a `Heap`, plus a replica of
+`main.rs`'s read, check and render). At the 1 MiB cap: one line of `<` 158 MiB,
+one-word paragraphs 107 MiB, rich table rows 92 MiB, code spans 69 MiB, blank
+lines 33.5 MiB (the line index's `Vec<&str>` doubling), benign prose 10 MiB.
+Against the 16 MiB heap almost every adversarial shape failed, silently. A
+problem on every line took 66 s at 256 KiB, because the diagnostic dedup was
+quadratic.
+
+**Why a rewrite, not a bigger heap.** A heap large enough would be about the
+per-Proc page budget and would leave F2 and F3's quadratic time. The reader now
+streams. `format::read` reports each problem, in line order, and the section's
+structure (`open` / `close` / `run` / `code_line`) to a consumer as it reads, and
+keeps nothing past the block in hand. `check` counts, `render` writes 64 KiB
+chunks, and `wrap::Wrap` fills lines as runs arrive. The binary checks the whole
+file first and renders on a second read, so a failing file writes nothing.
+
+Three mechanisms carry the bounds:
+
+1. A block's lines are joined with `\n` and the scan crosses them. Entering a
+   line reports that line's own structure; leaving it reports a hard break unless
+   the crossing is inside a code span. So problems come out in line order even
+   where the old tree parser learned them out of order (a table header's cells
+   after its delimiter row, a paragraph's structure before its inline content, an
+   unclosed fence after its content), and no line number is ever searched for
+   (F2).
+2. Per-line dedup holds only the current line's set. That bounds diagnostic
+   memory with no cap, so MANUAL-DESIGN 5's "prints every diagnostic" stands; a
+   cap was the other option and would have been a user-visible change.
+3. Searches ahead resume (`Look`). A failed code-span or emphasis closer search
+   records where it started. That is sound because every search starts right
+   after a maximal run, so escape pairing reads the same from any later start.
+   `[` reuses its last `]`, and the underscore closer is found once per scan
+   (F3).
+
+**After.** Worst high-water mark at the cap is 6207 KiB: one code span across a
+1 MiB paragraph, wrapped on a console wider than the block. Block-per-line
+shapes measure 1088 KiB, of which 1024 is the section. Every shape scales 4.0x
+from 64 to 256 KiB. The test asserts an 8 MiB working set, not just the 16 MiB
+heap: a regression that buffered the whole rich output (17.7 MiB for headings)
+would pass a heap-only check for smaller shapes.
+
+**The Mac was held for main's Halcyon rebuild through all of this**, so the
+suite, the controls and a differential ran on thyla-pi (rustc 1.98.1), and the
+guest binary was type-checked there for `aarch64-unknown-none`. The Pi's lease
+was taken late: I ran two sabotage rounds before holding it, which is the
+protocol breach the lease exists to prevent. Nobody was waiting, but that was
+luck, not care.
+
+**Controls, each on a copy.** Every one failed the test aimed at it:
+
+- C1, sanitizing off: the forge test and the contents test fail. C1's first run
+  showed my own contents assertion was vacuous. `wire::strip` removes a forged
+  OSC along with its ESC, so "no ESC after strip" held with sanitizing off. It
+  now requires the U+FFFD replacements in the raw output.
+- C2, frames at every tier: 3 identity tests fail.
+- C3, the whole output buffered: the heap test fails (17.7 MiB).
+- C4, emphasis resumption off: the time test fails (6.4 s at 64 KiB, 101.9 s at
+  256 KiB).
+- C5, bracket resumption off: the time test fails (12.4 s, then 199 s).
+- C6, an unclosed fence reported after its content: the line-order test fails.
+- C7, per-line dedup off: 2 tests fail.
+
+**A differential against 3fa1f814** (scratch, 180,000 inputs from the review's
+generators plus multi-line sweeps): 98,200 renders of the 19,640 inputs both
+accept are byte-identical. The first report said 1,018 diagnostic differences
+were unexplained. They turned out to be cascades of one intended change: `-`,
+`--` and `- ` under a paragraph line are now setext underlines, as in
+CommonMark, so the paragraph continues past them. Code spans that were unclosed
+now close, and a "blank line must separate" moves to a later line. Once the
+harness filed whole inputs under that change, nothing unexplained remained. That
+class masks whole inputs, which the commit says. Two of my own reporting slips
+were caught on the way. `tail -120` had cut off exactly the categories that sort
+first, which were the unexplained ones. And a draft commit message quoted "736,099
+comparisons" for the wrap differential; that figure was invented, and the real
+count is exactly 780,000 by construction.
+
+**Shared-surface findings to main (yip 0094), both taken:** `beacon::Tier::parse`
+is exact while ut trims `BEACON` (F10), and libthyla-rs's panic handler exits 1
+with no message, which is why F1 was silent. That second one applies to every
+native program, not only the reader.
+
+**Open at this entry:** the in-guest scenario on a `--config ci` bake (legs b, c
+and f are new), a host-test run on the Mac, round 2 of the review (running,
+Fable), and two format questions for the operator: whether `&amp;`-style
+character references and Unicode bidi controls should be rejected.
+
 ---
 ## 2026-09-10 (aux, run 9, post self-compact) -- the Halcyon SESSION-path inline-media channel (I-47, HALCYON 14.7.2): per-pane routing on the existing /srv+9P mechanism
 
