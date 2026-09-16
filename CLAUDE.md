@@ -903,8 +903,7 @@ When a chunk lands (bug fix, refactor, new module, new feature), the author upda
    the pre-commit lint keeps current — self-maintaining, where the old rule's
    only enforcement was remembering it. That is how it reached six weeks
    stale, unnoticed, while every chunk quietly skipped it.
-   `docs/USER-MANUAL.md`'s snapshot is likewise not owed: the user manual has
-   been a Phase-0 stub since 2026-05-04 and is deferred to v1.0-rc.
+   The Operator's Manual index keeps no snapshot.
 
 A PR that adds code without updating the relevant reference sections is incomplete. **Treat docs as code: doc-update-per-PR is non-negotiable. Missing docs are reverted along with their code.**
 
