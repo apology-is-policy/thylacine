@@ -489,6 +489,8 @@ void test_sys_burrow_attach_rounds_up(void);
 void test_sys_burrow_attach_rejects_bad_length(void);
 void test_sys_burrow_detach_rejects(void);
 void test_sys_burrow_detach_window_confined(void);
+void test_sys_burrow_detach_dma_map_by_identity(void);
+void test_sys_burrow_detach_mmio_map_by_identity(void);
 void test_sys_burrow_attach_lazy_window_va(void);
 void test_sys_burrow_attach_lazy_large(void);
 void test_sys_burrow_lazy_len_from_args(void);
@@ -2202,6 +2204,8 @@ struct test_case g_tests[] = {
     { "sys_burrow.attach_rejects_bad_length", test_sys_burrow_attach_rejects_bad_length, false, NULL },
     { "sys_burrow.detach_rejects",            test_sys_burrow_detach_rejects,            false, NULL },
     { "sys_burrow.detach_window_confined",    test_sys_burrow_detach_window_confined,    false, NULL },
+    { "sys_burrow.detach_dma_map_by_identity", test_sys_burrow_detach_dma_map_by_identity, false, NULL },
+    { "sys_burrow.detach_mmio_map_by_identity", test_sys_burrow_detach_mmio_map_by_identity, false, NULL },
     { "sys_burrow.attach_lazy_window_va",     test_sys_burrow_attach_lazy_window_va,     false, NULL },
     { "sys_burrow.attach_lazy_large",         test_sys_burrow_attach_lazy_large,         false, NULL },
     { "sys_burrow.lazy_len_from_args",        test_sys_burrow_lazy_len_from_args,        false, NULL },

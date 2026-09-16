@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md"]
 created: 2026-08-03
-updated: 2026-09-06
+updated: 2026-09-16
 ---
 ## Purpose
 
@@ -278,18 +278,41 @@ takes `vma_lock` — the header will not tell you to.
 
 A separate rule governs the geometry-matching *removers* rather than this file's
 own arithmetic: **`vma_remove` / `burrow_unmap` match a VMA by its coordinates
-alone, so any syscall that hands them a user-supplied `(vaddr, length)` must bound
-the vaddr to a region the caller is entitled to unmap before the match runs.**
-`SYS_BURROW_DETACH` is the one that does — it rejects any vaddr outside the
-burrow-attach window `[EXEC_USER_BURROW_BASE, EXEC_USER_BURROW_TOP)` before it
-touches the list (the P6-pouch-mem-a F1). Without that bound a caller could pass
-the coordinates of its own ELF-segment, stack, or stack-guard VMA and have it
-dismantled — the stack-guard case silently retiring a security-relevant page,
-because a geometry match cannot tell those apart from a burrow region. Every
-attach lives in the window and every ELF / stack / guard VMA sits below it
-(`_Static_assert`'d in `exec.h`), so the bound structurally excludes them; a
-driver that placed an MMIO/DMA mapping *inside* the window could still detach it by
-coordinates, but that is its own resource and self-harm, not an [[inv-i1]] breach.
+alone, so any syscall that hands them a user-supplied `(vaddr, length)` must decide
+that the caller is entitled to unmap THAT VMA before the match runs.**
+`SYS_BURROW_DETACH` decides it by **identity** (ARCH 6.5, operator-ratified
+2026-09-16), in `kernel/syscall.c`'s three halves:
+- `detach_shape_check`: a non-zero length, a page-aligned base, and a span
+  inside `USER_VA_TOP`.
+- `detach_in_window`: the burrow-attach window `[EXEC_USER_BURROW_BASE,
+  EXEC_USER_BURROW_TOP)`, the P6-pouch-mem-a F1 bound. It is still the whole
+  rule for the phenotype `munmap` range, which keeps `detach_args_check`.
+- `detach_is_hw_map_locked`: outside the window, ONLY a VMA backed by a DMA or
+  MMIO Burrow, read under the same `as->lock` hold that removes it, with exact
+  geometry.
+
+Without a rule, a caller could pass the coordinates of its own ELF-segment,
+stack or stack-guard VMA and have it dismantled; the stack-guard case silently
+retires a security-relevant page. None of those is ever DMA- or MMIO-backed:
+- ELF segments are FILE or ANON;
+- the stack is ANON;
+- the guard is a Burrow-less VMA (`vma_alloc_guard`);
+- the vDSO is a kernel ANON Burrow;
+- a CODE alias is refused on its own.
+
+The two hardware types reach an address space only through `SYS_DMA_MAP` /
+`SYS_MMIO_MAP` / `SYS_PCI_MAP_BAR`, or through the weft share, which places
+inside the window. `addrspace_clone` refuses to fork them.
+
+**Why the window alone was wrong.** It protected by LOCATION, a proxy that also
+covered every hardware map a driver placed below 4 GiB, so `SYS_DMA_MAP` accepted
+placements `SYS_BURROW_DETACH` could never remove. tapestryd mapped every weave,
+GPU buffer and ring at `0x0240_0000`+ from G-3a on, and every release returned -1
+into a discarded result. A kernel probe measured it: objects created minus objects
+live held at exactly 46 across a whole session while 415 accumulated, until a weave
+create failed mid-drag ([[sub-tapestryd]]). The identity form is Plan 9's:
+`syssegdetach` refuses the initial stack by `s == up->seg[SSEG]` and detaches any
+other segment, device segments at caller-chosen addresses included.
 
 ## Seams
 
@@ -328,6 +351,14 @@ absorbed from docs/reference/79: `SYS_BURROW_DETACH` must bound its user-supplie
 vaddr to the burrow-attach window before `burrow_unmap`, because the remover
 matches by geometry alone — else EL0 dismantles its own ELF/stack/stack-guard VMA
 (the guard case silently retiring a security page).
+
+2026-09-16: the detach admission became identity-scoped (ARCH 6.5; scripture
+`0fbeaf3c`). The window bound stays; a DMA- or MMIO-backed VMA is admitted outside
+it. Tests `sys_burrow.detach_dma_map_by_identity` and
+`sys_burrow.detach_mmio_map_by_identity` (a >256 MiB BAR-shaped map; the claim is
+released) fail on the window-only rule. `sys_burrow.detach_window_confined` now
+also installs a guard VMA, and is the control that an identity arm admitting ANON
+fails. All three were sabotage-measured.
 
 ## Tests
 

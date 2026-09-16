@@ -17,7 +17,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-09-05
+updated: 2026-09-16
 ---
 ## Purpose
 
@@ -407,3 +407,9 @@ be one 4 KiB staging buffer per round trip.
 ## Provenance
 
 [[chg-2026-08-03-syscall-abi-sweep]], [[chg-2026-09-05-syscall-abi-census]].
+
+2026-09-16: `SYS_BURROW_DETACH`'s documented `-1` list (syscall.h and the
+libthyla-rs `t_burrow_detach` mirror) now states the window refusal it always
+had, and the identity arm ARCH 6.5 added: a DMA- or MMIO-backed mapping is
+detachable wherever the driver placed it. No number, argument or record changed;
+the result for that class of call went from `-1` to `0`.

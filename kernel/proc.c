@@ -526,7 +526,9 @@ struct Proc *proc_alloc_in(struct AddrSpace *share, u32 page_budget) {
 //
 // RESIDUAL (round-3 F1, trust-envelope): a driver that FULLY releases its
 // KObj_MMIO claim (SYS_BURROW_DETACH + close the fd) while the device is still
-// armed is invisible to BOTH walks -- but that is a malicious/buggy
+// armed is invisible to BOTH walks. SYS_BURROW_DETACH reaches an MMIO map
+// wherever the driver placed it (ARCH 6.5's identity rule), so no placement
+// hides this; what bounds it is the envelope -- it is a malicious/buggy
 // CAP_HW_CREATE driver (the v1.0 envelope: kproc grants CAP_HW_CREATE only to
 // trusted drivers; stratumd maps-and-holds), the same posture as the
 // mmio_handle.c rng-slot residual. The structural close is a per-device

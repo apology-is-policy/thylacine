@@ -26,8 +26,8 @@
 // Burrow wrapping the mapping holds an INDEPENDENT refcount on the
 // underlying KObj (see `kernel/burrow.c::burrow_free_internal`); the
 // user VA mapping survives SYS_CLOSE until the proc's pgtable is
-// torn down at exit OR (post-handle-close) until a future
-// SYS_BURROW_DETACH on the mapping window. In practice every native
+// torn down at exit OR until SYS_BURROW_DETACH removes it (a hardware
+// map is detachable wherever it was placed, ARCH 6.5). In practice every native
 // driver creates these handles once at startup and never closes, so
 // the Drop only fires when the binary exits, where its effect is a
 // no-op (proc_free is about to release everything anyway). The RAII
@@ -74,7 +74,7 @@ use crate::err::{Error, Result};
 use crate::handle::{Handle, Rights};
 use crate::poll::AsFd;
 use crate::{
-    t_burrow_from_hostmem, t_dma_create, t_dma_map, t_irq_create, t_irq_wait, t_irq_wait_timeout,
+    t_burrow_detach, t_burrow_from_hostmem, t_dma_create, t_dma_map, t_irq_create, t_irq_wait, t_irq_wait_timeout,
     t_mmio_create, t_mmio_map, t_pci_claim, t_pci_info, t_pci_map_bar, TPciInfo, T_PROT_READ,
     T_PROT_WRITE,
 };
@@ -733,17 +733,12 @@ impl PciDev {
             return Err(PciError::Info);
         }
 
-        // pci-3 F1: a mid-loop failure here leaves the BARs already mapped at
-        // bar_va[j&lt;i] in place until proc exit -- the handle Drop releases the
-        // claim but a live BAR mapping holds an independent kobj_mmio ref (#847).
-        // This is NOT explicitly unwound because there is no v1.0 detach path for
-        // it: SYS_BURROW_DETACH is confined to the burrow-attach window
-        // (EXEC_USER_BURROW_BASE = 4 GiB+), and the driver-VA windows (BAR + DMA,
-        // mirroring the byte-identical mmio VirtioNet) live below it by design, so
-        // the proc-exit-bounded posture is shared by every virtio driver mapping
-        // (MMIO / DMA / BAR), not a PCI-specific gap. claim() is one-shot at driver
-        // startup + a single-BAR virtio-net-pci never maps a second BAR, so the
-        // partial-map path is unreachable in practice. See docs/reference/115.
+        // pci-3 F1: a live BAR mapping holds its own kobj_mmio ref (#847), so a
+        // mid-loop failure that only dropped the handle would leave the BARs
+        // already mapped at bar_va[j<i] -- and their device-register claims --
+        // until proc exit. SYS_BURROW_DETACH decides by identity (ARCH 6.5), so a
+        // BAR map below the burrow-attach window is detachable and the failure
+        // arm unwinds it.
         let prot = T_PROT_READ | T_PROT_WRITE;
         let mut bar_va: [Option<u64>; 6] = [None; 6];
         for (i, bar) in info.bars.iter().enumerate() {
@@ -760,6 +755,11 @@ impl PciDev {
             }
             let va = bar_window + (i as u64) * PCI_BAR_VA_STRIDE;
             if t_pci_map_bar(i64::from(handle.raw()), va, i as u64, prot) < 0 {
+                for (j, mapped) in bar_va.iter().enumerate().take(i) {
+                    if let Some(v) = *mapped {
+                        let _ = t_burrow_detach(v, info.bars[j].size);
+                    }
+                }
                 return Err(PciError::MapBar);
             }
             bar_va[i] = Some(va);

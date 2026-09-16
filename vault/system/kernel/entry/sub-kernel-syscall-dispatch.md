@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-09-06
+updated: 2026-09-16
 ---
 ## Purpose
 
@@ -522,6 +522,20 @@ staging buffers are private by construction. Three shared concerns:
   the VMA struct, so that pointer dangles the moment it returns — and claims the
   page charge *before* the drop, because a freeing drop takes the payment record
   with it.
+
+### Detach admission is decided by identity (2026-09-16)
+
+`SYS_BURROW_DETACH`'s gate is three halves:
+- `detach_shape_check` checks the shape.
+- `detach_in_window` bounds the address.
+- `detach_is_hw_map_locked` admits a DMA- or MMIO-backed VMA outside the window,
+  read under `as->lock`.
+
+`sys_munmap_range_for_proc` keeps the window whole through `detach_args_check`,
+because it removes a range. The rule and its soundness argument live in
+[[sub-kernel-vma]]'s Prosecution section; ARCH 6.5 is the scripture. The gate is
+a caller-entitlement decision made before a geometry-only remover runs, which is
+exactly the kind of gate this file is allowed to hold.
 
 ### Who paid is recorded, not inferred
 

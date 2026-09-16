@@ -42,7 +42,7 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-09-06
+updated: 2026-09-16
 ---
 ## Purpose
 
@@ -521,3 +521,11 @@ absorbed from docs/reference/89: `mmio_read32`/`write32` must be a single
 base-only instruction (ISV=1) so HVF can decode the emulated access -- a plain
 `read_volatile` can inline to a writeback/unscaled form (ISV=0) that trips HVF's
 `assert(isv)` (#890, the kernel-worked-userspace-tripped signature).
+
+2026-09-16: `PciDev::claim_nth` now unwinds a partial BAR mapping. A mid-loop
+`t_pci_map_bar` failure detaches the BARs this call already mapped, because each
+live mapping holds its own `kobj_mmio` reference, and the handle's drop alone
+left them and their claims until exit. The pci-3 F1 comment had called that
+unfixable ("SYS_BURROW_DETACH is confined to the burrow-attach window"); ARCH
+6.5's identity rule made the detach reachable. The `t_burrow_detach` doc
+comment names both detachable classes.

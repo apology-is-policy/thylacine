@@ -5751,33 +5751,73 @@ static s64 sys_burrow_attach_handler(u64 length_raw) {
     return sys_burrow_attach_for_proc(t->proc, length_raw);
 }
 
-// The shared argument gate for both detach entries (#199 factored it out): the
-// alignment/rounding rules and the window confinement are ONE set of rules, not
-// two. Writes *length_out only on success (0).
-static s64 detach_args_check(struct Proc *p, u64 vaddr_raw, u64 length_raw,
-                             u64 *length_out) {
+// The detach admission, in three halves (#199 factored the gate so both detach
+// entries share ONE set of shape rules; ARCH 6.5 split the address rule from the
+// identity rule). Each writes *length_out only on success (0).
+//
+// The shape half both detach syscalls share: a non-zero length, a page-aligned
+// base, and a span inside the user address space. The length is page-rounded
+// the way SYS_BURROW_ATTACH rounds it, so a caller may pass either its original
+// request or the rounded span and still match the installed VMA. Overflow-safe:
+// vaddr_raw < USER_VA_TOP bounds the subtraction, and a length_raw that passes is
+// below 2^47, so the round-up cannot wrap.
+static s64 detach_shape_check(struct Proc *p, u64 vaddr_raw, u64 length_raw,
+                              u64 *length_out) {
     if (!p)                                          return -1;
     if (length_raw == 0)                             return -1;
-    if (length_raw > BURROW_ATTACH_MAX)              return -1;
     if (vaddr_raw & (PAGE_SIZE - 1))                 return -1;
-
-    // Same page-rounding as SYS_BURROW_ATTACH, so a caller may pass
-    // either its original request or the rounded length and still match
-    // the installed VMA's span.
+    if (vaddr_raw >= USER_VA_TOP)                    return -1;
+    if (length_raw > USER_VA_TOP - vaddr_raw)        return -1;
     u64 length = (length_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
+    if (length > USER_VA_TOP - vaddr_raw)            return -1;
+    *length_out = length;
+    return 0;
+}
 
-    // Confine detach to the burrow-attach window (F1, P6-pouch-mem-a
-    // audit). burrow_unmap matches a VMA by geometry alone — without
-    // this bound a caller could pass the coordinates of its own ELF
-    // segment, stack, or stack-guard VMA and have burrow_unmap dismantle
-    // it (removing the stack guard silently retires a security page).
-    // Every burrow_attach region lives in the window and every ELF /
-    // stack / guard VMA sits below it, so the bound structurally
-    // excludes them. Overflow-safe: length <= BURROW_ATTACH_MAX, far
-    // below EXEC_USER_BURROW_TOP, so TOP - length never underflows.
-    if (vaddr_raw < EXEC_USER_BURROW_BASE)           return -1;
-    if (vaddr_raw > EXEC_USER_BURROW_TOP - length)   return -1;
+// The address half: the burrow-attach window (F1, P6-pouch-mem-a audit).
+// burrow_unmap matches a VMA by geometry alone, so without a bound a caller
+// could pass the coordinates of its own ELF segment, stack, or stack-guard VMA
+// and have burrow_unmap dismantle it (removing the stack guard silently retires
+// a security page). Every kernel-placed region lives in the window and every
+// ELF / stack / guard / vDSO VMA sits below it. BURROW_ATTACH_MAX keeps
+// TOP - length from underflowing.
+static bool detach_in_window(u64 vaddr, u64 length) {
+    if (length > BURROW_ATTACH_MAX)                  return false;
+    if (vaddr < EXEC_USER_BURROW_BASE)               return false;
+    if (vaddr > EXEC_USER_BURROW_TOP - length)       return false;
+    return true;
+}
 
+// The identity half (ARCH 6.5, "Detach is decided by identity"): a VMA backed by
+// a DMA or MMIO Burrow is detachable wherever it sits. Those two types reach an
+// address space only through SYS_DMA_MAP / SYS_MMIO_MAP / SYS_PCI_MAP_BAR -- a
+// driver's own placement -- or the weft share of a weave or GPU buffer, which
+// the kernel places inside the window anyway; addrspace_clone refuses to fork
+// either. No ELF, stack, guard, vDSO or CODE VMA is ever one, so this admits
+// nothing the window protected. A window-only rule refused every hardware map a
+// driver placed below 4 GiB, and tapestryd's weaves and GPU buffers leaked there
+// for the life of the process. Caller holds as->lock -- the same hold the
+// removal runs under -- so the type decided here is the type removed; the
+// geometry must match exactly, as burrow_unmap will require.
+static bool detach_is_hw_map_locked(struct Proc *p, u64 vaddr, u64 length) {
+    struct Vma *v = vma_lookup(p, vaddr);
+    if (!v || v->vaddr_start != vaddr || v->vaddr_end - vaddr != length)
+        return false;
+    struct Burrow *b = v->burrow;
+    if (!b || b->magic != VMO_MAGIC)                 return false;
+    return b->type == BURROW_TYPE_DMA || b->type == BURROW_TYPE_MMIO;
+}
+
+// The phenotype munmap range's admission: shape + window. It removes a RANGE,
+// so the identity half would have to hold per VMA; a Linux-phenotype Proc
+// cannot reach the three hardware-map syscalls, so the window is the whole rule
+// there.
+static s64 detach_args_check(struct Proc *p, u64 vaddr_raw, u64 length_raw,
+                             u64 *length_out) {
+    u64 length;
+    if (detach_shape_check(p, vaddr_raw, length_raw, &length) != 0)
+        return -1;
+    if (!detach_in_window(vaddr_raw, length))        return -1;
     *length_out = length;
     return 0;
 }
@@ -5785,7 +5825,8 @@ static s64 detach_args_check(struct Proc *p, u64 vaddr_raw, u64 length_raw,
 // The per-VMA detach body (#199 factored it from sys_burrow_detach_for_proc,
 // byte-identical semantics): exact-match [vaddr_raw, vaddr_raw+length) against
 // ONE installed VMA, remove it, settle the I-32 accounting. Caller holds
-// as->lock and has already run detach_args_check.
+// as->lock and has already admitted the span (detach_args_check, or the native
+// path's window-or-identity test).
 //
 // D-3c F1: `*out_free` receives the Burrow whose mapping-drop was the last ref
 // (or NULL) -- the caller pushes it onto a local stack and frees it with
@@ -5967,11 +6008,14 @@ static s64 detach_one_locked(struct Proc *p, u64 vaddr_raw, u64 length,
 
 s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
     u64 length;
-    if (detach_args_check(p, vaddr_raw, length_raw, &length) != 0)
+    if (detach_shape_check(p, vaddr_raw, length_raw, &length) != 0)
         return -1;
     struct Burrow *to_free = NULL;
+    s64 rc = -1;
     spin_lock(&p->as->lock);
-    s64 rc = detach_one_locked(p, vaddr_raw, length, &to_free);
+    if (detach_in_window(vaddr_raw, length) ||
+        detach_is_hw_map_locked(p, vaddr_raw, length))
+        rc = detach_one_locked(p, vaddr_raw, length, &to_free);
     spin_unlock(&p->as->lock);
     // D-3c F1: free OUTSIDE as->lock -- a FILE Burrow's free reaches a
     // possibly-sleeping spoor_clunk (a 9P Tclunk), and sleeping under a plain

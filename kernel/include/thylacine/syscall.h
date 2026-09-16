@@ -603,21 +603,34 @@ enum {
     SYS_BURROW_ATTACH = 37,  // arg: length (x0)
 
     // P6-pouch-mem: SYS_BURROW_DETACH(vaddr, length) → 0 / -1
-    //   x0 = vaddr    the base VA a prior SYS_BURROW_ATTACH returned
-    //   x1 = length   the attached length — the caller's original
+    //   x0 = vaddr    the base VA of the mapping: one a prior
+    //                 SYS_BURROW_ATTACH* returned, or one the caller
+    //                 chose for SYS_DMA_MAP / SYS_MMIO_MAP /
+    //                 SYS_PCI_MAP_BAR
+    //   x1 = length   the mapped length — the caller's original
     //                 request OR any value that page-rounds to the
     //                 same span (the match is on the page-rounded
     //                 [vaddr, vaddr + round_up(length)) range)
-    // Detach a region previously attached by SYS_BURROW_ATTACH. The
-    // (vaddr, rounded length) must match an installed VMA exactly — no
-    // partial detach at v1.0 (mirrors burrow_unmap's constraint). The
-    // VMA is removed and, mapping_count reaching 0 with handle_count
-    // already 0, the Burrow's pages are freed.
+    // Detach one installed mapping. The (vaddr, rounded length) must
+    // match an installed VMA exactly — no partial detach at v1.0
+    // (mirrors burrow_unmap's constraint). The VMA is removed and, when
+    // that was the Burrow's last reference, its pages are freed (a
+    // hardware Burrow's KObj reference drops with it).
+    //
+    // Which mappings are detachable is decided by IDENTITY (ARCH 6.5):
+    // anything inside the burrow-attach window [EXEC_USER_BURROW_BASE,
+    // EXEC_USER_BURROW_TOP), and a DMA- or MMIO-backed mapping wherever
+    // the driver placed it. An ELF segment, the stack, its guard and the
+    // vDSO sit below the window and are never hardware-backed, so they
+    // stay refused.
     //
     // Returns 0 on success, -1 on:
-    //   - length == 0 or length > BURROW_ATTACH_MAX
-    //   - vaddr not page-aligned
+    //   - length == 0, vaddr not page-aligned, or the span leaves the
+    //     user address space
+    //   - a span inside the window with length > BURROW_ATTACH_MAX
+    //   - a span outside the window whose VMA is not DMA- or MMIO-backed
     //   - no VMA matches [vaddr, vaddr + round_up(length)) exactly
+    //   - a JIT code alias (the JIT syscalls own that lifetime)
     SYS_BURROW_DETACH = 38,  // arg: vaddr (x0), length (x1)
 
     // P6-pouch-wait-addr (sub-chunk 8): the `torpor` wait-on-address

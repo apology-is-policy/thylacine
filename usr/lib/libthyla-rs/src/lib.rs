@@ -2126,12 +2126,16 @@ pub unsafe fn t_burrow_attach(length: u64) -> i64 {
     x0
 }
 
-// t_burrow_detach — release a region previously attached by
-// t_burrow_attach. The (vaddr, page-rounded length) must match an
+// t_burrow_detach — release one mapping: a region t_burrow_attach* returned,
+// or a hardware map the caller placed with t_dma_map / t_mmio_map /
+// t_pci_map_bar, wherever it sits (the kernel decides by identity: a
+// sub-window mapping that is not DMA- or MMIO-backed -- ELF, stack, guard,
+// vDSO -- stays refused). The (vaddr, page-rounded length) must match an
 // installed VMA exactly — no partial detach at v1.0 (mirrors the
 // kernel-side burrow_unmap constraint). Returns 0 on success, -1 on:
-//   - length == 0 or length > BURROW_ATTACH_MAX
-//   - vaddr not page-aligned
+//   - length == 0, vaddr not page-aligned, or the span leaves user VA
+//   - an in-window span with length > BURROW_ATTACH_MAX
+//   - an out-of-window span that is not a hardware map
 //   - no VMA matches [vaddr, vaddr + round_up(length)) exactly
 //
 // `length` may be the original request OR any value that page-rounds
