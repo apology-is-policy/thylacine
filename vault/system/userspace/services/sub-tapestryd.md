@@ -1268,7 +1268,8 @@ this were wrong and are recorded so nobody repeats them: it is NOT
 what the compositor paints itself -- the pane ground, the frame, the
 separator), and the gap is NOT that `paint_instrument` takes no clip.
 
-The structural repaint's own body is the answer, at `server.rs:7515`:
+The answer is the structural-repaint arm inside `Comp::reconcile`, where the
+geometry signature changed:
 
 ```
 self.paint_chrome();      // everything the compositor paints
@@ -1277,8 +1278,10 @@ self.geom_sig = sig;
 self.screen_flush_full();
 ```
 
-That pair restores the whole screen buffer from current state and does NOT
-reconcile -- the CONFIGURE fan is separate, below it. So a flash frame is
+That pair restores the whole screen buffer from current state, and the
+CONFIGURE fan is a SEPARATE step after it -- so calling the pair alone
+repaints without fanning, which is exactly the property a transition needs and
+the property `comp_repaint_pending` lacks. So a flash frame is
 `paint_chrome()` + `prefill_from_shown()` + `paint_cartoon(flash ops)` +
 `screen_push(flash_rect)`, with an expiry frame that is the same minus the
 blend. Nothing new is needed; the cost is one structural-repaint-sized buffer
