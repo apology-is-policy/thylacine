@@ -1297,6 +1297,17 @@ would therefore run at the idle rate. The condition set is incomplete the
 moment the first compositor transition exists, and widening it is part of that
 chunk, not a follow-up.
 
+**The chunk owes THREE gates, not one, and that is what sizes it.** Widening
+the tick condition so a verb-started transition does not run at `IDLE_HZ`
+changes exactly what `tools/ci-idle-gate.sh` measures -- the residual-2 idle
+cost, re-measured at 7.2 % mean and defended by that gate. So the wiring owes
+a bake, `ls-halcyon-session-instrument`, AND the idle gate, with
+`THYLACINE_IDLE_STRICT` set, because the idle gate's default 80 % threshold
+catches spins rather than throttle regressions (its own audit F4). A
+transition that leaves the compositor awake at 60 Hz when nothing is animating
+is precisely the regression that gate exists for, and it will not be visible
+in the session gate at all.
+
 **What must NOT be reached for.** `comp_repaint_pending` looks like the frame
 hook a transition wants, and is not: `frame_tick` consumes it with a full
 `reconcile()`, which fans redraw CONFIGUREs to every client. Sixteen of those
