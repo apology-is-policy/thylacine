@@ -1268,7 +1268,8 @@ N-1 and N-2 are the "sound in the games" milestone; N-4 is the operator's
 requirement made real; N-5/N-6 are reach. Each chunk lands with its reference
 section (`docs/reference/NNN-nocturne*.md` — or the vault dossier once the
 cutover lands; run `quaestor owner` at the doc step), its manual chapter
-(`docs/manual/41-audio.md`, the DOSBox chapter's grow-by-chapter precedent),
+(`docs/manual-drafts/41-audio.md` since 2026-09-16, until the chapter is rewritten
+to the Operator's Manual writing guide and installed; `docs/MANUAL-DESIGN.md`),
 and its JOURNAL entry.
 
 ---

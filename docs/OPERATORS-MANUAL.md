@@ -20,23 +20,25 @@ Every section is written to `docs/thylacine-operators-manual-writing-guide.md`, 
 
 ## Source, installation, and rendering
 
-Each section is one Markdown file, `docs/manual/NN-<topic>.md`. The number orders the sections for sequential reading and does not appear in any heading. Operating-system topics are numbered below 40; ported applications start at 40.
+Each section is one Markdown file, `docs/manual/NN-<name>.md`. The number orders the sections for sequential reading and does not appear in any heading; the name is what a reader types to open the section. Operating-system topics are numbered below 40; ported applications start at 40.
 
-The source is installed in the operating system under `/manual` and read through a reader that emits Beacon markup (`docs/BEACON.md`). Under Halcyon a section is rendered with its headings, tables, and preformatted blocks; on a serial console or through a pipe the same section reads as plain text.
+The source is installed in the operating system under `/manual` and read with the `manual` command, which emits Beacon markup (`docs/BEACON.md`). Under Halcyon a section is rendered with its headings, tables, and preformatted blocks; on a serial console or through a pipe the same section reads as plain text.
 
-Neither the reader nor the `/manual` installation exists yet. Both are built before further sections are written (operator decision, 2026-09-16), and the reader defines the supported source format: a section may use only the Markdown forms that the reader maps onto Beacon. New section content waits for those rules.
+`docs/MANUAL-DESIGN.md` is binding for the source format, the reader, and the installation. It defines the Markdown subset a section may use: every accepted form has both a Beacon and a plain-text realization, and anything else is rejected by `manual --check`. The reader and the installation are built before further sections are written (operator decision, 2026-09-16).
 
 ---
 
 ## Sections
 
-| File | Section | State |
-|---|---|---|
-| `manual/00-overview.md` | Overview | Phase-0 plan (2026-05-04). It describes intended phases rather than the current system and is to be replaced. |
-| `manual/40-dosbox.md` | DOSBox-X | Written 2026-09-05 to the earlier page template; to be rewritten to the writing guide. |
-| `manual/41-audio.md` | Audio (Nocturne) | Written 2026-09-05 to 2026-09-07 to the earlier page template; to be rewritten to the writing guide. |
+No section is installed yet. Containers is the first section to be written to the guide, once the reader exists.
 
-Containers is the first section to be written to the guide, once the reader exists.
+Three pages written before the guide are kept as drafts in `docs/manual-drafts/`, which is neither checked nor installed. A draft returns to `docs/manual/` when it has been rewritten to the guide and passes `manual --check`.
+
+| Draft | Subject | State |
+|---|---|---|
+| `manual-drafts/00-overview.md` | Overview | A Phase-0 plan (2026-05-04) that describes intended phases rather than the current system. |
+| `manual-drafts/40-dosbox.md` | DOSBox-X | Written 2026-09-05 to the earlier page template. |
+| `manual-drafts/41-audio.md` | Audio (Nocturne) | Written 2026-09-05 to 2026-09-07 to the earlier page template. |
 
 ---
 
@@ -53,3 +55,4 @@ A section is added when the facility it describes has settled, so sections appea
 | 2026-05-04 | Scaffolded as `docs/USER-MANUAL.md` (Phase 0). | Index and page template for a user manual. |
 | 2026-09-05 | Revived; added the `/manual` plan and the first chapter (`40-dosbox.md`). | Operator decision; supersedes the 2026-05-31 deferral to v1.0-rc. |
 | 2026-09-16 | Renamed to `docs/OPERATORS-MANUAL.md`; the writing guide adopted and the earlier page template withdrawn; the reader and `/manual` installation to be built before further sections. | Operator decisions. |
+| 2026-09-16 | `docs/MANUAL-DESIGN.md` adopted (source format, the `manual` reader, installation); the three earlier pages moved to `docs/manual-drafts/`. | Operator sign-off: nothing is installed until it is written to the guide. |

@@ -5092,7 +5092,7 @@ stage_dosbox_sysconf() {
 # SYSTEM-owned, read-only. Override it per user in ~/.config/dosbox-x/ (your
 # first launch generates that file from these values), per game with a
 # dosbox-x.conf in the game directory, or per launch with -conf / -set.
-# Reference: docs/manual/40-dosbox.md.
+# Reference: docs/manual-drafts/40-dosbox.md.
 
 [sdl]
 # Click in the window to capture the mouse (motion then reaches the game);

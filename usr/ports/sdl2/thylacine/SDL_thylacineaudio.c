@@ -19,7 +19,7 @@
  * The ~340 ms FIFO depth is the byte-copy path's latency ceiling; N-2b's
  * ring trims it.
  *
- * Nocturne dictates one format (S16LE stereo 48000 Hz, manual/41-audio.md);
+ * Nocturne dictates one format (S16LE stereo 48000 Hz, manual-drafts/41-audio.md);
  * OpenDevice forces it and lets SDL's core build the conversion stream from
  * whatever the app asked for. Init probes /srv/nocturne and declines the
  * driver when it is absent; a soundless machine then reaches SDL's dummy
@@ -42,7 +42,7 @@
 #define NOC_SRV     "/srv/nocturne"
 #define NOC_SRV_LEN 13
 
-/* nocturne's fixed device format (manual/41-audio.md). */
+/* nocturne's fixed device format (manual-drafts/41-audio.md). */
 #define NOC_FREQ     48000
 #define NOC_CHANNELS 2
 #define NOC_FORMAT   AUDIO_S16LSB

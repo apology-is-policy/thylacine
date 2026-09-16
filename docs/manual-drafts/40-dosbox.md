@@ -295,5 +295,5 @@ ramfs rebuild.
   the CAP_JIT dynrec, the cycles=auto root cause, software Voodoo, the DX-8
   config layers).
 - `docs/reference/150-build-config.md` — the build configurator.
-- `docs/manual/00-overview.md` — using Thylacine.
+- `docs/manual-drafts/00-overview.md` — using Thylacine.
 - The Stratum manual — pool ownership (why the copy-to-home step).

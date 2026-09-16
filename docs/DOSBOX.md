@@ -294,7 +294,7 @@ server + virtio-sound (post-v1.0) lights it up.
   lowering constraint. The Duke3D gate now proves MOUSE-LOOK BY DEFAULT with a
   lateral-shift witness + a no-input control (a frame hash cannot: a live frame
   changes by itself). Reference: `docs/reference/152-dosbox.md` "DX-8"; manual:
-  `docs/manual/40-dosbox.md`.
+  `docs/manual-drafts/40-dosbox.md`.
 
 **Act 2 -- Win9x + 3dfx (the showcase; needs DX-4):**
 - **DX-6** -- **Win9x guest bring-up**: boot Windows 98 in DOSBox-X on Thylacine
