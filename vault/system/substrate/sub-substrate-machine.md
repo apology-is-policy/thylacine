@@ -227,6 +227,20 @@ sized for the slower TCG compat run. Idle cost under HVF was the subject of
 
 ## Caveats
 
+- **Under cocoa, the guest's Super is the Mac's Cmd, and macOS takes some Cmd
+  combos first** (2026-09-16, operator-found): Cmd+Tab (the app switcher),
+  Cmd+H (Hide -- Halcyon's split), Cmd+Shift+Q (Log Out -- Halcyon's close).
+  `run-vm.sh` therefore adds `full-grab=on` to the cocoa display by default,
+  handing every key to the guest while its window has focus; macOS asks once
+  for Accessibility permission for QEMU, and `THYLACINE_FULL_GRAB=0` opts out.
+  Chosen by the operator over moving the chord plane off Super. Verified
+  present in QEMU 10.0.2.
+- **`show-cursor=on` is a STOPGAP** (same date, `THYLACINE_SHOW_CURSOR=0` opts
+  out): it draws the HOST pointer over the window because the guest draws
+  none -- tapestryd sets up the virtio-gpu cursor queue and never issues
+  `UPDATE_CURSOR`. On VNC or any non-cocoa display there is still no pointer.
+  Remove it when the guest draws its own.
+
 - `--snapshot` is parsed but unimplemented: it prints "not yet implemented"
   and continues. TOOLING.md §6 describes the snapshot workflow as a
   Phase-5+ deliverable; the flag is a placeholder, not a feature.

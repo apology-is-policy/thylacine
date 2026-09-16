@@ -404,6 +404,25 @@ fi
 if [[ "${THYLACINE_FULLSCREEN:-0}" != "0" ]]; then
     cocoa_display="$cocoa_display,full-screen=on"
 fi
+# Under cocoa the guest's Super is the Mac's Cmd, and macOS takes several Cmd
+# combos before any window sees them: Cmd+Tab (the app switcher), Cmd+H (Hide
+# -- Halcyon's Super+H split), Cmd+Shift+Q (Log Out -- Halcyon's close). So
+# the chord plane is unusable exactly where it collides. full-grab=on hands
+# every key to the guest while the window has focus (operator-chosen
+# 2026-09-16 over moving the chords off Super, which would have diverged from
+# the kit's labels). macOS asks once for Accessibility permission for QEMU.
+# THYLACINE_FULL_GRAB=0 opts out, for a session that needs Cmd+Tab back.
+if [[ "${THYLACINE_FULL_GRAB:-1}" != "0" ]]; then
+    cocoa_display="$cocoa_display,full-grab=on"
+fi
+# show-cursor=on draws the HOST pointer over the window. A STOPGAP, not the
+# fix: tapestryd sets up the virtio-gpu cursor queue but never issues
+# UPDATE_CURSOR, so the guest draws no pointer of its own and one is
+# invisible on VNC or any other display. Drop this once the guest does.
+# THYLACINE_SHOW_CURSOR=0 opts out.
+if [[ "${THYLACINE_SHOW_CURSOR:-1}" != "0" ]]; then
+    cocoa_display="$cocoa_display,show-cursor=on"
+fi
 
 # P4-K-events: QMP control socket for test-harness key injection.
 # tools/test.sh polls the boot log for the userspace virtio-input
