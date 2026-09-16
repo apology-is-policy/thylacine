@@ -592,6 +592,30 @@ active child's body is laid out. **A leaf that is not in a stack renders
 as a stack of one**: frame + header + body, so the visual is uniform and
 no second container type is invented.
 
+**A stack's members are TILES, and the tree must never build anything else
+(2026-09-16, operator-answered, after driving the image by hand).** The
+paragraph above already says so — every child "stays a real hosted leaf" — and
+the kit agrees (`.pane > .tile*`, no split inside a pane). The implementation
+did not enforce it. When a program opened a window from a stacked tile,
+`Layout::host_for` chose `SplitH`/`SplitV` from the tile's aspect and NESTED a
+split inside the stack slot, falling back to `Stacked` only when the minima
+failed. `Layout::place_frame` never modelled a container member: open, it got a
+header no tile paints a title into (a blank strip) and its own children headers
+re-numbered from 01; collapsed, the carve did not descend at all, so its tiles
+had no header, no body and no visibility. They were hidden, not lost —
+`Layout::focus` reveals a container's first leaf — but the only route back was
+Super+Tab, which macOS had taken, and the blank strip is not a hit target. The
+operator found it by running `tyr-quake` in a stacked tile.
+
+**Ratified:** a window opened from a stacked tile JOINS THE STACK as a new tile,
+and a split performed inside a stack adds a tile rather than a sub-pane.
+Whether a container member is refused, flattened or prevented upstream is the
+implementation's to decide, but the invariant is the one below: one header per
+TILE, and a stack's children are leaves. **Owed at implementation, and not
+decided here:** how a user splits a new pane BESIDE a stack, now that a split
+chord on a stacked tile no longer does it — and what becomes of a tree that
+already holds a container member (a saved layout, a restore).
+
 ### 6.2 Invariants
 
 1. A visible stack has exactly one expanded tile and one header per tile.
@@ -1711,6 +1735,32 @@ one in the tree, and this paragraph is why. The alternative — the owner
 declaring its shadow at `menu place` — was rejected: it changes a
 renderer-gated verb's grammar and puts a presentation value on the wire, for a
 difference the cap had already made invisible.
+
+**REVERSED THE SAME DAY: the backdrop covers the WHOLE VIEWPORT (2026-09-16,
+operator-answered, after driving the image by hand).** The bounded extent below
+was wrong, and the evidence was visual: a menu drew a hard-edged black
+RECTANGLE (the operator's `Screenshot 2026-09-16 at 10.49.08.png`). The cause is
+structural, not a tuning slip — `pane::menu_effect_region` sizes the ring from
+the shadow's UNCLAMPED spread (`CARD_SHADOW_BLUR` 80 × scale, about 200 px at
+that display), `menu_paint_effects` darkens that region uniformly at
+`BACKDROP_ALPHA` 184/255, and the scene outside it is untouched, so the ring
+has a straight edge BY CONSTRUCTION. No gate could see it: every leg asserts on
+logs, none on ink. The kit's rule was unambiguous all along —
+`dialog::backdrop { background: rgba(3,4,4,.72); backdrop-filter: blur(3px) }`
+covers the viewport, and a region that covers everything has no edge to see.
+
+So the backdrop darkens and blurs the whole display except the card. The
+FROZEN-scene rule below stands and simply widens: while a modal is placed,
+nothing behind it updates until dismiss, every tile included. The cost the
+original text refused — a display-sized heal on every dismiss — is now
+accepted, and it is paid only on dismiss, not per frame. The faintness argument
+below carries over exactly: at 184/255 the frozen scene contributes about 28 %
+of each pixel. Rejected alternatives: keeping the ring live behind the menu
+(re-dimming every push, via the restore-then-blend pair the compositor
+transitions will use — higher fidelity, much more work) and feathering the
+ring's edge (no hard line, but a dark halo the kit never draws).
+
+*Superseded text follows, kept as the record of what was decided and why.*
 
 **The backdrop is BOUNDED to the card's surroundings, and the scene under it
 is FROZEN (2026-09-16, operator-answered).** Two things I-8b-3 needed that the
