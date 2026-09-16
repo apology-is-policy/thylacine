@@ -4,7 +4,7 @@
 use alloc::string::String;
 
 use crate::format::Run;
-use crate::is_control;
+use crate::is_replaced;
 
 /// Wraps one paragraph or list item at a time. `begin` starts one; runs are
 /// `feed` as they arrive; `end` finishes it. Each finished line is passed to
@@ -60,13 +60,13 @@ impl Wrap {
         self.own_line = false;
     }
 
-    /// A run's text. Control characters become U+FFFD (4.4).
+    /// A run's text. The characters of `is_replaced` become U+FFFD (4.4).
     pub fn feed(&mut self, kind: Run, text: &str, emit: &mut dyn FnMut(&str)) {
         for c in text.chars() {
             if c == ' ' && kind != Run::Code {
                 self.end_word();
             } else {
-                self.push(if is_control(c) { '\u{fffd}' } else { c }, emit);
+                self.push(if is_replaced(c) { '\u{fffd}' } else { c }, emit);
             }
         }
     }

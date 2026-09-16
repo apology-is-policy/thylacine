@@ -14,10 +14,15 @@ use core::mem;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::{catalog, is_control, SECTION_MAX};
+use crate::{catalog, is_bidi_control, is_control, SECTION_MAX};
 
 /// The most columns a table may have (3.2).
 pub const TABLE_COLUMNS_MAX: usize = 16;
+
+/// The most characters a table cell's displayed text may hold (3.2). Every cell
+/// pads to its column's widest, so this bounds the padding a row can carry, and
+/// with it the output and the time a table takes (4.4).
+pub const TABLE_CELL_MAX: usize = 256;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Align {
@@ -80,6 +85,7 @@ pub enum Problem {
     CarriageReturn,
     Tab,
     Control(char),
+    BidiControl(char),
     NoTitle,
     TitleNumber,
     LevelOneHeading,
@@ -101,6 +107,7 @@ pub enum Problem {
     ContinuationIndent(usize),
     NestedList,
     TooManyColumns,
+    CellTooWide,
     NoDelimiterRow,
     DelimiterCell,
     CellCount {
@@ -118,6 +125,7 @@ pub enum Problem {
     Footnote,
     HardBreak,
     Angle,
+    CharacterReference,
     CodeInEmphasis,
     CodeSpanTicks,
     UnclosedCodeSpan,
@@ -139,6 +147,13 @@ impl fmt::Display for Problem {
             CarriageReturn => "a carriage return; a section uses LF line endings",
             Tab => "a tab outside a code block",
             Control(c) => return write!(f, "the control character U+{:04X}", c as u32),
+            BidiControl(c) => {
+                return write!(
+                    f,
+                    "the bidirectional control character U+{:04X}, which reorders how text is displayed",
+                    c as u32
+                )
+            }
             NoTitle => "a section begins with its title on line 1, written '# Title'",
             TitleNumber => {
                 "the title begins with the section number; the number only orders the book"
@@ -189,6 +204,13 @@ impl fmt::Display for Problem {
             TooManyColumns => {
                 return write!(f, "a table has at most {} columns", TABLE_COLUMNS_MAX)
             }
+            CellTooWide => {
+                return write!(
+                    f,
+                    "a table cell holds at most {} characters",
+                    TABLE_CELL_MAX
+                )
+            }
             NoDelimiterRow => {
                 "a table's header row is followed by a delimiter row, such as | --- | --- |"
             }
@@ -215,6 +237,9 @@ impl fmt::Display for Problem {
             Footnote => "footnotes are not supported",
             HardBreak => "hard line breaks are not supported; end the line without two trailing spaces or a backslash",
             Angle => "write '<' and '>' inside a code span (a placeholder is written `<name>`) or escape them",
+            CharacterReference => {
+                "character references such as &amp; are not supported; write the character itself, or escape the ampersand as \\&"
+            }
             CodeInEmphasis => "emphasis cannot contain a code span",
             CodeSpanTicks => "a code span is delimited by one or two backticks",
             UnclosedCodeSpan => "this code span is not closed",
@@ -797,7 +822,8 @@ impl<'s, 'e> Parser<'s, 'e> {
     }
 
     /// A carriage return (reported once per file) and the first other control
-    /// character on the line (TAB is allowed only inside a code block).
+    /// character on the line (TAB is allowed only inside a code block), or its
+    /// first bidirectional control, which no block allows.
     fn check_chars(&mut self, l: Line<'s>, in_code: bool) {
         if l.text.contains('\r') && !self.cr_reported {
             self.cr_reported = true;
@@ -813,6 +839,10 @@ impl<'s, 'e> Parser<'s, 'e> {
             }
             if is_control(c) {
                 self.problem(l.no, Problem::Control(c));
+                return;
+            }
+            if is_bidi_control(c) {
+                self.problem(l.no, Problem::BidiControl(c));
                 return;
             }
         }
@@ -1111,14 +1141,15 @@ impl<'s, 'e> Parser<'s, 'e> {
     fn row(&mut self, r: Line<'s>) {
         self.events.open(Open::Row);
         for cell in cells(r.text) {
-            let width = if self.measure {
-                self.cell_width(cell)
-            } else {
-                0
-            };
-            self.events.open(Open::Cell { width });
+            let width = self.cell_width(cell);
+            self.events.open(Open::Cell {
+                width: if self.measure { width } else { 0 },
+            });
             self.cell_inline(r.no, cell, true, &mut Sink::Events);
             self.events.close();
+            if width > TABLE_CELL_MAX {
+                self.problem(r.no, Problem::CellTooWide);
+            }
         }
         self.events.close();
     }
@@ -1355,6 +1386,13 @@ impl<'s, 'e> Parser<'s, 'e> {
                     self.emit(sink, Run::Text, &t[k..k + 1]);
                     k += 1;
                 }
+                b'&' => {
+                    if is_character_reference(&b[k + 1..hi]) {
+                        self.flag(sc, Problem::CharacterReference);
+                    }
+                    self.emit(sink, Run::Text, "&");
+                    k += 1;
+                }
                 b'[' => {
                     if sc.report {
                         self.bracket(sc, lo, k, hi, &mut look);
@@ -1513,8 +1551,24 @@ impl<'s, 'e> Parser<'s, 'e> {
 fn is_special(c: u8) -> bool {
     matches!(
         c,
-        b'\\' | b'\n' | b'`' | b'*' | b'<' | b'>' | b'[' | b'~' | b'_'
+        b'\\' | b'\n' | b'`' | b'*' | b'<' | b'>' | b'[' | b'~' | b'_' | b'&'
     )
+}
+
+/// Whether the bytes after an `&` complete a character reference (3.3): a letter
+/// followed by letters and digits, `#` followed by decimal digits, or `#x` or
+/// `#X` followed by hexadecimal digits, then `;`. Any name counts, not only the
+/// names a code host decodes, so no decoded form is missed. The walk stops at the
+/// first byte outside the form, so the walks of successive `&`s never overlap.
+fn is_character_reference(rest: &[u8]) -> bool {
+    let (body, allowed): (&[u8], fn(&u8) -> bool) = match rest {
+        [b'#', b'x' | b'X', tail @ ..] => (tail, u8::is_ascii_hexdigit),
+        [b'#', tail @ ..] => (tail, u8::is_ascii_digit),
+        [first, ..] if first.is_ascii_alphabetic() => (rest, u8::is_ascii_alphanumeric),
+        _ => return false,
+    };
+    let n = body.iter().take_while(|&c| allowed(c)).count();
+    n > 0 && body.get(n) == Some(&b';')
 }
 
 /// A space, or a line break, which joins lines as a space.
@@ -2334,6 +2388,142 @@ mod tests {
         rejects("# T\r\n\r\nText.\r\n", 1, "carriage return");
         rejects("\u{feff}# T\n", 1, "byte-order mark");
         rejects("# T\n\nA C1 \u{9b} control.\n", 3, "U+009B");
+    }
+
+    /// No block allows a bidirectional control, a code block and a code span
+    /// included: reordered code is the case these controls are used to forge.
+    #[test]
+    fn rejects_bidirectional_controls_in_every_block() {
+        for c in [
+            '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}', '\u{2066}', '\u{2067}',
+            '\u{2068}', '\u{2069}',
+        ] {
+            let m = alloc::format!("bidirectional control character U+{:04X}", c as u32);
+            rejects(&alloc::format!("# T{}\n", c), 1, &m);
+            rejects(&alloc::format!("# T\n\n## H{}\n", c), 3, &m);
+            rejects(&alloc::format!("# T\n\nA {} B.\n", c), 3, &m);
+            rejects(&alloc::format!("# T\n\nA\nB {}.\n", c), 4, &m);
+            rejects(&alloc::format!("# T\n\n- A {}\n", c), 3, &m);
+            rejects(&alloc::format!("# T\n\nA `x{}y` span.\n", c), 3, &m);
+            rejects(
+                &alloc::format!("# T\n\n```\nlet s = \"{}\";\n```\n", c),
+                4,
+                &m,
+            );
+            rejects(&alloc::format!("# T\n\n| a{} |\n| --- |\n", c), 3, &m);
+            rejects(
+                &alloc::format!("# T\n\n| a |\n| --- |\n| b{} |\n", c),
+                5,
+                &m,
+            );
+        }
+        // The implicit direction marks reorder no letters, and are text.
+        ok("# T\n\nA \u{200e}mark, \u{200f}another, and \u{61c}a third.\n");
+    }
+
+    /// Every form a code host decodes is rejected, whether or not its name is
+    /// one the host knows, in every block that holds inline content.
+    #[test]
+    fn rejects_character_references() {
+        for r in [
+            "&amp;",
+            "&nbsp;",
+            "&copy;",
+            "&unknown;",
+            "&a1;",
+            "&#38;",
+            "&#0;",
+            "&#0000038;",
+            "&#x26;",
+            "&#X1F;",
+            "&#x202E;",
+            "&#27;",
+            "AT&T;",
+        ] {
+            rejects(
+                &alloc::format!("# T\n\nAn {} here.\n", r),
+                3,
+                "character references",
+            );
+        }
+        rejects("# T &amp; U\n", 1, "character references");
+        rejects("# T\n\n## A &amp; B\n", 3, "character references");
+        rejects("# T\n\n- A &amp; B\n", 3, "character references");
+        rejects("# T\n\n| A &amp; B |\n| --- |\n", 3, "character references");
+        rejects(
+            "# T\n\nA *run &amp; more* here.\n",
+            3,
+            "character references",
+        );
+        rejects(
+            "# T\n\nA **run &#38; more** here.\n",
+            3,
+            "character references",
+        );
+        rejects(
+            "# T\n\nFirst line,\nthen &amp;.\n",
+            4,
+            "character references",
+        );
+        // Code, an escaped ampersand, and every ampersand that completes no
+        // reference are literal.
+        let d = ok(concat!(
+            "# T\n\n",
+            "R&D, a & b, &, &;, &#;, &#x;, &#xg;, &#1a, & amp;, &amp and, &\namp; ",
+            "`&amp;` and \\&amp;.\n\n",
+            "```\n&amp;\n```\n"
+        ));
+        assert_eq!(
+            d.blocks[1],
+            Block::Paragraph(vec![
+                t("R&D, a & b, &, &;, &#;, &#x;, &#xg;, &#1a, & amp;, &amp and, & amp; "),
+                Inline::Code(String::from("&amp;")),
+                t(" and &amp;."),
+            ])
+        );
+        assert_eq!(d.blocks[2], Block::Code(vec![String::from("&amp;")]));
+    }
+
+    /// A cell's width is its displayed text in characters, the unit its padding
+    /// is counted in (render.rs), so the limit bounds the padding exactly.
+    #[test]
+    fn a_table_cell_holds_at_most_256_characters() {
+        fn n(count: usize, s: &str) -> String {
+            s.repeat(count)
+        }
+        let table = |cell: &str| alloc::format!("# T\n\n| h |\n| --- |\n| {} |\n", cell);
+        ok(&table(&n(TABLE_CELL_MAX, "a")));
+        rejects(
+            &table(&n(TABLE_CELL_MAX + 1, "a")),
+            5,
+            "a table cell holds at most 256 characters",
+        );
+        // Characters, not bytes; escapes and code-span delimiters are not
+        // displayed; emphasis markers are not either.
+        ok(&table(&n(TABLE_CELL_MAX, "\u{e9}")));
+        ok(&table(&n(TABLE_CELL_MAX, "\\|")));
+        ok(&table(&alloc::format!("`{}`", n(TABLE_CELL_MAX, "x"))));
+        ok(&table(&alloc::format!("*{}*", n(TABLE_CELL_MAX, "x"))));
+        rejects(
+            &table(&alloc::format!("{}\\|", n(TABLE_CELL_MAX, "\u{e9}"))),
+            5,
+            "at most 256 characters",
+        );
+        // The header row counts, and a row with several wide cells reports once.
+        rejects(
+            &alloc::format!("# T\n\n| {} |\n| --- |\n", n(TABLE_CELL_MAX + 1, "a")),
+            3,
+            "at most 256 characters",
+        );
+        rejects(
+            &alloc::format!(
+                "# T\n\n| h | h |\n| --- | --- |\n| {} | {} |\n",
+                n(TABLE_CELL_MAX + 1, "a"),
+                n(300, "b")
+            ),
+            5,
+            "at most 256 characters",
+        );
     }
 
     #[test]

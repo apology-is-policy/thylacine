@@ -37,14 +37,27 @@ pub fn is_control(c: char) -> bool {
     u < 0x20 || u == 0x7f || (0x80..=0x9f).contains(&u)
 }
 
-/// Replace every control character with U+FFFD (4.4), keeping TAB when
+/// True for the bidirectional embedding, override, and isolate controls (3.1),
+/// which reorder how the text around them is displayed. The implicit marks
+/// (U+061C, U+200E, U+200F) are not among them.
+pub fn is_bidi_control(c: char) -> bool {
+    matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+}
+
+/// True for every character output replaces with U+FFFD (4.4). Each site that
+/// writes text it did not produce tests this, so the set has one definition.
+pub fn is_replaced(c: char) -> bool {
+    is_control(c) || is_bidi_control(c)
+}
+
+/// Replace every character of `is_replaced` with U+FFFD (4.4), keeping TAB when
 /// `keep_tab` (code blocks). Section text therefore cannot open, close, or
-/// imitate a Beacon frame, or carry any other terminal control sequence --
-/// independently of the checker, which rejects such text first.
+/// imitate a Beacon frame, carry any other terminal control sequence, or reorder
+/// its display -- independently of the checker, which rejects such text first.
 pub fn sanitize(s: &str, keep_tab: bool) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
-        if is_control(c) && !(keep_tab && c == '\t') {
+        if is_replaced(c) && !(keep_tab && c == '\t') {
             out.push('\u{fffd}');
         } else {
             out.push(c);
@@ -86,6 +99,28 @@ mod tests {
             sanitize("caf\u{e9} \u{2014} ok", false),
             "caf\u{e9} \u{2014} ok"
         );
+    }
+
+    #[test]
+    fn the_bidirectional_controls_are_exactly_nine() {
+        let set: alloc::vec::Vec<u32> = (0..=0x10ffffu32)
+            .filter_map(char::from_u32)
+            .filter(|&c| is_bidi_control(c))
+            .map(|c| c as u32)
+            .collect();
+        assert_eq!(
+            set,
+            [0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069]
+        );
+        // The implicit marks reorder no letters and stay.
+        for mark in ['\u{61c}', '\u{200e}', '\u{200f}'] {
+            assert!(!is_replaced(mark));
+        }
+        assert_eq!(
+            sanitize("a\u{202e}b\u{2066}c\u{200f}d", false),
+            "a\u{fffd}b\u{fffd}c\u{200f}d"
+        );
+        assert_eq!(sanitize("\t\u{2069}", true), "\t\u{fffd}");
     }
 
     #[test]

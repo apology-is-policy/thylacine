@@ -49,7 +49,10 @@ source [file join [file dirname [info script]] lib.exp]
 
 # Wait for `<tag> <code>` at the end of a line; a different code for the same
 # tag fails at once instead of waiting out the timeout, and so does `failpat`
-# (exact text no correct run prints before the status).
+# (exact text no correct run prints at all). expect picks the FIRST listed
+# pattern that matches anywhere in what has arrived, so `failpat` is listed
+# before the status: output and status that arrive in one read then fail, where
+# the other order would pass on the status (lib.exp's rule for hardfail).
 proc manual_status {tag code phase {failpat ""}} {
     global lc_cmd_timeout timeout
     set timeout $lc_cmd_timeout
@@ -64,9 +67,9 @@ proc manual_status {tag code phase {failpat ""}} {
         return
     }
     expect {
+        -ex $failpat            { lc_fail "$phase: \[$failpat\] was printed" }
         -ex "$tag $code\r"      { lc_step "saw: $phase" }
         -re "$tag (\[0-9\]+)\r" { lc_fail "$phase: exit status $expect_out(1,string), want $code" }
-        -ex $failpat            { lc_fail "$phase: \[$failpat\] was printed" }
         -re {EXTINCTION:}       { lc_extinction_fail "kernel extinction during '$phase'" }
         timeout                 { lc_fail "timeout (${lc_cmd_timeout}s) waiting for \[$tag $code\] during '$phase'" }
         eof                     { lc_fail "unexpected EOF during '$phase'" }

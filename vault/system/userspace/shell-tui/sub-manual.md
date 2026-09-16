@@ -53,10 +53,11 @@ host-tested) and a thin libthyla-rs binary behind the `backend` feature.
   stderr, in line order, a problem at most once per line; exit 1 if any.
 - A file that fails the check is never rendered: nothing is written until the whole
   file has passed. Exit 2 = usage error. Diagnostics are prefixed `manual: `, and a
-  name or path they repeat has its controls replaced (`sanitize`).
+  name or path they repeat has the `is_replaced` characters replaced (`sanitize`).
 - `tools/manual-check <dir>` -- the same checker built for the build host; the
   bake runs it over `docs/manual` before the pool opens and installs exactly the
-  sections it lists (misnamed or failing files fail the bake).
+  sections it lists (misnamed or failing files fail the bake). Its diagnostics
+  sanitize the names they repeat, so each stays one line.
 - `--beacon=auto|always|never` resolves the tier exactly as the coreutils do
   (`beacon::effective_tier` over `BEACON` + `fd_devclass(1)`).
 
@@ -92,13 +93,25 @@ from a later opener examines a subset of the same runs (every search starts righ
 after a maximal run, so escape pairing reads the same); `[`'s `]` search reuses
 its last result; the underscore-emphasis closer is found once per scan.
 
+Three rules added 2026-09-16 (operator decisions; `b4f5c822` scripture):
+`check_chars` rejects the nine bidirectional embedding/override/isolate controls
+on every line, code included (`Problem::BidiControl`); `scan` treats `&` as a
+special byte and flags a character reference (`is_character_reference`: a
+letter-led alphanumeric name, `#` digits, or `#x` hex digits, then `;` -- any
+name, deliberately wider than the HTML5 table, so no decoded form escapes;
+`\&` and code spans are literal); `row` measures every cell (a `Count` scan, in
+both modes) and reports `CellTooWide` past `TABLE_CELL_MAX` = 256 displayed
+characters, the unit the padding is counted in.
+
 **render.rs -- the rendering consumer.** `Renderer` implements `Events`, writing
 payload always and frames only at the rich tier through `Chunks` (64 KiB), so
 stripping frames yields the plain output (BEACON.md 12.1 rule 1). Tables mirror
 `beacon::sink::Table` byte for byte; the widths it pads to arrive with the events,
 because a consumer that `measures_tables` makes the parser scan a table's cells
 for their widths before opening it (`Open::Table { widths }`, `Open::Cell {
-width }`). `render_contents` drives the same renderer.
+width }`). The renderer clamps each column width to `TABLE_CELL_MAX`, so padding
+stays linear for text that never passed the check (a checked section is already
+within it). `render_contents` drives the same renderer.
 
 **wrap.rs.** `Wrap` fills greedily as runs arrive (`begin` / `feed` / `end`):
 list items hang under their marker; a code span does not break at its own spaces;
@@ -108,11 +121,14 @@ only, and only on a console reporting at least 20 columns; pipes, pts and the
 serial console get one line per paragraph. The whole-paragraph algorithm it
 replaced is kept in its tests as a differential reference.
 
-**Hygiene.** `sanitize` replaces C0 controls (TAB kept only in code blocks), DEL
-and U+0080-U+009F with U+FFFD at emission, independently of the checker, which
-rejects such text first. No section text ever becomes a frame argument (only the
-heading level, the em class, and a table column spec of at most 16 characters),
-so no frame can exceed the wire caps.
+**Hygiene.** One predicate, `is_replaced` (lib.rs: `is_control` -- C0, DEL,
+U+0080-U+009F -- or `is_bidi_control` -- U+202A-202E, U+2066-2069), decides what
+becomes U+FFFD at every site that writes text the reader did not produce:
+`sanitize` (echoed names, paths), `Renderer::put_text` (payload, code lines with
+TAB kept), and `Wrap::feed`. It runs independently of the checker, which rejects
+such text first. No section text ever becomes a frame argument (only the heading
+level, the em class, and a table column spec of at most 16 characters), so no
+frame can exceed the wire caps.
 
 ## Data structures
 
@@ -121,7 +137,7 @@ Table{align, widths}, Row, Cell{width}}; `format::Run` {Text, Code, Emph, Strong
 (flat: emphasis never nests); `format::Problem` (one variant per rejection, the
 message in its `Display`); `catalog::Entry {number, name, file}`;
 `render::Listed {name, title}`. `SECTION_MAX` = 1 MiB; `HEAP_BYTES` = 16 MiB (the
-binary's `ThylaAllocN`). The binary reads into a buffer sized from `fstat`
+binary's `ThylaAllocN`); `TABLE_COLUMNS_MAX` = 16; `TABLE_CELL_MAX` = 256. The binary reads into a buffer sized from `fstat`
 (`read_capped`). The test-only `format::tree` rebuilds the old block tree from
 events and asserts they are well formed, in line order, and identical whether or
 not tables are measured.
@@ -135,14 +151,20 @@ None. Single-threaded, short-lived, no shared state.
 - A rendered section passed the format check (the binary renders only after
   `check` returned 0 for the whole file; `manual.exp` leg (f) shows a failing file
   prints none of its rendering).
-- Memory: the section, at most a few copies of its largest block, and one output
-  chunk (`bounds::the_heap_bounds_hold`, under the guest's `linked_list_allocator`:
-  worst 6207 KiB of an 8 MiB working-set bound at 1 MiB, the 16 MiB heap above it).
+- Memory: the section (plus the holes its buffer leaves when `fstat` gives no
+  length), at most a few copies of its largest block, and one output chunk
+  (`bounds::the_heap_bounds_hold`, under the guest's `linked_list_allocator`, with
+  each diagnostic formatted into a String as libthyla-rs does: worst 6648 KiB of
+  an 8 MiB working-set bound at 1 MiB, the 16 MiB heap above it).
 - Time linear in the section (`bounds::the_time_bounds_hold`).
 - Strip identity: `wire::strip(render(Rich)) == render(None)` without wrapping,
   for every fixture and every installed section (host test).
-- Section text cannot inject a frame or a control sequence (`sanitize`; host test
-  `section_text_cannot_forge_frames`).
+- Section text cannot inject a frame or a control sequence, or reorder its display
+  (`is_replaced` at every write site; host tests `section_text_cannot_forge_frames`
+  and `bidirectional_controls_are_replaced_without_the_check`).
+- Output linear in the section: padding per cell <= `TABLE_CELL_MAX`, enforced by
+  the check and clamped by the renderer (`table_padding_is_bounded_without_the_check`;
+  `the_time_bounds_hold` asserts output as well as time).
 
 ## Error paths
 
@@ -154,10 +176,15 @@ write latches (`io::OutSink`) and exits 1 with "write error".
 ## Performance
 
 Measured on thyla-pi (A72, release) through `bounds`: every expensive shape
-scales 4.0x from 64 to 256 KiB. Heap high-water marks at 1 MiB (the section itself
-is 1024 KiB of it): 1088 KiB for block-per-line shapes, 2112 KiB for one
-1 MiB block, 3136 KiB for one emphasis or code span across it, 6207 KiB with
-wrapping on a console wider than the block. Before the 2026-09-16 rewrite the
+scales 4.0x from 64 to 256 KiB in time and in output. Heap high-water marks at
+1 MiB (the section itself is 1024 KiB of it): 1088 KiB for block-per-line shapes,
+2112 KiB for one 1 MiB block, 3136 KiB for one emphasis or code span across it,
+6208 KiB with wrapping on a console wider than the block. A read with no length
+hint adds the grown buffer's holes: 2040 KiB for block-per-line shapes, 6648 KiB
+worst (2026-09-16, round 2 F4). Table output at the cell limit: 255 KiB of empty
+rows under sixteen 256-character header cells writes 116,182 KiB across the rich
+and the 80-column plain rendering together (63 KiB writes 27,635 KiB; the ratio is
+the constant header's). Before the 2026-09-16 rewrite the
 same shapes measured up to 158 MiB against the 16 MiB heap (an allocation
 failure, which exits 1 silently), and a paragraph of one-character lines took
 5.8 s at 256 KiB on the M2. The contents listing reads every installed section to
@@ -176,7 +203,11 @@ problem reported for an earlier line breaks per-line dedup (debug-asserted,
 enforced by `tree`); (5) the rewrite's equivalence with fe79e6c8 on accepted and
 rejected input (the known deliberate changes are in the commit); (6) memory: a
 shape that makes the parser or renderer hold more than a bounded number of
-copies of one block.
+copies of one block; (7) output: any loop that writes in proportion to something
+other than input bytes (the padding was one -- review round 2 F1, found by a
+shape the 37 enumerated ones lacked); (8) the character-reference detector: a
+form a code host decodes that it misses, and a false positive on ordinary prose;
+(9) the bidirectional set at every check and write site.
 
 ## Seams
 
@@ -198,6 +229,13 @@ copies of one block.
   problems (it is found when the scan leaves the line).
 - halcyond's tile path remembers 32 table specs, so a section with more tables
   than that may lose table structure in a tile.
+- The character-reference rule over-approximates: `&foo;` or `AT&T;`, which a code
+  host leaves literal, is rejected too; the author writes `\&`.
+- The implicit direction marks (U+061C, U+200E, U+200F) are allowed and printed.
+- The cell limit bounds table output linearly but with a large constant: sixteen
+  256-character header cells over 18-byte rows of empty cells write about 227
+  bytes per source byte per rendering (measured 116,182 KiB for the rich plus the
+  plain rendering of 255 KiB).
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

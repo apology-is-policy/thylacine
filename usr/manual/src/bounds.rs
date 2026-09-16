@@ -2,7 +2,7 @@
 //! expensive are read, checked and rendered as `manual` does, under the
 //! allocator the guest heap uses, and the heap's high-water mark must stay
 //! within the reader's working set, which is half of `HEAP_BYTES`; the same
-//! sections must take time linear in their size.
+//! sections must take time, and write output, linear in their size.
 //!
 //! The high-water mark is what a lazily committed `ThylaAllocN` heap touches:
 //! the furthest address `linked_list_allocator` has handed out, so the space a
@@ -25,8 +25,8 @@ use linked_list_allocator::Heap;
 
 use beacon::Tier;
 
-use crate::format::{self, Problem};
-use crate::render::render;
+use crate::format::{self, Problem, TABLE_CELL_MAX, TABLE_COLUMNS_MAX};
+use crate::render::{render, CHUNK};
 use crate::{HEAP_BYTES, SECTION_MAX};
 
 std::thread_local! {
@@ -94,10 +94,11 @@ unsafe impl GlobalAlloc for GuestHeap {
 #[global_allocator]
 static ALLOCATOR: GuestHeap = GuestHeap;
 
-/// What the reader may hold at once: the section, a few copies of its largest
-/// block (the block joined for scanning, an emphasis or code span's text, and on
-/// a console wider than the block a wrapped line and the word pending on it), and
-/// a chunk of output (MANUAL-DESIGN.md 4.4). The heap leaves room above it.
+/// What the reader may hold at once: the section, and the holes its buffer left
+/// behind while it grew; a few copies of its largest block (the block joined for
+/// scanning, an emphasis or code span's text, and on a console wider than the
+/// block a wrapped line and the word pending on it); and a chunk of output
+/// (MANUAL-DESIGN.md 4.4). The heap leaves room above it.
 const WORKING_SET_MAX: usize = 8 * SECTION_MAX;
 const _: () = assert!(WORKING_SET_MAX <= HEAP_BYTES / 2);
 
@@ -129,35 +130,49 @@ fn high_water(f: impl FnOnce()) -> usize {
     HIGH_WATER.load(Ordering::Relaxed)
 }
 
-/// What `manual <file>` does with a file's bytes: read into a buffer sized from
-/// the file's length, 8 KiB at a time (`read_capped`), check it, printing each
-/// problem, and render it when it passes. Returns whether it passed.
-fn show(bytes: &[u8], tier: Tier, width: Option<usize>) -> bool {
-    let mut v = Vec::with_capacity(bytes.len().min(SECTION_MAX));
+/// How `read_capped` sizes its buffer: from the length `fstat` reports, or, when
+/// it reports none, from nothing, so the buffer grows as the file is read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Read {
+    Hinted,
+    Unhinted,
+}
+
+/// What `manual <file>` does with a file's bytes (main.rs `show`): it holds the
+/// path and the copy it prints, reads the file 8 KiB at a time into a buffer
+/// sized as `read` says, checks it, printing each problem, and renders it when it
+/// passes. Returns the bytes written, or `None` when the check fails.
+fn show(bytes: &[u8], read: Read, tier: Tier, width: Option<usize>) -> Option<usize> {
+    let path = String::from("/manual/05-x.md");
+    let shown = crate::sanitize(&path, false);
+    let hint = match read {
+        Read::Hinted => bytes.len(),
+        Read::Unhinted => 0,
+    };
+    let mut v = Vec::with_capacity(hint.min(SECTION_MAX));
     for chunk in bytes.chunks(8 * 1024) {
         v.extend_from_slice(chunk);
     }
     let src = String::from_utf8(v).unwrap();
-    let mut shown = 0usize;
+    let mut printed = 0usize;
     let problems = format::check(Some("05-x.md"), &src, &mut |line, p: Problem| {
-        // `eprintln!` formats into the write without allocating.
-        struct Discard;
-        impl core::fmt::Write for Discard {
-            fn write_str(&mut self, _: &str) -> core::fmt::Result {
-                Ok(())
-            }
-        }
-        let _ = core::fmt::write(&mut Discard, format_args!("manual: x:{}: {}", line, p));
-        shown += 1;
+        // libthyla-rs's `eprintln!` is `eprint!("{}\n", ..)`, and its
+        // `Stderr::write_fmt` formats the whole line into a new String first.
+        let line = alloc::fmt::format(format_args!(
+            "{}\n",
+            format_args!("manual: {}:{}: {}", shown, line, p)
+        ));
+        printed += 1;
+        drop(line);
     });
-    assert_eq!(problems, shown);
+    assert_eq!(problems, printed);
     if problems > 0 {
-        return false;
+        return None;
     }
     let mut written = 0usize;
     render(&src, tier, width, &mut |chunk| written += chunk.len());
     assert!(written > 0);
-    true
+    Some(written)
 }
 
 fn fill(prefix: &str, unit: &str, bytes: usize) -> String {
@@ -359,12 +374,52 @@ fn expensive(bytes: usize) -> Vec<(&'static str, String, bool)> {
         },
         true,
     );
+    // Wider than a cell may be (3.2), so only its check is measured: the row is
+    // still split, unescaped and counted as one cell.
     add(
         "one table cell of escaped pipes",
         {
             let mut s = fill("# T\n\n| a", "\\|", bytes - 11);
             s.push_str(" |\n|---|\n");
             s
+        },
+        false,
+    );
+    // Every cell pads to its column's widest, so the widest cells the format
+    // allows, over as many short rows as fit, are the most output per byte.
+    let limit = |c: char| -> String { core::iter::repeat_n(c, TABLE_CELL_MAX).collect() };
+    add(
+        "rows of escaped pipes at the width limit",
+        {
+            let row = alloc::format!("| {} |\n", "\\|".repeat(TABLE_CELL_MAX));
+            let mut s = fill("# T\n\n| h |\n|---|\n", &row, bytes);
+            while s.len() < bytes {
+                s.push('\n');
+            }
+            s
+        },
+        true,
+    );
+    add(
+        "short rows under cells at the width limit",
+        fill(
+            &alloc::format!("# T\n\n| {} | {} |\n|---|---|\n", limit('a'), limit('b')),
+            "|c|d|\n",
+            bytes,
+        ),
+        true,
+    );
+    add(
+        "empty rows under sixteen cells at the width limit",
+        {
+            let mut head = String::from("# T\n\n|");
+            for _ in 0..TABLE_COLUMNS_MAX {
+                head.push_str(&limit('h'));
+                head.push('|');
+            }
+            head.push('\n');
+            head.push_str(delim16);
+            fill(&head, "|||||||||||||||||\n", bytes)
         },
         true,
     );
@@ -377,21 +432,29 @@ fn expensive(bytes: usize) -> Vec<(&'static str, String, bool)> {
 fn the_heap_bounds_hold() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let mut worst = (0usize, "");
+    let wide = Some(2 * SECTION_MAX);
+    // A section that fails the check is never rendered, so only the first two
+    // settings, which differ in how the file is read, apply to it.
+    let settings = [
+        (Read::Unhinted, Tier::None, wide),
+        (Read::Hinted, Tier::Rich, None),
+        (Read::Hinted, Tier::None, None),
+        (Read::Hinted, Tier::None, Some(80)),
+        (Read::Hinted, Tier::None, wide),
+    ];
     for (name, src, passes) in expensive(SECTION_MAX) {
         assert!(src.len() <= SECTION_MAX && src.len() > SECTION_MAX - 64);
-        let wide = Some(2 * SECTION_MAX);
-        for (tier, width) in [
-            (Tier::Rich, None),
-            (Tier::None, None),
-            (Tier::None, Some(80)),
-            (Tier::None, wide),
-        ] {
+        for (i, &(read, tier, width)) in settings.iter().enumerate() {
+            if !passes && i >= 2 {
+                break;
+            }
             let mut passed = false;
-            let hw = high_water(|| passed = show(src.as_bytes(), tier, width));
+            let hw = high_water(|| passed = show(src.as_bytes(), read, tier, width).is_some());
             assert_eq!(passed, passes, "{}: whether it passes the check", name);
             std::eprintln!(
-                "bounds: {:<42} {:?}/{:?}: high water {:>6} KiB ({:.2} bytes per byte)",
+                "bounds: {:<50} {:?}/{:?}/{:?}: high water {:>6} KiB ({:.2} bytes per byte)",
                 name,
+                read,
                 tier,
                 width,
                 hw / 1024,
@@ -399,8 +462,9 @@ fn the_heap_bounds_hold() {
             );
             assert!(
                 hw <= WORKING_SET_MAX,
-                "{} at {:?}/{:?}: a high-water mark of {} bytes exceeds the {}-byte working set",
+                "{} at {:?}/{:?}/{:?}: a high-water mark of {} bytes exceeds the {}-byte working set",
                 name,
+                read,
                 tier,
                 width,
                 hw,
@@ -408,9 +472,6 @@ fn the_heap_bounds_hold() {
             );
             if hw > worst.0 {
                 worst = (hw, name);
-            }
-            if !passes {
-                break;
             }
         }
     }
@@ -421,38 +482,48 @@ fn the_heap_bounds_hold() {
     );
 }
 
-/// Every expensive shape takes time linear in its size: the same work on a
-/// section four times larger takes well under sixteen times as long. Each size
-/// is timed as the best of several runs, which discards interference rather
-/// than averaging it in.
+/// Every expensive shape takes time, and writes output, linear in its size: the
+/// same work on a section four times larger takes well under sixteen times as
+/// long and writes well under sixteen times as much. Each size is timed as the
+/// best of several runs, which discards interference rather than averaging it
+/// in.
 #[test]
 fn the_time_bounds_hold() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    fn best(src: &str) -> Duration {
-        (0..3)
+    fn best(src: &str) -> (Duration, usize) {
+        let mut written = 0;
+        let t = (0..3)
             .map(|_| {
                 let t = Instant::now();
-                show(src.as_bytes(), Tier::Rich, None);
-                show(src.as_bytes(), Tier::None, Some(80));
+                written = [(Tier::Rich, None), (Tier::None, Some(80))]
+                    .into_iter()
+                    .map(|(tier, width)| {
+                        show(src.as_bytes(), Read::Hinted, tier, width).unwrap_or(0)
+                    })
+                    .sum();
                 t.elapsed()
             })
             .min()
-            .unwrap()
+            .unwrap();
+        (t, written)
     }
     let small = expensive(SECTION_MAX / 16);
     let large = expensive(SECTION_MAX / 4);
     for ((name, s, _), (_, l, _)) in small.iter().zip(&large) {
-        let (ts, tl) = (best(s), best(l));
+        let ((ts, os), (tl, ol)) = (best(s), best(l));
         std::eprintln!(
-            "time: {:<42} {:>9.3?} at {:>4} KiB, {:>9.3?} at {:>4} KiB",
+            "time: {:<50} {:>9.3?} and {:>6} KiB out at {:>4} KiB, {:>9.3?} and {:>6} KiB out at {:>4} KiB",
             name,
             ts,
+            os / 1024,
             s.len() / 1024,
             tl,
+            ol / 1024,
             l.len() / 1024
         );
-        // Linear work is four times as long; quadratic is sixteen. The floor
-        // keeps timer resolution from deciding a case that finishes at once.
+        // Linear work is four times as long and as large; quadratic is sixteen.
+        // The floors keep timer resolution, and output that does not grow with
+        // the section, from deciding a case.
         assert!(
             tl <= ts * 8 + Duration::from_millis(20),
             "{}: {:?} at {} bytes, {:?} at {} bytes",
@@ -460,6 +531,15 @@ fn the_time_bounds_hold() {
             ts,
             s.len(),
             tl,
+            l.len()
+        );
+        assert!(
+            ol <= os * 8 + CHUNK,
+            "{}: {} bytes written at {} bytes, {} at {} bytes",
+            name,
+            os,
+            s.len(),
+            ol,
             l.len()
         );
     }

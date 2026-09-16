@@ -8,8 +8,8 @@ use alloc::vec::Vec;
 use beacon::wire::{self, Op};
 use beacon::Tier;
 
-use crate::format::{self, Align, Events, Open, Problem, Run, TABLE_COLUMNS_MAX};
-use crate::is_control;
+use crate::format::{self, Align, Events, Open, Problem, Run, TABLE_CELL_MAX, TABLE_COLUMNS_MAX};
+use crate::is_replaced;
 use crate::wrap::Wrap;
 
 /// The heading of the contents listing (5).
@@ -178,12 +178,12 @@ impl<'o> Renderer<'o> {
         self.out.put(bytes);
     }
 
-    /// Section text, with every control character replaced (4.4). A code
-    /// block keeps its tabs.
+    /// Section text, with every character of `is_replaced` replaced (4.4). A
+    /// code block keeps its tabs.
     fn put_text(&mut self, s: &str, keep_tab: bool) {
         let mut clean = 0;
         for (i, c) in s.char_indices() {
-            if is_control(c) && !(keep_tab && c == '\t') {
+            if is_replaced(c) && !(keep_tab && c == '\t') {
                 self.out.put(&s.as_bytes()[clean..i]);
                 self.out.put("\u{fffd}".as_bytes());
                 clean = i + c.len_utf8();
@@ -325,8 +325,10 @@ impl Events for Renderer<'_> {
             Open::Table { align, widths } => {
                 self.cols = align.len().min(TABLE_COLUMNS_MAX);
                 self.align[..self.cols].copy_from_slice(&align[..self.cols]);
+                // A checked section's cells are within the limit already; the
+                // clamp keeps padding linear for text that skipped the check.
                 for c in 0..self.cols {
-                    self.widths[c] = widths.get(c).copied().unwrap_or(0);
+                    self.widths[c] = widths.get(c).copied().unwrap_or(0).min(TABLE_CELL_MAX);
                 }
                 let mut spec = [0u8; TABLE_COLUMNS_MAX];
                 for (c, a) in align.iter().take(self.cols).enumerate() {
@@ -699,6 +701,70 @@ A paragraph that needs to wrap at twenty columns.\n\n\
         }
     }
 
+    /// Each bidirectional control is written as U+FFFD from every block, at
+    /// every tier and through the wrapping path, for text that never passed the
+    /// check (4.4).
+    #[test]
+    fn bidirectional_controls_are_replaced_without_the_check() {
+        let src = concat!(
+            "# T\u{202e}itle\n\n",
+            "## H\u{2066}eading\n\n",
+            "A para\u{202a}graph, `co\u{202b}de`, *em\u{202c}ph* and **st\u{202d}rong**.\n\n",
+            "- An it\u{2067}em\n\n",
+            "```\nco\u{2068}de line\n```\n\n",
+            "| ce\u{2069}ll |\n| --- |\n| b\u{202e}ody |\n"
+        );
+        let planted = src.chars().filter(|&c| crate::is_bidi_control(c)).count();
+        assert_eq!(planted, 10);
+        for (tier, width) in [
+            (Tier::Rich, None),
+            (Tier::None, None),
+            (Tier::Cells, None),
+            (Tier::None, Some(40)),
+        ] {
+            let mut out = Vec::new();
+            render(src, tier, width, &mut |chunk| out.extend_from_slice(chunk));
+            let out = s(&out);
+            assert!(
+                !out.chars().any(crate::is_bidi_control),
+                "{:?}/{:?}: {:?}",
+                tier,
+                width,
+                out
+            );
+            assert_eq!(
+                out.matches('\u{fffd}').count(),
+                planted,
+                "{:?}/{:?}: {:?}",
+                tier,
+                width,
+                out
+            );
+        }
+    }
+
+    /// The cell limit bounds a column's padding even for a table that never
+    /// passed the check: one cell far wider than the limit, then many short rows.
+    #[test]
+    fn table_padding_is_bounded_without_the_check() {
+        let rows = 2000;
+        let mut src = String::from("# T\n\n| h | h |\n| --- | --- |\n| ");
+        src.push_str(&"a".repeat(100_000));
+        src.push_str(" | b |\n");
+        for _ in 0..rows {
+            src.push_str("| c | d |\n");
+        }
+        // Each short row pads to at most the limit, plus its frames and spacing.
+        let bound = src.len() + rows * (TABLE_CELL_MAX + 256);
+        for tier in [Tier::Rich, Tier::None] {
+            let mut written = 0;
+            render(&src, tier, None, &mut |chunk| {
+                written += chunk.len();
+                assert!(written <= bound, "{:?}: over {} bytes written", tier, bound);
+            });
+        }
+    }
+
     #[test]
     fn contents_with_no_sections() {
         let rich = contents(&[], Tier::Rich);
@@ -733,11 +799,11 @@ A paragraph that needs to wrap at twenty columns.\n\n\
         // A title is section text: its controls are replaced.
         let forged = [Listed {
             name: String::from("x"),
-            title: String::from("A\x1b]1936;v1;obj\x07"),
+            title: String::from("A\x1b]1936;v1;obj\x07\u{202e}"),
         }];
         let out = contents(&forged, Tier::Rich);
         assert!(
-            s(&out).contains("A\u{fffd}]1936;v1;obj\u{fffd}"),
+            s(&out).contains("A\u{fffd}]1936;v1;obj\u{fffd}\u{fffd}"),
             "{:?}",
             s(&out)
         );
