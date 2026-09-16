@@ -22,6 +22,80 @@ needed the operator.
 
 
 ---
+## 2026-09-16 (aux, Opus 5, effort max) -- the Operator's Manual restarts: a writing guide, a design, and the reader
+
+The operator added `docs/thylacine-operators-manual-writing-guide.md` and asked
+whether the manual's location had been decided. It had, on 2026-09-05
+(`876888cf`: Markdown in `docs/manual/`, installed at `/manual`, rendered through
+Beacon) -- **but only on aux-3.** That commit never reached main, the CLAUDE.md
+reconciliation noted as owed that day was never made, and so CLAUDE.md in both
+trees, `vault/meta/schema.md`, and my own memory all still said "deferred to
+v1.0-rc". Main had re-written the stale claim into its CLAUDE.md step 3 that same
+morning (`8c33c95d`), from its copy of the memory. Told main on yip 0091; main
+corrected it (`34f1ba3b`) with wording identical to aux-3's, so the merge meets the
+same text. The lesson is a new A-PIN: a decision landed on one track is invisible
+to the other until someone says so.
+
+**The finding that shaped the arc.** The guide requires "the repository's supported
+Beacon authoring workflow" and forbids inventing markup. No such workflow existed:
+nothing installed `/manual`, no program turned Markdown into Beacon, and BEACON.md
+defines a stream vocabulary (`hdr` levels 1-3, `table`, `pre`, `em`, `obj`) with no
+document format, lists, or links. The operator chose (AskUserQuestion) to **build
+the reader first** so a working renderer fixes the format, Containers as the first
+section, the guide committed unchanged, the index renamed `OPERATORS-MANUAL.md`
+(`53b91177`). After the design pass: the command is `manual`, and **nothing is
+installed until it is written to the guide** -- the three earlier pages moved to
+`docs/manual-drafts/` (`4d76ae87`, `docs/MANUAL-DESIGN.md`, binding).
+
+**The design in one line each.** A strict Markdown subset where every accepted form
+has both a Beacon and a plain realization, so the checker rejects links, images,
+block quotes, HTML, `---`, level-4 headings, nested lists and `_` emphasis instead of
+rendering them approximately. Plain output is the rich output with frames removed
+(BEACON 12.1 rule 1), which has one visible cost: a code span shows no backticks on
+serial. Wrapping happens only on a console that reports its width. Section text is
+sanitized so a file cannot forge a frame.
+
+**The crate** (`fe79e6c8`, `usr/manual`, 54 host tests). Two things worth keeping:
+- *Strict rejection tests found real noise.* Every "rejects X" test was tightened to
+  require exactly one diagnostic. The first run failed four: a rejected `~~~`
+  fence's body was then parsed as Markdown and reported again; a title below a blank
+  first line was reported twice; a CRLF file got one report per line; `<b>` got two.
+  All were parser behaviour an author would have had to read past.
+- *My first sabotage run proved nothing.* Six controls (sanitizer off, a rich-only
+  byte, table padding inside the cell frame, `docs/manual` absent / holding a link /
+  holding a misnamed file) all printed blank. zsh does not word-split an unquoted
+  `$T`, so `cargo` never ran. Caught only because a blank verdict is not a verdict;
+  the re-run began with an unmodified-tree control that had to print `ok` first, and
+  then every sabotage failed its test as intended.
+
+**Into the image.** `tools/build.sh` now installs `/manual` (0 sections, directory
+existence verified) and `/bin/manual`; `tools/interactive/manual.exp` PASSES on the
+`--config ci` image (31 s, attempt 1). Getting there surfaced two things the reader
+did not cause:
+- **ut's interactive `$status` reads 0 after every failing external command.** The
+  scenario's status leg failed 3/3 (`mf-missing=0`). Ground truth, one boot, one
+  line: `false`, `ls /no-such-dir-mf` and `manual nosuch-mf` each followed by
+  `echo st-*=$status` printed 0 for all three. `u-7-test` asserts the same case
+  (foreground `$status` == 1) and passes, so the fault is in the interactive REPL
+  session path, not the evaluator core. Ruled out by reading: the kernel's exit and
+  wait encodings (`sys_exits_handler`, `WAIT_STATUS_*`), the `SYS_WAIT_PID` status
+  copy-out, libthyla-rs's unpack helpers, `_start`'s exit path, and a competing
+  wildcard reaper in ut (every reap is by pid or by job group). Mechanism NOT
+  found. ENQUEUED (memory `bug_ut_status_zero_in_interactive_session`) and raised
+  with main, whose shell it is. The scenario's exit-status legs are withheld and
+  say so in its header -- a `$status` leg there could not fail, so it would verify
+  nothing -- and the reader's exit codes stay UNVERIFIED in a guest until the fix.
+- **Writing `rich` into `/env/BEACON` from ut did not reach the reader it spawned**
+  (the title came out plain 3/3). Mechanism unmeasured; recorded with the `$status`
+  defect. The rich leg was dropped: the rich bytes are pinned by the host goldens,
+  and a Halcyon tile (whose pts advertises `rich`) is where MANUAL-DESIGN 8.3 looks
+  at them for real.
+
+**Open at this entry:** the `$status` defect (preempts closing this chunk); the
+focused review (MANUAL-DESIGN 9); the Halcyon look (8.3); the console-drain burst
+measurement (8.4); the push; then the Containers section.
+
+---
 ## 2026-09-10 (aux, run 9, post self-compact) -- the Halcyon SESSION-path inline-media channel (I-47, HALCYON 14.7.2): per-pane routing on the existing /srv+9P mechanism
 
 Picked up from the run-8 self-compact at the 600k line. The operator had ratified

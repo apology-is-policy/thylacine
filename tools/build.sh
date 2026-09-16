@@ -484,7 +484,7 @@ EOF
     # P4-Ia2: copy any built Rust-side userspace binaries from
     # build/usr-rs/<target>/release/. Same curation discipline.
     # Binary name = crate's [[bin]] name = directory under usr/.
-    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "nocturned" "nocturne-probe" "nocturne-vol" "nocturne-vol-probe" "nocturne-tap-probe" "nocturne-capture-probe" "ring-voice-probe" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "halcyon" "halcyond" "view" "gallery" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "diorama" "diorama-probe" "viv" "viv-probe" "viv-pheno-probe" "ptyhost" "jc-probe" "susp-mask-child" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "exec-probe" "fork-probe" "coreutil-smoke" "fs-mut-smoke" "symlink-probe" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "ps" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "aurora-push" "pipe-src" "pipe-sink" "legate-prover" "imperium-probe" "imperium" "jit-prover" "login" "ut" "nora" "prowl" "quarry" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" "warp-prove" "haul" "kaua-term" "kaua-term-probe" "caps-probe" )
+    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "nocturned" "nocturne-probe" "nocturne-vol" "nocturne-vol-probe" "nocturne-tap-probe" "nocturne-capture-probe" "ring-voice-probe" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "halcyon" "halcyond" "view" "gallery" "manual" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "diorama" "diorama-probe" "viv" "viv-probe" "viv-pheno-probe" "ptyhost" "jc-probe" "susp-mask-child" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "exec-probe" "fork-probe" "coreutil-smoke" "fs-mut-smoke" "symlink-probe" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "ps" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "aurora-push" "pipe-src" "pipe-sink" "legate-prover" "imperium-probe" "imperium" "jit-prover" "login" "ut" "nora" "prowl" "quarry" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" "warp-prove" "haul" "kaua-term" "kaua-term-probe" "caps-probe" )
     local rs_release="$USR_RS_BUILD/$USR_RS_TARGET/release"
     for bin in "${usr_rs_bins[@]}"; do
         local src="$rs_release/$bin"
@@ -3880,6 +3880,36 @@ populate_stratum_pool() {
         done
         echo "==> populate pool: $baked theme(s) baked + readback-verified into /lib/halcyon/themes (HALCYON-THEME TH-5)"
     fi
+
+    # MANUAL-DESIGN 6: install the Operator's Manual at /manual. EVERY
+    # docs/manual/NN-<name>.md rather than a hand-listed set, so a section
+    # added to the tree ships by existing; `cargo test -p manual` has already
+    # held each one to the format. Unconditional: the manual is content, not a
+    # lever. With no sections the directory is still created, and `manual`
+    # reports that none are installed -- so the directory's existence is
+    # verified here, since an empty listing cannot tell "no sections" from
+    # "no /manual".
+    local manual_src="$REPO_ROOT/docs/manual"
+    "$stratum_fs_bin" -s "$sock_path" mkdir /manual >/dev/null 2>&1 || true
+    "$stratum_fs_bin" -s "$sock_path" stat /manual >/dev/null 2>&1 \
+        || { echo "==> populate pool: mkdir /manual FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    local section_src section_base sections=0
+    for section_src in "$manual_src"/[0-9][0-9]-*.md; do
+        [[ -f "$section_src" ]] || continue
+        section_base="$(basename "$section_src")"
+        "$stratum_fs_bin" -s "$sock_path" write "/manual/$section_base" < "$section_src" \
+            || { echo "==> populate pool: write /manual/$section_base FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        sections=$((sections + 1))
+    done
+    "$stratum_fs_bin" -s "$sock_path" sync \
+        || { echo "==> populate pool: sync (manual) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    for section_src in "$manual_src"/[0-9][0-9]-*.md; do
+        [[ -f "$section_src" ]] || continue
+        section_base="$(basename "$section_src")"
+        "$stratum_fs_bin" -s "$sock_path" read "/manual/$section_base" | cmp -s - "$section_src" \
+            || { echo "==> populate pool: /manual/$section_base readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    done
+    echo "==> populate pool: $sections manual section(s) baked + readback-verified into /manual (MANUAL-DESIGN 6)"
 
     # TH-5b: put a gallery theme IN FORCE. `THYLACINE_HALCYON_THEME=<name>`
     # copies `/lib/halcyon/themes/<name>.toml` to `/lib/halcyon/theme.toml`,

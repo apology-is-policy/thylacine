@@ -230,6 +230,16 @@ LS-CI mints one with `mkdisk.py` at need.
   readback-cmp -- below this file's target/ledger granularity, so no target-set
   change.)
 
+- **`/manual` is baked unconditionally, and its EXISTENCE is verified even when
+  empty (2026-09-16, docs/MANUAL-DESIGN.md 6).** The pool step after the TH-5
+  themes block writes every `docs/manual/NN-<name>.md` to `/manual` with the
+  themes block's write + sync + readback-cmp shape, globbed so a new section ships
+  by existing. It then `stat`s `/manual`, because `manual` reads an ABSENT
+  directory as "no sections installed" -- and until the first guide-written section
+  lands the directory IS empty, so a silently failed mkdir would be
+  indistinguishable from the correct result. The `manual` binary rides
+  `usr_rs_bins` like `view`. Same granularity note as above: no target-set change.
+
 - **The stale-stage warning claims a property it achieves by maintenance,
   not by construction — and its own comment is the argument against
   itself.** The comment says it is *"checked for EVERY staged GL binary, not

@@ -1,0 +1,61 @@
+#!/usr/bin/expect -f
+# tools/interactive/manual.exp -- the Operator's Manual reader over a real PTY
+# (docs/MANUAL-DESIGN.md 8.2).
+#
+# No section is installed yet (MANUAL-DESIGN 10), so the scenario writes small
+# fixture sections under /tmp from the shell and drives the reader against them.
+# Each leg matches a token that only the command's OUTPUT can produce (the
+# LS-CI discipline, lib.exp), and no two legs share one:
+#   (a) `manual` with nothing installed -> "No sections are installed."
+#   (c) the fixture by path, plain tier  -> "body has emphasis and ends." (typed
+#                                           with asterisks, rendered without).
+#                                           The reader renders only a file that
+#                                           passes the check, so this leg also
+#                                           proves the fixture checks clean.
+#   (d) an unknown section name          -> "no section named"
+#   (e) --check on a fixture with a link -> "links are not supported"
+#
+# The RICH tier is not driven here: writing `rich` into /env/BEACON from the
+# shell did not reach the reader it spawned (measured 2026-09-16: the title came
+# out plain on all three attempts; the mechanism is unmeasured). Rich output is
+# pinned byte-for-byte by the host tests (`cargo test -p manual`) and is seen for
+# real in a Halcyon tile, whose pts advertises `rich` (MANUAL-DESIGN.md 8.3).
+#
+# EXIT STATUSES ARE NOT ASSERTED, and that is a gap, not a design. In this
+# interactive console session `$status` reads 0 after EVERY failing external
+# command -- measured 2026-09-16 with `false`, `ls /no-such-dir` and
+# `manual nosuch` on one line, all 0 -- while u-7-test's bare evaluator sees 1.
+# A `$status` leg here would therefore pass whatever the reader returned. The
+# ut defect is recorded in docs/JOURNAL.md (2026-09-16); restore the exit-status
+# legs (manual nosuch -> 1, --check on the link fixture -> 1) once it is fixed.
+#
+# The serial console advertises no Beacon tier (ut exports BEACON=none), so
+# every leg renders plain.
+
+# HVF: the scenario is boot-dominated, and nothing the reader does depends on
+# the CPU model or the GIC version that the TCG anchor set covers.
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+lc_run_expect "manual" "No sections are installed."
+lc_pass "manual(a): the contents listing reports that no sections are installed"
+
+# Braces keep Tcl from substituting; single quotes keep ut from globbing.
+lc_send {echo '# Fixture Reader Title' > /tmp/mf.md; echo '' >> /tmp/mf.md; echo 'The fixture body has *emphasis* and ends.' >> /tmp/mf.md}
+lc_run_expect "manual /tmp/mf.md" "body has emphasis and ends."
+lc_pass "manual(c): a section renders by path, with its inline markup removed at the plain tier"
+
+lc_run_expect "manual nosuch-mf" "no section named"
+lc_pass "manual(d): an unknown section name is a diagnostic"
+
+lc_send {echo '# Bad Fixture' > /tmp/mfbad.md; echo '' >> /tmp/mfbad.md; echo 'See [x](y) here.' >> /tmp/mfbad.md}
+lc_run_expect "manual --check /tmp/mfbad.md" "links are not supported"
+lc_pass "manual(e): --check rejects a link with a diagnostic"
+
+lc_quit
+lc_pass "LS-CI manual: the listing, render, lookup and check legs verified (exit statuses withheld: the ut status defect)"
+exit 0
