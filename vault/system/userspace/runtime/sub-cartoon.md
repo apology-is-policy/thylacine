@@ -95,6 +95,25 @@ ring cannot be clobbered under its own reader: slot `k % (r + 1)` is rewritten
 at step `k + r + 1`, strictly past every step that still needs it, because a
 window at `i` reaches back only to `i - r`.
 
+**The window RUNS (2026-09-16), so a pixel costs the same at any radius.**
+`blur_line` keeps four channel sums over the current window: step `i` gains
+the value entering at `i + r` -- still original, being ahead of the cursor --
+and loses the one leaving at `i - 1 - r`, which is already overwritten and so
+comes from the ring. That leaving value sits in slot `(i - 1 - r) % (r + 1)`,
+which is `i % (r + 1)`: EXACTLY the slot step `i` is about to write. So the
+subtraction reads it BEFORE the write, and that order is the whole of the
+ring's correctness argument for the running form. The output is identical to
+the per-tap sum it replaced -- same window, same clipped edges, same floor
+division -- and that is pinned, not asserted: the old sum is kept VERBATIM in
+the tests as `reference_blur_line`, and
+`the_running_window_matches_the_per_tap_sum_everywhere` compares the two on
+216 random fields covering every window class (`n` below, at and past `2r +
+1`; radii past the cap; the column pass's stride; a non-zero base). Why it
+changed: the modal backdrop became display-sized (section 10 as reversed at
+`c065ec06`), and on a 2560x1664 field at the release profile the per-tap sum
+took 111 / 144 / 182 ms at radius 3 / 6 / 8 against 41 / 32 / 29 ms running
+-- the difference between a menu that opens and one that stalls.
+
 **`blur_line` clamps the radius itself, and the clamp lives there and nowhere
 else.** `keep` is sized from `GLOW_RADIUS_MAX`, so an over-large radius would
 index past the ring -- the bound is MEMORY SAFETY here, not the work bound it
@@ -186,7 +205,9 @@ executor's contract is that it always produces a validly-clamped frame.
 
 ## Performance
 
-Per-op, per-pixel within the clip. The blend short-circuits the opaque and
+Per-op, per-pixel within the clip. `Op::Blur` is O(1) per pixel per pass at
+any radius since the running window (measured above: a full 2560x1664 field
+in 29-41 ms on the host, flat in the radius). The blend short-circuits the opaque and
 transparent cases (the common ones for fills and glyph interiors), so only
 antialiased edges pay the packed-lane arithmetic. The flat run pool avoids a
 per-run allocation. Damage-bounding is the author's job via `clip`; the
@@ -212,6 +233,13 @@ executor honours it but does not compute it.
 - **`blur_line`'s clamp must not be duplicated into its caller.** It is the
   ring's bounds check; a second copy upstream would mask its sabotage and
   leave the real guard unwitnessed.
+- **`blur_line` must read the leaving value before it writes the ring.** Both
+  live in slot `i % (r + 1)`; writing first subtracts the pixel ENTERING the
+  window instead of the one leaving it. Sabotage-measured 2026-09-16: that
+  swap fails the oracle comparison and `a_blur_averages_its_neighbourhood`.
+  (A subtraction guard moved from `i > r` to `i >= r` does NOT fail, and must
+  not be mistaken for a missing witness: at `i == r` the slot it reads has not
+  been written in this pass and is zero, so the extra subtraction is a no-op.)
 - **`Op::Blur` must keep normalising by the taps actually taken.** Dividing by
   the full `2r+1` window instead darkens every edge toward black, which shows
   as a ring around the backdrop's own border.

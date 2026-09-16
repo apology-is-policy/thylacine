@@ -205,7 +205,10 @@ at 256 nodes. No hot path.
 - **`skeleton::plan` must track the compositor's split rule.** If the
   compositor changes when a split nests vs flattens, the model here must change
   with it, or restore builds the wrong tree -- this is a model kept in sync by
-  the H-4b tests, not by a shared type.
+  the H-4b tests, not by a shared type. It changed on 2026-09-16 (a split on a
+  stacked tile splits the stack, under Instrument), and the model was kept in
+  step by never PLANNING that split: `flatten_stack_members` removes every
+  container member first (see the section below).
 - **`theme` must remain the sole palette source.** A second definition of any
   Daylight token anywhere else is the drift the H-3 split exists to prevent.
 
@@ -690,6 +693,46 @@ Proven LINKED rather than merely compiling: setting this constant to 8 fires a
 test in BOTH crates. The tapestryd side needed a new absolute assertion to
 manage it, because every bound assertion there had been written relative to the
 constant and so could not see it move.
+
+## A saved stack's container members restore FLAT (2026-09-16, HALCYON-INSTRUMENT 6.1)
+
+The compositor stopped building containers inside stacks under the Instrument
+profile ([[sub-tapestryd]], "a stack's members are tiles"): a split on a
+stacked tile now splits BESIDE the whole stack. That broke an assumption
+`skeleton::plan` depends on. For a stacked container the planner emits its
+splits, then `SetMode`, then grows each child IN PLACE -- so a child that is
+itself a container issues `split <stacked leaf> <dir>` and expects a nest.
+The compositor now answers by splitting the stack instead, the executor's
+per-op verification sees the wrong shape, and the restore diverges and
+returns 1. A layout saved before the rule (the operator's `tyr-quake` shape)
+or edited by hand could therefore never restore.
+
+**`layout::flatten_stack_members`** lays every `Stacked` / `Tabbed`
+container's CONTAINER members flat before planning: each is replaced, in
+place, by its own leaves in order, recursively, so every tile survives -- the
+kit's rule that an already-loaded layout "must retain data ... not delete
+tiles". Only the nested arrangement is lost, and it was never renderable. A
+member that was its stack's ACTIVE child hands the stack its own active-path
+leaf (`active_leaf_offset`), so the tile that was open stays open; a laid-flat
+leaf takes the default weight (a stack divides nothing); split containers, and
+stacks whose members are already leaves, come back EQUAL, which is what makes
+the pass safe to run on every restore. Witnesses: the member laid flat with the
+open tile kept, flattening at every depth with splits outside stacks untouched
+(weights too), and the unchanged-tree control. Sabotage-measured separately:
+dropping the active offset, and keeping a laid-flat leaf's split weight, each
+fail one.
+
+**The tool applies it only under Instrument**, because under legacy a
+container inside a tabbed/stacked one is an ordinary i3 shape the compositor
+still builds. `halcyon layout restore` resolves the seat's profile with
+`seat_profile(home)` -- the user's `lib/halcyon/profile` word, then the
+system's, the two tiers the session reads at start -- through
+**`instrument::resolve_profile`**, which is `resolve_bundle`'s first step
+extracted unchanged: the user's word wins, a word that is not a profile is
+skipped and its tier's label returned (so `resolve_bundle` still writes the
+same REFUSED notes), and nothing at all is legacy from the built-in tier. A
+profile tier that exists but cannot be read fails the restore (`read_theme`
+says why) rather than guessing a profile and building the wrong tree.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

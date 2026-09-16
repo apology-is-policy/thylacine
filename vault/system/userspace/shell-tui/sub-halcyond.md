@@ -349,7 +349,10 @@ specifies.
   header carrying a close x, a two-column key grid, a footer paragraph -- which
   is why `help` is its own module rather than a `Dialog` variant.
 
-  **Its rows are the chords IN FORCE, not a literal.** `Help::from_chords`
+  **Its rows are the chords IN FORCE, not a literal.** (`new-tile` joined the
+  table's vocabulary 2026-09-16 -- "Open a new tile in the focused pane", the
+  compositor's Super+N, HALCYON-INSTRUMENT 6.1 -- so the reference shows it the
+  moment the `chords` file names it.) `Help::from_chords`
   parses the compositor's `chords` file (the same text `rail::hints_from_chords`
   reads for the footer hints) at EVERY open, so a rebind is a rebind of the
   reference, an action with no binding has no row at all, and an empty or

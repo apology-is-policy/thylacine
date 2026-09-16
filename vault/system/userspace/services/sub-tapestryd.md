@@ -2368,7 +2368,10 @@ dragged rule `amber` and a painter reading the state back out of the colour
 would key an effect on a token. A token is not a state.
 
 **`menu_effect_region`, and the census that decided how it wired in
-(I-8b-3).** The pure rule that says which display region a placed card's
+(I-8b-3).** *SUPERSEDED 2026-09-16: the region is now the WHOLE DISPLAY and
+`MenuState::heal_rect` is gone -- see "The backdrop covers the display" below.
+The census that follows still holds and is why the separate field survived.*
+The pure rule that says which display region a placed card's
 EFFECTS cover -- the card united with its drop shadow's reach, clamped to the
 display -- takes the REQUESTED blur radius rather than the clamped one,
 because the executor only ever clamps DOWN: the region is then always a
@@ -2391,7 +2394,9 @@ is. All three heal sites now read `MenuState::heal_rect()`; none of the other
 five readers was touched.
 
 **The effects are painted ONCE, and the ring is push-suppressed (section 10
-as amended at `b62a761b`, operator-answered).** An effect BLENDS against the
+as amended at `b62a761b`, operator-answered).** *The ring is the whole display
+since 2026-09-16, and the dismiss no longer heals through `menu_heal` -- see
+below; the once-only argument here is unchanged.* An effect BLENDS against the
 destination, so unlike `menu_reassert`'s opaque `copy_nonoverlapping` it is
 not safe to repeat -- and `screen_flush_rect` provably re-asserts one region
 twice, once directly and once through the `screen_push` of its own return.
@@ -2438,3 +2443,155 @@ drive a real divider drag (press the track, `divider drag start`, a 100 px
 drag, `divider drag end ... release`), which exercises `paint_cartoon` on real
 drag frames -- but no leg reads sub-pixel ink, so the gate witnesses that the
 path RUNS, never that the glow LOOKS right. That gap is stated, not closed.
+
+## The backdrop covers the display, the scene is rebuilt at dismiss, and a stack's members are tiles (2026-09-16, the operator's hands-on fixes)
+
+The operator drove the I-8 demo image by hand and found what seventeen green
+gate legs could not, because every leg reads logs and none reads ink. Two of
+the five issues land here; the scripture is `c065ec06` + `4257a4ab`.
+
+**The backdrop was a hard-edged dark RECTANGLE, by construction.**
+`menu_effect_region` sized the effect region from the card's shadow reach --
+`CARD_SHADOW_BLUR` 80 at 200 %, about 160 px, plus `dy` -- and
+`menu_paint_effects` darkened that region uniformly at `BACKDROP_ALPHA` while
+the scene outside stayed untouched. A straight edge was the only possible
+result; the kit's `dialog::backdrop` covers the viewport and so has none.
+`pane::menu_effect_region(card, disp_w, disp_h)` now returns the display (the
+card and the display non-degenerate), and `menu_fx_for` passes the geometry
+only. The consequences, each handled rather than inherited:
+
+- **Push admission is the card alone.** `menu_push_allowed(r, fx = display,
+  card)` has no bars left, so the whole scene behind a modal is FROZEN on the
+  display until the dismiss. The function stays general in `fx`, with a
+  witness at a sub-display region so its generic contract cannot rot.
+- **The structural flush freezes too.** `screen_flush_full` uploaded the
+  whole buffer unconditionally, so a structural repaint under a standing card
+  (a tile closing, a `comp_repaint_pending` tick) would have un-dimmed the
+  whole screen for the rest of the modal's life. It now routes through
+  `menu_push_allowed` whenever a card with effects stands on a display that is
+  ALREADY `Composed`. Entering `Composed` is the exception, and it must be:
+  the screen resource is not yet what the display shows, so it goes up whole
+  before `set_scanout` binds it.
+- **A display mode change dismisses the card.** `set_mode` swaps in a fresh,
+  zeroed screen; a frozen upload onto it would show nothing but the card, and
+  `fx` would name the old geometry. So `set_mode` calls
+  `menu_dismiss("mode")` after its validation and pre-flight and before the
+  new screen is built -- a modal ends there as it ends a divider drag.
+- **Effects are only ever laid over a REBUILT scene.** `menu_paint_effects`
+  starts with `scene_restore()`. Two reasons, both measured from the code
+  rather than supposed: on a MOVE (the same surface placed again) the buffer
+  still holds the previous placement's effects, and blending over them is the
+  double-darkening the once-only rule exists to prevent -- the old code healed
+  the old ring first, but the heal's own pushes were suppressed by the NEW
+  placement and client pixels under it stayed dimmed; and on the GPU composed
+  path the buffer holds no client pixels at all. After the paint the card is
+  copied back (`menu_reassert` over the region), so a moved card stays crisp
+  instead of arriving dimmed until its owner's next present.
+
+**The dismiss REBUILDS rather than heals.** `menu_heal`'s repaint +
+same-size CONFIGURE, run display-wide, would fill every header and both rails
+with their resting ground and leave every tile dimmed until its client
+re-presented: a whole-screen blink on every dismiss, exactly where the
+backdrop had been. The scripture had refused a display-sized heal for that
+flash; the reversal accepted the COST, and the mechanism is what keeps the
+flash out. `menu_heal_placement(m)` is now the one decision all three dismiss
+sites take (`retire`'s tail, `menu_dismiss`'s fallback, `menu_place`'s move):
+a placement WITHOUT effects (legacy, `fx` empty) heals its card's rect through
+`menu_heal` exactly as before; one WITH effects runs `menu_restore`:
+
+1. `scene_restore()` rebuilds the screen BUFFER from retained state, uploading
+   nothing: `paint_chrome`, then `restore_surface(n)` for every visible hosted
+   surface (backgrounded ones skipped, as the pre-fill skips them), then for
+   every visible chrome surface -- headers, rails, the bar -- except the menu.
+2. `screen_flush_full()` uploads the display in ONE push (`self.menu` is
+   already `None`, so nothing is withheld).
+3. Only the surfaces the rebuild could NOT reproduce get the redraw
+   CONFIGURE; a wedged one retires, as in `menu_heal`.
+
+`restore_surface(n)` composes `n`'s shown slot at its current target and
+answers whether that reproduced the frame. It refuses a GL adoption (the frame
+is host-side), a held slot (test-mode HOLD stays unshown, as `release`
+promises), and a surface with no shown slot or weave; an accumulator
+(`patchwork`, #56) is composed anyway, as the structural pre-fill always did,
+but reported owed. Why a shown slot is a WHOLE frame: a client honouring the
+buffer-age contract repaints each slot over the union of the damage since
+that slot's age (GPU-DESIGN 4.5.8b), so its last presented slot is its last
+frame, never a fragment. `prefill_from_shown` now calls `restore_surface` too,
+byte-identical in behaviour -- one implementation of "what can be recomposed".
+
+**Cost, measured on the host.** The backdrop's blur over a 2560x1664 display
+took 144 ms at the 200 % radius under cartoon's per-tap sum; cartoon's
+`blur_line` now runs its window and takes ~32 ms (see [[sub-cartoon]]). A
+placement is rebuild + blur + tint + one full upload; a dismiss is rebuild +
+one full upload. Neither is per frame.
+
+**A stack's members are TILES (HALCYON-INSTRUMENT 6.1 and invariant 9).** When
+the operator ran `tyr-quake` in a stacked tile, `host_for` chose `SplitH` from
+the tile's aspect and nested a split INSIDE the stack slot; `place_frame` never
+modelled a container member, so the group got a blank header, its own tiles
+re-numbered from 01, and on collapse the carve never descended -- the tiles
+vanished (hidden, not lost: `focus` reveals a container's first leaf, but only
+Super+Tab reached it, and macOS had taken that). The rule is enforced at the
+three places a container can enter a stack, all in `Layout`, Instrument only
+(the legacy i3 tree is unchanged, and each witness uses legacy as its
+one-variable control):
+
+- **`split_target(leaf, mode)`**, consulted by `split` itself so no caller can
+  bypass it: a split mode on a tile of a `Stacked` / `Tabbed` container acts on
+  the STACK -- the new pane lands beside it, flattening into the stack's parent
+  when that parent already has the mode, nesting otherwise; the kit's
+  `splitFocused` replaces the whole pane the same way. The stack's own mode
+  joins it. The OTHER stack-like mode has no target (`None`). The walk climbs
+  while the parent is stack-like, so even a pre-rule tree splits beside its
+  outermost stack.
+- **`host_for`** joins a stacked tile's stack (`stack_parent_mode`) before it
+  considers an aspect split, and refuses the host like a full pane table when
+  the join does not fit the minima.
+- **`set_mode`** refuses a stack-like mode on a target holding a container
+  child (`stacking_refused`) -- the one path left once splits and windows no
+  longer nest: from the welcome layout with its right pane split, Super+S on
+  the LEFT tile would make the right-hand split a stack member. The chord says
+  so (`chord mode refused: a stack holds only tiles`), since `set_mode`
+  refuses silently; the `mode` verb answers `E_INVAL` (a shape the tree does
+  not admit), not the minima's `E_NOMEM`.
+
+`split_fits` judges the node `split` will actually split, or a check and its
+mutation would disagree about which node grows; `min_size_hyp` gained the
+container-target arm (the stack's own minimum beside a new leaf along the
+axis) and the flatten branch's base became the node's own minimum rather than
+a tile's. Both are pinned absolutely: a root stack of three nests [stack / new]
+at 153 + 7 + 88 = 248 (the leaf-level nest the check used to judge would say
+282), and [a / stack(b, c)] split V flattens to 88 + 121 + 88 + 14 = 311 (a
+tile's minimum there would say 278 -- width cannot pin this, a stack is as
+narrow as a tile).
+
+**Super+N -- `ChordAction::NewTile`, `new-tile`.** A new empty tile in the
+focused pane: `new_tile_mode` is the tile's stack's own mode when it is a tile
+of one (the newcomer joins), else `Stacked` (a lone tile becomes a stack of
+two). The session fills the leaf with a shell exactly as it fills a split's:
+the chord and Super+H / Super+V now share `chord_split`, which stamps the new
+leaf's owner so the session can mint its claim (KT-1.5d-3). The keyboard
+reference lists it from the `chords` file like every other row.
+
+**Witnesses** (tapestryd lib 93, +6): `a_split_on_a_stacked_tile_splits_the_whole_stack`,
+`a_window_from_a_stacked_tile_joins_the_stack` (its legacy control IS the
+operator's defect), `stacking_a_group_that_holds_a_split_is_refused`,
+`a_new_tile_joins_its_stack_or_makes_one`,
+`no_mutation_builds_a_container_inside_a_stack` (EIGHT attempts on fresh trees
+-- both split modes, both stack modes, a host, a new tile, a move, stacking
+the root -- each asserting that the tree changed iff the attempt succeeded, so
+a no-op cannot satisfy the walk, and the legacy control shows the walk can
+fail), `a_split_on_a_stack_is_judged_on_the_stack`; and for the backdrop
+`the_effect_region_is_the_whole_display`, `while_a_card_stands_only_the_card_is_pushed`,
+`push_admission_is_general_in_the_region`. Sabotage-measured SEPARATELY, each
+failing its named witnesses and restored byte-identical: no redirect in
+`split_target` (3 fail), no join in `host_for` (1), no refusal in `set_mode`
+(2), no container-target arm (1), the flatten base back to a tile's (1).
+
+**What no host test reaches.** `scene_restore`, `restore_surface`,
+`menu_restore`, the frozen `screen_flush_full`, `set_mode`'s dismiss and the
+`NewTile` chord arm are bin-side -- the standing "N defended sites need N
+witnesses" gap, stated. The guest gate places and dismisses menus, so the
+paths RUN on live frames; no leg reads ink, so whether the dismiss leaves the
+screen exact is a thing a person verifies, and the operator's re-check is that
+person.

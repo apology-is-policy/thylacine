@@ -1470,26 +1470,14 @@ struct MenuState {
     gen: u32,
     rect: Rect,
     /// HALCYON-INSTRUMENT 10: the display region this card's EFFECTS cover
-    /// -- the card united with its shadow's reach. SEPARATE from `rect` on
-    /// purpose: `rect` is what the surface IS (the compose source map, the
-    /// placement, the click-away test), and widening it would read outside
-    /// the weave, misplace the card, and make a click on the SHADOW count
-    /// as a click on the card. `Rect::ZERO` under the legacy profile, where
-    /// section 10's effects are not painted -- so nothing is suppressed.
+    /// -- the whole display since the full-viewport reversal (`c065ec06`).
+    /// SEPARATE from `rect` on purpose: `rect` is what the surface IS (the
+    /// compose source map, the placement, the click-away test), and widening
+    /// it would read outside the weave, misplace the card, and make a click
+    /// on the backdrop count as a click on the card. `Rect::ZERO` under the
+    /// legacy profile, where section 10's effects are not painted -- so
+    /// nothing is suppressed and the old card-sized heal stands.
     fx: Rect,
-}
-
-impl MenuState {
-    /// What must HEAL when this card goes: its effect region, which contains
-    /// the card by construction -- or the card alone under the legacy
-    /// profile, where no effects are painted and `fx` is `Rect::ZERO`.
-    fn heal_rect(self) -> Rect {
-        if self.fx.is_empty() {
-            self.rect
-        } else {
-            self.fx
-        }
-    }
 }
 
 /// H-3d: the registered status bar -- the surface the display's bottom
@@ -5621,6 +5609,14 @@ impl Comp {
             h,
             self.scanout_name()
         );
+        // Section 10: a placed modal was clamped to -- and has frozen -- the
+        // display this replaces. It cannot survive the swap: its region names
+        // the old geometry, and a frozen upload onto the new, zeroed screen
+        // would show nothing but the card. Dismissed first, as a modal
+        // opening ends a divider drag.
+        if self.menu.is_some() {
+            self.menu_dismiss("mode");
+        }
         let new = match self.alloc_screen(w, h) {
             Some(s) => s,
             None => return Err(p9::E_NOMEM),
@@ -5736,12 +5732,10 @@ impl Comp {
         // 9.2: a modal opening ends a divider drag (the grab takes the
         // pointer from the capture).
         self.drag_end("menu");
-        // The same surface placed again (a move): its old rect is healed
+        // The same surface placed again (a move): the old placement is healed
         // below, after the new placement composes (SA-1).
-        // The OLD EFFECT REGION is what must heal, not the old card: the
-        // backdrop and shadow reach past the rect on every side.
-        let old_rect = match self.menu {
-            Some(m) if m.n == n => Some(m.heal_rect()),
+        let old = match self.menu {
+            Some(m) if m.n == n => Some(m),
             _ => None,
         };
         if self.menu.map_or(false, |m| m.n != n) {
@@ -5760,36 +5754,127 @@ impl Comp {
         if !self.emit_configure_to(n, sw, sh) {
             self.retire(n);
         }
-        if let Some(o) = old_rect {
-            self.menu_heal(o);
+        // A placement that paints effects needs no separate heal of the old
+        // one: its scene rebuild below replaces every pixel the old
+        // placement touched, and healing first would upload the un-dimmed
+        // scene for one push between two dimmed ones.
+        if let Some(o) = old {
+            if fx.is_empty() {
+                self.menu_heal_placement(o);
+            }
         }
         // Section 10 as amended at `b62a761b`: the effects are painted ONCE,
         // here, AFTER the reconcile that repainted the scene beneath them --
-        // and the ring is push-suppressed from now until the dismiss, so
+        // and the display is push-suppressed from now until the dismiss, so
         // nothing re-blends over what this lays down.
         self.menu_paint_effects();
         Ok(())
     }
 
-    /// The effect region for a card at `rect`, or `Rect::ZERO` where section
-    /// 10's effects are not painted (the legacy profile).
+    /// Heal the screen under a menu placement that has gone -- the one
+    /// decision every dismiss path takes. A placement WITH effects froze the
+    /// whole display behind it (section 10 as reversed at `c065ec06`), so the
+    /// scene is rebuilt from retained state and uploaded in one push; one
+    /// without (the legacy profile) heals its card's rect as it always did.
+    fn menu_heal_placement(&mut self, m: MenuState) {
+        if m.fx.is_empty() {
+            self.menu_heal(m.rect);
+        } else {
+            self.menu_restore();
+        }
+    }
+
+    /// The dismiss of a frozen modal: rebuild the scene, upload the whole
+    /// display in ONE push, and send the redraw request only to the surfaces
+    /// the rebuild could not reproduce.
     ///
-    /// Built from the REQUESTED blur, not the executor's clamped one: the
-    /// executor only ever clamps DOWN, so the region stays a superset of
-    /// what is painted. Over-healing costs work; under-healing leaves a ring
-    /// of un-healed backdrop after the card is gone.
+    /// `menu_heal`'s repaint-and-CONFIGURE, run display-wide, would instead
+    /// fill every header and rail with its resting ground and leave every
+    /// tile dimmed until its client re-presented -- a whole-screen blink on
+    /// every dismiss, visible exactly where the backdrop had just been.
+    fn menu_restore(&mut self) {
+        if self.screen.is_none() {
+            return;
+        }
+        let owed = self.scene_restore();
+        self.screen_flush_full();
+        let mut wedged: Vec<usize> = Vec::new();
+        for (n, t) in owed {
+            if !self.emit_configure_to(n, t.w, t.h) {
+                wedged.push(n);
+            }
+        }
+        for n in wedged {
+            self.retire(n);
+        }
+    }
+
+    /// Rebuild the whole screen BUFFER from retained state, uploading
+    /// nothing: the compositor's own paint, then every visible surface's
+    /// last presented frame at its current target -- hosted content, then
+    /// the chrome (headers, the rails, the bar) beside it, the menu
+    /// excepted. Returns the surfaces whose pixels this could not
+    /// reproduce, with their target rects: the ones still owed a redraw
+    /// request.
+    ///
+    /// Sound because a client honouring the buffer-age contract presents
+    /// COMPLETE frames -- each slot is repainted over the union of the
+    /// damage since that slot's age (GPU-DESIGN 4.5.8b) -- so a surface's
+    /// shown slot is its last frame, not a fragment of one. The exceptions
+    /// are exactly `restore_surface`'s refusals.
+    fn scene_restore(&mut self) -> Vec<(usize, Rect)> {
+        let mut owed: Vec<(usize, Rect)> = Vec::new();
+        self.paint_chrome();
+        for (_, n, c) in self.layout.visible_hosted() {
+            // d-1b: a backgrounded SYSTEM leaf contributes no composed pixels.
+            if self.surf(n).map_or(false, |s| s.backgrounded) {
+                continue;
+            }
+            if !self.restore_surface(n) {
+                owed.push((n, c));
+            }
+        }
+        for (n, t) in self.visible_chrome() {
+            if self.surf(n).map_or(false, |s| s.is_menu) {
+                continue;
+            }
+            if !self.restore_surface(n) {
+                owed.push((n, t));
+            }
+        }
+        owed
+    }
+
+    /// Compose surface `n`'s last-presented slot into the screen buffer at
+    /// its current target. False when that does not reproduce its frame: a
+    /// GL adoption's frame is host-side, a held (test-mode HOLD) slot stays
+    /// unshown as `release` promises, a surface that never presented has
+    /// nothing to show, and an accumulator's slot is patchwork (#56) --
+    /// composed anyway, as the structural pre-fill always did, but owed a
+    /// redraw.
+    fn restore_surface(&mut self, n: usize) -> bool {
+        if self.gl_adoption(n).is_some() {
+            return false;
+        }
+        let (slot, w, h, patchwork) = match self.surf(n) {
+            Some(s) if s.held.is_none() => match (s.shown_slot, &s.weave) {
+                (Some(sl), Some(_)) => (sl, s.w, s.h, s.patchwork),
+                _ => return false,
+            },
+            _ => return false,
+        };
+        let _ = self.blit_composed_pixels(n, slot, 0, 0, w, h, None);
+        !patchwork
+    }
+
+    /// The effect region for a card at `rect` -- the whole display -- or
+    /// `Rect::ZERO` where section 10's effects are not painted (the legacy
+    /// profile).
     fn menu_fx_for(&self, rect: Rect) -> Rect {
         if self.bundle.profile != libhalcyon::instrument::Profile::Instrument {
             return Rect::ZERO;
         }
-        let ipx = |v: i32| libhalcyon::scale::ipx(v, self.scale).max(0);
-        pane::menu_effect_region(
-            rect,
-            ipx(libhalcyon::instrument::effects::CARD_SHADOW_DY),
-            ipx(libhalcyon::instrument::effects::CARD_SHADOW_BLUR) as u32,
-            self.gpu.width,
-            self.gpu.height,
-        )
+        pane::menu_effect_region(rect, self.gpu.width, self.gpu.height)
     }
 
     /// Paint section 10's modal backdrop and the one card shadow into the
@@ -5797,8 +5882,15 @@ impl Comp {
     /// because `screen_push` is the very thing that suppresses this region.
     ///
     /// Paint order is the list's order: the backdrop's blur of the scene,
-    /// its tint over the blurred result, then the shadow. The card itself
-    /// arrives on top through `menu_reassert` as before.
+    /// its tint over the blurred result, then the shadow. The card is then
+    /// copied back over its own rect (a moved card keeps its pixels; a new
+    /// one has none yet and arrives with its owner's first present).
+    ///
+    /// The effects BLEND, so they are only ever laid over a scene rebuilt
+    /// from retained state just before: on a move the buffer still holds the
+    /// previous placement's effects, and on the GPU composed path it holds
+    /// no client pixels at all. Painted over either, a second darkening or a
+    /// stale scene would reach the display.
     fn menu_paint_effects(&mut self) {
         let Some(m) = self.menu else { return };
         let instrument = self.bundle.profile == libhalcyon::instrument::Profile::Instrument;
@@ -5808,6 +5900,10 @@ impl Comp {
         if self.screen.is_none() {
             return;
         }
+        // The surfaces this cannot reproduce stay as the ground under the
+        // backdrop; their redraws would be suppressed while the card stands
+        // anyway, and the dismiss asks them then.
+        let _ = self.scene_restore();
         let mut cart = cartoon::Cartoon::new();
         cart.ops.push(cartoon::Op::Blur {
             x: e.region.x as i32,
@@ -5834,6 +5930,7 @@ impl Comp {
             radius: e.shadow_radius,
         });
         self.paint_cartoon(&cart, e.region);
+        self.menu_reassert(e.region);
         self.screen_push_raw(e.region);
     }
 
@@ -5854,7 +5951,7 @@ impl Comp {
             // unplace + heal here so the grab can never outlive the surface.
             self.menu = None;
             self.menu_reason = "retire";
-            self.menu_heal(m.heal_rect());
+            self.menu_heal_placement(m);
         }
         true
     }
@@ -6082,17 +6179,9 @@ impl Comp {
             if self.surf(n).map_or(false, |s| s.backgrounded) {
                 continue;
             }
-            if self.gl_adoption(n).is_some() {
-                continue;
-            }
-            let (slot, w, h) = match self.surf(n) {
-                Some(s) if s.held.is_none() => match (s.shown_slot, &s.weave) {
-                    (Some(sl), Some(_)) => (sl, s.w, s.h),
-                    _ => continue,
-                },
-                _ => continue,
-            };
-            let _ = self.blit_composed_pixels(n, slot, 0, 0, w, h, None);
+            // The fan that follows every structural repaint is the redraw
+            // request, so what could not be reproduced is not tracked here.
+            let _ = self.restore_surface(n);
         }
     }
 
@@ -7125,13 +7214,31 @@ impl Comp {
             Some(s) => s.res,
             None => return,
         };
-        self.menu_reassert(Rect {
+        let disp = Rect {
             x: 0,
             y: 0,
             w: dw,
             h: dh,
-        });
-        let _ = self.gpu.transfer_then_flush(res, 0, 0, 0, dw, dh);
+        };
+        self.menu_reassert(disp);
+        // Section 10 (reversed at `c065ec06`): the scene behind a card with
+        // effects is FROZEN until the dismiss, so a structural repaint under
+        // one rebuilds the BUFFER -- its fan's redraws land there too -- and
+        // uploads only the card; `menu_restore` uploads the rest. NOT while
+        // entering Composed: the display is not yet showing this resource,
+        // so it must go up whole before the bind.
+        match self.menu {
+            Some(m) if !m.fx.is_empty() && self.scanout == Scanout::Composed => {
+                for piece in pane::menu_push_allowed(disp, m.fx, m.rect) {
+                    if !piece.is_empty() {
+                        self.screen_push_raw(piece);
+                    }
+                }
+            }
+            _ => {
+                let _ = self.gpu.transfer_then_flush(res, 0, 0, 0, dw, dh);
+            }
+        }
     }
 
     /// Reconcile scanout + chrome with the layout (run after every layout
@@ -8240,6 +8347,12 @@ impl Comp {
             if !self.actor_owns_subtree(actor, target) {
                 return Err(p9::E_PERM);
             }
+            // HALCYON-INSTRUMENT 6.1 (2026-09-16): a stacking that would make a
+            // container a stack member is not a shape the tree admits -- the
+            // request is invalid, not too big (the minima's E_NOMEM).
+            if self.layout.stacking_refused(slot, mode) {
+                return Err(p9::E_INVAL);
+            }
             // 5.2 (I-6): a mode that would overflow the minima (a wide row
             // turned into a column) is refused on a copy, as `move`.
             if !self.layout.fits_after(|l| l.set_mode(slot, mode)) {
@@ -8285,12 +8398,12 @@ impl Comp {
         // owner's verb, Esc, click-away, a chord, ctl `destroy`, the conn's
         // death, a WEDGE): unplace first so no routing or target names it
         // while it goes, heal the screen under it at the tail.
-        let menu_heal: Option<Rect> = match self.menu {
+        let menu_heal: Option<MenuState> = match self.menu {
             Some(m) if m.n == n => {
                 self.menu = None;
                 say!("tapestryd: menu {} dismissed ({})", n, self.menu_reason);
                 self.menu_reason = "retire";
-                Some(m.heal_rect())
+                Some(m)
             }
             _ => None,
         };
@@ -8413,8 +8526,8 @@ impl Comp {
         // byte patterns mid-line (it split `/home/michael` in the panes
         // post-battery assert). The error/edge prints above stay.
         let _ = s.presents;
-        if let Some(r) = menu_heal {
-            self.menu_heal(r);
+        if let Some(m) = menu_heal {
+            self.menu_heal_placement(m);
         }
     }
 
@@ -9447,6 +9560,36 @@ impl Comp {
         }
     }
 
+    /// Split leaf `f` in `mode` for a chord (Super+H / Super+V / Super+N),
+    /// stamping the new leaf's owner and reconciling. The caller has judged
+    /// the minima.
+    ///
+    /// The new empty leaf must record the owner of the leaf being split (its
+    /// hosted surface's principal), so a SESSION that splits its own tile can
+    /// later mint the placement claim on the new leaf (HALCYON.md 13.7). The
+    /// client `split` verb (pane_cmd) already stamps this; the chord path must
+    /// match, else a session-driven split yields an environment-owned (0)
+    /// leaf its own compositor cannot claim -- KT-1.5d-3.
+    fn chord_split(&mut self, f: usize, mode: Mode) {
+        let owner = self
+            .layout
+            .leaf_surface(f)
+            .and_then(|n| self.surf(n))
+            .map(|s| s.owner_principal)
+            .unwrap_or_else(|| self.layout.pane_owner_principal(f));
+        // The field's vocabulary is "0 = the environment's": a system
+        // surface's sentinel principal never lands on a leaf.
+        let owner = if principal_is_session(owner) {
+            owner
+        } else {
+            0
+        };
+        if let Some(new_leaf) = self.layout.split(f, mode) {
+            self.layout.set_owner_principal(new_leaf, owner);
+            self.reconcile();
+        }
+    }
+
     /// Perform one resolved chord action against the layout (the old
     /// hardcoded arms, now keyed by ChordAction). A structural change
     /// reconciles; a no-op (edge/degenerate) does not.
@@ -9533,30 +9676,27 @@ impl Comp {
                     return;
                 }
                 self.layout.unzoom();
-                // The new empty leaf must record the owner of the leaf being
-                // split (its hosted surface's principal), so a SESSION that
-                // Super+H-splits its own tile can later mint the placement
-                // claim on the new leaf (HALCYON.md 13.7). The client `split`
-                // verb (pane_cmd) already stamps this; the chord path must
-                // match, else a session-driven split yields an environment-
-                // owned (0) leaf its own compositor cannot claim -- KT-1.5d-3.
-                let owner = self
-                    .layout
-                    .leaf_surface(f)
-                    .and_then(|n| self.surf(n))
-                    .map(|s| s.owner_principal)
-                    .unwrap_or_else(|| self.layout.pane_owner_principal(f));
-                // The field's vocabulary is "0 = the environment's": a system
-                // surface's sentinel principal never lands on a leaf.
-                let owner = if principal_is_session(owner) {
-                    owner
-                } else {
-                    0
-                };
-                if let Some(new_leaf) = self.layout.split(f, mode) {
-                    self.layout.set_owner_principal(new_leaf, owner);
-                    self.reconcile();
+                self.chord_split(f, mode);
+            }
+            ChordAction::NewTile => {
+                // HALCYON-INSTRUMENT 6.1 (2026-09-16): Super+N -- a new tile
+                // in the focused pane, joining its stack or making a lone
+                // tile a stack of two. The session fills the empty leaf with
+                // a shell exactly as it fills a split's.
+                let f = self.layout.focused;
+                if !self.layout.is_leaf(f) {
+                    return;
                 }
+                let mode = self.layout.new_tile_mode(f);
+                if !self.layout.split_fits(f, mode) {
+                    say!(
+                        "tapestryd: chord new-tile refused: the minima (pane {})",
+                        self.layout.id_of(f).unwrap_or(0)
+                    );
+                    return;
+                }
+                self.layout.unzoom();
+                self.chord_split(f, mode);
             }
             ChordAction::Zoom => {
                 let f = self.layout.focused;
@@ -9566,6 +9706,16 @@ impl Comp {
             }
             ChordAction::SetMode(mode) => {
                 let f = self.layout.focused;
+                // HALCYON-INSTRUMENT 6.1 (2026-09-16): a stack's members are
+                // tiles, so stacking a group that holds a split is refused --
+                // said here, because `set_mode` refuses it silently.
+                if self.layout.stacking_refused(f, mode) {
+                    say!(
+                        "tapestryd: chord mode refused: a stack holds only tiles (pane {})",
+                        self.layout.id_of(f).unwrap_or(0)
+                    );
+                    return;
+                }
                 if !self.layout.fits_after(|l| l.set_mode(f, mode)) {
                     say!(
                         "tapestryd: chord mode refused: the minima (pane {})",

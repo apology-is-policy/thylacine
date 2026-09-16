@@ -1023,6 +1023,24 @@ pub struct ResolvedBundle {
     pub inherited: Vec<String>,
 }
 
+/// The profile the two tiers select -- the user's word, else the system's,
+/// else legacy -- with the tier it came from and the label ("user",
+/// "system") of each word before it that was not a profile. The first step
+/// of `resolve_bundle`, alone, for a caller that needs only the profile:
+/// `halcyon layout restore` lays a saved stack's container members flat
+/// under Instrument (HALCYON-INSTRUMENT 6.1).
+pub fn resolve_profile(user: Option<&str>, system: Option<&str>) -> (Profile, Tier, Vec<&'static str>) {
+    let mut refused: Vec<&'static str> = Vec::new();
+    for (word, tier, label) in [(user, Tier::User, "user"), (system, Tier::System, "system")] {
+        let Some(w) = word else { continue };
+        match Profile::parse(w) {
+            Some(p) => return (p, tier, refused),
+            None => refused.push(label),
+        }
+    }
+    (Profile::Legacy, Tier::BuiltIn, refused)
+}
+
 /// Resolve a session's bundle (HALCYON-INSTRUMENT 4.1). The profile: the
 /// user's word, then the system's, then `legacy` (until the rollout flips
 /// the floor, 12). The theme: the picker's gallery choice, then the user's
@@ -1031,25 +1049,11 @@ pub struct ResolvedBundle {
 /// other schema is projected, never refused.
 pub fn resolve_bundle(src: Sources<'_>) -> ResolvedBundle {
     let mut notes: Vec<String> = Vec::new();
-    let mut profile = Profile::Legacy;
-    let mut profile_tier = Tier::BuiltIn;
-    for (word, tier, label) in [
-        (src.user_profile, Tier::User, "user"),
-        (src.system_profile, Tier::System, "system"),
-    ] {
-        let Some(w) = word else { continue };
-        match Profile::parse(w) {
-            Some(p) => {
-                profile = p;
-                profile_tier = tier;
-                break;
-            }
-            None => {
-                let mut n = String::new();
-                let _ = write!(n, "theme: {label} profile REFUSED -- not `legacy` or `instrument`");
-                notes.push(n);
-            }
-        }
+    let (profile, profile_tier, refused) = resolve_profile(src.user_profile, src.system_profile);
+    for label in refused {
+        let mut n = String::new();
+        let _ = write!(n, "theme: {label} profile REFUSED -- not `legacy` or `instrument`");
+        notes.push(n);
     }
 
     // The pick is a WORD naming a gallery file. A word that is not an id is
@@ -1118,6 +1122,19 @@ pub fn resolve_bundle(src: Sources<'_>) -> ResolvedBundle {
 
 #[cfg(test)]
 mod tests {
+    /// The profile alone resolves exactly as `resolve_bundle`'s first step:
+    /// the user's word wins, a word that is not a profile is skipped and
+    /// named, and nothing at all is legacy from the built-in tier.
+    #[test]
+    fn the_profile_resolves_user_over_system_skipping_a_bad_word() {
+        use super::{resolve_profile, Profile, Tier};
+        assert_eq!(resolve_profile(None, None), (Profile::Legacy, Tier::BuiltIn, alloc::vec![]));
+        assert_eq!(resolve_profile(None, Some("instrument")), (Profile::Instrument, Tier::System, alloc::vec![]));
+        assert_eq!(resolve_profile(Some("legacy"), Some("instrument")), (Profile::Legacy, Tier::User, alloc::vec![]));
+        assert_eq!(resolve_profile(Some("bogus"), Some("instrument")), (Profile::Instrument, Tier::System, alloc::vec!["user"]));
+        assert_eq!(resolve_profile(Some("bogus"), Some("nope")), (Profile::Legacy, Tier::BuiltIn, alloc::vec!["user", "system"]));
+    }
+
     /// Section 10: the effect literals are LITERALS, and the proof is that
     /// each differs from the token a painter would otherwise reach for.
     /// This is the assertion whose absence let the status glow ship

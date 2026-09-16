@@ -283,43 +283,30 @@ pub fn track_glow(rule: Rect, dragged: bool, instrument: bool, pct: u16) -> Opti
 }
 
 /// HALCYON-INSTRUMENT 10: the display region a placed menu card's EFFECTS
-/// cover -- the card united with its drop shadow's reach, clamped to the
-/// display.
+/// cover -- the WHOLE DISPLAY, as the kit's `dialog::backdrop` does
+/// (section 10 as reversed at `c065ec06`, operator-answered).
 ///
-/// Kept SEPARATE from `MenuState.rect`, and that separation is the whole
+/// It was the card united with its drop shadow's reach until that
+/// reversal, and the reach is why it had to go: the shadow's requested
+/// blur is `CARD_SHADOW_BLUR` scaled (about 200 px on a 2x display), the
+/// region was darkened uniformly at `BACKDROP_ALPHA`, and the scene outside
+/// it was untouched -- a hard-edged dark RECTANGLE by construction. A
+/// region that covers everything has no edge to see. The card's shadow is
+/// still painted, inside this region, by the executor's clamped glow.
+///
+/// Kept SEPARATE from `MenuState.rect`, and that separation is still the
 /// point. `rect` is what the surface IS: `menu_reassert` maps screen pixels
 /// into the weave by `inter.x - rect.x`, `surface_target` places the card
 /// there, and the click-away test asks whether the pointer sits inside it.
-/// Widening `rect` to cover the effects would read outside the weave,
-/// misplace the card, and make a click on the SHADOW count as a click on
-/// the card. One field for what is painted, one for what the surface is.
+/// One field for what is painted, one for what the surface is.
 ///
-/// `radius` is the REQUESTED blur, not the clamped one. The executor only
-/// ever clamps down (`cartoon::GLOW_RADIUS_MAX`), so this region is always a
-/// superset of what is actually painted -- and the asymmetry is deliberate:
-/// over-healing costs work, while under-healing leaves a ring of un-healed
-/// backdrop on screen after the card is dismissed.
-///
-/// All arithmetic in i64: `Rect` is u32, and a card near the origin grown by
-/// a radius would otherwise wrap to a near-infinite rect instead of failing.
-pub fn menu_effect_region(card: Rect, dy: i32, radius: u32, disp_w: u32, disp_h: u32) -> Rect {
+/// `Rect::ZERO` for a degenerate card or display, so a caller can never be
+/// handed a region with nothing under it.
+pub fn menu_effect_region(card: Rect, disp_w: u32, disp_h: u32) -> Rect {
     if card.w == 0 || card.h == 0 || disp_w == 0 || disp_h == 0 {
         return Rect::ZERO;
     }
-    let (r, d) = (radius as i64, dy as i64);
-    let (cx0, cy0) = (card.x as i64, card.y as i64);
-    let (cx1, cy1) = (cx0 + card.w as i64, cy0 + card.h as i64);
-    // The shadow is the card offset by `dy` and spread by `radius`.
-    let (sx0, sy0) = (cx0 - r, cy0 + d - r);
-    let (sx1, sy1) = (cx1 + r, cy1 + d + r);
-    let x0 = cx0.min(sx0).max(0);
-    let y0 = cy0.min(sy0).max(0);
-    let x1 = cx1.max(sx1).min(disp_w as i64);
-    let y1 = cy1.max(sy1).min(disp_h as i64);
-    if x1 <= x0 || y1 <= y0 {
-        return Rect::ZERO;
-    }
-    Rect { x: x0 as u32, y: y0 as u32, w: (x1 - x0) as u32, h: (y1 - y0) as u32 }
+    Rect { x: 0, y: 0, w: disp_w, h: disp_h }
 }
 
 /// The four bands of `outer` around `inner` (top, bottom, left, right;
@@ -353,7 +340,10 @@ pub fn bars_around(outer: Rect, inner: Rect) -> [Rect; 4] {
 
 /// HALCYON-INSTRUMENT 10: the parts of screen write `r` that may still be
 /// PUSHED to the display while a menu card stands at `card` with its effect
-/// region `fx`.
+/// region `fx`. Since the full-viewport reversal `fx` is the whole display,
+/// so the answer is the card's intersection alone: the scene behind a modal
+/// is FROZEN until the dismiss rebuilds it. The function stays general in
+/// `fx` -- nothing here depends on the region's extent.
 ///
 /// The effects are painted ONCE, when the menu is placed (section 10 as
 /// amended at `b62a761b`), and this is what keeps them there. An effect
@@ -372,8 +362,8 @@ pub fn bars_around(outer: Rect, inner: Rect) -> [Rect; 4] {
 /// scheme safe rather than merely cheap: `menu_reassert` copies the card
 /// over it opaquely, so any effect applied twice underneath is provably
 /// invisible. Five rects, empties included; `card` is inside `fx` by
-/// construction (`menu_effect_region` unions the card with its shadow), so
-/// they never overlap.
+/// construction (`menu_effect_region` is the display the card was clamped
+/// into), so they never overlap.
 pub fn menu_push_allowed(r: Rect, fx: Rect, card: Rect) -> [Rect; 5] {
     let hidden = r.intersect(fx);
     if hidden.is_empty() {
@@ -400,10 +390,11 @@ pub fn menu_push_allowed(r: Rect, fx: Rect, card: Rect) -> [Rect; 5] {
 // No `Eq`: the struct carries `Rect`s, and `Rect` is `PartialEq` only.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MenuEffects {
-    /// The bounded region every effect is clipped to -- NOT the display.
-    /// A display-wide scrim would force a display-sized heal on every
-    /// dismiss, which is the whole-screen flash `menu_heal` exists to
-    /// prevent (section 10's extent, operator-ratified).
+    /// The region every effect is clipped to: the whole display (section
+    /// 10 as reversed at `c065ec06`). The display-sized heal that costs is
+    /// paid once, at dismiss, by rebuilding the scene from what every
+    /// surface last presented -- not per frame, and not by a repaint that
+    /// waits on clients.
     pub region: Rect,
     pub backdrop_color: u32,
     pub backdrop_alpha: u8,
@@ -1319,10 +1310,15 @@ impl Layout {
     /// Split leaf `slot`: same-mode parents FLATTEN (sibling insert),
     /// different-mode ones NEST. Returns the NEW empty leaf's slot; focus
     /// moves to it (the auto-host target).
+    ///
+    /// Under the Instrument profile the node split is `split_target`'s --
+    /// a stacked leaf's split-mode split acts on its STACK (HALCYON-INSTRUMENT
+    /// 6.1, 2026-09-16) -- so no caller can nest a container inside one.
     pub fn split(&mut self, slot: usize, mode: Mode) -> Option<usize> {
         if !self.is_leaf(slot) {
             return None;
         }
+        let slot = self.split_target(slot, mode)?;
         let parent = self.get(slot)?.parent;
         if let Some(pi) = parent {
             let same = matches!(self.get(pi)?.kind,
@@ -1355,8 +1351,9 @@ impl Layout {
                 return Some(new_leaf);
             }
         }
-        // Nest: the leaf's position becomes a container [leaf, new-leaf].
-        // The container stands where the leaf stood, so it takes the leaf's
+        // Nest: the node's position becomes a container [node, new-leaf] --
+        // the node a leaf, or under Instrument a whole stack.
+        // The container stands where the node stood, so it takes the node's
         // weight in the parent; inside it the two halve (equal defaults).
         let leaf_weight = self.get(slot)?.weight;
         let container = self.alloc(
@@ -1403,6 +1400,88 @@ impl Layout {
         }
         self.epoch += 1;
         Some(new_leaf)
+    }
+
+    /// HALCYON-INSTRUMENT 6.1 (2026-09-16): the node a split of leaf `slot`
+    /// in `mode` acts on. Under the Instrument profile a stack's members are
+    /// TILES, so a split never nests inside a `Stacked` or `Tabbed`
+    /// container:
+    ///
+    /// - a split mode (`SplitH` / `SplitV`) on a tile of one acts on the
+    ///   STACK -- the new pane lands beside it, as the kit's `splitFocused`
+    ///   replaces the whole pane;
+    /// - the stack's OWN mode joins it (a flatten, the new tile);
+    /// - the other stack-like mode could only build a container inside the
+    ///   stack, so there is no target (`None`).
+    ///
+    /// The walk climbs while the parent is stack-like, so even a tree that
+    /// already holds a stack inside a stack (built under legacy, before the
+    /// rule) is split beside its outermost one rather than deeper into it.
+    /// The leaf itself under legacy, and for a leaf whose parent is a split.
+    pub fn split_target(&self, slot: usize, mode: Mode) -> Option<usize> {
+        if self.profile != Profile::Instrument {
+            return Some(slot);
+        }
+        let mut t = slot;
+        loop {
+            let Some(pi) = self.get(t).and_then(|p| p.parent) else {
+                return Some(t);
+            };
+            match self.get(pi).map(|p| &p.kind) {
+                Some(Kind::Container {
+                    mode: pm @ (Mode::Stacked | Mode::Tabbed),
+                    ..
+                }) => {
+                    if *pm == mode {
+                        return if self.is_leaf(t) { Some(t) } else { None };
+                    }
+                    if !matches!(mode, Mode::SplitH | Mode::SplitV) {
+                        return None;
+                    }
+                    t = pi;
+                }
+                _ => return Some(t),
+            }
+        }
+    }
+
+    /// The mode of `slot`'s parent when that parent is a stack (`Stacked` or
+    /// `Tabbed`) -- the container a new tile beside `slot` joins.
+    pub fn stack_parent_mode(&self, slot: usize) -> Option<Mode> {
+        let pi = self.get(slot)?.parent?;
+        match self.get(pi).map(|p| &p.kind) {
+            Some(Kind::Container {
+                mode: m @ (Mode::Stacked | Mode::Tabbed),
+                ..
+            }) => Some(*m),
+            _ => None,
+        }
+    }
+
+    /// HALCYON-INSTRUMENT 6.1 (Super+N, 2026-09-16): the mode a NEW TILE
+    /// beside leaf `slot` is split in -- its stack's own mode when `slot` is
+    /// a tile of one, so the newcomer joins it; else `Stacked`, so a lone
+    /// tile becomes a stack of two.
+    pub fn new_tile_mode(&self, slot: usize) -> Mode {
+        self.stack_parent_mode(slot).unwrap_or(Mode::Stacked)
+    }
+
+    /// HALCYON-INSTRUMENT 6.1 (2026-09-16): is a `mode` on `slot` refused
+    /// because it would make a CONTAINER a stack member? Under the Instrument
+    /// profile a stack-like mode on a target holding a container child is --
+    /// the refusal `Super+S`, `Super+Shift+T` and the `mode` verb all meet,
+    /// through `set_mode`. False under legacy and for the split modes.
+    pub fn stacking_refused(&self, slot: usize, mode: Mode) -> bool {
+        if self.profile != Profile::Instrument || !matches!(mode, Mode::Stacked | Mode::Tabbed) {
+            return false;
+        }
+        let Some(t) = self.mode_target(slot) else {
+            return false;
+        };
+        match self.get(t).map(|p| &p.kind) {
+            Some(Kind::Container { children, .. }) => children.iter().any(|&c| !self.is_leaf(c)),
+            _ => false,
+        }
     }
 
     /// The mean of `container`'s children's weights, round half up, at
@@ -1484,17 +1563,29 @@ impl Layout {
         } else {
             Mode::SplitV
         };
-        // HALCYON-INSTRUMENT 5.2: the minima hold on every growth. When the
-        // aspect split would leave a pane below them, the new tile joins the
-        // focused leaf's STACK instead (a same-mode split flattens into an
-        // existing stack; a fresh one nests) -- the mockup's own answer to a
-        // full pane; and when even that will not fit, the host is refused
-        // like a full pane table.
-        if self.profile == Profile::Instrument && !self.split_fits(f, mode) {
-            if self.split_fits(f, Mode::Stacked) {
-                mode = Mode::Stacked;
-            } else {
-                return None;
+        if self.profile == Profile::Instrument {
+            if let Some(pm) = self.stack_parent_mode(f) {
+                // HALCYON-INSTRUMENT 6.1 (2026-09-16): a window opened from a
+                // stacked tile JOINS THE STACK as a new tile. An aspect split
+                // here would nest a split inside the stack slot -- the blank
+                // header and vanishing tiles the operator hit with tyr-quake.
+                // A join that will not fit is refused like a full pane table.
+                if !self.split_fits(f, pm) {
+                    return None;
+                }
+                mode = pm;
+            } else if !self.split_fits(f, mode) {
+                // HALCYON-INSTRUMENT 5.2: the minima hold on every growth.
+                // When the aspect split would leave a pane below them, the
+                // new tile joins the focused leaf's STACK instead (a fresh
+                // stack of two nests here) -- the mockup's own answer to a
+                // full pane; and when even that will not fit, the host is
+                // refused like a full pane table.
+                if self.split_fits(f, Mode::Stacked) {
+                    mode = Mode::Stacked;
+                } else {
+                    return None;
+                }
             }
         }
         let leaf = self.split(f, mode)?;
@@ -1841,8 +1932,13 @@ impl Layout {
     }
 
     /// Set a container's mode (a leaf targets its parent container --
-    /// the i3 shape). False = no container to act on.
+    /// the i3 shape). False = no container to act on, or (Instrument) a
+    /// stacking that would make a container a stack member
+    /// (`stacking_refused`).
     pub fn set_mode(&mut self, slot: usize, mode: Mode) -> bool {
+        if self.stacking_refused(slot, mode) {
+            return false;
+        }
         let target = self.mode_target(slot);
         match target {
             Some(t) => {
@@ -2754,6 +2850,18 @@ impl Layout {
                 Some((l, mode)) if l == slot => nested(mode),
                 _ => leaf_min,
             },
+            // HALCYON-INSTRUMENT 6.1: the hypothetical split's node is a
+            // whole STACK (`split_target`), nested beside a new leaf. Only a
+            // split mode reaches here -- a stack-like split of a container
+            // has no target -- so the container's own minimum sits beside a
+            // leaf's along the axis.
+            Some(Kind::Container { .. }) if is_hyp(slot) => {
+                let own = self.min_size_hyp(slot, None);
+                match hyp {
+                    Some((_, Mode::SplitV)) => (own.0.max(leaf_min.0), own.1.saturating_add(t).saturating_add(leaf_min.1)),
+                    _ => (own.0.saturating_add(t).saturating_add(leaf_min.0), own.1.max(leaf_min.1)),
+                }
+            }
             Some(Kind::Container { mode, children, .. }) => {
                 let eff: Vec<usize> = {
                     let fg: Vec<usize> = children
@@ -2772,11 +2880,12 @@ impl Layout {
                         let horizontal = *mode == Mode::SplitH;
                         let mut parts: Vec<(u32, u32)> = Vec::with_capacity(eff.len() + 1);
                         for &c in &eff {
-                            // The hypothetical leaf under a same-mode split
-                            // flattens: one more leaf beside it.
+                            // The hypothetical node under a same-mode split
+                            // flattens: one more leaf beside it. The node is
+                            // a leaf, or under Instrument a whole stack.
                             let flat = matches!(hyp, Some((l, hm)) if l == c && hm == *mode);
                             if flat {
-                                parts.push(leaf_min);
+                                parts.push(self.min_size_hyp(c, None));
                                 parts.push(leaf_min);
                             } else {
                                 parts.push(self.min_size_hyp(c, hyp));
@@ -2847,11 +2956,17 @@ impl Layout {
     /// HALCYON-INSTRUMENT 5.2: would splitting leaf `slot` in `mode` keep
     /// every minimum inside the workspace? Judged on the tree as it WOULD
     /// be, before anything changes, so a refusal leaves the tree untouched.
-    /// Always true under legacy.
+    /// Judged on the node `split` actually splits (`split_target`: a
+    /// stacked leaf's stack), or a check and its mutation would disagree
+    /// about which node grows. True when there is no target -- `split`
+    /// answers that with its own refusal. Always true under legacy.
     pub fn split_fits(&self, slot: usize, mode: Mode) -> bool {
         if self.profile != Profile::Instrument || !self.is_leaf(slot) {
             return true;
         }
+        let Some(slot) = self.split_target(slot, mode) else {
+            return true;
+        };
         let pad = self.metrics.outer_pad.max(0) as u32;
         let root = inset(self.area, pad);
         // F8: from the SLOT'S OWN root. `self.root()` is the ACTIVE root, so
@@ -3568,46 +3683,34 @@ mod tests {
     use super::*;
     use alloc::vec;
 
-    /// The effect region covers the card AND its shadow's reach, and never
-    /// less than the card: a region short of the card would leave the card's
-    /// own pixels unhealed.
+    /// The effect region is the whole display wherever the card stands --
+    /// centred, at the origin, against the far corner. The ring it replaced
+    /// was the card grown by the shadow's reach, and its edge was the
+    /// defect; a display-sized region has none.
     #[test]
-    fn the_effect_region_covers_the_card_and_its_shadow() {
-        let card = Rect { x: 400, y: 200, w: 480, h: 300 };
-        let g = menu_effect_region(card, 24, 32, 1280, 800);
-        assert_eq!(g.x, 368, "the card's left less the radius");
-        assert_eq!(g.y, 192, "dy 24 is LESS than radius 32, so the blur reaches 8 px above the card");
-        assert_eq!(g.x + g.w, 912, "right plus the radius");
-        assert_eq!(g.y + g.h, 556, "bottom plus dy plus the radius");
-        assert!(g.x <= card.x && g.y <= card.y, "never inside the card");
-        assert!(g.x + g.w >= card.x + card.w && g.y + g.h >= card.y + card.h);
+    fn the_effect_region_is_the_whole_display() {
+        let disp = Rect { x: 0, y: 0, w: 1280, h: 800 };
+        for card in [
+            Rect { x: 400, y: 200, w: 480, h: 300 },
+            Rect { x: 0, y: 0, w: 100, h: 80 },
+            Rect { x: 1200, y: 760, w: 80, h: 40 },
+        ] {
+            let g = menu_effect_region(card, 1280, 800);
+            assert_eq!(g, disp, "card {:?}", card);
+            assert_eq!(g.intersect(card), card, "the card is inside its region");
+        }
+        // Absolute, not relative to the card: a region derived from the
+        // card (the old ring) would move with it.
+        assert_eq!(menu_effect_region(Rect { x: 9, y: 9, w: 9, h: 9 }, 2560, 1664), Rect { x: 0, y: 0, w: 2560, h: 1664 });
     }
 
-    /// A card at the origin: the grow would underflow u32, so the
-    /// arithmetic is i64 and the region clamps at 0 instead of wrapping to
-    /// a near-infinite rect that would heal the whole display.
-    #[test]
-    fn a_card_at_the_origin_does_not_underflow() {
-        let g = menu_effect_region(Rect { x: 0, y: 0, w: 100, h: 80 }, 24, 32, 1280, 800);
-        assert_eq!((g.x, g.y), (0, 0));
-        assert_eq!(g.x + g.w, 132);
-        assert_eq!(g.y + g.h, 136, "80 + 24 + 32");
-    }
-
-    /// And a card against the far edge clamps to the display rather than
-    /// describing a region off-screen.
-    #[test]
-    fn the_effect_region_clamps_to_the_display() {
-        let g = menu_effect_region(Rect { x: 1200, y: 760, w: 80, h: 40 }, 24, 32, 1280, 800);
-        assert_eq!(g.x + g.w, 1280, "clamped at the display's right");
-        assert_eq!(g.y + g.h, 800, "clamped at the display's bottom");
-    }
-
-    /// Degenerate inputs yield nothing to heal rather than a wrapped rect.
+    /// Degenerate inputs yield nothing to paint or heal.
     #[test]
     fn a_degenerate_card_has_no_effect_region() {
-        assert_eq!(menu_effect_region(Rect { x: 10, y: 10, w: 0, h: 40 }, 24, 32, 1280, 800), Rect::ZERO);
-        assert_eq!(menu_effect_region(Rect { x: 10, y: 10, w: 40, h: 40 }, 24, 32, 0, 800), Rect::ZERO);
+        assert_eq!(menu_effect_region(Rect { x: 10, y: 10, w: 0, h: 40 }, 1280, 800), Rect::ZERO);
+        assert_eq!(menu_effect_region(Rect { x: 10, y: 10, w: 40, h: 40 }, 0, 800), Rect::ZERO);
+        assert_eq!(menu_effect_region(Rect { x: 10, y: 10, w: 40, h: 40 }, 1280, 0), Rect::ZERO);
+        assert_ne!(menu_effect_region(Rect { x: 10, y: 10, w: 40, h: 40 }, 1280, 800), Rect::ZERO, "the control");
     }
 
     /// `bars_around` subtracts: the four bands must tile `outer` minus
@@ -3642,19 +3745,39 @@ mod tests {
         assert!(full.iter().all(|r| r.is_empty()), "a hole the size of outer leaves nothing");
     }
 
-    /// The card's own rect stays pushable while the ring around it is
-    /// suppressed -- the property that lets the effects be painted once and
-    /// stay. A blend is not idempotent the way the card's opaque copy is.
+    /// While a card stands, only the card's own rect is pushed: the scene
+    /// behind the modal is frozen, which is what lets the effects be painted
+    /// once and stay. A blend is not idempotent the way the card's opaque
+    /// copy is.
     #[test]
-    fn the_effect_ring_is_suppressed_but_the_card_is_not() {
+    fn while_a_card_stands_only_the_card_is_pushed() {
         let card = Rect { x: 400, y: 200, w: 480, h: 300 };
-        let fx = menu_effect_region(card, 24, 32, 1280, 800);
-        let allowed = menu_push_allowed(Rect { x: 0, y: 0, w: 1280, h: 800 }, fx, card);
+        let fx = menu_effect_region(card, 1280, 800);
+        let whole = Rect { x: 0, y: 0, w: 1280, h: 800 };
+        let allowed = menu_push_allowed(whole, fx, card);
         let covers = |x: u32, y: u32| allowed.iter().any(|r| !r.is_empty() && r.contains(x, y));
         assert!(covers(402, 202), "the card itself is still pushed");
-        assert!(!covers(fx.x + 1, fx.y + 1), "the ring is suppressed");
-        assert!(covers(10, 10), "the scene outside the region is untouched");
-        // Disjoint, or a pixel would be uploaded twice.
+        assert!(!covers(10, 10), "the scene far from the card is frozen");
+        assert!(!covers(398, 202), "and so is the pixel just outside it");
+        let area: u32 = allowed.iter().map(|r| r.w * r.h).sum();
+        assert_eq!(area, card.w * card.h, "exactly the card, nothing else");
+        // A write that misses the card uploads nothing at all.
+        let off = menu_push_allowed(Rect { x: 0, y: 0, w: 50, h: 50 }, fx, card);
+        assert!(off.iter().all(|r| r.is_empty()), "{:?}", off);
+    }
+
+    /// The function is general in `fx`: with a region SMALLER than the
+    /// write, the parts outside it are admitted, the card is admitted, and
+    /// no two pieces overlap -- or a pixel would be uploaded twice.
+    #[test]
+    fn push_admission_is_general_in_the_region() {
+        let card = Rect { x: 400, y: 200, w: 480, h: 300 };
+        let fx = Rect { x: 300, y: 150, w: 700, h: 450 };
+        let allowed = menu_push_allowed(Rect { x: 0, y: 0, w: 1280, h: 800 }, fx, card);
+        let covers = |x: u32, y: u32| allowed.iter().any(|r| !r.is_empty() && r.contains(x, y));
+        assert!(covers(402, 202), "the card");
+        assert!(!covers(fx.x + 1, fx.y + 1), "the region around the card");
+        assert!(covers(10, 10), "outside the region");
         for (i, p) in allowed.iter().enumerate() {
             for (j, q) in allowed.iter().enumerate() {
                 if i < j && !p.is_empty() && !q.is_empty() {
@@ -3680,7 +3803,7 @@ mod tests {
     #[test]
     fn the_menu_effects_are_section_tens_literals() {
         let card = Rect { x: 100, y: 100, w: 200, h: 150 };
-        let fx = menu_effect_region(card, 24, 32, 1280, 800);
+        let fx = menu_effect_region(card, 1280, 800);
         let e = menu_effects(card, fx, true, 100).expect("instrument, non-degenerate");
         assert_eq!(e.backdrop_color, 0xFF03_0404, "rgb(3,4,4), not a ground token");
         assert_eq!(e.backdrop_alpha, 184, ".72");
@@ -3698,7 +3821,7 @@ mod tests {
     #[test]
     fn the_menu_effects_scale_with_the_display() {
         let card = Rect { x: 100, y: 100, w: 200, h: 150 };
-        let fx = menu_effect_region(card, 48, 64, 2560, 1600);
+        let fx = menu_effect_region(card, 2560, 1600);
         let e = menu_effects(card, fx, true, 200).expect("instrument");
         assert_eq!(e.backdrop_radius, 6, "3 doubled");
         assert_eq!(e.shadow_radius, 160, "80 doubled, still clamped at paint");
@@ -3710,7 +3833,7 @@ mod tests {
     #[test]
     fn menu_effects_are_instrument_only_and_refuse_degenerates() {
         let card = Rect { x: 100, y: 100, w: 200, h: 150 };
-        let fx = menu_effect_region(card, 24, 32, 1280, 800);
+        let fx = menu_effect_region(card, 1280, 800);
         assert!(menu_effects(card, fx, false, 100).is_none(), "legacy has no backdrop");
         assert!(menu_effects(Rect::ZERO, fx, true, 100).is_none(), "no card");
         assert!(menu_effects(card, Rect::ZERO, true, 100).is_none(), "no region");
@@ -4497,6 +4620,223 @@ mod tests {
         assert_eq!(l.host(3), None, "a third tile would need 2 + 96 + 1 + 54 = 153 > 144: refused");
         assert_eq!((l.epoch, l.live_ids().len()), (e, n), "and the tree is untouched");
     }
+    // ---- HALCYON-INSTRUMENT 6.1 (2026-09-16): a stack's members are TILES ---
+
+    fn kids(l: &Layout, slot: usize) -> alloc::vec::Vec<usize> {
+        match l.get(slot).map(|p| &p.kind) {
+            Some(Kind::Container { children, .. }) => children.clone(),
+            _ => alloc::vec::Vec::new(),
+        }
+    }
+
+    /// Section 6.2 invariant 9, as a walk over every live pane.
+    fn stack_members_are_leaves(l: &Layout) -> bool {
+        l.live_ids().iter().all(|&(slot, _)| match l.get(slot).map(|p| &p.kind) {
+            Some(Kind::Container {
+                mode: Mode::Stacked | Mode::Tabbed,
+                children,
+                ..
+            }) => children.iter().all(|&c| l.is_leaf(c)),
+            _ => true,
+        })
+    }
+
+    /// [a | (b / c)] with the right column stacked, every leaf hosted and b
+    /// focused -- the shape the operator ran tyr-quake from.
+    fn stacked_right(profile: Profile) -> (Layout, usize, usize, usize) {
+        let area = r(0, 34, 1440, 832);
+        let mut l = Layout::new();
+        l.recompute(area, 1, inst100(), profile);
+        let a = l.root();
+        let b = l.split(a, Mode::SplitH).unwrap();
+        let c = l.split(b, Mode::SplitV).unwrap();
+        assert!(l.set_mode(b, Mode::Stacked));
+        assert_eq!(l.host_into(1, a), Some(a));
+        assert_eq!(l.host_into(2, b), Some(b));
+        assert_eq!(l.host_into(3, c), Some(c));
+        assert!(l.focus(b));
+        l.recompute(area, 1, inst100(), profile);
+        (l, a, b, c)
+    }
+
+    /// The kit's split acts on the PANE: Super+H / Super+V on a stacked tile
+    /// put the new pane beside the WHOLE stack, flattening into the stack's
+    /// parent when the modes agree and nesting the stack otherwise.
+    #[test]
+    fn a_split_on_a_stacked_tile_splits_the_whole_stack() {
+        let (mut l, a, b, c) = stacked_right(Profile::Instrument);
+        let stack = parent(&l, b);
+        let root = l.root();
+        assert_eq!(parent(&l, stack), root);
+        let d = l.split(b, Mode::SplitH).unwrap();
+        assert_eq!(parent(&l, d), root, "beside the stack, in the root's own row");
+        assert_eq!(kids(&l, root), vec![a, stack, d], "right after the stack");
+        assert_eq!(kids(&l, stack), vec![b, c], "the stack itself is untouched");
+        assert_eq!(l.focused, d, "the new pane takes focus");
+        let e = l.split(c, Mode::SplitV).unwrap();
+        let col = parent(&l, e);
+        assert!(matches!(l.get(col).unwrap().kind, Kind::Container { mode: Mode::SplitV, .. }));
+        assert_eq!(kids(&l, col), vec![stack, e], "the whole stack above, the new pane below");
+        assert_eq!(parent(&l, col), root);
+        assert_eq!(kids(&l, stack), vec![b, c]);
+        assert!(stack_members_are_leaves(&l));
+        // A stack that IS the root splits into a new root.
+        let mut l = Layout::new();
+        l.recompute(r(0, 34, 1440, 832), 1, inst100(), Profile::Instrument);
+        let a = l.root();
+        let b = l.split(a, Mode::Stacked).unwrap();
+        let stack = l.root();
+        let c = l.split(b, Mode::SplitH).unwrap();
+        let top = l.root();
+        assert_ne!(top, stack, "a new root");
+        assert_eq!(kids(&l, top), vec![stack, c]);
+        assert_eq!(kids(&l, stack), vec![a, b]);
+        assert!(stack_members_are_leaves(&l));
+    }
+
+    /// A window opened from a stacked tile JOINS the stack (c065ec06): the
+    /// host lands in the same stack, right after the focused tile, and open.
+    /// Legacy keeps its i3 aspect split -- which is exactly the nest the
+    /// operator saw, so the control is also the defect.
+    #[test]
+    fn a_window_from_a_stacked_tile_joins_the_stack() {
+        let (mut l, _, b, c) = stacked_right(Profile::Instrument);
+        let stack = parent(&l, b);
+        let d = l.host(4).expect("the join fits");
+        assert_eq!(parent(&l, d), stack);
+        assert_eq!(kids(&l, stack), vec![b, d, c]);
+        assert_eq!(l.leaf_surface(d), Some(4));
+        assert_eq!(l.focused, d);
+        assert!(stack_members_are_leaves(&l));
+        let (mut g, _, b, _) = stacked_right(Profile::Legacy);
+        let stack = parent(&g, b);
+        let d = g.host(4).unwrap();
+        assert_ne!(parent(&g, d), stack, "legacy nests beside the tile");
+        assert!(!stack_members_are_leaves(&g), "and the walk sees the container member");
+    }
+
+    /// The one path left to the shape once splits and windows no longer nest
+    /// (operator-answered 2026-09-16): stacking a parent that holds a split.
+    /// From the welcome layout with its right pane split, Super+S on the LEFT
+    /// tile is refused; on a right-hand tile it stacks the right side.
+    #[test]
+    fn stacking_a_group_that_holds_a_split_is_refused() {
+        let area = r(0, 34, 1440, 832);
+        let mut l = Layout::new();
+        l.recompute(area, 1, inst100(), Profile::Instrument);
+        let left = l.root();
+        let r1 = l.split(left, Mode::SplitH).unwrap();
+        let r2 = l.split(r1, Mode::SplitV).unwrap();
+        let root = l.root();
+        let e = l.epoch;
+        for m in [Mode::Stacked, Mode::Tabbed] {
+            assert!(l.stacking_refused(left, m), "{}", m.name());
+            assert!(!l.set_mode(left, m), "{}", m.name());
+        }
+        assert_eq!(l.epoch, e, "refused: nothing moved");
+        assert!(matches!(l.get(root).unwrap().kind, Kind::Container { mode: Mode::SplitH, .. }));
+        assert!(!l.stacking_refused(left, Mode::SplitV), "a split mode is not a stacking");
+        assert!(!l.stacking_refused(r1, Mode::Stacked), "r1's parent holds only tiles");
+        assert!(l.set_mode(r1, Mode::Stacked));
+        assert_eq!(parent(&l, r1), parent(&l, r2));
+        assert!(matches!(l.get(parent(&l, r1)).unwrap().kind, Kind::Container { mode: Mode::Stacked, .. }));
+        // Legacy keeps the i3 tree: not refused there.
+        let mut g = Layout::new();
+        g.recompute(area, 1, inst100(), Profile::Legacy);
+        let left = g.root();
+        let r1 = g.split(left, Mode::SplitH).unwrap();
+        let _ = g.split(r1, Mode::SplitV).unwrap();
+        assert!(!g.stacking_refused(left, Mode::Stacked));
+        assert!(g.set_mode(left, Mode::Stacked));
+    }
+
+    /// Super+N: a tile of a stack gets a newcomer in its own stack's mode, a
+    /// lone tile (or a split's) a fresh stack of two.
+    #[test]
+    fn a_new_tile_joins_its_stack_or_makes_one() {
+        let (mut l, a, b, c) = stacked_right(Profile::Instrument);
+        assert!(l.new_tile_mode(a) == Mode::Stacked, "a tile of a split");
+        assert!(l.new_tile_mode(b) == Mode::Stacked, "a tile of a stack");
+        let stack = parent(&l, b);
+        let d = l.split(c, l.new_tile_mode(c)).unwrap();
+        assert_eq!(kids(&l, stack), vec![b, c, d], "joined, after the focused tile");
+        let e = l.split(a, l.new_tile_mode(a)).unwrap();
+        let fresh = parent(&l, e);
+        assert_eq!(kids(&l, fresh), vec![a, e], "a stack of two where the lone tile stood");
+        assert!(matches!(l.get(fresh).unwrap().kind, Kind::Container { mode: Mode::Stacked, .. }));
+        assert!(l.set_mode(e, Mode::Tabbed));
+        assert!(l.new_tile_mode(e) == Mode::Tabbed, "a tabbed parent joins with ITS mode");
+        assert!(stack_members_are_leaves(&l));
+    }
+
+    /// Section 6.2 invariant 9, ATTEMPTED: every way the tree grows at a
+    /// stacked tile, each on a fresh tree, and the walk after each. The
+    /// growth itself is asserted too -- a mutation that did nothing would
+    /// satisfy the walk trivially.
+    #[test]
+    fn no_mutation_builds_a_container_inside_a_stack() {
+        type Attempt = fn(&mut Layout, usize, usize) -> bool;
+        let attempts: [(&str, Attempt, bool); 8] = [
+            ("split h", |l, _, b| l.split(b, Mode::SplitH).is_some(), true),
+            ("split v", |l, _, b| l.split(b, Mode::SplitV).is_some(), true),
+            ("split stacked", |l, _, b| l.split(b, Mode::Stacked).is_some(), true),
+            ("split tabbed", |l, _, b| l.split(b, Mode::Tabbed).is_some(), false),
+            ("host", |l, _, _| l.host(9).is_some(), true),
+            ("new tile", |l, _, b| {
+                let m = l.new_tile_mode(b);
+                l.split(b, m).is_some()
+            }, true),
+            ("move", |l, _, b| l.move_dir(b, Dir::Left), true),
+            ("stack the root", |l, a, _| l.set_mode(a, Mode::Stacked), false),
+        ];
+        for (what, go, grows) in attempts {
+            let (mut l, a, b, _) = stacked_right(Profile::Instrument);
+            let e = l.epoch;
+            assert_eq!(go(&mut l, a, b), grows, "{}", what);
+            assert_eq!(l.epoch != e, grows, "{}: the tree changed iff the attempt succeeded", what);
+            assert!(stack_members_are_leaves(&l), "{}: a container inside a stack", what);
+        }
+        // The control, one variable away: the same split under legacy DOES
+        // nest, so the walk can fail and the profile rule is what prevents it.
+        let (mut g, _, b, _) = stacked_right(Profile::Legacy);
+        assert!(g.split(b, Mode::SplitH).is_some());
+        assert!(!stack_members_are_leaves(&g));
+    }
+
+    /// The minima are judged on the node the split actually splits. A root
+    /// stack of three is 2 + 3 x 32 + 1 + 54 = 153 tall; Super+V on a tile of
+    /// it nests [stack / new] at 153 + 7 + 88 = 248 -- not the leaf-level
+    /// nest the check would otherwise judge (2 + 96 + 1 + (88 + 7 + 88) =
+    /// 282). And [a / stack(b, c)] split V at a stacked tile flattens a
+    /// THIRD row beside the stack, whose own 121 counts -- not a tile's 88:
+    /// 88 + 121 + 88 + 2 x 7 = 311 tall (a tile's minimum there would say
+    /// 278). Width cannot pin that base: a stack is as narrow as a tile.
+    #[test]
+    fn a_split_on_a_stack_is_judged_on_the_stack() {
+        for (h, fits) in [(248u32, true), (247, false)] {
+            let area = r(0, 34, 600, h + 6);
+            let mut l = Layout::new();
+            l.recompute(area, 1, inst100(), Profile::Instrument);
+            let b = l.root();
+            let c = l.split(b, Mode::Stacked).unwrap();
+            let _ = l.split(c, Mode::Stacked).unwrap();
+            l.recompute(area, 1, inst100(), Profile::Instrument);
+            assert_eq!(l.min_size().1, 153, "h={}", h);
+            assert_eq!(l.split_fits(c, Mode::SplitV), fits, "h={}", h);
+        }
+        for (h, fits) in [(311u32, true), (310, false)] {
+            let area = r(0, 34, 600, h + 6);
+            let mut l = Layout::new();
+            l.recompute(area, 1, inst100(), Profile::Instrument);
+            let a = l.root();
+            let b = l.split(a, Mode::SplitV).unwrap();
+            let _ = l.split(b, Mode::Stacked).unwrap();
+            l.recompute(area, 1, inst100(), Profile::Instrument);
+            assert_eq!(l.min_size().1, 88 + 7 + 121, "h={}", h);
+            assert_eq!(l.split_fits(b, Mode::SplitV), fits, "h={}", h);
+        }
+    }
+
     /// HALCYON-INSTRUMENT 14.6 + 6.4 (I-3): a lone EMPTY leaf is the N = 0
     /// pane -- no header row, its `tagbar` the whole interior (the placard's
     /// surface) and its body ZERO; hosted, it is a stack of one again. The

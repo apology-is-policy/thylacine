@@ -270,6 +270,91 @@ pub fn prune_env(node: &LayoutNode) -> Option<LayoutNode> {
     }
 }
 
+/// HALCYON-INSTRUMENT 6.1 (2026-09-16): lay every stack's CONTAINER members
+/// flat. Under the Instrument profile a stack's members are tiles, and a
+/// saved layout that already holds a container inside a `Stacked` or
+/// `Tabbed` one -- saved before the rule, or edited by hand -- could not be
+/// rebuilt: the compositor splits beside a stack, never inside it. So each
+/// such member is replaced, in place, by its own leaves in order, and every
+/// tile survives (the kit: an already-loaded layout "must retain data ...
+/// not delete tiles"); only the nested arrangement is lost, and it was never
+/// renderable.
+///
+/// A member that was the stack's ACTIVE child hands the stack its own
+/// active-path leaf, so the tile that was open stays open. A laid-flat
+/// leaf takes the default weight -- a stack divides nothing. Split
+/// containers, and stacks whose members are already leaves, are unchanged.
+pub fn flatten_stack_members(node: &LayoutNode) -> LayoutNode {
+    match node {
+        LayoutNode::Leaf { .. } => node.clone(),
+        LayoutNode::Container {
+            mode,
+            active,
+            children,
+            weight,
+        } => {
+            let kids: Vec<LayoutNode> = children.iter().map(flatten_stack_members).collect();
+            if !matches!(mode, LayoutMode::Stacked | LayoutMode::Tabbed) {
+                return LayoutNode::Container {
+                    mode: *mode,
+                    active: *active,
+                    children: kids,
+                    weight: *weight,
+                };
+            }
+            let mut flat: Vec<LayoutNode> = Vec::new();
+            let mut new_active = 0u32;
+            for (i, c) in kids.iter().enumerate() {
+                if i as u32 == *active {
+                    new_active = (flat.len() + active_leaf_offset(c)) as u32;
+                }
+                match c {
+                    LayoutNode::Leaf { .. } => flat.push(c.clone()),
+                    LayoutNode::Container { .. } => push_leaves(c, &mut flat),
+                }
+            }
+            LayoutNode::Container {
+                mode: *mode,
+                active: new_active,
+                children: flat,
+                weight: *weight,
+            }
+        }
+    }
+}
+
+/// Every leaf under `node`, in order, at the default weight.
+fn push_leaves(node: &LayoutNode, out: &mut Vec<LayoutNode>) {
+    match node {
+        LayoutNode::Leaf { .. } => out.push(node.clone().with_weight(DEFAULT_WEIGHT)),
+        LayoutNode::Container { children, .. } => {
+            for c in children {
+                push_leaves(c, out);
+            }
+        }
+    }
+}
+
+/// The index, among `node`'s leaves in order, of the leaf on its active
+/// path (0 for a leaf).
+fn active_leaf_offset(node: &LayoutNode) -> usize {
+    match node {
+        LayoutNode::Leaf { .. } => 0,
+        LayoutNode::Container { active, children, .. } => {
+            let a = (*active as usize).min(children.len().saturating_sub(1));
+            let before: usize = children.iter().take(a).map(leaf_count).sum();
+            before + children.get(a).map_or(0, active_leaf_offset)
+        }
+    }
+}
+
+fn leaf_count(node: &LayoutNode) -> usize {
+    match node {
+        LayoutNode::Leaf { .. } => 1,
+        LayoutNode::Container { children, .. } => children.iter().map(leaf_count).sum(),
+    }
+}
+
 impl LayoutNode {
     fn with_weight(mut self, w: u16) -> LayoutNode {
         match &mut self {
@@ -715,6 +800,78 @@ mod tests {
         assert!(s.starts_with("halcyon-layout v1\n"), "header: {:?}", s);
         let back = parse(&s).expect("parse own output");
         assert_eq!(&back, n, "round-trip\n---\n{}\n---", s);
+    }
+
+    /// HALCYON-INSTRUMENT 6.1: a stack's container member is laid flat in
+    /// place -- its tiles, in order -- and the open tile stays open: here the
+    /// member was active and its own active leaf is `c`.
+    #[test]
+    fn a_stacks_container_member_is_laid_flat_and_keeps_the_open_tile() {
+        let saved = cont(
+            LayoutMode::Stacked,
+            1,
+            vec![leaf("a"), w(cont(LayoutMode::SplitH, 1, vec![leaf("b"), w(leaf("c"), 700)]), 300), leaf("d")],
+        );
+        let flat = flatten_stack_members(&saved);
+        assert_eq!(
+            flat,
+            cont(LayoutMode::Stacked, 2, vec![leaf("a"), leaf("b"), leaf("c"), leaf("d")]),
+            "every tile, in order, the open one still open, split weights dropped"
+        );
+    }
+
+    /// Depth: a stack inside a split inside a stack, and a tabbed parent,
+    /// all come out as tiles; the split containers OUTSIDE any stack keep
+    /// their shape and their weights.
+    #[test]
+    fn flattening_reaches_every_depth_and_leaves_splits_alone() {
+        let saved = w(
+            cont(
+                LayoutMode::SplitV,
+                0,
+                vec![
+                    w(leaf("top"), 250),
+                    cont(
+                        LayoutMode::Tabbed,
+                        0,
+                        vec![
+                            cont(LayoutMode::SplitH, 0, vec![leaf("x"), cont(LayoutMode::Stacked, 1, vec![leaf("y"), leaf("z")])]),
+                            leaf("q"),
+                        ],
+                    ),
+                ],
+            ),
+            900,
+        );
+        let flat = flatten_stack_members(&saved);
+        let want = w(
+            cont(
+                LayoutMode::SplitV,
+                0,
+                vec![
+                    w(leaf("top"), 250),
+                    cont(LayoutMode::Tabbed, 0, vec![leaf("x"), leaf("y"), leaf("z"), leaf("q")]),
+                ],
+            ),
+            900,
+        );
+        assert_eq!(flat, want);
+    }
+
+    /// The control: a tree that holds no container member is returned
+    /// EQUAL, so the pass is safe to run on every restore.
+    #[test]
+    fn a_tree_without_container_members_is_unchanged() {
+        let saved = w(
+            cont(
+                LayoutMode::SplitH,
+                1,
+                vec![w(leaf("a"), 400), cont(LayoutMode::Stacked, 1, vec![leaf("b"), w(leaf("c"), 7)])],
+            ),
+            3,
+        );
+        assert_eq!(flatten_stack_members(&saved), saved);
+        assert_eq!(flatten_stack_members(&leaf("solo")), leaf("solo"));
     }
 
     #[test]

@@ -93,6 +93,7 @@ const ACTION_ROWS: &[(&str, &str)] = &[
     ("split-h", "Split the focused pane horizontally"),
     ("split-v", "Split the focused pane vertically"),
     ("split-toggle", "Flip the split's orientation"),
+    ("new-tile", "Open a new tile in the focused pane"),
     ("zoom", "Zoom the focused tile to the workspace"),
     ("tab", "Show the stack as tabs"),
     ("stack", "Show the stack's headers"),

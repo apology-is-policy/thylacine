@@ -391,6 +391,18 @@ fn print_lint(r: &LintReport) -> i64 {
     }
 }
 
+/// The profile this seat resolves (HALCYON-INSTRUMENT 4.1): the user's word,
+/// then the system's, then legacy -- the same two tiers the session reads at
+/// start. `Err` when a tier exists but could not be read (`read_theme` has
+/// said why).
+fn seat_profile(home: &str) -> core::result::Result<instrument::Profile, ()> {
+    let system = read_theme(instrument::SYSTEM_PROFILE_PATH)?;
+    let mut user_path = String::from(home);
+    user_path.push_str(instrument::USER_PROFILE_REL);
+    let user = read_theme(&user_path)?;
+    Ok(instrument::resolve_profile(user.as_deref(), system.as_deref()).0)
+}
+
 /// Read a theme file. `Ok(None)` = it is not there, which for a TIER is the
 /// default installation (HALCYON-THEME 4.1). Every other failure is reported
 /// here and returns `Err(())`.
@@ -897,6 +909,15 @@ fn layout_restore(name: &str) -> i64 {
             );
             return 0;
         }
+    };
+    // HALCYON-INSTRUMENT 6.1 (2026-09-16): under Instrument a stack's members
+    // are tiles and the compositor splits BESIDE a stack, never inside one,
+    // so a saved container member could not be rebuilt -- the build would
+    // diverge at its first split. Laid flat first, every tile restored.
+    let tree = match seat_profile(&home) {
+        Ok(instrument::Profile::Instrument) => layout::flatten_stack_members(&tree),
+        Ok(instrument::Profile::Legacy) => tree,
+        Err(()) => return 1,
     };
 
     let tap = match Tap::open() {

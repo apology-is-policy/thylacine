@@ -44,6 +44,11 @@ pub enum ChordAction {
     Workspace(u8),
     /// Move the focused tile to workspace n, ownership-preserving.
     MoveToWorkspace(u8),
+    /// HALCYON-INSTRUMENT 6.1 (2026-09-16): a new empty tile in the focused
+    /// pane -- joining its stack, or making a lone tile a stack of two -- for
+    /// the session to fill with a shell. The kit has no such control (its
+    /// tiles are fixtures); Super+N is Halcyon's.
+    NewTile,
 }
 
 #[derive(Clone, Copy)]
@@ -87,6 +92,7 @@ const KEY_SLASH: u16 = 53;
 const KEY_S: u16 = 31;
 const KEY_F: u16 = 33;
 const KEY_H: u16 = 35;
+const KEY_N: u16 = 49;
 const KEY_V: u16 = 47;
 const KEY_UP: u16 = 103;
 const KEY_LEFT: u16 = 105;
@@ -225,6 +231,7 @@ pub fn action_name(a: ChordAction) -> &'static str {
         ChordAction::ScaleStep(s) if s > 0 => "scale-up",
         ChordAction::ScaleStep(_) => "scale-down",
         ChordAction::ScaleReset => "scale-reset",
+        ChordAction::NewTile => "new-tile",
         // n is 1..=9 BY CONSTRUCTION (see the variant's doc). The clamp is
         // there because `u8` is not, and is unreachable; a table keeps this
         // direction and `action_of` from drifting as 18 arms would.
@@ -283,6 +290,7 @@ fn action_of(name: &str) -> Option<Option<ChordAction>> {
         "scale-up" => ChordAction::ScaleStep(1),
         "scale-down" => ChordAction::ScaleStep(-1),
         "scale-reset" => ChordAction::ScaleReset,
+        "new-tile" => ChordAction::NewTile,
         "none" => return Some(None), // the unbind token
         // HALCYON-WORKSPACES 4: `workspace-1`..`-9` and `move-to-1`..`-9`,
         // PARSED rather than listed, so this direction and `action_name`
@@ -327,6 +335,7 @@ impl Chords {
                 d(KEY_T, false, Picker),
                 d(KEY_T, true, SetMode(Mode::Tabbed)),
                 d(KEY_S, false, SetMode(Mode::Stacked)),
+                d(KEY_N, false, NewTile),
                 d(KEY_SLASH, false, Help),
                 d(KEY_E, false, SplitToggle),
                 d(KEY_TAB, false, TabCycle(true)),
@@ -512,6 +521,11 @@ mod tests {
         assert!(matches!(c.lookup(KEY_T, false), Some(ChordAction::Picker)));
         assert!(matches!(c.lookup(KEY_T, true), Some(ChordAction::SetMode(Mode::Tabbed))));
         assert!(matches!(c.lookup(KEY_SLASH, false), Some(ChordAction::Help)));
+        // HALCYON-INSTRUMENT 6.1 (2026-09-16): Super+N opens a new tile.
+        assert!(matches!(c.lookup(KEY_N, false), Some(ChordAction::NewTile)));
+        assert!(matches!(action_of("new-tile"), Some(Some(ChordAction::NewTile))));
+        assert_eq!(action_name(ChordAction::NewTile), "new-tile");
+        assert_eq!(key_code("n"), Some(KEY_N));
         assert!(matches!(action_of("picker"), Some(Some(ChordAction::Picker))));
         assert!(matches!(action_of("help"), Some(Some(ChordAction::Help))));
         assert_eq!(key_code("slash"), Some(KEY_SLASH));
@@ -589,6 +603,7 @@ mod tests {
         assert!(text.contains("super+shift+t tab\n"));
         assert!(text.contains("super+slash help\n"));
         assert!(text.contains("super+equal scale-up\n"));
+        assert!(text.contains("super+n new-tile\n"));
         assert!(text.contains("super+1 workspace-1\n"));
         assert!(text.contains("super+shift+9 move-to-9\n"));
         // DERIVED, not a literal: this pinned 22 by hand and went stale the

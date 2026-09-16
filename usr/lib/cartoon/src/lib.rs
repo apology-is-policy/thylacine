@@ -543,13 +543,23 @@ impl Exec<'_> {
 /// whose contract is "always produces a validly-clamped frame" must not be
 /// able to fail.
 ///
-/// Slot `k % (r + 1)` is rewritten at step `k + r + 1`, which is strictly
-/// past every step that still needs it (a window at `i` reaches back only
-/// to `i - r`), so the ring cannot be clobbered under its own reader.
+/// A RUNNING window, so a pixel costs the same at any radius: the sums gain
+/// the value entering at `i + r` (still original: it is ahead of the
+/// cursor) and lose the one leaving at `i - 1 - r` (already overwritten, so
+/// it comes from the ring). Summing every tap per pixel cost 4-6x at the
+/// modal backdrop's full-display extent (a 2560x1664 field on the host at
+/// the release profile: 144 ms against 32 ms at radius 6, 182 against 29 at
+/// radius 8), and the output is identical — the window, its clipped edges
+/// and the floor division are the same.
+///
+/// The leaving value sits in slot `(i - 1 - r) % (r + 1)`, which is `i %
+/// (r + 1)`: exactly the slot step `i` is about to overwrite. So it is read
+/// BEFORE the write, and no slot is clobbered under a reader that still
+/// needs it (a window at `i` reaches back only to `i - r`).
 ///
 /// Channels are summed independently in u32: at most `2 * GLOW_RADIUS_MAX
 /// + 1` == 65 taps of one byte each is 16575 per channel, nowhere near
-/// overflow.
+/// overflow, and every subtraction removes a value the same sum gained.
 fn blur_line(px: &mut [u32], base: usize, stride: usize, n: usize, r: usize) {
     // The cap is applied HERE, the one place it is structurally REQUIRED:
     // `keep` is sized from it, so a larger radius would index past the ring
@@ -562,18 +572,32 @@ fn blur_line(px: &mut [u32], base: usize, stride: usize, n: usize, r: usize) {
     }
     let m = r + 1;
     let mut keep = [0u32; GLOW_RADIUS_MAX as usize + 1];
+    let (mut sa, mut sr, mut sg, mut sb) = (0u32, 0u32, 0u32, 0u32);
+    for k in 0..=r.min(n - 1) {
+        let p = px[base + k * stride];
+        sa += p >> 24;
+        sr += (p >> 16) & 0xFF;
+        sg += (p >> 8) & 0xFF;
+        sb += p & 0xFF;
+    }
     for i in 0..n {
-        keep[i % m] = px[base + i * stride];
-        let lo = i.saturating_sub(r);
-        let hi = (i + r).min(n - 1);
-        let (mut sa, mut sr, mut sg, mut sb) = (0u32, 0u32, 0u32, 0u32);
-        for k in lo..=hi {
-            let p = if k < i { keep[k % m] } else { px[base + k * stride] };
+        if i > r {
+            let p = keep[i % m];
+            sa -= p >> 24;
+            sr -= (p >> 16) & 0xFF;
+            sg -= (p >> 8) & 0xFF;
+            sb -= p & 0xFF;
+        }
+        if i > 0 && i + r < n {
+            let p = px[base + (i + r) * stride];
             sa += p >> 24;
             sr += (p >> 16) & 0xFF;
             sg += (p >> 8) & 0xFF;
             sb += p & 0xFF;
         }
+        keep[i % m] = px[base + i * stride];
+        let lo = i.saturating_sub(r);
+        let hi = (i + r).min(n - 1);
         let c = (hi - lo + 1) as u32;
         px[base + i * stride] =
             ((sa / c) << 24) | ((sr / c) << 16) | ((sg / c) << 8) | (sb / c);
@@ -1123,6 +1147,72 @@ mod tests {
         let mut c2 = Cartoon::new();
         c2.ops.push(Op::Blur { x: i32::MIN, y: i32::MIN, w: u32::MAX, h: u32::MAX, radius: 32 });
         execute(&c2, &empty_atlas(), &BlobStore::new(), &mut px2, 4, None);
+    }
+
+    /// The per-tap sum `blur_line` replaced, kept VERBATIM as the oracle:
+    /// the running window is only a faster way to compute these values, so
+    /// the two must agree on every pixel, not merely look alike.
+    fn reference_blur_line(px: &mut [u32], base: usize, stride: usize, n: usize, r: usize) {
+        let r = r.min(GLOW_RADIUS_MAX as usize);
+        if n == 0 || r == 0 {
+            return;
+        }
+        let m = r + 1;
+        let mut keep = [0u32; GLOW_RADIUS_MAX as usize + 1];
+        for i in 0..n {
+            keep[i % m] = px[base + i * stride];
+            let lo = i.saturating_sub(r);
+            let hi = (i + r).min(n - 1);
+            let (mut sa, mut sr, mut sg, mut sb) = (0u32, 0u32, 0u32, 0u32);
+            for k in lo..=hi {
+                let p = if k < i { keep[k % m] } else { px[base + k * stride] };
+                sa += p >> 24;
+                sr += (p >> 16) & 0xFF;
+                sg += (p >> 8) & 0xFF;
+                sb += p & 0xFF;
+            }
+            let c = (hi - lo + 1) as u32;
+            px[base + i * stride] =
+                ((sa / c) << 24) | ((sr / c) << 16) | ((sg / c) << 8) | (sb / c);
+        }
+    }
+
+    #[test]
+    fn the_running_window_matches_the_per_tap_sum_everywhere() {
+        // Random fields over every shape class the window has: n below,
+        // at and above 2r + 1 (all-edge, one interior pixel, a long
+        // interior), radii past the cap, stride > 1 (the column pass) and a
+        // non-zero base. A deterministic xorshift, so a failure replays.
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut cases = 0;
+        for n in [0usize, 1, 2, 3, 4, 7, 8, 13, 64, 65, 66, 129] {
+            for r in [0usize, 1, 2, 3, 6, 31, 32, 33, 4000] {
+                for stride in [1usize, 3] {
+                    let base = 5;
+                    let len = base + n * stride + 2;
+                    let field: alloc::vec::Vec<u32> = (0..len).map(|_| rnd() as u32).collect();
+                    let mut want = field.clone();
+                    reference_blur_line(&mut want, base, stride, n, r);
+                    let mut got = field.clone();
+                    blur_line(&mut got, base, stride, n, r);
+                    assert_eq!(got, want, "n={} r={} stride={}", n, r, stride);
+                    cases += 1;
+                }
+            }
+        }
+        assert_eq!(cases, 12 * 9 * 2);
+        // The control: the comparison must be able to fail. A field the
+        // blur moves differs from its own input.
+        let field: alloc::vec::Vec<u32> = (0..40).map(|_| rnd() as u32).collect();
+        let mut moved = field.clone();
+        blur_line(&mut moved, 0, 1, 40, 2);
+        assert_ne!(moved, field, "the blur must move a random field");
     }
 
     #[test]
