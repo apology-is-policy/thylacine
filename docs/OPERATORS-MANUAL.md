@@ -30,7 +30,19 @@ The source is installed in the operating system under `/manual` and read with th
 
 ## Sections
 
-No section is installed yet. Containers is the first section to be written to the guide, once the reader exists.
+No section is installed yet. The first sections, in the order they are being written:
+
+1. Utopia: the shell language, with examples; the native utilities; and how familiar `sh` syntax is written in Utopia.
+2. Imperium.
+3. Vivarium.
+4. Containers.
+5. Alpine: each of its utilities in a subsection with an example, its `sh`, and a note on `git`.
+6. Haul.
+7. View.
+8. Gallery.
+9. The bundled games, Quake, GLQuake, VkQuake, and DOSBox-X, with how to launch and configure each.
+
+The writing order is not the book order; each section is numbered by the rule above.
 
 Three pages written before the guide are kept as drafts in `docs/manual-drafts/`, which is neither checked nor installed. A draft returns to `docs/manual/` when it has been rewritten to the guide and passes `manual --check`.
 
@@ -56,3 +68,4 @@ A section is added when the facility it describes has settled, so sections appea
 | 2026-09-05 | Revived; added the `/manual` plan and the first chapter (`40-dosbox.md`). | Operator decision; supersedes the 2026-05-31 deferral to v1.0-rc. |
 | 2026-09-16 | Renamed to `docs/OPERATORS-MANUAL.md`; the writing guide adopted and the earlier page template withdrawn; the reader and `/manual` installation to be built before further sections. | Operator decisions. |
 | 2026-09-16 | `docs/MANUAL-DESIGN.md` adopted (source format, the `manual` reader, installation); the three earlier pages moved to `docs/manual-drafts/`. | Operator sign-off: nothing is installed until it is written to the guide. |
+| 2026-09-16 | The first sections and their writing order set, starting with Utopia; Containers remains a section of its own. | Operator decision. |

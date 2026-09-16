@@ -24,7 +24,8 @@ Decisions this document builds on:
 | 2026-09-05 | Markdown source in the repo, installed at `/manual`, rendered through Beacon with a plain-text fallback | `876888cf`, `docs/JOURNAL.md` |
 | 2026-09-16 | The writing guide is binding; the index is `docs/OPERATORS-MANUAL.md` | `53b91177` |
 | 2026-09-16 | Build the reader and the `/manual` installation before writing more sections | this document |
-| 2026-09-16 | Containers is the first section written to the guide | `docs/OPERATORS-MANUAL.md` |
+| 2026-09-16 | Containers is the first section written to the guide. Superseded the same day: Utopia is written first, and Containers remains a section of its own | `docs/OPERATORS-MANUAL.md` |
+| 2026-09-16 | Character references and bidirectional controls are rejected, and a table cell holds at most 256 characters | sections 3.1 to 3.3 and 4.4 |
 | 2026-09-16 | The reader is named `manual`; the three earlier pages move to `docs/manual-drafts/` and nothing is installed until a section is written to the guide | this document, section 10 |
 
 This document fixes five things: the accepted Markdown subset (section 3), its
@@ -72,7 +73,10 @@ enough to test exhaustively; the format checker is part of the reader.
   hyphens, and is what a reader types to open the section. Operating-system topics
   are numbered below 40; ported applications start at 40.
 - A section is UTF-8 with LF line endings and no byte-order mark. It contains no
-  control characters other than LF, except TAB inside code blocks.
+  control characters other than LF, except TAB inside code blocks. It also contains
+  none of the bidirectional embedding, override, and isolate controls (U+202A to
+  U+202E and U+2066 to U+2069), which make text display in an order other than the
+  order in which it is stored.
 - A section is at most 1 MiB.
 - Every section file in `docs/manual/` must pass the check (section 8.1), and every
   such file is installed (section 6). The directory holds nothing else except
@@ -94,7 +98,7 @@ or the end of the file.
 | Bulleted list | Items begin `- ` | No blank line between items; continuation lines are indented by two spaces; no nesting. |
 | Numbered list | Items begin `1. `, `2. `, … | Numbers run from 1 without gaps; continuation lines are indented to the item text; no nesting. |
 | Code block | A line of exactly three backticks, optionally followed by one word containing no backtick, then content, then a line of three backticks | Content is taken verbatim; the word after the opening fence is ignored. |
-| Table | A header row, a delimiter row, then body rows | Every row begins and ends with `\|` and has the same number of cells; at most 16 columns; the delimiter cells are `---`, `:---`, `---:`, or `:---:`. |
+| Table | A header row, a delimiter row, then body rows | Every row begins and ends with `\|` and has the same number of cells; at most 16 columns; a cell's text, as displayed, is at most 256 characters; the delimiter cells are `---`, `:---`, `---:`, or `:---:`. |
 
 The checker rejects, with a diagnostic naming the line: block quotes, thematic
 breaks, setext headings (a line of `=` or `-` characters directly below a
@@ -122,6 +126,14 @@ references (`[^label]`), hard line breaks outside a code span, strikethrough
 (`~~`), and a raw `<` or `>` outside a code span. Placeholders are written in code
 spans, for example `` `<pid>` ``, which also keeps them visible when the file is
 viewed on a code host that renders HTML.
+
+The checker also rejects character references outside a code span. A character
+reference is an ampersand, then a letter followed by letters and digits, `#`
+followed by decimal digits, or `#x` or `#X` followed by hexadecimal digits, then a
+semicolon: `&amp;`, `&#38;`, `&#x26;`. A code host decodes these, while the reader
+would print them as written. A section contains the character itself, or escapes
+the ampersand (`\&amp;`) to show the reference as text. Any other ampersand is
+literal.
 
 ### 3.4 Cross-references
 
@@ -183,9 +195,10 @@ output remains suitable for `grep`. Width is counted in Unicode scalar values.
 ### 4.4 Output hygiene
 
 - Before emission, every control character in section text other than LF (and TAB
-  inside code blocks), together with DEL and U+0080 to U+009F, is replaced by
-  U+FFFD. File content therefore cannot open, close, or imitate a Beacon frame, and
-  cannot send any other terminal control sequence.
+  inside code blocks), together with DEL, U+0080 to U+009F, and the bidirectional
+  controls named in section 3.1, is replaced by U+FFFD. File content therefore
+  cannot open, close, or imitate a Beacon frame, cannot send any other terminal
+  control sequence, and cannot change the order in which text is displayed.
 - Frame arguments are drawn only from the renderer's own values (a heading level, an
   emphasis class, a table column specification of at most 16 characters). No
   section text appears in a frame argument, so no frame can exceed the caps in
@@ -194,7 +207,8 @@ output remains suitable for `grep`. Width is counted in Unicode scalar values.
   section a second time and writes the rendering as it goes, in chunks of at most
   64 KiB. At any moment it holds the section, the block being rendered, and one
   chunk of output, so no section within the size limit makes it fail for want of
-  memory, and the time it takes grows linearly with the section's size
+  memory. Table padding is bounded by the cell limit in section 3.2, so the size of
+  the output, and the time the reader takes, grow linearly with the section's size
   (section 8.1).
 
 ---
@@ -231,7 +245,7 @@ manual --check <file>...
   instead. Installed sections have already passed the check at build time
   (section 6).
 - Diagnostics are written to standard error, prefixed `manual: `. A name or path
-  repeated in a diagnostic has its control characters replaced as in section 4.4.
+  repeated in a diagnostic has the characters named in section 4.4 replaced.
 - Exit status: 0 on success; 1 when no section matches, a name is ambiguous, a file
   cannot be read or is not valid UTF-8, or a check fails; 2 on a usage error.
 
@@ -242,7 +256,9 @@ manual --check <file>...
 - `tools/build.sh`, in the pool population step, first runs `tools/manual-check`,
   the reader's checker built for the build host, over `docs/manual/`. The bake
   fails if any file other than `.gitkeep` is not named `NN-<name>.md` or fails the
-  check, and otherwise installs exactly the sections the checker listed. It creates
+  check, and otherwise installs exactly the sections the checker listed. The
+  checker's diagnostics name files with the characters of section 4.4 replaced, one
+  diagnostic per line. The bake creates
   `/manual` and writes each section to it, reading each back and comparing it with
   its source. With no sections, `/manual` is created empty.
   This follows the unconditional block that installs `/lib/halcyon/themes`; the
@@ -290,18 +306,23 @@ Run with `cd usr && cargo test -p manual --lib --no-default-features --target aa
   over-long word, and an unwrapped table and code block.
 - **Hygiene.** A section containing a forged `ESC ] 1936 ; v1 ; obj …` sequence
   renders with no frames other than those the renderer emits, counted by parsing
-  the output with beacon's parser.
+  the output with beacon's parser. A section containing each bidirectional control
+  renders each as U+FFFD, in every block and at every tier, without first passing
+  the check.
 - **Installed content.** The test fails if `docs/manual/` cannot be read, since an
   absent directory and an empty one would otherwise both pass. Every file in it
   other than `.gitkeep` must be named `NN-<name>.md`, pass the check, and render at
   both tiers. The test reports how many sections it checked.
 - **Bounds.** Sections at the 1 MiB limit that are built to be expensive (blank
-  lines, one-word paragraphs, long lists, tables and code blocks, dense inline
-  forms, a problem on every line, one long line of problems) are checked and
-  rendered at both tiers under the allocator `ThylaAllocN` uses
-  (`linked_list_allocator`), and the heap's high-water mark stays below the
-  reader's heap. The same sections, and the inline forms whose matching searches
-  ahead, are checked and rendered in time that grows linearly with their size.
+  lines, one-word paragraphs, long lists, tables and code blocks, tables whose
+  cells are as wide as section 3.2 allows, dense inline forms, a problem on every
+  line, one long line of problems) are read, checked, and rendered at both tiers as
+  the binary does it, including a read whose length is not known in advance and a
+  diagnostic formatted into a newly allocated string, under the allocator
+  `ThylaAllocN` uses (`linked_list_allocator`). The heap's high-water mark stays
+  below the reader's heap. The same sections, and the inline forms whose matching
+  searches ahead, are checked and rendered in time, and into output, that grow
+  linearly with their size.
 - **Controls.** Each hygiene and identity test is shown to fail with its mechanism
   disabled, and the commit records that result.
 
@@ -312,11 +333,13 @@ no section is installed yet (section 10), the scenario writes a small fixture
 section under `/tmp` from the shell and exercises the reader against it. It checks
 that `manual` with no sections installed says so and exits 0, that the fixture
 renders by path and prints its title, that an unknown name produces a diagnostic
-and exit status 1, that the rich tier writes an `hdr` frame when the environment's
-tier is `rich`, that `manual --check` accepts the fixture with exit status 0 and
+and exit status 1, that `manual --check` accepts the fixture with exit status 0 and
 rejects a copy containing a link with exit status 1, and that displaying that copy
-prints its diagnostic, exits 1, and writes none of its rendering. Name resolution against `/manual` is covered by the host tests
-until sections are installed, when the scenario gains a by-name case.
+prints its diagnostic, exits 1, and writes none of its rendering. The scenario does
+not drive the rich tier: the host tests fix its output byte for byte, and section
+8.3 reviews it on a Halcyon session. Name resolution against `/manual` is covered
+by the host tests until sections are installed, when the scenario gains a by-name
+case.
 
 ### 8.3 The rendered result
 
