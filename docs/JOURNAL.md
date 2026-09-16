@@ -2285,6 +2285,26 @@ documented as a GPU-path halo. Every one of the audit's F4 detach fixes
 ("detach before close, or 64 MiB leaks") had been dead code for the same
 reason the weaves leaked.
 
+The follow-up round (Fable 5.1) closed clean: 0 P0 / 0 P1 / 0 P2 / 6 P3. It
+enumerated every producer of a DMA or MMIO VMA and every stored-`va` consumer
+in the compositor (64 sites). It found no protection bypass, no accounting
+drift and no cross-object write. The six P3s are tracked for the next chunk:
+- a budget refusal on `menu place` that halcyond does not retry;
+- the window top as an unpinned copy of the stack guard base;
+- two hardenings of the churn witness;
+- the blob probe's page, which its comment says is freed;
+- per-page TLB flushes on a huge BAR detach.
+It also found a pre-existing defect outside its scope: a lazy reservation
+between 256 MiB and 1 GiB can never be detached.
+
+On thyla-pi, `prove` and `ring` verified. `composed` and `wedge-gate` were red,
+and neither verdict was trusted until measured. The base tip failed `composed`
+identically, and its 16 composition probes read byte-equal to the change's, so
+the 08-17 colour literal is what rotted. `wedge-gate` compiles its probe with
+`/clade/bin/clang`, which a `ci` image does not carry, and reports the missing
+tool as a wedge. Both are enqueued, and the push went ahead on that measured
+basis rather than on an all-green claim.
+
 ## Run 46o (2026-09-14, Fable 5.1 max) -- the Halcyon Instrument arc opens: reading the Carbon Optics kit against the tree
 
 ### What this run was for
