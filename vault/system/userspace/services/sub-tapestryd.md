@@ -1203,6 +1203,58 @@ DISCRIMINATING witness is therefore halcyond's side: `motion 1 forwarded`
 prints only on `Ok(())`, so it reports that the gate admitted the verb and the
 parse accepted it -- a missing gate conjunct says `refused E_PERM` instead.
 
+## What a compositor-side TRANSITION would need, surveyed (2026-09-16, ahead of I-8c-3b / I-8c-4)
+
+Four of section 10's five transitions are the compositor's, and all four want
+the same mechanism, which does not exist yet. Surveyed before opening the
+chunk so the next one starts from facts rather than from section 10's
+paraphrase -- which was wrong twice in one day about what it was even
+describing (see `9187455e`).
+
+**What is already here, and is more than expected.**
+
+- `Comp::frame_tick` is a real wall-clock tick, 60 Hz by default, with
+  `drag_apply()` already inside it -- the exact shape a tween advance takes.
+  Test-mode freezes it and the `tick` ctl verb drives it, so a transition is
+  deterministically steppable from a gate.
+- `Surface.shown_slot` remembers the slot a client last presented, and
+  `prefill_from_shown` already loops `visible_hosted()` blitting each one back
+  into the screen buffer via `blit_composed_pixels(n, slot, x, y, pw, ph, _)`.
+  That IS the restore primitive a translucent overlay needs, and it takes a
+  destination rect, so it also serves an EASED destination.
+- `compose_geometry` builds `ComposeOp { src, dst, clip }` from the leaf's
+  `content` rect and already carries a scale arm (`place::nearest_src` /
+  `scaled_clip`) for `src != dst`. Animating a leaf's composited rect is
+  therefore a new USE of this, not new machinery.
+- `Comp.motion` (I-8c-3a) is the gate on whether any of it runs.
+- `paint_cartoon(&Cartoon, clip)` (I-8b-2) runs cartoon's executor straight
+  over the screen buffer, so `Op::RectAlpha` + `Op::Rect` give the flash its
+  fill and border with nothing new.
+
+**What is missing, and is the actual chunk.** A transient per-frame overlay
+needs RESTORE-then-BLEND-then-PUSH, because a blend is not idempotent (the
+I-8b-3c finding). The restore is per surface kind and that is the unsolved
+part: a hosted tile restores from its `shown_slot`, an EMPTY leaf's interior
+is painted by halcyond's CHROME surface (the placard) and so also has one, and
+anything the compositor paints itself (the pane ground, the frame, the
+separator) has neither. A rect-restricted `prefill_from_shown` covers the
+first two; the third needs a per-leaf structural paint that does not exist as
+a callable unit.
+
+**The trap that is already set.** `main.rs` drops the effective tick to
+`IDLE_HZ` unless the host is `frozen`, has seen input within `IDLE_AFTER_MS`,
+or `Comp::animating()` is true -- and `animating()` measures PRESENT pressure,
+not compositor-side motion. A transition started by a VERB rather than by a
+click (a `workspace` switch, a restore tool's split) during an idle stretch
+would therefore run at the idle rate. The condition set is incomplete the
+moment the first compositor transition exists, and widening it is part of that
+chunk, not a follow-up.
+
+**What must NOT be reached for.** `comp_repaint_pending` looks like the frame
+hook a transition wants, and is not: `frame_tick` consumes it with a full
+`reconcile()`, which fans redraw CONFIGUREs to every client. Sixteen of those
+in 250 ms is precisely the CONFIGURE storm section 10's amendment refuses.
+
 ## Backgrounded-leaf tiling, structural transparency, and the hosting-fan defect (2026-09-05, KT-1.5d-3 F2)
 
 **Context the dossier lacked.** Since KT-1.5d-1b a SESSION (a logged-in

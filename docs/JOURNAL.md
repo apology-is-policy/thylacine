@@ -1831,6 +1831,66 @@ a gate run that had already passed with the witness present, so the image was
 re-baked and re-gated rather than argued equivalent: I had already been wrong
 once this session arguing a delta was invisible.
 
+### Reading the oracle instead of the paraphrase, and what it cost me
+
+Opening I-8c-3 I went to write the tile expansion and stopped to check what
+"the allocated size" meant. The mockup's CSS says
+`.tile { transition: flex-basis .18s cubic-bezier(.2,.8,.2,1) }`, and `.tile`
+is a STACK MEMBER -- `flex: 0 0 var(--header-h)` collapsed, `flex: 1 1 auto`
+expanded. The 180 ms is a stacked tile growing from its header row to its full
+allocation. `.pane`, the split child, has exactly one transition in the whole
+kit -- `border-color .12s` -- and no size transition at all.
+
+**A split does not animate.** Which means the fork I put to the operator this
+morning was framed on a misreading: I described a dozen SIGWINCHes "per split"
+for an event the kit never animates. The ratified answer survives -- the
+choice was between animating the compositor's copy and fanning CONFIGUREs, and
+that tradeoff does not depend on which event fires it; if anything a stack
+expand/collapse strengthens it, since it re-allocates every member at once. I
+checked that rather than assuming it, corrected the premise in place with a
+marker, and said so in the commit instead of quietly rewording.
+
+The same read settled two more things the paraphrase had left ambiguous.
+`.expanded .tile-body { opacity: 1; transition-delay: .07s }` is section 10's
+"after 70 ms", and it runs INSIDE the expansion -- which is independently why
+the client must be configured at the start, the conclusion `6c76b688` had
+already reached from the text alone. And "hover 120 ms" is three separate
+`.12s ease` rules of which only one is hover; `.tile-header` declares no
+transition at all, so its hover tint snaps and must not be animated.
+
+Twice in one day I reasoned confidently from section 10's prose about rules
+whose document is the kit. The lesson was already on the books -- write the
+witness from the DOCUMENT -- and I had been applying it to tests while
+treating a paraphrase as the source for design.
+
+### Surveying the compositor's transitions, and stopping before starting them
+
+With the trigger corrected, four of the five transitions are the compositor's
+and all four want one mechanism: restore, blend, push, once per frame. More of
+it exists than I expected -- `frame_tick` is a real 60 Hz wall-clock tick with
+`drag_apply` already in it and a test-mode `tick` verb to step it;
+`Surface.shown_slot` plus `prefill_from_shown`/`blit_composed_pixels` is the
+restore primitive and it already takes a destination rect, so it serves an
+EASED one; `compose_geometry` already carries a scale arm for `src != dst`.
+
+What is missing is the restore for what the COMPOSITOR itself paints -- the
+pane ground, the frame, the separator have no `shown_slot` and no per-leaf
+structural paint exists as a callable unit. And one trap is already set:
+`main.rs` throttles the tick to `IDLE_HZ` unless input is recent or
+`animating()` is true, and `animating()` measures PRESENT pressure, not
+compositor-side motion, so a transition started by a verb during an idle
+stretch would run at the idle rate. There is also a decoy -- 
+`comp_repaint_pending` looks like the frame hook and is not, because
+`frame_tick` consumes it with a full `reconcile()` that fans redraw CONFIGUREs
+to every client: sixteen of those in 250 ms is exactly the storm the amendment
+refuses.
+
+I stopped there rather than opening it. Each probe was revealing another layer
+of the restore path, and starting an edit to the present path -- an
+audit-trigger surface -- on a shrinking budget is how something gets left
+half-written. The survey is banked in `sub-tapestryd` so the next chunk begins
+from facts instead of repeating the discovery.
+
 ## Run 46o (2026-09-14, Fable 5.1 max) -- the Halcyon Instrument arc opens: reading the Carbon Optics kit against the tree
 
 ### What this run was for
