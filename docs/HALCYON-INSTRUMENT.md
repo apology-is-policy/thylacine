@@ -1770,6 +1770,55 @@ the modal is dismissed — a terminal scrolling behind a dialog freezes. At
 frozen frame differs from a live one only faintly. That is the whole of what
 the choice gives up, and it is given up knowingly.
 
+**The tile expansion animates the COMPOSITOR'S COPY, and the client is
+configured ONCE (2026-09-16, operator-answered).** "180 ms
+`cubic-bezier(.2,.8,.2,1)` on the allocated size" was written of a CSS box,
+where there is no client and no compositor and the content simply reflows.
+Here the allocated size is not a style — it is a **pts winsize**, a contract
+with a running program, and the literal reading sends that program about a
+dozen `SIGWINCH`es per split, each costing it a full re-lay, for a gesture it
+did not make.
+
+So the compositor tweens the RECT IT COMPOSITES the client's buffer into, over
+§10's 180 ms and §10's curve, and sends exactly **one** CONFIGURE — at the
+end, at the final size. `compose_cpu` already carries both arms this needs
+(`op.clip` for a reveal, `place::nearest_src` / `scaled_clip` for a scale), so
+the mechanism is a new USE of existing machinery rather than new machinery.
+
+*The precedent, both halves.* The heritage answer is no animation at all: rio,
+tmux and i3 resize instantaneously, and Plan 9's idiom is that the window IS
+the rectangle. The modern answer is precisely this one — Mutter, KWin and
+sway animate a window's geometry against the client's already-committed
+buffer and configure it once, and `xdg_shell` discourages configure storms in
+so many words. The two agree that a resize tween is the COMPOSITOR's business,
+not the client's, and this compositor is the one that owns the carve.
+
+*The alternative, and why it was refused.* Tweening the carve itself is the
+literal text, and it is not unbuildable — a divider drag ALREADY re-carves and
+fans CONFIGUREs at most once per frame (§13.6's coalescing), so the path
+exists. The difference is consent: a drag is a resize the user is performing,
+frame by frame, and a split is one gesture whose consequences should not be
+charged to every program in the layout.
+
+*The cost, stated.* For 180 ms the tile's content is a clip or a
+nearest-neighbour scale of its FINAL frame rather than a true reflow, so a
+mid-tween capture will not match what a browser would have drawn. The goldens
+cannot arbitrate this either way — §11 captures them with "transitions and
+animations off" — so the fidelity being given up is fidelity to the mockup's
+*mechanism*, not to any pixel we measure against.
+
+**The compositor learns the motion preference by VERB, as it learns the
+scale.** §9.5's amendment above says the channel "follows `/env/HALCYON_SCALE`'s
+shape exactly (read by the session at startup, the compositor following)", and
+that resolves to one thing in this tree: **tapestryd reads no file of any kind**
+— no `/env`, no `/lib/halcyon` — so "following" cannot mean a second reader of
+the same lever. It means what the scale means: the session reads the preference
+once and expresses it as a gated verb, and the compositor stays the authority
+over its own paint. One reader of the user's preference, one owner of the
+motion it drives. Under the console renderer there is no session and so no
+preference to forward; the compositor's own default (motion on) stands, which
+is the same posture §9.5 gives a user who has stated nothing.
+
 ## 11. Evidence: the goldens and the gates
 
 - **Oracle.** `docs/halcyon-carbon-handoff/reference/` (frozen; SHA256SUMS;
@@ -1981,7 +2030,15 @@ the choice gives up, and it is given up knowingly.
   dissolves the conn problem by construction and gives `halcyon workspace <n>`
   a route with no new mechanism.
 - **I-8 — effects and motion.** The two ops, the glows, the backdrop, the
-  transitions.
+  transitions. **I-8a..I-8c-2 LANDED**: `Op::RectAlpha` / `Op::Glow` /
+  `Op::Blur`, the sage glow at SUCCESS alone, the divider drag glow, the
+  modal backdrop and the one card shadow (painted once, the effect ring
+  push-suppressed, because a blend is not idempotent), `libhalcyon::motion`,
+  and the caret's blink behind `/env/HALCYON_MOTION`. Remaining: the three
+  transitions (I-8c-3) and the split flash (I-8c-4). Six operator forks
+  answered in §10's amendments, the last being that the tile expansion
+  animates the COMPOSITOR'S COPY with one CONFIGURE rather than tweening the
+  carve, because the allocated size here is a pts winsize.
 - **I-9 — parity gate, audit, rollout.** ACCEPTANCE-TESTS in full against
   Astra's goldens; the Fable round over I-1..I-8 (double-distance batched:
   one round after I-4, one after I-8); `/lib/halcyon/profile` flips to

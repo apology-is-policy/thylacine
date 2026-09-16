@@ -1749,6 +1749,49 @@ deadline is ever folded, so the opt-out costs nothing rather than costing
 less. And no gate leg reads sub-pixel ink, so nothing here proves the caret
 LOOKS right.
 
+### The tile expansion's fork: the mockup has no client, and we do
+
+Reading I-8c-3, section 10's "180 ms `cubic-bezier(.2,.8,.2,1)` on the
+allocated size" stopped being obvious. In a browser the box grows and the
+content reflows; here the allocated size IS a pts winsize -- a contract with
+a running program -- so the literal reading SIGWINCHes it about a dozen times
+per split, for a gesture it did not make.
+
+I researched before asking, and the research moved me twice. First against
+the literal reading and then, briefly, back: I assumed a per-frame CONFIGURE
+fan would be new and unacceptable machinery, and the tree refuted that --
+a divider drag ALREADY re-carves and fans CONFIGUREs at most once per frame
+(13.6's coalescing). So it was buildable, and the objection had to be
+sharpened from "expensive" to "without consent": a drag is a resize the user
+is performing frame by frame; a split is one gesture whose cost should not be
+charged to every program in the layout.
+
+The precedent pointed one way from both ends. Heritage: rio, tmux and i3 do
+not animate a resize at all, and Plan 9's idiom is that the window IS the
+rectangle. SOTA: Mutter, KWin and sway animate a window's geometry against
+the client's already-committed buffer and configure it ONCE -- `xdg_shell`
+discourages configure storms in so many words. And `compose_cpu` already
+carries both arms the compositor needs for that (`op.clip`, and
+`place::nearest_src` / `scaled_clip`), so it is a new use of existing
+machinery.
+
+**The operator chose the compositor's copy with one CONFIGURE.** Landed as a
+scripture commit before any code, with the cost stated: for 180 ms the
+content is a clip or a nearest scale of the FINAL frame rather than a true
+reflow, and the goldens cannot arbitrate that -- section 11 captures them
+with animations off, so what is given up is fidelity to the mockup's
+mechanism, not to any pixel we measure.
+
+**A second question the research closed without a vote.** 9.5's amendment
+says the motion channel follows the scale's shape, "the compositor
+following". I had written, in an I-8c-2 doc comment, that the compositor
+would read its own lever. It cannot: tapestryd reads no file of any kind --
+no `/env`, no `/lib/halcyon`, zero hits. "Following" therefore means what it
+means for the scale: the session reads the preference once and expresses it
+as a gated verb. The comment was a prediction about a mechanism that does not
+exist, and the amendment now says so; correcting it is owed by the next
+commit.
+
 ## Run 46o (2026-09-14, Fable 5.1 max) -- the Halcyon Instrument arc opens: reading the Carbon Optics kit against the tree
 
 ### What this run was for
