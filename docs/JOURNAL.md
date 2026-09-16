@@ -2189,6 +2189,66 @@ bump, so a GL client churning buffers spends every other client's address
 space. The fix is a reusing window pinned below the stack guard. It is the
 next chunk, witnessed first.
 
+### The witness went red on something else: no weave was ever freed
+
+The churn witness came first: a 600-move divider drag in one QMP session
+(`qmp-sendtext.sh -p "drag ..."`). Before any fix, it failed, and not on the
+review's finding. `t_dma_create_weave(5320704)` returned -1 after about 133
+relayouts, and the console surface's reweave was refused `Err(12)`. The bump
+gauge read 82 MiB of a 2 GiB window, so the address space was not the wall.
+The create failed before any address was chosen.
+
+Three causes fit that line: physical exhaustion, 2 MiB buddy fragmentation,
+or a full handle table. I measured instead of ranking them. A temporary kernel
+probe (never committed) printed state at the failing allocation and a line per
+large weave create:
+- `alloc_pages failed ... order=9 dma_live=415 dma_created=461`;
+- `free pages=13631`, with nothing free above order 6;
+- `handles in use=22` in tapestryd.
+
+That rules out the handle table and makes fragmentation a symptom. The
+trajectory is the finding: `created - live` read exactly 46 from the first
+Halcyon surface (`created=54`) to the failure. **No DMA object was freed at
+any point in the session**, so every earlier drag leg leaked too, and free
+memory fell from 479761 pages to 13631. The churn only reached the wall first.
+
+A second probe printed the Burrow's handle and mapping counts at each release
+step:
+- The client side worked: `weft map ... hc=1 mc=2`, then
+  `clunk ... unmap_rc=0`, which left `hc=0 mc=1`.
+- There was not one `detach` line and not one `dma burrow freed` line.
+
+tapestryd's own `t_burrow_detach` never reached the per-VMA body, because
+`detach_args_check` refuses any address below `EXEC_USER_BURROW_BASE`
+(4 GiB). That guard is F1 of the P6-pouch-mem-a audit (198fda14,
+2026-05-22), which protects ELF, stack and guard VMAs by where they sit.
+tapestryd has placed weaves at 0x0240_0000 since G-3a (88547181,
+2026-07-19), and every one of its detach sites discards the return value.
+The mapping keeps the Burrow's `mapping_count` at 1, the Burrow keeps its
+reference on the DMA object, and the pages stay allocated until tapestryd
+exits.
+
+The same gate catches GPU BOs (every Warp client buffer free), rings, the
+screen buffer and the probe resources. It does not catch the kernel-placed
+effect scratch or hostmem rings, which sit inside the window. TAPESTRY.md
+G-6b recorded the bump allocator as the only seam ("the 47-bit VA holds
+millions of reweaves"), and no gate read memory after churn.
+
+**The fix changes what a syscall accepts, so it goes to the operator.** The
+kernel's own #122 comment expects a driver to place a detachable DMA map
+inside the window, and ARCH 6.5 defines `burrow_detach` only for
+kernel-placed Tier-1 regions. Nothing covers a caller-placed map below the
+window. Three shapes:
+- Protect by identity, as Plan 9's `syssegdetach` protects the stack by
+  segment rather than by address (recommended).
+- Place tapestryd's maps inside the kernel's first-fit window by convention.
+- Add a kernel-chosen hardware map, which needs a new syscall because
+  `SYS_DMA_MAP` returns the PA.
+
+The probe is out of the tree. The review's F1 (the bump reaching the stack)
+stays real, and the churn witness now has to measure memory, not only
+survive.
+
 ## Run 46o (2026-09-14, Fable 5.1 max) -- the Halcyon Instrument arc opens: reading the Carbon Optics kit against the tree
 
 ### What this run was for
