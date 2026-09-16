@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
-updated: 2026-09-15
+updated: 2026-09-16
 ---
 ## Purpose
 
@@ -1444,7 +1444,12 @@ renderer's OR -- since H-4d -- the declared session compositor's, gated
 the user's rio summons the menu over its own tiles, but an idle declarer that
 hosts nothing is refused (else it could float a menu, take the grab, and force
 Composed with no tile of its own). `Comp.menu:
-Option<MenuState { n, gen, rect }>` is the ONE placed menu. Gated global verbs:
+Option<MenuState { n, gen, rect, fx }>` is the ONE placed menu -- `fx` being
+the region its section-10 EFFECTS cover, kept separate from `rect` for the
+reason the census below states, and `Rect::ZERO` under the legacy profile
+where those effects are not painted.
+`MenuState::heal_rect()` is what a dismiss must repair: `fx` when it exists
+(it contains `rect` by construction), the card alone otherwise. Gated global verbs:
 `menu place <surface-id> <x> <y>` (authority -> syntax -> a non-menu surface
 E_NOENT -> owned by the caller's PROCESS via `owner_peer == peer_stripes`
 E_PERM; clamp; replace; forces Composed; redraw CONFIGURE) and `menu dismiss`.
@@ -1470,7 +1475,10 @@ intersection: `paint_borders(false)` + strip intersections pushed, tag-bar
 headers + empty-leaf BG_COLOR filled (`placement_rect` = the crop),
 same-size CONFIGURE to intersecting hosted + `visible_chrome` surfaces.
 `menu_reassert` composes each `shown_slot` over any screen write under the
-menu (`screen_push` before upload, `screen_flush_rect`/`_full` after);
+menu (`screen_push` before upload, `screen_flush_rect`/`_full` after) -- and
+since I-8b-3c the SAME two entry points also SUPPRESS the effect ring, via
+`pane::menu_push_allowed`, so the once-painted backdrop and shadow are never
+re-blended over;
 `reconcile`'s structural repaint runs `prefill_from_shown()` after
 `paint_chrome()` (every visible hosted surface's `shown_slot` composed;
 GL adoptions and held slots skipped), and its Off/Direct `want` arms gained
@@ -2206,27 +2214,70 @@ its sibling rather than an inference from the ink, because 9.2 paints the
 dragged rule `amber` and a painter reading the state back out of the colour
 would key an effect on a token. A token is not a state.
 
-**`menu_effect_region` landed ahead of its wiring (I-8b-3).** The pure rule
-that says which display region a placed card's EFFECTS cover -- the card
-united with its drop shadow's reach, clamped to the display -- is in
-`pane.rs` with its witnesses, before anything calls it. It takes the
-REQUESTED blur radius rather than the clamped one, because the executor only
-ever clamps DOWN: the region is then always a superset of what is painted,
-and the asymmetry is the point (over-healing costs work; under-healing leaves
-a ring of un-healed backdrop after dismiss). Its arithmetic is i64 because
-`Rect` is u32 and a card at the origin grown by a radius would wrap.
+**`menu_effect_region`, and the census that decided how it wired in
+(I-8b-3).** The pure rule that says which display region a placed card's
+EFFECTS cover -- the card united with its drop shadow's reach, clamped to the
+display -- takes the REQUESTED blur radius rather than the clamped one,
+because the executor only ever clamps DOWN: the region is then always a
+superset of what is painted, and the asymmetry is the point (over-healing
+costs work; under-healing leaves a ring of un-healed backdrop after dismiss).
+Its arithmetic is i64 because `Rect` is u32 and a card at the origin grown by
+a radius would wrap.
 
-**The census that decides how it wires in, recorded because conflating these
-is the defect.** `MenuState` is built in exactly ONE place and `self.menu` is
-written in three. Its `m.rect` readers serve THREE different roles: the HEAL
-sites, which must cover the effect region -- `menu_place`'s old-rect heal,
-`menu_dismiss`'s fallback, and `retire`, which captures the rect into a local
-and is the path EVERY dismiss actually takes; the COMPOSE/PLACE sites, which
-must NOT grow, since `menu_reassert` maps screen pixels into the weave by
-`inter.x - m.rect.x` and `surface_target` places the card; and the HIT TEST
-sites, which must not grow either, or a click on the SHADOW counts as a click
-on the card. So the effect region becomes a SEPARATE field: one for what is
-painted, one for what the surface is.
+The census is recorded because conflating its three roles IS the defect.
+`MenuState` is built in exactly ONE place and `self.menu` is written in three.
+Its `m.rect` readers serve THREE roles: the HEAL sites, which must cover the
+effect region -- `menu_place`'s old-region heal, `menu_dismiss`'s fallback,
+and `retire`, which captures it into a local and is the path EVERY dismiss
+actually takes; the COMPOSE/PLACE sites, which must NOT grow, since
+`menu_reassert` maps screen pixels into the weave by `inter.x - m.rect.x` and
+`surface_target` places the card; and the HIT TEST sites, which must not grow
+either, or a click on the SHADOW counts as a click on the card. So the effect
+region is a SEPARATE field: one for what is painted, one for what the surface
+is. All three heal sites now read `MenuState::heal_rect()`; none of the other
+five readers was touched.
+
+**The effects are painted ONCE, and the ring is push-suppressed (section 10
+as amended at `b62a761b`, operator-answered).** An effect BLENDS against the
+destination, so unlike `menu_reassert`'s opaque `copy_nonoverlapping` it is
+not safe to repeat -- and `screen_flush_rect` provably re-asserts one region
+twice, once directly and once through the `screen_push` of its own return.
+Re-applying per push would darken what the previous push already darkened;
+tracking which writes carry fresh scene pixels would need a signal threaded
+through all SEVEN functions that write the screen buffer
+(`blit_composed_pixels`, `fill_rect`, `menu_heal`'s local fill,
+`paint_borders`, `paint_cartoon`, `paint_strips`, `compose_cpu`) -- the
+"N defended sites need N witnesses" hazard, which this dossier already
+records as stated and not closed.
+
+So idempotency is obtained by EXCLUDING writes rather than tracking them.
+`menu_paint_effects` blends the backdrop and shadow once, at placement, after
+the reconcile that repainted the scene beneath them, and pushes the region
+through `screen_push_raw` -- the transport half, which exists precisely
+because `screen_push` is the thing that withholds that region. From then
+until the dismiss, `pane::menu_push_allowed` splits every push and every
+flush into the parts outside `fx` plus the card's own rect. The buffer
+beneath may drift as clients present; the DISPLAY keeps the effected pixels;
+`menu_heal` reconciles both at dismiss. **The card's rect is re-admitted, and
+that is what makes this safe rather than merely cheap**: `menu_reassert` has
+just copied the card back opaquely, so any effect applied twice underneath it
+is provably invisible.
+
+The visible cost is stated rather than discovered: a program repainting behind
+a placed modal is hidden until dismiss -- a terminal scrolling behind a dialog
+freezes. At `BACKDROP_ALPHA` 184/255 the scene contributes about 28 % of each
+pixel, so a frozen frame differs from a live one only faintly. This is rio's
+save-under answer fitted to a damage-driven compositor; the modern
+per-frame-reblur answer (KWin, Hyprland, `NSVisualEffectView`) is idempotent
+for free only because those compositors re-composite the whole frame each
+vsync, which is a frame model tapestryd deliberately does not have.
+
+**`bars_around` moved here from `server.rs`** and gained its first host
+witnesses in the process: it had lived as an associated fn in the bin for its
+whole life, where tapestryd's lib -- `chords`/`keymap`/`pane`/`skein` -- could
+not reach it. `menu_push_allowed` is built on it rather than beside it, and
+its two existing callers (the floor under a cropped client, the heal under a
+dismissed menu) now have witnesses they never had.
 
 **What the host tests cannot reach.** The two-caller threading is bin-side and
 so has no unit witness; the guest gate `ls-halcyon-session-instrument` does

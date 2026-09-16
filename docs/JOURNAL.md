@@ -1488,6 +1488,98 @@ wrong.
 three heal sites, the push suppression, and the effects painted at placement.
 No compositor line has been changed yet.
 
+### I-8b-3c: the wiring, and a green test run that compiled none of it
+
+The design was settled, so this was meant to be mechanical: `MenuState` gains
+the effect region, the three heal sites read it, the effects paint once, the
+ring is withheld. Most of it was. Three things were not.
+
+**The pure rules first, then the compositor** -- the same order that worked
+for 3b. `bars_around` MOVED from `server.rs` into `pane.rs` rather than being
+copied: I needed `r` minus the effect region as four bands, and the bin
+already had exactly that function, sitting where tapestryd's lib
+(`chords`/`keymap`/`pane`/`skein`) could not reach it and where it had
+therefore never had a single host witness. Copying it would have been the
+"second implementation of a bounded resource" shape I had just warned about in
+I-8b's own audit row. Moving it gave its two existing callers -- the floor
+under a cropped client, the heal under a dismissed menu -- witnesses they had
+never had.
+
+**Then I asserted an expectation I had not derived, for the fourth time this
+arc, and left the evidence in the message.** The witness for the shadow's
+offset read `assert_eq!(e.shadow.y, 250, "the card at 100 displaced by dy 24,
+plus its own 126? no -- 100 + 24")`. The comment is visibly arguing with
+itself mid-sentence. `ipx(24, 100)` is 24, so the answer is 124. What is worth
+recording is not that I got it wrong again but that the tell was legible
+BEFORE the run: a justification that changes its mind inside one sentence is
+not a justification.
+
+**And a green test run that compiled none of the wiring.** After the server.rs
+edits, `cargo test -p tapestryd --lib --no-default-features` returned 86
+passed -- and it is exactly the trap this crate's own Cargo.toml documents in
+its header. `server.rs` is in the BIN, gated `required-features = ["guest"]`,
+and **a bin whose required features are unmet is SKIPPED SILENTLY rather than
+failing**. The lib run compiled `pane.rs` and nothing else. I had the green
+number in hand and it was evidence about a different set of files. The only
+thing that compiles `server.rs` is the guest build, and even there the verdict
+has to be read by CONTENT -- the line naming `(bin "tapestryd")` is what
+distinguishes "the bin built" from "the bin was skipped and the lib built".
+
+Then my own filter hid the verdict: I grepped for `^error` and `-->`, which
+printed warning context while swallowing whether the build succeeded, and
+`EXIT=` came back empty. Re-run into a file: exit 0, zero errors, and the line
+naming `(bin "tapestryd")` -- which is the part that discriminates, since a bin
+whose features are unmet is skipped silently and the lib still builds.
+
+**And then I did it again, which is what makes it a pattern rather than a
+slip.** I ran the gate bake as `tools/build.sh kernel 2>&1 | tail -25` in the
+background. The capture was 27 lines -- the summary alone. Every per-stage
+echo was gone, including the `==> populate pool: HALCYON profile lever
+ENABLED` line that `build.sh` emits only AFTER reading the file back and
+comparing it. So when I went looking for evidence that the levers had taken,
+there was none, and I spent three rounds building a case that the populate
+stage had not run: I checked the ramfs for `/lib/halcyon` (wrong tree
+entirely -- those levers are written into the POOL, so their absence there
+discriminates nothing), ran a malformed `find` that missed `pool.img` where it
+actually sits, and probed the encrypted pool with `strings`, whose miss I at
+least recorded as inconclusive at the time. Three probes, each answering a
+question I had not asked, all downstream of one `| tail -25`.
+
+The generalisable part is not "don't filter". It is that **a filtered stream
+that still prints something reads as a working instrument.** A probe returning
+NOTHING announces itself; a probe returning the summary while discarding the
+verdict does not, and every conclusion drawn from it inherits the omission
+silently. Both instances here shared one shape: I chose the filter to keep the
+output short, and shortness is exactly what removed the discriminating line.
+
+Four sabotages, each run separately, each naming its intended witness alone:
+the card's re-admission, `bars_around`'s empty-hole return, the Instrument
+gate, and the shadow's literal. Restored byte-identical, md5 `a9aa5cd4`.
+
+**The gate, and the order that made it mean something.** This scenario SKIPs
+with exit 77 on a wrong image instead of failing, and the harness still exits
+0 -- so "the gate passed" is a claim about the STEPS FILE, never about a
+return code. Two things were therefore checked BEFORE spending the boot: that
+`build.sh`'s own readback-verified echoes named both levers
+(`/lib/halcyon/profile = instrument`, `/lib/halcyon/session = on`), and that
+the staged `tapestryd` and `halcyond` binaries were newer than the last source
+edit. A PASS over yesterday's compositor is worse than a red, and that
+ordering is what closes it. Result: PASS **17/17 legs, 0 FAIL at 108 s**,
+attempt 1, hvf, artifact stamped 07:45 against a 07:46 clock -- the prior
+run's artifact from 22:12 was still sitting in `build/`, so the timestamp is
+part of the verdict.
+
+What the run actually exercises is better than the leg count suggests: it
+PLACES MENUS -- the picker at 286 x 728, the tile menu's Restart, the
+workspace list -- so `menu_paint_effects`, the split push and the split flush
+all ran on live frames, and every dismiss/heal leg after them still passed.
+That is the evidence worth having, because the hazard the suppression
+introduces is precisely an un-healed ring: a region withheld from upload that
+never gets reconciled would surface as a failed dismiss or a wrong subsequent
+state, exactly where these legs look. **It does not prove the backdrop or the
+shadow LOOK right** -- no leg reads sub-pixel ink. That gap is stated, not
+closed, and it is the same one I-8b-2 recorded.
+
 ## Run 46o (2026-09-14, Fable 5.1 max) -- the Halcyon Instrument arc opens: reading the Carbon Optics kit against the tree
 
 ### What this run was for

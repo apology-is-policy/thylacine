@@ -322,6 +322,117 @@ pub fn menu_effect_region(card: Rect, dy: i32, radius: u32, disp_w: u32, disp_h:
     Rect { x: x0 as u32, y: y0 as u32, w: (x1 - x0) as u32, h: (y1 - y0) as u32 }
 }
 
+/// The four bands of `outer` around `inner` (top, bottom, left, right;
+/// empty ones included) -- `outer` MINUS `inner`, expressed as rects.
+///
+/// Lived in `server.rs` as an associated fn for its whole life, which meant
+/// it had no host witness: tapestryd's lib is `chords`/`keymap`/`pane`/
+/// `skein`, and the bin is not in it. It moved here rather than being
+/// copied, because a second implementation of a geometric primitive is the
+/// shape that produced three HALCYON-WORKSPACES defects -- and its two
+/// existing callers (the floor under a cropped client, the heal under a
+/// dismissed menu) get the witnesses along with the new one.
+///
+/// An empty `inner` yields `[outer, ZERO, ZERO, ZERO]`: nothing is
+/// subtracted, so the whole of `outer` survives.
+pub fn bars_around(outer: Rect, inner: Rect) -> [Rect; 4] {
+    if inner.is_empty() {
+        return [outer, Rect::ZERO, Rect::ZERO, Rect::ZERO];
+    }
+    let ox1 = outer.x + outer.w;
+    let oy1 = outer.y + outer.h;
+    let ix1 = inner.x + inner.w;
+    let iy1 = inner.y + inner.h;
+    [
+        Rect { x: outer.x, y: outer.y, w: outer.w, h: inner.y.saturating_sub(outer.y) },
+        Rect { x: outer.x, y: iy1.min(oy1), w: outer.w, h: oy1.saturating_sub(iy1) },
+        Rect { x: outer.x, y: inner.y, w: inner.x.saturating_sub(outer.x), h: inner.h },
+        Rect { x: ix1.min(ox1), y: inner.y, w: ox1.saturating_sub(ix1), h: inner.h },
+    ]
+}
+
+/// HALCYON-INSTRUMENT 10: the parts of screen write `r` that may still be
+/// PUSHED to the display while a menu card stands at `card` with its effect
+/// region `fx`.
+///
+/// The effects are painted ONCE, when the menu is placed (section 10 as
+/// amended at `b62a761b`), and this is what keeps them there. An effect
+/// BLENDS against the destination, so unlike the card's own opaque
+/// `copy_nonoverlapping` it is not idempotent -- and `screen_flush_rect`
+/// provably re-asserts one region twice, once directly and once through the
+/// `screen_push` of its own return. Re-applying per push would darken what
+/// the previous push already darkened; tracking which writes carry fresh
+/// scene pixels would need a signal threaded through all seven functions
+/// that write the screen buffer. So idempotency is obtained by EXCLUDING
+/// writes instead: the effect ring is not uploaded while the menu stands.
+/// The buffer beneath may drift as clients present; the DISPLAY keeps the
+/// effected pixels, and `menu_heal` reconciles both at dismiss.
+///
+/// The card's own rect is re-admitted, and that is what makes the whole
+/// scheme safe rather than merely cheap: `menu_reassert` copies the card
+/// over it opaquely, so any effect applied twice underneath is provably
+/// invisible. Five rects, empties included; `card` is inside `fx` by
+/// construction (`menu_effect_region` unions the card with its shadow), so
+/// they never overlap.
+pub fn menu_push_allowed(r: Rect, fx: Rect, card: Rect) -> [Rect; 5] {
+    let hidden = r.intersect(fx);
+    if hidden.is_empty() {
+        return [r, Rect::ZERO, Rect::ZERO, Rect::ZERO, Rect::ZERO];
+    }
+    let b = bars_around(r, hidden);
+    [b[0], b[1], b[2], b[3], r.intersect(card)]
+}
+
+/// HALCYON-INSTRUMENT 10: what the compositor paints under a placed menu
+/// card -- the modal backdrop and the one card shadow, in paint order.
+///
+/// `None` under the legacy profile (section 10 is the Instrument visual) and
+/// for a degenerate card or region. Every value is section 10's LITERAL, not
+/// a theme token: the effects "stay amber / green literals on every theme",
+/// and painting one with a token is the defect corrected at `a4c9a461`.
+///
+/// Lengths scale through the same `ipx` the metrics take, so an effect and a
+/// derived opaque of the same stated size agree. The shadow's radius is the
+/// REQUESTED one -- 80 scaled -- and the executor clamps it to
+/// `cartoon::GLOW_RADIUS_MAX`; that flattening is what collapsed section
+/// 10's two card shadows into one, and a second copy of the bound here would
+/// be a second thing to keep in step.
+// No `Eq`: the struct carries `Rect`s, and `Rect` is `PartialEq` only.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MenuEffects {
+    /// The bounded region every effect is clipped to -- NOT the display.
+    /// A display-wide scrim would force a display-sized heal on every
+    /// dismiss, which is the whole-screen flash `menu_heal` exists to
+    /// prevent (section 10's extent, operator-ratified).
+    pub region: Rect,
+    pub backdrop_color: u32,
+    pub backdrop_alpha: u8,
+    pub backdrop_radius: u32,
+    /// The card displaced by the scaled `dy`; the blur spreads from there.
+    pub shadow: Rect,
+    pub shadow_color: u32,
+    pub shadow_alpha: u8,
+    pub shadow_radius: u32,
+}
+
+pub fn menu_effects(card: Rect, fx: Rect, instrument: bool, pct: u16) -> Option<MenuEffects> {
+    if !instrument || card.w == 0 || card.h == 0 || fx.is_empty() {
+        return None;
+    }
+    let ipx = |v: i32| libhalcyon::scale::ipx(v, pct).max(0);
+    let dy = ipx(libhalcyon::instrument::effects::CARD_SHADOW_DY) as u32;
+    Some(MenuEffects {
+        region: fx,
+        backdrop_color: libhalcyon::instrument::effects::BACKDROP,
+        backdrop_alpha: libhalcyon::instrument::effects::BACKDROP_ALPHA,
+        backdrop_radius: ipx(libhalcyon::instrument::effects::BACKDROP_BLUR) as u32,
+        shadow: Rect { x: card.x, y: card.y.saturating_add(dy), w: card.w, h: card.h },
+        shadow_color: libhalcyon::instrument::effects::CARD_SHADOW,
+        shadow_alpha: libhalcyon::instrument::effects::CARD_SHADOW_ALPHA,
+        shadow_radius: ipx(libhalcyon::instrument::effects::CARD_SHADOW_BLUR) as u32,
+    })
+}
+
 pub fn admit_rail(r: &RailReq) -> StatusAdmit {
     if !r.instrument
         || r.rail_h == 0
@@ -3332,6 +3443,113 @@ mod tests {
     fn a_degenerate_card_has_no_effect_region() {
         assert_eq!(menu_effect_region(Rect { x: 10, y: 10, w: 0, h: 40 }, 24, 32, 1280, 800), Rect::ZERO);
         assert_eq!(menu_effect_region(Rect { x: 10, y: 10, w: 40, h: 40 }, 24, 32, 0, 800), Rect::ZERO);
+    }
+
+    /// `bars_around` subtracts: the four bands must tile `outer` minus
+    /// `inner` exactly, with no overlap and nothing lost. Its two existing
+    /// callers had no host witness at all before this.
+    #[test]
+    fn bars_around_subtracts_exactly() {
+        let outer = Rect { x: 10, y: 10, w: 100, h: 80 };
+        let inner = Rect { x: 40, y: 30, w: 20, h: 20 };
+        let b = bars_around(outer, inner);
+        let area: u32 = b.iter().map(|r| r.w * r.h).sum();
+        assert_eq!(area, outer.w * outer.h - inner.w * inner.h, "area conserved");
+        for (i, p) in b.iter().enumerate() {
+            assert!(p.intersect(inner).is_empty(), "band {} overlaps the hole", i);
+            assert_eq!(p.intersect(outer), *p, "band {} escapes outer", i);
+            for (j, q) in b.iter().enumerate() {
+                if i < j {
+                    assert!(p.intersect(*q).is_empty(), "bands {} and {} overlap", i, j);
+                }
+            }
+        }
+    }
+
+    /// An empty hole subtracts nothing, and a hole covering the whole of
+    /// `outer` subtracts everything. The pair matters: the first alone is
+    /// satisfied by a function that always returns `outer`.
+    #[test]
+    fn bars_around_handles_both_degenerate_holes() {
+        let outer = Rect { x: 4, y: 4, w: 20, h: 20 };
+        assert_eq!(bars_around(outer, Rect::ZERO)[0], outer);
+        let full = bars_around(outer, outer);
+        assert!(full.iter().all(|r| r.is_empty()), "a hole the size of outer leaves nothing");
+    }
+
+    /// The card's own rect stays pushable while the ring around it is
+    /// suppressed -- the property that lets the effects be painted once and
+    /// stay. A blend is not idempotent the way the card's opaque copy is.
+    #[test]
+    fn the_effect_ring_is_suppressed_but_the_card_is_not() {
+        let card = Rect { x: 400, y: 200, w: 480, h: 300 };
+        let fx = menu_effect_region(card, 24, 32, 1280, 800);
+        let allowed = menu_push_allowed(Rect { x: 0, y: 0, w: 1280, h: 800 }, fx, card);
+        let covers = |x: u32, y: u32| allowed.iter().any(|r| !r.is_empty() && r.contains(x, y));
+        assert!(covers(402, 202), "the card itself is still pushed");
+        assert!(!covers(fx.x + 1, fx.y + 1), "the ring is suppressed");
+        assert!(covers(10, 10), "the scene outside the region is untouched");
+        // Disjoint, or a pixel would be uploaded twice.
+        for (i, p) in allowed.iter().enumerate() {
+            for (j, q) in allowed.iter().enumerate() {
+                if i < j && !p.is_empty() && !q.is_empty() {
+                    assert!(p.intersect(*q).is_empty(), "pieces {} and {} overlap", i, j);
+                }
+            }
+        }
+    }
+
+    /// With no menu placed the region is empty and NOTHING is suppressed --
+    /// the guard that keeps the ordinary path byte-identical.
+    #[test]
+    fn no_placed_menu_suppresses_nothing() {
+        let r = Rect { x: 5, y: 5, w: 40, h: 40 };
+        let a = menu_push_allowed(r, Rect::ZERO, Rect::ZERO);
+        assert_eq!(a[0], r);
+        assert!(a[1..].iter().all(|x| x.is_empty()));
+    }
+
+    /// Section 10's literals, pinned ABSOLUTELY, because a painter reaching
+    /// for a theme token instead is exactly the defect corrected at
+    /// `a4c9a461` -- and a witness written from the code could not see it.
+    #[test]
+    fn the_menu_effects_are_section_tens_literals() {
+        let card = Rect { x: 100, y: 100, w: 200, h: 150 };
+        let fx = menu_effect_region(card, 24, 32, 1280, 800);
+        let e = menu_effects(card, fx, true, 100).expect("instrument, non-degenerate");
+        assert_eq!(e.backdrop_color, 0xFF03_0404, "rgb(3,4,4), not a ground token");
+        assert_eq!(e.backdrop_alpha, 184, ".72");
+        assert_eq!(e.backdrop_radius, 3);
+        assert_eq!(e.shadow_color, 0xFF00_0000, "black .35, not a token");
+        assert_eq!(e.shadow_alpha, 90);
+        assert_eq!(e.shadow_radius, 80, "the REQUESTED blur; the executor clamps to 32");
+        assert_eq!(e.shadow.y, 124, "the card at y 100 displaced by ipx(24, 100) == 24");
+        assert_eq!(e.shadow.x, card.x, "a straight-down shadow: dx is 0");
+        assert_eq!(e.region, fx);
+    }
+
+    /// At 200 % every length doubles through the same `ipx` the metrics
+    /// take, so an effect and a derived opaque of one stated size agree.
+    #[test]
+    fn the_menu_effects_scale_with_the_display() {
+        let card = Rect { x: 100, y: 100, w: 200, h: 150 };
+        let fx = menu_effect_region(card, 48, 64, 2560, 1600);
+        let e = menu_effects(card, fx, true, 200).expect("instrument");
+        assert_eq!(e.backdrop_radius, 6, "3 doubled");
+        assert_eq!(e.shadow_radius, 160, "80 doubled, still clamped at paint");
+        assert_eq!(e.shadow.y, 148, "100 + dy 48");
+    }
+
+    /// Section 10 is the INSTRUMENT visual: no card shadow under legacy, and
+    /// nothing at all for a degenerate card or region.
+    #[test]
+    fn menu_effects_are_instrument_only_and_refuse_degenerates() {
+        let card = Rect { x: 100, y: 100, w: 200, h: 150 };
+        let fx = menu_effect_region(card, 24, 32, 1280, 800);
+        assert!(menu_effects(card, fx, false, 100).is_none(), "legacy has no backdrop");
+        assert!(menu_effects(Rect::ZERO, fx, true, 100).is_none(), "no card");
+        assert!(menu_effects(card, Rect::ZERO, true, 100).is_none(), "no region");
+        assert!(menu_effects(card, fx, true, 100).is_some(), "the control: it does fire");
     }
 
     /// A dragged rule under Instrument at 100 %: section 10's literal, its

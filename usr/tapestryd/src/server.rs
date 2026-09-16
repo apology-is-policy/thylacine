@@ -1469,6 +1469,27 @@ struct MenuState {
     n: usize,
     gen: u32,
     rect: Rect,
+    /// HALCYON-INSTRUMENT 10: the display region this card's EFFECTS cover
+    /// -- the card united with its shadow's reach. SEPARATE from `rect` on
+    /// purpose: `rect` is what the surface IS (the compose source map, the
+    /// placement, the click-away test), and widening it would read outside
+    /// the weave, misplace the card, and make a click on the SHADOW count
+    /// as a click on the card. `Rect::ZERO` under the legacy profile, where
+    /// section 10's effects are not painted -- so nothing is suppressed.
+    fx: Rect,
+}
+
+impl MenuState {
+    /// What must HEAL when this card goes: its effect region, which contains
+    /// the card by construction -- or the card alone under the legacy
+    /// profile, where no effects are painted and `fx` is `Rect::ZERO`.
+    fn heal_rect(self) -> Rect {
+        if self.fx.is_empty() {
+            self.rect
+        } else {
+            self.fx
+        }
+    }
 }
 
 /// H-3d: the registered status bar -- the surface the display's bottom
@@ -5687,8 +5708,10 @@ impl Comp {
         self.drag_end("menu");
         // The same surface placed again (a move): its old rect is healed
         // below, after the new placement composes (SA-1).
+        // The OLD EFFECT REGION is what must heal, not the old card: the
+        // backdrop and shadow reach past the rect on every side.
         let old_rect = match self.menu {
-            Some(m) if m.n == n => Some(m.rect),
+            Some(m) if m.n == n => Some(m.heal_rect()),
             _ => None,
         };
         if self.menu.map_or(false, |m| m.n != n) {
@@ -5700,7 +5723,8 @@ impl Comp {
         let x = x.min(dw - w);
         let y = y.min(dh - h);
         let rect = Rect { x, y, w, h };
-        self.menu = Some(MenuState { n, gen, rect });
+        let fx = self.menu_fx_for(rect);
+        self.menu = Some(MenuState { n, gen, rect, fx });
         say!("tapestryd: menu {} placed at {},{} {}x{}", n, x, y, w, h);
         self.reconcile();
         if !self.emit_configure_to(n, sw, sh) {
@@ -5709,7 +5733,78 @@ impl Comp {
         if let Some(o) = old_rect {
             self.menu_heal(o);
         }
+        // Section 10 as amended at `b62a761b`: the effects are painted ONCE,
+        // here, AFTER the reconcile that repainted the scene beneath them --
+        // and the ring is push-suppressed from now until the dismiss, so
+        // nothing re-blends over what this lays down.
+        self.menu_paint_effects();
         Ok(())
+    }
+
+    /// The effect region for a card at `rect`, or `Rect::ZERO` where section
+    /// 10's effects are not painted (the legacy profile).
+    ///
+    /// Built from the REQUESTED blur, not the executor's clamped one: the
+    /// executor only ever clamps DOWN, so the region stays a superset of
+    /// what is painted. Over-healing costs work; under-healing leaves a ring
+    /// of un-healed backdrop after the card is gone.
+    fn menu_fx_for(&self, rect: Rect) -> Rect {
+        if self.bundle.profile != libhalcyon::instrument::Profile::Instrument {
+            return Rect::ZERO;
+        }
+        let ipx = |v: i32| libhalcyon::scale::ipx(v, self.scale).max(0);
+        pane::menu_effect_region(
+            rect,
+            ipx(libhalcyon::instrument::effects::CARD_SHADOW_DY),
+            ipx(libhalcyon::instrument::effects::CARD_SHADOW_BLUR) as u32,
+            self.gpu.width,
+            self.gpu.height,
+        )
+    }
+
+    /// Paint section 10's modal backdrop and the one card shadow into the
+    /// screen buffer, then push the region ONCE -- through the raw push,
+    /// because `screen_push` is the very thing that suppresses this region.
+    ///
+    /// Paint order is the list's order: the backdrop's blur of the scene,
+    /// its tint over the blurred result, then the shadow. The card itself
+    /// arrives on top through `menu_reassert` as before.
+    fn menu_paint_effects(&mut self) {
+        let Some(m) = self.menu else { return };
+        let instrument = self.bundle.profile == libhalcyon::instrument::Profile::Instrument;
+        let Some(e) = pane::menu_effects(m.rect, m.fx, instrument, self.scale) else {
+            return;
+        };
+        if self.screen.is_none() {
+            return;
+        }
+        let mut cart = cartoon::Cartoon::new();
+        cart.ops.push(cartoon::Op::Blur {
+            x: e.region.x as i32,
+            y: e.region.y as i32,
+            w: e.region.w,
+            h: e.region.h,
+            radius: e.backdrop_radius,
+        });
+        cart.ops.push(cartoon::Op::RectAlpha {
+            x: e.region.x as i32,
+            y: e.region.y as i32,
+            w: e.region.w,
+            h: e.region.h,
+            color: e.backdrop_color,
+            alpha: e.backdrop_alpha,
+        });
+        cart.ops.push(cartoon::Op::Glow {
+            x: e.shadow.x as i32,
+            y: e.shadow.y as i32,
+            w: e.shadow.w,
+            h: e.shadow.h,
+            color: e.shadow_color,
+            alpha: e.shadow_alpha,
+            radius: e.shadow_radius,
+        });
+        self.paint_cartoon(&cart, e.region);
+        self.screen_push_raw(e.region);
     }
 
     /// Compositor-owned dismiss: retire the placed menu's surface. `retire`
@@ -5729,7 +5824,7 @@ impl Comp {
             // unplace + heal here so the grab can never outlive the surface.
             self.menu = None;
             self.menu_reason = "retire";
-            self.menu_heal(m.rect);
+            self.menu_heal(m.heal_rect());
         }
         true
     }
@@ -5812,7 +5907,7 @@ impl Comp {
                     pane::Kind::Leaf { surface: Some(n) } => {
                         let c = p.content;
                         let inner = self.placement_rect(*n, c).unwrap_or(Rect::ZERO);
-                        for bar in Self::bars_around(c, inner) {
+                        for bar in pane::bars_around(c, inner) {
                             let b = bar.intersect(r);
                             if !b.is_empty() {
                                 fills.push((b, self.theme.blank));
@@ -5930,7 +6025,7 @@ impl Comp {
             return;
         };
         let inner = self.placement_rect(n, c).unwrap_or(Rect::ZERO);
-        for bar in Self::bars_around(c, inner) {
+        for bar in pane::bars_around(c, inner) {
             if !bar.is_empty() {
                 self.fill_rect(bar, self.theme.blank);
             }
@@ -5940,41 +6035,6 @@ impl Comp {
 
     /// The four bands of `outer` around `inner` (top, bottom, left, right;
     /// empty ones included) -- the floor a client's placement leaves bare.
-    fn bars_around(outer: Rect, inner: Rect) -> [Rect; 4] {
-        if inner.is_empty() {
-            return [outer, Rect::ZERO, Rect::ZERO, Rect::ZERO];
-        }
-        let ox1 = outer.x + outer.w;
-        let oy1 = outer.y + outer.h;
-        let ix1 = inner.x + inner.w;
-        let iy1 = inner.y + inner.h;
-        [
-            Rect {
-                x: outer.x,
-                y: outer.y,
-                w: outer.w,
-                h: inner.y.saturating_sub(outer.y),
-            },
-            Rect {
-                x: outer.x,
-                y: iy1.min(oy1),
-                w: outer.w,
-                h: oy1.saturating_sub(iy1),
-            },
-            Rect {
-                x: outer.x,
-                y: inner.y,
-                w: inner.x.saturating_sub(outer.x),
-                h: inner.h,
-            },
-            Rect {
-                x: ix1.min(ox1),
-                y: inner.y,
-                w: ox1.saturating_sub(ix1),
-                h: inner.h,
-            },
-        ]
-    }
 
     /// Compose every visible hosted surface's last-presented slot into the
     /// screen BUFFER at its current placement -- the structural repaint's
@@ -7646,13 +7706,43 @@ impl Comp {
         if r.is_empty() {
             return;
         }
+        if self.screen.is_none() {
+            return;
+        }
+        // H-3c: the menu composes last -- re-assert it in the buffer under
+        // this push before the upload carries the region.
+        self.menu_reassert(r);
+        // Section 10 (amended at `b62a761b`): while a card stands, the parts
+        // of this write that fall in its effect ring are NOT uploaded. The
+        // effects were blended once at placement and a blend is not
+        // idempotent, so the display keeps them while the buffer beneath is
+        // free to drift; `menu_heal` reconciles the two at dismiss. The
+        // card's own rect is re-admitted -- `menu_reassert` has just copied
+        // it back opaquely, so nothing underneath it can show through.
+        match self.menu {
+            Some(m) if !m.fx.is_empty() => {
+                for piece in pane::menu_push_allowed(r, m.fx, m.rect) {
+                    if !piece.is_empty() {
+                        self.screen_push_raw(piece);
+                    }
+                }
+            }
+            _ => self.screen_push_raw(r),
+        }
+    }
+
+    /// Upload + flush one screen rect with NO menu re-assert and NO effect
+    /// suppression -- the transport half of `screen_push`. Called directly
+    /// only by `screen_push` itself and by `menu_paint_effects`, which must
+    /// push the very region `screen_push` exists to withhold.
+    fn screen_push_raw(&mut self, r: Rect) {
+        if r.is_empty() {
+            return;
+        }
         let res = match &self.screen {
             Some(s) => s.res,
             None => return,
         };
-        // H-3c: the menu composes last -- re-assert it in the buffer under
-        // this push before the upload carries the region.
-        self.menu_reassert(r);
         let dw = self.gpu.width as u64;
         let off = ((r.y as u64) * dw + r.x as u64) * 4;
         let t0 = Instant::now();
@@ -7673,7 +7763,20 @@ impl Comp {
             None => return,
         };
         let t0 = Instant::now();
-        let _ = self.gpu.flush(res, r.x, r.y, r.w, r.h);
+        // The same suppression as `screen_push`: a flush of the effect ring
+        // would reveal the GPU's un-effected pixels there.
+        match self.menu {
+            Some(m) if !m.fx.is_empty() => {
+                for piece in pane::menu_push_allowed(r, m.fx, m.rect) {
+                    if !piece.is_empty() {
+                        let _ = self.gpu.flush(res, piece.x, piece.y, piece.w, piece.h);
+                    }
+                }
+            }
+            _ => {
+                let _ = self.gpu.flush(res, r.x, r.y, r.w, r.h);
+            }
+        }
         self.cost_add(Cost::Flush, t0);
         // H-3c: a GPU-composed region under the placed menu -- put the menu
         // back on top (buffer + push of just the intersection).
@@ -8157,7 +8260,7 @@ impl Comp {
                 self.menu = None;
                 say!("tapestryd: menu {} dismissed ({})", n, self.menu_reason);
                 self.menu_reason = "retire";
-                Some(m.rect)
+                Some(m.heal_rect())
             }
             _ => None,
         };
