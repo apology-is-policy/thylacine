@@ -71,7 +71,7 @@ The Thylacine (abstractly depicted in the logo above) is an extinct (though I be
 ### Halcyon, the first light
 
 ![](readme_assets/halcyon/halc1.png)
-![](readme_assets/halcyon/halc1.png)
+![](readme_assets/halcyon/halc2.png)
 
 ### DOSBox-X Ported via Pouch
 
