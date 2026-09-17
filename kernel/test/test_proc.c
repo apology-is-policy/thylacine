@@ -2202,3 +2202,92 @@ void test_proc_exec_drops_image_note_state(void) {
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
 }
+
+// =============================================================================
+// IM-2: the rfork-vs-teardown straggler close (specs/imperium.tla Fork vs
+// BUGGY_STRAGGLER; IMPERIUM-DESIGN.md 11.4 G5; I-25 STRENGTHENED). A parent
+// whose group_exit_msg is set -- by the legate sweep, a kill, an exit_group --
+// cannot publish a child: rfork_internal re-checks the flag under the
+// g_proc_table_lock hold that links the child, fails, and rolls the built
+// child (Proc + its never-readied Thread) back. Driven through the REAL rfork
+// from a real child Proc: the test thread flags it under the table lock exactly
+// as the sweep would (proc_group_terminate), then releases it to fork. The
+// unflagged twin is the positive control one variable away, and both report
+// their thread / child counts so the rollback's completeness is measured, not
+// assumed. (The child is a kernel-entry Proc, so the flag never kills it at an
+// EL0 tail; it exits on its own.)
+// =============================================================================
+
+enum { STRAG_CLEAN = 1, STRAG_FLAGGED = 2 };
+static struct Proc *volatile g_strag_child_proc;
+static volatile int          g_strag_phase;   // 0 -> 1 (child up) -> 2 (go) -> 3 (done)
+static volatile int          g_strag_rc;
+static volatile unsigned     g_strag_threads_after;
+static volatile unsigned     g_strag_kids_after;
+
+static void strag_grandchild(void *arg) {
+    (void)arg;
+    exits("ok");
+}
+
+static void strag_child(void *arg) {
+    (void)arg;
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) extinction("strag_child: no proc");
+    struct Proc *p = t->proc;
+    __atomic_store_n(&g_strag_child_proc, p, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_strag_phase, 1, __ATOMIC_RELEASE);
+    TEST_YIELD_UNTIL_PROC(__atomic_load_n(&g_strag_phase, __ATOMIC_ACQUIRE) == 2);
+    int rc = rfork(RFPROC, strag_grandchild, NULL);
+    if (rc > 0) {
+        int st = -1;
+        (void)wait_pid(&st);
+    }
+    g_strag_rc            = rc;
+    g_strag_threads_after = __atomic_load_n(&p->thread_count, __ATOMIC_ACQUIRE);
+    g_strag_kids_after    = __atomic_load_n(&p->child_count, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&g_strag_phase, 3, __ATOMIC_RELEASE);
+    exits("ok");
+}
+
+static void strag_run(int role) {
+    __atomic_store_n(&g_strag_child_proc, NULL, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_strag_phase, 0, __ATOMIC_RELEASE);
+    g_strag_rc = -99; g_strag_threads_after = 99u; g_strag_kids_after = 99u;
+
+    int pid = rfork(RFPROC, strag_child, NULL);
+    TEST_ASSERT(pid > 0, "strag child rfork");
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_strag_phase, __ATOMIC_ACQUIRE) == 1);
+
+    if (role == STRAG_FLAGGED) {
+        struct Proc *cp = __atomic_load_n(&g_strag_child_proc, __ATOMIC_ACQUIRE);
+        TEST_ASSERT(cp != NULL, "child published its Proc");
+        irq_state_t s = proc_table_lock_acquire();
+        proc_group_terminate(cp, "im2 straggler test");   // what the sweep does
+        proc_table_lock_release(s);
+    }
+    __atomic_store_n(&g_strag_phase, 2, __ATOMIC_RELEASE);
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_strag_phase, __ATOMIC_ACQUIRE) == 3);
+
+    int status = -42;
+    int reaped = wait_pid(&status);
+    TEST_EXPECT_EQ(reaped, pid, "reaped the strag child");
+}
+
+void test_proc_rfork_refused_while_terminating(void) {
+    // Positive control first: an unflagged parent forks, reaps, reports.
+    strag_run(STRAG_CLEAN);
+    TEST_ASSERT(g_strag_rc > 0, "clean parent: rfork succeeds");
+    TEST_EXPECT_EQ((int)g_strag_threads_after, 1, "clean parent: one thread after");
+    TEST_EXPECT_EQ((int)g_strag_kids_after, 0, "clean parent: grandchild reaped");
+
+    // The straggler close: the SAME parent shape, flagged under the table lock
+    // before it forks -> the rfork fails, and nothing of the built child
+    // survives (its Thread unlinked, its Proc never published).
+    strag_run(STRAG_FLAGGED);
+    TEST_EXPECT_EQ(g_strag_rc, -1, "terminating parent: rfork REFUSED");
+    TEST_EXPECT_EQ((int)g_strag_threads_after, 1,
+                   "terminating parent: the rolled-back child's thread is gone");
+    TEST_EXPECT_EQ((int)g_strag_kids_after, 0,
+                   "terminating parent: no child was published");
+}

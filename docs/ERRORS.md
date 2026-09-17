@@ -372,3 +372,19 @@ See CLAUDE.md §"Audit-triggering changes" for the row.
 | Pouch `snare:*` → POSIX signal mapping     | DEFERRED | v1.x      |
 | Structured 64-bit exit_status              | DEFERRED | v1.x      |
 | Retroactive `-T_E_*` rollout to old syscalls | DEFERRED | per-touch |
+
+### Imperium integration (2026-09-17)
+
+The reserved native syscall slots are now implemented without renumbering
+DMA_SEGMENTS (112) or the native-top sentinel (113):
+
+| Syscall | Arguments | Result |
+|---|---|---|
+| CONSOLE_EPISODE (110) | op: ARM=1 or END=2 | 0 on success; -1 for unauthorized/invalid operations or END without an open episode |
+| CAP_GRANT_IMPERIUM (111) | cap_mask, target_stripes, valid_for_ns, session_id, flags | 0 on registered grant; -1 for invalid/unauthorized grant, unknown flags, or an out-of-mask propagating request |
+
+Flag 1 selects propagation. Flag 0 retains ordinary clearance behavior.
+CAP_POST_SERVICE is bit 13 and follows elevation-only grant/redeem rules.
+The existing `/srv` WALK_CREATE failure convention remains -1, including
+missing post authority, occupied/protected names and exhausted admission quota.
+Shell `mount`/`unmount` translate these failures to status 1 plus `$errstr`.

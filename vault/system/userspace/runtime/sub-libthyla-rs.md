@@ -42,7 +42,7 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-09-16
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -61,6 +61,13 @@ program ask the kernel to do" but **"what does the library add, and where does
 what it adds disagree with what it says it adds"**.
 
 ## Contract
+
+**Imperium/Haul ABI mirrors (2026-09-17).** The native wrappers add console
+episode operations at 110, propagating grant at 111, and POST_SERVICE bit 13,
+while preserving DMA_SEGMENTS=112. The cap helper exposes the grant flag, and
+the notes vocabulary includes session hangup. Haul uses existing WALK_CREATE,
+SRV_ACCEPT and SRV_PEER wrappers; it grants itself no authority in userspace.
+
 
 A native binary does three things and gets a runtime:
 

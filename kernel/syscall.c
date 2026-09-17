@@ -8622,6 +8622,15 @@ int spawn_perm_grant_check(struct Proc *p, u32 perm_flags) {
     if ((perm_flags & SPAWN_PERM_MAY_RAISE_PAGE_BUDGET)
             && !proc_is_console_attached(p)
             && !proc_may_raise_page_budget(p))                     return -1;
+    // arm-6: SESSION_HANGUP takes the MAY_POST_SERVICE one-hop shape (a
+    // console-attached granter OR a holder of the post-service bit) -- login's
+    // session-management authority, the same gate CONSOLE_OWNER uses. The
+    // hangup terminates only same-session members (a Proc's own descendants),
+    // so it confers no cross-authority reach; the gate just scopes WHO may set
+    // up a self-reclaiming session to the login-shaped callers that need it.
+    if ((perm_flags & SPAWN_PERM_SESSION_HANGUP)
+            && !proc_is_console_attached(p)
+            && !proc_may_post_service(p))                          return -1;
     return 0;
 }
 
@@ -8656,6 +8665,16 @@ void apply_spawn_perms(struct Proc *p, u32 perm_flags) {
     }
     if (perm_flags & SPAWN_PERM_MAY_RAISE_PAGE_BUDGET) {
         proc_mark_may_raise_page_budget(p);   // CL-5: the raise authority
+    }
+    if (perm_flags & SPAWN_PERM_SESSION_HANGUP) {
+        // arm-6 (IDENTITY-DESIGN §9.9.1): become a NEW session leader, then arm
+        // the hangup. proc_setsid's leader-guard passes here -- post-rfork the
+        // child still carries the parent's pgid (!= its own pid), so it is not
+        // yet a group leader. Arm the flag only when setsid actually made us the
+        // leader; the death hook re-checks sid == pid, so a failed setsid leaves
+        // the flag inert rather than hanging up the parent's session.
+        if (proc_setsid(p) > 0)
+            proc_arm_session_hangup(p);
     }
     if (perm_flags & ~SPAWN_PERM_ALL) {
         extinction("apply_spawn_perms: unknown SPAWN_PERM_* bit");
@@ -10028,18 +10047,25 @@ static s64 sys_rfork_core(struct exception_context *ctx, unsigned flags,
     };
 
     // I-43 (VIVARIUM.md): a Linux fork INHERITS the parent's capabilities, so
-    // the PHENO_LINUX clone path forks with CAP_ALL as the mask -- which
+    // the PHENO_LINUX clone path forks with the FULL inheritable mask -- which
     // rfork_internal intersects with the parent's actually-held caps and then
-    // strips ~CAP_ELEVATION_ONLY, so the child gets exactly parent_caps minus
-    // elevation (I-2: <= parent, never grown; elevation never propagates by
-    // inheritance). Without this a shell-forked phenotype program (git,
-    // anything) loses every cap the container was granted -- getrandom(2), for
-    // one, would fail in a forked child that the entrypoint could call fine.
+    // strips the elevation-only bits, CARVED by the parent's legate scope
+    // (IM-2): the child gets parent_caps minus elevation, plus exactly the
+    // caps a PROPAGATING scope flows (I-2: <= parent, never grown; elevation
+    // propagates only by that carve). The mask names CAP_ELEVATION_ONLY too
+    // because the carve, not the mask, is what bounds the flow: with CAP_ALL
+    // alone a Linux child of an imperium sub-shell would be LESS elevated than
+    // a native child spawned with a full mask -- a phenotype conferring less
+    // authority is as much an I-43 breach as one conferring more. Pre-IM-2 the
+    // two masks were bit-identical after the unconditional strip. Without the
+    // inheritance a shell-forked phenotype program (git, anything) loses every
+    // cap the container was granted -- getrandom(2), for one, would fail in a
+    // forked child that the entrypoint could call fine.
     // NATIVE fork keeps CAP_NONE (Thylacine's stronger fork-zeros-caps default):
     // a native program confers caps explicitly at spawn, never by inheritance.
     struct Proc *p = t->proc;
     int pid = (p && p->phenotype == PHENO_LINUX)
-                  ? rfork_forked_with_caps(flags, &fc, CAP_ALL)
+                  ? rfork_forked_with_caps(flags, &fc, CAP_ALL | CAP_ELEVATION_ONLY)
                   : rfork_forked(flags, &fc);
     if (pid < 0) return -(s64)T_E_AGAIN;
 
@@ -10180,12 +10206,11 @@ int sys_srv_accept_for_proc(struct Proc *p, hidx_t service_h) {
     // that was tombstoned and rebound by a different poster.
     u64 caller = proc_stripes(p);
     if (caller == 0)                                    return -1;
-    if (svc->poster_stripes != caller)                  return -1;
 
     // Block until a connection is on the backlog. NULL means the service
     // stopped being LIVE while we blocked (the poster exited / a test
     // reset the registry) — fail closed.
-    struct SrvConn *cn = srv_accept_blocking(svc);
+    struct SrvConn *cn = srv_accept_blocking(svc, caller);
     if (!cn) return -1;
 
     // Wrap the accepted SrvConn in a devsrv connection Spoor — corvus's
@@ -10385,6 +10410,23 @@ static s64 sys_cap_grant_clearance_handler(u64 cap_mask, u64 target_stripes,
     return (rc >= 0) ? 0 : -1;
 }
 
+// SYS_CAP_GRANT_IMPERIUM (IM-2; IMPERIUM-DESIGN.md 11.4) -- the clearance
+// grant with a flags word (the 40-byte /cap/grant form), same chrooted-corvus
+// bridge reasoning as SYS_CAP_GRANT_CLEARANCE. Forwards to
+// cap_register_imperium_grant_for_writer, which enforces the CAP_GRANT_-
+// CLEARANCE gate, every clearance bound, the flag set and the PROPAGATING
+// cap bound (CAP_GRANTABLE_IMPERIUM). The redeem rides SYS_CAP_USE.
+static s64 sys_cap_grant_imperium_handler(u64 cap_mask, u64 target_stripes,
+                                          u64 valid_for_ns, u64 session_id,
+                                          u64 flags) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc)                                    return -1;
+    long rc = cap_register_imperium_grant_for_writer(
+        t->proc, (caps_t)cap_mask, target_stripes, valid_for_ns, session_id,
+        flags);
+    return (rc >= 0) ? 0 : -1;
+}
+
 // =============================================================================
 // SYS_POLL — the multi-fd wait/wake primitive (P5-poll-a).
 //
@@ -10504,6 +10546,20 @@ static s64 sys_console_relinquish_handler(void) {
     if (!proc_is_console_attached(p))  return -1;
     proc_console_relinquish(p);
     return 0;
+}
+
+// SYS_CONSOLE_EPISODE -- the trusted EPISODE's control ops (IM-1, I-27). The
+// gate (the caller IS the trusted login authority) and the act share one
+// g_proc_table_lock hold in proc_console_episode; this handler only resolves
+// the caller. Returns 0 / -1 (a non-trusted caller, a bad op, END with no
+// open episode).
+static s64 sys_console_episode_handler(u64 op) {
+    struct Thread *t = current_thread();
+    if (!t)                            return -1;
+    struct Proc *p = t->proc;
+    if (!p)                            return -1;
+    if (op > 0xffffffffull)            return -1;
+    return (s64)proc_console_episode(p, (u32)op);
 }
 
 // SYS_CONSOLE_OPEN core -- attach /dev/cons + install a KOBJ_SPOOR R|W handle.
@@ -14565,6 +14621,12 @@ void syscall_dispatch(struct exception_context *ctx) {
             ctx->regs[0], ctx->regs[1], ctx->regs[2], ctx->regs[3]);
         return;
 
+    case SYS_CAP_GRANT_IMPERIUM:
+        ctx->regs[0] = (u64)sys_cap_grant_imperium_handler(
+            ctx->regs[0], ctx->regs[1], ctx->regs[2], ctx->regs[3],
+            ctx->regs[4]);
+        return;
+
     case SYS_BOOT_COMPLETE:
         ctx->regs[0] = (u64)sys_boot_complete_handler();
         return;
@@ -14729,6 +14791,11 @@ void syscall_dispatch(struct exception_context *ctx) {
         ctx->regs[0] = (u64)sys_open_create_handler(
             ctx->regs[0], ctx->regs[1], ctx->regs[2], ctx->regs[3],
             ctx->regs[4]);
+        return;
+
+    // IM-1: the trusted EPISODE (IMPERIUM-DESIGN.md 11.3; I-27).
+    case SYS_CONSOLE_EPISODE:
+        ctx->regs[0] = (u64)sys_console_episode_handler(ctx->regs[0]);
         return;
 
     // I-42 / CL-7k: the JIT capability.

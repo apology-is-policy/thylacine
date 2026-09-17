@@ -147,10 +147,22 @@ struct Thread;
 // and a thread masking the bit defers every tty note.
 #define NOTE_BIT_TTY         5u
 
+// IM-1 (IMPERIUM-DESIGN.md 11.3, ratified fork F3): the `sak` trusted-path
+// note -- "a serial BREAK opened a trusted EPISODE; you are its consumer".
+// Posted by proc_console_sak to the trusted login authority (corvus), which
+// reads it off its notes fd. Kernel-synthetic-only on the POST axis (the
+// tty:* gate's shape: notes_post refuses a userspace poster by name) --
+// else any Proc could fake the operator's attention gesture and drive the
+// authority into a prompt nobody asked for. Default IGNORE: a note nobody
+// consumes must never terminate the TCB. Its own bit, so a consumer can
+// mask exactly it.
+#define NOTE_BIT_SAK         6u
+
 // F4 audit close: includes NOTE_BIT_SNARE (bit 4) for the snare:*
 // family even though no v1.0 consumer exists; reserves the bit
-// position for v1.x. PTY-1b adds NOTE_BIT_TTY (bit 5), live.
-#define NOTE_MASK_SUPPORTED  0x3fu
+// position for v1.x. PTY-1b adds NOTE_BIT_TTY (bit 5), live. IM-1 adds
+// NOTE_BIT_SAK (bit 6), live.
+#define NOTE_MASK_SUPPORTED  0x7fu
 
 // #15: the DEFAULT ACTION of a note -- what happens when nobody catches it.
 // One value per row of `g_known_notes`, so a note's disposition is a property
@@ -314,6 +326,15 @@ _Static_assert(sizeof(NOTE_NAME_TTY_QUIT) <= NOTE_NAME_MAX,
                "NOTE_NAME_TTY_QUIT does not fit NOTE_NAME_MAX");
 _Static_assert(sizeof(NOTE_NAME_TTY_HUP) <= NOTE_NAME_MAX,
                "NOTE_NAME_TTY_HUP does not fit NOTE_NAME_MAX");
+
+// IM-1: the trusted-path note (NOTE_BIT_SAK above). ONE name, no family
+// prefix: there is exactly one attention gesture. Kernel-synthetic-POST
+// (notes_post refuses it from SYS_POSTNOTE by exact name), catchable,
+// default IGNORE. ABI: docs/ERRORS.md "The trusted-path note".
+#define NOTE_NAME_SAK        "sak"
+
+_Static_assert(sizeof(NOTE_NAME_SAK) <= NOTE_NAME_MAX,
+               "NOTE_NAME_SAK does not fit NOTE_NAME_MAX");
 
 _Static_assert(sizeof(NOTE_NAME_SNARE_ALIGN) <= NOTE_NAME_MAX,
                "NOTE_NAME_SNARE_ALIGN does not fit NOTE_NAME_MAX");

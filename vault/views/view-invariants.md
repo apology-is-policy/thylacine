@@ -22,11 +22,13 @@ Generated from note fields — do not edit between the markers
 | I-17 | [[inv-i17]] | prose | sub-kernel-sched, sub-kernel-timer | spec-scheduler, gate-smp |
 | I-18 | [[inv-i18]] | spec | sub-kernel-sched-smp, sub-kernel-gic | spec-scheduler, gate-smp |
 | I-19 | [[inv-i19]] | prose | sub-kernel-notes | prose, gate-smp |
+| I-2 | [[inv-i2]] | spec | sub-kernel-caps, sub-kernel-proc, sub-imperium, sub-haul | spec-imperium, gate-smp |
 | I-20 | [[inv-i20]] | spec | sub-ptyfs, sub-kernel-pts, sub-kernel-jobctl, sub-kernel-proc | spec-pty, spec-pty-stop, prose, gate-smp |
 | I-21 | [[inv-i21]] | spec | sub-kernel-sched-smp, sub-kernel-thread, sub-kernel-exception | spec-sched-alpha, spec-sched-oncpu, spec-sched-ctxsw, gate-smp |
 | I-22 | [[inv-i22]] | prose | sub-kernel-perm, sub-kernel-caps, sub-kernel-devproc | prose, gate-smp |
 | I-23 | [[inv-i23]] | prose | sub-corvus | prose |
 | I-24 | [[inv-i24]] | spec | sub-kernel-death, sub-kernel-torpor, sub-pouch-process, sub-pouch-signal | spec-death-wake, gate-smp |
+| I-25 | [[inv-i25]] | spec | sub-kernel-caps, sub-kernel-proc, sub-kernel-death, sub-imperium | spec-imperium, gate-smp, gate-interactive |
 | I-26 | [[inv-i26]] | prose | sub-kernel-devproc | prose, gate-smp |
 | I-27 | [[inv-i27]] | prose | sub-kernel-cons, sub-kernel-devdev | prose, gate-interactive, gate-smp |
 | I-28 | [[inv-i28]] | prose | sub-kernel-stalk, sub-pouch-fs, sub-pouch-net, sub-kernel-content | gate-smp |

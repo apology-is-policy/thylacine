@@ -10,6 +10,11 @@ pinned-by:
   - "kernel/cons.c (cons_kernel_writer_begin/end -- the DELIVERY half)"
   - "docs/TOOLING.md §10"
 mirrors:
+  - "tools/interactive/im1-sak-lever.exp"
+  - "tools/interactive/im3-lex-curiata.exp"
+  - "tools/interactive/ls-bghome-stall.exp"
+  - "tools/interactive/ls-imperium.exp"
+  - "tools/interactive/haul-post.exp"
   - "tools/test.sh"
   - "tools/smp-multiboot.sh"
   - "tools/test-cross-reboot.sh"
@@ -51,7 +56,7 @@ literal-mentions:
   - "tools/warp-host.sh (a usage comment)"
   - "tools/interactive/go8d.exp (a prose note)"
 created: 2026-08-01
-updated: 2026-09-14
+updated: 2026-09-17
 ---
 ## The surface
 

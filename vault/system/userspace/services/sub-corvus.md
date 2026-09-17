@@ -5,6 +5,7 @@ title: "corvus — the key agent: one session, one keypair in mlock'd RAM, and a
 parent: moc-userspace
 code:
   - usr/corvus/src/main.rs
+  - usr/corvus/src/provincia.rs
   - usr/corvus/Cargo.toml
 audit: hard
 guarded-by: [inv-i22, inv-i23]
@@ -14,7 +15,7 @@ hazards: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md", "docs/IDENTITY-DESIGN.md"]
 created: 2026-08-04
-updated: 2026-09-06
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -45,6 +46,17 @@ exist, but the interesting half is that everything above rides the same
 **15-verb** wire on the same one connection.
 
 ## Contract
+
+**Imperium authorization (2026-09-17).** Verbs 19 (IMPERIUM_REQUEST) and
+20 (CLEARANCE_LIST_SELF) add the lex curiata flow. The request records intent;
+only a SAK-backed trusted episode renders the exact restricted cap set and
+accepts the imperium key. `provincia.rs` composes that trusted panel. The
+imperium level includes DAC_OVERRIDE, CHOWN, KILL and POST_SERVICE; the tool
+can restrict it, never expand it. The pending peer is revalidated before
+conferral, and the propagating grant is redeemed through the kernel. Key
+state, eligibility and rate limits remain corvus-owned. See [[sub-imperium]]
+and `docs/IMPERIUM-DESIGN.md §11` for the integrated contract.
+
 
 **Reached as a 9P server.** corvus posts `/srv/corvus` and serves a
 two-node namespace: a directory root containing a single `ctl` file.

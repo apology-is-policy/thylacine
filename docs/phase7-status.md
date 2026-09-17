@@ -15,6 +15,28 @@ The Phase 7 entry decision (taken under the U-1 scripture conversation):
 - **Runtime**: native libthyla-rs (the Plan 9 split — see `docs/ARCHITECTURE.md §3.5` + `CLAUDE.md` "Native vs ported userspace programs").
 - **Workspace**: Cargo workspace at `usr/utopia/`; Helix vendored separately at `usr/helix/`.
 
+## Haul completion integration — 2026-09-17
+
+The operator authorized bringing Haul's required Imperium dependencies into
+main and requested single-agent work. The implementation provides
+`imperium post`, `haul --post NAME ... &`, and same-shell `mount`/`unmount`.
+The cap is elevation-only bit 13; kernel admission is bounded to two live
+posts per scope and four cap-owned registry slots, with generation-checked
+recycling of exited cap posters. TCB names remain protected.
+
+Verified before integration: encrypted remote file reads in the existing
+shell; rejection of a second mount; unmount/reap; repost under a new name;
+abdication with a live mount; existing private/child encrypted path and remote
+hangup; Imperium conferral/denial, background teardown and cross-user logout.
+The workflow also exposed and fixed the shell's early `$status` reset, with
+boot regression probes. The Imperium harness now waits for a complete PID
+line rather than accepting a prefix from a split serial read.
+
+Host tests, KATs, model results and the completed multi-boot matrix are recorded
+in the integration commit and `docs/HAUL-INTEGRATION-REVIEW.md`. This is a
+self-review, not a new independent adversarial audit. Existing credential
+custody and back-pressure test caveats remain in [[sub-haul]].
+
 ## Landed chunks
 
 **The AUX-track notes / job-control block (2026-08-13..16)** sits at the top of

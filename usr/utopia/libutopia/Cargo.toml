@@ -24,6 +24,9 @@ path = "src/lib.rs"
 # PARSING and formatting stay pure (and testable); only the built-ins whose
 # whole purpose is to mutate this Proc reach for a syscall.
 libthyla-rs = { path = "../../lib/libthyla-rs" }
+# IM-4: the shared, host-tested imperium /proc-line parser + fasces renderer
+# (one parser for the kernel ABI line, also used by the `imperium` tool).
+fasces = { path = "../../lib/fasces" }
 # H-1c: the Beacon zone frames (wire emission only -- pure bytes, no
 # syscalls; the ut binary resolves the tier and hands Repl the flag, so
 # the no-kernel-surfaces layering above holds).

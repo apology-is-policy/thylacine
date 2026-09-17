@@ -1,0 +1,35 @@
+#!/usr/bin/expect -f
+# Session logout regression: a background job must not pin the home mount
+# after its login session ends. Exercises session hangup + Territory-at-exit.
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+lc_run_expect "pwd" "/home/michael"
+
+lc_send "sleep 314159 &"
+set timeout 15
+expect {
+    -re {\[\d+\][ \t]+(\d+)\r?\r?\n} { }
+    -re {EXTINCTION:}      { lc_fail "kernel extinction launching bg sleep" }
+    timeout               { lc_fail "no `\[N\] pid` line for the background sleep" }
+    eof                   { lc_fail "unexpected EOF launching bg sleep" }
+}
+
+lc_send "exit"
+set timeout 90
+expect {
+    -ex "Thylacine login: " {
+        lc_pass "logout->login completed; a background job did not pin the home"
+        lc_quit
+        exit 0
+    }
+    -re {EXTINCTION:} { lc_fail "kernel extinction after exit" }
+    timeout {
+        lc_fail "STALL: no login prompt within 90s -- a plain orphaned bg job pins the home mount (GENERAL bug)"
+    }
+    eof { lc_fail "qemu exited after exit" }
+}
+exit 0

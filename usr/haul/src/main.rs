@@ -342,6 +342,7 @@ struct DownCtx {
     /// POLLOUT (`kernel/pipe.c`), so here it IS `dst`.
     dst_ready: Ready,
     opener: Option<npxf::Opener>,
+    close_on_finish: bool, // pipe writer is private; a posted connection is shared
 }
 
 /// The kernel -> server pump ended: record it and exit the thread, closing
@@ -393,7 +394,7 @@ fn finish_up() -> ! {
 /// main watches STOPPED.
 fn finish_down(ctx: &DownCtx) -> ! {
     let _ = STOPPED.compare_exchange(STOP_NONE, STOP_DOWN, Ordering::AcqRel, Ordering::Acquire);
-    let _ = unsafe { t_close(ctx.dst) };
+    if ctx.close_on_finish { let _ = unsafe { t_close(ctx.dst) }; }
     unsafe { libthyla_rs::t_thread_exit() };
 }
 
@@ -551,38 +552,27 @@ fn spawn_pump<T: Pump>(ctx: T) -> Result<(), &'static str> {
 }
 
 const USAGE: &str = "\
-usage: haul [-a aname] [-t file | --token-env VAR] host!port mountpoint [cmd ...]
-  Mount a remote 9P2000.L tree served over TCP.
+usage: haul [-a aname] [-t file | --token-env VAR] [-v] HOST!PORT MOUNTPOINT [COMMAND ...]
+       haul --post NAME [-t file | --token-env VAR] [-v] HOST!PORT
 
-  Without a command haul parks, holding the mount, until the peer hangs up.
-  A mount lands in the calling Proc's namespace ONLY, so a backgrounded
-  `haul ... &` is not visible to the shell that started it.
+Without --post, mount in haul's own namespace and optionally run a command
+there (use an absolute command path, e.g. /bin/ut). A backgrounded private
+mount cannot appear in the parent shell.
 
-  With a command, haul mounts and then runs it -- but a spawned child is NOT
-  currently seeing the mount, which is an open kernel bug and not a property of
-  this tool. Until it is fixed, prefer the parking form. The command is resolved
-  from the namespace root, with no PATH search: write /bin/cat, not cat.
-  Everything after the command word is passed to it verbatim; `--` ends haul's
-  own options early.
+Under imperium post, --post publishes one same-user byte service. In the
+same shell: mount /srv/NAME /n/NAME [aname]. Unmount with: unmount /n/NAME.
+The service accepts one mount and ends with its transport or imperium scope.
+A second mount is refused; start another haul with another name if needed.
 
-  -a aname        the tree to attach (default \"/\")
-  -t file         shared token file -- enables npxf's encrypted channel
-  --token-env VAR read the token from /env/VAR instead
-  -v              report each step (dial, handshake, attach, mount)
-  --help          show this help
-
-The address takes the Plan 9 form host!port, or host:port. With no token the
-connection is PLAIN 9P; npxf servers always require one.
-
-Note: a LITERAL host!port is typeable as-is. A composed one is not --
-$host!$port lexes as three tokens and ut glues words only with ~ and ^, so it
-splits; single quotes suppress the expansion, so write \"$host:$port\" instead.
-
-Example:
-  haul -t /cfg/npxf.token '10.0.2.100!7820' /n/host
+-t FILE or --token-env VAR enables the npxf encrypted channel. Without a
+token the connection is PLAIN 9P. HOST must be dotted-quad IPv4; HOST:PORT
+also works. For variables in ut use a quoted \"$host:$port\" address.
+-a sets the private attach name (default /); --post leaves it to mount.
+-v reports progress; --help shows this text. Options precede the two operands.
 ";
 
 struct Parsed {
+    post: bool,
     addr: String,
     mountpoint: String,
     aname: String,
@@ -777,6 +767,7 @@ fn parse_args(args: Args) -> Result<Parsed, &'static str> {
         }
         Err(cmdline::Bad::MissingValue(m)) => return Err(m),
         Err(cmdline::Bad::UnknownOption) => return Err("unknown option"),
+        Err(cmdline::Bad::InvalidPost) => return Err("post mode wants NAME HOST!PORT; NAME is one /srv component (1..32 bytes); no command or -a (give aname to mount)"),
         Err(cmdline::Bad::DashAfterOperands) => {
             return Err("an option must come before the address; to run a command whose name \
                         starts with a dash, put -- after the mountpoint")
@@ -793,6 +784,7 @@ fn parse_args(args: Args) -> Result<Parsed, &'static str> {
     };
 
     Ok(Parsed {
+        post: plan.post,
         addr: plan.addr,
         mountpoint: plan.mountpoint,
         aname: plan.aname,
@@ -856,6 +848,34 @@ fn npxf_handshake(fd: i64, ready: Ready, token: &[u8]) -> Result<npxf::Session, 
     Ok(session)
 }
 
+// Creation is the kernel capability gate. A failed post never dials the peer.
+fn post_listener(name: &str) -> Result<i64, &'static str> {
+    use libthyla_rs::{t_open, t_walk_create, T_WALK_OPEN_FROM_ROOT, T_OPATH,
+                     T_OREAD, T_WALK_CREATE_DMSRVBYTE};
+    let srv = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv".as_ptr(), 4, T_OPATH) };
+    if srv < 0 { return Err("cannot open /srv"); }
+    let listener = unsafe { t_walk_create(srv, name.as_ptr(), name.len(), T_OREAD,
+                                          T_WALK_CREATE_DMSRVBYTE) };
+    let _ = unsafe { t_close(srv) };
+    if listener < 0 { return Err("cannot post service (requires imperium post, an unused name and a free service slot)"); }
+    Ok(listener)
+}
+
+fn accept_owner(listener: i64) -> Result<i64, &'static str> {
+    let uid = unsafe { libthyla_rs::t_getuid() };
+    if uid < 0 { return Err("cannot identify service owner"); }
+    loop {
+        let conn = unsafe { libthyla_rs::t_srv_accept(listener) };
+        if conn < 0 { return Err("accept"); }
+        let mut peer = libthyla_rs::TSrvPeerInfo::default();
+        let rc = unsafe { libthyla_rs::t_srv_peer(conn, &mut peer) };
+        if rc == 0 && peer.alive != 0 && peer.principal_id as i64 == uid {
+            return Ok(conn);
+        }
+        let _ = unsafe { t_close(conn) };
+    }
+}
+
 fn run(argv: Args) -> Result<(), &'static str> {
     let mut args = parse_args(argv)?;
 
@@ -876,6 +896,7 @@ fn run(argv: Args) -> Result<(), &'static str> {
         return Err("the command form needs stdin, stdout and stderr open (the command would otherwise inherit the connection)");
     }
 
+    let listener = if args.post { Some(post_listener(&args.mountpoint)?) } else { None };
     let (host, port) = haul::addr::split_dial(&args.addr)
         .ok_or("address needs a host and a port (host!port, or host:port)")?;
     let ip = Ipv4Addr::parse(host).map_err(|_| "the host is not a dotted-quad IPv4 address")?;
@@ -923,6 +944,29 @@ fn run(argv: Args) -> Result<(), &'static str> {
         None => (None, None),
     };
 
+    if let Some(listener) = listener {
+        say!("haul: /srv/{} posted for {} ({})", args.mountpoint, args.addr,
+             if encrypted { "npxf encrypted" } else { "PLAIN 9P" });
+        let conn = accept_owner(listener)?;
+        spawn_pump(UpCtx { src: conn, dst: tcp_fd, dst_ready: tcp_ready, sealer })?;
+        spawn_pump(DownCtx { src: tcp_fd, dst: conn, dst_ready: Ready(conn),
+                             opener, close_on_finish: false })?;
+        say!("haul: /srv/{} serving one mount", args.mountpoint);
+        step!("watching the posted connection and listener");
+        loop {
+            if STOPPED.load(Ordering::Acquire) != STOP_NONE {
+                return Err("posted connection ended");
+            }
+            // The remote 9P session belongs to the first client. Never splice
+            // a second client's tags/fids into it; close queued clients promptly.
+            if wait_ready(Ready(listener), libthyla_rs::T_POLLIN, 50) {
+                step!("refusing an additional mount");
+                let extra = unsafe { libthyla_rs::t_srv_accept(listener) };
+                if extra >= 0 { let _ = unsafe { t_close(extra) }; step!("additional mount closed"); }
+            }
+        }
+    }
+
     // Two half-duplex pipes: c2s carries T-messages, s2c carries R-messages.
     let (c2s_rd, c2s_wr) = unsafe { t_pipe() };
     let (s2c_rd, s2c_wr) = unsafe { t_pipe() };
@@ -945,6 +989,7 @@ fn run(argv: Args) -> Result<(), &'static str> {
         // A pipe's own fd carries real POLLOUT, so it is its own readiness.
         dst_ready: Ready(s2c_wr),
         opener,
+        close_on_finish: true,
     })?;
     step!("pumps up; attaching (Tversion + Tattach run inside the syscall)");
 

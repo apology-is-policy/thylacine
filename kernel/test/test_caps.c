@@ -273,3 +273,116 @@ void test_caps_rfork_inherits_legate_scope(void) {
     TEST_ASSERT((legate_gc_proc_flags & PROC_FLAG_LEGATE_ROOT) == 0,
                 "PROC_FLAG_LEGATE_ROOT leaked across rfork");
 }
+
+// IM-2 (IMPERIUM-DESIGN.md 11.4; specs/imperium.tla Fork / Flow; I-25
+// STRENGTHENED): under a PROPAGATING legate scope rfork lets exactly the
+// parent's legate_caps -- the set the root redeemed, never its further-
+// redeemed extras -- through the elevation-only strip:
+//     child = (parent & mask) & ~(ELEVATION_ONLY & ~flow)
+// The intermediate is a throwaway Proc that sets its OWN legate block the way
+// proc_become_legate would (the two-level pattern above): a root that ALSO
+// further-redeemed CAP_JIT, so caps carries the pair + JIT while legate_caps
+// carries only the pair. Three arms, one variable apart: the flag ON with a
+// full mask (the pair flows, JIT does not), the flag OFF (nothing flows: the
+// v1.0 strip), and the flag ON with a mask that omits the pair (the spawn mask
+// bounds everything, G9).
+struct flow_case {
+    u32    legate_flags;
+    caps_t mask;
+};
+static caps_t flow_gc_caps;
+static caps_t flow_gc_legate_caps;
+static u32    flow_gc_legate_flags;
+static u32    flow_gc_scope;
+static u32    flow_gc_proc_flags;
+static void flow_grandchild_thunk(void *arg) {
+    (void)arg;
+    struct Thread *t = current_thread();
+    if (!t)                          extinction("flow_gc: no current_thread");
+    struct Proc *p = t->proc;
+    if (!p)                          extinction("flow_gc: no proc");
+    flow_gc_caps         = p->caps;
+    flow_gc_legate_caps  = p->legate_caps;
+    flow_gc_legate_flags = p->legate_flags;
+    flow_gc_scope        = p->legate_scope_id;
+    flow_gc_proc_flags   = p->proc_flags;
+    exits("ok");
+}
+static void flow_intermediate_thunk(void *arg) {
+    const struct flow_case *fc = (const struct flow_case *)arg;
+    struct Thread *t = current_thread();
+    if (!t)                          extinction("flow_int: no current_thread");
+    struct Proc *p = t->proc;
+    if (!p)                          extinction("flow_int: no proc");
+    p->caps |= (CAP_ALL | CAP_DAC_OVERRIDE | CAP_CHOWN | CAP_JIT);
+    p->legate_caps        = CAP_DAC_OVERRIDE | CAP_CHOWN;
+    p->legate_flags       = fc->legate_flags;
+    p->legate_session_id  = 0x5E56u;
+    // proc_become_legate's publication order: the block, THEN the scope_id
+    // RELEASE store that rfork ACQUIRE-loads first.
+    __atomic_store_n(&p->legate_scope_id, 0xA4A5u, __ATOMIC_RELEASE);
+    __atomic_fetch_or(&p->proc_flags, PROC_FLAG_LEGATE_ROOT, __ATOMIC_RELEASE);
+
+    int gpid = rfork_with_caps(RFPROC, flow_grandchild_thunk, NULL, fc->mask);
+    if (gpid <= 0) extinction("flow intermediate rfork_with_caps failed");
+    int gstatus = -42;
+    int greaped = wait_pid(&gstatus);
+    if (greaped != gpid) extinction("flow intermediate wait_pid pid mismatch");
+    if (gstatus != 0)    extinction("flow grandchild exit status non-zero");
+    exits("ok");
+}
+static void flow_run(const struct flow_case *fc) {
+    flow_gc_caps = ~(caps_t)0; flow_gc_legate_caps = ~(caps_t)0;
+    flow_gc_legate_flags = 0xFFFFFFFFu; flow_gc_scope = 0; flow_gc_proc_flags = 0xFFFFFFFFu;
+    int ipid = rfork(RFPROC, flow_intermediate_thunk, (void *)fc);
+    TEST_ASSERT(ipid > 0, "flow intermediate rfork failed");
+    int istatus = -42;
+    int ireaped = wait_pid(&istatus);
+    TEST_EXPECT_EQ(ireaped, ipid, "flow intermediate wait_pid pid");
+    TEST_EXPECT_EQ(istatus, 0, "flow intermediate exit status");
+}
+
+void test_caps_rfork_flows_under_propagating_scope(void) {
+    static const struct flow_case c = { LEGATE_FLAG_PROPAGATING,
+                                        CAP_ALL | CAP_ELEVATION_ONLY };
+    flow_run(&c);
+    // Exactly the flowing pair crosses; the further-redeemed JIT does not, nor
+    // does anything else elevation-only.
+    TEST_EXPECT_EQ(flow_gc_caps, (caps_t)(CAP_ALL | CAP_DAC_OVERRIDE | CAP_CHOWN),
+                   "propagating rfork: the fork-grantable set + the flowing pair, nothing else");
+    TEST_EXPECT_EQ(flow_gc_legate_caps, (caps_t)(CAP_DAC_OVERRIDE | CAP_CHOWN),
+                   "the child's flowing set = what flowed in");
+    TEST_EXPECT_EQ(flow_gc_legate_flags, (u32)LEGATE_FLAG_PROPAGATING,
+                   "the propagating property inherits as a MEMBER property");
+    TEST_EXPECT_EQ((int)flow_gc_scope, 0xA4A5, "the tag inherits");
+    TEST_ASSERT((flow_gc_proc_flags & PROC_FLAG_LEGATE_ROOT) == 0,
+                "the ROOT flag never inherits");
+}
+
+void test_caps_rfork_no_flow_without_propagating(void) {
+    // The one-variable control: the same root, the same full mask, the flag
+    // OFF -- the v1.0 strip, bit-identical.
+    static const struct flow_case c = { 0u, CAP_ALL | CAP_ELEVATION_ONLY };
+    flow_run(&c);
+    TEST_EXPECT_EQ(flow_gc_caps, (caps_t)CAP_ALL,
+                   "plain scope: no elevation-only cap crosses");
+    TEST_EXPECT_EQ(flow_gc_legate_caps, (caps_t)0, "nothing flowed in");
+    TEST_EXPECT_EQ(flow_gc_legate_flags, (u32)0, "not propagating");
+    TEST_EXPECT_EQ((int)flow_gc_scope, 0xA4A5, "still a member (the tag inherits)");
+}
+
+void test_caps_rfork_flow_bounded_by_mask(void) {
+    // G9: the spawn mask bounds everything. The flag ON, the mask omits the
+    // flowing pair -> nothing elevated crosses, and the child's own flowing
+    // set records what it actually received (nothing), not what its parent
+    // offered -- so its descendants cannot regain it either.
+    static const struct flow_case c = { LEGATE_FLAG_PROPAGATING, CAP_ALL };
+    flow_run(&c);
+    TEST_EXPECT_EQ(flow_gc_caps, (caps_t)CAP_ALL,
+                   "mask without the flowing pair: the pair does not cross");
+    TEST_EXPECT_EQ(flow_gc_legate_caps, (caps_t)0,
+                   "the child's flowing set is what it holds of the flow: nothing");
+    TEST_EXPECT_EQ(flow_gc_legate_flags, (u32)LEGATE_FLAG_PROPAGATING,
+                   "the scope property still inherits (a scope-wide fact)");
+    TEST_EXPECT_EQ((int)flow_gc_scope, 0xA4A5, "the tag inherits");
+}

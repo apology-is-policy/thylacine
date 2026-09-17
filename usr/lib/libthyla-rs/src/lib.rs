@@ -255,11 +255,30 @@ pub const T_SYS_UNLINK: u64           = 58;
 // and composes create-else-open bounded (T_OEXCL / DMDIR are the exclusive
 // arms, server-atomic).
 pub const T_SYS_OPEN_CREATE: u64      = 109;
-pub const T_SYS_DMA_SEGMENTS: u64     = 112;   // WEAVE-SKEIN: a KObj_DMA's backing segment list (110/111 reserved to aux-3)
+pub const T_SYS_DMA_SEGMENTS: u64     = 112;   // WEAVE-SKEIN: a KObj_DMA's backing segment list (110/111 are Imperium)
+// IM-1 (IMPERIUM-DESIGN.md 11.3): the trusted EPISODE's control ops --
+// callable only by the trusted login authority (corvus). ARM declares the
+// caller an episode consumer (a serial BREAK then opens an episode: input
+// discarded, RAW forced, the non-attached world frozen, the `sak` note
+// posted); END closes the open episode. 0 / -1.
+pub const T_SYS_CONSOLE_EPISODE: u64  = 110;
+pub const T_CONSOLE_EPISODE_ARM: u64  = 1;
+pub const T_CONSOLE_EPISODE_END: u64  = 2;
 // A-2a (IDENTITY-DESIGN.md section 9.5): chmod/chown via Tsetattr.
 pub const T_SYS_WSTAT: u64            = 59;
 pub const T_SYS_EXIT_GROUP: u64       = 60;
 pub const T_SYS_CAP_GRANT_CLEARANCE: u64 = 61;  // A-4a clearance grant-side bridge
+// A-5a: attach the kernel UART console Dev (/dev/cons) as an fd. Gated on the
+// caller being console-ATTACHED -- the boot anchor (joey) and, post-SAK, the
+// trusted login authority (corvus; IM-3 reads the imperium key and writes the
+// provincia through it). -1 otherwise.
+pub const T_SYS_CONSOLE_OPEN: u64     = 64;
+// IM-2 (IMPERIUM-DESIGN.md 11.4): the clearance grant with a flags word (the
+// 40-byte /cap/grant form). flags 0 = a plain clearance grant;
+// T_CAP_GRANT_FLAG_PROPAGATING = the redeemed caps FLOW to the legate root's
+// rfork descendants (bounded to DAC_OVERRIDE|CHOWN|KILL by the kernel).
+pub const T_SYS_CAP_GRANT_IMPERIUM: u64 = 111;
+pub const T_CAP_GRANT_FLAG_PROPAGATING: u64 = 1 << 0;
 pub const T_SYS_OPEN: u64             = 65;     // A-5b-0/stalk-1 multi-component open
 // Loom -- the io_uring-inverted 9P ring transport (docs/LOOM.md). Backs the
 // native t::loom::Ring API (Loom-6d). SETUP maps the SQ/CQ Burrow + reports
@@ -589,6 +608,13 @@ pub const T_SPAWN_PERM_CONSOLE_TRUSTED: u64 = 1 << 1;
 // console-attach, I-27); gated like MAY_POST_SERVICE, so trusted /sbin/login
 // confers it on the session shell `ut`.
 pub const T_SPAWN_PERM_CONSOLE_OWNER: u64 = 1 << 2;
+// arm-6 (IDENTITY-DESIGN §9.9.1): make the child a NEW session leader + arm the
+// kernel session hangup, so when that leader exits the kernel terminates the
+// rest of its session -- how /sbin/login reclaims the user's session (and its
+// per-user encrypted home) at logout. Gated like MAY_POST_SERVICE (login holds
+// it). Bit 5 matches SPAWN_PERM_SESSION_HANGUP (bits 3/4 -- RENDERER, RAISE --
+// are unused by native callers, so they are not mirrored here).
+pub const T_SPAWN_PERM_SESSION_HANGUP: u64 = 1 << 5;
 
 // poll event bits — MUST mirror POLL* in kernel/include/thylacine/poll.h.
 // Linux values; the future musl shim is a no-op.
@@ -650,6 +676,10 @@ pub const T_NOTE_BIT_SNARE:      u8 = 4;
 // does defer a ^Z, and the kernel routes an all-masked pgrp's tty:susp to a
 // note POST whose stop is applied later at the EL0-return tail.
 pub const T_NOTE_BIT_TTY:        u8 = 5;
+// IM-1: the `sak` trusted-path note -- kernel-synthetic-only (a SYS_POSTNOTE
+// of the name is refused), posted to the trusted login authority when a
+// serial BREAK opens a trusted episode. Default IGNORE. Its own bit.
+pub const T_NOTE_BIT_SAK:        u8 = 6;
 
 // NOTE_MASK_SUPPORTED — the union of every NOTE_BIT_* the kernel knows
 // about today. Setting bits outside this is tolerated (no-op) so future
@@ -662,7 +692,7 @@ pub const T_NOTE_BIT_TTY:        u8 = 5;
 // ties it to the NoteClass set at compile time, which catches a variant added
 // without the bit; it CANNOT catch the kernel growing a bit this file never
 // hears about, because both sides of that check live here.
-pub const T_NOTE_MASK_SUPPORTED: u64 = 0x3f;
+pub const T_NOTE_MASK_SUPPORTED: u64 = 0x7f;
 
 // SYS_POSTNOTE sentinel for "send to my own Proc" (kernel maps pid == 0
 // to the calling Proc's pid; matches POSIX kill(0, sig) "send to my
@@ -709,6 +739,7 @@ pub const T_CAP_DAC_OVERRIDE: u64    = 1 << 7;   // elevation-only; perm_check r
 pub const T_CAP_CHOWN: u64           = 1 << 8;   // elevation-only; chown/chgrp-to-any
 pub const T_CAP_KILL: u64            = 1 << 9;   // elevation-only; cross-identity kill override
 pub const T_CAP_DEBUG: u64           = 1 << 10;  // elevation-only; cross-Proc debug authority (I-39)
+pub const T_CAP_POST_SERVICE: u64 = 1 << 13; // elevated /srv posting, propagated by imperium
 pub const T_CAP_JIT: u64             = 1 << 11;  // elevation-only; code-Burrow creation (I-42)
 
 // =============================================================================
@@ -2099,6 +2130,40 @@ pub unsafe fn t_cap_grant_clearance(
     x0
 }
 
+// t_cap_grant_imperium -- SYS_CAP_GRANT_IMPERIUM (IM-2): t_cap_grant_clearance
+// with a `flags` word. `flags` is 0 (a plain clearance grant) or
+// T_CAP_GRANT_FLAG_PROPAGATING (the target's scope becomes PROPAGATING: its
+// redeemed caps flow to its rfork descendants, which die with it; `cap_mask`
+// must then be within DAC_OVERRIDE|CHOWN|KILL). Caller must hold
+// CAP_GRANT_CLEARANCE (corvus). The target redeems via t_cap_use; a
+// PROPAGATING grant is redeemable only by a Proc in NO legate scope. Returns
+// 0 on success, -1 on gate fail / bad args / unknown flag / table full.
+///
+/// # Safety
+/// A raw syscall: the kernel validates every argument and fails closed, so
+/// the only contract is the ABI (register-passed scalars, no memory).
+#[inline(always)]
+pub unsafe fn t_cap_grant_imperium(
+    cap_mask: u64,
+    target_stripes: u64,
+    valid_for_ns: u64,
+    session_id: u64,
+    flags: u64,
+) -> i64 {
+    let mut x0: i64 = cap_mask as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") target_stripes,
+        in("x2") valid_for_ns,
+        in("x3") session_id,
+        in("x4") flags,
+        in("x8") T_SYS_CAP_GRANT_IMPERIUM,
+        options(nostack)
+    );
+    x0
+}
+
 // t_burrow_attach — request `length` bytes of anonymous, demand-zero,
 // read-write memory and have the kernel install it in the calling
 // Proc's address space. Returns the page-aligned base user-VA on
@@ -2680,6 +2745,39 @@ pub unsafe fn t_open_create(start_fd: i64, path: *const u8, path_len: usize,
         in("x3") omode as u64,
         in("x4") perm as u64,
         in("x8") T_SYS_OPEN_CREATE,
+        options(nostack)
+    );
+    x0
+}
+
+// t_console_open — attach the kernel console Dev (/dev/cons) and return an fd
+// carrying RIGHT_READ | RIGHT_WRITE, or -1 when the caller is not console-
+// attached (the A-5a gate: the console-trust anchor only -- joey at bringup,
+// the trusted login authority post-SAK). Reads drain the one global RX ring
+// under the single-reader slot; writes reach the UART through the console
+// writer role (an attached writer passes the IM-1 freeze).
+#[inline(always)]
+pub unsafe fn t_console_open() -> i64 {
+    let mut x0: i64;
+    asm!(
+        "svc #0",
+        lateout("x0") x0,
+        in("x8") T_SYS_CONSOLE_OPEN,
+        options(nostack)
+    );
+    x0
+}
+
+// t_console_episode — the trusted EPISODE's control ops (IM-1). `op` is
+// T_CONSOLE_EPISODE_ARM or T_CONSOLE_EPISODE_END. Callable only by the trusted
+// login authority; -1 otherwise, on a bad op, or on END with no open episode.
+#[inline(always)]
+pub unsafe fn t_console_episode(op: u64) -> i64 {
+    let mut x0: i64 = op as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x8") T_SYS_CONSOLE_EPISODE,
         options(nostack)
     );
     x0

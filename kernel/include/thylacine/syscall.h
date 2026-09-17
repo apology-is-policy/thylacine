@@ -2198,6 +2198,53 @@ enum {
     //   Audit-bearing: the #50 path-mutation-family row (AUDIT-TRIGGERS.md).
     SYS_OPEN_CREATE = 109,   // arg: start_fd(x0) path_va(x1) path_len(x2) omode(x3) perm(x4)
 
+    // IM-1 (IMPERIUM-DESIGN.md 11.3; TRUSTED-PATH.md 12; I-27 ENFORCED on the
+    // serial medium): SYS_CONSOLE_EPISODE(op) -> 0 / -1 -- the trusted
+    // EPISODE's two control ops, callable ONLY by the trusted login authority
+    // (the Proc joey established with SPAWN_PERM_CONSOLE_TRUSTED: corvus).
+    //
+    //   SYS_CONSOLE_EPISODE_ARM (1): declare the caller an episode CONSUMER.
+    //     From then on a serial BREAK (the SAK) that lands with the caller
+    //     alive and no episode open OPENS one: every pending console input
+    //     byte is discarded, the line discipline is forced RAW, every
+    //     non-attached console read / write / poll / consctl write / renderer
+    //     feed is FROZEN (parked, never dropped), and the `sak` note is posted
+    //     to the caller. UNARMED, a SAK is the A-4c-2 attach handoff exactly
+    //     as before -- the kernel alone can never freeze a console that nobody
+    //     is there to unfreeze. Sticky until the caller dies; idempotent.
+    //   SYS_CONSOLE_EPISODE_END (2): end the open episode: restore the saved
+    //     termios, unfreeze the non-attached world, and hand the pre-SAK
+    //     console OWNER (the Ctrl-C target) back if nobody claimed the slot
+    //     meanwhile. -1 with no open episode. The caller stays console-
+    //     attached (I-27 as today).
+    //
+    //   NO kernel timeout: an episode ended behind the consumer's back would
+    //   route the next keystrokes -- the secret -- to the shell; the consumer
+    //   bounds its own prompt and ENDs. The trusted Proc's death, or its own
+    //   SYS_CONSOLE_RELINQUISH, ends an open episode fail-safe: the untrusted
+    //   world unfreezes, and no secret is in flight because its only reader
+    //   is gone.
+    //
+    //   Audit-bearing: the IM-1 trusted-episode row (AUDIT-TRIGGERS.md).
+    SYS_CONSOLE_EPISODE = 110,   // arg: op(x0)
+
+    // IM-2 (IMPERIUM-DESIGN.md 11.4; I-25 STRENGTHENED; specs/imperium.tla):
+    // SYS_CAP_GRANT_IMPERIUM(cap_mask, target_stripes, valid_for_ns,
+    // session_id, flags) -> 0 / -1 -- the clearance grant with a FLAGS word
+    // (the 40-byte /cap/grant form; the syscall bridge because corvus is
+    // chrooted, exactly as SYS_CAP_GRANT_CLEARANCE). flags == 0 is a plain
+    // clearance grant. CAP_GRANT_FLAG_PROPAGATING (1) makes the scope the
+    // redeemer creates a PROPAGATING one: the redeemed caps (bounded to
+    // CAP_GRANTABLE_IMPERIUM = DAC_OVERRIDE|CHOWN|KILL|POST_SERVICE) FLOW to its rfork
+    // descendants, which die with it. Gated on CAP_GRANT_CLEARANCE (corvus).
+    // The REDEEM still rides SYS_CAP_USE; a PROPAGATING grant is redeemable
+    // only by a Proc in NO scope (propagating never nests -- abdicate first).
+    // -1 on any clearance-grant failure, an unknown flag bit, or a
+    // PROPAGATING cap_mask outside CAP_GRANTABLE_IMPERIUM.
+    //   x0 = cap_mask, x1 = target_stripes, x2 = valid_for_ns,
+    //   x3 = session_id, x4 = flags
+    SYS_CAP_GRANT_IMPERIUM = 111,
+
     // WEAVE-SKEIN (docs/WEAVE-SKEIN-DESIGN.md §3.5): read a KObj_DMA's
     // backing SEGMENT LIST -- the physically-contiguous runs behind the
     // object, in ascending buffer order. Returns the count, or -1.
@@ -2213,8 +2260,7 @@ enum {
     // discloses the same thing: where the caller's own buffer physically
     // lives. REFUSES when count > max_entries rather than truncating -- a
     // short list would be attached as a whole backing and read past its end.
-    // 110 and 111 are RESERVED to the aux-3 arc (SYS_CONSOLE_EPISODE,
-    // SYS_CAP_GRANT_IMPERIUM) and are holes here only until that merge lands.
+    // 110 and 111 implement SYS_CONSOLE_EPISODE and SYS_CAP_GRANT_IMPERIUM.
     // Do not fill them: both numbers already have consumers on a live branch,
     // and duplicate enum values are legal C -- a second minting would compile
     // silently on both sides and surface as two dispatch cases colliding.
@@ -2234,6 +2280,12 @@ enum {
     // tail -- which is the append-only rule the number space already runs on.
     SYS__NATIVE_TOP,
 };
+
+
+// SYS_CONSOLE_EPISODE ops (x0). ABI: mirrored by libthyla-rs
+// T_CONSOLE_EPISODE_* and docs/ERRORS.md.
+#define SYS_CONSOLE_EPISODE_ARM  1u
+#define SYS_CONSOLE_EPISODE_END  2u
 
 // WEAVE-SKEIN: SYS_DMA_MAP's return when the object is a skein (nblk > 1).
 //
@@ -2477,11 +2529,27 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, shm)         == 208, "t_pci
 // needing this bit. That is deliberate: it is what carries a raise down through
 // pouch programs (make, clang) that cannot set a budget themselves.
 #define SPAWN_PERM_MAY_RAISE_PAGE_BUDGET (1u << 4)
+// SPAWN_PERM_SESSION_HANGUP (arm-6, IDENTITY-DESIGN §9.9.1): make the child a
+// NEW session leader (proc_setsid in the spawn thunk -- the leader-guard passes
+// post-rfork since the child still carries the parent's pgid) AND arm
+// PROC_FLAG_SESSION_HANGUP on it, so when that leader exits the kernel
+// terminates the remaining members of its session (the legate-teardown pattern
+// applied to the login session -- proc_become_zombie_locked). This is what
+// finally implements A-5 decision (3)'s "no orphaned session Proc": logout
+// terminates the user's session so its per-user encrypted-home mount is fully
+// released. Gated like MAY_POST_SERVICE (a console-attached granter OR a holder
+// of the one-hop bit) -- the login-session-management authority login already
+// holds for CONSOLE_OWNER; the terminate is same-session-only (a Proc could
+// already kill its own descendants), so it confers no cross-authority reach.
+// NOT a cap (rfork does not propagate proc_flags), so only the marked leader
+// carries the flag.
+#define SPAWN_PERM_SESSION_HANGUP    (1u << 5)
 #define SPAWN_PERM_ALL               (SPAWN_PERM_MAY_POST_SERVICE | \
                                       SPAWN_PERM_CONSOLE_TRUSTED | \
                                       SPAWN_PERM_CONSOLE_OWNER | \
                                       SPAWN_PERM_CONSOLE_RENDERER | \
-                                      SPAWN_PERM_MAY_RAISE_PAGE_BUDGET)
+                                      SPAWN_PERM_MAY_RAISE_PAGE_BUDGET | \
+                                      SPAWN_PERM_SESSION_HANGUP)
 
 // A-1a (docs/IDENTITY-DESIGN.md §9.1): sys_spawn_args.identity_flags bits.
 // SPAWN_IDENTITY_SET requests that the child be born with the principal_id

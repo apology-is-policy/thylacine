@@ -15,7 +15,7 @@ hazards: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md"]
 created: 2026-08-04
-updated: 2026-09-06
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -39,6 +39,13 @@ daemon passes a kernel-CSPRNG adapter, the minter passes the host's), and
 the allocator belongs to whichever binary links it.
 
 ## Contract
+
+**Imperium key authentication (2026-09-17).** The library supplies the
+key-authentication derivation consumed by corvus's trusted episode. This
+integration imports the reviewed aux implementation; Haul does not use it to
+store or retrieve npxf credentials. Those remain `-t FILE` or an explicitly
+selected environment source, as [[sub-haul]] records.
+
 
 **A wrap** is a fixed 3752-byte blob: a 72-byte header — magic, version,
 the three Argon2 cost parameters, salt, nonce — followed by the 3648-byte

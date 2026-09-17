@@ -93,6 +93,7 @@ enum {
     PQS_CWD      = 14,       // /proc/<pid>/cwd              (QTFILE; VIVARIUM V-4b-1; RO, the Territory's cwd)
     PQS_MAPS     = 15,       // /proc/<pid>/maps             (QTFILE; VIVARIUM V-4b-2; RO, the VMA table)
     PQS_ENVIRON  = 16,       // /proc/<pid>/environ          (QTFILE; VIVARIUM V-4b-6; RO, owner-or-CAP_HOSTOWNER)
+    PQS_IMPERIUM = 17,       // /proc/<pid>/imperium         (QTFILE; IM-2; RO, owner-or-CAP_HOSTOWNER: the legate scope + what flows)
 };
 
 #define PROC_QID_ROOT_PATH  0ULL
@@ -134,6 +135,7 @@ static const struct proc_pid_file g_proc_pid_files[] = {
     { "maps",    PQS_MAPS    },
     { "sched",   PQS_SCHED   },
     { "environ", PQS_ENVIRON },
+    { "imperium", PQS_IMPERIUM },
 };
 
 #define PROC_PID_FILE_COUNT \
@@ -817,6 +819,10 @@ static u32 devproc_mode_for_kind(u32 kind) {
     case PQS_KREGS:   return T_S_IFREG | 0400u;   // 8a-1b-gamma-3: RO kernel frame (I-39-gated at the read site)
     case PQS_KSTACK:  return T_S_IFREG | 0400u;   // 8a-1b-gamma-3: RO symbolized bt (I-39-gated at the read site)
     case PQS_SCHED:   return T_S_IFREG | 0400u;   // prowl-3b: RO deep internals (OQ-4-gated at the read site)
+    // IM-2: who is elevated, by what scope, and what flows is a disclosure
+    // about ANOTHER user's authority -- the sched/environ posture (0400 + the
+    // owner-or-CAP_HOSTOWNER gate at the read site), not status's 0444.
+    case PQS_IMPERIUM: return T_S_IFREG | 0400u;
     // V-4b-6: 0400 -- Linux's own mode for environ, and for Linux's own reason.
     // Environment variables are where secrets live by universal convention
     // (tokens, passwords, keys), and unlike exe/cwd/ns/maps NOTHING discloses
@@ -1034,8 +1040,11 @@ static void devproc_close(struct Spoor *c) {
 // the definition sits with the other authority predicates (after
 // devproc_kill_authorized). Non-static -- the test suite exercises it.
 bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *target);
+bool devproc_owner_or_hostowner(const struct Proc *caller, const struct Proc *target);
 size_t devproc_sched_read_gated(const struct Proc *caller, struct Proc *target,
                                 char *buf, size_t cap, bool *denied);
+size_t devproc_imperium_read_gated(const struct Proc *caller, struct Proc *target,
+                                   char *buf, size_t cap, bool *denied);
 
 // prowl-3b (prowl-5 F4): the OQ-4-gated sched read, factored out so the unit
 // suite can exercise the DENY wiring with a synthetic (caller, target) pair --
@@ -1051,6 +1060,63 @@ size_t devproc_sched_read_gated(const struct Proc *caller, struct Proc *target,
     if (!devproc_sched_authorized(caller, target)) { *denied = true; return 0; }
     *denied = false;
     return format_sched(target, buf, cap);
+}
+
+// IM-2 (IMPERIUM-DESIGN.md 11.4): /proc/<pid>/imperium -- the legate scope as
+// the kernel holds it, one line:
+//   scope N session N propagating 0|1 rods N axe 0|1 caps 0xHEX until NS
+// scope/session are the A-4a tag (0 = not a legate); propagating is the
+// scope-wide property (imperium.tla PropagatingIsScopeWide, so a member
+// reports the same value as its root); rods = popcount(legate_caps), the
+// number of caps that FLOW to this Proc's children (the fasces the shell
+// prompt shows); axe = CAP_KILL held (the executioner's axe among the rods);
+// caps = the Proc's elevation-only caps as held (a further redeem's extras
+// show here and NOT in rods); until = legate_valid_until (0 = no deadline).
+// This is the section-4 "unforgeable kernel flag": userspace can only read
+// it. Every load is atomic where a concurrent writer exists (caps: a peer
+// thread's redeem; valid_until: a further redeem); the rest is set once
+// before the scope_id RELEASE store and read after an ACQUIRE of it.
+static size_t format_imperium(struct Proc *p, char *buf, size_t cap) {
+    size_t off = 0;
+    size_t n;
+    u32    scope = __atomic_load_n(&p->legate_scope_id, __ATOMIC_ACQUIRE);
+    u32    sess  = scope ? p->legate_session_id : 0u;
+    bool   prop  = scope && (p->legate_flags & LEGATE_FLAG_PROPAGATING);
+    caps_t lc    = scope ? p->legate_caps : (caps_t)0;
+    caps_t held  = __atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & (caps_t)CAP_ELEVATION_ONLY;
+    u64    until = scope ? __atomic_load_n(&p->legate_valid_until, __ATOMIC_RELAXED) : 0u;
+    unsigned rods = 0;
+    for (caps_t x = lc; x; x &= x - 1) rods++;
+
+    // Every formatter returns 0 ONLY for no-room (fmt_udec prints "0" for a
+    // zero value), so a bare `!n` is the whole guard -- the `!n && v != 0`
+    // idiom of format_status would continue past a truncated zero field.
+    n = fmt_str(buf, cap, off, "scope ");        if (!n) return 0; off += n;
+    n = fmt_udec(buf, cap, off, (unsigned long)scope); if (!n) return 0; off += n;
+    n = fmt_str(buf, cap, off, " session ");     if (!n) return 0; off += n;
+    n = fmt_udec(buf, cap, off, (unsigned long)sess);  if (!n) return 0; off += n;
+    n = fmt_str(buf, cap, off, prop ? " propagating 1" : " propagating 0"); if (!n) return 0; off += n;
+    n = fmt_str(buf, cap, off, " rods ");        if (!n) return 0; off += n;
+    n = fmt_udec(buf, cap, off, (unsigned long)rods);  if (!n) return 0; off += n;
+    n = fmt_str(buf, cap, off, (held & (caps_t)CAP_KILL) ? " axe 1" : " axe 0"); if (!n) return 0; off += n;
+    n = fmt_str(buf, cap, off, " caps ");        if (!n) return 0; off += n;
+    n = fmt_hex(buf, cap, off, (u64)held);       if (!n) return 0; off += n;
+    n = fmt_str(buf, cap, off, " until ");       if (!n) return 0; off += n;
+    n = fmt_udec(buf, cap, off, (unsigned long)until); if (!n) return 0; off += n;
+    n = fmt_str(buf, cap, off, "\n");            if (!n) return 0; off += n;
+    return off;
+}
+
+// IM-2: the gated imperium read -- the sched shape (prowl-5 F4): factored so the
+// unit suite can drive the DENY leg with a synthetic (caller, target) pair,
+// since the in-kernel runner is kproc (CAP_HOSTOWNER by CAP_ALL, always
+// allowed). Same policy predicate as sched/environ (devproc_owner_or_hostowner),
+// deliberately NOT the I-39 debug predicate. Non-static: test-driven.
+size_t devproc_imperium_read_gated(const struct Proc *caller, struct Proc *target,
+                                   char *buf, size_t cap, bool *denied) {
+    if (!devproc_owner_or_hostowner(caller, target)) { *denied = true; return 0; }
+    *denied = false;
+    return format_imperium(target, buf, cap);
 }
 
 struct devproc_read_ctx {
@@ -1081,6 +1147,9 @@ static int devproc_read_cb(struct Proc *p, void *arg) {
     case PQS_CTL:     r->total = format_ctl_read(p, r->buf, r->cap); break;  // 8a-2a hwverify result; else empty
     case PQS_SCHED:                            // prowl-3b: OQ-4 owner-or-CAP_HOSTOWNER
         r->total = devproc_sched_read_gated(r->caller, p, r->buf, r->cap, &r->denied);
+        break;
+    case PQS_IMPERIUM:                         // IM-2: owner-or-CAP_HOSTOWNER
+        r->total = devproc_imperium_read_gated(r->caller, p, r->buf, r->cap, &r->denied);
         break;
     default:          break;                  // kind pre-validated by the caller
     }
@@ -1141,7 +1210,7 @@ static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
     // machinery, and adding one would route it there as well, formatting nothing.
     if (kind != PQS_STATUS && kind != PQS_CMDLINE && kind != PQS_NS &&
         kind != PQS_CTL && kind != PQS_EXE && kind != PQS_SCHED &&
-        kind != PQS_CWD && kind != PQS_MAPS) return -1;
+        kind != PQS_CWD && kind != PQS_MAPS && kind != PQS_IMPERIUM) return -1;
 
     // prowl-3b (OQ-4): capture the reading Proc BEFORE the lock so the gated
     // PQS_SCHED kind can be authorized against the target found inside the walk.

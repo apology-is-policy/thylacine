@@ -100,6 +100,12 @@ static const struct note_name_entry g_known_notes[] = {
     { NOTE_NAME_TTY_CONT,  NOTE_BIT_TTY, NOTE_DFL_IGNORE    },
     { NOTE_NAME_TTY_QUIT,  NOTE_BIT_TTY, NOTE_DFL_TERMINATE },
     { NOTE_NAME_TTY_HUP,   NOTE_BIT_TTY, NOTE_DFL_TERMINATE },
+    // IM-1: the trusted-path note. Kernel-synthetic-POST (notes_post's
+    // exact-name gate is the ONLY thing keeping userspace posters out of
+    // this row -- load-bearing, like the tty prefix gate), catchable,
+    // IGNORE by default: it is delivered to the TCB (corvus), and a note
+    // the TCB does not happen to be reading must never terminate it.
+    { NOTE_NAME_SAK,       NOTE_BIT_SAK, NOTE_DFL_IGNORE    },
 };
 #define NOTE_NUM_KNOWN  (sizeof(g_known_notes) / sizeof(g_known_notes[0]))
 
@@ -541,6 +547,13 @@ int notes_post(struct Proc *p, const char *name, u32 arg,
     // POST axis. Unlike the snare gate above this one is load-bearing TODAY
     // (the tty names are in the supported set below).
     if (!synthetic && notes_name_has_tty_prefix(name)) return -1;
+
+    // IM-1: `sak` is kernel-synthetic-only on the POST axis for the same
+    // reason -- a userspace poster could otherwise fake the operator's
+    // attention gesture and steer the trusted login authority into a prompt
+    // nobody pressed the SAK for. Exact name (no family), so the gate is one
+    // comparison.
+    if (!synthetic && notes_name_eq(name, NOTE_NAME_SAK)) return -1;
 
     // Validate name is in the v1.0 supported set.
     if (notes_name_to_bit(name) < 0) return -1;

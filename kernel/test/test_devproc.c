@@ -77,6 +77,9 @@ void test_devproc_sched_read_gated(void);
 void test_devproc_read_sched_format(void);
 // #133: the settled-park decision (a stale park must not read as stopped).
 void test_devproc_park_state_settled(void);
+// IM-2: /proc/<pid>/imperium (the legate scope; owner-or-CAP_HOSTOWNER).
+void test_devproc_imperium_read_gated(void);
+void test_devproc_read_imperium_format(void);
 
 // A-4b + 8a-1b impl hooks (non-static in kernel/devproc.c) + Proc test helpers
 // (non-static in kernel/proc.c; the test_proc.c / test_devsrv_conn.c pattern).
@@ -86,6 +89,8 @@ bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *targ
 bool devproc_owner_or_hostowner(const struct Proc *caller, const struct Proc *target);
 size_t devproc_sched_read_gated(const struct Proc *caller, struct Proc *target,
                                 char *buf, size_t cap, bool *denied);
+size_t devproc_imperium_read_gated(const struct Proc *caller, struct Proc *target,
+                                   char *buf, size_t cap, bool *denied);   // IM-2
 extern void proc_test_link(struct Proc *p);
 extern void proc_test_unlink(struct Proc *p);
 bool devproc_park_state_is_settled(bool registered, bool on_cpu, int state);
@@ -2295,4 +2300,90 @@ void test_devproc_park_state_settled(void) {
     pt->threads = pt_saved;                       // unlink before free
     pt->state = PROC_STATE_ZOMBIE;
     proc_free(pt);
+}
+
+// =============================================================================
+// IM-2: /proc/<pid>/imperium -- the legate scope as the kernel holds it, behind
+// the owner-or-CAP_HOSTOWNER gate (the sched/environ posture).
+// =============================================================================
+
+void test_devproc_imperium_read_gated(void) {
+    struct Proc *caller = proc_alloc();
+    struct Proc *target = proc_alloc();
+    TEST_ASSERT(caller && target, "proc_alloc caller + target");
+    target->principal_id = 0xA11CEu;
+    // A propagating scope worth reading: DAC|CHOWN flow, KILL held as a further
+    // extra (the axe), a deadline. The block, then the scope_id RELEASE store.
+    target->legate_session_id  = 77u;
+    target->legate_caps        = CAP_DAC_OVERRIDE | CAP_CHOWN;
+    target->legate_flags       = LEGATE_FLAG_PROPAGATING;
+    target->legate_valid_until = 12345u;
+    target->caps               = CAP_DAC_OVERRIDE | CAP_CHOWN | CAP_KILL;
+    __atomic_store_n(&target->legate_scope_id, 94u, __ATOMIC_RELEASE);
+
+    char buf[256];
+    bool denied;
+    size_t n;
+
+    // Non-owner, no caps -> DENIED, zero bytes formatted (no partial leak).
+    caller->principal_id = 0xB0Bu;
+    caller->caps         = 0;
+    denied = false;
+    n = devproc_imperium_read_gated(caller, target, buf, sizeof(buf), &denied);
+    TEST_ASSERT(denied && n == 0, "non-owner imperium read denied, no bytes");
+
+    // CAP_DAC_OVERRIDE is NOT an axis: an info file is owner-or-hostowner.
+    caller->caps = CAP_DAC_OVERRIDE;
+    denied = false;
+    n = devproc_imperium_read_gated(caller, target, buf, sizeof(buf), &denied);
+    TEST_ASSERT(denied && n == 0, "CAP_DAC_OVERRIDE is not a read axis");
+
+    // Owner -> the line, every field as held.
+    caller->principal_id = 0xA11CEu;
+    caller->caps         = 0;
+    denied = true;
+    n = devproc_imperium_read_gated(caller, target, buf, sizeof(buf), &denied);
+    TEST_ASSERT(!denied && n > 0, "owner imperium read allowed");
+    TEST_ASSERT(contains(buf, n, "scope 94 session 77 propagating 1 rods 2 axe 1 caps 0x380 until 12345\n"),
+                "imperium line: scope/session/propagating/rods/axe/caps/until");
+
+    // CAP_HOSTOWNER (non-owner) -> allowed.
+    caller->principal_id = 0xB0Bu;
+    caller->caps         = CAP_HOSTOWNER;
+    denied = true;
+    n = devproc_imperium_read_gated(caller, target, buf, sizeof(buf), &denied);
+    TEST_ASSERT(!denied && n > 0, "CAP_HOSTOWNER imperium read allowed");
+
+    // A plain (non-propagating) member with nothing flowing: rods 0, axe 0.
+    target->legate_flags = 0u;
+    target->legate_caps  = 0;
+    target->caps         = CAP_JIT;
+    n = devproc_imperium_read_gated(caller, target, buf, sizeof(buf), &denied);
+    TEST_ASSERT(!denied && contains(buf, n, "propagating 0 rods 0 axe 0 caps 0x800 until 12345"),
+                "plain member line: nothing flows, JIT held shows in caps only");
+
+    caller->state = PROC_STATE_ZOMBIE;
+    target->state = PROC_STATE_ZOMBIE;
+    proc_free(caller);
+    proc_free(target);
+}
+
+void test_devproc_read_imperium_format(void) {
+    struct Spoor *root   = devproc.attach("");
+    struct Spoor *piddir = walk_one(root, "0");
+    struct Spoor *imp    = walk_one(piddir, "imperium");
+    spoor_unref(piddir);
+    spoor_unref(root);
+    TEST_ASSERT(imp != NULL, "walk to /proc/0/imperium OK");
+    TEST_ASSERT(devproc.open(imp, 0) != NULL, "open imperium");
+
+    char buf[256];
+    long got = devproc.read(imp, buf, (long)sizeof(buf), 0);
+    TEST_ASSERT(got > 0, "imperium read positive (owner-gated allow for kproc-self)");
+    // kproc: no scope, CAP_ALL holds no elevation-only bit.
+    TEST_ASSERT(contains(buf, (size_t)got,
+                         "scope 0 session 0 propagating 0 rods 0 axe 0 caps 0x0 until 0\n"),
+                "kproc imperium line is the not-a-legate line");
+
+    spoor_clunk(imp);
 }

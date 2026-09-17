@@ -16,9 +16,17 @@ cfgs:
   - "corvus_buggy_transfer_rebind.cfg — buggy (session layer): transfer/rebind of a session binding"
 gate: "Re-run the 8 buggy cfgs on any change to a modeled action's implementation site (the connection-layer trio for kernel /srv changes; all 8 for corvus-side changes). The clean cfg is NOT a pre-commit gate — spec-to-code is suspended for corvus (user direction, 2026-05-20; the state space grew ~3x under ConnTeardown + connections_history and the clean run no longer terminates practically)."
 created: 2026-07-31
-updated: 2026-07-31
+updated: 2026-09-17
 ---
 ## Abstraction boundary
+
+**Haul integration (2026-09-17).** The existing `service_marked`
+predicate models the TCB posting route. It does not model individual
+CAP_POST_SERVICE grants, per-scope quotas, reservation state, active-accepter
+pins, or recycled generations. The added route is validated by the kernel
+cap/registry tests and the Imperium flow model; these corvus mutants remain
+negative controls for the original connection/session identity mechanisms.
+They are not a formal proof of the new posting route.
 
 `corvus.tla` models **identity and lifecycle a level above the bytes**:
 who may post a name, who owns a connection, whose identity a peer query

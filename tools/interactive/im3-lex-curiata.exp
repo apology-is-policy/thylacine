@@ -1,0 +1,135 @@
+#!/usr/bin/expect -f
+# tools/interactive/im3-lex-curiata.exp -- IM-3: the lex curiata end to end
+# (IMPERIUM-DESIGN.md 11.5 + 11.8; TRUSTED-PATH.md 9; I-27 / I-25 / I-2).
+#
+# The request -> the SAK -> the provincia -> the key -> the grant -> the
+# redeem, over the REAL console, with the deny arms one variable away from the
+# confer arm so a corvus that confers unconditionally cannot pass:
+#
+#   (1) CONFER: `imperium-probe chown dac` posts the request and parks;
+#       Ctrl-A b -> `cons: SAK (episode)` -> the provincia shows EXACTLY the
+#       restricted set (CAP_CHOWN + CAP_DAC_OVERRIDE, `axe: no`) -> the
+#       fixture key -> `imperium CONFERRED` -> the parked read returns OK ->
+#       the probe redeems and prints /proc/<pid>/imperium: `propagating 1`,
+#       `rods 2`, `axe 0` -- the kernel's unforgeable account.
+#   (2) WRONG KEY, with the axe: `imperium-probe kill` -> the provincia shows
+#       CAP_KILL and `axe: YES` -> a wrong key -> `imperium DENIED: wrong key`
+#       -> the probe reads DENIED. This is ALSO the input-exclusivity witness:
+#       the typed key reached corvus's verdict, never the frozen shell.
+#   (3) BUSY: a backgrounded request holds the one slot; a second request is
+#       refused at once.
+#   (4) TIMEOUT: the backgrounded request is never conferred -- no SAK is
+#       pressed -- and expires after 60 s: a script cannot confer (11.10:
+#       an episode can be started only by BREAK, never by software).
+#   (5) the session SURVIVES every arm: a command executes afterwards.
+#
+# The fixture key `imperium-key-michael-v1` is what joey's boot ladder grants
+# michael at CLEARANCE_GRANT (usr/joey/joey.c, the IM-3 step). The typed key
+# is never echoed (the episode forced RAW + ECHO off), so nothing here matches
+# on it; every assertion is on corvus's or the probe's OUTPUT.
+#
+# Tcl trap: "\001b" is Ctrl-A + b (octal, three digits max); "\x01b" is ESC.
+
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+proc sak_witness_within {secs phase} {
+    global timeout
+    set timeout $secs
+    expect {
+        -re {cons: SAK \(([a-z ]+)\)} {
+            set d $expect_out(1,string)
+            lc_step "saw: cons: SAK ($d) during '$phase'"
+            return $d
+        }
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during '$phase'" }
+        eof               { lc_fail "unexpected EOF during '$phase'" }
+        timeout           { return "" }
+    }
+}
+
+proc press_sak {phase} {
+    lc_raw_send "\001b" "monitor BREAK ($phase)"
+    set d [sak_witness_within 10 "the SAK witness ($phase)"]
+    if {$d eq ""} {
+        lc_fail "no `cons: SAK (...)` line within 10s of Ctrl-A b ($phase)"
+    }
+    if {$d ne "episode"} {
+        lc_fail "SAK decision was '$d', expected 'episode' ($phase) -- corvus not ARMED, or an episode already open"
+    }
+}
+
+# Wait for the probe's request line, then for one of its terminal lines; the
+# probe's own FAIL/DENIED family is a hard fail unless it is the one expected.
+proc expect_probe_line {want phase} {
+    global lc_cmd_timeout timeout
+    set timeout $lc_cmd_timeout
+    expect {
+        -ex $want                      { lc_step "saw: $want ($phase)" }
+        -re {imperium-probe: (FAIL|DENIED|PERMISSION-DENIED|NOT-FOUND|RATE-LIMITED|TIMEOUT|BUSY|status=)[^\r\n]*} {
+            lc_fail "probe said \[$expect_out(0,string)\] while waiting for \[$want\] ($phase)"
+        }
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction ($phase)" }
+        timeout           { lc_fail "timeout (${lc_cmd_timeout}s) waiting for \[$want\] ($phase)" }
+        eof               { lc_fail "unexpected EOF ($phase)" }
+    }
+}
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# ---- (1) CONFER: chown + dac, no axe ---------------------------------------
+lc_send "imperium-probe chown dac"
+expect_probe_line "press the SAK" "the request posted (1)"
+press_sak "confer"
+lc_expect "CONFERRING IMPERIUM" "the provincia title (1)"
+lc_expect "CAP_CHOWN" "the restricted set names CAP_CHOWN (1)"
+lc_expect "axe:     no" "no axe for a request without CAP_KILL (1)"
+lc_expect "imperium key: " "the key prompt on the trusted path (1)"
+lc_raw_send "imperium-key-michael-v1\r" "the fixture key"
+lc_expect "imperium CONFERRED" "corvus's verdict on the trusted path (1)"
+expect_probe_line "imperium-probe: OK session=" "the parked read returned OK (1)"
+expect_probe_line "propagating 1" "/proc/<pid>/imperium: the scope propagates (1)"
+expect_probe_line "imperium-probe: PASS" "the probe's own verdict (1)"
+lc_pass "IM-3(1): request -> SAK -> provincia -> key -> CONFERRED -> OK -> redeemed (propagating 1)"
+
+# ---- (2) WRONG KEY, with the axe on the provincia ---------------------------
+lc_send "imperium-probe kill"
+expect_probe_line "press the SAK" "the request posted (2)"
+press_sak "wrong key"
+lc_expect "CAP_KILL" "the restricted set names CAP_KILL (2)"
+# The axe value is rendered BOLD, so an SGR sequence sits between the label
+# and the value on the wire (the `no` of arm 1 is unstyled and matches exactly).
+lc_expect_re {axe:     (\x1b\[1m)?YES} "the axe shown for CAP_KILL (2)"
+lc_expect "imperium key: " "the key prompt (2)"
+lc_raw_send "not-the-key\r" "a wrong key"
+lc_expect "imperium DENIED: wrong key" "corvus's verdict (2)"
+lc_expect "imperium-probe: DENIED" "the parked read returned DENIED (2)"
+lc_pass "IM-3(2): a wrong key is DENIED on the trusted path and to the requester"
+
+# ---- (3) BUSY: one pending slot -------------------------------------------
+lc_send "imperium-probe dac &"
+expect_probe_line "press the SAK" "the background request posted (3)"
+lc_send "imperium-probe chown"
+lc_expect "imperium-probe: BUSY" "a second request is refused while one is pending (3)"
+lc_pass "IM-3(3): the one pending slot refuses a second request with BUSY"
+
+# ---- (4) TIMEOUT: no SAK -> the background request expires -----------------
+set timeout 90
+expect {
+    -ex "imperium-probe: TIMEOUT" { lc_step "saw: the background request timed out (4)" }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction (4)" }
+    timeout           { lc_fail "the unconferred request did not TIMEOUT within 90s (4) -- the 60-s window is not enforced" }
+    eof               { lc_fail "unexpected EOF (4)" }
+}
+lc_pass "IM-3(4): an unconferred request TIMES OUT -- a script cannot confer"
+
+# ---- (5) the session survives ---------------------------------------------
+lc_send "echo im3-after-curiata | tr a-z A-Z"
+lc_expect "IM3-AFTER-CURIATA" "a command executes after every arm (5)"
+lc_pass "IM-3(5): the session survives the confer / deny / busy / timeout arms"
+
+lc_quit
+lc_pass "IM-3 im3-lex-curiata: confer + wrong key + busy + timeout + session survives"
+exit 0

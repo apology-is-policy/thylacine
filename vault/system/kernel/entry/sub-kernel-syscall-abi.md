@@ -17,7 +17,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-09-16
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -30,6 +30,14 @@ It is three files saying the same thing in three languages, and nothing in the
 build checks that they agree.
 
 ## Contract
+
+**Imperium integration (2026-09-17).** Reserved numbers 110 and 111 are
+now implemented as SYS_CONSOLE_EPISODE and SYS_CAP_GRANT_IMPERIUM. Main's
+SYS_DMA_SEGMENTS stays 112 and SYS__NATIVE_TOP stays 113; no existing syscall
+was renumbered. Native C and Rust mirrors include the new operations and
+CAP_POST_SERVICE at bit 13. The console operation accepts ARM=1 or END=2;
+unknown operations fail closed.
+
 
 `x8` carries the syscall number, `x0..x5` the arguments, `x0` the result —
 deliberately Linux's AArch64 convention, so a ported libc's syscall stub needs

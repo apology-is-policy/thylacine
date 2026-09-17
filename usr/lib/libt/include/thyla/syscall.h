@@ -121,6 +121,12 @@ enum {
     T_SYS_GETPGID           = 91,  // PTY-1a: read a Proc's pgid (0 = self)
     T_SYS_GETSID            = 92,  // PTY-1a: read a Proc's sid (0 = self)
     T_SYS_PTY_REGISTER      = 93,  // PTY-1c: pts registry ops (ptyfs-only)
+    // 110 = SYS_CONSOLE_EPISODE (IM-1; the trusted login authority only --
+    // native libthyla-rs; no libt wrapper).
+    T_SYS_CONSOLE_EPISODE   = 110,
+    // 111 = SYS_CAP_GRANT_IMPERIUM (IM-2; corvus only -- native libthyla-rs;
+    // no libt wrapper).
+    T_SYS_CAP_GRANT_IMPERIUM = 111,
     T_SYS_TTY_SIGNAL        = 94,  // PTY-1d: server-side signal-class report
     T_SYS_TTY_ACQUIRE       = 95,  // PTY-1d: controlling-terminal acquisition
     T_SYS_TTY_SET_FG        = 96,  // PTY-1d: tcsetpgrp
@@ -281,6 +287,13 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 // (console-attach-only, like CONSOLE_TRUSTED) + single-holder (refused while
 // a live renderer holds the role). joey grants it to /bin/aurora.
 #define T_SPAWN_PERM_CONSOLE_RENDERER  (1u << 3)
+// T_SPAWN_PERM_SESSION_HANGUP (arm-6, IDENTITY-DESIGN §9.9.1): make the child a
+// NEW session leader + arm the kernel session hangup (on the leader's exit the
+// kernel terminates the rest of its session). Gated like MAY_POST_SERVICE. Bit
+// 5 matches SPAWN_PERM_SESSION_HANGUP; bit 4 (MAY_RAISE_PAGE_BUDGET) has no C
+// consumer and is not mirrored here. No native C caller uses this today (login
+// is Rust); mirrored for ABI lockstep.
+#define T_SPAWN_PERM_SESSION_HANGUP    (1u << 5)
 
 // VIVARIUM V-1b / Design D (13.10): t_sys_spawn_args.pheno_flags bits (mirror
 // SPAWN_PHENO_* in the kernel header). The phenotype itself is DECIDED FROM
@@ -459,6 +472,7 @@ _Static_assert(__builtin_offsetof(struct t_allowance_desc, pci) == 180,
 #define T_CAP_GRANT_CLEARANCE (1UL << 6)   // fork-grantable; corvus-only; register clearance grants
 #define T_CAP_DAC_OVERRIDE    (1UL << 7)   // elevation-only; perm_check rwx bypass
 #define T_CAP_CHOWN           (1UL << 8)   // elevation-only; chown/chgrp-to-any
+#define T_CAP_POST_SERVICE    (1UL << 13) // elevation-only /srv posting
 #define T_CAP_KILL            (1UL << 9)   // elevation-only; cross-identity kill override
 
 // Maximum binary name length for t_spawn (mirror SYS_SPAWN_NAME_MAX).

@@ -10,7 +10,7 @@ validated-by: [spec-death-wake, gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-09-06
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -46,6 +46,17 @@ lockless walk races `thread_free` into a use-after-free. Holding it also
 `group_exit_msg` only has to guard idempotency, never a genuine race.
 
 ## Mechanism
+
+**Scope and session cleanup (2026-09-17).** The imported Imperium teardown
+closes the publish-after-sweep race through the child insertion check in
+[[sub-kernel-proc]]. Process exit now releases the process's Territory at exit,
+rather than leaving namespace/session references pinned until reaping. This
+allows a login waiting on its home server to complete after shell exit.
+`proc_session_hangup_if_leader` delivers the session hangup to eligible peers
+when an armed leader dies; its table walk follows the existing held-lock death
+protocol. The cross-user arm of `tools/interactive/ls-imperium.exp` verifies
+that michael can abdicate/log out and cora can log in afterward.
+
 
 **The four steps of a cascade** (`proc_group_terminate`):
 

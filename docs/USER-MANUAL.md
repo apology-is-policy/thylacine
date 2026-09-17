@@ -50,6 +50,7 @@ The bar: a user landing on a topic page should be able to learn how to do the th
 | 11-troubleshooting.md (planned) | Boot failures, recovery shell, common panics, /ctl/log/ | All users | Phase 5+ |
 | 12-halcyon.md (planned) | Halcyon usage; scroll buffer; image display; video; customization | End users | Phase 8 |
 | 13-keyboard-shortcuts.md (planned) | Halcyon keybindings, terminal-mode keybindings | End users | Phase 8 |
+| [14-remote-files.md](manual/14-remote-files.md) | Haul: remote 9P mounts and scoped service posting | Users, admins | Phase 7 |
 
 (Pages appear as their underlying surfaces ship. Phase 0 scaffold provides the index + overview only.)
 

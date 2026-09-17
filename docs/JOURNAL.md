@@ -23,6 +23,36 @@ needed the operator.
 
 ---
 
+## Haul completion (2026-09-17, Codex, single-agent)
+
+The operator asked to finish Haul and authorized bringing its required
+Imperium dependencies into main. The integration selects IM-1 through IM-5
+and the necessary logout/namespace fixes, retaining main's syscall 112 and
+Instrument prompt rather than importing unrelated aux media/audio work.
+
+The new workflow is a scoped `haul --post` service mounted by the existing
+shell. Its kernel gate bounds services and protects TCB names. The encrypted
+E2E reads real remote data, refuses a second mount, verifies unmount/repost,
+handles an authenticated remote disconnect during attach, and revokes a live
+relay on abdication.
+
+Three wrong turns mattered. The first test waited for an error the shell stores
+in `$errstr`, then an explicit status check exposed the shell clearing status
+before argv expansion. Separately, the Imperium test captured a partial serial
+PID. Finally, self-review disproved the assumption that a tombstoned service
+has no live accepter: exit notification precedes peer-thread death. The fix
+pins accept identity, rejects a second concurrent waiter and prevents reuse
+until the old call unwinds. A real blocked-thread regression now covers it.
+
+`docs/HAUL-INTEGRATION-REVIEW.md` records the selected source commits, measured
+verification and residual limits. The kernel suite is 1551/1551 and all seven
+interactive scenarios passed. The final default/UBSan matrix passed all 40
+boots across 4 and 8 cores with zero corruption. No independent audit was run: the operator explicitly requested
+single-agent work. `AGENTS.md` adapts the shared project discipline for Codex
+without duplicating CLAUDE's agent-specific machinery.
+
+---
+
 ## Run 47 (2026-09-15, Fable 5.1 max, then Opus 4.8 mid-run) -- Halcyon Instrument I-7: the theme picker, live switching, and the dialog family
 
 ### What this run was for

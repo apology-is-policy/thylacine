@@ -12,7 +12,7 @@ hazards: []
 abis: [abi-note-names]
 design: ["docs/ARCHITECTURE.md", "docs/ERRORS.md"]
 created: 2026-08-03
-updated: 2026-09-07
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -27,6 +27,14 @@ a callback — exists because ported software expects it. It is the second
 citizen here, and the file says so.
 
 ## Contract
+
+**Imperium/session integration (2026-09-17).** Trusted SAK episode delivery
+and session hangup use the existing note wake discipline. The hangup note is
+registered by login's console shell to exit on session teardown; it must not
+be interpreted as an ordinary foreground interrupt. The held process-table
+lock to note-queue lock ordering is unchanged; episode ownership is specified
+in [[sub-kernel-cons]].
+
 
 Three paths, **one queue**:
 

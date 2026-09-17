@@ -10,7 +10,7 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-09-05
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -46,6 +46,15 @@ resolves against — a fresh monotonic u64 per `proc_alloc`, never inherited,
 `0` reserved as the fail-closed sentinel.
 
 ## Mechanism
+
+**Imperium scope flow (2026-09-17).** The `rfork_internal` capability carve
+and table-insertion race check now implement [[sub-kernel-caps#Contract]].
+`proc_become_legate` publishes the coherent scope block through the scope-id
+release store, refuses nested propagating scopes, and shortens an existing
+one-shot deadline rather than extending it. `proc_legate_teardown_if_root`
+marks every scoped member under the same process-table lock used by child
+publication. Membership, not reparenting, determines revocation.
+
 
 **Three shapes, one discriminator.** Since the fork arc there are exactly three
 answers to "what address space does the child get", and each *is* what its shape

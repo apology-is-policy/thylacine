@@ -824,6 +824,195 @@ pub fn unwrap_keypair_passphrase(
     Some(kp)
 }
 
+// =============================================================================
+// The capability-key VERIFIER wrap -- IM-3 (IMPERIUM-DESIGN.md 11.5; ratified
+// fork F4).
+// =============================================================================
+//
+// A DISTINCT_SECRET clearance level (imperium) is unlocked on the trusted path
+// by a per-(user, level) key that is NOT the login passphrase. corvus stores a
+// VERIFIER for it and never a DEK (IDENTITY-DESIGN.md 3.1 axis hygiene):
+// argon2id(key, salt) -> a KEK that AEAD-seals a random 32-byte token under an
+// AD binding the subject AND the level; the AEGIS tag is the verifier and the
+// token is discarded on both sides. A stolen clearance.db yields an offline
+// argon2 guessing target and nothing else -- no keypair, no DEK, no session.
+//
+// Its own compact layout (CRVS-KV v1, 136 bytes) rather than the 3752-byte CRVS
+// v1, whose ciphertext field is fixed at KEYPAIR_LEN. The header discipline is
+// the same (magic / version / the cost envelope), so crvs_kv_unpack fails
+// closed the same way crvs_v1_unpack does.
+
+pub const CAPKEY_MAGIC: u32 = 0x564B_5243; // 'CRKV' LE
+pub const CAPKEY_VERSION: u32 = 1;
+pub const CAPKEY_TOKEN_LEN: usize = 32;
+pub const CAPKEY_HEADER_LEN: usize = 4 + 4 + 4 + 8 + 4 + ARGON2_SALT_LEN + AEGIS256_NONCE_LEN; // = 72
+pub const CAPKEY_WRAP_LEN: usize = CAPKEY_HEADER_LEN + CAPKEY_TOKEN_LEN + AEGIS256_TAG_LEN; // = 136
+
+const _: () = assert!(CAPKEY_HEADER_LEN == 72, "capkey wrap header layout drift");
+const _: () = assert!(CAPKEY_WRAP_LEN == 136, "capkey wrap layout drift");
+
+// AD: prefix || len(subject) u8 || subject || len(level) u8 || level. Length-
+// prefixed so ("ab","c") and ("a","bc") can never share an AD; a distinct
+// prefix domain-separates it from the passphrase and recovery wraps.
+pub const CAPKEY_AD_PREFIX: &[u8] = b"thylacine-corvus-capkey-v1";
+pub const CAPKEY_SUBJECT_MAX: usize = 255;
+
+// The interactive preset: the key is typed by a human on the trusted path.
+pub const CAPKEY_ARGON2_T_COST: u32 = ARGON2_T_COST;
+pub const CAPKEY_ARGON2_M_COST_KIB: u32 = ARGON2_M_COST_KIB;
+pub const CAPKEY_ARGON2_PARALLELISM: u32 = ARGON2_PARALLELISM;
+
+pub fn build_capkey_ad(subject: &[u8], level: &[u8], out: &mut Vec<u8>) {
+    // Hard contract: the length bytes must not truncate (a caller bug, not data).
+    assert!(subject.len() <= CAPKEY_SUBJECT_MAX, "build_capkey_ad: subject too long");
+    assert!(level.len() <= CAPKEY_SUBJECT_MAX, "build_capkey_ad: level too long");
+    out.clear();
+    out.extend_from_slice(CAPKEY_AD_PREFIX);
+    out.push(subject.len() as u8);
+    out.extend_from_slice(subject);
+    out.push(level.len() as u8);
+    out.extend_from_slice(level);
+}
+
+#[derive(Clone)]
+pub struct CapKeyWrap {
+    pub t_cost: u32,
+    pub m_cost_kib: u32,
+    pub parallelism: u32,
+    pub salt: [u8; ARGON2_SALT_LEN],
+    pub nonce: [u8; AEGIS256_NONCE_LEN],
+    pub ciphertext: [u8; CAPKEY_TOKEN_LEN],
+    pub tag: [u8; AEGIS256_TAG_LEN],
+}
+
+impl CapKeyWrap {
+    pub fn to_bytes(&self) -> [u8; CAPKEY_WRAP_LEN] {
+        let mut out = [0u8; CAPKEY_WRAP_LEN];
+        out[0..4].copy_from_slice(&CAPKEY_MAGIC.to_le_bytes());
+        out[4..8].copy_from_slice(&CAPKEY_VERSION.to_le_bytes());
+        out[8..12].copy_from_slice(&self.t_cost.to_le_bytes());
+        out[12..20].copy_from_slice(&(self.m_cost_kib as u64).to_le_bytes());
+        out[20..24].copy_from_slice(&self.parallelism.to_le_bytes());
+        out[24..40].copy_from_slice(&self.salt);
+        out[40..72].copy_from_slice(&self.nonce);
+        out[72..72 + CAPKEY_TOKEN_LEN].copy_from_slice(&self.ciphertext);
+        out[72 + CAPKEY_TOKEN_LEN..CAPKEY_WRAP_LEN].copy_from_slice(&self.tag);
+        out
+    }
+
+    // None on length / magic / version mismatch or a cost outside the v1.0 emit
+    // envelope -- the crvs_v1_unpack discipline (RW-6 R1-F1): a tampered header
+    // must not wedge the daemon on the KDF or OOM it.
+    pub fn from_bytes(blob: &[u8]) -> Option<CapKeyWrap> {
+        if blob.len() != CAPKEY_WRAP_LEN {
+            return None;
+        }
+        let magic = u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]);
+        let version = u32::from_le_bytes([blob[4], blob[5], blob[6], blob[7]]);
+        if magic != CAPKEY_MAGIC || version != CAPKEY_VERSION {
+            return None;
+        }
+        let t_cost = u32::from_le_bytes([blob[8], blob[9], blob[10], blob[11]]);
+        let m64 = u64::from_le_bytes([
+            blob[12], blob[13], blob[14], blob[15], blob[16], blob[17], blob[18], blob[19],
+        ]);
+        if m64 > u32::MAX as u64 {
+            return None;
+        }
+        let parallelism = u32::from_le_bytes([blob[20], blob[21], blob[22], blob[23]]);
+        if t_cost > ARGON2_MAX_T_COST
+            || (m64 as u32) > ARGON2_MAX_M_COST_KIB
+            || parallelism == 0
+            || parallelism > ARGON2_MAX_PARALLELISM
+        {
+            return None;
+        }
+        let mut salt = [0u8; ARGON2_SALT_LEN];
+        let mut nonce = [0u8; AEGIS256_NONCE_LEN];
+        let mut ciphertext = [0u8; CAPKEY_TOKEN_LEN];
+        let mut tag = [0u8; AEGIS256_TAG_LEN];
+        salt.copy_from_slice(&blob[24..40]);
+        nonce.copy_from_slice(&blob[40..72]);
+        ciphertext.copy_from_slice(&blob[72..72 + CAPKEY_TOKEN_LEN]);
+        tag.copy_from_slice(&blob[72 + CAPKEY_TOKEN_LEN..CAPKEY_WRAP_LEN]);
+        Some(CapKeyWrap {
+            t_cost,
+            m_cost_kib: m64 as u32,
+            parallelism,
+            salt,
+            nonce,
+            ciphertext,
+            tag,
+        })
+    }
+}
+
+// Mint a FRESH verifier for `key` bound to (subject, level): RNG salt + nonce +
+// token, derive the KEK, AEAD-seal the token. The token is wiped here and never
+// returned -- only the tag matters. None on RNG / KDF failure.
+pub fn make_capkey_wrap<R: RngCore + CryptoRng>(
+    rng: &mut R,
+    subject: &[u8],
+    level: &[u8],
+    key: &[u8],
+) -> Option<CapKeyWrap> {
+    let mut salt = [0u8; ARGON2_SALT_LEN];
+    rng.try_fill_bytes(&mut salt).ok()?;
+    let mut nonce = [0u8; AEGIS256_NONCE_LEN];
+    rng.try_fill_bytes(&mut nonce).ok()?;
+    let mut token = [0u8; CAPKEY_TOKEN_LEN];
+    rng.try_fill_bytes(&mut token).ok()?;
+    let mut kek = match argon2id_kek(
+        key,
+        &salt,
+        CAPKEY_ARGON2_T_COST,
+        CAPKEY_ARGON2_M_COST_KIB,
+        CAPKEY_ARGON2_PARALLELISM,
+    ) {
+        Some(k) => k,
+        None => {
+            wipe(&mut token);
+            return None;
+        }
+    };
+    let mut ad: Vec<u8> = Vec::new();
+    build_capkey_ad(subject, level, &mut ad);
+    let mut ciphertext = [0u8; CAPKEY_TOKEN_LEN];
+    let tag = aegis_wrap(&kek, &nonce, &ad, &token, &mut ciphertext);
+    wipe(&mut kek);
+    wipe(&mut token);
+    Some(CapKeyWrap {
+        t_cost: CAPKEY_ARGON2_T_COST,
+        m_cost_kib: CAPKEY_ARGON2_M_COST_KIB,
+        parallelism: CAPKEY_ARGON2_PARALLELISM,
+        salt,
+        nonce,
+        ciphertext,
+        tag,
+    })
+}
+
+// true iff `key` opens the verifier for (subject, level). The unsealed token is
+// wiped without being looked at; the tag check is the whole verdict. false on
+// KDF failure or a tag mismatch (wrong key, wrong subject, wrong level).
+pub fn verify_capkey(subject: &[u8], level: &[u8], key: &[u8], w: &CapKeyWrap) -> bool {
+    let mut kek = match argon2id_kek(key, &w.salt, w.t_cost, w.m_cost_kib, w.parallelism) {
+        Some(k) => k,
+        None => return false,
+    };
+    let mut ad: Vec<u8> = Vec::new();
+    build_capkey_ad(subject, level, &mut ad);
+    let res = aegis_unwrap(&kek, &w.nonce, &ad, &w.ciphertext, &w.tag);
+    wipe(&mut kek);
+    match res {
+        Some(mut token) => {
+            wipe(&mut token);
+            true
+        }
+        None => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -955,6 +1144,102 @@ mod tests {
         blob[0] ^= 0xff;
         assert!(RecoveryWrap::from_bytes(&blob).is_none());
         assert!(RecoveryWrap::from_bytes(&blob[..TOTAL_LEN - 1]).is_none());
+    }
+
+    // IM-3: the capability-key verifier. The positive control (the right key
+    // opens it) sits beside each negative one variable away -- a wrong key, a
+    // foreign subject, a foreign level -- so a verifier that accepts everything
+    // (a broken AD, a zeroed tag check) cannot pass.
+    #[test]
+    fn capkey_verifier_binds_key_subject_and_level() {
+        let mut rng = CounterRng(7);
+        let w = make_capkey_wrap(&mut rng, b"michael", b"imperium", b"imperium-key-michael-v1")
+            .expect("mint");
+        assert!(verify_capkey(b"michael", b"imperium", b"imperium-key-michael-v1", &w));
+        assert!(!verify_capkey(b"michael", b"imperium", b"imperium-key-michael-v2", &w));
+        assert!(!verify_capkey(b"cora", b"imperium", b"imperium-key-michael-v1", &w));
+        assert!(!verify_capkey(b"michael", b"jit", b"imperium-key-michael-v1", &w));
+        assert!(!verify_capkey(b"michael", b"imperium", b"", &w));
+    }
+
+    #[test]
+    fn capkey_wrap_byte_round_trip_and_pins() {
+        let mut rng = CounterRng(11);
+        let w = make_capkey_wrap(&mut rng, b"michael", b"imperium", b"k").expect("mint");
+        let blob = w.to_bytes();
+        assert_eq!(blob.len(), CAPKEY_WRAP_LEN);
+        assert_eq!(&blob[0..4], &CAPKEY_MAGIC.to_le_bytes());
+        assert_eq!(&blob[4..8], &CAPKEY_VERSION.to_le_bytes());
+        let w2 = CapKeyWrap::from_bytes(&blob).expect("parse");
+        assert_eq!(w2.t_cost, w.t_cost);
+        assert_eq!(w2.m_cost_kib, w.m_cost_kib);
+        assert_eq!(w2.parallelism, w.parallelism);
+        assert_eq!(w2.salt, w.salt);
+        assert_eq!(w2.nonce, w.nonce);
+        assert_eq!(w2.ciphertext, w.ciphertext);
+        assert_eq!(w2.tag, w.tag);
+        // The parsed copy verifies exactly like the minted one.
+        assert!(verify_capkey(b"michael", b"imperium", b"k", &w2));
+        // Two mints of the SAME key differ (fresh salt / nonce / token): a
+        // clearance.db never carries a recognizable fingerprint of the key.
+        let w3 = make_capkey_wrap(&mut rng, b"michael", b"imperium", b"k").expect("mint");
+        assert_ne!(w3.salt, w.salt);
+        assert_ne!(w3.tag, w.tag);
+    }
+
+    #[test]
+    fn capkey_wrap_rejects_malformed_and_out_of_envelope() {
+        let w = CapKeyWrap {
+            t_cost: 2,
+            m_cost_kib: 16 * 1024,
+            parallelism: 1,
+            salt: [1u8; ARGON2_SALT_LEN],
+            nonce: [2u8; AEGIS256_NONCE_LEN],
+            ciphertext: [3u8; CAPKEY_TOKEN_LEN],
+            tag: [4u8; AEGIS256_TAG_LEN],
+        };
+        let good = w.to_bytes();
+        assert!(CapKeyWrap::from_bytes(&good).is_some());
+        assert!(CapKeyWrap::from_bytes(&good[..CAPKEY_WRAP_LEN - 1]).is_none());
+        let mut bad_magic = good;
+        bad_magic[0] ^= 0xff;
+        assert!(CapKeyWrap::from_bytes(&bad_magic).is_none());
+        let mut bad_version = good;
+        bad_version[4] = 9;
+        assert!(CapKeyWrap::from_bytes(&bad_version).is_none());
+        // A CRVS v1 wrap (the keypair layout) is a different magic: never
+        // parsed as a capkey wrap even at a matching prefix length.
+        let mut v1_magic = good;
+        v1_magic[0..4].copy_from_slice(&CORVUS_MAGIC.to_le_bytes());
+        assert!(CapKeyWrap::from_bytes(&v1_magic).is_none());
+        let hot = CapKeyWrap { t_cost: ARGON2_MAX_T_COST + 1, ..w };
+        assert!(CapKeyWrap::from_bytes(&hot.to_bytes()).is_none());
+        let fat = CapKeyWrap { m_cost_kib: ARGON2_MAX_M_COST_KIB + 1, ..hot };
+        let fat = CapKeyWrap { t_cost: 2, ..fat };
+        assert!(CapKeyWrap::from_bytes(&fat.to_bytes()).is_none());
+        let wide = CapKeyWrap { m_cost_kib: 16 * 1024, parallelism: ARGON2_MAX_PARALLELISM + 1, ..fat };
+        assert!(CapKeyWrap::from_bytes(&wide.to_bytes()).is_none());
+        let zero = CapKeyWrap { parallelism: 0, ..wide };
+        assert!(CapKeyWrap::from_bytes(&zero.to_bytes()).is_none());
+    }
+
+    #[test]
+    fn capkey_ad_is_length_prefixed_and_domain_separated() {
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        build_capkey_ad(b"ab", b"c", &mut a);
+        build_capkey_ad(b"a", b"bc", &mut b);
+        assert_ne!(a, b);
+        let mut p = Vec::new();
+        build_passphrase_ad(b"michael", &mut p);
+        let mut r = Vec::new();
+        build_recovery_ad(b"michael", &mut r);
+        let mut k = Vec::new();
+        build_capkey_ad(b"michael", b"imperium", &mut k);
+        assert!(!k.starts_with(AD_PREFIX));
+        assert!(!k.starts_with(RECOVERY_AD_PREFIX));
+        assert_ne!(k, p);
+        assert_ne!(k, r);
     }
 
     #[test]

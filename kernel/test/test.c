@@ -172,6 +172,7 @@ void test_proc_group_terminate_smoke(void);
 void test_proc_legate_scope_teardown(void);
 void test_proc_legate_teardown_except_and_zero(void);
 void test_proc_legate_teardown_from_zombie_chokepoint(void);
+void test_proc_rfork_refused_while_terminating(void);   // IM-2: the straggler close
 void test_pgrp_defaults_and_inherit(void);
 void test_pgrp_setsid_semantics(void);
 void test_pgrp_setpgid_rule_matrix(void);
@@ -637,6 +638,8 @@ void test_devproc_walk_unknown_pid_misses(void);
 void test_devproc_walk_to_status_file(void);
 void test_devproc_walk_dotdot_to_root(void);
 void test_devproc_read_status_format(void);
+void test_devproc_imperium_read_gated(void);   // IM-2: /proc/<pid>/imperium gate
+void test_devproc_read_imperium_format(void);  // IM-2: /proc/<pid>/imperium line
 void test_proc_cpu_ns_accounting(void);     // prowl-1: name + run_ns substrate
 void test_sched_prowl_counters(void);       // prowl-3a: per-thread sched counters + per-CPU idle_ns
 void test_devproc_read_cmdline_kproc(void);
@@ -700,6 +703,18 @@ void test_cons_sak_idempotent_flood(void);
 void test_cons_sak_via_console_mgr(void);
 void test_cons_sak_does_not_terminate_trusted(void);
 void test_cons_sak_attaches_from_relinquished_state(void);
+void test_cons_episode_requires_arm(void);                // IM-1: the trusted EPISODE
+void test_cons_episode_begins_on_sak(void);
+void test_cons_episode_discards_pending_input(void);
+void test_cons_episode_freezes_nonattached_reader(void);
+void test_cons_episode_freezes_nonattached_writer(void);
+void test_cons_episode_freezes_feed_consctl_poll(void);
+void test_cons_episode_end_restores(void);
+void test_cons_episode_repeat_sak_idempotent(void);
+void test_cons_episode_gate(void);
+void test_cons_episode_relinquish_ends(void);
+void test_cons_episode_trusted_death_ends(void);
+void test_cons_episode_saved_owner_death(void);
 void test_proc_console_relinquish(void);
 void test_proc_console_relinquish_other_owner(void);
 void test_cons_console_open(void);
@@ -1013,6 +1028,8 @@ void test_devsrv_registered(void);
 void test_devsrv_open_root_dir(void);
 void test_devsrv_stat_native_root(void);
 void test_devsrv_post_gate(void);
+void test_devsrv_cap_post_bounds(void);
+void test_devsrv_accept_lifetime(void);
 void test_devsrv_post_basic(void);
 void test_devsrv_tombstone(void);
 void test_devsrv_registry_full(void);
@@ -1044,6 +1061,11 @@ void test_devcap_clearance_one_shot(void);
 void test_devcap_clearance_cross_stripes(void);
 void test_devcap_clearance_valid_until(void);
 void test_devcap_clearance_kind_isolation(void);
+// IM-2: the propagating grant form + the two redeem arms + the nest refusal.
+void test_devcap_imperium_grant_gate_and_bounds(void);
+void test_devcap_imperium_redeem_propagating(void);
+void test_devcap_imperium_nest_refused(void);
+void test_devcap_further_redeem_keeps_scope(void);
 void test_srvconn_create_destroy(void);
 void test_srvconn_roundtrip(void);
 void test_srvconn_ring_capacity(void);
@@ -1563,6 +1585,10 @@ void test_caps_rfork_with_caps_clamps_to_parent(void);
 void test_caps_rfork_with_caps_zero_mask(void);
 void test_caps_rfork_strips_elevation_only(void);
 void test_caps_rfork_inherits_legate_scope(void);
+// IM-2: the propagation carve at rfork (flow / no flow / mask-bounded).
+void test_caps_rfork_flows_under_propagating_scope(void);
+void test_caps_rfork_no_flow_without_propagating(void);
+void test_caps_rfork_flow_bounded_by_mask(void);
 void test_mmio_handle_create_basic(void);
 void test_mmio_handle_create_misaligned_rejected(void);
 void test_mmio_handle_create_zero_size_rejected(void);
@@ -1782,6 +1808,8 @@ struct test_case g_tests[] = {
     { "pts.teardown_hup_cont",         test_pts_teardown_hup_cont,         false, NULL },
     { "proc.legate_teardown_from_zombie_chokepoint",
                                        test_proc_legate_teardown_from_zombie_chokepoint, false, NULL },
+    { "proc.rfork_refused_while_terminating",
+                                       test_proc_rfork_refused_while_terminating, false, NULL },
     { "proc.wait_pid_for_no_match",    test_proc_wait_pid_for_no_match,    false, NULL },
     { "proc.wait_pid_for_wnohang_alive_then_reap",
                                        test_proc_wait_pid_for_wnohang_alive_then_reap, false, NULL },
@@ -2357,6 +2385,8 @@ struct test_case g_tests[] = {
     { "devproc.walk_to_status_file",   test_devproc_walk_to_status_file,   false, NULL },
     { "devproc.walk_dotdot_to_root",   test_devproc_walk_dotdot_to_root,   false, NULL },
     { "devproc.read_status_format",    test_devproc_read_status_format,    false, NULL },
+    { "devproc.imperium_read_gated",   test_devproc_imperium_read_gated,   false, NULL },
+    { "devproc.read_imperium_format",  test_devproc_read_imperium_format,  false, NULL },
     { "proc.cpu_ns_accounting",        test_proc_cpu_ns_accounting,        false, NULL },
     { "scheduler.prowl_counters",      test_sched_prowl_counters,          false, NULL },
     { "devproc.read_cmdline_kproc",    test_devproc_read_cmdline_kproc,    false, NULL },
@@ -2429,6 +2459,26 @@ struct test_case g_tests[] = {
                                        test_cons_sak_does_not_terminate_trusted, false, NULL },
     { "cons.sak_attaches_from_relinquished_state",
                                        test_cons_sak_attaches_from_relinquished_state, false, NULL },
+    // IM-1: the trusted EPISODE (IMPERIUM-DESIGN.md 11.3; I-27 on serial).
+    { "cons.episode_requires_arm",     test_cons_episode_requires_arm,     false, NULL },
+    { "cons.episode_begins_on_sak",    test_cons_episode_begins_on_sak,    false, NULL },
+    { "cons.episode_discards_pending_input",
+                                       test_cons_episode_discards_pending_input, false, NULL },
+    { "cons.episode_freezes_nonattached_reader",
+                                       test_cons_episode_freezes_nonattached_reader, false, NULL },
+    { "cons.episode_freezes_nonattached_writer",
+                                       test_cons_episode_freezes_nonattached_writer, false, NULL },
+    { "cons.episode_freezes_feed_consctl_poll",
+                                       test_cons_episode_freezes_feed_consctl_poll, false, NULL },
+    { "cons.episode_end_restores",     test_cons_episode_end_restores,     false, NULL },
+    { "cons.episode_repeat_sak_idempotent",
+                                       test_cons_episode_repeat_sak_idempotent, false, NULL },
+    { "cons.episode_gate",             test_cons_episode_gate,             false, NULL },
+    { "cons.episode_relinquish_ends",  test_cons_episode_relinquish_ends,  false, NULL },
+    { "cons.episode_trusted_death_ends",
+                                       test_cons_episode_trusted_death_ends, false, NULL },
+    { "cons.episode_saved_owner_death",
+                                       test_cons_episode_saved_owner_death, false, NULL },
     { "proc.console_relinquish",       test_proc_console_relinquish,       false, NULL },
     { "proc.console_relinquish_other", test_proc_console_relinquish_other_owner, false, NULL },
     { "cons.console_open",             test_cons_console_open,             false, NULL },
@@ -2667,6 +2717,8 @@ struct test_case g_tests[] = {
     { "devsrv.open_root_dir",          test_devsrv_open_root_dir,          false, NULL },
     { "devsrv.stat_native_root",       test_devsrv_stat_native_root,       false, NULL },
     { "devsrv.post_gate",              test_devsrv_post_gate,              false, NULL },
+    { "devsrv.cap_post_bounds", test_devsrv_cap_post_bounds, false, NULL },
+    { "devsrv.accept_lifetime", test_devsrv_accept_lifetime, false, NULL },
     { "devsrv.post_basic",             test_devsrv_post_basic,             false, NULL },
     { "devsrv.tombstone",              test_devsrv_tombstone,              false, NULL },
     { "devsrv.registry_full",          test_devsrv_registry_full,          false, NULL },
@@ -2692,6 +2744,10 @@ struct test_case g_tests[] = {
     { "devcap.clearance_grant_gate_no_cap",   test_devcap_clearance_grant_gate_no_cap,   false, NULL },
     { "devcap.clearance_grant_bad_args",      test_devcap_clearance_grant_bad_args,      false, NULL },
     { "devcap.clearance_redeem_basic",        test_devcap_clearance_redeem_basic,        false, NULL },
+    { "devcap.imperium_grant_gate_and_bounds", test_devcap_imperium_grant_gate_and_bounds, false, NULL },
+    { "devcap.imperium_redeem_propagating",   test_devcap_imperium_redeem_propagating,   false, NULL },
+    { "devcap.imperium_nest_refused",         test_devcap_imperium_nest_refused,         false, NULL },
+    { "devcap.further_redeem_keeps_scope",    test_devcap_further_redeem_keeps_scope,    false, NULL },
     { "devcap.clearance_self_restriction",    test_devcap_clearance_self_restriction,    false, NULL },
     { "devcap.clearance_redeem_beyond_grant", test_devcap_clearance_redeem_beyond_grant, false, NULL },
     { "devcap.clearance_one_shot",            test_devcap_clearance_one_shot,            false, NULL },
@@ -3446,6 +3502,15 @@ struct test_case g_tests[] = {
     { "caps.rfork_inherits_legate_scope",
                                        test_caps_rfork_inherits_legate_scope,
                                                                            false, NULL },
+    { "caps.rfork_flows_under_propagating_scope",
+                                       test_caps_rfork_flows_under_propagating_scope,
+                                                                           false, NULL },
+    { "caps.rfork_no_flow_without_propagating",
+                                       test_caps_rfork_no_flow_without_propagating,
+                                                                           false, NULL },
+    { "caps.rfork_flow_bounded_by_mask",
+                                       test_caps_rfork_flow_bounded_by_mask,
+                                                                           false, NULL },
     { "mmio_handle.create_basic",      test_mmio_handle_create_basic,      false, NULL },
     { "mmio_handle.create_misaligned_rejected",
                                        test_mmio_handle_create_misaligned_rejected,
@@ -3721,13 +3786,16 @@ void test_run_all(void) {
         }
         if (uart_test_rx_release_hold()) owned |= TEST_OWNED_UART_RX_HOLD;
         if (owned != 0) {
-            static const char *const names[6] = {
+            // Bit 6 = CONS_TEST_OWNED_EPISODE (cons.h; IM-1): the table spans
+            // the cons set AND the two arch bits above, so it is indexed by
+            // the UNION's bit numbers.
+            static const char *const names[7] = {
                 "echo-capture", "tx-role", "mgr-hold", "reader-busy", "uart-tx-stall",
-                "uart-rx-hold"
+                "uart-rx-hold", "episode"
             };
             uart_puts("LEAKED-STATE(");
             bool first = true;
-            for (int b = 0; b < 6; b++) {
+            for (int b = 0; b < 7; b++) {
                 if (!(owned & (1u << b))) continue;
                 if (!first) uart_puts(",");
                 uart_puts(names[b]);

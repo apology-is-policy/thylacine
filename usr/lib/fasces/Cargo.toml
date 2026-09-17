@@ -1,0 +1,22 @@
+[package]
+name = "fasces"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+# The imperium scale indicator (IMPERIUM-DESIGN.md 4 + 11.6): a PURE parser for
+# the kernel's /proc/<pid>/imperium ABI line + the fasces glyph renderer. Kept
+# standalone (no libthyla-rs dependency) for two reasons: (1) it host-tests --
+# libthyla-rs's _start inline asm uses ELF directives the macOS assembler
+# rejects, so any crate depending on it cannot compile for aarch64-apple-darwin;
+# (2) one parser for a kernel-defined line, shared by ut's prompt, the `abdicate`
+# builtin, and the `imperium` tool, so the three cannot drift. `no_std` for the
+# target; `std` under `cargo test` so the host harness works (the corvus-crypto
+# pattern). No external deps; the linking binary provides the allocator.
+
+[lib]
+name = "fasces"
+path = "src/lib.rs"
+
+[dependencies]

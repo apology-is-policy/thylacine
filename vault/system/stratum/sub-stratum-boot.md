@@ -12,7 +12,7 @@ locks: []
 abis: []
 design: ["docs/reference/86-pouch-stratumd-boot.md (the 16c design section)"]
 created: 2026-08-02
-updated: 2026-09-06
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -23,6 +23,14 @@ process root onto the result — carrying forward every mount the old root
 held.
 
 ## Contract
+
+**Imperium boot fixtures (2026-09-17).** The integration adds the
+imperium capability/authorization probes to joey's test ladder and initializes
+the fixture imperium key for the eligible test identity. Production
+self-elevation still requires a corvus eligibility record and a trusted SAK
+episode; the tool does not bypass that path. Haul's posting gate is exercised
+by a separate interactive test against a real npxf server.
+
 
 Ordered, and every step is boot-fatal:
 

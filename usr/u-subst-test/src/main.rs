@@ -41,6 +41,15 @@ pub extern "C" fn rs_main() -> i64 {
     let mut env = Env::new();
     env.interactive = true;
 
+    // An empty substitution retains its status; an empty successful one
+    // overwrites a preceding failure, even when both produce no argv words.
+    if eval_source(&mut env, "$(seq)").is_err() || env.status() != 1 {
+        return fail("empty failed substitution status");
+    }
+    if eval_source(&mut env, "false; $(echo)").is_err() || env.status() != 0 {
+        return fail("empty successful substitution status");
+    }
+
     // 1. Capture + trailing-newline trim. echo writes "hi\n" to fd 1 (the
     //    capture pipe); the trim drops the newline. A successful echo also
     //    leaves $status == 0.

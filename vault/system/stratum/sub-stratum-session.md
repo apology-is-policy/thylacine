@@ -15,7 +15,7 @@ locks: []
 abis: []
 design: ["docs/IDENTITY-DESIGN.md section 9.9", "docs/CORVUS-DESIGN.md"]
 created: 2026-08-02
-updated: 2026-09-07
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -44,6 +44,14 @@ write is a partial payload and therefore EINVAL — a short write is a hard
 failure, never resumable.
 
 ## Mechanism
+
+**Logout under an elevated shell (2026-09-17).** Login arms the kernel's
+session-leader hangup path so exiting the session terminates its remaining
+shell peers. Namespace references are dropped at process exit, permitting the
+home-server shutdown to finish rather than waiting on unreaped Territory
+references. The restored cross-user arm of `ls-imperium` checks actual
+michael logout followed by cora login, not just a return to the first shell.
+
 
 **The echo mask is set BEFORE the prompt is written, never after**, and the
 ordering is the whole mechanism — there is no window to lose.

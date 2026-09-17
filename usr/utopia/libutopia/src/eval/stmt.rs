@@ -1265,14 +1265,10 @@ pub fn aggregate_pipefail(elements: &[(i32, bool)]) -> i32 {
 fn eval_command(env: &mut Env, cmd: &Command) -> EvalResult<StatementFlow> {
     match &cmd.kind {
         CommandKind::Simple(simple) => {
-            // Default this command to success BEFORE expanding argv. A
-            // command substitution in the words sets $status to the
-            // inner exit (scripture 8.7); a bare `$(cmd)` line that
-            // expands to nothing must then PRESERVE that exit, while a
-            // substitution-free empty expansion ($undef-only line) still
-            // reports 0. (Setting 0 up front + not resetting on the
-            // empty-argv path achieves both.)
-            env.status_set(0);
+            // Arguments see the PREVIOUS command's status (`exit $status`,
+            // `echo $status`). Only an empty expansion needs a default zero;
+            // preserve a substitution's result even when it emits no words.
+            let status_revision = env.status_revision();
             let argv = evaluate_argv(env, &simple.words)?;
             // SA-1 (RW-9 round-2 self-audit): a Ctrl-C that interrupted a
             // `$(...)` argument latched interrupt_pending while expanding argv.
@@ -1283,6 +1279,7 @@ fn eval_command(env: &mut Env, cmd: &Command) -> EvalResult<StatementFlow> {
                 return Ok(StatementFlow::Normal);
             }
             if argv.is_empty() {
+                if env.status_revision() == status_revision { env.status_set(0); }
                 return Ok(StatementFlow::Normal);
             }
             // argv[0] is already alias-expanded (evaluate_argv folds it in for
@@ -1436,6 +1433,19 @@ fn exec_external(
         return exec_external_raw(env, argv, env.consctl_fd);
     }
 
+    // IM-4 (IMPERIUM-DESIGN.md 11.6): a console-passthrough wrapper (imperium)
+    // launches an interactive SUB-SHELL that must read the console. Only on the
+    // CONSOLE (non-jc) path -- the jc branch below already hands a foreground
+    // child Inherit stdin, so a pts sub-shell works there; the console path
+    // pipes-and-drops stdin, which EOFs the sub-shell at birth. Route it to the
+    // passthrough (Inherit fd 0/1/2, PROMPT discipline untouched, plain wait);
+    // see exec_external_passthrough. The pipeline / redirect paths never reach
+    // here, so a `imperium ... | cat` or `imperium ... > f` keeps its non-tty
+    // stdout and the tool fails its own fd-1 tty check -- the design's fail-fast.
+    if env.stdio_inherit && env.job_control.is_none() && console::is_console_passthrough(&argv[0]) {
+        return exec_external_passthrough(env, argv);
+    }
+
     if env.trace_depth > 0 {
         trace_echo(argv);
     }
@@ -1572,6 +1582,58 @@ fn exec_external_raw(
             if let Some(fd) = consctl_fd {
                 console::set_mode(fd, console::PROMPT_MODE);
             }
+            let mut s = String::new();
+            let _ = write!(&mut s, "spawn failed: {:?}", e);
+            env.errstr_set(s);
+            env.status_set(127);
+            Ok(StatementFlow::Normal)
+        }
+    }
+}
+
+/// Run a console-passthrough wrapper (imperium) that launches an interactive
+/// SUB-SHELL. Unlike `exec_external_raw` (a full-screen TUI), the child needs the
+/// console but NOT the RAW-mode dance: the sub-shell inherits the outer shell's
+/// PROMPT discipline UNCHANGED (`+onlcr` for its children's output, `-icanon
+/// -echo` + `+isig` for its own line editor -- the ut prompt read services Ctrl-C
+/// as the `interrupt` note, not a raw byte), so this touches no consctl and
+/// re-emits no screen escapes. fd 0/1/2 = Inherit (the console): the console-path
+/// spawn's Piped-drop stdin (see `exec_external`) would EOF the sub-shell at
+/// birth. The wait is a PLAIN by-pid wait, NOT `wait_pids_interruptible`: the
+/// console owner stays the OUTER shell, so a Ctrl-C during the sub-shell posts
+/// `interrupt` to the outer shell (undelivered here -> dropped: Ctrl-C at the
+/// sub-shell prompt is inert, a documented v1.x gap that wants console-ownership
+/// transfer to the sub-shell). Forwarding it to the wrapper instead would
+/// terminate it and SWEEP the whole propagating legate scope (I-25). I-27: the
+/// wrapper never touches consctl and is never console-attached, so the SAK /
+/// elevation gate is untouched.
+fn exec_external_passthrough(env: &mut Env, argv: &[String]) -> EvalResult<StatementFlow> {
+    if env.trace_depth > 0 {
+        trace_echo(argv);
+    }
+
+    let mut spawn_cmd = build_command(argv);
+    spawn_cmd.stdin(Stdio::Inherit);
+    spawn_cmd.stdout(Stdio::Inherit);
+    spawn_cmd.stderr(Stdio::Inherit);
+
+    match spawn_cmd.spawn() {
+        Ok(child) => {
+            // All-Inherit: the parent holds no pipe ends, so `child` carries
+            // nothing to close (Child::Drop does not reap) -- read the pid, wait,
+            // let it drop. A plain by-pid wait (matching exec_external_raw): no
+            // interrupt forwarding (see the doc comment -- forwarding a Ctrl-C to
+            // the wrapper would terminate it and sweep the propagating scope, I-25),
+            // no line-discipline flip, no screen restore.
+            let pid = child.pid();
+            let mut st: i32 = 0;
+            // SAFETY: SVC wrapper; &mut st is a valid writable i32. A vanished /
+            // not-our-child pid yields rc < 0 -> status 0 (matches the reap loops).
+            let rc = unsafe { t_wait_pid_for(pid, 0, &mut st as *mut i32) };
+            env.status_set(if rc < 0 { 0 } else { st });
+            Ok(StatementFlow::Normal)
+        }
+        Err(e) => {
             let mut s = String::new();
             let _ = write!(&mut s, "spawn failed: {:?}", e);
             env.errstr_set(s);
@@ -2360,6 +2422,7 @@ pub fn note_class_for_name(name: &str) -> Option<NoteClass> {
         "interrupt" => Some(NoteClass::Interrupt),
         "pipe" => Some(NoteClass::Pipe),
         "child_exit" => Some(NoteClass::ChildExit),
+        "sak" => Some(NoteClass::Sak),
         _ if name.starts_with("tty:") => Some(NoteClass::Tty),
         _ => None,
     }

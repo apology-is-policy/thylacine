@@ -111,6 +111,8 @@ pub struct Env {
     /// register, not a scope binding -- interior mutability models
     /// "every evaluated command updates the register".
     status: Cell<i32>,
+    // Detect a status-producing substitution during argv expansion.
+    status_revision: Cell<u64>,
     /// $errstr -- last command's error string (rc tradition;
     /// scripture 8.5). Initialized to "".
     errstr: String,
@@ -261,6 +263,7 @@ impl Env {
             fns: BTreeMap::new(),
             note_handlers: BTreeMap::new(),
             status: Cell::new(0),
+            status_revision: Cell::new(0),
             errstr: String::new(),
             cwd: "/".to_string(),
             interactive: false,
@@ -528,6 +531,11 @@ impl Env {
     /// transparently, so every existing call site is unaffected.
     pub fn status_set(&self, code: i32) {
         self.status.set(code);
+        self.status_revision.set(self.status_revision.get().wrapping_add(1));
+    }
+
+    pub(crate) fn status_revision(&self) -> u64 {
+        self.status_revision.get()
     }
 
     pub fn errstr(&self) -> &str {
@@ -565,7 +573,7 @@ impl Env {
     fn special_set(&mut self, name: &str, value: &Value) -> bool {
         match name {
             "status" => {
-                self.status.set(value.as_int().unwrap_or(0) as i32);
+                self.status_set(value.as_int().unwrap_or(0) as i32);
                 true
             }
             "errstr" => {

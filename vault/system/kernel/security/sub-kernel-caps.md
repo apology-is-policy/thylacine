@@ -6,15 +6,16 @@ title: "Capabilities — the fork-grantable ceiling, the cap device, and the leg
 code:
   - kernel/include/thylacine/caps.h
   - kernel/devcap.c
+  - kernel/include/thylacine/devcap.h
   - kernel/proc.c
 audit: hard
-guarded-by: []
-validated-by: [prose, gate-smp]
+guarded-by: [inv-i2, inv-i25]
+validated-by: [prose, spec-imperium, gate-smp]
 locks: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md section 5.5", "docs/IDENTITY-DESIGN.md section 9.8", "specs/corvus.tla", "specs/handles.tla"]
 created: 2026-08-02
-updated: 2026-09-05
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -29,6 +30,19 @@ The single sanctioned path by which a Proc gains one is the `cap` device,
 and everything in this dossier exists to make that the only path.
 
 ## Contract
+
+**Propagating Imperium and Haul (2026-09-17).** `CAP_GRANTABLE_IMPERIUM`
+is DAC_OVERRIDE | CHOWN | KILL | POST_SERVICE. The last bit is 13 (12 remains
+reserved for audio); it is absent from CAP_ALL, present in CAP_ELEVATION_ONLY
+and CAP_GRANTABLE_CLEARANCE. `sys_cap_grant_imperium_core` accepts only the
+propagating flag and this subset. `proc_become_legate` rejects nested
+propagating redemption. During `rfork_internal`, only the parent's scoped
+`legate_caps` can survive the elevation strip, intersected with actual parent
+caps and the requested child mask. Ordinary clearance still does not flow.
+The scope tag is published last with release ordering. Child insertion checks
+parent teardown under the process-table lock, closing the fork/sweep gap.
+The trusted authorization and user interface are described in [[sub-imperium]].
+
 
 Two disjoint classes, pinned by `_Static_assert`:
 

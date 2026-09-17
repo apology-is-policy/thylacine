@@ -20,7 +20,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-03
-updated: 2026-09-07
+updated: 2026-09-17
 area: userspace
 ---
 ## Purpose
@@ -82,6 +82,13 @@ aliases completable; a rejected mode-set leaves the shell in whatever mode it
 inherited. Nothing in this layer can fail startup.
 
 ## Mechanism
+
+**Elevated prompt and hangup (2026-09-17).** The REPL obtains its scope
+from `/proc` and renders the fasces through [[sub-imperium]]. Outside a scope
+it retains main's Instrument prompt behavior. Session hangup exits the console
+shell. The evaluator's foreground input passthrough prevents the waiting parent
+from discarding bytes intended for the trusted corvus episode.
+
 
 **The byte pipeline.** `ParserState` is a four-state machine — `Ground`, `Escape`,
 `Csi`, `Utf8`. Ground maps C0 controls to emacs bindings (`Ctrl-A/E/B/F/K/U/W/Y/D`,

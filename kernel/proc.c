@@ -38,6 +38,7 @@
 #include <thylacine/sched.h>
 #include <thylacine/smp.h>
 #include <thylacine/spinlock.h>
+#include <thylacine/syscall.h>     // IM-1: SYS_CONSOLE_EPISODE_ARM / _END (the op ABI)
 #include <thylacine/thread.h>
 #include <thylacine/torpor.h>
 #include <thylacine/types.h>
@@ -1244,6 +1245,21 @@ static void vfork_await_release(struct Proc *p, int child_pid);
 // surface delegates with mask=CAP_NONE so children inherit no caps —
 // the v1.0 default for any rfork-from-non-kproc-context path that
 // hasn't been explicitly designed to grant caps.
+// IM-2: undo a fully-built but never-published child (the straggler close's
+// failure path -- the parent turned out to be terminating at the link). The
+// child Thread exists but was never ready()'d: on no run tree, on no CPU, so
+// thread_free's not-RUNNING gate passes and its unlink brings thread_count to
+// 0, which is what proc_free's drain precondition wants. Everything else the
+// child acquired (the territory, the handle-table copy, the env, the exe Path,
+// the allowance, its address-space reference) is released by proc_free exactly
+// as on the pre-thread failure paths above; the ZOMBIE store is that function's
+// lifecycle gate, not a death (nothing ever observed this Proc).
+static void rfork_rollback_unpublished(struct Proc *child, struct Thread *ct) {
+    thread_free(ct);
+    child->state = PROC_STATE_ZOMBIE;
+    proc_free(child);
+}
+
 static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
                           caps_t caps_mask, const struct fork_context *fc) {
     // RFPROC alone, or RFPROC|RFMEM (LINEAGE L-3). The remaining reserved flags
@@ -1372,16 +1388,33 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // `granted \subseteq proc_caps[parent]`: the AND with caps_mask is
     // the impl-side "ceiling at parent's current caps" enforcement.
     //
-    // A-4-pre / I-2: AND with ~CAP_ELEVATION_ONLY unconditionally. An
-    // elevated parent (one that legitimately gained CAP_HOSTOWNER via the
-    // console-gated `cap` device) must not leak it across a fork —
-    // elevation-only caps are the sole sanctioned capability growth and
-    // flow ONLY through the cap device for a console-attached Proc, never
-    // by inheritance. caps_mask alone can't enforce this (a caller may
-    // pass a mask that includes the bit); the ~CAP_ELEVATION_ONLY strip
-    // is load-bearing. Honors the contract caps.h already documents.
+    // A-4-pre / I-2: AND with ~CAP_ELEVATION_ONLY. An elevated parent (one
+    // that legitimately gained CAP_HOSTOWNER via the console-gated `cap`
+    // device) must not leak it across a fork -- elevation-only caps are the
+    // sole sanctioned capability growth and flow ONLY through the cap device,
+    // never by inheritance. caps_mask alone can't enforce this (a caller may
+    // pass a mask that includes the bit); the strip is load-bearing.
+    //
+    // IM-2 (IMPERIUM-DESIGN.md 11.4; specs/imperium.tla Fork / Flow; I-25
+    // STRENGTHENED): the strip is CARVED by the parent's scope. Under a
+    // PROPAGATING legate scope exactly the parent's legate_caps -- the set the
+    // root redeemed, never its further-redeemed extras -- survive the strip:
+    //     child = (parent & mask) & ~(ELEVATION_ONLY & ~flow)
+    // with flow = parent->legate_caps iff the scope propagates, else 0 (the
+    // v1.0 strip, bit-identical). CAP_HOSTOWNER is never clearance-grantable,
+    // so it never flows; the spawn mask still bounds everything (G9: a caller
+    // whose mask omits the flowing bits gets an unelevated child). scope_id is
+    // ACQUIRE-loaded FIRST: it is the RELEASE-published word of the legate
+    // block, so legate_caps / legate_flags read after it are coherent once it
+    // reads nonzero; a parent mid-redeem reads 0 and its child is born
+    // unscoped -- the fork linearizes before the redeem, the only consistent
+    // answer. The tag inherit below keys on the same load.
     caps_t parent_caps = __atomic_load_n(&parent->caps, __ATOMIC_ACQUIRE);
-    child->caps = (parent_caps & caps_mask) & ~CAP_ELEVATION_ONLY;
+    u32    pscope      = __atomic_load_n(&parent->legate_scope_id, __ATOMIC_ACQUIRE);
+    caps_t flow        = (pscope != 0u &&
+                          (parent->legate_flags & LEGATE_FLAG_PROPAGATING) != 0u)
+                       ? parent->legate_caps : (caps_t)0;
+    child->caps = (parent_caps & caps_mask) & ~(CAP_ELEVATION_ONLY & ~flow);
 
     // A-1a: identity is INHERITED across rfork (the durable principal-id +
     // groups flow parent -> child unchanged). This is the opposite of caps
@@ -1456,16 +1489,30 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // §9.8, I-25). A child of a legate-scoped Proc JOINS the scope: it
     // carries scope_id + session_id + valid_until so the teardown walk
     // (A-4a-2b) finds it and it can detect valid_until expiry at its own
-    // EL0-return tail. It carries only the FORK-GRANTABLE subset of the
-    // caps -- the elevation-only members were already stripped above by
-    // `& ~CAP_ELEVATION_ONLY` (A-4-pre), so a scope member cannot wield
-    // the legate's fs-admin authority; the membership tag governs lifetime,
-    // not authority. PROC_FLAG_LEGATE_ROOT is NOT inherited (proc_flags
+    // EL0-return tail. PROC_FLAG_LEGATE_ROOT is NOT inherited (proc_flags
     // never are; see below), so the child is a scope MEMBER, never a second
     // root. For a non-legate parent these are all 0 -> child not-a-legate.
-    child->legate_scope_id    = parent->legate_scope_id;
-    child->legate_session_id  = parent->legate_session_id;
-    child->legate_valid_until = parent->legate_valid_until;
+    //
+    // IM-2: the membership tag now governs AUTHORITY too, under propagation.
+    // legate_caps = what flowed (the carve above; 0 for a plain scope) and the
+    // PROPAGATING property inherits as a MEMBER property -- a scope-wide fact
+    // every member carries (imperium.tla PropagatingIsScopeWide), so this
+    // child's own rfork reads its own copy. Keyed on `pscope` (the ACQUIRE
+    // load above) so a parent mid-redeem yields a fully-unscoped child rather
+    // than a half-copied block. valid_until is loaded atomically: a peer
+    // thread's FURTHER redeem may be shortening it right now.
+    child->legate_scope_id    = pscope;
+    child->legate_session_id  = pscope ? parent->legate_session_id : 0u;
+    child->legate_valid_until = pscope
+        ? __atomic_load_n(&parent->legate_valid_until, __ATOMIC_RELAXED) : 0u;
+    // What the child's OWN children may receive is what it actually holds of
+    // the flow -- a spawn mask that omitted a flowing bit (G9) narrows the
+    // flowing set for the whole subtree below, never widens it (imperium.tla
+    // FlowNeverWidens); /proc/<pid>/imperium's `rods` then counts caps the
+    // Proc really carries.
+    child->legate_caps        = flow & child->caps;
+    child->legate_flags       = pscope
+        ? (parent->legate_flags & LEGATE_FLAG_PROPAGATING) : 0u;
 
     // I-34 (specs/allowance.tla): inherit the hardware allowance. A NARROWED
     // parent's child is equally narrowed -- the hardware-axis analog of caps'
@@ -1656,7 +1703,29 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // P3-A: link child into parent's children list under the proc-table
     // lock. This is the publication point — after release, the child is
     // visible to any concurrent exits()/wait_pid() on the parent.
+    //
+    // IM-2 (imperium.tla Fork vs BUGGY_STRAGGLER; IMPERIUM-DESIGN.md 11.4 G5;
+    // I-25 STRENGTHENED): re-check the parent's group_exit_msg in the SAME lock
+    // hold. The legate teardown sweep (proc_legate_teardown_if_root, run under
+    // this lock at the root's ZOMBIE transition) walks the table BY TAG and
+    // marks every member it finds; the child's tag + caps were copied above,
+    // OUTSIDE the lock, so a sweep that runs between that copy and this link
+    // walked past a child it could not see -- and that child would land here
+    // ALIVE and, under propagation, ELEVATED, with its root already dead. The
+    // sweep DID mark the parent (which is in the table), so the parent's flag
+    // is the witness: read it under the lock the sweep held, and a set flag
+    // means the sweep ran -- fail the rfork, unpublished. Uniform for every
+    // terminating parent (a kill, an exit_group, an expiry): a dying Proc
+    // cannot mint a child, and the -1 never even reaches its userspace, which
+    // dies at this syscall's own return tail. Without the re-check the
+    // v1.0 straggler was merely an unelevated Proc with a stale tag; with
+    // caps propagating it is the escape TLC finds in four steps.
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    if (__atomic_load_n(&parent->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) {
+        spin_unlock_irqrestore(&g_proc_table_lock, s);
+        rfork_rollback_unpublished(child, ct);
+        return -1;
+    }
     proc_link_child(parent, child);
     spin_unlock_irqrestore(&g_proc_table_lock, s);
 
@@ -1730,13 +1799,14 @@ int rfork_forked(unsigned flags, const struct fork_context *fc) {
 
 // The caps-bearing fork: identical to rfork_forked but with an explicit
 // caps_mask instead of the CAP_NONE default. The ONLY caller is the phenotype
-// clone path (sys_rfork_core, PHENO_LINUX), which passes CAP_ALL so a Linux
-// fork INHERITS the parent's capabilities -- Linux's own semantics (I-43 shape
-// fidelity). rfork_internal still intersects with the parent's actual caps and
-// still strips ~CAP_ELEVATION_ONLY unconditionally, so the child never exceeds
-// the parent (I-2: child_caps == parent_caps & ~elevation <= parent_caps) and
-// elevation-only caps never propagate by inheritance. Native fork keeps
-// CAP_NONE (Thylacine's stronger fork-zeros-caps default) via rfork_forked.
+// clone path (sys_rfork_core, PHENO_LINUX), which passes the full inheritable
+// mask so a Linux fork INHERITS the parent's capabilities -- Linux's own
+// semantics (I-43 shape fidelity). rfork_internal still intersects with the
+// parent's actual caps and strips the elevation-only bits carved by the
+// parent's legate scope (IM-2), so the child never exceeds the parent (I-2:
+// child_caps <= parent_caps) and elevation-only caps propagate ONLY through a
+// PROPAGATING scope's flowing set. Native fork keeps CAP_NONE (Thylacine's
+// stronger fork-zeros-caps default) via rfork_forked.
 int rfork_forked_with_caps(unsigned flags, const struct fork_context *fc,
                            caps_t caps_mask) {
     if (!fc) extinction("rfork_forked_with_caps with NULL fork_context");
@@ -1867,10 +1937,49 @@ bool proc_console_owner_in_session(const struct Proc *p) {
     return console_session_match(owner_sid, caller_sid);
 }
 
+// IM-1 (IMPERIUM-DESIGN.md 11.3): the console OWNER a SAK unseated, handed
+// back when the episode it opened ENDs -- else every imperium episode would
+// leave the session without a Ctrl-C target until the next login (today the
+// owner only returns when login spawns the next shell). Same lifetime
+// discipline as g_console_owner: protected by g_proc_table_lock, cleared at
+// the ZOMBIE chokepoint on that Proc's death and by its own relinquish, so it
+// never dangles. Restored only into an EMPTY owner slot: a claim made during
+// the episode (SPAWN_PERM_CONSOLE_OWNER) is never clobbered.
+static struct Proc *g_console_owner_pre_sak;   // BSS NULL
+
+// Hand the Ctrl-C target back to the Proc a SAK unseated, once the episode is
+// over. Caller holds g_proc_table_lock. One-shot: the saved pointer is
+// consumed either way. Only a LIVE Proc (the chokepoint clears a dead one, so
+// the state check is belt and braces) and only into an empty slot.
+static void proc_console_owner_restore_locked(void) {
+    struct Proc *pre = g_console_owner_pre_sak;
+    g_console_owner_pre_sak = NULL;
+    if (!pre || pre->magic != PROC_MAGIC || pre->state != PROC_STATE_ALIVE) return;
+    if (g_console_owner == NULL) g_console_owner = pre;
+}
+
 void proc_set_console_trusted(struct Proc *p) {
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    struct Proc *prev = g_console_trusted_proc;
     g_console_trusted_proc = p;
+    // IM-1: the episode ARM is a property of the authority's IDENTITY -- a
+    // new (or cleared) authority starts unarmed, and an episode the old one
+    // left open ends fail-safe (the same abandon the ZOMBIE chokepoint runs).
+    // cons's leaf lock nests under g_proc_table_lock here: a new edge with no
+    // reverse (cons queries the table only with its own lock released).
+    if (prev != p) {
+        cons_episode_disarm();
+        if (cons_episode_abandon()) proc_console_owner_restore_locked();
+    }
     spin_unlock_irqrestore(&g_proc_table_lock, s);
+}
+
+bool proc_is_console_trusted(const struct Proc *p) {
+    if (!p) return false;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    bool yes = (g_console_trusted_proc == p);
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return yes;
 }
 
 // g_console_renderer is the single bound console RENDERER (G-4, the R2-F6
@@ -2080,6 +2189,19 @@ void proc_console_relinquish(struct Proc *p) {
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
     proc_revoke_console_attached(p);   // atomic AND on proc_flags
     if (g_console_owner == p) g_console_owner = NULL;
+    // IM-1: a relinquish drops EVERY console role p holds, the saved pre-SAK
+    // owner included -- joey is the owner during bringup and relinquishes at
+    // the session boundary, and a SAK during bringup must not let a later
+    // episode's END re-install init as the Ctrl-C target (the RW-7 R2-F2
+    // kill, re-synthesized through the restore).
+    if (g_console_owner_pre_sak == p) g_console_owner_pre_sak = NULL;
+    // The trusted authority giving up the console mid-episode could never END
+    // it through the gate -- so the relinquish ends it: the untrusted world
+    // unfreezes, and no secret is in flight because its only reader just
+    // left. The ARM persists (it is the consumer's declaration, and the next
+    // SAK re-attaches the same Proc).
+    if (g_console_trusted_proc == p && cons_episode_abandon())
+        proc_console_owner_restore_locked();
     spin_unlock_irqrestore(&g_proc_table_lock, s);
 }
 
@@ -2087,64 +2209,165 @@ void proc_console_relinquish(struct Proc *p) {
 // console_mgr kthread on a recognized serial BREAK. The whole transition runs
 // under g_proc_table_lock so the owner + trusted pointers cannot be reaped/freed
 // mid-transition (the A-4c-1 console-owner lifetime discipline). RW-7 R2-F2: the
-// SAK posts NO note, so it takes ONLY g_proc_table_lock -- the prior
-// g_proc_table_lock -> note q->lock edge is gone (revoke/mark/is-attached are
-// lock-free atomic RMWs), strictly simplifying the lock order.
-void proc_console_sak(void) {
+// SAK posts NO `interrupt`; revoke/mark/is-attached are lock-free atomic RMWs.
+// IM-1 adds the `sak` note to the TRUSTED Proc under the same hold -- the
+// g_proc_table_lock -> note q->lock edge is the one proc_become_zombie_locked's
+// notes_post_child_exit already takes, so the lock order is unchanged.
+bool proc_console_sak(void) {
     // DISPLAY-MODES.md 1b (audit F2): a SAK is a demand for the trusted path on
     // the EMERGENCY serial medium -- restore serial output regardless of any
     // renderer's silence, before anything else and covering the idempotent
     // repeat-SAK path below. Lockless relaxed store, so it takes no lock and
     // introduces no g_proc_table_lock -> g_cons.lock edge.
     cons_serial_silent_clear();
+    bool        begin = false;
+    const char *why;
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
     struct Proc *owner   = g_console_owner;
     struct Proc *trusted = g_console_trusted_proc;
 
     bool trusted_live = trusted && trusted->magic == PROC_MAGIC
                         && trusted->state == PROC_STATE_ALIVE;
+    bool owner_live   = owner && owner->magic == PROC_MAGIC
+                        && owner->state == PROC_STATE_ALIVE;
 
-    // Idempotent under a BREAK flood: once the trusted login authority is the
-    // sole console authority (console-attached) and no owner remains to revoke,
-    // a repeat SAK is a no-op. RW-7 R2-F1: post-fix the trusted Proc is
-    // attach-only and is NEVER the console OWNER, so the prior `owner == trusted`
-    // guard could no longer fire -- this is its replacement.
-    if (trusted_live && owner == NULL && proc_is_console_attached(trusted)) {
-        spin_unlock_irqrestore(&g_proc_table_lock, s);
-        return;
+    // The HANDOFF is idempotent under a BREAK flood: once the trusted login
+    // authority is the sole console authority (console-attached) and no owner
+    // remains to revoke, a repeat SAK re-grants nothing. RW-7 R2-F1: post-fix
+    // the trusted Proc is attach-only and is NEVER the console OWNER, so the
+    // prior `owner == trusted` guard could no longer fire -- this is its
+    // replacement. IM-1: a no-op handoff no longer RETURNS early -- the
+    // episode decision below runs on every SAK, because the first SAK of a
+    // session leaves the owner NULL until the next login, and an early return
+    // would have made it the only SAK that could ever open an episode.
+    bool steady = trusted_live && owner == NULL && proc_is_console_attached(trusted);
+    if (!steady) {
+        // (1) Revoke the console-attach bit from the current owner. RW-7 R2-F2:
+        // post NO note here. Reusing `interrupt` to mean "you lost the console"
+        // was a benign courtesy BEFORE LS-5; LS-5 made `interrupt` a real
+        // terminate-if-uncaught note, so posting it to the old owner TERMINATES
+        // a non-self-managing owner (joey during bringup -> init dies) or
+        // spuriously kills a session shell's foreground command. SAK-revoke
+        // needs its OWN note name (a dedicated `hangup` / `console-revoked`;
+        // RW-7 R2-F3, a v1.x notes SEAM) -- until then, the attach-bit revoke
+        // is the SAK's observable effect on the old owner (it loses elevation
+        // authority). Guarded on a live owner: after the owner exited,
+        // proc_become_zombie_locked already cleared it.
+        if (owner_live) {
+            proc_revoke_console_attached(owner);
+            // IM-1: remember whom the SAK unseated, so the episode's END can
+            // hand the Ctrl-C target back. Only a LIVE owner is worth saving;
+            // a NULL owner (a session between logins) keeps the previously
+            // saved one -- the shell that lost its Ctrl-C at an earlier
+            // unarmed SAK gets it back at the next episode's END.
+            g_console_owner_pre_sak = owner;
+        }
+
+        // (2) Re-grant the console-ATTACH (elevation authority) to the trusted
+        // login authority, but do NOT make it the console OWNER. RW-7 R2-F1:
+        // owner and attach are DISTINCT roles post-LS-5 -- the OWNER is the
+        // `interrupt` (Ctrl-C) target; the ATTACH gates SAK/elevation
+        // redemption (the devcap gate keys on PROC_FLAG_CONSOLE_ATTACHED).
+        // corvus is the login AUTHORITY, never a Ctrl-C target; making it the
+        // owner meant a Ctrl-C after SAK posted `interrupt` to corvus, arming
+        // its terminate latch (non-self-managing) and killing the trusted path
+        // until reboot. The Ctrl-C owner is re-established when login spawns
+        // the session shell (SPAWN_PERM_CONSOLE_OWNER) -- or, since IM-1, when
+        // the episode this SAK opens ENDs. FAIL-SAFE: with no trusted Proc
+        // alive, the attach is simply not granted -- no Proc can redeem
+        // elevation until a trusted login claims the console.
+        g_console_owner = NULL;
+        if (trusted_live) {
+            proc_mark_console_attached(trusted);   // atomic OR; trusted ALIVE-checked
+        }
     }
 
-    // (1) Revoke the console-attach bit from the current owner. RW-7 R2-F2: post
-    // NO note here. Reusing `interrupt` to mean "you lost the console" was a
-    // benign courtesy BEFORE LS-5; LS-5 made `interrupt` a real
-    // terminate-if-uncaught note, so posting it to the old owner TERMINATES a
-    // non-self-managing owner (joey during bringup -> init dies) or spuriously
-    // kills a session shell's foreground command. SAK-revoke needs its OWN note
-    // name (a dedicated `hangup` / `console-revoked`; RW-7 R2-F3, a v1.x notes
-    // SEAM) -- until then, the attach-bit revoke is the SAK's observable effect
-    // on the old owner (it loses elevation authority). Guarded on a live owner:
-    // after the owner exited, proc_become_zombie_locked already cleared it.
-    if (owner && owner->magic == PROC_MAGIC && owner->state == PROC_STATE_ALIVE) {
-        proc_revoke_console_attached(owner);
-    }
-
-    // (2) Re-grant the console-ATTACH (elevation authority) to the trusted login
-    // authority, but do NOT make it the console OWNER. RW-7 R2-F1: owner and
-    // attach are DISTINCT roles post-LS-5 -- the OWNER is the `interrupt`
-    // (Ctrl-C) target; the ATTACH gates SAK/elevation redemption (the devcap
-    // gate keys on PROC_FLAG_CONSOLE_ATTACHED). corvus is the login AUTHORITY,
-    // never a Ctrl-C target; making it the owner meant a Ctrl-C after SAK posted
-    // `interrupt` to corvus, arming its terminate latch (non-self-managing) and
-    // killing the trusted path until reboot. The Ctrl-C owner is re-established
-    // when login spawns the session shell (SPAWN_PERM_CONSOLE_OWNER); during the
-    // login window there is no foreground terminate target. FAIL-SAFE: with no
-    // trusted Proc alive, the attach is simply not granted -- no Proc can redeem
-    // elevation until a trusted login claims the console.
-    g_console_owner = NULL;
-    if (trusted_live) {
-        proc_mark_console_attached(trusted);   // atomic OR; trusted ALIVE-checked
+    // IM-1 (IMPERIUM-DESIGN.md 11.3): the EPISODE decision, on EVERY SAK. It
+    // opens iff the trusted Proc is alive, ARMED as an episode consumer
+    // (SYS_CONSOLE_EPISODE_ARM -- unarmed, the kernel alone must not freeze a
+    // console nobody is there to unfreeze), and no episode is already open (a
+    // repeat SAK is idempotent: no restart, no second note -- the operator
+    // holding BREAK is one gesture). BEGIN and the `sak` note both happen
+    // HERE, under the lock that ALIVE-checked the trusted Proc: its death /
+    // relinquish / replacement (the same lock) is ordered entirely before or
+    // after, so an episode never opens behind a consumer that just left, and
+    // corvus can never read the note and find no episode behind it. BEGIN
+    // first, note second: a refused post (a Proc with no queue -- not a live
+    // Proc, but the fail-safe costs one call) closes the episode again, because
+    // an episode nobody was told about is a frozen console. The caught-note
+    // wake is the poster's duty under this lock (the interrupt path's
+    // discipline): a self-managing consumer blocked in an interruptible wait
+    // unwinds to read the note.
+    if (!trusted_live)               why = "no trusted proc";
+    else if (!cons_episode_armed())  why = "unarmed";
+    else if (cons_episode_active())  why = "active";
+    else if (!cons_episode_begin())  why = "not begun";
+    else if (notes_post(trusted, NOTE_NAME_SAK, 0u, NULL, true) != 0) {
+        (void)cons_episode_abandon();
+        why = "note refused";
+    } else {
+        proc_caught_note_wake(trusted);
+        begin = true;
+        why = "episode";
     }
     spin_unlock_irqrestore(&g_proc_table_lock, s);
+
+    // One line per SAK, in the caller's process context, via the #126
+    // non-spinning emitter: the harness's witness that a BREAK reached the
+    // kernel and what it decided (tools/interactive: the BREAK lever). Outside
+    // the lock -- the emitter takes the TX ring lock and needs nothing of the
+    // table.
+    struct cons_diag_line l;
+    cons_diag_line_init(&l);
+    cons_diag_line_puts(&l, "cons: SAK (");
+    cons_diag_line_puts(&l, why);
+    cons_diag_line_puts(&l, ")\n");
+    (void)cons_diag_line_emit(&l);
+    return begin;
+}
+
+// IM-1: the SYS_CONSOLE_EPISODE op core. The gate is the trusted IDENTITY
+// (not the attach bit): the SAK attached the trusted Proc, and a relinquish
+// ends the episode by itself, so "trusted && open" is the whole condition. One
+// g_proc_table_lock hold covers gate + act + owner restore, so a concurrent
+// ZOMBIE chokepoint (which clears the trusted pointer and abandons the episode
+// under the same lock) is ordered entirely before or entirely after.
+int proc_console_episode(struct Proc *p, u32 op) {
+    if (!p) return -1;
+    int rc = -1;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    if (g_console_trusted_proc == p) {
+        switch (op) {
+        case SYS_CONSOLE_EPISODE_ARM:
+            cons_episode_arm();
+            rc = 0;
+            break;
+        case SYS_CONSOLE_EPISODE_END:
+            if (cons_episode_end()) {
+                proc_console_owner_restore_locked();
+                rc = 0;
+            }
+            break;
+        default:
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return rc;
+}
+
+struct Proc *proc_test_console_owner_pre_sak(void) {
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    struct Proc *o = g_console_owner_pre_sak;
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return o;
+}
+
+struct Proc *proc_test_console_trusted(void) {
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    struct Proc *t = g_console_trusted_proc;
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return t;
 }
 
 // Test-only: read g_console_owner (the SAK-transition target assertion in
@@ -2186,6 +2409,24 @@ void proc_mark_may_post_service(struct Proc *p) {
     // in the spawn thunk pre-EL0, never the live console owner -- but the
     // all-RMWs-atomic posture closes the class.)
     __atomic_or_fetch(&p->proc_flags, PROC_FLAG_MAY_POST_SERVICE, __ATOMIC_RELAXED);
+}
+
+// arm-6 (IDENTITY-DESIGN §9.9.1): stamp PROC_FLAG_SESSION_HANGUP -- the mark
+// that makes a session leader's death hang up (terminate) the rest of its
+// session (the login-session reclamation). Set in the spawn thunk right after
+// proc_setsid made the child a session leader. Same one-way / atomic-RMW /
+// refuse-non-ALIVE discipline as proc_mark_may_post_service (the flag word is
+// multi-writer via the SAK's console-attach RMW, so the OR must be atomic);
+// never cleared, never propagated by rfork. The death hook additionally gates on
+// p->sid == p->pid, so a stray flag on a non-leader (a setsid that somehow
+// failed) is inert.
+void proc_arm_session_hangup(struct Proc *p) {
+    if (!p)                    extinction("proc_arm_session_hangup(NULL)");
+    if (p->magic != PROC_MAGIC)
+        extinction("proc_arm_session_hangup on corrupted Proc");
+    if (p->state != PROC_STATE_ALIVE)
+        extinction("proc_arm_session_hangup on non-ALIVE Proc");
+    __atomic_or_fetch(&p->proc_flags, PROC_FLAG_SESSION_HANGUP, __ATOMIC_RELAXED);
 }
 
 // CL-5: resolve a spawn's requested page_budget against the parent's authority.
@@ -2485,10 +2726,37 @@ static u32 legate_scope_alloc(void) {
     return id;
 }
 
-void proc_become_legate(struct Proc *p, u64 caps_to_or, u32 session_id,
-                        u64 valid_until) {
+int proc_become_legate(struct Proc *p, u64 caps_to_or, u32 session_id,
+                       u64 valid_until, u32 legate_flags) {
     if (!p || p->magic != PROC_MAGIC)
         extinction("proc_become_legate: NULL or corrupted Proc");
+    if ((legate_flags & ~LEGATE_FLAGS_VALID) != 0u) return -1;   // fail closed
+
+    // IM-2 (imperium.tla RedeemFurther; IMPERIUM-DESIGN.md 11.4 G6): ONE scope
+    // per Proc, set once. A Proc already in a scope keeps its tag, its root
+    // status, its flowing set and its propagating property -- the further
+    // redeem adds caps to THIS Proc only. Pre-IM-2 this function always
+    // allocated, and a member's later redeem (CAP_JIT under imperium) walked
+    // it out of the imperium teardown: the A-4a F2 re-tag, now the
+    // privilege escape imperium_buggy_retag.cfg prints. A PROPAGATING further
+    // redeem is refused: propagating never nests (abdicate first) -- the
+    // scope's traits are fixed at the join (ScopeTraitsSetOnce). The caller
+    // holds the cap-table lock, so this decision cannot race a peer thread's
+    // redeem on the same Proc.
+    u32 have = __atomic_load_n(&p->legate_scope_id, __ATOMIC_ACQUIRE);
+    if (have != 0u) {
+        if (legate_flags & LEGATE_FLAG_PROPAGATING) return -1;
+        __atomic_fetch_or(&p->caps, caps_to_or, __ATOMIC_ACQ_REL);
+        // The EARLIER nonzero deadline wins: a scope that carries any expired
+        // deadline tears down (every member checks its own copy at its EL0
+        // tail and sweeps the whole scope), so shortening is the conservative
+        // direction and lengthening is never admitted. Atomic store: a peer
+        // thread's rfork may be copying the deadline right now.
+        u64 cur = __atomic_load_n(&p->legate_valid_until, __ATOMIC_RELAXED);
+        if (valid_until != 0u && (cur == 0u || valid_until < cur))
+            __atomic_store_n(&p->legate_valid_until, valid_until, __ATOMIC_RELAXED);
+        return 0;
+    }
 
     u32 scope = legate_scope_alloc();
 
@@ -2498,19 +2766,23 @@ void proc_become_legate(struct Proc *p, u64 caps_to_or, u32 session_id,
     __atomic_fetch_or(&p->caps, caps_to_or, __ATOMIC_ACQ_REL);
 
     // Durable principal_id is UNCHANGED (scripture §3.1). Record the scope
-    // context. session_id + valid_until are written before scope_id so a
-    // concurrent teardown walk (of some OTHER scope) that observes a nonzero
-    // scope_id via the RELEASE store below also observes these. (Correctness
-    // does not depend on it -- a fresh scope id matches no in-flight teardown
-    // ctx -- but it keeps the publication clean.)
+    // context. session_id + valid_until + the IM-2 pair (legate_caps: the set
+    // that FLOWS at rfork; legate_flags: the scope's propagating property) are
+    // written before scope_id so a reader that ACQUIRE-loads a nonzero scope_id
+    // via the RELEASE store below also observes them whole -- rfork_internal
+    // is that reader, from a peer thread of this Proc, and a torn block there
+    // would be a child with the tag but not the flowing set (or the reverse).
     p->legate_session_id  = session_id;
-    p->legate_valid_until = valid_until;
+    __atomic_store_n(&p->legate_valid_until, valid_until, __ATOMIC_RELAXED);
+    p->legate_caps        = caps_to_or;
+    p->legate_flags       = legate_flags;
     __atomic_store_n(&p->legate_scope_id, scope, __ATOMIC_RELEASE);
 
     // Mark the ROOT. One-way; NEVER inherited by rfork (proc_flags never are),
     // so an rfork child is a scope MEMBER (carries scope_id, not the flag),
     // never a second root. RELEASE pairs with the ACQUIRE read in exits().
     __atomic_fetch_or(&p->proc_flags, PROC_FLAG_LEGATE_ROOT, __ATOMIC_RELEASE);
+    return 0;
 }
 
 // Teardown walk context + callback. The callback group-terminates every Proc
@@ -2518,16 +2790,20 @@ void proc_become_legate(struct Proc *p, u64 caps_to_or, u32 session_id,
 // exits via the normal path) and kproc. Returns 0 always so proc_for_each /
 // proc_for_each_walk visits the ENTIRE table.
 //
-// Member teardown is the scripture-mandated tidiness sweep: at v1.0 the
-// clearance set is ALL elevation-only, which rfork strips, so a scope MEMBER
-// never holds the elevated caps (only the root does). I-25's privilege
-// guarantee ("no elevated Proc outlives the scope") therefore rests on the
-// ROOT -- which dies on its own exit (trigger 1) or self-terminates on
-// valid_until expiry (trigger 2, which passes except=NULL to include self).
-// A member spawned racing this walk that the sweep misses is a benign,
-// UNELEVATED straggler with a stale scope tag -- not an I-25 violation. (A
-// strict whole-subtree close via an rfork-under-lock parent-flag check is a
-// documented v1.x tidiness refinement.)
+// Member teardown is LOAD-BEARING for privilege since IM-2 (IMPERIUM-DESIGN.md
+// 11.4; specs/imperium.tla): under a PROPAGATING scope the members ARE
+// elevated (rfork_internal's carve lets the root's legate_caps through), so
+// I-25's "no elevated Proc outlives the scope" rests on this sweep reaching
+// every member, not on the root alone. The root dies on its own exit (trigger
+// 1: proc_become_zombie_locked, under g_proc_table_lock, one hold with the
+// walk) or any member self-terminates the whole scope on valid_until expiry
+// (trigger 2, except=NULL to include self). The walk is BY TAG over the whole
+// table, so a member forked while the root was merely flagged (not yet ZOMBIE)
+// is found here too. The one member the walk cannot see -- a child whose tag
+// was copied before the walk and whose link came after -- is the straggler
+// rfork_internal closes by re-checking its parent's group_exit_msg under this
+// same lock at the link: the walk marked that parent, so the child is never
+// published (imperium_buggy_straggler.cfg is the four-step escape without it).
 struct legate_teardown_ctx {
     u32          scope_id;
     struct Proc *except;
@@ -2561,6 +2837,44 @@ void proc_legate_teardown_if_root(struct Proc *p) {
         return;
     struct legate_teardown_ctx tctx = { .scope_id = p->legate_scope_id, .except = p };
     proc_for_each_walk(g_kproc, legate_teardown_cb, &tctx);
+}
+
+// arm-6 (IDENTITY-DESIGN §9.9.1): the session-leader-exit HANGUP -- the exact
+// structural sibling of proc_legate_teardown_if_root. If `p` leads its own
+// session (sid == pid) armed with PROC_FLAG_SESSION_HANGUP (set from
+// SPAWN_PERM_SESSION_HANGUP on the login shell), group-terminate every OTHER
+// ALIVE Proc sharing its sid. This is a kernel-driven session-LIFECYCLE
+// termination (like the legate teardown / orphan rule / #811 cascade), NOT a
+// userspace cross-Proc kill -- so it is NOT I-26-gated (login lacks CAP_KILL by
+// design; the kernel does the hangup). It implements A-5 decision (3)'s "no
+// orphaned session Proc": logout reclaims the user's session so its per-user
+// encrypted-home mount is fully released (with Part D, each member releases its
+// mount ref at its own exit). `except = p`: the leader dies via the surrounding
+// zombie transition. A non-armed Proc, or an armed non-leader (a setsid that
+// somehow did not take), is a no-op. PRECONDITION: caller holds
+// g_proc_table_lock (the LOCKED proc_for_each_walk; proc_group_terminate is a
+// held-lock callee, exactly as legate_teardown_cb calls it).
+struct session_hangup_ctx {
+    u32          sid;
+    struct Proc *except;
+};
+
+static int session_hangup_cb(struct Proc *m, void *arg) {
+    struct session_hangup_ctx *ctx = arg;
+    if (m == ctx->except)  return 0;
+    if (m == g_kproc)      return 0;
+    if (m->state == PROC_STATE_ALIVE && (u32)m->sid == ctx->sid)
+        proc_group_terminate(m, "session leader exit");
+    return 0;   // visit every Proc
+}
+
+void proc_session_hangup_if_leader(struct Proc *p) {
+    if (!p || p->magic != PROC_MAGIC) return;
+    if (!(__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_SESSION_HANGUP))
+        return;
+    if ((u32)p->sid != (u32)p->pid) return;   // armed but not a leader -> inert (defensive)
+    struct session_hangup_ctx sctx = { .sid = (u32)p->sid, .except = p };
+    proc_for_each_walk(g_kproc, session_hangup_cb, &sctx);
 }
 
 // P6-pouch-threads (sub-chunk 9a) audit F1 close: cross-module
@@ -2628,6 +2942,13 @@ static void proc_become_zombie_locked(struct Proc *p, int status, const char *ms
     // drives, and the multi-thread-root SYS_EXIT_GROUP path). A-4a audit F1.
     proc_legate_teardown_if_root(p);
 
+    // arm-6 (I-24/IDENTITY-DESIGN §9.9.1): if p is a hangup-armed session
+    // leader, terminate the rest of its session -- the legate-teardown sibling
+    // at the same chokepoint, so logout reclaims the user's session (no
+    // orphaned Proc keeps the per-user encrypted home mounted). Same held-lock
+    // contract as the legate teardown above.
+    proc_session_hangup_if_leader(p);
+
     // A-4c-1: if p is the kernel console owner, clear the owner pointer so it
     // never dangles to a zombie/freed Proc. Same chokepoint discipline as the
     // legate teardown above -- fires on every death path. (caller holds
@@ -2636,11 +2957,24 @@ static void proc_become_zombie_locked(struct Proc *p, int status, const char *ms
     if (g_console_owner == p) {
         g_console_owner = NULL;
     }
+    // IM-1: the saved pre-SAK owner dying leaves nothing to restore. Before
+    // the trusted block below so a dying Proc is never the one handed back.
+    if (g_console_owner_pre_sak == p) {
+        g_console_owner_pre_sak = NULL;
+    }
     // A-4c-2: likewise clear the trusted login authority (corvus) on its death,
     // so a SAK fired after it exits falls back to revoke-only rather than
-    // re-granting the console to a freed Proc.
+    // re-granting the console to a freed Proc. IM-1: an episode the dying
+    // authority left open ends here, fail-safe -- the untrusted world
+    // unfreezes, and no secret is in flight because its only reader is dead
+    // -- and the ARM dies with its holder. cons's leaf lock nests under
+    // g_proc_table_lock (a new edge, no reverse: cons queries the table only
+    // with its own lock released); the parked-waiter wakes are the
+    // child_waiters precedent below.
     if (g_console_trusted_proc == p) {
         g_console_trusted_proc = NULL;
+        cons_episode_disarm();
+        if (cons_episode_abandon()) proc_console_owner_restore_locked();
     }
     // G-4: clear the bound console renderer (Aurora) on its death -- the same
     // never-dangle chokepoint. The renderer's drain fid disarms via its own
@@ -2769,6 +3103,39 @@ static void proc_close_handles_at_exit(struct Proc *p) {
         p->handles = NULL;
         closer->exit_close_active = false;
     }
+}
+
+// Part D (arm-6, IDENTITY-DESIGN 9.9.1): release the Proc's Territory at EXIT,
+// not deferred to reap -- the direct analog of #68/#926 moving the handle-table
+// close to exit, so an exited/zombie Proc stops pinning its inherited 9P mount
+// sessions (the per-user home --single-session proxy) the instant it dies rather
+// than when its (possibly much later, or deadlocked) parent reaps it.
+//
+// The FOOTGUN this avoids: devproc format_ns / format_cwd read p->territory
+// under g_proc_table_lock (the #57a F2 envelope), so the free cannot run
+// lock-free the way the #926 handle-table free does (ARCHITECTURE.md the #66c
+// note). Hence the LOCKED-DETACH + UNLOCKED-FREE split: NULL p->territory UNDER
+// the lock (a concurrent format_ns then observes NULL and renders empty --
+// territory_format_ns(NULL) and format_cwd's `if(!p->territory)` are both
+// NULL-safe), THEN territory_unref the detached pointer with the lock DROPPED
+// (territory_unref's spoor_clunk may sleep on a 9P Tclunk; the detached pointer
+// is unreachable by any reader, so the sleep is safe).
+//
+// CALLED with g_proc_table_lock HELD (*s = the saved irq state); on return the
+// lock is re-held with *s refreshed. CALLED only from the last-live-thread exit
+// window (exits() / thread_exit_self, live_peers == 0, t still RUNNING so the
+// sleeping unref is legal) -- the same soundness envelope proc_close_handles_-
+// at_exit documents. IDEMPOTENT with proc_free's territory_unref: this NULLs
+// p->territory, so proc_free's territory_unref(NULL) no-ops on every path that
+// reaches here (the direct state=ZOMBIE;proc_free orphan/rollback paths, which
+// skip this, keep p->territory and free it at reap as before).
+static void proc_release_territory_at_exit(struct Proc *p, irq_state_t *s) {
+    struct Territory *dead = p->territory;
+    if (!dead) return;
+    p->territory = NULL;                                  // detach UNDER the lock
+    spin_unlock_irqrestore(&g_proc_table_lock, *s);
+    territory_unref(dead);                                // sleep-legal, lock dropped
+    *s = spin_lock_irqsave(&g_proc_table_lock);
 }
 
 // Internal: count peer Threads that are NOT in THREAD_EXITING state
@@ -3049,6 +3416,14 @@ void exits_code(int code, const char *msg) {
             extinction("exits: peer appeared during handle close");
     }
 
+    // Part D (arm-6, IDENTITY-DESIGN 9.9.1): release the namespace at exit, not
+    // reap, so a zombie stops pinning its inherited per-user home 9P mount.
+    // Same last-live-thread window as the handle close (drops + retakes the
+    // lock to sleep in territory_unref); the peer-appeared re-check mirrors it.
+    proc_release_territory_at_exit(p, &s);
+    if (proc_count_live_peers_locked(p, t) != 0)
+        extinction("exits: peer appeared during territory release");
+
     proc_become_zombie_locked(p, code, msg);
 
     // Mark the executing thread EXITING so sched() leaves it out of the
@@ -3170,6 +3545,14 @@ void thread_exit_self(void) {
     }
 
     if (become_zombie) {
+        // Part D (arm-6, IDENTITY-DESIGN 9.9.1): release the namespace at exit
+        // (detach-under-lock + unref-outside) BEFORE the zombie transition, so a
+        // zombie stops pinning its inherited per-user home 9P mount. Same
+        // last-live-thread window as the handle close above; the peer re-check
+        // mirrors it (no RUNNING peer exists to spawn one during the unref).
+        proc_release_territory_at_exit(p, &s);
+        if (proc_count_live_peers_locked(p, t) != 0)
+            extinction("thread_exit: peer appeared during territory release");
         // This Thread is the last live one. Proc transitions to ZOMBIE.
         // SYS_EXIT_GROUP / kill cross-thread shootdown (I-24): if a group
         // termination is in progress, use the recorded group_exit_msg + its
@@ -3691,8 +4074,11 @@ void el0_return_die_check(void) {
     // expiry pass is a CAS no-op. scope_id read ACQUIRE (pairs with
     // proc_become_legate's RELEASE); valid_until is its coherent companion.
     u32 scope = __atomic_load_n(&p->legate_scope_id, __ATOMIC_ACQUIRE);
-    if (scope != 0u && p->legate_valid_until != 0u &&
-        timer_now_ns() > p->legate_valid_until) {
+    // IM-2: the deadline is loaded atomically -- a peer thread's FURTHER redeem
+    // (proc_become_legate) may be shortening it concurrently.
+    u64 until = (scope != 0u)
+              ? __atomic_load_n(&p->legate_valid_until, __ATOMIC_RELAXED) : 0u;
+    if (scope != 0u && until != 0u && timer_now_ns() > until) {
         struct legate_teardown_ctx tctx = { .scope_id = scope, .except = NULL };
         proc_for_each(legate_teardown_cb, &tctx);
     }

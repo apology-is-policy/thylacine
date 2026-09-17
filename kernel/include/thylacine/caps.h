@@ -183,14 +183,16 @@ typedef u64 caps_t;
 // excluded from CAP_ALL that no Proc holds at creation and that rfork
 // MUST strip from every child, so an elevated parent cannot leak
 // elevation across a fork. rfork_internal ANDs the child's caps with
-// ~CAP_ELEVATION_ONLY (A-4-pre). All six are acquired ONLY through the
+// ~CAP_ELEVATION_ONLY (A-4-pre). All seven are acquired ONLY through the
 // `cap` device: CAP_HOSTOWNER (the unified fs-admin authority) plus the
 // A-4 finer caps split out of it — CAP_DAC_OVERRIDE, CAP_CHOWN, CAP_KILL —
 // plus CAP_DEBUG (the Stage-8a cross-Proc debug authority) and CAP_JIT (the
 // CL-7k code-emission authority; I-42 requires it be non-heritable, so its
 // membership here is an invariant obligation, not a style choice).
 // Maps to specs/handles.tla::ElevationOnly.
-#define CAP_ELEVATION_ONLY  (CAP_HOSTOWNER | CAP_DAC_OVERRIDE | CAP_CHOWN | CAP_KILL | CAP_DEBUG | CAP_JIT)
+#define CAP_POST_SERVICE (1ull << 13) // elevation-only /srv posting; bit 12 reserved for audio
+
+#define CAP_ELEVATION_ONLY  (CAP_POST_SERVICE | CAP_HOSTOWNER | CAP_DAC_OVERRIDE | CAP_CHOWN | CAP_KILL | CAP_DEBUG | CAP_JIT)
 
 // CAP_ALL — the FORK-GRANTABLE capability ceiling: every capability a
 // Proc may legitimately hold from creation, and the mask kproc gets at

@@ -20,7 +20,7 @@ design:
   - "docs/TAPESTRY.md section 18.7 (the renderer drain/feed)"
   - "docs/LIFE-SUPPORT.md LS-8"
 created: 2026-08-02
-updated: 2026-09-06
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -60,6 +60,17 @@ exist because a bounded spin in the handler is still a spin; the locks are
 leaves because a leaf is what an interrupt handler can take.
 
 ## Contract
+
+**Trusted serial episodes (Imperium, 2026-09-17).** `SYS_CONSOLE_EPISODE`
+110 arms or ends an episode for the registered trusted reader. A physical SAK
+starts the armed episode; ordinary console readers/writers are frozen while
+corvus renders the requested capability set and reads the key. Ending,
+abandonment, or trusted-process death restores the saved console owner. The
+process-table lock serializes owner lifetime; its cons leaf-lock edge has no
+reverse acquisition. `docs/TRUSTED-PATH.md` and `docs/IMPERIUM-DESIGN.md §11`
+describe the episode state machine. This is serial trusted input, not an
+assertion that every graphical input path is authenticated.
+
 
 Two front doors, **one implementation**. A syscall mints a console fd directly;
 a namespace path walks to `/dev/cons` ([[sub-kernel-devdev]]). Both call the

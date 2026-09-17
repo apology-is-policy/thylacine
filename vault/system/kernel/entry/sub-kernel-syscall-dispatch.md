@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-09-16
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -35,6 +35,14 @@ A handler's own semantics are its subsystem's; a handler's *shape* is this
 dossier's.
 
 ## Contract
+
+**Imperium entry points (2026-09-17).** Dispatch 110 validates and executes
+the trusted-reader console-episode operation; 111 marshals the propagating
+clearance grant, preserving its kernel cap-subset and flag checks. DMA_SEGMENTS
+remains dispatch 112. Haul posting uses the existing WALK_CREATE devsrv branch,
+not a new syscall; its authorization and bounded reservation live in
+[[sub-kernel-devsrv]].
+
 
 `syscall_dispatch` receives the interrupted register frame. Since the phenotype
 prologue landed it no longer starts by reading `x8`: it first resolves the

@@ -900,6 +900,28 @@ struct Proc {
     // group-terminate set it; the single-thread exits() path passes its own code
     // straight to proc_become_zombie_locked and never consults this).
     int group_exit_code;
+
+    // IM-2 (IMPERIUM-DESIGN.md 11.4; I-25 STRENGTHENED; specs/imperium.tla):
+    // the fork-PROPAGATING legate scope. Appended at the tail so no existing
+    // offset moves. Both belong to the A-4a legate block above in meaning --
+    // they inherit across rfork with the tag, KP_ZERO reads as not-a-legate --
+    // and are written by the same single site (proc_become_legate).
+    //   legate_caps  -- the set that FLOWS at rfork. On the root: the cap set
+    //     of the redeemed grant (propagating or not). On a member: exactly
+    //     what flowed in (the parent's legate_caps iff the scope propagates,
+    //     else 0). A FURTHER redeem ORs into `caps` only; this set is fixed
+    //     when the scope is joined (imperium.tla ScopeTraitsSetOnce), so a
+    //     member's later CAP_JIT never flows to its children.
+    //   legate_flags -- LEGATE_FLAG_PROPAGATING: the scope property. Lives in
+    //     the legate block (INHERITED, as a MEMBER property) rather than in
+    //     proc_flags (which never inherit): every Proc of a scope carries the
+    //     same value (imperium.tla PropagatingIsScopeWide), so rfork reads its
+    //     own parent's copy without a table walk and /proc/<pid>/imperium
+    //     reports a scope fact.
+    //   Both are written BEFORE the legate_scope_id RELEASE store; a reader
+    //   that ACQUIRE-loads scope_id first (rfork does) sees them coherent.
+    caps_t             legate_caps;
+    u32                legate_flags;
 };
 
 // VIVARIUM: the phenotype values (Proc.phenotype; docs/VIVARIUM.md §5.1).
@@ -929,6 +951,14 @@ static inline u32 phenotype_decide(bool crossed_pheno, bool territory_linux) {
 // its scope on every death path (clean exit AND kill / group-terminate;
 // A-4a audit F1). I-25.
 #define PROC_FLAG_LEGATE_ROOT       (1u << 5)
+// IM-2: Proc.legate_flags bits (NOT proc_flags -- these INHERIT across rfork
+// with the legate tag). LEGATE_FLAG_PROPAGATING marks a scope whose redeemed
+// caps (legate_caps) FLOW to rfork children: set on the root from the grant's
+// CAP_GRANT_FLAG_PROPAGATING, copied to every member. A scope's value never
+// changes after the join (a further redeem keeps it; a PROPAGATING redeem on a
+// Proc already in any scope is refused -- propagating never nests).
+#define LEGATE_FLAG_PROPAGATING     (1u << 0)
+#define LEGATE_FLAGS_VALID          (LEGATE_FLAG_PROPAGATING)
 // LS-5 (P2 default disposition, ARCH 8.8.2): marks a Proc that opened its
 // notes fd (devnotes, via SYS_NOTE_OPEN) -- it has declared it consumes its
 // OWN notes (the shell's wait_pids_interruptible notes-fd poll). The
@@ -990,8 +1020,9 @@ static inline u32 phenotype_decide(bool crossed_pheno, bool territory_linux) {
 #define PROC_FLAG_MAY_RAISE_PAGE_BUDGET (1u << 10)
 
 // item 11 (ARCH §8.8.3): the CAUGHT-note-deliverable latch -- the non-death
-// sibling of the two terminate latches above. A 6-bit sub-field at bits
-// 11..16, one bit per note family ALIGNED TO NOTE_BIT_* (INTERRUPT=0 .. TTY=5),
+// sibling of the two terminate latches above. A 7-bit sub-field at bits
+// 11..17 (6 bits, 11..16, until IM-1 added the `sak` family), one bit per note
+// family ALIGNED TO NOTE_BIT_* (INTERRUPT=0 .. TTY=5, SAK=6),
 // so thread_caught_note_deliverable can gate it by the per-Thread note_mask
 // exactly as thread_die_pending gates the terminate latches. The per-family
 // pairing is REQUIRED for the same reason the PTY-1b comment above gives: a
@@ -1006,7 +1037,7 @@ static inline u32 phenotype_decide(bool crossed_pheno, bool territory_linux) {
 // does not include notes.h; notes.c static_asserts it equals
 // NOTE_MASK_SUPPORTED << PROC_CAUGHT_NOTE_SHIFT.
 #define PROC_CAUGHT_NOTE_SHIFT      11u
-#define PROC_FLAG_CAUGHT_NOTE_MASK  (0x3fu << PROC_CAUGHT_NOTE_SHIFT)  // bits 11..16
+#define PROC_FLAG_CAUGHT_NOTE_MASK  (0x7fu << PROC_CAUGHT_NOTE_SHIFT)  // bits 11..17
 
 // #237: the PIPE terminate-disposition latch -- the THIRD terminate family
 // (interrupt, tty:quit/hup, now pipe). Armed when notes_post commits an
@@ -1019,19 +1050,39 @@ static inline u32 phenotype_decide(bool crossed_pheno, bool territory_linux) {
 // handler registration, the self-managing mark, or draining the last queued
 // pipe note); NOT propagated by rfork; never armed on kproc.
 //
-// BIT 17, not the next literal gap: bits 11..16 are the caught-note sub-field
+// BIT 18, not the next literal gap: bits 11..17 are the caught-note sub-field
 // (dense, one bit per NOTE_BIT_* family), and NOTE_MASK_SUPPORTED grows per
-// chunk, so that field grows UPWARD from bit 11. 17 is the first bit above it
-// today; the static_assert makes a future widening (a 7th note family) that
+// chunk, so that field grows UPWARD from bit 11. 18 is the first bit above it
+// today; the static_assert makes a future widening (an 8th note family) that
 // grows the field into this bit a compile-time relocation rather than a silent
-// alias. (The design memo's "next free bit = 11" missed the sub-field: bit 11
-// is the INTERRUPT family's caught-note bit -- using it would have aliased two
-// unrelated latches, a collision no build would catch.)
-#define PROC_FLAG_PIPE_TERMINATE_PENDING (1u << 17)
+// alias -- exactly what happened once already: this latch sat at bit 17 until
+// IM-1's `sak` family (NOTE_BIT_SAK = 6) grew the field into it, and the
+// assert below turned that into this relocation. (The design memo's "next
+// free bit = 11" missed the sub-field: bit 11 is the INTERRUPT family's
+// caught-note bit -- using it would have aliased two unrelated latches, a
+// collision no build would catch.)
+#define PROC_FLAG_PIPE_TERMINATE_PENDING (1u << 18)
 _Static_assert((PROC_FLAG_PIPE_TERMINATE_PENDING & PROC_FLAG_CAUGHT_NOTE_MASK) == 0,
                "#237: the pipe terminate latch must not overlap the caught-note "
                "sub-field; widening NOTE_MASK_SUPPORTED grows it upward -- "
                "relocate PROC_FLAG_PIPE_TERMINATE_PENDING above the field then");
+
+// PROC_FLAG_SESSION_HANGUP (arm-6, IDENTITY-DESIGN §9.9.1) -- kernel-stamped
+// from SPAWN_PERM_SESSION_HANGUP in the spawn thunk (paired with a proc_setsid
+// that makes the child a session leader). When a Proc carrying this flag AND
+// leading its own session (p->sid == p->pid) becomes a zombie,
+// proc_become_zombie_locked terminates the remaining ALIVE members of its
+// session -- the legate-teardown pattern applied to the login session, so
+// logout reclaims the user's session (A-5 decision (3)). Set-once, never
+// cleared, NOT propagated by rfork (proc_flags is not copied), so only the
+// armed leader carries it. Bit 19: above the caught-note sub-field (11..17) and
+// the pipe latch (18); the static_assert makes a future field-widening a
+// compile-time relocation rather than a silent alias.
+#define PROC_FLAG_SESSION_HANGUP    (1u << 19)
+_Static_assert((PROC_FLAG_SESSION_HANGUP & PROC_FLAG_CAUGHT_NOTE_MASK) == 0,
+               "arm-6: the session-hangup flag must not overlap the caught-note "
+               "sub-field; widening NOTE_MASK_SUPPORTED grows it upward -- "
+               "relocate PROC_FLAG_SESSION_HANGUP above the field then");
 
 // The terminate-CLASS latch set (interrupt + tty:quit/hup + pipe). Used by the
 // whole-class clears -- handler registration, the self-managing mark, the
@@ -1049,7 +1100,10 @@ _Static_assert((PROC_FLAG_PIPE_TERMINATE_PENDING & PROC_FLAG_CAUGHT_NOTE_MASK) =
 // message prose carries only each field's landing RATIONALE. Absolute offsets
 // were deliberately stripped from that prose -- duplicating the number in a
 // comment is what made it go stale here in the first place.
-_Static_assert(sizeof(struct Proc) == 392,
+_Static_assert(sizeof(struct Proc) == 408,
+ "struct Proc size: IM-2 appended the propagating-legate pair (legate_caps "
+ "u64 + legate_flags u32, tail-padded to the 8-byte struct alignment): "
+ "392 -> 408. Before that: "
  "struct Proc size pinned at 376 bytes. LINEAGE L-1 took it 408 -> 376: "
  "seven fields left for struct AddrSpace and one pointer replaced them. "
  "The growth history below is the PRE-L-1 layout's, kept because its "
@@ -1169,6 +1223,13 @@ _Static_assert(__builtin_offsetof(struct Proc, legate_session_id) == 224,
  "A-4a legate block appends after group_exit_msg; existing "
  "offsets stay stable (KP_ZERO inits the new tail to "
  "not-a-legate).");
+_Static_assert(__builtin_offsetof(struct Proc, legate_caps) == 392,
+ "IM-2: the propagating-legate pair appends at the TAIL (after "
+ "group_exit_code) so no existing offset moves; KP_ZERO inits it to "
+ "nothing-flows.");
+_Static_assert(__builtin_offsetof(struct Proc, legate_flags) == 400,
+ "IM-2: legate_flags follows legate_caps; the 4-byte tail pad to the "
+ "8-byte struct alignment is deliberate (the next u32 field lands there).");
 // CL-5 page_budget, placed by the aux-2 merge. On main it sat at 392 in a
 // 400-byte Proc; aux's L-1 had moved the whole address-space block OUT of Proc
 // (pgtable_root, vma_lock, vma_count, page_count, shared_map_pages,
@@ -2075,7 +2136,9 @@ void proc_console_relinquish(struct Proc *p);
 // the target the A-4c-2 SAK re-grants the console to. Takes g_proc_table_lock.
 // Set when joey establishes corvus (SPAWN_PERM_CONSOLE_TRUSTED). Pass NULL to
 // clear; proc_become_zombie_locked also clears it on the trusted Proc's death so
-// the pointer never dangles (a then-fired SAK falls back to revoke-only).
+// the pointer never dangles (a then-fired SAK falls back to revoke-only). IM-1:
+// a CHANGE of authority disarms the episode consumer (the ARM is a property of
+// the identity) and ends an episode the old one left open, fail-safe.
 void proc_set_console_trusted(struct Proc *p);
 
 // proc_set_console_renderer — claim `p` as the bound console RENDERER (G-4,
@@ -2108,16 +2171,41 @@ void proc_test_clear_console_renderer(void);
 // proc_console_sak — the A-4c-2 SAK transition (I-27 trusted-path handoff). Run
 // from the console_mgr kthread on a recognized serial BREAK. Under
 // g_proc_table_lock (RW-7 R2-F1/F2 as-built): revoke the console-ATTACH bit from
-// the current owner (NO note -- LS-5 made `interrupt` a terminate note, so the
+// the current owner (NO `interrupt` -- LS-5 made it a terminate note, so the
 // old courtesy post would KILL a non-self-managing owner), then grant the ATTACH
 // to the trusted login authority and clear the OWNER to NULL. owner and attach
 // are distinct roles: corvus is the elevation authority, NEVER the Ctrl-C target
 // (the owner is re-established when login spawns the session shell). FAIL-SAFE:
 // with no trusted Proc alive, no attach is granted -- no Proc can redeem
 // CAP_HOSTOWNER / a clearance until a trusted login claims the console.
-// Idempotent once the trusted Proc is the sole attach holder with no owner (a
-// BREAK flood is a no-op).
-void proc_console_sak(void);
+// The handoff is idempotent once the trusted Proc is the sole attach holder
+// with no owner (a BREAK flood re-grants nothing).
+//
+// IM-1 (IMPERIUM-DESIGN.md 11.3): the SAK is ALSO the trusted EPISODE's
+// trigger. Returns true iff an episode must BEGIN -- the trusted Proc is alive,
+// ARMED as an episode consumer (SYS_CONSOLE_EPISODE_ARM) and no episode is
+// open; the `sak` note is posted to it here, under the same lock hold, and the
+// caller (console_mgr) runs cons_episode_begin next. The unseated owner is
+// remembered so the episode's END can hand the Ctrl-C target back. Emits one
+// `cons: SAK (<decision>)` diagnostic line per SAK -- the harness's witness.
+bool proc_console_sak(void);
+
+// proc_is_console_trusted — true iff `p` is the current trusted login
+// authority (compare-only under g_proc_table_lock; never dereferences).
+// Fail-closed on NULL.
+bool proc_is_console_trusted(const struct Proc *p);
+
+// proc_console_episode — the SYS_CONSOLE_EPISODE op core (IM-1). Gated on `p`
+// being the trusted login authority (the identity, not the attach bit: the
+// SAK attached it, and a relinquish ends the episode itself). ARM marks p an
+// episode consumer (sticky, idempotent); END ends the open episode and hands
+// the pre-SAK owner back into an empty owner slot. One g_proc_table_lock hold
+// covers gate + act, so the ZOMBIE chokepoint cannot interleave. 0 / -1.
+int proc_console_episode(struct Proc *p, u32 op);
+
+// Test-only readers: the saved pre-SAK owner / the trusted pointer.
+struct Proc *proc_test_console_owner_pre_sak(void);
+struct Proc *proc_test_console_trusted(void);
 
 // =============================================================================
 // P5-corvus-srv: per-Proc identity tag.
@@ -2191,23 +2279,34 @@ void proc_apply_identity(struct Proc *p, u32 principal_id, u32 primary_gid,
 // A-4a: the legate stamp (the single audited legate-creation write site).
 // =============================================================================
 //
-// proc_become_legate — make `p` a legate ROOT (IDENTITY-DESIGN.md §9.8, I-25).
-// The ONLY function that creates a legate; called from the `cap` device
-// clearance redeem (devcap.c::cap_redeem_grant_for_writer) after it validated
-// the pending clearance grant. Atomically ORs `caps_to_or` (already narrowed by
-// the redeem's self_restriction to a subset of the grant) into p->caps, records
-// the scope context (a FRESH kernel-allocated legate_scope_id -- NEVER caller-
-// supplied, since it is the teardown-walk match key and a collision would tear
-// down the wrong subtree -- plus the corvus-supplied session_id + the computed
-// valid_until), and sets PROC_FLAG_LEGATE_ROOT. Durable principal_id is
-// UNCHANGED (scripture §3.1: the legate is the same human, more authority).
-// `caps_to_or` is OR'd with __ATOMIC_ACQ_REL (multi-thread Procs exist since
+// proc_become_legate — the legate stamp (IDENTITY-DESIGN.md §9.8, I-25; since
+// IM-2 also IMPERIUM-DESIGN.md 11.4 / specs/imperium.tla RedeemFresh +
+// RedeemFurther). The ONLY function that creates or extends a legate; called
+// from the `cap` device clearance redeem (devcap.c::cap_redeem_grant_for_writer)
+// after it validated the pending grant, UNDER the cap-table lock, which is what
+// serializes two redeems by peer threads of one Proc (without it both could
+// read scope 0 and mint two roots, the second overwriting the first's flowing
+// set). Two arms, decided on p->legate_scope_id:
+//   FRESH (scope 0): a FRESH kernel-allocated legate_scope_id -- NEVER caller-
+//     supplied, since it is the teardown-walk match key and a collision would
+//     tear down the wrong subtree -- plus the corvus-supplied session_id, the
+//     computed valid_until, legate_caps = `caps_to_or` (the set that flows) and
+//     legate_flags; PROC_FLAG_LEGATE_ROOT set. The block is written before the
+//     scope_id RELEASE store so an ACQUIRE reader of scope_id sees it whole.
+//   FURTHER (scope set): ONE scope per Proc, set once (G6; retires A-4a F2's
+//     re-tag). ORs `caps_to_or` into p->caps and keeps the tag, the root status,
+//     legate_caps and legate_flags; legate_valid_until becomes the EARLIER
+//     nonzero deadline. A PROPAGATING further redeem is REFUSED (-1) --
+//     propagating never nests; abdicate first.
+// `caps_to_or` (already narrowed by the redeem's self_restriction to a subset
+// of the grant) is OR'd with __ATOMIC_ACQ_REL (multi-thread Procs exist since
 // P6; a sibling thread may read p->caps in a concurrent syscall cap-check).
+// Durable principal_id is UNCHANGED (scripture §3.1: the legate is the same
+// human, more authority). Returns 0, or -1 on the refusal / an invalid flag
+// (the caller has not consumed the grant yet, so a refusal loses nothing).
 // Extincts on a NULL / corrupted Proc (a kernel-internal contract violation).
-// The matching EVAPORATION (scope teardown on root exit / valid_until expiry)
-// lands in the same chunk so a legate never exists without its teardown (I-25).
-void proc_become_legate(struct Proc *p, u64 caps_to_or, u32 session_id,
-                        u64 valid_until);
+int proc_become_legate(struct Proc *p, u64 caps_to_or, u32 session_id,
+                       u64 valid_until, u32 legate_flags);
 
 // proc_legate_teardown_if_root — if `p` is a legate ROOT, group-terminate every
 // OTHER Proc in its legate_scope_id (I-25). Called from proc_become_zombie_locked
@@ -2215,6 +2314,13 @@ void proc_become_legate(struct Proc *p, u64 caps_to_or, u32 session_id,
 // (clean exit AND kill / group-terminate; A-4a audit F1). A non-root Proc is a
 // no-op. PRECONDITION: caller holds g_proc_table_lock (uses the LOCKED walk).
 void proc_legate_teardown_if_root(struct Proc *p);
+
+// arm-6 (IDENTITY-DESIGN §9.9.1) -- if `p` leads its own session (sid == pid)
+// armed with PROC_FLAG_SESSION_HANGUP, group-terminate every OTHER ALIVE Proc
+// sharing its sid. The session-lifecycle sibling of the legate teardown above
+// (same chokepoint, same held-lock contract, NOT I-26-gated). A non-armed Proc
+// or an armed non-leader is a no-op. PRECONDITION: caller holds g_proc_table_lock.
+void proc_session_hangup_if_leader(struct Proc *p);
 
 // =============================================================================
 // P5-corvus-srv-impl-a2: the /srv service-registry post-gate.
@@ -2242,6 +2348,13 @@ bool proc_may_post_service(const struct Proc *p);
 // PROC_PAGE_HARD_MAX). LOWERING never needs this. Fail-closed on NULL/corrupt.
 void proc_mark_may_raise_page_budget(struct Proc *p);
 bool proc_may_raise_page_budget(const struct Proc *p);
+
+// arm-6 (IDENTITY-DESIGN §9.9.1): stamp PROC_FLAG_SESSION_HANGUP, from
+// SPAWN_PERM_SESSION_HANGUP in the spawn thunk (after proc_setsid makes the
+// child a session leader). One-way, idempotent, never propagated by rfork.
+// Fail-loud on NULL/corrupt/non-ALIVE (a trust-conferring stamp on a live
+// child, like proc_mark_may_post_service).
+void proc_arm_session_hangup(struct Proc *p);
 
 // proc_spawn_budget_resolve -- the single authority decision for a spawn's
 // requested page_budget. `req` is the caller's ABI field: 0 means "inherit"

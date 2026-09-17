@@ -168,6 +168,17 @@ no-graphics-in-kernel posture.) The trusted output is a medium-aware **sink** wi
 Using a cell grid (not corvus-emitted ANSI) is deliberate: it keeps a VT-escape
 *parser* out of the kernel — the kernel only ever rasterizes cells.
 
+**As-built refinement (2026-09-07, `IMPERIUM-DESIGN.md` §11.3; ratified fork
+F1).** On the SERIAL medium the kernel's part of the sink is the
+**output-exclusivity gate**: during a trusted episode only the console-attached
+Proc's writes reach the UART and every other console writer parks (I-27
+property 2, enforced at IM-1); corvus composes the medium-independent cell grid
+and rasterizes it to ANSI in userspace through its console handle. The kernel
+cell ABI described above lands with the framebuffer backend (v1.x) and consumes
+that same composer. Same bytes on the wire, same security on serial (§8: the
+anchor is the chain, not the pixels), a smaller TCB delta, and no kernel ABI
+designed blind to the only backend that needs it.
+
 **Why this is small, and pays for itself twice.** The kernel already renders text to
 the UART (the boot banner; the Halls-of-Extinction crash dump) — the UART backend is
 essentially what exists. The new piece is the framebuffer backend (a baked font + a
@@ -280,6 +291,25 @@ login + elevation; join §25.4 at the sub-chunk that lands each):
 - **The owner/attach discipline** (the reconciliation above): the SAK clears the
   owner + attaches corvus, never owns corvus — re-validate that no medium re-opens
   the RW-7 R2-F1 hazard.
+- **The trusted EPISODE (IM-1, `IMPERIUM-DESIGN.md` §11.3 + its as-built
+  refinements; LANDED 2026-09-07)**: on a SAK that finds the trusted Proc alive
+  and ARMED as the episode consumer (`SYS_CONSOLE_EPISODE` = 110, op ARM; unarmed,
+  a SAK is the A-4c-2 handoff alone, so the kernel never freezes a console nobody
+  can unfreeze) the kernel opens an episode — ALL pending input discarded (the
+  ring's committed lines too, not only the partial line), RAW/no-echo forced,
+  every non-attached console read / write / poll / consctl write / renderer feed
+  FROZEN (parked or refused until END; a frozen poller is not even woken per
+  keystroke), the `sak` note posted to the trusted Proc; ended only by the
+  trusted Proc's op END, or fail-safe by its death, its own relinquish, or a
+  change of authority (NEVER a kernel timeout — an END behind corvus's back would
+  route the secret to the shell); the pre-SAK console OWNER is handed back at
+  END. Prosecute: a non-attached reader that drains a post-BEGIN byte; a
+  non-attached writer that reaches the UART; a feed or consctl byte that lands;
+  a poll that returns per keystroke; an END from a non-trusted caller; a repeat
+  SAK that restarts the prompt mid-secret; a lost wake on the three new parks;
+  the lock order (`g_proc_table_lock` -> `g_cons.lock` is the one new edge:
+  BEGIN, END and every fail-safe close take the cons leaf lock under the table
+  lock, and nothing takes them the other way round).
 
 ---
 
@@ -318,3 +348,16 @@ renderer; the pending-request consumption (imperium); the per-cap-key auth.
   §28 + IDENTITY-DESIGN §9.8 + CLAUDE.md). No code. The framebuffer trusted sink + the
   graphical SAK build with the Aurora renderer + the MENAGERIE board input path; the
   serial path is live today (A-4c).
+- **2026-09-07 (IM-1 + IM-3, aux)**: the serial trusted path is BUILT end to end. The
+  kernel EPISODE (§12; I-27 enforced on serial) + corvus as its consumer: the §9 flow
+  runs as designed -- `IMPERIUM_REQUEST` posts the pending request, the BREAK opens
+  the episode, corvus composes the provincia as the §7 cell grid and rasterizes it in
+  userspace (ratified fork F1), reads the per-cap key on the frozen console, and
+  registers the propagating grant. `usr/corvus/src/provincia.rs` is the composer the
+  v1.x framebuffer sink consumes. `IMPERIUM-DESIGN.md` §11.3 / §11.5 carry the
+  as-built refinements.
+- **2026-09-07**: the IM phase opened (aux; `IMPERIUM-DESIGN.md` §11). The serial
+  EPISODE is IM-1; fork F1 ratified the serial sink as the kernel exclusivity gate
+  + userspace rasterization (the §7 refinement); the `sak` note (F3) +
+  `SYS_CONSOLE_EPISODE_END` ride the same signoff. The framebuffer sink + the
+  graphical SAK stay v1.x.
