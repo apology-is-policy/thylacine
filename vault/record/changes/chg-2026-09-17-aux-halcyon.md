@@ -4,7 +4,7 @@ type: chg
 title: "Aux integration: ordered media, native panes, manual, and bounded interrupt/transport ownership"
 date: 2026-09-17
 arc: arc-tapestry
-commits: []
+commits: ["f82c598d"]
 touched: [sub-halcyond, sub-view, sub-gallery, sub-manual, sub-sdl-port, sub-kernel-pci-irq, sub-netd-server, sub-netperf, sub-dosbox, sub-nocturne-tools, sub-kernel-exception, sub-kernel-boot-sequence, sub-kernel-devdev, sub-netdev]
 established: []
 closed: []

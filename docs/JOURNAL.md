@@ -75,7 +75,8 @@ exposure. An additional eight-CPU ITS/TCG UBSan boot passes in 121 seconds.
 The integration review and evidence are in `AUX-HALCYON-INTEGRATION.md`.
 Review staffing is deliberately single-agent, as requested; no independent
 audit is claimed. Main's concurrent README updates and aux's uncommitted work
-are preserved. The verified integration is ready for the final main merge.
+are preserved. The final main merge carries this verified tree and the
+concurrent README updates.
 
 ---
 ## 2026-09-16 (aux, Opus 5, effort max) -- the Operator's Manual restarts: a writing guide, a design, and the reader

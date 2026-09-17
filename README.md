@@ -6,10 +6,10 @@ Thylacine is a non-POSIX operating system targeting ARM64/ARMv8 that revolves ar
 
 - Everything is a file
 - [9P](https://en.wikipedia.org/wiki/9P_(protocol)) is the universal protocol
-  - Thylacine squeezes every last nanosecond of performance out of it, since it's really easy to implement 9P in a rather sub-optimal fashion (WSL2 interop FS bridge is an example)
 - Per-process namespaces are the superior isolation primitive
   - Plan 9 had it in the 80s, and decades later the immensely popular Docker reimplements the same concept. Ken Thompson et al. were four decades ahead of their time.
-- The kernel is a monolithic core with a deliberately minimal interface (one mechanism: 9P), and drivers are userspace programs
+- The kernel is a monolithic core with a deliberately minimal interface (one mechanism: 9P)
+- Drivers are userspace programs
   - Driver faults don't take the entire kernel down with them
 
 On top of that it adds its own convictions:
@@ -17,19 +17,27 @@ On top of that it adds its own convictions:
 - SOTA kernel components, formally modeled in [TLA+](https://lamport.azurewebsites.net/tla/tla.html)
   - Memory management, work scheduling, transport, security model, etc., all have their formal models
 - Borrow universally loved mechanisms from mainstream OSs, but stay true to our Plan 9 heritage
-  - Most notably Linux, e.g. 9P2000.L, and [io_uring](https://en.wikipedia.org/wiki/Io_uring) as an inspiration for Thylacine's _Loom_
-  - [Factotum](https://en.wikipedia.org/wiki/Factotum_(software)), Plan9s key manager inspired Corvus, which is promoted to the system-wide authentication and trust source (driving SAK)
+  - 9P2000.L
+  - No root user, in favor of capability-based elevation
+    - Any user can authorize a process and its forks against a specific capability set provided the user
+      holds the secrets
+  - [Factotum](https://en.wikipedia.org/wiki/Factotum_(software)), Plan9s key manager inspired Corvus, which is promoted to the system-wide authentication and trust source
+    - Corvus drives SAK episodes, taking over serial or scanout to prevent spoofing; and SAK enables _Imperium_, the elevation system
 - Expand on the "everything is a file"
   - Everything is a filesystem
-    - Display, network, disk -- synthetic filesystems backed by 9P-speaking daemons (the console by an in-kernel device), all accessible via the kernel 9P device and grantable per-process
+    - Display, network, disk -- synthetic filesystems backed by 9P-speaking daemons, all accessible via the kernel 9P device and grantable per-process
 - We want to be usable -- transparent POSIX compatibility layer
   - Vendored and patched [musl](https://musl.libc.org) (an alternative c stdlib implementation used by, e.g., [Alpine Linux](https://www.alpinelinux.org))
   - Recompiled POSIX/Linux software just runs, its POSIX surface translated to Thylacine syscalls in userspace
   - Vivarium: A runtime binary compatibility layer:
-    - Linux: Viv. maps syscalls in real time and exposes a Linux sysroot namespace via an adaptor 9P server (Diorama)
+    - Drives containerization for runners of different _phenotypes_ (e.g. native, linux, ...)
+    - Linux: Vivarium maps syscalls in real time and exposes a Linux sysroot namespace to the container via an adaptor 9P server (Diorama)
+    - Alpine busybox runs, and its coreutils + sh are transparently mapped to path (so you can execute them directly from a Utopia (the shell) prompt without any extra ceremony)
     - (Planned) x86 translation layer
-    - (Planned) Wine port
-    - (Planned) DOS Emulation of some sort
+- Emulation
+  - Thylacine want you to be able to (safely) run anything that's executable and eventually become an universal emulator
+    - DOSBox: Already bundled in, including its Voodoo emulator
+    - Wine: Planned (perhaps as a Vivarium phenotype -- not sure yet)
 - Native userspace drivers and native coreutils in Rust
 - Native Go port with a flagship TUI programming and debugging experience
   - Natively symbolized stack traces all the way to the kernel depths
@@ -41,18 +49,29 @@ On top of that it adds its own convictions:
   - OpenGL: llvmpipe + HW-accelerated for RPi 4 and 5 and under KVM
   - Vulkan: lavapipe + HW-accelerated -||-
   - (Planned) 3DFx Glide emulation (for millenials)
-- A rich, media-capable, tabs-and-panes-based text terminal is the only UI
-  - I don't believe in the concept of a desktop and windows in 2026. Most modern desktops now veer towards docking, which is Thylacine implements from the start in the form of a multimedia-capable graphical terminal the likes of [i3wm](https://i3wm.org) with substantial [Acme](https://en.wikipedia.org/wiki/Acme_(text_editor)) influence (Rob Pike, the author of Acme, is one of the Bell Labs' holy trinity that we revere (except for the mouse thing -- what was that?)).
+- Halcyon: A rich, media-capable, graphical interface running on Vulkan, inspired by three programs
+  - [i3wm](https://i3wm.org) -- tiles and panes only
+  - [Acme](https://en.wikipedia.org/wiki/Acme_(text_editor)) -- I always loved how Acme stacked its customizable, executable tile headers, so this is what Halcyon has
+  - [Symbolics Genera](https://en.wikipedia.org/wiki/Genera_(software)) -- The nerdiest and most niche of all three. Genera was an ahead-of-its time (and it still some might say) operating system that ran on LISP Machines and had loads of alien features, such as the fact that you could live inspect and edit any code (including kernel code) without recompiling it, since everything was LISP. But the feature I took from it is a visual one -- its shell rendered rich proportional type. Since Halcyon is the one and only interface to Thylacine, it also renders
+  proportional type
+    - Proportional rendering is driven by _Beacon_, a markup language that programs emit in plain text if they want to
+    - Monospace fallback (Cornucopia: My own reconfigured Iosefka)
 - A new made-to-measure (but portable) COW filesystem -- Stratum.
   - Compiles anywhere, 9P native
   - Runs as a userspace driver in Thylacine, executes via the POSIX compatibility layer ("Pouch"), and rides the 9P kernel device -- yet reaches performance competitive with the host (tested on a big Go build directly in Thylacine)
   - Post-quantum cryptography and Merkle validation
+- Coming soon. Pi4 and Pi5 drivers and out of the box support
 
 ### Why the name "Thylacine"
 
 The Thylacine (abstractly depicted in the logo above) is an extinct (though I believe that they still roam hidden corners of Tasmania somewhere in low numbers) marsupial, also known as the Tasmanian Tiger, that my wife introduced me to -- she has a special relationship with it that she infected me with. It is a special kind of loneliness when you're the last specimen of your entire species. Calling out into the night, waiting for an answer that can never come. It stirs an unnamed, brooding emotion in us. Naming my ultimate software project after it is my little nod. The Thylacine runs free in the great NAND plains.
 
 ## Latest
+
+### Halcyon, the first light
+
+![](readme_assets/halcyon/halc1.png)
+![](readme_assets/halcyon/halc2.png)
 
 ### DOSBox-X Ported via Pouch
 
