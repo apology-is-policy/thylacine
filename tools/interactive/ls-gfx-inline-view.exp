@@ -1,0 +1,137 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-gfx-inline-view.exp -- the inline-media E2E (I-47,
+# HALCYON.md 14.7). `view /test.png` decodes a PNG in the sacrificial `view`
+# process and hands the raster to halcyond over the /srv/halcyon place channel;
+# halcyond validates + injects it as a transcript Item::Image, and it renders on
+# the real scanout. This proves the whole slice-3b pipeline end to end on HVF:
+#
+#   channel   : halcyond posts /srv/halcyon (the MAY_POST_SERVICE grant);
+#   decode    : view sniffs + decodes /test.png (zune) to ARGB;
+#   transport : view writes the inlinewire place-request; halcyond accumulates
+#               it (validate-before-alloc) and injects the 640x400 raster;
+#   pixels    : the decoded image is on the screen -- a before/after non-ground
+#               pixel DELTA over the whole display (position-independent): the
+#               640x400 witness card adds ~256k saturated/gradient pixels, which
+#               dwarfs the handful of text lines view prints, so a broken channel
+#               (no image, only the fallback report) cannot reach the threshold.
+#
+# The load-bearing proofs are the SERIAL WITNESSES (order-independent, from the
+# transcript): "/srv/halcyon posted" + the injection line "inline image placed
+# (640x400 ...)". view's own "placed inline (640x400)" is asserted with a
+# hard-fail on its "not displayed" fallback, so a channel that silently failed
+# (view fell back to a report) goes RED, never green.
+#
+# Needs the halcyond-renderer image (THYLACINE_HALCYON=1); SKIPs (77) cleanly on
+# a default aurora image, like ls-halcyon. Runs under HVF; needs the QMP socket +
+# python3 (screendump + gfx_region).
+
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+set scen [file dirname [info script]]
+
+proc region {png args} {
+    global scen
+    return [exec python3 $scen/gfx_region.py $png {*}$args]
+}
+proc dump {out} {
+    global repo qmp
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} err]} { return $err }
+    return ""
+}
+# Read the whole-session transcript (order-independent grep at a checkpoint;
+# the ls-halcyon idiom -- an inline expect for a say line races the login prompt
+# on the shared serial).
+proc tbody {} {
+    global transcript
+    log_file
+    set f [open $transcript r]; set body [read $f]; close $f
+    log_file -a $transcript
+    return $body
+}
+
+set transcript /tmp/ls-gfx-inline-view-[pid].log
+catch {file delete -force $transcript}
+log_file -a $transcript
+
+lc_boot
+
+# The renderer probe: joey names its choice. Aurora => the lever is not baked
+# => SKIP (never a red on a default image).
+set timeout $lc_boot_timeout
+expect {
+    -ex "joey: halcyond spawned" { lc_step "joey chose halcyond (lever image)" }
+    -ex "joey: aurora spawned" {
+        puts "\nLS-CI SKIP: default image (aurora fbcon) -- inline media needs\
+ the halcyon lever. Bake with THYLACINE_HALCYON=1 to run this scenario."
+        lc_quit
+        exit 77
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction before the renderer spawn" }
+    timeout { lc_fail "no renderer spawn line within ${lc_boot_timeout}s" }
+    eof     { lc_fail "qemu exited before the renderer spawn" }
+}
+
+lc_login michael correct-horse-battery-staple-v1
+
+# Console up + the place channel posted (from the transcript, order-independent).
+set W 0; set H 0; set posted 0
+for {set i 0} {$i < 16} {incr i} {
+    set body [tbody]
+    if {[regexp {halcyond: console up (\d+)x(\d+) px} $body -> W H]} {}
+    if {[string first "halcyond: /srv/halcyon posted" $body] >= 0} { set posted 1 }
+    if {$W > 0 && $posted} break
+    after 500
+}
+if {$W == 0} { lc_fail "no 'halcyond: console up' after login" }
+if {!$posted} { lc_fail "halcyond never posted /srv/halcyon -- the I-47 channel is down (MAY_POST_SERVICE grant?)" }
+lc_pass "inline: console up ${W}x${H} px; /srv/halcyon posted"
+
+# Baseline: non-ground pixels BEFORE the image. gfx_region counts pixels that
+# differ from a GIVEN colour, so the ground must be named -- its default is the
+# Bonfire console black, and against that a Daylight-parchment screen reads
+# ~every pixel as "off" in BOTH dumps (the delta then cancels to ~0, a false
+# negative). Derive the real ground from the pre-dump's dominant colour (the
+# parchment fills most of the display), theme-independent, then count non-ground
+# against THAT in both dumps -- the status bar + chrome are in both and cancel,
+# so the delta isolates the image.
+if {[dump /tmp/ls-gfx-inline-pre.png] ne ""} { lc_fail "pre-view screendump failed (harness, not the guest)" }
+lassign [region /tmp/ls-gfx-inline-pre.png 0 0 $W $H] _ _ gr gg gb
+lassign [region /tmp/ls-gfx-inline-pre.png 0 0 $W $H $gr $gg $gb] off_pre tot_pre
+lc_step "inline: ground ($gr,$gg,$gb); baseline $off_pre/$tot_pre non-ground px"
+
+# THE E2E. view decodes /test.png and hands the raster to halcyond. The success
+# sentinel is view's own line; a hard-fail on its "not displayed" fallback means
+# a silent channel failure (renderer not posting, short write) goes RED.
+lc_run_expect_hardfail "view /test.png" "placed inline (640x400)" "not displayed"
+
+# The injection witness: the full pipeline (accumulate + validate + inject).
+set injected 0
+for {set i 0} {$i < 20} {incr i} {
+    if {[string first "halcyond: inline image placed (640x400" [tbody]] >= 0} { set injected 1; break }
+    after 300
+}
+if {!$injected} { lc_fail "halcyond never logged the 640x400 injection -- view reported success but the raster did not complete on the reader" }
+lc_pass "inline: view placed + halcyond injected the 640x400 raster (I-47 pipeline end to end)"
+
+# The pixel proof: the decoded image added a large block to the screen.
+after 800
+if {[dump /tmp/ls-gfx-inline-post.png] ne ""} { lc_fail "post-view screendump failed (harness, not the guest)" }
+lassign [region /tmp/ls-gfx-inline-post.png 0 0 $W $H $gr $gg $gb] off_post tot_post
+set delta [expr {$off_post - $off_pre}]
+lc_step "inline: post $off_post/$tot_post non-ground px (delta +$delta)"
+if {$delta < 20000} {
+    lc_fail "only +$delta non-ground px after view -- the decoded image did not reach the screen (view's text lines alone add far fewer; the 640x400 card is ~256k px)"
+}
+lc_pass "inline: the decoded image is on the screen (+$delta non-ground px)"
+
+# Preserve the witness image for review (the operator's screenshot).
+catch {file copy -force /tmp/ls-gfx-inline-post.png $repo/build/ls-gfx-inline-view.png}
+lc_step "inline: witness image saved to build/ls-gfx-inline-view.png"
+
+lc_ctrlc
+sleep 1
+lc_quit

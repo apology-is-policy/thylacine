@@ -87,6 +87,7 @@ pub mod poll;
 pub mod process;
 pub mod rand;
 pub mod sched;
+pub mod sync;
 pub mod territory;
 pub mod thread;
 pub mod time;
@@ -296,6 +297,14 @@ pub const T_SYS_GETGID: u64           = 74;     // LS-K identity: primary_gid
 pub const T_SYS_CLOCK_GETTIME: u64    = 75;     // LS-K clock: realtime/monotonic
 pub const T_SYS_PCI_CLAIM: u64        = 76;     // pci-1c: claim a VirtIO-PCI function
 pub const T_SYS_PCI_MAP_BAR: u64      = 77;     // pci-1c: map a KObj_PCI BAR
+pub const T_SYS_PCI_IRQ_CREATE: u64 = 115;
+pub const T_SYS_PCI_IRQ_ARM: u64 = 116;
+pub const T_SYS_PCI_IRQ_WAIT: u64 = 117;
+pub const T_SYS_PCI_IRQ_COMPLETE: u64 = 118;
+pub const T_SYS_PCI_IRQ_DISABLE: u64 = 119;
+pub const T_SYS_PCI_IRQ_INFO: u64 = 120;
+pub const T_SYS_PCI_MAP_WINDOW: u64   = 113;
+pub const T_SYS_PCI_WINDOWS: u64      = 114;
 pub const T_SYS_PCI_INFO: u64         = 78;     // pci-1c: read KObj_PCI topology
 pub const T_SYS_CLOCK_SETTIME: u64    = 79;     // net-7a: step CLOCK_REALTIME (CAP_HOSTOWNER)
 pub const T_SYS_FD_DEVCLASS: u64      = 80;     // H-1: fd -> Dev class char ('c' = console)
@@ -741,6 +750,7 @@ pub const T_CAP_KILL: u64            = 1 << 9;   // elevation-only; cross-identi
 pub const T_CAP_DEBUG: u64           = 1 << 10;  // elevation-only; cross-Proc debug authority (I-39)
 pub const T_CAP_POST_SERVICE: u64 = 1 << 13; // elevated /srv posting, propagated by imperium
 pub const T_CAP_JIT: u64             = 1 << 11;  // elevation-only; code-Burrow creation (I-42)
+pub const T_CAP_AUDIO_GRAPH: u64     = 1 << 12;  // elevation-only; Nocturne whole-sink authority (I-46; NOCTURNE.md 6.8)
 
 // =============================================================================
 // Rights — MUST mirror RIGHT_* bits in kernel/include/thylacine/handle.h.
@@ -973,6 +983,86 @@ impl TPciInfo {
             shm: [TPciShm { offset: 0, length: 0, bar: 0, present: 0, shmid: 0, _pad: [0; 5] }; 2],
         }
     }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+pub struct TPciIrqEvent {
+    pub generation: u64,
+    pub sequence: u64,
+    pub count: u32,
+    pub reason: u32,
+    pub retry_after_ns: u64,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+pub struct TPciIrqInfo {
+    pub generation: u64,
+    pub deliveries: u64,
+    pub retries: u64,
+    pub cooldowns: u64,
+    pub mode: u32,
+    pub state: u32,
+    pub table_index: u32,
+    pub reserved: u32,
+}
+const _: () = assert!(core::mem::size_of::<TPciIrqEvent>() == 32);
+const _: () = assert!(core::mem::size_of::<TPciIrqInfo>() == 48);
+// Private register shaper shared by the named PCI endpoint wrappers.
+unsafe fn pci_irq_call(nr: u64, h: i64, a1: u64, a2: u64) -> i64 {
+    let mut x0 = h;
+    asm!("svc #0", inlateout("x0") x0, in("x1") a1, in("x2") a2,
+        in("x8") nr, options(nostack));
+    x0
+}
+pub unsafe fn t_pci_irq_create(pci: i64, mode: u32, ordinal: u32) -> i64 {
+    pci_irq_call(T_SYS_PCI_IRQ_CREATE, pci, mode as u64, ordinal as u64)
+}
+pub unsafe fn t_pci_irq_arm(h: i64) -> i64 { pci_irq_call(T_SYS_PCI_IRQ_ARM, h, 0, 0) }
+pub unsafe fn t_pci_irq_disable(h: i64) -> i64 { pci_irq_call(T_SYS_PCI_IRQ_DISABLE, h, 0, 0) }
+pub unsafe fn t_pci_irq_complete(h: i64, generation: u64, sequence: u64) -> i64 {
+    pci_irq_call(T_SYS_PCI_IRQ_COMPLETE, h, generation, sequence)
+}
+pub unsafe fn t_pci_irq_wait(h: i64, timeout_ns: u64, event: *mut TPciIrqEvent) -> i64 {
+    pci_irq_call(T_SYS_PCI_IRQ_WAIT, h, timeout_ns, event as u64)
+}
+pub unsafe fn t_pci_irq_info(h: i64, info: *mut TPciIrqInfo) -> i64 {
+    pci_irq_call(T_SYS_PCI_IRQ_INFO, h, info as u64, 0)
+}
+
+/// A page-aligned mappable BAR window, excluding kernel-owned MSI-X pages.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct TPciWindow {
+    pub offset: u64,
+    pub length: u64,
+    pub bar: u32,
+    pub reserved: u32,
+}
+const _: () = assert!(core::mem::size_of::<TPciWindow>() == 24);
+const _: () = assert!(core::mem::offset_of!(TPciWindow, bar) == 16);
+pub const T_PCI_WINDOW_MAX: usize = 8;
+
+/// Fill the complete window list. A short buffer fails; no partial list is valid.
+/// # Safety
+/// `out` must address `capacity` writable records.
+pub unsafe fn t_pci_windows(h: i64, out: *mut TPciWindow, capacity: u64) -> i64 {
+    let mut x0 = h;
+    asm!("svc #0", inlateout("x0") x0, in("x1") out, in("x2") capacity,
+        in("x8") T_SYS_PCI_WINDOWS, options(nostack));
+    x0
+}
+
+/// Map an allowed page-aligned range of the caller's BAR.
+/// # Safety
+/// `va` must be an available user VA range of `length` bytes.
+pub unsafe fn t_pci_map_window(h: i64, va: u64, bar: u64, prot: u32,
+                               offset: u64, length: u64) -> i64 {
+    let mut x0 = h;
+    asm!("svc #0", inlateout("x0") x0, in("x1") va, in("x2") bar,
+        in("x3") prot as u64, in("x4") offset, in("x5") length,
+        in("x8") T_SYS_PCI_MAP_WINDOW, options(nostack));
+    x0
 }
 
 // t_pci_claim — the arg packs `virtio_device_id | nth<<32` (G-7c): the low 32
@@ -1929,8 +2019,11 @@ pub unsafe fn t_getrandom(buf: *mut u8, len: usize, flags: u64) -> i64 {
 //   primary_gid  : peer's primary group; GID_NONE when alive == 0
 //   flags        : cfg-3 — bit 0 (T_SRV_PEER_FLAG_CONSOLE_RENDERER) = the
 //                  peer holds the LIVE console-renderer role (the tapestryd
-//                  apply-authority gate's admitted set); 0 when alive == 0.
-//                  Append-only: scan by bit, unknown-clear = absent.
+//                  apply-authority gate's admitted set); N-3a-3 — bit 1
+//                  (T_SRV_PEER_FLAG_CONSOLE_OWNER) = the peer's session OWNS
+//                  the console (NOCTURNE.md 6.8, "the person at the keyboard").
+//                  Both 0 when alive == 0. Append-only: scan by bit,
+//                  unknown-clear = absent.
 #[repr(C)]
 #[derive(Copy, Clone, Default, Debug)]
 pub struct TSrvPeerInfo {
@@ -1949,9 +2042,13 @@ pub struct TSrvPeerInfo {
 }
 const _: () = assert!(core::mem::size_of::<TSrvPeerInfo>() == 40);
 
-// cfg-3: TSrvPeerInfo.flags bits (append-only; mirrors the kernel's
-// SRV_PEER_FLAG_CONSOLE_RENDERER in <thylacine/syscall.h>).
+// cfg-3 + N-3a-3: TSrvPeerInfo.flags bits (append-only; mirror the kernel's
+// SRV_PEER_FLAG_* in <thylacine/syscall.h>).
 pub const T_SRV_PEER_FLAG_CONSOLE_RENDERER: u32 = 1 << 0;
+// The peer's session currently OWNS the console (the foreground session, "the
+// person at the keyboard") -- NOCTURNE.md 6.8's sink-authority axis. Distinct
+// from `console` (console-ATTACHMENT, I-27 corvus-only).
+pub const T_SRV_PEER_FLAG_CONSOLE_OWNER: u32 = 1 << 1;
 
 // t_srv_accept — block until a client connects, return the server-side
 // endpoint as a KObj_Spoor handle (byte I/O — plain t_read/t_write). The

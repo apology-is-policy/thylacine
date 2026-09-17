@@ -36,7 +36,8 @@
 #
 # The exported tree must contain `hello.txt` holding exactly the line asserted
 # below. npxf is Linux-only (statfs/O_PATH/accept4), so on a macOS dev host the
-# server runs on thyla-pi with an `ssh -L` tunnel bound to 127.0.0.1 -- the guest
+# server runs on thyla-pi (`ssh thyla-pi-ssh.treeso.net` via Cloudflare)
+# with an `ssh -L` tunnel bound to 127.0.0.1 -- the guest
 # only ever reaches the HOST's loopback (via 10.0.2.2), so the tunnel is
 # transparent to it.
 

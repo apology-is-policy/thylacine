@@ -263,6 +263,27 @@ renderer does.
   typography in the vocabulary (stylesheet inversion); Beacon-carried pixels
   (Tapestry owns pixels).
 
+**The out-of-band rejection is scoped to Beacon's OWN transport; it does not bar
+the inline-media pixel channel** (reconciliation, 2026-09-09 — `HALCYON.md §14.7`
+proposed a native out-of-band channel for images two days after this rejection
+was written, with no cross-reference; this note closes the gap). Beacon rejects
+carrying *Beacon structure* out of band — text annotation rides the pts cleanly as
+OSC 1936, so a side channel for *it* would be gratuitously fragile — and rejects
+*Beacon* carrying pixels ("Tapestry owns pixels"). The inline-media path
+(`HALCYON.md §14.7`, reserved as **I-47**) is **consistent with both**: pixels
+travel a dedicated per-pane pixel channel (a Weft raster share + a place-request),
+**never Beacon**, and the "fragile association / dies at every hop" failure mode is
+closed *by construction* — the endpoint lives in the pane's own namespace, so
+association is structural (inherited with the namespace). In a session, the
+pixel request carries a per-placement u128 ID; a standalone
+`obj type=inline-image ref=<32 hexadecimal digits>` caption in the text stream
+selects that raster from the same pane's bounded cache. The caption owns its
+position among commands and output; arrival on the pixel channel never chooses
+transcript position. The plain realization is the caption text, such as
+`image 640x400`. Missing or evicted rasters retain that text. Mixed-content
+lines and objects of other types never substitute an image. This adds an
+object vocabulary term, not a Beacon pixel encoding or a cross-pane reference.
+
 ## 11. Naming rationale (locked) + status
 
 **Beacon** = the signal fire: structured light that *carries meaning*, relayed

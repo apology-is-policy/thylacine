@@ -194,19 +194,20 @@ struct Burrow {
     // P4-Ic1 / P4-Ic5b1b: hw-backed-Burrow fields. For BURROW_TYPE_ANON
     // these are zero. For BURROW_TYPE_MMIO: kobj_mmio is the underlying
     // KObj_MMIO whose PA claim this Burrow holds; pa is the device PA
-    // (page-aligned, matches kobj_mmio->pa). For BURROW_TYPE_DMA:
+    // (page-aligned, within kobj_mmio). For BURROW_TYPE_DMA:
     // kobj_dma is the underlying KObj_DMA whose pinned skein this Burrow
     // wraps, and `pa` is 0 -- WEAVE-SKEIN made the backing a LIST of
     // contiguous runs, so there is no base to add an offset to; the fault arm
     // resolves each page through kobj_dma_pa_at instead.
     // For BURROW_TYPE_HOSTMEM (V-2): kobj_pci is the owning PCI claim whose
     // hostmem BAR subrange this Burrow maps; pa is that subrange's absolute PA.
-    // Exactly one of kobj_mmio / kobj_dma / kobj_pci is non-NULL for hw types;
+    // PCI MMIO mappings retain both kobj_mmio and kobj_pci. Other hw types
+    // retain only their corresponding object;
     // all are NULL for BURROW_TYPE_ANON. The non-NULL hw ref is released at
     // burrow_free_internal via the type-dispatched switch.
     struct KObj_MMIO *kobj_mmio;   // NULL except for BURROW_TYPE_MMIO
     struct KObj_DMA  *kobj_dma;    // NULL except for BURROW_TYPE_DMA
-    struct KObj_PCI  *kobj_pci;    // NULL except for BURROW_TYPE_HOSTMEM (V-2)
+    struct KObj_PCI  *kobj_pci;    // HOSTMEM or PCI-backed MMIO
     u64               pa;           // MMIO/HOSTMEM base PA; 0 for ANON and DMA
     u8                hostmem_mair; // HOSTMEM only: create-time MAIR_IDX_* (V-2)
 
@@ -337,6 +338,11 @@ struct Burrow *burrow_create_anon(size_t size);
 // arch/arm64/fault.c (handling the MMIO PA + device-memory PTE attrs)
 // lands at P4-Ic2.
 struct Burrow *burrow_create_mmio(struct KObj_MMIO *kobj_mmio);
+// Subrange retains the entire parent MMIO claim (including protected holes).
+struct Burrow *burrow_create_mmio_range(struct KObj_MMIO *kobj_mmio,
+                                       u64 offset, size_t length);
+struct Burrow *burrow_create_pci_mmio(struct KObj_PCI *pci, u32 bar,
+                                     u64 offset, size_t length);
 // V-2: wrap a subrange of a PCI hostmem BAR in a share-admissible Burrow.
 // `pa` is the absolute CPU PA of the subrange base (page-aligned), `len` its
 // byte length (page multiple, non-zero), `mair_idx` the host-dictated MAIR

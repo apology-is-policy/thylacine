@@ -86,6 +86,12 @@ probes ON), `ci`. Fragments (`configs/fragments/*.config`): composable overlays
 
 ### Constraints
 
+Two kinds since DX-8 (2026-09-05): **implies** raises the dependency
+(`BOOT_PROBES=y` raises `DEV_ACCOUNTS`), **needs** lowers the dependent
+(`CHUNK_DOSBOX=n` lowers `CHUNK_DUKE3D` + `CHUNK_TOMBRAIDER`, which default ON --
+raising the emulator back would silently undo an explicit 17.6 MB opt-out).
+`tools/test-build-config.sh` T-needs covers the lowering + its control.
+
 `bc_resolve` enforces the implies-constraints. The MVP has one: **`BOOT_PROBES=y`
 implies `DEV_ACCOUNTS=y`** (the boot-test ladder authenticates the dev accounts,
 so it cannot run without them). It auto-raises + warns rather than ever producing
@@ -181,11 +187,15 @@ A `[section.name]` TOML table per input, each with a `forageable` verb telling
 
 Sections: `[fork.*]` (the 6 sibling forks -- go/ambush/stratum clone from
 `apology-is-policy`; gopls is `manual`; llvm/mesa are `remote-source` clade-build
-sources), `[cache.*]` (the 2 Alpine manual-drop inputs, sha256-pinned), `[network.quake]`
-(auto-at-build), `[remote.clade_*]` (the thyla-keep-built artifacts), and
+sources), `[cache.*]` (the 3 manual-drop inputs, sha256-pinned), `[network.*]`
+(auto-at-build: `quake`, and since DX-8 `duke3d` + `tombraider` -- the two DOSBox
+showcase games; the DOSBox-X emulator itself is vendored in-repo and deliberately
+NOT an input), `[remote.clade_*]` (the thyla-keep-built artifacts), and
 `[pairing.stratum_pool]` (the crypto-paired pool/key/ramfs policy -- a constraint,
-not an input). Hashes are byte-exact from build.sh; commit pins are verified
-against the local forks.
+not an input). Hashes are byte-exact from build.sh -- and `test-forage.sh` A9
+enforces it: every hash/url under `network.*` must appear verbatim in `build.sh`
+(two copies of one truth; a pin bumped on one side fails the test). Commit pins
+are verified against the local forks.
 
 `forage` reads a **controlled TOML subset**: `[section]` tables + `key = "value"`
 / `key = bareword` + `#` comments. Not a full TOML parser -- no arrays, inline
@@ -199,7 +209,8 @@ a construct the reader silently drops.
 ```
 forage.sh              report present/ABSENT + the action for every input
 forage.sh <target>     gather one: go|ambush|stratum|gopls|llvm|mesa|
-                       alpine|busybox|quake|clade|clade-gl
+                       alpine|busybox|quake|duke3d|tombraider|clade|clade-gl
+                       (or any literal manifest section, e.g. network.duke3d)
 forage.sh all          gather everything automatable
 FORAGE_DRY=1 forage.sh … preview; touch nothing (git/net/gcp)
 ```

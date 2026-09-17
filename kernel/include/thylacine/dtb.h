@@ -256,6 +256,27 @@ typedef enum dtb_psci_method {
 
 dtb_psci_method_t dtb_psci_method(void);
 
+// PCI MSI discovery follows the host's msi-map/msi-parent, never the first
+// controller-compatible node. No match, ambiguity or malformed data leaves
+// *out untouched. Register addresses include ancestor ranges translation.
+#define DTB_MSI_V2M 1u
+#define DTB_MSI_ITS 2u
+struct dtb_pci_msi {
+    u64 pa, size;
+    u32 kind, node, device_id;
+    u32 spi_base, spi_count; // zero = use MSI_TYPER; overrides are paired
+};
+bool dtb_pci_msi_route(u16 requester_id, struct dtb_pci_msi *out);
+// Enumerate all recognized MSI frames, including controllers not linked to
+// this PCI host. Kernel MMIO protection must cover those frames too.
+bool dtb_msi_controller_n(u32 index, struct dtb_pci_msi *out);
+// Validate that the MSI node belongs to the initialized distributor.
+bool dtb_msi_parent_matches(u32 controller_node, u64 distributor_pa);
+// Decode the PCI binding's four-cell map. Exposed for hostile-input tests;
+// accepts byte-aligned data, validates every row and rejects ambiguous matches.
+bool dtb_msi_map_decode(const u8 *data, u32 length, u32 mask, u16 rid,
+                        u32 *phandle, u32 *device_id);
+
 // =============================================================================
 // Tree-walk API (Menagerie devhw — the DTB published as a walkable tree).
 // =============================================================================

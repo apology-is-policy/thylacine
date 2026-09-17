@@ -57,6 +57,7 @@ use libthyla_rs::notes::{self, NoteClass, NoteMask, NoteTarget, Notes};
 use libthyla_rs::poll::{PollEvents, PollSet, PollTimeout};
 use libthyla_rs::process::{self, Command, Stdio};
 use libthyla_rs::rand;
+use libthyla_rs::sync::Mutex;
 use libthyla_rs::territory::{self, MountFlags};
 use libthyla_rs::thread;
 use libthyla_rs::time::{self, Duration};
@@ -1370,6 +1371,95 @@ pub extern "C" fn rs_main() -> i64 {
     }
 
     t_putstr("alloc-smoke: Torpor + Time + Rand + Thread OK\n");
+
+    // ====================================================================
+    // U-2h-sync: t::sync -- the intra-Proc futex Mutex<T> (N-2c-1)
+    // ====================================================================
+    //
+    // Two properties, the second the load-bearing one: (1) try_lock is
+    // Some when free, None when held, Some again after release -- the
+    // realtime cycle thread's decline-don't-block path; (2) under real
+    // contention (WORKERS peers + this thread each incrementing a shared
+    // counter ITERS times through lock()), no update is lost -- the total
+    // must equal exactly (WORKERS+1)*ITERS. A lost wakeup or torn lock
+    // word shows as a short total, or as a join timeout (bounded, not a
+    // hang). This is the mutual-exclusion invariant nocturned's graph lock
+    // rides.
+    {
+        const WORKERS: usize = 4;
+        const ITERS: u64 = 1000;
+        const WSENT: u32 = 0xBEEF;
+        static COUNTER: Mutex<u64> = Mutex::new(0);
+        static WTIDS: [AtomicU32; WORKERS] = [
+            AtomicU32::new(0),
+            AtomicU32::new(0),
+            AtomicU32::new(0),
+            AtomicU32::new(0),
+        ];
+
+        // try_lock: free -> Some; held -> None; released -> Some. Also
+        // resets COUNTER to 0 through the last guard for the stress leg.
+        {
+            let g = COUNTER.try_lock();
+            if g.is_none() {
+                t_putstr("alloc-smoke: sync::Mutex try_lock on free FAILED\n");
+                return 1;
+            }
+            if COUNTER.try_lock().is_some() {
+                t_putstr("alloc-smoke: sync::Mutex try_lock on held unexpectedly succeeded\n");
+                return 1;
+            }
+            drop(g);
+            match COUNTER.try_lock() {
+                Some(mut g2) => *g2 = 0,
+                None => {
+                    t_putstr("alloc-smoke: sync::Mutex try_lock after release FAILED\n");
+                    return 1;
+                }
+            }
+        }
+
+        extern "C" fn worker_entry(arg: u64) -> ! {
+            thread::set_tid_address(&WTIDS[arg as usize]);
+            for _ in 0..ITERS {
+                let mut g = COUNTER.lock();
+                *g += 1;
+            }
+            thread::exit_self()
+        }
+
+        for i in 0..WORKERS {
+            WTIDS[i].store(WSENT, Ordering::SeqCst); // sentinel BEFORE spawn
+            let stack: Box<[u8; 8192]> = Box::new([0u8; 8192]);
+            let sp = unsafe { Box::leak(stack).as_mut_ptr().add(8192) } as u64;
+            if unsafe { thread::spawn_raw(worker_entry as *const () as u64, sp, i as u64, 0) }
+                .is_err()
+            {
+                t_putstr("alloc-smoke: sync::Mutex worker spawn FAILED\n");
+                return 1;
+            }
+        }
+
+        // This thread contends too, then joins every worker.
+        for _ in 0..ITERS {
+            let mut g = COUNTER.lock();
+            *g += 1;
+        }
+        for i in 0..WORKERS {
+            if thread::join_tid(&WTIDS[i], WSENT, Some(Duration::from_secs(10))).is_err() {
+                t_putstr("alloc-smoke: sync::Mutex worker join FAILED\n");
+                return 1;
+            }
+        }
+
+        let total = *COUNTER.lock();
+        let expect = (WORKERS as u64 + 1) * ITERS;
+        if total != expect {
+            t_putstr("alloc-smoke: sync::Mutex lost updates under contention FAILED\n");
+            return 1;
+        }
+        t_putstr("alloc-smoke: sync::Mutex (try_lock + contended mutual-exclusion) OK\n");
+    }
 
     // ====================================================================
     // U-2h-ninep: t::ninep -- 9P2000.L server-side codec

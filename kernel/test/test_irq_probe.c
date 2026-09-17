@@ -9,7 +9,7 @@
 // Setup:
 //   1. devramfs_lookup("irq-probe", ...) — pre-built userspace ELF
 //      from the cpio. Graceful skip if not built (fresh checkout).
-//   2. gic_set_pending_spi(IRQ_PROBE_TEST_INTID) — manually pend SPI 96
+//   2. gic_set_pending_spi(intid) — manually pend selected SPI
 //      at GICD_ISPENDR<n>.bit. The IRQ is now pending but not yet
 //      enabled (no driver has gic_enable_irq'd it), so the GIC keeps
 //      it in pending state without delivering. Per ARM IHI 0069
@@ -22,15 +22,15 @@
 //
 // Child execution:
 //   1. exec_setup + userland_enter → _start (libthyla-rs) → rs_main.
-//   2. rs_main calls t_irq_create(96, T_RIGHT_SIGNAL):
+//   2. rs_main calls t_irq_create(intid, T_RIGHT_SIGNAL):
 //      - SVC enters EL1 with IRQs masked.
 //      - sys_irq_create_handler validates cap + rights + intid.
 //      - kobj_irq_create:
-//        - intid_try_claim(96): ✓ (96 is not in g_intid_claimed; only
+//        - intid_try_claim(intid): ✓ (intid is not in g_intid_claimed; only
 //          SGI 0 and PPI 30 are pre-reserved at irqfwd_init).
 //        - kmalloc + magic + ref=1.
-//        - gic_attach(96, kobj_irq_dispatch, k): handler slot set.
-//        - gic_enable_irq(96): GICD_ISENABLER<n>.bit set. Now both
+//        - gic_attach(intid, kobj_irq_dispatch, k): handler slot set.
+//        - gic_enable_irq(intid): GICD_ISENABLER<n>.bit set. Now both
 //          enabled AND pending (from our pre-pend), so the GIC delivers
 //          the IRQ to CPU 0 as soon as CPU 0 has IRQs unmasked.
 //      - returns handle.
@@ -39,11 +39,11 @@
 //      enable's MMIO write if CPU 0 was at EL1 with IRQs unmasked when
 //      we enabled — the per-CPU dispatch order doesn't matter, the
 //      pending_count increment is under r->lock):
-//      - gic_acknowledge → 96.
-//      - gic_dispatch(96) → kobj_irq_dispatch(96, k).
+//      - gic_acknowledge → intid.
+//      - gic_dispatch(intid) → kobj_irq_dispatch(intid, k).
 //      - kobj_irq_dispatch under r->lock: pending_count = 1, drop lock,
 //        wakeup(&k->rendez) (no waiter yet → no-op).
-//      - gic_eoi(96).
+//      - gic_eoi(intid).
 //   4. Child's rs_main calls t_irq_wait(handle):
 //      - sys_irq_wait_handler validates handle + KOBJ_IRQ kind +
 //        RIGHT_SIGNAL.
@@ -100,21 +100,8 @@
 
 void test_irq_probe_rfork_with_caps(void);
 
-// Test INTID — pinned in lockstep with usr/irq-probe/src/main.rs's
-// IRQ_PROBE_INTID. A mismatch produces a deterministic failure: the
-// kernel pre-pends a different SPI than the probe waits on; cond
-// stays false; t_irq_wait blocks forever; the test runner's
-// BOOT_TIMEOUT=20s bounds the worst case.
-//
-// SPI 96 chosen as a safe unused SPI on QEMU virt's GIC:
-//   - 32+ (SPI range), not 0..31 (SGI/PPI, kernel-reserved at F142+F145).
-//   - Not in [32, 47]: PL011 UART (33), PL031 RTC (34), PCI host
-//     (35-38), GPIO (39), arch-aux (40-47).
-//   - Not in [48, 79]: virtio-mmio slots.
-//   - 96 is comfortably above the platform-device range while still
-//     in the dist's reported ITLines (typically 160 on QEMU virt's
-//     GICv3 with a few SPIs of headroom).
-#define IRQ_PROBE_TEST_INTID  96u
+// The kernel selects a synthetic SPI and passes it as argv[1]. The userspace
+// probe has no platform/vector constant that can drift from MSI reservations.
 
 // 8-aligned static buffer for the loaded ELF blob (R5-G F61 alignment
 // requirement on the Ehdr cast in exec_setup). Sized to match the P4-K
@@ -126,6 +113,7 @@ static _Alignas(16) u8 g_irq_probe_blob[IRQ_PROBE_BLOB_MAX];
 struct irq_probe_exec_args {
     const void *blob;
     size_t      size;
+    u32         intid;
 };
 
 __attribute__((noreturn))
@@ -146,7 +134,12 @@ static void irq_probe_exec_thunk(void *arg) {
     }
 
     u64 entry = 0, sp = 0;
-    int rc = exec_setup(p, ea->blob, ea->size, &entry, &sp);
+    char argv[32] = "irq-probe";
+    u32 n = 10, v = ea->intid; char digits[10]; u32 nd = 0;
+    do { digits[nd++] = (char)('0' + v % 10); v /= 10; } while (v);
+    while (nd) argv[n++] = digits[--nd];
+    argv[n++] = 0;
+    int rc = exec_setup_with_argv(p, ea->blob, ea->size, argv, n, 2, &entry, &sp);
     if (rc != 0) {
         uart_puts("    exec_setup rc=");
         uart_putdec((u64)rc);
@@ -166,6 +159,8 @@ static void irq_probe_exec_thunk(void *arg) {
 }
 
 void test_irq_probe_rfork_with_caps(void) {
+    u32 intid = test_irq_choose_spi();
+    TEST_ASSERT(intid != 0xffffffffu, "topology needs a synthetic test SPI");
     const void *cpio_blob = NULL;
     size_t size = 0;
 
@@ -184,20 +179,20 @@ void test_irq_probe_rfork_with_caps(void) {
     uart_puts("    /irq-probe size=");
     uart_putdec((u64)size);
     uart_puts(" bytes → pre-pend SPI ");
-    uart_putdec((u64)IRQ_PROBE_TEST_INTID);
+    uart_putdec((u64)intid);
     uart_puts(" + rfork_with_caps(CAP_HW_CREATE)\n");
 
     // Pre-pend the SPI BEFORE spawning the child. The IRQ is pending
     // but not yet enabled, so it doesn't deliver yet. When the child's
-    // t_irq_create calls gic_enable_irq(96), the GIC sees pending+
+    // t_irq_create calls gic_enable_irq(intid), the GIC sees pending+
     // enabled and delivers immediately (modulo CPU IRQ masking). This
     // makes the test race-free: the child's t_irq_wait will always
     // observe pending_count >= 1 by the time cond is evaluated.
-    bool pended = gic_set_pending_spi(IRQ_PROBE_TEST_INTID);
-    TEST_ASSERT(pended, "gic_set_pending_spi failed for SPI 96 (out of GIC range?)");
+    bool pended = gic_set_pending_spi(intid);
+    TEST_ASSERT(pended, "gic_set_pending_spi failed for selected SPI");
 
     struct irq_probe_exec_args args = {
-        .blob = g_irq_probe_blob, .size = size
+        .blob = g_irq_probe_blob, .size = size, .intid = intid
     };
 
     // Grant the child CAP_HW_CREATE (kproc has CAP_ALL = CAP_HW_CREATE

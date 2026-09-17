@@ -602,6 +602,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gallery"
+version = "0.1.0"
+dependencies = [
+ "libtapestry",
+ "libthyla-rs",
+ "view",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -660,6 +669,7 @@ dependencies = [
  "beacon",
  "cartoon",
  "cornucopia",
+ "inlinewire",
  "kaua",
  "kaua-term",
  "libhalcyon",
@@ -774,6 +784,10 @@ version = "0.1.0"
 dependencies = [
  "libthyla-rs",
 ]
+
+[[package]]
+name = "inlinewire"
+version = "0.1.0"
 
 [[package]]
 name = "inout"
@@ -982,6 +996,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ca88d725a0a943b096803bd34e73a4437208b6077654cc4ecb2947a5f91618d"
 
 [[package]]
+name = "manual"
+version = "0.1.0"
+dependencies = [
+ "beacon",
+ "libthyla-rs",
+ "linked_list_allocator",
+]
+
+[[package]]
 name = "menagerie-probe"
 version = "0.1.0"
 dependencies = [
@@ -1055,6 +1078,49 @@ name = "nettest"
 version = "0.1.0"
 dependencies = [
  "coreutils",
+ "libthyla-rs",
+]
+
+[[package]]
+name = "nocturne-capture-probe"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
+name = "nocturne-probe"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
+name = "nocturne-tap-probe"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
+name = "nocturne-vol"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
+name = "nocturne-vol-probe"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
+name = "nocturned"
+version = "0.1.0"
+dependencies = [
+ "libdriver",
  "libthyla-rs",
 ]
 
@@ -1435,6 +1501,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ring-voice-probe"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
 name = "rsa"
 version = "0.9.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1630,6 +1703,12 @@ dependencies = [
  "digest",
  "rand_core",
 ]
+
+[[package]]
+name = "simd-adler32"
+version = "0.3.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
 name = "skrifa"
@@ -1953,6 +2032,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "view"
+version = "0.1.0"
+dependencies = [
+ "beacon",
+ "inlinewire",
+ "libthyla-rs",
+ "zune-core",
+ "zune-jpeg",
+ "zune-png",
+]
+
+[[package]]
 name = "virtio-blk-probe"
 version = "0.1.0"
 dependencies = [
@@ -2196,4 +2287,38 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "zune-core"
+version = "0.4.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f423a2c17029964870cfaabb1f13dfab7d092a62a29a89264f4d36990ca414a"
+
+[[package]]
+name = "zune-inflate"
+version = "0.2.54"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73ab332fe2f6680068f3582b16a24f90ad7096d5d39b974d1c0aff0125116f02"
+dependencies = [
+ "simd-adler32",
+]
+
+[[package]]
+name = "zune-jpeg"
+version = "0.4.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29ce2c8a9384ad323cf564b67da86e21d3cfdff87908bc1223ed5c99bc792713"
+dependencies = [
+ "zune-core",
+]
+
+[[package]]
+name = "zune-png"
+version = "0.4.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d29c085769c6f29effea890f093120ac019375fdc789d2a496ba8ba96c77509"
+dependencies = [
+ "zune-core",
+ "zune-inflate",
 ]

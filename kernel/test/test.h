@@ -38,6 +38,10 @@ struct test_case {
 // New tests are added by extending the array (no constructors needed).
 extern struct test_case g_tests[];
 
+// Select an unused synthetic SPI, excluding MSI, active claims and firmware
+// interrupt properties. UINT32_MAX means this topology has no test vector.
+u32 test_irq_choose_spi(void);
+
 // Run every test in g_tests[]. Reports per-test PASS/FAIL on UART.
 // Sets each test_case's failed / fail_msg fields for post-run inspection.
 void test_run_all(void);

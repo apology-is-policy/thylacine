@@ -19,7 +19,7 @@ abis: [abi-boot-banner]
 design:
   - "docs/TOOLING.md section 10"
 created: 2026-08-02
-updated: 2026-09-07
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -43,6 +43,14 @@ it is printed when init explicitly signals that its own checks passed, which is 
 consequence of init having become a process that never exits.
 
 ## Mechanism
+
+### PCI interrupt initialization
+
+After raw IRQ reservations and PCI enumeration, `kobj_pci_init` establishes
+function claims, then `pci_irq_init` constructs the shared routing domains and
+MSI backend. This precedes userspace driver claims and DMA publication. The
+controller tables and source ownership are described by [[sub-kernel-pci-irq]];
+initialization cannot be moved after drivers become runnable.
 
 **The four phases.** Describe the machine (parse the tree, find the console,
 print what was found). Build the memory system (physical allocator, then the

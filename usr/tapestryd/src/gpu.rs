@@ -26,7 +26,7 @@ use tapestryd::skein::Seg;   // WEAVE-SKEIN: the scatter-gather backing entry
 use libthyla_rs::handle::Rights;
 use libthyla_rs::hardware::{
     mmio_read16, mmio_read32, mmio_read8, mmio_write16, mmio_write32, mmio_write64, mmio_write8,
-    Dma, Irq, PciDev, PciRegion,
+    Dma, PciIrq, PciIrqMode, PciDev, PciRegion,
 };
 use libthyla_rs::time::Instant;
 use libthyla_rs::virtio_rmb;
@@ -68,18 +68,15 @@ const VIRTIO_GPU_F_CONTEXT_INIT_BIT_LO: u32 = 1 << 4;
 // the byte clears it.
 const ISR_QUEUE: u8 = 1 << 0;
 
-const VIRTIO_MSI_NO_VECTOR: u16 = 0xFFFF;
 
 // virtio_pci_common_cfg field offsets (section 4.1.4.3).
 const CCFG_DEVICE_FEATURE_SELECT: u64 = 0x00;
 const CCFG_DEVICE_FEATURE: u64 = 0x04;
 const CCFG_DRIVER_FEATURE_SELECT: u64 = 0x08;
 const CCFG_DRIVER_FEATURE: u64 = 0x0C;
-const CCFG_CONFIG_MSIX_VECTOR: u64 = 0x10;
 const CCFG_DEVICE_STATUS: u64 = 0x14;
 const CCFG_QUEUE_SELECT: u64 = 0x16;
 const CCFG_QUEUE_SIZE: u64 = 0x18;
-const CCFG_QUEUE_MSIX_VECTOR: u64 = 0x1A;
 const CCFG_QUEUE_ENABLE: u64 = 0x1C;
 const CCFG_QUEUE_NOTIFY_OFF: u64 = 0x1E;
 const CCFG_QUEUE_DESC: u64 = 0x20;
@@ -696,7 +693,6 @@ fn setup_queue(
         w64(common + CCFG_QUEUE_DESC, desc_pa);
         w64(common + CCFG_QUEUE_DRIVER, avail_pa);
         w64(common + CCFG_QUEUE_DEVICE, used_pa);
-        w16(common + CCFG_QUEUE_MSIX_VECTOR, VIRTIO_MSI_NO_VECTOR);
         let notify_off = r16(common + CCFG_QUEUE_NOTIFY_OFF);
         w16(common + CCFG_QUEUE_ENABLE, 1);
         Some(notify_off)
@@ -730,13 +726,12 @@ fn init_device(
     ring_pa: u64,
 ) -> Result<DevInit, Error> {
     unsafe {
-        w8(common + CCFG_DEVICE_STATUS, 0);
+        // PciIrq::for_virtio completed reset and selected queue vectors.
         w8(common + CCFG_DEVICE_STATUS, STATUS_ACKNOWLEDGE);
         w8(
             common + CCFG_DEVICE_STATUS,
             STATUS_ACKNOWLEDGE | STATUS_DRIVER,
         );
-        w16(common + CCFG_CONFIG_MSIX_VECTOR, VIRTIO_MSI_NO_VECTOR);
 
         w32(common + CCFG_DEVICE_FEATURE_SELECT, 0);
         let dev_feat_lo = r32(common + CCFG_DEVICE_FEATURE);
@@ -966,7 +961,7 @@ struct Controlq {
     ring_pa: u64,
     notify_va: u64,
     isr_va: u64,
-    irq: Irq,
+    irq: PciIrq,
     /// Count of avail entries published. Up to 1 + FENCED_SLOTS chains can
     /// be outstanding (Warp-2d), so completion is attributed by used-ENTRY
     /// id -- never inferred from this cursor (the single-in-flight `seq`
@@ -1329,27 +1324,33 @@ impl Controlq {
         }
     }
 
-    /// The serve loop's non-blocking completion pump. Nothing to do unless
-    /// fenced work is in flight (a sync chain never outlives its own
-    /// dispatch). The ISR read is level hygiene: nobody irq.waits between
-    /// dispatches, so the assert would otherwise sit latched.
-    fn poll_completions(&mut self) {
-        // #178: NO global early return for the harness hold. It used to
-        // bail here, which stopped EVERY client's drain -- an unprivileged
-        // box-wide DoS on a mode-0666 ctl. The hold is enforced per-slot
-        // in `drain` instead, so a held ctx's fences stay in flight while
-        // everyone else's retire normally.
-        //
-        // Poisoned-but-idle still needs draining (round-3 F3): abandonment
-        // TAKES the tag, so `fenced_in_flight()` is 0 the moment the last
-        // slot is abandoned -- and the un-poison lives in drain()'s
-        // late-retire arm, which this early return then made unreachable.
-        // Poison is state that OUTLIVES in-flight-ness, so it cannot be
-        // the guard's only question.
-        let poisoned_any = self.fslot_poisoned.iter().any(|&p| p);
-        if self.fenced_in_flight() == 0 && !poisoned_any {
-            return;
+    /// Service one interrupt ticket and drain the authoritative used ring.
+    /// A retry leaves the ticket in the kernel for the next pump; never spin
+    /// on a shared-line cooldown in the compositor's non-blocking path.
+    fn service_completions(&mut self, timeout_ns: u64) -> Result<(), ()> {
+        let event = self.irq.wait_timeout(timeout_ns).map_err(|_| {
+            say!("tapestryd: gpu PCI interrupt wait failed");
+            self.dead = true;
+        })?;
+        if self.irq.mode() == PciIrqMode::Intx {
+            let _ = unsafe { r8(self.isr_va) };
         }
+        self.drain();
+        dsb_sy();
+        if let Some(event) = event {
+            match self.irq.complete(event) {
+                Ok(()) | Err(libthyla_rs::err::Error::WouldBlock) => {}
+                Err(_) => { self.dead = true; return Err(()); }
+            }
+        }
+        if self.dead { Err(()) } else { Ok(()) }
+    }
+
+    /// The serve loop's bounded completion pump. Even an idle queue may own
+    /// a notification for work already drained by a synchronous spin poll.
+    /// It must complete that ticket to rearm subsequent asynchronous work.
+    /// Per-client harness holds remain enforced in drain(), never globally.
+    fn poll_completions(&mut self) {
         if self.dead {
             // A dead engine will never retire anything, so the slots it
             // still holds must be released as ABANDONED right now
@@ -1361,8 +1362,10 @@ impl Controlq {
             self.abandon_all("engine dead");
             return;
         }
-        let _ = unsafe { r8(self.isr_va) };
-        let _ = self.drain();
+        if self.service_completions(1).is_err() {
+            self.abandon_all("interrupt service failed");
+            return;
+        }
         self.reap_abandoned();
     }
 
@@ -1497,20 +1500,9 @@ impl Controlq {
         let mut wakes = 0u32;
         let mut stale_since: Option<Instant> = None;
         'wait: loop {
-            // F-A1 (C): a BOUNDED wait. A timeout returns Ok(0) -- NOT an error;
-            // the loop then reads the ISR, drains (catching a completion whose
-            // interrupt was lost), and advances the stale-wake deadline, instead
-            // of blocking forever on a never-delivered IRQ. Only an ABI error
-            // (bad handle / a 2nd concurrent waiter) latches dead here.
-            if self.irq.wait_timeout(GPU_IRQ_WAIT_TIMEOUT_NS).is_err() {
-                say!("tapestryd: gpu SYS_IRQ_WAIT returned error");
-                self.dead = true;
-                return Err(());
-            }
-            // Read-to-clear on every wake: consumes + deasserts the INTx
-            // source (level hygiene). Deliberately NOT the break condition.
-            let _ = unsafe { r8(self.isr_va) };
-            self.drain();
+            // A timeout still drains: used-ring progress is authoritative.
+            // The same pump also completes tickets after asynchronous work.
+            self.service_completions(GPU_IRQ_WAIT_TIMEOUT_NS)?;
             if self.sync_done(both) {
                 break 'wait;
             }
@@ -1553,13 +1545,9 @@ impl Controlq {
             }
         }
 
-        // The spin-break path can exit with the COMPLETION's own INTx
-        // assertion unconsumed (the wake-path read above cleared only the
-        // PRIOR level; the device re-asserts when it bumps used.idx during
-        // the spin). Read-to-clear once more so a retired command's own
-        // assertion cannot surface as the next submit's stale wake (G-5 F2).
-        let _ = unsafe { r8(self.isr_va) };
-        Ok(())
+        // A spin may retire the chain before consuming its notification.
+        // Take one bounded pass; later serve-loop passes finish any cooldown.
+        self.service_completions(1)
     }
 
     fn submit_and_wait(&mut self, req_len: u32, resp_len: u32) -> Result<u32, ()> {
@@ -1969,16 +1957,12 @@ impl Gpu {
             })?
             .0;
         let notify_mul = u64::from(pci.notify_off_multiplier());
-        let intid = pci.intid().ok_or_else(|| {
-            say!("tapestryd: gpu no INTx INTID resolved");
+        let irq = PciIrq::for_virtio(&pci, &[0, 1]).map_err(|_| {
+            say!("tapestryd: gpu PCI interrupt endpoint creation failed");
             Error::Hardware
         })?;
 
-        let irq = Irq::new(intid, Rights::SIGNAL).map_err(|_| {
-            say!("tapestryd: SYS_IRQ_CREATE failed for gpu intid {}", intid);
-            Error::Hardware
-        })?;
-
+        say!("tapestryd: gpu PCI IRQ mode={:?} vector={}", irq.mode(), irq.vector());
         let rw_map = Rights::READ | Rights::WRITE | Rights::MAP;
         let prot = T_PROT_READ | T_PROT_WRITE;
         let ring = unsafe { Dma::new(RING_DMA_SIZE, rw_map, ring_va, prot) }.map_err(|_| {
@@ -2004,6 +1988,10 @@ impl Gpu {
 
         let flane = if virgl {
             let f = unsafe { Dma::new(FLANE_DMA_SIZE, rw_map, flane_va, prot) }.map_err(|_| {
+                // init_device already set DRIVER_OK. Stop DMA before the
+                // earlier ring local unwinds on this constructor failure.
+                unsafe { w8(common_va + CCFG_DEVICE_STATUS, 0); }
+                dsb_sy();
                 say!("tapestryd: SYS_DMA_CREATE(gpu fenced lane) failed");
                 Error::Hardware
             })?;
@@ -2017,6 +2005,13 @@ impl Gpu {
         // hostmem BAR's shm region (shm id 1). None on a device without it.
         let hostmem = pci.shm_region(1).map(|(_, len)| HostmemAllocator::new(len));
 
+        if irq.mode() == PciIrqMode::Intx { unsafe { let _ = r8(isr_va); } }
+        dsb_sy();
+        if irq.arm().is_err() {
+            unsafe { w8(common_va + CCFG_DEVICE_STATUS, 0); }
+            dsb_sy();
+            return Err(Error::Hardware);
+        }
         let mut gpu = Gpu {
             ctrl: Controlq {
                 ring_va,
@@ -2102,7 +2097,7 @@ impl Gpu {
             "tapestryd: gpu up -- {}x{}, pci intid={}, virgl={} capsets={}",
             gpu.width,
             gpu.height,
-            intid,
+            gpu.pci.intid().unwrap_or(0),
             gpu.virgl as u32,
             gpu.num_capsets
         );
@@ -4369,5 +4364,16 @@ impl Gpu {
 
     pub fn engine_dead(&self) -> bool {
         self.ctrl.dead
+    }
+}
+
+impl Drop for Gpu {
+    fn drop(&mut self) {
+        // Run before Controlq's endpoint and DMA field destructors. A PCI
+        // endpoint retains the function independently of the parent handle.
+        if let Some((common, _)) = self.pci.region(PciRegion::Common) {
+            unsafe { w8(common + CCFG_DEVICE_STATUS, 0); }
+            dsb_sy();
+        }
     }
 }

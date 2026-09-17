@@ -724,6 +724,6 @@ stream.
    a full-corpus verification (every heading of every retired doc accounted
    for) is recorded in a chg note.
 
-Out of scope, unchanged: the TLA+ specs themselves, the user-manual deferral
-(the vault's user-facing half waits on the v1.0-rc decision), git as the
-authority on code.
+Out of scope, unchanged: the TLA+ specs themselves, the user manual (since
+2026-09-05 the Operator's Manual, a separate track in `docs/manual/` with its
+index at `docs/OPERATORS-MANUAL.md`), git as the authority on code.

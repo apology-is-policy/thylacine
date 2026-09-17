@@ -349,6 +349,51 @@ func gitDirtySet(root string) map[string]bool {
 			m[rec[3:]] = true
 		}
 	}
+	// Merge in progress: `git status --porcelain` reports EVERY path the merge
+	// introduced as differing from HEAD (the first parent), because HEAD has
+	// not yet advanced to the merge commit. That defeats the R6 grandfather at
+	// the one moment it is needed most -- a chg brought in UNCHANGED from the
+	// merged branch was authored + validated on that branch, not now, but it
+	// looks dirty because it is absent from (or older on) the first parent. So
+	// during a merge, keep in the dirty set only the paths that ALSO differ
+	// from MERGE_HEAD -- the ones the user actually hand-resolved or newly
+	// authored while merging. A path equal to MERGE_HEAD (a clean take from the
+	// merged branch) is grandfathered, exactly as it would be one commit later.
+	if gitMergeInProgress(root) {
+		vsMerge := gitDiffNameSet(root, "MERGE_HEAD")
+		if vsMerge != nil {
+			for p := range m {
+				if !vsMerge[p] {
+					delete(m, p)
+				}
+			}
+		}
+	}
+	return m
+}
+
+// gitMergeInProgress reports whether the repo at root has an unresolved MERGE_HEAD.
+func gitMergeInProgress(root string) bool {
+	cmd := exec.Command("git", "rev-parse", "-q", "--verify", "MERGE_HEAD")
+	cmd.Dir = root
+	return cmd.Run() == nil
+}
+
+// gitDiffNameSet returns the repo-relative paths whose working-tree content
+// differs from ref (`git diff --name-only <ref>`). Returns nil on git error.
+func gitDiffNameSet(root, ref string) map[string]bool {
+	cmd := exec.Command("git", "diff", "--name-only", "-z", ref)
+	cmd.Dir = root
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	m := map[string]bool{}
+	for _, p := range strings.Split(string(out), "\x00") {
+		if p != "" {
+			m[p] = true
+		}
+	}
 	return m
 }
 

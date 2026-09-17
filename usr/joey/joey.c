@@ -481,6 +481,89 @@ static int smoke_drain(long rd, unsigned char *acc, size_t acc_cap,
     }
 }
 
+// PROBE_REAP_MAX_SEC -- the bound on how long joey waits for a boot probe to
+// exit before it force-kills it and moves on. Generous versus any probe's real
+// runtime (the pouch hellos and nocturne-probe all finish in a second or two,
+// even under -smp8 contention) yet well under the 300s harness timeout, so a
+// HUNG probe becomes a fast diagnosable failure instead of a boot-wide
+// black-box stall with no banner.
+#define PROBE_REAP_MAX_SEC 120
+
+// KILL_GRACE_SEC -- after force-killing a hung child, how long to wait for the
+// corpse before giving up and returning anyway. A killed child dies promptly
+// (kill is non-catchable, I-19); this only bounds the pathological case where
+// the kill could not be issued or the child ignores it, so the reap here is
+// ALSO bounded -- never an unbounded block, which would re-introduce the hang.
+#define KILL_GRACE_SEC 5
+
+// REAP_PARK_MS -- how long reap_bounded sleeps between WNOHANG polls. A TIMED
+// park (t_torpor_wait), not a busy t_yield: joey is init and runs on every boot,
+// and a yield with nothing else runnable on this vCPU spins -- a hot poll loop
+// beside every probe is the very -smp8 pressure this arc removes. 10 ms keeps
+// the reap latency imperceptible while the vCPU idles between polls.
+#define REAP_PARK_MS 10
+
+// reap_bounded -- reap `pid`, but never block on it forever. Poll WAIT_WNOHANG,
+// sleeping REAP_PARK_MS on a PRIVATE stack word between checks (t_torpor_wait --
+// the kernel DOES have a timed park, and joey already uses it elsewhere). On the
+// `max_sec` deadline, kill the child via /proc/<pid>/ctl and reap the corpse
+// (also bounded). Returns `pid` (>0) on a clean exit with *status set, -2 if it
+// had to kill on the deadline, -1 on a wait error. The deadline is time-based
+// (t_clock_gettime) with an iteration-count BACKSTOP, so a kernel whose clock is
+// unavailable cannot make this unbounded. WHY it exists: a boot probe that hangs
+// must not hold the boot forever -- an unbounded t_wait_pid_for once turned a
+// nocturned busy-spin into a 300s -smp8 timeout with no diagnosis.
+static long reap_bounded(long pid, int *status, unsigned long max_sec) {
+    struct t_timespec t0 = { 0, 0 }, now = { 0, 0 };
+    int have_t0 = (t_clock_gettime(T_CLOCK_MONOTONIC, &t0) == 0);
+    // Iteration backstop (F3): each pass parks ~REAP_PARK_MS, so a count bounds
+    // real time even if every t_clock_gettime fails. Sized to match max_sec; the
+    // park is on a private word nothing wakes, so passes are not shortened and
+    // per-pass overhead makes the time deadline fire first when the clock works.
+    unsigned long iters = 0;
+    const unsigned long max_iters = max_sec * (1000UL / REAP_PARK_MS);
+    unsigned pacer = 0;
+    for (;;) {
+        long r = t_wait_pid_for((int)pid, WAIT_WNOHANG, status);
+        if (r == pid) return pid;
+        if (r < 0) return -1;
+        unsigned long el = 0;
+        if (have_t0 && t_clock_gettime(T_CLOCK_MONOTONIC, &now) == 0 && now.tv_sec >= t0.tv_sec)
+            el = (unsigned long)(now.tv_sec - t0.tv_sec);
+        if ((have_t0 && el >= max_sec) || ++iters >= max_iters) {
+            char ctl[64];
+            unsigned ctl_len = 0;
+            char nb[24];
+            const char *ns = itoa_dec(pid, nb, sizeof(nb));
+            const char pfx[] = "/proc/";
+            for (unsigned k = 0; k < sizeof(pfx) - 1; k++) ctl[ctl_len++] = pfx[k];
+            for (unsigned k = 0; ns[k]; k++) ctl[ctl_len++] = ns[k];
+            const char sfx[] = "/ctl";
+            for (unsigned k = 0; k < sizeof(sfx) - 1; k++) ctl[ctl_len++] = sfx[k];
+            long kfd = t_open(T_WALK_OPEN_FROM_ROOT, ctl, ctl_len, T_OWRITE);
+            if (kfd >= 0) {
+                (void)t_write(kfd, "kill", 4);
+                (void)t_close(kfd);
+            }
+            // Reap the corpse with a BOUNDED grace -- never an unbounded block:
+            // if the kill could not be issued (open failed) or the child ignores
+            // it, blocking here would re-introduce the very hang we are bounding.
+            // Iteration-bounded (KILL_GRACE_SEC worth of parks), clock-independent.
+            unsigned long kiters = 0;
+            const unsigned long max_kiters =
+                (unsigned long)KILL_GRACE_SEC * (1000UL / REAP_PARK_MS);
+            for (;;) {
+                long kr = t_wait_pid_for((int)pid, WAIT_WNOHANG, status);
+                if (kr == pid || kr < 0) break;
+                if (++kiters >= max_kiters) break;
+                (void)t_torpor_wait(&pacer, 0u, (long)REAP_PARK_MS * 1000L);
+            }
+            return -2;
+        }
+        (void)t_torpor_wait(&pacer, 0u, (long)REAP_PARK_MS * 1000L);
+    }
+}
+
 // pouch_smoke_core — pouch_smoke_one's body, parameterized by optional
 // cap_mask and optional perm_flags. If both are 0, uses t_spawn_with_fds
 // (no extra caps, no perm stamps). If cap_mask != 0 and perm_flags == 0,
@@ -550,7 +633,12 @@ static int pouch_smoke_core(const char *name, size_t name_len,
             (void)t_close(rd);
             return -1;
         }
-        long reaped = t_wait_pid_for((int)pid, 0, &status);
+        long reaped = reap_bounded(pid, &status, PROBE_REAP_MAX_SEC);
+        if (reaped == -2) {
+            t_putstr("joey: pouch-smoke child did not exit within the deadline -- killed\n");
+            (void)t_close(rd);
+            return -1;
+        }
         if (reaped != pid) {
             t_putstr("joey: pouch-smoke t_wait_pid wrong pid\n");
             (void)t_close(rd);
@@ -561,7 +649,12 @@ static int pouch_smoke_core(const char *name, size_t name_len,
         // an adopted-orphan zombie must not be consumed here -- 2B-F3), then
         // drain. Sound ONLY because these children write < the 4 KiB ring before
         // exit; see the ordering note above pouch_smoke_core.
-        long reaped = t_wait_pid_for((int)pid, 0, &status);
+        long reaped = reap_bounded(pid, &status, PROBE_REAP_MAX_SEC);
+        if (reaped == -2) {
+            t_putstr("joey: pouch-smoke child did not exit within the deadline -- killed\n");
+            (void)t_close(rd);
+            return -1;
+        }
         if (reaped != pid) {
             t_putstr("joey: pouch-smoke t_wait_pid wrong pid\n");
             (void)t_close(rd);
@@ -11447,11 +11540,14 @@ int main(void) {
                         }
                     }
                 }
+                // MAY_POST_SERVICE (I-47): halcyond posts /srv/halcyon for the
+                // inline-media place channel. Harmless to aurora, which posts no
+                // service; the bit is a capability to post, not an obligation.
                 long aur_pid = t_spawn_with_perms(
                     rname, rname_len,
                     /*fds=*/(const unsigned int *)0, /*fd_count=*/0,
                     /*cap_mask=*/0,
-                    T_SPAWN_PERM_CONSOLE_RENDERER);
+                    T_SPAWN_PERM_CONSOLE_RENDERER | T_SPAWN_PERM_MAY_POST_SERVICE);
                 if (aur_pid <= 0) {
                     t_putstr("joey: t_spawn_with_perms(console renderer) FAILED\n");
                     return 1;
@@ -11465,6 +11561,155 @@ int main(void) {
             }
         } else {
             t_putstr("joey: /srv/tapestry absent (no GPU environment); skipping\n");
+        }
+    }
+
+    // === Nocturne: mount /dev/nocturne + the audio witness probe ===
+    // nocturned is WARDEN-spawned (persistent; the virtio-pci:25 bind) long
+    // before this point; joey's job is the mount (the /dev/tapestry idiom:
+    // /srv/nocturne absence is environment-dependent -- THYLACINE_NO_AUDIO
+    // boots have no sound function -- so absent is SOFT; a mount error on a
+    // present service is FATAL) and, under THYLA_BOOT_PROBES, ONE witness
+    // probe: by default /nocturne-probe (N-2a-1: mint two voices, play 1 kHz
+    // and 2 kHz SIMULTANEOUSLY so the mixer sums them, then silence), or under
+    // thylacine.sdlaudio /sdl-audio-probe (N-2a-2: the same chord streamed
+    // through SDL_thylacineaudio), or under thylacine.ringprobe /ring-voice-probe
+    // (N-2b: the same chord streamed through the zero-copy Weft rings of two
+    // voices). The three are mutually exclusive -- one wav capture, one chord
+    // span -- so only one runs. FATAL once the mount is up -- a driver that
+    // cannot play a period is a regression, never an environment. The host-side
+    // halves are tools/test-audio.sh / tools/test-sdl-audio.sh /
+    // tools/test-ring-audio.sh (the wav capture + tools/audio-verdict.py --chord).
+    {
+        long noc_root = t_open(T_WALK_OPEN_FROM_ROOT, "/srv/nocturne", 13, T_OREAD);
+        if (noc_root >= 0) {
+            if (t_mount("/dev/nocturne", 13, noc_root, T_MREPL) != 0) {
+                t_putstr("joey: t_mount(/dev/nocturne) FAILED\n");
+                return 1;
+            }
+            (void)t_close(noc_root);
+            t_putstr("joey: /dev/nocturne mounted (nocturned tree)\n");
+#if THYLA_BOOT_PROBES
+            // N-2a-2: under thylacine.sdlaudio the SDL audio backend witness
+            // runs INSTEAD of the N-1 mixing probe. The two never share a wav
+            // capture -- the chord verdict's silent-tail check forbids a second
+            // tone after the first -- so a clean SDL capture needs the N-1 probe
+            // to stand down. Default boots keep the N-1 witness unchanged.
+            if (bootarg_has("thylacine.noaudioprobe", 22)) {
+                // N-2a-3: the game-audio witness (tools/test-game-audio.sh)
+                // judges a wav that must carry ONLY the game's sound -- QEMU's
+                // wav backend elides silent gaps, so a boot-time chord cannot
+                // be separated from the game by position. Declined out loud.
+                t_putstr("joey: audio probe DECLINED (thylacine.noaudioprobe; the wav is the game's alone)\n");
+            } else if (bootarg_has("thylacine.sdlaudio", 18)) {
+                static const char sa_name[]   = "/bin/sdl-audio-probe";
+                static const char sa_expect[] = "sdl-audio-probe: PASS";
+                if (pouch_smoke_one(sa_name, sizeof(sa_name) - 1,
+                                    sa_expect, sizeof(sa_expect) - 1) != 0) {
+                    t_putstr("joey: sdl-audio-probe FAILED (SDL audio did not play; Nocturne N-2a-2)\n");
+                    return 1;
+                }
+                t_putstr("joey: sdl-audio-probe OK (1 kHz + 2 kHz via SDL_thylacineaudio -> a Nocturne voice; N-2a-2)\n");
+            } else if (bootarg_has("thylacine.ringprobe", 19)) {
+                // N-2b: the zero-copy Weft ring witness. EXCLUSIVE with the byte
+                // /nocturne-probe (they cannot share a wav capture -- the chord
+                // verdict's silent-tail + contiguity checks forbid a second chord
+                // span), so under thylacine.ringprobe the byte probe stands down
+                // and the ring is the ONLY thing in the capture: any chord present
+                // came through the zero-copy path. The probe runs both phases --
+                // N-2b-1 (map + geometry + 2 controls) and N-2b-2a (stream a
+                // 1 kHz + 2 kHz chord through two ring voices) -- and emits ONE
+                // PASS. FATAL once selected (a ring that will not map or play is a
+                // regression, never an environment). Gated off by default; the
+                // host halves are tools/test-ring-voice.sh (substrate, no capture)
+                // and tools/test-ring-audio.sh (the wav + audio-verdict --chord).
+                static const char rp_name[]   = "/bin/ring-voice-probe";
+                static const char rp_expect[] = "RING-VOICE-PROBE PASS";
+                if (pouch_smoke_one(rp_name, sizeof(rp_name) - 1,
+                                    rp_expect, sizeof(rp_expect) - 1) != 0) {
+                    t_putstr("joey: ring-voice-probe FAILED (the Weft ring chord did not play; Nocturne N-2b)\n");
+                    return 1;
+                }
+                t_putstr("joey: ring-voice-probe OK (Weft ring mapped + geometry valid + ring chord played; Nocturne N-2b)\n");
+            } else if (bootarg_has("thylacine.volprobe", 18)) {
+                // N-3a-3: the sink-volume authority witness. nocturne-vol-probe
+                // proves the two-post split: a SYSTEM write on the per-connection
+                // /srv/nocturne-ctl post is ACCEPTED + the Plan 9 volume(3)
+                // grammar/F3 round-trip, the mount volume READS, and a
+                // user-principal child is REFUSED on BOTH the mount write path
+                // (the F1 attack) and a direct -ctl write (the negative arms;
+                // without them a return-true gate would pass the positive alone).
+                // The parent needs CAP_SET_IDENTITY to stamp the child's
+                // principal, so it rides pouch_smoke_one_caps. No wav capture (a
+                // control-file test), so it conflicts with no chord probe -- but
+                // it takes its own boot arg for a clean, dedicated witness
+                // (tools/test-nocturne-volume.sh). FATAL once selected.
+                static const char vp_name[]   = "/bin/nocturne-vol-probe";
+                static const char vp_expect[] = "NOCTURNE-VOL-PROBE PASS";
+                if (pouch_smoke_one_caps(vp_name, sizeof(vp_name) - 1,
+                                         vp_expect, sizeof(vp_expect) - 1,
+                                         T_CAP_SET_IDENTITY) != 0) {
+                    t_putstr("joey: nocturne-vol-probe FAILED (the sink-volume authority; Nocturne N-3a-3)\n");
+                    return 1;
+                }
+                t_putstr("joey: nocturne-vol-probe OK (control-post allow + mount+control deny; Nocturne N-3a-3)\n");
+            } else if (bootarg_has("thylacine.tapprobe", 18)) {
+                // N-3c-1: the sink-tap (capture) authority witness.
+                // nocturne-tap-probe proves the eavesdropping gate: a SYSTEM
+                // reader opens /srv/nocturne-ctl/tap and CAPTURES a played tone
+                // (positive), a SECOND concurrent open is EBUSY (single-reader),
+                // a /dev/nocturne/audio READ is REFUSED (no eavesdrop via the
+                // shared mount), and a user-principal child is DENIED the tap
+                // (the negative arms; without them a gate that refused every read
+                // would pass the denials alone). Needs CAP_SET_IDENTITY to stamp
+                // the child, so it rides pouch_smoke_one_caps. No wav capture (the
+                // tap reads the software mirror, not the device), so it needs no
+                // capture backend (tools/test-nocturne-tap.sh). FATAL once selected.
+                static const char tp_name[]   = "/bin/nocturne-tap-probe";
+                static const char tp_expect[] = "NOCTURNE-TAP-PROBE PASS";
+                if (pouch_smoke_one_caps(tp_name, sizeof(tp_name) - 1,
+                                         tp_expect, sizeof(tp_expect) - 1,
+                                         T_CAP_SET_IDENTITY) != 0) {
+                    t_putstr("joey: nocturne-tap-probe FAILED (the sink-tap authority; Nocturne N-3c-1)\n");
+                    return 1;
+                }
+                t_putstr("joey: nocturne-tap-probe OK (SYSTEM tap capture + mount+user deny; Nocturne N-3c-1)\n");
+            } else if (bootarg_has("thylacine.captureprobe", 22)) {
+                // N-3c-2: the device-capture (source) authority witness.
+                // nocturne-capture-probe proves the eavesdropping gate on the mic /
+                // line-in RX stream: a SYSTEM reader opens /srv/nocturne-ctl/source
+                // (positive), the driver's periods-captured CLIMBS while it is held
+                // (the deterministic COUNT -- content is silence under audiodev=none,
+                // so no content assertion), a SECOND concurrent open is EBUSY, the
+                // source is ABSENT on /dev/nocturne (never the shared mount), and a
+                // user-principal child is DENIED (the negative arm). Needs
+                // CAP_SET_IDENTITY to stamp the child, so it rides
+                // pouch_smoke_one_caps. The boot must set streams=2 + a capture
+                // stream (tools/test-nocturne-capture.sh). FATAL once selected.
+                static const char cp_name[]   = "/bin/nocturne-capture-probe";
+                static const char cp_expect[] = "NOCTURNE-CAPTURE-PROBE PASS";
+                if (pouch_smoke_one_caps(cp_name, sizeof(cp_name) - 1,
+                                         cp_expect, sizeof(cp_expect) - 1,
+                                         T_CAP_SET_IDENTITY) != 0) {
+                    t_putstr("joey: nocturne-capture-probe FAILED (the device-capture authority; Nocturne N-3c-2)\n");
+                    return 1;
+                }
+                t_putstr("joey: nocturne-capture-probe OK (SYSTEM source capture + single-reader + mount absent + user deny; Nocturne N-3c-2)\n");
+            } else {
+                // POST-PIVOT: bare ramfs names no longer resolve; the ramfs
+                // root is bound at /bin (#58), like /bin/corvus and /bin/login.
+                static const char np_name[]   = "/bin/nocturne-probe";
+                static const char np_expect[] = "NOCTURNE-PROBE PASS";
+                if (pouch_smoke_one(np_name, sizeof(np_name) - 1,
+                                    np_expect, sizeof(np_expect) - 1) != 0) {
+                    t_putstr("joey: nocturne-probe FAILED (the chord did not play; Nocturne N-2a-1)\n");
+                    return 1;
+                }
+                t_putstr("joey: nocturne-probe OK (1 kHz + 2 kHz mixed on two voices; Nocturne N-2a-1)\n");
+            }
+#endif
+        } else {
+            t_putstr("joey: /srv/nocturne absent (no virtio-sound function); skipping\n");
         }
     }
 

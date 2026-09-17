@@ -43,6 +43,27 @@ assert_grep  "$secs" "fork.stratum" "A6 enum: fork. includes fork.stratum"
 assert_ngrep "$secs" "cache"        "A7 enum: fork. excludes cache.*"
 assert_ngrep "$secs" "meta"         "A7 enum: fork. excludes meta"
 
+nsecs="$(manifest_sections network.)"
+assert_grep "$nsecs" "network.duke3d"     "A8 enum: network. includes duke3d (DX-8)"
+assert_grep "$nsecs" "network.tombraider" "A8 enum: network. includes tombraider (DX-8)"
+
+# A9: the network pins are TWO COPIES OF ONE TRUTH -- build.sh fetches with its
+# own literal sha256/url and the manifest records them for forage + the
+# installer. A pin bumped in one place and not the other is exactly the drift
+# this catches: every hash-shaped value + url under network.* must appear
+# verbatim in build.sh. (Sabotage: edit one hex digit in the manifest -> FAIL.)
+for nsec in $nsecs; do
+    for nkey in sha256 pak_sha256 grp_sha256 exe_sha256 url; do
+        nval="$(manifest_get "$nsec" "$nkey")"
+        [[ -n "$nval" ]] || continue
+        if grep -qF -- "$nval" "$REPO_ROOT/tools/build.sh"; then
+            ok "A9 pin: $nsec.$nkey matches build.sh"
+        else
+            bad "A9 pin: $nsec.$nkey NOT in build.sh ($nval) -- manifest/build.sh drift"
+        fi
+    done
+done
+
 # --- B. status + gather via a fixture manifest (isolated to a temp root) ------
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 FIX="$TMP/manifest.toml"
@@ -87,6 +108,14 @@ sha256 = "bbbb"
 feeds = "busybox feed"
 forageable = "download"
 
+[network.game]
+file = "game.zip"
+dir = "game"
+url = "http://127.0.0.1:9/game.zip"
+sha256 = "cccc"
+feeds = "game feed"
+forageable = "auto-at-build"
+
 [remote.clade_llvm]
 path = "clade/llvm-build"
 probe = "clade/stage/bin"
@@ -121,6 +150,15 @@ assert_grep "$out" "\[dry-run\] fork.go: git clone https://example.invalid/go.gi
 # B7/B8: non-automatable inputs INSTRUCT (do not silently no-op)
 assert_grep "$(runf gopls 2>&1)" "no public source"                "B7 instruct: manual names the remedy"
 assert_grep "$(runf llvm 2>&1)"  "source pin for a remotely-built" "B8 instruct: remote-source explains"
+
+# B8b: an auto-at-build input is always "present" to forage (build.sh owns the
+# fetch) and its gather INSTRUCTS rather than downloading (never a silent no-op,
+# never a fetch forage does not own)
+out="$(runf status 2>&1)"
+assert_grep "$out" "network.game[[:space:]]+present" "B8b status: auto-at-build reports present (build.sh fetches it)"
+out="$(FORAGE_DRY=1 runf network.game 2>&1 || true)"
+assert_grep "$out" "fetched automatically at build time" "B8b gather: auto-at-build instructs"
+if [[ -f "$TMP/game/game.zip" ]]; then bad "B8b auto-at-build was downloaded by forage"; else ok "B8b auto-at-build not downloaded by forage"; fi
 
 # B9: unknown target is rejected
 if runf nosuch >/dev/null 2>&1; then bad "B9 unknown target should exit nonzero"; else ok "B9 unknown target rejected"; fi

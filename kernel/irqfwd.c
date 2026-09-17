@@ -18,6 +18,7 @@
 //     zero pending_count (an IRQ that fires between sleep's return
 //     and our zeroing must NOT be lost).
 
+#include <thylacine/pci_irq.h>
 #include <thylacine/dtb.h>                   // F-A1: dtb_pci_intid_is_level
 #include <thylacine/extinction.h>
 #include <thylacine/irqfwd.h>
@@ -30,6 +31,7 @@
 #include <thylacine/smp.h>                  // IPI_RESCHED (P4-Ib R9 F142)
 
 #include "../arch/arm64/gic.h"
+#include "../arch/arm64/gic_msi.h"
 #include "../arch/arm64/timer.h"            // TIMER_INTID_EL1_VIRT
 #include "../arch/arm64/uart.h"
 #include "../mm/slub.h"
@@ -59,6 +61,9 @@
 // memory is negligible.
 
 static bool        g_intid_claimed[GIC_NUM_INTIDS];
+// Permanent dispatch indirection. GIC callbacks never retain a KObj pointer.
+// g_intid_lock guards publication/removal and precedes rendez.lock when pinning.
+static struct KObj_IRQ *g_intid_owner[GIC_NUM_INTIDS];
 static spin_lock_t g_intid_lock = SPIN_LOCK_INIT;
 
 // Try to claim `intid`. Returns true on success (caller now owns it),
@@ -108,6 +113,8 @@ static void intid_release(u32 intid) {
 // future refactor exposes the SGI/PPI range.
 void irqfwd_init(void) {
     irq_state_t s = spin_lock_irqsave(&g_intid_lock);
+    g_intid_claimed[IPI_MSI_FAULT]           = true;     // SGI 14
+    g_intid_claimed[IPI_IRQ_BARRIER]         = true;     // SGI 15
     g_intid_claimed[IPI_RESCHED]             = true;     // SGI 0
     g_intid_claimed[TIMER_INTID_EL1_VIRT]    = true;     // PPI 27 (virtual timer)
     g_intid_claimed[UART_INTID_PL011]        = true;     // A-4c-1: kernel cons RX
@@ -155,56 +162,29 @@ bool kobj_irq_intid_claimed(u32 intid) {
 // blocked waiter. Both lock/unlock + the wakeup are IRQ-context safe.
 
 static void kobj_irq_dispatch(u32 intid, void *arg) {
-    (void)intid;        // intid is the registered IRQ; we trust it
-    struct KObj_IRQ *k = (struct KObj_IRQ *)arg;
-    if (!k || k->magic != KOBJ_IRQ_MAGIC) return;
-
-    // RW-7 R1-F2: the GIC slot holds a RAW, non-refcounted `k`, and
-    // gic_disable_irq does NOT retract an already-acknowledged IRQ that is
-    // mid-dispatch on another CPU -- so a concurrent kobj_irq_free_internal
-    // could kfree(k) while this runs (UAF). Two guards make the free safe:
-    //   - `dying`: a dispatch arriving after teardown began touches *k no
-    //     further (no count, no wake);
-    //   - `in_dispatch`: marks this dispatch in-flight under the lock so the
-    //     freeing CPU spins until our LAST touch of *k (the final unlock
-    //     below, after clearing in_dispatch) has completed before kfree.
-    // At most one dispatch per INTID is in flight (handlers run IRQ-masked,
-    // no nesting; an SPI targets one CPU) so `in_dispatch` is a plain bool.
-    //
-    // Order: increment under r->lock + DROP the lock + then wakeup (which
-    // RE-takes r->lock). Holding the lock through wakeup would deadlock-by-
-    // recursion since wakeup wants the same lock.
-    irq_state_t s = spin_lock_irqsave(&k->rendez.lock);
+    (void)arg;
+    if (intid >= GIC_NUM_INTIDS) return;
+    irq_state_t ds = spin_lock_irqsave(&g_intid_lock);
+    struct KObj_IRQ *k = g_intid_owner[intid];
+    if (!k) { spin_unlock_irqrestore(&g_intid_lock, ds); return; }
+    // Resolve and pin while removal is excluded. The old in-object dying
+    // check could itself dereference freed storage before acquiring its lock.
+    spin_lock(&k->rendez.lock);
     if (k->dying) {
-        spin_unlock_irqrestore(&k->rendez.lock, s);
-        return;             // teardown owns *k now (it already masked the line)
+        spin_unlock(&k->rendez.lock);
+        spin_unlock_irqrestore(&g_intid_lock, ds);
+        return;
     }
-    // F-A1: a LEVEL line (virtio-PCI INTx) stays asserted until the driver acks
-    // the device, so mask it at the GIC HERE -- inside gic_dispatch, before the
-    // exception vector's EOI -- so the still-high line does not immediately
-    // re-fire (an unrecoverable storm) after the EOImode=0 deactivate.
-    // kobj_irq_wait unmasks on re-arm once the driver has acked + re-waits.
-    // gic_disable_irq is a lock-free write-1-to-clear to ICENABLER, safe under
-    // rendez.lock. EDGE keeps the no-mask fast path (an edge latches a pending
-    // bit that survives). k->level is immutable post-create (published before
-    // gic_attach). A dispatch that raced teardown returns above WITHOUT masking:
-    // free_internal already called gic_disable_irq (kobj_irq_free_internal),
-    // so the line is masked either way.
-    if (k->level) gic_disable_irq(k->intid);
-    // RW-7 round-2 F3: saturate at 0xFFFFFFFE so a pathological un-drained count
-    // can never equal KOBJ_IRQ_WAIT_BUSY (0xFFFFFFFF). Drivers handle collapsed
-    // IRQs via used-ring state anyway, so the exact count past the cap is moot.
+    if (k->level) gic_disable_irq(intid);
     if (k->pending_count < 0xFFFFFFFEu) k->pending_count++;
-    k->in_dispatch = true;
-    spin_unlock_irqrestore(&k->rendez.lock, s);
-
+    k->in_dispatch++;
+    spin_unlock(&k->rendez.lock);
+    spin_unlock_irqrestore(&g_intid_lock, ds);
     __atomic_fetch_add(&g_irq_total_fires, 1u, __ATOMIC_RELAXED);
-
     wakeup(&k->rendez);
-
-    s = spin_lock_irqsave(&k->rendez.lock);
-    k->in_dispatch = false;   // LAST touch of *k on this path
-    spin_unlock_irqrestore(&k->rendez.lock, s);
+    irq_state_t rs = spin_lock_irqsave(&k->rendez.lock);
+    k->in_dispatch--; // Last touch; destructor drains under the same lock.
+    spin_unlock_irqrestore(&k->rendez.lock, rs);
 }
 
 // =============================================================================
@@ -212,6 +192,10 @@ static void kobj_irq_dispatch(u32 intid, void *arg) {
 // =============================================================================
 
 struct KObj_IRQ *kobj_irq_create(u32 intid) {
+    // A routed PCI line belongs to its function-scoped domain even before
+    // the first endpoint is created. Numeric routing hints grant no authority.
+    bool pci_level;
+    if (dtb_pci_intid_is_level(intid, &pci_level) || gic_msi_reserved(intid)) return NULL;
     // P4-Ib: claim the INTID before allocating. Pins
     // specs/handles.tla::HwResourceExclusive — two callers asking for
     // the same INTID can't both succeed.
@@ -255,36 +239,17 @@ struct KObj_IRQ *kobj_irq_create(u32 intid) {
         }
     }
 
-    // Register handler + enable the IRQ. gic_attach binds (intid →
-    // dispatch + arg); gic_enable_irq unmasks it on the CPU's
-    // redistributor (for SGIs/PPIs) or distributor (for SPIs).
-    if (!gic_attach(intid, kobj_irq_dispatch, k)) {
-        intid_release(intid);
-        // R9 F152 (P3) close: clobber magic before kfree so any stale
-        // post-free dispatch (impossible here — no fires can route to
-        // k since gic_attach FAILED, but defense for the symmetric
-        // gic_enable failure path below) sees magic=0 in the freed
-        // memory and returns early. Mirrors kobj_irq_free_internal.
-        k->magic = 0;
-        kfree(k);
-        return NULL;
-    }
-    if (!gic_enable_irq(intid)) {
-        // R9 F152 (P3): gic_attach SUCCEEDED here — g_handlers[intid]
-        // now points at (kobj_irq_dispatch, k). If we just kfree(k)
-        // without clearing the handler slot OR clobbering magic, an
-        // in-flight IRQ (unlikely since enable failed; defense) could
-        // dispatch into freed memory and read undefined magic bytes.
-        // gic_attach(intid, NULL, NULL) is the proper unregister but
-        // is currently rejected by gic_attach's NULL-handler guard;
-        // the magic clobber is the active defense.
-        intid_release(intid);
-        k->magic = 0;
-        kfree(k);
+    // Publish a weak owner before enabling, protected against last-unref.
+    // Count it before publication so rollback can use the normal destructor.
+    __atomic_fetch_add(&g_kobj_irq_live, 1u, __ATOMIC_RELAXED);
+    irq_state_t ds = spin_lock_irqsave(&g_intid_lock);
+    g_intid_owner[intid] = k;
+    spin_unlock_irqrestore(&g_intid_lock, ds);
+    if (!gic_attach(intid, kobj_irq_dispatch, NULL) || !gic_enable_irq(intid)) {
+        kobj_irq_unref(k);
         return NULL;
     }
 
-    __atomic_fetch_add(&g_kobj_irq_live, 1u, __ATOMIC_RELAXED);
     return k;
 }
 
@@ -301,37 +266,30 @@ void kobj_irq_ref(struct KObj_IRQ *k) {
 }
 
 static void kobj_irq_free_internal(struct KObj_IRQ *k) {
+    if (k->pci) { pci_irq_free(k); return; }
     if (k->magic != KOBJ_IRQ_MAGIC)
         extinction("kobj_irq_free_internal of corrupted KObj_IRQ");
     if (k->ref != 0)
         extinction("kobj_irq_free_internal with ref > 0");
 
-    // Disable the IRQ first so no more fires arrive.
     gic_disable_irq(k->intid);
-    // Unregister attempt — gic_attach(intid, NULL, NULL) currently
-    // returns false (NULL handler is rejected by the gic API), so the
-    // handler slot retains its kobj_irq_dispatch + arg=k pointer. The
-    // dying-guard + magic-clobber below make any post-free dispatch
-    // touch *k no further. See docs/reference/36-irqfwd.md "stale-fire
-    // safety" for the full lifecycle discussion.
-    gic_attach(k->intid, NULL, NULL);
-
-    // RW-7 R1-F2: gic_disable_irq masks future fires but does NOT retract an
-    // IRQ already acknowledged and mid-dispatch on another CPU -- that
-    // dispatch holds a raw `k` and would UAF once we kfree it. Set `dying`
-    // (under the lock, so a dispatch that takes the lock from here on sees it
-    // and returns without touching *k), then SPIN until any in-flight dispatch
-    // has cleared `in_dispatch` -- its final unlock is its last touch of *k.
-    // Bounded: a single in-flight handler runs IRQ-masked and completes in
-    // microseconds. free_internal runs in process context; the dispatch runs
-    // on a DIFFERENT CPU (IRQ context), so no same-CPU self-deadlock.
+    // Detach the owner under the same lock used by dispatch BEFORE its first
+    // dereference. Keep the permanent GIC callback installed: a late arrival
+    // sees an empty slot, never freed memory. A new owner cannot publish until
+    // intid_release below, after every old dispatch has finished.
+    irq_state_t ds = spin_lock_irqsave(&g_intid_lock);
+    if (g_intid_owner[k->intid] != k) extinction("IRQ owner mismatch on detach");
+    g_intid_owner[k->intid] = NULL;
+    spin_lock(&k->rendez.lock);
+    k->dying = true;
+    spin_unlock(&k->rendez.lock);
+    spin_unlock_irqrestore(&g_intid_lock, ds);
     for (;;) {
-        irq_state_t ds = spin_lock_irqsave(&k->rendez.lock);
-        k->dying = true;
-        bool in_flight = k->in_dispatch;
-        spin_unlock_irqrestore(&k->rendez.lock, ds);
+        irq_state_t rs = spin_lock_irqsave(&k->rendez.lock);
+        u32 in_flight = k->in_dispatch;
+        spin_unlock_irqrestore(&k->rendez.lock, rs);
         if (!in_flight) break;
-        __asm__ __volatile__("yield" ::: "memory");
+        __asm__ volatile("yield" ::: "memory");
     }
 
     // P4-Ib: release the INTID claim so a subsequent kobj_irq_create
@@ -383,6 +341,8 @@ u32 kobj_irq_wait_timed(struct KObj_IRQ *k, u64 timeout_ns) {
     if (!k) return 0;
     if (k->magic != KOBJ_IRQ_MAGIC)
         extinction("kobj_irq_wait of corrupted KObj_IRQ");
+
+    if (k->pci) return KOBJ_IRQ_WAIT_BUSY; // PCI WAIT has a separate ticket ABI
 
     // RW-7 R1-F1: the Rendez is single-waiter -- tsleep() EXTINCTS the kernel
     // on a 2nd concurrent sleeper (sched.c "rendez already has a waiter"). But
@@ -461,3 +421,10 @@ u32 kobj_irq_wait_timed(struct KObj_IRQ *k, u64 timeout_ns) {
 u32 kobj_irq_wait(struct KObj_IRQ *k) {
     return kobj_irq_wait_timed(k, 0);
 }
+
+#ifdef KERNEL_TESTS
+void irqfwd_test_dispatch(u32 intid, void *untrusted_arg);
+void irqfwd_test_dispatch(u32 intid, void *untrusted_arg) {
+    kobj_irq_dispatch(intid, untrusted_arg);
+}
+#endif

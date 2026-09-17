@@ -641,7 +641,9 @@ struct Proc {
     // resumes -- the debugger's deliberate choice), and release -- all under
     // g_proc_table_lock, serialized with debug_owner, so it is a plain bool (no
     // atomic). NOT rfork-inherited (per-slot debug state, like debug_owner /
-    // debug_stop_req). Occupies a tail pad byte @346, so struct Proc stays 352.
+    // debug_stop_req). Occupies a tail pad byte @346 (the exe_path-offset and
+    // sizeof asserts below are the authoritative layout; VIVARIUM's phenotype +
+    // the exe_path/name fields have since grown the total past 352).
     bool               debug_exitkill;
 
     // VIVARIUM (docs/VIVARIUM.md §5.1 + §12; invariant I-43): this Proc's ABI
@@ -661,8 +663,9 @@ struct Proc {
     //
     // rfork-INHERITED (unlike the debug_* slots): a Linux process that forks
     // must produce a Linux child, or the child's first syscall mis-decodes.
-    // Occupies the tail pad byte @347 between debug_exitkill @346 and
-    // shared_map_pages @348, so struct Proc stays 352 bytes.
+    // Occupies the tail pad byte @347 (after debug_exitkill @346); the asserts
+    // below are the authoritative layout -- shared_map_pages has since moved to
+    // AddrSpace and the total has grown past 352.
     u8                 phenotype;
 
     // (LINEAGE L-1: the I-32 FIFTH axis, shared_map_pages, moved to
@@ -2249,10 +2252,14 @@ bool proc_caps_by_stripes(u64 stripes, caps_t *caps_out);
 // VIVARIUM V-4a-0b: `pid_out` reports the matched Proc's pid, feeding
 // srv_peer_info.pid. It rides the SAME alive-gated walk as caps + identity, so
 // a dead/reaped peer fail-closes to 0 -- never a stale pid a server could
-// resolve against a REUSED table entry.
+// resolve against a REUSED table entry. N-3a-3 (NOCTURNE.md 6.8):
+// `console_owner_out` reports whether the matched Proc's session OWNS the
+// console (proc_console_owner_in_session, computed under the same lock),
+// feeding the SRV_PEER_FLAG_CONSOLE_OWNER stamp; fail-closed false on no match.
 bool proc_peer_snapshot_by_stripes(u64 stripes, caps_t *caps_out,
                                    u32 *principal_out, u32 *primary_gid_out,
-                                   bool *renderer_out, int *pid_out);
+                                   bool *renderer_out, int *pid_out,
+                                   bool *console_owner_out);
 
 // =============================================================================
 // A-1a: identity mutation (the single audited write site).

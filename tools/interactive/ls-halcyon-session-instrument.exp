@@ -45,7 +45,13 @@
 # login is drivable over serial exactly as ls-gfx-session; the session's
 # markers ride the kernel diagnostic UART. HVF like the gfx siblings.
 
-set ::env(THYLACINE_ACCEL) hvf
+# Preserve the fast graphics default, with an explicit backend-matrix override.
+# The BOOT step records the actual selection; the wrapper default is not proof.
+set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
+if {$::env(THYLACINE_ACCEL) ni {hvf tcg kvm}} {
+    puts stderr "LS_CI_GFX_ACCEL must be hvf, tcg or kvm"
+    exit 1
+}
 
 source [file join [file dirname [info script]] lib.exp]
 
@@ -351,7 +357,32 @@ if {[catch {exec grep -a -m 1 {halcyond: session tile leaf=[0-9]* spawned pid=} 
 }
 set A [lindex [regexp -inline {leaf=(\d+) spawned} $first] 1]
 if {$A eq ""} { lc_fail "no leaf id in the root tile's spawn line ('$first')" }
-set ha [header_of $A]
+# A pane-count update precedes the CONFIGURE/chrome geometry updates. Drain
+# serial until BOTH latest headers describe disjoint panes; otherwise the old
+# shell column may now point into the welcome's amber links, not its prompt.
+if {[catch {exec grep -a {session tile leaf=.* /bin/halcyon welcome} $transcript} tour]} {
+    lc_fail "no welcome tile spawn line"
+}
+set tour_leaf [lindex [regexp -inline {leaf=(\d+) spawned} $tour] 1]
+set geometry_ready 0
+set geometry_deadline [expr {[clock milliseconds] + 12000}]
+while {[clock milliseconds] < $geometry_deadline} {
+    set ha [header_of $A]
+    set tour_header [header_of $tour_leaf]
+    lassign $ha ax ay aw ah
+    lassign $tour_header tx ty tw th
+    if {$aw > 0 && $tw > 0 && ($ax + $aw <= $tx || $tx + $tw <= $ax || $ay + $ah <= $ty || $ty + $th <= $ay)} {
+        set geometry_ready 1
+        break
+    }
+    expect -timeout 1 {
+        -re {.+} {}
+        eof { lc_fail "EOF waiting for settled prompt geometry" }
+        timeout {}
+    }
+}
+if {!$geometry_ready} { lc_fail "shell and welcome headers never settled into separate panes" }
+lc_step "prompt geometry settled: shell $A at $ha; welcome $tour_leaf at $tour_header"
 set pad_x [expr {int(round(max(20.0, min(48.0, 0.03 * $W))))}]
 set cx [expr {[lindex $ha 0] + $pad_x}]
 set ry0 [expr {[lindex $ha 1] + [lindex $ha 3] + 4}]

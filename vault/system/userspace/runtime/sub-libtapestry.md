@@ -15,7 +15,7 @@ hazards: []
 abis: []
 design: ["docs/TAPESTRY.md"]
 created: 2026-08-04
-updated: 2026-09-05
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -414,3 +414,16 @@ protection -- section 6.5 reads `Super+Q` as the structural act.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)
+
+### Frame intent and native titles
+
+`Surface::intent(FrameIntent::Static | Dynamic)` writes the existing compositor
+intent control. Static is the server default and allows idle throttling;
+Dynamic keeps the frame clock active only while the surface is visible.
+Gallery declares Static; animated clients may toggle intent as playback changes.
+This does not change presentation fences or buffer ownership.
+
+`Surface::surface_ctl("title ...")` updates the hosting pane's tag, which the
+session uses as the native application's header. It must follow successful
+surface creation. It does not create a second title store or confer authority
+over another pane.

@@ -1,0 +1,201 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-gfx-session-image.exp -- the SESSION-path inline-media
+# E2E (I-47, HALCYON.md 14.7.2). Proves the genuinely-new surface the console
+# spike (ls-gfx-inline-view.exp) does not exercise: the PER-PANE routing. A
+# `view /test.png` typed into a session tile reaches THAT tile's transcript via
+# the per-user service /srv/halcyon-<user> + the pane's own token
+# (/env/HALCYON_PLACE), and halcyond injects the raster into the tile it came
+# from.
+#
+# The pipeline, end to end on one boot:
+#   - login -> the per-user compositor (halcyond --session) posts
+#     /srv/halcyon-<user> and mints a per-pane token per tile.
+#   - the root tile's ut runs `view /test.png` (typed over QMP into the focused
+#     tile); view reads its pane's /env/HALCYON_PLACE, decodes the PNG in the
+#     sacrificial process, and writes the inlinewire place-request to
+#     /srv/halcyon-<user>/<hex(token)>/place.
+#   - halcyond validates the token at the walk, accepts the connection only from
+#     the session's own user, accumulates + validates the payload, and routes the
+#     completed raster to the tile the token names: the serial witness
+#     "halcyond: session inline leaf=N 640x400" (my new drain log).
+#   - the pixel proof: a screendump delta shows the decoded image painted into
+#     the composited tile (the cartoon::Op::Image render, in a session tile).
+#
+# view's own "placed inline" line rides the tile's pts (pixels, not serial), so
+# the serial witness is halcyond's session-inline drain log -- guest-emitted and
+# success-specific (it fires only when a completed raster injects), never the
+# harness. A silent channel failure prints no witness and the E2E fails.
+#
+# GATED ON THE SESSION LEVER (the ls-gfx-session precedent): the pool carries
+# /lib/halcyon/session = "on" only under THYLACINE_HALCYON_SESSION=1, and the
+# widened bake (build.sh) puts /test.png in a session build too. On a default
+# image login spawns ut and this scenario SKIPs cleanly.
+
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+set scen [file dirname [info script]]
+
+# The screendump + non-ground-pixel helpers (the ls-gfx-inline-view idiom; these
+# are per-scenario procs, not lib.exp).
+proc region {png args} {
+    global scen
+    return [exec python3 $scen/gfx_region.py $png {*}$args]
+}
+proc dump {out} {
+    global repo qmp
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} err]} { return $err }
+    return ""
+}
+
+lc_boot
+
+global lc_boot_timeout timeout
+set timeout $lc_boot_timeout
+expect {
+    -ex "Thylacine login: " { lc_step "login prompt" }
+    -re {EXTINCTION:}       { lc_extinction_fail "extinction before login prompt" }
+    timeout                 { lc_fail "no login prompt within ${lc_boot_timeout}s" }
+    eof                     { lc_fail "qemu exited before login prompt" }
+}
+lc_raw_send "michael\r" "login user"
+expect {
+    -ex "password: "  { lc_step "password prompt" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction at password prompt" }
+    timeout           { lc_fail "no password prompt (username not received?)" }
+    eof               { lc_fail "qemu exited at password prompt" }
+}
+lc_raw_send "correct-horse-battery-staple-v1\r" "login password"
+
+# DISCRIMINATE: the session lever (proceed) vs a default image (SKIP).
+expect {
+    -ex "login: session compositor (halcyond) spawned" {
+        lc_step "session path taken (lever image)"
+    }
+    -ex "Thylacine textual shell" {
+        puts "\nLS-CI SKIP: default (ut) image -- the session-path inline-media\
+ channel needs THYLACINE_HALCYON_SESSION=1"
+        lc_quit
+        exit 77
+    }
+    -ex "login incorrect"  { lc_fail "auth rejected for michael" }
+    -re {EXTINCTION:}      { lc_extinction_fail "extinction during login/session spawn" }
+    timeout                { lc_fail "neither session nor ut path within ${lc_boot_timeout}s" }
+    eof                    { lc_fail "qemu exited during login" }
+}
+
+# The per-user place service posts on the session's own principal.
+expect {
+    -re {halcyond: inline-media service /srv/halcyon-([^\s]+)} {
+        lc_step "the session posted its inline-media service (/srv/halcyon-$expect_out(1,string))"
+    }
+    -re {halcyond: inline-media service unavailable} {
+        lc_fail "the session could not post its inline-media service (user/MAY_POST_SERVICE?)"
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction before the inline-media service posted" }
+    timeout { lc_fail "the session never posted its inline-media service" }
+    eof     { lc_fail "qemu exited before the inline-media service posted" }
+}
+
+# The root tile + the first successful present.
+set A ""
+expect {
+    -re {halcyond: session tile leaf=([0-9]+) spawned} {
+        set A $expect_out(1,string)
+        lc_step "the root session tile spawned (leaf $A)"
+    }
+    -re {halcyond: session tile leaf=[0-9]+ spawn failed} { lc_fail "the root session tile failed to spawn" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction before the root tile spawned" }
+    timeout { lc_fail "the root session tile never spawned" }
+    eof     { lc_fail "qemu exited before the root tile spawned" }
+}
+set W 0
+set H 0
+expect {
+    -re {halcyond: session up ([0-9]+)x([0-9]+) px} {
+        set W $expect_out(1,string)
+        set H $expect_out(2,string)
+        lc_step "the compositor presented (${W}x${H})"
+    }
+    -re {halcyond: FAIL session} { lc_fail "halcyond --session failed to present" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction during session bringup" }
+    timeout { lc_fail "halcyond never presented (no successful present)" }
+    eof     { lc_fail "qemu exited during session bringup" }
+}
+if {$W == 0} { lc_fail "no display dimensions from the session-up line" }
+expect {
+    -ex "halcyond: session tile ingest live" { lc_step "the root tile ingested its kaua-term's records (ut is at a prompt)" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction before the root tile ingested" }
+    timeout { lc_fail "the root tile never ingested (ut did not come up in the tile)" }
+    eof     { lc_fail "qemu exited before the root tile ingested" }
+}
+
+# Let the first-login welcome settle before typing. The welcome hosts a tour tile
+# beside the shell and re-homes focus; after ingest-live (above) the shell is at a
+# prompt, and a settle covers the tour + the focus re-home. `view` is typed into
+# whichever tile is focused (any tile has its own /env/HALCYON_PLACE), so its
+# raster routes to that tile -- the witness matches any leaf, not specifically A.
+# (focus->pane markers arrive BEFORE ingest-live, so they cannot be waited on
+# here without the ingest-live expect above consuming them first.)
+after 8000
+
+# Baseline: non-ground pixels before the image (the ground is the pre-dump's
+# dominant colour -- theme-independent; the chrome/status are in both dumps and
+# cancel, isolating the image, the ls-gfx-inline-view idiom).
+if {[dump /tmp/ls-gfx-session-image-pre.png] ne ""} { lc_fail "pre-view screendump failed (harness, not the guest)" }
+lassign [region /tmp/ls-gfx-session-image-pre.png 0 0 $W $H] _ _ gr gg gb
+lassign [region /tmp/ls-gfx-session-image-pre.png 0 0 $W $H $gr $gg $gb] off_pre tot_pre
+lc_step "session image: ground ($gr,$gg,$gb); baseline $off_pre/$tot_pre non-ground px"
+
+# THE E2E: `view /test.png` typed into the focused session tile. view reads its
+# pane's /env/HALCYON_PLACE, decodes, and writes the place-request to the pane's
+# token endpoint on /srv/halcyon-<user>.
+after 800
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp "view /test.png\n"} err]} {
+    lc_fail "qmp-sendtext view failed: $err"
+}
+
+# The routing + injection witness: halcyond routed the raster to the tile the
+# token named and injected it. Success-specific + serial (guest-emitted), so a
+# direct expect matches it whether it is already buffered or still arriving.
+set leaf ""
+set timeout 60
+expect {
+    -re {halcyond: session inline leaf=([0-9]+) 640x400} {
+        set leaf $expect_out(1,string)
+    }
+    -re {halcyond: session inline leaf=[0-9]+ REFUSED} {
+        lc_fail "the 640x400 raster was REFUSED by the per-pane budget (unexpected in a\
+ lightly-loaded session -- the inject-time F1 check or the tile share is wrong)"
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction during the inline view" }
+    timeout {
+        lc_fail "no 'halcyond: session inline leaf=N 640x400' witness after `view /test.png` --\
+ the place-request never routed+injected (the pane token, the walk validation, the peer\
+ gate, or the accumulate)"
+    }
+    eof { lc_fail "qemu exited during the inline view" }
+}
+lc_pass "session image: view placed + halcyond routed the 640x400 raster to tile $leaf (I-47 session-path pipeline end to end)"
+
+# The pixel proof: the decoded image painted into the composited tile. A tile is
+# a fraction of the display, so the letterboxed 640x400 card adds far more than
+# this floor while a broken render adds ~0.
+after 1000
+if {[dump /tmp/ls-gfx-session-image-post.png] ne ""} { lc_fail "post-view screendump failed (harness, not the guest)" }
+lassign [region /tmp/ls-gfx-session-image-post.png 0 0 $W $H $gr $gg $gb] off_post tot_post
+set delta [expr {$off_post - $off_pre}]
+lc_step "session image: post $off_post/$tot_post non-ground px (delta +$delta)"
+if {$delta < 3000} {
+    lc_fail "only +$delta non-ground px after view -- the decoded image did not paint into the session tile"
+}
+lc_pass "session image: the decoded image is on the screen in a composited tile (+$delta non-ground px)"
+
+# Preserve the witness image for review (the operator's screenshot).
+catch {file copy -force /tmp/ls-gfx-session-image-post.png $repo/build/ls-gfx-session-image.png}
+lc_step "session image: witness image saved to build/ls-gfx-session-image.png"
+
+lc_quit

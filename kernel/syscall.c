@@ -28,6 +28,7 @@
 #include <thylacine/handle.h>
 #include <thylacine/image.h>           // D-3: the FILE mmap arm shares exec's Image cache
 #include <thylacine/irqfwd.h>
+#include <thylacine/pci_irq.h>
 #include <thylacine/loom.h>
 #include <thylacine/mmio_handle.h>
 #include <thylacine/notes.h>
@@ -666,7 +667,9 @@ int hostmem_resolve_subrange(const struct KObj_PCI *k, u64 shmid, u64 offset,
         if (bar >= PCI_BAR_COUNT || !k->bars[bar].present)      return -1;  // malformed
         if (offset > k->shm[s].length)                          return -1;  // OOB start
         if (length > k->shm[s].length - offset)                 return -1;  // OOB extent
-        *base_pa_out = k->bars[bar].pa + k->shm[s].offset + offset;
+        u64 bar_offset = k->shm[s].offset + offset;
+        if (bar_offset < offset || !kobj_pci_user_range(k, bar, bar_offset, length)) return -1;
+        *base_pa_out = k->bars[bar].pa + bar_offset;
         return 0;
     }
     return -1;   // no window with this shmid
@@ -1141,7 +1144,9 @@ s64 sys_pci_claim_handler(u64 virtio_device_id, u64 a1) {
 // rejected -- AArch64 has no W-only AP), resolves bar_index -> the BAR's
 // KObj_MMIO, wraps it in a BURROW_TYPE_MMIO Burrow, installs the VMA under
 // p->vma_lock, and drops the construction ref. Returns 0 / -1.
-s64 sys_pci_map_bar_handler(u64 hraw, u64 vaddr, u64 bar_index, u64 prot_raw) {
+static s64 pci_map_range(u64 hraw, u64 vaddr, u64 bar_index, u64 prot_raw,
+                         u64 offset, u64 length, bool whole_bar) {
+    if (hraw >= PROC_HANDLE_MAX) return -1;
     struct Thread *t = current_thread();
     if (!t)                                          return -1;
     struct Proc *p = t->proc;
@@ -1162,6 +1167,7 @@ s64 sys_pci_map_bar_handler(u64 hraw, u64 vaddr, u64 bar_index, u64 prot_raw) {
 
     // Bound prot by the handle rights; reject EXEC and the W-without-R construct
     // (identical to sys_mmio_map -- device memory, no W-only AP encoding).
+    if (prot_raw > 0xffffffffull) { handle_put(&hh); return -1; }
     u32 prot = (u32)prot_raw;
     if (prot == 0)                                   { handle_put(&hh); return -1; }
     if (prot & ~(u32)(VMA_PROT_READ | VMA_PROT_WRITE)) { handle_put(&hh); return -1; }
@@ -1182,7 +1188,11 @@ s64 sys_pci_map_bar_handler(u64 hraw, u64 vaddr, u64 bar_index, u64 prot_raw) {
     if (!km)                              { handle_put(&hh); return -1; }
     if (km->magic != KOBJ_MMIO_MAGIC)     { handle_put(&hh); return -1; }
 
-    struct Burrow *b = burrow_create_mmio(km);
+    if (whole_bar) length = km->size;
+    if (!kobj_pci_user_range(k, (u32)bar_index, offset, length)) {
+        handle_put(&hh); return -1;
+    }
+    struct Burrow *b = burrow_create_pci_mmio(k, (u32)bar_index, offset, length);
     if (!b)                               { handle_put(&hh); return -1; }
 
     // burrow_map walks + splices p->as->vmas, so it holds p->vma_lock (the #713
@@ -1190,7 +1200,7 @@ s64 sys_pci_map_bar_handler(u64 hraw, u64 vaddr, u64 bar_index, u64 prot_raw) {
     // full decoded BAR size; the user maps the whole BAR and indexes the
     // VIRTIO_PCI_CAP regions within it.
     spin_lock(&p->as->lock);
-    int rc = burrow_map(p, b, vaddr, km->size, prot);
+    int rc = burrow_map(p, b, vaddr, length, prot);
     if (rc < 0) {
         burrow_unref(b);
         spin_unlock(&p->as->lock);
@@ -1201,6 +1211,40 @@ s64 sys_pci_map_bar_handler(u64 hraw, u64 vaddr, u64 bar_index, u64 prot_raw) {
     spin_unlock(&p->as->lock);
     handle_put(&hh);
     return 0;
+}
+
+// The original four-argument syscall retains its ABI; a protected BAR now
+// fails closed. Do not read unused argument registers from old callers.
+s64 sys_pci_map_bar_handler(u64 hraw, u64 vaddr, u64 bar_index, u64 prot_raw) {
+    return pci_map_range(hraw, vaddr, bar_index, prot_raw, 0, 0, true);
+}
+
+static s64 sys_pci_map_window_handler(u64 hraw, u64 vaddr, u64 bar, u64 prot,
+                                     u64 offset, u64 length) {
+    return pci_map_range(hraw, vaddr, bar, prot, offset, length, false);
+}
+
+static s64 sys_pci_windows_handler(u64 hraw, u64 out_va, u64 capacity) {
+    if (hraw >= PROC_HANDLE_MAX) return -1;
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) return -1;
+    struct Handle hh;
+    if (handle_get(t->proc, (hidx_t)hraw, &hh) < 0) return -1;
+    if (hh.kind != KOBJ_PCI || !(hh.rights & RIGHT_READ)) {
+        handle_put(&hh); return -1;
+    }
+    // Every emitted record explicitly initializes its padding. The unused
+    // tail is neither read nor copied. Never truncate a list silently.
+    struct pci_map_window windows[PCI_MAP_WINDOW_MAX];
+    u32 n = kobj_pci_map_windows((const struct KObj_PCI *)hh.obj, windows);
+    handle_put(&hh);
+    if (capacity < n) return -1;
+    u64 bytes = n * sizeof(windows[0]);
+    if (bytes && !sys_validate_user_buf(out_va, bytes)) return -1;
+    const u8 *src = (const u8 *)windows;
+    for (u64 i = 0; i < bytes; i++)
+        if (uaccess_store_u8(out_va + i, src[i]) != 0) return -1;
+    return n;
 }
 
 // =============================================================================
@@ -1264,6 +1308,79 @@ s64 sys_pci_info_handler(u64 hraw, u64 info_va) {
     }
     handle_put(&hh);
     return 0;
+}
+
+// PCI IRQ authority comes from an owned writable PCI handle, never a raw
+// INTID allowance. Pin the parent across construction and recheck revocation
+// at handle publication through the existing allowance commit primitive.
+static s64 sys_pci_irq_create_handler(u64 hraw, u64 mode, u64 ordinal) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc || hraw >= PROC_HANDLE_MAX || mode > 0xffffffffull || ordinal > 0xffffffffull)
+        return -T_E_INVAL;
+    struct Proc *p = t->proc;
+    if (!(__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_HW_CREATE)) return -T_E_PERM;
+    struct Handle hh;
+    if (handle_get(p, (hidx_t)hraw, &hh) < 0) return -T_E_BADF;
+    if (hh.kind != KOBJ_PCI || !(hh.rights & RIGHT_WRITE)) {
+        handle_put(&hh); return -T_E_ACCES;
+    }
+    struct KObj_PCI *pci = hh.obj;
+    if (!allowance_permits(p, HW_RES_PCI, PCI_BDF_PACK(pci->bus, pci->dev, pci->fn), 0)) {
+        handle_put(&hh); return -T_E_PERM;
+    }
+    int error;
+    struct KObj_IRQ *irq = pci_irq_create(pci, (u32)mode, (u32)ordinal, &error);
+    handle_put(&hh);
+    if (!irq) return error;
+    hidx_t h = allowance_handle_alloc(p, KOBJ_IRQ, RIGHT_READ | RIGHT_WRITE | RIGHT_SIGNAL, irq);
+    if (h < 0) { kobj_irq_unref(irq); return -T_E_NOMEM; }
+    return h;
+}
+
+static s64 sys_pci_irq_op(u64 op, u64 hraw, u64 a1, u64 a2) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc || hraw >= PROC_HANDLE_MAX) return -T_E_INVAL;
+    struct Handle hh;
+    if (handle_get(t->proc, (hidx_t)hraw, &hh) < 0) return -T_E_BADF;
+    rights_t needed = op == SYS_PCI_IRQ_WAIT ? RIGHT_SIGNAL :
+                      op == SYS_PCI_IRQ_INFO ? RIGHT_READ : RIGHT_WRITE;
+    if (hh.kind != KOBJ_IRQ || !(hh.rights & needed) || !((struct KObj_IRQ *)hh.obj)->pci) {
+        handle_put(&hh); return -T_E_ACCES;
+    }
+    struct KObj_IRQ *irq = hh.obj;
+    s64 rc;
+    switch (op) {
+    case SYS_PCI_IRQ_ARM: rc = pci_irq_arm(irq); break;
+    case SYS_PCI_IRQ_COMPLETE: rc = pci_irq_complete(irq, a1, a2); break;
+    case SYS_PCI_IRQ_DISABLE: rc = pci_irq_disable(irq); break;
+    case SYS_PCI_IRQ_WAIT: {
+        struct pci_irq_event event;
+        if (!sys_validate_user_buf(a2, sizeof(event))) { rc = -T_E_FAULT; break; }
+        rc = pci_irq_wait(irq, a1, &event);
+        if (rc == 1) {
+            const u8 *src = (const u8 *)&event;
+            for (u64 i = 0; i < sizeof(event); i++)
+                if (uaccess_store_u8(a2 + i, src[i]) != 0) { rc = -T_E_FAULT; break; }
+            // No event was consumed. WAIT can replay it after a copy fault;
+            // only COMPLETE spends the generation/sequence ticket.
+        }
+        break;
+    }
+    case SYS_PCI_IRQ_INFO: {
+        struct pci_irq_info info;
+        if (!sys_validate_user_buf(a1, sizeof(info))) { rc = -T_E_FAULT; break; }
+        rc = pci_irq_get_info(irq, &info);
+        if (!rc) {
+            const u8 *src = (const u8 *)&info;
+            for (u64 i = 0; i < sizeof(info); i++)
+                if (uaccess_store_u8(a1 + i, src[i]) != 0) { rc = -T_E_FAULT; break; }
+        }
+        break;
+    }
+    default: rc = -T_E_INVAL; break;
+    }
+    handle_put(&hh);
+    return rc;
 }
 
 // =============================================================================
@@ -2990,13 +3107,10 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
         u32 omode_dev = (u32)(omode_raw & ~(u64)SYS_WALK_OPEN_NOFOLLOW);
         struct Spoor *opened = nc->dev->open(nc, (int)omode_dev);
         if (!opened) {
+            // Read before clunk frees the private error. Other Devs retain EIO.
+            s64 open_err = dev9p_open_errno(nc);
             spoor_clunk(nc);
-            // #80 seam: Dev.open returns Spoor* with no errno channel -- the
-            // same shape that forced #99's create_errno side-channel. Until it
-            // grows one, a failed open is EIO. Reachable causes today are a
-            // dev9p Tlopen refusal and a devsrv connect failure; the walk
-            // already succeeded, so this is never "no such file".
-            return -T_E_IO;
+            return open_err == -1 ? -T_E_IO : open_err;
         }
         if (opened != nc) {
             // #66 (audit F2): transplant the walked name onto the connection
@@ -10314,9 +10428,11 @@ int sys_srv_peer_for_proc(struct Proc *p, hidx_t conn_h,
     u32    peer_gid       = GID_NONE;
     bool   peer_renderer  = false;
     int    peer_pid       = 0;
+    bool   peer_owner     = false;
     bool   peer_alive = proc_peer_snapshot_by_stripes(peer_stripes, &peer_caps,
                                                       &peer_principal, &peer_gid,
-                                                      &peer_renderer, &peer_pid);
+                                                      &peer_renderer, &peer_pid,
+                                                      &peer_owner);
 
     out->stripes      = peer_stripes;
     out->caps         = peer_alive ? (u64)peer_caps : 0u;
@@ -10326,10 +10442,14 @@ int sys_srv_peer_for_proc(struct Proc *p, hidx_t conn_h,
     // NONE (the SrvConn captures only stripes + console immutably).
     out->principal_id = peer_alive ? peer_principal : PRINCIPAL_NONE;
     out->primary_gid  = peer_alive ? peer_gid       : GID_NONE;
-    // cfg-3: the renderer-role stamp rides the same alive-gated walk as
-    // caps — a dead/reaped peer fail-closes to 0 (never a stale grant).
-    out->flags        = (peer_alive && peer_renderer)
-                            ? SRV_PEER_FLAG_CONSOLE_RENDERER : 0u;
+    // cfg-3 + N-3a-3: the renderer-role and console-owner stamps ride the same
+    // alive-gated walk as caps — a dead/reaped peer fail-closes the whole flags
+    // word to 0 (never a stale grant). NOCTURNE.md 6.8 reads CONSOLE_OWNER for
+    // the sink-authority "person at the keyboard" axis.
+    out->flags        = (peer_alive && peer_renderer
+                             ? SRV_PEER_FLAG_CONSOLE_RENDERER : 0u)
+                      | (peer_alive && peer_owner
+                             ? SRV_PEER_FLAG_CONSOLE_OWNER : 0u);
     // V-4a-0b: the peer's pid, same alive gate as caps/identity -- a dead peer
     // reports 0, never a pid a REUSED table entry now owns.
     out->pid          = peer_alive ? (u32)peer_pid : 0u;
@@ -14421,6 +14541,23 @@ void syscall_dispatch(struct exception_context *ctx) {
                                                     ctx->regs[3]);
         return;
 
+    case SYS_PCI_IRQ_CREATE:
+        ctx->regs[0] = (u64)sys_pci_irq_create_handler(ctx->regs[0], ctx->regs[1], ctx->regs[2]);
+        return;
+    case SYS_PCI_IRQ_ARM:
+    case SYS_PCI_IRQ_WAIT:
+    case SYS_PCI_IRQ_COMPLETE:
+    case SYS_PCI_IRQ_DISABLE:
+    case SYS_PCI_IRQ_INFO:
+        ctx->regs[0] = (u64)sys_pci_irq_op(ctx->regs[8], ctx->regs[0], ctx->regs[1], ctx->regs[2]);
+        return;
+    case SYS_PCI_MAP_WINDOW:
+        ctx->regs[0] = (u64)sys_pci_map_window_handler(ctx->regs[0], ctx->regs[1],
+                            ctx->regs[2], ctx->regs[3], ctx->regs[4], ctx->regs[5]);
+        return;
+    case SYS_PCI_WINDOWS:
+        ctx->regs[0] = (u64)sys_pci_windows_handler(ctx->regs[0], ctx->regs[1], ctx->regs[2]);
+        return;
     case SYS_PCI_INFO:
         ctx->regs[0] = (u64)sys_pci_info_handler(ctx->regs[0],
                                                  ctx->regs[1]);

@@ -525,6 +525,7 @@ Cannot sensibly be external — they modify the calling process's namespace, cap
 - `rfork` — `rfork [FLAGS]` — explicit fork with namespace-control flags.
 - `cap` — `cap [ls|get|drop]` — inspect or drop capabilities held by the current process.
 - `note` — `note [send|list|wait] [PID] [NAME] [BODY]` — send a note, list pending notes, wait for one.
+- `abdicate` — lay down an imperium sub-shell early (the Roman *abdicatio*; IM-4). Exits the shell iff it is a legate member — the kernel's `/proc/<pid>/imperium` reports a nonzero scope — which tears down the propagated legate subtree (I-25). In an ordinary shell it reports "not under an imperium scope" and does nothing. A builtin (not external) because only the shell process can end its own scope; see `docs/IMPERIUM-DESIGN.md` §6 + §11.6. The `imperium` tool itself is external (`/bin/imperium`), not a builtin: it renders no authorization surface, so it need not be trusted shell state.
 
 These are the user-facing surface of Thylacine's per-process namespace + capability + notes model. Without them as builtins, users would have to write Rust or C to compose namespaces; with them, namespace composition is a one-line shell builtin.
 

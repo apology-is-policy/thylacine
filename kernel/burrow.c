@@ -173,6 +173,12 @@ struct Burrow *burrow_create_anon(size_t size) {
 // handle_close. handle_count=1 is the "construction reference" pattern
 // (mirrors burrow_create_anon).
 struct Burrow *burrow_create_mmio(struct KObj_MMIO *kobj_mmio) {
+    if (!kobj_mmio) return NULL;
+    return burrow_create_mmio_range(kobj_mmio, 0, kobj_mmio->size);
+}
+
+struct Burrow *burrow_create_mmio_range(struct KObj_MMIO *kobj_mmio,
+                                       u64 offset, size_t length) {
     if (!g_vmo_cache) extinction("burrow_create_mmio before burrow_init");
     if (!kobj_mmio) return NULL;
     // Magic check defends against the caller passing a freed pointer.
@@ -180,7 +186,8 @@ struct Burrow *burrow_create_mmio(struct KObj_MMIO *kobj_mmio) {
     // below doesn't bump a corrupted ref.
     if (kobj_mmio->magic != KOBJ_MMIO_MAGIC)
         extinction("burrow_create_mmio: kobj_mmio has bad magic (UAF?)");
-    if (kobj_mmio->size == 0) return NULL;     // defensive; kobj_mmio_create rejects
+    if (!length || ((offset | length) & (PAGE_SIZE - 1u)) ||
+        offset > kobj_mmio->size || length > kobj_mmio->size - offset) return NULL;
 
     struct Burrow *v = kmem_cache_alloc(g_vmo_cache, KP_ZERO);
     if (!v) return NULL;
@@ -191,16 +198,29 @@ struct Burrow *burrow_create_mmio(struct KObj_MMIO *kobj_mmio) {
 
     v->magic         = VMO_MAGIC;
     v->type          = BURROW_TYPE_MMIO;
-    v->size          = kobj_mmio->size;
-    v->page_count    = kobj_mmio->size / PAGE_SIZE;
+    v->size          = length;
+    v->page_count    = length / PAGE_SIZE;
     v->handle_count  = 1;            // construction reference
     v->mapping_count = 0;
     v->pages         = NULL;         // MMIO: no struct page backing
     v->order         = 0;
     v->kobj_mmio     = kobj_mmio;
-    v->pa            = kobj_mmio->pa;
+    v->pa            = kobj_mmio->pa + offset;
     g_vmo_created++;
     return v;
+}
+
+// A PCI mapping retains both the function and its whole BAR claim. This
+// prevents close-and-reclaim from reassigning hardware behind a live VMA.
+struct Burrow *burrow_create_pci_mmio(struct KObj_PCI *pci, u32 bar,
+                                     u64 offset, size_t length) {
+    if (!kobj_pci_user_range(pci, bar, offset, length)) return NULL;
+    struct KObj_MMIO *mmio = kobj_pci_bar_mmio(pci, bar);
+    struct Burrow *b = burrow_create_mmio_range(mmio, offset, length);
+    if (!b) return NULL;
+    kobj_pci_ref(pci);
+    b->kobj_pci = pci;
+    return b;
 }
 
 // P4-Ic5b1b: Wrap a KObj_DMA in a Burrow. Holds a reference on the
@@ -254,6 +274,15 @@ struct Burrow *burrow_create_hostmem(struct KObj_PCI *kobj_pci, u64 pa,
     if (len == 0) return NULL;
     // Page-aligned base + length: the fault arm adds page-aligned offsets.
     if ((pa & (PAGE_SIZE - 1)) || (len & (PAGE_SIZE - 1))) return NULL;
+    bool allowed = false;
+    for (u32 bar = 0; bar < PCI_BAR_COUNT; bar++) {
+        if (!kobj_pci->bars[bar].present || pa < kobj_pci->bars[bar].pa) continue;
+        if (kobj_pci_user_range(kobj_pci, bar, pa - kobj_pci->bars[bar].pa, len)) {
+            allowed = true;
+            break;
+        }
+    }
+    if (!allowed) return NULL;
     // Host-visible memory is Normal -- cacheable WB or non-cacheable NC. Device
     // and Write-Through are never correct here; reject rather than store a
     // nonsense index the fault arm would then install.
@@ -638,6 +667,10 @@ static void burrow_free_internal(struct Burrow *v) {
         // alive and only the Burrow goes away.
         kobj_mmio_unref(v->kobj_mmio);
         v->kobj_mmio = NULL;
+        if (v->kobj_pci) {
+            kobj_pci_unref(v->kobj_pci);
+            v->kobj_pci = NULL;
+        }
         break;
     case BURROW_TYPE_DMA:
         if (!v->kobj_dma)

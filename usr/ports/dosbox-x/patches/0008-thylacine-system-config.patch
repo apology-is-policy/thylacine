@@ -1,0 +1,48 @@
+Thylacine DX-8: a system-wide base-layer config at /lib/dosbox-x/dosbox-x.conf.
+
+Upstream DOSBox-X has no system-wide config location: on a plain launch it
+searches the current directory, the executable's directory, then the per-user
+XDG directory, loads the FIRST hit exclusively, and on a first launch GENERATES
+the per-user file from the built-in defaults (every key written explicitly).
+So a build-time default -- autolock=true, core=dynamic_rec, the cycle preset --
+had nowhere to live: whatever the image wanted, the user's generated file pinned
+the built-in defaults over it forever after.
+
+This adds one Thylacine-only step at the top of the resolution: parse
+/lib/dosbox-x/dosbox-x.conf (baked by tools/build.sh, SYSTEM-owned, read-only)
+as a BASE LAYER, then clear the loaded-file list so the upstream flow runs
+byte-for-byte as before. Consequences, in order:
+  - a first launch's generated per-user config inherits the system values
+    (PrintConfig writes the current values), so the user's file starts sane;
+  - the per-user config, a cwd/exe-dir dosbox-x.conf, -conf files and -set
+    all still override it (they are parsed later, values-last-wins);
+  - -defaultconf ignores it like every other config file;
+  - the line "CONFIG: Loaded system config: ..." is the gate witness.
+
+--- a/src/gui/sdlmain.cpp
++++ b/src/gui/sdlmain.cpp
+@@ -8589,6 +8589,24 @@
+     bool default_config = false;
+ 
+     struct stat st;
++
++#if defined(__thylacine__)
++    /* Thylacine: a system-wide base layer. /lib/dosbox-x/dosbox-x.conf is baked
++     * by the build (SYSTEM-owned, read-only) and parsed FIRST, so its values sit
++     * under everything the unmodified search below loads on top of them: the
++     * per-user config (which a first launch GENERATES from these values via
++     * PrintConfig), a dosbox-x.conf in the current or exe directory, -conf files,
++     * -set. Only the values carry over -- the loaded-file list is cleared so the
++     * upstream flow (probe, create-on-first-run, search, "Loaded config file")
++     * runs exactly as before. -defaultconf skips it like every other file. */
++    if (!control->opt_defaultconf) {
++        const char *sysconf = "/lib/dosbox-x/dosbox-x.conf";
++        if (control->ParseConfigFile(sysconf)) {
++            LOG_MSG("CONFIG: Loaded system config: %s", sysconf);
++            control->configfiles.clear();
++        }
++    }
++#endif
+ 
+     control->ParseConfigFile(config_combined.c_str());
+     if(!control->configfiles.size() && config_combined.size()) {

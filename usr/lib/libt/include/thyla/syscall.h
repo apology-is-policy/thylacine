@@ -131,6 +131,14 @@ enum {
     T_SYS_TTY_ACQUIRE       = 95,  // PTY-1d: controlling-terminal acquisition
     T_SYS_TTY_SET_FG        = 96,  // PTY-1d: tcsetpgrp
     T_SYS_TTY_GET_FG        = 97,  // PTY-1d: tcgetpgrp
+    T_SYS_PCI_IRQ_CREATE = 115,
+    T_SYS_PCI_IRQ_ARM = 116,
+    T_SYS_PCI_IRQ_WAIT = 117,
+    T_SYS_PCI_IRQ_COMPLETE = 118,
+    T_SYS_PCI_IRQ_DISABLE = 119,
+    T_SYS_PCI_IRQ_INFO = 120,
+    T_SYS_PCI_MAP_WINDOW    = 113,
+    T_SYS_PCI_WINDOWS       = 114,
     T_SYS_TTY_CONT          = 98,  // PTY-1f: fg/bg resume of a job-stopped pgrp
 };
 
@@ -1560,6 +1568,76 @@ static inline long t_pci_claim(unsigned long virtio_device_id) {
         : "r"(x8)
         : "memory", "cc"
     );
+    return x0;
+}
+
+struct t_pci_irq_event {
+    unsigned long generation, sequence;
+    unsigned int count, reason;
+    unsigned long retry_after_ns;
+};
+struct t_pci_irq_info {
+    unsigned long generation, deliveries, retries, cooldowns;
+    unsigned int mode, state, table_index, reserved;
+};
+_Static_assert(sizeof(struct t_pci_irq_event) == 32, "PCI IRQ event ABI");
+_Static_assert(sizeof(struct t_pci_irq_info) == 48, "PCI IRQ info ABI");
+#define T_PCI_IRQ_INTX 1
+#define T_PCI_IRQ_MSIX 2
+__attribute__((always_inline))
+static inline long t_pci_irq_call(long nr, long h, unsigned long a1, unsigned long a2) {
+    register long x0 __asm__("x0") = h;
+    register unsigned long x1 __asm__("x1") = a1;
+    register unsigned long x2 __asm__("x2") = a2;
+    register long x8 __asm__("x8") = nr;
+    __asm__ volatile ("svc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x8) : "memory", "cc");
+    return x0;
+}
+static inline long t_pci_irq_create(long pci, unsigned int mode, unsigned int ordinal) {
+    return t_pci_irq_call(T_SYS_PCI_IRQ_CREATE, pci, mode, ordinal);
+}
+static inline long t_pci_irq_arm(long h) { return t_pci_irq_call(T_SYS_PCI_IRQ_ARM, h, 0, 0); }
+static inline long t_pci_irq_disable(long h) { return t_pci_irq_call(T_SYS_PCI_IRQ_DISABLE, h, 0, 0); }
+static inline long t_pci_irq_complete(long h, unsigned long generation, unsigned long sequence) {
+    return t_pci_irq_call(T_SYS_PCI_IRQ_COMPLETE, h, generation, sequence);
+}
+static inline long t_pci_irq_wait(long h, unsigned long timeout_ns, struct t_pci_irq_event *event) {
+    return t_pci_irq_call(T_SYS_PCI_IRQ_WAIT, h, timeout_ns, (unsigned long)event);
+}
+static inline long t_pci_irq_info(long h, struct t_pci_irq_info *info) {
+    return t_pci_irq_call(T_SYS_PCI_IRQ_INFO, h, (unsigned long)info, 0);
+}
+
+// Mappable windows exclude every MSI-X table/PBA page. The list is complete
+// or fails (-1); count is returned on success. PCI_INFO remains 256 bytes.
+#define T_PCI_WINDOW_MAX 8
+struct t_pci_window {
+    unsigned long offset, length;
+    unsigned int bar, reserved;
+};
+_Static_assert(sizeof(struct t_pci_window) == 24, "PCI window ABI size");
+__attribute__((always_inline))
+static inline long t_pci_windows(long h, struct t_pci_window *out, unsigned long capacity) {
+    register long x0 __asm__("x0") = h;
+    register unsigned long x1 __asm__("x1") = (unsigned long)out;
+    register unsigned long x2 __asm__("x2") = capacity;
+    register long x8 __asm__("x8") = T_SYS_PCI_WINDOWS;
+    __asm__ volatile ("svc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x8) : "memory", "cc");
+    return x0;
+}
+__attribute__((always_inline))
+static inline long t_pci_map_window(long h, unsigned long va, unsigned long bar,
+                                    unsigned long prot, unsigned long offset,
+                                    unsigned long length) {
+    register long x0 __asm__("x0") = h;
+    register unsigned long x1 __asm__("x1") = va;
+    register unsigned long x2 __asm__("x2") = bar;
+    register unsigned long x3 __asm__("x3") = prot;
+    register unsigned long x4 __asm__("x4") = offset;
+    register unsigned long x5 __asm__("x5") = length;
+    register long x8 __asm__("x8") = T_SYS_PCI_MAP_WINDOW;
+    __asm__ volatile ("svc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3),
+        "r"(x4), "r"(x5), "r"(x8) : "memory", "cc");
     return x0;
 }
 

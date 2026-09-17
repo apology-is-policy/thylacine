@@ -30,6 +30,7 @@
 #include "../mm/slub.h"
 #include "test/test.h"
 
+#include <thylacine/pci_irq.h>
 #include <thylacine/canary.h>
 #include <thylacine/context.h>          // fp_enable_this_cpu (P4-Ic5-FP)
 
@@ -634,6 +635,7 @@ void boot_main(void) {
     // claims from the enumerated g_virtio_pci_devs[]). No DTB/HW access of its
     // own -- BARs are assigned lazily from dtb_pci_mem_window on the first claim.
     kobj_pci_init();
+    pci_irq_init();
 
     // W1.5: boot-time LSE alternatives-patching. Rewrites the LL/SC atomic
     // sites (the spinlock test-and-set, the Spoor/SrvConn refcounts, the

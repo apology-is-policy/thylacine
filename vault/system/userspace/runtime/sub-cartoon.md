@@ -14,7 +14,7 @@ hazards: []
 abis: []
 design: ["docs/HALCYON.md section 13.2", "docs/TAPESTRY.md section 14"]
 created: 2026-09-05
-updated: 2026-09-16
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -40,7 +40,12 @@ buffer of stride `w`. `AtlasStore` + `AtlasPacker` manage the 8-bit alpha
 pages and the shelf packing; `BlobStore` holds decoded rasters; `blend` is the
 shared src-over. The author builds a `Cartoon` (`push_glyphs` appends a run and
 its op together), hands it to `execute` with the store it was authored
-against, and `reset`s it for the next frame keeping both allocations.
+against, and `reset`s it for the next frame. `Cartoon.blobs` can carry the
+frame-local image rasters: `add_blob` returns the index used by `Op::Image`,
+and the caller supplies that store to `execute`. Reset retains the collection
+capacities but drops the individual raster payloads. `Blob::scaled` performs
+nearest-neighbor resampling; its dimensions come from the bounded layout and
+admission path, not directly from unchecked input image dimensions.
 
 ## Mechanism
 

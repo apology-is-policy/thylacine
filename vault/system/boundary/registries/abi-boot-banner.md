@@ -10,6 +10,9 @@ pinned-by:
   - "kernel/cons.c (cons_kernel_writer_begin/end -- the DELIVERY half)"
   - "docs/TOOLING.md §10"
 mirrors:
+  - "tools/interactive/ls-halcyon-session-media.exp"
+  - "tools/interactive/ls-halcyon-session-dosbox.exp"
+  - tools/interactive/pci-net-load.exp
   - "tools/interactive/im1-sak-lever.exp"
   - "tools/interactive/im3-lex-curiata.exp"
   - "tools/interactive/ls-bghome-stall.exp"
@@ -35,17 +38,33 @@ mirrors:
   - "tools/display-modes/verify-gpu-headless-1b.exp"
   - "tools/interactive/item10-ctrlc.exp"
   - "tools/interactive/ls-gfx-age.exp"
+  - "tools/interactive/ls-gfx-inline-view.exp"
+  - "tools/interactive/ls-gfx-gallery.exp"
+  - "tools/interactive/ls-gfx-jpeg.exp"
   - "tools/interactive/ls-gfx-restore.exp"
   - "tools/interactive/ls-gfx-session.exp"
   - "tools/interactive/ls-halcyon-instrument.exp"
   - "tools/interactive/ls-halcyon-session-instrument.exp"
+  - "tools/interactive/ls-gfx-session-image.exp"
   - "tools/interactive/ls-halcyon.exp"
   - "tools/interactive/pty-susp-pouch.exp"
   - "tools/interactive/r5f9-ash.exp"
   - "tools/test-smp-classify.sh (the classifier's own fixtures — both literals)"
   - "tools/testdata/smp-classify/real-pass-harness.log (a classifier input fixture)"
   - "tools/warp/composed-screen.exp"
+  - "tools/interactive/ls-gfx-dosbox.exp"
+  - "tools/interactive/ls-gfx-dosbox-conf.exp"
+  - "tools/interactive/ls-gfx-dosbox-duke3d.exp"
+  - "tools/interactive/ls-gfx-dosbox-dynarec.exp"
+  - "tools/interactive/ls-gfx-dosbox-input.exp"
+  - "tools/interactive/ls-gfx-dosbox-tombraider.exp"
+  - "tools/interactive/ls-gfx-throttle.exp"
+  - "tools/interactive/im1-sak-lever.exp"
+  - "tools/interactive/im3-lex-curiata.exp"
+  - "tools/interactive/ls-imperium.exp"
+  - "tools/interactive/ls-bghome-stall.exp"
   - "tools/interactive/s7-nora-probe.exp"
+  - "tools/interactive/manual.exp"
 literals:
   - "Thylacine boot OK"
   - "EXTINCTION:"
@@ -97,26 +116,20 @@ fault-injection variant reports the protection did not fire.
 ## Why it is frozen
 
 It is the whole agentic loop's success signal, and the mirror set above is
-what that means concretely. The 2026-09 resync grew the set to twenty-eight
-(it added thirteen consumer gates — see "The resync grew the set to
-twenty-eight" below); the s7 F3 gate `s7-nora-probe.exp` then added one more
-(see "s7-nora-probe" below), and the two HALCYON-INSTRUMENT gates
-`ls-halcyon-instrument.exp` (I-2) and `ls-halcyon-session-instrument.exp`
-(I-4) two more (see below), so the set is now **thirty-one**: **thirty
-mirrors match one or both of `Thylacine boot OK` / `EXTINCTION:`** — one of
-those thirty, `real-pass-harness.log`, is a captured-log fixture, data not a
-program — plus `stall-watch.py` on `kernel base:`. Two more mention the
-literals in comments only (`tools/warp-host.sh`,
-`tools/interactive/go8d.exp`) — they become wrong rather than broken, so they
-are not mirrors. 31 mirrors + 2 mentions = the 33 files under `tools/` that
-carry a literal.
+what that means concretely. The authoritative `mirrors` list below tracks the
+combined main and aux harnesses. The DERIVED check verifies the set;
+`stall-watch.py` matches `kernel base:` and `real-pass-harness.log` is a
+captured-log fixture rather than a program.
 
 **Reading the counts below.** The dated measurements further down (the 2026-08-18
-main#245 census, the delivery classification) describe the **fifteen-member set
-as it then stood**; they are kept as the historical record. The current totals
-are the twenty-nine above, the delivery table is updated to twenty-nine, and
-the resync's thirteen gates and the later s7 add are classified in their own
-subsections.
+main#245 census, the delivery classification, the "resync grew to twenty-eight"
+and "s7-nora-probe" subsections) describe the set **as it stood at each of those
+points** — fifteen, then twenty-eight, then twenty-nine — and are kept as the
+historical record, not re-tallied at every merge. The current authoritative
+total is the **forty-one mirrors + two mentions = forty-three** above (the
+forty-first, 2026-09-16, is `manual.exp`, whose exit-status proc carries its
+own `EXTINCTION:` arm); the DERIVED
+check (not a hand count) is what holds it correct.
 
 ### The resync grew the set to twenty-eight (2026-09)
 

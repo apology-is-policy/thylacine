@@ -27,7 +27,7 @@ use libhalcyon::instrument::Profile;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-use cartoon::{Cartoon, GlyphRef, Op};
+use cartoon::{Blob, Cartoon, GlyphRef, Op};
 use vt::{ATTR_BOLD, ATTR_ITALIC};
 
 use crate::raster::{
@@ -714,10 +714,20 @@ pub struct RectSpec {
     pub color: u32,
 }
 
+/// A laid inline image (I-47 inline media): the resampled blob + its
+/// block-relative top-left. Built in `layout_block` (letterbox + resample),
+/// blitted in `render_block` via `cartoon::Op::Image`.
+pub struct LaidImage {
+    pub blob: Blob,
+    pub x: i32,
+    pub y: i32,
+}
+
 pub struct LaidBlock {
     pub height: i32,
     pub lines: Vec<LaidLine>,
     pub rects: Vec<RectSpec>,
+    pub images: Vec<LaidImage>,
 }
 
 fn face_for(st: &Style, in_table: bool, sheet: &Sheet) -> u8 {
@@ -895,6 +905,8 @@ struct LineBuilder<'a> {
     line_pre: bool,
     /// Centre the line's content in the available width (the herald).
     center: bool,
+    /// Laid inline images (I-47), block-relative; drained into `LaidBlock`.
+    images: Vec<LaidImage>,
 }
 
 impl<'a> LineBuilder<'a> {
@@ -917,6 +929,7 @@ impl<'a> LineBuilder<'a> {
             line_class: LineClass::Doc,
             line_pre: false,
             center: false,
+            images: Vec::new(),
         }
     }
 
@@ -1470,6 +1483,8 @@ enum Role {
     Table,
     Rule,
     Pre,
+    /// An inline image item (I-47): block-level, prose-like margins.
+    Image,
 }
 
 impl Role {
@@ -1495,6 +1510,7 @@ impl Role {
             Role::Pre => (r.pre, r.pre),
             Role::Table => (r.table_top, r.table_bottom),
             Role::Rule => (r.rule, r.rule),
+            Role::Image => (r.prose, r.prose),
         };
         (sheet.ipx(t), sheet.ipx(b))
     }
@@ -1524,6 +1540,7 @@ fn roles_of(b: &Block, fractional: bool) -> Vec<Role> {
             Item::Table(_) => Role::Table,
             Item::Rule => Role::Rule,
             Item::Pre(_) => Role::Pre,
+            Item::Image { .. } => Role::Image,
             Item::Line(line) => {
                 let class = if line.class == LineClass::Inherit {
                     block_class
@@ -1595,7 +1612,42 @@ fn roles_of(b: &Block, fractional: bool) -> Vec<Role> {
 /// the glyph cache (rasterize-on-miss mutates `gs`; the RESULT is width-
 /// and content-deterministic either way -- the property the reflow E2E
 /// pins).
+/// Contain-fit `(nw, nh)` into `(aw, ah)` preserving aspect, never upscaling
+/// past native (I-47 inline media). Returns the letterboxed `(w, h)`; a
+/// narrower result is centred by the caller (the side bars are the letterbox).
+/// The inline path passes `ah = i32::MAX` for WIDTH-FIT (no height cap -- the
+/// transcript scrolls); a bounded `ah` (the future gallery/fullscreen path)
+/// caps both dimensions.
+fn letterbox(nw: i32, nh: i32, aw: i32, ah: i32) -> (i32, i32) {
+    if nw <= 0 || nh <= 0 || aw <= 0 || ah <= 0 {
+        return (0, 0);
+    }
+    let mut dw = nw.min(aw);
+    let mut dh = (nh as i64 * dw as i64 / nw as i64) as i32;
+    if dh > ah {
+        dh = ah;
+        dw = (nw as i64 * dh as i64 / nh as i64) as i32;
+    }
+    (dw.max(1), dh.max(1))
+}
+
+fn lay_inline_image(lb: &mut LineBuilder<'_>, sheet: &Sheet, w: u32, h: u32, argb: &[u32]) {
+    let avail = (lb.width - 2 * sheet.pad_x).max(1);
+    let (dw, dh) = letterbox(w as i32, h as i32, avail, i32::MAX);
+    if dw > 0 && dh > 0 && !argb.is_empty() {
+        let blob = Blob { w, h, argb: argb.to_vec() }.scaled(dw as u32, dh as u32);
+        let x = sheet.pad_x + (avail - dw) / 2;
+        lb.images.push(LaidImage { blob, x, y: lb.y() });
+        lb.advance(dh);
+    }
+}
+
 pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) -> LaidBlock {
+    layout_block_media(b, width, sheet, gs, None)
+}
+
+pub fn layout_block_media(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource,
+    media: Option<&crate::inlinecache::InlineCache>) -> LaidBlock {
     // The glyph source follows the sheet in force here, at the entry the
     // owners and every test share (r2 A-F2: forty Instrument painter tests
     // ran unkerned against a sheet that said `kerning`); the memo is
@@ -1652,7 +1704,8 @@ pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) 
         }
     };
     for (item_idx, item) in b.items.iter().enumerate() {
-        let role = roles[item_idx];
+        let raster = media.and_then(|m| m.resolve(b, item));
+        let role = if raster.is_some() { Role::Image } else { roles[item_idx] };
         let (top, bottom) = role.margins(sheet);
         // Consecutive raw lines share one island: no margin between them.
         let joins_island = role == Role::Raw && island_top.is_some();
@@ -1700,6 +1753,10 @@ pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) 
         let lines_before = lb.lines.len();
         lb.start_item(role.cap(sheet));
         match item {
+            Item::Line(_) if raster.is_some() => {
+                let r = raster.unwrap();
+                lay_inline_image(&mut lb, sheet, r.w, r.h, &r.argb);
+            }
             Item::Line(line) => {
                 let (mode, class) = match role {
                     Role::Prompt => (SpanMode::Prompt, LineClass::Prompt),
@@ -1787,6 +1844,9 @@ pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) 
                 lb.right_inset = 0;
                 close_island(&mut lb, top_q, true);
             }
+            Item::Image { w, h, argb } => {
+                lay_inline_image(&mut lb, sheet, *w, *h, argb);
+            }
         }
         // Stamp the item's visual lines with their source address (tables
         // stamped per-row inside lay_table already carry src_row).
@@ -1830,6 +1890,7 @@ pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) 
         height: lb.y(),
         lines: lb.lines,
         rects,
+        images: lb.images,
     }
 }
 
@@ -2234,6 +2295,24 @@ pub fn render_block(cart: &mut Cartoon, laid: &LaidBlock, y0: i32, gs: &mut Glyp
             cart.push_glyphs(gen, seg.x, y0 + line.baseline, seg.color, &refs);
         }
     }
+    // I-47 inline media: blit each laid image via Op::Image. The resampled
+    // blob is pushed into the cartoon's per-frame blob table (execute reads
+    // cart.blobs). A per-frame clone off the cached LaidBlock -- fine for a
+    // handful of images; a move/borrow optimization is a later refinement.
+    for img in laid.images.iter() {
+        let id = cart.add_blob(Blob {
+            w: img.blob.w,
+            h: img.blob.h,
+            argb: img.blob.argb.clone(),
+        });
+        cart.ops.push(Op::Image {
+            blob_id: id,
+            x: img.x,
+            y: y0 + img.y,
+            w: img.blob.w,
+            h: img.blob.h,
+        });
+    }
 }
 
 /// Frozen-block layout, cached by block id (stable identity; the open block
@@ -2422,6 +2501,100 @@ pub(crate) mod tests {
 
     fn gs() -> GlyphSource {
         GlyphSource::new_vendored(512)
+    }
+
+    // I-47 inline media (slice 1, the render path): an Item::Image lays out
+    // (contain-fit + resample), render_block emits Op::Image into the
+    // cartoon's blob table, and execute blits it. Reflow: a narrower width
+    // rescales the source. A baked raster proves pixels-in-the-transcript
+    // deterministically -- no channel/decoder yet.
+    #[test]
+    fn inline_image_lays_renders_and_reflows() {
+        let (nw, nh) = (100u32, 50u32);
+        let mut argb: Vec<u32> =
+            (0..nw * nh).map(|i| 0xFF00_0000 | (i & 0x00FF_FFFF)).collect();
+        argb[0] = 0xFF11_2233;
+        let mk = || Block {
+            id: 7,
+            kind: BlockKind::Output,
+            continuation: false,
+            exit: None,
+            cmd: None,
+            items: alloc::vec![Item::Image { w: nw, h: nh, argb: argb.clone() }],
+            styles: Vec::new(),
+            objs: Vec::new(),
+            cost: 0,
+            annotated_own: true,
+        };
+        let sheet = daylight_sheet(100);
+        let mut g = gs();
+
+        // Wide: avail >> native, so contain-fit keeps native size (no upscale).
+        let wide = mk();
+        let laid = layout_block(&wide, 600, &sheet, &mut g);
+        assert_eq!(laid.images.len(), 1, "the image laid as one item");
+        assert_eq!(
+            (laid.images[0].blob.w, laid.images[0].blob.h),
+            (nw, nh),
+            "wide enough: native size, no upscale"
+        );
+        assert!(laid.height >= nh as i32, "the block reserved the image height");
+
+        // render_block emits an Op::Image into the cartoon's blob table.
+        let mut cart = Cartoon::new();
+        render_block(&mut cart, &laid, 0, &mut g);
+        assert_eq!(cart.blobs.blobs.len(), 1, "one blob in cart.blobs");
+        let (bid, ix, iy, iw, ih) = cart
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                Op::Image { blob_id, x, y, w, h } => Some((*blob_id, *x, *y, *w, *h)),
+                _ => None,
+            })
+            .expect("an Op::Image was emitted");
+        assert_eq!((iw, ih), (nw, nh));
+        assert_eq!(bid as usize, 0);
+        assert_eq!((ix, iy), (laid.images[0].x, laid.images[0].y));
+
+        // execute blits it: the image's top-left pixel is the source color.
+        let pw = 600usize;
+        let ph = (laid.height + 4) as usize;
+        let mut px = alloc::vec![0xDEAD_BEEFu32; pw * ph];
+        cartoon::execute(&cart, &g.packer.store, &cart.blobs, &mut px, pw, None);
+        let idx = (iy as usize) * pw + ix as usize;
+        assert_eq!(px[idx], 0xFF11_2233, "the image's top-left pixel painted");
+
+        // Reflow: a narrow width rescales the source (contain-fit to width).
+        let narrow = mk();
+        let laid_n = layout_block(&narrow, 80, &sheet, &mut g);
+        assert_eq!(laid_n.images.len(), 1);
+        assert!(
+            laid_n.images[0].blob.w < nw && laid_n.images[0].blob.w > 0,
+            "a narrower pane scaled the image down (reflow)"
+        );
+
+        // Width-fit, no height cap (the operator's ruling 2026-09-09): a TALL
+        // image that fits the content width keeps its native height -- the
+        // transcript scrolls. Under the old IMAGE_MAX_H=320 this was capped.
+        let tall_argb: Vec<u32> = alloc::vec![0xFF44_5566u32; 100 * 500];
+        let tall = Block {
+            id: 8,
+            kind: BlockKind::Output,
+            continuation: false,
+            exit: None,
+            cmd: None,
+            items: alloc::vec![Item::Image { w: 100, h: 500, argb: tall_argb }],
+            styles: Vec::new(),
+            objs: Vec::new(),
+            cost: 0,
+            annotated_own: true,
+        };
+        let laid_t = layout_block(&tall, 600, &sheet, &mut g);
+        assert_eq!(
+            (laid_t.images[0].blob.w, laid_t.images[0].blob.h),
+            (100, 500),
+            "a tall image that fits the width keeps native height (no height cap)"
+        );
     }
 
     fn body_h(_g: &GlyphSource, sheet: &Sheet) -> i32 {

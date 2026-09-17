@@ -33,7 +33,7 @@ build checks that they agree.
 
 **Imperium integration (2026-09-17).** Reserved numbers 110 and 111 are
 now implemented as SYS_CONSOLE_EPISODE and SYS_CAP_GRANT_IMPERIUM. Main's
-SYS_DMA_SEGMENTS stays 112 and SYS__NATIVE_TOP stays 113; no existing syscall
+SYS_DMA_SEGMENTS stays 112; later PCI appends now put SYS__NATIVE_TOP at 121. No existing syscall
 was renumbered. Native C and Rust mirrors include the new operations and
 CAP_POST_SERVICE at bit 13. The console operation accepts ARM=1 or END=2;
 unknown operations fail closed.
@@ -421,3 +421,19 @@ libthyla-rs `t_burrow_detach` mirror) now states the window refusal it always
 had, and the identity arm ARCH 6.5 added: a DMA- or MMIO-backed mapping is
 detachable wherever the driver placed it. No number, argument or record changed;
 the result for that class of call went from `-1` to `0`.
+
+## Protected PCI windows (2026-09-17)
+
+[[abi-pci-windows]] appends `PCI_MAP_WINDOW` 113 and `PCI_WINDOWS` 114 in kernel,
+C and Rust. The native ceiling is 114. Linux clock_gettime 113 is handled by the
+existing phenotype Tier-2 translator before native dispatch; its former ceiling
+assertion is replaced by an explicit collision pin. The old PCI_INFO record and
+four-argument whole-BAR map remain unchanged; protected whole-BAR maps now fail.
+
+## PCI endpoint append (2026-09-17)
+
+[[abi-pci-irq]] appends calls 115..120; native ceiling is now 120 and SYS__NATIVE_TOP
+121. Kernel/C/Rust records pin event 32 bytes and info 48 bytes. Clock_gettime's
+113 collision remains consumed by its Tier-2 phenotype row. Remaining ceiling
+assertions compile. MSI-X mode currently fails ENODEV; backend implementation
+must precede any support claim.

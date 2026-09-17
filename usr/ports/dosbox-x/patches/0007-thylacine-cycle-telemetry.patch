@@ -1,0 +1,32 @@
+Thylacine: enable the built-in per-adjust cycle telemetry (cyclelog).
+
+DOSBox-X's auto-cycle control loop (increaseticks() in src/dosbox.cpp) carries a
+commented-out diagnostic that prints, once per ~250ms evaluation window, the
+current CPU_CycleMax, the newly computed target, the control ratio, and the raw
+ticksDone/ticksScheduled timing that drives the decision. Uncomment it.
+
+It lives AFTER the `if (!CPU_CycleAutoAdjust) return;` guard, so it fires ONLY in
+cycles=auto/max mode -- it is completely silent under a fixed cycles= setting (the
+shipped Duke3D config). That makes it a zero-overhead opt-in instrument: run a game
+with cycles=auto to observe the hunt, ship it with cycles=fixed to silence it.
+
+Used to diagnose the Duke3D ~500ms turn-speed oscillation (the cycles=auto loop
+hunting the emulated CPU speed) and to check whether Thylacine's host timer
+resolution/jitter destabilises the loop more than a native host would.
+--- a/src/dosbox.cpp	2026-09-04 14:35:55
++++ b/src/dosbox.cpp	2026-09-04 14:35:55
+@@ -675,14 +675,12 @@
+         if (new_cmax < CPU_CYCLES_LOWER_LIMIT)
+             new_cmax = CPU_CYCLES_LOWER_LIMIT;
+ 
+-        /*
+            LOG_MSG("cyclelog: current %6d   cmax %6d   ratio  %5d  done %3d   sched %3d",
+            CPU_CycleMax,
+            new_cmax,
+            ratio,
+            ticksDone,
+            ticksScheduled);
+-           */
+            /* ratios below 1% are considered to be dropouts due to
+               temporary load imbalance, the cycles adjusting is skipped */
+         if (ratio > 10) {

@@ -72,7 +72,7 @@ struct Spoor;
 // footing: a Proc that must emit code (an llvmpipe-backed GL app) acquires the
 // authority through a bounded legate rather than by inheritance, which is what
 // keeps I-42's "non-heritable" clause true of every path, not just rfork.
-#define CAP_GRANTABLE_CLEARANCE  (CAP_POST_SERVICE | CAP_DAC_OVERRIDE | CAP_CHOWN | CAP_KILL | CAP_DEBUG | CAP_JIT)
+#define CAP_GRANTABLE_CLEARANCE  (CAP_AUDIO_GRAPH | CAP_POST_SERVICE | CAP_DAC_OVERRIDE | CAP_CHOWN | CAP_KILL | CAP_DEBUG | CAP_JIT)
 
 // Both grantable sets must be elevation-only. Ordinary fork strips them;
 // only the explicit propagating-scope carve may retain granted authority.

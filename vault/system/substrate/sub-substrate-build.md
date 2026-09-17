@@ -7,6 +7,11 @@ code:
   - tools/build.sh
   - tools/mkcpio.py
   - tools/mkdisk.py
+  - tools/build-config.sh
+  - tools/build-manifest.toml
+  - tools/forage.sh
+  - tools/test-forage.sh
+  - tools/test-build-config.sh
 audit: none
 guarded-by: []
 validated-by: [prose, gate-smp]
@@ -14,7 +19,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-09-06
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -33,19 +38,25 @@ all -> kernel -> { userspace, pouch-progs, stratumd, pool-fixture, ramfs, disk }
 Sub-targets build one stage each. `clean` is the only true from-scratch
 reset.
 
-**There are nineteen targets and three lists of them, no two of which
-agree.** The dispatcher's `case` arms are ground truth at nineteen; the
-"Unknown target" error advertises fifteen; the header comment block names
-ten. The two graphics/toolchain families — the Clade compiler stages and the
-ported-game builders — are the bulk of what the shorter lists omit. Nothing
-is advertised that does not exist, so there is no phantom; the drift is one
-directional, and it is toward silence.
+The dispatcher is authoritative for the target list: it has 21 named arms,
+including `dosbox-x` and the Clade staging targets. The unknown-target help
+lists 17 and omits `quake-host`, `clade`, `stage-clade`, and `stage-storm`;
+the introductory comments are also not an exhaustive inventory.
 
 **Every run ends with a `SUMMARY for target ...` block listing exactly what
 was BUILT / REUSED / PRESERVED.** That block is the contract: read it to
 know the resulting state rather than inferring it from the target name.
 
 ## Mechanism
+
+### Typed configuration and external inputs
+
+`build-config.sh` loads the typed configuration axes, presets and fragments;
+its tests check parsing and precedence. `build-manifest.toml` records external
+inputs, while `forage.sh` resolves and checks those inputs before a build.
+`MANIFEST` and `FORAGE_ROOT` isolate fixture tests; they are not permission to
+silently substitute downloaded bytes for a pinned archive. DOSBox and game
+baking follow the same configured input path as the existing toolchain.
 
 **`build.sh kernel` is `build.sh all`, and this is the tree's most-repeated
 footgun.** It pulls the whole chain including a pool re-bake driven by the
@@ -145,6 +156,15 @@ file SYSTEM-owned. With root + baked files + runtime creates all SYSTEM-owned,
 the boot chain owns the whole tree. It is a stamped *value*, not a format change
 (`si_uid` / `si_gid` already exist in the inode).
 
+The aux integration adds default-on DOSBox-X build/staging and its system
+configuration at `/lib/dosbox-x/dosbox-x.conf`, plus optional Duke3D and Tomb
+Raider fixture stages. Emulator opt-out also skips its game data. Missing
+external C++ tooling is announced as a skipped build, not emulator coverage.
+View, Gallery, Manual, Nocturne and their probes are curated into the native
+ramfs binary list. `configs/ci.config` selects a serial shell for existing
+interactive scenarios; the default profile starts the Halcyon session.
+Use an explicit `HALCYON_SESSION=y` override for graphical session gates.
+
 ## Data structures
 
 `build/` layout: `kernel/` and `kernel-undefined/` (parallel sanitizer
@@ -203,9 +223,9 @@ LS-CI mints one with `mkdisk.py` at need.
   **THAT ADVICE IS NOW WRONG, AND THIS DOSSIER GAVE IT.** The header is
   still the best account of *what each target it names does* — the caching
   footguns, the pool/key coupling, the summary contract are all there and
-  all correct. But as a *list*, it is the least complete of the three: ten
-  entries against the dispatcher's nineteen, so it is silent about nine
-  working targets including every Clade toolchain stage.
+  all correct. But as a *list*, it is the least complete of the three: a partial
+  list against the dispatcher's complete target set, omitting working
+  targets including Clade stages.
 
   The failure is worth more than the correction. The claim was true when
   written and decayed without anything failing, because a target added to
@@ -229,6 +249,16 @@ LS-CI mints one with `mkdisk.py` at need.
   more baked file in the `/lib/beacon/verbs` shape -- mkdir + write + sync +
   readback-cmp -- below this file's target/ledger granularity, so no target-set
   change.)
+
+- **`/manual` is baked unconditionally, and its EXISTENCE is verified even when
+  empty (2026-09-16, docs/MANUAL-DESIGN.md 6).** The pool step after the TH-5
+  themes block writes every `docs/manual/NN-<name>.md` to `/manual` with the
+  themes block's write + sync + readback-cmp shape, globbed so a new section ships
+  by existing. It then `stat`s `/manual`, because `manual` reads an ABSENT
+  directory as "no sections installed", so a silently failed mkdir could be
+  indistinguishable from a deliberately empty catalogue. Six checked sections
+  now ship: Manual, Remote files with Haul, View, Gallery, Nocturne and DOSBox-X. The `manual` binary rides
+  `usr_rs_bins` like `view`. Same granularity note as above: no target-set change.
 
 - **The stale-stage warning claims a property it achieves by maintenance,
   not by construction — and its own comment is the argument against

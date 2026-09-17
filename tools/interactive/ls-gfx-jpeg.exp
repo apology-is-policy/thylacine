@@ -1,0 +1,129 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-gfx-jpeg.exp -- the JPEG inline-media E2E (I-47,
+# HALCYON.md 14.7; the zune-jpeg slice). Exercises the NEW JPEG decode path in
+# BOTH viewers, end to end on real hardware, in one boot:
+#
+#   view /test.jpg    : view's Jpeg arm sniffs + decodes the JPEG (zune-jpeg) to
+#                       ARGB and hands the raster to halcyond over /srv/halcyon;
+#                       halcyond validates + injects it (the inline pipeline).
+#   gallery /test.jpg : gallery's Jpeg arm decodes the same JPEG and presents it
+#                       to a fullscreen tapestryd surface (the client path).
+#
+# The load-bearing proofs are the SERIAL WITNESSES (order-independent): view's
+# "placed inline (640x400)" (hard-failing on its "not displayed" fallback, so a
+# silent channel failure goes RED) + halcyond's "inline image placed (640x400"
+# injection line + gallery's "shown WxH" present line. The image-on-screen
+# rasterization is format-independent and already gated by ls-gfx-inline-view
+# (PNG, with a pixel delta); this scenario's job is the JPEG DECODE, which those
+# three witnesses prove produced a valid raster both bins accepted.
+#
+# Needs the halcyond-renderer image (THYLACINE_HALCYON=1: /test.jpg + the
+# renderer lever are gated with it); SKIPs (77) cleanly on a default aurora
+# image, like ls-gfx-inline-view. Runs under HVF; needs the QMP socket.
+
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+
+proc dump {out} {
+    global repo qmp
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} err]} { return $err }
+    return ""
+}
+# Read the whole-session transcript (order-independent grep at a checkpoint).
+proc tbody {} {
+    global transcript
+    log_file
+    set f [open $transcript r]; set body [read $f]; close $f
+    log_file -a $transcript
+    return $body
+}
+
+set transcript /tmp/ls-gfx-jpeg-[pid].log
+catch {file delete -force $transcript}
+log_file -a $transcript
+
+lc_boot
+
+# The renderer probe: aurora => the lever (and /test.jpg) is not baked => SKIP.
+set timeout $lc_boot_timeout
+expect {
+    -ex "joey: halcyond spawned" { lc_step "joey chose halcyond (lever image)" }
+    -ex "joey: aurora spawned" {
+        puts "\nLS-CI SKIP: default image (aurora fbcon) -- JPEG inline media needs\
+ the halcyon lever. Bake with THYLACINE_HALCYON=1 to run this scenario."
+        lc_quit
+        exit 77
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction before the renderer spawn" }
+    timeout { lc_fail "no renderer spawn line within ${lc_boot_timeout}s" }
+    eof     { lc_fail "qemu exited before the renderer spawn" }
+}
+
+lc_login michael correct-horse-battery-staple-v1
+
+# The place channel must be posted before view can hand off a raster.
+set posted 0
+for {set i 0} {$i < 16} {incr i} {
+    if {[string first "halcyond: /srv/halcyon posted" [tbody]] >= 0} { set posted 1; break }
+    after 500
+}
+if {!$posted} { lc_fail "halcyond never posted /srv/halcyon -- the I-47 channel is down" }
+lc_step "jpeg: /srv/halcyon posted"
+
+# THE INLINE LEG. view decodes /test.jpg (zune-jpeg) and hands the raster to
+# halcyond; the hard-fail on "not displayed" means a silent channel/decode
+# failure (view fell back to a report) goes RED, never green.
+lc_run_expect_hardfail "view /test.jpg" "placed inline (640x400)" "not displayed"
+
+# The injection witness: halcyond accumulated + validated + injected the raster
+# the JPEG decode produced.
+set injected 0
+for {set i 0} {$i < 20} {incr i} {
+    if {[string first "halcyond: inline image placed (640x400" [tbody]] >= 0} { set injected 1; break }
+    after 300
+}
+if {!$injected} { lc_fail "halcyond never logged the 640x400 injection -- view reported success but the JPEG raster did not complete on the reader" }
+lc_pass "jpeg inline: view decoded /test.jpg + halcyond injected the 640x400 raster (zune-jpeg pipeline end to end)"
+
+# THE FULLSCREEN LEG. gallery decodes the same JPEG and presents it to a
+# fullscreen tapestryd surface; the "shown" line prints only after a successful
+# decode -> mint -> paint -> present.
+set timeout 60
+lc_send "gallery /test.jpg"
+expect {
+    -re {gallery: /test\.jpg 640x400 shown (\d+)x(\d+) at \d+,\d+ on (\d+)x(\d+)} {
+        lc_step "jpeg fullscreen: gallery decoded /test.jpg, shown\
+                 $expect_out(1,string)x$expect_out(2,string) on\
+                 $expect_out(3,string)x$expect_out(4,string)"
+    }
+    -re {gallery: [^\r\n]*(no compositor|not a recognized image|read failed|present failed|too large|jpeg:)} {
+        lc_fail "gallery failed on /test.jpg: $expect_out(0,string)"
+    }
+    "snare:"          { lc_fail "gallery faulted (snare)" }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction while gallery ran" }
+    timeout           { lc_fail "gallery did not present /test.jpg within 60s" }
+}
+lc_pass "jpeg fullscreen: gallery decoded + presented /test.jpg (client path end to end)"
+
+# Screendump for the record.
+after 800
+set post $repo/build/ls-gfx-jpeg.png
+if {[dump $post] eq ""} { lc_step "jpeg: screendump saved ($post)" }
+
+# Best-effort exit (focus of a 2nd fullscreen client in console mode is uncertain
+# -- not gated; the VM is torn down next).
+after 300
+catch {exec $repo/tools/qmp-send-key.sh -s $qmp esc}
+set timeout 8
+lc_send "echo JPEG_SHELL_BACK"
+expect {
+    -ex "JPEG_SHELL_BACK" { lc_step "jpeg: Esc exited gallery; the shell is live again" }
+    timeout { lc_step "jpeg: shell not confirmed back within 8s (focus model in console mode; not gated)" }
+}
+
+lc_pass "ls-gfx-jpeg: the I-47 JPEG decode path (view inline + gallery fullscreen) verified on hardware"
+lc_quit

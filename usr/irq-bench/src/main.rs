@@ -11,9 +11,9 @@
 //      via pa_to_kva (kernel direct map). PIPT data caches keep the
 //      two aliases coherent (same PA → same cache line).
 //   2. Kernel test pre-fills num_iter into the shared region, then
-//      pre-pends SPI 96 (race-free pattern from irq-probe), then
+//      pre-pends SPI intid (race-free pattern from irq-probe), then
 //      spawns this child.
-//   3. This child calls t_irq_create(96, T_RIGHT_SIGNAL) — the
+//   3. This child calls t_irq_create(intid, T_RIGHT_SIGNAL) — the
 //      gic_enable_irq inside causes the pending IRQ to deliver
 //      immediately on CPU 0.
 //   4. Loop: t_irq_wait → read CNTVCT_EL0 → store user_ts[i] →
@@ -52,11 +52,6 @@ use libthyla_rs::handle::Rights;
 use libthyla_rs::hardware::Irq;
 use libthyla_rs::{t_exits, t_putstr};
 
-// SPI 96 — same as /irq-probe. Pinned in lockstep with kernel test's
-// IRQ_BENCH_TEST_INTID. Safe unused SPI on QEMU virt's GIC (not in
-// PL011/PCI/GPIO/virtio-mmio ranges).
-const IRQ_BENCH_INTID: u32 = 96;
-
 // Shared-region user-VA. Mapped by kernel test before userland_enter.
 // Pinned in lockstep with kernel test's SHARED_USER_VA.
 const SHARED_USER_VA: u64 = 0x0080_0000;
@@ -65,6 +60,7 @@ const SHARED_USER_VA: u64 = 0x0080_0000;
 const OFF_NUM_ITER:  u64 = 0;
 const OFF_READY:     u64 = 8;
 const OFF_COMPLETED: u64 = 16;
+const OFF_INTID: u64 = 24;
 const OFF_USER_TS:   u64 = 32;
 
 // Maximum iterations the shared block can hold. (8192 - 32) / 8 = 1020.
@@ -104,10 +100,15 @@ pub extern "C" fn rs_main() -> i64 {
         unsafe { t_exits(1) };
     }
 
-    // Claim SPI 96. The kernel pre-pended one IRQ before rfork, so
+    // Claim SPI intid. The kernel pre-pended one IRQ before rfork, so
     // gic_enable_irq inside Irq::new delivers immediately. U-2h-hardware:
     // typed Irq wraps SYS_IRQ_CREATE.
-    let irq = match Irq::new(IRQ_BENCH_INTID, Rights::SIGNAL) {
+    let intid = unsafe { read_u64(SHARED_USER_VA + OFF_INTID) };
+    if !(32..1020).contains(&intid) {
+        t_putstr("irq-bench: invalid kernel-selected SPI\n");
+        unsafe { t_exits(1) };
+    }
+    let irq = match Irq::new(intid as u32, Rights::SIGNAL) {
         Ok(i) => i,
         Err(_) => {
             t_putstr("irq-bench: FAIL — Irq::new failed\n");

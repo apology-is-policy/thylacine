@@ -35,6 +35,8 @@ concurrency lift must re-establish).
   cs/dns/ndb/ipifc, the readiness (`ready`) file, and the weft zero-copy
   drive.
 
+- [[sub-netperf]] — native measurements and admission/backpressure diagnostics.
+
 ## Cross-cutting
 
 - Invariants: [[inv-i9]] (the deferred-reply engines' userspace

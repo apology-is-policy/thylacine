@@ -1,0 +1,35 @@
+N-2a-3 (docs/NOCTURNE.md section 6.5) -- make SDL's dummy audio driver the
+AUTO-SELECTED fallback on Thylacine.
+
+Upstream keeps DUMMYAUDIO demand_only (SDL_TRUE): SDL_AudioInit's
+auto-selection loop `continue`s past it, so with no other driver available
+SDL_Init(SDL_INIT_AUDIO) fails with "No available audio device". On
+Thylacine a soundless boot is an ordinary configuration (THYLACINE_NO_AUDIO,
+a machine without the virtio-sound function): the thylacine driver's Init
+declines when /srv/nocturne is absent, and every SDL program that inits
+audio as part of a combined SDL_Init -- DOSBox-X's E_Exit on failure being
+the worked case its old 0004 patch papered over with setenv
+SDL_AUDIODRIVER=dummy -- would die. With demand_only false under
+__thylacine__ the dummy driver, last in bootstrap[], is reached exactly when
+thylacine declined, so such a program runs silently instead. An explicit
+SDL_AUDIODRIVER still wins (the named-driver path is unchanged).
+
+One hunk against the pristine vendored tree.
+
+--- a/src/audio/dummy/SDL_dummyaudio.c
++++ b/src/audio/dummy/SDL_dummyaudio.c
+@@ -54,7 +54,13 @@
+ }
+ 
+ AudioBootStrap DUMMYAUDIO_bootstrap = {
+-    "dummy", "SDL dummy audio driver", DUMMYAUDIO_Init, SDL_TRUE
++    "dummy", "SDL dummy audio driver", DUMMYAUDIO_Init,
++#if defined(__thylacine__)
++    /* auto-selected when the thylacine driver declined (no /srv/nocturne) */
++    SDL_FALSE
++#else
++    SDL_TRUE
++#endif
+ };
+ 
+ #endif

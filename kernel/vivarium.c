@@ -53,8 +53,10 @@ _Static_assert(VIV_LINUX_EXECVE > VIV_NATIVE_CEILING,
                "execve's collision argument is the ceiling one (LINEAGE L-6a)");
 _Static_assert(VIV_LINUX_WAIT4 > VIV_NATIVE_CEILING,
                "wait4's collision argument is the ceiling one (LINEAGE L-6b)");
-_Static_assert(VIV_LINUX_CLOCK_GETTIME > VIV_NATIVE_CEILING,
-               "clock_gettime's collision argument is the ceiling one (time family)");
+// Linux clock_gettime 113 collides with PCI_MAP_WINDOW. The Tier-2 row is
+// mandatory: vivarium dispatch consumes it before native syscall dispatch.
+_Static_assert(VIV_LINUX_CLOCK_GETTIME == SYS_PCI_MAP_WINDOW,
+               "revisit clock_gettime/PCI_MAP_WINDOW collision on renumber");
 _Static_assert(VIV_LINUX_GETTIMEOFDAY > VIV_NATIVE_CEILING,
                "gettimeofday's collision argument is the ceiling one (time family)");
 _Static_assert(VIV_LINUX_GETSOCKOPT > VIV_NATIVE_CEILING,

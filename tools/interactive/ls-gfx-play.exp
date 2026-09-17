@@ -110,7 +110,18 @@ lc_expect "play-preclean-done" "config.cfg pre-clean drained"
 
 # Launch INTO THE GAME (+map start skips the demo loop; a demo would route
 # most keys to the menu -- keys.c demoplayback special-case).
-lc_send "tyr-quake -window -nosound +map start"
+lc_send "tyr-quake -window +map start"
+# N-2a-3: sound is ON. "Sound Initialized" prints in Host_Init BEFORE the
+# "Quake Initialized" banner, so it is expected FIRST (a later expect would
+# have discarded it). The rate reads 48000 either way (Quake requests
+# 48000 = the device rate); which driver ran is the wav's business, not this
+# line's -- see tools/test-game-audio.sh.
+expect {
+    -re {Sound Initialized: 16 bits @ ([0-9]+)Hz} { lc_step "sound init: 16 bits @ $expect_out(1,string) Hz (snd_sdl over SDL_thylacineaudio)" }
+    "Couldn't init SDL audio" { lc_fail "tyr-quake: SDL audio init failed (no thylacine driver AND no dummy fallback?)" }
+    "Couldn't open SDL audio" { lc_fail "tyr-quake: SDL_OpenAudio failed" }
+    timeout { lc_fail "no Sound Initialized line within ${timeout}s" }
+}
 lc_expect "Quake Initialized" "engine init (pak loaded, SW renderer up)"
 
 # Map-load margin (the shareware start map loads well under a second on

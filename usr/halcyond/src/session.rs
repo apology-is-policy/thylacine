@@ -23,7 +23,6 @@ use beacon::verbs::{parse as parse_verbs, Rule};
 use halcyond::chrome::{abbrev_home, parse_leaves_all, parse_rect, program_name};
 use halcyond::downq::DownQueue;
 use halcyond::input::{map_key, normal_key, Mode, NormalAct};
-use halcyond::layout::layout_block;
 use halcyond::layout::{sheet_for, Sheet};
 use halcyond::menu::{
     build_menu, hit_run, obj_of, run_rect, runs_on_row, step_run_with, Action, Menu, ObjRun,
@@ -43,7 +42,9 @@ use libthyla_rs::fs::{self, File};
 use libthyla_rs::io::Write;
 use libthyla_rs::process::{Child, Command, Stdio};
 use libthyla_rs::time::{sleep, Duration};
-use libthyla_rs::{t_poll, t_read, t_write, TPollFd, T_POLLHUP, T_POLLIN, T_POLLOUT};
+use libthyla_rs::{
+    t_getrandom, t_poll, t_read, t_write, TPollFd, T_POLLHUP, T_POLLIN, T_POLLOUT,
+};
 use tapestry::{
     DisplayInfo, EventRing, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FOCUS, TEV_KEY,
     TEV_LAYOUT, TEV_PTR_BTN, TEV_PTR_MOVE,
@@ -51,6 +52,7 @@ use tapestry::{
 
 use crate::chromeset::{self, read_file, ChromeAction};
 use crate::railset;
+use crate::paneplace::PanePlaceServer;
 use crate::menuset::{self, MenuEvent};
 use crate::statusset;
 use halcyond::chrome::{Described, Fate};
@@ -144,6 +146,12 @@ const HALCYON_SCALE_ENV_PATH: &str = "/env/HALCYON_SCALE";
 /// the user's preference, one owner of the motion it drives (section 10 as
 /// amended 2026-09-16).
 const HALCYON_MOTION_ENV_PATH: &str = "/env/HALCYON_MOTION";
+/// The per-pane inline-media place address (I-47, HALCYON.md 14.7.2):
+/// `/srv/halcyon-<user>/<hex(token)>/place`. Written per tile BEFORE its spawn
+/// and removed after -- the child snapshots it via the /env copy-at-spawn, so
+/// every program in the pane inherits ITS pane's address and the compositor's
+/// own /env stays clean between spawns. `view` opens it to place inline.
+const HALCYON_PLACE_ENV_PATH: &str = "/env/HALCYON_PLACE";
 
 /// How many connect iterations tolerate a refused `session on` before the
 /// compositor runs UNDECLARED: the seat may be mid-handover (the previous
@@ -322,6 +330,7 @@ impl SessionTile {
         geom: Geom,
         argv: &[String],
         budget: usize,
+        place_addr: Option<&str>,
         // The RESOLVED theme's terminal palette (HALCYON-THEME 3.4). The tile
         // is born in it AND the child is told it, from this one value, so the
         // grid and the transcript beside it cannot disagree.
@@ -344,13 +353,33 @@ impl SessionTile {
         // The identity axis stops here whatever the parent holds: a tile's
         // programs never spawn as another principal (login masks it too; this
         // is the second hop's own guard).
-        let mut child = cmd
-            .caps(!libthyla_rs::T_CAP_SET_IDENTITY)
+        cmd.caps(!libthyla_rs::T_CAP_SET_IDENTITY)
             .stdin(Stdio::Piped)
             .stdout(Stdio::Piped)
-            .stderr(Stdio::Inherit)
-            .spawn()
-            .ok()?;
+            .stderr(Stdio::Inherit);
+        // I-47 (14.7.2): publish THIS pane's inline-media place address into
+        // /env just before the spawn, so the child (and every program it runs)
+        // snapshots it via the /env copy-at-spawn -- then remove it, so the
+        // compositor's own /env and the NEXT tile's snapshot are unaffected.
+        // F3 (I-1): CLEAR any prior value FIRST, unconditionally -- a pane with
+        // NO channel (place_addr None, e.g. a CSPRNG short-read) must not
+        // inherit a previous pane's token via a failed remove, which would let
+        // its `view` place into a DIFFERENT pane. So a no-channel pane's child
+        // snapshots an ABSENT env var, never a stale one.
+        let _ = libthyla_rs::fs::remove_file(HALCYON_PLACE_ENV_PATH);
+        if let Some(addr) = place_addr {
+            if File::create(HALCYON_PLACE_ENV_PATH)
+                .and_then(|mut f| f.write_all(addr.as_bytes()))
+                .is_err()
+            {
+                say!("halcyond: could not write {}", HALCYON_PLACE_ENV_PATH);
+            } else {
+                say!("halcyond: pane leaf={} inline {}", leaf, addr);
+            }
+        }
+        let spawned = cmd.spawn();
+        let _ = libthyla_rs::fs::remove_file(HALCYON_PLACE_ENV_PATH);
+        let mut child = spawned.ok()?;
         let pid = child.pid();
         // Stdio::Piped guarantees both ends, but never leak a spawned kaua-term:
         // Child has no reaping Drop, so a missing end must kill + reap here.
@@ -514,7 +543,7 @@ impl SessionTile {
         } else {
             sb.frozen_blocks().get(index)?
         };
-        Some(layout_block(b, self.surf.w as i32, sheet, gs))
+        Some(halcyond::layout::layout_block_media(b, self.surf.w as i32, sheet, gs, Some(&self.tile.media)))
     }
 
     /// A KEY in Normal mode, or the Esc that enters it (the caller gates on
@@ -844,7 +873,7 @@ impl SessionTile {
             cartoon::execute(
                 cart,
                 &gs.packer.store,
-                &cartoon::BlobStore::new(),
+                &cart.blobs,
                 px,
                 sw,
                 None,
@@ -1030,6 +1059,70 @@ fn end_terminal(child: &mut Child, leaf: u32) {
     say!("halcyond: tile {} killed after the hangup grace", leaf);
 }
 
+/// The session's user name for `/srv/halcyon-<user>` (I-47, 14.7.2), from the
+/// `/env/USER` login seeds. None -> no per-user place service (inline media
+/// unavailable, a clean degrade). Validated to a safe path component
+/// (`[A-Za-z0-9_-]`, bounded) as defense-in-depth even though login is trusted.
+fn session_user() -> Option<String> {
+    let raw = read_file(libthyla_rs::T_WALK_OPEN_FROM_ROOT, "/env/USER")?;
+    let u = raw.trim();
+    if u.is_empty()
+        || u.len() > 64
+        || !u
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+    {
+        return None;
+    }
+    Some(String::from(u))
+}
+
+/// A fresh unguessable per-pane token from the kernel CSPRNG (I-47, 14.7.2).
+/// Zero on failure -- the caller treats zero as "no channel" and skips the
+/// /env write, so a pane simply has no inline media rather than a weak token.
+fn mint_place_token() -> u128 {
+    let mut b = [0u8; 16];
+    let n = unsafe { t_getrandom(b.as_mut_ptr(), b.len(), 0) };
+    if n != b.len() as i64 {
+        return 0;
+    }
+    u128::from_le_bytes(b)
+}
+
+/// The per-image pixel cap for the session place channel (I-47, 14.7.2): the
+/// 64 MiB heap residual after the shared 32 MiB scrollback budget, the ~10 MiB
+/// baseline, and the display-scaled atlas, DIVIDED by the server's MAX_CONNS so
+/// the aggregate of all in-flight transfers still fits the residual (8 bytes/px
+/// peak: the accumulator + its completion Vec). paneplace clamps it to
+/// [PLACE_MIN_PIXELS, PLACE_MAX_PIXELS_HARD]. Mirrors main.rs `place_cap_for`,
+/// divided for the multi-connection session service.
+fn place_residual(gs: &GlyphSource) -> u64 {
+    const HEAP: u64 = 64 * 1024 * 1024;
+    const TRANSCRIPT_RESERVE: u64 = SESSION_SCROLLBACK_BUDGET as u64;
+    const BASELINE_RESERVE: u64 = 10 * 1024 * 1024;
+    const ATLAS_PAGE_BYTES: u64 = 512 * 512;
+    let atlas = gs.evict_pages() as u64 * ATLAS_PAGE_BYTES;
+    HEAP.saturating_sub(TRANSCRIPT_RESERVE + BASELINE_RESERVE + atlas)
+}
+
+fn place_cap(gs: &GlyphSource) -> u64 {
+    place_residual(gs) / (8 * crate::paneplace::MAX_CONNS as u64)
+}
+
+/// Mint + register a pane's inline-media channel (I-47, 14.7.2): a fresh token
+/// bound to `leaf` in the place server, and the `/env/HALCYON_PLACE` address
+/// its programs open. `(0, None)` when no server/user (inline media off) or the
+/// CSPRNG failed -- the caller then spawns the tile with no channel.
+fn pane_channel(places: &mut Option<PanePlaceServer>, leaf: u32) -> Option<String> {
+    let p = places.as_mut()?;
+    let token = mint_place_token();
+    if token == 0 {
+        return None;
+    }
+    p.register(token, leaf);
+    Some(p.place_address(token))
+}
+
 /// Bring the tile set in line with the layout: reap orphaned tiles (leaf
 /// gone), spawn tiles for new empty leaves we own (claim-gated). `closed` is
 /// the permanent respawn guard.
@@ -1040,6 +1133,7 @@ fn reconcile(
     closed: &mut BTreeSet<u32>,
     geom: Geom,
     home: Option<&str>,
+    places: &mut Option<PanePlaceServer>,
     // The session's resolved terminal palette: a tile created LATER must be
     // born in the same theme as the ones already up.
     palette: vt::Palette,
@@ -1088,6 +1182,9 @@ fn reconcile(
         }
         if let Some(t) = tiles.remove(&leaf) {
             closed.insert(leaf);
+            if let Some(p) = places.as_mut() {
+                p.unregister_leaf(leaf);
+            }
             t.teardown();
         }
     }
@@ -1126,17 +1223,35 @@ fn reconcile(
             }
         };
         let budget = SESSION_SCROLLBACK_BUDGET / (tiles.len() + 1);
-        match SessionTile::spawn(leaf, surf, geom, &argv, budget, palette) {
+        // I-47 (14.7.2): mint + register this pane's inline-media channel and
+        // pass its /env address to the spawn (child snapshots it).
+        let place_addr = pane_channel(places, leaf);
+        match SessionTile::spawn(
+            leaf,
+            surf,
+            geom,
+            &argv,
+            budget,
+            place_addr.as_deref(),
+            palette,
+        ) {
             Some(t) => {
                 tiles.insert(leaf, t);
             }
-            None => say!("halcyond: session tile leaf={} spawn failed", leaf),
+            None => {
+                // The token was registered; the tile never lived -- drop the
+                // route so a stale token cannot resolve.
+                if let Some(p) = places.as_mut() {
+                    p.unregister_leaf(leaf);
+                }
+                say!("halcyond: session tile leaf={} spawn failed", leaf);
+            }
         }
     }
     // Every tile's share of the ONE scrollback budget follows the tile count.
     let share = SESSION_SCROLLBACK_BUDGET / tiles.len().max(1);
     for t in tiles.values_mut() {
-        t.tile.scrollback.set_max_cost(share);
+        t.tile.set_content_budget(share);
     }
 }
 
@@ -1644,15 +1759,28 @@ pub fn run(home: Option<String>) -> i64 {
         ),
         Err(_) => say!("halcyond: could not write {}", HALCYON_PALETTE_ENV_PATH),
     }
+    // I-47 (HALCYON.md 14.7.2): the per-user inline-media place service. Posted
+    // once (login granted MAY_POST_SERVICE, one hop, as it does for the home
+    // proxy); each tile gets a per-pane secret token routed through it. A failed
+    // post degrades cleanly -- the session runs with inline media unavailable.
+    let user = session_user();
+    let mut places: Option<PanePlaceServer> = user.as_deref().and_then(PanePlaceServer::post);
+    match (&places, user.as_deref()) {
+        (Some(_), Some(u)) => say!("halcyond: inline-media service /srv/halcyon-{}", u),
+        _ => say!("halcyond: inline-media service unavailable (no user or post failed)"),
+    }
+
     let mut tiles: BTreeMap<u32, SessionTile> = BTreeMap::new();
     let mut closed: BTreeSet<u32> = BTreeSet::new();
     let shell = tile_command("", home.as_deref(), |p| fs::exists(p));
+    let root_addr = pane_channel(&mut places, root_leaf);
     match SessionTile::spawn(
         root_leaf,
         root_surf,
         geom,
         &shell,
         SESSION_SCROLLBACK_BUDGET,
+        root_addr.as_deref(),
         theme.terminal,
     ) {
         Some(t) => {
@@ -2097,6 +2225,9 @@ pub fn run(home: Option<String>) -> i64 {
         for leaf in reap {
             if let Some(t) = tiles.remove(&leaf) {
                 closed.insert(leaf);
+                if let Some(p) = places.as_mut() {
+                    p.unregister_leaf(leaf);
+                }
                 t.teardown();
             }
         }
@@ -2134,6 +2265,7 @@ pub fn run(home: Option<String>) -> i64 {
                 &mut closed,
                 geom,
                 home.as_deref(),
+                &mut places,
                 sheet.theme.terminal,
             );
             if tiles.is_empty() {
@@ -2305,7 +2437,10 @@ pub fn run(home: Option<String>) -> i64 {
                     } else {
                         let (surf, argv) = old.into_parts();
                         let budget = SESSION_SCROLLBACK_BUDGET / tiles.len().max(1);
-                        match SessionTile::spawn(leaf, surf, geom, &argv, budget, sheet.theme.terminal) {
+                        // Restart revokes the previous program's routing token.
+                        if let Some(p) = places.as_mut() { p.unregister_leaf(leaf); }
+                        let place_addr = pane_channel(&mut places, leaf);
+                        match SessionTile::spawn(leaf, surf, geom, &argv, budget, place_addr.as_deref(), sheet.theme.terminal) {
                             Some(t) => {
                                 say!("halcyond: tile {} restarted", leaf);
                                 tiles.insert(leaf, t);
@@ -2314,6 +2449,7 @@ pub fn run(home: Option<String>) -> i64 {
                                 // The surface went with the failed spawn (its
                                 // drop destroys it): the leaf closes.
                                 say!("halcyond: tile {} restart failed -- closing", leaf);
+                                if let Some(p) = places.as_mut() { p.unregister_leaf(leaf); }
                                 closed.insert(leaf);
                             }
                         }
@@ -2564,6 +2700,15 @@ pub fn run(home: Option<String>) -> i64 {
                 up_leaves.push(leaf);
             }
         }
+        // (4a) I-47 (14.7.2): the per-pane inline-media place service joins the
+        // wait so a `view` write wakes the loop. Appended AFTER the up entries
+        // (the up_leaves[i] <-> fds[i+1] map is untouched) and BEFORE the down
+        // entries (so it counts toward the POLL_MAX_NFDS cap); serviced below by
+        // its own non-blocking pass, which re-polls its own fds. Bounded to
+        // 1 + MAX_CONNS fds.
+        if let Some(p) = places.as_ref() {
+            p.push_fds(&mut fds);
+        }
         // Undelivered input wakes the loop when its pipe has room. Appended
         // AFTER the up entries, so the up_leaves[i] <-> fds[i+1] map holds;
         // capped at the kernel's set ceiling. A tile left OUT has nothing
@@ -2623,6 +2768,34 @@ pub fn run(home: Option<String>) -> i64 {
         for t in tiles.values_mut() {
             if t.exit.is_none() && !t.down.is_empty() {
                 t.drain_down();
+            }
+        }
+
+        // (4b) The text stream orders inline objects; the per-tile raster
+        // cache owns retention. Text and rasters each receive half of the
+        // ONE session budget. Admit against the smallest live cache as well
+        // as the heap residual, so a successful upload fits its pane even
+        // after the budget was redistributed by a new split. MAX_PANES bounds
+        // this share above the place server's 64 Kpx admission floor.
+        if let Some(p) = places.as_mut() {
+            let stored_cap = tiles.values().map(|t| t.tile.media.max_pixels())
+                .min().unwrap_or(0);
+            p.set_budget(place_cap(&gs).min(stored_cap), place_residual(&gs));
+            p.service();
+            for img in p.take_completed() {
+                if let Some(t) = tiles.get_mut(&img.leaf) {
+                    if !t.tile.place_image(img.id, img.w, img.h, img.argb) {
+                        say!("halcyond: session inline leaf={} cache refused", img.leaf);
+                        continue;
+                    }
+                    say!(
+                        "halcyond: session inline leaf={} {}x{}",
+                        img.leaf,
+                        img.w,
+                        img.h
+                    );
+                    t.dirty = true;
+                }
             }
         }
 
@@ -2709,6 +2882,9 @@ pub fn run(home: Option<String>) -> i64 {
         }
         for leaf in reap {
             if let Some(t) = tiles.remove(&leaf) {
+                if let Some(p) = places.as_mut() {
+                    p.unregister_leaf(leaf);
+                }
                 t.teardown();
             }
         }

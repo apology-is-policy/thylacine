@@ -328,12 +328,10 @@ enum {
     VIV_LINUX_GETSID          = 156,
     VIV_LINUX_SETSID          = 157,
 
-    // The time family. Both above the native ceiling (113, 169 > the highest
-    // native syscall), so collision-free by construction -- their collision
-    // re-check is the ceiling argument, discharged by the static_asserts in
-    // vivarium.c beside restart_syscall/socket/clone/execve/wait4, not a
-    // per-number one. These are the calls a libc's timeout path issues; without
-    // them curl/git/TLS cannot bound a wait, and busybox `date` reads 1970.
+    // The time family. Linux clock_gettime (113) overlaps PCI_MAP_WINDOW.
+    // A PHENO_LINUX call is consumed by the Tier-2 translator and invokes the
+    // native CLOCK_GETTIME handler directly, never dispatching raw number 113
+    // as a native call. gettimeofday (169) remains above the native ceiling.
     VIV_LINUX_CLOCK_GETTIME   = 113,
     VIV_LINUX_GETTIMEOFDAY    = 169,
 
@@ -516,10 +514,9 @@ enum {
 // never going to be a person remembering. The assert is now pinned to the
 // SYS__NATIVE_TOP sentinel, which the compiler recomputes on every append.
 //
-// 112 is the post-renumber top: main's SYS_DMA_SEGMENTS moved 110 -> 112 to
-// clear the collision with aux-3's SYS_CONSOLE_EPISODE (110), decided on
-// measured edit cost -- 2 mirror sites here against 6 there.
-#define VIV_NATIVE_CEILING 112
+// PCI mapping windows append 113/114; clock_gettime now has a per-number
+// collision argument above rather than the old ceiling argument.
+#define VIV_NATIVE_CEILING 120
 
 // -----------------------------------------------------------------------------
 // TIER 2 — translators (V-2b).

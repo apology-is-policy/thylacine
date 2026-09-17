@@ -30,7 +30,13 @@ code:
   - usr/halcyond/src/railset.rs
   - usr/halcyond/src/outline.rs
   - usr/halcyond/src/indicator.rs
+  - usr/halcyond/src/placesrv.rs
+  - usr/halcyond/src/paneplace.rs
+  - usr/halcyond/src/inlinecache.rs
+  - usr/halcyond/src/paneroute.rs
+  - usr/halcyond/src/inlineaccum.rs
   - usr/halcyond/Cargo.toml
+  - usr/halcyond/src/viewtest.rs
 audit: hard
 guarded-by: []
 validated-by: [prose, gate-interactive]
@@ -39,7 +45,7 @@ hazards: [haz-budget-stored-not-derived]
 abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md", "docs/HALCYON-INSTRUMENT.md"]
 created: 2026-09-05
-updated: 2026-09-16
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -546,6 +552,105 @@ while the reader is back in history an append keeps them there -- so the
 indicator never reports "at end" until they return.** The picker reuses the same
 arithmetic through `thumb_raw` with its own smaller floor (`PICKER_MIN_THUMB`).
 
+### The inline-media place channel (I-47; the `view` reader side)
+
+halcyond receives decoded rasters from a short-lived `view` process and injects
+them into the transcript as `Item::Image` blocks (rendered by the already-built
+`cartoon::Op::Image`). The DECODE runs in `view`, never here (the blast-radius
+amendment; see [[sub-view]] for the writer + the `inlinewire` contract) -- so
+halcyond's exposure is a bounded WRITE of untrusted bytes, not a codec.
+
+- **The server** (`placesrv.rs`, the console `rs_main` path only): once the
+  console is up halcyond posts `/srv/halcyon` (a minimal 9P2000.L service; it
+  holds the console renderer's `MAY_POST_SERVICE` grant, joey ORs it beside
+  `CONSOLE_RENDERER`). The namespace is two nodes -- the root dir and a
+  write-only `place` file. The listener + live conns join the loop's unified
+  `poll(2)` (a write wakes the renderer at once), and one non-blocking
+  `service()` pass per loop accepts + drains complete frames, exactly like the
+  console drain (the same one-pass inject latency). The 9P codec is the shared
+  `libthyla_rs::ninep` server codec; the dispatch/fid/frame-read shape is
+  nocturned's (`usr/nocturned/src/server.rs`, not yet dossiered).
+- **The accumulator** (`inlineaccum.rs`, the PURE, host-tested brain): a `place`
+  write carries an `inlinewire` header (magic/format/w/h) then the ARGB payload.
+  `PlaceAccum::write` validates the header -- magic, `FORMAT_ARGB8888`,
+  dimensions, and a heap-safe per-image pixel cap (`PLACE_MAX_PIXELS` = 1 Mpx,
+  deliberately BELOW `inlinewire::MAX_PIXELS`, so a decoded raster cannot exhaust
+  halcyond's fixed 64 MiB heap) -- BEFORE it allocates a byte of payload, and
+  `reserve_exact`s the exact `total_len` so the buffer never Vec-doubles (the
+  audit-F2 2x overshoot); accumulates sequential writes bounded by the header's
+  own declared total; and on completion yields the `w*h` ARGB `Vec<u32>` for
+  `Transcript::inject_image`. A clunk mid-transfer discards the partial; a
+  malformed / over-cap / non-sequential / trailing-past-total write is refused
+  (Rlerror) and the transfer torn down. This is the format-fuzz surface, and it
+  is where the tests live (Invariants + Tests below).
+  - **The heap budget** (audit F1/F4, the OOM the round found + closed): the cap
+    bounds ONE image; `MAX_CONNS` = 1 bounds how many accumulate at once (one), so
+    with `reserve_exact` the whole place path peaks at `8 bytes x pixels` (a 4 MiB
+    accumulator + a 4 MiB completion `Vec<u32>` at 1 Mpx). The per-image cap is
+    DISPLAY-ADAPTIVE (`main.rs place_cap_for` -> `PlaceServer::set_max_pixels` each
+    loop): the atlas scales with the scanout (~6 MiB at 1280x800, ~18 MiB at 4K),
+    so the cap is the heap RESIDUAL after it -- holding the full 1 Mpx (native-size)
+    through 2560x1600 (the operator's HiDPI) and shrinking only past ~3K, where a
+    fixed 8 MiB place peak beside the ~18 MiB atlas + 32 MiB transcript would
+    OOM. The round-1 defect was `MAX_CONNS`=4 x a doubled 16 MiB = the whole heap;
+    the round-2 F4 refinement was the atlas term. Raising `MAX_CONNS` requires a
+    real cross-connection byte budget -- do NOT bump it alone.
+- **Authority** (the console spike): none beyond reachability. Injecting an image
+  into the console transcript is at parity with writing text to `/dev/cons`
+  (which any holder of the console already can), so the spike gates on
+  format-fuzz safety + the resource bound, not a peer-identity check; the
+  per-pane token + quota land with the session-path channel (below).
+
+#### The session-path channel (I-47, HALCYON.md 14.7.2; the per-user, per-pane deployment)
+
+The `--session` compositor owns each tile's transcript itself (the RICH tier),
+so inline media in a session tile needs a session-side place server that ROUTES
+each raster to the tile it came from. `paneplace.rs` (the syscall shell) +
+`paneroute.rs` (the PURE, host-tested routing core) provide it; the payload core
+(`inlineaccum` + `inlinewire`) is shared with the console spike unchanged.
+
+- **One per-user service** `/srv/halcyon-<user>` (`PanePlaceServer::post`;
+  `session_user()` reads + validates `/env/USER`, login seeds it and grants
+  `MAY_POST_SERVICE` one hop). A failed post degrades cleanly -- the session runs
+  with inline media unavailable.
+- **The per-pane token is a PATH COMPONENT.** For each tile the compositor mints
+  a fresh CSPRNG `u128` (`mint_place_token` -> `t_getrandom`), `register`s
+  `token -> leaf` in the server, and writes the FULLY-RESOLVED address
+  `/srv/halcyon-<user>/<hex(token)>/place` into that pane's `/env/HALCYON_PLACE`
+  in `SessionTile::spawn` -- BEFORE `cmd.spawn()` so the child snapshots it via
+  the per-Proc `/env` copy-at-spawn (`env_clone_into`), and REMOVED after so the
+  compositor's own `/env` and the next tile's snapshot stay clean. Every program
+  in the pane (`ut`, then `view`) inherits ITS pane's address transitively; no
+  other pane can name it (per-Proc `/env` isolation) and it is unguessable.
+- **The namespace is dynamic** (`paneroute::walk_child`): the root's children are
+  the live token dirs `<hex>` (validated against the routes map, fail-closed
+  `E_NOENT` on an unknown/dead token -- `parse_hex32` accepts ONLY the canonical
+  32 lowercase-hex spelling, so a token has no alias), each holding a write-only
+  `place`. HPL2 adds a placement ID to the raster header; the routing token stays
+  outside the payload and is checked at the walk.
+- **Two authority axes.** (1) the secret token above; (2) a PEER-PRINCIPAL gate
+  at accept (`peer_is_session_user` -> `t_srv_peer`): a connection whose peer is
+  not the session's own user is refused, so even a leaked token cannot let a
+  different user place into the session. A `view` runs AS the user (tiles never
+  elevate, `!T_CAP_SET_IDENTITY`), so a legitimate write always passes.
+- **Routing + TOCTOU.** Completions are TAGGED with the target leaf
+  (`PaneCompletedImage { leaf, .. }`); the compositor drains them each loop and
+  stores into `tiles[leaf].tile.media`. A standalone `inline-image` object
+  caption in the tile's text stream selects the raster at its ordered position. A token whose tile closed between
+  walk and completion resolves to nothing at completion -> the raster is DROPPED
+  (the pane is gone), never misrouted. `unregister_leaf` drops a closed tile's
+  route at every reap site (reconcile drop, the surface-event reap, the ingest
+  reap).
+- **The DoS floor.** `MAX_CONNS` = 2 bounds concurrent transfers (a third
+  `view` WAITS); the per-image cap is `place_cap(&gs)` = the same heap residual
+  as the console DIVIDED by `MAX_CONNS`, so the aggregate in-flight
+  (`MAX_CONNS x per-image-peak`) stays within the residual at every display scale
+  -- a static bound, no cross-connection byte sum, `inlineaccum` untouched. The
+  per-pane stored budget is split equally between transcript and raster cache.
+  The cache holds at most 64 images and evicts FIFO under byte pressure. Missing
+  rasters render the original caption. Cache changes invalidate layout heights;
+  ID zero is reserved for console direct insertion.
+
 ## Data structures
 
 - `Transcript` -- zones -> `Block`s (cells + styles + objs + tables); the
@@ -559,6 +664,20 @@ arithmetic through `thumb_raw` with its own smaller floor (`PICKER_MIN_THUMB`).
   (latest-wins, ahead of keys), delivered one byte per ready POLLOUT.
 - `EventRing` (from [[sub-libtapestry]]) -- the one SQPOLL session + ring every
   surface shares.
+- `PlaceServer` / `Conn` / `PlaceAccum` (`placesrv.rs` + `inlineaccum.rs`, I-47) --
+  the `/srv/halcyon` listener + its bounded conn table (`MAX_CONNS` = 1 -- the
+  console spike drives one `view`; a second connection waits, bounded acceptance;
+  the audit-F1 heap-budget term, each fid table `MAX_FIDS` = 8) + the
+  per-connection single-in-flight place accumulator; completed rasters queue in
+  `PlaceServer.completed`, drained per loop into `Transcript::inject_image`.
+- `PanePlaceServer` / `Conn` / `Fid{node}` (`paneplace.rs`, I-47, the session
+  deployment) -- the `/srv/halcyon-<user>` listener + `routes: BTreeMap<u128,u32>`
+  (token -> live leaf) + `principal` (the accept gate) + `user` (the addresses it
+  hands panes) + `max_pixels`; `MAX_CONNS` = 2. A fid's node is
+  `paneroute::Node` (`Root` | `Dir(token)` | `Place(token)`); completions are
+  `PaneCompletedImage { leaf, w, h, argb }`. `paneroute` (PURE): `hex32` /
+  `parse_hex32` (the canonical 32-lowercase-hex token codec) + `walk_child` (the
+  fail-closed namespace walk).
 - Budget constants: `SESSION_SCROLLBACK_BUDGET` = 32 MiB (shared by tile count
   via `set_max_cost`), `OPEN_BLOCK_MAX_COST` = 512 KiB (freezes a newline-free
   open block), `POLL_MAX_NFDS` = 64 (the unified-poll fan cap), `DECLARE_TRIES`
@@ -614,6 +733,25 @@ anchors are the H-2 / H-3b / H-3c / H-3d / KT-1 trigger rows +
   (`ITEM_OVERHEAD` per line) + a per-block line cap + `OPEN_BLOCK_MAX_COST`; in
   the session one `SESSION_SCROLLBACK_BUDGET` shared by tile count, evicting AT
   ONCE.
+- **The place channel validates before it allocates** (I-47, format-fuzz class).
+  `PlaceAccum` parses + fully validates the `inlinewire` header (magic, format,
+  dimensions, and a heap-safe `PLACE_MAX_PIXELS` cap tighter than the wire's own)
+  from a 16-byte prefix BEFORE buffering a payload byte; each write is
+  sequential-only and cannot grow the buffer past the header's declared total;
+  a clunk mid-transfer discards the partial. So a hostile / oversize / truncated
+  place-request can neither drive a large reserve nor exhaust the renderer's
+  fixed heap -- it is refused (Rlerror) and the transfer torn down.
+- **The session-path channel is pane-isolated on TWO axes** (I-47/I-1/I-22, the
+  `--session` deployment). A place-request reaches only the pane that owns the
+  secret token: the token is a CSPRNG `u128` path component living solely in that
+  pane's per-Proc `/env` (unguessable + unnameable by another pane), validated
+  fail-closed at the 9P walk against the live routes map; AND the accept refuses
+  any peer that is not the session's own user (`t_srv_peer`), so a leaked token
+  cannot cross a user boundary. A completed raster whose tile is gone is DROPPED,
+  never misrouted. The aggregate in-flight is bounded statically
+  (`MAX_CONNS x` the residual-derived per-image cap); the per-pane STORED bytes +
+  live-placement count are bounded by the tile transcript's content budget,
+  failing clean.
 
 ## Error paths
 
@@ -679,11 +817,25 @@ presents are a recorded optimization.
   (`Blur`); a future op added without touching it fails nothing until
   somebody runs the host suite.
 
+- **The place channel against a hostile writer** (I-47). The `inlinewire` header
+  parse (validate-before-allocate); the `PLACE_MAX_PIXELS` heap cap; the
+  sequential-only, bounded-by-declared-total accumulation; the discard on a
+  clunk / a malformed-write teardown; the bounded conn + fid tables; the
+  single-in-flight-per-conn guard. The accumulator is `inlineaccum`, host-tested
+  adversarially (Tests).
+
 ## Seams
 
 - Raw-VT panes (H-3; `raw_vt_intent` latches today), compose (H-5), the vk
-  executor + the display-list wire (H-6), images/`Embed` (H-7) are unbuilt; the
-  executor carries `Image`/`Embed` ops no transcript path emits yet.
+  executor + the display-list wire (H-6) are unbuilt.
+- **Inline images are BUILT** (I-47), on BOTH deployments: the console spike
+  (`/srv/halcyon`, single service, `placesrv.rs`) AND the per-user SESSION-path
+  channel (`/srv/halcyon-<user>` + per-pane token routing + the two-axis
+  authority + the residual/`MAX_CONNS` cap, `paneplace.rs` + `paneroute.rs`) --
+  the transcript emits `Item::Image`, rendered by `cartoon::Op::Image`, and JPEG
+  (the `view` decoder) + `--fullscreen` (`gallery`) are done. Remaining
+  inline-media seams: `Embed` (the out-of-band pixel surface for video). See
+  [[sub-view]].
 - The session-tier settings verbs (the settings push) are unbuilt.
 - The 14.5 dialog family's DIRTY-close variant (`This tile has unsaved
   changes.`) and its one-line prompt have no producer: no program declares
@@ -721,6 +873,24 @@ presents are a recorded optimization.
   `[build] target = "aarch64-unknown-none"`, so without the override the run dies
   at `E0463: can't find crate for 'test'` (this row said otherwise until
   2026-09-15 -- the stated invocation had never been runnable as written). They pin the streaming determinism, wrap/alignment/boxes, the
+
+- **Host: 227 `#[test]` across the lib modules** (measured `cargo test -p
+  halcyond --lib --no-default-features`), including **paneroute's 5** (the I-47
+  session-path routing core: the 32-hex token codec round-trips; `parse_hex32`
+  accepts ONLY the canonical form -- rejecting short/long/uppercase/non-hex so a
+  token has no alias; `walk_child` resolves only LIVE tokens and fail-closes on a
+  dead one; `.`/`..` climb; the address tail matches the walk) and
+  **inlineaccum's 11** (the I-47 place-request accumulator, adversarial:
+  `set_max_pixels_gates_the_reused_accum` -- the F2 regression, discriminating
+  that a refreshed cap gates a reused accum's next image; plus a
+  one-write and a split-write complete
+  to the right pixels; bad magic, over-cap dimensions, a giant-claiming header,
+  a non-sequential offset, and trailing bytes past the total each Reject; two
+  images on one fid; a partial-then-abandoned stays incomplete; and
+  `capacity_is_exact_no_doubling` -- the audit-F2 regression that the buffer
+  `reserve_exact`s to `total_len` with no Vec doubling -- the
+  validate-before-allocate + bounded-accumulation contract). They pin the
+  streaming determinism, wrap/alignment/boxes, the
   word-through-executor leg, the held-feed arms, the obj-run walk +
   `run_rect`/`hit_run` agreement, the menu cap + window, the windowed render (a
   warm render lays <= 4 blocks / <= 12 lines for 200 blocks of history; the
@@ -1014,3 +1184,29 @@ witnesses, as they were for round 1's F5/F6 and round 2's F6.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)
+
+
+The session media test exercises live inline pixels, Gallery zoom/escape and
+manual review captures. Host tests cover 325 Halcyon cases after adding caption
+resolution controls (all 325 pass). Test-mode chrome geometry diagnostics now
+track moves/resizes as well as initial mint, so interaction gates can use the
+current pane tree rather than stale coordinates.
+
+### Lex curiata visual approval (2026-09-17)
+
+The operator approved the Lex curiata visual specification: a fullscreen
+trusted takeover, an immutable frozen workspace backdrop dimmed and blurred,
+and a central Instrument-styled authorization panel. CORVUS / LEX CURIATA
+identifies the trusted scene; Provincia and Term show the requested authority
+and its exact lifetime. See `docs/HALCYON-TRUSTED-EPISODE.md` for the display and
+input ownership contract. This is an approved visual design, not a claim that
+the ordinary userspace compositor is a trusted sink. Serial secure attention
+remains the implemented path pending trusted scanout ownership.
+
+Session inline admission uses the smaller of the transient heap cap and the
+smallest live raster cache allowance. Text and raster caches already split the
+shared content budget; admission must not halve the text half a second time.
+Completion rechecks the current cap before replying, so a split during upload
+cannot report success for a now-oversized raster. Session uploads require a
+nonzero HPL2 image ID, and a token whose pane disappeared returns ENOENT;
+the legacy console's id-less wire path remains separate.

@@ -65,50 +65,55 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**456 owned · 52 unowned · 508 files (89% owned) · ~14005 unswept lines.**
+**491 owned · 53 unowned · 544 files (90% owned) · ~14206 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **67 files, ~30991 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **73 files, ~32738 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
 | usr/warp-prove | 0 | 1 | 4349 |
 | usr/pouch-hello | 0 | 22 | 3384 |
-| kernel | 124 | 14 | 1910 |
-| usr/ports | 14 | 4 | 1631 |
-| usr/quarry | 0 | 1 | 1028 |
+| kernel | 126 | 14 | 1910 |
+| usr/ports | 19 | 4 | 1631 |
+| usr/quarry | 0 | 1 | 1033 |
 | usr/stratumd-stub | 0 | 1 | 453 |
 | usr/kaua-term | 3 | 1 | 276 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
 | usr/tapestryd | 8 | 2 | 236 |
-| arch | 36 | 2 | 146 |
+| usr/libthyla-rs | 29 | 1 | 196 |
+| arch | 41 | 2 | 146 |
 | usr/susp-mask-child | 0 | 1 | 139 |
 | usr/stub-driver | 0 | 1 | 119 |
-| usr/lib | 64 | 1 | 72 |
+| usr/lib | 66 | 1 | 72 |
 | mm | 8 | 0 | 0 |
 | usr/aurora | 4 | 0 | 0 |
 | usr/coreutils | 60 | 0 | 0 |
 | usr/corvus | 2 | 0 | 0 |
 | usr/curl | 3 | 0 | 0 |
 | usr/diorama | 2 | 0 | 0 |
+| usr/gallery | 2 | 0 | 0 |
 | usr/halcyon | 2 | 0 | 0 |
-| usr/halcyond | 26 | 0 | 0 |
+| usr/halcyond | 32 | 0 | 0 |
 | usr/haul | 5 | 0 | 0 |
 | usr/httpd | 1 | 0 | 0 |
 | usr/https | 1 | 0 | 0 |
 | usr/imperium | 1 | 0 | 0 |
 | usr/joey | 1 | 0 | 0 |
-| usr/libthyla-rs | 29 | 0 | 0 |
 | usr/login | 1 | 0 | 0 |
 | usr/loom-stress | 1 | 0 | 0 |
+| usr/manual | 7 | 0 | 0 |
 | usr/net-echo | 1 | 0 | 0 |
 | usr/netd | 3 | 0 | 0 |
 | usr/netdev-driver | 1 | 0 | 0 |
+| usr/nocturne-vol | 1 | 0 | 0 |
+| usr/nocturned | 3 | 0 | 0 |
 | usr/nora | 13 | 0 | 0 |
 | usr/prowl | 3 | 0 | 0 |
 | usr/ptyfs | 2 | 0 | 0 |
 | usr/ptyhost | 1 | 0 | 0 |
 | usr/sntp | 1 | 0 | 0 |
 | usr/utopia | 26 | 0 | 0 |
+| usr/view | 2 | 0 | 0 |
 | usr/virtio-blk-rw | 1 | 0 | 0 |
 | usr/virtio-gpu | 1 | 0 | 0 |
 | usr/virtio-input | 1 | 0 | 0 |
@@ -124,7 +129,7 @@ Excluded as harness and counted here rather than dropped: **67 files, ~30991 lin
 |---|---:|
 | usr/warp-prove/src/main.rs | 4349 |
 | usr/ports/gnumake/config.h | 1357 |
-| usr/quarry/src/main.rs | 1028 |
+| usr/quarry/src/main.rs | 1033 |
 | usr/stratumd-stub/stratumd-stub.c | 453 |
 | kernel/include/thylacine/errno.h | 388 |
 | usr/pouch-hello/pouch-hello-sockets.c | 366 |
@@ -139,6 +144,7 @@ Excluded as harness and counted here rather than dropped: **67 files, ~30991 lin
 | usr/tapestryd/src/skein.rs | 217 |
 | kernel/include/thylacine/spinlock.h | 204 |
 | kernel/include/thylacine/context.h | 201 |
+| usr/lib/libthyla-rs/src/sync.rs | 196 |
 | usr/pouch-hello/pouch-hello-sodium.c | 196 |
 | usr/pouch-hello/pouch-hello-poll.c | 179 |
 | usr/ports/gnumake/generated/glob.h | 163 |

@@ -29,7 +29,8 @@
 #include <thylacine/mmio_handle.h>
 #include <thylacine/notes.h>
 #include <thylacine/page.h>
-#include <thylacine/pci_handle.h>  // audit F8: quiesce a PCI-transport driver at death
+#include <thylacine/pci_handle.h>
+#include <thylacine/pci_irq.h>  // audit F8: quiesce a PCI-transport driver at death
 #include <thylacine/path.h>        // VIVARIUM V-4a-0: Proc.exe_path (#66 Path)
 #include <thylacine/poll.h>        // child_waiters multi-waiter reap (#344)
 #include <thylacine/territory.h>
@@ -571,6 +572,14 @@ int proc_quiesce_owned_devices(struct Proc *p) {
                     reset += kobj_pci_quiesce(kp) ? 1 : 0;
                 continue;
             }
+            if (h->kind == KOBJ_IRQ && h->obj) {
+                struct KObj_PCI *kp = pci_irq_owner((struct KObj_IRQ *)h->obj);
+                if (kp) {
+                    if (__atomic_load_n(&kp->hostmem_burrows, __ATOMIC_ACQUIRE) > 0)
+                        reset += kobj_pci_quiesce_dma_only(kp) ? 1 : 0;
+                    else reset += kobj_pci_quiesce(kp) ? 1 : 0;
+                }
+            }
             if (h->kind != KOBJ_MMIO || !h->obj) continue;
             struct KObj_MMIO *k = (struct KObj_MMIO *)h->obj;
             reset += virtio_mmio_reset_in_range(k->pa, k->size);
@@ -615,6 +624,16 @@ int proc_quiesce_owned_devices(struct Proc *p) {
     for (struct Vma *v = as_sole ? p->as->vmas : NULL; v; v = v->next) {
         struct Burrow *b = v->burrow;
         if (!b || b->type != BURROW_TYPE_MMIO || !b->kobj_mmio) continue;
+        if (b->kobj_pci) {
+            // PCI BAR mappings can outlive a closed PCI handle. Quiesce DMA
+            // before tearing down ANY of this address space's DMA buffers.
+            struct KObj_PCI *kp = b->kobj_pci;
+            if (__atomic_load_n(&kp->hostmem_burrows, __ATOMIC_ACQUIRE) > 0)
+                reset += kobj_pci_quiesce_dma_only(kp) ? 1 : 0;
+            else
+                reset += kobj_pci_quiesce(kp) ? 1 : 0;
+            continue;
+        }
         struct KObj_MMIO *k = b->kobj_mmio;
         reset += virtio_mmio_reset_in_range(k->pa, k->size);
     }
@@ -2615,6 +2634,7 @@ struct peer_snapshot_ctx {
     u32    principal_id;  // OUT — A-1a: the peer's durable identity
     u32    primary_gid;   // OUT — A-1a: the peer's primary group
     bool   renderer;      // OUT — cfg-3: matched Proc IS g_console_renderer
+    bool   console_owner; // OUT — N-3a-3: matched Proc's session OWNS the console
     int    pid;           // OUT — V-4a-0b: the peer's pid (the diorama's `self`)
     bool   found;         // OUT — set once an ALIVE Proc matched
 };
@@ -2633,6 +2653,13 @@ static int peer_snapshot_cb(struct Proc *p, void *arg) {
         // (proc_for_each holds it across the walk) — a match implies a live
         // holder; compare-only, never a deref.
         c->renderer     = (g_console_renderer == p);
+        // N-3a-3 (NOCTURNE.md 6.8): does the matched peer's session OWN the
+        // console (the person at the keyboard)? Compare-only, under the SAME
+        // g_proc_table_lock proc_for_each holds -- exactly the renderer pattern
+        // and console_session_match's own discipline: read the owner's sid (0 if
+        // no owner, e.g. post-SAK -> fail-closed) vs the peer's, never a deref.
+        c->console_owner = console_session_match(
+            g_console_owner ? g_console_owner->sid : 0u, p->sid);
         // V-4a-0b: the pid rides the SAME alive-gated snapshot as caps +
         // identity, so a dead/reaped peer fail-closes to 0 -- never a stale
         // pid a server could resolve against a REUSED table entry.
@@ -2645,19 +2672,21 @@ static int peer_snapshot_cb(struct Proc *p, void *arg) {
 
 bool proc_peer_snapshot_by_stripes(u64 stripes, caps_t *caps_out,
                                    u32 *principal_out, u32 *primary_gid_out,
-                                   bool *renderer_out, int *pid_out) {
+                                   bool *renderer_out, int *pid_out,
+                                   bool *console_owner_out) {
     // 0 is the reserved fail-closed sentinel; no Proc is ever stamped 0,
     // so it can never match. Reject it before the scan. Out-params may be
     // NULL — the caller takes only what it needs.
     if (stripes == 0) return false;
 
-    struct peer_snapshot_ctx ctx = { .stripes      = stripes,
-                                     .caps         = 0,
-                                     .principal_id = PRINCIPAL_NONE,
-                                     .primary_gid  = GID_NONE,
-                                     .renderer     = false,
-                                     .pid          = 0,
-                                     .found        = false };
+    struct peer_snapshot_ctx ctx = { .stripes       = stripes,
+                                     .caps          = 0,
+                                     .principal_id  = PRINCIPAL_NONE,
+                                     .primary_gid   = GID_NONE,
+                                     .renderer      = false,
+                                     .console_owner = false,
+                                     .pid           = 0,
+                                     .found         = false };
     // proc_for_each holds g_proc_table_lock across the whole DFS, so the
     // callback's "is this Proc ALIVE" test and its field reads are one
     // snapshot under the lock. Only VALUES escape — never the Proc pointer
@@ -2669,6 +2698,7 @@ bool proc_peer_snapshot_by_stripes(u64 stripes, caps_t *caps_out,
     if (primary_gid_out) *primary_gid_out = ctx.primary_gid;
     if (renderer_out)    *renderer_out    = ctx.renderer;
     if (pid_out)         *pid_out         = ctx.pid;
+    if (console_owner_out) *console_owner_out = ctx.console_owner;
     return true;
 }
 
@@ -2677,7 +2707,7 @@ bool proc_peer_snapshot_by_stripes(u64 stripes, caps_t *caps_out,
 // specs/corvus.tla ConnOpPeerWasLive) unchanged for current callers.
 bool proc_caps_by_stripes(u64 stripes, caps_t *caps_out) {
     if (!caps_out) return false;
-    return proc_peer_snapshot_by_stripes(stripes, caps_out, NULL, NULL, NULL, NULL);
+    return proc_peer_snapshot_by_stripes(stripes, caps_out, NULL, NULL, NULL, NULL, NULL);
 }
 
 // A-1a: proc_apply_identity — the single audited identity mutation site.
@@ -2848,8 +2878,12 @@ void proc_legate_teardown_if_root(struct Proc *p) {
 // userspace cross-Proc kill -- so it is NOT I-26-gated (login lacks CAP_KILL by
 // design; the kernel does the hangup). It implements A-5 decision (3)'s "no
 // orphaned session Proc": logout reclaims the user's session so its per-user
-// encrypted-home mount is fully released (with Part D, each member releases its
-// mount ref at its own exit). `except = p`: the leader dies via the surrounding
+// encrypted-home mount is released for the in-session process tree (with Part D,
+// each terminated member releases its mount ref at its own exit). A member that
+// SYS_SETSID's out of the session escapes this sweep and keeps its mount ref
+// pinned -- the narrow residual tracked as arm-6 F2 (the robust cure bounds the
+// mount to the DEK lease, not to session membership). `except = p`: the leader
+// dies via the surrounding
 // zombie transition. A non-armed Proc, or an armed non-leader (a setsid that
 // somehow did not take), is a no-op. PRECONDITION: caller holds
 // g_proc_table_lock (the LOCKED proc_for_each_walk; proc_group_terminate is a
@@ -2863,6 +2897,16 @@ static int session_hangup_cb(struct Proc *m, void *arg) {
     struct session_hangup_ctx *ctx = arg;
     if (m == ctx->except)  return 0;
     if (m == g_kproc)      return 0;
+    // ISOLATION DEPENDENCY (arm-6 F1): sid == leader-pid identifies EXACTLY the
+    // leader's genuine fork-descendants ONLY because pids never recycle
+    // (g_next_pid is strictly monotonic + extincts at INT_MAX rather than
+    // wrapping -- proc_alloc). A member's sid is set only to its own pid (setsid)
+    // or inherited from its parent (rfork), so the value leader-pid propagates
+    // solely down the leader's subtree. If pid recycling is ever introduced (a
+    // free-list / a wrap), a stale sid on an orphaned member of a DEFUNCT
+    // same-numbered session could alias here -> a cross-session termination.
+    // Unlike the legate teardown this mirrors (which keys on a dedicated
+    // non-reusable legate_scope_id), this path leans on the pid property.
     if (m->state == PROC_STATE_ALIVE && (u32)m->sid == ctx->sid)
         proc_group_terminate(m, "session leader exit");
     return 0;   // visit every Proc

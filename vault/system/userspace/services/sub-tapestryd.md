@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
-updated: 2026-09-16
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -65,6 +65,21 @@ because the session **is** the capability.
 **The pane and layout tree is deliberately connection-global.** F2 gates
 surfaces; it never gates the shared tree, because the tree is the window
 manager's, not any one client's.
+
+### Native application metadata
+
+A hosted surface's `title TEXT` control updates its hosting pane's canonical
+`tag` and sends the session a layout event. Halcyon reads that tag for native
+applications as well as its own shell panes; there is no second, unread title
+store. The surface control remains restricted to the owning connection and
+cannot name a different pane. An unhosted surface has no pane title and the
+operation returns `EINVAL`.
+
+The layout text marks system-background leaves with an optional `backgrounded`
+token after the geometry/weight. This is distinct from `hidden`, which also
+covers foreground tabs and zoomed-out siblings. Halcyon's footer excludes
+background leaves explicitly; absence of a session PTY does not imply a
+background renderer. Gallery and other native graphical clients count as panes.
 
 ### The Warp tree — `/srv/warp`
 
@@ -2881,3 +2896,28 @@ of 2011 MiB, 600 console relayouts, kernel suite 1527/1527. Sabotage-measured
 **What no host test reaches.** `server.rs` is bin-only. The F2-F6/F8 fixes and
 the window wiring are witnessed by the gates, not host tests; the window itself
 is host-tested in `va.rs` (7 tests, including a 20000-frame drag).
+
+## Polled input and shared PCI lines
+
+`InputDev` still suppresses event-queue notifications; its claimed PCI function
+now also starts electrically quiet under the kernel's POLLED default. A pending
+configuration ISR can no longer assert the shared wire. GPU completion uses a
+function-bound endpoint: initial arm, ticket wait, drain/ISR acknowledgement,
+device barrier, then explicit completion. EAGAIN keeps the source masked and
+WAIT supplies a delayed retry. Warden grants BDF authority without raw IRQs.
+[[sub-kernel-pci-irq]] owns the protocol. GPU config/control/cursor queues
+select one readback-verified MSI-X vector through `PciIrq::for_virtio`, with
+initialization rollback before INTx fallback. Only INTx paths read ISR.
+
+Gpu Drop resets before endpoint/mapping/DMA field destruction. Fenced-lane DMA
+allocation failure after DRIVER_OK also resets before the earlier ring unwinds.
+Shared-INTx Instrument runs pass three times on HVF; MSI-X runs
+pass twice on HVF. The live Instrument workspace was inspected at 1280x800.
+Both synchronous waits and the asynchronous serve-loop pump now drain the
+used ring and complete the interrupt ticket. Idle queues still service a
+notification for work already retired by spin polling. Each asynchronous pass
+uses one bounded wait and leaves cooldown tickets for a later pass, so it
+cannot spin on shared-line retries. Live verification passes on ITS/TCG (176 seconds) and on GICv3/TCG with
+ITS disabled (174 seconds). The latter samples sound stable at 190 deliveries
+while GPU advances 309 -> 339 over eight seconds, with no retries/cooldowns.
+The full controller/mode/SMP matrix remains open. This work is not yet in main.

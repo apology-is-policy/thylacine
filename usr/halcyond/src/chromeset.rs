@@ -330,14 +330,9 @@ impl ChromeSet {
         };
         let inst = sheet.profile == Profile::Instrument;
         let tree = parse_tree(&layout);
-        // The owner's own surface is never foreign, whatever `describe` says
-        // of it on the first pass (r1 B-F8).
-        let panes = halcyond::rail::pane_count(&tree, |t| {
-            t.leaf.surface.is_some()
-                && t.leaf.surface != Some(own_surface)
-                && describe(t.leaf.id).is_none()
-        })
-        .max(1);
+        // Native graphical applications are foreground panes too. Only the
+        // compositor's explicit system-background state excludes a leaf.
+        let panes = halcyond::rail::pane_count(&tree).max(1);
         // Said on a change, under Instrument only (test builds): a gate reads
         // the count and the leaves behind it; the legacy console's transcript
         // must not grow a row for it.
@@ -462,6 +457,16 @@ impl ChromeSet {
                     t.name = w.name;
                     t.trail = w.trail;
                     t.meta = w.meta;
+                    // The header can move after the welcome splits/reorders
+                    // panes. Keep test geometry current, not just its mint
+                    // position; input/pixel probes must follow the live tree.
+                    #[cfg(feature = "test-mode")]
+                    if inst && (t.origin != w.origin || t.surf.w != w.w || t.surf.h != w.h) {
+                        say(&format!(
+                            "halcyond: chrome {} for pane {} at {},{} {}x{}",
+                            t.surf.id, w.id, w.origin.0, w.origin.1, w.w, w.h
+                        ));
+                    }
                     t.origin = w.origin;
                     if t.kind != w.kind {
                         t.kind = w.kind;

@@ -257,6 +257,59 @@ func TestMirrorsCheckedGrandfathersCommitted(t *testing.T) {
 		"chg-2026-01-01-t.md: touched abi has 3 mirrors; mirrors-checked covers 2")
 }
 
+// The grandfather (dirty vs HEAD) must survive a merge in progress. During a
+// merge HEAD is the first parent, so `git status` marks EVERY path the merge
+// introduced as dirty -- including a chg brought in unchanged from the merged
+// branch. Without the merge-aware refinement that chg is wrongly held to the
+// abi's current (grown) mirror set and wedges the merge commit -- the exact
+// break an aux<-main merge hit landing Nocturne N-2 (aux, 2026-09-05).
+func TestMirrorsCheckedGrandfathersMergedIn(t *testing.T) {
+	root := fixtureGit(t)
+	writeNote(t, root, "vault/abis/abi-t.md",
+		"---\nid: abi-t\ntype: abi\nkind: struct\nstability: append-only\n"+
+			"pinned-by: []\nmirrors: [usr/lib/a.rs, usr/lib/b.rs]\n---\nAn ABI.\n")
+	gitT(t, root, "add", "-A")
+	gitT(t, root, "commit", "-qm", "base: abi-t with 2 mirrors")
+
+	// An incoming branch honestly checks both mirrors in a committed chg, then
+	// grows the mirror set in a LATER commit -- so on its tip the chg is
+	// committed + clean + grandfathered.
+	gitT(t, root, "checkout", "-q", "-b", "incoming")
+	mutate(t, root, "vault/record/changes/chg-2026-01-01-t.md",
+		"touched: []", "touched: [abi-t]")
+	mutate(t, root, "vault/record/changes/chg-2026-01-01-t.md",
+		"depth: skeletal\n",
+		"depth: skeletal\nmirrors-checked: [usr/lib/a.rs, usr/lib/b.rs]\n")
+	gitT(t, root, "add", "-A")
+	gitT(t, root, "commit", "-qm", "incoming: chg-t checks both mirrors")
+	mutate(t, root, "vault/abis/abi-t.md",
+		"mirrors: [usr/lib/a.rs, usr/lib/b.rs]",
+		"mirrors: [usr/lib/a.rs, usr/lib/b.rs, usr/lib/c.rs]")
+	gitT(t, root, "add", "-A")
+	gitT(t, root, "commit", "-qm", "incoming: grow abi-t to 3 mirrors")
+
+	// Back on the base branch (which has neither the chg edits nor the grown
+	// abi) and merge incoming without committing -- MERGE_HEAD is set and the
+	// worktree now carries both. git-status-vs-HEAD marks chg-t dirty.
+	gitT(t, root, "checkout", "-q", "-")
+	gitT(t, root, "merge", "--no-commit", "--no-ff", "incoming")
+	fails, _ := runLint(root, false)
+	for _, f := range fails {
+		if strings.Contains(f, "chg-2026-01-01-t") &&
+			strings.Contains(f, "mirrors-checked covers") {
+			t.Fatalf("a chg brought in unchanged by a merge must be grandfathered; got %v", fails)
+		}
+	}
+
+	// Control: hand-edit the merged-in chg during the merge. It now differs
+	// from MERGE_HEAD too -- authored now -- so the grown set applies again.
+	mutate(t, root, "vault/record/changes/chg-2026-01-01-t.md",
+		"Change body.", "Change body (resolved during merge).")
+	fails2, _ := runLint(root, false)
+	wantFailContaining(t, fails2,
+		"chg-2026-01-01-t.md: touched abi has 3 mirrors; mirrors-checked covers 2")
+}
+
 func TestFileLineCitationWarnsOnPresentOnly(t *testing.T) {
 	root := fixture(t)
 	mutate(t, root, "vault/system/t/sub-t-x.md",

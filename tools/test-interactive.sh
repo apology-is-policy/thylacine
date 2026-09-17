@@ -22,7 +22,7 @@
 #                               run). 14 gfx scenarios override this to hvf in
 #                               the .exp itself; the timings table reports what
 #                               actually BOOTED, not this.
-#   LS_CI_JOBS=N                scenarios to run at once (default 1). RAM-bound,
+#   LS_CI_JOBS=N                scenarios to run at once (default 3). RAM-bound,
 #                               not core-bound -- each VM takes
 #                               THYLACINE_MEM_MIB. Boot/cmd budgets scale by N.
 #   LS_CI_BOOT_TIMEOUT=N        seconds to reach the shell (300 with a staged
@@ -529,7 +529,19 @@ run_one_scenario() {
         # steps file is the flush-immune live view. `< /dev/null` is a clean stdin;
         # `script` still waits for the wrapped command to exit (verified).
         att_t0=$SECONDS
-        LS_CI_STEPS="$steps" script -q "$transcript" expect -f "$scen" < /dev/null >/dev/null 2>&1
+        # `script` gives expect a controlling PTY (macOS expect 5.45 corrupts its
+        # std channels when stdout is not a tty). BSD (macOS) and util-linux
+        # (Linux, e.g. thyla-pi) take DIFFERENT syntax: BSD is
+        # `script -q <file> <cmd...>`; util-linux is `script -q -e -c "<cmd>" <file>`
+        # where -e propagates the child's exit code -- the PASS/FAIL/SKIP contract
+        # below reads $rc, so on Linux -e is load-bearing, not cosmetic. Detect the
+        # flavor by OS (the run-vm.sh Darwin/Linux precedent), so the interactive
+        # E2Es run on the Pi offload host, not only the mac.
+        if [[ "$(uname -s)" == "Darwin" ]]; then
+            LS_CI_STEPS="$steps" script -q "$transcript" expect -f "$scen" < /dev/null >/dev/null 2>&1
+        else
+            LS_CI_STEPS="$steps" script -q -e -c "expect -f '$scen'" "$transcript" < /dev/null >/dev/null 2>&1
+        fi
         rc=$?
         att_dur=$((SECONDS - att_t0))
         # The accel that ACTUALLY booted, read out of the artifact rather than
@@ -668,9 +680,11 @@ if [[ "$JOBS" -gt 1 && "${LS_CI_POOL_RESTORE:-1}" == "0" ]]; then
     exit 2
 fi
 
-SLOTS="$BUILD_DIR/ls-ci-slots"
-rm -rf "$SLOTS" 2>/dev/null || true
-mkdir -p "$SLOTS"
+# macOS AF_UNIX paths must be shorter than 104 bytes. A checkout path plus
+# a long scenario name exceeds that limit before QEMU can even boot. Keep
+# per-run slot paths short and private; transcripts remain under BUILD_DIR.
+SLOTS="$(mktemp -d /tmp/thyla-ci.XXXXXX)"
+trap 'reap_qemu; rm -rf -- "$SLOTS"' EXIT
 
 # Mint the disk twin ONCE, here, before anything forks. disk_restore creates
 # $DISK_SNAP on demand when it is missing or the size changed, and that path

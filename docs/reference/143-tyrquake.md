@@ -75,7 +75,10 @@ byte-pristine.
    as fix 1. `vid_sdl.c` calls neither, so the SOFTWARE build links happily;
    `vid_sgl.c` calls both around `VID_SetMode`, so **tyr-glquake is the first
    configuration in this tree that can see it**, as an undefined symbol at
-   link rather than a runtime fault.
+   link rather than a runtime fault. Since N-2a-3 neither build compiles
+   `snd_null.c` (SND=sdl; `snd_sdl.c` defines the pair itself), so this hunk
+   is inert -- kept because the file is still patched and a null build would
+   need it again.
 
    Worth recording for the mechanism rather than the symbol: the fix did not
    work the first time, and it *reported success*. The hunk header promised
@@ -487,7 +490,11 @@ is frame-paced by design (the display clock); benchmarks opt out via
 
 - Mouse-look (virtio-tablet → `TEV_PTR`) is G-7c — keyboard already plays
   Quake, so the gate is met without it.
-- No sound (`-nosound`) — virtio-sound is unbuilt; game audio waits on the
-  audio server (§10 item 4).
+- Sound is ON since Nocturne N-2a-3: both builds compile `snd_sdl.c` (SDL's
+  thylacine audio driver, or its dummy fallback on a soundless boot -- sdl2
+  patch 0003), and the play scenarios run without `-nosound`; `-nosound` is
+  still honoured, and fix 1 still guards that path. Bench legs (quarry)
+  keep `-nosound` for perf isolation. The audio witness is
+  `tools/test-game-audio.sh` (docs/reference/142-sdl-port.md "Audio").
 - The fixed-size-window-in-a-tiling-compositor friction is the doc-142
   seam.

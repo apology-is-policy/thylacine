@@ -10,9 +10,9 @@ validated-by: [spec-net-poll, prose, gate-smp]
 locks: []
 hazards: [haz-driver-panic-dos]
 abis: []
-design: ["docs/NET-DESIGN.md", "docs/NET-THROUGHPUT.md"]
+design: ["docs/NET-DESIGN.md", "docs/NET-THROUGHPUT.md", "docs/NET-CLOSE-DESIGN.md"]
 created: 2026-07-31
-updated: 2026-09-06
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -49,8 +49,23 @@ over-the-mount accept because the direct-method E2Es bypass perm_check).
 **The clone idiom.** Opening `clone` MINTS connection N and rebinds the
 opened fid onto `N/ctl` (the kernel dev9p client accepts the differing
 Rlopen qid); reading ctl yields N. A connection is refcounted by the
-fids naming its subtree; the LAST clunk frees N and removes its socket
-— the only free path.
+fids naming its subtree; the LAST clunk frees N and detaches its Weft mapping.
+An established/closing TCP socket transfers to private retirement metadata,
+carrying only its handle, NIC/loopback stack identity and a 30-second absolute
+deadline. The serve loop discards abandoned RX, drives queued TX/FIN and
+TIME-WAIT, then removes Closed sockets. Expiry aborts/removes and increments
+`close-timeouts`; it never counts as delivery proof. At most 64 TCP transports
+(public plus retiring) and 16 public slots exist. Clone and accept replacement
+check admission before allocating. Metadata is preallocated; public slot reuse
+cannot reach an old transport. TCP loopback migration moves the existing socket.
+`stats` distinguishes `active`, `transports`, `retiring`, and `close-timeouts`.
+
+The approved lifecycle decision is [[dec-2026-09-17-tcp-transport-retirement]].
+The extended resident loopback selftest covers queued TX before last close,
+unread RX, FIN, same-number/new-generation reuse, immediate Weft detach and
+normal TIME-WAIT reaping. A separate bound control verifies both admission
+paths, retained queued bytes, capacity recovery, exact expiry and handshake
+close. These are real smoltcp sockets, with isolated test clock advancement.
 
 **ctl verbs** (`ctl_write`): `connect a.b.c.d!port` (ICMP: a bare IPv4;
 TCP active-open + the #293 deadline arm; UDP ephemeral-bind + record

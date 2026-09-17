@@ -321,9 +321,47 @@ These are not v1.0 angles — they're recorded so a future direction isn't lost.
   architecture arc for a real design session, not a quick socket backend.
   Composes I-1/I-28 (namespace-scoped access) + I-4 (the handle-transfer positive
   path it would build) + I-5/I-6 (non-transferable, rights-attenuated channel
-  handles). Name: the mycelial network, the underground substrate connecting
-  everything (the "wood wide web") — fitting the bushland palette and the
-  universal-connective-tissue role.
+  handles). **Design approach — "pave the trodden pathways" (ratified 2026-09-10,
+  the inline-media dialogue).** Mycelium is designed by UNIFYING the hand-rolled
+  per-service channels that have actually emerged from real needs — each a mini
+  9P server reinventing the same shape (a serve loop + fid table + frame reader +
+  a bespoke wire): **ptyfs, corvus, nocturned, placesrv, and the Halcyon
+  session-path channel (§14.7.2 in `docs/HALCYON.md`)**. Each is both a *validated
+  consumer* (the substrate is designed against what it actually needs) and a
+  *migration candidate* (cheap to move onto Mycelium once it lands). The
+  abstraction follows the concrete desire paths, so it fits real IPC and does not
+  overfit to one speculative driver — the discipline above ("native-first,
+  AF_UNIX a consumer not the driver") made concrete and *sequenced*: build the
+  consumers, then the substrate. The session-path channel ships NOW on the
+  existing `/srv` + 9P mechanism (it does not force the Mycelium arc — its inline
+  path is a bounded write, exercising the substrate's message-framing +
+  namespace-scoping but not its handle-passing square) and joins this set; the
+  Mycelium arc runs after the inline-media images arc. Name: the mycelial network,
+  the underground substrate connecting everything (the "wood wide web") — fitting
+  the bushland palette and the universal-connective-tissue role.
+
+- **Nocturne — an audio graph that is a file server, whose DSP is a
+  capability-bounded client, not a plugin** (`docs/NOCTURNE.md`; captured
+  2026-09-05 at the N-0 design pass; **an ACTIVE arc, operator-directed**, not
+  deferred — whether it rides v1.0 or v1.1 is a ROADMAP call at ratification).
+  Three claims, none made together by a shipping system. (1) **Audio authority
+  is the namespace**: a Proc that cannot see `/dev/nocturne` has no audio;
+  insertion, routing and tapping are owner-or-clearance on files, with no
+  registry and no new capability bit (PipeWire keeps a per-client permission
+  table over a global object registry; Genode opens typed sessions; Fuchsia
+  routes FIDL capabilities). (2) **User programs extend the processing graph
+  with their own DSP, isolated**: a *descant* runs in its owner's Proc over a
+  shared-Burrow ring and the server never loads, calls, or waits on it — every
+  shipping desktop stack loads third-party DSP into the engine (WASAPI APOs in
+  `audiodg`, PipeWire's filter-chain in the daemon, CoreAudio AUs in-process
+  by default), and Fuchsia's out-of-process effects protocol is
+  system-provisioned rather than program-supplied. (3) **Deadline containment
+  per node**: the cycle never waits; a late node degrades only itself, and
+  in-cycle guarantees are a bounded, revocable, warden-budgeted *lease* on the
+  scheduler (Zircon's deadline profile shaped as I-34's allowance), not a
+  real-time class. On the same Loom/Weft substrate as the display and the
+  network — Angle #1 (9P totalized) reaching the last subsystem Plan 9 left as
+  a single writer on one file. Candidate invariant I-46 (reserved in ARCH §28).
 
 ---
 

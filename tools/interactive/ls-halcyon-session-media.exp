@@ -1,0 +1,121 @@
+#!/usr/bin/expect -f
+# Real session media: inline View pixels, Gallery zoom/escape, and manual output.
+set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
+source [file join [file dirname [info script]] lib.exp]
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+set transcript /tmp/ls-halcyon-session-media-[pid].log
+log_file -a $transcript
+proc key {chord} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $chord} e]} { lc_fail $e }
+    after 700
+}
+proc type {text} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp $text} e]} { lc_fail $e }
+}
+proc capture {name} {
+    global repo qmp
+    after 1000
+    set out $repo/build/session-media-$name.png
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} e]} { lc_fail $e }
+    lc_step "captured $out"
+    return $out
+}
+proc colour_count {png} {
+    global repo
+    return [exec python3 $repo/tools/interactive/gfx_media.py $png]
+}
+lc_boot
+set timeout $lc_boot_timeout
+expect {
+    -ex "Thylacine login: " {}
+    -re {EXTINCTION:} { lc_extinction_fail "boot" }
+    timeout { lc_fail "no login" }
+    eof { lc_fail "EOF before login" }
+}
+lc_raw_send "michael\r" "login user"
+expect {
+    -ex "password: " {}
+    timeout { lc_fail "no password prompt" }
+    eof { lc_fail "EOF before password" }
+}
+lc_raw_send "correct-horse-battery-staple-v1\r" "login password"
+expect {
+    -ex "login: session compositor (halcyond) spawned" {}
+    -ex "Thylacine textual shell" { lc_fail "requires HALCYON_SESSION=y image" }
+    timeout { lc_fail "no graphical session" }
+    eof { lc_fail "EOF at session start" }
+}
+set timeout 60
+expect {
+    -re {halcyond: status bar [^\r\n]*running false panes 2} {}
+    -re {EXTINCTION:} { lc_extinction_fail "session" }
+    timeout { lc_fail "welcome and shell did not become ready" }
+}
+after 1500
+key "meta_l+f"
+set baseline [colour_count [capture before-view]]
+type "view /test.png\n"
+expect {
+    -re {halcyond: session inline leaf=[0-9]+ 640x400} {}
+    -re {halcyond: session inline [^\r\n]*(REFUSED|refused)} { lc_fail "inline cache refused image" }
+    -re {EXTINCTION:} { lc_extinction_fail "View" }
+    timeout { lc_fail "View did not place its image" }
+}
+set inline [colour_count [capture view]]
+if {$inline - $baseline < 20000} { lc_fail "View added only [expr {$inline-$baseline}] colourful pixels" }
+lc_pass "View: decoded raster appears in the live shell transcript"
+type "gallery /test.png\n"
+expect {
+    -re {gallery: /test\.png 640x400 shown [0-9]+x[0-9]+ at [0-9]+,[0-9]+ on [0-9]+x[0-9]+} {}
+    -re {EXTINCTION:} { lc_extinction_fail "Gallery" }
+    timeout { lc_fail "Gallery did not present" }
+}
+set tiled [colour_count [capture gallery-pane]]
+if {$tiled < 20000} { lc_fail "Gallery pane contains no substantial image" }
+key "meta_l+f"
+set zoomed [colour_count [capture gallery-zoom]]
+if {$zoomed < 100000} { lc_fail "zoomed Gallery image missing" }
+key "esc"
+capture gallery-return
+# The shell retains focus and its transcript when Gallery exits.
+type "manual gallery\n"
+after 2000
+capture manual-gallery
+# Normal transcript selection gives a stable start-of-history review image.
+key "esc"
+key "g"
+capture manual-history
+key "i"
+# The catalogue exercises the reader's Beacon table in the real pane.
+type "manual\n"
+after 1500
+capture manual-catalogue
+# Change the session theme, then decode JPEG into a newly-created viewer.
+# This also covers q (the first viewer used Escape).
+key "meta_l+t"
+key "home"
+key "ret"
+expect {
+    -re {halcyond: theme signal applied} {}
+    -re {halcyond: theme signal refused} { lc_fail "Signal theme refused" }
+    timeout { lc_fail "Signal theme did not apply" }
+    eof { lc_fail "EOF changing theme" }
+}
+capture manual-catalogue-signal
+type "gallery /test.jpg\n"
+expect {
+    -re {gallery: /test\.jpg 640x400 shown [0-9]+x[0-9]+ at [0-9]+,[0-9]+ on [0-9]+x[0-9]+} {}
+    -re {EXTINCTION:} { lc_extinction_fail "Gallery JPEG" }
+    timeout { lc_fail "JPEG Gallery did not present" }
+    eof { lc_fail "EOF in JPEG Gallery" }
+}
+key "meta_l+f"
+set jpeg [colour_count [capture gallery-jpeg-signal]]
+if {$jpeg < 100000} { lc_fail "zoomed JPEG image missing after theme change" }
+key "q"
+capture gallery-jpeg-return
+lc_pass "session media: ordered View, PNG/JPEG Gallery zoom/exit, manual table and live theme review captures"
+lc_quit

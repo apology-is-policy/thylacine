@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::layout::layout_block;
 // A tile's model -- the live grid + the scrollback transcript (HALCYON 14.11.1).
 //
 // One `Tile` per leaf terminal. It holds two structures, not one (14.11.1):
@@ -26,7 +28,7 @@ use alloc::vec::Vec;
 
 use crate::grid::Grid;
 use crate::layout::{
-    block_gap_between, caret_in_block, laid_line_for, layout_block, render_block, LaidBlock,
+    block_gap_between, caret_in_block, laid_line_for, layout_block_media, render_block, LaidBlock,
     LaidLine, Sheet,
 };
 use crate::menu::{run_rect, ObjRun};
@@ -48,6 +50,7 @@ type LiveLaid = (LaidBlock, Vec<(usize, usize, usize)>, i32);
 
 pub struct Tile {
     pub grid: Grid,
+    pub media: crate::inlinecache::InlineCache,
     pub scrollback: Transcript,
     pub mode: ScreenMode,
     /// OSC 0/2 title (the child's own; "" until it sets one).
@@ -147,12 +150,13 @@ impl Tile {
                 let mut t = Transcript::with_caps(
                     pal,
                     DEFAULT_MAX_BLOCKS,
-                    max_cost,
+                    max_cost / 2,
                     DEFAULT_MAX_LINES_PER_BLOCK,
                 );
                 t.set_cells_mode(true);
                 t
             },
+            media: crate::inlinecache::InlineCache::new(max_cost / 2),
             mode: ScreenMode::Normal,
             title: String::new(),
             fate: crate::chrome::Fate::Live,
@@ -310,6 +314,20 @@ impl Tile {
             }
             None => Some((c0 as i32 * cw, r as i32 * ch, (n as i32 * cw).max(1), ch)),
         }
+    }
+
+    /// Text and raster retention split one per-pane allowance; a quota change
+    /// invalidates all height entries whose inline references may have expired.
+    pub fn set_content_budget(&mut self, bytes: usize) {
+        self.scrollback.set_max_cost(bytes / 2);
+        if self.media.set_limit(bytes / 2) { self.heights.clear(); }
+    }
+
+    pub fn place_image(&mut self, id: u128, w: u32, h: u32, argb: Vec<u32>) -> bool {
+        if !self.media.insert(id, w, h, argb) { return false; }
+        self.heights.clear();
+        self.scrollback.seq = self.scrollback.seq.wrapping_add(1);
+        true
     }
 
     /// The record -> model dispatch (14.11.2).
@@ -566,7 +584,7 @@ impl Tile {
             for (i, &(_, _, hgt)) in self.heights.iter().enumerate() {
                 total += hgt + gap_after(i, hgt);
             }
-            let open_lb = layout_block(self.scrollback.open_block(), lay_w, sheet, gs);
+            let open_lb = layout_block_media(self.scrollback.open_block(), lay_w, sheet, gs, Some(&self.media));
             self.laid_last += 1;
             self.laid_lines_last += open_lb.lines.len();
             total += open_lb.height;
@@ -589,7 +607,7 @@ impl Tile {
                 &self.spans,
                 self.grid.top_continues(),
             );
-            let live_lb = layout_block(&live_b, lay_w, sheet, gs);
+            let live_lb = layout_block_media(&live_b, lay_w, sheet, gs, Some(&self.media));
             self.laid_last += 1;
             self.laid_lines_last += live_lb.lines.len();
 
@@ -642,7 +660,7 @@ impl Tile {
                 .enumerate()
             {
                 if b.id == m.block {
-                    let lb = layout_block(b, lay_w, sheet, gs);
+                    let lb = layout_block_media(b, lay_w, sheet, gs, Some(&self.media));
                     span = Some(match laid_line_for(&lb, m.item, m.row) {
                         Some((ly, lh)) => (rel + ly, lh),
                         None => (rel, hgt.max(1)),
@@ -694,7 +712,7 @@ impl Tile {
         {
             self.frame.push((b.id, y, hgt));
             if y + hgt >= 0 && y <= view_end {
-                let lb = layout_block(b, lay_w, sheet, gs);
+                let lb = layout_block_media(b, lay_w, sheet, gs, Some(&self.media));
                 debug_assert_eq!(lb.height, hgt, "a frozen block's height is deterministic");
                 paint_mark(cart, &lb, y, w, sheet, mark.filter(|m| m.block == b.id));
                 render_block(cart, &lb, y, gs);
@@ -851,7 +869,7 @@ impl Tile {
         self.heights.truncate(keep);
         let mut laid = 0;
         for b in frozen.iter().skip(self.heights.len()) {
-            let lb = layout_block(b, width, sheet, gs);
+            let lb = layout_block_media(b, width, sheet, gs, Some(&self.media));
             self.heights.push_back((b.id, b.exit, lb.height));
             laid += 1;
         }
@@ -1584,6 +1602,7 @@ mod tests {
                 t.set_cells_mode(true);
                 t
             },
+            media: crate::inlinecache::InlineCache::new(DEFAULT_MAX_COST / 2),
             mode: ScreenMode::Normal,
             title: String::new(),
             fate: crate::chrome::Fate::Live,

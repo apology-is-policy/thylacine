@@ -9,19 +9,19 @@
 //      Wrap in a Burrow via burrow_create_dma. Kernel access to the
 //      shared region is via pa_to_kva (kernel direct map).
 //   2. Pre-fill control block (num_iter, completed=0, user_ts[]=0).
-//   3. Pre-pend SPI 96 via gic_set_pending_spi. The IRQ is pending
+//   3. Pre-pend SPI intid via gic_set_pending_spi. The IRQ is pending
 //      but not delivered (no driver has enabled it). Capture
 //      g_kernel_t_arm[0] via timer_get_counter() around the pre-pend.
 //   4. rfork_with_caps(CAP_HW_CREATE) → child. Child's exec thunk
 //      calls burrow_map(child, burrow, SHARED_USER_VA, 8 KiB, RW)
 //      between exec_setup and userland_enter; the VMA is installed
 //      but PTEs are demand-paged.
-//   5. Child enters EL0, calls t_irq_create(96, T_RIGHT_SIGNAL).
+//   5. Child enters EL0, calls t_irq_create(intid, T_RIGHT_SIGNAL).
 //      gic_enable_irq inside delivers the pending IRQ immediately.
 //   6. Child loop: t_irq_wait → CNTPCT_EL0 → user_ts[i] → completed=i+1.
 //   7. Kernel loop (this function): for each iteration i = 0..N-2,
 //      poll until completed == i+1, then capture g_kernel_t_arm[i+1]
-//      via timer_get_counter() and trigger gic_set_pending_spi(96).
+//      via timer_get_counter() and trigger gic_set_pending_spi(intid).
 //      (Iteration 0's "trigger" is the pre-pend in step 3.)
 //   8. After all iterations, wait for completed == N, then wait_pid.
 //   9. Compute deltas = user_ts[i] - g_kernel_t_arm[i] for i in 1..N
@@ -68,6 +68,7 @@
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
+#include <thylacine/notes.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
@@ -77,10 +78,7 @@
 #include "../../arch/arm64/uart.h"
 
 void test_irq_latency_bench(void);
-
-// SPI 96 — pinned in lockstep with usr/irq-bench/src/main.rs's
-// IRQ_BENCH_INTID. Same safe-unused SPI as /irq-probe.
-#define IRQ_BENCH_TEST_INTID  96u
+void test_irq_latency_bench_failure(void);
 
 // Shared-region user-VA — pinned in lockstep with usr/irq-bench's
 // SHARED_USER_VA. Mapped at this VA in the child's address space
@@ -128,7 +126,7 @@ struct irq_bench_shared {
     u64 num_iter;
     u64 ready;
     u64 completed;
-    u64 _reserved;
+    u64 intid;
     u64 user_ts[1020];
 };
 _Static_assert(sizeof(struct irq_bench_shared) == 8192,
@@ -149,6 +147,7 @@ struct irq_bench_exec_args {
     const void    *blob;
     size_t         size;
     struct Burrow *shared_burrow;
+    bool force_failure;
 };
 
 __attribute__((noreturn))
@@ -187,6 +186,7 @@ static void irq_bench_exec_thunk(void *arg) {
         exits("fail-map");
     }
 
+    if (ea->force_failure) exits("forced-benchmark-failure");
     userland_enter(entry, sp);
 }
 
@@ -204,11 +204,14 @@ static void sort_u64(u64 *arr, size_t n) {
     }
 }
 
-void test_irq_latency_bench(void) {
+static void run_irq_latency_bench(bool force_failure) {
+    u32 intid = test_irq_choose_spi();
+    TEST_ASSERT(intid != 0xffffffffu, "topology needs a synthetic test SPI");
     const void *cpio_blob = NULL;
     size_t size = 0;
     int rc = devramfs_lookup("irq-bench", &cpio_blob, &size);
     if (rc != 0) {
+        TEST_ASSERT(!force_failure, "forced failure control requires /irq-bench");
         uart_puts("    [skip] /irq-bench not in ramfs (build with: tools/build.sh all)\n");
         return;
     }
@@ -236,7 +239,7 @@ void test_irq_latency_bench(void) {
     kshared->num_iter   = (u64)IRQ_BENCH_NUM_ITER;
     kshared->ready      = 0;
     kshared->completed  = 0;
-    kshared->_reserved  = 0;
+    kshared->intid      = intid;
     for (u32 i = 0; i < IRQ_BENCH_NUM_ITER; i++) kshared->user_ts[i] = 0;
 
     // Wrap in Burrow. burrow_create_dma bumps dma->ref to 2; the
@@ -245,12 +248,12 @@ void test_irq_latency_bench(void) {
     struct Burrow *burrow = burrow_create_dma(dma);
     TEST_ASSERT(burrow != NULL, "burrow_create_dma failed");
 
-    // Pre-pend SPI 96 to bootstrap iteration 0. The IRQ is pending
+    // Pre-pend SPI intid to bootstrap iteration 0. The IRQ is pending
     // but not delivered (no driver has enabled it yet). When the
     // child's t_irq_create runs gic_enable_irq, the GIC delivers
     // immediately.
-    bool pended = gic_set_pending_spi(IRQ_BENCH_TEST_INTID);
-    TEST_ASSERT(pended, "gic_set_pending_spi failed for SPI 96");
+    bool pended = gic_set_pending_spi(intid);
+    TEST_ASSERT(pended, "gic_set_pending_spi failed for SPI intid");
 
     // Capture iteration 0's kernel timestamp around the pre-pend.
     // Iteration 0 is the warmup (process bootstrap dominates) — this
@@ -261,32 +264,45 @@ void test_irq_latency_bench(void) {
         .blob = g_irq_bench_blob,
         .size = size,
         .shared_burrow = burrow,
+        .force_failure = force_failure,
     };
 
     int pid = rfork_with_caps(RFPROC, irq_bench_exec_thunk, &args,
                               CAP_HW_CREATE);
     TEST_ASSERT(pid > 0, "rfork_with_caps failed for /irq-bench");
 
-    // Trigger loop. For each completed iteration i, fire iteration i+1.
-    // Spin-wait via `yield` on the polling line; CPU 0 (where this
-    // test runs) stays awake to drive triggers, while the child
-    // schedules on whichever CPU the wakeup landed on.
-    for (u32 i = 0; i < IRQ_BENCH_NUM_ITER - 1; i++) {
-        while (__atomic_load_n(&kshared->completed, __ATOMIC_RELAXED)
-               != (u64)(i + 1)) {
+    // Bound every wait so a failed/exited child produces a test failure,
+    // rather than hiding the cause behind the host's whole-boot timeout.
+    bool timed_out = false;
+    for (u32 i = 0; i < IRQ_BENCH_NUM_ITER; i++) {
+        u64 deadline = timer_now_ns() + 5000000000ull;
+        while (__atomic_load_n(&kshared->completed, __ATOMIC_RELAXED) != (u64)(i + 1)) {
+            if (timer_now_ns() >= deadline) { timed_out = true; break; }
             __asm__ __volatile__("yield" ::: "memory");
         }
-        g_kernel_t_arm[i + 1] = timer_get_counter();
-        (void)gic_set_pending_spi(IRQ_BENCH_TEST_INTID);
+        if (timed_out) break;
+        if (i + 1 < IRQ_BENCH_NUM_ITER) {
+            g_kernel_t_arm[i + 1] = timer_get_counter();
+            (void)gic_set_pending_spi(intid);
+        }
     }
-    // Wait for the final iteration to complete before reaping.
-    while (__atomic_load_n(&kshared->completed, __ATOMIC_RELAXED)
-           != (u64)IRQ_BENCH_NUM_ITER) {
-        __asm__ __volatile__("yield" ::: "memory");
-    }
-
+    if (timed_out) (void)notes_post_pid(pid, NOTE_NAME_KILL, 0);
     int status = -42;
     int reaped = wait_pid(&status);
+    if (timed_out || reaped != pid || status != 0) {
+        burrow_unref(burrow); kobj_dma_destroy(dma);
+        // The forced-failure control uses this same timeout/reap/cleanup path.
+        // Clear the synthetic pending SPI: no failed child enabled it.
+        if (force_failure) {
+            TEST_ASSERT(gic_drain_spi(intid), "failed benchmark source drained");
+            TEST_ASSERT(timed_out && reaped == pid && status != 0,
+                        "forced child failure reached bounded cleanup");
+            return;
+        }
+        TEST_ASSERT(!timed_out, "IRQ benchmark child made no progress for 5s");
+        TEST_ASSERT(reaped == pid && status == 0, "IRQ benchmark child failed");
+    }
+    TEST_ASSERT(!force_failure, "forced benchmark child unexpectedly succeeded");
     TEST_EXPECT_EQ(reaped, pid, "wait_pid pid mismatch");
     TEST_EXPECT_EQ(status, 0, "/irq-bench exit status");
 
@@ -359,4 +375,12 @@ void test_irq_latency_bench(void) {
     TEST_SOFT_WARN(p99_ns < IRQ_BENCH_CI_BUDGET_NS,
                    "IRQ-to-userspace p99 exceeds CI sanity budget "
                    "(host throttled; not a kernel fault)");
+}
+
+
+void test_irq_latency_bench(void) { run_irq_latency_bench(false); }
+void test_irq_latency_bench_failure(void) {
+    u64 before = kobj_dma_live_count();
+    run_irq_latency_bench(true);
+    TEST_EXPECT_EQ(kobj_dma_live_count(), before, "failed benchmark releases DMA and Burrow backing");
 }

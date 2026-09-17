@@ -3,7 +3,10 @@ id: sub-kernel-ninep-dev9p
 type: sub
 title: "dev9p — the 9P Dev (walk/IO/mutation + Larder integration + write-behind + cached-open + weft arms)"
 parent: moc-kernel-ninep
-code: [kernel/dev9p.c, kernel/include/thylacine/dev9p.h]
+code:
+  - kernel/dev9p.c
+  - kernel/include/thylacine/dev9p.h
+  - kernel/test/test_dev9p.c
 audit: hard
 guarded-by: [inv-i38]
 validated-by: [spec-fs-cache, gate-smp]
@@ -12,7 +15,7 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: [docs/LARDER-DESIGN.md, docs/FID-LIFECYCLE-DESIGN.md, docs/POUNCE-DESIGN.md]
 created: 2026-07-31
-updated: 2026-08-16
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -93,14 +96,18 @@ priv inherits `attached_owner` and refs it.
 `_Static_assert(DEV_WALK_ATTRS_MAX == P9_MAX_WALK)`):
 
 - **Capability latch**: `client->wga_unsupported` → return the
-  `DEV_WALK_ATTRS_UNSUPPORTED` sentinel; first `-T_E_NOSYS` reply sets it.
+  `DEV_WALK_ATTRS_UNSUPPORTED` sentinel; either `-T_E_NOSYS` or
+  `-T_E_OPNOTSUPP` sets it, at both fused-walk and cached-open sites.
+  A real transport error such as EIO does not latch non-support.
   **Non-support is the MAJORITY case and must be read as a class, not as a
   named example.** Stratum is the only v1.0 server that implements the op;
   every native userspace one (netd, ptyfs, tapestryd, the VIVARIUM diorama)
   falls through its unknown-op arm to ENOSYS, and **the list only grows** —
   each new native server joins the non-supporting side by default, since
   implementing the op is the deliberate act. The resolver then uses the
-  per-component loop for the session's lifetime, RPC-free.
+  per-component RPC loop for the session's lifetime without retrying the
+  unsupported fused operation. npxf uses EOPNOTSUPP (95); classifying it
+  prevents an absent operation from appearing to Haul as an absent file.
 - **L1d dentry serve**: a fully-cached run serves RPC-free — a negative
   (miss) in EITHER form; a full positive ONLY in the query form
   (`nc == NULL`; a bind form must RPC to mint the server fid) and only if
@@ -117,7 +124,7 @@ priv inherits `attached_owner` and refs it.
   offset-stable FS — the latch is what admits the attr/dentry/page caches
   for this session, and its absence is what keeps **every non-supporting
   server's tree** out of them: netd's streams, ptyfs, tapestryd, the
-  diorama, and each future native server. **The ENOSYS latch above is
+  diorama, and each future native server. **The non-support latch above is
   therefore the cache-admission decision**, which is why the class matters
   and a single named example actively misleads — a reader who takes one
   instance for the rule concludes the other sessions are cached. They are
@@ -154,6 +161,16 @@ cannot be ruled out cross-project — the L1f-F1 rule); G2 dir-fid DROP on
 the child's qid (a parked fid for the dead prior occupant must die);
 (parent,name) dentry drop; write-behind arming (create-born ⇒ end known 0)
 on loose+cacheable plain files.
+
+`dev9p_open` resets and records `open_errno` on the unpublished walked
+Spoor. `dev9p_open_errno` returns a server errno in [-4095,-2], otherwise the
+unspecified sentinel. Both `SYS_WALK_OPEN` and stalk read it before failure
+cleanup clunks the private state; netd's ENOMEM admission refusal therefore
+reaches callers as ENOMEM. Success clears the previous failure. Non-9P devices
+keep their generic EIO fallback. The pointer-returning `Dev.open` interface
+still requires this per-operation record (as `Dev.create` already does); a
+future typed vtable result would remove that interface debt. No global or
+thread-local errno state is introduced.
 
 ### read (the serve/overlay/populate stack, in precedence order)
 
@@ -327,7 +344,7 @@ uncharge; test accessors assert balance.
 - `p->poll`: RELEASE-publish / ACQUIRE fast-path read (net-6b F5); the
   rest under the poll registry lock ([[sub-kernel-ninep-dev9p-poll]]).
 - `cached_open` state is immutable post-mint (lock-free serves);
-  `create_errno` is handler-local by construction (a fresh clone-walk priv,
+  `create_errno` and `open_errno` are handler-local by construction (a fresh clone-walk priv,
   read once before the clunk — #99's no-sharing argument).
 - Everything else rides the client's `c->lock` via the `p9_client_*` calls.
 
@@ -410,7 +427,7 @@ kmalloc per walk; the attrs scratch on the walk_attrs RPC path (heap — 16
   `cacheable`; the latch is set ONLY by a successful Twalkgetattr. A
   future POUNCE-speaking-but-streaming server breaks the proxy — that
   needs an explicit capability (recorded v1.x).
-- **Read the ENOSYS latch as a CLASS.** Non-support is the majority and the
+- **Read the non-support latch as a CLASS.** Non-support is the majority and the
   default; a new native server is non-supporting unless someone implements
   the op. Any statement here that names one server is wrong the moment a
   second lands, and it fails in the dangerous direction — it invites the
@@ -485,3 +502,17 @@ cached-open (`dev9p.cached_open_*`), the poll teardown
 and the prw wire-offset capture (`dev9p.prw_wire_offset_and_cursor`).
 Boot-level: every boot exercises the full stack against live Stratum; the
 go-build oracle is the standing stress ([[gate-smp]] the SMP witness).
+
+### Append, directory errors, and close diagnostics
+
+Open and create forward `SYS_WALK_OPEN_OAPPEND` as the 9P/Linux `02000` flag.
+The server chooses EOF for each write; the kernel's tracked cursor is advisory.
+Append descriptors are excluded from write-behind at both eligibility sites:
+a client-side staging offset cannot safely predict concurrent server appends.
+Writes therefore pass through instead of installing own-pages at guessed offsets.
+
+Readdir propagates the translated wire errno, preserving interrupted reads as
+EINTR rather than fabricating EPERM from a flat -1. Readdir failure does not
+mark the fid suspect: its cursor is supplied again from the unchanged offset.
+If asynchronous Tclunk submission is refused at close, a bounded console
+diagnostic reports the fid and error; close still releases local ownership.

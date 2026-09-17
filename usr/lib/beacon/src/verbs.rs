@@ -195,4 +195,26 @@ url   fetch  wget {} {}\n";
         assert_eq!(expand("ps", "/x").as_deref(), Some("ps"), "no placeholder: the template as is");
         assert_eq!(expand("cat {}", "a\nb"), None);
     }
+
+    // The inline-media obj-verbs (I-47): choosing "view" (inline) or "gallery"
+    // (fullscreen) on a presented path types `<verb> '<path>'` into the pane --
+    // the operator's Esc+w/b+enter spec. Both take a bare path operand (they do
+    // not consume `--`, so unlike ls/cat/stat the template omits it -- the
+    // file's documented "queued" class), and the ref is rc-single-quoted so the
+    // child acts on exactly the path the menu showed, hostile bytes contained.
+    #[test]
+    fn inline_media_obj_verbs_type_quoted_path() {
+        for (label, tmpl) in [("view", "view {}"), ("gallery", "gallery {}")] {
+            let src = alloc::format!("path {} {}\n", label, tmpl);
+            let r = parse(&src, false);
+            assert_eq!(r.len(), 1);
+            assert_eq!(r[0].ty, "path");
+            assert_eq!(r[0].label, label);
+            assert_eq!(r[0].template, tmpl);
+            let want = alloc::format!("{} '/home/o/pic.png'", label);
+            assert_eq!(expand(&r[0].template, "/home/o/pic.png").as_deref(), Some(want.as_str()));
+            let hostile = alloc::format!("{} 'a b; rm -rf /'", label);
+            assert_eq!(expand(&r[0].template, "a b; rm -rf /").as_deref(), Some(hostile.as_str()));
+        }
+    }
 }

@@ -169,8 +169,26 @@ typedef u64 caps_t;
 // untrusted JIT the confinement instrument is the namespace, not this bit.
 #define CAP_JIT             (1ull << 11)
 
+// CAP_AUDIO_GRAPH — elevation-only. The Nocturne whole-sink authority (I-46
+// candidate; docs/NOCTURNE.md §6.8): the clearance-grantable axis on the
+// SYSTEM-owned parts of the audio graph. A holder may operate on the shared
+// sink beyond its own voices — set the sink `volume`/`default`, insert a
+// descant at a sink's input (the "system EQ" case), and read a tap on the
+// sink (`/dev/nocturne/audio` loopback; recording is eavesdropping otherwise).
+// Own-voice work (mint/write/gain/tap your OWN voice) is the owner axis and
+// needs NO clearance — this bit is only the whole-sink, cross-owner authority.
+// The two-axis rule of I-26/I-39: the sink volume is (console-owner OR this
+// clearance); the tap/insert is (owner-of-the-target OR this clearance).
+// Clearance-grantable (a member of CAP_GRANTABLE_CLEARANCE) so a system-level
+// audio program acquires it via a corvus-mediated, scope-bounded legate —
+// exactly like CAP_DEBUG / CAP_JIT — never by inheritance. Elevation-only
+// (rfork-stripped): whole-sink authority must not leak to a child. Checked by
+// nocturned via SYS_SRV_PEER's live caps word; nothing in the kernel consults
+// it (the audio authority lives in nocturned, the sink's owner).
+#define CAP_AUDIO_GRAPH     (1ull << 12)
+
 // Reserved for Phase 5+ (one bit per capability domain; next free bit is
-// 1<<12):
+// 1<<13):
 //   CAP_NS_MOUNT     — bind/mount in /proc and /ctl (kernel admin Devs).
 //   CAP_NS_BIND      — bind in any namespace (forward-looking).
 //   CAP_NET_RAW      — open raw network sockets / Ethernet frames.
@@ -186,19 +204,19 @@ typedef u64 caps_t;
 // ~CAP_ELEVATION_ONLY (A-4-pre). All seven are acquired ONLY through the
 // `cap` device: CAP_HOSTOWNER (the unified fs-admin authority) plus the
 // A-4 finer caps split out of it — CAP_DAC_OVERRIDE, CAP_CHOWN, CAP_KILL —
-// plus CAP_DEBUG (the Stage-8a cross-Proc debug authority) and CAP_JIT (the
+// plus CAP_DEBUG (the Stage-8a cross-Proc debug authority), CAP_JIT (the
 // CL-7k code-emission authority; I-42 requires it be non-heritable, so its
 // membership here is an invariant obligation, not a style choice).
 // Maps to specs/handles.tla::ElevationOnly.
-#define CAP_POST_SERVICE (1ull << 13) // elevation-only /srv posting; bit 12 reserved for audio
+#define CAP_POST_SERVICE (1ull << 13) // elevation-only /srv posting; bit 12 is CAP_AUDIO_GRAPH
 
-#define CAP_ELEVATION_ONLY  (CAP_POST_SERVICE | CAP_HOSTOWNER | CAP_DAC_OVERRIDE | CAP_CHOWN | CAP_KILL | CAP_DEBUG | CAP_JIT)
+#define CAP_ELEVATION_ONLY  (CAP_AUDIO_GRAPH | CAP_POST_SERVICE | CAP_HOSTOWNER | CAP_DAC_OVERRIDE | CAP_CHOWN | CAP_KILL | CAP_DEBUG | CAP_JIT)
 
 // CAP_ALL — the FORK-GRANTABLE capability ceiling: every capability a
 // Proc may legitimately hold from creation, and the mask kproc gets at
 // proc_init. Elevation-only capabilities (CAP_ELEVATION_ONLY:
-// CAP_HOSTOWNER, CAP_DAC_OVERRIDE, CAP_CHOWN, CAP_KILL, CAP_DEBUG, CAP_JIT)
-// are deliberately excluded — see above. A new fork-grantable CAP_* bit MUST be added
+// CAP_HOSTOWNER, CAP_DAC_OVERRIDE, CAP_CHOWN, CAP_KILL, CAP_DEBUG, CAP_JIT,
+// CAP_AUDIO_GRAPH) are deliberately excluded — see above. A new fork-grantable CAP_* bit MUST be added
 // here; an elevation-only one MUST NOT.
 #define CAP_ALL         (CAP_HW_CREATE | CAP_LOCK_PAGES | CAP_CSPRNG_READ | CAP_GRANT_HOSTOWNER | CAP_SET_IDENTITY | CAP_GRANT_CLEARANCE)
 

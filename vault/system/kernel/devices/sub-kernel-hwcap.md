@@ -9,7 +9,10 @@ code:
   - kernel/dma_handle.c
   - kernel/include/thylacine/dma_handle.h
   - kernel/pci_handle.c
+  - arch/arm64/mmio.h
   - kernel/include/thylacine/pci_handle.h
+  - kernel/test/test_mmio_handle.c
+  - kernel/test/test_pci_handle.c
 audit: hard
 guarded-by: [inv-i5, inv-i32, inv-i34]
 validated-by: [prose, gate-smp]
@@ -19,7 +22,7 @@ design:
   - "docs/ARCHITECTURE.md section 13"
   - "docs/VIRTIO-PCI-DESIGN.md"
 created: 2026-08-02
-updated: 2026-09-06
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -392,3 +395,67 @@ subrange is contained inside the discovered shared-memory window (I-45).
 [[chg-2026-09-06-hwcap-warp-v2-hostmem]].
 
 Absorbed `docs/reference/39-hw-handles.md` and `docs/reference/115-pci-claim.md`.
+
+## PCI interrupt domains
+
+A function-bound endpoint retains its KObj_PCI and composes with its terminal
+quiesce/refcount lifecycle. Shared INTx is implemented in [[sub-kernel-pci-irq]];
+MSI-X delivery remains in progress under `docs/PCI-INTERRUPTS-DESIGN.md`.
+
+### Protected PCI mappings (implementation in progress, 2026-09-17)
+
+The approved interrupt design now has its mapping foundation. Capability walking
+rejects loops and truncated capabilities, parses MSI-X table/PBA bounds and
+rejects essential transport registers sharing their pages. The union of routing
+pages is unavailable through either whole-BAR, range, or host-memory mappings.
+The query returns the remaining page-aligned windows, at most eight across six
+BARs. A routing-only BAR legitimately returns no windows. PCI MMIO Burrows retain
+the function claim as well as the parent MMIO claim, preventing reassignment
+while a register mapping survives handle close. [[abi-pci-windows]] owns the ABI.
+
+Electrical quiescence and shared-INTx endpoints are implemented and pass boot
+and Instrument regressions. MSI-X delivery and the full interrupt verification
+matrix remain unfinished. Layout, alias and function-retention tests pass.
+
+Kernel MMIO reservation includes DTB-translated GICv2m and ITS frames, even
+when unreferenced by PCI or disabled. Overlapping kernel regions are merged as
+a union; overlap alone is not full coverage. Overflow and non-kernel collisions
+fail closed. The guest regression covers extending tails, transitive unions and
+rejection without losing prior protection.
+
+## Quiescent PCI claims and config serialization (2026-09-17)
+
+Enumeration now disables supported unclaimed functions' INTx and bus mastering;
+claims begin POLLED with MSI-X disabled. [[lock-pci-config]] serializes runtime
+Command controls, using 16-bit writes, readback and a device barrier. Quiescence
+publishes a terminal revoke before revoking [[sub-kernel-pci-irq]] endpoints, so
+concurrent ARM/COMPLETE cannot restore delivery. Function routing reads the
+actual Interrupt Pin, rather than assuming INTA. GICv2m and ITS/LPI MSI-X backends are implemented.
+
+
+PCI BAR aperture placement is retained per immutable enumerated function, not
+per KObj_PCI lifetime. Repeated claims recheck BAR geometry and reacquire fresh
+exclusive KObj_MMIO claims at that placement. An unexpected geometry change
+fails; live PCI mappings/endpoints still retain the old function claim and
+prevent reassignment. This bounds aperture consumption across driver restarts
+and supplies stable addresses for kernel-owned MSI routing/reset mappings.
+
+
+Kernel common-register and MSI-X table mappings are cached in the function's
+hardware backing, so driver restarts do not consume more permanent MMIO VA.
+Claims reset the virtio transport with bus mastering disabled, initialize and
+verify every table entry as masked with zero routing, then enable mastering.
+Terminal quiesce masks function delivery, stops mastering, performs a bounded
+status-zero reset, revokes endpoints and drains retired routes before releasing
+BAR claims. A failed reset cannot authorize vector reuse.
+
+`arch/arm64/mmio.h` pins device accesses to fixed-form ARM instructions. The
+compiler's post-indexed store in a table-clearing loop reproduced QEMU/HVF's
+ISV assertion; disassembly records the failing instruction and its removal.
+The corrected HVF run passes the real MSI-X RNG test and boot gate.
+
+The claim's `irq_faulted` state is distinct from revocation. A live routing
+readback failure masks MSI-X and INTx without waiting for device reset in IRQ
+context; IRQ creation/arm then fails until a fresh claim/reset. Common control
+register mappings require eight-byte alignment. Kernel-test-only one-shot
+readback failures exercise rollback and peer-vector fault containment.

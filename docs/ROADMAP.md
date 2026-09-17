@@ -984,7 +984,7 @@ No new formal specs. Per the 2026-05-23 spec-to-code suspension (`CLAUDE.md`), t
 - **Network I/O rides Loom** (added 2026-06-08; `docs/LOOM.md` + `NOVEL.md` Angle #1 + `ARCHITECTURE.md` §10.1). Because `/net` is 9P, a `LOOM_OP_READ`/`LOOM_OP_WRITE` on a connection's data fid *is* recv/send and a multishot read on the listen file *is* an async accept loop -- so **no socket opcodes are added to Loom** (the vocabulary stays pure 9P). The userspace `net/` server is exactly `netd` (the stratumd-as-driver precedent), and Loom is what makes a userspace network stack fast enough -- it amortizes the app<->netd hops the way it does for stratumd. The native remote-access story is `import`/`exportfs` over authenticated 9P (corvus auth, the Plan 9 `cpu(1)` model); sshd stays a portable Pouch option for ecosystem compatibility.
 
 **Imperium/Authority arc** (binding design: `docs/MANDATE-DESIGN.md` + `docs/IMPERIUM-DESIGN.md` + `docs/TRUSTED-PATH.md`; invariant I-35; sequenced AFTER the net stack, BEFORE the container runner):
-- **IM — imperium (self-elevation)**: the serial trusted-path *episode* (corvus cell-grid renderer + per-cap DISTINCT_SECRET clearance keys + the *lex curiata* flow, on the A-4c serial SAK mechanism) -> the fork-propagating legate scope (kernel, modeled) -> fasces + abdicate [+ pomerium/dictator].
+- **IM — imperium (self-elevation)** — **OPENED 2026-09-07 on the aux track** (the as-built design + plan = `IMPERIUM-DESIGN.md` §11; four forks ratified): IM-0 scripture -> IM-1 the kernel trusted EPISODE (SAK -> freeze + forced raw + the `sak` note + `SYS_CONSOLE_EPISODE_END`; I-27 enforced on serial) -> IM-2 the fork-propagating legate scope (`specs/imperium.tla` first; I-25 strengthened) -> IM-3 corvus's *lex curiata* (the `imperium` DISTINCT_SECRET level + the per-user key wrap + `IMPERIUM_REQUEST` with a deferred reply + the episode consumer) -> IM-4 `usr/imperium` + ut `abdicate` + the fasces -> IM-5 `ls-imperium.exp` + the batched audits + the SMP gate -> [IM-6 pomerium + dictator]. Serial-only trusted path on QEMU; corvus rasterizes its cell grid in userspace (the kernel cell sink lands with the framebuffer backend, v1.x).
 - **MA — mandate (delegation)**: the corvus *album* + per-domain key-generations + issue/redeem/revoke + `specs/mandate.tla` (spec-first) -> the `censor` tool + login-time silent redemption -> the **netd per-principal `/net` enforcement** (the §8 `/net/filter` seam) -> the focused audit. Realizes "a censor grants a citizen standing, revocable-by-key-rotation TCP:80" without per-act elevation; the floor is itself a mandate, set per-install at the founding.
 - v1.x: the kernel scoped-cap table (cap-resource-scope mandates, e.g. kill-own-group), the graphical SAK, the stateful packet filter.
 
@@ -1429,7 +1429,7 @@ These are explicitly *not in v1.0*; they're tracked for post-v1.0 work.
 - **Rust kernel components**: selected modules (9P client, ELF loader, handle table) ported from C99 to Rust.
 - **Full POSIX ACLs / xattrs at the territory level**: complement Stratum's existing xattr/ACL with territory-level semantics.
 - **MAC (mandatory access control)**: SELinux-equivalent for multi-tenant deployments. Post-v2.0; territory isolation suffices for v1.0/v1.x.
-- **Audio stack**: VirtIO sound device + userspace audio server.
+- **Audio stack** — *pulled forward 2026-09-05 (operator-directed): the **Nocturne** arc, `docs/NOCTURNE.md` (VirtIO sound driver + a userspace audio-graph server; sequencing N-0..N-7 there). No longer a v2.0 item.*
 
 ### 12.4 v3.0 horizon
 
@@ -1444,8 +1444,8 @@ These are explicitly *not in v1.0*; they're tracked for post-v1.0 work.
 - **Distributed / clustered OS**. 9P over network is supported; the OS doesn't manage clusters.
 - **Windows binary compatibility**. Not in scope, ever.
 - **Backward compatibility with Linux kernel modules**. Not in scope.
-- **Sound / Bluetooth / hardware sensors at v1.0**. Deferred to v1.x.
-- **Real-time scheduling at v1.0**. EEVDF gives soft latency bounds; hard RT is v2.x.
+- **Bluetooth / hardware sensors at v1.0**. Deferred to v1.x. *(Sound was on this line until 2026-09-05; it is now the Nocturne arc, `docs/NOCTURNE.md` — the v1.0-vs-v1.1 ship call is made at the design ratification.)*
+- **Real-time scheduling at v1.0**. EEVDF gives soft latency bounds; hard RT is v2.x. *(Nocturne's proposed cadence lease — `docs/NOCTURNE.md` §6.7 — is a bounded, revocable, warden-budgeted periodic promotion, not a hard-RT class; this line stands.)*
 
 ---
 

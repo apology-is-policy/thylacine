@@ -15,7 +15,7 @@ abis: []
 design:
   - docs/MENAGERIE.md sections 3-6
 created: 2026-08-04
-updated: 2026-09-06
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -315,3 +315,17 @@ boot.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)
+
+## Proposed PCI interrupt grants
+
+The function-bound interrupt design in `docs/PCI-INTERRUPTS-DESIGN.md` retains
+BDF-scoped PCI allowances and derives endpoint routing inside the kernel. Raw
+PCI INTID grants cease to be endpoint authority under that proposal. Current
+grant behavior is unchanged; see [[dec-2026-09-17-pci-interrupt-domains]].
+
+## PCI interrupt authority (2026-09-17)
+
+PCI manifests for Tapestry, netd and Nocturne now request no raw IRQ allowance.
+Their existing BDF allowance authorizes function-bound endpoint creation. DTB
+wired drivers retain their IRQ allowance axis. This removes device-order-based
+line ownership without granting drivers a controller INTID or message address.

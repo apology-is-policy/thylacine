@@ -21,7 +21,7 @@ hazards: []
 abis: []
 design: ["docs/BEACON.md"]
 created: 2026-09-05
-updated: 2026-09-16
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -128,6 +128,18 @@ layout's name (`halcyon layout {}`) — so `halcyon layout list` presents each
 saved layout as a menu-actionable object with **no renderer code**: `layout` is
 a new value of the existing `type` key (BEACON.md 12.2), handled by string in
 halcyond, not a new frame op.
+
+`verbs.default` also carries the two **inline-media** path verbs (I-47):
+**`view`** (`path view view {}`) renders an image INLINE in the transcript (via
+`/srv/halcyon`, [[sub-view]]) or falls back to `cat`; **`gallery`**
+(`path gallery gallery {}`) shows it in a native tapestryd pane that Halcyon
+can zoom with its workspace controls
+([[sub-gallery]]). Choosing either on a presented path types `<verb> '<path>'`
+into the pane. Unlike `ls`/`cat`/`stat` both templates omit `--`: each reads a
+bare path operand and does not yet consume the `--` separator (the file's
+documented "queued" class), so a `--` would be opened as the file. They sit with
+the other `path` verbs (baked unconditionally); the obj menu that surfaces them
+is a halcyond feature, so under the aurora fail-safe the rows are simply inert.
 
 **The cells tier is the coreutils colour language, relocated verbatim**
 (2026-09-01, BEACON.md 12.5): `boxd` (box furniture computed on plain text,

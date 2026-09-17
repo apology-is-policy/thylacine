@@ -8,6 +8,7 @@ code:
   - kernel/devcap.c
   - kernel/include/thylacine/devcap.h
   - kernel/proc.c
+  - kernel/test/test_devcap.c
 audit: hard
 guarded-by: [inv-i2, inv-i25]
 validated-by: [prose, spec-imperium, gate-smp]
@@ -130,6 +131,18 @@ property rests on the root alone.** A member never holds the elevated caps,
 so a straggler the teardown sweep misses is an unelevated Proc with a stale
 tag — untidy, not a violation. The teardown walk is a tidiness sweep; the
 root dies on its own exit or self-terminates at `valid_until`.
+
+**The arm-6 session hangup is this teardown's structural sibling, and is *not* a
+cap.** `proc_session_hangup_if_leader` ([[sub-kernel-death]]) rides the same
+ZOMBIE chokepoint and the same held-lock `proc_group_terminate` walk, but it
+keys on the session `sid` (not the legate `scope_id`) and terminates *processes*
+for session-lifecycle reclamation at logout — it confers no authority, so it is
+not I-2/I-25 territory and [[inv-i26]] is untouched (login drives it without
+CAP_KILL precisely because the *kernel* does the termination). The contrast is
+instructive: the legate keys on a **dedicated monotonic** `scope_id`, so its
+member-match is alias-free by construction; the hangup keys on `sid ==
+leader-pid`, alias-free only because pids never recycle — a dependency the
+mirror silently swapped, now recorded at `session_hangup_cb` (arm-6 audit F1).
 
 **The clearance window opens at redeem, not at grant.** `valid_until` is
 computed as `now + valid_for` *when the caps land*, so a slow redeem does not

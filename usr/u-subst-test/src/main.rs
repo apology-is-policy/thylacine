@@ -12,6 +12,9 @@
 //   4. Inside "..." inserted verbatim (no split) -- "[$(echo hi)]" -> "[hi]"
 //   5. Pipeline-body capture                   -- $(echo hello | tr a-z A-Z)
 //   6. rc-traditional backtick form            -- `{echo hi} -> "hi"
+//   6b. A substitution's exit stands for a statement with no command, even
+//       when it equals the previous status; its body reads the previous
+//       $status                                -- false; $(seq) -> 1
 //   7. $status carries the inner exit (8.7)    -- $(seq)->1, $(echo)->0
 //   7c. A builtin in a substitution is NotImplemented -- $(true)
 //   8. Process substitution stays NotImplemented -- <(echo hi)
@@ -105,6 +108,49 @@ pub extern "C" fn rs_main() -> i64 {
     }
     if env.get("b").as_scalar() != "hi" {
         return fail("`{echo hi} did not capture \"hi\"");
+    }
+
+    // 6b. A substitution's exit stands for a statement that runs no command of
+    //     its own, even when it equals the status already in the register --
+    //     so "did a substitution run" must be counted, never inferred from a
+    //     change in $status. And the substitution's body expands against the
+    //     status the previous command left. Every leg runs and every failure
+    //     is printed.
+    {
+        let mut bad = false;
+
+        // eval_command + succeed_unless_substituted: `false` then a bare
+        // `$(seq)` line (seq exits 1, prints nothing) reports seq's 1.
+        let mut e = fresh();
+        bad |= leg_src(&mut e, "false\n$(seq)");
+        bad |= leg_status(
+            e.status(),
+            1,
+            "a bare substitution line keeps an exit equal to the previous one",
+        );
+
+        // eval_let + succeed_unless_substituted: the same through a let.
+        let mut e = fresh();
+        bad |= leg_src(&mut e, "false\nlet w = $(seq)");
+        bad |= leg_status(
+            e.status(),
+            1,
+            "a let keeps a substitution exit equal to the previous one",
+        );
+
+        // run_command_substitution_script: the body's words expand against
+        // the previous command's status.
+        let mut e = fresh();
+        bad |= leg_src(&mut e, "false\nlet got = $(echo $status)");
+        bad |= leg_eq(
+            &e.get("got").as_scalar(),
+            "1",
+            "$status inside a substitution body",
+        );
+
+        if bad {
+            return 1;
+        }
     }
 
     // 7. $status carries the inner command's exit (scripture 8.7). We use
@@ -235,4 +281,47 @@ fn fail(tag: &str) -> i64 {
     t_putstr(tag);
     t_putstr("\n");
     1
+}
+
+/// A fresh interactive Env: a non-zero $status does not end the source, so
+/// every statement in a leg runs.
+fn fresh() -> Env {
+    let mut e = Env::new();
+    e.interactive = true;
+    e
+}
+
+/// The legs of a block that reports every failure before failing. Each prints
+/// its FAILED line with what it saw, and returns true for a failure.
+///
+/// `leg_src` fails when `src` does not evaluate at all -- without it, a leg
+/// whose source cannot parse reports only the empty value its assertion then
+/// reads.
+fn leg_src(env: &mut Env, src: &str) -> bool {
+    match eval_source(env, src) {
+        Ok(_) => false,
+        Err(_) => {
+            fail(&alloc::format!(
+                "the leg source did not evaluate: {:?}",
+                src
+            ));
+            true
+        }
+    }
+}
+
+fn leg_eq(got: &str, want: &str, tag: &str) -> bool {
+    if got == want {
+        return false;
+    }
+    fail(&alloc::format!("{} (got {:?}, want {:?})", tag, got, want));
+    true
+}
+
+fn leg_status(got: i32, want: i32, tag: &str) -> bool {
+    if got == want {
+        return false;
+    }
+    fail(&alloc::format!("{} (got {}, want {})", tag, got, want));
+    true
 }

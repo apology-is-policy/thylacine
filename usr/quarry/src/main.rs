@@ -249,10 +249,15 @@ fn driver_restore(old: Option<String>) {
 // Launching.
 // ---------------------------------------------------------------------------
 
-/// The engine invocation every lane uses. -window is the tested tapestry
-/// path; -nosound because no audio device exists (the engine probes forever
-/// otherwise).
-const BASE_ARGS: &[&str] = &["-window", "-nosound"];
+/// The engine invocation for a PLAYED game: -window is the tested tapestry
+/// path; sound is on (Nocturne N-2a-3 -- SDL's thylacine audio driver, or its
+/// dummy fallback on a soundless machine, so the engine never probes forever).
+const PLAY_ARGS: &[&str] = &["-window"];
+
+/// A BENCH leg keeps -nosound: the audio thread's blocking writes and the
+/// mixer's interrupt load would perturb the fps figure, and a benchmark's
+/// number must stay a property of the renderer, not of the sound path.
+const BENCH_ARGS: &[&str] = &["-window", "-nosound"];
 
 /// One bench leg: a renderer row plus the resolution to run it at.
 ///
@@ -306,7 +311,7 @@ impl Leg {
 /// `key` or `key@WxH`.
 ///
 /// An explicit resolution reaches the engine as `-width W -height H`. Those
-/// are honoured for any size because BASE_ARGS already passes `-window`:
+/// are honoured for any size because both arg sets already pass `-window`:
 /// VID_GetCmdlineMode writes the request straight into vid_windowed_mode and
 /// returns, where the fullscreen path would instead search the modelist and
 /// Sys_Error on a miss.
@@ -339,7 +344,7 @@ fn parse_leg(spec: &str) -> Result<Leg, String> {
 fn play(r: &Renderer, extra: &[String]) -> Result<i32, String> {
     let old = r.driver.map(driver_set);
     let mut cmd = Command::new(r.bin);
-    for a in BASE_ARGS {
+    for a in PLAY_ARGS {
         cmd.arg(*a);
     }
     for a in extra {
@@ -391,7 +396,7 @@ fn bench_one(leg: &Leg, demo: &str) -> Result<Bench, String> {
         Some(env_set(ENV_NOPACE, ENV_NOPACE_PATH, "1"))
     };
     let mut cmd = Command::new(r.bin);
-    for a in BASE_ARGS {
+    for a in BENCH_ARGS {
         cmd.arg(*a);
     }
     // Built before the loop because Command borrows each argument: a

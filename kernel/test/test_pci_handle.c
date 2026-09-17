@@ -13,6 +13,7 @@
 
 #include "test.h"
 
+#include <thylacine/burrow.h>
 #include <thylacine/mmio_handle.h>     // kobj_mmio_pa_claimed
 #include <thylacine/page.h>            // PAGE_SIZE
 #include <thylacine/pci_handle.h>
@@ -28,6 +29,8 @@
 void test_pci_bar_decode_size(void);
 void test_pci_walk_caps_hostile(void);
 void test_pci_walk_caps_shm(void);
+void test_pci_msix_windows(void);
+void test_pci_mapping_holds_function(void);
 void test_pci_claim_rng(void);
 void test_pci_claim_unknown(void);
 void test_pci_claim_exclusive(void);
@@ -103,7 +106,7 @@ static void cfg_put_vcap(u8 *cfg, u32 at, u8 next, u8 cfg_type, u8 bar,
                          u32 offset, u32 length) {
     cfg[at + 0] = PCI_CAP_ID_VNDR;
     cfg[at + 1] = next;
-    cfg[at + 2] = 0x10;          // cap_len (unread by the walk)
+    cfg[at + 2] = cfg_type == VIRTIO_PCI_CAP_NOTIFY_CFG ? 20 : 16;
     cfg[at + 3] = cfg_type;
     cfg[at + 4] = bar;
     cfg_put32(cfg, at + 8, offset);
@@ -155,11 +158,71 @@ static bool walk_setup(u8 **cfg, struct KObj_PCI **k, struct virtio_pci_dev *d) 
     return true;
 }
 
+// Each case gets fresh claim state: production walks once before publication.
+// Include both successful nontrivial windows and hostile config layouts.
+void test_pci_msix_windows(void) {
+    for (u32 scenario = 0; scenario < 12; scenario++) {
+        u8 *cfg;
+        struct KObj_PCI *k;
+        struct virtio_pci_dev d = {0};
+        TEST_ASSERT(walk_setup(&cfg, &k, &d), "MSI-X fixture allocation");
+        k->bars[0].size = 0x10000;
+        cfg[0x40] = PCI_CAP_ID_MSIX;
+        cfg_put16(cfg, 0x42, 63); // 64 entries = 1024 table bytes, 8 PBA bytes
+        cfg_put32(cfg, 0x44, 0x2800); // page [0x2000,0x3000)
+        cfg_put32(cfg, 0x48, 0x5800); // page [0x5000,0x6000)
+        switch (scenario) {
+        case 1: cfg_put32(cfg, 0x48, 0x2c00); break; // same page, disjoint bytes
+        case 2: cfg_put32(cfg, 0x44, 0x2806); break; // bad table BIR
+        case 3: cfg_put32(cfg, 0x48, 0x5801); break; // absent PBA BAR
+        case 4: cfg_put32(cfg, 0x44, 0xfff8); break; // table extends past BAR
+        case 5: cfg_put32(cfg, 0x48, 0x10000); break; // PBA past BAR
+        case 6: cfg_put32(cfg, 0x48, 0x2808); break; // table/PBA overlap
+        case 7: cfg[0x41] = 0xfc; cfg[0xfc] = PCI_CAP_ID_MSIX; break; // truncated cap
+        case 8: // two MSI-X capabilities are ambiguous, not first-one-wins
+            cfg[0x41] = 0x50; cfg[0x50] = PCI_CAP_ID_MSIX; break;
+        case 9: // device config shares a protected page
+            cfg[0x41] = 0x50;
+            cfg_put_vcap(cfg, 0x50, 0, VIRTIO_PCI_CAP_DEVICE_CFG, 0, 0x2f00, 8);
+            break;
+        case 10: // truncated notify cap must not read its multiplier
+            cfg[0x40] = PCI_CAP_ID_VNDR; cfg[0x42] = 16;
+            cfg[0x43] = VIRTIO_PCI_CAP_NOTIFY_CFG; break;
+        case 11: // the two holes consume a routing-only BAR entirely
+            k->bars[0].size = 0x1000;
+            cfg_put32(cfg, 0x44, 0); cfg_put32(cfg, 0x48, 0x800); break;
+        }
+        int rc = pci_walk_caps(k, &d);
+        bool valid = scenario == 0 || scenario == 1 || scenario == 11;
+        bool good = (rc == 0) == valid;
+        if (valid && rc == 0) {
+            struct pci_map_window windows[PCI_MAP_WINDOW_MAX];
+            u32 n = kobj_pci_map_windows(k, windows);
+            good = good && n == (scenario == 0 ? 3u : scenario == 1 ? 2u : 0u);
+            if (scenario != 11) {
+                good = good && windows[0].offset == 0 && windows[0].length == 0x2000;
+                good = good && windows[1].offset == 0x3000;
+                good = good && windows[1].length == (scenario == 0 ? 0x2000u : 0xd000u);
+                if (scenario == 0)
+                    good = good && windows[2].offset == 0x6000 && windows[2].length == 0xa000;
+            }
+            for (u32 i = 0; i < n; i++)
+                good = good && kobj_pci_user_range(k, windows[i].bar,
+                    windows[i].offset, windows[i].length) && windows[i].reserved == 0;
+            good = good && !kobj_pci_user_range(k, 0, 0, k->bars[0].size);
+            good = good && !kobj_pci_user_range(k, 0, 0xfffffffffffff000ull, 0x2000);
+            good = good && !kobj_pci_user_range(k, 0, 0, 0);
+            good = good && !kobj_pci_user_range(k, 0, 1, 4096);
+        }
+        kfree(cfg); kfree(k);
+        TEST_EXPECT_EQ(good, true, "MSI-X layout/window rejection or complement");
+    }
+}
+
 void test_pci_walk_caps_hostile(void) {
     const u8 COMMON = (u8)VIRTIO_PCI_CAP_COMMON_CFG;
 
-    // A: a cap-pointer loop must TERMINATE (the 48-hop guard) and return 0, not
-    // hang. cfg_type 5 (PCI_CFG) is outside [1,4], so no region resolve runs --
+    // A: a cap-pointer loop must fail, not merely terminate successfully. cfg_type 5 (PCI_CFG) is outside [1,4], so no region resolve runs --
     // this isolates the loop-termination property.
     {
         u8 *cfg;
@@ -171,8 +234,7 @@ void test_pci_walk_caps_hostile(void) {
         int r = pci_walk_caps(k, &d);
         kfree(cfg);
         kfree(k);
-        TEST_ASSERT(r == 0,
-                    "a cap-pointer loop must terminate via the 48-hop guard (no hang)");
+        TEST_ASSERT(r < 0, "a cap-pointer loop must be rejected");
     }
 
     // B: a cap with an out-of-range BAR index must be rejected.
@@ -610,4 +672,29 @@ void test_pci_claim_nth(void) {
     if (k0) kobj_pci_unref(k0);
     TEST_ASSERT(both, "two same-id functions must be independently claimable");
     TEST_ASSERT(distinct, "the two claims must own DISTINCT functions");
+}
+
+// A mapped function cannot be reclaimed after its ordinary handle closes.
+// The retained whole BAR also keeps its excluded routing pages exclusive.
+void test_pci_mapping_holds_function(void) {
+    struct KObj_PCI *k = kobj_pci_claim(VIRTIO_DEVICE_ID_RNG, 0);
+    TEST_ASSERT(k != NULL, "claim idle RNG for mapping lifetime");
+    struct pci_map_window windows[PCI_MAP_WINDOW_MAX];
+    u32 n = kobj_pci_map_windows(k, windows);
+    struct Burrow *b = n ? burrow_create_pci_mmio(k, windows[0].bar,
+        windows[0].offset, windows[0].length) : NULL;
+    if (!b) { kobj_pci_unref(k); TEST_ASSERT(false, "create PCI mapping"); }
+    bool valid = b->kobj_pci == k && b->pa ==
+        k->bars[windows[0].bar].pa + windows[0].offset;
+    kobj_pci_unref(k); // ordinary handle closes; only the mapping pins k
+    struct KObj_PCI *second = kobj_pci_claim(VIRTIO_DEVICE_ID_RNG, 0);
+    bool refused = second == NULL;
+    if (second) kobj_pci_unref(second);
+    burrow_unref(b);
+    second = kobj_pci_claim(VIRTIO_DEVICE_ID_RNG, 0);
+    bool released = second != NULL;
+    if (second) kobj_pci_unref(second);
+    TEST_ASSERT(valid, "mapping retains PCI owner and range PA");
+    TEST_ASSERT(refused, "mapping prevents premature function reassignment");
+    TEST_ASSERT(released, "last mapping drop releases function");
 }

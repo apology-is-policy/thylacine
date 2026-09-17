@@ -1,12 +1,12 @@
 # Remote files with Haul
 
-## Overview
-
 Haul connects a remote 9P2000.L filesystem over IPv4 TCP. Supplying a token
 selects the npxf authenticated encrypted channel; omitting it selects plain,
 unencrypted 9P. The current implementation accepts dotted IPv4 addresses.
 
-## Getting started
+## In Practice
+
+### Mount in the current shell
 
 Provision a token file separately and restrict its permissions with
 `chmod 600 /path/to/token`. For a mount in the current shell, enter
@@ -27,7 +27,7 @@ abdicate
 Replace the example address, token path and filename with your server's values.
 `abdicate` ends the elevated scope and its background relays.
 
-## Reference
+### Command reference
 
 - `haul --post [-t FILE | --token-env VAR] [-v] NAME HOST!PORT`: publish a
   single-session byte service at `/srv/NAME`; requires scoped post authority.
@@ -44,7 +44,7 @@ child command. Names are single printable ASCII components, at most 32 bytes,
 excluding slash, whitespace, `.` and `..`. `HOST:PORT` also works; when composing
 an address from shell variables, use the quoted form `"$host:$port"`.
 
-## Patterns
+### Separate remote sessions
 
 One post serves one mount. Use another name and Haul process for another remote
 session. A scope may hold two active posts; the shared registry has four
@@ -57,14 +57,16 @@ For a one-command private mount, use:
 haul -t /path/to/token 10.0.2.2!5640 /tmp/remote /bin/cat /tmp/remote/hello.txt
 ```
 
-## Differences from Linux
+## Technical Details
+
+### Namespace and identity
 
 Namespaces are per-process. Backgrounding the private mount form cannot add a
 mount to its parent shell. The posted-service form and shell `mount` builtin
 exist to perform that mount in the calling shell itself. The service accepts
 only a client with the poster's kernel-stamped principal identity.
 
-## Troubleshooting
+### Failure and cleanup
 
 `mount` and `unmount` set `$status` and `$errstr`. Run `echo $errstr` to display
 a failure reason. A second mount of one post is refused; a missing post, busy
@@ -74,8 +76,3 @@ mounting, and use `haul -v` for connection and handshake progress.
 A remote disconnect fails pending filesystem operations. The relay ends when
 its connection or elevated scope ends. Token retrieval through corvus is not
 implemented; continue to use the explicit file or environment-source interface.
-
-## See also
-
-[Haul design](../HAUL-DESIGN.md), [Imperium design](../IMPERIUM-DESIGN.md), and
-[trusted path](../TRUSTED-PATH.md).

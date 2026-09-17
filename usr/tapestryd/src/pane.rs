@@ -3677,6 +3677,7 @@ impl Layout {
         if p.weight != DEFAULT_WEIGHT {
             let _ = core::fmt::write(s, format_args!(" w={}", p.weight));
         }
+        if p.backgrounded { s.push_str(" backgrounded"); }
         let _ = core::fmt::write(s, format_args!("{}\n", if p.visible { "" } else { " hidden" }));
         if let Kind::Container { children, .. } = &p.kind {
             for &c in children {
@@ -5321,6 +5322,20 @@ mod tests {
         l.close(t[3]);
         assert_eq!(active_of(&l, t[0]), t[0]);
         assert_eq!(l.focused, t[0]);
+    }
+
+    #[test]
+    fn layout_text_distinguishes_background_from_hidden() {
+        let mut l = Layout::new();
+        let root = l.root();
+        l.get_mut(root).unwrap().backgrounded = true;
+        let text = l.render_text();
+        assert!(text.contains(" backgrounded"));
+        l.get_mut(root).unwrap().backgrounded = false;
+        l.get_mut(root).unwrap().visible = false;
+        let text = l.render_text();
+        assert!(text.contains(" hidden"));
+        assert!(!text.contains(" backgrounded"));
     }
 
     // ---- HALCYON-WORKSPACES 4 (W-1): the live roots ----

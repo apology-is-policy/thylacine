@@ -1089,14 +1089,16 @@ pub fn reset_plan(layout: &str) -> Vec<(u32, String)> {
     plan
 }
 
-/// 8.2 / 14.3: the panes of a layout -- every stack of one and every stack
-/// counted once (a tile that is its stack's first), less the leaves
-/// `foreign` names: a leaf hosting a surface the owner does not describe
-/// is a backgrounded system leaf (the console renderer a session stepped
-/// back, sharing the root -- the dump does not mark it, so only the owner
-/// can tell it from its own).
-pub fn pane_count(tiles: &[crate::chrome::TileInfo], foreign: impl Fn(&crate::chrome::TileInfo) -> bool) -> u32 {
-    tiles.iter().filter(|t| t.index == 1 && !foreign(t)).count() as u32
+/// 8.2 / 14.3: each stack counts once. Exclude only explicitly backgrounded
+/// system leaves; an independently hosted native application remains a pane.
+pub fn pane_count(tiles: &[crate::chrome::TileInfo]) -> u32 {
+    // A background renderer can be the first member of a foreground stack.
+    // Count each group at its first foreground member, not at index one.
+    tiles.iter().enumerate().filter(|(i, t)| {
+        !t.leaf.backgrounded && !tiles[..*i].iter().any(|prior| {
+            !prior.leaf.backgrounded && prior.group == t.group
+        })
+    }).count() as u32
 }
 
 #[cfg(test)]
@@ -1692,11 +1694,19 @@ mod tests {
         assert!(reset_plan("").is_empty());
         // The pane count over the same trees: a stack counts once.
         let t = crate::chrome::parse_tree("epoch 1 focused 2\n1 splith n=2 active=0 [0,0,1,1]\n  2* leaf surface=0 [0,0,1,1]\n  3 stacked n=2 active=0 [0,0,1,1]\n    4 leaf surface=1 [0,0,1,1]\n    5 leaf surface=2 [0,0,0,0] hidden\n");
-        assert_eq!(pane_count(&t, |_| false), 2);
-        // A backgrounded system leaf beside the session's two: hosting a
-        // surface the session does not describe -- not a pane.
+        assert_eq!(pane_count(&t), 2);
+        // A foreground native app counts even without a session PTY. Only
+        // the explicit backgrounded system leaf disappears from the count.
         let t = crate::chrome::parse_tree("epoch 1 focused 3\n1 splith n=3 active=1 [0,0,1,1]\n  2 leaf surface=0 [0,0,0,0]\n  3* leaf surface=1 [0,0,1,1]\n  4 leaf surface=2 [0,0,1,1]\n");
-        assert_eq!(pane_count(&t, |_| false), 3);
-        assert_eq!(pane_count(&t, |x| x.leaf.surface.is_some() && x.leaf.id == 2), 2);
+        assert_eq!(pane_count(&t), 3);
+        let mut t = t;
+        t[0].leaf.backgrounded = true;
+        assert_eq!(pane_count(&t), 2);
+        let parsed = crate::chrome::parse_tree("1 leaf surface=0 [0,0,0,0] backgrounded\n2 leaf surface=1 [0,0,1,1] hidden\n");
+        assert!(parsed[0].leaf.backgrounded);
+        assert!(!parsed[1].leaf.backgrounded);
+        assert_eq!(pane_count(&parsed), 1, "hidden app still belongs to its pane");
+        let mixed = crate::chrome::parse_tree("1 stacked n=2 active=1 [0,0,1,1]\n  2 leaf surface=0 [0,0,0,0] backgrounded hidden\n  3 leaf surface=1 [0,0,1,1]\n");
+        assert_eq!(pane_count(&mixed), 1, "a background first member cannot hide its foreground stack");
     }
 }

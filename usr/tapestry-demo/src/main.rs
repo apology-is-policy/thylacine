@@ -25,7 +25,7 @@ extern crate alloc;
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
 use libthyla_rs::time::{sleep, Duration};
-use tapestry::{Event, Rect, Surface, TEV_CLOSE, TEV_FRAME, TEV_KEY};
+use tapestry::{Event, FrameIntent, Rect, Surface, TEV_CLOSE, TEV_FRAME, TEV_KEY};
 
 macro_rules! say {
     ($($a:tt)*) => {{
@@ -95,6 +95,25 @@ pub extern "C" fn rs_main() -> i64 {
     let mut surf = surf.unwrap();
     let (w, h) = (surf.w, surf.h);
 
+    // reference/139 "Frame intent" regression lever (the throttle gate): argv
+    // declares this surface's intent, and "idle" makes it present ONCE then
+    // stop -- a visible surface whose animating() falls to false, so only the
+    // DYNAMIC pin can hold the compositor clock. No args = the plain demo
+    // (unchanged). Scanned across all args so argv[0] cannot match a token.
+    let mut idle_mode = false;
+    for a in libthyla_rs::env::args() {
+        match core::str::from_utf8(a) {
+            Ok("static") => {
+                let _ = surf.intent(FrameIntent::Static);
+            }
+            Ok("dynamic") => {
+                let _ = surf.intent(FrameIntent::Dynamic);
+            }
+            Ok("idle") => idle_mode = true,
+            _ => {}
+        }
+    }
+
     // The plasma block: display-center, clear of the -v quadrant sample
     // points by construction (samples at (w/4,h/4),(3w/4,h/4),(w/4,3h/4),
     // (3w/4,3h/4); the block spans (3w/8..5w/8, 3h/8..5h/8)).
@@ -132,6 +151,12 @@ pub extern "C" fn rs_main() -> i64 {
         };
         match ev.kind {
             TEV_FRAME => {
+                if idle_mode {
+                    // Present-once-idle: the frame-0 present already took the
+                    // scanout; stay visible but stop presenting so animating()
+                    // falls to false and the intent pin becomes the only signal.
+                    continue;
+                }
                 phase = phase.wrapping_add(3);
                 // GPU-DESIGN 4.5.8b. Frame 0 painted the quadrant background
                 // into SLOT 0 only; every frame after draws just the plasma

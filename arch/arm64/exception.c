@@ -388,7 +388,7 @@ static void exception_irq_curr_el_impl(struct exception_context *ctx) {
     // INTIDs 1020..1023 are reserved per ARM IHI 0069 §2.2.1 (1023 is
     // explicitly "spurious"; 1020..1022 are also reserved and must not
     // be dispatched or EOI'd). Treat the full range as spurious.
-    if (intid >= GIC_NUM_INTIDS) {
+    if (intid >= GIC_NUM_INTIDS && intid <= GIC_INTID_SPURIOUS) {
         return;
     }
     gic_dispatch(intid);

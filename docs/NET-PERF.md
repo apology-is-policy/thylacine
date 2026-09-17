@@ -554,3 +554,13 @@ device and not the crypto.** The reserve is large and the #1 lever — an
 RX-driven netd via a pollable IRQ fd (N1) — is a small, well-scoped kernel ABI
 that would remove ~250 ms from a typical in-guest HTTPS fetch. The ranked
 backlog (N1-N5) feeds the RW-11 v1.x perf backlog (#62).
+
+## Bounded transport retirement (2026-09-17)
+
+`NET-CLOSE-DESIGN.md` separates last-clunk public cleanup from TCP transport
+retirement. Connection churn may exhaust the 64-transport limit during
+TIME-WAIT. M3/M6 dial loops retry ENOMEM only, with a 35-second bound, and
+report refusals/recovery. Their measured dial latency includes this waiting;
+these values are not directly comparable to historical immediate-removal runs.
+NIC bulk send still closes immediately. The `pci-net-load` gate checks every
+byte and EOF at its host sink because send-completion alone is insufficient.

@@ -72,10 +72,9 @@ use core::sync::atomic::{compiler_fence, Ordering};
 
 use crate::err::{Error, Result};
 use crate::handle::{Handle, Rights};
-use crate::poll::AsFd;
 use crate::{
     t_burrow_detach, t_burrow_from_hostmem, t_dma_create, t_dma_map, t_irq_create, t_irq_wait, t_irq_wait_timeout,
-    t_mmio_create, t_mmio_map, t_pci_claim, t_pci_info, t_pci_map_bar, TPciInfo, T_PROT_READ,
+    t_mmio_create, t_mmio_map, t_pci_claim, t_pci_info, t_pci_map_window, t_pci_windows, TPciInfo, TPciWindow, T_PCI_WINDOW_MAX, T_PROT_READ,
     T_PROT_WRITE,
 };
 
@@ -368,9 +367,11 @@ impl Mmio {
 /// A claimed IRQ line. Created by [`Irq::new`]; the kernel forwards
 /// matching GIC dispatches to the handle's per-Proc pending counter.
 ///
-/// Block on [`Irq::wait`] to consume one or more pending IRQs.
-///
-/// Composes with `t::poll::PollSet` via the [`AsFd`] impl.
+/// Block on [`Irq::wait`] to consume one or more pending IRQs. An `Irq` is
+/// deliberately NOT pollable: the kernel `poll(2)` has no KOBJ_IRQ readiness
+/// arm (it returns POLLNVAL), so there is no `AsFd` impl and passing an `Irq`
+/// to a `PollSet` is a compile error. A caller that wants to multiplex the IRQ
+/// against fds runs `wait()` on a dedicated thread and signals its poll loop.
 ///
 /// Non-transferable per invariant I-5.
 pub struct Irq {
@@ -408,11 +409,14 @@ impl Irq {
     /// Block until at least one IRQ is pending; return the collapsed
     /// pending-count consumed.
     ///
-    /// Edge-triggered semantics: multiple GIC dispatches while the
-    /// waiter is blocked collapse into one wake, but the returned
-    /// count reflects the count seen at wake time. The kernel
-    /// atomically reads-and-clears the counter under the rendez lock,
-    /// so no IRQ is dropped between consume and the next dispatch.
+    /// Multiple GIC dispatches collapse into one wake; the returned count
+    /// reflects dispatches consumed atomically under the kernel rendez lock.
+    /// Trigger mode comes from the device's DTB description. For a level line,
+    /// dispatch masks the interrupt and this call re-enables it: acknowledge
+    /// the device (including completion of its MMIO access) BEFORE waiting
+    /// again. Merely waking another thread to acknowledge later can cause an
+    /// interrupt storm that starves that thread. Used-ring state, not the
+    /// collapsed count, determines which device completions to consume.
     pub fn wait(&self) -> Result<u32> {
         let rc = unsafe { t_irq_wait(self.handle.raw() as i64) };
         if rc < 0 {
@@ -437,14 +441,120 @@ impl Irq {
     }
 }
 
-impl AsFd for Irq {
-    /// Returns the kernel handle index. Suitable for direct use with
-    /// `t::poll::PollSet` -- when the IRQ has a pending count >= 1,
-    /// the poll surface reports the fd as readable.
-    #[inline]
-    fn as_raw_fd(&self) -> i32 {
-        self.handle.raw()
+/// A function-bound PCI interrupt. Unlike `Irq`, WAIT never re-arms it.
+/// No AsFd: endpoint poll registration has not been implemented.
+pub struct PciIrq { handle: Handle, mode: PciIrqMode, vector: u16 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PciIrqMode { Intx = 1, Msix = 2 }
+impl PciIrq {
+    pub fn new(pci: &PciDev, mode: PciIrqMode) -> Result<Self> {
+        let raw = unsafe { crate::t_pci_irq_create(pci.handle.raw() as i64, mode as u32, 0) };
+        if raw < 0 { return Err(hw_error(raw)); }
+        let handle = unsafe { Handle::from_raw(raw as i32, Rights::READ | Rights::WRITE | Rights::SIGNAL) };
+        let mut info = crate::TPciIrqInfo::default();
+        Error::from_syscall_return(unsafe { crate::t_pci_irq_info(handle.raw() as i64, &mut info) })?;
+        if info.mode != mode as u32 || (mode == PciIrqMode::Msix && info.table_index >= 0xffff) {
+            return Err(Error::Io);
+        }
+        Ok(Self { handle, mode, vector: if mode == PciIrqMode::Msix { info.table_index as u16 } else { 0xffff } })
     }
+    pub fn mode(&self) -> PciIrqMode { self.mode }
+    pub fn vector(&self) -> u16 { self.vector }
+
+    /// Initialize interrupt routing before allocating/publishing queues or DMA.
+    /// This owns the reset and vector-selection transaction; the caller then
+    /// starts ACKNOWLEDGE/DRIVER and must not reset away the selected vectors.
+    /// PCI_IRQ_MODE=intx/msix forces a mode; unset/auto prefers MSI-X with full
+    /// rollback to INTx. Both config and every listed queue are read back.
+    pub fn for_virtio(pci: &PciDev, queues: &[u16]) -> Result<Self> {
+        let (common, len) = pci.region(PciRegion::Common).ok_or(Error::InvalidArgument)?;
+        if len < 56 || common & 7 != 0 { return Err(Error::InvalidArgument); }
+        let preference = crate::env::var("PCI_IRQ_MODE");
+        let force = match preference.as_deref() {
+            None | Some("auto") => None,
+            Some("intx") => Some(PciIrqMode::Intx),
+            Some("msix") => Some(PciIrqMode::Msix),
+            _ => return Err(Error::InvalidArgument),
+        };
+        Self::reset_virtio(common)?;
+        if force != Some(PciIrqMode::Intx) {
+            let attempt = Self::new(pci, PciIrqMode::Msix);
+            match attempt {
+                Ok(irq) => {
+                    if irq.select_virtio_vectors(common, queues).is_ok() { return Ok(irq); }
+                    // No queue/DMA has been published. Undo every selection
+                    // before closing the masked endpoint and changing mode.
+                    Self::reset_virtio(common)?;
+                    drop(irq);
+                    if force == Some(PciIrqMode::Msix) { return Err(Error::Io); }
+                }
+                Err(error) => {
+                    if force == Some(PciIrqMode::Msix) { return Err(error); }
+                    Self::reset_virtio(common)?;
+                }
+            }
+        }
+        let irq = Self::new(pci, PciIrqMode::Intx)?;
+        irq.select_virtio_vectors(common, queues)?;
+        Ok(irq)
+    }
+    fn reset_virtio(common: u64) -> Result<()> {
+        unsafe { mmio_write8(common + 20, 0); core::arch::asm!("dsb sy", options(nostack)); }
+        let deadline = crate::time::monotonic_ns().saturating_add(10_000_000);
+        // The iteration cap also bounds a malfunctioning monotonic source.
+        for _ in 0..1_000_000 {
+            if unsafe { mmio_read8(common + 20) } == 0 { return Ok(()); }
+            if crate::time::monotonic_ns() >= deadline { break; }
+            core::hint::spin_loop();
+        }
+        Err(Error::TimedOut)
+    }
+    fn select_virtio_vectors(&self, common: u64, queues: &[u16]) -> Result<()> {
+        unsafe {
+            let count = mmio_read16(common + 18);
+            if queues.iter().any(|&q| q >= count) { return Err(Error::InvalidArgument); }
+            mmio_write16(common + 16, self.vector);
+            if mmio_read16(common + 16) != self.vector { return Err(Error::Io); }
+            for &queue in queues {
+                mmio_write16(common + 22, queue);
+                mmio_write16(common + 26, self.vector);
+                if mmio_read16(common + 26) != self.vector { return Err(Error::Io); }
+            }
+            core::arch::asm!("dsb sy", options(nostack));
+        }
+        Ok(())
+    }
+    /// Initial enable only, after queue publication and initialization ack.
+    pub fn arm(&self) -> Result<()> {
+        Error::from_syscall_return(unsafe { crate::t_pci_irq_arm(self.handle.raw() as i64) }).map(|_| ())
+    }
+    /// Returns the outstanding ticket, or None on timeout. The same ticket is
+    /// replayed until completion, so a copy failure cannot strand the source.
+    pub fn wait_timeout(&self, timeout_ns: u64) -> Result<Option<crate::TPciIrqEvent>> {
+        let mut event = crate::TPciIrqEvent::default();
+        let rc = unsafe { crate::t_pci_irq_wait(self.handle.raw() as i64, timeout_ns, &mut event) };
+        Error::from_syscall_return(rc)?;
+        Ok(if rc == 0 { None } else { Some(event) })
+    }
+    pub fn wait(&self) -> Result<Option<crate::TPciIrqEvent>> { self.wait_timeout(0) }
+    /// Call only after draining/acknowledging the device and a device barrier.
+    /// WouldBlock leaves the source masked; WAIT supplies a timed retry of the
+    /// same ticket, after which the driver drains and acknowledges again.
+    pub fn complete(&self, event: crate::TPciIrqEvent) -> Result<()> {
+        Error::from_syscall_return(unsafe { crate::t_pci_irq_complete(self.handle.raw() as i64,
+            event.generation, event.sequence) }).map(|_| ())
+    }
+    pub fn disable(&self) -> Result<()> {
+        Error::from_syscall_return(unsafe { crate::t_pci_irq_disable(self.handle.raw() as i64) }).map(|_| ())
+    }
+    pub fn info(&self) -> Result<crate::TPciIrqInfo> {
+        let mut info = crate::TPciIrqInfo::default();
+        Error::from_syscall_return(unsafe { crate::t_pci_irq_info(self.handle.raw() as i64, &mut info) })?;
+        Ok(info)
+    }
+}
+impl Drop for PciIrq {
+    fn drop(&mut self) { let _ = self.disable(); }
 }
 
 // =============================================================================
@@ -628,8 +738,8 @@ impl Dma {
 // The PCI sibling of `Mmio` (pci-2, the virtio-PCI transport). `PciDev::claim`
 // composes the three pci-1c syscalls -- SYS_PCI_CLAIM (claim a function by its
 // virtio_device_id), SYS_PCI_INFO (read its resolved BAR + capability-region +
-// INTID topology), and SYS_PCI_MAP_BAR (map each present memory BAR into user
-// VA) -- so the returned object exposes the four virtio_pci capability regions
+// INTID topology), SYS_PCI_WINDOWS and SYS_PCI_MAP_WINDOW (map allowed BAR
+// pages, retaining MSI-X routing pages in the kernel) -- so the returned object exposes the four virtio_pci capability regions
 // (common / notify / isr / device config) as mapped VAs a driver pokes through
 // the ISV-safe `mmio_*` primitives.
 //
@@ -638,9 +748,9 @@ impl Dma {
 // persistent userspace drivers (netd vs stratumd) at the MMU granule -- the #140
 // resolution the virtio-mmio bank could not give (8 device slots / 4 KiB page).
 //
-// Lifetime + I-5: like `Mmio`, `Drop` closes the KObj_PCI handle; the BAR
-// mappings survive the close (the kernel-side Burrow holds an independent ref --
-// the #847 dual lifetime) until proc exit. KObj_PCI joins KOBJ_KIND_HW_MASK, so
+// Lifetime + I-5: Drop detaches the mapped windows, then closes the PCI
+// handle. Kernel BAR mappings and IRQ endpoints independently retain the
+// function until their references are released. KObj_PCI joins KOBJ_KIND_HW_MASK, so
 // the kernel rejects SYS_TRANSFER + handle_dup; this type adds no Transfer trait.
 
 /// The four VirtIO-PCI capability-structure kinds (VIRTIO 1.2 section 4.1.4.1),
@@ -666,7 +776,7 @@ pub enum PciError {
     Claim,
     /// `SYS_PCI_INFO` failed (bad handle -- should not happen post-claim).
     Info,
-    /// A BAR/hostmem mapping syscall failed: `SYS_PCI_MAP_BAR` (overlap / bad VA
+    /// A BAR/hostmem mapping syscall failed: `SYS_PCI_MAP_WINDOW` (overlap / bad VA
     /// / prot) or `SYS_BURROW_FROM_HOSTMEM` (bad shmid, out-of-bounds or
     /// non-page-aligned subrange, missing `RIGHT_MAP`, or an unknown cache policy).
     MapBar,
@@ -693,7 +803,8 @@ pub struct PciDev {
     #[allow(dead_code)] // Drop fires on the handle.
     handle: Handle,
     info: TPciInfo,
-    bar_va: [Option<u64>; 6],
+    windows: [TPciWindow; T_PCI_WINDOW_MAX],
+    window_va: [Option<u64>; T_PCI_WINDOW_MAX],
 }
 
 impl PciDev {
@@ -733,39 +844,44 @@ impl PciDev {
             return Err(PciError::Info);
         }
 
-        // pci-3 F1: a live BAR mapping holds its own kobj_mmio ref (#847), so a
-        // mid-loop failure that only dropped the handle would leave the BARs
-        // already mapped at bar_va[j<i] -- and their device-register claims --
-        // until proc exit. SYS_BURROW_DETACH decides by identity (ARCH 6.5), so a
-        // BAR map below the burrow-attach window is detachable and the failure
-        // arm unwinds it.
-        let prot = T_PROT_READ | T_PROT_WRITE;
-        let mut bar_va: [Option<u64>; 6] = [None; 6];
-        for (i, bar) in info.bars.iter().enumerate() {
-            if bar.present == 0 {
-                continue;
+        let mut windows = [TPciWindow::default(); T_PCI_WINDOW_MAX];
+        let n = t_pci_windows(i64::from(handle.raw()), windows.as_mut_ptr(), T_PCI_WINDOW_MAX as u64);
+        if n < 0 || n as usize > T_PCI_WINDOW_MAX { return Err(PciError::Info); }
+        // Validate every record before creating the first mapping, so even
+        // malformed topology cannot bypass the rollback path later.
+        for w in &windows[..n as usize] {
+            let bar = info.bars.get(w.bar as usize).ok_or(PciError::Info)?;
+            let size = bar.size.checked_add(4095).ok_or(PciError::Info)? & !4095;
+            if bar.present == 0 || w.reserved != 0 || w.length == 0 ||
+                (w.offset | w.length) & 4095 != 0 ||
+                w.offset > size || w.length > size - w.offset {
+                return Err(PciError::Info);
             }
-            // #166: a BAR past the stride (the hostmem shm class) is left
-            // unmapped, not a claim failure -- bar_va[i] stays None, so
-            // region() fails closed if a hostile cap layout ever routed a
-            // capability region into it. Its geometry still reaches the
-            // driver via shm_region().
-            if bar.size > PCI_BAR_VA_STRIDE {
-                continue;
-            }
-            let va = bar_window + (i as u64) * PCI_BAR_VA_STRIDE;
-            if t_pci_map_bar(i64::from(handle.raw()), va, i as u64, prot) < 0 {
-                for (j, mapped) in bar_va.iter().enumerate().take(i) {
-                    if let Some(v) = *mapped {
-                        let _ = t_burrow_detach(v, info.bars[j].size);
-                    }
+        }
+        let mut window_va = [None; T_PCI_WINDOW_MAX];
+        for i in 0..n as usize {
+            let w = windows[i];
+            let bar = &info.bars[w.bar as usize];
+            // Large shared-memory BARs are mapped per allocation, explicitly.
+            if bar.size > PCI_BAR_VA_STRIDE { continue; }
+            let va = bar_window.checked_add(u64::from(w.bar) * PCI_BAR_VA_STRIDE)
+                .and_then(|v| v.checked_add(w.offset));
+            let rc = match va {
+                Some(v) => t_pci_map_window(i64::from(handle.raw()), v, u64::from(w.bar),
+                    T_PROT_READ | T_PROT_WRITE, w.offset, w.length),
+                None => -1,
+            };
+            if rc < 0 {
+                // A mapping owns a separate claim reference. Dropping only
+                // the handle would strand earlier windows until process exit.
+                for j in 0..i {
+                    if let Some(v) = window_va[j] { let _ = t_burrow_detach(v, windows[j].length); }
                 }
                 return Err(PciError::MapBar);
             }
-            bar_va[i] = Some(va);
+            window_va[i] = va;
         }
-
-        Ok(Self { handle, info, bar_va })
+        Ok(Self { handle, info, windows, window_va })
     }
 
     /// The mapped VA + byte length of a resolved VirtIO-PCI capability region,
@@ -778,16 +894,18 @@ impl PciDev {
         if r.present == 0 {
             return None;
         }
-        let base = (*self.bar_va.get(r.bar as usize)?)?;
-        // Defensive re-bound: the kernel already validated offset+length <=
-        // bar.size at claim, but re-check so a malformed ABI read can never hand
-        // out a VA past the mapped BAR.
         let bar = self.info.bars.get(r.bar as usize)?;
-        let end = u64::from(r.offset).checked_add(u64::from(r.length))?;
-        if end > bar.size {
-            return None;
+        let off = u64::from(r.offset);
+        let len = u64::from(r.length);
+        if off.checked_add(len)? > bar.size { return None; }
+        for (w, va) in self.windows.iter().zip(self.window_va.iter()) {
+            if w.bar != u32::from(r.bar) || off < w.offset { continue; }
+            let delta = off - w.offset;
+            if delta <= w.length && len <= w.length - delta {
+                if let Some(base) = va { return Some((base.checked_add(delta)?, r.length)); }
+            }
         }
-        Some((base + u64::from(r.offset), r.length))
+        None
     }
 
     /// The function's swizzled GIC INTID (the INTx line), or `None` if the DTB
@@ -879,5 +997,15 @@ impl PciDev {
     #[must_use]
     pub fn bdf(&self) -> (u8, u8, u8) {
         (self.info.bus, self.info.dev, self.info.fn_)
+    }
+}
+
+impl Drop for PciDev {
+    fn drop(&mut self) {
+        for (w, va) in self.windows.iter().zip(self.window_va.iter()) {
+            if let Some(va) = va { unsafe { let _ = t_burrow_detach(*va, w.length); } }
+        }
+        // Handle drops after this body. An endpoint/hostmem alias may retain
+        // the function, so drivers must quiesce before releasing DMA buffers.
     }
 }

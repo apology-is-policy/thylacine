@@ -37,6 +37,33 @@ in the integration commit and `docs/HAUL-INTEGRATION-REVIEW.md`. This is a
 self-review, not a new independent adversarial audit. Existing credential
 custody and back-pressure test caveats remain in [[sub-haul]].
 
+## Aux media and Halcyon integration — 2026-09-17
+
+The committed aux-3 work through `b0ea1986` is being integrated with main.
+View now places session images at their ordered Beacon caption in the shell
+transcript. Gallery preserves aspect ratio, composites transparency over black,
+and exposes its title through the hosting pane tag; Halcyon counts native app
+panes independently of its PTYs. Real session captures verify pane creation,
+zoom, Escape, transcript preservation, and the rich Gallery manual on ITS and
+shared INTx configurations.
+
+The installed manual catalogue covers the reader, remote files/Haul, View,
+Gallery, Nocturne and DOSBox. Host format checks and the serial reader scenario
+pass. Real npxf mount, posting, remote-hangup and abdication scenarios pass
+through a temporary fixture on the Pi's Cloudflare SSH endpoint.
+
+The Lex curiata visual specification is operator-approved. The trusted display
+boundary and acceptance plan are in `docs/HALCYON-TRUSTED-EPISODE.md`; a regular
+Halcyon surface is not a trusted graphics sink. Graphical SAK implementation is
+not claimed by this design deliverable.
+
+The associated PCI work is governed by `docs/PCI-INTERRUPTS-DESIGN.md`.
+Function-bound shared INTx, mediated MSI-X, GICv2m, and ITS/LPI are implemented;
+1,568 kernel tests pass on HVF, including forced benchmark failure and a
+64-round last-close/dispatch race. Audio/controller and full SMP matrix gates
+remain in progress. Work is single-agent with self-review, not an independent
+auditor's approval. Main integration remains pending those checks.
+
 ## Landed chunks
 
 **The AUX-track notes / job-control block (2026-08-13..16)** sits at the top of
@@ -591,6 +618,25 @@ deadlock the capture harness -- no BrokenPipe; covered interactively by
 audit-bearing; floor = `make test-tcg` x2 (both clean: 793/793 + boot OK + 0
 EXTINCTION). NEXT on the MVP line: LS-5 (Ctrl-C); remaining breadth: LS-6
 (login UX) / LS-7 (editor) / LS-K (id/whoami/date).
+
+### The Imperium/Authority arc (IM) -- self-elevation on the trusted path
+
+Opened 2026-09-07 (operator-directed; aux track, Fable 5.1 at effort max) after
+the Nocturne arc was parked at N-3c-2. Binding design: `docs/IMPERIUM-DESIGN.md`
+(§11 = the as-built revisit + the plan; four forks ratified) +
+`docs/TRUSTED-PATH.md` + ROADMAP §9.1 (the IM bullet). Rows land in the
+Landed-chunks table above as each sub-chunk closes.
+
+| Sub-chunk | Scope | Bar | State |
+|---|---|---|---|
+| **IM-0** | scripture: IMPERIUM-DESIGN §11 + TRUSTED-PATH §7/§12/§15 + ARCH §25.2/§28 + CLAUDE.md rows + ROADMAP + ERRORS.md `sak` + SPEC-TO-CODE + JOURNAL | scripture, no code | `94eb3efd` |
+| **IM-1** | the kernel trusted EPISODE (IMPERIUM-DESIGN §11.3 + its 8 as-built refinements): `cons.c` the FREEZE (non-attached read / write / poll / consctl write / renderer feed park or refuse; the frozen poller on its own hook list), BEGIN discards all pending input + forces RAW, `SYS_CONSOLE_EPISODE` (110; ARM=1 / END=2, trusted-identity gated), the `sak` note (`NOTE_BIT_SAK`=6, mask 0x7f, kernel-synthetic-POST; the caught-note sub-field widened to 7 bits, the pipe latch relocated to bit 18), the three fail-safe closes (trusted death / relinquish / replacement), the pre-SAK owner handed back at END, one `cons: SAK (<decision>)` line per SAK; `t_console_episode` + `NoteClass::Sak` (libthyla-rs), libt enum, ut's `sak` note class | 12 `cons.episode_*` kernel tests (1525/1525 PASS); `tools/interactive/im1-sak-lever.exp` (Ctrl-A b IS a BREAK on the muxed serial: positive + negative control + every-SAK + the session survives an unarmed SAK); SMP gate; audit:hard (I-27) -- BATCHED holotype CLOSED CLEAN 0/0/0/1P3 (F1 = the documented pre-SAK-writer residue, kept as ratified; prosecutor Fable->Opus 4.8 silent mid-run fallback per JSONL, finished=closed, full-Fable pass owed; `memory/audit_im12_closed_list.md`) | `bccb297f` |
+| **IM-2** | the fork-PROPAGATING legate scope (IMPERIUM-DESIGN §11.4 + its 11 as-built refinements; I-25 STRENGTHENED): `specs/imperium.tla` FIRST (TLC-green before the kernel was touched: clean 157,839 states + liveness; 4 buggy cfgs each tripping its named invariant; `NoElevatedOutlivesScope` keyed on the anchor root's identity), then `SYS_CAP_GRANT_IMPERIUM` (111) + the 40-byte `/cap/grant` form (flags; PROPAGATING bounded to `CAP_GRANTABLE_IMPERIUM` = DAC|CHOWN|KILL), `Proc.legate_caps` + `Proc.legate_flags` (`LEGATE_FLAG_PROPAGATING`, a legate-block field that INHERITS; struct 392 -> 408 at the tail), the rfork carve `(parent & mask) & ~(CAP_ELEVATION_ONLY & ~flow)` + `legate_caps = flow & child->caps`, the straggler close (the parent's `group_exit_msg` re-checked under the SAME table-lock hold as the link; a refused rfork rolls the built child back), one scope per Proc set once (`proc_become_legate` FRESH / FURTHER arms; a PROPAGATING further redeem refused WITHOUT consuming; the stamp under the cap lock before the consume), the PHENO_LINUX fork mask `CAP_ALL \| CAP_ELEVATION_ONLY`, `/proc/<pid>/imperium` (0400, owner-or-hostowner); `t_cap_grant_imperium` (libthyla-rs), libt enum | 10 kernel tests (`proc.rfork_refused_while_terminating` through the REAL rfork + its clean twin; `caps.rfork_flow*` x3; `devcap.imperium_*` x3 + `further_redeem_keeps_scope`; `devproc.*imperium*` x2): 1535/1535 PASS on the full bake; clippy; SMP gate (see the commit body); audit:hard (I-2/I-25) -- BATCHED holotype CLOSED CLEAN 0/0/0/1P3 (with IM-1; F1 the ratified pre-SAK residue; Fable->Opus silent fallback JSONL-caught, finished=closed; `memory/audit_im12_closed_list.md`) | `4c77db6e` |
+| **IM-3** | corvus: the lex curiata (IMPERIUM-DESIGN §11.5 + its 16 as-built refinements): the `imperium` level (DAC/CHOWN/KILL, DISTINCT_SECRET, 4 h, PROPAGATING); the per-(user, level) key VERIFIER (corvus-crypto `CapKeyWrap`, CRVS-KV v1 136 B: argon2id(key) -> AEGIS over a random token, the tag is the check, never a DEK; a length-prefixed AD over subject + level) stored as `clearance.db` v2 record kind 2 at `CLEARANCE_GRANT`'s new key tail (required for DISTINCT_SECRET, user-only; refused for RE_AUTH; verify-then-skip idempotence; REVOKE takes it); `IMPERIUM_REQUEST` (verb 19; the verb-18 payload; no token, no session; ONE pending slot, BUSY=8; 60-s window, TIMEOUT=7) with the reply DEFERRED as a PARKED `Tread` (a 0-byte `Rread` is EOF -- §11.1's claim corrected; `Tflush` / reset / close abandon); the episode consumer on the `sak` note (notes fd in the poll set; ARM at startup): console open -> rate limit BEFORE the KDF (5 wrong keys per (user, level), the RECOVER discipline) -> the provincia (an 8-bit cell grid rasterized in userspace, `provincia.rs`; the exact cap-set + the axe + the term + the requester BEFORE the prompt) -> the key raw + unechoed (60-s bound) -> verify -> the requester re-read LIVE -> `SYS_CAP_GRANT_IMPERIUM(PROPAGATING)` -> the parked read answered -> END -> close + wipe; "nothing pending" on a bare SAK; `t_console_open` (libthyla-rs); joey's ladder (the imperium grant + 4 deny probes); `usr/imperium-probe` | corvus-crypto host tests 17/17 (4 new); clippy: no new warning in the changed files; full bake + test.sh 1535/1535 + the ladder lines + boot OK; LS-CI `im1-sak-lever` PASS (rewritten: `cons: SAK (episode)` + the empty episode) + `im3-lex-curiata` PASS (confer / wrong key with the axe / BUSY / TIMEOUT / survives); no SMP gate (no kernel change); audit:hard (crypto + privilege) BATCHED with IM-4 per the double-distance rule -- the AUDIT-TRIGGERS IM-3 row carries the prosecution addenda | `871b8f92` |
+| **IM-4** | the userspace sub-shell model (IMPERIUM-DESIGN §11.6 + its 9 as-built refinements): NEW `usr/imperium` (thin, untrusted native tool: `imperium [chown\|dac\|kill]` -> `IMPERIUM_REQUEST` verb 19 -> "confer with the SAK" -> the PARKED reply -> `cap::use_grant` (a PROPAGATING legate ROOT) -> spawn `/bin/ut` (fd 0/1/2 + identity inherited; the imperium caps FLOW via the kernel's rfork carve) -> wait -> exit; fail-fast on a non-tty; refuse when already in a scope; `--list` shows the /proc-flag holdings). Confirmed by reading the spawn path, NOT assumed: every `SYS_SPAWN` routes `rfork_with_caps(RFPROC)` -> `rfork_internal` (the IM-2 carve keeps the flow + copies the legate fields), and `proc_exec_replace` preserves `caps` + the legate fields -- so the spawned `ut` is an elevated propagating MEMBER that dies with the root. The fasces prompt in `ut` (`repl.rs`: `probe_imperium` reads `/proc/<pid>/imperium` ONCE; rods + securis + `#` in place of the tack; a warning hue with the axe). The `abdicate` builtin (exit iff a legate member; the SAME `read_own_imperium` as the prompt). NEW `usr/lib/fasces` (a PURE, host-tested parser for the /proc ABI line + the fasces renderer -- standalone because libthyla-rs's `_start` asm cannot host-compile, so one parser serves the prompt + `abdicate` + the tool with no drift) | fasces host tests 7/7 (`cargo test --target aarch64-apple-darwin -p fasces`); clippy: no new warning in the changed files; full bake + test.sh **1535/1535** + `u-builtin-test all OK` (the abdicate deny-path arm) + boot OK + `imperium` staged in the ramfs; **NO kernel change** (pure userspace consuming IM-2/IM-3), so no SMP gate; the confer -> spawn -> fasces -> abdicate E2E + the BATCHED holotype (IM-3 + IM-4) land at IM-5. **`--list` eligibility: OPERATOR-APPROVED 2026-09-08 and BUILT** as a follow-up (`0263a845`) -- the corvus `CLEARANCE_LIST_SELF` verb (20; the verb-18 identity shape, no token; verb 14 + 20 share `emit_eligible_levels`) + the tool's bounds-checked decode + a joey `PRINCIPAL_SYSTEM` deny probe; the positive path is IM-5's `ls-imperium.exp` | `6c4d61be` (+ `0263a845`) |
+| **IM-4** | `usr/imperium` (thin, untrusted; the sub-shell model) + ut `abdicate` + the fasces prompt + the manual page | host tests + boot | |
+| **IM-5** | The batched IM-3+IM-4 holotype (Fable 5.1, full diversity) CLOSED 0 P0 / 0 P1 / 1 P2 / 5 P3 (`4bae9094`); then the sub-shell-INPUT fix: the elevated `imperium` sub-`ut` EOF'd at birth on the serial console (a non-jc console pipes an external child's stdin). Fix = a new `is_console_passthrough` (libutopia console.rs, matches `imperium`) + `exec_external_passthrough` (stmt.rs): Inherit fd 0/1/2, the outer shell's PROMPT discipline left UNTOUCHED (NOT the `is_raw_command` RAW dance -- a sub-shell wants `+onlcr`/`+isig`), plain by-pid wait (NOT wait_pids_interruptible -- forwarding Ctrl-C would sweep the scope, I-25); non-jc console path only (jc/pts already Inherits; pipeline/redirect keep the fd-1 tty-check fail-fast). VERIFIED on **real ARM KVM (thyla-pi)**: `ls-imperium.exp` arms 0-5 ALL PASS -- arm 1 (confer -> SAK -> provincia -> key -> the sub-shell opens + `imperium --list` runs INSIDE it: scope + CAP_DAC_OVERRIDE) + arm 3 (abdicate teardown, I-25). Getting there made the Pi an E2E offload host (4 harness-portability fixes: run-vm.sh accel fallback, test-interactive.sh `script` syntax, test-serial-bridge.py preflight-#4 Linux-aware, the LS-CI fixture sync). **DEFERRED: arm 6** (cross-user logout->login) hit a real, ORTHOGONAL exit->getty/SAK logout STALL (PROVEN not-the-fix: a note-draining passthrough variant did not clear it; dev-accounts base logout->login passes on the Pi in 105s) -- ls-imperium scoped to the green arms 0-5, the stall tracked for a fresh-context deep-debug. No SMP gate (userspace-only). | arms 0-5 green on Pi KVM; arm 6 deferred (orthogonal stall tracked) | `abdf70ae` (+ tools `8dac07a6`) |
+| **IM-6** | pomerium + dictator | later | |
 
 ## Exit criteria status
 

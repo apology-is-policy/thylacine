@@ -56,7 +56,18 @@ proc gfx_dump_or_fail {out} {
 lc_boot
 lc_login michael correct-horse-battery-staple-v1
 
-lc_send "tyr-quake -window -nosound +timedemo demo1"
+lc_send "tyr-quake -window +timedemo demo1"
+# N-2a-3: sound is ON. "Sound Initialized" prints in Host_Init BEFORE the
+# "Quake Initialized" banner, so it is expected FIRST (a later expect would
+# have discarded it). The rate reads 48000 either way (Quake requests
+# 48000 = the device rate); which driver ran is the wav's business, not this
+# line's -- see tools/test-game-audio.sh.
+expect {
+    -re {Sound Initialized: 16 bits @ ([0-9]+)Hz} { lc_step "sound init: 16 bits @ $expect_out(1,string) Hz (snd_sdl over SDL_thylacineaudio)" }
+    "Couldn't init SDL audio" { lc_fail "tyr-quake: SDL audio init failed (no thylacine driver AND no dummy fallback?)" }
+    "Couldn't open SDL audio" { lc_fail "tyr-quake: SDL_OpenAudio failed" }
+    timeout { lc_fail "no Sound Initialized line within ${timeout}s" }
+}
 lc_expect "Quake Initialized" "engine init (pak loaded, SW renderer up)"
 
 # The timedemo completion line = the whole SDL->tapestry present path ran.

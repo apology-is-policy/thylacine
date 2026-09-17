@@ -30,6 +30,15 @@ to infer another agent's operating state.
 These decisions persist for this task. They are not permanent policy changes
 for future tasks with different instructions.
 
+## Current operator decisions (aux and Halcyon integration, 2026-09-17)
+
+- Integrate the remaining committed aux work, including media viewers, audio,
+  DOSBox and the manual reader, with current main and Halcyon. Preserve aux
+  uncommitted edits. Complete the manual reader and write operator sections.
+- Design graphical SAK authorization and document the trusted display boundary.
+- Continue single-agent; Claude-specific settings gates remain waived.
+- Share real screenshots as the new interfaces work in Halcyon.
+
 ## Working safely in this repository
 
 - Inspect `git status`, branch and worktrees before changing anything. Preserve
@@ -91,3 +100,21 @@ Use concise ASCII commit messages describing the final change and validation.
 Never fabricate authorship or audit approval. Before integrating into `main`,
 check again for concurrent changes and preserve the user's work. Report what
 landed, what was verified, and any remaining limitations plainly.
+
+### Additional operator direction during aux integration
+
+- Flag architectural workarounds and mismatches explicitly, with alternatives.
+- Design full shared PCI IRQ and MSI-X support now; see
+  `docs/PCI-INTERRUPTS-DESIGN.md` and the Vault decision
+  `dec-2026-09-17-pci-interrupt-domains`. The design's binding ownership/ABI
+  contract and full implementation are APPROVED by the operator (2026-09-17).
+  Implement both shared INTx and MSI-X backends, migrate drivers and verify.
+- Update the Vault alongside the work and regenerate/lint derived views.
+
+- The operator approved the Lex curiata visual specification on 2026-09-17.
+  Follow `docs/HALCYON-TRUSTED-EPISODE.md`; distinguish that visual approval
+  from implementation of a trusted graphics sink.
+
+- The operator approved the bounded TCP close design and implementation on
+  2026-09-17. Follow `docs/NET-CLOSE-DESIGN.md`: private transport retirement,
+  admission bounds, deadline diagnostics and byte-verified backend tests.

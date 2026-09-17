@@ -10,7 +10,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
-updated: 2026-09-05
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -546,3 +546,11 @@ its reasoning fails a test rather than passing quietly.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)
+
+## Native ceiling 114 (2026-09-17)
+
+The PCI mapping API raises the native ceiling to 114. Linux clock_gettime 113
+now overlaps native PCI_MAP_WINDOW, so its old above-ceiling proof no longer
+applies. The existing Tier-2 row consumes the Linux syscall and invokes the
+CLOCK_GETTIME handler directly. A compile-time equality pin records this specific
+collision; all remaining above-ceiling assertions still compile. [[abi-pci-windows]].

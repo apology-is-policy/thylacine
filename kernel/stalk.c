@@ -33,6 +33,7 @@
 #include <thylacine/stalk.h>
 
 #include <thylacine/dev.h>
+#include <thylacine/dev9p.h>
 #include <thylacine/errno.h>      // T_E_* (the errno-rollout arc; stalk *errp)
 #include <thylacine/perm.h>
 #include <thylacine/proc.h>       // struct Proc -> territory
@@ -1818,7 +1819,10 @@ per_component:
         // Spoor carries one owned ref; if it differs, the old quarry is spent
         // (open did not consume its ref) -> clunk it and adopt the replacement.
         struct Spoor *opened = quarry->dev->open(quarry, (int)omode);
-        if (!opened) goto fail;
+        if (!opened) {
+            err = err_code((int)dev9p_open_errno(quarry));
+            goto fail;
+        }
         if (opened != quarry) {
             // #66 (audit F2): the replacement (devsrv open=connect's connection
             // endpoint) is born with its OWN name ("/" for a 9P-mode conn root,

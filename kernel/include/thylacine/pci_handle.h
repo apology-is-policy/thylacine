@@ -34,8 +34,10 @@
 #define THYLACINE_PCI_HANDLE_H
 
 #include <thylacine/types.h>
+#include <thylacine/spinlock.h>
 
 struct virtio_pci_dev;          // <thylacine/virtio_pci.h>
+struct gic_msi_route;
 struct KObj_MMIO;               // <thylacine/mmio_handle.h>
 
 // KOBJ_PCI_MAGIC — sentinel at offset 0; checked at every public entry. SLUB
@@ -76,6 +78,8 @@ struct KObj_MMIO;               // <thylacine/mmio_handle.h>
 // PCI command register bits (PCI Local Bus 6.2.2).
 #define PCI_CMD_MEM_SPACE   (1u << 1)
 #define PCI_CMD_BUS_MASTER  (1u << 2)
+#define PCI_CMD_INTX_DISABLE (1u << 10)
+#define PCI_STATUS_INTERRUPT (1u << 3)
 
 // PCI status register: bit 4 = capabilities list present.
 #define PCI_STATUS_CAP_LIST (1u << 4)
@@ -83,6 +87,22 @@ struct KObj_MMIO;               // <thylacine/mmio_handle.h>
 // PCI capability ID for a vendor-specific capability (VIRTIO_PCI_CAP_* live in
 // vendor caps per VIRTIO 1.2 §4.1.4).
 #define PCI_CAP_ID_VNDR     0x09u
+#define PCI_CAP_ID_MSIX     0x11u
+#define PCI_MSIX_ENABLE    (1u << 15)
+#define PCI_MSIX_MASK_ALL  (1u << 14)
+
+// At most two protected intervals split six BARs into eight user windows.
+#define PCI_MAP_WINDOW_MAX (PCI_BAR_COUNT + 2u)
+struct pci_map_window {
+    u64 offset, length;
+    u32 bar, reserved;
+};
+_Static_assert(sizeof(struct pci_map_window) == 24, "PCI window ABI size");
+struct pci_msix {
+    u16 cap_offset, entries; // cap_offset == 0 means absent
+    u8 table_bar, pba_bar;
+    u32 table_offset, pba_offset;
+};
 
 // Legacy INTx pin: 1 = INTA (.. 4 = INTD). v1.0 single-function devices raise
 // INTA; dtb_pci_intx_route swizzles it to a GIC SPI INTID.
@@ -121,6 +141,12 @@ struct pci_shm {
 struct KObj_PCI {
     u64 magic;       // KOBJ_PCI_MAGIC
     int ref;         // refcount; starts at 1 from kobj_pci_claim
+    spin_lock_t cfg_lock; // serializes runtime command/MSI-X controls
+    bool revoked;        // terminal owner-death quiescence, under cfg_lock
+    bool irq_faulted;    // terminal IRQ configuration failure, under cfg_lock
+    bool reset_complete; // terminal virtio reset completed, under cfg_lock
+    void *common_cfg;    // cached kernel mapping of validated common registers
+    void *msix_table;    // cached kernel-only routing table mapping
 
     u8  bus;
     u8  dev;
@@ -135,6 +161,7 @@ struct KObj_PCI {
     struct pci_bar    bars[PCI_BAR_COUNT];
     struct pci_region regions[VIRTIO_PCI_CAP_REGION_COUNT];   // (cfg_type - 1)
     struct pci_shm    shm[PCI_SHM_COUNT];   // cfg_type 8, discovery order
+    struct pci_msix msix; // immutable after claim, before any user mapping
     u32 notify_off_multiplier;   // from the NOTIFY_CFG cap
 
     // V-2 (audit F1): count of live BURROW_TYPE_HOSTMEM burrows mapping this
@@ -179,6 +206,25 @@ struct KObj_PCI *kobj_pci_claim(u32 virtio_device_id, u32 nth);
 // checks the exact (bus,dev,fn) the claim resolves.
 int kobj_pci_resolve_bdf(u32 virtio_device_id, u32 nth, u8 *bus, u8 *dev, u8 *fn);
 
+// Runtime function control. Every Command access is 16-bit, preserving W1C
+// Status. Enable refuses a terminally quiesced owner; masking remains allowed.
+bool kobj_pci_intx_set(struct KObj_PCI *k, bool enable);
+bool kobj_pci_intx_asserted(struct KObj_PCI *k);
+bool kobj_pci_is_live(struct KObj_PCI *k);
+bool kobj_pci_irq_usable(struct KObj_PCI *k);
+// IRQ-safe function masking; DMA remains owned until ordinary reset/teardown.
+void kobj_pci_irq_fault(struct KObj_PCI *k);
+// Routing primitives are kernel-only. At most eight entries per function.
+#define PCI_MSIX_VECTOR_MAX 8u
+// 1 = installed, -1 = programming failed but lease retained for retirement,
+// 0 = rejected before touching routing state (caller may release its lease).
+int kobj_pci_msix_program(struct KObj_PCI *k, u32 index,
+                           const struct gic_msi_route *route);
+bool kobj_pci_msix_mask(struct KObj_PCI *k, u32 index, bool masked);
+void kobj_pci_msix_retire(struct KObj_PCI *k, u32 index);
+void kobj_pci_msix_off(struct KObj_PCI *k);
+
+
 // Refcount ops. Mirror kobj_mmio_ref / kobj_mmio_unref.
 // Clear MEM_SPACE|BUS_MASTER on the claimed function -- stop it decoding
 // and mastering. Idempotent; true iff it was actually enabled. Used by the
@@ -219,6 +265,12 @@ u64 pci_bar_decode_size(u32 lo_mask, u32 hi_rb, bool is64);
 // loop / out-of-range BAR / unassigned BAR / region past the BAR size). Exposed
 // for a deterministic hostile-cap-layout unit test over a synthetic config.
 int pci_walk_caps(struct KObj_PCI *k, struct virtio_pci_dev *d);
+
+// Page-granular user mapping policy, including the rounded last BAR page.
+// No allocation or mutable state. Every mapping path must use this policy.
+bool kobj_pci_user_range(const struct KObj_PCI *k, u32 bar, u64 offset, u64 length);
+u32 kobj_pci_map_windows(const struct KObj_PCI *k,
+                         struct pci_map_window out[PCI_MAP_WINDOW_MAX]);
 
 // Diagnostics — cumulative claim counter + currently-live count.
 u64 kobj_pci_total_created(void);

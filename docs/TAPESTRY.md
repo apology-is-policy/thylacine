@@ -203,9 +203,9 @@ Per session:
 
 A Thylacine SDL **video backend** (`SDL_thylacine`) targets libtapestry:
 `CreateWindowFramebuffer` -> `new_tapestry`; `UpdateWindowFramebuffer` ->
-`present`; `PumpEvents` -> the multishot event stream; `SDL_audio` -> a future
-audio server (the same shape; **no virtio-sound driver exists yet** — a
-prerequisite for game audio). Software-rendered Quake / Chocolate-Doom / PrBoom
+`present`; `PumpEvents` -> the multishot event stream; `SDL_audio` ->
+**Nocturne** (`docs/NOCTURNE.md` §6.11 — the same shape, designed 2026-09-05;
+its virtio-sound driver is Nocturne N-1, the SDL audio backend N-2). Software-rendered Quake / Chocolate-Doom / PrBoom
 land on this; GZDoom stays gated on a GL stack (Mesa swrast via Pouch is the
 realistic route, not a hand-rolled GL).
 
@@ -222,8 +222,8 @@ In dependency order:
    `TRANSFER_TO_HOST_2D` / `RESOURCE_FLUSH` (the deferred half of
    `usr/virtio-gpu`; the controlq probe already exists).
 3. **`tapestryd`** — the server above (`CAP_HW_CREATE`; the 9P protocol §8).
-4. **virtio-sound** (for audio) — does not exist; scope alongside the audio
-   server when game audio is in view.
+4. **virtio-sound** (for audio) — scoped 2026-09-05 as **Nocturne N-1**
+   (`docs/NOCTURNE.md` §8); the audio server is `nocturned` (N-2).
 
 Items 2-4 are the **post-Loom graphics phase** (NOVEL #2 + #4 territory;
 Halcyon, the graphical shell, is the eventual consumer above `tapestryd`). The
@@ -821,6 +821,15 @@ struct tevent {              /* little-endian, 24 bytes, version-pinned wire */
   hardware backends slots in behind the same event. A client that only
   recycles on present-CQEs never needs FRAME (the game loop); a client that
   paces (video) arms it.
+- **FRAME intent** (the declared throttle axis): a surface declares STATIC
+  (default) or DYNAMIC via `intent <static|dynamic>` on its `ctl` fid. While a
+  DYNAMIC surface is VISIBLE the compositor pins the synthesized clock to the
+  ctl rate, overriding the idle throttle's activity heuristic for
+  continuous-animation clients it cannot detect (a game presenting near the
+  throttle's present floor with a held key — the ~500 ms `core=dynamic` stutter).
+  Visible-gated: a hidden DYNAMIC surface throttles like any other.
+  `SDL_thylacine` declares DYNAMIC; console and chrome stay STATIC. See
+  reference/139 "Frame intent".
 - The Super/Hyper compositor-control layer (§14) is intercepted ABOVE this
   stream: reserved chords never reach a surface's events.
 
@@ -851,6 +860,13 @@ Stage 0 (V1) ships ONLY `ctl` + `surface/` with one fullscreen surface; the
 picture a client maps and draws into); `fb` is the fallback if it reads as
 obscuring. The tree is served by tapestryd over `/srv` + dev9p, mounted at
 `/dev/tapestry` by the boot chain (the /net mount precedent).
+
+A hosted surface's `title TEXT` writes the hosting pane's canonical tag and
+notifies the session to repaint its header. The surface owner cannot use this
+verb to name another pane. An unhosted surface returns `EINVAL`. Layout text
+has an optional `backgrounded` token after geometry/weight, separate from
+`hidden`: a hidden foreground tab still belongs to its pane, while a background
+system renderer is excluded from the session's pane count.
 
 ### 18.6 Determinism mode (the §16 wire, made concrete)
 

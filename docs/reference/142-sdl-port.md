@@ -52,7 +52,10 @@ copies OUR `thylacine/` driver in as `src/video/thylacine/`.
 
 The pruned tree IS the compile list (every `.c` under `src/` except
 `src/main`). Driver selections: **video** = thylacine + dummy; **audio** =
-dummy (no virtio-sound at v1.0 — §10 item 4); **thread** = pthread (pouch
+thylacine (the Nocturne backend, N-2a-2) + dummy (the soundless fallback,
+selected when `/srv/nocturne` is absent -- auto-selectable on this target
+only via patch `0003`, N-2a-3; upstream keeps it demand-only, which SDL's
+auto-selection skips); **thread** = pthread (pouch
 patch 0004); **timer** = unix (`clock_gettime` = 75; `nanosleep` = torpor,
 patch 0022); everything else = dummy/disabled stubs.
 
@@ -108,6 +111,36 @@ stock `linux_scancode_table`; the compositor-resolved rune → `SDL_TEXTINPUT`
 on press; a size-changing `TEV_CONFIGURE` acks + reweaves on the SDL thread
 then reports `SDL_WINDOWEVENT_RESIZED`; `TEV_FOCUS`/`TEV_CLOSE` map to the
 SDL window events.
+
+### App-driven resize (`SetWindowSize` -> tap recreate; DX-2b)
+
+A size-changing `TEV_CONFIGURE` is the compositor OFFERING a size, and a
+`reweave` acks it (above). The inverse -- an app calling `SDL_SetWindowSize`
+-- has no compositor serial to ack, so it CANNOT reweave a live weave. The
+`THYLACINE_SetWindowSize` hook instead RECREATES the tap at the requested
+size: `StopEventPump` (retires the old surface + joins the pump) ->
+`thyla_tap_close` -> `thyla_tap_open(neww,newh)` -> `StartEventPump` -- a
+mirror of `DestroyWindow`'s teardown + `CreateWindow`'s surface setup, so the
+next `SDL_GetWindowSurface` hands back a valid surface at the new size.
+Without the hook, `SDL_SetWindowSize` invalidates the SDL surface but leaves
+the weave at the old size, and the next `SDL_GetWindowSurface` builds a
+surface over a wrong-sized buffer -- a NULL surface (the app derefs it and
+faults) or an out-of-bounds draw. A reopen failure falls back to the prior
+size so `window->w/h` never lead the weave; `thyla_tap_open` memsets the
+struct first, so recreating on a used tap is safe.
+
+**The resize war (why apps that manage their own size are non-resizable
+here).** The two resize paths FIGHT for a RESIZABLE window: the app sets its
+size (recreate) -> the compositor offers the pane size via `TEV_CONFIGURE`
+-> the resizable window acks it (reweave + `RESIZED`) -> the app reads
+`RESIZED` as a user resize and re-asserts its own aspect-corrected size ->
+the compositor re-offers, forever, and the scanout never settles ("Display
+output is not active"). A NON-resizable window declines the offer (the
+`TEV_CONFIGURE` Fork-2 path: keep the surface dims, the compositor
+letterboxes) -- no `RESIZED`, no chase. DOSBox-X, which computes its own
+aspect-corrected window size, is therefore pinned non-resizable on Thylacine
+(`usr/ports/dosbox-x/patches/0005-*`), and the compositor letterboxes its
+640x`N` DOS surface into the pane. Worked example: the DX-2b first light.
 
 **G-7c — the pointer path.** `TEV_PTR_MOVE` carries the surface-relative
 position packed `x<<16|y` (TAPESTRY §18.4). In relative mode (Quake
@@ -166,7 +199,8 @@ elapsed → re-measure the deadline on the requested clock; chunked under the
 `build_sdl2()`: copy → patch → config-overwrite → glob-compile the pruned
 tree (130 TUs, zero warnings) → `libSDL2.a` (1.5 MB) + headers →
 `sysroot/include/SDL2/`. Then `/sdl-probe`. `tools/build.sh sdl2` builds it
-standalone; `build_all` calls it before the ramfs bake.
+standalone; `build_all` calls it before the ramfs bake. The audio witness
+`/sdl-audio-probe` links the same way, right after `/sdl-probe`.
 
 ## Proof: `/sdl-probe`
 
@@ -178,6 +212,103 @@ pattern + an animated sweep, pumps events, tears down. On the first live
 run the compositor tiled the probe beside aurora and CONFIGURE-resized it,
 so the reweave/generation path was exercised on run one; the screendump
 pixel-count asserts all four quadrant colors on the scanout.
+
+## Audio: the Nocturne backend (`SDL_thylacineaudio`, N-2a-2)
+
+The audio peer of the video backend. `SDL_Init(AUDIO)` resolves
+`THYLACINEAUDIO_bootstrap` (registered ahead of `DUMMYAUDIO` by patch
+`0002-sdl2-thylacine-audio.patch`), `SDL_OpenAudioDevice` mints a private
+Nocturne voice, and SDL's audio thread streams the callback's PCM to it --
+the whole audio path through stock SDL API. The source lives beside the video
+backend in `usr/ports/sdl2/thylacine/`; `build_sdl2` stages it into
+`src/audio/thylacine/` (where its `../SDL_sysaudio.h` include resolves) rather
+than the video dir.
+
+The design mirrors `thyla_tap.c` exactly one layer over: plain blocking file
+ops, no Loom ring (the byte-copy path; the Weft ring is N-2b). Four entry
+points, the rest SDL's no-op defaults:
+
+- **`Init`** probes `/srv/nocturne` (open OREAD, close) and returns `FALSE`
+  when it is absent, so a soundless machine (`THYLACINE_NO_AUDIO`, no
+  virtio-sound function) falls through to `DUMMY` rather than failing every
+  `SDL_OpenAudioDevice`. `demand_only = SDL_FALSE`: auto-selected when present.
+  **The fallback half needs patch `0003` (N-2a-3):** upstream marks the dummy
+  driver `demand_only`, and `SDL_AudioInit`'s auto-selection `continue`s past
+  every such driver, so as landed at N-2a-2 a soundless boot did NOT reach
+  DUMMY -- `SDL_Init(AUDIO)` failed "No available audio device" (harmless to
+  the probe, fatal to DOSBox-X's combined init, which its old `0004` patch
+  papered over). `0003` flips `demand_only` to `SDL_FALSE` under
+  `__thylacine__`; DUMMY is last in `bootstrap[]`, so it is reached exactly
+  when thylacine declined.
+- **`OpenDevice`** forces the device format Nocturne dictates
+  (S16LE / 48000 / stereo, `manual/41-audio.md`) and calls
+  `SDL_CalculateAudioSpec`, so SDL's core builds a conversion stream from
+  whatever rate/format the app asked for. It then opens `/srv/nocturne`
+  DIRECTLY -- a fresh per-client connection, NOT joey's shared
+  `/dev/nocturne` mount -- mints a voice via `nodes/new` (open mints, read
+  yields the decimal id), and opens `nodes/<id>/audio` OWRITE. The connection
+  IS the voice's lifetime: `CloseDevice` (or the app simply exiting) tears the
+  connection down and nocturned's `drop_conn_voices` reaps the voice. No
+  explicit `remove` on the happy path.
+- **`PlayDevice`** writes the filled period to the voice in <=8 KiB chunks
+  (well under the server's 32 KiB msize). A voice's `audio` write BLOCKS
+  (nocturned parks the `Twrite` until the mixer drains room -- Plan 9's
+  blocking `audio(3)` write), so once the 64 KiB voice FIFO fills, each
+  `PlayDevice` returns at exactly the device drain rate. `WaitDevice` is
+  therefore SDL's no-op default; adding a delay would underrun. A `t_write`
+  that returns <= 0 (the connection died) reports
+  `SDL_OpenedAudioDeviceDisconnected` so SDL retires the device instead of
+  spinning.
+
+The ~340 ms FIFO depth is the byte-copy path's latency ceiling; N-2b's ring
+trims it. Capture ("ears") is Nocturne N-3; `HasCaptureSupport` is false.
+
+**Proof `/sdl-audio-probe`** (`usr/sdl-audio-probe/`): an SDL app that opens
+audio through `SDL_OpenAudioDevice` and streams a 1 kHz + 2 kHz chord from its
+callback. joey runs it INSTEAD of the N-1 `/nocturne-probe` under the
+`thylacine.sdlaudio` boot arg (the two never share a wav capture -- the chord
+verdict's silent-tail check forbids a second tone), so the wav is a clean SDL
+capture. `tools/test-sdl-audio.sh` boots with `THYLACINE_AUDIODEV=wav
+THYLACINE_SDLAUDIO=1` and judges the capture with `audio-verdict.py --chord`:
+BOTH tones in the SAME windows. This proves the SDL byte path delivers complex
+PCM; it does not re-prove nocturned's mixer (that is N-1 -- the app pre-mixes
+both tones into one voice).
+
+**The Quake flip (N-2a-3).** With the backend proven, TyrQuake stopped opting
+out: the software build's shared object list selects `snd_sdl` in place of
+`snd_null` (the GL build already used `snd_sdl`; `snd_sdl.c` defines the
+`S_BlockSound`/`S_UnblockSound` pair `vid_sgl.c` needs), the play scenarios
+(`ls-gfx-quake`, `ls-gfx-play`, `ls-gfx-glquake`) run without `-nosound` and
+assert Quake's `Sound Initialized: 16 bits @ NHz` line -- expected BEFORE the
+later banners, since `Host_Init` runs `S_Init` early (after `VID_Init`, so in
+the GL scenario after the CAP_JIT/`GL_RENDERER` legs) and a later `expect`
+would have discarded it -- and quarry splits `PLAY_ARGS` (sound on) from
+`BENCH_ARGS` (`-nosound` kept: an audio thread's blocking writes would make an
+fps figure a property of the sound path). The benchmark/wedge/venus scenarios
+keep `-nosound` deliberately.
+
+**DOSBox-X sound is N-2a-4, not this chunk.** DOSBox-X builds only through the
+clade C++ fork (`build_clade`/`stage_clade`, `THYLACINE_BAKE_CLADE=1`), which
+a default `build all` does not run, and its DX-1 config is compiled `nosound`
+(`tools/dosbox-x-sources.py`) -- so giving it sound needs a build-config
+change AND a clade rebuild, none of it buildable or verifiable on the dev
+host. Retiring its `0004-thylacine-force-dummy-audio` patch there would bake
+the stale dummy-forcing binary and hide the change until a clade rebuild, so
+that flip waits for N-2a-4 on a clade-capable host (thyla-pi). `0004` stands
+until then.
+
+**Proof: `tools/test-game-audio.sh [scenario]`** (W-4): runs one interactive
+scenario (default `ls-gfx-quake`, ~17 s of demo1 gunfire) with the wav
+backend and `thylacine.noaudioprobe` -- joey declines its boot-time probe, so
+the capture is the game's alone (QEMU's wav backend appends only while the
+guest stream runs, so a boot chord and the game would sit ADJACENT in the
+file and no skip/tail window could separate them) -- then judges it with
+`audio-verdict.py --music`: >= 2 s of windows above -40 dBFS whose median
+spectral flatness over quarter-octave bins (150 Hz .. 4 kHz) is below 0.45
+(one-bin white noise measures ~0.56, e^-gamma) and whose dominant bin takes
+>= 4 distinct values (a buzz has 1, an alarm 2, the boot chord 1-2). Its
+selftest pins nine synthetic cases both ways, and the two real N-1/N-2a-2
+chord captures FAIL it (the negative controls on real data).
 
 ## Known caveats / seams
 

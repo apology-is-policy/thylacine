@@ -236,6 +236,16 @@ if [[ -n "${THYLACINE_GUESTFWD:-}" ]]; then
         net1_opts="${net1_opts},guestfwd=tcp:10.0.2.100:$((7820 + gf_i))-tcp:127.0.0.1:$((gf_hostport + gf_i))"
     done
 fi
+# PCI interrupt verification topologies. Explicit high slots let all three
+# resident interrupt users share INTA while unrelated devices auto-place.
+# Two permutations detect authority/routing assumptions tied to slot order.
+pci_net_addr=""; pci_gpu_addr=""; pci_sound_addr=""
+case "${THYLACINE_PCI_LAYOUT:-default}" in
+    default) ;;
+    shared-a) pci_net_addr=",addr=0x9"; pci_gpu_addr=",addr=0xd"; pci_sound_addr=",addr=0x11" ;;
+    shared-b) pci_net_addr=",addr=0x11"; pci_gpu_addr=",addr=0x9"; pci_sound_addr=",addr=0xd" ;;
+    *) echo "THYLACINE_PCI_LAYOUT must be default, shared-a or shared-b" >&2; exit 1 ;;
+esac
 net_flags=()
 if [[ "${THYLACINE_NO_NET:-0}" != "1" ]]; then
     net_flags=(
@@ -251,7 +261,7 @@ if [[ "${THYLACINE_NO_NET:-0}" != "1" ]]; then
         # claims the mmio net above (MENAGERIE 5d-3). The PCI function is not a
         # virtio-mmio slot (like rng-pci), so the mmio slot map below is unchanged.
         -netdev "$net1_opts"
-        -device "virtio-net-pci,netdev=net1,disable-legacy=on,mac=52:54:00:12:34:57"
+        -device "virtio-net-pci,netdev=net1,disable-legacy=on,mac=52:54:00:12:34:57$pci_net_addr"
     )
 fi
 if [[ -n "${THYLACINE_NET_DUMP:-}" ]]; then
@@ -370,7 +380,7 @@ if [[ "${THYLACINE_NO_GPU:-0}" != "1" && "${THYLACINE_DISPLAY:-none}" != "consol
     fi
     gpu_flags=(
         -device "virtio-gpu-device,id=gpu-mmio0"
-        -device "$gpu_dev,id=gpu0,disable-legacy=on$gpu_res"
+        -device "$gpu_dev,id=gpu0,disable-legacy=on$gpu_res$pci_gpu_addr"
     )
     # vnc/egl-headless display modes drop the vestigial MMIO gpu: a display
     # backend binds QemuConsole 0, and gpu-mmio0 (probe-only, driverless in
@@ -386,7 +396,7 @@ if [[ "${THYLACINE_NO_GPU:-0}" != "1" && "${THYLACINE_DISPLAY:-none}" != "consol
     if [[ "${THYLACINE_DISPLAY:-none}" == vnc:* || "${THYLACINE_DISPLAY:-none}" == "egl-headless" \
        || "${THYLACINE_DISPLAY:-none}" == "dbus-gl" || "${THYLACINE_DISPLAY:-none}" == "gpu" ]]; then
         gpu_flags=(
-            -device "$gpu_dev,id=gpu0,disable-legacy=on$gpu_res"
+            -device "$gpu_dev,id=gpu0,disable-legacy=on$gpu_res$pci_gpu_addr"
         )
     fi
 fi
@@ -504,6 +514,23 @@ detect_accel() {
 }
 accel="${THYLACINE_ACCEL:-$(detect_accel)}"
 
+# Portability: a scenario (or the caller) may PIN an accel this host cannot
+# provide -- the gfx/interactive .exp files pin `hvf` for the Apple-Silicon dev
+# loop, which no Linux host has. Rather than die on `-accel hvf`, fall back to
+# this host's native accel (detect_accel: kvm on an ARM64 Linux box like
+# thyla-pi, else tcg) so an hvf-pinned scenario still runs -- under KVM on the
+# Pi, the hardware-accel EQUIVALENT of the mac's HVF. A no-op where the pinned
+# accel IS available (the mac keeps hvf: -accel help lists it). This lets the Pi
+# serve as a QEMU offload host for the interactive E2Es when the mac is
+# memory-starved. The -cpu/GIC case below re-derives from the final accel.
+if ! qemu-system-aarch64 -accel help 2>/dev/null | grep -qw "$accel"; then
+    native="$(detect_accel)"
+    if [[ "$native" != "$accel" ]]; then
+        echo "==> run-vm: accel '$accel' unavailable on this host; using '$native'" >&2
+        accel="$native"
+    fi
+fi
+
 # Display backend (the fbcon era: tapestryd + Aurora render the console on
 # gpu0). Headless (-nographic) stays the default -- the CI/agent loop.
 #   THYLACINE_DISPLAY=cocoa   the interactive window (switch the View menu
@@ -581,7 +608,15 @@ case "$accel" in
     kvm) cpu="${THYLACINE_CPU:-host}"; gicv="${THYLACINE_GIC:-host}" ;;
     *)   cpu="${THYLACINE_CPU:-max}";  gicv="${THYLACINE_GIC:-3}" ;;
 esac
-echo "==> qemu: accel=$accel cpu=$cpu gic=v$gicv smp=$cpus" >&2
+# Explicit controller-absence fixture: preserve QEMU's default unless requested.
+# With GICv3 and ITS off, drivers must fall back to function-bound shared INTx.
+its_machine_opt=""
+case "${THYLACINE_ITS:-auto}" in
+    auto) ;;
+    on|off) its_machine_opt=",its=$THYLACINE_ITS" ;;
+    *) echo "THYLACINE_ITS must be auto, on or off" >&2; exit 1 ;;
+esac
+echo "==> qemu: accel=$accel cpu=$cpu gic=v$gicv smp=$cpus its=${THYLACINE_ITS:-auto}" >&2
 
 # task #70: QEMU TCG programs DBGWVR/DBGWCR but never raises EC 0x34, and a guest
 # thread that touches a watched page then spins inside the emulator's retry of that
@@ -617,6 +652,58 @@ fi
 if [[ "${THYLACINE_NOSTORM:-0}" == "1" ]]; then
     append_tokens+=("thylacine.nostorm")
 fi
+# N-2a-2 (docs/NOCTURNE.md section 6.5): run the SDL audio backend witness
+# (/sdl-audio-probe) INSTEAD of the N-1 nocturne-probe, so the wav capture is a
+# clean SDL tone (the chord verdict forbids a second tone in one capture). Same
+# "1" convention as THYLACINE_NOSTORM. tools/test-sdl-audio.sh sets it.
+if [[ "${THYLACINE_SDLAUDIO:-0}" == "1" ]]; then
+    append_tokens+=("thylacine.sdlaudio")
+fi
+# N-2a-3: no boot-time audio probe at all, so a wav capture carries ONLY what
+# the session plays (the game-audio witness, tools/test-game-audio.sh).
+if [[ "${THYLACINE_NOAUDIOPROBE:-0}" == "1" ]]; then
+    append_tokens+=("thylacine.noaudioprobe")
+fi
+# N-2b-1: the zero-copy ring substrate witness (tools/test-ring-voice.sh runs
+# /ring-voice-probe -- map a voice's Weft ring + validate the geometry, no audio).
+# Gated off by default so ordinary boots and the other gates are unaffected.
+if [[ "${THYLACINE_RINGPROBE:-0}" == "1" ]]; then
+    append_tokens+=("thylacine.ringprobe")
+fi
+# N-3a-2: the sink-volume gate witness (tools/test-nocturne-volume.sh runs
+# /nocturne-vol-probe -- the Plan 9 volume(3) grammar round-trip over a direct
+# /srv/nocturne conn, a SYSTEM write ACCEPTED, and a user-principal write
+# REFUSED). No wav capture; gated off by default.
+if [[ "${THYLACINE_VOLPROBE:-0}" == "1" ]]; then
+    append_tokens+=("thylacine.volprobe")
+fi
+# N-3c-1: the sink-tap (capture) authority witness (tools/test-nocturne-tap.sh
+# runs /nocturne-tap-probe -- a SYSTEM reader captures a played tone on
+# /srv/nocturne-ctl/tap, a mount /dev/nocturne/audio READ is refused, and a
+# user-principal tap open is denied). No wav capture (the tap reads the software
+# mirror, not the device); gated off by default.
+if [[ "${THYLACINE_TAPPROBE:-0}" == "1" ]]; then
+    append_tokens+=("thylacine.tapprobe")
+fi
+# N-3c-2: the device-capture (source) authority witness
+# (tools/test-nocturne-capture.sh runs /nocturne-capture-probe -- a SYSTEM reader
+# opens /srv/nocturne-ctl/source, the driver's periods-captured CLIMBS [the
+# deterministic COUNT; content is silence under audiodev=none], a second open is
+# EBUSY, the source is ABSENT on the shared mount, and a user-principal open is
+# DENIED). Needs a SECOND virtio-snd stream (the capture stream), so it forces
+# streams=2 in the device line below. Gated off by default.
+if [[ "${THYLACINE_CAPTUREPROBE:-0}" == "1" ]]; then
+    append_tokens+=("thylacine.captureprobe")
+fi
+# I-47 slice 1b (docs/HALCYON.md 14.7): the inline-image render-path witness.
+# halcyond (the console renderer) injects a baked raster into the transcript so
+# a boot proves Item::Image -> cartoon Op::Image on the REAL scanout, before the
+# out-of-band channel (slice 3) or the decoder (slice 2) exist -- the de-risk
+# the host layout/cartoon tests cannot do. Same "1" convention as the probes
+# above; screendump the result (tools/screendump.sh). Gated off by default.
+if [[ "${THYLACINE_VIEWTEST:-0}" == "1" ]]; then
+    append_tokens+=("thylacine.viewtest")
+fi
 # DISPLAY-MODES.md the display-mode signal. The kernel has no cmdline parser;
 # the guest reads this back through /hw/chosen/bootargs (aurora, joey). Only the
 # two EXPLICIT production values emit it -- the testing-hybrid backends
@@ -646,6 +733,50 @@ if (( ${#append_tokens[@]} > 0 )); then
     append_flags=(-append "${append_tokens[*]}")
 fi
 
+# Nocturne N-1 (docs/NOCTURNE.md section 4.3): the virtio-sound function
+# (virtio device id 25 -> the warden's `virtio-pci:25` bind -> nocturned).
+# PRESENT ON EVERY BOOT so the driver path rides the boot-probe ladder; the
+# HOST BACKEND is the switch:
+#   THYLACINE_AUDIODEV=none      (default) no host sound; the guest still plays
+#   THYLACINE_AUDIODEV=wav       capture what the guest played into
+#                                THYLACINE_AUDIO_WAV (default build/audio-capture.wav)
+#                                -- the deterministic gate witness. PLAYBACK-ONLY
+#                                (QEMU's wav backend has no capture voice), so
+#                                the device is declared with one stream.
+#   THYLACINE_AUDIODEV=coreaudio the mac's speakers (a human listening)
+#   THYLACINE_AUDIODEV=pipewire  thyla-pi's PipeWire -> HDMI (pa/alsa/sdl/dbus
+#                                pass through likewise)
+#   THYLACINE_NO_AUDIO=1         no device at all: the warden finds no
+#                                virtio-pci:25, joey logs "/srv/nocturne absent"
+# ORDER IS LOAD-BEARING (the INTx rule above): this function CLAIMS a line
+# (nocturned irq-waits on it), so it sits after gpu0 + rng_pci0 -- the next PCI
+# slot -- and before the poll-mode mouse. The guest's "nocturned: ... intid=N"
+# line witnesses the line it got; an exclusivity clash with the NIC or the GPU
+# fails the IRQ claim loudly at probe.
+audio_flags=()
+if [[ "${THYLACINE_NO_AUDIO:-0}" != "1" ]]; then
+    audiodev="${THYLACINE_AUDIODEV:-none}"
+    case "$audiodev" in
+        none)
+            audio_flags=(-audiodev "none,id=snd0") ;;
+        wav)
+            audio_wav="${THYLACINE_AUDIO_WAV:-$REPO_ROOT/build/audio-capture.wav}"
+            audio_flags=(-audiodev "wav,id=snd0,path=$audio_wav,out.fixed-settings=on,out.frequency=48000,out.channels=2,out.format=s16") ;;
+        coreaudio|pipewire|pa|alsa|sdl|dbus|oss|jack)
+            audio_flags=(-audiodev "$audiodev,id=snd0") ;;
+        *)
+            echo "run-vm.sh: unknown THYLACINE_AUDIODEV '$audiodev' (none|wav|coreaudio|pipewire|pa|alsa|sdl|dbus|oss|jack)" >&2
+            exit 2 ;;
+    esac
+    # streams default 1 (playback-only, N-1). The capture witness (N-3c-2) needs a
+    # SECOND stream (QEMU exposes stream 1 as D_INPUT at streams=2); force it there.
+    snd_streams="${THYLACINE_SND_STREAMS:-1}"
+    if [[ "${THYLACINE_CAPTUREPROBE:-0}" == "1" ]]; then
+        snd_streams=2
+    fi
+    audio_flags+=(-device "virtio-sound-pci,id=snd-pci0,audiodev=snd0,streams=$snd_streams,disable-legacy=on$pci_sound_addr")
+fi
+
 # Canonical QEMU flags per TOOLING.md §3.
 #
 # disk_flags (P4-Ic5b2) comes BEFORE virtio-rng-device because QEMU
@@ -653,7 +784,7 @@ fi
 # -device lands at slot 31. virtio-blk-probe scans 0..31 either way;
 # the ordering keeps slot 31 conventionally the "primary device."
 exec qemu-system-aarch64 \
-    -machine "virt,gic-version=$gicv,accel=$accel" \
+    -machine "virt,gic-version=$gicv,accel=$accel$its_machine_opt" \
     -cpu "$cpu" \
     -smp "$cpus" \
     -m "$mem_mib" \
@@ -667,6 +798,7 @@ exec qemu-system-aarch64 \
     ${gpu_flags[@]+"${gpu_flags[@]}"} \
     -device virtio-rng-device,id=rng0 \
     -device virtio-rng-pci,id=rng_pci0 \
+    ${audio_flags[@]+"${audio_flags[@]}"} \
     ${mouse_flags[@]+"${mouse_flags[@]}"} \
     ${display_flags[@]+"${display_flags[@]}"} \
     -serial "${THYLACINE_SERIAL:-mon:stdio}" \

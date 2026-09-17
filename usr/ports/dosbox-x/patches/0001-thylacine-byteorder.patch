@@ -1,0 +1,17 @@
+Thylacine: use <endian.h> (musl provides BYTE_ORDER under _GNU_SOURCE).
+DOSBox-X's include/byteorder.h has arms for linux/apple/bsd/etc but no
+generic POSIX #else, so a non-Linux musl target (thylacine) matches
+nothing and np2glue.h's BYTE_ORDER assert fires. Thylacine's musl endian.h
+is the linux-shaped one, so route it through the __linux__ arm.
+
+--- a/include/byteorder.h
++++ b/include/byteorder.h
+@@ -106,7 +106,7 @@
+ #define be64toh(x) OSSwapBigToHostInt64(x)
+ #define le64toh(x) OSSwapLittleToHostInt64(x)
+ 
+-#elif defined(__linux__) || defined(__CYGWIN__)
++#elif defined(__linux__) || defined(__CYGWIN__) || defined(__thylacine__)
+ 
+ #include <endian.h>
+ 

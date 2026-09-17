@@ -14,11 +14,11 @@ design:
   - "docs/ARCHITECTURE.md section 9.4"
   - "docs/IDENTITY-DESIGN.md section 9.8"
 created: 2026-08-02
-updated: 2026-09-06
+updated: 2026-09-17
 ---
 ## Purpose
 
-The aggregating `/dev` directory: one Dev serving ten leaves and three
+The aggregating `/dev` directory: one Dev serving eleven leaves and four
 mount-point stubs, so that `/dev` is a walkable path rather than a set of
 separate mounts.
 
@@ -55,6 +55,13 @@ through the resolver, which is how the introspection Devs sat unmountable for
 an arc ([[sub-kernel-devproc]]).
 
 ## Mechanism
+
+### Audio mount point
+
+`DEV_KIND_NOCTURNE` adds the empty `/dev/nocturne` directory to walk, stat and
+readdir. Init mounts the public playback tree there. This stub does not grant
+sink or capture authority: [[sub-nocturned]] keeps those controls on a separate
+per-client service connection and rejects access through the shared mount.
 
 ### The gate is two-tier, and the tiers cover different things
 

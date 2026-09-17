@@ -6,6 +6,7 @@ title: "The interrupt controller — two hardware generations, one driver"
 code:
   - arch/arm64/gic.c
   - arch/arm64/gic.h
+  - kernel/test/test_gic.c
 audit: hard
 guarded-by: [inv-i15, inv-i18]
 validated-by: [prose, spec-scheduler, gate-smp]
@@ -15,7 +16,7 @@ design:
   - "docs/ARCHITECTURE.md section 12.3"
   - "docs/PORTABILITY.md section 5"
 created: 2026-08-02
-updated: 2026-09-15
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -99,7 +100,8 @@ byte. Per-CPU interrupts are not routed at all — they are delivered to whoever
 owns the bank.
 
 **Dispatch.** An arriving interrupt is acknowledged, which yields its number;
-that number indexes a flat table of handler-and-argument pairs; the handler is
+that number selects a wired table (0..1019) or a separate bounded LPI table
+(8192..8255 on GICv3); the handler is
 called; completion is signalled. An out-of-range number or a missing handler
 ends the world — there is no quiet drop, because an interrupt nobody handles
 will re-assert immediately and the machine would livelock instead of stopping.
@@ -149,8 +151,9 @@ and the older generation's CPU interface; the physical addresses each was found
 at, kept for diagnostics; and the highest interrupt number this implementation
 reports.
 
-A flat array of handler-and-argument pairs, one per architectural interrupt
-number.
+A wired array of handler-and-argument pairs plus a separate 64-entry LPI
+array. Special IAR values 1020..1023 are neither dispatched nor EOId; LPI IDs
+retain their full width through dispatch and EOI.
 
 Two per-CPU arrays: the saved acknowledgement word for the older generation's
 completion echo, and a count of interrupts dispatched.
@@ -350,3 +353,22 @@ Revised 2026-09-15 at `12d154eb` for the F-A1 cure (docs/ARCHITECTURE.md 9.3.1):
 the lending layer sets the trigger explicitly both ways) and `gic_intid_enabled`
 (the read-only ISENABLER/redistributor query that lets a test observe the level
 mask+ack). Both are consumed by [[sub-kernel-irqfwd]].
+
+## MSI backend boundary
+
+[[sub-kernel-gic-msi]] owns GICv2m leases and ITS translation. This layer owns
+full-width LPI dispatch/EOI, redistributor topology validation and the CPU-side
+IRQ barrier. `gic_synchronize_cpu` uses permanent SGI 15; observing its handler
+proves earlier acknowledged IRQ handlers/EOIs have finished because IRQs never
+nest. Callers must first quiesce sources and synchronize the controller, and
+must not hold a domain lock across this bounded thread-context wait. Timeout
+never authorizes reuse. SGIs 14 and 15 are reserved against raw interrupt
+claims. SGI 14 drains the ITS fault mailbox on CPU 0, notifying PCI endpoints
+after controller locks have been released.
+
+`gic_redist_for_cpu` checks mapped extent, DTB CPU affinity and the existing
+contiguous 128KiB frame layout. VLPI/extra-frame layouts are explicitly declined
+by LPI setup. IRQ-barrier and redistributor tests pass on GICv3/TCG; real ITS
+RNG delivery and 1,565 kernel tests pass, including ITS command-ring failure
+handling. An actual ITS Instrument workflow passes in 173 seconds. The full controller/SMP matrix remains
+open. Instrument's historical hard-coded HVF default is not TCG evidence.

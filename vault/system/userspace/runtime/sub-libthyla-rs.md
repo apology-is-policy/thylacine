@@ -536,3 +536,42 @@ left them and their claims until exit. The pci-3 F1 comment had called that
 unfixable ("SYS_BURROW_DETACH is confined to the burrow-attach window"); ARCH
 6.5's identity rule made the detach reachable. The `t_burrow_detach` doc
 comment names both detachable classes.
+
+## Hardware interrupt contract
+
+`hardware::Irq::wait` re-arms level-triggered sources in the current kernel.
+Its caller must complete device acknowledgement before waiting again; waking
+another thread to acknowledge later is insufficient. Queue state remains the
+source of truth when notifications coalesce.
+
+This raw interface is for non-PCI interrupts. PCI drivers use function-bound
+`PciIrq` endpoints and protected BAR windows, as specified by
+`docs/PCI-INTERRUPTS-DESIGN.md` and [[sub-kernel-pci-irq]].
+
+## Protected PCI mapping windows (2026-09-17)
+
+`PciDev::claim_nth` now queries a bounded list of kernel-approved BAR windows and
+maps those fitting the existing small-BAR stride. Routing-only BARs are omitted;
+a region is exposed only if one mapped window covers its entire extent. Every
+record is checked before mappings begin, and a later failure detaches all earlier
+windows. The old PCI_INFO layout remains unchanged. [[abi-pci-windows]] names the
+new record and syscall mirrors. Kernel/driver compile checks and guest mapping
+tests pass; resident driver migration is boot- and Instrument-verified on HVF.
+
+## PCI interrupt tickets and cleanup (2026-09-17)
+
+`hardware::PciIrq` exposes create, initial arm, replayable ticket wait, complete,
+terminal disable and info. It has no AsFd. EAGAIN completion leaves the source
+masked and WAIT delivers a timed retry. Drop disables the endpoint before its
+handle closes. `PciDev::drop` now detaches its mapped windows; its parent handle
+then closes, while an endpoint or hostmem mapping may still retain the function.
+Drivers must reset before DMA buffers are destroyed. [[abi-pci-irq]].
+
+`PciIrq::for_virtio` performs the initialization transaction: bounded reset,
+create a masked MSI-X endpoint, select config/queue vectors, verify readback,
+and reset/unwind before INTx fallback. `PCI_IRQ_MODE` accepts auto, intx or msix;
+forced MSI-X fails instead of silently falling back. `mode()` and `vector()`
+retain the kernel-reported selection, and drivers skip ISR reads in MSI-X mode.
+This helper runs before DMA setup; a subsequent driver reset would erase the
+selected vectors and is forbidden until rollback or shutdown. Full fallback
+fault-injection and the cross-controller matrix remain required.

@@ -9,6 +9,30 @@ code:
   - tools/interactive/serial-bridge.py
   - tools/interactive/serial-listen.py
   - tools/interactive/test-serial-bridge.py
+  - tools/interactive/ls-halcyon-session-instrument.exp
+  - tools/interactive/ls-halcyon-session-media.exp
+  - tools/interactive/ls-halcyon-session-dosbox.exp
+  - tools/interactive/pci-net-load.exp
+  - tools/interactive/pci-net-load-peer.py
+  - tools/interactive/gfx_media.py
+  - tools/interactive/gfx_shift.py
+  - tools/interactive/haul-npxf.exp
+  - tools/interactive/ls-gfx-dosbox-conf.exp
+  - tools/interactive/ls-gfx-dosbox-duke3d.exp
+  - tools/interactive/ls-gfx-dosbox-dynarec.exp
+  - tools/interactive/ls-gfx-dosbox-input.exp
+  - tools/interactive/ls-gfx-dosbox-tombraider.exp
+  - tools/interactive/ls-gfx-dosbox.exp
+  - tools/interactive/ls-gfx-gallery.exp
+  - tools/interactive/ls-gfx-glquake.exp
+  - tools/interactive/ls-gfx-inline-view.exp
+  - tools/interactive/ls-gfx-jpeg.exp
+  - tools/interactive/ls-gfx-play.exp
+  - tools/interactive/ls-gfx-quake.exp
+  - tools/interactive/ls-gfx-session-image.exp
+  - tools/interactive/ls-gfx-throttle.exp
+  - tools/interactive/manual.exp
+  - tools/qmp-send-key.sh
 audit: none
 guarded-by: []
 validated-by: [prose, gate-interactive]
@@ -16,7 +40,7 @@ locks: []
 abis: []
 design: ["docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-09-06
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -408,3 +432,29 @@ per full gate ≈ 3 s against a run measured in tens of minutes.
 [[chg-2026-08-01-substrate-sweep]]; [[chg-2026-09-06-interactive-failprobe-slot230]]
 the fail-probe (the burned-retry decider), the #230 second-monitor per-slot
 isolation, and the #224 refinement of the in-tree refusal.
+
+
+## Session media and backend verification
+
+Instrument accepts `LS_CI_GFX_ACCEL` explicitly; historical runs made before
+that override was added always forced HVF regardless of wrapper defaults.
+Its prompt test waits for disjoint current shell/welcome header geometry.
+Halcyon's test-mode geometry witness reports moves/resizes as well as mint.
+The old mint-only witness could sample welcome links at a former shell column.
+
+`ls-halcyon-session-media` captures View in a real session transcript, checks
+strongly coloured image pixels, drives Gallery pane/zoom/Escape, and captures
+manual output for visual review. `gfx_media.py` counts strongly coloured pixels
+while excluding the neutral/amber chrome. This gate is being verified; capture
+creation alone is not a claim of correct manual layout.
+
+`pci-net-load` drives the existing netperf NIC workload against a bounded
+loopback peer: 200 immediate and delayed round trips, 40 connections, and an
+8 MiB sink transfer. The host independently verifies all payload bytes and EOF;
+a best-effort netperf exit or send-completion report alone cannot pass it.
+The fixture owns all three consecutive ports before publishing their base,
+and expires after 240 seconds if a failed scenario cannot clean it up.
+
+The DOSBox input gate's foreground-exit witness is produced by a lowercase
+`echo` piped through `tr a-z A-Z`; an echoed command line cannot satisfy the
+uppercase marker. It requires real shell execution after DOSBox exits.

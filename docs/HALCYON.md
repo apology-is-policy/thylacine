@@ -553,11 +553,20 @@ line boxes.
   islands (code/`em code`/aligned content) set their baseline ON the Plex
   baseline and may not stretch the line box; box-drawing glyphs appear only
   in raw-VT panes and cells-tier content, never proportional flow.
-- **Images** (H-7): PNG decodes in halcyond — the bound recommendation is
-  miniz_oxide (`no_std` inflate) + a hand-rolled defilter/chunk walker
-  (PNG's spec surface is small; a bespoke decoder is fuzz-friendlier than a
-  ported one and keeps the parse in Rust). JPEG: decide at H-7
-  (port-vs-defer); not load-bearing for the exit criteria draft.
+- **Images** (H-7): decode is **native Rust in the short-lived `view`/`gallery`
+  Proc** (NOT in halcyond — the §14.7 blast-radius amendment, ratified
+  2026-09-09); the inline path (A) crosses the raster to halcyond as a **bounded
+  write**, and the fullscreen `gallery` (path B) renders into a Tapestry pane
+  surface like DOSBox. The bound recommendation is the
+  **zune** codec crates — `zune-png` + `zune-jpeg` (both `no_std + alloc`,
+  competitive with libjpeg-turbo, and already the JPEG engine inside the
+  `image` crate) — covering PNG **and** JPEG in memory-safe Rust. This
+  supersedes the earlier miniz_oxide + hand-rolled-PNG note: a mature
+  `no_std` pure-Rust decoder is equally fuzz-friendly, covers JPEG for free,
+  and is far less bespoke surface to own. VERIFY the `no_std` claim at vendor
+  time by building against the native target before any code depends on it
+  (the fontdue discipline). Video/audio decode is the split-by-medium case
+  (§14.7.7): a sandboxed ported codec, never native.
 - **Inline surfaces**: an `Embed` reserves flow space; the actual pixels are
   a Tapestry surface the compositor places (the inline-live placement,
   TAPESTRY §14). The H-2 MVP may land text-only transcripts first; `Embed`
@@ -1451,14 +1460,169 @@ read to choose output. Under multi-console **both** relocate to the per-tile pts
   side is halcyond's rasterizer, RICH for every tile. The console
   special-case remains for the non-tile fallback.
 
-### 14.7 Inline media — native, out-of-band
+### 14.7 Inline media — native, out-of-band (the `view` mechanism)
 
-`cat picture.png` → an inline image is a **native** path: a `display`/type-aware
-coreutil or the shell emits an `Embed`/`Image` to `halcyond` **directly** (out of
-band), **not** PNG bytes down the pts — raw image bytes down the pts hit the VT
+`view picture.png` → an inline image is a **native** path: the pixels reach
+`halcyond` **out of band** — **not** as image bytes down the pts, which hit the VT
 parser as garbage. This matches NOVEL §3.4 (bytes-in-text rejected as the media
-mechanism) and keeps image decode in `halcyond` (Rust, the format-fuzz surface).
-Terminal image-escape protocols (sixel / kitty / iTerm) are **v1.x**.
+mechanism). Terminal image-escape protocols (sixel / kitty / iTerm) are **v1.x**:
+we own both ends of the wire, so we adopt the object model those protocols
+converged on (the image/placement split, explicit-format-never-sniff,
+resize-as-re-place, a bounded table) natively, without the escape-sequence hacks.
+
+**AS-DESIGNED (operator-ratified 2026-09-09; the design-conversation → scripture
+pattern).** Reserved as **I-47** (ARCH §28). Two amendments to the original prose,
+both from the ratifying dialogue:
+- **Decode runs in the short-lived `view`/`gallery` Proc, not in the compositor** —
+  native Rust either way (the format-fuzz intent holds), but a per-invocation
+  throwaway is a strictly smaller failure domain than the whole-session `halcyond`
+  for parsing an untrusted image bytestream.
+- **The path splits by CONTENT MODEL onto the two proven pixel mechanisms** (the
+  DOSBox/Quake precedent, verified `usr/ports/sdl2/thylacine/thyla_tap.{c,h}` +
+  `usr/tapestryd/src/server.rs`): a **static** image inline in the transcript is
+  the lightweight cartoon-blit **(A)**, driven by `view`; a **fullscreen** view —
+  and, later, live/video content — is a Tapestry pane surface **(B)**, the path
+  DOSBox/Quake already use, driven by a separate program, `gallery`. This retires
+  the ratified "native `view` + Weft": Weft is privileged-server-shares-OUT-to-
+  client (the sharer needs `CAP_HW_CREATE`, `syscall.c:6907`), so a `view` sharing
+  *in* to halcyond is the wrong Weft direction — the inline handoff is a **bounded
+  write** (a one-shot copy, negligible for a static image); the zero-copy Weft
+  lives on the (B) side, where the app MAPS a compositor-shared buffer exactly like
+  DOSBox (map is uncapped).
+
+**14.7.1 Data flow.**
+
+```
+view test.png   (short-lived, NATIVE — libthyla-rs + the zune no_std codecs)
+  → open + read the file  (in the user's own namespace, with the user's rights)
+  → zune-png / zune-jpeg decode          [hostile bytes die in THIS throwaway proc]
+  → place-request to halcyond's per-pane control endpoint:
+       { format (declared), native w/h, then the RGBA bytes -- a bounded write }
+halcyond → validates format + dims + size; COPIES the RGBA into a cartoon Blob (view may now exit)
+         → a new transcript Item::Image placement
+         → letterbox to the pane's px width; reflow-on-resize is free
+           (the width-keyed layout cache re-derives; halcyond resamples the blob)
+```
+
+`view` exits as soon as the request is delivered; the placement persists because
+`halcyond` owns the copied blob. The RGBA travels as an ordinary bounded write over
+the control channel — a single ~few-MB copy for a one-shot image, exactly the copy
+`halcyond` makes into its Blob regardless; zero-copy only ever mattered per-frame
+(the (B)/video case).
+
+**14.7.2 The channel — the per-pane control endpoint (the genuinely new IPC).**
+`halcyond` posts a **per-pane control endpoint** — a per-session
+`/srv/halcyon-<user>` service + an `/env` per-pane token (the `/srv` post pattern
+of ptyfs/corvus and the `TAPESTRY_CLAIM` `/env` precedent; login grants halcyond
+`T_SPAWN_PERM_MAY_POST_SERVICE`, one hop, as it already does for the home proxy;
+the exact bind path is fixed in the implementation chunk). Any program in the pane
+reaches it by inheriting the pane's namespace. A **place-request** carries
+`{ format (explicitly declared — halcyond never sniffs), native w, native h, then
+the RGBA bytes }`. This is the **sanctioned out-of-band pixel channel**; `BEACON
+§10`'s "out-of-band side channels — fragile association, dies at every existing
+hop" rejection is scoped to *Beacon's own text transport* and is answered here **by
+construction**: the endpoint lives in the pane's own namespace, so association is
+structural (inherited, not guessed) and there are **no hops** — `view` is a direct
+namespace descendant of the pane's shell. See the reciprocal note in `BEACON.md §10`.
+
+**AS-BUILT (the session-path slice, 2026-09-10; operator-ratified routing shape
+"per-user service + token path").** The compositor posts ONE per-user service
+`/srv/halcyon-<user>` (`session_user()` from `/env/USER`; login already grants
+`MAY_POST_SERVICE`). The **per-pane token** is a fresh CSPRNG `u128` used as a
+**path component**: `view` opens `/srv/halcyon-<user>/<hex(token)>/place`, the
+fully-resolved address the compositor wrote into that pane's
+`/env/HALCYON_PLACE` right before its spawn (per-Proc `/env`, deep-copied at
+spawn — so the child snapshots ITS pane's address, isolated from every other
+pane; the compositor removes it after the spawn so its own `/env` and the next
+tile's snapshot stay clean). The **wire is unchanged** (`inlinewire` v0 — the
+token never enters the payload; it is validated ONCE at the 9P walk, fail-closed
+`E_NOENT` on an unknown/dead token). Two authority axes: (1) the secret token
+(unguessable, only in the pane's own `/env`), and (2) a **peer-principal gate at
+accept** (`t_srv_peer`) refusing any connection whose peer is not the session's
+own user — so even a leaked token cannot let a different user place into the
+session. The DoS floor: `MAX_CONNS = 2` bounds concurrent transfers; the
+per-image cap is the heap residual divided by `MAX_CONNS` (so the aggregate
+in-flight fits the residual); the per-pane **stored** quota (live placements +
+raster bytes) is the tile transcript's own content budget (`inject_image` →
+`enforce_budget` evicts frozen blocks by `max_cost` + `max_blocks`, failing
+clean). The alternatives — a distinct 9P service per pane, and a token in the
+wire payload — were rejected: the former posts N services (heavier teardown, and
+§14.7.2 specifies one service); the latter bumps the wire ABI (a format break)
+and re-validates per write. Impl: `usr/halcyond/src/{paneroute,paneplace}.rs` +
+the `session.rs` wiring + `view` `open_place_write`. The console spike's global
+`/srv/halcyon` (single-conn) remains for console mode; `view` prefers the
+session address when `/env/HALCYON_PLACE` is set and never falls back to the
+console channel inside a session.
+
+**14.7.3 The transcript item.** A new `Item::Image { blob, native_w, native_h,
+placement }` beside `Line | Table | Rule | Pre` (`transcript.rs`). Layout reserves
+a letterboxed rect at the block's current px width and emits the **already-built,
+already-tested** `cartoon::Op::Image` (`usr/lib/cartoon/src/lib.rs:49` + the
+`execute` arm at `:444`, unit-tested at `:590`/`:602`, currently fed by nothing).
+Reflow is the free width-keyed layout re-derive. Under §14.11 an inline image is a
+**scrollback item** (history), never a live-grid cell — it rides `ScrollOff` into a
+history block; this is the concrete realization of §14.11.5's "the grid is
+text-only; inline media stays the out-of-band native seam."
+
+**14.7.4 `view` (native coreutil — the inline path A).** Sniffs magic bytes: a
+recognized image (PNG now; JPEG at the H-7-expand via `zune-jpeg`) → decode +
+place-request; **otherwise → `exec cat`** (the text fallback). `view` is native
+libthyla-rs linking the **pure-Rust `no_std`** zune codecs — native-linking-native,
+**not** the `CLAUDE.md` "native program linking a ported library" case.
+
+**14.7.5 `gallery` (native program — the fullscreen path B).** `gallery <img>`
+opens a **Tapestry pane surface** (the native `libtapestry` client — the same
+mechanism DOSBox/Quake use via `thyla_tap`), decodes with the shared zune helper,
+and renders the image **letterboxed into the whole pane** (real dimensions if they
+fit, else scaled): tapestryd shares the framebuffer OUT and `gallery` MAPS it
+(uncapped `SYS_WEFT_MAP`), draws into it, then presents — zero-copy, `gallery`
+unprivileged, **no new compositor code** (the pane-surface path is built). Input
+events (next/prev/zoom/quit) arrive as tapestryd surface events; quit destroys the
+surface and the pane returns to the shell. "Fullscreen" fills the pane and may
+promote to the whole display via the compositor's existing zoom. `gallery` is
+**not** an I-47 surface — it rides the existing Tapestry invariants (I-40 surface
+integrity, I-45 GPU authority) like any pane app; I-47 governs only the inline (A)
+path.
+
+**14.7.6 The obj-verb menu.** Two verbs on an image file object
+(`/lib/beacon/verbs`): `path view view {}` (inline) and `path gallery gallery {}`
+(fullscreen); the H-3c menu (Esc + w/b + Enter) types the chosen command into the
+pane as an ordinary child (`main.rs:802-820`). **Zero mechanism change** — the
+verbs only automate *invoking* the two programs.
+
+**14.7.7 Safety + the DoS floor (the A path).** Decode is isolated in the
+sacrificial `view`/`gallery` (hostile bytes never touch the compositor). For (A),
+`halcyond` validates the **declared format + native dims + bounds the RGBA size**
+before it copies, and **copies before the placement goes live** (no torn/partial
+placement — a placement shows a fully-decoded raster or nothing). A **per-pane
+image-table quota** bounds live placements + total raster bytes (the I-32 DoS
+floor, the kitty per-client-quota lesson), failing clean rather than extincting.
+The place-request parser is a **new IPC parse surface** on `halcyond` —
+bounds-checked like the 9P wire / Beacon frame; it joins the format-fuzz audit
+class. Its `AUDIT-TRIGGERS` row + the `ARCH §25.4` entry land **with the
+implementation** (the reserve-then-enforce discipline). (B) inherits tapestryd's
+existing surface safety.
+
+**14.7.8 Video + audio (later; split by medium).** Video is the (B) surface path
+taken live — a **sandboxed ported codec** (an FFmpeg decode-only subset ~3 MB, or
+dav1d) streams frames into a Tapestry surface; as of 2026-09 there is **no
+production-grade pure-Rust decoder for H.264 / HEVC / VP9** (only AV1 via `rav1d`),
+so "video later" forces ported C. A video *inline in the scrollback* additionally
+needs the §14.8 `Embed` placement (a live surface at a transcript offset), unbuilt
+and deferred until inline video needs it — a fullscreen (`gallery`-shaped) player
+needs none of it. Audio does **not** render inline — the decoder routes PCM to
+**Nocturne** (I-46). So "one library, video + sound later" is right for the
+video/audio *decoder* (one ported codec) and wrong for *images* (native `zune`);
+the media path is **split by medium**.
+
+**14.7.9 Staging** (operator-ratified spike-first 2026-09-09):
+1. **Spike `view` inline (A)** — `view test.png` → an inline, letterboxed PNG
+   end-to-end (the per-pane channel + `Item::Image` + `view` PNG-only + reflow),
+   proven on thyla-pi's V3D. This proves the one new mechanism.
+2. **`gallery` fullscreen (B)** — the native libtapestry viewer (lower risk: the
+   pane-surface path is proven).
+3. **Expand** — JPEG (`zune-jpeg`) + both obj-verbs + the per-pane DoS quota + the
+   focused (format-fuzz) audit.
 
 ### 14.8 Inline-live graphical apps + promotion (TAPESTRY §14 concretized)
 
@@ -2115,3 +2279,45 @@ session-render + format-fuzz class; AUDIT-TRIGGERS rows 142/151) and joins the
 batched stabilization audit at the arc's close. The producer/pts, the trust
 boundary (§14.11.10), the resize path (§14.11.8), and the alt-screen render are
 unchanged in shape.
+
+### 14.7 integration refinement: ordered inline references (2026-09-17)
+
+The first real Instrument-session screenshot exposed a prototype limitation:
+putting a raster directly into frozen scrollback places it before the command
+that invoked `view`, because that command is still on the live terminal grid.
+Inline placement must follow the same byte-stream ordering as text, including
+when the live grid scrolls into history.
+
+The session path therefore uses an opaque image reference carried by an
+ordinary Beacon object (`type=inline-image`, `ref=<32 hexadecimal digits>`).
+`view` first uploads the bounded raster with a fresh per-invocation 128-bit
+identifier, then emits a standalone object caption in its normal stdout
+stream. A pipe or renderer that does not know the object sees readable text.
+No compressed data enters Beacon and no new Beacon opcode is introduced.
+The caption's cells retain the same object identity across terminal records,
+soft wrapping and scrollback, so the raster appears exactly where that line
+belongs. The place wire is versioned to carry the identifier; zero is reserved
+for the console/test injection path.
+
+Each tile owns a bounded raster cache, independent of other panes. Text and
+raster retention share the existing per-tile content allowance equally.
+There are at most 64 cached images; eviction leaves the readable caption in
+place. A repeated reference does not duplicate retained raster storage. The
+layout resolver substitutes only a complete standalone inline-image object;
+ordinary text around an object is never silently discarded. New or evicted
+raster data invalidates the tile's layout-height cache. Restart drops both
+routing tokens and raster references. An id names presentation data only and
+confers no authority: service peer checks and per-pane routes remain the gates.
+
+Session upload admission is capped by both the transient heap residual and the
+smallest live raster cache. Completion rechecks the current cap before replying:
+opening another pane during an upload must not turn a reported success into a
+quota refusal afterward. A session requires a nonzero image identifier and a
+still-live routed pane; otherwise the final write fails and View reports the
+failed placement. The console's legacy id-less path remains separate.
+
+Acceptance includes command/image/prompt order on first paint, after enough
+output to scroll the caption into history, on resize, and with independent
+panes. Tests cover unavailable and evicted references, duplicate ids, invalid
+headers and quota reduction. No timing delay or forced terminal clear is an
+acceptable substitute for stream ordering.

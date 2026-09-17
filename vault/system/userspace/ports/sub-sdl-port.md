@@ -3,7 +3,25 @@ id: sub-sdl-port
 type: sub
 title: "The SDL2 Thylacine backend — the video driver, the OSMesa GL path that acquires CAP_JIT, and the two-sided Vulkan consent"
 parent: moc-userspace
-code: [usr/ports/sdl2/thylacine/SDL_thylacinevideo.c, usr/ports/sdl2/thylacine/SDL_thylacinevideo.h, usr/ports/sdl2/thylacine/SDL_thylacineopengl.c, usr/ports/sdl2/thylacine/SDL_thylacineopengl.h, usr/ports/sdl2/thylacine/SDL_thylacinevulkan.c, usr/ports/sdl2/thylacine/SDL_thylacinevulkan.h, usr/ports/sdl2/thylacine/SDL_thylacineevents.c, usr/ports/sdl2/thylacine/SDL_thylacineevents_c.h, usr/ports/sdl2/thylacine/thyla_tap.c, usr/ports/sdl2/thylacine/thyla_tap.h, usr/ports/sdl2/thylacine-nogl/SDL_thylacineopengl_nogl.c, usr/ports/sdl2/glapi-probe.c, usr/ports/sdl2/SDL_config.h, usr/lib/thylajit/thyla_capjit.h]
+code:
+  - usr/ports/sdl2/thylacine/SDL_thylacinevideo.c
+  - usr/ports/sdl2/thylacine/SDL_thylacinevideo.h
+  - usr/ports/sdl2/thylacine/SDL_thylacineopengl.c
+  - usr/ports/sdl2/thylacine/SDL_thylacineopengl.h
+  - usr/ports/sdl2/thylacine/SDL_thylacinevulkan.c
+  - usr/ports/sdl2/thylacine/SDL_thylacinevulkan.h
+  - usr/ports/sdl2/thylacine/SDL_thylacineevents.c
+  - usr/ports/sdl2/thylacine/SDL_thylacineevents_c.h
+  - usr/ports/sdl2/thylacine/thyla_tap.c
+  - usr/ports/sdl2/thylacine/thyla_tap.h
+  - usr/ports/sdl2/thylacine-nogl/SDL_thylacineopengl_nogl.c
+  - usr/ports/sdl2/glapi-probe.c
+  - usr/ports/sdl2/SDL_config.h
+  - usr/lib/thylajit/thyla_capjit.h
+  - usr/ports/sdl2/thylacine/SDL_thylacineaudio.c
+  - usr/ports/sdl2/thylacine/SDL_thylacineaudio.h
+  - usr/ports/sdl2/patches/0002-sdl2-thylacine-audio.patch
+  - usr/ports/sdl2/patches/0003-sdl2-thylacine-dummy-audio-fallback.patch
 audit: hard
 guarded-by: [inv-i45, inv-i40, inv-i7]
 validated-by: [prose, gate-interactive]
@@ -12,7 +30,7 @@ hazards: []
 abis: [abi-caps]
 design: ["docs/LLVM-DESIGN.md", "docs/GPU-DESIGN.md"]
 created: 2026-09-07
-updated: 2026-09-07
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -40,6 +58,14 @@ registers as `VideoBootStrap THYLACINE_bootstrap` (`:121`), driver name
 `"thylacine"` (`:36`), placed ahead of the platform drivers in `SDL_video.c` by
 patch 0001 so `SDL_VideoInit` picks it first.
 
+**Window metadata.** `SetWindowTitle` copies SDL's UTF-8 title through the
+owning surface ctl into Halcyon's canonical pane tag. The C client bounds this
+to 250 bytes without splitting a codepoint and replaces control bytes with
+spaces. Window recreation restores the title and dynamic frame intent before
+new frames are published; otherwise a DOS mode change silently creates an
+untitled, throttle-eligible surface. The session DOSBox gate captures the
+native pane and zoom and requires keyboard exit back to the shell.
+
 **One window per process** (`:174-176`): the compositor session is
 process-scoped, so a second `CreateWindow` is refused.
 
@@ -53,6 +79,14 @@ value); the sanctioned off-switch is the `__thylacine__` arm patch 0001 adds to
 ET_EXEC).
 
 ## Mechanism
+
+### Audio integration
+
+`SDL_thylacineaudio` opens an owned Nocturne voice and supplies the callback's
+PCM frames through blocking, bounded writes to its audio file. The registered dummy fallback keeps video-only SDL
+applications usable when audio cannot initialize. Actual mixed waveform and
+SDL playback verification lives in [[sub-nocturne-tools]]; [[sub-nocturned]]
+owns sink/capture authority and device cadence.
 
 ### CAP_JIT is acquired in the platform layer, before the rasteriser (I-42)
 

@@ -33,6 +33,10 @@
 
 #define GIC_NUM_INTIDS         1020   // 0..1019 are dispatchable
 #define GIC_INTID_SPURIOUS     1023
+#define GIC_LPI_MIN            8192u
+#define GIC_LPI_COUNT          64u
+#define IPI_MSI_FAULT          14u // deferred controller-fault notification
+#define IPI_IRQ_BARRIER        15u // permanent kernel IRQ-drain rendezvous
 
 #define GIC_SGI_MIN            0
 #define GIC_SGI_MAX            15
@@ -96,6 +100,16 @@ u64 gic_dist_base(void);
 u64 gic_redist_base(void);
 u64 gic_dist_pa(void);
 u64 gic_redist_pa(void);
+// Validate the currently supported redistributor layout and CPU affinity.
+// Refuses VLPI/extra-frame or mismatched firmware layouts before LPI setup.
+bool gic_redist_for_cpu(unsigned cpu, u64 *va, u64 *pa, u64 *typer);
+// True only for the kernel-supported wired or LPI dispatch namespace.
+bool gic_intid_dispatchable(u32 intid);
+// Thread-context barrier after source/controller quiescence. An IPI observed
+// on the target proves that a previously acknowledged IRQ has finished its
+// handler/EOI (IRQ handlers do not nest). Never call with a domain lock held.
+// Timeout returns false; it is not permission to recycle an interrupt ID.
+bool gic_synchronize_cpu(unsigned cpu, u64 timeout_ns);
 
 // GICv2 CPU-interface (GICC) KVA + PA. Both zero on v3 (the CPU interface is
 // the ICC_* system registers, not MMIO) and before gic_init runs.
@@ -138,7 +152,7 @@ bool gic_intid_enabled(u32 intid);
 // the lower 10-bit INTID and stashes the raw IAR per-CPU so gic_eoi can echo
 // the SGI source CPUID). The caller dispatches and then issues
 // gic_eoi(intid). If no IRQ is pending or the IRQ is spurious, returns an
-// INTID >= GIC_NUM_INTIDS — caller MUST NOT EOI in that case.
+// INTID in 1020..1023 — caller MUST NOT EOI those special IDs.
 //
 // MUST be paired with exactly one gic_eoi (or no EOI on spurious) on the same
 // CPU before the next gic_acknowledge: the v2 per-CPU EOI-token slot holds a
@@ -226,6 +240,10 @@ bool gic_set_pending_spi(u32 intid);
 // after the ICFGR write so the distributor's internal latching is
 // observable to a subsequent GICD_ISENABLER<n> write.
 void gic_set_spi_edge_triggered(u32 intid);
+
+// After source quiescence: mask, clear pending and confirm no active handler.
+// A false result requires another bounded attempt or vector quarantine.
+bool gic_drain_spi(u32 intid);
 
 // F-A1: the level-triggered sibling (ICFGR 0b00). GIC init already defaults
 // SPIs to level; kobj_irq_create calls this explicitly for a DTB-declared

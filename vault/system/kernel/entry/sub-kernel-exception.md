@@ -17,7 +17,7 @@ design:
   - "docs/ARCHITECTURE.md section 12"
   - "docs/reference/08-exception.md"
 created: 2026-08-02
-updated: 2026-08-18
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -39,6 +39,15 @@ carry EL0 exceptions (synchronous, interrupt). The other twelve route to a
 diagnostic that names which one fired and halts.
 
 ## Mechanism
+
+### Full-width interrupt dispatch
+
+The reserved/spurious range is exactly INTIDs 1020 through 1023. The IRQ entry
+must not treat every larger ID as spurious: GICv3 LPIs start at 8192 and reach
+`gic_dispatch` and EOI with their full identifier. [[sub-kernel-gic]] owns the
+controller distinction and [[sub-kernel-pci-irq]] the endpoint lifetime. The
+ITS/TCG DMA/PBA and resident-driver gates exercise this path; dropping larger
+IDs would leave those endpoints permanently waiting.
 
 ### Everything is on the thread's own stack, and that is the design
 

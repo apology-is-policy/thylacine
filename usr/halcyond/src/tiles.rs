@@ -100,6 +100,7 @@ mod tests {
             focused,
             surface,
             hidden: false,
+            backgrounded: false,
         }
     }
 

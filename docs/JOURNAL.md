@@ -22,7 +22,3711 @@ needed the operator.
 
 
 ---
+## 2026-09-17 (Codex, single-agent) -- aux integration found two lifetime boundaries
 
+The operator asked to bring the remaining committed aux work into main and
+make View, Gallery, DOSBox and the manual reader fit the current Halcyon.
+Actual screenshots caught what the earlier serial witnesses did not: View's
+raster preceded its invoking command, Gallery discarded PNG alpha, and native
+pane titles and counts did not consistently describe the visible workspace.
+The integration anchors inline media to correlated Beacon objects with bounded
+raster ownership, composites Gallery alpha, and gives hosted panes canonical
+titles. The reader now has six installed, checked sections; its catalogue and
+section rendering were inspected in both Built-in and Signal themes.
+
+A shared keyboard/audio PCI line exposed the assumption that device order
+would avoid interrupt conflicts. The operator explicitly chose and approved
+the full shared INTx/MSI-X design, including GICv2m and ITS/LPI. Implementing
+function ownership, ticketed completion, protected MSI-X pages and quarantined
+retirement replaced that assumption. A later review found that the GPU's
+asynchronous completion path also had to retain the ticket until used-ring
+work was drained. The same exercise corrected a harness that silently forced
+HVF: earlier desktop observations remain HVF evidence, while subsequent ITS
+and no-MSI runs stamp and verify their actual TCG controller configuration.
+
+The network load check measured receipt instead of successful writes. It
+received 8,333,292 of 8,388,608 bytes: last clunk had destroyed 55,316 queued
+bytes. The operator approved a separate bounded transport owner. Its first
+boot passed close controls but broke the 50-dial benchmark at the transport
+capacity limit; bounded ENOMEM-only admission handling exposed a second gap,
+where `Dev.open` flattened 9P errors to EIO. The repair preserves per-operation
+errors on the unpublished Spoor and reads them before clunk. The pointer-only
+vtable remains documented interface debt. All three interrupt backends now
+receive every byte after immediate close, with 1,570 kernel tests passing.
+
+The post-repair applications passed all eight serial scenarios, including a
+real npxf fixture on the Pi via the operator's Cloudflare SSH endpoint. Its
+temporary server and tunnel were removed after the tests. Halcyon's media gate
+passed again. DOSBox's first session harness incorrectly waited for DOS output
+on serial rather than in the PTY transcript; the screenshot proved DOS had
+booted. That review also found a real SDL omission: recreated video surfaces
+lost their title and dynamic-frame intent. The generic SDL backend now restores
+both. The corrected session gate passes in 71 seconds, with reviewed tiled,
+zoomed and returned-to-shell screenshots.
+
+The operator approved the Lex curiata visual specification: a frozen blurred
+workspace and centered trusted scene with the Roman authority vocabulary.
+`HALCYON-TRUSTED-EPISODE.md` records the required scanout/input trust boundary;
+the scene is not represented as an implemented trusted GPU sink.
+
+The full 40-boot default/UBSan by SMP4/SMP8 verification passes: ten boots in
+each configuration, zero in every failure category, 2,313 seconds of test
+exposure. An additional eight-CPU ITS/TCG UBSan boot passes in 121 seconds.
+The integration review and evidence are in `AUX-HALCYON-INTEGRATION.md`.
+Review staffing is deliberately single-agent, as requested; no independent
+audit is claimed. Main's concurrent README updates and aux's uncommitted work
+are preserved. The verified integration is ready for the final main merge.
+
+---
+## 2026-09-16 (aux, Opus 5, effort max) -- the Operator's Manual restarts: a writing guide, a design, and the reader
+
+## 2026-09-10 (aux, run 9, post self-compact) -- the Halcyon SESSION-path inline-media channel (I-47, HALCYON 14.7.2): per-pane routing on the existing /srv+9P mechanism
+
+Picked up from the run-8 self-compact at the 600k line. The operator had ratified
+(run 8) shipping the session-path channel on the EXISTING mechanism now, with
+Mycelium a later "pave the trodden pathways" arc. This run built it.
+
+**The research pass found the gap the console spike hid.** In session mode
+(`halcyond --session`) the compositor spawns each tile as a `kaua-term` and OWNS
+each tile's transcript itself (the RICH tier -- it rasterizes
+`SessionTile.tile.scrollback`), while the console-spike `placesrv` runs ONLY in
+console mode (`main.rs`). So a `view` in a session tile had nowhere to place --
+the session compositor had no inline media at all. The chunk is therefore a
+session-side place server + per-tile ROUTING + the I-32 quota, not a tweak.
+
+**The routing fork went to the operator (I am on Opus -- stop at the first
+user-input item), with the research attached.** Three shapes: (A) one per-user
+service + the per-pane token as a PATH COMPONENT carried as a fully-resolved
+address in `/env/HALCYON_PLACE`, wire unchanged; (B) a distinct 9P service per
+pane; (C) one place file, token in the wire payload. I recommended A and the
+operator chose it. A is the Plan 9 capability-URL: it matches the TAPESTRY_CLAIM
+`/env` precedent, needs NO wire-format bump (the token never enters the payload
+-- it is validated once at the 9P walk), and posts ONE service (B posts N; C is a
+format break re-validated per write).
+
+**The mechanism facts, all verified in-tree before building:** `/env` is
+per-Proc + deep-copied at spawn (`kernel/env.c` `env_clone_into`), so a per-tile
+token written before `SessionTile::spawn` propagates compositor->kaua-term->ut->
+view, isolated from every other pane; `Command` has NO per-child `env()` yet
+(`process.rs:38` "environment is inherited"), so the compositor sets a per-tile
+value the way it already sets `HALCYON_PALETTE` -- write `/env/NAME` right before
+that tile's spawn (and remove after, so its own env + the next tile's snapshot
+stay clean); login already grants `MAY_POST_SERVICE` one hop (the home proxy).
+
+**What landed** (all guest-clean + clippy-clean; halcyond lib host tests 221 ->
+226): NEW `usr/halcyond/src/paneroute.rs` (the PURE, host-tested routing core --
+the canonical 32-lowercase-hex token codec + the fail-closed namespace walk; 5
+tests) + NEW `usr/halcyond/src/paneplace.rs` (`PanePlaceServer`: the per-user
+`/srv/halcyon-<user>` server, the token->leaf routes map, the peer-principal
+accept gate, leaf-tagged completions; reuses `inlineaccum`+`inlinewire`+the
+placesrv dispatch shape) + the `session.rs` wiring (`session_user`,
+`mint_place_token`, `place_cap` = the console residual / MAX_CONNS, `pane_channel`,
+the `/env` write-before-spawn, the reconcile register + reap unregister, the loop
+push_fds/service/drain-inject) + `usr/view/src/main.rs` (`open_place_write` --
+the session address preferred, no console fallback in a session).
+
+**Two authority axes, by construction:** (1) the secret CSPRNG-`u128` token is a
+path component living only in the pane's per-Proc `/env` (unguessable +
+unnameable across panes), validated fail-closed at the walk; (2) a peer-principal
+gate at accept (`t_srv_peer`) refuses any connection whose peer is not the
+session's own user -- so even a LEAKED token cannot cross a user boundary. The
+DoS floor is a static aggregate (`MAX_CONNS`=2 x the residual-derived per-image
+cap) + the tile transcript's own content budget as the per-pane STORED quota
+(both live-count and bytes, evicting clean) -- so I added NO new transcript
+plumbing; the existing 13.3 budget IS the §14.7.7 quota.
+
+**Two wrong turns, both caught by a gate rather than by me -- the reusable part.**
+
+(1) **The E2E caught TWO functional blockers my design asserted away** -- neither
+reachable by any prior gate, both invisible to the audit (they are runtime
+wiring, not soundness). FIRST: my design said "login grants halcyond
+MAY_POST_SERVICE, one hop, as for the home proxy" -- but it *didn't*: login
+spawned `halcyond --session` with only `SESSION_HANGUP` (login/main.rs:1373), so
+`PanePlaceServer::post` failed and the E2E hit my own "inline-media service
+unavailable", 3/3 deterministic. A comment/assumption is not the code -- I wrote
+the grant into the design prose and never checked login did it; `ls-gfx-session`
+never posts to /srv (it drives tapestryd), so nothing had exercised it. SECOND,
+past that: the service posted + each tile got its `/env/HALCYON_PLACE` address,
+but `view` never CONNECTED (the server-side diagnostics I added showed the
+address set, no accept). The cause: `view` did a SINGLE deep open of
+`/srv/halcyon-<user>/<hex>/place`, but a /srv posted service connects on OPEN and
+the resolver WALKS intermediate components without opening them -- so a single
+deep open cannot cross the service to the token dir. FIXED by mirroring the
+console's two-step (connect to the service root, then walk the `<hex>/place`
+subpath). The design's "the kernel resolves it by connecting and walking" was
+the tell: I asserted a resolution behavior I had not verified. Both fixes proven
+by `ls-gfx-session-image` going green (PASS 41s: view inline in a session tile,
+the serial witness + the screendump delta).
+
+(2) **The Opus holotype found the aggregate OOM I had reasoned right past.** I
+had convinced myself "the per-pane stored quota is the tile's existing content
+budget -- no new plumbing needed." The prosecutor re-derived it and found the
+hole: `enforce_budget` keeps >=1 frozen block (transcript.rs:1436), so a single
+oversized image survives ABOVE the tile's share, and the server's per-image cap
+is the FIXED residual (ignores tile count) -- so K image-panes retain K x
+per_image, exhaust the 64 MiB heap, and `t_exits(1)` kills the WHOLE session
+(I-32 OOM-extinction + I-1 blast radius). Ordinary heavy use, not adversarial.
+My "no new plumbing" was the tell -- a generative step that argued for its own
+smallness. FIXED (F1) by an inject-time per-tile budget check (an image > half
+the tile's share is refused clean). The round: 0 P0 / 1 P1 / 2 P2 / 4 P3; F1 +
+F2 (stale in-flight cap -> a live aggregate byte budget, the cross-conn sum the
+console F5 deferred at MAX_CONNS=1) + F3 (a no-channel pane inheriting a stale
+/env token -> unconditional clear) + F5 (qid u128 truncation) FIXED; F4/F6/F7
+DEFERRED (inherited / bounded-at-cap / perm-0-moot). NOT dirty. Detail:
+[[audit_inline_media_closed_list]].
+
+**Build + E2E:** widened the `/test.png`+`/test.jpg` bake gate to fire under
+`THYLACINE_HALCYON_SESSION` too (a session build needs the fixtures), and added
+`tools/interactive/ls-gfx-session-image.exp` (view inline in a session tile: the
+`session inline leaf=N 640x400` serial witness + a screendump delta; SKIP-77 on a
+default image; enrolled in the abi-boot-banner mirrors). The E2E re-run on the
+fixed image + the SMP gate close the chunk.
+
+**Owed / flagged, not done unilaterally:** the ARCH §28 I-47 row still reads
+RESERVED -- the console/gallery/JPEG slices all left it so, updating only
+`docs/AUDIT-TRIGGERS.md`; the formal RESERVED->ENFORCED flip is an arc-close
+decision for the operator (the whole inline-(A) path -- console + session + JPEG
++ fullscreen + the quota -- is now in, a natural close milestone), not a
+mid-arc side effect. A Fable-diversity audit on the whole inline-media surface
+remains owed (all rounds Opus, credit-gated).
+
+---
+## 2026-09-09 (aux, run 8, post self-compact) -- gallery arc E2E-verified + PUSHED; then the JPEG slice (zune-jpeg): both viewers decode JPEG; one Opus holotype in flight
+
+Picked up from the run-7 self-compact at the 600k line: the gallery arc was
+committed through `8454ecb3` but its OOM fix had NOT been E2E-re-verified on
+hardware (the fix changed the allocator + added a headers-only precheck), and
+nothing was pushed. Two things this run: close the gallery arc (verify + push),
+then the operator-ratified JPEG slice.
+
+**Re-prosecuted the OOM fix from a fresh context before trusting it.** I missed
+that OOM the first time (the E2E was green only because /test.png is 256 Kpx), so
+the first act was to re-read `cfa4f83f` cold: the 128 MiB lazy-overcommit heap
+(decode peak ~112 MiB at the 12 Mpx budget -- fits), the headers-only
+`png_dimensions`+`within_pixel_budget` precheck rejecting over-budget BEFORE the
+heap-hungry decode, `drop(bytes)`, the Surface-yielding connect block. Sound; the
+humility loop closed on my own read, not on the green.
+
+**Gallery arc CLOSED + PUSHED.** Waited out main's required WEAVE-SKEIN SMP gate
+on the shared mac (~48 min; interrupting a required gate for a provably-passing
+formality is not a fair trade -- a Monitor woke me the moment the lease freed).
+Then, on the fix-tip: `THYLACINE_HALCYON=1 build.sh all`, and both E2Es GREEN on
+HVF -- `ls-gfx-gallery` (`gallery: /test.png 640x400 shown 1280x800 at 0,0`) +
+`ls-gfx-inline-view` (`view: /test.png placed inline (640x400)` + halcyond's
+injection witness). Pushed `7846ecd7..8454ecb3` to BOTH mirrors (github + codeberg).
+
+**The JPEG slice `8f5a4143` (ratified "gallery first, then JPEG").** Both
+inline-media viewers now decode JPEG as well as PNG.
+
+- **Verified the vendor before adding it** (the discipline the OOM miss taught):
+  crates.io says `zune-jpeg` 0.4.21 depends on ONLY `zune-core ^0.4` (already
+  vendored at 0.4.12), so `cargo vendor` added exactly one crate dir with zero
+  churn to the existing tree (measured: `git status third_party/rust/` = one `??`).
+- **The safe-decode property, measured not assumed.** Vendored
+  `default-features=false`, and zune-jpeg's Cargo.toml `default =
+  ["x86","neon","std"]` -- so all three are OFF, which activates the crate's own
+  `#![cfg_attr(not(any(feature="x86",feature="neon")), forbid(unsafe_code))]`. The
+  JPEG decode is therefore ENTIRELY safe Rust, in the sacrificial view/gallery
+  process: hostile bytes can only panic (caught at the process boundary), never
+  reach memory unsafety -- the same posture as PNG.
+- **`argb.len() == w*h` proven, not hoped.** `decode_jpeg` reads `nc` from
+  `get_output_colorspace()`; the concern was whether that matches the nc zune
+  sizes the decode buffer with. It does, by construction: `output_buffer_size()`
+  (decoder.rs:261) and `get_output_colorspace()` (decoder.rs:665) BOTH call
+  `self.options.jpeg_get_out_colorspace()`, and `decode()` returns exactly
+  `output_buffer_size()` bytes -> `samples.len() == npx*nc` -> `chunks_exact(nc)`
+  yields exactly npx chunks. So the place path (a header declaring w*h + a payload
+  of argb.len()*4) cannot desync.
+- **Keying on the reported colorspace makes it robust:** RGB (nc=3) and Luma
+  (nc=1) normalize to opaque ARGB; a 4-component CMYK/YCCK output is REFUSED, not
+  mis-read as RGBA (JPEG's 4th channel is not alpha). The default out-colorspace
+  is RGB (never BGR), so nc==3 is RGB order.
+- **The DRY refactor.** view's decode/place tail factored into
+  `check_budget`+`place_decoded` (PNG + JPEG share it); gallery's Png arm
+  converted to the same `check_budget` for symmetry with its new Jpeg arm. Both
+  bins' PNG E2Es RE-RAN GREEN after the refactor -- the regression check.
+- **Witnessed on hardware:** `ls-gfx-jpeg.exp` (view `/test.jpg` inline + gallery
+  `/test.jpg` fullscreen), PASS [31s] on HVF, all three witnesses (`view:
+  /test.jpg placed inline`, halcyond `inline image placed (640x400)`, `gallery:
+  /test.jpg 640x400 shown 1280x800`). Fixtures `test.jpg`+`quad.jpg` from
+  `make-test-jpg.sh` (sips), committed; view lib tests 6 -> 9.
+
+**Opus holotype on the JPEG decode: 1 P1 + 2 P3, ALL FIXED** (format-fuzz
+surface; Fable credit-exhausted -> the Opus fallback, context-independence not
+family diversity; MODEL start==end). My concurrent self-audit had found no P0/P1
+(nc-consistency + `forbid(unsafe_code)`) -- and MISSED the P1, which is the lesson
+of the round:
+
+- **F1 [P1] -- the one I missed.** I sized the JPEG budget by mirroring
+  decode_png's ~8*npx peak. But a PROGRESSIVE JPEG is a different beast: zune
+  holds a full-image i16 coefficient buffer PER input component
+  (mcu_prog.rs:101-106, `2 B * components * npx`) ALONGSIDE the output during
+  decode -- peak ~= READ_CAP + 12*npx (4-comp), ~1.5x the baseline. A 3-comp
+  4:4:4 progressive at 6 Mpx = ~70 MiB OOM-exits view's 64 MiB heap: the exact
+  "misleading OOM" class R-GALLERY-1 F1 closed, on the NEW progressive path, and
+  progressive is the common web format. The green E2E hid it AGAIN because
+  /test.jpg is baseline + 256 Kpx (the one image that fits -- small AND baseline).
+  LESSON: **a decode budget copied from one codec under-models another; size to
+  the worst decode MODE's peak, not the format's typical one.** Fixed: view
+  6M->3M (52 MiB fits 64; the channel re-caps inline to ~1 Mpx anyway); gallery
+  heap 128->192 MiB keeping 12M (160 MiB fits, to view ~12 Mpx photos; lazy
+  overcommit within the 256 MiB page budget). Both budgets now documented against
+  the progressive worst case.
+- **F2/F3 [P3, fixed].** F2: the `nc != 1 && nc != 3` "CMYK REFUSED" comment
+  described an unreachable path (zune only ever outputs RGB/Luma) -> reworded as a
+  defensive guard. F3: the Luma + progressive paths were reachable but untested
+  (fixtures were baseline 3-comp -- exactly where F1 hid) -> added `gray.jpg`
+  (grayscale) + `prog.jpg` (SOF2 progressive) fixtures + tests (view lib 9 -> 11).
+
+Verified sound (the prosecutor re-derived from zune source, not comments):
+memory-safe decode, `argb.len()==w*h` exactly, nc in {1,3}, the refactor, E2E
+honesty. Non-invasive fix (budget constants + a heap bump) + P0=0 / (P1+P2)=1 ->
+close NOT dirty, no round 2. **All 3 E2Es re-ran GREEN on the new budget/heap**
+(ls-gfx-jpeg + the two PNG; the 192 MiB gallery heap boots; ls-gfx-inline-view's
++542212-px on-screen delta held) and the JPEG arc PUSHED `a92f800e` (both
+mirrors). Fable-diversity pass still owed.
+
+**Post-JPEG dialogue -> a scripture decision (`026d50a6`).** The operator asked
+whether the next chunk (the Halcyon session-path per-pane channel, HALCYON 14.7.2)
+should be built as/on the parked **Mycelium** NOVEL. I laid out the fit: strong
+CONCEPTUAL match to the NOVEL's IPC-SUBSTRATE framing (a namespace-named,
+capability-scoped, message-framed channel), a POOR match to the older
+plumber-router framing in memory (14.7.2 is deliberately a direct/structural
+channel, not content-routed), but only a PARTIAL driver -- its inline path is a
+bounded write, exercising message-framing + namespace-scoping, NOT the
+handle-passing (I-4/SCM_RIGHTS) that is Mycelium's hard/novel square. The real
+argument for Mycelium is that this would be the FOURTH-plus hand-rolled mini-9P
+channel (ptyfs/corvus/nocturned/placesrv). Operator's call, and the good one:
+**ship 14.7.2 on the existing /srv+9P mechanism now; build Mycelium later as its
+own arc by "paving the trodden pathways"** -- unifying the channels that actually
+emerged, each a validated consumer + a migration candidate (empirical, not
+speculative -> no overfit). Captured in `docs/NOVEL.md` (the Mycelium para) +
+`memory/project_mycelium.md`. Next chunk: the 14.7.2 build on the existing
+mechanism (a fresh subsystem -> self-compact first).
+
+---
+## 2026-09-09 (aux, run 7, post-compact) -- inline media EXPAND begins: the `view` obj-verb lands; the rest stops for the operator (Opus fallback)
+
+Picked up the ratified inline-media expand from the run-6 self-compact. First
+item is the operator's *original* spec: `view` on the Esc+w/b file-object menu.
+
+**Landed `47d18a4e`** -- one data row (`path view view {}`) in the shipped
+`verbs.default`, so a presented path offers "view"; choosing it types
+`view '<path>'` into the pane and `view` renders the image inline (slice 3b) or
+falls back to `cat`. The whole change is a config row + a host test on already
+audited H-3c menu machinery -- no Rust changed, so the guest binaries are
+byte-identical to the fully-green `4134e89d`.
+
+- **The `--` question, settled by reading the code, not assuming.** The note I
+  left myself said to place the verb "beside the wedge-test rule" and I nearly
+  wrote `view -- {}` to match `ls`/`cat`/`stat`. Both were wrong. `verbs.rs` +
+  `env.rs:207` (`Operands` returns `argv[1..]` verbatim -- it does NOT consume
+  `--`) proved `view` reads a bare operand, so `view -- {}` would open `--` as
+  the file; `view {}` is correct, and the verb belongs in `verbs.default`
+  unconditionally (the wedge rule is a `#`-internal *test* action, a different
+  concern). `view_obj_verb_types_view_quoted_path` pins parse+expand ->
+  `view '<path>'`; beacon host tests 38/38.
+- **Bake proven, not assumed:** `THYLACINE_HALCYON=1 build.sh pool` --
+  `/lib/beacon/verbs` readback-verified (byte-exact vs `verbs.default`+wedge, so
+  the `view` row is definitively baked). `sub-beacon` dossier updated (audit:light).
+
+**STOP -- the decision that needs the operator.** The remaining expand (JPEG via
+zune-jpeg; `gallery`/`--fullscreen`; then the session-path per-pane channel) is
+where I hand back. I am on **Opus, not Fable** (the standing 2026-09-01 grant:
+Fable auto-resolves heritage-aligned forks, Opus stops at the first user-input
+item), the note flagged the operator "may prefer to redirect the expand," and
+each remaining item carries a real judgment: JPEG adds a *second* format-fuzz
+decoder whose audit would again be **Opus-only** (Fable is credit-exhausted --
+a Fable-diversity pass is already owed on the PNG surface), deepening a gap on
+the exact security axis where the operator drew the Fable-trust line; the
+session-path channel is a genuine trust-boundary design fork regardless of
+model. Surfaced as a blocking question rather than guessed.
+
+**The operator answered: gallery first, then JPEG** (the recommended path;
+gallery is lower-risk on Opus -- it adds NO new format-fuzz decoder, so it does
+not deepen the owed Fable-diversity audit debt). So gallery landed next.
+
+**Landed `20aa8e95`** -- `gallery <image>`, the fullscreen variant. It opens its
+own fullscreen tapestryd surface and blits the image letterboxed (the
+DOSBox/Quake client pattern; rides I-40/I-45 as a CLIENT, no new compositor
+code), and it REUSES view's audited zune decode (`default-features=false` -> the
+pure brain) -- no new format-fuzz surface, decode still in the sacrificial
+process. The obj-verb `path gallery gallery {}` joins `view` on the menu.
+
+- **The new logic is the letterbox FIT** (aspect-preserving, centred, scaled to
+  FILL -- the deliberate divergence from the inline native-if-fits ruling: a
+  fullscreen viewer upscales) + a nearest-neighbor blit (forced opaque; every
+  src/dst index re-checked so a truncated raster clamps, never OOB). Pure, host-
+  tested (`gallery` lib 10: fit_rect / paint / is_exit_key).
+- **Self-audit found + fixed a real bug BEFORE the formal round:** the CONFIGURE
+  handler only repainted on `Ok(true)` (a resize), missing libtapestry's contract
+  that ANY `Ok` obliges a full repaint+present -- `Ok(false)` is a same-size
+  REDRAW request after the slots were invalidated; and `Err(Busy)` is non-fatal
+  (a stale offer), not the fatal I first wrote.
+- **Wrong turn, caught by reading my own regex:** the first E2E hardcoded
+  `shown 640x400`, but gallery scales the image to FILL the display, so the
+  witness line reads `shown 1280x800` (the fitted size); 640x400 is only the
+  NATIVE raster field. The doomed run was killed by PID and re-run with a
+  captured-dimension regex.
+- **The display-model finding (joey G-4):** scanout is FIRST-PRESENT-WINS, so a
+  second fullscreen client's VISIBILITY over the halcyond console is the
+  tapestry-demo/DOSBox-proven path, not gallery's to guarantee -- gallery's home
+  is the graphical SESSION (the pane model). The E2E therefore keys on the SERIAL
+  present witness (the whole client path on hardware) and saves the screendump as
+  a record; a session-mode visual gate is owed.
+
+**The gallery E2E passed on HVF (29s, first attempt)** -- witness
+`gallery: /test.png 640x400 shown 1280x800`, Esc exited cleanly, and the
+screendump showed the image rendered (tiled beside the console -- the compositor
+gave gallery a pane, the documented console-mode display model). Screenshot sent
+to the operator.
+
+**Then the Opus holotype found the finding the green E2E hid -- F1 [P1].** BOTH
+viewers had declared the default 4 MiB `ThylaAlloc`, so `READ_CAP` (64 MiB) and
+`view::MAX_PIXELS` (64 Mpx) were PHANTOM bounds: an image decoder's peak is ~8*npx
+(compressed input + samples + ARGB, all live), which on a 4 MiB heap caps npx at
+~0.3-0.5 Mpx. Any image large enough to fill even the default 1280x800 display,
+and every real photo, OOM-exited SILENTLY (panic -> t_exits(1), no diagnostic).
+The E2E was green only because `/test.png` is 256 Kpx -- the one input that fits,
+the exact "gauge reading zero because it never started" trap the memory pins warn
+about. **This is a genuine self-audit miss**: I copied view's `ThylaAlloc` +
+`READ_CAP` pattern without seeing that view is the closed slice-3b's INLINE path
+(an OOM there merely drops the inline image) while gallery is a whole viewer (an
+OOM is total failure) -- and that view itself shared the ceiling.
+
+Fixed both (one root cause, one feature -- the fullest-spec + stewardship call,
+not just enqueue the sibling): gallery -> 128 MiB `ThylaAllocN` + a 12 Mpx budget;
+view -> 64 MiB + a 6 Mpx budget; both reject over-budget from a NEW headers-only
+`view::png_dimensions` + `within_pixel_budget` BEFORE the heap-hungry decode, so
+the bound is REAL. Plus F2 (`drop(bytes)` after decode) and F3 (the connect
+`unwrap` -> a Surface-yielding block). The round's verified-sound list (fit/paint
+bounds, the CONFIGURE lifecycle, the obj-verb quoting, the I-40/I-45 client
+obligations) stands: 0 P0, no memory-safety violation. Closed `cfa4f83f`. The
+E2E re-runs (confirming the bigger heap leaves the happy path unchanged) are
+pending the mac; not pushed until re-confirmed green.
+
+**The lesson (pinned):** a `MAX_PIXELS`/`READ_CAP` far above the process heap is
+a PHANTOM bound the allocator OOMs past -- size the pixel budget to the heap and
+check it from the headers BEFORE the decode. And a decoder E2E whose fixture is
+the one image that fits proves nothing about the images that do not.
+
+JPEG is next (the second half of the operator's vote); the session-path per-pane
+channel remains the design fork owed to the operator.
+
+
+
+The console spike the operator ratified. `view /test.png` now decodes a PNG in
+the sacrificial `view` process, hands the raster to halcyond over a new
+`/srv/halcyon` 9P place channel, and halcyond validates + injects it as a
+transcript `Item::Image` -- and it renders on the real scanout. Proven on HVF;
+screenshot sent.
+
+**What landed (not yet committed at the time of this entry -- the commit is the
+next act):**
+- `usr/halcyond/src/inlineaccum.rs` (NEW, PURE, host-tested 9/9): the
+  format-fuzz-critical accumulator. Validate-before-allocate (the `inlinewire`
+  header is assembled from a 16-byte prefix and fully validated -- magic, format,
+  dims, AND a heap-safe `PLACE_MAX_PIXELS`=2 Mpx cap BELOW the wire's own 16 Mpx,
+  so a decoded raster cannot exhaust halcyond's fixed 64 MiB heap -- before a
+  payload byte is buffered); sequential-only writes bounded by the header's
+  declared total; a clunk mid-transfer discards the partial. Split into a pure
+  lib module ON PURPOSE, so the untrusted-byte path is host-tested (the audit's
+  regression floor), not buried in the syscall body.
+- `usr/halcyond/src/placesrv.rs` (NEW): the minimal 9P2000.L server halcyond
+  posts (`/srv/halcyon`, root dir + write-only `place`), adapted from nocturned's
+  proven Conn/fid/frame-read/dispatch shape over the shared `libthyla_rs::ninep`
+  codec, folded into `rs_main`'s unified poll (so a place write wakes the loop at
+  once) + a service/inject step (the same one-pass latency as the console drain).
+- `usr/joey/joey.c`: the console renderer spawn now ORs in MAY_POST_SERVICE
+  (harmless to aurora, which posts nothing).
+- `usr/view` + `usr/lib/inlinewire`: staged into the image; `/test.png` (a
+  640x400 RGB witness card, `usr/view/testdata/make-test-png.py`, stdlib zlib)
+  baked to the pool under THYLACINE_HALCYON.
+- `tools/interactive/ls-gfx-inline-view.exp` (NEW gate): boots halcyond, runs
+  `view /test.png`, asserts the serial witnesses + the image on screen; SKIP-clean
+  on a default image.
+
+**The wrong turn, and what caught it.** The gate's first RED was `+0 non-ground
+px after view` -- which read as "the image never reached the screen." Ground
+truth (reading the actual screendump, not the metric) showed the image plainly
+on screen. The bug was the INSTRUMENT: `gfx_region` counts pixels differing from
+a *given* color, and I passed none, so it defaulted to the Bonfire console black
+-- against which a Daylight-parchment screen reads ~every pixel as "off" in BOTH
+dumps, so the delta cancelled to ~0. A false negative from a metric keyed on the
+wrong ground, exactly the "GREENS CAN BE IRRELEVANT" / "the LOOK catches what the
+METRIC cannot" class. Fixed by deriving the real ground from the pre-dump's
+dominant color and counting non-ground against THAT: the delta became +542756 and
+the gate is green. (A second, dumber miss on the way: my `region` Tcl proc took
+fixed args but I passed color args -> a crash that left a stray VM, killed by
+PID.) The feature was never in doubt -- the serial witnesses (`/srv/halcyon
+posted`, `inline image placed (640x400, 256000 px)`, `view ... placed inline`)
+all fired on the first boot.
+
+**Self-audit find (fixed before commit).** `inlineaccum` supports multiple images
+on one fid via a `base` offset (and I test it), but `h_write` first destroyed the
+accumulator on `Done`, defeating that and making the tested behavior unreachable.
+Keeping the accumulator bound to the fid makes the tested behavior the real one.
+
+**Verification.** Host: inlineaccum 9/9 + view 4/4 (incl. a decode of the exact
+baked witness bytes) + inlinewire 2/2; halcyond lib 220/220; guest build + clippy
+clean on the new files. E2E `ls-gfx-inline-view` 3/3 legs green on HVF. Default
+(aurora) image re-baked + `test.sh` exit 0, boot OK, all ladders "all OK" -- the
+one "FAILED" is `pouch-smoke spawn` (the pouch port is not built in this bake; an
+absent optional probe, non-fatal, wholly unrelated to the joey/view/build.sh
+changes). No SMP gate: no kernel change (joey.c is userspace init).
+
+**Trust posture (console spike).** No peer-identity gate: injecting an image into
+the console transcript is at parity with writing text to `/dev/cons`, which any
+holder already can, so the spike gates on format-fuzz safety + the resource bound.
+The per-pane token + quota land with the session-path channel.
+
+**The audit found a P0, and it was the exact class the prompt named (@b28ee180).**
+The focused holotype round ran on the OPUS fallback -- the Fable prosecutor died
+mid-spawn on a 429 credit error (Fable IS credit-exhausted, confirming the
+standing memory), so per "NEVER SKIP A ROUND FOR WANT OF FABLE" I re-spawned Opus
+with the context-independence framing. It confirmed my held self-audit finding
+AND sharpened it into a P0: I had estimated 4 conns x 8 MiB; the prosecutor
+re-derived that a `Vec<u8>` grown incrementally to just over 8 MiB DOUBLES to
+16 MiB capacity, so `MAX_CONNS`=4 x 16 MiB = the whole 64 MiB heap -- and even
+2 conns beside a flooded 32 MiB transcript OOM-exit the console renderer. An
+unprivileged process can open the world-writable `place` and slow-loris it.
+Fixed (b28ee180): `MAX_CONNS` 4->1 (the spike drives one view; a second waits),
+`PLACE_MAX_PIXELS` 2->1 Mpx, and `reserve_exact` so the buffer holds exactly
+`total_len` (no doubling) -- peak place ~8 MiB, bounded by construction; plus the
+F3 POLLHUP fix. The E2E stayed 3/3 green with the tighter bounds. This is a DIRTY
+CLOSE (a P0 returned), so a round-2 re-audit of the fix followed. **The
+lesson: a per-element cap is not a per-container bound, and Vec doubling hides a
+2x factor in any "it fits" arithmetic** -- the E2E drove ONE well-behaved client,
+so only the adversarial read found it. Closed list:
+`memory/audit_inline_media_closed_list.md`.
+
+**Round 2 verified the fix + sharpened the budget again.** The re-audit (Opus)
+confirmed F1/F2/F3 CLOSED with no new P0/P1, but found F4 [P2]: my fix's budget
+arithmetic reasoned only at 1280x800, and **the atlas scales with the scanout**
+(~6 MiB there, ~18 MiB at 4K) -- so at 4K a fixed 8 MiB place peak leaves a thin,
+unproven margin. The default is 1280x800 (comfortable) and the operator's HiDPI
+2560x1600 still fits, but 4K is a settable `THYLACINE_GPU_RES`, so I fixed it
+rather than documenting a ceiling: a **display-adaptive cap** (`place_cap_for` ->
+`set_max_pixels`, the heap residual after the atlas) that stays 1 Mpx (native)
+through 2560x1600 and shrinks only past ~3K. Plus F5 (the comments implied a
+wired byte-sum that wasn't there -- reworded to the real structural bound) and F6
+(the MAX_CONNS=1 sole-slot tradeoff -- documented). Round 2's F4 fix is a bounded
+budget calc, not invasive, so no round 3 is triggered; it was self-audited +
+host-tested + E2E-reverified (@b1ui3ko1j, still 3/3 green). **The second lesson:
+a heap budget that names the fixed terms but omits the display-scaled one is
+right at the reference display and wrong at the extremes.**
+
+**Open / owed.** A Fable-DIVERSITY pass when credits return (both rounds were
+Opus -- context independence without family diversity). The session-path per-pane
+channel, JPEG, `--fullscreen` (`gallery`), the obj-verb rule, and `Embed` (video)
+remain seams.
+
+---
+## 2026-09-09 (aux, run 6, self-compact #6) -- inline media: slice 1b (render path on real hardware) + the operator's width-fit ruling + slice 2 (vendor zune) + slice 3a (the channel wire + view's writer) + the channel design decided
+
+Picked up the resume note at `ca785f1e` and built slice 1b: prove the
+`Item::Image` render path -- layout letterbox + `cartoon::Op::Image` -- reaches
+the REAL scanout, the one thing a host test cannot do, and hand the operator the
+first inline-image visual they asked for.
+
+**What landed (`9d662ece`).** A boot-time witness lever: `Transcript::inject_image`
+(push a decoded ARGB raster as its own frozen block -- a non-Line item, so
+`class()` is Doc with no styles table); a new lib module `viewtest` holding the
+PURE half (host-tested) -- `declared()` (the whole-word `thylacine.viewtest`
+bootarg test, the `scale::declared_scale` discipline) + `raster()` (a bordered
+card: color bars + a luminance gradient + diagonal thylacine stripes, native
+720x480 so a default-scale boot both letterboxes AND resamples); the bin reads
+`/hw/chosen/bootargs` the way tapestryd reads its scale token; `run-vm.sh`
+`THYLACINE_VIEWTEST=1` -> the append token. Host: `viewtest` 2 tests + full
+halcyond lib 211/211; guest target compiles.
+
+**Wrong turn #1, caught by reading the boot log, not the diff.** The first
+`THYLACINE_VIEWTEST=1` boot came up on AURORA, not halcyond -- `joey: aurora
+spawned pid=2478 (the console renderer)` -- so the injection (halcyond-only)
+never ran. The `/lib/halcyon/renderer = halcyond` lever is BUILD-gated on
+`THYLACINE_HALCYON=1` (build.sh:3774), which a plain `build.sh kernel` leaves as
+the aurora fail-safe. The new halcyond binary WAS in the pool; only the
+renderer-selection file was missing. Rebuilt with `THYLACINE_HALCYON=1` (pool +
+ramfs regenerate key-paired); the second boot logged `joey: halcyond spawned` +
+`halcyond: viewtest -- inline image injected (720x480; I-47 slice 1b)`. The tell
+was the boot log's renderer line -- a self-report of which binary took the
+scanout -- not anything in the code.
+
+**Wrong turn #2, predicted before it wasted a boot.** halcyond is
+bottom-anchored, and at the login prompt there are hundreds of lines of boot
+scrollback -- the top-injected image was off-screen (the baseline screendump
+confirmed: login prompt, image gone). halcyond reads keys from virtio-input, not
+serial, so the fix was QMP `send-key` (Esc -> Normal, then `g` -> scroll to top,
+`input.rs:177`) -- the same path a real keystroke takes. The retry screendump
+showed the card at the top of the transcript with the boot console flowing below
+it: color bars (ARGB channel order correct -- red is red, blue is blue), a smooth
+resampled gradient (720x480 -> 480x320), diagonal stripes, letterboxed with side
+bars. Sent to the operator.
+
+**What this de-risked, exactly.** The blit + resample land correct pixels through
+the real GPU/present path -- proven. It did NOT exercise the channel (slice 3) or
+a real decoder (slice 2): the raster is baked in-process. And "resample on the
+real GPU" is only strictly proven at scale 100 (the height cap `ipx(320)` grows
+with scale; at 200% a 480-tall native would blit native). This boot was HVF/M2,
+not V3D -- the thyla-pi V3D witness is still worth taking when a later slice
+boots there anyway.
+
+**The operator's width-fit ruling (`0b7741f1`).** Seeing the screenshot, the
+operator ruled: a small image renders at its EXACT native size when it fits,
+scaling down only when it does not. That is precisely what they were reacting to
+-- the witness raster was 720x480, fit the 1280 pane width, yet my slice-1
+letterbox scaled it to 480x320 because of an artificial `IMAGE_MAX_H=320` cap.
+Removed the cap: the inline path now bounds only by the content WIDTH (letterbox
+with `ah=i32::MAX`), height unbounded (the transcript scrolls). A regression test
+pins a tall image (100x500 in a 600px pane) at native height -- capped to 320
+before. The general `letterbox` helper is unchanged and still caps both
+dimensions for the future gallery/fullscreen path. A pure, host-tested change --
+the render path itself was already hardware-proven, so no re-boot.
+
+**Slice 2 (`ee9f1048`): vendor zune + the `view` decoder.** Vendored zune-png
+0.4.10 + zune-core 0.4.12 + zune-inflate 0.2.54 + simd-adler32 0.3.10 into
+third_party/rust (cargo vendor, additive -- 4 new crate dirs, ZERO existing crate
+touched, confirmed by `git status`). The vendor gotcha handled cleanly: the
+offline source-replacement in `usr/.cargo/config.toml` had to be commented out so
+cargo could fetch a not-yet-vendored crate, then restored via `git checkout`. All
+four build no_std on aarch64-unknown-none (zune `default-features=false`) --
+VERIFIED at vendor time by the `view` guest build, the one thing the README's
+regenerate procedure requires. New `usr/view` crate (lib+bin, the halcyond
+pattern): the lib is the pure `sniff` (PNG/JPEG magic) + `decode_png` -> ARGB
+(Luma/LumaA/RGB/RGBA + 16->8 + palette-expand), host-tested against a hand-built
+2x2 RGBA PNG fixture decoded to its four corner colors; the bin reads + sniffs,
+PNG -> decode + report (slice 3 hands the raster to halcyond), non-image -> cat
+(the operator's fallback). Decode runs in the sacrificial `view`, never halcyond
+(the blast-radius amendment). Not staged into the boot image yet -- no point until
+it displays (slice 3).
+
+Chosen pure-Rust PNG over a ported C codec deliberately (H-7 format-fuzz posture):
+the decoder parses untrusted bytes, and a fuzz-friendly memory-safe decoder in a
+sacrificial process is the whole point.
+
+**The channel design, decided (design-conversation pattern).** Slice 3 is the one
+genuinely-new IPC and a format-fuzz trust boundary, so I didn't plunge in -- I
+delegated a read-only research pass over the tree's precedents (/srv posting, the
+TAPESTRY_CLAIM /env token, the one-hop MAY_POST_SERVICE grant, halcyond's
+pane/transcript model, the native 9P-server scaffolding, and whether any existing
+tapestryd surface takes a copy-in raster). It confirmed: the transport is a
+9P-mode /srv service (post = `t_walk_create("/srv/x")`, client = the corvus
+two-step `t_open` then walk `place`); every existing pixel channel is share-OUT +
+map (which unprivileged `view` can't use), so the RGBA copy-in is a genuinely new
+parse surface. Then I surfaced ONE decision to the operator -- console spike
+(namespace-scoped, one transcript, fastest to a visual in the UI they're using)
+vs per-pane-token-first (the session compositor's isolation model up front). They
+chose the **console spike**.
+
+**Slice 3a (`9bb7947a`): the wire contract + view's writer.** New
+`usr/lib/inlinewire` (pure, no_std, zero deps, host-tested): the ONE place-request
+format both halves share, so they can't drift AND halcyond never pulls view's
+decoder -- a 16-byte header ("HPL1" + format + w + h, LE) then w*h ARGB u32s as LE
+bytes; `parse` fully validates (magic/format/dims/MAX_PIXELS) before any alloc.
+view's `place_on_halcyon` does the corvus /srv two-step and writes header +
+payload in 60 KiB chunks, falling back to reporting the decode when no service is
+posted (so view is coherent standalone). A design note caught while writing it:
+the first `MAGIC` value I typed decoded to the wrong ASCII ("HLI1"), true-comment /
+wrong-value -- fixed to 0x314c5048 and pinned by a test asserting the packed bytes
+read "HPL1", so the value can't drift from the comment again.
+
+**Next.** Slice 3b -- the reader + the E2E: halcyond posts + serves /srv/halcyon
+(a minimal 9P server folded into rs_main's unified poll, the nocturned pattern;
+accumulate Twrites -> `inject_image`), joey grants it MAY_POST_SERVICE, `view` +
+a test.png get staged, then a boot proves `view /test.png` inline (screenshot),
+and the format-fuzz audit + the dossier land. Full plan in
+`memory/project_next_session.md`.
+
+---
+## 2026-09-09 (aux, run 6, self-compact #5) -- inline media / `view`: research + ratified design + scripture (reserved I-47)
+
+The operator opened a new task: Halcyon should display media inline in the
+scrollable buffer -- a `view test.png` that prints the picture into the console,
+letterboxed to the pane and re-scaling on resize, wired as a file-object action
+(Esc+w/b+Enter -> view) with a `--fullscreen` variant, "choosing a media library
+knowing we also want video + sound later." Explicitly a design-conversation:
+"come back with your findings and pushback," no code yet.
+
+**Method: self-compact, then a 3-agent research fan-out to keep synthesis
+context lean.** At the 600k checkpoint the prior segment self-compacted; this
+segment picked up the resume note and fanned out three read-only agents --
+(1) Halcyon rendering feasibility, (2) the native/ported boundary + the
+service-vs-link decision, (3) external SOTA on media libs + inline-image terminal
+UX -- then synthesized. The load-bearing agent claims were re-verified against the
+tree before quoting them to the operator (trust-but-verify): `cartoon::Op::Image`
+at `usr/lib/cartoon/src/lib.rs:49` + the `execute` arm `:444` + tests `:590`/`:602`;
+`HALCYON.md` 14.7 + 13.5; `BEACON.md` 10.
+
+**The reframing the research forced (the pushback that changed the answer).** The
+operator's "one library for everything" instinct is right for video/audio and
+wrong for images, and the tree already says so:
+- The render side is mostly built: there is no image path into the transcript
+  today (pure text cells), BUT a complete, unit-tested, currently-UNUSED CPU
+  image compositor already exists one layer down (`cartoon::Op::Image`), and
+  reflow-on-resize is free (the width-keyed layout cache). The compositor floor
+  is done; decode + a channel are the only gaps.
+- For images, scripture already picked native memory-safe Rust decode (H-7),
+  explicitly because "a bespoke decoder is fuzz-friendlier than a ported one."
+  Dragging a huge C codec (FFmpeg, CVE-dense libpng/libjpeg) into the IMAGE path
+  fights the project's own format-fuzz posture.
+- External SOTA settled the video crux: as of 2026-09 there is NO production-grade
+  pure-Rust decoder for H.264/HEVC/VP9 (only AV1, via rav1d). So "video later"
+  forces a ported C codec -- but that belongs on the heavier Embed/inline-live
+  surface, and audio isn't visual at all (it routes to Nocturne). The media path
+  is split by medium, not unified on one library.
+
+**A wrong turn in the scripture itself, caught by agent 1.** `BEACON.md` 10
+(2026-09-01) rejects "out-of-band side channels" and "Beacon-carried pixels";
+`HALCYON.md` 14.7 (2026-09-03, two days later) mandates a native out-of-band
+channel for images -- with no cross-reference between them. Left unreconciled, a
+future implementer reads a flat contradiction. Reconciled in this commit: the
+rejection is scoped to Beacon's own text transport; the pixel channel is the
+sanctioned exception, and the "fragile association" failure mode is closed by
+construction (the endpoint lives in the pane's own namespace -- no hops).
+
+**A blast-radius amendment to as-written scripture.** The original 14.7 kept
+"image decode in halcyond." The ratified design moves decode into the
+short-lived, per-invocation `view` Proc: the decoder is native Rust either way,
+but a throwaway process is a strictly smaller failure domain for parsing an
+untrusted image bytestream than the whole-session compositor. Recorded as the
+I-47 (a)-clause and flagged in 14.7 + 13.5 as an amendment.
+
+**Two operator decisions (both via blocking question, Opus fallback).** (1)
+Decode architecture: **native `view` + Weft** (decode PNG/JPEG natively with the
+zune no_std crates in a short-lived proc, Weft-hand the raster to halcyond) --
+chosen over decode-in-halcyond and over one ported FFmpeg for everything. (2)
+Signoff: **approve, scripture-then-spike-first.**
+
+**Landed this segment: the scripture commit only (design-first; no code).**
+`HALCYON.md` 14.7 expanded into the full mechanism (data flow, the per-pane
+control-endpoint channel, `transcript::Item::Image`, `view`, the obj-verb,
+safety+DoS, video/audio-split, staging) + 13.5 decoder rec updated to zune;
+`BEACON.md` 10 reconciliation; `ARCHITECTURE.md` + `CLAUDE.md` section 28 reserve
+**I-47** (mirroring the I-46/Nocturne RESERVED shape); the AUX-ROADMAP arc row.
+quaestor owner: all four doc paths UNOWNED (design docs, not code surfaces) -- no
+dossier update owed; the AUDIT-TRIGGERS row lands with the implementation.
+
+**A second wrong turn, caught by the operator -- the Weft direction.** After the
+scripture landed, the channel-mapping pass verified that `SYS_WEFT_SHARE` gates on
+`CAP_HW_CREATE` (syscall.c:6907 -- a deliberate anti-DoS gate), so an unprivileged
+`view` cannot Weft-share *in* to halcyond: Weft is a privileged-server-shares-OUT
+mechanism, the reverse of the design's trust direction. Surfaced as a fork; the
+operator's reply -- "how does DOSBox/Quake render?" -- was the key. Verified in the
+tree: those apps are unprivileged clients that MAP a tapestryd-shared framebuffer
+(`SYS_WEFT_MAP` is uncapped) and present; tapestryd (holding `CAP_HW_CREATE`) is the
+sharer. I had invented a Weft wall by flipping the trust direction. The fix split
+the feature cleanly by CONTENT MODEL: a STATIC inline image is a cartoon-blit into
+halcyond's transcript with a one-shot BOUNDED WRITE handoff (Weft was the wrong tool
+and direction); a FULLSCREEN view is a separate program, `gallery`, that takes a
+Tapestry PANE surface exactly like DOSBox (zero-copy, unprivileged, NO new
+compositor code, rides I-40/I-45). Scripture amended before any code (14.7 -> `view`
+(A) / `gallery` (B) + bounded write; I-47 handoff -> bounded write; 13.5). The
+reusable lesson: when a mechanism seems to "need a capability the actor can't get,"
+check whether the working precedent runs it in the OTHER direction.
+
+**Landed + pushed this segment.** The eb26e8b8 main-merge (latest Halcyon:
+HALCYON-TYPE + HALCYON-THEME) was build-verified GREEN (`build.sh all` + `test.sh`:
+boot banner, arc gates L-6c/D-5 PASS) and pushed to both mirrors with the scripture
+(`43185c12`), followed by the view/gallery amendment (this commit).
+
+**Slice 1 (the render path) landed + pushed `cf6aa06b`.** The build order was
+inverted for signal: prove pixels-in-the-transcript BEFORE the channel/decoder. A
+new `Item::Image { w, h, argb }` transcript item; a `layout_block` arm that
+contain-fits it to the content width and resamples (the executor stays a 1:1
+blitter, so `cartoon::Blob::scaled` does the letterbox); `render_block` emits
+`Op::Image` into a per-frame `Cartoon.blobs`; reflow is the free width-keyed re-lay.
+A host test (`layout::inline_image_lays_renders_and_reflows`) drives it end to end
+with a baked raster -- lays + resamples, emits the op, `execute` blits the top-left
+pixel, a narrow width rescales. Full halcyond lib 209/209 + cartoon 11/11 green; the
+guest target compiles. Nothing produces an `Item::Image` at runtime yet (that is the
+channel, slice 3) -- this is the render floor. Low-ripple design: `blobs` went INTO
+`Cartoon` so `render_block` kept its signature (no ripple to its ~11 callers) and
+only the two transcript-path `execute` sites changed their blob arg. Dossier
+deferred with a `No-dossier-change` trailer (sub-halcyond is audit:hard but already
+~2000 lines stale from the merge; the inline-media dossier + AUDIT-TRIGGERS row land
+with the full feature).
+
+**Next.** Slice 1b -- a boot-time baked `Item::Image` (an env-gated lever) rendered
+on a REAL boot (thyla-pi V3D) -> the first inline-image screenshot for the operator
+(de-risks the blit through the actual GPU/scanout, which the host test cannot). Then
+slice 2 (vendor `zune-png`, native decode), slice 3 (the per-pane channel: `view
+test.png` E2E), then `gallery` (B), then expand (JPEG + both obj-verbs + the DoS
+quota + the format-fuzz audit).
+
+---
+## 2026-09-09 (aux, run 6, self-compact #4) -- the arm-6 arc CLOSE: audit SOUND 0/0/0/2 P3, SMP gate 40 boots clean, ls-imperium arm 6 re-added
+
+The fix from the prior entry (Part D `8bcc2e3f` + A1 `6758a1bd`, tip `0ae4a9ed`)
+came into this run already landed + pushed. This run is the arc close: the
+formal audit, the SMP concurrency witness, and the deferred E2E arm the fix
+unblocks.
+
+**Audit -- a caught wrong turn, then a clean verdict.** The holotype-reviewer's
+Fable round died mid-launch on a usage-credit 429 (HTTP 429, `claude-fable-5-1`).
+Per the never-skip-a-round rule it re-spawned straight on the Opus fallback tier
+(no Fable retry, since it died of credit exhaustion). `MODEL(start) ==
+MODEL(end) == Opus 4.8`, no mid-run fallback. Verdict **SOUND 0 P0 / 0 P1 / 0 P2
+/ 2 P3**, run in parallel with an independent self-audit; the two **converged on
+every soundness point** -- the Part D UAF closed by the #926/#68 `live_peers==0`
+envelope + devproc-reads-under-`g_proc_table_lock`; the A1 held-lock walk-safety
+(byte-for-byte the legate teardown); the monotonic-pid session isolation;
+login-survives; I-26 untouched.
+
+The self-audit's own path is worth recording: it *flagged* a sid-reuse
+mis-target hazard (session_hangup_cb matches `m->sid == leader-pid`, and a pid
+looks reusable), then **withdrew it** on reading `proc_alloc` -- `g_next_pid` is
+strictly monotonic and extincts at INT_MAX rather than recycling, so
+`sid==leader-pid` uniquely identifies the leader's descendants. The independent
+Opus prosecutor reached the SAME spot but filed it sharper as **F1 [P3]**: the
+isolation is sound today but rests on an *implicit global property* where the
+legate teardown it mirrors uses a *dedicated non-reusable* `legate_scope_id`;
+nothing at the call site recorded the dependency. Fixed by documenting it at
+`session_hangup_cb` -- so a future pid-recycling change can't silently
+reintroduce a cross-session kill. **Lesson: a guard's isolation can rest on an
+implicit global property where the precedent it mirrors uses a local one -- name
+the dependency the mirror silently swapped.**
+
+**F2 [P3] -- a real residual, out of scope, surfaced as a design fork.** A
+session member that `SYS_SETSID`'s out of the session (sid = own pid) escapes the
+hangup and keeps its deep-copied home-mount `spoor_ref` pinned -> login's
+`unbind_home`->`proxy.wait()` blocks -> the SAME stall, for that (uncommon,
+daemonizing) case. The reported bug (plain `sleep &`) IS fixed. This is a
+pre-existing property of the per-session home-proxy architecture: the mount
+lifetime is bound to session MEMBERSHIP, not the DEK LEASE. Minimal honest fix
+landed -- the proc.c:2860 claim softened from "fully released" to "released for
+the in-session process tree." The robust cure (bind the mount to the DEK lease;
+force-detach at logout independent of `proxy.wait`, since login orders
+`unbind_home` before `evict_dek`) is a **design fork owed to the operator**,
+enqueued in `memory/bug_logout_stall_session_pins_home_mount.md`. **Lesson: a
+fix that reclaims by membership leaves the detached case -- bind the resource to
+the lease, not the membership.**
+
+**SMP gate -- the second caught wrong turn.** The first run aborted at pre-flight
+(RC=1, no boots): `ci-smp-gate.sh` auto-enables `BAKE_CLADE=1` whenever
+`build/clade/stage/bin` exists (line 98), and the PRESERVE'd 2.6 GB pool is too
+small to hold /clade, so it refused rather than boot without clangd. clangd is
+irrelevant to the death path -- every boot exercises Part D's territory
+detach/free split on every proc exit. Re-ran with `THYLACINE_BAKE_CLADE=0`: the
+full matrix default/ubsan x smp4/smp8 at N=10 = **40 boots, 0 corruption /
+0 external-kill / 0 timing / 0 other** across all four configs. This is the
+concurrency witness the audit flagged as owed (the findings were static proofs
+reusing two already-audited envelopes).
+
+**arm-6 re-add -- verified, capture-confirmed.** `ls-imperium` arm 6 (michael
+logout -> cora login -> cora not eligible for imperium) was deferred *because*
+that cross-user re-login stalled (>540s) on this very bug. Re-added as a
+fails-without-fix regression control. The full scenario (arms 0-6) PASSED in
+31s; I checked the transcript rather than trusting the green: `login: home cora
+bound at /home/cora` (the re-login the fix unblocks), `/home/cora` (pwd),
+`imperium: not eligible` (the gate), `IM-5(6) PASS`. Not a vacuous pass -- the
+arm executed its assertions.
+
+Posture: `tools/test.sh` PASS (boot banner + arc gates L-6c/D-5); ci-smp-gate
+40/40 boots clean; ls-imperium 7/7 arms. The two P3 fixes are comment-only.
+Owed: the vault death-path dossiers (rung to the vault agent per the code-track
+discipline) and the F2 design fork (operator's vote).
+
+---
+## 2026-09-09 (aux, run 6 continued) -- the arm-6 logout deadlock FIXED: territory-at-exit (Part D) + the kernel-driven session hangup (A1); both parts verified, arc close (SMP gate + audit) owed
+
+The operator ratified the fix over two blocking questions: **A1** (kernel session
+hangup) over A3 (grant login CAP_KILL), after a precedents survey they asked for
+(pam_mount escalating hup/term/kill; systemd `KillUserProcesses` + session
+scopes; systemd-homed; macOS FileVault; Plan 9 frees the namespace at `pexit`).
+Then the implementation surfaced a second, sharper decision: login **cannot**
+drive the reap decision (3) named -- `LOGIN_CAPS` has no `CAP_KILL`/`CAP_HOSTOWNER`
+and I-26 denies it -- so "login terminates the session" is infeasible as worded.
+The operator chose the kernel-driven realization.
+
+**The find that reframed it:** A-5 decision (3) (voted 2026-06-02) already
+mandated "logout = login reaps its group ... no orphaned session Proc," and it
+was **never implemented** -- `unbind_home` only unmounts + closes + waits the
+proxy. So this is closing a silent omission, not adding a feature. The scripture
+commit (`564de51c`) records the refinement (kernel trigger, mechanism unchanged);
+IDENTITY-DESIGN §9.9.1 is the design record.
+
+**Part D (`8bcc2e3f`) -- territory-at-exit.** A Proc's Territory freed only at
+REAP, so a zombie/orphan kept a `spoor_ref` on every inherited mount, including
+the per-user home proxy's -- login's `proxy.wait()` then deadlocked on an orphan
+joey could not reap (joey blocked in `wait(login)`, login in `proxy.wait`).
+Part D extends #68/#926 to the namespace: release `p->territory` at EXIT via a
+**locked-detach + unlocked-free split** (NULL under `g_proc_table_lock`,
+serializing with devproc `format_ns` which then renders empty -- both readers
+NULL-safe; then `territory_unref` outside the lock, the `Tclunk` may sleep). The
+#66c FOOTGUN (a lock-free free racing `format_ns`) is why the split, not a bare
+`territory_unref`, was needed -- caught by reading the ARCHITECTURE #66c note
+before writing the code. Part D **alone** cleared ls-imperium-stall (30s PASS,
+was 121s STALL) -- the abdicate-swept job already exited, so it released its mount
+ref at exit.
+
+**A1 (`6758a1bd`) -- kernel session hangup.** Part D did NOT fix a plain
+`sleep & ; exit` (the ALIVE orphan never exits), which a minimal `ls-bghome-stall`
+proved stalls with **no imperium at all** -- the bug is general. A1: login spawns
+the shell (and halcyond) with a new `SPAWN_PERM_SESSION_HANGUP`; the child thunk
+`proc_setsid`s it (leader-guard passes post-rfork; login stays OUTSIDE the
+session and survives) + arms `PROC_FLAG_SESSION_HANGUP`; on that leader's exit
+`proc_become_zombie_locked` terminates the rest of its session -- **the exact
+legate-teardown sibling** (Explore-mapped), so it is a kernel session-lifecycle
+termination, NOT a userspace kill: I-26 untouched. A1 cleared ls-bghome-stall
+(28s PASS, was STALL).
+
+**Cost / method.** One Explore agent mapped the spawn/session/death plumbing
+(the flag bit, the setsid-in-thunk, the death hook, the struct bit) so the
+load-bearing edits were precise. The vault-lint pre-commit gate caught two
+registrar gaps my changes triggered -- a stale audit-trigger coverage view (fixed
+by `quaestor render`) and an undeclared banner-literal `.exp` (my regression
+matches `EXTINCTION:`; declared in `abi-boot-banner.md` mirrors) -- both fixed
+in-tree.
+
+**Still open (the arc close, owed):** the **SMP gate** (the concurrency witness
+for the death-path change -- NOT yet run); the **formal audit** (holotype-reviewer,
+Fable/max -- the AUDIT-TRIGGERS row carries the prosecution checklist); **re-add
+ls-imperium arm 6** (the cross-user re-login the fix unblocks); the **vault
+death-path dossiers** (sub-kernel-death/-proc/-caps -- deferred via
+`No-dossier-change` trailers, owed once at the close); the reference-doc pass.
+
+---
+## 2026-09-08 (aux, run 6 continued, post self-compact #3) -- the arm-6 stall ROOT CAUSE CONFIRMED + GENERALIZED: any session process pinning the per-user home mount deadlocks logout; fix is a design fork (surfaced)
+
+Picked up the localization from the entry below and drove it to a proven root
+cause on the mac (HVF), which is where `ls-imperium.exp` runs by default
+(`THYLACINE_ACCEL hvf`) -- so the whole hunt moved off the Pi: no scp, no
+pairing traps, tests-ON works (the mac has no virtio-rng-reseed issue). The Pi
+detour last session was avoidable.
+
+**Confirmed the hung line (BOOT 1, mac HVF).** Instrumented `unbind_home`
+(`usr/login/src/main.rs:1066`) with four `t_putstr` markers around its three
+steps (unmount / close-attach / `proxy.wait()`) and ran a diagnostic
+`ls-imperium-stall.exp` (arms 0-5 + capture `/ctl/procs` + `exit` + a 90s
+prompt wait). The two provisioning logins printed all four markers including
+`proxy-reaped`; the imperium login printed `enter -> unmounted ->
+attach-closed, wait proxy` then **nothing** -- login is stuck in
+`proxy.wait()`. Proxy 414 never EOFs.
+
+**Generalized it (the discriminator that reframed the bug).** Hypothesized the
+pin was the imperium background `sleep 314159 &` (zombie 424 in the pre-exit
+`/ctl/procs`, PPID joey, unreaped, cwd `/home/michael`). Tested with a MINIMAL
+`ls-bghome-stall.exp`: a plain session, `sleep 314159 & ; exit` -- **no
+imperium, no SAK, no corvus, no legate.** It STALLS identically. So the bug is
+GENERAL, and the imperium arc merely happened to background a job.
+
+**The mechanism, proven by the code + the two boots.** The per-user encrypted
+home is a `--single-session` proxy stratumd (414) that login spawns and
+synchronously reaps with `proxy.wait()` (`bind_home`, `usr/login/src/main.rs:
+884`/`1069`). The `/home/<user>` mount is inherited by EVERY process in the
+user's session (namespace copy -> each holds a Chan on login's home
+`p9_client`). The proxy EOFs only when that `p9_client` is destroyed = when
+its last fid is released; and a Proc's territory (cwd + mounts) is released
+ONLY at REAP (`territory_unref` at `proc_free`, `kernel/proc.c:668` -- NOT in
+`exits()`/`thread_exit_self`, confirmed by grep). A background job that
+outlives the login shell orphans to joey; **joey cannot reap it because joey
+is blocked in `t_wait_pid(login)`**, and login is blocked in `proxy.wait()`.
+Circular: login -> proxy 414 -> the orphan's held mount Chan -> the orphan's
+reap -> joey -> login. Normal logout works only because the shell is the sole
+session process and login reaps it directly (releasing its mount Chan) before
+`unbind_home`.
+
+**This is a recurrence of the #926-class deadlock, one layer over.** The joey
+reaper note (`usr/joey/joey.c:440`) records that #68/#926 moved the HANDLE
+TABLE close to EXIT precisely to stop "a zombie holds the resource until reap"
+deadlocks. But it did NOT move the TERRITORY (cwd + mounts), which holds the
+9P *session* fids -- so the same deadlock reappears on the namespace. Unlike
+#926, it also fires for ALIVE orphans (the bghome case), so "release at exit"
+alone is not a complete fix.
+
+**Why the fix is a fork (surfaced to the operator).** The pin is the territory
+(mount Chan), held until reap, and login cannot reap the session's non-child
+processes. So a complete fix needs BOTH "make alive orphans exit" (terminate
+the session at logout) AND "an exited/zombie process must not hold the mount
+past exit" (release the namespace 9P Chans at exit, extending #926) -- OR a
+single force/lazy-detach of the home mount at logout (evicts the DEK, leaves
+orphans with a dead home). These differ on logout semantics (does logout kill
+background jobs?) and on the per-user-encrypted-home SECURITY model (only
+terminate-or-detach evicts the DEK; a POSIX decouple leaves the home mounted +
+DEK loaded for lingering processes). A genuine value/security tradeoff -> the
+operator's call.
+
+**Cost / state.** Two mac HVF boots (~2 min each) after one instrumented build
+(PRESERVE=1, kept michael's home). Markers reverted; tree clean. Discriminators
+saved in `scratchpad/{ls-imperium-stall,ls-bghome-stall}.exp`. No fix landed
+yet -- the fork is surfaced; implementation waits on the decision.
+
+---
+## 2026-09-08 (aux, run 6 continued, self-compact #3) -- the arm-6 logout stall ROOT-CAUSE-LOCALIZED: login hangs in its post-ut-exit cleanup, not the console
+
+The operator-chosen arc: deep-debug the arm-6 logout->login stall (after an
+imperium session, `exit` never returns to a login prompt). Ground-truth-first,
+per the playbook -- no theorizing.
+
+**Method.** An Explore agent mapped the exit->getty->login->cons chain
+(ruled out ut-exit, login-wait/exit console ops, and the console *open*; it
+pointed at the new login's prompt write parking, or the chain never reaching
+it). Then a kernel instrument -- `cons_diag_line` markers (freeze-immune, the
+#126-safe path): `DBG-DIE` at `proc_become_zombie_locked`, `DBG-WFREEZE`/
+`DBG-WROLE` at the two `cons_output_write` parks, plus joey getty markers --
+all gated on `boot_is_complete()`; and a diagnostic `.exp` that captures
+`/ctl/procs`+`/ctl/cons` before `exit` then reproduces the stall.
+
+**Two wrong turns, both caught, both reusable.** (1) The Pi CANNOT run a
+tests-ON kernel: its KVM env fails the in-kernel `virtio-rng reseed` test
+(poll-timeout), and the kernel extincts on ANY test failure (`kernel/main.c`
+842), so every tests-ON boot died at ~12s before login. Caught by measurement:
+GATED (0 DBG output) and UNGATED both failed EXACTLY 12/1535 -- identical, so
+the markers contributed 0; the failures were environmental. Fix: build
+tests-OFF (`--set TESTS=n`, keeps boot probes -> keeps joey's imperium grant).
+So the Pi is a tests-OFF host only; the mac stays the tests-ON (test.sh) host.
+(2) `LS_CI_POOL_RESTORE=0` left the per-slot pool (`build/ls-ci-slots/<scen>/
+pool.img`) UNPOPULATED -> the guest booted with no `/srv/stratum-fs`. Fixed by
+creating `pool.img.baked-snapshot`+`system.key.baked-snapshot` from the synced
+pool and using the default `POOL_RESTORE=1`.
+
+**The finding (boot5, tests-off, DBG timeline).** Arms 0-5 pass; on `exit`:
+`DBG-DIE pid=416` fires (michael's ut exits cleanly, line 1556) but `DBG-DIE
+pid=413` (login) and `pid=414` (the home-proxy stratumd) NEVER fire. So
+michael's login hangs in its post-ut-exit CLEANUP (`usr/login/src/main.rs`
+1406-1415: `unbind_home` / `evict_dek` / `session_close`); joey's getty, blocked
+in `t_wait_pid_for(413)`, never respawns login -> no prompt. `/ctl/cons` is
+clean (`tx_room_waits=0`, `tx_dropped=0`) -> NOT a console/TX-role issue, and
+the episode was inactive -> NOT the freeze. Prime suspect: `unbind_home`
+reaping the home proxy (414), which never exits -- likely the imperium session
+left an fd on `/srv/home-michael` (or corvus holds session-3 state) keeping the
+proxy's upstream open. Orthogonal to the passthrough fix (already proven) and
+to the console, exactly as the arm-6 deferral flagged.
+
+**Open.** Localize the exact cleanup step (add login markers to `unbind_home`/
+`evict_dek`/`session_close`) + find why the proxy (414) never exits after an
+imperium session; then fix. The diagnostic `.exp` + the marker recipe are in
+`scratchpad/arm6-stall-plan.md`. **Cost:** repeated mac contention (main's
+active SC-5 development); coordinated cleanly on yip (main slotted one build).
+
+## 2026-09-08 (aux, run 6 continued, post-self-compact) -- the sub-shell-input fix VERIFIED on real ARM silicon; the Pi made an E2E offload host; an orthogonal logout stall proven + tracked
+
+**What landed.** The IM-5 sub-shell-input fix (`imperium`'s elevated sub-shell EOF'd
+at birth on the serial console). Fix: a new `is_console_passthrough` category +
+`exec_external_passthrough` (Inherit fd 0/1/2, PROMPT discipline left untouched,
+plain by-pid wait -- NOT the RAW dance, NOT wait_pids_interruptible; forwarding a
+Ctrl-C to the wrapper would sweep the propagating scope, I-25). The candidate in
+the prior handoff (route through `is_raw_command`) was WRONG and rejected after
+reading the console model: RAW is `-isig -onlcr`, but a sub-shell wants `+onlcr`
+(else its children staircase) and `+isig` (the ut prompt read services Ctrl-C as
+the `interrupt` note, not a raw byte). IMPERIUM-DESIGN 11.6 refinement 10.
+
+**The mac couldn't verify it -- so the Pi became an E2E host.** The 8 GB mac, with
+two Claude sessions + build caches, could not fit a 2 GB guest: the E2E stalled at
+boot three times (qemu swapped to ~14 MB RSS, free ~15 MB) even after the operator
+freed memory. NOT the harness bg-killer alone -- a hard memory wall. Operator
+authorized offloading QEMU to thyla-pi (4 GB/KVM, idle). Making the interactive
+harness run there took FOUR portability fixes, each a real BSD-vs-Linux gap:
+run-vm.sh (an hvf pin -> `detect_accel` fallback to kvm), test-interactive.sh (the
+BSD `script -q <file> <cmd>` vs util-linux `script -q -e -c "<cmd>" <file>`, where
+`-e` propagates the child exit the PASS/FAIL contract reads), test-serial-bridge.py
+(preflight #4 asserted macOS SO_SNDBUF semantics; Linux AF_UNIX is receiver-rcvbuf
+governed, so the sndbuf-widening is inert -- the real capacity is the app spool,
+test #1, which passes; made #4 informational on Linux), and the LS-CI fixtures
+(warp-host.sh sync ships pool.img but not the .baked-snapshot + system.key set;
+shipped + derived them). RESULT: **ls-imperium arms 0-5 ALL PASS on real ARM KVM**
+-- arm 1 (confer -> SAK -> provincia -> key -> the elevated sub-shell opens +
+`imperium --list` runs INSIDE it) and arm 3 (abdicate teardown, I-25) are the
+fix's proof.
+
+**The orthogonal stall, proven not-mine (the reusable part).** ls-imperium arm 6
+(logout michael -> login cora, to test cora's ineligibility) STALLS: no login
+prompt within 540s after `exit`. The discipline forbids waving it off, so I
+attributed it three ways rather than assume: (1) dev-accounts.exp (base
+logout->login, NO imperium) PASSES on the Pi in 105s -> it's a real STALL, not
+SD-slowness, and the Pi is fast; (2) a 3-probe bisection of ls-imperium had ALL
+probes pass incl. "reads before exit" -> michael's ut reads the console fine, the
+`exit`->getty-respawn chain hangs SILENTLY; (3) the DECISIVE test the operator
+asked for -- a note-draining passthrough variant -- did NOT clear it, PROVING the
+stall is orthogonal to my passthrough (it lives in the exit->getty / SAK-episode
+chain, existing code the imperium SESSION triggers). So: the fix is committed with
+its passthrough as the minimal plain-wait; ls-imperium is scoped to the green arms
+0-5 (arm 6's cross-user re-login deferred -- corvus ineligibility is already
+covered by joey's PRINCIPAL_SYSTEM probe + the IM-3 tests); the logout stall is a
+tracked follow-up needing proc-state at the hang. A wrong turn caught: I first
+inferred "console-read broken" from a missing exit echo; the probe overturned it
+(read is fine) -- the end-state told a different story than the missing-output did.
+
+**Coordination.** A Pi build/ slot collision (main's GL-round sync vs mine) --
+main aborted its sync cleanly (my per-chunk md5 verify confirmed no damage); we
+agreed to `hold pi` before any Pi sync henceforth, and I held it for the last run.
+
+**Cost note, for the next Pi iteration.** A non-PRESERVE rebake RE-KEYS the pool
+(system.key + pool.img ciphertext change), forcing a full paired re-sync (ramfs +
+pool + key). The pool is sparse (~362 MB actual of 2.5 GB), so it's ~minutes not
+~half an hour, but bake with THYLACINE_MKFS_PRESERVE=1 to keep the key stable and
+make future changes ramfs-only syncs.
+
+---
+## 2026-09-08 (aux, run 6 continued) -- IM-5: the E2E + the batched holotype; a full-diversity review, and the bug the E2E caught that the review approved
+
+**What landed.** IM-5 (`IMPERIUM-DESIGN.md` §11.8): `tools/interactive/ls-imperium.exp`
+(the login -> confer -> elevated sub-shell -> cap works -> abdicate teardown E2E,
+plus the wrong-key / non-tty / ineligible-user deny arms), the BATCHED adversarial
+holotype over IM-3 + IM-4, and the fixes it surfaced. The operator was present and
+directed "get into IM-5, review the batch"; the `--list` eligibility fork it had
+approved earlier landed first as the `CLEARANCE_LIST_SELF` follow-up.
+
+**The review had full family diversity for once.** The orchestrator/author ran on
+the Opus 4.8 fallback this session; the holotype ran on Fable 5.1 (JSONL-verified
+pure -- 64 fable / 0 opus, no silent fallback). So this round was Opus-author vs
+Fable-reviewer -- the strongest case (both family diversity AND context
+independence), and it discharges the family-diversity concern for IM-3/IM-4 (the
+IM-1/IM-2 owed Fable pass is separate). Verdict: **0 P0 / 0 P1 / 1 P2 / 5 P3** --
+not a dirty close.
+
+**The complementary-prosecutor lesson: the E2E caught TWO console bugs the review
+approved.** The holotype read the tool's tty fail-fast (`fd_devclass(0) in {c,t}`)
+and VERIFIED IT SOUND (its point 10). The E2E then caught what the code-read could
+not -- runtime context about how a console `ut` treats its children:
+- **E1 (fixed): the tty check.** Arm 1 first failed with "needs an interactive
+  terminal" on the console: a console `ut` gives an external child a PIPED stdin
+  (`exec_external`, non-jc), so imperium's fd 0 is never the console. The review
+  was right about the code ("is fd 0 a tty" is what fd_devclass(0) answers) and
+  wrong about the world. Fixed by keying the check on fd 1 (stdout, which ut
+  inherits to the console -- the `stdout_is_terminal` convention).
+- **The sub-shell-input bug (OPEN, the E2E's deeper catch).** With E1 fixed, arm
+  1 got all the way through: request posted, SAK, provincia, key, `conferred`, the
+  sub-shell BANNER + the FASCES prompt (`/ ‖‖#`) -- and then the sub-shell EXITED
+  INSTANTLY ("imperium: relinquished"; `imperium --list` then ran in the outer
+  plain shell -> "not currently elevated"). Root cause: the SAME stdin-piping. The
+  console `ut` pipes imperium's stdin AND drops the write end; imperium spawns the
+  sub-`ut` with `Stdio::Inherit`, so the sub-`ut`'s fd 0 is that dead pipe -> it
+  reads EOF -> exits at birth. The imperium sub-shell cannot read console input on
+  a non-jc console session. It would work on a PTS (jc gives children Inherit
+  stdin), but the serial console is the v1.0 trusted medium, so this must be
+  fixed. Candidate: make imperium console-inheriting (add it to
+  `libutopia::console::is_raw_command`, the existing "this child needs the
+  console" mechanism -> `exec_external_raw` -> Inherit fd 0/1/2), verifying the
+  raw-mode dance composes with the sub-`ut`'s own line discipline. imperium cannot
+  simply open /dev/cons itself (the I-27 attach gate forbids a non-attached mint).
+  DEFERRED to the next session (found at ctx wind-down, no cores held).
+
+So this session's E2E is NOT yet green: E1 + the holotype's F1/F3/F4/F5/F6 are
+fixed and verified by test.sh (both verb-20 probes) + the holotype, but the E2E's
+full run is blocked on the sub-shell-input bug above. The fixes are committed; the
+E2E scenario is committed as written; the bug + the E2E completion are next.
+
+**The one P2 (F1): the SAK can be harvested for a slot-hog.** A hostile
+same-principal Proc (inside the design's own threat model) can loop
+`IMPERIUM_REQUEST`, hold the ONE pending slot, and be conferred at the SAK the
+operator pressed for their OWN request -- because the provincia shows the
+requester's pid but the tool never surfaced the operator's own pid to compare
+against. The trusted path's informed-consent property was defeated by a value the
+operator had no reference for. Fix (the review's "minimum"): the tool prints
+`imperium: requesting ... as pid N -- the trusted panel MUST show this pid`, and
+the BUSY message warns that a pending request may not be this one. A corvus-side
+console-owner gate was considered and rejected -- the legitimate tool is a
+NON-console-owner child of the shell, so that gate would refuse the real tool too.
+
+**The five P3s, four fixed + one deferred.** F3 (a second parked Tread orphaned
+the first tag -> refuse with EAGAIN), F4 (verb 20 accepted any payload -> BadFormat
+on non-empty, with a joey probe), F5 (a wrong-key lockout was permanent until
+reboot -> a new-verifier GRANT now clears it), F6 (the idle-slice fallback missed
+the read==0 arm) all fixed. F2 (abdicate in a DOUBLE-nested member shell says
+"relinquishing" but relinquishes nothing) DEFERRED: the common first-level abdicate
+is correct (arm 3 proves it) and I-25 holds; the fix needs /proc to expose
+root-vs-member, a larger change.
+
+**A pre-existing gap the E2E surfaced (not imperium, enqueued).** `$status` after a
+FAILING external command is 0 on the console (non-jc) path: `mkdir /home/x` printed
+"permission denied" yet `echo mka=$status` printed `mka=0`. `exec_external` sets
+`$status` from `wait_pids_interruptible`, so the reap returns 0 for a child that
+exited 1 -- or the coreutil runtime does not propagate rs_main's return (the worse,
+broader gap). It affects shell scripting; enqueued for a separate chunk. The E2E
+works around it (message-based witnesses, no $status).
+
+**A host-memory hole, worth recording.** The E2E was OOM-killed twice by the host
+(15 MB free RAM, 82% swap) with a second 2 GB VM (main's Halcyon image) also up --
+a measured infrastructure kill, not a guest defect and not the forbidden "host
+load" dodge (the system itself reported "running low on memory"). The operator
+freed memory and the run proceeded.
+
+---
+## 2026-09-07 (aux, sixth run) -- IM-4 the userspace sub-shell: the imperium tool, the fasces prompt, abdicate; a load-bearing question the boot prover never answered, settled by reading the kernel; a host-test wall that reshaped the crate layout
+
+**What landed.** IM-4 (`IMPERIUM-DESIGN.md` §11.6), the userspace half of the
+imperium arc, as one commit (`6c4d61be`): the `imperium` tool, the fasces prompt
+in `ut`, the `abdicate` builtin, and a new standalone `fasces` crate. Pure
+userspace -- no kernel change, no corvus change, no new invariant surface. It
+CONSUMES the IM-2 legate propagation and the IM-3 confer.
+
+**The one load-bearing question the IM-3 boot prover never answered.** The
+design says `imperium` redeems a propagating grant (becoming the legate root),
+then SPAWNS `ut` via `libthyla_rs::process::Command`, and `ut` must inherit the
+imperium caps + the scope and die with the root. But `imperium-probe` (IM-3)
+redeemed and checked `/proc/<pid>/imperium` on ITSELF, never on a spawned child
+-- so "spawn propagates the propagating-legate scope + caps" was UNVERIFIED, and
+the IM-2 carve is written entirely in terms of `rfork`, while `Command::spawn`
+is `SYS_SPAWN`. If spawn stripped `CAP_ELEVATION_ONLY` the normal way (I-2), the
+whole sub-shell would be silently broken -- an elevated tool spawning a
+powerless shell. Rather than assume, I read the kernel: every `SYS_SPAWN`
+variant (`sys_spawn_full_argv` at `syscall.c:9062`, with_fds at 8394, with_caps
+at 8285) routes through `rfork_with_caps(RFPROC, ...)` -> `rfork_internal`
+(`proc.c:1261`), whose carve at 1415 is `child->caps = (parent & mask) &
+~(CAP_ELEVATION_ONLY & ~flow)` with `flow = parent->legate_caps` iff propagating,
+and which copies `legate_scope_id`/`legate_caps`/`legate_flags` at 1502-1513. The
+last risk was exec resetting it: `proc_exec_replace` (`proc.c:3712`) swaps only
+`->as`, `->phenotype`, and the sigtab -- it never touches `caps` or the legate
+fields, and `exec.c` has zero cap/legate mutations. So the chain holds by
+construction and NO kernel change was needed. This is the "BOOT OK DOES NOT
+PROVE A GATE IS WIRED" lesson applied before writing a line: the prover proved
+the redeemer's own scope, not the child's inheritance, and the difference is the
+whole feature.
+
+**A host-test wall reshaped the crate layout.** I first put the pure
+`/proc/<pid>/imperium` parser + fasces renderer as a module inside libutopia,
+with `#[cfg(test)]` host tests -- and `cargo test --target aarch64-apple-darwin
+-p libutopia` failed to COMPILE: libthyla-rs's `_start` inline asm emits ELF
+directives (`.type`, `.size`) the macOS (Mach-O) assembler rejects, so any crate
+depending on libthyla-rs cannot host-compile. That means libutopia's own
+existing `#[cfg(test)]` modules (ansi, completion) have NEVER run on host --
+a pre-existing dead-test gap. The fix made the layout better: I pulled the
+parser into a standalone `usr/lib/fasces` crate with no libthyla-rs dependency
+(the `corvus-crypto` `cfg_attr(not(test), no_std)` pattern), which host-tests
+cleanly (7/7) AND let the thin `imperium` tool drop the heavy whole-shell
+dependency it would otherwise have carried just to parse one line. One parser,
+three consumers (the prompt, `abdicate`, the tool), no drift on a kernel-defined
+ABI line.
+
+**Two small compile bugs, caught by the target build before the bake.** A
+`match` in the tool mixed `i64` arms with a `()` block arm (fixed: every arm a
+statement); an unused `String` import. The targeted `cargo build --release -p
+imperium ...` caught both in ~2 s, before paying the ~4-min bake.
+
+**Gates.** fasces host tests 7/7. clippy: no new warning in any changed file
+(the large pile is the pre-existing libutopia/libthyla-rs `Result<_,()>` /
+missing-`# Safety` idiom classes; anchored greps to my files came back empty).
+Full bake + `test.sh`: `tests: 1535/1535 PASS`, `u-builtin-test all OK` (the new
+abdicate deny-path arm: not-a-legate -> status 1, no exit), boot OK, `imperium`
+staged in the ramfs (49240 B). No SMP gate -- no kernel change. The confer ->
+spawn -> fasces -> abdicate E2E needs the SAK a boot probe cannot press, so it
+lands with the batched holotype at IM-5.
+
+**The Opus fallback, and what it stopped me from deciding.** This session's
+attribution reminder named Opus 4.8, not Fable -- the fallback signal. Per the
+operator-away rule I built the entire fork-free core and stopped at the one
+genuine user-input item: `imperium --list`'s eligibility half ("what you could
+become") needs a NEW corvus `CLEARANCE_LIST_SELF` verb (a wire-ABI addition to
+the audited corvus surface). I shipped only the decision-free /proc-flag half
+(current holdings) and surfaced the verb as the operator's call rather than
+adding it on the fallback model.
+
+**Follow-up (operator-approved, 2026-09-08).** The operator answered "yes, let's
+add it," so the eligibility half landed as a follow-up: corvus's
+`CLEARANCE_LIST_SELF` verb (20) -- the SELF form of `CLEARANCE_LIST`, identity
+from the connection's kernel-stamped principal (the verb-18 shape), no token, no
+re-auth (a listing is not an activation). Verb 14 and verb 20 now share one
+reply encoder (`emit_eligible_levels`) so the two wire forms cannot drift -- the
+refactor was the point, not a bonus. The tool's `--list` shows both halves
+(holdings from `/proc`, the ladder from corvus) and degrades gracefully if
+corvus is unreachable; the reply decode is fully bounds-checked. A
+`PRINCIPAL_SYSTEM` deny probe rides joey's ladder (the boot chain is never a
+corvus user -> `PermissionDenied`); the positive path (a login user's eligible
+levels) is IM-5's `ls-imperium.exp`, since only a login-stamped principal can
+exercise it.
+
+**Deltas flagged for veto (the 9 as-built refinements, §11.6).** The
+sub-shell gets no `--home` (home is a shell var, not exported to `/env`; it runs
+at the inherited cwd) -- the one most likely to draw a "fix it" rather than a
+veto.
+
+---
+## 2026-09-07 (aux, fifth run) -- IM-3 the lex curiata: corvus confers imperium on the trusted path; a design claim corrected by the code; two hazards caught before the scenario ran
+
+**What landed.** IM-3 (the corvus half of the Imperium/SAK arc; `IMPERIUM-DESIGN.md`
+11.5 + 16 as-built refinements; the hash is in the phase-7 IM-3 row). On Fable 5.1 at
+effort max (the far side of the run-4 compaction came back on Fable, so the crypto
+authoring the resume note had HELD on the Opus fallback proceeded). The end-to-end
+flow is real over the serial console: a login-session program posts
+`IMPERIUM_REQUEST`, the operator presses BREAK, the kernel freezes the console
+(IM-1), corvus renders the provincia, reads the imperium key raw and unechoed,
+verifies it against a stored VERIFIER, re-reads the requester live, registers the
+PROPAGATING grant (IM-2), answers the requester's parked read, ENDs the episode; the
+requester redeems and `/proc/<pid>/imperium` reads `propagating 1`. LS-CI witnesses
+both scenarios; joey's ladder witnesses the grant and four deny paths every boot.
+
+**A design claim the code corrected (refinement 1).** 11.1 had "verified" that a verb
+handler which stages no response "leaves the client's read parked". Reading
+`dispatch_tread` showed the opposite: it drains zero bytes into an `Rread` of count 0,
+and the kernel client hands a 0-count `Rread` to userspace as EOF. The deferral had to
+be built as a PARKED `Tread` -- the request records the tag and count and corvus
+answers it later, which 9P permits; the srvconn client blocks with no steady-state
+deadline since #841, so the park is safe; `Tflush` (the kernel client's abandon on a
+note-interrupted read) drops both the park and the request. The lesson is the run-3
+one again: a "verified" line in a design revisit is a claim about what the author
+believed the code did, and it costs one read to check.
+
+**Two hazards caught before the scenario ran, one by the self-audit and one by the
+first bake.** (1) The server loop handled the `sak` note BEFORE it serviced connection
+input, so a request whose `Twrite` and the operator's BREAK landed in the same poll
+would have found "nothing pending" and stranded until its 60-s timeout -- an
+ordering the harness would have hit (it presses the SAK milliseconds after the probe's
+line) and a human might have, rarely. Connections are serviced first now, and the
+probe announces "press the SAK" only AFTER its request bytes are written. Caught
+while reading my own loop against the scenario's timeline, not by a test; the fix
+cost an incremental rebake. (2) The first LS-CI run of `im3-lex-curiata` failed
+deterministically at arm 2 on `axe:     YES`: the axe value is rendered BOLD, so an
+SGR sequence sits between the label and the value on the wire and an exact-string
+match cannot span it (arm 1's unstyled `no` matched, which is exactly why it was not
+seen earlier). The transcript bytes confirmed it (`axe:     ^[[1mYES ...`); the fix is
+a regex in the scenario, not a change to the composer -- the provincia was correct.
+Arm 1 (the whole confer path) had already passed on that run.
+
+**Refinements worth the operator's eye** (all 16 are in 11.5, flagged for veto): the
+key wrap is its OWN 136-byte layout rather than the 3752-byte CRVS v1 (whose
+ciphertext is fixed at the keypair length); `clearance.db` went to version 2 (reader
+accepts v1 and v2); the grant's key tail is required for DISTINCT_SECRET and refused
+for RE_AUTH, user-subject only; a re-grant whose key verifies rewrites nothing (the
+boot ladder re-grants every boot) and a different key is the hostowner's reset;
+`IMPERIUM_REQUEST` needs NO live login session (the SAK plus the distinct key ARE the
+authentication); wrong keys are rate-limited per (user, level) at 5 until restart,
+declines and timeouts uncounted; the episode runs INLINE in corvus's single thread
+(other clients wait <= 60 s -- the one residue I would most expect a veto on).
+
+**Gates.** corvus-crypto host tests 17/17 (4 new); clippy adds no warning in the
+changed files; full bake + `test.sh` 1535/1535 + the ladder's `CLEARANCE_GRANT michael
+imperium ok` + `IM-3 deny-path probes ok`; LS-CI `im1-sak-lever` PASS (35 s, 1 attempt;
+rewritten for the armed consumer: `cons: SAK (episode)` + two empty episodes dismissed
+by a key) and `im3-lex-curiata` PASS (91 s, 1 attempt: confer / wrong key with the
+axe / BUSY / TIMEOUT / the session survives). No SMP gate: no kernel change. The
+vault was rung (call 0073) for the corvus / corvus-crypto / libthyla-rs / joey /
+build.sh dossiers and the three new unowned surfaces.
+
+**Owed.** The IM-3 audit (crypto + privilege, audit:hard) is BATCHED with IM-4 per
+the double-distance rule; the AUDIT-TRIGGERS IM-3 row carries nine prosecution
+addenda, the verifier and the parked-read lifecycle first among them. IM-4 next:
+`usr/imperium` (the sub-shell model) + ut `abdicate` + the fasces prompt + the
+manual page.
+
+## 2026-09-07 (aux, fourth run) -- IM-1 + IM-2 batched holotype: a CLEAN close, and a SILENT reviewer fallback the JSONL caught
+
+The fourth run of the day did one thing: the batched adversarial holotype round
+for the two landed Imperium kernel chunks -- IM-1 (`bccb297f`, the trusted
+EPISODE, I-27) and IM-2 (`4c77db6e`, the fork-PROPAGATING legate scope, I-25
+strengthened / I-2). Batched into one round per the double-distance rule. Tip
+unchanged at `c8b25b26` -- the close landed no code (see F1).
+
+**The verdict: CLEAN. 0 P0 / 0 P1 / 0 P2 / 1 P3.** The prosecutor read both
+chunks' full scope, re-derived every load-bearing claim from the tree, and
+independently re-ran TLC on `specs/imperium.tla` (157,839 distinct states / 0
+errors, matching the commit; all four buggy cfgs trip exactly their named
+invariant). A parallel self-audit ran on the same surface while the prosecutor
+worked and reached the same 0/0/0 on nine re-derived properties
+(`scratchpad/im12-selfaudit.md`). No dirty-close round 2 owed.
+
+**The wrong turn that got caught -- a SILENT reviewer fallback.** The prosecutor
+self-reported `MODEL(start)==MODEL(end)==Fable 5.1`. That was false. Grepping the
+task JSONL for model ids returned BOTH `claude-fable-5-1` (54 lines) AND
+`claude-opus-4-8` (53 lines): it fell back to Opus 4.8 at roughly the halfway
+mark, which a subagent cannot see in its own output. This is the standing
+[[audit-h3b-closed-list]] lesson made concrete again -- the self-reported model
+line is not the detector; the JSONL `model` field is. Per the 2026-08-03 rule and
+the h3d precedent (a mid-run Opus fallback whose MODEL(end) still claimed Fable),
+a fallback round that FINISHES is closed -- no re-spawn owed; the tier is noted
+and a full-Fable diversity pass stays owed (already contemplated at IM-5). One
+sharper wrinkle this run: the ORCHESTRATOR session ALSO fell back Fable->Opus 4.8
+(the commit-attribution reminder flipped mid-run), so the author-vs-reviewer
+FAMILY-diversity axis was absent on both sides; what the round bought was CONTEXT
+independence (the prosecutor re-derived from code + re-ran the model checker, did
+not read the author's reasoning) plus the model-independent TLC re-run.
+
+**F1 [P3] -- the documented residue, confirmed not worse, kept as ratified.** The
+one finding is the pre-SAK in-flight-writer chunk: `cons_output_write`'s staging
+loop guards the freeze with `if (i > 0 && cons_caller_frozen()) break;`
+(`kernel/cons.c:2230`), so a non-attached writer that acquired the TX role while
+unfrozen and then races BEGIN emits ONE <=512 B chunk (CONS_TX_STAGE, cons.c:464)
+after the episode opens. This is exactly the residue AUDIT-TRIGGERS row 155 flags
+in its own prosecute list ("the FIRST chunk of a write that held the role at
+BEGIN goes out -- pre-SAK output by construction, or is it?"). The prosecutor
+confirmed not-worse: bounded to one unit (the role is exclusive), the content is
+the argument buffer fixed at `write()` time (genuinely pre-SAK), and there is NO
+credential path -- the RX ring is discarded at BEGIN (cons.c:1940-41) and every
+non-attached read is frozen, so post-SAK keystrokes reach only corvus. The
+residual is a bounded cosmetic pre-SAK flash. Kept as the ratified residue, no
+code change. The prosecutor's one-line hardening (drop the `i>0` qualifier so a
+frozen writer short-counts 0 on the first chunk too, making I-27 output
+exclusivity total) is OFFERED to the operator, not applied: it flips a deliberate
+author tradeoff (cons.c:2225-29 -- "a zero count would read as an error to a
+caller that saw no freeze"), which on this run's Opus fallback + operator-away is
+a fork to surface, not to auto-decide.
+
+**The cross-check finding, which is the reusable part.** The prosecutor caught F1;
+the self-audit did NOT -- it read the same loop and recorded "role-holder at a
+mid-write BEGIN finishes the chunk + short-counts," gliding past the i==0 first
+iteration the `i>0` qualifier leaves unguarded. The lesson: reading a guard is
+not prosecuting its boundary -- when a loop guard is qualified, the UNGUARDED
+first iteration IS the finding. Two independent reads, one axis of coverage the
+other missed -- exactly what the parallel-prosecutor discipline is for.
+
+**Cost / open.** ~523k subagent tokens, 56 tool uses, ~19 min wall. Open after
+this close: the full-Fable diversity pass (half-Opus this round); the F1
+hardening decision (operator to weigh; keep-residue is the live default); and two
+pre-existing, non-IM items -- the `format_status` `!n && v != 0` guard-idiom
+sweep (14 sites, devproc.c) and CLAUDE.md's condensed I-2 row still naming
+CAP_ELEVATION_ONLY as 4 bits (caps.h has 7). Closed list:
+`memory/audit_im12_closed_list.md`.
+
+---
+## 2026-09-07 (aux, third run) -- IM-2: the fork-PROPAGATING legate scope landed (I-25 strengthened; spec-first)
+
+**Where it started.** The second self-compaction at the 600k line, IM-1 pushed
+at `bccb297f`, and a draft `specs/imperium.tla` in the scratchpad that had been
+written but never run. Effort max (operator-set). The plan said spec first,
+then the kernel, then the batched IM-1+IM-2 holotype.
+
+**The spec moved twice before the kernel was touched -- which is the point of
+running it first.**
+
+- The draft's `RootEnd` was one atomic step: root dead + members marked. The
+  kernel has THREE teardown shapes and the draft modelled one. Reading
+  `proc.c`: a clean exit is `proc_become_zombie_locked` -> the tag walk in the
+  SAME `g_proc_table_lock` hold (the draft's shape); a KILL is
+  `proc_group_terminate` setting the flag -- the root is doomed, not dead, and
+  its members stay alive and elevated until the root's die-check reaches the
+  chokepoint; the EXPIRY sweep is any member's EL0 tail marking the whole
+  scope, root included. Modelled as `Exit` / `Terminate`+`Die` / `Expire`, and
+  the "live root" a member's caps need became alive-OR-terminating (not yet
+  ZOMBIE). Without that split the model would have called the killed-root
+  window a violation the kernel does not have, or missed it entirely.
+- First TLC run (`imperium.cfg`: 157,839 distinct states, liveness checked;
+  the four buggy cfgs red): the retag cfg tripped on a TWO-step trace -- a root
+  re-tagging ITSELF, after which no Proc carries scope 1 -- not the member
+  escape the cfg promised. True, and beside the point: the invariant keyed the
+  live root on the scope NUMBER, which a re-tag moves. Re-keyed on the ANCHOR
+  (the root Proc of the scope first joined, by identity, captured in the
+  `first` record and inherited down the fork tree); the trace is now
+  RedeemFresh -> Fork -> BuggyRedeemRetag(member) -> Exit(root). The lesson is
+  the standing one: a counterexample must witness the CLASS the cfg names, and
+  a shallower true violation is a wrong witness.
+- A fourth switch, `BUGGY_NEST_ADMITTED` (a PROPAGATING further redeem taken
+  as flag-flip + flowing-set widening), caught by `ScopeTraitsSetOnce`; plus
+  `MembersNeverRoot`, `PropagatingIsScopeWide`, `FlowNeverWidens`. Seven
+  invariants where the design named three.
+
+**The kernel reads settled what the design left open** -- eleven as-built
+refinements in IMPERIUM-DESIGN 11.4, each flagged for veto. The ones that
+carry weight:
+
+- The straggler has exactly one shape here: `proc_for_each_walk` is a TREE
+  walk and `proc_link_child` under the lock is the publication point, so a
+  child's tag + caps (copied before the link) are invisible to a sweep that
+  runs between copy and link -- and that sweep marks the PARENT. The close is
+  one ACQUIRE load of the parent's `group_exit_msg` in the same hold as the
+  link; refused -> `rfork_rollback_unpublished` (`thread_free` of the
+  never-readied thread -- its own comment already licensed that pattern --
+  then `proc_free`). Uniform for every terminating parent.
+- Two redeems by peer threads of one Proc could both read scope 0 and mint
+  two roots, the second overwriting the first's flowing set -- harmless before
+  IM-2, a privilege question now. The stamp moved UNDER the cap-table lock
+  and BEFORE the consume, so a refusal never loses a grant either.
+- `PROC_FLAG_LEGATE_PROPAGATING` could not be a `proc_flags` bit: those never
+  inherit and the property must. It is `Proc.legate_flags` in the legate
+  block, with `Proc.legate_caps`, appended at the tail (392 -> 408, asserted).
+- `CAP_GRANTABLE_IMPERIUM` = DAC|CHOWN|KILL bounds what may propagate, so the
+  heritability clauses of I-39 (CAP_DEBUG), I-42 (CAP_JIT) and I-46
+  (CAP_AUDIO_GRAPH) hold by construction, not by corvus's policy alone.
+- The Linux-phenotype fork passed `CAP_ALL` as its mask: under imperium a
+  Linux child would have been LESS elevated than a native one, an I-43 breach
+  in the other direction. Now `CAP_ALL | CAP_ELEVATION_ONLY`, bit-identical
+  before the carve because the carve is what bounds the flow.
+- The design said `/proc/<pid>/imperium` is "0444, the two-axis gate like
+  `status`". `status` is ungated. Built as 0400 + the `sched`/`environ`
+  read-site gate; `CAP_DAC_OVERRIDE` is not a read axis.
+- The one-syscall window (the die-check is on the EL0 return tail;
+  `userland_enter` has none) is inherited I-24 semantics, now privilege-
+  bearing. Stated in the spec header and in the audit row, not hidden.
+
+**Wrong turns caught.** (1) The retag trace, above. (2) The child's
+`legate_caps` was first written as the parent's OFFER (`flow`); the
+mask-bounded test would have had a Proc reporting rods it does not hold --
+changed to `flow & child->caps`, the code twin of `FlowNeverWidens`. (3) The
+shell's working directory persisted in `specs/` after the TLC run and two
+relative-path reads failed silently-looking -- the known trap, re-issued with
+absolute paths.
+
+**Gates.** Kernel suite 1535/1535 (1525 + 10) twice: the fast kernel-only path
+and again on the full bake (ramfs rebuilt, verified by content); clippy on
+libthyla-rs adds no warning (the one new raw wrapper carries the `# Safety`
+section the other 98 lack); the SMP gate 40/40 (default + UBSan x smp4/smp8,
+N=10, 0 corruption / 0 external-kill / 0 other; ~48-55 s per boot). The gate
+had to run DETACHED under `nohup`: at ~50 s a boot, even a two-config half
+exceeds the tool's 600 s ceiling, so the split the 2026-08-03 memory
+prescribes no longer fits -- a first attempt (two configs in a background
+task) was stopped at boot 2 for that reason and for a four-line formatter
+fix that had to precede a frozen-source run. The batched IM-1+IM-2 holotype
+round is the next chunk, not this one.
+
+**Open / residue.** The phenotype flow is asserted by construction (the same
+`rfork_internal`), not by an in-kernel test -- the E2E under IM-5 is its
+witness. `/proc/self` still absent (#66). A shell already in ANY scope cannot
+obtain imperium (refinement 11; IM-4's UX must say so). A pre-existing wart
+seen while writing the formatter: `format_status` guards its numeric fields
+with `if (!n && v != 0) return 0;`, but `fmt_udec` prints "0" for zero and
+returns 0 ONLY for no-room, so the idiom continues past a truncated zero field
+(14 sites; unreachable at the 2048-byte buffer; `format_imperium` uses the
+bare `!n`) -- an owed P3 sweep, recorded in `memory/project_next_session.md`.
+The vault folds ride the main merge (call 0071). The operator may veto any of
+the eleven refinements; a veto is the next chunk.
+
+---
+## 2026-09-07 (aux, second run) -- IM-1: the kernel trusted EPISODE landed (I-27 enforced on serial)
+
+**Where it started.** A self-compaction at the 600k line, on an
+operator-directed arc: IM-0 scripture pushed at `94eb3efd`, the resume note
+saying "IM-1 next, the design + build order + tests are in
+`memory/project_next_session.md`, do not re-derive". The effort gate reported
+`max` before a line was read. The pickup was followed as written; what follows
+is what the code reads added to it.
+
+**What landed (one commit, hash in the phase7 row).** The trusted EPISODE of
+`IMPERIUM-DESIGN.md` 11.3: a serial BREAK with an ARMED trusted Proc opens an
+episode; BEGIN discards every pending input byte and forces RAW; every
+non-attached console read / write / poll / consctl write / renderer feed is
+FROZEN (parked, never dropped -- ratified F2) until END; the `sak` note is
+posted to the trusted Proc; `SYS_CONSOLE_EPISODE` = 110 carries ARM (1) and
+END (2), gated on the trusted IDENTITY; the trusted Proc's death, relinquish
+or replacement ends an open episode fail-safe; the pre-SAK owner is handed
+back at END. Twelve `cons.episode_*` kernel tests (two of them through the
+REAL ZOMBIE chokepoint via rfork children), 1525/1525 at boot; the
+`im1-sak-lever` LS-CI scenario; the libthyla-rs / libt / ut mirrors. The
+design's four refinements from the pickup became EIGHT, all recorded as a
+numbered list under 11.3 so the operator can veto any of them.
+
+**The findings nobody planned, in the order they bit.**
+
+1. *The 7th note family relocated a latch, exactly as its assert promised.*
+   `NOTE_BIT_SAK` = 6 widened `NOTE_MASK_SUPPORTED` to 0x7f, and the build
+   refused it: `proc.h`'s caught-note sub-field is a literal 6-bit mask at
+   bits 11..16 with `PROC_FLAG_PIPE_TERMINATE_PENDING` at bit 17, and the
+   #237 static_assert exists precisely to turn "the field grew into my bit"
+   into a compile-time relocation instead of a silent alias. It did. The
+   field is 7 bits (11..17) and the pipe latch is bit 18; every consumer was
+   symbolic, so the sweep was two lines + the comment that now records the
+   first time the assert earned its keep.
+2. *A `-1` that means "busy" cannot share a codespace with `TSLEEP_INTR`.* My
+   reader-slot helper returned -1 for "slot held, not waiting"; `TSLEEP_INTR`
+   is also -1, so the caller mapped a busy slot to the death-interrupt return
+   (0). `cons.read_busy_guard` -- an EXISTING test -- caught it on the first
+   boot. The busy code is now a positive `CONS_SLOT_BUSY`.
+3. *A new owned-state bit collided with the harness's own bits.* I gave the
+   episode backstop bit 4 (the next free index in `cons.h`); `test.c` keeps
+   the two arch UART bits at 4 and 5 and indexes ONE name table by the union.
+   Four spawn-perm tests then "leaked uart-rx-hold" -- my bit, mis-named, and
+   in truth my kproc-attached backstop firing on tests that attach kproc on
+   purpose. The kproc backstop is gone (the tests never needed it), the
+   episode bit is 6, and the name table is 7 wide with a comment saying why
+   the index is the union's.
+4. *sys_poll RETURNS on a spurious hook wake.* The freeze design masked
+   POLLIN for a frozen poller, but the console's per-byte RX relay wakes every
+   registered hook and `sys_poll` re-samples and returns the count -- zero, to
+   userspace, once per keystroke. A frozen shell would have learned the
+   secret's length and cadence with the readiness word reading 0. Fix: a
+   frozen poller's hook goes on `episode_poll_list`, which the RX relay never
+   walks; it is woken once, at END. Found by reading the poll loop for the
+   self-audit, not by a test -- the test for it is a design residue named in
+   the audit row.
+5. *BEGIN moved under the table lock.* The pickup had console_mgr call BEGIN
+   after `proc_console_sak` returned; between the two, the trusted Proc could
+   relinquish (or a test could clear it) and an episode would open behind a
+   consumer that had just left. BEGIN, the note and the caught-note wake now
+   run inside the one `g_proc_table_lock` hold that ALIVE-checked the Proc;
+   the arm re-check under `g_cons.lock` stays as belt.
+6. *Two of the twelve tests had no way to be honest without a real death.*
+   "The trusted Proc's death ends the episode" is a claim about the ZOMBIE
+   chokepoint, which is static; a helper-driven test would have proved the
+   helper. Both death tests rfork a child that takes the role, arm through
+   the production op core, open the episode against it, and reap it -- the
+   chokepoint runs for real.
+7. *The Tcl `\x` trap, twice removed.* `"\x01b"` is one byte (ESC), not
+   Ctrl-A b; `"\001b"` is right, and `lc_quit` already spells Ctrl-A x that
+   way. Recorded in the scenario so nobody "fixes" it back. Then the
+   scenario's first run failed on `expect_out` being local to the helper
+   proc that matched -- the kernel had already printed `cons: SAK (unarmed)`
+   on cue; the helper now returns the decision string.
+
+**What the boot log said that was NOT mine.** `joey: pouch-smoke spawn FAILED`
+twice per boot -- the venus-prove and vk-sdl-prove probes on a venus-off host,
+recorded as pre-existing on every boot at JOURNAL:594 and :1618. Not
+re-enqueued.
+
+**Gates.** Kernel suite 1525/1525 PASS (twice: once with findings 2-3 red,
+once green, `Thylacine boot OK`, 0 EXTINCTION); `im1-sak-lever` PASS on
+attempt 1 (34 s; the first run failed on finding 7's scoping slip, with the
+kernel's witness line already on the wire); the SMP gate 40/40 PASS
+(default-smp4 / default-smp8 / ubsan-smp4 / ubsan-smp8, N=10 each, 0
+CORRUPTION, 0 EXTERNAL-KILL); clippy clean on the touched crates. The
+holotype round is deliberately batched with IM-2 (double-distance).
+
+**Open, tracked in the audit row's residue list.** The #174 PL011 holdback
+byte across BEGIN (a FULL ring at the SAK instant); two non-attached readers
+frozen together both reading after END; the first staged chunk of a write
+that held the TX role at BEGIN; the kproc-attached windows in the tests.
+
+---
+## 2026-09-07 (aux) -- Imperium & SAK: the arc opened; the revisit landed as IM-0 scripture (+ the origin/main merge)
+
+The operator parked Nocturne at N-3c-2 and opened a different arc: "Imperium
+and SAK" (Fable 5.1, `/effort max` -- the effort gate reported `max` before a
+line was read, so no question fired). The binding design was six weeks old
+(`IMPERIUM-DESIGN.md` ACCEPTED 2026-06-08 with a scheduled revisit;
+`TRUSTED-PATH.md` 2026-06-15; ROADMAP 9.1's IM bullet), so the first deliverable
+was the revisit itself: the design re-grounded against the September tree, then
+surfaced as a page (https://claude.ai/code/artifact/5e5ca828-8855-43cc-8763-8cdf7e485108)
+with four forks, all four voted the recommendation, and landed here as
+`IMPERIUM-DESIGN.md` 11 + the TRUSTED-PATH / ARCH 25.2 + 28 / CLAUDE.md /
+ROADMAP / phase7-status / ERRORS.md `sak` / SPEC-TO-CODE amendments. No code.
+
+**The finding worth keeping: scripture asserted two I-27 properties the code
+never enforced.** TRUSTED-PATH 8 says corvus is "the kernel-guaranteed sole
+writer" after a SAK; `cons_output_write` (`kernel/cons.c:1795`) is ungated --
+any Proc writes the UART. TRUSTED-PATH 2 says input goes only to corvus; the
+session shell holds the single-reader slot (`reader_busy`, `cons.c:1692`) parked
+in `cons_input_read`, so post-SAK its read would drain the typed secret. A third
+hole is newer than the design: the G-4 renderer feed (`cons_feed_write`,
+`cons.c:2030`) lets a halcyond session's keyboard reach the RX ring through
+userspace, so a renderer could type into corvus's prompt. The SAK mechanism
+(A-4c-2) is live and correct; the EPISODE it was built for does not exist --
+post-SAK corvus is attached and does nothing (no notes fd, no console handling;
+`AUTH_REQ_DISTINCT_SECRET` refused at `corvus main.rs:2940` "A-4c not yet
+built"). The revisit's value was reading `cons_output_write`, not the design.
+IM-1 builds all three properties: the freeze, the forced raw mode, the feed
+refusal, the `sak` note, `SYS_CONSOLE_EPISODE_END`.
+
+**Two wrong turns caught at the whiteboard, before code.** (1) A kernel timeout
+on the episode (a hung corvus should not freeze the console forever) -- dropped
+by asking what the kernel does with the NEXT keystroke after a timeout corvus
+does not know about: it routes the secret to the shell. So: no kernel timeout;
+corvus bounds its own prompt and ENDs; trusted death ends it; a hung corvus is a
+hung TCB, the class of corvus dying at boot. (2) The nested redeem. Asking "what
+does the first program a user runs under imperium do?" answered: it activates
+`CAP_JIT` (user-default; every GL program, verb 18). Under A-4a F2's "fresh
+scope per redeem" that member would be RE-TAGGED out of the imperium teardown
+while holding the propagated caps -- an elevated escape, and also every GL
+program failing under imperium had the rule gone the other way. Resolution:
+one scope per Proc, set once; a further redeem ORs caps and keeps the tag;
+a PROPAGATING redeem on a Proc already in any scope is refused. Both would have
+been P0s in the IM-2 round.
+
+**Two stale notes corrected.** A-4c-2's closed list says "no BREAK injectable in
+the harness" -- LS-CI's serial is a `mux=on` chardev with the qemu monitor
+(`tools/interactive/lib.exp:535,695`), so `Ctrl-A b` sends a BREAK; the arc gets
+a real end-to-end. And 102-legate's "#855 kproc orphan leak" is closed while
+init lives: joey adopts + reaps orphans with a wait-any sweep (`proc.c:995`).
+
+**The design also assigned the kernel lift to main.** The operator gave the arc
+to aux; main is on Halcyon stabilization (ptyfs/kaua/halcyond/login), disjoint
+surfaces, declared on yip. The vault owns every code surface IM touches
+(`quaestor owner`: cons.c, proc.c, devcap.c, devproc.c, notes.c, corvus,
+libutopia repl) -- code chunks ring the vault and carry `No-dossier-change`
+trailers; the retired `docs/reference` stubs are not re-written.
+
+**The merge.** aux-3 was 416 behind origin/main, and the vault had meanwhile
+retired 152/157 `docs/reference` files into redirect stubs. Merged first
+(`487fd33d`): 8 conflicts -- AUDIT-TRIGGERS index + JOURNAL (keep both), four
+reference files (take the stubs; aux-3's 192 pre-absorption lines -- the
+audio-graph level, the tapestryd zoom rows, the JIT + sys-thread notes -- rung
+to the vault as yip call 0068 rather than written into retired files), two vault
+views (re-rendered). Verified on the merged tree before committing: full bake +
+one HVF boot, `Thylacine boot OK`, 0 EXTINCTION (`build/merge-verify.log`).
+
+**Open.** IM-1 is next (the episode; audit:hard I-27; the SMP gate is owed on
+the kernel delta). The Fable-diversity pass for the Nocturne arc stays owed
+(parked with the arc). MEMORY.md is still above the hook's target; the
+coordinated main+aux curation stays owed.
+
+---
+
+## 2026-09-07 (aux) -- Nocturne N-3c-2: device capture (the D_INPUT RX stream + the gated `source`)
+
+Fresh context off a self-compaction; N-3c-1 (the sink tap) was closed + pushed
+(`@6d35b3f9`) and the operator had already chosen N-3c-2 (device capture) as the
+next chunk via `AskUserQuestion`. Capture is eavesdropping-adjacent AND a driver
+surface, so the EFFORT GATE fired first -- `effort-report.sh` confirmed `max (this
+session)`, no escalation.
+
+**Research settled most of the design before the fork -- deliberately.** The
+authority model was already FIXED by scripture 6.8 (reading a device source is
+recording -> the identical `sink_authorized` gate, fresh per read, on `-ctl`), so
+there was no authority fork to surface. The as-built tree settled the SHAPE: the
+sink is a SINGLETON (no `sinks/<name>/` subtree exists; `audio`/`volume`/`tap` name
+the one sink), so `source` is the singleton mirror of that, not scripture's
+aspirational `sources/<name>/`. And the driver architecture settled the MECHANISM:
+the device (`snd`) lives SOLELY in the cycle thread, so capture had to be mediated
+through the shared graph exactly as playback is -- `source_open` requests it, the
+cycle owns the RX start/stop.
+
+**Two forks genuinely needed the operator (`AskUserQuestion`), both taken as
+recommended.** (1) The witness rigor bar = DETERMINISTIC now, real content later.
+(2) ONE chunk, not a 2a/2b split.
+
+**The witness was the crux, and the research surfaced an option scripture had not
+considered.** Scripture (6.4, the N-3 row) had anticipated needing a real capture
+backend (coreaudio loopback / Pi PipeWire null-sink -- non-deterministic,
+real-silicon). But the security-critical half (I-46: recording is gated) turns out
+to be witnessable DETERMINISTICALLY with `audiodev=none`: the null backend clocks
+the capture stream with SILENCE, and the discriminating positive is the period
+COUNT (the driver's `periods-captured` in `info` climbing), not the content.
+Asserting non-silence would have been the M-PIN broken-fixture trap -- a broken RX
+path produces all-zeros too, indistinguishable from the working null backend. One
+empirical unknown rode this as a contingency: *does* `none` actually clock capture
+periods? I built it and MEASURED: it does. `nocturned: stream 1: dir=1` (D_INPUT),
+`capture ready`, and `periods-captured` climbed under `audiodev=none` -- the
+thyla-pi contingency was not needed.
+
+**The RX path is the TX path mirrored, with one new adversarial field.** The rxq
+(`VQ_RX`=3) chain is the TX chain with the payload descriptor flipped to `F_WRITE`
+(capture is device -> guest). The one field TX does not have is the used-ring
+`len` -- the device's claimed captured byte count -- which is clamped
+`len.min(PERIOD_BYTES)` before any copy-out, so an over-long claim cannot read past
+the payload buffer (the RX analog of the TX `latency_bytes` clamp). The DMA pool
+grew 40 -> 64 KiB (build-asserted `<= 256 KiB`, the grant); I verified the page
+math by hand (RXQ at pages 10-12, RX_META 13, RX_PAYLOAD 14-15, slot 3's payload
+ending at exactly 65536).
+
+**Graceful degrade was the non-regression bar, and it holds.** Capture negotiation
+is OPTIONAL + NON-FATAL: `streams=1` (the default boot) leaves `has_capture` false
+and the daemon runs playback-only. MEASURED on the default boot: `capture disabled
+(playback-only)` + `nocturne-probe OK` + 1512/1512 kernel tests + `Thylacine boot
+OK`. Capture is also ON-DEMAND -- the RX stream starts only while an authorized
+reader holds `source` -- a privacy property beyond the gate (the mic is not even
+running otherwise).
+
+**A wrong turn caught by the self-audit, before the commit.** My first cut seeded
+`capture_available` once at driver open. Tracing the wedge path (a device where
+`stop_capture`'s re-PREPARE fails sets the driver's `has_capture` false) I found
+`Graph.capture_available` would go stale-true, so a later `source` open would be
+ACCEPTED yet capture nothing -- an accept-then-never-deliver. Benign (no crash, the
+gate still held) but wrong; the fix is to re-publish `capture_available =
+snd.has_capture()` each cycle (like `stats`/`started`), so a post-wedge open gets a
+clean ENODEV. What caught it was asking "what does each state mean and who reads
+it", not "what caller does this" -- the two-states-must-stay-in-sync question.
+
+Landed at `@18ac43e8` (19 files, +1060/-50), one chunk: the driver RX path
+(`snd.rs`), the `source` authority (`server.rs`), the cycle wiring (`main.rs`),
+`E_NODEV` (`ninep.rs`, a mirror of the ABI-pinned kernel errno), and the
+deterministic witness (`nocturne-capture-probe` + `test-nocturne-capture.sh`).
+
+**Audit (round-8, Opus fallback -- Fable out arc-wide; MODEL(start)==MODEL(end),
+no mid-run fallback): 0 P0 / 0 P1 / 1 P2 / 3 P3, all fixed-or-deferred.** The
+context-independent read caught the one thing my self-audit missed: **F1 [P2]** --
+I had added `capture`/`capturing`/`periods-captured` to the WORLD-READABLE mount
+`info` (to feed the witness's count), which defeated the open path's own
+"presence not probeable" property AND side-channelled live-recording activity to
+any principal. A claimed security property, false in the commit that introduced
+it. I reconciled by CONFINING (the principled choice for an eavesdropping surface):
+removed the capture fields from `render_info`, and switched the witness to the
+`source` BYTE-FLOW (bytes delivered off the stream) -- which also dissolved **F2
+[P3]** (the witness had keyed on a fixed count threshold, the bug_184 class,
+latent). **F3 [P3]** (a device that PREPAREs but fails PCM_START retried
+`start_capture` forever while the reader parked with no error -- my own self-found
+F-self-A folded in) is FIXED: `start_capture` now clears `has_capture` on the
+failure (the capture analog of TX `start()`'s give-up), the cycle republishes
+`capture_available=false`, and the parked read fails closed with ENODEV. **F4
+[P3]** (the cycle holds the graph lock across the capture device RPCs -- same class
+as the deferred N-2c-F2, a larger bound) is DEFERRED with N-2c-F2 (the refinement
+is shared by playback + capture). NOT a dirty close (0 P0/0 P1, P1+P2=1<6, the
+fixes are non-invasive) -> no re-audit owed. Re-verified GREEN on the fixed build:
+the byte-flow capture witness + the streams=1 non-regression, both re-booted.
+
+The F1 miss is the instructive part: my pre-commit self-audit found the
+`capture_available` wedge but NOT the info leak, because I was reasoning about the
+DRIVER + the GATE and treated the `info` render as neutral observability -- I did
+not ask "does this new render defeat a property the OPEN path claims". The
+prosecutor, having never read my justifications, re-derived the "not probeable"
+property from the open path and immediately saw the info render contradict it.
+Exactly the context-independence the fallback round is supposed to buy.
+
+**Open:** real captured-audio CONTENT fidelity is a deferred thyla-pi
+PipeWire-loopback witness (real-silicon, non-deterministic, not in CI); the `ear`
+node kind (tapping another program's voice) is N-4; the Fable-diversity pass is
+owed arc-wide (N-2c/N-3a/N-3c all ran Opus).
+
+---
+## 2026-09-07 (aux) -- Nocturne N-3c-1: the gated sink tap (capture is a distinct authority)
+
+Fresh context off a self-compaction; the N-3a arc was closed + pushed. The next
+scripture item was N-3c (capture): ears, `sources/`, and the sink tap. Because
+capture is an EAVESDROPPING surface, the EFFORT GATE fired first --
+`effort-report.sh` confirmed `max (this session)`, no escalation.
+
+**Research before the fork, and it split the chunk cleanly.** Plan 9's
+`/dev/audio` loopback is UNGATED (anyone who can open it records); the modern
+SOTA (PipeWire's per-sink monitor source, CoreAudio's TCC-gated system-audio
+capture, Fuchsia's `AudioCapturer`, Android's `RECORD_AUDIO` + opt-in
+`AudioPlaybackCapture`) uniformly makes capture a distinct, mediated authority
+from playback. Thylacine's fit is cleaner than the portal indirection: the
+N-3a-3 `/srv/nocturne-ctl` post reads the real 9P peer, so "who may record the
+system" collapses to the SAME two-axis gate as the volume. Two as-built facts
+then decided scope: (1) the mixer already produces a mixed S16 period
+(`server.rs` `next_period`), so a sink tap is a cheap software copy -- buildable
+now; (2) the virtio-snd driver REFUSES anything but `D_OUTPUT` (`snd.rs:493`),
+so DEVICE mic capture needs a whole new RX-stream path + a non-wav witness. So
+the eavesdropping-critical half (the sink tap) is pure software and testable
+now; device `sources/` is hardware-blocked.
+
+**A scripture tension the research surfaced.** NOCTURNE.md 6.4 said a mount
+`/dev/nocturne/audio` READ is "an ear on the sink tap"; 6.8 said the tap is
+clearance-gated. In tension precisely because of the N-3a-3 transport-identity
+lesson: a shared mount cannot gate (its peer is always the mounter=SYSTEM). And
+measured, the mount audio read returns EMPTY today (`server.rs:1150`, the
+audio(3) output-only convention) -- it was never actually a tap. So the
+reconciliation was small.
+
+**Surfaced as a blocking `AskUserQuestion` (scripture-altering + security-critical
+-> the operator's vote); all three recommendations taken:** (1) tap shape = a
+`tap` FILE on `/srv/nocturne-ctl` (mount audio read refused); the full `ear` node
+kind was rejected as larger + overlapping the N-4 descant-ring machinery. (2)
+device `sources/` DEFERRED to N-3c-2 (the deferral-needs-signoff case -- surfaced,
+not dropped). (3) N-3c before N-3b. Scripture landed first (`09a1ba81`), then the
+impl (`dc179f1c`), then the audit -- the design-conversation pattern.
+
+**The implementation, and the one guard that is load-bearing.** The tap: a `tap`
+file on `ROOT_CHILDREN_CTL` only; `Graph.tap_mirror` a bounded drop-oldest ring
+(8 periods) filled in `next_period` ONLY while a reader holds it; `sink_authorized`
+(renamed from `volume_authorized` -- it now gates both the volume write and the
+tap read) checked at OPEN and FRESH per READ (fail-closed on a mid-recording
+revocation); single-reader (`tap_open`, EBUSY on a second open, released on
+clunk/teardown); an empty mirror PARKS the read and `poll_writes` serves or
+fail-closes it. The load-bearing point -- the same shape as N-3a-3's F1:
+`sink_authorized` returns TRUE for a SYSTEM peer, and a MOUNT connection's peer
+IS SYSTEM, so it is the `!self.control` guard, NOT the predicate, that keeps the
+tap off the shared mount. Both the open and the read assert `!self.control`; the
+tap file is additionally absent from the mount's `ROOT_CHILDREN` table. The mount
+`audio` READ becomes an explicit `EPERM` (was empty/EOF) so the recording
+boundary is discoverable.
+
+**A self-audit catch before the formal round.** The empty-mirror park had a
+zero-count edge: a `Tread` with count 0 computes `want=0`, so it would PARK -- and
+a `want=0` park is never satisfiable, wedging the single-reader slot forever.
+Fixed pre-audit: `want==0` returns an immediate zero-count Rread.
+
+**Witness.** NEW `/nocturne-tap-probe` (gated boot arg `thylacine.tapprobe`):
+SYSTEM opens the tap, proves a second concurrent open is `EBUSY`, plays a tone
+and CAPTURES it (the positive arm -- a gate that refused every read would pass the
+denials alone), and asserts a mount `audio` read is refused; a user-principal deny
+child is refused the tap AND the mount read.
+
+**Audit (round 7, Opus fallback -- Fable out of credits arc-wide; context
+independence exploited): 0 P0 / 0 P1 / 1 P2 / 1 P3.** The agent re-derived the two
+headline threats -- eavesdropping bypass and guard-leak DoS -- as CORRECTLY
+CLOSED (no bypass to a mirror byte; the guard released on every conn-death path).
+- **F1 [P2, borders P1] -- FIXED.** The agent found what my self-audit missed:
+  `pending_tap_read` was a single `Option`, whereas parked WRITES use an ordered
+  `Vec`. A pipelined second tap `Tread` (a distinct tag -- 9P's own concurrency
+  mechanism) OVERWRITES the parked first -> its tag never gets a reply (lost), and
+  via a cycle-fill race between poll passes the second could even drain the mirror
+  AHEAD of the first (a reordered stream). Fix: refuse a second concurrent tap
+  read with `E_BUSY` -- one outstanding read at a time on the single-reader tap
+  (preserves exactly-once AND stream order; a sequential reader never trips it).
+- **F2 [P3] -- DOCUMENTED.** A tap read parked on a STOPPED sink keeps
+  `has_pending()` true, so the control loop polls at 10 ms (100 Hz) until playback
+  resumes -- a new idle-path spin (parked WRITES only occur while playing).
+  Bounded, self-inflicted by an authorized reader on a silent sink, no
+  correctness/security impact; accepted + reference-153 caveated, v1.x fix = a
+  stream-started-gated timeout. (I found this one independently too.)
+
+**The wrong turn, caught.** My own self-audit had flagged a THIRD finding --
+tap-mirror frame-alignment: a non-frame-aligned tap read moves the mirror head
+mid-frame, so a drop-oldest under stall could split a frame -> a permanent L/R
+channel swap -- and I had drafted a fix (frame-floor `tap_take` + `EINVAL` on
+`want < FRAME`). Re-analysis WITHDREW it: a frame-aligned reader (`cat`, any sane
+recorder -- buffers are divisible by 4) NEVER misaligns even under stall; only a
+client reading odd counts gets odd-framed bytes, which is correct byte-stream
+behavior (framing is the client's job), affects only its own recording, and is
+not a system soundness issue. The agent (independent, context-independent) also
+did not flag it. Catching it kept an unneeded `EINVAL` edge out of the ABI. A
+second self-found item (the `build_rlopen`-orphan guard leak) was likewise
+withdrawn as unreachable + self-cleaning -- the agent confirmed it.
+
+**Not a dirty close** (0 P0, P1+P2=1<6, the F1 fix is a 3-line guard, not
+invasive) -> no re-audit round owed. `MODEL(start)==MODEL(end)` (Opus 4.8, no
+mid-run switch) -> no post-fallback re-spawn owed. A Fable-diversity pass remains
+owed for the whole N-2c/N-3a/N-3c arc when credits return.
+
+**Verify (final build):** `test-nocturne-tap.sh` GREEN (SYSTEM tap capture +
+single-reader EBUSY + mount read/user tap deny); default boot `nocturne-probe OK`
+(playback intact) + 1512/1512 kernel tests + `Thylacine boot OK`. No kernel delta
+(the tap is entirely userspace) -> SMP gate not owed (consistent with the arc).
+
+**Observed (inherited, not fixed):** `snd.rs:97` `0 * PAGE` trips clippy 1.97's
+`erasing_op` deny -- pre-existing N-1 code the `cargo build` gate tolerates (no
+gate runs `cargo clippy`); a trivial future clippy-clean pass on the driver, left
+untouched here to keep a tap chunk out of a driver audit surface.
+
+**Open / deferred:** device `sources/` (mic) = N-3c-2 (driver RX stream + non-wav
+witness); N-3b (node gain->dB) is the next N-3 sub-item; the tap is single-reader
++ realtime drop-oldest + idle-parking by design (multi-reader broadcast / larger
+buffer / stream-kept-running-while-tapped are v1.x); the N-3a-3 round-6 F1 (shared
+MAX_CONNS pool) + F3 (two-Proc console-owner test) stay tracked v1.x.
+
+---
+## 2026-09-07 (aux) -- Nocturne N-3a-3: the F1 root fix (the shared mount cannot carry per-writer identity)
+
+The pickup was a dirty close. The round-5 audit of N-3a (the sink-volume gate,
+`851f3ab2`) had found **F1 [P1, borders P0]**: any user could mute or change the
+system volume by writing `/dev/nocturne/volume`, with no clearance and no
+keyboard. The gate logic was fine; the bypass was the transport. joey mounts
+`/srv/nocturne` at `/dev/nocturne` ONCE, and `territory_clone` shares that one
+connection to every session (`spoor_ref`); login never unmounts it. So a user's
+`Twrite` rides joey's conn, and `t_srv_peer` resolves the peer as joey = SYSTEM.
+9P binds identity at ATTACH, per connection, not per message -- so per-writer
+authority through a shared mount is **impossible by construction**. This was
+unpushed, so there was no live exposure.
+
+**The operator's own candidate was mechanically unsound, and saying so was the
+first real step.** The round-5 handoff carried the operator's vote -- "fix via
+option B, the per-Proc-conn model" -- with a named candidate: *login re-mounts
+`/dev/nocturne` on the session's own conn*. Tracing it killed it: login runs as
+`PRINCIPAL_SYSTEM` (`usr/login/src/main.rs:24`), so a login re-mount's conn peer
+is SYSTEM too -- not the user. The only mount that carries user identity is the
+home pattern's per-user *proxy* (login spawns stratumd AS the user, and the
+proxy->coordinator hop establishes identity) -- but a proxy sitting between
+nocturned and the client would break the N-2b zero-copy Weft ring, which is
+nocturned<->client shared memory. So Family 1 (a per-session mount) is
+fundamentally at odds with the ring. I did NOT silently substitute my own design
+for the operator's flawed candidate: I surfaced the correction + the sound
+alternative (the **warp precedent**, `joey.c:11437` -- "a shared mount is one
+connection, so an authority surface is never globally mounted") as a blocking
+`AskUserQuestion`, with the research attached. The operator ratified both
+recommendations: a **second /srv post** for sink authority, and **realize the
+console-owner axis now**.
+
+The research also uncovered that §6.8's "console-owner session" axis was **never
+realized**: the N-3a-2 gate checked `srv_peer_info.console`, which is
+console-*attachment* -- and I-27 makes that corvus-only, so the "person at the
+keyboard" axis was dead for every user session. `proc_console_owner_in_session`
+(the predicate that already gates a phenotype `TCSETS`) was the right concept; it
+just was not wired to the peer query. That is the N-3a-2 F2, fixed here.
+
+**Scripture first** (`db4333ca`, no code): NOCTURNE.md §6.4 (the two posts), §6.8
+(the per-conn realization + the console-owner axis via a new flag), §6.13 (the
+audit surfaces), §8 (the row), §14 (the ratification record). Then the code, in
+two sub-chunks. **N-3a-3a** (`0a0ad86c`, kernel): a new
+`SRV_PEER_FLAG_CONSOLE_OWNER` (`srv_peer_info.flags` bit 1, append-only, no
+struct-size change) set from `proc_console_owner_in_session` on the *same*
+alive-gated `g_proc_table_lock` walk that already computes caps + the renderer
+stamp -- compare-only under the held lock, never a deref, a dead peer
+fail-closing the whole flags word to 0. **N-3a-3b** (`131f9336`, userspace):
+nocturned posts `/srv/nocturne` (playback, mounted, the ring intact) +
+`/srv/nocturne-ctl` (sink authority, per-conn, never mounted); volume is 0o444
+read-only in the mount and 0o666 writable on `-ctl`; `h_write` refuses a
+`P_VOLUME` write on any non-control conn (so even an owner/root open that slips
+the mode gate cannot write); `volume_authorized` reads the new flag fresh per
+write; `apply_volume` is two-pass validate-then-apply (F3 -- a bad late line no
+longer leaves a partial change); a native `nocturne-vol` tool is the shell UX;
+and the witness is redone with the arm the N-3a-2 witness *lacked* -- a USER
+writing volume THROUGH the mount must be REFUSED. Measured: `test-nocturne-volume.sh`
+GREEN ("user mount write + control-post write both refused"; "control-post SYSTEM
+allow + grammar/F3 + mount read"), the default boot's `nocturne-probe OK`
+(playback intact after the split), 1512/1512 kernel tests, `Thylacine boot OK`.
+
+**Three wrong turns, each caught by a check, not by luck:**
+
+1. *The console-owner test caught its own false premise.* My first cut asserted
+   `console_owner == true` when the current proc (joey) was set as owner -- and
+   it FAILED, extincting the boot (a failing kernel test fails the boot, by
+   design). The cause was not the feature: joey is session-less (`sid == 0`), and
+   `console_session_match(0, 0)` is correctly `false` ("no session is never the
+   keyboard owner"). The test was wrong to use a sid-0 proc as the owner; the fix
+   injects a nonzero session id for the positive arm. The feature's sid-0
+   handling was *right*, and the test proved it by failing first.
+
+2. *The vault pre-commit hook uses a different quaestor than I did.* Two commit
+   attempts were rejected with "view-spec-coverage.md: stale generated body" even
+   though my manual `lint --staged` passed and `git diff` on the view was empty.
+   The hook is `go -C "$top/vault/meta/quaestor"` -- the **aux worktree's own**
+   embedded quaestor -- but I had rendered the coverage views with the *standalone*
+   `~/projects/thylacine-vault` quaestor (a different instance). Rendering with
+   the aux worktree's quaestor (`cd aux && go -C vault/meta/quaestor run . render
+   --root "$(pwd)"`) produced views the hook accepted.
+
+3. *A `| tail` masked a chain's exit code.* I ran `build && witness && test.sh |
+   tail -18` in the background; the reported "exit 0" was **tail's**, not the
+   chain's (the pipe's exit is the last stage). Not a correctness problem here --
+   I verified via artifacts: `build/test-boot.log` was test.sh's *default* boot
+   (`nocturne-probe`, not the volprobe), which only runs if build AND witness both
+   passed through the `&&`. But it is the exact masking trap the memory already
+   records, repeated.
+
+**The re-audit closed CLEAN.** Round 6 (Opus -- Fable out of credits all arc, so
+the Fable-diversity axis is forfeit and a Fable pass is owed when credits return)
+re-derived every load-bearing claim line-by-line and returned **0 P0 / 0 P1 /
+0 P2 / 3 P3**: F1/F2/F3 genuinely closed, no dirty-close criteria tripped. My
+parallel self-audit found nothing new (the main.rs accept-tagging maps
+pollfds[0]/[1] to (listener,false)/(ctl_listener,true) by index -- no off-by-one;
+the getattr 0o666-on-control is advisory-only; the ring path is structurally
+untouched). The three P3s: **F2** (the `!control` guard -- the sole F1 closer on
+a *direct* playback connect -- was untested) is FIXED with a probe arm that
+writes volume on a direct playback conn and asserts EPERM; **F1** (both posts
+share the 32-conn pool) and **F3** (the console-owner kernel test's positive arm
+has owner==peer) are TRACKED as v1.x, both with reference caveats.
+
+**A fourth wrong turn, caught by the very test it strengthened.** The F3 fix
+tried a two-Proc arm (owner=p, peer=kproc, different sessions -> expect CLEAR) --
+and it FAILED (1511/1512, boot extinct), reporting SET. The cause: in the
+boot-test context `current_thread()->proc` IS `kproc()`, so `p` and `kp` are one
+object; setting the peer's sid moved the owner's too. The arm caught its own
+false premise (same shape as the sid-0 catch earlier). Reverted to the A/B
+owner-global-dependence form; a real two-Proc test is deferred to a harness that
+can hand out a second controllable Proc.
+
+---
+## 2026-09-06 (aux) -- Nocturne N-2a-4: DOSBox-X + glquake game audio (and a build subsystem the main merge had silently deleted)
+
+The operator chose N-2a-4 (both games' audio) after the N-2c close. The chunk
+looked like "retire patch 0004, boot, capture" -- `c5136f31` had already retired
+`0004-thylacine-force-dummy-audio` (the whole code change; there was never a
+"nosound config to flip"). It was not that simple, in three separate ways, and
+each was caught by a check rather than by luck.
+
+**The build subsystem was gone.** The dosbox-x binary on disk was `Sep 5 13:30`
+-- older than `c5136f31` (`Sep 5 18:06`), its own audio fix. A stale artifact
+older than its own source fix is the tell: nothing rebuilds it. `grep -ci dosbox
+tools/build.sh` = 0. The 292-commit main merge (`8b28327f`) had taken
+origin/main's `build.sh` wholesale and dropped aux's entire DOSBox build+bake
+subsystem (aux-only since DX-1 `5af3e46d`; main never had it) -- `build_dosbox_x`,
+`build_duke3d_fixture`, `build_tombraider_fixture`, `stage_dosbox_sysconf`,
+`build_zlib`, the ramfs staging, the pool puts, the bake-verify arms, the
+dispatch case. `build-config.sh` still advertised `CHUNK_DOSBOX=y` -- a live
+config/executor mismatch, silent because `build.sh all` skips a missing chunk
+gracefully and no gate builds dosbox. Restored all five functions + five call
+sites verbatim from `4e930f11` (verified functionally identical: all 20 ops + 12
+`THYLACINE_BAKE_DOSBOX` guards match; only condensed comments differ). Memory:
+[[bug-main-merge-deleted-dosbox-subsystem]]. (A self-inflicted wrong turn caught
+immediately: the `awk`-splice + `mv` that inserted the functions reset build.sh's
++x bit -> "Permission denied"; `chmod 755` and on.)
+
+**Duke3D was silent, then wouldn't start.** With dosbox rebuilt (fresh, audio
+path live -- SDL selected "Audio thylacine", nocturned serving), the first witness
+PASSED the scenario but the wav was ~66 s of silence: `0 windows above -40 dBFS`.
+`usr/ports/dosbox-x/duke3d/DUKE3D.CFG` (git-tracked from DX-5a, never exercised
+because 0004 forced dummy) had `FXDevice = 13` -- the PC speaker in the Apogee
+Sound System enum, not the SoundBlaster DOSBox emulates -- plus `NumBits = 1`.
+The Blaster* hardware settings were already correct SB16. First fix guessed the
+enum wrong (`FXDevice = 1`): Duke3D printed `MVSOUND.SYS not loaded` and exited to
+DOS. MVSOUND.SYS is specifically the Pro Audio Spectrum driver -- so device 1 is
+the PAS, and the enum is SoundBlaster=**0**, not the 0=NoSound/1=SB I had assumed.
+The screenshot was the oracle: Duke3D's sound-init prints to the DOSBox SDL
+window, not the serial log, so `/tmp/lsd3d-1.png` (the scenario's own title dump)
+showed the exact console. `FXDevice=0`/`MusicDevice=0` (SoundBlaster for both):
+`PASS(music): 1779 active windows of 3319; median flatness 0.09; 14 distinct
+dominant bins`.
+
+**glquake needed the clade toolchain, which was incompletely fetched.**
+tyr-glquake lives at `/clade/bin`, so it needs a `THYLACINE_BAKE_CLADE=1` pool.
+The Mesa/llvmpipe GL stack was already cross-built on thyla-keep
+(`/build/mesa-xOS5`, the heavy part done); a subagent assembled `build/clade/gl`
+(libOSMesa.a + `llvm-libs.list` + 8 ORC/JIT archives absent on the mac) and
+tyr-glquake built (146 MB). Then `stage_clade` refused: `cxx-rt/libc++.a` MISSING
+-- the #156 fetch-set gap (the mac's clade is a partial fetch of bin/llvm+clangd,
+never the C++ runtime). The comment names the source ("pull it from the builder's
+stage2 sysroot"), which is exactly the mac's locally-built `build/sysroot/lib` --
+so filling `cxx-rt` from there is the intended fix, no thyla-keep round-trip.
+glquake wav: `PASS(music): 761 active windows of 1096; flatness 0.20; 18 distinct
+dominant bins`.
+
+**The witness harness had a --production blindspot.** A clade-baked game image
+must boot `--production` to skip the boot-fatal clade gates (joey CL-4/CL-5,
+`clade_gate()!=0 -> return 1`). But `--production` sets `THYLA_BOOT_PROBES=OFF`,
+dropping joey's audio probe -- so `test-game-audio.sh`'s "the boot did not decline
+its audio probe" check (a proxy for "the wav is the game's alone") fired, even
+though the probe being ABSENT means the wav is clean by construction (the probe
+is the only boot-time audio source). Refined the check to accept
+`THYLA_BOOT_PROBES=OFF` as the second clean-wav guarantee.
+
+**Witnesses** (mac HVF + QEMU wav; `audio-verdict.py --music` = >=2 s of energy
+that is neither noise nor a stationary buzz): DOSBox `ls-gfx-dosbox-duke3d` and
+glquake `ls-gfx-glquake`, both on the final `THYLACINE_BAKE_CLADE=1 --production`
+image (dosbox + duke3d + /clade/bin/tyr-glquake). The DOSBox sound path
+(SoundBlaster 16 + OPL -> the SDL thylacine backend -> Nocturne) had NEVER run on
+Thylacine before this -- 0004 sent it to a null sink from DX-1 onward.
+
+**Open / deferred.** The thyla-pi SILICON audio leg (the operator's original "on
+thyla-pi" framing) is N-6, not N-2a-4: the game `.exp` scenarios hardcode
+`THYLACINE_ACCEL=hvf`, so the audio `--music` witness is a mac/HVF+wav witness by
+construction; thyla-pi is the graphics/GL host (a separate FPS witness). Second
+defect owned + noted, not fixed: `build-manifest.toml [remote.clade_gl]` claims
+`pull = clade-keep-build.sh fetch`, but `cmd_fetch` never retrieves
+`build/clade/gl` -- the GL-stack fetch path is unwired (the #156 family). A Fable
+audit pass on N-2c is still owed (credits).
+
+---
+## 2026-09-06 (aux) -- Nocturne N-2c: the cycle/control thread split + a futex Mutex
+
+With the design ratified, resumed the arc at N-2c (`dd07836a`): split `nocturned`
+from one poll loop into two threads (D-1c), so the audio clock is never delayed
+by 9P work -- the foundation N-4's in-cycle descants require. The CYCLE thread
+owns the device and runs the audio clock (try_lock the graph, pump, start/stop,
+publish stats, wait on the IRQ); the CONTROL thread (the original, after it
+spawns the cycle) serves /srv/nocturne and touches the graph only under the lock,
+never across a reply. Neither crosses into the other's half: the cycle never
+touches 9P, the control never touches the device.
+
+**The design choice inside the ratified D-1c.** D-1c fixes "two threads, one
+try-locked graph"; the *mechanism* was mine to pick. I chose the literal reading
+-- ONE `Mutex<Graph>`, the cycle `try_lock`s and on a miss REPLAYS the last
+mixed period (voices do not advance, so no data lost, at most one ~10.7 ms period
+repeats) -- over a refcounted-Arc-plan model (PipeWire's RCU-style graph swap).
+The Arc model is glitch-free on graph edits but adds per-voice atomics + an
+SPSC-flush race + Arc lifetime, i.e. more concurrency surface, for a benefit
+(no ~10.7 ms replay) that is inaudible at the <0.001%-per-period collision rate
+(the control holds the lock only for microsecond graph ops, never across I/O, vs
+a 10.7 ms period). For a security-critical OS, fewer moving parts under
+concurrency is the "build proper" call, and it is exactly what "run last cycle's
+plan" says. The new primitive it rides -- `libthyla_rs::sync::Mutex` (N-2c-1) --
+is the three-state futex mutex std uses on Linux, over AtomicU32 + torpor, plus a
+non-blocking `try_lock` for the realtime cycle; libthyla-rs had spawn_raw + torpor
+but no Mutex, and native callers had each rolled their own.
+
+**The same-Proc poke.** A stopped stream has no IRQ, so the cycle parks on a
+`wake` futex with a 100 ms backstop; a byte write that makes a stopped voice
+playable pokes it (torpor works intra-Proc), preserving the single-threaded era's
+instant byte-start. A ring producer in *another* Proc still cannot poke (no fd,
+no cross-Proc torpor) -- that stays the N-2b-2b deferral; its start rides the
+backstop. Register-then-observe closes the poke-vs-park race.
+
+**Verified** (all GREEN): the `alloc-smoke` sync leg -- try_lock semantics + a
+5-thread contended mutual-exclusion stress (total must equal (WORKERS+1)*ITERS or
+a lost wakeup shows as a short total / join timeout) -- under `-smp 4` real
+parallelism; `test-ring-audio` PASS(chord) 70 windows (the cycle consumes rings +
+the control serves weft); `test-audio` PASS(chord) 59 (the cycle drains FIFOs +
+the control pushes + pokes); `test-sdl-audio` PASS(chord) 78; the full boot ladder
+green. The **SMP gate is not owed** -- N-2c is userspace-only (no kernel/arch/mm
+delta), and the mutex + split are already exercised under `-smp 4` x3 (same
+reasoning as the N-2b close).
+
+**The batched holotype audit (N-2c-1 + N-2c-2, Opus -- Fable out of credits)
+closed CLEAN: 0 P0 / 0 P1 / 0 P2, 2 P3, both deferred.** The prosecutor
+re-derived the mutex (Drepper three-state, no lost wake), the poke/park
+register-then-observe, the lock-across-reply discipline (checked every handler),
+the single-mutex lifetime argument, and the memory-safety bounds -- all sound. It
+refined one self-audit claim: the cycle is ALSO a FIFO *writer* (`pop_front`,
+`drop_fifo`), not only a reader -- but every access on both threads is under the
+one mutex, so the "single writer at a time" property holds and there is no race
+(conclusion correct, premise sharpened). The two P3s are both pre-existing /
+non-regression: **F1** -- `has_playable` uses the cross-voice byte SUM, but
+`next_period` drains only whole frames, so a sub-frame residue (1-3 bytes) sticks
+and defeats the idle-stop forever (perpetual wakeups); byte-identical in the
+parent 46d51fbb (N-2a mixer, NOT N-2c -- N-2c only moved the caller into the
+cycle thread). **F2** -- the cycle holds the graph lock across `snd.start()`/
+`stop()`'s device RPCs, so a wedged device freezes the control plane for a
+BOUNDED interval (verified: `ctrl_rpc` caps at `CTRL_WAIT_STEPS`=2000x1ms;
+`stop()`=3 rpcs ~= 6 s worst case) -- not a deadlock, not a regression (the
+pre-N-2c serve loop also blocked on device RPCs). Both are documented in
+reference 153's caveats + the closed list; F1 gets a focused follow-up (the
+one-line per-voice `>= FRAME` fix + a residue-idle-stop regression witness), F2
+an optional v1.x refinement. A Fable pass on this surface remains the stronger
+check, owed whenever credits return (the standing Opus-round caveat).
+
+**The wrong turn, caught by the tooling.** My first commit was blocked by
+vault's freshly-installed shared commit-msg dossier-gate -- which I had ACKed on
+yip without verifying aux's own quaestor had the feature. It did not: the hook
+builds quaestor from the COMMITTING worktree's source, and aux-3's quaestor
+(lint/render/owner only) predates `dossier-gate` (landed @292a1f9c, not in aux
+HEAD), so it hit quaestor's usage arm -> exit 2 -> the hook fail-CLOSED,
+contradicting its own "fail open on infra" design. I diagnosed it (the exact
+subcommand-absent -> exit-2 -> exec-propagated chain, with the merge-base
+evidence) and flagged vault via yip; vault fixed the shared hook to no-op when the
+committing worktree lacks `vault/meta/quaestor/dossier_gate.go` (a file-check,
+zero extra compiles for behind-worktrees) + exit==2 tolerance. Lesson: ACK a
+shared-hook install only after checking the feature exists in YOUR worktree's
+tool, not just on main. The gate activates for aux automatically once aux merges
+main; until then it correctly no-ops. (A separate, pre-existing observation:
+`joey: pouch-smoke spawn FAILED` x2 -- confirmed via JOURNAL:1031 as pre-existing
+on all boots, a bare-name resolution issue in a different toolchain, NOT an N-2c
+regression.)
+
+Also caught before the audit: I traced `ctrl_rpc` and confirmed it is bounded
+(CTRL_WAIT_STEPS, 1 ms sleeps, then Err) -- so a device that never answers a STOP
+verb cannot wedge the control thread past that timeout, and it is the same
+bounded-stall class the single-threaded loop already had (no regression).
+
+**Open:** F1 (the pre-existing idle-stop residue -- a focused follow-up: the
+one-line `has_playable` per-voice `>= FRAME` fix + a residue-idle-stop regression
+witness); F2 (the bounded lock-across-device-RPC -- an optional v1.x refinement);
+N-2c-2b (the cross-Proc back-pressure poke) stays v1.x. Next on the arc: N-3
+(ears/capture + the dB grammar), then N-4 (descants + the cadence lease + the
+weft park leg, spec-first, max effort). Per the @695e0ef5 scripture flip, N-3's
+technical-reference prose routes to a vault dossier, not a docs/reference section.
+
+---
+## 2026-09-06 (aux) -- Nocturne design RATIFIED by operator vote; scripture commit
+
+After the N-2b close, the operator engaged the pending items and asked me to
+surface every open design question and fork via `AskUserQuestion` "so I can
+directly vote", with each recommendation checked against "build proper" and the
+Thylacine values. I put all 11 through three batches. The operator's votes (all
+matched the recommendation except Q3, which they amended, and Q8, which they
+enriched):
+
+- **Q2 = in-cycle leased DSP.** The cadence lease (the arc's one kernel/scheduler
+  lift, N-4, spec-first) is now firmly ON the critical path -- the complete design
+  over the deferred half-version, per "build proper / cost-speed not a factor".
+- **Poke = wire the weft ready-ring park leg** (not a general shared-memory
+  futex). Research finding that made this legible: `torpor` is per-Proc-keyed
+  (hash(Proc*,user_va)), so it cannot do the cross-Proc consumer->producer wake;
+  the weft park leg keys on the binding the kernel already tracks, reuses
+  WEFT_READY_TX, is already specced (weft_readiness.tla), and N-4's descants need
+  it regardless.
+- **Q3 amended by the operator: rate/depth target 192 kHz / 24-bit "if
+  possible"** (I had proposed 48 kHz/S16). Decoded the device the driver already
+  sees (rates=0x3fff, formats=0xe0078, cross-checked against the FMT_S16=5 /
+  RATE_48000=7 constants in snd.rs): 192 kHz is advertised (rate bit 12); 24-bit
+  is deliverable via **S32/FLOAT** (the QEMU device offers S8/U8/S16/U16/S32/
+  U32/FLOAT -- no packed S24), which float32-internal maps to; 48k/S16 stays the
+  floor. At 256 frames / 192 kHz the in-cycle deadline is ~1.33 ms (§6.9), which
+  the cadence-lease spec + N-4 audit must hold.
+- Pulse-native compat / capture-later (Q6); single-input descants first (Q7,
+  multi-input a non-breaking follow-on); keep all sub-names (Q1); own-tap free /
+  loopback clearance-gated (Q4); policy keys principal+program+label (Q5); MIDI/BT
+  out of scope (Q8 -- operator note: DOSBox emulates its wavetable synth, e.g.
+  Gravis Ultrasound, itself and outputs PCM, so Nocturne's PCM sink already
+  serves it); the VISION §9 relaxation confirmed (Q9); D-1..D-11 ratified.
+
+Landed as a **scripture commit** (design->scripture pattern, no code):
+NOCTURNE.md §3 status CANDIDATE->RATIFIED + a new §13 ratification record + the
+§6.9 rate/depth amendment + §9/§10 settled-notes; VISION.md §9 (N-0 ratified);
+the I-46 rows in ARCHITECTURE.md §28 + CLAUDE.md (candidate -> ratified).
+
+**Also, an honest correction (Ad 2 from the hand-off).** My close said "clade
+can't build on the Pi, defer N-2a-4"; the operator corrected that we build clade
+on thyla-keep (GCP) and authorized the compute. Checking thyla-keep, clade is
+already fully built there (an Aug-24 build: the llvm multicall + clangd + 135
+static libs incl. JIT/ORC) -- and clade is the stable LLVM-fork toolchain,
+untouched by Nocturne/DOSBox work, so N-2a-4 needs no rebuild at all, only the
+thyla-pi GL+audio witness. Started thyla-keep to verify, confirmed, stopped it
+again (disk-only; nothing burned).
+
+**Next**: N-2c (the cycle/control split) builds against the now-fixed reference.
+
+---
+## 2026-09-06 (aux) -- Nocturne N-2b-2a: the ring period protocol + the ring-fed mixer
+
+**Landed** `37604139` (aux-3). The first cross-Proc DATA path in nocturned: a
+client PRODUCES S16 periods into a voice's zero-copy Weft ring, nocturned's mixer
+CONSUMES them on the device clock. N-2b-1 built the ring's allocate+share+map;
+this adds the producer/consumer protocol over it and the ring-fed mixer branch.
+
+**The shape.** A fixed-slot SPSC over the ring, chosen over netd's addr-based
+descriptor mode because it is safer by construction: the payload is K=8 fixed
+period slots, the CONSUMER computes slot `cons_head % K`'s offset itself and
+NEVER trusts a client-written `desc.addr` -- the only client value it reads is
+`desc[i].len`, snapshotted once and validated (`0 < len <= PERIOD_BYTES`,
+`len % FRAME == 0`; a bad len is dropped) -- so no client address is ever on the
+read path (the I-30 discipline). The load-bearing memory ordering lives in ONE
+place, `libthyla-rs::weft` (`slot_produce`/`slot_consume`/`slot_pending`), which
+both the probe (producer) and nocturned (consumer) obey: `prod_tail`'s
+Release/Acquire pair carries the payload+len across the Proc boundary (no torn
+period), the full-check (`pt-ch >= K`) stops the producer overwriting an
+undrained slot, and `cons_head` is Release-bumped AFTER the copy so the two never
+touch a slot at once.
+
+**One design point that is not obvious and is worth recording.** A ring producer
+writing to a STOPPED stream generates no poll event -- the ring is shared memory,
+not an fd -- so nocturned would not notice new data until its next poll timeout,
+which was 1000 ms. For N-2b-2a the fix is a bounded idle poll (`IDLE_POLL_MS` =
+100 ms in `main.rs:58`): a running stream still wakes on the device IRQ every
+period and byte writes still wake on the conn fd, so only a stopped stream's
+ring-notice latency is affected, and 100 ms is imperceptible for a chord start.
+The producer->consumer wake POKE that removes even that latency is deferred to
+N-2b-2b (the ready-ring is already there; wiring it is the next chunk). Named so
+the 100 ms is understood as a chosen bound, not an accident.
+
+**Verified rather than assumed.** The producer WRITES the ring through its client
+mapping, so the map had to be read-write, not read-only. Checked:
+`sys_weft_map_for_proc` -> `weft_map_claimed` -> `burrow_share_into(p, v, va,
+VMA_PROT_RW)` (`syscall.c:7000`) -- RW confirmed, so the write path is sound.
+
+**The witness (the discriminating one).** `/ring-voice-probe` now mints TWO ring
+voices and streams a 1 kHz + 2 kHz chord THROUGH the rings (one tone per ring,
+`t_yield` back-pressure). joey runs it under `thylacine.ringprobe` INSTEAD of the
+byte `/nocturne-probe` -- exclusive, one wav, one chord span -- so the ring is
+the ONLY audio in the capture: any chord present came through the zero-copy path.
+`tools/test-ring-audio.sh` boots with the wav backend and judges the FILE:
+`PASS(chord): 70 windows carry 1000+2000 Hz at once; silent tail 34; 104 windows
+total`. Both tones SIMULTANEOUSLY = the mixer summed two ring voices; a torn
+period would corrupt the tones and fail the Goertzel; `dropped=0` on both rings =
+no period failed the consumer's len validation. All regressions green:
+`test-ring-voice` (N-2b-1 substrate, no capture), `test-audio` (N-2a byte chord,
+`PASS(chord): 59 windows` -- the exclusive ladder left the default intact), and
+`test.sh` (the default suite).
+
+**Wrong turn, caught cheap.** First build failed: I typed `IDLE_POLL_MS: i64` but
+`t_poll`'s timeout is `i32` (`lib.rs:1295`). cargo caught it in one line; fixed
+to `i32`. Cost: one rebuild.
+
+**Vault.** `quaestor owner` on the changed paths: `weft.rs` is OWNED by
+`sub-libthyla-rs` and `joey.c` by `sub-stratum-boot` (so their descriptions do
+NOT go in a reference doc); the joey change lands in the audio-ladder region that
+dossier explicitly disclaims and touches no banner-ABI literal, so no dossier
+prose is owed there. The one owed sweep is `sub-libthyla-rs.md` gaining the new
+`slot_*` primitives -- actionable when the Nocturne arc merges to main and the
+vault syncs. Nocturned/probe/tests are UNOWNED -> `docs/reference/153-nocturne.md`
+(done this PR).
+
+**The batched N-2b audit CLOSED CLEAN (same run): 0 P0 / 0 P1 / 0 P2, 3 P3.**
+Opus fallback (Fable out of credits; MODEL(start)==MODEL(end), no mid-run
+switch). The prosecutor re-derived the load-bearing surface from source, not from
+the comments: the cross-Proc SPSC memory ordering (each Release/Acquire required
+and present -- no torn read, no in-flight overwrite; wrapping_sub exact), the
+consumer's memory safety against a fully-hostile ring (own trusted geometry ->
+every index bounded; desc.len the only client value on the read path,
+snapshot-once + validated), the #847 dual-count lifetime, and the consume-once
+SPSC backstop -- all sound, no finding on the crux. The 3 P3s were witness/comment
+quality: F1 (the probe's control-(b) over-attributes voice-0-unmappable to the
+id==0 gate, when the owner gate independently refuses it -- reworded to "id==0 AND
+owner"), F2 (the back-pressure stall bound was a yield COUNT, which false-fails a
+live-but-starved consumer under host contention -- made it a monotonic-time
+deadline), F3 ("sole producer THREAD" safety note). Plus a self-audit SA-2 (a
+compile-time K*PERIOD_BYTES-fits-payload assert). My self-audit SA-1 (nocturned
+reads the client-writable shared cons_head) was WITHDRAWN: the prosecutor
+independently confirmed it yields only bounded garbage to the client's OWN voice
+(within I-37 + the deferred F5 envelope), so touching the verified-sound ordering
+for a non-defect was the wrong move. Not a dirty close -> no re-audit round.
+
+**Open (deferred, not v1.0).** The blocking back-pressure POKE is a v1.x item:
+the research finding is that `torpor` is per-Proc-keyed (`hash(Proc*, user_va)`,
+torpor.c:55/80), so it CANNOT do the cross-Proc consumer->producer wake the
+design doc casually named -- a real cross-Proc park+wake needs a NEW kernel
+primitive (a physical-page-keyed futex, or wiring the weft ready-ring's
+validated-not-wired park leg). That is a kernel-scope fork for the operator, not
+a v1.0 blocker (the t_yield busy-poll is the correct v1.0 answer). The "SMP gate
+owed at the N-2 close" note is SUPERSEDED: the whole Nocturne N-2 arc is
+userspace-only (verified -- the kernel changes in 562cbe50..HEAD are all from the
+main merge, already SMP-gated on main), so N-2b owes no fresh SMP gate.
+
+---
+## 2026-09-06 (aux) -- Nocturne N-2b-1: the zero-copy Weft ring substrate
+
+The operator ratified N-2b and said "feel free to start"; effort confirmed max.
+N-2b-1 (`497f7151`) lands the ring's allocate + share + map half -- a voice's
+`data` leaf, an `h_weft` Tweft responder, a per-voice ANON ring, and
+`/ring-voice-probe` to map + validate it. The period producer/consumer protocol
+is N-2b-2.
+
+**The finding that shrank the chunk.** An Explore subagent mapped the Weft
+substrate end-to-end; the pivotal answer was that `sys_weft_share_for_proc`
+(syscall.c:6875) is GENERIC and CAP_HW_CREATE-gated -- not hardwired to `/net`
+-- and the Tweft responder lives in the userspace server (netd's `h_weft` is the
+verbatim template). So N-2b-1 is USERSPACE-ONLY: the kernel Weft mechanism is
+reused unchanged, `weft.tla` is not in play, and no kernel change was needed.
+The roles invert vs netd (nocturned = allocator+consumer, probe = producer),
+matching `weft_ring_hdr`'s prod_tail/cons_head ownership exactly.
+
+**The wrong turn the boot caught.** I first gave `data` mode 0o600 ("owner-only
+intent; the real gate is h_weft"). The boot FAILED: `RING-VOICE-PROBE FAIL: open
+nodes/<id>/data`. The kernel's dev9p rwx enforcement (A-2d) gates the OPEN on the
+file mode BEFORE any handler runs, and a boot probe is not uid 0 -- so 0o600
+refused the open before h_weft's owner gate could speak. The witness discriminated
+cleanly: nocturne-probe (opens `audio` at 0o666) passed in the same boot, so the
+only variable was the mode. Fixed to 0o666, matching the established pattern
+(`audio` is 0o666; authority is server-side at the operation, not the mode).
+Re-boot GREEN: `mapped ring va=0x100400000 K=8 size=20480 payload=20160`.
+
+**The authority shape.** Because `/dev/nocturne` is one shared kernel dev9p
+session, the h_weft owner gate cannot isolate mounted clients from each other
+(the pre-existing F5 limitation). The kernel's CONSUME-ONCE share claim is the
+SPSC producer-uniqueness backstop: only the first Proc to SYS_WEFT_MAP a voice's
+ring claims it; a second mapper gets a claim failure. The probe proves both a
+positive (map + geometry) and two controls (idempotent re-map; voice-0 refused).
+
+**A dead-code catch.** I added a `ctl remove` to the probe "to exercise the
+RingVoice teardown at runtime" -- but ctl is 0o644 (owner-write) and the probe
+is not uid 0, so the remove is refused at the kernel rwx layer: dead code whose
+comment falsely claimed coverage it never had. Removed it; the probe now leaks
+its mount-minted voice exactly like /nocturne-probe does (the F5 root). The
+RingVoice Drop is left to the batched N-2b formal audit, not a false runtime claim.
+
+Still open: N-2b-2 (the period protocol). And the N-2a-4 host correction stands
+(clade cannot build on the Pi; it needs a big-RAM GCP builder -- surfaced, awaiting
+the operator).
+
+---
+
+## 2026-09-06 (aux) -- Nocturne audit close: verified GREEN and pushed
+
+The prior entry left the runtime test + push OWED (mac-blocked). The mac freed
+(operator), so this short run discharged it. Model OPUS 4.8.
+
+**The ramfs was stale, and that was the trap.** The last `build all` ran at
+`e9f69dc7` -- which still HAD the F6 TX-reprime gate -- so the baked ramfs
+predated the F6 revert (`9b17f56f`). Testing it would have witnessed reverted
+code, not the shipped code. Rebuilt (`build all`; fresh pool+key pair, seed
+`0xac4ee5e3371a2364`), then verified by CONTENT, not exit code: the nocturned
+extracted from `build/ramfs.cpio` is byte-identical to the freshly staged build
+(`sha256 a98ba4b4...`). Bake traps fail as absent/stale content, so the
+byte-compare is the gate, not the ledger line.
+
+**Both runtime witnesses GREEN** (single boots; wav-capture + verdict; each with
+its checker's discrimination selftest running first, #245):
+- `test-audio` (N-1/N-2a-1, `/nocturne-probe`): `joey: nocturne-probe OK`; the
+  389 KB capture PASSes the chord verdict -- 59 windows carry 1000+2000 Hz at
+  once (both tones in the SAME windows = the mixer proof, unmeetable by two
+  voices played sequentially). So F1's conn-scoped owner gate does NOT regress
+  the probe (it mints + writes both voices on the one mount conn -> same-conn
+  writes allowed).
+- `test-sdl-audio` (N-2a-2, the SDL `thylacine` backend over a fresh private
+  `/srv/nocturne` conn): `joey: sdl-audio-probe OK`; the 487 KB capture PASSes
+  the chord verdict -- 78 windows. So the F1 owner gate + F2 accept-refuse + conn
+  teardown do NOT regress the private-conn path.
+
+**Pushed** `0c0456ab..a40d0081` to both mirrors (codeberg + github, ls-remote
+verified). This CLOSES the P1 (F1 cross-Proc voice injection) on the mirrors,
+which had carried it since `0c0456ab`.
+
+**Still open, handed back (Opus stop-rule -- design/budget items are the
+operator's):** N-2a-4's empirical DOSBox-sound verification (needs a clade
+rebuild = GCP budget); N-2b's Weft-ring voice design ratification. Deferred and
+tracked (not blockers): F5 [P2, immortal mount voices -- architectural]; the
+proper F6 fix [P3, count-based stale-completion rejection]; F9 / F1-followup /
+F-R2-2 [P3]. Dispositions: memory/audit_nocturne_closed_list.md.
+
+**Doc-per-PR close (`31a820fb`).** The fixes had been pushed without their
+reference-doc update. `quaestor owner` put `usr/nocturned/src/*` UNOWNED, so
+the gap was closed in `docs/reference/153-nocturne.md` -- the F1 owner gate,
+the F2 always-armed listener + accept-refuse at `MAX_CONNS`=32, the F3
+`ctrl_drain_stale` control-queue resync, the error-path rows, and a caveat
+recording the audit + the deferred F5.
+
+
+## 2026-09-06 (aux) -- Nocturne N-2a-4 code + the audit of the whole audio surface
+
+**Two things landed**: N-2a-4's code (`c5136f31`, LOCAL/unpushed) and the first
+adversarial audit of the whole Nocturne surface (N-1..N-2a-4) plus its fixes. The
+session ran on OPUS, not Fable (it fell back; the operator-away rule then bounds
+autonomy to non-design work -- so N-2a-4's GCP verification and N-2b's design
+ratification are handed back, not taken).
+
+**N-2a-4 -- a scope correction.** NOCTURNE.md section 8 recorded "flip the nosound
+config"; that premise was wrong. config.h has always compiled the DOSBox mixer
+("the mixer still runs the emulation into a null sink") -- patch
+`0004-thylacine-force-dummy-audio` (a `setenv SDL_AUDIODRIVER=dummy`) was the SOLE
+silencer, and the audio-stubs are opusfile/speexdsp CD-DA codec shims, unrelated.
+So the code change is just retiring 0004. Empirical verification needs a clade
+dosbox rebuild = GCP budget = an operator decision on Opus; and the thyla-pi has
+NO clade toolchain (`build/clade` absent), contradicting the resume note's "build
+on the ready pi." Plan + the open DUKE3D.CFG FXDevice=13 question:
+scratchpad/n2a4-verification-plan.md.
+
+**The Nocturne audit (rounds 1+2).** Round 1 (holotype-reviewer, Fable 5.1,
+78/78 JSONL-verified) prosecuted the virtio-snd driver + mixer/server: 1 P1 +
+4 P2 + 4 P3, three systemic roots -- (a) ownership was a field never gated,
+(b) the shared /dev/nocturne mount is ONE 9P conn so per-conn bounds go box-wide,
+(c) the driver tracked in-flight TX by a bitmask, not the posted-minus-reaped
+count. My parallel self-audit independently found the P1's sibling (the unbounded
+reap loop == the reviewer's F7).
+
+Fixed (committed, compile+bake verified, NOT runtime-tested -- the mac is held by
+main's H-arc gfx gates): F1 [P1] the cross-Proc voice-injection hole (`867a0632`,
+a server-side conn-scoped owner gate; voice 0 the world-shared exemption);
+F2/F3/F4 [P2] + F7/F8/SA2 [P3] (`816010df`, `f56fe99b`, `e9f69dc7`).
+
+**The wrong turn, and what caught it.** My F6 fix (start() refuses to prime a
+dirty TX ring) was a NET REGRESSION: on a PCM_START control-timeout it left
+PERIODS buffers queued-but-never-returned with no reclaim path -> audio wedged
+PERMANENTLY, on the exact transient F6 targeted. My own self-audit had checked F6
+for a livelock and missed the wedge one function-call away, on the start()-failure
+path it never opened. The round-2 dirty-close audit caught it (F-R2-1, P2). Round 2
+ran on the OPUS FALLBACK: Fable ran out of credits mid-round-2 (HTTP 429), so per
+the reviewer-model rule I re-spawned on Opus -- context-independence, not family
+diversity, was its value that round, and it re-derived the accounting the
+same-context self-audit could not. Disposition: I REVERTED F6 (`9b17f56f`, keeping
+F3 -- round 2 confirmed F3 clean and hostile-device-robust) rather than stack a
+reclaim fix that carries its own residual wedge; with no round-3 available (Fable
+out) to verify new code, reverting to proven pre-F6 code is the zero-new-risk
+close. F6's round-1 hazard (idle-STOP double-post, a pre-existing P3, latent in
+production) is re-deferred for a proper count-based fix under a review.
+
+**Deferred, risk stated (not a blocker).** F5 [P2] immortal mount-minted voices --
+round 2 confirmed it invariant-safe (bounded graceful ENOMEM) but
+under-characterized: persistent + box-wide + reachable by any proc via the
+world-writable nodes/new + leaks under crash-churn; its proper fix is
+architectural. F9 [P3], F1-followup [non-security], F-R2-2 [P3, F2 accept-spin]
+tracked. Full dispositions: memory/audit_nocturne_closed_list.md.
+
+**Cost / open.** The mandatory P1+P2 (F1-F4) are fixed and compile+bake clean, but
+the runtime witness (test-audio + test-sdl-audio) is MAC-BLOCKED by main's gfx
+gates, so the PUSH is owed -- the mirrors (0c0456ab) still carry the P1 injection
+hole until it lands. Owed to the operator: N-2a-4 GCP verify + N-2b ratification
+(Opus stop-items). Along the way: closed a vault-surfaced stale proc.h comment
+(`e30d95d0`, VIVARIUM grew struct Proc 352->392), and a self-compaction failed on
+a session limit (since reset; context never compacted, so the run continued in place).
+
+## 2026-09-05 (aux) -- Nocturne N-2a-3: the Quake sound flip
+
+**Landed** (aux-3, on 348d9780): TyrQuake has sound. Its software build's
+object list selects `snd_sdl` over `snd_null` (the GL build already used
+`snd_sdl`), the three play scenarios run without `-nosound` and assert Quake's
+`Sound Initialized: 16 bits @ NHz`, quarry splits `PLAY_ARGS` (sound) from
+`BENCH_ARGS` (`-nosound` kept), sdl2 patch `0003` makes DUMMY an auto-selectable
+fallback, and `tools/test-game-audio.sh` + `audio-verdict.py --music` are the
+W-4 witness. Effort max.
+
+**Scope narrowed mid-chunk, on a verifiability finding.** N-2a-3 was planned
+to flip DOSBox-X too. But DOSBox-X builds ONLY through the clade C++ fork
+(`build_clade`/`stage_clade`, `THYLACINE_BAKE_CLADE=1`) -- a dev-host
+`build all` does not build it (`build/clade/bin/clang++` absent), and its DX-1
+config compiles `nosound` (`dosbox-x-sources.py`). So retiring its `0004`
+patch on this host would (a) have no local effect -- the stale binary, still
+forcing `SDL_AUDIODRIVER=dummy`, is what gets baked -- and (b) be unverifiable.
+That is exactly the deferred-verification hazard the discipline forbids, so
+the DOSBox flip (0004 + the `nosound` build config + tyr-glquake, which needs
+clade GL) is split to **N-2a-4**, to be built and verified on thyla-pi. `0004`
+was restored to the tree. The Quake flip stands alone and is fully verified
+on the dev host.
+
+**A wrong claim caught -- mine, from the previous run.** N-2a-2's backend,
+docs, commit message and patch preamble all said a soundless boot "falls
+through to DUMMY". Reading `SDL_AudioInit` for this chunk: the auto-selection
+loop `continue`s past every `demand_only` driver, and upstream marks DUMMY
+`demand_only`. So as landed at 348d9780 a soundless boot did NOT reach DUMMY;
+`SDL_Init(SDL_INIT_AUDIO)` failed "No available audio device" -- harmless to
+the probe (never run without the device), fatal to DOSBox-X's combined
+`SDL_Init`, which is precisely what its old 0004 `setenv(SDL_AUDIODRIVER=dummy)`
+papered over. Had I retired 0004 on that claim, every soundless DOSBox boot
+would have `E_Exit`ed. The mechanism is now real: sdl2 patch `0003` flips
+DUMMY's `demand_only` to `SDL_FALSE` under `__thylacine__` (last in
+`bootstrap[]`, so reached exactly when thylacine declined). Every copy of the
+claim was rewritten to name 0003 (`SDL_thylacineaudio.c`, `SDL_config.h`, the
+0002 preamble, reference 142, manual 41); AUDIT-TRIGGERS point (22) records
+it. The catch came from re-deriving a load-bearing claim from the code before
+building on it -- the thing a prosecutor is told to do, done to my own work.
+
+**A second ordering catch, before it ran.** Quake's `Host_Init` calls
+`VID_Init` (944) before `S_Init` (947), so in the GL scenario the
+`sdl-gl: CAP_JIT acquired` and `GL_RENDERER` lines print BEFORE
+`Sound Initialized`. My first insertion put the sound `expect` right after
+`lc_send`, which would have consumed past the capability line the scenario
+expects next and failed a gate that had nothing to do with audio. Moved after
+the renderer leg. The software scenarios print nothing the gate wants between
+launch and the sound line, so their order (sound, then `Quake Initialized`)
+stands. Same lesson as the expect-residue pin: an expect placed after a later
+token silently discards the earlier one.
+
+**The witness design.** A game-audio verdict must not be satisfiable by the
+boot probe, and the obvious fix -- window the capture -- does not work: QEMU's
+wav backend appends only while the guest stream runs, so a boot chord and the
+game sit ADJACENT in the file. joey therefore DECLINES the probe under
+`thylacine.noaudioprobe` (announced in the log; the wrapper greps it), and
+the wav is the game's alone. `--music` itself: >= 2 s of windows above -40
+dBFS; median spectral flatness over quarter-octave bins 150 Hz..4 kHz below
+0.45 (one-bin white noise measures ~0.56, e^-gamma -- measured, then pinned
+by the selftest, not assumed); >= 4 distinct dominant bins (a buzz has 1, an
+alarm 2, the chord 1-2). Ten synthetic cases both ways, and the two real N-1
+/ N-2a-2 chord captures fail it (78 and 63 active windows < 100). A 3 s chord
+is pinned to fail on distinct bins, so a future longer probe cannot pass.
+
+**Scope, exactly.** The bench/wedge/venus scenarios (`glq-bench`,
+`glq-wedge-probe`, `glq-decomp`, `glq-virgl`, `vkq-venus`, `ls-gfx-mp`) keep
+`-nosound` deliberately: an fps figure with an audio thread's blocking writes
+under it is a property of the sound path. tyrquake's 0001 guard patch stays
+load-bearing (`-nosound` is still a user flag and the bench legs pass it);
+only its `snd_null.c` `S_UnblockSound` hunk went inert (the software build no
+longer compiles `snd_null.c`; the GL build never did). DOSBox = N-2a-4.
+
+**Measured.** GATE 1 (device present, `tools/test-game-audio.sh ls-gfx-quake`):
+the 5.1 MB capture judged `PASS(music): 749 active windows of 1339; median
+flatness 0.20; 18 distinct dominant bins` -- Quake's demo1 audio, neither
+noise nor a buzz -- and the guest reached `Sound Initialized: 16 bits @
+48000Hz`. The wav is the driver proof (DUMMY plays to nowhere -> a silent
+capture -> `--music` fails). GATE 2 (`THYLACINE_NO_AUDIO=1`): `/srv/nocturne
+absent` then `Sound Initialized: 16 bits @ 48000Hz` -- 0003 carried tyr-quake
+to the DUMMY fallback rather than "Couldn't init SDL audio", the 0003 witness.
+The `--music` selftest holds ten synthetic cases both ways, and the two real
+N-1/N-2a-2 chord captures fail it (78 and 63 active windows < 100) -- the
+negative controls on real data. The 0003 SABOTAGE control (the same
+NO_AUDIO boot WITHOUT 0003 must fail) was NOT run -- it needs a
+rebuild-without-0003; the mechanism is read from SDL_AudioInit's demand_only
+skip and the positive boot stands with that.
+
+**A gate that failed its own first run -- mine.** GATE 1 first came back FAIL
+"audio init did not run" while writing a 5.1 MB wav (audio plainly played).
+The bug was in the gate: it grepped the transcript for the `lc_step` MESSAGE
+text ("sound init: ...") which goes to the `.steps` file, not the raw guest
+line ("Sound Initialized: 16 bits @ 48000Hz", no space before Hz) that lands
+in the transcript. Fixed to the raw line, rate-agnostic (both driver and
+fallback print 48000, so the line cannot identify the driver -- the wav
+does). The two-halves lesson: a gate's capture half and its grep half are
+different, and only a real boot exercises the grep against real output.
+
+---
+
+## 2026-09-05 (aux) -- Nocturne N-2a-2: the SDL audio backend
+
+**Landed** (aux-3, on 72d4240d): `usr/ports/sdl2/thylacine/SDL_thylacineaudio.{c,h}`
+-- SDL's audio driver for Nocturne -- plus its witness `/sdl-audio-probe`,
+`tools/test-sdl-audio.sh`, and the `thylacine.sdlaudio` boot arg. Effort max
+(`effort-report.sh`: `max (this session)`).
+
+**What it is.** Four SDL entry points over plain blocking file ops, the audio
+twin of `thyla_tap.c`: `Init` probes `/srv/nocturne` and declines when absent
+(DUMMY wins on a soundless boot); `OpenDevice` forces the device format
+(S16LE/48 kHz/stereo, SDL's core converts), opens `/srv/nocturne` DIRECTLY,
+mints a voice via `nodes/new`, opens `nodes/<id>/audio`; `PlayDevice` writes
+the period in <= 8 KiB chunks; `CloseDevice` closes the connection, which is
+what reaps the voice (`drop_conn_voices`). `WaitDevice` is SDL's no-op --
+pacing rides the voice's BLOCKING write (nocturned parks the Twrite until the
+mixer drains room), so once the 64 KiB FIFO fills each `PlayDevice` returns
+at the drain rate. A driver that also slept would underrun.
+
+**Measured.** `sdl-audio-probe: PASS driver=thylacine freq=48000 ch=2`;
+`joey: sdl-audio-probe OK`; the wav (491520 B) judged
+`PASS(chord): 78 windows carry 1000+2000 Hz at once; span 78; silent tail 47;
+127 windows total`. The N-1 witness re-run unchanged: `PASS(chord): 59
+windows`. Backend compiled into `libSDL2.a` (`THYLACINEAUDIO_bootstrap` D +
+referenced U by `SDL_audio.c`), `sdl-audio-probe` 1002064 B linked.
+
+**The design decision worth recording.** The witness could not simply be a
+second boot probe. `audio-verdict.py --chord` demands ONE contiguous span and a
+SILENT TAIL, and its `loud_outside`/gap checks fail on any second tone in the
+same capture -- so the SDL probe and the N-1 chord probe cannot share a wav.
+Rather than weaken the verdict, joey runs the SDL probe INSTEAD of the N-1
+probe under a boot arg (`thylacine.sdlaudio`, the `bootarg_has` idiom
+`thylacine.nostorm` already uses), and `test-sdl-audio.sh` passes it. Default
+boots keep the N-1 witness byte-for-byte; the regression run above proves it.
+
+**A wrong turn caught before it compiled.** My first header omitted the
+`#define _THIS SDL_AudioDevice *_this` re-definition. `SDL_sysaudio.h` defines
+`_THIS` for its own struct and `#undef`s it at its end, so every driver header
+re-defines it (cf. `SDL_dummyaudio.h`). Caught by reading the dummy driver's
+include order before the first build, not by the compiler -- the cheap kind.
+
+**Scope, exactly.** This is the backend + its proof. The GAME-SOUND FLIP --
+retiring DOSBox patch `0004-thylacine-force-dummy-audio` and the `-nosound`
+in the play scenarios (quarry `BASE_ARGS`, tyrquake's nosound-guard) -- is
+SPLIT OUT as N-2a-3 (`NOCTURNE.md` section 8). Why: it touches ~10 scenario
+files, several of which (`glq-bench`, the wedge probes) keep `-nosound`
+deliberately for perf isolation, and it re-enables tyrquake/DOSBox audio-init
+paths that have never run on Thylacine -- a separable surface with its own
+bake budget and its own W-4 gate (RMS floor + spectral flatness). Games still
+run soundless today; the manual says so.
+
+**Also in this bake (owed since N-2a-1).** joey's nocturne section still said
+"1 kHz then 2 kHz written to /dev/nocturne/audio; N-1" while the probe has
+mixed two voices since N-2a-1; the comment and the OK/FAILED lines now say
+what runs. The gates grep the stable `joey: nocturne-probe OK` prefix, so
+this is cosmetic -- re-baked and re-booted regardless.
+
+**Vault.** `quaestor owner`: the sdl2 audio paths + `sdl-audio-probe` +
+`test-sdl-audio.sh` are UNOWNED (reference written in `142-sdl-port.md`, the
+sweep filed with vault); `joey.c` / `build.sh` / `run-vm.sh` are OWNED but
+already STALE from main's churn (+1351 / +3089 / +115 lines) -- my additions
+are small and noted for the de-stale, not a de-stale of main's work.
+
+**Open.** Holotype (Fable, max) on N-1 + N-2a-1 + N-2a-2 and the SMP gate
+are BATCHED to the N-2 close (double-the-distance). The ~340 ms FIFO latency
+ceiling is the byte-copy path's; N-2b's ring trims it. The DOSBox fullscreen
+re-run (owed to main) now rides N-2a-3's bake.
+
+---
+
+## 2026-09-05 (aux, Fable 5.1 -> Opus 4.8, effort max) -- the main merge + a quaestor merge-blind-spot fix, then Nocturne N-2a-1 (multi-voice mixing)
+
+Two things landed, and the first was an unplanned detour that turned into a real
+fix.
+
+**The merge, and the vault-lint wall (8b28327f).** Before opening N-2 I merged
+origin/main into aux-3 (292 commits: the fullscreen-zoom fix f25781ad, the KT-1
+session-compositor arc, the vault cutover). Four conflicts, all append-shaped,
+resolved by union -- the interesting one was the tapestryd G-3 audit row, which
+had diverged: aux carried a FRAME-INTENT addendum, main carried the KT-1.5d
+session-priority addenda, and *neither had the other's*. Factored the giant
+single-line cell into shared-prefix + aux-middle + main-middle + tail and
+rebuilt it as base + both addenda (bold markers rebalanced), so no prose was
+dropped. Then the commit was REFUSED: the merge brought the vault graph + the
+shared quaestor pre-commit hook into the aux worktree, and `vault-lint --staged`
+failed 9 ways. A merge stages every main-changed file, so `--staged` effectively
+lints the whole graph -- that is why a pure-code merge tripped it.
+
+Five of the nine were mine to fix (`quaestor render` regenerated 5 stale views;
+declared the 7 aux-authored `ls-gfx-dosbox*`/`ls-gfx-throttle` .exp gates as
+abi-boot-banner `mirrors` -- they match `EXTINCTION:` as failure-detectors, so
+they BREAK if it reworded: owed R6 debt aux incurred authoring them). That grew
+the mirror set 28->35 and surfaced the real wall: 4 committed HISTORICAL chg
+records now "under-cover" (mirrors-checked 15/28 < 35).
+
+The wrong turn I did NOT take: bumping those 4 records to 35. Vault ruled it
+would be a FALSE claim (the old author never checked mirrors that did not exist
+yet) plus an R3 violation -- the records correctly record their era's count and
+stay grandfathered. **This corrects my own merge commit message, which called
+the bump a "cosmetic future pass": it is NOT owed.**
+
+The root cause instead: quaestor's R6 grandfather (86ad7e8c) exempts a
+committed, unchanged chg via `gitDirtySet` = `git status --porcelain`. During a
+merge, HEAD is the first parent, so git-status marks EVERY merge-introduced path
+dirty -- defeating the grandfather at the one moment it matters, the exact case
+the check's own comment says "an upstream merge adds new consumers must not
+retroactively fail." `--no-verify` (which the operator separately sanctioned for
+merges) is CLASSIFIER-BLOCKED in this harness, so it was not even available to
+me -- which made the tooling fix not optional but *required* for aux. Fixed
+`validate.go`: during a merge, intersect the HEAD-dirty set with the
+MERGE_HEAD-diff set, so a chg taken UNCHANGED from the merged branch (== MERGE_
+HEAD) is grandfathered as it would be one commit later, while a hand-resolved
+path stays enforced. Regression `TestMirrorsCheckedGrandfathersMergedIn` (a real
+git-merge fixture; sabotage-verified -- it fails with the refinement disabled);
+full quaestor suite green; lint on the staged merge went 9 fails -> 0. Vault
+confirmed KEEP (aux can't `--no-verify`, reverting would diverge aux/main
+forever, and it is the correct root fix), will mark the bug fixed-by-8b28327f,
+and will report to the operator that their "B over A" choice rested on the false
+premise that aux could `--no-verify`. The fix flows to main via aux->main and
+unblocks EVERY mirror-set-growing merge for both tracks.
+
+**Nocturne N-2a-1: multi-voice mixing (the graph core's first half).** N-1
+played one voice; N-2a-1 proves the graph MIXES. `nocturned/src/server.rs` grew
+the single FIFO into a `Vec<Voice>` (cap 16), each an independent S16-stereo
+FIFO + gain, exposed via `nodes/new` (open = mint, read = the id) + per-voice
+`audio`/`ctl`/`info`; voice 0 stays the persistent root `audio` file.
+`next_period` mixes all voices in a float32 accumulator, gain-scaled, clamped
+once to S16 (the f32 accumulator makes N unity voices un-overflowable before the
+clamp -- the I-14 posture at the graph layer). Scoping named for the operator:
+this is the BYTE-COPY path (the designed fallback, NOCTURNE.md 6.5), the
+`nodes/` surface is deliberately minimal, and the ports/links/ring/descant ABI
+that NOCTURNE.md 9/10 leaves for the operator is NOT built -- N-2b (Weft ring),
+N-2a-2 (SDL backend), N-2c (thread split), N-4 (descants) follow.
+
+The witness is the reusable part. The probe mints two voices and plays 1 kHz +
+2 kHz SIMULTANEOUSLY (interleaved writes park on full FIFOs, pacing both to
+realtime so the mixer sums them every period), and `audio-verdict.py --chord`
+asserts BOTH tones in the SAME 20 ms windows. The control that makes it real: a
+SEQUENTIAL capture (each tone alone -- the N-1 shape) FAILS the chord check, so
+the witness cannot be satisfied by two voices that merely played at different
+times. Measured on the real boot: guest `voices 3`, both voices' bytes-in full,
+111 periods, `joey: nocturne-probe OK`; the captured wav judged
+`PASS(chord): 59 windows carry 1000+2000 Hz at once`. Full boot ladder green,
+0 EXTINCTION. holotype + SMP gate batched to the N-2 close (double-the-distance);
+one stale log string (joey still says "Nocturne N-1") rides N-2a-2's bake.
+
+## 2026-09-05 (aux, Fable 5.1, effort max) -- Nocturne N-1: the virtio-snd driver, the Plan 9 audio file, the wav witness
+
+Same run as N-0, straight through the checkpoint: N-1 is the substrate every
+candidate design needs (a driver, a device file, a witness), so it did not
+wait for the operator's ratification of the design's open questions. Landed
+in one commit (@562cbe50 on aux-3): `usr/nocturned` (the
+modern-PCI virtio-snd transport in `snd.rs`, the `/srv/nocturne` 9P tree in
+`server.rs`, one poll loop over listener + connections + the pollable IRQ fd
+in `main.rs`), `usr/nocturne-probe`, a one-entry `/dev/nocturne` mount stub
+in `kernel/devdev.c`, the joey mount + probe, the warden manifest, run-vm.sh's
+`THYLACINE_AUDIODEV`, and `tools/audio-verdict.py` + `tools/test-audio.sh`.
+
+**What worked first time.** The device bound and negotiated on the first
+boot: PCI (0,6,0) on INTID 37 (a line distinct from the NIC's and the GPU's --
+the run-vm.sh placement after `rng_pci0` was right), features lo=0x79000000
+hi=0x101, one stream offering S8..FLOAT and all fourteen rates, SET_PARAMS at
+QEMU's own defaults (2048/8192, S16, 48 kHz), PREPARE, `/srv/nocturne` served,
+READY. The transport was written from the netdev crate's constants and the
+GPU's queue-setup shape; the 9P server from ptyfs's framing and its parked-
+read idiom turned into a parked WRITE (the blocking `audio` write of
+audio(3)).
+
+**Wrong turns, caught.** (1) The probe's first run failed with `joey:
+pouch-smoke spawn FAILED`: I spawned it by its bare ramfs name, but the
+probe block sits POST-PIVOT (joey line ~11300 vs the pivot at ~7130), where
+programs resolve as `/bin/<name>` through the post-pivot bind -- exactly how
+`net-echo` and `jc-probe` are spawned two screens up. One string, one re-bake.
+(2) The wav witness's first real run failed in the READER: QEMU's `wav`
+backend patches the RIFF/data sizes only on a clean exit and the harness
+kills QEMU at teardown, so the file said RIFF size 0 and Python's `wave`
+refused it. A lenient reader (ignore the sizes; take every frame after the
+`data` header) fixed that -- and the header's samples showed the real
+surprise: the file BEGINS with the 1 kHz sine (0, 1069, 2120, 3135 ... =
+8192*sin(2pi k/48)). The backend appends only while the guest's stream runs.
+My negative control -- "the capture starts with >= 0.5 s of silence" -- was
+therefore unsatisfiable by construction, and had it been written more loosely
+it would have passed vacuously (the verdict's OWN selftest had already caught
+that vacuous-prefix shape once, on a synthetic case). The control was
+re-founded on the silent TAIL: the probe's 0.2 s plus the driver's idle-stop
+silence, with nothing loud outside the tone span. That is a better control
+anyway -- it is the property "an empty FIFO yields silence, never a repeated
+buffer or noise", which a driver bug could actually violate. The instrument's
+window is measured from the subject, not assumed from a layout
+([[bug-dx8-fixed-band-blind-to-moderate-yaw]] again, in a different domain).
+
+**Numbers.** Boot probe: 77 periods played, 0 silence periods, 0 TX errors,
+0 bad used ids, `latency_bytes` always 0 from QEMU's device (recorded, not
+relied on). Capture: 319488 bytes = 1.66 s (the probe's 1.2 s + ~0.5 s of
+idle-stop silence); verdict `PASS: 1000 Hz x 25 windows (median 12), 2000 Hz
+x 25 windows (median 37); silent tail 33 windows; ambiguous 0`. The verdict's
+selftest: nine synthetic cases (two PASS shapes incl. 44.1 kHz; reversed,
+silent, single tone, no tail, noise after, gapped span all FAIL).
+
+**Open / owed.** The focused holotype on the driver (an audit-bearing
+surface: DMA + IRQ + untrusted device responses) and the SMP gate for the
+devdev delta are BATCHED to the N-2 close per the double-the-distance rule;
+until then N-1 is landed-not-audited on aux-3 (not merged). The design's
+section 9/10 residue still awaits the operator. Seams recorded in the
+reference chapter: no cooperative quiesce-on-remove (netdev's inherited
+MENAGERIE section 10 hazard), the private copy of the virtio-pci constants,
+no capture/eventq, concurrent writers interleave until the N-2 mixer.
+
+---
+
+## 2026-09-05 (aux, Fable 5.1, effort max) -- Nocturne N-0: the audio research pass + the design candidate
+
+The far side of the DX-8 self-compaction. The resume note's one item was the
+operator's "start fresh on the audio arc"; the operator had named the system
+(Nocturne) and given one requirement verbatim -- permissioned programs must be
+able to hook onto the graph and add their own DSP modules (a convolution
+filter) -- and had asked that the known PipeWire and PulseAudio quirks be
+designed around, not inherited. Under the standing Fable rule this pass ran
+autonomously and produced `docs/NOCTURNE.md` (1236 lines: the prior-art
+digest with sources, the ground truth on both hosts, the candidate design, the
+reserved invariant I-46, the gates, the sequencing N-0..N-7, eleven named
+decisions, nine open questions) plus the scripture reconciliations. No code.
+**The candidate is NOT ratified**: every decision is listed for the operator
+to overturn, and the sub-names are held for signoff.
+
+**What the research settled (evidence in the doc).** Plan 9's `audio(3)` is one
+writer on one file with a one-number latency interface (`stat` length =
+bytes buffered); 9front's `mixfs` is a file server layered over it that mixes,
+resamples to the device format, proxies `volume`, and exports for free -- the
+shape to keep. PipeWire's scheduling page gave the exact mechanism to copy
+(activation records with `pending`/`required` counters, eventfd wakes, remote
+nodes waking peers directly, "mark xrun on unfinished nodes" at cycle start);
+its filter-chain loads plugins into the daemon -- the thing to shed, with
+WASAPI's APOs-in-`audiodg` (a crash kills the engine; a watchdog) and
+CoreAudio's in-process AUs. JACK2 sync vs async gave the never-wait discipline
+and its cost (one period), which the design applies PER NODE so the JACK
+whole-graph desync disappears. Genode 24.02 gave the inversion (the mixer is the
+multiplexer; drivers and apps are both clients) and policy-as-XML; Fuchsia's
+`fuchsia.audio.effects` gave the out-of-process processor contract (VMO ranges,
+`latency_frames`, `block_size`, per-call metrics) that became the descant
+contract almost verbatim, and Zircon's deadline profiles the scheduler
+precedent for the cadence lease; sDDF's sound class matched virtio-snd's
+pre-buffer protocol exactly.
+
+**Substrate findings, all measured this pass.** Both QEMUs (10.0.2 mac, 10.0.11
+Pi) ship `virtio-sound-pci`; the mac's backends are none/coreaudio/dbus/wav,
+the Pi's add alsa/jack/oss/pa/pipewire/sdl/spice. QEMU's device advertises
+FLOAT and 5512..384000 Hz, defaults to 8192/2048-byte buffer/period at 48 kHz
+S16, returns a TX status only when the whole buffer is consumed, has **no
+state gating** on the PCM verbs, and its **eventq is unimplemented** -- so the
+TX completion IRQ is the period clock, there is no xrun event to lean on, and
+device responses are untrusted input (a 2026 QEMU virtio-snd heap-overflow
+write-up is the reminder). The `wav` backend is **playback-only** -- found by
+the warning line QEMU logs when `streams=2` is combined with it -- which makes
+it the deterministic gate witness for playback and no witness at all for
+capture. The Pi 400 has two `vc4-hdmi` playback-only ALSA cards and no
+headphone card (measured), the Pi 500 spec page lists no jack, and the one
+review summary claiming a jack was describing the Raspberry Pi Monitor -- a
+wrong answer caught by going to the product page. In the tree: no
+nanosleep-class syscall exists (torpor's `timeout_us` is the finest wait), no
+native daemon uses a second thread today, INTERACTIVE promotion is reachable
+only via `kobj_irq_wait` and the trusted console, and the `SYS_WEFT_SHARE`/
+`SYS_WEFT_MAP` grant-is-the-share path is already answered by two userspace
+servers (netd, tapestryd's Warp ring) -- so Nocturne's ring needs no kernel work.
+
+**Wrong turns, caught.** The 9front and cat-v man pages and the IWP9 paper all
+refused WebFetch (402/403/a broken TLS chain); the man pages came from the
+GitHub raw mirrors and the paper via thyla-pi with `curl -k` + `pdftotext`,
+which also read the two PDFs (Letz 2009, the sDDF design) the mac cannot render
+(no poppler). The `t_thread_spawn` grep returned nothing because zsh expanded
+`--include=*.rs` -- an empty result that would have read as "no threads" had
+the error line not been visible; re-run quoted. The first scripture-edit
+script aborted on its first anchor (a quoted sentence that wrapped across a
+line) and, because it exits on the first mismatch, applied nothing -- the
+right failure shape; the rerun applied all fifteen edits.
+
+**Decisions taken provisionally (the doc's section 9):** the driver lives inside
+`nocturned` behind the node ring protocol (splittable later; Genode's
+inversion kept as a seam); policy is two files, not a process; float32 planar
+at the sink's rate with server-side conversion at voice entry; async by
+construction per node (bypass/hold/mute, auto-bypass after N misses); the
+cadence lease as the ONE kernel lift, last, spec-first; authority = namespace
++ (owner OR `nocturne-graph` clearance), taps clearance-gated; Plan 9's
+`audio`/`volume` kept; the PulseAudio native protocol for Linux binaries; the
+`wav` backend as the gate witness with positive + negative controls; the
+sub-names held. I-46 reserved in ARCH section 28 AND CLAUDE.md (the I-41
+lesson). Scripture reconciled: VISION section 9, ROADMAP 12.3/12.5, COMPARISON
+(three lines), TAPESTRY sections 9/10, the manual overview, NOVEL (a candidate
+bullet), AUX-ROADMAP (a row). The vault carries none of the touched paths
+(`quaestor owner`, 10 paths, all UNOWNED).
+
+**Open.** The nine questions in NOCTURNE.md section 10 -- above all whether
+sub-10 ms in-cycle DSP (the kernel lift) is on the critical path -- and the
+sub-names. NEXT after ratification: N-1, the virtio-snd driver + the wav
+witness (a driver with DMA + IRQ + untrusted device input: the effort gate
+fires there if the session is not at max).
+
+---
+
+## 2026-09-05 (aux, Fable 5.1, effort max) -- DX-8: DOSBox defaults, presets, per-game configs, the build inputs; Nocturne named
+
+Resumed from a self-compaction with one queued item the resume note called
+"blocked on the operator's archive URLs": registering DOSBox-X and its two
+games in Forage + the build configurator, with the autolock default and the
+cycle presets riding on it. The note was wrong about the block, in two ways
+worth recording.
+
+**The block that was not one.** Duke3D's fetch was ALREADY pinned in
+`build_duke3d_fixture` (archive.org `3dduke13`, sha256 of the zip AND of
+`DUKE3D.GRP`) -- the manifest merely lacked the row. And Tomb Raider's origin
+was in the reference doc (archive.org item `tomb3dem`), so "I don't hold the
+originals" was answerable from ground truth: archive.org publishes md5/sha1 per
+file in its metadata API; thyla-pi has internet; the zip's ten files md5-match
+the operator's hand-staged demo byte for byte. The pins (`4ffd686c…` zip,
+`6a333d2d…` TOMB.EXE) were established there, and `build_tombraider_fixture`
+was exercised on the Pi end to end: cold fetch (19 s), warm cache hit, a
+corrupted `TOMB.EXE` re-staging from the cached zip, a wrong zip failing loud
+on the sha. The lesson is the CLAUDE.md one -- "I cannot verify from this
+tree" was a choice not to look; the networked host was one `ssh` away.
+
+**Where "autolock default" had nowhere to live.** Measured from the gate
+logs: every plain launch loads `~/.config/dosbox-x/dosbox-x-2026.08.31.conf`,
+a file DOSBox-X GENERATES on first launch with every key written out from the
+built-in defaults (`autolock=false` at `sdlmain.cpp:6886`, `core=auto`,
+`cycles=auto`). Upstream has no system-wide config location; the exe-dir slot
+is empty on Thylacine (whereami finds no `/proc/self/exe`) and would shadow
+the user's file anyway (the search is exclusive-first-hit). So a build-time
+default needs a BASE LAYER: patch `0008` parses `/lib/dosbox-x/dosbox-x.conf`
+first and clears the loaded-file list, leaving upstream's flow byte-identical
+-- the first launch's generated user file now inherits the system values, and
+user / cwd / `-conf` / `-set` all still override. `/lib` was already the
+system-data location (joey reads `/lib/ndb`, `/lib/aurora`, `/lib/halcyon`),
+rendered from the configurator's new `DOSBOX_CPU_PRESET` choice (xt..pentium2
+-> `cycles=fixed N`). Both game masters got a per-game `dosbox-x.conf`
+(`mount c .` + the game; TR adds `voodoo_card=software`), so the launch is
+`cd ~/duke3d; dosbox-x` -- the portable-DOS-game idiom, no shell script.
+
+**The witness that a hash could not carry.** "Mouse-look works by default"
+needs a gate leg, and the obvious witness -- the frame hash changes after a
+mouse sweep -- is void: on the earlier probe's frames the click-ONLY pair
+already hashed differently (the shot's flash; a live 3D frame moves by
+itself). A yaw is different in kind: it shifts the whole viewport sideways.
+`gfx_shift.py` reduces each frame to a per-column luma profile over the
+viewport band and finds the shift minimizing their difference; calibrated on
+the probe frames BEFORE the gate ran: click-only -> 0 px, each 20x500 sweep
+-> +-288 px with the sign following the direction. The gate runs the no-input
+CONTROL first (two frames, ~0 required, else "cannot discriminate" -- not a
+pass), then requires >= 100 px for the sweep and the opposite sign for the
+sweep back. Level entry uses `-noautoexec` (drops only the file's autoexec;
+`-c` still runs, verified in `shell.cpp`) + `DUKE3D.EXE /v1 /l1 /s2` -- no
+menu navigation to time -- after Ctrl+F9 (the mapper's shutdown, MK_f9+MMOD1)
+kills the first launch, witnessed by tapestryd's `retire surface` line.
+
+**The gate's first run stacked two DOSBox windows -- and the screendump said
+so.** The Duke leg's quit step sent Ctrl+F9 and then expected tapestryd's
+`retire surface` line; it matched at once and the second launch went ahead.
+Deterministic failure at the mouse arm: control 0, sweep 0. The last
+attempt's frame showed three tiles: the console pane flooded with DOSBox-X's
+"You are currently running a program or game. Are you sure to quit anyway
+now? y/n:" (repeated, forever), DOSBox #1 alive at Duke's episode menu, and
+DOSBox #2 IN THE LEVEL -- so the `/v1 /l1 /s2` warp works, and the click and
+the shift band had straddled two windows. Two defects, both mine: (a) the
+`retire surface` line that satisfied the witness was already in the buffer
+from DOSBox-X's start-up window re-creation -- the "token an earlier leg can
+contain" trap, now fenced behind a fresh echo marker; (b) DOSBox-X's quit
+confirmation has no dialog on this port and falls back to a CONSOLE y/n
+prompt, which a captured game window cannot reach and which a backgrounded
+launch loops onto the console pane -- so the system default now carries
+`quit warning=false` (upstream DOSBox quits at once; the confirmation is a
+DOSBox-X addition the port cannot present), the manual says so, and the gate
+gained a keyboard-turn POSITIVE control between the no-input control and the
+mouse arm, so "not in the level" and "the witness is blind here" can never
+again read as "the mouse is broken".
+
+**The second run failed at the positive control -- and the control was right
+about the instrument, not the game.** Rerun with the fenced quit and
+`quit warning=false`: one DOSBox window, the warp in the level, the no-input
+control at 0 -- and the keyboard turn "did not yaw" either, so the mouse arm
+was (correctly) not judged. My first reading was a focus problem; the frames
+said otherwise. Measured against the DOSBox surface's REAL box in the frame
+(rows 26..438 of the right tile -- top-aligned, with the HUD in its bottom
+~15% and a uniform dark-grey tile ground below it), the keyboard turn had
+yawed the view by 212 px. The witness's band was fixed at display rows
+30..65%, which on this placement straddles the HUD and the empty ground --
+both identical between frames -- and those static columns swamped a moderate
+yaw. The earlier calibration had survived only because the probe's sweeps
+were huge (+-288 px). Fix: `gfx_shift.py` now finds the surface itself
+(per-row luma VARIANCE across the tile, inset past its frame lines -- a
+brightness floor cannot do it, the ground's mean is above a dark sky's) and
+bands 10..80% of that extent; `--extent` also gives the gate the centre to
+click, so no coordinate is guessed. Re-calibrated: keyboard turn 212 px, the
+big sweeps +-296 px, click-only and no-input 0. Two wrong turns in one leg,
+both caught by a control, neither by reading code.
+
+**Small catches.** (1) A Tcl `[autoexec]` inside two gate strings -- the
+command-substitution trap the memory already names -- and my own sweep for it
+was BLIND: it filtered lines containing "exec" to skip `exec` calls, and
+`autoexec` contains "exec". A sweep whose exclusion matches the target finds
+nothing; fixed the sweep, then the strings. (2) The calibration loop's
+`set -- $pair` did not split under zsh -- a silent no-op that read as five
+file-not-found errors. (3) A manual row for live cycle hotkeys (Ctrl+F11/F12)
+turned out to be upstream DOSBox's binding; DOSBox-X binds Host+-/Host+= and
+I could not pin the host key's default from the source, so the row came out
+rather than ship a claim I had not verified. (4) build.sh's populate arms
+baked a STALE game stage past an opt-out flag (`THYLACINE_BAKE_DUKE3D=0` with
+an old stage still baked /duke3d, and the bake-verify then EXPECTED it);
+populate + verify now key on the same flag-AND-stage predicate.
+
+**Forage/configurator.** `[network.duke3d]` + `[network.tombraider]`
+(auto-at-build), forage targets + literal `class.name` sections, and a
+pin-drift control (`test-forage.sh` A9: every hash/url under `network.*` must
+appear verbatim in build.sh -- two copies of one truth). `CHUNK_DOSBOX` /
+`CHUNK_DUKE3D` / `CHUNK_TOMBRAIDER` / `DOSBOX_CPU_PRESET` in the configurator
+with a second constraint kind: DOSBOX=n LOWERS the games (raising the
+emulator back would undo an explicit 17.6 MB opt-out). The emulator itself is
+vendored and deliberately not a manifest input.
+
+**Operator input mid-run (recorded, not acted on yet):** the audio system is
+named **Nocturne**, and a first-class requirement: permissioned PROGRAMS must
+be able to hook into the routing graph and add their own DSP modules (e.g. a
+convolution filter). Both are in the audio-arc memory for the research pass.
+
+**Verification.** All fast tests green: `tools/test-build-config.sh` (ALL PASS, incl. the new
+T-needs + the DOSBOX_CPU_PRESET validation/export), `tools/test-forage.sh`
+(33/33, incl. the A9 pin-drift control and the auto-at-build class),
+`tools/test-configure.sh` (21/21). `build_tombraider_fixture` exercised on
+thyla-pi (cold fetch 19 s / warm / corrupt-restage / wrong-zip loud). Two pool
+bakes (`build.sh kernel`; the second added `quit warning=false`), each verified
+by CONTENT: the relinked binary carries the new log string, the rendered system
+config reads pentium/60000, `/lib/dosbox-x/dosbox-x.conf` readback-verified,
+bake-verify lists DUKE3D TOMBRAIDER DBXCONF. All six DOSBox LS-CI gates green
+on the FINAL pool, serial (LS_CI_JOBS=1): ls-gfx-dosbox 40 s (the baked config
+read back through the FS + the base layer loading on a launch with no -conf),
+-input 45 s, -conf 37 s, -dynarec 35 s, -tombraider 65 s (launched as `cd
+~/tombraider; dosbox-x`, both config layers witnessed, Voodoo from the file),
+-duke3d 107 s first attempt (both layers, the fenced Ctrl+F9 quit, the warp,
+no-input control 0 px, keyboard turn 224 px, right sweep 320 px, left sweep
+-320 px). The kernel is untouched, so no SMP gate is owed. The Duke gate's two
+failed runs before that are the two wrong turns above -- both real defects in
+the gate, neither in DX-8.
+
+---
+
+## 2026-09-05 (aux, Opus 4.8, effort max) -- Duke3D mouse, the throttle-log churn, the manual revival
+
+Operator returned after the DX-7 (Tomb Raider Voodoo) landing and drove three
+threads: the mouse in the DOSBox games, two small tapestryd annoyances, and
+starting a user manual. Audio was named as the *next* arc (fresh session).
+
+**The Duke3D mouse -- root-caused across 4 boots, with a wrong-device trap.**
+"Duke can use mouse though, right?" -- yes, and proving it took care. First two
+probes fired but never TURNED the view; I nearly concluded a motion gap. The
+trap: `qmp-sendtext -p "abs X Y"` drives the virtio-TABLET (absolute), but a
+captured DOS FPS reads RELATIVE deltas from the virtio-MOUSE -- tapestryd sources
+TEV_PTR_REL only from the relative device (server.rs ~798). Switching to
+`-p "rel dx dy"` + forcing `sdl autolock=true` (so the click captures) gave a
+dramatic bidirectional turn (fs frames dxm4-40/42/43). So: mouse BUTTON fires
+unconditionally; mouse LOOK needs autolock + a capture-click. Also learned: in a
+tiled layout `abs` spans the whole 1280px display, so half my early sweep landed
+on the console pane. Findings in [[bug-dosbox-mouse-look-needs-autolock]]. TR
+(1996) is tank-controls -- no mouse gameplay -- so mouse is moot there, a game
+fact not a Thylacine gap.
+
+**Throttle-log churn -- fixed at the root (7ad00831).** The
+`idle-throttle N -> M Hz` say! flooded the console during typing. Root cause: the
+frame clock throttled after only 250ms input-quiet, and a >250ms gap between
+keystrokes is ordinary -- so every keystroke churned 60<->15 and logged a line.
+The WRONG-TURN I caught: I first wrote a log-only debounce (settle before
+logging). It reads faithful but it BREAKS ls-gfx-throttle deterministically --
+it suppresses the gate's transient force->60->15 when the last-logged rate is
+already 15. A flaky gate is worse than the spam. Reverted; raised IDLE_AFTER_MS
+250->1000 instead (clock stays 60 through typing, say! stays per-transition, gate
+stays deterministic). Verified IDLE_AFTER_MS is NOT coupled to
+PRESENT_BURST_WINDOW_MS. Gate: ls-gfx-throttle PASS 76s attempt-1.
+
+**Manual revived (876888cf).** Operator confirmed: Markdown source in the repo ->
+ship in-OS at `/manual` -> render richly via Beacon (plain-text fallback), one
+source. Wrote `docs/manual/40-dosbox.md` (the first chapter: every DOSBox setting
++ effect, cycle presets, the working autolock+mouse-look launch, both games,
+troubleshooting) + revived USER-MANUAL.md (supersedes the 2026-05-31 deferral).
+
+**Fullscreen-zoom -- root-caused, then DEFERRED to main.** Cmd+F (Super+F=zoom) of
+a sub-display surface (DOSBox 640x417) leaves it native-size top-left on black,
+not scaled. reconcile correctly picks Composed (not Direct -- the s.w==dw guard),
+but the composed placement hit placement_rect's SAME-SIZE-CROP branch, so the
+zoomed leaf's `content` reaching composition was ~640x417 not the full 1280x800
+recompute sets. Smoking gun: ZERO letterbox/scanout output after the Super+F
+inject (fs-repro-run.log). NOT a pure regression -- Quake fills because it renders
+at full display res; DOSBox renders a fixed buffer. Operator said main is actively
+in that compositor code -> stopped. main confirmed (yip 0048): their F2 arc
+touches the SAME loci (layout_pane zoom arm + placement_rect), so the fixer must
+REBASE ON F2 first. Handed off: [[bug-zoom-fullscreen-surface-not-scaled]].
+
+**Open / handed off:** Forage registration of DOSBox + the 2 games
+(build-manifest.toml [network.*] entries) is BLOCKED on archive URLs + sha256s (a
+networked fetch; I don't hold the originals); the autolock/preset launcher-default
+rides that work. CLAUDE.md doc-discipline reconciliation for the manual revival
+(deferred rather than rush a binding-scripture edit into a compaction). The
+fullscreen fix (post-F2). Audio arc filed: [[project-audio-arc-future]].
+
+---
+
+## 2026-09-04 (aux, Opus 4.8, effort max) -- DX-7: Voodoo/Glide 3D on Thylacine (Tomb Raider)
+
+Operator: "let's give Voodoo/Glide a shot." First target was Unreal (they had the
+demo) -- but inspecting it showed a 100% Win32 game (Unreal.exe PE32; every
+renderer, incl. SoftDrv, a Win32 DLL; InstallShield installer): DOSBox-X runs the
+hardware, not Win32, so without a Win9x install it cannot run, and that is a
+three-mountain path (Win9x media + DX-6 Win9x-guest + DX-7). Pivoted to a
+DOS-native Glide game.
+
+**The surprise: no build work.** Our DOSBox-X already has the ENTIRE Voodoo/Glide
+stack compiled in -- the source-list generator walks hardware/ + builtin/, and
+Voodoo is runtime-selected by voodoo_card=, not a compile define. Because C_OPENGL
+is OFF in our config, voodoo.cpp maps voodoo_card=auto -> emulation_type=1 = the
+CPU software rasteriser (voodoo_emu.cpp), NO host GL; the built-in GLIDE2X.OVL
+(builtin/glide2x.cpp) supplies the Glide the DOS game loads. So software Voodoo is
+a launch-config path on the already-audited CAP_JIT dynrec (I-42) -- no kernel
+change, no new build. (Binary check: Voodoo_Initialize + GLIDE2X present.)
+
+**Tomb Raider (1996), the free 3dfx demo (archive.org tomb3dem).** DOS game:
+TOMB.EXE (DOS4GW, the 3dfx build -- "Failed to download texture to 3Dfx board" +
+FX_GLIDE_SWAPINTERVAL in the binary), no bundled GLIDE2X.OVL (uses DOSBox's
+built-in). Staged to /tombraider (build.sh populate mirroring Duke3D), launched
+with -set "voodoo voodoo_card=software". RESULT (screenshotted): the 3dfx title
+renders (VOODOO LFB mapped on serial); the IN-GAME 3D renders -- Lara in the
+Vilcabamba cave/cavern, textured Mayan architecture, correct perspective; and
+keyboard input walks her through the 3D world (corridor -> cavern). First
+3D-accelerated gameplay on Thylacine, no host GL.
+
+**A gate wrong-turn, caught.** The first ls-gfx-dosbox-tombraider gate FAILED
+witness-4 "frame went flat after input (26 buckets)". NOT a TR failure: I had
+copied Duke3D's assertion (post-ENTER frame stays >= 30 colour buckets), but TR's
+ENTER advances toward the DARKER level, legitimately dropping buckets -- a test
+double stricter than the contract. Fixed: the input witness is frame-CHANGED
+(hash) + still-rendering (not black, buckets > 8), not stays-colourful. The kernel
+was green throughout (1463 tests, 0 fail).
+
+**Honest scope.** Software Voodoo is CPU-rasterised (fine for a 1996 game on M2,
+not blazing); GL-accelerated Voodoo (fast) is the unbuilt DX-7-proper path (rides
+the Warp/GL arc). build_tombraider_fixture (a build-time archive.org fetch,
+sha256-pinned, like Duke3D) is OWED -- the pool bake is currently conditional on a
+locally-staged build/tombraider/stage (the demo is game data, never committed;
+network is sandboxed here, so the operator downloaded it). Unreal remains a
+Win9x-arc target (DX-6), not attempted.
+
+---
+
+## 2026-09-04 (aux, Opus 4.8, effort max) -- the REAL Duke3D oscillation cause: DOSBox cycles=auto
+
+The frame-intent pin (the entry below) was necessary but NOT the cause. The
+operator ran the fixed build, held a turn key, and reported ground truth that
+overrode the "fixed" close: "it flipped to 60, but I could still see the
+oscillation." The compositor clock was pinned at 60 (the frame-intent fix working
+as designed) and the ~500ms turn-speed oscillation persisted. So the idle
+throttle was never the cause -- the gates had proved the MECHANISM (the clock no
+longer flaps), not the SYMPTOM (the operator's visible oscillation). A
+verify-around-the-symptom miss; owned, fed back (SendFeedback), and re-opened.
+
+**The real cause, found by reading the emulator + a period fingerprint.** With the
+clock ruled out, "spins slower then faster" is a *speed* change, not judder --
+the emulated CPU rate, not frame delivery. We ship DOSBox-X with no `cycles=`
+setting, so it defaults to `cycles=auto`; for a protected-mode game that enables
+`CPU_CycleAutoAdjust`, a feedback control loop in `increaseticks()`
+(`src/dosbox.cpp`) that re-scales the emulated CPU speed. Its evaluation window is
+**250 ms** (`if (ticksScheduled >= 250 || ticksDone >= 250 ...)`) -- an
+overshoot-then-correct cycle spans ~500 ms, the operator's exact period. That
+250ms-in-the-code / 500ms-in-the-symptom match was the fingerprint.
+
+**Measured, not asserted (the 0007 telemetry patch).** DOSBox-X carries a
+commented-out per-adjust `cyclelog` (`dosbox.cpp:679`); uncommented it, rebuilt,
+booted Duke3D at `cycles=auto`, dwelt 45s through the attract-mode demo (real
+in-game load). Over 531 adjustments the applied `CPU_CycleMax` swung
+**748 <-> 495,725** -- peak-to-peak 506% of the mean, reversing direction 21% of
+steps -- with the raw `ticksDone`/`ticksScheduled` timing inputs themselves
+swinging 500-1200%. A control loop fed noisy measurements, hunting hard. That is
+the oscillation, in numbers. (The telemetry sits after the
+`if (!CPU_CycleAutoAdjust) return` guard, so it is silent under a fixed cycles=
+setting -- a zero-overhead diagnostic that ships.)
+
+**Fix, verified by the absence of the thing.** `cycles=fixed 60000` (Pentium-100
+class, near the measured median 62,851) turns `CPU_CycleAutoAdjust` off. Re-ran
+the showcase gate with the fix: **0** cyclelog lines (the loop never fires) + the
+game renders + takes input (1463 kernel tests PASS, 0 FAIL, 0 EXTINCTION).
+Delivered as a launch flag -- no pool rebake, because the fix is a launch-time
+setting, not a binary/data change; the operator plays the current build now.
+
+**A second broken measurement, caught by a coincidence that could not be one.**
+The dynrec-vs-interpreter perf script reported `title_reached_ms=9738` for BOTH
+cores -- byte-identical, impossible for genuine core-dependent timing. Cause:
+`buckets>=30` fires on DOSBox's SDL-rendered *startup* screen (core-independent),
+not Duke3D's emulated title. Boot-to-title is the wrong metric; the honest
+core-speed signal is the achievable cycle count under `cycles=auto` (the loop
+drives each core to ~90% realtime). Measured: dynrec median 62,851 vs interpreter
+(core=normal) 44,985 -- ~1.4x median, ~3x at peak (495,725 vs 158,088), noisy on
+both. The modest ratio is REAL, not a measurement flaw: the Build engine's
+software rasteriser + the SDL blit are host-side, so the demo is only partly
+CPU-bound, and on M2/HVF both cores clear Duke3D's ~60,000-cycle need easily. The
+dynrec's decisive advantage is HEADROOM for Win9x/Voodoo, not Duke3D on fast
+silicon. A clean single-number speedup needs a dedicated CPU-bound benchmark
+(deferred -- the attract demo is too render-mixed to isolate the recompiler).
+
+**Open, not this arc.** Whether Thylacine's host-timer resolution/jitter
+*amplifies* the auto-adjust instability beyond a native host is unmeasured (needs
+a native-Linux baseline of the same telemetry -- do NOT assume; that is the
+forbidden "host" reflex). The fix is correct regardless. Also inherited +
+surfaced: `joey: pouch-smoke spawn FAILED` x2 at boot (pre-existing, all boots,
+non-fatal, a different subsystem -- enqueued, not fixed here).
+
+---
+
+## 2026-09-04 (aux, Opus 4.8, effort max) -- the frame-intent throttle pin (the operator's Duke3D FPS oscillation)
+
+Playing Duke Nukem 3D under the new DX-5 showcase (DOSBox-X `core=dynamic`), the
+operator saw the displayed motion oscillate ~2 Hz while holding a turn key --
+"every 500ms or so he spins a bit slower, then faster" -- in tiled AND
+fullscreen. They asked (a design question) whether graphical apps should carry a
+manifest telling the compositor they are static-UI vs dynamic-high-performance.
+They are right, and this run built it.
+
+**First, the housekeeping.** DX-5a (the Duke3D showcase, `8ce2c537`) was
+committed local last run but never pushed (the mac was busy). Pushed both
+mirrors, ls-remote-verified. A follow-up (`b3ace730`): the showcase gate's
+header comment claimed the `/duke3d` data is "world-writable (0666)" -- a
+leftover from a reverted chmod experiment; build.sh actually stages it 0644
+read-only and the gate copies it to a writable home. A stale security-posture
+claim in pushed code, corrected. (Found by re-reading my own gate while modelling
+the new one on it -- the good kind of accident.)
+
+**The culprit, and why #164 did not already cover it.** The #164 idle throttle
+drops the synthesized frame clock 60 -> 15 Hz after 250ms with no input AND no
+sustained *visible* presents (`animating()`, >= ~8 Hz). #164 added the present
+axis precisely because a held key emits no repeat input events (virtio-input has
+no auto-repeat), so an input-only heuristic flapped for GLQuake. But `animating()`
+has a floor: it needs >= ~8 Hz presents. A GL client at 60 clears it easily; a
+DOSBox SW-VGA game presenting *near* the floor does not -- so for the slow client
+the clock still flaps, exactly the ~500ms wobble reported. The residual is
+structural: a heuristic cannot know a client's intent, only its recent behaviour.
+
+**The fix: a declared per-surface frame intent.** STATIC (default,
+throttle-eligible) vs DYNAMIC (while VISIBLE, pins the clock to the ctl rate
+unconditionally). The operator ratified visible-gating (a hidden DYNAMIC surface
+throttles like any other). Landed design-first: scripture `628b0387`
+(reference/139 "Frame intent" + TAPESTRY.md 18.4), then impl `58dee4d1`. SDL
+declares DYNAMIC at window create, so every ported SDL game/video is covered with
+no per-app work; `animating()` remains the fallback for undeclared native
+clients. SOTA-aligned (Wayland `wp_content_type`, Android `setFrameRate`, macOS
+App-Nap). Runtime-set via an `intent <static|dynamic>` surface ctl verb, not a
+create token -- a toggle, and it kept the fixed-size C create buffer untouched.
+
+**The wrong turn, caught by the observability log (the reusable part).** The
+regression gate's first run FAILED at its own control leg: a visible STATIC idle
+`tapestry-demo` produced no `60 -> 15` transition in 10s. The instinct was to
+suspect the fix -- but the re-added observability line (`idle-throttle N -> M Hz
+(quiet_ms= animating= dyn=)`) showed the truth: the ONLY `60 -> 15` in the whole
+boot happened during early boot, before the demo, and was consumed by my marker;
+the clock was *already at 15* when the demo came up, so there was no new
+transition to see. The gate's premise ("a visible idle demo causes a 60 -> 15")
+was wrong: the observability log only fires on *transitions*, and the clock may
+already be throttled. **Fix: `force_clock_60` -- inject a QMP input event (a
+tablet move + a no-op modifier key; verified against the three `input_seen`
+drains in main.rs) to establish a known 60 Hz state first, THEN watch the
+drop-or-hold.** This also made the sabotage catchable: a dynamic leg stuck at 15
+would else pass spuriously. That the flap had "no witness before"
+(felt-but-uncaught) is exactly why the observability line is retained.
+
+**Verified three ways, all green:**
+- **ls-gfx-throttle** (the deterministic gate, sabotage-proof, one token apart):
+  Leg A static -> `60 -> 15 (quiet_ms=336 animating=false dyn=false)` (control:
+  the throttle still works). Leg B dynamic -> `15 -> 60 (quiet_ms=19655
+  animating=false dyn=true)` then NO `60 -> 15` -- the clock held at 60 with
+  input stale 19.6s AND animation false, *solely* because `dyn=true`. That log
+  line is the fix, precisely witnessed.
+- **ci-idle-gate STRICT**: idle mean 10.3% <= 20% -- no idle regression (aurora
+  is STATIC, still throttles at the login prompt).
+- **ls-gfx-quake** (the G-7 SDL acceptance gate, the same `SDL_CreateWindow` ->
+  `thyla_tap_intent` path Duke3D uses): 969 frames @ 62.5 fps, textured world on
+  scanout. My SDL change does not break SDL apps.
+
+**Self-audit (in parallel with the formal round):** the `intent` ctl verb is
+conn-scoped AND gen-guarded -- `surf_owned(n, self.conn_id, f.gen)` gates the
+whole surface_ctl dispatch (server.rs:14686) before my code runs, so no
+cross-conn intent-setting and no stale-slot confusion. tapestryd is a
+single-threaded serve loop (no thread spawns in main.rs), so the intent write
+and the `any_visible_dynamic` read are sequential -- no TOCTOU. The visibility
+predicate is copied verbatim from `note_present` (pending_direct | Direct scanout
+| composed target), so a fullscreen game on the Direct scanout is covered, not
+just a composed one -- a coverage gap I found and closed before the build.
+
+**Audit CLOSED CLEAN** (holotype-reviewer, Opus 4.8 -- Fable out of credits,
+operator directed close-on-4.8; MODEL start==end, no mid-run fallback):
+**0 P0 / 0 P1 / 0 P2 / 5 P3**, all bounded/documentation. The audit
+independently re-derived and verified SOUND every core property (cross-conn
+authority is gen-checked + conn-scoped via `surf_owned`; no truly-hidden pin;
+test-mode exactly preserved; no TOCTOU -- single-threaded serve loop; I-40's
+present/scanout/retire path untouched, only the tick rate changes; the gate is
+sabotage-proof with a real positive control) -- independent agreement with the
+self-audit. The 5 P3s: F3 (scripture said `surface_target`-gated, impl uses the
+full three-arm `note_present` predicate -- the exact mismatch I had already
+queued) and F4 (reference/139 documented a `TAPESTRY_FRAME_INTENT` env override
+that does not exist -- I chose argv and did not update the doc) were FIXED in
+reference/139; F1 (a visible-but-blank DYNAMIC surface pins the clock -- bounded,
+no compounding, self-revealing, consistent with the ratified layout-visible
+gating), F2 (the observability `say!` is client-flappable via intent-toggling
+into serial log-spam -- bounded, rides a pre-existing ctl-flood spin; a
+rate-limit follow-up is tracked), and F5 (SDL declares DYNAMIC unconditionally,
+so a static visible SDL app pins the clock -- a power tradeoff, the doc's
+argued policy) are recorded as bounded "Known caveats" in reference/139. No code
+defect surfaced, so no re-build/re-gate and no round 2 (a clean close needs
+none). **Duke3D image rebuilt + regression-gated:** a full `BAKE_DOSBOX=1` build
+re-baked SDL2 (with the fix, cached from the earlier build) + DOSBox + staged
+Duke3D to the pool; `ls-gfx-dosbox-duke3d` GREEN -- Duke3D runs under
+core=dynamic (CAP_JIT dynrec), renders, and takes input, with no regression from
+the SDL change (DOSBox declares DYNAMIC via the same SDL path). So the operator
+can now boot and play Duke3D with the oscillation fixed. **Still open (DX-5 loose
+ends, fresh context):** the dynrec-vs-normal perf number (unblocked now the clock
+is stable) and the DX5M.COM mouse witness (the mouse path is already proven via
+ls-gfx-play, so this is a rigorous witness, not a feature gap).
+
+---
+
+## 2026-09-04 (aux, Opus 4.8, effort max) -- DX-4: the CAP_JIT dynarec (core=dynamic) on Thylacine
+
+DOSBox-X's dynamic recompiler now runs on Thylacine: `core=dynamic_rec`
+JIT-compiles x86 to AArch64 and executes it out of a dual-mapped code Burrow,
+with no page ever writable-and-executable. This is the prerequisite for Act 2
+(Win9x, 3dfx), and the first non-Mesa userspace consumer of CAP_JIT (I-42).
+
+**The chunk was far smaller than the DX-0 sketch feared, for two reasons found
+by reading the code before touching it.** (1) DOSBox-X ALREADY implements a
+dual-mapped W^X code cache (`DYNCOREM_DUAL_RW_X` in `dynamic_alloc_common.h`),
+built for Linux memfd / Darwin `mach_vm_remap`: `cache_rwtox()` is exactly the
+constant writer->exec delta the kernel's `SYS_JIT_CREATE` hands back, and each
+block already stores both `cache.start` (writer) and `cache.xstart` (exec). (2)
+The AArch64 backend (`risc_armv8le.h`) embeds ZERO absolute in-cache code
+addresses -- block-to-block links go indirect through the block metadata's
+`xstart` field (read at runtime, never patched into code), and intra-block
+branches are PC-relative, so the writer/exec delta cancels and they are
+alias-agnostic. So NO codegen change was needed. DX-4 collapsed to: enable
+`C_DYNREC` + `C_TARGETCPU=0x07` (config.h), a `#if defined(__thylacine__)`
+allocation arm that acquires CAP_JIT (the corvus `jit` clearance, walked by the
+Proc itself via `thyla_capjit.h`) then `SYS_JIT_CREATE`s the region, and routing
+the `__builtin___clear_cache` publish sites through `SYS_ICACHE_SYNC`. All in one
+boundary-line patch (`0006`) plus a small syscall-wrapper header
+(`usr/lib/thylajit/thyla_jit.h`). The DX-0 sketch said "wire `dynamic_x86`" --
+that was wrong: `dynamic_x86` emits native x86; the ARM path is the portable
+`core_dynrec`. Corrected in `docs/DOSBOX.md`.
+
+**Why the clear_cache sites HAD to move (a measured kernel fact, not a guess).**
+`__builtin___clear_cache` lowers to `dc cvau`/`ic ivau`, and Thylacine runs EL0
+with `SCTLR_EL1.UCI=0` (start.S: the MMU-on SCTLR is `0x30D00800 | M|C|I`, no bit
+26), so those instructions TRAP at EL0. The kernel does the maintenance instead
+(`SYS_ICACHE_SYNC` -> `arch_icache_sync_range` on its own direct map). A related
+question resolved by reading the kernel: `PTE_GP` (the BTI guard bit) is set on
+kernel text ONLY, so the JIT exec alias is not BTI-guarded and the dynrec's
+indirect block entries need no `bti c` landing pads.
+
+**Wrong turn #1, caught by the transcript.** The gate's first run FAILED with
+"dosbox-x SDL did not come up within 30s" -- but the transcript showed the SDL
+surface created, tapestryd compositing it, and COMMAND.COM booted. The dynrec
+WORKED; my gate had an expect-ordering bug: "Video thylacine" prints BEFORE
+"CAP_JIT acquired" (SDL inits before the CPU cores), so matching CAP_JIT first
+consumed past the Video line and the later `expect "Video thylacine"` timed out.
+Fixed by dropping the fragile intermediate expects -- CAP_JIT-acquired (the
+dynrec witness) then the OUT.TXT poll (the correctness witness) are order-robust.
+
+**Wrong turn #2 -- a real W^X gap, caught by self-audit, not the gate.** The gate
+PASSED (`CAP_JIT acquired` + `OUT.TXT=DX-2C-OK`) before I found this. `cache_init`
+and `cache_reset` emit the two link stubs + the runcode trampoline into page 0 of
+the code region through the writer alias, and NO per-block `cache_block_closing`
+ever covers page 0 -- so the trampoline was executed (via the exec alias) without
+ever being published. It worked on this host by cold-I-cache luck; on other
+silicon (the A72 Pi) an un-cleaned-to-PoU write or a stale line would fetch the
+wrong bytes, and `cache_reset`'s re-emit is stale-not-cold. Fixed:
+`thyla_jit_icache_sync(cache_code_link_blocks, PAGESIZE_TEMP)` after both emit
+sites (`cache.h` in patch 0006). This is the reusable lesson -- a gate that
+passes on one machine is not proof the publish protocol is correct; the emit-vs-
+execute pairing has to be enumerated, and page 0 was the site no per-block flush
+reached. Rebuilt + re-gated green on the fix.
+
+**Evidence.** Gate `tools/interactive/ls-gfx-dosbox-dynarec.exp` PASS [37s]:
+`core=dynamic_rec` boots, `dosbox-x: CAP_JIT acquired (SELF)` on serial (the
+dynrec cache is a dual-mapped CODE Burrow -- there is no other producer of that
+line), and DX2C.COM writes `C:\OUT.TXT=DX-2C-OK` under the dynrec. Build:
+311/311 TUs, `core_dynrec.o` 385 KB (was a near-empty TU under `#if C_DYNREC`).
+
+**Decision the operator made mid-run.** Fable ran out of credits (the DX-4
+holotype review died HTTP 429 mid-run); the operator directed "use Opus 5 for
+reviews until told otherwise." The DX-4 focused audit re-ran on Opus 5 (the
+highest-available-Opus fallback the reviewer rule already prescribes), spawned
+with the context-independence framing the same-family fallback requires.
+
+**Open, and exact about it.** The DX-4 exit criterion has two halves --
+`core=dynamic` correct (met) and "measurably faster" (deferred to DX-5). DX2C.COM
+is 49 bytes, so a dynrec-vs-normal NUMBER is not meaningful here; DX-5 sources a
+compute-heavy real program and owns the measurement. The dynrec is faster by
+construction and is proven active + correct. Act 2's prerequisite is a WORKING
+dynrec, which is met.
+
+## 2026-09-03 (aux, Opus 4.8, effort max) -- DX-3b: file-based config/autoexec, plus two findings the run turned up
+
+DOSBox-X loads a `dosbox-x.conf` from disk and runs its `[autoexec]` section --
+the declarative equivalent of `-c` flags. Proven with the section running with NO
+`-c` flags on the command line: `dosbox-x -conf /home/michael/dosbox-x.conf`
+alone mounts C: and runs a program, and the transcript carries both
+`CONFIG: Loaded config file: /home/michael/dosbox-x.conf` and the resulting
+`C:\OUT.TXT`. A sample config is baked at the devramfs root. Gate:
+`ls-gfx-dosbox-conf.exp`. With this, DX-3 is substantially complete (input,
+foreground-exit, sound, config/autoexec); the "larger real DOS program" defers to
+DX-5, which owns sourcing a real one (no assembler is vendored to hand-write a
+richer one).
+
+**Wrong turn, caught by the transcript, not the verdict.** The first config-gate
+boot FAILED, and the failure LOOKED like DOSBox: the log showed
+`COMMAND.COM env invalid command name "autoexec"`. It was not DOSBox -- it was
+MY gate. A `[word]` inside a double-quoted Tcl/expect message string is COMMAND
+SUBSTITUTION, so `lc_step "... running the config's [autoexec]"` made expect try
+to execute the command `autoexec` and abort. The tells that it was mine, not
+dosbox's: the same transcript carried `CONFIG: Loaded config file` (so -conf
+worked) and the Tcl error frame named my `.exp` file and line. The trap is nasty
+because `info complete` passes (it parses fine) and only the REACHED arm crashes
+-- so a `[...]` in an untriggered fail arm is a latent time bomb. Fixed by
+rewording every message; swept both dosbox gates; recorded the rule +
+grep-before-boot detector in memory. See
+[[bug-tcl-bracket-command-substitution-in-gate-messages]].
+
+**Build-hygiene finding (efficiency, not soundness), now pinned.** Both DX-3
+bakes recompiled DOSBox-X from scratch (311 TUs, ~4 min) despite unchanged
+source. Root cause: the libcxx reuse check requires `libc++.a` newer than
+`build.sh` itself (`build.sh:5260`, `${BASH_SOURCE[0]}`). Editing build.sh --
+which each DX staging change does -- makes it newer than libc++.a, so libcxx
+rebuilds, which bumps libc++.a's mtime, which trips the dosbox staleness check
+(`libc++.a -nt dosbox-x`) into a full rebuild. It is conservative-by-design, not
+a bug: a *repeated default build* (build.sh untouched) keeps dosbox cached; only
+a build.sh/libcxx-source edit cascades. The practical lesson for this arc: batch
+build.sh edits, bake once. Not fixed here -- it is operator-owned build-infra,
+and "fixing" a conservative staleness check risks under-rebuilding.
+
+Landed (@dcc1dd71): `dosbox-x.conf` staging in `tools/build.sh` +
+`tools/interactive/ls-gfx-dosbox-conf.exp`.
+
+## 2026-09-03 (aux, Opus 4.8, effort max) -- DX-3a: a keystroke reaches DOS, and the foreground-exit "wedge" dissolves
+
+DX-3's crown jewel: an injected keystroke reaches a running DOS program end to
+end. The path is long and every hop is now proven live -- QMP `send-key` -> QEMU
+virtio-keyboard-PCI -> **tapestryd** (the compositor owns the input device,
+`usr/tapestryd/src/input.rs`) -> the DOSBox-X surface (auto-focused on create)
+-> the **SDL_thylacine event pump** (`SDL_thylacineevents.c`: evdev keycode ->
+`linux_scancode_table` -> `SDL_SendKeyboardKey`) -> DOSBox-X's BIOS keyboard
+buffer -> INT 21h AH=08h in the guest. The witness is **DX3K.COM**
+(`tools/dx3-keyprog.py`, a 67-byte `.COM`, offsets computed from the 45-byte code
+length and asserted, not hand-transcribed): it prints a prompt, reads one key
+with no echo, self-patches the read byte into a `KEY=?\r\n` buffer, and writes
+`C:\OUT.TXT`, which the Thylacine shell reads back. Result on HVF: `KEY=a` for an
+injected `a` -- lowercase, matching a no-shift injection, so even the layout is
+right. Gate: `ls-gfx-dosbox-input.exp` (45 s), driving a new reusable
+`tools/qmp-send-key.sh` -- the "agentic fingers" to screendump.sh's "agentic
+eyes".
+
+**The finding nobody planned: the DX-2c "foreground-exit wedge" was a
+misdiagnosis, and chasing it the obvious way would have wasted the run.** DX-2c
+left an open item: a foreground dosbox seemed to leave the shell wedged, and the
+leading theory (mine, from a static read) was a hang in the SDL teardown -- the
+`SDL_Quit -> VideoQuit -> DestroyWindow -> StopEventPump` pump-join, a path NO
+SDL app had ever exercised on Thylacine (the Quake gate kills the VM with
+`lc_quit`; it never exits Quake to the shell). That theory was plausible and
+wrong. One boot settled it: `dosbox-x -c "exit"` in the FOREGROUND exits cleanly
+and the shell returns (`FG-EXIT-DONE-MARKER` appears). So the teardown does not
+hang -- this is, in fact, the first clean exit of an SDL app back to the shell on
+Thylacine, a whole-graphical-stack soundness fact worth having. The real DX-2c
+pitfall was mundane: DOSBox-X reads its input from the PANE (SDL events), never
+from the serial console, so typing `exit` on serial never reached DOSBox's DOS
+shell -- the foreground dosbox simply kept running, correctly. The cure is an
+autoexec `-c "exit"` (or backgrounding). Promoted to a HARD gate leg with the
+full DX-2c sequence (`mount c` + `c:` + `DX2C.COM` + `exit`), re-confirmed green,
+and it also proves two dosbox instances coexist (the input proof's backgrounded
+dosbox stays alive while the foreground-exit dosbox runs and exits).
+
+Wrong turn avoided, not just caught: the static teardown analysis was the RIGHT
+preparation (it named the exact join to watch) but the WRONG conclusion, and the
+cheap disambiguator was a single boot with a post-exit marker rather than a deep
+dive into the pump-join. Ground truth over theory, again.
+
+Landed (@bd9cbe02): `tools/dx3-keyprog.py`, `tools/qmp-send-key.sh`,
+`tools/interactive/ls-gfx-dosbox-input.exp`, and the `DX3K.COM` staging in
+`tools/build.sh` (under the same `THYLACINE_BAKE_DOSBOX` default-on gate as
+DX2C.COM). Open for the DX-3 remainder: sound-stub hardening, config/autoexec
+(`dosbox.conf`), and a larger real DOS program.
+
+## 2026-09-03 (aux, Opus 4.8, effort max) -- DX-2c: a real DOS program runs off a mounted host drive
+
+DX-2's second half, and the DX-2 exit criterion met: `dosbox-x` mounts a host
+directory as the DOS `C:` drive, runs a real DOS program off it, and the program
+writes a host file that Thylacine reads back. The program is **DX2C.COM** -- a
+49-byte DOS `.COM` (`tools/dx2c-dosprog.py`, offsets computed from the fixed
+31-byte code length, not hand-transcribed) that creates `C:\OUT.TXT`, writes the
+marker `DX-2C-OK`, and terminates via INT 21h. Baked at the devramfs root under
+`THYLACINE_BAKE_DOSBOX`. Verified end to end on HVF; `ls-gfx-dosbox` now proves
+both DX-2 halves in one leg.
+
+Two wrong turns, both caught by grounding in a **pane screendump** rather than a
+green/red verdict -- the DX-2b spurious-green lesson paying off again:
+
+- **"Bad command or filename".** The first real run mounted C: fine
+  ("Drive C is mounted as local directory /home/michael/") but `DX2C.COM` was
+  not found. The screendump showed the exact DOS-shell text -- decisive. Root
+  cause: I copied the program from `/DX2C.COM`, but joey pivots root to the
+  Stratum pool at boot's end, and `bin_src_h = t_open("/", O_PATH)` (pre-pivot,
+  `usr/joey/joey.c:7081`) is what gets MREPL-mounted onto `/bin`. So the devramfs
+  root -- including the baked `DX2C.COM` -- survives the pivot ONLY at `/bin`;
+  plain `/DX2C.COM` is gone (/ is the pool). The `cp` had silently copied
+  nothing. Fix: source `/bin/DX2C.COM`. A lesson that generalizes past this
+  chunk: a devramfs-root DATA file is reachable post-pivot only through the /bin
+  bind, exactly like the coreutil binaries -- and spawn's devramfs-backed lookup
+  (which is pivot-independent) does NOT extend to an `open()` of a data file.
+
+- **The shell never came back.** With a foreground DOSBox-X, reading `OUT.TXT`
+  back needs the shell, and it blocks on the emulator for its whole run.
+  Returning it after -- an autoexec `exit` (the last `-c`), then a Ctrl-C --
+  both left the shell wedged (no readback, 45s quiet). I did NOT conclude
+  "DOSBox-X exit is broken": the failure is equally explained by console input
+  buffering / the emulator draining stdin, and distinguishing them would have
+  cost boots for no DX-2c benefit. Instead I backgrounded DOSBox-X (`&`; ut's
+  job control is real, `u-job-test` drives it) so the shell stays free for the
+  `cat` while the emulator keeps painting the pane for the screendump. Clean,
+  and it sidesteps the exit question entirely. (The foreground-exit shell-return
+  is left as an open question for DX-3, noted in memory, not silently dropped.)
+
+Method note: three probe boots, each deliberately exploratory (the resume note's
+"a wrong assumption burns a boot"). Probe v1 (autoexec exit) -> shell wedged.
+Probe v2 (no exit + screendump + Ctrl-C) -> the screendump proved mount OK / file
+not found / Ctrl-C wedged. Probe v3 (`/bin` path + background) -> `OUT.TXT =
+DX-2C-OK` + 24-bucket DOS screen. Each boot bought a specific fact; none was a
+retry of the same guess.
+
+Cost: the re-bake reused the cached 17.6 MB emulator (only the ramfs+pool
+re-baked). No quake regression expected (the render path is unchanged; DX-2c only
+adds a mount + a 49-byte program).
+
+Landed: `tools/dx2c-dosprog.py` (new), the `DX2C.COM` ramfs staging in
+`tools/build.sh` (under `THYLACINE_BAKE_DOSBOX`), and the rewritten
+`tools/interactive/ls-gfx-dosbox.exp`.
+
+**DX-2 close -- the default-on decision (operator's call).** I recommended
+keeping `THYLACINE_BAKE_DOSBOX` opt-in until DX-5 (the flip taxes every default
+build across both tracks: +17.6 MB ramfs, ~30s/bake, for a DOS emulator at DX-2
+of 7). The operator chose **default-on now** ("DX-1 default ON"). Implemented by
+mirroring `build_go_goroot`'s opt-out: `${THYLACINE_BAKE_DOSBOX:-1}=="1"` at all
+three gate sites (build + stage + DX2C.COM emit), so `=0` opts out and an absent
+LLVM C++ fork still skips the emulator gracefully (build_dosbox_x returns 0; a
+missing *vendored* source stays fatal, but it is committed). Verified by a plain
+`build.sh kernel` with the env var UNSET staging both dosbox-x and DX2C.COM.
+
+Open: the foreground-exit shell-return (DX-3); the vault sweep of
+`usr/ports/dosbox-x` + `usr/ports/sdl2` (vault behind).
+
+---
+
+## 2026-09-03 (aux, Opus 4.8, effort max) -- DX-2b: DOSBox-X FIRST LIGHT (Z:\ on a Tapestry pane)
+
+The Cryptid arc's first-light milestone: `dosbox-x` graphical paints its VGA text
+screen -- the blue "Welcome to DOSBox-X ! v2026.08.31" box and the `Z:\>` prompt
+-- to a Tapestry pane, through `output=surface` -> the `SDL_thylacine` framebuffer
+path -> the compositor. `ls-gfx-dosbox` renders it and gates on it (24 color
+buckets vs the console's ~12; `PASS [38s]`), and `ls-gfx-quake` still passes in
+the same run (no regression from the SDL2 backend change).
+
+It was NOT a straight shot -- it was a three-bug hunt through an SDL-app-vs-
+compositor impedance mismatch, plus a spurious green caught by looking.
+
+**The spurious green (caught by VIEWING the pixels).** The first exploratory boot
+PASSED a naive color floor (12 buckets >= 2) -- but the screendump was the aurora
+CONSOLE, not a DOS screen: DOSBox-X had `E_Exit`ed at `Can't init SDL: No available
+audio device`, and the console's own log text carries ~12 buckets. A color floor
+alone measures whatever is on the scanout, console included (the [[greens can be
+irrelevant]] trap). The fix was to make the gate's load-bearing proof the LOG, not
+the pixels: a `Video thylacine` arm (SDL init got past the fatal combined init) and
+a `COMMAND.COM` arm (the internal DOS reached its shell) -- an exit now trips the
+death arms instead of passing on the console.
+
+**Bug 1 -- SDL audio init is fatal.** `gui/sdlmain.cpp:9508` calls
+`SDL_Init(SDL_INIT_AUDIO|SDL_INIT_VIDEO|...)` as ONE combined call and `E_Exit`s on
+any failure; Thylacine ships no SDL audio backend, and SDL's dummy audio driver is
+`demand_only` (never an auto-fallback). Fix: patch `0004` forces
+`setenv("SDL_AUDIODRIVER","dummy",0)` before the init (consistent with dosbox's own
+`putenv("SDL_AUDIODRIVER=dummy")` at line 7527, an automated-mode path never hit here).
+
+**Bug 2 -- the `SetWindowSize` NULL-surface crash.** Past audio, DOSBox-X got deep
+(tapestryd composed surface 0 at 1280x800, created surface 1 at 640x400, ran the
+whole DOS init) then SEGV'd: `snare:segv addr=0x10 pc=0xc2b698` -> `OUTPUT_SURFACE_SetSize`,
+disassembly `ldr w12, [x0, #0x10]` = `sdl.surface->w` with `sdl.surface` NULL (offset
+of `w` in `SDL_Surface` is 0x10). `SDL_GetWindowSurface` returned NULL right after
+`GFX_SetSDLWindowMode` -> `SDL_SetWindowSize(640,772)`, because the `SDL_thylacine`
+backend had NO `SetWindowSize` hook: the window dims raced ahead of the weave, and
+`SDL_CreateWindowFramebuffer` built a surface over a wrong-sized buffer. A live weave
+can't be reweaved without a compositor CONFIGURE serial (`thyla_tap_reweave` returns
+-EAGAIN on a stale one), so the fix RECREATES the tap at the new size in a new
+`THYLACINE_SetWindowSize` hook (`StopEventPump` -> `thyla_tap_close` ->
+`thyla_tap_open` -> `StartEventPump`, a mirror of DestroyWindow+CreateWindow;
+`thyla_tap_open` memsets first, so recreate-on-a-used-tap is safe).
+
+**Bug 3 -- the resize war (found by instrumenting, not theorizing).** With the
+recreate hook the crash was gone but the scanout read "Display output is not active".
+Theory kept contradicting the tapestryd log (the surface reweaving to 1280x800
+implied a resizable window, but `SDL2_resize_enable` defaults false and no
+`GFX_SetResizeable(true)` sat in our build). So I `SDL_Log`-instrumented the backend
+and MEASURED it: `winflags=0x202c RESIZABLE=1`. The window IS resizable --
+`gui/sdlmain.cpp:4310 GFX_SetResizeable(true)` in the first-time video init, a call
+site I had missed. A resizable window ACKS the compositor's pane offer (the
+`TEV_CONFIGURE` Fork-1 reweave + `RESIZED`), DOSBox-X reads `RESIZED` as a user
+resize (`GFX_HandleVideoResize` sets `userResizeWindow*`), re-asserts its own
+aspect size (640x772), the compositor re-offers the pane (632x772), forever -- the
+8px gap never converges. Fix: patch `0005` pins the window non-resizable on Thylacine
+(the compositor is authoritative + letterboxes), so it takes the Fork-2 DECLINE path.
+After the fix the instrumentation showed `surface consider` firing exactly twice
+(640x497, 720x417) with `final == consider` -- settled, no chase.
+
+**What "fixed" covers, exactly.** DX-2b is the RENDER half of DX-2 (first light). It
+does NOT include DX-2c (mount a host/9P dir as a DOS drive + run a real DOS program)
+-- that is next. Sound is dummy-driver silent (a v1.0 non-goal). The
+`SetWindowSize` change lives in `SDL_thylacinevideo.c`, a file NAMED in the W-3e
+audit row but only for its Vulkan slots; this change is the software-framebuffer
+window-lifecycle path (client-side, not the compositor/kernel I-40 enforcement),
+mirrors the proven DestroyWindow+CreateWindow lifecycle, and was self-audited (no
+race -- the pump is joined before the recreate; no UAF -- SDL frees only the borrowed
+surface struct; graceful error fallback). The vault is 597 commits behind and cannot
+see the new port paths -- a vault sweep of `usr/ports/dosbox-x` + `usr/ports/sdl2` is
+owed.
+---
+
+## 2026-09-03 (aux, Opus 4.8, effort max) -- DX-2a: DOSBox-X EXECUTES on Thylacine
+
+Same run as DX-1 below (self-compacted at 600k between DX-2a and the DX-2b
+render leg). The Cryptid arc's execution milestone, `@c9c4cb40`: the DX-1 binary
+is not just a linking ET_EXEC -- it RUNS. Under a full HVF boot + login,
+`dosbox-x -version` printed **"DOSBox-X version 2026.08.31"** and exited cleanly
+(no snare/fault). So main() runs, the pouch libc++ runtime initializes, and arg
+parsing works on aarch64-thylacine -- the C++ runtime + static-init + the whole
+17.6 MB image are live, not merely linked.
+
+Wiring: dosbox-x bakes into the ramfs only under `THYLACINE_BAKE_DOSBOX=1`
+(opt-in, build_go_goroot's pattern) so a 17.6 MB binary does not tax the default
+build during the arc; flips default-on at DX-2 close. The gate is
+`tools/interactive/ls-gfx-dosbox.exp` (execution leg; the render leg is DX-2b).
+
+**Checkpoint catch worth recording:** the smoke's expect run left a **stray
+QEMU + two caffeinate timers** alive after it exited (the boot harness did not
+reap its own VM on the expect exit path). Found only by the checkpoint contract's
+"account for every running process" sweep (`ps` scoped to the worktree), killed
+by explicit PID before self-compacting. A stray QEMU holding the qmp socket +
+the build fixtures is exactly the kind of thing that silently breaks the next
+boot -- the sweep is not tidiness.
+
+**DX-2b (next):** the render leg -- run dosbox-x graphically so the DOS `Z:\`
+prompt renders to a Tapestry pane, screendump the scanout, gate on a color-bucket
+floor (the ls-gfx-quake pattern), then kill it. Risk: DOSBox's SDL usage differs
+from Quake's (8bpp palette, VGA text mode) so the SDL_thylacine backend may need
+gap-filling. The ramfs is currently baked WITH dosbox-x, so the gate runs without
+a re-bake unless a plain `build.sh kernel` clobbers it.
+
+## 2026-09-03 (aux, Opus 4.8, effort max) -- DX-1: DOSBox-X (Cryptid) vendored + a curated C++ build that LINKS
+
+The first build chunk of the Cryptid arc (`docs/DOSBOX.md`). Exit criterion --
+"a static ET_EXEC that links" -- MET: `build/pouch/progs/dosbox-x`, **24,923,984
+bytes, ELF64 EXEC AArch64, 0 PT_DYNAMIC** (kernel/elf.c-loadable), 311/311 TUs
+compiled + linked against libc++ + libSDL2.a + a new libz.a.
+
+DOSBox-X v2026.08.31 (commit `4f19017c`) vendored pruned-pristine to
+`third_party/dosbox-x/` (59M; dropped vs/ + contrib/ + build-scripts/ + docs/;
+`PRUNE-MANIFEST.md`). The build (`build_dosbox_x` in tools/build.sh) is the
+TyrQuake idiom at C++ scale: a curated object list DERIVED from the upstream
+Makefile.am `_SOURCES` by `tools/dosbox-x-sources.py` (self-maintaining across a
+version bump; 311 TUs), a hand `config.h` (aarch64/POSIX/LP64; core=normal,
+nosound, no-GL/D3D/TTF/net; the vs/config.h `_M_ARM64` arms are DEAD on
+aarch64-thylacine so every value is set unconditionally), and a DIRECT pouch link
+(fork clang++ driver + -lSDL2 -lz) -- not autotools, because the Pouch link
+(static/ET_EXEC/no-PT_DYNAMIC/custom-CRT) is the shape libtool would fight.
+
+Build method decided over autotools cross-compile precisely because the *link* is
+the hard, non-standard part; the object SELECTION and config were the tractable
+parts (extract from Makefile.am; adapt vs/config.h).
+
+The compile-fix loop, measured (landscape mode, -O0, xargs -P8):
+- **220 fail -> 6**: structural includes. `-I<top>` for "include/menu.h"-style
+  includes; the six snd_pc98 `-I` dirs; byteorder.h routed to `<endian.h>` for
+  thylacine (patch 0001, `-D__thylacine__=1`); the over-pruned
+  `vs/sdl/src/cdrom/` SDL1-CD-ROM compat shim re-vendored.
+- **6 -> 1**: `-DC_SDL2=1` global (SDL_cdrom.c includes SDL's config, not
+  DOSBox's, so C_SDL2 was undefined for it); **zlib pulled forward** (new
+  `build_zlib`, zlib 1.3.1 -> the sysroot) because cdrom_image unity-includes
+  libchdr AND include/zip.h both hard-require it; whereami.c routed to its Linux
+  /proc/self/exe arm (patch 0003); bios.cpp's boot-logo PNG decode gated behind
+  C_LIBPNG (patch 0002).
+- **1 -> 0 compile**: `vs/zlib/contrib/minizip/` re-vendored (savestates
+  unity-include).
+- **link 16 undefined -> 0**: cdrom.cpp already unity-includes SDL_cdrom.c +
+  the dummy syscdrom backend, so my compiling them standalone DUPLICATED the
+  SDL_CD* symbols -- dropped from the object list (kept vendored). opngeng.c
+  un-excluded (its `#error use opngen.x86` is `#if OPNGENX86`-gated, off on ARM,
+  so it compiles the C generator defining opngen_getpcm). opusfile `op_*` +
+  speexdsp `speex_resampler_*` (cdrom_image's opus CD-audio decoder) and the
+  host `SERIAL_*` API (opl3duoboard, a real OPL3-over-serial board) STUBBED as
+  port glue (`usr/ports/dosbox-x/glue/`) rather than compiling the 169-file
+  libopusint or adding a libserial platform arm -- both are nosound/no-hardware
+  features irrelevant to DX-1; decode/connect fail gracefully. DX-3 (audio) can
+  build real libopusint.
+
+**The wrong turn worth recording.** The bios.cpp C_LIBPNG-gate patch first came
+out as a FULL-FILE hunk (`@@ -1,13427 +1,13431 @@`, every line re-added).
+bios.cpp is CRLF; python3 text-mode read silently converted it to LF, so the
+"2-hunk gate" would have rewritten all 13427 lines to LF. **Both** guards passed
+it -- `check-patch-hunks.py` (counts were internally consistent) AND
+`patch --dry-run` (applied clean) -- a textbook "a passing check is not proof."
+Caught by eyeballing the hunk header (a full-file span for a 4-line insert is the
+tell), confirmed with `file` (CRLF) + a CR-count diff, and regenerated in binary
+mode preserving `\r\n` -> 4 clean localized hunks; verified the CRs survive the
+apply. whereami.c/byteorder.h are LF, so their patches were fine -- the line-ending
+is per-file, not per-tree.
+
+**What DX-1 does NOT cover (exact).** This is compile + link only -- the binary
+has not booted. core=normal only (the CAP_JIT dynarec is DX-4); sound stubbed;
+opus CD-audio + host serial stubbed; no GL/TTF/screenshots/savestate-verified.
+First light (reach `Z:\>` in a Tapestry pane + the ls-gfx-dosbox gate) is DX-2.
+Built + verified at -O0 (landscape) AND the strict default -O2 path. Landed at
+`5af3e46d`, pushed to both mirrors; fresh-checkout integrity verified (committed
+== on-disk == 1502 files, 0 gitignored -- no repeat of the vendored-gitignore
+bug).
+
+## 2026-09-03 (aux, Opus 4.8, effort max) -- the merge, aux side: the fresh-checkout vendoring bug that a long-lived worktree can't see
+
+The aux half of the 0046 merge (run 20 above has the merge narrative). aux was
+the verifier + the viv-side authority. Beyond the per-hunk intent, aux's
+independent reads earned three things: a `git merge-tree` cross-check that
+matched main's 13 conflicts exactly (and caught my OWN grep over-match first --
+it conflated "Auto-merging X" with "CONFLICT in X" and would have fabricated a
+24-file discrepancy; re-parsed to CONFLICT-lines-only before saying anything);
+the build-critical `VIV_NATIVE_CEILING` catch (a literal `108` in aux's
+`vivarium.h`, pinned by the `vivarium.c:30` static_assert, absent from main's
+"verified complete" 108->109 blast radius -- owner-verifies-own-surface); and a
+spec-gate scope confirmation (aux changed ONLY `territory.tla` + `pipe.tla` among
+specs, so main's territory+pipe buggy-cfg set was exactly complete -- I nearly
+flagged a false gap from the modelled CODE files aux touched, until the specs/
+diff showed they merged clean = already-validated).
+
+**The finding nobody planned: forking a genuinely fresh branch off merged-main
+broke the build in a way main's tree structurally could not show.** aux-3 @
+`3d4d633e` failed `build.sh` at Cargo's vendored-crate checksum step --
+`third_party/rust/aegis/wasm-libs/libaegis.a: No such file`. Root cause: the
+vendored `third_party/rust` crates require 107 files (~37.7 MiB) that broad
+`.gitignore` rules EXCLUDE -- `*.a` (aegis + 5 windows import libs), `*.bin` (76
+pkcs5/ring/rustls-webpki/smoltcp/thiserror fixtures), `*.o` (17 ring objects),
+and the build-output `target/` rule wrongly eating `cc/src/target/*.rs` SOURCE.
+Cargo checksums every vendored crate, so a fresh checkout dies one file at a
+time. PRE-EXISTING in main's H-arc (the crates are in pre-merge main 93aa6325,
+not aux-2), and invisible on any long-lived worktree, which accumulated all 107
+when the crates were first vendored -- so main's builds and the SMP/spec gates
+never saw it. Blast radius: every fresh checkout -- a new worktree, a clean
+clone, CI, and `warp-host.sh sync` to thyla-pi (git-archive of HEAD drops
+gitignored files). **Caught only because forking a fresh branch is exactly the
+thing a long-lived worktree cannot test.** My first scope scan REPEATED the
+gitignore's own over-match (I filtered `/target/` and missed cc's source module
+literally named `target`); the reliable scan is `git ls-files --others --ignored`
+with no pattern filter, diffed main-vs-aux. Worked around for aux-3 by mirroring
+all 107 from main (identical commit -> checksums verified against each crate's
+`.cargo-checksum.json`); the proper fix is main-owned (a `.gitignore` edit +
+committing the ~37 MiB vendored subset) so fresh checkouts are reproducible.
+Tracked: `memory/bug_vendored_gitignored_breaks_fresh_checkout.md`; flagged on
+0046 turn 16. It does NOT block the close -- both worktrees build.
+
+**Outcome.** aux-3 @ `3d4d633e` (= c83da249 + main's run-20 journal, docs-only):
+`build.sh kernel` + `userspace` + the suite all green (boot banner, arc gates
+L-6c + D-5 PASS, "Thylacine boot OK"), pushed both mirrors, ls-remote verified.
+SMP soundness inherited from c83da249 (aux-3's kernel is the byte-identical
+binary main gated 40 boots / 0 corruption -- not re-run on identical bits). The
+operator's 3-part bar is met: aux-2 merged, aux-3 fresh off merged-main, both
+build+test green. Role split: aux -> viv on aux-3, main -> KT-1.
 ## Haul completion (2026-09-17, Codex, single-agent)
 
 The operator asked to finish Haul and authorized bringing its required

@@ -75,6 +75,8 @@ void test_kthread_join_free(struct Thread *t, volatile bool *exited) {
 void test_kaslr_mix64_avalanche(void);
 void test_dtb_chosen_kaslr_seed_present(void);
 void test_dtb_pci_intx_route(void);
+void test_dtb_msi_map_bounds(void);
+void test_dtb_pci_msi_route(void);
 void test_dtb_pci_intid_is_level(void);
 void test_dtb_pci_mem_window(void);
 void test_dtb_pci_mem_window64(void);
@@ -85,6 +87,8 @@ void test_slub_leak_10k(void);
 void test_slub_kmalloc_overflow_guard(void);
 void test_slub_cache_destroy_guards(void);
 void test_gic_init_smoke(void);
+void test_gic_irq_barrier(void);
+void test_gic_its_commands(void);
 void test_gic_cpu_irq_counter_geometry(void);  // V-4c-3 F5 (#73)
 void test_timer_tick_increments(void);
 void test_timer_oneshot_tval_clamps(void);
@@ -220,6 +224,7 @@ void test_proc_identity_spawn_set_accepted_with_cap(void);
 void test_proc_identity_set_rejects_reserved(void);
 void test_proc_identity_set_rejects_system_supp_gid(void);
 void test_proc_identity_peer_snapshot_by_stripes(void);
+void test_proc_identity_peer_snapshot_console_owner(void);
 void test_proc_wait_pid_for_no_match(void);
 void test_proc_wait_pid_for_wnohang_alive_then_reap(void);
 void test_proc_wait_pid_for_selects_target(void);
@@ -1115,6 +1120,7 @@ void test_irqfwd_refcount_lifecycle(void);
 void test_irqfwd_wait_wakes_on_sgi(void);
 void test_irqfwd_collapses_concurrent_fires(void);
 void test_irqfwd_second_waiter_refused(void);
+void test_irqfwd_detached_dispatch(void);
 void test_irqfwd_level_mask_ack(void);
 void test_irqfwd_wait_timeout(void);
 void test_virtio_pci_init_called(void);
@@ -1128,6 +1134,15 @@ void test_virtio_pci_cfg_write_bounds(void);
 void test_pci_bar_decode_size(void);
 void test_pci_walk_caps_hostile(void);
 void test_pci_walk_caps_shm(void);
+void test_pci_irq_shared_tickets(void);
+void test_pci_intx_recovery(void);
+void test_pci_intx_close_dispatch(void);
+void test_pci_msi_allocator(void);
+void test_pci_restart_placement(void);
+void test_pci_msix_rng(void);
+void test_pci_msix_failures(void);
+void test_pci_msix_windows(void);
+void test_pci_mapping_holds_function(void);
 void test_pci_claim_rng(void);
 void test_pci_claim_unknown(void);
 void test_pci_claim_exclusive(void);
@@ -1352,6 +1367,8 @@ void test_dev9p_attach_client_root_spoor(void);
 void test_dev9p_walk_one_component(void);
 void test_dev9p_walk_clone(void);
 void test_dev9p_open_lopens_fid(void);
+void test_dev9p_open_errno(void);
+void test_dev9p_stalk_open_errno(void);
 void test_dev9p_read_routes_through_client(void);
 void test_dev9p_write_routes_through_client(void);
 void test_dev9p_write_read_propagate_errno(void);
@@ -1577,6 +1594,7 @@ void test_stratumd_stub_fs_round_trip(void);
 void test_stratumd_stub_walk_round_trip(void);
 void test_stub_driver_round_trip(void);
 void test_irq_latency_bench(void);
+void test_irq_latency_bench_failure(void);
 void test_caps_kproc_has_all(void);
 void test_caps_kproc_has_hw_create(void);
 void test_caps_rfork_child_has_none(void);
@@ -1598,6 +1616,7 @@ void test_mmio_handle_create_adjacent_ok(void);
 void test_mmio_handle_create_unref_releases_slot(void);
 void test_mmio_handle_double_unref_extincts(void);
 void test_mmio_handle_create_kernel_reserved_rejected(void);
+void test_mmio_kernel_reservation_union(void);
 void test_mmio_handle_virtio_mmio_claimable(void);
 void test_mmio_handle_create_out_of_ips_rejected(void);
 void test_dma_handle_create_basic(void);
@@ -1646,6 +1665,9 @@ void test_mmio_map_proc_free_releases_kobj(void);
 struct test_case g_tests[] = {
     { "kaslr.mix64_avalanche",         test_kaslr_mix64_avalanche,         false, NULL },
     { "dtb.chosen_kaslr_seed_present", test_dtb_chosen_kaslr_seed_present, false, NULL },
+    { "mmio.kernel_reservation_union", test_mmio_kernel_reservation_union, false, NULL },
+    { "dtb.msi_map_bounds", test_dtb_msi_map_bounds, false, NULL },
+    { "dtb.pci_msi_route", test_dtb_pci_msi_route, false, NULL },
     { "dtb.pci_intx_route",            test_dtb_pci_intx_route,            false, NULL },
     { "dtb.pci_intid_is_level",        test_dtb_pci_intid_is_level,        false, NULL },
     { "dtb.pci_mem_window",            test_dtb_pci_mem_window,            false, NULL },
@@ -1656,6 +1678,8 @@ struct test_case g_tests[] = {
     { "slub.leak_10k",                 test_slub_leak_10k,                 false, NULL },
     { "slub.kmalloc_overflow_guard",   test_slub_kmalloc_overflow_guard,   false, NULL },
     { "slub.cache_destroy_guards",     test_slub_cache_destroy_guards,     false, NULL },
+    { "gic.its_commands", test_gic_its_commands, false, NULL },
+    { "gic.irq_barrier", test_gic_irq_barrier, false, NULL },
     { "gic.init_smoke",                test_gic_init_smoke,                false, NULL },
     { "gic.cpu_irq_counter_geometry",  test_gic_cpu_irq_counter_geometry,  false, NULL },
     { "timer.tick_increments",         test_timer_tick_increments,         false, NULL },
@@ -1882,6 +1906,9 @@ struct test_case g_tests[] = {
                                        false, NULL },
     { "proc_identity.peer_snapshot_by_stripes",
                                        test_proc_identity_peer_snapshot_by_stripes,
+                                       false, NULL },
+    { "proc_identity.peer_snapshot_console_owner",
+                                       test_proc_identity_peer_snapshot_console_owner,
                                        false, NULL },
     { "territory.bind_smoke",          test_namespace_bind_smoke,          false, NULL },
     { "territory.cycle_rejected",      test_namespace_cycle_rejected,      false, NULL },
@@ -2839,6 +2866,7 @@ struct test_case g_tests[] = {
     { "irqfwd.collapses_concurrent_fires",
                                        test_irqfwd_collapses_concurrent_fires, false, NULL },
     { "irqfwd.second_waiter_refused",  test_irqfwd_second_waiter_refused,  false, NULL },
+    { "irqfwd.detached_dispatch", test_irqfwd_detached_dispatch, false, NULL },
     { "irqfwd.level_mask_ack",         test_irqfwd_level_mask_ack,         false, NULL },
     { "irqfwd.wait_timeout",           test_irqfwd_wait_timeout,           false, NULL },
     { "virtio_pci.init_called",        test_virtio_pci_init_called,        false, NULL },
@@ -2853,6 +2881,15 @@ struct test_case g_tests[] = {
     { "virtio_pci.cfg_write_bounds",   test_virtio_pci_cfg_write_bounds,   false, NULL },
     { "pci.bar_decode_size",           test_pci_bar_decode_size,           false, NULL },
     { "pci.walk_caps_hostile",         test_pci_walk_caps_hostile,         false, NULL },
+    { "pci.mapping_holds_function",   test_pci_mapping_holds_function,   false, NULL },
+    { "pci.msix_failures", test_pci_msix_failures, false, NULL },
+    { "pci.msix_rng", test_pci_msix_rng, false, NULL },
+    { "pci.restart_placement", test_pci_restart_placement, false, NULL },
+    { "pci.msi_allocator", test_pci_msi_allocator, false, NULL },
+    { "pci.intx_recovery", test_pci_intx_recovery, false, NULL },
+    { "pci.intx_close_dispatch", test_pci_intx_close_dispatch, false, NULL },
+    { "pci.shared_irq_tickets",        test_pci_irq_shared_tickets,        false, NULL },
+    { "pci.msix_windows",             test_pci_msix_windows,             false, NULL },
     { "pci.walk_caps_shm",             test_pci_walk_caps_shm,             false, NULL },
     { "pci.claim_rng",                 test_pci_claim_rng,                 false, NULL },
     { "pci.claim_unknown",             test_pci_claim_unknown,             false, NULL },
@@ -3214,6 +3251,8 @@ struct test_case g_tests[] = {
     { "dev9p.walk_one_component",      test_dev9p_walk_one_component,      false, NULL },
     { "dev9p.walk_clone",              test_dev9p_walk_clone,              false, NULL },
     { "dev9p.open_lopens_fid",         test_dev9p_open_lopens_fid,         false, NULL },
+    { "dev9p.open_errno", test_dev9p_open_errno, false, NULL },
+    { "dev9p.stalk_open_errno", test_dev9p_stalk_open_errno, false, NULL },
     { "dev9p.read_routes_through_client",
                                        test_dev9p_read_routes_through_client,
                                                                            false, NULL },
@@ -3483,6 +3522,7 @@ struct test_case g_tests[] = {
     { "userspace.stratumd_stub_fs_round_trip",         test_stratumd_stub_fs_round_trip,                   false, NULL },
     { "userspace.stratumd_stub_walk_round_trip",       test_stratumd_stub_walk_round_trip,                 false, NULL },
     { "userspace.stub_driver_round_trip",              test_stub_driver_round_trip,                        false, NULL },
+    { "userspace.irq_latency_bench_failure", test_irq_latency_bench_failure, false, NULL },
     { "userspace.irq_latency_bench",   test_irq_latency_bench,             false, NULL },
     { "caps.kproc_has_all",            test_caps_kproc_has_all,            false, NULL },
     { "caps.kproc_has_hw_create",      test_caps_kproc_has_hw_create,      false, NULL },

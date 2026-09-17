@@ -109,6 +109,8 @@ pub struct Leaf {
     /// Not laid out this pass (a zoom or a tab hides it). Still a leaf, still
     /// hosted: absent from the chrome, present in the tree.
     pub hidden: bool,
+    /// Explicit system-background state, distinct from a hidden tab/zoom.
+    pub backgrounded: bool,
 }
 
 /// The `layout` header's workspace pair -- `workspaces N active K`, ONE-BASED
@@ -323,6 +325,8 @@ pub fn parse_leaves_all(layout: &str) -> Vec<Leaf> {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct TileInfo {
     pub leaf: Leaf,
+    /// Stack/tab parent identity, or this leaf for a standalone pane.
+    pub group: u32,
     /// The 1-based position among the parent's children and their count,
     /// when the parent is a stack or a tab container; (1, 1) for a leaf
     /// that is a stack of one (a split's child, or the root).
@@ -339,12 +343,13 @@ pub struct TileInfo {
 /// Parse the `layout` text into its leaves with their stack facts. The
 /// dump's grammar (tapestryd `render_pane`): two spaces per depth; a
 /// container row `<id>[*] <mode> n=<k> active=<a> [rect]`, a leaf row
-/// `<id>[*] leaf surface=<n>|empty [rect][ w=<n>][ hidden]`. The depth
+/// `<id>[*] leaf surface=<n>|empty [rect][ w=<n>][ backgrounded][ hidden]`. The depth
 /// names the parent: a leaf at depth d belongs to the nearest container at
 /// depth d-1 above it. A malformed id is skipped, never guessed; a row
 /// whose depth names no container is a stack of one.
 pub fn parse_tree(layout: &str) -> Vec<TileInfo> {
     struct Cont {
+        id: u32,
         depth: usize,
         stacked: bool,
         n: u32,
@@ -378,7 +383,7 @@ pub fn parse_tree(layout: &str) -> Vec<TileInfo> {
             Some(c) if c.depth + 1 == depth => {
                 let i = c.seen;
                 c.seen += 1;
-                Some((c.stacked, i, c.n, c.active))
+                Some((c.stacked, i, c.n, c.active, c.id))
             }
             _ => None,
         };
@@ -389,15 +394,21 @@ pub fn parse_tree(layout: &str) -> Vec<TileInfo> {
                 .find_map(|t| t.strip_prefix("surface="))
                 .and_then(|s| s.parse().ok());
             let (index, count, open, last) = match place {
-                Some((true, i, n, active)) => (i + 1, n.max(1), i == active, i + 1 >= n),
+                Some((true, i, n, active, _)) => (i + 1, n.max(1), i == active, i + 1 >= n),
                 _ => (1, 1, true, true),
             };
+            let group = match place {
+                Some((true, _, _, _, parent)) => parent,
+                _ => id,
+            };
             out.push(TileInfo {
+                group,
                 leaf: Leaf {
                     id,
                     focused,
                     surface,
                     hidden,
+                    backgrounded: it.clone().any(|t| t == "backgrounded"),
                 },
                 index,
                 count,
@@ -419,6 +430,7 @@ pub fn parse_tree(layout: &str) -> Vec<TileInfo> {
             }
         }
         stack.push(Cont {
+            id,
             depth,
             stacked,
             n,
@@ -1058,6 +1070,7 @@ mod tests {
                 focused: false,
                 surface: Some(0),
                 hidden: false,
+                backgrounded: false,
             }
         );
         assert_eq!(
@@ -1067,6 +1080,7 @@ mod tests {
                 focused: true,
                 surface: None,
                 hidden: false,
+                backgrounded: false,
             }
         );
     }

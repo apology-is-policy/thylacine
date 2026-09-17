@@ -80,7 +80,7 @@ macro_rules! say {
 /// -- a driver that always fails `probe`, restarted with back-off up to the bound
 /// then given up on (a SOFT per-device failure that does not fail the boot); the
 /// `virtio-pci:1` -> `netd` bind (net-2) is the network daemon -- it owns the NIC
-/// over the PCI transport, narrowed to its (bus,dev,fn) + INTID + DMA pool (no
+/// over the PCI transport, narrowed to its (bus,dev,fn) + DMA pool (no
 /// MMIO axis: a PCI function's registers are in BARs, mapped off the claimed
 /// KObj_PCI), and runs the TCP/IP stack (the live I-34-on-PCI proof, evolved from
 /// the 6b-3 ARP demo). v1.x reads `/lib/driver/*.manifest`.
@@ -110,7 +110,8 @@ driver "tapestryd" {
     binds = ["virtio-pci:16", "virtio-pci:18"]
     needs {
         pci = "node"
-        irq = "node:interrupts"
+        # The BDF claim authorizes function-bound interrupt endpoints.
+        irq = "none"
         # WEAVE-SKEIN: matches KOBJ_DMA_WEAVE_MAX_SIZE, the kernel's own
         # per-object envelope. It read 32 MiB and was the FIRST of the two
         # bounds a 2560x1664 display hit -- allowance_permits refuses a
@@ -138,10 +139,26 @@ driver "netd" {
     binds = ["virtio-pci:1"]
     needs {
         pci = "node"
-        irq = "node:interrupts"
+        # The BDF claim authorizes function-bound interrupt endpoints.
+        irq = "none"
         dma = "pool: 64 KiB"
     }
     serves    = "/net"
+    restart   = on-crash
+    lifecycle = persistent
+}
+"#,
+    r#"
+driver "nocturned" {
+    abi   = 1
+    binds = ["virtio-pci:25"]
+    needs {
+        pci = "node"
+        # The BDF claim authorizes function-bound interrupt endpoints.
+        irq = "none"
+        dma = "pool: 256 KiB"
+    }
+    serves    = "/dev/nocturne"
     restart   = on-crash
     lifecycle = persistent
 }

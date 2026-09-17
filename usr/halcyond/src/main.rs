@@ -68,6 +68,8 @@ macro_rules! say {
 mod chromeset;
 mod menuset;
 mod railset;
+mod paneplace;
+mod placesrv;
 mod session;
 mod statusset;
 
@@ -212,6 +214,26 @@ fn summon(
     menus.open(model, d(ax, gx), d(ay, gy), run_d, sheet, gs);
 }
 
+
+/// The heap-residual inline-media place cap (I-47 audit F4): how many pixels the
+/// `/srv/halcyon` channel may accept, given the display-scaled atlas. The 64 MiB
+/// heap (`ThylaAllocN`) is shared by the transcript's 32 MiB content budget, the
+/// atlas (which scales with the scanout -- ~6 MiB at 1280x800, ~18 MiB at 4K),
+/// the layout cache + faces + misc, and the place path (peak 8 bytes/px: the
+/// accumulator plus its completion `Vec<u32>`). So place gets the RESIDUAL after
+/// the atlas, over 8; `PlaceServer::set_max_pixels` clamps it to the placesrv
+/// floor/ceiling. This holds the full 1 Mpx (native-size images) through
+/// 2560x1600 (the operator's HiDPI) and shrinks it only past ~3K, where the atlas
+/// would otherwise crowd the heap and OOM the renderer.
+fn place_cap_for(atlas_pages: usize) -> u64 {
+    const HEAP: u64 = 64 * 1024 * 1024;
+    const TRANSCRIPT_RESERVE: u64 = 32 * 1024 * 1024; // the transcript's max_cost
+    const BASELINE_RESERVE: u64 = 10 * 1024 * 1024; // layout cache + faces + misc
+    const ATLAS_PAGE_BYTES: u64 = 512 * 512; // one 8-bit atlas page
+    let atlas = atlas_pages as u64 * ATLAS_PAGE_BYTES;
+    let residual = HEAP.saturating_sub(TRANSCRIPT_RESERVE + BASELINE_RESERVE + atlas);
+    residual / 8 // 8 bytes/px place peak; set_max_pixels clamps to [MIN, HARD]
+}
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
@@ -480,6 +502,26 @@ pub extern "C" fn rs_main() -> i64 {
     let mut t = Transcript::new(theme.terminal);
     let mut cache = LayoutCache::new();
 
+    // I-47 slice 1b: the inline-image witness. When the boot declares
+    // `thylacine.viewtest` (run-vm.sh THYLACINE_VIEWTEST=1), inject a raster
+    // into the transcript so the render path (Item::Image -> cartoon Op::Image)
+    // shows on the real scanout -- the de-risk the host test cannot do. Reads
+    // the FDT bootargs the way tapestryd reads its scale token; best-effort
+    // (a missing /hw or an absent token simply injects nothing).
+    {
+        let ba = open_path("/hw/chosen/bootargs", T_OREAD);
+        if ba >= 0 {
+            let mut bbuf = [0u8; 512];
+            let n = unsafe { t_read(ba, bbuf.as_mut_ptr(), bbuf.len()) };
+            let _ = unsafe { libthyla_rs::t_close(ba) };
+            if n > 0 && halcyond::viewtest::declared(&bbuf[..n as usize]) {
+                let (iw, ih, argb) = halcyond::viewtest::raster();
+                t.inject_image(iw, ih, argb);
+                say!("halcyond: viewtest -- inline image injected ({}x{}; I-47 slice 1b)", iw, ih);
+            }
+        }
+    }
+
     // The winsize report: the transcript is flowed, but programs wrap to a
     // COLUMN count -- report the mono-grid equivalent (foreign/plain
     // content is mono, so this is the terminal-compatible answer). The cell
@@ -517,6 +559,19 @@ pub extern "C" fn rs_main() -> i64 {
     const PRESENT_FAILS_FATAL: u32 = 240;
 
     let mut announced = false;
+
+    // I-47 (HALCYON.md 14.7): the inline-media place channel. Post /srv/halcyon
+    // so a short-lived `view` can hand this renderer a decoded raster (the
+    // console spike). Best-effort: without the MAY_POST_SERVICE grant (or if the
+    // post races) the renderer runs unchanged and inline `view` is simply
+    // unavailable -- it falls back to reporting the decode. The place fds join
+    // the unified wait below so a write wakes the loop promptly.
+    let mut places = placesrv::PlaceServer::post();
+    if places.is_some() {
+        say!("halcyond: /srv/halcyon posted (inline media; I-47)");
+    } else {
+        say!("halcyond: /srv/halcyon post failed (inline media off; not a MAY_POST_SERVICE holder?)");
+    }
 
     loop {
         // (0) The render pass runs at the TOP: pass 1 paints + presents the
@@ -840,7 +895,7 @@ pub extern "C" fn rs_main() -> i64 {
             cartoon::execute(
                 &cart,
                 &gs.packer.store,
-                &cartoon::BlobStore::new(),
+                &cart.blobs,
                 px,
                 w,
                 None,
@@ -1337,25 +1392,26 @@ pub extern "C" fn rs_main() -> i64 {
                     // matching it. A console-only wake leaves this surface's
                     // queue empty (take_event -> None); step (2) drains the
                     // console and the top re-renders.
-                    let mut waitfds = [
-                        TPollFd {
-                            fd: ring.poll_fd(),
-                            events: T_POLLIN,
-                            revents: 0,
-                        },
-                        TPollFd {
-                            fd: drain as i32,
-                            events: T_POLLIN,
-                            revents: 0,
-                        },
-                    ];
-                    // A transient status notice expires on the clock (8.2):
-                    // wake for it, so the live model returns; and the
-                    // rails' clocks turn with the minute.
+                    let mut waitfds: Vec<TPollFd> = Vec::with_capacity(3 + 4);
+                    waitfds.push(TPollFd {
+                        fd: ring.poll_fd(),
+                        events: T_POLLIN,
+                        revents: 0,
+                    });
+                    waitfds.push(TPollFd {
+                        fd: drain as i32,
+                        events: T_POLLIN,
+                        revents: 0,
+                    });
+                    // I-47: the place channel (listener + live conns) joins the
+                    // wait, so an inline `view`'s write wakes the loop at once.
+                    if let Some(p) = places.as_ref() {
+                        p.push_fds(&mut waitfds);
+                    }
+                    let nfds = waitfds.len();
                     let clock = statusset::clock_timeout_ms();
-                    let timeout =
-                        libhalcyon::motion::fold_timeout(clock, status.notice_timeout_ms());
-                    if unsafe { t_poll(waitfds.as_mut_ptr(), 2, timeout) } < 0 {
+                    let timeout = libhalcyon::motion::fold_timeout(clock, status.notice_timeout_ms());
+                    if unsafe { t_poll(waitfds.as_mut_ptr(), nfds, timeout) } < 0 {
                         say!("halcyond: unified poll failed (compositor gone); exiting");
                         return 1;
                     }
@@ -1776,5 +1832,26 @@ pub extern "C" fn rs_main() -> i64 {
             &mut drain_eof,
             &mut pending_exit,
         );
+
+        // (2b) I-47: service the inline-media place channel + inject any
+        // completed rasters into the transcript. One non-blocking pass per loop
+        // (cheap when idle); a completed image bumps t.seq, so the top-of-loop
+        // render shows it next pass -- the same one-pass latency as the drain.
+        {
+            // The place cap tracks the live atlas (F4): recompute from the
+            // current display-scaled atlas bound so a large scanout shrinks the
+            // place footprint instead of OOMing the shared heap.
+            let place_cap = place_cap_for(gs.evict_pages());
+            if let Some(p) = places.as_mut() {
+                p.set_max_pixels(place_cap);
+                p.service();
+                for img in p.take_completed() {
+                    let (iw, ih, n) = (img.w, img.h, img.argb.len());
+                    t.inject_image(img.w, img.h, img.argb);
+                    dirty = true;
+                    say!("halcyond: inline image placed ({}x{}, {} px; I-47)", iw, ih, n);
+                }
+            }
+        }
     }
 }

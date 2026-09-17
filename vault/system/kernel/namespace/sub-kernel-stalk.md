@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/POUNCE-DESIGN.md", "docs/FID-LIFECYCLE-DESIGN.md", "docs/DISTRO.md", "docs/VIVARIUM.md"]
 created: 2026-08-01
-updated: 2026-09-05
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -422,6 +422,11 @@ endpoint — stalk-3b-β). The adoption arm clunks the spent quarry, adopts
 the replacement, and transplants the walked name onto it (#66a F2,
 [[fnd-66a-r1-f2]] — fd2path must report `/srv/corvus`, not the endpoint's
 born-"/" name).
+
+A failed final `Dev.open` reads the 9P open errno before unwinding its
+unpublished quarry. `stalk_err` returns its positive magnitude to SYS_OPEN;
+unknown/non-9P errors remain EIO. Resource admission errors no longer collapse
+into transport failure. [[sub-kernel-ninep-dev9p]] owns the per-open record.
 
 ## Data structures
 

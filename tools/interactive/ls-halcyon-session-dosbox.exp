@@ -1,0 +1,83 @@
+#!/usr/bin/expect -f
+# DOSBox as a native client in the real Halcyon session; capture and exit proof.
+set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
+source [file join [file dirname [info script]] lib.exp]
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+set transcript /tmp/ls-halcyon-session-dosbox-[pid].log
+log_file -a $transcript
+proc key {chord} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $chord} e]} { lc_fail $e }
+    after 700
+}
+proc type {text} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp $text} e]} { lc_fail $e }
+}
+proc capture {name} {
+    global repo qmp
+    after 1000
+    set out $repo/build/session-dosbox-$name.png
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} e]} { lc_fail $e }
+    lc_step "captured $out"
+    return $out
+}
+proc colour_count {png} {
+    global repo
+    return [exec python3 $repo/tools/interactive/gfx_media.py $png]
+}
+lc_boot
+set timeout $lc_boot_timeout
+expect {
+    -ex "Thylacine login: " {}
+    -re {EXTINCTION:} { lc_extinction_fail "boot" }
+    timeout { lc_fail "no login" }
+    eof { lc_fail "EOF before login" }
+}
+lc_raw_send "michael\r" "login user"
+expect {
+    -ex "password: " {}
+    timeout { lc_fail "no password prompt" }
+    eof { lc_fail "EOF before password" }
+}
+lc_raw_send "correct-horse-battery-staple-v1\r" "login password"
+expect {
+    -ex "login: session compositor (halcyond) spawned" {}
+    -ex "Thylacine textual shell" { lc_fail "requires HALCYON_SESSION=y image" }
+    timeout { lc_fail "no graphical session" }
+    eof { lc_fail "EOF at session start" }
+}
+set timeout 60
+expect {
+    -re {halcyond: status bar [^\r\n]*running false panes 2} {}
+    -re {EXTINCTION:} { lc_extinction_fail "session" }
+    timeout { lc_fail "welcome and shell did not become ready" }
+}
+after 1500
+type "cp /bin/DX2C.COM /home/michael/DX2C.COM\n"
+after 1500
+type {dosbox-x -c "mount c /home/michael" -c "c:" -c "DX2C.COM"}
+type "\n"
+set timeout 60
+expect {
+    -re {halcyond: status bar [^\r\n]*context "DOSBox-X[^\r\n]*panes 3} {}
+    -re {E_Exit|Can't init SDL|snare:|EXTINCTION:} { lc_fail "DOSBox failed to start in session" }
+    timeout { lc_fail "DOSBox did not publish its titled native pane" }
+    eof { lc_fail "EOF starting DOSBox" }
+}
+after 6000
+capture pane
+key "meta_l+f"
+capture zoom
+# These keys go to the focused DOS pane, not the serial console.
+type "exit\n"
+expect {
+    -re {halcyond: status bar [^\r\n]*exit 0 [^\r\n]*running false panes 2} {}
+    -re {snare:|EXTINCTION:} { lc_fail "DOSBox faulted on exit" }
+    timeout { lc_fail "DOSBox did not return a successful shell session" }
+    eof { lc_fail "EOF exiting DOSBox" }
+}
+capture returned
+lc_pass "DOSBox in Halcyon: titled native pane/zoom review captures, keyboard exit and shell return"
+lc_quit

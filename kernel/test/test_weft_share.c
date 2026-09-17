@@ -1277,5 +1277,18 @@ void test_weft_hostmem_resolve(void) {
     TEST_EXPECT_EQ(hostmem_resolve_subrange(k, 1, 0, 0, &pa), -1, "zero length rejects");
     TEST_EXPECT_EQ(hostmem_resolve_subrange(k, 0x100, 0, PAGE_SIZE, &pa), -1,
         "shmid > 0xff rejects (the u8 truncation guard)");
+    // A valid SHM descriptor is not authority over kernel routing pages.
+    k->msix.cap_offset = 0x40;
+    k->msix.entries = 1;
+    k->msix.table_bar = 0;
+    k->msix.table_offset = 0x2800;
+    k->msix.pba_bar = 0;
+    k->msix.pba_offset = 0x3800;
+    TEST_EXPECT_EQ(hostmem_resolve_subrange(k, 1, 0x1000, PAGE_SIZE, &pa), -1,
+        "hostmem alias cannot expose table page");
+    TEST_EXPECT_EQ(hostmem_resolve_subrange(k, 1, 0x2000, PAGE_SIZE, &pa), -1,
+        "hostmem alias cannot expose PBA page");
+    TEST_EXPECT_EQ(hostmem_resolve_subrange(k, 1, 0, PAGE_SIZE, &pa), 0,
+        "unprotected hostmem prefix remains available");
     kfree(k);
 }

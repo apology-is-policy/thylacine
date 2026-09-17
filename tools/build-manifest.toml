@@ -26,7 +26,7 @@
 
 [meta]
 schema  = "1"
-updated = "2026-08-24"
+updated = "2026-09-05"
 
 # --- forks: sibling git trees, pinned by commit ------------------------------
 # `path` is where the build expects the tree (the `env` override points here too);
@@ -126,6 +126,29 @@ url        = "https://ftp.gwdg.de/pub/misc/ftp.idsoftware.com/idstuff/quake/quak
 sha256     = "ec6c9d34b1ae0252ac0066045b6611a7919c2a0d78a3a66d9387a8f597553239"
 pak_sha256 = "35a9c55e5e5a284a159ad2a62e0e8def23d829561fe2f54eb402dbc0a9a946af"
 feeds      = "CHUNK_QUAKE (the tyrquake shareware pak0.pak)"
+forageable = "auto-at-build"
+
+# The DOSBox-X emulator itself is NOT an input here: it is vendored in-repo
+# (third_party/dosbox-x, pruned-pristine + usr/ports/dosbox-x/patches). Only
+# its two showcase games are fetched. tools/test-forage.sh checks that every
+# network.* pin below matches build.sh's copy (two copies of one truth).
+
+[network.duke3d]
+file       = "3dduke13.zip"
+dir        = "build/duke3d"
+url        = "https://archive.org/download/3dduke13/3dduke13.zip"
+sha256     = "c67efd179022bc6d9bde54f404c707cbcbdc15423c20be72e277bc2bdddf3d0e"
+grp_sha256 = "f943d0c2e2a0803a644a2107c81ea897dec87596d9dd1a6a432131ad6f5818d6"
+feeds      = "CHUNK_DUKE3D (the Duke Nukem 3D v1.3d shareware -> /duke3d; needs CHUNK_DOSBOX)"
+forageable = "auto-at-build"
+
+[network.tombraider]
+file       = "tomb3dem.zip"
+dir        = "build/tombraider"
+url        = "https://archive.org/download/tomb3dem/tomb3dem.zip"
+sha256     = "4ffd686c7cc21513abd5bc352057314ed6bcf5519acd532987807d29a8cdfd72"
+exe_sha256 = "6a333d2da2a099f88ad04f78707d0fd0392caad07b7502c81f93b622ab02d53d"
+feeds      = "CHUNK_TOMBRAIDER (the Tomb Raider 1996 3dfx demo -> /tombraider; needs CHUNK_DOSBOX)"
 forageable = "auto-at-build"
 
 # --- remote: Clade artifacts built on thyla-keep, pulled prebuilt ------------

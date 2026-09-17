@@ -1294,3 +1294,243 @@ bool dtb_node_parent(u32 node_off, u32 *out_parent_off) {
     }
     return false;
 }
+
+// =============================================================================
+// PCI MSI relationships. These readers do not change the immutable boot DTB.
+// All arithmetic uses wide intermediates; malformed/ambiguous firmware fails
+// closed so it cannot authorize a different controller or requester identity.
+// =============================================================================
+static u32 msi_be32(const u8 *p) {
+    return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3];
+}
+// Tri-state: absent=0, present=1, malformed/duplicate=-1. Optional
+// properties must not turn malformed firmware into a default value.
+static int node_prop(u32 node, const char *name, const u8 **data, u32 *len) {
+    u32 cursor = 0;
+    struct dtb_node_entry e;
+    bool found = false;
+    while (dtb_node_iter(node, &cursor, &e)) {
+        if (!e.is_node && k_streq(e.name, name)) {
+            if (found) return -1; // duplicate property is not absence
+            *data = e.data; *len = e.datalen; found = true;
+        }
+    }
+    return found;
+}
+static bool node_u32(u32 node, const char *name, u32 *value) {
+    const u8 *p; u32 len;
+    if (node_prop(node, name, &p, &len) != 1 || len != 4) return false;
+    *value = msi_be32(p); return true;
+}
+static bool node_compat(u32 node, const char *compat) {
+    const u8 *p; u32 len;
+    if (node_prop(node, "compatible", &p, &len) != 1) return false;
+    // Unlike the early parser's trusted string helper, bound every string.
+    for (u32 off = 0; off < len;) {
+        u32 end = off;
+        while (end < len && p[end]) end++;
+        if (end == len) return false;
+        if (k_strlen(compat) == end - off && k_streq((const char *)p + off, compat))
+            return true;
+        off = end + 1;
+    }
+    return false;
+}
+static bool node_cells(u32 node, const char *name, u32 fallback, u32 *out) {
+    const u8 *p; u32 len;
+    *out = fallback;
+    int present = node_prop(node, name, &p, &len);
+    if (present < 0) return false;
+    if (present) {
+        if (len != 4) return false;
+        *out = msi_be32(p);
+    }
+    return *out == 1 || *out == 2;
+}
+static u64 msi_cells(const u8 *p, u32 cells) {
+    return cells == 1 ? msi_be32(p) : ((u64)msi_be32(p) << 32) | msi_be32(p + 4);
+}
+static bool node_reg_translated(u32 node, bool single, u64 *pa, u64 *size) {
+    u32 bus, ac, sc, len;
+    const u8 *p;
+    if (!dtb_node_parent(node, &bus) || node == bus ||
+        !node_cells(bus, "#address-cells", 2, &ac) ||
+        !node_cells(bus, "#size-cells", 1, &sc) ||
+        node_prop(node, "reg", &p, &len) != 1 || !len ||
+        len % ((ac + sc) * 4) || (single && len != (ac + sc) * 4)) return false;
+    u64 addr = msi_cells(p, ac), bytes = msi_cells(p + ac * 4, sc);
+    if (!bytes || addr > ~0ull - bytes) return false;
+    for (u32 depth = 0; bus != DTB_NODE_ROOT; depth++) {
+        u32 parent, pac;
+        if (depth >= DTB_MAX_DEPTH || !dtb_node_parent(bus, &parent) || parent == bus ||
+            !node_cells(parent, "#address-cells", 2, &pac) ||
+            node_prop(bus, "ranges", &p, &len) != 1) return false;
+        if (len) {
+            u32 stride = (ac + pac + sc) * 4;
+            if (len % stride) return false;
+            bool found = false; u64 translated = 0;
+            for (u32 off = 0; off < len; off += stride) {
+                u64 child = msi_cells(p + off, ac);
+                u64 host = msi_cells(p + off + ac * 4, pac);
+                u64 span = msi_cells(p + off + (ac + pac) * 4, sc);
+                if (!span || child > ~0ull - span || host > ~0ull - span) return false;
+                if (addr >= child && addr - child <= span && bytes <= span - (addr - child)) {
+                    if (found) return false;
+                    found = true; translated = host + (addr - child);
+                }
+            }
+            if (!found) return false;
+            addr = translated;
+        }
+        if (pac == 1 && (addr > 0xffffffffull || bytes > 0x100000000ull - addr)) return false;
+        bus = parent; ac = pac;
+        if (!node_cells(bus, "#size-cells", 1, &sc)) return false;
+    }
+    *pa = addr; *size = bytes; return true;
+}
+static bool msi_controller(u32 node, struct dtb_pci_msi *out) {
+    struct dtb_pci_msi r = { .node = node };
+    const u8 *p; u32 len, cells;
+    if (node_compat(node, "arm,gic-v2m-frame")) r.kind = DTB_MSI_V2M;
+    else if (node_compat(node, "arm,gic-v3-its")) r.kind = DTB_MSI_ITS;
+    else return false;
+    if (node_prop(node, "msi-controller", &p, &len) != 1 || len != 0 ||
+        !node_reg_translated(node, true, &r.pa, &r.size) ||
+        r.pa >= (1ull << 40) || r.size > (1ull << 40) - r.pa) return false;
+    if (r.kind == DTB_MSI_ITS &&
+        (!node_u32(node, "#msi-cells", &cells) || cells != 1)) return false;
+    int base = node_prop(node, "arm,msi-base-spi", &p, &len);
+    if (base < 0) return false;
+    if (base && (len != 4 || !node_u32(node, "arm,msi-base-spi", &r.spi_base))) return false;
+    int count = node_prop(node, "arm,msi-num-spis", &p, &len);
+    if (count < 0) return false;
+    if (count && (len != 4 || !node_u32(node, "arm,msi-num-spis", &r.spi_count))) return false;
+    if (base != count || (base && (r.kind != DTB_MSI_V2M || r.spi_base < 32 ||
+        !r.spi_count || (u64)r.spi_base + r.spi_count > 1020))) return false;
+    *out = r; return true;
+}
+bool dtb_msi_controller_n(u32 index, struct dtb_pci_msi *out) {
+    if (!g_dtb.ready || !out) return false;
+    struct fdt_walker w; walker_start(&w);
+    for (;;) {
+        // NOPs can precede a node: compute its offset from the returned name,
+        // rather than from the cursor before walker_next skipped those NOPs.
+        const char *name = NULL;
+        u32 tok = walker_next(&w, &name, NULL, NULL, NULL);
+        if (tok == FDT_END) return false;
+        if (tok != FDT_BEGIN_NODE) continue;
+        u32 node = (u32)((const u8 *)name - dtb_struct_base() - 4);
+        struct dtb_pci_msi r;
+        if (msi_controller(node, &r) && index-- == 0) { *out = r; return true; }
+    }
+}
+bool dtb_msi_map_decode(const u8 *data, u32 length, u32 mask, u16 rid,
+                        u32 *phandle, u32 *device_id) {
+    if (!data || !phandle || !device_id || !length || length % 16 || mask > 0xffffu)
+        return false;
+    u32 key = rid & mask, handle = 0, id = 0;
+    bool found = false;
+    for (u32 off = 0; off < length; off += 16) {
+        u32 base = msi_be32(data + off), ph = msi_be32(data + off + 4);
+        u32 target = msi_be32(data + off + 8), count = msi_be32(data + off + 12);
+        if (!ph || ph == 0xffffffffu || !count || base > 0xffffu ||
+            (u64)base + count > 0x10000ull || (u64)target + count > 0x100000000ull)
+            return false;
+        if (key >= base && key - base < count) {
+            if (found) return false;
+            found = true; handle = ph; id = target + key - base;
+        }
+    }
+    if (!found) return false;
+    *phandle = handle; *device_id = id; return true;
+}
+static bool node_enabled(u32 node) {
+    for (u32 depth = 0; depth < DTB_MAX_DEPTH; depth++) {
+        const u8 *p; u32 len;
+        int status = node_prop(node, "status", &p, &len);
+        if (status < 0) return false;
+        if (status &&
+            !((len == 3 && p[0] == 'o' && p[1] == 'k' && p[2] == 0) ||
+              (len == 5 && p[0] == 'o' && p[1] == 'k' && p[2] == 'a' && p[3] == 'y' && p[4] == 0)))
+            return false;
+        if (node == DTB_NODE_ROOT) return true;
+        u32 parent;
+        if (!dtb_node_parent(node, &parent) || parent == node) return false;
+        node = parent;
+    }
+    return false;
+}
+bool dtb_pci_msi_route(u16 requester_id, struct dtb_pci_msi *out) {
+    if (!g_dtb.ready || !out) return false;
+    // Enumeration currently supports one host bridge. Do not combine a map
+    // from one bridge with a mask or parent from another matching node.
+    struct fdt_walker hosts; walker_start(&hosts);
+    u32 host = 0; bool have_host = false;
+    for (;;) {
+        const char *name = NULL;
+        u32 tok = walker_next(&hosts, &name, NULL, NULL, NULL);
+        if (tok == FDT_END) break;
+        if (tok != FDT_BEGIN_NODE) continue;
+        u32 node = (u32)((const u8 *)name - dtb_struct_base() - 4);
+        const u8 *compat; u32 compat_len;
+        if (node_prop(node, "compatible", &compat, &compat_len) < 0) return false;
+        if (node_compat(node, DTB_PCI_COMPAT)) {
+            if (have_host) return false;
+            have_host = true; host = node;
+        }
+    }
+    if (!have_host || !node_enabled(host)) return false;
+    const u8 *data; u32 len, phandle = 0, device_id = 0;
+    int map = node_prop(host, "msi-map", &data, &len);
+    if (map < 0) return false;
+    if (map) {
+        const u8 *mask_data; u32 mask_len, mask = 0xffffu;
+        int mask_present = node_prop(host, "msi-map-mask", &mask_data, &mask_len);
+        if (mask_present < 0) return false;
+        if (mask_present) {
+            if (mask_len != 4) return false;
+            mask = msi_be32(mask_data);
+        }
+        if (!dtb_msi_map_decode(data, len, mask, requester_id, &phandle, &device_id)) return false;
+    } else {
+        if (node_prop(host, "msi-parent", &data, &len) != 1 || len != 4)
+            return false;
+        phandle = msi_be32(data);
+        if (!phandle || phandle == 0xffffffffu) return false;
+    }
+    struct fdt_walker w; walker_start(&w);
+    bool found = false; u32 target = 0;
+    for (;;) {
+        const char *name = NULL;
+        u32 tok = walker_next(&w, &name, NULL, NULL, NULL);
+        if (tok == FDT_END) break;
+        if (tok != FDT_BEGIN_NODE) continue;
+        u32 node = (u32)((const u8 *)name - dtb_struct_base() - 4), value;
+        const u8 *ph_data; u32 ph_len;
+        int ph = node_prop(node, "phandle", &ph_data, &ph_len);
+        if (ph < 0 || (ph && ph_len != 4)) return false;
+        if (node_u32(node, "phandle", &value) && value == phandle) {
+            if (found) return false;
+            found = true; target = node;
+        }
+    }
+    struct dtb_pci_msi r;
+    if (!found || !node_enabled(target) || !msi_controller(target, &r)) return false;
+    // msi-parent alone carries no PCI sideband identity. ITS requires msi-map.
+    if (r.kind == DTB_MSI_ITS && !map) return false;
+    r.device_id = device_id; *out = r; return true;
+}
+
+// MSI frames in these bindings are direct children of their owning GIC.
+// Compare the translated distributor address with the controller initialized
+// by gic_init, rather than selecting the first MSI-compatible node in the tree.
+bool dtb_msi_parent_matches(u32 controller_node, u64 distributor_pa) {
+    u32 parent; u64 pa, size;
+    if (!node_enabled(controller_node) ||
+        !dtb_node_parent(controller_node, &parent) || parent == controller_node ||
+        !node_enabled(parent) ||
+        !(node_compat(parent, "arm,gic-v3") || node_compat(parent, "arm,gic-400") ||
+          node_compat(parent, "arm,cortex-a15-gic")) ||
+        !node_reg_translated(parent, false, &pa, &size)) return false;
+    return pa == distributor_pa;
+}

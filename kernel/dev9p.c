@@ -82,6 +82,16 @@ s64 dev9p_create_errno(struct Spoor *c) {
     return (e <= -2 && e >= -4095) ? (s64)e : -1;
 }
 
+// Like create, open is performed on a freshly walked, unpublished Spoor.
+// Preserve resource refusals so callers can distinguish admission from I/O
+// failure. Non-9P devices and invalid/unspecified wire errors keep EIO.
+s64 dev9p_open_errno(struct Spoor *c) {
+    struct dev9p_priv *p = priv_of(c);
+    if (!p) return -1;
+    int e = p->open_errno;
+    return (e <= -2 && e >= -4095) ? (s64)e : -1;
+}
+
 // #80: bound a wire errno on its way to becoming a syscall return.
 //
 // Unlike the create path (#99), the mutation vtable slots ALREADY have an errno
@@ -1293,6 +1303,7 @@ static struct Spoor *dev9p_open_cached(struct Spoor *c, const char *const *names
 static struct Spoor *dev9p_open(struct Spoor *c, int omode) {
     struct dev9p_priv *p = priv_of(c);
     if (!p) return NULL;
+    p->open_errno = 0;
     if (p->fid == P9_NOFID) return NULL;   // a fidless (cached-open) Spoor is
                                            // already open; no fid to Tlopen
     // Map Plan 9 omode → Linux O_* flags. Plan 9: OREAD=0, OWRITE=1,
@@ -1322,7 +1333,7 @@ static struct Spoor *dev9p_open(struct Spoor *c, int omode) {
     struct p9_qid qid;
     u32 iounit;
     int rc = p9_client_lopen(p->client, p->fid, flags, &qid, &iounit);
-    if (rc != 0) return NULL;
+    if (rc != 0) { p->open_errno = rc; return NULL; }
     // Update the cached qid with the server's response.
     c->qid.path = qid.path;
     c->qid.vers = qid.version;

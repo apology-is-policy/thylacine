@@ -5,7 +5,9 @@ parent: moc-kernel-boot
 title: "The device tree — where the hardware view comes from"
 code:
   - lib/dtb.c
+  - tools/test-pci-msi-dtb.py
   - kernel/include/thylacine/dtb.h
+  - kernel/test/test_dtb.c
 audit: hard
 guarded-by: [inv-i15]
 validated-by: [prose, gate-smp]
@@ -14,7 +16,7 @@ abis: []
 design:
   - "docs/ARCHITECTURE.md section 5"
 created: 2026-08-02
-updated: 2026-08-16
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -206,3 +208,39 @@ boot, which consults this file for every hardware fact it prints.
 
 The second PCI memory window and the parameterized ranges walker are
 [[chg-2026-08-16-dtb-second-window]].
+
+## PCI MSI discovery
+
+`dtb_pci_msi_route` resolves the sole supported PCI host's `msi-map` and
+optional mask, or its no-sideband `msi-parent`. It follows a unique controller
+phandle, derives DeviceID from the requester ID, recognizes GICv2m/ITS and
+translates the controller's register extent through ancestor `ranges`.
+Disabled nodes/ancestors, unknown controllers, ambiguous matches, malformed
+four-cell maps and overflowing extents fail without modifying the output.
+ITS requires a sideband map; a bare parent cannot supply its DeviceID.
+V2m's paired SPI base/count overrides are validated against the SPI namespace.
+
+`dtb_msi_controller_n` enumerates controller frames independently of the PCI
+relationship for [[sub-kernel-hwcap]] MMIO reservation, including disabled and
+unreferenced frames. Discovery does not enable an MSI backend. MSI-X delivery,
+ITS tables and vector retirement remain separate implementation work under
+`docs/PCI-INTERRUPTS-DESIGN.md`.
+
+Guest tests cover unaligned map bytes, masking/translation, exclusive bounds,
+truncation, overflow, invalid phandles, ambiguity and malformed later rows.
+The live-DTB test checks controller identity and distinct ITS DeviceIDs; the
+hardware-claim test checks that controller pages are not claimable by EL0.
+See [[dec-2026-09-17-pci-interrupt-domains]].
+
+The host regression `tools/test-pci-msi-dtb.py` compiles the actual parser and
+checks 29 synthetic device trees, including nonempty address translation,
+disabled ancestors, absent sideband identity and ambiguous relationships. All
+29 pass. Live discovery and protected-frame tests pass on GICv2/HVF and
+GICv3/TCG (2026-09-17); neither result alone proves MSI delivery.
+
+Optional MSI properties distinguish absent from malformed/duplicate; a duplicate
+status or mask cannot silently become the default. The parser also checks the
+MSI node's parent GIC against the initialized distributor's translated address.
+The native fixtures cover both the matching and nonmatching parent, duplicate
+parent registers, and duplicate status, mask, cells, phandle, compatible, map
+and ranges properties.

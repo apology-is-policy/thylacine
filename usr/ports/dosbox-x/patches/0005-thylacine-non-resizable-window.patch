@@ -1,0 +1,34 @@
+Thylacine: pin the DOSBox-X window non-resizable (avoid the compositor resize war).
+
+The Thylacine tapestry compositor is authoritative on window size and letterboxes
+a client's chosen surface size into its pane. The SDL_thylacine backend implements
+this: a RESIZABLE window accepts the compositor's pane-size CONFIGURE offer (acks +
+reweaves + SDL_WINDOWEVENT_RESIZED), while a NON-resizable window declines the offer
+(the surface keeps its dims, the compositor letterboxes). DOSBox-X calls
+GFX_SetResizeable(true) at first-time video init (gui/sdlmain.cpp), so its window is
+resizable -- and it ALSO computes its own aspect-corrected target size. The two fight:
+the compositor offers 632x772 (the pane), DOSBox-X chases it, then re-asserts 640x772
+(its aspect size), the compositor re-offers 632x772, ... forever, and the scanout never
+settles ("Display output is not active"). Forcing GFX_SetResizeable to keep the window
+non-resizable on Thylacine breaks the loop at one point (covering every caller): the
+surface stays at DOSBox-X's size and the compositor letterboxes it into the pane.
+--- a/src/gui/sdlmain.cpp
++++ b/src/gui/sdlmain.cpp
+@@ -1951,6 +1951,17 @@
+ }
+ 
+ void GFX_SetResizeable(bool enable) {
++#if defined(__thylacine__)
++    /* The Thylacine tapestry compositor is authoritative on window size and
++     * letterboxes the client's chosen size into its pane. A RESIZABLE window
++     * accepts the compositor's pane-size CONFIGURE offer (SDL_WINDOWEVENT_RESIZED);
++     * an app with its own aspect-corrected size preference then chases that
++     * offer and oscillates against it forever (DOSBox-X: 640x772 vs the 632x772
++     * pane), so the scanout never settles. Pin non-resizable: the surface keeps
++     * the app's size and the compositor letterboxes it (the backend's Fork-2
++     * decline path). */
++    enable = false;
++#endif
+     if (SDL2_resize_enable != enable) {
+         SDL2_resize_enable = enable;
+ 
