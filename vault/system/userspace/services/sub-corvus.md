@@ -58,14 +58,15 @@ state, eligibility and rate limits remain corvus-owned. See [[sub-imperium]]
 and `docs/IMPERIUM-DESIGN.md §11` for the integrated contract.
 
 
-Graphical implementation was requested on 2026-09-18. The approved visual
-specification is `docs/HALCYON-TRUSTED-EPISODE.md`; the separately proposed
-hardware ownership boundary is `docs/GRAPHICAL-SAK-OWNERSHIP.md`. The latter
-awaits ratification because it moves the trusted graphics sink from the kernel
-to an isolated trusted hardware service. It is not implemented, and the serial
-episode remains the enforced path. Neither Halcyon nor Beacon may collect the
-Imperium key through an ordinary surface.
-
+Graphical service ownership was approved on 2026-09-18; see
+[[dec-2026-09-18-graphical-sak-portability]]. The visual specification is
+`docs/HALCYON-TRUSTED-EPISODE.md`; ownership and backend obligations are in
+`docs/GRAPHICAL-SAK-OWNERSHIP.md` and `docs/GRAPHICAL-SAK-PORTABILITY.md`.
+The service is a TCB member. Corvus must not accept secrets before exclusive
+presentation/input acknowledgement, or bypass existing request/grant validation.
+Pi 400/Pi 500 require independent hardware qualification. This is approved design,
+not implemented behavior; serial remains the enforced path. Halcyon and Beacon
+must never collect the Imperium key through an ordinary surface.
 
 **Reached as a 9P server.** corvus posts `/srv/corvus` and serves a
 two-node namespace: a directory root containing a single `ctl` file.

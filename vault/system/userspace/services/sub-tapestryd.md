@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
-updated: 2026-09-17
+updated: 2026-09-18
 ---
 ## Purpose
 
@@ -36,6 +36,16 @@ objects, and submits 3D command streams. That half holds [[inv-i45]] —
 whose **guest-exposure axis** is what this dossier describes; its host
 and v3d axes are reserved and unbuilt respectively, so cite the axis
 rather than the bare number.
+
+**Approved ownership change, not yet implemented (2026-09-18):**
+[[dec-2026-09-18-graphical-sak-portability]] extracts physical display/input
+into an isolated trusted service. Tapestry will keep normal composition behind
+a bounded broker, losing raw display/input hardware authority. Episode entry
+must exclude pending presents, cursors, all outputs and capture paths; restoration
+requires a full repaint. `docs/GRAPHICAL-SAK-PORTABILITY.md` records platform
+controller grants, DMA trust assumptions and backend qualification; a whole RP1
+PCI-function grant is not an isolated keyboard grant. Existing ownership described
+above remains the as-built state until that implementation lands.
 
 ## Contract
 

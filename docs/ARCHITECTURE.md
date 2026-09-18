@@ -3146,6 +3146,16 @@ The evolution *strengthens* the original claim: the kernel grows **no graphics-s
 - **Processes**: `rfork` / `exec` / `pipe` / `wait` — Halcyon spawns commands into panes.
 - **Notes**: resize (`winch`), `interrupt` (Ctrl-C).
 
+**Approved trusted-path refinement (2026-09-18).** Normal composition retains
+these interfaces. Graphical SAK extracts physical display/input ownership into
+an isolated boot-trusted service; the kernel gains episode authority/lifetime
+mediation, not a GPU command parser or graphical rasterizer. Corvus retains all
+authentication policy. This planned change supersedes the direct Tapestry hardware
+ownership above once implemented. `GRAPHICAL-SAK-OWNERSHIP.md` and
+`GRAPHICAL-SAK-PORTABILITY.md` define the boundary and Pi 400/Pi 500 obligations.
+The service, required non-isolated DMA drivers and firmware are explicit TCB;
+ordinary Halcyon/Beacon remain outside it. As built, only serial SAK is enforced.
+
 ### 17.3 Agentic enablement (the graphical agentic-loop ABI)
 
 The graphics phase ships a perceive / act / assert API for the coding agent, designed in from the fbcon (TAPESTRY.md §16): structural perception is free (the agent is a 9P client of the `/dev/tapestry` tree, `cat` over the serial console it already drives); visual perception is QEMU `screendump` -> the agent reads the PNG visually (host-side, now) then an in-band per-pane snapshot (later); action is QMP `input-send-event` (+ an in-band inject file later); and the oracle/ground-truth pairing (9P structure vs. captured pixels) makes graphical testing rigorous. This keeps the post-Utopia agent-primary loop alive into the graphical phase, where it would otherwise go blind on pixels. It is a new agentic-loop ABI sibling to the boot-banner ABI (`TOOLING.md` §10, which gains the concrete contract at fbcon-time); the in-band capture / inject files are dev/test-build-only (the #880 strip-for-production class).

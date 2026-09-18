@@ -22,6 +22,24 @@ needed the operator.
 
 
 ---
+## 2026-09-18 (Codex, single-agent) -- portable graphical SAK approval
+
+The operator approved the trusted display/input service and required Pi 400/Pi 500
+research before implementation. Primary Raspberry Pi Linux sources, pinned in
+`GRAPHICAL-SAK-PORTABILITY.md`, exposed two easy overclaims: an IOMMU can retain
+bypass mappings, and a keyboard controller can share a PCI function with unrelated
+RP1 peripherals. Protecting only the current framebuffer or handing the input
+service a whole RP1 function would not establish the promised boundary.
+
+The approved design now requires a seat-wide hardware acknowledgement before
+secret input, controller-scoped resource authority, explicit DMA trust assumptions,
+and qualification per backend. Old kernel-only-pixels and uncopyable-indicator
+claims were corrected. Production graphical failure does not enable serial auth.
+No runtime code changed in this research/design commit; no hardware portability
+pass or new graphical screenshot is claimed. The broker implementation remains
+next, with the normal compositor outside the trusted path.
+
+---
 ## 2026-09-18 (Codex, single-agent) -- native npxf and the graphical trust boundary
 
 The operator supplied a new npxf remote and requested OpenSSL, CMake and native

@@ -125,6 +125,7 @@ landed, what was verified, and any remaining limitations plainly.
   and its new apology-is-policy/npxf remote. Document it as Haul's supported
   host-side example.
 - Implement graphical SAK/Imperium using the approved Lex curiata visual design.
-  The changed hardware ownership contract proposed in GRAPHICAL-SAK-OWNERSHIP
-  remains a separate pending ratification; visual approval is not that decision.
+  The operator approved the isolated trusted display/input service on 2026-09-18.
+  Follow GRAPHICAL-SAK-OWNERSHIP and GRAPHICAL-SAK-PORTABILITY. Research and
+  design for Pi 400/Pi 500 and future display backends; do not overfit to QEMU.
 - Continue single-agent and preserve the earlier review/settings overrides.

@@ -11,10 +11,10 @@ The approved, self-contained [visual preview](halcyon-lex-curiata-preview.html)
 is retained with this specification. It is a labelled design artifact, not a
 running authorization surface.
 
-Implementation was requested on 2026-09-18. The proposed virtio hardware
-ownership change is in [Graphical SAK ownership](GRAPHICAL-SAK-OWNERSHIP.md).
-Its trusted-userspace-service option awaits operator ratification; it does not
-silently replace the kernel-owned sink contract below.
+Implementation and the isolated trusted hardware service were approved on
+2026-09-18. See [ownership](GRAPHICAL-SAK-OWNERSHIP.md) and the
+[portable backend contract](GRAPHICAL-SAK-PORTABILITY.md), including Pi 400
+and Pi 500 research. Approval does not imply an implemented trusted sink.
 
 ## Purpose and presentation
 
@@ -32,9 +32,9 @@ A narrow top rail identifies CORVUS and LEX CURIATA. The panel is titled
 section **Term**. These retain the documented Roman vocabulary while plain
 explanations make the authorization understandable without knowing the theme.
 
-Capture a kernel-owned, immutable copy of the last fully presented frame only
+Capture a trusted-service-owned, immutable copy of the last fully presented frame only
 after exclusive scanout ownership is established. Apply a bounded blur once,
-then dim it to keep the dialog dominant; no userspace-owned buffer remains as
+then dim it to keep the dialog dominant; no ordinary-client-writable buffer remains as
 the backdrop. Do not animate or refresh that snapshot during the episode.
 If safe capture is unavailable, use the same dialog on a neutral dark field.
 Failure to capture must never fall back to a live compositor backdrop.
@@ -127,8 +127,8 @@ The initial framebuffer implementation should accept a fixed maximum cell
 grid with a small closed set of semantic attributes, not pixels, font files,
 paths, terminal escapes, or general layout commands. Validate dimensions,
 lengths and attributes before replacing the current frame, so a malformed or
-short update cannot partially obscure a previous authorization. The kernel
-may rasterize a build-baked, bounded font into a kernel-owned linear buffer.
+short update cannot partially obscure a previous authorization. The trusted service
+rasterizes a build-baked, bounded font into private trusted backing.
 User-selected Instrument themes cannot alter this font or palette.
 
 The kernel's episode generation binds all submissions and END operations to
@@ -146,27 +146,22 @@ Nocturne continues its real-time cycle throughout, as I-46 requires.
 
 ## Current hardware boundary
 
-TRUSTED-PATH section 7 explicitly restricts a kernel-rendered episode to a
-kernel-reachable linear framebuffer. The present QEMU virtio-gpu path is owned
-by userspace. Painting a Corvus-themed Halcyon surface over it would not meet
-the invariant, even if input focus were moved and every other window hidden.
-That environment retains the serial BREAK trusted path until an approved
-trusted scanout mechanism exists. Any mirrored serial scene is labelled as a
-mirror, and never accepts a key through Halcyon's renderer feed.
-
-A graphical implementation therefore needs either the documented linear
-framebuffer backend and trusted keyboard, or a separately designed trusted
-virtio-gpu handoff. The latter would change the display trust architecture and
-requires an explicit design review; it is not smuggled into this visual work.
+Tapestry currently owns GPU and input hardware. The approved design extracts that
+ownership into a trusted service and places normal composition behind a bounded
+broker. Until implemented and verified, QEMU retains the existing serial path;
+a normal Halcyon dialog cannot collect the Imperium key. Production does not gain
+serial authorization as a failure fallback. Each future backend, including the
+Pi 400 and Pi 500 controllers, must independently establish exclusive output,
+physical input provenance and DMA containment or explicit trusted-driver assumptions.
 
 ## Implementation and acceptance
 
 1. Extract and test the bounded Corvus presentation model without changing
    authorization policy or serial output semantics.
-2. Implement episode-bound cell submission and the linear-framebuffer sink,
-   with exclusive mappings and trusted input, on supported hardware.
+2. Implement the trusted hardware broker and episode-bound semantic submission,
+   with exclusive output, private backing and trusted input on supported hardware.
 3. Wire Halcyon suspension and complete redraw on restoration, retaining the
-   serial fallback for virtio-only images.
+   configured serial path for dev/recovery images only.
 4. Verify request, empty, wrong-key, lockout, cancel, expiry, success and trusted
    owner death. Capture each visual state on both the smallest supported
    framebuffer and the reference display.

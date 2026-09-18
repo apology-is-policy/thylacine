@@ -1,11 +1,13 @@
 # Graphical Lex curiata: hardware ownership review
 
-Proposed, 18 September 2026. The visual specification is approved; the change
-below concerns the trusted computing base, not the appearance or authentication policy.
+Approved by the operator, 18 September 2026, with an explicit portability
+requirement for Pi 400, Pi 500 and future graphical output. Implementation is
+not yet present. [Portability contract and research](GRAPHICAL-SAK-PORTABILITY.md)
+refine the backend obligations below.
 
-## Decision requested
+## Approved decision
 
-Use an isolated, boot-trusted display/input service for the QEMU virtio hardware,
+Use an isolated, boot-trusted display/input service with portable display and input backends,
 with kernel-bound episode authority. Extract hardware ownership from Tapestry;
 keep Halcyon, Beacon, layout, themes and ordinary window composition outside this
 trusted service. Corvus retains authentication and all Imperium policy.
@@ -38,7 +40,8 @@ The separation is architectural work, not merely a modal overlay.
 ## Ownership and interfaces
 
 - The boot manifest identifies one trusted hardware service. It alone claims the
-  presentation GPU and physical input functions. Tapestry loses those claims and
+  presentation and input resources (platform controllers or bus children, not
+  necessarily PCI functions). Tapestry loses those claims and
   raw BAR/DMA access. Device ownership is never granted by a runtime self-assertion.
 - The kernel binds this service instance and Corvus to a generation-bearing episode.
   Registration and control handles are non-transferable, non-inheritable and
@@ -64,7 +67,7 @@ The separation is architectural work, not merely a modal overlay.
 
 1. A physical reserved attention gesture reaches the trusted input owner. Software
    input injection is a distinct untrusted route and cannot trigger SAK or enter
-   the secret queue. Serial BREAK remains a physical recovery trigger.
+   the secret queue. Serial BREAK remains a recovery trigger only in a configured dev/recovery posture.
 2. The kernel starts a generation and freezes normal presentation/input admission.
    The trusted owner drains previously admitted presentation fences before acknowledging
    exclusive trusted scanout. Corvus cannot accept secret input before this acknowledgement.
@@ -86,8 +89,9 @@ or the immutable episode background until restoration.
 ## Failure rules
 
 A dead/stalled trusted service never causes the compositor to inherit display or
-input ownership. Cancel the pending grant, invalidate the generation, and use serial
-recovery. Recovery/restart must establish exclusive hardware ownership again before
+input ownership. Cancel the pending grant and invalidate the generation. Serial
+recovery is available only under the configured dev/recovery posture; production
+does not enable serial authorization on graphical failure. Recovery/restart must establish exclusive hardware ownership again before
 showing a new trusted episode. Corvus death, requester death, timeout, malformed
 semantic frames and stale END/submission messages all fail closed. The existing
 workspace must not be treated as proof that authorization completed.
