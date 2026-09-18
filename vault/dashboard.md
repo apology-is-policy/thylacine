@@ -131,6 +131,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-09-18 [[chg-2026-09-18-npxf-host]] — Supported OpenSSL npxf hosts and pending graphical SAK ownership review
 - 2026-09-17 [[chg-2026-09-17-aux-halcyon]] — Aux integration: ordered media, native panes, manual, and bounded interrupt/transport ownership
 - 2026-09-07 [[chg-2026-09-07-aurora-doc-absorb]] — absorb docs/reference/140-aurora (the fbcon + /dev/cons drain/feed, G-4): clean redirect + sharpen the cfg-3 F1 attribution in sub-aurora
 - 2026-09-07 [[chg-2026-09-07-author-sdl-port]] — author the ports plane: sub-sdl-port (audit:hard, I-42 CAP_JIT + W-3e Vulkan) + sub-tyrquake (audit:light)
@@ -138,5 +139,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-09-07 [[chg-2026-09-07-diorama-doc-absorb]] — absorb docs/reference/141-diorama (the synthetic Linux world): fold the SA-4 vDSO fast-path + the MIDR-0x00 harness lesson + diorama-probe into sub-diorama
 - 2026-09-07 [[chg-2026-09-07-go-port-doc-absorb]] — absorb docs/reference/133-go-port (GOOS=thylacine capability map): fold the Loom SETATTR truncate-only fail-close into sub-kernel-loom; fork is external
 - 2026-09-07 [[chg-2026-09-07-halcyond-doc-absorb]] — absorb docs/reference/150-halcyond (the Halcyon environment client): clean redirect -- sub-halcyond is fresh, audit:hard, all audit anchors covered
-- 2026-09-07 [[chg-2026-09-07-jit-doc-absorb]] — absorb docs/reference/145-jit (the JIT capability, I-42): fold the I-cache contract (CL-7k-3 F1 create-invalidate + the cross-PE ISB publish contract) into sub-kernel-mmu
 <!-- generated:end -->

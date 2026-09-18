@@ -2,6 +2,9 @@
 
 **Status**: AS-BUILT. Plain transport `5094f1ad`; the npxf secure channel this
 document specifies landed with the row added to `docs/AUDIT-TRIGGERS.md`.
+The supported host server now builds with CMake and OpenSSL 3 on Linux and
+macOS (2026-09-18, npxf `cd35c64`), preserving the NPXF v1 wire protocol.
+See the remote-files operator section for host setup.
 
 The thylacine ranged well beyond its den to feed; what it brought back went in
 the larder. `haul` grafts a tree from *outside the machine* into the local
@@ -15,7 +18,7 @@ cache, I-38). The name was **ratified by the operator 2026-09-09**, replacing
 ## 1. The problem
 
 The operator asked for Thylacine to mount an
-[npxf](https://github.com/) server — their own tool, `~/projects/npxf`, which
+[npxf](https://github.com/apology-is-policy/npxf) server — their own tool, `~/projects/npxf`, which
 exports a directory over 9P2000.L on an authenticated, encrypted channel — "as a
 directory, transparently."
 

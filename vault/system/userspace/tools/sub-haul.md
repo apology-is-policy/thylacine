@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: [docs/HAUL-DESIGN.md]
 created: 2026-09-17
-updated: 2026-09-17
+updated: 2026-09-18
 ---
 ## Purpose
 
@@ -29,6 +29,14 @@ and publishes `/srv/NAME`. The existing shell runs `mount /srv/NAME PATH /`.
 ADDR accepts `host!port` or `host:port`, with dotted IPv4 and a bounded port.
 Post mode rejects a child command or `-a`; the shell supplies the attach name.
 No credential source means explicitly announced PLAIN 9P, not encryption.
+
+The supported host-side example is [npxf](https://github.com/apology-is-policy/npxf),
+a separate C++20/CMake project targeting Linux and Darwin with OpenSSL 3 EVP
+primitives. NPXF v1 framing, transcript labels, token-file CR/LF trimming and
+counter nonces remain wire-compatible. OpenSSL is the host implementation;
+Haul retains its existing RustCrypto implementation. This is not TLS.
+The remote-files operator section covers host build, token provisioning and
+read-only export, including QEMU's 10.0.2.2 host-loopback route.
 
 ## Mechanism
 
@@ -102,6 +110,13 @@ read actual remote data and witness teardown, not merely a startup banner.
 second-attach rejection, unmount/reap, repost and abdication. The added remote-FIN
 arm checks an authenticated server disconnect during a posted attach. `haul-npxf` and
 `haul-hangup` cover the private/child path and remote-close regression.
+
+The OpenSSL host migration (npxf `cd35c64`, 2026-09-18) passes all 53 Haul
+host tests with live native macOS interoperability. The explicit CI-profile
+guest passes `haul-npxf` and `haul-post`, 56s each, against that same server.
+Native npxf CTest also passes on Linux arm64 and macOS; macOS LLVM ASan/UBSan
+passes. The Pi GCC ASan runtime fails before main even for an empty program;
+that lane is unavailable coverage, not a passing sanitizer result.
 
 ## Seams
 

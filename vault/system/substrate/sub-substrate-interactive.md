@@ -40,7 +40,7 @@ locks: []
 abis: []
 design: ["docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-09-17
+updated: 2026-09-18
 ---
 ## Purpose
 
@@ -458,3 +458,11 @@ and expires after 240 seconds if a failed scenario cannot clean it up.
 The DOSBox input gate's foreground-exit witness is produced by a lowercase
 `echo` piped through `tr a-z A-Z`; an echoed command line cannot satisfy the
 uppercase marker. It requires real shell execution after DOSBox exits.
+
+
+The 2026-09-18 npxf host migration was verified with `haul-npxf` and
+`haul-post` against a native macOS OpenSSL-backed server (both PASS, 56s each).
+The fixture must use the explicit CI image (`HALCYON_SESSION=n`): automatic
+Halcyon login consumes the serial session and invalidates these serial-driving
+scenarios. The updated harness comment removes the obsolete Linux-only server
+restriction. Native Haul tests also pass 53/53 including live server interop.

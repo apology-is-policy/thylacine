@@ -11,6 +11,11 @@ The approved, self-contained [visual preview](halcyon-lex-curiata-preview.html)
 is retained with this specification. It is a labelled design artifact, not a
 running authorization surface.
 
+Implementation was requested on 2026-09-18. The proposed virtio hardware
+ownership change is in [Graphical SAK ownership](GRAPHICAL-SAK-OWNERSHIP.md).
+Its trusted-userspace-service option awaits operator ratification; it does not
+silently replace the kernel-owned sink contract below.
+
 ## Purpose and presentation
 
 The *lex curiata* is the conferral act. A secure-attention episode is a temporary change of display and input owner.

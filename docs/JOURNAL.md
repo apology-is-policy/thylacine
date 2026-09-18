@@ -22,6 +22,40 @@ needed the operator.
 
 
 ---
+## 2026-09-18 (Codex, single-agent) -- native npxf and the graphical trust boundary
+
+The operator supplied a new npxf remote and requested OpenSSL, CMake and native
+Linux/macOS support, then implementation of the approved graphical Lex curiata.
+The separate npxf project now uses OpenSSL EVP throughout without changing its
+NPXF v1 wire protocol (published tip `cd35c64`). The Darwin server required a
+real filesystem port: descriptor metadata, identity-checked reopen before
+truncation, native directory cookies, OFD locks and Linux wire-error translation.
+
+The Linux concurrency gate exposed a reply/tag-retirement race: Rwalk was on the
+wire while its tag remained active, so an immediate Tgetattr reuse got EINVAL.
+The repair serializes publication and retirement with request admission, and
+adds 1000 rapid reuses as a regression. Crypto errors now poison the channel,
+nonce exhaustion fails closed, and ephemeral/intermediate keys are cleared on
+exceptional paths. Tests retain failure evidence and propagate Python failures.
+
+Both native CTest targets pass on Mac and Pi; Mac Homebrew LLVM ASan/UBSan also
+passes. Apple's ASan deadlocked in runtime startup and the Pi's GCC ASan failed
+allocator reservation. Empty programs reproduced each, so neither is disguised
+as a successful sanitizer lane. Haul passes all 53 host tests, including live
+interop, plus both actual guest mount/post gates against the new native Mac
+server (56s each). The first guest attempt mistakenly used the graphical default
+image: automatic Halcyon login intercepted the serial harness. Rebuilding the
+explicit CI profile corrected that setup; the failed logs are retained.
+
+The remote-files manual now documents npxf as the supported host example with
+build, token provisioning and export commands. All six manual sections check.
+Graphical SAK itself remains unimplemented: the ownership review in
+`docs/GRAPHICAL-SAK-OWNERSHIP.md` proposes a trusted hardware service outside
+Tapestry, and awaits the operator's decision on that explicit TCB change. A
+full-screen ordinary compositor surface cannot meet the trusted-path contract.
+No new kernel/display ownership ABI is silently introduced by this documentation.
+
+---
 ## 2026-09-17 (Codex, single-agent) -- aux integration found two lifetime boundaries
 
 The operator asked to bring the remaining committed aux work into main and

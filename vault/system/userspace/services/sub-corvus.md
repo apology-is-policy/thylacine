@@ -15,7 +15,7 @@ hazards: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md", "docs/IDENTITY-DESIGN.md"]
 created: 2026-08-04
-updated: 2026-09-17
+updated: 2026-09-18
 ---
 ## Purpose
 
@@ -56,6 +56,15 @@ can restrict it, never expand it. The pending peer is revalidated before
 conferral, and the propagating grant is redeemed through the kernel. Key
 state, eligibility and rate limits remain corvus-owned. See [[sub-imperium]]
 and `docs/IMPERIUM-DESIGN.md §11` for the integrated contract.
+
+
+Graphical implementation was requested on 2026-09-18. The approved visual
+specification is `docs/HALCYON-TRUSTED-EPISODE.md`; the separately proposed
+hardware ownership boundary is `docs/GRAPHICAL-SAK-OWNERSHIP.md`. The latter
+awaits ratification because it moves the trusted graphics sink from the kernel
+to an isolated trusted hardware service. It is not implemented, and the serial
+episode remains the enforced path. Neither Halcyon nor Beacon may collect the
+Imperium key through an ordinary surface.
 
 
 **Reached as a 9P server.** corvus posts `/srv/corvus` and serves a

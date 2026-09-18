@@ -6,6 +6,46 @@ unencrypted 9P. The current implementation accepts dotted IPv4 addresses.
 
 ## In Practice
 
+### Prepare a host-side server
+
+npxf is an officially supported
+host-side 9P2000.L server for Haul. It runs on Linux and macOS and uses
+OpenSSL 3 for its authenticated encrypted channel. Install a C++20 compiler,
+CMake and the OpenSSL development package on the host, then build it:
+
+```sh
+git clone https://github.com/apology-is-policy/npxf.git
+cd npxf
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
+```
+
+On macOS, Homebrew provides `cmake` and `openssl@3`. If CMake does not find
+OpenSSL, add `-DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)"` to its configure
+command. On Debian or Ubuntu, install `build-essential cmake libssl-dev`.
+
+Create a token and export a directory. These commands run on the host:
+
+```sh
+umask 077
+openssl rand -base64 32 > npxf.token
+mkdir -p export
+printf 'Hello from the host\n' > export/hello.txt
+./build/npxf-server -r export -t npxf.token -l 127.0.0.1:5640 -R
+```
+
+`-R` makes the export read-only; omit it when the guest should write files.
+The server uses its host account's permissions. Copy the token securely into
+the guest and use that file with Haul's `-t` option. A token holder can access
+the exported tree with the server's permissions; use a separate random token
+for each separately trusted export.
+
+For QEMU user networking on the same host, `10.0.2.2!5640` reaches this
+loopback listener. To serve another machine, bind npxf to the host's reachable
+interface address and use its dotted IPv4 address in Haul. The server requires
+a token; Haul's plain 9P mode cannot connect to it. Stop the host server with
+Ctrl-C after unmounting its clients.
+
 ### Mount in the current shell
 
 Provision a token file separately and restrict its permissions with

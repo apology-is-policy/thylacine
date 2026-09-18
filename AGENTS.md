@@ -118,3 +118,13 @@ landed, what was verified, and any remaining limitations plainly.
 - The operator approved the bounded TCP close design and implementation on
   2026-09-17. Follow `docs/NET-CLOSE-DESIGN.md`: private transport retirement,
   admission bounds, deadline diagnostics and byte-verified backend tests.
+
+## Current operator request (npxf and graphical SAK, 2026-09-18)
+
+- Modernize the separate npxf project with OpenSSL, CMake, Linux/macOS support,
+  and its new apology-is-policy/npxf remote. Document it as Haul's supported
+  host-side example.
+- Implement graphical SAK/Imperium using the approved Lex curiata visual design.
+  The changed hardware ownership contract proposed in GRAPHICAL-SAK-OWNERSHIP
+  remains a separate pending ratification; visual approval is not that decision.
+- Continue single-agent and preserve the earlier review/settings overrides.
