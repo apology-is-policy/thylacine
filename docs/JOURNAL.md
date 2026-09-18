@@ -48,7 +48,9 @@ image: automatic Halcyon login intercepted the serial harness. Rebuilding the
 explicit CI profile corrected that setup; the failed logs are retained.
 
 The remote-files manual now documents npxf as the supported host example with
-build, token provisioning and export commands. All six manual sections check.
+build, token provisioning and export commands. All six manual sections check. GitHub CI passes Ubuntu and macOS. An actual
+Halcyon manual-render probe passes in 64s and its captured host setup is visually
+reviewed.
 Graphical SAK itself remains unimplemented: the ownership review in
 `docs/GRAPHICAL-SAK-OWNERSHIP.md` proposes a trusted hardware service outside
 Tapestry, and awaits the operator's decision on that explicit TCB change. A
