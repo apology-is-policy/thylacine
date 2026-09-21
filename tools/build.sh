@@ -4426,7 +4426,9 @@ build_sdl2() {
 
     local p
     for p in "$port_dir"/patches/*.patch; do
-        patch -s -p1 -t -d "$sdl_src" -i "$p"
+        # -F 0: exact context or fail, the pouch series' reason (GNU patch fuzzes
+        # 2 lines by default, quietly); every port patch applies at fuzz 0 (r5 F7).
+        patch -s -p1 -t -F 0 -d "$sdl_src" -i "$p"
     done
     cp "$port_dir/SDL_config.h" "$sdl_src/include/SDL_config.h"
     mkdir -p "$sdl_src/src/video/thylacine" "$sdl_src/src/audio/thylacine"
@@ -4850,7 +4852,9 @@ build_tyrquake() {
         "$tq_vendor/external" "$tq_src/"
     local qp
     for qp in "$port_dir"/patches/*.patch; do
-        patch -s -p1 -t -d "$tq_src" -i "$qp"
+        # -F 0: exact context or fail, the pouch series' reason (GNU patch fuzzes
+        # 2 lines by default, quietly); every port patch applies at fuzz 0 (r5 F7).
+        patch -s -p1 -t -F 0 -d "$tq_src" -i "$qp"
     done
 
     # The window-icon header is upstream-GENERATED (ImageMagick over the
@@ -5353,7 +5357,9 @@ build_dosbox_x() {
         # __thylacine__ defined but WITHOUT the dynrec CAP_JIT arm -> the malloc
         # fallback hands back a non-executable region -> a runtime fault the gate
         # only catches downstream. The dosbox patches all apply rc=0 (verified).
-        patch -s -p1 -t -d "$dbx_src" -i "$pp" || {
+        # -F 0: exact context or fail, the pouch series' reason (GNU patch fuzzes
+        # 2 lines by default, quietly); every port patch applies at fuzz 0 (r5 F7).
+        patch -s -p1 -t -F 0 -d "$dbx_src" -i "$pp" || {
             echo "==> dosbox-x: patch $(basename "$pp") FAILED to apply" >&2
             exit 1
         }
@@ -5596,7 +5602,9 @@ build_vkquake() {
     cp -R "$vq_vendor/Quake" "$vq_vendor/Shaders" "$vq_src/"
     local qp
     for qp in "$port_dir"/patches/*.patch; do
-        patch -s -p1 -t -d "$vq_src" -i "$qp"
+        # -F 0: exact context or fail, the pouch series' reason (GNU patch fuzzes
+        # 2 lines by default, quietly); every port patch applies at fuzz 0 (r5 F7).
+        patch -s -p1 -t -F 0 -d "$vq_src" -i "$qp"
     done
 
     # The curated object list (upstream Quake/Makefile OBJS; codecs
@@ -5722,7 +5730,9 @@ prepare_gnumake_src() {
     local p
     for p in "$port_dir"/patches/*.patch; do
         [[ -e "$p" ]] || continue
-        patch -s -p1 -t -d "$dest" -i "$p"
+        # -F 0: exact context or fail, the pouch series' reason (GNU patch fuzzes
+        # 2 lines by default, quietly); every port patch applies at fuzz 0 (r5 F7).
+        patch -s -p1 -t -F 0 -d "$dest" -i "$p"
     done
 }
 

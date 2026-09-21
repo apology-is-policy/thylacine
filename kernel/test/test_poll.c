@@ -76,6 +76,7 @@ void test_poll_devsrv_client_wakes_on_reply_only(void);
 void test_poll_devsrv_server_pollout_wakes_on_client_drain(void);
 void test_poll_devsrv_client_pollout_wakes_on_server_blocking_drain(void);
 void test_poll_devsrv_client_kernel_attached_pollnval(void);
+void test_poll_devsrv_client_wakes_on_teardown(void);
 void test_poll_timeout_survives_a_busy_list(void);
 void test_poll_death_ends_a_noise_driven_poll(void);
 void test_poll_stop_parks_a_noise_driven_poll(void);
@@ -1181,6 +1182,49 @@ void test_poll_devsrv_client_pollout_wakes_on_server_blocking_drain(void) {
     if (__atomic_load_n(&g_cp_result, __ATOMIC_ACQUIRE) != -999) test_kthread_join_free(poller, &g_cp_exited);
     cp_teardown(&f);
     TEST_ASSERT(err == NULL, err ? err : "client POLLOUT on the blocking drain");
+}
+
+// The teardown edge, from the CLIENT's side: a client parked in poll(POLLIN) on
+// its own connection is woken by srvconn_teardown's walk and sees the hang-up
+// at once. Nothing witnessed that walk (B-0 audit round 5 F4): without it the
+// poll still reports POLLHUP -- its timeout pass re-samples the latched eof --
+// so the on-device prover that should have caught it passed ten seconds late.
+// As with the drain above, the assertion is WHEN it returns.
+void test_poll_devsrv_client_wakes_on_teardown(void) {
+    struct cp_fixture f;
+    TEST_ASSERT(cp_setup(&f), "fixture");
+    TEST_EXPECT_EQ((s64)(cp_sample(f.client, f.client_h, POLLIN) & (POLLIN | POLLHUP)), 0L,
+        "nothing to read and no hang-up yet");
+
+    g_cp_proc = f.client;  g_cp_fd = (hidx_t)f.client_h;
+    g_cp_events = POLLIN;  g_cp_timeout = 3000;
+    g_cp_result = -999; g_cp_exited = false;    g_cp_revents = 0;
+
+    struct Thread *poller = thread_create(kproc(), cp_poll_entry);
+    TEST_ASSERT(poller != NULL, "thread_create");
+    ready(poller);
+    TEST_YIELD_UNTIL(poller->state == THREAD_SLEEPING);
+
+    const char *err = NULL;
+    u64 torn = timer_now_ns();
+    srvconn_teardown(f.cn);
+    TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_cp_result, __ATOMIC_ACQUIRE) != -999);
+    u64 woke = timer_now_ns();
+    if (__atomic_load_n(&g_cp_result, __ATOMIC_ACQUIRE) == -999)
+        err = "the teardown woke the client's poll (it was still parked)";
+    else if (woke - torn >= CP_WAKE_LATE_NS)
+        err = "the poll ended at the teardown, not at its timeout pass";
+    else if (g_cp_result != 1)
+        err = "it returns 1";
+    else if ((g_cp_revents & POLLHUP) == 0)
+        err = "revents carries POLLHUP (s2c.eof, the direction the client reads)";
+    // A kernel without the walk returns at the 3 s timeout: wait it out so the
+    // poller is reaped, never freed while still asleep.
+    TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_cp_result, __ATOMIC_ACQUIRE) != -999);
+    if (__atomic_load_n(&g_cp_result, __ATOMIC_ACQUIRE) != -999)
+        test_kthread_join_free(poller, &g_cp_exited);
+    cp_teardown(&f);
+    TEST_ASSERT(err == NULL, err ? err : "client POLLIN woken by the teardown");
 }
 
 // A kernel-attached conn's rings are the kernel 9P client's.

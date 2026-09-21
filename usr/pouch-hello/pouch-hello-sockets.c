@@ -48,6 +48,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#include <time.h>
 
 extern char **environ;
 
@@ -61,6 +62,16 @@ static const char MSG_PING[]     = "PING\n";
 static const char MSG_PONG[]     = "PONG\n";
 static const char MSG_LINE[]     = "LINE 7\n";
 static const char MSG_ECHO[]     = "ECHO 7 tail\n";
+
+/* A poll that returns at its event, not at its timeout's last sample: the
+ * timeouts below are 10 s, and a missing kernel walk shows only as lateness. */
+#define POLL_LATE_MS 2000
+static long long mono_ms(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (long long)t.tv_sec * 1000LL + t.tv_nsec / 1000000L;
+}
 
 static pthread_barrier_t g_ready;
 static int               g_server_ok = 0;
@@ -330,23 +341,32 @@ static int stdio_over_socket(int c)
         return -1;
     }
     /* ppoll() on the socket must report the REPLY, and nothing else, as
-     * readable. Three things have each broken this and each reads differently:
+     * readable -- and report it WHEN it lands. Three things have each broken
+     * this and each reads differently:
      *   - libc hands the kernel the socket fd raw (a tagged value, not a kernel
      *     handle): POLLNVAL at once -- which also counts as "ready", so only
      *     the revents tell it from success;
      *   - the kernel samples the SERVER's end for a client: POLLIN from the
      *     client's own unread request, or -- polled after the server consumed
      *     it, as here -- nothing, ever: pr == 0 after the full timeout;
-     *   - the kernel walks no hook list when the reply lands: the same pr == 0.
+     *   - the kernel walks no hook list when the reply lands: NOT pr == 0, as
+     *     this said until B-0 audit round 5 F4 -- the timeout pass re-samples
+     *     and finds the reply, so the poll reports POLLIN ten seconds late.
+     *     Only the clock tells that apart, so both legs are timed. (A reply
+     *     that landed before the poll began is seen by its first sample; the
+     *     kernel test poll.devsrv_client_wakes_on_teardown is the deterministic
+     *     witness of the walks.)
      * See server_main for why the barriers sit where they do. */
     pthread_barrier_wait(&g_ready);         /* the request has been consumed */
     {
         struct pollfd pf = { .fd = c, .events = POLLIN };
         struct timespec ts = { .tv_sec = 10 };
+        long long t0 = mono_ms();
         int pr = ppoll(&pf, 1, &ts, NULL);
-        if (pr != 1 || pf.revents != POLLIN) {
-            printf("client: ppoll(socket) = %d revents=%#x errno=%d (want exactly POLLIN)\n",
-                   pr, (unsigned)pf.revents, errno);
+        long long took = mono_ms() - t0;
+        if (pr != 1 || pf.revents != POLLIN || took >= POLL_LATE_MS) {
+            printf("client: ppoll(socket) = %d revents=%#x errno=%d after %lld ms (want exactly POLLIN, before %d ms)\n",
+                   pr, (unsigned)pf.revents, errno, took, POLL_LATE_MS);
             fflush(stdout);
             _exit(1);                       /* the server waits at a barrier */
         }
@@ -376,10 +396,12 @@ static int stdio_over_socket(int c)
     {
         struct pollfd pf = { .fd = c, .events = POLLIN };
         struct timespec ts = { .tv_sec = 10 };
+        long long t0 = mono_ms();
         int pr = ppoll(&pf, 1, &ts, NULL);
-        if (pr != 1 || pf.revents != (POLLIN | POLLHUP)) {
-            printf("client: ppoll(closed socket) = %d revents=%#x errno=%d (want POLLIN|POLLHUP)\n",
-                   pr, (unsigned)pf.revents, errno);
+        long long took = mono_ms() - t0;
+        if (pr != 1 || pf.revents != (POLLIN | POLLHUP) || took >= POLL_LATE_MS) {
+            printf("client: ppoll(closed socket) = %d revents=%#x errno=%d after %lld ms (want POLLIN|POLLHUP, before %d ms)\n",
+                   pr, (unsigned)pf.revents, errno, took, POLL_LATE_MS);
             fclose(cf);
             return -1;
         }

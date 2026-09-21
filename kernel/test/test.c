@@ -1537,6 +1537,7 @@ void test_poll_devsrv_client_wakes_on_reply_only(void);
 void test_poll_devsrv_server_pollout_wakes_on_client_drain(void);
 void test_poll_devsrv_client_pollout_wakes_on_server_blocking_drain(void);
 void test_poll_devsrv_client_kernel_attached_pollnval(void);
+void test_poll_devsrv_client_wakes_on_teardown(void);
 void test_poll_timeout_survives_a_busy_list(void);
 void test_poll_death_ends_a_noise_driven_poll(void);
 void test_poll_stop_parks_a_noise_driven_poll(void);
@@ -3500,6 +3501,7 @@ struct test_case g_tests[] = {
     { "poll.devsrv_server_pollout_wakes_on_client_drain", test_poll_devsrv_server_pollout_wakes_on_client_drain, false, NULL },
     { "poll.devsrv_client_pollout_wakes_on_server_blocking_drain", test_poll_devsrv_client_pollout_wakes_on_server_blocking_drain, false, NULL },
     { "poll.devsrv_client_kernel_attached_pollnval", test_poll_devsrv_client_kernel_attached_pollnval, false, NULL },
+    { "poll.devsrv_client_wakes_on_teardown", test_poll_devsrv_client_wakes_on_teardown, false, NULL },
     { "poll.timeout_survives_a_busy_list", test_poll_timeout_survives_a_busy_list, false, NULL },
     { "poll.death_ends_a_noise_driven_poll", test_poll_death_ends_a_noise_driven_poll, false, NULL },
     { "poll.stop_parks_a_noise_driven_poll", test_poll_stop_parks_a_noise_driven_poll, false, NULL },

@@ -193,9 +193,18 @@ int main(void)
 	      "udp connect-for-poll (binds local port -> writable)");
 	struct pollfd po;
 	po.fd = pfd; po.events = POLLOUT; po.revents = 0;
+	/* WHEN, not only what: the readiness bridge's walk wakes this poll as
+	 * netd answers. Without it the timeout pass re-samples and finds POLLOUT
+	 * anyway -- at 2000 ms (B-0 audit round 5 F4) -- so only the clock tells. */
+	struct timespec pt0, pt1;
+	clock_gettime(CLOCK_MONOTONIC, &pt0);
 	int pr = poll(&po, 1, 2000);
+	clock_gettime(CLOCK_MONOTONIC, &pt1);
+	long long pms = (long long)(pt1.tv_sec - pt0.tv_sec) * 1000LL
+	              + (pt1.tv_nsec - pt0.tv_nsec) / 1000000L;
 	CHECK(pr == 1 && (po.revents & POLLOUT),
 	      "poll(POLLOUT) ready on a writable udp socket");
+	CHECK(pms < 1500, "poll(POLLOUT) woken by the readiness walk, not its 2000 ms timeout pass");
 	po.fd = pfd; po.events = POLLIN; po.revents = 0;
 	pr = poll(&po, 1, 150);
 	CHECK(pr == 0, "poll(POLLIN) times out on an empty udp socket (waited)");
