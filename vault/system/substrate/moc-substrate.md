@@ -22,6 +22,9 @@ counts. Five dossiers:
   type, and the richest failure-attribution taxonomy in the tree.
 - **[[sub-substrate-builders]]** — the remote GCP builders, disposable and
   permanent.
+- **[[sub-substrate-remote-host]]** — `tools/warp-host.sh`: the remote
+  GL/KVM host driver (thyla-gl, thyla-pi) -- the chunked pool sync, the
+  pool/ramfs key pair, and the restore twins that must travel with them.
 
 ## Why this area is `audit: none`, and what it carries instead
 

@@ -277,6 +277,66 @@ verbs beside it; lictor, tapestryd and halcyond all check clean with
 `--no-default-features`. A caveat that one command would have settled should
 never have been written down as a caveat.
 
+### Addendum 2: real silicon, the file the sync did not know about, and reading her kernel work
+
+**The graphical trusted path on a real GPU.** `ls-graphical-sak` passes on
+thyla-pi under KVM with `virtio-gpu-gl-pci` on the V3D (`virgl=1 ctxinit=1`),
+first attempt, 161 s: the panel, the confer, real DAC authority, the abdicate,
+the wrong key, the cancel, and the wire fence rewinding at 2^31 against a real
+virgl device. The captures come over a private VNC socket because QEMU 10
+refuses a QMP screendump of a GL texture scanout (Astra's harness work, and it
+holds). Screenshots in `work/shots-pi-gl`.
+
+**It failed first, and it failed the way hers had.** `stratumd: run failed
+(rc=-201)`, `EXTINCTION: joey: /joey exited non-zero`, a Halls dump -- on a
+sync that had md5-verified the kernel, the ramfs and every chunk of the pool.
+Her note for the same failure on 09-18 reads "fixture error"; mine nearly did.
+The pool the guest booted was not the pool I had shipped. LS-CI boots every
+attempt from `pool.img.baked-snapshot`, and it validates that twin against
+`system.key.baked-snapshot` -- twin against twin, never against the ramfs. The
+Pi baked locally once, on 09-08, and has carried a coherent pair of stale
+twins ever since; the sync ships neither. So the harness carefully restored a
+two-week-old pool over a perfectly good one, every attempt, and the boot
+refused it exactly as designed. The sync now ships the PRISTINE pool (the
+local snapshot, not the image the last run wrote to) and refreshes all three
+twins, md5-checked. The lesson is about what "verified" covered: the sync
+verified everything it shipped, and the break was a file it did not know its
+consumer read. The tool had no dossier; it has one now
+(`sub-substrate-remote-host`). Also learned the hard way: the tunnel closes a
+long ssh session from the far end, which kills a foreground gate -- remote
+gates run detached and are polled.
+
+**Her kernel work in `main`, read rather than trusted.** The operator asked for
+an audit of the week, and the branch was only a third of the week. While the
+SMP matrix ran I read the PCI interrupt subsystem end to end -- `pci_irq.c`,
+the v2m allocator, the ITS driver, the MSI-X / INTx / map-window parts of
+`pci_handle.c`, the six syscalls, `irqfwd.c`, the MMIO reservation union, the
+DTB `msi-map` parser, and the `CAP_POST_SERVICE` gate. No P0, P1 or P2. The
+claims I went looking to break and could not: every path that maps BAR memory
+into EL0 goes through one predicate, so the MSI-X table and PBA pages never
+reach a driver; a raw `IRQ_CREATE` refuses every PCI-routed and MSI-reserved
+INTID and a raw wait refuses a PCI endpoint; the lock order holds in IRQ
+context; dispatch pins are taken under the membership lock and drained before
+the free; the ITS command encodings and table geometry are right. It is
+careful work, and the reservation-union fix in `mmio_handle.c` (overlap is not
+coverage) is a real bug she found on her own. Three P3s and what was NOT read
+are in the closed list (`memory/audit_lictor_closed_list.md`, round 2).
+
+**What the read found instead was arithmetic nobody was doing.** The shared
+`/srv` registry has 16 slots and a dead poster's name holds its slot forever.
+The header comment sized 16 as "8 occupants + ~8 headroom" when there were six
+resident services. There are eleven now, plus two boot-probe tombstones, plus
+two per logged-in user: a one-user session on this branch sits at 15 of 16.
+Cora logging in fills it; after that a third username cannot get a home, and
+`haul --post` -- the feature `CAP_POST_SERVICE` exists for -- cannot post at
+all. Each resident service spent a unit of headroom nobody was counting;
+lictor took it from two to one. Not fixed here (devsrv is an audit surface and
+the matrix was already running on the tree); queued with the measurement.
+
+**The matrix.** `tools/ci-smp-gate.sh`, full: default and UBSan kernels at four
+and eight CPUs, ten boots each -- 40 of 40, no corruption, no external kill, no
+timing miss, nothing unclassified, 37-42 s a boot.
+
 ---
 ## 2026-09-18 (Codex, single-agent) -- portable graphical SAK approval
 
