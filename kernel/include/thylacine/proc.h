@@ -1082,6 +1082,11 @@ _Static_assert((PROC_FLAG_PIPE_TERMINATE_PENDING & PROC_FLAG_CAUGHT_NOTE_MASK) =
 // the pipe latch (18); the static_assert makes a future field-widening a
 // compile-time relocation rather than a silent alias.
 #define PROC_FLAG_SESSION_HANGUP    (1u << 19)
+// Boot-only graphical seat manager designation; not propagated through rfork.
+#define PROC_FLAG_SEAT_MANAGER       (1u << 20)
+_Static_assert((PROC_FLAG_SEAT_MANAGER & (PROC_FLAG_CAUGHT_NOTE_MASK |
+    PROC_FLAG_SESSION_HANGUP | PROC_FLAG_PIPE_TERMINATE_PENDING)) == 0,
+    "seat manager flag must not overlap note, session or pipe flags");
 _Static_assert((PROC_FLAG_SESSION_HANGUP & PROC_FLAG_CAUGHT_NOTE_MASK) == 0,
                "arm-6: the session-hangup flag must not overlap the caught-note "
                "sub-field; widening NOTE_MASK_SUPPORTED grows it upward -- "

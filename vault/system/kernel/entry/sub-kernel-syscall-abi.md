@@ -17,7 +17,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-09-17
+updated: 2026-09-18
 ---
 ## Purpose
 
@@ -33,7 +33,7 @@ build checks that they agree.
 
 **Imperium integration (2026-09-17).** Reserved numbers 110 and 111 are
 now implemented as SYS_CONSOLE_EPISODE and SYS_CAP_GRANT_IMPERIUM. Main's
-SYS_DMA_SEGMENTS stays 112; later PCI appends now put SYS__NATIVE_TOP at 121. No existing syscall
+SYS_DMA_SEGMENTS stays 112; later PCI appends now put SYS__NATIVE_TOP at 124. No existing syscall
 was renumbered. Native C and Rust mirrors include the new operations and
 CAP_POST_SERVICE at bit 13. The console operation accepts ARM=1 or END=2;
 unknown operations fail closed.
@@ -432,8 +432,14 @@ four-argument whole-BAR map remain unchanged; protected whole-BAR maps now fail.
 
 ## PCI endpoint append (2026-09-17)
 
-[[abi-pci-irq]] appends calls 115..120; native ceiling is now 120 and SYS__NATIVE_TOP
-121. Kernel/C/Rust records pin event 32 bytes and info 48 bytes. Clock_gettime's
+[[abi-pci-irq]] appends calls 115..120; native ceiling is 123 after the trusted-seat/nonblocking append, with SYS__NATIVE_TOP
+124. Kernel/C/Rust records pin event 32 bytes and info 48 bytes. Clock_gettime's
 113 collision remains consumed by its Tier-2 phenotype row. Remaining ceiling
 assertions compile. MSI-X mode currently fails ENODEV; backend implementation
 must precede any support claim.
+
+## Trusted-seat and nonblocking append
+
+[[abi-trusted-seat]] pins native 121/122 and [[abi-native-nonblock]] pins 123.
+The ceiling is 123, SYS__NATIVE_TOP is 124. Existing call numbers and Linux
+phenotype translation retain their meanings.

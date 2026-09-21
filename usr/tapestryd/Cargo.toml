@@ -40,8 +40,8 @@ required-features = ["guest"]
 # by itself.
 [features]
 default = ["guest", "test-mode"]
-guest = ["dep:libdriver", "dep:libthyla-rs"]
-test-mode = []
+guest = ["dep:libdriver", "dep:libthyla-rs", "lictor/guest"]
+test-mode = ["lictor/test-mode"]
 
 [dependencies]
 libhalcyon = { path = "../lib/libhalcyon" }
@@ -55,3 +55,4 @@ libhalcyon = { path = "../lib/libhalcyon" }
 cartoon = { path = "../lib/cartoon" }
 libdriver = { path = "../lib/libdriver", optional = true }
 libthyla-rs = { path = "../lib/libthyla-rs", optional = true }
+lictor = { path = "../lictor", default-features = false }

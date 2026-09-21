@@ -12,9 +12,9 @@ mirrors:
   - kernel/syscall.c
   - usr/lib/libt/include/thyla/syscall.h
   - usr/lib/libthyla-rs/src/lib.rs
-  - "kernel/include/thylacine/vivarium.h: native ceiling 120"
+  - "kernel/include/thylacine/vivarium.h: native ceiling 123"
 created: 2026-09-17
-updated: 2026-09-17
+updated: 2026-09-18
 ---
 ## Calls
 
@@ -22,8 +22,8 @@ updated: 2026-09-17
 event_out); 118 COMPLETE(endpoint, generation, sequence); 119 DISABLE(endpoint);
 120 INFO(endpoint, info_out). Create returns a handle, WAIT returns 0 timeout or
 1 event, other successful operations return 0. Errors use existing negative
-errno. INTx mode is 1 and ordinal 0. MSI-X mode 2 is reserved by the approved
-design but currently returns ENODEV: it is not an automatic mode substitution.
+errno. INTx mode is 1 and ordinal 0. MSI-X mode 2 selects a protected table entry
+through the GICv2m or ITS backend; unsupported routes fail explicitly.
 
 The 32-byte event contains u64 generation/sequence, u32 count/reason and u64
 retry_after_ns. Reasons 1/2/3 are delivery/retry/cooldown. WAIT blocks through

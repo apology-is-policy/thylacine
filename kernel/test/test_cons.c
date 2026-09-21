@@ -3703,3 +3703,98 @@ void test_cons_episode_saved_owner_death(void) {
     ep_teardown(&f);
     TEST_ASSERT(err == NULL, err ? err : "saved owner death");
 }
+
+// Graphical endpoint tests exercise the same role, generation and visibility
+// gates as the syscall, without claiming physical GPU/input qualification.
+#include <thylacine/seat.h>
+void proc_test_seat_reset(void);
+int proc_test_serial_sak(int posture);
+void test_cons_graphical_seat_gate(void);
+static int seat_test_key(struct Proc *p, u32 code, u32 down, u8 byte) {
+    struct seat_message m;
+    seat_zero(&m, sizeof(m));
+    m.code = code; m.value = down;
+    if (byte) { m.length = 1; m.data[0] = byte; }
+    return proc_seat_op(p, SEAT_INPUT, &m);
+}
+void test_cons_graphical_seat_gate(void) {
+    struct ep_fixture f;
+    struct Proc *service = NULL;
+    const char *err = NULL;
+    struct seat_message m;
+    u64 generation = 0;
+    proc_test_seat_reset();
+    bool setup = ep_setup(&f, true, true);
+    service = proc_alloc();
+#define SEAT_CHECK(test, why) do { if (!(test)) { err = why; goto cleanup; } } while (0)
+    SEAT_CHECK(setup && service, "seat fixture");
+    service->state = PROC_STATE_ALIVE;
+    SEAT_CHECK(proc_set_seat_service(service) == 0, "boot binds seat owner");
+    SEAT_CHECK((service->proc_flags & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE)) ==
+               (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE), "seat owner is protected before userspace starts");
+    SEAT_CHECK(proc_set_seat_service(f.owner) == -1, "second owner refused");
+    SEAT_CHECK(proc_set_seat_client(f.owner) == 0, "boot binds normal compositor");
+    SEAT_CHECK(proc_set_seat_client(service) == -1, "second compositor refused");
+    seat_zero(&m, sizeof(m));
+    SEAT_CHECK(proc_seat_op(service, SEAT_CLIENT, &m) == 0 &&
+               m.sequence == proc_stripes(f.owner) && m.code == (u32)f.owner->pid,
+               "service resolves designated process incarnation");
+    SEAT_CHECK(proc_seat_op(f.owner, SEAT_CLIENT, &m) == -1,
+               "normal compositor role grants no trusted endpoint authority");
+    seat_zero(&m, sizeof(m));
+    SEAT_CHECK(proc_seat_op(f.owner, SEAT_QUERY, &m) == -1, "ordinary process cannot query trusted state");
+    SEAT_CHECK(seat_test_key(f.owner, 29, 1, 0) == -1, "ordinary injection is not physical input");
+    (void)proc_test_serial_sak(0);
+    SEAT_CHECK(!proc_console_sak() && !cons_episode_active(), "disabled serial posture cannot authorize");
+    (void)proc_test_serial_sak(1);
+    SEAT_CHECK(seat_test_key(service, 29, 1, 0) == 0, "ctrl");
+    SEAT_CHECK(seat_test_key(service, 56, 1, 0) == 0, "alt");
+    SEAT_CHECK(seat_test_key(service, 111, 1, 0) == 0, "reserved attention");
+    SEAT_CHECK(proc_seat_op(service, SEAT_STATUS, &m) == 0, "status");
+    generation = m.generation;
+    SEAT_CHECK(generation && m.phase == SEAT_QUIESCING && !cons_episode_active(), "takeover precedes Corvus attachment");
+    SEAT_CHECK(proc_seat_op(service, SEAT_ACK, &m) == -1, "held chord prevents acknowledgement");
+    SEAT_CHECK(!proc_console_sak(), "serial cannot redirect graphical takeover");
+    SEAT_CHECK(seat_test_key(service, 29, 0, 0) == 0, "ctrl release");
+    SEAT_CHECK(seat_test_key(service, 56, 0, 0) == 0, "alt release");
+    SEAT_CHECK(seat_test_key(service, 111, 0, 0) == 0, "delete release");
+    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(f.owner, SEAT_ACK, &m) == -1, "only service can acknowledge");
+    SEAT_CHECK(proc_seat_op(service, SEAT_ACK, &m) == 0 && cons_episode_active(), "exclusive ack opens Corvus episode");
+    SEAT_CHECK(seat_test_key(service, 30, 1, 'a') == 0, "pre-frame key report");
+    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(f.trusted, SEAT_KEY, &m) == 0 && m.length == 0, "no key before authorization frame is visible");
+    SEAT_CHECK(seat_test_key(service, 30, 0, 0) == 0, "key release");
+    m.generation = generation; m.length = 1; m.data[0] = 1;
+    SEAT_CHECK(proc_seat_op(f.owner, SEAT_FRAME, &m) == -1, "ordinary content cannot enter trusted sink");
+    SEAT_CHECK(proc_seat_op(f.trusted, SEAT_FRAME, &m) == 0, "Corvus content admitted");
+    SEAT_CHECK(proc_seat_op(service, SEAT_STATUS, &m) == 0 && m.length == 1, "service sees bounded semantic frame");
+    SEAT_CHECK(proc_seat_op(service, SEAT_VISIBLE, &m) == 0, "backend confirms frame visibility");
+    SEAT_CHECK(seat_test_key(service, 30, 1, 'a') == 0, "secret key report");
+    SEAT_CHECK(proc_seat_op(service, SEAT_STATUS, &m) == 0 && m.data[0] == 1, "service status has content, never secret queue");
+    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(f.owner, SEAT_KEY, &m) == -1, "only Corvus reads secret");
+    SEAT_CHECK(proc_seat_op(f.trusted, SEAT_KEY, &m) == 0 && m.length == 1 && m.data[0] == 'a', "Corvus consumes secret");
+    SEAT_CHECK(proc_seat_op(f.trusted, SEAT_KEY, &m) == 0 && m.length == 0, "secret consumed once");
+    SEAT_CHECK(proc_console_episode(f.trusted, SYS_CONSOLE_EPISODE_END) == 0, "end");
+    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(service, SEAT_RESTORED, &m) == -1, "held episode key blocks restoration");
+    SEAT_CHECK(seat_test_key(service, 30, 0, 0) == 0, "episode release consumed");
+    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(service, SEAT_RESTORED, &m) == 0 && m.phase == SEAT_NORMAL, "restore after full repaint acknowledgement");
+    SEAT_CHECK(seat_test_key(service, 29, 1, 0) == 0, "second ctrl");
+    SEAT_CHECK(seat_test_key(service, 56, 1, 0) == 0, "second alt");
+    SEAT_CHECK(seat_test_key(service, 111, 1, 0) == 0, "second attention");
+    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(service, SEAT_FAIL, &m) == -1, "stale failure cannot mutate new episode");
+    SEAT_CHECK(proc_seat_op(service, SEAT_STATUS, &m) == 0 && m.generation > generation, "new epoch");
+    SEAT_CHECK(proc_seat_op(service, SEAT_FAIL, &m) == 0 && m.phase == SEAT_FAILED, "failure closes admission");
+    SEAT_CHECK(proc_seat_op(service, SEAT_RESTORED, &m) == -1, "failed owner cannot restore through END");
+cleanup:
+    (void)proc_test_serial_sak(1);
+    proc_test_seat_reset();
+    ep_teardown(&f);
+    if (service) { service->state = PROC_STATE_ZOMBIE; proc_free(service); }
+    TEST_ASSERT(err == NULL, err ? err : "graphical seat gates");
+#undef SEAT_CHECK
+}

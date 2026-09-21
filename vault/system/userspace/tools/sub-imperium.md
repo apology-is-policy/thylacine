@@ -12,8 +12,18 @@ hazards: []
 abis: []
 design: [docs/IMPERIUM-DESIGN.md, docs/TRUSTED-PATH.md]
 created: 2026-09-17
-updated: 2026-09-17
+updated: 2026-09-18
 ---
+## Halcyon operation
+
+Ordinary tool output uses stdout, so the requesting PID, capabilities,
+conferral and relinquishment appear in the caller's Halcyon PTY. The key remains
+on Corvus's trusted channel. Ctrl-Alt-Delete invokes graphical Lex curiata;
+serial BREAK requires the configured recovery posture. The fasces library uses
+baked U+2016 rods and a readable `[axe]` terminal cue. The trusted dialog draws
+its own fixed fasces emblem. [[sub-lictor]] documents the authority boundary;
+`docs/manual/18-imperium.md` documents operation.
+
 ## Purpose
 
 An eligible user confers a restricted capability set through a physical SAK
@@ -87,12 +97,11 @@ clean and mutant configurations pin propagation; runtime `imperium-probe` and
 
 ## Seams
 
-Graphical trusted-path integration follows `docs/TRUSTED-PATH.md`; this delivery
-uses the implemented serial episode.
+Graphical and serial transport share Corvus policy; [[sub-lictor]] owns the
+graphical sink and physical input.
 
 ## Caveats
 
-This is a dependency-selected integration, not a merge of all aux-3 work.
 The user requested single-agent implementation/review; there is no new
 independent audit claim.
 

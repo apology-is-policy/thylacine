@@ -137,6 +137,9 @@ enum {
     T_SYS_PCI_IRQ_COMPLETE = 118,
     T_SYS_PCI_IRQ_DISABLE = 119,
     T_SYS_PCI_IRQ_INFO = 120,
+    T_SYS_TRUSTED_SEAT = 121,
+    T_SYS_SEAT_IMPORT = 122,
+    T_SYS_SET_NONBLOCK = 123,
     T_SYS_PCI_MAP_WINDOW    = 113,
     T_SYS_PCI_WINDOWS       = 114,
     T_SYS_TTY_CONT          = 98,  // PTY-1f: fg/bg resume of a job-stopped pgrp
@@ -302,6 +305,9 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 // consumer and is not mirrored here. No native C caller uses this today (login
 // is Rust); mirrored for ABI lockstep.
 #define T_SPAWN_PERM_SESSION_HANGUP    (1u << 5)
+#define T_SPAWN_PERM_SEAT_MANAGER      (1u << 6)
+#define T_SPAWN_PERM_SEAT_SERVICE      (1u << 7)
+#define T_SPAWN_PERM_SEAT_CLIENT       (1u << 8)
 
 // VIVARIUM V-1b / Design D (13.10): t_sys_spawn_args.pheno_flags bits (mirror
 // SPAWN_PHENO_* in the kernel header). The phenotype itself is DECIDED FROM
@@ -1085,6 +1091,17 @@ static inline long t_close(long fd) {
         : "r"(x8)
         : "memory", "cc"
     );
+    return x0;
+}
+
+// Set nonblocking I/O on the shared open-file description. Duplicated handles
+// see the same mode; this changes no rights. `on` must be 0 or 1.
+__attribute__((always_inline))
+static inline long t_set_nonblock(long fd, long on) {
+    register long x0 __asm__("x0") = fd;
+    register long x1 __asm__("x1") = on;
+    register long x8 __asm__("x8") = T_SYS_SET_NONBLOCK;
+    __asm__ volatile ("svc #0" : "+r"(x0) : "r"(x1), "r"(x8) : "memory", "cc");
     return x0;
 }
 

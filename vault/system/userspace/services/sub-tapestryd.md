@@ -22,12 +22,10 @@ it pixels through a shared page (a *weave*) and a 32-byte present
 descriptor; it transfers, flushes, and either scans a client's resource
 out directly or composes several into its own screen buffer.
 
-The warden binds it to `virtio-pci:16` (GPU) **and** `virtio-pci:18`
-(keyboard) through the manifest's `gather` mode — one grant, one Proc,
-an I-34 allowance narrowed to exactly those functions. Both ride PCI
-because the six populated virtio-mmio slots share one page whose
-lifetime belongs to stratumd, so a second persistent MMIO claimant is
-structurally impossible.
+Warden gives Tapestry a DMA allowance and a normal seat-client designation.
+[[sub-lictor]] owns the physical GPU/input functions and mediates the typed
+broker. Tapestry retains surface layout, application contexts and normal
+composition, but has no display/input BARs, queues or IRQ authority.
 
 Since the Warp arc it is **also the GPU seam**: when the device offers
 `VIRTIO_GPU_F_VIRGL`, tapestryd serves a second tree, `/srv/warp`,
@@ -37,15 +35,13 @@ whose **guest-exposure axis** is what this dossier describes; its host
 and v3d axes are reserved and unbuilt respectively, so cite the axis
 rather than the bare number.
 
-**Approved ownership change, not yet implemented (2026-09-18):**
-[[dec-2026-09-18-graphical-sak-portability]] extracts physical display/input
-into an isolated trusted service. Tapestry will keep normal composition behind
-a bounded broker, losing raw display/input hardware authority. Episode entry
-must exclude pending presents, cursors, all outputs and capture paths; restoration
-requires a full repaint. `docs/GRAPHICAL-SAK-PORTABILITY.md` records platform
-controller grants, DMA trust assumptions and backend qualification; a whole RP1
-PCI-function grant is not an isolated keyboard grant. Existing ownership described
-above remains the as-built state until that implementation lands.
+**Trusted episode boundary:** Tapestry pauses normal hardware requests while
+Lictor owns an episode. On the changed generation it releases held keys/buttons
+to their original live surface generations, clears modifier/chord state and
+forces a complete repaint. Its GPU/input modules are broker proxies; the raw
+transport lives in Lictor. Existing resource/present protocol semantics below
+remain at the application-facing boundary; references to physical queue execution
+belong to [[sub-lictor]]. Pi hardware qualification is separate.
 
 ## Contract
 

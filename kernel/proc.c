@@ -1,3 +1,4 @@
+#include <thylacine/seat.h>
 // Process descriptor management (P2-A) + rfork/exits/wait lifecycle (P2-D).
 //
 // Per ARCHITECTURE.md §7.2 + §7.4 + §7.9. P2-A established the bare
@@ -35,6 +36,7 @@
 #include <thylacine/poll.h>        // child_waiters multi-waiter reap (#344)
 #include <thylacine/territory.h>
 #include <thylacine/proc.h>
+#include <thylacine/dtb.h>
 #include <thylacine/rendez.h>
 #include <thylacine/sched.h>
 #include <thylacine/smp.h>
@@ -1905,6 +1907,23 @@ static struct Proc *g_console_owner;   // BSS NULL
 // proc_become_zombie_locked on the trusted Proc's death so it never dangles (a
 // then-fired SAK falls back to revoke-only -- the security-correct default).
 static struct Proc *g_console_trusted_proc;   // BSS NULL
+// Protected by g_proc_table_lock. The role dies at the zombie chokepoint;
+// generation never wraps, even when a service is restarted.
+static struct {
+    struct Proc *service;
+    struct Proc *client;
+    u64 generation, frame_sequence, visible_sequence, deadline;
+    u64 grant_stripes;
+    u32 grant_session;
+    u32 phase, frame_len, masked_len;
+    u8 frame[SEAT_FRAME_MAX];
+    u8 keys[256];
+    u32 key_head, key_len;
+    u8 held[256];
+} g_seat;
+
+static void proc_seat_fail_locked(void);
+
 
 void proc_set_console_owner(struct Proc *p) {
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
@@ -1987,6 +2006,7 @@ void proc_set_console_trusted(struct Proc *p) {
     // cons's leaf lock nests under g_proc_table_lock here: a new edge with no
     // reverse (cons queries the table only with its own lock released).
     if (prev != p) {
+        if (g_seat.phase != SEAT_NORMAL) proc_seat_fail_locked();
         cons_episode_disarm();
         if (cons_episode_abandon()) proc_console_owner_restore_locked();
     }
@@ -2219,8 +2239,10 @@ void proc_console_relinquish(struct Proc *p) {
     // unfreezes, and no secret is in flight because its only reader just
     // left. The ARM persists (it is the consumer's declaration, and the next
     // SAK re-attaches the same Proc).
-    if (g_console_trusted_proc == p && cons_episode_abandon())
-        proc_console_owner_restore_locked();
+    if (g_console_trusted_proc == p) {
+        if (g_seat.phase != SEAT_NORMAL) proc_seat_fail_locked();
+        if (cons_episode_abandon()) proc_console_owner_restore_locked();
+    }
     spin_unlock_irqrestore(&g_proc_table_lock, s);
 }
 
@@ -2232,16 +2254,33 @@ void proc_console_relinquish(struct Proc *p) {
 // IM-1 adds the `sak` note to the TRUSTED Proc under the same hold -- the
 // g_proc_table_lock -> note q->lock edge is the one proc_become_zombie_locked's
 // notes_post_child_exit already takes, so the lock order is unchanged.
-bool proc_console_sak(void) {
+static bool proc_console_sak_from(struct Proc *seat, u64 generation) {
     // DISPLAY-MODES.md 1b (audit F2): a SAK is a demand for the trusted path on
     // the EMERGENCY serial medium -- restore serial output regardless of any
     // renderer's silence, before anything else and covering the idempotent
     // repeat-SAK path below. Lockless relaxed store, so it takes no lock and
     // introduces no g_proc_table_lock -> g_cons.lock edge.
-    cons_serial_silent_clear();
     bool        begin = false;
     const char *why;
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    if (seat) {
+        if (g_seat.service != seat || g_seat.generation != generation ||
+                g_seat.phase != SEAT_QUIESCING || timer_now_ns() >= g_seat.deadline) {
+            spin_unlock_irqrestore(&g_proc_table_lock, s);
+            return false;
+        }
+        for (u32 i = 0; i < sizeof(g_seat.held); i++) {
+            if (g_seat.held[i]) {
+                spin_unlock_irqrestore(&g_proc_table_lock, s);
+                return false;
+            }
+        }
+    } else if (g_seat.phase != SEAT_NORMAL) {
+        // A serial BREAK cannot redirect a live/failed graphical episode into
+        // a different medium. Recovery must first rebuild its trusted owner.
+        spin_unlock_irqrestore(&g_proc_table_lock, s);
+        return false;
+    }
     struct Proc *owner   = g_console_owner;
     struct Proc *trusted = g_console_trusted_proc;
 
@@ -2329,6 +2368,10 @@ bool proc_console_sak(void) {
         begin = true;
         why = "episode";
     }
+    if (seat) {
+        g_seat.phase = begin ? SEAT_EXCLUSIVE : SEAT_FAILED;
+        g_seat.deadline = timer_now_ns() + 90000000000ull;
+    }
     spin_unlock_irqrestore(&g_proc_table_lock, s);
 
     // One line per SAK, in the caller's process context, via the #126
@@ -2343,6 +2386,263 @@ bool proc_console_sak(void) {
     cons_diag_line_puts(&l, ")\n");
     (void)cons_diag_line_emit(&l);
     return begin;
+}
+
+#ifdef KERNEL_TESTS
+// Kernel-only fixture posture, compiled out of production. The test runner
+// restores -1 BEFORE launching userspace; no syscall can change this setting.
+static int g_test_serial_sak = -1;
+int proc_test_serial_sak(int posture);
+int proc_test_serial_sak(int posture) {
+    return __atomic_exchange_n(&g_test_serial_sak, posture, __ATOMIC_ACQ_REL);
+}
+#endif
+
+// Serial authorization is a boot-selected recovery posture, never an automatic
+// fallback when the graphical service fails. The bootloader/DTB is trusted;
+// ordinary processes cannot alter this immutable property through /hw.
+static bool serial_sak_configured(void) {
+#ifdef KERNEL_TESTS
+    int fixture = __atomic_load_n(&g_test_serial_sak, __ATOMIC_ACQUIRE);
+    if (fixture >= 0) return fixture != 0;
+#endif
+    struct dtb_node_entry node, prop;
+    u32 root_cursor = 0;
+    const char chosen[] = "chosen", bootargs[] = "bootargs";
+    const char token[] = "thylacine.serial-sak=1";
+    while (dtb_node_iter(DTB_NODE_ROOT, &root_cursor, &node)) {
+        if (!node.is_node || node.namelen != sizeof(chosen) - 1) continue;
+        u32 i = 0;
+        while (i < node.namelen && node.name[i] == chosen[i]) i++;
+        if (i != node.namelen) continue;
+        u32 cursor = 0;
+        while (dtb_node_iter(node.off, &cursor, &prop)) {
+            if (prop.is_node || prop.namelen != sizeof(bootargs) - 1) continue;
+            i = 0;
+            while (i < prop.namelen && prop.name[i] == bootargs[i]) i++;
+            if (i != prop.namelen) continue;
+            // Require a complete whitespace-delimited token, not a substring
+            // such as serial-sak=10 or another parameter's value.
+            for (u32 at = 0; at < prop.datalen && prop.data[at]; ) {
+                while (at < prop.datalen && (prop.data[at] == ' ' || prop.data[at] == '\t')) at++;
+                u32 start = at;
+                while (at < prop.datalen && prop.data[at] && prop.data[at] != ' ' && prop.data[at] != '\t') at++;
+                if (at - start == sizeof(token) - 1) {
+                    i = 0;
+                    while (i < sizeof(token) - 1 && prop.data[start + i] == (u8)token[i]) i++;
+                    if (i == sizeof(token) - 1) return true;
+                }
+            }
+            return false;
+        }
+    }
+    return false;
+}
+
+bool proc_console_sak(void) {
+    if (!serial_sak_configured()) return false;
+    cons_serial_silent_clear();
+    return proc_console_sak_from(NULL, 0);
+}
+
+void proc_test_seat_reset(void);
+void proc_test_seat_reset(void) {
+    irq_state_t lock = spin_lock_irqsave(&g_proc_table_lock);
+    seat_zero(&g_seat, sizeof(g_seat));
+    spin_unlock_irqrestore(&g_proc_table_lock, lock);
+}
+
+bool proc_is_seat_service(struct Proc *p) {
+    irq_state_t lock = spin_lock_irqsave(&g_proc_table_lock);
+    bool yes = p && g_seat.service == p;
+    spin_unlock_irqrestore(&g_proc_table_lock, lock);
+    return yes;
+}
+bool proc_is_seat_manager(struct Proc *p) {
+    return p && (__atomic_load_n(&p->proc_flags, __ATOMIC_RELAXED) & PROC_FLAG_SEAT_MANAGER);
+}
+void proc_mark_seat_manager(struct Proc *p) {
+    if (p) __atomic_fetch_or(&p->proc_flags, PROC_FLAG_SEAT_MANAGER, __ATOMIC_RELAXED);
+}
+int proc_set_seat_service(struct Proc *p) {
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    int rc = -1;
+    if (p && !g_seat.service && !g_seat.client) {
+        u64 generation = g_seat.generation;
+        seat_zero(&g_seat, sizeof(g_seat));
+        g_seat.generation = generation;
+        g_seat.service = p;
+        // Before its first EL0 instruction: physical keys/private pixels must
+        // never be exposed through a debug attach or core dump, even briefly.
+        __atomic_fetch_or(&p->proc_flags, PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE, __ATOMIC_RELAXED);
+        rc = 0;
+    }
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return rc;
+}
+
+// Warden designates the normal compositor at spawn. It remains untrusted:
+// this role only admits broker requests, never physical input or private frames.
+int proc_set_seat_client(struct Proc *p) {
+    irq_state_t lock = spin_lock_irqsave(&g_proc_table_lock);
+    int rc = -1;
+    if (p && g_seat.service && !g_seat.client && g_seat.phase == SEAT_NORMAL) {
+        g_seat.client = p;
+        rc = 0;
+    }
+    spin_unlock_irqrestore(&g_proc_table_lock, lock);
+    return rc;
+}
+
+// Caller holds the proc-table lock. Failing never restores ordinary pixels or
+// transfers hardware; only the console's parked writers/owner are released.
+static void proc_seat_fail_locked(void) {
+    cap_cancel_imperium_pending(g_seat.grant_stripes, g_seat.grant_session);
+    g_seat.grant_stripes = g_seat.grant_session = 0;
+    g_seat.phase = SEAT_FAILED;
+    seat_zero(g_seat.keys, sizeof(g_seat.keys));
+    g_seat.key_head = g_seat.key_len = 0;
+    seat_zero(g_seat.frame, sizeof(g_seat.frame));
+    g_seat.frame_len = g_seat.masked_len = 0;
+    if (cons_episode_abandon()) proc_console_owner_restore_locked();
+}
+
+int proc_seat_op(struct Proc *p, u32 op, struct seat_message *m) {
+    if (!p || !m) return -1;
+    if (op == SEAT_ACK) return proc_console_sak_from(p, m->generation) ? 0 : -1;
+    irq_state_t lock = spin_lock_irqsave(&g_proc_table_lock);
+    bool service = g_seat.service == p;
+    bool corvus = g_console_trusted_proc == p;
+    int rc = -1;
+    u64 now = timer_now_ns();
+    if (!service && !corvus) goto done;
+    if (g_seat.phase != SEAT_NORMAL && g_seat.phase != SEAT_FAILED && now >= g_seat.deadline)
+        proc_seat_fail_locked();
+    if (op == SEAT_CLIENT && service) {
+        struct Proc *client = g_seat.client;
+        seat_zero(m, sizeof(*m));
+        if (client && client->state == PROC_STATE_ALIVE) {
+            m->sequence = client->stripes;
+            m->code = (u32)client->pid;
+        }
+        rc = 0; goto done;
+    }
+    if (op == SEAT_QUERY && corvus) { rc = 0; goto status; }
+    if (op == SEAT_STATUS && service) { rc = 0; goto status; }
+    if (op == SEAT_INPUT && service) {
+        if (m->code >= sizeof(g_seat.held) || m->value > 2 || m->length > 4) goto done;
+        g_seat.held[m->code] = m->value != 0;
+        bool ctrl = g_seat.held[29] || g_seat.held[97];
+        bool alt = g_seat.held[56] || g_seat.held[100];
+        if (g_seat.phase == SEAT_NORMAL && ctrl && alt && g_seat.held[111]) {
+            if (!g_console_trusted_proc || !cons_episode_armed() || cons_episode_active() ||
+                    g_seat.generation == ~0ull) goto done;
+            g_seat.generation++;
+            g_seat.phase = SEAT_QUIESCING;
+            g_seat.frame_sequence = g_seat.visible_sequence = 0;
+            g_seat.frame_len = g_seat.masked_len = 0;
+            g_seat.key_head = g_seat.key_len = 0;
+            seat_zero(g_seat.frame, sizeof(g_seat.frame));
+            seat_zero(g_seat.keys, sizeof(g_seat.keys));
+            g_seat.deadline = now + 5000000000ull;
+        } else if (g_seat.phase == SEAT_EXCLUSIVE && m->value == 1 &&
+                g_seat.frame_sequence != 0 && g_seat.visible_sequence == g_seat.frame_sequence) {
+            if (m->length > sizeof(g_seat.keys) - g_seat.key_len) {
+                proc_seat_fail_locked();
+                goto done;
+            }
+            for (u32 i = 0; i < m->length; i++) {
+                u32 tail = (g_seat.key_head + g_seat.key_len++) % sizeof(g_seat.keys);
+                g_seat.keys[tail] = m->data[i];
+            }
+        }
+        rc = 0; goto status;
+    }
+    if (!m->generation || m->generation != g_seat.generation) goto done;
+    if (op == SEAT_FAIL && service) { proc_seat_fail_locked(); rc = 0; goto status; }
+    if (op == SEAT_RESTORED && service && g_seat.phase == SEAT_RESTORING) {
+        for (u32 i = 0; i < sizeof(g_seat.held); i++) if (g_seat.held[i]) goto done;
+        // Physical restore + release drainage have completed. This grant-lock
+        // release is the authority commit, ordered with failure by our lock.
+        if (g_seat.grant_stripes && !cap_release_seat_grant(
+                g_seat.grant_stripes, g_seat.grant_session)) {
+            proc_seat_fail_locked(); goto done;
+        }
+        g_seat.phase = SEAT_NORMAL;
+        g_seat.grant_stripes = g_seat.grant_session = 0;
+        g_seat.masked_len = 0;
+        seat_zero(g_seat.keys, sizeof(g_seat.keys));
+        seat_zero(g_seat.frame, sizeof(g_seat.frame));
+        g_seat.frame_len = g_seat.key_head = g_seat.key_len = 0;
+        rc = 0; goto status;
+    }
+    if (op == SEAT_VISIBLE && service && g_seat.phase == SEAT_EXCLUSIVE &&
+            m->sequence == g_seat.frame_sequence && m->sequence != 0) {
+        g_seat.visible_sequence = m->sequence;
+        rc = 0; goto status;
+    }
+    if (op == SEAT_FRAME && corvus && g_seat.phase == SEAT_EXCLUSIVE) {
+        if (!m->length || m->length > SEAT_FRAME_MAX || g_seat.frame_sequence == ~0ull) goto done;
+        seat_zero(g_seat.frame, sizeof(g_seat.frame));
+        seat_copy(g_seat.frame, m->data, m->length);
+        g_seat.frame_len = m->length;
+        g_seat.frame_sequence++;
+        // Never apply queued keystrokes to changed authorization content.
+        seat_zero(g_seat.keys, sizeof(g_seat.keys));
+        g_seat.key_head = g_seat.key_len = 0;
+        rc = 0; goto status;
+    }
+    if (op == SEAT_MASK && corvus && g_seat.phase == SEAT_EXCLUSIVE && m->value <= 256) {
+        g_seat.masked_len = m->value;
+        rc = 0; goto status;
+    }
+    if (op == SEAT_GRANT && corvus && g_seat.phase == SEAT_EXCLUSIVE &&
+            g_seat.frame_sequence != 0 && g_seat.visible_sequence == g_seat.frame_sequence &&
+            m->length == 40 && !g_seat.grant_stripes) {
+        u64 args[5];
+        for (u32 i = 0; i < 5; i++) {
+            args[i] = 0;
+            for (u32 j = 0; j < 8; j++) args[i] |= (u64)m->data[i * 8 + j] << (j * 8);
+        }
+        // g_proc_table_lock -> grant lock is also the proc-exit order.
+        // Owner death/timeout and publication therefore cannot cross this gate.
+        long granted = cap_register_seat_grant(p, args[0], args[1], args[2], args[3], args[4]);
+        if (granted >= 0) {
+            g_seat.grant_stripes = args[1];
+            g_seat.grant_session = (u32)args[3];
+        }
+        seat_zero(args, sizeof(args));
+        rc = granted >= 0 ? 0 : -1;
+        goto status;
+    }
+    if (op == SEAT_KEY && corvus && g_seat.phase == SEAT_EXCLUSIVE) {
+        seat_zero(m, sizeof(*m));
+        m->generation = g_seat.generation;
+        m->phase = g_seat.phase;
+        if (g_seat.key_len) {
+            m->data[0] = g_seat.keys[g_seat.key_head];
+            g_seat.keys[g_seat.key_head] = 0;
+            g_seat.key_head = (g_seat.key_head + 1) % sizeof(g_seat.keys);
+            g_seat.key_len--;
+            m->length = 1;
+        }
+        rc = 0; goto done;
+    }
+    goto done;
+status:
+    seat_zero(m, sizeof(*m));
+    m->generation = g_seat.generation;
+    m->sequence = g_seat.frame_sequence;
+    m->code = g_seat.masked_len;
+    m->value = g_seat.frame_sequence && g_seat.visible_sequence == g_seat.frame_sequence;
+    m->phase = g_seat.phase;
+    if (service) {
+        m->length = g_seat.frame_len;
+        seat_copy(m->data, g_seat.frame, g_seat.frame_len);
+    }
+done:
+    spin_unlock_irqrestore(&g_proc_table_lock, lock);
+    return rc;
 }
 
 // IM-1: the SYS_CONSOLE_EPISODE op core. The gate is the trusted IDENTITY
@@ -2363,6 +2663,12 @@ int proc_console_episode(struct Proc *p, u32 op) {
             break;
         case SYS_CONSOLE_EPISODE_END:
             if (cons_episode_end()) {
+                if (g_seat.phase == SEAT_EXCLUSIVE) {
+                    g_seat.phase = SEAT_RESTORING;
+                    g_seat.deadline = timer_now_ns() + 5000000000ull;
+                    seat_zero(g_seat.keys, sizeof(g_seat.keys));
+                    g_seat.key_head = g_seat.key_len = 0;
+                }
                 proc_console_owner_restore_locked();
                 rc = 0;
             }
@@ -3015,6 +3321,16 @@ static void proc_become_zombie_locked(struct Proc *p, int status, const char *ms
     // g_proc_table_lock (a new edge, no reverse: cons queries the table only
     // with its own lock released); the parked-waiter wakes are the
     // child_waiters precedent below.
+    if (g_seat.client == p) {
+        proc_seat_fail_locked();
+        g_seat.client = NULL;
+    }
+    if (g_seat.service == p) {
+        proc_seat_fail_locked();
+        g_seat.service = NULL;
+    }
+    if (g_console_trusted_proc == p && g_seat.phase != SEAT_NORMAL)
+        proc_seat_fail_locked();
     if (g_console_trusted_proc == p) {
         g_console_trusted_proc = NULL;
         cons_episode_disarm();

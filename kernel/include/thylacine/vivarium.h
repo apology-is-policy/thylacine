@@ -516,7 +516,7 @@ enum {
 //
 // PCI mapping windows append 113/114; clock_gettime now has a per-number
 // collision argument above rather than the old ceiling argument.
-#define VIV_NATIVE_CEILING 120
+#define VIV_NATIVE_CEILING 123
 
 // -----------------------------------------------------------------------------
 // TIER 2 — translators (V-2b).

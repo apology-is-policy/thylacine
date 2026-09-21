@@ -146,7 +146,7 @@ pub const MAX_WARP_CONNS: usize = 4;
 /// side warp diagnostic, because the refusal never reached the warp
 /// dispatch). ~24 B/slot inline in Conn: 512 x 8 conns ~= 100 KiB.
 const MAX_FIDS: usize = 512;
-pub const SRV_MSIZE: u32 = 32768;
+pub const SRV_MSIZE: u32 = lictor::limits::SRV_MSIZE;
 const SRV_MSIZE_USIZE: usize = SRV_MSIZE as usize;
 
 /// F9: the per-client surface-count cap + the global slot pool. The pool
@@ -246,7 +246,7 @@ const MAX_SURFACES: usize = MAX_CONNS * MAX_SURFACES_PER_CONN + 2 * (2 * pane::M
 /// one ctx per conn); BOs bounded per ctx (each is a kernel GPU-BO mint the
 /// client's shared-map budget also bounds -- this cap is the server's own
 /// bookkeeping bound, not the resource authority).
-pub(crate) const MAX_WARP_CTXS: usize = 8;
+pub(crate) const MAX_WARP_CTXS: usize = lictor::limits::MAX_WARP_CTXS;
 /// Lifted 16 -> 128 at Warp-3 (st/mesa alone mints ~8 hw_res before the
 /// first draw; a GL app's textures are one hw_res each), then 128 -> 1024
 /// at #204: GLQuake's map load holds MORE than 128 textures live at once,
@@ -1183,7 +1183,7 @@ struct Screen {
 
 /// The res_seq base: per-generation resource ids (surface weaves + the
 /// screen since cfg-3) mint strictly above this -- no id ever aliases.
-pub(crate) const SCREEN_RES: u32 = 0x40;
+pub(crate) const SCREEN_RES: u32 = lictor::limits::SCREEN_RES;
 
 /// Warp-C C-2: the COMPOSITOR's own virgl context. Client warp ctxs take ids
 /// `slot + 1` over `0..MAX_WARP_CTXS`, so this sits far above that range and
@@ -1196,7 +1196,7 @@ pub(crate) const SCREEN_RES: u32 = 0x40;
 /// composed GPU path is reachable ONLY on a GL host and the CPU path stays the
 /// universal one. A tapestryd that assumed GL here would take the console dark
 /// on the default device, which is what everything else boots under.
-pub(crate) const COMPOSITOR_CTX: u32 = 0x100;
+pub(crate) const COMPOSITOR_CTX: u32 = lictor::limits::COMPOSITOR_CTX;
 
 /// Warp-C C-3: the throwaway contexts the bring-up CONVENTION PROBE runs on
 /// (`comp_measure_conventions`), one fresh id per attempt above the
@@ -2911,7 +2911,7 @@ impl Comp {
                 && self.gpu.resource_create_2d(res, w, h).is_ok()
                 && self
                     .gpu
-                    .attach_backing(res, &slot_segs[..nslot])
+                    .attach_backing(res, va, size, (i as u64) * slot_stride, slot_stride)
                     .is_ok();
             if !ok {
                 // Roll back THIS mint (a create that succeeded with a failed
@@ -4254,7 +4254,7 @@ impl Comp {
         }
         if self
             .gpu
-            .attach_backing(res, &segs[..nsegs])
+            .attach_backing(res, va, size, 0, size)
             .is_err()
         {
             let _ = self.gpu.resource_unref(res);
@@ -5559,7 +5559,7 @@ impl Comp {
                 )
                 .is_ok();
             let attached = created && self.gpu.ctx_attach_resource(COMPOSITOR_CTX, res).is_ok();
-            let backed = attached && self.gpu.attach_backing(res, &segs[..nsegs]).is_ok();
+            let backed = attached && self.gpu.attach_backing(res, va, size, 0, size).is_ok();
             if backed && self.screen_3d_roundtrip(res, va, dw) {
                 is3d = true;
             } else {
@@ -5591,7 +5591,7 @@ impl Comp {
                 unsafe { t_close(handle) };
                 return None;
             }
-            if self.gpu.attach_backing(res, &segs[..nsegs]).is_err() {
+            if self.gpu.attach_backing(res, va, size, 0, size).is_err() {
                 let _ = self.gpu.resource_unref(res);
                 Self::window_unmap(&mut self.va, va, size, "screen");
                 unsafe { t_close(handle) };
@@ -9150,6 +9150,20 @@ impl Comp {
         }
     }
 
+    /// Reconcile input ownership after an exclusive trusted episode. Releases
+    /// follow their original live surface/generation; authorization Enter/Escape
+    /// never enter this path. Layout and surviving focus remain unchanged.
+    pub fn seat_resumed(&mut self) {
+        for code in 0..KEYCODE_SPAN {
+            if self.key_owner[code] != 0 { self.key_event(code as u16, 0, 0, 0); }
+        }
+        for button in 0..BTNCODE_SPAN {
+            if self.btn_owner[button] != 0 { self.ptr_btn(BTN_BASE + button as u16, false, 0); }
+        }
+        self.key_owner.fill(0); self.btn_owner.fill(0); self.chord_down.fill(0);
+        self.comp_repaint_pending = true;
+    }
+
     /// Deliver a key to the FOCUSED leaf's surface (G-6 routing).
     pub fn key_event(&mut self, code: u16, value: u32, rune: u32, mods: u16) {
         let ki = key_idx(code);
@@ -10877,7 +10891,7 @@ impl Comp {
         }
         if self
             .gpu
-            .attach_backing(res_id, &segs[..nsegs])
+            .attach_backing(res_id, va, size, 0, size)
             .is_err()
         {
             undo(&mut self.gpu, &mut self.va, 2, res_id);
@@ -11687,7 +11701,7 @@ impl Comp {
         }
         if self
             .gpu
-            .attach_backing(res_id, &segs[..nsegs])
+            .attach_backing(res_id, va, size, 0, size)
             .is_err()
         {
             unwind(&mut self.gpu, &mut self.va, 2, res_id);
@@ -12137,7 +12151,7 @@ impl Comp {
             let rid = self.res_seq;
             if self
                 .gpu
-                .create_ring_blob(rid, pa as u64, bytes as u32)
+                .create_ring_blob(rid, va, bytes as u32)
                 .is_err()
             {
                 Self::window_unmap(&mut self.va, va, bytes, "warp ring");

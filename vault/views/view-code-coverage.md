@@ -65,26 +65,27 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**491 owned · 53 unowned · 544 files (90% owned) · ~14206 unswept lines.**
+**492 owned · 77 unowned · 569 files (86% owned) · ~21785 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **73 files, ~32738 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **73 files, ~32789 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
+| usr/lictor | 0 | 24 | 7794 |
 | usr/warp-prove | 0 | 1 | 4349 |
 | usr/pouch-hello | 0 | 22 | 3384 |
-| kernel | 126 | 14 | 1910 |
+| kernel | 127 | 14 | 1910 |
 | usr/ports | 19 | 4 | 1631 |
 | usr/quarry | 0 | 1 | 1033 |
 | usr/stratumd-stub | 0 | 1 | 453 |
 | usr/kaua-term | 3 | 1 | 276 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
-| usr/tapestryd | 8 | 2 | 236 |
 | usr/libthyla-rs | 29 | 1 | 196 |
 | arch | 41 | 2 | 146 |
 | usr/susp-mask-child | 0 | 1 | 139 |
 | usr/stub-driver | 0 | 1 | 119 |
 | usr/lib | 66 | 1 | 72 |
+| usr/tapestryd | 8 | 2 | 21 |
 | mm | 8 | 0 | 0 |
 | usr/aurora | 4 | 0 | 0 |
 | usr/coreutils | 60 | 0 | 0 |
@@ -127,13 +128,18 @@ Excluded as harness and counted here rather than dropped: **73 files, ~32738 lin
 
 | file | lines |
 |---|---:|
+| usr/lictor/src/backend/gpu.rs | 4372 |
 | usr/warp-prove/src/main.rs | 4349 |
 | usr/ports/gnumake/config.h | 1357 |
 | usr/quarry/src/main.rs | 1033 |
 | usr/stratumd-stub/stratumd-stub.c | 453 |
+| usr/lictor/src/backend/device.rs | 446 |
+| usr/lictor/src/backend/input.rs | 429 |
+| usr/lictor/src/gpu_api.rs | 411 |
 | kernel/include/thylacine/errno.h | 388 |
 | usr/pouch-hello/pouch-hello-sockets.c | 366 |
 | usr/pouch-hello/pouch-hello-fs.c | 350 |
+| usr/lictor/src/proxy/gpu.rs | 297 |
 | usr/pouch-hello/pouch-hello-net.c | 284 |
 | kernel/include/thylacine/smp.h | 282 |
 | usr/pouch-hello/pouch-hello.c | 278 |
@@ -141,25 +147,35 @@ Excluded as harness and counted here rather than dropped: **73 files, ~32738 lin
 | usr/gl-sdl-prove/gl-sdl-prove.c | 262 |
 | usr/pouch-hello/pouch-hello-signals.c | 258 |
 | usr/pouch-hello/pouch-hello-pty.c | 231 |
-| usr/tapestryd/src/skein.rs | 217 |
+| usr/lictor/src/skein.rs | 217 |
+| usr/lictor/src/backend/server.rs | 206 |
 | kernel/include/thylacine/spinlock.h | 204 |
 | kernel/include/thylacine/context.h | 201 |
 | usr/lib/libthyla-rs/src/sync.rs | 196 |
+| usr/lictor/src/render.rs | 196 |
 | usr/pouch-hello/pouch-hello-sodium.c | 196 |
 | usr/pouch-hello/pouch-hello-poll.c | 179 |
+| usr/lictor/src/keymap.rs | 166 |
 | usr/ports/gnumake/generated/glob.h | 163 |
 | kernel/include/thylacine/9p_srvconn_transport.h | 160 |
+| usr/lictor/src/objects.rs | 154 |
 | kernel/cpio.c | 152 |
 | usr/susp-mask-child/src/main.rs | 139 |
 | usr/pouch-hello/pouch-hello-reentry.c | 133 |
+| usr/lictor/src/backend/seat.rs | 130 |
 | usr/pouch-hello/pouch-hello-spawn.c | 127 |
 | usr/pouch-hello/pouch-hello-mallocng-torture.c | 126 |
+| usr/lictor/src/wire.rs | 124 |
 | usr/pouch-hello/pouch-hello-malloc.c | 122 |
 | usr/pouch-hello/pouch-hello-fopen.c | 120 |
 | usr/pouch-hello/pouch-hello-threads.c | 119 |
 | usr/stub-driver/stub-driver.c | 119 |
+| usr/lictor/src/backend/screen.rs | 113 |
+| usr/lictor/src/main.rs | 113 |
 | kernel/include/thylacine/9p_transport_loopback.h | 96 |
+| usr/lictor/src/model.rs | 94 |
 | usr/pouch-hello/pouch-hello-exitgroup.c | 91 |
+| usr/lictor/src/framing.rs | 89 |
 | kernel/include/thylacine/9p_spoor_transport.h | 85 |
 | kernel/include/thylacine/9p_transport_mq.h | 83 |
 | usr/pouch-hello/pouch-hello-getrandom.c | 79 |
@@ -169,15 +185,24 @@ Excluded as harness and counted here rather than dropped: **73 files, ~32738 lin
 | usr/pouch-hello/pouch-hello-susp.c | 71 |
 | arch/arm64/psci.h | 68 |
 | kernel/vdso.c | 68 |
+| usr/lictor/src/rpc_client.rs | 67 |
 | usr/ports/gnumake/generated/fnmatch.h | 64 |
 | usr/pouch-hello/pouch-hello-printf.c | 64 |
 | kernel/include/thylacine/cpio.h | 61 |
 | usr/pouch-hello/pouch-hello-env.c | 57 |
 | usr/pouch-hello/pouch-hello-argv.c | 51 |
+| usr/lictor/src/endpoint.rs | 49 |
 | usr/ports/vkquake/thy_vkloader.c | 47 |
 | usr/pouch-hello/pouch-hello-stdio.c | 42 |
 | usr/pouch-hello/pouch-hello-fault.c | 40 |
+| usr/lictor/src/proxy/input.rs | 36 |
 | kernel/include/thylacine/types.h | 30 |
+| usr/lictor/src/backend/import.rs | 29 |
 | kernel/include/thylacine/devramfs.h | 27 |
+| usr/lictor/src/backend/mod.rs | 26 |
+| usr/lictor/src/lib.rs | 23 |
 | usr/tapestryd/src/lib.rs | 19 |
+| usr/lictor/src/limits.rs | 5 |
+| usr/lictor/src/proxy/mod.rs | 2 |
+| usr/tapestryd/src/skein.rs | 2 |
 <!-- generated:end -->

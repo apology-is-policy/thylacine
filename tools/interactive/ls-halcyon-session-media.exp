@@ -1,11 +1,10 @@
 #!/usr/bin/expect -f
-# Real session media: inline View pixels, Gallery zoom/escape, and manual output.
+# Real session media: inline View, Gallery across SAK, manual and theme picker.
+# Requires HALCYON_SESSION=y and THYLACINE_HALCYON_PROFILE=instrument.
 set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
 source [file join [file dirname [info script]] lib.exp]
 set repo $lc_repo
 set qmp [lc_qmp_sock]
-set transcript /tmp/ls-halcyon-session-media-[pid].log
-log_file -a $transcript
 proc key {chord} {
     global repo qmp
     if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $chord} e]} { lc_fail $e }
@@ -50,6 +49,15 @@ expect {
 }
 set timeout 60
 expect {
+    -re {halcyond: theme [^\r\n]*; profile (instrument|legacy) } {
+        if {$expect_out(1,string) ne "instrument"} {
+            lc_fail "theme picker requires THYLACINE_HALCYON_PROFILE=instrument in the pool fixture"
+        }
+    }
+    timeout { lc_fail "session did not report its graphics profile" }
+    eof { lc_fail "EOF before profile" }
+}
+expect {
     -re {halcyond: status bar [^\r\n]*running false panes 2} {}
     -re {EXTINCTION:} { lc_extinction_fail "session" }
     timeout { lc_fail "welcome and shell did not become ready" }
@@ -78,6 +86,13 @@ if {$tiled < 20000} { lc_fail "Gallery pane contains no substantial image" }
 key "meta_l+f"
 set zoomed [colour_count [capture gallery-zoom]]
 if {$zoomed < 100000} { lc_fail "zoomed Gallery image missing" }
+key "ctrl+alt+delete"
+capture gallery-sak
+key "ret"
+lc_expect "corvus: imperium: SAK with nothing pending" "Gallery trusted episode ended"
+set resumed [colour_count [capture gallery-resumed]]
+if {$resumed < 100000} { lc_fail "Gallery pixels missing after trusted episode" }
+lc_pass "Gallery remains visible after secure attention and full repaint"
 key "esc"
 capture gallery-return
 # The shell retains focus and its transcript when Gallery exits.

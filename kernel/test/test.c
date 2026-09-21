@@ -717,6 +717,7 @@ void test_cons_episode_freezes_feed_consctl_poll(void);
 void test_cons_episode_end_restores(void);
 void test_cons_episode_repeat_sak_idempotent(void);
 void test_cons_episode_gate(void);
+void test_cons_graphical_seat_gate(void);
 void test_cons_episode_relinquish_ends(void);
 void test_cons_episode_trusted_death_ends(void);
 void test_cons_episode_saved_owner_death(void);
@@ -1074,6 +1075,7 @@ void test_devcap_further_redeem_keeps_scope(void);
 void test_srvconn_create_destroy(void);
 void test_srvconn_roundtrip(void);
 void test_srvconn_ring_capacity(void);
+void test_srvconn_nonblocking_backpressure(void);
 void test_srvconn_recv_blocks_then_wakes(void);
 void test_srvconn_recv_deadline_timeout(void);
 void test_srvconn_teardown_eofs(void);
@@ -2500,6 +2502,7 @@ struct test_case g_tests[] = {
     { "cons.episode_end_restores",     test_cons_episode_end_restores,     false, NULL },
     { "cons.episode_repeat_sak_idempotent",
                                        test_cons_episode_repeat_sak_idempotent, false, NULL },
+    { "cons.graphical_seat_gate", test_cons_graphical_seat_gate, false, NULL },
     { "cons.episode_gate",             test_cons_episode_gate,             false, NULL },
     { "cons.episode_relinquish_ends",  test_cons_episode_relinquish_ends,  false, NULL },
     { "cons.episode_trusted_death_ends",
@@ -2783,6 +2786,7 @@ struct test_case g_tests[] = {
     { "devcap.clearance_kind_isolation",      test_devcap_clearance_kind_isolation,      false, NULL },
     { "srvconn.create_destroy",        test_srvconn_create_destroy,        false, NULL },
     { "srvconn.roundtrip",             test_srvconn_roundtrip,             false, NULL },
+    { "srvconn.nonblocking_backpressure", test_srvconn_nonblocking_backpressure, false, NULL },
     { "srvconn.ring_capacity",         test_srvconn_ring_capacity,         false, NULL },
     { "srvconn.recv_blocks_then_wakes",
                                        test_srvconn_recv_blocks_then_wakes,
@@ -3779,7 +3783,12 @@ void test_soft_warn(const char *msg) {
     uart_puts("\n");
 }
 
+int proc_test_serial_sak(int posture);
 void test_run_all(void) {
+    // Legacy console transition tests require the serial recovery posture.
+    // Select it explicitly for the fixture; the real boot policy is restored
+    // before userspace and tested independently by graphical E2E.
+    int serial_posture = proc_test_serial_sak(1);
     passed_count = 0;
     failed_count = 0;
     total_count  = 0;
@@ -3900,6 +3909,7 @@ void test_run_all(void) {
     uart_puts(" child-Proc expiries\n");
 
     current_test = NULL;
+    (void)proc_test_serial_sak(serial_posture);
 }
 
 unsigned g_test_yield_calls;

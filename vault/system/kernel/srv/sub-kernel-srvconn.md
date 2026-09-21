@@ -12,8 +12,21 @@ hazards: [haz-single-waiter-rendez, haz-death-path-wake]
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-08-14
+updated: 2026-09-18
 ---
+## Event-loop I/O
+
+`srvconn_io_nonblock` shares the same rings and channel locks as blocking
+transport. It refuses a busy same-direction I/O role, returns a short prefix
+when only part fits, EAGAIN when no progress is possible, EOF after a drained
+closed read, and EPIPE for a closed write. It wakes the opposite Rendez and
+server poll waiters after unlocking. Client-side poll is not added by this path.
+A POLLOUT result alone guarantees neither a complete frame nor a full buffer;
+[[sub-lictor]] therefore uses explicit nonblocking mode. The kernel test
+`srvconn.nonblocking_backpressure` covers that exact short-space condition,
+empty reads, role contention and teardown. `s2c_frames` counts completed
+requested server buffers; a partial nonblocking prefix does not increment it.
+
 ## Purpose
 
 A `SrvConn` is one kernel-minted `/srv` connection: a bidirectional byte

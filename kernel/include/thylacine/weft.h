@@ -430,6 +430,9 @@ u64 weft_share_register(struct Proc *owner, struct Burrow *v);
 // NULL if no live entry has `share_id` (a replay / forged / already-claimed id).
 // Because the pin is transferred, the caller owns exactly one burrow_ref after a
 // non-NULL return -- no extra ref/unref.
+// Reverse data import by a trusted broker. A mismatch must not consume another
+// peer's share. owner_stripes comes from a kernel-stamped accepted connection.
+struct Burrow *weft_share_claim_from(u64 share_id, u64 owner_stripes);
 struct Burrow *weft_share_claim(u64 share_id);
 
 // GC every UN-claimed share owned by `owner` (drops each registration pin). The

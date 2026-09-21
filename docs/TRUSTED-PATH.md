@@ -167,11 +167,17 @@ All planes, cursors, outputs, capture paths, DMA access and pending submissions
 are part of the exclusion proof. A simple-framebuffer node or CPU mapping alone
 is insufficient evidence. Backends must pass conformance tests before enablement.
 
-**As built:** only the serial episode is enforced today. The kernel gates UART
-output to the attached trusted process, and Corvus renders ANSI in userspace.
-The new graphical architecture is approved but unimplemented. Its service cannot
-be assumed available during a kernel panic; graphical Halls output needs a separate
-crash-ownership contract, not a second live GPU driver.
+**As built:** the serial episode gates UART output to the attached trusted
+process. The QEMU graphical backend uses Lictor as the boot-trusted physical
+GPU/input owner, with Corvus semantic frames and kernel generation/visibility
+checks. Tapestry holds only the normal broker role. Grants remain held until
+acknowledged restoration; owner failure cancels them before redemption. The
+current backend uses the neutral field because private workspace capture is not
+implemented. Serial authorization requires `thylacine.serial-sak=1`; the QEMU dev
+launcher selects it unless `THYLACINE_SERIAL_SAK=0`.
+
+Lictor cannot be assumed available during a kernel panic; graphical Halls output
+needs a separate crash-ownership contract. Pi 400/Pi 500 remain unqualified.
 
 ---
 

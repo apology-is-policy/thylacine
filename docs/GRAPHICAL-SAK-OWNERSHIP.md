@@ -1,8 +1,7 @@
 # Graphical Lex curiata: hardware ownership review
 
 Approved by the operator, 18 September 2026, with an explicit portability
-requirement for Pi 400, Pi 500 and future graphical output. Implementation is
-not yet present. [Portability contract and research](GRAPHICAL-SAK-PORTABILITY.md)
+requirement for Pi 400, Pi 500 and future graphical output. Implementation is in progress in `usr/lictor`; runtime qualification is pending. [Portability contract and research](GRAPHICAL-SAK-PORTABILITY.md)
 refine the backend obligations below.
 
 ## Approved decision
@@ -21,8 +20,8 @@ pixels. No ordinary compositor process gets that authority.
 
 ## Why this decision is needed
 
-Today tapestryd owns the virtio GPU and keyboard PCI functions, their BAR mappings,
-DMA queues and IRQ endpoints. Its gpu.rs also implements accelerated resources,
+Before this separation, tapestryd owned the virtio GPU and keyboard PCI functions, their BAR mappings,
+DMA queues and IRQ endpoints. Its gpu.rs also implemented accelerated resources,
 contexts and presentation lifetimes. A full-screen Halcyon dialog would still be
 paintable and readable by that ordinary compositor. Freezing its UI does not revoke
 its hardware mappings or outstanding DMA.
@@ -33,7 +32,7 @@ workspace. Copying userspace virtqueue state into a kernel driver would add an
 untrusted command parser and a second owner to a live device. Neither is a sound
 small patch.
 
-The proposed persistent hardware owner avoids changing the GPU owner at each SAK.
+The persistent hardware owner avoids changing the GPU owner at each SAK.
 The episode changes which principal may supply display/input content to that owner.
 The separation is architectural work, not merely a modal overlay.
 
@@ -43,6 +42,10 @@ The separation is architectural work, not merely a modal overlay.
   presentation and input resources (platform controllers or bus children, not
   necessarily PCI functions). Tapestry loses those claims and
   raw BAR/DMA access. Device ownership is never granted by a runtime self-assertion.
+- Warden starts the hardware service and DMA-only compositor as separate narrowed
+  leaves. The existing no-child rule for narrowed drivers remains intact. A
+  boot-stamped normal-client designation admits only that process incarnation to
+  the broker and confers no trusted endpoint authority.
 - The kernel binds this service instance and Corvus to a generation-bearing episode.
   Registration and control handles are non-transferable, non-inheritable and
   invalid after owner death. Generic CAP_HW_CREATE is not enough to register as
@@ -122,3 +125,34 @@ protocol there; it is substantially larger than adding a simplefb blitter.
 It can preserve the stronger kernel-only output claim, at the cost of a larger
 kernel driver/parser surface. A second dedicated virtual GPU would avoid some
 mediation but would be a QEMU-specific workaround and is not recommended.
+
+## Implementation checkpoint
+
+The QEMU path is implemented in Lictor, Corvus and the kernel seat endpoint.
+Warden starts service and normal compositor as independent narrowed leaves.
+The normal transport uses nonblocking /srv endpoints: POLLOUT alone is not a
+whole-reply guarantee. Native ABI 121/122/123 covers seat operations, peer-bound
+backing import and shared open-file nonblocking mode.
+
+Graphical grants publish held under the grant lock and cannot be redeemed until
+SEAT_RESTORED commits the exact target incarnation/session. Failure before that
+commit cancels the grant. Corvus replies after restoration, but the kernel barrier
+also protects against a requester that polls /use independently of the reply.
+Serial SAK requires an explicit immutable boot token; the graphical regression
+disables it. The current visual backend uses the approved neutral field.
+
+Measured integration evidence: host framing/model/ownership/render tests; kernel
+seat gates and transport backpressure tests; QEMU empty/confer/DAC/abdicate/wrong
+key/cancel flow with real screenshots. Accelerated context continuity, broader
+backend qualification and final matrix verification remain separate gates.
+
+### Trusted raster memory
+
+The private CPU raster workspace is committed at Lictor startup in its own
+anonymous, non-exportable mapping, sized by the validated display geometry
+(maximum 4096 by 2160 pixels). It is separate from both the general-purpose
+heap and device-visible plain-DMA scanout backing. Entry and repaint reuse
+it rather than allocating a framebuffer alongside normal broker bookkeeping.
+Both buffers are erased after restoration. This prevents normal resource churn
+from crowding out the allocation required for secure attention; inability to
+reserve the workspace fails service startup before normal clients are admitted.

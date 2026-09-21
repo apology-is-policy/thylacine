@@ -9,6 +9,7 @@
 // SYS_SRV_PEER are P5-corvus-srv-impl-a3b / -a3c.
 
 #include <thylacine/extinction.h>
+#include <thylacine/errno.h>
 #include <thylacine/page.h>
 #include <thylacine/poll.h>
 #include <thylacine/rendez.h>
@@ -289,6 +290,36 @@ static long chan_consume_nonblock(struct srvconn_chan *ch, u8 *buf, long n) {
     bool eof = ch->eof;
     spin_unlock(&ch->lock);
     return eof ? -1 : 0;
+}
+
+// A poll result promises some room, not an entire reply. Native event-loop
+// servers need a try operation that never parks behind a client or a competing
+// blocking I/O role. The same primitive serves POSIX O_NONBLOCK endpoints.
+long srvconn_io_nonblock(struct SrvConn *cn, bool server, bool writing,
+                        void *buf, long n) {
+    if (!cn || cn->magic != SRV_CONN_MAGIC || n < 0 || (!buf && n)) return -T_E_INVAL;
+    if (!n) return 0;
+    struct srvconn_chan *ch = server == writing ? &cn->s2c : &cn->c2s;
+    spin_lock(&ch->lock);
+    long rc;
+    if (writing && ch->eof) rc = -T_E_PIPE;
+    else if (writing ? ch->writing : ch->reading) rc = -T_E_AGAIN;
+    else if (writing) {
+        rc = chan_ring_write(ch, (const u8 *)buf, n);
+        if (!rc) rc = -T_E_AGAIN;
+    } else if (ch->count) rc = chan_ring_read(ch, (u8 *)buf, n);
+    else rc = ch->eof ? 0 : -T_E_AGAIN;
+    spin_unlock(&ch->lock);
+    if (rc > 0) {
+        wakeup(writing ? &ch->rendez : &ch->wrendez);
+        // Wake endpoint pollers after releasing the channel lock, matching
+        // the existing blocking paths. Client-side poll remains unsupported.
+        poll_waiter_list_wake(&cn->poll_list);
+        // Keep the existing completed-buffer diagnostic semantics. A short
+        // nonblocking prefix is progress, but not a completed requested buffer.
+        if (server && writing && rc == n) __atomic_fetch_add(&cn->s2c_frames, 1u, __ATOMIC_RELAXED);
+    }
+    return rc;
 }
 
 // (chan_set_eof was retired: srvconn_teardown latches BOTH directions'

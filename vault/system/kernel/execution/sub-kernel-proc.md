@@ -10,8 +10,19 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-09-17
+updated: 2026-09-18
 ---
+## Graphical seat incarnations
+
+The kernel binds one boot-designated hardware service, one normal compositor
+and Corvus to a generation-bearing seat. Manager/service/client spawn roles are
+not inherited. Only service and Corvus may operate the trusted endpoint; the
+normal designation admits broker connections but no trusted operations. Binding
+the service sets NODUMP and NOTRACE before userspace runs. Either graphics owner's
+death invalidates the seat; no process inherits its hardware ownership. Episode
+transitions, pending-grant commit/cancellation and death serialize under the
+process-table lock. See [[abi-trusted-seat]] and [[sub-lictor]].
+
 ## Purpose
 
 A `Proc` is the unit of isolation: one address space, one Territory, one

@@ -462,7 +462,22 @@ impl Driver for Tapestryd {
         #[cfg(feature = "test-mode")]
         let mut pass_mark = Instant::now();
 
+        let mut seat_generation = 0;
         loop {
+            let (generation, phase) = match self.comp.gpu.seat_state() {
+                Ok(state) => state,
+                Err(error) => { say!("tapestryd: seat state failed {:?}", error); return Err(error); }
+            };
+            if phase != 0 {
+                let _ = libthyla_rs::time::sleep(core::time::Duration::from_millis(10));
+                continue;
+            }
+            if generation != seat_generation {
+                seat_generation = generation;
+                self.mods = Mods::default();
+                self.comp.seat_resumed();
+            }
+
             #[cfg(feature = "test-mode")]
             {
                 let d = pass_mark.elapsed().as_millis() as u64;
@@ -484,6 +499,9 @@ impl Driver for Tapestryd {
                 kbd.drain(|ev| raw_events.push(ev));
                 input_seen |= !raw_events.is_empty();
                 for ev in &raw_events {
+                    if ev.etype == EV_SYN && ev.code == 3 {
+                        self.mods = Mods::default(); self.comp.seat_resumed(); continue;
+                    }
                     if ev.etype != EV_KEY {
                         continue; // EV_SYN separators etc.
                     }

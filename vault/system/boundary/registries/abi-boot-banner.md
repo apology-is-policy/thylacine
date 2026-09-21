@@ -11,6 +11,8 @@ pinned-by:
   - "docs/TOOLING.md §10"
 mirrors:
   - "tools/interactive/ls-halcyon-session-media.exp"
+  - "tools/interactive/ls-graphical-sak.exp"
+  - "tools/interactive/ls-graphical-sak-states.exp"
   - "tools/interactive/ls-halcyon-session-dosbox.exp"
   - tools/interactive/pci-net-load.exp
   - "tools/interactive/im1-sak-lever.exp"

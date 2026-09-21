@@ -2274,6 +2274,13 @@ enum {
     SYS_PCI_IRQ_COMPLETE = 118,
     SYS_PCI_IRQ_DISABLE = 119,
     SYS_PCI_IRQ_INFO = 120,
+    // Kernel-bound trusted display/input endpoint; seat.h fixes the envelope.
+    SYS_TRUSTED_SEAT = 121,
+    // Trusted seat imports a share-admissible DMA buffer from its accepted
+    // connection peer; no raw PA is accepted. Returns non-transferable DMA fd.
+    SYS_SEAT_IMPORT = 122,
+    // Open-file nonblocking mode, shared by duplicate handles; fd, boolean.
+    SYS_SET_NONBLOCK = 123,
 
     // NOT A SYSCALL. One past the highest assigned number, so that
     // VIV_NATIVE_CEILING can be pinned to a value the compiler recomputes
@@ -2553,12 +2560,18 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, shm)         == 208, "t_pci
 // NOT a cap (rfork does not propagate proc_flags), so only the marked leader
 // carries the flag.
 #define SPAWN_PERM_SESSION_HANGUP    (1u << 5)
+#define SPAWN_PERM_SEAT_MANAGER      (1u << 6)
+#define SPAWN_PERM_SEAT_SERVICE      (1u << 7)
+#define SPAWN_PERM_SEAT_CLIENT       (1u << 8)
 #define SPAWN_PERM_ALL               (SPAWN_PERM_MAY_POST_SERVICE | \
                                       SPAWN_PERM_CONSOLE_TRUSTED | \
                                       SPAWN_PERM_CONSOLE_OWNER | \
                                       SPAWN_PERM_CONSOLE_RENDERER | \
                                       SPAWN_PERM_MAY_RAISE_PAGE_BUDGET | \
-                                      SPAWN_PERM_SESSION_HANGUP)
+                                      SPAWN_PERM_SESSION_HANGUP | \
+                                      SPAWN_PERM_SEAT_MANAGER | \
+                                      SPAWN_PERM_SEAT_SERVICE | \
+                                      SPAWN_PERM_SEAT_CLIENT)
 
 // A-1a (docs/IDENTITY-DESIGN.md §9.1): sys_spawn_args.identity_flags bits.
 // SPAWN_IDENTITY_SET requests that the child be born with the principal_id

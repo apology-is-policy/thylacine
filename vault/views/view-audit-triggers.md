@@ -91,6 +91,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-weft]] | kernel/weft.c, kernel/include/thylacine/weft.h | inv-i37, inv-i30, inv-i9, inv-i32 | - **Admission stays kernel-minted.** Anonymous, or the allocation-time |
 | [[sub-libdriver-discovery]] | usr/lib/libdriver/src/source.rs, usr/lib/libdriver/src/dtb.rs, usr/lib/libdriver/src/supervise.rs, usr/lib/libdriver/src/readyline.rs | inv-i34 | - **The warden must never read a device register.** The moment it does, the |
 | [[sub-libdriver-grant]] | usr/lib/libdriver/src/lib.rs, usr/lib/libdriver/src/manifest.rs, usr/lib/libdriver/src/resource.rs, usr/lib/libdriver/src/driver.rs | inv-i34 | - **Every axis must stay node-supplied.** A new axis whose concrete values come |
+| [[sub-lictor]] | usr/lictor, kernel/include/thylacine/seat.h, usr/caps-probe | inv-i1, inv-i2, inv-i5, inv-i9, inv-i27, inv-i34, inv-i40, inv-i45 | QEMU graphical regression passes empty, confer, actual DAC elevation, abdicate, |
 | [[sub-netd-nic]] | usr/netd/src/main.rs, usr/netd/Cargo.toml |  | On any change, prosecute: |
 | [[sub-netd-server]] | usr/netd/src/server.rs, usr/netd/src/ndb.rs, usr/netd/ndb/local | inv-i9 | On any change, prosecute (the standing list, accreted across |
 | [[sub-netdev]] | usr/lib/netdev/src/lib.rs, usr/lib/netdev/src/ring.rs, usr/lib/netdev/src/virtio.rs, usr/lib/netdev/src/virtio_pci.rs, usr/lib/netdev/Cargo.toml |  | On any change, prosecute: |
