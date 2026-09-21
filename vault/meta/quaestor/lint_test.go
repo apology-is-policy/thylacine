@@ -660,4 +660,3 @@ func TestCodeDirectoryClaimFails(t *testing.T) {
 	reg, _ = loadRegistry(root)
 	wantFailContaining(t, checkCodePaths(reg), "is a directory")
 }
-

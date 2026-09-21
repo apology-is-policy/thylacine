@@ -337,6 +337,26 @@ the matrix was already running on the tree); queued with the measurement.
 and eight CPUs, ten boots each -- 40 of 40, no corruption, no external kill, no
 timing miss, nothing unclassified, 37-42 s a boot.
 
+**After the merge (`6b5dad04`, both mirrors).** The operator's image is a bare
+`tools/build.sh kernel` in the main checkout: the bake log says session `on`,
+profile `instrument`; `ls-halcyon-session-instrument` passes on that exact
+image first attempt (137 s), and the screendump is the Instrument desktop --
+rails, frames, headers, the lambda prompt -- with no legacy bezel in it. The
+fixed sync was then run for real, because a fix that has never executed is a
+hypothesis: five md5s agree across the tunnel (pool, its snapshot twin, both
+key twins, the ramfs). The Pi's `build/` now holds this image as its certified
+set.
+
+**And the commit that recorded that was refused.** `view-audit-trigger-coverage`
+was "stale" in the main checkout and current in its sibling: quaestor resolved
+the table's cited paths with `os.Stat`, and main's checkout carries an
+untracked `ls-gfx-compose.exp` the other worktree does not -- 19 ghosts here, 21
+there. A committed view was a function of the directory that rendered it, so
+whichever checkout committed last made it stale everywhere else. Cited paths
+now resolve against `git ls-files` (files and the directories holding them);
+the test keeps a tracked control beside the untracked file, and reverting the
+resolver fails it.
+
 ---
 ## 2026-09-18 (Codex, single-agent) -- portable graphical SAK approval
 
