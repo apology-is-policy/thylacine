@@ -65,14 +65,14 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**521 owned · 49 unowned · 570 files (91% owned) · ~13264 unswept lines.**
+**521 owned · 50 unowned · 571 files (91% owned) · ~13285 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **73 files, ~32816 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **73 files, ~32957 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
 | usr/warp-prove | 0 | 1 | 4349 |
-| usr/pouch-hello | 4 | 18 | 2657 |
+| usr/pouch-hello | 4 | 19 | 2678 |
 | kernel | 127 | 14 | 1910 |
 | usr/ports | 19 | 4 | 1631 |
 | usr/quarry | 0 | 1 | 1033 |
@@ -175,6 +175,7 @@ Excluded as harness and counted here rather than dropped: **73 files, ~32816 lin
 | usr/pouch-hello/pouch-hello-fault.c | 40 |
 | kernel/include/thylacine/types.h | 30 |
 | kernel/include/thylacine/devramfs.h | 27 |
+| usr/pouch-hello/pouch-census.h | 21 |
 | usr/tapestryd/src/lib.rs | 19 |
 | usr/tapestryd/src/skein.rs | 2 |
 <!-- generated:end -->

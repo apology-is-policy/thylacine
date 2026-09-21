@@ -73,7 +73,14 @@ proc empty_episode {phase} {
     }
     lc_expect "nothing pending -- press any key" "corvus's empty-episode panel ($phase)"
     lc_raw_send "x" "dismiss the panel ($phase)"
-    lc_expect "trusted path: done" "the episode END witness ($phase)"
+    lc_expect "trusted path: done" "corvus's verdict line ($phase)"
+    # corvus prints that line INSIDE the episode and ENDs afterwards, so it is
+    # not the END witness it was used as until 2026-09-21: the next Ctrl-A b,
+    # sent on its heels, could land in the still-open episode and be answered
+    # `active` -- by design (a repeat SAK is idempotent), and red here. One
+    # sighting in a 77-scenario fleet, green on the retry: a race between this
+    # script and corvus, not a kernel one. The KERNEL's line is the END.
+    lc_expect "cons: trusted episode END" "the episode END witness ($phase)"
 }
 
 lc_boot

@@ -89,11 +89,22 @@ def main(argv):
             continue
         for path in sorted(base.rglob('*.patch')):
             try:
-                lines = path.read_text(errors='replace').splitlines()
+                text = path.read_text(errors='replace')
             except OSError as e:
                 print(f'{path}: UNREADABLE ({e})', file=sys.stderr)
                 errors += 1
                 continue
+            lines = text.splitlines()
+            # A patch whose last byte is not a newline ends in a line strict
+            # appliers call corrupt (`git apply`) and BSD patch(1) matches only
+            # by spending fuzz on the final context line -- SILENTLY, with no
+            # "with fuzz" message. 0024 sat that way for months: a hunk that
+            # applied by luck and told nobody.
+            if text and not text.endswith('\n'):
+                errors += 1
+                rel = path.relative_to(repo) if repo in path.parents else path
+                print(f'ERROR {rel}: no newline at end of the PATCH FILE -- its '
+                      f'last hunk applies only through silent fuzz')
             for i, ln in enumerate(lines):
                 m = HDR.match(ln)
                 if not m:

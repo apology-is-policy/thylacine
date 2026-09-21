@@ -102,12 +102,22 @@
 0038-pouch-stdio-socket-fds.patch
 # 0039: B-0 audit r2 F2 -- a socket fd (0x40000000 | slot) does not fit an
 # fd_set: FD_SET(sock) was a store 128 MiB past the set, in application code.
-# FD_SET/FD_CLR/FD_ISSET now abort() on a descriptor outside [0, FD_SETSIZE)
-# (glibc's __fdelt_chk); ppoll() goes through the tag-aware poll(). The real
-# fix -- small-integer socket fds -- is its own chunk, recorded as owed.
+# FD_SET/FD_CLR/FD_ISSET now abort() on a descriptor that does not fit the set
+# (glibc's __fdelt_chk: full width, against the set's own size); ppoll() goes
+# through the tag-aware poll(). THE SERIES' FIRST PATCH INTO A PUBLIC HEADER
+# (include/sys): the guard lives in the PORT's objects, so ports are rebuilt,
+# not relinked. The real fix -- small-integer socket fds -- is owed.
 0039-pouch-fdset-guard-ppoll-tag.patch
 # 0040: B-0 audit r2 F9 -- O_APPEND was a one-time seek at open (0030), so a
 # write after a seek landed mid-file. The opens now carry the kernel's OAPPEND
 # omode bit (VIVARIUM 6.27; Stratum appends server side); the seek is kept for
-# ftell() and the first "a+" read.
+# ftell() and the first "a+" read. NOT atomic against a concurrent appender
+# (Stratum's write is stat-then-write).
 0040-pouch-o-append-omode.patch
+# 0041: B-0 audit r3 F1+F2 (libc half) -- poll() gives a CONNECTED AF_UNIX
+# socket the stream-socket shape: a peer's orderly close is POLLIN|POLLHUP, not
+# the kernel's pipe-like POLLHUP|POLLERR, so the "POLLIN? read; 0 = closed"
+# loop every port has terminates. The kernel half (a client endpoint is
+# pollable at all; every ring mutation walks the hook list) is ARCH 23.3. An
+# ACCEPTED socket is untagged and not covered -- recorded in the header.
+0041-pouch-poll-stream-socket-shape.patch

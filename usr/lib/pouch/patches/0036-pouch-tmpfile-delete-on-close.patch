@@ -42,7 +42,14 @@ guards the list and an `exiting` flag and is never held across a syscall.
     node already unlisted with the name still on disk (leak). Now fclose()
     closes and unlinks while the node is STILL LISTED and unlists it last, so
     an exit() landing anywhere in between still sweeps the name; the sweep
-    repeating a close or an unlink is harmless (EBADF / ENOENT).
+    repeating an UNLINK is harmless (ENOENT).
+  - A repeated CLOSE is not harmless in a threaded program -- the number can
+    have been handed to another thread in between -- so the descriptor has
+    exactly one closer (audit r3 F6): whoever takes it out of the node, under
+    tmp_lock, closes it. That is fclose(), the __fdopen-failure arm, or the
+    sweep; never two. (Only the failure arm could actually overlap the sweep:
+    fclose() holds the FILE lock across f->close and __stdio_exit takes every
+    listed FILE's lock before it sweeps. The rule is uniform anyway.)
   - The first version's sweep took the lock and kept it, so a thread that
     had just open()ed its file blocked on the lock for ever with a name the
     sweep never saw. Now the sweep sets `exiting`, releases the lock, and
@@ -58,7 +65,15 @@ that lands between open() returning and the node being listed. POSIX calls
 that case implementation-defined; closing it needs a boot-time /tmp sweep,
 not libc, and is recorded as owed.
 
-COUPLINGS this creates, for whoever wires the missing calls (audit r2 F8):
+COUPLINGS this creates (audit r2 F8; r3 F5 found the one that is LIVE):
+  - posix_spawn file actions -- LIVE TODAY. posix_spawn resolves a
+    `dup2(fileno(t), 0)` action into the child's fd list: the child gets the
+    SAME fid. `t = tmpfile(); fill; rewind; posix_spawn(child, stdin =
+    fileno(t)); fclose(t)` unlinks while the child holds it, and the child's
+    first uncached read meets Stratum's IOReject. It worked before this patch
+    only because nothing was ever unlinked. No in-tree consumer; a port that
+    hands a tmpfile() to a child must keep the stream open until the child is
+    reaped.
   - fork: safe today only because _Fork's SYS_clone is a sentinel. A child
     would inherit the list, and its exit() would unlink the PARENT's live
     files -- which on this filesystem kills the parent's streams. Wiring fork
@@ -66,6 +81,9 @@ COUPLINGS this creates, for whoever wires the missing calls (audit r2 F8):
   - dup: GNU make's os_anontmp is tmpfile() -> dup(fileno) -> fclose. dup()
     is ENOSYS today, so make falls back. The day dup() works, that fclose
     deletes the file under the descriptor make keeps.
+  - freopen(): replaces f->close with the new stream's, orphaning the node
+    (the name is then swept at exit, not at fclose). freopen() cannot succeed
+    today -- it needs dup3 -- so this is latent behind the same seam as dup.
   - the name is resolved again at fclose(): a Proc that pivots or binds over
     /tmp in between unlinks in the wrong /tmp or leaks.
   - tmpfile() and the sweep call the interposable unlink() (as 0023 already
@@ -121,7 +139,7 @@ the parent requires the count unchanged again.
  weak_alias(__stdio_exit, __stdio_exit_needed);
 --- a/src/stdio/tmpfile.c
 +++ b/src/stdio/tmpfile.c
-@@ -1,30 +1,160 @@
+@@ -1,30 +1,179 @@
  #include <stdio.h>
  #include <fcntl.h>
  #include <stdlib.h>
@@ -164,7 +182,11 @@ the parent requires the count unchanged again.
 + *   - the exit sweep sets tmp_exiting and releases the lock before it walks.
 + *     From then on the list is frozen: fclose() leaves its node in place and
 + *     tmpfile() removes its own new file instead of listing it, so the walk
-+ *     needs no lock and no thread is parked holding a file the sweep missed. */
++ *     needs no lock and no thread is parked holding a file the sweep missed.
++ *   - the DESCRIPTOR has one closer. Whoever takes it out of the node, under
++ *     the lock, closes it (tmp_take_fd): fclose(), the __fdopen-failure arm or
++ *     the sweep, never two of them -- a second close can land on a descriptor
++ *     another thread was handed in between. */
 +
 +struct tmpnode {
 +	struct tmpnode *next, *prev;
@@ -206,15 +228,27 @@ the parent requires the count unchanged again.
 +	return r;
 +}
 +
++/* Takes the descriptor out of the node: the caller that gets >= 0 closes it. */
++static int tmp_take_fd(struct tmpnode *n)
++{
++	int fd;
++	LOCK(tmp_lock);
++	fd = n->fd;
++	n->fd = -1;
++	UNLOCK(tmp_lock);
++	return fd;
++}
++
 +static int tmpfile_close(FILE *f)
 +{
 +	struct tmpnode *n = f->cookie;
 +	int r, e;
 +
-+	/* Close first: nothing may touch the fid after the unlink. */
++	/* __stdio_close closes it (f->fd is the same descriptor), and closes it
++	 * first: nothing may touch the fid after the unlink. */
++	(void)tmp_take_fd(n);
 +	r = __stdio_close(f);
 +	e = errno;
-+	n->fd = -1;
 +	unlink(n->name);
 +	errno = e;
 +	if (!tmp_retire(n)) free(n);
@@ -230,7 +264,8 @@ the parent requires the count unchanged again.
 +	n = tmp_head;
 +	UNLOCK(tmp_lock);
 +	for (; n; n = n->next) {
-+		if (n->fd >= 0) __syscall(SYS_close, n->fd);
++		int fd = tmp_take_fd(n);
++		if (fd >= 0) __syscall(SYS_close, fd);
 +		unlink(n->name);
 +	}
 +}
@@ -278,8 +313,10 @@ the parent requires the count unchanged again.
 +		f = listed ? __fdopen(fd, "w+") : 0;
 +		if (!f) {
 +			e = listed ? errno : EAGAIN;
-+			__syscall(SYS_close, fd);
-+			n->fd = -1;
++			/* Unlisted, the node is private; listed, the sweep may be
++			 * walking it. */
++			fd = listed ? tmp_take_fd(n) : fd;
++			if (fd >= 0) __syscall(SYS_close, fd);
 +			unlink(s);
 +			if (!listed || !tmp_retire(n)) free(n);
 +			errno = e;

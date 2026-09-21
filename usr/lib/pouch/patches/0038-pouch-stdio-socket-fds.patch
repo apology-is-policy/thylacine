@@ -18,8 +18,9 @@ So since 0006:
 
 Pre-existing; found by the audit of 0035, which rewrote __stdio_read and
 preserved the defect. It survived because nobody fdopen()s a SOCKET: the ports
-that call fdopen() at all (GNU make's misc.c, dosbox-x's drive_local.cpp) wrap
-file descriptors, and stratumd does not call it. The first port that wraps a
+that call fdopen() at all (GNU make's misc.c; in dosbox-x drive_local.cpp, the
+stb.h decoder and opusfile's stream.c -- `grep -rl fdopen third_party/dosbox-x/src`)
+wrap file descriptors, and stratumd does not call it. The first port that wraps a
 connected socket in a FILE would have hit it.
 
 The fix is the mapping read()/write()/close() already use, in the three

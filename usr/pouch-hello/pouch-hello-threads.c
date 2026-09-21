@@ -43,6 +43,7 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#include "pouch-census.h"
 #include <stdint.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -177,6 +178,6 @@ int main(void) {
     printf("pouch-hello-threads: ok (%u workers, mutex-protected counter, joined)\n",
            NTHREADS);
     /* The census is what joey matches: a stale binary prints the old marker. */
-    printf("pouch-hello-threads: legs=pthread,mutex,main-stack-maps-row: exit 0\n");
+    puts(POUCH_CENSUS_THREADS);
     return 0;
 }

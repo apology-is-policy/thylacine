@@ -35,6 +35,7 @@
  * child's stdout to the boot log. A failure line on fd 2 is a line nobody
  * sees (pouch-hello-threads.c documents the same trap). */
 #define _GNU_SOURCE
+#include "pouch-census.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -260,16 +261,32 @@ static void *server_main(void *arg)
     n = read(conn, buf, sizeof(buf) - 1);
     if (n != (ssize_t)(sizeof(MSG_LINE) - 1) ||
         memcmp(buf, MSG_LINE, sizeof(MSG_LINE) - 1) != 0) {
+        /* The client is about to wait at a barrier only this thread can
+         * release: say why and end the process, or the boot hangs mute. */
         printf("server: stdio leg read got %zd errno=%d\n", n, errno);
-        close(conn); close(s);
-        return NULL;
+        fflush(stdout);
+        _exit(1);
     }
+    /* The ppoll leg's sequencing, both halves load-bearing:
+     *  - the client polls only AFTER its request has been consumed (this
+     *    barrier). Polled earlier, a kernel that samples the WRONG end of the
+     *    connection calls the client's own unread request "readable" and the
+     *    leg goes green over it -- which is what it did for one gate.
+     *  - the connection stays open until the client HAS polled (the barrier
+     *    after the write), so the only thing that can end its poll is the
+     *    reply. The pause makes "parked, then woken by the reply" the usual
+     *    schedule; "replied before it looked" is also correct and also passes. */
+    pthread_barrier_wait(&g_ready);
+    usleep(100 * 1000);
     w = write(conn, MSG_ECHO, sizeof(MSG_ECHO) - 1);
     if (w != (ssize_t)(sizeof(MSG_ECHO) - 1)) {
         printf("server: stdio leg write got %zd errno=%d\n", w, errno);
-        close(conn); close(s);
-        return NULL;
+        fflush(stdout);
+        _exit(1);
     }
+    pthread_barrier_wait(&g_ready);
+    /* The close is the client's second poll: an orderly EOF. */
+    usleep(100 * 1000);
 
     close(conn);
     close(s);
@@ -311,21 +328,29 @@ static int stdio_over_socket(int c)
         fclose(cf);
         return -1;
     }
-    /* ppoll() on the socket, with the reply on its way: it must report the
-     * socket READABLE. Handed to the kernel raw, a socket fd (a tagged value,
-     * not a kernel handle) answers POLLNVAL at once -- which also counts as
-     * "ready", so only the revents tell the two apart. */
+    /* ppoll() on the socket must report the REPLY, and nothing else, as
+     * readable. Three things have each broken this and each reads differently:
+     *   - libc hands the kernel the socket fd raw (a tagged value, not a kernel
+     *     handle): POLLNVAL at once -- which also counts as "ready", so only
+     *     the revents tell it from success;
+     *   - the kernel samples the SERVER's end for a client: POLLIN from the
+     *     client's own unread request, or -- polled after the server consumed
+     *     it, as here -- nothing, ever: pr == 0 after the full timeout;
+     *   - the kernel walks no hook list when the reply lands: the same pr == 0.
+     * See server_main for why the barriers sit where they do. */
+    pthread_barrier_wait(&g_ready);         /* the request has been consumed */
     {
         struct pollfd pf = { .fd = c, .events = POLLIN };
         struct timespec ts = { .tv_sec = 10 };
         int pr = ppoll(&pf, 1, &ts, NULL);
-        if (pr != 1 || !(pf.revents & POLLIN) || (pf.revents & POLLNVAL)) {
-            printf("client: ppoll(socket) = %d revents=%#x errno=%d (want POLLIN)\n",
+        if (pr != 1 || pf.revents != POLLIN) {
+            printf("client: ppoll(socket) = %d revents=%#x errno=%d (want exactly POLLIN)\n",
                    pr, (unsigned)pf.revents, errno);
-            fclose(cf);
-            return -1;
+            fflush(stdout);
+            _exit(1);                       /* the server waits at a barrier */
         }
     }
+    pthread_barrier_wait(&g_ready);         /* polled; the server may close */
     int v = -1;
     char rest[16];
     if (fscanf(cf, "ECHO %d", &v) != 1 || v != 7 ||
@@ -341,11 +366,33 @@ static int stdio_over_socket(int c)
         fclose(cf);
         return -1;
     }
+    /* The peer's orderly close, in the shape a socket program expects:
+     * POLLIN|POLLHUP and no POLLERR, then a read of 0. The kernel reports a
+     * /srv connection pipe-like (POLLHUP|POLLERR, no POLLIN at a drained EOF);
+     * libc's poll() supplies the socket shape. Without it the loop every port
+     * has -- "POLLIN? then read; 0 means closed" -- never sees its POLLIN and
+     * spins on a poll() that returns at once. */
+    {
+        struct pollfd pf = { .fd = c, .events = POLLIN };
+        struct timespec ts = { .tv_sec = 10 };
+        int pr = ppoll(&pf, 1, &ts, NULL);
+        if (pr != 1 || pf.revents != (POLLIN | POLLHUP)) {
+            printf("client: ppoll(closed socket) = %d revents=%#x errno=%d (want POLLIN|POLLHUP)\n",
+                   pr, (unsigned)pf.revents, errno);
+            fclose(cf);
+            return -1;
+        }
+        if (fgetc(cf) != EOF || !feof(cf)) {
+            printf("client: read after POLLHUP was not EOF\n");
+            fclose(cf);
+            return -1;
+        }
+    }
     if (fclose(cf) != 0) {
         printf("client: fclose(socket FILE) failed errno=%d\n", errno);
         return -1;
     }
-    printf("client: stdio over socket (fputs/ppoll/fscanf/fgets/fclose) ok\n");
+    printf("client: stdio over socket (fputs/ppoll/fscanf/fgets/ppoll-eof/fclose) ok\n");
     return 0;
 }
 
@@ -527,6 +574,6 @@ int main(int argc, char **argv)
     if (test_fdset_guard() != 0)         return 1;
 
     /* The census is what joey matches: a stale binary prints the old marker. */
-    printf("pouch-hello-sockets: legs=refusals,paths,round-trip,peercred,stdio,ppoll,slots,fdset-guard: exit 0\n");
+    puts(POUCH_CENSUS_SOCKETS);
     return 0;
 }

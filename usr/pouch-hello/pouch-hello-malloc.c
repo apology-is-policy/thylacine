@@ -32,6 +32,7 @@
 // that as a boot regression. fd 1 is a pipe write-end joey relays to the
 // boot-log UART and content-checks for the "exit 0" marker.
 
+#include "pouch-census.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,6 +44,12 @@
 #define LARGE_BYTES   (256u * 1024u)   // > MMAP_THRESHOLD (131052)
 #define LARGE_REGROWN (LARGE_BYTES + 65536u)
 #define SMALL_BYTES   64u
+
+// Zero the stack a callee is about to occupy (see the ualarm leg).
+static __attribute__((noinline)) void stack_poison(void) {
+    volatile char z[512];
+    for (unsigned i = 0; i < sizeof z; i++) z[i] = 0;
+}
 
 static int fail(const char *what) {
     printf("pouch-hello-malloc: FAIL %s\n", what);
@@ -193,14 +200,18 @@ int main(void) {
         if (getdomainname(dn, sizeof dn) != -1 || errno != ENOSYS)
             return fail("getdomainname invented a name");
         // ualarm() read "the time left on the previous alarm" out of a struct
-        // its failed setitimer() never wrote.
+        // its failed setitimer() never wrote. The frame it is about to reuse is
+        // zeroed first, so the unfixed libc answers exactly 0 -- a RED that
+        // names the defect every time, not whatever the stack last held.
+        stack_poison();
         errno = EXDEV;
         if (ualarm(1000, 0) != (useconds_t)-1 || errno != ENOSYS)
             return fail("ualarm invented a remaining time");
 
         // The CPU count is a real figure (the "cpus:" line of /ctl/sched), and
         // the call does not fail, so it must leave errno alone. Read here with
-        // a different parser than libc's.
+        // a different parser than libc's. (On a 1-CPU boot this cannot tell a
+        // real 1 from upstream's fallback 1; it never false-fails there.)
         {
             long want = 0;
             char key[32];
@@ -249,6 +260,6 @@ int main(void) {
     printf("pouch-hello-malloc: realloc-grow large ok (mremap ENOSYS -> malloc+memcpy+free)\n");
     // The census is what joey matches: a stale binary (the bake traps that
     // skip a populate) prints the old marker and must not pass for this one.
-    printf("pouch-hello-malloc: legs=heap,physpages,nprocs,sentinel-wrappers,ualarm,dtablesize: exit 0\n");
+    puts(POUCH_CENSUS_MALLOC);
     return 0;
 }

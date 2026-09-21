@@ -31,6 +31,7 @@
 // fd 1 is a pipe write-end joey relays to the boot log. Cross-compiled
 // with tools/pouch-clang against the pouch sysroot.
 
+#include "pouch-census.h"
 #include <dirent.h>
 #include <stdio.h>
 #include <string.h>
@@ -299,6 +300,6 @@ int main(int argc, char **argv) {
     puts("pouch-hello-fopen: scan OK");
 
     // The census is what joey matches: a stale binary prints the old marker.
-    puts("pouch-hello-fopen: legs=create,append-omode,truncate,excl,unlink,tmpfile,scan: exit 0");
+    puts(POUCH_CENSUS_FOPEN);
     return 0;
 }

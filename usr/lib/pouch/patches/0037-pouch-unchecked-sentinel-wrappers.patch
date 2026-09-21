@@ -52,6 +52,17 @@ The 0032 arm also left open()'s errno behind on its fail-soft return of 1 (a
 call that did not fail reporting ENOENT), and its comment still said /ctl is
 absent pre-pivot, which stopped being true at #57a; both corrected here.
 
+P-4 (the series header's rule: a patch that enters a new directory argues it
+here). By the derivation the series header gives, ONE directory is new with
+this patch: src/legacy (getloadavg, getdtablesize, ulimit). The other three it
+touches were entered earlier -- src/conf by 0032, src/misc by 0021, src/unistd
+by 0006. src/legacy is lower half on the same ground as the rest: each of the
+three is a thin wrapper whose whole body is "call a syscall-backed function and
+return what it filled", and the defect is that the call fails here and the
+wrapper returns the unfilled struct anyway. Nothing above the seam is touched.
+The ualarm leg below zeroes the frame first, so the unfixed libc answers exactly
+0 rather than whatever the stack held.
+
 Device-side pin (same commit, not in this patch file): pouch-hello-malloc
 pre-loads errno with a value none of these calls sets and requires
 sysconf(_SC_OPEN_MAX) and sysconf(_SC_CHILD_MAX) to return -1 with it

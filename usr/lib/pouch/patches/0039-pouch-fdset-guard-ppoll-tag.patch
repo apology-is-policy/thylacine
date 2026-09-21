@@ -27,11 +27,20 @@ Pre-existing, not introduced by this series; not reachable in-tree today
 poll() is unusable.
 
 THE FIX HERE is the honest minimum:
-  - FD_SET / FD_CLR / FD_ISSET check (unsigned)d < FD_SETSIZE and otherwise
-    call __pouch_fdset_oob(), which says why on fd 2 (raw write, no stdio) and
-    abort()s. That is the check glibc's fortified build makes (__fdelt_chk):
-    a loud stop replaces a silent wild store. POSIX lets these macros
-    evaluate their arguments more than once.
+  - FD_SET / FD_CLR / FD_ISSET check that d fits the set and otherwise call
+    __pouch_fdset_oob(), which abort()s. That is the check glibc's fortified
+    build makes (__fdelt_chk): a stop replaces a silent wild store. Like
+    glibc's it is made in the descriptor's FULL width against the set's OWN
+    size -- `(unsigned long long)(d) < 8*sizeof(fd_set)`. The first version
+    wrote `(unsigned)(d) < FD_SETSIZE` (audit r3 F3): a long 0x100000005
+    passed as 5 and then indexed word 67,108,864, and FD_SETSIZE is read in
+    the APPLICATION's macro context, so a port that redefines it to 8192
+    weakened the bound over a 1024-bit set. POSIX lets these macros evaluate
+    their arguments more than once.
+  - __pouch_fdset_oob() says why ONLY when fd 2 is a terminal (audit r3 F4).
+    fd 2 is routinely not stderr here -- a prover is spawned with {0,1};
+    stratumd with no fds, so its fd 2 is its third real kernel handle -- and
+    the first version wrote ~110 bytes of English at that handle's cursor.
   - ppoll() goes through poll(), which translates a tagged fd to its kernel
     poll target and drops negative fds.
 
@@ -39,21 +48,38 @@ THE REAL FIX is not here and is recorded as owed: socket fds that are small
 integers (a placeholder kernel handle per slot with an fd -> slot side table),
 which would let select() work on sockets and retire the tag from every
 fd-consuming call. That is a redesign of 0006 / 0016 -- its own chunk, its own
-audit. Until then a port that select()s on a socket stops with a message that
-names the cause, and one that poll()s works.
+audit. Until then a port that select()s on a socket stops (status 127, and on
+a terminal a line that names the cause). What a port that poll()s gets is
+0041's subject, not this patch's: this one only makes ppoll() REACH the
+kernel's poll with the right handle. The same-day claim that such a port
+"works" was false (audit r3 F1) -- the kernel sampled the server's end of the
+connection for a client and walked no hook list when a reply arrived.
+
+THIS IS THE SERIES' FIRST PATCH INTO A PUBLIC HEADER (audit r3 F8), and the
+consequence is one no other patch here has: the guard is compiled into the
+PORT's objects, not into libc.a. Relinking a port against the new sysroot
+changes nothing; every port that uses FD_SET must be REBUILT to have it. In
+this tree that happens by itself -- a stale sysroot is rebuilt from scratch and
+build_sysroot removes build/pouch, every port's output with it -- which is why
+this is a sentence and not a step. A port built OUTSIDE tools/build.sh against
+an installed sysroot gets no such help. It is also why the macro must be warning-free in
+every language mode a port compiles in -- checked as C99/C11/gnu17 and
+C++11/17/20 under -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wcomma.
 
 The macros keep upstream's value (the assignment / the test) behind a comma:
 `((void)(fits || (oob(d), 0)), <upstream expression>)`. A ?: form would make
 every FD_SET statement in every port an unused-value warning.
 
-Device-side pin (same commit, not in this patch file): pouch-hello-sockets
-ppoll()s a connected socket with the reply on its way and requires POLLIN
-rather than POLLNVAL, and re-runs itself as a child that FD_SETs a socket fd
-and must die with abort's status (127), not return and not fault.
+Device-side pin (not in this patch file): pouch-hello-sockets re-runs itself as
+a child that FD_SETs a socket fd and must die with abort's status (127), not
+return and not fault; and it ppoll()s a connected socket, where a raw tagged fd
+answers POLLNVAL. (That leg's first form asked for POLLIN with the reply "on
+its way" and was decided by a scheduling race over the kernel defect above; it
+is sequenced by barriers now and pins 0041 and the kernel fix as well.)
 
 --- a/include/sys/select.h
 +++ b/include/sys/select.h
-@@ -23,10 +23,21 @@
+@@ -23,10 +23,24 @@
  	unsigned long fds_bits[FD_SETSIZE / 8 / sizeof(long)];
  } fd_set;
  
@@ -63,33 +89,40 @@ and must die with abort's status (127), not return and not fault.
 + * 0x40000000 | slot, so FD_SET(sock, &set) was a store 128 MiB past the set,
 + * in application code, before libc was ever entered (select() refuses such an
 + * fd, but only afterwards). Sockets are waited on with poll(). The check is
-+ * the one glibc's fortified build makes (__fdelt_chk). POSIX lets these macros
-+ * evaluate their arguments more than once. */
++ * the one glibc's fortified build makes (__fdelt_chk), and like it is made in
++ * the descriptor's FULL width against the set's OWN size: `(unsigned)(d)`
++ * would let a long 0x100000005 through as 5, and FD_SETSIZE here would be
++ * whatever the application redefined it to. POSIX lets these macros evaluate
++ * their arguments more than once. */
 +_Noreturn void __pouch_fdset_oob(int);
-+#define __FD_FITS(d) ((unsigned)(d) < FD_SETSIZE)
++#define __FD_FITS(d) ((unsigned long long)(d) < 8*sizeof(fd_set))
 +
  #define FD_ZERO(s) do { int __i; unsigned long *__b=(s)->fds_bits; for(__i=sizeof (fd_set)/sizeof (long); __i; __i--) *__b++=0; } while(0)
 -#define FD_SET(d, s)   ((s)->fds_bits[(d)/(8*sizeof(long))] |= (1UL<<((d)%(8*sizeof(long)))))
 -#define FD_CLR(d, s)   ((s)->fds_bits[(d)/(8*sizeof(long))] &= ~(1UL<<((d)%(8*sizeof(long)))))
 -#define FD_ISSET(d, s) !!((s)->fds_bits[(d)/(8*sizeof(long))] & (1UL<<((d)%(8*sizeof(long)))))
-+#define FD_SET(d, s)   ((void)(__FD_FITS(d) || (__pouch_fdset_oob(d), 0)), (s)->fds_bits[(d)/(8*sizeof(long))] |= (1UL<<((d)%(8*sizeof(long)))))
-+#define FD_CLR(d, s)   ((void)(__FD_FITS(d) || (__pouch_fdset_oob(d), 0)), (s)->fds_bits[(d)/(8*sizeof(long))] &= ~(1UL<<((d)%(8*sizeof(long)))))
-+#define FD_ISSET(d, s) ((void)(__FD_FITS(d) || (__pouch_fdset_oob(d), 0)), !!((s)->fds_bits[(d)/(8*sizeof(long))] & (1UL<<((d)%(8*sizeof(long))))))
++#define FD_SET(d, s)   ((void)(__FD_FITS(d) || (__pouch_fdset_oob((int)(d)), 0)), (s)->fds_bits[(d)/(8*sizeof(long))] |= (1UL<<((d)%(8*sizeof(long)))))
++#define FD_CLR(d, s)   ((void)(__FD_FITS(d) || (__pouch_fdset_oob((int)(d)), 0)), (s)->fds_bits[(d)/(8*sizeof(long))] &= ~(1UL<<((d)%(8*sizeof(long)))))
++#define FD_ISSET(d, s) ((void)(__FD_FITS(d) || (__pouch_fdset_oob((int)(d)), 0)), !!((s)->fds_bits[(d)/(8*sizeof(long))] & (1UL<<((d)%(8*sizeof(long))))))
  
  int select (int, fd_set *__restrict, fd_set *__restrict, fd_set *__restrict, struct timeval *__restrict);
  int pselect (int, fd_set *__restrict, fd_set *__restrict, fd_set *__restrict, const struct timespec *__restrict, const sigset_t *__restrict);
 --- /dev/null
 +++ b/src/select/__pouch_fdset_oob.c
-@@ -0,0 +1,24 @@
+@@ -0,0 +1,30 @@
 +#include <sys/select.h>
 +#include <stdlib.h>
 +#include <string.h>
++#include <unistd.h>
 +#include "syscall.h"
 +
-+/* FD_SET / FD_CLR / FD_ISSET on a descriptor outside [0, FD_SETSIZE): see
-+ * <sys/select.h>. Says why on fd 2 with a raw write (no stdio: this can run
-+ * in a program that links none) and aborts -- the alternative was a silent
-+ * wild store. */
++/* FD_SET / FD_CLR / FD_ISSET on a descriptor that does not fit the set: see
++ * <sys/select.h>. Aborts -- the alternative was a silent wild store -- and
++ * says why ONLY when fd 2 is a terminal. fd 2 is routinely not stderr here (a
++ * prover is spawned with {0,1}; stratumd with no fds at all, so its fd 2 is
++ * its third real kernel handle), and ~110 bytes of English at that handle's
++ * cursor is a second bug. A raw write, no stdio: this can run in a program
++ * that links none. */
 +_Noreturn void __pouch_fdset_oob(int d)
 +{
 +	static const char head[] = "pouch: fd 0x";
@@ -100,9 +133,11 @@ and must die with abort's status (127), not return and not fault.
 +	unsigned u = d;
 +	int i;
 +	for (i = 7; i >= 0; i--, u >>= 4) hex[i] = "0123456789abcdef"[u & 15];
-+	__syscall(SYS_write, 2, head, sizeof head - 1);
-+	__syscall(SYS_write, 2, hex, sizeof hex);
-+	__syscall(SYS_write, 2, tail, sizeof tail - 1);
++	if (isatty(2)) {
++		__syscall(SYS_write, 2, head, sizeof head - 1);
++		__syscall(SYS_write, 2, hex, sizeof hex);
++		__syscall(SYS_write, 2, tail, sizeof tail - 1);
++	}
 +	abort();
 +}
 --- a/src/select/ppoll.c
