@@ -178,12 +178,29 @@ struct Spoor *spoor_clone(struct Spoor *c) {
     //   - qid: the position the new Spoor inherits (walks update this
     //     in-place on the new Spoor afterwards).
     //   - flag / mode: pre-open flags carry over so a walk of a CMSG
-    //     parent inherits message-style semantics. EXCEPT CWALKONLY (#81): it
-    //     is a per-final-handle "navigation-only, no byte I/O" marker, set
-    //     EXPLICITLY at the two T_OPATH handle-creation sites -- it must NOT be
-    //     inherited, or a child CREATED or normally-opened from a T_OPATH parent
-    //     (the FS-delta create-from-O_PATH base pattern) would inherit it and
-    //     reject its own legitimate read/write.
+    //     parent inherits message-style semantics. EXCEPT two per-final-handle
+    //     markers, which a fresh navigation clone must NOT inherit:
+    //       * CWALKONLY (#81): a T_OPATH "navigation-only, no byte I/O" marker,
+    //         set EXPLICITLY at the two handle-creation sites -- inheriting it
+    //         would make a child CREATED or normally-opened from a T_OPATH parent
+    //         (the FS-delta create-from-O_PATH base pattern) reject its own
+    //         legitimate read/write.
+    //       * COPEN (H9): "open() has succeeded on THIS Spoor". It is set by
+    //         dev->open (dev_simple_open), never by a walk -- a clone is a walk
+    //         position that has not been opened, so it must start COPEN-clear
+    //         and let its own dev->open set it. Inheriting it made a COPEN-gated
+    //         close with a GLOBAL side effect fire on the wrong handle: an
+    //         O_PATH re-open of the console-drain fd (SYS_OPEN(fd, ".", O_PATH))
+    //         clone-walks the drain Spoor, and pre-fix the clone carried COPEN +
+    //         qid CONSDRAIN, so closing that navigation handle ran devdev_close's
+    //         cons_drain_close() and DISARMED the live drain under the renderer
+    //         (a re-open then reset reader_busy for a fresh epoch -> the
+    //         single-waiter drain Rendez could take two sleepers, an extinction).
+    //         The sweep (2026-09-16) found devdev's drain the ONLY COPEN-gated
+    //         close whose effect is global rather than keyed on this Spoor's
+    //         identity/aux; stripping COPEN here is the root fix and no consumer
+    //         relies on a clone reading COPEN (the sole reader, dev9p's dir-fid
+    //         donate gate, WANTS COPEN==0 on a never-opened walk clone).
     //   - offset: 0 by default; cloning a positioned Spoor and the
     //     caller wanting the cursor preserved sets it explicitly. We
     //     copy here to match Plan 9 cclone behavior; tests verify.
@@ -196,7 +213,7 @@ struct Spoor *spoor_clone(struct Spoor *c) {
     //     attaches it. Inheriting it would double-free the opened members and
     //     misroute readdir of a plain child through the parent's union.
     nc->qid    = c->qid;
-    nc->flag   = c->flag & ~CWALKONLY;   // #81: never inherit the nav-only marker
+    nc->flag   = c->flag & ~(CWALKONLY | COPEN);   // never inherit the per-final-handle markers (see above)
     nc->mode   = c->mode;
     nc->offset = c->offset;
     nc->aux    = c->aux;
