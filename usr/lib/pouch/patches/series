@@ -4,10 +4,19 @@
 # from the musl tree root. Lines starting with '#' are comments; blank lines
 # are ignored. See README.md in this directory for the discipline.
 #
-# Invariant P-4 (POUCH-DESIGN.md §11): every patch touches ONLY musl's lower
-# half + the syscall seam — never the portable upper half (string / stdio /
-# stdlib / math / ...). See docs/reference/78-pouch.md for the per-directory
-# UPPER / LOWER / SEAM boundary-line inventory.
+# Invariant P-4 (POUCH-DESIGN.md §11): every patch touches ONLY where musl
+# meets the kernel -- the syscall seam and the lower half -- never the portable
+# algorithms above it (string / stdlib / math / stdio's formatting and
+# buffering core). "stdio" is NOT wholly upper half, whatever this header used
+# to say: its fd-facing BACKENDS (__stdio_read/write/close/seek, the openers,
+# tmpfile) are lower half, and 0002 / 0023 / 0035 / 0036 / 0038 patch them.
+#
+# There is no per-directory inventory to review a patch against.
+# docs/reference/78-pouch.md, cited here for years, is an absorbed stub and
+# never held one. The as-built boundary is DERIVED, not kept:
+#   grep -h '^+++ b/' *.patch | cut -d/ -f2-3 | sort | uniq -c
+# A patch that adds a directory to that list is a P-4 review event, argued in
+# its own header and in the owning dossier (vault/system/boundary/pouch-seam/).
 #
 # tools/build.sh sysroot copies third_party/musl/ to build/pouch/musl-src/,
 # applies the patches below in order, then builds the pouch libc out-of-tree.
@@ -83,11 +92,22 @@
 0036-pouch-tmpfile-delete-on-close.patch
 # 0037: B-0 audit r1 F1+F6 -- sysconf(_SC_OPEN_MAX/_SC_CHILD_MAX), getloadavg,
 # getdtablesize, ulimit, getdomainname all read an out-struct a sentinel-parked
-# wrapper never filled (0034's defect, five more times); sysconf's /ctl reads
-# stop being cancellation points.
+# wrapper never filled (0034's defect, five more times; ualarm, the sixth, was
+# round 2's); sysconf's /ctl reads stop being cancellation points.
 0037-pouch-unchecked-sentinel-wrappers.patch
 # 0038: B-0 audit r1 F4 -- the stdio backends handed a pouch SOCKET fd (a
 # libc-side slot tag) to the kernel raw: fdopen(sock) never worked and fclose()
 # stranded the slot (8 of them ends socket()). Map the tag as read/write/close
 # do; ESPIPE for a seek. Pinned by pouch-hello-sockets' stdio + slot-count legs.
 0038-pouch-stdio-socket-fds.patch
+# 0039: B-0 audit r2 F2 -- a socket fd (0x40000000 | slot) does not fit an
+# fd_set: FD_SET(sock) was a store 128 MiB past the set, in application code.
+# FD_SET/FD_CLR/FD_ISSET now abort() on a descriptor outside [0, FD_SETSIZE)
+# (glibc's __fdelt_chk); ppoll() goes through the tag-aware poll(). The real
+# fix -- small-integer socket fds -- is its own chunk, recorded as owed.
+0039-pouch-fdset-guard-ppoll-tag.patch
+# 0040: B-0 audit r2 F9 -- O_APPEND was a one-time seek at open (0030), so a
+# write after a seek landed mid-file. The opens now carry the kernel's OAPPEND
+# omode bit (VIVARIUM 6.27; Stratum appends server side); the seek is kept for
+# ftell() and the first "a+" read.
+0040-pouch-o-append-omode.patch

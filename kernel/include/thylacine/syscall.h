@@ -1640,8 +1640,9 @@ enum {
     //   VIVARIUM.md 6.27). For an append fd the kernel cursor is advisory: the
     //   server ignores the client offset, so a raw phenotype binary (git) gets
     //   correct appends without the kernel or a libc emulating them. (Pouch
-    //   ports still emulate O_APPEND above this layer for the native SYS_RW
-    //   path, which carries no append bit.)
+    //   ports pass the same bit since pouch 0040; until then they emulated
+    //   O_APPEND with one seek at open, so a write after a seek landed
+    //   mid-file.)
     SYS_PWRITE = 86,   // arg: fd (x0), buf (x1), len (x2), off (x3)
 
     // SYS_YIELD() -> 0 (#33)

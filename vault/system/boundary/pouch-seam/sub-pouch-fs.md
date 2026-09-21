@@ -12,6 +12,7 @@ code:
   - usr/lib/pouch/patches/0027-pouch-remove.patch
   - usr/lib/pouch/patches/0030-pouch-fopen-append.patch
   - usr/lib/pouch/patches/0031-pouch-readlink.patch
+  - usr/lib/pouch/patches/0040-pouch-o-append-omode.patch
 audit: hard
 guarded-by: [inv-i28]
 validated-by: [prose, gate-smp]
@@ -19,7 +20,7 @@ locks: []
 abis: []
 design: ["docs/POUCH-DESIGN.md", "docs/LLVM-DESIGN.md", "docs/VIVARIUM.md"]
 created: 2026-08-01
-updated: 2026-08-16
+updated: 2026-09-21
 ---
 ## Purpose
 
@@ -34,8 +35,8 @@ the most: `openat.c` alone has three generations.
 
 - `openat(AT_FDCWD, path, flags[, mode])` — one `SYS_open` (65) through
   the stalk resolver; `O_CREAT` splits into (parent, leaf) +
-  `SYS_WALK_CREATE`; `O_TRUNC` → `+OTRUNC`; `O_APPEND` → a post-open
-  seek-to-END. A real dirfd is `ENOTSUP`; `O_TMPFILE` is `ENOTSUP`.
+  `SYS_WALK_CREATE`; `O_TRUNC` → `+OTRUNC`; `O_APPEND` → the `OAPPEND`
+  omode bit (0040) plus a post-open seek-to-END (0030). A real dirfd is `ENOTSUP`; `O_TMPFILE` is `ENOTSUP`.
 - `fstat` → `SYS_FSTAT` (50); `stat`/`lstat`/`fstatat(path)` →
   `SYS_STAT` (88), the POUNCE walk-query; `fstatat(fd,"",AT_EMPTY_PATH)`
   delegates to `fstat`. `lstat == stat` (no symlinks, G11).
@@ -153,16 +154,29 @@ every failure to a flat `-1` with no distinct `EISDIR` (the #102-class
 errno-loss), so 0027 dispatches on an `lstat` instead: a directory →
 `rmdir`, anything else → `unlink`.
 
-**`O_APPEND` has no kernel mode.** An fd carries a plain cursor and
-`SYS_WALK_OPEN` has no append bit, so musl's `__fdopen` asks for it via
-`fcntl(F_SETFL)` — which pouch answers `ENOSYS`, leaving the cursor at 0
-and making every `fopen("a")` write CLOBBER the file at offset 0. 0030
-seeks to END once at open, and does it in a helper every successful-open
-exit routes through (`pouch_open_ret`) precisely because `openat` has
-THREE such exits — create-ok, EEXIST-fallback-open, plain-open — and a
-per-site fix would silently miss one. Single-writer append is thereby
-correct; concurrent appenders may still interleave, and that atomicity is
-documented-absent rather than silently claimed.
+**`O_APPEND`, in two halves, and the history is why.** musl's `__fdopen`
+asks for append via `fcntl(F_SETFL)` — which pouch answers `ENOSYS`,
+leaving the cursor at 0 and making every `fopen("a")` write CLOBBER the
+file at offset 0. 0030 (2026-07-27) seeks to END once at open, in a helper
+every successful-open exit routes through (`pouch_open_ret`) precisely
+because `openat` has THREE such exits — create-ok, EEXIST-fallback-open,
+plain-open — and a per-site fix would silently miss one. Its comment said
+the kernel had no append mode and that the real fix needed "a v1.x omode
+bit". That bit arrived five weeks later with VIVARIUM 6.27 — `OAPPEND`
+(0x40), inside `SYS_WALK_OPEN_OMODE_VALID`, forwarded by dev9p to the 9P
+open, honoured by Stratum positioning EVERY write at EOF server-side —
+and nobody told Pouch: raw Linux binaries got correct appends while ports
+stayed on the one-time seek, so `fopen("a+")`, a read or an `fseek`, then
+a write landed MID-FILE, over existing bytes (audit B-0 r2 F9). 0040
+passes the bit on all three opens and KEEPS the seek, because for an
+append fd the kernel cursor is advisory and the seek is what makes
+`ftell()` and the first read of an `"a+"` stream start at EOF as they have
+since 0030. A Dev with no append notion ignores the bit (each switches on
+`omode & 3`). Two costs, stated: dev9p keeps an append fd off the Larder's
+write-behind path, so each flushed append is one RPC; and after an append
+write that followed a seek the cursor is seek-position + count, not the
+new EOF as on Linux. `/bin/pouch-hello-fopen` pins it (`"a+"`, seek 0,
+write, the bytes must follow the file's last line).
 
 **`readlink` is the sharpest translation in the series.** The seam parked
 `__NR_readlinkat` at the sentinel, which is the *wrong* answer rather
@@ -225,9 +239,10 @@ in-place translation pass.
 
 ## Prosecution
 
-- Every successful-open exit must route through `pouch_open_ret`, or
-  `O_APPEND` silently clobbers on that path (the reason the fix is a
-  helper and not three call-site edits).
+- Every successful-open exit must route through `pouch_open_ret`, and the
+  `OAPPEND` bit must be OR-ed into `omode` BEFORE the first of the three
+  opens, or `O_APPEND` silently degrades on that path (the reason both
+  halves sit at one place each and not at three call sites).
 - `__pouch_open_parent`'s parent fd must be closed on EVERY arm,
   including the EEXIST fallback and both `renameat` endpoints.
 - The `readlink` `/proc` whitelist must stay closed and strict (no `//`

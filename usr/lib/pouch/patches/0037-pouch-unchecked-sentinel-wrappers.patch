@@ -1,5 +1,6 @@
-B-0 (Boosty) audit round 1, F1 + F6 -- five libc functions stop reporting
-uninitialised stack, and sysconf's /ctl reads stop being cancellation points.
+B-0 (Boosty) audit round 1, F1 + F6 (+ round 2, F1) -- six libc functions stop
+reporting uninitialised stack, and sysconf's /ctl reads stop being
+cancellation points.
 
 0034 fixed sysconf(_SC_PHYS_PAGES): upstream called a sentinel-parked wrapper
 (__lsysinfo) without checking it and computed from the struct it never filled.
@@ -15,18 +16,26 @@ is the 0xFFFF ENOSYS sentinel, ignores the failure, and reads the out-struct:
   ulimit()          getrlimit() unchecked -> garbage
   getdomainname()   uname() unchecked -> strlen/strcpy over an uninitialised
                     struct utsname
+  ualarm()          setitimer() unchecked -> "time left on the previous alarm"
+                    read from an it_old nobody wrote. ROUND 2 found this one:
+                    round 1's list said "alarm/ualarm return 0", true of
+                    alarm() only because upstream wrote `old = { 0 }` there.
 
 Why my own sweep missed them, recorded because the method is what gets reused:
 I grepped the patched tree for statement-position `__syscall(`. These are
 unchecked WRAPPER calls -- which is exactly what 0034's bug was. The sweep that
 finds them is "every libc-internal call to a wrapper over a sentinel whose
-return value is ignored".
+return value is ignored". Round 2 ran exactly that over the whole patched src/
+(a named-wrapper pass and a generic pass over the 213 always-failing wrappers):
+the only out-struct readers left were ualarm.c and alarm.c.
 
 Answers, each the honest one its API allows:
   sysconf       -1 with errno as the caller left it (POSIX: indeterminate)
   getloadavg    -1 (its documented failure)
   ulimit        -1
   getdomainname -1 (uname already set errno)
+  ualarm        -1 with the wrapper's ENOSYS (glibc's answer when the timer
+                cannot be set), and it_old is zero-initialised
   getdtablesize 1024 -- the one MIRROR here. The API has no error channel,
                 INT_MAX would turn every close-all-fds loop into a hang, and
                 the kernel's per-Proc handle table is PROC_HANDLE_MAX = 1024.
@@ -46,8 +55,10 @@ absent pre-pivot, which stopped being true at #57a; both corrected here.
 Device-side pin (same commit, not in this patch file): pouch-hello-malloc
 pre-loads errno with a value none of these calls sets and requires
 sysconf(_SC_OPEN_MAX) and sysconf(_SC_CHILD_MAX) to return -1 with it
-untouched, getloadavg / ulimit(UL_GETFSIZE) / getdomainname to return -1, and
-getdtablesize() to match the measured table.
+untouched, getloadavg / ulimit(UL_GETFSIZE) / getdomainname to return -1 (the
+last with errno == ENOSYS: on the unfixed libc it also returned -1 whenever the
+stack residue held no NUL, but with EINVAL), ualarm() to return (unsigned)-1
+with ENOSYS, and getdtablesize() to match the measured table.
 
 --- a/src/conf/sysconf.c
 +++ b/src/conf/sysconf.c
@@ -166,3 +177,25 @@ getdtablesize() to match the measured table.
  	if (!len || strlen(temp.domainname) >= len) {
  		errno = EINVAL;
  		return -1;
+--- a/src/unistd/ualarm.c
++++ b/src/unistd/ualarm.c
+@@ -2,12 +2,17 @@
+ #include <unistd.h>
+ #include <sys/time.h>
+ 
++/* pouch: setitimer is a sentinel here, so the call fails WITHOUT writing
++ * it_old, and upstream then returned that uninitialised struct as "the time
++ * left on the previous alarm". Report the failure instead (errno is the
++ * wrapper's ENOSYS); -1 is what glibc answers when the timer cannot be set.
++ * alarm() beside this file is saved only by its `old = { 0 }`. */
+ unsigned ualarm(unsigned value, unsigned interval)
+ {
+ 	struct itimerval it = {
+ 		.it_interval.tv_usec = interval,
+ 		.it_value.tv_usec = value
+-	}, it_old;
+-	setitimer(ITIMER_REAL, &it, &it_old);
++	}, it_old = { 0 };
++	if (setitimer(ITIMER_REAL, &it, &it_old)) return -1;
+ 	return it_old.it_value.tv_sec*1000000 + it_old.it_value.tv_usec;
+ }

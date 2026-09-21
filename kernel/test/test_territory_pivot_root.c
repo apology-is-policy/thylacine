@@ -54,13 +54,35 @@
 //     array: after the shed the search order is still member 0, member 1.
 //   territory.shed_clone_before_pivot_unaffected
 //     I-1: a child cloned before the parent pivots keeps its whole table.
+//   territory.shed_union_root_keeps_point_entries
+//     A root that is a UNION handle (member[0]'s identity + the mount point in
+//     union_snap) keeps the entries keyed at the point, which lives in ANOTHER
+//     tree. The control one variable away -- the same identity with no snap --
+//     sheds them. (Audit r1 F1; the spec's buggy_no_union_seed.)
+//   territory.shed_drops_nested_orphan
+//     An orphan keyed in a tree that hangs off the OLD tree (not in the old
+//     root's own instance) goes too: the rule is "unreachable from the new
+//     root", not "keyed in the old root".
+//   territory.shed_full_table_boundary
+//     32 chained entries under a union root: reach[] lands exactly on its
+//     capacity (2 seeds + 32 sources), every entry survives, nothing overflows.
+//   territory.shed_releases_mp_path_once
+//     Mount points with REAL Paths: a shed entry's mp_path ref is released
+//     exactly once (a NULL mp_path makes path_unref vacuous), witnessed by the
+//     ref count and by the allocator balance.
+//   territory.shed_initial_chroot_and_root_as_source
+//     The first chroot (old root NULL) sheds like any other, and a new root
+//     that is itself the SOURCE of a shed entry keeps exactly its root ref.
 
 #include "test.h"
 
 #include <thylacine/dev.h>
+#include <thylacine/path.h>
 #include <thylacine/spoor.h>
 #include <thylacine/territory.h>
 #include <thylacine/types.h>
+
+#include "../../mm/slub.h"       // kmalloc: a point-only union_snap
 
 extern struct Dev devnone;
 extern struct Dev devenv;
@@ -77,6 +99,11 @@ void test_territory_shed_per_walker_dev_matched_on_dc(void);
 void test_territory_shed_same_root_is_a_noop(void);
 void test_territory_shed_preserves_union_order(void);
 void test_territory_shed_clone_before_pivot_unaffected(void);
+void test_territory_shed_union_root_keeps_point_entries(void);
+void test_territory_shed_drops_nested_orphan(void);
+void test_territory_shed_full_table_boundary(void);
+void test_territory_shed_releases_mp_path_once(void);
+void test_territory_shed_initial_chroot_and_root_as_source(void);
 
 // =============================================================================
 // pivot_root_smoke
@@ -412,4 +439,173 @@ void test_territory_shed_clone_before_pivot_unaffected(void) {
     territory_unref(parent);
     TEST_EXPECT_EQ(src->ref, 1, "all entry refs gone");
     spoor_unref(root_a); spoor_unref(root_b); spoor_unref(mp_a); spoor_unref(src);
+}
+
+// A Spoor with `identity`'s instance that carries `point` as a POINT-ONLY union
+// snapshot -- what an O_PATH open of a union directory yields (stalk.c
+// union_snap_point_only). spoor_free_internal releases the snap and its point
+// ref. `point` NULL = the control: same identity, no snap.
+static struct Spoor *shed_union_handle(u32 devno, struct Spoor *point) {
+    struct Spoor *s = shed_spoor(devno, 0);
+    if (!s || !point) return s;
+    struct union_snap *snap = kmalloc(sizeof(*snap), 0);
+    if (!snap) { spoor_unref(s); return NULL; }
+    snap->point = point;
+    spoor_ref(point);
+    snap->n = 0;
+    s->union_snap = snap;
+    return s;
+}
+
+// The default image's /bin in miniature: a point in A's tree with two members,
+// then a chroot INTO the union. Returns the surviving entry count.
+static int shed_union_root_survivors(bool with_snap) {
+    struct Territory *p = territory_alloc();
+    struct Spoor *root_a = shed_spoor(1, 0);
+    struct Spoor *point  = shed_spoor(1, 50);    // /bin, a dir in A's tree
+    struct Spoor *m0 = shed_spoor(3, 0), *m1 = shed_spoor(4, 0);
+    struct Spoor *mp_w = shed_spoor(9, 10), *w = shed_spoor(8, 0);   // an orphan
+    struct Spoor *uroot = shed_union_handle(3, with_snap ? point : NULL);
+    if (!p || !root_a || !point || !m0 || !m1 || !mp_w || !w || !uroot) return -1;
+
+    int n = -1;
+    if (territory_chroot(p, root_a) == 0 &&
+        mount(p, m0, point, 0) == 0 &&
+        mount(p, w,  mp_w,  0) == 0 &&
+        mount(p, m1, point, MAFTER) == 0 &&
+        territory_chroot(p, uroot) == 0) {
+        n = territory_nmounts(p);
+        if (with_snap) {
+            // Not just counted: the members are still found AT THE POINT, in
+            // order -- which is what stalk_union_child asks for.
+            struct Spoor *g0 = mount_member_at(p, point, 0, NULL);
+            struct Spoor *g1 = mount_member_at(p, point, 1, NULL);
+            if (g0 != m0 || g1 != m1) n = -2;
+            if (g0) spoor_clunk(g0);
+            if (g1) spoor_clunk(g1);
+        }
+    }
+
+    territory_unref(p);
+    spoor_unref(uroot);
+    spoor_unref(root_a); spoor_unref(point); spoor_unref(m0); spoor_unref(m1);
+    spoor_unref(mp_w);   spoor_unref(w);
+    return n;
+}
+
+void test_territory_shed_union_root_keeps_point_entries(void) {
+    TEST_EXPECT_EQ(shed_union_root_survivors(true), 2,
+        "a union root keeps both entries keyed at its point; the orphan goes");
+    // The control: the same root identity WITHOUT the snap reaches nothing, so
+    // everything is shed -- otherwise the arm above would also be satisfied by
+    // a shed that keeps everything.
+    TEST_EXPECT_EQ(shed_union_root_survivors(false), 0,
+        "without the point the same identity reaches no entry");
+}
+
+void test_territory_shed_drops_nested_orphan(void) {
+    struct Territory *p = territory_alloc();
+    struct Spoor *root_a = shed_spoor(1, 0), *root_b = shed_spoor(2, 0);
+    struct Spoor *mp_a = shed_spoor(1, 10), *z = shed_spoor(6, 0);   // Z in A
+    struct Spoor *mp_z = shed_spoor(6, 60), *q = shed_spoor(7, 0);   // Q in Z
+    TEST_ASSERT(p && root_a && root_b && mp_a && z && mp_z && q, "alloc");
+
+    TEST_EXPECT_EQ(territory_chroot(p, root_a), 0, "chroot to A");
+    TEST_EXPECT_EQ(mount(p, z, mp_a, 0), 0, "mount Z in A's tree");
+    TEST_EXPECT_EQ(mount(p, q, mp_z, 0), 0, "mount Q inside Z's tree");
+    TEST_EXPECT_EQ(territory_pivot_root(p, root_b), 0, "pivot to B");
+    TEST_EXPECT_EQ(territory_nmounts(p), 0,
+        "Q is keyed in Z's instance, not the old root's, and is unreachable all the same");
+    TEST_EXPECT_EQ(z->ref, 1, "Z released once");
+    TEST_EXPECT_EQ(q->ref, 1, "Q released once");
+
+    territory_unref(p);
+    spoor_unref(root_a); spoor_unref(root_b); spoor_unref(mp_a); spoor_unref(z);
+    spoor_unref(mp_z);   spoor_unref(q);
+}
+
+void test_territory_shed_full_table_boundary(void) {
+    struct Territory *p = territory_alloc();
+    struct Spoor *root_a = shed_spoor(1, 0);
+    struct Spoor *stale_pt = shed_spoor(90, 1);   // a point in its own tree: seed 2
+    struct Spoor *uroot = shed_union_handle(100, stale_pt);
+    struct Spoor *mp[PGRP_MAX_MOUNTS], *src[PGRP_MAX_MOUNTS];
+    TEST_ASSERT(p && root_a && stale_pt && uroot, "alloc");
+
+    TEST_EXPECT_EQ(territory_chroot(p, root_a), 0, "chroot to A");
+    // Entry i grafts tree 101+i at a directory of tree 100+i: a chain hanging
+    // off the new root, every source a NEW instance.
+    for (int i = 0; i < PGRP_MAX_MOUNTS; i++) {
+        mp[i]  = shed_spoor(100 + (u32)i, 7);
+        src[i] = shed_spoor(101 + (u32)i, 0);
+        TEST_ASSERT(mp[i] && src[i], "alloc chain link");
+        TEST_EXPECT_EQ(mount(p, src[i], mp[i], 0), 0, "chain link installs");
+    }
+    TEST_EXPECT_EQ(territory_nmounts(p), PGRP_MAX_MOUNTS, "the table is full");
+
+    TEST_EXPECT_EQ(territory_pivot_root(p, uroot), 0,
+        "pivot: the closure holds 2 seeds + 32 sources, exactly its capacity");
+    TEST_EXPECT_EQ(territory_nmounts(p), PGRP_MAX_MOUNTS, "every link is reachable and kept");
+    struct Spoor *last = mount_lookup(p, mp[PGRP_MAX_MOUNTS - 1], NULL);
+    TEST_EXPECT_EQ(last == src[PGRP_MAX_MOUNTS - 1], true, "the deepest link still crosses");
+    if (last) spoor_clunk(last);
+
+    territory_unref(p);
+    for (int i = 0; i < PGRP_MAX_MOUNTS; i++) { spoor_unref(mp[i]); spoor_unref(src[i]); }
+    spoor_unref(uroot); spoor_unref(stale_pt); spoor_unref(root_a);
+}
+
+void test_territory_shed_releases_mp_path_once(void) {
+    u64 pa0 = path_total_allocated(), pf0 = path_total_freed();
+    struct Path *rootp = path_make_root();
+    TEST_ASSERT(rootp != NULL, "path_make_root");
+
+    struct Territory *p = territory_alloc();
+    struct Spoor *root_a = shed_spoor(1, 0), *root_b = shed_spoor(2, 0);
+    struct Spoor *mp_a = shed_spoor(1, 10), *mp_b = shed_spoor(2, 20);
+    struct Spoor *gone = shed_spoor(5, 0),  *kept = shed_spoor(6, 0);
+    TEST_ASSERT(p && root_a && root_b && mp_a && mp_b && gone && kept, "alloc");
+    mp_a->path = path_addelem(rootp, "old", 3);     // owned by the Spoor
+    mp_b->path = path_addelem(rootp, "new", 3);
+    TEST_ASSERT(mp_a->path && mp_b->path, "path_addelem");
+
+    TEST_EXPECT_EQ(territory_chroot(p, root_a), 0, "chroot to A");
+    TEST_EXPECT_EQ(mount(p, gone, mp_a, 0), 0, "mount in A's tree");
+    TEST_EXPECT_EQ(mount(p, kept, mp_b, 0), 0, "mount in B's tree");
+    TEST_EXPECT_EQ(mp_a->path->ref, 2, "mp_path ref = Spoor + entry");
+    TEST_EXPECT_EQ(mp_b->path->ref, 2, "likewise");
+
+    TEST_EXPECT_EQ(territory_pivot_root(p, root_b), 0, "pivot to B");
+    TEST_EXPECT_EQ(territory_nmounts(p), 1, "one shed, one kept");
+    TEST_EXPECT_EQ(mp_a->path->ref, 1, "the shed entry released its mp_path ref exactly once");
+    TEST_EXPECT_EQ(mp_b->path->ref, 2, "the survivor's moved with it, untouched");
+
+    territory_unref(p);
+    spoor_unref(root_a); spoor_unref(root_b); spoor_unref(mp_a); spoor_unref(mp_b);
+    spoor_unref(gone);   spoor_unref(kept);
+    path_unref(rootp);
+    TEST_EXPECT_EQ(path_total_allocated() - pa0, path_total_freed() - pf0,
+        "every Path allocated here was freed: no leaked mp_path ref");
+}
+
+void test_territory_shed_initial_chroot_and_root_as_source(void) {
+    struct Territory *p = territory_alloc();
+    struct Spoor *root_b = shed_spoor(2, 0);
+    struct Spoor *mp_far = shed_spoor(9, 10);     // a tree B cannot reach
+    struct Spoor *mp_b   = shed_spoor(2, 20), *src = shed_spoor(5, 0);
+    TEST_ASSERT(p && root_b && mp_far && mp_b && src, "alloc");
+
+    // Mounts exist BEFORE any root does; B itself is the source of one of them.
+    TEST_EXPECT_EQ(mount(p, root_b, mp_far, 0), 0, "B grafted somewhere unreachable");
+    TEST_EXPECT_EQ(mount(p, src,    mp_b,   0), 0, "a mount in B's own tree");
+    TEST_EXPECT_EQ(root_b->ref, 2, "B: test + entry");
+
+    TEST_EXPECT_EQ(territory_chroot(p, root_b), 0, "the FIRST chroot (old root NULL)");
+    TEST_EXPECT_EQ(territory_nmounts(p), 1, "it sheds like any other swap");
+    TEST_EXPECT_EQ(root_b->ref, 2, "B: test + root (the shed entry's ref went, the root's came)");
+    TEST_EXPECT_EQ(src->ref, 2, "the reachable entry is intact");
+
+    territory_unref(p);
+    TEST_EXPECT_EQ(root_b->ref, 1, "destroy drops the root ref");
+    spoor_unref(root_b); spoor_unref(mp_far); spoor_unref(mp_b); spoor_unref(src);
 }

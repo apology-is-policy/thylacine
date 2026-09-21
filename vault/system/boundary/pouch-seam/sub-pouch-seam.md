@@ -141,8 +141,10 @@ The **direct arm** (`len > buf_size`, or any unbuffered stream) reads
 straight into the caller, and needs no pushback slot because `fread` never
 ungets, `ungetc` stores its byte itself, and an unbuffered stream takes
 `__shgetc`'s `buf[-1]` path. Readahead survives exactly where upstream's
-does: `fread`'s loop calls `__toread` (which drops the buffer) only after
-a SHORT count, and a short count leaves no surplus. The two callers of
+does: `fread`'s loop calls `__toread` (which drops the buffer) before
+EVERY `f->read`, the first included — but it gets there only once the
+buffer is exhausted, and a second pass happens only after a SHORT count,
+which leaves no surplus. So nothing buffered is ever dropped. The two callers of
 `f->read` are `__uflow` (len 1) and `fread` (len = remainder); there are
 no others.
 
@@ -203,9 +205,19 @@ surface, which is recorded honestly rather than papered over:
 - **P-3** structurally for un-retargeted calls (`ENOSYS`); by
   construction for retargeted ones (each lower-half patch owns its own
   errno fidelity).
-- **P-4** by the UPPER/LOWER/SEAM inventory in
-  `docs/reference/78-pouch.md`: a patch that must touch an UPPER entry is
-  by definition off the boundary line.
+- **P-4** by per-patch review, and by nothing else. This section, the MOC
+  and the series header all said "against the UPPER/LOWER/SEAM inventory in
+  `docs/reference/78-pouch.md`" — that file is an absorbed stub and never
+  held one; the inventory exists nowhere (audit B-0 r2 F7g). The as-built
+  boundary is therefore DERIVED rather than kept:
+  `grep -h '^+++ b/' usr/lib/pouch/patches/*.patch | cut -d/ -f2-3 | sort | uniq -c`.
+  A patch that adds a directory to that list is a P-4 review event, argued
+  in its header. "stdio" is not wholly upper half: its fd-facing BACKENDS
+  (`__stdio_read/write/close/seek`, the openers, `tmpfile`) are where libc
+  meets the kernel, and 0002 / 0023 / 0035 / 0036 / 0038 patch them; the
+  formatting and buffering core above them is untouched. 0036 / 0037
+  entered `src/conf`, `src/legacy`, `src/misc`, `src/unistd`; 0039
+  `include/sys` and `src/select`.
 
 ## Error paths
 
@@ -288,8 +300,39 @@ cache it, and nothing hot asks.
   through `f->close` (close first, then unlink), and streams still open at
   a normal `exit()` are swept by `__stdio_exit` through a weak hook. The
   prover writes three pages, reads them back to a clean EOF over the wire,
-  and COUNTS `tmpfile_*` names before / after `fclose` / after a
-  self-respawned child exits with a tmpfile still open.
+  and COUNTS `tmpfile_*` names before / WHILE OPEN (the positive control:
+  before + 1, or the counter is blind) / after `fclose` / after a
+  self-respawned child — which returns 42, so the parent knows the arm ran
+  — exits with a tmpfile still open.
+  **The locking was wrong in the first version, twice (audit r2 F3 + F4).**
+  It held `tmp_lock` across close + unlink — four 9P round trips, each a
+  note-delivery point — so a handler calling `exit()` there met its own
+  lock in a threaded program and, single-threaded, found the node unlisted
+  with the name still on disk. And its exit sweep took the lock and kept
+  it, so a thread that had just `open()`ed blocked for ever holding a name
+  the sweep never saw, under a comment saying that could not happen. Now
+  the lock is never held across a syscall: `fclose()` closes and unlinks
+  while the node is STILL LISTED and unlists last; the sweep sets an
+  `exiting` flag, drops the lock, and walks a list that is frozen from
+  then on (`fclose()` leaves its node, `tmpfile()` removes its own new file
+  instead of listing it). `tmpfile.o` also references
+  `__stdio_exit_needed` itself — otherwise only `__toread.o` /
+  `__towrite.o` pull it, and a program using `tmpfile()` through `fileno()`
+  alone exited through the dummy (r2 F5; verified by `llvm-nm`, which is
+  the only witness: any prover that prints links `__towrite.o`). It is
+  best effort by nature — `_exit`, `abort`, a kill, or an `exit()` landing
+  between `open()` returning and the listing leave the name — and the
+  backstop is a boot-time `/tmp` sweep, OWED.
+  **Couplings for whoever wires the missing calls** (r2 F8): `fork` — a
+  child would inherit the list and its `exit()` would unlink the PARENT's
+  live files (needs a child-side reset + `tmp_lock` in the atfork set);
+  `dup` — make's `os_anontmp` is `tmpfile()` → `dup(fileno)` → `fclose`,
+  which would delete the file under the fd make keeps; the name is
+  re-resolved at `fclose()`, so a pivot or a bind over `/tmp` in between
+  unlinks in the wrong place; and `getdtablesize()` answers 1024 while
+  `sysconf(_SC_OPEN_MAX)` answers -1 — deliberately: the first has no error
+  channel and a close-all loop needs a bound, the second has one and the
+  kernel exposes no limit to read.
 - `__stdio_read` must keep BOTH properties: one `SYS_read` per call, and
   the returned byte at `rpos[-1]` after every buffered-arm read — at EVERY
   buffer size, including one byte. `pouch-hello-fopen`'s `scan` leg pins
@@ -337,8 +380,15 @@ per-call errno approximation built on top of it.
   `uname` fails VISIBLY (`-1`/`ENOSYS`): `umask()` returns `0xFFFFFFFF` as the
   "previous mask" from an API that cannot fail and never sets the mask, and
   `times()` returns `(clock_t)-38` -- not the documented `-1` -- with `*tms`
-  untouched. The audit round's full list of this class (F1, F8) is in
-  `memory/audit_pouch_0033_0035_closed_list.md`.
+  untouched. The audit rounds' full list of this class (r1 F1 + F8, r2 F1)
+  is in `memory/audit_pouch_0033_0035_closed_list.md`. Round 2 found a
+  SIXTH out-struct reader round 1's list had waved through: `ualarm()`
+  returned the `it_old` a failed `setitimer` never wrote (`alarm()` beside
+  it is saved only by upstream's `old = { 0 }`). It now answers
+  `(unsigned)-1` / `ENOSYS`, in 0037. That round swept the whole patched
+  `src/` — a named-wrapper pass plus a generic pass over the 213
+  always-failing wrappers — and those two files were the only out-struct
+  readers left.
 - **stdio input reads ahead since 0035**, as on every other libc, and
   everything that follows from that is now true here. A program that mixes
   `FILE` reads with raw reads of the same fd, or hands the fd to a child
@@ -367,12 +417,18 @@ per-call errno approximation built on top of it.
   takes the whole type-ahead into the first reader's `FILE`, so a line
   typed ahead for the NEXT program is consumed by this one. The defect is
   in the tty layers (both audit surfaces), tracked as its own item.
-- `usr/pouch-hello/` is otherwise unclaimed (20 of its 23 files have no
-  dossier; [[sub-pouch-thread]] claims `pouch-hello-threads.c`); this one claims the two provers whose new legs pin mechanisms
-  described here, not the directory.
+- `usr/pouch-hello/` is otherwise unclaimed — run `quaestor owner
+  usr/pouch-hello/*` for the count rather than trusting one typed here
+  (it was wrong two rounds running). [[sub-pouch-thread]] claims
+  `pouch-hello-threads.c` and [[sub-pouch-net]] `pouch-hello-sockets.c`;
+  this one claims the two provers whose new legs pin mechanisms described
+  here, not the directory. joey matches each prover on a LEG CENSUS
+  (`<name>: legs=a,b,c: exit 0`), not on `exit 0` alone, so a stale binary
+  — the bake traps that skip a populate — cannot pass for a new one.
 - **`docs/REFERENCE.md`'s pouch row (absorbed) says "seven patches" and
-  "Ten pouch binaries"** — the series is 31 patches and the ramfs bakes
-  24 pouch binaries. The row was written at sub-chunk 14 and never
+  "Ten pouch binaries"** — both long stale (count the series with
+  `grep -vc '^#\|^$' usr/lib/pouch/patches/series`, never from a number
+  typed here: this caveat said 31 while the series was 38). The row was written at sub-chunk 14 and never
   re-counted.
 - **`78-pouch.md` (absorbed) carried a caveat asserting the opposite of
   the patch it documents**: "`exit` and `exit_group` both terminate the

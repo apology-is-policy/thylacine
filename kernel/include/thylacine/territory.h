@@ -56,14 +56,15 @@ struct Path;   // <thylacine/path.h> -- #66 namespace name retention (I-33)
 // eventual ramfs + /proc + /dev + /net binds.
 #define PGRP_MAX_BINDS  8
 
-// Mount-table size. A login session holds 17 entries (measured 2026-09-21: 15
-// that joey grafts onto the pivoted disk root, + login's /home/<user> and /tmp
-// binds), and a container runner adds up to ~10 recipe mounts on top. The
+// Mount-table size. A shell in a login session holds 17 entries (measured
+// 2026-09-21: 15 that joey grafts onto the pivoted disk root, login's
+// /home/<user>, and ut's /tmp bind), and a container runner adds up to 11 recipe
+// mounts on top (/dio, eight fixed binds, /net and /dev/tty when granted). The
 // table is deep-copied per territory_clone (each entry a spoor_ref), so the cap
 // stays modest: ~1.3 KiB per spawn.
 //
-// History worth keeping: the cap went 12 -> 16 -> 20 -> 32, every time for the
-// SAME cause. A root swap left the previous generation's entries in the table
+// History worth keeping: the cap went 8 -> 12 -> 16 -> 20 -> 32, every time for
+// the SAME cause. A root swap left the previous generation's entries in the table
 // -- unreachable, and un-unmountable because unmount takes a resolved mount
 // point -- so the boot generation rode along in every Proc (#80). At 32 the
 // session's 23 plus a container's 10 no longer fit and `viv run` broke. The fix
@@ -613,12 +614,13 @@ int territory_chroot(struct Territory *territory, struct Spoor *source);
 // if the caller has no current root_spoor. Use territory_chroot for
 // the initial-chroot case (kproc's boot-time setup).
 //
-// Spec posture: same shape as `specs/territory.tla::Chroot(p, s)` --
-// the formal state transition is identical to chroot under the
-// renamed action. No new spec module per the 2026-05-23 spec-to-code
-// suspension; the no-cycle invariant (I-3) holds trivially because
-// pivot does not touch the bind graph, and refcount consistency
-// (§9.6.6) holds via the matched bump + drop pattern.
+// Spec posture: the ROOT swap has the shape of `specs/territory.tla::Chroot(p,
+// s)` under a renamed action; the no-cycle invariant (I-3) holds trivially
+// because pivot adds no edge, and refcount consistency (§9.6.6) holds via the
+// matched bump + drop pattern. The MOUNT-TABLE half does not refine that
+// action (it is `UNCHANGED bindings` there): the shed is
+// `specs/territory_shed.tla::Pivot`, and no module models refcounts together
+// with the shed -- kernel tests + the audit carry that.
 //
 // Mount table across the swap (ARCH 9.6.10, #80): in the same ns_lock hold
 // that installs the new root, every mount entry whose mount point lies in a

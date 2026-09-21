@@ -1155,6 +1155,14 @@ bool mount_noexec_covers(struct Territory *territory, int dc, u32 devno) {
 // that makes it conservative -- it may keep an entry no walk reaches, and never
 // drops one a walk can. A Dev whose walk does not preserve devno
 // (Dev.devno_per_walker: devenv) is matched on dc alone, conservative again.
+//
+// One Spoor is consulted at the base WITHOUT having been walked to: a union
+// root's mount point. An O_PATH open of a union directory has member[0]'s
+// identity and carries the point in union_snap, and stalk routes every first
+// component from such a base through the entries keyed AT THE POINT
+// (union_base = base->union_snap->point). The point lives in the tree the union
+// was mounted in, so its instance is a second seed; without it the shed drops
+// the union's own entries and every name under the new root is ENOENT.
 struct shed_inst { int dc; u32 devno; bool any_devno; };
 
 static bool shed_has(const struct shed_inst *r, int n, int dc, u32 devno) {
@@ -1163,13 +1171,15 @@ static bool shed_has(const struct shed_inst *r, int n, int dc, u32 devno) {
     return false;
 }
 
-// Caller has checked !shed_has(). Capacity: one instance per mount entry plus
-// the root, and each add is preceded by a miss, so n <= nmounts + 1.
-static void shed_add(struct shed_inst *r, int *n, int dc, u32 devno) {
-    struct Dev *d = dev_lookup_by_dc(dc);
-    r[*n].dc        = dc;
-    r[*n].devno     = devno;
-    r[*n].any_devno = d && d->devno_per_walker;
+#define SHED_REACH_MAX (PGRP_MAX_MOUNTS + 2)
+
+// Caller has checked !shed_has(). Capacity: the two seeds plus one instance per
+// mount entry, and each add is preceded by a miss, so n <= nmounts + 2.
+static void shed_add(struct shed_inst *r, int *n, const struct Spoor *s) {
+    if (*n >= SHED_REACH_MAX) extinction("territory shed: reach[] overflow");
+    r[*n].dc        = s->dc;
+    r[*n].devno     = s->devno;
+    r[*n].any_devno = s->dev && s->dev->devno_per_walker;
     (*n)++;
 }
 
@@ -1184,9 +1194,15 @@ static void shed_add(struct shed_inst *r, int *n, int dc, u32 devno) {
 static int territory_shed_unreachable_locked(struct Territory *t,
                                              const struct Spoor *root,
                                              struct Spoor **clunk) {
-    struct shed_inst reach[PGRP_MAX_MOUNTS + 1];
+    struct shed_inst reach[SHED_REACH_MAX];
     int nr = 0;
-    shed_add(reach, &nr, root->dc, root->devno);
+    shed_add(reach, &nr, root);
+    // union_snap is set once before the Spoor is published and freed with it,
+    // and the caller holds a root ref, so this read needs no more than that.
+    if (root->union_snap && root->union_snap->point) {
+        const struct Spoor *pt = root->union_snap->point;
+        if (!shed_has(reach, nr, pt->dc, pt->devno)) shed_add(reach, &nr, pt);
+    }
 
     bool changed = true;
     while (changed) {
@@ -1195,7 +1211,7 @@ static int territory_shed_unreachable_locked(struct Territory *t,
             const struct PgrpMount *m = &t->mounts[i];
             if (!shed_has(reach, nr, m->mp_dc, m->mp_devno)) continue;
             if (shed_has(reach, nr, m->source->dc, m->source->devno)) continue;
-            shed_add(reach, &nr, m->source->dc, m->source->devno);
+            shed_add(reach, &nr, m->source);
             changed = true;
         }
     }

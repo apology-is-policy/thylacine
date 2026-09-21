@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 9", "docs/STALK-DESIGN.md"]
 created: 2026-08-03
-updated: 2026-08-03
+updated: 2026-09-21
 ---
 ## Purpose
 
@@ -127,8 +127,28 @@ struct Spoor {
     s64          offset;   // byte cursor
     void        *aux;      // dev-private, opaque here
     struct Path *path;     // #66 namespace name; I-33 non-load-bearing
+    struct union_snap *union_snap;  // UM: non-NULL iff opened ON a union point
 };
+
+struct union_snap { struct Spoor *point; int n; struct union_member m[]; };
 ```
+
+`union_snap` was missing from this listing until 2026-09-21, and the
+header's own comment on it was wrong in a way that mattered. It said
+"ONLY `spoor_readdir_run` consults it". True of the MEMBERS (`m[]`, the
+per-member directories opened at open time, merged by readdir); false of
+the retained **`point`** since UM-8c F5: stalk reads it whenever a union
+dirfd — or a union ROOT — is a resolution base
+(`union_base = base->union_snap->point`), the fd mutation handlers read
+it, and the mount-table shed seeds its reachability closure from it
+([[sub-kernel-territory]]; the omission there was a P1). The opened
+Spoor's own identity is member[0], so the point is the one Spoor a
+resolution consults without having walked to it. A POINT-ONLY snap
+(`n == 0`) tags an `O_PATH` open of a union. The snap is set once before
+the Spoor is published, never inherited by `spoor_clone` (a clone is a
+walk position, not a union open), and freed — members and point clunked —
+at `spoor_free_internal`; that lifetime is why readers need no lock
+beyond a ref on the Spoor.
 
 `magic` at offset 0 is pinned by a `_Static_assert` whose message names
 the mechanism it defends: SLUB's freelist write at free lands at offset

@@ -17,9 +17,10 @@ So since 0006:
     wide, so eight such fclose()s ended socket() for the life of the Proc.
 
 Pre-existing; found by the audit of 0035, which rewrote __stdio_read and
-preserved the defect. No program under usr/ and nothing in stratumd calls
-fdopen() at all (grepped 2026-09-21), which is how it survived: the first port
-that wraps a connected socket in a FILE would have hit it.
+preserved the defect. It survived because nobody fdopen()s a SOCKET: the ports
+that call fdopen() at all (GNU make's misc.c, dosbox-x's drive_local.cpp) wrap
+file descriptors, and stratumd does not call it. The first port that wraps a
+connected socket in a FILE would have hit it.
 
 The fix is the mapping read()/write()/close() already use, in the three
 backends, plus the POSIX answer for a seek:

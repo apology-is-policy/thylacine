@@ -1,0 +1,83 @@
+B-0 (Boosty) audit round 2, F9 -- O_APPEND means append: the open carries the
+kernel's append omode bit instead of a one-time seek alone.
+
+0030 emulated O_APPEND with one lseek(SEEK_END) at open, under a comment saying
+"Thylacine has NO kernel append mode ... it needs ... a v1.x SYS_WALK_OPEN omode
+bit". That bit has existed since VIVARIUM 6.27: OAPPEND (0x40), inside
+SYS_WALK_OPEN_OMODE_VALID, which dev9p forwards to the 9P Tlopen / Tlcreate and
+Stratum honours by positioning EVERY write at end-of-file server side. Raw
+Linux-phenotype binaries (git) have had correct appends ever since; Pouch ports
+were left on the emulation, and kernel/include/thylacine/syscall.h says so.
+
+What the emulation got wrong: the seek happens once. fopen(p, "a+"), a read or
+a rewind, then the write POSIX requires to land at END landed wherever the
+cursor was -- mid-file, over existing bytes. Same for fseek + fwrite on an "a"
+stream, and for two appenders to one log.
+
+The fix passes the bit on all three open exits (create, EEXIST-fallback open,
+plain open) and KEEPS the one-time seek: for an append fd the kernel cursor is
+advisory, musl's __fdopen cannot set it (fcntl(F_SETFL) is ENOSYS here), and
+the seek is what has made ftell() and the first read of an "a+" stream start
+at end-of-file since 0030. A Dev with no append notion ignores the bit (each
+switches on omode & 3). One difference from Linux remains and is stated in the
+source: after an append write that followed a seek, the cursor is the seek
+position plus the count, not the new end of file.
+
+Cost: dev9p keeps an append fd off the Larder's write-behind path (pure
+write-through is what is coherent for it), so each flushed append is one RPC.
+
+Device-side pin (same commit, not in this patch file): pouch-hello-fopen
+writes "AAAA", reopens "a+", seeks to 0, writes "BB", and requires the file to
+read "AAAABB". On the 0030 emulation it reads "BBAA".
+
+--- a/src/fcntl/openat.c
++++ b/src/fcntl/openat.c
+@@ -29,20 +29,28 @@
+ /* SYS_open +OTRUNC (SYS_WALK_OPEN_OMODE_VALID includes OTRUNC = 0x10). */
+ #define POUCH_OTRUNC  0x10u
+ 
+-/* O_APPEND (patch 0030). Thylacine has NO kernel append mode: an fd carries a
+- * plain cursor, and musl's __fdopen tries fcntl(F_SETFL, O_APPEND) -- which
+- * pouch answers ENOSYS -- so nothing positions the cursor. Without this seek
+- * fopen("a") writes at offset 0 and CLOBBERS the file it meant to extend.
++/* O_APPEND, in two halves.
+  *
+- * Applied HERE, at a single helper every successful-open exit routes through,
+- * rather than at one return site: openat() has three such exits (create-ok,
+- * EEXIST-fallback-open, plain-open) and a per-site fix would silently miss
+- * one. Error exits pass negatives through untouched.
++ * (1) The omode bit. The open syscalls carry an append bit (OAPPEND 0x40,
++ * inside SYS_WALK_OPEN_OMODE_VALID since VIVARIUM 6.27) that dev9p forwards to
++ * the 9P open, and Stratum then positions EVERY write at end-of-file server
++ * side -- the POSIX meaning. Patch 0030 predates the bit and only seeked once
++ * (half 2), so fopen("a+"), a read or an fseek, then a write landed MID-FILE.
++ * A Dev without an append notion ignores the bit (it switches on omode & 3).
+  *
+- * Single-writer append is thereby correct (the config-file / log-file case
+- * fopen("a") is actually used for). CONCURRENT appenders may interleave --
+- * that atomicity is documented-ABSENT, not silently claimed; it needs a real
+- * kernel append mode (a v1.x SYS_WALK_OPEN omode bit). */
++ * (2) The one-time seek, kept: for an append fd the kernel cursor is advisory,
++ * and musl's __fdopen cannot set it (its fcntl(F_SETFL) is ENOSYS here), so
++ * this is what makes ftell() and the first read of an "a+" stream start at
++ * end-of-file, as they have since 0030. After an append write that followed a
++ * seek the cursor is the seek position plus the count, not the new end of file
++ * as on Linux; a stream must reposition between a write and a read anyway.
++ *
++ * Both are applied where every open exit routes through -- the omode before
++ * the three opens, the seek in one helper -- rather than per return site:
++ * openat() has three successful exits (create-ok, EEXIST-fallback-open,
++ * plain-open) and a per-site fix would silently miss one. */
++#define POUCH_OAPPEND 0x40u
++
+ static int pouch_open_ret(long r, int flags)
+ {
+ 	if (r >= 0 && (flags & O_APPEND))
+@@ -74,6 +82,7 @@
+ 	case O_RDWR:   omode = POUCH_ORDWR;  break;
+ 	default:       errno = EINVAL; return -1;
+ 	}
++	if (flags & O_APPEND) omode |= POUCH_OAPPEND;
+ 
+ 	size_t len = strnlen(filename, POUCH_PATH_MAX + 1);
+ 	if (!len) { errno = ENOENT; return -1; }

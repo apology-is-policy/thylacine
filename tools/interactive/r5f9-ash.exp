@@ -44,7 +44,10 @@ if {!$p0} { lc_fail "viv never gave an interactive ash prompt" }
 # on a symptom that named nothing. `uname -s` is the phenotype's own answer --
 # ash says Linux, ut says Thylacine -- folded into each leg's unique token.
 # ($(...) is evaluated by whichever shell reads the line, so a host shell can
-# not produce the -LINUX suffix even by accident.)
+# not produce the -LINUX suffix even by accident.) That rests on ONE fact worth
+# naming: ut resolves `uname` to the native /bin/uname (usr/coreutils, prints
+# Thylacine) because /bin precedes /viv/abin in PATH. Drop the native uname and
+# ut would run busybox's under the phenotype mount and answer Linux too.
 #
 # CONTROL 0: the shell answers, and it is the container's shell.
 lc_send "echo ash-alive-0-\$(uname -s) | tr a-z A-Z"

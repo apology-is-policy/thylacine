@@ -29,14 +29,47 @@ THE FIX. The name lives exactly as long as the stream:
     nothing touches the fid after the name is gone);
   - streams still open at a normal exit() are swept by __stdio_exit after its
     final flushes, through a weak hook, so a program that never calls
-    tmpfile() links none of this;
-  - the node is listed BEFORE the stream exists and unlisted under the same
-    lock that spans close + unlink, so an exit racing either call cannot miss
-    a name that is on disk. tmp_lock is always innermost (FILE lock or the
-    open-file-list lock may be held around it, never the reverse).
-A process that dies without running exit() (_exit, abort, a kill) leaves its
-names behind. POSIX calls that case implementation-defined; closing it needs a
-boot-time /tmp sweep, not libc, and is recorded as owed.
+    tmpfile() links none of this. tmpfile.o references __stdio_exit_needed
+    itself (the __toread.c idiom): that symbol is otherwise pulled in only by
+    __toread.o / __towrite.o, so a program using tmpfile() through fileno()
+    alone would have exited through the dummy and never swept (audit r2 F5).
+
+LOCKING (audit r2 F3 + F4 -- the first version got both wrong). tmp_lock
+guards the list and an `exiting` flag and is never held across a syscall.
+  - The first version held it across close + unlink: four 9P round trips,
+    each a note-delivery point. A handler calling exit() there met its own
+    lock in a threaded program (never exits) and, single-threaded, found the
+    node already unlisted with the name still on disk (leak). Now fclose()
+    closes and unlinks while the node is STILL LISTED and unlists it last, so
+    an exit() landing anywhere in between still sweeps the name; the sweep
+    repeating a close or an unlink is harmless (EBADF / ENOENT).
+  - The first version's sweep took the lock and kept it, so a thread that
+    had just open()ed its file blocked on the lock for ever with a name the
+    sweep never saw. Now the sweep sets `exiting`, releases the lock, and
+    walks a list that is frozen from then on: fclose() leaves its node in
+    place, and tmpfile() removes its own new file instead of listing it.
+  - tmp_lock is always innermost, and every hold is a few pointer stores --
+    the window upstream's open-file-list lock has always had.
+This is best effort by nature, and the first version's "an exit racing either
+call cannot miss a name that is on disk" was false. A process that dies
+without running exit() (_exit, abort, a kill) leaves its names behind, and so
+does an exit() -- a note handler's, or another thread's reaching _Exit first --
+that lands between open() returning and the node being listed. POSIX calls
+that case implementation-defined; closing it needs a boot-time /tmp sweep,
+not libc, and is recorded as owed.
+
+COUPLINGS this creates, for whoever wires the missing calls (audit r2 F8):
+  - fork: safe today only because _Fork's SYS_clone is a sentinel. A child
+    would inherit the list, and its exit() would unlink the PARENT's live
+    files -- which on this filesystem kills the parent's streams. Wiring fork
+    needs a child-side reset of tmp_head (and tmp_lock in the atfork set).
+  - dup: GNU make's os_anontmp is tmpfile() -> dup(fileno) -> fclose. dup()
+    is ENOSYS today, so make falls back. The day dup() works, that fclose
+    deletes the file under the descriptor make keeps.
+  - the name is resolved again at fclose(): a Proc that pivots or binds over
+    /tmp in between unlinks in the wrong /tmp or leaks.
+  - tmpfile() and the sweep call the interposable unlink() (as 0023 already
+    does with open()), where upstream used raw syscalls.
 
 NOT FIXED HERE, and bigger than tmpfile(): every POSIX program that unlinks a
 file it still has open -- the classic private-scratch idiom, which is exactly
@@ -88,7 +121,7 @@ the parent requires the count unchanged again.
  weak_alias(__stdio_exit, __stdio_exit_needed);
 --- a/src/stdio/tmpfile.c
 +++ b/src/stdio/tmpfile.c
-@@ -1,28 +1,121 @@
+@@ -1,30 +1,160 @@
  #include <stdio.h>
  #include <fcntl.h>
  #include <stdlib.h>
@@ -113,9 +146,25 @@ the parent requires the count unchanged again.
 + *
 + * The name therefore lives exactly as long as the stream: removed by fclose()
 + * (through f->close) and, for streams still open at a normal exit, by
-+ * __stdio_exit after the final flush. A process that dies without running
-+ * exit() leaves its names behind -- POSIX calls that case
-+ * implementation-defined; it needs a boot-time /tmp sweep, not libc. */
++ * __stdio_exit after the final flush. That is best effort by nature: a
++ * process that dies without running exit() leaves its names behind (POSIX
++ * calls that case implementation-defined), and so does an exit() that lands
++ * between open() returning and the node being listed below. Both need a
++ * boot-time /tmp sweep, not libc.
++ *
++ * LOCKING. tmp_lock guards the list and tmp_exiting and is NEVER held across
++ * a syscall: every hold is a few pointer stores, the same window upstream's
++ * open-file-list lock has. (The first version held it across close + unlink,
++ * four 9P round trips, each a note-delivery point: a handler calling exit()
++ * there met its own lock in a threaded program and, in a single-threaded one,
++ * found the node unlisted but the name still on disk.) So:
++ *   - fclose() closes and unlinks while the node is STILL LISTED, and only
++ *     then unlists it: an exit() landing anywhere in between still sweeps the
++ *     name, and the sweep repeating a close or an unlink is harmless.
++ *   - the exit sweep sets tmp_exiting and releases the lock before it walks.
++ *     From then on the list is frozen: fclose() leaves its node in place and
++ *     tmpfile() removes its own new file instead of listing it, so the walk
++ *     needs no lock and no thread is parked holding a file the sweep missed. */
 +
 +struct tmpnode {
 +	struct tmpnode *next, *prev;
@@ -124,7 +173,17 @@ the parent requires the count unchanged again.
 +};
 +
 +static struct tmpnode *tmp_head;
++static int tmp_exiting;
 +static volatile int tmp_lock[1];
++
++/* exit() reaches __stdio_exit only through this reference: the weak
++ * __stdio_exit_needed is otherwise pulled in by __toread.o / __towrite.o
++ * alone, and a program that uses tmpfile() through fileno() links neither --
++ * its exit() would bind the dummy and never sweep. */
++hidden void __tmpfile_needs_stdio_exit()
++{
++	__stdio_exit_needed();
++}
 +
 +static void tmp_unlist(struct tmpnode *n)
 +{
@@ -133,36 +192,45 @@ the parent requires the count unchanged again.
 +	if (n->next) n->next->prev = n->prev;
 +}
 +
++/* Returns 0 with the node unlisted (the caller frees it), or -1 if the exit
++ * sweep owns the list and the node must stay where it is. */
++static int tmp_retire(struct tmpnode *n)
++{
++	int r = -1;
++	LOCK(tmp_lock);
++	if (!tmp_exiting) {
++		tmp_unlist(n);
++		r = 0;
++	}
++	UNLOCK(tmp_lock);
++	return r;
++}
++
 +static int tmpfile_close(FILE *f)
 +{
 +	struct tmpnode *n = f->cookie;
 +	int r, e;
 +
-+	/* The lock spans the close and the unlink, so the exit sweep below either
-+	 * sees this node whole or not at all -- never a name it no longer lists
-+	 * and this thread has not yet removed. Close first: nothing may touch the
-+	 * fid after the unlink. */
-+	LOCK(tmp_lock);
-+	tmp_unlist(n);
++	/* Close first: nothing may touch the fid after the unlink. */
 +	r = __stdio_close(f);
 +	e = errno;
++	n->fd = -1;
 +	unlink(n->name);
 +	errno = e;
-+	UNLOCK(tmp_lock);
-+	free(n);
++	if (!tmp_retire(n)) free(n);
 +	return r;
 +}
 +
-+/* Called by __stdio_exit once every stream has been flushed. The lock is
-+ * taken and never released, as __stdio_exit does with the open-file list: a
-+ * thread still racing in tmpfile()/fclose() blocks rather than walking a list
-+ * this sweep is consuming. */
++/* Called by __stdio_exit once every stream has been flushed. */
 +void __pouch_tmpfile_exit(void)
 +{
 +	struct tmpnode *n;
 +	LOCK(tmp_lock);
-+	for (n = tmp_head; n; n = n->next) {
-+		__syscall(SYS_close, n->fd);
++	tmp_exiting = 1;
++	n = tmp_head;
++	UNLOCK(tmp_lock);
++	for (; n; n = n->next) {
++		if (n->fd >= 0) __syscall(SYS_close, n->fd);
 +		unlink(n->name);
 +	}
 +}
@@ -170,16 +238,21 @@ the parent requires the count unchanged again.
  FILE *tmpfile(void)
  {
  	char s[] = "/tmp/tmpfile_XXXXXX";
- 	int fd;
+-	int fd;
++	int fd, e, listed;
  	FILE *f;
  	int try;
 +	struct tmpnode *n;
++
++	/* Before the file exists, so a failure here leaves nothing to undo. */
++	n = malloc(sizeof *n);
++	if (!n) return 0;
 +
  	for (try=0; try<MAXTRIES; try++) {
  		__randname(s+13);
  		/* pouch: route through the patched open() -- see fopen.c. */
  		fd = open(s, O_RDWR|O_CREAT|O_EXCL, 0600);
- 		if (fd >= 0) {
+-		if (fd >= 0) {
 -#ifdef SYS_unlink
 -			__syscall(SYS_unlink, s);
 -#else
@@ -187,33 +260,35 @@ the parent requires the count unchanged again.
 -#endif
 -			f = __fdopen(fd, "w+");
 -			if (!f) __syscall(SYS_close, fd);
-+			/* Listed BEFORE the stream exists, so an exit racing this call
-+			 * cannot miss a name that is already on disk. */
-+			n = malloc(sizeof *n);
-+			if (n) {
-+				n->fd = fd;
-+				memcpy(n->name, s, sizeof s);
-+				LOCK(tmp_lock);
-+				n->prev = 0;
-+				n->next = tmp_head;
-+				if (tmp_head) tmp_head->prev = n;
-+				tmp_head = n;
-+				UNLOCK(tmp_lock);
-+			}
-+			f = n ? __fdopen(fd, "w+") : 0;
-+			if (!f) {
-+				int e = errno;
-+				LOCK(tmp_lock);
-+				if (n) tmp_unlist(n);
-+				__syscall(SYS_close, fd);
-+				unlink(s);
-+				UNLOCK(tmp_lock);
-+				free(n);
-+				errno = e;
-+				return 0;
-+			}
-+			f->cookie = n;
-+			f->close = tmpfile_close;
- 			return f;
+-			return f;
++		if (fd < 0) continue;
++
++		n->fd = fd;
++		memcpy(n->name, s, sizeof s);
++		LOCK(tmp_lock);
++		listed = !tmp_exiting;
++		if (listed) {
++			n->prev = 0;
++			n->next = tmp_head;
++			if (tmp_head) tmp_head->prev = n;
++			tmp_head = n;
  		}
++		UNLOCK(tmp_lock);
++
++		f = listed ? __fdopen(fd, "w+") : 0;
++		if (!f) {
++			e = listed ? errno : EAGAIN;
++			__syscall(SYS_close, fd);
++			n->fd = -1;
++			unlink(s);
++			if (!listed || !tmp_retire(n)) free(n);
++			errno = e;
++			return 0;
++		}
++		f->cookie = n;
++		f->close = tmpfile_close;
++		return f;
  	}
++	free(n);
+ 	return 0;
+ }

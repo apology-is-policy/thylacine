@@ -14,6 +14,7 @@ code:
   - usr/lib/pouch/patches/0020-pouch-srv-bulk.patch
   - usr/lib/pouch/patches/0028-pouch-net-nonblock.patch
   - usr/lib/pouch/patches/0038-pouch-stdio-socket-fds.patch
+  - usr/lib/pouch/patches/0039-pouch-fdset-guard-ppoll-tag.patch
   - usr/pouch-hello/pouch-hello-sockets.c
 audit: hard
 guarded-by: [inv-i1, inv-i28]
@@ -194,7 +195,8 @@ kernel-attached mount negotiates a 128 KiB msize (CF-3 B).
   operation failed (fail-closed), but `fclose()` on it "closed" a number
   the kernel never issued and STRANDED the slot with its kernel handles —
   a leak against a table of `POUCH_SOCK_MAX` = 8. Found by the audit of
-  0035, not by a consumer: nothing under `usr/` calls `fdopen` at all.
+  0035, not by a consumer: the ports that call `fdopen` (GNU make,
+  dosbox-x) wrap FILE descriptors, and nobody wraps a socket.
   0038 maps the tag in read/write (`pouch_sock_kernel_fd`), routes close
   through `pouch_sock_close`, and answers `ESPIPE` to a seek.
   `/pouch-hello-sockets` pins it: it wraps the connected client end in a
@@ -231,7 +233,7 @@ round against this surface before it had a node).
 - **The `select()`/`pselect()` fd-VALUE bound is stale and now wrong.**
   Both reject any fd ≥ 64 set in an input set, commented as "unreachable
   through any Thylacine syscall — `PROC_HANDLE_MAX`". That was true when
-  `PROC_HANDLE_MAX` was 64; since #355 the fd table is 256 and only the
+  `PROC_HANDLE_MAX` was 64; the fd table is 1024 today (`handle.h`) and only the
   `SYS_POLL` *nfds count* is bounded at `POLL_MAX_NFDS` = 64. So a
   program holding fds ≥ 64 gets valid fds wrongly `EBADF`'d by
   `select()`. `poll()` is unaffected (fd values pass through; only the
@@ -240,11 +242,32 @@ round against this surface before it had a node).
   large fd population, and the three patches that mirror the constant
   (0005 / 0015 / 0018) all still name it `PROC_HANDLE_MAX`.
 - `POUCH_SOCK_MAX` is 8 concurrent sockets per Proc.
+- **A socket fd cannot live in an `fd_set`, and that was a WILD WRITE until
+  0039** (audit B-0 r2 F2; pre-existing). The tag makes a socket fd
+  `0x40000000 | slot`; upstream's `FD_SET(d, s)` indexes `fds_bits[d / 64]`
+  with no bound, so `FD_SET(sock, &set)` stored 128 MiB past a 16-long
+  array — in APPLICATION code, before libc was entered; `select()` refuses
+  the fd, but only afterwards. From the main stack that address is usually
+  unmapped; from a heap-resident set it is someone's Burrow. 0039 makes
+  `FD_SET` / `FD_CLR` / `FD_ISSET` `abort()` with a message on a
+  descriptor outside `[0, FD_SETSIZE)` — glibc's `__fdelt_chk` — and
+  routes `ppoll()` through the tag-aware `poll()` (it was a raw
+  `SYS_poll`: POLLNVAL, counted ready, a busy-spin; the failure 0015 fixed
+  in `poll()` and not there). **That is the honest minimum, not the fix.**
+  The fix is socket fds that are small integers (a placeholder kernel
+  handle per slot + an fd→slot side table), which lets `select()` work on
+  sockets and retires the tag from every fd-consuming call — a redesign of
+  0006 / 0016, its own chunk and audit, OWED. Until then a port that
+  `select()`s on a socket stops with a message naming the cause; one that
+  `poll()`s works. `/pouch-hello-sockets` pins both halves.
 - **The tag-aware set is still not the POSIX set** (census 2026-09-21: every
   site in the patched `src/` that passes an fd to a raw syscall, outside
-  `src/network/`). On a tagged fd every remaining one FAILS VISIBLY, so none
-  fabricates a value or leaks a slot — they are missing surface, and a port
-  that needs one needs a patch. `fstat(sock)` reaches the kernel with a
+  `src/network/`). That census method cannot see a call that takes a
+  BITMAP or an ARRAY of fds — it missed `select` and `ppoll`, above, and
+  its first version claimed here that every remaining call "fails
+  visibly". Of the scalar-fd calls that remain, each does fail visibly, so
+  none fabricates a value or leaks a slot — they are missing surface, and
+  a port that needs one needs a patch. `fstat(sock)` reaches the kernel with a
   number it never issued and gets `EBADF` (no `S_ISSOCK` test). `fcntl`,
   `dup`, `dup3`, `readv`, `writev` never reach it at all: their numbers are
   sentinel-parked for EVERY fd (`ENOSYS`; `dup2` onto a target is a

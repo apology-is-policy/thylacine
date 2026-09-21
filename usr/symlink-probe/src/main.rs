@@ -65,7 +65,7 @@ use libthyla_rs::err::{Error, Result};
 use libthyla_rs::fs::{self, File};
 use libthyla_rs::io::Read;
 use libthyla_rs::loom::{RegisteredBuffer, Ring, Sqe};
-use libthyla_rs::{t_chroot, t_exits, t_putstr};
+use libthyla_rs::{t_chroot, t_exits, t_pivot_root, t_putstr};
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
@@ -452,6 +452,21 @@ pub extern "C" fn rs_main() -> i64 {
     let root_before = File::open(&format!("{}/l_root", WORK)).is_ok();
     c.ok("K before: l_abs resolves", abs_before);
     c.ok("K before: l_root does not", !root_before);
+
+    // A root must be a DIRECTORY, on BOTH doors. A non-directory root wedges
+    // every later resolution, and since the mount-table shed (ARCH 9.6.10) a
+    // pivot onto one also strips the table for good -- pivot had no such gate
+    // until the shed's audit. Deny-path legs: a boot that merely succeeds says
+    // nothing about whether the gate is wired.
+    match File::open_with_opath(TARGET) {
+        Ok(f) => {
+            let fd = f.as_raw_fd() as i64;
+            c.ok("K gate: chroot onto a file is refused", unsafe { t_chroot(fd) } != 0);
+            c.ok("K gate: pivot_root onto a file is refused", unsafe { t_pivot_root(fd) } != 0);
+            c.ok("K gate: the namespace is intact afterwards", File::open(TARGET).is_ok());
+        }
+        Err(_) => fail("symlink-probe: FAIL -- O_PATH on the target file\n"),
+    }
 
     let jail = match File::open_with_opath(WORK) {
         Ok(f) => f,

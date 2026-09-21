@@ -129,9 +129,11 @@ static int scan_pass(size_t vsize) {
 int main(int argc, char **argv) {
     // CHILD (self-respawn, the tmpfile exit leg): leave a tmpfile OPEN and return.
     if (argc >= 2 && !strcmp(argv[1], "tmpleak")) {
+        // 42, not 0: the parent must see that THIS arm ran (argv arrived), not
+        // merely that some run of this binary exited cleanly.
         FILE *t = tmpfile();
         if (!t || fputs("left open on purpose\n", t) == EOF) return 2;
-        return 0;
+        return 42;
     }
 
     // create
@@ -159,7 +161,27 @@ int main(int argc, char **argv) {
     if (!fgets(buf, sizeof buf, f) || strcmp(buf, "beta\n"))
         return fail("append line2");
     if (fclose(f)) return fail("append verify fclose");
-    puts("pouch-hello-fopen: append OK");
+    // O_APPEND means EVERY write lands at end-of-file, not just the first one
+    // after open. "a+", seek to 0, write: the bytes must follow "beta". With
+    // the one-time-seek emulation they overwrote "alpha" in place.
+    f = fopen(PROBE, "a+");
+    if (!f) return fail("append fopen(a+)");
+    if (fseek(f, 0, SEEK_SET)) return fail("append fseek");
+    if (fputs("gamma\n", f) == EOF) return fail("append fputs after seek");
+    if (fclose(f)) return fail("append a+ fclose");
+    f = fopen(PROBE, "r");
+    if (!f) return fail("append a+ reopen");
+    {
+        char all[64];
+        size_t k = fread(all, 1, sizeof all - 1, f);
+        all[k] = 0;
+        if (strcmp(all, "alpha\nbeta\ngamma\n")) {
+            printf("pouch-hello-fopen: after a+ / seek 0 / write the file reads \"%s\"\n", all);
+            return fail("O_APPEND write did not land at end-of-file");
+        }
+    }
+    if (fclose(f)) return fail("append a+ verify fclose");
+    puts("pouch-hello-fopen: append OK (a write after a seek still lands at EOF)");
 
     // truncate
     f = fopen(PROBE, "w");
@@ -231,6 +253,15 @@ int main(int argc, char **argv) {
                    feof(f), ferror(f), errno);
             return fail("tmpfile clean EOF");
         }
+        // The positive control for the two counts below: while the stream is
+        // open the counter must SEE the name. A counter blind to it (a changed
+        // prefix or directory) would read "unchanged" on a libc that leaks.
+        int during = count_tmpfiles();
+        if (during != tmp_before + 1) {
+            printf("pouch-hello-fopen: /tmp tmpfile_* names %d -> %d while one is open\n",
+                   tmp_before, during);
+            return fail("the tmpfile counter cannot see an open tmpfile");
+        }
     }
     if (fclose(f)) return fail("tmpfile fclose");
     {
@@ -247,7 +278,7 @@ int main(int argc, char **argv) {
         int st = 0;
         if (posix_spawn(&pid, SELF, NULL, NULL, cargv, environ) != 0)
             return fail("tmpfile respawn");
-        if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+        if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 42) {
             printf("pouch-hello-fopen: tmpleak child status %#x\n", st);
             return fail("tmpfile child");
         }
@@ -267,6 +298,7 @@ int main(int argc, char **argv) {
     if (scan_pass(0) || scan_pass(9) || scan_pass(10)) return 1;
     puts("pouch-hello-fopen: scan OK");
 
-    puts("pouch-hello-fopen: exit 0");
+    // The census is what joey matches: a stale binary prints the old marker.
+    puts("pouch-hello-fopen: legs=create,append-omode,truncate,excl,unlink,tmpfile,scan: exit 0");
     return 0;
 }

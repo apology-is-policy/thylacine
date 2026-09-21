@@ -1472,6 +1472,11 @@ void test_territory_shed_per_walker_dev_matched_on_dc(void);
 void test_territory_shed_same_root_is_a_noop(void);
 void test_territory_shed_preserves_union_order(void);
 void test_territory_shed_clone_before_pivot_unaffected(void);
+void test_territory_shed_union_root_keeps_point_entries(void);
+void test_territory_shed_drops_nested_orphan(void);
+void test_territory_shed_full_table_boundary(void);
+void test_territory_shed_releases_mp_path_once(void);
+void test_territory_shed_initial_chroot_and_root_as_source(void);
 void test_pipe_smoke(void);
 void test_pipe_read_on_empty_returns_zero(void);
 void test_pipe_write_to_full_returns_zero(void);
@@ -1967,6 +1972,11 @@ struct test_case g_tests[] = {
     { "territory.shed_same_root_is_a_noop",               test_territory_shed_same_root_is_a_noop,               false, NULL },
     { "territory.shed_preserves_union_order",             test_territory_shed_preserves_union_order,             false, NULL },
     { "territory.shed_clone_before_pivot_unaffected",     test_territory_shed_clone_before_pivot_unaffected,     false, NULL },
+    { "territory.shed_union_root_keeps_point_entries",    test_territory_shed_union_root_keeps_point_entries,    false, NULL },
+    { "territory.shed_drops_nested_orphan",               test_territory_shed_drops_nested_orphan,               false, NULL },
+    { "territory.shed_full_table_boundary",               test_territory_shed_full_table_boundary,               false, NULL },
+    { "territory.shed_releases_mp_path_once",             test_territory_shed_releases_mp_path_once,             false, NULL },
+    { "territory.shed_initial_chroot_and_root_as_source", test_territory_shed_initial_chroot_and_root_as_source, false, NULL },
     { "handles.alloc_close_smoke",     test_handles_alloc_close_smoke,     false, NULL },
     { "handles.rights_monotonic",      test_handles_rights_monotonic,      false, NULL },
     { "handles.dup_lifecycle",         test_handles_dup_lifecycle,         false, NULL },

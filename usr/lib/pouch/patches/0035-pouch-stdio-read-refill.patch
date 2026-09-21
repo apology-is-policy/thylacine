@@ -39,7 +39,9 @@ __shgetc's buf[-1] path; ungetc() stores its byte itself). One SYS_read per
 call in both arms -- never a second read after a successful first, which would
 block a pipe or tty that had already delivered what it had. Readahead survives
 exactly where upstream's does: fread's loop calls __toread() (which drops the
-buffer) only after a SHORT count, and a short count leaves no surplus.
+buffer) before EVERY f->read, the first included -- but it only gets there
+once the buffer is exhausted, and a second pass happens only after a SHORT
+count, which leaves no surplus. So nothing buffered is ever dropped.
 
 Behaviour changes to know about -- stdio input now reads AHEAD (up to BUFSIZ),
 as it does on every other libc, and everything that follows from that is now

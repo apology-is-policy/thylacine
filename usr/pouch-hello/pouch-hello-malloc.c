@@ -185,10 +185,39 @@ int main(void) {
             return fail("getloadavg invented a load figure");
         if (ulimit(UL_GETFSIZE) != -1)
             return fail("ulimit(UL_GETFSIZE) invented a limit");
+        // errno pinned too: on the unfixed libc this ALSO returned -1 whenever
+        // the stack residue held no NUL in 65 bytes -- with EINVAL.
         char dn[65];
         memset(dn, 'x', sizeof dn);
-        if (getdomainname(dn, sizeof dn) != -1)
+        errno = EXDEV;
+        if (getdomainname(dn, sizeof dn) != -1 || errno != ENOSYS)
             return fail("getdomainname invented a name");
+        // ualarm() read "the time left on the previous alarm" out of a struct
+        // its failed setitimer() never wrote.
+        errno = EXDEV;
+        if (ualarm(1000, 0) != (useconds_t)-1 || errno != ENOSYS)
+            return fail("ualarm invented a remaining time");
+
+        // The CPU count is a real figure (the "cpus:" line of /ctl/sched), and
+        // the call does not fail, so it must leave errno alone. Read here with
+        // a different parser than libc's.
+        {
+            long want = 0;
+            char key[32];
+            FILE *sf = fopen("/ctl/sched", "r");
+            if (!sf) return fail("open /ctl/sched");
+            while (fscanf(sf, "%31s", key) == 1)
+                if (!strcmp(key, "cpus:") && fscanf(sf, "%ld", &want) == 1) break;
+            fclose(sf);
+            errno = EXDEV;
+            long onln = sysconf(_SC_NPROCESSORS_ONLN);
+            long conf = sysconf(_SC_NPROCESSORS_CONF);
+            if (want < 1 || onln != want || conf != want || errno != EXDEV) {
+                printf("pouch-hello-malloc: nprocs onln=%ld conf=%ld errno=%d, /ctl/sched cpus=%ld\n",
+                       onln, conf, errno, want);
+                return fail("sysconf(_SC_NPROCESSORS_*) != the kernel's cpu count");
+            }
+        }
 
         // getdtablesize() has no error channel, so libc states the kernel's
         // handle-table size. Checked against the kernel, not against the same
@@ -218,6 +247,8 @@ int main(void) {
     printf("pouch-hello-malloc: realloc-grow (small slot) ok\n");
     printf("pouch-hello-malloc: large malloc/free ok (> MMAP_THRESHOLD)\n");
     printf("pouch-hello-malloc: realloc-grow large ok (mremap ENOSYS -> malloc+memcpy+free)\n");
-    printf("pouch-hello-malloc: exit 0\n");
+    // The census is what joey matches: a stale binary (the bake traps that
+    // skip a populate) prints the old marker and must not pass for this one.
+    printf("pouch-hello-malloc: legs=heap,physpages,nprocs,sentinel-wrappers,ualarm,dtablesize: exit 0\n");
     return 0;
 }

@@ -2733,9 +2733,23 @@ static s64 sys_attach_9p_srv_handler(u64 srv_fd_raw, u64 aname_va,
 // stratumd's mounted FS root.
 //
 // Audit-trigger: touches `kernel/territory.c` (CLAUDE.md §25.4 — Territory)
-// via territory_pivot_root. Adds no new mount-table edge (no I-3 / I-1
-// implications). MountRefcountConsistency holds via the matched bump +
-// drop in territory_pivot_root.
+// via territory_pivot_root. Adds no mount-table edge; since ARCH 9.6.10 it
+// REMOVES the entries unreachable from the new root (the shed), each releasing
+// what unmount releases.
+
+// The new root of SYS_CHROOT / SYS_PIVOT_ROOT: ref-held, RIGHT_READ, and a
+// DIRECTORY. One home for the gate because the two handlers are the two places
+// a handle becomes root_spoor, and pivot lacked it until audit r1 F3 of the
+// shed: a non-directory root wedges every later resolution at its first
+// component, and since the shed it also strips the mount table for good (the
+// closure from a pipe or /dev/null reaches almost nothing), so pivoting back to
+// a held directory fd no longer restores the namespace.
+static struct Spoor *sys_lookup_root_source(struct Proc *p, u64 fd_raw) {
+    struct Spoor *source = sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_READ);
+    if (!source)                                     return NULL;
+    if (!(source->qid.type & QTDIR))                 { spoor_clunk(source); return NULL; }
+    return source;
+}
 
 static s64 sys_pivot_root_handler(u64 new_root_fd_raw) {
     struct Thread *t = current_thread();
@@ -2751,7 +2765,7 @@ static s64 sys_pivot_root_handler(u64 new_root_fd_raw) {
     // from the freshly-cloned Spoor's Dev. Mount-style operations that
     // create new edges in the namespace need W; pivot only swaps an
     // existing R-rights name binding (R1 F10 close).
-    struct Spoor *source = sys_lookup_spoor(p, (hidx_t)new_root_fd_raw, RIGHT_READ);
+    struct Spoor *source = sys_lookup_root_source(p, new_root_fd_raw);
     if (!source)                                     return -1;
 
     // territory_pivot_root handles: NULL-source rejection, no-current-root
@@ -4955,9 +4969,10 @@ static s64 sys_wstat_handler(u64 hraw, u64 valid_raw, u64 mode_raw,
 // Chroot).
 //
 // Audit-trigger: touches `kernel/territory.c` (CLAUDE.md §25.4 — Territory).
-// Adds no new mount-table edge (no I-3 / I-1 implications); the only
-// invariant in play is MountRefcountConsistency, extended in the spec
-// for this chunk to include the root_spoor contribution.
+// Adds no mount-table edge (no I-3 / I-1 implications); since ARCH 9.6.10 it
+// REMOVES the entries unreachable from the new root (the shed). The root half
+// keeps MountRefcountConsistency, extended in the spec for that chunk to
+// include the root_spoor contribution.
 // =============================================================================
 
 static s64 sys_chroot_handler(u64 spoor_fd_raw) {
@@ -4971,11 +4986,10 @@ static s64 sys_chroot_handler(u64 spoor_fd_raw) {
     // serve as a walk source for SYS_WALK_OPEN(FROM_ROOT, ...). Without
     // READ the pivot is structurally inert (you cannot walk from it).
     // Mirrors SYS_MOUNT's source-rights gate exactly.
-    struct Spoor *source = sys_lookup_spoor(p, (hidx_t)spoor_fd_raw, RIGHT_READ);
-    if (!source)                                     return -1;
-
-    // The root must be a DIRECTORY -- the #81 single-hop gate, applied to the
-    // one other place a Spoor becomes a resolution base. Installing a non-dir
+    //
+    // The root must be a DIRECTORY -- the #81 single-hop gate, applied where a
+    // Spoor becomes a resolution base (here and SYS_PIVOT_ROOT, through the one
+    // sys_lookup_root_source). Installing a non-dir
     // wedges the Territory: every later resolution answers T_E_NOTDIR at its
     // first component, exec-from-namespace fails, and territory_root_ref hands
     // the same node to D-1's absolute-target re-anchor. Contained (the Proc only
@@ -4983,7 +4997,8 @@ static s64 sys_chroot_handler(u64 spoor_fd_raw) {
     // Pre-existing -- t_chroot of an O_PATH handle on a FILE did this before
     // D-1 too -- but D-1 shipped File::open_link, a documented API whose whole
     // job is to hand back a non-directory, so the shape is now easy to reach.
-    if (!(source->qid.type & QTDIR))                 { spoor_clunk(source); return -1; }
+    struct Spoor *source = sys_lookup_root_source(p, spoor_fd_raw);
+    if (!source)                                     return -1;
 
     // territory_chroot handles: idempotent same-pointer (returns 0 without ref
     // bump), prior-root displacement (spoor_clunk the old), spoor_ref of the

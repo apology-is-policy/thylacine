@@ -31,13 +31,28 @@
  * via t_spawn_with_perms(..., T_SPAWN_PERM_MAY_POST_SERVICE).
  */
 
+/* Diagnostics go to STDOUT: joey installs fds 0 and 1 only, and echoes the
+ * child's stdout to the boot log. A failure line on fd 2 is a line nobody
+ * sees (pouch-hello-threads.c documents the same trap). */
+#define _GNU_SOURCE
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
 #include <errno.h>
+#include <poll.h>
+#include <spawn.h>
 #include <pthread.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/wait.h>
+
+extern char **environ;
+
+/* This prover runs PRE-pivot: the root is the initrd and the binary sits at
+ * its top level. */
+static const char SELF[] = "/pouch-hello-sockets";
 
 static const char SOCK_PATH[]    = "/srv/pouch-sock-demo";
 static const char NONEXIST_PATH[] = "/srv/pouch-sock-nonex";
@@ -59,7 +74,7 @@ static int test_family_refusals(void)
      * family, just no longer AF_INET. */
     int s = socket(10 /* AF_INET6 */, SOCK_STREAM, 0);
     if (s >= 0 || errno != EAFNOSUPPORT) {
-        fprintf(stderr, "test: AF_INET6 should have refused with "
+        printf("test: AF_INET6 should have refused with "
                 "EAFNOSUPPORT, got s=%d errno=%d\n", s, errno);
         if (s >= 0) close(s);
         return -1;
@@ -68,7 +83,7 @@ static int test_family_refusals(void)
 
     s = socket(AF_UNIX, SOCK_DGRAM, 0);
     if (s >= 0 || errno != EPROTONOSUPPORT) {
-        fprintf(stderr, "test: SOCK_DGRAM should have refused with "
+        printf("test: SOCK_DGRAM should have refused with "
                 "EPROTONOSUPPORT, got s=%d errno=%d\n", s, errno);
         if (s >= 0) close(s);
         return -1;
@@ -77,7 +92,7 @@ static int test_family_refusals(void)
 
     s = socket(AF_UNIX, SOCK_STREAM, 42);
     if (s >= 0 || errno != EPROTONOSUPPORT) {
-        fprintf(stderr, "test: protocol=42 should have refused with "
+        printf("test: protocol=42 should have refused with "
                 "EPROTONOSUPPORT, got s=%d errno=%d\n", s, errno);
         if (s >= 0) close(s);
         return -1;
@@ -93,7 +108,7 @@ static int test_connect_nonexistent(void)
 {
     int c = socket(AF_UNIX, SOCK_STREAM, 0);
     if (c < 0) {
-        fprintf(stderr, "test: socket failed errno=%d\n", errno);
+        printf("test: socket failed errno=%d\n", errno);
         return -1;
     }
 
@@ -104,13 +119,13 @@ static int test_connect_nonexistent(void)
 
     int r = connect(c, (struct sockaddr *)&addr, sizeof(addr));
     if (r == 0) {
-        fprintf(stderr, "test: connect(%s) UNEXPECTEDLY succeeded\n",
+        printf("test: connect(%s) UNEXPECTEDLY succeeded\n",
                 NONEXIST_PATH);
         close(c);
         return -1;
     }
     if (errno != ECONNREFUSED) {
-        fprintf(stderr, "test: connect(%s) wrong errno=%d (want "
+        printf("test: connect(%s) wrong errno=%d (want "
                 "ECONNREFUSED)\n", NONEXIST_PATH, errno);
         close(c);
         return -1;
@@ -118,7 +133,7 @@ static int test_connect_nonexistent(void)
     printf("test: connect(%s) refused ECONNREFUSED ok\n", NONEXIST_PATH);
 
     if (close(c) != 0) {
-        fprintf(stderr, "test: close(fresh slot) failed errno=%d\n", errno);
+        printf("test: close(fresh slot) failed errno=%d\n", errno);
         return -1;
     }
     printf("test: close(fresh slot) ok\n");
@@ -130,7 +145,7 @@ static int test_path_validation(void)
 {
     int s = socket(AF_UNIX, SOCK_STREAM, 0);
     if (s < 0) {
-        fprintf(stderr, "test: socket failed errno=%d\n", errno);
+        printf("test: socket failed errno=%d\n", errno);
         return -1;
     }
 
@@ -140,7 +155,7 @@ static int test_path_validation(void)
     memcpy(addr.sun_path, "/usr/foo", sizeof("/usr/foo"));
     int r = bind(s, (struct sockaddr *)&addr, sizeof(addr));
     if (r == 0 || errno != EINVAL) {
-        fprintf(stderr, "test: bind(/usr/foo) should have rejected "
+        printf("test: bind(/usr/foo) should have rejected "
                 "EINVAL, got r=%d errno=%d\n", r, errno);
         close(s);
         return -1;
@@ -159,7 +174,7 @@ static void *server_main(void *arg)
 
     int s = socket(AF_UNIX, SOCK_STREAM, 0);
     if (s < 0) {
-        fprintf(stderr, "server: socket failed errno=%d\n", errno);
+        printf("server: socket failed errno=%d\n", errno);
         pthread_barrier_wait(&g_ready);
         return NULL;
     }
@@ -170,13 +185,13 @@ static void *server_main(void *arg)
     memcpy(addr.sun_path, SOCK_PATH, sizeof(SOCK_PATH));
 
     if (bind(s, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        fprintf(stderr, "server: bind failed errno=%d\n", errno);
+        printf("server: bind failed errno=%d\n", errno);
         close(s);
         pthread_barrier_wait(&g_ready);
         return NULL;
     }
     if (listen(s, 1) != 0) {
-        fprintf(stderr, "server: listen failed errno=%d\n", errno);
+        printf("server: listen failed errno=%d\n", errno);
         close(s);
         pthread_barrier_wait(&g_ready);
         return NULL;
@@ -190,7 +205,7 @@ static void *server_main(void *arg)
     socklen_t          peerlen = sizeof(peer);
     int conn = accept(s, (struct sockaddr *)&peer, &peerlen);
     if (conn < 0) {
-        fprintf(stderr, "server: accept failed errno=%d\n", errno);
+        printf("server: accept failed errno=%d\n", errno);
         close(s);
         return NULL;
     }
@@ -199,14 +214,14 @@ static void *server_main(void *arg)
     char buf[64];
     ssize_t n = read(conn, buf, sizeof(buf) - 1);
     if (n != (ssize_t)(sizeof(MSG_PING) - 1)) {
-        fprintf(stderr, "server: read got %zd want %zu errno=%d\n",
+        printf("server: read got %zd want %zu errno=%d\n",
                 n, sizeof(MSG_PING) - 1, errno);
         close(conn); close(s);
         return NULL;
     }
     buf[n] = '\0';
     if (memcmp(buf, MSG_PING, sizeof(MSG_PING) - 1) != 0) {
-        fprintf(stderr, "server: read got '%s' want '%s'\n", buf, MSG_PING);
+        printf("server: read got '%s' want '%s'\n", buf, MSG_PING);
         close(conn); close(s);
         return NULL;
     }
@@ -214,7 +229,7 @@ static void *server_main(void *arg)
 
     ssize_t w = write(conn, MSG_PONG, sizeof(MSG_PONG) - 1);
     if (w != (ssize_t)(sizeof(MSG_PONG) - 1)) {
-        fprintf(stderr, "server: write got %zd want %zu errno=%d\n",
+        printf("server: write got %zd want %zu errno=%d\n",
                 w, sizeof(MSG_PONG) - 1, errno);
         close(conn); close(s);
         return NULL;
@@ -228,12 +243,12 @@ static void *server_main(void *arg)
     } cred = {0};
     socklen_t credlen = sizeof(cred);
     if (getsockopt(conn, SOL_SOCKET, SO_PEERCRED, &cred, &credlen) != 0) {
-        fprintf(stderr, "server: getsockopt(SO_PEERCRED) errno=%d\n", errno);
+        printf("server: getsockopt(SO_PEERCRED) errno=%d\n", errno);
         close(conn); close(s);
         return NULL;
     }
     if (cred.pid == 0) {
-        fprintf(stderr, "server: peer pid is zero (unexpected)\n");
+        printf("server: peer pid is zero (unexpected)\n");
         close(conn); close(s);
         return NULL;
     }
@@ -245,13 +260,13 @@ static void *server_main(void *arg)
     n = read(conn, buf, sizeof(buf) - 1);
     if (n != (ssize_t)(sizeof(MSG_LINE) - 1) ||
         memcmp(buf, MSG_LINE, sizeof(MSG_LINE) - 1) != 0) {
-        fprintf(stderr, "server: stdio leg read got %zd errno=%d\n", n, errno);
+        printf("server: stdio leg read got %zd errno=%d\n", n, errno);
         close(conn); close(s);
         return NULL;
     }
     w = write(conn, MSG_ECHO, sizeof(MSG_ECHO) - 1);
     if (w != (ssize_t)(sizeof(MSG_ECHO) - 1)) {
-        fprintf(stderr, "server: stdio leg write got %zd errno=%d\n", w, errno);
+        printf("server: stdio leg write got %zd errno=%d\n", w, errno);
         close(conn); close(s);
         return NULL;
     }
@@ -287,35 +302,71 @@ static int stdio_over_socket(int c)
 {
     FILE *cf = fdopen(c, "r+");
     if (!cf) {
-        fprintf(stderr, "client: fdopen(socket) failed errno=%d\n", errno);
+        printf("client: fdopen(socket) failed errno=%d\n", errno);
         close(c);
         return -1;
     }
     if (fputs(MSG_LINE, cf) == EOF || fflush(cf) != 0) {
-        fprintf(stderr, "client: stdio write over socket failed errno=%d\n", errno);
+        printf("client: stdio write over socket failed errno=%d\n", errno);
         fclose(cf);
         return -1;
+    }
+    /* ppoll() on the socket, with the reply on its way: it must report the
+     * socket READABLE. Handed to the kernel raw, a socket fd (a tagged value,
+     * not a kernel handle) answers POLLNVAL at once -- which also counts as
+     * "ready", so only the revents tell the two apart. */
+    {
+        struct pollfd pf = { .fd = c, .events = POLLIN };
+        struct timespec ts = { .tv_sec = 10 };
+        int pr = ppoll(&pf, 1, &ts, NULL);
+        if (pr != 1 || !(pf.revents & POLLIN) || (pf.revents & POLLNVAL)) {
+            printf("client: ppoll(socket) = %d revents=%#x errno=%d (want POLLIN)\n",
+                   pr, (unsigned)pf.revents, errno);
+            fclose(cf);
+            return -1;
+        }
     }
     int v = -1;
     char rest[16];
     if (fscanf(cf, "ECHO %d", &v) != 1 || v != 7 ||
         !fgets(rest, sizeof rest, cf) || strcmp(rest, " tail\n") != 0) {
-        fprintf(stderr, "client: stdio read over socket wrong: v=%d errno=%d\n",
+        printf("client: stdio read over socket wrong: v=%d errno=%d\n",
                 v, errno);
         fclose(cf);
         return -1;
     }
     errno = 0;
     if (fseek(cf, 0, SEEK_CUR) != -1 || errno != ESPIPE) {
-        fprintf(stderr, "client: fseek(socket FILE) errno=%d (want ESPIPE)\n", errno);
+        printf("client: fseek(socket FILE) errno=%d (want ESPIPE)\n", errno);
         fclose(cf);
         return -1;
     }
     if (fclose(cf) != 0) {
-        fprintf(stderr, "client: fclose(socket FILE) failed errno=%d\n", errno);
+        printf("client: fclose(socket FILE) failed errno=%d\n", errno);
         return -1;
     }
-    printf("client: stdio over socket (fputs/fscanf/fgets/fclose) ok\n");
+    printf("client: stdio over socket (fputs/ppoll/fscanf/fgets/fclose) ok\n");
+    return 0;
+}
+
+/* A socket fd does not fit an fd_set, and FD_SET must say so instead of
+ * storing 128 MiB past the set. The child does exactly that and must die by
+ * abort() -- 127 here -- not return, and not fault on some unmapped page. */
+static int test_fdset_guard(void)
+{
+    char *cargv[] = { (char *)SELF, (char *)"fdsetoob", NULL };
+    pid_t pid;
+    int st = 0;
+    if (posix_spawn(&pid, SELF, NULL, NULL, cargv, environ) != 0) {
+        printf("test: fdset guard: respawn failed errno=%d\n", errno);
+        return -1;
+    }
+    if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 127) {
+        printf("test: fdset guard: child status %#x (want abort = exit 127)\n",
+               (unsigned)st);
+        return -1;
+    }
+    printf("test: FD_SET(socket fd) stops the program (abort) ok\n");
     return 0;
 }
 
@@ -324,19 +375,19 @@ static int test_round_trip(void)
     int slots_before = free_socket_slots();
     if (slots_before < 3 || slots_before >= 64) {
         /* 64 is the probe's own ceiling: a reading AT it is not a measurement. */
-        fprintf(stderr, "test: %d socket slots free at start (want 3..63)\n",
+        printf("test: %d socket slots free at start (want 3..63)\n",
                 slots_before);
         return -1;
     }
 
     if (pthread_barrier_init(&g_ready, NULL, 2) != 0) {
-        fprintf(stderr, "test: pthread_barrier_init failed\n");
+        printf("test: pthread_barrier_init failed\n");
         return -1;
     }
 
     pthread_t srv;
     if (pthread_create(&srv, NULL, server_main, NULL) != 0) {
-        fprintf(stderr, "test: pthread_create failed\n");
+        printf("test: pthread_create failed\n");
         return -1;
     }
 
@@ -345,7 +396,7 @@ static int test_round_trip(void)
 
     int c = socket(AF_UNIX, SOCK_STREAM, 0);
     if (c < 0) {
-        fprintf(stderr, "client: socket failed errno=%d\n", errno);
+        printf("client: socket failed errno=%d\n", errno);
         pthread_join(srv, NULL);
         return -1;
     }
@@ -356,7 +407,7 @@ static int test_round_trip(void)
     memcpy(addr.sun_path, SOCK_PATH, sizeof(SOCK_PATH));
 
     if (connect(c, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        fprintf(stderr, "client: connect failed errno=%d\n", errno);
+        printf("client: connect failed errno=%d\n", errno);
         close(c);
         pthread_join(srv, NULL);
         return -1;
@@ -365,7 +416,7 @@ static int test_round_trip(void)
 
     ssize_t w = write(c, MSG_PING, sizeof(MSG_PING) - 1);
     if (w != (ssize_t)(sizeof(MSG_PING) - 1)) {
-        fprintf(stderr, "client: write got %zd want %zu errno=%d\n",
+        printf("client: write got %zd want %zu errno=%d\n",
                 w, sizeof(MSG_PING) - 1, errno);
         close(c);
         pthread_join(srv, NULL);
@@ -376,7 +427,7 @@ static int test_round_trip(void)
     char buf[64];
     ssize_t n = read(c, buf, sizeof(buf) - 1);
     if (n != (ssize_t)(sizeof(MSG_PONG) - 1)) {
-        fprintf(stderr, "client: read got %zd want %zu errno=%d\n",
+        printf("client: read got %zd want %zu errno=%d\n",
                 n, sizeof(MSG_PONG) - 1, errno);
         close(c);
         pthread_join(srv, NULL);
@@ -384,7 +435,7 @@ static int test_round_trip(void)
     }
     buf[n] = '\0';
     if (memcmp(buf, MSG_PONG, sizeof(MSG_PONG) - 1) != 0) {
-        fprintf(stderr, "client: read got '%s' want '%s'\n", buf, MSG_PONG);
+        printf("client: read got '%s' want '%s'\n", buf, MSG_PONG);
         close(c);
         pthread_join(srv, NULL);
         return -1;
@@ -408,14 +459,14 @@ static int test_round_trip(void)
         socklen_t credlen = sizeof(cred);
         int r = getsockopt(c, SOL_SOCKET, SO_PEERCRED, &cred, &credlen);
         if (r == 0) {
-            fprintf(stderr, "client: getsockopt(SO_PEERCRED) UNEXPECTEDLY "
+            printf("client: getsockopt(SO_PEERCRED) UNEXPECTEDLY "
                     "succeeded on client-side fd\n");
             close(c);
             pthread_join(srv, NULL);
             return -1;
         }
         if (errno != ENOTSOCK) {
-            fprintf(stderr, "client: getsockopt(SO_PEERCRED) wrong errno=%d "
+            printf("client: getsockopt(SO_PEERCRED) wrong errno=%d "
                     "(want ENOTSOCK on client-side fd at v1.0)\n", errno);
             close(c);
             pthread_join(srv, NULL);
@@ -425,20 +476,28 @@ static int test_round_trip(void)
     }
 
     int stdio_rc = stdio_over_socket(c);   /* closes c */
+    if (stdio_rc != 0) {
+        /* Do NOT join: on a libc whose fclose() strands the socket slot -- the
+         * defect this leg exists for -- the connection is still open, the
+         * server thread is blocked in read(), and the join never returns. The
+         * failure would then arrive as joey's reap deadline with no line. */
+        printf("pouch-hello-sockets: FAIL stdio over socket\n");
+        fflush(stdout);
+        _exit(1);
+    }
     pthread_join(srv, NULL);
     pthread_barrier_destroy(&g_ready);
-
-    if (stdio_rc != 0) return -1;
     if (!g_server_ok) {
-        fprintf(stderr, "test: server thread reported failure\n");
+        printf("test: server thread reported failure\n");
         return -1;
     }
 
-    /* Every slot this test took must be back: the listener, the accepted
-     * end, and the client end that was closed through its FILE. */
+    /* Every slot this test took must be back: the listener and the client end
+     * that was closed through its FILE. (The AF_UNIX accepted end is a plain
+     * kernel fd, not a slot.) */
     int slots_after = free_socket_slots();
     if (slots_after != slots_before) {
-        fprintf(stderr, "test: socket slots leaked: %d free before, %d after\n",
+        printf("test: socket slots leaked: %d free before, %d after\n",
                 slots_before, slots_after);
         return -1;
     }
@@ -447,15 +506,27 @@ static int test_round_trip(void)
     return 0;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    /* CHILD (self-respawn, the fd_set guard leg). */
+    if (argc >= 2 && !strcmp(argv[1], "fdsetoob")) {
+        int s = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (s < 0) return 3;
+        fd_set set;
+        FD_ZERO(&set);
+        FD_SET(s, &set);
+        return 0;                /* reached only if the guard is missing */
+    }
+
     printf("pouch-hello-sockets: AF_UNIX SOCK_STREAM byte-mode /srv\n");
 
     if (test_family_refusals() != 0)     return 1;
     if (test_path_validation() != 0)     return 1;
     if (test_connect_nonexistent() != 0) return 1;
     if (test_round_trip() != 0)          return 1;
+    if (test_fdset_guard() != 0)         return 1;
 
-    printf("pouch-hello-sockets: exit 0\n");
+    /* The census is what joey matches: a stale binary prints the old marker. */
+    printf("pouch-hello-sockets: legs=refusals,paths,round-trip,peercred,stdio,ppoll,slots,fdset-guard: exit 0\n");
     return 0;
 }

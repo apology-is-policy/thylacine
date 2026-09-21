@@ -3,7 +3,7 @@ id: sub-kernel-territory
 type: sub
 title: "Territory — the per-Proc namespace (mount table, root, cwd)"
 parent: moc-kernel-namespace
-code: ["kernel/territory.c", "kernel/include/thylacine/territory.h"]
+code: ["kernel/territory.c", "kernel/include/thylacine/territory.h", "kernel/test/test_territory_pivot_root.c", "usr/symlink-probe/src/main.rs"]
 audit: hard
 guarded-by: [inv-i1, inv-i3, inv-i33]
 validated-by: [spec-territory, gate-smp]
@@ -238,9 +238,9 @@ at the next `territory_ref`/`unref` rather than corrupting silently.
 their compile-time caps before the copy loops, so a torn count cannot
 walk past the arrays.
 
-`PGRP_MAX_MOUNTS` is **32**, grown 8 → 16 → 20 → 32 — every time for
-the same cause, and the fourth time the cause was fixed instead
-(2026-09-21). A root swap used to leave the previous generation's entries
+`PGRP_MAX_MOUNTS` is **32**, grown 8 → 12 → 16 → 20 → 32 (`git log -G`) —
+every time for the same cause, and the fifth time the cause was fixed
+instead (2026-09-21). A root swap used to leave the previous generation's entries
 in the table. The boot namespace mounts `/srv`, `/proc`, `/ctl`, `/dev`,
 `/hw`, `/hw/pci`, `/env` on devramfs synthetic directories; joey pivots to
 the disk root and re-grafts each; and the seven originals stayed — their
@@ -258,12 +258,16 @@ resource** — and then it presents as the other feature's bug.
 same `ns_lock` hold that installs a new root, `territory_pivot_root` and
 `territory_chroot` drop every entry whose mount point lies in a device
 instance unreachable from that root. Reachability is the least set `R` of
-`(dc, devno)` instances containing the new root's and closed under
-"mount-point instance in `R` ⇒ source instance in `R`". Three facts make
+`(dc, devno)` instances containing the new root's — and, when the root is
+a union handle, its mount point's (fact 4) — and closed under
+"mount-point instance in `R` ⇒ source instance in `R`". Four facts make
 that rule sound rather than hopeful:
 
-1. **The resolver only descends.** `..` never reaches `Dev.walk`; stalk
-   pops its in-call trail and the pop is a no-op at the base
+1. **The resolver only descends.** stalk handles `..` itself: it pops its
+   in-call trail and the pop is a no-op at the base (a device's own `..`
+   arm IS reachable — the union readdir dedup hands server-supplied names
+   to a member's walk — but it stays inside that device's instance, which
+   per-instance granularity already covers)
    ([[sub-kernel-stalk]]), and a symlink re-anchors at `root_spoor`. So
    every Spoor a resolution from the new root can hold is in `R`, an entry
    keyed outside `R` can never fire for one, and every name resolved from
@@ -283,14 +287,41 @@ that rule sound rather than hopeful:
    closure match such a Dev on `dc` alone. The set of devno assigners was
    enumerated, not assumed: `spoor_alloc` (0), `spoor_clone` (copy),
    `dev9p` attach, `devsrv` attach, `env_alloc`, `devenv_walk`.
+4. **One Spoor is consulted at the base without having been walked to: a
+   union root's mount point** (audit round 1, F1 — a P1 the first version
+   had). An `O_PATH` open of a union directory has member[0]'s identity
+   and carries the point in `union_snap`; `chroot` / `pivot_root` take
+   exactly such handles, and stalk routes every first component from a
+   union base through the entries keyed AT THE POINT
+   (`union_base = base->union_snap->point`). The point lives in the tree
+   the union was mounted in. Seeded from the root alone, a chroot into
+   `/bin` — a union in the default image — shed the union's own entries:
+   every name under the new root was `ENOENT` and `open("/")` landed on
+   the covered directory. The point's instance is therefore a second
+   seed. `union_snap` is set once before the Spoor is published and freed
+   with it, so the read under `ns_lock` needs only the root ref the
+   caller holds. `reach[]` is sized for it (`PGRP_MAX_MOUNTS + 2`: two
+   seeds + one new instance per entry), guarded, and a test lands exactly
+   on the bound.
+
+The spec could not have caught fact 4, and the reason is the lesson:
+round 1's `territory_shed.tla` stated `ShedLosesNothing` against the same
+closure `Keep` was built from, so it held for ANY rule — the auditor
+replaced the closure with `{root}` and with "every tree" and TLC reported
+no error both times. It now states it against an operational WALKER
+(start / cross / per-walker restamp) that shares no operator with the
+rule, and three sabotages of the closure each fail. A check that compares
+a rule with itself is the spec-level form of a test that cannot fail.
 
 Dropped entries release what `unmount` releases: `path_unref(mp_path)`
 under the lock, `spoor_clunk(source)` deferred outside it (a Dev close
 hook may sleep). Survivors keep their relative order, which IS the union
 search order. The idempotent same-root call swaps nothing and sheds
 nothing. `mount()` itself never sheds. Measured after the fix, same
-probe: a login session holds **17** entries (15 of joey's, login's two),
-so a container's ten fit with five to spare.
+probe: a shell in a login session holds **17** entries (15 of joey's,
+login's `/home/<user>`, ut's `/tmp` bind), so a container's eleven at most
+(`/dio`, eight fixed binds, `/net` and `/dev/tty` when granted) fit with
+four to spare.
 
 **Order matters, and the text says which order.** Reachability is
 evaluated once, at the swap, over the table as it stands. joey binds the
@@ -305,8 +336,20 @@ re-grafts it explicitly ([[sub-stratum-boot]]).
 
 **The one observable change.** An fd-relative walk from a directory fd
 opened BEFORE the swap, into a tree the new root cannot reach, no longer
-crosses the shed mounts and sees the underlying directory. Such an fd is
-a handle on a file tree, not on the old namespace. A mount used as a MASK
+crosses the shed mounts and sees the underlying directory (a union dirfd
+whose point's entries were shed finds no members: `ENOENT` for every
+name). Such an fd is a handle on a file tree, not on the old namespace.
+A peer thread's resolution already in flight across the swap is the same
+case: the lock makes each LOOKUP atomic with the swap, not each
+resolution, and a resolution straddling a root swap never had a
+consistent namespace. `SYS_PIVOT_ROOT` refuses a non-directory root as
+`SYS_CHROOT` always did (one `sys_lookup_root_source`): with the shed, a
+pivot onto a pipe strips the table for good instead of wedging the Proc
+until it pivots back. `usr/symlink-probe` carries the deny-path legs (its
+leg K is a real chroot, so it is where a root gate can be probed from
+userspace): chroot AND pivot onto a regular file are refused and the
+namespace still resolves afterwards. The shed's own regressions are the 13
+`territory.shed_*` kernel tests in `test_territory_pivot_root.c`. A mount used as a MASK
 over a directory in an unreachable tree therefore stops masking for
 holders of such an fd; nothing in-tree relies on more.
 

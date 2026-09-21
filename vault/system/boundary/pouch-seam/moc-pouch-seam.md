@@ -4,7 +4,7 @@ type: moc
 title: "pouch — the POSIX boundary line"
 parent: moc-boundary
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-09-21
 ---
 pouch is Thylacine's C library: musl 1.2.5 vendored pristine at
 `third_party/musl/`, with a **patch series** (`usr/lib/pouch/patches/`,
@@ -49,8 +49,9 @@ system):
   and the seam.
 
 P-1 and P-3 are structurally enforced by one mechanism ([[sub-pouch-seam]]'s
-sentinel); P-4 is enforced by review against the UPPER/LOWER/SEAM
-inventory. P-2 is a kernel-side property — its evidence is the absence of
+sentinel); P-4 is enforced by per-patch review alone — the
+"UPPER/LOWER/SEAM inventory" this line used to cite was never written
+([[sub-pouch-seam]] derives the as-built boundary instead). P-2 is a kernel-side property — its evidence is the absence of
 socket, signal, and terminal syscalls in `kernel/syscall.c`.
 
 ## Cross-cutting

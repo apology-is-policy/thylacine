@@ -176,6 +176,7 @@ int main(void) {
     }
     printf("pouch-hello-threads: ok (%u workers, mutex-protected counter, joined)\n",
            NTHREADS);
-    printf("pouch-hello-threads: exit 0\n");
+    /* The census is what joey matches: a stale binary prints the old marker. */
+    printf("pouch-hello-threads: legs=pthread,mutex,main-stack-maps-row: exit 0\n");
     return 0;
 }

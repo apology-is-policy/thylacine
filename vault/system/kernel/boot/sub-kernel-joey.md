@@ -15,7 +15,7 @@ design:
   - "docs/ARCHITECTURE.md section 5.1"
   - "docs/CORVUS-DESIGN.md section 3"
 created: 2026-09-06
-updated: 2026-09-06
+updated: 2026-09-21
 ---
 ## Purpose
 
@@ -188,8 +188,9 @@ exec window), which is the whole point of the #85 transient.
   ([[sub-stratum-boot]]); this kproc keeps its one-shot shape until nothing needs
   it to.
 - **The boot mounts are dropped by the pivot** (they key on devramfs synth
-  dirs), and re-grafted post-pivot by userspace joey. A pivot-time GC of the
-  orphaned pre-pivot mounts is a recorded seam ([[seam-80-pivot-orphan-mounts]]).
+  dirs), and re-grafted post-pivot by userspace joey. The orphaned pre-pivot
+  entries are shed at the pivot itself since 2026-09-21
+  ([[seam-80-pivot-orphan-mounts]], closed; [[sub-kernel-territory]]).
 
 ## Caveats
 

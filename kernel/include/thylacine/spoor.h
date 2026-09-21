@@ -219,10 +219,14 @@ struct Spoor {
                                // (>= 2 grafted members). Holds the member
                                // directories OPENED (OREAD) + R-gated + ref-held
                                // AT OPEN TIME, in declared order (Plan 9's
-                               // Chan.umh/umc). ONLY spoor_readdir_run consults
-                               // it, to merge every member's entries (dedup
+                               // Chan.umh/umc). spoor_readdir_run consults the
+                               // MEMBERS, to merge their entries (dedup
                                // first-member-wins; specs/territory.tla
-                               // ReaddirDedupFirstWins). The opened Spoor's OWN
+                               // ReaddirDedupFirstWins); the retained POINT is
+                               // also read by stalk (a union dirfd or union
+                               // root as a resolution base), the fd mutation
+                               // handlers, and the mount-table shed's closure
+                               // seed (ARCH 9.6.10). The opened Spoor's OWN
                                // identity is member[0] (the final cross), so
                                // fstat/type/every non-readdir op sees member[0].
                                // Captured ONCE at open (UM-8 F1/F2/F7: dev9p

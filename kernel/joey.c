@@ -396,7 +396,8 @@ void joey_run(void) {
         // reads it, never raw ECAM). MUST mount AFTER /hw: "hw/pci" resolves by
         // crossing the /hw mount into devhw, then STALK_MOUNT-resolving devhw's
         // synthetic `pci` child (the mount-point). The v1.0 warden reads /hw/pci
-        // PRE-pivot; the post-pivot re-graft of this nested mount is a v1.x seam.
+        // PRE-pivot; userspace joey re-grafts this nested mount after its pivot,
+        // which sheds this entry with the rest of the boot generation (ARCH 9.6.10).
         if (joey_mount_static_dev(kt, &devpci, "hw/pci", 6) != 0)
             extinction("joey: /hw/pci mount (devpci) failed");
         uart_puts("  joey: /hw/pci mounted (mediated PCI topology)\n");

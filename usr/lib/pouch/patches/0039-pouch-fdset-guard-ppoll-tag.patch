@@ -1,0 +1,120 @@
+B-0 (Boosty) audit round 2, F2 -- a pouch socket fd cannot live in an fd_set:
+FD_SET stops instead of writing 128 MiB past the set, and ppoll() learns the
+socket tag.
+
+A pouch socket fd is 0x40000000 | slot (0006 / 0016). The dossier's central
+obligation is that every fd-consuming call is tag-aware, and round 1's census
+("every site that passes an fd to a raw syscall") concluded that every
+remaining one FAILS VISIBLY. Two do not, and that census could not see either:
+select takes a BITMAP and ppoll an ARRAY.
+
+  FD_SET(sock, &set)   upstream's macro indexes fds_bits[d / 64] with no bound.
+                       d = 0x40000000 is index 16,777,216 of a 16-long array:
+                       a store 128 MiB past the set, in APPLICATION code,
+                       before libc is entered. From the main stack that is
+                       usually unmapped (a snare); from a heap-resident set it
+                       is whatever Burrow sits there -- silent corruption.
+                       select() does refuse the fd (n > FD_SETSIZE), but only
+                       afterwards. FD_CLR / FD_ISSET are the same shape.
+  ppoll()              was `syscall_cp(SYS_poll, fds, ...)`: a tagged fd
+                       reaches the kernel as 0x4000000N, answers POLLNVAL,
+                       counts as ready, defeats the timeout and busy-spins --
+                       the exact failure 0015 fixed in poll() and not here.
+
+Pre-existing, not introduced by this series; not reachable in-tree today
+(tyrquake's FD_SET on a socket is under SERVERONLY; make's is a pipe fd). curl
+-- the browser arc's likely network layer -- falls back to select() where
+poll() is unusable.
+
+THE FIX HERE is the honest minimum:
+  - FD_SET / FD_CLR / FD_ISSET check (unsigned)d < FD_SETSIZE and otherwise
+    call __pouch_fdset_oob(), which says why on fd 2 (raw write, no stdio) and
+    abort()s. That is the check glibc's fortified build makes (__fdelt_chk):
+    a loud stop replaces a silent wild store. POSIX lets these macros
+    evaluate their arguments more than once.
+  - ppoll() goes through poll(), which translates a tagged fd to its kernel
+    poll target and drops negative fds.
+
+THE REAL FIX is not here and is recorded as owed: socket fds that are small
+integers (a placeholder kernel handle per slot with an fd -> slot side table),
+which would let select() work on sockets and retire the tag from every
+fd-consuming call. That is a redesign of 0006 / 0016 -- its own chunk, its own
+audit. Until then a port that select()s on a socket stops with a message that
+names the cause, and one that poll()s works.
+
+The macros keep upstream's value (the assignment / the test) behind a comma:
+`((void)(fits || (oob(d), 0)), <upstream expression>)`. A ?: form would make
+every FD_SET statement in every port an unused-value warning.
+
+Device-side pin (same commit, not in this patch file): pouch-hello-sockets
+ppoll()s a connected socket with the reply on its way and requires POLLIN
+rather than POLLNVAL, and re-runs itself as a child that FD_SETs a socket fd
+and must die with abort's status (127), not return and not fault.
+
+--- a/include/sys/select.h
++++ b/include/sys/select.h
+@@ -23,10 +23,21 @@
+ 	unsigned long fds_bits[FD_SETSIZE / 8 / sizeof(long)];
+ } fd_set;
+ 
++/* pouch: a descriptor that does not fit the set stops the program instead of
++ * indexing past it. Upstream's macros trust the caller, which is sound only
++ * while every fd is a small integer -- and a pouch SOCKET fd is not: it is
++ * 0x40000000 | slot, so FD_SET(sock, &set) was a store 128 MiB past the set,
++ * in application code, before libc was ever entered (select() refuses such an
++ * fd, but only afterwards). Sockets are waited on with poll(). The check is
++ * the one glibc's fortified build makes (__fdelt_chk). POSIX lets these macros
++ * evaluate their arguments more than once. */
++_Noreturn void __pouch_fdset_oob(int);
++#define __FD_FITS(d) ((unsigned)(d) < FD_SETSIZE)
++
+ #define FD_ZERO(s) do { int __i; unsigned long *__b=(s)->fds_bits; for(__i=sizeof (fd_set)/sizeof (long); __i; __i--) *__b++=0; } while(0)
+-#define FD_SET(d, s)   ((s)->fds_bits[(d)/(8*sizeof(long))] |= (1UL<<((d)%(8*sizeof(long)))))
+-#define FD_CLR(d, s)   ((s)->fds_bits[(d)/(8*sizeof(long))] &= ~(1UL<<((d)%(8*sizeof(long)))))
+-#define FD_ISSET(d, s) !!((s)->fds_bits[(d)/(8*sizeof(long))] & (1UL<<((d)%(8*sizeof(long)))))
++#define FD_SET(d, s)   ((void)(__FD_FITS(d) || (__pouch_fdset_oob(d), 0)), (s)->fds_bits[(d)/(8*sizeof(long))] |= (1UL<<((d)%(8*sizeof(long)))))
++#define FD_CLR(d, s)   ((void)(__FD_FITS(d) || (__pouch_fdset_oob(d), 0)), (s)->fds_bits[(d)/(8*sizeof(long))] &= ~(1UL<<((d)%(8*sizeof(long)))))
++#define FD_ISSET(d, s) ((void)(__FD_FITS(d) || (__pouch_fdset_oob(d), 0)), !!((s)->fds_bits[(d)/(8*sizeof(long))] & (1UL<<((d)%(8*sizeof(long))))))
+ 
+ int select (int, fd_set *__restrict, fd_set *__restrict, fd_set *__restrict, struct timeval *__restrict);
+ int pselect (int, fd_set *__restrict, fd_set *__restrict, fd_set *__restrict, const struct timespec *__restrict, const sigset_t *__restrict);
+--- /dev/null
++++ b/src/select/__pouch_fdset_oob.c
+@@ -0,0 +1,24 @@
++#include <sys/select.h>
++#include <stdlib.h>
++#include <string.h>
++#include "syscall.h"
++
++/* FD_SET / FD_CLR / FD_ISSET on a descriptor outside [0, FD_SETSIZE): see
++ * <sys/select.h>. Says why on fd 2 with a raw write (no stdio: this can run
++ * in a program that links none) and aborts -- the alternative was a silent
++ * wild store. */
++_Noreturn void __pouch_fdset_oob(int d)
++{
++	static const char head[] = "pouch: fd 0x";
++	static const char tail[] =
++		" does not fit an fd_set (a socket fd is a tagged value here;"
++		" wait on it with poll())\n";
++	char hex[8];
++	unsigned u = d;
++	int i;
++	for (i = 7; i >= 0; i--, u >>= 4) hex[i] = "0123456789abcdef"[u & 15];
++	__syscall(SYS_write, 2, head, sizeof head - 1);
++	__syscall(SYS_write, 2, hex, sizeof hex);
++	__syscall(SYS_write, 2, tail, sizeof tail - 1);
++	abort();
++}
+--- a/src/select/ppoll.c
++++ b/src/select/ppoll.c
+@@ -35,5 +35,9 @@
+ 		if (ms > 0x7fffffffLL) ms = 0x7fffffffLL;
+ 		timeout_ms = (int)ms;
+ 	}
+-	return syscall_cp(SYS_poll, fds, n, timeout_ms);
++	/* Through poll(), not SYS_poll: poll() is where a pouch socket fd is
++	 * translated to its kernel poll target and a negative fd is dropped. Raw,
++	 * a tagged fd reaches the kernel as 0x4000000N, answers POLLNVAL, counts
++	 * as ready and busy-spins the caller. */
++	return poll(fds, n, timeout_ms);
+ }

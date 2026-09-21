@@ -907,7 +907,12 @@ static int do_pouch_hello_smoke(void) {
     // > MMAP_THRESHOLD individually-mmapped path; verifies byte-level
     // round-trip on every region.
     static const char pm_name[]   = "pouch-hello-malloc";
-    static const char pm_expect[] = "pouch-hello-malloc: exit 0";
+    // The expected marker carries the prover's LEG CENSUS, not just "exit 0": a
+    // stale binary (the bake traps that skip a populate) still prints the old
+    // marker, and every new leg would be green without having run. Adding a leg
+    // means adding its name in the prover AND here. Same for the three below.
+    static const char pm_expect[] =
+        "pouch-hello-malloc: legs=heap,physpages,nprocs,sentinel-wrappers,ualarm,dtablesize: exit 0";
     if (pouch_smoke_one(pm_name, sizeof(pm_name) - 1,
                         pm_expect, sizeof(pm_expect) - 1) != 0)
         return -1;
@@ -923,7 +928,8 @@ static int do_pouch_hello_smoke(void) {
     // counter: any lost increment trips the "COUNT MISMATCH" return.
     // Closes POUCH-DESIGN.md §13's multithreaded-test exit criterion.
     static const char pt_name[]   = "pouch-hello-threads";
-    static const char pt_expect[] = "pouch-hello-threads: exit 0";
+    static const char pt_expect[] =
+        "pouch-hello-threads: legs=pthread,mutex,main-stack-maps-row: exit 0";
     if (pouch_smoke_one(pt_name, sizeof(pt_name) - 1,
                         pt_expect, sizeof(pt_expect) - 1) != 0)
         return -1;
@@ -981,7 +987,8 @@ static int do_pouch_hello_smoke(void) {
     // verify SO_PEERCRED on both sides. Closes POUCH-DESIGN.md §6.2 /
     // §14 sub-chunk 12's exit criterion.
     static const char po_name[]   = "pouch-hello-sockets";
-    static const char po_expect[] = "pouch-hello-sockets: exit 0";
+    static const char po_expect[] =
+        "pouch-hello-sockets: legs=refusals,paths,round-trip,peercred,stdio,ppoll,slots,fdset-guard: exit 0";
     if (pouch_smoke_one_perms(po_name, sizeof(po_name) - 1,
                               po_expect, sizeof(po_expect) - 1,
                               0,
@@ -11396,13 +11403,16 @@ int main(void) {
         // Task #50: the create-mode fopen / unlink-family prover
         // (0024-pouch-fopen-create). Spawn /bin/pouch-hello-fopen -- it
         // drives fopen("w"/"a") create + O_TRUNC truncation + O_EXCL +
-        // unlink/remove + tmpfile (write/rewind/read AFTER the immediate
-        // unlink = the fid-survives-unlink property) POST-PIVOT on the
+        // unlink/remove + tmpfile (delete-on-close: the name is gone after
+        // fclose and after a child's exit; an open file does NOT outlive its
+        // last name on Stratum, so there is no unlink-at-creation) + the
+        // O_APPEND omode + the fscanf refill passes, POST-PIVOT on the
         // Stratum FS, the surface Quake's config.cfg rides. /tmp exists
         // by this point (the go-arc env block creates it). Boot-fatal.
         {
             const char pf_name[]   = "/bin/pouch-hello-fopen";
-            const char pf_expect[] = "pouch-hello-fopen: exit 0";
+            const char pf_expect[] =
+                "pouch-hello-fopen: legs=create,append-omode,truncate,excl,unlink,tmpfile,scan: exit 0";
             if (pouch_smoke_one(pf_name, sizeof(pf_name) - 1,
                                 pf_expect, sizeof(pf_expect) - 1) != 0) {
                 t_putstr("joey: #50 PROBE pouch-hello-fopen FAILED\n");

@@ -143,8 +143,9 @@ re-graft is explicit — and the aliases the old devramfs root used to carry
 into `/bin` (`/bin/proc`, `/bin/srv`, `/bin/dev/cons`) are gone with it.
 O_PATH crosses each mount and yields the *Dev root*, not the synthetic
 mount point — that distinction is what makes the re-graft land the real
-tree. Each re-graft is `mkdir`-then-`MREPL`, and the `mkdir` must be
-idempotent because the pool persists across reboots and a later boot finds
+tree. Each re-graft onto the DISK root is `mkdir`-then-`MREPL` (`/hw/pci`
+alone has no `mkdir`: its point is devhw's synthetic `pci` child), and the
+`mkdir` must be idempotent because the pool persists across reboots and a later boot finds
 its own directories already there.
 
 **`/dev/pts` is grafted separately, after the swap, once ptyfs is up** — it is
