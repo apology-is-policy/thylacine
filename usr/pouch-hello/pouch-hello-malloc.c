@@ -122,7 +122,10 @@ int main(void) {
         unsigned long total = 0;
         FILE *mf = fopen("/ctl/memory", "r");
         if (!mf) return fail("fopen /ctl/memory");
-        if (fscanf(mf, " total: %lu pages", &total) != 1 || total == 0) {
+        int got = fscanf(mf, " total: %lu pages", &total);
+        if (got != 1 || total == 0) {
+            printf("pouch-hello-malloc: fscanf=%d total=%lu eof=%d err=%d\n",
+                   got, total, feof(mf), ferror(mf));
             fclose(mf);
             return fail("parse /ctl/memory total");
         }

@@ -22,6 +22,9 @@
 //              unlink; write/rewind/read AFTER the unlink proves the
 //              Plan 9-lineage fid-survives-unlink property end to end
 //              (the open fid keeps the file alive until clunk).
+//   scan     : fscanf over a real FILE, three pushbacks deep (0035): the
+//              read backend must leave the last byte at rpos[-1] or every
+//              pushed-back delimiter is re-read as a stale buffer byte.
 //
 // fd 1 is a pipe write-end joey relays to the boot log. Cross-compiled
 // with tools/pouch-clang against the pouch sysroot.
@@ -114,6 +117,40 @@ int main(void) {
         return fail("tmpfile verify");
     if (fclose(f)) return fail("tmpfile fclose");
     puts("pouch-hello-fopen: tmpfile OK");
+
+    // scan (pouch 0035): the scanf family pushes its terminating byte back with a
+    // bare `rpos--`, which only works if the read backend left that byte at
+    // rpos[-1]. Each step below re-reads a pushed-back delimiter: the space after
+    // "alpha", the newline a "%d" stops at, and the byte fgetc must then see.
+    // The arithmetic check is on VALUES, so a scan that "succeeds" on the wrong
+    // bytes still fails.
+    f = tmpfile();
+    if (!f) return fail("scan tmpfile");
+    if (fputs("alpha 12 -7\n0x1f beta\ntail line\n", f) == EOF) return fail("scan fputs");
+    if (fflush(f)) return fail("scan fflush");
+    rewind(f);
+    {
+        char w1[8] = {0}, w2[8] = {0};
+        int a = 0, b = 0, n;
+        unsigned x = 0;
+        n = fscanf(f, "%7s %d %d", w1, &a, &b);
+        if (n != 3 || strcmp(w1, "alpha") || a != 12 || b != -7) {
+            printf("pouch-hello-fopen: scan line1 n=%d w1=[%s] a=%d b=%d\n", n, w1, a, b);
+            return fail("scan line1 (fscanf pushback)");
+        }
+        if (fgetc(f) != '\n') return fail("scan pushed-back newline not re-read");
+        n = fscanf(f, "%x %7s", &x, w2);
+        if (n != 2 || x != 0x1f || strcmp(w2, "beta")) {
+            printf("pouch-hello-fopen: scan line2 n=%d x=%#x w2=[%s]\n", n, x, w2);
+            return fail("scan line2");
+        }
+        if (fgetc(f) != '\n') return fail("scan second pushed-back newline");
+        if (!fgets(buf, sizeof buf, f) || strcmp(buf, "tail line\n"))
+            return fail("scan fgets after fscanf");
+        if (fgetc(f) != EOF || !feof(f)) return fail("scan EOF");
+    }
+    if (fclose(f)) return fail("scan fclose");
+    puts("pouch-hello-fopen: scan OK");
 
     puts("pouch-hello-fopen: exit 0");
     return 0;
