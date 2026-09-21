@@ -242,6 +242,16 @@ event-driven; no timing constant appears in this path.
 
 ## Caveats
 
+- **joey's boot-fatal pouch provers are matched on a LEG CENSUS, and the four
+  census strings are not joey's to type.** `pouch_smoke_core` matches each
+  prover's marker (`<name>: legs=a,b,c: exit 0`) rather than `exit 0`, so a
+  stale binary cannot pass for one with a new leg; since 2026-09-21 the strings
+  come from `usr/pouch-hello/pouch-census.h`, which the prover that prints each
+  one reads too ([[sub-pouch-seam]]). `joey.c` includes it by relative path —
+  the only header it takes from outside `libt`. What those provers pin is
+  documented with the mechanisms they pin ([[sub-pouch-seam]],
+  [[sub-pouch-net]], [[sub-pouch-fs]], [[sub-pouch-thread]]), not here.
+
 - joey's **warden** spawn mask is `CAP_HW_CREATE | CAP_CSPRNG_READ` (+
   `SPAWN_PERM_MAY_POST_SERVICE`) since H-4b-1 (2026-09-02): the warden never
   draws entropy itself, it confers the second bit on the one driver whose

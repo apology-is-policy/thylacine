@@ -32,6 +32,11 @@
 //   L re-anchor     an absolute target anchors at the ROOT, not at the base
 //   K current-root  ...and at the root the caller has NOW (I-28)
 //
+// Riders, because this is the one native probe that runs on the live FS and
+// performs a real chroot -- each is argued where it is defined:
+//   N append        an append open carries T_OAPPEND (write-after-seek lands at END)
+//   U union-a/-b    a UNION root under chroot, and the dissolved union (ARCH 9.6.10)
+//
 // Legs L and K together are the I-28 containment proof, and they are two legs
 // because a revert probe proved one is not enough.
 //
@@ -175,6 +180,7 @@ fn pre_clean() {
     ] {
         let _ = fs::remove_file(&format!("{}/{}", WORK, name));
     }
+    let _ = fs::remove_file(APPEND_FILE);
     let _ = fs::remove_file(INNER);
     let _ = fs::remove_file(TARGET);
     let _ = fs::remove_dir(SUB);
@@ -203,6 +209,32 @@ fn pre_clean() {
 //
 // The covered directory holds one marker file, so "which directory is this"
 // is a fact read back, not an inference from errnos.
+// Leg N rides here because this is the one NATIVE probe on the live FS: an
+// append open must carry T_OAPPEND, not merely start at the end. Until
+// 2026-09-21 libthyla-rs emulated append with one seek at open, so a write
+// after ANY seek landed mid-file -- and so did the second of two appenders.
+// The discriminator is a seek to 0 before the write: with the bit the bytes
+// still land at the end; with the emulation they overwrite the first line.
+const APPEND_FILE: &str = "/d1-symlink/append.txt";
+
+fn append_leg(c: &mut Checker) {
+    use libthyla_rs::io::{Seek, SeekFrom, Write};
+    let made = File::create(APPEND_FILE)
+        .map(|mut f| f.write_all(b"one\n").is_ok())
+        .unwrap_or(false);
+    let wrote = fs::OpenOptions::new()
+        .write(true)
+        .append(true)
+        .open(APPEND_FILE)
+        .map(|mut f| f.seek(SeekFrom::Start(0)).is_ok() && f.write_all(b"two\n").is_ok())
+        .unwrap_or(false);
+    c.ok("N append: fixture + append-after-seek write", made && wrote);
+    c.ok(
+        "N append: the write landed at END despite the seek (T_OAPPEND)",
+        read_all(APPEND_FILE).as_deref() == Ok(b"one\ntwo\n".as_slice()),
+    );
+}
+
 const UNION_DIR: &str = "/d1-union";
 const UNION_MARKER: &str = "/d1-union/covered-marker";
 
@@ -626,6 +658,8 @@ pub extern "C" fn rs_main() -> i64 {
         }
         Err(_) => fail("symlink-probe: FAIL -- O_PATH on the target file\n"),
     }
+
+    append_leg(&mut c);
 
     // The union-root stages, each in its own child (see union_stage).
     run_union_stage(&mut c, "union-a");

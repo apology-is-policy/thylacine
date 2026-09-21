@@ -14,6 +14,8 @@ code:
   - usr/lib/pouch/patches/0037-pouch-unchecked-sentinel-wrappers.patch
   - usr/pouch-hello/pouch-hello-malloc.c
   - usr/pouch-hello/pouch-hello-fopen.c
+  - usr/pouch-hello/pouch-census.h
+  - usr/lib/pouch/patches/series
 audit: hard
 guarded-by: []
 validated-by: [prose, gate-smp]
@@ -321,7 +323,13 @@ cache it, and nothing hot asks.
   while the node is STILL LISTED and unlists last; the sweep sets an
   `exiting` flag, drops the lock, and walks a list that is frozen from
   then on (`fclose()` leaves its node, `tmpfile()` removes its own new file
-  instead of listing it). `tmpfile.o` also references
+  instead of listing it). The DESCRIPTOR has exactly one closer (r3 F6):
+  whoever takes it out of the node under `tmp_lock` (`tmp_take_fd`) closes
+  it — `fclose()`, the `__fdopen`-failure arm, or the sweep, never two. A
+  repeated UNLINK is harmless (`ENOENT`); a repeated CLOSE in a threaded
+  program can land on a descriptor another thread was handed in between,
+  and the first version's "harmless (EBADF / ENOENT)" covered both with one
+  word. `tmpfile.o` also references
   `__stdio_exit_needed` itself — otherwise only `__toread.o` /
   `__towrite.o` pull it, and a program using `tmpfile()` through `fileno()`
   alone exited through the dummy (r2 F5; verified by `llvm-nm`, which is
@@ -329,7 +337,16 @@ cache it, and nothing hot asks.
   best effort by nature — `_exit`, `abort`, a kill, or an `exit()` landing
   between `open()` returning and the listing leave the name — and the
   backstop is a boot-time `/tmp` sweep, OWED.
-  **Couplings for whoever wires the missing calls** (r2 F8): `fork` — a
+  **Couplings** (r2 F8; r3 F5 found the one that is LIVE TODAY):
+  **`posix_spawn` file actions** — a `dup2(fileno(t), 0)` action is resolved
+  into the child's fd list, so the child holds the SAME fid: `tmpfile()`,
+  fill, rewind, spawn with it as stdin, `fclose()` unlinks under the child,
+  whose first uncached read meets Stratum's IOReject. It worked before 0036
+  only because nothing was ever unlinked; no in-tree consumer; a port that
+  hands a tmpfile to a child must keep the stream open until the child is
+  reaped. `freopen()` replaces `f->close`, orphaning the node (swept at
+  exit instead) — latent behind `dup3`. And for whoever wires the missing
+  calls: `fork` — a
   child would inherit the list and its `exit()` would unlink the PARENT's
   live files (needs a child-side reset + `tmp_lock` in the atfork set);
   `dup` — make's `os_anontmp` is `tmpfile()` → `dup(fileno)` → `fclose`,
@@ -391,7 +408,9 @@ per-call errno approximation built on top of it.
   SIXTH out-struct reader round 1's list had waved through: `ualarm()`
   returned the `it_old` a failed `setitimer` never wrote (`alarm()` beside
   it is saved only by upstream's `old = { 0 }`). It now answers
-  `(unsigned)-1` / `ENOSYS`, in 0037. That round swept the whole patched
+  `(unsigned)-1` / `ENOSYS`, in 0037. (The prover zeroes the frame first —
+  `stack_poison` — so the unfixed libc answers exactly 0: a RED that names
+  the defect every time, not whatever the stack last held; r3 F10.) That round swept the whole patched
   `src/` — a named-wrapper pass plus a generic pass over the 213
   always-failing wrappers — and those two files were the only out-struct
   readers left.
@@ -430,7 +449,12 @@ per-call errno approximation built on top of it.
   this one claims the two provers whose new legs pin mechanisms described
   here, not the directory. joey matches each prover on a LEG CENSUS
   (`<name>: legs=a,b,c: exit 0`), not on `exit 0` alone, so a stale binary
-  — the bake traps that skip a populate — cannot pass for a new one.
+  — the bake traps that skip a populate — cannot pass for a new one. The
+  four strings live in ONE header, `usr/pouch-hello/pouch-census.h`, read by
+  the prover that prints each and by joey that matches it (they were typed
+  twice, and the fopen one omitted its `remove` leg; r3 F10). Sharing the
+  header does not weaken the stale-binary catch: the stale binary was
+  compiled against the old string, joey against the new one.
 - **`docs/REFERENCE.md`'s pouch row (absorbed) says "seven patches" and
   "Ten pouch binaries"** — both long stale (count the series with
   `grep -vc '^#\|^$' usr/lib/pouch/patches/series`, never from a number

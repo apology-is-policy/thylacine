@@ -1005,6 +1005,7 @@ void test_stalk_union_remove_uncrossed(void);
 void test_stalk_union_fd_base(void);
 void test_stalk_union_opath_base(void);
 void test_stalk_union_zero_component(void);
+void test_stalk_union_dissolved_degrades(void);
 void test_stalk_pheno_symlink_reanchor(void);
 void test_stalk_path_accumulate(void);
 void test_stalk_path_dotdot(void);
@@ -3767,6 +3768,7 @@ struct test_case g_tests[] = {
     { "stalk.union_fd_base",           test_stalk_union_fd_base,           false, NULL },
     { "stalk.union_opath_base",        test_stalk_union_opath_base,        false, NULL },
     { "stalk.union_zero_component",    test_stalk_union_zero_component,    false, NULL },
+    { "stalk.union_dissolved_degrades", test_stalk_union_dissolved_degrades, false, NULL },
     { "stalk.pheno_symlink_reanchor",  test_stalk_pheno_symlink_reanchor,  false, NULL },
     { "stalk.path_accumulate",         test_stalk_path_accumulate,         false, NULL },
     { "stalk.path_dotdot",             test_stalk_path_dotdot,             false, NULL },

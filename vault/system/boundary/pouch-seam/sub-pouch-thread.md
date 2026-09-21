@@ -119,7 +119,8 @@ lie inside the reported bounds AND the bounds must equal the `stack` row of
 `/proc/<pid>/maps`, read at run time (exactly one such row, or the prover
 refuses). "Contains" alone passed for years while the size was one page. joey
 matches this prover on a LEG CENSUS
-(`pouch-hello-threads: legs=pthread,mutex,main-stack-maps-row: exit 0`),
+(`POUCH_CENSUS_THREADS` in `usr/pouch-hello/pouch-census.h` — one definition
+read by the prover and by joey),
 not on `exit 0`, so a stale binary cannot stand in for one with the
 maps-row leg ([[sub-pouch-seam]]). The
 first version of the second half compared libc with two literals written in

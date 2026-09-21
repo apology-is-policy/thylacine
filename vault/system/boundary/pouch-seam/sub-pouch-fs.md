@@ -171,12 +171,39 @@ a write landed MID-FILE, over existing bytes (audit B-0 r2 F9). 0040
 passes the bit on all three opens and KEEPS the seek, because for an
 append fd the kernel cursor is advisory and the seek is what makes
 `ftell()` and the first read of an `"a+"` stream start at EOF as they have
-since 0030. A Dev with no append notion ignores the bit (each switches on
-`omode & 3`). Two costs, stated: dev9p keeps an append fd off the Larder's
-write-behind path, so each flushed append is one RPC; and after an append
-write that followed a seek the cursor is seek-position + count, not the
-new EOF as on Linux. `/bin/pouch-hello-fopen` pins it (`"a+"`, seek 0,
-write, the bytes must follow the file's last line).
+since 0030. On a Dev with no append notion the bit is inert — NOT because
+"each switches on `omode & 3`", as this paragraph first said (14 of the 16
+other `Dev.open` slots are `dev_simple_open`, which stores the whole omode
+and switches on nothing), but because `Spoor.mode` has one reader and that
+reader masks it (`kernel/handle.c`, `s->mode & 3`). Conclusion true,
+mechanism false (audit r3 F7). `/bin/pouch-hello-fopen` pins it: on the file
+its create + append legs left as `alpha\nbeta\n`, reopen `"a+"`, seek 0,
+write `gamma\n`, require `alpha\nbeta\ngamma\n` (the 0030 emulation yields
+`gamma\nbeta\n`).
+
+**What 0040 does NOT give: atomicity against a CONCURRENT appender.**
+Stratum's write is stat-then-write with a documented TOCTOU
+(`src/9p/server.c` h_write step b; its `cf-2-design.md` 4.3), so two
+appenders to one log can be handed the same end and one overwrites the
+other. 0030's source said so ("CONCURRENT appenders may interleave -- that
+atomicity is documented-ABSENT"); 0040's first version DELETED that sentence
+and claimed "two appenders to one log" as fixed. Restored in `openat.c` and
+here. The fix is Stratum's (take the size under the write's own lock);
+tracked there.
+
+Costs and divergences, all of them: dev9p keeps an append fd off the Larder's
+write-behind path, so each flushed append is one RPC; an `"a+"` stream's
+initial read position is END (the BSD choice — musl-on-Linux and glibc give
+0); after an append write that followed a seek the cursor — `ftell()`,
+`lseek(SEEK_CUR)`, a read after a bare `fflush()` — is seek-position + count,
+not the new EOF; after ANOTHER writer grew the file the cursor does not move
+at all, though the next write lands at the new end.
+
+**0024's patch file had no trailing newline**, so its last hunk
+(`unlinkat.c`) applied only because BSD `patch` silently spends fuzz on a
+final context line; `git apply` calls the file corrupt. Found 2026-09-21 by
+applying the series under `--fuzz=0`; fixed, and
+`tools/check-patch-hunks.py` now fails the class.
 
 **`readlink` is the sharpest translation in the series.** The seam parked
 `__NR_readlinkat` at the sentinel, which is the *wrong* answer rather

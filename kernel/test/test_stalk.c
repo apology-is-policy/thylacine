@@ -91,6 +91,7 @@ void test_stalk_union_remove_uncrossed(void);    // UM-8c/F3: STALK_REMOVE leave
 void test_stalk_union_fd_base(void);             // UM-8c/F5: fd-relative union base sees all members
 void test_stalk_union_opath_base(void);          // UM-8c/R2-F2: O_PATH base carries the point
 void test_stalk_union_zero_component(void);      // UM-8c/R2-F3: "." off a union base keeps it
+void test_stalk_union_dissolved_degrades(void);  // ARCH 9.6.10: never the covered directory
 void test_stalk_pheno_symlink_reanchor(void);   // VIVARIUM section 13 (F1)
 // #66: namespace-name accumulation through the real resolver.
 void test_stalk_path_accumulate(void);
@@ -2353,6 +2354,72 @@ void test_stalk_union_zero_component(void) {
     spoor_clunk(r);
 
     spoor_clunk(ufd);
+    territory_unref(p.territory);
+    spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// ARCH 9.6.10 (shed audit r2 F1): a DISSOLVED union degrades to member[0], never
+// to the covered directory. The handle's point is the directory the union was
+// mounted OVER; once it hosts no member, an uncrossed clone of it is a directory
+// the handle never named. Pre-fix "." off the fd returned the point (qid 28).
+void test_stalk_union_dissolved_degrades(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+    struct Spoor *um1 = stalk(&p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE), 0, "um1 MBEFORE");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER),  0, "um2 MAFTER");
+
+    // Both handle classes carry the point: a full snap and a point-only one.
+    struct Spoor *ufd = stalk(&p, root, "umpt", 4, STALK_OPEN, 0);
+    struct Spoor *uop = stalk(&p, root, "umpt", 4, STALK_WALK, 0);
+    TEST_ASSERT(ufd && ufd->union_snap && uop && uop->union_snap, "union fd + O_PATH fd");
+
+    // Control, while the union lives: "." keeps the union (crosses to member[0]
+    // WITH a snap) and a later member's name resolves.
+    struct Spoor *q = stalk(&p, ufd, ".", 1, STALK_WALK, 0);
+    TEST_ASSERT(q != NULL, "live union: \".\"");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)22, "live union: \".\" is member[0] (um1, 22)");
+    TEST_ASSERT(q->union_snap != NULL, "live union: \".\" is still a UNION handle");
+    spoor_clunk(q);
+    q = stalk(&p, ufd, "only2", 5, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "live union: a member-1 name resolves");
+    spoor_clunk(q);
+
+    // Dissolve it the plain way -- no shed involved.
+    TEST_EXPECT_EQ(unmount(p.territory, pt), 0, "unmount member 0");
+    TEST_EXPECT_EQ(unmount(p.territory, pt), 0, "unmount member 1");
+    TEST_EXPECT_NE(unmount(p.territory, pt), 0, "the point hosts nothing now");
+
+    u64 live_before = spoor_total_allocated() - spoor_total_freed();
+    struct Spoor *handles[2] = { ufd, uop };
+    for (int i = 0; i < 2; i++) {
+        q = stalk(&p, handles[i], ".", 1, STALK_WALK, 0);
+        TEST_ASSERT(q != NULL, "dissolved: \".\" still resolves");
+        TEST_EXPECT_EQ((u64)q->qid.path, (u64)22,
+                       "dissolved: \".\" is member[0] (22), NOT the covered point (28)");
+        TEST_ASSERT(q->union_snap == NULL, "dissolved: a plain handle, no union");
+        spoor_clunk(q);
+        q = stalk(&p, handles[i], "shared", 6, STALK_OPEN, 0);
+        TEST_ASSERT(q != NULL, "dissolved: member[0]'s own name still resolves");
+        TEST_EXPECT_EQ((u64)q->qid.path, (u64)23, "dissolved: shared is member[0]'s (23)");
+        spoor_clunk(q);
+        q = stalk(&p, handles[i], "only2", 5, STALK_OPEN, 0);
+        TEST_ASSERT(q == NULL, "dissolved: a name only member 1 held is gone");
+    }
+    // STALK_MOUNT keeps the point as a KEY (it hands no Spoor to EL0).
+    q = stalk(&p, ufd, ".", 1, STALK_MOUNT, 0);
+    TEST_ASSERT(q != NULL, "dissolved: STALK_MOUNT \".\"");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)28, "STALK_MOUNT still names the point (28)");
+    spoor_clunk(q);
+    u64 live_after = spoor_total_allocated() - spoor_total_freed();
+    TEST_EXPECT_EQ(live_after, live_before, "no Spoor leak across the dissolved resolves");
+
+    spoor_clunk(uop); spoor_clunk(ufd);
     territory_unref(p.territory);
     spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
     spoor_unref(root);
