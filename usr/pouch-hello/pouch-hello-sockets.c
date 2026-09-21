@@ -204,11 +204,14 @@ static void *server_main(void *arg)
 
     struct sockaddr_un peer;
     socklen_t          peerlen = sizeof(peer);
+    /* From here on the client meets barriers only this thread can release:
+     * every failure says why, flushes, and ends the process, or the boot
+     * hangs mute (B-0 audit round 4 F10). */
     int conn = accept(s, (struct sockaddr *)&peer, &peerlen);
     if (conn < 0) {
         printf("server: accept failed errno=%d\n", errno);
-        close(s);
-        return NULL;
+        fflush(stdout);
+        _exit(1);
     }
     printf("server: accept ok, conn fd=%d\n", conn);
 
@@ -217,14 +220,14 @@ static void *server_main(void *arg)
     if (n != (ssize_t)(sizeof(MSG_PING) - 1)) {
         printf("server: read got %zd want %zu errno=%d\n",
                 n, sizeof(MSG_PING) - 1, errno);
-        close(conn); close(s);
-        return NULL;
+        fflush(stdout);
+        _exit(1);
     }
     buf[n] = '\0';
     if (memcmp(buf, MSG_PING, sizeof(MSG_PING) - 1) != 0) {
         printf("server: read got '%s' want '%s'\n", buf, MSG_PING);
-        close(conn); close(s);
-        return NULL;
+        fflush(stdout);
+        _exit(1);
     }
     printf("server: read PING (%zd bytes byte-accurate) ok\n", n);
 
@@ -232,8 +235,8 @@ static void *server_main(void *arg)
     if (w != (ssize_t)(sizeof(MSG_PONG) - 1)) {
         printf("server: write got %zd want %zu errno=%d\n",
                 w, sizeof(MSG_PONG) - 1, errno);
-        close(conn); close(s);
-        return NULL;
+        fflush(stdout);
+        _exit(1);
     }
     printf("server: write PONG ok\n");
 
@@ -245,13 +248,13 @@ static void *server_main(void *arg)
     socklen_t credlen = sizeof(cred);
     if (getsockopt(conn, SOL_SOCKET, SO_PEERCRED, &cred, &credlen) != 0) {
         printf("server: getsockopt(SO_PEERCRED) errno=%d\n", errno);
-        close(conn); close(s);
-        return NULL;
+        fflush(stdout);
+        _exit(1);
     }
     if (cred.pid == 0) {
         printf("server: peer pid is zero (unexpected)\n");
-        close(conn); close(s);
-        return NULL;
+        fflush(stdout);
+        _exit(1);
     }
     printf("server: SO_PEERCRED pid=%d uid=%u gid=%u\n",
            cred.pid, cred.uid, cred.gid);
@@ -261,8 +264,6 @@ static void *server_main(void *arg)
     n = read(conn, buf, sizeof(buf) - 1);
     if (n != (ssize_t)(sizeof(MSG_LINE) - 1) ||
         memcmp(buf, MSG_LINE, sizeof(MSG_LINE) - 1) != 0) {
-        /* The client is about to wait at a barrier only this thread can
-         * release: say why and end the process, or the boot hangs mute. */
         printf("server: stdio leg read got %zd errno=%d\n", n, errno);
         fflush(stdout);
         _exit(1);

@@ -104,9 +104,10 @@
 # fd_set: FD_SET(sock) was a store 128 MiB past the set, in application code.
 # FD_SET/FD_CLR/FD_ISSET now abort() on a descriptor that does not fit the set
 # (glibc's __fdelt_chk: full width, against the set's own size); ppoll() goes
-# through the tag-aware poll(). THE SERIES' FIRST PATCH INTO A PUBLIC HEADER
-# (include/sys): the guard lives in the PORT's objects, so ports are rebuilt,
-# not relinked. The real fix -- small-integer socket fds -- is owed.
+# through the tag-aware poll(). The first patch to put CODE in a public header
+# (include/sys; 0001.. add syscall numbers to bits/syscall.h): the guard lives
+# in the PORT's objects, so ports are rebuilt, not relinked. The real fix --
+# small-integer socket fds -- is owed.
 0039-pouch-fdset-guard-ppoll-tag.patch
 # 0040: B-0 audit r2 F9 -- O_APPEND was a one-time seek at open (0030), so a
 # write after a seek landed mid-file. The opens now carry the kernel's OAPPEND
@@ -115,9 +116,15 @@
 # (Stratum's write is stat-then-write).
 0040-pouch-o-append-omode.patch
 # 0041: B-0 audit r3 F1+F2 (libc half) -- poll() gives a CONNECTED AF_UNIX
-# socket the stream-socket shape: a peer's orderly close is POLLIN|POLLHUP, not
-# the kernel's pipe-like POLLHUP|POLLERR, so the "POLLIN? read; 0 = closed"
-# loop every port has terminates. The kernel half (a client endpoint is
+# socket the stream-socket shape: a peer's orderly close is POLLIN|POLLHUP (and
+# POLLOUT, as Linux reports it, when asked), not the kernel's pipe-like
+# POLLHUP|POLLERR, so the "POLLIN? read; 0 = closed" loop every port has
+# terminates. The kernel half (a client endpoint is
 # pollable at all; every ring mutation walks the hook list) is ARCH 23.3. An
 # ACCEPTED socket is untagged and not covered -- recorded in the header.
 0041-pouch-poll-stream-socket-shape.patch
+# 0042: B-0 audit r4 F12 -- ppoll()/select() computed tv_sec * 1000 in signed
+# long long (UB past ~9.2e15 s: a TIME_MAX "forever" could become a spurious
+# early 0); pselect()'s microsecond round-up carried into tv_sec at TIME_MAX.
+# Clamp before the multiply; no carry past INT_MAX s. Pre-existing (0005).
+0042-pouch-timeout-clamp.patch

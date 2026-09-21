@@ -55,9 +55,12 @@ kernel's poll with the right handle. The same-day claim that such a port
 "works" was false (audit r3 F1) -- the kernel sampled the server's end of the
 connection for a client and walked no hook list when a reply arrived.
 
-THIS IS THE SERIES' FIRST PATCH INTO A PUBLIC HEADER (audit r3 F8), and the
-consequence is one no other patch here has: the guard is compiled into the
-PORT's objects, not into libc.a. Relinking a port against the new sysroot
+This patch puts BEHAVIOR into a public header, and the consequence is one no
+other patch here has: the guard is compiled into the PORT's objects, not into
+libc.a. (It is not the series' first public-header patch, as round 3's F8
+disposition had it: 0001, 0003-0010 and 0021 edit arch/aarch64/bits/
+syscall.h.in, installed as <bits/syscall.h>. Those add syscall NUMBERS;
+this is the first to add code -- round 4 F6.) Relinking a port against the new sysroot
 changes nothing; every port that uses FD_SET must be REBUILT to have it. In
 this tree that happens by itself -- a stale sysroot is rebuilt from scratch and
 build_sysroot removes build/pouch, every port's output with it -- which is why

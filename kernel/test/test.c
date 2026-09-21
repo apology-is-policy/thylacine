@@ -714,6 +714,8 @@ void test_cons_episode_discards_pending_input(void);
 void test_cons_episode_freezes_nonattached_reader(void);
 void test_cons_episode_freezes_nonattached_writer(void);
 void test_cons_episode_freezes_feed_consctl_poll(void);
+void test_cons_episode_frozen_poller_follows_end(void);
+void test_cons_episode_prior_poller_not_woken_by_keys(void);
 void test_cons_episode_end_restores(void);
 void test_cons_episode_repeat_sak_idempotent(void);
 void test_cons_episode_gate(void);
@@ -1530,8 +1532,11 @@ void test_poll_devsrv_conn_block_then_wake_pollin(void);
 void test_poll_devsrv_client_row(void);
 void test_poll_devsrv_client_wakes_on_reply_only(void);
 void test_poll_devsrv_server_pollout_wakes_on_client_drain(void);
+void test_poll_devsrv_client_pollout_wakes_on_server_blocking_drain(void);
 void test_poll_devsrv_client_kernel_attached_pollnval(void);
 void test_poll_timeout_survives_a_busy_list(void);
+void test_poll_death_ends_a_noise_driven_poll(void);
+void test_poll_stop_parks_a_noise_driven_poll(void);
 void test_poll_null_obj_spoor_pollnval(void);
 void test_poll_mixed_spoor_and_srv(void);
 void test_poll_max_nfds(void);
@@ -2542,6 +2547,10 @@ struct test_case g_tests[] = {
                                        test_cons_episode_freezes_nonattached_writer, false, NULL },
     { "cons.episode_freezes_feed_consctl_poll",
                                        test_cons_episode_freezes_feed_consctl_poll, false, NULL },
+    { "cons.episode_frozen_poller_follows_end",
+                                       test_cons_episode_frozen_poller_follows_end, false, NULL },
+    { "cons.episode_prior_poller_not_woken_by_keys",
+                                       test_cons_episode_prior_poller_not_woken_by_keys, false, NULL },
     { "cons.episode_end_restores",     test_cons_episode_end_restores,     false, NULL },
     { "cons.episode_repeat_sak_idempotent",
                                        test_cons_episode_repeat_sak_idempotent, false, NULL },
@@ -3483,8 +3492,11 @@ struct test_case g_tests[] = {
     { "poll.devsrv_client_row", test_poll_devsrv_client_row, false, NULL },
     { "poll.devsrv_client_wakes_on_reply_only", test_poll_devsrv_client_wakes_on_reply_only, false, NULL },
     { "poll.devsrv_server_pollout_wakes_on_client_drain", test_poll_devsrv_server_pollout_wakes_on_client_drain, false, NULL },
+    { "poll.devsrv_client_pollout_wakes_on_server_blocking_drain", test_poll_devsrv_client_pollout_wakes_on_server_blocking_drain, false, NULL },
     { "poll.devsrv_client_kernel_attached_pollnval", test_poll_devsrv_client_kernel_attached_pollnval, false, NULL },
     { "poll.timeout_survives_a_busy_list", test_poll_timeout_survives_a_busy_list, false, NULL },
+    { "poll.death_ends_a_noise_driven_poll", test_poll_death_ends_a_noise_driven_poll, false, NULL },
+    { "poll.stop_parks_a_noise_driven_poll", test_poll_stop_parks_a_noise_driven_poll, false, NULL },
     { "poll.null_obj_spoor_pollnval",           test_poll_null_obj_spoor_pollnval,           false, NULL },
     { "poll.mixed_spoor_and_srv",               test_poll_mixed_spoor_and_srv,               false, NULL },
     { "poll.max_nfds",                          test_poll_max_nfds,                          false, NULL },

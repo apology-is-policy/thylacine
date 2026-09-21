@@ -65,14 +65,14 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**522 owned · 49 unowned · 571 files (91% owned) · ~13264 unswept lines.**
+**522 owned · 49 unowned · 571 files (91% owned) · ~13367 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **73 files, ~33112 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
 | usr/warp-prove | 0 | 1 | 4349 |
-| usr/pouch-hello | 5 | 18 | 2657 |
+| usr/pouch-hello | 5 | 18 | 2760 |
 | kernel | 127 | 14 | 1910 |
 | usr/ports | 19 | 4 | 1631 |
 | usr/quarry | 0 | 1 | 1033 |
@@ -136,6 +136,7 @@ Excluded as harness and counted here rather than dropped: **73 files, ~33112 lin
 | usr/pouch-hello/pouch-hello-fs.c | 350 |
 | usr/pouch-hello/pouch-hello-net.c | 284 |
 | kernel/include/thylacine/smp.h | 282 |
+| usr/pouch-hello/pouch-hello-poll.c | 282 |
 | usr/pouch-hello/pouch-hello.c | 278 |
 | usr/kaua-term/src/cmdline.rs | 276 |
 | usr/gl-sdl-prove/gl-sdl-prove.c | 262 |
@@ -145,7 +146,6 @@ Excluded as harness and counted here rather than dropped: **73 files, ~33112 lin
 | kernel/include/thylacine/context.h | 201 |
 | usr/lib/libthyla-rs/src/sync.rs | 196 |
 | usr/pouch-hello/pouch-hello-sodium.c | 196 |
-| usr/pouch-hello/pouch-hello-poll.c | 179 |
 | usr/ports/gnumake/generated/glob.h | 163 |
 | kernel/include/thylacine/9p_srvconn_transport.h | 160 |
 | kernel/cpio.c | 152 |

@@ -10,9 +10,12 @@
 //   Register             ↔ the first scan in `sys_poll_for_proc`;
 //                          `dev->poll(c, events, pw)` is the per-fd
 //                          atomic "install + sample" step.
-//   CommitOrSleep        ↔ the post-scan flag check + `tsleep` call;
+//   TSleepCommit         ↔ the post-scan flag check + `tsleep` call;
 //                          `tsleep`'s cond `poll_cond_any_flagged` runs
 //                          under the poller's rendez lock.
+//   Rearm / LoopCheck /  ↔ each loop pass: `poll_unhook_all`, the loop's
+//   Resample               own die-check + stop park, then the first
+//                          scan's register+sample again.
 //   MakeReady(f)         ↔ a producer's `poll_waiter_list_wake`
 //                          (called from devpipe wakeup sites; devsrv
 //                          at P5-poll-b). Sets `pw->ready = true` AND
@@ -29,10 +32,13 @@
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
 #include <thylacine/loom.h>       // loom_poll -- KObj_Loom .poll (KT-1.5)
+#include <thylacine/notes.h>      // thread_die_pending
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
+#include <thylacine/sched.h>      // sched_yield_hint
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
+#include <thylacine/thread.h>
 #include <thylacine/types.h>
 
 #include "../arch/arm64/timer.h"   // timer_now_ns — deadline conversion
@@ -86,17 +92,24 @@ void poll_waiter_list_init(struct poll_waiter_list *l) {
     l->head = NULL;
 }
 
+// Every operation on a hook list takes its lock IRQSAVE. The list lock nests
+// under Dev object locks that IRQ handlers take (g_cons.lock and
+// g_cons_drain.lock, taken by the UART RX IRQ): a holder with IRQs on --
+// console_mgr is a kthread -- could be interrupted by an IRQ spinning on the
+// object lock that another CPU holds while it spins on this list lock, a
+// deadlock through the IRQ edge (B-0 audit round 4 F3). A lock acquired while
+// holding an IRQ-taken lock must itself be taken with IRQs masked, everywhere.
 void poll_waiter_list_register(struct poll_waiter_list *l,
                                struct poll_waiter *pw) {
     if (!l || !pw)                            extinction("pw_register: NULL");
     if (pw->magic != POLL_WAITER_MAGIC)       extinction("pw_register: bad magic");
     if (pw->list != NULL)                     extinction("pw_register: double register");
 
-    spin_lock(&l->lock);
+    irq_state_t s = spin_lock_irqsave(&l->lock);
     pw->next = l->head;
     pw->list = l;
     l->head  = pw;
-    spin_unlock(&l->lock);
+    spin_unlock_irqrestore(&l->lock, s);
 }
 
 void poll_waiter_list_unregister(struct poll_waiter *pw) {
@@ -104,7 +117,7 @@ void poll_waiter_list_unregister(struct poll_waiter *pw) {
     struct poll_waiter_list *l = pw->list;
     if (!l) return;   // already unregistered — idempotent no-op.
 
-    spin_lock(&l->lock);
+    irq_state_t s = spin_lock_irqsave(&l->lock);
     // Re-check under lock: a concurrent unregister on this pw isn't
     // possible (pw belongs to the calling poller), but the list could
     // have been modified by other pollers' register/unregister against
@@ -115,7 +128,7 @@ void poll_waiter_list_unregister(struct poll_waiter *pw) {
             *slot    = pw->next;
             pw->next = NULL;
             pw->list = NULL;
-            spin_unlock(&l->lock);
+            spin_unlock_irqrestore(&l->lock, s);
             return;
         }
         slot = &(*slot)->next;
@@ -123,21 +136,8 @@ void poll_waiter_list_unregister(struct poll_waiter *pw) {
     // Not on the list — pw->list was non-NULL on entry but pw is gone.
     // That's a corruption: the unregister-on-NULL idempotency check
     // above already covered the legitimate "already gone" case.
-    spin_unlock(&l->lock);
+    spin_unlock_irqrestore(&l->lock, s);
     extinction("pw_unregister: pw->list set but pw not on list (corruption)");
-}
-
-// Re-arm one hook for another sleep (specs/poll.tla ClearFlags). The flag is
-// cleared under the hook list's lock because that is the lock a producer's walk
-// sets it under; `pw->list` itself is written only by the owning poller, so it
-// reads without one. An unlisted hook has no producer.
-void poll_waiter_rearm(struct poll_waiter *pw) {
-    if (!pw) return;
-    struct poll_waiter_list *l = pw->list;
-    if (!l) { pw->ready = false; return; }
-    spin_lock(&l->lock);
-    pw->ready = false;
-    spin_unlock(&l->lock);
 }
 
 // Whether the list currently has no registered hooks. Under the list lock (a
@@ -148,16 +148,16 @@ void poll_waiter_rearm(struct poll_waiter *pw) {
 // hook BEFORE taking g_dev9p_poll_lock.
 bool poll_waiter_list_empty(struct poll_waiter_list *l) {
     if (!l) return true;
-    spin_lock(&l->lock);
+    irq_state_t s = spin_lock_irqsave(&l->lock);
     bool empty = (l->head == NULL);
-    spin_unlock(&l->lock);
+    spin_unlock_irqrestore(&l->lock, s);
     return empty;
 }
 
 void poll_waiter_list_wake(struct poll_waiter_list *l) {
     if (!l) return;
 
-    spin_lock(&l->lock);
+    irq_state_t s = spin_lock_irqsave(&l->lock);
     for (struct poll_waiter *pw = l->head; pw; pw = pw->next) {
         if (pw->magic != POLL_WAITER_MAGIC) {
             // The walker mid-iteration found a corrupted link. A
@@ -172,7 +172,7 @@ void poll_waiter_list_wake(struct poll_waiter_list *l) {
         pw->ready = true;
         (void)wakeup(pw->rendez);
     }
-    spin_unlock(&l->lock);
+    spin_unlock_irqrestore(&l->lock, s);
 }
 
 // =============================================================================
@@ -197,10 +197,11 @@ static int poll_cond_any_flagged(void *arg) {
     return 0;
 }
 
-// Per-fd scan step: either REGISTER + SAMPLE (pw != NULL on first
-// scan) or SAMPLE-ONLY (pw == NULL on post-wake re-scan and on
-// timeout=0 fast path). Sets `kfds[i].revents` and returns 1 iff the
-// fd is "ready" (revents != 0).
+// Per-fd scan step: REGISTER + SAMPLE -- `dev->poll(c, events, pw)` installs
+// the hook and samples readiness in one step under the object's lock. Every
+// scan registers, the loop's re-arm passes included (specs/poll.tla Register /
+// Resample). Sets `kfds[i].revents` and returns 1 iff the fd is "ready"
+// (revents != 0).
 //
 // We deliberately do NOT require RIGHT_READ/RIGHT_WRITE: poll's
 // semantics are "is this fd ready for the requested event", and a
@@ -209,10 +210,10 @@ static int poll_cond_any_flagged(void *arg) {
 static int poll_scan_one(struct Proc *p, struct pollfd *pfd,
                          struct poll_waiter *pw_or_null,
                          struct Handle *keep_out) {
-    // RW-2 2C-F1: `keep_out` (non-NULL only on the REGISTER scan) receives the
-    // obj ref this scan must HOLD past the sleep when it registers a waiter on
-    // an object's poll_list -- see the retain decision below. Default: hold
-    // nothing (zeroed snapshot; handle_put no-ops on it).
+    // RW-2 2C-F1: `keep_out` receives the obj ref this scan must HOLD past the
+    // sleep when it registers a waiter on an object's poll_list -- see the
+    // retain decision below. Default: hold nothing (zeroed snapshot; handle_put
+    // no-ops on it). The caller has already put whatever the slot held.
     if (keep_out) *keep_out = (struct Handle){0};
     s16 revents = 0;
     if (pfd->fd < 0) {
@@ -290,6 +291,20 @@ static int poll_scan_one(struct Proc *p, struct pollfd *pfd,
     return (revents != 0) ? 1 : 0;
 }
 
+// Take every hook off its list, THEN drop every retained object ref, then
+// clear each hook (specs/poll.tla Rearm). The order is load-bearing (RW-2
+// 2C-F1): a final handle_put may run an object's close hook against its
+// embedded list, which must no longer hold one of ours. Off its list no
+// producer can reach a hook, so the clear takes no lock, and a hook goes back
+// on clear. Idempotent, so the return sweep runs it after a pass that already
+// did.
+static void poll_unhook_all(struct poll_waiter *waiters, struct Handle *held,
+                            u64 nfds) {
+    for (u64 i = 0; i < nfds; i++) poll_waiter_list_unregister(&waiters[i]);
+    for (u64 i = 0; i < nfds; i++) handle_put(&held[i]);   // zeroes the slot
+    for (u64 i = 0; i < nfds; i++) waiters[i].ready = false;
+}
+
 s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds, u64 nfds,
                       s32 timeout_ms) {
     if (!p)                                   return -1;
@@ -328,7 +343,7 @@ s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds, u64 nfds,
     }
 
     // Fast path: any fd ready at the first scan → unregister all,
-    // return. specs/poll.tla CommitOrSleep: anyFlagged → done_ready.
+    // return. specs/poll.tla EvaluateFirst: seen → done_ready.
     if (ready_count > 0) {
         goto unregister_and_return;
     }
@@ -352,16 +367,15 @@ s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds, u64 nfds,
     }
 
     __atomic_fetch_add(&g_poll_slept, 1u, __ATOMIC_RELAXED);
+    struct Thread *t = current_thread();
     struct poll_cond_arg cond_arg = { .waiters = waiters, .nfds = nfds };
     for (;;) {
         int ts = tsleep(&r, poll_cond_any_flagged, &cond_arg, deadline_ns);
 
         // #811 (ARCH §8.8.1): death-interrupted -> the Proc is group-
         // terminating. Skip the re-sample (the Thread dies at its EL0-return
-        // die-check; the result is immaterial) and fall to the unregister
-        // sweep, which is REQUIRED -- waiters[] are stack-allocated and still
-        // listed on each fd's poll_list; returning without unregistering would
-        // dangle them.
+        // die-check; the result is immaterial) and fall to the sweep, which is
+        // REQUIRED -- waiters[] are stack-allocated and still listed.
         if (ts == TSLEEP_INTR) {
             ready_count = 0;
             goto unregister_and_return;
@@ -369,21 +383,37 @@ s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds, u64 nfds,
 
         // A flag is a HINT: the list it sits on is walked for every event on
         // the object, asked-about or not, and a competing reader can drain
-        // what readied it before we look. So re-arm, THEN re-sample -- in that
-        // order (specs/poll.tla ClearFlags -> Resample): an event landing
-        // between the two sets a flag that survives into the next tsleep, and
-        // one that landed before the clear is seen by the sample, which runs
-        // under the object's lock after the producer released it. The other
-        // order wipes the flag of an event its own sample was too early to see
-        // (poll_buggy_clear_after_sample.cfg).
-        for (u64 i = 0; i < nfds; i++) {
-            poll_waiter_rearm(&waiters[i]);
+        // what readied it before we look. So every pass RE-REGISTERS: every
+        // hook comes off its list (clear), then each fd's .poll runs WITH its
+        // hook again, the first scan's install-and-sample (specs/poll.tla
+        // Rearm -> Resample). An event before an fd's install is seen by its
+        // sample; one after reaches the fresh hook. Re-registering, not merely
+        // re-sampling, is what lets a Dev that chooses its list by state
+        // re-choose it: the console files a frozen poller on its episode list,
+        // and a hook left there after the episode ended never saw another
+        // keystroke (cons_poll.tla BUGGY_NO_REREGISTER). It also re-resolves
+        // the fd with its hook, so a closed fd reports POLLNVAL.
+        poll_unhook_all(waiters, held, nfds);
+
+        // tsleep's own die-check and stop detour sit BEHIND its cond test: a
+        // producer that keeps a flag set in every re-sample window keeps every
+        // tsleep returning AWOKEN without reaching either. So the loop makes
+        // both itself, with no hook listed -- a parked poller is walked by no
+        // producer for as long as the stop lasts (DeathTerminates /
+        // StopHonoured; DEATH WINS: the park returns SLEEP_INTR on death).
+        if (thread_die_pending(t)) {
+            ready_count = 0;
+            goto unregister_and_return;
         }
-        // Sample each fd's CURRENT revents via `dev->poll(c, events, NULL)` --
-        // sample-only, no list op; the hooks stay registered across the loop.
+        if (t->proc && proc_stop_requested(t->proc) &&
+            proc_stop_sleeper_park(t) == SLEEP_INTR) {
+            ready_count = 0;
+            goto unregister_and_return;
+        }
+
         ready_count = 0;
         for (u64 i = 0; i < nfds; i++) {
-            ready_count += poll_scan_one(p, &kfds[i], NULL, NULL);
+            ready_count += poll_scan_one(p, &kfds[i], &waiters[i], &held[i]);
         }
         if (ready_count > 0 || ts == TSLEEP_TIMEDOUT) break;
 
@@ -397,30 +427,25 @@ s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds, u64 nfds,
         // here past the timeout (PollTerminates).
         if (deadline_ns != 0 && timer_now_ns() >= deadline_ns) break;
         __atomic_fetch_add(&g_poll_resleeps, 1u, __ATOMIC_RELAXED);
+
+        // A noise pass cost this CPU a full pass and bought nothing; let
+        // queued work run before the next one. Syscalls run IRQ-masked, so
+        // without this a producer that keeps walking a list would keep every
+        // other thread on this CPU waiting out our deadline. (With nothing
+        // else runnable the loop still spins IRQ-masked -- ARCH 23.3, an
+        // operator question about the preemption model.)
+        (void)sched_yield_hint();
     }
 
 unregister_and_return:
-    // Sweep: unregister every still-listed hook. Idempotent for any
-    // hook that wasn't registered (e.g., POLLNVAL'd fds where
-    // poll_scan_one returned early). specs/poll.tla NoStaleHook.
-    //
-    // Order is load-bearing: unregister FIRST (removes pw from the list
-    // under list->lock; after release no producer walk can find pw),
-    // THEN scribble magic = 0. Reversing would expose a magic=0 hook
-    // to a concurrent producer walker that holds list->lock — the
-    // wake's magic check would extinct.
+    // Sweep: every exit path lands here (specs/poll.tla NoStaleHook). Hooks
+    // off, THEN refs dropped (poll_unhook_all); a pass that already unhooked
+    // makes the first two steps no-ops. The magic is scribbled only AFTER the
+    // unregister: a magic-0 hook still on a list would extinct a concurrent
+    // producer's walk.
+    poll_unhook_all(waiters, held, nfds);
     for (u64 i = 0; i < nfds; i++) {
-        poll_waiter_list_unregister(&waiters[i]);
         waiters[i].magic = 0;   // defense-in-depth: scribble before stack pops
-    }
-    // RW-2 2C-F1: release the obj refs retained for registered waiters, AFTER
-    // the unregister sweep -- now no waiter references any object's poll_list,
-    // so a final handle_put that drops an object's last ref (a sibling closed
-    // its fd while we polled) runs its close hook against a list we are no
-    // longer on. Order is load-bearing: unregister-all THEN handle_put-all.
-    // handle_put no-ops on the zeroed snapshot of a non-registering scan.
-    for (u64 i = 0; i < nfds; i++) {
-        handle_put(&held[i]);
     }
     return ready_count;
 }

@@ -998,9 +998,22 @@ long srvconn_server_recv_blocking(struct SrvConn *cn, u8 *buf, long n) {
 // chan_consume_nonblock each take a single ch->lock), so this dual-lock
 // acquire cannot deadlock with itself or with any producer.
 //
-// pw == NULL is the post-wake sample-only call (sys_poll_for_proc's
-// re-sample); pw != NULL atomically registers the hook with the sample
-// under the same locks — the register-then-observe step.
+// pw != NULL atomically registers the hook with the sample under the same
+// locks — the register-then-observe step. sys_poll_for_proc passes a hook on
+// every pass (each re-arm pass re-registers); pw == NULL is a pure sample.
+//
+// Readiness is the RING's, not the I/O ROLE's (B-0 audit round 4 F7). A
+// nonblocking try (srvconn_io_nonblock) answers EAGAIN while a blocking reader
+// or writer of the same channel holds its role, though this sample says POLLIN
+// or POLLOUT: an event loop polls, is told ready, tries, gets EAGAIN, polls
+// again. The spin is bounded by the holder's own progress -- a reader holds its
+// role over bytes that are there only while it is taking them, a writer over
+// room it is filling -- and a userspace poller re-enters the kernel through the
+// EL0 tail, where the tick preempts it for the holder. Linux has the same shape
+// for a socket one thread reads blocking while another polls it. The role is
+// deliberately not folded into the sample: it is per-operation serialization,
+// not a readiness level, and a role-aware POLLIN would need a walk at every
+// role release, which is not a ring mutation.
 
 short srvconn_poll(struct SrvConn *cn, bool client, short events,
                    struct poll_waiter *pw) {

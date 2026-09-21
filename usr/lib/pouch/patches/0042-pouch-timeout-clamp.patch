@@ -1,0 +1,64 @@
+B-0 (Boosty) audit round 4, F12 -- ppoll() and select() convert their timeout
+to milliseconds as `(long long)tv_sec * 1000LL`, which is signed overflow (UB)
+for a tv_sec past ~9.2e15 s. A caller that means "forever" by passing a huge
+timespec -- TIME_MAX is a common spelling -- got whatever the optimizer made of
+it: a wrapped negative (an infinite wait by luck) or a small positive (a
+spurious early 0). pselect() had the same hole one step earlier: rounding
+tv_nsec up to a whole microsecond carried into tv_sec with a `+= 1` that
+overflows at TIME_MAX.
+
+Pre-existing: the conversions are 0005's (P6 pouch-poll), untouched since.
+Found by the round-4 prosecutor as a sibling of 0039's ppoll change.
+
+The fix clamps BEFORE the multiply: any tv_sec above INT_MAX/1000 is already
+past the INT_MAX-millisecond ceiling the kernel's poll accepts, so it becomes
+that ceiling directly, and pselect() does not carry into a tv_sec that large
+(select() would clamp it anyway). Negative and out-of-range fields are still
+EINVAL, as before. Semantics are unchanged for every timeout below ~24.8 days.
+
+--- a/src/select/ppoll.c
++++ b/src/select/ppoll.c
+@@ -30,8 +30,12 @@
+ 	           to->tv_nsec >= 1000000000L) {
+ 		return __syscall_ret(-EINVAL);
+ 	} else {
+-		long long ms = (long long)to->tv_sec * 1000LL
+-		             + ((long long)to->tv_nsec + 999999LL) / 1000000LL;
++		/* Clamp BEFORE the multiply: tv_sec * 1000 is signed overflow
++		 * past ~9.2e15 s, and anything past INT_MAX ms clamps anyway. */
++		long long ms = 0x7fffffffLL;
++		if (to->tv_sec <= 0x7fffffffLL / 1000LL)
++			ms = (long long)to->tv_sec * 1000LL
++			   + ((long long)to->tv_nsec + 999999LL) / 1000000LL;
+ 		if (ms > 0x7fffffffLL) ms = 0x7fffffffLL;
+ 		timeout_ms = (int)ms;
+ 	}
+--- a/src/select/pselect.c
++++ b/src/select/pselect.c
+@@ -29,7 +29,9 @@
+ 	/* Round ns up to µs so a sub-µs timespec doesn't fold to zero. */
+ 	tv.tv_usec = (ts->tv_nsec + 999L) / 1000L;
+ 	if (tv.tv_usec >= 1000000L) {
+-		tv.tv_sec += 1;
++		/* No carry past INT_MAX s: TIME_MAX + 1 is signed overflow, and
++		 * select() clamps anything that long to INT_MAX ms anyway. */
++		if (tv.tv_sec < 0x7fffffffL) tv.tv_sec += 1;
+ 		tv.tv_usec -= 1000000L;
+ 	}
+ 	return select(n, rfds, wfds, efds, &tv);
+--- a/src/select/select.c
++++ b/src/select/select.c
+@@ -45,8 +45,11 @@
+ 	           tv->tv_usec >= 1000000L) {
+ 		return __syscall_ret(-EINVAL);
+ 	} else {
+-		long long ms = (long long)tv->tv_sec * 1000LL
+-		             + ((long long)tv->tv_usec + 999LL) / 1000LL;
++		/* Clamp BEFORE the multiply (ppoll's reason). */
++		long long ms = 0x7fffffffLL;
++		if (tv->tv_sec <= 0x7fffffffLL / 1000LL)
++			ms = (long long)tv->tv_sec * 1000LL
++			   + ((long long)tv->tv_usec + 999LL) / 1000LL;
+ 		if (ms > 0x7fffffffLL) ms = 0x7fffffffLL;
+ 		timeout_ms = (int)ms;
+ 	}

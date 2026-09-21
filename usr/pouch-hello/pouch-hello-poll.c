@@ -25,6 +25,12 @@
 //      after re-writing the byte (POLLIN's fd_set re-set)
 //   4. select(0, NULL, NULL, NULL, {0,0}) — the zero-timeout no-fds
 //      portable-sleep edge case                            -> expect 0
+//   5. ppoll / select / pselect with a HUGE timeout while a helper thread
+//      writes the pipe ~50 ms later                        -> expect 1
+//      (B-0 audit round 4 F12, pouch 0042: the ms conversion was
+//      tv_sec * 1000 in signed long long, so tv_sec = 2^62 wrapped to a
+//      0 ms timeout and returned 0 at once; pselect's microsecond carry
+//      at TIME_MAX went negative and answered EINVAL)
 //
 // fd 1 is the pipe joey relays to the boot-log UART. Output:
 //   pouch-hello-poll: pipe rd=N wr=M
@@ -32,12 +38,19 @@
 //   pouch-hello-poll: poll with byte -> 1 POLLIN (ok)
 //   pouch-hello-poll: select with byte -> 1 rfds (ok)
 //   pouch-hello-poll: select(0,...) zero-tv -> 0 (ok)
+//   pouch-hello-poll: huge ppoll -> 1 (ok)
+//   pouch-hello-poll: huge select -> 1 (ok)
+//   pouch-hello-poll: huge pselect -> 1 (ok)
 //   pouch-hello-poll: exit 0
 //
 // Return non-zero on any failed assertion — joey treats it as a regression.
 
+#define _GNU_SOURCE   // ppoll
 #include <errno.h>
+#include <limits.h>
 #include <poll.h>
+#include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -64,6 +77,45 @@ static int sys_pipe_pair(int fds[2]) {
     }
     fds[0] = (int)x0;
     fds[1] = (int)x1;
+    return 0;
+}
+
+// Leg 5's helper: write one byte to the pipe after a pause, so a poll with a
+// huge timeout has something to END it -- a correct conversion waits for it,
+// a wrapped one returns before it.
+static int g_late_wr;
+static void *late_writer(void *arg) {
+    (void)arg;
+    usleep(50 * 1000);
+    const char byte = 'L';
+    if (write(g_late_wr, &byte, 1) != 1) {
+        printf("pouch-hello-poll: FAIL late write errno=%d\n", errno);
+        fflush(stdout);
+        _exit(20);
+    }
+    return NULL;
+}
+
+// Start the late writer; returns 0 or the failing leg's exit code.
+static int late_start(pthread_t *t, int wr, int code) {
+    g_late_wr = wr;
+    if (pthread_create(t, NULL, late_writer, NULL) != 0) {
+        printf("pouch-hello-poll: FAIL pthread_create\n");
+        fflush(stdout);
+        return code;
+    }
+    return 0;
+}
+
+// Join the writer and drain its byte; returns 0 or the failing leg's code.
+static int late_finish(pthread_t t, int rd, int code) {
+    char drain;
+    pthread_join(t, NULL);
+    if (read(rd, &drain, 1) != 1) {
+        printf("pouch-hello-poll: FAIL late drain\n");
+        fflush(stdout);
+        return code;
+    }
     return 0;
 }
 
@@ -166,6 +218,57 @@ int main(void) {
             return 9;
         }
         printf("pouch-hello-poll: select(0,...) zero-tv -> 0 (ok)\n");
+        fflush(stdout);
+    }
+
+    // 5. huge timeouts are long waits, not zero ones. Each call must still be
+    //    parked when the helper's byte lands and report it.
+    {
+        pthread_t t;
+        int rc;
+        if ((rc = late_start(&t, pipefd[1], 10)) != 0) return rc;
+        struct pollfd p = { .fd = pipefd[0], .events = POLLIN, .revents = 0 };
+        struct timespec huge = { .tv_sec = (time_t)1 << 62, .tv_nsec = 0 };
+        int pr = ppoll(&p, 1, &huge, NULL);
+        if ((rc = late_finish(t, pipefd[0], 11)) != 0) return rc;
+        if (pr != 1 || !(p.revents & POLLIN)) {
+            printf("pouch-hello-poll: FAIL huge ppoll rc=%d revents=0x%x errno=%d\n",
+                   pr, (unsigned)p.revents, errno);
+            fflush(stdout);
+            return 12;
+        }
+        printf("pouch-hello-poll: huge ppoll -> 1 (ok)\n");
+        fflush(stdout);
+
+        if ((rc = late_start(&t, pipefd[1], 13)) != 0) return rc;
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(pipefd[0], &rfds);
+        struct timeval htv = { .tv_sec = (time_t)1 << 62, .tv_usec = 0 };
+        int sr = select(pipefd[0] + 1, &rfds, NULL, NULL, &htv);
+        if ((rc = late_finish(t, pipefd[0], 14)) != 0) return rc;
+        if (sr != 1 || !FD_ISSET(pipefd[0], &rfds)) {
+            printf("pouch-hello-poll: FAIL huge select rc=%d errno=%d\n", sr, errno);
+            fflush(stdout);
+            return 15;
+        }
+        printf("pouch-hello-poll: huge select -> 1 (ok)\n");
+        fflush(stdout);
+
+        if ((rc = late_start(&t, pipefd[1], 16)) != 0) return rc;
+        FD_ZERO(&rfds);
+        FD_SET(pipefd[0], &rfds);
+        // tv_nsec rounds up to a whole second's worth of microseconds: the
+        // carry into a TIME_MAX tv_sec.
+        struct timespec maxts = { .tv_sec = LONG_MAX, .tv_nsec = 999999999L };
+        int psr = pselect(pipefd[0] + 1, &rfds, NULL, NULL, &maxts, NULL);
+        if ((rc = late_finish(t, pipefd[0], 17)) != 0) return rc;
+        if (psr != 1 || !FD_ISSET(pipefd[0], &rfds)) {
+            printf("pouch-hello-poll: FAIL huge pselect rc=%d errno=%d\n", psr, errno);
+            fflush(stdout);
+            return 18;
+        }
+        printf("pouch-hello-poll: huge pselect -> 1 (ok)\n");
         fflush(stdout);
     }
 

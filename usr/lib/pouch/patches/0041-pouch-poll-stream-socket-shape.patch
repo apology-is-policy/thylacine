@@ -24,9 +24,14 @@ The loop every port has --
 at once, for ever. Event libraries that test POLLERR first tear the connection
 down as failed and drop the reply bytes still in the ring.
 
-So for a CONNECTED AF_UNIX slot, and only there, POLLHUP gains the POLLIN the
-caller asked for and sheds POLLERR. This is the boundary line's job, done once
-here: the alternative is every port's poll loop, or nothing. Not touched:
+So for a CONNECTED AF_UNIX slot, and only there, POLLHUP gains the POLLIN and
+POLLOUT the caller asked for and sheds POLLERR. POLLOUT because Linux's
+unix_poll reports a stream socket writable after the peer's close -- its source
+says so, "this prevents stuck sockets" -- and a writer waiting on
+POLLOUT|POLLERR, having lost the POLLERR here, would otherwise spin on a bare
+POLLHUP instead of writing and meeting the close in the write's error (B-0
+audit round 4 F4). This is the boundary line's job, done once here: the
+alternative is every port's poll loop, or nothing. Not touched:
 AF_INET slots (they poll netd's ready file, whose contract is netd's), and a
 LISTENING slot's POLLHUP (the service was tombstoned -- not an EOF).
 
@@ -35,9 +40,14 @@ kernel handle untagged (0006's design: the server side stays on the raw
 read/write fast path), so poll() cannot tell it from a pipe without a kernel
 query per fd per call, and a pouch SERVER still sees the pipe-like row when its
 client closes. It folds into the small-integer-socket-fd redesign 0039 records
-as owed (an fd -> slot side table covers accepted sockets too). No in-tree
-pouch server polls an accepted socket: stratumd is thread-per-connection and
-blocks in read().
+as owed (an fd -> slot side table covers accepted sockets too). One in-tree
+pouch server does poll an accepted socket: stratumd's fs_pool
+(pool_socket_pending) makes a zero-timeout poll(POLLIN) on each connection to
+decide whether a client has pipelined, and counts ANY revents -- POLLHUP and
+POLLERR included -- as "pending", so the pipe-like row changes nothing for it:
+the dispatched op proceeds and the reader meets the EOF on its next header
+read. (An earlier draft of this header said no in-tree server polled an
+accepted socket; round 4 F5 found this one.)
 
 ppoll() reaches this through poll() (0039); select() refuses socket fds.
 
@@ -50,7 +60,7 @@ must see EXACTLY POLLIN with the connection still open.
 
 --- a/src/select/poll.c
 +++ b/src/select/poll.c
-@@ -40,6 +40,23 @@
+@@ -40,6 +40,26 @@
   * shape is preserved -- SYS_poll runs against the caller's array
   * directly with zero copy overhead.
   *
@@ -65,16 +75,19 @@ must see EXACTLY POLLIN with the connection still open.
 + * has -- `if (revents & POLLIN) { n = read(...); if (n == 0) closed; }` -- never
 + * terminates on POLLHUP alone: it spins on a poll() that returns at once, for
 + * ever. So for a CONNECTED AF_UNIX slot, and only there, POLLHUP gains the
-+ * POLLIN the caller asked for and sheds POLLERR. This is the boundary line's
-+ * job, done once here, rather than the kernel's: it would otherwise be done
-+ * at every port's poll loop or not at all. AF_INET slots poll netd's ready
-+ * file and are not touched; a LISTENING slot's POLLHUP (the service was
-+ * tombstoned) is not an EOF and is not touched either.
++ * POLLIN and POLLOUT the caller asked for and sheds POLLERR -- POLLOUT as
++ * Linux's unix_poll sets it after a peer's close ("prevents stuck sockets"):
++ * the write then fails and reports the close, where a writer waiting on
++ * POLLOUT|POLLERR would otherwise spin on a bare POLLHUP. This is the
++ * boundary line's job, done once here, rather than the kernel's: it would
++ * otherwise be done at every port's poll loop or not at all. AF_INET slots
++ * poll netd's ready file and are not touched; a LISTENING slot's POLLHUP (the
++ * service was tombstoned) is not an EOF and is not touched either.
 + *
   * Reference: docs/POUCH-DESIGN.md sec 14 row 16c-pre, 0015-pouch-
   * poll-tag.patch. */
  #include <poll.h>
-@@ -104,6 +121,7 @@
+@@ -104,6 +124,7 @@
  	 * the blocking poll, and the ignored entry reads revents 0. */
  	struct pollfd kfds[POUCH_POLL_NFDS_MAX];
  	nfds_t map[POUCH_POLL_NFDS_MAX];
@@ -82,7 +95,7 @@ must see EXACTLY POLLIN with the connection still open.
  	nfds_t nk = 0;
  	for (nfds_t i = 0; i < n; i++) {
  		if (fds[i].fd < 0) {
-@@ -111,7 +129,11 @@
+@@ -111,7 +132,11 @@
  			continue;
  		}
  		int kfd;
@@ -94,14 +107,14 @@ must see EXACTLY POLLIN with the connection still open.
  			/* net-6b: pouch_sock_poll_fd (NOT pouch_sock_kernel_fd)
  			 * resolves the POLL TARGET: an AF_INET socket polls its
  			 * QTPOLL-marked /net/<proto>/N/ready sibling (the data fd
-@@ -150,7 +172,12 @@
+@@ -150,7 +175,12 @@
  	 * original tagged identifiers). Ignored fd < 0 entries already read
  	 * revents 0 from the build loop. */
  	for (nfds_t k = 0; k < nk; k++) {
 -		fds[map[k]].revents = kfds[k].revents;
 +		short rev = kfds[k].revents;
 +		if (stream[k] && (rev & POLLHUP)) {
-+			rev |= kfds[k].events & POLLIN;
++			rev |= kfds[k].events & (POLLIN | POLLOUT);
 +			rev &= ~POLLERR;
 +		}
 +		fds[map[k]].revents = rev;

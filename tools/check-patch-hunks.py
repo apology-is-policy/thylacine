@@ -26,6 +26,13 @@ Reporting both as "would DROP" is how a checker earns being ignored, and a
 checker that is ignored is worth less than no checker at all -- so the two are
 classified separately and only the second is an error.
 
+WHAT IT DOES NOT CHECK: where a hunk lands. The counts can be exact while the
+line numbers have drifted -- patch then applies at an OFFSET and reports it
+only under --verbose (0029 applied 2 lines off until 2026-09-21, and a review
+that read this tool's clean output as "no fuzz/offset/reject line" was wrong).
+An offset is harmless on its own; fuzz is not, and the pouch musl series is
+applied with -F 0 in build_sysroot so a context mismatch fails the build.
+
 Usage: tools/check-patch-hunks.py [dir ...]     (default: the tree's patch dirs)
 """
 import re

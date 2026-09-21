@@ -2305,11 +2305,17 @@ build_sysroot() {
     #    build (set -e); a rejected hunk also leaves a .rej file, caught
     #    below. The read loop's || [[ -n ]] guard handles a final
     #    newline-less line in series.
+    #    -F 0: a hunk whose context does not match EXACTLY fails. GNU patch
+    #    (the Linux builders) fuzzes up to 2 context lines by default and
+    #    says so only on stdout -- a hand-maintained patch that drifted would
+    #    apply somewhere near its target, exit 0. Measured 2026-09-21: the
+    #    series applies at fuzz 0 and zero offset; a perturbed context line
+    #    applies under -F 2 and fails under -F 0 (B-0 audit round 4 F6).
     echo "==> applying pouch patch series"
     while IFS= read -r patch_line || [[ -n "$patch_line" ]]; do
         case "$patch_line" in ''|\#*) continue ;; esac
         echo "    patch: $patch_line"
-        patch -p1 -t -d "$musl_src" -i "$patches_dir/$patch_line"
+        patch -p1 -t -F 0 -d "$musl_src" -i "$patches_dir/$patch_line"
     done < "$patches_dir/series"
     local rej
     rej="$(find "$musl_src" -name '*.rej')"
