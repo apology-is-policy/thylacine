@@ -964,8 +964,11 @@ static void cp_poll_entry(void) {
     struct pollfd pfds[1] = {
         { .fd = g_cp_fd, .events = g_cp_events, .revents = 0 },
     };
-    g_cp_result  = sys_poll_for_proc(g_cp_proc, pfds, 1, g_cp_timeout);
+    s64 r = sys_poll_for_proc(g_cp_proc, pfds, 1, g_cp_timeout);
+    // revents BEFORE the result: the tests wait on g_cp_result and then read
+    // g_cp_revents, possibly from another CPU.
     g_cp_revents = pfds[0].revents;
+    __atomic_store_n(&g_cp_result, r, __ATOMIC_RELEASE);
     sched();    // park
 }
 
@@ -1117,8 +1120,12 @@ void test_poll_devsrv_server_pollout_wakes_on_client_drain(void) {
 // The mirror: a client that polled POLLOUT on a full c2s is woken by the
 // server's BLOCKING read -- the byte-mode POSIX-server read() path. That walk
 // in srvconn_server_recv_blocking had no witness: deleting it passed every
-// kernel test (B-0 audit round 4 F9). A bounded timeout, so a kernel without
-// the walk fails the assert (0, timed out) instead of stranding the poller.
+// kernel test (B-0 audit round 4 F9). The assertion is WHEN the poll returns,
+// not what it returns: without the walk the poll still reports POLLOUT -- its
+// timeout pass re-samples and finds the room -- so the first form of this
+// test, which asserted only the result, PASSED on the sabotaged kernel
+// (measured). The timeout is bounded so that kernel still reaps cleanly.
+#define CP_WAKE_LATE_NS (500ull * 1000ull * 1000ull)
 void test_poll_devsrv_client_pollout_wakes_on_server_blocking_drain(void) {
     struct cp_fixture f;
     TEST_ASSERT(cp_setup(&f), "fixture");
@@ -1132,7 +1139,7 @@ void test_poll_devsrv_client_pollout_wakes_on_server_blocking_drain(void) {
         "c2s is full: the client is not writable");
 
     g_cp_proc = f.client;  g_cp_fd = (hidx_t)f.client_h;
-    g_cp_events = POLLOUT; g_cp_timeout = 1000;
+    g_cp_events = POLLOUT; g_cp_timeout = 3000;
     g_cp_result = -999;    g_cp_revents = 0;
 
     struct Thread *poller = thread_create(kproc(), cp_poll_entry);
@@ -1140,14 +1147,26 @@ void test_poll_devsrv_client_pollout_wakes_on_server_blocking_drain(void) {
     ready(poller);
     TEST_YIELD_UNTIL(poller->state == THREAD_SLEEPING);
 
-    TEST_ASSERT(srvconn_server_recv_blocking(f.cn, chunk, sizeof chunk) > 0,
-        "the server drains through the blocking read");
-    TEST_YIELD_UNTIL(g_cp_result != -999);
-    TEST_EXPECT_EQ(g_cp_result, 1L, "the drain ends the client's poll (not its timeout)");
-    TEST_EXPECT_EQ((s64)g_cp_revents, (s64)POLLOUT, "revents = POLLOUT");
-
-    thread_free(poller);
+    const char *err = NULL;
+    u64 drained = timer_now_ns();
+    if (srvconn_server_recv_blocking(f.cn, chunk, sizeof chunk) <= 0)
+        err = "the server drains through the blocking read";
+    TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_cp_result, __ATOMIC_ACQUIRE) != -999);
+    u64 woke = timer_now_ns();
+    if (!err && g_cp_result == -999)
+        err = "the drain woke the client's poll (it was still parked 2 s later)";
+    else if (!err && woke - drained >= CP_WAKE_LATE_NS)
+        err = "the poll ended at the drain, not at its timeout pass";
+    else if (!err && g_cp_result != 1)
+        err = "it returns 1";
+    else if (!err && g_cp_revents != POLLOUT)
+        err = "revents = POLLOUT";
+    // A kernel without the walk returns at the 3 s timeout: wait it out so the
+    // poller is reaped, never freed while still asleep.
+    TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_cp_result, __ATOMIC_ACQUIRE) != -999);
+    if (g_cp_result != -999) thread_free(poller);
     cp_teardown(&f);
+    TEST_ASSERT(err == NULL, err ? err : "client POLLOUT on the blocking drain");
 }
 
 // A kernel-attached conn's rings are the kernel 9P client's.
