@@ -450,6 +450,52 @@ tree, and rounds 4 (libc + the new kernel poll surface) and 3 (shed) have not be
 Stratum's O_APPEND is stat-then-write (two appenders clobber -- ours, enqueued), the accepted-socket shape, two
 union resolver gaps, the exact union seed. `main` is still `47ba3295`.
 
+### Addendum 5, same day (eighth self-compact): the test that failed on the fixed kernel, and the sabotage that passed
+
+**The fix was wrong, and its own test said so first.** The verification run I had left in flight at the compaction
+(`5807bd9f`) came back `1594/1595`: `stalk.union_dissolved_degrades` -- the kernel test I had written that morning for
+shed round 2's finding -- failed on the UNSABOTAGED kernel with `dissolved: "." still resolves`. The rule ("a
+dissolved union degrades to member[0], never to the covered directory") cloned `base` for the degrade. A `STALK_OPEN`
+union handle is member[0] OPENED, and the fixture refuses to walk an opened Spoor because Stratum does (`h_walk`:
+`is_open` -> EINVAL, the zero-element clone included). While a union lives this never shows: every resolution leaves
+through the point. The on-device probe stages had been green for the dullest reason available -- their members are
+`/proc` and `/ctl`, kernel Devs that walk an opened Spoor without complaint. So the rule held on the Devs I tested and
+failed on the one class a real union would be made of. What caught it was the fixture's author (UM round 2) having
+made the double refuse what production refuses; the lesson is in that comment, not in my diligence. Fixed at
+`237ba793`: both dissolved sites resolve from `stalk_union_handle_walkable(base)`, the UNOPENED clone of that member
+which the snapshot already retains for the readdir dedup probe -- matched by identity, never by index, because the
+snapshot skips a member it could not open. `STALK_MOUNT` still keys the point.
+
+**The sabotage that passed.** The same run booted a kernel with the re-arm loop's own deadline test removed, to
+RED-before `poll.timeout_survives_a_busy_list`. It PASSED. `tsleep` prefers a set flag to a passed deadline, so the
+defect needs a walk to land between the loop's clear and `tsleep`'s cond check on EVERY iteration past the deadline;
+my producer was the test thread doing send/recv between yields, which hits that window only by luck. I had written
+in the dossier that the test "cannot false-fail -- it can only fail to discriminate", which was a true sentence
+standing in for the measurement I had not taken. Rebuilt: the producer is the polled object itself, a test Dev whose
+`.poll` registers and then walks its own hook list on every sample, never ready. Every re-sample re-flags the hook
+inside the window, deterministically. The walking stops after 1 s so a kernel without the test still returns instead
+of spinning a CPU for the rest of the suite, and the assertion is about WHEN the last sample happened (50 ms vs 1 s).
+The `deadline` sabotage now fails it at that assertion.
+
+**A second resolver defect, found by reading three lines further.** Fixing the degrade meant reading the `..` arm:
+`if (depth > 0) spoor_clunk(trail[--depth])`. A base that is itself a mount point crosses BEFORE the component loop
+and its mounted root is pushed as `trail[0]`; a `..` at the bottom popped it, and the next component was walked from
+the uncrossed base -- the directory the mount COVERS. `"../x"` read under a mount that `"x"` read over. Pre-existing,
+unreported by four audit rounds on this file, and the comment twenty lines below it ("the base case was already
+proven not-a-mount by the base cross above") was true only until such a pop. I wrote the test first and rode its
+RED-before on the sabotage script (mode `floor` = the old arm): `FAIL: '..' at a crossed base is a no-op: still the
+mount`, 1595/1596; fixed kernel 1596/1596 (`d5c58d76`, `floor_depth`). Not yet audited -- it rides round 3.
+
+**Where the measurements stand** (`d5c58d76`): suite 1596/1596; five sabotaged kernels -- `poll`, `union`, `deadline`,
+`walkable`, `floor` -- each fail exactly their own assertion and nothing else; `symlink-probe` 33 checks, 0 failures.
+The combined gate (fleet, then the 40-boot SMP gate) and both follow-up audits (round 4: the kernel poll surface and
+the libc deltas; round 3: shed + stalk, the two new fixes included) were launched together and are running as this
+is written. Two self-audit items are parked until the auditors let go of the files: the re-arm loop re-RESOLVES the
+fd number on each re-sample instead of sampling the object its hook sits on (a sibling close+reopen makes it report
+one object while waiting on another), and `poll.h` tells producers to walk "under the object's lock" where `srvconn.c`
+walks after dropping it -- sound, because the register and the sample share a critical section, but the contract
+should say what is actually required.
+
 ## 2026-09-21 (main, Fable 5.1, effort max) -- taking over a week of another agent's work: the graphical trusted path, the chord nobody could find, and the image that booted two UIs at once
 
 **Where the tree stood.** Claude credits ran out on 09-16; a Codex agent ("Astra")
