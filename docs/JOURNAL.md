@@ -22,6 +22,68 @@ needed the operator.
 
 
 ---
+## 2026-09-21 (aux, Opus 4.8, effort xhigh) -- R-0 REACHED: `std` compiles for aarch64-unknown-thylacine
+
+The Rust std port's first milestone. `std` (core+alloc+libc+std) compiles for
+`aarch64-unknown-thylacine` via `-Z build-std=std`, and a std probe crate
+(HashMap + `env::args`) links against it. Durable + reproducible: two validated
+patches in `usr/ports/rust/patches/` (libc 1244 lines / 9 files; rust-src 245
+lines / 11 files) recreate both forks from pristine sources -- the rust-src patch
+was applied to a truly-pristine tree and rebuilt green as proof.
+
+**Method: the compiler is the oracle, not the plan.** The design note's R-0
+guesses were mostly wrong, and each was caught by grounding against the real
+artifact rather than trusting scripture:
+- **"synthesized errno" was false.** Pouch presents STANDARD musl errno -- read
+  from patch 0001's `syscall_ret.c` (passes `-errno` in [-4095,-2] through; flat
+  -1 -> EIO) + the tracked getuid `-38` (= musl ENOSYS). Corrected in the note.
+- **The rust-src arms were far smaller than feared.** `os/mod.rs`, the
+  `stack_overflow` opt-out (non-membership = zero code), and `library/unwind`
+  (the `target_env="musl"` link arm) all ride free via `target_family="unix"` +
+  `target_env="musl"`. The real arms: `os/thylacine/{mod,raw,fs}` (reached via
+  `os/unix::platform`, NOT `os/mod.rs`), `sys/thread` set_name->unsupported,
+  `sys/random` getrandom, `sys/paths` current_exe->unsupported, `sys/args` imp,
+  and the `std/build.rs` restricted_std allowlist. No `sys/*/unix.rs` cfg series.
+- **My `libc_all.txt` grep snapshot undercounted by 71 symbols** (36 errnos, 27
+  signals, 8 wait(2) macros) that only surfaced once std's decode/signal/wait
+  arms were reached. The build (`build-std=std`), not the grep, was the true
+  surface oracle; the fill subagent used it and caught them. 371->0 libc-side
+  errors, then 26->0 std-arm errors.
+
+**The wrong turn that cost the most, and the catch: build-std fingerprint
+staleness.** `-Z build-std` does NOT reliably rebuild a patched std-dep (libc)
+or re-run std's `build.rs` when their SOURCE changes -- it silently reuses a
+stale rlib and reports FALSE results (both false-missing-symbols and a
+false-green risk). First seen when a libc edit "did nothing"; confirmed when a
+`build.rs` allowlist edit didn't clear `restricted_std` because std never
+recompiled (`Compiling std` absent from the log). The fix is a full
+`rm -rf target/<triple>` (definitive) and ALWAYS verifying `Compiling libc` /
+`Compiling std` appears. Documented in `patches/README.md` so it does not
+re-bite. `restricted_std` itself was the last gate: std compiled but was marked
+"unsupported platform"; the honest fix is declaring thylacine in
+`std/build.rs`'s full-std allowlist, not making every program carry
+`#![feature(restricted_std)]`.
+
+Also found: libc 0.2.189's `new/musl/` tree assumes every musl target is Linux
+(its pthread re-exports pull from `common::{linux_like,posix}::pthread`, gated to
+specific `target_os`) -- an upstream gap thylacine is the first to hit; fixed by
+adding thylacine to those cfg gates (in the libc patch). And `-Z json-target-spec`
+is now required on this nightly for a `.json` target.
+
+**Cost:** the whole R-0 ran at `-j2` on the Mac (modest; ~13s per clean build),
+no all-core hold needed. Two general-purpose subagents did the mechanical libc
+transcription from the in-tree musl aarch64 layers under tight constraints; the
+category-B rust-src arms + all the grounding/validation were done directly.
+
+**Open (R-1):** a cargo-built std hello RUN ON DEVICE (threads/file/TCP/HashMap/
+panic-unwind). Needs the pouch RUNTIME patches -- and main's ci is RED on a
+mount-table regression (operator ruled the real fix scripture-first, main's), so
+0033/0034/0035 will NOT reach `main` soon; R-1 cherry-picks them from
+`browser-b0 @e0fc2422` (NOT 0037, never compiled). The final-link path
+(`pouch-clang` + the JSON LINK fields: static-PIE/CRT) was NOT exercised by
+R-0's rlib compile and is unproven. `getuid`=-38 stays main's A-3 chunk (R-2).
+
+---
 ## 2026-09-21 (aux, Opus 4.8, effort max) -- H9 landed; the arc pivots to the Rust std port
 
 **H9, the console-drain disarm (`c1b25cdf`).** main handed aux the H9 hazard on yip

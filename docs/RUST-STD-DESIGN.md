@@ -24,6 +24,26 @@ The `std::os::thylacine` surface (section 6) and toolchain-pinning policy
 (section 7) are ratified as the engineering approach; per-arm specifics are
 proven at R-0 (section 13). Everything else is engineering the brief settled.
 
+**AS-BUILT (R-0 REACHED, 2026-09-21): `std` compiles for
+`aarch64-unknown-thylacine`.** Corrections to this note's pre-build guesses,
+now verified (durable + reproducible in `usr/ports/rust/patches/`):
+- errno is STANDARD musl, NOT synthesized (fixed in the status table + the libc
+  section).
+- The rust-src arms are SMALLER than sections 6/8 estimated. What rides FREE via
+  `target_family="unix"` + `target_env="musl"`: `os/mod.rs` dispatch, the
+  `stack_overflow` opt-out (non-membership = zero code), and `library/unwind`
+  (no arm -- the `target_env="musl"` link arm covers it). What actually needed
+  arms: `os/thylacine/{mod,raw,fs}` (reached via `os/unix::platform`, not
+  `os/mod.rs`), `sys/thread` set_name (-> unsupported), `sys/random` getrandom,
+  `sys/paths` current_exe (-> unsupported), `sys/args` imp, and the
+  `std/build.rs` restricted_std allowlist. There is NO separate `sys/*/unix.rs`
+  cfg-arm series -- the component `unix.rs` files take generic-unix defaults.
+- Build mechanism: `-Z build-std=std -Z json-target-spec` (the flag is required
+  on this nightly); std's libc is patched in rust-src's `library/Cargo.toml`
+  (build-std ignores a `[patch]` in the user crate); rust-src is patched in the
+  sysroot in place (no `../rust-thylacine` copy). Full detail:
+  `usr/ports/rust/patches/README.md`.
+
 ---
 
 ## 1. What this is, and the first milestone
@@ -68,7 +88,7 @@ is stable and under ~1k lines (Managarm, HelenOS are the recent precedents).
 | Piece | State |
 |---|---|
 | C toolchain | clang 22 / LLVM `llvmorg-22.1.8` fork, real `aarch64-thylacine` triple (`docs/LLVM-DESIGN.md` CL-3). Static libunwind + libc++abi + libc++; unwinding proven on-device. |
-| pouch libc | musl **1.2.5**-derived (`third_party/musl/`, pristine) + a **30-patch** boundary-line series (`usr/lib/pouch/patches/0001..0030`). Upper half = musl unmodified; lower half = Thylacine-native. Sysroot: `build/sysroot/{include,lib,bin}` (`libc.a`, CRT). Syscall ABI is Thylacine-native numbers (musl's `bits/syscall.h` regenerated); errno synthesized per-call in the lower half. |
+| pouch libc | musl **1.2.5**-derived (`third_party/musl/`, pristine) + a **30-patch** boundary-line series (`usr/lib/pouch/patches/0001..0030`). Upper half = musl unmodified; lower half = Thylacine-native. Sysroot: `build/sysroot/{include,lib,bin}` (`libc.a`, CRT). Syscall ABI is Thylacine-native numbers (musl's `bits/syscall.h` regenerated); errno is STANDARD musl (AS-BUILT R-0 correction: the seam's `syscall_ret.c` passes `-errno` in `[-4095,-2]` through unchanged and maps a flat -1 to EIO -- no `bits/errno.h` patch; getuid's -38 = musl ENOSYS confirms). |
 | Native Rust | `no_std` on the built-in `aarch64-unknown-none` over `libthyla-rs`; **144 crates vendored** under `third_party/rust`. **No `std` port** -- this arc. |
 | Custom targets | flagged in `usr/.cargo/config.toml` as a "Phase 5+" option, never built. |
 
@@ -285,12 +305,14 @@ once stable.
   series adding the `sys/*/unix.rs` arms, `os/thylacine/{mod,raw,fs}.rs`, and
   the `library/unwind` link arm). Built by `-Z build-std`, not a compiled rustc.
 - **`libc-thylacine`** (forked `rust-lang/libc`, pinned): the new-OS module
-  `src/unix/thylacine/{mod,b64,align,no_align}.rs` (aarch64-only -> no `b32`),
-  seeded from `src/unix/linux_like/linux/musl/` + its `b64/aarch64` arch file
-  and edited for the syscall-number / errno divergences (errno constants must
-  match pouch's synthesized values, not Linux's), plus the `src/unix/mod.rs`
-  dispatch arm and the `build.rs` `target_os` registration. Only the
-  `library/std`-referenced items at first (the initial Hurd libc PR was ~3.3k
+  `src/unix/thylacine/mod.rs` (AS-BUILT: one file suffices, aarch64-only),
+  seeded from `src/unix/linux_like/linux/musl/` + its `b64/aarch64` arch file.
+  AS-BUILT R-0 correction: errno constants are STANDARD musl (NOT synthesized --
+  see the status table row); SYS_* numbers mostly ENOSYS in pouch but std as a
+  non-linux unix calls libc FUNCTIONS, not raw `syscall(SYS_*)`, so they do not
+  reach std. Plus the `src/unix/mod.rs` dispatch arm, the `build.rs` check-cfg,
+  and the `src/new/` pthread-gate additions (an upstream gap for non-linux musl).
+  Only the `library/std`-referenced items at first (the initial Hurd libc PR was ~3.3k
   lines; the module grows as it completes). This is the larger half of the work.
 - **In this repo:** `aarch64-unknown-thylacine.json`, the `rust-toolchain.toml`
   pin, the `tools/` build recipe (mirroring the clang/Mesa fork recipes), the
