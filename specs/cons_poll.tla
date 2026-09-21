@@ -55,6 +55,29 @@
 (*     under the lock, so a flag set during the window either keeps the    *)
 (*     mgr off the sleep path or finds it enqueued to wake.                 *)
 (*                                                                         *)
+(* THE EPISODE AND THE RE-ARM (2026-09-21, B-0 audit round 4, F1)          *)
+(*                                                                         *)
+(*   IM-1's trusted episode gives the console a SECOND hook list: a caller *)
+(*   frozen by an open episode registers on `episode_poll_list`, which the *)
+(*   per-byte relay never walks, so a frozen poller is not woken once per  *)
+(*   secret keystroke. The list is chosen by state AT REGISTER TIME. That  *)
+(*   was sound while poll RETURNED on every wake (the caller re-polled and *)
+(*   re-registered on the list its new state called for). Since the poll   *)
+(*   re-arm (poll.tla: a wake is a hint; an empty re-sample sleeps AGAIN)  *)
+(*   a hook that only re-SAMPLES stays on the list it was put on: a caller *)
+(*   that registered frozen, woken at END with nothing buffered, re-sleeps *)
+(*   on the episode list -- and the keystrokes after END are relayed to    *)
+(*   the other one. The fix is at the poll core: every re-arm pass         *)
+(*   UNREGISTERS and RE-REGISTERS, so a Dev re-chooses its list for the    *)
+(*   state it samples. The same re-registration keeps the privacy half:    *)
+(*   a caller that registered BEFORE the SAK is moved to the episode list  *)
+(*   by BEGIN's walk, so no secret keystroke's relay reaches it.            *)
+(*                                                                         *)
+(*   BUGGY_NO_REREGISTER -- the as-built d5c58d76 re-arm (sample-only      *)
+(*     re-sample; hooks stay put). NoMissedConsPoll counterexample: Begin, *)
+(*     Register(frozen -> E), sleep, End, wake, empty re-sample, re-sleep  *)
+(*     on E, a key: the relay walks P only.                                 *)
+(*                                                                         *)
 (* CFG MATRIX (executable documentation per CLAUDE.md spec-first policy)    *)
 (*                                                                         *)
 (*   cons_poll.cfg                  all buggy flags FALSE -- every safety  *)
@@ -66,6 +89,13 @@
 (*   cons_poll_buggy_lost_wake.cfg  BUGGY_MGR_LOST_WAKE -- NoMissedConsPoll*)
 (*                                   counterexample: the relay strands a    *)
 (*                                   poller asleep on a ready console.       *)
+(*   cons_poll_buggy_no_reregister.cfg BUGGY_NO_REREGISTER --               *)
+(*                                   NoMissedConsPoll counterexample: a     *)
+(*                                   poller stranded on the episode list.    *)
+(*   cons_poll_buggy_no_reregister_cadence.cfg BUGGY_NO_REREGISTER --       *)
+(*                                   NoSecretCadence counterexample: a      *)
+(*                                   pre-SAK poller left on poll_list gets  *)
+(*                                   one pass per secret keystroke.          *)
 (*                                                                         *)
 (* MODELING ASSUMPTIONS                                                     *)
 (*                                                                         *)
@@ -76,7 +106,14 @@
 (*   `data` -- the console has at least one byte buffered, the POLLIN      *)
 (*   readiness -- is monotonic FALSE -> TRUE: a readiness edge within one  *)
 (*   poll episode (a consumer draining the ring is a separate concern,     *)
-(*   poll.tla's assumption).                                                *)
+(*   poll.tla's assumption). It arrives only while no episode is open: a   *)
+(*   keystroke DURING one belongs to the trusted reader, and BEGIN        *)
+(*   discards the ring.                                                     *)
+(*                                                                         *)
+(*   One episode (`episode_used`), which is enough for both halves: a      *)
+(*   poller that registers before it (the privacy half) and one that       *)
+(*   registers during it (the liveness half). A frozen caller samples no   *)
+(*   readiness at all (IM-1: POLLIN would leak the count of key bytes).     *)
 (*                                                                         *)
 (*   The mgr's `Rendez` has OTHER wakers -- the Ctrl-C `interrupt` and SAK *)
 (*   flags also wake it (kernel/cons.c `cons_mgr_pending`). `SpuriousWake` *)
@@ -105,36 +142,46 @@
 EXTENDS Naturals
 
 CONSTANTS
-    BUGGY_MGR_LOST_WAKE   \* BOOLEAN -- TRUE: the console_mgr's go-to-sleep
+    BUGGY_MGR_LOST_WAKE,  \* BOOLEAN -- TRUE: the console_mgr's go-to-sleep
                           \*   is a hand-rolled check-then-sleep (observe
                           \*   poll_wake_pending, then commit), not the
                           \*   register-then-observe sleep(). A flag set in
                           \*   the gap is lost.
 
+    BUGGY_NO_REREGISTER   \* BOOLEAN -- TRUE: the poll re-arm re-SAMPLES but
+                          \*   leaves the hook on the list it was registered on
+                          \*   (the as-built d5c58d76 loop).
+
 ASSUME BUGGY_MGR_LOST_WAKE \in BOOLEAN
+ASSUME BUGGY_NO_REREGISTER \in BOOLEAN
 
 VARIABLES
     data,            \* BOOLEAN -- the console ring holds >= 1 byte (POLLIN
                      \*   readiness). Monotonic FALSE -> TRUE.
     pending,         \* BOOLEAN -- g_cons poll_wake_pending: an RX IRQ asked
                      \*   the mgr to walk the poll-hook list.
-    registered,      \* BOOLEAN -- the poller's poll_waiter hook is installed
-                     \*   on the console's hook list.
-    flagged,         \* BOOLEAN -- the poller's poll_waiter ready flag, set by
-                     \*   the mgr's hook-list walk; the readiness the poller
-                     \*   observes under its own Rendez lock.
+    onlist,          \* "none" | "P" | "E" -- which console hook list holds
+                     \*   the poller's poll_waiter: poll_list or
+                     \*   episode_poll_list.
+    flagged,         \* BOOLEAN -- the poller's poll_waiter ready flag: a
+                     \*   HINT set by any walk of its list (poll.tla).
     poller_pc,       \* the poll() call's lifecycle (see PollerPCs).
     mgr_pc,          \* the console_mgr's lifecycle (see MgrPCs).
     mgr_saw,         \* BOOLEAN -- BUGGY path only: the mgr's stale snapshot
                      \*   of pending, taken before it commits to sleep.
-    spurious_used    \* BOOLEAN -- the one modeled benign mgr wake has fired.
+    spurious_used,   \* BOOLEAN -- the one modeled benign mgr wake has fired.
+    frozen,          \* BOOLEAN -- an episode is open (IM-1): the poller's
+                     \*   Proc is not the attached one, so it is FROZEN.
+    episode_used,    \* BOOLEAN -- the one modeled episode has begun.
+    secret_woke      \* BOOLEAN -- history: a keystroke relayed DURING the
+                     \*   episode reached the frozen poller's hook.
 
-vars == <<data, pending, registered, flagged, poller_pc, mgr_pc,
-          mgr_saw, spurious_used>>
+vars == <<data, pending, onlist, flagged, poller_pc, mgr_pc,
+          mgr_saw, spurious_used, frozen, episode_used, secret_woke>>
 
 \* Poller: "start"      -- poll() entered; no hook installed.
 \*         "registered" -- hook installed, readiness sampled; the evaluate
-\*                         point (first entry and every resume from a wake).
+\*                         point (first entry and every re-arm pass).
 \*         "sleeping"   -- parked on the poller's private Rendez.
 \*         "done"       -- poll returned a ready revent.
 PollerPCs      == {"start", "registered", "sleeping", "done"}
@@ -147,165 +194,200 @@ PollerTerminal == {"done"}
 \*                            and committing to sleep (the lost-wake window).
 MgrPCs == {"sleeping", "awake", "deciding"}
 
+\* The readiness a sample reports: none at all for a frozen caller.
+Ready == data /\ ~frozen
+
+\* The list cons_poll registers on, chosen by the state it samples.
+ListFor == IF frozen THEN "E" ELSE "P"
+
+registered == onlist # "none"
+
 TypeOk ==
     /\ data          \in BOOLEAN
     /\ pending       \in BOOLEAN
-    /\ registered    \in BOOLEAN
+    /\ onlist        \in {"none", "P", "E"}
     /\ flagged       \in BOOLEAN
     /\ poller_pc     \in PollerPCs
     /\ mgr_pc        \in MgrPCs
     /\ mgr_saw       \in BOOLEAN
     /\ spurious_used \in BOOLEAN
+    /\ frozen        \in BOOLEAN
+    /\ episode_used  \in BOOLEAN
+    /\ secret_woke   \in BOOLEAN
 
-(***************************************************************************)
-(* The poller has just called poll; the console is empty, no hook is       *)
-(* installed, no flag set, no IRQ pending; the console_mgr is parked.       *)
-(***************************************************************************)
 Init ==
     /\ data          = FALSE
     /\ pending       = FALSE
-    /\ registered    = FALSE
+    /\ onlist        = "none"
     /\ flagged       = FALSE
     /\ poller_pc     = "start"
     /\ mgr_pc        = "sleeping"
     /\ mgr_saw       = FALSE
     /\ spurious_used = FALSE
+    /\ frozen        = FALSE
+    /\ episode_used  = FALSE
+    /\ secret_woke   = FALSE
 
 (***************************************************************************)
-(* DataArrives -- the RX IRQ producer. A byte enters the ring (the POLLIN  *)
-(* edge), the poll_wake_pending flag is set under g_cons.lock, and the     *)
-(* console_mgr's Rendez is woken: a sleeping mgr is re-scheduled to its    *)
-(* loop. A mgr that is already "awake" (or "deciding") is untouched -- the *)
-(* wakeup finds no enqueued waiter, exactly as the impl. Monotonic: fires  *)
-(* once. Gated to the pre-terminal space (after poll returns, no one polls)*)
+(* DataArrives -- the RX IRQ producer, outside an episode. A byte enters   *)
+(* the ring (the POLLIN edge), poll_wake_pending is set under g_cons.lock, *)
+(* and the console_mgr's Rendez is woken. Monotonic: fires once.            *)
 (***************************************************************************)
 DataArrives ==
     /\ poller_pc \notin PollerTerminal
     /\ ~data
+    /\ ~frozen
     /\ data'    = TRUE
     /\ pending' = TRUE
     /\ mgr_pc'  = IF mgr_pc = "sleeping" THEN "awake" ELSE mgr_pc
-    /\ UNCHANGED <<registered, flagged, poller_pc, mgr_saw, spurious_used>>
+    /\ UNCHANGED <<onlist, flagged, poller_pc, mgr_saw, spurious_used,
+                   frozen, episode_used, secret_woke>>
 
 (***************************************************************************)
-(* PollerRegister -- the CORRECT poll entry (poll.tla's Register, one fd). *)
-(* `dev->poll` installs the hook AND samples the console's readiness in    *)
-(* one locked step: register-then-observe, so no readiness event slips     *)
-(* between the sample and the hook going live. The sampled readiness is    *)
-(* the initial flag.                                                        *)
+(* SecretKey -- a keystroke DURING the episode. It is the trusted reader's *)
+(* (corvus consumes it), but the RX IRQ relays a poll wake like any byte:  *)
+(* pending is set and the mgr woken. What the privacy half pins is whose   *)
+(* hook that relay reaches. Not fair; may repeat.                           *)
+(***************************************************************************)
+SecretKey ==
+    /\ poller_pc \notin PollerTerminal
+    /\ frozen
+    /\ pending' = TRUE
+    /\ mgr_pc'  = IF mgr_pc = "sleeping" THEN "awake" ELSE mgr_pc
+    /\ UNCHANGED <<data, onlist, flagged, poller_pc, mgr_saw, spurious_used,
+                   frozen, episode_used, secret_woke>>
+
+(***************************************************************************)
+(* Begin / End -- the SAK opens the episode, SYS_CONSOLE_EPISODE_END (or   *)
+(* the trusted Proc's death) closes it. BEGIN discards the ring. Each      *)
+(* transition walks BOTH lists (cons_episode_wake_all), so a hook on       *)
+(* either is flagged and a sleeping poller resumes to its evaluate point.  *)
+(***************************************************************************)
+WalkBoth ==
+    /\ flagged'   = (flagged \/ registered)
+    /\ poller_pc' = IF poller_pc = "sleeping" /\ registered
+                    THEN "registered" ELSE poller_pc
+
+Begin ==
+    /\ ~episode_used
+    /\ poller_pc \notin PollerTerminal
+    /\ ~data
+    /\ frozen'       = TRUE
+    /\ episode_used' = TRUE
+    /\ WalkBoth
+    /\ UNCHANGED <<data, pending, onlist, mgr_pc, mgr_saw, spurious_used,
+                   secret_woke>>
+
+End ==
+    /\ frozen
+    /\ frozen' = FALSE
+    /\ WalkBoth
+    /\ UNCHANGED <<data, pending, onlist, mgr_pc, mgr_saw, spurious_used,
+                   episode_used, secret_woke>>
+
+(***************************************************************************)
+(* PollerRegister -- the poll entry (poll.tla's Register, one fd):         *)
+(* cons_poll registers on the list its sampled state calls for and samples *)
+(* readiness in one step under g_cons.lock -- register-then-observe.       *)
 (***************************************************************************)
 PollerRegister ==
     /\ poller_pc = "start"
-    /\ poller_pc'  = "registered"
-    /\ registered' = TRUE
-    /\ flagged'    = data
-    /\ UNCHANGED <<data, pending, mgr_pc, mgr_saw, spurious_used>>
+    /\ poller_pc' = "registered"
+    /\ onlist'    = ListFor
+    /\ flagged'   = Ready
+    /\ UNCHANGED <<data, pending, mgr_pc, mgr_saw, spurious_used,
+                   frozen, episode_used, secret_woke>>
 
 (***************************************************************************)
-(* PollerCommit -- the evaluate point (first entry and every resume). A    *)
-(* `tsleep` on the poller's Rendez: the flag scan and the sleep transition *)
-(* are atomic under that Rendez lock. Flag set -> return ready (unhook).   *)
-(* Else (poll(-1)) -> sleep. (The timeout branch is tsleep.tla's.)         *)
+(* PollerEvaluate -- the evaluate point, first entry and every re-arm pass *)
+(* (poll.tla: a flag is a HINT). A flag set -> re-arm: the flag cleared,   *)
+(* readiness re-sampled; ready -> return (unhook). Not ready -> sleep      *)
+(* again (poll(-1): 0 only at a deadline, and there is none here). The     *)
+(* CORRECT re-arm re-REGISTERS in the same step -- the hook moves to the   *)
+(* list its new state calls for. BUGGY_NO_REREGISTER leaves it where it    *)
+(* was put. No flag -> sleep (the tsleep commit, atomic under the Rendez). *)
 (***************************************************************************)
-PollerCommit ==
+PollerEvaluate ==
     /\ poller_pc = "registered"
-    /\ IF flagged
-       THEN /\ poller_pc'  = "done"
-            /\ registered' = FALSE      \* unhook on return (NoStaleHook)
-       ELSE /\ poller_pc'  = "sleeping"
-            /\ registered' = registered
-    /\ UNCHANGED <<data, pending, flagged, mgr_pc, mgr_saw, spurious_used>>
+    /\ IF Ready
+       THEN /\ poller_pc' = "done"
+            /\ onlist'    = "none"
+            /\ flagged'   = flagged
+       ELSE IF flagged
+            THEN /\ poller_pc' = "sleeping"
+                 /\ flagged'   = FALSE
+                 /\ onlist'    = IF BUGGY_NO_REREGISTER THEN onlist ELSE ListFor
+            ELSE /\ poller_pc' = "sleeping"
+                 /\ flagged'   = FALSE
+                 /\ onlist'    = onlist
+    /\ UNCHANGED <<data, pending, mgr_pc, mgr_saw, spurious_used,
+                   frozen, episode_used, secret_woke>>
 
 (***************************************************************************)
-(* MgrDrainWalk -- the console_mgr, awake with the flag set, drains it     *)
-(* (under g_cons.lock) and walks the poll-hook list (`poll_waiter_list_-   *)
-(* wake`, process context). The walk sets each registered poller's flag    *)
-(* AND wakes its Rendez. Here: if the console is ready and the poller is   *)
-(* registered, set its flag and re-schedule a sleeping poller to its       *)
-(* evaluate point. The mgr stays awake to loop.                            *)
+(* MgrDrainWalk -- the console_mgr drains pending and walks poll_list (the *)
+(* per-byte relay walks ONLY poll_list; that is the episode design). The   *)
+(* walk flags every hook on it (a hint) and wakes a sleeping poller. A     *)
+(* walk that reaches the poller while it is frozen during the episode AND  *)
+(* finds its flag clear is recorded: that walk buys the frozen poller one  *)
+(* more pass, i.e. a secret keystroke's cadence arriving at its hook. (A   *)
+(* flag already set -- BEGIN's own walk, not yet consumed -- gains nothing.)*)
 (***************************************************************************)
 MgrDrainWalk ==
     /\ mgr_pc = "awake"
     /\ pending
     /\ pending' = FALSE
-    /\ IF data /\ registered
-       THEN /\ flagged'   = TRUE
-            /\ poller_pc' = IF poller_pc = "sleeping" THEN "registered"
-                                                      ELSE poller_pc
-       ELSE /\ flagged'   = flagged
-            /\ poller_pc' = poller_pc
-    /\ UNCHANGED <<data, registered, mgr_pc, mgr_saw, spurious_used>>
+    /\ IF onlist = "P"
+       THEN /\ flagged'     = TRUE
+            /\ poller_pc'   = IF poller_pc = "sleeping" THEN "registered"
+                                                        ELSE poller_pc
+            /\ secret_woke' = (secret_woke \/ (frozen /\ ~flagged))
+       ELSE /\ flagged'     = flagged
+            /\ poller_pc'   = poller_pc
+            /\ secret_woke' = secret_woke
+    /\ UNCHANGED <<data, onlist, mgr_pc, mgr_saw, spurious_used,
+                   frozen, episode_used>>
 
-(***************************************************************************)
-(* MgrSleep -- the CORRECT go-to-sleep: register-then-observe. The mgr     *)
-(* enqueues on its Rendez and re-checks `pending` under the lock in ONE    *)
-(* atomic step (the `sleep(&mgr_rendez, cons_mgr_pending)` contract,       *)
-(* scheduler.tla). The ~pending guard IS that re-check: a producer that    *)
-(* set pending is a separate step that either precedes this (the guard     *)
-(* fails, the mgr drains instead) or follows it (the mgr is enqueued, so   *)
-(* the wakeup re-schedules it). No flag set in the window is lost.          *)
-(***************************************************************************)
 MgrSleep ==
     /\ ~BUGGY_MGR_LOST_WAKE
     /\ mgr_pc = "awake"
     /\ ~pending
     /\ mgr_pc' = "sleeping"
-    /\ UNCHANGED <<data, pending, registered, flagged, poller_pc,
-                   mgr_saw, spurious_used>>
+    /\ UNCHANGED <<data, pending, onlist, flagged, poller_pc,
+                   mgr_saw, spurious_used, frozen, episode_used, secret_woke>>
 
-(***************************************************************************)
-(* MgrObserve / MgrCommitSleep -- the BUGGY hand-rolled check-then-sleep,  *)
-(* split into two steps so a flag set in the gap is lost.                   *)
-(*                                                                         *)
-(*   MgrObserve     -- the mgr snapshots pending (FALSE: no work seen) and *)
-(*                     heads toward sleep. NOT yet enqueued on its Rendez.  *)
-(*   MgrCommitSleep -- the mgr commits to sleep on the stale snapshot. A   *)
-(*                     `DataArrives` between the two set pending and woke   *)
-(*                     the mgr -- but the mgr was "deciding", not enqueued, *)
-(*                     so that wake was a no-op (see DataArrives). The mgr  *)
-(*                     sleeps with pending TRUE: the relay is dropped.      *)
-(***************************************************************************)
 MgrObserve ==
     /\ BUGGY_MGR_LOST_WAKE
     /\ mgr_pc = "awake"
     /\ ~pending
     /\ mgr_saw'   = FALSE
     /\ mgr_pc'    = "deciding"
-    /\ UNCHANGED <<data, pending, registered, flagged, poller_pc,
-                   spurious_used>>
+    /\ UNCHANGED <<data, pending, onlist, flagged, poller_pc,
+                   spurious_used, frozen, episode_used, secret_woke>>
 
 MgrCommitSleep ==
     /\ BUGGY_MGR_LOST_WAKE
     /\ mgr_pc = "deciding"
     /\ mgr_pc' = IF mgr_saw THEN "awake" ELSE "sleeping"
-    /\ UNCHANGED <<data, pending, registered, flagged, poller_pc,
-                   mgr_saw, spurious_used>>
+    /\ UNCHANGED <<data, pending, onlist, flagged, poller_pc,
+                   mgr_saw, spurious_used, frozen, episode_used, secret_woke>>
 
-(***************************************************************************)
-(* SpuriousWake -- a benign non-poll wake of the console_mgr (the Ctrl-C / *)
-(* SAK path also signals `mgr_rendez`). Fires once; it is what places the  *)
-(* mgr in the "awake, about to re-sleep" state where the poll-pending      *)
-(* relay race opens. Not fair (incidental).                                 *)
-(***************************************************************************)
 SpuriousWake ==
     /\ ~spurious_used
     /\ mgr_pc = "sleeping"
     /\ mgr_pc'        = "awake"
     /\ spurious_used' = TRUE
-    /\ UNCHANGED <<data, pending, registered, flagged, poller_pc, mgr_saw>>
+    /\ UNCHANGED <<data, pending, onlist, flagged, poller_pc, mgr_saw,
+                   frozen, episode_used, secret_woke>>
 
-(***************************************************************************)
-(* Done -- terminal self-loop. Once poll has returned, the model halts;    *)
-(* the explicit stutter keeps the legitimate terminal state from tripping  *)
-(* TLC's -deadlock check, which then stays meaningful for the pre-terminal *)
-(* space (where the lost-wake stuck state lives, NOT terminal).             *)
-(***************************************************************************)
 Done == poller_pc \in PollerTerminal /\ UNCHANGED vars
 
 Next ==
     \/ DataArrives
+    \/ SecretKey
+    \/ Begin
+    \/ End
     \/ PollerRegister
-    \/ PollerCommit
+    \/ PollerEvaluate
     \/ MgrDrainWalk
     \/ MgrSleep
     \/ MgrObserve
@@ -319,58 +401,49 @@ Spec == Init /\ [][Next]_vars
 (* ============================== INVARIANTS ============================== *)
 (***************************************************************************)
 
-\* FlagImpliesReady -- the poller's flag is set only for a genuinely ready
-\* console: poll never reports POLLIN for an empty ring (no spurious return).
-FlagImpliesReady == flagged => data
-
-\* NoMissedConsPoll -- ARCH §28 I-9 across the deferred relay: the poller is
-\* never left asleep on a ready, registered console with the relay quiescent
-\* (the mgr also asleep, no flag). In the correct model this is unreachable
-\* -- while a poll wake is pending the mgr is awake-or-draining (the ~pending
-\* MgrSleep guard), and the drain that clears pending also flags the poller.
-\* BUGGY_MGR_LOST_WAKE reaches it: the mgr sleeps with pending TRUE.
+\* NoMissedConsPoll -- ARCH section 28 I-9 across the deferred relay AND the
+\* episode: the poller is never left asleep, hooked, unflagged, on a console
+\* that is ready for it, with the relay quiescent. The correct model cannot
+\* reach it: while a poll wake is pending the mgr is awake, and the walk that
+\* clears pending flags the poller -- provided the poller is on the list the
+\* relay walks, which the re-registering re-arm guarantees whenever it is not
+\* frozen. BUGGY_MGR_LOST_WAKE reaches it (the relay drops), and so does
+\* BUGGY_NO_REREGISTER (the poller sits on the episode list after END).
 NoMissedConsPoll ==
-    ~( data /\ registered /\ poller_pc = "sleeping"
+    ~( Ready /\ registered /\ poller_pc = "sleeping"
        /\ ~flagged /\ mgr_pc = "sleeping" )
 
-\* NoStaleHook -- a returned poll holds no poll_waiter hook (poll.tla's
-\* property, re-checked here: the relay must not leave a dangling hook).
+\* NoSecretCadence -- the IM-1 privacy half: no relay of a keystroke made
+\* during the episode ever reaches the frozen poller's hook. With the
+\* re-registering re-arm, BEGIN's walk moves a poller that registered before
+\* the SAK onto the episode list.
+NoSecretCadence == ~secret_woke
+
+\* NoStaleHook -- a returned poll holds no hook.
 NoStaleHook == (poller_pc \in PollerTerminal) => ~registered
 
-\* DoneSound -- poll returns ready only with the flag actually set.
-DoneSound == (poller_pc = "done") => flagged
+\* DoneSound -- poll returns only a console that is ready FOR THIS CALLER.
+DoneSound == (poller_pc = "done") => (data /\ ~frozen)
 
 Invariants ==
     /\ TypeOk
-    /\ FlagImpliesReady
     /\ NoMissedConsPoll
+    /\ NoSecretCadence
     /\ NoStaleHook
     /\ DoneSound
 
 (***************************************************************************)
 (* ============================== LIVENESS ================================ *)
-(*                                                                         *)
-(* PollerEventuallyServed -- once the console is ready and the poller has  *)
-(* registered, poll eventually returns. The whole point of the relay: a    *)
-(* ready console must reach a parked poller through the IRQ -> mgr -> hook  *)
-(* chain. Fairness grants the producer NOTHING beyond the single           *)
-(* DataArrives edge; progress rides the mgr relay and the poller's         *)
-(* re-evaluation:                                                           *)
-(*                                                                         *)
-(*   WF(MgrDrainWalk) -- an awake mgr with a pending flag eventually       *)
-(*                       drains it and walks the hook list.                 *)
-(*   WF(PollerRegister), WF(PollerCommit) -- the poller eventually         *)
-(*                       registers and re-evaluates after a wake.           *)
-(*                                                                         *)
-(* Under BUGGY_MGR_LOST_WAKE this FAILS: the relay drops, the poller never *)
-(* leaves "sleeping". (cons_poll_liveness.cfg runs the clean spec.)        *)
+(* PollerEventuallyServed -- a console ready for the poller (bytes, no     *)
+(* episode) with a hook installed is eventually returned. Fairness grants  *)
+(* the producers nothing; progress rides the relay and the re-arm.         *)
 (***************************************************************************)
 PollerEventuallyServed ==
-    (data /\ registered) ~> (poller_pc \in PollerTerminal)
+    (Ready /\ registered) ~> (poller_pc \in PollerTerminal)
 
 Liveness ==
     /\ WF_vars(PollerRegister)
-    /\ WF_vars(PollerCommit)
+    /\ WF_vars(PollerEvaluate)
     /\ WF_vars(MgrDrainWalk)
 
 Spec_Live == Init /\ [][Next]_vars /\ Liveness

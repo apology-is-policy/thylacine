@@ -866,9 +866,20 @@ hand-rolled check-then-sleep instead of register-then-observe).
 
 | Config | Flags | Checked | Result | Distinct |
 |---|---|---|---|---|
-| `cons_poll.cfg`                 | `BUGGY_MGR_LOST_WAKE=FALSE` | `Invariants` | clean | 31 |
-| `cons_poll_liveness.cfg`        | `Spec_Live`, all FALSE      | `PollerEventuallyServed` | clean | 31 |
-| `cons_poll_buggy_lost_wake.cfg` | `BUGGY_MGR_LOST_WAKE`       | `NoMissedConsPoll` | violation (depth 9) | — |
+| `cons_poll.cfg`                 | all FALSE                   | `Invariants` | clean | 125 |
+| `cons_poll_liveness.cfg`        | `Spec_Live`, all FALSE      | `PollerEventuallyServed` | clean | 125 |
+| `cons_poll_buggy_lost_wake.cfg` | `BUGGY_MGR_LOST_WAKE`       | `NoMissedConsPoll` | violation | — |
+| `cons_poll_buggy_no_reregister.cfg` | `BUGGY_NO_REREGISTER`   | `NoMissedConsPoll` | violation (Begin, Register frozen -> E, End, re-sample, re-sleep on E, a key relayed to P) | — |
+| `cons_poll_buggy_no_reregister_cadence.cfg` | `BUGGY_NO_REREGISTER` | `NoSecretCadence` | violation (a pre-SAK poller left on P gets a pass per secret keystroke) | — |
+
+**2026-09-21 (B-0 audit round 4, F1): the episode and the re-arm.** The module now models IM-1's second hook list
+(`episode_poll_list`, chosen by state at REGISTER time), one episode (`Begin`/`End` walk both lists; a frozen caller
+samples no readiness), secret keystrokes (`SecretKey`), and the poll RE-ARM (`PollerEvaluate`: a flag is a hint, an
+empty re-sample sleeps again). The re-arm must RE-REGISTER on every pass -- `sys_poll_for_proc` unregisters and
+re-registers each hook, so a Dev re-chooses its list for the state it samples; the two buggy cfgs are the as-built
+d5c58d76 sample-only re-arm, which strands a poller on the episode list (liveness) and leaves a pre-SAK poller where
+every secret keystroke's relay reaches it (`NoSecretCadence`, the privacy half). `FlagImpliesReady` is gone: since the
+re-arm a flag is a hint by design; `DoneSound` carries what it protected.
 
 Spec action ↔ impl mapping: **filled at LS-8a** — the intended map is
 `kernel/cons.c::cons_rx_input` = `DataArrives`; `console_mgr_main` =
