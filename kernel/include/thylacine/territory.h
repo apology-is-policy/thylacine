@@ -56,7 +56,7 @@ struct Path;   // <thylacine/path.h> -- #66 namespace name retention (I-33)
 // eventual ramfs + /proc + /dev + /net binds.
 #define PGRP_MAX_BINDS  8
 
-// Mount-table size. A login session holds 16 entries (measured 2026-09-21: 14
+// Mount-table size. A login session holds 17 entries (measured 2026-09-21: 15
 // that joey grafts onto the pivoted disk root, + login's /home/<user> and /tmp
 // binds), and a container runner adds up to ~10 recipe mounts on top. The
 // table is deep-copied per territory_clone (each entry a spoor_ref), so the cap

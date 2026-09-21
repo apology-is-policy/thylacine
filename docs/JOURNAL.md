@@ -260,6 +260,97 @@ manifest entries with it; a copy I had made a minute earlier saved them. And I c
 partial WebKit checkout as a test fixture, which started fetching blobs over the network and
 hung; a synthetic repository did the job in a second.
 
+### Addendum 2, same day (fifth self-compact): the audit's fixes, the fix that broke the boot, and the mount table
+
+**What this stretch was.** Close audit round 1 on the libc patches, then the Territory
+mount-table fix the operator chose over a fifth cap raise. Branch `browser-b0`, still local;
+`main` is untouched at `47ba3295` and stays that way until the ci fleet is green.
+
+*Every new prover leg was measured RED before it was trusted.* On the old-libc image, from a
+login session: `sysconf(_SC_OPEN_MAX)` = `2116292` with `errno=38` (F1 -- stack residue, errno
+clobbered); the new stack pin GREEN, and RED against a libc whose mirror I sabotaged by
+linking a 2 MiB `pthread_getattr_np.o` ahead of `libc.a` (`libc [0x7fe00000, ...) kernel
+[0x7ff00000, ...)`) -- the control F3 said the old pin could not pass; `tmpfile()` leaving
+`during=1 nlink=1 after_close=1`, then `2` on the second run (F2). F4's leg could not be run
+that way (it needs joey's post-service perm); its discrimination rests on the model below and
+is said so in the closed list rather than assumed.
+
+*The audit's own suggested fix broke the boot, and that was the most useful thing that
+happened all day.* F2 said `tmpfile()` never unlinks because it issues a raw sentinel
+syscall; use the public `unlink()`. I did, and the boot went RED -- not in the tmpfile leg
+but one leg later: `FAIL scan EOF (errno 2)`. I had a hypothesis in one minute and did not
+trust it; I put the evidence in the prover instead: `fgetc=-1 feof=0 ferror=1 errno=2; raw
+read=-1 errno=2`. A plain `read()` at EOF of an unlinked-but-open file returns ENOENT. The
+kernel only forwards it; the data bytes had come from the Larder's own-write pages, so the
+FIRST wire read was the EOF probe, which is why a short read-back passed. The refusal is
+Stratum's and is deliberate -- `specs/fid.tla` IOReject, `verify_fresh_snapshot`. **On this
+root filesystem an open file does not outlive its last name.** So the prover leg that had
+claimed "the fid survives the unlink" since patch 0024 was green for one reason only: libc
+never issued the unlink. One false green was hiding a leak AND a semantic. `tmpfile()` is now
+delete-on-close (the name goes at `fclose()` through `f->close`, and at a normal `exit()`
+through a weak hook at the end of `__stdio_exit`); measured `during=1 nlink=1 after_close=0`,
+twice. The bigger question -- every POSIX program that unlinks a file it keeps using loses
+it here -- is NOT mine to settle and is queued for the operator.
+
+*A wrong turn of my own, caught by somebody else's instrument.* F9 suggested buffering small
+`fread`s as upstream's `readv` did. I generalised 0035's refill arm and wrote the boundary as
+`len >= buf_size`. The auditor had left a differential model of the stdio read state machine
+in the scratchpad; I added my arm to it as a third variant before building anything. 1889 of
+2000 trials failed at `buf_size == 1`, none at any other size: a one-byte request on a
+one-byte buffer took the DIRECT arm and lost the pushback slot -- 0002's original defect,
+reintroduced at exactly one size. `>` gives 0 of 32000 against 26496 of 32000 for the 0002
+backend on the same trials. The prover's scan leg now runs at three buffer sizes (default,
+and `setvbuf` of 9 and 10 bytes -- stream buffers of one and two) so the FILE, not just the
+model, holds the boundary.
+
+*I wrote a sweep rule and then ran it.* F4 (stdio backends hand a Pouch socket fd to the
+kernel raw: `fdopen(sock)` never worked, `fclose` stranded one of eight slots) is fixed in
+patch 0038. The dossier sentence I wrote -- "sweep every site that passes an fd to a raw
+syscall, not every public function that takes one" -- was a prescription, so I followed it
+before moving on. My first write-up of the result was wrong (I claimed `fcntl`/`dup` fail
+with EBADF on a socket fd; the table says their numbers are sentinel-parked for EVERY fd,
+ENOSYS), caught by reading `bits/syscall.h.in` instead of my summary of it. Recorded OPEN:
+no `fcntl(F_SETFL, O_NONBLOCK)`, no `readv`/`writev`, for any fd.
+
+*The mount table, with ground truth first.* `/proc/<pid>/ns` of a login session: 23 entries,
+the first seven the kproc boot generation (`/srv #s`, `/proc #p`, `/ctl #C`, `/dev #d`,
+`/hw #H`, `/hw/pci #P`, `/env #E`) that joey's pivot orphaned. They cannot be unmounted --
+`unmount` takes a RESOLVED mount point and nothing can name them -- and `territory_clone`
+copies them into every Proc. 23 + viv's 10 > 32. The design (ARCH 9.6.10, scripture commit
+`e3fc226a` before any code): at the root swap, drop entries whose mount point lies in a
+device instance unreachable from the new root. Reading the resolver first changed the
+design twice. (1) `..` never reaches `Dev.walk` -- it pops stalk's in-call trail -- so
+resolution is downward-only and "reachable" has an exact meaning. (2) joey binds the OLD
+devramfs root at `/bin` after its pivot, so the "orphans" are in fact reachable today as
+`/bin/proc`, `/bin/dev/cons`, `/bin/srv`; and `/hw/pci` works post-pivot only because the
+orphaned entry is keyed on a directory the `/hw` re-graft makes reachable again. ARCH has
+called that re-graft "a v1.x seam" for months while it worked by accident. The shed ends the
+generation at the swap; joey now re-grafts `/hw/pci` on purpose. The per-instance rule has
+one Dev that breaks its premise -- `devenv` stamps the CALLER's devno on every walk -- so
+`Dev.devno_per_walker` makes the closure match it on `dc` alone. A small new spec,
+`territory_shed.tla`: clean 7614 states; the tempting non-transitive rule (keep only the new
+root's own tree) violates `ShedLosesNothing`, the pre-fix kernel violates
+`NoResidueAfterPivot`, and I checked that each buggy cfg fails ITS invariant rather than
+"an" invariant, because the first run reported only a conjunction.
+
+*A fleet scenario that could not see its own failure.* `r5f9-ash`'s "ash still answers"
+controls were `echo ... | tr a-z A-Z` -- which the hosted `ut` answers just as well. When
+`viv run` failed to start, the OUTER shell passed every control and the scenario went red
+three legs later on a symptom that named nothing. Each control now folds `$(uname -s)` into
+its token (ash says LINUX; ut cannot), and the first-prompt check fails at the cause.
+
+*Self-audit note for the Territory round.* Shedding an `MNOEXEC` entry can un-cover a device
+instance that is still reachable through a SECOND, unflagged mount. That is the same
+loosening the ungated `unmount` already gives the same caller, and the Linux phenotype serves
+neither `chroot` nor `mount` -- so a container cannot trigger it. It goes to the prosecutor
+as a named item, not as a closed one.
+
+*Still open from this stretch, each with an owner in the queue:* the unlink-while-open
+semantics (operator); tty canonical reads that drain past the newline, which 0035's
+readahead now makes swallow type-ahead; the missing `fcntl`/`readv`/`writev` surface; the
+kernel's `detach` refusing what lazy `attach` admits above 256 MiB; a boot-time `/tmp` sweep
+for processes that die without `exit()`; the deny-path probe for `sysconf`'s honest `-1`.
+
 ---
 ## 2026-09-21 (main, Fable 5.1, effort max) -- taking over a week of another agent's work: the graphical trusted path, the chord nobody could find, and the image that booted two UIs at once
 

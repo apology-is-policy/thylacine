@@ -36,7 +36,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 90
+## Open seams: 89
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-221-idle-pump-wake]] (sub-kernel-ninep-dev9p-poll)
@@ -49,7 +49,6 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-66c-proc-fd]] (sub-kernel-path, sub-kernel-territory)
 - [[seam-70-tcg-watchpoint]] (sub-substrate-machine, sub-substrate-gates)
 - [[seam-791-smp1-joey]] (sub-substrate-machine, sub-substrate-gates)
-- [[seam-80-pivot-orphan-mounts]] (sub-kernel-territory)
 - [[seam-841-mi-harness]] (sub-kernel-ninep-client)
 - [[seam-845-untrusted-server]] (sub-kernel-ninep-client)
 - [[seam-87-disk-write-proof]] (sub-substrate-interactive, sub-substrate-gates)

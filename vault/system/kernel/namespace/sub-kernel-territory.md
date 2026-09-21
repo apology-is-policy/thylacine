@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-09-06
+updated: 2026-09-21
 ---
 ## Purpose
 
@@ -238,24 +238,77 @@ at the next `territory_ref`/`unref` rather than corrupting silently.
 their compile-time caps before the copy loops, so a torn count cannot
 walk past the arrays.
 
-`PGRP_MAX_MOUNTS` is **32**, grown 8 → 16 → 20 → 32. Init was the
-original high-water mark: the boot namespace mounts `/srv`, `/proc`,
-`/ctl`, `/dev`, `/env`, and the pre-pivot mounts ORPHAN at pivot (their
-ramfs mount points stop being reachable from the disk root) while
-staying in the table — so the cost is pre+post per re-grafted directory.
+`PGRP_MAX_MOUNTS` is **32**, grown 8 → 16 → 20 → 32 — every time for
+the same cause, and the fourth time the cause was fixed instead
+(2026-09-21). A root swap used to leave the previous generation's entries
+in the table. The boot namespace mounts `/srv`, `/proc`, `/ctl`, `/dev`,
+`/hw`, `/hw/pci`, `/env` on devramfs synthetic directories; joey pivots to
+the disk root and re-grafts each; and the seven originals stayed — their
+mount points no longer the target of any name, and therefore
+**un-unmountable**, because `unmount` takes a RESOLVED mount point.
+`territory_clone` then copied them into every Proc in the system. Measured
+on the device (`/proc/<pid>/ns` of a login session): 23 entries, the first
+seven that generation. A container runner inherits the 23 and adds ten
+recipe mounts; the tenth returned `-2` at `nmounts == 32`, and `viv run`
+was broken on `main` from the day the 23rd entry arrived. **A leak that
+only wastes a resource is invisible until something else wants that
+resource** — and then it presents as the other feature's bug.
 
-The last growth had a different driver and a sharper failure. A container
-runner **inherits** the session namespace — roughly sixteen entries
-including that orphaned pre-pivot generation — and then adds its own root
-plus about ten more from its recipe. At twenty, the recipe overflowed and
-the first over-cap mount failed the container. So the orphan accumulation
-stopped being a tidiness matter and became the thing consuming the budget a
-feature needed: **a leak that only wastes a resource is invisible until
-something else wants that resource.**
+**The shed (ARCH 9.6.10; `territory_shed_unreachable_locked`).** In the
+same `ns_lock` hold that installs a new root, `territory_pivot_root` and
+`territory_chroot` drop every entry whose mount point lies in a device
+instance unreachable from that root. Reachability is the least set `R` of
+`(dc, devno)` instances containing the new root's and closed under
+"mount-point instance in `R` ⇒ source instance in `R`". Three facts make
+that rule sound rather than hopeful:
 
-The real fix is still a pivot-time collection ([[seam-80-pivot-orphan-mounts]]);
-the cap growth remains the holding action, now at a per-clone deep-copy
-cost of roughly 1.3 KiB per spawn.
+1. **The resolver only descends.** `..` never reaches `Dev.walk`; stalk
+   pops its in-call trail and the pop is a no-op at the base
+   ([[sub-kernel-stalk]]), and a symlink re-anchors at `root_spoor`. So
+   every Spoor a resolution from the new root can hold is in `R`, an entry
+   keyed outside `R` can never fire for one, and every name resolved from
+   the new root resolves identically with and without the shed — the
+   spec's `ShedLosesNothing`.
+2. **It is per instance, so it is conservative.** The kernel cannot see
+   inside a 9P tree and cannot tell which directories of a reachable tree
+   are reachable. It may keep an entry no walk reaches; it never drops
+   one a walk can. `viv` shows the cost: it chroots into a bundle
+   directory on the SAME Stratum session as the host root, so every host
+   entry keyed in that session survives into the container's table.
+3. **One Dev breaks the premise, and says so.** A walk normally
+   preserves `(dc, devno)` (`spoor_clone` copies it). `devenv` stamps the
+   CALLING Proc's Env devno on every walk, including the 0-element mount
+   cross, so a Spoor inside `/env` does not share a devno with the `/env`
+   mount source. `Dev.devno_per_walker` ([[sub-kernel-dev]]) makes the
+   closure match such a Dev on `dc` alone. The set of devno assigners was
+   enumerated, not assumed: `spoor_alloc` (0), `spoor_clone` (copy),
+   `dev9p` attach, `devsrv` attach, `env_alloc`, `devenv_walk`.
+
+Dropped entries release what `unmount` releases: `path_unref(mp_path)`
+under the lock, `spoor_clunk(source)` deferred outside it (a Dev close
+hook may sleep). Survivors keep their relative order, which IS the union
+search order. The idempotent same-root call swaps nothing and sheds
+nothing. `mount()` itself never sheds. Measured after the fix, same
+probe: a login session holds **17** entries (15 of joey's, login's two),
+so a container's ten fit with five to spare.
+
+**Order matters, and the text says which order.** Reachability is
+evaluated once, at the swap, over the table as it stands. joey binds the
+OLD devramfs root at `/bin` *after* its pivot, which before the shed
+revived the boot generation as aliases — `/bin/proc`, `/bin/srv`,
+`/bin/dev/cons` were live device trees. They are bare synthetic
+directories now. One alias had a real user: `/hw/pci` worked post-pivot
+only because the orphaned entry was keyed on devhw's `pci` child, which
+the `/hw` re-graft made reachable again — ARCH had recorded that re-graft
+as "a v1.x seam" the whole time it was working by accident. joey now
+re-grafts it explicitly ([[sub-stratum-boot]]).
+
+**The one observable change.** An fd-relative walk from a directory fd
+opened BEFORE the swap, into a tree the new root cannot reach, no longer
+crosses the shed mounts and sees the underlying directory. Such an fd is
+a handle on a file tree, not on the old namespace. A mount used as a MASK
+over a directory in an unreachable tree therefore stops masking for
+holders of such an fd; nothing in-tree relies on more.
 
 ## Concurrency
 
@@ -413,6 +466,23 @@ On any change to this file, prosecute:
   refusal — a path through a directory that does not exist opening a working
   descriptor. The canonicalizer keeps exactly one caller, and it runs on an
   already-resolved path.
+- **The shed's premise is the resolver's, not the table's.** It is sound
+  ONLY while no resolution can climb out of a mounted tree: `..` must keep
+  popping the in-call trail, never reaching `Dev.walk`, and symlinks must
+  keep re-anchoring at `root_spoor`. A resolver change that lets a
+  device-level `..` escape a mount source makes the shed drop LIVE
+  mounts. Likewise a new Dev whose walk re-stamps `devno` without setting
+  `devno_per_walker`. Re-run `territory_shed.tla`'s two buggy cfgs
+  (`nontransitive` must violate `ShedLosesNothing`, `keeps_all` must
+  violate `NoResidueAfterPivot` — check WHICH invariant, a bare
+  conjunction hides a wrong one) and `territory.shed_*`, whose
+  `per_walker` test carries its own control one variable away.
+- **Shedding an `MNOEXEC` entry can un-cover an instance still reachable
+  through a second, unflagged mount** (`mount_noexec_covers` is an
+  any-scan over the surviving table). It is the loosening the ungated
+  `unmount` already gives the same caller, and the Linux phenotype serves
+  neither `chroot` nor `mount`, so a container cannot trigger it. If
+  either of those ever changes, this becomes a hole.
 - **Nothing may become the only enforcement by accident.** The `..` clamp was
   described as a redundant net while a duplicate mechanism upstream consumed its
   inputs; when that duplicate was removed as a defect, the clamp became load-
@@ -424,8 +494,10 @@ On any change to this file, prosecute:
 - [[seam-union-mount-walk]] — CLOSED (the UM arc): MBEFORE/MAFTER/MCREATE
   are walked, ordered, and spec-modeled (see the union-mount section).
 - [[seam-rfnameg-shared-territory]] — cross-Proc namespace sharing.
-- [[seam-80-pivot-orphan-mounts]] — pre-pivot mounts accumulate; the cap
-  grows instead of a GC running.
+- [[seam-80-pivot-orphan-mounts]] — CLOSED 2026-09-21: the shed at pivot /
+  chroot (above). What it leaves is recorded there: a container still
+  inherits its host's reachable-by-instance entries, and the
+  Fuchsia-shaped fix is a clean spawn-time Territory.
 - [[seam-handle-based-dot]] — the cwd is a string, not a Spoor; symlinks
   force the upgrade.
 - [[seam-mount-graph-unmodeled]] — the live cycle check has no model.

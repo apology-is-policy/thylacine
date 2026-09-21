@@ -12,7 +12,7 @@ locks: []
 abis: []
 design: ["docs/reference/86-pouch-stratumd-boot.md (the 16c design section)"]
 created: 2026-08-02
-updated: 2026-09-17
+updated: 2026-09-21
 ---
 ## Purpose
 
@@ -131,9 +131,16 @@ So the init program's mount question is not "carry it or lose it" but **"should
 this tree be global at all?"** — and the answer is no whenever the served tree's
 authority is per-connection.
 
-**The pivot is a swap, so everything else must be carried by hand.** Seven
+**The pivot is a swap, so everything else must be carried by hand.** Eight
 O_PATH handles are taken *before* the swap and re-grafted after: `/srv`,
-the whole devramfs root (→ `/bin`), `/proc`, `/ctl`, `/dev`, `/hw`, `/env`.
+the whole devramfs root (→ `/bin`), `/proc`, `/ctl`, `/dev`, `/hw`,
+`/hw/pci`, `/env`. The eighth is new (2026-09-21) and replaces an accident.
+`/hw/pci` is mounted INSIDE the devhw tree, on its synthetic `pci` child;
+it used to work post-pivot only because the orphaned boot-generation entry
+was keyed on that child, which the `/hw` re-graft made reachable again.
+The pivot now SHEDS the boot generation ([[sub-kernel-territory]]), so the
+re-graft is explicit — and the aliases the old devramfs root used to carry
+into `/bin` (`/bin/proc`, `/bin/srv`, `/bin/dev/cons`) are gone with it.
 O_PATH crosses each mount and yields the *Dev root*, not the synthetic
 mount point — that distinction is what makes the re-graft land the real
 tree. Each re-graft is `mkdir`-then-`MREPL`, and the `mkdir` must be
@@ -210,7 +217,10 @@ event-driven; no timing constant appears in this path.
 - A new readiness signal must be emitted **after** the last fallible step.
   Any line printed before the bind is optimistic and unusable.
 - A new pre-pivot mount must acquire its O_PATH handle before the swap and
-  re-graft after, or it vanishes silently at pivot.
+  re-graft after, or it vanishes silently at pivot. That has been literally
+  true since the pivot sheds the old generation (2026-09-21); before, a
+  mount NESTED inside a re-grafted tree survived by accident, and the next
+  one to rely on that would have broken the day the shed landed.
 - **Before that: decide whether it should be a global mount at all.** If the
   served tree's authority is per-connection, a boot-time mount collapses every
   process onto init's single connection and is a privilege breach, not a

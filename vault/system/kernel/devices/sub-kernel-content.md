@@ -22,7 +22,7 @@ design:
   - "docs/ARCHITECTURE.md section 9.7"
   - "docs/PORTABILITY.md section 6"
 created: 2026-08-02
-updated: 2026-09-06
+updated: 2026-09-21
 ---
 ## Purpose
 
@@ -93,6 +93,14 @@ path under `/env` could serve one process the contents of another's variable.
 **A cache in an unrelated subsystem is what makes the identity load-bearing.** A
 forked child gets a fresh device number with its copied variables, because a copy
 is not the same file.
+
+That stamp has a second consequence, and the Dev now declares it. Every other
+Dev's walk preserves `(dc, devno)`, so "a directory inside a mounted tree carries
+the tree's instance" holds — and the mount-table shed at pivot / chroot
+([[sub-kernel-territory]]) reasons on it. `/env`'s walk does not: a Spoor inside
+`/env` carries the *walker's* number, never the mount source's (the same fact
+that puts `/env` beyond any `MNOEXEC` mount). So `devenv` sets
+`Dev.devno_per_walker`, and the shed matches it on the device class alone.
 
 **The random source's content is manufactured on demand, and its lifetime runs
 backwards.** Where the other two must make their bytes persist, this one must
