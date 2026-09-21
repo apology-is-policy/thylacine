@@ -51,11 +51,14 @@ struct Spoor;   // REVENANT R-4: exec_setup_from_spoor's pinned executable
 // The user-stack region is well below the TTBR1 split (0x0001_0000_*)
 // and well above typical ELF segment vaddrs + BSS heaps. Sized 1 MiB
 // (G-7b; was 256 KiB): a real ported program's call graph (TyrQuake's
-// model loader) overflowed 256 KiB into the guard page. 1 MiB is eager
-// headroom for every userspace Proc; the 0x8000_0000..0xC000_0000 gap
-// above TOP leaves room to grow. The Linux-model lazy demand-grown stack
-// (commits only touched pages — no eager per-Proc cost) is the tracked
-// v-next lift.
+// model loader) overflowed 256 KiB into the guard page. The mapping is
+// SPARSE since LINEAGE L-4a (exec_map_user_stack: burrow_create_anon_lazy):
+// exec commits only the pages the argv/auxv frame occupies at the top, and
+// the rest demand-zeroes as the program descends -- the Linux model. So the
+// size is a RESERVATION plus an I-32 ceiling, not a per-Proc cost, and
+// raising it is a constant change here plus its mirrors (pouch patch 0033
+// states [TOP - SIZE, TOP) to pthread_getattr_np; pouch-hello-threads pins
+// both from the device side).
 //
 // P5-secondary-stack-guard: a 4 KiB guard page sits directly below
 // EXEC_USER_STACK_BASE, installed by exec_map_user_stack as a prot==0
@@ -68,15 +71,11 @@ struct Spoor;   // REVENANT R-4: exec_setup_from_spoor's pinned executable
 // G-7b: 1 MiB (was 256 KiB). The original 256 KiB was too small for a
 // real ported program's call graph — TyrQuake's model loader
 // (Mod_ForName -> Mod_LoadAliasModel, large on-stack temp buffers)
-// overflowed it into the guard page during the first map load. 1 MiB is
-// eager-anon (whole thing committed at exec, like the ELF data), so it
-// stays modest: ~1 MiB * boot-Proc-count, trivial against RAM, and the
-// 0x80000000..0xC0000000 gap above STACK_TOP leaves 1 GiB of headroom to
-// grow down further. The proper Linux-model answer — a large lazy
-// (demand-grown) reservation that commits only touched pages — is the
-// tracked v-next lift (it needs the exec frame-fill to pre-commit just
-// the top page; the overcommit BURROW_TYPE_ANON_LAZY infra already
-// exists). This bump unblocks real ports now at a bounded eager cost.
+// overflowed it into the guard page during the first map load. When this
+// bump landed the stack was eager-anon and the size was kept modest for that
+// reason; L-4a has since made it sparse (see the layout note above), so the
+// eager-cost argument for 1 MiB no longer holds -- only the reservation and
+// the I-32 ceiling do.
 #define EXEC_USER_STACK_SIZE         (1024ull * 1024)
 #define EXEC_USER_STACK_TOP          0x0000000080000000ull
 #define EXEC_USER_STACK_BASE         (EXEC_USER_STACK_TOP - EXEC_USER_STACK_SIZE)

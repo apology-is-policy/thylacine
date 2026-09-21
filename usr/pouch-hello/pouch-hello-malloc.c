@@ -35,6 +35,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define LARGE_BYTES   (256u * 1024u)   // > MMAP_THRESHOLD (131052)
 #define LARGE_REGROWN (LARGE_BYTES + 65536u)
@@ -111,6 +112,35 @@ int main(void) {
     if (!e2) return fail("realloc grow large");
     if (!check(e2, LARGE_BYTES, 4)) return fail("realloc-large lost data");
     free(e2);
+
+    // pouch 0034: sysconf's memory figures must be the KERNEL's, not stack
+    // residue. /ctl/memory is re-read HERE with a different parser (stdio),
+    // and the total must match exactly -- a range check alone would pass on
+    // plausible garbage. `free` moves between the two reads, so it gets the
+    // ordering bound only.
+    {
+        unsigned long total = 0;
+        FILE *mf = fopen("/ctl/memory", "r");
+        if (!mf) return fail("fopen /ctl/memory");
+        if (fscanf(mf, " total: %lu pages", &total) != 1 || total == 0) {
+            fclose(mf);
+            return fail("parse /ctl/memory total");
+        }
+        fclose(mf);
+        long phys = sysconf(_SC_PHYS_PAGES);
+        long avail = sysconf(_SC_AVPHYS_PAGES);
+        if (phys < 0 || (unsigned long)phys != total) {
+            printf("pouch-hello-malloc: _SC_PHYS_PAGES=%ld but /ctl/memory total=%lu\n",
+                   phys, total);
+            return fail("sysconf(_SC_PHYS_PAGES) != kernel total");
+        }
+        if (avail <= 0 || avail > phys) {
+            printf("pouch-hello-malloc: _SC_AVPHYS_PAGES=%ld phys=%ld\n", avail, phys);
+            return fail("sysconf(_SC_AVPHYS_PAGES) out of (0, phys]");
+        }
+        printf("pouch-hello-malloc: sysconf phys=%ld avail=%ld pages == /ctl/memory ok\n",
+               phys, avail);
+    }
 
     printf("pouch-hello-malloc: small malloc/free ok\n");
     printf("pouch-hello-malloc: calloc zeroing ok\n");

@@ -16,9 +16,10 @@ Measured on the device (2026-09-21, a static probe, HVF):
     main   base=0x7ffff000  size=4096    sp=0x7ffffdb8
     thread base=0x100007000 size=134920  (correct: musl's own 128 KiB default)
 
-The real main stack is [0x7ff00000, 0x80000000): 1 MiB, committed whole at
-exec, over a one-page guard (kernel/include/thylacine/exec.h,
-EXEC_USER_STACK_TOP / EXEC_USER_STACK_SIZE). Nothing in the tree asked until
+The real main stack is [0x7ff00000, 0x80000000): a 1 MiB sparse demand-zero
+mapping (kernel/exec.c exec_map_user_stack, lazy since LINEAGE L-4a) over a
+one-page guard (kernel/include/thylacine/exec.h, EXEC_USER_STACK_TOP /
+EXEC_USER_STACK_SIZE). Nothing in the tree asked until
 JavaScriptCore did: WTF::StackBounds feeds the VM's recursion limit from these
 bounds, so jsc threw a stack overflow on its first call and could not even
 print it (exit 3, no output). The same wrong answer would reach any
@@ -35,8 +36,9 @@ pouch-hello-threads.c gains the main-stack check.
 
 Not addressed here, recorded for the platform-tranche conversation: 1 MiB is
 small for a JavaScript engine's main thread (JavaScriptCore asks for 5 MiB and
-clamps to what it is given). exec.h already names the answer -- a large lazy
-reservation -- as its tracked next lift.
+clamps to what it is given). The mapping is already sparse, so a larger
+reservation costs nothing at exec; what it changes is the constant, this
+mirror, and the I-32 ceiling a runaway recursion can reach.
 
 --- a/src/thread/pthread_getattr_np.c
 +++ b/src/thread/pthread_getattr_np.c
@@ -62,7 +64,7 @@ reservation -- as its tracked next lift.
 -			l += PAGE_SIZE;
 -		a->_a_stacksize = l;
 +		/* Thylacine: the initial thread's stack is the fixed exec
-+		 * mapping [TOP - SIZE, TOP), committed whole at exec above a
++		 * mapping [TOP - SIZE, TOP), sparse demand-zero above a
 +		 * one-page guard (kernel exec.h: EXEC_USER_STACK_TOP / _SIZE;
 +		 * mirrored here, and pinned from the device side by
 +		 * pouch-hello-threads' main-stack check). Upstream finds the
