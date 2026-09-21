@@ -1,0 +1,15 @@
+# R-1 witness: the first cargo-built Rust `std` program for Thylacine.
+# Built by tools/build.sh build_rust_progs (gated on the track-R toolchain);
+# staged into the image as /r1hello; run by tools/interactive/rust-std-hello.exp.
+[package]
+name = "r1hello"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "r1hello"
+path = "src/main.rs"
+
+[profile.release]
+panic = "unwind"

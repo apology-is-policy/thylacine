@@ -163,10 +163,37 @@ main's reaches `main` soon, including these patches**. For R-1, cherry-pick from
 4. DONE -- `std` compiles for `aarch64-unknown-thylacine` (the R-0 exit). No Mac
    hold needed after all (build-std at -j2 is modest, ~13s clean).
 
-## R-1 next
+## R-1 IN PROGRESS (2026-09-21)
 
-A cargo-built std hello RUN ON DEVICE (threads / file read / TCP connect /
-HashMap / panic that unwinds). Needs: the pouch runtime patches (cherry-pick
-0033/0034/0035 from browser-b0 @e0fc2422 -- see "Pouch dependencies"); the
-final-link path (pouch-clang + the JSON LINK fields -- see "Still to confirm at
-R-1"); staging the binary into the image; an on-device witness.
+A cargo-built std hello RUN ON DEVICE. Progress:
+
+- **The hello LINKS.** `usr/ports/rust/r1-hello/` (a std bin: stdout / HashMap /
+  threads / panic-unwind gate PASS; file + TCP informational) cargo-builds AND
+  LINKS for the target via `pouch-clang` (the fork clang drives `ld.lld`).
+  Output: a static `ET_EXEC` aarch64 binary (NOT static-PIE -- the fork
+  toolchain dropped `-static-pie` and produced ET_EXEC, which is exactly the
+  pouch-hello shape the kernel loader accepts; W^X-clean segments). Release +
+  llvm-strip = ~488 KB.
+- The link needed ONE more std arm than R-0: `sys/io/error/unix.rs` errno
+  link_name = `__errno_location` (musl) -- surfaced at LINK, not compile. Added
+  to `patches/rust-src-thylacine.patch` (now 12 files).
+
+REMAINING (the on-device witness, next chunk):
+1. `build_rust_progs()` in tools/build.sh -- cargo-build r1-hello (gated on the
+   track-R toolchain, self-skip if absent; set
+   `CARGO_TARGET_AARCH64_UNKNOWN_THYLACINE_LINKER=$REPO_ROOT/tools/pouch-clang`;
+   rm the target-dir first per the build-std staleness trap) + strip + stage to
+   `$BUILD_DIR/pouch/progs/r1hello`; call it after `build_pouch_progs`.
+2. add `r1hello` to the `pouch_bins` list in `build_ramfs` (-> `/r1hello`).
+3. WITNESS: build `--config ci` + an expect script (tools/interactive/) that
+   logs in, runs `/r1hello`, asserts `R1-HELLO: PASS` + the per-leg tokens. (ut
+   connects the child's stdout to the console, so tokens are visible -- joey's
+   `pouch_smoke_one` drains to a buffer and does NOT echo, so it is the wrong
+   witness for per-leg visibility.)
+4. runtime deps if it faults: pouch 0033/0034/0035 from browser-b0 @e0fc2422
+   (main's ci is red; they will not reach main soon). The hello links against
+   the EXISTING sysroot libc.a (pre-patches); std stubs stack_overflow + does
+   own buffering + uses _SC_PAGESIZE, so it MAY run unpatched -- the boot proves
+   it.
+5. thyla-pi (real V3D/KVM silicon) for a real-silicon confirmation after the
+   Mac HVF witness.
