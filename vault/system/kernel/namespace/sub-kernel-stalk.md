@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/POUNCE-DESIGN.md", "docs/FID-LIFECYCLE-DESIGN.md", "docs/DISTRO.md", "docs/VIVARIUM.md"]
 created: 2026-08-01
-updated: 2026-09-17
+updated: 2026-09-21
 ---
 ## Purpose
 
@@ -270,6 +270,39 @@ I-3 acyclicity and I-1 isolation stay the territory's to keep (a union is a
 member SET at one identity, added under `ns_lock`); stalk only *resolves* across
 it. `union_snap_point_only` (UM-8c R2-F2) is the point-only retained snapshot a
 union DIRFD holds so the union can be re-reached off the handle.
+
+**The POINT is consulted in exactly two places, and each carries two
+obligations** (2026-09-21; ARCH 9.6.10). The places: the base-set `union_base`
+(the first component off a union base is searched through the members keyed at
+the point) and the zero-component `zbase` (`"/"` of a union root, `"."` of a
+union dirfd clone the point so the final cross keeps the union). The
+obligations:
+
+1. **Each is a SEED of the mount-table shed's closure**
+   ([[sub-kernel-territory]]). The point is a Spoor the walk never WALKED to —
+   it lives in whatever tree the union was mounted in — so a closure seeded from
+   the root alone sheds the union's own entries at the next `chroot` onto such
+   a handle (shed audit r1 F1: every name under the new root `ENOENT`). A NEW
+   base-time consult in this file is a new seed there, and no spec can notice
+   one missing from BOTH the rule and the walker. A change here fires the stalk
+   and UM audit rows, not the shed's; this paragraph and the two WHY comments
+   in the code are the back-pointer.
+2. **The point is consulted only while it still hosts a member in the caller's
+   Territory.** It is the directory the union was mounted OVER. Once its
+   entries are gone — a plain `unmount("/")` loop does it, no shed needed, and
+   so does a `chroot` elsewhere whose shed drops them — the uncrossed point IS
+   the covered directory: one the handle never named, in a tree its holder may
+   have no other path into (shed audit r2 F1). So the base-set site probes
+   `mount_member_at(point, 0)` before routing through the point, and the
+   zero-component site enforces it as a POST-condition of the cross
+   (`zero_from_point`: a point clone that does not cross is replaced by a clone
+   of `base`), so a peer Thread's `unmount` opens no window between a check and
+   the cross. A dissolved union is a plain handle on member[0], which is what
+   `base` is. `STALK_MOUNT` is untouched — it takes the point as a KEY and
+   hands no Spoor to EL0. The base-set site is also gated on `depth == 0`: a
+   base that CROSSED is searched as that mount, and a second `union_base` ref
+   would be overwritten unclunked by the descent branch (a race-only Spoor leak,
+   r2 F7.1).
 
 ### Symlink expansion (DISTRO D-1)
 
@@ -618,6 +651,16 @@ authoritative audit-trigger copy):
   target to native — over-declaration is I-43-safe, but under-declaration
   silently changes an image's ABI shape.
 
+- **A union handle's point is a capability on the COVERED directory unless
+  the two rules above hold.** Prosecute every amode through the zero-component
+  arm for a path that returns an uncrossed point clone to EL0, and every new
+  consult of `union_snap->point` for both obligations. Device witnesses:
+  `usr/symlink-probe` stages `union-a` (chroot ONTO a union of `/proc` + `/ctl`
+  over a Stratum directory — point and member[0] in different instances, the
+  only shape that discriminates — then dissolve it and open `"/"`) and
+  `union-b` (hold the dirfd, chroot elsewhere, open `"."`); a marker file in the
+  covered directory makes "which directory is this" a fact read back.
+
 ## Seams
 
 - [[seam-372-latched-double-xcheck]] — on a `wga_unsupported`-latched
@@ -645,6 +688,13 @@ authoritative audit-trigger copy):
 
 ## Caveats
 
+- **Two union resolver gaps, open and tracked (shed audit r2 F7):** from a
+  union base, `a/../b` resolves `b` in member[0] only (the base-set `union_base`
+  is consumed by the first real component, and the `..` pop lands on `base`,
+  not on the point); and `sys_walk_open_handler` never consults
+  `src->union_snap`, so `SYS_WALK_OPEN(FROM_ROOT, name)` on a union root sees
+  member[0] while `SYS_OPEN("/name")` sees the union. Neither affects the
+  shed's soundness (both resolve a SUBSET of what the union would).
 - **`..` is contained at `start`, not the dirfd's real parent** — for a
   relative resolve from a dirfd, `..` at the base is a no-op.
   Over-restrictive vs POSIX `openat` (safe: it cannot escape).

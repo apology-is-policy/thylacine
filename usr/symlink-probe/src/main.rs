@@ -305,9 +305,31 @@ fn run_union_stage(c: &mut Checker, stage: &str) {
     if !built {
         fail("symlink-probe: FAIL -- union: build the covered directory\n");
     }
-    let ok = match Command::new("/bin/symlink-probe").arg(stage).spawn() {
-        Ok(mut child) => child.wait().map(|st| st.success()).unwrap_or(false),
-        Err(_) => false,
+    // joey spawns this probe with no fds, so there is no 0/1/2 to inherit and a
+    // default Command refuses: hand the child three real ones. It reports
+    // through t_putstr like its parent, so nothing is lost to the bit bucket.
+    use libthyla_rs::process::Stdio;
+    let null = || fs::OpenOptions::new().read(true).write(true).open("/dev/null");
+    let ok = match (null(), null(), null()) {
+        (Ok(i), Ok(o), Ok(e)) => {
+            match Command::new("/bin/symlink-probe")
+                .arg(stage)
+                .stdin(Stdio::File(i))
+                .stdout(Stdio::File(o))
+                .stderr(Stdio::File(e))
+                .spawn()
+            {
+                Ok(mut child) => child.wait().map(|st| st.success()).unwrap_or(false),
+                Err(e) => {
+                    t_putstr(&format!("symlink-probe: {} spawn errno {}\n", stage, e.as_errno()));
+                    false
+                }
+            }
+        }
+        _ => {
+            t_putstr("symlink-probe: /dev/null would not open\n");
+            false
+        }
     };
     c.ok(&format!("{}: the child stage passed", stage), ok);
     // The mounts died with the child's Territory; the directory is ours again.

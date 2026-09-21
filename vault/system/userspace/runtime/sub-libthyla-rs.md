@@ -42,7 +42,7 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-09-17
+updated: 2026-09-21
 ---
 ## Purpose
 
@@ -425,6 +425,19 @@ instant, and falling back to the syscall when the page is absent.
   traits.
 
 ## Caveats
+
+- **`OpenOptions::append` carries `T_OAPPEND` since 2026-09-21; before that
+  the constant had a definition and no user.** Append was one seek-to-end at
+  open, so a write after any seek — and the second of two appenders to one
+  file: `>>` from two shells, the history file — landed mid-file over existing
+  bytes. Now the open carries the bit (the kernel forwards it to the 9P open;
+  Stratum lands each write at the file's current end) AND keeps the seek, which
+  is what makes the cursor agree. Inert on a Dev with no append notion. **Not
+  atomic against a CONCURRENT appender**: Stratum's append is stat-then-write
+  (a documented TOCTOU on its side), so two racing writers can still be handed
+  one end. `territory::chroot` / `pivot_root` fail flat — every refusal is
+  `InvalidArgument`, whatever the doc comments once promised — and a real swap
+  also drops the mount entries the new root cannot reach (ARCH 9.6.10).
 
 - **`Stdio::Null` is unimplemented for a reason that expired.** Three places
   say the discard mode cannot be built for want of a kernel bit-bucket device.

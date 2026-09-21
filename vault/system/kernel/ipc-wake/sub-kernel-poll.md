@@ -9,7 +9,7 @@ guarded-by: [inv-i9]
 validated-by: [spec-poll, spec-tsleep, gate-smp]
 locks: [lock-poll-list, lock-rendez, lock-wait, lock-timerwait]
 created: 2026-08-01
-updated: 2026-08-14
+updated: 2026-09-21
 ---
 ## Purpose
 
@@ -28,6 +28,10 @@ dev9p.poll bridge's userside.
 - `sys_poll_for_proc(p, kfds, nfds, timeout_ms)` → count of pollfds
   with `revents != 0`, or -1 (bad args). `timeout_ms < 0` blocks
   indefinitely, `== 0` is a non-blocking probe, `> 0` bounds the park.
+  **It returns 0 only at its deadline** (and never for `timeout_ms < 0`):
+  a wake that turns out to be for nothing the caller asked about is
+  followed by another sleep, not by a return. Until 2026-09-21 it was
+  followed by a return — see Mechanism step 5.
 - `nfds` ∈ [1, `POLL_MAX_NFDS` = 64]. **Deliberately decoupled from
   `PROC_HANDLE_MAX`**, which is now **1024** — 64 at the decoupling,
   256 by [[chg-2026-06-24-355-poll-decouple]], 1024 since the #198
@@ -74,7 +78,29 @@ dev9p.poll bridge's userside.
 4. `TSLEEP_INTR` (#811 death/terminate) ⇒ skip the re-sample — the
    thread dies at its EL0-return check — but the sweep still runs:
    the hooks are stack memory and MUST be unlisted.
-5. Re-sample every fd (`pw = NULL`), rebuild the count.
+5. **The re-arm** (2026-09-21; [[spec-poll]] `ClearFlags` → `Resample`
+   → `EvaluateWake`). A flag is a HINT, not a verdict: one hook list
+   serves every poller of an object whatever each asked for (a SrvConn's
+   list carries four readiness edges for two endpoints —
+   [[sub-kernel-srvconn]]), and readiness is a LEVEL a competing reader
+   can lower between the wake and the look. So: clear every flag
+   (`poll_waiter_rearm`, under the hook list's lock — the lock a
+   producer sets it under), THEN re-sample every fd (`pw = NULL`). That
+   order is the only sound one: an event landing between the two sets a
+   flag that survives into the next `tsleep`; one that landed before the
+   clear is seen by the sample, which runs under the object's lock after
+   the producer released it. Ready, or `TSLEEP_TIMEDOUT` ⇒ the sweep.
+   Otherwise an explicit `timer_now_ns() >= deadline_ns` test, then
+   **loop to step 3 against the same absolute deadline**. The explicit
+   test is load-bearing: `tsleep` prefers a set flag to a passed
+   deadline, so a producer that never stops walking a list would hold
+   the poller past its timeout for ever (`PollTerminates`).
+   *What this replaced:* the empty re-sample fell through and returned 0
+   — `poll(fd, 10 s)` reported a timeout after microseconds whenever a
+   second reader won the bytes, and `poll(-1)` returned 0, which POSIX
+   never permits. [[spec-poll]] was green over it for the module's
+   whole life because it modeled readiness as a monotonic edge and a
+   flag as a verdict: the state did not exist.
 6. **The sweep, in load-bearing order**: unregister every hook
    (idempotent), THEN scribble `magic = 0` (reversed, a concurrent
    producer walk holding the list lock would extinct on the zeroed
@@ -106,7 +132,10 @@ the sweep's route home without a Dev vtable op) + `next`.
 in the pollable object. `struct pollfd` — the 8-byte pinned ABI.
 Diagnostics: `poll_total_calls` / `poll_total_slept` — the latter
 counts "committed to the slow path", not "actually parked" (a
-producer racing register-to-tsleep still increments it).
+producer racing register-to-tsleep still increments it) —
+and `poll_total_resleeps`: wakes whose re-sample found nothing asked
+about, so the poller slept again. It is the tests' witness that a walk
+for someone else's edge did not end a poll.
 
 ## Concurrency
 
@@ -131,7 +160,12 @@ is never left asleep while a registered fd is ready. The single-fd
 core is [[spec-scheduler]]'s NoMissedWakeup; the deadline leg is
 [[spec-tsleep]]; poll adds the N-sources-behind-N-locks composition,
 with the hook flag as the cross-lock handoff. `NoStaleHook` pins the
-sweep.
+sweep; `NoSpuriousZero` the re-arm (0 only at the deadline);
+`PollTerminates` its loop bound; `StableReadyReturns` replaces the
+retired `PollReturnsWhenReady` ("a set flag leads to a return" is false
+by design now). `specs/check-poll.sh` runs the four clean + five buggy
+cfgs and asserts WHICH invariant each buggy one violates; both liveness
+properties were sabotaged in scratch before being trusted.
 
 ## Error paths
 
@@ -158,6 +192,15 @@ why `POLL_MAX_NFDS` is a frame bound, not an fd-table bound.
   a Dev that registers on a DIFFERENT list than the one it samples
   breaks the atomicity argument.
 - The INTR arm must never skip the sweep.
+- The re-arm: the clear precedes the sample for EVERY waiter; the hooks
+  and the retained refs survive the loop and come off only at the
+  sweep; `timeout_ms == 0` never enters it; the loop's own deadline test
+  stays (`poll.timeout_survives_a_busy_list` is its device witness, and
+  cannot false-fail — it can only fail to discriminate on a schedule
+  where no walk lands between a clear and the next `tsleep`).
+- **A wake site may walk its list for ANY state change; what it may
+  never do is fail to walk it for one.** That licence is what lets one
+  list serve two endpoints, and it exists only because of the re-arm.
 
 ## Seams
 
@@ -190,4 +233,8 @@ why `POLL_MAX_NFDS` is a frame bound, not an fd-table bound.
 the close [[adt-poll-r1]]) → #811 INTR arm →
 [[chg-2026-06-10-rw2-poll-retain]] (the retain) → #844 snapshot API →
 net-6b-2b `poll_waiter_list_empty` (the dev9p GC's atomic
-emptiness probe) → [[chg-2026-06-24-355-poll-decouple]].
+emptiness probe) → [[chg-2026-06-24-355-poll-decouple]] → the re-arm
+(2026-09-21, B-0 libc audit r3 F1/F2: spec extended first, scripture
+`6684e7da`; five `poll.*` tests, incl.
+`poll.devsrv_client_wakes_on_reply_only`, which pins `NoSpuriousZero`
+on a real parked poller).

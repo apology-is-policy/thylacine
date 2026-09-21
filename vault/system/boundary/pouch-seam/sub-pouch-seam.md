@@ -215,9 +215,15 @@ surface, which is recorded honestly rather than papered over:
   in its header. "stdio" is not wholly upper half: its fd-facing BACKENDS
   (`__stdio_read/write/close/seek`, the openers, `tmpfile`) are where libc
   meets the kernel, and 0002 / 0023 / 0035 / 0036 / 0038 patch them; the
-  formatting and buffering core above them is untouched. 0036 / 0037
-  entered `src/conf`, `src/legacy`, `src/misc`, `src/unistd`; 0039
-  `include/sys` and `src/select`.
+  formatting and buffering core above them is untouched. By that
+  derivation the B-0 series entered exactly TWO new directories:
+  `src/legacy` (0037) and `include/sys` (0039 — the series' first PUBLIC
+  header, which is a different kind of event: the change lands in every
+  port's objects, not in libc.a). This sentence first listed six and had
+  four of them wrong — `src/conf` was 0032's, `src/misc` 0021's,
+  `src/unistd` 0006's, `src/select` 0005's — typed from memory under the
+  very paragraph that says to derive (audit r3 F8). First-touch per
+  directory: `for d in ...; do grep -l "^+++ b/$d/" *.patch | head -1; done`.
 
 ## Error paths
 

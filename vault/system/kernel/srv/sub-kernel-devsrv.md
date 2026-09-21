@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/CORVUS-DESIGN.md"]
 created: 2026-07-31
-updated: 2026-09-18
+updated: 2026-09-21
 ---
 ## Nonblocking endpoints
 
@@ -216,9 +216,16 @@ extincts.
 kind dispatch → `srv_handle_poll` → `svc_listener_poll` (POLLIN ↔
 backlog non-empty; POLLHUP ↔ not LIVE; sample+register atomic under the
 registry lock; producers wake after release). A SrvConn-flavored
-KObj_Srv handle is POLLNVAL fail-closed (see [[sub-kernel-srvconn]]
-Caveats). The Dev `.poll` slot dispatches conn Spoors to `srvconn_poll`;
-roots and svc-refs report no events.
+KObj_Srv handle is POLLNVAL fail-closed — a guard on a path nothing has
+held since stalk-3b (see [[sub-kernel-srvconn]] Caveats). The Dev `.poll`
+slot (`devsrv_poll`) is where a connection is actually polled, and it
+dispatches **by endpoint**: `srvconn_poll(cn, client, ...)` with
+`client = (c->flag & CSRVCLIENT)`. Until 2026-09-21 it ignored the flag,
+though `devsrv_read` and `devsrv_write` both branch on it — a client was
+sampled as a server. A `CSRVCLIENT` Spoor on a **kernel-attached** conn
+answers `POLLNVAL` without registering anything: the rings belong to the
+kernel 9P client, the same reason read/write refuse it (the stalk-3b-E F1
+guard's third site). Roots and svc-refs report no events.
 
 ## Data structures
 

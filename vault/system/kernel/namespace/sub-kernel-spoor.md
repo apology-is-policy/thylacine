@@ -143,8 +143,14 @@ dirfd — or a union ROOT — is a resolution base
 it, and the mount-table shed seeds its reachability closure from it
 ([[sub-kernel-territory]]; the omission there was a P1). The opened
 Spoor's own identity is member[0], so the point is the one Spoor a
-resolution consults without having walked to it. A POINT-ONLY snap
-(`n == 0`) tags an `O_PATH` open of a union. The snap is set once before
+resolution consults without having walked to it — in exactly two places
+(the base-set `union_base` and the zero-component `zbase`), and only while
+the point still hosts a member in the caller's Territory: it names the
+directory the union was mounted OVER, so a dissolved union degrades to
+member[0], never to it ([[sub-kernel-stalk]]). A POINT-ONLY snap
+(`n == 0`) tags an `O_PATH` (STALK_WALK) open of a union; a STALK_OPEN
+carries the full one — the header comment said "opened (STALK_OPEN)" alone
+until 2026-09-21. The snap is set once before
 the Spoor is published, never inherited by `spoor_clone` (a clone is a
 walk position, not a union open), and freed — members and point clunked —
 at `spoor_free_internal`; that lifetime is why readers need no lock

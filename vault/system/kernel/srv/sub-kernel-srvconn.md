@@ -12,7 +12,7 @@ hazards: [haz-single-waiter-rendez, haz-death-path-wake]
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-09-18
+updated: 2026-09-21
 ---
 ## Event-loop I/O
 
@@ -20,7 +20,9 @@ updated: 2026-09-18
 transport. It refuses a busy same-direction I/O role, returns a short prefix
 when only part fits, EAGAIN when no progress is possible, EOF after a drained
 closed read, and EPIPE for a closed write. It wakes the opposite Rendez and
-server poll waiters after unlocking. Client-side poll is not added by this path.
+the conn's poll list after unlocking (since 2026-09-21 every ring mutator
+does; this one was, for a while, the only one that walked the list for all
+four edges).
 A POLLOUT result alone guarantees neither a complete frame nor a full buffer;
 [[sub-lictor]] therefore uses explicit nonblocking mode. The kernel test
 `srvconn.nonblocking_backpressure` covers that exact short-space condition,
@@ -101,11 +103,46 @@ Note the deliberate EOF asymmetry: the blocking reads return **0** at
 EOF (POSIX); the non-blocking server read returns **−1** at EOF and 0
 for empty-but-live (the corvus poll-then-read shape).
 
-**Poll** — `srvconn_poll(cn, events, pw)`: SERVER-endpoint semantics
-(POLLIN ↔ c2s has bytes; POLLOUT ↔ s2c live with room; POLLHUP ↔
-c2s.eof; POLLERR ↔ s2c.eof; both EOFs latch together). Atomic
-sample+register under both chan locks; `pw == NULL` is the post-wake
-sample-only call.
+**Poll** — `srvconn_poll(cn, client, events, pw)`, BOTH endpoints since
+2026-09-21 (ARCH 23.3). An endpoint READS one channel and WRITES the
+other, and the two rows are mirror images:
+
+| Endpoint | reads | writes | `POLLIN` | `POLLOUT` | `POLLHUP` | `POLLERR` |
+|---|---|---|---|---|---|---|
+| server (`client = false`) | c2s | s2c | c2s has bytes | s2c live + room | c2s.eof | s2c.eof |
+| client (`client = true`) | s2c | c2s | s2c has bytes | c2s live + room | s2c.eof | c2s.eof |
+
+Pipe-like on purpose: **no `POLLIN` at a drained EOF**; both EOFs latch
+together, so either endpoint sees `POLLHUP|POLLERR` on the same edge, with
+`POLLIN` beside them while bytes remain. The POSIX stream-socket shape
+(`POLLIN|POLLHUP`, no `POLLERR`, on an orderly close) is NOT the kernel's
+to supply — the native 9P servers are written to these rows — and is added
+once, at the boundary line, by pouch's `poll()` ([[sub-pouch-net]], 0041).
+Atomic sample+register under both chan locks (c2s → s2c); `pw == NULL` is
+the sample-only call.
+
+**ONE `poll_list`, FOUR edges, TWO endpoints.** Every ring mutation walks
+`cn->poll_list` after dropping the channel lock it mutated under:
+
+| Edge | Whose readiness | Walked by |
+|---|---|---|
+| c2s fill | server `POLLIN` | `srvconn_client_send` / `_send_frame` / `_send_blocking` (per chunk) |
+| s2c fill | client `POLLIN` | `srvconn_server_send` / `_send_blocking` (per chunk) |
+| s2c drain | server `POLLOUT` | `srvconn_client_recv` |
+| c2s drain | client `POLLOUT` | `srvconn_server_recv` / `_recv_blocking` |
+| all four | | `srvconn_io_nonblock` |
+| teardown | both `POLLHUP|POLLERR` | `srvconn_teardown` |
+
+So a walk is a real edge for some pollers on the list and noise for the
+rest. That is sound ONLY because `sys_poll_for_proc` re-arms and sleeps
+again on an empty re-sample ([[sub-kernel-poll]], the re-arm) — the two
+landed together and must not be separated. Until 2026-09-21 only the first
+row and the last walked the list: a client poller was never woken by its
+reply, and — the half nobody had asked about — a nonblocking SERVER that
+polled `POLLOUT` after `EAGAIN` was never woken by a blocking client drain.
+The per-chunk walk in both blocking sends is the [[fnd-cf3b-r1-f1]]
+argument applied symmetrically: the poller is the drainer the send may be
+about to park waiting for.
 
 **Diagnostics** — `srvconn_total_created`/`_freed` (the difference is
 the live count; [[sub-kernel-devsrv]]'s global soft cap reads it).
@@ -351,22 +388,30 @@ What an auditor attacks here (the CLAUDE.md CF-3 B row absorbed):
 
 ## Seams
 
-None open on this surface. Two adjacent items are deliberately caveats,
-not debt: the client-side poll story and the future server-side
-deadline (below) are unbuilt features with no v1.0 consumer, fail-closed
-by construction — not owed work. The devsrv-side seams
+None open on this surface. One adjacent item is deliberately a caveat,
+not debt: the future server-side deadline (below) is an unbuilt feature
+with no v1.0 consumer, fail-closed by construction — not owed work. (The
+client-side poll story sat beside it under the same label until
+2026-09-21; it WAS owed — pouch 0039 gave it a consumer and the ci fleet
+went red on it the same day.) The devsrv-side seams
 ([[seam-srv-registry-lifecycle]], [[seam-srv-9p-connect-unit]]) bound
 this surface's blast radius but live there.
 
 ## Caveats
 
-- **Client-side poll is fail-closed, not built**: `srvconn_poll` is
-  SERVER-endpoint semantics; a client polling its own handle would need
-  the mirror image (POLLIN ↔ s2c, POLLOUT ↔ c2s) plus its own hook list,
-  so `srv_handle_poll`'s SrvConn arm returns POLLNVAL and
-  `srvconn_server_send` deliberately fires NO poll wake (s2c growth is
-  only a POLLIN edge for that nonexistent client poller; the kernel
-  client tsleep-blocks, it does not poll).
+- **"Client-side poll is fail-closed, not built" — this dossier said so
+  until 2026-09-21, and only the second half was true.** The fail-closed
+  guard (`srv_handle_poll` → `POLLNVAL`) sits on the `KObj_Srv` path, and
+  no client has held a `KObj_Srv` connection since stalk-3b moved the
+  client endpoint to a `CSRVCLIENT` Spoor. On the path clients actually
+  hold, `devsrv_poll` sent them to the SERVER-endpoint sample: `POLLIN`
+  from the client's own unread request (the following read then blocked),
+  no wake on the reply. A guard on a dead path reads exactly like a guard.
+  Built now (Poll, above); the 9P hot path pays for it with one
+  uncontended list-lock pair per recv and per reply.
+- **A new ring mutator without a list walk is a lost wake for ONE
+  endpoint that the OTHER endpoint's tests cannot see.** Enumerate
+  `chan_ring_write` / `chan_ring_read` call sites when touching this file.
 - **A future server-side deadline needs a signal**: the TIMEDOUT
   branches in the deadline-0 blocking sends are defense-in-depth dead
   code; arming a real deadline there requires a caller-visible
@@ -399,6 +444,16 @@ send), [[chg-2026-06-24-349-flow-control]] (the EAGAIN contract on
 the role park + the blocking client send).)
 
 ## Tests
+
+The poll contract's tests live with the real `sys_poll_for_proc` in
+`kernel/test/test_poll.c`: `poll.devsrv_client_row` (every bit of the
+client row against the server row on one connection, incl. the defect
+itself — a client is NOT readable because its own request is unread),
+`poll.devsrv_client_wakes_on_reply_only` (a parked client poller sleeps
+THROUGH the c2s-fill and c2s-drain walks — `poll_total_resleeps` moves —
+and wakes on the reply), `poll.devsrv_server_pollout_wakes_on_client_drain`,
+`poll.devsrv_client_kernel_attached_pollnval`,
+`poll.timeout_survives_a_busy_list`.
 
 `kernel/test/test_srvconn.c` — 14 `srvconn.*` cases (roster verified
 against `kernel/test/test.c`): `create_destroy` · `roundtrip` ·

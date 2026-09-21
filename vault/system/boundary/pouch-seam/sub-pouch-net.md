@@ -15,6 +15,7 @@ code:
   - usr/lib/pouch/patches/0028-pouch-net-nonblock.patch
   - usr/lib/pouch/patches/0038-pouch-stdio-socket-fds.patch
   - usr/lib/pouch/patches/0039-pouch-fdset-guard-ppoll-tag.patch
+  - usr/lib/pouch/patches/0041-pouch-poll-stream-socket-shape.patch
   - usr/pouch-hello/pouch-hello-sockets.c
 audit: hard
 guarded-by: [inv-i1, inv-i28]
@@ -249,8 +250,19 @@ round against this surface before it had a node).
   array — in APPLICATION code, before libc was entered; `select()` refuses
   the fd, but only afterwards. From the main stack that address is usually
   unmapped; from a heap-resident set it is someone's Burrow. 0039 makes
-  `FD_SET` / `FD_CLR` / `FD_ISSET` `abort()` with a message on a
-  descriptor outside `[0, FD_SETSIZE)` — glibc's `__fdelt_chk` — and
+  `FD_SET` / `FD_CLR` / `FD_ISSET` `abort()` (status 127) on a descriptor
+  that does not fit the set — glibc's `__fdelt_chk`, and like it made in the
+  descriptor's FULL width against the set's OWN size,
+  `(unsigned long long)(d) < 8*sizeof(fd_set)`: the first version's
+  `(unsigned)(d) < FD_SETSIZE` let a `long` 0x100000005 through as 5 and
+  read `FD_SETSIZE` in the APPLICATION's macro context (audit r3 F3). It
+  says why only when fd 2 is a terminal: fd 2 is routinely not stderr here
+  (a prover is spawned with {0,1}; stratumd with none, so its fd 2 is its
+  third real kernel handle), and the first version wrote ~110 bytes of
+  English at that handle's cursor (r3 F4). **0039 is the series' first patch
+  into a PUBLIC header**: the guard is compiled into the PORT's objects, so a
+  port is rebuilt, not relinked, to have it (in-tree that is automatic — a
+  stale sysroot rebuild removes every port's output). It also
   routes `ppoll()` through the tag-aware `poll()` (it was a raw
   `SYS_poll`: POLLNVAL, counted ready, a busy-spin; the failure 0015 fixed
   in `poll()` and not there). **That is the honest minimum, not the fix.**
@@ -258,8 +270,36 @@ round against this surface before it had a node).
   handle per slot + an fd→slot side table), which lets `select()` work on
   sockets and retires the tag from every fd-consuming call — a redesign of
   0006 / 0016, its own chunk and audit, OWED. Until then a port that
-  `select()`s on a socket stops with a message naming the cause; one that
-  `poll()`s works. `/pouch-hello-sockets` pins both halves.
+  `select()`s on a socket stops.
+- **`poll()` on an AF_UNIX socket: what was claimed, what was true, what is
+  true now.** This dossier said on 2026-09-21 that a port which `poll()`s
+  "works" and that `/pouch-hello-sockets` "pins both halves". Both false
+  (audit r3 F1). 0039 only made `ppoll()` REACH the kernel's poll with the
+  right handle; the kernel then sampled the SERVER's end of the connection
+  for a client (`POLLIN` from the client's own unread request) and walked no
+  hook list when a reply arrived. The prover leg that "pinned" it was decided
+  by a scheduling race over that defect — green on the one boot the gate's
+  first stage ran, then 57 of 58 failed ci-fleet boots and 17 of 17 failed
+  SMP-gate boots, one signature. Now: the kernel polls both endpoints and
+  walks the list on every ring mutation ([[sub-kernel-srvconn]]), and **0041**
+  gives a CONNECTED AF_UNIX slot the stream-socket SHAPE in `poll()`: the
+  kernel's row is pipe-like (`POLLHUP|POLLERR`, no `POLLIN` at a drained EOF —
+  what the native 9P servers are written to), and a program written to sockets
+  expects a peer's orderly close to read `POLLIN|POLLHUP` with no `POLLERR`.
+  The loop every port has — `POLLIN`? then `read`; 0 means closed — never sees
+  its `POLLIN` otherwise and spins on a `poll()` that returns at once. Done
+  once, at the boundary line. The prover's leg is sequenced by barriers so no
+  schedule can turn it green over a broken kernel: the client polls only AFTER
+  the server consumed its request, must see EXACTLY `POLLIN` with the
+  connection still open, and after the server's close EXACTLY
+  `POLLIN|POLLHUP`, then EOF.
+- **An ACCEPTED AF_UNIX socket is not covered by 0041.** `accept()` returns
+  the kernel handle untagged (0006's design), so `poll()` cannot tell it from a
+  pipe without a kernel query per fd per call, and a pouch SERVER still sees
+  the pipe-like row when its client closes. No in-tree pouch server polls an
+  accepted socket (stratumd blocks in `read()`, thread per connection). Folds
+  into the small-integer-socket-fd redesign above — an fd→slot side table
+  covers accepted sockets too.
 - **The tag-aware set is still not the POSIX set** (census 2026-09-21: every
   site in the patched `src/` that passes an fd to a raw syscall, outside
   `src/network/`). That census method cannot see a call that takes a

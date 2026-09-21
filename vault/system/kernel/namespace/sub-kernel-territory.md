@@ -46,7 +46,9 @@ capability guards `SYS_MOUNT`, `SYS_UNMOUNT`, `SYS_CHROOT`,
 already-held authority:
 
 1. **`RIGHT_READ` on the source handle** (`sys_lookup_spoor(..., RIGHT_READ)`
-   in mount / chroot / pivot). A mount source you cannot read is
+   in mount; chroot and pivot take theirs through `sys_lookup_root_source`,
+   which adds the one non-authority condition — the source must be a
+   DIRECTORY, `QTDIR`). A mount source you cannot read is
    structurally inert; `RIGHT_WRITE` is deliberately NOT required —
    pivot binds a name, it creates no edge ([[fnd-16c-r1-f10]]).
 2. **Reaching the mount point at all** — `sys_resolve_mountpoint` stalks
@@ -289,8 +291,9 @@ that rule sound rather than hopeful:
    `dev9p` attach, `devsrv` attach, `env_alloc`, `devenv_walk`.
 4. **One Spoor is consulted at the base without having been walked to: a
    union root's mount point** (audit round 1, F1 — a P1 the first version
-   had). An `O_PATH` open of a union directory has member[0]'s identity
-   and carries the point in `union_snap`; `chroot` / `pivot_root` take
+   had). An open of a union directory — `O_PATH` or `OREAD`; both pass
+   the directory gate — has member[0]'s identity and carries the point in
+   `union_snap`; `chroot` / `pivot_root` take
    exactly such handles, and stalk routes every first component from a
    union base through the entries keyed AT THE POINT
    (`union_base = base->union_snap->point`). The point lives in the tree
@@ -334,11 +337,14 @@ the `/hw` re-graft made reachable again — ARCH had recorded that re-graft
 as "a v1.x seam" the whole time it was working by accident. joey now
 re-grafts it explicitly ([[sub-stratum-boot]]).
 
-**The one observable change.** An fd-relative walk from a directory fd
-opened BEFORE the swap, into a tree the new root cannot reach, no longer
-crosses the shed mounts and sees the underlying directory (a union dirfd
-whose point's entries were shed finds no members: `ENOENT` for every
-name). Such an fd is a handle on a file tree, not on the old namespace.
+**The observable changes — three shapes, no others.** (1) An fd-relative
+walk from a directory fd opened BEFORE the swap, into a tree the new root
+cannot reach, no longer crosses the shed mounts and sees the underlying
+directory. (2) A ROOT-relative walk through joey's post-pivot `/bin` bind
+(the aliases above). (3) A union dirfd whose point's entries were shed is a
+plain handle on member[0]: names only a later member held are `ENOENT`,
+and `"."` is member[0] — never the covered directory (below). Such an fd is
+a handle on a file tree, not on the old namespace.
 A peer thread's resolution already in flight across the swap is the same
 case: the lock makes each LOOKUP atomic with the swap, not each
 resolution, and a resolution straddling a root swap never had a
@@ -348,8 +354,29 @@ pivot onto a pipe strips the table for good instead of wedging the Proc
 until it pivots back. `usr/symlink-probe` carries the deny-path legs (its
 leg K is a real chroot, so it is where a root gate can be probed from
 userspace): chroot AND pivot onto a regular file are refused and the
-namespace still resolves afterwards. The shed's own regressions are the 13
-`territory.shed_*` kernel tests in `test_territory_pivot_root.c`. A mount used as a MASK
+namespace still resolves afterwards. The shed's own regressions are the 12
+`territory.shed_*` kernel tests in `test_territory_pivot_root.c` (count them:
+`grep -c '"territory.shed_' kernel/test/test.c` — this sentence said 13 for
+a day). Of the five added at audit round 1 only
+`shed_union_root_keeps_point_entries` FAILS on the pre-fix shed
+(survivors 0, want 2); the other four are gap-closers that pass on both and
+are named as such (audit r2 F5). And that one test encodes the AUTHOR's
+model of what stalk consults, so a new base-time consult leaves it green —
+which is why the device witnesses exist: `usr/symlink-probe`'s `union-a` /
+`union-b` stages run a REAL union (`/proc` + `/ctl` over a Stratum
+directory: point and member[0] in different instances — a same-session
+union passes on a kernel with no seed at all) through a real chroot.
+
+**A dissolved union degrades to member[0], never to the covered directory**
+(audit r2 F1; the rule is [[sub-kernel-stalk]]'s to enforce, stated here
+because the shed is one of the two ways to reach it). A union handle's
+`point` is the directory the union was mounted over. Round 1's correction
+("a union dirfd whose point's entries were shed answers `ENOENT`") was true
+for a NAME and false for `"."`: the zero-component walk cloned the point,
+found nothing mounted there, and returned the covered directory. Reachable
+with no shed at all — `unmount("/")` until the union is empty, then
+`open("/")` — so it predates #80; the shed added a second route (hold the
+dirfd, `chroot` into an instance that cannot reach the point's). A mount used as a MASK
 over a directory in an unreachable tree therefore stops masking for
 holders of such an fd; nothing in-tree relies on more.
 
