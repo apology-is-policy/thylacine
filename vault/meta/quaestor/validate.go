@@ -433,8 +433,17 @@ func checkCodePaths(reg *Registry) []string {
 		if i := strings.IndexAny(rel, " \t"); i > 0 {
 			rel = rel[:i]
 		}
-		if _, err := os.Stat(filepath.Join(base, rel)); err != nil {
+		fi, err := os.Stat(filepath.Join(base, rel))
+		if err != nil {
 			return fmt.Sprintf("%s: %s -> no such file '%s'", note, field, rel)
+		}
+		// Ownership is by EXACT path (owner.go), so a directory in `code:`
+		// claims nothing: `owner` reports every file under it UNOWNED and the
+		// dossier gate never fires for them. Stat is content with a directory,
+		// which is how sub-lictor claimed `usr/lictor` for three days -- the
+		// most security-sensitive new tree in the repo, owned by nothing.
+		if field == "code" && fi.IsDir() {
+			return fmt.Sprintf("%s: code -> '%s' is a directory; ownership is by exact file path, so this claims nothing -- list the files", note, rel)
 		}
 		return ""
 	}

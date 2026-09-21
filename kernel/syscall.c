@@ -10472,11 +10472,12 @@ static s64 sys_set_nonblock_handler(u64 fd, u64 on) {
     return handle_set_nonblock(t->proc, (hidx_t)fd, on != 0) == 0 ? 0 : -T_E_BADF;
 }
 
-static s64 sys_seat_import_handler(u64 conn, u64 share_id) {
-    if (conn >= PROC_HANDLE_MAX) return -1;
-    struct Thread *t = current_thread();
-    if (!t || !t->proc || !proc_is_seat_service(t->proc)) return -1;
-    struct Proc *p = t->proc;
+// Non-static so the kernel tests drive every gate with a synthetic Proc (the
+// sys_weft_share_for_proc shape). Both identity gates run BEFORE the claim:
+// the claim consumes the share, so a stranger must never reach it.
+s64 sys_seat_import_for_proc(struct Proc *p, u64 conn, u64 share_id);
+s64 sys_seat_import_for_proc(struct Proc *p, u64 conn, u64 share_id) {
+    if (!p || conn >= PROC_HANDLE_MAX || !proc_is_seat_service(p)) return -1;
     if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_HW_CREATE) == 0) return -1;
     struct srv_peer_info peer;
     if (sys_srv_peer_for_proc(p, (hidx_t)conn, &peer) != 0 || !peer.alive) return -1;
@@ -10495,6 +10496,12 @@ static s64 sys_seat_import_handler(u64 conn, u64 share_id) {
     if (fd < 0) kobj_dma_unref(dma);
     burrow_unref(v);
     return (s64)fd;
+}
+
+static s64 sys_seat_import_handler(u64 conn, u64 share_id) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) return -1;
+    return sys_seat_import_for_proc(t->proc, conn, share_id);
 }
 
 static s64 sys_srv_peer_handler(u64 conn_h_raw, u64 out_va) {

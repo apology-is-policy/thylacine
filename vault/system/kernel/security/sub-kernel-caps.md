@@ -66,8 +66,12 @@ Two disjoint classes, pinned by `_Static_assert`:
   `LOCK_PAGES`, `CSPRNG_READ`, `GRANT_HOSTOWNER`, `SET_IDENTITY`,
   `GRANT_CLEARANCE`.
 - **`CAP_ELEVATION_ONLY`** — held by no Proc at creation and stripped from
-  every child unconditionally: `HOSTOWNER`, `DAC_OVERRIDE`, `CHOWN`,
-  `KILL`, `DEBUG`, `JIT`.
+  every child (except a PROPAGATING legate scope's own `legate_caps`):
+  `HOSTOWNER`, `DAC_OVERRIDE`, `CHOWN`, `KILL`, `DEBUG`, `JIT`,
+  `AUDIO_GRAPH` (bit 12) and `POST_SERVICE` (bit 13). The macro in `caps.h`
+  is the authority for this list; a prose COUNT of it has been wrong four
+  times (four, five, six, seven -- in `caps.h`, CLAUDE.md and ARCH section 28
+  at once, 2026-09-21), so none is given here.
 
 `(CAP_ALL & CAP_ELEVATION_ONLY) == 0` is asserted, so every bit is
 fork-grantable **xor** elevation-only, never both. `CAP_ALL` is itself

@@ -757,6 +757,7 @@ pub struct Net {
     slots: [Slot; MAX_SLOTS],
     retired: Vec<RetiredTcp>,
     tcp_retire_expired: u32,
+    tcp_timewait_yielded: u32,
     tcp_active: u32,      // currently-live TCP connections (the `active` stat)
     tcp_opened: u32,      // total TCP connections ever minted
     udp_active: u32,      // currently-live UDP connections (net-3b)
@@ -820,6 +821,7 @@ impl Net {
             slots: [Slot::empty(); MAX_SLOTS],
             retired: Vec::with_capacity(MAX_TCP_TRANSPORTS),
             tcp_retire_expired: 0,
+            tcp_timewait_yielded: 0,
             tcp_active: 0,
             tcp_opened: 0,
             udp_active: 0,
@@ -1222,6 +1224,36 @@ impl Net {
                 .count()
     }
 
+    /// Make room for one new TCP transport (NET-CLOSE-DESIGN, the 2026-09-21
+    /// refinement). Below the bound this is a plain yes. AT the bound, the
+    /// oldest retiree that has reached TIME-WAIT is released early: both FINs
+    /// are exchanged and acknowledged, so it holds no byte anyone is owed and
+    /// no close left to finish -- only the rest of its 2MSL quiet time. Removed
+    /// without an abort, so no RST is emitted. A retiree in any other state
+    /// still carries queued data or an unfinished close and is never touched;
+    /// with no TIME-WAIT retiree the answer is no, and the caller refuses with
+    /// the existing resource error exactly as before.
+    fn tcp_admit(&mut self) -> bool {
+        if self.tcp_transports() < MAX_TCP_TRANSPORTS {
+            return true;
+        }
+        let mut oldest: Option<(usize, u64)> = None;
+        for i in 0..self.retired.len() {
+            let r = self.retired[i];
+            let state = self.retired_set(r.lo).get_mut::<tcp::Socket>(r.handle).state();
+            if state == tcp::State::TimeWait && oldest.map_or(true, |(_, d)| r.deadline_ms < d) {
+                oldest = Some((i, r.deadline_ms));
+            }
+        }
+        let Some((i, _)) = oldest else {
+            return false;
+        };
+        let r = self.retired.swap_remove(i);
+        self.retired_set(r.lo).remove(r.handle);
+        self.tcp_timewait_yielded = self.tcp_timewait_yielded.saturating_add(1);
+        true
+    }
+
     fn retired_set(&mut self, lo: bool) -> &mut SocketSet<'static> {
         if lo {
             &mut self.lo.as_mut().expect("retired lo stack").sockets
@@ -1475,7 +1507,9 @@ impl Net {
     /// full. The slot is NOT yet freeable -- only slot_unref frees, and the
     /// caller refs it before any unref can occur.
     fn tcp_clone(&mut self) -> Option<u32> {
-        if self.tcp_transports() >= MAX_TCP_TRANSPORTS {
+        // The free slot first: a clone refused for want of a SLOT must not
+        // have cost a TIME-WAIT retiree its quiet time.
+        if !self.slots.iter().any(|s| !s.used) || !self.tcp_admit() {
             return None;
         }
         let n = self.slots.iter().position(|s| !s.used)?;
@@ -2199,12 +2233,13 @@ impl Net {
     /// M's ctl. None if the slot table is full (the call stays buffered in N's
     /// socket) or the re-arm fails (N keeps the call; the accept retries).
     fn accept_swap(&mut self, n: u32) -> Option<u32> {
-        if self.tcp_transports() >= MAX_TCP_TRANSPORTS {
-            return None;
-        }
+        // Every other refusal first, so a swap that cannot happen yields nothing.
         let m = self.slots.iter().position(|s| !s.used)?;
         let established = self.slots[n as usize].socket?;
         let ep = self.slots[n as usize].listen_ep?;
+        if !self.tcp_admit() {
+            return None;
+        }
         // N's stack (lo or NIC): the established + re-armed sockets all live here.
         // M inherits it -- a loopback listener accepts loopback calls (net-8a).
         let nlo = self.slots[n as usize].lo;
@@ -2907,6 +2942,8 @@ impl Net {
                 c.push_dec(self.retired.len() as u32);
                 c.push(b"\n  close-timeouts ");
                 c.push_dec(self.tcp_retire_expired);
+                c.push(b"\n  timewait-yielded ");
+                c.push_dec(self.tcp_timewait_yielded);
                 c.push(b"\n");
             }
             P_UDP_STATS => {
@@ -3354,6 +3391,84 @@ pub fn close_retirement_selftest(base: Instant) -> &'static str {
     if net.slot_live(handshake) || !net.retired.is_empty() {
         return "syn-close";
     }
+
+    // TIME-WAIT yields to admission; nothing else does. The refusal leg above
+    // is this leg's control -- the same full bound, no TIME-WAIT retiree, and
+    // both admission paths refuse. Here ONE retiree is a real TIME-WAIT (a
+    // normal close, client first) and one holds real queued bytes.
+    net.slot_unref(m);
+    net.slot_unref(ln);
+    let (m2, cn2, ln2) = match lo_establish_pair(&mut net, &mut device) {
+        Some(pair) => pair,
+        None => return "yield-establish",
+    };
+    net.slot_ref(m2);
+    net.slot_ref(cn2);
+    net.slot_ref(ln2);
+    net.slot_unref(cn2);
+    let mut scratch = [0u8; 8];
+    if !lo_drive(&mut net, &mut device, |n| {
+        matches!(n.data_recv_outcome(m2, &mut scratch), RecvOutcome::Eof)
+    }) {
+        return "yield-eof";
+    }
+    net.slot_unref(m2);
+    net.slot_unref(ln2);
+    if !lo_drive(&mut net, &mut device, |n| {
+        n.retired.len() == 1
+            && n.sockets.get::<tcp::Socket>(n.retired[0].handle).state() == tcp::State::TimeWait
+    }) {
+        return "yield-timewait";
+    }
+    let quiet = net.retired[0].handle;
+    let (m3, cn3, ln3) = match lo_establish_pair(&mut net, &mut device) {
+        Some(pair) => pair,
+        None => return "yield-establish-2",
+    };
+    net.slot_ref(m3);
+    net.slot_ref(cn3);
+    net.slot_ref(ln3);
+    if net.data_send(cn3, b"still-owed-bytes") != 16 {
+        return "yield-send";
+    }
+    net.slot_unref(cn3);
+    let owed = match net.retired.iter().find(|r| r.handle != quiet) {
+        Some(r) => r.handle,
+        None => return "yield-owed-missing",
+    };
+    let owed_queue = net.sockets.get::<tcp::Socket>(owed).send_queue();
+    if owed_queue == 0
+        || net.sockets.get::<tcp::Socket>(quiet).state() != tcp::State::TimeWait
+    {
+        return "yield-fixture";
+    }
+    while net.tcp_transports() < MAX_TCP_TRANSPORTS {
+        let rx = tcp::SocketBuffer::new(alloc::vec![0u8; TCP_RX_BUF]);
+        let tx = tcp::SocketBuffer::new(alloc::vec![0u8; TCP_TX_BUF]);
+        let handle = net.sockets.add(tcp::Socket::new(rx, tx));
+        net.retired.push(RetiredTcp {
+            handle,
+            lo: false,
+            deadline_ms: u64::MAX,
+        });
+    }
+    let yielded_before = net.tcp_timewait_yielded;
+    let admitted = match net.tcp_clone() {
+        Some(n) => n,
+        None => return "yield-refused",
+    };
+    if net.tcp_timewait_yielded != yielded_before + 1
+        || net.retired.iter().any(|r| r.handle == quiet)
+        || !net.retired.iter().any(|r| r.handle == owed)
+        || net.sockets.get::<tcp::Socket>(owed).send_queue() != owed_queue
+    {
+        return "yield-wrong-victim";
+    }
+    // The bound is full again and the only TIME-WAIT is gone: refusal returns.
+    if net.tcp_transports() != MAX_TCP_TRANSPORTS || net.tcp_clone().is_some() {
+        return "yield-unbounded";
+    }
+    net.free_orphan_mint(admitted);
     "PASS"
 }
 

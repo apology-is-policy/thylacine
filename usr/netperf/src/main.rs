@@ -434,8 +434,11 @@ fn weft_throughput(total: u64) -> Result<(), &'static str> {
         return Err("server announce timeout");
     }
 
-    let mut client = TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, MW_PORT))
-        .map_err(|_| "connect")?;
+    // MW runs straight after M3's churn, when the transport bound may still be
+    // full of retirees: the admission signal is retried here as it is there. A
+    // plain connect made this phase -- and with it the BOOT -- depend on
+    // whether a retiree happened to have aged out yet.
+    let mut client = connect_with_admission(SocketAddrV4::new(Ipv4Addr::LOCALHOST, MW_PORT))?;
     // open() reads only the data fd (a Copy i32), holding no borrow of `client`,
     // so `client` stays usable for the shutdown below.
     let mut flow = WeftFlow::open(&client).map_err(|_| "weft open")?;
@@ -831,7 +834,8 @@ fn m6_connect(addr: SocketAddrV4, conns: u32) -> Result<(), &'static str> {
 }
 
 fn m6_throughput(addr: SocketAddrV4, total: u64) -> Result<(), &'static str> {
-    let mut client = TcpStream::connect(addr).map_err(|_| "connect")?;
+    // After m6_connect's churn: retry the admission signal, as MW does.
+    let mut client = connect_with_admission(addr)?;
     let ready = client.ready_fd().map_err(|_| "ready fd")?;
     let mut ps = PollSet::new();
     ps.add_raw(ready.as_raw_fd(), PollEvents::WRITE);

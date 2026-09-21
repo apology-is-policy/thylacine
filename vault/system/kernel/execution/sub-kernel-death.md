@@ -114,7 +114,11 @@ exit and a kill alike:
   SERVICE's death fails the seat; the compositor CLIENT's death fails it only
   mid-episode and otherwise just clears the slot; corvus's death fails it when
   an episode is in progress. A seat failure closes a console episode only when
-  the seat opened it ([[sub-kernel-proc]]);
+  the seat opened it ([[sub-kernel-proc]]). The client and service arms are
+  driven through this chokepoint by REAL deaths (an `rfork` child takes the
+  role, an episode opens over it, it exits and is reaped):
+  `cons.graphical_seat_deadline_and_death` and
+  `cons.graphical_seat_service_death`;
 - the POSIX 2.4.3 orphan rule, **before** the reparent (the children list is
   consumed there) — [[sub-kernel-jobctl]] owns it, and the ordering is the
   whole trick: it asks "orphaned once I am gone" while the answer is still

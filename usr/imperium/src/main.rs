@@ -496,7 +496,7 @@ fn cmd_elevate(self_restrict: u64) -> i64 {
     }
     print(" as pid ");
     put_dec(if mypid > 0 { mypid as u64 } else { 0 });
-    print(" -- press Ctrl-Alt-Delete (or Ctrl-Alt-F10); the trusted panel MUST show this pid\n");
+    print(" -- press the SAK: Ctrl-Alt-Delete or Ctrl-Alt-F10 (a serial BREAK in a recovery session); the trusted panel MUST show this pid\n");
 
     // (5) Block on the deferred reply.
     let (st, resp) = match unsafe { read_reply(conn) } {

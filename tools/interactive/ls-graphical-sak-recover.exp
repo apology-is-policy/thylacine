@@ -63,7 +63,14 @@ expect {
 lc_raw_send "correct-horse-battery-staple-v1\r" "login password"
 expect {
     -ex "login: session compositor (halcyond) spawned" {}
-    -ex "Thylacine textual shell" { lc_fail "requires HALCYON_SESSION=y image" }
+    -ex "Thylacine textual shell" {
+        # A lever the image lacks is a SKIP, never a FAIL: a full fleet run on
+        # the gate image must not be red for a reason that is not a defect.
+        puts "\nLS-CI SKIP: default (ut) image -- this scenario drives the session\
+ compositor. Bake with: THYLACINE_HALCYON_SESSION=1 THYLACINE_HALCYON_PROFILE=instrument tools/build.sh kernel --config ci"
+        lc_quit
+        exit 77
+    }
     timeout { lc_fail "no graphical session" }
     eof { lc_fail "EOF at session start" }
 }

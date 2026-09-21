@@ -919,7 +919,13 @@ struct Controlq {
     /// submit_and_wait sets it, and it never returns success with it set
     /// -- drain() treats an id-0 entry outside that window as corruption.
     sync_pending: bool,
+    /// The id a fenced command's OWNER is told, and the identity its
+    /// completion carries back: monotone for the life of the service, never
+    /// reused. It is not what the device sees -- that is `wire_next`.
     fence_next: u64,
+    /// The id the DEVICE echoes. A smaller space with its own rules, so it
+    /// rewinds while the device is idle (`crate::fence`).
+    wire_next: u64,
     sync2_pending: bool,
     #[cfg(feature = "test-mode")]
     pair_said: bool,
@@ -994,6 +1000,16 @@ impl Controlq {
 
     fn fenced_in_flight(&self) -> u32 {
         self.fslots.iter().flatten().count() as u32
+    }
+
+    /// The ids the NEXT fenced command will carry, as (wire, owner). A pure
+    /// peek: the request is staged with the wire id first, and `fenced_commit`
+    /// records both only once the chain is actually published.
+    fn fenced_ids(&self) -> Option<(u64, u64)> {
+        Some((
+            crate::fence::next(self.wire_next, self.device_idle())?,
+            self.fence_next.checked_add(1)?,
+        ))
     }
 
     /// A CLIENT chain's slot: first-fit over the client pool, which is every
@@ -1466,14 +1482,37 @@ impl Controlq {
         self.service_completions(1)
     }
 
-    // One monotone sequence covers synchronous and asynchronous commands.
-    // Legacy virgl completion callbacks use 32-bit IDs; fail closed at that
-    // limit rather than wrap or create a high-bit namespace they cannot return.
-    fn fence_sync(&mut self, offset: u64) -> Result<u64, ()> {
-        let Some(id) = self.fence_next.checked_add(1).filter(|id| *id <= u32::MAX as u64) else {
+    /// The device holds no chain at all: no tagged fence, no abandoned chain
+    /// still to retire, no synchronous chain inside its window. The one state
+    /// in which the wire sequence may rewind (`crate::fence`).
+    fn device_idle(&self) -> bool {
+        !self.sync_pending
+            && !self.sync2_pending
+            && self.fslots.iter().all(|t| t.is_none())
+            && !self.fslot_poisoned.iter().any(|p| *p)
+    }
+
+    /// Take the next WIRE id. `idle` is the caller's, sampled ONCE per
+    /// submission: a second id taken for the same submission must pass
+    /// `false`, because the first is about to be in flight beside it and is
+    /// not yet visible in any of the flags `device_idle` reads.
+    fn wire_take(&mut self, idle: bool) -> Option<u64> {
+        let id = crate::fence::next(self.wire_next, idle)?;
+        #[cfg(feature = "test-mode")]
+        if crate::fence::rewinds(self.wire_next, idle) {
+            say!("lictor: gpu fence sequence rewound at {} (device idle)", self.wire_next);
+        }
+        self.wire_next = id;
+        Some(id)
+    }
+
+    // One wire sequence covers synchronous and fenced commands. Legacy virgl
+    // completion callbacks use 32-bit IDs; exhaustion fails closed rather
+    // than wrap or create a high-bit namespace they cannot return.
+    fn fence_sync(&mut self, offset: u64, idle: bool) -> Result<u64, ()> {
+        let Some(id) = self.wire_take(idle) else {
             self.dead = true; return Err(());
         };
-        self.fence_next = id;
         unsafe {
             w32(self.ring_va + offset + 4, r32(self.ring_va + offset + 4) | VIRTIO_GPU_FLAG_FENCE);
             w64(self.ring_va + offset + 8, id);
@@ -1515,7 +1554,8 @@ impl Controlq {
             w16(desc_va + 28, VIRTQ_DESC_F_WRITE);
             w16(desc_va + 30, 0);
         };
-        let fence = self.fence_sync(REQ_OFF)?;
+        let idle = self.device_idle();
+        let fence = self.fence_sync(REQ_OFF, idle)?;
         self.sync_pending = true;
         self.publish(0);
         self.wait_sync_done(false)?;
@@ -1581,8 +1621,9 @@ impl Controlq {
             w16(desc2_va + 28, VIRTQ_DESC_F_WRITE);
             w16(desc2_va + 30, 0);
         };
-        let fence1 = self.fence_sync(REQ_OFF)?;
-        let fence2 = self.fence_sync(REQ2_OFF)?;
+        let idle = self.device_idle();
+        let fence1 = self.fence_sync(REQ_OFF, idle)?;
+        let fence2 = self.fence_sync(REQ2_OFF, false)?;
         self.sync_pending = true;
         self.sync2_pending = true;
         // The engagement witness (once): the W-4 C measurement run could not
@@ -1977,6 +2018,7 @@ impl Gpu {
                 vindicated: alloc::vec::Vec::new(),
                 sync_pending: false,
                 fence_next: 0,
+                wire_next: crate::fence::FENCE_START,
                 sync2_pending: false,
                 #[cfg(feature = "test-mode")]
                 pair_said: false,
@@ -3788,7 +3830,7 @@ impl Gpu {
         &mut self,
         slot: usize,
         req_len: u32,
-        fence_id: u64,
+        (wire, fence_id): (u64, u64),
         ctx_pub: u32,
         readback: bool,
         comp: bool,
@@ -3809,6 +3851,11 @@ impl Gpu {
                 },
             )
             .map_err(|_| FencedErr::Dead)?;
+        #[cfg(feature = "test-mode")]
+        if wire <= self.ctrl.wire_next {
+            say!("lictor: gpu fence sequence rewound at {} (device idle)", self.ctrl.wire_next);
+        }
+        self.ctrl.wire_next = wire;
         self.ctrl.fence_next = fence_id;
         Ok(fence_id)
     }
@@ -3830,9 +3877,9 @@ impl Gpu {
     ) -> Result<u64, FencedErr> {
         let slot = self.fenced_begin(8 + stream.len() as u64)?;
         let req = self.ctrl.flane_va + (slot as u64) * FREQ_LEN;
-        let fence_id = self.ctrl.fence_next.checked_add(1).filter(|id| *id <= u32::MAX as u64).ok_or(FencedErr::Dead)?;
+        let ids = self.ctrl.fenced_ids().ok_or(FencedErr::Dead)?;
         unsafe {
-            write_ctrl_hdr_fenced(req, VIRTIO_GPU_CMD_SUBMIT_3D, ctx_id, fence_id);
+            write_ctrl_hdr_fenced(req, VIRTIO_GPU_CMD_SUBMIT_3D, ctx_id, ids.0);
             if ring_idx > 0 {
                 w32(
                     req + 4,
@@ -3847,7 +3894,7 @@ impl Gpu {
         self.fenced_commit(
             slot,
             GPU_CTRL_HDR_LEN + 8 + stream.len() as u32,
-            fence_id,
+            ids,
             ctx_pub,
             false,
             false,
@@ -3971,7 +4018,7 @@ impl Gpu {
         layer_stride: u32,
     ) -> Result<u64, FencedErr> {
         let slot = self.fenced_begin(48)?;
-        self.stage_transfer_3d(
+        let ids = self.stage_transfer_3d(
             slot,
             to_host,
             ctx_id,
@@ -3987,13 +4034,12 @@ impl Gpu {
             stride,
             layer_stride,
         )?;
-        let fence_id = self.ctrl.fence_next.checked_add(1).filter(|id| *id <= u32::MAX as u64).ok_or(FencedErr::Dead)?;
         // A readback marks the lane (the sync-slot deadline reads it, C-6):
         // the device executes it synchronously at processing time.
         self.fenced_commit(
             slot,
             GPU_CTRL_HDR_LEN + 48,
-            fence_id,
+            ids,
             ctx_pub,
             !to_host,
             false,
@@ -4021,14 +4067,13 @@ impl Gpu {
         stride: u32,
     ) -> Result<u64, FencedErr> {
         let slot = self.fenced_begin_comp()?;
-        self.stage_transfer_3d(
+        let ids = self.stage_transfer_3d(
             slot, false, ctx_id, res_id, 0, 0, 0, 0, w, h, 1, 0, stride, 0,
         )?;
-        let fence_id = self.ctrl.fence_next.checked_add(1).filter(|id| *id <= u32::MAX as u64).ok_or(FencedErr::Dead)?;
         self.fenced_commit(
             slot,
             GPU_CTRL_HDR_LEN + 48,
-            fence_id,
+            ids,
             ctx_pub,
             true,
             true,
@@ -4037,9 +4082,8 @@ impl Gpu {
     }
 
     /// Stage a TRANSFER_TO/FROM_HOST_3D request in fenced slot `slot`'s
-    /// buffer (the fence id is written by `fenced_commit`'s caller order:
-    /// the header carries `fence_next + 1`, which is what `fenced_commit`
-    /// then records).
+    /// buffer, returning the ids it staged with so `fenced_commit` records
+    /// exactly those rather than peeking a second time.
     #[allow(clippy::too_many_arguments)]
     fn stage_transfer_3d(
         &mut self,
@@ -4057,16 +4101,16 @@ impl Gpu {
         offset: u64,
         stride: u32,
         layer_stride: u32,
-    ) -> Result<(), FencedErr> {
+    ) -> Result<(u64, u64), FencedErr> {
         let req = self.ctrl.flane_va + (slot as u64) * FREQ_LEN;
-        let fence_id = self.ctrl.fence_next.checked_add(1).filter(|id| *id <= u32::MAX as u64).ok_or(FencedErr::Dead)?;
+        let ids = self.ctrl.fenced_ids().ok_or(FencedErr::Dead)?;
         let cmd = if to_host {
             VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D
         } else {
             VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D
         };
         unsafe {
-            write_ctrl_hdr_fenced(req, cmd, ctx_id, fence_id);
+            write_ctrl_hdr_fenced(req, cmd, ctx_id, ids.0);
             w32(req + 24, x);
             w32(req + 28, y);
             w32(req + 32, z);
@@ -4079,7 +4123,7 @@ impl Gpu {
             w32(req + 64, stride);
             w32(req + 68, layer_stride);
         };
-        Ok(())
+        Ok(ids)
     }
 
     /// Synchronous full-frame TRANSFER_FROM_HOST_3D under the COMPOSITOR's

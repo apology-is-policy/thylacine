@@ -2452,6 +2452,13 @@ void proc_test_seat_reset(void) {
     seat_zero(&g_seat, sizeof(g_seat));
     spin_unlock_irqrestore(&g_proc_table_lock, lock);
 }
+// The deadlines are 5 s and 90 s of wall clock; a test cannot wait them out.
+void proc_test_seat_expire(void);
+void proc_test_seat_expire(void) {
+    irq_state_t lock = spin_lock_irqsave(&g_proc_table_lock);
+    g_seat.deadline = 0;
+    spin_unlock_irqrestore(&g_proc_table_lock, lock);
+}
 #endif
 
 bool proc_is_seat_service(struct Proc *p) {

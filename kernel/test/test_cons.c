@@ -3924,3 +3924,177 @@ cleanup:
     TEST_ASSERT(err == NULL, err ? err : "graphical seat grant and failure");
 #undef SEAT_CHECK
 }
+
+// The edges no gate can reach in bounded time: every non-resting phase carries
+// a deadline, an expired one FAILS the seat at the next op whoever issues it,
+// and the two seat Procs dying mid-episode go through the REAL ZOMBIE
+// chokepoint. Each failure closes the seat's own episode, and a dead client's
+// slot is free again once the service has recovered.
+void proc_test_seat_expire(void);
+void test_cons_graphical_seat_deadline_and_death(void);
+enum { EPD_ROLE_SEAT_CLIENT = 3, EPD_ROLE_SEAT_SERVICE = 4 };
+static struct Proc *volatile g_seat_child;
+
+static void seat_child(void *arg) {
+    int role = (int)(long)arg;
+    struct Proc *me = current_thread()->proc;
+    int rc = role == EPD_ROLE_SEAT_SERVICE ? proc_set_seat_service(me)
+                                           : proc_set_seat_client(me);
+    __atomic_store_n(&g_seat_child, me, __ATOMIC_RELEASE);
+    // A parent that gave up waiting has already written 2: never overwrite it,
+    // or this child waits for a second 2 that is not coming.
+    int unset = 0;
+    (void)__atomic_compare_exchange_n(&g_epd_state, &unset, rc == 0 ? 1 : -1, false,
+                                      __ATOMIC_RELEASE, __ATOMIC_ACQUIRE);
+    TEST_YIELD_UNTIL_PROC(__atomic_load_n(&g_epd_state, __ATOMIC_ACQUIRE) == 2);
+    exits("ok");
+}
+
+static bool seat_test_chord(struct Proc *service, u64 *generation) {
+    struct seat_message m;
+    if (seat_test_key(service, 29, 1, 0) || seat_test_key(service, 56, 1, 0) ||
+            seat_test_key(service, 68, 1, 0)) return false;
+    if (seat_test_key(service, 29, 0, 0) || seat_test_key(service, 56, 0, 0) ||
+            seat_test_key(service, 68, 0, 0)) return false;
+    seat_zero(&m, sizeof(m));
+    if (proc_seat_op(service, SEAT_STATUS, &m) != 0 || m.phase != SEAT_QUIESCING) return false;
+    *generation = m.generation;
+    return true;
+}
+
+static bool seat_test_recover(struct Proc *service, u64 generation) {
+    struct seat_message m;
+    seat_zero(&m, sizeof(m));
+    m.generation = generation;
+    return proc_seat_op(service, SEAT_RESTORED, &m) == 0 && m.phase == SEAT_NORMAL;
+}
+
+void test_cons_graphical_seat_deadline_and_death(void) {
+    struct ep_fixture f;
+    struct Proc *service = NULL;
+    const char *err = NULL;
+    struct seat_message m;
+    u64 generation = 0;
+    int pid = -1;
+    proc_test_seat_reset();
+    bool setup = ep_setup(&f, true, true);
+    service = proc_alloc();
+#define SEAT_CHECK(test, why) do { if (!(test)) { err = why; goto cleanup; } } while (0)
+    SEAT_CHECK(setup && service, "seat fixture");
+    SEAT_CHECK(proc_set_seat_service(service) == 0, "service");
+
+    // (1) QUIESCING: a takeover the backend never acknowledges.
+    SEAT_CHECK(seat_test_chord(service, &generation), "chord");
+    proc_test_seat_expire();
+    seat_zero(&m, sizeof(m));
+    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(service, SEAT_ACK, &m) == -1 && !cons_episode_active(),
+               "an expired quiesce cannot be acknowledged");
+    SEAT_CHECK(proc_seat_op(service, SEAT_STATUS, &m) == 0 && m.phase == SEAT_FAILED,
+               "an expired quiesce fails the seat");
+    SEAT_CHECK(seat_test_recover(service, generation), "recovered from the quiesce timeout");
+
+    // (2) EXCLUSIVE: a prompt left open. Corvus is the one that notices, and
+    //     the queued secret is gone before anyone can read it.
+    SEAT_CHECK(seat_test_open(service, f.trusted, &generation) && cons_episode_active(), "episode opens");
+    SEAT_CHECK(seat_test_key(service, 30, 1, 's') == 0 && seat_test_key(service, 30, 0, 0) == 0,
+               "a secret is queued");
+    proc_test_seat_expire();
+    seat_zero(&m, sizeof(m));
+    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(f.trusted, SEAT_KEY, &m) == -1, "an expired episode yields no key");
+    SEAT_CHECK(!cons_episode_active(), "the expiry closed the seat's episode");
+    SEAT_CHECK(proc_seat_op(service, SEAT_STATUS, &m) == 0 && m.phase == SEAT_FAILED, "and failed the seat");
+    SEAT_CHECK(seat_test_recover(service, generation), "recovered from the prompt timeout");
+    SEAT_CHECK(seat_test_open(service, f.trusted, &generation), "the next episode opens");
+    seat_zero(&m, sizeof(m));
+    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(f.trusted, SEAT_KEY, &m) == 0 && m.length == 0,
+               "the expired episode's secret did not survive into the next");
+
+    // (3) RESTORING: a backend that never reports the repaint.
+    SEAT_CHECK(proc_console_episode(f.trusted, SYS_CONSOLE_EPISODE_END) == 0, "end");
+    SEAT_CHECK(proc_seat_op(service, SEAT_STATUS, &m) == 0 && m.phase == SEAT_RESTORING, "restoring");
+    proc_test_seat_expire();
+    SEAT_CHECK(proc_seat_op(service, SEAT_STATUS, &m) == 0 && m.phase == SEAT_FAILED,
+               "an expired restore fails the seat");
+    SEAT_CHECK(seat_test_recover(service, generation), "recovered from the restore timeout");
+
+    // (4) The CLIENT dies mid-episode, through the real chokepoint.
+    g_epd_state = 0;
+    g_seat_child = NULL;
+    pid = rfork(RFPROC, seat_child, (void *)(long)EPD_ROLE_SEAT_CLIENT);
+    SEAT_CHECK(pid > 0, "rfork(client child)");
+    TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_epd_state, __ATOMIC_ACQUIRE) != 0);
+    SEAT_CHECK(g_epd_state == 1, "the child bound as the seat client");
+    seat_zero(&m, sizeof(m));
+    SEAT_CHECK(proc_seat_op(service, SEAT_CLIENT, &m) == 0 && m.code == (u32)pid, "the service sees it");
+    SEAT_CHECK(seat_test_open(service, f.trusted, &generation) && cons_episode_active(), "episode over a live client");
+    __atomic_store_n(&g_epd_state, 2, __ATOMIC_RELEASE);
+    SEAT_CHECK(epd_reap(pid) == pid, "reaped the client child");
+    pid = -1;
+    SEAT_CHECK(proc_seat_op(service, SEAT_STATUS, &m) == 0 && m.phase == SEAT_FAILED,
+               "the client's death failed the episode");
+    SEAT_CHECK(!cons_episode_active(), "and closed it");
+    seat_zero(&m, sizeof(m));
+    SEAT_CHECK(proc_seat_op(service, SEAT_CLIENT, &m) == 0 && m.sequence == 0 && m.code == 0,
+               "no dangling client");
+    SEAT_CHECK(proc_set_seat_client(f.owner) == -1, "no client binds a failed seat");
+    SEAT_CHECK(seat_test_recover(service, generation), "recovered from the client's death");
+    SEAT_CHECK(proc_set_seat_client(f.owner) == 0, "a replacement client binds once the seat is NORMAL");
+cleanup:
+    if (pid > 0) { __atomic_store_n(&g_epd_state, 2, __ATOMIC_RELEASE); (void)epd_reap(pid); }
+    proc_test_seat_reset();
+    ep_teardown(&f);
+    if (service) { service->state = PROC_STATE_ZOMBIE; proc_free(service); }
+    TEST_ASSERT(err == NULL, err ? err : "graphical seat deadline and death");
+#undef SEAT_CHECK
+}
+
+// The SERVICE dies mid-episode: the episode closes, the seat is FAILED with no
+// owner, and nothing a survivor holds can drive it (the ops are service-gated).
+void test_cons_graphical_seat_service_death(void);
+void test_cons_graphical_seat_service_death(void) {
+    struct ep_fixture f;
+    const char *err = NULL;
+    struct seat_message m;
+    u64 generation = 0;
+    int pid = -1;
+    proc_test_seat_reset();
+    bool setup = ep_setup(&f, true, true);
+#define SEAT_CHECK(test, why) do { if (!(test)) { err = why; goto cleanup; } } while (0)
+    SEAT_CHECK(setup, "seat fixture");
+    g_epd_state = 0;
+    g_seat_child = NULL;
+    pid = rfork(RFPROC, seat_child, (void *)(long)EPD_ROLE_SEAT_SERVICE);
+    SEAT_CHECK(pid > 0, "rfork(service child)");
+    TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_epd_state, __ATOMIC_ACQUIRE) != 0);
+    struct Proc *service = __atomic_load_n(&g_seat_child, __ATOMIC_ACQUIRE);
+    SEAT_CHECK(g_epd_state == 1 && service && proc_is_seat_service(service), "the child bound as the service");
+    SEAT_CHECK(seat_test_open(service, f.trusted, &generation) && cons_episode_active(), "episode over a live service");
+    __atomic_store_n(&g_epd_state, 2, __ATOMIC_RELEASE);
+    SEAT_CHECK(epd_reap(pid) == pid, "reaped the service child");
+    pid = -1;
+    SEAT_CHECK(!cons_episode_active(), "the service's death closed its episode");
+    seat_zero(&m, sizeof(m));
+    SEAT_CHECK(proc_seat_op(f.trusted, SEAT_QUERY, &m) == 0 && m.phase == SEAT_FAILED,
+               "Corvus reads a failed seat");
+    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(f.trusted, SEAT_RESTORED, &m) == -1 && proc_seat_op(f.owner, SEAT_RESTORED, &m) == -1,
+               "no survivor recovers an ownerless seat");
+    // The refusal must be the SEAT's: with the serial posture enabled, the
+    // same BREAK opens an episode the moment the seat is NORMAL again.
+    (void)proc_test_serial_sak(1);
+    SEAT_CHECK(!proc_console_sak() && !cons_episode_active(),
+               "and serial cannot take over a failed graphical seat");
+    proc_test_seat_reset();
+    SEAT_CHECK(proc_console_sak() && cons_episode_active(), "control: the same BREAK opens over a NORMAL seat");
+    SEAT_CHECK(proc_console_episode(f.trusted, SYS_CONSOLE_EPISODE_END) == 0, "control episode ends");
+cleanup:
+    if (pid > 0) { __atomic_store_n(&g_epd_state, 2, __ATOMIC_RELEASE); (void)epd_reap(pid); }
+    (void)proc_test_serial_sak(1);
+    proc_test_seat_reset();
+    ep_teardown(&f);
+    TEST_ASSERT(err == NULL, err ? err : "graphical seat service death");
+#undef SEAT_CHECK
+}

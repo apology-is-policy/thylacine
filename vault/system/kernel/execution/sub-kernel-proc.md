@@ -29,7 +29,13 @@ A failed seat returns to normal through SEAT_RESTORED, which releases nothing
 because the failure already zeroed the grant identity. The attention chord is
 scanned here (`seat_attention_held`: Control + Alt + Delete or F10). Episode
 transitions, pending-grant commit/cancellation and death serialize under the
-process-table lock. See [[abi-trusted-seat]] and [[sub-lictor]].
+process-table lock. The three phase deadlines (5 s quiesce, 90 s exclusive, 5 s
+restoring) are checked LAZILY, at the next seat operation by the service or
+Corvus -- there is no kernel timer, so a seat whose two operators are both
+wedged stays frozen on the trusted scene: fail-closed for I-27, and an
+availability loss only if TCB processes hang. `proc_test_seat_expire`
+(KERNEL_TESTS only) zeroes the deadline so the suite can reach the three expiry
+arms without waiting out wall clock. See [[abi-trusted-seat]] and [[sub-lictor]].
 
 ## Purpose
 

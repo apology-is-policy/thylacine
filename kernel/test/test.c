@@ -719,6 +719,8 @@ void test_cons_episode_repeat_sak_idempotent(void);
 void test_cons_episode_gate(void);
 void test_cons_graphical_seat_gate(void);
 void test_cons_graphical_seat_grant_and_failure(void);
+void test_cons_graphical_seat_deadline_and_death(void);
+void test_cons_graphical_seat_service_death(void);
 void test_cons_episode_relinquish_ends(void);
 void test_cons_episode_trusted_death_ends(void);
 void test_cons_episode_saved_owner_death(void);
@@ -1102,6 +1104,7 @@ void test_devsrv_srv_peer_dead_peer(void);
 void test_devsrv_srv_peer_renderer_flag(void);
 void test_devsrv_srv_peer_gate(void);
 void test_devsrv_srv_peer_bad_args(void);
+void test_devsrv_seat_import_gates(void);
 void test_srv_client_no_per_proc_cap(void);
 void test_srv_client_byte_mode_propagates_to_conn(void);
 void test_srv_client_byte_mode_conn_dispatch(void);
@@ -1577,6 +1580,7 @@ void test_sys_spawn_with_perms_holder_delegates_may_post(void);
 void test_sys_spawn_with_perms_console_trusted_not_delegable(void);
 void test_sys_spawn_with_perms_console_owner_grant_gate(void);
 void test_sys_spawn_with_perms_console_owner_set_wiring(void);
+void test_sys_spawn_with_perms_seat_roles(void);
 void test_sys_spawn_with_perms_renderer_gate(void);   // G-4
 void test_sys_spawn_full_argv_no_argv_acts_as_spawn_with_perms(void);
 void test_sys_spawn_full_argv_golden_argc4(void);
@@ -2505,6 +2509,8 @@ struct test_case g_tests[] = {
                                        test_cons_episode_repeat_sak_idempotent, false, NULL },
     { "cons.graphical_seat_gate", test_cons_graphical_seat_gate, false, NULL },
     { "cons.graphical_seat_grant_and_failure", test_cons_graphical_seat_grant_and_failure, false, NULL },
+    { "cons.graphical_seat_deadline_and_death", test_cons_graphical_seat_deadline_and_death, false, NULL },
+    { "cons.graphical_seat_service_death", test_cons_graphical_seat_service_death, false, NULL },
     { "cons.episode_gate",             test_cons_episode_gate,             false, NULL },
     { "cons.episode_relinquish_ends",  test_cons_episode_relinquish_ends,  false, NULL },
     { "cons.episode_trusted_death_ends",
@@ -2836,6 +2842,7 @@ struct test_case g_tests[] = {
     { "devsrv.srv_peer_renderer_flag", test_devsrv_srv_peer_renderer_flag, false, NULL },
     { "devsrv.srv_peer_gate",          test_devsrv_srv_peer_gate,          false, NULL },
     { "devsrv.srv_peer_bad_args",      test_devsrv_srv_peer_bad_args,      false, NULL },
+    { "devsrv.seat_import_gates",      test_devsrv_seat_import_gates,      false, NULL },
     { "srv_client.no_per_proc_cap",
                                        test_srv_client_no_per_proc_cap,
                                                                            false, NULL },
@@ -3507,6 +3514,7 @@ struct test_case g_tests[] = {
     { "sys_spawn_with_perms.console_trusted_not_delegable", test_sys_spawn_with_perms_console_trusted_not_delegable, false, NULL },
     { "sys_spawn_with_perms.console_owner_grant_gate",  test_sys_spawn_with_perms_console_owner_grant_gate,  false, NULL },
     { "sys_spawn_with_perms.console_owner_set_wiring",  test_sys_spawn_with_perms_console_owner_set_wiring,  false, NULL },
+    { "sys_spawn_with_perms.seat_roles", test_sys_spawn_with_perms_seat_roles, false, NULL },
     { "sys_spawn_with_perms.renderer_gate",             test_sys_spawn_with_perms_renderer_gate,             false, NULL },
     { "sys_spawn_full_argv.no_argv_acts_as_spawn_with_perms", test_sys_spawn_full_argv_no_argv_acts_as_spawn_with_perms, false, NULL },
     { "sys_spawn_full_argv.golden_argc4",              test_sys_spawn_full_argv_golden_argc4,              false, NULL },

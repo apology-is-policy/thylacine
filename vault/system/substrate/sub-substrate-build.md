@@ -60,6 +60,18 @@ inputs, while `forage.sh` resolves and checks those inputs before a build.
 silently substitute downloaded bytes for a pinned archive. DOSBox and game
 baking follow the same configured input path as the existing toolchain.
 
+An input the manifest does not declare is invisible twice over: `forage.sh
+status` cannot report it missing, and whatever it feeds degrades without a
+word. The static Linux git (`/viv/bin`, and the git-probe / git-net /
+git-workflow bundles) was such an input until 2026-09-21 -- present only in one
+worktree's `build/cache`, hinted at by `build.sh` as a forage target that did
+not exist, and claimed as one by `docs/GIT-ON-THYLACINE.md`. `git-shell` had
+failed 3/3 on main for eleven days as a result, with a timeout that read like a
+broken git, because ut reports a missing command only in `$status`. It is now
+`remote.static_git`: a `remote-pull` from the Pi that built it, sha-pinned, and
+`do_remote_pull` verifies the pin of any pulled FILE (a pulled tree has none).
+The gate SKIPs on an image without it.
+
 **`build.sh kernel` is `build.sh all`, and this is the tree's most-repeated
 footgun.** It pulls the whole chain including a pool re-bake driven by the
 *ambient environment* — so running it without carrying `THYLACINE_BAKE_CLADE`

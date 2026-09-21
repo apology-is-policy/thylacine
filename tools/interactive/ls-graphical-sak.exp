@@ -7,6 +7,11 @@ source [file join [file dirname [info script]] lib.exp]
 set repo $lc_repo
 set qmp [lc_qmp_sock]
 
+# The whole serial stream, for the one witness that lands before the login
+# prompt and is therefore scanned past by the time anything can expect it.
+set transcript /tmp/ls-graphical-sak-[pid].log
+catch {file delete -force $transcript}
+log_file -a $transcript
 
 proc key {chord} {
     global repo qmp
@@ -59,7 +64,14 @@ expect {
 lc_raw_send "correct-horse-battery-staple-v1\r" "login password"
 expect {
     -ex "login: session compositor (halcyond) spawned" {}
-    -ex "Thylacine textual shell" { lc_fail "requires HALCYON_SESSION=y image" }
+    -ex "Thylacine textual shell" {
+        # A lever the image lacks is a SKIP, never a FAIL: a full fleet run on
+        # the gate image must not be red for a reason that is not a defect.
+        puts "\nLS-CI SKIP: default (ut) image -- this scenario drives the session\
+ compositor. Bake with: THYLACINE_HALCYON_SESSION=1 THYLACINE_HALCYON_PROFILE=instrument tools/build.sh kernel --config ci"
+        lc_quit
+        exit 77
+    }
     timeout { lc_fail "no graphical session" }
     eof { lc_fail "EOF at session start" }
 }
@@ -134,5 +146,15 @@ lc_expect "corvus: imperium: DECLINED at the prompt" "operator cancellation"
 after 1000
 witness cancelled
 capture final
+# Test builds start the GPU wire fence sequence just short of its rewind point
+# (usr/lictor/src/fence.rs), so a session that reached the desktop has crossed
+# a REAL rewind against the real device, and every present, takeover and
+# restore above ran on rewound ids. Without the rewind the engine latches dead
+# at 2^32 commands; without this line the rewind is only a host-tested policy.
+if {[catch {exec grep -a -q {lictor: gpu fence sequence rewound at [0-9]* (device idle)} $transcript}]} {
+    lc_fail "the GPU fence sequence never rewound: no rewind line in the transcript"
+}
+lc_pass "the wire fence sequence rewound while the device was idle, and the scenario ran on the rewound ids"
+catch {file delete -force $transcript}
 lc_pass "graphical SAK: empty, confer, real DAC authority, abdicate, wrong key, cancel"
 lc_quit

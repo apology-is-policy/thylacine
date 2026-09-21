@@ -646,3 +646,18 @@ func TestMCPToolLayer(t *testing.T) {
 		t.Fatalf("vault_query_findings: %q", out)
 	}
 }
+
+// A `code:` entry naming a DIRECTORY must fail: it exists, so the plain
+// existence check passed it, and it owns nothing. The control is the same
+// fixture with the file claim it ships with.
+func TestCodeDirectoryClaimFails(t *testing.T) {
+	root := fixture(t)
+	reg, _ := loadRegistry(root)
+	if bad := checkCodePaths(reg); len(bad) != 0 {
+		t.Fatalf("control: the file claim must pass, got %v", bad)
+	}
+	mutate(t, root, "vault/system/t/sub-t-x.md", "code: [kernel/t.c]", "code: [kernel]")
+	reg, _ = loadRegistry(root)
+	wantFailContaining(t, checkCodePaths(reg), "is a directory")
+}
+

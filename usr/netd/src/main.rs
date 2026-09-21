@@ -416,7 +416,7 @@ impl Driver for NetD {
 
         let close = server::close_retirement_selftest(base);
         if close == "PASS" {
-            say!("netd: TCP retirement PASS (admission bound, queued data retained, deadline, handshake close)");
+            say!("netd: TCP retirement PASS (admission bound, queued data retained, deadline, handshake close, TIME-WAIT yields and nothing else does)");
         } else {
             say!("netd: TCP retirement FAIL ({})", close);
             return Err(Error::Hardware);

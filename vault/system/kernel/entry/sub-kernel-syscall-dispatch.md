@@ -24,7 +24,11 @@ the native ceiling is 123. [[abi-trusted-seat]] and [[abi-native-nonblock]] pin
 the mirrors. TRUSTED_SEAT snapshots the bounded 544-byte envelope before taking
 the process lock, scrubs temporary key material and validates copyout. SEAT_IMPORT
 checks the bound service, owned live peer connection and DMA allowance before
-claiming that peer's weave/GPU-BO share. SET_NONBLOCK calls
+claiming that peer's weave/GPU-BO share; its body is `sys_seat_import_for_proc`
+(the `sys_weft_share_for_proc` shape) so the suite drives every refusal arm
+with synthetic Procs. The order is load-bearing: both IDENTITY gates (designated
+service, `CAP_HW_CREATE`) run before the claim, because the claim consumes the
+share -- a stranger must never be able to burn one. SET_NONBLOCK calls
 `handle_set_nonblock`, the same helper the phenotype's fcntl(F_SETFL) uses, so
 one function owns the flag word's lock-domain rules; a non-Spoor fd is a no-op
 success, as there.

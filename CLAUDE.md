@@ -493,7 +493,7 @@ names).
 | # | Invariant (condensed) | Validation |
 |---|---|---|
 | I-1 | Territory operations in Proc A don't affect Proc B | `territory.tla` |
-| I-2 | Fork-grantable caps monotonically reduce; `CAP_ELEVATION_ONLY` stripped at every fork; growth only via the `cap` device (HOSTOWNER console-gated; clearance corvus-side-gated). **The set is SIX bits — HOSTOWNER+DAC_OVERRIDE+CHOWN+KILL+DEBUG+JIT — and this row said four until 2026-09-10; re-derive from `caps.h:193`, never from a prose list.** `CAP_POST_SERVICE` (bit 12) is DESIGNED as the seventh (IMPERIUM-DESIGN §6.5), unbuilt | `handles.tla` |
+| I-2 | Fork-grantable caps monotonically reduce; `CAP_ELEVATION_ONLY` stripped at every fork; growth only via the `cap` device (HOSTOWNER console-gated; clearance corvus-side-gated). **The set is EIGHT bits — HOSTOWNER+DAC_OVERRIDE+CHOWN+KILL+DEBUG+JIT+AUDIO_GRAPH (bit 12)+POST_SERVICE (bit 13, IMPERIUM-DESIGN §6.5, built 2026-09-17) — and this row said four until 2026-09-10 and six until 2026-09-21; re-derive from the `CAP_ELEVATION_ONLY` define in `caps.h`, never from a prose list (this one included).** | `handles.tla` |
 | I-3 | Mount points form a DAG, never a cycle | `territory.tla` |
 | I-4 | Handles transfer between Procs only via 9P sessions (no direct-transfer syscall; the positive 9P path is still future) | `handles.tla` |
 | I-5 | `KObj_MMIO`/`KObj_IRQ`/`KObj_DMA` (and `KObj_Loom`) non-transferable. ONE kernel-mediated exception since 2026-09-21: `SYS_SEAT_IMPORT` pins a weave/GPU-BO buffer into the boot-designated trusted seat service from its accepted connection peer's share -- a refcount pin in a new handle, never a caller PA, never MMIO/IRQ/PCI (ARCH section 28 I-5) | `handles.tla` + static_asserts + the `seat` kernel tests |

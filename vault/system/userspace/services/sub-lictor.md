@@ -3,7 +3,36 @@ id: sub-lictor
 type: sub
 title: "Lictor - the trusted graphical seat and normal hardware broker"
 parent: moc-userspace
-code: [usr/lictor, kernel/include/thylacine/seat.h, usr/caps-probe]
+code:
+  - usr/caps-probe/Cargo.toml
+  - usr/caps-probe/src/main.rs
+  - usr/lictor/Cargo.toml
+  - usr/lictor/src/backend/device.rs
+  - usr/lictor/src/backend/gpu.rs
+  - usr/lictor/src/backend/import.rs
+  - usr/lictor/src/backend/input.rs
+  - usr/lictor/src/backend/mod.rs
+  - usr/lictor/src/backend/screen.rs
+  - usr/lictor/src/backend/seat.rs
+  - usr/lictor/src/backend/server.rs
+  - usr/lictor/src/endpoint.rs
+  - usr/lictor/src/fence.rs
+  - usr/lictor/src/framing.rs
+  - usr/lictor/src/gpu_api.rs
+  - usr/lictor/src/keymap.rs
+  - usr/lictor/src/lib.rs
+  - usr/lictor/src/limits.rs
+  - usr/lictor/src/main.rs
+  - usr/lictor/src/model.rs
+  - usr/lictor/src/objects.rs
+  - usr/lictor/src/proxy/gpu.rs
+  - usr/lictor/src/proxy/input.rs
+  - usr/lictor/src/proxy/mod.rs
+  - usr/lictor/src/render.rs
+  - usr/lictor/src/rpc_client.rs
+  - usr/lictor/src/skein.rs
+  - usr/lictor/src/wire.rs
+  - kernel/include/thylacine/seat.h
 audit: hard
 guarded-by: [inv-i1, inv-i2, inv-i5, inv-i9, inv-i27, inv-i34, inv-i40, inv-i45]
 validated-by: [prose]
@@ -162,7 +191,23 @@ visibility acknowledgement, held-key restoration and pending-grant cancellation;
 operation, its commit at RESTORED, its cancellation by a failure and the
 recovery that releases nothing, and pins that a seat failure leaves a serial
 episode open (sabotage-verified: without the ownership check exactly that
-assertion fails, 1572 of 1573).
+assertion fails, 1572 of 1573). `cons.graphical_seat_deadline_and_death`
+expires each of the three deadlines through a test seam (they are 5 s / 90 s
+of wall clock) -- a quiesce never acknowledged, a prompt left open whose queued
+secret must not survive into the next episode, a restore never reported -- and
+kills the CLIENT mid-episode through the real ZOMBIE chokepoint (failed,
+episode closed, no dangling client, no bind to a failed seat, a replacement
+binds once it is NORMAL). `cons.graphical_seat_service_death` does the same to
+the SERVICE, with a positive control one variable away so the "serial cannot
+take over a failed seat" refusal cannot be satisfied by a disabled serial
+posture. `devsrv.seat_import_gates` drives every refusal arm of
+`SYS_SEAT_IMPORT`: not the designated service, no `CAP_HW_CREATE`, not a
+connection, the CONFUSED DEPUTY (a share is importable only through its
+owner's connection), a dead peer, ANON, plain DMA, over the service's I-34
+DMA allowance; that an identity refusal consumes nothing; and the import as a
+pin -- the peer tears its whole side down and the chunk lives exactly as long
+as the service holds the handle. `sys_spawn_with_perms.seat_roles` pins who
+may confer the three seat roles and the ordered first-come bind.
 These tests are blind to actual scanout/input timing and backend DMA isolation;
 QEMU end-to-end qualification and real screenshots are separate evidence. No
 Pi hardware qualification is claimed.
@@ -184,13 +229,28 @@ review by a different agent followed on 2026-09-21, also in-session by operator
 direction (memory/audit_lictor_closed_list.md); it is context-independent of
 the author but it is not a separate prosecutor run.
 
+Closed after that review, before the merge: the fence exhaustion. One monotone
+32-bit sequence latched the engine dead at 2^32 commands -- weeks of uptime.
+The id was doing two jobs, so it is now two sequences (`usr/lictor/src/fence.rs`,
+`backend/gpu.rs`). The WIRE id is what the device echoes: legacy virgl
+callbacks carry 32 bits and the device retires a legacy-fenced command when
+`its id <= the signalled id`, so the only rule is monotonicity AMONG COMMANDS IN
+FLIGHT -- and the sequence rewinds to 1 once it has passed 2^31 and the device
+holds no chain at all (no tagged fence, no abandoned chain still to retire, no
+synchronous chain in its window). The OWNER id is what a fenced command's
+submitter is told and what its completion carries back: a u64 that is never
+reused, so nothing that matches a completion to a request (the compositor's
+readback record does, by equality) can alias across a rewind. The batched pair
+samples idleness ONCE: its second id is taken as busy, because the first is
+about to be in flight beside it and no flag shows that yet. Clients are
+unaffected either way -- their ledgers count completions, they never compare
+ids. Test builds start the wire sequence 64 short of the rewind point, so
+every gate that reaches the desktop has crossed a real rewind on the real
+device; `ls-graphical-sak` asserts the witness line. A device that is never
+once idle across the last 2^31 ids still fails closed.
+
 Open after that review:
 
-- Fence ids are one monotone 32-bit sequence shared by synchronous and fenced
-  commands, and exhaustion latches the engine dead. At desktop command rates
-  that is weeks of uptime. A reset of the sequence while no work is in flight
-  is the intended cure; it is not built because it cannot be exercised without
-  a lever that starts the sequence near the limit.
 - `test-mode` is a default cargo feature of `lictor` and `tapestryd`; a
   production compile without it has not been verified.
 - A display smaller than 800x720 refuses the whole seat at startup. There is no

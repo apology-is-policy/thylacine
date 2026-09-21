@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/NET-DESIGN.md", "docs/NET-THROUGHPUT.md", "docs/NET-CLOSE-DESIGN.md"]
 created: 2026-07-31
-updated: 2026-09-17
+updated: 2026-09-21
 ---
 ## Purpose
 
@@ -32,7 +32,9 @@ TCP transports' RX/TX buffers, with headroom for bounded 9P connections,
 non-TCP buffers, stack metadata and DNS. Private retirement is driven by
 `Net::poll` before and after stack progress; `poll_delay_ms` also includes
 retirement expiry. The new deterministic close controls fail startup if
-queued data, admission, mapping cleanup or deadline invariants fail. See
+queued data, admission, mapping cleanup or deadline invariants fail -- and,
+since 2026-09-21, if a retiree other than a TIME-WAIT one ever yields to
+admission or a TIME-WAIT one fails to. See
 [[sub-netd-server]] and `docs/NET-CLOSE-DESIGN.md`.
 
 - **`NetD::probe(res)`** — fail-closed identity gate: the grant's
