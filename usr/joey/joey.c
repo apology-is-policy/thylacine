@@ -7353,6 +7353,19 @@ int main(void) {
                 t_putstr("joey: devhw pre-pivot t_open(/hw) FAILED\n");
                 return 1;
             }
+            // /hw/pci (devpci) is mounted INSIDE the devhw tree, on its synthetic
+            // `pci` child. The pivot sheds every boot-generation mount (ARCH
+            // 9.6.10), and re-grafting /hw alone would leave /hw/pci an empty
+            // stub -- it only ever worked post-pivot by accident, because the
+            // orphaned boot entry was keyed on a directory the re-graft made
+            // reachable again. Same idiom as the rest: O_PATH crosses to the
+            // devpci root. The kernel boot-mounts it unconditionally (an empty
+            // PCI root on a machine with no functions), so a failure is a fault.
+            long pci_dev_h = t_open(T_WALK_OPEN_FROM_ROOT, "/hw/pci", 7, T_OPATH);
+            if (pci_dev_h < 0) {
+                t_putstr("joey: devpci pre-pivot t_open(/hw/pci) FAILED\n");
+                return 1;
+            }
             // Go Stage 4b: /env (devenv: the per-Proc environment device). The
             // kernel boot-mounts it for the pre-pivot ladder, but the post-pivot
             // toolchain (go reads $GOROOT/$GOCACHE/... via goenvs) is the first
@@ -7482,6 +7495,13 @@ int main(void) {
                 }
             }
             (void)t_close(hw_dev_h);
+            // ...and /hw/pci inside it (see the pre-pivot open above). The point
+            // is devhw's own `pci` child, reached through the /hw just grafted.
+            if (t_mount("/hw/pci", 7, pci_dev_h, T_MREPL) != 0) {
+                t_putstr("joey: devpci post-pivot t_mount(/hw/pci) FAILED\n");
+                return 1;
+            }
+            (void)t_close(pci_dev_h);
             // Go Stage 4b: re-establish /env on the pivoted root (mirror /dev).
             // The post-pivot Go toolchain's goenvs reads it for $GOROOT et al.
             {

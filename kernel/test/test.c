@@ -1464,7 +1464,14 @@ void test_territory_pivot_root_smoke(void);
 void test_territory_pivot_root_rejects_no_initial_root(void);
 void test_territory_pivot_root_idempotent_same_spoor(void);
 void test_territory_pivot_root_null_source_rejected(void);
-void test_territory_pivot_root_does_not_touch_mounts(void);
+void test_territory_pivot_root_keeps_reachable_mount(void);
+void test_territory_shed_pivot_drops_unreachable(void);
+void test_territory_shed_chroot_drops_unreachable(void);
+void test_territory_shed_keeps_transitive(void);
+void test_territory_shed_per_walker_dev_matched_on_dc(void);
+void test_territory_shed_same_root_is_a_noop(void);
+void test_territory_shed_preserves_union_order(void);
+void test_territory_shed_clone_before_pivot_unaffected(void);
 void test_pipe_smoke(void);
 void test_pipe_read_on_empty_returns_zero(void);
 void test_pipe_write_to_full_returns_zero(void);
@@ -1952,7 +1959,14 @@ struct test_case g_tests[] = {
     { "territory.pivot_root_rejects_no_initial_root",     test_territory_pivot_root_rejects_no_initial_root,     false, NULL },
     { "territory.pivot_root_idempotent_same_spoor",       test_territory_pivot_root_idempotent_same_spoor,       false, NULL },
     { "territory.pivot_root_null_source_rejected",        test_territory_pivot_root_null_source_rejected,        false, NULL },
-    { "territory.pivot_root_does_not_touch_mounts",       test_territory_pivot_root_does_not_touch_mounts,       false, NULL },
+    { "territory.pivot_root_keeps_reachable_mount",       test_territory_pivot_root_keeps_reachable_mount,       false, NULL },
+    { "territory.shed_pivot_drops_unreachable",           test_territory_shed_pivot_drops_unreachable,           false, NULL },
+    { "territory.shed_chroot_drops_unreachable",          test_territory_shed_chroot_drops_unreachable,          false, NULL },
+    { "territory.shed_keeps_transitive",                  test_territory_shed_keeps_transitive,                  false, NULL },
+    { "territory.shed_per_walker_dev_matched_on_dc",      test_territory_shed_per_walker_dev_matched_on_dc,      false, NULL },
+    { "territory.shed_same_root_is_a_noop",               test_territory_shed_same_root_is_a_noop,               false, NULL },
+    { "territory.shed_preserves_union_order",             test_territory_shed_preserves_union_order,             false, NULL },
+    { "territory.shed_clone_before_pivot_unaffected",     test_territory_shed_clone_before_pivot_unaffected,     false, NULL },
     { "handles.alloc_close_smoke",     test_handles_alloc_close_smoke,     false, NULL },
     { "handles.rights_monotonic",      test_handles_rights_monotonic,      false, NULL },
     { "handles.dup_lifecycle",         test_handles_dup_lifecycle,         false, NULL },

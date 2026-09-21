@@ -350,6 +350,11 @@ struct Dev devenv = {
     // a visible, deliberate decision, not an implicit zero-init default.
     .perm_enforced = false,
 
+    // devenv_walk stamps the CALLER's Env devno (even on the 0-element mount
+    // cross), so a Spoor inside /env does not share a devno with the /env
+    // mount source. Declared for the mount-table shed (ARCH 9.6.10).
+    .devno_per_walker = true,
+
     .reset    = devenv_reset,
     .init     = devenv_init,
     .shutdown = devenv_shutdown,

@@ -34,10 +34,21 @@ sleep 1
 
 lc_send "viv run /vivarium/alpine-ash"
 set p0 [r5_prompt "viv run (first prompt)" 30]
+# Fail AT the cause: every later leg presupposes a running container.
+if {!$p0} { lc_fail "viv never gave an interactive ash prompt" }
 
-# CONTROL 0: the shell answers.
-lc_send "echo ash-alive-0 | tr a-z A-Z"
-lc_expect "ASH-ALIVE-0" "control 0: ash answers"
+# The controls must be answerable ONLY by the container. Until 2026-09-21 they
+# were `echo ash-alive-N | tr a-z A-Z`, which the hosted ut answers just as
+# well: when `viv run` failed to start (the Territory mount table was full), the
+# OUTER shell passed every control and the scenario went red three legs later
+# on a symptom that named nothing. `uname -s` is the phenotype's own answer --
+# ash says Linux, ut says Thylacine -- folded into each leg's unique token.
+# ($(...) is evaluated by whichever shell reads the line, so a host shell can
+# not produce the -LINUX suffix even by accident.)
+#
+# CONTROL 0: the shell answers, and it is the container's shell.
+lc_send "echo ash-alive-0-\$(uname -s) | tr a-z A-Z"
+lc_expect "ASH-ALIVE-0-LINUX" "control 0: the CONTAINER's ash answers (viv really started)"
 r5_prompt "control 0" 10
 
 # A: ^C at the PROMPT, twice.
@@ -45,8 +56,8 @@ send "\x03"; sleep 1
 set a1 [r5_prompt "^C #1 at the prompt" 10]
 send "\x03"; sleep 1
 set a2 [r5_prompt "^C #2 at the prompt" 10]
-lc_send "echo ash-alive-a | tr a-z A-Z"
-lc_expect "ASH-ALIVE-A" "control A: ash still answers"
+lc_send "echo ash-alive-a-\$(uname -s) | tr a-z A-Z"
+lc_expect "ASH-ALIVE-A-LINUX" "control A: the container's ash still answers"
 r5_prompt "control A" 10
 
 # B: ^C inside the read builtin (a cooked read; SIGINT -> onsig -> raise_interrupt -> longjmp).
@@ -61,23 +72,22 @@ if {!$b2} {
     send "\r"; sleep 1
     r5_prompt "Enter to satisfy the stuck read" 10
 }
-lc_send "echo ash-alive-b | tr a-z A-Z"
-lc_expect "ASH-ALIVE-B" "control B: ash still answers"
+lc_send "echo ash-alive-b-\$(uname -s) | tr a-z A-Z"
+lc_expect "ASH-ALIVE-B-LINUX" "control B: the container's ash still answers"
 r5_prompt "control B" 10
 
 # C: a foreground sleep + ^C (sleep dies SIG_DFL either way -- a sanity leg).
 lc_send "sleep 20"; sleep 1
 send "\x03"; sleep 1
 set c1 [r5_prompt "^C on a foreground sleep" 10]
-lc_send "echo ash-alive-c | tr a-z A-Z"
-lc_expect "ASH-ALIVE-C" "control C: ash still answers"
+lc_send "echo ash-alive-c-\$(uname -s) | tr a-z A-Z"
+lc_expect "ASH-ALIVE-C-LINUX" "control C: the container's ash still answers"
 r5_prompt "control C" 10
 
 lc_step "RESULT: first-prompt=$p0 | prompt-^C #1=$a1 #2=$a2 | read-^C #1=$b1 #2=$b2 | sleep-^C=$c1  (1 = prompt returned, 0 = no prompt within the window)"
 # item 8 (11b-9p) hard gates. The first prompt-^C is the headline; the rest also
 # gate the R5-F9 longjmp wedge (a second ^C after a longjmp'd handler must still
 # be delivered). Pre-11b-9p any of these is 0 (the note delivers a line late).
-if {!$p0} { lc_fail "viv never gave an interactive ash prompt" }
 if {!$a1} { lc_fail "item 8 REGRESSED: first prompt-^C did not reprompt -- the caught note did not interrupt the blocked dev9p read" }
 if {!$a2} { lc_fail "R5-F9 wedge: second prompt-^C not delivered (in_handler stuck after ash's longjmp)" }
 if {!$b1 || !$b2} { lc_fail "^C inside the read builtin not delivered (item 8 / R5-F9 wedge)" }
