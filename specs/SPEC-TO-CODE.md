@@ -798,29 +798,49 @@ SAME deadline. `FlagImpliesReady` and `PollReturnsWhenReady` are retired
 as false by design; `NoSpuriousZero` and `StableReadyReturns` replace
 them.
 
-State universe: one poller, N fds (`Fds`), one timeout. CONSTANTS:
-`HAS_TIMEOUT` (FALSE = poll(-1)), `BUGGY_CHECK_BEFORE_REGISTER`,
-`BUGGY_NO_WAKE`, `BUGGY_LAZY_UNREGISTER`, `BUGGY_CLEAR_AFTER_SAMPLE`,
-`BUGGY_RETURN_ON_WAKE`.
+Audit round 4 of the same day changed the re-arm itself and the spec
+followed first. The pass is now a RE-REGISTRATION (`Rearm` takes every
+hook off, `Resample` is the first scan's install-and-sample again),
+because a Dev that chooses its list by state -- the console's episode
+list -- stranded a hook that persisted across the loop (the list half is
+`cons_poll.tla`'s `BUGGY_NO_REREGISTER`). And the loop owns DEATH and
+STOP (`dying`, `stop_req`, `LoopCheck`, the two parks): `TSleepCommit`
+keeps tsleep's real order -- cond, deadline, stop detour, die-check --
+because that order is the bug; a set flag short-circuits both checks.
+
+State universe: one poller, N fds (`Fds`), one timeout, at most one stop
+request. CONSTANTS: `HAS_TIMEOUT` (FALSE = poll(-1)),
+`BUGGY_CHECK_BEFORE_REGISTER`, `BUGGY_NO_WAKE`, `BUGGY_LAZY_UNREGISTER`,
+`BUGGY_CLEAR_AFTER_SAMPLE`, `BUGGY_RETURN_ON_WAKE`,
+`BUGGY_NO_LOOP_DIE_CHECK`, `BUGGY_NO_LOOP_STOP_CHECK`.
 
 | Config | Flags | Checked | Result | Distinct |
 |---|---|---|---|---|
-| `poll.cfg`                             | all FALSE, `HAS_TIMEOUT`      | `Invariants` | clean | 395 |
-| `poll_notimeout.cfg`                   | `HAS_TIMEOUT=FALSE`           | `Invariants` | clean | 176 |
-| `poll_liveness.cfg`                    | all FALSE, `Spec_Live`        | `Invariants` + `PollTerminates` + `StableReadyReturns` | clean | 395 |
-| `poll_liveness_notimeout.cfg`          | `HAS_TIMEOUT=FALSE`, `Spec_Live` | `Invariants` + `StableReadyReturns` | clean | 176 |
+| `poll.cfg`                             | all FALSE, `HAS_TIMEOUT`      | `Invariants` | clean | 2146 |
+| `poll_notimeout.cfg`                   | `HAS_TIMEOUT=FALSE`           | `Invariants` | clean | 944 |
+| `poll_liveness.cfg`                    | all FALSE, `Spec_Live`        | `Invariants` + `PollTerminates` + `StableReadyReturns` + `DeathTerminates` + `StopHonoured` | clean | 2146 |
+| `poll_liveness_notimeout.cfg`          | `HAS_TIMEOUT=FALSE`, `Spec_Live` | `Invariants` + `StableReadyReturns` + `DeathTerminates` + `StopHonoured` | clean | 944 |
 | `poll_buggy_check_before_register.cfg` | `BUGGY_CHECK_BEFORE_REGISTER` | `NoMissedPoll` | violation | — |
 | `poll_buggy_no_wake.cfg`               | `BUGGY_NO_WAKE`               | `NoMissedPoll` | violation | — |
 | `poll_buggy_lazy_unregister.cfg`       | `BUGGY_LAZY_UNREGISTER`       | `NoStaleHook`  | violation | — |
 | `poll_buggy_clear_after_sample.cfg`    | `BUGGY_CLEAR_AFTER_SAMPLE`    | `NoMissedPoll` | violation | — |
 | `poll_buggy_return_on_wake.cfg`        | `BUGGY_RETURN_ON_WAKE`        | `NoSpuriousZero` | violation | — |
+| `poll_buggy_no_loop_die_check.cfg`     | `BUGGY_NO_LOOP_DIE_CHECK`, poll(-1), `Spec_Live` | `DeathTerminates` | violation | — |
+| `poll_buggy_no_loop_stop_check.cfg`    | `BUGGY_NO_LOOP_STOP_CHECK`, poll(-1), `Spec_Live` | `StopHonoured` | violation | — |
 
 Both liveness properties were shown able to FAIL before being trusted
 (2026-09-21): deleting `EvaluateWake`'s explicit `Expired` test violates
 `PollTerminates` (tsleep prefers a set flag to a passed deadline, so a
 producer that never stops walking the list holds the poller past its
 timeout); `BUGGY_NO_WAKE` under `poll_liveness_notimeout.cfg` violates
-`StableReadyReturns`.
+`StableReadyReturns`. The two round-4 properties fail the same way:
+both buggy cfgs' lassos are a dying (resp. stopped) poller circling
+armed -> woken -> rescanned -> armed while a producer walks a list in
+every window, so no tsleep entry ever finds its flags clear. Bounding the
+model to ONE stop request is load-bearing for `DeathTerminates`: with
+unbounded stop/continue the environment can hold a dying thread in
+tsleep's detour (its stop test precedes its die-check) -- a race the
+debugger must win every time, owned by `debug_stop.tla`.
 
 Spec action ↔ impl mapping:
 
@@ -829,15 +849,17 @@ Spec action ↔ impl mapping:
 | `Register` | `kernel/poll.c::poll_scan_one` (first scan); `kernel/pipe.c::devpipe_poll`; `kernel/srvconn.c::srvconn_poll` (BOTH endpoints, selected by its `client` argument); `kernel/devsrv.c::svc_listener_poll` + `devsrv_poll` + `srv_handle_poll` | `dev->poll(spoor, events, pw)` for KObj_Spoor; `srv_handle_poll(obj, events, pw)` for KObj_Srv. Each installs the hook AND samples readiness in one locked step under the object's lock(s) (`r->lock` for pipe; `c2s.lock` + `s2c.lock` for SrvConn; `g_srv_registry.lock` for SrvService). |
 | `EvaluateFirst` | `kernel/poll.c::sys_poll_for_proc` (the post-scan fast path) | Return on `ready_count > 0` or `timeout_ms == 0`. |
 | `TSleepCommit` | `kernel/poll.c::sys_poll_for_proc` (the `tsleep` on the poller's private rendez with `poll_cond_any_flagged`) | The flag scan + the sleep transition are atomic under the rendez lock; a set flag beats the deadline (tsleep.tla). |
-| `ClearFlags` | `kernel/poll.c::poll_waiter_rearm`, called for every waiter BEFORE the re-sample | Clears `pw->ready` under the hook list's lock, so the clear is serialized against a producer's walk. |
-| `Resample` / `FinalSample` | `kernel/poll.c::sys_poll_for_proc` (the sample-only `poll_scan_one(..., NULL, NULL)` loop) | `dev->poll(c, events, NULL)`: no list op. |
+| `Rearm` | `kernel/poll.c::poll_unhook_all` | `poll_waiter_list_unregister` every hook, THEN `handle_put` every retained ref (the RW-2 2C-F1 order), then clear each `pw->ready` -- unlisted, so no producer can race the clear. |
+| `LoopCheck` / `ParkDeath` / `StopResume` | `kernel/poll.c::sys_poll_for_proc` (the loop's `thread_die_pending` + `proc_stop_requested` -> `proc_stop_sleeper_park`) | With every hook off. `SLEEP_INTR` from the park is `ParkDeath`. |
+| `Resample` / `FinalSample` | `kernel/poll.c::sys_poll_for_proc` (the re-registering `poll_scan_one(..., &waiters[i], &held[i])` loop) | The first scan's install-and-sample again; a TIMEDOUT pass runs the same code (the model folds it into `FinalSample`). |
+| `Die` / `StopRequest` waking a sleeper | `kernel/proc.c::proc_group_terminate`'s cascade; `proc_stop_wake_sleepers_locked` | Wake the private rendez; tsleep re-loops through `TSleepCommit`. |
 | `EvaluateWake` | `kernel/poll.c::sys_poll_for_proc` (the loop tail) | Ready -> return; else the explicit `timer_now_ns() >= deadline_ns` test -> return 0; else `continue` to the tsleep. |
 | `MakeReady(f)` | devpipe: `kernel/pipe.c::devpipe_close` + `devpipe_read` (drain) + `devpipe_write` (append). srvconn: EVERY ring mutation and the teardown — `srvconn_client_send` / `_send_frame` / `_send_blocking` (c2s fill), `srvconn_server_send` / `_send_blocking` (s2c fill), `srvconn_client_recv` (s2c drain), `srvconn_server_recv` / `_recv_blocking` (c2s drain), `srvconn_io_nonblock` (all four), `srvconn_teardown`. devsrv listener: `kernel/devsrv.c::srv_conn_open_for_proc` (push) + `srv_proc_exit_notify` (tombstone) + `srv_registry_reset`. | Every readiness site calls `poll_waiter_list_wake` AFTER releasing the object lock it mutated under. For a SrvConn the one list carries four edges for two endpoints, so each walk is `MakeReady` for some pollers and `OtherEvent` for the rest. |
 | `OtherEvent(f)` | the same walks, seen from a poller that asked about something else | Until 2026-09-21 only the c2s-fill edge and the teardown walked the SrvConn list: a client poller was never woken by its reply, and a nonblocking server polling POLLOUT was never woken by a blocking client drain. |
 | `Retract(f)` | any competing consumer: a second reader of the pipe / the connection | No walk. |
 | `Timeout` | `kernel/sched.c::tsleep` deadline (landed, P5-tsleep) | poll's timeout IS a `tsleep` deadline. |
-| `NoStaleHook` (unregister sweep) | `kernel/poll.c::sys_poll_for_proc` (the `unregister_and_return:` label) | Every exit path goes through the sweep; hooks stay registered ACROSS the re-arm loop and come off only here. |
-| the five `BUGGY_*` | (none) | The disciplines the impl upholds: register-then-observe in every `.poll`; a walk at every readiness site; the unconditional sweep; clear-THEN-sample; sleep again on an empty re-sample. |
+| `NoStaleHook` (unregister sweep) | `kernel/poll.c::sys_poll_for_proc` (the `unregister_and_return:` label -> `poll_unhook_all`) | Every exit path goes through the sweep; it is idempotent over a pass that already unhooked. |
+| the seven `BUGGY_*` | (none) | The disciplines the impl upholds: register-then-observe in every `.poll`; a walk at every readiness site; the unconditional sweep; clear-THEN-sample (a hook goes back on clear); sleep again on an empty re-sample; the loop's own die-check and stop park. |
 
 cfgs run with `-deadlock`; `poll.tla`'s `Done` self-loop keeps a
 legitimate terminal state from tripping the deadlock check. See

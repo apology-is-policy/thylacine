@@ -39,6 +39,24 @@
 (*   exactly one sound order, clear-then-sample, and the spec fails the    *)
 (*   other one.                                                             *)
 (*                                                                         *)
+(*   Since round 4 of that audit the re-arm is a full RE-REGISTRATION:     *)
+(*   every pass takes every hook off its list (which clears it), then      *)
+(*   calls each fd's `dev->poll` WITH the hook again -- the same atomic    *)
+(*   install-and-sample as the first scan. Hooks that persisted across the *)
+(*   loop were sound for an object with one list, and wrong for a Dev that *)
+(*   CHOOSES its list by state: the console files a frozen poller on the   *)
+(*   episode list, and a hook left there after the episode ended never saw *)
+(*   another keystroke. That half is pinned where the choosing Dev is      *)
+(*   modeled (cons_poll.tla BUGGY_NO_REREGISTER); here the re-registration *)
+(*   is the as-built re-arm the other properties are checked against.      *)
+(*                                                                         *)
+(*   And the loop now owns DEATH and STOP. tsleep's own die-check and stop *)
+(*   detour sit behind its cond test, so a flag set in every re-sample     *)
+(*   window -- a producer that keeps walking a list -- makes each tsleep   *)
+(*   return AWOKEN without reaching either: poll(-1) became unkillable and *)
+(*   unstoppable. Each pass therefore checks both itself, with its hooks   *)
+(*   off (DeathTerminates, StopHonoured).                                   *)
+(*                                                                         *)
 (* THE BUGS THIS PINS                                                       *)
 (*                                                                         *)
 (*   BUGGY_CHECK_BEFORE_REGISTER — the poller samples each fd's readiness  *)
@@ -62,11 +80,12 @@
 (*     the next readiness event will walk. The fix: poll unregisters every *)
 (*     hook before it returns (NoStaleHook counterexample).                 *)
 (*                                                                         *)
-(*   BUGGY_CLEAR_AFTER_SAMPLE — on a wake the poller re-samples, THEN      *)
-(*     clears its flags. An event landing between the two is recorded only *)
-(*     in a flag the clear then wipes; the next tsleep finds no flag and   *)
-(*     sleeps on a ready fd (NoMissedPoll counterexample). The fix: clear  *)
-(*     first, sample second.                                                *)
+(*   BUGGY_CLEAR_AFTER_SAMPLE — on a wake the poller re-registers and     *)
+(*     re-samples, THEN clears its flags. An event landing between the two *)
+(*     is recorded only in a flag the clear then wipes; the next tsleep    *)
+(*     finds no flag and sleeps on a ready fd (NoMissedPoll                *)
+(*     counterexample). The fix: a hook comes off its list clear and goes  *)
+(*     back on clear -- clear first, sample second.                        *)
 (*                                                                         *)
 (*   BUGGY_RETURN_ON_WAKE — the pre-2026-09-21 sys_poll_for_proc: a wake   *)
 (*     whose re-sample finds nothing returns 0. poll(fd, 10 s) reports a   *)
@@ -74,6 +93,18 @@
 (*     bytes, or because the list was walked for an event this poller did  *)
 (*     not ask about; poll(-1) returns 0, which POSIX never permits        *)
 (*     (NoSpuriousZero counterexample). The fix: sleep again.               *)
+(*                                                                         *)
+(*   BUGGY_NO_LOOP_DIE_CHECK — the round-4 F2 loop: the re-arm relies on   *)
+(*     tsleep's die-check alone. A producer that walks a list inside every *)
+(*     re-sample window keeps a flag set at every tsleep entry, tsleep     *)
+(*     returns AWOKEN before its die-check, and a dying poll(-1) circles   *)
+(*     forever (DeathTerminates counterexample). The fix: the loop checks  *)
+(*     thread_die_pending itself on every pass.                             *)
+(*                                                                         *)
+(*   BUGGY_NO_LOOP_STOP_CHECK — the same shape for a debugger / job stop:  *)
+(*     tsleep's stop detour sits behind the same cond test, so the stop is *)
+(*     never honoured (StopHonoured counterexample). The fix: the loop     *)
+(*     parks on proc_stop_sleeper_park itself when a stop is pending.       *)
 (*                                                                         *)
 (* CFG MATRIX (executable documentation per CLAUDE.md spec-first policy)    *)
 (*                                                                         *)
@@ -86,11 +117,14 @@
 (*                                        PollTerminates (the timeout      *)
 (*                                        backstop, against a producer     *)
 (*                                        that walks the lists forever) +  *)
-(*                                        StableReadyReturns.              *)
+(*                                        StableReadyReturns +             *)
+(*                                        DeathTerminates + StopHonoured.  *)
 (*   poll_liveness_notimeout.cfg         Spec_Live, HAS_TIMEOUT FALSE —    *)
-(*                                        StableReadyReturns alone: a      *)
-(*                                        poll(-1) may block forever, but  *)
-(*                                        not on an fd that stays ready.   *)
+(*                                        StableReadyReturns: a poll(-1)   *)
+(*                                        may block forever, but not on an *)
+(*                                        fd that stays ready -- nor once  *)
+(*                                        its Proc is dying (DeathTermin-  *)
+(*                                        ates) or stopped (StopHonoured). *)
 (*   poll_buggy_check_before_register.cfg BUGGY_CHECK_BEFORE_REGISTER —    *)
 (*                                        NoMissedPoll counterexample.     *)
 (*   poll_buggy_no_wake.cfg              BUGGY_NO_WAKE — NoMissedPoll      *)
@@ -101,6 +135,10 @@
 (*                                        NoMissedPoll counterexample.     *)
 (*   poll_buggy_return_on_wake.cfg       BUGGY_RETURN_ON_WAKE —           *)
 (*                                        NoSpuriousZero counterexample.   *)
+(*   poll_buggy_no_loop_die_check.cfg    BUGGY_NO_LOOP_DIE_CHECK, poll(-1) *)
+(*                                        — DeathTerminates counterexample.*)
+(*   poll_buggy_no_loop_stop_check.cfg   BUGGY_NO_LOOP_STOP_CHECK, poll(-1)*)
+(*                                        — StopHonoured counterexample.   *)
 (*                                                                         *)
 (* MODELING ASSUMPTIONS                                                     *)
 (*                                                                         *)
@@ -137,9 +175,24 @@
 (*   producer that never stops walking the list holds the poller past its  *)
 (*   timeout forever (PollTerminates).                                      *)
 (*                                                                         *)
-(*   The death-interrupt (#811, TSLEEP_INTR) is not modeled: it skips the  *)
-(*   re-sample and falls to the unregister sweep, which NoStaleHook's      *)
-(*   return arms already cover.                                             *)
+(*   DEATH and STOP are modeled since round 4 (`dying`, `stop_req`). The   *)
+(*   tsleep call keeps its real order -- cond, then deadline, then the     *)
+(*   stop detour, then the die-check -- because that order is the bug: a  *)
+(*   set flag short-circuits the two checks behind it. Die and a stop      *)
+(*   request wake a sleeping poller (the #811 death cascade; the stop      *)
+(*   delivery's sleeper wake); a stop park ends on resume or, death        *)
+(*   winning, on death. A resume is modeled only at a settled park (the    *)
+(*   debugger continues a STOPPED target), with fairness: without it       *)
+(*   StopHonoured would hold vacuously and PollTerminates would fail for a *)
+(*   stop nobody ever lifts. ONE stop per behavior: a debugger that        *)
+(*   re-stops forever can hold even a dying thread in tsleep's detour,     *)
+(*   whose stop test precedes its die-check -- a race the debugger must    *)
+(*   win every time, owned by debug_stop.tla (DeathWinsOverStop), not by   *)
+(*   the poll loop. The loop's sched_yield_hint on a noise pass   *)
+(*   is a stutter here -- it moves the CPU, not the poll's state. A pass   *)
+(*   that follows a TIMEDOUT tsleep runs the same unhook/check/re-register *)
+(*   in the code; the model folds it into FinalSample, since every exit    *)
+(*   from it is terminal and the checks there only choose which.           *)
 (*                                                                         *)
 (* See ARCHITECTURE.md §23.3 (poll/select), §28 invariant I-9; tsleep.tla  *)
 (* (the deadline-bounded `Rendez` sleep poll builds on); scheduler.tla     *)
@@ -164,10 +217,14 @@ CONSTANTS
                                   \*   re-samples FIRST and clears its flags
                                   \*   SECOND, so an event between the two is
                                   \*   wiped with the flag that recorded it.
-    BUGGY_RETURN_ON_WAKE          \* BOOLEAN — TRUE: a wake whose re-sample
+    BUGGY_RETURN_ON_WAKE,         \* BOOLEAN — TRUE: a wake whose re-sample
                                   \*   finds nothing ready RETURNS 0 instead
                                   \*   of sleeping again (the pre-2026-09-21
                                   \*   sys_poll_for_proc).
+    BUGGY_NO_LOOP_DIE_CHECK,      \* BOOLEAN — TRUE: the re-arm loop leaves
+                                  \*   death to tsleep's die-check alone.
+    BUGGY_NO_LOOP_STOP_CHECK      \* BOOLEAN — TRUE: the re-arm loop leaves
+                                  \*   a stop to tsleep's detour alone.
 
 ASSUME Fds # {}
 ASSUME HAS_TIMEOUT                 \in BOOLEAN
@@ -176,6 +233,8 @@ ASSUME BUGGY_NO_WAKE               \in BOOLEAN
 ASSUME BUGGY_LAZY_UNREGISTER       \in BOOLEAN
 ASSUME BUGGY_CLEAR_AFTER_SAMPLE    \in BOOLEAN
 ASSUME BUGGY_RETURN_ON_WAKE        \in BOOLEAN
+ASSUME BUGGY_NO_LOOP_DIE_CHECK     \in BOOLEAN
+ASSUME BUGGY_NO_LOOP_STOP_CHECK    \in BOOLEAN
 
 VARIABLES
     pc,               \* the poll call's lifecycle ∈ PCs (see below).
@@ -191,28 +250,43 @@ VARIABLES
                       \*   also set by an event the poller did not ask about.
     seen,             \* [Fds -> BOOLEAN] — what the poller's latest SAMPLE
                       \*   of each fd returned (the revents it would report).
-    deadline_passed   \* BOOLEAN — monotonic time reached the poll timeout.
+    deadline_passed,  \* BOOLEAN — monotonic time reached the poll timeout.
+    dying,            \* BOOLEAN — the poller's Proc is group-terminating
+                      \*   (thread_die_pending). Monotonic.
+    stop_req,         \* BOOLEAN — a debugger or job-control stop is pending
+                      \*   (proc_stop_requested).
+    stop_used         \* BOOLEAN — the one stop request of a behavior has been
+                      \*   made (see MODELING ASSUMPTIONS).
 
-vars == <<pc, ready, registered, flagged, seen, deadline_passed>>
+vars == <<pc, ready, registered, flagged, seen, deadline_passed, dying, stop_req,
+          stop_used>>
 
 \* "start"         — poll() entered; no hook installed, nothing sampled.
 \* "checked"       — BUGGY path only: readiness sampled, no hook installed.
 \* "scanned"       — the first scan is done (hooks installed + sampled).
 \* "armed"         — about to call tsleep: the commit point.
 \* "sleeping"      — committed to sleep on the poller's private Rendez.
+\* "tsparked"      — tsleep's own stop detour: parked, hooks STILL listed.
 \* "woken"         — tsleep returned AWOKEN (some flag was set).
-\* "cleared"       — the flags are cleared; the re-sample is pending.
-\* "sampled_dirty" — BUGGY_CLEAR_AFTER_SAMPLE only: re-sampled, flags not
-\*                   yet cleared.
+\* "unhooked"      — every hook is off its list; the loop's own death and
+\*                   stop checks are next.
+\* "loopparked"    — the loop's stop park: parked with NO hook listed.
+\* "cleared"       — the checks passed; the re-register + re-sample is next.
+\* "sampled_dirty" — BUGGY_CLEAR_AFTER_SAMPLE only: re-registered and
+\*                   re-sampled, flags not yet cleared.
 \* "rescanned"     — the post-wake re-sample is done; evaluate it.
 \* "timedout"      — tsleep returned TIMEDOUT; the final sample is pending.
 \* "final"         — the final sample is done; evaluate it.
 \* "done_ready"    — poll returned >= 1 ready fd.
 \* "done_timeout"  — poll returned 0.
-PCs      == {"start", "checked", "scanned", "armed", "sleeping", "woken",
-             "cleared", "sampled_dirty", "rescanned", "timedout", "final",
-             "done_ready", "done_timeout"}
-Terminal == {"done_ready", "done_timeout"}
+\* "done_intr"     — poll unwound for death (the result is immaterial: the
+\*                   thread dies at its EL0-return tail).
+PCs      == {"start", "checked", "scanned", "armed", "sleeping", "tsparked",
+             "woken", "unhooked", "loopparked", "cleared", "sampled_dirty",
+             "rescanned", "timedout", "final",
+             "done_ready", "done_timeout", "done_intr"}
+Terminal == {"done_ready", "done_timeout", "done_intr"}
+Parked   == {"tsparked", "loopparked"}
 
 TypeOk ==
     /\ pc              \in PCs
@@ -221,6 +295,9 @@ TypeOk ==
     /\ flagged         \in [Fds -> BOOLEAN]
     /\ seen            \in [Fds -> BOOLEAN]
     /\ deadline_passed \in BOOLEAN
+    /\ dying           \in BOOLEAN
+    /\ stop_req        \in BOOLEAN
+    /\ stop_used       \in BOOLEAN
 
 NoneSet == [f \in Fds |-> FALSE]
 AllSet  == [f \in Fds |-> TRUE]
@@ -232,6 +309,9 @@ Init ==
     /\ flagged         = NoneSet
     /\ seen            = NoneSet
     /\ deadline_passed = FALSE
+    /\ dying           = FALSE
+    /\ stop_req        = FALSE
+    /\ stop_used       = FALSE
 
 (***************************************************************************)
 (* Expired — the deadline-reached predicate. FALSE whenever the modeled    *)
@@ -264,7 +344,7 @@ MakeReady(f) ==
     /\ ~ready[f]
     /\ ready' = [ready EXCEPT ![f] = TRUE]
     /\ Walk(f)
-    /\ UNCHANGED <<registered, seen, deadline_passed>>
+    /\ UNCHANGED <<registered, seen, deadline_passed, dying, stop_req, stop_used>>
 
 (***************************************************************************)
 (* Retract — readiness falls again before the poller looks: a competing    *)
@@ -275,7 +355,7 @@ Retract(f) ==
     /\ pc \notin Terminal
     /\ ready[f]
     /\ ready' = [ready EXCEPT ![f] = FALSE]
-    /\ UNCHANGED <<pc, registered, flagged, seen, deadline_passed>>
+    /\ UNCHANGED <<pc, registered, flagged, seen, deadline_passed, dying, stop_req, stop_used>>
 
 (***************************************************************************)
 (* OtherEvent — f's hook list is walked for an event this poller did NOT   *)
@@ -287,7 +367,7 @@ Retract(f) ==
 OtherEvent(f) ==
     /\ pc \notin Terminal
     /\ Walk(f)
-    /\ UNCHANGED <<ready, registered, seen, deadline_passed>>
+    /\ UNCHANGED <<ready, registered, seen, deadline_passed, dying, stop_req, stop_used>>
 
 (***************************************************************************)
 (* AdvanceTime — the monotonic counter reaches the poll timeout.           *)
@@ -297,7 +377,56 @@ AdvanceTime ==
     /\ ~deadline_passed
     /\ pc \notin Terminal
     /\ deadline_passed' = TRUE
-    /\ UNCHANGED <<pc, ready, registered, flagged, seen>>
+    /\ UNCHANGED <<pc, ready, registered, flagged, seen, dying, stop_req, stop_used>>
+
+(***************************************************************************)
+(* Die — the Proc starts group-terminating. The #811 death cascade wakes a *)
+(* sleeping poller: tsleep re-loops, and re-checks cond BEFORE its         *)
+(* die-check (TSleepCommit). A parked poller wakes through ParkDeath.       *)
+(***************************************************************************)
+Die ==
+    /\ pc \notin Terminal
+    /\ ~dying
+    /\ dying' = TRUE
+    /\ pc' = IF pc = "sleeping" THEN "armed" ELSE pc
+    /\ UNCHANGED <<ready, registered, flagged, seen, deadline_passed, stop_req, stop_used>>
+
+(***************************************************************************)
+(* StopRequest — a debugger `stop` or a job-control suspend. The delivery  *)
+(* wakes every sleeping thread of the Proc so it can re-observe the flag   *)
+(* and park (proc_stop_wake_sleepers_locked).                               *)
+(***************************************************************************)
+StopRequest ==
+    /\ pc \notin Terminal
+    /\ ~stop_used
+    /\ stop_req'  = TRUE
+    /\ stop_used' = TRUE
+    /\ pc' = IF pc = "sleeping" THEN "armed" ELSE pc
+    /\ UNCHANGED <<ready, registered, flagged, seen, deadline_passed, dying>>
+
+(***************************************************************************)
+(* StopResume — the stop is lifted and the parked poller resumes. From     *)
+(* tsleep's detour it re-loops tsleep (`continue`); from the loop's own    *)
+(* park it goes on to re-register. Modeled only at a settled park -- see   *)
+(* MODELING ASSUMPTIONS.                                                    *)
+(***************************************************************************)
+StopResume ==
+    /\ stop_req
+    /\ pc \in Parked
+    /\ stop_req' = FALSE
+    /\ pc' = IF pc = "tsparked" THEN "armed" ELSE "cleared"
+    /\ UNCHANGED <<ready, registered, flagged, seen, deadline_passed, dying, stop_used>>
+
+(***************************************************************************)
+(* ParkDeath — DEATH WINS over a stop: proc_stop_sleeper_park returns      *)
+(* SLEEP_INTR, the caller unwinds to the sweep.                             *)
+(***************************************************************************)
+ParkDeath ==
+    /\ pc \in Parked
+    /\ dying
+    /\ pc'         = "done_intr"
+    /\ registered' = Unhook
+    /\ UNCHANGED <<ready, flagged, seen, deadline_passed, dying, stop_req, stop_used>>
 
 (***************************************************************************)
 (* Register — the CORRECT entry. For every fd, `dev->poll` installs the    *)
@@ -311,7 +440,7 @@ Register ==
     /\ pc'         = "scanned"
     /\ registered' = AllSet
     /\ seen'       = ready
-    /\ UNCHANGED <<ready, flagged, deadline_passed>>
+    /\ UNCHANGED <<ready, flagged, deadline_passed, dying, stop_req, stop_used>>
 
 (***************************************************************************)
 (* BuggyCheck / BuggyRegisterLate — the BUGGY entry: sample, THEN install. *)
@@ -323,14 +452,14 @@ BuggyCheck ==
     /\ pc = "start"
     /\ pc'   = "checked"
     /\ seen' = ready
-    /\ UNCHANGED <<ready, registered, flagged, deadline_passed>>
+    /\ UNCHANGED <<ready, registered, flagged, deadline_passed, dying, stop_req, stop_used>>
 
 BuggyRegisterLate ==
     /\ BUGGY_CHECK_BEFORE_REGISTER
     /\ pc = "checked"
     /\ pc'         = "scanned"
     /\ registered' = AllSet
-    /\ UNCHANGED <<ready, flagged, seen, deadline_passed>>
+    /\ UNCHANGED <<ready, flagged, seen, deadline_passed, dying, stop_req, stop_used>>
 
 (***************************************************************************)
 (* EvaluateFirst — the first scan's verdict. Anything seen ready returns;  *)
@@ -339,7 +468,7 @@ BuggyRegisterLate ==
 (***************************************************************************)
 EvaluateFirst ==
     /\ pc = "scanned"
-    /\ UNCHANGED <<ready, flagged, seen, deadline_passed>>
+    /\ UNCHANGED <<ready, flagged, seen, deadline_passed, dying, stop_req, stop_used>>
     /\ IF \E f \in Fds : seen[f]
        THEN /\ pc' = "done_ready"
             /\ registered' = Unhook
@@ -347,16 +476,25 @@ EvaluateFirst ==
             /\ registered' = registered
 
 (***************************************************************************)
-(* TSleepCommit — the `tsleep` call. The flag scan and the sleep           *)
-(* transition are atomic under the poller's Rendez lock. A set flag has    *)
-(* precedence over the deadline (tsleep.tla TimeoutSound).                  *)
+(* TSleepCommit — the `tsleep` call, in the code's order: the flag scan    *)
+(* (success has precedence -- tsleep.tla TimeoutSound), then the deadline, *)
+(* then the 8c-2 stop detour, then the #811 die-check, then the sleep, all *)
+(* atomic under the poller's locks. A set flag short-circuits BOTH checks  *)
+(* behind it -- which is why the loop must make them itself.                *)
 (***************************************************************************)
 TSleepCommit ==
     /\ pc = "armed"
-    /\ pc' = IF \E f \in Fds : flagged[f] THEN "woken"
-             ELSE IF Expired              THEN "timedout"
-             ELSE "sleeping"
-    /\ UNCHANGED <<ready, registered, flagged, seen, deadline_passed>>
+    /\ UNCHANGED <<ready, flagged, seen, deadline_passed, dying, stop_req, stop_used>>
+    /\ IF \E f \in Fds : flagged[f] THEN /\ pc' = "woken"
+                                         /\ registered' = registered
+       ELSE IF Expired                THEN /\ pc' = "timedout"
+                                         /\ registered' = registered
+       ELSE IF stop_req               THEN /\ pc' = "tsparked"
+                                         /\ registered' = registered
+       ELSE IF dying                  THEN /\ pc' = "done_intr"
+                                         /\ registered' = Unhook
+       ELSE                                /\ pc' = "sleeping"
+                                         /\ registered' = registered
 
 (***************************************************************************)
 (* Timeout — the tsleep deadline fires and wakes the sleeping poller.      *)
@@ -365,42 +503,51 @@ Timeout ==
     /\ pc = "sleeping"
     /\ deadline_passed
     /\ pc' = "timedout"
-    /\ UNCHANGED <<ready, registered, flagged, seen, deadline_passed>>
+    /\ UNCHANGED <<ready, registered, flagged, seen, deadline_passed, dying, stop_req, stop_used>>
 
 (***************************************************************************)
-(* ClearFlags THEN Resample — the re-arm, in the only sound order. The     *)
-(* flags are cleared FIRST (each under its hook list's lock), the fds      *)
-(* re-sampled SECOND. An event that lands between the two sets a flag that *)
-(* survives into the next tsleep; one that landed before the clear is seen *)
-(* by the sample, which runs under the object's lock after the producer    *)
-(* released it.                                                             *)
+(* Rearm -- every hook comes off its list. Off the list no producer can    *)
+(* reach it, so it is cleared there: a hook goes back on clear. The        *)
+(* BUGGY_CLEAR_AFTER_SAMPLE variant carries the stale flags forward and    *)
+(* clears them after the re-sample instead (BuggyClearLate).                *)
 (***************************************************************************)
-ClearFlags ==
-    /\ ~BUGGY_CLEAR_AFTER_SAMPLE
+Rearm ==
     /\ pc = "woken"
-    /\ pc'      = "cleared"
-    /\ flagged' = NoneSet
-    /\ UNCHANGED <<ready, registered, seen, deadline_passed>>
+    /\ pc'         = "unhooked"
+    /\ registered' = NoneSet
+    /\ flagged'    = IF BUGGY_CLEAR_AFTER_SAMPLE THEN flagged ELSE NoneSet
+    /\ UNCHANGED <<ready, seen, deadline_passed, dying, stop_req, stop_used>>
 
+(***************************************************************************)
+(* LoopCheck -- the loop's own death and stop checks, with no hook listed. *)
+(* Death unwinds to the sweep; a stop parks on proc_stop_sleeper_park.      *)
+(***************************************************************************)
+LoopCheck ==
+    /\ pc = "unhooked"
+    /\ pc' = IF dying /\ ~BUGGY_NO_LOOP_DIE_CHECK THEN "done_intr"
+             ELSE IF stop_req /\ ~BUGGY_NO_LOOP_STOP_CHECK THEN "loopparked"
+             ELSE "cleared"
+    /\ UNCHANGED <<ready, registered, flagged, seen, deadline_passed, dying, stop_req, stop_used>>
+
+(***************************************************************************)
+(* Resample -- each fd's `dev->poll` WITH the hook: the first scan's       *)
+(* atomic install-and-sample again, so the Dev re-chooses the list and the *)
+(* fd re-resolves. An event before an fd's install is seen by its sample;  *)
+(* one after reaches the fresh hook.                                        *)
+(***************************************************************************)
 Resample ==
     /\ pc = "cleared"
-    /\ pc'   = "rescanned"
-    /\ seen' = ready
-    /\ UNCHANGED <<ready, registered, flagged, deadline_passed>>
+    /\ pc'         = IF BUGGY_CLEAR_AFTER_SAMPLE THEN "sampled_dirty" ELSE "rescanned"
+    /\ registered' = AllSet
+    /\ seen'       = ready
+    /\ UNCHANGED <<ready, flagged, deadline_passed, dying, stop_req, stop_used>>
 
-\* The BUGGY order: sample, then clear.
-BuggySampleFirst ==
-    /\ BUGGY_CLEAR_AFTER_SAMPLE
-    /\ pc = "woken"
-    /\ pc'   = "sampled_dirty"
-    /\ seen' = ready
-    /\ UNCHANGED <<ready, registered, flagged, deadline_passed>>
-
+\* The BUGGY order's second half: the flags are cleared after the sample.
 BuggyClearLate ==
     /\ pc = "sampled_dirty"
     /\ pc'      = "rescanned"
     /\ flagged' = NoneSet
-    /\ UNCHANGED <<ready, registered, seen, deadline_passed>>
+    /\ UNCHANGED <<ready, registered, seen, deadline_passed, dying, stop_req, stop_used>>
 
 (***************************************************************************)
 (* EvaluateWake — the verdict after a wake. Ready returns. NOT ready is    *)
@@ -414,7 +561,7 @@ BuggyClearLate ==
 (***************************************************************************)
 EvaluateWake ==
     /\ pc = "rescanned"
-    /\ UNCHANGED <<ready, flagged, seen, deadline_passed>>
+    /\ UNCHANGED <<ready, flagged, seen, deadline_passed, dying, stop_req, stop_used>>
     /\ IF \E f \in Fds : seen[f]
        THEN /\ pc' = "done_ready"
             /\ registered' = Unhook
@@ -433,13 +580,13 @@ FinalSample ==
     /\ pc = "timedout"
     /\ pc'   = "final"
     /\ seen' = ready
-    /\ UNCHANGED <<ready, registered, flagged, deadline_passed>>
+    /\ UNCHANGED <<ready, registered, flagged, deadline_passed, dying, stop_req, stop_used>>
 
 EvaluateFinal ==
     /\ pc = "final"
     /\ pc' = IF \E f \in Fds : seen[f] THEN "done_ready" ELSE "done_timeout"
     /\ registered' = Unhook
-    /\ UNCHANGED <<ready, flagged, seen, deadline_passed>>
+    /\ UNCHANGED <<ready, flagged, seen, deadline_passed, dying, stop_req, stop_used>>
 
 (***************************************************************************)
 (* Done — terminal self-loop (keeps TLC's deadlock check quiet).            *)
@@ -453,13 +600,14 @@ PollerStep ==
     \/ EvaluateFirst
     \/ TSleepCommit
     \/ Timeout
-    \/ ClearFlags
+    \/ Rearm
+    \/ LoopCheck
     \/ Resample
-    \/ BuggySampleFirst
     \/ BuggyClearLate
     \/ EvaluateWake
     \/ FinalSample
     \/ EvaluateFinal
+    \/ ParkDeath
 
 Next ==
     \/ PollerStep
@@ -467,6 +615,9 @@ Next ==
     \/ \E f \in Fds : Retract(f)
     \/ \E f \in Fds : OtherEvent(f)
     \/ AdvanceTime
+    \/ Die
+    \/ StopRequest
+    \/ StopResume
     \/ Done
 
 Spec == Init /\ [][Next]_vars
@@ -474,7 +625,6 @@ Spec == Init /\ [][Next]_vars
 (***************************************************************************)
 (* ============================== INVARIANTS ============================== *)
 (***************************************************************************)
-
 \* HookedReadyIsFlagged — at the two points where it matters (about to
 \* sleep, asleep) every hooked fd that IS ready has its flag set. This is
 \* the register-then-observe discipline, and the clear-then-sample order,
@@ -509,6 +659,14 @@ TimeoutResultSound == (pc = "done_timeout") => (\A f \in Fds : ~seen[f])
 \* poll(-1) never returns 0 at all. Violated by BUGGY_RETURN_ON_WAKE.
 NoSpuriousZero == (pc = "done_timeout") => Expired
 
+\* ParkedLoopHoldsNoHook — the loop's own stop park happens with every hook
+\* off its list, so no producer walks to a parked poller for as long as a
+\* debugger holds it (tsleep's detour, by contrast, parks listed).
+ParkedLoopHoldsNoHook == (pc = "loopparked") => (\A f \in Fds : ~registered[f])
+
+\* IntrOnlyWhenDying — poll unwinds for death only when its Proc is dying.
+IntrOnlyWhenDying == (pc = "done_intr") => dying
+
 Invariants ==
     /\ TypeOk
     /\ HookedReadyIsFlagged
@@ -517,6 +675,8 @@ Invariants ==
     /\ ReadyResultSound
     /\ TimeoutResultSound
     /\ NoSpuriousZero
+    /\ ParkedLoopHoldsNoHook
+    /\ IntrOnlyWhenDying
 
 (***************************************************************************)
 (* ============================== LIVENESS ================================ *)
@@ -529,15 +689,29 @@ Invariants ==
 (* StableReadyReturns — once an fd is ready and STAYS ready, poll returns, *)
 (* timeout or no timeout. (The old PollReturnsWhenReady — "a set flag      *)
 (* leads to a return" — is false by design now: a flag is a hint.)          *)
+(*                                                                         *)
+(* DeathTerminates — a dying poller returns, whatever the producers do and *)
+(* whatever its timeout. With poll(-1) this is the property the loop's own *)
+(* die-check exists for (BUGGY_NO_LOOP_DIE_CHECK): without it a producer   *)
+(* that keeps a flag set keeps the dying poller circling forever.           *)
+(*                                                                         *)
+(* StopHonoured — a pending stop is eventually honoured: the poller parks, *)
+(* returns, or the stop is lifted (which here happens only at a park).     *)
+(* Violated by BUGGY_NO_LOOP_STOP_CHECK.                                    *)
 (***************************************************************************)
 PollTerminates == <>(pc \in Terminal)
 
 StableReadyReturns ==
     \A f \in Fds : (<>[](ready[f])) => <>(pc \in Terminal)
 
+DeathTerminates == dying ~> (pc \in Terminal)
+
+StopHonoured == stop_req ~> (~stop_req \/ pc \in Parked \/ pc \in Terminal)
+
 Liveness ==
     /\ WF_vars(PollerStep)
     /\ WF_vars(AdvanceTime)
+    /\ WF_vars(StopResume)
 
 Spec_Live == Init /\ [][Next]_vars /\ Liveness
 
