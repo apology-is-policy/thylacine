@@ -94,7 +94,13 @@ The load-bearing facts, because they decide what `std` can and cannot do here.
   `__mprotect` is `ENOSYS`. musl's `pthread_create` maps the stack `PROT_NONE`
   then `mprotect`s the writable part -- both return RW, so the guard region is
   RW and a stack overflow corrupts it silently, faulting only past the whole
-  region. The `std` side of this is CLEAN and needs no kernel change (prior-art
+  region. This RW-guard limitation is **pthread-created (spawned) stacks only**
+  (main's turn-8 correction): the MAIN thread's stack is a 1 MiB SPARSE
+  demand-zero reservation `[0x7ff00000, 0x80000000)` over a REAL `prot==0` guard
+  VMA the kernel maps at exec (`exec_map_user_stack` = `burrow_create_anon_lazy`
+  since LINEAGE L-4a; the old "committed whole at exec" comment was stale), so
+  the main thread HAS a working guard and touching low pages just demand-zeroes
+  them. The `std` side of this is CLEAN and needs no kernel change (prior-art
   survey, section 6): `std`'s own guard install
   (`sys/pal/unix/stack_overflow.rs`) is gated on an explicit OS allowlist, so
   the opt-out is simply **not adding `thylacine` to that list** -- the no-op
@@ -122,9 +128,12 @@ on device bringing up JavaScriptCore), NOT yet on main -- both bite `std`:**
   a ONE-PAGE main stack (4096 B) because musl's main-thread arm probes the
   extent with `mremap()`, which the seam ENOSYSes (errno != ENOMEM), so the loop
   never runs. Real main stack is 1 MiB. **Rust `std`'s unix main-thread path
-  asks exactly this** (main's finding). 0033 states the exec mapping. If R-0
-  needs it before main lands it on main, **cherry-pick the patch file + the
-  series lines from `da87cffe` -- do not re-derive** (main's instruction).
+  asks exactly this** (main's finding). 0033 states the exec mapping. Main is
+  landing 0033/0034 on main via a from-scratch sysroot rebuild + suite + ci; if
+  R-0 blocks before they arrive, **cherry-pick from `browser-b0` @`0d3f8ee1` --
+  do not re-derive** (main's turn-8 correction; NOT `da87cffe` -- 0034 changed
+  in main's self-audit: a value running to the end of the read buffer is now a
+  miss, honest `-1` leaving errno as the caller had it).
 - **Patch 0034 -- `sysconf`.** `_SC_PHYS_PAGES` / `_SC_AVPHYS_PAGES` return
   uninitialised stack (upstream never checks the ENOSYSed `sysinfo()`); 0034
   reads `/ctl/memory`, `-1` on a miss. Some crates call this.
@@ -364,6 +373,15 @@ holds the LLVM fork) if the Mac's headroom or contention bites.
   `std` diff under ~1k lines.
 - **`aws-lc-sys` / `ring`** for the TLS crates in the tail is a C/asm/CMake
   build; rustls + ring is the fallback. R-2, not R-0/R-1.
+- **`getuid`/`geteuid`/`getgid`/`getegid`/`getppid` return the raw ENOSYS
+  sentinel** `0xFFFFFFDA` = `(uid_t)-38` (main's turn-8 finding; the kernel has
+  `SYS_GETUID=73`/`SYS_GETGID=74` but CL-1a wired only `getpid`; musl treats
+  these as cannot-fail). `std` itself does not need them for R-1, but crates in
+  the tail will. The fix is **NOT this track's**: stratumd consumes the value
+  (admin-uid, the keyslot-token gate, dataset-root ownership), so it is an
+  A-3-surface chunk owned by main/the operator. Track R depends on it landing
+  before any tail crate that reads a uid. (`umask`/`times`/`uname` are parked
+  too but fail visibly.)
 - **The arc must never risk the v1.0-rc** (ROADMAP 11; BROWSER-DESIGN 10). Track
   R is independent of the kernel release path.
 
