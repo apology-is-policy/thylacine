@@ -116,16 +116,30 @@ that only a build at the real in-tree location shows.
 was `bba531001` (wrong); the installed `nightly-2026-09-20` is rustc
 `feaadeeac` 2026-09-19, LLVM 23.1.1 (measured `rustc +nightly-2026-09-20 -Vv`).
 
-**The one piece left, and why it is blocked.** R-1's definition is std RUN ON
-DEVICE, which needs a `--config ci` image (login lands on `ut`, not the Halcyon
-session) booted with `tools/test-interactive.sh rust-std-hello`. That is
-hard-blocked on the shared 8-core Mac: main holds it for the mount-table-shed SMP
-soundness gate + the ci interactive fleet (~1-1.5h), and `test-interactive.sh`'s
-reaper is a HOST-WIDE `pkill -9 qemu` (#224) -- booting my witness while main's
-fleet runs would cross-kill both. So the boot waits for main's fleet to finish;
-it is not a contention-slowdown concern but a correctness one. OWED with it: the
-full 12-file rust-src patch re-validation (apply-to-pristine + rebuild green),
-cheap in the same Mac window.
+**How it actually closed (correcting the "blocked" note this paragraph used to
+carry).** R-1's boot was NOT host-blocked: `test-interactive.sh`'s reaper is
+`pkill -9 -f "qemu-system-aarch64.*$BUILD_DIR/"` -- scoped to each TREE's build
+dir (main read the code; I had mis-read CLAUDE.md's "tree-wide" as host-wide), so
+booting from `../thylacine-aux/build` while main's fleet ran in
+`../thylacine-halcyon` was safe -- wall clock only. The witness ran concurrently
+with main's gate and PASSed (HVF, ~32 s; `--config ci` image, login on `ut`,
+`/bin/r1hello`).
+
+**Re-validation (post-close, same run, @a6009acd).** The full 13-file (not 12 --
+the count had drifted) `rust-src-thylacine.patch` was re-validated
+apply-to-pristine: `rustup component remove/add rust-src` on the pinned nightly,
+then DELETE the leftover new-files rustup's remove leaves behind
+(`os/thylacine/{fs,mod,raw}.rs` are not in rustup's manifest -- an honest pristine
+needs them gone; skipping this would let the dry-run lie), then `patch -p1
+--dry-run` clean (0 fuzz), apply, diff 13/13 byte-identical to the working tree.
+A forced `tools/build.sh rust-progs` then recompiled core/libc/std/alloc/unwind
+green and produced `r1hello` sha256 `1c300f19...` (499792 B, ET_EXEC, no
+PT_DYNAMIC) -- BYTE-IDENTICAL to the R-1 witness binary. So the re-validation is
+stronger than a re-boot: the runtime PASS transfers to a bit-exact binary without
+re-running it (which my resume note forbade anyway). libc's patch (sibling
+`../libc-thylacine`, not rustup-managed) survives the remove/add untouched.
+OWED: only the thyla-pi real-silicon confirmation remains -- CONFIRMATION, not a
+blocker.
 
 ---
 ## 2026-09-21 (aux, Opus 4.8, effort xhigh) -- R-0 REACHED: `std` compiles for aarch64-unknown-thylacine

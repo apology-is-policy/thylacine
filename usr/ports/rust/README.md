@@ -182,7 +182,7 @@ panic (the unwinder + libunwind). File-read + TCP are informational.
   single `write()`/`read()` and `is_*_vectored()` return false, because pouch's
   libc ENOSYSes `writev`/`readv` for every fd (main-recorded). std's `println!`
   via `LineWriterShim` would otherwise take the vectored path. The full 13-file
-  patch re-validation (apply-to-pristine + rebuild-green) is OWED.
+  patch re-validation (apply-to-pristine -> bit-exact rebuild) is DONE (below).
 
 **Two traps on the way (both cost boots, both worth knowing):**
 - **The witness path.** ramfs binaries are reached from the ut SESSION as
@@ -218,35 +218,26 @@ HOW IT IS BUILT + WITNESSED:
    the console, so tokens are visible -- joey's `pouch_smoke_one` drains to a
    buffer and does NOT echo, so it is the wrong witness for per-leg visibility.
 
-REMAINING (the actual witness -- needs a Mac window; coordinate on yip 0097
-first, main shares the 8-core host with the browser arc):
-4. Run it: `tools/build.sh rust-progs` (verify the std build stages /r1hello),
-   then `tools/build.sh kernel --config ci` (the gate image -- no Halcyon
-   session, so login lands on `ut`), then
-   `tools/test-interactive.sh rust-std-hello`. Cap `-j2` (build-std is modest,
-   not a full bootstrap -- the turn-13 agreement on 0097).
-5. runtime deps if it faults: the pouch patches 0033-0038 (main-side). Take them
-   from `main` once landed, or from LOCAL branch `browser-b0` BY FILE (current
-   tip moves; it was `9f7613f0` on 2026-09-21) -- NEVER by an old hash: 0035's
-   code changed under audit (buffered arm now serves len <= buf_size), 0036 is
-   now DELETE-ON-CLOSE not public-unlink (Stratum rejects I/O on an unlinked fid,
-   fid.tla IOReject), 0037 now compiles, 0038 is new (stdio over a socket fd).
-   The hello links against the EXISTING aux-3 sysroot libc.a (pre-patches); std
-   stubs stack_overflow + does own buffering + uses _SC_PAGESIZE, so it MAY run
-   unpatched -- the boot proves it. If it faults, rebuild the sysroot with the
-   current patch files.
-   Known pouch gaps std may hit (main-recorded OPEN, ENOSYS for every fd):
-   fcntl / dup / dup3 / readv / writev -- so std's `write_vectored` (a plausible
-   `println!` path), `try_clone`, and fcntl `set_nonblocking` are at risk. R-1's
-   hello does not obviously need dup/fcntl; `write_vectored` via stdout is the
-   one to watch -- the boot output (or its absence) is the discriminator.
-   Rust's tempfile "create-unlink-keep-fd" idiom also does NOT work on this
-   rootfs (the 0036 finding) -- an R-2 crate-tail concern, an operator question.
-6. thyla-pi (real V3D/KVM silicon) for a real-silicon confirmation after the
-   Mac HVF witness.
+AS-RUN (R-1 CLOSED @a6009acd): built with `tools/build.sh kernel --config ci`
+(the gate image; `build_rust_progs` stages `/bin/r1hello`), witnessed by
+`tools/test-interactive.sh rust-std-hello` -> PASS (HVF, ~32 s). The
+`write_vectored` risk called out in the plan was real and is closed by the
+`sys/fd/unix.rs` no-vectored cohort join (above); the other pouch gaps
+(fcntl/dup/dup3) R-1 did not exercise.
 
-OWED: re-validate the FULL 12-file `patches/rust-src-thylacine.patch` against a
-pristine rust-src (apply + rebuild green) -- cheap in the Mac window via `rustup
-component remove/add rust-src` then re-apply and rebuild. R-0's 11 files were
-validated apply-to-pristine + rebuild-green; the 12th (`sys/io/error/unix.rs`
-errno arm) was appended and is well-formed but not yet re-validated end-to-end.
+RE-VALIDATED (2026-09-21, after close): the full 13-file
+`patches/rust-src-thylacine.patch` applies to a truly-pristine rust-src and
+rebuilds bit-exactly. Method: `rustup component remove/add rust-src` on the
+pinned nightly, then DELETE the leftover new-files rustup's remove does not
+(`os/thylacine/{fs,mod,raw}.rs` are not in rustup's manifest, so remove leaves
+them -- they must go for an honest pristine), then `patch -p1 --dry-run` (clean,
+0 fuzz), apply, and diff all 13 against the working tree (13/13 byte-identical).
+A forced `tools/build.sh rust-progs` then recompiled core/libc/std/alloc/unwind
+green and produced `r1hello` sha256 `1c300f19...` (499792 B, ET_EXEC, no
+PT_DYNAMIC) -- byte-IDENTICAL to the R-1 witness binary, so the PASS transfers
+without a redundant re-boot. libc's patch (against the sibling
+`../libc-thylacine`, not rustup-managed) was untouched and survives remove/add.
+
+REMAINING: thyla-pi (real V3D/KVM silicon) real-silicon confirmation of the same
+witness -- CONFIRMATION, not a blocker (R-1 is done). The track-R toolchain is
+not on the pi; simplest is to run the Mac-built image on the pi's qemu.
