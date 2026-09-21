@@ -243,7 +243,7 @@ while {(!$saw_rail_created || !$saw_rail_minted || !$saw_bar_created || !$saw_ba
         # then KEEP SCANNING. `exp_continue` is load-bearing -- without it this
         # branch would satisfy the enclosing expect and become a consumer
         # itself, swallowing the rails markers it sits beside.
-        -re {halcyond: status bar \d+ painted [^\r\n]*running false panes (\d+)} {
+        -re {halcyond: status bar \d+ painted [^\r\n]*running false panes (\d+) workspaces} {
             if {$expect_out(1,string) >= 2} {
                 set N $expect_out(1,string)
                 set saw_panes2 1
@@ -423,7 +423,10 @@ htype "true\n"
 set after ""
 for {set i 0} {$i < 12} {incr i} {
     set after [prompt_counts $cx $ry0 $ry1]
-    if {[lindex $after 0] >= $a0 + 6} break
+    # The whole prompt, not its first glyph: a frame can land between the
+    # lambda's cells and the rest of the line (the tile paints what it has
+    # ingested), and the three asserts below read ONE frame.
+    if {[lindex $after 0] >= $a0 + 6 && [lindex $after 2] >= $b0 + 4 && [lindex $after 4] >= $c0 + 4} break
     after 500
 }
 lassign $after a1 g1 b1 ba1 c1 ca1
@@ -731,7 +734,7 @@ after 1000
 set shc [zone_centre [dict get $rz splith]]
 click [lindex $shc 0] [lindex $shc 1]
 expect {
-    -re {tapestryd: ptr btn 272 1 -> chrome (\d+) at (\d+),(\d+)} {}
+    -re {tapestryd: ptr btn 272 1 -> chrome (\d+) at (\d+),(\d+)\r} {}
     timeout { lc_fail "the press on SPLIT H was not routed to the rail" }
     eof     { lc_fail "EOF waiting for the SPLIT H press" }
 }

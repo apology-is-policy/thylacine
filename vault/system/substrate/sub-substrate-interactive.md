@@ -32,6 +32,12 @@ code:
   - tools/interactive/ls-gfx-session-image.exp
   - tools/interactive/ls-gfx-throttle.exp
   - tools/interactive/manual.exp
+  - tools/interactive/ls-gfx-gl.exp
+  - tools/interactive/ls-gfx-panes.exp
+  - tools/interactive/ls-gfx-session.exp
+  - tools/interactive/ls-halcyon-instrument.exp
+  - tools/interactive/ls-halcyon.exp
+  - tools/interactive/pty-susp-pouch.exp
   - tools/qmp-send-key.sh
 audit: none
 guarded-by: []
@@ -40,7 +46,7 @@ locks: []
 abis: []
 design: ["docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-09-18
+updated: 2026-09-21
 ---
 ## Purpose
 
@@ -426,6 +432,59 @@ per full gate ≈ 3 s against a run measured in tens of minutes.
   **not** find the flip. `-S` counts occurrences of the string, and
   `:-1` → `:-3` leaves the prefix count unchanged, so the commit that made
   the change is invisible to the search most likely to be reached for.
+
+- **Five authoring rules the fleet has paid for (2026-09-21, the lictor
+  pre-merge matrix).** Each was a red gate over a correct guest.
+
+  1. **A numeric capture that ends its pattern must be anchored.** expect
+     matches as bytes arrive, so `disp_w=([0-9]+)` fires on `disp_w=12` when
+     the serial chunk ends inside `1280`. `ls-gfx-session` read a display
+     width of `12` (and once `128`), PASSED its 85 % fill check against it --
+     a check satisfied by a broken capture -- and then failed three attempts
+     running on the zoom leg, whose pattern interpolates the width. Every
+     guest line ends `\r`, so the anchor is `([0-9]+)\r`; mid-line captures
+     anchor on the literal that follows. Swept across the fleet in the same
+     change (19 sites; the `regexp` ones read whole files and are exempt).
+  2. **A poll loop exits on the WHOLE state its asserts read.**
+     `ls-halcyon-session-instrument` polled screendumps until the second
+     prompt's lambda appeared, then asserted the cwd and the turnstile on
+     that same frame. A tile paints what it has ingested, and a frame can
+     land between the lambda and the rest of the line: 1 attempt in 2 burned.
+     The loop now waits for all three; the 6 s bound and the three distinct
+     failure messages are unchanged, so a prompt that never completes still
+     fails by name.
+  3. **On a console-renderer image the transcript mirrors the console, so the
+     gate may COUNT rows but never assume them.** Every daemon witness is a
+     transcript row (kernel #76 routes `SYS_PUTS` to the bound renderer). The
+     09-17 aux merge brought the compositor's `idle-throttle` witness, which
+     prints on a quiet second and again on the input that ends it -- inside
+     every input-then-observe window `ls-halcyon` has. Its keyboard legs
+     assumed the ls row is one `k` above the newest row; its click leg
+     assumed exactly one line (its own report) scrolls the view. Both now
+     hold for any number of witness lines: `b` (PrevRun) steps to the newest
+     obj run however many rows intervene, and the click counts the lines that
+     landed after the run report from the same serial stream, re-aims, and
+     converges on the receiver's `click at X,Y -> no run` verdict (a miss is
+     harmless and always lands BELOW the run). The press must land while the
+     compositor is awake, or its own wake line races the hit test.
+  4. **expect's timeout is whole seconds, `timeout 0` never reads, and a
+     one-line `expect { ... }` is a single glob pattern.** A zero timeout
+     matches only what the previous expect left in the buffer; the next
+     call with a nonzero timeout goes to the pty and returns at once with
+     everything pending. A drain-until-quiet therefore costs a full second --
+     which is the compositor's idle threshold, so the drain itself changes
+     the state being measured. Measured with a three-line harness before the
+     gate was written against it.
+  5. **A gate asks the IMAGE which lever it carries, and a lever it lacks is
+     a SKIP (77) with the bake recipe -- never a late FAIL, never a PASS.**
+     `ls-gfx-session` asserts the LEGACY session (an ended tile closes; the
+     zoomed leaf is borderless) and ran forty legs green on an Instrument
+     session image before failing as "input never reached the focused tile":
+     Instrument RETAINS an ended tile. It now reads the session's own
+     `halcyond: theme ...; profile <word>` line. NOT tapestryd's boot line:
+     the compositor is spawned before the pivot to the pool, so its startup
+     read of `/lib/halcyon/profile` always misses and it says `built-in` on
+     every image, until a halcyond pushes the bundle.
 
 ## Provenance
 

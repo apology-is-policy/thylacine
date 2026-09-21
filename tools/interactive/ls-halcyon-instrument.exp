@@ -335,7 +335,7 @@ set cx [expr {$W - 4 - 14}]
 click $hx $hy
 set timeout $lc_cmd_timeout
 expect {
-    -re {tapestryd: ptr btn 272 1 -> chrome (\d+) at (\d+),(\d+)} {
+    -re {tapestryd: ptr btn 272 1 -> chrome (\d+) at (\d+),(\d+)\r} {
         lc_step "the compositor routed the press to chrome surface $expect_out(1,string) at $expect_out(2,string),$expect_out(3,string)"
     }
     timeout { lc_fail "the press on the header was not routed to a chrome surface" }
@@ -397,7 +397,7 @@ lc_pass "instrument: the header's secondary press summons the tile verb menu on 
 # Leaving the header: the compositor tells the chrome surface.
 ptr_to $hx 20
 expect {
-    -re {tapestryd: ptr leave chrome (\d+)} {}
+    -re {tapestryd: ptr leave chrome (\d+)\r} {}
     timeout { lc_fail "leaving the header was not told to its chrome surface" }
     eof     { lc_fail "EOF waiting for the leave" }
 }
@@ -414,7 +414,7 @@ set shc [zone_centre $shz]
 click [lindex $shc 0] [lindex $shc 1]
 set timeout $lc_cmd_timeout
 expect {
-    -re {tapestryd: ptr btn 272 1 -> chrome (\d+) at (\d+),(\d+)} {}
+    -re {tapestryd: ptr btn 272 1 -> chrome (\d+) at (\d+),(\d+)\r} {}
     timeout { lc_fail "the press on SPLIT H was not routed to the rail's chrome surface" }
     eof     { lc_fail "EOF waiting for the SPLIT H press" }
 }
@@ -521,7 +521,7 @@ lc_pass "instrument: the pointer over the track paints its rule amber_muted (9.2
 ptr_op "btn left down"
 set timeout $lc_cmd_timeout
 expect {
-    -re {tapestryd: divider drag start pane (\d+) track 0 at (\d+),(\d+)} {
+    -re {tapestryd: divider drag start pane (\d+) track 0 at (\d+),(\d+)\r} {
         if {$expect_out(1,string) ne $root} { lc_fail "the drag captured pane $expect_out(1,string), expected the root $root" }
     }
     timeout { lc_fail "the press on the track did not start a drag" }
@@ -821,7 +821,7 @@ lc_pass "instrument: the mark opens the workspace list on the menu surface; Esc 
 # Off the rail (34 tall) onto the console body: the LEAVE.
 ptr_to [expr {$W / 2}] 200
 expect {
-    -re {tapestryd: ptr leave chrome (\d+)} {}
+    -re {tapestryd: ptr leave chrome (\d+)\r} {}
     timeout { lc_fail "leaving the rail was not told to its chrome surface" }
     eof     { lc_fail "EOF waiting for the rail's leave" }
 }

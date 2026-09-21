@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
-updated: 2026-09-18
+updated: 2026-09-21
 ---
 ## Purpose
 
@@ -818,6 +818,22 @@ construction: one IRQ wait per GPU command.
 
 ## Caveats
 
+- **The system tier is read from a root that never has it (2026-09-21, OPEN).**
+  `system_theme()` (`main.rs`) reads `/lib/halcyon/profile` and
+  `/lib/halcyon/theme.toml` once at startup, and every boot says `profile
+  built-in (no /lib/halcyon/profile)` -- on images whose pool carries both.
+  `joey` spawns warden (and so this process) BEFORE it pivots to the Stratum
+  pool (`usr/joey/joey.c`, the warden spawn well above `t_pivot_root`); a
+  territory is cloned at spawn, so this process's root is the ramfs for life
+  and the path exists only in the pool. The compositor agrees with the image
+  only because every halcyond resolves the bundle itself and PUSHES it before
+  it mints chrome (`theme applied (renderer push)` / `(session push)`), and the
+  default pre-login console (aurora) draws no compositor chrome -- so the
+  legacy built-in is in force only in the pre-push window. Cures, undecided:
+  bake both files into the ramfs too; re-read on the first renderer connect;
+  or delete the tier and name the push as the only channel (then HALCYON-THEME
+  3.4 changes with it). A gate must never read this boot line as "the profile
+  in force".
 - **`h_version` replies `9P2000.L` to any proposal** and sets
   `version_done` unconditionally, where ptyfs replies `unknown` for an
   unsupported version. Inert — the only client proposes `9P2000.L` —
@@ -1320,6 +1336,17 @@ click (a `workspace` switch, a restore tool's split) during an idle stretch
 would therefore run at the idle rate. The condition set is incomplete the
 moment the first compositor transition exists, and widening it is part of that
 chunk, not a follow-up.
+
+**The throttle's witness is a test-build line (2026-09-21).** Each rate change
+says `tapestryd: idle-throttle A -> B Hz (quiet_ms=.. animating=.. dyn=..)`;
+`ls-gfx-throttle` reads it. It fires on every quiet second and again on the
+input that ends it, and a console renderer mirrors every daemon line into the
+transcript the operator is typing into (kernel #76), so it sits under
+`cfg(feature = "test-mode")` with the other levers rather than in every build.
+It reached `main` unconditional in the 09-17 aux merge and turned `ls-halcyon`
+red there: the gate's row arithmetic assumed no line lands between a command's
+output and the keypress that follows it
+([[sub-substrate-interactive]], the authoring rules).
 
 **The chunk owes THREE gates, not one, and that is what sizes it.** Widening
 the tick condition so a verb-started transition does not run at `IDLE_HZ`

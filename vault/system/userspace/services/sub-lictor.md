@@ -251,8 +251,15 @@ once idle across the last 2^31 ids still fails closed.
 
 Open after that review:
 
-- `test-mode` is a default cargo feature of `lictor` and `tapestryd`; a
-  production compile without it has not been verified.
+- `test-mode` is still a default cargo feature of `lictor` and `tapestryd`, so
+  every image carries the levers (the #880 strip-for-production class). The
+  production compile is now VERIFIED (2026-09-21): `cargo check --release -p
+  lictor --no-default-features --features backend`, and `-p tapestryd` /
+  `-p halcyond` with `--features guest`. It did not build before that: the
+  broker ran `Gpu::pair_protocol_selftest` -- a `cfg(test-mode)` method -- on
+  request in every build. The verb is now refused (`BadField`) without the
+  feature, like the four `Test*` verbs beside it; nothing in the tree sends it
+  (the backend runs the selftest itself at init).
 - A display smaller than 800x720 refuses the whole seat at startup. There is no
   reduced layout.
 - The main loop polls at 100 Hz whether or not anything is happening, and the

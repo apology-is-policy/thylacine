@@ -658,6 +658,10 @@ impl Driver for Tapestryd {
                 // Witness the transition: `dyn` distinguishes an intent pin
                 // from an activity pin, and the flap the DYNAMIC pin removes
                 // was previously unobservable (the felt-but-uncaught bug).
+                // Test builds only: it fires on every input after a quiet
+                // second, and a console renderer mirrors it into the
+                // transcript the operator is typing into.
+                #[cfg(feature = "test-mode")]
                 if eff_hz != cur_hz {
                     say!(
                         "tapestryd: idle-throttle {} -> {} Hz (quiet_ms={} animating={} dyn={})",

@@ -45,9 +45,14 @@
 #         is placed by the SESSION compositor ("menu N placed ... for path");
 #         Enter picks `ls` -> "menu ran: ls -l -- '...'" typed into the tile.
 #
-# GATED ON THE BAKED LEVER (the cfg-4 / ls-halcyon precedent): the pool carries
-# /lib/halcyon/session = "on" only under THYLACINE_HALCYON_SESSION=1. On a
-# default image login spawns ut and this scenario SKIPs cleanly.
+# GATED ON THE BAKED LEVERS (the cfg-4 / ls-halcyon precedent): the pool carries
+# /lib/halcyon/session = "on" only under THYLACINE_HALCYON_SESSION=1, and this
+# gate asserts the LEGACY profile, which `--config ci` pins. Its image is:
+#
+#   THYLACINE_HALCYON_SESSION=1 tools/build.sh kernel --config ci
+#
+# On a default (ut) image, or an Instrument session image, it SKIPs (77) with
+# that recipe.
 #
 # aurora is the pre-login console renderer and does NOT silence serial, so login
 # is drivable over serial exactly as ls-ci; halcyond's markers ride the kernel
@@ -87,9 +92,11 @@ expect {
         lc_step "session path taken (lever image)"
     }
     -ex "Thylacine textual shell" {
-        lc_step "default (ut) image -- session lever absent; SKIP"
+        # A lever the image lacks is a SKIP (77), never a FAIL or a PASS.
+        puts "\nLS-CI SKIP: default (ut) image -- this scenario drives the session\
+ compositor. Bake with: THYLACINE_HALCYON_SESSION=1 tools/build.sh kernel --config ci"
         lc_quit
-        exit 0
+        exit 77
     }
     -ex "login incorrect"  { lc_fail "auth rejected for michael -- see ls-ci's #233 note (an echoed byte after 'password: ' truncated the passphrase)" }
     -re {EXTINCTION:}      { lc_extinction_fail "extinction during login/session spawn" }
@@ -114,6 +121,31 @@ expect {
     -re {EXTINCTION:} { lc_extinction_fail "extinction during the Direct handoff" }
     timeout { lc_fail "scanout never went Direct after backgrounding" }
     eof     { lc_fail "qemu exited during the Direct handoff" }
+}
+
+# --- THE PROFILE: this gate asserts the LEGACY session's behaviour ---
+# An ended tile CLOSES under `legacy` and is RETAINED under `instrument`
+# (HALCYON-INSTRUMENT I-3), the zoomed lone leaf is borderless and full-width
+# only under `legacy`, and the palette below is Daylight's. On an Instrument
+# image the first forty legs pass and the exit leg then reads as "input never
+# reached the focused tile" -- a regression that does not exist. The session
+# says which profile it resolved; ask it, and SKIP with the recipe.
+# `--config ci` pins `legacy`; the Instrument twin is
+# ls-halcyon-session-instrument.exp.
+expect {
+    -re {halcyond: theme [^\r\n]*; profile legacy \(} {
+        lc_step "the session resolved the legacy profile (this gate's geometry)"
+    }
+    -re {halcyond: theme [^\r\n]*; profile instrument \(} {
+        puts "\nLS-CI SKIP: an Instrument-profile session image -- this scenario asserts the\
+ LEGACY session (an ended tile closes; the zoomed leaf is borderless). Bake with:\
+ THYLACINE_HALCYON_SESSION=1 tools/build.sh kernel --config ci"
+        lc_quit
+        exit 77
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction before the session resolved its profile" }
+    timeout { lc_fail "the session never said which profile it resolved" }
+    eof     { lc_fail "qemu exited before the session resolved its profile" }
 }
 
 # --- s7a-4: the session published its Daylight palette to /env (tiles inherit it) ---
@@ -195,7 +227,7 @@ proc h4d_flags {} {
 while {(!$saw_armed || !$saw_ingest || !$saw_init || !$saw_tagged || !$saw_focus || !$saw_released || !$saw_wspawn || !$saw_tier || !$saw_objs || !$saw_exit) && $tries < 80} {
     incr tries
     expect {
-        -re {ut: beacon rich \(transcript zones armed\)|halcyond: session tile ingest live|halcyond: session init: /bin/halcyon layout restore default \(pid \d+\)|tapestryd: claim on pane [0-9]+ reserved by conn [0-9]+ \(E_AGAIN\)|halcyon: tagged 1 pane\(s\) for the session compositor|halcyon: focus -> pane ([0-9]+)|tapestryd: conn [0-9]+ released [0-9]+ reserved empty leaf/leaves|halcyond: session tile leaf=([0-9]+) spawned pid=[0-9]+ [0-9]+x[0-9]+ /bin/halcyon welcome|halcyon: welcome shown \(tier (rich|none)\)|halcyond: session tile leaf=([0-9]+) presents objs \(([0-9]+)\)|halcyond: session init exited \(code ([0-9-]+)\)|tapestryd: session-tiling active=([0-9]+) min_w=([0-9]+) sum_w=([0-9]+) disp_w=([0-9]+)} {
+        -re {ut: beacon rich \(transcript zones armed\)|halcyond: session tile ingest live|halcyond: session init: /bin/halcyon layout restore default \(pid \d+\)|tapestryd: claim on pane [0-9]+ reserved by conn [0-9]+ \(E_AGAIN\)|halcyon: tagged 1 pane\(s\) for the session compositor|halcyon: focus -> pane ([0-9]+)|tapestryd: conn [0-9]+ released [0-9]+ reserved empty leaf/leaves|halcyond: session tile leaf=([0-9]+) spawned pid=[0-9]+ [0-9]+x[0-9]+ /bin/halcyon welcome|halcyon: welcome shown \(tier (rich|none)\)|halcyond: session tile leaf=([0-9]+) presents objs \(([0-9]+)\)|halcyond: session init exited \(code ([0-9-]+)\)|tapestryd: session-tiling active=([0-9]+) min_w=([0-9]+) sum_w=([0-9]+) disp_w=([0-9]+)\r} {
             # ONE alternation: the leftmost marker in the buffer is the one
             # consumed, so a chunk carrying several markers yields them in
             # arrival order, one per iteration. Groups: 1 focus pane, 2 the
@@ -277,7 +309,7 @@ if {!$saw_reserved} { lc_step "H-4d: (the compositor did not try to mint while t
 # fallback when the reconcile beat the last marker.
 set timeout 15
 expect {
-    -re {tapestryd: session-tiling active=([0-9]+) min_w=([0-9]+) sum_w=([0-9]+) disp_w=([0-9]+)} {
+    -re {tapestryd: session-tiling active=([0-9]+) min_w=([0-9]+) sum_w=([0-9]+) disp_w=([0-9]+)\r} {
         if {$expect_out(1,string) < 2} {
             exp_continue
         }
@@ -433,7 +465,7 @@ set sumw 0
 set minw 0
 set dispw 0
 expect {
-    -re {tapestryd: session-tiling active=([0-9]+) min_w=([0-9]+) sum_w=([0-9]+) disp_w=([0-9]+)} {
+    -re {tapestryd: session-tiling active=([0-9]+) min_w=([0-9]+) sum_w=([0-9]+) disp_w=([0-9]+)\r} {
         if {$expect_out(1,string) < 3} {
             exp_continue
         }
@@ -544,7 +576,7 @@ expect {
 # --- two tiles again: the tour + the shell share the width ---
 set timeout 30
 expect {
-    -re {tapestryd: session-tiling active=2 min_w=[0-9]+ sum_w=([0-9]+) disp_w=([0-9]+)} {
+    -re {tapestryd: session-tiling active=2 min_w=[0-9]+ sum_w=([0-9]+) disp_w=([0-9]+)\r} {
         if {$expect_out(1,string) < ($expect_out(2,string) * 85 / 100)} {
             lc_fail "after B closed, the tour + the shell fill only $expect_out(1,string) of $expect_out(2,string)"
         }

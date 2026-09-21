@@ -2286,7 +2286,7 @@ mod tests {
             assert!(f.has(ch), "U+{cp:04X} is baked but not in the subset");
             n += 1;
         }
-        assert_eq!(n, 207, "the bake's glyph count");
+        assert_eq!(n, 208, "the bake's glyph count");
         // The box glyphs stay OUT of the bake (the procedural path owns
         // them on the cell; a font's box glyphs are metrics-bound to its
         // own line box). Since I-5 the SUBSET carries U+2500-257F for the

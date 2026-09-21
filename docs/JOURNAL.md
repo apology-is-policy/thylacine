@@ -209,8 +209,73 @@ reaps the compositor, so there is no restart path and a dead lictor means a
 dark display until reboot. The approved mockup's blurred backdrop is unbuilt.
 No Pi 400/500 qualification. And the larger debt: NOTHING Astra landed in
 `main` has had an independent read -- the PCI interrupt subsystem,
-`CAP_POST_SERVICE` (CLAUDE.md's I-2 row still says six elevation bits; `caps.h`
-has eight), the devsrv/devcap changes, netd's close path.
+`CAP_POST_SERVICE` (CLAUDE.md's I-2 row said six elevation bits against
+`caps.h`'s eight until this run corrected it), the devsrv/devcap changes,
+netd's close path.
+
+### Addendum, same day: the lever images, and three gates that were wrong about a correct guest
+
+The ci fleet cannot see a session or a console renderer, so the matrix baked
+one image per lever and ran what each unlocks. First pass: 11 of 13 green, and
+`ls-graphical-sak` found its `lictor: gpu fence sequence rewound at 2147483648
+(device idle)` line on the real device, which is the fence fix engaged rather
+than merely compiled. Two red, one burned attempt, and none of the three was
+the guest.
+
+**`ls-gfx-session`, three attempts of three, on the zoom leg.** The guest had
+zoomed: `session-tiling active=1 min_w=1280 sum_w=1280 disp_w=1280`, five
+times over. The gate was waiting for `min_w=12 sum_w=12`. Forty lines earlier
+it had captured the display width with `disp_w=([0-9]+)`, the serial chunk had
+ended inside `1280`, and expect matches as bytes arrive. The part worth
+keeping: the SAME capture had already PASSED a check -- "the tiles fill 1254 of
+12" clears an 85 % bar -- so a broken capture satisfied one assertion before it
+starved the next. This exact lesson is pinned in the memory index ("an
+unanchored `(\d+)` fires on a partial chunk") and the fleet still carried
+nineteen of them. Anchored all that read the value (`\r`, or the literal that
+follows); one of my own anchors was wrong for ten minutes (`panes (\d+)` is
+mid-line) and the census, not a boot, caught it.
+
+**`ls-halcyon-session-instrument`, one attempt of two.** "A second prompt did
+not add its cwd on the path ink (6 -> 6)". The poll loop left as soon as the
+lambda's amber arrived and then asserted the cwd and the turnstile on that one
+frame; a tile paints what it has ingested so far. It now leaves on all three.
+Not called a flake and not re-run until green: the bound and the three failure
+messages are unchanged, so a cwd that NEVER arrives still fails by name.
+
+**`ls-halcyon`, three of three, and red on `main` since 09-17 without anyone
+knowing.** `halcyond: act: no obj run on row 149/155 (block 22 item 2)`: Enter
+had landed on the `pwd` row, one below the `ls` row the gate wanted. Rows
+150..154 were five `tapestryd: idle-throttle` lines. A console renderer mirrors
+every daemon's output into the transcript (kernel #76, deliberately), the
+compositor says a line each time it drops to 15 Hz after a quiet second and
+another on the input that wakes it, and the gate's 1.5 s settle after each key
+guarantees both. Whether the wake line is IN the transcript when Esc snapshots
+the rows is a race between two processes -- which is why attempt 3 got past the
+keyboard leg and died on the click leg instead, where the same two lines moved
+the rows under the pointer. The witness came from aux (09-04) and reached
+`main` in Astra's 09-17 merge; `main`'s last green `ls-halcyon` log is 09-16
+and has zero such lines. The earlier fix to this same leg (`17d4cd7f`) had
+named the class -- THE OBSERVER EFFECT, in capitals, in the gate -- and then
+compensated for exactly one line. So the cure this time is not a second
+constant: the keyboard legs step by RUN (`b`), which no number of witness rows
+can displace, and the click leg COUNTS the lines that landed after the run
+report from the stream it is already reading, re-aims, and converges on the
+receiver's own `-> no run` verdict. Two things had to be measured before that
+could be written: expect's `timeout 0` never reads the pty, and its timeout is
+whole seconds -- the compositor's idle threshold -- so a drain-until-quiet
+changes the state it is counting. And the row pitch is the run's laid height
+(17), not the mono cell the old arithmetic used (14): equal for one row,
+three pixels out per row after that. The witness itself moved under
+`cfg(test-mode)`; every image is still a test build, so that changes nothing
+the operator sees today and is only the right class for the strip.
+
+**The open item that was a defect.** "No production compile has been verified"
+was on the list as a caveat. Verifying it took one command and it failed:
+lictor's broker ran `pair_protocol_selftest` -- a test-mode method -- on
+request in every build. Refused without the feature now, like the four `Test*`
+verbs beside it; lictor, tapestryd and halcyond all check clean with
+`--no-default-features`. A caveat that one command would have settled should
+never have been written down as a caveat.
 
 ---
 ## 2026-09-18 (Codex, single-agent) -- portable graphical SAK approval

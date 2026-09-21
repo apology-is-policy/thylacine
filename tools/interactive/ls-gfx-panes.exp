@@ -106,7 +106,7 @@ proc scale_legs {want} {
     }
     lc_pass "panes: the seat booted at scale $want ([expr {$want == 100 ? "EDID-derived" : "declared on the cmdline"}]) and Super+= stepped to [expr {$want + 25}]"
     expect {
-        -re {tapestryd: scale fan direct (\d+) configure serial (\d+)} {
+        -re {tapestryd: scale fan direct (\d+) configure serial (\d+)\r} {
             set fan_surf $expect_out(1,string); set fan_serial $expect_out(2,string)
         }
         timeout { lc_fail "the DIRECT console got no redraw CONFIGURE on the scale change (the arm fanned nothing -- the follower would stay at $want until an unrelated relayout)" }
@@ -122,7 +122,7 @@ proc scale_legs {want} {
         timeout { lc_fail "Super+0 never reset the scale (no `tapestryd: scale [expr {$want + 25}] -> $want (chord-reset)`)" }
     }
     expect {
-        -re {tapestryd: scale fan direct (\d+) configure serial (\d+)} {
+        -re {tapestryd: scale fan direct (\d+) configure serial (\d+)\r} {
             if {$expect_out(2,string) == $fan_serial} { lc_fail "the reset's fan re-used serial $fan_serial: no fresh CONFIGURE was queued" }
         }
         timeout { lc_fail "the DIRECT console got no redraw CONFIGURE on the scale reset" }

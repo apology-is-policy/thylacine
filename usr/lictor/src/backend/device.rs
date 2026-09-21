@@ -104,8 +104,12 @@ impl Device {
                 Info::from(&self.gpu).put(&mut out);
             }
             Request::PairProtocolSelftest => {
-                let result = self.gpu.pair_protocol_selftest();
-                result.put(&mut out);
+                // A test lever: a production service carries no selftest and
+                // refuses the verb rather than run device work on request.
+                #[cfg(feature = "test-mode")]
+                self.gpu.pair_protocol_selftest().put(&mut out);
+                #[cfg(not(feature = "test-mode"))]
+                return Err(Error::BadField);
             }
             Request::QueryEdid => {
                 let result = self.gpu.query_edid();

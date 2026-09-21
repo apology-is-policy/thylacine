@@ -95,7 +95,7 @@ lc_pass "jpeg inline: view decoded /test.jpg + halcyond injected the 640x400 ras
 set timeout 60
 lc_send "gallery /test.jpg"
 expect {
-    -re {gallery: /test\.jpg 640x400 shown (\d+)x(\d+) at \d+,\d+ on (\d+)x(\d+)} {
+    -re {gallery: /test\.jpg 640x400 shown (\d+)x(\d+) at \d+,\d+ on (\d+)x(\d+)\r} {
         lc_step "jpeg fullscreen: gallery decoded /test.jpg, shown\
                  $expect_out(1,string)x$expect_out(2,string) on\
                  $expect_out(3,string)x$expect_out(4,string)"
