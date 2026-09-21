@@ -81,7 +81,24 @@ unwind). Hard constraint: no permission-mutation syscall (Pouch mmap is anon-onl
 Whether std-on-Pouch is for ports only or a sanctioned way to write new Thylacine
 programs is the operator's call (O-5); the target name + `std::os` surface + toolchain
 pinning are scripture-before-code (a design note first). Operator voted xhigh for the
-browser arc. Next: read `docs/handoffs/041-rust-std-track-to-aux.md`.
+browser arc.
+
+Same day, the design note landed and was ratified. `docs/RUST-STD-DESIGN.md`
+(`4cce758d`, pushed): grounded against `origin/main` (the allocator rides pouch's
+`mallocng` for free; the stack-guard problem -- pouch's `mprotect` is ENOSYS --
+dissolves to a *non-membership* opt-out in std's guard allowlist, no kernel
+change, no permission syscall) and a sourced prior-art survey (a research subagent
+read Hurd PR 115230 / libc 3325 and the current std `sys` layout, which had
+refactored out of `sys/pal/unix/*` since the Hurd PR -- a premise the survey
+corrected). The operator ratified three things: the target name
+`aarch64-unknown-thylacine`; O-5 = std-on-pouch is a **sanctioned first-party
+substrate**, not ports only (a third substrate beside native `no_std` and ported
+POSIX -- an ARCHITECTURE 3.5 amendment now owed + coordinated with main, since aux
+is 154 behind main on that shared core file); and R-0. Main, bringing up
+JavaScriptCore on `browser-b0` the same day, handed over two pouch fixes std will
+need (0033 one-page main-thread stack, 0034 sysconf) and the abort-backtrace shim
+for pouch's silent `_Exit(127)`. Next: R-0 -- the out-of-tree fork + target spec +
+libc module + std arms.
 
 ---
 ## 2026-09-16 (aux, Opus 5, effort max) -- the Operator's Manual restarts: a writing guide, a design, and the reader
