@@ -9,8 +9,10 @@
 # is not the claim any of these cfgs makes: a buggy cfg that starts failing a
 # DIFFERENT invariant has stopped documenting its bug.
 #
-# The two liveness properties were shown able to FAIL before being trusted
+# The liveness properties were shown able to FAIL before being trusted
 # (SPEC-TO-CODE.md, the poll.tla section); a liveness cfg is 'clean' here.
+# DeathTerminates and StopHonoured also have buggy cfgs of their own, judged
+# like the invariant ones: a TEMPORAL violation of the named property.
 set -u
 cd "$(dirname "$0")"
 export PATH="/opt/homebrew/opt/openjdk/bin:$PATH"
@@ -20,17 +22,19 @@ trap 'rm -rf "$TMP"' EXIT
 STAMP="$TMP/stamp"; : > "$STAMP"
 
 # clean: cfg, expected distinct states ("-" = do not pin)
-CLEAN="poll:395
-poll_notimeout:176
-poll_liveness:395
-poll_liveness_notimeout:176"
+CLEAN="poll:2146
+poll_notimeout:944
+poll_liveness:2146
+poll_liveness_notimeout:944"
 
 # buggy: cfg, invariant that must be the one reported
 BUGGY="poll_buggy_check_before_register:NoMissedPoll
 poll_buggy_no_wake:NoMissedPoll
 poll_buggy_clear_after_sample:NoMissedPoll
 poll_buggy_lazy_unregister:NoStaleHook
-poll_buggy_return_on_wake:NoSpuriousZero"
+poll_buggy_return_on_wake:NoSpuriousZero
+poll_buggy_no_loop_die_check:DeathTerminates
+poll_buggy_no_loop_stop_check:StopHonoured"
 
 run() {  # $1 = cfg basename -> sets RC and LOG
     LOG="$TMP/$1.log"
@@ -60,8 +64,8 @@ echo "$BUGGY" | while IFS=: read -r cfg want; do
     if [ "$RC" -eq 0 ]; then
         echo "FAIL $cfg: rc=0 -- the counterexample did NOT fire; $want is unguarded"
         echo fail > "$TMP/failed"
-    elif ! grep -q "Invariant $want is violated" "$LOG"; then
-        echo "FAIL $cfg: rc=$RC but not via $want -- got: $(grep -o 'Invariant [A-Za-z]* is violated' "$LOG" | head -1)"
+    elif ! grep -qE "Invariant $want is violated|Temporal property $want was violated" "$LOG"; then
+        echo "FAIL $cfg: rc=$RC but not via $want -- got: $(grep -oE 'Invariant [A-Za-z]* is violated|Temporal property [A-Za-z]* was violated' "$LOG" | head -1)"
         echo fail > "$TMP/failed"
     else
         echo "ok   $cfg: rc=$RC, $want violated as claimed"

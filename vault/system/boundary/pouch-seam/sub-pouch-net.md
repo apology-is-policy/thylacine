@@ -16,7 +16,9 @@ code:
   - usr/lib/pouch/patches/0038-pouch-stdio-socket-fds.patch
   - usr/lib/pouch/patches/0039-pouch-fdset-guard-ppoll-tag.patch
   - usr/lib/pouch/patches/0041-pouch-poll-stream-socket-shape.patch
+  - usr/lib/pouch/patches/0042-pouch-timeout-clamp.patch
   - usr/pouch-hello/pouch-hello-sockets.c
+  - usr/pouch-hello/pouch-hello-poll.c
 audit: hard
 guarded-by: [inv-i1, inv-i28]
 validated-by: [prose, gate-smp]
@@ -259,10 +261,13 @@ round against this surface before it had a node).
   says why only when fd 2 is a terminal: fd 2 is routinely not stderr here
   (a prover is spawned with {0,1}; stratumd with none, so its fd 2 is its
   third real kernel handle), and the first version wrote ~110 bytes of
-  English at that handle's cursor (r3 F4). **0039 is the series' first patch
-  into a PUBLIC header**: the guard is compiled into the PORT's objects, so a
-  port is rebuilt, not relinked, to have it (in-tree that is automatic — a
-  stale sysroot rebuild removes every port's output). It also
+  English at that handle's cursor (r3 F4). **0039 puts CODE into a PUBLIC
+  header**: the guard is compiled into the PORT's objects, so a port is
+  rebuilt, not relinked, to have it (in-tree that is automatic — a stale
+  sysroot rebuild removes every port's output). This dossier and 0039 called
+  it the series' FIRST public-header patch, adopting round 3 F8's premise;
+  round 4 F6 found 0001, 0003-0010 and 0021 editing `bits/syscall.h.in`
+  (installed `<bits/syscall.h>`) -- numbering constants, not code. It also
   routes `ppoll()` through the tag-aware `poll()` (it was a raw
   `SYS_poll`: POLLNVAL, counted ready, a busy-spin; the failure 0015 fixed
   in `poll()` and not there). **That is the honest minimum, not the fix.**
@@ -285,7 +290,12 @@ round against this surface before it had a node).
   gives a CONNECTED AF_UNIX slot the stream-socket SHAPE in `poll()`: the
   kernel's row is pipe-like (`POLLHUP|POLLERR`, no `POLLIN` at a drained EOF —
   what the native 9P servers are written to), and a program written to sockets
-  expects a peer's orderly close to read `POLLIN|POLLHUP` with no `POLLERR`.
+  expects a peer's orderly close to read `POLLIN|POLLHUP` with no `POLLERR`
+  -- and `POLLOUT` too when asked (round 4 F4): Linux's `unix_poll` reports a
+  stream socket writable after the peer's close ("prevents stuck sockets"),
+  and a writer waiting on `POLLOUT|POLLERR`, having lost the `POLLERR` here,
+  would otherwise spin on a bare `POLLHUP` instead of writing and meeting the
+  close in the write's error.
   The loop every port has — `POLLIN`? then `read`; 0 means closed — never sees
   its `POLLIN` otherwise and spins on a `poll()` that returns at once. Done
   once, at the boundary line. The prover's leg is sequenced by barriers so no
@@ -296,10 +306,23 @@ round against this surface before it had a node).
 - **An ACCEPTED AF_UNIX socket is not covered by 0041.** `accept()` returns
   the kernel handle untagged (0006's design), so `poll()` cannot tell it from a
   pipe without a kernel query per fd per call, and a pouch SERVER still sees
-  the pipe-like row when its client closes. No in-tree pouch server polls an
-  accepted socket (stratumd blocks in `read()`, thread per connection). Folds
+  the pipe-like row when its client closes. One in-tree pouch server does poll
+  an accepted socket -- stratumd's fs_pool `pool_socket_pending`, a
+  zero-timeout `poll(POLLIN)` that counts ANY revents as "a client has
+  pipelined", `POLLHUP`/`POLLERR` included, so the pipe-like row changes
+  nothing for it (this dossier said no server did until round 4 F5). Folds
   into the small-integer-socket-fd redesign above — an fd→slot side table
   covers accepted sockets too.
+- **Timeout conversion (0042, round 4 F12, pre-existing since 0005).**
+  `ppoll()` and `select()` fold a timespec/timeval into the kernel's
+  millisecond `int`. They computed `tv_sec * 1000` in signed `long long`, UB
+  past ~9.2e15 s: `tv_sec = 2^62` wrapped to a 0 ms timeout and returned 0 at
+  once, where a TIME_MAX-style "forever" is common. `pselect()`'s microsecond
+  round-up carried into `tv_sec` with a `+= 1` that overflowed at TIME_MAX
+  (then `select()` answered `EINVAL`). 0042 clamps before the multiply
+  (anything above `INT_MAX/1000` s is the `INT_MAX`-ms ceiling) and stops the
+  carry at `INT_MAX` s. `/pouch-hello-poll` leg 5 pins all three with a
+  helper thread whose late byte the call must still be parked to receive.
 - **The tag-aware set is still not the POSIX set** (census 2026-09-21: every
   site in the patched `src/` that passes an fd to a raw syscall, outside
   `src/network/`). That census method cannot see a call that takes a

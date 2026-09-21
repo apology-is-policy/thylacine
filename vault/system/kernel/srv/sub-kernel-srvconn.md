@@ -119,7 +119,20 @@ together, so either endpoint sees `POLLHUP|POLLERR` on the same edge, with
 to supply — the native 9P servers are written to these rows — and is added
 once, at the boundary line, by pouch's `poll()` ([[sub-pouch-net]], 0041).
 Atomic sample+register under both chan locks (c2s → s2c); `pw == NULL` is
-the sample-only call.
+a pure sample (sys_poll passes a hook on every pass since its round-4
+re-registration).
+
+**Readiness is the RING's, not the I/O role's** (B-0 audit round 4 F7).
+`srvconn_io_nonblock` answers `EAGAIN` while a blocking reader or writer of
+the same channel holds its role, though this sample says ready: an event
+loop polls, tries, gets `EAGAIN`, polls again. The spin is bounded by the
+holder's progress (a reader holds its role over bytes it is taking, a
+writer over room it is filling) and a userspace poller re-enters through
+the EL0 tail, where the tick preempts it for the holder — Linux's shape
+for a socket one thread reads blocking while another polls it. The role is
+not folded into the sample: it is per-operation serialization, not a
+readiness level, and a role-aware `POLLIN` would need a walk at every role
+release.
 
 **ONE `poll_list`, FOUR edges, TWO endpoints.** Every ring mutation walks
 `cn->poll_list` after dropping the channel lock it mutated under:
@@ -136,7 +149,13 @@ the sample-only call.
 So a walk is a real edge for some pollers on the list and noise for the
 rest. That is sound ONLY because `sys_poll_for_proc` re-arms and sleeps
 again on an empty re-sample ([[sub-kernel-poll]], the re-arm) — the two
-landed together and must not be separated. Until 2026-09-21 only the first
+landed together and must not be separated. Each row has a kernel witness;
+the c2s-drain walk in `srvconn_server_recv_blocking` got its own only at
+round 4 F9 (`poll.devsrv_client_pollout_wakes_on_server_blocking_drain` --
+deleting the walk had passed every kernel test). `_send_blocking`'s
+per-chunk walks are witnessed by the sockets prover alone. The cost of one
+list for four edges is a walk of every endpoint's pollers on every 9P
+reply frame (round 4 F8, tracked: split per endpoint). Until 2026-09-21 only the first
 row and the last walked the list: a client poller was never woken by its
 reply, and — the half nobody had asked about — a nonblocking SERVER that
 polled `POLLOUT` after `EAGAIN` was never woken by a blocking client drain.

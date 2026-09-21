@@ -31,7 +31,10 @@ dev9p.poll bridge's userside.
   **It returns 0 only at its deadline** (and never for `timeout_ms < 0`):
   a wake that turns out to be for nothing the caller asked about is
   followed by another sleep, not by a return. Until 2026-09-21 it was
-  followed by a return — see Mechanism step 5.
+  followed by a return — see Mechanism step 5. A DYING caller returns 0
+  from any pass (it dies at its EL0-return tail); a STOPPED caller parks
+  inside the call, with no hook listed, and resumes the same poll against
+  the same deadline.
 - `nfds` ∈ [1, `POLL_MAX_NFDS` = 64]. **Deliberately decoupled from
   `PROC_HANDLE_MAX`**, which is now **1024** — 64 at the decoupling,
   256 by [[chg-2026-06-24-355-poll-decouple]], 1024 since the #198
@@ -61,8 +64,11 @@ dev9p.poll bridge's userside.
   readiness, not access, and POSIX permits polling a write-only fd.
 - The `Dev.poll` vtable op: `dev->poll(spoor, events, pw)` returns
   current revents and, iff `pw != NULL`, registers it — **atomically
-  with the sample, under the object's own lock**. `pw == NULL` is
-  sample-only (the post-wake re-scan and the probe path).
+  with the sample, under the object's own lock**. `sys_poll_for_proc`
+  passes a hook on EVERY pass (since audit round 4); `pw == NULL` is a
+  pure sample for other in-kernel callers and tests. A `.poll` MAY choose
+  which of its lists to register on by the state it samples (the
+  console's episode list) — the choice holds for one pass.
 
 ## Mechanism
 
@@ -78,34 +84,60 @@ dev9p.poll bridge's userside.
 4. `TSLEEP_INTR` (#811 death/terminate) ⇒ skip the re-sample — the
    thread dies at its EL0-return check — but the sweep still runs:
    the hooks are stack memory and MUST be unlisted.
-5. **The re-arm** (2026-09-21; [[spec-poll]] `ClearFlags` → `Resample`
-   → `EvaluateWake`). A flag is a HINT, not a verdict: one hook list
-   serves every poller of an object whatever each asked for (a SrvConn's
-   list carries four readiness edges for two endpoints —
+5. **The re-arm** (2026-09-21; [[spec-poll]] `Rearm` → `LoopCheck` →
+   `Resample` → `EvaluateWake`). A flag is a HINT, not a verdict: one
+   hook list serves every poller of an object whatever each asked for (a
+   SrvConn's list carries four readiness edges for two endpoints —
    [[sub-kernel-srvconn]]), and readiness is a LEVEL a competing reader
-   can lower between the wake and the look. So: clear every flag
-   (`poll_waiter_rearm`, under the hook list's lock — the lock a
-   producer sets it under), THEN re-sample every fd (`pw = NULL`). That
-   order is the only sound one: an event landing between the two sets a
-   flag that survives into the next `tsleep`; one that landed before the
-   clear is seen by the sample, which runs under the object's lock after
-   the producer released it. Ready, or `TSLEEP_TIMEDOUT` ⇒ the sweep.
-   Otherwise an explicit `timer_now_ns() >= deadline_ns` test, then
+   can lower between the wake and the look. Each pass therefore
+   RE-REGISTERS: `poll_unhook_all` takes every hook off its list, drops
+   every retained ref, and clears every hook (off its list no producer
+   can reach it, so the clear needs no lock); then the loop's own death
+   and stop checks (below); then each fd's `.poll` runs WITH its hook
+   again — the first scan's install-and-sample. An event before an fd's
+   install is seen by its sample; one after reaches the fresh hook. Ready,
+   or `TSLEEP_TIMEDOUT` ⇒ the sweep. Otherwise an explicit
+   `timer_now_ns() >= deadline_ns` test, then `sched_yield_hint` (a
+   noise pass bought nothing; queued work on this CPU runs first), then
    **loop to step 3 against the same absolute deadline**. The explicit
    test is load-bearing: `tsleep` prefers a set flag to a passed
    deadline, so a producer that never stops walking a list would hold
    the poller past its timeout for ever (`PollTerminates`).
+   *Why re-register, not re-sample* (audit round 4 F1): the first form of
+   the re-arm kept every hook where the first scan put it and only
+   re-sampled. That is sound for an object with one list and wrong for a
+   Dev that chooses its list by state: the console files a frozen poller
+   on `episode_poll_list`, and a hook left there after the episode ENDed
+   never saw another keystroke — `poll(-1)` on the console hung until the
+   next SAK ([[sub-kernel-cons]]; `cons_poll.tla` `BUGGY_NO_REREGISTER`).
+   Re-registration also makes the fd re-resolve WITH its hook (a closed fd
+   reports `POLLNVAL` at the next wake), where the re-sample had sampled a
+   re-bound fd while sleeping on the old object's list.
+   *The loop's own death and stop checks* (round 4 F2): `tsleep`'s #811
+   die-check and its 8c-2 stop detour sit BEHIND its cond test, so a
+   producer that sets a flag inside every re-sample window keeps every
+   `tsleep` returning `AWOKEN` before either: a noise-driven `poll(-1)`
+   was unkillable and unstoppable. Each pass checks `thread_die_pending`
+   (⇒ the sweep, 0) and parks on `proc_stop_sleeper_park` when a stop is
+   pending — with every hook already off, so no producer walks to a
+   parked poller; the park returns `SLEEP_INTR` on death (DEATH WINS).
+   **Residue, the operator's:** syscalls run IRQ-masked end to end, so a
+   noise-driven poll with NOTHING else runnable still spins with
+   interrupts off until its deadline — a preemption-model question, not a
+   poll fix (`pipe_block_locked` and `chan_role_acquire` share it).
    *What this replaced:* the empty re-sample fell through and returned 0
    — `poll(fd, 10 s)` reported a timeout after microseconds whenever a
    second reader won the bytes, and `poll(-1)` returned 0, which POSIX
    never permits. [[spec-poll]] was green over it for the module's
    whole life because it modeled readiness as a monotonic edge and a
    flag as a verdict: the state did not exist.
-6. **The sweep, in load-bearing order**: unregister every hook
-   (idempotent), THEN scribble `magic = 0` (reversed, a concurrent
-   producer walk holding the list lock would extinct on the zeroed
-   magic), THEN `handle_put` every retained ref (below) — only after
-   no waiter references any object's list.
+6. **The sweep, in load-bearing order**: `poll_unhook_all` — unregister
+   every hook (idempotent), THEN `handle_put` every retained ref (below:
+   only after no waiter references any object's list, so a final put's
+   close hook frees a list we are off), THEN clear — and only after that
+   scribble `magic = 0` (on a still-listed hook, a concurrent producer
+   walk holding the list lock would extinct on the zeroed magic). A pass
+   that already unhooked makes the first two steps no-ops.
 
 **The retain discipline** (RW-2 2C-F1, [[fnd-rw2-2cf1]]): a
 registered hook lives on the OBJECT's embedded list across the whole
@@ -114,8 +146,9 @@ last handle mid-sleep — `spoor_clunk` frees the object and its
 embedded list, leaving `pw->list` dangling and the unregister
 spin-locking freed memory. So the register scan RETAINS the #844
 `handle_get` obj ref whenever it actually registered
-(`pw->list != NULL`), transferring it to `held[i]`; the sweep releases
-all of them after unregistering. The retain is transitively
+(`pw->list != NULL`), transferring it to `held[i]`; every re-arm pass and
+the sweep release all of them after unregistering, and each re-register
+scan takes them afresh. The retain is transitively
 sufficient for both real registering paths (pipe ring and devsrv
 connection — each frees its embedded list only at the Spoor's last
 clunk). The **listener** retain is INERT ([[fnd-rw2-r2poll-f1]],
@@ -145,9 +178,21 @@ release/acquire pair carries the flag to the woken cond. The full
 chain: object lock → list lock → (the wake enters the wait chain:
 `g_timerwait` → rendez → runq). Unregister takes ONLY the list lock —
 that asymmetry is what lets the sweep run without deadlocking against
-a producer holding the object lock. The list lock is non-irqsave; no
-IRQ handler enters it (the console's IRQ-side readiness is relayed to
-process context precisely to honor this — the cons_poll design).
+a producer holding the object lock. **Every list op takes the lock
+IRQSAVE** (audit round 4 F3, pre-existing): no IRQ handler enters the
+list, but it nests under object locks IRQ handlers DO take
+(`g_cons.lock` and `g_cons_drain.lock`, by the UART RX IRQ). Taken plain,
+console_mgr — a kthread with IRQs on — could be interrupted inside its
+walk by an RX IRQ spinning on `g_cons.lock` while another CPU held
+`g_cons.lock` in `cons_poll` spinning on the list lock: CPU0 dead in IRQ
+context, the other IRQ-masked, a guest wedge. The rule is lockdep's
+"IRQ-unsafe lock nested under an IRQ-safe one": a lock taken while
+holding a lock some IRQ takes is masked everywhere. The console still
+relays its IRQ-side readiness to process context — that keeps the
+per-byte IRQ's work O(1) — but no longer because the list forbids it.
+No deterministic test exists (it needs an IRQ inside a list hold on one
+CPU while another holds the object lock); the guard is the comment at
+the list ops, the audit row, and the SMP gate.
 
 Double-register, a stale magic mid-walk, or `pw->list` set but absent
 from the list are all extinctions — corruption, not recoverable
@@ -163,9 +208,12 @@ with the hook flag as the cross-lock handoff. `NoStaleHook` pins the
 sweep; `NoSpuriousZero` the re-arm (0 only at the deadline);
 `PollTerminates` its loop bound; `StableReadyReturns` replaces the
 retired `PollReturnsWhenReady` ("a set flag leads to a return" is false
-by design now). `specs/check-poll.sh` runs the four clean + five buggy
-cfgs and asserts WHICH invariant each buggy one violates; both liveness
-properties were sabotaged in scratch before being trusted.
+by design now); `DeathTerminates` and `StopHonoured` the loop's own
+checks. `specs/check-poll.sh` runs the four clean + seven buggy cfgs
+(two of them liveness: `no_loop_die_check`, `no_loop_stop_check`) and
+asserts WHICH property each buggy one violates; the clean counts are
+pinned (2146 / 944). The list-choosing half of re-registration is
+[[spec-cons-poll]]'s (`BUGGY_NO_REREGISTER`, `_CADENCE`).
 
 ## Error paths
 
@@ -192,10 +240,16 @@ why `POLL_MAX_NFDS` is a frame bound, not an fd-table bound.
   a Dev that registers on a DIFFERENT list than the one it samples
   breaks the atomicity argument.
 - The INTR arm must never skip the sweep.
-- The re-arm: the clear precedes the sample for EVERY waiter; the hooks
-  and the retained refs survive the loop and come off only at the
-  sweep; `timeout_ms == 0` never enters it; the loop's own deadline test
-  stays. `poll.timeout_survives_a_busy_list` is its device witness, and
+- The re-arm: every pass unhooks (unregister-all THEN put-all THEN
+  clear) before it re-registers; the die and stop checks run on every
+  pass, with no hook listed; `timeout_ms == 0` never enters it; the
+  loop's own deadline test stays; nothing in a pass may sleep while a
+  hook is listed except `tsleep` itself (the stop park runs unhooked).
+  `poll.death_ends_a_noise_driven_poll` / `poll.stop_parks_a_noise_
+  driven_poll` pin the checks (a real Proc's thread on the busy Dev
+  below), `cons.episode_frozen_poller_follows_end` /
+  `cons.episode_prior_poller_not_woken_by_keys` the re-registration.
+  `poll.timeout_survives_a_busy_list` is the deadline's device witness, and
   its first form did NOT discriminate: a send/recv producer on another
   thread lands a walk between a clear and the next `tsleep` only by luck,
   and with the deadline test removed the test still passed (measured).
@@ -204,7 +258,9 @@ why `POLL_MAX_NFDS` is a frame bound, not an fd-table bound.
   re-sample re-flags the hook inside the window. The walking stops after
   1 s so a kernel without the test still returns; what separates the two
   is WHEN the last sample happened (at the 50 ms deadline, or when the
-  producer went quiet).
+  producer went quiet) — measured from the FIRST sample since round 4
+  F9, so a poller the scheduler starts late cannot read as one that
+  returned late.
 - **A wake site may walk its list for ANY state change; what it may
   never do is fail to walk it for one.** That licence is what lets one
   list serve two endpoints, and it exists only because of the re-arm.
@@ -244,4 +300,6 @@ emptiness probe) → [[chg-2026-06-24-355-poll-decouple]] → the re-arm
 (2026-09-21, B-0 libc audit r3 F1/F2: spec extended first, scripture
 `6684e7da`; five `poll.*` tests, incl.
 `poll.devsrv_client_wakes_on_reply_only`, which pins `NoSpuriousZero`
-on a real parked poller).
+on a real parked poller) → audit round 4 the same day (scripture
+`e55b86ef`: re-registration, the loop's death/stop checks, the irqsave
+list lock; two more poll tests and two cons tests).

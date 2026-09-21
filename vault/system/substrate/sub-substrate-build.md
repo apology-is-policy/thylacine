@@ -140,6 +140,16 @@ Note what makes this different in kind from the two staleness checks: those
 watch mtimes and can only warn. This one reads the artifact's own internal
 arithmetic and refuses.
 
+**What the count check cannot see is WHERE a hunk lands** — and a review once
+read its clean output as "no fuzz/offset/reject line" (B-0 poll audit round 4
+F6, when pouch 0029 had in fact applied two lines off for its whole life). So
+the pouch musl series is applied with `patch -F 0`: a hunk whose context does
+not match exactly fails the build. That matters on the Linux builders, whose
+GNU `patch` fuzzes up to two context lines by default and says so only on
+stdout; the control was measured — a perturbed context line applies under
+`-F 2` with exit 0 and fails under `-F 0`. The port patch loops are not yet
+fuzz-strict.
+
 **A fourth guard warns about a stage the main chain never refreshes.** The
 compiler-toolchain staging step is reachable only as its own explicit
 target, never from `all`, so a rebuilt graphics binary does not reach the
