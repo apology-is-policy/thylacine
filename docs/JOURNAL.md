@@ -143,8 +143,20 @@ byte-identical to `../libc-thylacine`. So BOTH durable patches now provably
 recreate their forks from pristine -- the README's long-standing "recreate both
 forks from pristine sources" claim, previously only established for rust-src, is
 now measured for libc too.
-OWED: only the thyla-pi real-silicon confirmation remains -- CONFIRMATION, not a
-blocker.
+
+**Operator decisions (this run).** (1) The thyla-pi real-silicon confirmation:
+HOLD it and bundle it with R-2's pi work, rather than pay a fresh --config ci
+build + ~2.7 GB (sparse) pool sync + pi KVM boot now for near-zero marginal
+assurance over the HVF witness (which is real hardware virtualization, not
+emulation) on this ARMv8.0-baseline binary. (2) R-2 (the crate tail toward
+Servo): CHECK BACK when unblocked -- do not pre-authorize; re-surface for a fresh
+scope/direction vote once main's pouch 0033-0040 land. R-2 is gated on main
+regardless: per yip 0099 those deps moved further out (main's B-0 ci came back
+15/77 RED on the kernel client-poll defect, so main is building the full
+srvconn.c client-poll arm -- 4 incomplete wake edges -- before the pouch batch,
+and will take pouch writev/readv/fcntl/dup as its own libc chunk after B-0).
+So track R rests here: R-1 done + re-validated + pushed; nothing actionable until
+main's pouch work lands.
 
 ---
 ## 2026-09-21 (aux, Opus 4.8, effort xhigh) -- R-0 REACHED: `std` compiles for aarch64-unknown-thylacine
