@@ -3922,11 +3922,17 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
     // UM-8c F5: a union dirfd holds member[0]; a create must land in the union's
     // first MCREATE member, not member[0]. spoor_create_install CONSUMES the
     // parent ref, so swap in the MCREATE member (clunking member[0]) first.
+    // A DISSOLVED union makes the handle a plain handle on member[0] (ARCH
+    // 9.6.10): create there, in a fresh unopened clone.
     if (src->union_snap && src->union_snap->point) {
         int e = 0;
-        struct Spoor *cm = stalk_union_create_member(p, src->union_snap->point, &e);
+        struct Spoor *m0 = NULL;
+        bool dissolved = stalk_union_dissolved(p, src, &m0);
+        struct Spoor *cm = dissolved
+            ? m0
+            : stalk_union_create_member(p, src->union_snap->point, &e);
         spoor_clunk(src);
-        if (!cm) return e ? -(s64)e : -(s64)T_E_ACCES;
+        if (!cm) return dissolved ? -(s64)T_E_IO : (e ? -(s64)e : -(s64)T_E_ACCES);
         src = cm;
     }
 
@@ -4705,11 +4711,20 @@ static bool spoor_same_mount_identity(const struct Spoor *a, const struct Spoor 
 // the member the mutation should act on -- the holder of `leaf` (remove) or the
 // first MCREATE member (create) -- ref-held (caller clunks). Returns NULL when
 // `c` is not a union (caller acts on `c` directly, *err untouched) OR when a
-// union has no holder / MCREATE member (*err set to a negative -T_E_*).
+// union has no holder / MCREATE member (*err set to a negative -T_E_*). A union
+// that has DISSOLVED makes `c` a plain handle on member[0] (ARCH 9.6.10), which
+// is what the resolver already says for `openat(c, ...)`: act on member[0], in a
+// fresh unopened clone (the handle itself may be opened, and a Dev may refuse to
+// walk or create from an opened Spoor).
 static struct Spoor *sys_union_dirfd_member(struct Proc *p, struct Spoor *c,
                                             const char *leaf, bool want_create,
                                             s64 *err) {
     if (!c->union_snap || !c->union_snap->point) return NULL;
+    struct Spoor *m0 = NULL;
+    if (stalk_union_dissolved(p, c, &m0)) {
+        if (!m0) *err = -(s64)T_E_IO;
+        return m0;
+    }
     int e = 0;
     struct Spoor *m = want_create
         ? stalk_union_create_member(p, c->union_snap->point, &e)
@@ -12861,23 +12876,25 @@ static struct Spoor *viv_mutation_parent(struct Proc *p, u64 path_va,
 
     struct Spoor *root = territory_root_ref(p->territory);
     if (!root)                   { *err_out = -(s64)T_E_INVAL;  return NULL; }
-    int serr = 0;
     // STALK_REMOVE (UM-7 F3): a union parent resolves to the mount point
     // UNCROSSED; *is_union_out then tells the caller to select the member that
-    // HOLDS the leaf (viv_union_member), not member 0 / the MCREATE member.
-    struct Spoor *parent = sys_stalk_parent(p, root, rpath, leaf_start,
-                                            STALK_REMOVE, &serr);
+    // HOLDS the leaf (viv_union_member), not member 0 / the MCREATE member. The
+    // resolver says so itself (stalk_remove_parent). This used to be a probe of
+    // the table AFTER stalk returned, which a peer's unmount could answer
+    // wrongly in both directions -- R2-F4 fixed the shrink to one member by
+    // probing index 0, and a shrink to ZERO still read as "not a union" and
+    // handed the COVERED directory to the mutation (shed audit round 3, F3).
+    // Now the answer is fixed when the resolver chooses: a union that dissolves
+    // afterwards makes stalk_union_member_holding find no member -> ENOENT,
+    // never the point.
+    const char *pp = (leaf_start == 0) ? "." : rpath;
+    u64 pl         = (leaf_start == 0) ? 1   : leaf_start;
+    int serr = T_E_NOENT;
+    bool upoint = false;
+    struct Spoor *parent = stalk_remove_parent(p, root, pp, pl, &serr, &upoint);
     spoor_clunk(root);
     if (!parent)                 { *err_out = -(s64)serr;       return NULL; }
-    if (p->territory) {
-        // R2-F4: probe index 0 ("is this the uncrossed mount point STALK_REMOVE
-        // left me"), NOT index 1. A >=2-member test flips to "not union" if a
-        // peer unmounts to a single member between stalk and here -- routing the
-        // unlink onto the covered mounted-onto directory. Index 0 is stable and
-        // stalk_union_member_holding handles any member count (1..N).
-        struct Spoor *m0 = mount_member_at(p->territory, parent, 0, NULL);
-        if (m0) { spoor_clunk(m0); *is_union_out = true; }
-    }
+    *is_union_out = upoint;
     return parent;
 }
 

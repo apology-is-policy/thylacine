@@ -423,6 +423,16 @@ static struct Spoor *stalk_union_handle_walkable(struct Spoor *h) {
     return h;
 }
 
+bool stalk_union_dissolved(struct Proc *p, struct Spoor *h, struct Spoor **member0) {
+    *member0 = NULL;
+    if (!h || !h->union_snap || !h->union_snap->point) return false;
+    struct Spoor *m0 = mount_member_at(p ? p->territory : NULL,
+                                       h->union_snap->point, 0, NULL);
+    if (m0) { spoor_clunk(m0); return false; }
+    *member0 = clone_walk_zero(stalk_union_handle_walkable(h));
+    return true;
+}
+
 // path_has_dotdot -- pre-scan for a ".." component. The POUNCE compresses a
 // run of components into ONE trail entry (intermediates never materialize as
 // Spoors), which is incompatible with `..`'s pop-one-component semantics --
@@ -770,7 +780,7 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
                                 const char *path, u64 pathlen,
                                 int amode, u32 omode, int *errp,
                                 struct t_stat *stat_out, bool *stat_done,
-                                bool *crossed_pheno) {
+                                bool *crossed_pheno, bool *union_point_out) {
     if (!start || !path) { if (errp) *errp = T_E_INVAL; return NULL; }
     // Reject an unknown amode LOUDLY rather than silently degrading to walk-only
     // (stalk-1 audit F1). stalk-2 adds STALK_MOUNT; POUNCE adds STALK_STAT; D-1
@@ -906,7 +916,13 @@ restart:
         if (crossed) trail[depth++] = crossed;
     }
     floor_depth = depth;
-    wbase = base;
+    // Where a depth-0 component is walked FROM. A union handle is walked in its
+    // UNOPENED form whether or not its union still lives: the first component
+    // goes through the members (union_base below), but a `..` back to the base,
+    // or a relative symlink found at the union's top level, walks from here --
+    // and a Dev may refuse to walk the opened handle (9P forbids a Twalk from an
+    // opened fid). == base for everything but a full-snap union handle.
+    wbase = stalk_union_handle_walkable(base);
 
     // UM-8c F5: a union DIRFD used as a resolution base holds member[0] + the
     // union_snap (member 0's identity is not a mount point, so the base cross
@@ -926,7 +942,7 @@ restart:
     //    only while it still hosts a member in THIS Territory; once the members
     //    are gone (unmounted, or shed by a chroot elsewhere) the handle is a
     //    plain handle on member[0] (ARCH 9.6.10) -- which is what `base` is,
-    //    resolved from in its walkable form (`wbase`).
+    //    resolved from in its walkable form (`wbase`, above).
     // depth == 0: a base that CROSSED (something was mounted over member[0]'s
     // identity) is searched as that mount, and must not leave a second ref for
     // the descent branch to overwrite.
@@ -937,8 +953,6 @@ restart:
             spoor_clunk(m0);
             union_base = base->union_snap->point;
             spoor_ref(union_base);
-        } else {
-            wbase = stalk_union_handle_walkable(base);
         }
     }
 
@@ -1722,6 +1736,19 @@ per_component:
     // its own iteration, so this only ever fires for the base-set case.
     if (union_base) { spoor_clunk(union_base); union_base = NULL; }
 
+    // STALK_MOUNT names a mount POINT, never a mounted root. A resolution that
+    // ends at the bottom of a CROSSED base -- no real component ("/", "."), or a
+    // `..` run back down to it -- would otherwise hand SYS_MOUNT the base's
+    // mounted root as the key, which nothing is keyed on: unmount("/") could
+    // never name a mount over the root, and MREPL would stack instead of
+    // replacing. Name the base itself, as "/mnt/." names "/mnt" (#81). Plan 9's
+    // namec(Amount) likewise never crosses the channel it starts from.
+    if (amode == STALK_MOUNT && floor_depth > 0 && depth == floor_depth) {
+        stalk_unwind(trail, depth);
+        depth = 0;
+        carried_valid = false;
+    }
+
     // Determine the quarry.
     if (depth > 0) {
         // Pop the deepest resolved Spoor off the trail; trail[0..depth) now
@@ -1746,6 +1773,19 @@ per_component:
                                   ? base->union_snap->point : base;
         zero_from_point = (zbase != base);
         quarry = clone_walk_zero(zbase);
+        if (!quarry && zero_from_point) {
+            // The point itself would not clone (its tree's session is gone -- a
+            // per-user tree torn down at logout). If nothing is mounted there
+            // any more the handle is member[0] regardless, which never needed
+            // the point; a live union still does (the cross below keys on it).
+            struct Spoor *m0 = mount_member_at(p ? p->territory : NULL, zbase, 0, NULL);
+            if (m0) {
+                spoor_clunk(m0);
+            } else {
+                quarry = clone_walk_zero(wbase);
+                zero_from_point = false;
+            }
+        }
         if (!quarry) goto fail;
     }
 
@@ -1768,7 +1808,12 @@ per_component:
             // selects the member that HOLDS the leaf via
             // stalk_union_member_holding -- a remove must act on the entry's own
             // member, never member 0 or the MCREATE member. `carried` still
-            // describes the (uncrossed) mount point, so it stays valid.
+            // describes the (uncrossed) mount point, so it stays valid. The
+            // caller learns it holds a union POINT from HERE, not from probing
+            // the table afterwards: a peer's unmount between this decision and
+            // that probe would make the point read as an ordinary directory --
+            // the covered one -- and route the mutation into it.
+            if (union_point_out) *union_point_out = true;
         } else if (is_union && amode == STALK_CREATE) {
             // A create PARENT: cross to the FIRST MCREATE member (ARCH 9.5), not
             // member 0. No MCREATE member -> the union has no writable target ->
@@ -1822,10 +1867,9 @@ per_component:
                 // path into (reachable by plain unmount("/"), and by a chroot
                 // whose shed dropped the union's entries). Degrade to member[0],
                 // which is what the handle itself is -- cloned from its walkable
-                // form, NOT from `wbase`: the union may have been live at the
-                // base-set probe and dissolved since (a peer Thread's unmount).
+                // form (`wbase`), since a Dev may refuse to walk the opened one.
                 spoor_clunk(quarry);
-                quarry = clone_walk_zero(stalk_union_handle_walkable(base));
+                quarry = clone_walk_zero(wbase);
                 if (!quarry) { union_snap_free(snap); goto fail; }
                 carried_valid = false;
             }
@@ -1938,7 +1982,15 @@ fail:
 struct Spoor *stalk_err(struct Proc *p, struct Spoor *start,
                         const char *path, u64 pathlen, int amode, u32 omode,
                         int *errp) {
-    return stalk_core(p, start, path, pathlen, amode, omode, errp, NULL, NULL, NULL);
+    return stalk_core(p, start, path, pathlen, amode, omode, errp, NULL, NULL, NULL,
+                      NULL);
+}
+
+struct Spoor *stalk_remove_parent(struct Proc *p, struct Spoor *start,
+                                  const char *path, u64 pathlen, int *errp,
+                                  bool *union_point) {
+    return stalk_core(p, start, path, pathlen, STALK_REMOVE, 0, errp, NULL, NULL,
+                      NULL, union_point);
 }
 
 // stalk_exec (VIVARIUM section 13) -- the exec-resolution variant: identical to
@@ -1957,7 +2009,7 @@ struct Spoor *stalk_exec(struct Proc *p, struct Spoor *start,
                          const char *path, u64 pathlen, int amode, u32 omode,
                          int *errp, bool *crossed_pheno) {
     return stalk_core(p, start, path, pathlen, amode, omode, errp, NULL, NULL,
-                      crossed_pheno);
+                      crossed_pheno, NULL);
 }
 
 int stalk_stat(struct Proc *p, struct Spoor *start,
@@ -1970,7 +2022,7 @@ int stalk_stat(struct Proc *p, struct Spoor *start,
     bool done = false;
     struct Spoor *q = stalk_core(p, start, path, pathlen,
                                  STALK_STAT | (int)flags, 0,
-                                 errp, out, &done, NULL);
+                                 errp, out, &done, NULL, NULL);
     if (done) return 0;   // the walk-query fast path filled *out; no Spoor existed
     if (!q)   return -1;  // *errp carries the cause
     // Fallback quarry (walk_attrs-less final Dev / leaf mount point crossed to

@@ -237,6 +237,12 @@ fn append_leg(c: &mut Checker) {
 
 const UNION_DIR: &str = "/d1-union";
 const UNION_MARKER: &str = "/d1-union/covered-marker";
+// union-c's members: two Stratum directories, so member[0] is a 9P directory and
+// its handle a 9P fid -- which refuses a Twalk once opened. /proc and /ctl (the
+// other stages' members) are kernel Devs that walk an opened Spoor without
+// complaint, which is how a rule wrong for 9P passed both of them.
+const UNION_M0: &str = "/d1-union-m0";
+const UNION_M1: &str = "/d1-union-m1";
 
 fn opens_under(dirfd: i64, name: &str) -> bool {
     let fd = unsafe {
@@ -252,6 +258,12 @@ fn union_stage(stage: &[u8]) -> i64 {
     use libthyla_rs::territory::{mount, unmount, MountFlags};
     let mut c = Checker { checks: 0, fails: 0 };
     let me = format!("{}", unsafe { libthyla_rs::t_getpid() });
+
+    if stage == b"union-c" {
+        union_c(&mut c);
+        t_putstr(&format!("symlink-probe: union-c {} checks, {} failures\n", c.checks, c.fails));
+        return if c.fails != 0 { 1 } else { 0 };
+    }
 
     let (proc_h, ctl_h) = match (File::open_with_opath("/proc"), File::open_with_opath("/ctl")) {
         (Ok(p), Ok(k)) => (p, k),
@@ -298,11 +310,23 @@ fn union_stage(stage: &[u8]) -> i64 {
             }
             Err(_) => c.ok("U-a dissolved: \"/\" opens", false),
         }
+        // A NAME off the dissolved root, not only "/": the first component is
+        // walked from member[0], and member[1]'s names are gone.
+        c.ok("U-a dissolved: member[0]'s name resolves off the root",
+             File::open_with_opath(&format!("/{}", me)).is_ok());
+        c.ok("U-a dissolved: member[1]'s name is gone",
+             File::open_with_opath("/kernel-base").is_err());
     } else {
         if unsafe { t_chroot(proc_h.as_raw_fd() as i64) } != 0 {
             fail("symlink-probe: FAIL -- union-b: chroot into /proc\n");
         }
         let ufd = uh.as_raw_fd() as i64;
+        // Positive control that the chroot's shed DISSOLVED the union: without
+        // it, every leg below still holds on a live union (shed audit round 3).
+        c.ok("U-b shed: member[1]'s name is gone off the dirfd",
+             !opens_under(ufd, "kernel-base"));
+        c.ok("U-b shed: member[0]'s name resolves off the dirfd",
+             opens_under(ufd, &me));
         let dot = unsafe {
             libthyla_rs::t_open(ufd, b".".as_ptr(), 1, libthyla_rs::T_OPATH)
         };
@@ -322,6 +346,56 @@ fn union_stage(stage: &[u8]) -> i64 {
     if c.fails != 0 { 1 } else { 0 }
 }
 
+// union-c: a union of two STRATUM directories over a Stratum directory, held
+// through an OPENED (OREAD) handle -- the handle class whose member[0] is an
+// opened 9P fid. Live, a `..` back to the base must walk member[0] unopened;
+// dissolved, "." and member[0]'s names must still resolve, member[1]'s must not,
+// and the covered directory must never answer.
+fn union_c(c: &mut Checker) {
+    use libthyla_rs::territory::{mount, unmount, MountFlags};
+    let (m0, m1) = match (File::open_with_opath(UNION_M0), File::open_with_opath(UNION_M1)) {
+        (Ok(a), Ok(b)) => (a, b),
+        _ => fail("symlink-probe: FAIL -- union-c: O_PATH on the member directories\n"),
+    };
+    if mount(&m0, UNION_DIR, MountFlags::REPL).is_err()
+        || mount(&m1, UNION_DIR, MountFlags::AFTER).is_err()
+    {
+        fail("symlink-probe: FAIL -- union-c: mount the Stratum members\n");
+    }
+    c.ok("U-c control: member[0]'s name resolves through the union",
+         File::open_with_opath(&format!("{}/zero-only", UNION_DIR)).is_ok());
+    c.ok("U-c control: member[1]'s name resolves through the union",
+         File::open_with_opath(&format!("{}/one-only", UNION_DIR)).is_ok());
+    c.ok("U-c control: the covered marker is hidden by the union",
+         File::open_with_opath(UNION_MARKER).is_err());
+
+    let uh = match File::open(UNION_DIR) {
+        Ok(f) => f,
+        Err(_) => fail("symlink-probe: FAIL -- union-c: OREAD open of the union\n"),
+    };
+    let ufd = uh.as_raw_fd() as i64;
+    c.ok("U-c live: member[1]'s name off the OPENED dirfd", opens_under(ufd, "one-only"));
+    c.ok("U-c live: back at the base, member[0] is walked unopened",
+         opens_under(ufd, "sub/../zero-only"));
+
+    let mut gone = 0;
+    while gone < 4 && unmount(UNION_DIR).is_ok() {
+        gone += 1;
+    }
+    c.ok("U-c: both members unmounted", gone == 2);
+    let dot = unsafe { libthyla_rs::t_open(ufd, b".".as_ptr(), 1, libthyla_rs::T_OPATH) };
+    c.ok("U-c dissolved: \".\" of the OPENED dirfd opens", dot >= 0);
+    if dot >= 0 {
+        c.ok("U-c dissolved: \".\" is NOT the covered directory",
+             !opens_under(dot, "covered-marker"));
+        c.ok("U-c dissolved: \".\" is member[0]", opens_under(dot, "zero-only"));
+        unsafe { libthyla_rs::t_close(dot) };
+    }
+    c.ok("U-c dissolved: member[0]'s name off the dirfd", opens_under(ufd, "zero-only"));
+    c.ok("U-c dissolved: member[1]'s name is gone", !opens_under(ufd, "one-only"));
+    c.ok("U-c dissolved: the covered marker never answers", !opens_under(ufd, "covered-marker"));
+}
+
 // Build the covered directory + its marker, run one stage in a child, reap it.
 fn run_union_stage(c: &mut Checker, stage: &str) {
     use libthyla_rs::process::Command;
@@ -336,6 +410,17 @@ fn run_union_stage(c: &mut Checker, stage: &str) {
             .unwrap_or(false);
     if !built {
         fail("symlink-probe: FAIL -- union: build the covered directory\n");
+    }
+    if stage == "union-c" {
+        remove_union_c_members();
+        let members = fs::create_dir(UNION_M0).is_ok()
+            && fs::create_dir(&format!("{}/sub", UNION_M0)).is_ok()
+            && File::create(&format!("{}/zero-only", UNION_M0)).is_ok()
+            && fs::create_dir(UNION_M1).is_ok()
+            && File::create(&format!("{}/one-only", UNION_M1)).is_ok();
+        if !members {
+            fail("symlink-probe: FAIL -- union-c: build the member directories\n");
+        }
     }
     // joey spawns this probe with no fds, so there is no 0/1/2 to inherit and a
     // default Command refuses: hand the child three real ones. It reports
@@ -367,6 +452,19 @@ fn run_union_stage(c: &mut Checker, stage: &str) {
     // The mounts died with the child's Territory; the directory is ours again.
     let _ = fs::remove_file(UNION_MARKER);
     let _ = fs::remove_dir(UNION_DIR);
+    if stage == "union-c" {
+        remove_union_c_members();
+    }
+}
+
+// Remove union-c's member directories (idempotent: a leftover from a prior boot
+// on a preserved pool must not fail the build step).
+fn remove_union_c_members() {
+    let _ = fs::remove_file(&format!("{}/zero-only", UNION_M0));
+    let _ = fs::remove_dir(&format!("{}/sub", UNION_M0));
+    let _ = fs::remove_dir(UNION_M0);
+    let _ = fs::remove_file(&format!("{}/one-only", UNION_M1));
+    let _ = fs::remove_dir(UNION_M1);
 }
 
 #[no_mangle]
@@ -664,6 +762,7 @@ pub extern "C" fn rs_main() -> i64 {
     // The union-root stages, each in its own child (see union_stage).
     run_union_stage(&mut c, "union-a");
     run_union_stage(&mut c, "union-b");
+    run_union_stage(&mut c, "union-c");
 
     let jail = match File::open_with_opath(WORK) {
         Ok(f) => f,

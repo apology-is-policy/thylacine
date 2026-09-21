@@ -243,7 +243,14 @@ first thing to look at if anything ever streams from them.
   leans on (the class is the kernel's to assign, never the server's).
 - **The drain arm must stay paired with its unwind**, and the disarm must stay
   gated on the opened flag — walk intermediates and path-only handles reach
-  close too.
+  close too. The flag is a sound gate only because `spoor_clone` strips `COPEN`
+  (since 2026-09-21): before that, any name walked off an OPENED `/dev` directory
+  inherited it, so an unprivileged `open("/dev")` + `openat(fd, "consdrain",
+  O_PATH)` + `close` disarmed a renderer's live drain (shed audit round 3, F1 --
+  the wider reach of H9). `devdev_walk` resolves `consdrain` with no gate; only
+  the open is gated, and the close must never act for a Spoor that did not open.
+  Pinned by `devdev.drain_opath_clone_no_disarm` and
+  `devdev.drain_walk_off_opened_dev_no_disarm`.
 - **The walk must keep reusing the caller's Spoor.** A Dev that mints its own is
   unreachable through the resolver.
 - **A new stub owes a statement about the mounted tree's authority granularity,

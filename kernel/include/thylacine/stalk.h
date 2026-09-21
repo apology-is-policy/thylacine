@@ -138,6 +138,26 @@ struct Spoor *stalk_err(struct Proc *p, struct Spoor *start,
                         const char *path, u64 pathlen, int amode, u32 omode,
                         int *errp);
 
+// stalk_union_dissolved -- true iff `h` is a union handle whose union has
+// DISSOLVED in p's Territory (its point hosts no member). The handle is then a
+// plain handle on member[0] (ARCH 9.6.10), and *member0 receives a FRESH,
+// unopened clone of it for a mutation to act on (NULL on OOM / walk failure --
+// the caller answers T_E_IO). false: not a union handle, or its union lives, and
+// *member0 is NULL. A union that dissolves after a false answer makes the
+// member selection that follows find no member: ENOENT / EACCES, never the
+// covered directory.
+bool stalk_union_dissolved(struct Proc *p, struct Spoor *h, struct Spoor **member0);
+
+// stalk_remove_parent -- stalk_err(STALK_REMOVE) plus a report: on success
+// *union_point is set true iff the quarry is a union mount point the resolver
+// left UNCROSSED (UM-7 F3), so the caller must act on the member that HOLDS the
+// leaf. Decided at the moment the resolver chose, so a later unmount cannot flip
+// it: the point itself is the covered directory and is never a mutation target.
+// The caller inits *union_point = false.
+struct Spoor *stalk_remove_parent(struct Proc *p, struct Spoor *start,
+                                  const char *path, u64 pathlen, int *errp,
+                                  bool *union_point);
+
 // stalk_exec (VIVARIUM section 13) -- stalk_err plus a phenotype report: on
 // success *crossed_pheno is set true iff the resolution crossed an MPHENO_LINUX
 // mount (the /viv/bin subtree scope; the section-12.1 rule-1 second declaration

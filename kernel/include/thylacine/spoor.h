@@ -155,6 +155,11 @@ _Static_assert(sizeof(struct Qid) == 16,
 // an OPENED fid (is_open -> EINVAL), so the dedup cannot reuse `opened`. For a
 // native Dev that opens in place both point at distinct Spoors; when Dev.open
 // returns a fresh Spoor, `opened` is that one and `walkable` is the pre-open clone.
+// Since 2026-09-21 `walkable` is ALSO what the resolver walks a union handle's
+// base from (stalk_union_handle_walkable: member[0] in its unopened form, matched
+// by identity), and the source a mutation clones once the union has dissolved --
+// so it now reaches EL0 by way of a fresh clone, and must stay unopened for the
+// snap's whole life.
 struct union_member {
     struct Spoor *opened;      // OREAD-opened dir -- the per-member readdir source
     struct Spoor *walkable;    // UNOPENED clone -- the dedup existence-probe source
