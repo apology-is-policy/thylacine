@@ -40,6 +40,10 @@
 //
 // Return non-zero on mismatch — joey treats it as a regression.
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+#include <stdint.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -78,6 +82,32 @@ int main(void) {
     printf("pouch-hello-threads: %u threads, %u iters each\n",
            NTHREADS, ITER_PER_THREAD);
     fflush(stdout);
+
+    // pouch 0033: the initial thread's reported stack must CONTAIN a main-thread local
+    // and BE the exec mapping. Two-sided on purpose: "contains" alone passed for years
+    // while the size was one page, and a bare size check would pass on a wrong base.
+    {
+        pthread_attr_t at;
+        void *base = 0;
+        size_t size = 0;
+        int local = 0;
+        if (pthread_getattr_np(pthread_self(), &at) != 0 ||
+            pthread_attr_getstack(&at, &base, &size) != 0) {
+            printf("pouch-hello-threads: main stack query FAILED\n");
+            fflush(stdout);
+            return 7;
+        }
+        uintptr_t lo = (uintptr_t)base, hi = lo + size, here = (uintptr_t)&local;
+        if (here < lo || here >= hi || size != 1024u * 1024u || hi != 0x80000000ul) {
+            printf("pouch-hello-threads: main stack WRONG: [%p, %p) size=%lu local=%p\n",
+                   base, (void *)hi, (unsigned long)size, (void *)here);
+            fflush(stdout);
+            return 8;
+        }
+        printf("pouch-hello-threads: main stack [%p, %p) size=%lu OK\n",
+               base, (void *)hi, (unsigned long)size);
+        fflush(stdout);
+    }
 
     pthread_t tids[NTHREADS];
     for (unsigned i = 0; i < NTHREADS; i++) {

@@ -109,6 +109,51 @@ stay open on purpose and return for a signature in their own scripture commits.
 The browser also has a name, and it is not one of the three thematic ones I
 had held: **Boosty**, after the operator's cat. The operator's name wins.
 
+**B-0, the same day: JavaScriptCore runs on Thylacine.** WebKit 2.54.0's `JSCOnly`
+port, static, JIT off, against a cross-built ICU 78.3: `hello-42`, German number
+formatting through ICU's data, a graceful `RangeError` on runaway recursion,
+400,000-element arrays, 256 MiB typed arrays, `WebAssembly` present, `fib(30)` in 71 ms
+on the interpreter. All of WTF compiled against Pouch with five files touched; the
+whole WebKit delta is one patch of +60/-3. It is WIP on branch `browser-b0`, ungated.
+
+*The wrong turn, which cost about an hour.* The first device runs returned status 127
+and `$errstr` said "spawn failed: io", so I went hunting in the kernel's exec path for
+why a 60 MB ELF was being refused -- read the loader, the image cache, `kmalloc`'s
+large path, compared program headers with DOSBox-X, and finally instrumented the spawn
+syscall in a scratch worktree. **Not one diagnostic fired**, and that silence was the
+finding: the kernel never refused anything. `jsc` was starting and calling `abort()`,
+which Pouch maps to `_Exit(127)` with no message -- the same number the shell uses for
+"command not found". Two things had lied to me and both were mine: my first control
+copied `/hello-rs`, which does not exist after the pivot, so the "control" failed for
+its own reason (a negative assertion satisfied by a broken fixture -- a lesson already
+in memory, walked past); and `ut` does not clear `$errstr` on success, so the message I
+read belonged to that broken control, not to `jsc`. What broke the loop was a check
+that could only answer one way: a valid control (a copied `/bin/cat`, exec'd from the
+same directory, output compared) plus a SHA-256 of the fetched binary on the device.
+After that, making `abort()` loud -- a 12-line object that prints a backtrace through
+libunwind -- found each real cause in one boot.
+
+*What JavaScriptCore found in our libc.* `pthread_getattr_np()` has told every Pouch
+program that its main-thread stack is one page: musl probes the extent with `mremap`,
+the seam ENOSYSes it, and the loop stops on its first test. Measured `size=4096`
+against a real 1 MiB. And `sysconf(_SC_PHYS_PAGES)` has been returning *uninitialised
+stack*: upstream never checks its `sysinfo` call. JSC caps its heap at twice RAM, so
+every allocation over its 8 KB large-cell cutoff failed -- arrays died at element 1003
+while 256 MiB typed arrays (plain `malloc`) sailed through, which is the asymmetry that
+pointed away from the allocator and at a limit check. Both are fixed as Pouch patches
+0033 and 0034 on the branch; 0033 is pinned by a two-sided prover check, because
+"a local lies inside the reported stack" alone passed for years while the size was wrong.
+The Rust `std` track would have met 0033 in its main-thread guard.
+
+*What it measured about the platform*, recorded as F3-F9 in `docs/browser-status.md`
+for the conversation the operator asked for before any kernel design ("mprotect, dlopen
+etc., let's talk about it"): aligned reservations want a partial `munmap` we refuse;
+decommit is an ignored `madvise` (so memory is never returned) and wires onto
+`SYS_BURROW_DECOMMIT` with no kernel change; guard pages silently do not exist; a
+256 MiB per-mapping cap that JSC adapts to; and no per-thread asynchronous signal, which
+costs nothing today and will matter for the JIT and for multi-threaded JS. The probe's
+tolerances are exactly that -- probe posture, each one named -- not answers.
+
 ---
 ## 2026-09-21 (main, Fable 5.1, effort max) -- taking over a week of another agent's work: the graphical trusted path, the chord nobody could find, and the image that booted two UIs at once
 

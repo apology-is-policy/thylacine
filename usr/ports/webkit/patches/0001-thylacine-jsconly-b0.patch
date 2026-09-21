@@ -1,0 +1,239 @@
+From dda5c5450e49b64de85a1e049c63374ae13a30c3 Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <noreply@example.invalid>
+Date: Mon, 21 Sep 2026 11:55:55 +0200
+Subject: [PATCH] thylacine: B-0 JSCOnly port patches (WIP, local only)
+
+---
+ Source/JavaScriptCore/assembler/ARM64Assembler.h      |  8 ++++++++
+ Source/JavaScriptCore/offlineasm/arm64.rb             |  2 +-
+ Source/JavaScriptCore/runtime/Options.cpp             | 10 ++++++++++
+ Source/JavaScriptCore/wasm/WasmFaultSignalHandler.cpp |  7 +++++++
+ Source/WTF/wtf/InlineASM.h                            |  4 +++-
+ Source/WTF/wtf/PlatformOS.h                           |  5 +++++
+ Source/WTF/wtf/generic/MemoryFootprintGeneric.cpp     |  5 +++++
+ Source/WTF/wtf/posix/OSAllocatorPOSIX.cpp             | 10 ++++++++++
+ Source/WTF/wtf/posix/ThreadingPOSIX.cpp               | 10 ++++++++++
+ Source/cmake/OptionsJSCOnly.cmake                     |  2 +-
+ 10 files changed, 60 insertions(+), 3 deletions(-)
+
+diff --git a/Source/JavaScriptCore/assembler/ARM64Assembler.h b/Source/JavaScriptCore/assembler/ARM64Assembler.h
+index 6cf574e1..e8ba1ef8 100644
+--- a/Source/JavaScriptCore/assembler/ARM64Assembler.h
++++ b/Source/JavaScriptCore/assembler/ARM64Assembler.h
+@@ -4043,6 +4043,14 @@ public:
+         linuxPageFlush(current, end);
+ #elif OS(WINDOWS)
+         FlushInstructionCache(GetCurrentProcess(), code, size);
++#elif OS(THYLACINE)
++        // SYS_ICACHE_SYNC (103). Userspace cannot issue the cache maintenance itself,
++        // and a silent failure would execute stale instructions, so failure is fatal.
++        register long x0 __asm__("x0") = static_cast<long>(reinterpret_cast<uintptr_t>(code));
++        register long x1 __asm__("x1") = static_cast<long>(size);
++        register long x8 __asm__("x8") = 103L;
++        __asm__ volatile("svc #0" : "+r"(x0) : "r"(x1), "r"(x8) : "memory", "cc");
++        RELEASE_ASSERT(!x0);
+ #else
+ #error "The cacheFlush support is missing on this platform."
+ #endif
+diff --git a/Source/JavaScriptCore/offlineasm/arm64.rb b/Source/JavaScriptCore/offlineasm/arm64.rb
+index e792bb0d..09cd5f61 100644
+--- a/Source/JavaScriptCore/offlineasm/arm64.rb
++++ b/Source/JavaScriptCore/offlineasm/arm64.rb
+@@ -1459,7 +1459,7 @@ class Instruction
+             $asm.putStr("#endif")
+ 
+             # On Linux, use ELF GOT relocation specifiers.
+-            $asm.putStr("#elif OS(LINUX)")
++            $asm.putStr("#elif OS(LINUX) || OS(THYLACINE)")
+ 
+             $asm.puts "adrp #{operands[1].arm64Operand(:quad)}, :got:#{operands[0].asmLabel}"
+             $asm.putStr("#if CPU(ADDRESS32)")
+diff --git a/Source/JavaScriptCore/runtime/Options.cpp b/Source/JavaScriptCore/runtime/Options.cpp
+index 683bc60a..0cf9ec41 100644
+--- a/Source/JavaScriptCore/runtime/Options.cpp
++++ b/Source/JavaScriptCore/runtime/Options.cpp
+@@ -1034,6 +1034,16 @@ void Options::notifyOptionsChanged()
+     }
+ #endif
+ 
++#if OS(THYLACINE)
++    // No per-thread signal exists to interrupt a running mutator.
++    Options::usePollingTraps() = true;
++#endif
++
++#if !HAVE(MACHINE_CONTEXT) && !OS(WINDOWS)
++    // The fault handler recovers by rewriting the faulting thread's registers.
++    Options::useWasmFaultSignalHandler() = false;
++#endif
++
+     // We can't use our pacibsp system while using posix signals because the signal handler could trash our stack during reifyInlinedCallFrames.
+     // If we have JITCage we don't need to restrict ourselves to pacibsp.
+     if (!Options::useMachForExceptions() || Options::useJITCage())
+diff --git a/Source/JavaScriptCore/wasm/WasmFaultSignalHandler.cpp b/Source/JavaScriptCore/wasm/WasmFaultSignalHandler.cpp
+index 516fbdc0..0c29a910 100644
+--- a/Source/JavaScriptCore/wasm/WasmFaultSignalHandler.cpp
++++ b/Source/JavaScriptCore/wasm/WasmFaultSignalHandler.cpp
+@@ -60,6 +60,7 @@ static constexpr bool verbose = false;
+ }
+ }
+ 
++#if HAVE(MACHINE_CONTEXT) || OS(WINDOWS)
+ static SignalAction trapHandler(Signal signal, SigInfo& sigInfo, PlatformRegisters& context)
+ {
+     RELEASE_ASSERT(signal == Signal::AccessFault);
+@@ -130,6 +131,8 @@ static SignalAction trapHandler(Signal signal, SigInfo& sigInfo, PlatformRegiste
+     return SignalAction::NotHandled;
+ }
+ 
++#endif // HAVE(MACHINE_CONTEXT) || OS(WINDOWS)
++
+ void activateSignalingMemory()
+ {
+     static std::once_flag once;
+@@ -157,9 +160,13 @@ void prepareSignalingMemory()
+ #if CPU(ARM64E) && HAVE(HARDENED_MACH_EXCEPTIONS)
+         presignedTrampoline = g_wtfConfig.signalHandlers.presignReturnPCForHandler(LLInt::getCodePtr<NoPtrTag>(wasm_throw_from_fault_handler_trampoline_reg_instance));
+ #endif
++#if HAVE(MACHINE_CONTEXT) || OS(WINDOWS)
+         addSignalHandler(Signal::AccessFault, [] (Signal signal, SigInfo& sigInfo, PlatformRegisters& ucontext) {
+             return trapHandler(signal, sigInfo, ucontext);
+         });
++#else
++        RELEASE_ASSERT_NOT_REACHED(); // Options forces useWasmFaultSignalHandler off without a machine context.
++#endif
+     });
+ }
+ 
+diff --git a/Source/WTF/wtf/InlineASM.h b/Source/WTF/wtf/InlineASM.h
+index 2937c456..5268a10d 100644
+--- a/Source/WTF/wtf/InlineASM.h
++++ b/Source/WTF/wtf/InlineASM.h
+@@ -70,7 +70,8 @@
+     || OS(HPUX)                \
+     || OS(NETBSD)              \
+     || OS(OPENBSD)             \
+-    || OS(QNX)
++    || OS(QNX)                 \
++    || OS(THYLACINE)
+     // ELF platform
+ #define HIDE_SYMBOL(name) ".hidden " #name
+ #else
+@@ -90,6 +91,7 @@
+     || OS(HURD)                \
+     || OS(NETBSD)              \
+     || OS(QNX)                 \
++    || OS(THYLACINE)           \
+     || OS(WINDOWS)
+     // GNU as-compatible syntax.
+ #define LOCAL_LABEL_STRING(name) ".L" #name
+diff --git a/Source/WTF/wtf/PlatformOS.h b/Source/WTF/wtf/PlatformOS.h
+index e3184e90..1a2c4169 100644
+--- a/Source/WTF/wtf/PlatformOS.h
++++ b/Source/WTF/wtf/PlatformOS.h
+@@ -97,6 +97,11 @@
+ #define WTF_OS_FUCHSIA 1
+ #endif
+ 
++/* OS(THYLACINE) - Thylacine (the Pouch POSIX userland) */
++#if defined(__thylacine__)
++#define WTF_OS_THYLACINE 1
++#endif
++
+ /* OS(HAIKU) - Haiku */
+ #if defined(__HAIKU__)
+ #define WTF_OS_HAIKU 1
+diff --git a/Source/WTF/wtf/generic/MemoryFootprintGeneric.cpp b/Source/WTF/wtf/generic/MemoryFootprintGeneric.cpp
+index 393310d0..c39a0469 100644
+--- a/Source/WTF/wtf/generic/MemoryFootprintGeneric.cpp
++++ b/Source/WTF/wtf/generic/MemoryFootprintGeneric.cpp
+@@ -33,8 +33,13 @@ namespace WTF {
+ 
+ size_t memoryFootprint()
+ {
++#if PLATFORM(IOS_FAMILY) || OS(LINUX) || OS(FREEBSD)
+     auto memoryUse = memoryStatus();
+     return memoryUse.memoryFootprint;
++#else
++    // memoryStatus() is declared only for the platforms above.
++    return 0;
++#endif
+ }
+ 
+ } // namespace WTF
+diff --git a/Source/WTF/wtf/posix/OSAllocatorPOSIX.cpp b/Source/WTF/wtf/posix/OSAllocatorPOSIX.cpp
+index ca44751e..2c60170a 100644
+--- a/Source/WTF/wtf/posix/OSAllocatorPOSIX.cpp
++++ b/Source/WTF/wtf/posix/OSAllocatorPOSIX.cpp
+@@ -221,11 +221,15 @@ void* OSAllocator::tryReserveUncommittedAligned(size_t bytes, size_t alignment,
+     auto* rawAligned = reinterpret_cast<uint8_t*>(roundUpToMultipleOf(alignment, reinterpret_cast<uintptr_t>(mappedSpan.data())));
+     auto alignedSpan = mappedSpan.subspan(rawAligned - mappedSpan.data(), bytes);
+ 
++#if !OS(THYLACINE)
++    // Thylacine detaches whole mappings only. The slack of an aligned reservation is never
++    // touched, so it stays uncommitted address space rather than being trimmed.
+     if (size_t leftExtra = alignedSpan.data() - mappedSpan.data())
+         releaseDecommitted(mappedSpan.data(), leftExtra, 0);
+ 
+     if (size_t rightExtra = std::to_address(mappedSpan.end()) - std::to_address(alignedSpan.end()))
+         releaseDecommitted(std::to_address(alignedSpan.end()), rightExtra, 0);
++#endif
+ 
+     return alignedSpan.data();
+ #endif // HAVE(MAP_ALIGNED)
+@@ -295,6 +299,12 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
+         size += 2 * numberOfGuardPagesOnEachEnd * pageSize();
+     }
+     int result = munmap(base, size);
++#if OS(THYLACINE)
++    // An aligned reservation's interior is not a whole mapping; its pages were decommitted
++    // by the caller and only the address range is retained.
++    if (result == -1)
++        return;
++#endif
+     if (result == -1)
+         CRASH();
+ }
+diff --git a/Source/WTF/wtf/posix/ThreadingPOSIX.cpp b/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
+index 9ea11e2d..e9f6b338 100644
+--- a/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
++++ b/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
+@@ -192,6 +192,13 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
+     }
+     g_wtfConfig.isThreadSuspendResumeSignalConfigured = true;
+ 
++#if OS(THYLACINE)
++    // Pouch delivers no per-thread asynchronous signal, so there is no handler to install
++    // and Thread::suspend() is unavailable. JavaScriptCore's users of it are switched off
++    // in Options (polling VM traps; no sampling profiler; no Wasm fault handler).
++    return;
++#endif
++
+ #if !OS(DARWIN)
+     globalSemaphoreForSuspendResume.construct(0);
+ 
+@@ -481,6 +488,9 @@ bool Thread::signal(int signalNumber)
+ auto Thread::suspend(const ThreadSuspendLocker&) -> Expected<void, PlatformSuspendError>
+ {
+     RELEASE_ASSERT_WITH_MESSAGE(this != &Thread::currentSingleton(), "We do not support suspending the current thread itself.");
++#if OS(THYLACINE)
++    RELEASE_ASSERT_NOT_REACHED_WITH_MESSAGE("Thread::suspend is unavailable: Pouch has no per-thread signal delivery.");
++#endif
+ #if OS(DARWIN)
+     kern_return_t result = thread_suspend(m_platformThread);
+     if (result != KERN_SUCCESS)
+diff --git a/Source/cmake/OptionsJSCOnly.cmake b/Source/cmake/OptionsJSCOnly.cmake
+index bac11011..8f53c1ef 100644
+--- a/Source/cmake/OptionsJSCOnly.cmake
++++ b/Source/cmake/OptionsJSCOnly.cmake
+@@ -43,7 +43,7 @@ set(ENABLE_WEBINSPECTORUI OFF)
+ set(ENABLE_WEBGL OFF)
+ set(ENABLE_WEBGPU OFF)
+ 
+-if (WIN32)
++if (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Thylacine")
+     set(ENABLE_API_TESTS OFF)
+ else ()
+     set(ENABLE_API_TESTS ON)
+-- 
+2.43.0
+

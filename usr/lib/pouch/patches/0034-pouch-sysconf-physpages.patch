@@ -1,0 +1,88 @@
+B-0 (Boosty) -- sysconf(_SC_PHYS_PAGES / _SC_AVPHYS_PAGES) tells the truth.
+
+The 0001 seam parks __NR_sysinfo at the 0xFFFF ENOSYS sentinel. Upstream's
+arm calls __lsysinfo(&si) WITHOUT checking its result and then computes from
+`si` -- a struct it never initialised. So on pouch this arm has always
+returned uninitialised stack bytes as the machine's memory size.
+
+Found by JavaScriptCore (B-0, 2026-09-21, on the device): WTF::ramSize() comes
+from this figure, the jsc shell caps the heap at 2 x ramSize, and
+CompleteSubspace::tryAllocateSlow returns null when capacity exceeds the cap.
+With a zero/garbage RAM size every allocation over the 8 KB large-cell cutoff
+failed: `a.push(n)` threw "RangeError: Out of memory" at element 1003 and
+`new Array(300000)` failed outright, while typed arrays (plain malloc, no cap)
+allocated 256 MiB without complaint.
+
+The truthful source already exists: /ctl/memory (kernel/devctl.c
+format_memory) prints "total: N pages" / "free: N pages" / "reserved: N
+pages", world-readable and already in PAGE units -- the twin of 0032's
+/ctl/sched "cpus: N". The key is matched at a line start only, so "free:"
+cannot match inside another word.
+
+Failure is HONEST, not fabricated: no /ctl in a confined namespace, a short
+read or an absent key returns -1, which POSIX callers read as "unknown". A
+made-up constant here would be the same class of lie this patch removes.
+
+What the figure means on Thylacine, stated so nobody over-reads it: this is
+the MACHINE's memory. A Proc's real ceiling is its I-32 page budget (256 MiB
+by default), which is smaller; an engine that sizes its heap from RAM will
+meet the budget first and must take the clean ENOMEM it gets there. Exposing
+the budget itself (getrlimit) is a separate, later question.
+
+--- a/src/conf/sysconf.c
++++ b/src/conf/sysconf.c
+@@ -239,15 +239,45 @@
+ 		return 1;
+ 	case JT_PHYS_PAGES & 255:
+ 	case JT_AVPHYS_PAGES & 255: ;
+-		unsigned long long mem;
+-		struct sysinfo si;
+-		__lsysinfo(&si);
+-		if (!si.mem_unit) si.mem_unit = 1;
+-		if (name==_SC_PHYS_PAGES) mem = si.totalram;
+-		else mem = si.freeram + si.bufferram;
+-		mem *= si.mem_unit;
+-		mem /= PAGE_SIZE;
+-		return (mem > LONG_MAX) ? LONG_MAX : mem;
++		/* Thylacine: SYS_sysinfo is the 0xFFFF ENOSYS sentinel, and
++		 * upstream reads `si` without checking the call -- so this arm
++		 * returned UNINITIALISED STACK as the machine's memory size.
++		 * JavaScriptCore caps its heap at a multiple of that figure and
++		 * refused every large allocation (B-0). The truthful source is
++		 * /ctl/memory (kernel/devctl.c format_memory): "total: N pages"
++		 * and "free: N pages", already in page units. Honest failure on
++		 * a miss (no /ctl in a confined namespace, short read, absent
++		 * key): -1, which callers treat as "unknown" -- never a guess. */
++		{
++			char mbuf[256];
++			const char *key = (name==_SC_PHYS_PAGES) ? "total:" : "free:";
++			size_t klen = (name==_SC_PHYS_PAGES) ? 6 : 5;
++			int mfd = open("/ctl/memory", O_RDONLY);
++			ssize_t got = 0, r, j;
++			if (mfd < 0) return -1;
++			while (got < (ssize_t)sizeof mbuf &&
++			       (r = read(mfd, mbuf+got, sizeof mbuf - got)) > 0)
++				got += r;
++			close(mfd);
++			for (j = 0; j + (ssize_t)klen < got; j++) {
++				size_t k;
++				unsigned long long n = 0;
++				int digits = 0;
++				if (j > 0 && mbuf[j-1] != '\n') continue;
++				for (k = 0; k < klen && mbuf[j+k] == key[k]; k++);
++				if (k != klen) continue;
++				j += klen;
++				while (j < got && mbuf[j] == ' ') j++;
++				while (j < got && mbuf[j] >= '0' && mbuf[j] <= '9') {
++					if (n > (unsigned long long)LONG_MAX / 10) return LONG_MAX;
++					n = n*10 + (mbuf[j]-'0');
++					j++; digits++;
++				}
++				if (!digits) return -1;
++				return (n > LONG_MAX) ? LONG_MAX : (long)n;
++			}
++			return -1;
++		}
+ 	case JT_MINSIGSTKSZ & 255:
+ 	case JT_SIGSTKSZ & 255: ;
+ 		long val = __getauxval(AT_MINSIGSTKSZ);

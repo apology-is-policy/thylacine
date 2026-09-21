@@ -61,3 +61,11 @@
 # upstream popcounted its {1} seed to 1 forever; llvmpipe/LLVM/nproc all
 # saw one CPU. Fail-soft 1.
 0032-pouch-sysconf-nprocs.patch
+# 0033: B-0 -- pthread_getattr_np() reported a ONE-PAGE main-thread stack
+# (upstream probes the extent with mremap, which the seam ENOSYSes). State the
+# exec mapping instead: [0x7ff00000, 0x80000000). Pinned by pouch-hello-threads.
+0033-pouch-getattr-np-main-stack.patch
+# 0034: B-0 -- sysconf(_SC_PHYS_PAGES/_SC_AVPHYS_PAGES) returned UNINITIALISED
+# STACK (upstream never checks its ENOSYSed sysinfo call). Read /ctl/memory
+# instead (the 0032 precedent); -1 on a miss, never a guess.
+0034-pouch-sysconf-physpages.patch

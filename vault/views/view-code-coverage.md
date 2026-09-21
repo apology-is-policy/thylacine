@@ -65,14 +65,14 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**517 owned · 53 unowned · 570 files (90% owned) · ~13991 unswept lines.**
+**517 owned · 53 unowned · 570 files (90% owned) · ~14021 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **73 files, ~32801 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
 | usr/warp-prove | 0 | 1 | 4349 |
-| usr/pouch-hello | 0 | 22 | 3384 |
+| usr/pouch-hello | 0 | 22 | 3414 |
 | kernel | 127 | 14 | 1910 |
 | usr/ports | 19 | 4 | 1631 |
 | usr/quarry | 0 | 1 | 1033 |
@@ -150,13 +150,13 @@ Excluded as harness and counted here rather than dropped: **73 files, ~32801 lin
 | usr/ports/gnumake/generated/glob.h | 163 |
 | kernel/include/thylacine/9p_srvconn_transport.h | 160 |
 | kernel/cpio.c | 152 |
+| usr/pouch-hello/pouch-hello-threads.c | 149 |
 | usr/susp-mask-child/src/main.rs | 139 |
 | usr/pouch-hello/pouch-hello-reentry.c | 133 |
 | usr/pouch-hello/pouch-hello-spawn.c | 127 |
 | usr/pouch-hello/pouch-hello-mallocng-torture.c | 126 |
 | usr/pouch-hello/pouch-hello-malloc.c | 122 |
 | usr/pouch-hello/pouch-hello-fopen.c | 120 |
-| usr/pouch-hello/pouch-hello-threads.c | 119 |
 | usr/stub-driver/stub-driver.c | 119 |
 | kernel/include/thylacine/9p_transport_loopback.h | 96 |
 | usr/pouch-hello/pouch-hello-exitgroup.c | 91 |
