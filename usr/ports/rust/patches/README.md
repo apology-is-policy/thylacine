@@ -1,8 +1,11 @@
-# track R -- the R-0 patch series (validated 2026-09-21)
+# track R -- the R-0/R-1 patch series (re-validated apply-to-pristine 2026-09-21)
 
-Two patches recreate the two out-of-tree forks from pristine sources. Both were
-validated this session: rust-src applied to a pristine tree rebuilds `std`
-green; libc applies clean with `-p1`.
+Two patches recreate the two out-of-tree forks from pristine sources. BOTH were
+re-validated apply-to-pristine on 2026-09-21 (after R-1 closed): each applies to
+a truly-pristine tree with `-p1` (dry-run clean, 0 fuzz) and reproduces the fork
+byte-for-byte -- rust-src 13/13 files identical + a forced rebuild produced an
+`r1hello` byte-IDENTICAL to the R-1 witness binary (sha256 1c300f19...); libc
+9/9 files identical to `../libc-thylacine`. See the reproduce recipe below.
 
 R-0 EXIT REACHED: `std` compiles for `aarch64-unknown-thylacine`.
 
@@ -14,7 +17,7 @@ R-0 EXIT REACHED: `std` compiles for `aarch64-unknown-thylacine`.
   `src/unix/mod.rs` family-dispatch arm, the `build.rs` check-cfg entry, and the
   4 `src/new/` tree gate additions (thylacine joins the posix/linux_like pthread
   cfg gates -- an upstream gap: `new/musl/` assumed every musl target is Linux).
-- **`rust-src-thylacine.patch`** (11 files) -- apply with `-p1` from the rust-src
+- **`rust-src-thylacine.patch`** (13 files) -- apply with `-p1` from the rust-src
   ROOT (`.../lib/rustlib/src/rust`). Adds:
   - `library/Cargo.toml` -- `[patch.crates-io] libc = { path = ... }` (build-std
     does NOT honour a patch in the user crate; std's libc must be patched here).

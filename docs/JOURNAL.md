@@ -136,8 +136,13 @@ A forced `tools/build.sh rust-progs` then recompiled core/libc/std/alloc/unwind
 green and produced `r1hello` sha256 `1c300f19...` (499792 B, ET_EXEC, no
 PT_DYNAMIC) -- BYTE-IDENTICAL to the R-1 witness binary. So the re-validation is
 stronger than a re-boot: the runtime PASS transfers to a bit-exact binary without
-re-running it (which my resume note forbade anyway). libc's patch (sibling
-`../libc-thylacine`, not rustup-managed) survives the remove/add untouched.
+re-running it (which my resume note forbade anyway). The libc patch was ALSO
+re-validated apply-to-pristine the same way (copy the registry-cached pristine
+libc-0.2.189, `-p1` dry-run clean, apply, diff against the fork): 9/9
+byte-identical to `../libc-thylacine`. So BOTH durable patches now provably
+recreate their forks from pristine -- the README's long-standing "recreate both
+forks from pristine sources" claim, previously only established for rust-src, is
+now measured for libc too.
 OWED: only the thyla-pi real-silicon confirmation remains -- CONFIRMATION, not a
 blocker.
 
