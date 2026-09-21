@@ -1,0 +1,143 @@
+B-0 (Boosty) audit round 1, F1 + F6 -- five libc functions stop reporting
+uninitialised stack, and sysconf's /ctl reads stop being cancellation points.
+
+0034 fixed sysconf(_SC_PHYS_PAGES): upstream called a sentinel-parked wrapper
+(__lsysinfo) without checking it and computed from the struct it never filled.
+The audit round (Fable 5.1) found the SAME defect sixty lines up in the SAME
+function, and four more of the same shape. Each calls a wrapper whose syscall
+is the 0xFFFF ENOSYS sentinel, ignores the failure, and reads the out-struct:
+
+  sysconf(_SC_OPEN_MAX / _SC_CHILD_MAX)  getrlimit() unchecked -> stack residue
+                                         clamped to LONG_MAX, errno clobbered
+  getloadavg()      sysinfo() unchecked -> returns n "samples" of garbage, as
+                    SUCCESS (GNU make -l N throttled on them; job.c:2138)
+  getdtablesize()   getrlimit() unchecked -> garbage
+  ulimit()          getrlimit() unchecked -> garbage
+  getdomainname()   uname() unchecked -> strlen/strcpy over an uninitialised
+                    struct utsname
+
+Why my own sweep missed them, recorded because the method is what gets reused:
+I grepped the patched tree for statement-position `__syscall(`. These are
+unchecked WRAPPER calls -- which is exactly what 0034's bug was. The sweep that
+finds them is "every libc-internal call to a wrapper over a sentinel whose
+return value is ignored".
+
+Answers, each the honest one its API allows:
+  sysconf       -1 with errno as the caller left it (POSIX: indeterminate)
+  getloadavg    -1 (its documented failure)
+  ulimit        -1
+  getdomainname -1 (uname already set errno)
+  getdtablesize 1024 -- the one MIRROR here. The API has no error channel,
+                INT_MAX would turn every close-all-fds loop into a hang, and
+                the kernel's per-Proc handle table is PROC_HANDLE_MAX = 1024.
+                Nothing at run time exposes that figure, so nothing can pin
+                the mirror; it is recorded as such in the seam dossier.
+
+F6: sysconf's two /ctl arms (0032 nprocs, 0034 phys pages) read and closed
+their fd with read()/close(), which are cancellation points; sysconf is not
+one. A cancel pending at the read leaked the fd. Both arms now use raw
+__syscall(SYS_read / SYS_close). open() on pouch is already non-cancellable.
+
+--- a/src/conf/sysconf.c
++++ b/src/conf/sysconf.c
+@@ -181,7 +181,16 @@
+ 		return values[name];
+ 	} else if (values[name] < -256) {
+ 		struct rlimit lim;
+-		getrlimit(values[name]&16383, &lim);
++		/* pouch: getrlimit is a sentinel (prlimit64 + getrlimit are both
++		 * 0xFFFF). Upstream ignores its result and reads `lim`, so
++		 * _SC_OPEN_MAX / _SC_CHILD_MAX returned UNINITIALISED STACK with
++		 * errno clobbered to ENOSYS -- 0034's defect, in the same
++		 * function. Indeterminate, honestly: -1, errno as it was. */
++		int saved_rl = errno;
++		if (getrlimit(values[name]&16383, &lim)) {
++			errno = saved_rl;
++			return -1;
++		}
+ 		if (lim.rlim_cur == RLIM_INFINITY)
+ 			return -1;
+ 		return lim.rlim_cur > LONG_MAX ? LONG_MAX : lim.rlim_cur;
+@@ -218,10 +227,12 @@
+ 				ssize_t got = 0, r;
+ 				long n = 0;
+ 				ssize_t j, k;
+-				while (got < (ssize_t)sizeof cbuf &&
+-				       (r = read(cfd, cbuf+got, sizeof cbuf - got)) > 0)
++				/* raw, NOT read()/close(): those are cancellation points,
++				 * sysconf is not, and a cancel landing here leaks cfd. */
++				while (got < (ssize_t)sizeof cbuf &&
++				       (r = __syscall(SYS_read, cfd, cbuf+got, sizeof cbuf - got)) > 0)
+ 					got += r;
+-				close(cfd);
++				__syscall(SYS_close, cfd);
+ 				for (j = 0; j + 5 < got; j++) {
+ 					if (cbuf[j] != 'c' || cbuf[j+1] != 'p' ||
+ 					    cbuf[j+2] != 'u' || cbuf[j+3] != 's' ||
+@@ -259,10 +270,11 @@
+ 			int mfd = open("/ctl/memory", O_RDONLY);
+ 			ssize_t got = 0, r, j;
+ 			if (mfd < 0) { errno = saved; return -1; }
++			/* raw, NOT read()/close(): see the nprocs arm above. */
+ 			while (got < (ssize_t)sizeof mbuf &&
+-			       (r = read(mfd, mbuf+got, sizeof mbuf - got)) > 0)
++			       (r = __syscall(SYS_read, mfd, mbuf+got, sizeof mbuf - got)) > 0)
+ 				got += r;
+-			close(mfd);
++			__syscall(SYS_close, mfd);
+ 			errno = saved;
+ 			for (j = 0; j + (ssize_t)klen < got; j++) {
+ 				size_t k;
+--- a/src/legacy/getloadavg.c
++++ b/src/legacy/getloadavg.c
+@@ -6,7 +6,10 @@
+ {
+ 	struct sysinfo si;
+ 	if (n <= 0) return n ? -1 : 0;
+-	sysinfo(&si);
++	/* pouch: sysinfo is a sentinel; upstream ignored the failure and
++	 * returned n "samples" of uninitialised stack (GNU make -l throttled
++	 * on them). No load figure exists: say so. */
++	if (sysinfo(&si)) return -1;
+ 	if (n > 3) n = 3;
+ 	for (int i=0; i<n; i++)
+ 		a[i] = 1.0/(1<<SI_LOAD_SHIFT) * si.loads[i];
+--- a/src/legacy/getdtablesize.c
++++ b/src/legacy/getdtablesize.c
+@@ -6,6 +6,10 @@
+ int getdtablesize(void)
+ {
+ 	struct rlimit rl;
+-	getrlimit(RLIMIT_NOFILE, &rl);
++	/* pouch: getrlimit is a sentinel and this API has no error channel.
++	 * The kernel's per-Proc handle table is PROC_HANDLE_MAX = 1024
++	 * (kernel handle.h) -- a MIRROR with no runtime source to check it
++	 * against; INT_MAX would turn every close-all-fds loop into a hang. */
++	if (getrlimit(RLIMIT_NOFILE, &rl)) return 1024;
+ 	return rl.rlim_cur < INT_MAX ? rl.rlim_cur : INT_MAX;
+ }
+--- a/src/legacy/ulimit.c
++++ b/src/legacy/ulimit.c
+@@ -5,7 +5,8 @@
+ long ulimit(int cmd, ...)
+ {
+ 	struct rlimit rl;
+-	getrlimit(RLIMIT_FSIZE, &rl);
++	/* pouch: getrlimit is a sentinel; upstream computed from garbage. */
++	if (getrlimit(RLIMIT_FSIZE, &rl)) return -1;
+ 	if (cmd == UL_SETFSIZE) {
+ 		long val;
+ 		va_list ap;
+--- a/src/misc/getdomainname.c
++++ b/src/misc/getdomainname.c
+@@ -7,7 +7,9 @@
+ int getdomainname(char *name, size_t len)
+ {
+ 	struct utsname temp;
+-	uname(&temp);
++	/* pouch: uname is a sentinel; upstream ran strlen/strcpy over an
++	 * uninitialised struct. */
++	if (uname(&temp)) return -1;
+ 	if (!len || strlen(temp.domainname) >= len) {
+ 		errno = EINVAL;
+ 		return -1;

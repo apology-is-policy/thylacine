@@ -77,3 +77,8 @@
 # 0036: B-0 audit r1 F2 -- tmpfile() never unlinked (a raw SYS_unlinkat
 # sentinel, result ignored; 0027 fixed remove() and missed this twin).
 0036-pouch-tmpfile-unlink.patch
+# 0037: B-0 audit r1 F1+F6 -- sysconf(_SC_OPEN_MAX/_SC_CHILD_MAX), getloadavg,
+# getdtablesize, ulimit, getdomainname all read an out-struct a sentinel-parked
+# wrapper never filled (0034's defect, five more times); sysconf's /ctl reads
+# stop being cancellation points.
+0037-pouch-unchecked-sentinel-wrappers.patch
