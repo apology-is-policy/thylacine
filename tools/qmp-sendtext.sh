@@ -21,7 +21,8 @@
 # scenario vocabulary); anything else is a hard error, not a silent skip.
 # -k sends ONE chord: '+'-separated qcodes pressed in order, released in
 # reverse (the G-6c Super-chord leg; qcodes pass through verbatim, e.g.
-# meta_l, shift, left/right/up/down, letters).
+# meta_l, shift, left/right/up/down, letters). A trailing @MS holds the
+# chord down for MS milliseconds first: -k "ctrl+alt+f10@6500".
 # -p sends ONE pointer op to the virtio tablet (G-7c): `abs X Y` moves
 # (QEMU's absolute axis range is 0..32767, scaled by the guest to the
 # display), `btn left|right|middle down|up` clicks, `wheel up|down`
@@ -67,10 +68,23 @@ SHIFTED = {**{c.upper(): c for c in "abcdefghijklmnopqrstuvwxyz"},
            "!": "1", "@": "2", "#": "3", "$": "4", "%": "5", "^": "6",
            "&": "7", "*": "8", "(": "9", ")": "0"}
 
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.settimeout(10)
-s.connect(sock_path)
+s = None
 buf = b""
+
+
+def connect():
+    """(Re)open the QMP session. QEMU serves ONE client per monitor socket, so
+    a helper that sleeps with the connection open blocks every other QMP user
+    (a screenshot, another key) for the whole sleep: the held chord drops the
+    connection while it waits and reopens it to release."""
+    global s, buf
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(10)
+    s.connect(sock_path)
+    buf = b""
+    msg()  # greeting
+    cmd("qmp_capabilities")
+
 
 
 def msg():
@@ -114,8 +128,7 @@ def send_events(events):
     cmd("input-send-event", events=events)
 
 
-msg()  # greeting
-cmd("qmp_capabilities")
+connect()
 if mode == "pointer":
     parts = text.split()
     if parts and parts[0] == "abs" and len(parts) == 3:
@@ -176,6 +189,15 @@ if mode == "pointer":
     print(f"qmp-sendtext: pointer {text!r}")
     sys.exit(0)
 if mode == "chord":
+    # CHORD@MS holds the whole chord for MS milliseconds before releasing it
+    # (the held-attention leg: a chord kept down past the seat's deadline).
+    hold_ms = 0
+    if "@" in text:
+        text, _, ms = text.partition("@")
+        if not ms.isdigit():
+            print(f"qmp-sendtext: bad hold {ms!r}", file=sys.stderr)
+            sys.exit(1)
+        hold_ms = int(ms)
     codes = [c for c in text.split("+") if c]
     if not codes:
         print("qmp-sendtext: empty chord", file=sys.stderr)
@@ -183,6 +205,10 @@ if mode == "chord":
     for q in codes:
         key(q, True)
         time.sleep(0.03)
+    if hold_ms:
+        s.close()
+        time.sleep(hold_ms / 1000.0)
+        connect()
     for q in reversed(codes):
         key(q, False)
         time.sleep(0.03)

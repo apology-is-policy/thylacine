@@ -17,7 +17,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-09-18
+updated: 2026-09-21
 ---
 ## Purpose
 
@@ -442,4 +442,6 @@ must precede any support claim.
 
 [[abi-trusted-seat]] pins native 121/122 and [[abi-native-nonblock]] pins 123.
 The ceiling is 123, SYS__NATIVE_TOP is 124. Existing call numbers and Linux
-phenotype translation retain their meanings.
+phenotype translation retain their meanings. The 2026-09-21 review changed no
+number and no envelope: `seat.h` gained names for the six chord key codes, and
+RESTORED is now also accepted in the failed phase ([[abi-trusted-seat]]).

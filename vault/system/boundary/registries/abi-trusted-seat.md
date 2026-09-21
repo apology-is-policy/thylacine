@@ -16,7 +16,7 @@ mirrors:
   - usr/lib/libt/include/thyla/syscall.h
   - kernel/include/thylacine/vivarium.h
 created: 2026-09-18
-updated: 2026-09-18
+updated: 2026-09-21
 ---
 ## Contract
 
@@ -26,6 +26,19 @@ message contains u64 generation/sequence, u32 phase/length/code/value, then
 FAIL, QUERY, VISIBLE, MASK, GRANT and CLIENT. Phases 0..4 are normal, quiescing,
 exclusive, restoring and failed. Success is 0; refusal is -1. Generation and
 frame sequence bind state transitions and visibility, never a caller's name.
+
+The attention gesture is scanned in the kernel from INPUT key reports, in evdev
+codes: either Control (29, 97), either Alt (56, 100), and Delete (111) or F10
+(68). The second final key exists because Delete is absent from compact and
+laptop keyboards. `seat.h` names the six codes; nothing above the kernel
+decides what attention is.
+
+RESTORED closes two phases. From restoring it commits the episode's held grant.
+From failed it commits nothing, because the failure already cancelled the grant
+and cleared its identity; it only returns the seat to normal once the service
+has put ordinary output back and every key is up. A failure closes the console
+episode only when the seat opened it (phase exclusive): a serial episode runs
+while the seat is normal and is never closed by a seat failure.
 The operation-specific authority and lifecycle live in [[sub-lictor]].
 
 Native 122 SEAT_IMPORT takes an accepted connection handle and one-shot share

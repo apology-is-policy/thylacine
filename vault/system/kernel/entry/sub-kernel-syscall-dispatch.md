@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-09-18
+updated: 2026-09-21
 ---
 ## Trusted-seat and nonblocking entries
 
@@ -24,8 +24,10 @@ the native ceiling is 123. [[abi-trusted-seat]] and [[abi-native-nonblock]] pin
 the mirrors. TRUSTED_SEAT snapshots the bounded 544-byte envelope before taking
 the process lock, scrubs temporary key material and validates copyout. SEAT_IMPORT
 checks the bound service, owned live peer connection and DMA allowance before
-claiming that peer's weave/GPU-BO share. SET_NONBLOCK pins an owned Spoor and
-changes its shared open-file mode without increasing handle rights.
+claiming that peer's weave/GPU-BO share. SET_NONBLOCK calls
+`handle_set_nonblock`, the same helper the phenotype's fcntl(F_SETFL) uses, so
+one function owns the flag word's lock-domain rules; a non-Spoor fd is a no-op
+success, as there.
 
 ## Purpose
 

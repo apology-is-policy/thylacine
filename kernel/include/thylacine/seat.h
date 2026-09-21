@@ -22,6 +22,16 @@ struct Proc;
 #define SEAT_MASK 10u
 #define SEAT_GRANT 11u
 #define SEAT_CLIENT 12u
+// The reserved attention gesture, in evdev key codes: either Control, either
+// Alt, and one of the keys below. Two final keys because Delete is absent
+// from compact and laptop keyboards; both are scanned here, below every
+// compositor, so neither can be intercepted or synthesized by a client.
+#define SEAT_KEY_LEFTCTRL   29u
+#define SEAT_KEY_RIGHTCTRL  97u
+#define SEAT_KEY_LEFTALT    56u
+#define SEAT_KEY_RIGHTALT  100u
+#define SEAT_KEY_DELETE    111u
+#define SEAT_KEY_F10        68u
 // Fixed byte envelope. The kernel snapshots input before taking its lock and
 // copies output after release. No userspace pointers are stored in seat state.
 struct seat_message {

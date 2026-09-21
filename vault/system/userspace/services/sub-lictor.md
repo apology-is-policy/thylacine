@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: [abi-trusted-seat, abi-native-nonblock]
 design: ["docs/GRAPHICAL-SAK-OWNERSHIP.md", "docs/GRAPHICAL-SAK-PORTABILITY.md", "docs/HALCYON-TRUSTED-EPISODE.md"]
 created: 2026-09-18
-updated: 2026-09-18
+updated: 2026-09-21
 ---
 ## Purpose
 
@@ -64,7 +64,8 @@ fails closed rather than wrapping or using an incompatible high-bit namespace.
 
 ### Episode
 
-Physical Ctrl-Alt-Delete starts a kernel generation. Normal hardware requests
+Physical Ctrl-Alt-Delete, or Ctrl-Alt-F10 where the keyboard has no Delete,
+starts a kernel generation (the kernel scans the chord; [[abi-trusted-seat]]). Normal hardware requests
 park while the service drains all outstanding work, excludes every advertised
 scanout and selects private, non-shareable trusted backing. Held keys and buttons
 must be released before Corvus can receive input. No ordinary cursor commands
@@ -81,7 +82,22 @@ END requires restoration and release drainage before normal admission resumes.
 Tapestry observes the changed generation, releases previously held keys to their
 original owners and schedules a full repaint. Failure leaves authorization closed;
 owner death, stale generation, timeout or failed device completion cannot become
-a successful graphical grant. A failed episode cancels its still-unredeemed
+a successful graphical grant.
+
+A failed seat is recoverable. The kernel has already cancelled the grant and
+scrubbed the key queue, so Lictor shows the failure notice for 1.5 s, waits
+for every key to come up, rebinds the last normal presentation and reports
+RESTORED; the kernel returns the seat to normal and releases nothing. Normal
+broker requests park through a failure exactly as through an episode, so the
+compositor never sees an error for a display that is about to return. A
+refused restore (work still in flight, a dead device) is retried every pass.
+Before 2026-09-21 a failure was terminal and reachable by benign timing: a
+chord held past the 5 s quiesce deadline left the display dark until both seat
+processes died.
+
+When the compositor unrefs the resource it is presenting, the broker forgets
+that presentation, and a takeover that ends before a successor is bound
+restores to a blank output for the compositor to repaint. A failed episode cancels its still-unredeemed
 pending grant by exact target incarnation and session. Grants are held against early redemption until the RESTORED commit.
 Redeemed grants then use the existing legate lifecycle.
 
@@ -116,9 +132,12 @@ and [[inv-i45]]. See the linked ABI contracts for bounded native messages.
 
 Bad peers, reserved IDs, malformed sequences, oversized frames and unsupported
 operations are refused. Transport EAGAIN retains partial progress. GPU ambiguity
-retains reservations instead of freeing potentially live backing. Failed takeover,
-owner death and stale/expired generations disable authorization. Restart must
-re-establish hardware ownership; no ordinary client inherits the seat.
+retains reservations instead of freeing potentially live backing. Failed takeover
+and stale or expired generations cancel the episode and recover as above. Owner
+death is different: a dead service leaves the seat failed until warden starts a
+new one, which must re-establish hardware ownership; no ordinary client
+inherits the seat. The ledger validates a request before it reserves an id, so
+a refused request leaves no reservation behind.
 
 ## Performance
 
@@ -129,12 +148,21 @@ or mask changes. The neutral background avoids unqualified capture operations.
 ## Prosecution
 
 QEMU graphical regression passes empty, confer, actual DAC elevation, abdicate,
-wrong-key and Escape paths. Ordinary test descendants are refused trusted-seat
+wrong-key (opened with Ctrl-Alt-F10) and Escape paths; `ls-graphical-sak-states`
+adds real expiry and the five-failure lockout at the 800x720 minimum; and
+`ls-graphical-sak-recover` holds the chord past the quiesce deadline, requires
+the failure notice, the recovery with nothing conferred, a live workspace and
+then a full conferral on the recovered seat. Ordinary test descendants are refused trusted-seat
 operations and GPU claims at every stage. The run disables serial authorization.
 Broader accelerated/backend and SMP verification remains in progress. Host tests exercise framing,
 semantic validation, ownership/retirement, keymaps and rendering rejection.
 Kernel tests exercise seat role gates, physical-input admission, generation,
-visibility acknowledgement, held-key restoration and pending-grant cancellation.
+visibility acknowledgement, held-key restoration and pending-grant cancellation;
+`cons.graphical_seat_grant_and_failure` drives the grant through the seat
+operation, its commit at RESTORED, its cancellation by a failure and the
+recovery that releases nothing, and pins that a seat failure leaves a serial
+episode open (sabotage-verified: without the ownership check exactly that
+assertion fails, 1572 of 1573).
 These tests are blind to actual scanout/input timing and backend DMA isolation;
 QEMU end-to-end qualification and real screenshots are separate evidence. No
 Pi hardware qualification is claimed.
@@ -150,8 +178,27 @@ ordinary guest test client, never a source of trusted authority.
 
 The current backend is QEMU virtio GPU/input with a neutral backdrop. Pi DMA,
 controller ownership and display conformance require separate qualification.
-The physical hypervisor and host GPU renderer remain trusted for a VM. Review is
-single-agent self-review by operator direction, not an independent audit.
+The physical hypervisor and host GPU renderer remain trusted for a VM. The
+author's review was single-agent self-review by operator direction. A second
+review by a different agent followed on 2026-09-21, also in-session by operator
+direction (memory/audit_lictor_closed_list.md); it is context-independent of
+the author but it is not a separate prosecutor run.
+
+Open after that review:
+
+- Fence ids are one monotone 32-bit sequence shared by synchronous and fenced
+  commands, and exhaustion latches the engine dead. At desktop command rates
+  that is weeks of uptime. A reset of the sequence while no work is in flight
+  is the intended cure; it is not built because it cannot be exercised without
+  a lever that starts the sequence near the limit.
+- `test-mode` is a default cargo feature of `lictor` and `tapestryd`; a
+  production compile without it has not been verified.
+- A display smaller than 800x720 refuses the whole seat at startup. There is no
+  reduced layout.
+- The main loop polls at 100 Hz whether or not anything is happening, and the
+  compositor asks for the seat state every pass. The idle cost is unmeasured.
+- Warden starts the compositor after the service signals READY and never reaps
+  it.
 
 ## Provenance
 

@@ -2445,12 +2445,14 @@ bool proc_console_sak(void) {
     return proc_console_sak_from(NULL, 0);
 }
 
+#ifdef KERNEL_TESTS
 void proc_test_seat_reset(void);
 void proc_test_seat_reset(void) {
     irq_state_t lock = spin_lock_irqsave(&g_proc_table_lock);
     seat_zero(&g_seat, sizeof(g_seat));
     spin_unlock_irqrestore(&g_proc_table_lock, lock);
 }
+#endif
 
 bool proc_is_seat_service(struct Proc *p) {
     irq_state_t lock = spin_lock_irqsave(&g_proc_table_lock);
@@ -2494,9 +2496,14 @@ int proc_set_seat_client(struct Proc *p) {
     return rc;
 }
 
-// Caller holds the proc-table lock. Failing never restores ordinary pixels or
-// transfers hardware; only the console's parked writers/owner are released.
+// Caller holds the proc-table lock. Failing cancels the held grant, scrubs the
+// secret queue and closes the episode the SEAT opened. It never closes an
+// episode the seat does not own: a serial episode runs only while the seat is
+// NORMAL (proc_console_sak_from refuses otherwise), so abandoning on a
+// NORMAL-phase failure would unfreeze the console under a serial key entry.
+// Ordinary pixels come back only through SEAT_RESTORED, never from here.
 static void proc_seat_fail_locked(void) {
+    bool owns_episode = g_seat.phase == SEAT_EXCLUSIVE;
     cap_cancel_imperium_pending(g_seat.grant_stripes, g_seat.grant_session);
     g_seat.grant_stripes = g_seat.grant_session = 0;
     g_seat.phase = SEAT_FAILED;
@@ -2504,7 +2511,13 @@ static void proc_seat_fail_locked(void) {
     g_seat.key_head = g_seat.key_len = 0;
     seat_zero(g_seat.frame, sizeof(g_seat.frame));
     g_seat.frame_len = g_seat.masked_len = 0;
-    if (cons_episode_abandon()) proc_console_owner_restore_locked();
+    if (owns_episode && cons_episode_abandon()) proc_console_owner_restore_locked();
+}
+
+static bool seat_attention_held(void) {
+    bool ctrl = g_seat.held[SEAT_KEY_LEFTCTRL] || g_seat.held[SEAT_KEY_RIGHTCTRL];
+    bool alt  = g_seat.held[SEAT_KEY_LEFTALT]  || g_seat.held[SEAT_KEY_RIGHTALT];
+    return ctrl && alt && (g_seat.held[SEAT_KEY_DELETE] || g_seat.held[SEAT_KEY_F10]);
 }
 
 int proc_seat_op(struct Proc *p, u32 op, struct seat_message *m) {
@@ -2532,9 +2545,7 @@ int proc_seat_op(struct Proc *p, u32 op, struct seat_message *m) {
     if (op == SEAT_INPUT && service) {
         if (m->code >= sizeof(g_seat.held) || m->value > 2 || m->length > 4) goto done;
         g_seat.held[m->code] = m->value != 0;
-        bool ctrl = g_seat.held[29] || g_seat.held[97];
-        bool alt = g_seat.held[56] || g_seat.held[100];
-        if (g_seat.phase == SEAT_NORMAL && ctrl && alt && g_seat.held[111]) {
+        if (g_seat.phase == SEAT_NORMAL && seat_attention_held()) {
             if (!g_console_trusted_proc || !cons_episode_armed() || cons_episode_active() ||
                     g_seat.generation == ~0ull) goto done;
             g_seat.generation++;
@@ -2560,7 +2571,13 @@ int proc_seat_op(struct Proc *p, u32 op, struct seat_message *m) {
     }
     if (!m->generation || m->generation != g_seat.generation) goto done;
     if (op == SEAT_FAIL && service) { proc_seat_fail_locked(); rc = 0; goto status; }
-    if (op == SEAT_RESTORED && service && g_seat.phase == SEAT_RESTORING) {
+    // RESTORED closes RESTORING (the episode ended; commit its grant) and also
+    // FAILED (nothing to commit: the failure already cancelled the grant and
+    // zeroed its identity, so this arm can release no authority). Without the
+    // second arm a benign timeout -- a chord held past the quiesce deadline, a
+    // prompt left idle -- left the display dark until both seat processes died.
+    if (op == SEAT_RESTORED && service &&
+            (g_seat.phase == SEAT_RESTORING || g_seat.phase == SEAT_FAILED)) {
         for (u32 i = 0; i < sizeof(g_seat.held); i++) if (g_seat.held[i]) goto done;
         // Physical restore + release drainage have completed. This grant-lock
         // release is the authority commit, ordered with failure by our lock.
@@ -3321,8 +3338,10 @@ static void proc_become_zombie_locked(struct Proc *p, int status, const char *ms
     // g_proc_table_lock (a new edge, no reverse: cons queries the table only
     // with its own lock released); the parked-waiter wakes are the
     // child_waiters precedent below.
+    // The compositor is an untrusted client: losing it mid-episode fails the
+    // episode, losing it in NORMAL fails nothing (warden may seat a new one).
     if (g_seat.client == p) {
-        proc_seat_fail_locked();
+        if (g_seat.phase != SEAT_NORMAL) proc_seat_fail_locked();
         g_seat.client = NULL;
     }
     if (g_seat.service == p) {

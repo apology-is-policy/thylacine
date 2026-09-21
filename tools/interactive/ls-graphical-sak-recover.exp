@@ -1,6 +1,10 @@
 #!/usr/bin/expect -f
-# Graphical Lex curiata through physical QMP input. Requires HALCYON_SESSION=y.
-# Guest witnesses exercise real DAC operations and refuse trusted-seat/GPU access.
+# Graphical Lex curiata: a FAILED seat gives the workspace back. Requires
+# HALCYON_SESSION=y. The attention chord is held past the kernel's quiesce
+# deadline (the acknowledgement needs every key up), which fails the seat with
+# nothing conferred. The failure notice must show, normal output and input must
+# return once the keys are up, and the seat must then work again -- a benign
+# timeout used to leave the display dark until both seat processes died.
 set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
 set ::env(THYLACINE_SERIAL_SAK) 0
 source [file join [file dirname [info script]] lib.exp]
@@ -71,68 +75,50 @@ expect {
 }
 after 1500
 key "meta_l+f"
-capture workspace
-lc_raw_send "\001b" "serial BREAK must not authorize in graphical-only posture"
 witness baseline
-key "ctrl+alt+delete"
-after 1000
-capture empty
-key "ret"
-lc_expect "corvus: imperium: SAK with nothing pending" "empty trusted episode ended"
-after 1200
+# Hold the chord for 9 s against a 5 s deadline. In the background: the
+# capture below has to land WHILE the keys are still down.
+set hold [open "|$repo/tools/qmp-sendtext.sh -s $qmp -k ctrl+alt+f10@9000" r]
+set timeout 20
+expect {
+    -ex "lictor: trusted scanout active" { lc_pass "takeover happened under the held chord" }
+    -re {EXTINCTION:} { lc_extinction_fail "takeover" }
+    timeout { lc_fail "no takeover under a held chord" }
+}
+capture preparing
+expect {
+    -ex "lictor: kernel closed trusted seat (scanout private)" { lc_pass "held chord failed the seat at its deadline" }
+    -re {EXTINCTION:} { lc_extinction_fail "held chord" }
+    timeout { lc_fail "the seat never failed under a held chord" }
+}
+capture failed
+# Drain to EOF first: closing the read end under a live helper hands it EPIPE
+# on its own status line, which is a harness failure and not the guest's.
+if {[catch {read $hold; close $hold} e]} { lc_fail "held chord helper: $e" }
+expect {
+    -ex "lictor: trusted seat recovered; nothing was conferred" { lc_pass "seat recovered after release" }
+    -re {EXTINCTION:} { lc_extinction_fail "recovery" }
+    timeout { lc_fail "the failed seat never recovered" }
+}
+after 1500
+capture recovered
+# The workspace is live again: the probe's output crosses the compositor, the
+# PTY and the shell, and no authority leaked out of the failed episode.
+witness restored
+# And the seat itself works again, end to end, through a real conferral.
 type "imperium chown dac\n"
 after 1200
-capture request
 key "ctrl+alt+delete"
 after 1000
-capture prompt
 type "imperium-key-michael-v1"
-capture masked
 key "ret"
 after 2200
-capture conferred
 key "ret"
-lc_expect "corvus: imperium: CONFERRED to michael" "Corvus issued the grant"
-after 1000
-type "imperium --list\n"
-after 1200
-capture elevated
-witness elevated
-# An elevated interactive shell must preserve PTY ownership and isolate its
-# waiting Imperium parent from the foreground command's interrupt group.
-type "sleep 30\n"
-after 700
-key "ctrl+c"
+lc_expect "corvus: imperium: CONFERRED to michael" "a recovered seat confers"
 after 1000
 witness elevated
-capture interrupted
 type "abdicate\n"
 after 1200
-capture restored
-witness restored
-# Wrong key: the requesting tool must return and the original shell stay plain.
-type "imperium kill\n"
-after 1200
-# The second reserved chord: keyboards without Delete (this leg proves F10).
-key "ctrl+alt+f10"
-capture axe
-type "deliberately-wrong-key"
-key "ret"
-capture denied
-key "ret"
-lc_expect "corvus: imperium: DENIED (wrong key) for michael" "wrong key refused"
-after 1000
-witness denied
-# Escape cancels without KDF/authority; input must not leak into the workspace.
-type "imperium chown\n"
-after 1200
-key "ctrl+alt+delete"
-key "esc"
-capture cancelled
-key "ret"
-lc_expect "corvus: imperium: DECLINED at the prompt" "operator cancellation"
-after 1000
 witness cancelled
-capture final
-lc_pass "graphical SAK: empty, confer, real DAC authority, abdicate, wrong key, cancel"
+lc_pass "graphical SAK: a failed seat recovers, confers nothing, and works again"
 lc_quit

@@ -3707,6 +3707,8 @@ void test_cons_episode_saved_owner_death(void) {
 // Graphical endpoint tests exercise the same role, generation and visibility
 // gates as the syscall, without claiming physical GPU/input qualification.
 #include <thylacine/seat.h>
+#include <thylacine/caps.h>
+#include <thylacine/devcap.h>
 void proc_test_seat_reset(void);
 int proc_test_serial_sak(int posture);
 void test_cons_graphical_seat_gate(void);
@@ -3789,12 +3791,136 @@ void test_cons_graphical_seat_gate(void) {
     SEAT_CHECK(proc_seat_op(service, SEAT_FAIL, &m) == -1, "stale failure cannot mutate new episode");
     SEAT_CHECK(proc_seat_op(service, SEAT_STATUS, &m) == 0 && m.generation > generation, "new epoch");
     SEAT_CHECK(proc_seat_op(service, SEAT_FAIL, &m) == 0 && m.phase == SEAT_FAILED, "failure closes admission");
-    SEAT_CHECK(proc_seat_op(service, SEAT_RESTORED, &m) == -1, "failed owner cannot restore through END");
+    generation = m.generation;
+    SEAT_CHECK(proc_seat_op(service, SEAT_ACK, &m) == -1, "a failed seat cannot open an episode");
+    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(service, SEAT_RESTORED, &m) == -1, "a held chord blocks recovery");
+    SEAT_CHECK(seat_test_key(service, 29, 0, 0) == 0, "ctrl up");
+    SEAT_CHECK(seat_test_key(service, 56, 0, 0) == 0, "alt up");
+    SEAT_CHECK(seat_test_key(service, 111, 0, 0) == 0, "delete up");
+    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(f.owner, SEAT_RESTORED, &m) == -1, "only the service recovers a failed seat");
+    m.generation = generation + 1;
+    SEAT_CHECK(proc_seat_op(service, SEAT_RESTORED, &m) == -1, "a stale or forged generation cannot recover");
+    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(service, SEAT_RESTORED, &m) == 0 && m.phase == SEAT_NORMAL,
+               "a failed seat recovers once the backend restored normal output");
+    // The second reserved chord: Delete is absent from compact keyboards.
+    SEAT_CHECK(seat_test_key(service, 97, 1, 0) == 0, "right ctrl");
+    SEAT_CHECK(seat_test_key(service, 100, 1, 0) == 0, "right alt");
+    SEAT_CHECK(seat_test_key(service, 67, 1, 0) == 0 && proc_seat_op(service, SEAT_STATUS, &m) == 0 &&
+               m.phase == SEAT_NORMAL, "F9 is not attention");
+    SEAT_CHECK(seat_test_key(service, 67, 0, 0) == 0, "F9 up");
+    SEAT_CHECK(seat_test_key(service, 68, 1, 0) == 0 && proc_seat_op(service, SEAT_STATUS, &m) == 0 &&
+               m.phase == SEAT_QUIESCING && m.generation == generation + 1, "ctrl+alt+F10 is attention");
+    SEAT_CHECK(seat_test_key(service, 97, 0, 0) == 0 && seat_test_key(service, 100, 0, 0) == 0 &&
+               seat_test_key(service, 68, 0, 0) == 0, "chord up");
 cleanup:
     (void)proc_test_serial_sak(1);
     proc_test_seat_reset();
     ep_teardown(&f);
     if (service) { service->state = PROC_STATE_ZOMBIE; proc_free(service); }
     TEST_ASSERT(err == NULL, err ? err : "graphical seat gates");
+#undef SEAT_CHECK
+}
+
+// The authority commit and the two failure rules that are not visible from the
+// happy path: a held grant redeems only after RESTORED; a failure cancels it and
+// a later recovery releases nothing; and a seat failure never closes an
+// episode the seat did not open (a serial episode runs while the seat is
+// NORMAL -- closing it would unfreeze the console under a serial key entry).
+void test_cons_graphical_seat_grant_and_failure(void);
+static int seat_test_grant(struct Proc *corvus, u64 generation, u64 caps, u64 stripes, u64 session) {
+    struct seat_message m;
+    seat_zero(&m, sizeof(m));
+    m.generation = generation; m.length = 40;
+    u64 args[5] = { caps, stripes, 0, session, CAP_GRANT_FLAG_PROPAGATING };
+    for (u32 i = 0; i < 5; i++)
+        for (u32 j = 0; j < 8; j++) m.data[i * 8 + j] = (u8)(args[i] >> (j * 8));
+    return proc_seat_op(corvus, SEAT_GRANT, &m);
+}
+static bool seat_test_open(struct Proc *service, struct Proc *corvus, u64 *generation) {
+    struct seat_message m;
+    if (seat_test_key(service, 29, 1, 0) || seat_test_key(service, 56, 1, 0) ||
+            seat_test_key(service, 68, 1, 0)) return false;
+    if (seat_test_key(service, 29, 0, 0) || seat_test_key(service, 56, 0, 0) ||
+            seat_test_key(service, 68, 0, 0)) return false;
+    seat_zero(&m, sizeof(m));
+    if (proc_seat_op(service, SEAT_STATUS, &m) != 0 || m.phase != SEAT_QUIESCING) return false;
+    *generation = m.generation;
+    if (proc_seat_op(service, SEAT_ACK, &m) != 0) return false;
+    seat_zero(&m, sizeof(m));
+    m.generation = *generation; m.length = 1; m.data[0] = 1;
+    if (proc_seat_op(corvus, SEAT_FRAME, &m) != 0) return false;
+    if (proc_seat_op(service, SEAT_STATUS, &m) != 0) return false;
+    return proc_seat_op(service, SEAT_VISIBLE, &m) == 0;
+}
+void test_cons_graphical_seat_grant_and_failure(void) {
+    struct ep_fixture f;
+    struct Proc *service = NULL, *requester = NULL, *second = NULL;
+    const char *err = NULL;
+    struct seat_message m;
+    u64 generation = 0;
+    proc_test_seat_reset();
+    cap_reset_table();
+    bool setup = ep_setup(&f, true, true);
+    service = proc_alloc();
+    requester = proc_alloc();
+    second = proc_alloc();
+#define SEAT_CHECK(test, why) do { if (!(test)) { err = why; goto cleanup; } } while (0)
+    SEAT_CHECK(setup && service && requester && second, "seat fixture");
+    service->state = PROC_STATE_ALIVE;
+    requester->state = PROC_STATE_ALIVE;
+    second->state = PROC_STATE_ALIVE;
+    f.trusted->caps |= CAP_GRANT_CLEARANCE;
+    SEAT_CHECK(proc_set_seat_service(service) == 0, "service");
+    u64 stripes = proc_stripes(requester);
+
+    // (1) The commit: held until RESTORED, then exactly once.
+    SEAT_CHECK(seat_test_open(service, f.trusted, &generation), "episode one opens");
+    SEAT_CHECK(seat_test_grant(f.owner, generation, CAP_DAC_OVERRIDE, stripes, 0x2A1) == -1,
+               "only Corvus publishes a grant");
+    SEAT_CHECK(seat_test_grant(f.trusted, generation, CAP_DAC_OVERRIDE, stripes, 0x2A1) == 0, "grant published held");
+    SEAT_CHECK(seat_test_grant(f.trusted, generation, CAP_CHOWN, stripes, 0x2A2) == -1, "one grant per episode");
+    SEAT_CHECK(cap_redeem_grant_for_writer(requester, CAP_DAC_OVERRIDE) == -1, "no authority while the scene is up");
+    SEAT_CHECK(proc_console_episode(f.trusted, SYS_CONSOLE_EPISODE_END) == 0, "end");
+    SEAT_CHECK(cap_redeem_grant_for_writer(requester, CAP_DAC_OVERRIDE) == -1, "no authority while restoring");
+    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(service, SEAT_RESTORED, &m) == 0 && m.phase == SEAT_NORMAL, "restored");
+    SEAT_CHECK(cap_redeem_grant_for_writer(requester, CAP_DAC_OVERRIDE) == (long)CAP_USE_WRITE_LEN,
+               "restoration commits the grant");
+
+    // (2) Failure cancels; the recovery that follows releases nothing. A
+    //     FRESH requester: the first is a legate now, and a nested redeem is
+    //     refused for that reason alone, which would satisfy the assertion
+    //     below without the cancellation ever being exercised.
+    stripes = proc_stripes(second);
+    SEAT_CHECK(seat_test_open(service, f.trusted, &generation), "episode two opens");
+    SEAT_CHECK(seat_test_grant(f.trusted, generation, CAP_DAC_OVERRIDE, stripes, 0x2A3) == 0, "second grant held");
+    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(service, SEAT_FAIL, &m) == 0 && m.phase == SEAT_FAILED, "fail");
+    SEAT_CHECK(!cons_episode_active(), "failing an exclusive seat closes ITS episode");
+    SEAT_CHECK(cap_pending_count() == 0, "failure cancelled the held grant");
+    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(service, SEAT_RESTORED, &m) == 0 && m.phase == SEAT_NORMAL, "recovered");
+    SEAT_CHECK(cap_redeem_grant_for_writer(second, CAP_DAC_OVERRIDE) == -1, "recovery confers nothing");
+
+    // (3) A NORMAL-phase seat failure leaves a SERIAL episode alone.
+    SEAT_CHECK(proc_console_sak() && cons_episode_active(), "serial episode opens while the seat is NORMAL");
+    m.generation = generation;
+    SEAT_CHECK(proc_seat_op(service, SEAT_FAIL, &m) == 0 && m.phase == SEAT_FAILED, "seat fails underneath it");
+    SEAT_CHECK(cons_episode_active(), "a seat failure must not close a serial episode");
+    SEAT_CHECK(proc_console_episode(f.trusted, SYS_CONSOLE_EPISODE_END) == 0 && !cons_episode_active(),
+               "Corvus still ends its own serial episode");
+    SEAT_CHECK(proc_seat_op(service, SEAT_STATUS, &m) == 0 && m.phase == SEAT_FAILED,
+               "a serial END does not move the seat");
+cleanup:
+    cap_reset_table();
+    proc_test_seat_reset();
+    ep_teardown(&f);
+    if (service) { service->state = PROC_STATE_ZOMBIE; proc_free(service); }
+    if (requester) { requester->state = PROC_STATE_ZOMBIE; proc_free(requester); }
+    if (second) { second->state = PROC_STATE_ZOMBIE; proc_free(second); }
+    TEST_ASSERT(err == NULL, err ? err : "graphical seat grant and failure");
 #undef SEAT_CHECK
 }

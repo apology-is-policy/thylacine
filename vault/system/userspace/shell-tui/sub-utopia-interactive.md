@@ -20,7 +20,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-03
-updated: 2026-09-18
+updated: 2026-09-21
 area: userspace
 ---
 ## Graphical elevation banner
@@ -79,6 +79,14 @@ opening the same control/readiness siblings. It does not call `setsid` and then
 try to acquire an already-owned terminal. This applies equally to a plain nested
 `ut` and Imperium's elevated shell, preserving job control, Beacon and palette
 roles while keeping Ctrl-C off the waiting parent tool's group.
+
+The membership check WAITS, bounded at 500 ms. The parent shell seats a job
+after spawning it (`setpgid`, then `tty_set_fg`), so a child that samples the
+foreground once at startup can read its parent's group and refuse itself; a
+start that is genuinely in the background never converges and is refused at the
+bound. The post-spawn handoff itself is unchanged and is an open item: a
+foreground child that touches the terminal before its parent seats it is racing
+that handoff.
 
 **The session's beacon tier is inherited, not probed (H-4d).** Part of the session
 dance is reading `/env/BEACON` -- the render tier its pts host declared and the

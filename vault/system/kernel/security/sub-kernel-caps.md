@@ -16,7 +16,7 @@ locks: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md section 5.5", "docs/IDENTITY-DESIGN.md section 9.8", "specs/corvus.tla", "specs/handles.tla"]
 created: 2026-08-02
-updated: 2026-09-18
+updated: 2026-09-21
 ---
 ## Graphical grant commit
 
@@ -24,7 +24,9 @@ A graphical grant is inserted with `seat_held` atomically under the grant
 lock. Redemption refuses it without consuming it, even when the requester polls
 `/use` before Corvus replies. Only the seat's successful RESTORED transition
 releases the exact target stripes/session. Failure cancels the matching held
-entry. Both paths run in process-lock then grant-lock order; redemption takes
+entry and zeroes the seat's record of it, so the RESTORED that later recovers a
+failed seat finds nothing to release (`cons.graphical_seat_grant_and_failure`
+drives both orders with a fresh requester). Both paths run in process-lock then grant-lock order; redemption takes
 only the grant lock, so the barrier adds no inverse edge. Serial grants retain
 their existing immediate redemption semantics. The grant bounds test covers early
 redeem, mismatched releases, cancellation, one-shot release and successful redeem.

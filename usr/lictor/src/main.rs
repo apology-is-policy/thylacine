@@ -55,8 +55,11 @@ impl Driver for Lictor {
             for conn in &mut conns {
                 conn.advance(&self.device);
                 let runnable = conn.pending.as_ref().is_some_and(|(_, req)| {
+                    // A failed seat parks normal work exactly like a live
+                    // episode: it recovers to NORMAL, and an error reply here
+                    // would make the compositor give up on a display that is
+                    // about to come back.
                     matches!(req, Request::InputInfo { .. } | Request::InputDrain { .. } | Request::SeatState)
-                        || self.seat.phase == 4
                         || (self.seat.phase == 0 && (!Device::requires_quiescence(req) || self.device.gpu.all_work_retired()))
                 });
                 if !runnable { continue; }

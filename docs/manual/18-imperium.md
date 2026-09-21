@@ -19,7 +19,8 @@ From an interactive Halcyon shell, request only the capabilities needed:
 imperium chown dac
 ```
 
-The command prints its process ID. Press Ctrl–Alt–Delete, then release the keys.
+The command prints its process ID. Press Ctrl–Alt–Delete, or Ctrl–Alt–F10 on a
+keyboard without a Delete key, then release the keys.
 Check that the dialog shows the same process and the intended identity and
 capabilities. Enter the Imperium key in that dialog and press Enter. The field
 shows masked characters; it does not send the key into the terminal transcript.
@@ -64,8 +65,13 @@ work outside that scope before authorizing administrative work.
 Ctrl–Alt–Delete without a waiting request shows an informational panel. Press a
 key to return. A wrong key, cancellation, expired request, changed requester, or
 revoked eligibility does not confer authority. Repeated wrong keys cause a
-lockout. A failed trusted display leaves authorization disabled and requires a
-restart; it does not silently move the key prompt into an ordinary terminal.
+lockout.
+
+If the trusted display cannot complete an episode, the dialog reports that no
+authority was conferred, and the workspace returns once every key has been
+released. Holding the attention keys for more than five seconds is the usual
+cause. The pending request is cancelled and must be issued again. The key prompt
+is never moved into an ordinary terminal.
 
 The current QEMU backend uses a neutral dark background during authorization.
 The workspace is suspended from display and input while its panes remain alive.

@@ -10464,15 +10464,12 @@ int sys_srv_peer_for_proc(struct Proc *p, hidx_t conn_h,
     return 0;
 }
 
+// The native twin of the phenotype's fcntl(F_SETFL, O_NONBLOCK): one helper
+// owns the flag word's lock-domain rules, so both front doors share them.
 static s64 sys_set_nonblock_handler(u64 fd, u64 on) {
     struct Thread *t = current_thread();
     if (!t || !t->proc || fd >= PROC_HANDLE_MAX || on > 1) return -T_E_INVAL;
-    struct Spoor *sp = sys_lookup_rw_handle(t->proc, (hidx_t)fd, 0);
-    if (!sp) return -T_E_BADF;
-    if (on) spoor_flag_set(sp, CNONBLOCK);
-    else spoor_flag_clear(sp, CNONBLOCK);
-    spoor_clunk(sp);
-    return 0;
+    return handle_set_nonblock(t->proc, (hidx_t)fd, on != 0) == 0 ? 0 : -T_E_BADF;
 }
 
 static s64 sys_seat_import_handler(u64 conn, u64 share_id) {

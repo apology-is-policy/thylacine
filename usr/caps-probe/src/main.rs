@@ -73,9 +73,17 @@ fn seat_probe(stage: &str) -> i64 {
         "--seat-elevated" => true,
         _ => return 2,
     };
-    let group = unsafe { libthyla_rs::t_getpgid(0) };
-    if group <= 0 || unsafe { libthyla_rs::t_tty_get_fg(1) } != group {
-        t_putstr("seat-probe: FAIL caller lost foreground PTY session\n");
+    // The shell seats a foreground job AFTER spawning it (setpgid, then the
+    // terminal handoff), so a child that samples once at startup races its own
+    // parent. The property is that the handoff LANDS, so wait for it, bounded.
+    let mut seated = false;
+    for _ in 0..100 {
+        let group = unsafe { libthyla_rs::t_getpgid(0) };
+        if group > 0 && unsafe { libthyla_rs::t_tty_get_fg(1) } == group { seated = true; break; }
+        let _ = libthyla_rs::time::sleep(core::time::Duration::from_millis(10));
+    }
+    if !seated {
+        t_putstr("seat-probe: FAIL caller never became the foreground PTY group\n");
         return 1;
     }
     for op in [seat::STATUS, seat::INPUT, seat::ACK, seat::FRAME, seat::KEY,

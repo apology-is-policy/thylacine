@@ -12,13 +12,14 @@ hazards: []
 abis: []
 design: [docs/IMPERIUM-DESIGN.md, docs/TRUSTED-PATH.md]
 created: 2026-09-17
-updated: 2026-09-18
+updated: 2026-09-21
 ---
 ## Halcyon operation
 
 Ordinary tool output uses stdout, so the requesting PID, capabilities,
 conferral and relinquishment appear in the caller's Halcyon PTY. The key remains
-on Corvus's trusted channel. Ctrl-Alt-Delete invokes graphical Lex curiata;
+on Corvus's trusted channel. Ctrl-Alt-Delete, or Ctrl-Alt-F10 on a keyboard with
+no Delete, invokes graphical Lex curiata (the tool's usage text names both);
 serial BREAK requires the configured recovery posture. The fasces library uses
 baked U+2016 rods and a readable `[axe]` terminal cue. The trusted dialog draws
 its own fixed fasces emblem. [[sub-lictor]] documents the authority boundary;

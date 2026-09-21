@@ -108,8 +108,8 @@ pub fn render(pixels: &mut [u32], width: u32, height: u32, backdrop: Option<&[u3
     if model.caps & (1 << 9) != 0 { c.rect(x + pw - 36, y + 25, 10, 12, AMBER); }
     if !request {
         if model.state == State::Failed {
-            c.text(tx, y + 88, "Trusted display unavailable.", 10, AMBER);
-            c.text(tx, y + 132, "Authorization is disabled. Restart is required.", 9, QUIET);
+            c.text(tx, y + 88, "The trusted path could not complete.", 10, AMBER);
+            c.text(tx, y + 132, "No authority was conferred. Release all keys to return.", 9, QUIET);
         } else if !model.notice.is_empty() {
             c.text(tx, y + 88, ascii(&model.notice), 10, INK);
             c.text(tx, y + 132, "Release the secure attention keys.", 9, QUIET);

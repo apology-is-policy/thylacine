@@ -81,8 +81,12 @@ impl Conn {
     /// continues even when a normal client continuously sends work.
     pub fn advance(&mut self, device: &Device) {
         if !self.alive || !self.outgoing.is_empty() { return; }
+        // Runs every pass of a 100 Hz loop for every connection: an idle one
+        // must cost nothing, so the reply buffer is sized only once needed.
+        let ready = !self.reply.is_empty() && self.parked.is_some();
+        if !ready && self.incoming.len() < 7 { return; }
         let mut out = vec![0u8; MSIZE];
-        if !self.reply.is_empty() && self.parked.is_some() {
+        if ready {
             let (tag, count) = self.parked.take().unwrap();
             match self.read_reply(tag, count, &mut out) {
                 Ok(n) => { out.truncate(n); self.outgoing = out; }

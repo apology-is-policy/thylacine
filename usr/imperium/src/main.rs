@@ -107,7 +107,7 @@ fn usage() {
         "With no caps named, imperium requests the full level (CAP_DAC_OVERRIDE\n",
         "CAP_CHOWN CAP_KILL CAP_POST_SERVICE). Naming caps restricts the request to that subset.\n",
         "After `imperium`, an elevated sub-shell opens; `exit` or `abdicate` ends it.\n",
-        "SAK: Ctrl-Alt-Delete on the graphical seat; Ctrl-A b in an enabled QEMU serial recovery session.\n",
+        "SAK: Ctrl-Alt-Delete (or Ctrl-Alt-F10) on the graphical seat; Ctrl-A b in an enabled QEMU serial recovery session.\n",
     ));
 }
 
@@ -496,7 +496,7 @@ fn cmd_elevate(self_restrict: u64) -> i64 {
     }
     print(" as pid ");
     put_dec(if mypid > 0 { mypid as u64 } else { 0 });
-    print(" -- press Ctrl-Alt-Delete; the trusted panel MUST show this pid\n");
+    print(" -- press Ctrl-Alt-Delete (or Ctrl-Alt-F10); the trusted panel MUST show this pid\n");
 
     // (5) Block on the deferred reply.
     let (st, resp) = match unsafe { read_reply(conn) } {

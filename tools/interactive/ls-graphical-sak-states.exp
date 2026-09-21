@@ -113,7 +113,8 @@ witness restored
 # Wrong key: the requesting tool must return and the original shell stay plain.
 type "imperium kill\n"
 after 1200
-key "ctrl+alt+delete"
+# The second reserved chord: keyboards without Delete (this leg proves F10).
+key "ctrl+alt+f10"
 capture axe
 type "deliberately-wrong-key"
 key "ret"

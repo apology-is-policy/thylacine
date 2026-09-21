@@ -718,6 +718,7 @@ void test_cons_episode_end_restores(void);
 void test_cons_episode_repeat_sak_idempotent(void);
 void test_cons_episode_gate(void);
 void test_cons_graphical_seat_gate(void);
+void test_cons_graphical_seat_grant_and_failure(void);
 void test_cons_episode_relinquish_ends(void);
 void test_cons_episode_trusted_death_ends(void);
 void test_cons_episode_saved_owner_death(void);
@@ -2503,6 +2504,7 @@ struct test_case g_tests[] = {
     { "cons.episode_repeat_sak_idempotent",
                                        test_cons_episode_repeat_sak_idempotent, false, NULL },
     { "cons.graphical_seat_gate", test_cons_graphical_seat_gate, false, NULL },
+    { "cons.graphical_seat_grant_and_failure", test_cons_graphical_seat_grant_and_failure, false, NULL },
     { "cons.episode_gate",             test_cons_episode_gate,             false, NULL },
     { "cons.episode_relinquish_ends",  test_cons_episode_relinquish_ends,  false, NULL },
     { "cons.episode_trusted_death_ends",

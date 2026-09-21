@@ -65,13 +65,13 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**492 owned · 77 unowned · 569 files (86% owned) · ~21785 unswept lines.**
+**492 owned · 77 unowned · 569 files (86% owned) · ~21814 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **73 files, ~32789 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **73 files, ~32797 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
-| usr/lictor | 0 | 24 | 7794 |
+| usr/lictor | 0 | 24 | 7823 |
 | usr/warp-prove | 0 | 1 | 4349 |
 | usr/pouch-hello | 0 | 22 | 3384 |
 | kernel | 127 | 14 | 1910 |
@@ -133,7 +133,7 @@ Excluded as harness and counted here rather than dropped: **73 files, ~32789 lin
 | usr/ports/gnumake/config.h | 1357 |
 | usr/quarry/src/main.rs | 1033 |
 | usr/stratumd-stub/stratumd-stub.c | 453 |
-| usr/lictor/src/backend/device.rs | 446 |
+| usr/lictor/src/backend/device.rs | 450 |
 | usr/lictor/src/backend/input.rs | 429 |
 | usr/lictor/src/gpu_api.rs | 411 |
 | kernel/include/thylacine/errno.h | 388 |
@@ -148,7 +148,7 @@ Excluded as harness and counted here rather than dropped: **73 files, ~32789 lin
 | usr/pouch-hello/pouch-hello-signals.c | 258 |
 | usr/pouch-hello/pouch-hello-pty.c | 231 |
 | usr/lictor/src/skein.rs | 217 |
-| usr/lictor/src/backend/server.rs | 206 |
+| usr/lictor/src/backend/server.rs | 210 |
 | kernel/include/thylacine/spinlock.h | 204 |
 | kernel/include/thylacine/context.h | 201 |
 | usr/lib/libthyla-rs/src/sync.rs | 196 |
@@ -160,9 +160,9 @@ Excluded as harness and counted here rather than dropped: **73 files, ~32789 lin
 | kernel/include/thylacine/9p_srvconn_transport.h | 160 |
 | usr/lictor/src/objects.rs | 154 |
 | kernel/cpio.c | 152 |
+| usr/lictor/src/backend/seat.rs | 148 |
 | usr/susp-mask-child/src/main.rs | 139 |
 | usr/pouch-hello/pouch-hello-reentry.c | 133 |
-| usr/lictor/src/backend/seat.rs | 130 |
 | usr/pouch-hello/pouch-hello-spawn.c | 127 |
 | usr/pouch-hello/pouch-hello-mallocng-torture.c | 126 |
 | usr/lictor/src/wire.rs | 124 |
@@ -170,8 +170,8 @@ Excluded as harness and counted here rather than dropped: **73 files, ~32789 lin
 | usr/pouch-hello/pouch-hello-fopen.c | 120 |
 | usr/pouch-hello/pouch-hello-threads.c | 119 |
 | usr/stub-driver/stub-driver.c | 119 |
+| usr/lictor/src/main.rs | 116 |
 | usr/lictor/src/backend/screen.rs | 113 |
-| usr/lictor/src/main.rs | 113 |
 | kernel/include/thylacine/9p_transport_loopback.h | 96 |
 | usr/lictor/src/model.rs | 94 |
 | usr/pouch-hello/pouch-hello-exitgroup.c | 91 |

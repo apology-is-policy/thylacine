@@ -792,6 +792,15 @@ if [[ "${THYLACINE_NO_AUDIO:-0}" != "1" ]]; then
     audio_flags+=(-device "virtio-sound-pci,id=snd-pci0,audiodev=snd0,streams=$snd_streams,disable-legacy=on$pci_sound_addr")
 fi
 
+# THYLACINE_QEMU_EXTRA: whitespace-separated arguments appended verbatim, for a
+# caller that cannot reach this script's own argv (the interactive gates spawn
+# it with a fixed command line). The diagnostic lever: e.g.
+#   THYLACINE_QEMU_EXTRA="-trace virtio_gpu_cmd_set_scanout -D build/qemu-trace.log"
+if [[ -n "${THYLACINE_QEMU_EXTRA:-}" ]]; then
+    read -r -a _env_extra <<< "$THYLACINE_QEMU_EXTRA"
+    extra_qemu_args+=("${_env_extra[@]}")
+fi
+
 # Canonical QEMU flags per TOOLING.md §3.
 #
 # disk_flags (P4-Ic5b2) comes BEFORE virtio-rng-device because QEMU

@@ -372,9 +372,18 @@ impl Repl {
         // GET_FG on a slave is kernel-gated by controlling-session membership.
         // Only an already-foreground caller may seat a nested shell; it gets
         // its own group so ^C does not also terminate the waiting parent tool.
-        let foreground = unsafe { libthyla_rs::t_tty_get_fg(0) };
+        let mut foreground = unsafe { libthyla_rs::t_tty_get_fg(0) };
         let own_pgid = if foreground >= 0 {
-            let group = unsafe { libthyla_rs::t_getpgid(0) };
+            // The parent shell seats its job after the spawn; a nested shell
+            // that samples once can read the PARENT's group and refuse itself.
+            // A background start never converges and is refused at the bound.
+            let mut group = unsafe { libthyla_rs::t_getpgid(0) };
+            for _ in 0..50 {
+                if group > 0 && foreground == group { break; }
+                let _ = libthyla_rs::time::sleep(core::time::Duration::from_millis(10));
+                group = unsafe { libthyla_rs::t_getpgid(0) };
+                foreground = unsafe { libthyla_rs::t_tty_get_fg(0) };
+            }
             if group <= 0 || foreground != group {
                 t_putstr("ut: pts session: nested shell is not foreground\n");
                 return false;

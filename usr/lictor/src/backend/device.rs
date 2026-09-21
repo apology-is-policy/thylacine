@@ -116,8 +116,8 @@ impl Device {
                 result.put(&mut out);
             }
             Request::ResourceCreate2d { resource_id, w, h } => {
-                self.reserve(resource_id, Kind::Resource)?;
                 if w == 0 || h == 0 || w > 8192 || h > 8192 { return Err(Error::BadField); }
+                self.reserve(resource_id, Kind::Resource)?;
                 let result = self.gpu.resource_create_2d(resource_id, w, h);
                 result.put(&mut out);
             }
@@ -134,6 +134,10 @@ impl Device {
                 self.ordinary_resource(resource_id)?;
                 if matches!(self.presentation, Presentation::Image { resource, .. } | Presentation::Blob { resource, .. } if resource == resource_id) {
                     self.gpu.condemn(resource_id);
+                    // The ledger refuses a retiring id, so a takeover that ends
+                    // before the compositor binds a successor must restore to a
+                    // blank output, not fail the seat on a resource that is gone.
+                    self.presentation = Presentation::None;
                 }
                 let ticket = self.objects.retire(self.owner, resource_id, Kind::Resource).map_err(|_| Error::BadField)?;
                 self.retiring.push(Retiring { resource: resource_id, ticket, done: false });
@@ -161,17 +165,17 @@ impl Device {
             }
             Request::CreateRingBlob { resource_id, backing, len } => {
                 if backing.length != len as u64 { return Err(Error::BadField); }
-                self.reserve(resource_id, Kind::Resource)?;
                 let pin = Pin::claim(connection, backing)?;
                 if pin.count != 1 { return Err(Error::BadField); }
+                self.reserve(resource_id, Kind::Resource)?;
                 let result = self.gpu.create_ring_blob(resource_id, pin.segments[0].pa, len);
                 self.backings.push(Backing { resource: resource_id, _pin: pin });
                 result.put(&mut out);
             }
             Request::CreateHost3dBlob { resource_id, ctx_id, blob_flags, len, blob_id } => {
-                self.reserve(resource_id, Kind::Resource)?;
                 self.check(ctx_id, Kind::Context)?;
                 if len == 0 || len as u64 > 64 * 1024 * 1024 { return Err(Error::BadField); }
+                self.reserve(resource_id, Kind::Resource)?;
                 let result = self.gpu.create_host3d_blob(resource_id, ctx_id, blob_flags, len, blob_id);
                 result.put(&mut out);
             }
@@ -183,8 +187,8 @@ impl Device {
             }
             Request::MintHost3dRing { res_id, ctx_id, len, blob_id } => {
                 self.check(ctx_id, Kind::Context)?;
-                self.reserve(res_id, Kind::Resource)?;
                 if len == 0 || len > 1024 * 1024 { return Err(Error::BadField); }
+                self.reserve(res_id, Kind::Resource)?;
                 let result = self.gpu.mint_host3d_ring(res_id, ctx_id, len, blob_id);
                 let result = result.map(|ring| {
                     let info = RingInfo { res_id: ring.res_id, size: ring.size, cache: ring.cache };
@@ -219,8 +223,8 @@ impl Device {
                 ().put(&mut out);
             }
             Request::CtxCreate { ctx_id, debug_name } => {
-                self.reserve(ctx_id, Kind::Context)?;
                 if debug_name.len() > 64 { return Err(Error::BadField); }
+                self.reserve(ctx_id, Kind::Context)?;
                 let result = self.gpu.ctx_create(ctx_id, &debug_name);
                 result.put(&mut out);
             }
@@ -230,8 +234,8 @@ impl Device {
                 result.put(&mut out);
             }
             Request::CtxCreateCapset { ctx_id, capset_id, debug_name } => {
-                self.reserve(ctx_id, Kind::Context)?;
                 if debug_name.len() > 64 { return Err(Error::BadField); }
+                self.reserve(ctx_id, Kind::Context)?;
                 let result = self.gpu.ctx_create_capset(ctx_id, capset_id, &debug_name);
                 result.put(&mut out);
             }
@@ -289,9 +293,9 @@ impl Device {
                 result.put(&mut out);
             }
             Request::CreatePresentable { res_id, ctx_id, len, blob_id } => {
-                self.reserve(res_id, Kind::Resource)?;
                 self.check(ctx_id, Kind::Context)?;
                 if len == 0 || len as u64 > 64 * 1024 * 1024 { return Err(Error::BadField); }
+                self.reserve(res_id, Kind::Resource)?;
                 let result = self.gpu.create_presentable(res_id, ctx_id, len, blob_id);
                 result.put(&mut out);
             }

@@ -68,7 +68,9 @@ The separation is architectural work, not merely a modal overlay.
 
 ## Entry and restoration
 
-1. A physical reserved attention gesture reaches the trusted input owner. Software
+1. A physical reserved attention gesture (Ctrl-Alt-Delete, or Ctrl-Alt-F10 where
+   the keyboard has no Delete) reaches the trusted input owner and is scanned by
+   the kernel from that owner's key reports. Software
    input injection is a distinct untrusted route and cannot trigger SAK or enter
    the secret queue. Serial BREAK remains a recovery trigger only in a configured dev/recovery posture.
 2. The kernel starts a generation and freezes normal presentation/input admission.
@@ -91,8 +93,23 @@ or the immutable episode background until restoration.
 
 ## Failure rules
 
-A dead/stalled trusted service never causes the compositor to inherit display or
-input ownership. Cancel the pending grant and invalidate the generation. Serial
+Two different things fail, and they are treated differently.
+
+An EPISODE fails (a deadline passes, a device step is refused, a frame does not
+decode, Corvus or the requester goes away). The kernel cancels the held grant,
+scrubs the secret queue and closes the episode it opened. The owner then shows
+a failure notice, waits for every key to come up, puts the last normal
+presentation back and reports RESTORED; the kernel returns the seat to normal
+and releases nothing. Fail-closed is about AUTHORITY: nothing in these rules
+requires the display to stay dark, and before 2026-09-21 it did -- a chord held
+past the 5 s quiesce deadline, or a prompt left idle past the exclusive
+deadline, left the machine without a display until both seat processes died.
+A seat failure closes only the episode the seat opened; a serial episode, which
+runs only while the seat is normal, is never closed by one.
+
+The OWNER fails (it dies or stalls). A dead/stalled trusted service never causes
+the compositor to inherit display or input ownership. Cancel the pending grant
+and invalidate the generation. Serial
 recovery is available only under the configured dev/recovery posture; production
 does not enable serial authorization on graphical failure. Recovery/restart must establish exclusive hardware ownership again before
 showing a new trusted episode. Corvus death, requester death, timeout, malformed
@@ -145,6 +162,19 @@ Measured integration evidence: host framing/model/ownership/render tests; kernel
 seat gates and transport backpressure tests; QEMU empty/confer/DAC/abdicate/wrong
 key/cancel flow with real screenshots. Accelerated context continuity, broader
 backend qualification and final matrix verification remain separate gates.
+
+### Takeover review, 2026-09-21
+
+The work above was committed as a checkpoint (db88cf71) and reviewed by a second
+agent (memory/audit_lictor_closed_list.md). Fixed: a seat failure abandoned ANY
+open console episode, so an unrelated compositor death could unfreeze the
+console under a serial key entry (P1); a failed seat was terminal (P2); the
+broker kept naming a presented resource the compositor had unref'd, so the next
+restore failed the seat (P2); the ledger reserved ids before validating the
+request; and the last red gate was a probe that sampled the terminal foreground
+once, racing the shell's own post-spawn handoff. Added: Ctrl-Alt-F10 as a second
+reserved chord, `cons.graphical_seat_grant_and_failure`, and
+`ls-graphical-sak-recover`. Open items are listed in the Lictor dossier.
 
 ### Trusted raster memory
 

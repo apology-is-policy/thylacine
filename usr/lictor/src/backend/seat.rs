@@ -25,8 +25,10 @@ pub struct Seat {
     sequence: u64,
     masked: u32,
     model: Model,
-    failed_painted: bool,
+    failed_since: Option<libthyla_rs::time::Instant>,
 }
+/// How long the failure notice stays up before normal output returns.
+const FAILURE_NOTICE_MS: u128 = 1500;
 impl Seat {
     pub fn input(&mut self, inputs: &mut [Input]) {
         for input in inputs.iter_mut() {
@@ -82,6 +84,7 @@ impl Seat {
                     if screen.paint(&mut device.gpu, &self.model, 0, None).is_err()
                         || screen.activate(&mut device.gpu).is_err() { self.fail("private scanout activation"); return; }
                     self.active = true; self.sequence = 0; self.masked = 0;
+                    super::diagnostic(&alloc::format!("lictor: trusted scanout active generation={}\n", self.generation));
                 }
                 if released {
                     self.mods = Mods::default();
@@ -113,16 +116,31 @@ impl Seat {
                 self.phase = m.phase; self.active = false;
             }
             _ => {
+                // The kernel already cancelled any grant and scrubbed the key
+                // queue, so what is left is giving the workspace back. Say
+                // what happened first, then restore and tell the kernel; a
+                // refused restore (work still in flight, a dead device) is
+                // retried every pass and confers nothing in the meantime.
                 for input in inputs.iter_mut() { input.events.clear(); }
-                if !self.failed_painted {
-                    self.failed_painted = true;
-                    super::diagnostic("lictor: kernel closed trusted seat\n");
-                    let model = Model { state: State::Failed, ..Model::default() };
-                    let _ = screen.paint(&mut device.gpu, &model, 0, None);
-                    // If takeover never completed, try to blank/exclude normal
-                    // output before selecting the failure scene. Refusal leaves
-                    // authorization disabled; it never enables a fallback grant.
-                    if !self.active { let _ = screen.activate(&mut device.gpu); }
+                let since = *self.failed_since.get_or_insert_with(|| {
+                    super::diagnostic(&alloc::format!("lictor: kernel closed trusted seat (scanout {})\n",
+                        if self.active { "private" } else { "normal" }));
+                    if self.active {
+                        let model = Model { state: State::Failed, ..Model::default() };
+                        let _ = screen.paint(&mut device.gpu, &model, 0, None);
+                    }
+                    libthyla_rs::time::Instant::now()
+                });
+                if !released || (self.active && since.elapsed().as_millis() < FAILURE_NOTICE_MS) { return; }
+                if self.active {
+                    if device.restore().is_err() { return; }
+                    screen.deactivated();
+                    self.active = false;
+                }
+                self.mods = Mods::default(); self.model = Model::default(); self.masked = 0;
+                if ep::call(ep::RESTORED, &mut m).is_ok() {
+                    self.phase = m.phase; self.failed_since = None;
+                    super::diagnostic("lictor: trusted seat recovered; nothing was conferred\n");
                 }
             }
         }
