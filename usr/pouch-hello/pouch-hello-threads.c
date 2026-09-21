@@ -48,6 +48,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define NTHREADS         5u
 #define ITER_PER_THREAD  1000u
@@ -78,33 +79,64 @@ static void *worker(void *arg) {
     return NULL;
 }
 
+// The kernel's own statement of the initial stack: the row of /proc/<pid>/maps whose
+// role column reads `stack` (kernel/devproc.c format_maps). Exactly one such row, or
+// the answer is refused -- a second one would mean the role no longer names one mapping.
+static int kernel_stack_row(uintptr_t *lo, uintptr_t *hi) {
+    char path[64], line[256];
+    int found = 0;
+    snprintf(path, sizeof path, "/proc/%d/maps", (int)getpid());
+    FILE *mf = fopen(path, "r");
+    if (!mf) return -1;
+    while (fgets(line, sizeof line, mf)) {
+        size_t n = strlen(line);
+        unsigned long a = 0, b = 0;
+        if (n < 7 || strcmp(line + n - 7, " stack\n") != 0) continue;
+        if (sscanf(line, "%lx-%lx", &a, &b) != 2 || a >= b) continue;
+        *lo = a;
+        *hi = b;
+        found++;
+    }
+    fclose(mf);
+    return found == 1 ? 0 : -1;
+}
+
 int main(void) {
     printf("pouch-hello-threads: %u threads, %u iters each\n",
            NTHREADS, ITER_PER_THREAD);
     fflush(stdout);
 
-    // pouch 0033: the initial thread's reported stack must CONTAIN a main-thread local
-    // and BE the exec mapping. Two-sided on purpose: "contains" alone passed for years
-    // while the size was one page, and a bare size check would pass on a wrong base.
+    // The initial thread's reported stack must CONTAIN a main-thread local and BE the
+    // mapping the KERNEL says it made. The kernel's side comes from the `stack` row of
+    // /proc/<pid>/maps at run time: comparing libc against literals written here would
+    // only compare two hand-kept mirrors of exec.h with each other, and both could be
+    // stale together.
     {
         pthread_attr_t at;
         void *base = 0;
         size_t size = 0;
         int local = 0;
+        uintptr_t klo = 0, khi = 0;
         if (pthread_getattr_np(pthread_self(), &at) != 0 ||
             pthread_attr_getstack(&at, &base, &size) != 0) {
             printf("pouch-hello-threads: main stack query FAILED\n");
             fflush(stdout);
             return 7;
         }
+        if (kernel_stack_row(&klo, &khi) != 0) {
+            printf("pouch-hello-threads: no single `stack` row in /proc/%d/maps\n",
+                   (int)getpid());
+            fflush(stdout);
+            return 9;
+        }
         uintptr_t lo = (uintptr_t)base, hi = lo + size, here = (uintptr_t)&local;
-        if (here < lo || here >= hi || size != 1024u * 1024u || hi != 0x80000000ul) {
-            printf("pouch-hello-threads: main stack WRONG: [%p, %p) size=%lu local=%p\n",
-                   base, (void *)hi, (unsigned long)size, (void *)here);
+        if (here < lo || here >= hi || lo != klo || hi != khi) {
+            printf("pouch-hello-threads: main stack WRONG: libc [%p, %p) kernel [%p, %p) local=%p\n",
+                   base, (void *)hi, (void *)klo, (void *)khi, (void *)here);
             fflush(stdout);
             return 8;
         }
-        printf("pouch-hello-threads: main stack [%p, %p) size=%lu OK\n",
+        printf("pouch-hello-threads: main stack [%p, %p) size=%lu == kernel maps row OK\n",
                base, (void *)hi, (unsigned long)size);
         fflush(stdout);
     }

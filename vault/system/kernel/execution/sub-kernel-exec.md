@@ -343,10 +343,15 @@ occupies at the top, and the rest demand-zeroes as the program descends.
 in the same change. What the 1 MiB is now: a RESERVATION and an I-32 ceiling
 for a runaway recursion, not memory. It was caught because pouch patch 0033
 repeated the claim from the header, and the code was read before the patch
-landed. The size has two mirrors outside the kernel — pouch 0033's
-`POUCH_MAIN_STACK_TOP` / `_SIZE` ([[sub-pouch-thread]]) and
-`/pouch-hello-threads`' device-side pin — so changing it is a three-place edit
-that a boot prover makes loud.
+landed. The size has ONE mirror outside the kernel — the pouch libc's
+`POUCH_MAIN_STACK_TOP` / `_SIZE` ([[sub-pouch-thread]]) — so changing it is a
+two-place edit. What makes forgetting the second place loud is
+`/pouch-hello-threads`, which reads the `stack` row of `/proc/<pid>/maps`
+(`format_maps`, keyed on `vaddr_start == EXEC_USER_STACK_BASE`) at run time
+and requires libc's answer to equal it. The prover's first version compared
+libc with the same two literals written again in the prover — a third mirror,
+green through exactly the change it was for (audit r1 F3); it holds no
+literal now.
 
 ## Prosecution
 

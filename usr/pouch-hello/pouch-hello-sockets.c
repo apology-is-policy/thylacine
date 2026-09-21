@@ -43,6 +43,8 @@ static const char SOCK_PATH[]    = "/srv/pouch-sock-demo";
 static const char NONEXIST_PATH[] = "/srv/pouch-sock-nonex";
 static const char MSG_PING[]     = "PING\n";
 static const char MSG_PONG[]     = "PONG\n";
+static const char MSG_LINE[]     = "LINE 7\n";
+static const char MSG_ECHO[]     = "ECHO 7 tail\n";
 
 static pthread_barrier_t g_ready;
 static int               g_server_ok = 0;
@@ -238,14 +240,95 @@ static void *server_main(void *arg)
     printf("server: SO_PEERCRED pid=%d uid=%u gid=%u\n",
            cred.pid, cred.uid, cred.gid);
 
+    /* The client's stdio leg: the server end stays raw, so a byte the
+     * client's FILE mangles cannot be un-mangled by a FILE here. */
+    n = read(conn, buf, sizeof(buf) - 1);
+    if (n != (ssize_t)(sizeof(MSG_LINE) - 1) ||
+        memcmp(buf, MSG_LINE, sizeof(MSG_LINE) - 1) != 0) {
+        fprintf(stderr, "server: stdio leg read got %zd errno=%d\n", n, errno);
+        close(conn); close(s);
+        return NULL;
+    }
+    w = write(conn, MSG_ECHO, sizeof(MSG_ECHO) - 1);
+    if (w != (ssize_t)(sizeof(MSG_ECHO) - 1)) {
+        fprintf(stderr, "server: stdio leg write got %zd errno=%d\n", w, errno);
+        close(conn); close(s);
+        return NULL;
+    }
+
     close(conn);
     close(s);
     g_server_ok = 1;
     return NULL;
 }
 
+/* How many sockets this Proc can still open: socket() until it refuses, then
+ * give them all back. Measured, not mirrored from libc's table size -- the
+ * leak check below compares two readings of it. */
+static int free_socket_slots(void)
+{
+    int held[64];
+    int n = 0;
+    while (n < (int)(sizeof(held) / sizeof(held[0]))) {
+        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (fd < 0) break;
+        held[n++] = fd;
+    }
+    for (int i = 0; i < n; i++) close(held[i]);
+    return n;
+}
+
+/* stdio over a connected socket: fdopen() the client end, write a line through
+ * the FILE, read the reply back through it (the scanf pushback path included),
+ * and fclose() it. The socket fd is a libc-side slot, not a kernel handle, so
+ * a stdio backend that hands f->fd to the kernel raw fails every one of these
+ * and fclose() strands the slot. Consumes `c` either way. */
+static int stdio_over_socket(int c)
+{
+    FILE *cf = fdopen(c, "r+");
+    if (!cf) {
+        fprintf(stderr, "client: fdopen(socket) failed errno=%d\n", errno);
+        close(c);
+        return -1;
+    }
+    if (fputs(MSG_LINE, cf) == EOF || fflush(cf) != 0) {
+        fprintf(stderr, "client: stdio write over socket failed errno=%d\n", errno);
+        fclose(cf);
+        return -1;
+    }
+    int v = -1;
+    char rest[16];
+    if (fscanf(cf, "ECHO %d", &v) != 1 || v != 7 ||
+        !fgets(rest, sizeof rest, cf) || strcmp(rest, " tail\n") != 0) {
+        fprintf(stderr, "client: stdio read over socket wrong: v=%d errno=%d\n",
+                v, errno);
+        fclose(cf);
+        return -1;
+    }
+    errno = 0;
+    if (fseek(cf, 0, SEEK_CUR) != -1 || errno != ESPIPE) {
+        fprintf(stderr, "client: fseek(socket FILE) errno=%d (want ESPIPE)\n", errno);
+        fclose(cf);
+        return -1;
+    }
+    if (fclose(cf) != 0) {
+        fprintf(stderr, "client: fclose(socket FILE) failed errno=%d\n", errno);
+        return -1;
+    }
+    printf("client: stdio over socket (fputs/fscanf/fgets/fclose) ok\n");
+    return 0;
+}
+
 static int test_round_trip(void)
 {
+    int slots_before = free_socket_slots();
+    if (slots_before < 3 || slots_before >= 64) {
+        /* 64 is the probe's own ceiling: a reading AT it is not a measurement. */
+        fprintf(stderr, "test: %d socket slots free at start (want 3..63)\n",
+                slots_before);
+        return -1;
+    }
+
     if (pthread_barrier_init(&g_ready, NULL, 2) != 0) {
         fprintf(stderr, "test: pthread_barrier_init failed\n");
         return -1;
@@ -341,14 +424,26 @@ static int test_round_trip(void)
         printf("client: SO_PEERCRED client-side returns ENOTSOCK at v1.0 ok\n");
     }
 
-    close(c);
+    int stdio_rc = stdio_over_socket(c);   /* closes c */
     pthread_join(srv, NULL);
     pthread_barrier_destroy(&g_ready);
 
+    if (stdio_rc != 0) return -1;
     if (!g_server_ok) {
         fprintf(stderr, "test: server thread reported failure\n");
         return -1;
     }
+
+    /* Every slot this test took must be back: the listener, the accepted
+     * end, and the client end that was closed through its FILE. */
+    int slots_after = free_socket_slots();
+    if (slots_after != slots_before) {
+        fprintf(stderr, "test: socket slots leaked: %d free before, %d after\n",
+                slots_before, slots_after);
+        return -1;
+    }
+    printf("test: socket slots %d free before == %d after ok\n",
+           slots_before, slots_after);
     return 0;
 }
 

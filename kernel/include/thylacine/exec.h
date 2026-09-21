@@ -56,9 +56,10 @@ struct Spoor;   // REVENANT R-4: exec_setup_from_spoor's pinned executable
 // exec commits only the pages the argv/auxv frame occupies at the top, and
 // the rest demand-zeroes as the program descends -- the Linux model. So the
 // size is a RESERVATION plus an I-32 ceiling, not a per-Proc cost, and
-// raising it is a constant change here plus its mirrors (pouch patch 0033
-// states [TOP - SIZE, TOP) to pthread_getattr_np; pouch-hello-threads pins
-// both from the device side).
+// raising it is a constant change here plus its one mirror: pouch's
+// pthread_getattr_np states [TOP - SIZE, TOP) for the initial thread. The
+// pouch-hello-threads boot prover requires that answer to equal this
+// mapping's `stack` row in /proc/<pid>/maps, so a stale mirror fails a boot.
 //
 // P5-secondary-stack-guard: a 4 KiB guard page sits directly below
 // EXEC_USER_STACK_BASE, installed by exec_map_user_stack as a prot==0

@@ -63,7 +63,8 @@
 0032-pouch-sysconf-nprocs.patch
 # 0033: B-0 -- pthread_getattr_np() reported a ONE-PAGE main-thread stack
 # (upstream probes the extent with mremap, which the seam ENOSYSes). State the
-# exec mapping instead: [0x7ff00000, 0x80000000). Pinned by pouch-hello-threads.
+# exec mapping instead: [0x7ff00000, 0x80000000). pouch-hello-threads requires
+# the answer to equal the kernel's own /proc/<pid>/maps `stack` row.
 0033-pouch-getattr-np-main-stack.patch
 # 0034: B-0 -- sysconf(_SC_PHYS_PAGES/_SC_AVPHYS_PAGES) returned UNINITIALISED
 # STACK (upstream never checks its ENOSYSed sysinfo call). Read /ctl/memory
@@ -72,7 +73,8 @@
 # 0035: B-0 -- 0002's read backend never refilled f->buf, breaking the
 # rpos[-1] pushback invariant: fscanf/scanf on a real FILE failed at the first
 # pushed-back delimiter, and every getc was one syscall. Restores upstream's
-# own no-readv refill arm. Found by 0034's device pin.
+# own no-readv refill arm, generalised to every request <= the buffer (small
+# freads buffer too). Found by 0034's device pin.
 0035-pouch-stdio-read-refill.patch
 # 0036: B-0 audit r1 F2 -- tmpfile() never unlinked (a raw SYS_unlinkat
 # sentinel, result ignored; 0027 fixed remove() and missed this twin).
@@ -82,3 +84,8 @@
 # wrapper never filled (0034's defect, five more times); sysconf's /ctl reads
 # stop being cancellation points.
 0037-pouch-unchecked-sentinel-wrappers.patch
+# 0038: B-0 audit r1 F4 -- the stdio backends handed a pouch SOCKET fd (a
+# libc-side slot tag) to the kernel raw: fdopen(sock) never worked and fclose()
+# stranded the slot (8 of them ends socket()). Map the tag as read/write/close
+# do; ESPIPE for a seek. Pinned by pouch-hello-sockets' stdio + slot-count legs.
+0038-pouch-stdio-socket-fds.patch

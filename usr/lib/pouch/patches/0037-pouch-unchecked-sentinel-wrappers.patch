@@ -30,13 +30,24 @@ Answers, each the honest one its API allows:
   getdtablesize 1024 -- the one MIRROR here. The API has no error channel,
                 INT_MAX would turn every close-all-fds loop into a hang, and
                 the kernel's per-Proc handle table is PROC_HANDLE_MAX = 1024.
-                Nothing at run time exposes that figure, so nothing can pin
-                the mirror; it is recorded as such in the seam dossier.
+                No file exposes that figure, so the prover MEASURES it:
+                pouch-hello-malloc opens /ctl/memory until the kernel
+                refuses and requires getdtablesize() to equal the last fd
+                issued plus one (the table fills lowest-free-first).
 
 F6: sysconf's two /ctl arms (0032 nprocs, 0034 phys pages) read and closed
 their fd with read()/close(), which are cancellation points; sysconf is not
 one. A cancel pending at the read leaked the fd. Both arms now use raw
 __syscall(SYS_read / SYS_close). open() on pouch is already non-cancellable.
+The 0032 arm also left open()'s errno behind on its fail-soft return of 1 (a
+call that did not fail reporting ENOENT), and its comment still said /ctl is
+absent pre-pivot, which stopped being true at #57a; both corrected here.
+
+Device-side pin (same commit, not in this patch file): pouch-hello-malloc
+pre-loads errno with a value none of these calls sets and requires
+sysconf(_SC_OPEN_MAX) and sysconf(_SC_CHILD_MAX) to return -1 with it
+untouched, getloadavg / ulimit(UL_GETFSIZE) / getdomainname to return -1, and
+getdtablesize() to match the measured table.
 
 --- a/src/conf/sysconf.c
 +++ b/src/conf/sysconf.c
@@ -58,15 +69,29 @@ __syscall(SYS_read / SYS_close). open() on pouch is already non-cancellable.
  		if (lim.rlim_cur == RLIM_INFINITY)
  			return -1;
  		return lim.rlim_cur > LONG_MAX ? LONG_MAX : lim.rlim_cur;
-@@ -218,10 +227,12 @@
+@@ -209,19 +218,25 @@
+ 		 * (#150). The truthful source is the "cpus: N" line of
+ 		 * /ctl/sched (kernel/devctl.c), the same line the Go fork's
+ 		 * runtime getCPUCount() parses. Fail-soft to 1: no /ctl in
+-		 * this namespace (pre-pivot or confined), short read, absent
+-		 * key. Plain open(): no O_CLOEXEC dependency, transient fd. */
++		 * this namespace (a confined one), short read, absent key --
++		 * with errno as the caller had it either way: this call does
++		 * not fail, so it must not leave open()'s ENOENT behind.
++		 * Plain open(): no O_CLOEXEC dependency, transient fd. */
+ 		{
+ 			char cbuf[512];
++			int saved_np = errno;
+ 			int cfd = open("/ctl/sched", O_RDONLY);
++			errno = saved_np;
+ 			if (cfd >= 0) {
  				ssize_t got = 0, r;
  				long n = 0;
  				ssize_t j, k;
--				while (got < (ssize_t)sizeof cbuf &&
--				       (r = read(cfd, cbuf+got, sizeof cbuf - got)) > 0)
 +				/* raw, NOT read()/close(): those are cancellation points,
 +				 * sysconf is not, and a cancel landing here leaks cfd. */
-+				while (got < (ssize_t)sizeof cbuf &&
+ 				while (got < (ssize_t)sizeof cbuf &&
+-				       (r = read(cfd, cbuf+got, sizeof cbuf - got)) > 0)
 +				       (r = __syscall(SYS_read, cfd, cbuf+got, sizeof cbuf - got)) > 0)
  					got += r;
 -				close(cfd);
@@ -74,7 +99,7 @@ __syscall(SYS_read / SYS_close). open() on pouch is already non-cancellable.
  				for (j = 0; j + 5 < got; j++) {
  					if (cbuf[j] != 'c' || cbuf[j+1] != 'p' ||
  					    cbuf[j+2] != 'u' || cbuf[j+3] != 's' ||
-@@ -259,10 +270,11 @@
+@@ -259,10 +274,11 @@
  			int mfd = open("/ctl/memory", O_RDONLY);
  			ssize_t got = 0, r, j;
  			if (mfd < 0) { errno = saved; return -1; }

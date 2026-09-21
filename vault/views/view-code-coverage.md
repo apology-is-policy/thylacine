@@ -65,14 +65,14 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**520 owned · 50 unowned · 570 files (91% owned) · ~13630 unswept lines.**
+**521 owned · 49 unowned · 570 files (91% owned) · ~13264 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **73 files, ~32801 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
 | usr/warp-prove | 0 | 1 | 4349 |
-| usr/pouch-hello | 3 | 19 | 3023 |
+| usr/pouch-hello | 4 | 18 | 2657 |
 | kernel | 127 | 14 | 1910 |
 | usr/ports | 19 | 4 | 1631 |
 | usr/quarry | 0 | 1 | 1033 |
@@ -133,7 +133,6 @@ Excluded as harness and counted here rather than dropped: **73 files, ~32801 lin
 | usr/quarry/src/main.rs | 1033 |
 | usr/stratumd-stub/stratumd-stub.c | 453 |
 | kernel/include/thylacine/errno.h | 388 |
-| usr/pouch-hello/pouch-hello-sockets.c | 366 |
 | usr/pouch-hello/pouch-hello-fs.c | 350 |
 | usr/pouch-hello/pouch-hello-net.c | 284 |
 | kernel/include/thylacine/smp.h | 282 |

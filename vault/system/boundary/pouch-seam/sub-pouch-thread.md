@@ -114,10 +114,13 @@ same wrong answer. The fix returns the mapping the kernel actually makes —
 (`exec_map_user_stack` is `burrow_create_anon_lazy` since LINEAGE L-4a)
 over a real one-page `prot==0` guard VMA. So the main thread, unlike a
 created one, HAS a working guard page. `/pouch-hello-threads` pins the
-mirror from the device side, two-sided on purpose: a main-thread local must
-lie inside the reported bounds AND the bounds must be the full mapping —
-"contains" alone passed for years while the size was one page, and a bare
-size check would pass on a wrong base.
+mirror against the KERNEL, two-sided on purpose: a main-thread local must
+lie inside the reported bounds AND the bounds must equal the `stack` row of
+`/proc/<pid>/maps`, read at run time (exactly one such row, or the prover
+refuses). "Contains" alone passed for years while the size was one page. The
+first version of the second half compared libc with two literals written in
+the prover — a copy of the copy, which stays green when the kernel's constant
+moves and libc does not (audit r1 F3); the prover holds no literal now.
 
 ## Data structures
 

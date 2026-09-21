@@ -56,6 +56,56 @@ static int fail(const char *leg) {
     return 1;
 }
 
+// The scanf family pushes its terminating byte back with a bare `rpos--`, which
+// only works if the read backend left that byte at rpos[-1]. Each step re-reads a
+// pushed-back delimiter: the space after "alpha", the newline a "%d" stops at, and
+// the byte fgetc must then see. Then a small fread() followed by a scan, which
+// must continue from whatever the fread left buffered. Checks are on VALUES, so
+// a scan that "succeeds" on the wrong bytes still fails.
+static int scan_pass(size_t vsize) {
+    static char vbuf[16];
+    char line[64];
+    char w1[8] = {0}, w2[8] = {0}, h[5];
+    int a = 0, b = 0, n;
+    unsigned x = 0;
+    FILE *f = tmpfile();
+    if (!f) return fail("scan tmpfile");
+    if (vsize && setvbuf(f, vbuf, _IOFBF, vsize)) return fail("scan setvbuf");
+    if (fputs("alpha 12 -7\n0x1f beta\ntail line\n", f) == EOF) return fail("scan fputs");
+    if (fflush(f)) return fail("scan fflush");
+    rewind(f);
+    n = fscanf(f, "%7s %d %d", w1, &a, &b);
+    if (n != 3 || strcmp(w1, "alpha") || a != 12 || b != -7) {
+        printf("pouch-hello-fopen: scan[%lu] line1 n=%d w1=[%s] a=%d b=%d\n",
+               (unsigned long)vsize, n, w1, a, b);
+        return fail("scan line1 (fscanf pushback)");
+    }
+    if (fgetc(f) != '\n') return fail("scan pushed-back newline not re-read");
+    n = fscanf(f, "%x %7s", &x, w2);
+    if (n != 2 || x != 0x1f || strcmp(w2, "beta")) {
+        printf("pouch-hello-fopen: scan[%lu] line2 n=%d x=%#x w2=[%s]\n",
+               (unsigned long)vsize, n, x, w2);
+        return fail("scan line2");
+    }
+    if (fgetc(f) != '\n') return fail("scan second pushed-back newline");
+    if (!fgets(line, sizeof line, f) || strcmp(line, "tail line\n"))
+        return fail("scan fgets after fscanf");
+    if (fgetc(f) != EOF || !feof(f)) return fail("scan EOF");
+
+    rewind(f);
+    a = b = 0;
+    if (fread(h, 1, sizeof h, f) != sizeof h || memcmp(h, "alpha", sizeof h))
+        return fail("scan small fread");
+    n = fscanf(f, "%d %d", &a, &b);
+    if (n != 2 || a != 12 || b != -7) {
+        printf("pouch-hello-fopen: scan[%lu] after fread n=%d a=%d b=%d\n",
+               (unsigned long)vsize, n, a, b);
+        return fail("scan after small fread");
+    }
+    if (fclose(f)) return fail("scan fclose");
+    return 0;
+}
+
 int main(void) {
     // create
     FILE *f = fopen(PROBE, "w");
@@ -145,38 +195,11 @@ int main(void) {
     if (fclose(f)) return fail("tmpfile fclose");
     puts("pouch-hello-fopen: tmpfile OK");
 
-    // scan (pouch 0035): the scanf family pushes its terminating byte back with a
-    // bare `rpos--`, which only works if the read backend left that byte at
-    // rpos[-1]. Each step below re-reads a pushed-back delimiter: the space after
-    // "alpha", the newline a "%d" stops at, and the byte fgetc must then see.
-    // The arithmetic check is on VALUES, so a scan that "succeeds" on the wrong
-    // bytes still fails.
-    f = tmpfile();
-    if (!f) return fail("scan tmpfile");
-    if (fputs("alpha 12 -7\n0x1f beta\ntail line\n", f) == EOF) return fail("scan fputs");
-    if (fflush(f)) return fail("scan fflush");
-    rewind(f);
-    {
-        char w1[8] = {0}, w2[8] = {0};
-        int a = 0, b = 0, n;
-        unsigned x = 0;
-        n = fscanf(f, "%7s %d %d", w1, &a, &b);
-        if (n != 3 || strcmp(w1, "alpha") || a != 12 || b != -7) {
-            printf("pouch-hello-fopen: scan line1 n=%d w1=[%s] a=%d b=%d\n", n, w1, a, b);
-            return fail("scan line1 (fscanf pushback)");
-        }
-        if (fgetc(f) != '\n') return fail("scan pushed-back newline not re-read");
-        n = fscanf(f, "%x %7s", &x, w2);
-        if (n != 2 || x != 0x1f || strcmp(w2, "beta")) {
-            printf("pouch-hello-fopen: scan line2 n=%d x=%#x w2=[%s]\n", n, x, w2);
-            return fail("scan line2");
-        }
-        if (fgetc(f) != '\n') return fail("scan second pushed-back newline");
-        if (!fgets(buf, sizeof buf, f) || strcmp(buf, "tail line\n"))
-            return fail("scan fgets after fscanf");
-        if (fgetc(f) != EOF || !feof(f)) return fail("scan EOF");
-    }
-    if (fclose(f)) return fail("scan fclose");
+    // scan: three passes over the same text. The default buffer; then a setvbuf()
+    // buffer of UNGET+1 and UNGET+2 bytes (musl keeps UNGET = 8 of them for
+    // pushback, so the stream buffer is ONE and TWO bytes) -- the sizes at which a
+    // one-byte request meets the read backend's buffered/direct boundary.
+    if (scan_pass(0) || scan_pass(9) || scan_pass(10)) return 1;
     puts("pouch-hello-fopen: scan OK");
 
     puts("pouch-hello-fopen: exit 0");

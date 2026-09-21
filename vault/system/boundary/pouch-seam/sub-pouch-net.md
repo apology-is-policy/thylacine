@@ -13,13 +13,15 @@ code:
   - usr/lib/pouch/patches/0018-pouch-net-poll.patch
   - usr/lib/pouch/patches/0020-pouch-srv-bulk.patch
   - usr/lib/pouch/patches/0028-pouch-net-nonblock.patch
+  - usr/lib/pouch/patches/0038-pouch-stdio-socket-fds.patch
+  - usr/pouch-hello/pouch-hello-sockets.c
 audit: hard
 guarded-by: [inv-i1, inv-i28]
 validated-by: [prose, gate-smp]
 locks: [lock-pouch-sock-table]
 design: ["docs/POUCH-DESIGN.md", "docs/NET-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-09-06
+updated: 2026-09-21
 ---
 ## Purpose
 
@@ -182,9 +184,29 @@ kernel-attached mount negotiates a 128 KiB msize (CF-3 B).
 ## Prosecution
 
 - **Every fd-consuming call must be tag-aware.** The completeness of that
-  set is this surface's central obligation and has been breached twice
-  (0015's `poll`, 0017's `shutdown`/`sendto`/`recvfrom`). Both were
-  fail-closed rather than dangerous, which is the tag design working.
+  set is this surface's central obligation and has been breached three
+  times (0015's `poll`, 0017's `shutdown`/`sendto`/`recvfrom`, 0038's
+  stdio backends). The first two were fail-closed rather than dangerous,
+  which is the tag design working. The third was not quite: the four
+  `FILE` backends (`__stdio_read` / `_write` / `_close` / `_seek`) issue
+  RAW syscalls on `f->fd`, so they are fd consumers that a sweep of the
+  public wrappers never sees. `fdopen(sock)` gave a stream on which every
+  operation failed (fail-closed), but `fclose()` on it "closed" a number
+  the kernel never issued and STRANDED the slot with its kernel handles —
+  a leak against a table of `POUCH_SOCK_MAX` = 8. Found by the audit of
+  0035, not by a consumer: nothing under `usr/` calls `fdopen` at all.
+  0038 maps the tag in read/write (`pouch_sock_kernel_fd`), routes close
+  through `pouch_sock_close`, and answers `ESPIPE` to a seek.
+  `/pouch-hello-sockets` pins it: it wraps the connected client end in a
+  `FILE`, writes and reads through it (including a `fscanf` pushback),
+  requires `fseek` to fail with `ESPIPE`, `fclose`s it, and then requires
+  the number of free slots — MEASURED by opening sockets until refusal,
+  before and after — to be unchanged. The sweep rule that follows: a
+  tag-awareness sweep lists every site that passes an fd to `__syscall` /
+  `syscall` / `syscall_cp`, not every public function that takes an fd.
+  Still raw and recorded: `freopen`'s `dup3` onto a socket stream (fails
+  cleanly) and `__fdopen`'s `F_SETFD` / `F_SETFL` for the `e` / `a` modes
+  (results ignored upstream too).
 - `pouch_sock_poll_fd` vs `pouch_sock_kernel_fd` at every poll site.
 - The slot-reuse reset list must cover EVERY field — `bulk_hint` was
   missing from it until #52, so a recycled slot could spuriously post
@@ -218,6 +240,19 @@ round against this surface before it had a node).
   large fd population, and the three patches that mirror the constant
   (0005 / 0015 / 0018) all still name it `PROC_HANDLE_MAX`.
 - `POUCH_SOCK_MAX` is 8 concurrent sockets per Proc.
+- **The tag-aware set is still not the POSIX set** (census 2026-09-21: every
+  site in the patched `src/` that passes an fd to a raw syscall, outside
+  `src/network/`). On a tagged fd every remaining one FAILS VISIBLY, so none
+  fabricates a value or leaks a slot — they are missing surface, and a port
+  that needs one needs a patch. `fstat(sock)` reaches the kernel with a
+  number it never issued and gets `EBADF` (no `S_ISSOCK` test). `fcntl`,
+  `dup`, `dup3`, `readv`, `writev` never reach it at all: their numbers are
+  sentinel-parked for EVERY fd (`ENOSYS`; `dup2` onto a target is a
+  documented kernel seam, [[sub-pouch-process]]). So the commonest way to
+  make a socket non-blocking, `fcntl(sock, F_SETFL, O_NONBLOCK)`, does not
+  work — `ioctl(FIONBIO)` and 0028's `SOCK_NONBLOCK` do — and `writev` to a
+  socket does not exist, although 0002 rewrote the stdio backends around
+  exactly that absence. OPEN, tracked with the pouch-net completeness work.
 - **A stale doc-comment contradicts the live `SO_PEERCRED` marshal.**
   `getsockopt.c`'s top-of-file comment still says `ucred.uid` / `ucred.gid`
   are "0 at v1.0 (Thylacine has no uid model)"; the live A-3 marshal below
@@ -247,4 +282,6 @@ the kernel byte-mode SrvConn; [[adt-sockets12-r1]] 2 P1) →
 [[chg-2026-07-08-cf3b-bulk-ring]] (0020, the bulk hint) →
 [[chg-2026-07-22-52-nonblock]] (0028) →
 [[chg-2026-09-06-9p-identity-absorb]] (the A-3 `SO_PEERCRED`-carries-principal
-marshal in 0006, folded at the docs/reference retirement).
+marshal in 0006, folded at the docs/reference retirement). 0038 (stdio over
+a tagged fd) landed with the Boosty B-0 libc fixes, 2026-09-21; its audit
+record is `memory/audit_pouch_0033_0035_closed_list.md` finding F4.

@@ -10,6 +10,8 @@ code:
   - usr/lib/pouch/patches/0032-pouch-sysconf-nprocs.patch
   - usr/lib/pouch/patches/0034-pouch-sysconf-physpages.patch
   - usr/lib/pouch/patches/0035-pouch-stdio-read-refill.patch
+  - usr/lib/pouch/patches/0036-pouch-tmpfile-unlink.patch
+  - usr/lib/pouch/patches/0037-pouch-unchecked-sentinel-wrappers.patch
   - usr/pouch-hello/pouch-hello-malloc.c
   - usr/pouch-hello/pouch-hello-fopen.c
 audit: hard
@@ -126,15 +128,36 @@ byte was its own syscall.
 
 0035 has two arms and one `SYS_read` in each — never a second read after a
 successful first, which would block a pipe or tty that had already
-delivered what it had. The **refill arm** (`len - !!buf_size == 0`: a
-one-byte request on a buffered stream, i.e. `__uflow`) is upstream's own
-code — that arm never used `readv` — reading into `f->buf` and returning
-`*f->rpos++`. The **bulk arm** (`fread`'s remainder loop, or any unbuffered
-stream) stays a direct read into the caller; it does not top the buffer up
-the way `readv` did, and needs no pushback slot because `fread` never
-ungets and an unbuffered stream takes `__shgetc`'s `buf[-1]` path. The two
-callers of `f->read` are `__uflow` (len 1) and `fread` (len = remainder);
-there are no others.
+delivered what it had. The **buffered arm** (a buffered stream and
+`len <= buf_size`) reads into `f->buf`, serves the caller from it, and
+keeps the surplus as readahead: `rpos = buf + k`, `rend = buf + cnt`. For
+the one-byte request (`__uflow`) this is upstream's own code — that arm
+never used `readv` — and it is what leaves the returned byte at
+`rpos[-1]`. For `1 < len <= buf_size` (`fread`'s remainder loop on a small
+record) it is what upstream's `readv` bought: one syscall per buffer-full
+instead of one per `fread` — TyrQuake reads its pak header and every demo
+message length that way, and on a 9P-backed file each was a round trip.
+The **direct arm** (`len > buf_size`, or any unbuffered stream) reads
+straight into the caller, and needs no pushback slot because `fread` never
+ungets, `ungetc` stores its byte itself, and an unbuffered stream takes
+`__shgetc`'s `buf[-1]` path. Readahead survives exactly where upstream's
+does: `fread`'s loop calls `__toread` (which drops the buffer) only after
+a SHORT count, and a short count leaves no surplus. The two callers of
+`f->read` are `__uflow` (len 1) and `fread` (len = remainder); there are
+no others.
+
+The boundary is `>`, and the first draft had `>=`. A host model of the
+read state machine (the audit's differential model, extended with the new
+arm: random short reads, buffer sizes 0/1/2/3/7/16/64/1024, mixed getc /
+fread / ungetc / scan / peek) failed 1889 of 2000 trials at
+`buf_size == 1` and none at any other size: a one-byte request on a
+one-byte buffer (`setvbuf` with `UNGET + 1` bytes) took the direct arm and
+lost the pushback slot — 0002's defect, reintroduced at one size. With
+`>`: 0 of 32000, against 26496 of 32000 for the 0002 backend on the same
+trials. The model is a copy of the function, so it proves the design, not
+the file; the file is held by `pouch-hello-fopen`'s scan leg, which runs
+the same text through the default buffer and through `setvbuf` buffers of
+9 and 10 bytes (stream buffers of ONE and TWO).
 
 **What libc tells a program about the machine.** Three patches in this
 dossier and one in [[sub-pouch-thread]] (0033) are the same defect: a
@@ -199,9 +222,10 @@ The guard is one compare on a register already loaded. The stdio
 rewrite costs one extra syscall per flush when the stream has both a
 pending buffer and new data (musl's single `writev` became two
 `SYS_write`s). Character-at-a-time input is one `SYS_read` per BUFSIZ
-since 0035 (it was one per BYTE from 0002 until then); a bulk `fread`
-does not top up the stream buffer afterwards, so a `getc` that follows
-one pays a refill upstream would have folded into the `readv`. Each
+since 0035 (it was one per BYTE from 0002 until then), and a run of small
+`fread`s is one per buffer-full; only an `fread` LARGER than the buffer
+goes direct and leaves the buffer empty, so a `getc` that follows one pays
+a refill upstream would have folded into the `readv`. Each
 `sysconf` machine query is an open + read + close on `/ctl` — callers
 cache it, and nothing hot asks.
 
@@ -228,19 +252,52 @@ cache it, and nothing hot asks.
   consumes an out-buffer. Three were found by CONSUMERS rather than by
   review (0032, 0033, 0034); the first sweep then found the open identity
   calls below in minutes. The sweep
-  method: list the `0xFFFF` names in the PATCHED `bits/syscall.h.in`, then
-  grep the patched `src/` for statement-position `__syscall(` and for
-  `return __syscall(` on those names.
+  method has TWO halves, and the first version of this paragraph had only
+  the first, which is why the audit found five more (0037): (a) list the
+  `0xFFFF` names in the PATCHED `bits/syscall.h.in`, then grep the patched
+  `src/` for statement-position `__syscall(` and for `return __syscall(` on
+  those names; (b) for every libc WRAPPER over such a name (`getrlimit`,
+  `sysinfo`, `uname`, `prlimit`, ...), find every libc-INTERNAL caller that
+  ignores the wrapper's return and then reads the out-struct. Half (a)
+  cannot see half (b)'s sites — there is no `__syscall(` on the line — and
+  0034's own bug was a (b). 0037 fixes the five found: `sysconf`'s rlimit
+  arm (`_SC_OPEN_MAX` / `_SC_CHILD_MAX` were uninitialised stack with errno
+  clobbered; now -1, errno as it was), `getloadavg` (reported SUCCESS with
+  garbage samples — GNU make's `-l` consumes it; now -1), `ulimit`,
+  `getdomainname`, and `getdtablesize`, which has no error channel and so
+  states the kernel's handle-table size. That last is a mirror of
+  `PROC_HANDLE_MAX`, and the prover does not compare it with the number
+  typed again: it opens `/ctl/memory` until the kernel refuses and requires
+  `getdtablesize()` to equal the last fd issued plus one.
+- `tmpfile()` must unlink through the PUBLIC `unlink()` (0036). Upstream
+  issues a raw `SYS_unlinkat`, a sentinel, and ignores the result: every
+  `tmpfile()` left `/tmp/tmpfile_XXXXXX` on the persistent root, and the
+  prover's "the fid survives the unlink" leg was a false green for as long
+  as it existed, because no unlink happened. 0027 fixed `remove()` for the
+  same line and missed this twin. The prover now counts `tmpfile_*` names
+  in `/tmp` before and after.
 - `__stdio_read` must keep BOTH properties: one `SYS_read` per call, and
-  the returned byte at `rpos[-1]` on the refill arm. `pouch-hello-fopen`'s
-  `scan` leg pins the second three pushbacks deep and checks VALUES, so a
-  scan that "succeeds" on the wrong bytes still fails; it was measured RED
-  on the 0002 backend (`n=1 w1=[]`) before 0035 was applied.
+  the returned byte at `rpos[-1]` after every buffered-arm read — at EVERY
+  buffer size, including one byte. `pouch-hello-fopen`'s `scan` leg pins
+  the second three pushbacks deep, at three buffer sizes, plus a small
+  `fread` followed by a scan, and checks VALUES, so a scan that "succeeds"
+  on the wrong bytes still fails; it was measured RED on the 0002 backend
+  (`n=1 w1=[]`) before 0035 was applied.
+- The stdio backends are fd CONSUMERS that issue raw syscalls, so the
+  socket tag reaches them ([[sub-pouch-net]], 0038).
 - The `sysconf` memory figures are pinned from the device side by
   `pouch-hello-malloc`, which re-reads `/ctl/memory` with a DIFFERENT
   parser (stdio) and requires `_SC_PHYS_PAGES` to equal the kernel's total
   exactly. A range check alone would pass on plausible garbage, which is
-  what the arm used to return. (That pin is how the 0035 defect was found:
+  what the arm used to return. `_SC_AVPHYS_PAGES` moves, so it is
+  BRACKETED: the kernel's `free` is read before and after the libc call and
+  libc's figure must sit between the two readings give or take `total/16`,
+  and never above `total - reserved` (`phys_free_pages` can never exceed
+  the initial free count). The first version asked only `0 < avail <=
+  phys`, which a libc that matched the `reserved:` key would have passed.
+  NOT pinned, and owed: the honest `-1` when `/ctl` is absent — it needs a
+  prover spawned into a namespace without `/ctl`, which no pouch program
+  can build for itself. (That pin is how the 0035 defect was found:
   its `fscanf` returned 0 while raw `read`, `fgetc` and `fread` over the
   same file were all correct.)
 
@@ -268,10 +325,25 @@ per-call errno approximation built on top of it.
   `times()` returns `(clock_t)-38` -- not the documented `-1` -- with `*tms`
   untouched. The audit round's full list of this class (F1, F8) is in
   `memory/audit_pouch_0033_0035_closed_list.md`.
-- **stdio input reads ahead since 0035**, as on every other libc. A program
-  that mixes `FILE` reads with raw reads of the same fd, or hands the fd to
-  a child mid-stream, now sees standard POSIX readahead rather than the
-  accidental byte-exact positioning 0002 gave it.
+- **stdio input reads ahead since 0035**, as on every other libc, and
+  everything that follows from that is now true here. A program that mixes
+  `FILE` reads with raw reads of the same fd, or hands the fd to a child
+  mid-stream, sees standard POSIX readahead rather than the accidental
+  byte-exact positioning 0002 gave it. `fflush(stdin)`, `fclose` and `exit`
+  on a NON-seekable stream discard what was read ahead. An update stream
+  that reads then writes without the `fseek`/`fflush` ISO C requires writes
+  at the readahead offset. Bytes read through a `FILE` persist in its
+  buffer: Stratum's `janusd` reads a passphrase with `fgets` and wipes only
+  its own copy (`src/janus/janusd.c`) — true on every libc, new here, and
+  OPEN on the Stratum side (`setvbuf(_IONBF)` before the read, or wipe and
+  close the stream).
+- **OPEN: tty type-ahead is swallowed, and 0035 is what makes it visible.**
+  A canonical-mode read must return at most one line; neither tty layer
+  bounds it (`kernel/cons.c`'s read and ptyfs' `ring_drain` both drain past
+  the newline). 0002's byte-at-a-time reads hid that. A BUFSIZ read now
+  takes the whole type-ahead into the first reader's `FILE`, so a line
+  typed ahead for the NEXT program is consumed by this one. The defect is
+  in the tty layers (both audit surfaces), tracked as its own item.
 - `usr/pouch-hello/` is otherwise unclaimed (20 of its 23 files have no
   dossier; [[sub-pouch-thread]] claims `pouch-hello-threads.c`); this one claims the two provers whose new legs pin mechanisms
   described here, not the directory.

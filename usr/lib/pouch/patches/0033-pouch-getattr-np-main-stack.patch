@@ -26,10 +26,15 @@ print it (exit 3, no output). The same wrong answer would reach any
 conservative collector and Rust std's main-thread stack guard.
 
 The fix states the mapping the kernel actually makes. The two constants MIRROR
-exec.h; the device-side pin is pouch-hello-threads, which now asserts that a
-main-thread local lies inside the reported bounds and that the bounds are the
-full mapping -- so a change to the kernel's stack layout fails a boot prover
-instead of silently making libc wrong again.
+exec.h -- a hand-kept copy, not a derivation -- so the device-side pin compares
+libc with the KERNEL, not with a third copy: pouch-hello-threads reads the
+`stack` row of /proc/<pid>/maps (kernel/devproc.c format_maps) at run time and
+requires pthread_attr_getstack's [base, base + size) to equal it, and a
+main-thread local to lie inside it. A change to the kernel's stack layout that
+leaves this patch behind therefore fails a boot prover instead of silently
+making libc wrong again. (The first version of that check compared libc with
+the same two literals written a second time in the prover; it would have stayed
+green through exactly the change it was meant to catch. Audit r1 F3.)
 
 PAIRED WITH (same commit, not in this patch file): usr/pouch-hello/
 pouch-hello-threads.c gains the main-stack check.
@@ -42,9 +47,11 @@ mirror, and the I-32 ceiling a runaway recursion can reach.
 
 --- a/src/thread/pthread_getattr_np.c
 +++ b/src/thread/pthread_getattr_np.c
-@@ -3,6 +3,9 @@
- #include "libc.h"
- #include <sys/mman.h>
+@@ -1,8 +1,9 @@
+ #define _GNU_SOURCE
+ #include "pthread_impl.h"
+-#include "libc.h"
+-#include <sys/mman.h>
  
 +#define POUCH_MAIN_STACK_TOP  0x0000000080000000ul
 +#define POUCH_MAIN_STACK_SIZE (1024ul * 1024ul)
@@ -52,7 +59,7 @@ mirror, and the I-32 ceiling a runaway recursion can reach.
  int pthread_getattr_np(pthread_t t, pthread_attr_t *a)
  {
  	*a = (pthread_attr_t){0};
-@@ -12,13 +15,19 @@
+@@ -12,13 +13,20 @@
  		a->_a_stackaddr = (uintptr_t)t->stack;
  		a->_a_stacksize = t->stack_size;
  	} else {
@@ -65,12 +72,13 @@ mirror, and the I-32 ceiling a runaway recursion can reach.
 -		a->_a_stacksize = l;
 +		/* Thylacine: the initial thread's stack is the fixed exec
 +		 * mapping [TOP - SIZE, TOP), sparse demand-zero above a
-+		 * one-page guard (kernel exec.h: EXEC_USER_STACK_TOP / _SIZE;
-+		 * mirrored here, and pinned from the device side by
-+		 * pouch-hello-threads' main-stack check). Upstream finds the
-+		 * extent by probing downward with mremap(), which the seam
-+		 * ENOSYSes -- so the loop ended on its first test and every
-+		 * pouch program was told its main stack is ONE PAGE. A runtime
++		 * one-page guard (kernel exec.h: EXEC_USER_STACK_TOP / _SIZE,
++		 * MIRRORED here; the pouch-hello-threads boot prover requires
++		 * this answer to equal the `stack` row the kernel renders in
++		 * /proc/<pid>/maps, so a stale mirror fails a boot). Upstream
++		 * finds the extent by probing downward with mremap(), which
++		 * the seam ENOSYSes -- so the loop ended on its first test and
++		 * every pouch program was told its main stack is ONE PAGE. A runtime
 +		 * that sizes recursion or scans its stack from these bounds
 +		 * (JavaScriptCore, a conservative GC, Rust std's main-thread
 +		 * guard) then fails on its first call. */

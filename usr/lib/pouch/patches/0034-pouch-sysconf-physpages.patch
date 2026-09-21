@@ -28,9 +28,13 @@ buffer: it may be a truncated prefix of the real figure, so it is a miss too
 
 Device-side pin (same commit, not in this patch file): usr/pouch-hello/
 pouch-hello-malloc.c re-reads /ctl/memory with a DIFFERENT parser (stdio) and
-requires sysconf(_SC_PHYS_PAGES) to equal the kernel's total exactly, and
-0 < _SC_AVPHYS_PAGES <= phys. A range check alone would pass on plausible
-garbage, which is what this arm used to return.
+requires sysconf(_SC_PHYS_PAGES) to equal the kernel's total exactly. `free`
+moves, so _SC_AVPHYS_PAGES is BRACKETED: the kernel's figure is read before and
+after the libc call and libc's must sit between the two readings give or take
+total/16, and never above total - reserved. A range check alone would pass on
+plausible garbage, which is what this arm used to return -- and the first
+version's `0 < avail <= phys` would have passed a libc that matched the
+`reserved:` key (audit r1 F7).
 
 What the figure means on Thylacine, stated so nobody over-reads it: this is
 the MACHINE's memory. A Proc's real ceiling is its I-32 page budget (256 MiB

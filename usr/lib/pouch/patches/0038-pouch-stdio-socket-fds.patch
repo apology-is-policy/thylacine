@@ -1,0 +1,171 @@
+B-0 (Boosty) audit r1 F4 -- stdio over a socket: the FILE backends honour the
+pouch socket fd.
+
+A pouch socket fd is not a kernel handle. socket() -- and accept() on an
+AF_INET listener -- return POUCH_SOCK_TAG | slot (0006, 0016); read(), write(),
+close(), poll() and the socket calls map the tag to the slot's kernel handle
+before they trap. (An AF_UNIX accept() returns a plain kernel fd, so the
+server end of a /srv stream never had this problem; every client end did.) The
+four stdio backends never did: __stdio_read / __stdio_write / __stdio_close
+handed f->fd to the kernel raw, and the kernel has never issued 0x4000000N.
+
+So since 0006:
+  - fdopen(sock, ...) returned a FILE on which every read and write failed
+    (EBADF -> F_ERR), and dprintf(sock, ...) wrote nothing;
+  - fclose() on it "closed" a number the kernel did not know and STRANDED the
+    slot with the kernel handles it holds. The table is POUCH_SOCK_MAX = 8
+    wide, so eight such fclose()s ended socket() for the life of the Proc.
+
+Pre-existing; found by the audit of 0035, which rewrote __stdio_read and
+preserved the defect. No program under usr/ and nothing in stratumd calls
+fdopen() at all (grepped 2026-09-21), which is how it survived: the first port
+that wraps a connected socket in a FILE would have hit it.
+
+The fix is the mapping read()/write()/close() already use, in the three
+backends, plus the POSIX answer for a seek:
+  - read / write: pouch_sock_kernel_fd(f->fd) -- identity for an untagged fd; a
+    slot with no handle yet (socket() without connect()) is F_ERR with the
+    map's errno (ENOTCONN / EBADF), as read() reports it.
+  - close: a tagged fd goes through pouch_sock_close(), which frees the slot
+    and closes its data, ctl and ready handles.
+  - seek: ESPIPE for a tagged fd, instead of the kernel's EBADF for a number it
+    never issued. ftell()/fseek()/rewind() on a socket stream now fail the way
+    POSIX says they do.
+
+Cost, stated: the backends now reference _pouch_socket.o (3.8 KB, no further
+dependencies) from every program that links stdio. read.c / write.c / close.c
+already pull it into nearly all of them.
+
+NOT covered, recorded: freopen() onto a socket stream dup3()s onto the raw tag
+and fails cleanly (the stream is closed, as freopen does on any failure);
+__fdopen's F_SETFD / F_SETFL for the "e" and "a" modes are raw fcntl calls
+whose results upstream already ignores. Neither fabricates a value.
+
+Device-side pin (same commit, not in this patch file): usr/pouch-hello/
+pouch-hello-sockets.c fdopen()s the connected client end, writes a line through
+the FILE, reads the reply with fscanf + fgets (0035's pushback path, over a
+socket), requires fseek -> ESPIPE, fclose()s it, and then requires the number
+of free socket slots to equal the number measured before the test -- measured
+by opening sockets until refusal, not mirrored from POUCH_SOCK_MAX.
+
+--- a/src/stdio/__stdio_close.c
++++ b/src/stdio/__stdio_close.c
+@@ -1,5 +1,6 @@
+ #include "stdio_impl.h"
+ #include "aio_impl.h"
++#include "_pouch_socket.h"
+ 
+ static int dummy(int fd)
+ {
+@@ -10,5 +11,10 @@
+ 
+ int __stdio_close(FILE *f)
+ {
++	/* pouch: a socket fd is a libc-side slot. Closing it raw would hand the
++	 * kernel a number it never issued (EBADF) and strand the slot and the
++	 * handles it holds -- the table is small, so a few fclose()s of socket
++	 * streams would end socket() for the whole Proc. */
++	if (f->fd & POUCH_SOCK_TAG) return pouch_sock_close(f->fd);
+ 	return syscall(SYS_close, __aio_close(f->fd));
+ }
+--- a/src/stdio/__stdio_read.c
++++ b/src/stdio/__stdio_read.c
+@@ -1,5 +1,6 @@
+ #include "stdio_impl.h"
+ #include <string.h>
++#include "_pouch_socket.h"
+ 
+ /* pouch: musl's __stdio_read issues one readv over {caller buffer, the
+    stream's prefetch buffer}; Thylacine has no readv. Two arms, ONE SYS_read
+@@ -30,14 +31,25 @@
+    A short count is returned as short; fread's loop calls again, exactly as
+    it does after upstream's short readv.
+ 
+-   F_EOF / F_ERR exactly as upstream: cnt < 0 -> F_ERR, cnt == 0 -> F_EOF. */
++   F_EOF / F_ERR exactly as upstream: cnt < 0 -> F_ERR, cnt == 0 -> F_EOF.
++
++   f->fd may be a pouch SOCKET fd -- a libc-side slot tag, not a kernel handle
++   (fdopen() over socket()/accept()). The kernel is handed the slot's handle,
++   as read() does; an untagged fd maps to itself. A slot with no handle yet
++   (socket() without connect()) is an error with errno from the map. */
+ size_t __stdio_read(FILE *f, unsigned char *buf, size_t len)
+ {
+ 	long cnt;
+ 	size_t k;
++	int fd = pouch_sock_kernel_fd(f->fd);
+ 
++	if (fd < 0) {
++		f->flags |= F_ERR;
++		return 0;
++	}
++
+ 	if (!f->buf_size || len > f->buf_size) {
+-		cnt = syscall(SYS_read, f->fd, buf, len);
++		cnt = syscall(SYS_read, fd, buf, len);
+ 		if (cnt <= 0) {
+ 			f->flags |= cnt ? F_ERR : F_EOF;
+ 			return 0;
+@@ -45,7 +57,7 @@
+ 		return (size_t)cnt;
+ 	}
+ 
+-	cnt = syscall(SYS_read, f->fd, f->buf, f->buf_size);
++	cnt = syscall(SYS_read, fd, f->buf, f->buf_size);
+ 	if (cnt <= 0) {
+ 		f->flags |= cnt ? F_ERR : F_EOF;
+ 		return 0;
+--- a/src/stdio/__stdio_seek.c
++++ b/src/stdio/__stdio_seek.c
+@@ -1,7 +1,16 @@
+ #include "stdio_impl.h"
+ #include <unistd.h>
++#include <errno.h>
++#include "_pouch_socket.h"
+ 
+ off_t __stdio_seek(FILE *f, off_t off, int whence)
+ {
++	/* pouch: a socket is not seekable, and its fd is a slot tag the kernel
++	 * has never seen -- answer what POSIX says rather than the kernel's
++	 * EBADF for a number it did not issue. */
++	if (f->fd & POUCH_SOCK_TAG) {
++		errno = ESPIPE;
++		return -1;
++	}
+ 	return __lseek(f->fd, off, whence);
+ }
+--- a/src/stdio/__stdio_write.c
++++ b/src/stdio/__stdio_write.c
+@@ -1,4 +1,5 @@
+ #include "stdio_impl.h"
++#include "_pouch_socket.h"
+ 
+ /* pouch: musl's __stdio_write issues one writev over {pending-buffer span,
+    new-data span}; Thylacine has no writev. pouch writes the two spans with
+@@ -12,16 +13,25 @@
+    safe against Thylacine's SYS_write contract - a Thylacine write blocks
+    until it can make progress and returns -1 on a dead peer; it does not
+    0-return for flow control - and it avoids the unbounded spin musl's
+-   writev-based loop would take on a 0. */
++   writev-based loop would take on a 0.
++
++   f->fd may be a pouch socket fd (a libc-side slot tag); the kernel gets the
++   slot's handle, as write() does. See __stdio_read.c. */
+ size_t __stdio_write(FILE *f, const unsigned char *buf, size_t len)
+ {
+ 	const unsigned char *spans[2] = { f->wbase, buf };
+ 	size_t lens[2] = { (size_t)(f->wpos - f->wbase), len };
+ 	size_t done_new = 0;
++	int fd = pouch_sock_kernel_fd(f->fd);
++	if (fd < 0) {
++		f->wpos = f->wbase = f->wend = 0;
++		f->flags |= F_ERR;
++		return 0;
++	}
+ 	for (int i = 0; i < 2; i++) {
+ 		size_t off = 0;
+ 		while (off < lens[i]) {
+-			long cnt = syscall(SYS_write, f->fd,
++			long cnt = syscall(SYS_write, fd,
+ 			                   spans[i] + off, lens[i] - off);
+ 			if (cnt <= 0) {
+ 				f->wpos = f->wbase = f->wend = 0;

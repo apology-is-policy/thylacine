@@ -27,16 +27,55 @@ fgetc and fread over the same file all returned the right bytes, which cleared
 the kernel and devctl and left only the scan path.
 
 The fix needs no readv. Upstream's one-byte-request arm on a buffered stream
-was ALREADY a plain SYS_read into f->buf; this restores it verbatim. The bulk
-arm (fread's remainder loop, and any unbuffered stream) stays a direct read:
-fread never ungets, and an unbuffered stream takes __shgetc's buf[-1] path.
-One SYS_read per call in both arms -- never a second read after a successful
-first, which would block a pipe or tty that had already delivered what it had.
+was ALREADY a plain SYS_read into f->buf; this restores it, and generalises it
+to every request no larger than the buffer: read into f->buf, serve the caller
+from it, keep the surplus as readahead. So a run of small fread()s (TyrQuake
+reads its pak header and every demo message length this way: common/common.c,
+NQ/cl_demo.c) costs one syscall per buffer-full, as it does upstream, instead
+of one per call; on a 9P-backed file that is a round trip each. A request LARGER than the buffer, and any
+unbuffered stream, stays a direct read into the caller: no double copy, and no
+pushback slot needed (fread never ungets; an unbuffered stream takes
+__shgetc's buf[-1] path; ungetc() stores its byte itself). One SYS_read per
+call in both arms -- never a second read after a successful first, which would
+block a pipe or tty that had already delivered what it had. Readahead survives
+exactly where upstream's does: fread's loop calls __toread() (which drops the
+buffer) only after a SHORT count, and a short count leaves no surplus.
 
-Behaviour change to know about: stdio input now reads AHEAD (up to BUFSIZ), as
-it does on every other libc. A program that mixes FILE reads with raw reads of
-the same fd, or hands the fd to a child mid-stream, sees standard POSIX
-readahead instead of the accidental byte-exact positioning 0002 gave it.
+Behaviour changes to know about -- stdio input now reads AHEAD (up to BUFSIZ),
+as it does on every other libc, and everything that follows from that is now
+true here too:
+  * A program that mixes FILE reads with raw reads of the same fd, or hands
+    the fd to a child mid-stream, sees standard POSIX readahead instead of the
+    accidental byte-exact positioning 0002 gave it.
+  * fflush(stdin), fclose() and exit() on a NON-SEEKABLE stream (a pipe, a
+    tty, a socket) discard whatever was read ahead; on a seekable one they
+    seek the fd back, as upstream does.
+  * An update stream ("r+") that reads and then writes WITHOUT the fseek or
+    fflush ISO C requires between them writes at the readahead offset, not at
+    the logical position. Conforming programs are unaffected.
+  * Bytes read through a FILE now persist in its buffer until overwritten or
+    freed. A program that reads a SECRET with fgets() and wipes only its own
+    copy leaves one in the FILE (Stratum's janusd reads a passphrase this way:
+    src/janus/janusd.c). True on every libc; new here. setvbuf(f, 0, _IONBF, 0)
+    before the read is the portable way to opt out.
+  * TTY TYPE-AHEAD: a canonical-mode read should return at most one line, and
+    neither tty layer bounds it today (kernel/cons.c and ptyfs' ring_drain
+    both drain past the newline). 0002's byte-at-a-time reads hid that; a
+    BUFSIZ read now takes the whole type-ahead into the first reader's FILE,
+    so a line typed ahead for the NEXT program is consumed by this one. The
+    defect is the tty layers' (POSIX ICANON), tracked as its own item; recorded
+    here because this patch is what makes it observable.
+
+The arm boundary is `len > buf_size`, and the first draft of the generalised
+arm had `>=`. A host model of the read state machine (the audit's, extended
+with this arm; random short reads, buffer sizes 0/1/2/3/7/16/64/1024, mixed
+getc / fread / ungetc / scan / peek) failed 1889 of 2000 trials at
+buf_size == 1 and none anywhere else: a one-byte request on a one-byte buffer
+took the DIRECT arm and lost the pushback slot -- the original 0002 defect,
+reintroduced at one size. With `>`: 0 of 32000, against 26496 of 32000 for
+the 0002 backend on the same trials. pouch-hello-fopen's scan leg now runs a
+second pass on a setvbuf() buffer of UNGET+1 bytes to hold that boundary on
+the device.
 
 Device-side pin (same commit, not in this patch file): pouch-hello-fopen gains
 a `scan` leg -- three pushbacks deep, checked on VALUES -- measured RED on the
@@ -44,8 +83,9 @@ unfixed backend (n=1, w1=[]) before this patch was applied.
 
 --- a/src/stdio/__stdio_read.c
 +++ b/src/stdio/__stdio_read.c
-@@ -1,17 +1,46 @@
+@@ -1,17 +1,58 @@
  #include "stdio_impl.h"
++#include <string.h>
  
  /* pouch: musl's __stdio_read issues one readv over {caller buffer, the
 -   stream's prefetch buffer}; Thylacine has no readv. pouch does a single
@@ -57,28 +97,38 @@ unfixed backend (n=1, w1=[]) before this patch was applied.
 +   each -- never a second read after a successful first, which would block an
 +   interactive pipe or tty that has already delivered what it had.
 +
-+   The refill arm is upstream's own (it never used readv there): a one-byte
-+   request on a buffered stream -- __uflow, so every getc/fgets/getline/scanf
-+   -- reads into f->buf and hands back the first byte FROM it. That keeps the
-+   invariant the scan helpers lean on: after a read the returned byte sits at
++   The buffered arm: a request no larger than the stream's buffer reads into
++   f->buf and is served FROM it; the surplus stays as readahead. For the
++   one-byte request -- __uflow, so every getc/fgets/getline/scanf -- this is
++   upstream's own arm (it never used readv there), and it keeps the invariant
++   the scan helpers lean on: after a read the returned byte sits at
 +   f->rpos[-1], so shunget()'s bare `rpos--` re-reads it. 0002 read the byte
 +   straight into the caller and left rpos == rend == buf + buf_size, so every
 +   pushback re-read buf[buf_size-1] (stale, usually NUL): fscanf/scanf on a
 +   real FILE failed at the first pushed-back delimiter, and every getc was
-+   its own syscall.
++   its own syscall. For 1 < len <= buf_size -- fread's remainder loop on a
++   small record -- it is what upstream's readv bought: one syscall fills the
++   buffer and the next small freads are served from memory, where a direct
++   read would make each its own syscall (on a 9P-backed file, a round trip).
 +
-+   The bulk arm (fread's remainder loop, or any unbuffered stream) stays a
-+   direct read into the caller. It does not top the buffer up the way readv
-+   did -- the next getc refills -- and needs no pushback slot: fread never
-+   ungets, and an unbuffered stream takes __shgetc's buf[-1] path.
++   The direct arm (a request LARGER than the buffer, or any unbuffered
++   stream) reads straight into the caller: no double copy, and no pushback
++   slot is needed -- fread never ungets, and an unbuffered stream takes
++   __shgetc's buf[-1] path. The boundary is `>`, not `>=`: a one-byte request
++   on a ONE-byte buffer (setvbuf with UNGET+1 bytes) must still take the
++   buffered arm, or the scan helpers lose their pushback slot again.
++
++   A short count is returned as short; fread's loop calls again, exactly as
++   it does after upstream's short readv.
 +
 +   F_EOF / F_ERR exactly as upstream: cnt < 0 -> F_ERR, cnt == 0 -> F_EOF. */
  size_t __stdio_read(FILE *f, unsigned char *buf, size_t len)
  {
 -	long cnt = syscall(SYS_read, f->fd, buf, len);
 +	long cnt;
++	size_t k;
 +
-+	if (len - !!f->buf_size) {
++	if (!f->buf_size || len > f->buf_size) {
 +		cnt = syscall(SYS_read, f->fd, buf, len);
 +		if (cnt <= 0) {
 +			f->flags |= cnt ? F_ERR : F_EOF;
@@ -93,8 +143,9 @@ unfixed backend (n=1, w1=[]) before this patch was applied.
  		return 0;
  	}
 -	return (size_t)cnt;
-+	f->rpos = f->buf;
++	k = (size_t)cnt < len ? (size_t)cnt : len;
++	memcpy(buf, f->buf, k);
++	f->rpos = f->buf + k;
 +	f->rend = f->buf + cnt;
-+	buf[0] = *f->rpos++;
-+	return 1;
++	return k;
  }
