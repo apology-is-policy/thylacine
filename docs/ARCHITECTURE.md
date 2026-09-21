@@ -156,7 +156,7 @@ This discipline is enforced by the audit rounds; deviations get flagged.
 
 ### 3.5 The Plan 9 split: native vs ported userspace
 
-**STATUS**: COMMITTED — scripture under U-1 (the Utopia scripture commit). **AMENDED 2026-09-21** (operator decision O-5 of the Rust `std` track, `docs/RUST-STD-DESIGN.md` §9): a THIRD sanctioned substrate, first-party `std` Rust on Pouch — see the paragraph of that name below. The native/ported split itself is unchanged.
+**STATUS**: COMMITTED — scripture under U-1 (the Utopia scripture commit). **AMENDED 2026-09-21** (operator decision O-5 of the Rust `std` track, `docs/RUST-STD-DESIGN.md` §9 — that design doc rides the aux track's branch, `aux-3`, until track R merges; the brief on `main` is `docs/handoffs/041-rust-std-track-to-aux.md`): a THIRD sanctioned substrate, first-party `std` Rust on Pouch — see the paragraph of that name below. The native/ported split itself is unchanged.
 
 Every Thylacine userspace program is in one of three camps; the boundary determines the runtime substrate it builds against. The first two are the original Plan 9 split; the third sits on the second's substrate.
 
