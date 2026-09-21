@@ -857,6 +857,7 @@ void test_devdev_winsize_leaf(void);             // #55
 void test_devdev_fd_devclass(void);              // H-1 (SYS_FD_DEVCLASS)
 void test_devdev_beacon_leaf(void);              // H-1 audit F1 (/dev/beacon)
 void test_devdev_renderer_gate(void);            // G-4
+void test_devdev_drain_opath_clone_no_disarm(void); // H9 (spoor_clone COPEN strip)
 void test_devhw_bestiary_smoke(void);
 void test_devhw_attach_returns_root(void);
 void test_devhw_walk_node_and_prop(void);
@@ -2620,6 +2621,7 @@ struct test_case g_tests[] = {
     { "devdev.stat_native_leaves",     test_devdev_stat_native_leaves,     false, NULL },
     { "devdev.cons_gate",              test_devdev_cons_gate,              false, NULL },
     { "devdev.renderer_gate",          test_devdev_renderer_gate,          false, NULL },
+    { "devdev.drain_opath_clone_no_disarm", test_devdev_drain_opath_clone_no_disarm, false, NULL },
     { "devdev.consctl_renderer_mint",  test_devdev_consctl_renderer_mint,  false, NULL },
     { "devdev.winsize_leaf",           test_devdev_winsize_leaf,           false, NULL },
     { "devdev.fd_devclass",            test_devdev_fd_devclass,            false, NULL },

@@ -30,6 +30,7 @@ void test_devdev_stat_native_leaves(void);      // CL-4 merge: all-leaf shapes
 void test_devdev_cons_gate(void);
 void test_devdev_consctl_renderer_mint(void);   // #55
 void test_devdev_winsize_leaf(void);            // #55
+void test_devdev_drain_opath_clone_no_disarm(void); // H9 (spoor_clone COPEN strip)
 
 // =============================================================================
 // Helpers.
@@ -535,6 +536,88 @@ void test_devdev_renderer_gate(void) {
 
     spoor_unref(drain);
     spoor_unref(feed);
+    cons_test_echo_capture(false);
+    cons_test_reset();
+}
+
+// H9 (spoor_clone COPEN strip): an O_PATH re-open of the console-drain fd must
+// NOT disarm the live drain. SYS_OPEN(drain_fd, ".", O_PATH) clone-walks the
+// drain Spoor -- clone_walk_zero: spoor_clone + a zero-element dev->walk, then
+// the syscall stamps CWALKONLY on the walk-only handle. Before the fix the clone
+// inherited COPEN + qid CONSDRAIN, so closing that navigation handle reached
+// devdev_close's COPEN-gated arm and ran the GLOBAL cons_drain_close(), disarming
+// the drain out from under the renderer that still held the real fd -- and a
+// re-open then reset reader_busy for a fresh epoch, the two-sleeper drain-Rendez
+// extinction premise (cons.c cons_drain_open). The COPEN-close sweep (2026-09-16)
+// found devdev's drain the ONLY COPEN-gated close whose effect is global rather
+// than keyed on the Spoor's own identity/aux, so the fix strips COPEN in
+// spoor_clone. This reproduces the clone-close at the Spoor level (the devdev-
+// test tier) and asserts the drain stays live. Fix-agnostic: it passes whether
+// COPEN is stripped in the clone OR the devdev close is gated locally on the
+// minting Spoor; it fails on the unfixed clone-copies-COPEN.
+void test_devdev_drain_opath_clone_no_disarm(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t && t->proc, "current thread has Proc");
+    cons_test_reset();
+    cons_test_echo_capture(true);
+    proc_test_clear_console_renderer();
+
+    struct Spoor *drain = walk_to("consdrain");
+    TEST_ASSERT(drain != NULL, "walk /dev/consdrain resolves");
+    TEST_EXPECT_EQ(proc_set_console_renderer(t->proc), 0, "renderer role claimed");
+
+    struct Spoor *dopen = devdev.open(drain, 0);   // arms the tap; COPEN on dopen
+    TEST_ASSERT(dopen != NULL, "renderer open of consdrain ALLOWED (arms)");
+    TEST_ASSERT((dopen->flag & COPEN) != 0, "the minting drain Spoor carries COPEN");
+    cons_test_set_termios(0u);                       // raw: output taps directly
+
+    // Faithful clone_walk_zero(dopen): spoor_clone + the reuse-nc zero-element
+    // devdev walk, then the O_PATH stamp the syscall applies to a walk-only
+    // handle. This IS the Spoor SYS_OPEN(drain_fd, ".", O_PATH) installs.
+    struct Spoor *clone = spoor_clone(dopen);
+    TEST_ASSERT(clone != NULL, "clone of the opened drain Spoor");
+    struct Walkqid *w = devdev.walk(dopen, clone, NULL, 0);
+    TEST_ASSERT(w != NULL && w->spoor == clone && w->nqid == 0,
+                "zero-element reuse-nc walk (the clone_walk_zero shape)");
+    walkqid_free(w);
+    clone->flag |= CWALKONLY;                        // #81: the O_PATH stamp
+    TEST_EXPECT_EQ(clone->qid.path, dopen->qid.path,
+                   "the clone names the drain leaf (the close's qid arm matches)");
+    // NOTE: this test asserts the OUTCOME (the drain stays live), never the
+    // MECHANISM (whether the clone carries COPEN) -- so it discriminates the
+    // buggy code from EITHER candidate fix (strip COPEN in spoor_clone, or gate
+    // devdev_close on the minting Spoor while the clone keeps COPEN). The
+    // COPEN-stripped-by-clone mechanism is the fix that landed, and its direct
+    // witness lives in test_spoor_clone_copies_state, which is rightly fix-
+    // specific; asserting it here would overfit this test to one of the two.
+
+    // Close the navigation handle: SYS_CLOSE on the O_PATH fd -> last-ref clunk
+    // -> devdev_close(clone). Pre-fix, this disarmed the drain.
+    spoor_clunk(clone);
+
+    // Primary discriminator: output still taps through the ORIGINAL handle. On
+    // the unfixed code the clone close disarmed the drain, so the write drops
+    // (cons_drain_tap_bulk's armed pre-check) and the read returns -1 (open ==
+    // false) -- both assertions fail. Under the fix the byte is drained.
+    u8 b[4];
+    TEST_EXPECT_EQ(cons_output_write("Y", 1), 1L, "output while (still) armed");
+    TEST_EXPECT_EQ(devdev.read(dopen, b, sizeof(b), 0), 1L, "drain still delivers");
+    TEST_ASSERT(b[0] == 'Y', "the drained byte is Y (tap alive after the clone close)");
+
+    // Explicit "still open" statement -- and the "reader not double-parked" one:
+    // a still-open drain forecloses cons_drain_open's reader_busy reset, which is
+    // exactly the epoch confusion the two-sleeper extinction needs. cons_drain_-
+    // open returns -1 iff already open; if the bug re-armed it, re-disarm to keep
+    // teardown clean.
+    int reopen = cons_drain_open();
+    TEST_EXPECT_EQ(reopen, -1, "H9: the clone close did NOT disarm the live drain");
+    if (reopen == 0) cons_drain_close();             // buggy path only: undo the re-arm
+
+    // Teardown: the real drain handle's close disarms (the correct disarm), then
+    // drop the walked leaf.
+    devdev.close(dopen);
+    proc_test_clear_console_renderer();
+    spoor_unref(drain);
     cons_test_echo_capture(false);
     cons_test_reset();
 }
