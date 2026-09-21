@@ -92,6 +92,7 @@ void test_stalk_union_fd_base(void);             // UM-8c/F5: fd-relative union 
 void test_stalk_union_opath_base(void);          // UM-8c/R2-F2: O_PATH base carries the point
 void test_stalk_union_zero_component(void);      // UM-8c/R2-F3: "." off a union base keeps it
 void test_stalk_union_dissolved_degrades(void);  // ARCH 9.6.10: never the covered directory
+void test_stalk_dotdot_crossed_base_floor(void); // '..' never pops a crossed base
 void test_stalk_pheno_symlink_reanchor(void);   // VIVARIUM section 13 (F1)
 // #66: namespace-name accumulation through the real resolver.
 void test_stalk_path_accumulate(void);
@@ -2422,6 +2423,51 @@ void test_stalk_union_dissolved_degrades(void) {
     spoor_clunk(uop); spoor_clunk(ufd);
     territory_unref(p.territory);
     spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// A base that CROSSED is the bottom of the trail. '..' at the bottom is a no-op
+// (I-28 containment at the base) -- and the bottom is the crossed clone, not the
+// directory the mount covers: popping it leaves resolution standing on the
+// COVERED directory, so "../x" off a masked base read under the mask while "x"
+// read over it.
+void test_stalk_dotdot_crossed_base_floor(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+    struct Spoor *src = stalk(&p, root, "um1", 3, STALK_WALK,  0);
+    struct Spoor *mp  = stalk(&p, root, "a",   1, STALK_MOUNT, 0);   // UNCROSSED a (qid 1)
+    TEST_ASSERT(src != NULL && mp != NULL, "resolve um1 + the point a");
+    TEST_EXPECT_EQ(mount(p.territory, src, mp, 0), 0, "mount um1 over a");
+
+    // Controls: `mp` as a base crosses. um1's name resolves; a's own does not.
+    struct Spoor *q = stalk(&p, mp, "shared", 6, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "control: a mounted name off the base");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)23, "control: shared is um1's (23)");
+    spoor_clunk(q);
+    q = stalk(&p, mp, "b", 1, STALK_OPEN, 0);
+    TEST_ASSERT(q == NULL, "control: the covered a/b is masked");
+
+    u64 live_before = spoor_total_allocated() - spoor_total_freed();
+    q = stalk(&p, mp, "../shared", 9, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "'..' at a crossed base is a no-op: still the mount");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)23, "../shared is um1's (23)");
+    spoor_clunk(q);
+    q = stalk(&p, mp, "../b", 4, STALK_OPEN, 0);
+    TEST_ASSERT(q == NULL, "'..' must not drop under the mask to the covered a/b");
+    q = stalk(&p, mp, "./../.././shared", 16, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "a '..' run nets back to the crossed base");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)23, "still um1's shared (23)");
+    spoor_clunk(q);
+    q = stalk(&p, mp, "..", 2, STALK_WALK, 0);
+    TEST_ASSERT(q != NULL, "bare '..'");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)22, "bare '..' is the mounted root (22)");
+    spoor_clunk(q);
+    u64 live_after = spoor_total_allocated() - spoor_total_freed();
+    TEST_EXPECT_EQ(live_after, live_before, "no Spoor leak");
+
+    territory_unref(p.territory);
+    spoor_clunk(src); spoor_clunk(mp);
     spoor_unref(root);
 }
 

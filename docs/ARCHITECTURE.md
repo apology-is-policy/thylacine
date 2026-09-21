@@ -1960,6 +1960,10 @@ load-bearing properties:
   flags)` sketch with the as-built Spoor-identity-keyed mechanism.
 - **`..` containment** — `..` pops an in-call **trail** (the stack of resolved
   Spoors) and can never resolve above `root_spoor` (the chroot/pivot boundary, I-1).
+  The bottom of the trail is the base -- or, when the base is itself a mount
+  point, its MOUNTED ROOT: `..` never pops a crossed base, which would leave
+  resolution standing on the directory the mount covers (`"../x"` reading under
+  a mount that `"x"` reads over).
 - **Lifetime** — each resolved Spoor is a clone on the **trail**; at return,
   `unwind` `spoor_clunk`s every trail entry except the returned **quarry**.
 - **No batching in v1.0** — one component per `Dev.walk` with a kernel X-check

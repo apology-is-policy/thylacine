@@ -817,6 +817,10 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
     // union handle (stalk_union_handle_walkable). Recomputed on every pass at
     // the base-set site below, since a restart may have re-anchored `base`.
     struct Spoor        *wbase = start;
+    // Trail entries '..' may not pop: 1 when the base crossed (trail[0] is then
+    // the base's own mounted root -- the bottom of the resolution, not a
+    // component walked below it), else 0. Set at the base cross, every pass.
+    int                  floor_depth = 0;
     // The zero-component quarry was cloned from a union handle's POINT (set
     // where the quarry is determined; read after the final cross).
     bool                 zero_from_point = false;
@@ -901,6 +905,7 @@ restart:
         if (stalk_cross_mounts(p, base, &crossed, crossed_pheno) < 0) goto fail;
         if (crossed) trail[depth++] = crossed;
     }
+    floor_depth = depth;
     wbase = base;
 
     // UM-8c F5: a union DIRFD used as a resolution base holds member[0] + the
@@ -958,10 +963,14 @@ restart:
             continue;
         }
 
-        // ".." -- pop the trail. Contained at `base`: at the bottom (depth 0)
-        // this is a no-op, so resolution can never escape above the base (the
-        // chroot/pivot boundary -- I-28). The popped clone is clunk-safe (it
-        // owns its fid: a walked child or a crossed clone).
+        // ".." -- pop the trail. Contained at `base`: at the bottom this is a
+        // no-op, so resolution can never escape above the base (the
+        // chroot/pivot boundary -- I-28). The bottom is `floor_depth`, not 0: a
+        // base that CROSSED sits on the trail as trail[0], and popping it would
+        // leave resolution standing on the uncrossed base -- the directory the
+        // mount COVERS -- so "../x" would read under a mount that "x" reads
+        // over. The popped clone is clunk-safe (it owns its fid: a walked child
+        // or a crossed clone).
         //
         // D-1 SOUNDNESS: a pop is 1:1 -- it lands exactly one component up --
         // ONLY when no trail entry compresses a pounced run. That holds here
@@ -992,7 +1001,7 @@ restart:
             int se = stalk_tip_may_search(p, trail, depth, base,
                                           &carried, carried_valid);
             if (se != 0)                         { err = se;         goto fail; }
-            if (depth > 0) spoor_clunk(trail[--depth]);
+            if (depth > floor_depth) spoor_clunk(trail[--depth]);
             carried_valid = false;   // hygiene; unreachable while pounce_ok
             continue;
         }
@@ -1005,8 +1014,9 @@ restart:
         // The directory we are about to search. CROSS IT ON DESCENT: if the
         // trail tip is a mount point, replace it in place with the mounted root
         // so we walk INTO the mounted tree and X-check the mounted root (not the
-        // shadowed mount point). The base case (depth==0, parent==start) was
-        // already proven not-a-mount by the base cross above.
+        // shadowed mount point). The base case (depth==0) was already proven
+        // not-a-mount by the base cross above, and stays proven: a crossed base
+        // is never popped (floor_depth).
         struct Spoor *parent;
         if (depth > 0) {
             // UM: detect a UNION (>= 2 members) at this point. mount_member_at(_,1)

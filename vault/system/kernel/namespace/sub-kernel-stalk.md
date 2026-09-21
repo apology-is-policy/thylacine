@@ -100,8 +100,15 @@ bool          stalk_union_has_child(p, dir, const char *name, u32 namelen);
 ### The per-component loop
 
 For each tokenized component: `.` continues; `..` does
-`spoor_clunk(trail[--depth])` — at `depth == 0` a hard no-op, so resolution
-can never escape above `start` (the chroot/pivot boundary, I-28). A real
+`spoor_clunk(trail[--depth])` — at the bottom a hard no-op, so resolution
+can never escape above `start` (the chroot/pivot boundary, I-28). The bottom
+is `floor_depth`, not 0: a base that is itself a mount point CROSSES before
+the loop, and its mounted root sits on the trail as `trail[0]`. Popping that
+entry left resolution standing on the uncrossed base — the directory the
+mount COVERS — so `"../x"` off such a base read under a mount that `"x"` read
+over (found 2026-09-21 by reading the arm while fixing the dissolved-union
+rule; `stalk.dotdot_crossed_base_floor` pins it, control legs included).
+`floor_depth` is set at the base cross on every pass. A real
 component: X-search the parent (on a `perm_enforced` Dev,
 `spoor_stat_native` + `perm_check(p, &st, PERM_X)` — fail-closed if the Dev
 cannot vouch); reject trail-full BEFORE the push; `nc = spoor_clone(parent)`;
