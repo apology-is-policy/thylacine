@@ -22,6 +22,68 @@ needed the operator.
 
 
 ---
+## 2026-09-21 (aux, Opus 4.8, effort max) -- H9 landed; the arc pivots to the Rust std port
+
+**H9, the console-drain disarm (`c1b25cdf`).** main handed aux the H9 hazard on yip
+0096: `spoor_clone` copied `flag & ~CWALKONLY`, so a clone inherited COPEN, and
+`SYS_OPEN(drain_fd, ".", O_PATH)` clone-walks the console-drain Spoor -- the clone
+carried COPEN + qid CONSDRAIN, so closing that navigation handle ran `devdev_close`'s
+`qid==CONSDRAIN && COPEN` arm and the GLOBAL `cons_drain_close()`, disarming the live
+drain under the renderer that still held the real fd (a re-open then resets
+`reader_busy`, the two-sleeper drain-Rendez extinction premise). Verified by a kernel
+test BEFORE any fix, per main's ask.
+
+The fix is one line -- strip COPEN in `spoor_clone` beside CWALKONLY
+(`kernel/spoor.c:215`) -- but the reasoning is the chunk. COPEN is a per-open marker
+set by `dev->open`, never by a walk; a fresh navigation clone has not been opened. Two
+prosecutions main asked for, both clean:
+- *The COPEN-close sweep:* devdev's drain is the ONLY COPEN-gated close whose side
+  effect is GLOBAL. `devproc_close` also gates on a clone-copied flag (CDEBUGOWNER)
+  but keys the release on the Spoor POINTER (`devproc.c:948`), so a clone is a
+  harmless no-op; dev9p/devsrv/devcap normalize `nc->aux` in their walk; the rest are
+  `dev_simple_close` (no side effect). Nothing relies on a clone reading COPEN -- the
+  sole reader, dev9p's dir-fid donate gate (`dev9p.c:1661`), WANTS COPEN==0.
+- *The `spoor_clone` caller enumeration:* dup shares the Spoor by `spoor_ref`
+  (`handle.c:252`), not clone -- so the "dup of an open fd loses open state" hazard
+  main flagged cannot arise; rfork/fork inherit the table by `spoor_ref` too
+  (`proc.c:1576`); every other caller is a walk position re-opened (COPEN set fresh)
+  or an O_PATH handle (COPEN correctly clear); dev9p's cached-open clone
+  (`dev9p.c:1259`) sets COPEN itself.
+
+**The wrong turn, and what caught it.** My first H9 test asserted the MECHANISM (the
+clone does not carry COPEN). It passed on the fix and failed on the reverted control,
+so it "worked" -- but that assertion is fix-A-specific: under the other candidate fix
+(a local devdev gate, COPEN still inherited) it would fail a correct system, and main
+had asked the test to discriminate BOTH candidate fixes. Rewrote it to assert the
+OUTCOME (the drain still delivers after the clone close) -- fix-agnostic -- and left
+the mechanism assertion in `spoor.clone_copies_state`, which is rightly fix-specific.
+The discrimination control (revert the strip, rebuild, confirm red) is what showed the
+outcome test now fails at "drain still delivers" rather than at a precondition: a
+control proves discrimination, not detection.
+
+Green: 1559 PASS, boot OK, 0 FAIL with the fix; suite red with it reverted. Two
+dossiers (`sub-kernel-spoor` "what a clone inherits", `sub-kernel-devdev`) are owed
+and enqueued to main (yip 0097) -- landed with a `No-dossier-change` trailer because
+aux's vault worktree is 154 commits behind main and a `quaestor render` here would
+revert main's newer views. H7/H8/H6 (the `/env` aliasing hazards from the same
+research pass) remain open.
+
+**The pivot: the Rust std port (operator-directed).** Mid-run the operator handed aux
+a new arc -- "port Rust STD" -- and sent me to main for scope (yip 0097). The browser
+arc "Boosty" was ratified today (`docs/BROWSER-DESIGN.md`): WebKit first on main, Rust
+std on aux in parallel, Servo second gated on the std. Track R is aux's. The target: a
+new `aarch64-thylacine` Rust target, `target_family="unix"`, over the POUCH libc
+(patched musl), NOT libthyla-rs -- reuse `library/std/src/sys/pal/unix` + `std::os` +
+a `rustc_target` spec + a `libc` crate module (precedent: Hurd 2023, +626/-35 rust +
+3297 libc; a bespoke pal costs ~4x). Out-of-tree fork first; first milestone is a
+cargo-built std hello RUN ON THE DEVICE (threads, file read, TCP, HashMap, panic
+unwind). Hard constraint: no permission-mutation syscall (Pouch mmap is anon-only).
+Whether std-on-Pouch is for ports only or a sanctioned way to write new Thylacine
+programs is the operator's call (O-5); the target name + `std::os` surface + toolchain
+pinning are scripture-before-code (a design note first). Operator voted xhigh for the
+browser arc. Next: read `docs/handoffs/041-rust-std-track-to-aux.md`.
+
+---
 ## 2026-09-16 (aux, Opus 5, effort max) -- the Operator's Manual restarts: a writing guide, a design, and the reader
 
 The operator added `docs/thylacine-operators-manual-writing-guide.md` and asked
