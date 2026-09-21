@@ -22,6 +22,70 @@ needed the operator.
 
 
 ---
+## 2026-09-21 (aux, Opus 4.8, effort xhigh) -- R-1 wiring: the cargo std hello BUILDS + STAGES as /r1hello (on-device boot pending a Mac window)
+
+Picked up post-self-compact with R-1 at "the hello LINKS" (`005a4a5b`, a static
+ET_EXEC built in a scratchpad dir OUTSIDE the tree). This run wired the on-device
+witness into the build + a boot scenario, and VERIFIED the build end-to-end. The
+actual boot is the one piece left, and it is hard-blocked on the shared Mac (see
+below).
+
+**What landed (uncommitted at time of writing; commit follows):**
+- `tools/build.sh build_rust_progs()` -- cargo `-Z build-std=core,alloc,std` over
+  the forked libc + patched rust-src, links via `pouch-clang`, strips with
+  `llvm-strip`, stages the ET_EXEC at `$BUILD_DIR/pouch/progs/r1hello`. Called
+  after `build_pouch_progs` in the chain + a standalone `rust-progs` target.
+  Gated to self-skip (announced) off the track-R box. A staleness guard watches
+  the forked libc tree + the two patched rust-src files and forces the
+  `rm -rf target` the build-std fingerprint trap needs.
+- `/r1hello` added to `build_ramfs`'s `pouch_bins`; `tools/interactive/rust-std-hello.exp`
+  (login + run `/r1hello` + assert `R1-HELLO: PASS` across stdout/HashMap/threads/
+  panic-unwind, fast-fail on a `FAIL` line).
+
+**VERIFIED (no Mac needed -- a CPU-only -j2 build, within the turn-13 0097
+agreement that build-std is modest):** `tools/build.sh rust-progs` builds the
+full std hello in 34.6s (cache-warm) and stages `/r1hello` = **499792 bytes**,
+`Type: EXEC`, AArch64, **no PT_DYNAMIC**, W^X-clean (LOAD R / R+E / RW / RW;
+GNU_STACK RW-no-X). The `clang: argument unused '-static-pie'` warning confirms
+the fork toolchain drops static-PIE -> ET_EXEC, the shape `kernel/elf.c` accepts.
+
+**Two wrong turns, both caught by BUILDING the committed crate rather than
+trusting the scratchpad link.** The scratchpad build (`005a4a5b`) succeeded only
+because it lived OUTSIDE the tree; the committed crate at `usr/ports/rust/r1-hello`
+is under `usr/`, and two ancestor-config mechanisms bit in sequence:
+1. **Workspace capture.** `usr/Cargo.toml` is a `[workspace]` with an explicit
+   `members` list that (correctly) omits r1-hello; cargo walked up, found the
+   ancestor workspace, and refused a package it neither includes nor excludes.
+   Fix: an empty `[workspace]` table in r1-hello's Cargo.toml makes it its own
+   root (cargo's own "keep it out" remedy) -- r1-hello is a ports crate on a
+   different target/toolchain, NOT a native no_std member.
+2. **Vendored-source replacement.** `usr/.cargo/config.toml` replaces crates-io
+   with the native workspace's vendored `third_party/rust`, which (correctly)
+   has none of std's build-std deps (`hashbrown`, `gimli`, `object`, ...). Fix:
+   invoke cargo from a NEUTRAL cwd (`$BUILD_DIR`, no `.cargo/config` ancestor,
+   no global config) via `--manifest-path`, so the replacement is not inherited;
+   `--offline` then resolves the full std dep set from the `~/.cargo` cache the
+   scratchpad build populated. Confirmed with a light `build-std=core` probe from
+   the neutral cwd (resolved past the hashbrown error into compilation).
+Neither would have surfaced from the scratchpad link; both are the class of bug
+that only a build at the real in-tree location shows.
+
+**Also corrected (AS-BUILT):** the pinned rustc hash in the README + toolchain.toml
+was `bba531001` (wrong); the installed `nightly-2026-09-20` is rustc
+`feaadeeac` 2026-09-19, LLVM 23.1.1 (measured `rustc +nightly-2026-09-20 -Vv`).
+
+**The one piece left, and why it is blocked.** R-1's definition is std RUN ON
+DEVICE, which needs a `--config ci` image (login lands on `ut`, not the Halcyon
+session) booted with `tools/test-interactive.sh rust-std-hello`. That is
+hard-blocked on the shared 8-core Mac: main holds it for the mount-table-shed SMP
+soundness gate + the ci interactive fleet (~1-1.5h), and `test-interactive.sh`'s
+reaper is a HOST-WIDE `pkill -9 qemu` (#224) -- booting my witness while main's
+fleet runs would cross-kill both. So the boot waits for main's fleet to finish;
+it is not a contention-slowdown concern but a correctness one. OWED with it: the
+full 12-file rust-src patch re-validation (apply-to-pristine + rebuild green),
+cheap in the same Mac window.
+
+---
 ## 2026-09-21 (aux, Opus 4.8, effort xhigh) -- R-0 REACHED: `std` compiles for aarch64-unknown-thylacine
 
 The Rust std port's first milestone. `std` (core+alloc+libc+std) compiles for

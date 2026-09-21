@@ -16,7 +16,8 @@ panic-unwind), which needs the pouch runtime patches (`patches/README` + the
 ## Layout
 
 - `rust-toolchain.toml` -- the pinned nightly (`nightly-2026-09-20`, rustc
-  1.100.0 `bba531001`) + `rust-src`. **Scoped here on purpose** -- never move it
+  1.100.0-nightly `feaadeeac` 2026-09-19, LLVM 23.1.1) + `rust-src`. **Scoped
+  here on purpose** -- never move it
   to the repo root or `usr/`, or it switches the native no_std userspace build
   (stable) to nightly (rustup searches upward).
 - `aarch64-unknown-thylacine.json` -- the custom target spec (the ratified
@@ -178,22 +179,57 @@ A cargo-built std hello RUN ON DEVICE. Progress:
   link_name = `__errno_location` (musl) -- surfaced at LINK, not compile. Added
   to `patches/rust-src-thylacine.patch` (now 12 files).
 
-REMAINING (the on-device witness, next chunk):
-1. `build_rust_progs()` in tools/build.sh -- cargo-build r1-hello (gated on the
-   track-R toolchain, self-skip if absent; set
-   `CARGO_TARGET_AARCH64_UNKNOWN_THYLACINE_LINKER=$REPO_ROOT/tools/pouch-clang`;
-   rm the target-dir first per the build-std staleness trap) + strip + stage to
-   `$BUILD_DIR/pouch/progs/r1hello`; call it after `build_pouch_progs`.
-2. add `r1hello` to the `pouch_bins` list in `build_ramfs` (-> `/r1hello`).
-3. WITNESS: build `--config ci` + an expect script (tools/interactive/) that
-   logs in, runs `/r1hello`, asserts `R1-HELLO: PASS` + the per-leg tokens. (ut
-   connects the child's stdout to the console, so tokens are visible -- joey's
-   `pouch_smoke_one` drains to a buffer and does NOT echo, so it is the wrong
-   witness for per-leg visibility.)
-4. runtime deps if it faults: pouch 0033/0034/0035 from browser-b0 @e0fc2422
-   (main's ci is red; they will not reach main soon). The hello links against
-   the EXISTING sysroot libc.a (pre-patches); std stubs stack_overflow + does
-   own buffering + uses _SC_PAGESIZE, so it MAY run unpatched -- the boot proves
-   it.
-5. thyla-pi (real V3D/KVM silicon) for a real-silicon confirmation after the
+WIRED (the on-device witness harness -- landed, build+boot not yet run):
+1. `build_rust_progs()` in tools/build.sh -- cargo build-std over the forked
+   libc + patched rust-src, links via `pouch-clang`
+   (`CARGO_TARGET_AARCH64_UNKNOWN_THYLACINE_LINKER` pins the wrapper), strips
+   with `llvm-strip`, and stages the ET_EXEC at `$BUILD_DIR/pouch/progs/r1hello`.
+   Called after `build_pouch_progs` in the `build_all` chain; also a standalone
+   target (`tools/build.sh rust-progs`). GATED to self-skip (announced) off the
+   track-R box: no `cargo`, no pinned `nightly-2026-09-20`, a rust-src without
+   the thylacine patch, or an absent `../libc-thylacine` each skip cleanly. A
+   staleness guard reuses the staged binary unless a rust input changed, and on
+   a change does the from-scratch `rm -rf target` the build-std fingerprint trap
+   needs (it watches the forked libc tree + the two patched rust-src files whose
+   edits gate the compile/link -- the exact edits `-Z build-std` does NOT
+   detect).
+2. `r1hello` added to the `pouch_bins` list in `build_ramfs` (-> `/r1hello`); the
+   copy loop's `-f` guard stages nothing when build_rust_progs self-skipped.
+3. `tools/interactive/rust-std-hello.exp` -- logs in, runs `/r1hello`, asserts
+   `R1-HELLO: PASS` + each per-leg OK token (a fast-fail arm on a `FAIL` line;
+   file/TCP are informational, not asserted). ut connects the child's stdout to
+   the console, so tokens are visible -- joey's `pouch_smoke_one` drains to a
+   buffer and does NOT echo, so it is the wrong witness for per-leg visibility.
+
+REMAINING (the actual witness -- needs a Mac window; coordinate on yip 0097
+first, main shares the 8-core host with the browser arc):
+4. Run it: `tools/build.sh rust-progs` (verify the std build stages /r1hello),
+   then `tools/build.sh kernel --config ci` (the gate image -- no Halcyon
+   session, so login lands on `ut`), then
+   `tools/test-interactive.sh rust-std-hello`. Cap `-j2` (build-std is modest,
+   not a full bootstrap -- the turn-13 agreement on 0097).
+5. runtime deps if it faults: the pouch patches 0033-0038 (main-side). Take them
+   from `main` once landed, or from LOCAL branch `browser-b0` BY FILE (current
+   tip moves; it was `9f7613f0` on 2026-09-21) -- NEVER by an old hash: 0035's
+   code changed under audit (buffered arm now serves len <= buf_size), 0036 is
+   now DELETE-ON-CLOSE not public-unlink (Stratum rejects I/O on an unlinked fid,
+   fid.tla IOReject), 0037 now compiles, 0038 is new (stdio over a socket fd).
+   The hello links against the EXISTING aux-3 sysroot libc.a (pre-patches); std
+   stubs stack_overflow + does own buffering + uses _SC_PAGESIZE, so it MAY run
+   unpatched -- the boot proves it. If it faults, rebuild the sysroot with the
+   current patch files.
+   Known pouch gaps std may hit (main-recorded OPEN, ENOSYS for every fd):
+   fcntl / dup / dup3 / readv / writev -- so std's `write_vectored` (a plausible
+   `println!` path), `try_clone`, and fcntl `set_nonblocking` are at risk. R-1's
+   hello does not obviously need dup/fcntl; `write_vectored` via stdout is the
+   one to watch -- the boot output (or its absence) is the discriminator.
+   Rust's tempfile "create-unlink-keep-fd" idiom also does NOT work on this
+   rootfs (the 0036 finding) -- an R-2 crate-tail concern, an operator question.
+6. thyla-pi (real V3D/KVM silicon) for a real-silicon confirmation after the
    Mac HVF witness.
+
+OWED: re-validate the FULL 12-file `patches/rust-src-thylacine.patch` against a
+pristine rust-src (apply + rebuild green) -- cheap in the Mac window via `rustup
+component remove/add rust-src` then re-apply and rebuild. R-0's 11 files were
+validated apply-to-pristine + rebuild-green; the 12th (`sys/io/error/unix.rs`
+errno arm) was appended and is well-formed but not yet re-validated end-to-end.

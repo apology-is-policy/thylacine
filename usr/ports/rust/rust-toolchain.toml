@@ -9,5 +9,5 @@
 # Custom-target JSON fields are unstable, so the toolchain is pinned to one exact
 # nightly and advanced deliberately, never floated (RUST-STD-DESIGN section 7).
 [toolchain]
-channel = "nightly-2026-09-20"    # rustc 1.100.0-nightly (bba531001)
+channel = "nightly-2026-09-20"    # rustc 1.100.0-nightly (feaadeeac 2026-09-19, LLVM 23.1.1)
 components = ["rust-src"]           # -Z build-std rebuilds core/alloc/std from source
