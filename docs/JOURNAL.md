@@ -376,6 +376,80 @@ P-4 deserves its own sentence. The series header, the MOC and the dossier all sa
 
 State at the time of writing: scripture `453cea89` + the fix batch `2a794360` on local `browser-b0`, syntax-checked, NOT built or booted; the 40-patch series applies to pristine musl with zero fuzz. One combined gate (from-scratch sysroot, suite, ci fleet, SMP gate) is next, then a round 3 on the 0036 restructure and a round 2 on the shed fix. Nothing has landed on `main`.
 
+### Addendum 4, same day (seventh self-compact): the gate went red on my own prover, and the honest fix was three defects deep
+
+**What the gate said.** Stage B of the combined gate at `1de0692a` came back RED on both halves: ci fleet 15 of 77
+scenarios, SMP gate 17 OTHER of 40 boots. I classified before theorizing: 57 of the fleet's 58 failed boots and 17
+of the SMP gate's 17 carry one line, `client: ppoll(socket) = 1 revents=0x18` -- the ppoll leg I had added to
+`pouch-hello-sockets` that morning, which libc audit r3 had already called a scheduling race (F1). 0 corruption,
+0 external-kill, 0 timing. Under TCG the server thread consumes the request first ~98% of the time; under HVF
+usually not -- which is the whole reason `tools/test.sh`, one HVF boot, had been green. A leg that passes on one
+boot and fails on 57 is not a flaky leg, it is a leg whose green was the accident.
+
+The 58th failure was a different animal and I ran it down rather than let the retry absorb it:
+`im1-sak-lever` answered `active` to its second Ctrl-A b. corvus prints `trusted path: done` INSIDE the episode
+and calls END afterwards (`usr/corvus/src/main.rs:4145`), and the scenario used that line as its END witness, so
+the next BREAK could land in the still-open episode -- where `active` is the designed answer. A race between the
+script and corvus, not in the kernel. It now waits for the kernel's `cons: trusted episode END`.
+
+**Why not the one-line fix.** The auditor's minimum for the kernel half (F2) was to fail closed: `POLLNVAL` for a
+client endpoint. I did not take it, for a reason specific to this leg: a raw tagged fd -- the LIBC defect 0039
+fixes -- also answers `POLLNVAL`, so under the stub the leg could no longer tell the libc fix from its absence. And
+every event-driven port, which is the browser arc's entire IPC layer, would still have no readiness source. So the
+full client arm, scripture first (`6684e7da`).
+
+**What reading srvconn.c end to end found, that nobody had asked about.** (1) The wake set was incomplete in BOTH
+directions. Only c2s fill and teardown walked `cn->poll_list` (plus `srvconn_io_nonblock`, which walked it for all
+four edges). So besides the client never waking on its reply, a nonblocking SERVER that polled `POLLOUT` after
+`EAGAIN` was never woken by a blocking client drain. A comment in `srvconn_server_send` argued the wake away by
+reasoning about the wrong poller. (2) Making one list serve four edges for two endpoints means a walk is noise for
+some pollers -- and `sys_poll_for_proc` answered an empty post-wake re-sample by RETURNING 0. `poll(fd, 10 s)`
+reported a timeout after microseconds whenever a second reader won the bytes; `poll(-1)` returned 0, which POSIX
+never permits. That defect predates everything here. `specs/poll.tla` was green over it for its whole life because
+it modeled readiness as a monotonic edge and a flag as a verdict (`FlagImpliesReady`): the state in which the code
+was wrong did not exist in the model. Same lesson as the shed spec this morning, different shape -- that one
+compared a rule with itself, this one had abstracted away the only axis the bug lived on.
+
+So the spec was extended first: `Retract`, `OtherEvent`, a `seen` sample separate from the flag, the re-arm loop
+with its one sound order (clear THEN sample) and its own deadline test. Two properties retired as false by design,
+`NoSpuriousZero` + `StableReadyReturns` added, two buggy cfgs. I sabotaged both liveness properties in scratch
+before trusting them: deleting the loop's `Expired` test violates `PollTerminates` (tsleep prefers a set flag to a
+passed deadline, so a producer that never stops walking holds the poller forever), and `BUGGY_NO_WAKE` violates
+`StableReadyReturns`.
+
+**The libc half** became patch 0041: the kernel's rows stay mirror images and pipe-like (what the native 9P servers
+are written to); pouch `poll()` gives a CONNECTED AF_UNIX slot the stream-socket shape -- a peer's close is
+`POLLIN|POLLHUP`, no `POLLERR` -- because the loop every port has (`POLLIN`? read; 0 = closed) never terminates on
+`POLLHUP` alone. Not covered and written down: an ACCEPTED socket is untagged by 0006's design.
+
+**The prover leg, rebuilt so no schedule can turn it green over a broken kernel.** The client polls only AFTER a
+barrier the server releases once it has CONSUMED the request; the server replies; the connection stays open until
+the client has polled; exactly `POLLIN` required. Then the close: exactly `POLLIN|POLLHUP`, then EOF.
+
+**Shed r2 in the same batch.** F1 was the better finding: round 1's correction ("a union dirfd whose entries were
+shed answers ENOENT") was true for a NAME and false for `"."` -- the zero-component walk cloned the union's point,
+found nothing mounted there, and returned the directory the union had COVERED. Reachable with no shed at all
+(`unmount("/")` twice, `open("/")`), so it predates #80. Rule: the point is consulted only while it hosts a member;
+the zero-component half is a post-condition of the cross, so a peer Thread's unmount opens no window.
+
+**Controls, measured.** Sabotaged kernel "poll" (pre-fix return-on-wake, no s2c walks, server-end sampling): 4 of
+the 5 new `poll.*` tests FAIL, suite 1590/1594 -- and the fifth, `poll.timeout_survives_a_busy_list`, PASSES under
+it, correctly: that test pins the loop's deadline bound, which this sabotage does not touch. It gets its own
+sabotage (running as I write). Sabotaged kernel "union" (no dissolved-union rule): exactly the four dissolved-union
+probe legs FAIL while the controls and the r1-F1 seed legs pass -- and the kernel suite stayed 1594/1594, which told
+me no UNIT test covered the rule; `stalk.union_dissolved_degrades` exists now.
+
+**A trap found by changing the measuring method.** Applying the series under `--fuzz=0` instead of build.sh's
+flags rejected 0024's last hunk. Its patch FILE had no trailing newline; BSD `patch` silently spends fuzz on the
+final context line and prints no "with fuzz" message, and `git apply` calls the file corrupt. Every "zero fuzz"
+claim made about this series -- mine and two auditors' -- was made with an instrument that could not see it.
+Fixed; `tools/check-patch-hunks.py` fails the class now, negative-controlled.
+
+**Exactly what is NOT done.** Nothing in this addendum is gated: the fleet + SMP gate have not run on the fixed
+tree, and rounds 4 (libc + the new kernel poll surface) and 3 (shed) have not been spawned. Tracked, not fixed:
+Stratum's O_APPEND is stat-then-write (two appenders clobber -- ours, enqueued), the accepted-socket shape, two
+union resolver gaps, the exact union seed. `main` is still `47ba3295`.
+
 ## 2026-09-21 (main, Fable 5.1, effort max) -- taking over a week of another agent's work: the graphical trusted path, the chord nobody could find, and the image that booted two UIs at once
 
 **Where the tree stood.** Claude credits ran out on 09-16; a Codex agent ("Astra")
