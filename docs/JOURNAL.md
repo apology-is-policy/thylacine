@@ -22,6 +22,79 @@ needed the operator.
 
 
 ---
+## 2026-09-21 (main, Fable 5.1, effort xhigh) -- the browser arc opens: six research lanes, one wrong prior, and the finding that every engine wants the same kernel work
+
+**The ask.** The operator opened a new arc the moment the lictor takeover
+closed: a web browser. Their candidates were Ladybird ("the spiritual friend...
+already in Rust") and Gecko, with a third option invited, and one hard line --
+nothing Chrome, nothing tied to Google or Microsoft. Mid-research they narrowed
+that line to *exactly Blink, V8 and Chromium* ("not every library they
+touched"), said they are a WebKit fan, and called Servo "superbly interesting".
+Nothing is built. The deliverable of this run is `docs/BROWSER-DESIGN.md`,
+status PROPOSED, and a vote.
+
+**The wrong turn, and what caught it.** Before any research I told the operator
+their premise about Ladybird was probably wrong -- that it is C++ with a Rust
+transition barely begun. That was my 2024-shaped prior stated with more
+confidence than it had earned. The research agent did not search for an answer;
+it cloned upstream (`ee1487d`, committed the same day) and counted: zero Swift
+files, 460 Rust files, about 442K lines of Rust against 886K of C++, with the
+HTML parser, URL, style, layout, CSS parsing, display-list painting, regex and
+the LibJS front end all in Rust. The operator was substantially right and I
+corrected myself to them in the same session. The reusable part: a correction
+offered to the operator is a claim like any other, and I had labelled it
+"unverified" in my own notes while phrasing it to them as likely. What caught
+it was a primary source read by someone with no stake in my prior.
+
+**The finding nobody planned.** I expected the engines to differ mainly in how
+hard they are to port. They differ far less than that. Measured in our tree:
+Pouch `mmap` is anonymous-only with a kernel-chosen address and no `MAP_FIXED`,
+`mprotect`, `madvise` or partial `munmap`; there is no fd passing and no shared
+memory between unprivileged Procs (Weft shares exist but `SYS_WEFT_SHARE` is
+gated to the driver tier, `kernel/syscall.c:7179`); there is no Rust `std`
+port; there is no EGL. Every full engine needs the first; every multi-process
+engine (WebKit, Ladybird, Gecko) needs the second; every engine with Rust in
+it (Servo, Ladybird, Gecko -- and SpiderMonkey even standalone, through the
+`wast` crate) needs the third. So the design document's centre is an
+engine-neutral *platform tranche*, and the engine choice is about which to
+bring up first on it. `docs/NOVEL.md` parked Mycelium on 2026-08-31 for want of
+"a forcing near-term driver"; a multi-process browser is that driver.
+
+**The JIT answer the operator asked for.** JavaScriptCore already contains our
+I-42 design: `initializeSeparatedWXHeaps` remaps the JIT pool to a second
+address, makes one view R+X and the other R+W, and funnels every write through
+`performJITMemcpy` as an *offset* into the pool. It is compiled only for Darwin
+ARM64 (I read lines 189-334 of `ExecutableAllocator.cpp` myself; everywhere
+else JSC maps its pool permanently RWX). Porting it to `SYS_JIT_CREATE` is three
+sites. SpiderMonkey has no such mode and a dual map there changes the *address*
+of every code write -- an invasive, per-ESR patch nobody upstream wants -- and
+its no-JIT mode has no WebAssembly at all. Ladybird generates no code for
+JavaScript and has one Cranelift function for Wasm. One research agent reported
+SpiderMonkey "toggles permissions with mprotect"; I remembered Firefox shipping
+RWX; the dedicated agent read the source and both are true -- the engine
+defaults to flips, Firefox's pref turns them off. A disagreement between two
+reports was the signal to read the third.
+
+**The recommendation put to the operator.** WebKit first, on the shape of
+Sony's PlayStation port (no GLib, curl + OpenSSL, a C API that paints into a
+caller-owned buffer, JIT off upstream); Rust `std` and Servo as the second
+track; Ladybird re-evaluated at its 2027 beta, by which time the tranche exists
+for other reasons and its upstream -- closed to outside code since 2026-06-05
+-- matters less. Gecko is argued out with evidence. The first implementation
+step, if accepted, is deliberately tiny: JavaScriptCore alone (`JSCOnly`),
+which is WebKit's own advice for a new OS, measures the memory gaps instead of
+guessing at them, and answers the JIT question in days.
+
+**What is open.** Everything: the vote (section 11 of the design doc), and
+inside it two kernel designs that are scripture in their own right -- whether
+guard regions are reservation holes or an amendment to I-12's "no
+permission-mutation syscall" sentence, and whether shared memory for
+unprivileged Procs is a generalised Weft gate or Mycelium proper. Neither is
+decided in the document, on purpose. Effort note: this session reports `xhigh`,
+not `max`; research and a design document are fine there, and the effort gate
+is raised with the vote because the next steps reach the kernel.
+
+---
 ## 2026-09-21 (main, Fable 5.1, effort max) -- taking over a week of another agent's work: the graphical trusted path, the chord nobody could find, and the image that booted two UIs at once
 
 **Where the tree stood.** Claude credits ran out on 09-16; a Codex agent ("Astra")
