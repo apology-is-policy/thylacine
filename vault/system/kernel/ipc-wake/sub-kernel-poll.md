@@ -33,8 +33,13 @@ dev9p.poll bridge's userside.
   followed by another sleep, not by a return. Until 2026-09-21 it was
   followed by a return — see Mechanism step 5. A DYING caller returns 0
   from any pass (it dies at its EL0-return tail); a STOPPED caller parks
-  inside the call, with no hook listed, and resumes the same poll against
-  the same deadline.
+  inside the call and resumes the same poll against the same deadline --
+  with no hook listed when the loop's own check catches the stop, STILL
+  listed when `tsleep`'s detour catches it first (a walk then only sets a
+  flag the resumed `tsleep` reads; this said "no hook listed" flat until
+  audit round 5 F5). A caller kept awake by noise for
+  `POLL_SPIN_BUDGET_NS` backs off for `POLL_BACKOFF_NS` (step 5): at most
+  one backoff of extra latency, only while the noise lasts.
 - `nfds` ∈ [1, `POLL_MAX_NFDS` = 64]. **Deliberately decoupled from
   `PROC_HANDLE_MAX`**, which is now **1024** — 64 at the decoupling,
   256 by [[chg-2026-06-24-355-poll-decouple]], 1024 since the #198
@@ -96,10 +101,12 @@ dev9p.poll bridge's userside.
    and stop checks (below); then each fd's `.poll` runs WITH its hook
    again — the first scan's install-and-sample. An event before an fd's
    install is seen by its sample; one after reaches the fresh hook. Ready,
-   or `TSLEEP_TIMEDOUT` ⇒ the sweep. Otherwise an explicit
-   `timer_now_ns() >= deadline_ns` test, then `sched_yield_hint` (a
-   noise pass bought nothing; queued work on this CPU runs first), then
-   **loop to step 3 against the same absolute deadline**. The explicit
+   or a `TSLEEP_TIMEDOUT` whose deadline was the POLL's (`sleep_dl ==
+   deadline_ns`) ⇒ the sweep. Otherwise an explicit
+   `timer_now_ns() >= deadline_ns` test, then the noise backstop (below),
+   then `sched_yield_hint` (a noise pass bought nothing; queued work on
+   this CPU runs first), then **loop to step 3 against the same absolute
+   deadline**. The explicit
    test is load-bearing: `tsleep` prefers a set flag to a passed
    deadline, so a producer that never stops walking a list would hold
    the poller past its timeout for ever (`PollTerminates`).
@@ -121,10 +128,28 @@ dev9p.poll bridge's userside.
    (⇒ the sweep, 0) and parks on `proc_stop_sleeper_park` when a stop is
    pending — with every hook already off, so no producer walks to a
    parked poller; the park returns `SLEEP_INTR` on death (DEATH WINS).
-   **Residue, the operator's:** syscalls run IRQ-masked end to end, so a
-   noise-driven poll with NOTHING else runnable still spins with
-   interrupts off until its deadline — a preemption-model question, not a
-   poll fix (`pipe_block_locked` and `chan_role_acquire` share it).
+   *The noise backstop* (round 5 F1, P1; [[spec-poll]] `SpinLapse` /
+   `BackoffCommit` / `BackoffTimeout`, `SpinBounded`): syscalls run
+   IRQ-masked end to end, and a yield bounds nothing when nothing else is
+   queued, so a noise-driven poll held its CPU's interrupts -- the SAK
+   included -- for as long as the noise lasted; an unprivileged pipe, a
+   writer, a reader and an `events=0` poller were enough. Round 4 had
+   filed this as the operator's preemption-model question on the premise
+   that nothing unprivileged could drive it; the premise was false. The
+   loop keeps `spin_from` / `spin_sleeps`: when `t->nsleeps` has moved
+   (the thread was switched out SLEEPING -- its CPU ran other work or
+   idle, where interrupts are taken) the run restarts; a yield does NOT
+   count, since two noise pollers yielding to each other keep their CPU
+   masked between them. When `POLL_SPIN_BUDGET_NS` (1 ms) has passed
+   without one, the pass calls `poll_unhook_all` and the next `tsleep` is
+   on `poll_never` for `POLL_BACKOFF_NS` (1 ms), capped at the poll's
+   deadline. Off its lists nothing a producer does can cut it short;
+   death and a stop still end it through `tsleep`'s own checks. The loop's
+   own die-check and stop park now keep death and a stop PROMPT (one pass,
+   not one budget) -- the backstop alone would end them too, which is why
+   their buggy cfgs and kernel tests turn it off. The wake dedupe (skip
+   `wakeup` when `pw->ready` is set) was proposed alongside and
+   REJECTED: see Concurrency.
    *What this replaced:* the empty re-sample fell through and returned 0
    — `poll(fd, 10 s)` reported a timeout after microseconds whenever a
    second reader won the bytes, and `poll(-1)` returned 0, which POSIX
@@ -174,7 +199,15 @@ for someone else's edge did not end a poll.
 
 Producer order inside `poll_waiter_list_wake`, load-bearing: write
 `pw->ready = true` FIRST, then `wakeup(pw->rendez)` — the rendez-lock
-release/acquire pair carries the flag to the woken cond. The full
+release/acquire pair carries the flag to the woken cond. **The walk
+wakes even a hook whose `ready` is already set, and must** (round 5 F6
+proposed skipping it, "sound since ready only rises while listed"; it is
+not): `ready` means something only to `sys_poll_for_proc`, whose cond
+reads it. The one-shot role waiters that share the list type -- the
+cons tx-role, episode and reader-slot waiters, the SrvConn role waiter,
+the 9P send waiter -- sleep on a cond that reads the ROLE, not `ready`;
+a spurious wake re-sleeps them with `ready` still set, and a deduped
+walk would then skip the only wake the next release gives them. The full
 chain: object lock → list lock → (the wake enters the wait chain:
 `g_timerwait` → rendez → runq). Unregister takes ONLY the list lock —
 that asymmetry is what lets the sweep run without deadlocking against
@@ -209,10 +242,12 @@ sweep; `NoSpuriousZero` the re-arm (0 only at the deadline);
 `PollTerminates` its loop bound; `StableReadyReturns` replaces the
 retired `PollReturnsWhenReady` ("a set flag leads to a return" is false
 by design now); `DeathTerminates` and `StopHonoured` the loop's own
-checks. `specs/check-poll.sh` runs the four clean + seven buggy cfgs
-(two of them liveness: `no_loop_die_check`, `no_loop_stop_check`) and
-asserts WHICH property each buggy one violates; the clean counts are
-pinned (2146 / 944). The list-choosing half of re-registration is
+checks; `SpinBounded` the backstop and `BackoffHoldsNoHook` its sleep.
+`specs/check-poll.sh` runs the four clean + eight buggy cfgs (three of
+them liveness: `no_loop_die_check` and `no_loop_stop_check`, both with
+the backstop OFF, and `no_backstop`) and asserts WHICH property each
+buggy one violates; the clean counts are pinned (4340 / 1912 since the
+backstop). The list-choosing half of re-registration is
 [[spec-cons-poll]]'s (`BUGGY_NO_REREGISTER`, `_CADENCE`).
 
 ## Error paths
@@ -245,6 +280,18 @@ why `POLL_MAX_NFDS` is a frame bound, not an fd-table bound.
   pass, with no hook listed; `timeout_ms == 0` never enters it; the
   loop's own deadline test stays; nothing in a pass may sleep while a
   hook is listed except `tsleep` itself (the stop park runs unhooked).
+- The backstop: the backoff holds no hook and no ref; only a TIMEDOUT at
+  the poll's own deadline returns (a backoff's end read as the timeout is
+  a spurious 0); the budget resets on `nsleeps` only. The three
+  loop-check tests run at `NO_BACKSTOP` (`poll_spin_budget_set_for_test`)
+  -- at the real budget a kernel WITHOUT the check passes them, which the
+  model shows too (the loop-check buggy cfgs pass with the backstop on,
+  measured). `poll.backstop_sleeps_through_noise` catches the poller
+  asleep and hookless while the producer walks -- one consistent look
+  bracketed by `nsleeps` and the backoff counter, so the list read falls
+  inside ONE backoff -- then >= 3 backoffs and real sleeps, then readiness
+  still returns; `poll.backstop_keeps_the_deadline` a timed poll returning
+  0 AT its deadline under the same noise.
   `poll.death_ends_a_noise_driven_poll` / `poll.stop_parks_a_noise_
   driven_poll` pin the checks (a real Proc's thread on the busy Dev
   below), `cons.episode_frozen_poller_follows_end` /
@@ -302,4 +349,7 @@ emptiness probe) → [[chg-2026-06-24-355-poll-decouple]] → the re-arm
 `poll.devsrv_client_wakes_on_reply_only`, which pins `NoSpuriousZero`
 on a real parked poller) → audit round 4 the same day (scripture
 `e55b86ef`: re-registration, the loop's death/stop checks, the irqsave
-list lock; two more poll tests and two cons tests).
+list lock; two more poll tests and two cons tests) → audit round 5 (the
+noise backstop, spec first: `SpinBounded`, `BUGGY_NO_BACKSTOP`; two
+backstop tests; every poller test entry parks terminally and publishes
+its result with a release store).

@@ -1436,7 +1436,8 @@ void sched(void) {
 
         // prowl-3a (PROWL-DESIGN.md section 3.3): the per-thread scheduler
         // counters, stamped at this same single chokepoint. READ-ONLY telemetry
-        // (no decision reads them); single-writer per the run_ns discipline
+        // (no SCHEDULING decision reads them -- poll's backstop reads its own
+        // nsleeps, see thread.h); single-writer per the run_ns discipline
         // (prev switches OUT on this one CPU; next was picked by this one CPU).
         // `this_cpu` is derived from cs (asserted == smp_cpu_idx_self() above)
         // to avoid a redundant MPIDR read.

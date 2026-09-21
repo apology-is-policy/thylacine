@@ -36,8 +36,9 @@ proc gfx_dump_or_fail {out} { global repo qmp; if {[catch {exec $repo/tools/scre
 proc gfx_fp {png} { global repo; return [exec python3 $repo/tools/interactive/gfx_fp.py $png] }
 proc qkey {qcode} { global repo qmp; catch {exec $repo/tools/qmp-send-key.sh -s $qmp $qcode} }
 
-# Host-side skip: the staged tree is the one the pool bakes (build_tombraider_fixture).
-if {![file exists "$repo/build/tombraider/stage/TOMB.EXE"]} {
+# Host-side skip: the pool must HOLD the demo (the bake's verified payloads), not
+# merely have had it staged once -- a stage outlives the bake that used it.
+if {![file exists "$repo/build/tombraider/stage/TOMB.EXE"] || ![lc_pool_has TOMBRAIDER]} {
     puts "LS-CI SKIP: no Tomb Raider staged at build/tombraider/stage -- the demo is not\
           baked into this pool (THYLACINE_BAKE_TOMBRAIDER=0 or dosbox opted out)"
     exit 77

@@ -198,6 +198,20 @@ _Static_assert(__builtin_offsetof(struct pollfd, revents) == 6,
 // (the #355 growable-fd-table chunk's natural companion).
 #define POLL_MAX_NFDS        64
 
+// The noise backstop (ARCH 23.3; specs/poll.tla SpinBounded). A syscall runs
+// IRQ-masked end to end, and a producer that walks a hook list inside every
+// re-sample window keeps each of poll's tsleeps returning AWOKEN, so without a
+// bound a poll(-1) holds its CPU with interrupts masked for as long as the
+// noise lasts -- the SAK included -- and any unprivileged program can make the
+// noise. When POLL_SPIN_BUDGET_NS passes with no real sleep in it (the thread's
+// nsleeps unmoved), the loop takes every hook off and sleeps POLL_BACKOFF_NS
+// (capped at the poll's own deadline) on a cond nothing makes true, then
+// re-registers. Off its lists nothing a producer does can cut that sleep short.
+// What a caller sees is at most one backoff of extra latency, and only while
+// the noise lasts.
+#define POLL_SPIN_BUDGET_NS  1000000ull
+#define POLL_BACKOFF_NS      1000000ull
+
 // =============================================================================
 // kernel-internal poll_waiter hook + per-object hook list.
 // =============================================================================
@@ -317,11 +331,15 @@ bool poll_waiter_list_empty(struct poll_waiter_list *l);
 // poll_waiter waiters[64]` array lives on this routine's kernel stack. specs/
 // poll.tla `Register` ↔ the first scan; `TSleepCommit` ↔ the flag-
 // check + tsleep; `Rearm` / `LoopCheck` / `Resample` ↔ each loop pass;
-// `MakeReady` ↔ a producer's `poll_waiter_list_wake`.
+// `MakeReady` ↔ a producer's `poll_waiter_list_wake`; `BackoffCommit` /
+// `BackoffTimeout` ↔ the noise backstop's tsleep.
 //
 // A dying caller returns 0 from any pass (the thread dies at its EL0-return
-// tail); a stopped caller parks inside the call with no hook listed and
-// resumes the same poll against the same deadline.
+// tail). A stopped caller parks inside the call and resumes the same poll
+// against the same deadline: with no hook listed when the loop's own check
+// catches the stop, and STILL LISTED when tsleep's detour catches it first --
+// a walk then only sets a flag the resumed tsleep reads. A caller kept awake by
+// noise for POLL_SPIN_BUDGET_NS backs off (see the constants above).
 s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds, u64 nfds,
                       s32 timeout_ms);
 
@@ -359,5 +377,16 @@ u64 poll_total_calls(void);
 // the fast path (any fd ready at first scan) from the slow path.
 u64 poll_total_slept(void);
 u64 poll_total_resleeps(void);
+
+// Backoffs the noise backstop has taken: a poller kept awake by noise for a
+// whole budget, then made to sleep.
+u64 poll_total_backoffs(void);
+
+// Test-only: set the backstop's budget, returning the old one. The tests that
+// pin the loop's own deadline, death and stop checks drive a producer that
+// walks for a second, so at the real budget the backstop would end their polls
+// too -- and a kernel WITHOUT those checks would pass them. They raise it past
+// the noise window; nothing else calls this.
+u64 poll_spin_budget_set_for_test(u64 ns);
 
 #endif // THYLACINE_POLL_H

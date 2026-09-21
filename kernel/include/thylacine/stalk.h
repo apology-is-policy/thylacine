@@ -48,7 +48,12 @@ struct t_stat;   // <thylacine/syscall.h>; the stalk_stat metadata sink
                         // underlying mount point even when it already hosts a
                         // mount (Plan 9 Amount). Intermediate components still
                         // cross normally (you can mount onto /a/b where /a is
-                        // itself a mount).
+                        // itself a mount). A resolution that nets to a CROSSED
+                        // base ("/", ".", a `..` run back down) keys the base
+                        // itself -- for a union handle, member[0], the identity
+                        // the base cross looked up, never the union point. A
+                        // path THROUGH a union point keys the point, live or
+                        // dissolved (no point-unreachable fallback here).
 #define STALK_STAT  3   // resolve for METADATA only (POUNCE; SYS_STAT): like
                         // STALK_WALK (quarry crossed, never opened), but when
                         // the final run resolves via Dev.walk_attrs the leaf's
@@ -227,7 +232,9 @@ struct Spoor *stalk_union_member_holding(struct Proc *p, struct Spoor *point,
 
 // stalk_union_create_member (UM) -- the create-target member of the union at
 // `point`: the FIRST member (declared order) carrying MCREATE, crossed to its
-// leaf root (ref-held, mount-point name transplanted). NULL + *errp==0 means
+// leaf root (ref-held, mount-point name transplanted) -- or, when the point
+// holds exactly ONE member, that member, MCREATE or not: one member is not a
+// union, and the resolver's plain cross creates there too. NULL + *errp==0 means
 // no MCREATE member (caller answers -T_E_ACCES); NULL + *errp==T_E_IO means the
 // chosen member failed to cross. Exposed (UM-8c) for the fd/rename dest that
 // resolves a union point and must route a create through its writable member.

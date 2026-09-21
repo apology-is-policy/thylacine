@@ -124,21 +124,23 @@ void test_sched_dispatch_smoke(void) {
 
 static volatile bool g_preempt_test_running;
 static volatile u64  g_preempt_test_counter[2];
+static volatile bool g_preempt_test_exited[2];
 
 static void preempt_test_thread_a(void) {
     while (g_preempt_test_running) {
         g_preempt_test_counter[0]++;
     }
-    // Exit signaled. Yield back to the scheduler; boot will reap.
-    sched();
-    // Unreachable — boot doesn't switch back.
+    // Exit signaled: park TERMINALLY for the reap. A bare sched() here was a
+    // yield -- still RUNNABLE, stealable by an idle peer, and thread_free raced
+    // the thread it had started running.
+    test_kthread_park_terminal(&g_preempt_test_exited[0]);
 }
 
 static void preempt_test_thread_b(void) {
     while (g_preempt_test_running) {
         g_preempt_test_counter[1]++;
     }
-    sched();
+    test_kthread_park_terminal(&g_preempt_test_exited[1]);
 }
 
 void test_sched_preemption_smoke(void) {
@@ -149,6 +151,8 @@ void test_sched_preemption_smoke(void) {
     g_preempt_test_running    = true;
     g_preempt_test_counter[0] = 0;
     g_preempt_test_counter[1] = 0;
+    g_preempt_test_exited[0]  = false;
+    g_preempt_test_exited[1]  = false;
 
     struct Thread *ta = thread_create(kproc(), preempt_test_thread_a);
     struct Thread *tb = thread_create(kproc(), preempt_test_thread_b);
@@ -196,11 +200,10 @@ void test_sched_preemption_smoke(void) {
     TEST_ASSERT(a < (u64)10 * b && b < (u64)10 * a,
         "preemption is severely unfair (>10× imbalance)");
 
-    // Cleanup. Both threads have called sched() after exiting their
-    // loops; both should be RUNNABLE in the tree (suspended inside
-    // their own sched()). thread_free removes them.
-    thread_free(ta);
-    thread_free(tb);
+    // Cleanup. Both threads parked terminally after exiting their loops
+    // (EXITING, off the tree); the joins reap them.
+    test_kthread_join_free(ta, &g_preempt_test_exited[0]);
+    test_kthread_join_free(tb, &g_preempt_test_exited[1]);
     TEST_EXPECT_EQ(sched_runnable_count(), 0u,
         "run tree empty after thread_free");
 }

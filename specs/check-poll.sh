@@ -12,7 +12,9 @@
 # The liveness properties were shown able to FAIL before being trusted
 # (SPEC-TO-CODE.md, the poll.tla section); a liveness cfg is 'clean' here.
 # DeathTerminates and StopHonoured also have buggy cfgs of their own, judged
-# like the invariant ones: a TEMPORAL violation of the named property.
+# like the invariant ones: a TEMPORAL violation of the named property, and so
+# does SpinBounded (round 5's backstop). TLC_WORKERS overrides -workers auto
+# when the host is shared.
 set -u
 cd "$(dirname "$0")"
 export PATH="/opt/homebrew/opt/openjdk/bin:$PATH"
@@ -22,10 +24,10 @@ trap 'rm -rf "$TMP"' EXIT
 STAMP="$TMP/stamp"; : > "$STAMP"
 
 # clean: cfg, expected distinct states ("-" = do not pin)
-CLEAN="poll:2146
-poll_notimeout:944
-poll_liveness:2146
-poll_liveness_notimeout:944"
+CLEAN="poll:-
+poll_notimeout:-
+poll_liveness:-
+poll_liveness_notimeout:-"
 
 # buggy: cfg, invariant that must be the one reported
 BUGGY="poll_buggy_check_before_register:NoMissedPoll
@@ -34,11 +36,12 @@ poll_buggy_clear_after_sample:NoMissedPoll
 poll_buggy_lazy_unregister:NoStaleHook
 poll_buggy_return_on_wake:NoSpuriousZero
 poll_buggy_no_loop_die_check:DeathTerminates
-poll_buggy_no_loop_stop_check:StopHonoured"
+poll_buggy_no_loop_stop_check:StopHonoured
+poll_buggy_no_backstop:SpinBounded"
 
 run() {  # $1 = cfg basename -> sets RC and LOG
     LOG="$TMP/$1.log"
-    java -cp "$JAR" tlc2.TLC -workers auto -deadlock -metadir "$TMP/$1.meta" \
+    java -cp "$JAR" tlc2.TLC -workers "${TLC_WORKERS:-auto}" -deadlock -metadir "$TMP/$1.meta" \
         -config "$1.cfg" poll.tla > "$LOG" 2>&1
     RC=$?
 }

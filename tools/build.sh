@@ -4190,6 +4190,12 @@ WEBKIT /webkit/jsc"
         kill -TERM "$stratumd_pid"; exit 1
     fi
     echo "==> populate pool: bake config CLADE=${THYLACINE_BAKE_CLADE:-0} GOROOT=${THYLACINE_BAKE_GOROOT:-1}; payloads verified PRESENT in the pool:${bake_present:- (none gated on)}"
+    # The same verdict, for the host-side gates (lc_pool_has): appended to the
+    # mint's pool-contents, which the mint rewrote fresh for this bake, so a
+    # populate that dies before here leaves no payloads line and every gate
+    # skips. A gate that asked a STAGE instead ran ls-jsc against a pool baked
+    # without WebKit, because an earlier bake had left build/webkit/stage behind.
+    printf 'payloads=%s\n' "${bake_present# }" >> "$BUILD_DIR/pool-contents"
 
     # Clean stratumd shutdown: SIGTERM then wait. stratumd unmounts the
     # pool + flushes on its way out, so the pool.img bytes after this

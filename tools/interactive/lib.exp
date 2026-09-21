@@ -95,6 +95,23 @@ set ::lc_cmd_timeout  [expr {[info exists ::env(LS_CI_CMD_TIMEOUT)]  ? $::env(LS
 
 # Flush-immune progress marker: open/puts/close flushes on close, so the file
 # is current even though expect's own stdout is block-buffered.
+# Does THIS image's pool hold the optional payload `label` (WEBKIT, QUAKE, ...)?
+# Reads the `payloads=` line of build/pool-contents, which populate_stratum_pool
+# appends only after verifying each payload in the pool it just baked (the mint
+# rewrote the file fresh for that bake). Ask this, never a host STAGE directory:
+# a stage outlives the bake that used it, and ls-jsc once ran against a pool
+# baked without WebKit because an earlier bake's stage was still on disk -- 1/77
+# "failed", deterministically, with nothing wrong in the guest.
+proc lc_pool_has {label} {
+    set m [file join $::lc_repo build pool-contents]
+    if {![file readable $m]} { return 0 }
+    set fh [open $m r]
+    set body [read $fh]
+    close $fh
+    if {![regexp -line {^payloads=(.*)$} $body -> labels]} { return 0 }
+    return [expr {[lsearch -exact [split [string trim $labels] " "] $label] >= 0}]
+}
+
 proc lc_step {msg} {
     if {[info exists ::env(LS_CI_STEPS)]} {
         catch {

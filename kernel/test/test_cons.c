@@ -3510,7 +3510,7 @@ static void epp_poll_entry(void) {
     struct pollfd pfds[1] = { { .fd = g_epp_fd, .events = POLLIN, .revents = 0 } };
     s64 r = sys_poll_for_proc(g_epp_proc, pfds, 1, -1);
     g_epp_revents = pfds[0].revents;
-    g_epp_result  = r;
+    __atomic_store_n(&g_epp_result, r, __ATOMIC_RELEASE);
     test_kthread_park_terminal(&g_epp_exited);
 }
 
@@ -3550,11 +3550,11 @@ static bool epp_settle(struct Thread *t, u64 min, u64 *count) {
 // both transitions walking both lists, so a hook on either list re-samples an
 // unfrozen console with a byte waiting. Then reap. Safe on every path.
 static void epp_finish(struct Thread *t, struct ep_fixture *f) {
-    if (t && g_epp_result == -999) {
+    if (t && __atomic_load_n(&g_epp_result, __ATOMIC_ACQUIRE) == -999) {
         if (!cons_episode_active()) cons_test_sak_dispatch();
         cons_rx_input((u8)'z', false);
         (void)proc_console_episode(f->trusted, SYS_CONSOLE_EPISODE_END);
-        TEST_YIELD_UNTIL_SOFT(g_epp_result != -999);
+        TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_epp_result, __ATOMIC_ACQUIRE) != -999);
     }
     if (t) test_kthread_join_free(t, &g_epp_exited);
     if (g_epp_proc) {
@@ -3581,7 +3581,7 @@ void test_cons_episode_frozen_poller_follows_end(void) {
     if (!err) {
         cons_rx_input((u8)'q', false);
         cons_test_service_deferred();              // the relay's poll_list walk
-        TEST_YIELD_UNTIL_SOFT(g_epp_result != -999);
+        TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_epp_result, __ATOMIC_ACQUIRE) != -999);
         if (g_epp_result != 1)            err = "the key after END reached the poller (it re-registered on poll_list)";
         else if (g_epp_revents != POLLIN) err = "revents = POLLIN";
     }
@@ -3616,7 +3616,7 @@ void test_cons_episode_prior_poller_not_woken_by_keys(void) {
     }
     if (!err && proc_console_episode(f.trusted, SYS_CONSOLE_EPISODE_END) != 0) err = "END accepted";
     if (!err) {
-        TEST_YIELD_UNTIL_SOFT(g_epp_result != -999);
+        TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_epp_result, __ATOMIC_ACQUIRE) != -999);
         if (g_epp_result != 1)            err = "END reached the poller on the episode list";
         else if (g_epp_revents != POLLIN) err = "revents = POLLIN (the byte the authority left)";
     }

@@ -38,10 +38,13 @@
 //
 // IRQ-safety (IDENTITY-DESIGN.md section 9.8 "As-built"): cons_rx_input runs in
 // IRQ context, so it does ONLY ring + flag mutation (under an irqsave lock) +
-// wakeup() -- the SOLE IRQ-safe wake (notes_post + poll_waiter_list_wake take
-// plain spin_locks). The privileged/blocking work runs in console_mgr's process
-// context. The data wait is a single Rendez + a single-reader busy-guard:
-// poll_waiter_list_wake is not IRQ-safe, and a single-waiter Rendez extincts on
+// wakeup() -- the one wake it makes: notes_post takes a plain spin_lock, and a
+// poll_waiter_list_wake walk is O(pollers) nested wakeups, kept out of IRQ
+// context so the per-byte cost stays O(1) (its lock is irqsave since B-0 audit
+// round 4 F3; that makes the lock IRQ-safe, not the walk cheap). The
+// privileged/blocking work runs in console_mgr's process context. The data wait
+// is a single Rendez + a single-reader busy-guard: the IRQ does not walk a hook
+// list, and a single-waiter Rendez extincts on
 // a second sleeper, so a 2nd concurrent blocking read returns -1 rather than
 // racing into that extinction (the console is a single-reader resource at v1.0;
 // a multi-reader lift is v1.x).

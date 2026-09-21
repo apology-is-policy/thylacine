@@ -26,13 +26,14 @@ set ::env(THYLACINE_ACCEL) hvf
 
 source [file join [file dirname [info script]] lib.exp]
 
-# Host-side skip: the staged binary is the one the pool bakes, so its absence
-# here is the pool's absence -- checked before boot so the skip costs no VM time.
-set repo [file normalize [file join [file dirname [info script]] .. ..]]
-set staged "$repo/build/webkit/stage/jsc"
-if {![file exists $staged]} {
-    puts "LS-CI SKIP: no JavaScriptCore staged at build/webkit/stage -- not baked\
-          into this pool (CHUNK_WEBKIT=n / THYLACINE_BAKE_WEBKIT unset)"
+# Host-side skip, checked before boot so it costs no VM time: does THIS pool hold
+# JavaScriptCore? Asked of the bake's verified manifest, not of the stage -- a
+# stage left by an earlier bake once sent this scenario against a pool without
+# WebKit (it "failed" deterministically; the guest was fine).
+if {![lc_pool_has WEBKIT]} {
+    puts "LS-CI SKIP: this pool holds no JavaScriptCore (build/pool-contents has no\
+          WEBKIT payload -- CHUNK_WEBKIT=n / THYLACINE_BAKE_WEBKIT unset, or a pool\
+          baked before the payloads line existed)"
     exit 77
 }
 

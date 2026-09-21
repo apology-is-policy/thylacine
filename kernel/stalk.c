@@ -294,6 +294,15 @@ bool stalk_union_has_child(struct Proc *p, struct Spoor *dir,
 // target) or a member cross fails (*errp = T_E_IO). The create is member-scoped
 // (Plan 9): it does NOT check other members for the leaf name -- the merged-view
 // existence check is the open-first leg's job.
+//
+// A point holding ONE member is not a union (ARCH 9.5: a union is several mounts)
+// and its create target is that member, MCREATE or not -- what the resolver's
+// plain cross gives openat(O_CREAT) through the same point. Decided on the same
+// atomic snapshot, so a union unmounted down to one member answers alike on the
+// path and on a dirfd; before, the dirfd paths (SYS_WALK_CREATE, rename's
+// destination) refused with ACCES what the path created (shed audit r4 F5).
+// MCREATE routes a create inside a union; it was never the authority to create,
+// which is the member Dev's own permission check.
 struct Spoor *stalk_union_create_member(struct Proc *p, struct Spoor *base,
                                                int *errp) {
     *errp = 0;
@@ -309,8 +318,8 @@ struct Spoor *stalk_union_create_member(struct Proc *p, struct Spoor *base,
                                       PGRP_MAX_MOUNTS);
     struct Spoor *cm = NULL;
     for (int k = 0; k < nsrc; k++) {
-        if (flags[k] & MCREATE) {
-            cm = stalk_cross_src(p, srcs[k], NULL);   // the FIRST MCREATE member
+        if ((flags[k] & MCREATE) || nsrc == 1) {
+            cm = stalk_cross_src(p, srcs[k], NULL);   // the FIRST MCREATE member (or the only one)
             if (cm) spoor_path_transplant(cm, base);  // #66: the mount-point name
             else    *errp = T_E_IO;                    // the chosen member failed to cross
             break;                                     // Plan 9: create in the FIRST writable

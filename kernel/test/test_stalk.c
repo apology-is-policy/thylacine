@@ -86,6 +86,7 @@ void test_stalk_union_readdir_nontagged(void);  // UM-5: control (not over-tagge
 void test_stalk_union_create(void);             // UM-5a: MCREATE member selected
 void test_stalk_union_create_first_wins(void);  // UM-5a: first MCREATE (declared order)
 void test_stalk_union_create_no_target(void);   // UM-5a: no MCREATE -> EACCES
+void test_stalk_union_one_member_creates_alike(void); // shed r4 F5: one member is not a union
 void test_stalk_union_member_holding(void);     // UM-8c/F3: holder, not MCREATE member
 void test_stalk_union_remove_uncrossed(void);    // UM-8c/F3: STALK_REMOVE leaves the point
 void test_stalk_union_fd_base(void);             // UM-8c/F5: fd-relative union base sees all members
@@ -2112,6 +2113,56 @@ void test_stalk_union_create_no_target(void) {
                    "nothing was created in any member");
 
     ocp_teardown(p);
+}
+
+// A union unmounted down to ONE member is not a union (ARCH 9.5: a union is
+// several mounts), so its create target is that member, MCREATE or not -- on
+// BOTH routes (shed audit r4 F5). The resolver's STALK_CREATE has always crossed
+// a one-member point plainly; stalk_union_create_member, which the dirfd routes
+// use (SYS_WALK_CREATE, rename's destination, viv's mutation parent), answered
+// NULL -> EACCES for the same point, so openat(O_CREAT) created what a create
+// through the union dirfd refused. um2 is member[0] and the only MCREATE member;
+// unmount drops member[0], leaving um1 (qid 22), which has no MCREATE.
+void test_stalk_union_one_member_creates_alike(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    struct Spoor *um1 = stalk(&p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MBEFORE | MCREATE), 0, "um2 MBEFORE|MCREATE (member[0])");
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MAFTER),            0, "um1 MAFTER (no MCREATE)");
+
+    int e = 0;
+    struct Spoor *cm = stalk_union_create_member(&p, pt, &e);
+    TEST_ASSERT(cm != NULL, "live union: the helper finds the MCREATE member");
+    TEST_EXPECT_EQ((u64)cm->qid.path, (u64)25, "control: two members -> the MCREATE one (um2, qid 25)");
+    spoor_clunk(cm);
+
+    TEST_EXPECT_EQ(unmount(p.territory, pt), 0, "unmount member[0] (um2)");
+    struct Spoor *m1 = mount_member_at(p.territory, pt, 1, NULL);
+    TEST_ASSERT(m1 == NULL, "the point now holds one member");
+    struct Spoor *m0 = mount_member_at(p.territory, pt, 0, NULL);
+    TEST_ASSERT(m0 != NULL, "... and still holds one (not dissolved)");
+    spoor_clunk(m0);
+
+    struct Spoor *q = stalk(&p, root, "umpt", 4, STALK_CREATE, 0);
+    TEST_ASSERT(q != NULL, "the path route: STALK_CREATE crosses the one-member point");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)22, "the path route lands in um1 (qid 22)");
+
+    e = 0;
+    cm = stalk_union_create_member(&p, pt, &e);
+    TEST_ASSERT(cm != NULL, "the dirfd route: the helper answers the one member, not EACCES");
+    TEST_EXPECT_EQ(e, 0, "no cross error");
+    TEST_EXPECT_EQ((u64)cm->qid.path, (u64)q->qid.path, "both routes name the SAME member (um1)");
+    spoor_clunk(cm);
+    spoor_clunk(q);
+
+    territory_unref(p.territory);
+    spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
+    spoor_unref(root);
 }
 
 // =============================================================================

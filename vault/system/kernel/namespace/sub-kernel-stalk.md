@@ -266,7 +266,13 @@ Two amodes exist because create and remove must pick *different* members:
 
 - **`STALK_CREATE`** crosses a union quarry to the **first `MCREATE` member**
   (`stalk_union_create_member`) — a create lands in the union's writable mount;
-  a union with no `MCREATE` member is `-T_E_ACCES` (no writable target).
+  a union with no `MCREATE` member is `-T_E_ACCES` (no writable target). A point
+  holding ONE member is not a union (ARCH 9.5: several mounts): the resolver
+  crosses it plainly, and since shed r4 F5 the helper answers that member too,
+  MCREATE or not, decided on its own atomic snapshot -- before, the dirfd routes
+  (`SYS_WALK_CREATE`, rename's destination) refused with `EACCES` a create that
+  `openat(O_CREAT)` through the same point performed. MCREATE routes a create
+  inside a union; the authority to create is the member Dev's own check.
 - **`STALK_REMOVE`** returns a union quarry **uncrossed** (like `STALK_MOUNT`),
   and the caller then calls `stalk_union_member_holding` to act on the member
   that actually **holds** the leaf (UM-7 F3) — not member 0, not the writable
@@ -321,8 +327,12 @@ obligations:
    are `/proc` and `/ctl` — kernel Devs that walk an opened Spoor happily. The
    base-set site records the choice in `wbase` (where a depth-0 component is
    walked from), recomputed on every pass since a symlink restart may re-anchor
-   `base`. `STALK_MOUNT` is untouched — it takes the point as a KEY and
-   hands no Spoor to EL0. The base-set site is also gated on `depth == 0`: a
+   `base`. `STALK_MOUNT` never degrades — it takes a mount point as a KEY
+   and hands no Spoor to EL0: a path THROUGH a union point keys the point,
+   live or dissolved (the point-unreachable fallback is skipped for it), and a
+   path that nets to a union HANDLE used as its base keys member[0], the
+   identity that handle names (see item 4; this said "untouched" until shed r4
+   F4 found the base case keying the point). The base-set site is also gated on `depth == 0`: a
    base that CROSSED is searched as that mount, and a second `union_base` ref
    would be overwritten unclunked by the descent branch (a race-only Spoor leak,
    r2 F7.1).
@@ -347,7 +357,11 @@ obligations:
    unwinds that crossed clone and names the base, so `unmount("/")` names a
    mount over the root and `MREPL` re-keys instead of stacking. Before, the key
    was the mounted root's identity, which nothing is keyed on; d5c58d76's floor
-   had removed `"/.."`, the one spelling that reached the root's own key.
+   had removed `"/.."`, the one spelling that reached the root's own key. For a
+   union HANDLE as the base (`.` on a union dirfd), "the base" is `wbase` --
+   member[0], the mount the path shows -- never the union point, which would
+   key an invisible member (shed r4 F4, `mount_names_base`;
+   `stalk.mount_names_crossed_union_base`).
 
 ### Symlink expansion (DISTRO D-1)
 
