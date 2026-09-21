@@ -62,7 +62,8 @@ static struct Spoor *spoor_alloc_internal(struct Dev *d) {
     c->mode   = 0;
     c->offset = 0;
     c->aux    = NULL;
-    c->union_snap = NULL;    // UM: set only by a STALK_OPEN of a union point.
+    c->union_snap = NULL;    // UM: set only by stalk_core, on the final quarry
+                             // of an OPEN or a WALK (O_PATH) onto a union point.
     // qid is left zeroed (KP_ZERO already cleared it); the dev's
     // attach/walk hooks populate it as appropriate.
 

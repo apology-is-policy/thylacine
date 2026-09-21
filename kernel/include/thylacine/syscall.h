@@ -552,8 +552,15 @@ enum {
     // → spoor_clunk on root_spoor). Idempotent: SYS_CHROOT to the same
     // Spoor returns 0 without bumping refcount.
     //
-    // Returns 0 on success, -1 on:
+    // A real swap also REMOVES mount entries: every entry whose mount point
+    // lies in a device instance unreachable from the new root is dropped under
+    // the same lock hold (ARCH 9.6.10). Nothing resolved from the new root
+    // changes; an fd-relative walk from a directory fd opened before the swap
+    // can.
+    //
+    // Returns 0 on success, -1 (flat; no errno) on:
     //   - spoor_fd not KOBJ_SPOOR / out-of-range / missing RIGHT_READ
+    //   - spoor_fd is not a DIRECTORY (QTDIR)
     //   - the caller has no Territory (kernel invariant; structurally
     //     impossible for a userspace Proc, defense-in-depth)
     //
@@ -1116,8 +1123,16 @@ enum {
     // around line 293-304 ("v1.x adds SYS_UNCHROOT or a proper
     // pivot_root").
     //
-    // Returns: 0 on success, -1 on:
+    // Like SYS_CHROOT, a real swap REMOVES the mount entries the new root
+    // cannot reach (ARCH 9.6.10) -- which is why a non-directory is refused
+    // here as it always was there: a bad pivot used to wedge resolution until
+    // the caller pivoted back; with the shed it would strip the table for good.
+    //
+    // Returns: 0 on success, -1 (flat; no errno) on:
     //   - new_root_fd not KOBJ_SPOOR / out-of-range / missing RIGHT_READ
+    //   - new_root_fd is not a DIRECTORY (QTDIR)
+    //   - the caller has NO CURRENT ROOT (pivot exchanges a root; the initial
+    //     root is SYS_CHROOT's to install)
     //   - caller has no Territory (kernel invariant -- structurally
     //     impossible for userspace; defense-in-depth)
     //
@@ -1640,9 +1655,9 @@ enum {
     //   VIVARIUM.md 6.27). For an append fd the kernel cursor is advisory: the
     //   server ignores the client offset, so a raw phenotype binary (git) gets
     //   correct appends without the kernel or a libc emulating them. (Pouch
-    //   ports pass the same bit since pouch 0040; until then they emulated
-    //   O_APPEND with one seek at open, so a write after a seek landed
-    //   mid-file.)
+    //   ports pass the same bit from openat()'s O_APPEND translation; before
+    //   that existed they emulated O_APPEND with one seek at open, so a write
+    //   after a seek landed mid-file.)
     SYS_PWRITE = 86,   // arg: fd (x0), buf (x1), len (x2), off (x3)
 
     // SYS_YIELD() -> 0 (#33)

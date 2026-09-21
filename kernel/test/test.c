@@ -1518,6 +1518,11 @@ void test_poll_devsrv_conn_pollin_on_send(void);
 void test_poll_devsrv_conn_pollout_immediate(void);
 void test_poll_devsrv_conn_pollhup_on_teardown(void);
 void test_poll_devsrv_conn_block_then_wake_pollin(void);
+void test_poll_devsrv_client_row(void);
+void test_poll_devsrv_client_wakes_on_reply_only(void);
+void test_poll_devsrv_server_pollout_wakes_on_client_drain(void);
+void test_poll_devsrv_client_kernel_attached_pollnval(void);
+void test_poll_timeout_survives_a_busy_list(void);
 void test_poll_null_obj_spoor_pollnval(void);
 void test_poll_mixed_spoor_and_srv(void);
 void test_poll_max_nfds(void);
@@ -3464,6 +3469,11 @@ struct test_case g_tests[] = {
     { "poll.devsrv_conn_pollout_immediate",     test_poll_devsrv_conn_pollout_immediate,     false, NULL },
     { "poll.devsrv_conn_pollhup_on_teardown",   test_poll_devsrv_conn_pollhup_on_teardown,   false, NULL },
     { "poll.devsrv_conn_block_then_wake_pollin", test_poll_devsrv_conn_block_then_wake_pollin, false, NULL },
+    { "poll.devsrv_client_row", test_poll_devsrv_client_row, false, NULL },
+    { "poll.devsrv_client_wakes_on_reply_only", test_poll_devsrv_client_wakes_on_reply_only, false, NULL },
+    { "poll.devsrv_server_pollout_wakes_on_client_drain", test_poll_devsrv_server_pollout_wakes_on_client_drain, false, NULL },
+    { "poll.devsrv_client_kernel_attached_pollnval", test_poll_devsrv_client_kernel_attached_pollnval, false, NULL },
+    { "poll.timeout_survives_a_busy_list", test_poll_timeout_survives_a_busy_list, false, NULL },
     { "poll.null_obj_spoor_pollnval",           test_poll_null_obj_spoor_pollnval,           false, NULL },
     { "poll.mixed_spoor_and_srv",               test_poll_mixed_spoor_and_srv,               false, NULL },
     { "poll.max_nfds",                          test_poll_max_nfds,                          false, NULL },

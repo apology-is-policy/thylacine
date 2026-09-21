@@ -215,8 +215,11 @@ struct Spoor {
                                // -- only path->ref is concurrent (atomic).
 
     struct union_snap *union_snap;  // UM (union mounts): NON-NULL iff this Spoor
-                               // was opened (STALK_OPEN) on a UNION mount point
-                               // (>= 2 grafted members). Holds the member
+                               // is the final quarry of a stalk onto a UNION
+                               // mount point (>= 2 grafted members): a
+                               // STALK_OPEN carries the full snapshot below, a
+                               // STALK_WALK (O_PATH) a point-only one (n == 0).
+                               // The full one holds the member
                                // directories OPENED (OREAD) + R-gated + ref-held
                                // AT OPEN TIME, in declared order (Plan 9's
                                // Chan.umh/umc). spoor_readdir_run consults the

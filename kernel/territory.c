@@ -1157,8 +1157,9 @@ bool mount_noexec_covers(struct Territory *territory, int dc, u32 devno) {
 // (Dev.devno_per_walker: devenv) is matched on dc alone, conservative again.
 //
 // One Spoor is consulted at the base WITHOUT having been walked to: a union
-// root's mount point. An O_PATH open of a union directory has member[0]'s
-// identity and carries the point in union_snap, and stalk routes every first
+// root's mount point. An open of a union directory (O_PATH or OREAD -- both
+// pass the directory gate chroot / pivot_root apply) has member[0]'s identity
+// and carries the point in union_snap, and stalk routes every first
 // component from such a base through the entries keyed AT THE POINT
 // (union_base = base->union_snap->point). The point lives in the tree the union
 // was mounted in, so its instance is a second seed; without it the shed drops

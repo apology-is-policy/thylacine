@@ -43,6 +43,7 @@
 
 static u64 g_poll_calls;
 static u64 g_poll_slept;
+static u64 g_poll_resleeps;
 
 u64 poll_total_calls(void) {
     return __atomic_load_n(&g_poll_calls, __ATOMIC_RELAXED);
@@ -58,6 +59,12 @@ u64 poll_total_calls(void) {
 // "timeout=10ms with no immediate ready took the tsleep branch."
 u64 poll_total_slept(void) {
     return __atomic_load_n(&g_poll_slept, __ATOMIC_RELAXED);
+}
+
+// Wakes whose re-sample found nothing asked-about ready, so the poller slept
+// again. The witness that a wake for someone else's event does not end a poll.
+u64 poll_total_resleeps(void) {
+    return __atomic_load_n(&g_poll_resleeps, __ATOMIC_RELAXED);
 }
 
 // =============================================================================
@@ -118,6 +125,19 @@ void poll_waiter_list_unregister(struct poll_waiter *pw) {
     // above already covered the legitimate "already gone" case.
     spin_unlock(&l->lock);
     extinction("pw_unregister: pw->list set but pw not on list (corruption)");
+}
+
+// Re-arm one hook for another sleep (specs/poll.tla ClearFlags). The flag is
+// cleared under the hook list's lock because that is the lock a producer's walk
+// sets it under; `pw->list` itself is written only by the owning poller, so it
+// reads without one. An unlisted hook has no producer.
+void poll_waiter_rearm(struct poll_waiter *pw) {
+    if (!pw) return;
+    struct poll_waiter_list *l = pw->list;
+    if (!l) { pw->ready = false; return; }
+    spin_lock(&l->lock);
+    pw->ready = false;
+    spin_unlock(&l->lock);
 }
 
 // Whether the list currently has no registered hooks. Under the list lock (a
@@ -333,27 +353,50 @@ s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds, u64 nfds,
 
     __atomic_fetch_add(&g_poll_slept, 1u, __ATOMIC_RELAXED);
     struct poll_cond_arg cond_arg = { .waiters = waiters, .nfds = nfds };
-    int ts = tsleep(&r, poll_cond_any_flagged, &cond_arg, deadline_ns);
+    for (;;) {
+        int ts = tsleep(&r, poll_cond_any_flagged, &cond_arg, deadline_ns);
 
-    // #811 (ARCH §8.8.1): death-interrupted -> the Proc is group-terminating.
-    // Skip the re-sample (the Thread dies at its EL0-return die-check; the
-    // result is immaterial) and fall to the unregister sweep, which is
-    // REQUIRED -- waiters[] are stack-allocated and still listed on each fd's
-    // poll_list; returning without unregistering would dangle them.
-    if (ts == TSLEEP_INTR) {
+        // #811 (ARCH §8.8.1): death-interrupted -> the Proc is group-
+        // terminating. Skip the re-sample (the Thread dies at its EL0-return
+        // die-check; the result is immaterial) and fall to the unregister
+        // sweep, which is REQUIRED -- waiters[] are stack-allocated and still
+        // listed on each fd's poll_list; returning without unregistering would
+        // dangle them.
+        if (ts == TSLEEP_INTR) {
+            ready_count = 0;
+            goto unregister_and_return;
+        }
+
+        // A flag is a HINT: the list it sits on is walked for every event on
+        // the object, asked-about or not, and a competing reader can drain
+        // what readied it before we look. So re-arm, THEN re-sample -- in that
+        // order (specs/poll.tla ClearFlags -> Resample): an event landing
+        // between the two sets a flag that survives into the next tsleep, and
+        // one that landed before the clear is seen by the sample, which runs
+        // under the object's lock after the producer released it. The other
+        // order wipes the flag of an event its own sample was too early to see
+        // (poll_buggy_clear_after_sample.cfg).
+        for (u64 i = 0; i < nfds; i++) {
+            poll_waiter_rearm(&waiters[i]);
+        }
+        // Sample each fd's CURRENT revents via `dev->poll(c, events, NULL)` --
+        // sample-only, no list op; the hooks stay registered across the loop.
         ready_count = 0;
-        goto unregister_and_return;
-    }
+        for (u64 i = 0; i < nfds; i++) {
+            ready_count += poll_scan_one(p, &kfds[i], NULL, NULL);
+        }
+        if (ready_count > 0 || ts == TSLEEP_TIMEDOUT) break;
 
-    // Post-wake re-sample: tsleep returned either TSLEEP_AWOKEN (some
-    // pw->ready was set) or TSLEEP_TIMEDOUT (deadline lapsed with no
-    // ready flag). In either case, sample each fd's CURRENT revents
-    // via `dev->poll(c, events, NULL)` — sample-only, no list op. The
-    // sample under each fd's object lock observes any producer state
-    // change happens-before via the object lock's release/acquire chain.
-    ready_count = 0;
-    for (u64 i = 0; i < nfds; i++) {
-        ready_count += poll_scan_one(p, &kfds[i], NULL, NULL);
+        // Woken for nothing we asked about: sleep AGAIN, against the SAME
+        // absolute deadline. poll returns 0 only at its deadline (ARCH 23.3;
+        // NoSpuriousZero) -- until 2026-09-21 this fell through and returned 0,
+        // so a timed poll reported a timeout the moment a second reader won
+        // the bytes and poll(-1) returned 0 at all. The explicit test bounds
+        // the loop: tsleep prefers a set flag to a passed deadline, so a
+        // producer that never stops walking a list would otherwise hold us
+        // here past the timeout (PollTerminates).
+        if (deadline_ns != 0 && timer_now_ns() >= deadline_ns) break;
+        __atomic_fetch_add(&g_poll_resleeps, 1u, __ATOMIC_RELAXED);
     }
 
 unregister_and_return:

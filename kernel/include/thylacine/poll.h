@@ -23,6 +23,17 @@
 //   and signals that poller's private `Rendez`. specs/poll.tla
 //   `MakeReady(f)` ↔ `poll_waiter_list_wake`.
 //
+//   A FLAG IS A HINT, NOT A VERDICT (the re-arm, 2026-09-21). One hook list
+//   serves every poller of an object whatever each asked for -- a SrvConn's
+//   list carries four readiness edges for two endpoints -- and readiness is a
+//   LEVEL a competing reader can lower between the wake and the poller's look.
+//   So after a wake the poller clears every flag (`poll_waiter_rearm`), THEN
+//   re-samples every fd, and an empty re-sample leads to ANOTHER tsleep against
+//   the same absolute deadline: poll returns 0 only at its deadline. A `.poll`
+//   impl or a wake site may therefore walk its list for ANY state change; what
+//   it may never do is fail to walk it for one. specs/poll.tla `ClearFlags` /
+//   `Resample` / `EvaluateWake`; `NoSpuriousZero`.
+//
 // HOOK LIFETIME — STACK-ALLOCATED FOR ONE poll CALL
 //
 //   The hook is stack-allocated in `sys_poll_for_proc` — one slot per
@@ -247,6 +258,11 @@ void poll_waiter_list_register(struct poll_waiter_list *l,
 // `sys_poll_for_proc` on return.
 void poll_waiter_list_unregister(struct poll_waiter *pw);
 
+// Clear `pw->ready` for another sleep, under the hook list's lock (the lock a
+// producer sets it under). The poller calls this for EVERY waiter BEFORE its
+// post-wake re-sample, never after (specs/poll.tla ClearFlags).
+void poll_waiter_rearm(struct poll_waiter *pw);
+
 // Wake every registered poller: walk `l` (under `l->lock`), set each
 // hook's `ready` flag, then signal each hook's `rendez`. Called from
 // the producer's existing wakeup site UNDER the object's lock — so the
@@ -327,5 +343,6 @@ u64 poll_total_calls(void);
 // Monotonic counter of poll calls that slept on tsleep. Distinguishes
 // the fast path (any fd ready at first scan) from the slow path.
 u64 poll_total_slept(void);
+u64 poll_total_resleeps(void);
 
 #endif // THYLACINE_POLL_H

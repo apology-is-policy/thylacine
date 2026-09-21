@@ -787,6 +787,9 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
     // per_component union branch consumes (clunks) it. NULL for the common
     // single-source path. Clunked at `fail` if a goto slips past the consume.
     struct Spoor        *union_base = NULL;
+    // The zero-component quarry was cloned from a union handle's POINT (set
+    // where the quarry is determined; read after the final cross).
+    bool                 zero_from_point = false;
 
     // POUNCE state (docs/POUNCE-DESIGN.md §5). `carried` holds the current
     // trail tip's attrs when they arrived fused with the walk that produced it
@@ -876,9 +879,28 @@ restart:
     // every member (stalk_union_child), exactly as a descent-detected union. It
     // is consumed by that branch after the first real component; the loop-end
     // release below covers a path with no real component (only "." / "..").
-    if (base->union_snap && base->union_snap->point) {
-        union_base = base->union_snap->point;
-        spoor_ref(union_base);
+    //
+    // TWO obligations ride this consult (the zero-component `zbase` below is
+    // the other one -- keep them in step):
+    //  - It reaches a Spoor the walk never WALKED to, so the mount-table shed's
+    //    closure must SEED it (territory_shed_unreachable_locked; AUDIT-TRIGGERS
+    //    "Mount-table SHED" items 8 + 11). A new base-time consult is a new
+    //    seed there, and no spec can notice one missing from both sides.
+    //  - The point is the directory the union was mounted OVER. It is consulted
+    //    only while it still hosts a member in THIS Territory; once the members
+    //    are gone (unmounted, or shed by a chroot elsewhere) the handle is a
+    //    plain handle on member[0], which is what `base` is (ARCH 9.6.10).
+    // depth == 0: a base that CROSSED (something was mounted over member[0]'s
+    // identity) is searched as that mount, and must not leave a second ref for
+    // the descent branch to overwrite.
+    if (depth == 0 && base->union_snap && base->union_snap->point) {
+        struct Spoor *m0 = mount_member_at(p ? p->territory : NULL,
+                                           base->union_snap->point, 0, NULL);
+        if (m0) {
+            spoor_clunk(m0);
+            union_base = base->union_snap->point;
+            spoor_ref(union_base);
+        }
     }
 
     while (i < pathlen) {
@@ -1671,9 +1693,14 @@ per_component:
         // owed before this clone. R2-F3: off a UNION base, clone the POINT (not
         // member[0]) so the final-quarry dispatch below keeps the union -- else
         // a bare-leaf create (parent nets to ".") lands in member[0] regardless
-        // of MCREATE, and openat(ufd,".") drops the union to member[0].
+        // of MCREATE, and openat(ufd,".") drops the union to member[0]. The
+        // second consult of the point: same two obligations as the base-set
+        // union_base above. The "still hosts a member" half is enforced AFTER
+        // the cross below (zero_from_point), not by a table probe here, so a
+        // peer Thread's unmount cannot land between a check and the cross.
         struct Spoor *zbase = (base->union_snap && base->union_snap->point)
                                   ? base->union_snap->point : base;
+        zero_from_point = (zbase != base);
         quarry = clone_walk_zero(zbase);
         if (!quarry) goto fail;
     }
@@ -1743,6 +1770,18 @@ per_component:
                 quarry = crossed;
                 carried_valid = false;   // the record described the mount point
                 if (snap) { quarry->union_snap = snap; snap = NULL; }
+            } else if (zero_from_point) {
+                // The quarry is a clone of a union handle's POINT and nothing is
+                // mounted there any more: the union DISSOLVED in this Territory.
+                // Uncrossed, the point is the COVERED directory -- one the
+                // handle never named, in a tree its holder may have no other
+                // path into (reachable by plain unmount("/"), and by a chroot
+                // whose shed dropped the union's entries). Degrade to member[0],
+                // which is what the handle itself is.
+                spoor_clunk(quarry);
+                quarry = clone_walk_zero(base);
+                if (!quarry) { union_snap_free(snap); goto fail; }
+                carried_valid = false;
             }
             union_snap_free(snap);   // union w/o a cross (defensive; NULL-safe)
         }

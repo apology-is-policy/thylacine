@@ -312,8 +312,8 @@ long srvconn_io_nonblock(struct SrvConn *cn, bool server, bool writing,
     spin_unlock(&ch->lock);
     if (rc > 0) {
         wakeup(writing ? &ch->rendez : &ch->wrendez);
-        // Wake endpoint pollers after releasing the channel lock, matching
-        // the existing blocking paths. Client-side poll remains unsupported.
+        // Wake endpoint pollers after releasing the channel lock: any ring
+        // mutation is a readiness edge for ONE endpoint (srvconn_poll).
         poll_waiter_list_wake(&cn->poll_list);
         // Keep the existing completed-buffer diagnostic semantics. A short
         // nonblocking prefix is progress, but not a completed requested buffer.
@@ -505,9 +505,10 @@ void srvconn_teardown(struct SrvConn *cn) {
     poll_waiter_list_wake(&cn->c2s.role_waiters);
     poll_waiter_list_wake(&cn->s2c.role_waiters);
 
-    // Teardown is a single readiness edge for every server-endpoint
-    // poller: POLLHUP latches off c2s.eof, POLLERR off s2c.eof. ONE wake
-    // walks every registered hook. specs/poll.tla MakeReady.
+    // Teardown is a single readiness edge for every poller of EITHER
+    // endpoint: POLLHUP latches off the eof of the direction it reads,
+    // POLLERR off the one it writes. ONE wake walks every registered hook.
+    // specs/poll.tla MakeReady.
     poll_waiter_list_wake(&cn->poll_list);
 }
 
@@ -652,6 +653,9 @@ long srvconn_client_recv(struct SrvConn *cn, u8 *buf, long n) {
             // chan_produce wakes ch->rendez after a write). A no-op when no
             // producer is parked.
             wakeup(&ch->wrendez);
+            // ... and s2c room is the SERVER endpoint's POLLOUT edge: a
+            // nonblocking server that polled after EAGAIN is parked on it.
+            poll_waiter_list_wake(&cn->poll_list);
             break;
         }
         if (ch->eof) {
@@ -707,15 +711,10 @@ long srvconn_server_send(struct SrvConn *cn, const u8 *buf, long n) {
     if (!cn || cn->magic != SRV_CONN_MAGIC) return -1;
     if (!buf || n < 0) return -1;
     if (n == 0) return 0;
-    // No poll wake here at v1.0. srvconn_poll's server-endpoint POLLOUT is
-    // `!s2c.eof && s2c.count < s2c.cap`: increasing s2c.count can
-    // only REDUCE POLLOUT-ready space, never make it more ready. The
-    // POLLOUT-becomes-ready edge is the kernel-client drain in
-    // srvconn_client_recv — and the kernel client doesn't poll (it
-    // tsleep-blocks). Restoring the wake belongs with the future client-
-    // side poll path (cn->client_poll_list), which would observe s2c FILL
-    // as a POLLIN edge.
-    return chan_produce(&cn->s2c, buf, n);
+    long put = chan_produce(&cn->s2c, buf, n);
+    // s2c fill is the CLIENT endpoint's POLLIN edge (srvconn_poll).
+    if (put > 0) poll_waiter_list_wake(&cn->poll_list);
+    return put;
 }
 
 // srvconn_server_send_blocking — #348. The BLOCKING s2c producer: deliver
@@ -772,6 +771,12 @@ long srvconn_server_send_blocking(struct SrvConn *cn, const u8 *buf, long n) {
             break;
         }
         done += put;
+        // EVERY accepted chunk is the client endpoint's POLLIN edge, walked
+        // per chunk for the reason srvconn_client_send_blocking gives: a
+        // poll-then-read client is the drainer this send may be about to park
+        // waiting for, so deferring the walk to end-of-delivery is a circular
+        // wait.
+        if (put > 0) poll_waiter_list_wake(&cn->poll_list);
         if (done >= n) {
             // #210: one whole server reply buffer delivered (one 9P reply
             // frame on the devsrv server arm). The #354 writer role makes
@@ -880,7 +885,10 @@ long srvconn_server_recv(struct SrvConn *cn, u8 *buf, long n) {
     if (!cn || cn->magic != SRV_CONN_MAGIC) return -1;
     if (!buf || n < 0) return -1;
     if (n == 0) return 0;
-    return chan_consume_nonblock(&cn->c2s, buf, n);
+    long got = chan_consume_nonblock(&cn->c2s, buf, n);
+    // c2s room is the CLIENT endpoint's POLLOUT edge (srvconn_poll).
+    if (got > 0) poll_waiter_list_wake(&cn->poll_list);
+    return got;
 }
 
 // srvconn_server_recv_blocking — F1 close (P6-pouch-sockets audit).
@@ -926,6 +934,8 @@ long srvconn_server_recv_blocking(struct SrvConn *cn, u8 *buf, long n) {
             // on c2s.wrendez (srvconn_client_send_blocking); the #348
             // drain-wake discipline, outside ch->lock.
             wakeup(&ch->wrendez);
+            // ... and c2s room is the CLIENT endpoint's POLLOUT edge.
+            poll_waiter_list_wake(&cn->poll_list);
             break;
         }
         if (ch->eof) {
@@ -957,33 +967,56 @@ long srvconn_server_recv_blocking(struct SrvConn *cn, u8 *buf, long n) {
 }
 
 // =============================================================================
-// poll — readiness probe on the server endpoint Spoor (P5-poll-b).
+// poll — readiness probe on a connection endpoint (P5-poll-b; both endpoints
+// since 2026-09-21, ARCH 23.3).
 // =============================================================================
+//
+// `client` selects whose view is sampled. The two are mirror images: an
+// endpoint READS one channel and WRITES the other.
+//
+//               reads   writes   POLLIN        POLLOUT            HUP      ERR
+//   server      c2s     s2c      c2s.count>0   s2c live + room    c2s.eof  s2c.eof
+//   client      s2c     c2s      s2c.count>0   c2s live + room    s2c.eof  c2s.eof
+//
+// Pipe-like on purpose: no POLLIN at a drained EOF. The POSIX stream-socket
+// shape is the pouch boundary line's to add in its poll(); native 9P servers
+// are written to these rows.
+//
+// ONE hook list serves both endpoints, and EVERY ring mutation in this file
+// walks it after dropping the channel lock it mutated under -- c2s fill (server
+// POLLIN), s2c fill (client POLLIN), s2c drain (server POLLOUT), c2s drain
+// (client POLLOUT), teardown. So a walk is a real edge for some pollers and
+// noise for the rest, which is sound because sys_poll_for_proc re-arms and
+// sleeps again on an empty re-sample (poll.h, "A FLAG IS A HINT"). A new ring
+// mutator without a walk is a lost wake for one endpoint that the OTHER
+// endpoint's tests cannot see.
 //
 // Both channel locks are taken in a fixed order (c2s → s2c) across the
 // sample-and-register critical section, matching kernel/pipe.c's r->lock-
 // across-sample-and-register discipline. No other path takes both locks
-// (chan_produce / chan_consume_nonblock each take a single
-// ch->lock), so this dual-lock acquire cannot deadlock with itself or with
-// any producer.
+// except srvconn_teardown, in the same order (chan_produce /
+// chan_consume_nonblock each take a single ch->lock), so this dual-lock
+// acquire cannot deadlock with itself or with any producer.
 //
 // pw == NULL is the post-wake sample-only call (sys_poll_for_proc's
-// second scan); pw != NULL atomically registers the hook with the sample
+// re-sample); pw != NULL atomically registers the hook with the sample
 // under the same locks — the register-then-observe step.
 
-short srvconn_poll(struct SrvConn *cn, short events, struct poll_waiter *pw) {
+short srvconn_poll(struct SrvConn *cn, bool client, short events,
+                   struct poll_waiter *pw) {
     if (!cn || cn->magic != SRV_CONN_MAGIC) return POLLERR;
 
     spin_lock(&cn->c2s.lock);
     spin_lock(&cn->s2c.lock);
 
+    const struct srvconn_chan *rd = client ? &cn->s2c : &cn->c2s;
+    const struct srvconn_chan *wr = client ? &cn->c2s : &cn->s2c;
+
     short revents = 0;
-    if (cn->c2s.count > 0) revents |= POLLIN;     // bytes for corvus to read
-    if (cn->c2s.eof)       revents |= POLLHUP;    // teardown latched it
-    if (!cn->s2c.eof && cn->s2c.count < cn->s2c.cap) {
-        revents |= POLLOUT;                       // room for corvus to write
-    }
-    if (cn->s2c.eof)       revents |= POLLERR;    // server-side writes EPIPE
+    if (rd->count > 0)                    revents |= POLLIN;   // bytes to read
+    if (rd->eof)                          revents |= POLLHUP;  // teardown latched it
+    if (!wr->eof && wr->count < wr->cap)  revents |= POLLOUT;  // room to write
+    if (wr->eof)                          revents |= POLLERR;  // writes EPIPE
 
     if (pw) {
         poll_waiter_list_register(&cn->poll_list, pw);

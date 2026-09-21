@@ -71,6 +71,11 @@ void test_poll_devsrv_conn_pollin_on_send(void);
 void test_poll_devsrv_conn_pollout_immediate(void);
 void test_poll_devsrv_conn_pollhup_on_teardown(void);
 void test_poll_devsrv_conn_block_then_wake_pollin(void);
+void test_poll_devsrv_client_row(void);
+void test_poll_devsrv_client_wakes_on_reply_only(void);
+void test_poll_devsrv_server_pollout_wakes_on_client_drain(void);
+void test_poll_devsrv_client_kernel_attached_pollnval(void);
+void test_poll_timeout_survives_a_busy_list(void);
 void test_poll_null_obj_spoor_pollnval(void);
 void test_poll_mixed_spoor_and_srv(void);
 void test_poll_max_nfds(void);
@@ -933,6 +938,214 @@ void test_poll_devsrv_conn_block_then_wake_pollin(void) {
     srv_registry_reset();
     drop_test_proc(client);
     drop_test_proc(corvus);
+}
+
+// =============================================================================
+// The CLIENT endpoint + the re-arm (2026-09-21; ARCH 23.3).
+//
+// Until this date devsrv_poll sent a CSRVCLIENT Spoor to the SERVER-endpoint
+// sample: a client was told POLLIN while its OWN unread request sat in c2s, was
+// never woken by its reply, and -- sys_poll_for_proc's half -- any wake whose
+// re-sample found nothing returned 0. Each test below names the half it pins.
+// =============================================================================
+
+// A generalized poller: fd / events / timeout from globals.
+static struct Proc  *g_cp_proc;
+static hidx_t        g_cp_fd;
+static s16           g_cp_events;
+static s32           g_cp_timeout;
+static volatile s64  g_cp_result;
+static volatile s16  g_cp_revents;
+
+static void cp_poll_entry(void) {
+    struct pollfd pfds[1] = {
+        { .fd = g_cp_fd, .events = g_cp_events, .revents = 0 },
+    };
+    g_cp_result  = sys_poll_for_proc(g_cp_proc, pfds, 1, g_cp_timeout);
+    g_cp_revents = pfds[0].revents;
+    sched();    // park
+}
+
+struct cp_fixture {
+    struct Proc    *corvus, *client;
+    struct SrvConn *cn;
+    int             svc_h, client_h, conn_h;
+};
+
+static bool cp_setup(struct cp_fixture *f) {
+    srv_registry_reset();
+    f->corvus = make_marked_test_proc();
+    if (!f->corvus) return false;
+    f->svc_h = post_svc_byte(f->corvus, "corvus", 6);
+    if (f->svc_h < 0) return false;
+    f->client = make_test_proc();
+    if (!f->client) return false;
+    struct Spoor *cs = connect_byte(f->client, "corvus");
+    if (!cs) return false;
+    f->client_h = handle_alloc(f->client, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, cs);
+    if (f->client_h < 0) return false;
+    f->cn = devsrv_conn_of(cs);
+    f->conn_h = sys_srv_accept_for_proc(f->corvus, (hidx_t)f->svc_h);
+    return f->conn_h >= 0 && f->cn != NULL;
+}
+
+static void cp_teardown(struct cp_fixture *f) {
+    srv_registry_reset();
+    drop_test_proc(f->client);
+    drop_test_proc(f->corvus);
+}
+
+static s16 cp_sample(struct Proc *p, int h, s16 events) {
+    struct pollfd pfds[1] = { { .fd = (hidx_t)h, .events = events, .revents = 0 } };
+    (void)sys_poll_for_proc(p, pfds, 1, 0);
+    return pfds[0].revents;
+}
+
+// The client row, bit by bit, against the server row on the SAME connection.
+void test_poll_devsrv_client_row(void) {
+    struct cp_fixture f;
+    TEST_ASSERT(cp_setup(&f), "fixture");
+    const s16 io = POLLIN | POLLOUT;
+
+    TEST_EXPECT_EQ((s64)cp_sample(f.client, f.client_h, io), (s64)POLLOUT,
+        "fresh client: room to write, nothing to read");
+
+    // THE defect: the client's own unread request is the SERVER's POLLIN.
+    static const u8 req[7] = { 'r','e','q','u','e','s','t' };
+    TEST_EXPECT_EQ(srvconn_client_send(f.cn, req, 7), 7L, "client queues a request");
+    TEST_EXPECT_EQ((s64)cp_sample(f.client, f.client_h, io), (s64)POLLOUT,
+        "a client is NOT readable because its own request is unread");
+    TEST_EXPECT_EQ((s64)cp_sample(f.corvus, f.conn_h, io), (s64)(POLLIN | POLLOUT),
+        "the server is");
+
+    static const u8 rep[5] = { 'r','e','p','l','y' };
+    TEST_EXPECT_EQ(srvconn_server_send(f.cn, rep, 5), 5L, "server queues a reply");
+    TEST_EXPECT_EQ((s64)cp_sample(f.client, f.client_h, io), (s64)(POLLIN | POLLOUT),
+        "the reply makes the client readable");
+
+    // Teardown with the reply still buffered: bytes first, then the latches.
+    srvconn_teardown(f.cn);
+    TEST_EXPECT_EQ((s64)cp_sample(f.client, f.client_h, io),
+        (s64)(POLLIN | POLLHUP | POLLERR), "buffered bytes + both EOFs");
+    u8 in[8];
+    TEST_EXPECT_EQ(srvconn_io_nonblock(f.cn, false, false, in, sizeof in), 5L, "drain the reply");
+    TEST_EXPECT_EQ((s64)cp_sample(f.client, f.client_h, io), (s64)(POLLHUP | POLLERR),
+        "pipe-like: no POLLIN at a drained EOF");
+
+    cp_teardown(&f);
+}
+
+// A parked client poller: walks for the OTHER endpoint's edges must not end its
+// poll (NoSpuriousZero), and the reply must (the lost wake).
+void test_poll_devsrv_client_wakes_on_reply_only(void) {
+    struct cp_fixture f;
+    TEST_ASSERT(cp_setup(&f), "fixture");
+
+    g_cp_proc = f.client;  g_cp_fd = (hidx_t)f.client_h;
+    g_cp_events = POLLIN;  g_cp_timeout = 30000;
+    g_cp_result = -999;    g_cp_revents = 0;
+
+    struct Thread *poller = thread_create(kproc(), cp_poll_entry);
+    TEST_ASSERT(poller != NULL, "thread_create");
+    ready(poller);
+    TEST_YIELD_UNTIL(poller->state == THREAD_SLEEPING);
+
+    // c2s FILL: the server's POLLIN edge, noise for this poller. Pre-fix the
+    // server-endpoint sample called this POLLIN and the poll returned 1 with
+    // nothing to read; with the right sample but no re-arm it returned 0 --
+    // "timed out", 30 s early.
+    u64 resleeps = poll_total_resleeps();
+    static const u8 req[3] = { 1, 2, 3 };
+    TEST_EXPECT_EQ(srvconn_client_send(f.cn, req, 3), 3L, "request queued");
+    TEST_YIELD_UNTIL(poll_total_resleeps() > resleeps && poller->state == THREAD_SLEEPING);
+    TEST_EXPECT_EQ(g_cp_result, -999L, "the client's own request does not end its poll");
+
+    // c2s DRAIN: the client's POLLOUT edge, which it did not ask about.
+    resleeps = poll_total_resleeps();
+    u8 in[8];
+    TEST_EXPECT_EQ(srvconn_server_recv(f.cn, in, sizeof in), 3L, "server consumes it");
+    TEST_YIELD_UNTIL(poll_total_resleeps() > resleeps && poller->state == THREAD_SLEEPING);
+    TEST_EXPECT_EQ(g_cp_result, -999L, "nor does the server reading it");
+
+    // s2c FILL: the edge this poller asked about. Pre-fix nothing walked the
+    // list here and the poller slept until its timeout.
+    static const u8 rep[4] = { 9, 8, 7, 6 };
+    TEST_EXPECT_EQ(srvconn_server_send(f.cn, rep, 4), 4L, "reply queued");
+    TEST_YIELD_UNTIL(g_cp_result != -999);
+    TEST_EXPECT_EQ(g_cp_result, 1L, "the reply ends it");
+    TEST_EXPECT_EQ((s64)g_cp_revents, (s64)POLLIN, "revents = POLLIN");
+
+    thread_free(poller);
+    cp_teardown(&f);
+}
+
+// A server that polled POLLOUT on a full s2c is woken by a BLOCKING client
+// drain (pre-fix only srvconn_io_nonblock's drain walked the list).
+void test_poll_devsrv_server_pollout_wakes_on_client_drain(void) {
+    struct cp_fixture f;
+    TEST_ASSERT(cp_setup(&f), "fixture");
+
+    static u8 chunk[1024];
+    for (;;) {
+        long put = srvconn_server_send(f.cn, chunk, sizeof chunk);
+        if (put < (long)sizeof chunk) break;
+    }
+    TEST_EXPECT_EQ((s64)(cp_sample(f.corvus, f.conn_h, POLLOUT) & POLLOUT), 0L,
+        "s2c is full: not writable");
+
+    g_cp_proc = f.corvus;  g_cp_fd = (hidx_t)f.conn_h;
+    g_cp_events = POLLOUT; g_cp_timeout = -1;
+    g_cp_result = -999;    g_cp_revents = 0;
+
+    struct Thread *poller = thread_create(kproc(), cp_poll_entry);
+    TEST_ASSERT(poller != NULL, "thread_create");
+    ready(poller);
+    TEST_YIELD_UNTIL(poller->state == THREAD_SLEEPING);
+
+    TEST_ASSERT(srvconn_client_recv(f.cn, chunk, sizeof chunk) > 0, "the client drains");
+    TEST_YIELD_UNTIL(g_cp_result != -999);
+    TEST_EXPECT_EQ(g_cp_result, 1L, "the drain ends the server's poll");
+    TEST_EXPECT_EQ((s64)g_cp_revents, (s64)POLLOUT, "revents = POLLOUT");
+
+    thread_free(poller);
+    cp_teardown(&f);
+}
+
+// A kernel-attached conn's rings are the kernel 9P client's.
+void test_poll_devsrv_client_kernel_attached_pollnval(void) {
+    struct cp_fixture f;
+    TEST_ASSERT(cp_setup(&f), "fixture");
+    srvconn_set_kernel_attached(f.cn);
+    TEST_EXPECT_EQ((s64)cp_sample(f.client, f.client_h, POLLIN | POLLOUT), (s64)POLLNVAL,
+        "client endpoint of a kernel-attached conn");
+    TEST_ASSERT((cp_sample(f.corvus, f.conn_h, POLLOUT) & POLLNVAL) == 0,
+        "the server endpoint is unaffected");
+    cp_teardown(&f);
+}
+
+// A producer that never stops walking the list must not hold a timed poller
+// past its deadline: tsleep prefers a set flag to a passed deadline, so the
+// loop carries its own test (specs/poll.tla PollTerminates).
+void test_poll_timeout_survives_a_busy_list(void) {
+    struct cp_fixture f;
+    TEST_ASSERT(cp_setup(&f), "fixture");
+
+    g_cp_proc = f.client;  g_cp_fd = (hidx_t)f.client_h;
+    g_cp_events = POLLIN;  g_cp_timeout = 50;
+    g_cp_result = -999;    g_cp_revents = 0;
+
+    struct Thread *poller = thread_create(kproc(), cp_poll_entry);
+    TEST_ASSERT(poller != NULL, "thread_create");
+    ready(poller);
+
+    u8 b = 0x5A;
+    TEST_YIELD_UNTIL(g_cp_result != -999 ||
+                     (srvconn_client_send(f.cn, &b, 1),
+                      srvconn_server_recv(f.cn, &b, 1), false));
+    TEST_EXPECT_EQ(g_cp_result, 0L, "timed out -- at its deadline, not never");
+
+    thread_free(poller);
+    cp_teardown(&f);
 }
 
 // =============================================================================
