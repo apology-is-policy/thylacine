@@ -6593,7 +6593,7 @@ int main(void) {
             .argv_data_len = sizeof(wd_argv),
             .argc          = wd_argc,
             .cap_mask      = T_CAP_HW_CREATE | T_CAP_CSPRNG_READ,
-            .perm_flags    = T_SPAWN_PERM_MAY_POST_SERVICE,
+            .perm_flags    = T_SPAWN_PERM_MAY_POST_SERVICE | T_SPAWN_PERM_SEAT_MANAGER,
         };
         long wd_pid = t_spawn_full_argv(&wreq);
         if (wd_pid <= 0) {

@@ -41,7 +41,7 @@ use alloc::vec::Vec;
 use libthyla_rs::cap::{self, Caps};
 use libthyla_rs::process::{Command, Stdio};
 use libthyla_rs::{
-    env, fd_devclass, t_close, t_getpid, t_open, t_putstr, t_read, t_write, T_CAP_CHOWN,
+    env, fd_devclass, t_close, t_getpid, t_open, t_read, t_write, T_CAP_CHOWN,
     T_CAP_POST_SERVICE, T_CAP_DAC_OVERRIDE, T_CAP_KILL, T_OREAD, T_ORDWR, T_WALK_OPEN_FROM_ROOT,
 };
 
@@ -61,11 +61,11 @@ const STATUS_TIMEOUT: u8 = 7;
 const STATUS_BUSY: u8 = 8;
 
 fn puts(b: &[u8]) {
-    // SAFETY: a borrowed slice is readable for its length.
-    unsafe {
-        let _ = libthyla_rs::t_puts(b.as_ptr(), b.len());
-    }
+    // Ordinary command output belongs to the caller's terminal, including a
+    // Halcyon PTY. Only Corvus writes the trusted authorization scene.
+    unsafe { let _ = write_all(1, b); }
 }
+fn print(s: &str) { puts(s.as_bytes()); }
 
 fn put_dec(n: u64) {
     let mut tmp = [0u8; 21];
@@ -99,7 +99,7 @@ fn put_hex64(v: u64) {
 }
 
 fn usage() {
-    t_putstr(concat!(
+    print(concat!(
         "usage: imperium [chown] [dac] [kill] [post]   request elevation; confer with the SAK\n",
         "       imperium --list                 show what this shell currently holds\n",
         "       imperium --help                 this help\n",
@@ -107,6 +107,7 @@ fn usage() {
         "With no caps named, imperium requests the full level (CAP_DAC_OVERRIDE\n",
         "CAP_CHOWN CAP_KILL CAP_POST_SERVICE). Naming caps restricts the request to that subset.\n",
         "After `imperium`, an elevated sub-shell opens; `exit` or `abdicate` ends it.\n",
+        "SAK: Ctrl-Alt-Delete (or Ctrl-Alt-F10) on the graphical seat; Ctrl-A b in an enabled QEMU serial recovery session.\n",
     ));
 }
 
@@ -114,7 +115,7 @@ unsafe fn write_all(fd: i64, buf: &[u8]) -> bool {
     let mut off = 0usize;
     while off < buf.len() {
         let w = t_write(fd, buf.as_ptr().add(off), buf.len() - off);
-        if w <= 0 {
+        if w <= 0 || w as usize > buf.len() - off {
             return false;
         }
         off += w as usize;
@@ -224,14 +225,14 @@ fn put_cap_names(caps: u64) {
     ] {
         if caps & bit != 0 {
             if !first {
-                t_putstr(" ");
+                print(" ");
             }
-            t_putstr(name);
+            print(name);
             first = false;
         }
     }
     if first {
-        t_putstr("(none of the imperium caps)");
+        print("(none of the imperium caps)");
     }
 }
 
@@ -257,25 +258,25 @@ fn cmd_list() -> i64 {
     // (a) Current holdings, from the kernel's unforgeable /proc flag.
     match read_own_imperium() {
         None => {
-            t_putstr("imperium: not currently elevated (a plain shell)\n");
+            print("imperium: not currently elevated (a plain shell)\n");
         }
         Some(im) => {
-            t_putstr("imperium: elevated -- scope ");
+            print("imperium: elevated -- scope ");
             put_dec(im.scope);
-            t_putstr(" (session ");
+            print(" (session ");
             put_dec(im.session);
-            t_putstr(")\n  caps: ");
+            print(")\n  caps: ");
             put_cap_names(im.caps);
-            t_putstr(" (");
+            print(" (");
             put_hex64(im.caps);
-            t_putstr(")\n  rods ");
+            print(")\n  rods ");
             put_dec(im.rods as u64);
-            t_putstr(if im.axe {
+            print(if im.axe {
                 "  axe: PRESENT (power of life and death)\n"
             } else {
                 "  axe: absent\n"
             });
-            t_putstr(if im.propagating {
+            print(if im.propagating {
                 "  propagating: yes (caps flow to children)\n"
             } else {
                 "  propagating: no\n"
@@ -288,12 +289,12 @@ fn cmd_list() -> i64 {
     // corvus does not fail --list, which has already shown the holdings.
     let conn = connect_corvus();
     if conn < 0 {
-        t_putstr("imperium: (corvus unreachable -- eligibility list unavailable)\n");
+        print("imperium: (corvus unreachable -- eligibility list unavailable)\n");
         return 0;
     }
     let sent = unsafe { send_request(conn, VERB_CLEARANCE_LIST_SELF, &[]) };
     if !sent {
-        t_putstr("imperium: (transport error -- eligibility list unavailable)\n");
+        print("imperium: (transport error -- eligibility list unavailable)\n");
         let _ = unsafe { t_close(conn) };
         return 0;
     }
@@ -302,15 +303,15 @@ fn cmd_list() -> i64 {
     match reply {
         Some((STATUS_OK, body)) => print_eligible(&body),
         Some((STATUS_PERMISSION_DENIED, _)) => {
-            t_putstr("imperium: no eligibility ladder (not a corvus user)\n");
+            print("imperium: no eligibility ladder (not a corvus user)\n");
         }
         Some((st, _)) => {
-            t_putstr("imperium: eligibility list status=");
+            print("imperium: eligibility list status=");
             put_dec(st as u64);
-            t_putstr("\n");
+            print("\n");
         }
         None => {
-            t_putstr("imperium: (transport error -- eligibility reply lost)\n");
+            print("imperium: (transport error -- eligibility reply lost)\n");
         }
     }
     0
@@ -322,15 +323,15 @@ fn cmd_list() -> i64 {
 // than reading past the buffer.
 fn print_eligible(body: &[u8]) {
     if body.is_empty() {
-        t_putstr("imperium: (empty eligibility reply)\n");
+        print("imperium: (empty eligibility reply)\n");
         return;
     }
     let count = body[0];
     if count == 0 {
-        t_putstr("imperium: eligible for no levels\n");
+        print("imperium: eligible for no levels\n");
         return;
     }
-    t_putstr("imperium: eligible levels (what you could become):\n");
+    print("imperium: eligible levels (what you could become):\n");
     let mut off = 1usize;
     for _ in 0..count {
         if off >= body.len() {
@@ -363,12 +364,12 @@ fn print_eligible(body: &[u8]) {
         let tlv = &body[off..off + tl];
         off += tl;
         let caps = caps_from_tlv(tlv);
-        t_putstr("  ");
+        print("  ");
         puts(name);
-        t_putstr(auth_label(auth));
-        t_putstr(" caps ");
+        print(auth_label(auth));
+        print(" caps ");
         put_hex64(caps);
-        t_putstr("\n");
+        print("\n");
     }
 }
 
@@ -396,31 +397,31 @@ fn auth_label(auth: u8) -> &'static str {
 fn report_denied(status: u8) -> i64 {
     match status {
         STATUS_BAD_AUTH => {
-            t_putstr("imperium: denied (wrong key, or you declined)\n");
+            print("imperium: denied (wrong key, or you declined)\n");
         }
         STATUS_PERMISSION_DENIED => {
-            t_putstr("imperium: not eligible for the imperium level\n");
+            print("imperium: not eligible for the imperium level\n");
         }
         STATUS_NOT_FOUND => {
-            t_putstr("imperium: no imperium level is configured\n");
+            print("imperium: no imperium level is configured\n");
         }
         STATUS_RATE_LIMITED => {
-            t_putstr("imperium: too many failed attempts; wait and try again\n");
+            print("imperium: too many failed attempts; wait and try again\n");
         }
         STATUS_TIMEOUT => {
-            t_putstr("imperium: timed out (no SAK, or no key entered)\n");
+            print("imperium: timed out (no SAK, or no key entered)\n");
         }
         STATUS_BUSY => {
-            t_putstr(
+            print(
                 "imperium: another imperium request is already pending (NOT this one) -- \
                  if you press the SAK now it confers THAT request; do NOT confer a pid you \
                  do not recognize. Try again once it clears.\n",
             );
         }
         _ => {
-            t_putstr("imperium: unexpected status=");
+            print("imperium: unexpected status=");
             put_dec(status as u64);
-            t_putstr("\n");
+            print("\n");
         }
     }
     1
@@ -440,7 +441,7 @@ fn cmd_elevate(self_restrict: u64) -> i64 {
     match fd_devclass(1) {
         Some(b'c') | Some(b't') => {}
         _ => {
-            t_putstr(
+            print(
                 "imperium: needs an interactive terminal -- a request cannot be confirmed \
                  without a human at the console to press the SAK (Ctrl-A b)\n",
             );
@@ -451,9 +452,9 @@ fn cmd_elevate(self_restrict: u64) -> i64 {
     // (2) Already in a scope? The kernel refuses a nested propagating redeem
     // ("abdicate first"); say so before posting anything.
     if let Some(im) = read_own_imperium() {
-        t_putstr("imperium: already elevated (scope ");
+        print("imperium: already elevated (scope ");
         put_dec(im.scope);
-        t_putstr(") -- `abdicate` first to relinquish, then request again\n");
+        print(") -- `abdicate` first to relinquish, then request again\n");
         return 1;
     }
 
@@ -461,7 +462,7 @@ fn cmd_elevate(self_restrict: u64) -> i64 {
     // coming up right at login).
     let conn = connect_corvus();
     if conn < 0 {
-        t_putstr("imperium: cannot reach corvus (/srv/corvus)\n");
+        print("imperium: cannot reach corvus (/srv/corvus)\n");
         return 1;
     }
 
@@ -476,7 +477,7 @@ fn cmd_elevate(self_restrict: u64) -> i64 {
     // The request bytes go out BEFORE "confer with the SAK" is printed: a BREAK
     // that reached corvus ahead of the request would find nothing pending.
     if !unsafe { send_request(conn, VERB_IMPERIUM_REQUEST, &pl) } {
-        t_putstr("imperium: transport error (request)\n");
+        print("imperium: transport error (request)\n");
         let _ = unsafe { t_close(conn) };
         return 1;
     }
@@ -487,21 +488,21 @@ fn cmd_elevate(self_restrict: u64) -> i64 {
     // not this one -- a mismatch means "do not confer". The pid is a check only
     // because the tool surfaces its own value here.
     let mypid = unsafe { t_getpid() };
-    t_putstr("imperium: requesting ");
+    print("imperium: requesting ");
     if self_restrict == 0 {
-        t_putstr("the full imperium level (CAP_DAC_OVERRIDE CAP_CHOWN CAP_KILL CAP_POST_SERVICE)");
+        print("the full imperium level (CAP_DAC_OVERRIDE CAP_CHOWN CAP_KILL CAP_POST_SERVICE)");
     } else {
         put_cap_names(self_restrict);
     }
-    t_putstr(" as pid ");
+    print(" as pid ");
     put_dec(if mypid > 0 { mypid as u64 } else { 0 });
-    t_putstr(" -- confer with the SAK (Ctrl-A b); the trusted panel MUST show this pid\n");
+    print(" -- press the SAK: Ctrl-Alt-Delete or Ctrl-Alt-F10 (a serial BREAK in a recovery session); the trusted panel MUST show this pid\n");
 
     // (5) Block on the deferred reply.
     let (st, resp) = match unsafe { read_reply(conn) } {
         Some(x) => x,
         None => {
-            t_putstr("imperium: transport error (the parked reply was lost)\n");
+            print("imperium: transport error (the parked reply was lost)\n");
             let _ = unsafe { t_close(conn) };
             return 1;
         }
@@ -511,7 +512,7 @@ fn cmd_elevate(self_restrict: u64) -> i64 {
         return report_denied(st);
     }
     if resp.len() != 12 {
-        t_putstr("imperium: malformed OK reply\n");
+        print("imperium: malformed OK reply\n");
         let _ = unsafe { t_close(conn) };
         return 1;
     }
@@ -520,27 +521,27 @@ fn cmd_elevate(self_restrict: u64) -> i64 {
     ]);
     let _ = unsafe { t_close(conn) };
     if granted == 0 {
-        t_putstr("imperium: OK reply granted no caps\n");
+        print("imperium: OK reply granted no caps\n");
         return 1;
     }
     // Defense in depth: never redeem wider than requested (corvus already
     // bounds this, but the tool re-checks its own request).
     if self_restrict != 0 && granted & !self_restrict != 0 {
-        t_putstr("imperium: refusing a grant wider than requested\n");
+        print("imperium: refusing a grant wider than requested\n");
         return 1;
     }
 
     // (6) Redeem: become a PROPAGATING legate root.
     if cap::use_grant(Caps::from_bits(granted)).is_err() {
-        t_putstr("imperium: could not redeem the grant\n");
+        print("imperium: could not redeem the grant\n");
         return 1;
     }
-    t_putstr("imperium: conferred -- ");
+    print("imperium: conferred -- ");
     put_cap_names(granted);
     if granted & T_CAP_KILL != 0 {
-        t_putstr("  (the axe is drawn)");
+        print("  (the axe is drawn)");
     }
-    t_putstr("\n");
+    print("\n");
 
     // (7) Spawn the elevated sub-shell. fd 0/1/2 + identity inherited (Command
     // defaults); the default cap_mask (!0) lets the imperium caps FLOW through
@@ -553,7 +554,7 @@ fn cmd_elevate(self_restrict: u64) -> i64 {
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(_) => {
-            t_putstr("imperium: could not start the elevated shell (/bin/ut)\n");
+            print("imperium: could not start the elevated shell (/bin/ut)\n");
             return 1;
         }
     };
@@ -562,7 +563,7 @@ fn cmd_elevate(self_restrict: u64) -> i64 {
         Err(_) => 0,
     };
     // The sub-shell has exited; leaving imperium (the root) tears the scope down.
-    t_putstr("imperium: relinquished\n");
+    print("imperium: relinquished\n");
     code
 }
 
@@ -583,7 +584,7 @@ pub extern "C" fn rs_main() -> i64 {
             b"kill" => self_restrict |= T_CAP_KILL,
             b"post" => self_restrict |= T_CAP_POST_SERVICE,
             _ => {
-                t_putstr("imperium: unknown argument\n");
+                print("imperium: unknown argument\n");
                 usage();
                 return 2;
             }

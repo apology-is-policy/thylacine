@@ -31,6 +31,11 @@ const OTHER_PRINCIPAL: u32 = 1;
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
+    if let Some(stage) = libthyla_rs::env::args().nth(1) {
+        if stage.starts_with(b"--seat-") {
+            return core::str::from_utf8(stage).map(seat_probe).unwrap_or(2);
+        }
+    }
     let mut rc = 0;
     match Command::new(TARGET).spawn() {
         Ok(mut c) => {
@@ -56,4 +61,58 @@ pub extern "C" fn rs_main() -> i64 {
         }
     }
     rc
+}
+
+// Witness authority from an ordinary Halcyon shell descendant. This probe has
+// no special role: a successful test never grants it trusted seat access.
+fn seat_probe(stage: &str) -> i64 {
+    use libthyla_rs::{fs, err::Error};
+    use lictor::endpoint as seat;
+    let elevated = match stage {
+        "--seat-baseline" | "--seat-restored" | "--seat-denied" | "--seat-cancelled" => false,
+        "--seat-elevated" => true,
+        _ => return 2,
+    };
+    // The shell seats a foreground job AFTER spawning it (setpgid, then the
+    // terminal handoff), so a child that samples once at startup races its own
+    // parent. The property is that the handoff LANDS, so wait for it, bounded.
+    let mut seated = false;
+    for _ in 0..100 {
+        let group = unsafe { libthyla_rs::t_getpgid(0) };
+        if group > 0 && unsafe { libthyla_rs::t_tty_get_fg(1) } == group { seated = true; break; }
+        let _ = libthyla_rs::time::sleep(core::time::Duration::from_millis(10));
+    }
+    if !seated {
+        t_putstr("seat-probe: FAIL caller never became the foreground PTY group\n");
+        return 1;
+    }
+    for op in [seat::STATUS, seat::INPUT, seat::ACK, seat::FRAME, seat::KEY,
+               seat::RESTORED, seat::FAIL, seat::QUERY, seat::VISIBLE,
+               seat::MASK, seat::GRANT, seat::CLIENT] {
+        if seat::call(op, &mut seat::Message::default()).is_ok() {
+            t_putstr("seat-probe: FAIL ordinary process reached trusted endpoint\n");
+            return 1;
+        }
+    }
+    let pci = unsafe { libthyla_rs::t_pci_claim(16) };
+    if pci >= 0 {
+        unsafe { libthyla_rs::t_close(pci); }
+        t_putstr("seat-probe: FAIL ordinary process claimed GPU\n");
+        return 1;
+    }
+    // Separate paths keep a stale successful create from masquerading as a
+    // permission denial. /home is SYSTEM-owned and not writable by michael.
+    let path = alloc::format!("/home/graphical-sak-{}", &stage[7..]);
+    match fs::create_dir(&path) {
+        Ok(()) if elevated => {
+            if fs::remove_dir(&path).is_err() {
+                t_putstr("seat-probe: FAIL cleanup\n"); return 1;
+            }
+        }
+        Err(Error::PermissionDenied) if !elevated => {},
+        _ => { t_putstr("seat-probe: FAIL DAC authority mismatch\n"); return 1; }
+    }
+    t_putstr("seat-probe: PASS "); t_putstr(&stage[7..]);
+    t_putstr(" (endpoint denied; GPU denied; DAC verified)\n");
+    0
 }

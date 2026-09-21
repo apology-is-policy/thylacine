@@ -10,6 +10,7 @@ name = "corvus"
 path = "src/main.rs"
 
 [dependencies]
+lictor = { path = "../lictor", default-features = false, features = ["guest"] }
 # libthyla-rs provides _start + #[panic_handler] + SVC wrappers. corvus
 # uses t_putstr (banner) + t_mlockall + t_set_dumpable + t_set_traceable
 # + t_getrandom + t_explicit_bzero (the P5-corvus-syscalls hardening

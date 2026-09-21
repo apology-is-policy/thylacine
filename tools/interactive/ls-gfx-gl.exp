@@ -148,7 +148,7 @@ expect {
 }
 
 expect {
-    -re {gl-sdl-prove: PASS renderer=[^\r\n]* ([0-9]+)x([0-9]+) frames=([0-9]+)} {
+    -re {gl-sdl-prove: PASS renderer=[^\r\n]* ([0-9]+)x([0-9]+) frames=([0-9]+)\r} {
         lc_pass "GL draw + readback verified:\
                  $expect_out(1,string)x$expect_out(2,string),\
                  $expect_out(3,string) frames swapped, all 5 regions correct"

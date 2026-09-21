@@ -175,6 +175,11 @@ int cap_pending_count(void);
 // the target Proc's death."
 void cap_proc_exit_notify(struct Proc *p);
 
+// Cancel only an unredeemed clearance grant with this exact decision identity.
+// The trusted seat uses it on failure before normal restoration. Takes the cap
+// table lock; callers may hold g_proc_table_lock (the established exit ordering).
+void cap_cancel_imperium_pending(u64 stripes, u32 session_id);
+
 // cap_reset_table — drop all pending grants. Test-only; takes the
 // table lock. Production paths never call this.
 void cap_reset_table(void);
@@ -228,6 +233,12 @@ long cap_register_imperium_grant_for_writer(struct Proc *writer,
                                             caps_t cap_mask, u64 target_stripes,
                                             u64 valid_for_ns, u64 session_id,
                                             u64 flags);
+
+// Kernel-only graphical commit barrier. Held grants refuse redemption until
+// the seat's actual restoration; exact incarnation/session release is one-shot.
+long cap_register_seat_grant(struct Proc *writer, caps_t caps, u64 stripes,
+                             u64 term, u64 session, u64 flags);
+bool cap_release_seat_grant(u64 stripes, u32 session);
 
 // cap_redeem_grant_for_writer — the /use write core. Does ONE locked lookup
 // of the pending grant for the writer's stripes (so the grant's kind is read

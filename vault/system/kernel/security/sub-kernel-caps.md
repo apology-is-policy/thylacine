@@ -16,8 +16,22 @@ locks: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md section 5.5", "docs/IDENTITY-DESIGN.md section 9.8", "specs/corvus.tla", "specs/handles.tla"]
 created: 2026-08-02
-updated: 2026-09-17
+updated: 2026-09-21
 ---
+## Graphical grant commit
+
+A graphical grant is inserted with `seat_held` atomically under the grant
+lock. Redemption refuses it without consuming it, even when the requester polls
+`/use` before Corvus replies. Only the seat's successful RESTORED transition
+releases the exact target stripes/session. Failure cancels the matching held
+entry and zeroes the seat's record of it, so the RESTORED that later recovers a
+failed seat finds nothing to release (`cons.graphical_seat_grant_and_failure`
+drives both orders with a fresh requester). Both paths run in process-lock then grant-lock order; redemption takes
+only the grant lock, so the barrier adds no inverse edge. Serial grants retain
+their existing immediate redemption semantics. The grant bounds test covers early
+redeem, mismatched releases, cancellation, one-shot release and successful redeem.
+See [[sub-lictor]] for the physical restoration contract.
+
 ## Purpose
 
 A capability is an unforgeable per-Proc bit gating a class of privileged
@@ -52,8 +66,12 @@ Two disjoint classes, pinned by `_Static_assert`:
   `LOCK_PAGES`, `CSPRNG_READ`, `GRANT_HOSTOWNER`, `SET_IDENTITY`,
   `GRANT_CLEARANCE`.
 - **`CAP_ELEVATION_ONLY`** — held by no Proc at creation and stripped from
-  every child unconditionally: `HOSTOWNER`, `DAC_OVERRIDE`, `CHOWN`,
-  `KILL`, `DEBUG`, `JIT`.
+  every child (except a PROPAGATING legate scope's own `legate_caps`):
+  `HOSTOWNER`, `DAC_OVERRIDE`, `CHOWN`, `KILL`, `DEBUG`, `JIT`,
+  `AUDIO_GRAPH` (bit 12) and `POST_SERVICE` (bit 13). The macro in `caps.h`
+  is the authority for this list; a prose COUNT of it has been wrong four
+  times (four, five, six, seven -- in `caps.h`, CLAUDE.md and ARCH section 28
+  at once, 2026-09-21), so none is given here.
 
 `(CAP_ALL & CAP_ELEVATION_ONLY) == 0` is asserted, so every bit is
 fork-grantable **xor** elevation-only, never both. `CAP_ALL` is itself

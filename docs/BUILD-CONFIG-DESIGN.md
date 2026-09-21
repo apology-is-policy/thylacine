@@ -177,6 +177,22 @@ files as a numbered menu, labelled with each theme's own `[meta] name`
 `every_shipped_theme_loads` test closes the loop from the other side, reading
 the same directory and failing by filename when a theme does not parse.
 
+*`HALCYON_PROFILE` (added 2026-09-21) is what selects the UI; the theme only
+colours it.* Until then the profile was a raw `THYLACINE_HALCYON_PROFILE` lever
+the schema did not know, so a config could name an Instrument theme and still
+build the legacy layout -- the loader projects a theme onto whichever profile
+is in force rather than refusing it, and the result is new colours on the old
+bezels, a UI nobody drew. The option is a `choice:instrument,legacy` whose
+default is `instrument`, so a profile file written before the option existed
+builds the current UI; `configs/default.config` pins `instrument` and
+`configs/ci.config` pins `legacy`, because the gate scenarios that predate
+Instrument assert the legacy literals. A caller-set env var still outranks
+either, which is how the Instrument gates build from the ci profile. The wizard
+tags every theme file with the schema its own `[meta]` declares and says so
+when the chosen theme and the chosen profile differ. The loader's built-in
+floor (no `/lib/halcyon/profile` at all) is still `legacy`; flipping that is the
+Instrument arc's I-9.
+
 ### 4.3 Presets replace the bundles (migration)
 
 The hand-coded bundles become data:

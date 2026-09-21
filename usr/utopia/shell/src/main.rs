@@ -64,8 +64,8 @@ const UT_VERSION: &str = "0.9-dev";
 /// Emit the Pale Fire version banner. Three composed segments per
 /// UTOPIA-VISUAL.md section 3: the glyph-orange right-tack, white version
 /// text, path-blue tagline. Each coloured segment self-resets (ansi::fg),
-/// so colour cannot bleed into subsequent output. Goes to the UART via
-/// t_putstr (not fd 1), so it shows even when `ut` has no inherited stdout.
+/// so colour cannot bleed into subsequent output. Use the caller's terminal;
+/// the early boot probe without stdout uses the console.
 fn print_banner() {
     let mut banner = String::new();
     banner.push_str(&ansi::fg(palette::Role::Glyph, GLYPH));
@@ -74,7 +74,9 @@ fn print_banner() {
     banner.push_str(" -- ");
     banner.push_str(&ansi::fg(palette::Role::Path, "Thylacine textual shell"));
     banner.push('\n');
-    t_putstr(&banner);
+    use libthyla_rs::io::Write;
+    if io::stdout_is_live() { let _ = io::stdout().write_all(banner.as_bytes()); }
+    else { t_putstr(&banner); }
 }
 
 /// #94-B-b: parse "--consctl-fd N" from argv -> the inherited consctl fd, or -1

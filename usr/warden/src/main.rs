@@ -105,7 +105,7 @@ driver "netdev-driver" {
 }
 "#,
     r#"
-driver "tapestryd" {
+driver "lictor" {
     abi   = 1
     binds = ["virtio-pci:16", "virtio-pci:18"]
     needs {
@@ -126,7 +126,7 @@ driver "tapestryd" {
         # invisible way. The other axes (mmio, irq, pci) are untouched.
         dma = "pool: 64 MiB"
     }
-    serves    = "/dev/tapestry"
+    serves    = "/srv/lictor"
     restart   = on-crash
     lifecycle = persistent
     gather    = all
@@ -677,6 +677,34 @@ fn supervise(m: &Manifest, grant: &BoundResources, node_name: &str) -> Dispositi
     }
 }
 
+/// The normal compositor is a separate DMA-only leaf, never a child of the
+/// hardware service. Kernel designation binds its actual process incarnation.
+fn start_compositor(grant: &BoundResources) -> bool {
+    let mut normal = grant.clone();
+    normal.mmio.clear(); normal.irq.clear(); normal.pci = None; normal.pci_extra.clear();
+    let Ok(desc) = normal.to_descriptor() else { return false; };
+    let open_null = || OpenOptions::new().read(true).write(true).open("/dev/null");
+    let (Ok(nin), Ok(nerr)) = (open_null(), open_null()) else { return false; };
+    let mut cmd = Command::new("/tapestryd");
+    cmd.arg(desc).caps(T_CAP_HW_CREATE | T_CAP_CSPRNG_READ)
+        .allowance(to_allowance(&normal))
+        .perm(T_SPAWN_PERM_MAY_POST_SERVICE | libthyla_rs::T_SPAWN_PERM_SEAT_CLIENT)
+        .stdin(Stdio::File(nin)).stdout(Stdio::Piped).stderr(Stdio::File(nerr));
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => { say!("warden: compositor spawn failed {:?}", error); return false; }
+    };
+    if matches!(await_readiness(&mut child), Readiness::Signalled(ref line) if line == "READY") {
+        say!("warden: Tapestry pid={} READY with DMA-only allowance", child.pid());
+        true
+    } else {
+        say!("warden: compositor failed readiness");
+        let _ = child.kill();
+        let _ = child.wait();
+        false
+    }
+}
+
 /// Spawn the driver once for a conferred grant and watch it declare itself --
 /// the confer + one run attempt. Encodes the grant into the argv descriptor + the
 /// kernel allowance (both from one `BoundResources`), spawns the driver narrowed,
@@ -731,7 +759,12 @@ fn run_once(m: &Manifest, grant: &BoundResources) -> RunOutcome {
     // no namespace and is conferred nothing -- the grant is exactly as narrow as
     // the service that needs it.
     if m.lifecycle == Lifecycle::Persistent {
-        cmd.perm(T_SPAWN_PERM_MAY_POST_SERVICE);
+        // Boot-compiled designation, never a manifest-supplied permission.
+        // Both seat processes remain hardware-allowance leaves.
+        let seat = if m.name == "lictor" {
+            libthyla_rs::T_SPAWN_PERM_SEAT_SERVICE
+        } else { 0 };
+        cmd.perm(T_SPAWN_PERM_MAY_POST_SERVICE | seat);
     }
     // The boot-probe warden has no stdio fds of its own (joey spawns it without
     // any), so Command's default Stdio::Inherit -- which bumps the parent's fd
@@ -814,6 +847,11 @@ fn run_once(m: &Manifest, grant: &BoundResources) -> RunOutcome {
                         m.name,
                         pid
                     );
+                    if m.name == "lictor" && !start_compositor(grant) {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return RunOutcome::Exited(None);
+                    }
                     RunOutcome::Served
                 }
                 Lifecycle::Transient => {

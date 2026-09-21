@@ -12,8 +12,16 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/CORVUS-DESIGN.md"]
 created: 2026-07-31
-updated: 2026-09-17
+updated: 2026-09-18
 ---
+## Nonblocking endpoints
+
+`CNONBLOCK` selects `srvconn_io_nonblock` on raw client/server transport
+endpoints. A read or write makes bounded progress under the channel lock or
+returns EAGAIN; it never waits for a peer or a blocking reader/writer role.
+Kernel-attached clients retain their existing raw-I/O refusal. See
+[[sub-kernel-srvconn]] and [[abi-native-nonblock]].
+
 ## Purpose
 
 `/srv` is the kernel surface by which a userspace server publishes

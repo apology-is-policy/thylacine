@@ -303,6 +303,18 @@ pub const T_SYS_PCI_IRQ_WAIT: u64 = 117;
 pub const T_SYS_PCI_IRQ_COMPLETE: u64 = 118;
 pub const T_SYS_PCI_IRQ_DISABLE: u64 = 119;
 pub const T_SYS_PCI_IRQ_INFO: u64 = 120;
+pub const T_SYS_TRUSTED_SEAT: u64 = 121;
+pub const T_SYS_SEAT_IMPORT: u64 = 122;
+pub const T_SYS_SET_NONBLOCK: u64 = 123;
+/// Set open-file nonblocking mode (shared by aliases). EAGAIN means retry after
+/// readiness; a successful write can be short. No authority is added.
+pub unsafe fn t_set_nonblock(fd: i64, on: bool) -> i64 {
+    let mut result = fd;
+    asm!("svc #0", inlateout("x0") result, in("x1") on as u64,
+         in("x8") T_SYS_SET_NONBLOCK, options(nostack));
+    result
+}
+
 pub const T_SYS_PCI_MAP_WINDOW: u64   = 113;
 pub const T_SYS_PCI_WINDOWS: u64      = 114;
 pub const T_SYS_PCI_INFO: u64         = 78;     // pci-1c: read KObj_PCI topology
@@ -624,6 +636,9 @@ pub const T_SPAWN_PERM_CONSOLE_OWNER: u64 = 1 << 2;
 // it). Bit 5 matches SPAWN_PERM_SESSION_HANGUP (bits 3/4 -- RENDERER, RAISE --
 // are unused by native callers, so they are not mirrored here).
 pub const T_SPAWN_PERM_SESSION_HANGUP: u64 = 1 << 5;
+pub const T_SPAWN_PERM_SEAT_MANAGER: u64 = 1 << 6;
+pub const T_SPAWN_PERM_SEAT_SERVICE: u64 = 1 << 7;
+pub const T_SPAWN_PERM_SEAT_CLIENT: u64 = 1 << 8;
 
 // poll event bits — MUST mirror POLL* in kernel/include/thylacine/poll.h.
 // Linux values; the future musl shim is a no-op.

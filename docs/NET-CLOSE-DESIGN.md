@@ -110,3 +110,47 @@ bound, not a delivery guarantee.
 The full 40-boot default/UBSan by SMP4/SMP8 matrix passes, as does an additional
 eight-CPU ITS/TCG UBSan boot. Manual, real-Pi Haul mount/post, hangup and the
 DOSBox application gates pass after the repair.
+
+## Refinement (2026-09-21): a TIME-WAIT retiree yields to admission
+
+**The finding.** One boot in roughly eighty died before the login prompt:
+`netperf: FAIL -- MW (connect)` -> `joey: /joey exited non-zero` -> EXTINCTION.
+The probe's 50-dial churn phase fills the 64-transport bound with retirees, and
+the phase after it opened its connection with a plain `connect`, so whether it
+was admitted depended on whether a retiree happened to have aged out yet. The
+same logs showed the larger cost, on EVERY boot: one of the 50 dials waits
+9.81-9.85 s (the first TIME-WAIT expiring), where the mean dial is 2.8 ms.
+Every image has booted ten seconds slower since the bound landed, and any
+program that opens more than about six short connections a second is refused
+for up to ten seconds at a time.
+
+**What a TIME-WAIT retiree still holds.** Nothing this design protects. Both
+FINs are exchanged and acknowledged, so there is no accepted byte left to
+deliver and no close left to finish; what remains is 2MSL of quiet time that
+guards a reused 4-tuple against delayed duplicates of the old connection. The
+bounds section above says capacity exhaustion "never drops an older stream's
+accepted data to make room". Releasing a TIME-WAIT retiree early drops none.
+
+**The rule.** At the bound, admission first releases the OLDEST retiree that has
+reached TIME-WAIT (removed from its SocketSet without an abort, so no RST is
+emitted; a late segment for that 4-tuple meets no socket and is answered by the
+stack as for any closed port). A retiree in any other state -- data still
+queued, a FIN not yet acknowledged, a close in progress -- is never touched. If
+no retiree is in TIME-WAIT, admission refuses with ENOMEM exactly as before.
+This is the conventional trade (Linux bounds the same table with
+`tcp_max_tw_buckets` and drops TIME-WAIT at the limit); the residual risk is a
+4-tuple reused inside 2MSL while a duplicate of the old connection is still in
+flight, which sequence validation already has to survive after any reboot.
+
+**What does not change.** The 64-transport bound, the 30-second retirement
+deadline, the data-preservation rule, and ENOMEM as the admission signal.
+Connection-churn callers still retry it; the probe phase that did not now does.
+The stats file gains a `timewait-yielded` counter so the pressure is visible.
+
+**Verification.** `close_retirement_selftest` keeps its refusal leg (a bound
+full of retirees none of which is in TIME-WAIT still refuses, and the queued
+bytes of the real one are intact) and gains the yield leg: with one real
+TIME-WAIT retiree among them, admission succeeds, exactly that retiree is gone,
+and the retiree holding queued data is untouched. The boot probe's churn phase
+is the live witness: its longest dial drops from ~9.8 s to milliseconds.
+

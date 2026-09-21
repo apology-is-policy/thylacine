@@ -12,6 +12,8 @@ code:
   - tools/forage.sh
   - tools/test-forage.sh
   - tools/test-build-config.sh
+  - tools/configure.sh
+  - tools/test-configure.sh
 audit: none
 guarded-by: []
 validated-by: [prose, gate-smp]
@@ -19,7 +21,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-09-17
+updated: 2026-09-21
 ---
 ## Purpose
 
@@ -57,6 +59,18 @@ inputs, while `forage.sh` resolves and checks those inputs before a build.
 `MANIFEST` and `FORAGE_ROOT` isolate fixture tests; they are not permission to
 silently substitute downloaded bytes for a pinned archive. DOSBox and game
 baking follow the same configured input path as the existing toolchain.
+
+An input the manifest does not declare is invisible twice over: `forage.sh
+status` cannot report it missing, and whatever it feeds degrades without a
+word. The static Linux git (`/viv/bin`, and the git-probe / git-net /
+git-workflow bundles) was such an input until 2026-09-21 -- present only in one
+worktree's `build/cache`, hinted at by `build.sh` as a forage target that did
+not exist, and claimed as one by `docs/GIT-ON-THYLACINE.md`. `git-shell` had
+failed 3/3 on main for eleven days as a result, with a timeout that read like a
+broken git, because ut reports a missing command only in `$status`. It is now
+`remote.static_git`: a `remote-pull` from the Pi that built it, sha-pinned, and
+`do_remote_pull` verifies the pin of any pulled FILE (a pulled tree has none).
+The gate SKIPs on an image without it.
 
 **`build.sh kernel` is `build.sh all`, and this is the tree's most-repeated
 footgun.** It pulls the whole chain including a pool re-bake driven by the
@@ -164,6 +178,18 @@ View, Gallery, Manual, Nocturne and their probes are curated into the native
 ramfs binary list. `configs/ci.config` selects a serial shell for existing
 interactive scenarios; the default profile starts the Halcyon session.
 Use an explicit `HALCYON_SESSION=y` override for graphical session gates.
+
+`HALCYON_PROFILE` (`choice:instrument,legacy`, default `instrument`, since
+2026-09-21) is the option that selects WHICH Halcyon UI an image draws; it bakes
+`/lib/halcyon/profile`. The theme only colours the profile in force, and a
+theme of the other schema is projected rather than refused, so before the
+option existed a config that named an Instrument theme still built the legacy
+layout. `configs/default.config` pins `instrument`; `configs/ci.config` pins
+`legacy` because the pre-Instrument gate scenarios assert its literals, and an
+Instrument gate overrides that pin with a caller-set
+`THYLACINE_HALCYON_PROFILE=instrument`. `tools/configure.sh` tags each theme
+file with the schema its own `[meta]` declares, hides `TEMPLATE.toml`, and
+prints a note when the chosen theme and profile differ.
 
 ## Data structures
 

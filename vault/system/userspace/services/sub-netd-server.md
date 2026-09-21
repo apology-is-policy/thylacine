@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/NET-DESIGN.md", "docs/NET-THROUGHPUT.md", "docs/NET-CLOSE-DESIGN.md"]
 created: 2026-07-31
-updated: 2026-09-17
+updated: 2026-09-21
 ---
 ## Purpose
 
@@ -58,7 +58,25 @@ TIME-WAIT, then removes Closed sockets. Expiry aborts/removes and increments
 (public plus retiring) and 16 public slots exist. Clone and accept replacement
 check admission before allocating. Metadata is preallocated; public slot reuse
 cannot reach an old transport. TCP loopback migration moves the existing socket.
-`stats` distinguishes `active`, `transports`, `retiring`, and `close-timeouts`.
+`stats` distinguishes `active`, `transports`, `retiring`, `close-timeouts` and
+`timewait-yielded`.
+
+**A TIME-WAIT retiree yields to admission; nothing else does**
+([[dec-2026-09-21-timewait-yields-to-admission]]). Both admission paths go
+through `tcp_admit`: below the bound it is a plain yes; AT the bound it releases
+the oldest retiree whose state is TIME-WAIT (removed without an abort, so no RST)
+and says yes; with none, it says no and the caller refuses with ENOMEM as before.
+A retiree that still holds queued bytes or an unfinished close is never a
+candidate -- that is the whole of the close design's integrity rule, and it is
+what the bound self-test's two legs pin from both sides: a full bound with no
+TIME-WAIT retiree refuses and the queued bytes are intact; the same bound with
+one real TIME-WAIT retiree admits, exactly that retiree is gone, the one holding
+queued bytes is untouched, and the next admission refuses again. Every OTHER
+refusal is evaluated first (no free slot, no established call, no listen
+endpoint), so a request that cannot succeed costs no retiree its quiet time.
+Before this, the boot probe's 50-dial churn stalled 9.8 s on every boot and,
+about one boot in eighty, the probe phase after it was refused and the boot
+extincted.
 
 The approved lifecycle decision is [[dec-2026-09-17-tcp-transport-retirement]].
 The extended resident loopback selftest covers queued TX before last close,

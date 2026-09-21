@@ -1,0 +1,178 @@
+#!/usr/bin/expect -f
+# Graphical Lex curiata through physical QMP input. Requires HALCYON_SESSION=y.
+# Guest witnesses exercise real DAC operations and refuse trusted-seat/GPU access.
+set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
+set ::env(THYLACINE_SERIAL_SAK) 0
+source [file join [file dirname [info script]] lib.exp]
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+
+
+proc key {chord} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $chord} e]} { lc_fail $e }
+    after 700
+}
+proc type {text} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp $text} e]} { lc_fail $e }
+}
+proc capture {name} {
+    global repo qmp
+    after 1000
+    set dir [expr {[info exists ::env(SAK_SCREENSHOT_DIR)] ? $::env(SAK_SCREENSHOT_DIR) : [file join $repo build]}]
+    set out [file join $dir halcyon-sak-$name.png]
+    if {[info exists ::env(THYLACINE_EGL_VNC_SOCKET)]} {
+        if {[catch {exec python3 $repo/tools/interactive/vnc_capture.py $::env(THYLACINE_EGL_VNC_SOCKET) $out} e]} { lc_fail $e }
+    } else {
+        if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} e]} { lc_fail $e }
+    }
+    lc_step "captured $out"
+    return $out
+}
+proc witness {stage} {
+    type "caps-probe --seat-$stage\n"
+    global timeout
+    set timeout 30
+    expect {
+        -ex "seat-probe: PASS $stage (endpoint denied; GPU denied; DAC verified)" { lc_pass "seat $stage authority" }
+        -ex "seat-probe: FAIL" { lc_fail "guest authority witness failed ($stage)" }
+        -re {EXTINCTION:} { lc_extinction_fail "seat $stage" }
+        timeout { lc_fail "no authority witness ($stage)" }
+        eof { lc_fail "EOF ($stage)" }
+    }
+}
+lc_boot
+set timeout $lc_boot_timeout
+expect {
+    -ex "Thylacine login: " {}
+    -re {EXTINCTION:} { lc_extinction_fail "boot" }
+    timeout { lc_fail "no login" }
+    eof { lc_fail "EOF before login" }
+}
+lc_raw_send "michael\r" "login user"
+expect {
+    -ex "password: " {}
+    timeout { lc_fail "no password prompt" }
+    eof { lc_fail "EOF before password" }
+}
+lc_raw_send "correct-horse-battery-staple-v1\r" "login password"
+expect {
+    -ex "login: session compositor (halcyond) spawned" {}
+    -ex "Thylacine textual shell" {
+        # A lever the image lacks is a SKIP, never a FAIL: a full fleet run on
+        # the gate image must not be red for a reason that is not a defect.
+        puts "\nLS-CI SKIP: default (ut) image -- this scenario drives the session\
+ compositor. Bake with: THYLACINE_HALCYON_SESSION=1 THYLACINE_HALCYON_PROFILE=instrument tools/build.sh kernel --config ci"
+        lc_quit
+        exit 77
+    }
+    timeout { lc_fail "no graphical session" }
+    eof { lc_fail "EOF at session start" }
+}
+set timeout 60
+expect {
+    -re {halcyond: status bar [^\r\n]*running false panes 2} {}
+    -re {EXTINCTION:} { lc_extinction_fail "session" }
+    timeout { lc_fail "welcome and shell did not become ready" }
+}
+after 1500
+key "meta_l+f"
+capture workspace
+lc_raw_send "\001b" "serial BREAK must not authorize in graphical-only posture"
+witness baseline
+key "ctrl+alt+delete"
+after 1000
+capture empty
+key "ret"
+lc_expect "corvus: imperium: SAK with nothing pending" "empty trusted episode ended"
+after 1200
+type "imperium chown dac\n"
+after 1200
+capture request
+key "ctrl+alt+delete"
+after 1000
+capture prompt
+type "imperium-key-michael-v1"
+capture masked
+key "ret"
+after 2200
+capture conferred
+key "ret"
+lc_expect "corvus: imperium: CONFERRED to michael" "Corvus issued the grant"
+after 1000
+type "imperium --list\n"
+after 1200
+capture elevated
+witness elevated
+# An elevated interactive shell must preserve PTY ownership and isolate its
+# waiting Imperium parent from the foreground command's interrupt group.
+type "sleep 30\n"
+after 700
+key "ctrl+c"
+after 1000
+witness elevated
+capture interrupted
+type "abdicate\n"
+after 1200
+capture restored
+witness restored
+# Wrong key: the requesting tool must return and the original shell stay plain.
+type "imperium kill\n"
+after 1200
+# The second reserved chord: keyboards without Delete (this leg proves F10).
+key "ctrl+alt+f10"
+capture axe
+type "deliberately-wrong-key"
+key "ret"
+capture denied
+key "ret"
+lc_expect "corvus: imperium: DENIED (wrong key) for michael" "wrong key refused"
+after 1000
+witness denied
+# Escape cancels without KDF/authority; input must not leak into the workspace.
+type "imperium chown\n"
+after 1200
+key "ctrl+alt+delete"
+key "esc"
+capture cancelled
+key "ret"
+lc_expect "corvus: imperium: DECLINED at the prompt" "operator cancellation"
+after 1000
+witness cancelled
+capture final
+lc_pass "graphical SAK: empty, confer, real DAC authority, abdicate, wrong key, cancel"
+# Expiry is measured from Corvus's real monotonic deadline, with no injected
+# clock or shortened timeout. Capture before the verdict's 10-second dismissal.
+type "imperium chown\n"
+lc_expect "-- awaiting the SAK" "expiry request posted"
+key "ctrl+alt+delete"
+after 60500
+capture expired
+key "ret"
+lc_expect "corvus: imperium: prompt TIMED OUT" "real request deadline expired"
+after 1000
+witness denied
+# The first wrong key above counted once. Reach the five-failure lockout, then
+# verify that a fresh request is refused without asking for another key.
+for {set i 2} {$i <= 5} {incr i} {
+    type "imperium kill\n"
+    lc_expect "-- awaiting the SAK" "wrong-key request $i posted"
+    key "ctrl+alt+delete"
+    type "deliberately-wrong-key"
+    key "ret"
+    after 1000
+    key "ret"
+    lc_expect "corvus: imperium: DENIED (wrong key) for michael" "wrong key $i refused"
+    after 1000
+}
+type "imperium kill\n"
+lc_expect "-- awaiting the SAK" "lockout request posted"
+key "ctrl+alt+delete"
+capture locked
+key "ret"
+lc_expect "corvus: imperium: RATE-LIMITED michael" "five wrong keys lock authorization"
+after 1000
+witness denied
+lc_pass "graphical SAK extended: real expiry and five-failure lockout"
+lc_quit

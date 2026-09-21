@@ -366,17 +366,47 @@ impl Repl {
             Some(n) => n,
             None => return false,
         };
-        // SAFETY: scalar SVC wrappers; fd 0 is the pts slave just detected.
-        let sid = unsafe { libthyla_rs::t_setsid() };
-        if sid <= 0 {
-            t_putstr("ut: pts session: setsid failed\n");
-            return false;
-        }
-        let own_pgid = sid as u64; // a fresh session leader: sid == pgid == pid
-        if unsafe { libthyla_rs::t_tty_acquire(0) } < 0 {
-            t_putstr("ut: pts session: tty_acquire failed\n");
-            return false;
-        }
+        // A nested interactive shell (including Imperium's elevated shell)
+        // must stay in the terminal's existing session. setsid would detach
+        // it, after which tty_acquire correctly refuses the already-owned PTY.
+        // GET_FG on a slave is kernel-gated by controlling-session membership.
+        // Only an already-foreground caller may seat a nested shell; it gets
+        // its own group so ^C does not also terminate the waiting parent tool.
+        let mut foreground = unsafe { libthyla_rs::t_tty_get_fg(0) };
+        let own_pgid = if foreground >= 0 {
+            // The parent shell seats its job after the spawn; a nested shell
+            // that samples once can read the PARENT's group and refuse itself.
+            // A background start never converges and is refused at the bound.
+            let mut group = unsafe { libthyla_rs::t_getpgid(0) };
+            for _ in 0..50 {
+                if group > 0 && foreground == group { break; }
+                let _ = libthyla_rs::time::sleep(core::time::Duration::from_millis(10));
+                group = unsafe { libthyla_rs::t_getpgid(0) };
+                foreground = unsafe { libthyla_rs::t_tty_get_fg(0) };
+            }
+            if group <= 0 || foreground != group {
+                t_putstr("ut: pts session: nested shell is not foreground\n");
+                return false;
+            }
+            let pid = unsafe { libthyla_rs::t_getpid() };
+            if group != pid && unsafe { libthyla_rs::t_setpgid(0, 0) } < 0 {
+                t_putstr("ut: pts session: nested group creation failed\n");
+                return false;
+            }
+            pid as u64
+        } else {
+            // First shell created by the terminal host: establish the session.
+            let sid = unsafe { libthyla_rs::t_setsid() };
+            if sid <= 0 {
+                t_putstr("ut: pts session: setsid failed\n");
+                return false;
+            }
+            if unsafe { libthyla_rs::t_tty_acquire(0) } < 0 {
+                t_putstr("ut: pts session: tty_acquire failed\n");
+                return false;
+            }
+            sid as u64
+        };
         if unsafe { libthyla_rs::t_tty_set_fg(0, own_pgid) } < 0 {
             t_putstr("ut: pts session: tty_set_fg failed\n");
             return false;

@@ -22,6 +22,322 @@ needed the operator.
 
 
 ---
+## 2026-09-21 (main, Fable 5.1, effort max) -- taking over a week of another agent's work: the graphical trusted path, the chord nobody could find, and the image that booted two UIs at once
+
+**Where the tree stood.** Claude credits ran out on 09-16; a Codex agent ("Astra")
+worked 09-17..18 until hers ran out too. She merged aux's media/audio arc, landed
+Haul, the Imperium deltas, a PCI shared-INTx + MSI-X / GICv2m / ITS-LPI subsystem
+and the netd close redesign into `main` -- every one of them closed by
+"single-agent self-review, no independent audit" -- and left the graphical Lex
+curiata (a new trusted service `usr/lictor`, a kernel seat state machine, three
+new syscalls 121..123) as 76 uncommitted files in a worktree whose last gate run
+was RED. The operator asked for four things: commit and clean up, take the work
+over with an in-session audit ("you are now the unbiased one"), replace their
+own Delete-key hack with a proper Ctrl+Alt+F10, and find out why their
+hand-built images booted "a hybrid between the old bezel design and the new UI".
+
+**The chord was in the kernel, which is why it could not be found.** The operator
+had searched Halcyon's key maps. The attention gesture is scanned in
+`proc_seat_op`'s SEAT_INPUT arm (`kernel/proc.c`, `seat_attention_held`), below
+every compositor, from raw evdev codes that lictor merely forwards -- that is
+the whole point of it (I-27: unspoofable means no client can synthesize or
+swallow it). F10 (68) is now a second reserved final key beside Delete (111),
+named in `seat.h`; both, rather than a replacement, because a compact keyboard
+lacks one and a full keyboard user expects the other. `cons.graphical_seat_gate`
+pins F9 as NOT attention and F10 as attention.
+
+**The hybrid UI was a missing option, not a broken theme.** A Halcyon THEME only
+colours whatever PROFILE is in force, and the loader PROJECTS a cross-schema
+theme rather than refusing it. The build-config schema had a theme picker and no
+profile option at all, so every image the wizard produced drew the legacy bezel
+geometry in Instrument colours. `HALCYON_PROFILE` (`choice:instrument,legacy`,
+default `instrument`) now exists; `default.config` pins instrument,
+`ci.config` pins legacy so the gate fleet is unchanged; the wizard tags each
+theme with the schema it was drawn for and says PROJECTED when they differ. A
+bare `tools/build.sh kernel` passes `ls-halcyon-session-instrument` end to end
+(0c33ecd9). Audited against every `THYLACINE_*` lever `build.sh` reads: this
+was the only one the schema could not reach.
+
+**The review (817c2339): one P1, three P2.**
+- *K1 [P1]* `proc_seat_fail_locked` abandoned WHATEVER console episode was open.
+  A compositor death, or a SEAT_FAIL while the seat was idle, therefore closed a
+  live SERIAL episode -- console unfrozen and the pre-SAK owner restored while
+  corvus was still reading a key. The seat now closes only the episode it
+  opened (`owns_episode = phase == EXCLUSIVE`). Sabotage: with the fix removed
+  the suite fails at exactly `a seat failure must not close a serial episode`,
+  1572/1573.
+- *K2 [P2]* SEAT_FAILED was terminal and reachable by ordinary use: hold the
+  chord five seconds. The display stayed dark until BOTH seat processes died.
+  RESTORED now also closes FAILED -- it can release nothing, because the
+  failure already cancelled the held grant and zeroed its identity -- and
+  lictor paints a notice, waits for the keys to come up, restores, and says
+  `trusted seat recovered; nothing was conferred`.
+- *L1 [P2]* unref of the presented resource left `presentation` stale, so the
+  next restore failed and took the seat with it.
+- *L4 [P2, latent]* fence ids are 32-bit and the engine latches dead at
+  exhaustion -- weeks of uptime. Left open in the review commit; closed before
+  the merge (below).
+
+**The red gate at her cutoff was the probe's, not the seat's.** `caps-probe`
+sampled "am I the terminal's foreground group" ONCE. `ut` seats a foreground job
+AFTER spawning it (`run_foreground_jc`: spawn, then `setpgid` + `tty_set_fg`),
+so a child that looks first loses. The probe and a nested `ut` now wait for the
+handoff (bounded). The handoff order itself is unfixed and queued: it is a real
+race for any program that touches the tty in its first instructions.
+
+**Wrong turn, and what caught it.** The new recovery gate's screenshot showed
+the WORKSPACE where the failure notice should be -- three runs. I suspected
+lictor's takeover and added diagnostics, which said the takeover was fine;
+`-trace virtio_gpu_cmd_set_scanout` (through a new `THYLACINE_QEMU_EXTRA` knob)
+then PROVED the scanout had switched to the private resource. The picture was
+wrong, not the guest: QEMU serves ONE QMP client per socket, and the helper
+holding the chord slept with its connection open, so the screenshot queued
+behind it until after recovery. `qmp-sendtext.sh` now closes across the hold.
+Two channels disagreeing is the finding; the instinct to believe the picture
+cost three boots.
+
+**What the pre-merge fleet found that no targeted run would have.**
+I had planned five hand-picked serial scenarios; I ran all 76 instead (53
+pass, 15 skip, 8 fail, and not one retry burned outside those 8), because
+the branch is 109 files wide and "the ones I think are relevant" is a guess
+about my own blind spots. Every one of the findings below was in a scenario I
+would NOT have picked, or was caused by a change I had already called done.
+- *My own change broke `ls-ci`.* It asserted `profile: legacy (built-in)`. Since
+  0c33ecd9 every bake writes the profile word, so the gate image answers
+  `legacy (system)`. I had re-run the configurator's tests and the Instrument
+  gate and called it green. The leg now asserts the pinned system tier; the
+  no-file floor stays with libhalcyon's host tests.
+- *Two serial gates were stale against the author's rewording.* corvus's success
+  verdict became "Authority conferred to the requesting process." (it is the
+  semantic model's notice, shared with the graphical prompt) and imperium's
+  request line lost "confer with the SAK"; only the GRAPHICAL gates had been
+  updated. `im3-lex-curiata` and `ls-imperium` failed 3/3 with a correct guest.
+  Both now key on the claim in the line (the verdict; `requesting CAP_KILL as
+  pid`) rather than on the operator hint beside it. The hint itself was wrong
+  for half its audience -- it told a serial operator to press a chord they do
+  not have -- and now names both gestures.
+- *`git-shell` had been red on main since at least 09-10, and read like a broken
+  git.* `git --exec-path | tr a-z A-Z` printed nothing and timed out. The
+  redraw burst above it looked like a line-editor bug (every keystroke an empty
+  prompt) until the PASSING log from aux's tree showed the identical burst: ut
+  renders once per byte of a batch, after the batch, so a line that arrives
+  whole with its Enter renders empty N times. The real cause was duller. The
+  static Linux git exists only when `build/cache` holds a tarball that only
+  aux's tree had; it was in no manifest (`docs/GIT-ON-THYLACINE.md` said it
+  was a forage target; it was not); and ut reports a missing command ONLY in
+  `$status`. Now: a sha-pinned `remote.static_git` manifest entry pulled from
+  the Pi that built it, the `static-git` target `build.sh` had been hinting
+  at, a pin check on pulled files, and a SKIP guard in the gate. The silence
+  at the prompt is queued on its own -- rc prints; an operator who mistypes a
+  command here sees nothing at all.
+- *Five session gates FAILED on a non-session image instead of skipping*, so a
+  full fleet run on the gate image could never be green. They SKIP (77) now,
+  with their bake recipe in the message.
+- *The lictor dossier owned nothing.* Its `code:` claimed the DIRECTORY
+  `usr/lictor`; ownership is by exact path, so `quaestor owner` reported all 27
+  files of the most security-sensitive new tree UNOWNED and the dossier gate
+  never fired for them -- for the whole review. `os.Stat` is content with a
+  directory. The dossier now lists its files and the lint refuses a directory
+  claim (test + control; the real vault lints clean under it, so this was the
+  only one).
+
+**The P2 I had left open was not the one-liner it looked like.** "Rewind the
+fence sequence while idle" is right for the DEVICE: legacy virgl callbacks carry
+32 bits and the device retires a legacy-fenced command when `id <= signalled`,
+so the only rule is monotonicity among commands IN FLIGHT. But the same number
+was also the identity a fenced command's OWNER is told, and the compositor
+matches a readback's completion to its request by equality on it. So it is two
+sequences now: a WIRE id that rewinds to 1 past 2^31 when the device holds no
+chain at all, and an OWNER id that is a u64 and never repeats
+(`usr/lictor/src/fence.rs`). The batched pair was the trap inside the fix: it
+takes two ids before publishing either, so the second must be taken as BUSY --
+sampled naively it could rewind UNDER the first, and the first's completion
+would then retire it early. Clients never notice either way: their ledgers
+count completions and never compare ids (#210). Test builds start 64 short of
+the rewind point, so every gate that reaches the desktop has crossed a real
+rewind against the real device, and `ls-graphical-sak` asserts the witness.
+
+**One boot in eighty-five extincted, and it was not a flake.** Re-running the
+fixed gates, `ls-ci` burned an attempt on `EXTINCTION: joey: /joey exited
+non-zero` before the login prompt, then passed. The cause was three lines up:
+`netperf: FAIL -- MW (connect)`. The 09-17 TCP close redesign retires closed
+sockets into a bounded pool (64 transports) instead of dropping queued bytes --
+right -- and the boot probe's 50-dial churn phase fills that pool with
+TIME-WAIT retirees. The author had taught the churn phase to retry the ENOMEM
+admission signal, but not the phase that runs straight AFTER it, so whether
+that connect was admitted depended on whether a retiree had aged out yet.
+Tabulating the longest admission wait across every boot log of the session
+turned the intermittent into a constant: EVERY boot had one dial stall
+9.81-9.85 s (the first TIME-WAIT expiring) against a 2.8 ms mean before the
+redesign. Every image had booted ten seconds slower for four days and nobody
+saw it, because a probe that prints its own latency still says OK. Two fixes:
+the probe retries where its own design said it should; and at the bound,
+admission now releases the OLDEST retiree that has reached TIME-WAIT -- both
+FINs exchanged and acknowledged, no byte owed to anyone -- and nothing else,
+ever (the integrity rule of the close design, pinned from both sides by the
+bound self-test and by a sabotage that lets a FIN-WAIT retiree yield). M3's
+longest dial went from 9.8 s to 2.4 ms. This REFINES a design the operator
+voted on (09-17); it is recorded as an autonomous decision for them to
+overturn (`dec-2026-09-21-timewait-yields-to-admission`).
+
+**Coverage added before the merge** (the review had left these as "K9, partial"):
+`devsrv.seat_import_gates` drives every refusal arm of `SYS_SEAT_IMPORT` -- the
+ONE exception to I-5 -- including the confused deputy (a share is importable
+only through its OWNER's connection), that an identity refusal consumes nothing,
+and the import as a lifetime pin: the peer tears its whole side down and the
+chunk outlives it for exactly as long as the service holds the handle.
+`sys_spawn_with_perms.seat_roles` pins who may confer the three seat roles and
+the ordered first-come bind. `cons.graphical_seat_deadline_and_death` expires
+each of the three deadlines through a test seam (they are 5 s / 90 s of wall
+clock) and kills the client through the REAL zombie chokepoint;
+`cons.graphical_seat_service_death` does the same to the service, with a
+positive control so the "serial cannot take over a failed seat" refusal cannot
+be satisfied by a disabled serial posture. `specs/SPEC-TO-CODE.md` now declares
+the import as a MODEL GAP in `handles.tla` (`HwHandlesAtOrigin`, read literally,
+no longer describes the tree) with the action that would close it.
+
+**Decisions that were the operator's.** Effort max (asked, answered). An
+in-session audit in place of a separate prosecutor (their words). Instrument as
+the default UI (their words). One I made and recorded: `bliss.png` in her glass
+study is Microsoft's, with no open licence by her own `backgrounds.json`; it is
+NOT committed to a publicly mirrored repo.
+
+**Open, and owned.** `test-mode` is a default cargo feature of lictor
+and no production compile has been verified. A display under 800x720 refuses
+the seat outright. The 100 Hz loop's idle cost is unmeasured. Warden never
+reaps the compositor, so there is no restart path and a dead lictor means a
+dark display until reboot. The approved mockup's blurred backdrop is unbuilt.
+No Pi 400/500 qualification. And the larger debt: NOTHING Astra landed in
+`main` has had an independent read -- the PCI interrupt subsystem,
+`CAP_POST_SERVICE` (CLAUDE.md's I-2 row said six elevation bits against
+`caps.h`'s eight until this run corrected it), the devsrv/devcap changes,
+netd's close path.
+
+### Addendum, same day: the lever images, and three gates that were wrong about a correct guest
+
+The ci fleet cannot see a session or a console renderer, so the matrix baked
+one image per lever and ran what each unlocks. First pass: 11 of 13 green, and
+`ls-graphical-sak` found its `lictor: gpu fence sequence rewound at 2147483648
+(device idle)` line on the real device, which is the fence fix engaged rather
+than merely compiled. Two red, one burned attempt, and none of the three was
+the guest.
+
+**`ls-gfx-session`, three attempts of three, on the zoom leg.** The guest had
+zoomed: `session-tiling active=1 min_w=1280 sum_w=1280 disp_w=1280`, five
+times over. The gate was waiting for `min_w=12 sum_w=12`. Forty lines earlier
+it had captured the display width with `disp_w=([0-9]+)`, the serial chunk had
+ended inside `1280`, and expect matches as bytes arrive. The part worth
+keeping: the SAME capture had already PASSED a check -- "the tiles fill 1254 of
+12" clears an 85 % bar -- so a broken capture satisfied one assertion before it
+starved the next. This exact lesson is pinned in the memory index ("an
+unanchored `(\d+)` fires on a partial chunk") and the fleet still carried
+nineteen of them. Anchored all that read the value (`\r`, or the literal that
+follows); one of my own anchors was wrong for ten minutes (`panes (\d+)` is
+mid-line) and the census, not a boot, caught it.
+
+**`ls-halcyon-session-instrument`, one attempt of two.** "A second prompt did
+not add its cwd on the path ink (6 -> 6)". The poll loop left as soon as the
+lambda's amber arrived and then asserted the cwd and the turnstile on that one
+frame; a tile paints what it has ingested so far. It now leaves on all three.
+Not called a flake and not re-run until green: the bound and the three failure
+messages are unchanged, so a cwd that NEVER arrives still fails by name.
+
+**`ls-halcyon`, three of three, and red on `main` since 09-17 without anyone
+knowing.** `halcyond: act: no obj run on row 149/155 (block 22 item 2)`: Enter
+had landed on the `pwd` row, one below the `ls` row the gate wanted. Rows
+150..154 were five `tapestryd: idle-throttle` lines. A console renderer mirrors
+every daemon's output into the transcript (kernel #76, deliberately), the
+compositor says a line each time it drops to 15 Hz after a quiet second and
+another on the input that wakes it, and the gate's 1.5 s settle after each key
+guarantees both. Whether the wake line is IN the transcript when Esc snapshots
+the rows is a race between two processes -- which is why attempt 3 got past the
+keyboard leg and died on the click leg instead, where the same two lines moved
+the rows under the pointer. The witness came from aux (09-04) and reached
+`main` in Astra's 09-17 merge; `main`'s last green `ls-halcyon` log is 09-16
+and has zero such lines. The earlier fix to this same leg (`17d4cd7f`) had
+named the class -- THE OBSERVER EFFECT, in capitals, in the gate -- and then
+compensated for exactly one line. So the cure this time is not a second
+constant: the keyboard legs step by RUN (`b`), which no number of witness rows
+can displace, and the click leg COUNTS the lines that landed after the run
+report from the stream it is already reading, re-aims, and converges on the
+receiver's own `-> no run` verdict. Two things had to be measured before that
+could be written: expect's `timeout 0` never reads the pty, and its timeout is
+whole seconds -- the compositor's idle threshold -- so a drain-until-quiet
+changes the state it is counting. And the row pitch is the run's laid height
+(17), not the mono cell the old arithmetic used (14): equal for one row,
+three pixels out per row after that. The witness itself moved under
+`cfg(test-mode)`; every image is still a test build, so that changes nothing
+the operator sees today and is only the right class for the strip.
+
+**The open item that was a defect.** "No production compile has been verified"
+was on the list as a caveat. Verifying it took one command and it failed:
+lictor's broker ran `pair_protocol_selftest` -- a test-mode method -- on
+request in every build. Refused without the feature now, like the four `Test*`
+verbs beside it; lictor, tapestryd and halcyond all check clean with
+`--no-default-features`. A caveat that one command would have settled should
+never have been written down as a caveat.
+
+### Addendum 2: real silicon, the file the sync did not know about, and reading her kernel work
+
+**The graphical trusted path on a real GPU.** `ls-graphical-sak` passes on
+thyla-pi under KVM with `virtio-gpu-gl-pci` on the V3D (`virgl=1 ctxinit=1`),
+first attempt, 161 s: the panel, the confer, real DAC authority, the abdicate,
+the wrong key, the cancel, and the wire fence rewinding at 2^31 against a real
+virgl device. The captures come over a private VNC socket because QEMU 10
+refuses a QMP screendump of a GL texture scanout (Astra's harness work, and it
+holds). Screenshots in `work/shots-pi-gl`.
+
+**It failed first, and it failed the way hers had.** `stratumd: run failed
+(rc=-201)`, `EXTINCTION: joey: /joey exited non-zero`, a Halls dump -- on a
+sync that had md5-verified the kernel, the ramfs and every chunk of the pool.
+Her note for the same failure on 09-18 reads "fixture error"; mine nearly did.
+The pool the guest booted was not the pool I had shipped. LS-CI boots every
+attempt from `pool.img.baked-snapshot`, and it validates that twin against
+`system.key.baked-snapshot` -- twin against twin, never against the ramfs. The
+Pi baked locally once, on 09-08, and has carried a coherent pair of stale
+twins ever since; the sync ships neither. So the harness carefully restored a
+two-week-old pool over a perfectly good one, every attempt, and the boot
+refused it exactly as designed. The sync now ships the PRISTINE pool (the
+local snapshot, not the image the last run wrote to) and refreshes all three
+twins, md5-checked. The lesson is about what "verified" covered: the sync
+verified everything it shipped, and the break was a file it did not know its
+consumer read. The tool had no dossier; it has one now
+(`sub-substrate-remote-host`). Also learned the hard way: the tunnel closes a
+long ssh session from the far end, which kills a foreground gate -- remote
+gates run detached and are polled.
+
+**Her kernel work in `main`, read rather than trusted.** The operator asked for
+an audit of the week, and the branch was only a third of the week. While the
+SMP matrix ran I read the PCI interrupt subsystem end to end -- `pci_irq.c`,
+the v2m allocator, the ITS driver, the MSI-X / INTx / map-window parts of
+`pci_handle.c`, the six syscalls, `irqfwd.c`, the MMIO reservation union, the
+DTB `msi-map` parser, and the `CAP_POST_SERVICE` gate. No P0, P1 or P2. The
+claims I went looking to break and could not: every path that maps BAR memory
+into EL0 goes through one predicate, so the MSI-X table and PBA pages never
+reach a driver; a raw `IRQ_CREATE` refuses every PCI-routed and MSI-reserved
+INTID and a raw wait refuses a PCI endpoint; the lock order holds in IRQ
+context; dispatch pins are taken under the membership lock and drained before
+the free; the ITS command encodings and table geometry are right. It is
+careful work, and the reservation-union fix in `mmio_handle.c` (overlap is not
+coverage) is a real bug she found on her own. Three P3s and what was NOT read
+are in the closed list (`memory/audit_lictor_closed_list.md`, round 2).
+
+**What the read found instead was arithmetic nobody was doing.** The shared
+`/srv` registry has 16 slots and a dead poster's name holds its slot forever.
+The header comment sized 16 as "8 occupants + ~8 headroom" when there were six
+resident services. There are eleven now, plus two boot-probe tombstones, plus
+two per logged-in user: a one-user session on this branch sits at 15 of 16.
+Cora logging in fills it; after that a third username cannot get a home, and
+`haul --post` -- the feature `CAP_POST_SERVICE` exists for -- cannot post at
+all. Each resident service spent a unit of headroom nobody was counting;
+lictor took it from two to one. Not fixed here (devsrv is an audit surface and
+the matrix was already running on the tree); queued with the measurement.
+
+**The matrix.** `tools/ci-smp-gate.sh`, full: default and UBSan kernels at four
+and eight CPUs, ten boots each -- 40 of 40, no corruption, no external kill, no
+timing miss, nothing unclassified, 37-42 s a boot.
+
+---
 ## 2026-09-18 (Codex, single-agent) -- portable graphical SAK approval
 
 The operator approved the trusted display/input service and required Pi 400/Pi 500

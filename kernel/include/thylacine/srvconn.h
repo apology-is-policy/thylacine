@@ -518,6 +518,10 @@ long srvconn_client_send_blocking(struct SrvConn *cn, const u8 *buf, long n);
 // srvconn_server_send — corvus writes `n` bytes toward the kernel
 // client (the s2c ring). Returns bytes accepted (0..n) or -1 if torn
 // down / bad args. Non-blocking.
+// Explicit nonblocking endpoint I/O: EAGAIN on no progress/role contention,
+// short progress when space/data is limited, read EOF=0 and write EOF=EPIPE.
+long srvconn_io_nonblock(struct SrvConn *cn, bool server, bool writing,
+                        void *buf, long n);
 long srvconn_server_send(struct SrvConn *cn, const u8 *buf, long n);
 
 // srvconn_server_send_blocking — the BLOCKING server-side write (#348).

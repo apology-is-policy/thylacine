@@ -62,10 +62,9 @@ pub struct Imperium {
 /// pathological /proc line cannot spam the prompt (the imperium level holds at
 /// most 3 elevation caps; the cap is pure defense).
 const ROD_GLYPH: &str = "\u{2016}";
-/// The securis -- CROSSED SWORDS, U+2694 (3-byte UTF-8): the power of life and
-/// death (CAP_KILL). A single BMP glyph so it renders in a plain monospace
-/// terminal (an emoji axe would not on the serial console).
-const AXE_GLYPH: &str = "\u{2694}";
+/// The securis (CAP_KILL). A textual cue remains legible on serial terminals
+/// and the system face, which has no U+2694. The trusted scene draws an axe.
+const AXE_GLYPH: &str = "[axe]";
 /// The elevated-prompt marker -- `#` by the classic root-shell convention
 /// (IMPERIUM-DESIGN.md 4: `#` vs `$`/`⊢`).
 const ELEVATED_MARK: &str = "#";
@@ -161,7 +160,7 @@ mod tests {
     use super::*;
 
     const ROD: &str = "\u{2016}";
-    const AXE: &str = "\u{2694}";
+    const AXE: &str = "[axe]";
 
     #[test]
     fn parses_a_propagating_three_cap_scope_with_the_axe() {

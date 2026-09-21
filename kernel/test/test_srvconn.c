@@ -41,6 +41,10 @@
 #include "test.h"
 
 #include <thylacine/proc.h>
+#include <thylacine/errno.h>
+#include <thylacine/dev.h>
+#include <thylacine/devsrv.h>
+#include <thylacine/spoor.h>
 #include <thylacine/rendez.h>
 #include <thylacine/sched.h>
 #include <thylacine/srvconn.h>
@@ -1109,4 +1113,37 @@ void test_srvconn_ctl_counters(void) {
     struct sc_ctl_probe p2 = { 4242, false, {0} };
     srvconn_ctl_iterate(sc_ctl_cb, &p2);
     TEST_ASSERT(!p2.found, "freed conn unlinked from the registry");
+}
+
+// Discriminates poll-ready from write-all-ready: only three bytes remain, yet
+// a 16-byte nonblocking write must return three without parking the seat loop.
+void test_srvconn_nonblocking_backpressure(void);
+void test_srvconn_nonblocking_backpressure(void) {
+    struct SrvConn *cn = srvconn_create(123, 11, false, 456, SRVCONN_MSIZE);
+    TEST_ASSERT(cn != NULL, "nonblocking connection");
+    struct Spoor *sp = devsrv_make_conn_spoor(cn);
+    TEST_ASSERT(sp != NULL, "server endpoint");
+    spoor_flag_set(sp, CNONBLOCK);
+    fill_pattern(g_sc_chunk, sizeof g_sc_chunk, 7);
+    long left = SRVCONN_RING_CAP - 3;
+    while (left) {
+        long n = left < (long)sizeof g_sc_chunk ? left : (long)sizeof g_sc_chunk;
+        TEST_EXPECT_EQ(sp->dev->write(sp, g_sc_chunk, n, 0), n, "fill without client progress");
+        left -= n;
+    }
+    TEST_EXPECT_NE(srvconn_poll(cn, POLLOUT, NULL) & POLLOUT, 0, "three bytes is writable");
+    TEST_EXPECT_EQ(sp->dev->write(sp, g_sc_chunk, 16, 0), 3L, "short progress never parks");
+    TEST_EXPECT_EQ(sp->dev->write(sp, g_sc_chunk, 16, 0), -(long)T_E_AGAIN, "full ring retries");
+    TEST_EXPECT_EQ(sp->dev->read(sp, g_sc_chunk, 16, 0), -(long)T_E_AGAIN, "empty live read is not EOF");
+    u8 byte = 42;
+    TEST_EXPECT_EQ(srvconn_io_nonblock(cn, false, true, &byte, 1), 1L, "client direction");
+    spin_lock(&cn->c2s.lock); cn->c2s.reading = true; spin_unlock(&cn->c2s.lock);
+    TEST_EXPECT_EQ(sp->dev->read(sp, &byte, 1, 0), -(long)T_E_AGAIN, "busy blocking role is not bypassed");
+    spin_lock(&cn->c2s.lock); cn->c2s.reading = false; spin_unlock(&cn->c2s.lock);
+    TEST_EXPECT_EQ(sp->dev->read(sp, &byte, 1, 0), 1L, "retry receives the original byte");
+    TEST_EXPECT_EQ(byte, 42, "no contention data loss");
+    srvconn_teardown(cn);
+    TEST_EXPECT_EQ(sp->dev->read(sp, &byte, 1, 0), 0L, "drained EOF");
+    TEST_EXPECT_EQ(sp->dev->write(sp, &byte, 1, 0), -(long)T_E_PIPE, "dead peer write");
+    spoor_clunk(sp);
 }

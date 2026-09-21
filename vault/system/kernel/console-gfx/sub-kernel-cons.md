@@ -20,8 +20,20 @@ design:
   - "docs/TAPESTRY.md section 18.7 (the renderer drain/feed)"
   - "docs/LIFE-SUPPORT.md LS-8"
 created: 2026-08-02
-updated: 2026-09-17
+updated: 2026-09-18
 ---
+## Graphical attention and serial posture
+
+Physical graphical attention enters through the bound [[sub-lictor]] service;
+ordinary injected input cannot invoke that transition. Serial BREAK uses the
+existing console manager but is authorized only by the exact immutable boot token
+`thylacine.serial-sak=1`. A live or failed graphical episode cannot redirect to
+serial. The QEMU development launcher selects recovery by default; setting
+`THYLACINE_SERIAL_SAK=0` omits the token. Kernel-only console fixtures explicitly
+select recovery during the test suite and restore the boot policy before userspace;
+that override is absent from production builds. The graphical regression uses
+serial-disabled boot and verifies that BREAK cannot start an episode.
+
 ## Purpose
 
 The kernel console: one physical UART presented as `/dev/cons`, with a line

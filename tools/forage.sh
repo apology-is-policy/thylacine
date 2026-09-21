@@ -8,7 +8,7 @@
 #
 #   forage.sh                 report the status of every input
 #   forage.sh <target>        gather one: go|ambush|stratum|gopls|llvm|mesa|
-#                             alpine|busybox|static-curl|quake|duke3d|tombraider|
+#                             alpine|busybox|static-curl|static-git|quake|duke3d|tombraider|
 #                             clade|clade-gl
 #   forage.sh all             gather everything that can be gathered automatically
 #   FORAGE_DRY=1 forage.sh …   print what it WOULD do; touch nothing (git/net/gcp)
@@ -119,6 +119,14 @@ do_remote_pull() {
     if [[ "$DRY" == 1 ]]; then echo "[dry-run] $sec: $pull  (needs the builder reachable)"; return 0; fi
     echo "==> $sec: pulling via '$pull' (needs the builder reachable)"
     ( cd "$REPO_ROOT" && eval "$pull" ) || { echo "forage: pull failed${rebuild:+; rebuild with $rebuild}" >&2; return 1; }
+    # A pulled FILE with a pin is verified like a download; a pulled tree has none.
+    local sha; sha="$(manifest_get "$sec" sha256)"
+    if [[ -n "$sha" && -f "$REPO_ROOT/$probe" ]]; then
+        if verify_sha "$REPO_ROOT/$probe" "$sha"; then echo "    sha256 OK ($probe)"; else
+            echo "forage: sha256 MISMATCH for $probe -- got $(sha_of "$REPO_ROOT/$probe"), want $sha" >&2
+            return 1
+        fi
+    fi
 }
 
 do_instruct() {   # SECTION -- print the manual remedy for a non-automatable input
@@ -157,6 +165,7 @@ target_sections() {
         alpine)   echo "cache.alpine cache.busybox" ;;
         busybox)  echo "cache.busybox" ;;
         static-curl) echo "cache.static-curl" ;;
+        static-git) echo "remote.static_git" ;;
         quake)    echo "network.quake" ;;
         duke3d)   echo "network.duke3d" ;;
         tombraider) echo "network.tombraider" ;;
@@ -177,7 +186,7 @@ forage_status() {
         printf '%-18s %-8s %-13s %s\n' "$sec" "$st" "$(manifest_get "$sec" forageable)" "$(manifest_get "$sec" feeds)"
     done
     echo
-    echo "Gather one:  tools/forage.sh <go|ambush|stratum|gopls|alpine|static-curl|clade|clade-gl|quake|duke3d|tombraider>"
+    echo "Gather one:  tools/forage.sh <go|ambush|stratum|gopls|alpine|static-curl|static-git|clade|clade-gl|quake|duke3d|tombraider>"
     echo "Gather all:  tools/forage.sh all   (FORAGE_DRY=1 to preview)"
 }
 

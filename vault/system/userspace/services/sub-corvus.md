@@ -17,6 +17,18 @@ design: ["docs/CORVUS-DESIGN.md", "docs/IDENTITY-DESIGN.md"]
 created: 2026-08-04
 updated: 2026-09-18
 ---
+## Graphical Lex curiata
+
+Corvus uses the kernel's current episode to select its serial or graphical
+transport. The graphical transport sends bounded semantic identity/capability/term
+frames to [[sub-lictor]], waits for their actual visibility acknowledgement, then
+reads key bytes only from the generation-bound kernel queue. Mask counts are
+separate from authorization content. Key verification, wrong-key counters,
+eligibility, requester-incarnation revalidation and request expiry remain Corvus
+policy. A graphical grant is held until physical restoration; Corvus ends the
+episode and waits for that commit before releasing the deferred success reply.
+The terminal tool receives status and capabilities, never the authorization key.
+
 ## Purpose
 
 The key agent. corvus is where a user's cryptographic identity lives: a

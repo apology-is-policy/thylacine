@@ -15,8 +15,18 @@ abis: []
 design:
   - docs/MENAGERIE.md sections 3-6
 created: 2026-08-04
-updated: 2026-09-17
+updated: 2026-09-18
 ---
+## Trusted graphical seat bootstrap
+
+The GPU/input gather manifest starts [[sub-lictor]] with its physical function
+grants and seat-service role. After Lictor reports READY, Warden starts Tapestry
+as a separate leaf with only the DMA budget and normal-client designation. It
+waits for both services before reporting the graphical bind ready. Startup failure
+reaps the relevant children before bounded retry. The narrowed-driver no-child
+rule is unchanged: Lictor does not spawn the compositor. Runtime owner death
+fails authorization closed; Warden is not a persistent restart supervisor.
+
 ## Purpose
 
 One program, spawned by init before the root pivot, that turns a machine's
@@ -80,13 +90,13 @@ boot the device is discovered and simply matches nothing.
 
 **Bind.** Each device gets at most one manifest, the most specific match.
 Manifests marked *gather* do not bind per device; their matches are collected
-and folded into a single grant at the end, so the compositor gets one process
+and folded into a single grant at the end, so the trusted seat service gets one process
 holding all of its several devices rather than several processes each holding
 one.
 
 The bind database is **two sets since #230, and the split is a safety boundary.**
 `BUILTIN_MANIFESTS` is the PRODUCTION set — real hardware (the NIC driver,
-tapestryd, netd), bound in every build shape. `FIXTURE_MANIFESTS` — the 5c
+lictor, netd), bound in every build shape. `FIXTURE_MANIFESTS` — the 5c
 grant/narrowing proof (`menagerie-probe`) and the 5e-2 restart-ladder demo
 (`crash-probe`) — is bound ONLY when the caller passes `--with-fixtures` (joey
 does, from inside its probe ladder). The split is not cosmetic: `menagerie-probe`

@@ -581,7 +581,15 @@ case "${THYLACINE_DISPLAY:-none}" in
     # render node (docs/GPU-HOST-SETUP.md; tools/gl-host-probe.sh rung 6 is
     # the substrate witness). Serial stays on -serial below -- only
     # `none` implies -nographic.
-    egl-headless) display_flags=(-display egl-headless) ;;
+    egl-headless)
+        display_flags=(-display egl-headless)
+        # QEMU 10's QMP screendump refuses GL texture scanout. EGL readback
+        # still feeds 2D listeners: an explicitly requested private Unix VNC
+        # socket gives the visual test harness the actual displayed pixels.
+        if [[ -n "${THYLACINE_EGL_VNC_SOCKET:-}" ]]; then
+            display_flags+=(-vnc "unix:$THYLACINE_EGL_VNC_SOCKET")
+        fi
+        ;;
     # Headless GL WITHOUT the display readback (Warp-C C-4): the dbus display
     # in peer-to-peer mode with no listener attached gives the -gl models the
     # same render-node EGL context egl-headless does, but a RESOURCE_FLUSH
@@ -643,6 +651,13 @@ echo "==> qemu: accel=$accel cpu=$cpu gic=v$gicv smp=$cpus its=${THYLACINE_ITS:-
 # would silently DROP nowatchpoint the moment a second token was added, and
 # re-wedge #70 under TCG.
 append_tokens=()
+# This script is the QEMU development/recovery launcher. Real boot firmware
+# gets no serial authorization without this explicit token. Set the knob to 0
+# to exercise the production graphical-only posture (including in CI).
+if [[ "${THYLACINE_SERIAL_SAK:-1}" == "1" ]]; then
+    append_tokens+=("thylacine.serial-sak=1")
+fi
+
 if [[ "$accel" == "tcg" ]]; then
     append_tokens+=("thylacine.nowatchpoint")
 fi
@@ -775,6 +790,15 @@ if [[ "${THYLACINE_NO_AUDIO:-0}" != "1" ]]; then
         snd_streams=2
     fi
     audio_flags+=(-device "virtio-sound-pci,id=snd-pci0,audiodev=snd0,streams=$snd_streams,disable-legacy=on$pci_sound_addr")
+fi
+
+# THYLACINE_QEMU_EXTRA: whitespace-separated arguments appended verbatim, for a
+# caller that cannot reach this script's own argv (the interactive gates spawn
+# it with a fixed command line). The diagnostic lever: e.g.
+#   THYLACINE_QEMU_EXTRA="-trace virtio_gpu_cmd_set_scanout -D build/qemu-trace.log"
+if [[ -n "${THYLACINE_QEMU_EXTRA:-}" ]]; then
+    read -r -a _env_extra <<< "$THYLACINE_QEMU_EXTRA"
+    extra_qemu_args+=("${_env_extra[@]}")
 fi
 
 # Canonical QEMU flags per TOOLING.md §3.

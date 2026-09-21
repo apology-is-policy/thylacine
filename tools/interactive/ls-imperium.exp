@@ -148,7 +148,10 @@ lc_pass "IM-5(3): abdicate -> plain shell, cap denied again, the background job 
 
 # ---- (4) DENY: a wrong key, no sub-shell -----------------------------------
 lc_send "imperium kill"
-expect_tool_line "confer with the SAK" "the request posted (4)"
+# The request line names the cap and the pid; its tail is the operator hint and
+# was reworded when the graphical chord arrived ("press Ctrl-Alt-Delete (or
+# Ctrl-Alt-F10)"), so the leg keys on the part that is the CLAIM, not the hint.
+expect_tool_line "requesting CAP_KILL as pid" "the request posted (4)"
 press_sak "wrong key"
 lc_expect "CAP_KILL" "the provincia names CAP_KILL (4)"
 lc_raw_send "not-the-key\r" "a wrong key"

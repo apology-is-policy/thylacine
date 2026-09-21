@@ -123,3 +123,5 @@ port needs and the boundary-line patches it carries.
   halves must agree on it.
 - Kernel boundaries these Procs stand on: [[moc-kernel-srv]] (post/
   connect), [[moc-kernel-ninep]] (the mounts that reach them).
+
+- [[sub-lictor]] - trusted display/input ownership and the normal hardware broker.

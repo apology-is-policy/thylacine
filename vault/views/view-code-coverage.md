@@ -65,26 +65,26 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**491 owned · 53 unowned · 544 files (90% owned) · ~14206 unswept lines.**
+**517 owned · 53 unowned · 570 files (90% owned) · ~13991 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **73 files, ~32738 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **73 files, ~32801 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
 | usr/warp-prove | 0 | 1 | 4349 |
 | usr/pouch-hello | 0 | 22 | 3384 |
-| kernel | 126 | 14 | 1910 |
+| kernel | 127 | 14 | 1910 |
 | usr/ports | 19 | 4 | 1631 |
 | usr/quarry | 0 | 1 | 1033 |
 | usr/stratumd-stub | 0 | 1 | 453 |
 | usr/kaua-term | 3 | 1 | 276 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
-| usr/tapestryd | 8 | 2 | 236 |
 | usr/libthyla-rs | 29 | 1 | 196 |
 | arch | 41 | 2 | 146 |
 | usr/susp-mask-child | 0 | 1 | 139 |
 | usr/stub-driver | 0 | 1 | 119 |
 | usr/lib | 66 | 1 | 72 |
+| usr/tapestryd | 8 | 2 | 21 |
 | mm | 8 | 0 | 0 |
 | usr/aurora | 4 | 0 | 0 |
 | usr/coreutils | 60 | 0 | 0 |
@@ -99,6 +99,7 @@ Excluded as harness and counted here rather than dropped: **73 files, ~32738 lin
 | usr/https | 1 | 0 | 0 |
 | usr/imperium | 1 | 0 | 0 |
 | usr/joey | 1 | 0 | 0 |
+| usr/lictor | 25 | 0 | 0 |
 | usr/login | 1 | 0 | 0 |
 | usr/loom-stress | 1 | 0 | 0 |
 | usr/manual | 7 | 0 | 0 |
@@ -141,7 +142,6 @@ Excluded as harness and counted here rather than dropped: **73 files, ~32738 lin
 | usr/gl-sdl-prove/gl-sdl-prove.c | 262 |
 | usr/pouch-hello/pouch-hello-signals.c | 258 |
 | usr/pouch-hello/pouch-hello-pty.c | 231 |
-| usr/tapestryd/src/skein.rs | 217 |
 | kernel/include/thylacine/spinlock.h | 204 |
 | kernel/include/thylacine/context.h | 201 |
 | usr/lib/libthyla-rs/src/sync.rs | 196 |
@@ -180,4 +180,5 @@ Excluded as harness and counted here rather than dropped: **73 files, ~32738 lin
 | kernel/include/thylacine/types.h | 30 |
 | kernel/include/thylacine/devramfs.h | 27 |
 | usr/tapestryd/src/lib.rs | 19 |
+| usr/tapestryd/src/skein.rs | 2 |
 <!-- generated:end -->

@@ -189,6 +189,7 @@ def main():
         0x22A2,  # RIGHT TACK (the ut prompt glyph)
         0x22EE,  # VERTICAL ELLIPSIS (the ut continuation glyph)
         0x2026,  # HORIZONTAL ELLIPSIS
+        0x2016,  # Imperium: double rod authority cue
         0x2013, 0x2014,          # en/em dash
         0x2018, 0x2019, 0x201C, 0x201D,  # curly quotes
         0x2022,  # bullet

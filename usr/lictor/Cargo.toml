@@ -1,0 +1,26 @@
+[package]
+name = "lictor"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = ["backend", "test-mode"]
+guest = ["dep:libthyla-rs"]
+backend = ["guest", "libdriver/driver", "dep:libhalcyon"]
+test-mode = []
+
+[dependencies]
+libthyla-rs = { path = "../lib/libthyla-rs", optional = true }
+cornucopia = { path = "../lib/cornucopia" }
+libdriver = { path = "../lib/libdriver", default-features = false }
+libhalcyon = { path = "../lib/libhalcyon", optional = true }
+
+[[bin]]
+name = "lictor"
+path = "src/main.rs"
+required-features = ["backend"]

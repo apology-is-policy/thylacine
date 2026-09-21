@@ -680,6 +680,32 @@ void test_devcap_imperium_grant_gate_and_bounds(void) {
         CAP_GRANT_FLAG_PROPAGATING),
         (long)CAP_GRANT_IMPERIUM_WRITE_LEN, "propagating imperium level ok");
     TEST_EXPECT_EQ(cap_pending_count(), 1, "one pending (re-register replaced in place)");
+    cap_cancel_imperium_pending(stripes + 1, 0x1A7);
+    cap_cancel_imperium_pending(stripes, 0x1A8);
+    TEST_EXPECT_EQ(cap_pending_count(), 1, "cancellation needs exact process and session");
+    cap_cancel_imperium_pending(stripes, 0x1A7);
+    TEST_EXPECT_EQ(cap_pending_count(), 0, "failed graphical episode cancels unredeemed grant");
+    TEST_EXPECT_EQ(cap_redeem_grant_for_writer(target, CAP_DAC_OVERRIDE), -1,
+                   "cancelled grant cannot elevate");
+
+    TEST_EXPECT_EQ(cap_register_seat_grant(grantor, CAP_DAC_OVERRIDE, stripes,
+        0, 0x1A9, CAP_GRANT_FLAG_PROPAGATING), (long)CAP_GRANT_IMPERIUM_WRITE_LEN,
+        "graphical grant published held");
+    TEST_EXPECT_EQ(cap_redeem_grant_for_writer(target, CAP_DAC_OVERRIDE), -1,
+        "requester cannot redeem before display restoration");
+    TEST_EXPECT_EQ(cap_release_seat_grant(stripes + 1, 0x1A9), false, "wrong incarnation cannot release");
+    TEST_EXPECT_EQ(cap_release_seat_grant(stripes, 0x1AA), false, "wrong session cannot release");
+    TEST_EXPECT_EQ(cap_redeem_grant_for_writer(target, CAP_DAC_OVERRIDE), -1,
+        "wrong release left grant held");
+    cap_cancel_imperium_pending(stripes, 0x1A9);
+    TEST_EXPECT_EQ(cap_release_seat_grant(stripes, 0x1A9), false, "failed restore cannot release cancelled grant");
+    TEST_EXPECT_EQ(cap_register_seat_grant(grantor, CAP_DAC_OVERRIDE, stripes,
+        0, 0x1AB, CAP_GRANT_FLAG_PROPAGATING), (long)CAP_GRANT_IMPERIUM_WRITE_LEN,
+        "fresh graphical grant");
+    TEST_EXPECT_EQ(cap_release_seat_grant(stripes, 0x1AB), true, "restore commits exact grant");
+    TEST_EXPECT_EQ(cap_release_seat_grant(stripes, 0x1AB), false, "release is one-shot");
+    TEST_EXPECT_EQ(cap_redeem_grant_for_writer(target, CAP_DAC_OVERRIDE), (long)CAP_USE_WRITE_LEN,
+        "restored grant redeems");
 
     drop_test_proc(target);
     drop_test_proc(grantor);

@@ -54,6 +54,7 @@
 #include <thylacine/types.h>
 #include <thylacine/vivarium.h>         // the Linux translation table (V-1b branch)
 #include <thylacine/vma.h>
+#include <thylacine/seat.h>
 #include <thylacine/weft.h>             // share_id registry + binding (SYS_WEFT_*; Weft-6a-2)
 
 #include "../arch/arm64/exception.h"
@@ -8710,6 +8711,9 @@ int sys_spawn_full_for_proc(struct Proc *p, const char *name, size_t name_len,
 // suite can drive the per-bit decision directly on synthetic Procs.
 int spawn_perm_grant_check(struct Proc *p, u32 perm_flags) {
     if (perm_flags & ~SPAWN_PERM_ALL)                              return -1;
+    if ((perm_flags & SPAWN_PERM_SEAT_MANAGER) && !proc_is_console_attached(p)) return -1;
+    if ((perm_flags & (SPAWN_PERM_SEAT_SERVICE | SPAWN_PERM_SEAT_CLIENT))
+            && !proc_is_console_attached(p) && !proc_is_seat_manager(p)) return -1;
     if ((perm_flags & SPAWN_PERM_CONSOLE_TRUSTED)
             && !proc_is_console_attached(p))                       return -1;
     if ((perm_flags & SPAWN_PERM_MAY_POST_SERVICE)
@@ -8760,6 +8764,10 @@ int spawn_perm_grant_check(struct Proc *p, u32 perm_flags) {
 // (a real spawn races the child's exit clearing g_console_owner, so the owner-set
 // wiring is unobservable through a full spawn).
 void apply_spawn_perms(struct Proc *p, u32 perm_flags) {
+    if (perm_flags & SPAWN_PERM_SEAT_MANAGER) proc_mark_seat_manager(p);
+    if (perm_flags & SPAWN_PERM_SEAT_SERVICE) (void)proc_set_seat_service(p);
+    if (perm_flags & SPAWN_PERM_SEAT_CLIENT) (void)proc_set_seat_client(p);
+
     if (perm_flags & SPAWN_PERM_MAY_POST_SERVICE) {
         proc_mark_may_post_service(p);
     }
@@ -10456,6 +10464,46 @@ int sys_srv_peer_for_proc(struct Proc *p, hidx_t conn_h,
     return 0;
 }
 
+// The native twin of the phenotype's fcntl(F_SETFL, O_NONBLOCK): one helper
+// owns the flag word's lock-domain rules, so both front doors share them.
+static s64 sys_set_nonblock_handler(u64 fd, u64 on) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc || fd >= PROC_HANDLE_MAX || on > 1) return -T_E_INVAL;
+    return handle_set_nonblock(t->proc, (hidx_t)fd, on != 0) == 0 ? 0 : -T_E_BADF;
+}
+
+// Non-static so the kernel tests drive every gate with a synthetic Proc (the
+// sys_weft_share_for_proc shape). Both identity gates run BEFORE the claim:
+// the claim consumes the share, so a stranger must never reach it.
+s64 sys_seat_import_for_proc(struct Proc *p, u64 conn, u64 share_id);
+s64 sys_seat_import_for_proc(struct Proc *p, u64 conn, u64 share_id) {
+    if (!p || conn >= PROC_HANDLE_MAX || !proc_is_seat_service(p)) return -1;
+    if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_HW_CREATE) == 0) return -1;
+    struct srv_peer_info peer;
+    if (sys_srv_peer_for_proc(p, (hidx_t)conn, &peer) != 0 || !peer.alive) return -1;
+    struct Burrow *v = weft_share_claim_from(share_id, peer.stripes);
+    if (!v) return -1;
+    // Never import device MMIO, queues, ANON, hostmem or trusted private DMA.
+    // Only the kernel's two explicitly share-admissible pixel/BO kinds qualify.
+    struct KObj_DMA *dma = v->type == BURROW_TYPE_DMA ? v->kobj_dma : NULL;
+    if (!dma || (!dma->weave && !dma->gpu_bo) ||
+            !allowance_permits(p, HW_RES_DMA, dma->size, 0)) {
+        burrow_unref(v);
+        return -1;
+    }
+    kobj_dma_ref(dma);
+    hidx_t fd = allowance_handle_alloc(p, KOBJ_DMA, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP, dma);
+    if (fd < 0) kobj_dma_unref(dma);
+    burrow_unref(v);
+    return (s64)fd;
+}
+
+static s64 sys_seat_import_handler(u64 conn, u64 share_id) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) return -1;
+    return sys_seat_import_for_proc(t->proc, conn, share_id);
+}
+
 static s64 sys_srv_peer_handler(u64 conn_h_raw, u64 out_va) {
     struct Thread *t = current_thread();
     if (!t)                                            return -1;
@@ -10673,6 +10721,29 @@ static s64 sys_console_relinquish_handler(void) {
 // g_proc_table_lock hold in proc_console_episode; this handler only resolves
 // the caller. Returns 0 / -1 (a non-trusted caller, a bad op, END with no
 // open episode).
+static s64 sys_trusted_seat_handler(u64 op, u64 va) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc || op > SEAT_CLIENT || !va ||
+            va >= UACCESS_USER_VA_TOP || sizeof(struct seat_message) > UACCESS_USER_VA_TOP - va)
+        return -1;
+    struct seat_message message;
+    seat_zero(&message, sizeof(message));
+    u8 *bytes = (u8 *)&message;
+    for (u64 i = 0; i < sizeof(message); i++)
+        if (uaccess_load_u8(va + i, &bytes[i]) != 0) { seat_zero(&message, sizeof(message)); return -1; }
+    int rc = proc_seat_op(t->proc, (u32)op, &message);
+    if (rc < 0) { seat_zero(&message, sizeof(message)); return -1; }
+    for (u64 i = 0; i < sizeof(message); i++) {
+        if (uaccess_store_u8(va + i, bytes[i]) != 0) {
+            for (u64 j = 0; j < i; j++) (void)uaccess_store_u8(va + j, 0);
+            seat_zero(&message, sizeof(message));
+            return -1;
+        }
+    }
+    seat_zero(&message, sizeof(message));
+    return rc;
+}
+
 static s64 sys_console_episode_handler(u64 op) {
     struct Thread *t = current_thread();
     if (!t)                            return -1;
@@ -14931,6 +15002,18 @@ void syscall_dispatch(struct exception_context *ctx) {
         return;
 
     // IM-1: the trusted EPISODE (IMPERIUM-DESIGN.md 11.3; I-27).
+    case SYS_SET_NONBLOCK:
+        ctx->regs[0] = (u64)sys_set_nonblock_handler(ctx->regs[0], ctx->regs[1]);
+        return;
+
+    case SYS_SEAT_IMPORT:
+        ctx->regs[0] = (u64)sys_seat_import_handler(ctx->regs[0], ctx->regs[1]);
+        return;
+
+    case SYS_TRUSTED_SEAT:
+        ctx->regs[0] = (u64)sys_trusted_seat_handler(ctx->regs[0], ctx->regs[1]);
+        return;
+
     case SYS_CONSOLE_EPISODE:
         ctx->regs[0] = (u64)sys_console_episode_handler(ctx->regs[0]);
         return;

@@ -1124,12 +1124,16 @@ static long devsrv_read(struct Spoor *c, void *buf, long n, s64 off) {
         // (3c) -- the only v1.0 byte client (joey -> stratum-fs) attach-wraps its
         // conn Spoor, so the kernel 9P client drives s2c via srvconn_client_recv
         // directly. The CSRVCLIENT direction is the mirror of the server arm.
+        if (spoor_flag_get(c) & CNONBLOCK)
+            return srvconn_io_nonblock(cn, false, false, buf, n);
         return srvconn_client_recv(cn, (u8 *)buf, n);
     }
     // SERVER endpoint (the poster's accepted Spoor): read c2s. Atomic acquire on
     // byte_mode (F5 close): pair the setter's ATOMIC_RELEASE in
     // srvconn_set_byte_mode so a multi-thread Proc reading this endpoint sees
     // the mode that was propagated at SrvConn mint.
+    if (spoor_flag_get(c) & CNONBLOCK)
+        return srvconn_io_nonblock(cn, true, false, buf, n);
     bool bm = __atomic_load_n(&cn->byte_mode, __ATOMIC_ACQUIRE);
     if (bm) {
         return srvconn_server_recv_blocking(cn, (u8 *)buf, n);
@@ -1162,6 +1166,8 @@ static long devsrv_write(struct Spoor *c, const void *buf, long n, s64 off) {
         // forwarding a Tmsg upstream is exactly that caller. Parks until the
         // server drains c2s or teardown; role-parked vs a concurrent
         // peer-thread writer (#354).
+        if (spoor_flag_get(c) & CNONBLOCK)
+            return srvconn_io_nonblock(cn, false, true, (void *)buf, n);
         return srvconn_client_send_blocking(cn, (const u8 *)buf, n);
     }
     // SERVER endpoint: write replies toward the client via s2c. BLOCKING
@@ -1173,6 +1179,8 @@ static long devsrv_write(struct Spoor *c, const void *buf, long n, s64 off) {
     // PARKS until the first releases the role (#354 close -- pre-fix it was
     // refused -1, sound only while stratumd's own write_mu serialized its
     // CF-2 worker threads' replies; the kernel no longer leans on that).
+    if (spoor_flag_get(c) & CNONBLOCK)
+        return srvconn_io_nonblock(cn, true, true, (void *)buf, n);
     return srvconn_server_send_blocking(cn, (const u8 *)buf, n);
 }
 

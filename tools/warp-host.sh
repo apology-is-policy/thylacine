@@ -88,6 +88,14 @@ PY
 
 sync_pool() {
     local lpool="$REPO_ROOT/build/fixtures/pool.img"
+    # Ship the PRISTINE pool when the bake left one. `pool.img` is what the
+    # last local run booted (and may have written to); `.baked-snapshot` is
+    # what build.sh minted beside the key, and it is what LS-CI restores from.
+    # Only when the key twins cohere -- the same test the harness applies.
+    local lkey="$REPO_ROOT/build/fixtures/system.key"
+    if [ -f "$lpool.baked-snapshot" ] && cmp -s "$lkey" "$lkey.baked-snapshot" 2>/dev/null; then
+        lpool="$lpool.baked-snapshot"
+    fi
     # $RREPO carries a literal `~`, which only expands UNQUOTED on the remote --
     # and every path here must be quoted (it is passed through nested bash -c).
     # Resolve the remote home once so the path is absolute and quote-safe.
@@ -163,6 +171,28 @@ sync_pool() {
     fi
     ssh "$HOST" "mv -f \"$rpool.part\" \"$rpool\""
     echo "== pool verified: all $nchunks chunks hash-match, renamed into place =="
+
+    # THE RESTORE TWINS TRAVEL WITH THE POOL. tools/test-interactive.sh boots
+    # every attempt from `pool.img.baked-snapshot`, and validates it only
+    # against `system.key.baked-snapshot` -- twin against twin, never against
+    # the ramfs that will boot. A host that once baked locally keeps a coherent
+    # PAIR of stale twins, so a sync that ships pool + ramfs and not the twins
+    # boots the new ramfs on the OLD pool: stratumd rc=-201 (STM_EBADTAG) and
+    # `EXTINCTION: joey exited non-zero`, on every attempt, reading exactly like
+    # a guest defect. Two agents lost a run each to it (2026-09-18, 2026-09-21).
+    # The key is already on the wire -- the ramfs bakes it.
+    ssh "$HOST" "cp --sparse=always \"$rpool\" \"$rpool.baked-snapshot\""
+    local rkey="$rhome/projects/thylacine/build/fixtures/system.key"
+    scp -q "$lkey" "$HOST:$rkey"
+    ssh "$HOST" "chmod 600 \"$rkey\" && cp -p \"$rkey\" \"$rkey.baked-snapshot\""
+    local lk rk
+    lk=$(md5 -q "$lkey" 2>/dev/null || md5sum "$lkey" | cut -d" " -f1)
+    rk=$(ssh "$HOST" "md5sum \"$rkey\" \"$rkey.baked-snapshot\" | cut -d\" \" -f1 | sort -u")
+    if [ "$rk" != "$lk" ]; then
+        echo "SYNC-FAILED: the remote key twins do not match the local system.key" >&2
+        exit 1
+    fi
+    echo "== restore twins refreshed: pool.img.baked-snapshot + both key twins match this sync =="
 }
 
 sync_all() {

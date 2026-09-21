@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/NET-PERF.md", "docs/NET-CLOSE-DESIGN.md"]
 created: 2026-09-17
-updated: 2026-09-17
+updated: 2026-09-21
 ---
 ## Purpose
 
@@ -30,7 +30,7 @@ M3 repeatedly connects, accepts and closes both ends. The Weft comparison uses
 mapped rings and readiness backpressure; its breakdown separates data movement
 from readiness stalls.
 
-M3 and M6 connection-churn measurements use `connect_with_admission`. Only
+M3 and M6 connection-churn measurements use `connect_with_admission`, and so do the phases that FOLLOW a churn (MW after M3, the M6 throughput leg after its connect leg): a plain connect there made the phase, and with it the boot, depend on whether a retiree had aged out yet (one boot in about eighty extincted on it). Only
 ENOMEM (the existing fixed-resource exhaustion error) retries, every 25 ms,
 with a 35-second deadline. All admission waiting remains inside the measured
 dial latency and a diagnostic reports refusals and recovery. Other errors fail

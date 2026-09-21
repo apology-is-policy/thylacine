@@ -6,7 +6,15 @@
 # /lib/halcyon/renderer = "halcyond" only under THYLACINE_HALCYON=1, because
 # every sibling scenario and the suite assume the aurora fbcon. On a default
 # image joey spawns aurora and this scenario SKIPs cleanly (the go5/chords
-# idiom: lc_quit + exit 0); on a lever image it proves:
+# idiom: lc_quit + exit 0). It asserts the LEGACY profile's literals (the
+# Daylight parchment, the bezel tag bars), and since 2026-09-21 the bare build
+# bakes `instrument`, so its image is:
+#
+#   THYLACINE_HALCYON=1 THYLACINE_HALCYON_SESSION=0 \
+#   THYLACINE_HALCYON_PROFILE=legacy tools/build.sh kernel
+#
+# (or `--config ci`, which pins the legacy profile, plus THYLACINE_HALCYON=1).
+# The Instrument twin is ls-halcyon-instrument.exp. On a lever image it proves:
 #
 #   render  : joey chose halcyond; the rich advertisement landed; login ->
 #             ut flows through the transcript; the screendump's dominant
@@ -454,9 +462,9 @@ lc_run_expect "pwd" "/lib/aurora"
 lc_run_expect "cd; pwd" "/home/michael"
 
 # H-3c: THE KEYBOARD PATH (HALCYON.md 13.6 "obj interaction"; 5/6). `ls
-# /lib/aurora; pwd` leaves a path obj run on the row above the newest; Esc
-# enters Normal at the newest row, k moves onto the ls row, Enter opens the
-# verb menu for its first run. halcyond says the placement + the run's
+# /lib/aurora; pwd` leaves a path obj run above the newest row; Esc enters
+# Normal at the newest row, `b` steps onto the ls row's run (menu_open_kbd
+# says why not `k`), Enter opens the verb menu for the row's first run. halcyond says the placement + the run's
 # DISPLAY rect (the coordinates every later leg keys on); the compositor
 # says its own placement. The menu ground is Daylight `raised` (189,176,160)
 # -- a colour nothing else on this screen is painted -- so the placed rect's
@@ -468,13 +476,20 @@ lc_run_expect "cd; pwd" "/home/michael"
 # `placed` line, printed inside the `menu place` write, before halcyond's;
 # halcyond's line carries the REQUESTED point, which the compositor clamps
 # into the display) + the ref halcyond displayed.
-proc menu_placed {what} {
-    global timeout lc_cmd_timeout
+proc menu_placed {what {miss_ok 0}} {
+    global timeout lc_cmd_timeout menu_miss_rows
     set timeout $lc_cmd_timeout
     expect {
         -re {tapestryd: menu (\d+) placed at (\d+),(\d+) (\d+)x(\d+)[\r\n]} {
             set id $expect_out(1,string); set x $expect_out(2,string); set y $expect_out(3,string)
             set w $expect_out(4,string); set h $expect_out(5,string)
+        }
+        -re {halcyond: click at \d+,\d+ -> no run[\r\n]} {
+            # The receiver's verdict on a press that found no run. Every line
+            # consumed on the way here (this one included) is a transcript row.
+            if {!$miss_ok} { lc_fail "$what: the click found no run" }
+            set menu_miss_rows [regexp -all {\n} $expect_out(buffer)]
+            return {}
         }
         -re {halcyond: menu (surface failed|place refused)[^\r\n]*} {
             lc_fail "$what: the menu was refused: $expect_out(0,string)"
@@ -491,9 +506,20 @@ proc menu_placed {what} {
         eof     { lc_fail "$what: EOF waiting for halcyond's placement line" }
     }
 }
-proc menu_open_kbd {what} {
+# `b` (PrevRun), never `k`: the transcript mirrors the console, the console
+# carries every daemon's witness lines, and the compositor's idle-throttle
+# transition prints one on the very keypress that enters Normal -- so how many
+# rows sit between the newest row and the ls row is not the gate's to know.
+# PrevRun steps to the newest obj run above the cursor however many there are.
+# `unselected` then moves the cursor off the row and back (a cursor move drops
+# the run selection), so Enter takes the row's-first-run fallback instead.
+proc menu_open_kbd {what {unselected 0}} {
     hkey "esc"
-    hkey "k"
+    hkey "b"
+    if {$unselected} {
+        hkey "j"
+        hkey "k"
+    }
     hkey "ret"
     return [menu_placed $what]
 }
@@ -559,7 +585,7 @@ proc ptr_click {} {
 }
 
 lc_run_expect "ls /lib/aurora; pwd" "/home/michael"
-lassign [menu_open_kbd "keyboard menu"] mid mx my mw mh mref
+lassign [menu_open_kbd "keyboard menu" 1] mid mx my mw mh mref
 if {![string match "/lib/aurora/*" $mref]} {
     lc_fail "the menu names ref '$mref', not a resolved /lib/aurora/ path (the anti-clickjack line)"
 }
@@ -783,27 +809,71 @@ lc_pass "halcyon: in the split, the keyboard menu opened under the left pane's r
 # THE OBSERVER EFFECT: every diagnostic line the compositor or halcyond
 # prints is mirrored into the console transcript and scrolls it, so a run
 # rect reported earlier no longer holds. The click aims at a FRESH report:
-# Esc, k onto the ls row, `w` selects its run and (test builds) says the
-# run's CURRENT display rect + the mono row height -- that one line then
-# scrolls the transcript by exactly one such row, which the click subtracts.
+# Esc, `b` onto the ls row's run, which (test builds) says the run's CURRENT
+# display rect. From that line on, every line the console prints is one more
+# row of scroll, and the gate can COUNT them -- it reads the same stream the
+# transcript mirrors. Assuming a count instead (one: the report itself) held
+# only until a witness fired inside the window: the idle-throttle transition
+# prints on a quiet second AND on the pointer move that ends it.
+# Rows scroll by the run's own laid height (`rh`), not the mono cell
+# (`rowh`): the two differ, and the difference compounds past one row.
+# A press that still misses is harmless (the receiver says `-> no run` and
+# does nothing) and lands BELOW the run, never above it, since a row can be
+# uncounted but not over-counted: recount and re-aim, one row up when nothing
+# new was counted (a line that landed beside the report itself).
 hkey "i"
 lc_run_expect "ls /lib/aurora; pwd" "/home/michael"
 hkey "esc"
-hkey "k"
-hkey "w"
+hkey "b"
 set timeout $lc_cmd_timeout
 expect {
     -re {halcyond: run at (\d+) (\d+) (\d+) (\d+) rowh (\d+)[\r\n]} {
         set rx $expect_out(1,string); set ry $expect_out(2,string)
         set rw $expect_out(3,string); set rh $expect_out(4,string); set rowh $expect_out(5,string)
     }
-    timeout { lc_fail "no run report after w (test-mode halcyond?)" }
+    timeout { lc_fail "no run report after b (test-mode halcyond?)" }
     eof     { lc_fail "EOF waiting for the run report" }
 }
-after 800 ;# the report line lands in the transcript and re-renders before the click
-ptr_abs [expr {$rx + $rw / 2}] [expr {$ry + $rh / 2 - $rowh}]
-ptr_click
-lassign [menu_placed "click menu"] cid cx cy cw ch cref
+set scrolled 0
+set click {}
+for {set try 0} {$try < 5 && [llength $click] == 0} {incr try} {
+    # The press must land while the compositor is AWAKE: a press that wakes it
+    # prints the transition beside the very hit test it would move. So wake it
+    # with a move first (hkey's and ptr_click's trailing waits let it idle, so
+    # the wake line is pending by the time ptr_abs returns), count what has
+    # landed in ONE read -- expect's timeout is whole seconds and the idle
+    # threshold is one, so a drain-until-quiet would itself let the compositor
+    # idle again -- then re-aim and press inside that same second. When
+    # nothing is pending the read waits its second out and the press may
+    # miss; the next turn of the loop starts from an idle compositor again.
+    ptr_abs [expr {$rx + $rw / 2}] [expr {$ry + $rh / 2 - $rh * max($scrolled, 1)}]
+    # Two reads: a zero timeout matches only what the last expect left
+    # behind (it never reads), and the one after it must therefore go to the
+    # console, where it returns at once with everything pending.
+    set landed 0
+    set timeout 0
+    expect {
+        -re {.+} { incr landed [regexp -all {\n} $expect_out(buffer)] }
+        timeout {}
+    }
+    set timeout 1
+    expect {
+        -re {.+} { incr landed [regexp -all {\n} $expect_out(buffer)] }
+        timeout {}
+    }
+    if {$landed == 0 && $try > 0} { set landed 1 }
+    incr scrolled $landed
+    ptr_abs [expr {$rx + $rw / 2}] [expr {$ry + $rh / 2 - $rh * $scrolled}]
+    ptr_click
+    set menu_miss_rows 0
+    set click [menu_placed "click menu" 1]
+    incr scrolled $menu_miss_rows
+}
+if {[llength $click] == 0} {
+    lc_fail "click menu: five presses aimed at the run's reported rect, re-aimed by the rows counted since ($scrolled), all found no run"
+}
+lc_step "click menu: the press found the run after $try aim(s), $scrolled row(s) of scroll since its report"
+lassign $click cid cx cy cw ch cref
 if {$cref ne $mref} {
     lc_fail "the click opened a menu for '$cref', the keyboard for '$mref' -- not the same run"
 }

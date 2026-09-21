@@ -166,12 +166,45 @@ WZ_DIR_THEMES="${WZ_DIR_THEMES:-$REPO_ROOT/usr/lib/halcyon/themes}"
 wz_theme_dir() { printf '%s' "$WZ_DIR_THEMES"; }
 
 # One bare name per line (basename minus .toml), or nothing if the dir is empty.
+# TEMPLATE.toml is the authoring skeleton, not a theme: its values are
+# placeholders, so offering it would offer an image nobody designed.
 wz_theme_names() {
     local f b
     for f in "$(wz_theme_dir)"/*.toml; do
         [[ -e "$f" ]] || continue          # the literal glob when nothing matches
-        b="${f##*/}"; printf '%s\n' "${b%.toml}"
+        b="${f##*/}"; b="${b%.toml}"
+        [[ "$b" == TEMPLATE ]] && continue
+        printf '%s\n' "$b"
     done
+}
+
+# The profile a theme file was DESIGNED for, read off its own [meta]: an
+# Instrument theme declares `profile = "instrument-v1"`; a file with no such
+# line is in the legacy schema. Read from the file rather than listed here for
+# the reason the names are: a list in this script would go stale the day a
+# theme is added.
+wz_theme_schema() {
+    local f="$(wz_theme_dir)/$1.toml"
+    [[ -f "$f" ]] || { printf 'unknown'; return 0; }
+    if grep -q '^[[:space:]]*profile[[:space:]]*=[[:space:]]*"instrument-v1"' "$f" 2>/dev/null; then
+        printf 'instrument'
+    else
+        printf 'legacy'
+    fi
+}
+
+# Say so when the chosen theme and the chosen profile are different schemas.
+# It is not an error -- the loader projects one onto the other -- but it is the
+# pairing that produces a UI nobody drew, and the operator should pick it on
+# purpose rather than discover it at boot.
+wz_note_theme_pairing() {
+    local theme profile schema
+    theme="$(bc_get HALCYON_THEME)"; profile="$(bc_get HALCYON_PROFILE)"
+    [[ -n "$theme" ]] || return 0
+    schema="$(wz_theme_schema "$theme")"
+    [[ "$schema" == unknown || "$schema" == "$profile" ]] && return 0
+    printf '    ! theme %s is a %s-schema theme but HALCYON_PROFILE=%s: it will be\n' "$theme" "$schema" "$profile"
+    printf '      PROJECTED onto the %s UI (it works; it is not what its author drew).\n' "$profile"
 }
 
 # A theme's own [meta] name, so the menu reads "aero -- Frutiger Aero" rather
@@ -196,13 +229,13 @@ wz_ask_theme() {
 $(wz_theme_names)
 EOF
     count="${#names[@]}"
-    printf '    0) (built-in Daylight -- the compiled-in light theme; no file baked)\n'
+    printf '    0) (built-in -- the profile'"'"'s own compiled-in theme; no file baked)\n'
     for ((i = 0; i < count; i++)); do
         lbl="$(wz_theme_label "${names[$i]}")"
         if [[ -n "$lbl" ]]; then
-            printf '    %d) %-12s -- %s\n' "$((i + 1))" "${names[$i]}" "$lbl"
+            printf '    %d) %-12s [%-10s] -- %s\n' "$((i + 1))" "${names[$i]}" "$(wz_theme_schema "${names[$i]}")" "$lbl"
         else
-            printf '    %d) %s\n' "$((i + 1))" "${names[$i]}"
+            printf '    %d) %-12s [%-10s]\n' "$((i + 1))" "${names[$i]}" "$(wz_theme_schema "${names[$i]}")"
         fi
     done
     [[ "$count" == 0 ]] && printf '    (no *.toml found in %s)\n' "$(wz_theme_dir)"
@@ -217,7 +250,8 @@ EOF
             0)  bc_set_one HALCYON_THEME "" >/dev/null; return 0 ;;
             [1-9]|[1-9][0-9])
                 if (( ans <= count )); then
-                    bc_set_one HALCYON_THEME "${names[$((ans - 1))]}" >/dev/null; return 0
+                    bc_set_one HALCYON_THEME "${names[$((ans - 1))]}" >/dev/null
+                    wz_note_theme_pairing; return 0
                 fi
                 printf '    -- no such entry; pick 0..%d, or type a name.\n' "$count"; continue ;;
         esac
@@ -225,6 +259,7 @@ EOF
             [[ -f "$(wz_theme_dir)/$ans.toml" ]] \
                 || printf '    ! no %s.toml in %s yet -- the build will refuse until it exists.\n' \
                           "$ans" "$(wz_theme_dir)"
+            wz_note_theme_pairing
             return 0
         fi
         printf '    -- not a valid theme name.\n'
@@ -340,6 +375,7 @@ if [[ "$accept_defaults" == 1 ]]; then
     fi
     bc_resolve || { echo "configure: the seed resolved to an invalid config" >&2; exit 1; }
     wz_flag_absent_chunks
+    wz_note_theme_pairing
     wz_write "$out_name" 0
     exit 0
 fi
@@ -357,6 +393,9 @@ wz_walk
 bc_resolve || { echo "configure: resolved to an invalid config (should not happen)" >&2; exit 1; }
 wz_summary
 wz_flag_absent_chunks
+# Again at the end: the profile may have been changed AFTER the theme was
+# picked, and the pairing is a property of the two together.
+wz_note_theme_pairing
 printf '\nWrite this profile? [Y/n]: '; confirm=""; IFS= read -r confirm || true
 case "$confirm" in n|N|no) printf 'Aborted; nothing written.\n'; exit 0 ;; esac
 printf 'Save as profile name [%s]: ' "${out_name:-custom}"; nm=""; IFS= read -r nm || true

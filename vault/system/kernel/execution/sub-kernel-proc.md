@@ -10,8 +10,33 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-09-17
+updated: 2026-09-21
 ---
+## Graphical seat incarnations
+
+The kernel binds one boot-designated hardware service, one normal compositor
+and Corvus to a generation-bearing seat. Manager/service/client spawn roles are
+not inherited. Only service and Corvus may operate the trusted endpoint; the
+normal designation admits broker connections but no trusted operations. Binding
+the service sets NODUMP and NOTRACE before userspace runs. The SERVICE's death
+fails the seat and no process inherits its hardware ownership. The compositor's
+death fails the seat only while an episode is in progress; in the normal phase it
+just clears the client slot, so warden can seat a new one. `proc_seat_fail_locked`
+cancels the held grant, scrubs the key queue and closes the console episode ONLY
+when the seat opened it (phase exclusive): a serial episode runs while the seat
+is normal, and closing it would unfreeze the console under a serial key entry.
+A failed seat returns to normal through SEAT_RESTORED, which releases nothing
+because the failure already zeroed the grant identity. The attention chord is
+scanned here (`seat_attention_held`: Control + Alt + Delete or F10). Episode
+transitions, pending-grant commit/cancellation and death serialize under the
+process-table lock. The three phase deadlines (5 s quiesce, 90 s exclusive, 5 s
+restoring) are checked LAZILY, at the next seat operation by the service or
+Corvus -- there is no kernel timer, so a seat whose two operators are both
+wedged stays frozen on the trusted scene: fail-closed for I-27, and an
+availability loss only if TCB processes hang. `proc_test_seat_expire`
+(KERNEL_TESTS only) zeroes the deadline so the suite can reach the three expiry
+arms without waiting out wall clock. See [[abi-trusted-seat]] and [[sub-lictor]].
+
 ## Purpose
 
 A `Proc` is the unit of isolation: one address space, one Territory, one

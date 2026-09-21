@@ -9,3 +9,5 @@ path = "src/main.rs"
 
 [dependencies]
 libthyla-rs = { path = "../lib/libthyla-rs" }
+
+lictor = { path = "../lictor", default-features = false, features = ["guest"] }

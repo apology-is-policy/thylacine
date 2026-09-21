@@ -130,7 +130,12 @@ kernel → renderer "enter/leave trusted mode" signal), never to the shell.
 
 - **Serial**: a PL011 BREAK — a line condition, kernel-caught, unforgeable by data.
   Exists today (`cons.c` `DR.BE`).
-- **Graphical**: a reserved key-combo (Ctrl-Alt-Del-class). The trusted-path input
+- **Graphical**: a reserved key-combo. AS BUILT it is either Control + either Alt
+  + Delete **or F10** (the second final key because Delete is absent from compact
+  and laptop keyboards), scanned by the KERNEL from the trusted input owner's
+  key reports (`proc_seat_op` SEAT_INPUT; the codes are named in `seat.h`). No
+  compositor, shell or theme takes part in deciding what attention is, which is
+  also why the chord is not found by searching Halcyon's key maps. The trusted-path input
   device is either kernel-owned (the UART) or, on a board, a **trusted-tier system
   keyboard driver** (MENAGERIE.md §7 kernel-resident / system tier — never a
   third-party driver). That driver delivers raw HID events *through the kernel*,
@@ -167,11 +172,21 @@ All planes, cursors, outputs, capture paths, DMA access and pending submissions
 are part of the exclusion proof. A simple-framebuffer node or CPU mapping alone
 is insufficient evidence. Backends must pass conformance tests before enablement.
 
-**As built:** only the serial episode is enforced today. The kernel gates UART
-output to the attached trusted process, and Corvus renders ANSI in userspace.
-The new graphical architecture is approved but unimplemented. Its service cannot
-be assumed available during a kernel panic; graphical Halls output needs a separate
-crash-ownership contract, not a second live GPU driver.
+**As built:** the serial episode gates UART output to the attached trusted
+process. The QEMU graphical backend uses Lictor as the boot-trusted physical
+GPU/input owner, with Corvus semantic frames and kernel generation/visibility
+checks. Tapestry holds only the normal broker role. Grants remain held until
+acknowledged restoration; owner failure cancels them before redemption. A failed
+episode (a deadline, a refused device step, a malformed frame) cancels its grant
+and then RECOVERS: the owner restores normal output and the kernel returns the
+seat to normal, releasing nothing. A seat failure never closes a serial episode
+-- it closes only the episode the seat itself opened. The
+current backend uses the neutral field because private workspace capture is not
+implemented. Serial authorization requires `thylacine.serial-sak=1`; the QEMU dev
+launcher selects it unless `THYLACINE_SERIAL_SAK=0`.
+
+Lictor cannot be assumed available during a kernel panic; graphical Halls output
+needs a separate crash-ownership contract. Pi 400/Pi 500 remain unqualified.
 
 ---
 

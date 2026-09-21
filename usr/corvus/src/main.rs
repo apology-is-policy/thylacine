@@ -3838,11 +3838,91 @@ enum KeyRead {
     Error,
 }
 
-unsafe fn console_write_all(fd: i64, buf: &[u8]) -> bool {
+// Corvus policy is shared by both transports. Graphical output is semantic;
+// neither ANSI nor secret bytes are ever sent to an ordinary surface.
+struct EpisodeIo {
+    serial: i64,
+    generation: u64,
+    model: lictor::model::Model,
+}
+impl EpisodeIo {
+    unsafe fn open() -> Option<Self> {
+        use lictor::endpoint as ep;
+        let mut m = ep::Message::default();
+        ep::call(ep::QUERY, &mut m).ok()?;
+        let (serial, generation) = match m.phase {
+            0 => { let fd = t_console_open(); if fd < 0 { return None; } (fd, 0) },
+            2 if m.generation != 0 => (-1, m.generation),
+            _ => return None,
+        };
+        Some(Self { serial, generation, model: lictor::model::Model::default() })
+    }
+    fn request(&mut self, p: &ImperiumPending) {
+        self.model = lictor::model::Model {
+            state: lictor::model::State::Pending, pid: p.pid, principal: p.principal_id,
+            stripes: p.stripes, caps: p.caps, term_ns: p.valid_for_ns,
+            request_deadline_ns: p.deadline_ns, propagating: p.propagating,
+            user: p.user.clone(), level: p.level.to_vec(), notice: Vec::new(),
+        };
+    }
+    fn mask(&self, length: usize) -> bool {
+        if self.generation == 0 { return true; }
+        let mut m = lictor::endpoint::Message::default();
+        m.generation = self.generation; m.value = length as u32;
+        lictor::endpoint::call(lictor::endpoint::MASK, &mut m).is_ok()
+    }
+    // Tell the requester only after physical restoration committed its held
+    // grant. Merely withholding the reply is not the security boundary: the
+    // kernel independently refuses early /use attempts by a polling requester.
+    unsafe fn finish(&self) -> bool {
+        if t_console_episode(T_CONSOLE_EPISODE_END) != 0 { return false; }
+        if self.generation == 0 { return true; }
+        use lictor::endpoint as ep;
+        for _ in 0..600 {
+            let mut m = ep::Message::default();
+            if ep::call(ep::QUERY, &mut m).is_err() || m.generation != self.generation { return false; }
+            if m.phase == 0 { return true; }
+            if m.phase != 3 { return false; }
+            let _ = libthyla_rs::time::sleep(core::time::Duration::from_millis(10));
+        }
+        false
+    }
+    unsafe fn grant(&self, caps: u64, stripes: u64, term: u64, session: u64, flags: u64) -> bool {
+        if self.generation == 0 { return t_cap_grant_imperium(caps, stripes, term, session, flags) == 0; }
+        let mut m = lictor::endpoint::Message::default();
+        m.generation = self.generation; m.length = 40;
+        for (i, arg) in [caps, stripes, term, session, flags].iter().enumerate() {
+            m.data[i * 8..i * 8 + 8].copy_from_slice(&arg.to_le_bytes());
+        }
+        lictor::endpoint::call(lictor::endpoint::GRANT, &mut m).is_ok()
+    }
+}
+impl Drop for EpisodeIo {
+    fn drop(&mut self) { if self.serial >= 0 { unsafe { t_close(self.serial); } } }
+}
+
+unsafe fn console_write_all(fd: &mut EpisodeIo, buf: &[u8]) -> bool {
+    if fd.generation != 0 {
+        use lictor::endpoint as ep;
+        let bytes = match fd.model.encode() { Ok(bytes) => bytes, Err(_) => return false };
+        let mut m = ep::Message::default();
+        m.generation = fd.generation; m.length = bytes.len() as u32;
+        m.data[..bytes.len()].copy_from_slice(&bytes);
+        if ep::call(ep::FRAME, &mut m).is_err() { return false; }
+        let sequence = m.sequence;
+        // Await actual presentation, not just submission. A backend failure or
+        // changed generation prevents key collection and grant publication.
+        for _ in 0..200 {
+            if ep::call(ep::QUERY, &mut m).is_err() || m.generation != fd.generation || m.phase != 2 { return false; }
+            if m.sequence == sequence && m.value == 1 { return true; }
+            let _ = libthyla_rs::time::sleep(core::time::Duration::from_millis(10));
+        }
+        return false;
+    }
     let mut off = 0usize;
     while off < buf.len() {
         let chunk = core::cmp::min(buf.len() - off, FS_IO_CHUNK);
-        let w = t_write(fd, buf[off..].as_ptr(), chunk);
+        let w = t_write(fd.serial, buf[off..].as_ptr(), chunk);
         if w <= 0 || (w as usize) > chunk {
             return false;
         }
@@ -3851,11 +3931,11 @@ unsafe fn console_write_all(fd: i64, buf: &[u8]) -> bool {
     true
 }
 
-// One bounded wait for a console byte. The bound is the clock; `idle_slices`
-// counts only the polls that EXPIRED (never the ones that returned a byte), so
+// One bounded wait for a console byte. The bound is the clock; `idle_ms`
+// counts milliseconds spent in idle waits (never waits returning a byte), so
 // a broken clock still bounds the prompt at ~timeout_ms of idle time while a
 // keystroke flood cannot exhaust it.
-unsafe fn console_next_byte(fd: i64, start_ns: u64, timeout_ms: u64, idle_slices: &mut u64) -> NextByte {
+unsafe fn console_next_byte(fd: &mut EpisodeIo, start_ns: u64, timeout_ms: u64, idle_ms: &mut u64) -> NextByte {
     loop {
         let now = monotonic_ns();
         let elapsed_ms = if start_ns != 0 && now >= start_ns {
@@ -3863,28 +3943,37 @@ unsafe fn console_next_byte(fd: i64, start_ns: u64, timeout_ms: u64, idle_slices
         } else {
             0
         };
-        if elapsed_ms >= timeout_ms || *idle_slices * IMPERIUM_PROMPT_SLICE_MS >= timeout_ms {
+        if elapsed_ms >= timeout_ms || *idle_ms >= timeout_ms {
             return NextByte::Timeout;
         }
+        if fd.generation != 0 {
+            use lictor::endpoint as ep;
+            let mut m = ep::Message::default(); m.generation = fd.generation;
+            if ep::call(ep::KEY, &mut m).is_err() { return NextByte::Error; }
+            if m.length == 1 { return NextByte::Byte(m.data[0]); }
+            let _ = libthyla_rs::time::sleep(core::time::Duration::from_millis(10));
+            *idle_ms += 10;
+            continue;
+        }
         let wait = core::cmp::min(IMPERIUM_PROMPT_SLICE_MS, timeout_ms - elapsed_ms) as i32;
-        let mut pfd = TPollFd { fd: fd as i32, events: T_POLLIN, revents: 0 };
+        let mut pfd = TPollFd { fd: fd.serial as i32, events: T_POLLIN, revents: 0 };
         let rc = t_poll(&mut pfd as *mut TPollFd, 1, wait);
         if rc < 0 {
             return NextByte::Error;
         }
         if rc == 0 {
-            *idle_slices += 1;
+            *idle_ms += wait as u64;
             continue;
         }
         if pfd.revents & (T_POLLERR | T_POLLHUP | T_POLLNVAL) != 0 {
             return NextByte::Error;
         }
         if pfd.revents & T_POLLIN == 0 {
-            *idle_slices += 1;
+            *idle_ms += wait as u64;
             continue;
         }
         let mut b = [0u8; 1];
-        let n = t_read(fd, b.as_mut_ptr(), 1);
+        let n = t_read(fd.serial, b.as_mut_ptr(), 1);
         if n < 0 {
             return NextByte::Error;
         }
@@ -3893,7 +3982,7 @@ unsafe fn console_next_byte(fd: i64, start_ns: u64, timeout_ms: u64, idle_slices
             // idle-slice bound (holotype F6): otherwise a console that reports
             // ready but returns 0 could spin without advancing the fallback that
             // bounds the prompt when the monotonic clock is broken.
-            *idle_slices += 1;
+            *idle_ms += wait as u64;
             continue;
         }
         return NextByte::Byte(b[0]);
@@ -3903,7 +3992,7 @@ unsafe fn console_next_byte(fd: i64, start_ns: u64, timeout_ms: u64, idle_slices
 // The key prompt: raw and unechoed (BEGIN forced RAW + ECHO off). DEL/BS edit,
 // Ctrl-U kills the line, CR/LF submits, Ctrl-C declines. Every path that does
 // not hand the key back wipes it first.
-unsafe fn console_read_key(fd: i64, timeout_ms: u64) -> KeyRead {
+unsafe fn console_read_key(fd: &mut EpisodeIo, timeout_ms: u64) -> KeyRead {
     let mut key: Vec<u8> = Vec::with_capacity(MAX_PASS_LEN);
     let start = monotonic_ns();
     let mut idle: u64 = 0;
@@ -3920,7 +4009,7 @@ unsafe fn console_read_key(fd: i64, timeout_ms: u64) -> KeyRead {
             }
         };
         match b {
-            0x03 => {
+            0x03 | 0x1b => {
                 wipe(&mut key);
                 return KeyRead::Declined;
             }
@@ -3943,11 +4032,12 @@ unsafe fn console_read_key(fd: i64, timeout_ms: u64) -> KeyRead {
                 key.push(c);
             }
         }
+        if !fd.mask(key.len()) { wipe(&mut key); return KeyRead::Error; }
     }
 }
 
 // Dismiss an informational panel: any byte, or the bound.
-unsafe fn console_wait_any_key(fd: i64, timeout_ms: u64) {
+unsafe fn console_wait_any_key(fd: &mut EpisodeIo, timeout_ms: u64) {
     let start = monotonic_ns();
     let mut idle: u64 = 0;
     let _ = console_next_byte(fd, start, timeout_ms, &mut idle);
@@ -4026,23 +4116,26 @@ unsafe fn episode_end() {
     }
 }
 
-unsafe fn verdict(fd: i64, out: &mut Vec<u8>, line: &[u8]) {
+unsafe fn verdict(fd: &mut EpisodeIo, out: &mut Vec<u8>, line: &[u8], state: lictor::model::State) {
+    fd.model.state = state;
+    fd.model.notice = line.to_vec();
     out.clear();
     provincia::compose_verdict(line, out);
-    let _ = console_write_all(fd, out);
+    if console_write_all(fd, out) && fd.generation != 0 { console_wait_any_key(fd, 10_000); }
 }
 
 // The `sak` note arrived: the kernel opened the episode (the console is ours
 // alone until END). Everything trusted happens here, then END + close + wipe
 // on every path.
 unsafe fn episode_consume(conns: &mut Vec<Conn>) {
-    let fd = t_console_open();
-    if fd < 0 {
+    let Some(mut channel) = EpisodeIo::open() else {
         t_putstr("corvus: imperium: episode: console open FAILED -- ending\n");
         episode_end();
         return;
-    }
+    };
+    let fd = &mut channel;
     let mut out: Vec<u8> = Vec::new();
+    let mut ended = false;
     match imperium_pending_snapshot() {
         None => {
             provincia::compose_nothing_pending(&mut out);
@@ -4054,7 +4147,11 @@ unsafe fn episode_consume(conns: &mut Vec<Conn>) {
             t_putstr("corvus: imperium: SAK with nothing pending\n");
         }
         Some(p) => {
+            fd.request(&p);
             let outcome = episode_confer(fd, &p, conns, &mut out);
+            let restored = fd.finish();
+            ended = true;
+            let outcome = if restored { outcome } else { ImperiumOutcome::Internal };
             let mut ok = [0u8; 12];
             let (status, plen) = match outcome {
                 ImperiumOutcome::Conferred { session } => {
@@ -4074,15 +4171,15 @@ unsafe fn episode_consume(conns: &mut Vec<Conn>) {
         }
     }
     wipe(&mut out);
-    episode_end();
-    let _ = t_close(fd);
+    if !ended { let _ = fd.finish(); }
+
 }
 
 // The conferral: rate limit -> provincia -> key -> verify -> the requester
 // LIVE -> the kernel grant. The operator's verdict line goes out on the
 // trusted channel; the requester's status is the return.
 unsafe fn episode_confer(
-    fd: i64,
+    fd: &mut EpisodeIo,
     p: &ImperiumPending,
     conns: &mut Vec<Conn>,
     out: &mut Vec<u8>,
@@ -4090,6 +4187,7 @@ unsafe fn episode_confer(
     // 1. The rate limit, BEFORE the provincia and any KDF: a locked subject is
     //    told so and asked nothing.
     if imperium_fail_count(&p.user, p.level) >= IMPERIUM_FAIL_MAX {
+        fd.model.state = lictor::model::State::Locked;
         out.clear();
         provincia::compose_locked(&p.user, p.level, out);
         let _ = console_write_all(fd, out);
@@ -4121,31 +4219,32 @@ unsafe fn episode_confer(
         return ImperiumOutcome::Internal;
     }
     // 3. The key.
-    let mut key = match console_read_key(fd, IMPERIUM_PROMPT_TIMEOUT_MS) {
+    let remaining = p.deadline_ns.saturating_sub(monotonic_ns()) / 1_000_000;
+    let mut key = match console_read_key(fd, remaining.min(IMPERIUM_PROMPT_TIMEOUT_MS)) {
         KeyRead::Key(k) => k,
         KeyRead::Declined => {
-            verdict(fd, out, b"imperium DECLINED");
+            verdict(fd, out, b"imperium DECLINED", lictor::model::State::Cancelled);
             t_putstr("corvus: imperium: DECLINED at the prompt\n");
             return ImperiumOutcome::Denied;
         }
         KeyRead::Timeout => {
-            verdict(fd, out, b"imperium TIMEOUT: no key within 60 s");
+            verdict(fd, out, b"imperium TIMEOUT: no key within 60 s", lictor::model::State::Expired);
             t_putstr("corvus: imperium: prompt TIMED OUT\n");
             return ImperiumOutcome::Timeout;
         }
         KeyRead::Overflow => {
-            verdict(fd, out, b"imperium DENIED: key too long");
+            verdict(fd, out, b"imperium DENIED: key too long", lictor::model::State::Denied);
             t_putstr("corvus: imperium: DENIED (key too long)\n");
             return ImperiumOutcome::Denied;
         }
         KeyRead::Error => {
-            verdict(fd, out, b"imperium ERROR: console read failed");
+            verdict(fd, out, b"imperium ERROR: console read failed", lictor::model::State::Failed);
             t_putstr("corvus: imperium: console read FAILED\n");
             return ImperiumOutcome::Internal;
         }
     };
     if key.is_empty() {
-        verdict(fd, out, b"imperium DECLINED");
+        verdict(fd, out, b"imperium DECLINED", lictor::model::State::Cancelled);
         t_putstr("corvus: imperium: DECLINED at the prompt (empty key)\n");
         return ImperiumOutcome::Denied;
     }
@@ -4154,15 +4253,19 @@ unsafe fn episode_confer(
         Some(w) => w,
         None => {
             wipe(&mut key);
-            verdict(fd, out, b"imperium DENIED: not enrolled");
+            verdict(fd, out, b"imperium DENIED: not enrolled", lictor::model::State::Denied);
             return ImperiumOutcome::Denied;
         }
     };
+    if fd.generation != 0 {
+        fd.model.state = lictor::model::State::Verifying;
+        if !console_write_all(fd, &[]) { wipe(&mut key); return ImperiumOutcome::Internal; }
+    }
     let good = verify_capkey(&p.user, p.level, &key, &wrap);
     wipe(&mut key);
     if !good {
         imperium_fail_inc(&p.user, p.level);
-        verdict(fd, out, b"imperium DENIED: wrong key");
+        verdict(fd, out, b"imperium DENIED: wrong key", lictor::model::State::Denied);
         t_putstr("corvus: imperium: DENIED (wrong key) for ");
         putbytes(&p.user);
         t_putstr("\n");
@@ -4175,38 +4278,42 @@ unsafe fn episode_confer(
     let handle = match conns.iter().find(|c| c.conn_id == p.conn_id).map(|c| c.handle) {
         Some(h) => h,
         None => {
-            verdict(fd, out, b"imperium DENIED: requester gone");
+            verdict(fd, out, b"imperium DENIED: requester gone", lictor::model::State::Gone);
             return ImperiumOutcome::Denied;
         }
     };
     let peer = match peer_live_info(handle) {
         Some(x) => x,
         None => {
-            verdict(fd, out, b"imperium DENIED: requester died");
+            verdict(fd, out, b"imperium DENIED: requester died", lictor::model::State::Gone);
             return ImperiumOutcome::Denied;
         }
     };
     if peer.stripes == 0 || peer.stripes != p.stripes || peer.principal_id != p.principal_id {
-        verdict(fd, out, b"imperium DENIED: requester changed");
+        verdict(fd, out, b"imperium DENIED: requester changed", lictor::model::State::Gone);
         return ImperiumOutcome::Denied;
     }
     if !user_eligible_for(&p.user, p.level) {
-        verdict(fd, out, b"imperium DENIED: eligibility revoked");
+        verdict(fd, out, b"imperium DENIED: eligibility revoked", lictor::model::State::Denied);
         return ImperiumOutcome::Denied;
+    }
+    if monotonic_ns() >= p.deadline_ns {
+        verdict(fd, out, b"imperium TIMEOUT: request expired", lictor::model::State::Expired);
+        return ImperiumOutcome::Timeout;
     }
     // 6. The grant. The kernel bounds a PROPAGATING mask to
     //    CAP_GRANTABLE_IMPERIUM and refuses its redeem into an existing scope
     //    (propagating never nests -- abdicate first).
     let session = next_legate_session();
     let flags = if p.propagating { T_CAP_GRANT_FLAG_PROPAGATING } else { 0 };
-    if t_cap_grant_imperium(p.caps, peer.stripes, p.valid_for_ns, session as u64, flags) != 0 {
-        verdict(fd, out, b"imperium DENIED: kernel grant refused");
+    if !fd.grant(p.caps, peer.stripes, p.valid_for_ns, session as u64, flags) {
+        verdict(fd, out, b"imperium DENIED: kernel grant refused", lictor::model::State::Failed);
         t_putstr("corvus: imperium: kernel grant REFUSED for ");
         putbytes(&p.user);
         t_putstr("\n");
         return ImperiumOutcome::Internal;
     }
-    verdict(fd, out, b"imperium CONFERRED -- redeem in the requester");
+    verdict(fd, out, b"Authority conferred to the requesting process.", lictor::model::State::Success);
     let mut nbuf = [0u8; 12];
     t_putstr("corvus: imperium: CONFERRED to ");
     putbytes(&p.user);

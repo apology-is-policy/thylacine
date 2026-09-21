@@ -105,17 +105,24 @@ bc_def bake CHUNK_AURORA_CFG bool n "env:THYLACINE_AURORA_CFG4" \
 # The Halcyon axes. Two SEPARATE levers, and the difference decides what a user
 # actually sees: SESSION is the per-user Halcyon environment after login (the
 # forward path); CONSOLE replaces aurora as the pre-login system renderer and is
-# marked "being retired" in build.sh's own bake comment. THEME applies to
-# whichever of them runs.
+# marked "being retired" in build.sh's own bake comment. PROFILE picks WHICH
+# Halcyon they draw -- the geometry, the chrome and the type map -- and THEME
+# only colours it. A theme alone never selects the Instrument UI: an Instrument
+# theme baked without PROFILE=instrument is projected onto the legacy bezel
+# layout, which is the "new colours on the old UI" hybrid this option exists to
+# make impossible to reach by accident.
 bc_def display HALCYON_SESSION bool n "env:THYLACINE_HALCYON_SESSION" \
   "Halcyon session (per-user environment)" \
   "After login, spawn halcyond --session as the user instead of ut on /dev/cons -- the tiled Halcyon environment with its welcome, tag bars and status bar. aurora stays the pre-login console renderer. This is the forward path and the one that means 'Halcyon as the UI'. Off = the proven ut path (fail-safe): login just runs the shell."
 bc_def display HALCYON_CONSOLE bool n "env:THYLACINE_HALCYON" \
   "Halcyon as the pre-login console renderer" \
   "Bakes /lib/halcyon/renderer=halcyond so joey boots halcyond instead of aurora for the SYSTEM console. Distinct from the session lever above, and build.sh marks it 'being retired'. NOTE it is not a pure renderer swap: it also bakes a wedge-test rule into /lib/beacon/verbs (the #wedge lever the gate needs), so it is a DEV/TEST shape, not a shipping one. Off = aurora, which every interactive scenario but ls-halcyon assumes."
+bc_def display HALCYON_PROFILE "choice:instrument,legacy" instrument "env:THYLACINE_HALCYON_PROFILE" \
+  "Halcyon profile (which UI Halcyon draws)" \
+  "Bakes /lib/halcyon/profile, the one word tapestryd and halcyond read to pick the painters, the geometry and the type map. instrument = the current Halcyon UI (rails, tracks, headers, the theme picker; docs/HALCYON-INSTRUMENT.md) and the default. legacy = the earlier Daylight bezel UI, kept because the pre-Instrument gate scenarios assert its literals -- configs/ci.config pins it for that reason. A user's own \$HOME/lib/halcyon/profile outranks the baked word. Needs a Halcyon renderer (SESSION or CONSOLE) to be visible."
 bc_def display HALCYON_THEME string "" "env:THYLACINE_HALCYON_THEME" \
   "Halcyon theme" \
-  "Name of a theme in usr/lib/halcyon/themes/ (without .toml) to bake as /lib/halcyon/theme.toml. Empty = the built-in Daylight (light). The TYPE here is a free string rather than a choice on purpose -- the bake installs whatever *.toml is in that directory, so an enumerated list would refuse a theme the bake would take. The WIZARD reads the directory at run time and offers the real files as a numbered menu, so dropping a .toml in is all it takes to make it selectable. Needs a Halcyon renderer (either lever above) to be visible; on a pure-aurora image the file is baked and simply unread."
+  "Name of a theme in usr/lib/halcyon/themes/ (without .toml) to bake as /lib/halcyon/theme.toml. Empty = the PROFILE's own compiled-in theme. A theme file declares the profile it was designed for (profile = \"instrument-v1\" in its [meta]; none = the legacy schema); one baked under the other profile is PROJECTED onto it rather than refused, so it works but is not what its author drew -- the wizard tags each file with its schema so the pairing is a choice. The TYPE here is a free string rather than a choice on purpose -- the bake installs whatever *.toml is in that directory, so an enumerated list would refuse a theme the bake would take. The WIZARD reads the directory at run time and offers the real files as a numbered menu, so dropping a .toml in is all it takes to make it selectable. Needs a Halcyon renderer (either lever above) to be visible; on a pure-aurora image the file is baked and simply unread."
 
 # pool-control ----------------------------------------------------------------
 bc_def pool DISK_SIZE string 16M "env:THYLACINE_DISK_SIZE" \
