@@ -1,0 +1,219 @@
+B-0 (Boosty) audit r1 F2 -- tmpfile() is delete-on-close; it stops leaking
+/tmp/tmpfile_XXXXXX, and it still works afterwards.
+
+THE DEFECT THE AUDIT FOUND. Upstream tmpfile() creates the file and at once
+issues a raw SYS_unlinkat, ignoring the result. That number is the 0xFFFF
+sentinel, so the unlink never happened: every tmpfile() left a named file on
+the persistent root for ever. Measured on the device before this patch
+(2026-09-21, a probe run twice): `before=0 during=1 nlink=1 after_close=1`,
+then `before=1 ... after_close=2`. 0027 fixed remove() for the same line and
+missed this twin. Consumers: GNU make's os_anontmp, every port that spools.
+
+THE DEFECT THE OBVIOUS FIX FOUND. The audit's suggestion -- call the public
+unlink() instead -- was tried first, and the boot went RED in the scan leg of
+pouch-hello-fopen: `fgetc=-1 feof=0 ferror=1 errno=2; raw read=-1 errno=2`. A
+plain read() at EOF of the now genuinely unlinked file returned ENOENT. The
+kernel is only the messenger (dev9p_read forwards the server's error; the
+data bytes had been served from the Larder's own-write pages, so the FIRST
+wire read was the EOF probe). The refusal is Stratum's, and it is by design:
+its fid model's IOReject gate (specs/fid.tla; src/9p/server.c
+verify_fresh_snapshot) rejects I/O on a fid whose file has been unlinked. On
+this root filesystem an open file does NOT outlive its last name.
+
+So "the fid survives the unlink" -- which pouch-hello-fopen's tmpfile leg
+claimed to prove since 0024 -- was never true here. The leg was green because
+no unlink was ever issued. One false green hid both defects.
+
+THE FIX. The name lives exactly as long as the stream:
+  - fclose() removes it, through f->close (close the fd FIRST, then unlink:
+    nothing touches the fid after the name is gone);
+  - streams still open at a normal exit() are swept by __stdio_exit after its
+    final flushes, through a weak hook, so a program that never calls
+    tmpfile() links none of this;
+  - the node is listed BEFORE the stream exists and unlisted under the same
+    lock that spans close + unlink, so an exit racing either call cannot miss
+    a name that is on disk. tmp_lock is always innermost (FILE lock or the
+    open-file-list lock may be held around it, never the reverse).
+A process that dies without running exit() (_exit, abort, a kill) leaves its
+names behind. POSIX calls that case implementation-defined; closing it needs a
+boot-time /tmp sweep, not libc, and is recorded as owed.
+
+NOT FIXED HERE, and bigger than tmpfile(): every POSIX program that unlinks a
+file it still has open -- the classic private-scratch idiom, which is exactly
+what upstream tmpfile() is -- loses the file on this system. That is a
+filesystem-semantics question (Stratum's IOReject vs POSIX's "removal is
+postponed until all references are closed"), raised with the operator as its
+own item. Stratum's O_TMPFILE-shaped anonymous inodes (stm_fs_create_anon) are
+the natural future substrate for tmpfile(); the kernel has no create flag for
+them today, and adding one is a syscall-interface change.
+
+Device-side pin (same commit, not in this patch file): pouch-hello-fopen's
+tmpfile leg writes three pages, reads them back to a clean EOF through the
+wire, fclose()s, and requires the count of /tmp/tmpfile_* names to be what it
+was before; a self-respawned child then leaves a tmpfile OPEN at exit() and
+the parent requires the count unchanged again.
+
+--- a/src/internal/stdio_impl.h
++++ b/src/internal/stdio_impl.h
+@@ -59,6 +59,7 @@
+ hidden size_t __stdout_write(FILE *, const unsigned char *, size_t);
+ hidden off_t __stdio_seek(FILE *, off_t, int);
+ hidden int __stdio_close(FILE *);
++hidden void __pouch_tmpfile_exit(void);
+ 
+ hidden int __toread(FILE *);
+ hidden int __towrite(FILE *);
+--- a/src/stdio/__stdio_exit.c
++++ b/src/stdio/__stdio_exit.c
+@@ -5,6 +5,12 @@
+ weak_alias(dummy_file, __stdout_used);
+ weak_alias(dummy_file, __stderr_used);
+ 
++/* pouch: tmpfile() is delete-on-close (see tmpfile.c); streams still open at
++ * exit have their names removed here, after the flushes below. Weak, so a
++ * program that never calls tmpfile() links none of it. */
++static void dummy_tmpfile_exit(void) { }
++weak_alias(dummy_tmpfile_exit, __pouch_tmpfile_exit);
++
+ static void close_file(FILE *f)
+ {
+ 	if (!f) return;
+@@ -20,6 +26,7 @@
+ 	close_file(__stdin_used);
+ 	close_file(__stdout_used);
+ 	close_file(__stderr_used);
++	__pouch_tmpfile_exit();
+ }
+ 
+ weak_alias(__stdio_exit, __stdio_exit_needed);
+--- a/src/stdio/tmpfile.c
++++ b/src/stdio/tmpfile.c
+@@ -1,28 +1,121 @@
+ #include <stdio.h>
+ #include <fcntl.h>
+ #include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#include <errno.h>
+ #include "stdio_impl.h"
++#include "lock.h"
+ 
+ #define MAXTRIES 100
+ 
++/* pouch: tmpfile() is DELETE-ON-CLOSE, not create-then-unlink.
++ *
++ * Upstream creates the file, unlinks it at once and keeps using the fd. That
++ * needs a filesystem on which an open file outlives its last name, and the
++ * root filesystem here is not one: Stratum REJECTS I/O on a fid whose file has
++ * been unlinked (its fid model's IOReject gate -- ENOENT/ESTALE), by design.
++ * So an honest unlink-at-creation leaves a stream whose first uncached read
++ * or flushed write fails. (For years this was invisible: upstream's unlink is
++ * a raw SYS_unlinkat, a 0xFFFF sentinel whose result is ignored, so NO unlink
++ * happened -- every tmpfile() simply leaked /tmp/tmpfile_XXXXXX for ever.)
++ *
++ * The name therefore lives exactly as long as the stream: removed by fclose()
++ * (through f->close) and, for streams still open at a normal exit, by
++ * __stdio_exit after the final flush. A process that dies without running
++ * exit() leaves its names behind -- POSIX calls that case
++ * implementation-defined; it needs a boot-time /tmp sweep, not libc. */
++
++struct tmpnode {
++	struct tmpnode *next, *prev;
++	int fd;
++	char name[sizeof "/tmp/tmpfile_XXXXXX"];
++};
++
++static struct tmpnode *tmp_head;
++static volatile int tmp_lock[1];
++
++static void tmp_unlist(struct tmpnode *n)
++{
++	if (n->prev) n->prev->next = n->next;
++	else tmp_head = n->next;
++	if (n->next) n->next->prev = n->prev;
++}
++
++static int tmpfile_close(FILE *f)
++{
++	struct tmpnode *n = f->cookie;
++	int r, e;
++
++	/* The lock spans the close and the unlink, so the exit sweep below either
++	 * sees this node whole or not at all -- never a name it no longer lists
++	 * and this thread has not yet removed. Close first: nothing may touch the
++	 * fid after the unlink. */
++	LOCK(tmp_lock);
++	tmp_unlist(n);
++	r = __stdio_close(f);
++	e = errno;
++	unlink(n->name);
++	errno = e;
++	UNLOCK(tmp_lock);
++	free(n);
++	return r;
++}
++
++/* Called by __stdio_exit once every stream has been flushed. The lock is
++ * taken and never released, as __stdio_exit does with the open-file list: a
++ * thread still racing in tmpfile()/fclose() blocks rather than walking a list
++ * this sweep is consuming. */
++void __pouch_tmpfile_exit(void)
++{
++	struct tmpnode *n;
++	LOCK(tmp_lock);
++	for (n = tmp_head; n; n = n->next) {
++		__syscall(SYS_close, n->fd);
++		unlink(n->name);
++	}
++}
++
+ FILE *tmpfile(void)
+ {
+ 	char s[] = "/tmp/tmpfile_XXXXXX";
+ 	int fd;
+ 	FILE *f;
+ 	int try;
++	struct tmpnode *n;
++
+ 	for (try=0; try<MAXTRIES; try++) {
+ 		__randname(s+13);
+ 		/* pouch: route through the patched open() -- see fopen.c. */
+ 		fd = open(s, O_RDWR|O_CREAT|O_EXCL, 0600);
+ 		if (fd >= 0) {
+-#ifdef SYS_unlink
+-			__syscall(SYS_unlink, s);
+-#else
+-			__syscall(SYS_unlinkat, AT_FDCWD, s, 0);
+-#endif
+-			f = __fdopen(fd, "w+");
+-			if (!f) __syscall(SYS_close, fd);
++			/* Listed BEFORE the stream exists, so an exit racing this call
++			 * cannot miss a name that is already on disk. */
++			n = malloc(sizeof *n);
++			if (n) {
++				n->fd = fd;
++				memcpy(n->name, s, sizeof s);
++				LOCK(tmp_lock);
++				n->prev = 0;
++				n->next = tmp_head;
++				if (tmp_head) tmp_head->prev = n;
++				tmp_head = n;
++				UNLOCK(tmp_lock);
++			}
++			f = n ? __fdopen(fd, "w+") : 0;
++			if (!f) {
++				int e = errno;
++				LOCK(tmp_lock);
++				if (n) tmp_unlist(n);
++				__syscall(SYS_close, fd);
++				unlink(s);
++				UNLOCK(tmp_lock);
++				free(n);
++				errno = e;
++				return 0;
++			}
++			f->cookie = n;
++			f->close = tmpfile_close;
+ 			return f;
+ 		}
+ 	}

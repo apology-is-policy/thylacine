@@ -10,7 +10,7 @@ code:
   - usr/lib/pouch/patches/0032-pouch-sysconf-nprocs.patch
   - usr/lib/pouch/patches/0034-pouch-sysconf-physpages.patch
   - usr/lib/pouch/patches/0035-pouch-stdio-read-refill.patch
-  - usr/lib/pouch/patches/0036-pouch-tmpfile-unlink.patch
+  - usr/lib/pouch/patches/0036-pouch-tmpfile-delete-on-close.patch
   - usr/lib/pouch/patches/0037-pouch-unchecked-sentinel-wrappers.patch
   - usr/pouch-hello/pouch-hello-malloc.c
   - usr/pouch-hello/pouch-hello-fopen.c
@@ -269,13 +269,27 @@ cache it, and nothing hot asks.
   `PROC_HANDLE_MAX`, and the prover does not compare it with the number
   typed again: it opens `/ctl/memory` until the kernel refuses and requires
   `getdtablesize()` to equal the last fd issued plus one.
-- `tmpfile()` must unlink through the PUBLIC `unlink()` (0036). Upstream
-  issues a raw `SYS_unlinkat`, a sentinel, and ignores the result: every
-  `tmpfile()` left `/tmp/tmpfile_XXXXXX` on the persistent root, and the
-  prover's "the fid survives the unlink" leg was a false green for as long
-  as it existed, because no unlink happened. 0027 fixed `remove()` for the
-  same line and missed this twin. The prover now counts `tmpfile_*` names
-  in `/tmp` before and after.
+- **`tmpfile()` is delete-on-close (0036), because an open file does not
+  outlive its last name on this root filesystem.** Upstream creates the
+  file, issues a raw `SYS_unlinkat` and ignores the result; that number is
+  a sentinel, so NO unlink happened and every `tmpfile()` left
+  `/tmp/tmpfile_XXXXXX` on the persistent root (measured: `during=1 nlink=1
+  after_close=1`, then 2 on the second run). The audit's suggested fix —
+  the public `unlink()` — was tried first and the boot went RED:
+  `raw read=-1 errno=2` at EOF of the now genuinely unlinked file.
+  `dev9p_read` only forwards it; the refusal is Stratum's and is by design
+  (its fid model's IOReject gate, `specs/fid.tla`;
+  `verify_fresh_snapshot` in `src/9p/server.c`). The data bytes had come
+  from the Larder's own-write pages, so the first WIRE read was the EOF
+  probe — which is why a short read-back passed and only the scan leg
+  failed. The prover's "the fid survives the unlink" leg had been green
+  since 0024 because no unlink was ever issued: one false green hid both
+  defects. Now the name lives as long as the stream: `fclose()` removes it
+  through `f->close` (close first, then unlink), and streams still open at
+  a normal `exit()` are swept by `__stdio_exit` through a weak hook. The
+  prover writes three pages, reads them back to a clean EOF over the wire,
+  and COUNTS `tmpfile_*` names before / after `fclose` / after a
+  self-respawned child exits with a tmpfile still open.
 - `__stdio_read` must keep BOTH properties: one `SYS_read` per call, and
   the returned byte at `rpos[-1]` after every buffered-arm read — at EVERY
   buffer size, including one byte. `pouch-hello-fopen`'s `scan` leg pins
@@ -337,6 +351,15 @@ per-call errno approximation built on top of it.
   its own copy (`src/janus/janusd.c`) — true on every libc, new here, and
   OPEN on the Stratum side (`setvbuf(_IONBF)` before the read, or wipe and
   close the stream).
+- **OPEN, and bigger than `tmpfile()`: unlink-while-open loses the file.**
+  POSIX postpones removal until the last reference closes; Stratum rejects
+  I/O on the fid at once (IOReject, deliberate). Every ported program that
+  uses the private-scratch idiom (`open`, `unlink`, keep using the fd) and
+  every VIVARIUM guest that does is affected. A filesystem-semantics
+  question for the operator, not a libc patch; Stratum's anonymous inodes
+  (`stm_fs_create_anon`, its `O_TMPFILE`) are the natural substrate, and the
+  kernel has no create flag for them. Also owed: a boot-time `/tmp` sweep —
+  a process that dies without `exit()` leaves its `tmpfile_*` names.
 - **OPEN: tty type-ahead is swallowed, and 0035 is what makes it visible.**
   A canonical-mode read must return at most one line; neither tty layer
   bounds it (`kernel/cons.c`'s read and ptyfs' `ring_drain` both drain past

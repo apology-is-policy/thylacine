@@ -18,10 +18,12 @@
 //   unlink   : unlink() (the unlinkat boundary-line: parent T_OPATH +
 //              SYS_UNLINK) — a re-open must ENOENT.
 //   remove   : remove() on a fresh file — the stdio-facing arm.
-//   tmpfile  : tmpfile() — O_CREAT|O_EXCL under /tmp + the immediate
-//              unlink; write/rewind/read AFTER the unlink proves the
-//              Plan 9-lineage fid-survives-unlink property end to end
-//              (the open fid keeps the file alive until clunk).
+//   tmpfile  : tmpfile() is delete-on-close: three pages round-trip to a
+//              clean EOF over the wire, and the /tmp name is gone after
+//              fclose() and after a child's exit(). (This leg used to claim
+//              "the fid survives the unlink". It does not on this root
+//              filesystem -- Stratum rejects I/O on an unlinked fid -- and
+//              the leg was green only because libc never issued the unlink.)
 //   scan     : fscanf over a real FILE, three pushbacks deep (0035): the
 //              read backend must leave the last byte at rpos[-1] or every
 //              pushed-back delimiter is re-read as a stale buffer byte.
@@ -35,9 +37,14 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <spawn.h>
+#include <sys/wait.h>
 
 #define PROBE "/pouch-fopen-probe.txt"
 #define PROBE2 "/pouch-fopen-probe2.txt"
+#define SELF "/bin/pouch-hello-fopen"
+
+extern char **environ;
 
 // How many /tmp/tmpfile_* names exist right now; -1 if /tmp cannot be read.
 static int count_tmpfiles(void) {
@@ -90,7 +97,20 @@ static int scan_pass(size_t vsize) {
     if (fgetc(f) != '\n') return fail("scan second pushed-back newline");
     if (!fgets(line, sizeof line, f) || strcmp(line, "tail line\n"))
         return fail("scan fgets after fscanf");
-    if (fgetc(f) != EOF || !feof(f)) return fail("scan EOF");
+    {
+        int c = fgetc(f);
+        if (c != EOF || !feof(f)) {
+            // Say what the stream and the fd each think: a FAIL with no evidence
+            // costs a second boot to understand.
+            int se = errno, fe = feof(f), fr = ferror(f);
+            char one;
+            errno = 0;
+            long r = (long)read(fileno(f), &one, 1);
+            printf("pouch-hello-fopen: scan[%lu] at EOF: fgetc=%d feof=%d ferror=%d errno=%d; "
+                   "raw read=%ld errno=%d\n", (unsigned long)vsize, c, fe, fr, se, r, errno);
+            return fail("scan EOF");
+        }
+    }
 
     rewind(f);
     a = b = 0;
@@ -106,7 +126,14 @@ static int scan_pass(size_t vsize) {
     return 0;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    // CHILD (self-respawn, the tmpfile exit leg): leave a tmpfile OPEN and return.
+    if (argc >= 2 && !strcmp(argv[1], "tmpleak")) {
+        FILE *t = tmpfile();
+        if (!t || fputs("left open on purpose\n", t) == EOF) return 2;
+        return 0;
+    }
+
     // create
     FILE *f = fopen(PROBE, "w");
     if (!f) return fail("create fopen(w)");
@@ -170,29 +197,67 @@ int main(void) {
     if (f || errno != ENOENT) return fail("remove reopen not-ENOENT");
     puts("pouch-hello-fopen: remove OK");
 
-    // tmpfile (write/rewind/read AFTER the immediate unlink). pouch 0036: the
-    // unlink must actually HAPPEN -- for years it did not (a raw sentinel
-    // syscall, result ignored), and this leg stayed green while proving nothing
-    // about it. Counted, not "absent": a preserved pool may carry residue from
-    // before the fix, and only growth across THIS call is this call's doing.
+    // tmpfile: delete-on-close (pouch 0036). Three claims, each checked by
+    // COUNTING /tmp/tmpfile_* names rather than by "absent" -- a preserved pool
+    // may carry residue from before the fix, and only growth across THESE calls
+    // is these calls' doing:
+    //   1. the stream WORKS past the page cache: three pages out, back to a clean
+    //      EOF. (The EOF probe is a wire read; on a file already unlinked the
+    //      filesystem refuses it -- which is why upstream's create-then-unlink
+    //      cannot be used here, and what the first version of this fix hit.)
+    //   2. fclose() removes the name.
+    //   3. a stream still open at exit() has its name removed too: a child is
+    //      respawned with "tmpleak", opens a tmpfile and returns from main.
     int tmp_before = count_tmpfiles();
     if (tmp_before < 0) return fail("tmpfile opendir /tmp (before)");
     f = tmpfile();
     if (!f) return fail("tmpfile");
     {
-        int tmp_after = count_tmpfiles();
-        if (tmp_after != tmp_before) {
-            printf("pouch-hello-fopen: /tmp tmpfile_* entries %d -> %d across tmpfile()\n",
-                   tmp_before, tmp_after);
-            return fail("tmpfile left a NAMED file (unlink not issued)");
+        enum { TMP_BYTES = 3 * 4096 + 5 };
+        static unsigned char out[TMP_BYTES], in[TMP_BYTES];
+        for (unsigned i = 0; i < TMP_BYTES; i++) out[i] = (unsigned char)(i * 131u + 7u);
+        if (fwrite(out, 1, TMP_BYTES, f) != TMP_BYTES) return fail("tmpfile fwrite");
+        if (fflush(f)) return fail("tmpfile fflush");
+        rewind(f);
+        size_t got = 0, k;
+        while ((k = fread(in + got, 1, TMP_BYTES - got, f)) > 0) got += k;
+        if (got != TMP_BYTES || memcmp(in, out, TMP_BYTES)) {
+            printf("pouch-hello-fopen: tmpfile read back %lu of %d, ferror=%d errno=%d\n",
+                   (unsigned long)got, TMP_BYTES, ferror(f), errno);
+            return fail("tmpfile round trip");
+        }
+        if (fgetc(f) != EOF || !feof(f) || ferror(f)) {
+            printf("pouch-hello-fopen: tmpfile EOF: feof=%d ferror=%d errno=%d\n",
+                   feof(f), ferror(f), errno);
+            return fail("tmpfile clean EOF");
         }
     }
-    if (fputs("delta\n", f) == EOF) return fail("tmpfile fputs");
-    if (fflush(f)) return fail("tmpfile fflush");
-    rewind(f);
-    if (!fgets(buf, sizeof buf, f) || strcmp(buf, "delta\n"))
-        return fail("tmpfile verify");
     if (fclose(f)) return fail("tmpfile fclose");
+    {
+        int n = count_tmpfiles();
+        if (n != tmp_before) {
+            printf("pouch-hello-fopen: /tmp tmpfile_* names %d -> %d across tmpfile+fclose\n",
+                   tmp_before, n);
+            return fail("tmpfile left its name after fclose");
+        }
+    }
+    {
+        char *cargv[] = { (char *)SELF, (char *)"tmpleak", NULL };
+        pid_t pid;
+        int st = 0;
+        if (posix_spawn(&pid, SELF, NULL, NULL, cargv, environ) != 0)
+            return fail("tmpfile respawn");
+        if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+            printf("pouch-hello-fopen: tmpleak child status %#x\n", st);
+            return fail("tmpfile child");
+        }
+        int n = count_tmpfiles();
+        if (n != tmp_before) {
+            printf("pouch-hello-fopen: /tmp tmpfile_* names %d -> %d across a child's exit\n",
+                   tmp_before, n);
+            return fail("tmpfile left its name after exit()");
+        }
+    }
     puts("pouch-hello-fopen: tmpfile OK");
 
     // scan: three passes over the same text. The default buffer; then a setvbuf()

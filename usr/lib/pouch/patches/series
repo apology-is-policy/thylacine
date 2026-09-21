@@ -76,9 +76,11 @@
 # own no-readv refill arm, generalised to every request <= the buffer (small
 # freads buffer too). Found by 0034's device pin.
 0035-pouch-stdio-read-refill.patch
-# 0036: B-0 audit r1 F2 -- tmpfile() never unlinked (a raw SYS_unlinkat
-# sentinel, result ignored; 0027 fixed remove() and missed this twin).
-0036-pouch-tmpfile-unlink.patch
+# 0036: B-0 audit r1 F2 -- tmpfile() never unlinked (raw SYS_unlinkat is a
+# sentinel, result ignored), and an honest unlink-at-creation cannot work here:
+# Stratum rejects I/O on an unlinked fid by design. tmpfile() is now
+# delete-on-close: the name goes at fclose() and at a normal exit().
+0036-pouch-tmpfile-delete-on-close.patch
 # 0037: B-0 audit r1 F1+F6 -- sysconf(_SC_OPEN_MAX/_SC_CHILD_MAX), getloadavg,
 # getdtablesize, ulimit, getdomainname all read an out-struct a sentinel-parked
 # wrapper never filled (0034's defect, five more times); sysconf's /ctl reads
