@@ -29,6 +29,7 @@
 // fd 1 is a pipe write-end joey relays to the boot log. Cross-compiled
 // with tools/pouch-clang against the pouch sysroot.
 
+#include <dirent.h>
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
@@ -37,6 +38,18 @@
 
 #define PROBE "/pouch-fopen-probe.txt"
 #define PROBE2 "/pouch-fopen-probe2.txt"
+
+// How many /tmp/tmpfile_* names exist right now; -1 if /tmp cannot be read.
+static int count_tmpfiles(void) {
+    DIR *d = opendir("/tmp");
+    if (!d) return -1;
+    int n = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL)
+        if (!strncmp(e->d_name, "tmpfile_", 8)) n++;
+    closedir(d);
+    return n;
+}
 
 static int fail(const char *leg) {
     printf("pouch-hello-fopen: FAIL %s (errno %d)\n", leg, errno);
@@ -107,9 +120,23 @@ int main(void) {
     if (f || errno != ENOENT) return fail("remove reopen not-ENOENT");
     puts("pouch-hello-fopen: remove OK");
 
-    // tmpfile (write/rewind/read AFTER the immediate unlink)
+    // tmpfile (write/rewind/read AFTER the immediate unlink). pouch 0036: the
+    // unlink must actually HAPPEN -- for years it did not (a raw sentinel
+    // syscall, result ignored), and this leg stayed green while proving nothing
+    // about it. Counted, not "absent": a preserved pool may carry residue from
+    // before the fix, and only growth across THIS call is this call's doing.
+    int tmp_before = count_tmpfiles();
+    if (tmp_before < 0) return fail("tmpfile opendir /tmp (before)");
     f = tmpfile();
     if (!f) return fail("tmpfile");
+    {
+        int tmp_after = count_tmpfiles();
+        if (tmp_after != tmp_before) {
+            printf("pouch-hello-fopen: /tmp tmpfile_* entries %d -> %d across tmpfile()\n",
+                   tmp_before, tmp_after);
+            return fail("tmpfile left a NAMED file (unlink not issued)");
+        }
+    }
     if (fputs("delta\n", f) == EOF) return fail("tmpfile fputs");
     if (fflush(f)) return fail("tmpfile fflush");
     rewind(f);

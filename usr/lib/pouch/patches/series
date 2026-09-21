@@ -74,3 +74,6 @@
 # pushed-back delimiter, and every getc was one syscall. Restores upstream's
 # own no-readv refill arm. Found by 0034's device pin.
 0035-pouch-stdio-read-refill.patch
+# 0036: B-0 audit r1 F2 -- tmpfile() never unlinked (a raw SYS_unlinkat
+# sentinel, result ignored; 0027 fixed remove() and missed this twin).
+0036-pouch-tmpfile-unlink.patch
