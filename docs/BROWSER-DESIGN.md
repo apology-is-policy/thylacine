@@ -1,9 +1,14 @@
-# BROWSER -- a web browser for Thylacine
+# BROWSER -- Boosty, a web browser for Thylacine
 
-**Status**: PROPOSED (2026-09-21). Research and design only. **No code is
-written against this document until the operator has voted on section 11.**
-When the vote lands, this header changes to RATIFIED with the choice recorded,
-and the arc's first implementation commit cites that commit's hash.
+**Status**: **RATIFIED 2026-09-21** by the operator's vote on section 11
+(`vault/record/decisions/dec-2026-09-21-browser-engine-order.md`; proposed at
+`c09141da`). **WebKit first, then Servo. No stage 0 -- neither NetSurf nor
+`webfs` is built now. The Rust `std` port starts in parallel, owned by the aux
+track (`docs/handoffs/041-rust-std-track-to-aux.md`). Effort stays at `xhigh`
+for the whole arc, noted in each audit-bearing commit.** Two kernel designs
+remain open by intent and come back for a signature in their own scripture
+commits: O-1 (guard regions against I-12's wording) and O-3 (shared memory for
+unprivileged Procs). The arc's status rows live in `docs/browser-status.md`.
 
 **Audience**: the operator; every Claude session; Astra (Codex), who continues
 this arc when Claude credits run out and cannot read `~/.claude` memory --
@@ -574,6 +579,9 @@ free section-28 number at ratification, with a deny-path probe as its witness
 
 ### 8.4 `webfs`
 
+> Not built now (D-2, 2026-09-21). Kept as the record of the heritage shape and
+> of why it is not WebKit's network layer.
+
 Independent of the engine, a native `webfs` is worth having: `/mnt/web` for
 `rc`-style scripts, `hget`, the manual reader, NetSurf if stage 0 is chosen.
 It is a small native Rust 9P server over the rustls we already ship. It is
@@ -599,8 +607,8 @@ kernel phase is audit-bearing and preceded by its own scripture commit.
 | **B-5** | WebCore + WebKit2 bring-up, headless: `PORT=Thylacine`, modelled on PlayStation. P5 resolved here. | `WKPagePaint` renders a local page to a PNG on the device |
 | **B-6** | The chrome on Tapestry; P6; the constructed namespaces of 8.3 with their deny-path probes. | a page loads over TLS from the network in a tile; content Proc proven unable to open `/net` |
 | **B-7** | Hardening, fuzz posture, the invariant's ENFORCED flip, the Operator's Manual section. | arc close |
-| **R** (parallel, independent) | P4: Rust `std`, then the crate tail, then Servo with PBL in a confined single Proc. | a `std` hello-world built by cargo for a Thylacine Rust target and run on the device; later, servoshell-equivalent pixels |
-| **S-0** (optional) | `webfs` + NetSurf on Tapestry. | documents render on the device |
+| **R** (parallel, **owned by aux**, started 2026-09-21) | P4: Rust `std`, then the crate tail, then Servo with PBL in a confined single Proc. | a `std` hello-world built by cargo for a Thylacine Rust target and run on the device; later, servoshell-equivalent pixels |
+| ~~S-0~~ | ~~`webfs` + NetSurf on Tapestry.~~ **Not built: the operator voted "neither" on D-2.** | -- |
 
 B-0 is deliberately small and deliberately first: it costs days, it tests the
 toolchain (C++23, libc++, WTF), it measures P1 instead of guessing at it, and
@@ -635,6 +643,12 @@ it produces a JavaScript engine Thylacine can use whatever happens next.
 ---
 
 ## 11. Decisions for the operator
+
+> **VOTED 2026-09-21.** D-1: **(a) WebKit, then Servo.** D-2: **neither** --
+> no NetSurf and no `webfs` now (the operator cut the recommended `webfs`).
+> D-3: **in parallel, now, owned by aux** ("I will launch Aux to deliver the
+> Rust STD"). Effort: **xhigh throughout.** The options are kept below as the
+> record of what was weighed.
 
 **D-1. Which engine first?**
 - **(a) WebKit, then Servo** -- recommended. Best fit today; the only engine
@@ -671,11 +685,13 @@ it after B-5.
 - **O-4** fontconfig: port, or a static-configuration shim.
 - **O-5** Whether Rust-`std`-on-Pouch is for ports only or a sanctioned third
   way to write Thylacine programs (ARCHITECTURE 3.5).
-- **O-6** The name. The engine keeps its own; the *browser* wants a Thylacine
-  name. Held proposals, none adopted: **Sighting** (the disputed sightings: a
-  glimpse of something far away, which is what a page is), **Range** (the
-  animal ranged far beyond its den), **Benjamin** (the last known individual).
-  `webfs` keeps its Plan 9 name.
+- **O-6** The name -- **RESOLVED 2026-09-21: the browser is named Boosty**,
+  after the operator's cat ("We need a name for the browser. I want to name it
+  'Boosty' after my cat."). The operator's name outranks the thematic
+  candidates this document had held (Sighting, Range, Benjamin), which are
+  withdrawn. The engine keeps its own name (WebKit); `webfs` keeps its Plan 9
+  name. Program name `boosty`; the chrome lives at `usr/boosty/` when B-6
+  builds it.
 
 ---
 

@@ -94,6 +94,21 @@ decided in the document, on purpose. Effort note: this session reports `xhigh`,
 not `max`; research and a design document are fine there, and the effort gate
 is raised with the vote because the next steps reach the kernel.
 
+**The vote (same day, by blocking question).** WebKit first, then Servo --
+the recommendation. Stage 0: **neither**; the operator cut not only NetSurf
+but the `webfs` I had recommended building regardless, which is the right
+correction to a recommendation that hedged: neither is on the path to WebKit,
+whose own network process *is* the confined fetch service. Rust `std`: in
+parallel, now -- and a minute later, "I will launch Aux to deliver the Rust
+STD", so the track has an owner and a brief (`docs/handoffs/041`). Effort:
+**xhigh throughout**, to be stated in each audit-bearing commit rather than
+re-asked. Recorded as `dec-2026-09-21-browser-engine-order` (user-vote); the
+design document is RATIFIED; `docs/browser-status.md` is the arc's status doc;
+`docs/NOVEL.md` gains "The browser as a capability graph". Two kernel designs
+stay open on purpose and return for a signature in their own scripture commits.
+The browser also has a name, and it is not one of the three thematic ones I
+had held: **Boosty**, after the operator's cat. The operator's name wins.
+
 ---
 ## 2026-09-21 (main, Fable 5.1, effort max) -- taking over a week of another agent's work: the graphical trusted path, the chord nobody could find, and the image that booted two UIs at once
 
