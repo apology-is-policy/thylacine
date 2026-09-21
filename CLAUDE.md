@@ -90,7 +90,7 @@ Concrete pattern:
 5. Implement against the model. Cross-reference each impl step to the corresponding spec action in comments. Keep `specs/SPEC-TO-CODE.md` current.
 6. When the impl surfaces a new mechanism the spec didn't cover, extend the spec FIRST, then update the impl.
 
-The committed spec inventory is **35 modules** (`ls specs/*.tla | grep -v TTrace`
+The committed spec inventory is **36 modules** (`ls specs/*.tla | grep -v TTrace`
 -- re-derive it rather than trusting this number; it was stale at 28 until
 LINEAGE L-4 measured it, and the ARCH table was stale by the same six rows, so
 the two agreed with each other instead of with the tree). The authoritative table lives
@@ -99,8 +99,8 @@ in `ARCHITECTURE.md §25.2`): `scheduler` / `territory` / `handles` / `burrow`
 `sched_oncpu` / `sched_alpha` / `asid` / `death_wake` / `loom` /
 `loom_multishot` / `loom_order` / `cons_poll` / `loom_devgone` / `allowance` /
 `net_poll` / `net_poll_teardown` / `weft` / `weft_readiness` /
-`sched_tickless` / `sched_rebalance` / `fs_cache` / `debug_stop` / `imperium`, each with clean
-cfg(s) + buggy-cfg counterexamples (134 buggy cfgs as of 2026-09-07 -- re-derive
+`sched_tickless` / `sched_rebalance` / `fs_cache` / `debug_stop` / `imperium` / `territory_shed`, each with clean
+cfg(s) + buggy-cfg counterexamples (136 buggy cfgs as of 2026-09-21 -- re-derive
 with `ls specs/*buggy*.cfg | wc -l` rather than trusting this; it read 100 for
 long enough to be off by 21). Three of the Phase-0 planned nine
 (`futex.tla`, `notes.tla`, `pty.tla`) were dropped per the 2026-05-23
@@ -289,6 +289,7 @@ The index (one line per row; refresh with the table):
 - **9P-srvconn transport adapter** -- `kernel/9p_srvconn_transport.{c,h}` (new; parallel to `kernel/9p_spoor_transport.{c,h}`); ...
 - **`SYS_ATTACH_9P_SRV` syscall** -- `kernel/syscall.c::sys_attach_9p_srv_handler` (new; parallel to `sys_attach_9p_handler`), ...
 - **`SYS_PIVOT_ROOT` syscall + `territory_pivot_root`** -- `kernel/syscall.c::sys_pivot_root_handler` (new), `kernel/territory.c::territory_pivot_roo ...
+- **Mount-table SHED at pivot / chroot (#80; ARCH 9.6.10)** -- `kernel/territory.c` (`territory_shed_unreachable_locked` + the pivot/chroot call sites), `dev.h` (`Dev.devno_per_walker`) + `kernel/devenv.c`, `usr/joey/joey.c` (the `/hw/pci` re-graft), `specs/territory_shed.tla` ...
 - **`kernel_attached` SrvConn gate (16c-integration)** -- `kernel/srvconn.{c,h}::srvconn_set_kernel_attached` + `srvconn_is_kernel_attached`; `struc ...
 - **Host-side pool populate via existing `stratumd + stratum-fs` (host build infra)** -- `tools/build.sh::build_stratum_pool_fixture` (orchestrates stratumd start, stratum-fs writ ...
 - **FS-mutation syscalls (create / fsync / readdir)** -- `kernel/syscall.c` (`sys_walk_create_handler` / `sys_fsync_handler` / `sys_readdir_handler ...
