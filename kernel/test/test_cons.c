@@ -3528,10 +3528,22 @@ static struct Thread *epp_start(void) {
     return t;
 }
 
-// The poller is asleep in poll with exactly `resleeps` empty passes behind it.
-static bool epp_settled(struct Thread *t, u64 resleeps) {
-    TEST_YIELD_UNTIL_SOFT(t->state == THREAD_SLEEPING && poll_total_resleeps() == resleeps);
-    return t->state == THREAD_SLEEPING && poll_total_resleeps() == resleeps;
+// The poller is asleep in poll with at least `min` empty passes behind it, and
+// STAYS asleep; *count receives the settled pass count.
+// ">= min", not "== min": a transition walks poll_list THEN the episode list,
+// and on SMP an idle peer (its tickless backstop) may steal the poller woken
+// by the first walk and run its pass -- re-registering on the second list --
+// before the second walk flags that fresh hook: one more, harmless pass. The
+// privacy check below compares against the SETTLED count, so it still sees
+// any pass a key byte causes.
+static bool epp_settle(struct Thread *t, u64 min, u64 *count) {
+    TEST_YIELD_UNTIL_SOFT(t->state == THREAD_SLEEPING && poll_total_resleeps() >= min);
+    if (t->state != THREAD_SLEEPING || poll_total_resleeps() < min) return false;
+    u64 v = poll_total_resleeps();
+    for (int i = 0; i < 200; i++) sched();
+    if (t->state != THREAD_SLEEPING || poll_total_resleeps() != v) return false;
+    *count = v;
+    return true;
 }
 
 // Ends a poll the test could not end: BEGIN (discards input) + a byte + END,
@@ -3562,9 +3574,10 @@ void test_cons_episode_frozen_poller_follows_end(void) {
     if (!cons_episode_active()) err = "episode open";
     u64 rs = poll_total_resleeps();
     if (!err && !(t = epp_start())) err = "poller setup";
-    if (!err && !epp_settled(t, rs)) err = "the frozen poller registered and slept";
+    u64 settled = 0;
+    if (!err && !epp_settle(t, rs, &settled)) err = "the frozen poller registered and slept";
     if (!err && proc_console_episode(f.trusted, SYS_CONSOLE_EPISODE_END) != 0) err = "END accepted";
-    if (!err && !epp_settled(t, rs + 1u)) err = "END woke it once; with nothing buffered it slept again";
+    if (!err && !epp_settle(t, settled + 1u, &settled)) err = "END woke it; with nothing buffered it slept again";
     if (!err) {
         cons_rx_input((u8)'q', false);
         cons_test_service_deferred();              // the relay's poll_list walk
@@ -3585,19 +3598,20 @@ void test_cons_episode_prior_poller_not_woken_by_keys(void) {
     cons_test_mgr_hold(true);
     const char *err = NULL;
     u64 rs = poll_total_resleeps();
+    u64 settled = 0;
     struct Thread *t = epp_start();
     if (!t) err = "poller setup";
-    if (!err && !epp_settled(t, rs)) err = "the poller registered on poll_list and slept";
+    if (!err && !epp_settle(t, rs, &settled)) err = "the poller registered on poll_list and slept";
     if (!err) {
         cons_test_sak_dispatch();
         if (!cons_episode_active()) err = "episode open";
     }
-    if (!err && !epp_settled(t, rs + 1u)) err = "BEGIN woke it once; frozen, it slept again";
+    if (!err && !epp_settle(t, settled + 1u, &settled)) err = "BEGIN woke it; frozen, it slept again";
     if (!err) {
         cons_rx_input((u8)'k', false);             // a secret key byte
         cons_test_service_deferred();              // the relay's poll_list walk
         for (int i = 0; i < 2000; i++) sched();    // every chance for a wrong wake to run
-        if (poll_total_resleeps() != rs + 1u || t->state != THREAD_SLEEPING)
+        if (poll_total_resleeps() != settled || t->state != THREAD_SLEEPING)
             err = "the secret key's relay did NOT reach the frozen poller (no extra pass)";
     }
     if (!err && proc_console_episode(f.trusted, SYS_CONSOLE_EPISODE_END) != 0) err = "END accepted";
