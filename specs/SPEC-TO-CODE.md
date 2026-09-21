@@ -767,43 +767,77 @@ cfgs run with `-deadlock`; `tsleep.tla`'s `Done` self-loop keeps a
 legitimate terminal state from tripping the deadlock check. See
 `docs/reference/16-rendez.md` (the `tsleep` section).
 
-## poll.tla — P5-poll-spec (spec landed); P5-poll-a (mechanism + SYS_POLL + devpipe poll); P5-poll-b (devsrv poll)
+## poll.tla — P5-poll-spec (spec landed); P5-poll-a (mechanism + SYS_POLL + devpipe poll); P5-poll-b (devsrv poll); the RE-ARM (2026-09-21)
 
 Status: **spec landed at P5-poll-spec; the poll mechanism + `SYS_POLL`
 + `devpipe` poll landed at P5-poll-a; `devsrv` poll (connection
-endpoint + KObj_Srv listener) landed at P5-poll-b.** Models `poll` —
-one thread waiting on N readiness sources whose state lives behind N
-different locks. `scheduler.tla` already proves the single-`Rendez`
-check-then-sleep atomicity and `tsleep.tla` the deadline race;
-`poll.tla` models the surface neither covers — the cross-lock
-`poll_waiter` hand-off and the register-then-observe discipline.
+endpoint + KObj_Srv listener) landed at P5-poll-b; the re-arm loop +
+the two-endpoint SrvConn poll landed 2026-09-21 (spec extended FIRST).**
+Models `poll` — one thread waiting on N readiness sources whose state
+lives behind N different locks. `scheduler.tla` already proves the
+single-`Rendez` check-then-sleep atomicity and `tsleep.tla` the deadline
+race; `poll.tla` models the surface neither covers — the cross-lock
+`poll_waiter` hand-off, the register-then-observe discipline, and (since
+2026-09-21) what happens AFTER a wake.
 
-State universe: one poller, N fds (`Fds`), one timeout. One poller
-exercises the missed-wakeup-across-N-fds race fully; multiple pollers on
-one fd's hook list compose (each has its own private `Rendez` +
-`poll_waiter`, no shared mutable state). CONSTANTS: `HAS_TIMEOUT`
-(FALSE = poll(-1)), `BUGGY_CHECK_BEFORE_REGISTER`, `BUGGY_NO_WAKE`,
-`BUGGY_LAZY_UNREGISTER`.
+**What the 2026-09-21 extension changed, and why the old model could not
+see the defect.** The module modeled readiness as a monotonic edge and a
+flag as a verdict (`FlagImpliesReady`), and said a draining consumer was
+"a separate concern outside one poll call". Neither holds in the code:
+one hook list serves every poller of an object whatever each asked for,
+and a competing reader can drain the bytes between the wake and the
+poller's re-sample. The code's answer to an empty re-sample was to
+RETURN 0 — so `poll(fd, 10 s)` reported a timeout after microseconds and
+`poll(-1)` returned 0, which POSIX never permits. A monotonic model has
+no state in which that happens, so the spec was green over it for the
+module's whole life. `ready` is now a LEVEL (`MakeReady` / `Retract`),
+`OtherEvent` walks a list for an event the poller did not ask about,
+`seen` separates the SAMPLE from the FLAG, and the poller loops:
+wake -> clear flags -> re-sample -> (nothing) -> sleep again against the
+SAME deadline. `FlagImpliesReady` and `PollReturnsWhenReady` are retired
+as false by design; `NoSpuriousZero` and `StableReadyReturns` replace
+them.
+
+State universe: one poller, N fds (`Fds`), one timeout. CONSTANTS:
+`HAS_TIMEOUT` (FALSE = poll(-1)), `BUGGY_CHECK_BEFORE_REGISTER`,
+`BUGGY_NO_WAKE`, `BUGGY_LAZY_UNREGISTER`, `BUGGY_CLEAR_AFTER_SAMPLE`,
+`BUGGY_RETURN_ON_WAKE`.
 
 | Config | Flags | Checked | Result | Distinct |
 |---|---|---|---|---|
-| `poll.cfg`                             | all FALSE, `HAS_TIMEOUT`      | `Invariants` | clean | 25 |
-| `poll_notimeout.cfg`                   | `HAS_TIMEOUT=FALSE`           | `Invariants` | clean | 12 |
-| `poll_liveness.cfg`                    | all FALSE, `Spec_Live`        | `Invariants` + `PollTerminates` + `PollReturnsWhenReady` | clean | 25 |
-| `poll_buggy_check_before_register.cfg` | `BUGGY_CHECK_BEFORE_REGISTER` | `NoMissedPoll` | violation (depth 5) | — |
-| `poll_buggy_no_wake.cfg`               | `BUGGY_NO_WAKE`               | `NoMissedPoll` | violation (depth 4) | — |
-| `poll_buggy_lazy_unregister.cfg`       | `BUGGY_LAZY_UNREGISTER`       | `NoStaleHook`  | violation (depth 4) | — |
+| `poll.cfg`                             | all FALSE, `HAS_TIMEOUT`      | `Invariants` | clean | 395 |
+| `poll_notimeout.cfg`                   | `HAS_TIMEOUT=FALSE`           | `Invariants` | clean | 176 |
+| `poll_liveness.cfg`                    | all FALSE, `Spec_Live`        | `Invariants` + `PollTerminates` + `StableReadyReturns` | clean | 395 |
+| `poll_liveness_notimeout.cfg`          | `HAS_TIMEOUT=FALSE`, `Spec_Live` | `Invariants` + `StableReadyReturns` | clean | 176 |
+| `poll_buggy_check_before_register.cfg` | `BUGGY_CHECK_BEFORE_REGISTER` | `NoMissedPoll` | violation | — |
+| `poll_buggy_no_wake.cfg`               | `BUGGY_NO_WAKE`               | `NoMissedPoll` | violation | — |
+| `poll_buggy_lazy_unregister.cfg`       | `BUGGY_LAZY_UNREGISTER`       | `NoStaleHook`  | violation | — |
+| `poll_buggy_clear_after_sample.cfg`    | `BUGGY_CLEAR_AFTER_SAMPLE`    | `NoMissedPoll` | violation | — |
+| `poll_buggy_return_on_wake.cfg`        | `BUGGY_RETURN_ON_WAKE`        | `NoSpuriousZero` | violation | — |
+
+Both liveness properties were shown able to FAIL before being trusted
+(2026-09-21): deleting `EvaluateWake`'s explicit `Expired` test violates
+`PollTerminates` (tsleep prefers a set flag to a passed deadline, so a
+producer that never stops walking the list holds the poller past its
+timeout); `BUGGY_NO_WAKE` under `poll_liveness_notimeout.cfg` violates
+`StableReadyReturns`.
 
 Spec action ↔ impl mapping:
 
 | Spec action | Source location | Notes |
 |---|---|---|
-| `Register` | `kernel/poll.c::poll_scan_one` (first scan); `kernel/pipe.c::devpipe_poll`; `kernel/srvconn.c::srvconn_poll`; `kernel/devsrv.c::svc_listener_poll` + `devsrv_poll` + `srv_handle_poll` | `dev->poll(spoor, events, pw)` for KObj_Spoor; `srv_handle_poll(obj, events, pw)` for KObj_Srv (magic-discriminated SrvService/SrvConn dispatch). Each installs the hook AND samples readiness in one locked step under the object's lock(s) (`r->lock` for pipe; `c2s.lock` + `s2c.lock` for SrvConn; `g_srv_registry.lock` for SrvService). |
-| `CommitOrSleep` | `kernel/poll.c::sys_poll_for_proc` (post-scan fast-path + `tsleep`) | Fast-path return on `ready_count > 0` or `timeout_ms == 0`; else compute `deadline_ns` + `tsleep` on the poller's private rendez with `poll_cond_any_flagged`. |
-| `MakeReady(f)` | devpipe: `kernel/pipe.c::devpipe_close` + `devpipe_read` (drain) + `devpipe_write` (append). srvconn: `kernel/srvconn.c::srvconn_teardown` + `srvconn_client_send` + `srvconn_server_send`. devsrv listener: `kernel/devsrv.c::srv_conn_open_for_proc` (push) + `srv_proc_exit_notify` (tombstone) + `srv_registry_reset`. | Every existing readiness `wakeup` site also calls `poll_waiter_list_wake` — sets each registered `pw->ready` AND signals each `pw->rendez`. |
-| `Timeout` | `kernel/sched.c::tsleep` deadline (landed, P5-tsleep) | poll's timeout IS a `tsleep` deadline; the cond re-check at resume has precedence over the deadline (tsleep.tla TimeoutSound). |
-| `NoStaleHook` (unregister sweep) | `kernel/poll.c::sys_poll_for_proc` (the `unregister_and_return:` label) | Every exit path from `sys_poll_for_proc` goes through the sweep; idempotent on already-unregistered hooks; scribbles `pw->magic = 0` for defense-in-depth. |
-| `BuggyCheckBeforeRegister` / `BuggyNoWake` / `BuggyLazyUnregister` | (none — register-then-observe lives in every `.poll` impl; every readiness site calls `poll_waiter_list_wake`; the sweep above is unconditional) | The three disciplines the impl uphold. |
+| `Register` | `kernel/poll.c::poll_scan_one` (first scan); `kernel/pipe.c::devpipe_poll`; `kernel/srvconn.c::srvconn_poll` (BOTH endpoints, selected by its `client` argument); `kernel/devsrv.c::svc_listener_poll` + `devsrv_poll` + `srv_handle_poll` | `dev->poll(spoor, events, pw)` for KObj_Spoor; `srv_handle_poll(obj, events, pw)` for KObj_Srv. Each installs the hook AND samples readiness in one locked step under the object's lock(s) (`r->lock` for pipe; `c2s.lock` + `s2c.lock` for SrvConn; `g_srv_registry.lock` for SrvService). |
+| `EvaluateFirst` | `kernel/poll.c::sys_poll_for_proc` (the post-scan fast path) | Return on `ready_count > 0` or `timeout_ms == 0`. |
+| `TSleepCommit` | `kernel/poll.c::sys_poll_for_proc` (the `tsleep` on the poller's private rendez with `poll_cond_any_flagged`) | The flag scan + the sleep transition are atomic under the rendez lock; a set flag beats the deadline (tsleep.tla). |
+| `ClearFlags` | `kernel/poll.c::poll_waiter_rearm`, called for every waiter BEFORE the re-sample | Clears `pw->ready` under the hook list's lock, so the clear is serialized against a producer's walk. |
+| `Resample` / `FinalSample` | `kernel/poll.c::sys_poll_for_proc` (the sample-only `poll_scan_one(..., NULL, NULL)` loop) | `dev->poll(c, events, NULL)`: no list op. |
+| `EvaluateWake` | `kernel/poll.c::sys_poll_for_proc` (the loop tail) | Ready -> return; else the explicit `timer_now_ns() >= deadline_ns` test -> return 0; else `continue` to the tsleep. |
+| `MakeReady(f)` | devpipe: `kernel/pipe.c::devpipe_close` + `devpipe_read` (drain) + `devpipe_write` (append). srvconn: EVERY ring mutation and the teardown — `srvconn_client_send` / `_send_frame` / `_send_blocking` (c2s fill), `srvconn_server_send` / `_send_blocking` (s2c fill), `srvconn_client_recv` (s2c drain), `srvconn_server_recv` / `_recv_blocking` (c2s drain), `srvconn_io_nonblock` (all four), `srvconn_teardown`. devsrv listener: `kernel/devsrv.c::srv_conn_open_for_proc` (push) + `srv_proc_exit_notify` (tombstone) + `srv_registry_reset`. | Every readiness site calls `poll_waiter_list_wake` AFTER releasing the object lock it mutated under. For a SrvConn the one list carries four edges for two endpoints, so each walk is `MakeReady` for some pollers and `OtherEvent` for the rest. |
+| `OtherEvent(f)` | the same walks, seen from a poller that asked about something else | Until 2026-09-21 only the c2s-fill edge and the teardown walked the SrvConn list: a client poller was never woken by its reply, and a nonblocking server polling POLLOUT was never woken by a blocking client drain. |
+| `Retract(f)` | any competing consumer: a second reader of the pipe / the connection | No walk. |
+| `Timeout` | `kernel/sched.c::tsleep` deadline (landed, P5-tsleep) | poll's timeout IS a `tsleep` deadline. |
+| `NoStaleHook` (unregister sweep) | `kernel/poll.c::sys_poll_for_proc` (the `unregister_and_return:` label) | Every exit path goes through the sweep; hooks stay registered ACROSS the re-arm loop and come off only here. |
+| the five `BUGGY_*` | (none) | The disciplines the impl upholds: register-then-observe in every `.poll`; a walk at every readiness site; the unconditional sweep; clear-THEN-sample; sleep again on an empty re-sample. |
 
 cfgs run with `-deadlock`; `poll.tla`'s `Done` self-loop keeps a
 legitimate terminal state from tripping the deadlock check. See
@@ -2270,7 +2304,9 @@ that shares no operator with the rule.
   `territory.tla`'s `OrderCorrect` owns it).
 - **The walker (`WalkStart` / `WalkCross` / `WalkRestamp`)** -> `stalk_core`
   (`kernel/stalk.c`): the base (`territory_root_ref`), the union-base route
-  (`union_base = base->union_snap->point`), `stalk_cross_mounts` ->
+  (`union_base = base->union_snap->point`, and the zero-component `zbase` --
+  the resolver's TWO consults of the point, each a seed obligation and each
+  commented as one), `stalk_cross_mounts` ->
   `mount_lookup`, and `devenv_walk`'s per-caller devno stamp. The walker has NO
   upward step because the resolver has none (`..` pops the in-call trail);
   `WalkDotDot` exists only under `BUGGY_RESOLVER_DOTDOT_ESCAPES`, the
@@ -2278,7 +2314,15 @@ that shares no operator with the rule.
 - **Not modelled**: refcounts (each dropped entry releases what `unmount`
   releases -- kernel tests + the audit), the fd-relative walk from a pre-swap
   directory fd (the accepted observable change, ARCH 9.6.10), `qid.path` (the
-  rule is per instance and ignores it).
+  rule is per instance and ignores it), and the DISSOLVED UNION (audit r2 F1:
+  a union handle held outside the root, whose point hosts no member any more --
+  the walker here starts only at the root; the rule lives in ARCH 9.6.10 and
+  `stalk_core`, witnessed by `usr/symlink-probe`).
+- **What TLC cannot see** (audit r2 F2): a seed missing from BOTH `Seeds` and
+  `TrueStart`. With `TrueStart(r, upt) == {r}` the `buggy_no_union_seed` cfg
+  reports "No error" -- rule and truth forgot the point together. The guard is
+  prose: AUDIT-TRIGGERS "Mount-table SHED" item (11) and the WHY comments at
+  the two `stalk.c` consults.
 
 Gate (2026-09-21, after audit round 1): `territory_shed.cfg` clean at
 **744,864 distinct states** and `territory_shed_perwalker.cfg` at **793,408**
@@ -2287,7 +2331,8 @@ Gate (2026-09-21, after audit round 1): `territory_shed.cfg` clean at
 `ShedLosesNothing` violated; `buggy_keeps_all` -> `NoResidueAfterPivot`
 violated. Three sabotages of the closure in scratch copies (rule too small,
 rule = every tree, truth too small) each fail -- the property round 1's module
-lacked.
+lacked. `specs/check-territory-shed.sh` runs all seven cfgs, pins the two
+clean state counts, and asserts WHICH invariant each buggy cfg violates.
 
 ## Spec-first re-enablement record (moved verbatim from CLAUDE.md, 2026-08-05)
 
