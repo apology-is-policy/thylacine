@@ -100,7 +100,7 @@ in `ARCHITECTURE.md §25.2`): `scheduler` / `territory` / `handles` / `burrow`
 `loom_multishot` / `loom_order` / `cons_poll` / `loom_devgone` / `allowance` /
 `net_poll` / `net_poll_teardown` / `weft` / `weft_readiness` /
 `sched_tickless` / `sched_rebalance` / `fs_cache` / `debug_stop` / `imperium` / `territory_shed`, each with clean
-cfg(s) + buggy-cfg counterexamples (136 buggy cfgs as of 2026-09-21 -- re-derive
+cfg(s) + buggy-cfg counterexamples (139 buggy cfgs as of 2026-09-21 -- re-derive
 with `ls specs/*buggy*.cfg | wc -l` rather than trusting this; it read 100 for
 long enough to be off by 21). Three of the Phase-0 planned nine
 (`futex.tla`, `notes.tla`, `pty.tla`) were dropped per the 2026-05-23

@@ -9,122 +9,224 @@
 (* copied into every child: slots lost for the life of the namespace.      *)
 (* The shed drops exactly those entries, atomically with the swap.         *)
 (*                                                                         *)
-(* THE MODEL. The resolver is DOWNWARD-ONLY ('..' pops an in-call trail    *)
-(* and is a no-op at the base -- kernel/stalk.c), so from a root the       *)
-(* reachable device trees are the least set R with:                        *)
-(*      root \in R                                                         *)
-(*      <<pt, s>> \in mounts /\ Home[pt] \in R  =>  s \in R                *)
-(* Home[pt] is the tree (device instance) the mount point pt lives in.     *)
-(* The kernel cannot see INSIDE a 9P tree, so it cannot tell which         *)
-(* directories of a reachable tree are themselves reachable: the rule is   *)
-(* per TREE and therefore conservative -- it may keep an entry no walk can *)
-(* fire, and must never drop one a walk can.                               *)
+(* TWO DEFINITIONS, KEPT APART ON PURPOSE. Round 1 of the audit showed the *)
+(* first version of this module could not fail: its soundness invariant    *)
+(* compared Keep with the SAME closure Keep was built from, so any         *)
+(* reachability rule at all -- {root}, or every tree -- passed. The ground *)
+(* truth is therefore OPERATIONAL here and shares nothing with the rule:   *)
+(*                                                                         *)
+(*   THE WALKER is a resolution from the new root, run against the table   *)
+(*   as it stood BEFORE the shed (`ghost`). It starts where the resolver   *)
+(*   starts and moves only the ways the resolver moves:                    *)
+(*     - it starts in the root's own tree;                                 *)
+(*     - if the root is a UNION directory handle it also consults the      *)
+(*       union's mount POINT, which lives in the tree the union was        *)
+(*       mounted in, not in member[0]'s (kernel/stalk.c: union_base =      *)
+(*       base->union_snap->point), so it may start there too;              *)
+(*     - it CROSSES a mount whose point lives in the tree it stands in;    *)
+(*     - in a tree of a Dev that stamps the walker's own devno on every    *)
+(*       walk (devenv; Dev.devno_per_walker) it may land in any tree of    *)
+(*       that Dev.                                                         *)
+(*   It never goes UP: '..' pops the resolver's in-call trail and is a     *)
+(*   no-op at the base. BUGGY_RESOLVER_DOTDOT_ESCAPES is a resolver that   *)
+(*   does go up; the rule is unsound against it, which is what makes the   *)
+(*   downward-only premise a recorded dependency instead of a belief.      *)
+(*                                                                         *)
+(*   THE RULE (ImplReach) is what kernel/territory.c computes: the least   *)
+(*   set R of trees with the root's tree in R, the union point's tree in   *)
+(*   R, every per-walker tree in R once one is, and                        *)
+(*        <<pt, s>> \in mounts /\ Home[pt] \in R  =>  s \in R.             *)
+(*   The kernel cannot see INSIDE a 9P tree, so the rule is per TREE and   *)
+(*   conservative: it may keep an entry no walk fires, never drop one a    *)
+(*   walk can.                                                             *)
 (*                                                                         *)
 (* PROPERTIES.                                                             *)
-(*   ShedLosesNothing  -- no entry whose mount point lived in a tree       *)
-(*                        reachable from the NEW root is ever dropped.     *)
-(*                        (History variable `lost`.) This is the soundness *)
-(*                        half: every resolution from the new root crosses *)
-(*                        exactly the mounts it crossed before the shed.   *)
+(*   ShedLosesNothing   -- wherever the walker stands, every entry of the  *)
+(*                         pre-shed table that fires there SURVIVED. By    *)
+(*                         induction along the walk, a resolution from the *)
+(*                         new root crosses exactly the mounts it crossed  *)
+(*                         before the shed.                                *)
+(*   WalkerWithinClosure -- the walker never leaves TrueReach. Pins the    *)
+(*                         closure used by the completeness half from      *)
+(*                         BELOW: a TrueReach that is too small fails here.*)
 (*   NoResidueAfterPivot -- right after a pivot every surviving entry is   *)
-(*                        reachable. The completeness half: the slots come *)
-(*                        back. (Unmount may strand entries later; those   *)
-(*                        are revived by re-mounting the tree and are not  *)
-(*                        this mechanism's business.)                      *)
+(*                         keyed in TrueReach: the slots come back. (A     *)
+(*                         TrueReach that is too LARGE only weakens this   *)
+(*                         half; nothing here can pin it from above, and   *)
+(*                         the soundness half does not use it.)            *)
 (*                                                                         *)
-(* BUGGY_SHED_NONTRANSITIVE is the tempting wrong implementation: keep     *)
-(* only entries whose mount point lives in the NEW ROOT's own tree. It     *)
-(* drops a mount nested inside a mounted tree (/dev/pts inside the devdev  *)
-(* tree mounted at /dev) at the next pivot, and ShedLosesNothing fails.    *)
-(* BUGGY_SHED_KEEPS_ALL is the pre-fix kernel: NoResidueAfterPivot fails.  *)
+(* BUGGY CONFIGS, each failing its OWN invariant:                          *)
+(*   NONTRANSITIVE  keep only entries keyed in the seeds      -> ShedLoses *)
+(*   NO_UNION_SEED  forget the union root's point (audit F1)  -> ShedLoses *)
+(*   UNDECLARED_PER_WALKER  match a per-walker Dev on devno   -> ShedLoses *)
+(*   DOTDOT_ESCAPES the resolver goes up (premise violation)  -> ShedLoses *)
+(*   KEEPS_ALL      the pre-fix kernel                        -> NoResidue *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS
     Trees,                      \* device instances (dc, devno)
     Points,                     \* mount-point identities
+    PerWalker,                  \* trees of a Dev that restamps devno per walk
+    NoPoint,                    \* "the root is not a union handle"
     BUGGY_SHED_NONTRANSITIVE,
-    BUGGY_SHED_KEEPS_ALL
+    BUGGY_SHED_NO_UNION_SEED,
+    BUGGY_SHED_UNDECLARED_PER_WALKER,
+    BUGGY_SHED_KEEPS_ALL,
+    BUGGY_RESOLVER_DOTDOT_ESCAPES
 
+ASSUME PerWalker \subseteq Trees
+ASSUME NoPoint \notin Points
 ASSUME BUGGY_SHED_NONTRANSITIVE \in BOOLEAN
+ASSUME BUGGY_SHED_NO_UNION_SEED \in BOOLEAN
+ASSUME BUGGY_SHED_UNDECLARED_PER_WALKER \in BOOLEAN
 ASSUME BUGGY_SHED_KEEPS_ALL \in BOOLEAN
+ASSUME BUGGY_RESOLVER_DOTDOT_ESCAPES \in BOOLEAN
+
+Nowhere == "nowhere"
 
 VARIABLES
     Home,        \* [Points -> Trees]: the tree each mount point lives in.
                  \* Chosen at Init and never changed (the territory.tla `holds`
                  \* idiom), so TLC explores EVERY layout of points over trees.
-    root,        \* the Territory's root tree
+    root,        \* the root Spoor's own tree
+    rootpt,      \* the union mount point it carries, or NoPoint
     mounts,      \* SUBSET (Points \X Trees): <<pt, s>> = tree s grafted at pt
-    lost,        \* history: entries dropped while reachable from the new root
-    fresh        \* TRUE in the state right after a pivot
+    ghost,       \* the table as it stood BEFORE the last shed (while fresh)
+    pos,         \* the tree the walker stands in, or Nowhere
+    fresh        \* TRUE from a pivot until the next namespace edit
 
-vars == <<Home, root, mounts, lost, fresh>>
+vars == <<Home, root, rootpt, mounts, ghost, pos, fresh>>
 
-RECURSIVE ReachImpl(_, _)
-ReachImpl(R, M) ==
-    LET R2 == R \cup { e[2] : e \in { m \in M : Home[m[1]] \in R } }
-    IN  IF R2 = R THEN R ELSE ReachImpl(R2, M)
+\* ---- THE TRUTH. Shares no operator with the rule below, so a fault in the
+\* rule's closure cannot also move the yardstick. A productive step adds a
+\* tree, so Cardinality(Trees) steps reach the fixpoint.
 
-Reach(r, M) == ReachImpl({r}, M)
+TrueStart(r, upt) == IF upt = NoPoint THEN {r} ELSE {r, Home[upt]}
+
+TrueStep(R, M) ==
+    LET W == IF R \cap PerWalker # {} THEN R \cup PerWalker ELSE R
+    IN  W \cup { m[2] : m \in { e \in M : Home[e[1]] \in W } }
+
+RECURSIVE TrueIter(_, _, _)
+TrueIter(R, M, n) == IF n = 0 THEN R ELSE TrueIter(TrueStep(R, M), M, n - 1)
+
+TrueReach(r, upt, M) == TrueIter(TrueStart(r, upt), M, Cardinality(Trees) + 1)
+
+\* ---- THE RULE: what kernel/territory.c computes, with its buggy variants.
+
+Seeds(r, upt) ==
+    {r} \cup (IF ~BUGGY_SHED_NO_UNION_SEED /\ upt # NoPoint
+              THEN {Home[upt]} ELSE {})
+
+Widen(R) ==
+    IF ~BUGGY_SHED_UNDECLARED_PER_WALKER /\ R \cap PerWalker # {}
+    THEN R \cup PerWalker ELSE R
+
+RECURSIVE Close(_, _)
+Close(R, M) ==
+    LET R1 == Widen(R)
+        R2 == R1 \cup { e[2] : e \in { m \in M : Home[m[1]] \in R1 } }
+    IN  IF R2 = R THEN R ELSE Close(R2, M)
+
+ImplReach(r, upt, M) ==
+    IF BUGGY_SHED_NONTRANSITIVE THEN Widen(Seeds(r, upt))
+    ELSE Close(Seeds(r, upt), M)
+
+Keep(r, upt, M) ==
+    IF BUGGY_SHED_KEEPS_ALL THEN M
+    ELSE { m \in M : Home[m[1]] \in ImplReach(r, upt, M) }
+
+\* ---- namespace edits
 
 Init ==
     /\ Home \in [Points -> Trees]
     /\ root \in Trees
+    /\ rootpt = NoPoint
     /\ mounts = {}
-    /\ lost = {}
+    /\ ghost = {}
+    /\ pos = Nowhere
     /\ fresh = FALSE
 
-\* I-3 is territory.tla's business; this module only forbids the self-mount
-\* so the closure stays meaningful.
+\* Same-tree binds are allowed (they are the commonest real mount); I-3 is
+\* territory.tla's business, not this module's.
 Mount(pt, s) ==
-    /\ Home[pt] # s
     /\ mounts' = mounts \cup { <<pt, s>> }
-    /\ fresh' = FALSE
-    /\ UNCHANGED <<Home, root, lost>>
+    /\ ghost' = {} /\ pos' = Nowhere /\ fresh' = FALSE
+    /\ UNCHANGED <<Home, root, rootpt>>
 
 Unmount(pt, s) ==
     /\ <<pt, s>> \in mounts
     /\ mounts' = mounts \ { <<pt, s>> }
-    /\ fresh' = FALSE
-    /\ UNCHANGED <<Home, root, lost>>
+    /\ ghost' = {} /\ pos' = Nowhere /\ fresh' = FALSE
+    /\ UNCHANGED <<Home, root, rootpt>>
 
-Keep(new, M) ==
-    IF BUGGY_SHED_KEEPS_ALL THEN M
-    ELSE IF BUGGY_SHED_NONTRANSITIVE
-         THEN { m \in M : Home[m[1]] = new }
-         ELSE { m \in M : Home[m[1]] \in Reach(new, M) }
-
-Pivot(new) ==
-    /\ new # root
+\* The kernel skips only a swap to the SAME Spoor; a chroot into another
+\* directory of the same tree is a real swap, so `new = root` is explored.
+\* Any point may ride on the new root: a union handle can outlive the mounts
+\* that made it a union, and over-approximating is the safe direction.
+Pivot(new, upt) ==
     /\ root' = new
-    /\ mounts' = Keep(new, mounts)
-    /\ lost' = lost \cup { m \in mounts \ Keep(new, mounts) :
-                              Home[m[1]] \in Reach(new, mounts) }
+    /\ rootpt' = upt
+    /\ ghost' = mounts
+    /\ mounts' = Keep(new, upt, mounts)
+    /\ pos' = Nowhere
     /\ fresh' = TRUE
     /\ UNCHANGED Home
+
+\* ---- the walker (see the header): a resolution from the new root over `ghost`
+
+WalkStart ==
+    /\ fresh /\ pos = Nowhere
+    /\ pos' \in TrueStart(root, rootpt)
+    /\ UNCHANGED <<Home, root, rootpt, mounts, ghost, fresh>>
+
+WalkCross(m) ==
+    /\ fresh /\ m \in ghost /\ Home[m[1]] = pos
+    /\ pos' = m[2]
+    /\ UNCHANGED <<Home, root, rootpt, mounts, ghost, fresh>>
+
+WalkRestamp(t) ==
+    /\ fresh /\ pos \in PerWalker /\ t \in PerWalker
+    /\ pos' = t
+    /\ UNCHANGED <<Home, root, rootpt, mounts, ghost, fresh>>
+
+WalkDotDot(m) ==
+    /\ BUGGY_RESOLVER_DOTDOT_ESCAPES
+    /\ fresh /\ m \in ghost /\ m[2] = pos
+    /\ pos' = Home[m[1]]
+    /\ UNCHANGED <<Home, root, rootpt, mounts, ghost, fresh>>
 
 Next ==
     \/ \E pt \in Points, s \in Trees : Mount(pt, s)
     \/ \E pt \in Points, s \in Trees : Unmount(pt, s)
-    \/ \E new \in Trees : Pivot(new)
+    \/ \E new \in Trees, upt \in Points \cup {NoPoint} : Pivot(new, upt)
+    \/ WalkStart
+    \/ \E m \in ghost : WalkCross(m)
+    \/ \E t \in Trees : WalkRestamp(t)
+    \/ \E m \in ghost : WalkDotDot(m)
 
 Spec == Init /\ [][Next]_vars
 
 TypeOk ==
     /\ Home \in [Points -> Trees]
     /\ root \in Trees
+    /\ rootpt \in Points \cup {NoPoint}
     /\ mounts \subseteq (Points \X Trees)
-    /\ lost \subseteq (Points \X Trees)
+    /\ ghost \subseteq (Points \X Trees)
+    /\ pos \in Trees \cup {Nowhere}
     /\ fresh \in BOOLEAN
 
-ShedLosesNothing == lost = {}
+ShedLosesNothing ==
+    (fresh /\ pos # Nowhere) =>
+        \A m \in ghost : Home[m[1]] = pos => m \in mounts
+
+WalkerWithinClosure ==
+    (fresh /\ pos # Nowhere) => pos \in TrueReach(root, rootpt, ghost)
 
 NoResidueAfterPivot ==
-    fresh => \A m \in mounts : Home[m[1]] \in Reach(root, mounts)
+    fresh => \A m \in mounts : Home[m[1]] \in TrueReach(root, rootpt, ghost)
 
-\* The shed never changes what is reachable from the new root: the closure
-\* over the kept entries equals the closure over all of them. Stated on the
-\* post-state using the history set: nothing reachable was lost, so the two
-\* closures coincide.
-Invariants == TypeOk /\ ShedLosesNothing /\ NoResidueAfterPivot
+Invariants ==
+    TypeOk /\ ShedLosesNothing /\ WalkerWithinClosure /\ NoResidueAfterPivot
 =============================================================================
