@@ -1,0 +1,62 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-jsc.exp -- Boosty B-0 over a real PTY: JavaScriptCore
+# (WebKit's JSCOnly port, static, every JIT tier off) runs as the logged-in user
+# from the pool at /webkit/jsc. docs/BROWSER-DESIGN.md; docs/browser-status.md.
+#
+# What each leg pins, and the libc defect it would have caught (all three were
+# found by running this engine, not by review):
+#   hello   the binary execs and the LLInt interprets
+#   icu     Intl formats through the statically packaged ICU data
+#   recurse a runaway recursion is a graceful RangeError -- needs TRUE main-thread
+#           stack bounds (pouch 0033: pthread_getattr_np said ONE PAGE)
+#   heap    400,000 object pushes -- needs a TRUE machine memory size (pouch 0034:
+#           sysconf(_SC_PHYS_PAGES) returned stack residue; arrays died at ~1000)
+#   typed   a 64 MiB typed array, last byte written and read back (lazy anon mmap)
+#   wasm    the WebAssembly object exists and validates a module header (IPInt)
+#
+# EVERY marker is printed by the guest in lower case and asserted in UPPER case
+# through `tr`, and no expected string appears in the typed line (the inputs are
+# spelled 6*7, 4e5, 64<<20): the terminal echoes what is typed, and an expect that
+# the echo can satisfy proves nothing. `$errstr` is never consulted -- ut does not
+# clear it after a success.
+#
+# G-3: HVF, the go5 argument -- this scenario is boot-dominated and CPU-bound, has
+# no GIC/timer/BAR surface of its own, and the TCG anchor set keeps those axes.
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+# Host-side skip: the staged binary is the one the pool bakes, so its absence
+# here is the pool's absence -- checked before boot so the skip costs no VM time.
+set repo [file normalize [file join [file dirname [info script]] .. ..]]
+set staged "$repo/build/webkit/stage/jsc"
+if {![file exists $staged]} {
+    puts "LS-CI SKIP: no JavaScriptCore staged at build/webkit/stage -- not baked\
+          into this pool (CHUNK_WEBKIT=n / THYLACINE_BAKE_WEBKIT unset)"
+    exit 77
+}
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+set ::lc_cmd_timeout 120
+foreach {tag js want} {
+    hello   {print("jsca-" + 6*7)}
+            "JSCA-42"
+    icu     {print("jscb-" + new Intl.NumberFormat("de-DE").format(1234567.891))}
+            "JSCB-1.234.567,891"
+    recurse {function d(n){return d(n+1)}; try{d(0)}catch(e){print("jscc-" + e.name)}}
+            "JSCC-RANGEERROR"
+    heap    {var a=[]; for(var i=0;i<4e5;i++)a.push({x:i}); print("jscd-" + a.length + "-" + a[a.length-1].x)}
+            "JSCD-400000-399999"
+    typed   {var u=new Uint8Array(64<<20); u[u.length-1]=7; print("jsce-" + u.length + "-" + u[u.length-1])}
+            "JSCE-67108864-7"
+    wasm    {print("jscf-" + (typeof WebAssembly) + "-" + WebAssembly.validate(new Uint8Array([0,97,115,109,1,0,0,0])))}
+            "JSCF-OBJECT-TRUE"
+} {
+    lc_run_expect "/webkit/jsc -e '$js' | tr a-z A-Z" $want
+    lc_pass "ls-jsc($tag): $want"
+}
+
+lc_quit
+exit 0

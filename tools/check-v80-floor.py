@@ -302,7 +302,7 @@ def main():
     ap.add_argument('--binaries', nargs='*', default=None,
                     help='dirs/files to scan (default: build/ramfs-src)')
     ap.add_argument('--all', action='store_true',
-                    help='also scan the big pool payloads -- /clade, /goroot, '
+                    help='also scan the big pool payloads -- /clade, /goroot, /webkit, '
                          '/storm, /quake. Correct but slow: the five ~100 MB '
                          'clade LLVM binaries dominate (~6 min vs ~8 s).')
     ap.add_argument('--source-only', action='store_true')
@@ -376,7 +376,8 @@ def main():
             cand += [os.path.join(b, 'clade', 'stage'),
                      os.path.join(b, 'go', 'goroot'),
                      os.path.join(b, 'storm', 'stage'),
-                     os.path.join(b, 'quake', 'stage')]
+                     os.path.join(b, 'quake', 'stage'),
+                     os.path.join(b, 'webkit', 'stage')]
         dirs = [d for d in cand if os.path.isdir(d)]
     files = []
     for d in dirs:

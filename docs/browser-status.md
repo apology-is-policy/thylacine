@@ -47,7 +47,8 @@ branches of `InlineASM.h` and offlineasm's `globaladdr`; an upstream bit-rot fix
 exists (upstream never builds Wasm-on + no-machine-context); `OptionsJSCOnly` API tests off;
 and three tolerances listed as findings F3-F5 below.
 
-**Two Pouch libc bugs found and fixed on this branch** (each a libc-only change, no kernel):
+**Three Pouch libc bugs found and fixed on this branch** (each a libc-only change, no kernel),
+and a fourth found and deliberately NOT fixed here:
 - `0033` -- `pthread_getattr_np()` told every program its main-thread stack is ONE PAGE
   (upstream probes with `mremap`, which the seam ENOSYSes). Measured `size=4096`; real is
   1 MiB. JSC threw a stack overflow on its first call and could not print it. Pinned by a
@@ -55,7 +56,23 @@ and three tolerances listed as findings F3-F5 below.
   too** (std's main-thread guard).
 - `0034` -- `sysconf(_SC_PHYS_PAGES)` returned UNINITIALISED STACK (upstream never checks its
   ENOSYSed `sysinfo`). JSC caps its heap at 2 x RAM, so every allocation over 8 KB failed
-  ("Out of memory" at array element 1003). Now reads `/ctl/memory`; -1 on a miss.
+  ("Out of memory" at array element 1003). Now reads `/ctl/memory`; -1 on a miss (errno
+  untouched; a figure that runs to the end of the read buffer is a miss too). Pinned by
+  `pouch-hello-malloc`, which re-parses `/ctl/memory` itself and demands equality.
+- `0035` -- found BY the 0034 pin, not by the engine: **`fscanf`/`scanf` have been broken on
+  every real `FILE` since patch 0002**, and every `getc` was one syscall. 0002's read backend
+  never refilled `f->buf`, so musl's "the byte just returned sits at `rpos[-1]`" invariant was
+  gone and every scan pushback re-read `buf[1023]`. Raw `read`, `fgetc` and `fread` over the
+  same file were all correct, which is what cleared the kernel. Restores upstream's own
+  no-`readv` refill arm; `pouch-hello-fopen` gains a `scan` leg, measured RED on the unfixed
+  libc first. Behaviour change: C stdio input now reads ahead, like every other libc.
+- **OPEN, not fixed here: `getuid`/`geteuid`/`getgid`/`getegid`/`getppid` return the raw ENOSYS
+  sentinel, `0xFFFFFFDA`.** The kernel has `SYS_GETUID`/`SYS_GETGID`; only `getpid` was ever
+  wired. stratumd CONSUMES the value (its admin uid, the keyslot token gate, dataset-root
+  ownership), so the fix changes the storage daemon's security behaviour and is its own chunk
+  on the A-3 identity surface. Found by sweeping the class all four belong to: a syscall parked
+  at the sentinel whose libc caller cannot report failure, so the program gets a wrong value.
+  Every C library in B-3 and the Rust `std` crate tail will call these.
 
 ### The measured platform findings -- the list for the operator conversation
 
@@ -85,11 +102,22 @@ the journal). A 60 MB binary fetched with the native `curl` into an encrypted ho
 - `build_icu` / `build_jsc` in `tools/build.sh`, the manifest entries (`fork.webkit`,
   `cache.icu4c`), pool staging (`/webkit`), a gate (`ls-jsc.exp`). The recipe is in
   `usr/ports/webkit/README.md`; the scratch build is `build/pouch/{icu,jsc}`.
-- The Pouch patches are UNGATED: a sysroot rebuild (which wipes and rebuilds libc++, zlib,
-  SDL2) + the kernel suite + the ci fleet are owed before they reach `main`. They were
-  verified by linking the patched objects into `jsc` and `stackprobe`, which is a real test
-  of the code and NOT a test of the series applying in a from-scratch sysroot build.
-- The audit round for the two Pouch patches (pouch pthread + the sysconf surface).
+- The Pouch patches: from-scratch sysroot rebuild + every port rebuilt + kernel suite
+  1577/1577 GREEN (2026-09-21, scratch worktree). ci fleet: 53 PASS / 21 SKIP / **2 FAIL**
+  (`r5f9-ash`, `viv-run`) -- NOT from this branch: the per-Territory mount table (32) is full
+  on `main` (ground truth `mount() = -2, nmounts = 32`), so `viv run` from a pts fails at its
+  9th bind. **Operator, 2026-09-21: design the real fix first (keep 32; shed unreachable /
+  orphaned mounts at pivot + chroot). Nothing lands on `main` until the fleet is green.**
+- Audit round 1 (Fable 5.1): 0 P0 / 1 P1 / 3 P2 / 6 P3, all OPEN --
+  `memory/audit_pouch_0033_0035_closed_list.md`. The P1 is a sibling of 0034 in the same
+  function (`sysconf(_SC_OPEN_MAX)` = stack residue); the P2s: `tmpfile()` never unlinks, the
+  0033 pin compares mirrors instead of the kernel (`/proc/<pid>/maps` has the truth), stdio
+  ignores the Pouch socket tag.
+- The codified build (`CHUNK_WEBKIT`, `build_icu`/`build_jsc`, forage `clone-sparse`, the
+  `ls-jsc` gate) is WRITTEN and host-tested (forage 50/50, lever tests, the checkout verifier's
+  five arms, the W+X check's four arms) but has NOT been RUN end to end yet.
+- `build_sysroot` wipes `build/pouch/`, which is where the scratch ICU and JSC builds live.
+  The codified build must keep them elsewhere.
 - test262 / a real benchmark; the v8.0 floor check on `jsc`.
 
 ## Remaining work (in order; BROWSER-DESIGN section 9)
@@ -104,7 +132,7 @@ the journal). A 60 MB binary fetched with the native `curl` into an encrypted ho
 | **B-5** | WebCore + WebKit2 headless, `PORT=Thylacine` modelled on PlayStation; P5 (EGL) resolved here; O-2 (which WebKit line to track) measured here. | `WKPagePaint` renders a local page to a PNG on the device |
 | **B-6** | The chrome on Tapestry; P6; the constructed namespaces with deny-path probes. | a TLS page in a tile; content Proc proven unable to open `/net` |
 | **B-7** | Hardening, fuzz posture, the owed invariant ENFORCED, the Operator's Manual section. | arc close |
-| **R** | **aux**: Rust `std` for Thylacine, the crate tail, then Servo. Brief: `docs/handoffs/041-rust-std-track-to-aux.md`. | a `std` hello built by cargo and run on the device |
+| **R** | **aux**: Rust `std` for Thylacine, the crate tail, then Servo. Brief: `docs/handoffs/041-rust-std-track-to-aux.md`. aux's design `docs/RUST-STD-DESIGN.md` was RATIFIED by the operator 2026-09-21 (on `aux-3` @`4cce758d`, not yet on `main`): target `aarch64-unknown-thylacine`, family unix over Pouch; and **O-5 decided: `std`-on-Pouch is a sanctioned THIRD substrate for new first-party programs, not ports only** -- an ARCHITECTURE 3.5 amendment that main owes. R-0 (the target JSON, the `libc` module, the `std` arms) is in progress; it consumes Pouch 0033/0034/0035 from `main`. | a `std` hello built by cargo and run on the device |
 
 ## Exit criteria status
 

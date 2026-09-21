@@ -1,8 +1,19 @@
 # usr/ports/webkit -- WebKit for Thylacine (the Boosty arc, `docs/BROWSER-DESIGN.md`)
 
-**WIP (B-0).** The source is NOT vendored: WebKit is about 13 GB. It lives in a sparse,
+**B-0.** The source is NOT vendored: WebKit is about 13 GB. It lives in a sparse,
 partial clone beside the other forks, pinned to a release tag; this directory carries the
-patch series and, once B-0 is codified, the build wiring.
+patch series. Gather and build:
+
+```
+tools/forage.sh webkit                 # the sparse clone at the pin + this series; the ICU tarball
+tools/build.sh jsc                     # ICU (host tools, then cross) + JavaScriptCore
+tools/build.sh kernel --config ci --set CHUNK_WEBKIT=y   # ...and bake /webkit/jsc
+tools/test-interactive.sh ls-jsc       # the device gate
+```
+
+`CHUNK_WEBKIT` defaults OFF (~40 min cold on an 8-core / 8 GiB host). The pins live in
+`tools/build-manifest.toml` (`[source.webkit]`, `[cache.icu4c]`) and are mirrored by
+`WEBKIT_PIN` / `ICU_SHA256` in `tools/build.sh`; `tools/test-forage.sh` fails when they drift.
 
 | | |
 |---|---|
@@ -11,7 +22,7 @@ patch series and, once B-0 is codified, the build wiring.
 | Checkout | `~/projects/webkit-thylacine` (branch `thylacine`), sparse cone: `Source/JavaScriptCore Source/WTF Source/bmalloc Source/cmake Tools/Scripts` |
 | ICU | 78.3, `icu4c-78.3-sources.tgz`, sha256 `3a2e7a47604ba702f345878308e6fefeca612ee895cf4a5f222e7955fabfe0c0` |
 
-Recreate the checkout:
+Recreate the checkout by hand (what `tools/forage.sh webkit` does):
 
 ```
 git clone --filter=blob:none --no-checkout --depth 1 --branch webkitgtk-2.54.0 \
@@ -22,7 +33,7 @@ git checkout webkitgtk-2.54.0 && git checkout -b thylacine
 git am /path/to/thylacine/usr/ports/webkit/patches/*.patch
 ```
 
-The B-0 recipe as measured (to become `build_icu` + `build_jsc` in `tools/build.sh`):
+What `build_icu` + `build_jsc` do, as first measured by hand:
 
 1. ICU host build (`runConfigureICU MacOSX --disable-shared --enable-static ...`), then the
    cross build with `--host=aarch64-unknown-linux-musl --with-cross-build=<host dir>

@@ -7,13 +7,18 @@ code:
   - usr/lib/pouch/patches/0001-pouch-syscall-seam.patch
   - usr/lib/pouch/patches/0002-pouch-stdio-no-iovec.patch
   - usr/lib/pouch/patches/0008-pouch-hw-syscalls.patch
+  - usr/lib/pouch/patches/0032-pouch-sysconf-nprocs.patch
+  - usr/lib/pouch/patches/0034-pouch-sysconf-physpages.patch
+  - usr/lib/pouch/patches/0035-pouch-stdio-read-refill.patch
+  - usr/pouch-hello/pouch-hello-malloc.c
+  - usr/pouch-hello/pouch-hello-fopen.c
 audit: hard
 guarded-by: []
 validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-08-15
+updated: 2026-09-21
 ---
 ## Purpose
 
@@ -39,7 +44,14 @@ else in the series is a lower-half file riding this seam.
   `errno = EIO`, return -1; `r` in `[-4095,-2]` → `errno = -r`; else pass
   through.
 - **stdio** — `__stdio_write` / `__stdio_read` move bytes with
-  `SYS_write` / `SYS_read` instead of `writev` / `readv`.
+  `SYS_write` / `SYS_read` instead of `writev` / `readv`. `__stdio_read`
+  issues exactly ONE `SYS_read` per call and, for a one-byte request on a
+  buffered stream, leaves the byte it returns at `f->rpos[-1]` (0035).
+- **`sysconf`'s machine figures come from `/ctl`, or are `-1`** —
+  `_SC_NPROCESSORS_*` reads `/ctl/sched` "cpus: N" (0032, fail-soft to 1);
+  `_SC_PHYS_PAGES` / `_SC_AVPHYS_PAGES` read `/ctl/memory` "total:" /
+  "free:" (0034), and a miss is `-1` with `errno` untouched — never a
+  guess.
 
 ## Mechanism
 
@@ -92,9 +104,62 @@ error — musl's contract. A `cnt <= 0` return is treated as terminal,
 which is a deliberate coupling to Thylacine's write semantics (a write
 blocks until it makes progress and returns -1 on a dead peer; it never
 0-returns for flow control) and avoids the unbounded spin musl's
-writev loop would take on a 0. `__stdio_read` does one `SYS_read`
+writev loop would take on a 0.
+
+**The read backend, and the sentence this dossier used to carry about it.**
+Until 2026-09-21 this paragraph said `__stdio_read` "does one `SYS_read`
 straight into the caller's buffer, dropping musl's readahead-into-`f->buf`
-— throughput, not semantics.
+— throughput, not semantics." That was 0002's own claim, repeated here
+unchecked, and it was wrong on both counts. `__toread()` parks a stream at
+`rpos == rend == buf + buf_size`; upstream's read then REFILLS `f->buf` and
+hands the requested byte back from it, so the byte just returned sits at
+`f->rpos[-1]`. The scan helpers depend on exactly that: `shunget()` is a
+bare `rpos--`, and `__shgetc()` stores the byte itself only when
+`rpos <= buf` (the unbuffered case, into the UNGET area). With 0002 the
+byte went straight to the caller, `rpos` stayed at the end of the buffer,
+and every pushback stepped onto `buf[buf_size-1]` — a stale byte, usually
+NUL. On every real `FILE` the scanf family failed at the first pushed-back
+delimiter (`fscanf(f, "%7s %d %d")` over `"alpha 12 -7"` returned 1 with an
+empty word; `sscanf` was never affected, a string pseudo-FILE has its own
+read), and because the buffer never filled, every `getc`/`fgets`/`getline`
+byte was its own syscall.
+
+0035 has two arms and one `SYS_read` in each — never a second read after a
+successful first, which would block a pipe or tty that had already
+delivered what it had. The **refill arm** (`len - !!buf_size == 0`: a
+one-byte request on a buffered stream, i.e. `__uflow`) is upstream's own
+code — that arm never used `readv` — reading into `f->buf` and returning
+`*f->rpos++`. The **bulk arm** (`fread`'s remainder loop, or any unbuffered
+stream) stays a direct read into the caller; it does not top the buffer up
+the way `readv` did, and needs no pushback slot because `fread` never
+ungets and an unbuffered stream takes `__shgetc`'s `buf[-1]` path. The two
+callers of `f->read` are `__uflow` (len 1) and `fread` (len = remainder);
+there are no others.
+
+**What libc tells a program about the machine.** Three patches in this
+dossier and one in [[sub-pouch-thread]] (0033) are the same defect: a
+syscall parked at the sentinel whose libc caller *cannot or does not report
+failure*, so the program is told a LIE rather than an error.
+`sysconf(_SC_NPROCESSORS_ONLN)` seeded its affinity set with `{1}` and
+ignored the ENOSYS, so every pouch program saw one CPU (0032).
+`sysconf(_SC_PHYS_PAGES)` called `__lsysinfo(&si)` unchecked and computed
+from the uninitialised struct, so it returned stack residue (0034);
+JavaScriptCore caps its heap from that figure and refused every allocation
+past ~1000 array elements. `pthread_getattr_np` probed the main stack with
+`mremap` expecting `ENOMEM` and got `ENOSYS`, so it reported one page
+(0033). The sentinel is honest only where the caller propagates the error;
+where musl treats a call as cannot-fail, the sentinel produces a wrong
+*value*.
+
+0034's parser is deliberately strict where 0032's is soft. The key is
+matched at a line start only (`free:` cannot match inside another word), a
+figure must be followed by a terminator inside the buffer (a number that
+runs to the end of the read may be a truncated prefix, so it is a miss),
+overflow clamps to `LONG_MAX`, and every miss is `-1` with the caller's
+`errno` restored — POSIX's spelling of "indeterminate". The figure is the
+MACHINE's memory; a Proc's real ceiling is its I-32 page budget, which is
+smaller, and an engine that sizes its heap from RAM meets the budget first
+and must take the clean `ENOMEM` it gets there.
 
 ## Data structures
 
@@ -133,7 +198,12 @@ does so itself before reaching the decode. Explicit `-errno` in
 The guard is one compare on a register already loaded. The stdio
 rewrite costs one extra syscall per flush when the stream has both a
 pending buffer and new data (musl's single `writev` became two
-`SYS_write`s); reads lose the opportunistic readahead.
+`SYS_write`s). Character-at-a-time input is one `SYS_read` per BUFSIZ
+since 0035 (it was one per BYTE from 0002 until then); a bulk `fread`
+does not top up the stream buffer afterwards, so a `getc` that follows
+one pays a refill upstream would have folded into the `readv`. Each
+`sysconf` machine query is an open + read + close on `/ctl` — callers
+cache it, and nothing hot asks.
 
 ## Prosecution
 
@@ -152,6 +222,27 @@ pending buffer and new data (musl's single `writev` became two
 - The `-1`-before-range ordering in the decode.
 - `.rej` files after the apply loop abort the build ([[fnd-seam-r1-f6]]);
   `patch -t` alone would silently skip an already-applied patch.
+- **A sentinel is only honest where the caller can fail.** Before parking
+  a name at `0xFFFF` — and at every re-vendor — read each libc function
+  that returns `__syscall(SYS_x)` raw or ignores its result and then
+  consumes an out-buffer. Three were found by CONSUMERS rather than by
+  review (0032, 0033, 0034); the first sweep then found the open identity
+  calls below in minutes. The sweep
+  method: list the `0xFFFF` names in the PATCHED `bits/syscall.h.in`, then
+  grep the patched `src/` for statement-position `__syscall(` and for
+  `return __syscall(` on those names.
+- `__stdio_read` must keep BOTH properties: one `SYS_read` per call, and
+  the returned byte at `rpos[-1]` on the refill arm. `pouch-hello-fopen`'s
+  `scan` leg pins the second three pushbacks deep and checks VALUES, so a
+  scan that "succeeds" on the wrong bytes still fails; it was measured RED
+  on the 0002 backend (`n=1 w1=[]`) before 0035 was applied.
+- The `sysconf` memory figures are pinned from the device side by
+  `pouch-hello-malloc`, which re-reads `/ctl/memory` with a DIFFERENT
+  parser (stdio) and requires `_SC_PHYS_PAGES` to equal the kernel's total
+  exactly. A range check alone would pass on plausible garbage, which is
+  what the arm used to return. (That pin is how the 0035 defect was found:
+  its `fscanf` returned 0 while raw `read`, `fgetc` and `fread` over the
+  same file were all correct.)
 
 ## Seams
 
@@ -160,6 +251,30 @@ per-call errno approximation built on top of it.
 
 ## Caveats
 
+- **OPEN (found 2026-09-21): the identity calls return the raw sentinel.**
+  `getuid` / `geteuid` / `getgid` / `getegid` / `getppid` are
+  `return __syscall(SYS_getuid)`-shaped and their numbers are `0xFFFF`, so
+  each returns `(uid_t)-38` = `0xFFFFFFDA`. The kernel HAS `SYS_GETUID` = 73
+  (principal_id) and `SYS_GETGID` = 74 (primary_gid); CL-1a wired only
+  `getpid`. It is NOT a libc one-liner, because stratumd consumes the value:
+  `stm_ctl_set_admin_uid(ctl, geteuid())`, the unauthenticated-peer fallback
+  `peer_uid = getuid()`, `stm_fs_init_dataset_root(..., geteuid(),
+  getegid())`, and the keyslot token gate `tok_st.st_uid != geteuid()`.
+  Changing libc's answer changes the storage daemon's security behaviour, so
+  it is its own chunk on the A-3 identity surface. CONFIRMED ON THE DEVICE
+  2026-09-21: `uid=4294967258`, `ppid=-38`. Of the other parked names only
+  `uname` fails VISIBLY (`-1`/`ENOSYS`): `umask()` returns `0xFFFFFFFF` as the
+  "previous mask" from an API that cannot fail and never sets the mask, and
+  `times()` returns `(clock_t)-38` -- not the documented `-1` -- with `*tms`
+  untouched. The audit round's full list of this class (F1, F8) is in
+  `memory/audit_pouch_0033_0035_closed_list.md`.
+- **stdio input reads ahead since 0035**, as on every other libc. A program
+  that mixes `FILE` reads with raw reads of the same fd, or hands the fd to
+  a child mid-stream, now sees standard POSIX readahead rather than the
+  accidental byte-exact positioning 0002 gave it.
+- `usr/pouch-hello/` is otherwise unclaimed (20 of its 23 files have no
+  dossier; [[sub-pouch-thread]] claims `pouch-hello-threads.c`); this one claims the two provers whose new legs pin mechanisms
+  described here, not the directory.
 - **`docs/REFERENCE.md`'s pouch row (absorbed) says "seven patches" and
   "Ten pouch binaries"** — the series is 31 patches and the ramfs bakes
   24 pouch binaries. The row was written at sub-chunk 14 and never

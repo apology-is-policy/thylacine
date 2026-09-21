@@ -154,6 +154,112 @@ decommit is an ignored `madvise` (so memory is never returned) and wires onto
 costs nothing today and will matter for the JIT and for multi-threaded JS. The probe's
 tolerances are exactly that -- probe posture, each one named -- not answers.
 
+### Addendum, same day (post self-compact): landing the libc fixes properly, and the pin that found a third bug
+
+The job was small on paper: take patches 0033 and 0034 through a from-scratch sysroot
+rebuild, the kernel suite, the gate fleet and an audit, in a worktree that does not hold
+the operator's image. It did not stay small, and every detour came from the same place --
+**reading the thing instead of its description.**
+
+*A claim I had copied, caught before it landed.* My 0033 patch text said the main stack
+is "committed whole at exec". That sentence was `exec.h`'s, and `exec.h` was wrong:
+`exec_map_user_stack` has been `burrow_create_anon_lazy` since LINEAGE L-4a (`c19ae8dc`,
+2026-08-02). The header comment, the exec dossier's Performance section and my own finding
+F8 all carried the stale claim -- four copies agreeing with each other instead of with
+`kernel/exec.c`. It matters beyond tidiness: F8 ("1 MiB is small for a JS engine") had
+"eager cost" as its reason for caution, and that reason does not exist. A larger stack is
+a reservation and an I-32 ceiling, not memory. All four are corrected; I told aux, whose
+`std` design had taken the claim from me.
+
+*A sweep that took minutes and should have been run years ago.* 0032, 0033 and 0034 are
+one defect: a syscall parked at the ENOSYS sentinel whose libc caller cannot report
+failure, so the program gets a wrong VALUE. I listed the parked names in the patched
+`syscall.h.in` and read the callers. **`getuid()`, `geteuid()`, `getgid()`, `getegid()` and
+`getppid()` return the raw sentinel: `(uid_t)-38`, 0xFFFFFFDA.** The kernel has had
+`SYS_GETUID`/`SYS_GETGID` since LS-K; CL-1a wired only `getpid`. I did NOT fix it, and the
+reason is the finding: stratumd consumes the value -- `stm_ctl_set_admin_uid(geteuid())`,
+the keyslot token gate `st_uid != geteuid()`, dataset-root ownership, the unauthenticated
+peer fallback. Changing libc's answer changes the storage daemon's security behaviour, so
+it is a chunk on the A-3 identity surface with its own audit, not a line in a browser
+commit. It is tracked (memory `bug_pouch_getuid_returns_enosys_sentinel`, the seam
+dossier's Caveats) and goes to the operator. Read from code; a device probe is still owed.
+
+*The pin that failed, and was right to.* I gave 0034 a device-side pin: `pouch-hello-malloc`
+re-reads `/ctl/memory` with a different parser -- `fscanf` -- and demands equality with
+`sysconf`. The kernel suite went red: `fscanf` returned 0. Two guesses died in a row (the
+file is unreachable pre-pivot: no, `fopen` succeeded; the fd offset does not advance on
+devctl: no, `c->offset += n` is generic), so I stopped guessing and made the prover print
+what each read path returned. Raw `read(1)` x3: `t`, `o`, `t`. `read(64)`: correct.
+`fgetc` x3: correct. `fread`: correct. Only the scan path was wrong, which cleared the
+kernel entirely. The cause is in patch 0002, from the first week of Pouch: its
+`__stdio_read` reads "straight into the caller's buffer" and its header calls the dropped
+readahead "a throughput optimization, not a semantic one". It was semantic. musl's
+`shunget()` is a bare `rpos--`, which works only because upstream's read leaves the byte
+it just returned at `rpos[-1]`; with 0002, `rpos` sat at the END of the buffer and every
+pushback re-read `buf[1023]`. **`fscanf` and `scanf` have been broken on every real `FILE`
+in every Pouch program since 0002** (`fscanf("%7s %d %d")` over `"alpha 12 -7"` returns 1
+with an empty word), and every `getc` has been its own syscall. Nothing in the tree used
+`fscanf` on a file until a test did. The fix (0035) needs no `readv`: upstream's one-byte
+arm was already a plain `read` into the buffer. Before applying it I ran the new `scan`
+leg against the unfixed libc to see it go red (`n=1 w1=[]`), with the malloc pin moved out
+of the way so the boot could reach it -- a prover that has never failed has proven nothing.
+
+*Posture.* From-scratch sysroot with all three patches, every port rebuilt, kernel suite
+1577/1577, and the three prover lines at boot: `main stack [0x7ff00000, 0x80000000)
+size=1048576 OK`, `sysconf phys=524288 avail=479648 pages == /ctl/memory ok`,
+`pouch-hello-fopen: scan OK`.
+
+*The gate fleet, and a regression that was already on `main`.* 76 scenarios: 53 PASS, 21
+SKIP (lever-gated), **2 FAIL** -- `r5f9-ash` and `viv-run`, three attempts each, both last
+green on 10 September. Both print `viv: recipe mount /dev/tty failed (missing rootfs
+anchor?)`. The anchor was present. Pouch is not in that path at all -- `viv` is native Rust
+and the container is a Linux-phenotype busybox -- and `git diff main browser-b0` over the
+kernel, `viv`, `ptyhost`, `ptyfs`, `libthyla-rs` and `diorama` is one comment in `exec.h`, so
+the failing code is byte-identical on `main`. That settles who introduced it and changes
+nothing about whose it is. I guessed the per-Territory mount table (cap 32) had filled;
+reading history did not converge, so I printed from the kernel. **The first diagnostic boot
+showed nothing, and I nearly took that as a refutation** -- the line was there, interleaved
+byte-by-byte with `ut`'s prompt redraw on the shared serial (`DIAGM ^[OUNT r[c=20
+nmom...nts[J=3...2`), and my grep for the whole word missed it. Read through the interleave:
+`DIAGMOUNT rc=2 nmounts=32`. `mount()` returns -2, table full: the session inherits 24 mounts
+and `viv` needs nine. The SVC layer collapses every mount failure to -1, so `viv` could only
+guess. The cap's own comment is a lineage -- 12, 16, 20, 32, each raised after an overflow --
+and the likeliest last straw is `/dev/nocturne` at the 17 September merge. Also wrong in the
+gate itself: `r5f9-ash`'s "ash still answers" controls were answered by the HOST shell
+(`echo | tr` works in both), so they passed with no container running.
+
+*The audit round* (Fable 5.1, start == end; 0 P0 / 1 P1 / 3 P2 / 6 P3; full list in
+`memory/audit_pouch_0033_0035_closed_list.md`). The three patches survived -- the reviewer
+built a differential model of the stdio state machine (0035: 0 of 32,000 trials failed; the
+old backend: ~1,890 of 2,000) and fuzzed the 0034 parser with three million inputs. What it
+found was around them. **P1: `sysconf(_SC_OPEN_MAX)` returns uninitialised stack too** -- the
+same defect 0034 fixes, sixty lines up in the same function, through an unchecked
+`getrlimit`; `getloadavg`, `getdtablesize`, `ulimit` and `getdomainname` share it, and GNU
+make's `-l` throttles on stack residue. My own sweep method could not have found any of them:
+I grepped for raw `__syscall(`, and these are unchecked WRAPPER calls -- which is exactly what
+0034's bug was. **P2: `tmpfile()` has never unlinked its file** (a raw `unlinkat` sentinel that
+patch 0027 fixed in `remove()` and missed here), so the prover leg that claims to prove
+"the fid survives unlink" has been green with no unlink ever happening -- and my new leg made
+it leak two files per boot instead of one. **P2: my "two-sided" stack pin compares libc's
+constants with the prover's copy of them, never with the kernel**; raise the stack to 8 MiB --
+the change F8 anticipates -- and it still passes with libc wrong. I had written the opposite
+claim in five places. `/proc/<pid>/maps` already prints the stack row; the pin will read that.
+**P2: stdio has never worked over a Pouch socket fd** (the backends skip the socket tag).
+
+*Decisions (operator, 2026-09-21, by blocking question).* Mount table: **design the real fix
+first** -- keep 32 and shed unreachable/orphaned mounts at pivot and chroot -- rather than
+raise the cap a fifth time; the fleet stays red, and nothing lands on `main`, until it does.
+Effort for that kernel work and for the identity chunk: **stay at xhigh**. The identity
+wiring (`getuid` and friends return the raw sentinel -- confirmed on the device:
+`uid=4294967258`, `ppid=-38`, `umask()` = 037777777777): **next, right after B-0 lands**, as
+its own chunk on the A-3 surface.
+
+*Two mistakes of my own, both caught by a backup or a kill rather than by care.* I undid a
+test sabotage with `git checkout -- tools/build-manifest.toml` and wiped my uncommitted
+manifest entries with it; a copy I had made a minute earlier saved them. And I cloned the
+partial WebKit checkout as a test fixture, which started fetching blobs over the network and
+hung; a synthetic repository did the job in a second.
+
 ---
 ## 2026-09-21 (main, Fable 5.1, effort max) -- taking over a week of another agent's work: the graphical trusted path, the chord nobody could find, and the image that booted two UIs at once
 

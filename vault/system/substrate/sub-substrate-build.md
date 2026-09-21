@@ -191,6 +191,49 @@ Instrument gate overrides that pin with a caller-set
 file with the schema its own `[meta]` declares, hides `TEMPLATE.toml`, and
 prints a note when the chosen theme and profile differ.
 
+**`CHUNK_WEBKIT` (default OFF, since Boosty B-0, 2026-09-21)** builds ICU and
+JavaScriptCore and bakes `/webkit/jsc` ([[sub-webkit]] describes the port; this
+paragraph describes the wiring). Three things about it are unlike every other
+chunk, each on purpose.
+
+*A new input class: a pinned upstream plus an in-repo series.* `[source.webkit]`
+is kind `clone-sparse`: nothing of ours is hosted, so it is not a `fork.`.
+`forage.sh` makes a partial (`blob:none`) sparse clone at a TAG, refuses unless
+that tag resolves to the manifest's commit, creates a local branch, and `git am`s
+`usr/ports/webkit/patches/*`. It is idempotent (a patch that reverse-applies is
+reported as already applied) and it never resets: a checkout where a patch
+neither applies nor reverse-applies is reported as drifted and left alone,
+because it may hold work. `test-forage.sh` C1-C4 drive all four outcomes against
+a local upstream with no network.
+
+*The build re-checks the checkout from its own side.* `webkit_checkout_ok`
+requires the pin to be an ancestor of HEAD, a clean tree, every series patch to
+reverse-apply, AND the files that differ from the pin to be exactly the files the
+series names -- the last because a reverse-apply check alone passes on a tree that
+carries the patches plus local edits elsewhere. So `WEBKIT_PIN` / `ICU_SHA256` in
+`build.sh` and the manifest are two copies of one truth, and `test-forage.sh` A10
+fails when they drift (sabotaged: one hex digit -> FAIL).
+
+*With the chunk ON, an absent input is an error, not an announced skip.* Every
+default-on chunk skips gracefully so a bare checkout still builds. This one
+defaults off, so reaching `build_jsc` means it was asked for by name, and
+"skipped" would be the silent omission detect-and-instruct exists to end.
+
+The objects live under `build/pouch/{icu,jsc}` deliberately: `build_sysroot` wipes
+`build/pouch/`, and a static binary linked against the old `libc.a` is exactly
+what must not survive a libc change. The ICU HOST tools (`build/icu-host`) do not
+depend on the sysroot and survive it. `libc.a` is not a ninja input, so
+`build_jsc` removes `bin/jsc` to force the relink. After the link it asserts the
+shape the platform requires -- `ET_EXEC`, no `PT_DYNAMIC`, no `LOAD` segment both
+writable and executable, and at least two `LOAD` segments seen, so a parse that
+matched nothing cannot read as "no W+X" -- then strips into `build/webkit/stage`.
+Parallelism is sized from RAM as well as cores (`webkit_jobs`): JSC's unified
+sources peak over 1 GiB per job, and eight jobs on an 8 GiB host is an OOM, not a
+speedup. Verification: the pool's bake-verify expects `/webkit/jsc` under the same
+predicate the populate arm uses; `check-v80-floor.py --all` scans the stage; the
+device gate is `tools/interactive/ls-jsc.exp` (SKIPs with 77 when nothing is
+staged).
+
 ## Data structures
 
 `build/` layout: `kernel/` and `kernel-undefined/` (parallel sanitizer

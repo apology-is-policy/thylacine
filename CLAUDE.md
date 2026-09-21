@@ -1297,6 +1297,7 @@ Binding scripture under U-1 (the Utopia scripture commit): `docs/ARCHITECTURE.md
 
 - **Authored within Thylacine** → **native libthyla-rs**. The program builds against `usr/lib/libthyla-rs/` (no_std Rust, direct Thylacine syscalls). NO musl. NO Pouch boundary-line patches. Examples: `ut` (the shell), `libutopia`, the coreutils, corvus, the virtio-* drivers, the hello/probe binaries.
 - **Ported foreign code** → **Pouch**. The program builds via the Pouch cross-compilation environment (musl + the `usr/lib/pouch/patches/*` boundary-line patches). Examples: stratumd, libsodium, Helix, future ports of ssh / git / python.
+- **Authored within Thylacine, but wanting `std` + crates.io** → **first-party `std` Rust on Pouch** (the THIRD substrate; operator decision 2026-09-21, ARCH §3.5 as amended, `docs/RUST-STD-DESIGN.md` §9). Target `aarch64-unknown-thylacine`, family `unix`, `std` over the Pouch libc — NOT over libthyla-rs. Sanctioned for NEW programs, not ports only; `libthyla-rs` stays the native default. The author chooses per the program's needs and says so in the commit. It inherits every Pouch limit whole.
 
 The boundary determines the runtime substrate. The rationale mirrors Plan 9's `libc.h` (native) / APE (POSIX ported) split: native programs benefit from being Thylacine-shaped — smaller binaries, faster startup, no impedance mismatch, fewer patches to maintain — while ported programs get POSIX-shape via the pouch boundary-line, which is the right place to do the translation work once per surface rather than at every program's syscall site.
 

@@ -6,13 +6,15 @@ title: "pthreads and sleeping — over SYS_THREAD_SPAWN and torpor"
 code:
   - usr/lib/pouch/patches/0004-pouch-pthread.patch
   - usr/lib/pouch/patches/0022-pouch-nanosleep.patch
+  - usr/lib/pouch/patches/0033-pouch-getattr-np-main-stack.patch
+  - usr/pouch-hello/pouch-hello-threads.c
 audit: hard
 guarded-by: [inv-i9]
 validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-09-21
 ---
 ## Purpose
 
@@ -33,6 +35,9 @@ because on Thylacine a sleep IS a wait-on-address with a timeout.
 - `__unmapself` (asm) → `SYS_BURROW_DETACH` then `SYS_THREAD_EXIT`.
 - `clock_nanosleep(clk, flags, req, rem)` → a torpor wait on a private
   stack word nobody wakes, looped against a deadline.
+- `pthread_getattr_np(main thread)` → the exec mapping itself:
+  `[0x7ff00000, 0x80000000)`, 1 MiB (0033). A created thread still reports
+  musl's own `t->stack` / `t->stack_size`.
 
 ## Mechanism
 
@@ -92,6 +97,28 @@ stores and plain-`__wake`s; waiters race for the mutex and re-sleep on
 it. Functionally correct, loses the thundering-herd optimization under
 heavy broadcast.
 
+**The main thread's stack bounds are stated, not discovered (0033).**
+Upstream has no record of the initial thread's stack, so
+`pthread_getattr_np` finds it: start one page below the page-rounded auxv
+address and probe downward with `mremap(p-l-PAGE, PAGE, 2*PAGE, 0)` until
+the call stops failing with `ENOMEM`. `mremap` is a sentinel on pouch, so
+the first probe fails with `ENOSYS`, the loop body never runs, and every
+pouch program was told its main stack is ONE PAGE (measured on the device:
+`base=0x7ffff000 size=4096` with `sp=0x7ffffdb8`). Nothing asked until
+JavaScriptCore did — `WTF::StackBounds` feeds the VM's recursion limit, so
+`jsc` threw a stack overflow on its first call and could not even print it.
+A conservative collector or Rust std's main-thread guard would read the
+same wrong answer. The fix returns the mapping the kernel actually makes —
+`POUCH_MAIN_STACK_TOP` / `_SIZE` MIRROR `EXEC_USER_STACK_TOP` / `_SIZE` in
+`kernel/include/thylacine/exec.h` — a 1 MiB SPARSE demand-zero reservation
+(`exec_map_user_stack` is `burrow_create_anon_lazy` since LINEAGE L-4a)
+over a real one-page `prot==0` guard VMA. So the main thread, unlike a
+created one, HAS a working guard page. `/pouch-hello-threads` pins the
+mirror from the device side, two-sided on purpose: a main-thread local must
+lie inside the reported bounds AND the bounds must be the full mapping —
+"contains" alone passed for years while the size was one page, and a bare
+size check would pass on a wrong base.
+
 ## Data structures
 
 musl's `struct pthread` unchanged. `struct start_args` unchanged, placed
@@ -148,6 +175,11 @@ already changed does not even take `torpor_lock`.
   thread (a C path cannot munmap its own stack — SP would dangle).
 - Any new futex-shaped call site must go through the four retargeted
   helpers, not a hand-rolled `SYS_futex` (which is a sentinel).
+- The 0033 constants are a MIRROR of `exec.h`, not a derivation. A change
+  to the kernel's stack layout must change both, and the boot prover is
+  what makes forgetting loud. The derived form — the kernel passing the
+  extent in auxv — is recorded as part of browser finding F8
+  (`docs/browser-status.md`) and is an ABI change, so it is the operator's.
 
 ## Seams
 
@@ -158,7 +190,8 @@ the caller's Proc).
 
 ## Caveats
 
-- **Stack guard pages do not exist.** musl allocates the stack
+- **Stack guard pages do not exist for CREATED threads** (the main
+  thread's exec mapping has a real guard VMA; see 0033 above). musl allocates the stack
   `PROT_NONE` then mprotects the usable part RW; pouch's `mmap` ignores
   `prot` (always RW) and `mprotect` returns `ENOSYS`, which
   `pthread_create` tolerates by design (`&& errno != ENOSYS`). Overflow

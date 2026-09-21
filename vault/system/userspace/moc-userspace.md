@@ -16,6 +16,7 @@ dossiers.
 ## Children
 
 - [[sub-dosbox]] — the Cryptid DOSBox-X port and JIT boundary.
+- [[sub-webkit]] — the Boosty WebKit port: JavaScriptCore on Pouch (JIT off) and the platform findings it measured.
 - [[sub-nocturne-tools]] — audio clients and payload/authority witnesses.
 
 - [[moc-userspace-netd]] — the network daemon (the first userspace area;
