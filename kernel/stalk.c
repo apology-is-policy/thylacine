@@ -834,6 +834,7 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
     // The zero-component quarry was cloned from a union handle's POINT (set
     // where the quarry is determined; read after the final cross).
     bool                 zero_from_point = false;
+    bool                 mount_names_base = false;
 
     // POUNCE state (docs/POUNCE-DESIGN.md §5). `carried` holds the current
     // trail tip's attrs when they arrived fused with the walk that produced it
@@ -1743,10 +1744,15 @@ per_component:
     // never name a mount over the root, and MREPL would stack instead of
     // replacing. Name the base itself, as "/mnt/." names "/mnt" (#81). Plan 9's
     // namec(Amount) likewise never crosses the channel it starts from.
+    // The base's OWN identity is the one the base cross looked up -- for a
+    // union handle that is member[0]'s (the base cross is union-blind), never
+    // the union point, which would key an invisible member instead of the mount
+    // "/" shows (shed r4 F4).
     if (amode == STALK_MOUNT && floor_depth > 0 && depth == floor_depth) {
         stalk_unwind(trail, depth);
         depth = 0;
         carried_valid = false;
+        mount_names_base = true;
     }
 
     // Determine the quarry.
@@ -1756,6 +1762,11 @@ per_component:
         // `carried` record describes exactly this Spoor (it was set when the
         // tip was pushed and invalidated on every event that changed the tip).
         quarry = trail[--depth];
+    } else if (mount_names_base) {
+        // The crossed base, named for STALK_MOUNT: its walkable form (the
+        // handle itself unless it is a union handle) -- a key, never crossed.
+        quarry = clone_walk_zero(wbase);
+        if (!quarry) goto fail;
     } else {
         // Zero real components ("/", ".", or a ".." run netted back to the
         // base): the quarry is `base` itself, clone-walked to an owned,
@@ -1773,11 +1784,14 @@ per_component:
                                   ? base->union_snap->point : base;
         zero_from_point = (zbase != base);
         quarry = clone_walk_zero(zbase);
-        if (!quarry && zero_from_point) {
+        if (!quarry && zero_from_point && amode != STALK_MOUNT) {
             // The point itself would not clone (its tree's session is gone -- a
             // per-user tree torn down at logout). If nothing is mounted there
             // any more the handle is member[0] regardless, which never needed
             // the point; a live union still does (the cross below keys on it).
+            // Not for STALK_MOUNT: it keys the POINT, live or dissolved (ARCH
+            // 9.6.10), and a key that changed with the point's reachability
+            // would move a mount between trees (shed r4 F4).
             struct Spoor *m0 = mount_member_at(p ? p->territory : NULL, zbase, 0, NULL);
             if (m0) {
                 spoor_clunk(m0);

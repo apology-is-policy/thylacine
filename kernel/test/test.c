@@ -872,6 +872,7 @@ void test_devdev_beacon_leaf(void);              // H-1 audit F1 (/dev/beacon)
 void test_devdev_renderer_gate(void);            // G-4
 void test_devdev_drain_opath_clone_no_disarm(void); // H9 (spoor_clone COPEN strip)
 void test_devdev_drain_walk_off_opened_dev_no_disarm(void); // the unprivileged route to H9
+void test_devdev_spawn_unbump_runs_close(void);       // shed r4 F1 / H6
 void test_devhw_bestiary_smoke(void);
 void test_devhw_attach_returns_root(void);
 void test_devhw_walk_node_and_prop(void);
@@ -1015,6 +1016,7 @@ void test_stalk_union_live_dotdot_walks_unopened(void);
 void test_stalk_union_dissolved_point_unreachable(void);
 void test_stalk_remove_parent_reports_union_point(void);
 void test_stalk_mount_names_crossed_base(void);
+void test_stalk_mount_names_crossed_union_base(void);
 void test_stalk_union_dissolved_helper(void);
 void test_stalk_pheno_symlink_reanchor(void);
 void test_stalk_path_accumulate(void);
@@ -2712,6 +2714,7 @@ struct test_case g_tests[] = {
     { "devdev.renderer_gate",          test_devdev_renderer_gate,          false, NULL },
     { "devdev.drain_opath_clone_no_disarm", test_devdev_drain_opath_clone_no_disarm, false, NULL },
     { "devdev.drain_walk_off_opened_dev_no_disarm", test_devdev_drain_walk_off_opened_dev_no_disarm, false, NULL },
+    { "devdev.spawn_unbump_runs_close", test_devdev_spawn_unbump_runs_close, false, NULL },
     { "devdev.consctl_renderer_mint",  test_devdev_consctl_renderer_mint,  false, NULL },
     { "devdev.winsize_leaf",           test_devdev_winsize_leaf,           false, NULL },
     { "devdev.fd_devclass",            test_devdev_fd_devclass,            false, NULL },
@@ -3796,6 +3799,7 @@ struct test_case g_tests[] = {
     { "stalk.union_dissolved_point_unreachable", test_stalk_union_dissolved_point_unreachable, false, NULL },
     { "stalk.remove_parent_reports_union_point", test_stalk_remove_parent_reports_union_point, false, NULL },
     { "stalk.mount_names_crossed_base", test_stalk_mount_names_crossed_base, false, NULL },
+    { "stalk.mount_names_crossed_union_base", test_stalk_mount_names_crossed_union_base, false, NULL },
     { "stalk.union_dissolved_helper", test_stalk_union_dissolved_helper, false, NULL },
     { "stalk.pheno_symlink_reanchor",  test_stalk_pheno_symlink_reanchor,  false, NULL },
     { "stalk.path_accumulate",         test_stalk_path_accumulate,         false, NULL },

@@ -97,28 +97,35 @@ JSC builds locally at `-j5`; all of WebKit will not, and belongs on the GCP buil
 precedent). `ut` does not reset `$errstr` after a success, which cost this run an hour (see
 the journal). A 60 MB binary fetched with the native `curl` into an encrypted home execs fine.
 
-### What is NOT done in B-0 yet
+### Where B-0 stands (2026-09-21, evening)
 
-- `build_icu` / `build_jsc` in `tools/build.sh`, the manifest entries (`fork.webkit`,
-  `cache.icu4c`), pool staging (`/webkit`), a gate (`ls-jsc.exp`). The recipe is in
-  `usr/ports/webkit/README.md`; the scratch build is `build/pouch/{icu,jsc}`.
-- The Pouch patches: from-scratch sysroot rebuild + every port rebuilt + kernel suite
-  1577/1577 GREEN (2026-09-21, scratch worktree). ci fleet: 53 PASS / 21 SKIP / **2 FAIL**
-  (`r5f9-ash`, `viv-run`) -- NOT from this branch: the per-Territory mount table (32) is full
-  on `main` (ground truth `mount() = -2, nmounts = 32`), so `viv run` from a pts fails at its
-  9th bind. **Operator, 2026-09-21: design the real fix first (keep 32; shed unreachable /
-  orphaned mounts at pivot + chroot). Nothing lands on `main` until the fleet is green.**
-- Audit round 1 (Fable 5.1): 0 P0 / 1 P1 / 3 P2 / 6 P3, all OPEN --
-  `memory/audit_pouch_0033_0035_closed_list.md`. The P1 is a sibling of 0034 in the same
-  function (`sysconf(_SC_OPEN_MAX)` = stack residue); the P2s: `tmpfile()` never unlinks, the
-  0033 pin compares mirrors instead of the kernel (`/proc/<pid>/maps` has the truth), stdio
-  ignores the Pouch socket tag.
-- The codified build (`CHUNK_WEBKIT`, `build_icu`/`build_jsc`, forage `clone-sparse`, the
-  `ls-jsc` gate) is WRITTEN and host-tested (forage 50/50, lever tests, the checkout verifier's
-  five arms, the W+X check's four arms) but has NOT been RUN end to end yet.
-- `build_sysroot` wipes `build/pouch/`, which is where the scratch ICU and JSC builds live.
-  The codified build must keep them elsewhere.
-- test262 / a real benchmark; the v8.0 floor check on `jsc`.
+Everything below is on the local branch `browser-b0`; nothing of B-0 is on `main` yet. The journal
+(`docs/JOURNAL.md`, 2026-09-21 and its addenda) carries the story; this is the ledger.
+
+- **Built and gated green at `d5c58d76`:** the pouch patches 0033-0041, the #80 mount-table SHED at
+  pivot/chroot (the operator's "design the real fix, keep 32"; the session's 23 mounts become 17 and
+  `viv run` passes), the kernel poll re-arm + two-endpoint SrvConn poll, the dissolved-union rule, the
+  `..` floor. Combined gate: suite 1596/1596; ci fleet 55/77 PASS, 22 SKIP (host artifacts), 0 FAIL, 0
+  retries; SMP gate 40/40, 0 corruption. The codified JSC path RAN end to end there
+  (`tools/build.sh all --config ci --set CHUNK_WEBKIT=y`, cold ICU + JSC): `ls-jsc` passes all six legs,
+  `check-v80-floor --all` OK over 223 ELFs.
+- **Audit rounds so far** (full records in the repo's `memory/` closed lists): pouch/libc rounds 1-4
+  (round 4 on the kernel poll surface: 0 P0 / 2 P1 / 1 P2 / 9 P3, DIRTY) and the shed rounds 1-3
+  (round 3: 0 / 0 / 1 P2 / 6 P3). Every finding is fixed, documented by design, or tracked with a queue
+  item. Rounds 4-5 ran on Opus 5 (the Fable fallback, same-family preamble).
+- **Since `d5c58d76`, built and suite-green (1608/1608), gate in flight:** the shed round-3 fixes and
+  aux's `spoor_clone` COPEN strip (`1d00cea7`); the poll round-4 fixes -- every poll pass
+  re-registers, the loop owns death and stop, the hook-list lock is irqsave (scripture `5f4549d9` +
+  `e55b86ef`, code `abb012b0`), pouch 0042 (the timeout clamp), `patch -F 0` for the musl series. Each
+  new test was shown RED on a kernel with its fix reverted; one first form that was not (the c2s-drain
+  test) was rebuilt. Follow-up audits (poll round 5, shed round 4) are running.
+- **Still owed before `main`:** the gate at the tip (fleet + SMP), the follow-up audits closed, the
+  landing split (eight gated commits), the record notes.
+- **Owed to the operator (a conversation, not a decision to take here):** the F3-F9 kernel design
+  (below: reservations/holes, decommit, guard pages, >256 MiB, per-thread signals, stack, dlopen); the
+  small-integer socket fd redesign; unlink-while-open; and one new item from poll round 4 -- syscalls run
+  IRQ-masked end to end, so a noise-driven wait with nothing else runnable spins with interrupts off.
+- test262 / a real benchmark on `jsc`: not started.
 
 ## Remaining work (in order; BROWSER-DESIGN section 9)
 

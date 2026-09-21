@@ -17,10 +17,12 @@
 //   MountRefcountConsistency (ARCH §9.6.6): every mount entry holds one
 //   refcount on its source Spoor. Maintained by:
 //     - mount(): spoor_ref(source) before insert.
-//     - unmount(): spoor_unref(source) after remove.
+//     - unmount(): spoor_clunk(source) after remove (outside the lock).
 //     - territory_clone(): spoor_ref(source) per cloned entry.
-//     - territory_unref() final release: spoor_unref(source) for each
+//     - territory_unref() final release: spoor_clunk(source) for each
 //       entry BEFORE kmem_cache_free.
+//   Always spoor_clunk, never spoor_unref: the entry's ref may be the LAST
+//   (the Proc closed its fd), and the source Dev's close hook must run.
 //
 //   Isolation (ARCH §28 I-1): all operations take a single Territory *.
 //   Two Territories' tables are never modified in the same call.

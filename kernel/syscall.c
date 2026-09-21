@@ -2467,10 +2467,10 @@ static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
     // #844: tx + rx are REF-HELD (sys_lookup_spoor transferred a ref each). The
     // adapter takes its OWN independent ref below; we then release the two
     // lookup borrows here (UNCONDITIONAL -- each lookup ref'd, even when
-    // rx==tx). The adapter ref + the fds' own handle-table refs keep tx/rx
-    // alive for the rest, so every existing error path's adapter rollback
-    // (spoor_unref) + the success path stay correct without further borrow
-    // bookkeeping.
+    // rx==tx). Every rollback below drops the adapter ref with spoor_clunk,
+    // never spoor_unref: a sibling thread may close the fd meanwhile, making
+    // the rollback's drop the LAST, and the pipe's close hook (its peer's EOF)
+    // must run then (shed audit r4 F1, the H6 class).
     spoor_ref(tx);
     if (rx != tx) spoor_ref(rx);
     spoor_clunk(tx);
@@ -2481,8 +2481,8 @@ static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
     u8 aname_scratch[SYS_ATTACH_ANAME_MAX];
     for (u64 i = 0; i < aname_len; i++) {
         if (uaccess_load_u8(aname_va + i, &aname_scratch[i]) != 0) {
-            spoor_unref(tx);
-            if (rx != tx) spoor_unref(rx);
+            spoor_clunk(tx);
+            if (rx != tx) spoor_clunk(rx);
             return -1;
         }
     }
@@ -2493,16 +2493,16 @@ static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
     // is what kfree's the adapter and spoor_clunks the transport Spoors.
     struct p9_spoor_transport *adapter = kmalloc(sizeof(*adapter), KP_ZERO);
     if (!adapter) {
-        spoor_unref(tx);
-        if (rx != tx) spoor_unref(rx);
+        spoor_clunk(tx);
+        if (rx != tx) spoor_clunk(rx);
         return -1;
     }
     // owns_spoors=false: dev9p (not the adapter) is the holder. The
     // attached's last unref releases tx/rx via spoor_clunk and kfree's
     // the adapter; the adapter's own close hook stays a no-op.
     if (p9_spoor_transport_init(adapter, tx, rx, false) != 0) {
-        spoor_unref(tx);
-        if (rx != tx) spoor_unref(rx);
+        spoor_clunk(tx);
+        if (rx != tx) spoor_clunk(rx);
         kfree(adapter);
         return -1;
     }
@@ -2528,8 +2528,8 @@ static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
         // (the create's transport_ops.close runs on rollback, which is
         // a no-op for owns=false). We must still kfree the adapter +
         // release transport refs since they never transferred.
-        spoor_unref(tx);
-        if (rx != tx) spoor_unref(rx);
+        spoor_clunk(tx);
+        if (rx != tx) spoor_clunk(rx);
         kfree(adapter);
         return attach_err_to_ret(aerr);
     }
@@ -2542,8 +2542,8 @@ static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
         // Shouldn't happen — first install on a fresh attached. If it
         // does, the attached doesn't own the adapter; rollback manually.
         p9_attached_unref(att);
-        spoor_unref(tx);
-        if (rx != tx) spoor_unref(rx);
+        spoor_clunk(tx);
+        if (rx != tx) spoor_clunk(rx);
         kfree(adapter);
         return -1;
     }
@@ -4715,13 +4715,16 @@ static bool spoor_same_mount_identity(const struct Spoor *a, const struct Spoor 
 // that has DISSOLVED makes `c` a plain handle on member[0] (ARCH 9.6.10), which
 // is what the resolver already says for `openat(c, ...)`: act on member[0], in a
 // fresh unopened clone (the handle itself may be opened, and a Dev may refuse to
-// walk or create from an opened Spoor).
+// walk or create from an opened Spoor). `*dissolved`, when non-NULL, reports
+// which of the two it was.
 static struct Spoor *sys_union_dirfd_member(struct Proc *p, struct Spoor *c,
                                             const char *leaf, bool want_create,
-                                            s64 *err) {
+                                            s64 *err, bool *dissolved) {
+    if (dissolved) *dissolved = false;
     if (!c->union_snap || !c->union_snap->point) return NULL;
     struct Spoor *m0 = NULL;
     if (stalk_union_dissolved(p, c, &m0)) {
+        if (dissolved) *dissolved = true;
         if (!m0) *err = -(s64)T_E_IO;
         return m0;
     }
@@ -4757,23 +4760,29 @@ static s64 sys_rename_handler(u64 olddir_fd_raw, u64 oldname_va, u64 oldname_len
 
     // UM-8c F5: a union dirfd holds member[0]. A rename reaches the member that
     // HOLDS the source (od) and lands the destination in the SAME member when
-    // both fds name one union (Plan 9 within-member rename), else the MCREATE
-    // member (nd). Non-union dirfds act on od/nd directly; a cross-member move
-    // then falls to spoor_rename_in_dirs's same-Dev guard (EXDEV -> EINVAL).
+    // both fds name one LIVE union (Plan 9 within-member rename), else the
+    // MCREATE member (nd). Non-union dirfds act on od/nd directly; a
+    // cross-member move then falls to spoor_rename_in_dirs's same-Dev guard
+    // (EXDEV -> EINVAL). Once the union has DISSOLVED each handle means its own
+    // member[0] -- two handles on one point may hold different ones (shed r4
+    // F2: taken while dissolved, the shortcut renamed into od's member[0] a
+    // directory the caller never named for the destination).
     bool same_union = od->union_snap && od->union_snap->point &&
                       nd->union_snap && nd->union_snap->point &&
                       spoor_same_mount_identity(od->union_snap->point,
                                                 nd->union_snap->point);
     s64 uerr = 0;
-    struct Spoor *od_m = sys_union_dirfd_member(p, od, old_scratch, false, &uerr);
+    bool od_dissolved = false;
+    struct Spoor *od_m = sys_union_dirfd_member(p, od, old_scratch, false, &uerr,
+                                                &od_dissolved);
     if (!od_m && uerr) { spoor_clunk(od); spoor_clunk(nd); return uerr; }
     struct Spoor *od_target = od_m ? od_m : od;
     struct Spoor *nd_m = NULL;
     struct Spoor *nd_target;
-    if (same_union) {
+    if (same_union && !od_dissolved) {
         nd_target = od_target;   // within-member: borrow od_m (clunked once below)
     } else {
-        nd_m = sys_union_dirfd_member(p, nd, new_scratch, true, &uerr);
+        nd_m = sys_union_dirfd_member(p, nd, new_scratch, true, &uerr, NULL);
         if (!nd_m && uerr) {
             if (od_m) spoor_clunk(od_m);
             spoor_clunk(od); spoor_clunk(nd);
@@ -4839,7 +4848,7 @@ static s64 sys_unlink_handler(u64 parent_fd_raw, u64 name_va, u64 name_len_raw,
     // UM-8c F5: a union dirfd holds member[0]; unlink acts on the member that
     // HOLDS the leaf, not member[0].
     s64 uerr = 0;
-    struct Spoor *um = sys_union_dirfd_member(p, c, scratch, false, &uerr);
+    struct Spoor *um = sys_union_dirfd_member(p, c, scratch, false, &uerr, NULL);
     if (!um && uerr) { spoor_clunk(c); return uerr; }
     struct Spoor *target = um ? um : c;
 
@@ -8196,6 +8205,18 @@ static void sys_spawn_thunk(void *arg) {
 //
 // Note: bumped[] and bumped_rights[] are caller-allocated arrays of
 // SYS_SPAWN_MAX_FDS entries each.
+
+// The ONE way a spawn drops the fd refs it bumped but never handed to a child
+// (every failure unwind -- here and in the spawn handlers). spoor_clunk, never
+// spoor_unref: a sibling thread may close the fd while the spawn is in flight,
+// making this drop the LAST ref, and the Dev's close hook (the console drain's
+// disarm, a pipe's EOF, a SrvConn teardown, a 9P fid clunk) must run then
+// (shed audit r4 F1; aux's H6). Non-static for devdev.spawn_unbump_runs_close.
+void sys_spawn_unbump_fds(struct Spoor *const *bumped, u32 n);
+void sys_spawn_unbump_fds(struct Spoor *const *bumped, u32 n) {
+    for (u32 j = 0; j < n; j++) spoor_clunk(bumped[j]);
+}
+
 static int sys_bump_inherit_fds(struct Proc *p, const u32 *fds, u32 fd_count,
                                 struct Spoor *bumped[SYS_SPAWN_MAX_FDS],
                                 rights_t bumped_rights[SYS_SPAWN_MAX_FDS]) {
@@ -8207,7 +8228,7 @@ static int sys_bump_inherit_fds(struct Proc *p, const u32 *fds, u32 fd_count,
         struct Handle hh;
         if (handle_get(p, (hidx_t)fds[i], &hh) < 0 || hh.kind != KOBJ_SPOOR) {
             handle_put(&hh);
-            for (u32 j = 0; j < bumped_count; j++) spoor_unref(bumped[j]);
+            sys_spawn_unbump_fds(bumped, bumped_count);
             return -1;
         }
         struct Spoor *s = (struct Spoor *)hh.obj;
@@ -8525,14 +8546,14 @@ int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name, size_t name_le
     struct Spoor *exe = exec_resolve_from_namespace_ex(p, name, name_len, &exe_size,
                                                        &exe_pheno_linux);
     if (!exe) {
-        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
+        sys_spawn_unbump_fds(bumped, fd_count);
         return -1;
     }
 
     struct spawn_with_fds_args *sa = kmalloc(sizeof(*sa), KP_ZERO);
     if (!sa) {
         spoor_clunk(exe);
-        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
+        sys_spawn_unbump_fds(bumped, fd_count);
         return -1;
     }
     sa->exe      = exe;
@@ -8548,7 +8569,7 @@ int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name, size_t name_le
     if (pid < 0) {
         kfree(sa);
         spoor_clunk(exe);
-        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
+        sys_spawn_unbump_fds(bumped, fd_count);
         return -1;
     }
     return pid;
@@ -8685,14 +8706,14 @@ static int sys_spawn_full_with_perms_for_proc(struct Proc *p,
     struct Spoor *exe = exec_resolve_from_namespace_ex(p, name, name_len, &exe_size,
                                                        &exe_pheno_linux);
     if (!exe) {
-        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
+        sys_spawn_unbump_fds(bumped, fd_count);
         return -1;
     }
 
     struct spawn_with_fds_args *sa = kmalloc(sizeof(*sa), KP_ZERO);
     if (!sa) {
         spoor_clunk(exe);
-        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
+        sys_spawn_unbump_fds(bumped, fd_count);
         return -1;
     }
     sa->exe        = exe;
@@ -8709,7 +8730,7 @@ static int sys_spawn_full_with_perms_for_proc(struct Proc *p,
     if (pid < 0) {
         kfree(sa);
         spoor_clunk(exe);
-        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
+        sys_spawn_unbump_fds(bumped, fd_count);
         return -1;
     }
     return pid;
@@ -9341,7 +9362,7 @@ static int sys_spawn_full_argv_with_perms_for_proc(
     struct Spoor *exe = exec_resolve_from_namespace_ex(p, name, name_len,
                                                        &exe_size, &exe_pheno_linux);
     if (!exe) {
-        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
+        sys_spawn_unbump_fds(bumped, fd_count);
         return -1;
     }
 
@@ -9353,7 +9374,7 @@ static int sys_spawn_full_argv_with_perms_for_proc(
         argv_data_copy = kmalloc(argv_data_len, 0);
         if (!argv_data_copy) {
             spoor_clunk(exe);
-            for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
+            sys_spawn_unbump_fds(bumped, fd_count);
             return -1;
         }
         for (u32 i = 0; i < argv_data_len; i++) argv_data_copy[i] = argv_data[i];
@@ -9363,7 +9384,7 @@ static int sys_spawn_full_argv_with_perms_for_proc(
     if (!sa) {
         if (argv_data_copy) kfree(argv_data_copy);
         spoor_clunk(exe);
-        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
+        sys_spawn_unbump_fds(bumped, fd_count);
         return -1;
     }
     sa->exe           = exe;
@@ -9404,7 +9425,7 @@ static int sys_spawn_full_argv_with_perms_for_proc(
         kfree(sa);
         if (argv_data_copy) kfree(argv_data_copy);
         spoor_clunk(exe);
-        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
+        sys_spawn_unbump_fds(bumped, fd_count);
         return -1;
     }
     return pid;

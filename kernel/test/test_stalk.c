@@ -95,6 +95,7 @@ void test_stalk_union_dissolved_degrades(void);  // ARCH 9.6.10: never the cover
 void test_stalk_dotdot_crossed_base_floor(void); // '..' never pops a crossed base
 void test_stalk_union_live_dotdot_walks_unopened(void); // shed r3 F2
 void test_stalk_union_dissolved_point_unreachable(void); // shed r3 F2 (the point cannot clone)
+void test_stalk_mount_names_crossed_union_base(void); // shed r4 F4
 void test_stalk_remove_parent_reports_union_point(void); // shed r3 F3
 void test_stalk_mount_names_crossed_base(void);          // shed r3 F4
 void test_stalk_union_dissolved_helper(void);            // shed r3 F5
@@ -382,6 +383,12 @@ static struct Walkqid *fix_walk_attrs(struct Spoor *c, struct Spoor *nc,
                                       int nname, struct t_stat *sts) {
     if (!c || nname <= 0 || nname > DEV_WALK_ATTRS_MAX) return NULL;
     if (!names || !name_lens || !sts) return NULL;
+    // Stratum refuses a Twalkgetattr from an OPENED fid exactly as it refuses a
+    // Twalk (src/9p/server.c: is_open -> EINVAL on both). Until shed audit r4 F3
+    // only fix_walk did, so a NAME resolved off an opened base took the pounce
+    // here and passed -- the walk-from-opened class the dissolved-union rule got
+    // wrong once was invisible to every name leg in this file.
+    if (c->flag & COPEN) return NULL;
     g_fix_walkattrs_calls++;
 
     struct Walkqid *wq = walkqid_alloc(nname);
@@ -490,6 +497,7 @@ static struct Spoor *fix_open_cached(struct Spoor *c, const char *const *names,
     g_fix_co_calls++;
     if (!g_fix_co_enable) return NULL;
     if (!c || !names || !name_lens || !sts) return NULL;
+    if (c->flag & COPEN) return NULL;   // Stratum: no walk from an opened fid (fix_walk_attrs)
     if (nname <= 0 || nname > DEV_WALK_ATTRS_MAX) return NULL;
     u64 cur = c->qid.path;
     for (int i = 0; i < nname; i++) {
@@ -2529,10 +2537,21 @@ void test_stalk_union_dissolved_point_unreachable(void) {
     TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER),  0, "um2 MAFTER");
     struct Spoor *ufd = stalk(&p, root, "umpt", 4, STALK_OPEN, 0);
     TEST_ASSERT(ufd && ufd->union_snap && ufd->union_snap->point, "union fd");
+    struct Spoor *point = ufd->union_snap->point;
+
+    // The LIVE arm (shed audit r4 F3): while member[0] is mounted, "." names the
+    // union, which is reached only through the point -- an unreachable point
+    // fails the resolution; it never silently degrades a live union to one
+    // member. A kernel whose fallback ignored liveness passed the dissolved leg.
+    point->flag |= COPEN;
+    struct Spoor *lq = stalk(&p, ufd, ".", 1, STALK_WALK, 0);
+    point->flag &= ~COPEN;
+    TEST_ASSERT(lq == NULL, "a LIVE union with an unreachable point does not fall back to member[0]");
+    if (lq) spoor_clunk(lq);
+
     TEST_EXPECT_EQ(unmount(p.territory, pt), 0, "unmount member 0");
     TEST_EXPECT_EQ(unmount(p.territory, pt), 0, "unmount member 1");
 
-    struct Spoor *point = ufd->union_snap->point;
     point->flag |= COPEN;            // the point's session is gone
     struct Spoor *q = stalk(&p, ufd, ".", 1, STALK_WALK, 0);
     point->flag &= ~COPEN;
@@ -2624,6 +2643,47 @@ void test_stalk_mount_names_crossed_base(void) {
 
     territory_unref(p.territory);
     spoor_clunk(src); spoor_clunk(mp);
+    spoor_unref(root);
+}
+
+// Shed audit round 4, F4: the same rule off a UNION handle. Its base cross is
+// union-blind -- it looks up mounts keyed at member[0]'s identity -- so the name
+// of that crossed base is member[0]'s identity too. Keyed on the union POINT
+// instead, unmount of "." removed an invisible union member and left the mount
+// the handle actually shows in place.
+void test_stalk_mount_names_crossed_union_base(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+    struct Spoor *um1 = stalk(&p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    struct Spoor *a   = stalk(&p, root, "a",    1, STALK_WALK,  0);
+    struct Spoor *k1  = stalk(&p, root, "um1",  3, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt && a && k1, "resolve um1 + um2 + umpt + a + um1's key");
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE), 0, "um1 MBEFORE");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER),  0, "um2 MAFTER");
+    struct Spoor *ufd = stalk(&p, root, "umpt", 4, STALK_OPEN, 0);
+    TEST_ASSERT(ufd && ufd->union_snap && ufd->union_snap->point, "a union fd (member[0] = um1)");
+    TEST_EXPECT_EQ(mount(p.territory, a, k1, 0), 0, "mount a over member[0]'s identity");
+
+    struct Spoor *q = stalk(&p, ufd, ".", 1, STALK_MOUNT, 0);
+    TEST_ASSERT(q != NULL, "STALK_MOUNT \".\" at the crossed union base");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)22, "names member[0] (22), not the union point (28)");
+    if (q) {
+        TEST_EXPECT_EQ(unmount(p.territory, q), 0, "that name unmounts the mount over member[0]");
+        spoor_clunk(q);
+    }
+    q = stalk(&p, root, "umpt/only1", 10, STALK_WALK, 0);
+    TEST_ASSERT(q != NULL, "the union keeps member um1 (only1)");
+    if (q) spoor_clunk(q);
+    q = stalk(&p, root, "umpt/only2", 10, STALK_WALK, 0);
+    TEST_ASSERT(q != NULL, "the union keeps member um2 (only2)");
+    if (q) spoor_clunk(q);
+
+    spoor_clunk(ufd);
+    territory_unref(p.territory);
+    spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt); spoor_clunk(a); spoor_clunk(k1);
     spoor_unref(root);
 }
 

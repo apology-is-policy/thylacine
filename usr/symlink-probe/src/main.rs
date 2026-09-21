@@ -243,6 +243,7 @@ const UNION_MARKER: &str = "/d1-union/covered-marker";
 // complaint, which is how a rule wrong for 9P passed both of them.
 const UNION_M0: &str = "/d1-union-m0";
 const UNION_M1: &str = "/d1-union-m1";
+const UNION_M2: &str = "/d1-union-m2";
 
 fn opens_under(dirfd: i64, name: &str) -> bool {
     let fd = unsafe {
@@ -378,11 +379,30 @@ fn union_c(c: &mut Checker) {
     c.ok("U-c live: back at the base, member[0] is walked unopened",
          opens_under(ufd, "sub/../zero-only"));
 
+    // Two O_PATH union handles (an O_PATH dirfd carries the write right the fd
+    // mutations need) whose member[0]s DIFFER: ph0 is taken with member[0] =
+    // m0, then m2 is mounted in front and ph2 is taken with member[0] = m2.
+    let ph0 = match File::open_with_opath(UNION_DIR) {
+        Ok(f) => f,
+        Err(_) => fail("symlink-probe: FAIL -- union-c: O_PATH open of the union\n"),
+    };
+    let m2 = match File::open_with_opath(UNION_M2) {
+        Ok(f) => f,
+        Err(_) => fail("symlink-probe: FAIL -- union-c: O_PATH on member 2\n"),
+    };
+    if mount(&m2, UNION_DIR, MountFlags::BEFORE).is_err() {
+        fail("symlink-probe: FAIL -- union-c: mount member 2 in front\n");
+    }
+    let ph2 = match File::open_with_opath(UNION_DIR) {
+        Ok(f) => f,
+        Err(_) => fail("symlink-probe: FAIL -- union-c: O_PATH open of the grown union\n"),
+    };
+
     let mut gone = 0;
-    while gone < 4 && unmount(UNION_DIR).is_ok() {
+    while gone < 5 && unmount(UNION_DIR).is_ok() {
         gone += 1;
     }
-    c.ok("U-c: both members unmounted", gone == 2);
+    c.ok("U-c: all three members unmounted", gone == 3);
     let dot = unsafe { libthyla_rs::t_open(ufd, b".".as_ptr(), 1, libthyla_rs::T_OPATH) };
     c.ok("U-c dissolved: \".\" of the OPENED dirfd opens", dot >= 0);
     if dot >= 0 {
@@ -394,6 +414,40 @@ fn union_c(c: &mut Checker) {
     c.ok("U-c dissolved: member[0]'s name off the dirfd", opens_under(ufd, "zero-only"));
     c.ok("U-c dissolved: member[1]'s name is gone", !opens_under(ufd, "one-only"));
     c.ok("U-c dissolved: the covered marker never answers", !opens_under(ufd, "covered-marker"));
+
+    // The fd MUTATIONS follow the same rule (shed r3 F5, pinned at r4 F3): a
+    // dissolved union dirfd creates, unlinks and renames in ITS member[0] --
+    // never in the covered directory, and never refused for want of a member.
+    let p0 = ph0.as_raw_fd() as i64;
+    let p2 = ph2.as_raw_fd() as i64;
+    let made = unsafe {
+        libthyla_rs::t_walk_create(p0, b"c-made".as_ptr(), 6, libthyla_rs::T_OREAD, 0o644)
+    };
+    c.ok("U-c dissolved: SYS_WALK_CREATE off the dirfd succeeds", made >= 0);
+    if made >= 0 {
+        unsafe { libthyla_rs::t_close(made) };
+    }
+    c.ok("U-c dissolved: the create landed in member[0]",
+         File::open_with_opath(&format!("{}/c-made", UNION_M0)).is_ok());
+    c.ok("U-c dissolved: the create did NOT land in the covered directory",
+         File::open_with_opath(&format!("{}/c-made", UNION_DIR)).is_err());
+    let unl = unsafe { libthyla_rs::t_unlink(p0, b"c-made".as_ptr(), 6, 0) };
+    c.ok("U-c dissolved: SYS_UNLINK off the dirfd succeeds", unl == 0);
+    c.ok("U-c dissolved: the unlink removed member[0]'s file",
+         File::open_with_opath(&format!("{}/c-made", UNION_M0)).is_err());
+    // A rename between two handles on ONE point lands where the DESTINATION
+    // handle's member[0] is (m2), not the source's (shed r4 F2: the
+    // within-member shortcut is for a live union only).
+    let rn = unsafe {
+        libthyla_rs::t_rename(p0, b"r-src".as_ptr(), 5, p2, b"r-dst".as_ptr(), 5)
+    };
+    c.ok("U-c dissolved: SYS_RENAME between the two dirfds succeeds", rn == 0);
+    c.ok("U-c dissolved: the rename landed in the DESTINATION handle's member[0]",
+         File::open_with_opath(&format!("{}/r-dst", UNION_M2)).is_ok());
+    c.ok("U-c dissolved: ... not in the source handle's member[0]",
+         File::open_with_opath(&format!("{}/r-dst", UNION_M0)).is_err());
+    c.ok("U-c dissolved: the source left member[0]",
+         File::open_with_opath(&format!("{}/r-src", UNION_M0)).is_err());
 }
 
 // Build the covered directory + its marker, run one stage in a child, reap it.
@@ -416,8 +470,10 @@ fn run_union_stage(c: &mut Checker, stage: &str) {
         let members = fs::create_dir(UNION_M0).is_ok()
             && fs::create_dir(&format!("{}/sub", UNION_M0)).is_ok()
             && File::create(&format!("{}/zero-only", UNION_M0)).is_ok()
+            && File::create(&format!("{}/r-src", UNION_M0)).is_ok()
             && fs::create_dir(UNION_M1).is_ok()
-            && File::create(&format!("{}/one-only", UNION_M1)).is_ok();
+            && File::create(&format!("{}/one-only", UNION_M1)).is_ok()
+            && fs::create_dir(UNION_M2).is_ok();
         if !members {
             fail("symlink-probe: FAIL -- union-c: build the member directories\n");
         }
@@ -460,11 +516,17 @@ fn run_union_stage(c: &mut Checker, stage: &str) {
 // Remove union-c's member directories (idempotent: a leftover from a prior boot
 // on a preserved pool must not fail the build step).
 fn remove_union_c_members() {
-    let _ = fs::remove_file(&format!("{}/zero-only", UNION_M0));
+    for leaf in ["zero-only", "r-src", "r-dst", "c-made"] {
+        let _ = fs::remove_file(&format!("{}/{}", UNION_M0, leaf));
+    }
     let _ = fs::remove_dir(&format!("{}/sub", UNION_M0));
     let _ = fs::remove_dir(UNION_M0);
     let _ = fs::remove_file(&format!("{}/one-only", UNION_M1));
     let _ = fs::remove_dir(UNION_M1);
+    for leaf in ["r-dst", "r-src", "c-made"] {
+        let _ = fs::remove_file(&format!("{}/{}", UNION_M2, leaf));
+    }
+    let _ = fs::remove_dir(UNION_M2);
 }
 
 #[no_mangle]
