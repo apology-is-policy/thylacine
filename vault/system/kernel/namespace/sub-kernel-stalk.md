@@ -296,9 +296,25 @@ obligations:
    `mount_member_at(point, 0)` before routing through the point, and the
    zero-component site enforces it as a POST-condition of the cross
    (`zero_from_point`: a point clone that does not cross is replaced by a clone
-   of `base`), so a peer Thread's `unmount` opens no window between a check and
-   the cross. A dissolved union is a plain handle on member[0], which is what
-   `base` is. `STALK_MOUNT` is untouched — it takes the point as a KEY and
+   of member[0]), so a peer Thread's `unmount` opens no window between a check
+   and the cross. A dissolved union is a plain handle on member[0], which is
+   what `base` is — but a `STALK_OPEN` union handle is member[0] OPENED, and a
+   Dev may refuse to walk an opened Spoor (9P forbids a `Twalk`, the
+   zero-element clone included, from an opened fid; the test fixture refuses
+   what Stratum refuses). While the union lives that never shows, because every
+   resolution leaves through the point. Dissolved, both sites therefore resolve
+   from `stalk_union_handle_walkable(base)`: the UNOPENED clone of that member
+   which the full snap already retains for the readdir dedup probe, matched by
+   identity `(dc, devno, qid.path)` and never by index — the snap skips a member
+   it could not open, and a mount landing between the snapshot and the quarry's
+   own cross can make `m[0]` a different member than the handle. No match (the
+   point-only snap of an `O_PATH` handle, itself unopened) returns the handle.
+   The first version of this rule cloned `base` directly and was caught by its
+   own kernel test on the fixture, not by the on-device probe, whose members
+   are `/proc` and `/ctl` — kernel Devs that walk an opened Spoor happily. The
+   base-set site records the choice in `wbase` (where a depth-0 component is
+   walked from), recomputed on every pass since a symlink restart may re-anchor
+   `base`. `STALK_MOUNT` is untouched — it takes the point as a KEY and
    hands no Spoor to EL0. The base-set site is also gated on `depth == 0`: a
    base that CROSSED is searched as that mount, and a second `union_base` ref
    would be overwritten unclunked by the descent branch (a race-only Spoor leak,

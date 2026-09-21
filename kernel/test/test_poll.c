@@ -1125,27 +1125,71 @@ void test_poll_devsrv_client_kernel_attached_pollnval(void) {
 
 // A producer that never stops walking the list must not hold a timed poller
 // past its deadline: tsleep prefers a set flag to a passed deadline, so the
-// loop carries its own test (specs/poll.tla PollTerminates).
-void test_poll_timeout_survives_a_busy_list(void) {
-    struct cp_fixture f;
-    TEST_ASSERT(cp_setup(&f), "fixture");
+// re-arm loop carries its own test (specs/poll.tla PollTerminates).
+//
+// The window is between the loop's clear and tsleep's cond check, and a
+// producer on another thread lands in it only by luck -- measured: with the
+// loop's deadline test removed, a send/recv producer still let this pass. So
+// the producer here is the polled object itself: a Dev whose .poll walks its
+// own hook list on EVERY sample, never ready. Each re-sample then re-flags the
+// hook inside the window, deterministically, and tsleep never sleeps.
+//
+// The walking stops on its own after BUSY_WALK_NS so a kernel WITHOUT the
+// deadline test still returns (0, at the first quiet tsleep) instead of
+// spinning a CPU for the rest of the suite. What separates the two is WHEN the
+// last sample happened: at the 50 ms deadline, or at the end of the walking.
+#define BUSY_WALK_NS   (1000ull * 1000ull * 1000ull)
+#define BUSY_LATE_NS   ( 500ull * 1000ull * 1000ull)
+static struct poll_waiter_list g_busy_list = POLL_WAITER_LIST_INIT;
+static u64 g_busy_until_ns;
+static u64 g_busy_last_sample_ns;
+static u64 g_busy_samples;
 
-    g_cp_proc = f.client;  g_cp_fd = (hidx_t)f.client_h;
+static short busy_poll(struct Spoor *c, short events, struct poll_waiter *pw) {
+    (void)c; (void)events;
+    if (pw) poll_waiter_list_register(&g_busy_list, pw);
+    u64 now = timer_now_ns();
+    g_busy_last_sample_ns = now;
+    g_busy_samples++;
+    if (now < g_busy_until_ns) poll_waiter_list_wake(&g_busy_list);
+    return 0;
+}
+
+static struct Dev g_busy_dev = {
+    .dc   = (int)'~',
+    .name = "pollbusy",
+    .poll = busy_poll,
+};
+
+void test_poll_timeout_survives_a_busy_list(void) {
+    struct Proc *p = make_test_proc();
+    TEST_ASSERT(p != NULL, "test proc");
+    hidx_t h = install_spoor(p, dev_simple_attach(&g_busy_dev, 0), RIGHT_READ);
+    TEST_ASSERT(h >= 0, "busy fd installed");
+
+    g_cp_proc = p;         g_cp_fd = h;
     g_cp_events = POLLIN;  g_cp_timeout = 50;
     g_cp_result = -999;    g_cp_revents = 0;
+    g_busy_samples = 0;
+    u64 t0 = timer_now_ns();
+    g_busy_last_sample_ns = t0;
+    g_busy_until_ns       = t0 + BUSY_WALK_NS;
+    u64 resleeps0 = poll_total_resleeps();
 
     struct Thread *poller = thread_create(kproc(), cp_poll_entry);
     TEST_ASSERT(poller != NULL, "thread_create");
     ready(poller);
+    TEST_YIELD_UNTIL(g_cp_result != -999);
 
-    u8 b = 0x5A;
-    TEST_YIELD_UNTIL(g_cp_result != -999 ||
-                     (srvconn_client_send(f.cn, &b, 1),
-                      srvconn_server_recv(f.cn, &b, 1), false));
-    TEST_EXPECT_EQ(g_cp_result, 0L, "timed out -- at its deadline, not never");
+    TEST_EXPECT_EQ(g_cp_result, 0L, "timed out");
+    TEST_ASSERT(poll_total_resleeps() > resleeps0,
+        "non-vacuous: the loop re-slept on a flagged-but-empty wake");
+    TEST_ASSERT(g_busy_samples >= 3, "non-vacuous: the object was re-sampled");
+    TEST_ASSERT(g_busy_last_sample_ns - t0 < BUSY_LATE_NS,
+        "returned at ITS deadline, not when the producer went quiet");
 
     thread_free(poller);
-    cp_teardown(&f);
+    drop_test_proc(p);
 }
 
 // =============================================================================

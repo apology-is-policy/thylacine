@@ -397,6 +397,32 @@ static struct union_snap *union_snap_point_only(struct Spoor *point, int *errp) 
     return snap;
 }
 
+// stalk_union_handle_walkable -- the Spoor to RESOLVE FROM once a union
+// handle's union has dissolved (ARCH 9.6.10: the handle is then a plain handle
+// on member[0]). A STALK_OPEN union handle IS member[0], but OPENED, and a Dev
+// may refuse to walk an opened Spoor (9P forbids a Twalk -- a zero-element clone
+// included -- from an opened fid: Stratum h_walk, mirrored by the test fixture).
+// While the union lives that never shows, because every resolution leaves
+// through the point; dissolved, the opened handle would answer an I/O error for
+// "." and for member[0]'s own names on exactly the Devs that matter. The full
+// snap already retains each member UNOPENED (R2-F1, the readdir dedup probe):
+// resolve from the entry that IS this handle. Matched by identity, never by
+// index -- the snap skips a member it could not open, and a mount landing
+// between the snapshot and the quarry's own cross can make m[0] a different
+// member than the handle. No match (a point-only snap: the O_PATH handle, itself
+// unopened) -> the handle. Borrowed: the snap is immutable once attached and
+// lives as long as `h`, which the caller holds across the resolution.
+static struct Spoor *stalk_union_handle_walkable(struct Spoor *h) {
+    struct union_snap *snap = h->union_snap;
+    if (!snap) return h;
+    for (int k = 0; k < snap->n; k++) {
+        struct Spoor *w = snap->m[k].walkable;
+        if (w && w->dc == h->dc && w->devno == h->devno &&
+            w->qid.path == h->qid.path) return w;
+    }
+    return h;
+}
+
 // path_has_dotdot -- pre-scan for a ".." component. The POUNCE compresses a
 // run of components into ONE trail entry (intermediates never materialize as
 // Spoors), which is incompatible with `..`'s pop-one-component semantics --
@@ -787,6 +813,10 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
     // per_component union branch consumes (clunks) it. NULL for the common
     // single-source path. Clunked at `fail` if a goto slips past the consume.
     struct Spoor        *union_base = NULL;
+    // Where a depth-0 component is walked FROM: `base`, except off a dissolved
+    // union handle (stalk_union_handle_walkable). Recomputed on every pass at
+    // the base-set site below, since a restart may have re-anchored `base`.
+    struct Spoor        *wbase = start;
     // The zero-component quarry was cloned from a union handle's POINT (set
     // where the quarry is determined; read after the final cross).
     bool                 zero_from_point = false;
@@ -871,6 +901,7 @@ restart:
         if (stalk_cross_mounts(p, base, &crossed, crossed_pheno) < 0) goto fail;
         if (crossed) trail[depth++] = crossed;
     }
+    wbase = base;
 
     // UM-8c F5: a union DIRFD used as a resolution base holds member[0] + the
     // union_snap (member 0's identity is not a mount point, so the base cross
@@ -889,7 +920,8 @@ restart:
     //  - The point is the directory the union was mounted OVER. It is consulted
     //    only while it still hosts a member in THIS Territory; once the members
     //    are gone (unmounted, or shed by a chroot elsewhere) the handle is a
-    //    plain handle on member[0], which is what `base` is (ARCH 9.6.10).
+    //    plain handle on member[0] (ARCH 9.6.10) -- which is what `base` is,
+    //    resolved from in its walkable form (`wbase`).
     // depth == 0: a base that CROSSED (something was mounted over member[0]'s
     // identity) is searched as that mount, and must not leave a second ref for
     // the descent branch to overwrite.
@@ -900,6 +932,8 @@ restart:
             spoor_clunk(m0);
             union_base = base->union_snap->point;
             spoor_ref(union_base);
+        } else {
+            wbase = stalk_union_handle_walkable(base);
         }
     }
 
@@ -1008,7 +1042,7 @@ restart:
             }
             parent = trail[depth - 1];
         } else {
-            parent = base;
+            parent = wbase;
         }
 
         // #79: the thing we are about to search must BE a directory. Without
@@ -1777,9 +1811,11 @@ per_component:
                 // handle never named, in a tree its holder may have no other
                 // path into (reachable by plain unmount("/"), and by a chroot
                 // whose shed dropped the union's entries). Degrade to member[0],
-                // which is what the handle itself is.
+                // which is what the handle itself is -- cloned from its walkable
+                // form, NOT from `wbase`: the union may have been live at the
+                // base-set probe and dissolved since (a peer Thread's unmount).
                 spoor_clunk(quarry);
-                quarry = clone_walk_zero(base);
+                quarry = clone_walk_zero(stalk_union_handle_walkable(base));
                 if (!quarry) { union_snap_free(snap); goto fail; }
                 carried_valid = false;
             }

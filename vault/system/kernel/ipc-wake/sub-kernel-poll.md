@@ -195,9 +195,16 @@ why `POLL_MAX_NFDS` is a frame bound, not an fd-table bound.
 - The re-arm: the clear precedes the sample for EVERY waiter; the hooks
   and the retained refs survive the loop and come off only at the
   sweep; `timeout_ms == 0` never enters it; the loop's own deadline test
-  stays (`poll.timeout_survives_a_busy_list` is its device witness, and
-  cannot false-fail — it can only fail to discriminate on a schedule
-  where no walk lands between a clear and the next `tsleep`).
+  stays. `poll.timeout_survives_a_busy_list` is its device witness, and
+  its first form did NOT discriminate: a send/recv producer on another
+  thread lands a walk between a clear and the next `tsleep` only by luck,
+  and with the deadline test removed the test still passed (measured).
+  The producer is now the polled object itself — a test Dev whose `.poll`
+  walks its own hook list on every sample and is never ready — so every
+  re-sample re-flags the hook inside the window. The walking stops after
+  1 s so a kernel without the test still returns; what separates the two
+  is WHEN the last sample happened (at the 50 ms deadline, or when the
+  producer went quiet).
 - **A wake site may walk its list for ANY state change; what it may
   never do is fail to walk it for one.** That licence is what lets one
   list serve two endpoints, and it exists only because of the re-arm.
