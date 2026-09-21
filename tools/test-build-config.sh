@@ -157,5 +157,36 @@ eq "default profile: console OFF" "$(bc_get HALCYON_CONSOLE)" "n"
 bc_reset; bc_apply_preset ci
 eq "ci profile: session OFF" "$(bc_get HALCYON_SESSION)" "n"
 
+# T-display-profile: WHICH Halcyon is drawn is a config option (2026-09-21). It
+# used to be an env lever the schema did not know, so a config could select an
+# Instrument THEME and still get the legacy UI -- new colours on old bezels.
+# The schema default is `instrument` so a profile written before the option
+# existed (it names no HALCYON_PROFILE) builds the current UI, not the old one.
+bc_reset
+eq "profile schema default is instrument" "$(bc_get HALCYON_PROFILE)" "instrument"
+bc_reset; bc_apply_preset default
+eq "default profile: the Instrument UI"   "$(bc_get HALCYON_PROFILE)" "instrument"
+# The gate fleet's pre-Instrument scenarios assert the legacy literals.
+bc_reset; bc_apply_preset ci
+eq "ci profile: the legacy UI (pinned)"   "$(bc_get HALCYON_PROFILE)" "legacy"
+# A choice, not a string: a misspelt profile must fail HERE, not bake a word
+# the loader refuses one tier down at every boot.
+bc_reset
+if bc_set_one HALCYON_PROFILE instrumnet >/dev/null 2>&1; then
+    eq "a misspelt profile is refused" "accepted" "refused"
+else
+    eq "a misspelt profile is refused" "refused" "refused"
+fi
+eq "a refused profile changes nothing" "$(bc_get HALCYON_PROFILE)" "instrument"
+unset THYLACINE_HALCYON_PROFILE
+bc_reset; bc_set_one HALCYON_PROFILE legacy >/dev/null; bc_export
+eq "export PROFILE (choice -> raw)" "${THYLACINE_HALCYON_PROFILE:-}" "legacy"
+# The caller's env still wins (bc__export_env never clobbers): this is how an
+# Instrument gate overrides the ci profile's pin.
+THYLACINE_HALCYON_PROFILE=instrument; export THYLACINE_HALCYON_PROFILE
+bc_reset; bc_apply_preset ci; bc_export
+eq "a caller-set PROFILE outranks the ci pin" "${THYLACINE_HALCYON_PROFILE:-}" "instrument"
+unset THYLACINE_HALCYON_PROFILE
+
 echo
 if [[ "$fail" == 0 ]]; then echo "ALL PASS"; exit 0; else echo "FAILURES"; exit 1; fi

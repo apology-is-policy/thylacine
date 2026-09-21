@@ -6,7 +6,15 @@
 # /lib/halcyon/renderer = "halcyond" only under THYLACINE_HALCYON=1, because
 # every sibling scenario and the suite assume the aurora fbcon. On a default
 # image joey spawns aurora and this scenario SKIPs cleanly (the go5/chords
-# idiom: lc_quit + exit 0); on a lever image it proves:
+# idiom: lc_quit + exit 0). It asserts the LEGACY profile's literals (the
+# Daylight parchment, the bezel tag bars), and since 2026-09-21 the bare build
+# bakes `instrument`, so its image is:
+#
+#   THYLACINE_HALCYON=1 THYLACINE_HALCYON_SESSION=0 \
+#   THYLACINE_HALCYON_PROFILE=legacy tools/build.sh kernel
+#
+# (or `--config ci`, which pins the legacy profile, plus THYLACINE_HALCYON=1).
+# The Instrument twin is ls-halcyon-instrument.exp. On a lever image it proves:
 #
 #   render  : joey chose halcyond; the rich advertisement landed; login ->
 #             ut flows through the transcript; the screendump's dominant

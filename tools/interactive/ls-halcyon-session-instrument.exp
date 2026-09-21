@@ -360,8 +360,20 @@ if {$A eq ""} { lc_fail "no leaf id in the root tile's spawn line ('$first')" }
 # A pane-count update precedes the CONFIGURE/chrome geometry updates. Drain
 # serial until BOTH latest headers describe disjoint panes; otherwise the old
 # shell column may now point into the welcome's amber links, not its prompt.
-if {[catch {exec grep -a {session tile leaf=.* /bin/halcyon welcome} $transcript} tour]} {
-    lc_fail "no welcome tile spawn line"
+# The welcome tile is spawned by `halcyon layout restore`, AFTER the footer has
+# already counted its pane: the pane exists in the compositor before halcyond
+# hosts a tile in it. A one-shot grep here raced that order and failed whenever
+# the count's bar say won (measured: the spawn line lands ~25 transcript lines
+# after the count). Pump the serial until it is there, bounded.
+set tour ""
+set tour_deadline [expr {[clock milliseconds] + 15000}]
+while {[catch {exec grep -a {session tile leaf=.* /bin/halcyon welcome} $transcript} tour]} {
+    if {[clock milliseconds] >= $tour_deadline} { lc_fail "no welcome tile spawn line" }
+    expect -timeout 1 {
+        -re {.+} {}
+        eof { lc_fail "EOF waiting for the welcome tile" }
+        timeout {}
+    }
 }
 set tour_leaf [lindex [regexp -inline {leaf=(\d+) spawned} $tour] 1]
 set geometry_ready 0

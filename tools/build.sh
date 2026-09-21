@@ -3960,9 +3960,12 @@ populate_stratum_pool() {
     # `THYLACINE_HALCYON_PROFILE=<legacy|instrument>` writes
     # `/lib/halcyon/profile` -- the one word tapestryd and both halcyond
     # resolvers read to pick the painters' state machine, geometry and type
-    # map (a user's `$HOME/lib/halcyon/profile` outranks it). Absent = no
-    # file = `legacy` (the built-in floor), so every existing image and gate
-    # is untouched; the flip to `instrument` for fresh images is I-9's.
+    # map (a user's `$HOME/lib/halcyon/profile` outranks it). The config
+    # schema's HALCYON_PROFILE supplies it and defaults to `instrument`
+    # (operator-directed 2026-09-21), so a configured build always bakes the
+    # word; configs/ci.config pins `legacy` for the pre-Instrument gates.
+    # Absent (build.sh driven with no config at all) = no file = the loader's
+    # built-in floor, which stays `legacy` until the I-9 rollout flips it.
     # The word is constrained to the two the loader admits BEFORE it is
     # written: a misspelt lever must fail the bake, not bake a file the
     # loader refuses one tier down at every boot.
