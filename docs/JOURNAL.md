@@ -178,7 +178,7 @@ ever (the integrity rule of the close design, pinned from both sides by the
 bound self-test and by a sabotage that lets a FIN-WAIT retiree yield). M3's
 longest dial went from 9.8 s to 2.4 ms. This REFINES a design the operator
 voted on (09-17); it is recorded as an autonomous decision for them to
-overturn (`dec-2026-09-21-timewait-yields-to-admission`).
+overturn (`dec-2026-09-21-timewait-yields-to-admission`). **Ratified by the operator the same day**, on reading the report.
 
 **Coverage added before the merge** (the review had left these as "K9, partial"):
 `devsrv.seat_import_gates` drives every refusal arm of `SYS_SEAT_IMPORT` -- the
