@@ -22,7 +22,49 @@ needed the operator.
 
 
 ---
-## 2026-09-21 (aux, Opus 4.8, effort xhigh) -- R-1 wiring: the cargo std hello BUILDS + STAGES as /r1hello (on-device boot pending a Mac window)
+## 2026-09-21 (aux, Opus 4.8, effort xhigh) -- R-1 DONE: the cargo-built Rust std hello RUNS ON DEVICE
+
+**R-1 CLOSED.** `tools/test-interactive.sh rust-std-hello` -> `PASS: rust-std-hello`
+(HVF, ~32 s): login on `ut`, `/bin/r1hello` prints `R1-HELLO: PASS` after
+stdout + a HashMap + threads (spawn/join over pthread/torpor) + a caught panic
+(unwinder + libunwind). std RUNS on Thylacine, cargo-built, over the pouch libc.
+Two traps ate most of the run and both are the reusable part:
+
+1. **A phantom "std fault" that was a wrong PATH.** The witness ran `/r1hello`;
+   the ut SESSION's root is the pool, and ramfs binaries are reached as
+   `/bin/<name>` (the `/bin`-binds-the-ramfs-root idiom -- `/bin/jit-prover` in
+   ls-ci is the precedent). So `/r1hello` was `ls: no such file`, but with no
+   error surfaced in the editor redraw it read as "runs, no output, clean
+   prompt" -- and I spent boots chasing a std stdio/rt-init fault (a raw
+   `libc::write` first-line probe showing "main not reached", then RT markers in
+   `sys::init` showing "not even sys::init reached"). The markers being absent
+   was the tell: a `ls -l /r1hello` finally said `no such file or namespace
+   entry`. The fix was one word: `/bin/r1hello`. LESSON: when a guest program
+   "runs silently", FIRST prove it EXISTS on the session's path (an explicit
+   `ls`), before theorising about its innards -- the absence of an error line in
+   a redraw-heavy console is not the absence of an error.
+2. **A real fix found on the way (kept): thylacine joins the no-writev cohort.**
+   pouch's libc ENOSYSes `writev`/`readv` for every fd (main-recorded); std's
+   `println!` via `LineWriterShim` takes the vectored path. `sys/fd/unix.rs` now
+   lists thylacine beside espidf/nuttx so `write_vectored`/`read_vectored` fall
+   back to single `write`/`read` and `is_*_vectored()` return false. It was in
+   the PASSING binary; whether it is strictly load-bearing for THIS hello was not
+   isolated (the path bug masked everything), but it is correct-by-construction
+   for a libc without writev and prevents the bug for any std program.
+
+**Also hardened:** `build_rust_progs`'s staleness guard now DERIVES the patched
+rust-src set (`grep -rl thylacine`) instead of a hand-kept `std_build/errno_arm`
+name list -- it would otherwise have silently missed the new `sys/fd/unix.rs`
+edit (the exact name-pinned-guard staleness trap). The `sys/fd/unix.rs` hunk is
+appended to `rust-src-thylacine.patch` (now 13 files; full re-validation OWED).
+
+**Coordination:** main read the actual reaper (`pkill -f "...$BUILD_DIR/"`) --
+it is TREE-scoped, so cross-tree boots are safe (the #224 hazard is same-tree;
+I'd mis-read CLAUDE.md's "tree-wide" as host-wide and serialised needlessly).
+The clean witness ran concurrently with main's B-0 gate.
+
+--- (the wiring detail from earlier in the run follows) ---
+
 
 Picked up post-self-compact with R-1 at "the hello LINKS" (`005a4a5b`, a static
 ET_EXEC built in a scratchpad dir OUTSIDE the tree). This run wired the on-device

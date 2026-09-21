@@ -253,3 +253,62 @@ diff --color -ruN a/library/std/src/sys/thread/mod.rs b/library/std/src/sys/thre
          ),
          link_name = "__errno_location"
      )]
+diff --color -ruN a/library/std/src/sys/fd/unix.rs b/library/std/src/sys/fd/unix.rs
+--- a/library/std/src/sys/fd/unix.rs	2026-09-21 13:57:11
++++ b/library/std/src/sys/fd/unix.rs	2026-09-21 13:57:11
+@@ -145,7 +145,8 @@
+         target_os = "espidf",
+         target_os = "horizon",
+         target_os = "vita",
+-        target_os = "nuttx"
++        target_os = "nuttx",
++        target_os = "thylacine"
+     )))]
+     pub fn read_vectored(&self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
+         let ret = cvt(unsafe {
+@@ -162,7 +163,8 @@
+         target_os = "espidf",
+         target_os = "horizon",
+         target_os = "vita",
+-        target_os = "nuttx"
++        target_os = "nuttx",
++        target_os = "thylacine"
+     ))]
+     pub fn read_vectored(&self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
+         io::default_read_vectored(|b| self.read(b), bufs)
+@@ -176,6 +178,7 @@
+             target_os = "vita",
+             target_os = "nuttx",
+             target_os = "wasi",
++            target_os = "thylacine",
+         )))
+     }
+ 
+@@ -381,7 +384,8 @@
+         target_os = "espidf",
+         target_os = "horizon",
+         target_os = "vita",
+-        target_os = "nuttx"
++        target_os = "nuttx",
++        target_os = "thylacine"
+     )))]
+     pub fn write_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+         let ret = cvt(unsafe {
+@@ -398,7 +402,8 @@
+         target_os = "espidf",
+         target_os = "horizon",
+         target_os = "vita",
+-        target_os = "nuttx"
++        target_os = "nuttx",
++        target_os = "thylacine"
+     ))]
+     pub fn write_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+         io::default_write_vectored(|b| self.write(b), bufs)
+@@ -412,6 +417,7 @@
+             target_os = "vita",
+             target_os = "nuttx",
+             target_os = "wasi",
++            target_os = "thylacine",
+         )))
+     }
+ 

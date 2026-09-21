@@ -29,7 +29,7 @@ lc_login michael correct-horse-battery-staple-v1
 # Run the witness. Assert each core leg's OK token in the program's print order;
 # a leg that fails prints `<LEG>: FAIL` (not the OK token), so its assert misses
 # and names the failing leg. The final verdict below is the fail-fast arm.
-lc_send "/r1hello"
+lc_send "/bin/r1hello"
 lc_expect "R1-HELLO: std alive on thylacine" "std entry -- main reached, stdout live"
 lc_expect "R1-HASHMAP: ok" "HashMap -- alloc + hashing"
 lc_expect "R1-THREADS: ok" "threads -- spawn/join over the pthread/torpor path"

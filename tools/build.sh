@@ -4224,19 +4224,29 @@ build_rust_progs() {
     # Staleness: reuse the staged /r1hello when it is newer than every input.
     # This ALSO defeats the build-std fingerprint trap -- `-Z build-std` silently
     # reuses a stale libc/std rlib on a libc/rust-src SOURCE edit and reports a
-    # false result. The inputs watched here include the forked libc tree and the
-    # two patched rust-src files whose edits gate the compile+link, so a detected
-    # change forces the from-scratch rebuild (rm -rf target_dir) that build-std
-    # needs in order to see it.
+    # false result, so a source change must force the from-scratch rebuild
+    # (rm -rf target_dir) that build-std needs in order to see it.
+    #
+    # The rust-src half is DERIVED, not a name list: `grep -rl thylacine` finds
+    # EVERY patched std file (stock rust-src has zero thylacine mentions), so a
+    # newly-patched file (e.g. sys/fd/unix.rs) can never be silently missed the
+    # way a hand-kept `$std_build $errno_arm` list would be -- a guard pinned to
+    # a derived value cannot go stale.
     local fresh=1  # 1 = must rebuild
     if [[ -f "$staged" ]]; then
         fresh=0
         local input
-        for input in "$crate_dir" "$libc_fork/src" "$target_json" "$std_build" "$errno_arm"; do
+        for input in "$crate_dir" "$libc_fork/src" "$target_json"; do
             if [[ -n "$(find "$input" -type f -newer "$staged" 2>/dev/null)" ]]; then
                 fresh=1; break
             fi
         done
+        if [[ "$fresh" == "0" ]]; then
+            local patched_newer
+            patched_newer="$(grep -rl 'thylacine' "$rust_src_root/library/std/src" 2>/dev/null \
+                | while IFS= read -r pf; do [[ "$pf" -nt "$staged" ]] && { echo "$pf"; break; }; done)"
+            [[ -n "$patched_newer" ]] && fresh=1
+        fi
     fi
     if [[ "$fresh" == "0" ]]; then
         ledger "rust progs: r1hello REUSED (cached + up-to-date; force by touching a rust source, or 'tools/build.sh clean')"

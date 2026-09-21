@@ -164,22 +164,39 @@ main's reaches `main` soon, including these patches**. For R-1, cherry-pick from
 4. DONE -- `std` compiles for `aarch64-unknown-thylacine` (the R-0 exit). No Mac
    hold needed after all (build-std at -j2 is modest, ~13s clean).
 
-## R-1 IN PROGRESS (2026-09-21)
+## R-1 DONE (2026-09-21) -- std RUNS ON DEVICE
 
-A cargo-built std hello RUN ON DEVICE. Progress:
+The cargo-built Rust `std` hello RUNS on Thylacine. `tools/test-interactive.sh
+rust-std-hello` -> **`PASS: rust-std-hello`** (HVF, ~32 s): login on `ut`, then
+`/bin/r1hello` prints `R1-HELLO: PASS` after exercising stdout, a HashMap
+(alloc+hash), threads (spawn/join over the pthread/torpor path), and a caught
+panic (the unwinder + libunwind). File-read + TCP are informational.
 
-- **The hello LINKS.** `usr/ports/rust/r1-hello/` (a std bin: stdout / HashMap /
-  threads / panic-unwind gate PASS; file + TCP informational) cargo-builds AND
-  LINKS for the target via `pouch-clang` (the fork clang drives `ld.lld`).
-  Output: a static `ET_EXEC` aarch64 binary (NOT static-PIE -- the fork
-  toolchain dropped `-static-pie` and produced ET_EXEC, which is exactly the
-  pouch-hello shape the kernel loader accepts; W^X-clean segments). Release +
-  llvm-strip = ~488 KB.
-- The link needed ONE more std arm than R-0: `sys/io/error/unix.rs` errno
-  link_name = `__errno_location` (musl) -- surfaced at LINK, not compile. Added
-  to `patches/rust-src-thylacine.patch` (now 12 files).
+- **The binary**: a static `ET_EXEC` aarch64, 499792 B, no PT_DYNAMIC, W^X-clean
+  (the fork toolchain drops `-static-pie` -> ET_EXEC, the pouch-hello shape the
+  kernel loader accepts). Built by `build_rust_progs` (below).
+- **std arms beyond R-0** (both in `patches/rust-src-thylacine.patch`, now 13
+  files): `sys/io/error/unix.rs` errno `__errno_location` (surfaced at LINK);
+  and `sys/fd/unix.rs` -- thylacine JOINS the no-`writev`/`readv` cohort
+  (espidf/horizon/vita/nuttx): `write_vectored`/`read_vectored` fall back to
+  single `write()`/`read()` and `is_*_vectored()` return false, because pouch's
+  libc ENOSYSes `writev`/`readv` for every fd (main-recorded). std's `println!`
+  via `LineWriterShim` would otherwise take the vectored path. The full 13-file
+  patch re-validation (apply-to-pristine + rebuild-green) is OWED.
 
-WIRED (the on-device witness harness -- landed, build+boot not yet run):
+**Two traps on the way (both cost boots, both worth knowing):**
+- **The witness path.** ramfs binaries are reached from the ut SESSION as
+  `/bin/<name>`, NOT `/<name>` (the session root is the pool; `/bin` binds the
+  ramfs root -- see `/bin/jit-prover` in ls-ci). The witness used `/r1hello`
+  (session root, absent) and looked like a silent std fault for many boots;
+  it was `ls: no such file`. The fix is one word: `/bin/r1hello`.
+- **build-std does not see a rust-src edit outside the watched set.** The
+  `build_rust_progs` staleness guard now DERIVES the patched-file set
+  (`grep -rl thylacine` over `library/std/src`) rather than a hand-kept name
+  list, so a newly-patched file (like `sys/fd/unix.rs`) can never be silently
+  missed. On a change it forces `rm -rf target` (the build-std fingerprint trap).
+
+HOW IT IS BUILT + WITNESSED:
 1. `build_rust_progs()` in tools/build.sh -- cargo build-std over the forked
    libc + patched rust-src, links via `pouch-clang`
    (`CARGO_TARGET_AARCH64_UNKNOWN_THYLACINE_LINKER` pins the wrapper), strips
