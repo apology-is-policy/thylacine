@@ -5,10 +5,11 @@ document under Halcyon, the same words without frames on a serial console, and a
 plain concatenation down a pipe.
 
 The name is the magic lantern, the slide projector's ancestor; "lantern slide"
-is the original term for the thing this shows. A thematic alternative,
-`specimen` (a museum specimen; a microscope slide), is recorded here as the
-runner-up rather than chosen — the operator may prefer it, and a command name is
-one rename commit.
+is the original term for the thing this shows. **Ratified by the operator
+2026-09-22** over the thematic runner-up `specimen` (a museum specimen; a
+microscope slide), on the grounds that a presenter's name should read as a
+projector at a glance — and the project is already comfortable off the marsupial
+theme, as Halcyon and Stratum are.
 
 ## 1. What was decided, and by whom
 
@@ -254,11 +255,15 @@ tile, `Super+F` to zoom, `Super+=` to taste, `lantern <deck>`. Zero code.
 
 That demotes the `vw`-bound document type scale from a blocker to an optional
 refinement — it would make a deck presentable *without* the display-wide scale,
-which is nicer but is not required. It stays unbuilt deliberately: the
-Instrument type scale is display-wide and the operator has tuned that look
-(they called a 10 px prompt "rather small and not prominent" on 2026-09-08), so
-changing it globally is their call and not an autonomous one, deck-arc grant or
-not.
+which is nicer but is not required.
+
+**RATIFIED 2026-09-22: it is NOT built.** The operator was offered three
+options — leave it, make the document type scale `vw`-bound, or add a third
+"presentation" profile beside legacy/instrument — and chose to leave it, because
+the scale verb already does the job and the alternatives would change the type
+scale of every document including the terminal and the manual, i.e. the look
+they tuned. Recorded here as an available option should a real rehearsal want
+it; **not an open item.**
 
 ## 11. Settled by looking (2026-09-22), and what is left
 
@@ -274,12 +279,12 @@ session at 1280×800 and capturing, not by reading more code
    text, no inherited emphasis, no accumulated scrollback. The `span: 0` and
    no-scroll-off properties of §3 hold in practice.
 3. **The title renders as a left-aligned H1**, not centred, because
-   `manual::render` emits `Op::Hdr level=1` rather than `class=title`. It reads
-   well and is a perfectly ordinary deck style, so this is now a TASTE CALL for
-   the operator rather than a defect: `HdrClass::Title` would centre it and give
-   it its own top margin, which is the title-card look. Not changed
-   unilaterally — it would change the Operator's Manual's own section titles too,
-   since they share the renderer.
+   `manual::render` emits `Op::Hdr level=1` rather than `class=title`.
+   **RATIFIED 2026-09-22: left-aligned stays.** `HdrClass::Title` would centre it
+   with its own top margin — the title-card look — and was offered with the split
+   that would have kept the Operator's Manual's section titles unchanged. The
+   operator chose the current rendering, so this is a settled decision and not an
+   open question.
 4. **The caret is visible** — a yellow bar below the footer. Distracting on a
    projected slide. Hiding it means `ESC[?25l`, and whether that reaches
    halcyond's `paints_caret` is unverified, so it is NOT guessed at here.
