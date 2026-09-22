@@ -1157,3 +1157,62 @@ void test_sched_preempt_point_takes_a_pending_irq(void) {
     TEST_ASSERT(after > masked,
         "the point TAKES the pending interrupt (drop the daifclr and this fails)");
 }
+
+// ---------------------------------------------------------------------------
+// ARCH 8.12: the kernel-stack watermark.
+//
+// The instrument exists because the 8.1 chunk puts an IRQ frame on a syscall
+// stack that has never carried one, and because until it landed NOTHING in the
+// tree could report stack depth -- the only figure was a static
+// `-fstack-usage` bound with 797 unfollowed indirect edges under it.
+//
+// This test is written to FAIL on each way the instrument can be wrong, not
+// merely to observe a plausible number:
+//
+//   poison never written  -> nothing matches, `used` reads the full usable
+//                            region, and the `< THREAD_KSTACK_SIZE` assert
+//                            fires.
+//   scan runs the wrong   -> `used` collapses toward 0 and the
+//   way, or off the wrong    `after >= reached` assert fires, because we
+//   end                      PROVABLY touched that address.
+//   watermark does not    -> same assert: `reached` is measured from the
+//   follow the frontier      probe's own frame, not assumed.
+#define KSW_PROBE_BYTES 6144u
+
+// Returns the depth (bytes below the stack top) actually reached at the bottom
+// of its own frame. Measured from a real address in that frame rather than
+// computed from KSW_PROBE_BYTES, so the assertion below rests on where the
+// stack DID go, not on where a constant says it should have.
+__attribute__((noinline))
+static u32 kstack_probe_burn(const struct Thread *t) {
+    volatile u8 pad[KSW_PROBE_BYTES];
+    for (unsigned i = 0; i < KSW_PROBE_BYTES; i += 64)
+        pad[i] = (u8)i;
+    u64 top = (u64)(uintptr_t)t->kstack_base + THREAD_KSTACK_TOTAL_SIZE;
+    return (u32)(top - (u64)(uintptr_t)&pad[0]);
+}
+
+void test_thread_kstack_watermark_follows_the_frontier(void) {
+    struct Thread *self = current_thread();
+    TEST_ASSERT(self != NULL, "there is a current thread");
+    TEST_ASSERT(self->kstack_base != NULL,
+                "the test thread owns a kstack (a per-CPU BSS-stack thread has none)");
+
+    u32 before = thread_kstack_used(self);
+    TEST_ASSERT(before > 0,
+                "we are running on this stack, so some of it is used");
+    TEST_ASSERT(before < THREAD_KSTACK_SIZE,
+                "the poison IS written (an unpoisoned stack reads as fully used)");
+
+    u32 reached = kstack_probe_burn(self);
+    u32 after   = thread_kstack_used(self);
+
+    TEST_ASSERT(reached > before,
+                "the probe went deeper than the prior mark -- else the next "
+                "assert would pass without testing anything");
+    TEST_ASSERT(after >= reached,
+                "the watermark followed the frontier down to an address we "
+                "provably touched");
+    TEST_ASSERT(after < THREAD_KSTACK_SIZE,
+                "and stayed inside the usable region");
+}

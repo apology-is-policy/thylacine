@@ -1247,6 +1247,30 @@ u64 proc_cpu_ns(const struct Proc *p) {
     return total;
 }
 
+// proc_kstack_peak -- the deepest kernel stack any of this Proc's threads has
+// EVER reached, and the tid that reached it (ARCH 8.12). Mirrors proc_cpu_ns
+// exactly, including its safety argument: the p->threads walk is sound because
+// every caller holds g_proc_table_lock (the #95 walk-safety), so no peer can
+// thread_free out from under it.
+//
+// Scanning a thread that is RUNNING right now is deliberate and its answer is
+// honest: a running thread only ever pushes the frontier LOWER, so a
+// concurrent write makes the reported depth deeper, never shallower. The
+// number is a floor, which is the direction a stack-headroom question wants.
+u32 proc_kstack_peak(const struct Proc *p, int *tid_out) {
+    if (tid_out) *tid_out = 0;
+    if (!p) return 0;
+    u32 peak = 0;
+    for (const struct Thread *t = p->threads; t; t = t->next_in_proc) {
+        u32 used = thread_kstack_used(t);
+        if (used > peak) {
+            peak = used;
+            if (tid_out) *tid_out = t->tid;
+        }
+    }
+    return peak;
+}
+
 // LINEAGE L-3c-2. Defined next to wait_pid_for, whose park loop it mirrors
 // exactly; forward-declared here because rfork_internal's tail is its only
 // caller and sits well above it.

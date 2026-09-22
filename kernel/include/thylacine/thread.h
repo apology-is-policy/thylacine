@@ -582,6 +582,30 @@ _Static_assert(__builtin_offsetof(struct Thread, magic) == 0,
 #define THREAD_KSTACK_TOTAL_ORDER  3                  // 8 pages = 32 KiB
 #define THREAD_KSTACK_GUARD_PAGES  4                  // bottom 4 pages
 
+// The kernel-stack WATERMARK (ARCH 8.12).
+//
+// It exists because two things were true at once: ARCH 8.1's chunk puts an IRQ
+// frame on a syscall stack that has never carried one, and NOTHING IN THE TREE
+// COULD REPORT STACK DEPTH AT ALL. The bound that sized the chunk is a static
+// measurement (`-fstack-usage` over a call graph whose indirect edges resolve
+// through DWARF), and 797 indirect call sites stay unfollowed in it -- so it is
+// a LOWER bound, and a lower bound with ~4 KiB of headroom deserves a witness
+// rather than trust. Linux carries the same instrument for the same reason
+// (CONFIG_DEBUG_STACK_USAGE).
+//
+// The usable region is filled with THREAD_KSTACK_POISON at thread_create and
+// scanned upward from the guard for the first word that is not poison. That
+// word is the deepest the stack has EVER reached, not the depth right now.
+//
+// Reading a RUNNING thread's watermark is safe and its answer is honest: a
+// running thread can only push the frontier LOWER, so a concurrent write can
+// make the reported depth deeper but never shallower. The caller must pin the
+// Thread (the #95 proc-walk discipline); the scan itself needs no lock.
+#define THREAD_KSTACK_POISON  0x5354414b57415445ULL   // "STAKWATE", big-endian
+
+void thread_kstack_poison(struct Thread *t);
+u32  thread_kstack_used(const struct Thread *t);
+
 // "current thread" is held in TPIDR_EL1, the per-CPU OS-use register.
 // Accessed by inline mrs / msr — no function call overhead in the
 // hot path. Returns NULL before thread_init runs (TPIDR_EL1 is zero

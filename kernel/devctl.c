@@ -34,6 +34,7 @@
 #include <thylacine/spoor.h>
 #include <thylacine/srvconn.h>   // #210: srvconn_ctl_iterate (/ctl/9p-sessions)
 #include <thylacine/syscall.h>   // V-4b-5: struct t_stat + T_S_IF* (devctl_stat_native)
+#include <thylacine/thread.h>   // ARCH 8.12: THREAD_KSTACK_* (/ctl/kstack)
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -59,6 +60,7 @@ enum {
     CTL_KIND_CPU        = 6,
     CTL_KIND_CONS       = 7,   // #95: console byte-loss counters (RX + TX)
     CTL_KIND_9P         = 8,   // #210: live 9P sessions + srvconn ring counters
+    CTL_KIND_KSTACK     = 9,   // ARCH 8.12: the kernel-stack watermark
 };
 
 #define CTL_QID_ROOT_PATH  0ULL
@@ -266,6 +268,107 @@ static size_t format_procs(char *buf, size_t cap) {
     struct procs_fmt_state s = { buf, cap, off, false };
     proc_for_each(format_procs_cb, &s);
     return s.off;
+}
+
+// ARCH 8.12's kernel-stack watermark, per Proc and as a whole-system peak.
+//
+// This file exists because until it did, NOTHING in the tree could report
+// kernel stack depth -- the only figure anyone had was a static
+// `-fstack-usage` bound with 797 unfollowed indirect edges under it. The 8.1
+// chunk puts an IRQ frame on a syscall stack that never carried one, so the
+// static bound needed a witness rather than trust.
+//
+// Read it as a FLOOR in both directions: each number is the deepest that
+// thread has ever reached (not its depth now), and a running thread can only
+// push its own frontier lower while we look.
+struct kstack_fmt_state {
+    char  *buf;
+    size_t cap;
+    size_t off;
+    bool   overflow;
+    u32    peak;
+    int    peak_pid;
+    int    peak_tid;
+};
+
+static int format_kstack_cb(struct Proc *p, void *arg) {
+    struct kstack_fmt_state *s = (struct kstack_fmt_state *)arg;
+    size_t n;
+    int    tid  = 0;
+    u32    used = proc_kstack_peak(p, &tid);
+
+    if (used > s->peak) {
+        s->peak     = used;
+        s->peak_pid = p->pid;
+        s->peak_tid = tid;
+    }
+    if (used == 0)
+        return 0;                       // no kstack of its own; nothing to say
+
+    n = fmt_sdec(s->buf, s->cap, s->off, p->pid);
+    if (!n && p->pid != 0) { s->overflow = true; return 1; }
+    s->off += n;
+
+    n = fmt_str(s->buf, s->cap, s->off, "    ");
+    if (!n) { s->overflow = true; return 1; }
+    s->off += n;
+
+    n = fmt_str(s->buf, s->cap, s->off, p->name[0] ? p->name : "?");
+    if (!n) { s->overflow = true; return 1; }
+    s->off += n;
+
+    n = fmt_str(s->buf, s->cap, s->off, "    ");
+    if (!n) { s->overflow = true; return 1; }
+    s->off += n;
+
+    n = fmt_udec(s->buf, s->cap, s->off, (unsigned long)used);
+    if (!n) { s->overflow = true; return 1; }
+    s->off += n;
+
+    n = fmt_str(s->buf, s->cap, s->off, "    tid ");
+    if (!n) { s->overflow = true; return 1; }
+    s->off += n;
+
+    n = fmt_sdec(s->buf, s->cap, s->off, tid);
+    if (!n && tid != 0) { s->overflow = true; return 1; }
+    s->off += n;
+
+    n = fmt_str(s->buf, s->cap, s->off, "\n");
+    if (!n) { s->overflow = true; return 1; }
+    s->off += n;
+    return 0;
+}
+
+static size_t format_kstack(char *buf, size_t cap) {
+    size_t off = 0, n;
+
+    n = fmt_str(buf, cap, off, "usable:    ");   if (!n) return 0; off += n;
+    n = fmt_udec(buf, cap, off, (unsigned long)THREAD_KSTACK_SIZE);
+    if (!n) return 0; off += n;
+    n = fmt_str(buf, cap, off, "\nguard:     "); if (!n) return 0; off += n;
+    n = fmt_udec(buf, cap, off, (unsigned long)THREAD_KSTACK_GUARD_SIZE);
+    if (!n) return 0; off += n;
+    n = fmt_str(buf, cap, off, "\n\nPID    NAME    PEAK    TID\n");
+    if (!n) return 0; off += n;
+
+    struct kstack_fmt_state s = { buf, cap, off, false, 0, 0, 0 };
+    proc_for_each(format_kstack_cb, &s);
+    off = s.off;
+    if (s.overflow) return off;
+
+    // The whole-system peak LAST, so a truncated read still loses the
+    // per-Proc rows before it loses the number a gate actually asserts on.
+    n = fmt_str(buf, cap, off, "\npeak:      "); if (!n) return off; off += n;
+    n = fmt_udec(buf, cap, off, (unsigned long)s.peak);
+    if (!n) return off; off += n;
+    n = fmt_str(buf, cap, off, "    pid ");      if (!n) return off; off += n;
+    n = fmt_sdec(buf, cap, off, s.peak_pid);
+    if (!n && s.peak_pid != 0) return off; off += n;
+    n = fmt_str(buf, cap, off, "    tid ");      if (!n) return off; off += n;
+    n = fmt_sdec(buf, cap, off, s.peak_tid);
+    if (!n && s.peak_tid != 0) return off; off += n;
+    n = fmt_str(buf, cap, off, "\n");            if (!n) return off; off += n;
+    return off;
 }
 
 static size_t format_memory(char *buf, size_t cap) {
@@ -624,6 +727,7 @@ static const struct ctl_leaf g_ctl_leaves[] = {
     { "cpu",         CTL_KIND_CPU,         format_cpu         },
     { "cons",        CTL_KIND_CONS,        format_cons        },
     { "9p-sessions", CTL_KIND_9P,          format_9p_sessions },
+    { "kstack",      CTL_KIND_KSTACK,      format_kstack      },
 };
 
 #define CTL_LEAF_COUNT  (sizeof(g_ctl_leaves) / sizeof(g_ctl_leaves[0]))
