@@ -64,6 +64,7 @@
 // reference for this module. Per-sub-chunk extensions append rows
 // to its Status section.
 
+pub mod discipline;
 pub mod error;
 pub mod jobs;
 pub mod value;
@@ -78,9 +79,9 @@ pub mod value;
 pub mod expr;
 
 // The syscall half (see lib.rs's `backend` note). `console` is gated for its
-// three `t_write`/`t_fstat` calls, which is a shame precisely because its
-// `is_raw_command` allowlist is pure and worth testing -- so that vocabulary is
-// split out below rather than left stranded with them.
+// three `t_write`/`t_fstat` calls; its pure VOCABULARY -- the mode strings and
+// the `is_raw_command` allowlist -- lives in `discipline` above, so those
+// assertions run on the host instead of being stranded with the syscalls.
 #[cfg(feature = "backend")]
 pub mod builtin;
 #[cfg(feature = "backend")]

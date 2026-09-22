@@ -12,6 +12,7 @@ code:
   - usr/utopia/libutopia/src/eval/glob.rs
   - usr/utopia/libutopia/src/eval/jobs.rs
   - usr/utopia/libutopia/src/eval/console.rs
+  - usr/utopia/libutopia/src/eval/discipline.rs
   - usr/utopia/libutopia/src/eval/value.rs
   - usr/utopia/libutopia/src/eval/error.rs
 audit: light
@@ -23,7 +24,7 @@ abis: []
 design:
   - "docs/UTOPIA-SHELL-DESIGN.md sections 5-10"
 created: 2026-08-03
-updated: 2026-09-17
+updated: 2026-09-22
 ---
 ## Purpose
 
@@ -488,15 +489,24 @@ one.
   exactly the layering rule the crate already states: only the built-ins whose
   purpose is to mutate THIS Proc reach for one.
 
-  **`console` is the case that stings**, because its `is_raw_command` allowlist
-  — the hardcoded basename set that decides whether a child gets raw mode, most
-  recently extended for `lantern` — is pure and worth testing, and it sits in a
-  module gated for three unrelated `t_write`/`t_fstat` calls. The module already
-  shows the problem being worked around locally rather than escalated: four
-  compile-time asserts mirror four `#[cfg(test)]` assertions, with a comment
-  explaining that the crate *"has no host test harness ... so the `#[cfg(test)]`
-  literal asserts below never run. These do."* Lifting that vocabulary out of
-  the gated module is the obvious next slice.
+  **`console`'s vocabulary was lifted out** into `eval::discipline`
+  (2026-09-22), and it is the clearest case for why the `backend` split was
+  worth making. The mode strings, the screen-restore sequence and the two name
+  predicates are pure; `is_raw_command` in particular is the hardcoded basename
+  set deciding whether a child gets the raw-mode dance — extended for `lantern`
+  in that same arc — and it sat in a module gated for three unrelated
+  `t_write`/`t_fstat` calls, so its tests ran nowhere. The module had already
+  met the problem and worked around it locally rather than escalating: four
+  compile-time asserts mirroring four `#[cfg(test)]` assertions, under a
+  comment saying the crate *"has no host test harness ... so the `#[cfg(test)]`
+  literal asserts below never run. These do."*
+
+  A pure sibling replaces the mirrors with execution. The `const _: ()` guards
+  are KEPT anyway, deliberately: they fire on the device build, where a host
+  test cannot, so the two now cover different machines rather than the same one
+  twice. Measured — dropping `lantern` from the allowlist fails
+  `is_raw_command_matches_nora_by_basename` on the host in milliseconds, where
+  before it could only have been caught by a boot.
 
 ## Provenance
 
