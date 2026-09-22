@@ -40,7 +40,7 @@ that would catch it — has the owning dossier been updated since the row last
 changed on main? — is the next increment, tracked as task #169.
 
 <!-- generated:begin -->
-**169 declared surfaces · 165 covered by a hard-audit dossier · 4 soft-owned · 0 unowned · 0 unparsed · 21 cited path(s) that do not resolve.**
+**170 declared surfaces · 166 covered by a hard-audit dossier · 4 soft-owned · 0 unowned · 0 unparsed · 23 cited path(s) that do not resolve.**
 
 ### Cited paths that do not resolve
 
@@ -57,6 +57,8 @@ changed on main? — is the next increment, tracked as task #169.
 | Notes / signals | `specs/notes.tla` | **possibly a documented NEGATIVE — read the claim** |
 | Page fault + COW + W^X | `mm/vm.c` | **possibly a documented NEGATIVE — read the claim** |
 | Page fault + COW + W^X | `mm/wxe.c` | no such file in the tree |
+| SrvConn endpoint poll: BOTH endpoints + the four-edge wake (2026-09-21… | `kernel/test/test_srvconn` | no such file in the tree |
+| SrvConn endpoint poll: BOTH endpoints + the four-edge wake (2026-09-21… | `usr/lib/pouch/patches/0041` | no such file in the tree |
 | Syscall byte-I/O staging + bulk uaccess + the per-service bulk ring (C… | `kernel/user` | no such file in the tree |
 | VIVARIUM O_APPEND (FS pass-through) + pread64/pwrite64 (67/68): git co… | `init/add/commit/log/clone/verify` | no such file in the tree |
 | VMO / BURROW | `mm/vmo_pages.c` | no such file in the tree |
