@@ -12963,6 +12963,67 @@ static struct Spoor *viv_union_member(struct Proc *p, struct Spoor *resolved,
 // PARENT's frame -- the child's regs[0] was set to 0 in its own COPY of the
 // frame by fork_frame_init, before this function returns, and the child is a
 // different Thread on a different stack that never comes back through here.
+// getdents64's staging buffers are the reason this lives OUT OF LINE.
+// `viv_tier2` is one switch, and the compiler unions every case's locals into
+// ONE frame -- so raw[2048] + enc[2560] were allocated on EVERY Linux-phenotype
+// syscall, openat and read included. Measured at 4720 bytes per call, which put
+// the deepest phenotype chain at 86% of the 16 KiB kernel stack before this
+// chunk adds an IRQ frame to it (ARCHITECTURE.md 8.12). noinline is load-bearing,
+// not a hint: inlining this back into the switch restores the union.
+__attribute__((noinline))
+static s64 viv_getdents64_run(struct Proc *p, const u64 *args) {
+    // getdents64(fd, dirp, count): x0 fd, x1 dirp, x2 count. One raw
+    // fetch through the SAME spoor_readdir_run the native SYS_READDIR
+    // runs (dev-op + malformed guard + the #955 stale-cursor bound --
+    // extraction, not duplication), then the pure
+    // viv_dirent64_encode_run re-encode, then the copy-out, then the
+    // cursor commit. Order is load-bearing: the cursor advances to the
+    // last EMITTED entry's cookie only after the user copy succeeded
+    // (the F3 property both native and phenotype readers share), so a
+    // partial fit or a faulted copy re-fetches, never skips. A raw
+    // fetch the user buffer cannot hold ONE record of answers EINVAL
+    // (the Linux row), cursor unchanged.
+    //
+    // Frame note: 2048 raw + 2560 encoded. The encode's worst growth is
+    // align8(20+n)/(24+n), maximized at n==5 (32/29): 2048 * 32/29 =
+    // 2260 < 2560, so the cap never truncates what the fit-check would
+    // admit; the per-record fit-check enforces it regardless.
+    enum { VIV_GD_RAW = 2048, VIV_GD_ENC = 2560 };
+    u64 count = args[2];
+    if (count == 0)                          return -(s64)T_E_INVAL;
+    // Validate the user buffer BEFORE any access -- the getdents64 copy-out
+    // below writes straight to args[1] via uaccess_store_u8, whose fault
+    // fixup only engages for the USER half; a kernel-range dirp from an
+    // unprivileged phenotype would otherwise extinct (or, at a writable
+    // kernel VA, corrupt) rather than fault-gracefully. Mirror the native
+    // sys_readdir_handler, which validates its buffer up front. The write
+    // is bounded by dst_cap (<= VIV_GD_ENC), so validating that span covers
+    // every store the loop can make.
+    u64 dst_cap = (count < (u64)VIV_GD_ENC) ? count : (u64)VIV_GD_ENC;
+    if (!sys_validate_user_buf(args[1], dst_cap)) return -(s64)T_E_FAULT;
+    struct Spoor *c = sys_lookup_spoor(p, (hidx_t)args[0], RIGHT_READ);
+    if (!c)                                  return -(s64)T_E_BADF;
+    if (!(c->qid.type & QTDIR))            { spoor_clunk(c); return -(s64)T_E_NOTDIR; }
+
+    u8  raw[VIV_GD_RAW];
+    u64 run_cookie = 0;
+    s64 got = spoor_readdir_run(c, raw, (long)VIV_GD_RAW, &run_cookie);
+    if (got <= 0)                          { spoor_clunk(c); return got; }
+
+    u8  enc[VIV_GD_ENC];
+    u64 emit_cookie = 0;
+    u64 emitted = viv_dirent64_encode_run(raw, (u64)got, enc, dst_cap,
+                                          &emit_cookie);
+    if (emitted == 0)                      { spoor_clunk(c); return -(s64)T_E_INVAL; }
+
+    for (u64 i = 0; i < emitted; i++) {
+        if (uaccess_store_u8(args[1] + i, enc[i]) != 0)
+                                           { spoor_clunk(c); return -(s64)T_E_FAULT; }
+    }
+    c->offset = (s64)emit_cookie;
+    spoor_clunk(c);
+    return (s64)emitted;
+}
 static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
                      u64 linux_nr, const u64 *args) {
     switch (linux_nr) {
@@ -13154,59 +13215,8 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         return rc;
     }
 
-    case VIV_LINUX_GETDENTS64: {
-        // getdents64(fd, dirp, count): x0 fd, x1 dirp, x2 count. One raw
-        // fetch through the SAME spoor_readdir_run the native SYS_READDIR
-        // runs (dev-op + malformed guard + the #955 stale-cursor bound --
-        // extraction, not duplication), then the pure
-        // viv_dirent64_encode_run re-encode, then the copy-out, then the
-        // cursor commit. Order is load-bearing: the cursor advances to the
-        // last EMITTED entry's cookie only after the user copy succeeded
-        // (the F3 property both native and phenotype readers share), so a
-        // partial fit or a faulted copy re-fetches, never skips. A raw
-        // fetch the user buffer cannot hold ONE record of answers EINVAL
-        // (the Linux row), cursor unchanged.
-        //
-        // Frame note: 2048 raw + 2560 encoded. The encode's worst growth is
-        // align8(20+n)/(24+n), maximized at n==5 (32/29): 2048 * 32/29 =
-        // 2260 < 2560, so the cap never truncates what the fit-check would
-        // admit; the per-record fit-check enforces it regardless.
-        enum { VIV_GD_RAW = 2048, VIV_GD_ENC = 2560 };
-        u64 count = args[2];
-        if (count == 0)                          return -(s64)T_E_INVAL;
-        // Validate the user buffer BEFORE any access -- the getdents64 copy-out
-        // below writes straight to args[1] via uaccess_store_u8, whose fault
-        // fixup only engages for the USER half; a kernel-range dirp from an
-        // unprivileged phenotype would otherwise extinct (or, at a writable
-        // kernel VA, corrupt) rather than fault-gracefully. Mirror the native
-        // sys_readdir_handler, which validates its buffer up front. The write
-        // is bounded by dst_cap (<= VIV_GD_ENC), so validating that span covers
-        // every store the loop can make.
-        u64 dst_cap = (count < (u64)VIV_GD_ENC) ? count : (u64)VIV_GD_ENC;
-        if (!sys_validate_user_buf(args[1], dst_cap)) return -(s64)T_E_FAULT;
-        struct Spoor *c = sys_lookup_spoor(p, (hidx_t)args[0], RIGHT_READ);
-        if (!c)                                  return -(s64)T_E_BADF;
-        if (!(c->qid.type & QTDIR))            { spoor_clunk(c); return -(s64)T_E_NOTDIR; }
-
-        u8  raw[VIV_GD_RAW];
-        u64 run_cookie = 0;
-        s64 got = spoor_readdir_run(c, raw, (long)VIV_GD_RAW, &run_cookie);
-        if (got <= 0)                          { spoor_clunk(c); return got; }
-
-        u8  enc[VIV_GD_ENC];
-        u64 emit_cookie = 0;
-        u64 emitted = viv_dirent64_encode_run(raw, (u64)got, enc, dst_cap,
-                                              &emit_cookie);
-        if (emitted == 0)                      { spoor_clunk(c); return -(s64)T_E_INVAL; }
-
-        for (u64 i = 0; i < emitted; i++) {
-            if (uaccess_store_u8(args[1] + i, enc[i]) != 0)
-                                               { spoor_clunk(c); return -(s64)T_E_FAULT; }
-        }
-        c->offset = (s64)emit_cookie;
-        spoor_clunk(c);
-        return (s64)emitted;
-    }
+    case VIV_LINUX_GETDENTS64:
+        return viv_getdents64_run(p, args);
 
     case VIV_LINUX_FSYNC:
     case VIV_LINUX_FDATASYNC: {
