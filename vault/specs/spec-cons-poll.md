@@ -8,9 +8,11 @@ cfgs:
   - "cons_poll.cfg -- clean: every safety invariant, buggy flags FALSE"
   - "cons_poll_liveness.cfg -- Spec_Live: PollerEventuallyServed, the relay delivers"
   - "cons_poll_buggy_lost_wake.cfg -- BUGGY_MGR_LOST_WAKE: the relay strands a poller asleep on a ready console (NoMissedConsPoll counterexample)"
-gate: "any change to the manager kthread's sleep, the deferred-flag protocol, or a new interrupt-context readiness source"
+  - "cons_poll_buggy_no_reregister.cfg -- BUGGY_NO_REREGISTER: a hook stays on the list it was put on across the re-arm; a poller registered frozen sleeps on the episode list after END (NoMissedConsPoll counterexample)"
+  - "cons_poll_buggy_no_reregister_cadence.cfg -- the same flag, the privacy half: a poller registered before the SAK is woken per secret key byte (NoSecretCadence counterexample)"
+gate: "any change to the manager kthread's sleep, the deferred-flag protocol, a new interrupt-context readiness source, the episode's list choice, or sys_poll's re-arm pass"
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-09-21
 ---
 ## Abstraction
 
@@ -26,12 +28,23 @@ proves the deadline race. None of them has a producer that *cannot wake the
 consumer at all*.
 
 That producer is the console receive interrupt. It may not walk a hook list —
-[[lock-poll-list]] is non-irqsave and nests a wake inside itself — so it sets a
-pending flag and wakes the manager, which walks the list in process context.
+a walk nests a wake per poller, O(pollers) work the per-byte interrupt must not
+do ([[lock-poll-list]]; irqsave since 2026-09-21 for a different reason, the
+nesting under an interrupt-taken object lock) — so it sets a pending flag and
+wakes the manager, which walks the list in process context.
 This is Linux's tty shape: the hard interrupt buffers the byte and schedules
 work; the cooking and the wakeups happen in that work item.
 
 ## What it pins
+
+Since 2026-09-21 (B-0 audit round 4 F1) the model also carries the IM-1
+trusted EPISODE: two hook lists (`poll_list`, walked per byte; the episode
+list, walked only at BEGIN/END), `frozen`, a `SecretKey` action, and the poller
+re-arm of [[spec-poll]]. The console chooses a poller's list by state at
+register time, so the choice is only as fresh as the last registration — which
+is why sys_poll's pass RE-REGISTERS. Two more invariants: **NoSecretCadence**
+(no secret key byte's relay gives a frozen poller an extra pass — a pass whose
+CPU cost it could count) and **NoStaleHook**; `DoneSound` bounds the result.
 
 - **NoMissedConsPoll** — [[inv-i9]] across the deferral: a poller with a
   registered hook on a ready console is never left asleep with the relay

@@ -8,8 +8,9 @@
 // devcons_read drains the ring.
 //
 // IRQ-context discipline (IDENTITY-DESIGN.md section 9.8 "As-built"): the RX
-// handler runs in IRQ context, where notes_post + poll_waiter_list_wake are NOT
-// IRQ-safe (plain spin_lock). So cons_rx_input is wakeup-only -- it fills the
+// handler runs in IRQ context, where notes_post is NOT IRQ-safe (plain
+// spin_lock) and a poll_waiter_list_wake walk (O(pollers) nested wakeups) is
+// kept out to hold the per-byte cost O(1). So cons_rx_input is wakeup-only -- it fills the
 // ring + sets deferred-action flags + wakes two Rendez (wakeup() IS IRQ-safe).
 // The console_mgr kproc kthread services the deferred actions (the `interrupt`
 // note post; the A-4c-2 SAK revoke/re-grant) in process context.
@@ -297,7 +298,7 @@ void cons_tx_drops(u32 *dropped, u32 *room_waits);
 // LS-8a: the shared console poll. Register-then-observe under the cons lock:
 // POLLIN iff the RX ring is non-empty; POLLOUT always (the UART never blocks);
 // if `pw` is non-NULL, install it on the console poll-hook list. The IRQ
-// producer cannot walk that list (poll_waiter_list_wake is not IRQ-safe), so a
+// producer does not walk that list (a walk is O(pollers) nested wakeups), so a
 // POLLIN edge sets a flag + wakes console_mgr, which walks it in process context
 // (the cons_poll.tla I-9 deferred-wake relay). Shared by devcons
 // (SYS_CONSOLE_OPEN) + devdev's /dev/cons leaf -- #57b single-impl.

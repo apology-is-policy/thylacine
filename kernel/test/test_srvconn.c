@@ -927,7 +927,7 @@ static void pe_poller(void) {
     struct poll_waiter pw;
     rendez_init(&pr);
     poll_waiter_init(&pw, &pr);
-    short rv = srvconn_poll(g_pe_conn, POLLIN, &pw);
+    short rv = srvconn_poll(g_pe_conn, false, POLLIN, &pw);
     if ((rv & POLLIN) == 0) {
         (void)sleep(&pr, pe_cond_c2s_readable, g_pe_conn);
     }
@@ -1131,7 +1131,7 @@ void test_srvconn_nonblocking_backpressure(void) {
         TEST_EXPECT_EQ(sp->dev->write(sp, g_sc_chunk, n, 0), n, "fill without client progress");
         left -= n;
     }
-    TEST_EXPECT_NE(srvconn_poll(cn, POLLOUT, NULL) & POLLOUT, 0, "three bytes is writable");
+    TEST_EXPECT_NE(srvconn_poll(cn, false, POLLOUT, NULL) & POLLOUT, 0, "three bytes is writable");
     TEST_EXPECT_EQ(sp->dev->write(sp, g_sc_chunk, 16, 0), 3L, "short progress never parks");
     TEST_EXPECT_EQ(sp->dev->write(sp, g_sc_chunk, 16, 0), -(long)T_E_AGAIN, "full ring retries");
     TEST_EXPECT_EQ(sp->dev->read(sp, g_sc_chunk, 16, 0), -(long)T_E_AGAIN, "empty live read is not EOF");

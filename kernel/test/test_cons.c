@@ -88,6 +88,8 @@ void test_cons_episode_discards_pending_input(void);
 void test_cons_episode_freezes_nonattached_reader(void);
 void test_cons_episode_freezes_nonattached_writer(void);
 void test_cons_episode_freezes_feed_consctl_poll(void);
+void test_cons_episode_frozen_poller_follows_end(void);
+void test_cons_episode_prior_poller_not_woken_by_keys(void);
 void test_cons_episode_end_restores(void);
 void test_cons_episode_repeat_sak_idempotent(void);
 void test_cons_episode_gate(void);
@@ -3479,6 +3481,150 @@ void test_cons_episode_freezes_feed_consctl_poll(void) {
     }
     ep_teardown(&f);
     TEST_ASSERT(err == NULL, err ? err : "frozen world");
+}
+
+// A REAL sys_poll_for_proc poller across an episode (B-0 audit round 4 F1;
+// cons_poll.tla NoMissedConsPoll / NoSecretCadence, BUGGY_NO_REREGISTER). The
+// console chooses a poller's hook list by state -- a frozen caller goes on
+// episode_poll_list, which the per-byte relay never walks -- so the choice must
+// be re-made on every pass of the poll loop, or a hook stays where it was put:
+//   frozen_poller_follows_end: registered DURING the episode (-> the episode
+//     list) and woken at END with nothing buffered, it must re-register on
+//     poll_list, or the keystroke after END never reaches it;
+//   prior_poller_not_woken_by_keys: registered BEFORE the SAK (-> poll_list)
+//     and woken by BEGIN, it must move to the episode list, or every secret
+//     key byte's relay costs it a kernel pass it can count.
+// cons.episode_freezes_feed_consctl_poll samples with pw == NULL, so neither
+// reaches the loop. The poller here is a kproc kthread -- not console-attached,
+// so frozen by an episode -- polling a devcons handle held by a synthetic Proc.
+// The mgr is HELD (#58): the relay walks only where cons_test_service_deferred
+// drives it. poll_total_resleeps counts the poller's empty passes (no other
+// poller runs in the kernel test phase).
+static struct Proc  *g_epp_proc;
+static hidx_t        g_epp_fd;
+static volatile s64  g_epp_result;
+static volatile s16  g_epp_revents;
+static volatile bool g_epp_exited;
+
+static void epp_poll_entry(void) {
+    struct pollfd pfds[1] = { { .fd = g_epp_fd, .events = POLLIN, .revents = 0 } };
+    s64 r = sys_poll_for_proc(g_epp_proc, pfds, 1, -1);
+    g_epp_revents = pfds[0].revents;
+    __atomic_store_n(&g_epp_result, r, __ATOMIC_RELEASE);
+    test_kthread_park_terminal(&g_epp_exited);
+}
+
+static struct Thread *epp_start(void) {
+    g_epp_proc = proc_alloc();
+    if (!g_epp_proc) return NULL;
+    struct Spoor *cs = devcons.attach(NULL);
+    if (!cs) return NULL;
+    g_epp_fd = (hidx_t)handle_alloc(g_epp_proc, KOBJ_SPOOR, RIGHT_READ, cs);
+    if (g_epp_fd < 0) { spoor_clunk(cs); return NULL; }
+    g_epp_result = -999; g_epp_revents = 0; g_epp_exited = false;
+    struct Thread *t = thread_create(kproc(), epp_poll_entry);
+    if (!t) return NULL;
+    ready(t);
+    return t;
+}
+
+// The poller is asleep in poll with at least `min` empty passes behind it, and
+// STAYS asleep; *count receives the settled pass count.
+// ">= min", not "== min": a transition walks poll_list THEN the episode list,
+// and on SMP an idle peer (its tickless backstop) may steal the poller woken
+// by the first walk and run its pass -- re-registering on the second list --
+// before the second walk flags that fresh hook: one more, harmless pass. The
+// privacy check below compares against the SETTLED count, so it still sees
+// any pass a key byte causes.
+static bool epp_settle(struct Thread *t, u64 min, u64 *count) {
+    TEST_YIELD_UNTIL_SOFT(t->state == THREAD_SLEEPING && poll_total_resleeps() >= min);
+    if (t->state != THREAD_SLEEPING || poll_total_resleeps() < min) return false;
+    u64 v = poll_total_resleeps();
+    for (int i = 0; i < 200; i++) sched();
+    if (t->state != THREAD_SLEEPING || poll_total_resleeps() != v) return false;
+    *count = v;
+    return true;
+}
+
+// Ends a poll the test could not end: BEGIN (discards input) + a byte + END,
+// both transitions walking both lists, so a hook on either list re-samples an
+// unfrozen console with a byte waiting. Then reap. Safe on every path.
+static void epp_finish(struct Thread *t, struct ep_fixture *f) {
+    if (t && __atomic_load_n(&g_epp_result, __ATOMIC_ACQUIRE) == -999) {
+        if (!cons_episode_active()) cons_test_sak_dispatch();
+        cons_rx_input((u8)'z', false);
+        (void)proc_console_episode(f->trusted, SYS_CONSOLE_EPISODE_END);
+        TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_epp_result, __ATOMIC_ACQUIRE) != -999);
+    }
+    if (t) test_kthread_join_free(t, &g_epp_exited);
+    if (g_epp_proc) {
+        g_epp_proc->state = PROC_STATE_ZOMBIE;
+        proc_free(g_epp_proc);
+        g_epp_proc = NULL;
+    }
+}
+
+void test_cons_episode_frozen_poller_follows_end(void) {
+    struct ep_fixture f;
+    TEST_ASSERT(ep_setup(&f, false, true), "fixture (armed)");
+    cons_test_mgr_hold(true);
+    const char *err = NULL;
+    struct Thread *t = NULL;
+    cons_test_sak_dispatch();
+    if (!cons_episode_active()) err = "episode open";
+    u64 rs = poll_total_resleeps();
+    if (!err && !(t = epp_start())) err = "poller setup";
+    u64 settled = 0;
+    if (!err && !epp_settle(t, rs, &settled)) err = "the frozen poller registered and slept";
+    if (!err && proc_console_episode(f.trusted, SYS_CONSOLE_EPISODE_END) != 0) err = "END accepted";
+    if (!err && !epp_settle(t, settled + 1u, &settled)) err = "END woke it; with nothing buffered it slept again";
+    if (!err) {
+        cons_rx_input((u8)'q', false);
+        cons_test_service_deferred();              // the relay's poll_list walk
+        TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_epp_result, __ATOMIC_ACQUIRE) != -999);
+        if (g_epp_result != 1)            err = "the key after END reached the poller (it re-registered on poll_list)";
+        else if (g_epp_revents != POLLIN) err = "revents = POLLIN";
+    }
+    epp_finish(t, &f);
+    cons_test_mgr_hold(false);
+    ep_teardown(&f);
+    TEST_ASSERT(err == NULL, err ? err : "frozen poller across END");
+    TEST_YIELD_UNTIL(sched_runnable_count() == 0u);
+}
+
+void test_cons_episode_prior_poller_not_woken_by_keys(void) {
+    struct ep_fixture f;
+    TEST_ASSERT(ep_setup(&f, false, true), "fixture (armed)");
+    cons_test_mgr_hold(true);
+    const char *err = NULL;
+    u64 rs = poll_total_resleeps();
+    u64 settled = 0;
+    struct Thread *t = epp_start();
+    if (!t) err = "poller setup";
+    if (!err && !epp_settle(t, rs, &settled)) err = "the poller registered on poll_list and slept";
+    if (!err) {
+        cons_test_sak_dispatch();
+        if (!cons_episode_active()) err = "episode open";
+    }
+    if (!err && !epp_settle(t, settled + 1u, &settled)) err = "BEGIN woke it; frozen, it slept again";
+    if (!err) {
+        cons_rx_input((u8)'k', false);             // a secret key byte
+        cons_test_service_deferred();              // the relay's poll_list walk
+        for (int i = 0; i < 2000; i++) sched();    // every chance for a wrong wake to run
+        if (poll_total_resleeps() != settled || t->state != THREAD_SLEEPING)
+            err = "the secret key's relay did NOT reach the frozen poller (no extra pass)";
+    }
+    if (!err && proc_console_episode(f.trusted, SYS_CONSOLE_EPISODE_END) != 0) err = "END accepted";
+    if (!err) {
+        TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_epp_result, __ATOMIC_ACQUIRE) != -999);
+        if (g_epp_result != 1)            err = "END reached the poller on the episode list";
+        else if (g_epp_revents != POLLIN) err = "revents = POLLIN (the byte the authority left)";
+    }
+    epp_finish(t, &f);
+    cons_test_mgr_hold(false);
+    ep_teardown(&f);
+    TEST_ASSERT(err == NULL, err ? err : "prior poller across the episode");
+    TEST_YIELD_UNTIL(sched_runnable_count() == 0u);
 }
 
 // END restores: the pre-SAK termios word, the Ctrl-C target (into the empty

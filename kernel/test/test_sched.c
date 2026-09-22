@@ -23,12 +23,14 @@
 
 #include "test.h"
 
+#include "../../arch/arm64/gic.h"      // gic_cpu_irq_count -- the point's witness
 #include "../../arch/arm64/timer.h"
 
 #include <thylacine/dtb.h>
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
 #include <thylacine/smp.h>
+#include <thylacine/spinlock.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -124,21 +126,23 @@ void test_sched_dispatch_smoke(void) {
 
 static volatile bool g_preempt_test_running;
 static volatile u64  g_preempt_test_counter[2];
+static volatile bool g_preempt_test_exited[2];
 
 static void preempt_test_thread_a(void) {
     while (g_preempt_test_running) {
         g_preempt_test_counter[0]++;
     }
-    // Exit signaled. Yield back to the scheduler; boot will reap.
-    sched();
-    // Unreachable — boot doesn't switch back.
+    // Exit signaled: park TERMINALLY for the reap. A bare sched() here was a
+    // yield -- still RUNNABLE, stealable by an idle peer, and thread_free raced
+    // the thread it had started running.
+    test_kthread_park_terminal(&g_preempt_test_exited[0]);
 }
 
 static void preempt_test_thread_b(void) {
     while (g_preempt_test_running) {
         g_preempt_test_counter[1]++;
     }
-    sched();
+    test_kthread_park_terminal(&g_preempt_test_exited[1]);
 }
 
 void test_sched_preemption_smoke(void) {
@@ -149,6 +153,8 @@ void test_sched_preemption_smoke(void) {
     g_preempt_test_running    = true;
     g_preempt_test_counter[0] = 0;
     g_preempt_test_counter[1] = 0;
+    g_preempt_test_exited[0]  = false;
+    g_preempt_test_exited[1]  = false;
 
     struct Thread *ta = thread_create(kproc(), preempt_test_thread_a);
     struct Thread *tb = thread_create(kproc(), preempt_test_thread_b);
@@ -196,11 +202,10 @@ void test_sched_preemption_smoke(void) {
     TEST_ASSERT(a < (u64)10 * b && b < (u64)10 * a,
         "preemption is severely unfair (>10× imbalance)");
 
-    // Cleanup. Both threads have called sched() after exiting their
-    // loops; both should be RUNNABLE in the tree (suspended inside
-    // their own sched()). thread_free removes them.
-    thread_free(ta);
-    thread_free(tb);
+    // Cleanup. Both threads parked terminally after exiting their loops
+    // (EXITING, off the tree); the joins reap them.
+    test_kthread_join_free(ta, &g_preempt_test_exited[0]);
+    test_kthread_join_free(tb, &g_preempt_test_exited[1]);
     TEST_EXPECT_EQ(sched_runnable_count(), 0u,
         "run tree empty after thread_free");
 }
@@ -1070,4 +1075,53 @@ void test_sched_preempt_gate_defers_while_locked(void) {
     }
     TEST_EXPECT_EQ(saw_clear, true, "released -> the deferred preempt is consumed");
     sched_clear_need_resched_for_test(smp_cpu_idx_self());  // leave no dangling preempt
+}
+
+// =============================================================================
+// sched_preempt_point -- the window, witnessed (B-0 audit round 7 F3).
+// =============================================================================
+//
+// The unmask -> take-pending -> re-mask transition is the ONLY novel behaviour
+// the preemption point adds, and no poll test can see it: poll's test pollers
+// are kthreads, and a kthread is entered through thread_trampoline's
+// `msr daifclr, #2` (arch/arm64/context.S), so it already runs IRQs-on and the
+// window is architecturally INERT there. Both poll.point_* tests would stay
+// green with sched_preempt_point's whole body replaced by `return;`, because
+// everything they assert is produced by poll's loop. This test masks the way a
+// syscall body is masked, lets a timer tick pend, and asserts the interrupt is
+// actually TAKEN inside the window.
+//
+// The control is the load-bearing half: the SAME masked wait, measured one
+// variable away, must take NO interrupt. Without it a window that did nothing
+// would still pass on any host where the mask was not real.
+//
+// gic_cpu_irq_count is per-CPU and counts interrupts TAKEN, so it stays the
+// right counter to read even if the point's own sched() migrates us afterwards
+// -- the interrupt was taken on the CPU we were pinned to while masked.
+#define PP_PEND_NS (3ull * 1000ull * 1000ull)   // > 2 tick periods at 1 kHz
+
+void test_sched_preempt_point_takes_a_pending_irq(void) {
+    // Mask-only (a NULL lock): this form does not touch preempt_count, so the
+    // point's "no counted lock held" precondition still holds.
+    irq_state_t s = spin_lock_irqsave(NULL);
+    unsigned cpu  = smp_cpu_idx_self();   // masked, so we cannot migrate off it
+    u64 before    = gic_cpu_irq_count(cpu);
+
+    u64 t0 = timer_now_ns();
+    while (timer_now_ns() - t0 < PP_PEND_NS) { }   // let this CPU's tick pend
+    u64 masked = gic_cpu_irq_count(cpu);
+
+    sched_preempt_point();
+
+    u64 after = gic_cpu_irq_count(cpu);
+    spin_unlock_irqrestore(NULL, s);
+
+    TEST_EXPECT_EQ((s64)(masked - before), 0L,
+        "the control: the section really was masked (no interrupt taken while waiting)");
+    // Only the daifclr is witnessed. The isb widens the unmask window and is
+    // not needed for the mask write itself to take effect, so the `noisb`
+    // sabotage PASSES here (1615/1615, measured) -- recorded rather than
+    // asserted, because a test must not claim a discrimination it lacks.
+    TEST_ASSERT(after > masked,
+        "the point TAKES the pending interrupt (drop the daifclr and this fails)");
 }

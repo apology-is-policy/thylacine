@@ -38,10 +38,13 @@
 //
 // IRQ-safety (IDENTITY-DESIGN.md section 9.8 "As-built"): cons_rx_input runs in
 // IRQ context, so it does ONLY ring + flag mutation (under an irqsave lock) +
-// wakeup() -- the SOLE IRQ-safe wake (notes_post + poll_waiter_list_wake take
-// plain spin_locks). The privileged/blocking work runs in console_mgr's process
-// context. The data wait is a single Rendez + a single-reader busy-guard:
-// poll_waiter_list_wake is not IRQ-safe, and a single-waiter Rendez extincts on
+// wakeup() -- the one wake it makes: notes_post takes a plain spin_lock, and a
+// poll_waiter_list_wake walk is O(pollers) nested wakeups, kept out of IRQ
+// context so the per-byte cost stays O(1) (its lock is irqsave since B-0 audit
+// round 4 F3; that makes the lock IRQ-safe, not the walk cheap). The
+// privileged/blocking work runs in console_mgr's process context. The data wait
+// is a single Rendez + a single-reader busy-guard: the IRQ does not walk a hook
+// list, and a single-waiter Rendez extincts on
 // a second sleeper, so a 2nd concurrent blocking read returns -1 rather than
 // racing into that extinction (the console is a single-reader resource at v1.0;
 // a multi-reader lift is v1.x).
@@ -194,10 +197,14 @@ struct cons_input {
     // LS-8a: the poll-hook list for /dev/cons. The SYS_CONSOLE_OPEN fd (devcons)
     // AND the namespace /dev/cons leaf (devdev) share it -- #57b single-impl, so
     // a wake reaches every poller of the one console. cons_rx_input runs in IRQ
-    // context and CANNOT walk it (poll_waiter_list_wake takes a plain non-irqsave
-    // lock + nests a wakeup); it sets poll_wake_pending instead, and console_mgr
-    // walks the list in process context (the cons_poll.tla I-9 deferred-wake
-    // relay). The list lives in this file-scope static -> IMMORTAL, so the
+    // context and does not walk it (poll_waiter_list_wake nests a wakeup per
+    // poller: O(pollers) work the per-byte IRQ must not do); it sets
+    // poll_wake_pending instead, and console_mgr walks the list in process
+    // context (the cons_poll.tla I-9 deferred-wake relay). The list lock is
+    // taken irqsave by every list op: it nests under g_cons.lock, which this
+    // IRQ takes, so an interruptible holder (console_mgr runs with IRQs on)
+    // would deadlock against a CPU holding g_cons.lock in cons_poll (B-0 audit
+    // round 4 F3). The list lives in this file-scope static -> IMMORTAL, so the
     // RW-2 2C-F1 registered-object-lifetime hazard (a sibling freeing the
     // embedded list mid-sleep) structurally cannot arise here; multi-poller
     // composition is the standard poll.tla case (each poller has its own private
@@ -226,12 +233,14 @@ struct cons_input {
     //
     // `episode_poll_list`: where a FROZEN poller's hook goes instead of
     // `poll_list`. The RX-driven relay (console_mgr's poll_list walk on every
-    // byte) never reaches it, so a frozen poller is not woken per keystroke --
-    // sys_poll RETURNS to userspace on a hook wake (a re-sample, then the
-    // count, which for a frozen caller is 0), and one return per key byte
-    // would hand the shell the secret's length and cadence. It is walked
-    // exactly once, at END (and at BEGIN, for a poller that registered on
-    // poll_list before the SAK: its one spurious return re-registers it here).
+    // byte) never reaches it, so a frozen poller is not woken per keystroke:
+    // each wake costs the poller a full kernel pass (its readiness word still
+    // reads 0), and one pass per key byte would hand the caller -- through
+    // its own CPU time -- the secret's length and cadence. It is walked at
+    // END, and at BEGIN (together with poll_list): sys_poll's loop
+    // re-registers on EVERY pass, so a poller woken at BEGIN moves itself
+    // here, and one woken at END moves back (cons_poll.tla NoSecretCadence /
+    // NoMissedConsPoll; BUGGY_NO_REREGISTER).
     bool        episode_armed;
     bool        episode_active;
     u32         episode_saved_termios;
@@ -1496,8 +1505,8 @@ static void cons_service_deferred(void) {
     else if (do_intr) proc_console_post_interrupt();
 
     // LS-8a: the deferred poll-wake. A POLLIN edge (cons_rx_input set
-    // poll_wake_pending) -> walk the hook list now, in process context, where
-    // poll_waiter_list_wake's plain lock + nested wakeup are legal. Independent
+    // poll_wake_pending) -> walk the hook list now, in process context, off
+    // the IRQ path (the walk nests a wakeup per poller). Independent
     // of intr/sak (a data byte arrives with no Ctrl-C). The walk runs with
     // g_cons.lock RELEASED (lock order object -> list); the producer's count
     // mutation already happened-before via the just-drained flag, so any poller
@@ -1534,7 +1543,7 @@ void cons_test_reset(void) {
     cons_reader_busy_store(false);
     // IM-1: the episode back to the boot state (unarmed, closed). A test's
     // leaked open episode has readers/writers parked -- woken below, after
-    // the unlock (the wake takes a plain lock + nests a wakeup).
+    // the unlock (the wakes nest a wakeup per waiter; kept out of the hold).
     bool was_active = cons_episode_active_load();
     cons_episode_armed_store(false);
     cons_episode_active_store(false);
@@ -1831,8 +1840,8 @@ static void devcons_close(struct Spoor *c) {
 // of corvus dying at boot.
 //
 // Locking: the flags flip under g_cons.lock; the parked waiters are woken with
-// it RELEASED (poll_waiter_list_wake takes a plain lock + nests a wakeup,
-// illegal under an irqsave leaf). proc.c calls end / abandon / arm / disarm
+// it RELEASED (poll_waiter_list_wake nests a wakeup per waiter; the hold stays
+// short). proc.c calls end / abandon / arm / disarm
 // UNDER g_proc_table_lock -- the table -> cons edge; there is no reverse edge
 // (cons_input_read's owner query runs with g_cons.lock released, and no cond
 // takes a lock).
@@ -2882,19 +2891,21 @@ int cons_stat_native_fill(struct Spoor *c, struct t_stat *out) {
 // (uart_putc never blocks -- a poller must therefore request POLLIN to wait for
 // input). pw is registered UNCONDITIONALLY (even when POLLIN-ready);
 // sys_poll_for_proc's fast path unregisters it -- the poll.tla / devpipe
-// discipline. The poll_waiter_list_register nests the (plain) list lock under
-// g_cons.lock (irqsave) -- lock order object -> list, IRQs already masked.
+// discipline. The poll_waiter_list_register nests the list lock under
+// g_cons.lock (both irqsave) -- lock order object -> list.
 //
 // IM-1: a FROZEN caller (an episode is open, the caller is not attached) sees
 // NO readiness -- POLLIN would leak the count of key bytes, POLLOUT would
 // promise a write that freezes -- and its hook goes on episode_poll_list,
-// which the per-byte RX relay never walks: sys_poll returns to userspace on
-// any hook wake, so a frozen poller left on poll_list would return once per
-// keystroke, handing the shell the secret's length and cadence with the
-// readiness word still reading 0. It is woken exactly once, at END (the
-// transition walks both lists), re-samples unfrozen, and re-registers on
-// poll_list. Decided under g_cons.lock, the lock BEGIN/END flip the flag
-// under, so the sample, the flag and the list choice are one snapshot.
+// which the per-byte RX relay never walks: every hook wake costs the poller a
+// kernel pass, so a frozen poller left on poll_list would take one pass per
+// keystroke, handing the caller -- through its own CPU time -- the secret's
+// length and cadence with the readiness word still reading 0. The choice
+// holds for ONE pass only: sys_poll re-registers on every pass, so the poller
+// woken at END (the transition walks both lists) re-samples unfrozen and
+// re-registers on poll_list, and one woken at BEGIN moves itself here.
+// Decided under g_cons.lock, the lock BEGIN/END flip the flag under, so the
+// sample, the flag and the list choice are one snapshot.
 short cons_poll(short events, struct poll_waiter *pw) {
     short revents = 0;
     irq_state_t s = spin_lock_irqsave(&g_cons.lock);

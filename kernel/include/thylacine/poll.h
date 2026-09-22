@@ -17,16 +17,31 @@
 //   reach a still-empty hook list. specs/poll.tla `Register` ↔
 //   `dev->poll(c, events, pw)` is the binding spec action.
 //
-//   Producer side: every existing wakeup site (the existing
-//   `wakeup(&r->X)` in devpipe; future devsrv) ALSO walks the object's
-//   poll-hook list, sets each registered `poll_waiter`'s `ready` flag,
-//   and signals that poller's private `Rendez`. specs/poll.tla
-//   `MakeReady(f)` ↔ `poll_waiter_list_wake`.
+//   Producer side: every readiness site (devpipe, every SrvConn ring
+//   mutation, the listener, notes, loom, dev9p, the console relay) walks
+//   the object's poll-hook list, sets each registered `poll_waiter`'s
+//   `ready` flag, and signals that poller's private `Rendez`.
+//   specs/poll.tla `MakeReady(f)` ↔ `poll_waiter_list_wake`.
+//
+//   A FLAG IS A HINT, NOT A VERDICT (the re-arm, 2026-09-21). One hook list
+//   serves every poller of an object whatever each asked for -- a SrvConn's
+//   list carries four readiness edges for two endpoints -- and readiness is a
+//   LEVEL a competing reader can lower between the wake and the poller's look.
+//   So after a wake the poller takes every hook off its list (clearing it),
+//   THEN calls each `.poll` WITH its hook again -- a fresh register+sample --
+//   and an empty re-sample leads to ANOTHER tsleep against the same absolute
+//   deadline: poll returns 0 only at its deadline. A `.poll` impl or a wake
+//   site may therefore walk its list for ANY state change; what it may never
+//   do is fail to walk it for one. And because every pass re-registers, a
+//   `.poll` may choose WHICH list to register on by the state it samples (the
+//   console's episode list) -- the next pass re-chooses. specs/poll.tla
+//   `Rearm` / `Resample` / `EvaluateWake`; `NoSpuriousZero`;
+//   cons_poll.tla `BUGGY_NO_REREGISTER`.
 //
 // HOOK LIFETIME — STACK-ALLOCATED FOR ONE poll CALL
 //
 //   The hook is stack-allocated in `sys_poll_for_proc` — one slot per
-//   pollfd, `nfds ≤ PROC_HANDLE_MAX = 64`. The hook MUST be
+//   pollfd, `nfds ≤ POLL_MAX_NFDS = 64`. The hook MUST be
 //   unregistered before the poll returns; a leftover hook is a
 //   dangling stack pointer the next readiness event will walk.
 //   specs/poll.tla `NoStaleHook` is the invariant.
@@ -49,14 +64,20 @@
 //   `poll_waiter_list_unregister(pw)` takes ONLY the list lock — no
 //   object lock. Lock order globally:
 //     object → list → g_timerwait → rendez → cpu_sched
-//   The list lock is non-irqsave (held with IRQs ON during the wake
-//   walk); the wake's inner `wakeup(pw->rendez)` enters wakeup which
-//   takes `g_timerwait.lock` (irqsave) then the `rendez.lock` then the
-//   per-CPU `cs->lock` (in ready()). No IRQ handler enters
-//   `poll_list.lock`. Unregister takes only list, so no inversion. The
-//   hook stores a back-pointer `pw->list` set at register time so the
-//   kernel-side unregister sweep knows which list each hook is on
-//   without consulting the Dev.
+//   The list lock is taken IRQSAVE by every operation (register,
+//   unregister, wake, empty). No IRQ handler enters it, but it nests
+//   under object locks that IRQ handlers DO take (`g_cons.lock` and
+//   `g_cons_drain.lock`, by the UART RX IRQ), and a lock nested under an
+//   IRQ-taken lock must be held with IRQs masked everywhere -- otherwise
+//   a holder with IRQs on (console_mgr is a kthread) is interrupted by
+//   an IRQ spinning on the object lock another CPU holds while it spins
+//   on this list lock (B-0 audit round 4 F3; until then this lock was
+//   plain). The wake's inner `wakeup(pw->rendez)` takes
+//   `g_timerwait.lock` (irqsave) then the `rendez.lock` then the per-CPU
+//   `cs->lock` (in ready()). Unregister takes only list, so no
+//   inversion. The hook stores a back-pointer `pw->list` set at register
+//   time so the kernel-side unregister sweep knows which list each hook
+//   is on without consulting the Dev.
 //
 // REGISTERED-OBJECT LIFETIME (multi-thread-Proc safe -- RW-2 2C-F1)
 //
@@ -111,8 +132,9 @@
 //   `events`, plus output-only POLLERR/POLLHUP if the device sees an
 //   error / hangup). If `pw` is non-NULL, atomically registers `pw` on
 //   the object's hook list under the object's lock. If `pw` is NULL,
-//   the call is sample-only (used by the post-wake re-scan and the
-//   timeout=0 non-blocking probe).
+//   the call is sample-only. `sys_poll_for_proc` always passes a hook
+//   (every re-arm pass re-registers); the sample-only form serves
+//   other in-kernel callers and tests.
 //
 //   A NULL `Dev.poll` slot means the fd is always ready for the
 //   requested events — the POSIX-correct answer for a regular file, so
@@ -243,19 +265,23 @@ void poll_waiter_list_register(struct poll_waiter_list *l,
 
 // Unregister `pw` from its list. Takes `pw->list->lock` internally;
 // requires NO outer lock. Idempotent: a hook that is already
-// unregistered (`pw->list == NULL`) is a no-op. Used by
-// `sys_poll_for_proc` on return.
+// unregistered (`pw->list == NULL`) is a no-op. Used by every
+// `sys_poll_for_proc` re-arm pass and by its return sweep.
 void poll_waiter_list_unregister(struct poll_waiter *pw);
 
 // Wake every registered poller: walk `l` (under `l->lock`), set each
-// hook's `ready` flag, then signal each hook's `rendez`. Called from
-// the producer's existing wakeup site UNDER the object's lock — so the
-// readiness change the producer just made is visible to any concurrent
-// register's sample (which also runs under the object's lock).
+// hook's `ready` flag, then signal each hook's `rendez`.
 //
-// `wakeup()` takes the rendez's own lock; the lock chain (object →
-// list → rendez) is acyclic. Idempotent: walking an empty list is a
-// no-op.
+// THE CONTRACT is an ORDER, not a lock: the walk must FOLLOW the
+// readiness mutation's becoming visible under the lock the Dev's
+// register+sample holds. Then a concurrent register either sampled
+// before the mutation (and its hook is on the list when the walk runs)
+// or after it (and its sample saw the mutation). A site may walk while
+// still holding that object lock (the lock chain object → list → rendez
+// is acyclic) or after dropping it -- most do the latter, because the
+// walk nests a `wakeup` per poller (the SrvConn rings, the pipe).
+//
+// Idempotent: walking an empty list is a no-op.
 //
 // Extincts on a corrupted `pw->magic` mid-walk (UAF on a stale hook).
 void poll_waiter_list_wake(struct poll_waiter_list *l);
@@ -284,13 +310,23 @@ bool poll_waiter_list_empty(struct poll_waiter_list *l);
 //   > 0 — block for at most `timeout_ms` milliseconds.
 //
 // `nfds` MUST be 1..POLL_MAX_NFDS = 64 — the bound is on the ARRAY LENGTH, not
-// on the fd VALUES in it, which may be anything up to PROC_HANDLE_MAX (256).
+// on the fd VALUES in it, which may be anything below PROC_HANDLE_MAX.
 // (This comment said "PROC_HANDLE_MAX = 64" until V-5c-2. The two constants were
 // equal and were split by ffcc64b7; the same stale conflation copied into
 // pouch's select() became a real EBADF bug there — task #99 F-a.) The `struct
 // poll_waiter waiters[64]` array lives on this routine's kernel stack. specs/
-// poll.tla `Register` ↔ the first scan; `CommitOrSleep` ↔ the flag-
-// check + tsleep; `MakeReady` ↔ a producer's `poll_waiter_list_wake`.
+// poll.tla `Register` ↔ the first scan; `TSleepCommit` ↔ the flag-
+// check + tsleep; `Rearm` / `LoopCheck` / `Resample` ↔ each loop pass;
+// `MakeReady` ↔ a producer's `poll_waiter_list_wake`; `Point` ↔ the
+// preemption point (sched_preempt_point) each re-loop crosses.
+//
+// A dying caller returns 0 from any pass (the thread dies at its EL0-return
+// tail). A stopped caller parks inside the call and resumes the same poll
+// against the same deadline: with no hook listed when the loop's own check
+// catches the stop, and STILL LISTED when tsleep's detour catches it first --
+// a walk then only sets a flag the resumed tsleep reads. A caller kept awake by
+// noise crosses a preemption point each re-loop, where its CPU takes every
+// pending interrupt (ARCH 23.3; specs/poll.tla Point / IrqLatencyBounded).
 s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds, u64 nfds,
                       s32 timeout_ms);
 
@@ -327,5 +363,11 @@ u64 poll_total_calls(void);
 // Monotonic counter of poll calls that slept on tsleep. Distinguishes
 // the fast path (any fd ready at first scan) from the slow path.
 u64 poll_total_slept(void);
+u64 poll_total_resleeps(void);
+
+// Preemption points a poll loop has crossed. Climbs once per re-loop under
+// noise (specs/poll.tla Point): the witness that a noise-driven poll keeps
+// reaching the spot where its CPU services interrupts, not spinning masked.
+u64 poll_total_points(void);
 
 #endif // THYLACINE_POLL_H

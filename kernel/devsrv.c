@@ -1263,16 +1263,11 @@ short srv_handle_poll(void *obj, short events, struct poll_waiter *pw) {
         return svc_listener_poll((struct SrvService *)obj, events, pw);
     }
     if (magic == SRV_CONN_MAGIC) {
-        // Client-side connection handle. `srvconn_poll`'s semantics are
-        // SERVER-endpoint (POLLIN ↔ c2s.count > 0 — bytes corvus reads;
-        // POLLOUT ↔ s2c room — room corvus writes). A client polling its
-        // OWN handle expects mirror-image semantics (POLLIN ↔ s2c has a
-        // reply; POLLOUT ↔ c2s has room) — delegating here would return
-        // misleading revents. No v1.0 caller polls this (joey drives 9P
-        // synchronously through the kernel client; corvus polls its
-        // accept-side Spoor, not its KObj_Srv). Fail-closed until the
-        // client-side poll story lands (its own SrvConn `client_poll`
-        // entry with mirrored semantics + a separate hook list).
+        // A connection held as a KObj_Srv. No path has minted one since
+        // stalk-3b moved the client endpoint to a CSRVCLIENT Spoor, which is
+        // where client-side poll lives (devsrv_poll -> srvconn_poll(client)).
+        // Fail closed rather than guess which endpoint a handle nobody can
+        // hold would be.
         return POLLNVAL;
     }
     // Unknown magic — corruption, or a future KObj_Srv flavor.
@@ -1292,7 +1287,14 @@ static short devsrv_poll(struct Spoor *c, short events,
     }
     u64 m = *(const u64 *)c->aux;
     if (m == SRV_CONN_MAGIC) {
-        return srvconn_poll((struct SrvConn *)c->aux, events, pw);
+        struct SrvConn *cn = (struct SrvConn *)c->aux;
+        bool client = (c->flag & CSRVCLIENT) != 0;
+        // A kernel-attached conn's rings belong to the kernel 9P client; its
+        // client endpoint is no more pollable than it is readable
+        // (devsrv_read / devsrv_write refuse it for the same reason). Nothing
+        // is registered, so the poller holds no hook here.
+        if (client && srvconn_is_kernel_attached(cn)) return POLLNVAL;
+        return srvconn_poll(cn, client, events, pw);
     }
     if (m == SRV_REGISTRY_MAGIC) {
         // /srv root Spoor — no readiness state. The caller is asking about

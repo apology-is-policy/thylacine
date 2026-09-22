@@ -395,6 +395,24 @@ bool sched_has_runnable_work(void);
 // Returns whether it dispatched.
 bool sched_yield_hint(void);
 
+// A preemption point for a syscall body that runs IRQ-masked and loops
+// (poll's noise loop; ARCH 8.11 + 23.3): at a spot where the caller holds NO
+// spinlock, briefly unmask IRQs so an interrupt taken in that window -- the
+// timer tick and the SAK included -- runs on the caller's own kernel stack,
+// then re-mask and honour a deferred reschedule. The window is a WIDENING,
+// not a delivery guarantee: the architecture takes a pending unmasked
+// interrupt in finite time with no bound, so what a caller may rely on is
+// that crossing the point REPEATEDLY leaves the CPU repeatedly interruptible
+// (specs/poll_cpu.tla), never that any one crossing delivers. The thread switch
+// is DEFERRED across the window, not taken inside it: preempt_count is held so
+// preempt_check_irq (the #360 gate) leaves need_resched pending, and this
+// routine consumes it right after with a sched() -- sched_yield_hint does not
+// read need_resched, and the syscall-return preempt is a whole syscall away.
+// Extincts if a lock is held (preempt_count != 0). A caller already running
+// IRQs-on gets the reschedule check and an inert window. The L4 lineage's
+// "preemption point"; a stopgap until syscall bodies run IRQs-on (ARCH 8.1).
+void sched_preempt_point(void);
+
 // Internal — called by thread_free if t->state == THREAD_RUNNABLE so the
 // run tree doesn't carry a dangling pointer. Idempotent: safe to call
 // on an already-not-in-tree thread.
