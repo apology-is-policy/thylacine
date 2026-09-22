@@ -397,9 +397,13 @@ bool sched_yield_hint(void);
 
 // A preemption point for a syscall body that runs IRQ-masked and loops
 // (poll's noise loop; ARCH 8.11 + 23.3): at a spot where the caller holds NO
-// spinlock, briefly unmask IRQs so every interrupt pending on this CPU is
-// taken on the caller's own kernel stack -- the timer tick and the SAK
-// included -- then re-mask and honour a deferred reschedule. The thread switch
+// spinlock, briefly unmask IRQs so an interrupt taken in that window -- the
+// timer tick and the SAK included -- runs on the caller's own kernel stack,
+// then re-mask and honour a deferred reschedule. The window is a WIDENING,
+// not a delivery guarantee: the architecture takes a pending unmasked
+// interrupt in finite time with no bound, so what a caller may rely on is
+// that crossing the point REPEATEDLY leaves the CPU repeatedly interruptible
+// (specs/poll_cpu.tla), never that any one crossing delivers. The thread switch
 // is DEFERRED across the window, not taken inside it: preempt_count is held so
 // preempt_check_irq (the #360 gate) leaves need_resched pending, and this
 // routine consumes it right after with a sched() -- sched_yield_hint does not

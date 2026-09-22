@@ -475,12 +475,13 @@ struct Thread {
     //                   %CPU / run_ns, not nsched -- nsched is the complementary
     //                   "is it thrashing the scheduler" signal.
     //   nsleeps      -- times switched OUT voluntarily (state == SLEEPING) --
-    //                   the "parks" the process list surfaces (OQ-5). ONE
-    //                   reader outside /proc, and it is no scheduling
-    //                   decision: poll's noise backstop compares its OWN
-    //                   thread's nsleeps across a pass to learn whether it
-    //                   gave its CPU up (kernel/poll.c). A stale read only
-    //                   costs it one extra backoff.
+    //                   the "parks" the process list surfaces (OQ-5). No
+    //                   reader outside /proc, and none has ever driven a
+    //                   scheduling decision. poll's noise backstop briefly
+    //                   read its own thread's nsleeps across a pass; it was
+    //                   replaced by sched_preempt_point, because what that
+    //                   read could establish was per-THREAD while the
+    //                   obligation it served belongs to the CPU.
     //   nmigrations  -- times dispatched on a DIFFERENT CPU than the previous
     //                   dispatch (the first-ever dispatch is skipped via the
     //                   nsched == 0 guard, so it is not miscounted as a move

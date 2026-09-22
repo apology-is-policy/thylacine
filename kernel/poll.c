@@ -209,8 +209,8 @@ static int poll_cond_any_flagged(void *arg) {
 }
 
 // A cond that is never true, so a wait on it can only end on its deadline, a
-// stop, or a death-interrupt: the noise backstop's sleep, and the zero-fd
-// sleep at the bottom of this file. There is nothing to be ready.
+// stop, or a death-interrupt: the zero-fd sleep at the bottom of this file,
+// which is its only caller. There is nothing to be ready.
 static int poll_never(void *arg) {
     (void)arg;
     return 0;
@@ -436,8 +436,10 @@ s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds, u64 nfds,
         // The preemption point (specs/poll.tla Point; ARCH 23.3). Hooks are off
         // (poll_unhook_all, above) and no lock is held, so this is where the
         // syscall -- IRQ-masked end to end (ARCH 8.11; 8.1 says why that is not
-        // the design) -- briefly unmasks so this CPU takes every pending
-        // interrupt, the timer tick and the SAK included. A producer walking a
+        // the design) -- briefly unmasks, so an interrupt this CPU takes in
+        // that window (the timer tick and the SAK included) runs on this
+        // thread's own stack. The window is a widening, not a delivery
+        // guarantee; what composes is that EVERY pass crosses one. A producer walking a
         // list in every re-sample window keeps every tsleep returning AWOKEN,
         // so without this a poll(-1) holds its CPU masked for as long as the
         // noise lasts; the round-5 sleep backstop bounded one thread but not
