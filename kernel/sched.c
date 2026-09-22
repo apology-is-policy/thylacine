@@ -2639,9 +2639,15 @@ bool sched_yield_hint(void) {
 // during the window and may take locks, and holding one across it re-opens the
 // #359 masked-spinner deadlock. Held preempt_count blocks the switch so the
 // window is not itself a preempt point (preempt_check_irq defers on a nonzero
-// count, #360) -- the interrupt is SERVICED, the reschedule deferred -- and the
-// isb makes the pending interrupt land before the re-mask (a back-to-back
-// unmask/mask need not take it). A deferred need_resched is then consumed here;
+// count, #360) -- the interrupt is SERVICED, the reschedule deferred. The isb
+// WIDENS the window rather than guaranteeing it: a direct DAIF write needs no
+// barrier to take effect (Linux's __daif_local_irq_enable carries none), so
+// what it buys is a synchronization event between the two MSRs instead of
+// leaving them adjacent -- arm64 KVM's transient unmask has the same shape.
+// Delivery is architecturally "in finite time" with no bound either way, which
+// is why the model claims REPEATED interruptibility and not per-pass delivery.
+// MEASURED: the nodaifclr sabotage fails the witness test; noisb does NOT.
+// A deferred need_resched is then consumed here;
 // sched_yield_hint does not read it, and the EL0-return preempt is a whole
 // syscall away, so without this a reschedule the window raised would wait out
 // the rest of the noise loop.

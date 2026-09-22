@@ -144,8 +144,11 @@ dev9p.poll bridge's userside.
    re-loop, after the die/stop checks and before the rescan, the loop
    calls `sched_preempt_point` ([[sub-kernel-sched]]): hooks off and no
    lock held, it holds `preempt_count` (the switch is deferred, #360),
-   unmasks IRQs with an `isb` so every pending interrupt is taken on the
-   poller's own stack, re-masks, and honours a deferred `need_resched`. It
+   unmasks IRQs across an `isb` so an interrupt taken in that window runs
+   on the poller's own stack, re-masks, and honours a deferred
+   `need_resched`. The `isb` widens the window; it does not guarantee
+   delivery, and the `noisb` sabotage PASSES (measured) where `nodaifclr`
+   fails. The claim is REPEATED interruptibility, not per-pass delivery. It
    is UNCONDITIONAL, so its bound composes across pollers on one CPU where
    the sleep did not. The point does NOT check death or stop, so the
    loop's own die-check and stop park remain the ONLY prompt way out of a

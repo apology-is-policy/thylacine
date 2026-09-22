@@ -127,15 +127,27 @@ hold drops, within a tick.
 for a syscall body that runs IRQ-masked and LOOPS (poll's noise loop;
 [[sub-kernel-poll]], ARCH 23.3). At a spot where no lock is held (it
 extincts otherwise) it holds `preempt_count` across a brief IRQ window --
-`mrs daif` / `msr daifclr,#2` / `isb` / `msr daif` -- so every interrupt
-pending on this CPU is taken on the caller's own kstack (the timer tick
-and the SAK included) while the switch stays DEFERRED (the #360 gate),
+`mrs daif` / `msr daifclr,#2` / `isb` / `msr daif` -- so an interrupt
+taken in that window (the timer tick and the SAK included) runs on the
+caller's own kstack while the switch stays DEFERRED (the #360 gate),
 then consumes a `need_resched` the window raised with a `sched()`.
 `sched_yield_hint` does not read `need_resched`, and the EL0-return
 preempt is a whole syscall away, so without this consume a reschedule the
 window raised would wait out the rest of the loop. It is the L4 lineage's
 preemption point; a stopgap until syscall bodies run IRQs-on (ARCH 8.1
 records that they were built masked, which was never the design).
+
+The `isb` inside that window WIDENS it rather than guaranteeing it. A
+direct DAIF write takes effect with no barrier -- Linux's
+`__daif_local_irq_enable` is a bare `msr daifclr, #3` -- so what the
+`isb` buys is a synchronization event between the two MSRs instead of
+leaving them adjacent, which is the shape arm64 KVM uses to transiently
+unmask. Architecturally a pending unmasked interrupt is taken in finite
+time with no bound, so no single crossing is guaranteed to deliver; the
+property the point buys is that the CPU is REPEATEDLY interruptible, and
+that is what `poll_cpu.tla` states. Measured against the witness test
+`sched.preempt_point_takes_a_pending_irq`: dropping the `daifclr` fails
+it; dropping the `isb` does NOT.
 
 The count is per-**thread**, not per-CPU, and the reason is a real bug
 the first cut hit: an IRQ landing mid-RMW read the pre-increment `0`,

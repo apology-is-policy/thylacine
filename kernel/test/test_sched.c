@@ -1118,6 +1118,10 @@ void test_sched_preempt_point_takes_a_pending_irq(void) {
 
     TEST_EXPECT_EQ((s64)(masked - before), 0L,
         "the control: the section really was masked (no interrupt taken while waiting)");
+    // Only the daifclr is witnessed. The isb widens the unmask window and is
+    // not needed for the mask write itself to take effect, so the `noisb`
+    // sabotage PASSES here (1615/1615, measured) -- recorded rather than
+    // asserted, because a test must not claim a discrimination it lacks.
     TEST_ASSERT(after > masked,
-        "the point TAKES the pending interrupt (drop the daifclr, or the isb, and this fails)");
+        "the point TAKES the pending interrupt (drop the daifclr and this fails)");
 }
