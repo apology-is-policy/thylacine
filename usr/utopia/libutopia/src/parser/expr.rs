@@ -65,7 +65,7 @@
 //
 // === Substitution body lifting ===
 //
-// `Subst($(cmd))`, `Backtick(\`{cmd}\`)`, `ProcSubIn(<(cmd))`,
+// `Subst($(cmd))`, `Backtick(\`{cmd})`, `ProcSubIn(<(cmd))`,
 // `ProcSubOut(>(cmd))` carry their bodies as raw `String` from the
 // lexer. The expression parser eagerly parses these bodies as
 // sub-scripts (recursive `parse(&body)` call) so the AST is fully
