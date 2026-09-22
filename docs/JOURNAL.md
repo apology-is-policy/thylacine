@@ -750,6 +750,26 @@ change that. The kobj's INTID claim is released BEFORE the assertions, because `
 and asserting first would leak SGI 1 into the irqfwd tests -- one defect presenting as several, in a suite whose
 job is to say which thing broke.
 
+**Then I spent half an hour hunting a regression that was my own stale artifact -- for the second time in one
+day.** With the new witness in, three TCG boots of the suite came back 1613/1615 with `poll.point_services_noise`
+and `poll.point_keeps_the_deadline` red, while the same tip was 1615/1615 on HVF. I wrote it up as "my witness
+rewrite broke the poll point tests under emulation", built a control at the previous commit to confirm it, and the
+control came back green -- which I read as confirming the regression.
+
+It was not a regression. `red-k.sh` reverts the sabotaged SOURCE after each mode and leaves the LAST SABOTAGED
+KERNEL in `build/`, and `tools/test.sh` boots whatever is in `build/`. I had run those three TCG boots immediately
+after a sabotage run, so I was booting the `nopoint` kernel. The proof is exact and was available the whole time:
+1613/1615 with those same two FAIL lines is byte-for-byte the `nopoint` RED result from four minutes earlier. A
+fresh bake at the same commit is 1615/1615 under TCG, `accel=tcg cpu=max gic=v3 smp=4`.
+
+The same class cost this session an hour already -- a bake that exited 2 while my wrapper reported the echo's
+status, after which `test.sh` booted the kernel a previous sabotage had left behind and I called that a real
+regression too. **What makes this trap convincing is that the TREE IS CLEAN.** `git status` is empty,
+`red-k-treestate.txt` is empty, the revert says `ok` -- every signal I habitually check says restored, because
+every one of them is about SOURCE. None of them is about the artifact that actually boots. So `red-k.sh` now
+rebuilds the clean kernel as its last act and refuses loudly if that bake fails, which is the only fix that does
+not depend on me remembering.
+
 **Still open, and tracked rather than mentioned.** Round 7's F1: nothing caps how many hooks a single
 `poll_waiter_list` can hold, so the PRODUCER's wake walk -- which crosses no point, because it runs in the waker's
 context -- and the per-pass unregister walks are both O(attacker-scaled) and masked. The point bounds the poller's
