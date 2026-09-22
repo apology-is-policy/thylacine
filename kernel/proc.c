@@ -4454,6 +4454,14 @@ void proc_group_terminate_code(struct Proc *p, int code, const char *msg) {
 }
 
 void el0_return_die_check(void) {
+    // ARCH 8.12: this runs INSIDE the approach to the KERNEL_EXIT eret window,
+    // which installs ELR/SPSR and erets under an INHERITED mask -- the one
+    // surviving #713-class window that does not mask locally. #713 was the
+    // year-long AEGIS corruption: 3-13% of boots, never at -smp 1. When the
+    // 8.1 chunk unmasks syscall bodies, THIS is the assert that catches an
+    // unmask that leaked past the re-mask.
+    ASSERT_IRQS_MASKED("the EL0-return tail approaches the KERNEL_EXIT eret "
+                       "window, which inherits its mask (#713)");
     struct Thread *t = current_thread();
     if (!t || t->magic != THREAD_MAGIC) return;
     struct Proc *p = t->proc;

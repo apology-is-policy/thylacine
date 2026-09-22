@@ -23,6 +23,7 @@
 
 #include <thylacine/types.h>
 #include <atomic_lse.h>   // t_atomic_xchg_acq_u32 (W1.5 LSE-patchable test-and-set)
+#include <thylacine/extinction.h>  // ASSERT_OR_DIE (the ARCH 8.12 IRQ-state asserts)
 
 typedef struct spin_lock {
     // 0 = unlocked, 1 = locked. The test-and-set goes through the
@@ -171,6 +172,37 @@ static inline bool spin_trylock_raw(spin_lock_t *l) {
 // On UP at v1.0 the spin part of spin_lock_irqsave is still a
 // no-op — but the IRQ mask discipline is real. Phase 2's SMP
 // adds the LL/SC contention.
+// ARCH 8.12: ASSERTIONS ON THE INTERRUPT STATE.
+//
+// Until these landed there were NONE, anywhere in the tree. Searched
+// irq_disabled / irqs_disabled / in_irq / ASSERT.*daif: zero hits across
+// kernel/, arch/, mm/ and lib/. Every one of those files depends on a masking
+// discipline that was load-bearing ONLY IN PROSE -- so when the premise
+// changed, nothing would fail loudly; it would just be quietly wrong in a
+// place nobody was looking.
+//
+// The ARCH 8.1 chunk changes exactly that premise (syscall bodies run with
+// interrupts ON), which is why the assert lands with it rather than after.
+// Read the messages as documentation of which model the code is in: when 8.1
+// lands, the assertions at the syscall entry INVERT, and the inversion is
+// visible in the diff.
+//
+// Cost is one `mrs` and a branch -- cheap enough to leave in every build, and
+// an assert compiled out of the build that ships is an assert that never
+// catches the thing it was written for.
+#define DAIF_I_BIT  (1ULL << 7)         // PSTATE.I -- the IRQ mask
+
+static inline bool irqs_masked(void) {
+    u64 daif;
+    __asm__ __volatile__("mrs %x0, daif" : "=r" (daif) :: "memory");
+    return (daif & DAIF_I_BIT) != 0;
+}
+
+#define ASSERT_IRQS_MASKED(why) \
+    ASSERT_OR_DIE(irqs_masked(), "IRQs must be MASKED here: " why)
+#define ASSERT_IRQS_ENABLED(why) \
+    ASSERT_OR_DIE(!irqs_masked(), "IRQs must be ENABLED here: " why)
+
 typedef u64 irq_state_t;
 
 static inline irq_state_t spin_lock_irqsave(spin_lock_t *l) {

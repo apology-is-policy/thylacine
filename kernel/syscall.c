@@ -14570,6 +14570,14 @@ static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
 }
 
 void syscall_dispatch(struct exception_context *ctx) {
+    // ARCH 8.12: the AS-BUILT model -- the SVC vector masks at exception entry
+    // and nothing lifts it, so a syscall body runs IRQ-masked end to end. That
+    // was never the design (ARCH 8.1 records the accident); this assert states
+    // the model the code is CURRENTLY in, so that when the 8.1 chunk unmasks
+    // the body it INVERTS here and the model change is visible in the diff
+    // rather than implied by its absence.
+    ASSERT_IRQS_MASKED("the SVC vector masks at entry and the body does not "
+                       "yet unmask (ARCH 8.11; 8.12 changes this)");
     // VIVARIUM V-1b: a phenotyped Proc's numbers are decoded through the
     // translation table before anything else looks at them. A native Proc
     // (phenotype == PHENO_NATIVE, the default and every Proc outside a
