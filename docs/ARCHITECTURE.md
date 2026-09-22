@@ -156,9 +156,9 @@ This discipline is enforced by the audit rounds; deviations get flagged.
 
 ### 3.5 The Plan 9 split: native vs ported userspace
 
-**STATUS**: COMMITTED — scripture under U-1 (the Utopia scripture commit).
+**STATUS**: COMMITTED — scripture under U-1 (the Utopia scripture commit). **AMENDED 2026-09-21** (operator decision O-5 of the Rust `std` track, `docs/RUST-STD-DESIGN.md` §9 — that design doc rides the aux track's branch, `aux-3`, until track R merges; the brief on `main` is `docs/handoffs/041-rust-std-track-to-aux.md`): a THIRD sanctioned substrate, first-party `std` Rust on Pouch — see the paragraph of that name below. The native/ported split itself is unchanged.
 
-Every Thylacine userspace program is in one of two camps; the boundary determines the runtime substrate it builds against.
+Every Thylacine userspace program is in one of three camps; the boundary determines the runtime substrate it builds against. The first two are the original Plan 9 split; the third sits on the second's substrate.
 
 **Native code** — programs authored within Thylacine — builds against `libthyla-rs` (the existing no_std Rust crate at `usr/lib/libthyla-rs/`). Uses Thylacine syscalls directly. Speaks Thylacine concepts natively (Spoor, KObj_*, notes, capabilities, Territories). No musl. No POSIX shim. No Pouch boundary-line patches.
 
@@ -168,7 +168,9 @@ Native programs include: `ut` (the shell), `libutopia` (the shared Rust library)
 
 Ported programs include: stratumd, libsodium, the pouch-hello-* probing binaries, **Helix** (the default `$EDITOR`, ported via Pouch under U-Helix), and future ports of foreign programs (ssh, git, python, etc.).
 
-**The decision rule.** When a new program is added: ask whether the program is **authored within Thylacine** (native libthyla-rs, no Pouch) or **ported from elsewhere** (Pouch). Code review enforces; `tools/build.sh` has separate build paths for the two camps. The rationale mirrors Plan 9's `libc.h` (native) / APE (POSIX-compat ported) split: native programs benefit from being Thylacine-shaped — smaller binaries, faster startup, no impedance mismatch, fewer patches to maintain — while ported programs get POSIX-shape via the pouch boundary-line, which is the right place to do the translation work once per surface rather than at every program's syscall site.
+**First-party `std` Rust on Pouch** (the 2026-09-21 amendment) — Rust programs authored within Thylacine that want `std` and the crates.io ecosystem — build for the `aarch64-unknown-thylacine` target (family `unix`), whose `std` rests on the Pouch libc, NOT on `libthyla-rs`. The operator ruled that this is a sanctioned way to write NEW first-party programs, not a port-only path. It is not a demotion of `libthyla-rs`, which stays the native default and is untouched: a Thylacine-shaped daemon wanting the smallest surface and direct Thylacine concepts is native; a program wanting threads, `std::fs`, `std::net` and ecosystem crates, and accepting the Pouch POSIX surface with its documented gaps, may be `std`-on-Pouch. The choice between the two for a new program is the author's, made per the program's needs and stated in its commit. What this substrate inherits, it inherits whole: every Pouch boundary-line limit (anonymous-only `mmap`, no permission-mutation call, notes-as-signals) is a limit of `std` here too. The target, its `std::os::thylacine` surface and its toolchain pinning are specified in `docs/RUST-STD-DESIGN.md`.
+
+**The decision rule.** When a new program is added: ask whether the program is **authored within Thylacine** (native libthyla-rs, no Pouch — or, since the 2026-09-21 amendment, `std` Rust on Pouch where the program's needs call for it) or **ported from elsewhere** (Pouch). Code review enforces; `tools/build.sh` has separate build paths for the two camps. The rationale mirrors Plan 9's `libc.h` (native) / APE (POSIX-compat ported) split: native programs benefit from being Thylacine-shaped — smaller binaries, faster startup, no impedance mismatch, fewer patches to maintain — while ported programs get POSIX-shape via the pouch boundary-line, which is the right place to do the translation work once per surface rather than at every program's syscall site.
 
 Full scripture: `docs/UTOPIA-SHELL-DESIGN.md §3`.
 
