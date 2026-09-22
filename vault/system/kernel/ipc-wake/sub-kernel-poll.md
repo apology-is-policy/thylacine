@@ -9,7 +9,7 @@ guarded-by: [inv-i9]
 validated-by: [spec-poll, spec-tsleep, gate-smp]
 locks: [lock-poll-list, lock-rendez, lock-wait, lock-timerwait]
 created: 2026-08-01
-updated: 2026-09-21
+updated: 2026-09-22
 ---
 ## Purpose
 
@@ -37,9 +37,9 @@ dev9p.poll bridge's userside.
   with no hook listed when the loop's own check catches the stop, STILL
   listed when `tsleep`'s detour catches it first (a walk then only sets a
   flag the resumed `tsleep` reads; this said "no hook listed" flat until
-  audit round 5 F5). A caller kept awake by noise for
-  `POLL_SPIN_BUDGET_NS` backs off for `POLL_BACKOFF_NS` (step 5): at most
-  one backoff of extra latency, only while the noise lasts.
+  audit round 5 F5). A caller kept awake by noise crosses a preemption
+  point each re-loop (step 5), where its CPU takes every pending
+  interrupt; it adds no latency of its own.
 - `nfds` ∈ [1, `POLL_MAX_NFDS` = 64]. **Deliberately decoupled from
   `PROC_HANDLE_MAX`**, which is now **1024** — 64 at the decoupling,
   256 by [[chg-2026-06-24-355-poll-decouple]], 1024 since the #198
@@ -100,13 +100,13 @@ dev9p.poll bridge's userside.
    can reach it, so the clear needs no lock); then the loop's own death
    and stop checks (below); then each fd's `.poll` runs WITH its hook
    again — the first scan's install-and-sample. An event before an fd's
-   install is seen by its sample; one after reaches the fresh hook. Ready,
-   or a `TSLEEP_TIMEDOUT` whose deadline was the POLL's (`sleep_dl ==
-   deadline_ns`) ⇒ the sweep. Otherwise an explicit
-   `timer_now_ns() >= deadline_ns` test, then the noise backstop (below),
-   then `sched_yield_hint` (a noise pass bought nothing; queued work on
-   this CPU runs first), then **loop to step 3 against the same absolute
-   deadline**. The explicit
+   install is seen by its sample; one after reaches the fresh hook. BEFORE
+   the rescan, with hooks off and no lock held, the loop crosses the
+   preemption point (below). Ready, or a `TSLEEP_TIMEDOUT` (the sleep is
+   always to the poll's own deadline) ⇒ the sweep. Otherwise an explicit
+   `timer_now_ns() >= deadline_ns` test, then `sched_yield_hint` (a noise
+   pass bought nothing; queued work on this CPU runs first), then **loop
+   to step 3 against the same absolute deadline**. The explicit
    test is load-bearing: `tsleep` prefers a set flag to a passed
    deadline, so a producer that never stops walking a list would hold
    the poller past its timeout for ever (`PollTerminates`).
@@ -128,28 +128,32 @@ dev9p.poll bridge's userside.
    (⇒ the sweep, 0) and parks on `proc_stop_sleeper_park` when a stop is
    pending — with every hook already off, so no producer walks to a
    parked poller; the park returns `SLEEP_INTR` on death (DEATH WINS).
-   *The noise backstop* (round 5 F1, P1; [[spec-poll]] `SpinLapse` /
-   `BackoffCommit` / `BackoffTimeout`, `SpinBounded`): syscalls run
-   IRQ-masked end to end, and a yield bounds nothing when nothing else is
-   queued, so a noise-driven poll held its CPU's interrupts -- the SAK
-   included -- for as long as the noise lasted; an unprivileged pipe, a
-   writer, a reader and an `events=0` poller were enough. Round 4 had
-   filed this as the operator's preemption-model question on the premise
-   that nothing unprivileged could drive it; the premise was false. The
-   loop keeps `spin_from` / `spin_sleeps`: when `t->nsleeps` has moved
-   (the thread was switched out SLEEPING -- its CPU ran other work or
-   idle, where interrupts are taken) the run restarts; a yield does NOT
-   count, since two noise pollers yielding to each other keep their CPU
-   masked between them. When `POLL_SPIN_BUDGET_NS` (1 ms) has passed
-   without one, the pass calls `poll_unhook_all` and the next `tsleep` is
-   on `poll_never` for `POLL_BACKOFF_NS` (1 ms), capped at the poll's
-   deadline. Off its lists nothing a producer does can cut it short;
-   death and a stop still end it through `tsleep`'s own checks. The loop's
-   own die-check and stop park now keep death and a stop PROMPT (one pass,
-   not one budget) -- the backstop alone would end them too, which is why
-   their buggy cfgs and kernel tests turn it off. The wake dedupe (skip
-   `wakeup` when `pw->ready` is set) was proposed alongside and
-   REJECTED: see Concurrency.
+   *The preemption point* (round 5 F1 + round-6 S1; operator decision
+   2026-09-22, ARCH 8.1/23.3; [[spec-poll]] `Point`, `IrqLatencyBounded`):
+   syscalls run IRQ-masked end to end (ARCH 8.11 records the mechanism,
+   8.1 why that is not the design), so a noise-driven poll held its CPU's
+   interrupts -- the SAK included -- for as long as the noise lasted; an
+   unprivileged pipe, a writer, a reader and an `events=0` poller were
+   enough. Round 4 filed this as the operator's preemption-model question
+   on the premise that nothing unprivileged could drive it; the premise
+   was false. Round 5 slept a bounded interval once a per-thread budget
+   lapsed, but keyed on the THREAD while the obligation is the CPU's: two
+   masked pollers on one CPU each really sleep and hand the CPU back and
+   forth, still masked (round-6 S1), and a per-CPU sleep bound would still
+   only rate-limit masked passes (the timer-wait list is global). So each
+   re-loop, after the die/stop checks and before the rescan, the loop
+   calls `sched_preempt_point` ([[sub-kernel-sched]]): hooks off and no
+   lock held, it holds `preempt_count` (the switch is deferred, #360),
+   unmasks IRQs with an `isb` so every pending interrupt is taken on the
+   poller's own stack, re-masks, and honours a deferred `need_resched`. It
+   is UNCONDITIONAL, so its bound composes across pollers on one CPU where
+   the sleep did not. The point does NOT check death or stop, so the
+   loop's own die-check and stop park remain the ONLY prompt way out of a
+   noise loop (round 5's backoff had its own `tsleep` checks; the point
+   has none, which is why the die/stop buggy cfgs no longer need the point
+   off). A stopgap: deleted when syscall bodies run IRQs-on (ARCH 8.1).
+   The wake dedupe (skip `wakeup` when `pw->ready` is set) was proposed
+   alongside round 5 and REJECTED: see Concurrency.
    *What this replaced:* the empty re-sample fell through and returned 0
    — `poll(fd, 10 s)` reported a timeout after microseconds whenever a
    second reader won the bytes, and `poll(-1)` returned 0, which POSIX
@@ -242,12 +246,13 @@ sweep; `NoSpuriousZero` the re-arm (0 only at the deadline);
 `PollTerminates` its loop bound; `StableReadyReturns` replaces the
 retired `PollReturnsWhenReady` ("a set flag leads to a return" is false
 by design now); `DeathTerminates` and `StopHonoured` the loop's own
-checks; `SpinBounded` the backstop and `BackoffHoldsNoHook` its sleep.
-`specs/check-poll.sh` runs the four clean + eight buggy cfgs (three of
-them liveness: `no_loop_die_check` and `no_loop_stop_check`, both with
-the backstop OFF, and `no_backstop`) and asserts WHICH property each
-buggy one violates; the clean counts are pinned (4340 / 1912 since the
-backstop). The list-choosing half of re-registration is
+checks; `IrqLatencyBounded` the preemption point (a real sleep OR the
+point, infinitely often). `specs/check-poll.sh` runs the four clean +
+eight buggy cfgs (three of them liveness: `no_loop_die_check`,
+`no_loop_stop_check` -- both now with `BUGGY_NO_POINT=FALSE`, since the
+point does not mask a missing check -- and `no_point`) and asserts WHICH
+property each buggy one violates; the clean counts are pinned
+(2194 / 968 since the point). The list-choosing half of re-registration is
 [[spec-cons-poll]]'s (`BUGGY_NO_REREGISTER`, `_CADENCE`).
 
 ## Error paths
@@ -280,18 +285,18 @@ why `POLL_MAX_NFDS` is a frame bound, not an fd-table bound.
   pass, with no hook listed; `timeout_ms == 0` never enters it; the
   loop's own deadline test stays; nothing in a pass may sleep while a
   hook is listed except `tsleep` itself (the stop park runs unhooked).
-- The backstop: the backoff holds no hook and no ref; only a TIMEDOUT at
-  the poll's own deadline returns (a backoff's end read as the timeout is
-  a spurious 0); the budget resets on `nsleeps` only. The three
-  loop-check tests run at `NO_BACKSTOP` (`poll_spin_budget_set_for_test`)
-  -- at the real budget a kernel WITHOUT the check passes them, which the
-  model shows too (the loop-check buggy cfgs pass with the backstop on,
-  measured). `poll.backstop_sleeps_through_noise` catches the poller
-  asleep and hookless while the producer walks -- one consistent look
-  bracketed by `nsleeps` and the backoff counter, so the list read falls
-  inside ONE backoff -- then >= 3 backoffs and real sleeps, then readiness
-  still returns; `poll.backstop_keeps_the_deadline` a timed poll returning
-  0 AT its deadline under the same noise.
+- The preemption point: crossed every re-loop, before the rescan, with
+  hooks off and no lock held (`sched_preempt_point` extincts on a held
+  lock); it services interrupts but never ends a poll. Unlike round 5's
+  backoff it does not check death or stop, so the die/stop tests need no
+  special setup (the point cannot end their polls -- the model's die/stop
+  buggy cfgs reproduce with `BUGGY_NO_POINT=FALSE`).
+  `poll.point_services_noise` catches the poller reaching the point again
+  and again (`poll_total_points` climbs) while it is genuinely re-looping
+  on the noise (`g_busy_samples` climbs) and has NOT returned, then
+  readiness still returns; `poll.point_keeps_the_deadline` a timed poll
+  returning 0 AT its deadline under the same noise, with a non-vacuous
+  point count.
   `poll.death_ends_a_noise_driven_poll` / `poll.stop_parks_a_noise_
   driven_poll` pin the checks (a real Proc's thread on the busy Dev
   below), `cons.episode_frozen_poller_follows_end` /
@@ -350,6 +355,8 @@ emptiness probe) → [[chg-2026-06-24-355-poll-decouple]] → the re-arm
 on a real parked poller) → audit round 4 the same day (scripture
 `e55b86ef`: re-registration, the loop's death/stop checks, the irqsave
 list lock; two more poll tests and two cons tests) → audit round 5 (the
-noise backstop, spec first: `SpinBounded`, `BUGGY_NO_BACKSTOP`; two
-backstop tests; every poller test entry parks terminally and publishes
-its result with a release store).
+noise bound, spec first) and round 6 + the operator's "point now, model
+next" (2026-09-22): the sleep backstop became the preemption point
+(`IrqLatencyBounded`, `BUGGY_NO_POINT`, `sched_preempt_point`; two point
+tests; every poller test entry parks terminally and publishes its result
+with a release store).

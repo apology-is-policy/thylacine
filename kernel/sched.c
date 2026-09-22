@@ -2634,6 +2634,37 @@ bool sched_yield_hint(void) {
     return true;
 }
 
+// The preemption point for an IRQ-masked syscall loop (poll; ARCH 23.3). No
+// spinlock may be held here: an IRQ handler runs on THIS thread's kernel stack
+// during the window and may take locks, and holding one across it re-opens the
+// #359 masked-spinner deadlock. Held preempt_count blocks the switch so the
+// window is not itself a preempt point (preempt_check_irq defers on a nonzero
+// count, #360) -- the interrupt is SERVICED, the reschedule deferred -- and the
+// isb makes the pending interrupt land before the re-mask (a back-to-back
+// unmask/mask need not take it). A deferred need_resched is then consumed here;
+// sched_yield_hint does not read it, and the EL0-return preempt is a whole
+// syscall away, so without this a reschedule the window raised would wait out
+// the rest of the noise loop.
+void sched_preempt_point(void) {
+    struct Thread *t = current_thread();
+    if (!t || t->magic != THREAD_MAGIC) return;   // pre-thread_init / corruption
+    if (t->preempt_count != 0u)
+        extinction("sched_preempt_point with a spinlock held");
+
+    t->preempt_count++;
+    irq_state_t s;
+    __asm__ __volatile__("mrs %0, daif" : "=r"(s));
+    __asm__ __volatile__("msr daifclr, #2\n\tisb" ::: "memory");  // unmask IRQ, take pending
+    __asm__ __volatile__("msr daif, %0" :: "r"(s) : "memory");     // restore the caller's mask
+    t->preempt_count--;
+
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu < DTB_MAX_CPUS && need_resched_pending(cpu)) {
+        need_resched_clear(cpu);
+        sched();
+    }
+}
+
 void sched_tick(void) {
     // P2-Cd: per-CPU need_resched + this CPU's sched state.
     unsigned cpu = smp_cpu_idx_self();

@@ -9,7 +9,7 @@ guarded-by: [inv-i8, inv-i17, inv-i21, inv-i44]
 validated-by: [spec-scheduler, spec-sched-alpha, gate-smp]
 locks: [lock-runq]
 created: 2026-08-01
-updated: 2026-08-16
+updated: 2026-09-22
 ---
 ## Purpose
 
@@ -122,6 +122,20 @@ decrements after the release store. `preempt_check_irq` returns
 the once-set cross-CPU placement kick, so consuming it would lose the
 placement; the deferred preempt fires at the first IRQ-return after the
 hold drops, within a tick.
+
+`sched_preempt_point()` is the count's other consumer: a preemption point
+for a syscall body that runs IRQ-masked and LOOPS (poll's noise loop;
+[[sub-kernel-poll]], ARCH 23.3). At a spot where no lock is held (it
+extincts otherwise) it holds `preempt_count` across a brief IRQ window --
+`mrs daif` / `msr daifclr,#2` / `isb` / `msr daif` -- so every interrupt
+pending on this CPU is taken on the caller's own kstack (the timer tick
+and the SAK included) while the switch stays DEFERRED (the #360 gate),
+then consumes a `need_resched` the window raised with a `sched()`.
+`sched_yield_hint` does not read `need_resched`, and the EL0-return
+preempt is a whole syscall away, so without this consume a reschedule the
+window raised would wait out the rest of the loop. It is the L4 lineage's
+preemption point; a stopgap until syscall bodies run IRQs-on (ARCH 8.1
+records that they were built masked, which was never the design).
 
 The count is per-**thread**, not per-CPU, and the reason is a real bug
 the first cut hit: an IRQ landing mid-RMW read the pre-increment `0`,

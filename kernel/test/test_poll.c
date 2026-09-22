@@ -80,8 +80,8 @@ void test_poll_devsrv_client_wakes_on_teardown(void);
 void test_poll_timeout_survives_a_busy_list(void);
 void test_poll_death_ends_a_noise_driven_poll(void);
 void test_poll_stop_parks_a_noise_driven_poll(void);
-void test_poll_backstop_sleeps_through_noise(void);
-void test_poll_backstop_keeps_the_deadline(void);
+void test_poll_point_services_noise(void);
+void test_poll_point_keeps_the_deadline(void);
 void test_poll_null_obj_spoor_pollnval(void);
 void test_poll_mixed_spoor_and_srv(void);
 void test_poll_max_nfds(void);
@@ -1264,13 +1264,14 @@ void test_poll_devsrv_client_kernel_attached_pollnval(void) {
 // returned late (B-0 audit round 4 F9).
 //
 // Every poll here that pins one of the loop's OWN checks -- this deadline test,
-// and the die-check and stop park below -- runs with the noise backstop out of
-// the way (NO_BACKSTOP): at its real budget the backstop ends a noise-driven
-// poll within a couple of milliseconds by itself, so a kernel with the check
-// removed would pass. The backstop has tests of its own after these.
+// and the die-check and stop park below -- needs no special setup: the
+// preemption point services interrupts but never ENDS a poll, so a kernel with
+// the loop's own check removed does not pass on the point's account (unlike the
+// round-5 backoff, whose own tsleep ended the noise poll and so had to be
+// disabled -- the same simplification the spec's die/stop cfgs show). The point
+// has tests of its own after these.
 #define BUSY_WALK_NS   (1000ull * 1000ull * 1000ull)
 #define BUSY_LATE_NS   ( 500ull * 1000ull * 1000ull)
-#define NO_BACKSTOP    (~0ull)
 static struct poll_waiter_list g_busy_list = POLL_WAITER_LIST_INIT;
 static u64 g_busy_first_sample_ns;     // 0 until the first sample
 static u64 g_busy_until_ns;            // first sample + BUSY_WALK_NS
@@ -1318,13 +1319,11 @@ void test_poll_timeout_survives_a_busy_list(void) {
     g_cp_result = -999; g_cp_exited = false;    g_cp_revents = 0;
     busy_reset();
     u64 resleeps0 = poll_total_resleeps();
-    u64 budget0   = poll_spin_budget_set_for_test(NO_BACKSTOP);
 
     struct Thread *poller = thread_create(kproc(), cp_poll_entry);
     TEST_ASSERT(poller != NULL, "thread_create");
     ready(poller);
     TEST_YIELD_UNTIL(__atomic_load_n(&g_cp_result, __ATOMIC_ACQUIRE) != -999);
-    (void)poll_spin_budget_set_for_test(budget0);
 
     TEST_EXPECT_EQ(g_cp_result, 0L, "timed out");
     TEST_ASSERT(poll_total_resleeps() > resleeps0,
@@ -1355,7 +1354,6 @@ static volatile s64  g_pn_result;
 static volatile s16  g_pn_revents;
 static volatile u64  g_pn_return_ns;
 static volatile bool g_pn_exited;
-static u64           g_pn_budget0;
 
 static void pn_poll_entry(void) {
     struct pollfd pfds[1] = {
@@ -1368,11 +1366,9 @@ static void pn_poll_entry(void) {
     test_kthread_park_terminal(&g_pn_exited);
 }
 
-// Start a poll(-1) on the busy Dev from a thread of a fresh Proc, with the
-// noise backstop's budget set to `budget_ns` until pn_finish. NULL on any
+// Start a poll(-1) on the busy Dev from a thread of a fresh Proc. NULL on any
 // failure (nothing started).
-static struct Thread *pn_start(u64 budget_ns) {
-    g_pn_budget0 = poll_spin_budget_set_for_test(budget_ns);
+static struct Thread *pn_start(void) {
     g_pn_proc = proc_alloc();
     if (!g_pn_proc) return NULL;
     g_pn_fd = install_spoor(g_pn_proc, dev_simple_attach(&g_busy_dev, 0), RIGHT_READ);
@@ -1402,11 +1398,10 @@ static void pn_finish(struct Thread *poller) {
         g_pn_proc = NULL;
     }
     busy_reset();
-    (void)poll_spin_budget_set_for_test(g_pn_budget0);
 }
 
 void test_poll_death_ends_a_noise_driven_poll(void) {
-    struct Thread *poller = pn_start(NO_BACKSTOP);
+    struct Thread *poller = pn_start();
     const char *err = poller ? NULL : "poller setup";
     if (!err) {
         TEST_YIELD_UNTIL_SOFT(g_busy_samples >= 3);
@@ -1427,7 +1422,7 @@ void test_poll_death_ends_a_noise_driven_poll(void) {
 }
 
 void test_poll_stop_parks_a_noise_driven_poll(void) {
-    struct Thread *poller = pn_start(NO_BACKSTOP);
+    struct Thread *poller = pn_start();
     const char *err = poller ? NULL : "poller setup";
     if (!err) {
         TEST_YIELD_UNTIL_SOFT(g_busy_samples >= 3);
@@ -1466,120 +1461,82 @@ void test_poll_stop_parks_a_noise_driven_poll(void) {
     TEST_ASSERT(err == NULL, err ? err : "stop");
 }
 
-// The noise backstop (specs/poll.tla SpinBounded / BackoffHoldsNoHook; B-0
-// audit round 5 F1). A syscall runs IRQ-masked end to end, so a poll(-1) the
-// busy Dev keeps awake held its CPU with interrupts masked for the producer's
-// whole walking window -- the SAK included -- and any unprivileged program can
-// be that producer. At the real budget the poller must keep really SLEEPING
-// while the noise goes on, again and again, with its hook OFF the list each
-// time; and readiness must still end the poll.
-//
-// Under this producer a flag-sensitive tsleep never sleeps (the Dev re-flags
-// the hook inside every sample), so a poller seen SLEEPING while the producer
-// walks is in the backoff. pn_backoff_look takes one consistent look at it:
-// SLEEPING at both ends, no switch-out (nsleeps) and no new backoff begun
-// (the counter is bumped before a backoff's tsleep) in between -- so the list
-// read in the middle falls inside ONE backoff, never across a re-register.
-// Returns 1 asleep and hookless, 0 asleep with its hook LISTED (the failure),
-// -1 no consistent look.
-static int pn_backoff_look(struct Thread *poller) {
-    u64 b1 = poll_total_backoffs();
-    u64 n1 = __atomic_load_n(&poller->nsleeps, __ATOMIC_RELAXED);
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
-    if (poller->state != THREAD_SLEEPING) return -1;
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
-    bool hookless = poll_waiter_list_empty(&g_busy_list);
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
-    if (poller->state != THREAD_SLEEPING) return -1;
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
-    if (__atomic_load_n(&poller->nsleeps, __ATOMIC_RELAXED) != n1) return -1;
-    if (poll_total_backoffs() != b1) return -1;
-    if (timer_now_ns() >= g_busy_until_ns) return -1;   // the noise is over
-    return hookless ? 1 : 0;
-}
+// The preemption point (specs/poll.tla Point / IrqLatencyBounded; B-0 audit
+// round 5 F1 + round-6 S1). A syscall runs IRQ-masked end to end, so a poll(-1)
+// the busy Dev keeps awake would hold its CPU with interrupts masked for the
+// producer's whole walking window -- the SAK included -- and any unprivileged
+// program can be that producer. The fix is not a sleep (round 5's backoff,
+// which bounded one thread but not one CPU: round-6 S1) but a preemption point
+// the loop crosses every re-loop, where the CPU takes its pending interrupts.
+// The witness a kthread test can take is that the poller keeps REACHING the
+// point (poll_total_points climbs) while it is genuinely re-looping on the
+// noise (g_busy_samples climbs) and has NOT returned; readiness still ends it.
+#define POINT_WATCH_NS (100ull * 1000ull * 1000ull)
 
-#define BACKSTOP_WATCH_NS (100ull * 1000ull * 1000ull)
-
-void test_poll_backstop_sleeps_through_noise(void) {
-    u64 b0 = poll_total_backoffs();
-    struct Thread *poller = pn_start(POLL_SPIN_BUDGET_NS);
+void test_poll_point_services_noise(void) {
+    u64 pt0 = poll_total_points();
+    struct Thread *poller = pn_start();
     const char *err = poller ? NULL : "poller setup";
     if (!err) {
         TEST_YIELD_UNTIL_SOFT(g_busy_samples >= 3);
         if (g_busy_samples < 3) err = "non-vacuous: the poller is circling on the noise";
     }
     if (!err) {
-        u64 s0 = __atomic_load_n(&poller->nsleeps, __ATOMIC_RELAXED);
+        u64 s0 = g_busy_samples;
         u64 t0 = timer_now_ns();
-        int looks = 0, hooked = 0;
-        while (timer_now_ns() - t0 < BACKSTOP_WATCH_NS) {
-            int v = pn_backoff_look(poller);
-            if (v == 1) looks++;
-            if (v == 0) hooked++;
+        while (timer_now_ns() - t0 < POINT_WATCH_NS &&
+               poll_total_points() - pt0 < 3)
             sched();
-        }
-        u64 slept = __atomic_load_n(&poller->nsleeps, __ATOMIC_RELAXED) - s0;
-        if (hooked)
-            err = "a backed-off poller holds NO hook (BackoffHoldsNoHook)";
-        else if (looks == 0)
-            err = "non-vacuous: the poller was seen asleep while the producer walked";
-        else if (poll_total_backoffs() - b0 < 3)
-            err = "the backstop fires again and again while the noise lasts";
-        else if (slept < 3)
-            err = "each backoff really slept: the poller's nsleeps moved";
+        if (poll_total_points() - pt0 < 3)
+            err = "the noise-driven poll keeps reaching the preemption point";
+        else if (g_busy_samples - s0 < 3)
+            err = "non-vacuous: each point crossing is a real re-loop (re-sampled)";
         else if (__atomic_load_n(&g_pn_result, __ATOMIC_ACQUIRE) != -999)
-            err = "the backoff never ends the poll: poll(-1) returns only on readiness";
+            err = "the point never ends the poll: poll(-1) returns only on readiness";
     }
     if (!err) {
-        // No wake: a poller mid-backoff is on no list to be walked. The
-        // re-register after its sleep samples the readiness.
         g_busy_ready = true;
+        poll_waiter_list_wake(&g_busy_list);
         TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_pn_result, __ATOMIC_ACQUIRE) != -999);
-        if (g_pn_result != 1)            err = "readiness still ends a backed-off poll";
+        if (g_pn_result != 1)            err = "readiness still ends a noise-driven poll";
         else if (g_pn_revents != POLLIN) err = "revents = POLLIN";
     }
     pn_finish(poller);
-    TEST_ASSERT(err == NULL, err ? err : "backstop");
+    TEST_ASSERT(err == NULL, err ? err : "point");
 }
 
-// The backoff's sleep is capped at the poll's own deadline, and its TIMEDOUT
-// there is the poll's: a timed poll under the same noise backs off and returns
-// 0 AT its deadline -- not at the first backoff's end (a spurious 0,
-// NoSpuriousZero) and not when the producer goes quiet. Timed from the first
-// sample, as test_poll_timeout_survives_a_busy_list is.
-#define BACKSTOP_TIMEOUT_MS 30
-#define BACKSTOP_EARLY_NS   (25ull * 1000ull * 1000ull)
+// A timed poll under the same noise returns 0 AT its deadline: the point does
+// not sleep and does not end the poll, so the loop's own `now >= deadline_ns`
+// break is what ends it -- not the point (which never returns 0) and not the
+// producer going quiet. Timed from the first sample, as
+// test_poll_timeout_survives_a_busy_list is; a non-vacuous point count proves
+// the noise really drove the re-loop through the point on the way there.
+#define POINT_TIMEOUT_MS 30
 
-void test_poll_backstop_keeps_the_deadline(void) {
+void test_poll_point_keeps_the_deadline(void) {
     struct Proc *p = make_test_proc();
     TEST_ASSERT(p != NULL, "test proc");
     hidx_t h = install_spoor(p, dev_simple_attach(&g_busy_dev, 0), RIGHT_READ);
     TEST_ASSERT(h >= 0, "busy fd installed");
 
     g_cp_proc = p;         g_cp_fd = h;
-    g_cp_events = POLLIN;  g_cp_timeout = BACKSTOP_TIMEOUT_MS;
+    g_cp_events = POLLIN;  g_cp_timeout = POINT_TIMEOUT_MS;
     g_cp_result = -999; g_cp_exited = false;    g_cp_revents = 0;
     busy_reset();
-    u64 budget0 = poll_spin_budget_set_for_test(POLL_SPIN_BUDGET_NS);
-    u64 b0      = poll_total_backoffs();
+    u64 pt0 = poll_total_points();
 
     struct Thread *poller = thread_create(kproc(), cp_poll_entry);
     TEST_ASSERT(poller != NULL, "thread_create");
     ready(poller);
     TEST_YIELD_UNTIL(__atomic_load_n(&g_cp_result, __ATOMIC_ACQUIRE) != -999);
-    (void)poll_spin_budget_set_for_test(budget0);
 
     TEST_EXPECT_EQ(g_cp_result, 0L, "timed out");
-    TEST_ASSERT(poll_total_backoffs() > b0,
-        "non-vacuous: the noise drove the poller into the backstop");
-    TEST_ASSERT(g_busy_last_sample_ns - g_busy_first_sample_ns >= BACKSTOP_EARLY_NS,
-        "returned AT its deadline, not at a backoff's end");
+    TEST_ASSERT(poll_total_points() > pt0,
+        "non-vacuous: the noise drove the poller through the preemption point");
     TEST_ASSERT(g_busy_last_sample_ns - g_busy_first_sample_ns < BUSY_LATE_NS,
         "returned at its deadline, not when the producer went quiet");
 
-    test_kthread_join_free(poller, &g_cp_exited);
-    drop_test_proc(p);
-}
+
 
 // =============================================================================
 // Regression + coverage (P5-poll audit close #538).

@@ -22,9 +22,9 @@
 //                          signals `pw->rendez` — both required.
 //   AdvanceTime/Timeout  ↔ `tsleep`'s deadline path (specs/tsleep.tla
 //                          composition).
-//   BackoffCommit /      ↔ the noise backstop: a pass that finds the spin
-//   BackoffTimeout /       budget spent with `nsleeps` unmoved unhooks every
-//   SpinLapse              fd and sleeps on `poll_never` for POLL_BACKOFF_NS.
+//   Point                ↔ the preemption point: every re-loop, with no hook
+//                          listed and no lock held, `sched_preempt_point`
+//                          briefly unmasks IRQs so this CPU services them.
 //   Unregister sweep     ↔ the goto target before return; sweeps every
 //                          waiter via `poll_waiter_list_unregister`.
 
@@ -53,8 +53,7 @@
 static u64 g_poll_calls;
 static u64 g_poll_slept;
 static u64 g_poll_resleeps;
-static u64 g_poll_backoffs;
-static u64 g_poll_spin_budget_ns = POLL_SPIN_BUDGET_NS;
+static u64 g_poll_points;
 
 u64 poll_total_calls(void) {
     return __atomic_load_n(&g_poll_calls, __ATOMIC_RELAXED);
@@ -78,12 +77,11 @@ u64 poll_total_resleeps(void) {
     return __atomic_load_n(&g_poll_resleeps, __ATOMIC_RELAXED);
 }
 
-u64 poll_total_backoffs(void) {
-    return __atomic_load_n(&g_poll_backoffs, __ATOMIC_RELAXED);
-}
-
-u64 poll_spin_budget_set_for_test(u64 ns) {
-    return __atomic_exchange_n(&g_poll_spin_budget_ns, ns, __ATOMIC_RELAXED);
+// Preemption points crossed: the witness that a noise-driven poll keeps
+// reaching the spot where its CPU services interrupts, rather than spinning
+// masked. Climbs once per re-loop under noise (specs/poll.tla Point).
+u64 poll_total_points(void) {
+    return __atomic_load_n(&g_poll_points, __ATOMIC_RELAXED);
 }
 
 // =============================================================================
@@ -391,34 +389,13 @@ s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds, u64 nfds,
     struct Thread *t = current_thread();
     struct poll_cond_arg cond_arg = { .waiters = waiters, .nfds = nfds };
 
-    // The noise backstop's clock (specs/poll.tla SpinLapse): when the current
-    // run of passes began, and the thread's park count then. nsleeps moves only
-    // when this thread was switched out SLEEPING -- its CPU went to other work
-    // or idle, where interrupts are taken -- so a pass that finds it moved
-    // starts a new run. A yield does not count: two noise pollers yielding to
-    // each other keep their CPU IRQ-masked between them.
-    u64  spin_from   = timer_now_ns();
-    u64  spin_sleeps = __atomic_load_n(&t->nsleeps, __ATOMIC_RELAXED);
-    bool backoff     = false;
     for (;;) {
-        // The backoff (BackoffCommit) sleeps with every hook already off: on a
-        // cond nothing makes true, for POLL_BACKOFF_NS, capped at the poll's
-        // own deadline -- at which point its TIMEDOUT is the poll's timeout.
-        u64 sleep_dl = deadline_ns;
-        int ts;
-        if (backoff) {
-            u64 bdl = timer_now_ns() + POLL_BACKOFF_NS;
-            if (deadline_ns == 0 || bdl < deadline_ns) sleep_dl = bdl;
-            ts = tsleep(&r, poll_never, NULL, sleep_dl);
-        } else {
-            ts = tsleep(&r, poll_cond_any_flagged, &cond_arg, sleep_dl);
-        }
+        int ts = tsleep(&r, poll_cond_any_flagged, &cond_arg, deadline_ns);
 
         // #811 (ARCH §8.8.1): death-interrupted -> the Proc is group-
         // terminating. Skip the re-sample (the Thread dies at its EL0-return
         // die-check; the result is immaterial) and fall to the sweep, which is
-        // REQUIRED -- waiters[] are stack-allocated and, unless this was the
-        // backoff's sleep, still listed.
+        // REQUIRED -- waiters[] are stack-allocated and still listed.
         if (ts == TSLEEP_INTR) {
             ready_count = 0;
             goto unregister_and_return;
@@ -444,8 +421,8 @@ s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds, u64 nfds,
         // both itself, with no hook listed -- a parked poller is walked by no
         // producer for as long as the stop lasts (DeathTerminates /
         // StopHonoured; DEATH WINS: the park returns SLEEP_INTR on death). The
-        // backoff's tsleep would reach both too, a budget later; these keep
-        // death and a stop prompt.
+        // preemption point below does not check either, so these are the only
+        // prompt way out of a noise loop.
         if (thread_die_pending(t)) {
             ready_count = 0;
             goto unregister_and_return;
@@ -456,12 +433,27 @@ s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds, u64 nfds,
             goto unregister_and_return;
         }
 
+        // The preemption point (specs/poll.tla Point; ARCH 23.3). Hooks are off
+        // (poll_unhook_all, above) and no lock is held, so this is where the
+        // syscall -- IRQ-masked end to end (ARCH 8.11; 8.1 says why that is not
+        // the design) -- briefly unmasks so this CPU takes every pending
+        // interrupt, the timer tick and the SAK included. A producer walking a
+        // list in every re-sample window keeps every tsleep returning AWOKEN,
+        // so without this a poll(-1) holds its CPU masked for as long as the
+        // noise lasts; the round-5 sleep backstop bounded one thread but not
+        // one CPU (two masked pollers hand it back and forth -- round-6 S1),
+        // and this is UNCONDITIONAL, so its bound composes (IrqLatencyBounded).
+        // Crossed each re-loop, before the rescan; the FIRST scan (before the
+        // loop) is not a re-loop, so it needs no point.
+        __atomic_fetch_add(&g_poll_points, 1u, __ATOMIC_RELAXED);
+        sched_preempt_point();
+
         ready_count = 0;
         for (u64 i = 0; i < nfds; i++) {
             ready_count += poll_scan_one(p, &kfds[i], &waiters[i], &held[i]);
         }
         if (ready_count > 0) break;
-        if (ts == TSLEEP_TIMEDOUT && sleep_dl == deadline_ns) break;
+        if (ts == TSLEEP_TIMEDOUT) break;
 
         // Woken for nothing we asked about: sleep AGAIN, against the SAME
         // absolute deadline. poll returns 0 only at its deadline (ARCH 23.3;
@@ -475,29 +467,10 @@ s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds, u64 nfds,
         if (deadline_ns != 0 && now >= deadline_ns) break;
         __atomic_fetch_add(&g_poll_resleeps, 1u, __ATOMIC_RELAXED);
 
-        // The backstop (specs/poll.tla SpinBounded). A noise pass is IRQ-masked
-        // from end to end -- syscalls run so -- and a producer can supply one
-        // after another forever, so no deadline bounds how long this CPU goes
-        // without taking an interrupt: poll(-1) has none, and a producer can
-        // hold a poll with ten seconds left for all ten. Once a budget has
-        // passed with no real sleep in it, take every hook off and back off.
-        u64 sleeps = __atomic_load_n(&t->nsleeps, __ATOMIC_RELAXED);
-        if (sleeps != spin_sleeps) {
-            spin_sleeps = sleeps;
-            spin_from   = now;
-        }
-        backoff = now - spin_from >=
-                  __atomic_load_n(&g_poll_spin_budget_ns, __ATOMIC_RELAXED);
-        if (backoff) {
-            poll_unhook_all(waiters, held, nfds);
-            __atomic_fetch_add(&g_poll_backoffs, 1u, __ATOMIC_RELAXED);
-        } else {
-            // A noise pass cost this CPU a full pass and bought nothing; let
-            // queued work run before the next one, or a producer that keeps
-            // walking a list keeps every other thread on this CPU waiting out
-            // our budget.
-            (void)sched_yield_hint();
-        }
+        // A noise pass cost this CPU a full pass and bought nothing; let queued
+        // work run before the next tsleep. The interrupt bound is the point's
+        // (above); this is only fairness to peers on this CPU.
+        (void)sched_yield_hint();
     }
 
 unregister_and_return:
