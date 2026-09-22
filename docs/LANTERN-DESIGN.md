@@ -246,19 +246,40 @@ type scale `vw`-bound, reusing `vw()` — not a new mechanism, and not a
 manifest key (§5). **Owed, not built.** Until then a deck is read at Instrument
 sizes times the display scale.
 
-## 11. Open, to be settled by looking rather than reading
+## 11. Settled by looking (2026-09-22), and what is left
 
-Recorded as open because they are visual questions, and reading more code cannot
-answer them:
+These were visual questions, so they were settled by booting the Instrument
+session at 1280×800 and capturing, not by reading more code
+(`tools/interactive/ls-halcyon-lantern.exp`; captures at
+`build/lantern-rich-*.png`).
 
-1. Where a short slide sits in a tall tile — top, or pushed to the bottom like a
-   terminal's live tail.
-2. `manual::render` emits a section title as plain `Op::Hdr level=1`, not
-   `class=title`. `HdrClass::Title` is the class a rich stylesheet centres and
-   gives its own top margin — which is the slide look. Whether to emit it for
-   slides (and whether a manual section's title should change with it) is a
-   decision for the first look.
-3. Whether to hide the cursor while presenting.
+1. **A short slide sits at the TOP.** It does not sink to the bottom like a
+   terminal's live tail — the document flows from the top of the tile, which is
+   what a slide wants. Settled, no change.
+2. **The clear is exact.** Slide two carried no residue of slide one: no stale
+   text, no inherited emphasis, no accumulated scrollback. The `span: 0` and
+   no-scroll-off properties of §3 hold in practice.
+3. **The title renders as a left-aligned H1**, not centred, because
+   `manual::render` emits `Op::Hdr level=1` rather than `class=title`. It reads
+   well and is a perfectly ordinary deck style, so this is now a TASTE CALL for
+   the operator rather than a defect: `HdrClass::Title` would centre it and give
+   it its own top margin, which is the title-card look. Not changed
+   unilaterally — it would change the Operator's Manual's own section titles too,
+   since they share the renderer.
+4. **The caret is visible** — a yellow bar below the footer. Distracting on a
+   projected slide. Hiding it means `ESC[?25l`, and whether that reaches
+   halcyond's `paints_caret` is unverified, so it is NOT guessed at here.
+
+**And the one real gap, now measured rather than predicted: TYPE SIZE.** On a
+1280×800 display the body renders at the Instrument 15 px and the H1 near 24 px,
+which is comfortable at a desk and too small from the back of a room. The slide
+also occupies only the top third of the screen, and the fix for that is the same
+one: **bigger type, not vertical centring**, because centring is a layout op and
+§9 forbids reaching for one.
+
+So §10's owed change is confirmed by the look: make the document's type scale
+`vw`-bound, reusing the `vw(pct, lo, hi)` that already sizes the Instrument H1.
+That is the whole of what stands between this and a presentable deck.
 
 ## 12. What this facility does not do
 

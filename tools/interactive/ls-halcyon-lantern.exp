@@ -1,0 +1,138 @@
+#!/usr/bin/expect -f
+# The deck presenter in a real Halcyon tile -- the RICH tier, which no other
+# lantern test can reach (docs/LANTERN-DESIGN.md).
+#
+# tools/interactive/lantern.exp drives the same program over the serial console,
+# where the tier is `cells` and every realization is plain text. That gate proves
+# the program runs, pages and refuses; it is structurally blind to whether
+# anything RICH happens, because nothing on that path renders a Beacon frame.
+# This one runs it where the pts advertises `rich` and a compositor is drawing.
+#
+# What it asserts, and why these and not "it looked right":
+#   1. A slide PAINTS -- the tile is not blank after `lantern /deck`.
+#   2. SPACE CHANGES THE SCREEN. This is the whole clear-and-rerender claim in
+#      one check: the presenter writes ESC[2J and the next slide, and in a tile
+#      that is a grid operation the compositor re-lays. If the screens were
+#      identical the key did nothing, or the clear wiped without repainting.
+#   3. The deck is still SHOWING after the change, not blanked -- a clear that
+#      erased and failed to repaint would satisfy (2) on its own, so (3) is (2)'s
+#      control rather than a restatement of (1).
+#
+# The captures are kept at build/lantern-rich-*.png whatever the verdict: the
+# reason to run this is as much to LOOK at the result as to gate it, and a gate
+# that deletes its evidence on the way out is the #223 mistake.
+#
+# Needs HALCYON_SESSION=y. Bake with:
+#   THYLACINE_HALCYON_SESSION=1 tools/build.sh kernel --config ci
+# A gate-image run SKIPs (exit 77) rather than failing: a lever the image lacks
+# is not a defect.
+
+set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
+source [file join [file dirname [info script]] lib.exp]
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+
+# qmp-sendtext accepts lowercase letters, digits, space, '-', '.', '/' and
+# '\n' (which it maps to the Enter key) -- and REFUSES anything else rather
+# than dropping it, which is how the first run of this scenario failed loudly
+# on a '\r' instead of silently typing nothing.
+proc type {text} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp $text} e]} { lc_fail $e }
+    after 400
+}
+proc key {chord} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $chord} e]} { lc_fail $e }
+    after 700
+}
+proc capture {name} {
+    global repo qmp
+    after 1200
+    set out $repo/build/lantern-rich-$name.png
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} e]} { lc_fail $e }
+    lc_step "captured $out"
+    return $out
+}
+# Ink coverage: how many pixels are NOT the commonest colour. A blank tile is
+# almost entirely one colour, so this separates "a document was drawn" from "the
+# compositor painted a ground and stopped", pinning no theme's palette.
+proc ink {png} {
+    global repo
+    return [exec python3 $repo/tools/interactive/gfx_ink.py $png]
+}
+
+lc_boot
+set timeout $lc_boot_timeout
+expect {
+    -ex "Thylacine login: " {}
+    -re {EXTINCTION:} { lc_extinction_fail "boot" }
+    timeout { lc_fail "no login" }
+    eof { lc_fail "EOF before login" }
+}
+lc_raw_send "michael\r" "login user"
+expect {
+    -ex "password: " {}
+    timeout { lc_fail "no password prompt" }
+    eof { lc_fail "EOF before password" }
+}
+lc_raw_send "correct-horse-battery-staple-v1\r" "login password"
+expect {
+    -ex "login: session compositor (halcyond) spawned" {}
+    -ex "Thylacine textual shell" {
+        puts "\nLS-CI SKIP: default (ut) image -- this scenario drives the session\
+ compositor. Bake with: THYLACINE_HALCYON_SESSION=1 tools/build.sh kernel --config ci"
+        lc_quit
+        exit 77
+    }
+    timeout { lc_fail "no graphical session" }
+    eof { lc_fail "EOF at session start" }
+}
+set timeout 120
+expect {
+    -re {halcyond: status bar [^\r\n]*panes [0-9]+} {}
+    -re {EXTINCTION:} { lc_extinction_fail "session" }
+    timeout { lc_fail "the session's shell did not become ready" }
+    eof { lc_fail "EOF before the session was ready" }
+}
+lc_step "the session is up"
+
+set blank [capture blank]
+set ink_blank [ink $blank]
+lc_step "ink before the deck: $ink_blank"
+
+# Zoom the focused pane first (Super+F). Not decoration: a deck in a half-width
+# tile is not the posture anyone presents in, and the reason to capture at all is
+# that someone will LOOK at the result and judge whether it reads from the back
+# of a room. Judging that from half a screen would answer a different question.
+key "meta_l+f"
+type "lantern /deck\n"
+set one [capture slide1]
+set ink_one [ink $one]
+lc_step "ink on slide one: $ink_one"
+if {$ink_one < 2000} {
+    lc_fail "slide one painted almost nothing (ink $ink_one): the deck did not render"
+}
+lc_pass "ls-halcyon-lantern(1): a slide paints in a real tile at the rich tier"
+
+# SPACE: the clear-and-rerender claim, in one check.
+type " "
+set two [capture slide2]
+set ink_two [ink $two]
+lc_step "ink on slide two: $ink_two"
+if {[catch {exec cmp -s $one $two} ] == 0} {
+    lc_fail "SPACE changed nothing: slide one and slide two are byte-identical captures"
+}
+lc_pass "ls-halcyon-lantern(2): SPACE clears and repaints -- the screen changed"
+
+# (2)'s control: a clear that erased without repainting would also "change".
+if {$ink_two < 2000} {
+    lc_fail "slide two is effectively blank (ink $ink_two): the clear erased and did not repaint"
+}
+lc_pass "ls-halcyon-lantern(3): slide two is DRAWN, not merely different -- the clear repainted"
+
+type "q"
+after 800
+lc_quit
+lc_pass "LS-CI ls-halcyon-lantern: the deck renders in a Halcyon tile and pages on a keystroke; captures at build/lantern-rich-*.png"
+exit 0
