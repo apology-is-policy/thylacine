@@ -123,31 +123,32 @@ the once-set cross-CPU placement kick, so consuming it would lose the
 placement; the deferred preempt fires at the first IRQ-return after the
 hold drops, within a tick.
 
-`sched_preempt_point()` is the count's other consumer: a preemption point
-for a syscall body that runs IRQ-masked and LOOPS (poll's noise loop;
-[[sub-kernel-poll]], ARCH 23.3). At a spot where no lock is held (it
-extincts otherwise) it holds `preempt_count` across a brief IRQ window --
-`mrs daif` / `msr daifclr,#2` / `isb` / `msr daif` -- so an interrupt
-taken in that window (the timer tick and the SAK included) runs on the
-caller's own kstack while the switch stays DEFERRED (the #360 gate),
-then consumes a `need_resched` the window raised with a `sched()`.
-`sched_yield_hint` does not read `need_resched`, and the EL0-return
-preempt is a whole syscall away, so without this consume a reschedule the
-window raised would wait out the rest of the loop. It is the L4 lineage's
-preemption point; a stopgap until syscall bodies run IRQs-on (ARCH 8.1
-records that they were built masked, which was never the design).
+`sched_preempt_point()` WAS the count's other consumer, and it is gone. For
+part of one day (2026-09-22) it served poll's noise loop ([[sub-kernel-poll]]):
+at a spot where no lock was held it held `preempt_count` across a brief IRQ
+window -- `mrs daif` / `msr daifclr,#2` / `isb` / `msr daif` -- so an interrupt
+taken there (the timer tick and the SAK included) ran on the caller's own
+kstack while the switch stayed DEFERRED, then consumed a `need_resched` the
+window raised. It was the L4 lineage's preemption point, and a **stopgap by
+decision** until syscall bodies ran interrupts-on.
 
-The `isb` inside that window WIDENS it rather than guaranteeing it. A
-direct DAIF write takes effect with no barrier -- Linux's
-`__daif_local_irq_enable` is a bare `msr daifclr, #3` -- so what the
-`isb` buys is a synchronization event between the two MSRs instead of
-leaving them adjacent, which is the shape arm64 KVM uses to transiently
-unmask. Architecturally a pending unmasked interrupt is taken in finite
-time with no bound, so no single crossing is guaranteed to deliver; the
-property the point buys is that the CPU is REPEATEDLY interruptible, and
-that is what `poll_cpu.tla` states. Measured against the witness test
-`sched.preempt_point_takes_a_pending_irq`: dropping the `daifclr` fails
-it; dropping the `isb` does NOT.
+They now do (ARCH 8.12, [[sub-kernel-syscall-abi]]): the body is unmasked from
+the marker's set to the re-mask before the EL0-return tail, so there is no
+window to open and nothing for a point to consume. The count therefore has ONE
+consumer again -- `preempt_check_irq` -- and the second gate beside it is the
+per-thread in-syscall marker, which is a DIFFERENT field for a reason: three
+live assertions (the lock-across-sleep guard, and #361's leaked-count check at
+the EL0 return) forbid a syscall-wide `preempt_count`.
+
+Two measured facts from the point's era are worth keeping, because both
+corrected a claim rather than a test. The `isb` in that window WIDENED it and
+did not guarantee delivery: a direct DAIF write takes effect with no barrier
+(Linux's `__daif_local_irq_enable` is a bare `msr daifclr, #3`), so the `isb`
+bought a synchronization event between the two MSRs, not an arrival.
+Architecturally a pending unmasked interrupt is taken in finite time with no
+bound, so no single crossing was ever guaranteed to deliver. Measured against
+the witness test that is now also deleted: dropping the `daifclr` failed it,
+dropping the `isb` did NOT.
 
 The count is per-**thread**, not per-CPU, and the reason is a real bug
 the first cut hit: an IRQ landing mid-RMW read the pre-increment `0`,

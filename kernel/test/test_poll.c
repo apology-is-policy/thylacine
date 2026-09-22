@@ -80,8 +80,8 @@ void test_poll_devsrv_client_wakes_on_teardown(void);
 void test_poll_timeout_survives_a_busy_list(void);
 void test_poll_death_ends_a_noise_driven_poll(void);
 void test_poll_stop_parks_a_noise_driven_poll(void);
-void test_poll_point_services_noise(void);
-void test_poll_point_keeps_the_deadline(void);
+void test_poll_noise_keeps_it_looping(void);
+void test_poll_noise_keeps_the_deadline(void);
 void test_poll_null_obj_spoor_pollnval(void);
 void test_poll_mixed_spoor_and_srv(void);
 void test_poll_max_nfds(void);
@@ -1465,15 +1465,21 @@ void test_poll_stop_parks_a_noise_driven_poll(void) {
 // round 5 F1 + round-6 S1). A syscall runs IRQ-masked end to end, so a poll(-1)
 // the busy Dev keeps awake would hold its CPU with interrupts masked for the
 // producer's whole walking window -- the SAK included -- and any unprivileged
-// program can be that producer. The fix is not a sleep (round 5's backoff,
-// which bounded one thread but not one CPU: round-6 S1) but a preemption point
-// the loop crosses every re-loop, where the CPU takes its pending interrupts.
-// The witness a kthread test can take is that the poller keeps REACHING the
-// point (poll_total_points climbs) while it is genuinely re-looping on the
-// noise (g_busy_samples climbs) and has NOT returned; readiness still ends it.
+// program can be that producer. The first fix was a sleep (round 5's backoff,
+// which bounded one thread but not one CPU: round-6 S1), the second a
+// preemption point crossed on every re-loop. BOTH ARE GONE: ARCH 8.12 runs the
+// whole syscall body interrupts-on, so the CPU is interruptible at every
+// instruction of this loop rather than at one chosen spot in it, and the
+// property is asserted on every syscall of every boot
+// (ASSERT_IRQS_ENABLED in syscall_dispatch_body) rather than sampled here.
+//
+// What is left for this test is the half a kthread test could always see, and
+// which the interrupt model does not supply: that a noise-driven poll keeps
+// genuinely RE-LOOPING (g_busy_samples climbs) without returning, and that
+// readiness still ends it.
 #define POINT_WATCH_NS (100ull * 1000ull * 1000ull)
 
-void test_poll_point_services_noise(void) {
+void test_poll_noise_keeps_it_looping(void) {
     struct Thread *poller = pn_start();
     const char *err = poller ? NULL : "poller setup";
     if (!err) {
@@ -1487,15 +1493,11 @@ void test_poll_point_services_noise(void) {
         // sample check would then measure a zero-length window and fail (or,
         // worse, pass vacuously). The window must be the same for both.
         u64 s0 = g_busy_samples;
-        u64 p0 = poll_total_points();
         u64 t0 = timer_now_ns();
-        while (timer_now_ns() - t0 < POINT_WATCH_NS &&
-               (poll_total_points() - p0 < 3 || g_busy_samples - s0 < 3))
+        while (timer_now_ns() - t0 < POINT_WATCH_NS && g_busy_samples - s0 < 3)
             sched();
-        if (poll_total_points() - p0 < 3)
-            err = "the noise-driven poll keeps reaching the preemption point";
-        else if (g_busy_samples - s0 < 3)
-            err = "non-vacuous: each point crossing is a real re-loop (re-sampled)";
+        if (g_busy_samples - s0 < 3)
+            err = "the noise-driven poll keeps re-looping (re-sampling)";
         else if (__atomic_load_n(&g_pn_result, __ATOMIC_ACQUIRE) != -999)
             err = "the point never ends the poll: poll(-1) returns only on readiness";
     }
@@ -1514,11 +1516,10 @@ void test_poll_point_services_noise(void) {
 // not sleep and does not end the poll, so the loop's own `now >= deadline_ns`
 // break is what ends it -- not the point (which never returns 0) and not the
 // producer going quiet. Timed from the first sample, as
-// test_poll_timeout_survives_a_busy_list is; a non-vacuous point count proves
-// the noise really drove the re-loop through the point on the way there.
+// test_poll_timeout_survives_a_busy_list is.
 #define POINT_TIMEOUT_MS 30
 
-void test_poll_point_keeps_the_deadline(void) {
+void test_poll_noise_keeps_the_deadline(void) {
     struct Proc *p = make_test_proc();
     TEST_ASSERT(p != NULL, "test proc");
     hidx_t h = install_spoor(p, dev_simple_attach(&g_busy_dev, 0), RIGHT_READ);
@@ -1528,7 +1529,7 @@ void test_poll_point_keeps_the_deadline(void) {
     g_cp_events = POLLIN;  g_cp_timeout = POINT_TIMEOUT_MS;
     g_cp_result = -999; g_cp_exited = false;    g_cp_revents = 0;
     busy_reset();
-    u64 pt0 = poll_total_points();
+    u64 bs0 = g_busy_samples;
 
     struct Thread *poller = thread_create(kproc(), cp_poll_entry);
     TEST_ASSERT(poller != NULL, "thread_create");
@@ -1536,8 +1537,9 @@ void test_poll_point_keeps_the_deadline(void) {
     TEST_YIELD_UNTIL(__atomic_load_n(&g_cp_result, __ATOMIC_ACQUIRE) != -999);
 
     TEST_EXPECT_EQ(g_cp_result, 0L, "timed out");
-    TEST_ASSERT(poll_total_points() > pt0,
-        "non-vacuous: the noise drove the poller through the preemption point");
+    TEST_ASSERT(g_busy_samples > bs0 + 1,
+        "non-vacuous: the noise really drove the poller round its loop "
+        "(the point counter this used to read is gone with the point)");
     TEST_ASSERT(g_busy_last_sample_ns - g_busy_first_sample_ns < BUSY_LATE_NS,
         "returned at its deadline, not when the producer went quiet");
 

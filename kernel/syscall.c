@@ -14626,6 +14626,13 @@ void syscall_dispatch(struct exception_context *ctx) {
 }
 
 static void syscall_dispatch_body(struct exception_context *ctx) {
+    // ARCH 8.12's property, witnessed on EVERY syscall of every boot rather
+    // than in one test. This is what replaced poll's preemption point: the
+    // point unmasked for a window and had to prove it with a bespoke witness;
+    // the body is simply unmasked throughout, and this assert says so
+    // continuously, on every syscall the suite, the fleet and the SMP gate
+    // make.
+    ASSERT_IRQS_ENABLED("a syscall body runs interrupts-on (ARCH 8.12)");
     // VIVARIUM V-1b: a phenotyped Proc's numbers are decoded through the
     // translation table before anything else looks at them. A native Proc
     // (phenotype == PHENO_NATIVE, the default and every Proc outside a

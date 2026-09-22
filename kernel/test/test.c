@@ -1541,10 +1541,9 @@ void test_poll_devsrv_client_wakes_on_teardown(void);
 void test_poll_timeout_survives_a_busy_list(void);
 void test_poll_death_ends_a_noise_driven_poll(void);
 void test_poll_stop_parks_a_noise_driven_poll(void);
-void test_sched_preempt_point_takes_a_pending_irq(void);
 void test_thread_kstack_watermark_follows_the_frontier(void);
-void test_poll_point_services_noise(void);
-void test_poll_point_keeps_the_deadline(void);
+void test_poll_noise_keeps_it_looping(void);
+void test_poll_noise_keeps_the_deadline(void);
 void test_poll_null_obj_spoor_pollnval(void);
 void test_poll_mixed_spoor_and_srv(void);
 void test_poll_max_nfds(void);
@@ -3507,10 +3506,9 @@ struct test_case g_tests[] = {
     { "poll.timeout_survives_a_busy_list", test_poll_timeout_survives_a_busy_list, false, NULL },
     { "poll.death_ends_a_noise_driven_poll", test_poll_death_ends_a_noise_driven_poll, false, NULL },
     { "poll.stop_parks_a_noise_driven_poll", test_poll_stop_parks_a_noise_driven_poll, false, NULL },
-    { "sched.preempt_point_takes_a_pending_irq", test_sched_preempt_point_takes_a_pending_irq, false, NULL },
     { "thread.kstack_watermark_follows_the_frontier", test_thread_kstack_watermark_follows_the_frontier, false, NULL },
-    { "poll.point_services_noise", test_poll_point_services_noise, false, NULL },
-    { "poll.point_keeps_the_deadline", test_poll_point_keeps_the_deadline, false, NULL },
+    { "poll.noise_keeps_it_looping", test_poll_noise_keeps_it_looping, false, NULL },
+    { "poll.noise_keeps_the_deadline", test_poll_noise_keeps_the_deadline, false, NULL },
     { "poll.null_obj_spoor_pollnval",           test_poll_null_obj_spoor_pollnval,           false, NULL },
     { "poll.mixed_spoor_and_srv",               test_poll_mixed_spoor_and_srv,               false, NULL },
     { "poll.max_nfds",                          test_poll_max_nfds,                          false, NULL },

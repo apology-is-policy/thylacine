@@ -1437,7 +1437,7 @@ void sched(void) {
         // prowl-3a (PROWL-DESIGN.md section 3.3): the per-thread scheduler
         // counters, stamped at this same single chokepoint. READ-ONLY telemetry
         // (no SCHEDULING decision reads them, and since the poll backstop was
-        // replaced by sched_preempt_point nothing outside /proc reads nsleeps
+        // replaced by the preemption point (itself deleted at ARCH 8.12) nothing outside /proc reads nsleeps
         // at all); single-writer per the run_ns discipline
         // (prev switches OUT on this one CPU; next was picked by this one CPU).
         // `this_cpu` is derived from cs (asserted == smp_cpu_idx_self() above)
@@ -2643,53 +2643,14 @@ bool sched_yield_hint(void) {
     return true;
 }
 
-// The preemption point for an IRQ-masked syscall loop (poll; ARCH 23.3). No
-// spinlock may be held here: an IRQ handler runs on THIS thread's kernel stack
-// during the window and may take locks, and holding one across it re-opens the
-// #359 masked-spinner deadlock. Held preempt_count blocks the switch so the
-// window is not itself a preempt point (preempt_check_irq defers on a nonzero
-// count, #360) -- the interrupt is SERVICED, the reschedule deferred. The isb
-// WIDENS the window rather than guaranteeing it: a direct DAIF write needs no
-// barrier to take effect (Linux's __daif_local_irq_enable carries none), so
-// what it buys is a synchronization event between the two MSRs instead of
-// leaving them adjacent -- arm64 KVM's transient unmask has the same shape.
-// Delivery is architecturally "in finite time" with no bound either way, which
-// is why the model claims REPEATED interruptibility and not per-pass delivery.
-// MEASURED: the nodaifclr sabotage fails the witness test; noisb does NOT.
-// A deferred need_resched is then consumed here;
-// sched_yield_hint does not read it, and the EL0-return preempt is a whole
-// syscall away, so without this a reschedule the window raised would wait out
-// the rest of the noise loop.
-void sched_preempt_point(void) {
-    struct Thread *t = current_thread();
-    if (!t || t->magic != THREAD_MAGIC) return;   // pre-thread_init / corruption
-    if (t->preempt_count != 0u)
-        extinction("sched_preempt_point with a spinlock held");
-
-    // Through the #360 chokepoint, not an open-coded RMW: these carry the
-    // signal fences, the underflow check, and the g_spin_outer_acquire
-    // breadcrumb, so a sched() assert raised from inside poll names THIS site
-    // rather than some unrelated earlier acquire (round-7 F5).
-    spin_preempt_inc();
-    irq_state_t s;
-    __asm__ __volatile__("mrs %0, daif" : "=r"(s));
-    __asm__ __volatile__("msr daifclr, #2\n\tisb" ::: "memory");  // unmask IRQ, take pending
-    __asm__ __volatile__("msr daif, %0" :: "r"(s) : "memory");     // restore the caller's mask
-    spin_preempt_dec();
-
-    // Consume a reschedule the window deferred. The flag is NOT cleared here:
-    // for an IRQs-on caller the index can go stale between the read and the
-    // clear, and clearing a FOREIGN CPU's flag would swallow the #866-F1
-    // cross-CPU placement kick that is set exactly once -- stranding a
-    // just-placed thread for a slice (round-7 F4). sched()'s own entry clear
-    // runs under its entry mask, where the index cannot be stale; a stale read
-    // here therefore costs at most one spurious sched(), and a stale negative
-    // leaves the flag for the right CPU's next IRQ-return.
-    unsigned cpu = smp_cpu_idx_self();
-    if (cpu < DTB_MAX_CPUS && need_resched_pending(cpu))
-        sched();
-}
-
+// sched_preempt_point is GONE (ARCH 8.12). It unmasked a window inside an
+// IRQ-masked syscall so a looping poll could not hold its CPU's interrupts --
+// the SAK included -- for as long as an unprivileged producer kept it awake.
+// It was a stopgap by decision, and a patch on one instance of a diagnosed
+// class: pipe_block_locked and chan_role_acquire had the same shape and no
+// point. Syscall bodies now run interrupts-on throughout, so there is no
+// window to open and nothing left for a point to do.
+//
 void sched_tick(void) {
     // P2-Cd: per-CPU need_resched + this CPU's sched state.
     unsigned cpu = smp_cpu_idx_self();

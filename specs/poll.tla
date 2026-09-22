@@ -106,18 +106,12 @@
 (*     never honoured (StopHonoured counterexample). The fix: the loop     *)
 (*     parks on proc_stop_sleeper_park itself when a stop is pending.       *)
 (*                                                                         *)
-(*   BUGGY_NO_POINT — the round-5 F1 / round-6 S1 loop: nothing services  *)
-(*     interrupts between passes. Syscalls run IRQ-masked, and a producer  *)
-(*     that walks a list inside every re-sample window keeps every tsleep  *)
-(*     returning AWOKEN, so a poll(-1) holds its CPU IRQ-masked for as     *)
-(*     long as the noise lasts: every device interrupt, the SAK included,  *)
-(*     stays pending. Any unprivileged program can make that noise -- a    *)
-(*     pipe, a writer, a reader, and a poller asking for nothing. Round 5  *)
-(*     slept a bounded interval once a budget lapsed, but keyed on the     *)
-(*     thread while the obligation is the CPU's: two pollers on one CPU    *)
-(*     each sleep and hand it back and forth, still masked (S1). The fix:  *)
-(*     each re-loop crosses a preemption point that unmasks IRQs, reached  *)
-(*     no matter what any producer does (IrqLatencyBounded counterexample).*)
+(*   (BUGGY_NO_POINT was here until ARCH 8.12 deleted the preemption      *)
+(*   point. It modelled a syscall body that ran IRQ-MASKED, where an      *)
+(*   unprivileged producer could hold a CPU's interrupts -- the SAK       *)
+(*   included -- for as long as it kept a poll(-1) awake. Bodies now run  *)
+(*   interrupts-on throughout, so there is no masked span here to bound,  *)
+(*   and the CPU-level obligation lives in specs/syscall_irqs.tla.)       *)
 (*                                                                         *)
 (* CFG MATRIX (executable documentation per CLAUDE.md spec-first policy)    *)
 (*                                                                         *)
@@ -131,17 +125,13 @@
 (*                                        backstop, against a producer     *)
 (*                                        that walks the lists forever) +  *)
 (*                                        StableReadyReturns +             *)
-(*                                        DeathTerminates + StopHonoured + *)
-(*                                        IrqLatencyBounded.               *)
+(*                                        DeathTerminates + StopHonoured.  *)
 (*   poll_liveness_notimeout.cfg         Spec_Live, HAS_TIMEOUT FALSE —    *)
 (*                                        StableReadyReturns: a poll(-1)   *)
 (*                                        may block forever, but not on an *)
 (*                                        fd that stays ready -- nor once  *)
 (*                                        its Proc is dying (DeathTermin-  *)
-(*                                        ates) or stopped (StopHonoured); *)
-(*                                        and noise never keeps it from    *)
-(*                                        a preemption point               *)
-(*                                        (IrqLatencyBounded).             *)
+(*                                        ates) or stopped (StopHonoured). *)
 (*   poll_buggy_check_before_register.cfg BUGGY_CHECK_BEFORE_REGISTER —    *)
 (*                                        NoMissedPoll counterexample.     *)
 (*   poll_buggy_no_wake.cfg              BUGGY_NO_WAKE — NoMissedPoll      *)
@@ -160,8 +150,6 @@
 (*   poll_buggy_no_loop_stop_check.cfg   BUGGY_NO_LOOP_STOP_CHECK,         *)
 (*                                       poll(-1) — StopHonoured           *)
 (*                                       counterexample.                   *)
-(*   poll_buggy_no_point.cfg             BUGGY_NO_POINT, poll(-1)          *)
-(*                                       — IrqLatencyBounded counterexample.*)
 (*                                                                         *)
 (* MODELING ASSUMPTIONS                                                     *)
 (*                                                                         *)
@@ -220,21 +208,14 @@
 (*   park is LoopCheck's, already checked on the other passes, so the fold *)
 (*   loses a stutter-equivalent detour, not a behavior.)                   *)
 (*                                                                         *)
-(*   THE PREEMPTION POINT (round 5 F1 + round-6 S1, operator decision      *)
-(*   2026-09-22). Each re-loop, after the die/stop checks and before the   *)
-(*   re-register, the poller crosses `atpoint` (LoopCheck -> Point ->      *)
-(*   cleared): the code's sched_preempt_point, which briefly unmasks IRQs  *)
-(*   at a lock-free spot so every pending interrupt is taken. It is        *)
-(*   UNCONDITIONAL -- no producer action gates it -- which is why its      *)
-(*   bound composes across pollers on one CPU where round 5's sleep budget *)
-(*   did not (S1: two masked pollers hand a CPU back and forth, each       *)
-(*   really sleeping). The thread switch the window may raise is deferred  *)
-(*   (preempt_count held across it) and honored right after; the model     *)
-(*   folds that as a stutter, as it does sched_yield_hint. atpoint is not  *)
-(*   a sleep -- the CPU is not yielded -- but it services interrupts, so   *)
-(*   IrqLatencyBounded counts it beside the real sleeps. Building the      *)
-(*   IRQs-on syscall body that lets the point be deleted is a separate     *)
-(*   chunk (ARCHITECTURE.md 8.1).                                          *)
+(*   THE PREEMPTION POINT IS GONE (ARCH 8.12). This module carried it     *)
+(*   from 2026-09-22 until the syscall body was made interrupts-on: each  *)
+(*   re-loop crossed `atpoint`, where the code briefly unmasked so its    *)
+(*   CPU could take the interrupts a producer would otherwise have held   *)
+(*   off. The body is now unmasked throughout, so the window it modelled  *)
+(*   does not exist, and IrqLatencyBounded went with it. The CPU-level    *)
+(*   obligation -- whose it always was (round-7 F2) -- is                 *)
+(*   specs/syscall_irqs.tla's CpuGetsItsInterrupts.                       *)
 (*                                                                         *)
 (* See ARCHITECTURE.md §23.3 (poll/select), §28 invariant I-9; tsleep.tla  *)
 (* (the deadline-bounded `Rendez` sleep poll builds on); scheduler.tla     *)
@@ -265,12 +246,11 @@ CONSTANTS
                                   \*   sys_poll_for_proc).
     BUGGY_NO_LOOP_DIE_CHECK,      \* BOOLEAN — TRUE: the re-arm loop leaves
                                   \*   death to tsleep's die-check alone.
-    BUGGY_NO_LOOP_STOP_CHECK,     \* BOOLEAN — TRUE: the re-arm loop leaves
+    BUGGY_NO_LOOP_STOP_CHECK      \* BOOLEAN — TRUE: the re-arm loop leaves
                                   \*   a stop to tsleep's detour alone.
-    BUGGY_NO_POINT                \* BOOLEAN — TRUE: the loop skips the
-                                  \*   preemption point, so a noise pass goes
-                                  \*   straight back to the flag-sensitive
-                                  \*   tsleep and the CPU never unmasks.
+    \* BUGGY_NO_POINT is GONE (ARCH 8.12), with the preemption point it
+    \* turned off: a syscall body now runs interrupts-on throughout, so
+    \* there is no masked span for this module to bound.
 
 ASSUME Fds # {}
 ASSUME HAS_TIMEOUT                 \in BOOLEAN
@@ -281,7 +261,6 @@ ASSUME BUGGY_CLEAR_AFTER_SAMPLE    \in BOOLEAN
 ASSUME BUGGY_RETURN_ON_WAKE        \in BOOLEAN
 ASSUME BUGGY_NO_LOOP_DIE_CHECK     \in BOOLEAN
 ASSUME BUGGY_NO_LOOP_STOP_CHECK    \in BOOLEAN
-ASSUME BUGGY_NO_POINT              \in BOOLEAN
 
 VARIABLES
     pc,               \* the poll call's lifecycle ∈ PCs (see below).
@@ -326,22 +305,16 @@ vars == <<pc, ready, registered, flagged, seen, deadline_passed, dying, stop_req
 \* "final"         — the final sample is done; evaluate it.
 \* "done_ready"    — poll returned >= 1 ready fd.
 \* "done_timeout"  — poll returned 0.
-\* "atpoint"       — the preemption point (sched_preempt_point): hooks off, no
-\*                   lock held, IRQs briefly unmasked so every pending
-\*                   interrupt is taken. Reached each noise pass; the switch
-\*                   is deferred (not taken here).
 \* "done_intr"     — poll unwound for death (the result is immaterial: the
 \*                   thread dies at its EL0-return tail).
 PCs      == {"start", "checked", "scanned", "armed", "sleeping", "tsparked",
              "woken", "unhooked", "loopparked", "cleared", "sampled_dirty",
-             "rescanned", "timedout", "final", "atpoint",
+             "rescanned", "timedout", "final",
              "done_ready", "done_timeout", "done_intr"}
 Terminal == {"done_ready", "done_timeout", "done_intr"}
 Parked   == {"tsparked", "loopparked"}
 \* Every state in which the poller has given up its CPU (the code's nsleeps
-\* moves): the flag-sensitive tsleep and the two parks. The preemption point
-\* (atpoint) is NOT a sleep -- it does not yield the CPU -- but it services
-\* interrupts, so IrqLatencyBounded counts it alongside these.
+\* moves): the flag-sensitive tsleep and the two parks.
 RealSleep == {"sleeping"} \cup Parked
 
 TypeOk ==
@@ -584,7 +557,6 @@ LoopCheck ==
     /\ pc = "unhooked"
     /\ pc' = IF dying /\ ~BUGGY_NO_LOOP_DIE_CHECK THEN "done_intr"
              ELSE IF stop_req /\ ~BUGGY_NO_LOOP_STOP_CHECK THEN "loopparked"
-             ELSE IF ~BUGGY_NO_POINT THEN "atpoint"
              ELSE "cleared"
     /\ UNCHANGED <<ready, registered, flagged, seen, deadline_passed, dying, stop_req, stop_used>>
 
@@ -617,9 +589,7 @@ BuggyClearLate ==
 (* explicit Expired test bounds the loop: tsleep prefers a set flag to a   *)
 (* passed deadline, so a producer that keeps walking the list would        *)
 (* otherwise keep the poller circling past its timeout. Each re-loop first *)
-(* crosses the preemption point (LoopCheck -> atpoint), where interrupts   *)
-(* are serviced: the bound a poll(-1) has no deadline to supply            *)
-(* (IrqLatencyBounded).                                                    *)
+(* is serviced by the interrupts-on syscall body it runs in (ARCH 8.12).   *)
 (***************************************************************************)
 EvaluateWake ==
     /\ pc = "rescanned"
@@ -637,22 +607,22 @@ EvaluateWake ==
             /\ flagged' = flagged
 
 (***************************************************************************)
-(* Point -- the preemption point (sched_preempt_point). Hooks are off (the *)
-(* re-arm cleared them) and no lock is held, so the poller briefly unmasks  *)
-(* IRQs and every interrupt pending on this CPU is taken on the poller's    *)
-(* own stack, the SAK included. It is UNCONDITIONAL -- no producer can keep *)
-(* the poller from it -- so unlike the sleep it replaced (round 5) its      *)
-(* bound composes across the pollers sharing one CPU (the round-6 S1). The  *)
-(* thread switch is DEFERRED, not taken here: the code holds preempt_count  *)
-(* across the window (the #360 gate) and honors a deferred need_resched     *)
-(* right after, a scheduler concern this model folds as a stutter (like     *)
-(* sched_yield_hint). Not a sleep -- the CPU is not yielded -- but          *)
-(* IrqLatencyBounded counts atpoint as interrupt service regardless.        *)
+(* Point IS GONE, with the preemption point it modelled (ARCH 8.12).       *)
+(*                                                                         *)
+(* It modelled `sched_preempt_point`: a window inside an IRQ-MASKED syscall *)
+(* body where the poller briefly unmasked so its CPU could take the         *)
+(* interrupts an unprivileged producer would otherwise have held off -- the *)
+(* SAK included. The body now runs interrupts-on THROUGHOUT, so there is no *)
+(* window to model: the CPU is interruptible at every instruction of the    *)
+(* loop, not at one chosen spot in it.                                      *)
+(*                                                                         *)
+(* IrqLatencyBounded went with it, and so did poll_buggy_no_point.cfg. The  *)
+(* obligation they carried is discharged elsewhere now:                     *)
+(* specs/syscall_irqs.tla's CpuGetsItsInterrupts states it about the CPU,   *)
+(* which is whose obligation it always was (round-7 F2 said so, and it is   *)
+(* why poll_cpu.tla briefly existed -- that module's premise WAS the masked *)
+(* syscall, so it went vacuous and is deleted too).                         *)
 (***************************************************************************)
-Point ==
-    /\ pc = "atpoint"
-    /\ pc' = "cleared"
-    /\ UNCHANGED <<ready, registered, flagged, seen, deadline_passed, dying, stop_req, stop_used>>
 
 (***************************************************************************)
 (* FinalSample / EvaluateFinal — tsleep returned TIMEDOUT. One last sample *)
@@ -691,7 +661,6 @@ PollerStep ==
     \/ FinalSample
     \/ EvaluateFinal
     \/ ParkDeath
-    \/ Point
 
 Next ==
     \/ PollerStep
@@ -783,15 +752,11 @@ Invariants ==
 (* returns, or the stop is lifted (which here happens only at a park).     *)
 (* Violated by BUGGY_NO_LOOP_STOP_CHECK.                                    *)
 (*                                                                         *)
-(* IrqLatencyBounded — the poller reaches a state where its CPU services *)
-(* interrupts (a real sleep, or the preemption point) again and again: no *)
-(* producer can keep it from one. Between them the syscall runs IRQ-      *)
-(* masked, so this IS the CPU's interrupt latency. A timeout does not     *)
-(* supply the bound (a producer can hold a poll with ten seconds left for *)
-(* all ten), and neither does the sleep alone (two pollers on one CPU     *)
-(* hand it back and forth -- the round-6 S1); the point does, because it  *)
-(* is reached every pass no matter what any producer does. Violated by    *)
-(* BUGGY_NO_POINT.                                                        *)
+(* IrqLatencyBounded IS GONE (ARCH 8.12), with the preemption point it    *)
+(* was about. A syscall body now runs interrupts-on throughout, so there  *)
+(* is no masked span for this module to bound, and the CPU-level          *)
+(* obligation -- whose it always was, per round-7 F2 -- is                *)
+(* specs/syscall_irqs.tla's CpuGetsItsInterrupts.                         *)
 (***************************************************************************)
 PollTerminates == <>(pc \in Terminal)
 
@@ -802,7 +767,6 @@ DeathTerminates == dying ~> (pc \in Terminal)
 
 StopHonoured == stop_req ~> (~stop_req \/ pc \in Parked \/ pc \in Terminal)
 
-IrqLatencyBounded == []<>(pc \in RealSleep \cup {"atpoint"} \cup Terminal)
 
 Liveness ==
     /\ WF_vars(PollerStep)

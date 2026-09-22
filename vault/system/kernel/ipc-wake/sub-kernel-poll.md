@@ -128,48 +128,25 @@ dev9p.poll bridge's userside.
    (⇒ the sweep, 0) and parks on `proc_stop_sleeper_park` when a stop is
    pending — with every hook already off, so no producer walks to a
    parked poller; the park returns `SLEEP_INTR` on death (DEATH WINS).
-   *The preemption point* (round 5 F1 + round-6 S1; operator decision
-   2026-09-22, ARCH 8.1/23.3; [[spec-poll]] `Point`, `IrqLatencyBounded`):
-   syscalls run IRQ-masked end to end (ARCH 8.11 records the mechanism,
-   8.1 why that is not the design), so a noise-driven poll held its CPU's
-   interrupts -- the SAK included -- for as long as the noise lasted; an
+   *The preemption point lived here for part of one day, and is gone*
+   (round 5 F1 + round-6 S1; operator decision 2026-09-22; removed by ARCH
+   8.12 the same day). Worth keeping the shape, because the DEFECT it
+   addressed was real and only its remedy changed: syscall bodies ran
+   IRQ-masked end to end, so a noise-driven poll held its CPU's interrupts
+   -- the SAK included -- for as long as the noise lasted, and an
    unprivileged pipe, a writer, a reader and an `events=0` poller were
-   enough. Round 4 filed this as the operator's preemption-model question
-   on the premise that nothing unprivileged could drive it; the premise
-   was false. Round 5 slept a bounded interval once a per-thread budget
-   lapsed, but keyed on the THREAD while the obligation is the CPU's: two
-   masked pollers on one CPU each really sleep and hand the CPU back and
-   forth, still masked (round-6 S1), and a per-CPU sleep bound would still
-   only rate-limit masked passes (the timer-wait list is global). So each
-   re-loop, after the die/stop checks and before the rescan, the loop
-   calls `sched_preempt_point` ([[sub-kernel-sched]]): hooks off and no
-   lock held, it holds `preempt_count` (the switch is deferred, #360),
-   unmasks IRQs across an `isb` so an interrupt taken in that window runs
-   on the poller's own stack, re-masks, and honours a deferred
-   `need_resched`. The `isb` widens the window; it does not guarantee
-   delivery, and the `noisb` sabotage PASSES (measured) where `nodaifclr`
-   fails. The claim is REPEATED interruptibility, not per-pass delivery. It
-   is UNCONDITIONAL, so its bound composes across pollers on one CPU where
-   the sleep did not. The point does NOT check death or stop, so the
-   loop's own die-check and stop park remain the ONLY prompt way out of a
-   noise loop (round 5's backoff had its own `tsleep` checks; the point
-   has none, which is why the die/stop buggy cfgs no longer need the point
-   off). A stopgap: deleted when syscall bodies run IRQs-on (ARCH 8.1).
-   The wake dedupe (skip `wakeup` when `pw->ready` is set) was proposed
-   alongside round 5 and REJECTED: see Concurrency.
-   *What this replaced:* the empty re-sample fell through and returned 0
-   — `poll(fd, 10 s)` reported a timeout after microseconds whenever a
-   second reader won the bytes, and `poll(-1)` returned 0, which POSIX
-   never permits. [[spec-poll]] was green over it for the module's
-   whole life because it modeled readiness as a monotonic edge and a
-   flag as a verdict: the state did not exist.
-6. **The sweep, in load-bearing order**: `poll_unhook_all` — unregister
-   every hook (idempotent), THEN `handle_put` every retained ref (below:
-   only after no waiter references any object's list, so a final put's
-   close hook frees a list we are off), THEN clear — and only after that
-   scribble `magic = 0` (on a still-listed hook, a concurrent producer
-   walk holding the list lock would extinct on the zeroed magic). A pass
-   that already unhooked makes the first two steps no-ops.
+   enough to make that noise. Round 4 filed it as the operator's
+   preemption-model question on the premise that nothing unprivileged
+   could drive it; the premise was false. Round 5 slept a bounded interval
+   once a per-thread budget lapsed, but keyed on the THREAD while the
+   obligation is the CPU's: two masked pollers on one CPU each really
+   sleep and hand the CPU back and forth, still masked (round-6 S1).
+   Round 6's answer was a point crossed on every re-loop. **ARCH 8.12's
+   answer is that the body is never masked in the first place**, so the
+   CPU is interruptible at every instruction of this loop rather than at
+   one chosen spot in it, and `ASSERT_IRQS_ENABLED` in
+   `syscall_dispatch_body` asserts it on every syscall of every boot
+   instead of a bespoke witness sampling it once per run.
 
 **The retain discipline** (RW-2 2C-F1, [[fnd-rw2-2cf1]]): a
 registered hook lives on the OBJECT's embedded list across the whole
@@ -249,13 +226,14 @@ sweep; `NoSpuriousZero` the re-arm (0 only at the deadline);
 `PollTerminates` its loop bound; `StableReadyReturns` replaces the
 retired `PollReturnsWhenReady` ("a set flag leads to a return" is false
 by design now); `DeathTerminates` and `StopHonoured` the loop's own
-checks; `IrqLatencyBounded` the preemption point (a real sleep OR the
-point, infinitely often). `specs/check-poll.sh` runs the four clean +
-eight buggy cfgs (three of them liveness: `no_loop_die_check`,
-`no_loop_stop_check` -- both now with `BUGGY_NO_POINT=FALSE`, since the
-point does not mask a missing check -- and `no_point`) and asserts WHICH
-property each buggy one violates; the clean counts are pinned
-(2194 / 968 since the point). The list-choosing half of re-registration is
+checks. `IrqLatencyBounded` is GONE with the point (ARCH 8.12): there is
+no masked span left for this module to bound, and the CPU-level
+obligation is [[spec-syscall-irqs]]'s `CpuGetsItsInterrupts`.
+`specs/check-poll.sh` runs the four clean + seven buggy cfgs (two of them
+liveness: `no_loop_die_check`, `no_loop_stop_check`) and asserts WHICH
+property each buggy one violates; the clean runs measure 2146 / 944
+states, down 48 from the point's era -- exactly the `atpoint` states
+removed. The list-choosing half of re-registration is
 [[spec-cons-poll]]'s (`BUGGY_NO_REREGISTER`, `_CADENCE`).
 
 ## Error paths
@@ -288,12 +266,10 @@ why `POLL_MAX_NFDS` is a frame bound, not an fd-table bound.
   pass, with no hook listed; `timeout_ms == 0` never enters it; the
   loop's own deadline test stays; nothing in a pass may sleep while a
   hook is listed except `tsleep` itself (the stop park runs unhooked).
-- The preemption point: crossed every re-loop, before the rescan, with
-  hooks off and no lock held (`sched_preempt_point` extincts on a held
-  lock); it services interrupts but never ends a poll. Unlike round 5's
-  backoff it does not check death or stop, so the die/stop tests need no
-  special setup (the point cannot end their polls -- the model's die/stop
-  buggy cfgs reproduce with `BUGGY_NO_POINT=FALSE`).
+- Interrupt service: no longer this loop's concern at all (ARCH 8.12).
+  The syscall body runs interrupts-on throughout, so the CPU takes its
+  interrupts at every instruction of the loop. Nothing here must be
+  written as though it were masked.
   `poll.point_services_noise` catches the poller reaching the point again
   and again (`poll_total_points` climbs) while it is genuinely re-looping
   on the noise (`g_busy_samples` climbs) and has NOT returned, then
@@ -359,7 +335,9 @@ on a real parked poller) → audit round 4 the same day (scripture
 `e55b86ef`: re-registration, the loop's death/stop checks, the irqsave
 list lock; two more poll tests and two cons tests) → audit round 5 (the
 noise bound, spec first) and round 6 + the operator's "point now, model
-next" (2026-09-22): the sleep backstop became the preemption point
-(`IrqLatencyBounded`, `BUGGY_NO_POINT`, `sched_preempt_point`; two point
-tests; every poller test entry parks terminally and publishes its result
-with a release store).
+next" (2026-09-22): the sleep backstop became the preemption point, which
+ARCH 8.12 deleted the same day in favour of an interrupts-on syscall body
+(so `IrqLatencyBounded`, `BUGGY_NO_POINT` and `sched_preempt_point` are
+all gone, and the two point tests were retargeted onto the re-loop
+counter they already had; every poller test entry parks terminally and
+publishes its result with a release store).

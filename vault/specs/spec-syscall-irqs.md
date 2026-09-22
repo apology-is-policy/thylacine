@@ -78,9 +78,21 @@ where it is true: at the boundary, as `TailTookItsPreempt`.
 
 ## Supersession
 
-When the 8.1 code lands, [[spec-poll-cpu]]'s stated premise (the masked
-syscall body) is false and that module goes VACUOUS rather than wrong. It and
-its four cfgs are deleted with `sched_preempt_point`.
+[[spec-poll-cpu]] is RETIRED IN PLACE, not deleted: its module
+`specs/poll_cpu.tla` and its four cfgs are gone, but the note stays because the
+append-only record plane names it (an audit round scopes it, a change
+established it, a finding lists it as a surface). History keeps its referents.
+
+That module's stated premise WAS the masked syscall body, so this chunk did not
+make it wrong -- it made it VACUOUS. A model whose adversary cannot exist
+proves nothing, so it went with `sched_preempt_point`. The obligation it
+carried is `CpuGetsItsInterrupts` here, and `syscall_irqs_buggy_masked_body`
+reproduces the old defect under noise, so the discrimination round-6 S1 earned
+is not lost.
+
+`poll.tla` keeps everything else it models; only `Point` / `atpoint` /
+`IrqLatencyBounded` and `poll_buggy_no_point.cfg` left it. Its clean runs
+measure 2146 / 944 states, down 48 -- exactly the `atpoint` states removed.
 
 ## Binding
 

@@ -308,7 +308,6 @@ struct Thread {
     //
     //   sched.c   `sched()` extincts on a nonzero count (lock-across-sleep),
     //             and EVERY blocking syscall calls sched().
-    //   sched.c   `sched_preempt_point()` extincts on a nonzero count.
     //   proc.c    `el0_return_die_check` extincts on "counted spinlock leaked
     //   + sched.c to EL0 return" (#361) -- a syscall-wide count is
     //             DEFINITIONALLY that leak.
@@ -507,7 +506,7 @@ struct Thread {
     //                   reader outside /proc, and none has ever driven a
     //                   scheduling decision. poll's noise backstop briefly
     //                   read its own thread's nsleeps across a pass; it was
-    //                   replaced by sched_preempt_point, because what that
+    //                   replaced by the preemption point, itself since deleted (ARCH 8.12), because what that
     //                   read could establish was per-THREAD while the
     //                   obligation it served belongs to the CPU.
     //   nmigrations  -- times dispatched on a DIFFERENT CPU than the previous

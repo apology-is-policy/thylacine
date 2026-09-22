@@ -318,7 +318,8 @@ bool poll_waiter_list_empty(struct poll_waiter_list *l);
 // poll.tla `Register` ↔ the first scan; `TSleepCommit` ↔ the flag-
 // check + tsleep; `Rearm` / `LoopCheck` / `Resample` ↔ each loop pass;
 // `MakeReady` ↔ a producer's `poll_waiter_list_wake`; `Point` ↔ the
-// preemption point (sched_preempt_point) each re-loop crosses.
+// interrupts-on syscall body it runs in (ARCH 8.12), which replaced the
+// preemption point this loop used to cross on every re-loop.
 //
 // A dying caller returns 0 from any pass (the thread dies at its EL0-return
 // tail). A stopped caller parks inside the call and resumes the same poll

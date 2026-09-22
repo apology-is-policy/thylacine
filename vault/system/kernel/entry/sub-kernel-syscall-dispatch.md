@@ -530,6 +530,40 @@ presents `errno == EACCES`) where it once collapsed to a bare `-1` — the reaso
 that identity refusal is observable from Thylacine at all
 ([[sub-kernel-ninep-attach]]).
 
+### The body runs with interrupts ON (ARCH 8.12)
+
+`syscall_dispatch` is now a thin wrapper around the unchanged body. It sets the
+calling thread's in-syscall marker, unmasks, runs the body, re-masks, and
+clears the marker. Everything the dispatcher did before is in the body, and the
+body is where every handler still lives.
+
+Three things about it are load-bearing rather than incidental:
+
+**It is a wrapper, not an edit to the vector.** The re-mask must precede
+KERNEL_EXIT, which installs ELR/SPSR and `eret`s under an INHERITED mask -- the
+one surviving #713-class window that does not mask locally. A single-exit
+wrapper makes "the unmask leaks past the return tail" structurally impossible
+rather than merely intended. It also confines the unmask to the SVC body, so
+kernel fault handling, which shares the EL0-synchronous slot, still runs masked
+and the recursion guard on that slot keeps its discriminator.
+
+**The order is load-bearing in both directions.** Marker THEN unmask on entry:
+unmasking first opens a window in which an interrupt sees no marker and
+preempts a thread already inside its syscall. Re-mask THEN clear on exit:
+clearing first leaves a window that is unmasked with no marker. Each order has
+its own buggy cfg in [[spec-syscall-irqs]].
+
+**The re-mask is unconditional, not save/restore.** The entry state is known by
+construction, so a saved value would be a variable standing in for a constant,
+and #713's window must not depend on one. The consequence is that a caller
+which was NOT masked gets masked on return -- which is why the kernel tests
+that drive `syscall_dispatch` directly bracket it with a mask-only
+`spin_lock_irqsave(NULL)`; that was found by the interrupt-state assert firing,
+not by review.
+
+`ASSERT_IRQS_ENABLED` sits at the top of the body, so the property is checked
+on every syscall of every boot rather than sampled by a test.
+
 ## Data structures
 
 None owned. The dispatcher operates on the exception frame

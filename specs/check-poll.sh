@@ -12,14 +12,16 @@
 # The liveness properties were shown able to FAIL before being trusted
 # (SPEC-TO-CODE.md, the poll.tla section); a liveness cfg is 'clean' here.
 # DeathTerminates and StopHonoured also have buggy cfgs of their own, judged
-# like the invariant ones: a TEMPORAL violation of the named property, and so
-# does IrqLatencyBounded (the preemption point). poll_cpu.tla carries the CPU
-# half that poll.tla structurally cannot (round-7 F2): its buggy cfg is round-6
-# S1 -- two pollers on one CPU, round 5's per-thread sleep bound granted in
-# FULL as fairness, and the CPU still never unmasks. poll_cpu_sleep_bound_holds
-# is its positive control (EachPollerSleeps HOLDS in that same configuration,
-# so the counterexample is not "the pollers stopped sleeping"), and
-# poll_cpu_one_poller is the K=1 control (round 5's bound WAS sound there).
+# like the invariant ones: a TEMPORAL violation of the named property.
+#
+# IrqLatencyBounded and the whole poll_cpu module are GONE (ARCH 8.12). They
+# existed because a syscall body ran IRQ-MASKED, so an unprivileged producer
+# could hold a CPU's interrupts -- the SAK included -- for as long as it kept a
+# poll(-1) awake. Bodies now run interrupts-on throughout: there is no masked
+# span here to bound, poll_cpu's stated premise is false so the module went
+# VACUOUS rather than wrong, and the CPU-level obligation (whose it always was,
+# per round-7 F2) is specs/syscall_irqs.tla's CpuGetsItsInterrupts, gated by
+# specs/check-syscall-irqs.sh.
 # TLC_WORKERS overrides -workers auto when the host is shared.
 set -u
 cd "$(dirname "$0")"
@@ -33,10 +35,7 @@ STAMP="$TMP/stamp"; : > "$STAMP"
 CLEAN="poll:-
 poll_notimeout:-
 poll_liveness:-
-poll_liveness_notimeout:-
-poll_cpu:-
-poll_cpu_one_poller:-
-poll_cpu_sleep_bound_holds:-"
+poll_liveness_notimeout:-"
 
 # buggy: cfg, invariant that must be the one reported
 BUGGY="poll_buggy_check_before_register:NoMissedPoll
@@ -45,13 +44,11 @@ poll_buggy_clear_after_sample:NoMissedPoll
 poll_buggy_lazy_unregister:NoStaleHook
 poll_buggy_return_on_wake:NoSpuriousZero
 poll_buggy_no_loop_die_check:DeathTerminates
-poll_buggy_no_loop_stop_check:StopHonoured
-poll_buggy_no_point:IrqLatencyBounded
-poll_cpu_buggy_sleep_only:CpuServesIrqs"
+poll_buggy_no_loop_stop_check:StopHonoured"
 
 run() {  # $1 = cfg basename -> sets RC and LOG
     LOG="$TMP/$1.log"
-    case "$1" in poll_cpu*) MOD=poll_cpu ;; *) MOD=poll ;; esac
+    MOD=poll
     java -cp "$JAR" tlc2.TLC -workers "${TLC_WORKERS:-auto}" -deadlock -metadir "$TMP/$1.meta" \
         -config "$1.cfg" "$MOD.tla" > "$LOG" 2>&1
     RC=$?

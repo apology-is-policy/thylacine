@@ -1,7 +1,7 @@
 ---
 id: spec-poll-cpu
 type: spec
-title: "poll_cpu.tla"
+title: "poll_cpu.tla (RETIRED -- the module is deleted; ARCH 8.12)"
 models: [sub-kernel-poll, sub-kernel-sched]
 pins: [inv-i27]
 cfgs:
@@ -13,6 +13,30 @@ gate: "any change to the preemption point, to what unmasks a CPU (the idle loop,
 created: 2026-09-22
 updated: 2026-09-22
 ---
+## RETIRED 2026-09-22 -- the module and its four cfgs are DELETED
+
+`specs/poll_cpu.tla` no longer exists. It modelled ONE CPU and K pollers to
+carry the obligation [[spec-poll]] structurally could not (round-7 F2): that a
+masked syscall body's interrupt bound COMPOSES across pollers sharing a CPU.
+Its stated premise was the masked syscall body -- so when ARCH 8.12 made
+syscall bodies run interrupts-on, the premise went false and the module went
+**VACUOUS rather than wrong**. A module whose adversary cannot exist proves
+nothing, so it was deleted with `sched_preempt_point` itself.
+
+The obligation lives in [[spec-syscall-irqs]] as `CpuGetsItsInterrupts`
+(`[]<>(~masked)` -- the same sentence about the same CPU), and its
+`syscall_irqs_buggy_masked_body` cfg reproduces the old defect under noise, so
+the discrimination round-6 S1 earned is not lost.
+
+**This note is kept rather than deleted** because the append-only record plane
+names it: [[adt-b0poll-r7]] scopes it, [[chg-2026-09-22-poll-preemption-point]]
+established it, and [[fnd-b0poll-r7-f2]] lists it as a surface. History keeps
+its referents; retiring a Present-plane note is not the same as erasing it.
+
+---
+
+*What follows is the note as it stood while the module existed.*
+
 ## Abstraction
 
 ONE CPU, K pollers, and nothing else. Readiness, hooks, deadlines,

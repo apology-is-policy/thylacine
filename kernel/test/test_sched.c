@@ -1079,84 +1079,22 @@ void test_sched_preempt_gate_defers_while_locked(void) {
 }
 
 // =============================================================================
-// sched_preempt_point -- the window, witnessed (B-0 audit round 7 F3).
+// sched_preempt_point's witness is GONE with the point (ARCH 8.12).
 // =============================================================================
 //
-// The unmask -> take-pending -> re-mask transition is the ONLY novel behaviour
-// the preemption point adds, and no poll test can see it: poll's test pollers
-// are kthreads, and a kthread is entered through thread_trampoline's
-// `msr daifclr, #2` (arch/arm64/context.S), so it already runs IRQs-on and the
-// window is architecturally INERT there. Both poll.point_* tests would stay
-// green with sched_preempt_point's whole body replaced by `return;`, because
-// everything they assert is produced by poll's loop. This test masks the way a
-// syscall body is masked, lets a timer tick pend, and asserts the interrupt is
-// actually TAKEN inside the window.
+// That test masked the way a syscall body was masked, raised a self-targeted
+// SGI, and asserted the point took it. It existed because the point's unmask
+// was the ONLY novel thing the point did, and no poll test could see it: poll's
+// test pollers are kthreads, entered through thread_trampoline's
+// `msr daifclr, #2`, so they already run IRQs-on and the window was
+// architecturally INERT there (B-0 audit round 7 F3).
 //
-// The control is the load-bearing half: the SAME masked wait, measured one
-// variable away, must take NO interrupt. Without it a window that did nothing
-// would still pass on any host where the mask was not real.
-//
-// gic_cpu_irq_count is per-CPU and counts interrupts TAKEN, so it stays the
-// right counter to read even if the point's own sched() migrates us afterwards
-// -- the interrupt was taken on the CPU we were pinned to while masked.
-// Long enough for a self-targeted SGI to become pending at this CPU's
-// redistributor, short enough to cost the suite nothing. It is NOT a wait for
-// something to happen on its own -- see below.
-#define PP_PEND_NS (200ull * 1000ull)
-
-void test_sched_preempt_point_takes_a_pending_irq(void) {
-    // THE FIRE SOURCE IS SOFTWARE, NOT THE TIMER. The first form waited 3 ms
-    // masked for "this CPU's tick" to pend, and failed on one boot of a
-    // 77-scenario TCG fleet while passing on the retry and on every HVF run.
-    // WHY that boot had no tick pending in 3 ms is NOT established -- the
-    // in-kernel test phase is UP-like (no cross-CPU placement), so the obvious
-    // explanation, a thread on a timerless secondary, does not apply and was
-    // withdrawn. What IS established is that the old form's premise -- "an
-    // interrupt will arrive on its own inside this window" -- is a property of
-    // the environment rather than of the thing under test, so the test could
-    // fail without the point being wrong. A self-targeted SGI pends on whichever
-    // CPU we are on, immediately, so the window has something to take by
-    // CONSTRUCTION. (test_irqfwd uses the same source for the same reason.)
-    struct KObj_IRQ *k = kobj_irq_create(IPI_IRQFWD_TEST);
-    TEST_ASSERT(k != NULL, "the software fire source is available");
-
-    // Mask-only (a NULL lock): this form does not touch preempt_count, so the
-    // point's "no counted lock held" precondition still holds.
-    irq_state_t s = spin_lock_irqsave(NULL);
-    unsigned cpu  = smp_cpu_idx_self();   // masked, so we cannot migrate off it
-    u64 before    = gic_cpu_irq_count(cpu);
-
-    bool sent = gic_send_ipi(cpu, IPI_IRQFWD_TEST);
-
-    // Long enough for the SGI to reach this CPU's redistributor. CNTVCT is
-    // free-running independently of whether any timer is armed, so this spin
-    // measures time without depending on the thing the old form waited FOR.
-    u64 t0 = timer_now_ns();
-    while (timer_now_ns() - t0 < PP_PEND_NS) { }
-    u64 masked = gic_cpu_irq_count(cpu);
-
-    sched_preempt_point();
-
-    u64 after = gic_cpu_irq_count(cpu);
-    spin_unlock_irqrestore(NULL, s);
-
-    // Release the INTID claim BEFORE asserting. TEST_ASSERT returns on
-    // failure, so asserting first would leak SGI 1 on any failing run and
-    // make the irqfwd tests fail afterwards for a reason that is not theirs
-    // -- one defect presenting as several, in a suite whose whole job is to
-    // say which thing broke.
-    kobj_irq_destroy(k);
-
-    TEST_ASSERT(sent, "gic_send_ipi(self, IPI_IRQFWD_TEST) accepted");
-    TEST_EXPECT_EQ((s64)(masked - before), 0L,
-        "the control: the section really was masked (the SGI did NOT land)");
-    // Only the daifclr is witnessed. The isb widens the unmask window and is
-    // not needed for the mask write itself to take effect, so the `noisb`
-    // sabotage PASSES here (measured) -- recorded rather than asserted,
-    // because a test must not claim a discrimination it lacks.
-    TEST_ASSERT(after > masked,
-        "the point TAKES the pending interrupt (drop the daifclr and this fails)");
-}
+// The property it witnessed is now structural rather than sampled. A syscall
+// body runs interrupts-on throughout, and syscall_dispatch_body carries
+// ASSERT_IRQS_ENABLED -- so every syscall of every boot, in the suite, the
+// fleet and the SMP gate, asserts what this one test asserted once per run.
+// A bespoke witness for a window that no longer exists would be a test of
+// nothing.
 
 // ---------------------------------------------------------------------------
 // ARCH 8.12: the kernel-stack watermark.

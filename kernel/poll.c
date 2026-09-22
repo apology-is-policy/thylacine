@@ -22,9 +22,6 @@
 //                          signals `pw->rendez` — both required.
 //   AdvanceTime/Timeout  ↔ `tsleep`'s deadline path (specs/tsleep.tla
 //                          composition).
-//   Point                ↔ the preemption point: every re-loop, with no hook
-//                          listed and no lock held, `sched_preempt_point`
-//                          briefly unmasks IRQs so this CPU services them.
 //   Unregister sweep     ↔ the goto target before return; sweeps every
 //                          waiter via `poll_waiter_list_unregister`.
 
@@ -38,7 +35,7 @@
 #include <thylacine/notes.h>      // thread_die_pending
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
-#include <thylacine/sched.h>      // sched_yield_hint, sched_preempt_point
+#include <thylacine/sched.h>      // sched_yield_hint
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
 #include <thylacine/thread.h>
@@ -53,7 +50,6 @@
 static u64 g_poll_calls;
 static u64 g_poll_slept;
 static u64 g_poll_resleeps;
-static u64 g_poll_points;
 
 u64 poll_total_calls(void) {
     return __atomic_load_n(&g_poll_calls, __ATOMIC_RELAXED);
@@ -80,9 +76,6 @@ u64 poll_total_resleeps(void) {
 // Preemption points crossed: the witness that a noise-driven poll keeps
 // reaching the spot where its CPU services interrupts, rather than spinning
 // masked. Climbs once per re-loop under noise (specs/poll.tla Point).
-u64 poll_total_points(void) {
-    return __atomic_load_n(&g_poll_points, __ATOMIC_RELAXED);
-}
 
 // =============================================================================
 // poll_waiter + poll_waiter_list — the kernel-side hook mechanism.
@@ -433,29 +426,13 @@ s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds, u64 nfds,
             goto unregister_and_return;
         }
 
-        // The preemption point (specs/poll.tla Point; ARCH 23.3). Hooks are off
-        // (poll_unhook_all, above) and no lock is held, so this is where the
-        // syscall -- IRQ-masked end to end (ARCH 8.11; 8.1 says why that is not
-        // the design) -- briefly unmasks, so an interrupt this CPU takes in
-        // that window (the timer tick and the SAK included) runs on this
-        // thread's own stack. The window is a widening, not a delivery
-        // guarantee; what composes is that EVERY pass crosses one. A producer walking a
-        // list in every re-sample window keeps every tsleep returning AWOKEN,
-        // so without this a poll(-1) holds its CPU masked for as long as the
-        // noise lasts; the round-5 sleep backstop bounded one thread but not
-        // one CPU (two masked pollers hand it back and forth -- round-6 S1),
-        // and this is UNCONDITIONAL, so its bound composes (IrqLatencyBounded).
-        // Crossed each re-loop, before the rescan; the FIRST scan (before the
-        // loop) is not a re-loop, so it needs no point. The TIMEDOUT pass is
-        // skipped: it is TERMINAL (it breaks below), so it needs no bound, and
-        // crossing the point there could defer the return by a whole slice past
-        // the deadline if the window raised a reschedule (round-7 F7). The
-        // model agrees -- its TIMEDOUT path runs FinalSample straight to a
-        // terminal state and never reaches `atpoint`.
-        if (ts != TSLEEP_TIMEDOUT) {
-            __atomic_fetch_add(&g_poll_points, 1u, __ATOMIC_RELAXED);
-            sched_preempt_point();
-        }
+        // No preemption point here any more (ARCH 8.12). The loop used to
+        // cross sched_preempt_point on every non-terminal pass, because a
+        // syscall body ran IRQ-MASKED and an unprivileged producer could keep
+        // this loop awake -- holding the CPU's interrupts, the SAK included,
+        // for as long as the noise lasted. The body now runs interrupts-on
+        // throughout, so the CPU is interruptible at every instruction of this
+        // loop rather than at one chosen spot in it.
 
         ready_count = 0;
         for (u64 i = 0; i < nfds; i++) {

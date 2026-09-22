@@ -814,21 +814,18 @@ backstop that first closed it was not enough: syscalls run IRQ-masked
 poll holds its CPU's interrupts for as long as the noise lasts, and any
 unprivileged program can make the noise -- but a per-thread sleep bound
 does not compose, because two masked pollers on one CPU each really sleep
-and hand it back and forth (S1). The fix (operator decision 2026-09-22,
-"point now, model next") is the PREEMPTION POINT: each re-loop, after the
-die/stop checks and before the rescan, `LoopCheck` routes to `atpoint`
-and `Point` returns to `cleared` -- the code's `sched_preempt_point`,
-which unmasks IRQs at a lock-free spot (`preempt_count` held so the
-switch is deferred, `isb` so the pending interrupt is taken) then honors
-a deferred `need_resched`. It is UNCONDITIONAL, so unlike the sleep its
-bound composes across pollers on one CPU. `IrqLatencyBounded`
-(`[]<>(pc \in RealSleep \cup {"atpoint"} \cup Terminal)`) is the
-property; `BUGGY_NO_POINT` violates it on poll(-1) with the lasso
-armed -> woken -> rescanned -> armed. The point does NOT check death or
-stop, so it does not mask a missing loop check -- the two loop-check
-buggy cfgs now reproduce with `BUGGY_NO_POINT=FALSE` (measured), where
-round 5's backoff had needed it off. The point is a stopgap: when
-syscall bodies run IRQs-on (ARCH 8.1) it is deleted.
+and hand it back and forth (S1). The first fix (operator decision 2026-09-22, "point now, model next") was
+the PREEMPTION POINT: each re-loop routed through `atpoint`, the code's
+`sched_preempt_point`, which unmasked IRQs at a lock-free spot so the CPU
+took its pending interrupts. **It lived for part of one day.** ARCH 8.12
+made the whole syscall body interrupts-on, which is what the point was a
+stopgap for, so `Point` / `atpoint` / `IrqLatencyBounded` /
+`poll_buggy_no_point.cfg` and the entire `poll_cpu.tla` module are DELETED.
+The CPU-level obligation is now `syscall_irqs.tla`'s `CpuGetsItsInterrupts`.
+
+One measured fact from the point's era is kept because it corrected a claim
+rather than a test: the `isb` in that window WIDENED it and did not
+guarantee delivery -- a `noisb` sabotage PASSED while `nodaifclr` FAILED.
 
 State universe: one poller, N fds (`Fds`), one timeout, at most one stop
 request. CONSTANTS: `HAS_TIMEOUT` (FALSE = poll(-1)),
