@@ -109,7 +109,626 @@ stay open on purpose and return for a signature in their own scripture commits.
 The browser also has a name, and it is not one of the three thematic ones I
 had held: **Boosty**, after the operator's cat. The operator's name wins.
 
+**B-0, the same day: JavaScriptCore runs on Thylacine.** WebKit 2.54.0's `JSCOnly`
+port, static, JIT off, against a cross-built ICU 78.3: `hello-42`, German number
+formatting through ICU's data, a graceful `RangeError` on runaway recursion,
+400,000-element arrays, 256 MiB typed arrays, `WebAssembly` present, `fib(30)` in 71 ms
+on the interpreter. All of WTF compiled against Pouch with five files touched; the
+whole WebKit delta is one patch of +60/-3. It is WIP on branch `browser-b0`, ungated.
+
+*The wrong turn, which cost about an hour.* The first device runs returned status 127
+and `$errstr` said "spawn failed: io", so I went hunting in the kernel's exec path for
+why a 60 MB ELF was being refused -- read the loader, the image cache, `kmalloc`'s
+large path, compared program headers with DOSBox-X, and finally instrumented the spawn
+syscall in a scratch worktree. **Not one diagnostic fired**, and that silence was the
+finding: the kernel never refused anything. `jsc` was starting and calling `abort()`,
+which Pouch maps to `_Exit(127)` with no message -- the same number the shell uses for
+"command not found". Two things had lied to me and both were mine: my first control
+copied `/hello-rs`, which does not exist after the pivot, so the "control" failed for
+its own reason (a negative assertion satisfied by a broken fixture -- a lesson already
+in memory, walked past); and `ut` does not clear `$errstr` on success, so the message I
+read belonged to that broken control, not to `jsc`. What broke the loop was a check
+that could only answer one way: a valid control (a copied `/bin/cat`, exec'd from the
+same directory, output compared) plus a SHA-256 of the fetched binary on the device.
+After that, making `abort()` loud -- a 12-line object that prints a backtrace through
+libunwind -- found each real cause in one boot.
+
+*What JavaScriptCore found in our libc.* `pthread_getattr_np()` has told every Pouch
+program that its main-thread stack is one page: musl probes the extent with `mremap`,
+the seam ENOSYSes it, and the loop stops on its first test. Measured `size=4096`
+against a real 1 MiB. And `sysconf(_SC_PHYS_PAGES)` has been returning *uninitialised
+stack*: upstream never checks its `sysinfo` call. JSC caps its heap at twice RAM, so
+every allocation over its 8 KB large-cell cutoff failed -- arrays died at element 1003
+while 256 MiB typed arrays (plain `malloc`) sailed through, which is the asymmetry that
+pointed away from the allocator and at a limit check. Both are fixed as Pouch patches
+0033 and 0034 on the branch; 0033 is pinned by a two-sided prover check, because
+"a local lies inside the reported stack" alone passed for years while the size was wrong.
+The Rust `std` track would have met 0033 in its main-thread guard.
+
+*What it measured about the platform*, recorded as F3-F9 in `docs/browser-status.md`
+for the conversation the operator asked for before any kernel design ("mprotect, dlopen
+etc., let's talk about it"): aligned reservations want a partial `munmap` we refuse;
+decommit is an ignored `madvise` (so memory is never returned) and wires onto
+`SYS_BURROW_DECOMMIT` with no kernel change; guard pages silently do not exist; a
+256 MiB per-mapping cap that JSC adapts to; and no per-thread asynchronous signal, which
+costs nothing today and will matter for the JIT and for multi-threaded JS. The probe's
+tolerances are exactly that -- probe posture, each one named -- not answers.
+
+### Addendum, same day (post self-compact): landing the libc fixes properly, and the pin that found a third bug
+
+The job was small on paper: take patches 0033 and 0034 through a from-scratch sysroot
+rebuild, the kernel suite, the gate fleet and an audit, in a worktree that does not hold
+the operator's image. It did not stay small, and every detour came from the same place --
+**reading the thing instead of its description.**
+
+*A claim I had copied, caught before it landed.* My 0033 patch text said the main stack
+is "committed whole at exec". That sentence was `exec.h`'s, and `exec.h` was wrong:
+`exec_map_user_stack` has been `burrow_create_anon_lazy` since LINEAGE L-4a (`c19ae8dc`,
+2026-08-02). The header comment, the exec dossier's Performance section and my own finding
+F8 all carried the stale claim -- four copies agreeing with each other instead of with
+`kernel/exec.c`. It matters beyond tidiness: F8 ("1 MiB is small for a JS engine") had
+"eager cost" as its reason for caution, and that reason does not exist. A larger stack is
+a reservation and an I-32 ceiling, not memory. All four are corrected; I told aux, whose
+`std` design had taken the claim from me.
+
+*A sweep that took minutes and should have been run years ago.* 0032, 0033 and 0034 are
+one defect: a syscall parked at the ENOSYS sentinel whose libc caller cannot report
+failure, so the program gets a wrong VALUE. I listed the parked names in the patched
+`syscall.h.in` and read the callers. **`getuid()`, `geteuid()`, `getgid()`, `getegid()` and
+`getppid()` return the raw sentinel: `(uid_t)-38`, 0xFFFFFFDA.** The kernel has had
+`SYS_GETUID`/`SYS_GETGID` since LS-K; CL-1a wired only `getpid`. I did NOT fix it, and the
+reason is the finding: stratumd consumes the value -- `stm_ctl_set_admin_uid(geteuid())`,
+the keyslot token gate `st_uid != geteuid()`, dataset-root ownership, the unauthenticated
+peer fallback. Changing libc's answer changes the storage daemon's security behaviour, so
+it is a chunk on the A-3 identity surface with its own audit, not a line in a browser
+commit. It is tracked (memory `bug_pouch_getuid_returns_enosys_sentinel`, the seam
+dossier's Caveats) and goes to the operator. Read from code; a device probe is still owed.
+
+*The pin that failed, and was right to.* I gave 0034 a device-side pin: `pouch-hello-malloc`
+re-reads `/ctl/memory` with a different parser -- `fscanf` -- and demands equality with
+`sysconf`. The kernel suite went red: `fscanf` returned 0. Two guesses died in a row (the
+file is unreachable pre-pivot: no, `fopen` succeeded; the fd offset does not advance on
+devctl: no, `c->offset += n` is generic), so I stopped guessing and made the prover print
+what each read path returned. Raw `read(1)` x3: `t`, `o`, `t`. `read(64)`: correct.
+`fgetc` x3: correct. `fread`: correct. Only the scan path was wrong, which cleared the
+kernel entirely. The cause is in patch 0002, from the first week of Pouch: its
+`__stdio_read` reads "straight into the caller's buffer" and its header calls the dropped
+readahead "a throughput optimization, not a semantic one". It was semantic. musl's
+`shunget()` is a bare `rpos--`, which works only because upstream's read leaves the byte
+it just returned at `rpos[-1]`; with 0002, `rpos` sat at the END of the buffer and every
+pushback re-read `buf[1023]`. **`fscanf` and `scanf` have been broken on every real `FILE`
+in every Pouch program since 0002** (`fscanf("%7s %d %d")` over `"alpha 12 -7"` returns 1
+with an empty word), and every `getc` has been its own syscall. Nothing in the tree used
+`fscanf` on a file until a test did. The fix (0035) needs no `readv`: upstream's one-byte
+arm was already a plain `read` into the buffer. Before applying it I ran the new `scan`
+leg against the unfixed libc to see it go red (`n=1 w1=[]`), with the malloc pin moved out
+of the way so the boot could reach it -- a prover that has never failed has proven nothing.
+
+*Posture.* From-scratch sysroot with all three patches, every port rebuilt, kernel suite
+1577/1577, and the three prover lines at boot: `main stack [0x7ff00000, 0x80000000)
+size=1048576 OK`, `sysconf phys=524288 avail=479648 pages == /ctl/memory ok`,
+`pouch-hello-fopen: scan OK`.
+
+*The gate fleet, and a regression that was already on `main`.* 76 scenarios: 53 PASS, 21
+SKIP (lever-gated), **2 FAIL** -- `r5f9-ash` and `viv-run`, three attempts each, both last
+green on 10 September. Both print `viv: recipe mount /dev/tty failed (missing rootfs
+anchor?)`. The anchor was present. Pouch is not in that path at all -- `viv` is native Rust
+and the container is a Linux-phenotype busybox -- and `git diff main browser-b0` over the
+kernel, `viv`, `ptyhost`, `ptyfs`, `libthyla-rs` and `diorama` is one comment in `exec.h`, so
+the failing code is byte-identical on `main`. That settles who introduced it and changes
+nothing about whose it is. I guessed the per-Territory mount table (cap 32) had filled;
+reading history did not converge, so I printed from the kernel. **The first diagnostic boot
+showed nothing, and I nearly took that as a refutation** -- the line was there, interleaved
+byte-by-byte with `ut`'s prompt redraw on the shared serial (`DIAGM ^[OUNT r[c=20
+nmom...nts[J=3...2`), and my grep for the whole word missed it. Read through the interleave:
+`DIAGMOUNT rc=2 nmounts=32`. `mount()` returns -2, table full: the session inherits 24 mounts
+and `viv` needs nine. The SVC layer collapses every mount failure to -1, so `viv` could only
+guess. The cap's own comment is a lineage -- 12, 16, 20, 32, each raised after an overflow --
+and the likeliest last straw is `/dev/nocturne` at the 17 September merge. Also wrong in the
+gate itself: `r5f9-ash`'s "ash still answers" controls were answered by the HOST shell
+(`echo | tr` works in both), so they passed with no container running.
+
+*The audit round* (Fable 5.1, start == end; 0 P0 / 1 P1 / 3 P2 / 6 P3; full list in
+`memory/audit_pouch_0033_0035_closed_list.md`). The three patches survived -- the reviewer
+built a differential model of the stdio state machine (0035: 0 of 32,000 trials failed; the
+old backend: ~1,890 of 2,000) and fuzzed the 0034 parser with three million inputs. What it
+found was around them. **P1: `sysconf(_SC_OPEN_MAX)` returns uninitialised stack too** -- the
+same defect 0034 fixes, sixty lines up in the same function, through an unchecked
+`getrlimit`; `getloadavg`, `getdtablesize`, `ulimit` and `getdomainname` share it, and GNU
+make's `-l` throttles on stack residue. My own sweep method could not have found any of them:
+I grepped for raw `__syscall(`, and these are unchecked WRAPPER calls -- which is exactly what
+0034's bug was. **P2: `tmpfile()` has never unlinked its file** (a raw `unlinkat` sentinel that
+patch 0027 fixed in `remove()` and missed here), so the prover leg that claims to prove
+"the fid survives unlink" has been green with no unlink ever happening -- and my new leg made
+it leak two files per boot instead of one. **P2: my "two-sided" stack pin compares libc's
+constants with the prover's copy of them, never with the kernel**; raise the stack to 8 MiB --
+the change F8 anticipates -- and it still passes with libc wrong. I had written the opposite
+claim in five places. `/proc/<pid>/maps` already prints the stack row; the pin will read that.
+**P2: stdio has never worked over a Pouch socket fd** (the backends skip the socket tag).
+
+*Decisions (operator, 2026-09-21, by blocking question).* Mount table: **design the real fix
+first** -- keep 32 and shed unreachable/orphaned mounts at pivot and chroot -- rather than
+raise the cap a fifth time; the fleet stays red, and nothing lands on `main`, until it does.
+Effort for that kernel work and for the identity chunk: **stay at xhigh**. The identity
+wiring (`getuid` and friends return the raw sentinel -- confirmed on the device:
+`uid=4294967258`, `ppid=-38`, `umask()` = 037777777777): **next, right after B-0 lands**, as
+its own chunk on the A-3 surface.
+
+*Two mistakes of my own, both caught by a backup or a kill rather than by care.* I undid a
+test sabotage with `git checkout -- tools/build-manifest.toml` and wiped my uncommitted
+manifest entries with it; a copy I had made a minute earlier saved them. And I cloned the
+partial WebKit checkout as a test fixture, which started fetching blobs over the network and
+hung; a synthetic repository did the job in a second.
+
+### Addendum 2, same day (fifth self-compact): the audit's fixes, the fix that broke the boot, and the mount table
+
+**What this stretch was.** Close audit round 1 on the libc patches, then the Territory
+mount-table fix the operator chose over a fifth cap raise. Branch `browser-b0`, still local;
+`main` is untouched at `47ba3295` and stays that way until the ci fleet is green.
+
+*Every new prover leg was measured RED before it was trusted.* On the old-libc image, from a
+login session: `sysconf(_SC_OPEN_MAX)` = `2116292` with `errno=38` (F1 -- stack residue, errno
+clobbered); the new stack pin GREEN, and RED against a libc whose mirror I sabotaged by
+linking a 2 MiB `pthread_getattr_np.o` ahead of `libc.a` (`libc [0x7fe00000, ...) kernel
+[0x7ff00000, ...)`) -- the control F3 said the old pin could not pass; `tmpfile()` leaving
+`during=1 nlink=1 after_close=1`, then `2` on the second run (F2). F4's leg could not be run
+that way (it needs joey's post-service perm); its discrimination rests on the model below and
+is said so in the closed list rather than assumed.
+
+*The audit's own suggested fix broke the boot, and that was the most useful thing that
+happened all day.* F2 said `tmpfile()` never unlinks because it issues a raw sentinel
+syscall; use the public `unlink()`. I did, and the boot went RED -- not in the tmpfile leg
+but one leg later: `FAIL scan EOF (errno 2)`. I had a hypothesis in one minute and did not
+trust it; I put the evidence in the prover instead: `fgetc=-1 feof=0 ferror=1 errno=2; raw
+read=-1 errno=2`. A plain `read()` at EOF of an unlinked-but-open file returns ENOENT. The
+kernel only forwards it; the data bytes had come from the Larder's own-write pages, so the
+FIRST wire read was the EOF probe, which is why a short read-back passed. The refusal is
+Stratum's and is deliberate -- `specs/fid.tla` IOReject, `verify_fresh_snapshot`. **On this
+root filesystem an open file does not outlive its last name.** So the prover leg that had
+claimed "the fid survives the unlink" since patch 0024 was green for one reason only: libc
+never issued the unlink. One false green was hiding a leak AND a semantic. `tmpfile()` is now
+delete-on-close (the name goes at `fclose()` through `f->close`, and at a normal `exit()`
+through a weak hook at the end of `__stdio_exit`); measured `during=1 nlink=1 after_close=0`,
+twice. The bigger question -- every POSIX program that unlinks a file it keeps using loses
+it here -- is NOT mine to settle and is queued for the operator.
+
+*A wrong turn of my own, caught by somebody else's instrument.* F9 suggested buffering small
+`fread`s as upstream's `readv` did. I generalised 0035's refill arm and wrote the boundary as
+`len >= buf_size`. The auditor had left a differential model of the stdio read state machine
+in the scratchpad; I added my arm to it as a third variant before building anything. 1889 of
+2000 trials failed at `buf_size == 1`, none at any other size: a one-byte request on a
+one-byte buffer took the DIRECT arm and lost the pushback slot -- 0002's original defect,
+reintroduced at exactly one size. `>` gives 0 of 32000 against 26496 of 32000 for the 0002
+backend on the same trials. The prover's scan leg now runs at three buffer sizes (default,
+and `setvbuf` of 9 and 10 bytes -- stream buffers of one and two) so the FILE, not just the
+model, holds the boundary.
+
+*I wrote a sweep rule and then ran it.* F4 (stdio backends hand a Pouch socket fd to the
+kernel raw: `fdopen(sock)` never worked, `fclose` stranded one of eight slots) is fixed in
+patch 0038. The dossier sentence I wrote -- "sweep every site that passes an fd to a raw
+syscall, not every public function that takes one" -- was a prescription, so I followed it
+before moving on. My first write-up of the result was wrong (I claimed `fcntl`/`dup` fail
+with EBADF on a socket fd; the table says their numbers are sentinel-parked for EVERY fd,
+ENOSYS), caught by reading `bits/syscall.h.in` instead of my summary of it. Recorded OPEN:
+no `fcntl(F_SETFL, O_NONBLOCK)`, no `readv`/`writev`, for any fd.
+
+*The mount table, with ground truth first.* `/proc/<pid>/ns` of a login session: 23 entries,
+the first seven the kproc boot generation (`/srv #s`, `/proc #p`, `/ctl #C`, `/dev #d`,
+`/hw #H`, `/hw/pci #P`, `/env #E`) that joey's pivot orphaned. They cannot be unmounted --
+`unmount` takes a RESOLVED mount point and nothing can name them -- and `territory_clone`
+copies them into every Proc. 23 + viv's 10 > 32. The design (ARCH 9.6.10, scripture commit
+`e3fc226a` before any code): at the root swap, drop entries whose mount point lies in a
+device instance unreachable from the new root. Reading the resolver first changed the
+design twice. (1) `..` never reaches `Dev.walk` -- it pops stalk's in-call trail -- so
+resolution is downward-only and "reachable" has an exact meaning. (2) joey binds the OLD
+devramfs root at `/bin` after its pivot, so the "orphans" are in fact reachable today as
+`/bin/proc`, `/bin/dev/cons`, `/bin/srv`; and `/hw/pci` works post-pivot only because the
+orphaned entry is keyed on a directory the `/hw` re-graft makes reachable again. ARCH has
+called that re-graft "a v1.x seam" for months while it worked by accident. The shed ends the
+generation at the swap; joey now re-grafts `/hw/pci` on purpose. The per-instance rule has
+one Dev that breaks its premise -- `devenv` stamps the CALLER's devno on every walk -- so
+`Dev.devno_per_walker` makes the closure match it on `dc` alone. A small new spec,
+`territory_shed.tla`: clean 7614 states; the tempting non-transitive rule (keep only the new
+root's own tree) violates `ShedLosesNothing`, the pre-fix kernel violates
+`NoResidueAfterPivot`, and I checked that each buggy cfg fails ITS invariant rather than
+"an" invariant, because the first run reported only a conjunction.
+
+*A fleet scenario that could not see its own failure.* `r5f9-ash`'s "ash still answers"
+controls were `echo ... | tr a-z A-Z` -- which the hosted `ut` answers just as well. When
+`viv run` failed to start, the OUTER shell passed every control and the scenario went red
+three legs later on a symptom that named nothing. Each control now folds `$(uname -s)` into
+its token (ash says LINUX; ut cannot), and the first-prompt check fails at the cause.
+
+*Self-audit note for the Territory round.* Shedding an `MNOEXEC` entry can un-cover a device
+instance that is still reachable through a SECOND, unflagged mount. That is the same
+loosening the ungated `unmount` already gives the same caller, and the Linux phenotype serves
+neither `chroot` nor `mount` -- so a container cannot trigger it. It goes to the prosecutor
+as a named item, not as a closed one.
+
+*Still open from this stretch, each with an owner in the queue:* the unlink-while-open
+semantics (operator); tty canonical reads that drain past the newline, which 0035's
+readahead now makes swallow type-ahead; the missing `fcntl`/`readv`/`writev` surface; the
+kernel's `detach` refusing what lazy `attach` admits above 256 MiB; a boot-time `/tmp` sweep
+for processes that die without `exit()`; the deny-path probe for `sysconf`'s honest `-1`.
+
 ---
+### Addendum 3, same day (sixth self-compact): two audits come back, and both found the thing I had stopped looking at
+
+The SMP gate on `9f7613f0` finished first and clean: 40 / 40 boots, 0 corruption, 0 external-kill, 0 timing, 0 other (default + UBSan, smp4 + smp8). The ten existing `territory.tla` buggy cfgs were re-run and all still violate. Then the two prosecutors reported, both Fable 5.1 with `MODEL(start) == MODEL(end)`, and the pattern across them is the entry.
+
+**The Territory shed: 0 P0 / 1 P1 / 1 P2 / 6 P3, and the P1 and the P2 are one defect seen twice.** F1: the closure was seeded from the new root's own `(dc, devno)`. An `O_PATH` open of a UNION directory has member[0]'s identity and carries the union's mount point in `union_snap->point`; `chroot` takes exactly such handles, and stalk routes every first component from a union base through the entries keyed AT THE POINT -- which lives in the tree the union was mounted in. So `t_chroot` into `/bin`, a union in the default image, would have shed the union's own two entries: every name `ENOENT`, `open("/")` landing on the covered Stratum directory. No in-tree caller does it. F2 is why I did not see it: `specs/territory_shed.tla` stated `ShedLosesNothing` against the same closure `Keep` was built from. The auditor replaced that closure with `{root}` and with "every tree" and TLC reported no error both times -- the module could not fail for ANY rule, and my two buggy cfgs only detected a mismatch between `Keep` and `Reach`, not an unsound `Reach`. It is the spec-level form of the false-green prover leg from Addendum 2, written by the same hand the same day. My self-audit, run while the agent was running, re-derived the unmount parity, the fd-relative change and the assigner sets and found nothing; it asked "what can a resolution HOLD" and never "what does the resolver CONSULT at the base without walking to it". That second question is now prosecution item (8) in the audit row.
+
+The rewrite makes the ground truth operational: a WALKER (start in the root's tree and, for a union root, the point's tree; cross a mount whose point lives where it stands; restamp within a per-walker Dev; never up) that shares no operator with the closure the rule computes. Same-tree binds and same-tree root swaps are explored now (the first version excluded both, i.e. the commonest real mounts). Clean at 744,864 distinct states, 793,408 with a per-walker Dev; five buggy cfgs each fail their OWN invariant (`nontransitive`, `no_union_seed` = F1, `undeclared_per_walker`, `dotdot_escapes` = the I-28 premise as an executable dependency, `keeps_all`); and three sabotages of the closure in scratch copies -- rule too small, rule = every tree, truth too small -- each fail, which is precisely the property the first module lacked. One limit is stated in the module rather than hidden: a truth closure that is too LARGE only weakens the completeness half, and nothing pins it from above. Scripture first (`453cea89`), then the code: the point's instance is a second seed, `reach[]` is `PGRP_MAX_MOUNTS + 2` with an overflow extinction, and a kernel test lands exactly on that bound (2 seeds + 32 chained sources). The union-root test has its control one variable away -- the same root identity with no snap sheds everything -- so it cannot be satisfied by a shed that keeps everything.
+
+The P3s were mostly sentences. The cap was raised FOUR times (8 -> 12 -> 16 -> 20 -> 32; I had written three in ARCH and a step that never existed in the dossier -- `git log -G` settles it). `/tmp` is ut's bind, not login's. viv makes up to 11 mounts, not 10, so the margin is four, not five. ARCH 9.4 and `kernel/joey.c` still called the `/hw/pci` re-graft "a v1.x seam" two hundred lines from the section that closes it. `spoor.h` still said "ONLY `spoor_readdir_run` consults" the union snap, false since UM-8c F5 -- the stale comment that hid F1's dependency, and the Spoor dossier's struct listing had no `union_snap` field at all. One P3 was code: `SYS_PIVOT_ROOT` had no directory gate while `SYS_CHROOT` did, and with the shed a pivot onto a pipe strips the table for good instead of wedging the Proc until it pivots back. One `sys_lookup_root_source` now serves both doors, with deny-path legs for both in `usr/symlink-probe` (a boot that merely succeeds says nothing about whether a gate is wired).
+
+**The libc round 2: 0 P0 / 0 P1 / 2 P2 / 7 P3.** The good news was earned the hard way: the auditor rebuilt the series, proved the device's libc byte-identical to it, and re-ran 0035 against the REAL patched musl sources (not a transliteration) over nine buffer sizes -- 0 failures in 288,000 trials, with both positive controls discriminating (my `>=` first draft: 1669 / 2000 at `buf_size == 1`, 0 elsewhere). It also recorded that its first run showed 12 failures that were its own reference's fault (musl's `%d` consumes a sign and then match-fails) and fixed the reference, not the subject -- the checker-checking discipline, applied to itself.
+
+The findings, again, were a surviving SIBLING and FALSE SENTENCES. F1: `ualarm()` returns the `it_old` a failed `setitimer` never wrote -- the sixth member of the class 0037 claimed to have swept, and my own closed list said "`alarm/ualarm` return 0", true of `alarm()` only because upstream happened to write `old = { 0 }` there. F2 is the one worth the most: a pouch socket fd is `0x40000000 | slot`, and upstream's `FD_SET(d, s)` indexes `fds_bits[d / 64]` with no bound, so `FD_SET(sock, &set)` is a store 128 MiB past the set, in APPLICATION code, before libc is entered. Pre-existing -- but the census paragraph I added in round 1 said every remaining tag-unaware call "FAILS VISIBLY", and the census method ("every site that passes an fd to a raw syscall") cannot see a call that takes a BITMAP or an ARRAY. New 0039 is the honest minimum -- the `FD_*` macros `abort()` with a message outside `[0, FD_SETSIZE)`, glibc's `__fdelt_chk`; `ppoll()` goes through the tag-aware `poll()` -- and says in its own header that it is not the fix. The fix is socket fds that are small integers, which retires the tag from every fd-consuming call; that is a redesign of 0006 / 0016 with its own audit, recorded as owed. (The macro shape matters: a `?:` form made every `FD_SET` statement an unused-value warning, which is a build break for any port with `-Werror`; the comma form keeps upstream's value.)
+
+0036 -- the patch written after the suggested fix broke the boot -- had its locking wrong twice, under comments asserting the opposite. It held `tmp_lock` across close + unlink, four 9P round trips that are each a note-delivery point: a handler calling `exit()` there meets its own lock in a threaded program and, single-threaded, finds the node unlisted with the name still on disk. And the exit sweep took the lock and kept it, so a thread that had just `open()`ed blocked for ever holding a name the sweep never saw -- "cannot miss a name that is already on disk", said the header. Restructured: the lock is never held across a syscall; `fclose()` closes and unlinks while STILL LISTED and unlists last; the sweep sets `exiting`, drops the lock and walks a frozen list; `tmpfile()` mallocs first and removes its own file if `exiting`. The header now says "best effort" and names the residual window. F5 was a link-closure defect no prover can see: `tmpfile.o` did not pull `__stdio_exit.o`, so a program using `tmpfile()` through `fileno()` alone exited through the weak dummy -- but anything that prints links `__towrite.o`, so every test program is covered by accident. F9, adjacent and pre-existing: 0030 emulated `O_APPEND` with one seek at open under a comment asking for "a v1.x omode bit"; the bit arrived five weeks later with VIVARIUM 6.27 and nobody told Pouch, so `fopen("a+")`, a seek, then a write landed MID-FILE. New 0040 passes it.
+
+The prover gaps (F6) were each one line and each the same shape: the tmpfile count legs asserted only `n == before` with no positive control (a counter blind to the name passes on a libc that leaks -- now `before + 1` while the stream is open); the `tmpleak` child returned 0, the same code a full run returns (now 42); joey matched `"<name>: exit 0"`, which a stale binary prints too (now a LEG CENSUS per prover, so adding a leg means naming it in both places); and the sockets prover's 37 diagnostics went to fd 2, which joey never installs -- while on the very defect that leg exists for, the failure path joined a server thread blocked in `read()`, so RED would have arrived as a reap deadline with no line.
+
+P-4 deserves its own sentence. The series header, the MOC and the dossier all said the boundary line is "enforced by review against the UPPER/LOWER/SEAM inventory in `docs/reference/78-pouch.md`". That file is an absorbed stub. The inventory exists nowhere and never did, while the series header lists `stdio` as upper half above five patches to `src/stdio`. The boundary is now DERIVED -- one `grep` over the patches' `+++ b/` lines -- and a patch that adds a directory to that list is the review event.
+
+**What the two rounds have in common, because it is the reusable part.** Neither found a defect in the mechanism I was most worried about (the closure arithmetic; 0035's arms). Both found defects one step to the side of a thing I had just fixed and a comment, written by me that day, saying the step to the side was covered. Round 1's libc audit said the same. The generative step writes the reassuring sentence at the moment it is least entitled to it.
+
+State at the time of writing: scripture `453cea89` + the fix batch `2a794360` on local `browser-b0`, syntax-checked, NOT built or booted; the 40-patch series applies to pristine musl with zero fuzz. One combined gate (from-scratch sysroot, suite, ci fleet, SMP gate) is next, then a round 3 on the 0036 restructure and a round 2 on the shed fix. Nothing has landed on `main`.
+
+### Addendum 4, same day (seventh self-compact): the gate went red on my own prover, and the honest fix was three defects deep
+
+**What the gate said.** Stage B of the combined gate at `1de0692a` came back RED on both halves: ci fleet 15 of 77
+scenarios, SMP gate 17 OTHER of 40 boots. I classified before theorizing: 57 of the fleet's 58 failed boots and 17
+of the SMP gate's 17 carry one line, `client: ppoll(socket) = 1 revents=0x18` -- the ppoll leg I had added to
+`pouch-hello-sockets` that morning, which libc audit r3 had already called a scheduling race (F1). 0 corruption,
+0 external-kill, 0 timing. Under TCG the server thread consumes the request first ~98% of the time; under HVF
+usually not -- which is the whole reason `tools/test.sh`, one HVF boot, had been green. A leg that passes on one
+boot and fails on 57 is not a flaky leg, it is a leg whose green was the accident.
+
+The 58th failure was a different animal and I ran it down rather than let the retry absorb it:
+`im1-sak-lever` answered `active` to its second Ctrl-A b. corvus prints `trusted path: done` INSIDE the episode
+and calls END afterwards (`usr/corvus/src/main.rs:4145`), and the scenario used that line as its END witness, so
+the next BREAK could land in the still-open episode -- where `active` is the designed answer. A race between the
+script and corvus, not in the kernel. It now waits for the kernel's `cons: trusted episode END`.
+
+**Why not the one-line fix.** The auditor's minimum for the kernel half (F2) was to fail closed: `POLLNVAL` for a
+client endpoint. I did not take it, for a reason specific to this leg: a raw tagged fd -- the LIBC defect 0039
+fixes -- also answers `POLLNVAL`, so under the stub the leg could no longer tell the libc fix from its absence. And
+every event-driven port, which is the browser arc's entire IPC layer, would still have no readiness source. So the
+full client arm, scripture first (`6684e7da`).
+
+**What reading srvconn.c end to end found, that nobody had asked about.** (1) The wake set was incomplete in BOTH
+directions. Only c2s fill and teardown walked `cn->poll_list` (plus `srvconn_io_nonblock`, which walked it for all
+four edges). So besides the client never waking on its reply, a nonblocking SERVER that polled `POLLOUT` after
+`EAGAIN` was never woken by a blocking client drain. A comment in `srvconn_server_send` argued the wake away by
+reasoning about the wrong poller. (2) Making one list serve four edges for two endpoints means a walk is noise for
+some pollers -- and `sys_poll_for_proc` answered an empty post-wake re-sample by RETURNING 0. `poll(fd, 10 s)`
+reported a timeout after microseconds whenever a second reader won the bytes; `poll(-1)` returned 0, which POSIX
+never permits. That defect predates everything here. `specs/poll.tla` was green over it for its whole life because
+it modeled readiness as a monotonic edge and a flag as a verdict (`FlagImpliesReady`): the state in which the code
+was wrong did not exist in the model. Same lesson as the shed spec this morning, different shape -- that one
+compared a rule with itself, this one had abstracted away the only axis the bug lived on.
+
+So the spec was extended first: `Retract`, `OtherEvent`, a `seen` sample separate from the flag, the re-arm loop
+with its one sound order (clear THEN sample) and its own deadline test. Two properties retired as false by design,
+`NoSpuriousZero` + `StableReadyReturns` added, two buggy cfgs. I sabotaged both liveness properties in scratch
+before trusting them: deleting the loop's `Expired` test violates `PollTerminates` (tsleep prefers a set flag to a
+passed deadline, so a producer that never stops walking holds the poller forever), and `BUGGY_NO_WAKE` violates
+`StableReadyReturns`.
+
+**The libc half** became patch 0041: the kernel's rows stay mirror images and pipe-like (what the native 9P servers
+are written to); pouch `poll()` gives a CONNECTED AF_UNIX slot the stream-socket shape -- a peer's close is
+`POLLIN|POLLHUP`, no `POLLERR` -- because the loop every port has (`POLLIN`? read; 0 = closed) never terminates on
+`POLLHUP` alone. Not covered and written down: an ACCEPTED socket is untagged by 0006's design.
+
+**The prover leg, rebuilt so no schedule can turn it green over a broken kernel.** The client polls only AFTER a
+barrier the server releases once it has CONSUMED the request; the server replies; the connection stays open until
+the client has polled; exactly `POLLIN` required. Then the close: exactly `POLLIN|POLLHUP`, then EOF.
+
+**Shed r2 in the same batch.** F1 was the better finding: round 1's correction ("a union dirfd whose entries were
+shed answers ENOENT") was true for a NAME and false for `"."` -- the zero-component walk cloned the union's point,
+found nothing mounted there, and returned the directory the union had COVERED. Reachable with no shed at all
+(`unmount("/")` twice, `open("/")`), so it predates #80. Rule: the point is consulted only while it hosts a member;
+the zero-component half is a post-condition of the cross, so a peer Thread's unmount opens no window.
+
+**Controls, measured.** Sabotaged kernel "poll" (pre-fix return-on-wake, no s2c walks, server-end sampling): 4 of
+the 5 new `poll.*` tests FAIL, suite 1590/1594 -- and the fifth, `poll.timeout_survives_a_busy_list`, PASSES under
+it, correctly: that test pins the loop's deadline bound, which this sabotage does not touch. It gets its own
+sabotage (running as I write). Sabotaged kernel "union" (no dissolved-union rule): exactly the four dissolved-union
+probe legs FAIL while the controls and the r1-F1 seed legs pass -- and the kernel suite stayed 1594/1594, which told
+me no UNIT test covered the rule; `stalk.union_dissolved_degrades` exists now.
+
+**A trap found by changing the measuring method.** Applying the series under `--fuzz=0` instead of build.sh's
+flags rejected 0024's last hunk. Its patch FILE had no trailing newline; BSD `patch` silently spends fuzz on the
+final context line and prints no "with fuzz" message, and `git apply` calls the file corrupt. Every "zero fuzz"
+claim made about this series -- mine and two auditors' -- was made with an instrument that could not see it.
+Fixed; `tools/check-patch-hunks.py` fails the class now, negative-controlled.
+
+**Exactly what is NOT done.** Nothing in this addendum is gated: the fleet + SMP gate have not run on the fixed
+tree, and rounds 4 (libc + the new kernel poll surface) and 3 (shed) have not been spawned. Tracked, not fixed:
+Stratum's O_APPEND is stat-then-write (two appenders clobber -- ours, enqueued), the accepted-socket shape, two
+union resolver gaps, the exact union seed. `main` is still `47ba3295`.
+
+### Addendum 5, same day (eighth self-compact): the test that failed on the fixed kernel, and the sabotage that passed
+
+**The fix was wrong, and its own test said so first.** The verification run I had left in flight at the compaction
+(`5807bd9f`) came back `1594/1595`: `stalk.union_dissolved_degrades` -- the kernel test I had written that morning for
+shed round 2's finding -- failed on the UNSABOTAGED kernel with `dissolved: "." still resolves`. The rule ("a
+dissolved union degrades to member[0], never to the covered directory") cloned `base` for the degrade. A `STALK_OPEN`
+union handle is member[0] OPENED, and the fixture refuses to walk an opened Spoor because Stratum does (`h_walk`:
+`is_open` -> EINVAL, the zero-element clone included). While a union lives this never shows: every resolution leaves
+through the point. The on-device probe stages had been green for the dullest reason available -- their members are
+`/proc` and `/ctl`, kernel Devs that walk an opened Spoor without complaint. So the rule held on the Devs I tested and
+failed on the one class a real union would be made of. What caught it was the fixture's author (UM round 2) having
+made the double refuse what production refuses; the lesson is in that comment, not in my diligence. Fixed at
+`237ba793`: both dissolved sites resolve from `stalk_union_handle_walkable(base)`, the UNOPENED clone of that member
+which the snapshot already retains for the readdir dedup probe -- matched by identity, never by index, because the
+snapshot skips a member it could not open. `STALK_MOUNT` still keys the point.
+
+**The sabotage that passed.** The same run booted a kernel with the re-arm loop's own deadline test removed, to
+RED-before `poll.timeout_survives_a_busy_list`. It PASSED. `tsleep` prefers a set flag to a passed deadline, so the
+defect needs a walk to land between the loop's clear and `tsleep`'s cond check on EVERY iteration past the deadline;
+my producer was the test thread doing send/recv between yields, which hits that window only by luck. I had written
+in the dossier that the test "cannot false-fail -- it can only fail to discriminate", which was a true sentence
+standing in for the measurement I had not taken. Rebuilt: the producer is the polled object itself, a test Dev whose
+`.poll` registers and then walks its own hook list on every sample, never ready. Every re-sample re-flags the hook
+inside the window, deterministically. The walking stops after 1 s so a kernel without the test still returns instead
+of spinning a CPU for the rest of the suite, and the assertion is about WHEN the last sample happened (50 ms vs 1 s).
+The `deadline` sabotage now fails it at that assertion.
+
+**A second resolver defect, found by reading three lines further.** Fixing the degrade meant reading the `..` arm:
+`if (depth > 0) spoor_clunk(trail[--depth])`. A base that is itself a mount point crosses BEFORE the component loop
+and its mounted root is pushed as `trail[0]`; a `..` at the bottom popped it, and the next component was walked from
+the uncrossed base -- the directory the mount COVERS. `"../x"` read under a mount that `"x"` read over. Pre-existing,
+unreported by four audit rounds on this file, and the comment twenty lines below it ("the base case was already
+proven not-a-mount by the base cross above") was true only until such a pop. I wrote the test first and rode its
+RED-before on the sabotage script (mode `floor` = the old arm): `FAIL: '..' at a crossed base is a no-op: still the
+mount`, 1595/1596; fixed kernel 1596/1596 (`d5c58d76`, `floor_depth`). Not yet audited -- it rides round 3.
+
+**Where the measurements stand** (`d5c58d76`): suite 1596/1596; five sabotaged kernels -- `poll`, `union`, `deadline`,
+`walkable`, `floor` -- each fail exactly their own assertion and nothing else; `symlink-probe` 33 checks, 0 failures.
+The combined gate (fleet, then the 40-boot SMP gate) and both follow-up audits (round 4: the kernel poll surface and
+the libc deltas; round 3: shed + stalk, the two new fixes included) were launched together and are running as this
+is written. Two self-audit items are parked until the auditors let go of the files: the re-arm loop re-RESOLVES the
+fd number on each re-sample instead of sampling the object its hook sits on (a sibling close+reopen makes it report
+one object while waiting on another), and `poll.h` tells producers to walk "under the object's lock" where `srvconn.c`
+walks after dropping it -- sound, because the register and the sample share a critical section, but the contract
+should say what is actually required.
+
+### Addendum 6, same day (ninth self-compact, now on Opus 5): both audits came back, and the prosecutor's fix would have leaked the secret
+
+**Fable's credits ran out mid-run.** Both follow-up rounds died at their first line and were re-spawned on Opus 5 with
+the same-family preamble (CLAUDE.md: a dead round goes straight to the fallback). They are same-family reads, independent
+of my reasoning but not of my priors; the tier is noted in both closed lists.
+
+**Shed round 3: 0 P0 / 0 P1 / 1 P2 / 6 P3, all fixed in code (`85649c28`).** The P2 was a bug aux had already fixed on its
+own branch -- `spoor_clone` copied `COPEN`, so any Proc could open `/dev`, walk `consdrain` off it and close the leaf
+to disarm the console renderer's output drain. I cherry-picked aux's fix (`1d00cea7`, `-x`) and wrote the unprivileged
+route as its own test. The miss is the reusable part: the round found what aux's closed H-list already said, because
+main's self-audit never read it. The six P3s were the resolver's remaining union seams -- a live union handle still
+walked in its opened form after `..`, `unmount("/")` unable to name a mounted-over root, a remove caller re-probing
+state the resolver already knew, the dissolved-union rule enforced in stalk but not in two syscall consumers -- and a
+new on-device probe stage (`union-c`) whose members are Stratum directories, the 9P-strict class Addendum 5 showed the
+old stages could not see.
+
+**Poll round 4: 0 P0 / 2 P1 / 1 P2 / 9 P3 -- DIRTY, and the P1 I introduced.** F1: the console chooses a poller's hook
+list by state (a caller frozen by the trusted episode goes on `episode_poll_list`, which the per-byte relay never
+walks), and my re-arm from Addendum 2 kept hooks where the first scan put them. A poller that registered during an
+episode stayed on the episode list after END: `poll(-1)` on the console never saw another keystroke. The auditor's
+proposed fix was to re-register only such a hook. That fix is wrong in a way the auditor's model could not show: a
+poller registered BEFORE the SAK would stay on `poll_list` through the episode and be woken in-kernel once per SECRET
+key byte -- a kernel pass whose CPU cost the caller can time, which is the side channel the episode list exists to
+close. I wrote that half into `cons_poll.tla` first (`NoSecretCadence`, `5f4549d9`), then made every pass
+re-register: unhook everything, drop every retained ref, clear, then call each `.poll` WITH its hook again. The Dev
+re-chooses its list on every pass, and the fd re-resolves with its hook, which also dissolves the S1 item parked at the
+end of Addendum 5.
+
+F2 was the loop never checking death or stop itself. `tsleep`'s die-check and stop detour sit behind its cond test, so
+a producer that sets a flag in every re-sample window keeps every `tsleep` returning `AWOKEN` before either check -- a
+noise-driven `poll(-1)` was unkillable and unstoppable. `poll.tla` gained `dying`/`stop_req`, kept `TSleepCommit` in
+the code's real order (the order IS the bug), and two liveness buggy cfgs that fail `DeathTerminates` and
+`StopHonoured` (`e55b86ef`). One modelling surprise on the way: with unbounded stop/continue the CORRECT model violated
+`DeathTerminates` -- a debugger re-stopping forever can hold a dying thread in tsleep's detour, whose stop test precedes
+its die-check. That is a race the debugger must win every time and belongs to `debug_stop.tla`; the poll model now
+allows one stop per behaviour and says why. What I did not fix, because it is not mine to invent: syscalls run
+IRQ-masked end to end, so a noise-driven poll with nothing else runnable still spins with interrupts off. The loop now
+yields to queued work; a preemption point is the operator's call (`pipe_block_locked` and `chan_role_acquire` share the
+shape).
+
+F3 was older than all of this: the hook-list lock nests under `g_cons.lock`, which the UART RX interrupt takes, and
+`console_mgr` held it plain with interrupts on. An RX interrupt inside its walk spins on `g_cons.lock` while another CPU
+holds `g_cons.lock` spinning on the list lock -- a guest wedge. The vault's own lock note said "never widen this lock to
+irqsave"; the rule was half right (no interrupt should WALK a list) and half wrong (a lock nested under an
+interrupt-taken lock must be masked everywhere). Every list op is irqsave now. There is no deterministic test for it;
+the record says so instead of pretending.
+
+The P3s mostly corrected my own sentences -- "no pouch server polls an accepted socket" (stratumd does), "0039 is the
+series' first public-header patch" (0001 onward edit `bits/syscall.h`), an audit row that said a walk under the
+channel lock inverts the lock order (that nesting IS the order). One was a measurement I had claimed without taking:
+"the series applies with no fuzz/offset/reject line" was a property of `patch`'s quiet output; `--verbose` shows 0029
+two lines off. I re-headed it and made the musl apply `-F 0`, after checking the control both ways -- a perturbed
+context line applies under `-F 2` with exit 0 and fails under `-F 0`. F12 was pre-existing UB in 0005's timeout
+conversion (`tv_sec * 1000` in signed `long long`): `tv_sec = 2^62` wraps to a 0 ms timeout, so a caller meaning
+"forever" got an immediate 0. New patch 0042, and a prover leg with a helper thread whose late byte the call must still
+be parked to receive.
+
+**The sabotage that passed, again, and a test that would have flaked.** Each new test was booted RED on a kernel
+with its own fix reverted (`red3/kernel-sab2.py`, ten modes). Nine failed exactly as designed. The tenth -- the
+c2s-drain walk in `srvconn_server_recv_blocking`, the witness round 4 F9 asked for -- PASSED 1608/1608 with the walk
+removed, and the mechanism is the re-arm itself: without the wake, the poll's TIMEDOUT pass re-samples, finds the
+room the drain made and returns 1/POLLOUT, one second late. The test asserted the result, not the wake. It now
+asserts the return lands within 500 ms of the drain, and the re-run fails it ("still parked 2 s later"). The same
+day's Addendum 5 had the same shape (the deadline sabotage that passed); the reusable rule is that under a
+level-triggered re-sample, a missing wake is rescued by any later sample, so a wake test must pin TIME. Self-audit
+found the other: the privacy test demanded EXACTLY one pass after BEGIN, but BEGIN walks two lists and an idle peer
+may steal the poller between them -- a harmless second pass and a false failure. It now settles on "at least N
+passes, then stable", and the sabotage still fails it. And the union-c probe stage had never been shown to fail at
+all: a failing kernel suite extincts before userspace, so every sabotage boot of the resolver stopped before the
+probe ran. Booted without the in-kernel suite (`--set TESTS=n`), the `walkable` and `livewbase` sabotages fail
+union-c's "back at the base, member[0] is walked unopened" leg and the boot dies at symlink-probe.
+
+MEASUREMENTS
+
+## gate-r8a @78595d93 (22:23 CEST) -- the sabotage REDs, all as predicted
+Each pair baked + booted with the sabotage applied (red-k.sh), tree restored
+after each (r8-red-treestate.txt empty):
+- backstop+onemember 1610/1613: poll.backstop_sleeps_through_noise ("seen asleep
+  while the producer walked"), poll.backstop_keeps_the_deadline ("noise drove the
+  poller into the backstop"), stalk.union_one_member_creates_alike.
+- backoffzero+mountunion 1610/1613: sleeps_through_noise ("fires again and
+  again"), keeps_the_deadline ("AT its deadline"), stalk.mount_names_crossed_union_base.
+- backoffhooked+unbump 1611/1613: sleeps_through_noise ("holds NO hook"),
+  devdev.spawn_unbump_runs_close.
+- deadline+pointfblive 1611/1613: poll.timeout_survives_a_busy_list,
+  stalk.union_dissolved_point_unreachable.
+- loopdie+loopstop 1611/1613: the death + stop noise tests.
+- rename2 (TESTS=n): symlink-probe union-c 21 checks / 2 failures.
+Owed: teardownwalk (poll.devsrv_client_wakes_on_teardown) at the next bake.
+
+## A log line that cost five investigations
+`joey: pouch-smoke spawn FAILED` x2 on every ci boot: the generic smoke core's
+label, emitted when the OPTIONAL venus-prove / vk-sdl-prove binaries are absent.
+JOURNAL.md records five separate sessions stopping to classify it (1339, 2413,
+3001, 3588, 4025) and none fixing the label. Fixed: the core now prints
+`joey: spawn <name> FAILED (absent from this image, or refused)`.
+
+### Addendum 7, same day (tenth self-compact): the backstop that bounded the wrong thing, the property that could not fail, and the point
+
+**The last addendum's measurements name a `backstop` they never explain.** Round 5's F1 made round 4's parting note
+concrete: syscalls run IRQ-masked end to end, so a `poll(-1)` driven by noise spins a CPU with interrupts off, and
+every ingredient is unprivileged -- a pipe, a writer, a reader, and a poller registered with `events = 0` so it is
+woken by a wake it can never satisfy. I fixed it with a per-thread spin budget: after N fruitless passes the poller
+stops re-arming immediately and really sleeps for 1 ms, and a real sleep unmasks.
+
+**Round 6 came back 0 P0 / 0 P1 / 0 P2 / 2 P3, and the finding that mattered was my own.** The backstop keys on the
+THREAD; the obligation belongs to the CPU. Put two masked pollers on one CPU and each one hits its own budget, each
+one really sleeps -- and hands the CPU straight to the other through `sched()` *inside* the masked syscall. Neither
+thread ever returns to EL0, so neither ever unmasks, and the CPU serves no interrupt for as long as the pair is fed.
+K = 1 is safe. K >= 2 is not, and nothing in the mechanism notices the difference. A per-CPU backoff does not rescue
+it either: `g_timerwait` is global and `timerwait_tick` runs on every CPU's tick, so another CPU expires the backoff
+this one is counting on; with K pollers and a pass cost at or above the backoff period the CPU stays saturated with
+masked passes. The general statement is the useful one: **a sleep bounds the RATE of masked passes and never the
+masked SPAN.**
+
+**The operator asked two questions I had not earned the right to skip.** First, whether I had run a full research
+battery -- I had not; I had reasoned from memory, and said so, then ran one. The construct turns out to be standard
+practice with a name. seL4's `preemptionPoint()` polls `isIRQPending()` and restarts the syscall, never unmasking;
+Fiasco.OC's is literally `Proc::preemption_point(){ sti(); irq_chance(); cli(); }`; NOVA's is `daifclr` / `daifset`
+around a hazard check; and arm64 Linux's KVM run loop transiently unmasks with exactly `local_irq_enable(); isb();
+local_irq_disable();`. What no peer shares is the pair of traits that makes it load-bearing HERE -- syscall bodies
+masked from EL0 entry to return, AND blocking loops inside them. Our own heritage does not: 9front's `dosyscall`
+calls `spllo()`. Second, how I had hit it in practice. I had not. It came from reading the code and was never
+reproduced -- the honest answer, and the reason the formal model below matters more than a demo would have.
+
+**Then the operator asked where this architecture came from, and the answer is that nobody chose it.** Traced through
+git, the archived scripture, the vault and the JSONL: Phase 0 (`bc96ce55`, ARCH 8.1) deferred kernel PREEMPTION to
+Phase 7. P3-Ec (`48dfc5c4`) wired the SVC path and simply never unmasked -- so the deferral of *preemption* was built
+as *interrupts off*, which is a different property, and the difference was never written down. Every later race was
+then fixed by masking more (#713, #104), and #359 (`ce7bd352`) recorded the accident in ARCH 8.11 as a fact of the
+design. The Phase-7 deliverable that was supposed to correct it ("Kernel preemption enabled", ROADMAP:1091) never
+reached `phase7-status.md`, so no status doc has ever owed it. Scripture now says all of this in 8.1's as-built note,
+and the memory carries it so the next instance does not have to re-derive it.
+
+**The operator's ruling: the point now, the model next.** A preemption point in poll's loop today, and ARCH 8.1 built
+as written -- syscall bodies with interrupts ON, still non-preemptible -- as its own spec-first audited chunk before
+the F3-F9 browser kernel work, which deletes the point when it lands. `sched_preempt_point()` holds `preempt_count`
+first so the #360 gate DEFERS any switch, saves `daif`, `msr daifclr, #2`, `isb`, restores `daif`, drops the count,
+and only then consumes a deferred `need_resched` with `sched()`. It is unconditional, and that is the whole
+difference: a budget's bound is per-thread and does not compose, a point's bound is per-pass and does.
+
+**Round 7: 0 P0 / 0 P1 / 3 P2 / 4 P3, every P2 fixed -- and F2 is the one to read.** The spec property I had written
+for the point was
+
+    IrqLatencyBounded == []<>(pc \in RealSleep \cup {"atpoint"} \cup Terminal)
+
+which is IMPLIED by `[]<>(pc \in RealSleep)` by set inclusion. So the property was satisfied, in full, by the exact
+behaviour its own comment called insufficient -- the round-5 backstop. It had never checked S1 and could not have.
+The deeper defect is structural rather than textual: **a single-poller model cannot carry a composition claim at
+all**, because the thing that fails is what two pollers do to one CPU. `specs/poll_cpu.tla` models that directly --
+K pollers, one CPU, states `ready/run/atpoint/armed/sleep`, `Open == (cur = Idle) \/ (\E p : pc[p] = "atpoint")`,
+and round 5's entire guarantee GRANTED as fairness (`SF_vars(SleepStep(p))`). `CpuServesIrqs == []<>Open` holds with
+the point and is VIOLATED without it, which is S1 as a counterexample rather than as a paragraph. It ships with a
+positive control (`EachPollerSleeps` holds under the sleep-only rule -- so the buggy cfg fails for the right reason)
+and a K=1 control (holds, which is the "K=1 is safe" claim made checkable). The first cut of the module was wrong in
+a way worth recording: it let a poller sleep straight out of `run`, so the adversary could hand the CPU off before
+the point ever fired and the CLEAN cfg failed. The `armed` state exists to enforce the loop's real order -- a pass
+reaches its point before it can sleep again.
+
+**F3: the tests could not witness the mechanism they were named for.** Every test poller already runs with interrupts
+ON, so `point_services_noise` proves the loop makes progress and says nothing about masking. The witness masks
+deliberately: `spin_lock_irqsave(NULL)` (the sanctioned mask-only form, which by design does not touch
+`preempt_count`), spin 3 ms so a timer tick is certainly pending, read `gic_cpu_irq_count(cpu)` and assert it has NOT
+moved -- that is the control, and without it the test would be satisfied by a CPU that was never masked -- then cross
+the point and assert the count HAS moved. Removing the point fails both poll tests; removing the `daifclr` fails the
+witness at its own assertion with the masked control still passing.
+
+**And the third sabotage passed, which is the finding.** I had written the assertion as "drop the daifclr, OR the isb,
+and this fails". Booted with the `isb` removed and the `daifclr` kept, the suite is **1615/1615**. A sabotage that
+passes is a finding, and here it corrects the claim rather than the test: a direct write to PSTATE.DAIF takes effect
+with no barrier at all -- Linux's `__daif_local_irq_enable` is a bare `msr daifclr, #3`, and only the ICC_PMR_EL1
+priority-mask path needs a `pmr_sync()` -- so the `isb` is not what makes the unmask visible. What it buys is a
+synchronization event BETWEEN the two MSRs rather than leaving them adjacent, which is exactly the shape arm64 KVM
+uses to transiently unmask. It stays for that reason and at that cost. Following the correction down found the same
+overclaim in three more places, and the shape of the error is the part worth keeping: **the model was right and the
+prose around it was not.** The architecture gives no bound on when a pending unmasked interrupt is taken, only that it
+is taken in finite time -- so no single crossing can be guaranteed to deliver, and "every interrupt pending at that
+moment is taken" was never true of any implementation of this. What the point actually buys is that the CPU is
+REPEATEDLY interruptible, which is precisely what `poll_cpu.tla` already said (`Open` is "at a point or idle", never
+"an interrupt was taken here") and what the prose had quietly upgraded into a per-pass guarantee. The formal statement
+was the conservative one; four pieces of English drifted past it in the same direction, each one a little more
+confident than the last (`0434a4bc`). The sabotage stays in the script as a NON-discriminating control, labelled as
+one: if it ever goes red, the window got narrower than the architecture allows.
+
+**Two of my own defects, and the one that made a failure out of a success.** The splice that inserted
+`point_keeps_the_deadline` ate its closing brace. And `point_services_noise` took its point baseline before starting
+the poller and its sample baseline after -- a zero-length measurement window whose watch exited on its first check.
+It failed loudly this time, but it could as easily have passed vacuously, which is the failure mode that matters;
+both baselines are now taken together and the watch runs until BOTH counters advance. Worse than either: I reported a
+build green that had failed. My wrapper was `(tools/build.sh ... > log 2>&1; echo "bake exit=$?" >> log)` and I
+captured the wrapper's status, which is the ECHO's. The bake had exited 2 with five compile errors; `test.sh` then
+booted the kernel a PREVIOUS sabotage run had left in `build/`, which duly failed `poll.devsrv_client_wakes_on_teardown`
+-- and I wrote that up as a real regression from my own poll change. It was not. The project's own index already says
+it twice, in two different sentences: a gauge reading zero is satisfied by "it never started", and the one-liner that
+checks the checker is the one nothing reviews.
+
+MEASUREMENTS
+
+## The point @22332ef1 -- the suite, the specs, and four sabotages
+- Kernel suite **1615/1615 PASS** (halcyon worktree, `--config ci`), with
+  `sched.preempt_point_takes_a_pending_irq`, `poll.point_services_noise` and
+  `poll.point_keeps_the_deadline` all PASS.
+- `specs/check-poll.sh` **16/16 as claimed** -- `poll` 2194 distinct states,
+  `poll_notimeout` 968, `poll_cpu` 16, `poll_cpu_one_poller` 4,
+  `poll_cpu_sleep_bound_holds` 12, and `poll_cpu_buggy_sleep_only` violating
+  `CpuServesIrqs` (that is S1, mechanically).
+- Sabotage `nopoint` (the point deleted from poll's loop): 1612/1614, failing
+  BOTH `poll.point_services_noise` and `poll.point_keeps_the_deadline`.
+- Sabotage `nodaifclr` (the point never unmasks): 1614/1615, failing
+  `sched.preempt_point_takes_a_pending_irq` at "the point TAKES the pending
+  interrupt", with the masked control still passing.
+- Sabotage `noisb` (unmask kept, `isb` removed): **1615/1615 PASS** -- the
+  measurement that corrected the claim, not the test.
+- Tree restored clean after every sabotage (`red-k-treestate.txt` empty).
+
+## Where the masked syscall came from (traced 2026-09-22, at the operator's request)
+Phase 0 (`bc96ce55`, ARCH 8.1) deferred kernel PREEMPTION to Phase 7; P3-Ec
+(`48dfc5c4`) wired the SVC path and never unmasked, so non-preemption was built
+as "interrupts off" -- two different properties. Every later race was fixed by
+masking more (#713, #104), and #359 (`ce7bd352`) wrote the accident into ARCH
+8.11 as a fact. The Phase-7 "Kernel preemption enabled" deliverable
+(ROADMAP:1091) never reached `phase7-status.md`. The research battery found no
+other kernel that both masks in syscalls and loops in them; the heritage
+(9front `dosyscall` -> `spllo`) runs syscalls unmasked.
+
+**Still open, and tracked rather than mentioned.** Round 7's F1: nothing caps how many hooks a single
+`poll_waiter_list` can hold, so the PRODUCER's wake walk -- which crosses no point, because it runs in the waker's
+context -- and the per-pass unregister walks are both O(attacker-scaled) and masked. The point bounds the poller's
+half of the problem and not the producer's. It is in `docs/browser-status.md` with its three candidate fixes (round
+4 F8's keyed lists, a per-walk wake cap, an I-32 hooks-per-list axis). Round 7's F5 left a contract half standing:
+the `preempt_count` guard inside the point cannot SEE a mask-only `spin_lock_irqsave(NULL)` region, so a caller who
+crosses a point inside one gets no diagnostic -- documented at the declaration rather than papered over.
+
 ## 2026-09-21 (main, Fable 5.1, effort max) -- taking over a week of another agent's work: the graphical trusted path, the chord nobody could find, and the image that booted two UIs at once
 
 **Where the tree stood.** Claude credits ran out on 09-16; a Codex agent ("Astra")
