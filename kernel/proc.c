@@ -1271,6 +1271,32 @@ u32 proc_kstack_peak(const struct Proc *p, int *tid_out, u32 *budget_words) {
     return peak;
 }
 
+// The whole-system peak: the deepest kernel stack ANY live thread has ever
+// reached, with the owning pid/tid. Walks the proc table under its lock, which
+// is also the lifetime pin the per-thread scan needs.
+//
+// Unbudgeted, unlike the /ctl/kstack path: the ONE caller is the boot-complete
+// report, which runs once, on a tree of a few dozen threads, before any
+// untrusted program could have inflated the walk. A budget there would only be
+// able to make the number a silent floor.
+struct kstack_sys_peak { u32 peak; int pid; int tid; };
+
+static int kstack_sys_peak_cb(struct Proc *p, void *arg) {
+    struct kstack_sys_peak *a = (struct kstack_sys_peak *)arg;
+    int tid = 0;
+    u32 used = proc_kstack_peak(p, &tid, NULL);
+    if (used > a->peak) { a->peak = used; a->pid = p->pid; a->tid = tid; }
+    return 0;
+}
+
+u32 proc_kstack_peak_system(int *pid_out, int *tid_out) {
+    struct kstack_sys_peak a = { 0, 0, 0 };
+    proc_for_each(kstack_sys_peak_cb, &a);
+    if (pid_out) *pid_out = a.pid;
+    if (tid_out) *tid_out = a.tid;
+    return a.peak;
+}
+
 // LINEAGE L-3c-2. Defined next to wait_pid_for, whose park loop it mirrors
 // exactly; forward-declared here because rfork_internal's tail is its only
 // caller and sits well above it.

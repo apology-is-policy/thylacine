@@ -1758,6 +1758,26 @@ live latent defect on its own terms: at 86% of the kernel stack with no IRQ
 frame involved, any deepening of the FS path (a deeper union, a longer symlink
 chain, one more wrapper) already overflows into the guard today.
 
+**And the static table is now CORROBORATED by a runtime number, because on its
+own it was a claim about itself** (the audit round's F8). Every boot prints
+`boot-kstack: peak=<bytes> usable=16384 pid=<n> tid=<n>` immediately before the
+banner, read from the per-thread watermark after the whole boot -- exec, 9P,
+the phenotype probes -- has driven the deep paths. The default boot measures
+**peak=10448 of 16384 = 63.8%**, on a phenotype probe's thread.
+
+Read the two numbers for what they are, because they are NOT the same quantity
+and agreement is not the test. 12368 B is the worst case over paths the static
+graph could FOLLOW; 10448 B is the deepest path any thread actually TOOK on one
+boot. Measured below static is the expected relation and confirms nothing by
+itself. What the runtime line buys is a continuous witness: the static figure
+rests on a call graph with 797 unresolved indirect edges and is therefore a
+LOWER bound on the true worst case, so the one observation that would matter is
+a boot whose measured peak EXCEEDS the static bound -- which would prove the
+graph missed an edge. That observation is now taken on every boot rather than
+by hand, which is the only form in which it would ever be taken at all (#245).
+The guard pages remain the safety net under both numbers: an overflow faults
+into a no-access page and extincts, it does not corrupt a neighbour.
+
 #### Two things that are load-bearing only in prose, and get instruments here
 
 - **No assert on interrupt state exists anywhere in the tree** (`irq_disabled`,

@@ -266,6 +266,19 @@ dispositions (the POSIX latitude for a `sigaction` racing an in-flight signal).
 This is the commit half of Design D — the decision half is
 [[sub-kernel-syscall-dispatch]]'s execve, the resolver seed [[sub-kernel-stalk]]'s.
 
+
+### `proc_kstack_peak_system` -- the whole-system stack watermark
+
+Walks the proc table under `g_proc_table_lock` (which is also the lifetime pin
+the per-thread scan needs) and returns the deepest kernel stack ANY live thread
+has ever reached, with the owning pid and tid. Unbudgeted, unlike the
+`/ctl/kstack` path: its one caller is the boot-complete report, which runs once
+on a tree of a few dozen threads before any untrusted program could inflate the
+walk, and a budget there could only turn the number into a silent floor. The
+per-Proc `proc_kstack_peak` it calls DOES take a budget -- see
+[[sub-kernel-thread]] for why the scan's cost is inverted and why that made it
+a masked-window lever.
+
 ## Data structures
 
 `struct Proc` is 392 bytes and no longer holds a page table at all — it holds a

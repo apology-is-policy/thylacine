@@ -176,6 +176,29 @@ test's thread surfaced as a failure in a scheduler test. This is a real narrowin
 of what the suite can observe, taken knowingly, with the multi-boot gate as the
 compensating control.
 
+
+### The boot-complete report carries a kernel-stack witness
+
+`boot_mark_complete` prints `boot-kstack: peak=<bytes> usable=16384 pid=<n>
+tid=<n>` immediately before the `Thylacine boot OK` banner, beside the existing
+`boot-ms:` and `boot-wc:` diagnostics. It reads the whole-system watermark
+after the full boot -- exec, 9P, the phenotype probes -- has driven the deep
+paths, so it is the deepest any thread actually reached rather than a
+worst-case estimate.
+
+It exists because ARCH 8.12's static stack bound rests on a call graph with 797
+unresolved indirect edges and is therefore a LOWER bound on the true worst
+case. The observation that would matter is a boot whose measured peak EXCEEDS
+that bound, which would prove the graph missed an edge -- and an instrument
+reachable only by hand is never reached (#245), so it is taken every boot. The
+kernel prints it rather than anything reading `/ctl/kstack`, because that leaf
+is CAP_HOSTOWNER-gated and a witness needing an elevation is a witness nothing
+routine takes. Default boot measures 10448 of 16384 (63.8%).
+
+The banner contract [[abi-boot-banner]] is UNCHANGED: `Thylacine boot OK` and
+the `EXTINCTION:` prefix are what it pins, and this is an additive diagnostic
+line of the same class as its two neighbours.
+
 ## Data structures
 
 Almost none of its own: a one-shot completion flag, a painted boot stack for
