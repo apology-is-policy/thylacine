@@ -22,6 +22,86 @@ needed the operator.
 
 
 ---
+## 2026-09-22, late evening (aux, Opus 5 1M, effort xhigh) -- the caret bug was mine
+
+The run before this one closed the deck arc and left one thing open, loudly:
+lantern emits `ESC[?25l` and I reported that **the caret still painted in a
+Halcyon tile, cause unknown**. I put that claim in a source comment marked
+MEASURED, a memory note, the MEMORY.md index, the arc note, the entry below, the
+subject line of `1319b4ba` ("and say it does not work"), and my report to the
+operator.
+
+**There is no such defect.** The escape works, and the way it was disproved is
+the part worth keeping.
+
+I started where the note said to start -- whether a visibility-only change emits
+a cursor record at all -- and drove the whole chain on the host, since halcyond's
+lib links both `vt` and `kaua-term`. The probe printed the answer in one run:
+`vt.cursor_visible=false`, **one** CellDiff with zero changed cells and
+`cursor=(0,0,false)`, and `grid.cursor()=(0,0,false)`. Candidate (a) refuted;
+candidate (c) refuted in the same line. `Grid::apply_celldiff` stores the tuple
+verbatim (`grid.rs:175`), `Tile::apply` hands it straight over (`tile.rs:352`),
+and the wire codec is symmetric (`wire.rs:118` writes the byte, `:307` reads it).
+Every link was correct, which is a strong signal that the *claim* was wrong
+rather than the code.
+
+So I checked the evidence instead of the code, and that took one command:
+
+```
+build/ramfs-src/lantern        Sep 22 19:08:50
+build/ramfs.cpio               Sep 22 19:08:51
+build/lantern-rich-slide1.png  Sep 22 19:09:50
+```
+
+The captures **postdate** the escape-bearing binary, so they are from the right
+run -- and opening them shows **no caret** on any of the three slide frames.
+Better, `lantern-rich-blank.png` from the same run four seconds earlier shows
+**two** carets, the ut prompts in both panes: the positive control that rules out
+"the caret machinery was dead that run".
+
+**How I got it wrong is precise, and it is not the obvious one.** I did check for
+staleness and said so in the note: binary rebuilt, escape present in the staged
+binary, staged file byte-identical to the build output. **Every one of those is a
+check on the INPUT. None is a check on the EVIDENCE.** The caret I "saw" was from
+the *previous* run, whose build correctly emitted no escape; the observation was
+carried across the rebuild while the freshness check was performed on the
+artifact beside it. Ruling out staleness on the binary and then reasoning from a
+remembered screenshot is a recalled measurement wearing a verified one's clothes.
+Hedging the *cause* ("the reason is not known") did not help, because the false
+part was the *effect*, stated flat.
+
+**The durable fix is not a better screenshot, because no screenshot can settle
+this.** The caret BLINKS (`motion::caret_visible`, ~2 steps/sec), so a frame
+without one may be a frame caught mid-step and a frame with one proves only that
+instant -- the negative and positive readings are both unsound from a single
+capture. `dectcem_travels_the_whole_seam_to_the_caret_predicate` (`tile.rs`)
+replaces it: vt -> Producer -> **wire encode/parse round-trip** -> Grid ->
+`Tile::paints_caret`, deterministic, milliseconds. The round-trip is in there
+because that is the one link with two independently-written sides.
+
+It passed on the first run, which proves nothing about its power, so both legs
+were sabotaged: forcing the wire's visible byte to 1 fails it at the round-trip
+assert, and forcing `Grid`'s cursor store to `true` fails it at the predicate --
+different lines, so the test is not resting on one of them. It also pins that
+**SGR 25 is not DECTCEM** (the `?` carries the meaning) and that the hide
+survives the clear-and-repaint that follows it.
+
+**A trap re-hit inside the investigation, already in the memory index.** The
+first sabotage restore used `mv wire.rs.bak wire.rs`, which restores the file's
+**old mtime** -- so cargo saw nothing newer than its last build and re-ran the
+*sabotaged* artifact against clean source. The failure that produced is
+indistinguishable from a real one. `touch` after restoring; same family as
+"a clean tree is not a clean artifact".
+
+**Landed**: the regression test + the corrections to `usr/lantern/src/lib.rs`,
+`docs/LANTERN-DESIGN.md` §11, the arc memory, and the false bug note deleted in
+favour of [[bug-observation-carried-across-a-rebuild]].
+
+**Posture**: `tools/test-rust.sh` 25 crates / **1501** tests / 0 failing (was
+1500). halcyond lib 326/326. No guest boot was needed or run -- the question was
+answered on the host, which is the point.
+
+---
 ## 2026-09-22, evening (aux, Opus 5 1M, effort xhigh) -- lantern: the deck arc, and five findings that each made it smaller
 
 The operator gives a talk about AI next month and wants the slides to run inside
@@ -193,6 +273,13 @@ implementer assumed must not read the same a month later.
 footer, which is distracting on a projected slide. Hiding it means `ESC[?25l`,
 and whether that reaches halcyond's `paints_caret` is unknown -- so it is
 recorded, not guessed at.
+
+> **Superseded by the entry above (same night).** `ESC[?25l` landed at
+> `1319b4ba` and I then reported it as not working. It does work; the caret in
+> those captures was from THIS build, which had no escape in it, and the
+> observation was carried across the rebuild rather than re-taken. Left standing
+> here because the paragraph is what the run actually believed, and the entry
+> above is what caught it.
 
 **Posture at the close.** SMP gate PASS (5/5 configs, 50 boots, 0 corruption --
 including `default-smp1`, the row main warned might be red). `lantern.exp` 6/6

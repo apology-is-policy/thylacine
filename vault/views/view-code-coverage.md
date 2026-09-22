@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**523 owned · 53 unowned · 576 files (90% owned) · ~14558 unswept lines.**
+**523 owned · 53 unowned · 576 files (90% owned) · ~14554 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **73 files, ~33174 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -75,7 +75,7 @@ Excluded as harness and counted here rather than dropped: **73 files, ~33174 lin
 | usr/pouch-hello | 6 | 17 | 2487 |
 | kernel | 127 | 14 | 1981 |
 | usr/ports | 19 | 5 | 1691 |
-| usr/lantern | 0 | 4 | 1333 |
+| usr/lantern | 0 | 4 | 1329 |
 | usr/quarry | 0 | 1 | 1033 |
 | usr/stratumd-stub | 0 | 1 | 453 |
 | usr/kaua-term | 3 | 1 | 276 |
@@ -138,7 +138,7 @@ Excluded as harness and counted here rather than dropped: **73 files, ~33174 lin
 | usr/lantern/src/deck.rs | 372 |
 | usr/pouch-hello/pouch-hello-fs.c | 350 |
 | usr/pouch-hello/pouch-hello-net.c | 293 |
-| usr/lantern/src/lib.rs | 292 |
+| usr/lantern/src/lib.rs | 288 |
 | kernel/include/thylacine/smp.h | 282 |
 | usr/pouch-hello/pouch-hello.c | 278 |
 | usr/kaua-term/src/cmdline.rs | 276 |

@@ -285,9 +285,23 @@ session at 1280×800 and capturing, not by reading more code
    that would have kept the Operator's Manual's section titles unchanged. The
    operator chose the current rendering, so this is a settled decision and not an
    open question.
-4. **The caret is visible** — a yellow bar below the footer. Distracting on a
-   projected slide. Hiding it means `ESC[?25l`, and whether that reaches
-   halcyond's `paints_caret` is unverified, so it is NOT guessed at here.
+4. **The caret is hidden while presenting** — `ESC[?25l` on entry, `ESC[?25h` on
+   every exit path. A blinking bar under the footer is a desk affordance with
+   nothing to mark on a projected slide.
+
+   The observation in this run's captures was the *opposite* — a caret below the
+   footer — and it was correct for this build, which did not yet emit the escape.
+   That observation was then carried forward past the rebuild and reported at
+   `1319b4ba` as a measured defect of the escape-bearing build, which it was not:
+   the later captures show no caret, and a frame from the same run seconds
+   earlier shows the two ut prompts' carets, so the caret machinery was demonstrably
+   alive. Because the caret **blinks**, no single frame settles this in either
+   direction, so the durable answer is a host test rather than a capture:
+   `halcyond::tile::tests::dectcem_travels_the_whole_seam_to_the_caret_predicate`
+   drives the escape through vt → the kaua-term Producer → a wire
+   encode/parse round-trip → the Grid → `Tile::paints_caret`, with both sabotage
+   legs verified (a forced-visible wire byte and a forced-visible grid store each
+   fail it).
 
 5. **Type size at the default scale is too small for a room** — the body renders
    at the Instrument 15 px and the H1 near 24 px, and the slide fills only the
