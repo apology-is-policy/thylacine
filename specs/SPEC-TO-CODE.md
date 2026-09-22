@@ -2430,3 +2430,45 @@ pty_stop, reader_frame, ...) are recorded per-row in
 | `NoElevatedOutlivesScope` | the union of the above; runtime witnesses `proc.rfork_refused_while_terminating`, `devcap.imperium_nest_refused`, `devcap.further_redeem_keeps_scope` |
 | `FlowOnlyUnderPropagating` / `FlowNeverWidens` | `caps.rfork_flows_under_propagating_scope` / `caps.rfork_no_flow_without_propagating` / `caps.rfork_flow_bounded_by_mask` |
 | `OneScopePerProc` / `ScopeTraitsSetOnce` / `MembersNeverRoot` / `PropagatingIsScopeWide` | `devcap.further_redeem_keeps_scope` (tag + traits kept) + `devcap.imperium_nest_refused` + the rfork inherit (`caps.rfork_inherits_legate_scope`: the ROOT flag never inherits) |
+
+---
+
+## syscall_irqs.tla — ARCH 8.12 (model-first; the impl binding lands WITH the code)
+
+Written before the code, per the spec-first re-enablement recorded in ARCH
+8.12. There is therefore **no action-to-source mapping yet, and this section
+says so rather than inventing one** -- the binding table below is filled in by
+the implementation commit, which is also where each action gets its
+cross-reference comment.
+
+| action | binds to (OWED at the impl commit) |
+|---|---|
+| `Svc` | `arch/arm64/vectors.S` -- the SVC vector's `msr daifset` at exception entry |
+| `EnterBody` | the NEW marker set + the unmask, inside the SVC body |
+| `Tick` / `PreemptCheckIrq` | `preempt_check_irq` + its NEW early return on the marker |
+| `VoluntarySleep` | `sched()` from `sleep` / `tsleep` -- unchanged by this chunk |
+| `LeaveBody` | the re-mask + marker clear, BEFORE `.Lel0_sync_return` |
+| `TailPreempt` | the #107 syscall-return preempt in the EL0-return tail |
+| `OpenEretWindow` / `Eret` | `arch/arm64/vectors.S:126-131` KERNEL_EXIT -- ELR/SPSR then `eret`, under an INHERITED mask |
+
+**What the model does NOT carry, said here so a green reads no larger.** One
+CPU, one thread. No locks -- the reconnaissance measured zero sites where a
+plain lock is taken by both a syscall path and a same-CPU IRQ handler (ARCH
+8.12), so there is nothing for a lock model to discriminate. No stack depth:
+the kernel-stack bound is a MEASUREMENT (`-fstack-usage` over a DWARF-resolved
+call graph), and its runtime guard is the watermark this chunk adds, not a
+spec property.
+
+**It supersedes `poll_cpu.tla`.** That module's stated premise is the masked
+syscall body; when this chunk lands, the premise is false and the module is
+VACUOUS rather than wrong. It and its four cfgs are deleted with
+`sched_preempt_point`, and `CpuGetsItsInterrupts` here is the obligation it
+was carrying (`[]<>Open` there, `[]<>(~masked)` here -- the same sentence about
+the same CPU).
+
+Gate: `specs/check-syscall-irqs.sh`. Two clean cfgs pinned at 11 distinct
+states each; six cfgs that must FAIL, each on its own NAMED property. One of
+those six is not a bug but a CONTROL -- `syscall_irqs_kthread` -- whose
+violation is the pass, and the gate's header says why at length, because
+reading that row as a defect and "fixing" it would delete the only evidence
+that the clean rows mean anything.
