@@ -33,6 +33,7 @@ mirrors:
   - "tools/interactive/lib.exp"
   - "tools/interactive/dap-nora.exp"
   - "tools/interactive/rust-std-hello.exp (EXTINCTION: only — track R's std-on-device gate)"
+  - "tools/interactive/lantern.exp (EXTINCTION: only — the deck presenter's gate)"
   - "tools/interactive/flood-174.exp"
   - "tools/interactive/freeze-172.exp"
   - "tools/interactive/ls-gfx-font.exp"

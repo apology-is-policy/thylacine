@@ -107,6 +107,93 @@ mod tests {
         }
     }
 
+    /// The tokens `tools/interactive/lantern.exp` matches, pinned against the
+    /// SHIPPED slides rather than against a fixture.
+    ///
+    /// A gate token the renderer splits across a line break turns a real pass
+    /// into a TIMEOUT, which reads as a hang rather than as a regression -- the
+    /// most expensive way for a gate to fail. So the tokens are asserted here,
+    /// where a break is a failing test with a name. Both postures are covered
+    /// because they differ in exactly the way that matters: down a pipe there is
+    /// no width and nothing wraps, while a presented deck has a console width
+    /// and its prose IS wrapped. The gate uses body prose only in the first and
+    /// headings and footers in the second, and this is what makes that split
+    /// safe instead of merely intended.
+    #[test]
+    fn slide_tokens_render_contiguously() {
+        const SLIDES: [(&str, &str); 3] = [
+            (include_str!("../deck/01-title.md"), "Beacon slides"),
+            (include_str!("../deck/02-how.md"), "How it works"),
+            (include_str!("../deck/03-keys.md"), "Keys"),
+        ];
+
+        // The shipped manifest names exactly these three, in this order -- which
+        // is what makes the gate's "3 / 3" footer token correct.
+        let d = crate::deck::parse(include_str!("../deck/slides.toml")).expect("the manifest");
+        assert_eq!(d.slides, ["01-title.md", "02-how.md", "03-keys.md"]);
+        assert_eq!(d.slides.len(), SLIDES.len());
+        assert_eq!(d.title.as_deref(), Some("Beacon slides"));
+
+        let rendered = |src: &str, width: Option<usize>| -> alloc::string::String {
+            let mut v: Vec<u8> = Vec::new();
+            manual::render::render(src, beacon::Tier::None, width, &mut |c| {
+                v.extend_from_slice(c)
+            });
+            alloc::string::String::from_utf8(v).expect("the plain tier is UTF-8")
+        };
+
+        for (src, heading) in SLIDES {
+            assert_eq!(
+                manual::format::check(None, src, &mut |_, _| {}),
+                0,
+                "a shipped slide must pass the section checker"
+            );
+            // A heading survives EVERY width, including one narrower than the
+            // heading itself: the renderer does not wrap headings at all.
+            // Measured, not assumed -- asserting it at a comfortable 40 columns
+            // proved nothing, because 40 already exceeds every heading here, so
+            // that assertion could not have failed for the reason it named.
+            for width in [None, Some(40), Some(5)] {
+                assert!(
+                    rendered(src, width).contains(heading),
+                    "heading {:?} split at width {:?}",
+                    heading,
+                    width
+                );
+            }
+        }
+
+        // The positive control the heading assertions need, one variable away: a
+        // BODY token at the same narrow width IS broken up. Without it, every
+        // "survives at width N" above is equally satisfied by a renderer that
+        // ignores `width` entirely -- and then the gate's posture split would
+        // rest on nothing.
+        let body = "renderer already knows how to draw one";
+        assert!(
+            rendered(SLIDES[0].0, None).contains(body),
+            "the control's own premise: the token is contiguous unwrapped"
+        );
+        assert!(
+            !rendered(SLIDES[0].0, Some(5)).contains(body),
+            "width is inert: a body token survived a 5-column wrap, so the \
+             heading assertions above prove nothing about wrapping"
+        );
+
+        // The body tokens leg (b) matches -- the cat posture only, where the
+        // absence of a width is what keeps them contiguous.
+        for (src, token) in [
+            (SLIDES[0].0, "renderer already knows how to draw one"),
+            (SLIDES[1].0, "raw character grid"),
+            (SLIDES[2].0, "keeping the slide on screen"),
+        ] {
+            assert!(
+                rendered(src, None).contains(token),
+                "body token {:?} is not contiguous down a pipe",
+                token
+            );
+        }
+    }
+
     /// The claim `cook` rests on: a Beacon frame never carries an LF, so a
     /// blanket LF -> CR-LF translation cannot corrupt one. Rendered at the
     /// rich tier from a section exercising every construct the format has, and
