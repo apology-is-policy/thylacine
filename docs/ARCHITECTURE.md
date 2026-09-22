@@ -1820,8 +1820,35 @@ thread.** At `-smp 1` there is no peer to run the kthread and no
 `sched_notify_idle_peer` (it returns false at `online <= 1`), so the spin never
 terminates -- exactly as before the chunk. The hang is unchanged, and the fix
 it needs is a blocking wait on a Rendez the kthread's terminal path wakes: a
-spin inside a non-preemptible body can never wait on a thread. Tracked as
-open work; it is a pre-existing defect this chunk neither caused nor closes.
+spin inside a non-preemptible body can never wait on a thread. It is a
+pre-existing defect this chunk neither caused nor closes.
+
+**CLOSED 2026-09-22 by the chunk that followed**, on exactly that shape:
+`Loom.sqpoll_join`, a second Rendez the kthread's terminal wakes after the
+`sqpoll_exited` release store and inside the same masked window, so a joiner
+that observes the flag also observes `state == EXITING`. Two things the
+paragraph above did not know, both measured at the fix.
+
+**It was not a latent hazard. It was a 100 % boot hang at `-smp 1`**, and had
+been one since `15796866` (2026-09-03) put the first EL0 SQPOLL consumer into
+`usr/loom-smoke`, which joey spawns on every boot. One variable separates the
+control from the fix: the pre-fix kernel at `-smp 1` stops with
+`loom-smoke: PASS` as its last log line -- the program's own final print, after
+which the kernel never returns from its at-exit handle close -- and no banner
+inside 120 s. The fixed kernel, same `-smp 1`, reaps it `status=0`, banners,
+and runs 1616/1616.
+
+**Nothing could see it, and that is the part worth keeping.** Every boot gate
+in the tree runs four or eight CPUs -- `tools/test.sh` defaults to `-smp 4`,
+`ci-smp-gate.sh` is smp4/smp8 by construction -- so the single configuration in
+which a spin waiting on a THREAD cannot be rescued by a peer CPU is the single
+configuration nothing boots. A matrix built to stress concurrency is
+structurally blind to the uniprocessor class, and the SMP gate's own motto,
+"single boots lie", is true about SMP races and was read as licence to stop
+booting singles at all. The lesson generalizes past this bug: adding CPUs to a
+gate matrix removes coverage as well as adding it, because a peer CPU is itself
+a rescue mechanism, and a hazard that a rescue mechanism hides is a hazard the
+matrix can no longer observe.
 
 Two further sites this section originally named do not belong in the list at
 all. `arch/arm64/gic.c:239` short-circuits for self one line above the spin

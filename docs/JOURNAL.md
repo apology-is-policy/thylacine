@@ -22,6 +22,122 @@ needed the operator.
 
 
 ---
+## 2026-09-22, later still (main, Opus 5 1M, effort max) -- the loom join: a 100 % boot hang that no gate could see
+
+The first item of the run the operator ratified ("fold the loom fix into the
+identity chunk's run, as its first item"). It was filed as a latent hazard.
+It was not latent.
+
+**What it was.** `loom_free` joined the SQPOLL kthread by SPINNING on
+`sqpoll_exited` -- a flag written by that kthread and nobody else. The join runs
+inside a syscall body, and since ARCH 8.1 a syscall body runs with interrupts ON
+but is still non-preemptible: `preempt_check_irq` sees `Thread.in_syscall` and
+returns without switching. So the timer interrupt the spin was implicitly
+waiting on arrives, is serviced, and changes nothing about which thread holds
+the CPU. **Servicing an interrupt is not scheduling a thread.** At `-smp 1`
+there is no peer CPU to run the kthread either, so the spin could not end.
+
+**It was reachable from an ordinary boot, and had been for 19 days.**
+`usr/loom-smoke` -- which joey spawns on *every* boot -- gained an EL0 SQPOLL
+consumer at `15796866` (2026-09-03). Every `-smp 1` boot since then wedged at
+its exit. The control is one variable and it is unambiguous: the pre-fix kernel
+at `-smp 1` prints `loom-smoke: PASS` as its **last log line** -- the program's
+own final print, after which the kernel never returns from the at-exit handle
+close -- and no banner inside 120 s. The fixed kernel, same `-smp 1`, reaps it
+`status=0`, banners, and runs 1616/1616. Five for five.
+
+**Why nothing saw it, which is the part worth keeping.** Every boot gate in the
+tree runs four or eight CPUs -- `tools/test.sh` defaults to `-smp 4`,
+`ci-smp-gate.sh` was smp4/smp8 by construction. So the one configuration in
+which a thread spinning on another THREAD's write cannot be rescued by a peer
+CPU was the one configuration nothing booted. **A peer CPU is not only extra
+concurrency; it is a rescue mechanism, and a hazard that a rescue mechanism
+hides is a hazard the matrix can no longer observe.** This gate's own motto,
+"single boots lie", is true about SMP races and had been read as licence to stop
+booting singles at all. `default-smp1` is now the matrix's first row, with that
+reasoning written into the script rather than into this entry alone.
+
+**The fix, and the one part that is not obvious.** A second Rendez,
+`Loom.sqpoll_join`, which the kthread's terminal wakes after its `state=EXITING`
+and `sqpoll_exited` release stores and inside the same masked window -- so a
+joiner that observes the flag also observes EXITING, which is what
+`thread_free`'s not-RUNNING gate needs. The subtlety is that `sleep()` REFUSES
+to block a thread whose Proc is group-terminating, and a peer thread closing
+this fd during `exit_group` is exactly such a thread. The refusal cannot be
+honoured: abandoning the join means `thread_free` on a RUNNING kthread, which
+extincts. The at-exit path is already exempt -- `proc_close_handles_at_exit`
+sets `exit_close_active` so `thread_die_pending` reads false, the #68 F1
+mechanism that exists precisely so close hooks which must wait (the 9P Tclunk,
+now this join) behave as a live thread's would -- but the peer-close race is
+not covered by it. Finding that `exit_close_active` already existed is what
+kept this from becoming a new sleep primitive and a scripture fork -- I was one
+step from proposing one.
+
+**My first fix handled that with a second arm, and the audit was right to take
+it away.** I wrote `if (sleep(...) == SLEEP_INTR) sched();` -- yield the CPU and
+re-arm -- and flagged in the prompt that nothing in the tree executes it. The
+prosecutor turned that flag into three findings and one better design: bracket
+the whole join in `exit_close_active` (save/restore, never a bare clear, because
+the at-exit path already owns the flag and clearing it would re-arm the death
+legs for every LATER fd in the same table), whereupon `sleep()` can only return
+`SLEEP_OK` and the arm ceases to exist. One arm, and it is the arm
+`default-smp1` measures. It also sharpened the danger I had understated:
+abandoning the join on a **SLEEPING** kthread passes every `thread_free` gate
+and frees a Thread that later resumes on recycled memory -- a silent UAF, not
+the loud extinction I had written. And it found that my yield-loop's
+termination argument was not the one the code relied on: `pick_next` is strict
+priority by band with no aging at v1.0, so a joiner promoted to INTERACTIVE
+would loop in a band served ahead of the NORMAL-band kthread it waits for.
+
+Two more corrections worth recording. The prompt I wrote asserted that the
+handle-table fork copy bumps the Loom ref, and used that to make the
+single-waiter question hard; the prosecutor re-derived it from
+`handle_slot_may_alias` and found the opposite -- Loom is non-transferable, so
+no child ever holds one and single-waiter holds by construction. **The premise
+was mine and it was wrong**, which is precisely what context independence is
+for. And my new comment claimed the wait was "bounded by the
+LOOM_SQPOLL_IDLE_NS frame-boundary deadline" while the same file, 1800 lines
+down, says a MID-FRAME recv is deliberately NOT deadline-bounded (#841). The
+dossier had copied my claim and `loom.h` carried a pre-existing "the join always
+terminates". All three now say what is true: termination rests on the v1.0
+servers being trusted and prompt -- a trust assumption, not a mechanism.
+
+Counts: **0 P0, 0 P1, 1 P2, 2 P3**, all three fixed rather than deferred, on the
+**OPUS FALLBACK** tier again (Fable still out of credits). `MODEL(start)` ==
+`MODEL(end)`. The prosecutor's own closing note is the honest one to carry
+forward: the absence of findings in the memory-ordering section is worth less
+from a same-family reviewer than it would be from Fable, because that is exactly
+where it would agree with a construction it would also have written.
+
+**The class sweep, because an instance is not a class.** Every `yield`-spin in
+`kernel/` and `arch/`, classified by *what writes the value awaited*:
+`on_cpu` spins (`thread.c:732`, `sched.c:1844`, `proc.c:5504`) wait on an
+in-flight HARDWARE context switch, which completes with no scheduling decision;
+`irqfwd.c:288` and `pci_irq.c:482` wait on an IRQ handler's write and were
+fixed by interrupts-on; `pci_handle.c:539`, `random.c:399` and `cons.c:626` are
+deadline-bounded and fail out; `spinlock.h:116` is ordinary lock contention.
+`loom.c:323` was the only one waiting on a THREAD's write. No second instance.
+That also resolves ARCH 8.12's open "marginal at best" note on `proc.c:5431`:
+it is the `on_cpu` class, and safe.
+
+**Two things I will not claim.** `#791` ("at `-smp 1` joey exits non-zero in
+~45 % of boots", 2026-05-30) is a DIFFERENT bug -- it predates both the spin
+join (`d043f641`, 2026-06-07) and the consumer that made the hang reachable
+(2026-09-03). Its ~45 % rate did not reproduce today (5/5 clean, then the gate
+leg), which is evidence the rate has changed and NOT proof the bug is gone:
+0.55^5 is about 5 %, so five cleans would be unlucky, not impossible. The
+`#791` warning stays in `test.sh` with the measurement appended.
+
+**The wrong turn, caught by the thing put there to catch it.** The previous run
+paid for the lesson "assert EVERY anchor" after a multi-replace silently no-op'd
+the anchors it was not asserting. This run's patch script asserted all of them,
+and the first attempt failed on anchor 2 -- I had transcribed a comment line
+starting at `frame-boundary` when that word ends the *previous* line. Because
+the helper writes only after every anchor matches, `loom.c` was untouched and
+the tree stayed clean. The lesson held the second time it was needed, which is
+the only test of a lesson that counts.
+
+---
 ## 2026-09-22, later (main, Opus 5 1M, effort max) -- the ARCH 8.1 audit close: the prime target was clean and the P1 was in the scripture
 
 Same day, after the build run below. Two commits: `dc77a4b0` (the close) and

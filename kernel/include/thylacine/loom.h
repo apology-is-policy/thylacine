@@ -467,8 +467,13 @@ struct Loom {
     // set up with LOOM_SETUP_SQPOLL. A per-ring kproc() kthread (the console_mgr
     // precedent) that drains the SQ + drives the elected reader so steady-state
     // submission is zero-syscall. The Loom OWNS the kthread: loom_free sets
-    // `sqpoll_stopping`, wakes `sqpoll_park`, and JOINS (spins on `sqpoll_exited`,
-    // then thread_free) BEFORE freeing the ring -- the kthread only ever touches
+    // `sqpoll_stopping`, wakes `sqpoll_park`, and JOINS (BLOCKS on `sqpoll_join`
+    // until `sqpoll_exited`, then thread_free) BEFORE freeing the ring -- the
+    // join is a SLEEP, never a spin: it runs inside a syscall body, and a
+    // syscall body is non-preemptible (`Thread.in_syscall`, ARCH 8.1), so a
+    // spin there can never yield the CPU to the very kthread it waits on --
+    // at -smp 1 that is a guaranteed hang. Servicing an interrupt is not
+    // scheduling a thread. The kthread only ever touches
     // the still-allocated `struct Loom`, guaranteed by the join (the kthread
     // holds NO loom ref; a ref would deadlock loom_free's join). `sqpoll` is set
     // once at setup (before the handle is returned to userspace) and never
@@ -476,12 +481,18 @@ struct Loom {
     // single-writer flags of the join handshake (release/acquire paired). The
     // kthread is gated to a deadline-capable transport (loom_register_handles
     // rejects a NULL-deadline dev9p client into an SQPOLL ring) so its
-    // frame-boundary idle-deadline always lets it re-check `sqpoll_stopping` ->
-    // the join always terminates.
+    // frame-boundary idle-deadline lets a BETWEEN-FRAMES recv re-check
+    // `sqpoll_stopping`. That is not "the join always terminates", which this
+    // said until 2026-09-22: a MID-FRAME recv is deliberately NOT deadline-
+    // bounded (the body must complete or the shared stream desyncs, #841), so
+    // a Byzantine server mid-frame delays the stop until the frame ends or
+    // EOFs. Termination rests on the v1.0 servers being trusted and prompt --
+    // a trust assumption, not a mechanism.
     struct Thread          *sqpoll;          // the kthread (NULL = no SQPOLL)
     bool                    sqpoll_stopping; // loom_free sets (release); kthread reads (acquire)
     bool                    sqpoll_exited;   // kthread sets at terminal (release); joiner reads (acquire)
     struct Rendez           sqpoll_park;     // kthread parks here when idle; woken by ENTER / stop
+    struct Rendez           sqpoll_join;     // the JOINER sleeps here; woken by the kthread's terminal
     // The fid-lift audit F1 charge: the kthread counts against the CREATING
     // Proc's thread budget. `sqpoll_owner` is lifetime-safe without a ref:
     // KObj_Loom is I-5 non-transferable, so the creator's handle is the only

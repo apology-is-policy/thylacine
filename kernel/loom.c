@@ -211,6 +211,7 @@ struct Loom *loom_create(u32 sq_entries, u32 cq_entries) {
     spin_lock_init(&l->lock);
     poll_waiter_list_init(&l->cq_waiters);   // Loom-4 CQ wait-list (its own lock)
     rendez_init(&l->sqpoll_park);            // Loom-4c SQPOLL park (no kthread until loom_start_sqpoll)
+    rendez_init(&l->sqpoll_join);            // the join Rendez loom_free blocks on
     l->ring     = r;
     // The ring Burrow is anonymous + physically contiguous (alloc_pages chunk);
     // its direct-map base is stable for the Burrow's lifetime (the Loom holds a
@@ -304,6 +305,16 @@ static void loom_drop_pin_settling(struct Loom *l, struct Burrow *b) {
     }
 }
 
+// The join predicate. Read with ACQUIRE to pair with the kthread's terminal
+// RELEASE store, so a joiner that observes it also observes state==EXITING
+// (thread_free's not-RUNNING gate). Evaluated under sqpoll_join->lock, which
+// the kthread's wakeup() also takes -- the register-then-observe pairing
+// rendez.h requires of every cond.
+static int loom_sqpoll_exited_cond(void *arg) {
+    struct Loom *l = (struct Loom *)arg;
+    return __atomic_load_n(&l->sqpoll_exited, __ATOMIC_ACQUIRE) ? 1 : 0;
+}
+
 static void loom_free(struct Loom *l) {
     // Loom-4c: JOIN the SQPOLL kthread FIRST -- before the #898 quiesce. The
     // kthread is the only other mutator of inflight_ops (it submits + reaps in
@@ -312,17 +323,72 @@ static void loom_free(struct Loom *l) {
     // top / park-cond observes it, wake the park Rendez (an idle kthread is
     // sleeping there; a kthread mid-recv self-returns at its frame-boundary
     // idle-deadline and re-checks stopping -- the gate guarantees a deadline-
-    // capable transport so this terminates), then spin until the kthread signals
-    // sqpoll_exited (release; pairs with this acquire -> the kthread's
+    // capable transport so this terminates), then BLOCK until the kthread signals
+    // sqpoll_exited (release; pairs with the cond's acquire -> the kthread's
     // state=EXITING write is visible) and thread_free it (which internally spins
-    // on on_cpu, the wait_pid reap discipline). refcount is 0 so no ENTER runs;
-    // the kthread holds no loom ref, so this join is the sole lifetime authority.
+    // on on_cpu, the wait_pid reap discipline -- that one waits on an in-flight
+    // HARDWARE context switch, which completes with no scheduling decision, and
+    // is therefore a different animal from this join). refcount is 0 so no ENTER
+    // runs; the kthread holds no loom ref, so this join is the sole lifetime
+    // authority.
+    //
+    // THE WAIT IS A SLEEP, NOT A SPIN, and that is load-bearing rather than
+    // stylistic. loom_free runs inside a syscall body (close, SYS_LOOM_SETUP's
+    // unwind, handle-close-at-exit), and since ARCH 8.1 a syscall body runs with
+    // interrupts ON but is still NON-PREEMPTIBLE: preempt_check_irq sees
+    // Thread.in_syscall and returns WITHOUT switching. So the timer interrupt a
+    // spin here would be waiting on arrives, is serviced, and changes nothing --
+    // SERVICING AN INTERRUPT IS NOT SCHEDULING A THREAD. At -smp 1 there is no
+    // peer CPU to run the kthread either, so the old spin could never end: an
+    // unkillable hang on an ordinary close(2). Only a VOLUNTARY switch can hand
+    // the CPU to the kthread being joined, and sleep() is that. (ARCH 8.12 named
+    // this site as one interrupts-on does NOT fix, against an earlier draft that
+    // wrongly claimed it did.)
+    //
+    // THE WAIT IS ALSO UNINTERRUPTIBLE, and it borrows the mechanism the tree
+    // already has rather than inventing one. sleep() refuses to block a thread
+    // whose Proc is group-terminating -- and a peer thread closing this fd
+    // during exit_group is exactly that thread. The refusal CANNOT be honoured:
+    // abandoning the join means thread_free on a kthread that is still live.
+    // If it is RUNNING that extincts, which is merely loud; if it is SLEEPING
+    // it passes every thread_free gate (not-current, not-RUNNING, in no run
+    // tree, on_cpu false) and frees a Thread that later resumes on recycled
+    // memory -- a silent UAF, and the worse half of the reason there is no
+    // abandon path.
+    //
+    // `exit_close_active` is that mechanism: #68 F1 added it so a CLOSE that
+    // must WAIT behaves like a live thread's rather than short-circuiting --
+    // "the exit-close window is ORDERLY FINALIZATION, not duress". The 9P
+    // Tclunk flush is its first user and this join is the second; both are
+    // close hooks of the same handle table, with the same obligation. The
+    // at-exit path already arrives here with it set (proc_close_handles_at_exit
+    // wraps the whole close), so the bracket below is a no-op there and covers
+    // the peer-close race that is NOT inside that window.
+    //
+    // SAVE AND RESTORE, NEVER A BARE CLEAR. proc_close_handles_at_exit may
+    // already own the flag; clearing it unconditionally would re-arm the death
+    // legs for every LATER fd in the same table, reopening the #68 F1
+    // data-loss / fid-leak class this flag exists to close.
+    //
+    // WHAT THIS COSTS, stated rather than elided: the join inherits #68 F1's
+    // own residual. A kthread that never reaches its terminal parks the dying
+    // Proc unreapably instead of burning a CPU on a yield-loop. That is
+    // strictly the better failure -- and it is REACHABLE, because the
+    // frame-boundary deadline does NOT bound a MID-FRAME recv (the body must
+    // complete to keep the stream synced, #841; see LOOM_SQPOLL_IDLE_NS), so a
+    // Byzantine server mid-frame delays the stop until the frame finishes or
+    // EOFs. The v1.0 servers are trusted and complete promptly; the bound is a
+    // trust assumption, not a mechanism, and it is the SAME one the Tclunk
+    // flush already rests on.
     if (l->sqpoll) {
         __atomic_store_n(&l->sqpoll_stopping, true, __ATOMIC_RELEASE);
         wakeup(&l->sqpoll_park);
-        while (!__atomic_load_n(&l->sqpoll_exited, __ATOMIC_ACQUIRE)) {
-            __asm__ __volatile__("yield" ::: "memory");
-        }
+        struct Thread *self     = current_thread();
+        bool           prev_ecl = self->exit_close_active;
+        self->exit_close_active = true;
+        while (!__atomic_load_n(&l->sqpoll_exited, __ATOMIC_ACQUIRE))
+            (void)sleep(&l->sqpoll_join, loom_sqpoll_exited_cond, l);
+        self->exit_close_active = prev_ecl;
         thread_free(l->sqpoll);
         l->sqpoll = NULL;
     }
@@ -2237,6 +2303,14 @@ void loom_sqpoll_main(void *arg) {
     (void)spin_lock_irqsave(NULL);           // mask preempt for the terminal window
     current_thread()->state = THREAD_EXITING;
     __atomic_store_n(&l->sqpoll_exited, true, __ATOMIC_RELEASE);
+    // Hand the joiner its wake INSIDE the masked window, after BOTH stores, so
+    // the release it pairs with has already published state==EXITING. wakeup()
+    // takes g_timerwait -> sqpoll_join->lock -> cpu_sched and we hold none of
+    // them, so the documented order holds; it is explicitly IRQ-context-safe.
+    // Waking BEFORE sched() is sound on SMP for the same reason the old spin
+    // join was: a peer CPU that picks the joiner immediately lands in
+    // thread_free's on_cpu spin, which the sched() below releases.
+    wakeup(&l->sqpoll_join);
     sched();
     extinction("loom_sqpoll_main: returned from terminal sched");
 }

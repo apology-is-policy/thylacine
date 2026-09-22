@@ -188,7 +188,8 @@ The P1 was a false claim in ARCH 8.12 itself: it said five latent single-CPU
 hangs were fixed unlooked-for, and `loom_free`'s spin on a KTHREAD's exit flag
 is not one of them -- `in_syscall` refuses the switch that would run the
 kthread. Servicing an interrupt is not scheduling a thread. Scripture
-corrected; the defect is **OPEN, pre-existing, and tracked**. The P2 was an
+corrected; the defect was left **OPEN, pre-existing, and tracked**, and is now
+**CLOSED** (below). The P2 was an
 unprivileged masked-window DoS in `/ctl/kstack`, an instrument this chunk had
 added two commits earlier -- now `CAP_HOSTOWNER`-gated with a budgeted scan.
 
@@ -202,6 +203,31 @@ added two commits earlier -- now `CAP_HOSTOWNER`-gated with a budgeted scan.
 | `tools/test-fault.sh` | **8 PASS / 0 FAIL of 8** -- all three kernel-stack GUARD variants fire (`kstack_overflow`, `secondary_stack_guard`, `bootcpu_idle_guard`), plus `recursive_kernel_fault` and `el1_sync_runaway`, the nested-exception cases this chunk makes more reachable. Added to this chunk's bar MID-RUN: the chunk deepens the kernel stack and this is the only runtime witness that an overflow FAULTS into a no-access guard rather than corrupting its neighbour. A bar that omits the one gate aimed at the hazard the change creates is a bar that verifies around it. |
 | kstack runtime witness | **peak=10448 of 16384 = 63.8%** on a default boot, now printed every boot |
 | interactive fleet @`40261a8c` | **PASS -- 55/77, 0 FAIL** (22 SKIP = absent optional host artifacts + the documented ci-vs-halcyon image split, neither a guest result nor coverage). The ~15 scenarios that parse boot output all pass, which is the check that mattered: this chunk adds a `boot-kstack:` line before the banner. |
+
+### The P1's own close: the loom join, and the gate row it bought (2026-09-22)
+
+Fixed on the operator's ratified sequencing (the loom fix first, then identity).
+`loom_free` now BLOCKS on a new `Loom.sqpoll_join` Rendez that the kthread's
+terminal wakes after its `state=EXITING` + `sqpoll_exited` release stores, in
+the same masked window -- so a joiner that observes the flag observes EXITING,
+which is what `thread_free`'s not-RUNNING gate needs.
+
+**It was not latent.** `usr/loom-smoke`, which joey spawns on every boot, has
+carried an EL0 SQPOLL consumer since `15796866` (2026-09-03), so every `-smp 1`
+boot for 19 days hung at its exit. One-variable control:
+
+| | pre-fix `-smp 1` | post-fix `-smp 1` |
+|---|---|---|
+| last log line | `loom-smoke: PASS`, then silence | `joey: /loom-smoke reaped status=0` |
+| boot banner | **never** (120 s) | present |
+| suite | never completed | **1616/1616**, 5/5 boots |
+
+**Nothing could see it**, and that bought the durable part: every boot gate ran
+four or eight CPUs, so the one configuration where a thread spinning on another
+THREAD's write cannot be rescued by a peer was the one configuration nothing
+booted. `default-smp1` is now `ci-smp-gate.sh`'s first row. A peer CPU is a
+rescue mechanism as well as extra concurrency, and a hazard a rescue mechanism
+hides is one the matrix can no longer observe.
 
 ## Remaining work (in order; BROWSER-DESIGN section 9)
 

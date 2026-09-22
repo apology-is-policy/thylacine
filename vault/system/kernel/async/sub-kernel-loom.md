@@ -15,7 +15,7 @@ design:
   - "docs/LOOM.md"
   - "docs/reference/107-loom.md"
 created: 2026-08-02
-updated: 2026-09-07
+updated: 2026-09-22
 ---
 ## Purpose
 
@@ -186,8 +186,18 @@ comes from the user reaping and entering.
 Because the thread belongs to the immortal kernel process, it cannot exit
 normally — the normal exit path is fatal from there. It hand-rolls the tail of
 the reap protocol instead: mask interrupts, mark itself exiting, release the
-handshake flag, and switch away permanently. Teardown spins on that flag and
-then reclaims it.
+handshake flag, **wake the joiner**, and switch away permanently. Teardown
+sleeps on that wake and then reclaims it.
+
+Until 2026-09-22 teardown *spun* on the flag instead, and that was a hang. The
+spin runs inside a syscall body, and a syscall body is non-preemptible: the
+timer interrupt arrives and the preempt check declines to switch, because a
+thread inside a syscall is not a thread the scheduler may take the CPU from.
+Servicing an interrupt is not scheduling a thread. With one CPU there is no
+peer to run the poll thread either, so the spin could not end. Measured: at
+`-smp 1` every boot hung at `loom-smoke`'s exit — its last line printed, then
+silence, and the boot banner never arrived. The whole gate matrix runs at four
+or eight CPUs, which is the only reason this was not a standing red.
 
 The thread is charged against the **creating** Proc's thread budget, not the
 kernel process's — otherwise a ring is a way to buy a thread outside
@@ -353,9 +363,37 @@ reaper made this safe once; the poll thread was a second one, and it is not.
 
 **The join.** Teardown stops the poll thread before anything else, because the
 thread is the only other mutator of the in-flight list. It sets the stop flag,
-wakes the park, spins for the exit handshake and reclaims the thread — and only
-then quiesces the remaining operations. The thread deliberately holds no
-reference to the ring; one would deadlock this join.
+wakes the park, **sleeps** on a second rendezvous until the exit handshake, then
+reclaims the thread — and only then quiesces the remaining operations. The
+thread deliberately holds no reference to the ring; one would deadlock this
+join.
+
+The wait must be a sleep rather than a spin, for the reason above: only a
+voluntary switch can hand the CPU to the very thread being joined. One wrinkle
+makes the sleep less obvious than it looks. Sleeping is refused outright for a
+thread whose process is terminating — and a peer thread closing this descriptor
+during a group exit is exactly such a thread. The refusal cannot be honoured:
+abandoning the join means reclaiming a thread that is still live. If it is
+running, that is fatal and loud; if it is *sleeping*, it passes every gate the
+reclaim checks and frees a thread that later resumes on recycled memory — a
+silent use-after-free, and the worse half of why no abandon path exists.
+
+So the join is made uninterruptible with the mechanism the kernel already has
+rather than a new one. Closing a dying process's handle table suppresses the
+death check for its whole duration, precisely so that close hooks which must
+WAIT — the 9P clunk flush, and now this join — behave as a live thread's would.
+The join brackets itself in that same flag, saving and restoring rather than
+clearing, because on the at-exit path the close already owns it and a bare
+clear would re-arm the death legs for every later descriptor in the table.
+
+That inherits the flag's own residual rather than escaping it: a poll thread
+that never reaches its terminal parks the dying process unreapably instead of
+burning a CPU. It is the better failure, and it is reachable — the
+frame-boundary deadline does **not** bound a mid-frame receive, because the
+body must complete or the shared stream desyncs, so a stalled server mid-frame
+delays the stop until the frame ends. Termination rests on the servers being
+trusted and prompt. That is a trust assumption, not a mechanism, and it is the
+same one the clunk flush already rests on.
 
 **Quiescing.** Each surviving operation is abandoned through the engine under
 the client's lock, which makes it mutually exclusive with a demultiplex that
@@ -425,6 +463,19 @@ consumer.
   borrowed client.
 - **The poll thread must be joined before the in-flight list is touched**, and
   must never hold a ring reference.
+- **A spin inside a syscall body can never wait on a thread.** Syscall bodies
+  run with interrupts on but are not preemptible, so an interrupt arriving
+  mid-spin changes nothing about which thread holds the CPU; with one CPU
+  nothing else can run at all. Any wait here whose writer is a *thread* — as
+  opposed to an interrupt handler — must be a sleep. The distinction is the
+  one this subsystem's teardown got wrong for three months.
+
+  The operational form, because "is it bounded?" is the wrong first question:
+  **ask who WRITES the value awaited.** A thread's write is unsafe here; an
+  interrupt handler's, or an in-flight hardware transition's (`on_cpu`), is
+  not. Boundedness is what you conclude *after* that answer, not what you
+  check instead of it — the old spin was bounded in every author's head and
+  hung 100% of uniprocessor boots for nineteen days.
 - **A registered buffer must stay contiguous-by-type.** The single-base kernel
   address is only valid because the region is one physical chunk; admitting a
   scatter-gather type without making the address computation walk chunks yields

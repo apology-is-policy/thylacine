@@ -333,8 +333,16 @@ struct Thread {
     // "dying" short-circuited the dev9p write-behind close-flush (silent
     // data loss for a file left open at a multi-thread exit) and the
     // close-time Tclunk (a server-side fid leak per fd). Set/cleared ONLY
-    // by the owning Thread around proc_close_handles_at_exit; read only
-    // via thread_die_pending(self). Fits in the tail padding.
+    // by the owning Thread, always around a CLOSE THAT MUST WAIT, and read
+    // only via thread_die_pending(self) -- so the read needs no
+    // synchronization. TWO setters since 2026-09-22, and a third would need
+    // the same justification: proc_close_handles_at_exit wraps the whole
+    // at-exit close (#68 F1, the original), and loom_free brackets its SQPOLL
+    // kthread join (the peer-close race that falls OUTSIDE that window --
+    // abandoning that join frees a live Thread). A NESTED setter must
+    // SAVE AND RESTORE, never bare-clear: loom_free runs inside the at-exit
+    // close on one of its paths, and clearing there would re-arm the death
+    // legs for every later fd in the same table. Fits in the tail padding.
     bool               exit_close_active;
 
     // 8a-1b-beta (I-39; docs/DEBUG-FS-DESIGN.md section 4.2; specs/debug_stop.tla):
