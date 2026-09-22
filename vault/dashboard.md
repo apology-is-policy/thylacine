@@ -13,6 +13,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 | arc | status | chunks |
 |---|---|---|
+| [[arc-arch81]] | active | 1 |
 | [[arc-boosty]] | active | 3 |
 | [[arc-clade]] | active | 7 |
 | [[arc-corvus-srv]] | active | 3 |
@@ -37,7 +38,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 90
+## Open seams: 91
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-221-idle-pump-wake]] (sub-kernel-ninep-dev9p-poll)
@@ -127,11 +128,13 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-torpor-cross-proc]] (sub-kernel-torpor)
 - [[seam-torpor-lock-wake-spin]] (sub-kernel-torpor)
 - [[seam-torpor-reclaim-uaccess]] (sub-kernel-torpor)
+- [[seam-viv-tier2-frame]] (sub-kernel-syscall-abi, sub-kernel-vivarium)
 - [[seam-warp-prove-unowned]] (sub-tapestryd)
 - [[seam-wb-close-flush-slot]] (sub-kernel-ninep-dev9p)
 
 ## Recent changes
 
+- 2026-09-22 [[chg-2026-09-22-arch81-scripture]] — ARCH 8.12: the design for syscall bodies with interrupts on, landed as scripture before any code
 - 2026-09-22 [[chg-2026-09-22-poll-preemption-point]] — poll crosses a preemption point each re-loop: the masked CPU gets a window the noise cannot close
 - 2026-09-21 [[chg-2026-09-21-boosty-b0-jsc]] — Boosty B-0: JavaScriptCore runs on Thylacine (JIT off) -- the port wiring
 - 2026-09-21 [[chg-2026-09-21-mount-shed]] — The mount-table shed at pivot / chroot (#80): the cap stays 32 and the orphans go
@@ -139,5 +142,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-09-21 [[chg-2026-09-21-srvconn-two-endpoint-poll]] — poll: a wake is a hint (the re-arm), and a /srv connection is pollable from BOTH endpoints with a list walk on every ring mutation
 - 2026-09-18 [[chg-2026-09-18-npxf-host]] — Supported OpenSSL npxf hosts and pending graphical SAK ownership review
 - 2026-09-18 [[chg-2026-09-18-npxf-verification]] — Published npxf CI and actual Halcyon manual capture
-- 2026-09-17 [[chg-2026-09-17-aux-halcyon]] — Aux integration: ordered media, native panes, manual, and bounded interrupt/transport ownership
 <!-- generated:end -->
