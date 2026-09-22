@@ -710,6 +710,10 @@ MEASUREMENTS
 - Sabotage `noisb` (unmask kept, `isb` removed): **1615/1615 PASS** -- the
   measurement that corrected the claim, not the test.
 - Tree restored clean after every sabotage (`red-k-treestate.txt` empty).
+- gate-r9 @0434a4bc: bake rc=0 with WebKit in `pool-contents`; suite **1615/1615
+  PASS**; interactive fleet **PASS -- 56/77 run, 21 SKIP (missing host
+  artifact), 0 FAIL**, with `ls-jsc` RUN and PASS in 37 s; one retry, on
+  `freeze-172`, whose attempt-1 evidence is the intermittent witness test above.
 
 ## Where the masked syscall came from (traced 2026-09-22, at the operator's request)
 Phase 0 (`bc96ce55`, ARCH 8.1) deferred kernel PREEMPTION to Phase 7; P3-Ec
@@ -720,6 +724,31 @@ masking more (#713, #104), and #359 (`ce7bd352`) wrote the accident into ARCH
 (ROADMAP:1091) never reached `phase7-status.md`. The research battery found no
 other kernel that both masks in syscalls and loops in them; the heritage
 (9front `dosyscall` -> `spllo`) runs syscalls unmasked.
+
+**And then the gate found the one thing none of the sabotages could: my witness test is intermittent.** The
+77-scenario fleet came back PASS -- 56 run, 21 skipped for missing host artifacts, 0 failed -- but one scenario
+burned a retry, and the preserved attempt-1 evidence is an EXTINCTION before login with
+`sched.preempt_point_takes_a_pending_irq` red at 1614/1615. The test masked for 3 ms and waited for this CPU's
+tick to pend; on that one boot, nothing pended. The tick is confirmed 1 kHz from the boot banner, so 3 ms should
+have covered two or three of them.
+
+I do not know why it didn't, and the instructive part is the explanation I nearly shipped. The first mechanism I
+found was clean and satisfying -- `smp_enable_secondary_preemption` runs AFTER the in-kernel suite, so secondaries
+have no timer at all during it, and a test thread that happened to be placed on one could never see a tick. I had
+written it into the fix's comment before checking the other half, which flatly refutes it: the test phase is
+deliberately UP-like, `g_sched_notify_enabled` is off, there is no cross-CPU placement, and the suite thread stays
+on cpu0 where the timer is armed. A confident wrong cause in a comment is worse than no comment, because the next
+reader stops looking. The failure was under TCG and has not reproduced on HVF; beyond that it is UNEXPLAINED, and
+the comment now says so in those words.
+
+What the fix does not need is the mechanism. The old form's premise was **"an interrupt will arrive on its own
+inside this window"** -- a property of the environment, not of the thing under test, so the test could go red with
+the preemption point perfectly correct. The new form raises a self-targeted SGI (`IPI_IRQFWD_TEST`, the same
+software fire source `test_irqfwd` uses) from inside the masked region: the guest makes the interrupt pend, so the
+window has something to take by CONSTRUCTION rather than by luck, and nothing about host timer servicing can
+change that. The kobj's INTID claim is released BEFORE the assertions, because `TEST_ASSERT` returns on failure
+and asserting first would leak SGI 1 into the irqfwd tests -- one defect presenting as several, in a suite whose
+job is to say which thing broke.
 
 **Still open, and tracked rather than mentioned.** Round 7's F1: nothing caps how many hooks a single
 `poll_waiter_list` can hold, so the PRODUCER's wake walk -- which crosses no point, because it runs in the waker's

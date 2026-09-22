@@ -37,7 +37,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 89
+## Open seams: 90
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-221-idle-pump-wake]] (sub-kernel-ninep-dev9p-poll)
@@ -94,6 +94,7 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-netd-host-tests]] (sub-netd-server, sub-netd-nic)
 - [[seam-nuname-trust-stamp]] (sub-kernel-syscall-dispatch, sub-kernel-ninep-attach)
 - [[seam-poll-heap-waiters]] (sub-kernel-poll)
+- [[seam-poll-hooks-per-list]] (sub-kernel-poll)
 - [[seam-poll-srv-registry-retain]] (sub-kernel-poll)
 - [[seam-pouch-dirfd]] (sub-pouch-fs)
 - [[seam-pouch-dup2-target]] (sub-pouch-process)
