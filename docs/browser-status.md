@@ -123,8 +123,19 @@ Everything below is on the local branch `browser-b0`; nothing of B-0 is on `main
   landing split (eight gated commits), the record notes.
 - **Owed to the operator (a conversation, not a decision to take here):** the F3-F9 kernel design
   (below: reservations/holes, decommit, guard pages, >256 MiB, per-thread signals, stack, dlopen); the
-  small-integer socket fd redesign; unlink-while-open; and one new item from poll round 4 -- syscalls run
-  IRQ-masked end to end, so a noise-driven wait with nothing else runnable spins with interrupts off.
+  small-integer socket fd redesign; and unlink-while-open.
+- **DECIDED 2026-09-22 ("point now, model next"), was owed:** syscalls run IRQ-masked end to end, so a
+  noise-driven wait held its CPU's interrupts. poll now crosses a PREEMPTION POINT each re-loop
+  (`sched_preempt_point`; ARCH 23.3, `specs/poll_cpu.tla` checks the CPU-level claim). Scheduled next,
+  BEFORE the F3-F9 kernel work and it deletes the point: build ARCH 8.1 as written -- syscall bodies
+  with interrupts ON, still non-preemptible. The Phase-0 deferral that was never executed (ROADMAP's
+  "Kernel preemption" item never reached a status doc).
+- **OPEN from poll round 7 (F1), tracked here because nothing else owns it:** nothing caps hooks on one
+  `poll_waiter_list` (64 per call x `PROC_THREAD_MAX` x Procs), so a producer's `poll_waiter_list_wake`
+  walk and the poller's per-pass unregister walks are O(attacker-scaled) and IRQ-masked -- and the
+  producer's walk crosses no preemption point at all. The point bounds the NUMBER of masked spans, not
+  the length of one. Fixes: the per-endpoint/event-keyed lists of round-4 F8, a per-walk wake cap with
+  the remainder deferred, and an I-32 axis capping hooks per list.
 - test262 / a real benchmark on `jsc`: not started.
 
 ## Remaining work (in order; BROWSER-DESIGN section 9)

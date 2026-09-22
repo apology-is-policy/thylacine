@@ -38,7 +38,7 @@
 #include <thylacine/notes.h>      // thread_die_pending
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
-#include <thylacine/sched.h>      // sched_yield_hint
+#include <thylacine/sched.h>      // sched_yield_hint, sched_preempt_point
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
 #include <thylacine/thread.h>
@@ -444,9 +444,16 @@ s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds, u64 nfds,
         // one CPU (two masked pollers hand it back and forth -- round-6 S1),
         // and this is UNCONDITIONAL, so its bound composes (IrqLatencyBounded).
         // Crossed each re-loop, before the rescan; the FIRST scan (before the
-        // loop) is not a re-loop, so it needs no point.
-        __atomic_fetch_add(&g_poll_points, 1u, __ATOMIC_RELAXED);
-        sched_preempt_point();
+        // loop) is not a re-loop, so it needs no point. The TIMEDOUT pass is
+        // skipped: it is TERMINAL (it breaks below), so it needs no bound, and
+        // crossing the point there could defer the return by a whole slice past
+        // the deadline if the window raised a reschedule (round-7 F7). The
+        // model agrees -- its TIMEDOUT path runs FinalSample straight to a
+        // terminal state and never reaches `atpoint`.
+        if (ts != TSLEEP_TIMEDOUT) {
+            __atomic_fetch_add(&g_poll_points, 1u, __ATOMIC_RELAXED);
+            sched_preempt_point();
+        }
 
         ready_count = 0;
         for (u64 i = 0; i < nfds; i++) {

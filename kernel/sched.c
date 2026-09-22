@@ -2651,18 +2651,28 @@ void sched_preempt_point(void) {
     if (t->preempt_count != 0u)
         extinction("sched_preempt_point with a spinlock held");
 
-    t->preempt_count++;
+    // Through the #360 chokepoint, not an open-coded RMW: these carry the
+    // signal fences, the underflow check, and the g_spin_outer_acquire
+    // breadcrumb, so a sched() assert raised from inside poll names THIS site
+    // rather than some unrelated earlier acquire (round-7 F5).
+    spin_preempt_inc();
     irq_state_t s;
     __asm__ __volatile__("mrs %0, daif" : "=r"(s));
     __asm__ __volatile__("msr daifclr, #2\n\tisb" ::: "memory");  // unmask IRQ, take pending
     __asm__ __volatile__("msr daif, %0" :: "r"(s) : "memory");     // restore the caller's mask
-    t->preempt_count--;
+    spin_preempt_dec();
 
+    // Consume a reschedule the window deferred. The flag is NOT cleared here:
+    // for an IRQs-on caller the index can go stale between the read and the
+    // clear, and clearing a FOREIGN CPU's flag would swallow the #866-F1
+    // cross-CPU placement kick that is set exactly once -- stranding a
+    // just-placed thread for a slice (round-7 F4). sched()'s own entry clear
+    // runs under its entry mask, where the index cannot be stale; a stale read
+    // here therefore costs at most one spurious sched(), and a stale negative
+    // leaves the flag for the right CPU's next IRQ-return.
     unsigned cpu = smp_cpu_idx_self();
-    if (cpu < DTB_MAX_CPUS && need_resched_pending(cpu)) {
-        need_resched_clear(cpu);
+    if (cpu < DTB_MAX_CPUS && need_resched_pending(cpu))
         sched();
-    }
 }
 
 void sched_tick(void) {
