@@ -270,12 +270,16 @@ why `POLL_MAX_NFDS` is a frame bound, not an fd-table bound.
   The syscall body runs interrupts-on throughout, so the CPU takes its
   interrupts at every instruction of the loop. Nothing here must be
   written as though it were masked.
-  `poll.point_services_noise` catches the poller reaching the point again
-  and again (`poll_total_points` climbs) while it is genuinely re-looping
-  on the noise (`g_busy_samples` climbs) and has NOT returned, then
-  readiness still returns; `poll.point_keeps_the_deadline` a timed poll
-  returning 0 AT its deadline under the same noise, with a non-vacuous
-  point count.
+  The point and its `poll_total_points` counter are both GONE -- the
+  counter's declaration outlived its definition by one commit and was
+  deleted in the ARCH 8.12 audit round (F4), where it would have been a
+  link error for the next caller. What replaced the witness is not another
+  counter but the unmask itself: `syscall_dispatch` asserts interrupts-on
+  at the top of every syscall body, on every boot, so the property the
+  point had to demonstrate with a bespoke test is now continuously
+  asserted. `sched_yield_hint` remains in the re-loop and is still
+  load-bearing -- interrupts-on is NOT preemption, so without it a noise
+  loop would hold its CPU against a runnable peer indefinitely.
   `poll.death_ends_a_noise_driven_poll` / `poll.stop_parks_a_noise_
   driven_poll` pin the checks (a real Proc's thread on the busy Dev
   below), `cons.episode_frozen_poller_follows_end` /

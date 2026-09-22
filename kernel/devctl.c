@@ -281,6 +281,16 @@ static size_t format_procs(char *buf, size_t cap) {
 // Read it as a FLOOR in both directions: each number is the deepest that
 // thread has ever reached (not its depth now), and a running thread can only
 // push its own frontier lower while we look.
+// ARCH 8.12 audit F2: the whole walk runs under g_proc_table_lock WITH IRQS
+// MASKED, and each thread's scan costs MORE the SHALLOWER the thread is (it
+// stops at the first touched word). PROC_THREAD_MAX is 256, so an unbounded
+// walk lets any Proc -- it needs no privilege to spawn threads, only the
+// READER is gated -- inflate that masked window without limit. Bound the total
+// at 1 MiB of loads: a normal system (tens of threads, ~1750 words each) never
+// reaches it, and a hostile one truncates VISIBLY rather than silently
+// reporting a shallower peak than the truth.
+enum { KSTACK_SCAN_BUDGET_WORDS = 131072u };
+
 struct kstack_fmt_state {
     char  *buf;
     size_t cap;
@@ -289,13 +299,23 @@ struct kstack_fmt_state {
     u32    peak;
     int    peak_pid;
     int    peak_tid;
+    u32    budget;
+    bool   truncated;
 };
 
 static int format_kstack_cb(struct Proc *p, void *arg) {
     struct kstack_fmt_state *s = (struct kstack_fmt_state *)arg;
     size_t n;
     int    tid  = 0;
-    u32    used = proc_kstack_peak(p, &tid);
+    u32    used = proc_kstack_peak(p, &tid, &s->budget);
+
+    if (s->budget == 0u) {
+        // The scan ran out mid-walk. Every number from here on would be a
+        // floor, so stop and let the caller SAY the peak is a lower bound --
+        // a silently-truncated watermark is worse than no watermark.
+        s->truncated = true;
+        return 1;
+    }
 
     if (used > s->peak) {
         s->peak     = used;
@@ -351,13 +371,20 @@ static size_t format_kstack(char *buf, size_t cap) {
     n = fmt_str(buf, cap, off, "\n\nPID    NAME    PEAK    TID\n");
     if (!n) return 0; off += n;
 
-    struct kstack_fmt_state s = { buf, cap, off, false, 0, 0, 0 };
+    struct kstack_fmt_state s = { buf, cap, off, false, 0, 0, 0,
+                                  KSTACK_SCAN_BUDGET_WORDS, false };
     proc_for_each(format_kstack_cb, &s);
     off = s.off;
     if (s.overflow) return off;
 
     // The whole-system peak LAST, so a truncated read still loses the
     // per-Proc rows before it loses the number a gate actually asserts on.
+    if (s.truncated) {
+        n = fmt_str(buf, cap, off,
+                    "\n(scan budget exhausted -- rows above are partial and "
+                    "peak is a LOWER BOUND)\n");
+        if (!n) return off; off += n;
+    }
     n = fmt_str(buf, cap, off, "\npeak:      "); if (!n) return off; off += n;
     n = fmt_udec(buf, cap, off, (unsigned long)s.peak);
     if (!n) return off; off += n;
@@ -873,8 +900,11 @@ static int devctl_stat(struct Spoor *c, u8 *dp, int n) {
 // Not an authority: devctl.perm_enforced is false, so no gate consults this
 // mode. It DOCUMENTS the gates that live at the read sites -- kernel-base is
 // 0400 because devctl_kernel_base_readable requires CAP_HOSTOWNER (#57a F1: it
-// discloses the live KASLR slide, an I-16 secret), so advertising it 0444 would
-// have the mode lie about a file the caller cannot in fact read.
+// discloses the live KASLR slide, an I-16 secret), and kstack is 0400 for the
+// same gate on a different ground (ARCH 8.12 audit F2: its formatter's masked,
+// proc-table-locked scan is an I-32 cost lever, not a disclosure) -- so
+// advertising either 0444 would have the mode lie about a file the caller
+// cannot in fact read.
 static int devctl_stat_native(struct Spoor *c, struct t_stat *out) {
     if (!c || !out) return -1;
     for (size_t i = 0; i < sizeof(*out); i++) ((u8 *)out)[i] = 0;
@@ -895,7 +925,8 @@ static int devctl_stat_native(struct Spoor *c, struct t_stat *out) {
     if (!leaf_for_kind(kind)) return -1;        // a qid this Dev does not serve
 
     out->mode     = T_S_IFREG |
-                    ((kind == CTL_KIND_KERNEL_BASE) ? 0400u : 0444u);
+                    ((kind == CTL_KIND_KERNEL_BASE ||
+                      kind == CTL_KIND_KSTACK) ? 0400u : 0444u);
     out->qid_type = QTFILE;
     return 0;
 }
@@ -946,7 +977,18 @@ static long devctl_read(struct Spoor *c, void *buf, long n, s64 off) {
     // #57a F1: gate /ctl/kernel-base (the KASLR slide, an I-16 secret) on
     // CAP_HOSTOWNER now that /ctl is world-reachable (see devctl_kernel_base_-
     // readable). The other leaves stay world-readable Plan 9 introspection.
-    if (kind == CTL_KIND_KERNEL_BASE) {
+    //
+    // ARCH 8.12 audit F2: /ctl/kstack joins it, for a DIFFERENT reason. It
+    // discloses no address, so I-16 is not the issue here -- the cost is. Its
+    // formatter walks every live Proc under g_proc_table_lock with IRQs MASKED
+    // and scans each thread's 16 KiB stack for the poison boundary, recomputed
+    // on EVERY read() at every offset (devctl leaves are stateless). Left
+    // world-readable, a `while(1) pread(...)` loop would hold a CPU masked and
+    // block every fork/exit/wait behind the proc-table lock -- defeating, on
+    // that CPU, the very interrupt-latency property ARCH 8.12 exists to
+    // establish. I-32. The scan is separately budgeted (see format_kstack);
+    // the gate and the bound close different halves and both are wanted.
+    if (kind == CTL_KIND_KERNEL_BASE || kind == CTL_KIND_KSTACK) {
         struct Thread *t = current_thread();
         if (!devctl_kernel_base_readable(t ? t->proc : NULL)) return -1;
     }

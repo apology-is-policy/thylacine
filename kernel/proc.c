@@ -1257,12 +1257,12 @@ u64 proc_cpu_ns(const struct Proc *p) {
 // honest: a running thread only ever pushes the frontier LOWER, so a
 // concurrent write makes the reported depth deeper, never shallower. The
 // number is a floor, which is the direction a stack-headroom question wants.
-u32 proc_kstack_peak(const struct Proc *p, int *tid_out) {
+u32 proc_kstack_peak(const struct Proc *p, int *tid_out, u32 *budget_words) {
     if (tid_out) *tid_out = 0;
     if (!p) return 0;
     u32 peak = 0;
     for (const struct Thread *t = p->threads; t; t = t->next_in_proc) {
-        u32 used = thread_kstack_used(t);
+        u32 used = thread_kstack_used(t, budget_words);
         if (used > peak) {
             peak = used;
             if (tid_out) *tid_out = t->tid;

@@ -31,8 +31,8 @@ trap 'rm -rf "$TMP"' EXIT
 FAILED=0
 
 # clean: cfg, expected distinct states
-CLEAN="syscall_irqs:11
-syscall_irqs_liveness:11"
+CLEAN="syscall_irqs:18
+syscall_irqs_liveness:18"
 
 # must-fail: cfg, the property that must be the one reported
 MUSTFAIL="syscall_irqs_kthread:KthreadGetsPreempted
@@ -42,17 +42,34 @@ syscall_irqs_buggy_late_remask:EretWindowMasked
 syscall_irqs_buggy_marker_never_cleared:TailTookItsPreempt
 syscall_irqs_buggy_masked_body:CpuGetsItsInterrupts"
 
+# $2 = "checkdeadlock" to OMIT TLC's -deadlock flag (which DISABLES the check).
+#
+# The clean cfgs run WITH deadlock checking; the must-fail cfgs run without.
+# That split is not tidiness, it is the fix for a measured hole. The tail's
+# preempt check is modelled as its own step, and OpenEretWindow requires it to
+# have run -- so a model that SKIPS the check can never reach the eret window.
+# With -deadlock passed, TLC does not report that: it explores the smaller
+# graph and prints "No error has been found". Sabotage-measured -- deleting
+# TailPreemptCheck from Next passed the gate. Without the flag the same
+# sabotage reports "Deadlock reached" at 14 distinct states against the clean
+# 18. A must-fail cfg keeps -deadlock, because its job is to violate a NAMED
+# property and a deadlock reported first would mask which one.
 run() {
     LOG="$TMP/$1.log"
-    java -cp "$JAR" tlc2.TLC -workers auto -deadlock -metadir "$TMP/$1.meta" \
-        -config "$1.cfg" syscall_irqs.tla > "$LOG" 2>&1
+    if [ "${2:-}" = "checkdeadlock" ]; then
+        java -cp "$JAR" tlc2.TLC -workers auto -metadir "$TMP/$1.meta" \
+            -config "$1.cfg" syscall_irqs.tla > "$LOG" 2>&1
+    else
+        java -cp "$JAR" tlc2.TLC -workers auto -deadlock -metadir "$TMP/$1.meta" \
+            -config "$1.cfg" syscall_irqs.tla > "$LOG" 2>&1
+    fi
     RC=$?
 }
 
-echo "== clean (must run to completion) =="
+echo "== clean (must run to completion, deadlock-checked) =="
 for row in $CLEAN; do
     cfg=${row%%:*}; want=${row##*:}
-    run "$cfg"
+    run "$cfg" checkdeadlock
     got=$(grep -oE '[0-9]+ distinct states found' "$LOG" | head -1 | cut -d' ' -f1)
     if [ "$RC" -ne 0 ]; then
         echo "FAIL $cfg: TLC exit $RC (expected a clean run)"; sed -n '/Error/,+6p' "$LOG"; FAILED=1

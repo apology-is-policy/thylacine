@@ -14612,14 +14612,23 @@ static void syscall_dispatch_body(struct exception_context *ctx);
 void syscall_dispatch(struct exception_context *ctx) {
     ASSERT_IRQS_MASKED("the SVC vector masks at exception entry");
 
+    // ASSERTED, not guarded (ARCH 8.12 audit F6). A NULL thread here would
+    // run the body unmasked AND preemptible -- an involuntary switch inside a
+    // syscall body, the one thing NoInvoluntarySwitchInBody forbids -- and an
+    // `if (t)` would let it happen in silence. No live path reaches here
+    // without a current thread (an EL0 SVC implies thread_init ran; the direct
+    // test callers run on the boot kthread), which is exactly why the
+    // impossible case should be loud rather than tolerated. Every other
+    // precondition in this wrapper is an assert; this one was the odd branch.
     struct Thread *t = current_thread();
-    if (t) t->in_syscall = 1u;
+    ASSERT_OR_DIE(t, "syscall_dispatch with no current thread");
+    t->in_syscall = 1u;
     irq_unmask_local();
 
     syscall_dispatch_body(ctx);
 
     irq_mask_local();
-    if (t) t->in_syscall = 0u;
+    t->in_syscall = 0u;
 
     ASSERT_IRQS_MASKED("the re-mask must precede the KERNEL_EXIT eret window, "
                        "which inherits its mask (#713)");

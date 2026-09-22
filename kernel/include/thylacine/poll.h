@@ -366,9 +366,5 @@ u64 poll_total_calls(void);
 u64 poll_total_slept(void);
 u64 poll_total_resleeps(void);
 
-// Preemption points a poll loop has crossed. Climbs once per re-loop under
-// noise (specs/poll.tla Point): the witness that a noise-driven poll keeps
-// reaching the spot where its CPU services interrupts, not spinning masked.
-u64 poll_total_points(void);
 
 #endif // THYLACINE_POLL_H

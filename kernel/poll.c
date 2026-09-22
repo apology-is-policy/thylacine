@@ -73,9 +73,6 @@ u64 poll_total_resleeps(void) {
     return __atomic_load_n(&g_poll_resleeps, __ATOMIC_RELAXED);
 }
 
-// Preemption points crossed: the witness that a noise-driven poll keeps
-// reaching the spot where its CPU services interrupts, rather than spinning
-// masked. Climbs once per re-loop under noise (specs/poll.tla Point).
 
 // =============================================================================
 // poll_waiter + poll_waiter_list — the kernel-side hook mechanism.
@@ -413,9 +410,10 @@ s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds, u64 nfds,
         // tsleep returning AWOKEN without reaching either. So the loop makes
         // both itself, with no hook listed -- a parked poller is walked by no
         // producer for as long as the stop lasts (DeathTerminates /
-        // StopHonoured; DEATH WINS: the park returns SLEEP_INTR on death). The
-        // preemption point below does not check either, so these are the only
-        // prompt way out of a noise loop.
+        // StopHonoured; DEATH WINS: the park returns SLEEP_INTR on death).
+        // These two checks are the ONLY prompt way out of a noise loop -- the
+        // preemption point that used to sit below was deleted with ARCH 8.12
+        // and checked neither, so its removal took nothing from this argument.
         if (thread_die_pending(t)) {
             ready_count = 0;
             goto unregister_and_return;
@@ -454,8 +452,18 @@ s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds, u64 nfds,
         __atomic_fetch_add(&g_poll_resleeps, 1u, __ATOMIC_RELAXED);
 
         // A noise pass cost this CPU a full pass and bought nothing; let queued
-        // work run before the next tsleep. The interrupt bound is the point's
-        // (above); this is only fairness to peers on this CPU.
+        // work run before the next tsleep.
+        //
+        // The INTERRUPT bound is no longer this file's to make: ARCH 8.12 runs
+        // the whole syscall body unmasked, so the CPU services interrupts
+        // throughout, and syscall_dispatch's unmask is where that now comes
+        // from. What remains here is FAIRNESS to peers on this CPU, and it is
+        // load-bearing precisely because interrupts-on is NOT preemption: a
+        // body is non-preemptible, so without this yield a noise loop would
+        // hold its CPU against a runnable peer indefinitely. sched_yield_hint
+        // calls sched() when cpu_has_surplus_for_kick sees queued work, and a
+        // cross-CPU ready_on inserts into the run tree BEFORE setting
+        // need_resched -- so a just-placed peer does make this loop yield.
         (void)sched_yield_hint();
     }
 

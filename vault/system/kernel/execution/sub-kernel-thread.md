@@ -192,6 +192,18 @@ It exists because nothing in the tree could report stack depth at all, and ARCH
 that sized that chunk is static and has 797 unfollowed indirect edges under it,
 so it is a LOWER bound and wanted a witness.
 
+`thread_kstack_used(t, budget_words)` takes a **scan budget** (NULL = unlimited)
+because the scan's cost is INVERTED: it stops at the first touched word, so a
+SHALLOW thread costs MORE than a deep one, and the only in-tree caller walks
+every live Proc with IRQs masked. That made an unprivileged program able to
+inflate a masked window simply by spawning threads -- it needs no privilege to
+do so, and only the READER is gated. The budget is decremented per word; a
+caller that finds it 0 on return MUST report the answer as a LOWER BOUND,
+because a truncated scan returns a SHALLOWER number than the truth and a
+silently-truncated watermark is worse than none. `/ctl/kstack` spends
+131072 words (1 MiB of loads) per read and says so in its output when it runs
+out. Found by the ARCH 8.12 audit round (F2).
+
 ## Concurrency
 
 `thread_link_into_proc` / `thread_unlink_from_proc` take

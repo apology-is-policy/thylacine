@@ -5,7 +5,7 @@ title: "syscall_irqs.tla"
 models: [sub-kernel-sched, sub-kernel-syscall-abi]
 pins: []
 cfgs:
-  - "syscall_irqs.cfg -- clean, a user thread: NoInvoluntarySwitchInBody + EretWindowMasked + TailTookItsPreempt (11 states)"
+  - "syscall_irqs.cfg -- clean, a user thread: NoInvoluntarySwitchInBody + EretWindowMasked + TailTookItsPreempt (18 states)"
   - "syscall_irqs_liveness.cfg -- SpecLive: CpuGetsItsInterrupts (11)"
   - "syscall_irqs_kthread.cfg -- THE CONTROL, not a bug: no marker, so KthreadGetsPreempted must be VIOLATED (12)"
   - "syscall_irqs_buggy_marker_ignored.cfg -- preempt_check_irq never consults the marker (NoInvoluntarySwitchInBody)"
@@ -32,7 +32,15 @@ MODEL-FIRST for [[arc-arch81]] -- the code does not exist yet.
   `eret`s under an INHERITED mask, the one surviving #713-class window that
   does not mask locally, so the re-mask must precede it.
 - **TailTookItsPreempt** -- the #107 syscall-return preempt fires AT the
-  boundary rather than being deferred past it by a leaked marker.
+  boundary rather than being deferred past it by a leaked marker. Stated as
+  `tailchk # "deferred"`, over a variable the tail's preempt check WRITES,
+  not as `(pc = "eret") => ~resched`. The predecessor was TAUTOLOGICAL: it
+  gated the eret window on `(~resched \/ Defers)`, which with the marker clear
+  is literally the invariant's own text, so a model in which the check were
+  simply ABSENT would have passed it. It is now its own step, the window
+  requires it to have RUN, and skipping it wedges the model instead --
+  measured, by deleting the action: 14 distinct states and "Deadlock reached"
+  against the clean 18.
 - **CpuGetsItsInterrupts** -- `[]<>(~masked)`. What the chunk buys. This is
   the obligation [[spec-poll-cpu]] carries today (`[]<>Open` there): the same
   sentence about the same CPU.
@@ -62,6 +70,38 @@ discriminate.
 (`-fstack-usage` over a call graph whose indirect edges resolve through the
 DWARF layout of `struct Dev`), not a model property, and its runtime guard is
 the watermark [[arc-arch81]] adds. See [[seam-viv-tier2-frame]].
+
+## Three weaknesses the audit round found in this module
+
+All three were in the parts the module's own prose leaned on hardest, which is
+the instructive part -- the prose asserted properties the model did not have.
+
+**`VoluntarySleep` modelled no switch.** Its comment claimed it existed "so the
+invariant is not trivially satisfied by a model in which no switch of any kind
+occurs in the body", and the action moved no `pc` and touched no `ksw`: it
+cleared a flag. The module's non-triviality was carried ENTIRELY by the
+`KTHREAD` control, which is genuine, but the stated second source did not
+exist. It now moves to a real `"blocked"` state and back, so the body DOES
+leave the CPU and `NoInvoluntarySwitchInBody` is a claim about the KIND of
+switch rather than about switches existing. Its `resched` precondition is gone
+too -- a blocking syscall sleeps whether or not a reschedule is pending, and
+requiring one made the leg unreachable in exactly the runs where nothing had
+ticked.
+
+**`Tick` was gated on `~masked`.** A local timer IRQ does need the unmask, but
+it is not the only producer: `ready_on`'s cross-CPU arm sets a PEER's
+`need_resched` regardless of that peer's mask. The gate modelled a system in
+which the flag cannot appear during a masked window, and let the module prove
+a tail property STRONGER than the code guarantees.
+
+**`TailTookItsPreempt` was tautological** -- see above.
+
+And the gate that runs it had a matching hole: it passed TLC's `-deadlock`
+flag, which DISABLES deadlock checking, so the wedge that now catches a skipped
+tail check was invisible. Measured by sabotage: with the flag, deleting
+`TailPreemptCheck` PASSED. The clean cfgs now run deadlock-checked; the
+must-fail cfgs keep the flag, because their job is to violate a NAMED property
+and a deadlock reported first would mask which one.
 
 ## A property withdrawn, and why that is recorded
 

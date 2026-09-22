@@ -1782,12 +1782,40 @@ by decision), the need for points in `pipe_block_locked` / `chan_role_acquire`,
 and `specs/poll_cpu.tla` with its four cfgs -- that module's stated premise IS
 the masked syscall, so it becomes vacuous rather than false.
 
-Fixed without being aimed at: `kernel/loom.c:322` (`loom_free`, from a handle
-close) spins on a kthread's `sqpoll_exited`. If that kthread is runnable on the
-spinner's OWN CPU, its wake's `need_resched` can only be consumed at an
-IRQ-return -- which is masked -- so it is a latent single-CPU hang today. Same
-shape at `kernel/irqfwd.c:288`, `kernel/pci_irq.c:480`, `kernel/proc.c:5431`,
-`arch/arm64/gic.c:239`. Interrupts-on makes all five correct.
+Fixed without being aimed at -- but only where the waited-on write is an
+INTERRUPT HANDLER's, which is a narrower set than this section first claimed.
+`kernel/irqfwd.c:288` spins on `k->in_dispatch` and `kernel/pci_irq.c:481` on
+`k->pci->dispatch_pins`; both counters are decremented inside the IRQ dispatch
+path itself, so under the old mask a same-CPU handler could never run and the
+spin could never end. Interrupts-on fixes those two, and exactly those two.
+
+**It does NOT fix `kernel/loom.c:323`, and the reason is this chunk's own
+central limitation.** `loom_free`'s join spins until the sqpoll kthread sets
+`sqpoll_exited` -- a write made by the KTHREAD, at `kernel/loom.c:2239`, not by
+any interrupt handler. `loom_free` runs inside a syscall body (a handle close,
+or `proc_close_handles_at_exit` on the way out of `exits()`), so `in_syscall`
+is set; the tick fires and sets `need_resched`, and `preempt_check_irq` then
+returns without switching. **Servicing an interrupt is not scheduling a
+thread.** At `-smp 1` there is no peer to run the kthread and no
+`sched_notify_idle_peer` (it returns false at `online <= 1`), so the spin never
+terminates -- exactly as before the chunk. The hang is unchanged, and the fix
+it needs is a blocking wait on a Rendez the kthread's terminal path wakes: a
+spin inside a non-preemptible body can never wait on a thread. Tracked as
+open work; it is a pre-existing defect this chunk neither caused nor closes.
+
+Two further sites this section originally named do not belong in the list at
+all. `arch/arm64/gic.c:239` short-circuits for self one line above the spin
+(`if (cpu == smp_cpu_idx_self()) return true;`) and otherwise waits on a
+REMOTE CPU's counter under a timeout -- the local mask never mattered, so it
+was never broken. `kernel/proc.c:5431`'s `on_cpu` reap spin waits on a write
+the destination CPU's resume frame makes, and is marginal at best.
+
+Recorded at this length because the original claim ("interrupts-on makes all
+five correct") was FALSE, and false in the precise way this whole chunk exists
+to repair: it read "the CPU now services interrupts" as "the other thread now
+runs". That is the same conflation Phase 0's "defer preemption" underwent when
+P3-Ec built it as "mask interrupts" -- committed here, in the section
+correcting it, and caught by the audit round rather than by its author.
 
 #### The spec obligation
 

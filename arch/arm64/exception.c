@@ -136,9 +136,11 @@ static void exception_unexpected_impl(struct exception_context *ctx, u64 vector_
 // ARCH 8.12 (syscall bodies run with interrupts ON) does NOT open that
 // residual, and the reason is worth stating because the chunk looks like it
 // should. The unmask is confined to the SVC BODY -- syscall_dispatch's
-// wrapper, not the vector -- so kernel fault handling, which shares the 0x400
-// slot, still runs masked end to end and this counter still measures what it
-// was built to measure. A syscall body that faults enters EL1-sync through the
+// wrapper, not the vector. Kernel fault handling -- what this counter measures
+// -- enters through the SEPARATE 0x200 current-EL sync slot, which the wrapper
+// never touches and which masks at exception entry, so it still runs masked end
+// to end. (The slot the SVC shares is 0x400, lower-EL sync, whose other
+// occupant is EL0 fault handling, which this counter does not measure.) A syscall body that faults enters EL1-sync through the
 // normal vector, which masks at exception entry, so the recursive chain this
 // guard bounds is masked exactly as before.
 //

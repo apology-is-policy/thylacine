@@ -1155,14 +1155,14 @@ void test_thread_kstack_watermark_follows_the_frontier(void) {
     // The exact assert. A thread that has never been dispatched has touched
     // none of its stack, so every word is still poison and the watermark is
     // precisely 0. Without the poison this reads THREAD_KSTACK_SIZE.
-    TEST_EXPECT_EQ(thread_kstack_used(t), 0u,
+    TEST_EXPECT_EQ(thread_kstack_used(t, NULL), 0u,
         "a never-run thread's usable stack is entirely poison");
 
     ready(t);
     TEST_YIELD_UNTIL(__atomic_load_n(&g_kstack_probe_done, __ATOMIC_ACQUIRE) != 0u);
 
     u32 reached = g_kstack_probe_reached;
-    u32 used    = thread_kstack_used(t);
+    u32 used    = thread_kstack_used(t, NULL);
 
     TEST_ASSERT(reached >= KSW_PROBE_BYTES,
                 "the probe's frame really is as deep as it claims");

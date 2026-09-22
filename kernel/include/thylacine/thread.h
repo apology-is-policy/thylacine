@@ -631,7 +631,7 @@ _Static_assert(__builtin_offsetof(struct Thread, magic) == 0,
 #define THREAD_KSTACK_POISON  0x5354414b57415445ULL   // "STAKWATE", big-endian
 
 void thread_kstack_poison(struct Thread *t);
-u32  thread_kstack_used(const struct Thread *t);
+u32  thread_kstack_used(const struct Thread *t, u32 *budget_words);
 
 // "current thread" is held in TPIDR_EL1, the per-CPU OS-use register.
 // Accessed by inline mrs / msr — no function call overhead in the

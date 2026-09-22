@@ -58,9 +58,10 @@ VARIABLES
     resched,     \* need_resched is pending.
     ctx,         \* ELR/SPSR are installed: the eret window is OPEN.
     ksw,         \* an INVOLUNTARY switch happened while in kernel mode.
-    noise        \* an unprivileged producer is keeping the body looping.
+    noise,       \* an unprivileged producer is keeping the body looping.
+    tailchk      \* the return tail's preempt check: pending / took / deferred.
 
-vars == <<pc, masked, marker, resched, ctx, ksw, noise>>
+vars == <<pc, masked, marker, resched, ctx, ksw, noise, tailchk>>
 
 (***************************************************************************)
 (* "el0"   -- userspace.                                                   *)
@@ -70,9 +71,18 @@ vars == <<pc, masked, marker, resched, ctx, ksw, noise>>
 (* "body"  -- the syscall body, interrupts ON.                             *)
 (* "tail"  -- the EL0-return tail: die check, note delivery, the #107       *)
 (*            syscall-return preempt. The deferred reschedule fires here.   *)
+(* "blocked" -- the body called sched() ITSELF and is off-CPU. A VOLUNTARY *)
+(*            switch: it must never set `ksw`, and the marker and the mask  *)
+(*            must survive it, because the thread is still inside its       *)
+(*            syscall. Modelled as a real state rather than a flag clear,   *)
+(*            so a green on NoInvoluntarySwitchInBody is not the green of a *)
+(*            model in which NO switch occurs in the body at all (audit     *)
+(*            F7a: the predecessor claimed exactly this and did not deliver *)
+(*            it -- it moved no pc and touched no ksw).                     *)
 (* "eret"  -- ELR/SPSR installed, before the `eret`. #713's window.         *)
 (***************************************************************************)
-PcStates == {"el0", "entry", "body", "tail", "eret"}
+PcStates     == {"el0", "entry", "body", "blocked", "tail", "eret"}
+TailChkStates == {"pending", "took", "deferred"}
 
 TypeOk ==
     /\ pc \in PcStates
@@ -82,6 +92,7 @@ TypeOk ==
     /\ ctx \in BOOLEAN
     /\ ksw \in BOOLEAN
     /\ noise \in BOOLEAN
+    /\ tailchk \in TailChkStates
 
 Init ==
     /\ pc        = "el0"
@@ -91,16 +102,21 @@ Init ==
     /\ ctx       = FALSE
     /\ ksw       = FALSE
     /\ noise     = FALSE
+    /\ tailchk   = "pending"
 
 (***************************************************************************)
 (* Svc -- EL0 traps. `vectors.S` masks at exception entry (msr daifset).   *)
-(* A kthread never does this; it is modelled as entering the body directly. *)
+(* A kthread never traps -- but it is NOT modelled as bypassing this step   *)
+(* (audit F7d corrected the claim): Svc is the only transition out of "el0" *)
+(* and Init starts there, so every run begins with it. What KTHREAD changes *)
+(* is EnterBody, which sets no marker -- and the marker is the entire        *)
+(* difference the control is testing.                                       *)
 (***************************************************************************)
 Svc ==
     /\ pc = "el0"
     /\ pc' = "entry"
     /\ masked' = TRUE
-    /\ UNCHANGED <<marker, resched, ctx, ksw, noise>>
+    /\ UNCHANGED <<marker, resched, ctx, ksw, noise, tailchk>>
 
 (***************************************************************************)
 (* EnterBody -- set the marker, then unmask. The ORDER is the mechanism:    *)
@@ -114,7 +130,7 @@ EnterBody ==
     /\ pc' = "body"
     /\ masked' = BUGGY_MASKED_BODY
     /\ marker' = IF KTHREAD THEN FALSE ELSE ~BUGGY_UNMASK_BEFORE_MARK
-    /\ UNCHANGED <<resched, ctx, ksw, noise>>
+    /\ UNCHANGED <<resched, ctx, ksw, noise, tailchk>>
 
 (***************************************************************************)
 (* LateMark -- the BUGGY_UNMASK_BEFORE_MARK arm: the marker is set one step *)
@@ -126,18 +142,24 @@ LateMark ==
     /\ pc = "body"
     /\ ~marker
     /\ marker' = TRUE
-    /\ UNCHANGED <<pc, masked, resched, ctx, ksw, noise>>
+    /\ UNCHANGED <<pc, masked, resched, ctx, ksw, noise, tailchk>>
 
 (***************************************************************************)
-(* Tick -- the timer lands and sets need_resched. The producer: granted no  *)
-(* fairness, never forced to stop. Only possible while UNMASKED, which is   *)
-(* the whole point of the chunk.                                            *)
+(* Tick -- need_resched is set. The producer: granted no fairness, never    *)
+(* forced to stop.                                                          *)
+(*                                                                         *)
+(* NOT gated on ~masked (audit F7b). A local timer IRQ does require the     *)
+(* unmask, but it is not the only producer: `ready_on`'s cross-CPU arm      *)
+(* (kernel/sched.c, the #866 F1 kick) calls need_resched_set(target_cpu) on *)
+(* a PEER regardless of that peer's mask. Gating this action on ~masked     *)
+(* modelled a system in which the flag cannot appear during a masked        *)
+(* window, and that is simply not the system -- it let the module prove a   *)
+(* tail property STRONGER than the code guarantees. See TailTookItsPreempt. *)
 (***************************************************************************)
 Tick ==
-    /\ ~masked
     /\ ~resched
     /\ resched' = TRUE
-    /\ UNCHANGED <<pc, masked, marker, ctx, ksw, noise>>
+    /\ UNCHANGED <<pc, masked, marker, ctx, ksw, noise, tailchk>>
 
 (***************************************************************************)
 (* PreemptCheckIrq -- the IRQ-return gate. It DEFERS (leaves need_resched   *)
@@ -157,18 +179,32 @@ PreemptCheckIrq ==
     /\ ~Defers
     /\ resched' = FALSE
     /\ ksw' = (ksw \/ pc \in {"entry", "body", "tail"})
-    /\ UNCHANGED <<pc, masked, marker, ctx, noise>>
+    /\ UNCHANGED <<pc, masked, marker, ctx, noise, tailchk>>
 
 (***************************************************************************)
-(* VoluntarySleep -- the body calls sched() itself. ALLOWED and unchanged   *)
-(* by this chunk; modelled so the invariant is not trivially satisfied by a *)
-(* model in which no switch of any kind occurs in the body.                 *)
+(* VoluntarySleep / VoluntaryResume -- the body calls sched() itself.       *)
+(* ALLOWED and unchanged by this chunk. This is the leg that makes          *)
+(* NoInvoluntarySwitchInBody a claim about the KIND of switch rather than   *)
+(* about switches existing: the body DOES leave the CPU here, and `ksw`     *)
+(* still must not be set.                                                   *)
+(*                                                                         *)
+(* No `resched` precondition -- a blocking syscall sleeps whether or not a  *)
+(* reschedule is pending, and requiring one (the predecessor did) made the  *)
+(* leg unreachable in exactly the runs where nothing had ticked.            *)
+(* sched() clears need_resched at entry, hence resched' = FALSE.            *)
+(* The marker and the mask SURVIVE: the thread is still in its syscall, and *)
+(* each thread carries its own DAIF across the switch on its own stack.     *)
 (***************************************************************************)
 VoluntarySleep ==
     /\ pc = "body"
-    /\ resched
+    /\ pc' = "blocked"
     /\ resched' = FALSE
-    /\ UNCHANGED <<pc, masked, marker, ctx, ksw, noise>>
+    /\ UNCHANGED <<masked, marker, ctx, ksw, noise, tailchk>>
+
+VoluntaryResume ==
+    /\ pc = "blocked"
+    /\ pc' = "body"
+    /\ UNCHANGED <<masked, marker, resched, ctx, ksw, noise, tailchk>>
 
 (***************************************************************************)
 (* Noise -- an unprivileged producer keeps the body looping (a pipe, one    *)
@@ -181,12 +217,12 @@ NoiseOn ==
     /\ pc = "body"
     /\ ~noise
     /\ noise' = TRUE
-    /\ UNCHANGED <<pc, masked, marker, resched, ctx, ksw>>
+    /\ UNCHANGED <<pc, masked, marker, resched, ctx, ksw, tailchk>>
 
 NoiseOff ==
     /\ noise
     /\ noise' = FALSE
-    /\ UNCHANGED <<pc, masked, marker, resched, ctx, ksw>>
+    /\ UNCHANGED <<pc, masked, marker, resched, ctx, ksw, tailchk>>
 
 (***************************************************************************)
 (* LeaveBody -- re-mask and clear the marker BEFORE the return tail, so the *)
@@ -198,7 +234,7 @@ LeaveBody ==
     /\ pc' = "tail"
     /\ masked' = ~BUGGY_LATE_REMASK
     /\ marker' = IF BUGGY_MARKER_NEVER_CLEARED THEN marker ELSE FALSE
-    /\ UNCHANGED <<resched, ctx, ksw, noise>>
+    /\ UNCHANGED <<resched, ctx, ksw, noise, tailchk>>
 
 (***************************************************************************)
 (* TailPreempt -- the deferred reschedule fires here, which is the whole    *)
@@ -209,11 +245,21 @@ LeaveBody ==
 (* fires. It is not starvation (the next EL0 interrupt takes it), so        *)
 (* liveness cannot see it; TailTookItsPreempt is the safety statement.      *)
 (***************************************************************************)
-TailPreempt ==
+(* Audit F7c: this is now a SEPARATE step that always runs and RECORDS its  *)
+(* verdict, rather than a guard folded into OpenEretWindow. The predecessor *)
+(* gated the window on `(~resched \/ Defers)`, which with the marker clear  *)
+(* is literally the invariant's own statement -- so the property could not  *)
+(* fail for any reason except a leaked marker, and a model in which the     *)
+(* check was simply ABSENT would have passed it. Now absence shows up as a  *)
+(* deadlock (the window never opens) and deferral shows up as "deferred".   *)
+TailPreemptCheck ==
     /\ pc = "tail"
-    /\ resched
-    /\ ~Defers
-    /\ resched' = FALSE
+    /\ tailchk = "pending"
+    /\ IF resched /\ Defers
+         THEN /\ tailchk' = "deferred"          \* owed at EL0: the bug
+              /\ UNCHANGED resched
+         ELSE /\ tailchk' = "took"
+              /\ resched' = FALSE
     /\ UNCHANGED <<pc, masked, marker, ctx, ksw, noise>>
 
 (***************************************************************************)
@@ -222,14 +268,13 @@ TailPreempt ==
 (***************************************************************************)
 OpenEretWindow ==
     /\ pc = "tail"
-    \* The tail's preempt check RUNS, unconditionally, before KERNEL_EXIT.
-    \* So the window opens only once that check has had its turn: either it
-    \* consumed the reschedule, or it DEFERRED -- which is the bug, and is
-    \* what TailTookItsPreempt catches.
-    /\ (~resched \/ Defers)
+    \* The window opens only once the tail's preempt check has HAD ITS TURN --
+    \* whatever it decided. Skipping the check therefore does not silently
+    \* satisfy the property; it wedges here instead, which TLC reports.
+    /\ tailchk \in {"took", "deferred"}
     /\ pc' = "eret"
     /\ ctx' = TRUE
-    /\ UNCHANGED <<masked, marker, resched, ksw, noise>>
+    /\ UNCHANGED <<masked, marker, resched, ksw, noise, tailchk>>
 
 Eret ==
     /\ pc = "eret"
@@ -237,17 +282,19 @@ Eret ==
     /\ ctx' = FALSE
     /\ masked' = FALSE
     /\ marker' = FALSE
+    /\ tailchk' = "pending"
     /\ UNCHANGED <<resched, ksw, noise>>
 
 Next ==
     \/ Svc \/ EnterBody \/ LateMark \/ Tick \/ PreemptCheckIrq
-    \/ VoluntarySleep \/ NoiseOn \/ NoiseOff
-    \/ LeaveBody \/ TailPreempt \/ OpenEretWindow \/ Eret
+    \/ VoluntarySleep \/ VoluntaryResume \/ NoiseOn \/ NoiseOff
+    \/ LeaveBody \/ TailPreemptCheck \/ OpenEretWindow \/ Eret
 
 Fairness ==
     /\ WF_vars(Svc) /\ WF_vars(EnterBody) /\ WF_vars(LateMark)
     /\ WF_vars(PreemptCheckIrq) /\ WF_vars(LeaveBody)
-    /\ WF_vars(TailPreempt) /\ WF_vars(OpenEretWindow) /\ WF_vars(Eret)
+    /\ WF_vars(TailPreemptCheck) /\ WF_vars(OpenEretWindow) /\ WF_vars(Eret)
+    /\ WF_vars(VoluntaryResume)
     \* Tick, VoluntarySleep and the two Noise steps get NOTHING: the
     \* adversary is never obliged to interrupt, to stop making noise, or to
     \* let a body sleep. A property that needs the producer to cooperate is
@@ -280,7 +327,7 @@ SpecLive == Init /\ [][Next]_vars /\ Fairness
 (***************************************************************************)
 NoInvoluntarySwitchInBody == ~ksw
 EretWindowMasked          == ctx => masked
-TailTookItsPreempt        == (pc = "eret") => ~resched
+TailTookItsPreempt        == tailchk # "deferred"
 KthreadGetsPreempted      == ~ksw
 
 CpuGetsItsInterrupts           == []<>(~masked)

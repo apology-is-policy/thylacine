@@ -1383,7 +1383,7 @@ u64 proc_cpu_ns(const struct Proc *p);
 // proc_kstack_peak -- the deepest kernel stack any of p's threads has ever
 // reached, in bytes, and (via tid_out) which thread. Caller holds
 // g_proc_table_lock, exactly as for proc_cpu_ns. ARCH 8.12.
-u32 proc_kstack_peak(const struct Proc *p, int *tid_out);
+u32 proc_kstack_peak(const struct Proc *p, int *tid_out, u32 *budget_words);
 
 // proc_thread_cap_ok -- the thread-spawn gate. Returns true if the Proc is
 //   exempt OR thread_count + loom_sqpoll_count < PROC_THREAD_MAX (SQPOLL

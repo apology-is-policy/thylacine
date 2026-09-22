@@ -159,15 +159,30 @@ void thread_kstack_poison(struct Thread *t) {
 // distinctive constant that is a measure-zero concern, and it errs in the
 // direction a reader can detect: the static bound (ARCH 8.12) is the other
 // side of the same question, and the two disagreeing is itself the signal.
-u32 thread_kstack_used(const struct Thread *t) {
+//
+// BUDGETED because the scan's cost is INVERTED and that is a DoS lever (ARCH
+// 8.12 audit F2): a SHALLOW thread costs MORE, since the walk stops at the
+// first touched word and a shallow thread has a long untouched prefix. The
+// only in-tree caller walks every live Proc with IRQs MASKED, so an unbounded
+// scan is a masked window an unprivileged program can inflate by spawning
+// threads. `budget_words` (NULL = unlimited, for tests and one-off callers)
+// is decremented per word examined; a caller that finds it 0 on return MUST
+// treat the answer as a LOWER BOUND and say so, because a truncated scan
+// returns a SHALLOWER number than the truth -- the gauge-reads-zero trap.
+u32 thread_kstack_used(const struct Thread *t, u32 *budget_words) {
     if (!t || !t->kstack_base)
         return 0;
     const u64 *p   = (const u64 *)((const char *)t->kstack_base
                                    + THREAD_KSTACK_GUARD_SIZE);
     const u64 *end = (const u64 *)((const char *)t->kstack_base
                                    + THREAD_KSTACK_TOTAL_SIZE);
-    while (p < end && *p == THREAD_KSTACK_POISON)
+    while (p < end && *p == THREAD_KSTACK_POISON) {
+        if (budget_words) {
+            if (*budget_words == 0u) break;     // exhausted: answer is a floor
+            (*budget_words)--;
+        }
         p++;
+    }
     return (u32)((const char *)end - (const char *)p);
 }
 

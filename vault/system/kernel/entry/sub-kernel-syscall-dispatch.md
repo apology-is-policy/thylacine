@@ -537,6 +537,14 @@ calling thread's in-syscall marker, unmasks, runs the body, re-masks, and
 clears the marker. Everything the dispatcher did before is in the body, and the
 body is where every handler still lives.
 
+The current thread is **asserted, not guarded**. A NULL thread here would run
+the body unmasked AND preemptible -- an involuntary switch inside a syscall
+body, the one thing the model forbids -- and an `if (t)` would let that happen
+in silence. No live path reaches the wrapper without a current thread, which is
+exactly why the impossible case is loud rather than tolerated: every other
+precondition in the wrapper is an assert, and this one was the odd branch out.
+Changed by the ARCH 8.12 audit round (F6).
+
 Three things about it are load-bearing rather than incidental:
 
 **It is a wrapper, not an edit to the vector.** The re-mask must precede
