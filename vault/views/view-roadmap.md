@@ -12,6 +12,7 @@ Generated from note fields — do not edit between the markers
 <!-- generated:begin -->
 | arc | status | chunks landed | follow-ons |
 |---|---|---|---|
+| [[arc-boosty]] | active | 3 |  |
 | [[arc-clade]] | active | 7 |  |
 | [[arc-corvus-srv]] | active | 3 | seam-srv-registry-lifecycle |
 | [[arc-deep-smp-review]] | active | 4 | seam-hmp-push, seam-sparse-mpidr |

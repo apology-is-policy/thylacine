@@ -11,7 +11,7 @@ on-demand by `quaestor closed sub-kernel-srvconn`). Paste or
 transclude into a prosecutor prompt as the closed-findings preamble.
 
 <!-- generated:begin -->
-13 closed findings on [[sub-kernel-srvconn]] — do NOT re-report
+14 closed findings on [[sub-kernel-srvconn]] — do NOT re-report
 these in a future round (open/deferred findings are NOT listed
 here; see the seam inbox):
 
@@ -26,6 +26,7 @@ here; see the seam inbox):
 - [[fnd-p5srv-r1-f10]] [P3] client_deadline_ns defaults to 0 — unsafe-by-default for any future blocking caller (documented) — Documented: the default-0 is retained deliberately as the
 - [[fnd-p5srv-r1-f12]] [P3] client_fid uninitialized at create — soundness rested on the handshake_done gate alone (documented) — Documented at the time; RETIRED WHOLESALE at
 - [[fnd-p5srv-r1-f8]] [P3] A burst of hung handshakes can transiently exhaust SRV_MAX_CONNS (documented) — Documented, no code: with the F1 deadline fix even a hung handshake
+- [[fnd-pouchb0-r3-f2]] [P2] client-side poll on a byte-mode /srv connection is neither implemented nor fail-closed: it samples the server's end, and the reply wakes nobody (fixed) — Fixed in full, not fail-closed: POLLNVAL for a client endpoint is indistinguishable from the libc defect 0039 fixes, so the prover could no longer discriminate, and the browser's IPC would still have had nothing to poll. `srvconn_poll(cn, client, events, pw)` gives the two endpoints mirror-image rows, and reading `srvconn.c` end to end found the wake set incomplete in BOTH directions -- a nonblocking server polling for write room was never woken by a client drain either -- so every ring mutation now walks the one hook list. That is sound only with a second fix nobody had asked for: `sys_poll_for_proc` returned 0 when a post-wake re-sample found nothing, so a timed poll "timed out" in microseconds and `poll(-1)` could return 0. `specs/poll.tla` modelled readiness as a one-way edge and could not see it; the spec was extended first. The libc half is pouch 0041 (the stream-socket shape at EOF). Not covered and recorded: an ACCEPTED socket, untagged by 0006's design.
 - [[fnd-rw4-rev2-f1]] [P1] RW-4 R2-F1: byte-mode /srv blocking recv extincts on a 2nd concurrent reader (fixed) — Fixed at `ee30f559`: a per-`srvconn_chan` `bool reading` single-reader
 - [[fnd-stalk3c-r1-f2]] [P3] Residual stale references to the retired /srv symbols across seven files' comments (fixed) — Fixed: all reworded to create=post / open=connect /
 <!-- generated:end -->
