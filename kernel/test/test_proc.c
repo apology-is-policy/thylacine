@@ -1556,7 +1556,7 @@ void test_proc_wait_pid_syscall_untraced_flag(void) {
     ctx.regs[0] = (u64)(s64)cpid;
     ctx.regs[1] = (u64)WAIT_UNTRACED;
     ctx.regs[2] = 0;               // status_out NULL: the handler skips the copy
-    syscall_dispatch(&ctx);
+    TEST_SYSCALL_DISPATCH(&ctx);
     TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)cpid,
         "SYS_WAIT_PID admits WAIT_UNTRACED + reports the stop latch (pre-fix: -1)");
     TEST_ASSERT(c->state == PROC_STATE_ALIVE, "the report did not reap");
@@ -1569,7 +1569,7 @@ void test_proc_wait_pid_syscall_untraced_flag(void) {
     ctx.regs[0] = (u64)(s64)cpid;
     ctx.regs[1] = 0x40u;           // outside {WNOHANG, UNTRACED, CONTINUED}
     ctx.regs[2] = 0;
-    syscall_dispatch(&ctx);
+    TEST_SYSCALL_DISPATCH(&ctx);
     TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-1,
         "an unknown flag bit is still rejected");
 
