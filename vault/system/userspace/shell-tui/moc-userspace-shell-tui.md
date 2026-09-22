@@ -88,6 +88,25 @@ visible. In particular, two failure modes are worth not conflating:
   Also the area's sharpest instance of a test suite that does not run — and one
   module that says it does.
 
+- [[sub-lantern]] — a folder of Markdown slides, shown one at a time: the deck
+  presenter. The area's clearest case of a facility that needed *no* new
+  mechanism — the clear-and-rerender rich path already existed as a grid
+  operation, so the renderer is untouched and the only structural decision is
+  an exclusion (it links [[sub-kaua]] without the feature that owns the alt
+  screen, so there is no code path to the mode that would discard the
+  rendering). Its manifest refuses every display key it might plausibly carry,
+  which is where a content format's authority boundary is drawn.
+
+**This list is INCOMPLETE and has been since 2026-08-04.** Six dossiers in this
+area are not in it: [[sub-manual]], [[sub-view]], [[sub-gallery]],
+[[sub-halcyond]], [[sub-kaua-term]] and [[sub-lib-vt]] — the whole rendering
+half of the area, including the one dossier (`sub-halcyond`) that most of the
+rest now point at. Said here rather than quietly appended to, because a
+curated list needs an entry that earns its orientation, and adding one member
+to a list missing six makes the list *look* current without being so. Owed as
+its own pass; `ls vault/system/userspace/shell-tui/` is the authority until
+then.
+
 ## Cross-cutting
 
 - Everything here is native, so it stands on [[sub-libthyla-rs]] — the same
