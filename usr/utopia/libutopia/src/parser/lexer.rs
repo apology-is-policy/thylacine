@@ -1816,7 +1816,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "UT-PARSE-1: `cmd < in` lexes `in` as the keyword, not a filename"]
     fn redirects() {
         assert_eq!(
             kinds_no_eof("cmd > out"),
@@ -1834,12 +1833,21 @@ mod tests {
                 TokenKind::Word("out".into()),
             ]
         );
+        // `in` after `<` is a FILENAME, and this lexer still emits the
+        // keyword -- correctly. The lexer is context-free by design, so the
+        // demotion back to a word lives in the parser, where a word is already
+        // what the grammar asks for (`Parser::demote_reserved_word`; POSIX
+        // rule 1). This assertion was written expecting the other design --
+        // a context-sensitive lexer -- and pinning the real one here is what
+        // keeps the two halves of the decision in the same file as each other.
+        // The behaviour a user sees is asserted in
+        // `parse::tests::reserved_words_are_ordinary_words_off_the_command_word`.
         assert_eq!(
             kinds_no_eof("cmd < in"),
             vec![
                 TokenKind::Word("cmd".into()),
                 TokenKind::Less,
-                TokenKind::Word("in".into()),
+                TokenKind::In,
             ]
         );
     }

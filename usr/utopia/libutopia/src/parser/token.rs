@@ -303,4 +303,73 @@ impl TokenKind {
             _ => None,
         }
     }
+
+    /// The inverse of [`TokenKind::reserved_word`]: the source text a
+    /// reserved-word token was made from.
+    ///
+    /// Needed because a reserved word is reserved only in COMMAND-WORD
+    /// position (POSIX rule 1, and rc's lexer does the same with a
+    /// last-token flag): `echo if`, `cd in` and `cmd < in` are an ordinary
+    /// argument and an ordinary filename, so the parser demotes the token
+    /// back to a `Word` and everything downstream sees plain text.
+    ///
+    /// The two tables are hand-written inverses, which is a drift risk --
+    /// `reserved_word_round_trips` walks every word in the forward table and
+    /// fails if its token does not come back with the same spelling, so
+    /// adding a keyword to one and not the other cannot land quietly.
+    pub fn reserved_word_text(k: &TokenKind) -> Option<&'static str> {
+        Some(match k {
+            TokenKind::Fn => "fn",
+            TokenKind::Let => "let",
+            TokenKind::If => "if",
+            TokenKind::Else => "else",
+            TokenKind::Case => "case",
+            TokenKind::For => "for",
+            TokenKind::While => "while",
+            TokenKind::In => "in",
+            TokenKind::Try => "try",
+            TokenKind::Catch => "catch",
+            TokenKind::Return => "return",
+            TokenKind::Break => "break",
+            TokenKind::Continue => "continue",
+            TokenKind::On => "on",
+            TokenKind::Mask => "mask",
+            TokenKind::Trace => "trace",
+            _ => return None,
+        })
+    }
+}
+
+#[cfg(test)]
+mod reserved_tests {
+    use super::*;
+
+    /// Every word the lexer reserves comes back with the same spelling.
+    ///
+    /// The word list is the one the forward table matches on, so this catches
+    /// the drift that matters: a keyword added to `reserved_word` and not to
+    /// `reserved_word_text` would silently stop being demotable in argument
+    /// position -- i.e. it would quietly become unusable as a filename again,
+    /// which is the exact defect the demotion exists to fix.
+    #[test]
+    fn reserved_word_round_trips() {
+        for w in [
+            "fn", "let", "if", "else", "case", "for", "while", "in", "try", "catch", "return",
+            "break", "continue", "on", "mask", "trace",
+        ] {
+            let k = TokenKind::reserved_word(w)
+                .unwrap_or_else(|| panic!("{w} is not reserved by the forward table"));
+            assert_eq!(
+                TokenKind::reserved_word_text(&k),
+                Some(w),
+                "{w} does not round-trip"
+            );
+        }
+        // A non-keyword must not be demotable, or the predicate would rewrite
+        // ordinary tokens.
+        assert_eq!(
+            TokenKind::reserved_word_text(&TokenKind::Semicolon),
+            None
+        );
+    }
 }

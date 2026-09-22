@@ -218,6 +218,29 @@ impl Parser {
     }
 
     /// Tokens that can legally follow a statement (terminators).
+    /// Demote a reserved-word token in place to the ordinary `Word` it spells.
+    ///
+    /// A reserved word is reserved only in COMMAND-WORD position -- POSIX's
+    /// rule 1, and what rc does with its own last-token flag. Everywhere else
+    /// `in`, `if`, `case` and the rest are ordinary text: `echo if`, `cd in`
+    /// and `cmd < in` name an argument and a file, and a shell that refuses
+    /// them has made sixteen words unusable as filenames.
+    ///
+    /// Done in the parser rather than with a lexer mode for the same reason as
+    /// [`Self::split_double_rparen`]: the lexer is context-free and a mode has
+    /// to be right everywhere, while a demotion only has to be right where a
+    /// word is already what the grammar asks for. The rewrite keeps the
+    /// original span, so diagnostics still point at the source text, and the
+    /// result is an ordinary `TokenKind::Word` -- so nothing downstream, in
+    /// the expression parser or the evaluator, needs to know this happened.
+    fn demote_reserved_word(&mut self) {
+        let Some(text) = self.peek_kind().and_then(TokenKind::reserved_word_text) else {
+            return;
+        };
+        let span = self.tokens[self.pos].span;
+        self.tokens[self.pos] = Token::new(TokenKind::Word(String::from(text)), span);
+    }
+
     /// Split a `))` token in place into two `)`, when the parser is somewhere
     /// that wants a single one.
     ///
@@ -582,6 +605,14 @@ impl Parser {
         let mut words = Vec::new();
         let mut redirects = Vec::new();
         loop {
+            // Past the command word, a reserved word is just a word. Guarded on
+            // `words.is_empty()` so the COMMAND-WORD position keeps its
+            // reservation -- that is the whole of POSIX rule 1, and without the
+            // guard a pipeline element starting with a keyword would silently
+            // become a command named `if`.
+            if !words.is_empty() {
+                self.demote_reserved_word();
+            }
             match self.peek_kind() {
                 Some(k) if is_value_token(k) => {
                     words.push(self.parse_word()?);
@@ -777,6 +808,9 @@ impl Parser {
     }
 
     fn parse_redirect_target(&mut self, label: &'static str) -> ParseResult<Word> {
+        // A redirect target is never a command word, so the demotion is
+        // unconditional here: `cmd < in` reads from a file named `in`.
+        self.demote_reserved_word();
         match self.peek_kind() {
             Some(k) if is_value_token(k) => self.parse_word(),
             _ => Err(ParseError {
@@ -1546,6 +1580,45 @@ mod tests {
     use alloc::string::ToString;
     use alloc::vec;
 
+    /// UT-PARSE-1: a reserved word is reserved only in COMMAND-WORD position.
+    ///
+    /// Sixteen words -- `if`, `in`, `for`, `case`, `fn`, ... -- could not be
+    /// used as an argument or a filename ANYWHERE: `echo if`, `cd in`,
+    /// `cat case` and `cmd < in` were all parse errors. The finding arrived as
+    /// a redirect-only failure; the list below is what measuring the blast
+    /// radius actually returned, and it is kept as the test because the
+    /// redirect case alone would pass for a fix that only patched
+    /// `parse_redirect_target`.
+    ///
+    /// `ls in/` is here as the control that says something about the fix's
+    /// SHAPE rather than its effect: it passed before this change too, because
+    /// `in/` is not the bare word `in`, so a test made only of failures could
+    /// not tell a demotion from the lexer simply never reserving anything.
+    #[test]
+    fn reserved_words_are_ordinary_words_off_the_command_word() {
+        for src in [
+            // Argument position, every reserved word.
+            "echo fn", "echo let", "echo if", "echo else", "echo case", "echo for",
+            "echo while", "echo in", "echo try", "echo catch", "echo return",
+            "echo break", "echo continue", "echo on", "echo mask", "echo trace",
+            // Not just the second word, and not just `echo`.
+            "echo a in b", "cd in", "cat if", "ls in/",
+            // Redirect targets, which is where the finding surfaced.
+            "cmd < in", "cmd > for", "cmd >> case",
+        ] {
+            parse(src).unwrap_or_else(|e| panic!("{src}: {e:?}"));
+        }
+
+        // The command word KEEPS its reservation -- without that conjunct the
+        // demotion would turn every control-flow statement into a command
+        // named after its keyword, which is the failure this guard exists for.
+        parse_ok("if (x) { a }");
+        parse_ok("for (i in xs) { echo $i }");
+        parse_ok("while (x) { a }");
+        assert!(matches!(parse_err("in"), ParseErrorKind::InvalidStatement));
+        assert!(matches!(parse_err("else"), ParseErrorKind::InvalidStatement));
+    }
+
     fn parse_ok(src: &str) -> Script {
         parse(src).unwrap_or_else(|e| panic!("parse failed: {:?}", e))
     }
@@ -1868,7 +1941,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "UT-PARSE-1: a redirect target that is a keyword (`cmd < in`) is refused"]
     fn redirect_stdin() {
         let s = parse_ok("cmd < in");
         match &s.statements[0].kind {

@@ -232,10 +232,10 @@ Nothing here is on a hot path — it runs once per line typed.
   documents itself as not taking and which every production caller in `parse.rs`
   strips. The remaining **8 are 6 genuine defects**, quarantined with
   `#[ignore = "UT-PARSE-n"]` reasons so the gate keeps its signal for new
-  breakage while each debt stays greppable. **UT-PARSE-3 is FIXED** (below);
-  the rest are open: a redirect target that is a keyword is refused (`cmd <
-  in`); `cmd =arg` does not parse as two words though the test's comment
-  records that intent; a backtick fixture; and one line-editor ESC ESC case.
+  breakage while each debt stays greppable. **UT-PARSE-1 and UT-PARSE-3 are
+  FIXED** (below); the rest are open: `cmd =arg` does not parse as two words
+  though the test's comment records that intent; a backtick fixture; and one
+  line-editor ESC ESC case.
   **UT-PARSE-4 was investigated and downgraded** -- truncated input reports
   `UnexpectedToken` where `UnexpectedEof` is expected, and the theory that this
   could break the REPL's line-continuation is FALSE: `line_editor` decides
@@ -243,6 +243,33 @@ Nothing here is on a hot path — it runs once per line typed.
   lightweight; the U-5 parser is authoritative"*), and nothing outside
   `parser/` consumes `UnexpectedEof` at all. Its blast radius is the diagnostic
   a truncated script file prints.
+
+- **A reserved word is reserved only in COMMAND-WORD position** (UT-PARSE-1,
+  fixed 2026-09-22). Before this, the sixteen words in
+  `TokenKind::reserved_word` -- `if`, `in`, `for`, `case`, `fn`, `let`, `while`,
+  `try`, `catch`, `return`, `break`, `continue`, `on`, `mask`, `trace`, `else`
+  -- could not be used as an argument or a filename ANYWHERE. `echo if`,
+  `cd in`, `cat case`, `echo a in b` and `cmd < in` were all parse errors,
+  because the lexer reserves on word text and `is_value_token` admits no
+  keyword. The finding arrived looking like a redirect bug; measuring it
+  returned eighteen refused forms.
+
+  `Parser::demote_reserved_word` rewrites the token in place to the `Word` it
+  spells, keeping its span, at exactly two sites: `parse_simple_command`'s loop
+  **guarded on `!words.is_empty()`**, and `parse_redirect_target`
+  unconditionally (a redirect target is never a command word). The guard is the
+  whole of POSIX rule 1 and is load-bearing -- without it a pipeline element
+  beginning with a keyword would silently become a command named `if`. This is
+  also rc's answer, which its lexer reaches with a last-token flag; doing it in
+  the parser instead means the lexer stays context-free and the demotion only
+  has to be right where a word is already what the grammar asks for. Nothing
+  downstream learns of it: the result is an ordinary `TokenKind::Word`.
+
+  `TokenKind::reserved_word_text` is the hand-written inverse of
+  `reserved_word`, so `reserved_word_round_trips` walks every word in the
+  forward table and fails if it does not come back with the same spelling --
+  a keyword added to one table and not the other would otherwise quietly become
+  unusable as a filename again.
 
 - **`))` is split at the parse site, not lexed in context** (UT-PARSE-3, fixed
   2026-09-22). The lexer is context-free and emits `DoubleRParen` for any `))`,
