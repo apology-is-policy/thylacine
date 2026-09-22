@@ -1177,10 +1177,13 @@ void test_poll_devsrv_client_pollout_wakes_on_server_blocking_drain(void) {
     else if (!err && g_cp_revents != POLLOUT)
         err = "revents = POLLOUT";
     // A kernel without the walk returns at the 3 s timeout: wait it out so the
-    // poller is reaped, never freed while still asleep.
+    // poller is reaped, never freed while still asleep. A poll that outlasts
+    // even that is left parked WITH its fixture: its timeout pass still reads it.
     TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_cp_result, __ATOMIC_ACQUIRE) != -999);
-    if (__atomic_load_n(&g_cp_result, __ATOMIC_ACQUIRE) != -999) test_kthread_join_free(poller, &g_cp_exited);
-    cp_teardown(&f);
+    if (__atomic_load_n(&g_cp_result, __ATOMIC_ACQUIRE) != -999) {
+        test_kthread_join_free(poller, &g_cp_exited);
+        cp_teardown(&f);
+    }
     TEST_ASSERT(err == NULL, err ? err : "client POLLOUT on the blocking drain");
 }
 
@@ -1219,11 +1222,13 @@ void test_poll_devsrv_client_wakes_on_teardown(void) {
     else if ((g_cp_revents & POLLHUP) == 0)
         err = "revents carries POLLHUP (s2c.eof, the direction the client reads)";
     // A kernel without the walk returns at the 3 s timeout: wait it out so the
-    // poller is reaped, never freed while still asleep.
+    // poller is reaped, never freed while still asleep. A poll that outlasts
+    // even that is left parked WITH its fixture: its timeout pass still reads it.
     TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_cp_result, __ATOMIC_ACQUIRE) != -999);
-    if (__atomic_load_n(&g_cp_result, __ATOMIC_ACQUIRE) != -999)
+    if (__atomic_load_n(&g_cp_result, __ATOMIC_ACQUIRE) != -999) {
         test_kthread_join_free(poller, &g_cp_exited);
-    cp_teardown(&f);
+        cp_teardown(&f);
+    }
     TEST_ASSERT(err == NULL, err ? err : "client POLLIN woken by the teardown");
 }
 

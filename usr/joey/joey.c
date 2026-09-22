@@ -604,7 +604,18 @@ static int pouch_smoke_core(const char *name, size_t name_len,
         pid = t_spawn_with_fds(name, name_len, fds, 2);
     }
     if (pid <= 0) {
-        t_putstr("joey: pouch-smoke spawn FAILED\n");
+        // The core serves every smoke probe, so name the one that failed: an
+        // optional binary absent from this image is expected, and a bare
+        // "pouch-smoke" label sent readers hunting the wrong program.
+        char msg[112];
+        static const char pre[] = "joey: spawn ";
+        static const char post[] = " FAILED (absent from this image, or refused)\n";
+        size_t n = 0;
+        for (size_t i = 0; i < sizeof(pre) - 1; i++) msg[n++] = pre[i];
+        size_t room = sizeof(msg) - n - sizeof(post);
+        for (size_t i = 0; i < name_len && i < room; i++) msg[n++] = name[i];
+        for (size_t i = 0; i < sizeof(post); i++) msg[n++] = post[i];
+        t_putstr(msg);
         (void)t_close(rd);
         (void)t_close(wr);
         return -1;
