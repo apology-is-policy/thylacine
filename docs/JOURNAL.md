@@ -22,6 +22,202 @@ needed the operator.
 
 
 ---
+## 2026-09-22 (main, Opus 5 1M, effort max) -- ARCH 8.1 built as written: syscall bodies get their interrupts back, and three instruments find things on their first boot
+
+The masked syscall was an accident, traced the day before: Phase 0 deferred
+kernel PREEMPTION to Phase 7, P3-Ec (`48dfc5c4`) wired the SVC path under the
+mask exception entry sets and never lifted it, and the deferral of *preemption*
+was therefore BUILT as *interrupts off* -- strictly stronger, different, and
+recorded nowhere. Later races were closed by masking more (#713, #104) and #359
+wrote the result into ARCH 8.11 as a fact of the design. The operator agreed to
+build 8.1's actual line: **interrupts ON in a syscall body, still
+non-preemptible.**
+
+This is the run that built it. Tip `b7132455` on `arch81`.
+
+### The reconnaissance shrank the chunk, then the measurement grew it
+
+Three findings, each replacing an assumption:
+
+**The lock sweep is a CLEAN NEGATIVE.** The feared work -- converting every
+plain lock shared between a syscall path and a same-CPU IRQ handler to
+`irqsave` -- has zero sites. The sweep built the IRQ-taken lock set from every
+`gic_attach` registration and cross-checked ~300 plain `spin_lock(&...)` sites;
+all 27 plain acquisitions of an IRQ-reachable lock already sit inside an
+enclosing mask. The discipline already held. What died was its stated
+ARGUMENT -- a doc sweep, not a code sweep.
+
+**`preempt_count` cannot carry the marker, and THREE live assertions say so,
+not the one I had found.** The decisive one is #361's `el0_return_die_check`,
+which extincts on "counted spinlock leaked to EL0 return" -- so a syscall-wide
+count is definitionally that leak. Verified by reading `kernel/proc.c:4441` and
+`kernel/sched.c:241`, not inferred.
+
+**The kernel stack had never been measured, and measuring it pulled a
+prerequisite forward.** `-fstack-usage` over a call graph whose indirect edges
+resolve through the DWARF layout of `struct Dev`. A first cut let every `blr`
+reach every Dev method and reported 22.91 KiB by chaining
+`close -> create -> poll -> rename`, which is not a call chain -- the universal
+over-approximation is useless, and saying so is the only reason the real number
+is worth anything. Type-correct: 163 sites resolved by field, **797 left
+unresolved and REPORTED**, so every figure is a LOWER bound.
+
+    native worst case (execve -> exec_load_into -> stalk_core -> 9P)  10640 B  64.9%
+    Linux-phenotype worst case (through viv_tier2)                    14112 B  86.1%
+    the IRQ frame this chunk adds                                      1728 B
+
+86% with no IRQ frame involved. **The single cause is one frame**: `viv_tier2`
+is one `switch`, and clang unions every case's locals into it, so getdents64's
+`raw[2048] + enc[2560]` were allocated on EVERY Linux-phenotype syscall --
+openat and read included. Moving them out (`e7c83ec6`) took `viv_tier2` from
+4720 to 1408 bytes and the phenotype chain from 14112 to 10800. With the IRQ
+frame the worst case is now 12368 B = 75.5%, where it would have been 96.7%
+with 544 bytes free.
+
+Calibration, stated because it is not agreement: run direct-edges-only this
+instrument gives 4.94 KiB on the poll path where round 7 independently measured
+~5.9 KiB. Same ballpark from both sides; the residual gap is the error bar.
+
+### Three instruments, and each found something on its first boot
+
+Nothing in the tree could report **stack depth** (`stack_peak`, `kstack_high`,
+poison, watermark -- zero hits) or **interrupt state** (`irq_disabled`,
+`irqs_disabled`, `in_irq`, `ASSERT.*daif` -- zero hits). Both premises were
+load-bearing only in prose. So both got instruments, landed BEFORE the change
+they guard.
+
+1. **The watermark's own test failed** -- on `current_thread()`, because the
+   in-kernel test phase runs on the boot kthread, which has `kstack_base ==
+   NULL` and lives on cpu0's `_boot_stack`. A premise about the environment,
+   not the instrument. Fixing it bought a STRONGER assertion than the original
+   could make: a thread that has never been dispatched has touched none of its
+   stack, so the watermark is precisely 0 -- an exact expected value, and one
+   line that discriminates the instrument's main failure mode by itself.
+
+2. **`ASSERT_IRQS_MASKED` fired in `proc.group_terminate_smoke`** -- a test
+   calling `el0_return_die_check()` from the unmasked boot kthread when every
+   real caller arrives masked.
+
+3. **Then in `proc.wait_pid_syscall_untraced_flag`** -- seventeen tests call
+   `syscall_dispatch` directly from the unmasked boot kthread. That one would
+   have been a live bug, not a tidiness issue: the wrapper re-masks
+   UNCONDITIONALLY, so all seventeen would have returned with interrupts masked
+   and silently left the harness thread masked from then on. The answer is to
+   fix the caller, not soften the re-mask into save/restore -- which would make
+   #713's window depend on a saved value instead of a constant.
+
+4. **Then in `userland_enter`, a REAL path** -- and this one was MY mistake.
+   `arch/arm64/userland.S` calls `el0_return_die_check` deliberately before its
+   `msr daifset, #0xf`, so a die-path exit never enters that window. I had read
+   "runs before the eret window" as "runs masked"; those are different claims
+   about different callers. The assert moved to `el0_return_stop_check`, whose
+   only two callers ARE the tails that reach KERNEL_EXIT under an inherited
+   mask. **An interrupt-state precondition attaches to a PATH; asserting it in
+   a function several paths share asserts it of the ones that do not have it.**
+
+Two instruments, four findings, in code that had been green for months. None
+was a bug that slipped past review -- until the asserts existed they were
+invisible.
+
+### The change itself
+
+`Thread.in_syscall`, a separate per-thread marker. One early return in
+`preempt_check_irq`, beside the #360 gate and not consuming `need_resched` for
+the same reason. `syscall_dispatch` became a wrapper around the unchanged body
+-- a wrapper rather than an edit to `vectors.S`, so "the unmask leaks past the
+return tail" is structurally impossible rather than merely intended, and so the
+unmask stays out of kernel fault handling, which shares the 0x400 slot.
+
+Modelled first (`07223a86`), and **the model refuted a property I had written**.
+The first cut asserted that a pending reschedule always eventually fires; TLC
+produced a five-step counterexample -- a tick, a syscall entry, a producer that
+keeps the body looping. The counterexample was CORRECT: a non-preemptible
+kernel defers the switch for as long as the syscall runs. What 8.1 buys is that
+interrupts are SERVICED, not that a reschedule is prompt. **That is the same
+category error this chunk exists to repair -- "defer preemption" heard as "mask
+interrupts" -- caught one layer down, inside the spec written to prevent it.**
+The property was withdrawn rather than weakened, and the reschedule guarantee
+now lives only where it is true: at the boundary, as `TailTookItsPreempt`.
+
+The module carries its own positive control: `syscall_irqs_kthread` runs the
+same machinery with no marker and must VIOLATE `KthreadGetsPreempted`, because
+"no involuntary switch" is satisfied in full by a model that cannot switch at
+all. The gate's discrimination is measured, not assumed -- two sabotages of the
+module turn it red, on the rows they should.
+
+### A claim I wrote in the morning and corrected in the afternoon
+
+ARCH 8.12's first draft said the collapse to one tier "removes the #359
+asymmetry: a starved holder degrades from a whole-guest deadlock to
+starvation". **It does not.** The spinners behind a preempted holder are no
+longer MASKED -- so the wedged CPUs keep servicing interrupts and the operator
+can still see the machine -- but they are still NON-PREEMPTIBLE, so they still
+never yield and the holder still never runs. The deadlock survives; it merely
+stops being deaf. Wrong in the one direction it must not be wrong in, since it
+would have justified relaxing #360. Caught while rebuilding the `spinlock.h`
+paragraph, by asking what the spinners actually DO rather than what the tier
+count suggests. Corrected in ARCH 8.11/8.12, `spinlock.h` and the playbook
+(`13306e92`).
+
+A second correction went the other way: 8.12 predicted `sched_yield_hint`'s
+#104/#107 TOCTOU would "become live on day one". It does not. Its old argument
+is false, but the conclusion survives for a STRONGER reason that does not
+depend on masking -- a non-preemptible body cannot migrate between
+`this_cpu_sched()` and the loads.
+
+### The preemption point lived for part of one day
+
+Landed 2026-09-22 (`1f14b6c5`), deleted 2026-09-22 (`b7132455`). It was a
+stopgap by decision from the moment it shipped, and the thing it stood in for
+is now built. Deleted with it: `poll.tla`'s `Point`/`atpoint`/
+`IrqLatencyBounded`, `poll_buggy_no_point.cfg`, the whole of `poll_cpu.tla` and
+its four cfgs, and the witness test.
+
+`poll_cpu` went **VACUOUS, not wrong** -- its stated premise IS the masked
+syscall body, so when the premise became false its adversary ceased to exist,
+and a model whose adversary cannot exist proves nothing. Its obligation is now
+`syscall_irqs.tla`'s `CpuGetsItsInterrupts`, with
+`syscall_irqs_buggy_masked_body` reproducing the old defect under noise so the
+discrimination round-6 S1 earned is not lost.
+
+Measured rather than re-pinned by assumption: `poll.tla`'s clean cfgs go
+2194 -> 2146 and 968 -> 944 states, and the drop is exactly the states carrying
+`pc = "atpoint"`. That explanation is what makes the new numbers something
+other than "what it printed this time".
+
+**The vault lint stopped me deleting `spec-poll-cpu.md`**: three append-only
+record notes name it. History keeps its referents, so the note is RETIRED IN
+PLACE with its old body preserved below the retirement.
+
+### Two harness errors, both caught by checking the artifact first
+
+A commit was rejected by the pre-commit lint (a stale rendered view) and the
+`&&` chain that followed it baked and tested `rev-parse HEAD` -- the PREVIOUS
+commit -- reporting the same failure I had just fixed. Caught by diffing the
+worktree's source against the fix before reading the result, which is exactly
+the discipline yesterday's two stale-artifact investigations earned. The rule
+that follows: **never chain a bake to a commit without verifying the commit
+landed.**
+
+### Where it stands
+
+| what | result |
+|---|---|
+| suite @`13306e92` (CI image, HVF) | **1616/1616 PASS** |
+| poll spec gate @tip | ALL CFGS AS CLAIMED (4 clean + 7 buggy) |
+| `syscall_irqs` gate | 8 cfgs, each on its own named verdict; 2 sabotages turn it red |
+| SMP gate | IN FLIGHT -- `default-smp4` 10/10 PASS, `default-smp8` running |
+| suite @tip `b7132455` | **NOT YET RUN** -- the deletion is unverified by a boot |
+| interactive fleet | NOT YET RUN |
+| audit round | NOT YET RUN |
+
+**Open, and not to be read as done.** The tip is unbooted. The SMP gate matters
+more than usual here: #713's profile was 3-13% of boots and NEVER at `-smp 1`,
+so a single HVF suite run is structurally blind to the hazard this chunk sits
+closest to. And the reconnaissance swept LOCKS -- a lock-free read-modify-write
+on state an IRQ handler also writes is a different class and is this chunk's
+prime audit target.
+
 ## 2026-09-21 (main, Fable 5.1, effort xhigh) -- the browser arc opens: six research lanes, one wrong prior, and the finding that every engine wants the same kernel work
 
 **The ask.** The operator opened a new arc the moment the lictor takeover
