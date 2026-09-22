@@ -22,6 +22,118 @@ needed the operator.
 
 
 ---
+## 2026-09-22, evening (aux, Opus 5 1M, effort xhigh) -- lantern: the deck arc, and five findings that each made it smaller
+
+The operator gives a talk about AI next month and wants the slides to run inside
+Thylacine as rendered Beacon. They had already ratified the shape: do not
+formalize a deck type, because "a slide is just some beacon text and halcyon
+knows how to render that"; point a pager at a folder with a `slides.toml` naming
+the files in order; clear and rerender on keys.
+
+The pre-compaction plan for that was: extend Markdown with Beacon features it
+lacks, lift `format`/`render`/`wrap` out of `usr/manual` into a shared crate, and
+teach halcyond an interactive rich mode. **All three turned out to be
+unnecessary, and reading the code rather than trusting the plan is the only
+reason that is known.** In order:
+
+1. **The clear-and-rerender rich path already existed.** `ESC[2J` in a Halcyon
+   tile is a grid operation: `vt::Screen::erase_display(2)` blanks every cell in
+   place (no scroll-off, so the transcript does not accumulate shown slides),
+   `Cell::blank` sets `span: 0` so the previous slide's Beacon span tags go with
+   its text, and it is not a mode change -- so the tile stays in
+   `ScreenMode::Normal`, which is the mode that lays the document out richly.
+   Zero halcyond changes were needed. What was missing was a program using it.
+2. **Alt-screen is the one thing to avoid**, and it is the correction I owed the
+   operator. I had told them a `less`-shaped pager could not render Beacon
+   "because halcyond latches `raw_vt_intent` and demotes to raw VT". That was
+   false: `raw_vt_intent` is set at three sites in `transcript.rs` and read by
+   nothing but tests -- an inert reserved latch. The real demotion is
+   `ScreenMode::AltScreen` (`tile.rs:530`), which paints the raw mono grid and
+   returns early. So the mechanism I named was fiction while the conclusion
+   happened to survive. `lantern` therefore takes `kaua` WITHOUT its default
+   `backend` feature, which is what gates `kaua::term`, the alt-screen owner; the
+   pure `kaua::input::Parser` is ungated, so the tree keeps one VT input parser.
+3. **`usr/manual`'s library is already the shared crate** -- lib + bin, `no_std`,
+   `beacon` its only dependency, exposing `format::check` and
+   `render::render(src, tier, width, out)`. Nothing to lift.
+4. **A slide is already a valid manual section.** The subset requires `# Title`
+   on line 1 and accepts headings, lists, tables, code fences and emphasis --
+   which is what a textual slide is. No dialect extension. The one deviation:
+   slides are checked as ANONYMOUS sections (`check(None, ..)`), because the
+   `TitleNumber` rule exists for the manual's `NN-name.md` book ordering and a
+   deck's order comes from its manifest.
+5. **`ut`'s raw-mode dance is a hardcoded basename set**
+   (`console::is_raw_command` = `nora|ptyhost|prowl|quarry`). Membership is
+   REQUIRED, not optional: on the pts path an ordinary foreground child gets
+   `CHILD_MODE` (`+icanon +echo`), unusable for a pager, and on the console path
+   it gets piped-then-dropped stdin, which EOFs at birth. Adding `lantern` is the
+   chunk's only edit to an audit-trigger surface, and it is for the INPUT half
+   only. It costs `RAW_MODE`'s `-onlcr`, so lantern cooks its own LF -> CR-LF.
+
+### The wrong answer I nearly gave the operator
+
+They asked whether to bind the font raster size to the tile size and cap it at
+both ends. The elegant-sounding answer -- that it dissolves into heading
+semantics, so nothing is owed -- is **wrong**, and only measuring caught it.
+Legacy `hdr_px = [17.5, 14.5, 12.5]` against `body_px` 11.5 makes H1 **1.5x**
+body: nowhere near projector-sized. The real picture is better than that and
+still incomplete: under the Instrument profile `hdr_px[0] = px(vw(2.4, 23.0,
+34.0))` -- a viewport percentage with a floor AND a ceiling, which is *exactly*
+the mechanism the operator described, already built at
+`halcyond/src/layout.rs:360`. But `vw` is keyed to `disp_logical` (the DISPLAY
+width, not the tile) and `body_px` under Instrument is a fixed 15, so slide body
+text grows with nothing. So the minimal in-idiom change is to make the document
+type scale `vw`-bound, reusing `vw()`. **Owed, not built**, and deliberately not
+a manifest key: a deck file carries content and order, never display authority.
+
+### A finding nobody was looking for: no gate runs `cargo test`
+
+Landing `lantern` meant host-testing its pure half, which passes 22/22. Checking
+what would re-run those tests turned up the answer: **nothing.**
+`grep -rn "cargo test" Makefile tools/` returns exactly one hit and it is a
+COMMENT inside `tools/interactive/manual.exp`. The Makefile carries 25+ targets
+-- `test`, `test-fault`, `verify-kaslr`, `check-floor`, `test-a72`,
+`test-haul-kat`, `test-venus-verdict`, `smp-gate`, `idle-gate` -- and not one
+runs a Rust unit test. So the largest body of tests in the userspace tree
+(`manual`, `kaua`, `vt`, `libhalcyon`, `cartoon`, `beacon`, `libtapestry`, and
+now `lantern`) runs only when a human transcribes a command out of a
+`Cargo.toml` comment.
+
+This is CLAUDE.md's own #245 class -- "a checker reachable only by hand rots" --
+one layer up and at far larger scale than the two tools #245 was written about.
+Worse in one spot: `libutopia` has an unconditional `libthyla-rs` dependency,
+whose `_start` inline asm cannot assemble for Mach-O, so it has **no host-test
+path at all** and its `#[cfg(test)]` tests -- including the
+`is_raw_command` test this chunk extends -- cannot run on this host. That reads
+as covered while being unrunnable, which is worse than a test that is merely
+unrun. Enqueued as `bug_rust_host_tests_run_by_nothing`; the fix is a
+`make test-rust` target, and it is NOT in this chunk because a first full run may
+surface pre-existing failures that are then findings to own rather than
+obstacles to route around.
+
+### What is verified, and what is not
+
+Verified: the pure half 22/22 on host (one of those failures was my own test
+asserting `SlidePath` where the separator rule correctly wins over the dot rule
+for `../a.md` -- the code was right and the test was wrong). The three demo
+slides pass the real section checker, extracted out of `tools/build.sh` by `awk`
+so what was checked is byte-identical to what gets baked; and the checker was
+proven to DISCRIMINATE by feeding it a slide with no title and a link, which it
+refused with two precise diagnostics. `default-smp1` -- the row main warned might
+be red as task #791 -- came back **10 PASS / 0 CORRUPTION**, as did
+`default-smp4`.
+
+**Not verified: the look.** Nothing has been booted. Three visual questions stay
+open and reading more code cannot answer them: where a short slide sits in a tall
+tile; whether a slide's title should be emitted as `HdrClass::Title` (the class a
+rich stylesheet centres, which is the slide look) rather than the plain
+`Op::Hdr level=1` `manual::render` emits today; and whether to hide the cursor
+while presenting. Recorded in `docs/LANTERN-DESIGN.md` §11 as questions to settle
+by looking. The guest build has not been run either -- the SMP gate held all 8
+cores, and contending with a timing-sensitive gate to save ten minutes is how a
+red result becomes unattributable.
+
+---
 ## 2026-09-22, later still (main, Opus 5 1M, effort max) -- the loom join: a 100 % boot hang that no gate could see
 
 The first item of the run the operator ratified ("fold the loom fix into the

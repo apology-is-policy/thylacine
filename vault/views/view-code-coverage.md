@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**523 owned · 48 unowned · 571 files (91% owned) · ~13165 unswept lines.**
+**523 owned · 53 unowned · 576 files (90% owned) · ~14434 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **73 files, ~33174 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -74,7 +74,8 @@ Excluded as harness and counted here rather than dropped: **73 files, ~33174 lin
 | usr/warp-prove | 0 | 1 | 4349 |
 | usr/pouch-hello | 6 | 17 | 2487 |
 | kernel | 127 | 14 | 1981 |
-| usr/ports | 19 | 4 | 1631 |
+| usr/ports | 19 | 5 | 1691 |
+| usr/lantern | 0 | 4 | 1209 |
 | usr/quarry | 0 | 1 | 1033 |
 | usr/stratumd-stub | 0 | 1 | 453 |
 | usr/kaua-term | 3 | 1 | 276 |
@@ -132,7 +133,9 @@ Excluded as harness and counted here rather than dropped: **73 files, ~33174 lin
 | usr/ports/gnumake/config.h | 1357 |
 | usr/quarry/src/main.rs | 1033 |
 | usr/stratumd-stub/stratumd-stub.c | 453 |
+| usr/lantern/src/main.rs | 432 |
 | kernel/include/thylacine/errno.h | 388 |
+| usr/lantern/src/deck.rs | 372 |
 | usr/pouch-hello/pouch-hello-fs.c | 350 |
 | usr/pouch-hello/pouch-hello-net.c | 293 |
 | kernel/include/thylacine/smp.h | 282 |
@@ -142,9 +145,11 @@ Excluded as harness and counted here rather than dropped: **73 files, ~33174 lin
 | usr/gl-sdl-prove/gl-sdl-prove.c | 262 |
 | usr/pouch-hello/pouch-hello-signals.c | 258 |
 | usr/pouch-hello/pouch-hello-pty.c | 231 |
+| usr/lantern/src/nav.rs | 229 |
 | kernel/include/thylacine/context.h | 201 |
 | usr/lib/libthyla-rs/src/sync.rs | 196 |
 | usr/pouch-hello/pouch-hello-sodium.c | 196 |
+| usr/lantern/src/lib.rs | 176 |
 | usr/ports/gnumake/generated/glob.h | 163 |
 | kernel/include/thylacine/9p_srvconn_transport.h | 160 |
 | kernel/cpio.c | 152 |
@@ -167,6 +172,7 @@ Excluded as harness and counted here rather than dropped: **73 files, ~33174 lin
 | usr/ports/gnumake/generated/fnmatch.h | 64 |
 | usr/pouch-hello/pouch-hello-printf.c | 64 |
 | kernel/include/thylacine/cpio.h | 61 |
+| usr/ports/rust/r1-hello/src/main.rs | 60 |
 | usr/pouch-hello/pouch-hello-env.c | 57 |
 | usr/pouch-hello/pouch-hello-argv.c | 51 |
 | usr/ports/vkquake/thy_vkloader.c | 47 |

@@ -495,7 +495,7 @@ EOF
     # P4-Ia2: copy any built Rust-side userspace binaries from
     # build/usr-rs/<target>/release/. Same curation discipline.
     # Binary name = crate's [[bin]] name = directory under usr/.
-    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "nocturned" "nocturne-probe" "nocturne-vol" "nocturne-vol-probe" "nocturne-tap-probe" "nocturne-capture-probe" "ring-voice-probe" "lictor" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "halcyon" "halcyond" "view" "gallery" "manual" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "diorama" "diorama-probe" "viv" "viv-probe" "viv-pheno-probe" "ptyhost" "jc-probe" "susp-mask-child" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "exec-probe" "fork-probe" "coreutil-smoke" "fs-mut-smoke" "symlink-probe" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "ps" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "aurora-push" "pipe-src" "pipe-sink" "legate-prover" "imperium-probe" "imperium" "jit-prover" "login" "ut" "nora" "prowl" "quarry" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" "warp-prove" "haul" "kaua-term" "kaua-term-probe" "caps-probe" )
+    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "nocturned" "nocturne-probe" "nocturne-vol" "nocturne-vol-probe" "nocturne-tap-probe" "nocturne-capture-probe" "ring-voice-probe" "lictor" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "halcyon" "halcyond" "view" "gallery" "manual" "lantern" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "diorama" "diorama-probe" "viv" "viv-probe" "viv-pheno-probe" "ptyhost" "jc-probe" "susp-mask-child" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "exec-probe" "fork-probe" "coreutil-smoke" "fs-mut-smoke" "symlink-probe" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "ps" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "aurora-push" "pipe-src" "pipe-sink" "legate-prover" "imperium-probe" "imperium" "jit-prover" "login" "ut" "nora" "prowl" "quarry" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" "warp-prove" "haul" "kaua-term" "kaua-term-probe" "caps-probe" )
     local rs_release="$USR_RS_BUILD/$USR_RS_TARGET/release"
     for bin in "${usr_rs_bins[@]}"; do
         local src="$rs_release/$bin"
@@ -681,6 +681,63 @@ DOSBOXCONF
         chmod 0644 "$ramfs_src/dosbox-x.conf"
         ledger "ramfs.cpio: staged dosbox-x.conf (DX-3b sample config/autoexec)"
     fi
+
+    # LANTERN: a three-slide demo deck at /deck, so `lantern /deck` has
+    # something to show on a fresh boot without the operator writing one first.
+    # DATA (Markdown + a manifest), so it rides the bake directly. Each slide is
+    # an ordinary Operator's-Manual section -- there is no slide dialect -- and
+    # `lantern --check /deck` passes, which is what makes this a witness and not
+    # just a sample: a deck that stopped being valid would fail here.
+    mkdir -p "$ramfs_src/deck"
+    cat > "$ramfs_src/deck/slides.toml" <<'DECKTOML'
+# A deck names its slides in order. Nothing else: a manifest carries content
+# and order, never display authority -- the scale and the theme belong to the
+# compositor and reach it through its own verbs.
+title = "Beacon slides"
+slides = [
+    "01-title.md",
+    "02-how.md",
+    "03-keys.md",
+]
+DECKTOML
+    cat > "$ramfs_src/deck/01-title.md" <<'DECKSLIDE1'
+# Beacon slides
+
+A slide is Beacon text. Nothing in this deck is a slide format: each file is an
+Operator's Manual section, and the renderer already knows how to draw one.
+
+- Under Halcyon it is a rich document.
+- On a serial console it is the same words, without the frames.
+- Down a pipe it is plain text, and every slide at once.
+DECKSLIDE1
+    cat > "$ramfs_src/deck/02-how.md" <<'DECKSLIDE2'
+# How it works
+
+The presenter writes one slide, then clears and writes the next. The clear is a
+grid operation, so the tile keeps laying the document out richly.
+
+## What it does not do
+
+It never enters the alternate screen. That is the one mode in which a tile
+paints its raw character grid instead of the rich document, which would throw
+away the rendering the whole exercise is for.
+DECKSLIDE2
+    cat > "$ramfs_src/deck/03-keys.md" <<'DECKSLIDE3'
+# Keys
+
+| Key | Does |
+| --- | --- |
+| space, right, down, n | next slide |
+| left, up, p | previous slide |
+| g, G | first, last |
+| 1 to 9 | that slide |
+| q | leave, keeping the slide on screen |
+
+Advancing off the end stays on the last slide rather than quitting, because the
+end of a deck is where a talk pauses for questions.
+DECKSLIDE3
+    chmod 0644 "$ramfs_src/deck/"*
+    ledger "ramfs.cpio: staged /deck (the lantern demo deck: 3 slides + slides.toml)"
 
     # P6-pouch-stratumd-boot (sub-chunk 16a): copy the cross-built stratumd
     # daemon binary if build_stratumd has produced it. Separate from

@@ -206,9 +206,9 @@ lets a native `ut` service Ctrl-C at an otherwise-idle pts prompt.
 ### The raw-mode set is a closed allowlist, and joining it is a deliberate act
 
 Programs that need the console as an unprocessed byte pipe — the editor, the
-pseudoterminal host, the process monitor, and now the graphics bench launcher —
-are named in a **fixed list** matched on the command's basename, with the path
-form covered too.
+pseudoterminal host, the process monitor, the graphics bench launcher, and now
+the deck presenter — are named in a **fixed list** matched on the command's
+basename, with the path form covered too.
 
 **The default is cooked, and joining requires an edit plus a test.** Nothing
 infers raw mode from what a program does, so a new full-screen program gets the
@@ -223,6 +223,25 @@ wants the outer console as a raw pipe **because the terminal it hosts is the one
 line discipline** — two disciplines in series would double-cook. The others are
 full-screen renderers. A future entry owes its own sentence; "it looks like a
 TUI" is not the criterion.
+
+The deck presenter (2026-09-22) is the first entry that is **not** a full-screen
+renderer, and it pays the sentence the paragraph above asks for. It joins for the
+**input half only**: it needs byte-at-a-time reads with no echo so a keystroke
+turns a slide, and it needs signal cooking off so its own quit handling runs
+rather than a note terminating a talk. It deliberately never enters the alternate
+screen — that is the mode in which a tile paints its raw character grid instead
+of the rich document, which would discard the very rendering it exists to show —
+so the restore backstop's leave-alt-screen escape is inert for it, harmlessly.
+
+That splits the entry's cost in two, and only the second half is obvious. Signal
+cooking off means **the habitual interrupt key becomes a byte the program must
+answer itself**, so a member that does not answer it cannot be left by the key
+every user reaches for first. Output translation off means a member emitting a
+**document** rather than positioned cells must supply its own line-ending
+translation, because the argument for turning it off — that a full-screen program
+owns every byte it writes — is an argument about renderers, and a document's
+lines end in a bare feed. Both are properties of *membership*, not of being a
+TUI, which is why a non-renderer can hold the entry at all.
 
 ### A note read while looking for something else is held, not dropped
 

@@ -131,16 +131,27 @@ pub(crate) fn restore_screen() {
 
 /// Whether `argv0` names a full-screen TUI child that needs the raw-mode dance.
 /// Matches on the BASENAME so `/bin/nora` and a bare `nora` both qualify. v1.0
-/// carries a fixed set (`nora`, `ptyhost`, `prowl`, `quarry` -- the PTY-4
-/// session host wants the outer console as a raw byte pipe, so the pts it
+/// carries a fixed set (`nora`, `ptyhost`, `prowl`, `quarry`, `lantern` -- the
+/// PTY-4 session host wants the outer console as a raw byte pipe, so the pts it
 /// hosts is the one line discipline; `prowl` is the full-screen process
-/// monitor; `quarry` is the GPU demo-bench launcher); a binary
-/// self-declaring its console needs (a spawn flag or an on-disk manifest) is a
-/// recorded v1.x seam (KAUA.md) -- until then a name a user gives their own
-/// non-TUI binary that collides with this set is a known limitation.
+/// monitor; `quarry` is the GPU demo-bench launcher; `lantern` is the Beacon
+/// deck presenter); a binary self-declaring its console needs (a spawn flag or
+/// an on-disk manifest) is a recorded v1.x seam (KAUA.md) -- until then a name
+/// a user gives their own non-TUI binary that collides with this set is a known
+/// limitation.
+///
+/// `lantern` is a member for the INPUT half only: it needs `-icanon -echo`
+/// (a keystroke is a keystroke) and `-isig` (so its own `q`/Ctrl-C handling
+/// runs, and a Ctrl-C does not terminate a talk through a note it never sees).
+/// It is NOT a full-screen TUI and never enters the alt-screen -- doing so
+/// would make a Halcyon tile paint its raw mono grid instead of the rich
+/// document lantern exists to show -- so `RAW_MODE`'s `-onlcr` leaves it
+/// cooking its own line endings (`lantern::cook`). The screen backstop this
+/// dance re-emits on exit is harmless to it: every escape in `RESTORE_SCREEN`
+/// is idempotent, and leaving an alt-screen never entered is inert.
 pub fn is_raw_command(argv0: &str) -> bool {
     let base = argv0.rsplit('/').next().unwrap_or(argv0);
-    matches!(base, "nora" | "ptyhost" | "prowl" | "quarry")
+    matches!(base, "nora" | "ptyhost" | "prowl" | "quarry" | "lantern")
 }
 
 /// Whether `argv0` names a console-PASSTHROUGH wrapper: a thin foreground command
@@ -239,6 +250,10 @@ mod tests {
         // quarry: the GPU demo-bench launcher (Kaua TUI).
         assert!(is_raw_command("quarry"));
         assert!(is_raw_command("/bin/quarry"));
+        // lantern: the Beacon deck presenter -- the raw INPUT half only (it
+        // never enters the alt-screen; see is_raw_command's note).
+        assert!(is_raw_command("lantern"));
+        assert!(is_raw_command("/bin/lantern"));
         // Ordinary externals stay on the normal spawn path.
         assert!(!is_raw_command("cat"));
         assert!(!is_raw_command("/bin/ut"));
