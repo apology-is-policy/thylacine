@@ -12,6 +12,7 @@ code:
   - usr/lib/pouch/patches/0027-pouch-remove.patch
   - usr/lib/pouch/patches/0030-pouch-fopen-append.patch
   - usr/lib/pouch/patches/0031-pouch-readlink.patch
+  - usr/lib/pouch/patches/0040-pouch-o-append-omode.patch
 audit: hard
 guarded-by: [inv-i28]
 validated-by: [prose, gate-smp]
@@ -19,7 +20,7 @@ locks: []
 abis: []
 design: ["docs/POUCH-DESIGN.md", "docs/LLVM-DESIGN.md", "docs/VIVARIUM.md"]
 created: 2026-08-01
-updated: 2026-08-16
+updated: 2026-09-21
 ---
 ## Purpose
 
@@ -34,8 +35,8 @@ the most: `openat.c` alone has three generations.
 
 - `openat(AT_FDCWD, path, flags[, mode])` — one `SYS_open` (65) through
   the stalk resolver; `O_CREAT` splits into (parent, leaf) +
-  `SYS_WALK_CREATE`; `O_TRUNC` → `+OTRUNC`; `O_APPEND` → a post-open
-  seek-to-END. A real dirfd is `ENOTSUP`; `O_TMPFILE` is `ENOTSUP`.
+  `SYS_WALK_CREATE`; `O_TRUNC` → `+OTRUNC`; `O_APPEND` → the `OAPPEND`
+  omode bit (0040) plus a post-open seek-to-END (0030). A real dirfd is `ENOTSUP`; `O_TMPFILE` is `ENOTSUP`.
 - `fstat` → `SYS_FSTAT` (50); `stat`/`lstat`/`fstatat(path)` →
   `SYS_STAT` (88), the POUNCE walk-query; `fstatat(fd,"",AT_EMPTY_PATH)`
   delegates to `fstat`. `lstat == stat` (no symlinks, G11).
@@ -153,16 +154,56 @@ every failure to a flat `-1` with no distinct `EISDIR` (the #102-class
 errno-loss), so 0027 dispatches on an `lstat` instead: a directory →
 `rmdir`, anything else → `unlink`.
 
-**`O_APPEND` has no kernel mode.** An fd carries a plain cursor and
-`SYS_WALK_OPEN` has no append bit, so musl's `__fdopen` asks for it via
-`fcntl(F_SETFL)` — which pouch answers `ENOSYS`, leaving the cursor at 0
-and making every `fopen("a")` write CLOBBER the file at offset 0. 0030
-seeks to END once at open, and does it in a helper every successful-open
-exit routes through (`pouch_open_ret`) precisely because `openat` has
-THREE such exits — create-ok, EEXIST-fallback-open, plain-open — and a
-per-site fix would silently miss one. Single-writer append is thereby
-correct; concurrent appenders may still interleave, and that atomicity is
-documented-absent rather than silently claimed.
+**`O_APPEND`, in two halves, and the history is why.** musl's `__fdopen`
+asks for append via `fcntl(F_SETFL)` — which pouch answers `ENOSYS`,
+leaving the cursor at 0 and making every `fopen("a")` write CLOBBER the
+file at offset 0. 0030 (2026-07-27) seeks to END once at open, in a helper
+every successful-open exit routes through (`pouch_open_ret`) precisely
+because `openat` has THREE such exits — create-ok, EEXIST-fallback-open,
+plain-open — and a per-site fix would silently miss one. Its comment said
+the kernel had no append mode and that the real fix needed "a v1.x omode
+bit". That bit arrived five weeks later with VIVARIUM 6.27 — `OAPPEND`
+(0x40), inside `SYS_WALK_OPEN_OMODE_VALID`, forwarded by dev9p to the 9P
+open, honoured by Stratum positioning EVERY write at EOF server-side —
+and nobody told Pouch: raw Linux binaries got correct appends while ports
+stayed on the one-time seek, so `fopen("a+")`, a read or an `fseek`, then
+a write landed MID-FILE, over existing bytes (audit B-0 r2 F9). 0040
+passes the bit on all three opens and KEEPS the seek, because for an
+append fd the kernel cursor is advisory and the seek is what makes
+`ftell()` and the first read of an `"a+"` stream start at EOF as they have
+since 0030. On a Dev with no append notion the bit is inert — NOT because
+"each switches on `omode & 3`", as this paragraph first said (14 of the 16
+other `Dev.open` slots are `dev_simple_open`, which stores the whole omode
+and switches on nothing), but because `Spoor.mode` has one reader and that
+reader masks it (`kernel/handle.c`, `s->mode & 3`). Conclusion true,
+mechanism false (audit r3 F7). `/bin/pouch-hello-fopen` pins it: on the file
+its create + append legs left as `alpha\nbeta\n`, reopen `"a+"`, seek 0,
+write `gamma\n`, require `alpha\nbeta\ngamma\n` (the 0030 emulation yields
+`gamma\nbeta\n`).
+
+**What 0040 does NOT give: atomicity against a CONCURRENT appender.**
+Stratum's write is stat-then-write with a documented TOCTOU
+(`src/9p/server.c` h_write step b; its `cf-2-design.md` 4.3), so two
+appenders to one log can be handed the same end and one overwrites the
+other. 0030's source said so ("CONCURRENT appenders may interleave -- that
+atomicity is documented-ABSENT"); 0040's first version DELETED that sentence
+and claimed "two appenders to one log" as fixed. Restored in `openat.c` and
+here. The fix is Stratum's (take the size under the write's own lock);
+tracked there.
+
+Costs and divergences, all of them: dev9p keeps an append fd off the Larder's
+write-behind path, so each flushed append is one RPC; an `"a+"` stream's
+initial read position is END (the BSD choice — musl-on-Linux and glibc give
+0); after an append write that followed a seek the cursor — `ftell()`,
+`lseek(SEEK_CUR)`, a read after a bare `fflush()` — is seek-position + count,
+not the new EOF; after ANOTHER writer grew the file the cursor does not move
+at all, though the next write lands at the new end.
+
+**0024's patch file had no trailing newline**, so its last hunk
+(`unlinkat.c`) applied only because BSD `patch` silently spends fuzz on a
+final context line; `git apply` calls the file corrupt. Found 2026-09-21 by
+applying the series under `--fuzz=0`; fixed, and
+`tools/check-patch-hunks.py` now fails the class.
 
 **`readlink` is the sharpest translation in the series.** The seam parked
 `__NR_readlinkat` at the sentinel, which is the *wrong* answer rather
@@ -225,9 +266,10 @@ in-place translation pass.
 
 ## Prosecution
 
-- Every successful-open exit must route through `pouch_open_ret`, or
-  `O_APPEND` silently clobbers on that path (the reason the fix is a
-  helper and not three call-site edits).
+- Every successful-open exit must route through `pouch_open_ret`, and the
+  `OAPPEND` bit must be OR-ed into `omode` BEFORE the first of the three
+  opens, or `O_APPEND` silently degrades on that path (the reason both
+  halves sit at one place each and not at three call sites).
 - `__pouch_open_parent`'s parent fd must be closed on EVERY arm,
   including the EEXIST fallback and both `renameat` endpoints.
 - The `readlink` `/proc` whitelist must stay closed and strict (no `//`

@@ -65,14 +65,14 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**517 owned · 53 unowned · 570 files (90% owned) · ~13991 unswept lines.**
+**523 owned · 48 unowned · 571 files (91% owned) · ~13094 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **73 files, ~32801 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **73 files, ~33174 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
 | usr/warp-prove | 0 | 1 | 4349 |
-| usr/pouch-hello | 0 | 22 | 3384 |
+| usr/pouch-hello | 6 | 17 | 2487 |
 | kernel | 127 | 14 | 1910 |
 | usr/ports | 19 | 4 | 1631 |
 | usr/quarry | 0 | 1 | 1033 |
@@ -133,9 +133,8 @@ Excluded as harness and counted here rather than dropped: **73 files, ~32801 lin
 | usr/quarry/src/main.rs | 1033 |
 | usr/stratumd-stub/stratumd-stub.c | 453 |
 | kernel/include/thylacine/errno.h | 388 |
-| usr/pouch-hello/pouch-hello-sockets.c | 366 |
 | usr/pouch-hello/pouch-hello-fs.c | 350 |
-| usr/pouch-hello/pouch-hello-net.c | 284 |
+| usr/pouch-hello/pouch-hello-net.c | 293 |
 | kernel/include/thylacine/smp.h | 282 |
 | usr/pouch-hello/pouch-hello.c | 278 |
 | usr/kaua-term/src/cmdline.rs | 276 |
@@ -146,7 +145,6 @@ Excluded as harness and counted here rather than dropped: **73 files, ~32801 lin
 | kernel/include/thylacine/context.h | 201 |
 | usr/lib/libthyla-rs/src/sync.rs | 196 |
 | usr/pouch-hello/pouch-hello-sodium.c | 196 |
-| usr/pouch-hello/pouch-hello-poll.c | 179 |
 | usr/ports/gnumake/generated/glob.h | 163 |
 | kernel/include/thylacine/9p_srvconn_transport.h | 160 |
 | kernel/cpio.c | 152 |
@@ -154,9 +152,6 @@ Excluded as harness and counted here rather than dropped: **73 files, ~32801 lin
 | usr/pouch-hello/pouch-hello-reentry.c | 133 |
 | usr/pouch-hello/pouch-hello-spawn.c | 127 |
 | usr/pouch-hello/pouch-hello-mallocng-torture.c | 126 |
-| usr/pouch-hello/pouch-hello-malloc.c | 122 |
-| usr/pouch-hello/pouch-hello-fopen.c | 120 |
-| usr/pouch-hello/pouch-hello-threads.c | 119 |
 | usr/stub-driver/stub-driver.c | 119 |
 | kernel/include/thylacine/9p_transport_loopback.h | 96 |
 | usr/pouch-hello/pouch-hello-exitgroup.c | 91 |

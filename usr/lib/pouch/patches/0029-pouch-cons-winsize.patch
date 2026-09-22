@@ -103,7 +103,7 @@ cannot carry it (pouch_smoke_one pipes the probe's stdio).
  /* Per-op open of the pts ctl sibling /dev/pts/<n>ctl (the Plan 9
   * suffix-ctl idiom). Stateless: opened fresh per termios/winsize op,
   * closed before return — no cached fd to invalidate across a pts free. */
-@@ -334,7 +387,24 @@
+@@ -336,7 +389,24 @@
  		struct winsize *ws = arg;
  		unsigned flags, cols, rows;
  		if (!ws) { errno = EINVAL; return -1; }
@@ -129,7 +129,7 @@ cannot carry it (pouch_smoke_one pipes the probe's stdio).
  		if (pts_ctl_read(n, &flags, &cols, &rows) != 0) {
  			errno = ENOTTY;
  			return -1;
-@@ -348,7 +418,14 @@
+@@ -350,7 +420,14 @@
  	case TIOCSWINSZ: {
  		const struct winsize *ws = arg;
  		if (!ws) { errno = EINVAL; return -1; }

@@ -445,3 +445,18 @@ The ceiling is 123, SYS__NATIVE_TOP is 124. Existing call numbers and Linux
 phenotype translation retain their meanings. The 2026-09-21 review changed no
 number and no envelope: `seat.h` gained names for the six chord key codes, and
 RESTORED is now also accepted in the failed phase ([[abi-trusted-seat]]).
+
+## Behaviour changes on existing numbers (B-0, 2026-09-21)
+
+No number, record or errno changed; three existing calls changed what they
+DO, and `syscall.h`'s comments say so. `SYS_CHROOT` and `SYS_PIVOT_ROOT` now
+REMOVE every mount entry whose point the new root cannot reach, under the same
+lock hold (the #80 mount-table shed, ARCH 9.6.10, [[sub-kernel-territory]]):
+nothing resolved from the new root changes, an fd-relative walk from a
+directory fd opened before the swap can. Both refuse a non-directory with the
+flat -1 -- `SYS_CHROOT` newly (a bad pivot used to wedge resolution until the
+caller pivoted back; with the shed it would strip the table for good) -- and
+`SYS_PIVOT_ROOT` also refuses a caller with no current root, which is
+`SYS_CHROOT`'s to install. The `SYS_PWRITE` O_APPEND note changed with pouch
+0040: ports pass the kernel's `OAPPEND` omode bit instead of emulating append
+with one seek at open.

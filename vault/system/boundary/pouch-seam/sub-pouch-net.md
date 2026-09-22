@@ -13,13 +13,19 @@ code:
   - usr/lib/pouch/patches/0018-pouch-net-poll.patch
   - usr/lib/pouch/patches/0020-pouch-srv-bulk.patch
   - usr/lib/pouch/patches/0028-pouch-net-nonblock.patch
+  - usr/lib/pouch/patches/0038-pouch-stdio-socket-fds.patch
+  - usr/lib/pouch/patches/0039-pouch-fdset-guard-ppoll-tag.patch
+  - usr/lib/pouch/patches/0041-pouch-poll-stream-socket-shape.patch
+  - usr/lib/pouch/patches/0042-pouch-timeout-clamp.patch
+  - usr/pouch-hello/pouch-hello-sockets.c
+  - usr/pouch-hello/pouch-hello-poll.c
 audit: hard
 guarded-by: [inv-i1, inv-i28]
 validated-by: [prose, gate-smp]
 locks: [lock-pouch-sock-table]
 design: ["docs/POUCH-DESIGN.md", "docs/NET-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-09-06
+updated: 2026-09-21
 ---
 ## Purpose
 
@@ -182,9 +188,30 @@ kernel-attached mount negotiates a 128 KiB msize (CF-3 B).
 ## Prosecution
 
 - **Every fd-consuming call must be tag-aware.** The completeness of that
-  set is this surface's central obligation and has been breached twice
-  (0015's `poll`, 0017's `shutdown`/`sendto`/`recvfrom`). Both were
-  fail-closed rather than dangerous, which is the tag design working.
+  set is this surface's central obligation and has been breached three
+  times (0015's `poll`, 0017's `shutdown`/`sendto`/`recvfrom`, 0038's
+  stdio backends). The first two were fail-closed rather than dangerous,
+  which is the tag design working. The third was not quite: the four
+  `FILE` backends (`__stdio_read` / `_write` / `_close` / `_seek`) issue
+  RAW syscalls on `f->fd`, so they are fd consumers that a sweep of the
+  public wrappers never sees. `fdopen(sock)` gave a stream on which every
+  operation failed (fail-closed), but `fclose()` on it "closed" a number
+  the kernel never issued and STRANDED the slot with its kernel handles —
+  a leak against a table of `POUCH_SOCK_MAX` = 8. Found by the audit of
+  0035, not by a consumer: the ports that call `fdopen` (GNU make,
+  dosbox-x) wrap FILE descriptors, and nobody wraps a socket.
+  0038 maps the tag in read/write (`pouch_sock_kernel_fd`), routes close
+  through `pouch_sock_close`, and answers `ESPIPE` to a seek.
+  `/pouch-hello-sockets` pins it: it wraps the connected client end in a
+  `FILE`, writes and reads through it (including a `fscanf` pushback),
+  requires `fseek` to fail with `ESPIPE`, `fclose`s it, and then requires
+  the number of free slots — MEASURED by opening sockets until refusal,
+  before and after — to be unchanged. The sweep rule that follows: a
+  tag-awareness sweep lists every site that passes an fd to `__syscall` /
+  `syscall` / `syscall_cp`, not every public function that takes an fd.
+  Still raw and recorded: `freopen`'s `dup3` onto a socket stream (fails
+  cleanly) and `__fdopen`'s `F_SETFD` / `F_SETFL` for the `e` / `a` modes
+  (results ignored upstream too).
 - `pouch_sock_poll_fd` vs `pouch_sock_kernel_fd` at every poll site.
 - The slot-reuse reset list must cover EVERY field — `bulk_hint` was
   missing from it until #52, so a recycled slot could spuriously post
@@ -209,7 +236,7 @@ round against this surface before it had a node).
 - **The `select()`/`pselect()` fd-VALUE bound is stale and now wrong.**
   Both reject any fd ≥ 64 set in an input set, commented as "unreachable
   through any Thylacine syscall — `PROC_HANDLE_MAX`". That was true when
-  `PROC_HANDLE_MAX` was 64; since #355 the fd table is 256 and only the
+  `PROC_HANDLE_MAX` was 64; the fd table is 1024 today (`handle.h`) and only the
   `SYS_POLL` *nfds count* is bounded at `POLL_MAX_NFDS` = 64. So a
   program holding fds ≥ 64 gets valid fds wrongly `EBADF`'d by
   `select()`. `poll()` is unaffected (fd values pass through; only the
@@ -218,6 +245,100 @@ round against this surface before it had a node).
   large fd population, and the three patches that mirror the constant
   (0005 / 0015 / 0018) all still name it `PROC_HANDLE_MAX`.
 - `POUCH_SOCK_MAX` is 8 concurrent sockets per Proc.
+- **A socket fd cannot live in an `fd_set`, and that was a WILD WRITE until
+  0039** (audit B-0 r2 F2; pre-existing). The tag makes a socket fd
+  `0x40000000 | slot`; upstream's `FD_SET(d, s)` indexes `fds_bits[d / 64]`
+  with no bound, so `FD_SET(sock, &set)` stored 128 MiB past a 16-long
+  array — in APPLICATION code, before libc was entered; `select()` refuses
+  the fd, but only afterwards. From the main stack that address is usually
+  unmapped; from a heap-resident set it is someone's Burrow. 0039 makes
+  `FD_SET` / `FD_CLR` / `FD_ISSET` `abort()` (status 127) on a descriptor
+  that does not fit the set — glibc's `__fdelt_chk`, and like it made in the
+  descriptor's FULL width against the set's OWN size,
+  `(unsigned long long)(d) < 8*sizeof(fd_set)`: the first version's
+  `(unsigned)(d) < FD_SETSIZE` let a `long` 0x100000005 through as 5 and
+  read `FD_SETSIZE` in the APPLICATION's macro context (audit r3 F3). It
+  says why only when fd 2 is a terminal: fd 2 is routinely not stderr here
+  (a prover is spawned with {0,1}; stratumd with none, so its fd 2 is its
+  third real kernel handle), and the first version wrote ~110 bytes of
+  English at that handle's cursor (r3 F4). **0039 puts CODE into a PUBLIC
+  header**: the guard is compiled into the PORT's objects, so a port is
+  rebuilt, not relinked, to have it (in-tree that is automatic — a stale
+  sysroot rebuild removes every port's output). This dossier and 0039 called
+  it the series' FIRST public-header patch, adopting round 3 F8's premise;
+  round 4 F6 found 0001, 0003-0010 and 0021 editing `bits/syscall.h.in`
+  (installed `<bits/syscall.h>`) -- numbering constants, not code. It also
+  routes `ppoll()` through the tag-aware `poll()` (it was a raw
+  `SYS_poll`: POLLNVAL, counted ready, a busy-spin; the failure 0015 fixed
+  in `poll()` and not there). **That is the honest minimum, not the fix.**
+  The fix is socket fds that are small integers (a placeholder kernel
+  handle per slot + an fd→slot side table), which lets `select()` work on
+  sockets and retires the tag from every fd-consuming call — a redesign of
+  0006 / 0016, its own chunk and audit, OWED. Until then a port that
+  `select()`s on a socket stops.
+- **`poll()` on an AF_UNIX socket: what was claimed, what was true, what is
+  true now.** This dossier said on 2026-09-21 that a port which `poll()`s
+  "works" and that `/pouch-hello-sockets` "pins both halves". Both false
+  (audit r3 F1). 0039 only made `ppoll()` REACH the kernel's poll with the
+  right handle; the kernel then sampled the SERVER's end of the connection
+  for a client (`POLLIN` from the client's own unread request) and walked no
+  hook list when a reply arrived. The prover leg that "pinned" it was decided
+  by a scheduling race over that defect — green on the one boot the gate's
+  first stage ran, then 57 of 58 failed ci-fleet boots and 17 of 17 failed
+  SMP-gate boots, one signature. Now: the kernel polls both endpoints and
+  walks the list on every ring mutation ([[sub-kernel-srvconn]]), and **0041**
+  gives a CONNECTED AF_UNIX slot the stream-socket SHAPE in `poll()`: the
+  kernel's row is pipe-like (`POLLHUP|POLLERR`, no `POLLIN` at a drained EOF —
+  what the native 9P servers are written to), and a program written to sockets
+  expects a peer's orderly close to read `POLLIN|POLLHUP` with no `POLLERR`
+  -- and `POLLOUT` too when asked (round 4 F4): Linux's `unix_poll` reports a
+  stream socket writable after the peer's close ("prevents stuck sockets"),
+  and a writer waiting on `POLLOUT|POLLERR`, having lost the `POLLERR` here,
+  would otherwise spin on a bare `POLLHUP` instead of writing and meeting the
+  close in the write's error.
+  The loop every port has — `POLLIN`? then `read`; 0 means closed — never sees
+  its `POLLIN` otherwise and spins on a `poll()` that returns at once. Done
+  once, at the boundary line. The prover's leg is sequenced by barriers so no
+  schedule can turn it green over a broken kernel: the client polls only AFTER
+  the server consumed its request, must see EXACTLY `POLLIN` with the
+  connection still open, and after the server's close EXACTLY
+  `POLLIN|POLLHUP`, then EOF.
+- **An ACCEPTED AF_UNIX socket is not covered by 0041.** `accept()` returns
+  the kernel handle untagged (0006's design), so `poll()` cannot tell it from a
+  pipe without a kernel query per fd per call, and a pouch SERVER still sees
+  the pipe-like row when its client closes. One in-tree pouch server does poll
+  an accepted socket -- stratumd's fs_pool `pool_socket_pending`, a
+  zero-timeout `poll(POLLIN)` that counts ANY revents as "a client has
+  pipelined", `POLLHUP`/`POLLERR` included, so the pipe-like row changes
+  nothing for it (this dossier said no server did until round 4 F5). Folds
+  into the small-integer-socket-fd redesign above — an fd→slot side table
+  covers accepted sockets too.
+- **Timeout conversion (0042, round 4 F12, pre-existing since 0005).**
+  `ppoll()` and `select()` fold a timespec/timeval into the kernel's
+  millisecond `int`. They computed `tv_sec * 1000` in signed `long long`, UB
+  past ~9.2e15 s: `tv_sec = 2^62` wrapped to a 0 ms timeout and returned 0 at
+  once, where a TIME_MAX-style "forever" is common. `pselect()`'s microsecond
+  round-up carried into `tv_sec` with a `+= 1` that overflowed at TIME_MAX
+  (then `select()` answered `EINVAL`). 0042 clamps before the multiply
+  (anything above `INT_MAX/1000` s is the `INT_MAX`-ms ceiling) and stops the
+  carry at `INT_MAX` s. `/pouch-hello-poll` leg 5 pins all three with a
+  helper thread whose late byte the call must still be parked to receive.
+- **The tag-aware set is still not the POSIX set** (census 2026-09-21: every
+  site in the patched `src/` that passes an fd to a raw syscall, outside
+  `src/network/`). That census method cannot see a call that takes a
+  BITMAP or an ARRAY of fds — it missed `select` and `ppoll`, above, and
+  its first version claimed here that every remaining call "fails
+  visibly". Of the scalar-fd calls that remain, each does fail visibly, so
+  none fabricates a value or leaks a slot — they are missing surface, and
+  a port that needs one needs a patch. `fstat(sock)` reaches the kernel with a
+  number it never issued and gets `EBADF` (no `S_ISSOCK` test). `fcntl`,
+  `dup`, `dup3`, `readv`, `writev` never reach it at all: their numbers are
+  sentinel-parked for EVERY fd (`ENOSYS`; `dup2` onto a target is a
+  documented kernel seam, [[sub-pouch-process]]). So the commonest way to
+  make a socket non-blocking, `fcntl(sock, F_SETFL, O_NONBLOCK)`, does not
+  work — `ioctl(FIONBIO)` and 0028's `SOCK_NONBLOCK` do — and `writev` to a
+  socket does not exist, although 0002 rewrote the stdio backends around
+  exactly that absence. OPEN, tracked with the pouch-net completeness work.
 - **A stale doc-comment contradicts the live `SO_PEERCRED` marshal.**
   `getsockopt.c`'s top-of-file comment still says `ucred.uid` / `ucred.gid`
   are "0 at v1.0 (Thylacine has no uid model)"; the live A-3 marshal below
@@ -247,4 +368,6 @@ the kernel byte-mode SrvConn; [[adt-sockets12-r1]] 2 P1) →
 [[chg-2026-07-08-cf3b-bulk-ring]] (0020, the bulk hint) →
 [[chg-2026-07-22-52-nonblock]] (0028) →
 [[chg-2026-09-06-9p-identity-absorb]] (the A-3 `SO_PEERCRED`-carries-principal
-marshal in 0006, folded at the docs/reference retirement).
+marshal in 0006, folded at the docs/reference retirement). 0038 (stdio over
+a tagged fd) landed with the Boosty B-0 libc fixes, 2026-09-21; its audit
+record is `memory/audit_pouch_0033_0035_closed_list.md` finding F4.
