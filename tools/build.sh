@@ -300,12 +300,6 @@ build_kernel() {
     # build_ramfs ships /pouch-hello + /pouch-hello-stdio.
     build_userspace
     build_pouch_progs
-    # Track R (Rust std port), R-1: cross-build the cargo std hello (/r1hello)
-    # after the pouch sysroot exists. SKIPS cleanly off the track-R box (no
-    # nightly / no libc fork / no patched rust-src), so this is inert on a
-    # normal build and self-skips announced. Staged into $progs_out for
-    # build_ramfs, like the pouch progs.
-    build_rust_progs
     # G-7a: cross-build SDL2 + the /sdl-probe prover before the ramfs bake.
     build_sdl2
     # G-7b: cross-build TyrQuake + stage the shareware pak BEFORE the pool
@@ -336,6 +330,13 @@ build_kernel() {
     # Clade CL-2: cross-build the C++ runtime (libunwind+libc++abi+libc++) into
     # the sysroot + the /pouch-hello-cxx prover. Skips if the LLVM fork is absent.
     build_libcxx
+    # Track R (Rust std port), R-1: cross-build the cargo std hello (/r1hello).
+    # Must FOLLOW build_libcxx: `panic = "unwind"` links -lunwind, and libunwind
+    # is built by CL-2 above, not by build_sysroot. SKIPS cleanly off the track-R
+    # box (no nightly / no libc fork / no patched rust-src / no libunwind), so
+    # this is inert on a normal build and self-skips announced. Staged into
+    # $progs_out for build_ramfs, like the pouch progs.
+    build_rust_progs
     # Boosty B-0: ICU + JavaScriptCore (-> /webkit/jsc in the pool). DEFAULT-OFF:
     # ~40 min cold on this host, and the source is a sibling sparse clone. Must
     # follow build_libcxx (it links libc++) and precede the pool fixture.
@@ -4274,13 +4275,27 @@ build_rust_progs() {
     [[ -d "$libc_fork" ]] || { ledger "rust progs: SKIP ($libc_fork fork absent)"; return 0; }
     [[ -x "$pouch_clang" ]] || { ledger "rust progs: SKIP (tools/pouch-clang absent)"; return 0; }
 
-    # The link pulls libc.a + the static-PIE CRT + libunwind.a from the pouch
-    # sysroot; ensure it (build_pouch_progs already did when we run in the chain,
-    # but `tools/build.sh rust-progs` may be invoked standalone).
+    # The link pulls libc.a + the static-PIE CRT from the pouch sysroot; ensure
+    # it (build_pouch_progs already did when we run in the chain, but
+    # `tools/build.sh rust-progs` may be invoked standalone).
+    local sysroot="$BUILD_DIR/sysroot"
     if sysroot_is_stale; then
         echo "==> rust progs: pouch sysroot missing/stale -- building it first"
         build_sysroot
     fi
+    # libunwind.a is NOT one of those: build_sysroot makes musl + compiler-rt +
+    # libsodium, while libunwind comes from build_libcxx (the LLVM-fork C++
+    # runtime). `panic = "unwind"` links -lunwind, so this is a REAL dependency
+    # and it is ENSURED here rather than assumed from call order. It has to be:
+    # R-1 linked only because an earlier build had left libunwind.a in the
+    # sysroot, and the first pouch-patch change to rebuild the sysroot from
+    # pristine broke the link -- i.e. this never built from a clean tree.
+    if [[ ! -f "$sysroot/lib/libunwind.a" ]]; then
+        echo "==> rust progs: libunwind.a absent -- building the C++ runtime first"
+        build_libcxx
+    fi
+    [[ -f "$sysroot/lib/libunwind.a" ]] \
+        || { ledger "rust progs: SKIP (no libunwind.a -- the LLVM fork is absent, so panic=unwind cannot link)"; return 0; }
     mkdir -p "$progs_out"
 
     # Staleness: reuse the staged /r1hello when it is newer than every input.
@@ -4304,10 +4319,25 @@ build_rust_progs() {
             fi
         done
         if [[ "$fresh" == "0" ]]; then
-            local patched_newer
-            patched_newer="$(grep -rl 'thylacine' "$rust_src_root/library/std/src" 2>/dev/null \
-                | while IFS= read -r pf; do [[ "$pf" -nt "$staged" ]] && { echo "$pf"; break; }; done)"
-            [[ -n "$patched_newer" ]] && fresh=1
+            # EVERY branch below must end with status 0. This runs under
+            # `set -euo pipefail`, where a trailing `[[ ... ]] &&` that tests
+            # FALSE returns 1 and errexit kills the whole build with NO message.
+            # That is exactly how this block died: the old form piped grep into a
+            # `while ... [[ -nt ]] && { echo; break; }`, so when nothing was newer
+            # -- the steady-state REUSE case, i.e. the only path a second
+            # consecutive build takes -- the loop returned 1, pipefail propagated
+            # it to the assignment, and the build stopped silently right after
+            # pouch-hello-cxx. The do-nothing path was the one path never run.
+            # Process substitution (not a pipeline) keeps pipefail out of it, and
+            # `|| true` covers grep's no-match exit; `fresh` is set directly so
+            # there is no trailing `&&` left to return 1.
+            local pf
+            while IFS= read -r pf; do
+                if [[ -n "$pf" && "$pf" -nt "$staged" ]]; then
+                    fresh=1
+                    break
+                fi
+            done < <(grep -rl 'thylacine' "$rust_src_root/library/std/src" 2>/dev/null || true)
         fi
     fi
     if [[ "$fresh" == "0" ]]; then
