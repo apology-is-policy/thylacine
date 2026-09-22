@@ -123,6 +123,25 @@ refused with two precise diagnostics. `default-smp1` -- the row main warned migh
 be red as task #791 -- came back **10 PASS / 0 CORRUPTION**, as did
 `default-smp4`.
 
+### The defect that a question caught instead of a boot
+
+The demo deck was first staged into the **ramfs**, next to the DOSBox `.COM`
+witnesses, which is where a data file for the guest looks like it belongs. Before
+booting anything I asked where `/test.png` actually comes from, and the answer
+was `stratum_fs_bin write /test.png` -- the **pool**. The running system's `/` is
+the pool after the pivot, so the ramfs root is not `/` and `lantern /deck` would
+never have found the deck. Relocated into the pool beside `/manual`, with the
+slides checked before the pool opens and a failure made fatal.
+
+Two smaller things fell out of the same move. The deck became TRACKED files at
+`usr/lantern/deck/` rather than heredocs inside `tools/build.sh`, which is what
+lets the real checker read them directly. And `manual-check` turns out to refuse a
+deck directory outright -- it reads a whole directory and requires every entry to
+be `NN-<name>.md`, which `slides.toml` is not -- so the build-time check runs
+against a temp directory holding only the `.md` files. That refusal is not a bug:
+it is the manual BOOK's ordering rule, and a deck's order comes from its manifest
+instead, which is the distinction the whole design rests on.
+
 **Not verified: the look.** Nothing has been booted. Three visual questions stay
 open and reading more code cannot answer them: where a short slide sits in a tall
 tile; whether a slide's title should be emitted as `HdrClass::Title` (the class a

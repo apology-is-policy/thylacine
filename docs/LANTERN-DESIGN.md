@@ -128,6 +128,22 @@ ignored.
 compositor and reach it only through its own gated verbs, so a deck file someone
 mails you cannot reach for them.
 
+### 5.1 The shipped demo deck
+
+`usr/lantern/deck/` is a tracked three-slide deck, installed at **`/deck`** so
+`lantern /deck` shows something on a fresh boot. It is installed into the
+**pool**, beside `/manual` and `/test.png` — *not* the ramfs, whose root is not
+the running system's `/` (the pool is, after the pivot), so a deck baked into the
+ramfs would simply never be found. Its slides are checked with the manual's own
+checker before the pool opens and a failure is fatal, so a demo deck that stopped
+being a valid section set cannot ship.
+
+The check runs against a temporary directory holding only the `.md` files,
+because `manual-check` reads a whole directory and requires every entry to be
+named `NN-<name>.md` — which `slides.toml` is not. That rule is the manual
+*book's* ordering; a deck's order comes from its manifest, which is exactly the
+distinction §2 draws.
+
 ## 6. Keys
 
 | Key | Action |

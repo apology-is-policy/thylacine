@@ -682,62 +682,6 @@ DOSBOXCONF
         ledger "ramfs.cpio: staged dosbox-x.conf (DX-3b sample config/autoexec)"
     fi
 
-    # LANTERN: a three-slide demo deck at /deck, so `lantern /deck` has
-    # something to show on a fresh boot without the operator writing one first.
-    # DATA (Markdown + a manifest), so it rides the bake directly. Each slide is
-    # an ordinary Operator's-Manual section -- there is no slide dialect -- and
-    # `lantern --check /deck` passes, which is what makes this a witness and not
-    # just a sample: a deck that stopped being valid would fail here.
-    mkdir -p "$ramfs_src/deck"
-    cat > "$ramfs_src/deck/slides.toml" <<'DECKTOML'
-# A deck names its slides in order. Nothing else: a manifest carries content
-# and order, never display authority -- the scale and the theme belong to the
-# compositor and reach it through its own verbs.
-title = "Beacon slides"
-slides = [
-    "01-title.md",
-    "02-how.md",
-    "03-keys.md",
-]
-DECKTOML
-    cat > "$ramfs_src/deck/01-title.md" <<'DECKSLIDE1'
-# Beacon slides
-
-A slide is Beacon text. Nothing in this deck is a slide format: each file is an
-Operator's Manual section, and the renderer already knows how to draw one.
-
-- Under Halcyon it is a rich document.
-- On a serial console it is the same words, without the frames.
-- Down a pipe it is plain text, and every slide at once.
-DECKSLIDE1
-    cat > "$ramfs_src/deck/02-how.md" <<'DECKSLIDE2'
-# How it works
-
-The presenter writes one slide, then clears and writes the next. The clear is a
-grid operation, so the tile keeps laying the document out richly.
-
-## What it does not do
-
-It never enters the alternate screen. That is the one mode in which a tile
-paints its raw character grid instead of the rich document, which would throw
-away the rendering the whole exercise is for.
-DECKSLIDE2
-    cat > "$ramfs_src/deck/03-keys.md" <<'DECKSLIDE3'
-# Keys
-
-| Key | Does |
-| --- | --- |
-| space, right, down, n | next slide |
-| left, up, p | previous slide |
-| g, G | first, last |
-| 1 to 9 | that slide |
-| q | leave, keeping the slide on screen |
-
-Advancing off the end stays on the last slide rather than quitting, because the
-end of a deck is where a talk pauses for questions.
-DECKSLIDE3
-    chmod 0644 "$ramfs_src/deck/"*
-    ledger "ramfs.cpio: staged /deck (the lantern demo deck: 3 slides + slides.toml)"
 
     # P6-pouch-stratumd-boot (sub-chunk 16a): copy the cross-built stratumd
     # daemon binary if build_stratumd has produced it. Separate from
@@ -4014,6 +3958,54 @@ populate_stratum_pool() {
             || { echo "==> populate pool: /manual/$section_base readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
     done <<< "$manual_sections"
     echo "==> populate pool: $sections manual section(s) baked + readback-verified into /manual (MANUAL-DESIGN 6)"
+
+    # LANTERN: install the demo deck at /deck, so `lantern /deck` has something
+    # to show on a fresh boot. It goes in the POOL, beside /manual and
+    # /test.png -- NOT the ramfs, whose root is not the running system's `/`
+    # (the pool is, after the pivot), so a deck baked there would simply not be
+    # found. Unconditional: a deck is content, not a lever.
+    #
+    # The slides are CHECKED first, with the manual's own checker, and a failure
+    # is fatal -- so a deck that stopped being a valid section set cannot ship.
+    # They are checked in a temp directory holding only the .md files because
+    # manual-check reads a whole directory and requires every entry to be named
+    # NN-<name>.md, which `slides.toml` is not: that rule is the manual BOOK's
+    # ordering, and a deck's order comes from its manifest instead.
+    local deck_src="$REPO_ROOT/usr/lantern/deck"
+    if [[ -d "$deck_src" ]]; then
+        local deck_check
+        deck_check="$(mktemp -d)" || { echo "==> populate pool: mktemp for the deck check FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        cp "$deck_src"/*.md "$deck_check/" \
+            || { echo "==> populate pool: no deck slides to check in $deck_src" >&2; rm -rf "$deck_check"; kill -TERM "$stratumd_pid"; exit 1; }
+        if ! "$mc_bin" "$deck_check" >/dev/null; then
+            echo "==> populate pool: the lantern demo deck FAILS the section check (manual-check above)" >&2
+            "$mc_bin" "$deck_check" >&2 || true
+            rm -rf "$deck_check"
+            kill -TERM "$stratumd_pid"
+            exit 1
+        fi
+        rm -rf "$deck_check"
+        "$stratum_fs_bin" -s "$sock_path" mkdir /deck >/dev/null 2>&1 || true
+        "$stratum_fs_bin" -s "$sock_path" stat /deck >/dev/null 2>&1 \
+            || { echo "==> populate pool: mkdir /deck FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        local deck_file deck_files=0
+        for deck_file in "$deck_src"/*; do
+            local deck_base
+            deck_base="$(basename "$deck_file")"
+            "$stratum_fs_bin" -s "$sock_path" write "/deck/$deck_base" < "$deck_file" \
+                || { echo "==> populate pool: write /deck/$deck_base FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+            deck_files=$((deck_files + 1))
+        done
+        "$stratum_fs_bin" -s "$sock_path" sync \
+            || { echo "==> populate pool: sync (deck) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        for deck_file in "$deck_src"/*; do
+            local deck_base
+            deck_base="$(basename "$deck_file")"
+            "$stratum_fs_bin" -s "$sock_path" read "/deck/$deck_base" | cmp -s - "$deck_file" \
+                || { echo "==> populate pool: /deck/$deck_base readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        done
+        echo "==> populate pool: $deck_files lantern deck file(s) baked + readback-verified into /deck (LANTERN-DESIGN 1)"
+    fi
 
     # TH-5b: put a gallery theme IN FORCE. `THYLACINE_HALCYON_THEME=<name>`
     # copies `/lib/halcyon/themes/<name>.toml` to `/lib/halcyon/theme.toml`,
