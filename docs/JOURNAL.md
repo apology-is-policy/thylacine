@@ -22,6 +22,93 @@ needed the operator.
 
 
 ---
+## 2026-09-22, late evening (aux, Opus 5 1M, effort xhigh) -- 399 tests that had never compiled, and the six defects they were holding
+
+After the caret correction (entry below), the queue's next item was "five
+crates cannot host-test". **Measuring it first changed the item**: four of the
+five declare no tests at all, so un-host-testability costs them nothing. The
+whole debt was one crate -- `libutopia`, the shell -- and it was 399 tests.
+
+`tools/test-rust.sh` had been printing the opposite, in a blanket NOTE claiming
+"the NO-HOST crates carry `#[cfg(test)]` tests that cannot run anywhere". I
+wrote that a run earlier, from the one crate I had looked at. It now measures
+the stranded count per crate and prints it, because *cannot be host-tested* and
+*has tests that run nowhere* are different facts and only the second is a debt.
+(The count helper died on its first run under `set -euo pipefail`: grep exits 1
+when it matches nothing, which is the ordinary answer for a crate with no
+tests, so the summary printed its header and then silence. Caught by running it
+before committing it -- the same reflex that caught this script's first draft
+calling 93 bin-only crates FAIL.)
+
+**The split itself was smaller than the note predicted, and measuring said so.**
+My note said libutopia was "INVASIVE -- its built-ins call syscalls". True, but
+a per-file count showed **324 of the 399 tests sit in modules with ZERO
+libthyla-rs references** -- the entire parser (191), the line editor (83), path
+and palette. So the standard `backend` feature split lands most of it. Two
+modules are gated for reasons worth keeping: `eval::expr` makes no syscall of
+its own but expansion genuinely reaches into command substitution, globbing and
+the environment (`$(...)` runs a pipeline, `*.md` asks the filesystem) -- real
+coupling in the shell's design, not an import accident; and `eval::console` is
+gated for three `t_write`/`t_fstat` calls, which stings because its
+`is_raw_command` allowlist -- the set this very arc extended for lantern -- is
+pure and worth testing.
+
+**Then they were asked to compile for the first time. 20 build errors, then 49
+failures.**
+
+41 of the 49 were one stale helper: `parser::expr::tests::lex()` handed
+`parse_expr_tokens` the lexer's synthetic trailing `Eof`. That function's own
+doc says it takes an expression BODY, every production caller in `parse.rs`
+passes a sub-slice without it, and the lexer's own test helper drops it. So the
+helper had the wrong calling convention and the code was right -- fixed in the
+helper, not by relaxing the parser. That distinction is the whole discipline
+here: a test that has never run has never had a chance to be right, so "which
+one is wrong" has to be asked from the contract, every time.
+
+**The remaining 8 are 6 real defects in the shell, none of them mine:**
+
+- **UT-PARSE-1** `cmd < in` does not parse. `lexer.rs` makes `in` a keyword
+  unconditionally, so the parser reports ``expected "`<` target"``. In rc's
+  heritage `in` is a keyword only in `for (i in ...)`; a file named `in` is
+  legal, and `in`/`out` is an ordinary pair of names.
+- **UT-PARSE-3** `(a; (b; c))` is rejected. `lexer.rs:196` emits `DoubleRParen`
+  for ANY `))`, context-free, so a nested subshell's close becomes one
+  arithmetic token.
+- **UT-PARSE-4** truncated input reports `UnexpectedToken` where
+  `UnexpectedEof` is expected. **Possibly the most user-visible of the six**: a
+  shell decides "the line is incomplete, keep reading" by recognising an
+  EOF-class error, so this wants checking against the REPL's continuation logic
+  before anyone calls it cosmetic.
+- **UT-PARSE-2** `cmd =arg` does not parse as two words, though the test's own
+  comment records that as the intended behaviour it was changed TO.
+- **UT-PARSE-5** a backtick fixture the lexer now refuses; lowest confidence.
+- **UT-EDIT-1** ESC ESC drops a pending byte in the line editor.
+
+Quarantined with `#[ignore = "UT-..."]` rather than left red, because a
+permanently-failing gate stops carrying signal for NEW breakage. But cargo
+calls an ignore a pass, so the gate now counts and reports them separately and
+prints the grep that lists them; the one pre-existing ignore (haul's live
+interop test, legitimately server-dependent) gained a reason string so that
+claim is true of every one. Each finding is its own chunk on an audit-bearing
+surface -- [[bug-ut-parser-findings-from-never-run-tests]].
+
+**Two dossiers were carrying the old world and are corrected**:
+`sub-utopia-parser`'s "189 of this parser's tests cannot compile" and
+`sub-utopia-eval`'s "the job table was made pure specifically to be
+host-testable, and its fifteen tests have never run" -- a real design
+constraint accepted to buy a property that did not exist until today.
+
+Also landed, owed since the crate did: **`sub-lantern`**, the dossier `quaestor
+owner` reported missing (0 of 4 files claimed). Its MOC entry comes with an
+explicit note that the child list has been incomplete since 2026-08-04 -- six
+dossiers, the whole rendering half of the area -- because appending one member
+to a list missing six makes it read as current while staying wrong.
+
+**Posture**: `tools/test-rust.sh` **1797 tests / 26 crates / 0 failing / 9
+quarantined** (was 1501 / 25 / 0 / 1). Full workspace device build clean.
+quaestor lint 1270 notes, 0 fail. No guest boot needed.
+
+---
 ## 2026-09-22, late evening (aux, Opus 5 1M, effort xhigh) -- the caret bug was mine
 
 The run before this one closed the deck arc and left one thing open, loudly:
