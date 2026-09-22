@@ -39,9 +39,10 @@
 //    `$"var` form is rc's clean answer to bash's `"$@"` mess
 //    (scripture section 6.8).
 //
-// 5. Substitutions: `$(cmd)` (POSIX-shape) and `` `{cmd}` `` (rc
-//    shape; requires the closing backtick). The body is stored
-//    raw and re-tokenized by the parser when it descends.
+// 5. Substitutions: `$(cmd)` (POSIX-shape) and `` `{cmd} `` (rc
+//    shape; the `}` ends it -- there is NO closing backtick, per
+//    scripture section 6.6 and rc). The body is stored raw and
+//    re-tokenized by the parser when it descends.
 //
 // 6. Process substitution: `<(cmd)`, `>(cmd)`. Same raw-body
 //    pattern.
@@ -582,7 +583,13 @@ impl<'a> Lexer<'a> {
     fn scan_backtick(&mut self) -> ParseResult<()> {
         let start = self.pos;
         debug_assert_eq!(self.bytes[self.pos], b'`');
-        // Per scripture section 6.6: the form is `` `{cmd}` ``.
+        // Scripture section 6.6: the form is `` `{cmd} `` -- rc-traditional,
+        // and rc has NO closing backtick. This code used to require one, and
+        // the comment here claimed section 6.6 said so; it does not. The
+        // deviation defeated the form's only stated purpose, since an actual
+        // rc script's `` `{ls} `` failed to lex. Operator-ratified 2026-09-22:
+        // the code follows scripture.
+        //
         // Require `{` immediately after the opening backtick.
         if self.peek_byte_at(1) != Some(b'{') {
             return Err(ParseError {
@@ -598,14 +605,10 @@ impl<'a> Lexer<'a> {
                 span: Span::new(start, self.bytes.len()),
             })?;
         let body = String::from(&self.source[body_start..close_brace]);
-        // Closing backtick must follow the `}`.
-        if self.bytes.get(close_brace + 1) != Some(&b'`') {
-            return Err(ParseError {
-                kind: ParseErrorKind::UnterminatedBacktick,
-                span: Span::new(start, close_brace + 1),
-            });
-        }
-        self.pos = close_brace + 2; // past `}` `` ` ``
+        // The `}` ends it. A backtick immediately after is NOT a terminator --
+        // it opens the next substitution, which is why accepting both forms
+        // would make `` `{a}`{b} `` ambiguous and why only one is accepted.
+        self.pos = close_brace + 1; // past `}`
         let span = Span::new(start, self.pos);
         self.tokens.push(Token::new(TokenKind::Backtick(body), span));
         Ok(())
@@ -1568,11 +1571,33 @@ mod tests {
         }
     }
 
+    /// Scripture section 6.6's form, which is rc's: `` `{cmd} ``, no closing
+    /// backtick. Operator-ratified 2026-09-22 after the lexer was found
+    /// requiring one -- a deviation that made the form reject the very rc
+    /// scripts it exists to accept.
     #[test]
     fn backtick_braced_substitution() {
         assert_eq!(
-            kinds_no_eof("`{pwd}`"),
+            kinds_no_eof("`{pwd}"),
             vec![TokenKind::Backtick("pwd".into())]
+        );
+        // A backtick after the `}` opens the NEXT substitution rather than
+        // closing this one, which is what makes the single form unambiguous.
+        assert_eq!(
+            kinds_no_eof("`{a}`{b}"),
+            vec![
+                TokenKind::Backtick("a".into()),
+                TokenKind::Backtick("b".into()),
+            ]
+        );
+        // And it composes with ordinary words on both sides.
+        assert_eq!(
+            kinds_no_eof("echo `{pwd} done"),
+            vec![
+                TokenKind::Word("echo".into()),
+                TokenKind::Backtick("pwd".into()),
+                TokenKind::Word("done".into()),
+            ]
         );
     }
 

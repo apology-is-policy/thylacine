@@ -2024,7 +2024,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "UT-PARSE-5: the fixture uses a backtick form the lexer now refuses"]
     fn backtick_body_lifts_to_subscript() {
         let e = expr_ok("`{echo hi}", ExprContext::Value);
         match &e.kind {

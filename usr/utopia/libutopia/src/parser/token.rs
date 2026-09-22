@@ -111,8 +111,8 @@ pub enum TokenKind {
     /// bytes (between `(` and `)`).
     Subst(String),
     /// `` `{cmd} `` -- rc-traditional substitution. String is the raw
-    /// `cmd` bytes (between `{` and `}`; the surrounding backticks
-    /// are NOT in the stored body).
+    /// `cmd` bytes (between `{` and `}`; the leading `` ` `` is NOT in the
+    /// stored body, and there is no trailing one -- the `}` ends the form).
     Backtick(String),
 
     // === Process substitution ===============================================

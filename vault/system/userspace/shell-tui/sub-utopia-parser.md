@@ -2,7 +2,7 @@
 id: sub-utopia-parser
 type: sub
 parent: moc-userspace-shell-tui
-title: "The ut parser — an rc-shape grammar, three recursion bounds, and 189 tests that cannot compile"
+title: "The ut parser — an rc-shape grammar, three recursion bounds, and the tests that could not compile until they found six defects"
 code:
   - usr/utopia/libutopia/src/parser/mod.rs
   - usr/utopia/libutopia/src/parser/lexer.rs
@@ -21,7 +21,7 @@ abis: []
 design:
   - "docs/UTOPIA-SHELL-DESIGN.md sections 5-9"
 created: 2026-08-03
-updated: 2026-09-06
+updated: 2026-09-22
 ---
 ## Purpose
 
@@ -232,10 +232,12 @@ Nothing here is on a hot path — it runs once per line typed.
   documents itself as not taking and which every production caller in `parse.rs`
   strips. The remaining **8 are 6 genuine defects**, quarantined with
   `#[ignore = "UT-PARSE-n"]` reasons so the gate keeps its signal for new
-  breakage while each debt stays greppable. **UT-PARSE-1 and UT-PARSE-3 are
-  FIXED** (below); the rest are open: `cmd =arg` does not parse as two words
-  though the test's comment records that intent; a backtick fixture; and one
-  line-editor ESC ESC case.
+  breakage while each debt stays greppable. **UT-PARSE-1, -3 and -5 are FIXED**
+  (below) and **UT-PARSE-2 was WITHDRAWN** -- it asserted `cmd =arg` is two
+  words, which contradicts `UTOPIA-SHELL-DESIGN.md` 6.1's documented
+  `x = value` assignment form, so the parser was right and the never-run test
+  had encoded an intent the grammar moved past. One line-editor ESC ESC case
+  (UT-EDIT-1) and UT-PARSE-4 remain open.
   **UT-PARSE-4 was investigated and downgraded** -- truncated input reports
   `UnexpectedToken` where `UnexpectedEof` is expected, and the theory that this
   could break the REPL's line-continuation is FALSE: `line_editor` decides
@@ -270,6 +272,16 @@ Nothing here is on a hot path — it runs once per line typed.
   forward table and fails if it does not come back with the same spelling --
   a keyword added to one table and not the other would otherwise quietly become
   unusable as a filename again.
+
+- **`` `{cmd} `` has NO closing backtick** (UT-PARSE-5, fixed 2026-09-22,
+  operator-ratified). `scan_backtick` required a trailing backtick, and its own
+  comment claimed scripture 6.6 said so -- 6.6 says `` `{cmd} ``, which is rc's
+  actual form. The deviation defeated the form's only stated purpose, since a
+  real rc script's `` `{ls} `` failed to lex; three more comments (the lexer's
+  file header, `ParseErrorKind::UnterminatedBacktick`, `TokenKind::Backtick`)
+  carried the same wrong claim and are corrected. The `}` now ends the form, so
+  a backtick after it OPENS THE NEXT substitution -- which is also why both
+  forms are not accepted: `` `{a}`{b} `` would be ambiguous.
 
 - **`))` is split at the parse site, not lexed in context** (UT-PARSE-3, fixed
   2026-09-22). The lexer is context-free and emits `DoubleRParen` for any `))`,
