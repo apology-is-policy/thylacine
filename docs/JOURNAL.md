@@ -106,10 +106,21 @@ whose `_start` inline asm cannot assemble for Mach-O, so it has **no host-test
 path at all** and its `#[cfg(test)]` tests -- including the
 `is_raw_command` test this chunk extends -- cannot run on this host. That reads
 as covered while being unrunnable, which is worse than a test that is merely
-unrun. Enqueued as `bug_rust_host_tests_run_by_nothing`; the fix is a
-`make test-rust` target, and it is NOT in this chunk because a first full run may
-surface pre-existing failures that are then findings to own rather than
-obstacles to route around.
+unrun.
+
+**Fixed in the same run: `make test-rust` (`9e837771`). MEASURED: 25 crates,
+1500 tests, all passing** -- halcyond 325, nora 249, libhalcyon 134, tapestryd
+95, kaua 92, libdriver 89, parley 73, manual 72, vt 63, haul 52, and fifteen
+more. Fifteen hundred tests that nothing ran.
+
+Five buckets, not two, and the reason is a defect the first draft shipped: it
+classified all **93 bin-only crates** (every probe, smoke and bench -- no `--lib`
+to test) as FAIL, which would have made the target red on its first run and
+ignored by its second. Caught by RUNNING it before committing it, which is the
+argument the commit itself is making, applied to itself. The `NO-HOST` bucket is
+kept separate from "skipped" deliberately: five crates (curl, libthyla-rs,
+libutopia, ptyhold, tls) carry `#[cfg(test)]` tests that run NOWHERE, and the
+script names them every run rather than letting them read as coverage.
 
 ### What is verified, and what is not
 
