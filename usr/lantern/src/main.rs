@@ -315,11 +315,13 @@ fn present(dir: &str, d: &Deck, tier: Tier, foot: bool) -> i64 {
     let mut stdin = io::stdin();
     let mut buf = [0u8; 64];
 
+    out.put(lantern::HIDE_CARET);
     out.put(lantern::CLEAR);
     paint(&mut out, tier, width, d, dir, at, foot);
 
     loop {
         if out.failed() {
+            out.put(lantern::SHOW_CARET);
             eprintln!("lantern: write error");
             return 1;
         }
@@ -328,9 +330,14 @@ fn present(dir: &str, d: &Deck, tier: Tier, foot: bool) -> i64 {
         // cooked for this program anyway), and spinning on a would-block with no
         // poll in hand would be worse than stopping.
         let n = match stdin.read(&mut buf) {
-            Ok(0) => return 0, // stdin closed: the deck is over.
+            Ok(0) => {
+                // stdin closed: the deck is over.
+                out.put(lantern::SHOW_CARET);
+                return 0;
+            }
             Ok(n) => n,
             Err(e) => {
+                out.put(lantern::SHOW_CARET);
                 eprintln!("lantern: read: {}", e);
                 return 1;
             }
@@ -350,6 +357,7 @@ fn present(dir: &str, d: &Deck, tier: Tier, foot: bool) -> i64 {
                 // Leave the last slide on the screen: a talk ends on its
                 // closing slide, and clearing it would blank the room mid
                 // question.
+                out.put(lantern::SHOW_CARET);
                 out.put(b"\n");
                 return 0;
             }

@@ -41,6 +41,35 @@ pub mod nav;
 /// whole facility exists to get.
 pub const CLEAR: &[u8] = b"\x1b[0m\x1b[H\x1b[2J";
 
+/// Hide the caret while presenting, and show it again on the way out.
+///
+/// A blinking bar under the last line is a desk affordance; on a projected
+/// slide it is a distraction with nothing to mark.
+///
+/// **MEASURED 2026-09-22: this does NOT take effect in a Halcyon tile, and the
+/// reason is not known.** Every link in the chain reads as though it should:
+/// `vt` records DEC private `?25` into `cursor_visible` (distinct from SGR 25,
+/// which is blink-off), kaua-term forwards that in its cursor record, and
+/// `Tile::paints_caret` is `self.grid.cursor().2 && ...` -- the child's DECTCEM.
+/// Nothing in lantern's output resets it either; only RIS (`ESC c`) sets
+/// `cursor_visible` back to true, and lantern never emits one. Yet a capture
+/// with the escape in the shipped binary still shows the caret
+/// (`build/lantern-rich-slide1.png`, verified: binary rebuilt, escape present,
+/// staged into the image).
+///
+/// The escapes are kept rather than reverted because they are CORRECT for any
+/// terminal that honours DECTCEM, and a no-op escape costs nothing -- but this
+/// comment must not claim an effect that was looked for and not found. Whatever
+/// drops it between the write and the painter is an open question, and the one
+/// thing that would be wrong here is a comment reasoning from the source about
+/// a behaviour the screen contradicts.
+///
+/// `SHOW_CARET` is emitted on every exit path, and is idempotent with ut's
+/// post-reap screen restore, which re-emits the same show-cursor escape -- so a
+/// crash that skips lantern's own cleanup is covered by the backstop.
+pub const HIDE_CARET: &[u8] = b"\x1b[?25l";
+pub const SHOW_CARET: &[u8] = b"\x1b[?25h";
+
 /// Write `chunk` with every LF cooked to CR-LF.
 ///
 /// The raw-mode dance ut runs for a full-screen child sets `-onlcr` (the
