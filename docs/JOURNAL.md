@@ -153,7 +153,48 @@ against a temp directory holding only the `.md` files. That refusal is not a bug
 it is the manual BOOK's ordering rule, and a deck's order comes from its manifest
 instead, which is the distinction the whole design rests on.
 
-**Not verified: the look.** Nothing has been booted. Three visual questions stay
+### The look, and the cheap answer that beat the clever one
+
+Booted the Instrument session at 1280x800, zoomed, ran the deck, captured
+(`ls-halcyon-lantern.exp`, 4/4 legs). It works: a slide paints as a rich
+document, SPACE clears and repaints, and **slide two carried no residue of slide
+one** -- no stale text, no inherited emphasis, no scrollback growth. The `span:0`
+and no-scroll-off properties hold in practice and not merely in the source.
+
+Then the type-size question, where I was about to do the clever thing. At the
+default scale the body is 15 px and the deck fills the top third -- too small for
+a room -- and I had a well-argued change ready: make the document type scale
+`vw`-bound, reusing the clamp that already sizes the Instrument H1. I wrote in
+the previous commit that this was "the whole of what stands between this and a
+presentable deck."
+
+**It was not, and measuring the cheap possibility first is the only reason I
+know that.** `SCALE_MIN 100 / SCALE_MAX 200 / STEP 25` has been built, gated and
+chorded for some time, and nobody had pointed it at a document. Four presses of
+Super+= and the body is ~30 px, the slide fills the screen, and it reads from
+across a room. Zero code. The statement was true of the DEFAULT SCALE and false
+of the FEATURE SET, which is a distinction worth keeping: a gap measured in one
+configuration is not a gap in the system.
+
+So the `vw` change dropped from blocker to optional, and I did not make it --
+the Instrument type scale is display-wide, and changing it would change the
+terminal and the manual too, i.e. the look the operator tuned.
+
+### Three decisions, asked rather than assumed
+
+Put to the operator as a blocking question and answered: the `vw`-bound type
+scale is **not built** (the scale verb suffices); the name **`lantern`** stays
+over the thematic runner-up `specimen`; the slide title stays a **left-aligned
+H1** rather than a centred `HdrClass::Title`. All three are now recorded in
+`LANTERN-DESIGN.md` as RATIFIED, because a decision the operator made and one an
+implementer assumed must not read the same a month later.
+
+**Still open and honestly unverified:** the caret is visible as a bar under the
+footer, which is distracting on a projected slide. Hiding it means `ESC[?25l`,
+and whether that reaches halcyond's `paints_caret` is unknown -- so it is
+recorded, not guessed at.
+
+**What the earlier draft of this entry said, and why it is wrong.** Three visual questions stay
 open and reading more code cannot answer them: where a short slide sits in a tall
 tile; whether a slide's title should be emitted as `HdrClass::Title` (the class a
 rich stylesheet centres, which is the slide look) rather than the plain
