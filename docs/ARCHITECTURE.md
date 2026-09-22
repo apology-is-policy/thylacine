@@ -1016,7 +1016,7 @@ Plan 9 `rfork` semantics; threads as siblings in a Proc; notes as the internal s
 **Goals**:
 - **EEVDF** (Earliest Eligible Virtual Deadline First) algorithm — Linux 6.6+'s default since 2023, replacing CFS.
 - Preemptive at EL0→EL1 boundary (syscall + IRQ entry). Kernel preemption deferred to Phase 7 hardening for safety.
-  **As built, this was implemented as the wrong property (traced 2026-09-22).** The deferral is of *preemption* -- a thread switched out mid-kernel -- not of interrupt *service*: a non-preemptible kernel in this lineage runs syscalls with interrupts on (9front's `dosyscall` calls `spllo()`) and switches only at the boundary or where a syscall yields or sleeps. P3-Ec (`48dfc5c4`) wired the SVC path under the mask the exception entry sets and never lifted it, so "not preemptible" became "interrupts off"; later races were closed by masking more (#713, #104), and #359 wrote the result into section 8.11 as a fact. The Phase 7 deliverable (ROADMAP "Kernel preemption") never reached a status doc. Building this line as written -- syscall bodies with interrupts on, still non-preemptible -- is its own spec-first kernel chunk, scheduled before the browser arc's kernel work (operator decision 2026-09-22); poll's preemption point (section 23.3) holds the line until then.
+  **As built, this was implemented as the wrong property (traced 2026-09-22).** The deferral is of *preemption* -- a thread switched out mid-kernel -- not of interrupt *service*: a non-preemptible kernel in this lineage runs syscalls with interrupts on (9front's `dosyscall` calls `spllo()`) and switches only at the boundary or where a syscall yields or sleeps. P3-Ec (`48dfc5c4`) wired the SVC path under the mask the exception entry sets and never lifted it, so "not preemptible" became "interrupts off"; later races were closed by masking more (#713, #104), and #359 wrote the result into section 8.11 as a fact. The Phase 7 deliverable (ROADMAP "Kernel preemption") never reached a status doc. Building this line as written -- syscall bodies with interrupts on, still non-preemptible -- is its own spec-first kernel chunk, scheduled before the browser arc's kernel work (operator decision 2026-09-22); poll's preemption point (section 23.3) holds the line until then. **The design for that chunk is section 8.12** (reconnaissance + the kernel-stack measurement complete 2026-09-22; code pending), and section 8.11 is the as-built statement it replaces.
 - Per-CPU run trees (work-stealing on idle).
 - Three priority bands: `INTERACTIVE`, `NORMAL`, `IDLE` — separate run trees per band per CPU.
 - Tickless idle.
@@ -1606,7 +1606,182 @@ uses dedicated RAW (uncounted) variants, sound because sched runs fully
 IRQ-masked across the hold. See `docs/reference/15-scheduler.md` ("Preemption
 discipline") for the full mechanism, the first-cut per-CPU bug, and the tests.
 
-### 8.12 Summary
+**This rationale is rebuilt by the 8.12 chunk and must be rewritten WITH that
+code, not before it** -- the paragraph above is as-built and true until then.
+When syscall bodies run interrupts-on, the two-tier "masked spinners behind a
+preemptible holder" model collapses to one tier. That is GOOD (it removes the
+#359 asymmetry: a starved holder degrades from a whole-guest deadlock to
+starvation), but the argument for the discipline must then rest on
+`preempt_count` alone. Leaving this paragraph stale is how the next #359 gets
+built.
+
+### 8.12 The syscall interrupt model: interrupts ON, still non-preemptible (the 8.1 chunk)
+
+**STATUS**: DESIGNED 2026-09-22 (operator agreed the chunk the same day);
+reconnaissance and the stack measurement are complete; code pending. Section
+8.1 records the accident this repairs -- Phase 0 deferred kernel
+*preemption* and P3-Ec built *interrupts off*, a strictly stronger and
+different property that nothing recorded. Section 8.11 states the as-built
+consequence and stays true until this lands.
+
+**The target, exactly 8.1's line.** A syscall body runs with IRQ UNMASKED.
+Interrupts are serviced on the calling thread's own kernel stack, as they
+already are for kernel threads. No INVOLUNTARY switch happens inside a syscall
+body: a tick may land and set `need_resched`, but the switch waits for the EL0
+return. A VOLUNTARY switch (`sleep` / `tsleep` / an explicit yield) is
+unchanged, and so is the EL0-return tail, which is where a deferred reschedule
+is taken.
+
+#### The marker is its own field, because `preempt_count` cannot carry this
+
+The tempting move is to hold `preempt_count` across the body: `preempt_check_irq`
+already defers on a nonzero count (8.11), so the body would become
+non-preemptible for free. **It does not work, and three live assertions say so
+independently:**
+
+| site | what extincts |
+|---|---|
+| `kernel/sched.c:1246` | `sched()` on a nonzero count -- the lock-across-sleep guard. Every BLOCKING syscall calls `sched()`. |
+| `kernel/sched.c:2653` | `sched_preempt_point()` on a nonzero count. (Moot -- this chunk deletes the point.) |
+| `kernel/proc.c:4441` + `kernel/sched.c:241` (#361) | `el0_return_die_check` -> `sched_report_el0_leak`: "counted spinlock leaked to EL0 return". **A syscall-wide count is definitionally that leak.** |
+
+The two properties are genuinely different and must not share a counter:
+
+| marker | means | blocks involuntary switch | blocks voluntary sleep |
+|---|---|---|---|
+| `preempt_count` (#360) | a plain spinlock is held | yes | YES -- extincts |
+| the new marker | we are inside a syscall body | yes | no |
+
+So: a SEPARATE per-thread marker, set at SVC entry, cleared before the
+EL0-return tail so the #107 syscall-return preempt still fires.
+`preempt_check_irq` gains one early return on it; `sched()` ignores it.
+
+**Rejected: deciding from the interrupted frame** (`user_mode(regs)`, the Linux
+shape). It needs no new state, but it over-applies -- a kernel THREAD
+interrupted in kernel code is indistinguishable, and kthreads must STAY
+preemptible or #810 ("a CPU-bound thread on a secondary cannot monopolize it")
+is lost.
+
+#### Where the unmask goes, and why getting it wrong resurrects #713
+
+`arch/arm64/vectors.S:126-131` (KERNEL_EXIT) installs ELR/SPSR and `eret`s
+under an INHERITED mask: it is the one surviving #713-class ELR-set..eret
+window that does NOT mask locally (`userland.S:74`, `context.S:312` and
+`vectors.S:411` all `msr daifset, #0xf` explicitly and are safe).
+`kernel/proc.c:4560` (step-resume, SPSR.SS) has the same dependency.
+
+**Therefore: unmask INSIDE the SVC body only, and re-mask before
+`.Lel0_sync_return`.** An unmask that leaks into the return tail resurrects
+#713 -- the year-long "AEGIS corruption" hunt, 3-13% of boots, never at
+`-smp 1`.
+
+#### The lock migration is a CLEAN NEGATIVE (measured, not assumed)
+
+Today a plain `spin_lock()` on a syscall path is IMPLICITLY irq-safe because no
+interrupt can land, and removing that implicit safety is the obvious hazard: a
+handler running on the interrupted thread's own stack would spin forever on a
+lock that thread holds -- a same-CPU self-deadlock.
+
+A read-only sweep at `ca1c7030` built the IRQ-taken lock set from every
+`gic_attach` registration and cross-checked ~300 plain `spin_lock(&...)` sites
+against it. **Zero sites take a plain lock on a syscall path that a same-CPU
+IRQ handler also takes.** All 27 plain acquisitions of an IRQ-reachable lock
+are already nested inside an enclosing mask, and the subsystems most at risk --
+`kernel/cons.c`, `arch/arm64/uart.c`, `gic_msi.c`, `gic_its.c`, `mm/slub.c`,
+`mm/buddy.c`, `mm/magazines.c`, `kernel/poll.c` -- are 100% irqsave or
+mask-only.
+
+So the discipline ALREADY HOLDS; what this chunk changes is the ARGUMENT for
+it. The guard list, to be kept with the rule: `g_timerwait.lock`, ANY
+`Rendez.lock` (via `wakeup`), `CpuSched.lock` (via `ready_on`), `g_cons.lock`,
+`g_cons_drain.lock`, `g_cons_tx.lock`, `g_uart_rx_lock`, `g_uart_imsc_lock`,
+`g_intid_lock`, pci_irq's `domain_lock`, `msi_lock`, `lpi_lock`,
+`its_controller.command_lock`.
+
+#### The kernel stack: MEASURED, and it decides a prerequisite
+
+Today a syscall stack NEVER carries an IRQ frame. Under this model it carries a
+second exception context plus the handler chain. Measured at `ca1c7030` with
+`-fstack-usage` over a call graph whose indirect edges are resolved by
+backtracking each `blr` to the `ldr` that loaded it and mapping the offset
+through the DWARF layout of `struct Dev` (a universal over-approximation is
+useless -- it chains `close -> create -> poll -> rename` and reports 22.9 KiB
+of nonsense). 797 `blr` sites remain unresolved and are reported, so every
+figure below is a LOWER bound.
+
+The stack is 16 KiB usable + a 16 KiB guard (`thread.h:579`), so an overflow
+FAULTS rather than corrupts (#214's memory).
+
+| chain | depth | of 16 KiB |
+|---|---|---|
+| native worst case: `sys_execve_handler` -> `exec_load_into` -> `stalk_exec` -> `stalk_core` -> 9P | 10640 B | 64.9% |
+| Linux-phenotype worst case, through `viv_tier2` | 14112 B | 86.1% |
+
+The IRQ increment is `288 (a second exception context) + 80
+(exception_irq_curr_el + gic_dispatch) + 1072 (pci_intx_dispatch, the deepest
+REGISTERED handler) = 1440 B`, plus the 288 B SVC context already on the stack:
+**1728 B total**. `exception_irq_curr_el` and `preempt_check_irq` are sequential
+`bl`s (`vectors.S:225-226`), so they do not nest; IRQ entry masks, so there is
+no second IRQ frame; and under this model the marker makes `preempt_check_irq`
+return early inside a body, so no `sched()` frame appears at all.
+
+`10640 + 1728 = 12368 B = 75.5%` -- workable. But
+`14112 + 1728 = 15840 B of 16384 = 96.7%`, 544 bytes free, which is not a
+margin.
+
+**The single cause is one frame.** `viv_tier2`'s getdents64 case declares
+`u8 raw[2048]` + `u8 enc[2560]` (`kernel/syscall.c:13191,13196`), and clang
+unions every switch case's locals into ONE frame: the prologue allocates
+**4720 bytes on EVERY Linux-phenotype syscall**, openat and read included, when
+only getdents64 uses them. Moving those buffers out of the frame drops the
+phenotype chain BELOW the native one, making the native execve path the worst
+case at 75.5%.
+
+That fix is a **prerequisite of this chunk, pulled forward** -- and it is a
+live latent defect on its own terms: at 86% of the kernel stack with no IRQ
+frame involved, any deepening of the FS path (a deeper union, a longer symlink
+chain, one more wrapper) already overflows into the guard today.
+
+#### Two things that are load-bearing only in prose, and get instruments here
+
+- **No assert on interrupt state exists anywhere in the tree** (`irq_disabled`,
+  `irqs_disabled`, `in_irq`, `ASSERT.*daif` -- zero hits in `kernel/`, `arch/`,
+  `mm/`, `lib/`). Nothing fails loudly when the premise flips. This chunk adds a
+  cheap debug assert.
+- **No runtime kernel-stack high-water instrument exists either** (`stack_peak`,
+  `kstack_high`, poison, watermark -- zero hits). The static bound above is the
+  only measurement there is, and nothing would have reported 86% before it was
+  asked. This chunk adds a watermark, because a 4 KiB static margin with 797
+  unfollowed edges under it should be corroborated by measurement, not trusted.
+
+The kernel stack STAYS at 16 KiB. Growing it to 32 KiB would double per-thread
+kernel memory against an I-32 bound, to buy headroom the measurement says is
+not needed once `viv_tier2` is fixed. Reversible if the watermark disagrees
+with the static bound.
+
+#### What it deletes, and what it fixes unlooked-for
+
+Deleted: `sched_preempt_point()` and poll's call to it (section 23.3, a stopgap
+by decision), the need for points in `pipe_block_locked` / `chan_role_acquire`,
+and `specs/poll_cpu.tla` with its four cfgs -- that module's stated premise IS
+the masked syscall, so it becomes vacuous rather than false.
+
+Fixed without being aimed at: `kernel/loom.c:322` (`loom_free`, from a handle
+close) spins on a kthread's `sqpoll_exited`. If that kthread is runnable on the
+spinner's OWN CPU, its wake's `need_resched` can only be consumed at an
+IRQ-return -- which is masked -- so it is a latent single-CPU hang today. Same
+shape at `kernel/irqfwd.c:288`, `kernel/pci_irq.c:480`, `kernel/proc.c:5431`,
+`arch/arm64/gic.c:239`. Interrupts-on makes all five correct.
+
+#### The spec obligation
+
+Spec-first is RE-ENABLED for this surface. The property to model is NOT the
+lock sweep (measured clean): it is **"no involuntary switch inside a syscall
+body"** and **"the re-mask precedes the eret window"**. The buggy cfgs write
+themselves -- a marker that is not consulted, and an unmask that survives into
+the return tail (#713's shape).
+
+### 8.13 Summary
 
 EEVDF on per-CPU run trees with work-stealing, three priority bands, tickless idle, IPI-driven cross-CPU operations, a per-thread spinlock preemption discipline, Plan 9 idiom layer on top, formally verified.
 
