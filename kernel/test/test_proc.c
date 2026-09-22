@@ -1008,7 +1008,23 @@ void test_proc_group_terminate_smoke(void) {
     struct Proc *self = t ? t->proc : NULL;
     TEST_ASSERT(self != NULL && self->group_exit_msg == NULL,
         "terminating p must not flag the test thread's Proc (isolation)");
-    el0_return_die_check();   // must return -- self is not group-terminating
+    // MASKED, because that is the state the function's real callers provide.
+    // el0_return_die_check runs on the approach to KERNEL_EXIT, which installs
+    // ELR/SPSR and erets under an INHERITED mask (#713); every real call site
+    // -- .Lel0_sync_return, the 0x480 IRQ tail, both trampolines -- arrives
+    // masked. This test drives it from the boot kthread, which runs UNMASKED,
+    // so without this the call happens in a state no shipping path produces.
+    //
+    // Found by ARCH 8.12's new ASSERT_IRQS_MASKED on its first boot: the
+    // assert fired here, in a test, before any interrupt-model change had
+    // landed. That is the instrument working -- the tree had no assertion on
+    // interrupt state at all until then, so a call in the wrong state was
+    // simply invisible.
+    {
+        irq_state_t s = spin_lock_irqsave(NULL);   // mask-only; no preempt_count
+        el0_return_die_check();   // must return -- self is not group-terminating
+        spin_unlock_irqrestore(NULL, s);
+    }
 
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
