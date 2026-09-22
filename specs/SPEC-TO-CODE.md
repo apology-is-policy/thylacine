@@ -2245,6 +2245,61 @@ sharers) with Safety + `EventuallyReleased`; `cow_buggy_break` ->
 violated; `cow_buggy_vfork` -> temporal property violated with Safety intact.
 
 
+## `territory_shed.tla` -- the mount-table shed at pivot / chroot (#80, ARCH 9.6.10)
+
+**Spec-first for this surface** (operator decision 2026-09-21: "design the real
+fix first"). The module was REWRITTEN after audit round 1: its first version
+stated the soundness invariant against the same closure `Keep` was built from,
+so it held for ANY reachability rule (the auditor's two sabotages -- `{root}`
+and "every tree" -- both passed), and the union-root defect (F1) hid exactly
+where the module had no walk. The ground truth is now an operational WALKER
+that shares no operator with the rule.
+
+- **`Pivot(new, upt)`** -> `territory_pivot_root` / `territory_chroot`
+  (`kernel/territory.c`): the root swap and `territory_shed_unreachable_locked`
+  under ONE `ns_lock` hold. `upt` is `source->union_snap->point` (an `O_PATH`
+  open of a union directory; `NoPoint` otherwise). `new = root` is explored on
+  purpose: the kernel skips only a swap to the SAME Spoor, and a chroot into
+  another directory of the same tree is a real swap.
+- **`ImplReach` / `Seeds` / `Widen` / `Close`** -> the closure loop in
+  `territory_shed_unreachable_locked`: `shed_add` of the root's instance and of
+  the union point's instance (`Seeds`), `shed_has`'s `any_devno` arm (`Widen`;
+  set from `Dev.devno_per_walker`), the `while (changed)` fixpoint (`Close`).
+- **`Keep`** -> the compaction pass (survivors keep their relative order; that
+  order is the union search order, which this module does not model --
+  `territory.tla`'s `OrderCorrect` owns it).
+- **The walker (`WalkStart` / `WalkCross` / `WalkRestamp`)** -> `stalk_core`
+  (`kernel/stalk.c`): the base (`territory_root_ref`), the union-base route
+  (`union_base = base->union_snap->point`, and the zero-component `zbase` --
+  the resolver's TWO consults of the point, each a seed obligation and each
+  commented as one), `stalk_cross_mounts` ->
+  `mount_lookup`, and `devenv_walk`'s per-caller devno stamp. The walker has NO
+  upward step because the resolver has none (`..` pops the in-call trail);
+  `WalkDotDot` exists only under `BUGGY_RESOLVER_DOTDOT_ESCAPES`, the
+  executable form of that premise.
+- **Not modelled**: refcounts (each dropped entry releases what `unmount`
+  releases -- kernel tests + the audit), the fd-relative walk from a pre-swap
+  directory fd (the accepted observable change, ARCH 9.6.10), `qid.path` (the
+  rule is per instance and ignores it), and the DISSOLVED UNION (audit r2 F1:
+  a union handle held outside the root, whose point hosts no member any more --
+  the walker here starts only at the root; the rule lives in ARCH 9.6.10 and
+  `stalk_core`, witnessed by `usr/symlink-probe`).
+- **What TLC cannot see** (audit r2 F2): a seed missing from BOTH `Seeds` and
+  `TrueStart`. With `TrueStart(r, upt) == {r}` the `buggy_no_union_seed` cfg
+  reports "No error" -- rule and truth forgot the point together. The guard is
+  prose: AUDIT-TRIGGERS "Mount-table SHED" item (11) and the WHY comments at
+  the two `stalk.c` consults.
+
+Gate (2026-09-21, after audit round 1): `territory_shed.cfg` clean at
+**744,864 distinct states** and `territory_shed_perwalker.cfg` at **793,408**
+(3 trees x 3 points; about 2 min each on 2 workers); `buggy_nontransitive`,
+`buggy_no_union_seed`, `buggy_undeclared_per_walker`, `buggy_dotdot_escapes` ->
+`ShedLosesNothing` violated; `buggy_keeps_all` -> `NoResidueAfterPivot`
+violated. Three sabotages of the closure in scratch copies (rule too small,
+rule = every tree, truth too small) each fail -- the property round 1's module
+lacked. `specs/check-territory-shed.sh` runs all seven cfgs, pins the two
+clean state counts, and asserts WHICH invariant each buggy cfg violates.
+
 ## Spec-first re-enablement record (moved verbatim from CLAUDE.md, 2026-08-05)
 
 The six standalone re-enablement paragraphs below lived in `CLAUDE.md`'s
