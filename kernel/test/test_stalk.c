@@ -86,11 +86,20 @@ void test_stalk_union_readdir_nontagged(void);  // UM-5: control (not over-tagge
 void test_stalk_union_create(void);             // UM-5a: MCREATE member selected
 void test_stalk_union_create_first_wins(void);  // UM-5a: first MCREATE (declared order)
 void test_stalk_union_create_no_target(void);   // UM-5a: no MCREATE -> EACCES
+void test_stalk_union_one_member_creates_alike(void); // shed r4 F5: one member is not a union
 void test_stalk_union_member_holding(void);     // UM-8c/F3: holder, not MCREATE member
 void test_stalk_union_remove_uncrossed(void);    // UM-8c/F3: STALK_REMOVE leaves the point
 void test_stalk_union_fd_base(void);             // UM-8c/F5: fd-relative union base sees all members
 void test_stalk_union_opath_base(void);          // UM-8c/R2-F2: O_PATH base carries the point
 void test_stalk_union_zero_component(void);      // UM-8c/R2-F3: "." off a union base keeps it
+void test_stalk_union_dissolved_degrades(void);  // ARCH 9.6.10: never the covered directory
+void test_stalk_dotdot_crossed_base_floor(void); // '..' never pops a crossed base
+void test_stalk_union_live_dotdot_walks_unopened(void); // shed r3 F2
+void test_stalk_union_dissolved_point_unreachable(void); // shed r3 F2 (the point cannot clone)
+void test_stalk_mount_names_crossed_union_base(void); // shed r4 F4
+void test_stalk_remove_parent_reports_union_point(void); // shed r3 F3
+void test_stalk_mount_names_crossed_base(void);          // shed r3 F4
+void test_stalk_union_dissolved_helper(void);            // shed r3 F5
 void test_stalk_pheno_symlink_reanchor(void);   // VIVARIUM section 13 (F1)
 // #66: namespace-name accumulation through the real resolver.
 void test_stalk_path_accumulate(void);
@@ -375,6 +384,12 @@ static struct Walkqid *fix_walk_attrs(struct Spoor *c, struct Spoor *nc,
                                       int nname, struct t_stat *sts) {
     if (!c || nname <= 0 || nname > DEV_WALK_ATTRS_MAX) return NULL;
     if (!names || !name_lens || !sts) return NULL;
+    // Stratum refuses a Twalkgetattr from an OPENED fid exactly as it refuses a
+    // Twalk (src/9p/server.c: is_open -> EINVAL on both). Until shed audit r4 F3
+    // only fix_walk did, so a NAME resolved off an opened base took the pounce
+    // here and passed -- the walk-from-opened class the dissolved-union rule got
+    // wrong once was invisible to every name leg in this file.
+    if (c->flag & COPEN) return NULL;
     g_fix_walkattrs_calls++;
 
     struct Walkqid *wq = walkqid_alloc(nname);
@@ -483,6 +498,7 @@ static struct Spoor *fix_open_cached(struct Spoor *c, const char *const *names,
     g_fix_co_calls++;
     if (!g_fix_co_enable) return NULL;
     if (!c || !names || !name_lens || !sts) return NULL;
+    if (c->flag & COPEN) return NULL;   // Stratum: no walk from an opened fid (fix_walk_attrs)
     if (nname <= 0 || nname > DEV_WALK_ATTRS_MAX) return NULL;
     u64 cur = c->qid.path;
     for (int i = 0; i < nname; i++) {
@@ -2099,6 +2115,56 @@ void test_stalk_union_create_no_target(void) {
     ocp_teardown(p);
 }
 
+// A union unmounted down to ONE member is not a union (ARCH 9.5: a union is
+// several mounts), so its create target is that member, MCREATE or not -- on
+// BOTH routes (shed audit r4 F5). The resolver's STALK_CREATE has always crossed
+// a one-member point plainly; stalk_union_create_member, which the dirfd routes
+// use (SYS_WALK_CREATE, rename's destination, viv's mutation parent), answered
+// NULL -> EACCES for the same point, so openat(O_CREAT) created what a create
+// through the union dirfd refused. um2 is member[0] and the only MCREATE member;
+// unmount drops member[0], leaving um1 (qid 22), which has no MCREATE.
+void test_stalk_union_one_member_creates_alike(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    struct Spoor *um1 = stalk(&p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MBEFORE | MCREATE), 0, "um2 MBEFORE|MCREATE (member[0])");
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MAFTER),            0, "um1 MAFTER (no MCREATE)");
+
+    int e = 0;
+    struct Spoor *cm = stalk_union_create_member(&p, pt, &e);
+    TEST_ASSERT(cm != NULL, "live union: the helper finds the MCREATE member");
+    TEST_EXPECT_EQ((u64)cm->qid.path, (u64)25, "control: two members -> the MCREATE one (um2, qid 25)");
+    spoor_clunk(cm);
+
+    TEST_EXPECT_EQ(unmount(p.territory, pt), 0, "unmount member[0] (um2)");
+    struct Spoor *m1 = mount_member_at(p.territory, pt, 1, NULL);
+    TEST_ASSERT(m1 == NULL, "the point now holds one member");
+    struct Spoor *m0 = mount_member_at(p.territory, pt, 0, NULL);
+    TEST_ASSERT(m0 != NULL, "... and still holds one (not dissolved)");
+    spoor_clunk(m0);
+
+    struct Spoor *q = stalk(&p, root, "umpt", 4, STALK_CREATE, 0);
+    TEST_ASSERT(q != NULL, "the path route: STALK_CREATE crosses the one-member point");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)22, "the path route lands in um1 (qid 22)");
+
+    e = 0;
+    cm = stalk_union_create_member(&p, pt, &e);
+    TEST_ASSERT(cm != NULL, "the dirfd route: the helper answers the one member, not EACCES");
+    TEST_EXPECT_EQ(e, 0, "no cross error");
+    TEST_EXPECT_EQ((u64)cm->qid.path, (u64)q->qid.path, "both routes name the SAME member (um1)");
+    spoor_clunk(cm);
+    spoor_clunk(q);
+
+    territory_unref(p.territory);
+    spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
+    spoor_unref(root);
+}
+
 // =============================================================================
 // UM (union mounts) -- REMOVE targets the member HOLDING the leaf (UM-7 F3).
 //
@@ -2351,6 +2417,355 @@ void test_stalk_union_zero_component(void) {
     TEST_ASSERT(rm1 != NULL, "still a union point");
     spoor_clunk(rm1);
     spoor_clunk(r);
+
+    spoor_clunk(ufd);
+    territory_unref(p.territory);
+    spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// ARCH 9.6.10 (shed audit r2 F1): a DISSOLVED union degrades to member[0], never
+// to the covered directory. The handle's point is the directory the union was
+// mounted OVER; once it hosts no member, an uncrossed clone of it is a directory
+// the handle never named. Pre-fix "." off the fd returned the point (qid 28).
+void test_stalk_union_dissolved_degrades(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+    struct Spoor *um1 = stalk(&p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE), 0, "um1 MBEFORE");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER),  0, "um2 MAFTER");
+
+    // Both handle classes carry the point: a full snap and a point-only one.
+    struct Spoor *ufd = stalk(&p, root, "umpt", 4, STALK_OPEN, 0);
+    struct Spoor *uop = stalk(&p, root, "umpt", 4, STALK_WALK, 0);
+    TEST_ASSERT(ufd && ufd->union_snap && uop && uop->union_snap, "union fd + O_PATH fd");
+
+    // Control, while the union lives: "." keeps the union (crosses to member[0]
+    // WITH a snap) and a later member's name resolves.
+    struct Spoor *q = stalk(&p, ufd, ".", 1, STALK_WALK, 0);
+    TEST_ASSERT(q != NULL, "live union: \".\"");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)22, "live union: \".\" is member[0] (um1, 22)");
+    TEST_ASSERT(q->union_snap != NULL, "live union: \".\" is still a UNION handle");
+    spoor_clunk(q);
+    q = stalk(&p, ufd, "only2", 5, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "live union: a member-1 name resolves");
+    spoor_clunk(q);
+
+    // Dissolve it the plain way -- no shed involved.
+    TEST_EXPECT_EQ(unmount(p.territory, pt), 0, "unmount member 0");
+    TEST_EXPECT_EQ(unmount(p.territory, pt), 0, "unmount member 1");
+    TEST_EXPECT_NE(unmount(p.territory, pt), 0, "the point hosts nothing now");
+
+    u64 live_before = spoor_total_allocated() - spoor_total_freed();
+    struct Spoor *handles[2] = { ufd, uop };
+    for (int i = 0; i < 2; i++) {
+        q = stalk(&p, handles[i], ".", 1, STALK_WALK, 0);
+        TEST_ASSERT(q != NULL, "dissolved: \".\" still resolves");
+        TEST_EXPECT_EQ((u64)q->qid.path, (u64)22,
+                       "dissolved: \".\" is member[0] (22), NOT the covered point (28)");
+        TEST_ASSERT(q->union_snap == NULL, "dissolved: a plain handle, no union");
+        spoor_clunk(q);
+        q = stalk(&p, handles[i], "shared", 6, STALK_OPEN, 0);
+        TEST_ASSERT(q != NULL, "dissolved: member[0]'s own name still resolves");
+        TEST_EXPECT_EQ((u64)q->qid.path, (u64)23, "dissolved: shared is member[0]'s (23)");
+        spoor_clunk(q);
+        q = stalk(&p, handles[i], "only2", 5, STALK_OPEN, 0);
+        TEST_ASSERT(q == NULL, "dissolved: a name only member 1 held is gone");
+    }
+    // STALK_MOUNT keeps the point as a KEY (it hands no Spoor to EL0).
+    q = stalk(&p, ufd, ".", 1, STALK_MOUNT, 0);
+    TEST_ASSERT(q != NULL, "dissolved: STALK_MOUNT \".\"");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)28, "STALK_MOUNT still names the point (28)");
+    spoor_clunk(q);
+    u64 live_after = spoor_total_allocated() - spoor_total_freed();
+    TEST_EXPECT_EQ(live_after, live_before, "no Spoor leak across the dissolved resolves");
+
+    spoor_clunk(uop); spoor_clunk(ufd);
+    territory_unref(p.territory);
+    spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// A base that CROSSED is the bottom of the trail. '..' at the bottom is a no-op
+// (I-28 containment at the base) -- and the bottom is the crossed clone, not the
+// directory the mount covers: popping it leaves resolution standing on the
+// COVERED directory, so "../x" off a masked base read under the mask while "x"
+// read over it.
+void test_stalk_dotdot_crossed_base_floor(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+    struct Spoor *src = stalk(&p, root, "um1", 3, STALK_WALK,  0);
+    struct Spoor *mp  = stalk(&p, root, "a",   1, STALK_MOUNT, 0);   // UNCROSSED a (qid 1)
+    TEST_ASSERT(src != NULL && mp != NULL, "resolve um1 + the point a");
+    TEST_EXPECT_EQ(mount(p.territory, src, mp, 0), 0, "mount um1 over a");
+
+    // Controls: `mp` as a base crosses. um1's name resolves; a's own does not.
+    struct Spoor *q = stalk(&p, mp, "shared", 6, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "control: a mounted name off the base");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)23, "control: shared is um1's (23)");
+    spoor_clunk(q);
+    q = stalk(&p, mp, "b", 1, STALK_OPEN, 0);
+    TEST_ASSERT(q == NULL, "control: the covered a/b is masked");
+
+    u64 live_before = spoor_total_allocated() - spoor_total_freed();
+    q = stalk(&p, mp, "../shared", 9, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "'..' at a crossed base is a no-op: still the mount");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)23, "../shared is um1's (23)");
+    spoor_clunk(q);
+    q = stalk(&p, mp, "../b", 4, STALK_OPEN, 0);
+    TEST_ASSERT(q == NULL, "'..' must not drop under the mask to the covered a/b");
+    q = stalk(&p, mp, "./../.././shared", 16, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "a '..' run nets back to the crossed base");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)23, "still um1's shared (23)");
+    spoor_clunk(q);
+    q = stalk(&p, mp, "..", 2, STALK_WALK, 0);
+    TEST_ASSERT(q != NULL, "bare '..'");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)22, "bare '..' is the mounted root (22)");
+    spoor_clunk(q);
+    u64 live_after = spoor_total_allocated() - spoor_total_freed();
+    TEST_EXPECT_EQ(live_after, live_before, "no Spoor leak");
+
+    territory_unref(p.territory);
+    spoor_clunk(src); spoor_clunk(mp);
+    spoor_unref(root);
+}
+
+// Shed audit round 3, F2: a LIVE union handle is walked in its UNOPENED form once
+// resolution is back at the base. The first component goes through the members;
+// "deep/../b" then walks "b" from depth 0 -- pre-fix from the OPENED handle, which
+// the fixture refuses to walk exactly as Stratum does (a Twalk from an opened fid).
+void test_stalk_union_live_dotdot_walks_unopened(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+    struct Spoor *a   = stalk(&p, root, "a",    1, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(a && um2 && pt, "resolve a + um2 + umpt");
+    TEST_EXPECT_EQ(mount(p.territory, a,   pt, MBEFORE), 0, "a MBEFORE");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER),  0, "um2 MAFTER");
+    struct Spoor *ufd = stalk(&p, root, "umpt", 4, STALK_OPEN, 0);
+    TEST_ASSERT(ufd && ufd->union_snap && (ufd->flag & COPEN) != 0, "an OPENED union fd");
+
+    struct Spoor *q = stalk(&p, ufd, "deep", 4, STALK_WALK, 0);
+    TEST_ASSERT(q != NULL, "control: the first component goes through the union");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)3, "control: a/deep (3)");
+    spoor_clunk(q);
+
+    u64 live_before = spoor_total_allocated() - spoor_total_freed();
+    q = stalk(&p, ufd, "deep/../b", 9, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "back at the base, b is walked from the UNOPENED member");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)2, "deep/../b is member[0]'s b (2)");
+    spoor_clunk(q);
+    u64 live_after = spoor_total_allocated() - spoor_total_freed();
+    TEST_EXPECT_EQ(live_after, live_before, "no Spoor leak");
+
+    spoor_clunk(ufd);
+    territory_unref(p.territory);
+    spoor_clunk(a); spoor_clunk(um2); spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// Shed audit round 3, F2 (second half): a DISSOLVED union's "." falls back to
+// member[0] even when the point itself will not clone -- its tree's session gone,
+// e.g. a per-user tree torn down at logout. member[0] never needed the point.
+// The fault is injected at the fixture: COPEN on the retained point makes its
+// zero-element walk refused, as a dead 9P session would.
+void test_stalk_union_dissolved_point_unreachable(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+    struct Spoor *um1 = stalk(&p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE), 0, "um1 MBEFORE");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER),  0, "um2 MAFTER");
+    struct Spoor *ufd = stalk(&p, root, "umpt", 4, STALK_OPEN, 0);
+    TEST_ASSERT(ufd && ufd->union_snap && ufd->union_snap->point, "union fd");
+    struct Spoor *point = ufd->union_snap->point;
+
+    // The LIVE arm (shed audit r4 F3): while member[0] is mounted, "." names the
+    // union, which is reached only through the point -- an unreachable point
+    // fails the resolution; it never silently degrades a live union to one
+    // member. A kernel whose fallback ignored liveness passed the dissolved leg.
+    point->flag |= COPEN;
+    struct Spoor *lq = stalk(&p, ufd, ".", 1, STALK_WALK, 0);
+    point->flag &= ~COPEN;
+    TEST_ASSERT(lq == NULL, "a LIVE union with an unreachable point does not fall back to member[0]");
+    if (lq) spoor_clunk(lq);
+
+    TEST_EXPECT_EQ(unmount(p.territory, pt), 0, "unmount member 0");
+    TEST_EXPECT_EQ(unmount(p.territory, pt), 0, "unmount member 1");
+
+    point->flag |= COPEN;            // the point's session is gone
+    struct Spoor *q = stalk(&p, ufd, ".", 1, STALK_WALK, 0);
+    point->flag &= ~COPEN;
+    TEST_ASSERT(q != NULL, "\".\" of a dissolved union does not need the point");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)22, "it is member[0] (22)");
+    if (q) spoor_clunk(q);
+
+    spoor_clunk(ufd);
+    territory_unref(p.territory);
+    spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// Shed audit round 3, F3: a REMOVE parent that is a union point is REPORTED by the
+// resolver, at the moment it chose -- not re-derived by the caller from the table
+// later, where a dissolve to zero members read as "an ordinary directory" and
+// handed the covered one to the mutation. After a dissolve the member selection
+// finds nothing; the point is never a target.
+void test_stalk_remove_parent_reports_union_point(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+    struct Spoor *um1 = stalk(&p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE), 0, "um1 MBEFORE");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER),  0, "um2 MAFTER");
+
+    int e = 0;
+    bool up = false;
+    struct Spoor *plain = stalk_remove_parent(&p, root, "a", 1, &e, &up);
+    TEST_ASSERT(plain != NULL, "control: a plain directory parent");
+    TEST_ASSERT(!up, "control: not reported as a union point");
+    spoor_clunk(plain);
+
+    up = false;
+    struct Spoor *par = stalk_remove_parent(&p, root, "umpt", 4, &e, &up);
+    TEST_ASSERT(par != NULL, "the union parent resolves");
+    TEST_ASSERT(up, "reported as a union point");
+    TEST_EXPECT_EQ((u64)par->qid.path, (u64)28, "left UNCROSSED (the point, 28)");
+
+    TEST_EXPECT_EQ(unmount(p.territory, pt), 0, "a peer dissolves it: member 0");
+    TEST_EXPECT_EQ(unmount(p.territory, pt), 0, "a peer dissolves it: member 1");
+    e = 0;
+    struct Spoor *m = stalk_union_member_holding(&p, par, "shared", &e);
+    TEST_ASSERT(m == NULL, "no member holds the leaf -- the point is never the target");
+    if (m) spoor_clunk(m);
+    spoor_clunk(par);
+
+    territory_unref(p.territory);
+    spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// Shed audit round 3, F4: STALK_MOUNT names a mount POINT. A resolution that ends
+// at the bottom of a CROSSED base ("." / "..") names the base, not its mounted
+// root -- so a mount over the base can be unmounted by naming the base, as a mount
+// over "/" must be by unmount("/"). Pre-fix the key was the mounted root's
+// identity, which nothing is keyed on.
+void test_stalk_mount_names_crossed_base(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+    struct Spoor *src = stalk(&p, root, "um1", 3, STALK_WALK,  0);
+    struct Spoor *mp  = stalk(&p, root, "a",   1, STALK_MOUNT, 0);
+    TEST_ASSERT(src != NULL && mp != NULL, "resolve um1 + the point a");
+    TEST_EXPECT_EQ(mount(p.territory, src, mp, 0), 0, "mount um1 over a");
+
+    struct Spoor *q = stalk(&p, mp, ".", 1, STALK_WALK, 0);
+    TEST_ASSERT(q != NULL, "control: STALK_WALK \".\"");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)22, "control: a walk still crosses (um1, 22)");
+    spoor_clunk(q);
+
+    q = stalk(&p, mp, "..", 2, STALK_MOUNT, 0);
+    TEST_ASSERT(q != NULL, "STALK_MOUNT \"..\" at the crossed base");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)1, "names the base a (1), not um1's root");
+    spoor_clunk(q);
+    q = stalk(&p, mp, ".", 1, STALK_MOUNT, 0);
+    TEST_ASSERT(q != NULL, "STALK_MOUNT \".\" at the crossed base");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)1, "names the base a (1)");
+    TEST_EXPECT_EQ(unmount(p.territory, q), 0, "and that name unmounts the mount over it");
+    spoor_clunk(q);
+
+    q = stalk(&p, mp, "b", 1, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "the mask is gone: a/b resolves");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)2, "a/b (2)");
+    spoor_clunk(q);
+
+    territory_unref(p.territory);
+    spoor_clunk(src); spoor_clunk(mp);
+    spoor_unref(root);
+}
+
+// Shed audit round 4, F4: the same rule off a UNION handle. Its base cross is
+// union-blind -- it looks up mounts keyed at member[0]'s identity -- so the name
+// of that crossed base is member[0]'s identity too. Keyed on the union POINT
+// instead, unmount of "." removed an invisible union member and left the mount
+// the handle actually shows in place.
+void test_stalk_mount_names_crossed_union_base(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+    struct Spoor *um1 = stalk(&p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    struct Spoor *a   = stalk(&p, root, "a",    1, STALK_WALK,  0);
+    struct Spoor *k1  = stalk(&p, root, "um1",  3, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt && a && k1, "resolve um1 + um2 + umpt + a + um1's key");
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE), 0, "um1 MBEFORE");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER),  0, "um2 MAFTER");
+    struct Spoor *ufd = stalk(&p, root, "umpt", 4, STALK_OPEN, 0);
+    TEST_ASSERT(ufd && ufd->union_snap && ufd->union_snap->point, "a union fd (member[0] = um1)");
+    TEST_EXPECT_EQ(mount(p.territory, a, k1, 0), 0, "mount a over member[0]'s identity");
+
+    struct Spoor *q = stalk(&p, ufd, ".", 1, STALK_MOUNT, 0);
+    TEST_ASSERT(q != NULL, "STALK_MOUNT \".\" at the crossed union base");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)22, "names member[0] (22), not the union point (28)");
+    if (q) {
+        TEST_EXPECT_EQ(unmount(p.territory, q), 0, "that name unmounts the mount over member[0]");
+        spoor_clunk(q);
+    }
+    q = stalk(&p, root, "umpt/only1", 10, STALK_WALK, 0);
+    TEST_ASSERT(q != NULL, "the union keeps member um1 (only1)");
+    if (q) spoor_clunk(q);
+    q = stalk(&p, root, "umpt/only2", 10, STALK_WALK, 0);
+    TEST_ASSERT(q != NULL, "the union keeps member um2 (only2)");
+    if (q) spoor_clunk(q);
+
+    spoor_clunk(ufd);
+    territory_unref(p.territory);
+    spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt); spoor_clunk(a); spoor_clunk(k1);
+    spoor_unref(root);
+}
+
+// Shed audit round 3, F5: the syscall consumers of a union dirfd (fd-relative
+// unlink / rename / create, SYS_WALK_CREATE) ask this helper, so a dissolved union
+// is member[0] for them exactly as it is for openat -- in a FRESH, unopened clone.
+void test_stalk_union_dissolved_helper(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+    struct Spoor *um1 = stalk(&p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE), 0, "um1 MBEFORE");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER),  0, "um2 MAFTER");
+    struct Spoor *ufd = stalk(&p, root, "umpt", 4, STALK_OPEN, 0);
+    TEST_ASSERT(ufd && ufd->union_snap, "union fd");
+
+    struct Spoor *m0 = NULL;
+    TEST_ASSERT(!stalk_union_dissolved(&p, ufd, &m0), "a live union is not dissolved");
+    TEST_ASSERT(m0 == NULL, "and hands out nothing");
+    TEST_ASSERT(!stalk_union_dissolved(&p, root, &m0), "a plain handle is not a union");
+
+    TEST_EXPECT_EQ(unmount(p.territory, pt), 0, "unmount member 0");
+    TEST_EXPECT_EQ(unmount(p.territory, pt), 0, "unmount member 1");
+    TEST_ASSERT(stalk_union_dissolved(&p, ufd, &m0), "dissolved");
+    TEST_ASSERT(m0 != NULL, "member[0] handed out");
+    TEST_EXPECT_EQ((u64)m0->qid.path, (u64)22, "it is member[0] (22)");
+    TEST_ASSERT(m0 != ufd && (m0->flag & COPEN) == 0, "a fresh, UNOPENED clone");
+    spoor_clunk(m0);
 
     spoor_clunk(ufd);
     territory_unref(p.territory);

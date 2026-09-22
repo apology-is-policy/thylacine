@@ -314,11 +314,12 @@ void test_spoor_clone_copies_state(void) {
     struct Spoor *c = spoor_alloc(&devnone);
     TEST_ASSERT(c != NULL, "alloc OK");
 
-    // Mutate every field spoor_clone is documented to copy.
+    // Mutate every field spoor_clone is documented to copy, PLUS the two
+    // per-final-handle markers it must STRIP: COPEN (H9) and CWALKONLY (#81).
     c->qid.path = 0xDEADBEEFCAFE0001ULL;
     c->qid.vers = 7;
     c->qid.type = QTDIR;
-    c->flag     = COPEN | CMSG;
+    c->flag     = COPEN | CMSG | CWALKONLY;
     c->mode     = 3;
     c->offset   = (s64)0x1000;
 
@@ -328,7 +329,12 @@ void test_spoor_clone_copies_state(void) {
     TEST_EXPECT_EQ(nc->qid.path, c->qid.path, "qid.path copied");
     TEST_EXPECT_EQ(nc->qid.vers, c->qid.vers, "qid.vers copied");
     TEST_EXPECT_EQ(nc->qid.type, c->qid.type, "qid.type copied");
-    TEST_EXPECT_EQ(nc->flag,     c->flag,     "flag copied");
+    // A clone is a fresh, UNOPENED navigation position: CMSG (message-style
+    // semantics) carries over, but COPEN and CWALKONLY are per-final-handle
+    // markers a clone must not inherit -- dev->open re-sets COPEN, and the two
+    // T_OPATH sites re-set CWALKONLY. Inheriting COPEN was H9: an O_PATH clone
+    // of the console-drain fd, closed, ran devdev_close's COPEN-gated disarm.
+    TEST_EXPECT_EQ(nc->flag,     (u32)CMSG,  "flag: CMSG kept, COPEN+CWALKONLY stripped");
     TEST_EXPECT_EQ(nc->mode,     c->mode,     "mode copied");
     TEST_EXPECT_EQ(nc->offset,   c->offset,   "offset copied");
     TEST_EXPECT_EQ(nc->dev,      c->dev,      "dev back-pointer copied");

@@ -16,6 +16,7 @@
 #include <thylacine/poll.h>
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>
+#include <thylacine/stalk.h>
 #include <thylacine/syscall.h>               // #55: struct t_stat + T_S_IFCHR
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
@@ -30,6 +31,9 @@ void test_devdev_stat_native_leaves(void);      // CL-4 merge: all-leaf shapes
 void test_devdev_cons_gate(void);
 void test_devdev_consctl_renderer_mint(void);   // #55
 void test_devdev_winsize_leaf(void);            // #55
+void test_devdev_drain_opath_clone_no_disarm(void); // H9 (spoor_clone COPEN strip)
+void test_devdev_drain_walk_off_opened_dev_no_disarm(void); // the unprivileged route to H9
+void test_devdev_spawn_unbump_runs_close(void);       // shed r4 F1 / H6: an unwind's last drop closes
 
 // =============================================================================
 // Helpers.
@@ -539,6 +543,138 @@ void test_devdev_renderer_gate(void) {
     cons_test_reset();
 }
 
+// H9 (spoor_clone COPEN strip): an O_PATH re-open of the console-drain fd must
+// NOT disarm the live drain. SYS_OPEN(drain_fd, ".", O_PATH) clone-walks the
+// drain Spoor -- clone_walk_zero: spoor_clone + a zero-element dev->walk, then
+// the syscall stamps CWALKONLY on the walk-only handle. Before the fix the clone
+// inherited COPEN + qid CONSDRAIN, so closing that navigation handle reached
+// devdev_close's COPEN-gated arm and ran the GLOBAL cons_drain_close(), disarming
+// the drain out from under the renderer that still held the real fd -- and a
+// re-open then reset reader_busy for a fresh epoch, the two-sleeper drain-Rendez
+// extinction premise (cons.c cons_drain_open). The COPEN-close sweep (2026-09-16)
+// found devdev's drain the ONLY COPEN-gated close whose effect is global rather
+// than keyed on the Spoor's own identity/aux, so the fix strips COPEN in
+// spoor_clone. This reproduces the clone-close at the Spoor level (the devdev-
+// test tier) and asserts the drain stays live. Fix-agnostic: it passes whether
+// COPEN is stripped in the clone OR the devdev close is gated locally on the
+// minting Spoor; it fails on the unfixed clone-copies-COPEN.
+void test_devdev_drain_opath_clone_no_disarm(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t && t->proc, "current thread has Proc");
+    cons_test_reset();
+    cons_test_echo_capture(true);
+    proc_test_clear_console_renderer();
+
+    struct Spoor *drain = walk_to("consdrain");
+    TEST_ASSERT(drain != NULL, "walk /dev/consdrain resolves");
+    TEST_EXPECT_EQ(proc_set_console_renderer(t->proc), 0, "renderer role claimed");
+
+    struct Spoor *dopen = devdev.open(drain, 0);   // arms the tap; COPEN on dopen
+    TEST_ASSERT(dopen != NULL, "renderer open of consdrain ALLOWED (arms)");
+    TEST_ASSERT((dopen->flag & COPEN) != 0, "the minting drain Spoor carries COPEN");
+    cons_test_set_termios(0u);                       // raw: output taps directly
+
+    // Faithful clone_walk_zero(dopen): spoor_clone + the reuse-nc zero-element
+    // devdev walk, then the O_PATH stamp the syscall applies to a walk-only
+    // handle. This IS the Spoor SYS_OPEN(drain_fd, ".", O_PATH) installs.
+    struct Spoor *clone = spoor_clone(dopen);
+    TEST_ASSERT(clone != NULL, "clone of the opened drain Spoor");
+    struct Walkqid *w = devdev.walk(dopen, clone, NULL, 0);
+    TEST_ASSERT(w != NULL && w->spoor == clone && w->nqid == 0,
+                "zero-element reuse-nc walk (the clone_walk_zero shape)");
+    walkqid_free(w);
+    clone->flag |= CWALKONLY;                        // #81: the O_PATH stamp
+    TEST_EXPECT_EQ(clone->qid.path, dopen->qid.path,
+                   "the clone names the drain leaf (the close's qid arm matches)");
+    // NOTE: this test asserts the OUTCOME (the drain stays live), never the
+    // MECHANISM (whether the clone carries COPEN) -- so it discriminates the
+    // buggy code from EITHER candidate fix (strip COPEN in spoor_clone, or gate
+    // devdev_close on the minting Spoor while the clone keeps COPEN). The
+    // COPEN-stripped-by-clone mechanism is the fix that landed, and its direct
+    // witness lives in test_spoor_clone_copies_state, which is rightly fix-
+    // specific; asserting it here would overfit this test to one of the two.
+
+    // Close the navigation handle: SYS_CLOSE on the O_PATH fd -> last-ref clunk
+    // -> devdev_close(clone). Pre-fix, this disarmed the drain.
+    spoor_clunk(clone);
+
+    // Primary discriminator: output still taps through the ORIGINAL handle. On
+    // the unfixed code the clone close disarmed the drain, so the write drops
+    // (cons_drain_tap_bulk's armed pre-check) and the read returns -1 (open ==
+    // false) -- both assertions fail. Under the fix the byte is drained.
+    u8 b[4];
+    TEST_EXPECT_EQ(cons_output_write("Y", 1), 1L, "output while (still) armed");
+    TEST_EXPECT_EQ(devdev.read(dopen, b, sizeof(b), 0), 1L, "drain still delivers");
+    TEST_ASSERT(b[0] == 'Y', "the drained byte is Y (tap alive after the clone close)");
+
+    // Explicit "still open" statement -- and the "reader not double-parked" one:
+    // a still-open drain forecloses cons_drain_open's reader_busy reset, which is
+    // exactly the epoch confusion the two-sleeper extinction needs. cons_drain_-
+    // open returns -1 iff already open; if the bug re-armed it, re-disarm to keep
+    // teardown clean.
+    int reopen = cons_drain_open();
+    TEST_EXPECT_EQ(reopen, -1, "H9: the clone close did NOT disarm the live drain");
+    if (reopen == 0) cons_drain_close();             // buggy path only: undo the re-arm
+
+    // Teardown: the real drain handle's close disarms (the correct disarm), then
+    // drop the walked leaf.
+    devdev.close(dopen);
+    proc_test_clear_console_renderer();
+    spoor_unref(drain);
+    cons_test_echo_capture(false);
+    cons_test_reset();
+}
+
+// The UNPRIVILEGED route to the same close (shed audit round 3, F1). The test
+// above needs the drain fd; this one needs nothing. Any Proc may open the /dev
+// directory itself -- kind 0 passes neither the console nor the renderer gate,
+// so dev_simple_open marks it COPEN -- and every name the resolver walks off
+// that OPENED Spoor starts life as a spoor_clone of it. devdev_walk resolves
+// "consdrain" with no gate (only the open is gated), so before the strip an
+// openat(dev_fd, "consdrain", O_PATH) followed by close() reached devdev_close
+// holding {qid CONSDRAIN, COPEN} and disarmed a drain it never opened. Driven
+// through the real resolver, so it pins what EL0 gets, not a hand-built clone.
+void test_devdev_drain_walk_off_opened_dev_no_disarm(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t && t->proc, "current thread has Proc");
+    cons_test_reset();
+    cons_test_echo_capture(true);
+    proc_test_clear_console_renderer();
+
+    struct Spoor *drain = walk_to("consdrain");
+    TEST_ASSERT(drain != NULL, "walk /dev/consdrain resolves");
+    TEST_EXPECT_EQ(proc_set_console_renderer(t->proc), 0, "renderer role claimed");
+    struct Spoor *dopen = devdev.open(drain, 0);
+    TEST_ASSERT(dopen != NULL, "renderer open of consdrain ALLOWED (arms)");
+    cons_test_set_termios(0u);
+
+    struct Spoor *root = devdev.attach("");
+    TEST_ASSERT(root != NULL, "attach /dev");
+    struct Spoor *droot = devdev.open(root, 0);
+    TEST_ASSERT(droot != NULL && (droot->flag & COPEN) != 0,
+                "the /dev directory opens for anyone (COPEN)");
+    struct Spoor *leaf = stalk(t->proc, droot, "consdrain", 9, STALK_WALK, 0);
+    TEST_ASSERT(leaf != NULL, "consdrain walks off the opened /dev");
+    TEST_EXPECT_EQ(leaf->qid.path, dopen->qid.path, "it names the drain leaf");
+    spoor_clunk(leaf);   // close() of the O_PATH fd: the last ref -> devdev_close
+
+    u8 b[4];
+    TEST_EXPECT_EQ(cons_output_write("Z", 1), 1L, "output while (still) armed");
+    TEST_EXPECT_EQ(devdev.read(dopen, b, sizeof(b), 0), 1L, "drain still delivers");
+    TEST_ASSERT(b[0] == 'Z', "the drained byte is Z (tap alive after the walked leaf's close)");
+    int reopen = cons_drain_open();
+    TEST_EXPECT_EQ(reopen, -1, "a name walked off an opened /dev did NOT disarm the drain");
+    if (reopen == 0) cons_drain_close();             // buggy path only: undo the re-arm
+
+    spoor_clunk(droot);
+    if (droot != root) spoor_unref(root);
+    devdev.close(dopen);
+    proc_test_clear_console_renderer();
+    spoor_unref(drain);
+    cons_test_echo_capture(false);
+    cons_test_reset();
+}
+
 // H-1 (SYS_FD_DEVCLASS): the /dev/cons normalization. Only the cons DATA
 // leaf answers 'c' -- a walked /dev/cons fd must be indistinguishable from a
 // SYS_CONSOLE_OPEN fd (devcons, dc 'c') to the is-a-terminal predicate.
@@ -653,5 +789,48 @@ void test_devdev_beacon_leaf(void) {
     // UAF guard extincted the suite (a correct catch).
     devdev.close(o);
     spoor_unref(b);
+    cons_test_reset();
+}
+
+// A spawn bumps each inherited fd's Spoor before it knows the spawn will
+// succeed; every failure unwind drops those bumps (shed audit r4 F1, aux's H6).
+// A sibling thread may close the fd while the spawn is in flight, so the
+// unwind's drop can be the LAST ref -- and it used spoor_unref, which frees
+// without the Dev's close hook. For the console drain that left the drain armed
+// with no renderer until reboot (every later cons_drain_open refused). The
+// unwinds all go through sys_spawn_unbump_fds now; this drives it with the
+// interleaving staged by hand: the bump, the handle's own close, then the
+// unwind -- whose drop must run devdev_close and disarm.
+extern void sys_spawn_unbump_fds(struct Spoor *const *bumped, u32 n);
+
+void test_devdev_spawn_unbump_runs_close(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t && t->proc, "current thread has Proc");
+    cons_test_reset();
+    cons_test_echo_capture(true);
+    proc_test_clear_console_renderer();
+
+    struct Spoor *drain = walk_to("consdrain");
+    TEST_ASSERT(drain != NULL, "walk /dev/consdrain resolves");
+    TEST_EXPECT_EQ(proc_set_console_renderer(t->proc), 0, "renderer role claimed");
+    struct Spoor *dopen = devdev.open(drain, 0);
+    TEST_ASSERT(dopen != NULL, "renderer open of consdrain ALLOWED (arms)");
+    TEST_EXPECT_EQ(cons_drain_open(), -1, "the drain is armed");
+
+    // dev_simple_open returns the Spoor it was given (dopen == drain, one ref:
+    // the walk's, standing in for the fd's handle-table ref). The unwind's drop
+    // frees it -- on either kernel -- so nothing below may touch it again.
+    TEST_ASSERT(dopen == drain, "dev_simple_open opens in place");
+    spoor_ref(dopen);                         // the spawn's bump (sys_bump_inherit_fds)
+    spoor_clunk(dopen);                       // a sibling's close(fd): not the last ref
+    struct Spoor *bumped[1] = { dopen };
+    sys_spawn_unbump_fds(bumped, 1);          // the failure unwind: the LAST drop
+
+    int reopen = cons_drain_open();
+    TEST_EXPECT_EQ(reopen, 0, "the unwind's last drop ran the close hook: the drain is disarmed");
+    cons_drain_close();                       // either the probe's own arm or (buggy) the stale one
+
+    proc_test_clear_console_renderer();
+    cons_test_echo_capture(false);
     cons_test_reset();
 }

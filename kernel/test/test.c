@@ -868,6 +868,9 @@ void test_devdev_winsize_leaf(void);             // #55
 void test_devdev_fd_devclass(void);              // H-1 (SYS_FD_DEVCLASS)
 void test_devdev_beacon_leaf(void);              // H-1 audit F1 (/dev/beacon)
 void test_devdev_renderer_gate(void);            // G-4
+void test_devdev_drain_opath_clone_no_disarm(void); // H9 (spoor_clone COPEN strip)
+void test_devdev_drain_walk_off_opened_dev_no_disarm(void); // the unprivileged route to H9
+void test_devdev_spawn_unbump_runs_close(void);       // shed r4 F1 / H6
 void test_devhw_bestiary_smoke(void);
 void test_devhw_attach_returns_root(void);
 void test_devhw_walk_node_and_prop(void);
@@ -1000,11 +1003,20 @@ void test_stalk_union_readdir_nontagged(void);
 void test_stalk_union_create(void);
 void test_stalk_union_create_first_wins(void);
 void test_stalk_union_create_no_target(void);
+void test_stalk_union_one_member_creates_alike(void);
 void test_stalk_union_member_holding(void);
 void test_stalk_union_remove_uncrossed(void);
 void test_stalk_union_fd_base(void);
 void test_stalk_union_opath_base(void);
 void test_stalk_union_zero_component(void);
+void test_stalk_union_dissolved_degrades(void);
+void test_stalk_dotdot_crossed_base_floor(void);
+void test_stalk_union_live_dotdot_walks_unopened(void);
+void test_stalk_union_dissolved_point_unreachable(void);
+void test_stalk_remove_parent_reports_union_point(void);
+void test_stalk_mount_names_crossed_base(void);
+void test_stalk_mount_names_crossed_union_base(void);
+void test_stalk_union_dissolved_helper(void);
 void test_stalk_pheno_symlink_reanchor(void);
 void test_stalk_path_accumulate(void);
 void test_stalk_path_dotdot(void);
@@ -1464,7 +1476,19 @@ void test_territory_pivot_root_smoke(void);
 void test_territory_pivot_root_rejects_no_initial_root(void);
 void test_territory_pivot_root_idempotent_same_spoor(void);
 void test_territory_pivot_root_null_source_rejected(void);
-void test_territory_pivot_root_does_not_touch_mounts(void);
+void test_territory_pivot_root_keeps_reachable_mount(void);
+void test_territory_shed_pivot_drops_unreachable(void);
+void test_territory_shed_chroot_drops_unreachable(void);
+void test_territory_shed_keeps_transitive(void);
+void test_territory_shed_per_walker_dev_matched_on_dc(void);
+void test_territory_shed_same_root_is_a_noop(void);
+void test_territory_shed_preserves_union_order(void);
+void test_territory_shed_clone_before_pivot_unaffected(void);
+void test_territory_shed_union_root_keeps_point_entries(void);
+void test_territory_shed_drops_nested_orphan(void);
+void test_territory_shed_full_table_boundary(void);
+void test_territory_shed_releases_mp_path_once(void);
+void test_territory_shed_initial_chroot_and_root_as_source(void);
 void test_pipe_smoke(void);
 void test_pipe_read_on_empty_returns_zero(void);
 void test_pipe_write_to_full_returns_zero(void);
@@ -1952,7 +1976,19 @@ struct test_case g_tests[] = {
     { "territory.pivot_root_rejects_no_initial_root",     test_territory_pivot_root_rejects_no_initial_root,     false, NULL },
     { "territory.pivot_root_idempotent_same_spoor",       test_territory_pivot_root_idempotent_same_spoor,       false, NULL },
     { "territory.pivot_root_null_source_rejected",        test_territory_pivot_root_null_source_rejected,        false, NULL },
-    { "territory.pivot_root_does_not_touch_mounts",       test_territory_pivot_root_does_not_touch_mounts,       false, NULL },
+    { "territory.pivot_root_keeps_reachable_mount",       test_territory_pivot_root_keeps_reachable_mount,       false, NULL },
+    { "territory.shed_pivot_drops_unreachable",           test_territory_shed_pivot_drops_unreachable,           false, NULL },
+    { "territory.shed_chroot_drops_unreachable",          test_territory_shed_chroot_drops_unreachable,          false, NULL },
+    { "territory.shed_keeps_transitive",                  test_territory_shed_keeps_transitive,                  false, NULL },
+    { "territory.shed_per_walker_dev_matched_on_dc",      test_territory_shed_per_walker_dev_matched_on_dc,      false, NULL },
+    { "territory.shed_same_root_is_a_noop",               test_territory_shed_same_root_is_a_noop,               false, NULL },
+    { "territory.shed_preserves_union_order",             test_territory_shed_preserves_union_order,             false, NULL },
+    { "territory.shed_clone_before_pivot_unaffected",     test_territory_shed_clone_before_pivot_unaffected,     false, NULL },
+    { "territory.shed_union_root_keeps_point_entries",    test_territory_shed_union_root_keeps_point_entries,    false, NULL },
+    { "territory.shed_drops_nested_orphan",               test_territory_shed_drops_nested_orphan,               false, NULL },
+    { "territory.shed_full_table_boundary",               test_territory_shed_full_table_boundary,               false, NULL },
+    { "territory.shed_releases_mp_path_once",             test_territory_shed_releases_mp_path_once,             false, NULL },
+    { "territory.shed_initial_chroot_and_root_as_source", test_territory_shed_initial_chroot_and_root_as_source, false, NULL },
     { "handles.alloc_close_smoke",     test_handles_alloc_close_smoke,     false, NULL },
     { "handles.rights_monotonic",      test_handles_rights_monotonic,      false, NULL },
     { "handles.dup_lifecycle",         test_handles_dup_lifecycle,         false, NULL },
@@ -2663,6 +2699,9 @@ struct test_case g_tests[] = {
     { "devdev.stat_native_leaves",     test_devdev_stat_native_leaves,     false, NULL },
     { "devdev.cons_gate",              test_devdev_cons_gate,              false, NULL },
     { "devdev.renderer_gate",          test_devdev_renderer_gate,          false, NULL },
+    { "devdev.drain_opath_clone_no_disarm", test_devdev_drain_opath_clone_no_disarm, false, NULL },
+    { "devdev.drain_walk_off_opened_dev_no_disarm", test_devdev_drain_walk_off_opened_dev_no_disarm, false, NULL },
+    { "devdev.spawn_unbump_runs_close", test_devdev_spawn_unbump_runs_close, false, NULL },
     { "devdev.consctl_renderer_mint",  test_devdev_consctl_renderer_mint,  false, NULL },
     { "devdev.winsize_leaf",           test_devdev_winsize_leaf,           false, NULL },
     { "devdev.fd_devclass",            test_devdev_fd_devclass,            false, NULL },
@@ -3728,11 +3767,20 @@ struct test_case g_tests[] = {
     { "stalk.union_create",            test_stalk_union_create,            false, NULL },
     { "stalk.union_create_first_wins", test_stalk_union_create_first_wins, false, NULL },
     { "stalk.union_create_no_target",  test_stalk_union_create_no_target,  false, NULL },
+    { "stalk.union_one_member_creates_alike", test_stalk_union_one_member_creates_alike, false, NULL },
     { "stalk.union_member_holding",    test_stalk_union_member_holding,    false, NULL },
     { "stalk.union_remove_uncrossed",  test_stalk_union_remove_uncrossed,  false, NULL },
     { "stalk.union_fd_base",           test_stalk_union_fd_base,           false, NULL },
     { "stalk.union_opath_base",        test_stalk_union_opath_base,        false, NULL },
     { "stalk.union_zero_component",    test_stalk_union_zero_component,    false, NULL },
+    { "stalk.union_dissolved_degrades", test_stalk_union_dissolved_degrades, false, NULL },
+    { "stalk.dotdot_crossed_base_floor", test_stalk_dotdot_crossed_base_floor, false, NULL },
+    { "stalk.union_live_dotdot_walks_unopened", test_stalk_union_live_dotdot_walks_unopened, false, NULL },
+    { "stalk.union_dissolved_point_unreachable", test_stalk_union_dissolved_point_unreachable, false, NULL },
+    { "stalk.remove_parent_reports_union_point", test_stalk_remove_parent_reports_union_point, false, NULL },
+    { "stalk.mount_names_crossed_base", test_stalk_mount_names_crossed_base, false, NULL },
+    { "stalk.mount_names_crossed_union_base", test_stalk_mount_names_crossed_union_base, false, NULL },
+    { "stalk.union_dissolved_helper", test_stalk_union_dissolved_helper, false, NULL },
     { "stalk.pheno_symlink_reanchor",  test_stalk_pheno_symlink_reanchor,  false, NULL },
     { "stalk.path_accumulate",         test_stalk_path_accumulate,         false, NULL },
     { "stalk.path_dotdot",             test_stalk_path_dotdot,             false, NULL },

@@ -552,8 +552,15 @@ enum {
     // → spoor_clunk on root_spoor). Idempotent: SYS_CHROOT to the same
     // Spoor returns 0 without bumping refcount.
     //
-    // Returns 0 on success, -1 on:
+    // A real swap also REMOVES mount entries: every entry whose mount point
+    // lies in a device instance unreachable from the new root is dropped under
+    // the same lock hold (ARCH 9.6.10). Nothing resolved from the new root
+    // changes; an fd-relative walk from a directory fd opened before the swap
+    // can.
+    //
+    // Returns 0 on success, -1 (flat; no errno) on:
     //   - spoor_fd not KOBJ_SPOOR / out-of-range / missing RIGHT_READ
+    //   - spoor_fd is not a DIRECTORY (QTDIR)
     //   - the caller has no Territory (kernel invariant; structurally
     //     impossible for a userspace Proc, defense-in-depth)
     //
@@ -1116,8 +1123,16 @@ enum {
     // around line 293-304 ("v1.x adds SYS_UNCHROOT or a proper
     // pivot_root").
     //
-    // Returns: 0 on success, -1 on:
+    // Like SYS_CHROOT, a real swap REMOVES the mount entries the new root
+    // cannot reach (ARCH 9.6.10) -- which is why a non-directory is refused
+    // here as it always was there: a bad pivot used to wedge resolution until
+    // the caller pivoted back; with the shed it would strip the table for good.
+    //
+    // Returns: 0 on success, -1 (flat; no errno) on:
     //   - new_root_fd not KOBJ_SPOOR / out-of-range / missing RIGHT_READ
+    //   - new_root_fd is not a DIRECTORY (QTDIR)
+    //   - the caller has NO CURRENT ROOT (pivot exchanges a root; the initial
+    //     root is SYS_CHROOT's to install)
     //   - caller has no Territory (kernel invariant -- structurally
     //     impossible for userspace; defense-in-depth)
     //

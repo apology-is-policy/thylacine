@@ -155,6 +155,11 @@ _Static_assert(sizeof(struct Qid) == 16,
 // an OPENED fid (is_open -> EINVAL), so the dedup cannot reuse `opened`. For a
 // native Dev that opens in place both point at distinct Spoors; when Dev.open
 // returns a fresh Spoor, `opened` is that one and `walkable` is the pre-open clone.
+// Since 2026-09-21 `walkable` is ALSO what the resolver walks a union handle's
+// base from (stalk_union_handle_walkable: member[0] in its unopened form, matched
+// by identity), and the source a mutation clones once the union has dissolved --
+// so it now reaches EL0 by way of a fresh clone, and must stay unopened for the
+// snap's whole life.
 struct union_member {
     struct Spoor *opened;      // OREAD-opened dir -- the per-member readdir source
     struct Spoor *walkable;    // UNOPENED clone -- the dedup existence-probe source
@@ -215,14 +220,21 @@ struct Spoor {
                                // -- only path->ref is concurrent (atomic).
 
     struct union_snap *union_snap;  // UM (union mounts): NON-NULL iff this Spoor
-                               // was opened (STALK_OPEN) on a UNION mount point
-                               // (>= 2 grafted members). Holds the member
+                               // is the final quarry of a stalk onto a UNION
+                               // mount point (>= 2 grafted members): a
+                               // STALK_OPEN carries the full snapshot below, a
+                               // STALK_WALK (O_PATH) a point-only one (n == 0).
+                               // The full one holds the member
                                // directories OPENED (OREAD) + R-gated + ref-held
                                // AT OPEN TIME, in declared order (Plan 9's
-                               // Chan.umh/umc). ONLY spoor_readdir_run consults
-                               // it, to merge every member's entries (dedup
+                               // Chan.umh/umc). spoor_readdir_run consults the
+                               // MEMBERS, to merge their entries (dedup
                                // first-member-wins; specs/territory.tla
-                               // ReaddirDedupFirstWins). The opened Spoor's OWN
+                               // ReaddirDedupFirstWins); the retained POINT is
+                               // also read by stalk (a union dirfd or union
+                               // root as a resolution base), the fd mutation
+                               // handlers, and the mount-table shed's closure
+                               // seed (ARCH 9.6.10). The opened Spoor's OWN
                                // identity is member[0] (the final cross), so
                                // fstat/type/every non-readdir op sees member[0].
                                // Captured ONCE at open (UM-8 F1/F2/F7: dev9p

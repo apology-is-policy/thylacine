@@ -457,12 +457,17 @@ static struct Spoor *devdev_create(struct Spoor *c, const char *name, int omode,
 static void devdev_close(struct Spoor *c) {
     // G-4: the OPENED drain Spoor's close disarms the tap. The COPEN check is
     // load-bearing: devdev_close fires for every clunked devdev Spoor,
-    // including never-opened walk intermediates and O_PATH handles (which
-    // skip dev->open and thus never armed) -- only the Spoor that actually
-    // minted through devdev_open carries COPEN, and there is exactly one at
-    // a time (cons_drain_open's single-open). Runs at the LAST handle ref
-    // (dup/inherited fds share the one Spoor), incl. the renderer's
-    // #926/#68 close-at-exit -- so a dead renderer always disarms.
+    // including never-opened walk intermediates and O_PATH navigation handles.
+    // It is sound ONLY because COPEN is a per-open marker set by dev->open and
+    // NEVER inherited by a clone (spoor_clone strips it, alongside CWALKONLY) --
+    // so only the one Spoor that actually minted through devdev_open (a single
+    // open at a time, cons_drain_open's single-open) reads COPEN here, and its
+    // close alone runs the GLOBAL disarm. Before that strip (H9) an O_PATH
+    // re-open of the drain fd -- SYS_OPEN(fd, ".", O_PATH) clone-walks this
+    // Spoor -- yielded a clone carrying COPEN + qid CONSDRAIN, and closing that
+    // navigation handle disarmed the live drain under the renderer. Runs at the
+    // LAST handle ref (dup/inherited fds share the one Spoor), incl. the
+    // renderer's #926/#68 close-at-exit -- so a dead renderer always disarms.
     if (c && (u32)c->qid.path == DEV_KIND_CONSDRAIN && (c->flag & COPEN))
         cons_drain_close();
     dev_simple_close(c);
