@@ -151,6 +151,40 @@ per-round evidence; this is the ledger.
   the remainder deferred, and an I-32 axis capping hooks per list.
 - test262 / a real benchmark on `jsc`: not started.
 
+## ARCH 8.1 -- the kernel chunk that precedes F3-F9 (BUILT 2026-09-22, branch `arch81`)
+
+Not a browser chunk, but sequenced here because the operator put it before the
+browser arc's kernel work and because B-0's audit is what surfaced the defect
+it repairs. Eleven commits off `main` @`ca1c7030`; tip `df83f1bb`.
+
+**Syscall bodies now run with interrupts ON and are still non-preemptible** --
+ARCH 8.1's line as written, which Phase 0 deferred and P3-Ec accidentally built
+as "interrupts off" instead. `Thread.in_syscall` gates `preempt_check_irq`;
+`syscall_dispatch` is a wrapper that unmasks for the body and re-masks
+unconditionally before the EL0-return tail, so the unmask cannot leak into the
+KERNEL_EXIT eret window (#713).
+
+What it means for the browser arc: **poll's preemption point is deleted**
+(`b7132455`), and with it `specs/poll_cpu.tla`. `pipe_block_locked` and
+`chan_role_acquire`, which had the same masked-loop shape and no point, are
+covered without needing one. The B-0 residue item "any other masked loop"
+(r5 F1's tail) is closed by construction rather than by a sweep.
+
+Measured, and one number is a finding in its own right: the Linux-phenotype
+syscall path was at **86% of the 16 KiB kernel stack** before this chunk,
+because `viv_tier2`'s switch unioned getdents64's 4.6 KiB of staging into every
+phenotype syscall's frame. Fixed (`e7c83ec6`); worst case is now 75.5% WITH the
+new IRQ frame.
+
+| bar | state |
+|---|---|
+| suite @`13306e92` | 1616/1616 PASS (CI image, HVF) |
+| poll spec gate | ALL CFGS AS CLAIMED (4 clean + 7 buggy) |
+| `syscall_irqs` gate | 8 cfgs on their named verdicts; 2 sabotages turn it red |
+| SMP gate | in flight at handoff |
+| suite @tip | **NOT RUN** |
+| fleet, audit round | **NOT RUN** |
+
 ## Remaining work (in order; BROWSER-DESIGN section 9)
 
 | Phase | What | Exit |
