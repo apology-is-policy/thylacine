@@ -133,6 +133,20 @@ static void exception_unexpected_impl(struct exception_context *ctx, u64 vector_
 // runs IRQ-masked), and the failure mode of any miss is a spin, not
 // corruption.
 //
+// ARCH 8.12 (syscall bodies run with interrupts ON) does NOT open that
+// residual, and the reason is worth stating because the chunk looks like it
+// should. The unmask is confined to the SVC BODY -- syscall_dispatch's
+// wrapper, not the vector -- so kernel fault handling, which shares the 0x400
+// slot, still runs masked end to end and this counter still measures what it
+// was built to measure. A syscall body that faults enters EL1-sync through the
+// normal vector, which masks at exception entry, so the recursive chain this
+// guard bounds is masked exactly as before.
+//
+// The other half of the discriminator survives too: the counter is cleared at
+// every context switch, and a syscall body is NON-PREEMPTIBLE
+// (Thread.in_syscall), so an IRQ landing in a body does not switch and
+// therefore cannot spuriously clear it.
+//
 // The runaway path deliberately does NOT halls_dump (the dump machinery
 // is the likely faulting amplifier): print one raw banner with the frame
 // that killed the handler, and park THIS CPU with the stack corpse intact

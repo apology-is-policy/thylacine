@@ -39,17 +39,36 @@ typedef struct spin_lock {
 // #360 preemption discipline: a plain spin_lock hold makes the HOLDING
 // THREAD non-preemptible (the Linux "spin_lock disables preemption" rule).
 //
-// Why load-bearing: syscalls run IRQ-MASKED end-to-end (SVC masks DAIF;
-// no handler unmasks), so a syscall spinning on a contended lock cannot
-// be preempted. A holder that runs IRQ-ENABLED (a kproc kthread, or a
-// thunk on a fresh thread -- thread_trampoline `daifclr`s) COULD be
-// preempted mid-hold before #360: it goes RUNNABLE off-CPU still holding
-// the lock, IRQ-masked spinners occupy every CPU waiting for it, and the
-// holder never gets a CPU again -- a permanent whole-guest deadlock
-// (#359: the parallel `go build` wedge on the shared dev9p client's
-// c->lock; the same shape was latent on l->lock, g_dev9p_poll_lock, the
-// poll hook-list locks -- any lock shared between a preemptible context
-// and syscall paths).
+// Why load-bearing. THE ARGUMENT WAS REBUILT AT ARCH 8.12 and its old form
+// is now false, so read this rather than remembering the old one.
+//
+// It used to run: "syscalls are IRQ-MASKED end to end, so a syscall
+// spinning on a contended lock cannot be preempted." Syscall bodies now
+// run with interrupts ON (ARCH 8.12), so masking establishes nothing
+// here. What holds instead is a property, not a side effect: a syscall
+// body is NON-PREEMPTIBLE (Thread.in_syscall gates preempt_check_irq), so
+// a syscall spinning on a contended lock still cannot be switched out.
+//
+// The failure #360 exists to prevent is therefore UNCHANGED. A holder
+// that runs preemptible -- a kproc kthread, or a thunk on a fresh thread
+// (thread_trampoline `daifclr`s), neither of which carries the syscall
+// marker, and both of which must STAY preemptible or #810 is lost --
+// could be preempted mid-hold: it goes RUNNABLE off-CPU still holding the
+// lock, spinners occupy every CPU waiting for it, and the holder never
+// gets a CPU again. A permanent whole-guest deadlock (#359: the parallel
+// `go build` wedge on the shared dev9p client's c->lock; the same shape
+// was latent on l->lock, g_dev9p_poll_lock, the poll hook-list locks --
+// any lock shared between a preemptible context and syscall paths).
+//
+// ONE THING DID CHANGE, and it is smaller than it first looks. Those
+// spinners are no longer MASKED, so the wedged CPUs keep servicing
+// interrupts: the SAK still arrives, drivers still run, the operator can
+// still see the machine. But they are still non-preemptible, so they
+// still never yield, and the holder still never runs. The deadlock
+// SURVIVES -- it merely stops being deaf. (An earlier draft of ARCH 8.12
+// claimed this degraded the failure "from a whole-guest deadlock to
+// starvation". That was wrong, and wrong in the direction that would have
+// justified relaxing #360.)
 //
 // Mechanism: a PER-THREAD hold count (Thread.preempt_count; thread.h has
 // the full rationale for per-thread over per-CPU -- the count must travel

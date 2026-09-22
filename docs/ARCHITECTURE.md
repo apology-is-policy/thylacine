@@ -1589,14 +1589,20 @@ nonzero count: sleeping or yielding while holding a plain spinlock is
 forbidden (the lock-across-sleep deadlock class), and an unlock at count zero
 extincts as an unbalanced release.
 
-Why load-bearing: syscalls and EL0 faults run IRQ-masked end-to-end (as built, not
-as section 8.1 designs it -- see the as-built note there), so their
-lock spins are non-preemptible; a holder running IRQ-ENABLED (a kproc kthread,
-or a spawn thunk on a fresh thread) could previously be preempted mid-hold and
-starve behind a full complement of masked spinners -- a permanent whole-guest
-deadlock (#359, exposed by the parallel on-device `go build` on the shared
-dev9p client's `c->lock`; latent on every lock shared between a preemptible
-context and syscall paths).
+Why load-bearing -- **REBUILT at 8.12; the old form is false.** It used to read
+"syscalls and EL0 faults run IRQ-masked end to end, so their lock spins are
+non-preemptible". EL0 faults still do; SYSCALL BODIES DO NOT (8.12), so masking
+no longer establishes this. What holds instead is a property rather than a side
+effect: a syscall body is NON-PREEMPTIBLE (`Thread.in_syscall` gates
+`preempt_check_irq`), so a syscall spinning on a contended lock still cannot be
+switched out. A holder running PREEMPTIBLE (a kproc kthread, or a spawn thunk
+on a fresh thread -- neither carries the syscall marker, and both must stay
+preemptible or #810 is lost) could otherwise be preempted mid-hold and starve
+behind a full complement of spinners -- a permanent whole-guest deadlock (#359,
+exposed by the parallel on-device `go build` on the shared dev9p client's
+`c->lock`; latent on every lock shared between a preemptible context and
+syscall paths). The authoritative statement is the comment at
+`kernel/include/thylacine/spinlock.h`, beside the code it justifies.
 
 The count is per-THREAD, not per-CPU: it must travel with the thread across a
 migration (a per-CPU slot has an unfixable mid-increment preempt+migrate tear
@@ -1606,14 +1612,24 @@ uses dedicated RAW (uncounted) variants, sound because sched runs fully
 IRQ-masked across the hold. See `docs/reference/15-scheduler.md` ("Preemption
 discipline") for the full mechanism, the first-cut per-CPU bug, and the tests.
 
-**This rationale is rebuilt by the 8.12 chunk and must be rewritten WITH that
-code, not before it** -- the paragraph above is as-built and true until then.
-When syscall bodies run interrupts-on, the two-tier "masked spinners behind a
-preemptible holder" model collapses to one tier. That is GOOD (it removes the
-#359 asymmetry: a starved holder degrades from a whole-guest deadlock to
-starvation), but the argument for the discipline must then rest on
-`preempt_count` alone. Leaving this paragraph stale is how the next #359 gets
-built.
+**This rationale was REBUILT at the 8.12 chunk; the paragraph above is the
+as-built statement it replaces.** The new argument lives at
+`kernel/include/thylacine/spinlock.h`, next to the code it justifies. In
+short: masking no longer establishes anything here, because syscall bodies run
+with interrupts on; what holds instead is that a syscall body is
+NON-PREEMPTIBLE, so a syscall spinning on a contended lock still cannot be
+switched out. #360 is therefore unchanged and still necessary.
+
+**A claim in the first draft of this section was WRONG and is corrected here**,
+because it was wrong in the direction that would have justified relaxing #360.
+It said the collapse to one tier "removes the #359 asymmetry: a starved holder
+degrades from a whole-guest deadlock to starvation". It does not. The spinners
+behind a preempted holder are no longer MASKED -- so the wedged CPUs keep
+servicing interrupts, the SAK still arrives, and the operator can still see the
+machine -- but they are still NON-PREEMPTIBLE, so they still never yield and
+the holder still never runs. The deadlock survives; it merely stops being deaf.
+Caught while rebuilding the spinlock.h paragraph, by asking what the spinners
+actually do rather than what the tier count suggests.
 
 ### 8.12 The syscall interrupt model: interrupts ON, still non-preemptible (the 8.1 chunk)
 

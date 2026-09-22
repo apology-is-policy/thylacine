@@ -96,9 +96,22 @@ mid-handler.
 
 The shared return trampoline handles the ordinary case: a thread that entered
 via an exception returns the way it came. It is always reached with interrupts
-masked — hardware masked them on entry and nothing on the path unmasks — so it
-installs the return address and the saved processor state in the same masked
-instant that it `eret`s.
+masked, so it installs the return address and the saved processor state in the
+same masked instant that it `eret`s.
+
+**Why it is reached masked changed at ARCH 8.12, and the old reason is no
+longer true.** It used to be "hardware masked them on entry and nothing on the
+path unmasks". A syscall body now runs with interrupts ON: `syscall_dispatch`
+unmasks after setting the per-thread in-syscall marker, and re-masks
+UNCONDITIONALLY before returning. So the property is preserved by a re-mask
+rather than by an absence, which is a weaker guarantee and is therefore
+asserted rather than assumed — `el0_return_stop_check` carries an
+interrupt-state assert, and it sits in that function precisely because its only
+two callers are the two tails that reach this trampoline.
+
+The unmask is confined to the syscall body. Kernel fault handling shares the
+EL0-synchronous slot and is **not** unmasked, so the recursion guard on that
+slot keeps its discriminator.
 
 The other two are hand-rolled. One takes a kernel thread into EL0 for the first
 time after loading an ELF; the other is the initial entry point for a thread
