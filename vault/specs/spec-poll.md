@@ -88,8 +88,10 @@ blindness class [[spec-sched-tickless]] has for #363.
 `dev->poll`; TSleepCommit ↔ the flag check + tsleep; Rearm ↔
 `poll_unhook_all`; LoopCheck / ParkDeath / StopResume ↔ the loop's
 `thread_die_pending` + `proc_stop_sleeper_park`; Resample ↔ the
-re-registering scan; SpinLapse / BackoffCommit / BackoffTimeout ↔ the
-loop's `nsleeps`-keyed budget and its `poll_never` tsleep; MakeReady ↔
+re-registering scan; Point / PointDone ↔ `kernel/sched.c::sched_preempt_point`,
+crossed by the loop on every non-terminal pass (round 5's SpinLapse /
+BackoffCommit / BackoffTimeout and the `nsleeps`-keyed budget they named are
+GONE, with the code); MakeReady ↔
 `poll_waiter_list_wake`; the timeout
 composes with [[spec-tsleep]]. `specs/check-poll.sh` asserts every
 cfg's verdict (clean counts pinned; each buggy cfg's NAMED property).

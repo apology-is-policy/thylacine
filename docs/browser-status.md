@@ -21,8 +21,25 @@ the JIT question (B-2) instead of guessing.
 |---|---|---|
 | `c09141da` | `docs/BROWSER-DESIGN.md` PROPOSED: six research lanes, the tree's measured starting line, the platform tranche, the JIT mapping, the capability-graph design | docs only |
 | `8cd50a2d` | RATIFIED: the vote recorded (`dec-2026-09-21-browser-engine-order`), this status doc, the NOVEL.md candidate, the track-R brief for aux (`docs/handoffs/041`) | docs only |
+| `af293efc` | scripture: first-party `std` Rust on Pouch is the THIRD userspace substrate (ARCH 3.5) | docs only |
+| `25df504f` | scripture + spec: the mount-table shed at pivot/chroot (#80, ARCH 9.6.10); `specs/territory_shed.tla` + 5 buggy cfgs | `specs/check-territory-shed.sh` |
+| `b8b27f1d` | scripture + spec: poll re-registers every pass, owns death/stop, crosses a preemption point; `specs/poll_cpu.tla` NEW; ARCH 8.1's as-built note | `specs/check-poll.sh` 16/16 |
+| `2a737959` | territory + stalk: the shed, the `..` floor, the dissolved-union degrade, the COPEN strip | suite + `symlink-probe` union-a/b/c 34/0 |
+| `1f14b6c5` | poll: the re-arm, the loop's own death/stop, `sched_preempt_point`, the irqsave list ops, the two-endpoint SrvConn poll | suite; `sched.preempt_point_takes_a_pending_irq` |
+| `92a9ae94` | pouch 0033-0042 + the provers + the census header + `check-patch-hunks.py` | `pouch-hello-*` legs |
+| `b70e1bfd` | the WebKit port: JSCOnly JIT-off, the CMake platform/toolchain files, `CHUNK_WEBKIT`, ICU | `ls-jsc.exp` (6 legs) |
+| `5c08c7fd` | journal: addenda 3-7 | docs only |
+| `3df67cb0` | `vault/record/`: 43 notes -- 10 audit rounds, 27 findings, 5 changes, 1 decision, 1 arc | `quaestor lint` 0 fail |
 
-## B-0 in progress (branch `browser-b0`, WIP -- NOT gated, NOT on `main`)
+## B-0 (built, audited over ten rounds, gated; landed as nine commits)
+
+The working history is the branch `browser-b0` (46 commits, most of them labelled WIP and ungated as
+they went). It was landed as nine coherent commits so that `main` stays bisectable -- the landed tree
+is byte-identical to the branch's, checked with `git diff`. The per-step hashes cited in
+`docs/JOURNAL.md` and in the `vault/record/` notes name working-branch commits.
+
+The arc's record plane is `vault/record/`: one `chg` per change, one `adt` per audit round, one `fnd`
+per finding, and `dec-2026-09-22-point-now-model-next` for the one decision that was the operator's.
 
 **JavaScriptCore runs on Thylacine** (2026-09-21, HVF, JIT off = asm LLInt + IPInt).
 WebKit `webkitgtk-2.54.0`, `PORT=JSCOnly`, static, against ICU 78.3; a 60 MB `ET_EXEC`
@@ -97,30 +114,26 @@ JSC builds locally at `-j5`; all of WebKit will not, and belongs on the GCP buil
 precedent). `ut` does not reset `$errstr` after a success, which cost this run an hour (see
 the journal). A 60 MB binary fetched with the native `curl` into an encrypted home execs fine.
 
-### Where B-0 stands (2026-09-21, evening)
+### Where B-0 stands (2026-09-22)
 
-Everything below is on the local branch `browser-b0`; nothing of B-0 is on `main` yet. The journal
-(`docs/JOURNAL.md`, 2026-09-21 and its addenda) carries the story; this is the ledger.
+The working branch is `browser-b0`; the landed history is the nine commits in the table above.
+`docs/JOURNAL.md` (2026-09-21 and its addenda 1-7) carries the story; `vault/record/` carries the
+per-round evidence; this is the ledger.
 
-- **Built and gated green at `d5c58d76`:** the pouch patches 0033-0041, the #80 mount-table SHED at
-  pivot/chroot (the operator's "design the real fix, keep 32"; the session's 23 mounts become 17 and
-  `viv run` passes), the kernel poll re-arm + two-endpoint SrvConn poll, the dissolved-union rule, the
-  `..` floor. Combined gate: suite 1596/1596; ci fleet 55/77 PASS, 22 SKIP (host artifacts), 0 FAIL, 0
-  retries; SMP gate 40/40, 0 corruption. The codified JSC path RAN end to end there
-  (`tools/build.sh all --config ci --set CHUNK_WEBKIT=y`, cold ICU + JSC): `ls-jsc` passes all six legs,
-  `check-v80-floor --all` OK over 223 ELFs.
-- **Audit rounds so far** (full records in the repo's `memory/` closed lists): pouch/libc rounds 1-4
-  (round 4 on the kernel poll surface: 0 P0 / 2 P1 / 1 P2 / 9 P3, DIRTY) and the shed rounds 1-3
-  (round 3: 0 / 0 / 1 P2 / 6 P3). Every finding is fixed, documented by design, or tracked with a queue
-  item. Rounds 4-5 ran on Opus 5 (the Fable fallback, same-family preamble).
-- **Since `d5c58d76`, built and suite-green (1608/1608), gate in flight:** the shed round-3 fixes and
-  aux's `spoor_clone` COPEN strip (`1d00cea7`); the poll round-4 fixes -- every poll pass
-  re-registers, the loop owns death and stop, the hook-list lock is irqsave (scripture `5f4549d9` +
-  `e55b86ef`, code `abb012b0`), pouch 0042 (the timeout clamp), `patch -F 0` for the musl series. Each
-  new test was shown RED on a kernel with its fix reverted; one first form that was not (the c2s-drain
-  test) was rebuilt. Follow-up audits (poll round 5, shed round 4) are running.
-- **Still owed before `main`:** the gate at the tip (fleet + SMP), the follow-up audits closed, the
-  landing split (eight gated commits), the record notes.
+- **Ten audit rounds.** Pouch/libc 1-4, the shed 1-3, the B-0 self round, poll 5-7. Every P0/P1/P2 is
+  fixed or tracked with a queue item; nothing was closed silently. Rounds 4 onward ran on Opus 5 (the
+  Fable fallback with the same-family preamble, per CLAUDE.md: a round that finishes is closed, and a
+  round is never skipped for want of Fable). Round 7's three P2s were all failures of VERIFICATION
+  rather than of the mechanism, which is the part worth carrying forward:
+  a spec property entailed by the behaviour it was written to exclude (`fnd-b0poll-r7-f2`), tests that
+  could not witness the window they were named for (`fnd-b0poll-r7-f3`), and a latency claim resting
+  on an unbounded walk (`fnd-b0poll-r7-f1`, now `seam-poll-hooks-per-list`).
+- **Every new test rode a RED-before** on a kernel with its own fix reverted
+  (`work/b0/red3/kernel-sab2.py`). Three of those sabotages PASSED at some point and each was a real
+  finding, not a formality: the deadline sabotage (the test asserted the result, not the wake), the
+  c2s-drain sabotage (same shape), and `noisb` -- which is kept in the script as a labelled
+  NON-discriminating control, because the `isb` widens the unmask window and cannot be witnessed here.
+
 - **Owed to the operator (a conversation, not a decision to take here):** the F3-F9 kernel design
   (below: reservations/holes, decommit, guard pages, >256 MiB, per-thread signals, stack, dlopen); the
   small-integer socket fd redesign; and unlink-while-open.
