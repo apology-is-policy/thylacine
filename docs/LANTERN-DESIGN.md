@@ -241,10 +241,24 @@ is the only reason that is known:
 - The display `scale` verb (100–200 %, step 25, chord Super+=) multiplies
   everything on top, and is already built, gated and live.
 
-So the minimal in-idiom change for slide-sized type is to make the document's
-type scale `vw`-bound, reusing `vw()` — not a new mechanism, and not a
-manifest key (§5). **Owed, not built.** Until then a deck is read at Instrument
-sizes times the display scale.
+### 10.1 Measured: the existing scale verb already closes it
+
+Before proposing any change to halcyond's type, the cheap possibility was
+measured: **run the deck and press Super+= to the ceiling.** At 200 % the body
+renders near 30 px and the H1 near 48 px, the slide fills the screen, and it
+reads from across a room (`build/lantern-rich-slide2-200.png`, leg 4 of
+`ls-halcyon-lantern.exp`).
+
+**So there is nothing owed for the operator to present.** The path is: open a
+tile, `Super+F` to zoom, `Super+=` to taste, `lantern <deck>`. Zero code.
+
+That demotes the `vw`-bound document type scale from a blocker to an optional
+refinement — it would make a deck presentable *without* the display-wide scale,
+which is nicer but is not required. It stays unbuilt deliberately: the
+Instrument type scale is display-wide and the operator has tuned that look
+(they called a 10 px prompt "rather small and not prominent" on 2026-09-08), so
+changing it globally is their call and not an autonomous one, deck-arc grant or
+not.
 
 ## 11. Settled by looking (2026-09-22), and what is left
 
@@ -270,16 +284,14 @@ session at 1280×800 and capturing, not by reading more code
    projected slide. Hiding it means `ESC[?25l`, and whether that reaches
    halcyond's `paints_caret` is unverified, so it is NOT guessed at here.
 
-**And the one real gap, now measured rather than predicted: TYPE SIZE.** On a
-1280×800 display the body renders at the Instrument 15 px and the H1 near 24 px,
-which is comfortable at a desk and too small from the back of a room. The slide
-also occupies only the top third of the screen, and the fix for that is the same
-one: **bigger type, not vertical centring**, because centring is a layout op and
-§9 forbids reaching for one.
+5. **Type size at the default scale is too small for a room** — the body renders
+   at the Instrument 15 px and the H1 near 24 px, and the slide fills only the
+   top third. The fix is **bigger type, not vertical centring**, because
+   centring is a layout op and §9 forbids reaching for one.
 
-So §10's owed change is confirmed by the look: make the document's type scale
-`vw`-bound, reusing the `vw(pct, lo, hi)` that already sizes the Instrument H1.
-That is the whole of what stands between this and a presentable deck.
+   **But that is already solved by the display scale** (§10.1): at 200 % the
+   deck reads from across a room with no code at all. Nothing is owed for the
+   operator to present.
 
 ## 12. What this facility does not do
 

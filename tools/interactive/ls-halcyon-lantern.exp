@@ -131,6 +131,22 @@ if {$ink_two < 2000} {
 }
 lc_pass "ls-halcyon-lantern(3): slide two is DRAWN, not merely different -- the clear repainted"
 
+# (4) The display scale, which is the answer to "can this be presented from the
+# back of a room" that costs NO code: SCALE_MIN 100 / SCALE_MAX 200 / STEP 25,
+# already built, gated and chorded. Four presses reach the ceiling from any
+# EDID-derived start, because the verb clamps. The assertion is only that the
+# slide STILL RENDERS at the ceiling -- deliberately not that the screen
+# changed, because a display already at 200 % is a legitimate no-op and a gate
+# that failed on it would be asserting the fixture, not the feature.
+for {set i 0} {$i < 4} {incr i} { key "meta_l+equal" }
+set big [capture slide2-200]
+set ink_big [ink $big]
+lc_step "ink at the scale ceiling: $ink_big"
+if {$ink_big < 2000} {
+    lc_fail "the slide stopped rendering at the scale ceiling (ink $ink_big)"
+}
+lc_pass "ls-halcyon-lantern(4): the deck survives the display scale ceiling"
+
 type "q"
 after 800
 lc_quit
