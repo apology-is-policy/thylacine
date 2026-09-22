@@ -1166,53 +1166,76 @@ void test_sched_preempt_point_takes_a_pending_irq(void) {
 // tree could report stack depth -- the only figure was a static
 // `-fstack-usage` bound with 797 unfollowed indirect edges under it.
 //
-// This test is written to FAIL on each way the instrument can be wrong, not
-// merely to observe a plausible number:
+// THE TEST MEASURES A THREAD IT CREATES, NOT ITSELF, and the first draft
+// taught me why: it asserted on `current_thread()` and failed with "the test
+// thread owns a kstack" -- because the in-kernel test phase runs on the boot
+// kthread, which has kstack_base == NULL and lives on cpu0's _boot_stack. A
+// premise about the environment, not about the thing under test.
 //
-//   poison never written  -> nothing matches, `used` reads the full usable
-//                            region, and the `< THREAD_KSTACK_SIZE` assert
-//                            fires.
-//   scan runs the wrong   -> `used` collapses toward 0 and the
-//   way, or off the wrong    `after >= reached` assert fires, because we
-//   end                      PROVABLY touched that address.
-//   watermark does not    -> same assert: `reached` is measured from the
-//   follow the frontier      probe's own frame, not assumed.
+// Written to FAIL on each way the instrument can be wrong:
+//
+//   poison never written -> a never-run thread reads the FULL usable region
+//                           instead of 0, and the first assert fires. This is
+//                           the strongest discrimination available: a fresh
+//                           thread's stack is entirely poison by construction,
+//                           so the expected value is exact, not a range.
+//   scan runs the wrong  -> `used` collapses toward 0 and `used >= reached`
+//   way / off the end       fires, because we PROVABLY touched that address.
+//   watermark does not   -> same assert; `reached` is measured from a real
+//   follow the frontier     address in the probe's own frame, never computed
+//                           from the constant below.
 #define KSW_PROBE_BYTES 6144u
 
-// Returns the depth (bytes below the stack top) actually reached at the bottom
-// of its own frame. Measured from a real address in that frame rather than
-// computed from KSW_PROBE_BYTES, so the assertion below rests on where the
-// stack DID go, not on where a constant says it should have.
+static volatile u32 g_kstack_probe_reached;
+static volatile u32 g_kstack_probe_done;
+
+// Burns a frame of known size, then records the depth its own locals actually
+// reached -- measured from `&pad[0]`, so the assertion rests on where the
+// stack DID go rather than on where KSW_PROBE_BYTES says it should have.
 __attribute__((noinline))
-static u32 kstack_probe_burn(const struct Thread *t) {
+static void kstack_probe_entry(void) {
     volatile u8 pad[KSW_PROBE_BYTES];
     for (unsigned i = 0; i < KSW_PROBE_BYTES; i += 64)
         pad[i] = (u8)i;
-    u64 top = (u64)(uintptr_t)t->kstack_base + THREAD_KSTACK_TOTAL_SIZE;
-    return (u32)(top - (u64)(uintptr_t)&pad[0]);
+
+    struct Thread *me = current_thread();
+    u64 top = (u64)(uintptr_t)me->kstack_base + THREAD_KSTACK_TOTAL_SIZE;
+    g_kstack_probe_reached = (u32)(top - (u64)(uintptr_t)&pad[0]);
+    __atomic_store_n(&g_kstack_probe_done, 1u, __ATOMIC_RELEASE);
+    sched();
 }
 
 void test_thread_kstack_watermark_follows_the_frontier(void) {
-    struct Thread *self = current_thread();
-    TEST_ASSERT(self != NULL, "there is a current thread");
-    TEST_ASSERT(self->kstack_base != NULL,
-                "the test thread owns a kstack (a per-CPU BSS-stack thread has none)");
+    g_kstack_probe_reached = 0;
+    __atomic_store_n(&g_kstack_probe_done, 0u, __ATOMIC_RELAXED);
 
-    u32 before = thread_kstack_used(self);
-    TEST_ASSERT(before > 0,
-                "we are running on this stack, so some of it is used");
-    TEST_ASSERT(before < THREAD_KSTACK_SIZE,
-                "the poison IS written (an unpoisoned stack reads as fully used)");
+    struct Thread *t = thread_create(kproc(), kstack_probe_entry);
+    TEST_ASSERT(t != NULL, "thread_create failed");
+    TEST_ASSERT(t->kstack_base != NULL,
+                "a thread_create'd thread owns a kstack of its own");
 
-    u32 reached = kstack_probe_burn(self);
-    u32 after   = thread_kstack_used(self);
+    // The exact assert. A thread that has never been dispatched has touched
+    // none of its stack, so every word is still poison and the watermark is
+    // precisely 0. Without the poison this reads THREAD_KSTACK_SIZE.
+    TEST_EXPECT_EQ(thread_kstack_used(t), 0u,
+        "a never-run thread's usable stack is entirely poison");
 
-    TEST_ASSERT(reached > before,
-                "the probe went deeper than the prior mark -- else the next "
-                "assert would pass without testing anything");
-    TEST_ASSERT(after >= reached,
-                "the watermark followed the frontier down to an address we "
-                "provably touched");
-    TEST_ASSERT(after < THREAD_KSTACK_SIZE,
+    ready(t);
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_kstack_probe_done, __ATOMIC_ACQUIRE) != 0u);
+
+    u32 reached = g_kstack_probe_reached;
+    u32 used    = thread_kstack_used(t);
+
+    TEST_ASSERT(reached >= KSW_PROBE_BYTES,
+                "the probe's frame really is as deep as it claims");
+    TEST_ASSERT(used >= reached,
+                "the watermark followed the frontier down to an address the "
+                "probe provably touched");
+    TEST_ASSERT(used < THREAD_KSTACK_SIZE,
                 "and stayed inside the usable region");
+
+    // The probe is suspended inside its own sched(), RUNNABLE in the tree --
+    // the dispatch_smoke pattern. thread_free unlinks and reclaims it, so the
+    // next test still finds an empty run tree.
+    thread_free(t);
 }
