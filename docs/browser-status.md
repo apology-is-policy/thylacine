@@ -155,7 +155,7 @@ per-round evidence; this is the ledger.
 
 Not a browser chunk, but sequenced here because the operator put it before the
 browser arc's kernel work and because B-0's audit is what surfaced the defect
-it repairs. Eleven commits off `main` @`ca1c7030`; tip `df83f1bb`.
+it repairs. Seventeen commits off `main` @`ca1c7030`; tip `ce802b56`.
 
 **Syscall bodies now run with interrupts ON and are still non-preemptible** --
 ARCH 8.1's line as written, which Phase 0 deferred and P3-Ec accidentally built
@@ -176,14 +176,32 @@ because `viv_tier2`'s switch unioned getdents64's 4.6 KiB of staging into every
 phenotype syscall's frame. Fixed (`e7c83ec6`); worst case is now 75.5% WITH the
 new IRQ frame.
 
+**Audit round 1 closed 2026-09-22: 0 P0 / 1 P1 / 1 P2 / 6 P3, all fixed**
+(`dc77a4b0` + `ce802b56`). An **OPUS FALLBACK** round -- Fable was out of
+credits and the rule is never to skip a round for want of it -- so the
+family-diversity axis was forfeited and context independence was not; note the
+tier when weighing it. The prime target (a lock-free read-modify-write on state
+an IRQ handler also writes -- the class the chunk's lock sweep did NOT cover)
+came back **clean**.
+
+The P1 was a false claim in ARCH 8.12 itself: it said five latent single-CPU
+hangs were fixed unlooked-for, and `loom_free`'s spin on a KTHREAD's exit flag
+is not one of them -- `in_syscall` refuses the switch that would run the
+kthread. Servicing an interrupt is not scheduling a thread. Scripture
+corrected; the defect is **OPEN, pre-existing, and tracked**. The P2 was an
+unprivileged masked-window DoS in `/ctl/kstack`, an instrument this chunk had
+added two commits earlier -- now `CAP_HOSTOWNER`-gated with a budgeted scan.
+
 | bar | state |
 |---|---|
-| suite @`13306e92` | 1616/1616 PASS (CI image, HVF) |
+| suite @tip `ce802b56` | **1616/1616 PASS** |
 | poll spec gate | ALL CFGS AS CLAIMED (4 clean + 7 buggy) |
-| `syscall_irqs` gate | 8 cfgs on their named verdicts; 2 sabotages turn it red |
-| SMP gate | in flight at handoff |
-| suite @tip | **NOT RUN** |
-| fleet, audit round | **NOT RUN** |
+| `syscall_irqs` gate | 8 cfgs on their named verdicts, clean at 18 states; the tail-check sabotage now caught (it was NOT, before the close) |
+| SMP gate @`dd0e9ce1` | **PASS -- 40/40 boots, 0 corruption** (default/ubsan x smp4/smp8) |
+| SMP gate @tip | owed -- the close changed kernel code |
+| `tools/test-fault.sh` | **8 PASS / 0 FAIL of 8** -- all three kernel-stack GUARD variants fire (`kstack_overflow`, `secondary_stack_guard`, `bootcpu_idle_guard`), plus `recursive_kernel_fault` and `el1_sync_runaway`, the nested-exception cases this chunk makes more reachable. Added to this chunk's bar MID-RUN: the chunk deepens the kernel stack and this is the only runtime witness that an overflow FAULTS into a no-access guard rather than corrupting its neighbour. A bar that omits the one gate aimed at the hazard the change creates is a bar that verifies around it. |
+| kstack runtime witness | **peak=10448 of 16384 = 63.8%** on a default boot, now printed every boot |
+| fleet | **NOT RUN** |
 
 ## Remaining work (in order; BROWSER-DESIGN section 9)
 

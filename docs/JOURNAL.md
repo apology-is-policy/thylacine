@@ -22,6 +22,120 @@ needed the operator.
 
 
 ---
+## 2026-09-22, later (main, Opus 5 1M, effort max) -- the ARCH 8.1 audit close: the prime target was clean and the P1 was in the scripture
+
+Same day, after the build run below. Two commits: `dc77a4b0` (the close) and
+`ce802b56` (the last finding). Counts: **0 P0, 1 P1, 1 P2, 6 P3**.
+
+**The round ran on the fallback tier, and that is not a footnote.** Fable was
+out of credits -- the first spawn died on a 429 before producing any report.
+The standing rule is never to skip a round for want of Fable and, on credit
+exhaustion, to go straight to the fallback rather than retry it, so the round
+ran on Opus. The implementation agent was also Opus, so the family-diversity
+axis was forfeited; context independence survived in full, and the prompt said
+so explicitly and required the prosecutor to re-derive every load-bearing claim
+from the code rather than accept a comment, a commit message or a dossier. It
+did: it rebuilt the lock sweep independently from the `gic_attach` registration
+list rather than taking the chunk's word for it. A Fable round on this surface
+is still worth having.
+
+**The prime target came back clean, which is worth as much as a finding.** The
+round was aimed at the one class the chunk's own reconnaissance had not swept:
+a lock-free read-modify-write on state an IRQ handler also writes -- implicitly
+atomic under the old mask, for free, without a single author ever writing it
+down. Nothing. `preempt_count`'s RMW is inc/dec-balanced before IRQ return so a
+nested handler's net delta is zero; `slice_remaining` and `util` are written
+only from the tick or from inside `sched()`'s mask; the caught-note sub-field
+is a mask over a `u32`, not a C bitfield, so there is no neighbouring-bit
+hazard; `in_syscall` is a standalone `u8` between a `u32` and a `bool`.
+
+**The P1 was a false claim in binding scripture, and it was mine.** ARCH 8.12
+said five latent single-CPU hangs were "fixed unlooked-for" by interrupts-on.
+Two are: `irqfwd.c:288` and `pci_irq.c:481` spin on counters an INTERRUPT
+HANDLER decrements, so under the old mask the same-CPU handler could never run.
+One never was broken -- `gic_synchronize_cpu` short-circuits for self one line
+above its spin and otherwise waits on a REMOTE CPU under a timeout. One is
+marginal. And `loom_free`'s join is NOT fixed: it spins until the sqpoll
+KTHREAD sets `sqpoll_exited`, from inside a syscall body, so `in_syscall` makes
+`preempt_check_irq` return without switching, and at `-smp 1` there is no peer
+to run the kthread. **Servicing an interrupt is not scheduling a thread.**
+
+That is the same conflation Phase 0's "defer preemption" underwent when P3-Ec
+built it as "mask interrupts" -- committed in the section written to correct
+it, by the author who had spent the day tracing the original. The scripture is
+corrected; the defect is untouched, pre-existing, and now tracked, and its fix
+is a blocking wait, because a spin inside a non-preemptible body can never wait
+on a thread.
+
+**The P2 was an unprivileged DoS in an instrument built two commits earlier.**
+`/ctl/kstack` was world-readable and re-ran, on every `read()` at every offset,
+an IRQ-MASKED proc-table-locked scan of up to 16 KiB per live thread -- and the
+scan's cost is INVERTED, since it stops at the first touched word, so a SHALLOW
+thread costs MORE. At `PROC_THREAD_MAX` = 256 that is 4 MiB of masked scanning
+per read, holding a CPU masked and blocking every fork/exit/wait behind the
+proc-table lock: defeating, on that CPU, the exact interrupt-latency property
+the chunk exists to establish. Gated on `CAP_HOSTOWNER` and the scan budgeted
+with VISIBLE truncation, because a truncated watermark reports a SHALLOWER
+number than the truth and a silent floor is worse than no gauge at all.
+
+**The fix I wrote for the spec finding was itself undetectable, and only the
+sabotage said so.** F7 was that `TailTookItsPreempt` was tautological: the eret
+window was gated on `(~resched \/ Defers)`, which with the marker clear is
+literally the invariant's own text, so a model in which the tail's preempt
+check were simply ABSENT would have passed it. I restructured the check into
+its own step that records its verdict, re-ran the gate, got eight green
+verdicts, and nearly stopped there. Running the sabotage -- deleting
+`TailPreemptCheck` from `Next` -- **PASSED**. The gate passes TLC's `-deadlock`
+flag, which DISABLES deadlock checking, so the wedge the fix creates was
+invisible to the very gate meant to catch it. Clean cfgs now run
+deadlock-checked; the same sabotage reports "Deadlock reached" at 14 distinct
+states against the clean 18. Two layers of "a control must prove
+discrimination" in one finding, and the second layer was only visible because
+the rule says to run the sabotage even when the gate is already green.
+
+**A hypothesis I raised and killed.** Self-auditing in parallel, I thought the
+extinction path assumed an INHERITED mask -- which would mean an extinction
+from a syscall body holds `g_cons_tx.lock` with interrupts on and self-
+deadlocks against the same-CPU TX IRQ, turning a diagnosable `EXTINCTION:` into
+a silent hang, the tooling-ABI gate-blindness class. Wrong:
+`cons_tx_claim_for_dump`'s first line is `msr daifset, #2`. The mask is
+established locally. The comment at `extinction.c:152` states it as an ambient
+fact, which is how I misread it -- read the code, not the comment. It leaves a
+real residue: that sentence was true for two reasons before this chunk and is
+true for one now, which is a miss in the `13306e92` doc sweep whose whole job
+was rebuilding the arguments that rested on the masked syscall.
+
+**F8 turned the instrument on itself.** The chunk's kernel-stack table came
+from `-fstack-usage` over a DWARF-resolved call graph with **797 unresolved
+indirect edges**, so every figure is a LOWER bound -- and the runtime watermark
+built in the same chunk to answer that had never been read. It was, as the
+prosecutor put it, only a claim about itself. Every boot now prints
+`boot-kstack: peak=10448 usable=16384` before the banner: **63.8%**, on a
+phenotype probe's thread, which is the chain the static measurement predicted
+would be deepest. The two numbers are not the same quantity and their agreement
+is not the test -- 12368 B is the worst case over paths the graph could FOLLOW,
+10448 B is the deepest a thread actually TOOK, and measured-below-static
+confirms nothing by itself. What it buys is the one observation that would
+matter: a boot exceeding the static bound proves the graph missed an edge, and
+that is now taken every boot rather than by hand, which is the only form in
+which it would be taken at all.
+
+**Something I added to my own bar mid-run.** `tools/test-fault.sh` was not in
+this chunk's verification plan, and should have been from the start: the chunk
+adds an IRQ frame to the deepest kernel path, and that script is the only
+runtime witness that the kernel-stack GUARD PAGES actually FIRE rather than an
+overflow corrupting its neighbour. This file already records it sitting unrun
+for a month while it hid #244. A bar that omits the one gate aimed at the
+hazard your change creates is a bar that verifies around the hazard.
+
+**And one thing I broke.** `tools/build.sh` does NOT honour
+`THYLACINE_BUILD_DIR` (only `run-vm.sh` does), so a build I ran expecting an
+isolated scratch directory rebuilt the main checkout's `build/` -- which holds
+the operator's Halcyon image. It is a consistent paired set and the correct
+default config, so the image works; it now carries `arch81` code rather than
+`main`'s, and restoring it is owed.
+
+---
 ## 2026-09-22 (main, Opus 5 1M, effort max) -- ARCH 8.1 built as written: syscall bodies get their interrupts back, and three instruments find things on their first boot
 
 The masked syscall was an accident, traced the day before: Phase 0 deferred
