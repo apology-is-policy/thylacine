@@ -22,6 +22,94 @@ needed the operator.
 
 
 ---
+## 2026-09-22, night (aux, Opus 5 1M, effort xhigh) -- all six closed: four real defects, two wrong tests, and a false measurement I handed the operator
+
+The six findings from the entry below are closed the same day. The split is
+what I would want to remember: **four were real defects in `ut`'s parser, two
+were the tests being wrong.** A test that has never run has never had a chance
+to be right either, so neither side gets the benefit of the doubt, and each one
+was settled from a CONTRACT -- scripture, the rc heritage, or a documented
+state machine -- rather than by editing whichever side was cheaper.
+
+**UT-PARSE-1 was far bigger than its finding.** It presented as "a redirect
+target that is a keyword is refused" (`cmd < in`). Measuring the blast radius
+before fixing the symptom returned eighteen refused forms: **all sixteen
+reserved words were unusable as an argument or a filename anywhere** -- `echo
+if`, `cd in`, `cat case`, `echo a in b`. Patching `parse_redirect_target` would
+have turned the failing test green and left that standing. Fixed as POSIX rule
+1 (also rc's rule): `demote_reserved_word` rewrites the token in place to the
+word it spells, at `parse_simple_command`'s loop **guarded on
+`!words.is_empty()`** and at `parse_redirect_target` unconditionally. The guard
+IS the rule -- without it a pipeline element beginning with a keyword becomes a
+command named `if`. In the parser rather than a lexer mode, because a mode has
+to be right everywhere while a demotion only has to be right where a word is
+already what the grammar asks for.
+
+**UT-PARSE-3**: `(a; (b; c))` was rejected -- the lexer emits `DoubleRParen`
+for any `))`, context-free. Split at the parse site (Rust's own `>>` move), at
+two call sites, and the second is the one the first attempt missed: the split
+must run before JUDGING the statement terminator, not only before looking for
+the end token, because the inner subshell finishes with `))` current. The
+opening side is deliberately NOT symmetric: `((` is the arithmetic opener, so
+`((a; b); c)` reads as arithmetic and fails exactly as in sh, and that is now
+pinned by assertion so a later lexer mode cannot silently change it.
+
+**UT-PARSE-4's cause was better than its symptom.** `expect_kind` HAD an
+`UnexpectedEof` arm -- keyed on `peek_kind() == None`, and therefore
+unreachable, because `tokenize` always appends a synthetic `Eof` TOKEN. Every
+expect site in the parser was discarding the fact that input had ended. I first
+flagged it as possibly breaking the REPL's line continuation; **measuring
+downgraded it before I fixed it** -- the line editor decides submission with its
+own `balance(buffer)` tracker and says so ("intentionally lightweight; the U-5
+parser is authoritative"), and nothing outside `parser/` consumes
+`UnexpectedEof` at all.
+
+**UT-PARSE-2 and UT-EDIT-1 were withdrawn.** `cmd =arg` really is an assignment
+under `UTOPIA-SHELL-DESIGN.md` 6.1's documented `x = value` form; the parser is
+consistent and the test wasn't. `ESC ESC` really does restart the sequence --
+the VT rule -- and consumes the next byte as `ESC a`, the slot reserved for Alt
+bindings; it is internally consistent because a single ESC already swallows the
+next printable. Both tests now pin the real behaviour, including the case worth
+knowing: **`echo =arg` ASSIGNS**, to a variable named `echo`. rc does the same.
+
+**UT-PARSE-5 was the one that needed the operator**, because it was the code
+deviating from scripture rather than a stale test. `scan_backtick` required a
+closing backtick and its comment claimed section 6.6 said so; 6.6 says
+`` `{cmd} ``, which is rc's real form, and the deviation defeated the form's
+only stated purpose -- an actual rc script's `` `{ls} `` failed to lex. Three
+MORE comments carried the same false claim, which is the part worth noting: a
+wrong statement had propagated to every place a reader would check it.
+
+**And then the boot died, on evidence I had given the operator.** The ratified
+change broke ls-ci 3/3 with `EXTINCTION: joey exited non-zero`, because
+`u-subst-test` evaluated the old spelling. My question had said "zero uses of
+either form anywhere in the tree, so nothing breaks either way." The search
+behind that was `grep -rn '`{' --include="*.ut" --include="*.rc" .` -- and
+**there is not one `.ut` or `.rc` file in this tree.** The filter matched zero
+files, so the command could only print nothing. *No matches in the files I
+searched* and *no matches, and I searched no files* are the same output and
+opposite facts. The one consumer was Rust source, which is the only place a
+shell-syntax literal can live in a tree whose shell test corpus is compiled into
+binaries -- so the filter excluded the only category that could match.
+
+The decision was unaffected and the fix is one line. The lesson is not: **a
+measurement attached to a blocking question is load-bearing**, because the
+operator cannot re-derive it, and an unverified negative there converts "I have
+not checked" into "I checked". [[bug-grep-filter-matched-no-files-at-all]].
+
+**Every fix was sabotage-verified**, and one sabotage earned its keep: making
+`expect_kind`'s general arm return `Eof` unconditionally -- the careless version
+of UT-PARSE-4's fix -- passes both original tests and fails ONLY the control I
+added. Writing the wider tests for -1 and -3 also caught two wrong assumptions
+of my own about `((` before the code did.
+
+**Posture**: `tools/test-rust.sh` **1810 tests / 26 crates / 0 failing / 1
+quarantined** (the pre-existing haul interop test, which needs a live server).
+libutopia 309 passed, 0 ignored -- from 0 runnable this morning. ls-ci PASS 38s
+first attempt on the rebuilt image. Full workspace device build clean. Nothing
+running.
+
+---
 ## 2026-09-22, late evening (aux, Opus 5 1M, effort xhigh) -- 399 tests that had never compiled, and the six defects they were holding
 
 After the caret correction (entry below), the queue's next item was "five
