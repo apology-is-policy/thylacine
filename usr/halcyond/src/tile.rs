@@ -1606,7 +1606,10 @@ mod tests {
             "a visibility-only change must still emit a record"
         );
         assert!(!v.cursor_visible, "the vt took the DEC-private 25");
-        assert!(!t.paints_caret(true), "the hidden caret reaches the predicate");
+        assert!(
+            !t.paints_caret(true),
+            "the hidden caret reaches the predicate"
+        );
         assert!(!t.paints_caret(false), "under either profile");
 
         // What lantern writes next: its clear and a slide. The caret stays down
