@@ -13,7 +13,7 @@
 # (SPEC-TO-CODE.md, the poll.tla section); a liveness cfg is 'clean' here.
 # DeathTerminates and StopHonoured also have buggy cfgs of their own, judged
 # like the invariant ones: a TEMPORAL violation of the named property, and so
-# does SpinBounded (round 5's backstop). TLC_WORKERS overrides -workers auto
+# does IrqLatencyBounded (the preemption point). TLC_WORKERS overrides -workers auto
 # when the host is shared.
 set -u
 cd "$(dirname "$0")"
@@ -37,7 +37,7 @@ poll_buggy_lazy_unregister:NoStaleHook
 poll_buggy_return_on_wake:NoSpuriousZero
 poll_buggy_no_loop_die_check:DeathTerminates
 poll_buggy_no_loop_stop_check:StopHonoured
-poll_buggy_no_backstop:SpinBounded"
+poll_buggy_no_point:IrqLatencyBounded"
 
 run() {  # $1 = cfg basename -> sets RC and LOG
     LOG="$TMP/$1.log"

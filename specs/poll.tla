@@ -106,17 +106,18 @@
 (*     never honoured (StopHonoured counterexample). The fix: the loop     *)
 (*     parks on proc_stop_sleeper_park itself when a stop is pending.       *)
 (*                                                                         *)
-(*   BUGGY_NO_BACKSTOP — the round-5 F1 loop: nothing bounds how long a    *)
-(*     poller goes without really sleeping. Syscalls run IRQ-masked, and a *)
-(*     producer that walks a list inside every re-sample window keeps      *)
-(*     every tsleep returning AWOKEN, so a poll(-1) holds its CPU IRQ-     *)
-(*     masked for as long as the noise lasts: every device interrupt, the  *)
-(*     SAK included, stays pending. Any unprivileged program can make that *)
-(*     noise -- a pipe, a writer, a reader, and a poller asking for        *)
-(*     nothing. The fix: when a spin budget lapses with no real sleep in   *)
-(*     it, the loop unhooks every fd and sleeps a short bounded interval   *)
-(*     no producer can cut short, then re-registers (SpinBounded           *)
-(*     counterexample).                                                    *)
+(*   BUGGY_NO_POINT — the round-5 F1 / round-6 S1 loop: nothing services  *)
+(*     interrupts between passes. Syscalls run IRQ-masked, and a producer  *)
+(*     that walks a list inside every re-sample window keeps every tsleep  *)
+(*     returning AWOKEN, so a poll(-1) holds its CPU IRQ-masked for as     *)
+(*     long as the noise lasts: every device interrupt, the SAK included,  *)
+(*     stays pending. Any unprivileged program can make that noise -- a    *)
+(*     pipe, a writer, a reader, and a poller asking for nothing. Round 5  *)
+(*     slept a bounded interval once a budget lapsed, but keyed on the     *)
+(*     thread while the obligation is the CPU's: two pollers on one CPU    *)
+(*     each sleep and hand it back and forth, still masked (S1). The fix:  *)
+(*     each re-loop crosses a preemption point that unmasks IRQs, reached  *)
+(*     no matter what any producer does (IrqLatencyBounded counterexample).*)
 (*                                                                         *)
 (* CFG MATRIX (executable documentation per CLAUDE.md spec-first policy)    *)
 (*                                                                         *)
@@ -131,7 +132,7 @@
 (*                                        that walks the lists forever) +  *)
 (*                                        StableReadyReturns +             *)
 (*                                        DeathTerminates + StopHonoured + *)
-(*                                        SpinBounded.                     *)
+(*                                        IrqLatencyBounded.               *)
 (*   poll_liveness_notimeout.cfg         Spec_Live, HAS_TIMEOUT FALSE —    *)
 (*                                        StableReadyReturns: a poll(-1)   *)
 (*                                        may block forever, but not on an *)
@@ -139,7 +140,8 @@
 (*                                        its Proc is dying (DeathTermin-  *)
 (*                                        ates) or stopped (StopHonoured); *)
 (*                                        and noise never keeps it from    *)
-(*                                        sleeping (SpinBounded).          *)
+(*                                        a preemption point               *)
+(*                                        (IrqLatencyBounded).             *)
 (*   poll_buggy_check_before_register.cfg BUGGY_CHECK_BEFORE_REGISTER —    *)
 (*                                        NoMissedPoll counterexample.     *)
 (*   poll_buggy_no_wake.cfg              BUGGY_NO_WAKE — NoMissedPoll      *)
@@ -150,14 +152,16 @@
 (*                                        NoMissedPoll counterexample.     *)
 (*   poll_buggy_return_on_wake.cfg       BUGGY_RETURN_ON_WAKE —           *)
 (*                                        NoSpuriousZero counterexample.   *)
-(*   poll_buggy_no_loop_die_check.cfg    BUGGY_NO_LOOP_DIE_CHECK +         *)
-(*                                       BUGGY_NO_BACKSTOP, poll(-1)       *)
-(*                                       — DeathTerminates counterexample. *)
-(*   poll_buggy_no_loop_stop_check.cfg   BUGGY_NO_LOOP_STOP_CHECK +        *)
-(*                                       BUGGY_NO_BACKSTOP, poll(-1)       *)
-(*                                       — StopHonoured counterexample.    *)
-(*   poll_buggy_no_backstop.cfg          BUGGY_NO_BACKSTOP, poll(-1)       *)
-(*                                       — SpinBounded counterexample.     *)
+(*   poll_buggy_no_loop_die_check.cfg    BUGGY_NO_LOOP_DIE_CHECK,         *)
+(*                                       poll(-1) — DeathTerminates        *)
+(*                                       counterexample (the point does    *)
+(*                                       not check death, so it does not   *)
+(*                                       mask the missing die-check).      *)
+(*   poll_buggy_no_loop_stop_check.cfg   BUGGY_NO_LOOP_STOP_CHECK,         *)
+(*                                       poll(-1) — StopHonoured           *)
+(*                                       counterexample.                   *)
+(*   poll_buggy_no_point.cfg             BUGGY_NO_POINT, poll(-1)          *)
+(*                                       — IrqLatencyBounded counterexample.*)
 (*                                                                         *)
 (* MODELING ASSUMPTIONS                                                     *)
 (*                                                                         *)
@@ -214,24 +218,23 @@
 (*   FinalSample. Every exit from it is terminal except one: its stop      *)
 (*   check can PARK first, and resume into the same terminal exits. That   *)
 (*   park is LoopCheck's, already checked on the other passes, so the fold *)
-(*   loses a stutter-equivalent detour, not a behavior. (The backoff's     *)
-(*   TIMEDOUT is not folded: BackoffTimeout loops back through LoopCheck.) *)
+(*   loses a stutter-equivalent detour, not a behavior.)                   *)
 (*                                                                         *)
-(*   THE SPIN BUDGET (round 5). `spun` says the budget has lapsed since    *)
-(*   the poller last really slept. SpinLapse raises it, fairly, whenever   *)
-(*   the poller is awake -- time passes -- and entering any real sleep     *)
-(*   (the tsleep, a park, the backoff) lowers it: the code's comparison of *)
-(*   the thread's nsleeps counter, which a park moves too (it sleeps on    *)
-(*   debug_rendez). The code tests the budget only on a noise pass, as     *)
-(*   EvaluateWake does. The backoff's own short deadline is not modeled as *)
-(*   lapsing before its tsleep commits: it is computed one pass earlier,   *)
-(*   and a backoff that returned without sleeping would only leave `spun`  *)
-(*   up and back off again. The loop's die-check and stop park are no      *)
-(*   longer the ONLY way out of a noise loop -- the backoff's tsleep has   *)
-(*   its own -- so their buggy cfgs turn the backstop off to isolate them. *)
-(*   In the code they keep death and a stop prompt (one pass), where the   *)
-(*   backstop alone would take a budget; the kernel tests pin that with    *)
-(*   the backoff counter.                                                  *)
+(*   THE PREEMPTION POINT (round 5 F1 + round-6 S1, operator decision      *)
+(*   2026-09-22). Each re-loop, after the die/stop checks and before the   *)
+(*   re-register, the poller crosses `atpoint` (LoopCheck -> Point ->      *)
+(*   cleared): the code's sched_preempt_point, which briefly unmasks IRQs  *)
+(*   at a lock-free spot so every pending interrupt is taken. It is        *)
+(*   UNCONDITIONAL -- no producer action gates it -- which is why its      *)
+(*   bound composes across pollers on one CPU where round 5's sleep budget *)
+(*   did not (S1: two masked pollers hand a CPU back and forth, each       *)
+(*   really sleeping). The thread switch the window may raise is deferred  *)
+(*   (preempt_count held across it) and honored right after; the model     *)
+(*   folds that as a stutter, as it does sched_yield_hint. atpoint is not  *)
+(*   a sleep -- the CPU is not yielded -- but it services interrupts, so   *)
+(*   IrqLatencyBounded counts it beside the real sleeps. Building the      *)
+(*   IRQs-on syscall body that lets the point be deleted is a separate     *)
+(*   chunk (ARCHITECTURE.md 8.1).                                          *)
 (*                                                                         *)
 (* See ARCHITECTURE.md §23.3 (poll/select), §28 invariant I-9; tsleep.tla  *)
 (* (the deadline-bounded `Rendez` sleep poll builds on); scheduler.tla     *)
@@ -264,9 +267,10 @@ CONSTANTS
                                   \*   death to tsleep's die-check alone.
     BUGGY_NO_LOOP_STOP_CHECK,     \* BOOLEAN — TRUE: the re-arm loop leaves
                                   \*   a stop to tsleep's detour alone.
-    BUGGY_NO_BACKSTOP             \* BOOLEAN — TRUE: no spin budget; a noise
-                                  \*   pass always goes straight back to the
-                                  \*   flag-sensitive tsleep.
+    BUGGY_NO_POINT                \* BOOLEAN — TRUE: the loop skips the
+                                  \*   preemption point, so a noise pass goes
+                                  \*   straight back to the flag-sensitive
+                                  \*   tsleep and the CPU never unmasks.
 
 ASSUME Fds # {}
 ASSUME HAS_TIMEOUT                 \in BOOLEAN
@@ -277,7 +281,7 @@ ASSUME BUGGY_CLEAR_AFTER_SAMPLE    \in BOOLEAN
 ASSUME BUGGY_RETURN_ON_WAKE        \in BOOLEAN
 ASSUME BUGGY_NO_LOOP_DIE_CHECK     \in BOOLEAN
 ASSUME BUGGY_NO_LOOP_STOP_CHECK    \in BOOLEAN
-ASSUME BUGGY_NO_BACKSTOP           \in BOOLEAN
+ASSUME BUGGY_NO_POINT              \in BOOLEAN
 
 VARIABLES
     pc,               \* the poll call's lifecycle ∈ PCs (see below).
@@ -298,13 +302,11 @@ VARIABLES
                       \*   (thread_die_pending). Monotonic.
     stop_req,         \* BOOLEAN — a debugger or job-control stop is pending
                       \*   (proc_stop_requested).
-    stop_used,        \* BOOLEAN — the one stop request of a behavior has been
+    stop_used         \* BOOLEAN — the one stop request of a behavior has been
                       \*   made (see MODELING ASSUMPTIONS).
-    spun              \* BOOLEAN — the spin budget has lapsed since the poller
-                      \*   last really slept (see MODELING ASSUMPTIONS).
 
 vars == <<pc, ready, registered, flagged, seen, deadline_passed, dying, stop_req,
-          stop_used, spun>>
+          stop_used>>
 
 \* "start"         — poll() entered; no hook installed, nothing sampled.
 \* "checked"       — BUGGY path only: readiness sampled, no hook installed.
@@ -324,23 +326,23 @@ vars == <<pc, ready, registered, flagged, seen, deadline_passed, dying, stop_req
 \* "final"         — the final sample is done; evaluate it.
 \* "done_ready"    — poll returned >= 1 ready fd.
 \* "done_timeout"  — poll returned 0.
-\* "backoff"       — the backstop: the budget lapsed on a noise pass; every
-\*                   hook is off its list, the bounded never-true tsleep is
-\*                   next.
-\* "backingoff"    — asleep in the backoff. No hook is listed, so no producer
-\*                   can wake it: only its deadline, death, or a stop.
-\* "bparked"       — the backoff tsleep's own stop detour (no hook listed).
+\* "atpoint"       — the preemption point (sched_preempt_point): hooks off, no
+\*                   lock held, IRQs briefly unmasked so every pending
+\*                   interrupt is taken. Reached each noise pass; the switch
+\*                   is deferred (not taken here).
 \* "done_intr"     — poll unwound for death (the result is immaterial: the
 \*                   thread dies at its EL0-return tail).
 PCs      == {"start", "checked", "scanned", "armed", "sleeping", "tsparked",
              "woken", "unhooked", "loopparked", "cleared", "sampled_dirty",
-             "rescanned", "timedout", "final", "backoff", "backingoff",
-             "bparked", "done_ready", "done_timeout", "done_intr"}
+             "rescanned", "timedout", "final", "atpoint",
+             "done_ready", "done_timeout", "done_intr"}
 Terminal == {"done_ready", "done_timeout", "done_intr"}
-Parked   == {"tsparked", "loopparked", "bparked"}
+Parked   == {"tsparked", "loopparked"}
 \* Every state in which the poller has given up its CPU (the code's nsleeps
-\* moves): the flag-sensitive tsleep, the backoff, and all three parks.
-RealSleep == {"sleeping", "backingoff"} \cup Parked
+\* moves): the flag-sensitive tsleep and the two parks. The preemption point
+\* (atpoint) is NOT a sleep -- it does not yield the CPU -- but it services
+\* interrupts, so IrqLatencyBounded counts it alongside these.
+RealSleep == {"sleeping"} \cup Parked
 
 TypeOk ==
     /\ pc              \in PCs
@@ -352,7 +354,6 @@ TypeOk ==
     /\ dying           \in BOOLEAN
     /\ stop_req        \in BOOLEAN
     /\ stop_used       \in BOOLEAN
-    /\ spun            \in BOOLEAN
 
 NoneSet == [f \in Fds |-> FALSE]
 AllSet  == [f \in Fds |-> TRUE]
@@ -367,7 +368,6 @@ Init ==
     /\ dying           = FALSE
     /\ stop_req        = FALSE
     /\ stop_used       = FALSE
-    /\ spun            = FALSE
 
 (***************************************************************************)
 (* Expired — the deadline-reached predicate. FALSE whenever the modeled    *)
@@ -400,7 +400,7 @@ MakeReady(f) ==
     /\ ~ready[f]
     /\ ready' = [ready EXCEPT ![f] = TRUE]
     /\ Walk(f)
-    /\ UNCHANGED <<registered, seen, deadline_passed, dying, stop_req, stop_used, spun>>
+    /\ UNCHANGED <<registered, seen, deadline_passed, dying, stop_req, stop_used>>
 
 (***************************************************************************)
 (* Retract — readiness falls again before the poller looks: a competing    *)
@@ -411,7 +411,7 @@ Retract(f) ==
     /\ pc \notin Terminal
     /\ ready[f]
     /\ ready' = [ready EXCEPT ![f] = FALSE]
-    /\ UNCHANGED <<pc, registered, flagged, seen, deadline_passed, dying, stop_req, stop_used, spun>>
+    /\ UNCHANGED <<pc, registered, flagged, seen, deadline_passed, dying, stop_req, stop_used>>
 
 (***************************************************************************)
 (* OtherEvent — f's hook list is walked for an event this poller did NOT   *)
@@ -423,7 +423,7 @@ Retract(f) ==
 OtherEvent(f) ==
     /\ pc \notin Terminal
     /\ Walk(f)
-    /\ UNCHANGED <<ready, registered, seen, deadline_passed, dying, stop_req, stop_used, spun>>
+    /\ UNCHANGED <<ready, registered, seen, deadline_passed, dying, stop_req, stop_used>>
 
 (***************************************************************************)
 (* AdvanceTime — the monotonic counter reaches the poll timeout.           *)
@@ -433,7 +433,7 @@ AdvanceTime ==
     /\ ~deadline_passed
     /\ pc \notin Terminal
     /\ deadline_passed' = TRUE
-    /\ UNCHANGED <<pc, ready, registered, flagged, seen, dying, stop_req, stop_used, spun>>
+    /\ UNCHANGED <<pc, ready, registered, flagged, seen, dying, stop_req, stop_used>>
 
 (***************************************************************************)
 (* Die — the Proc starts group-terminating. The #811 death cascade wakes a *)
@@ -444,9 +444,8 @@ Die ==
     /\ pc \notin Terminal
     /\ ~dying
     /\ dying' = TRUE
-    /\ pc' = IF pc = "sleeping" THEN "armed"
-             ELSE IF pc = "backingoff" THEN "backoff" ELSE pc
-    /\ UNCHANGED <<ready, registered, flagged, seen, deadline_passed, stop_req, stop_used, spun>>
+    /\ pc' = IF pc = "sleeping" THEN "armed" ELSE pc
+    /\ UNCHANGED <<ready, registered, flagged, seen, deadline_passed, stop_req, stop_used>>
 
 (***************************************************************************)
 (* StopRequest — a debugger `stop` or a job-control suspend. The delivery  *)
@@ -458,14 +457,13 @@ StopRequest ==
     /\ ~stop_used
     /\ stop_req'  = TRUE
     /\ stop_used' = TRUE
-    /\ pc' = IF pc = "sleeping" THEN "armed"
-             ELSE IF pc = "backingoff" THEN "backoff" ELSE pc
-    /\ UNCHANGED <<ready, registered, flagged, seen, deadline_passed, dying, spun>>
+    /\ pc' = IF pc = "sleeping" THEN "armed" ELSE pc
+    /\ UNCHANGED <<ready, registered, flagged, seen, deadline_passed, dying>>
 
 (***************************************************************************)
 (* StopResume — the stop is lifted and the parked poller resumes. From     *)
-(* tsleep's detour it re-loops tsleep (`continue`), the backoff's tsleep   *)
-(* included; from the loop's own park it goes on to re-register. Modeled  *)
+(* tsleep's detour it re-loops tsleep (`continue`); from the loop's own    *)
+(* park it goes on to re-register. Modeled                                 *)
 (* only at a settled park -- see                                           *)
 (* MODELING ASSUMPTIONS.                                                    *)
 (***************************************************************************)
@@ -475,8 +473,7 @@ StopResume ==
     /\ stop_req' = FALSE
     /\ pc' = CASE pc = "tsparked"   -> "armed"
                 [] pc = "loopparked" -> "cleared"
-                [] pc = "bparked"    -> "backoff"
-    /\ UNCHANGED <<ready, registered, flagged, seen, deadline_passed, dying, stop_used, spun>>
+    /\ UNCHANGED <<ready, registered, flagged, seen, deadline_passed, dying, stop_used>>
 
 (***************************************************************************)
 (* ParkDeath — DEATH WINS over a stop: proc_stop_sleeper_park returns      *)
@@ -487,7 +484,7 @@ ParkDeath ==
     /\ dying
     /\ pc'         = "done_intr"
     /\ registered' = Unhook
-    /\ UNCHANGED <<ready, flagged, seen, deadline_passed, dying, stop_req, stop_used, spun>>
+    /\ UNCHANGED <<ready, flagged, seen, deadline_passed, dying, stop_req, stop_used>>
 
 (***************************************************************************)
 (* Register — the CORRECT entry. For every fd, `dev->poll` installs the    *)
@@ -501,7 +498,7 @@ Register ==
     /\ pc'         = "scanned"
     /\ registered' = AllSet
     /\ seen'       = ready
-    /\ UNCHANGED <<ready, flagged, deadline_passed, dying, stop_req, stop_used, spun>>
+    /\ UNCHANGED <<ready, flagged, deadline_passed, dying, stop_req, stop_used>>
 
 (***************************************************************************)
 (* BuggyCheck / BuggyRegisterLate — the BUGGY entry: sample, THEN install. *)
@@ -513,14 +510,14 @@ BuggyCheck ==
     /\ pc = "start"
     /\ pc'   = "checked"
     /\ seen' = ready
-    /\ UNCHANGED <<ready, registered, flagged, deadline_passed, dying, stop_req, stop_used, spun>>
+    /\ UNCHANGED <<ready, registered, flagged, deadline_passed, dying, stop_req, stop_used>>
 
 BuggyRegisterLate ==
     /\ BUGGY_CHECK_BEFORE_REGISTER
     /\ pc = "checked"
     /\ pc'         = "scanned"
     /\ registered' = AllSet
-    /\ UNCHANGED <<ready, flagged, seen, deadline_passed, dying, stop_req, stop_used, spun>>
+    /\ UNCHANGED <<ready, flagged, seen, deadline_passed, dying, stop_req, stop_used>>
 
 (***************************************************************************)
 (* EvaluateFirst — the first scan's verdict. Anything seen ready returns;  *)
@@ -529,7 +526,7 @@ BuggyRegisterLate ==
 (***************************************************************************)
 EvaluateFirst ==
     /\ pc = "scanned"
-    /\ UNCHANGED <<ready, flagged, seen, deadline_passed, dying, stop_req, stop_used, spun>>
+    /\ UNCHANGED <<ready, flagged, seen, deadline_passed, dying, stop_req, stop_used>>
     /\ IF \E f \in Fds : seen[f]
        THEN /\ pc' = "done_ready"
             /\ registered' = Unhook
@@ -556,7 +553,6 @@ TSleepCommit ==
                                          /\ registered' = Unhook
        ELSE                                /\ pc' = "sleeping"
                                          /\ registered' = registered
-    /\ spun' = IF pc' \in RealSleep THEN FALSE ELSE spun
 
 (***************************************************************************)
 (* Timeout — the tsleep deadline fires and wakes the sleeping poller.      *)
@@ -565,7 +561,7 @@ Timeout ==
     /\ pc = "sleeping"
     /\ deadline_passed
     /\ pc' = "timedout"
-    /\ UNCHANGED <<ready, registered, flagged, seen, deadline_passed, dying, stop_req, stop_used, spun>>
+    /\ UNCHANGED <<ready, registered, flagged, seen, deadline_passed, dying, stop_req, stop_used>>
 
 (***************************************************************************)
 (* Rearm -- every hook comes off its list. Off the list no producer can    *)
@@ -578,7 +574,7 @@ Rearm ==
     /\ pc'         = "unhooked"
     /\ registered' = NoneSet
     /\ flagged'    = IF BUGGY_CLEAR_AFTER_SAMPLE THEN flagged ELSE NoneSet
-    /\ UNCHANGED <<ready, seen, deadline_passed, dying, stop_req, stop_used, spun>>
+    /\ UNCHANGED <<ready, seen, deadline_passed, dying, stop_req, stop_used>>
 
 (***************************************************************************)
 (* LoopCheck -- the loop's own death and stop checks, with no hook listed. *)
@@ -588,8 +584,8 @@ LoopCheck ==
     /\ pc = "unhooked"
     /\ pc' = IF dying /\ ~BUGGY_NO_LOOP_DIE_CHECK THEN "done_intr"
              ELSE IF stop_req /\ ~BUGGY_NO_LOOP_STOP_CHECK THEN "loopparked"
+             ELSE IF ~BUGGY_NO_POINT THEN "atpoint"
              ELSE "cleared"
-    /\ spun' = IF pc' \in RealSleep THEN FALSE ELSE spun
     /\ UNCHANGED <<ready, registered, flagged, seen, deadline_passed, dying, stop_req, stop_used>>
 
 (***************************************************************************)
@@ -603,14 +599,14 @@ Resample ==
     /\ pc'         = IF BUGGY_CLEAR_AFTER_SAMPLE THEN "sampled_dirty" ELSE "rescanned"
     /\ registered' = AllSet
     /\ seen'       = ready
-    /\ UNCHANGED <<ready, flagged, deadline_passed, dying, stop_req, stop_used, spun>>
+    /\ UNCHANGED <<ready, flagged, deadline_passed, dying, stop_req, stop_used>>
 
 \* The BUGGY order's second half: the flags are cleared after the sample.
 BuggyClearLate ==
     /\ pc = "sampled_dirty"
     /\ pc'      = "rescanned"
     /\ flagged' = NoneSet
-    /\ UNCHANGED <<ready, registered, seen, deadline_passed, dying, stop_req, stop_used, spun>>
+    /\ UNCHANGED <<ready, registered, seen, deadline_passed, dying, stop_req, stop_used>>
 
 (***************************************************************************)
 (* EvaluateWake — the verdict after a wake. Ready returns. NOT ready is    *)
@@ -620,13 +616,14 @@ BuggyClearLate ==
 (* never permits. The poller sleeps AGAIN, against the SAME deadline. The  *)
 (* explicit Expired test bounds the loop: tsleep prefers a set flag to a   *)
 (* passed deadline, so a producer that keeps walking the list would        *)
-(* otherwise keep the poller circling past its timeout. And once the spin *)
-(* budget has lapsed the next sleep is the backoff, which no producer can *)
-(* shorten: the bound a poll(-1) has no deadline to supply (SpinBounded). *)
+(* otherwise keep the poller circling past its timeout. Each re-loop first *)
+(* crosses the preemption point (LoopCheck -> atpoint), where interrupts   *)
+(* are serviced: the bound a poll(-1) has no deadline to supply            *)
+(* (IrqLatencyBounded).                                                    *)
 (***************************************************************************)
 EvaluateWake ==
     /\ pc = "rescanned"
-    /\ UNCHANGED <<ready, seen, deadline_passed, dying, stop_req, stop_used, spun>>
+    /\ UNCHANGED <<ready, seen, deadline_passed, dying, stop_req, stop_used>>
     /\ IF \E f \in Fds : seen[f]
        THEN /\ pc' = "done_ready"
             /\ registered' = Unhook
@@ -635,46 +632,27 @@ EvaluateWake ==
        THEN /\ pc' = "done_timeout"
             /\ registered' = Unhook
             /\ flagged' = flagged
-       ELSE IF spun /\ ~BUGGY_NO_BACKSTOP
-       THEN /\ pc' = "backoff"
-            /\ registered' = NoneSet
-            /\ flagged' = NoneSet
        ELSE /\ pc' = "armed"
             /\ registered' = registered
             /\ flagged' = flagged
 
 (***************************************************************************)
-(* BackoffCommit — the backstop's tsleep: a never-true cond and a deadline *)
-(* one budget out, capped at the poll's own, in tsleep's order: the        *)
-(* deadline, the stop detour, the die-check, the sleep. With no hook       *)
-(* listed nothing a producer does can end it. A poll deadline already past *)
-(* times it out at once, into the loop's checks and the re-register.       *)
+(* Point -- the preemption point (sched_preempt_point). Hooks are off (the *)
+(* re-arm cleared them) and no lock is held, so the poller briefly unmasks  *)
+(* IRQs and every interrupt pending on this CPU is taken on the poller's    *)
+(* own stack, the SAK included. It is UNCONDITIONAL -- no producer can keep *)
+(* the poller from it -- so unlike the sleep it replaced (round 5) its      *)
+(* bound composes across the pollers sharing one CPU (the round-6 S1). The  *)
+(* thread switch is DEFERRED, not taken here: the code holds preempt_count  *)
+(* across the window (the #360 gate) and honors a deferred need_resched     *)
+(* right after, a scheduler concern this model folds as a stutter (like     *)
+(* sched_yield_hint). Not a sleep -- the CPU is not yielded -- but          *)
+(* IrqLatencyBounded counts atpoint as interrupt service regardless.        *)
 (***************************************************************************)
-BackoffCommit ==
-    /\ pc = "backoff"
-    /\ pc' = IF Expired  THEN "unhooked"
-             ELSE IF stop_req THEN "bparked"
-             ELSE IF dying    THEN "done_intr"
-             ELSE "backingoff"
-    /\ spun' = IF pc' \in RealSleep THEN FALSE ELSE spun
+Point ==
+    /\ pc = "atpoint"
+    /\ pc' = "cleared"
     /\ UNCHANGED <<ready, registered, flagged, seen, deadline_passed, dying, stop_req, stop_used>>
-
-\* BackoffTimeout — the backoff's deadline fires: tsleep returns TIMEDOUT, and
-\* the loop runs its checks and re-registers as after any other pass.
-BackoffTimeout ==
-    /\ pc = "backingoff"
-    /\ pc' = "unhooked"
-    /\ UNCHANGED <<ready, registered, flagged, seen, deadline_passed, dying, stop_req, stop_used, spun>>
-
-(***************************************************************************)
-(* SpinLapse — time passes while the poller is awake, and the spin budget  *)
-(* since its last real sleep runs out.                                      *)
-(***************************************************************************)
-SpinLapse ==
-    /\ pc \notin Terminal \cup RealSleep
-    /\ ~spun
-    /\ spun' = TRUE
-    /\ UNCHANGED <<pc, ready, registered, flagged, seen, deadline_passed, dying, stop_req, stop_used>>
 
 (***************************************************************************)
 (* FinalSample / EvaluateFinal — tsleep returned TIMEDOUT. One last sample *)
@@ -685,13 +663,13 @@ FinalSample ==
     /\ pc = "timedout"
     /\ pc'   = "final"
     /\ seen' = ready
-    /\ UNCHANGED <<ready, registered, flagged, deadline_passed, dying, stop_req, stop_used, spun>>
+    /\ UNCHANGED <<ready, registered, flagged, deadline_passed, dying, stop_req, stop_used>>
 
 EvaluateFinal ==
     /\ pc = "final"
     /\ pc' = IF \E f \in Fds : seen[f] THEN "done_ready" ELSE "done_timeout"
     /\ registered' = Unhook
-    /\ UNCHANGED <<ready, flagged, seen, deadline_passed, dying, stop_req, stop_used, spun>>
+    /\ UNCHANGED <<ready, flagged, seen, deadline_passed, dying, stop_req, stop_used>>
 
 (***************************************************************************)
 (* Done — terminal self-loop (keeps TLC's deadlock check quiet).            *)
@@ -713,8 +691,7 @@ PollerStep ==
     \/ FinalSample
     \/ EvaluateFinal
     \/ ParkDeath
-    \/ BackoffCommit
-    \/ BackoffTimeout
+    \/ Point
 
 Next ==
     \/ PollerStep
@@ -722,7 +699,6 @@ Next ==
     \/ \E f \in Fds : Retract(f)
     \/ \E f \in Fds : OtherEvent(f)
     \/ AdvanceTime
-    \/ SpinLapse
     \/ Die
     \/ StopRequest
     \/ StopResume
@@ -744,8 +720,7 @@ HookedReadyIsFlagged ==
         (\A f \in Fds : (registered[f] /\ ready[f]) => flagged[f])
 
 \* NoMissedPoll — ARCH §28 I-9 across N fds: a poller is never left asleep
-\* while a registered fd is ready. (The backoff is not "sleeping": it holds no
-\* hook, is bounded, and re-registers when it ends -- StableReadyReturns.) The headline property. Violated by
+\* while a registered fd is ready. The headline property. Violated by
 \* BUGGY_CHECK_BEFORE_REGISTER (stale sample), BUGGY_NO_WAKE (the event
 \* never wakes the sleeper) and BUGGY_CLEAR_AFTER_SAMPLE (the re-arm wipes
 \* the flag of an event its own sample was too early to see).
@@ -773,12 +748,6 @@ NoSpuriousZero == (pc = "done_timeout") => Expired
 \* debugger holds it (tsleep's detour, by contrast, parks listed).
 ParkedLoopHoldsNoHook == (pc = "loopparked") => (\A f \in Fds : ~registered[f])
 
-\* BackoffHoldsNoHook — the backoff runs, sleeps and parks with every hook off
-\* its list, and so holds no object ref either: that is what makes it a sleep
-\* no producer can shorten. The fds are re-resolved when it ends.
-BackoffHoldsNoHook ==
-    (pc \in {"backoff", "backingoff", "bparked"}) => (\A f \in Fds : ~registered[f])
-
 \* IntrOnlyWhenDying — poll unwinds for death only when its Proc is dying.
 IntrOnlyWhenDying == (pc = "done_intr") => dying
 
@@ -791,7 +760,6 @@ Invariants ==
     /\ TimeoutResultSound
     /\ NoSpuriousZero
     /\ ParkedLoopHoldsNoHook
-    /\ BackoffHoldsNoHook
     /\ IntrOnlyWhenDying
 
 (***************************************************************************)
@@ -815,11 +783,15 @@ Invariants ==
 (* returns, or the stop is lifted (which here happens only at a park).     *)
 (* Violated by BUGGY_NO_LOOP_STOP_CHECK.                                    *)
 (*                                                                         *)
-(* SpinBounded — the poller really sleeps, or returns, again and again:   *)
-(* no producer can keep it awake. Awake means IRQ-masked here -- a        *)
-(* syscall runs so end to end -- so this is the CPU's interrupt latency.  *)
-(* A timeout does not supply it: a producer can hold a poll with ten      *)
-(* seconds left for all ten. Violated by BUGGY_NO_BACKSTOP.               *)
+(* IrqLatencyBounded — the poller reaches a state where its CPU services *)
+(* interrupts (a real sleep, or the preemption point) again and again: no *)
+(* producer can keep it from one. Between them the syscall runs IRQ-      *)
+(* masked, so this IS the CPU's interrupt latency. A timeout does not     *)
+(* supply the bound (a producer can hold a poll with ten seconds left for *)
+(* all ten), and neither does the sleep alone (two pollers on one CPU     *)
+(* hand it back and forth -- the round-6 S1); the point does, because it  *)
+(* is reached every pass no matter what any producer does. Violated by    *)
+(* BUGGY_NO_POINT.                                                        *)
 (***************************************************************************)
 PollTerminates == <>(pc \in Terminal)
 
@@ -830,12 +802,11 @@ DeathTerminates == dying ~> (pc \in Terminal)
 
 StopHonoured == stop_req ~> (~stop_req \/ pc \in Parked \/ pc \in Terminal)
 
-SpinBounded == []<>(pc \in RealSleep \cup Terminal)
+IrqLatencyBounded == []<>(pc \in RealSleep \cup {"atpoint"} \cup Terminal)
 
 Liveness ==
     /\ WF_vars(PollerStep)
     /\ WF_vars(AdvanceTime)
-    /\ WF_vars(SpinLapse)
     /\ WF_vars(StopResume)
 
 Spec_Live == Init /\ [][Next]_vars /\ Liveness

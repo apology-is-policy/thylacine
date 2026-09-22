@@ -808,45 +808,50 @@ STOP (`dying`, `stop_req`, `LoopCheck`, the two parks): `TSleepCommit`
 keeps tsleep's real order -- cond, deadline, stop detour, die-check --
 because that order is the bug; a set flag short-circuits both checks.
 
-Audit round 5 added the NOISE BACKSTOP, spec first. Syscalls run
-IRQ-masked, so a noise-driven poll that never really sleeps holds its
-CPU's interrupts for as long as the noise lasts, and any unprivileged
-program can make the noise. `spun` (the spin budget lapsed since the
-poller last really slept; `SpinLapse` raises it fairly, entering any
-`RealSleep` lowers it) routes `EvaluateWake`'s noise arm to `backoff`:
-every hook off, then `BackoffCommit` -- a never-true tsleep, one budget
-long, capped at the poll's deadline -- then `BackoffTimeout` back through
-`LoopCheck`. `SpinBounded` (`[]<>(pc \in RealSleep \cup Terminal)`) is the
-property; `BUGGY_NO_BACKSTOP` violates it on poll(-1) with the lasso
-armed -> woken -> rescanned -> armed. The backoff's tsleep has its own
-stop detour and die-check, so the two loop-check buggy cfgs now set
-`BUGGY_NO_BACKSTOP` too -- measured: with the backstop on, both pass
-(rc=0), i.e. the backstop alone would mask the loop checks. The kernel
-tests pin the loop checks' promptness the same way, by raising the
-budget (`poll_spin_budget_set_for_test`).
+Audit round 5 F1 found the NOISE hazard, and round-6 S1 showed the sleep
+backstop that first closed it was not enough: syscalls run IRQ-masked
+(ARCH 8.11; 8.1 records why that is not the design), so a noise-driven
+poll holds its CPU's interrupts for as long as the noise lasts, and any
+unprivileged program can make the noise -- but a per-thread sleep bound
+does not compose, because two masked pollers on one CPU each really sleep
+and hand it back and forth (S1). The fix (operator decision 2026-09-22,
+"point now, model next") is the PREEMPTION POINT: each re-loop, after the
+die/stop checks and before the rescan, `LoopCheck` routes to `atpoint`
+and `Point` returns to `cleared` -- the code's `sched_preempt_point`,
+which unmasks IRQs at a lock-free spot (`preempt_count` held so the
+switch is deferred, `isb` so the pending interrupt is taken) then honors
+a deferred `need_resched`. It is UNCONDITIONAL, so unlike the sleep its
+bound composes across pollers on one CPU. `IrqLatencyBounded`
+(`[]<>(pc \in RealSleep \cup {"atpoint"} \cup Terminal)`) is the
+property; `BUGGY_NO_POINT` violates it on poll(-1) with the lasso
+armed -> woken -> rescanned -> armed. The point does NOT check death or
+stop, so it does not mask a missing loop check -- the two loop-check
+buggy cfgs now reproduce with `BUGGY_NO_POINT=FALSE` (measured), where
+round 5's backoff had needed it off. The point is a stopgap: when
+syscall bodies run IRQs-on (ARCH 8.1) it is deleted.
 
 State universe: one poller, N fds (`Fds`), one timeout, at most one stop
 request. CONSTANTS: `HAS_TIMEOUT` (FALSE = poll(-1)),
 `BUGGY_CHECK_BEFORE_REGISTER`, `BUGGY_NO_WAKE`, `BUGGY_LAZY_UNREGISTER`,
 `BUGGY_CLEAR_AFTER_SAMPLE`, `BUGGY_RETURN_ON_WAKE`,
-`BUGGY_NO_LOOP_DIE_CHECK`, `BUGGY_NO_LOOP_STOP_CHECK`, `BUGGY_NO_BACKSTOP`.
+`BUGGY_NO_LOOP_DIE_CHECK`, `BUGGY_NO_LOOP_STOP_CHECK`, `BUGGY_NO_POINT`.
 `specs/check-poll.sh` checks every cfg's verdict (clean counts pinned;
 buggy cfgs by the NAMED property); `TLC_WORKERS=1` on a shared host.
 
 | Config | Flags | Checked | Result | Distinct |
 |---|---|---|---|---|
-| `poll.cfg`                             | all FALSE, `HAS_TIMEOUT`      | `Invariants` | clean | 4340 |
-| `poll_notimeout.cfg`                   | `HAS_TIMEOUT=FALSE`           | `Invariants` | clean | 1912 |
-| `poll_liveness.cfg`                    | all FALSE, `Spec_Live`        | `Invariants` + `PollTerminates` + `StableReadyReturns` + `DeathTerminates` + `StopHonoured` + `SpinBounded` | clean | 4340 |
-| `poll_liveness_notimeout.cfg`          | `HAS_TIMEOUT=FALSE`, `Spec_Live` | `Invariants` + `StableReadyReturns` + `DeathTerminates` + `StopHonoured` + `SpinBounded` | clean | 1912 |
+| `poll.cfg`                             | all FALSE, `HAS_TIMEOUT`      | `Invariants` | clean | 2194 |
+| `poll_notimeout.cfg`                   | `HAS_TIMEOUT=FALSE`           | `Invariants` | clean | 968 |
+| `poll_liveness.cfg`                    | all FALSE, `Spec_Live`        | `Invariants` + `PollTerminates` + `StableReadyReturns` + `DeathTerminates` + `StopHonoured` + `IrqLatencyBounded` | clean | 2194 |
+| `poll_liveness_notimeout.cfg`          | `HAS_TIMEOUT=FALSE`, `Spec_Live` | `Invariants` + `StableReadyReturns` + `DeathTerminates` + `StopHonoured` + `IrqLatencyBounded` | clean | 968 |
 | `poll_buggy_check_before_register.cfg` | `BUGGY_CHECK_BEFORE_REGISTER` | `NoMissedPoll` | violation | — |
 | `poll_buggy_no_wake.cfg`               | `BUGGY_NO_WAKE`               | `NoMissedPoll` | violation | — |
 | `poll_buggy_lazy_unregister.cfg`       | `BUGGY_LAZY_UNREGISTER`       | `NoStaleHook`  | violation | — |
 | `poll_buggy_clear_after_sample.cfg`    | `BUGGY_CLEAR_AFTER_SAMPLE`    | `NoMissedPoll` | violation | — |
 | `poll_buggy_return_on_wake.cfg`        | `BUGGY_RETURN_ON_WAKE`        | `NoSpuriousZero` | violation | — |
-| `poll_buggy_no_loop_die_check.cfg`     | `BUGGY_NO_LOOP_DIE_CHECK` + `BUGGY_NO_BACKSTOP`, poll(-1), `Spec_Live` | `DeathTerminates` | violation | — |
-| `poll_buggy_no_loop_stop_check.cfg`    | `BUGGY_NO_LOOP_STOP_CHECK` + `BUGGY_NO_BACKSTOP`, poll(-1), `Spec_Live` | `StopHonoured` | violation | — |
-| `poll_buggy_no_backstop.cfg`           | `BUGGY_NO_BACKSTOP`, poll(-1), `Spec_Live` | `SpinBounded` | violation | — |
+| `poll_buggy_no_loop_die_check.cfg`     | `BUGGY_NO_LOOP_DIE_CHECK`, poll(-1), `Spec_Live` | `DeathTerminates` | violation | — |
+| `poll_buggy_no_loop_stop_check.cfg`    | `BUGGY_NO_LOOP_STOP_CHECK`, poll(-1), `Spec_Live` | `StopHonoured` | violation | — |
+| `poll_buggy_no_point.cfg`              | `BUGGY_NO_POINT`, poll(-1), `Spec_Live` | `IrqLatencyBounded` | violation | — |
 
 Both liveness properties were shown able to FAIL before being trusted
 (2026-09-21): deleting `EvaluateWake`'s explicit `Expired` test violates
@@ -874,8 +879,7 @@ Spec action ↔ impl mapping:
 | `Resample` / `FinalSample` | `kernel/poll.c::sys_poll_for_proc` (the re-registering `poll_scan_one(..., &waiters[i], &held[i])` loop) | The first scan's install-and-sample again; a TIMEDOUT pass runs the same code (the model folds it into `FinalSample`). |
 | `Die` / `StopRequest` waking a sleeper | `kernel/proc.c::proc_group_terminate`'s cascade; `proc_stop_wake_sleepers_locked` | Wake the private rendez; tsleep re-loops through `TSleepCommit`. |
 | `EvaluateWake` | `kernel/poll.c::sys_poll_for_proc` (the loop tail) | Ready -> return; else the explicit `timer_now_ns() >= deadline_ns` test -> return 0; else the backstop test (budget spent with `t->nsleeps` unmoved -> `poll_unhook_all` + `backoff`); else `sched_yield_hint` and `continue` to the tsleep. |
-| `SpinLapse` / `spun` | `kernel/poll.c::sys_poll_for_proc` (`spin_from` / `spin_sleeps`, reset when `t->nsleeps` moved) | Time passing while awake; `nsleeps` is bumped only by a switch-out while SLEEPING (`kernel/sched.c`), so a yield does not reset it. |
-| `BackoffCommit` / `BackoffTimeout` | `kernel/poll.c::sys_poll_for_proc` (the `backoff` arm: `tsleep(&r, poll_never, NULL, sleep_dl)`) | `sleep_dl` = now + `POLL_BACKOFF_NS`, capped at the poll's deadline; a TIMEDOUT at the cap breaks (the poll's timeout), otherwise the pass re-registers. Hooks already off (`BackoffHoldsNoHook`). |
+| `Point` / `atpoint` | `kernel/sched.c::sched_preempt_point`, called from `kernel/poll.c::sys_poll_for_proc` (the loop, after the die/stop checks, before the rescan) | Unmasks IRQs briefly with `preempt_count` held (the switch is deferred, `#360`), `isb` so a pending IRQ is taken; then honors a deferred `need_resched`. Reached every re-loop, so its bound composes across pollers on one CPU (round-6 S1). |
 | `MakeReady(f)` | devpipe: `kernel/pipe.c::devpipe_close` + `devpipe_read` (drain) + `devpipe_write` (append). srvconn: EVERY ring mutation and the teardown — `srvconn_client_send` / `_send_frame` / `_send_blocking` (c2s fill), `srvconn_server_send` / `_send_blocking` (s2c fill), `srvconn_client_recv` (s2c drain), `srvconn_server_recv` / `_recv_blocking` (c2s drain), `srvconn_io_nonblock` (all four), `srvconn_teardown`. devsrv listener: `kernel/devsrv.c::srv_conn_open_for_proc` (push) + `srv_proc_exit_notify` (tombstone) + `srv_registry_reset`. | Every readiness site calls `poll_waiter_list_wake` AFTER releasing the object lock it mutated under. For a SrvConn the one list carries four edges for two endpoints, so each walk is `MakeReady` for some pollers and `OtherEvent` for the rest. |
 | `OtherEvent(f)` | the same walks, seen from a poller that asked about something else | Until 2026-09-21 only the c2s-fill edge and the teardown walked the SrvConn list: a client poller was never woken by its reply, and a nonblocking server polling POLLOUT was never woken by a blocking client drain. |
 | `Retract(f)` | any competing consumer: a second reader of the pipe / the connection | No walk. |
