@@ -496,6 +496,239 @@ one object while waiting on another), and `poll.h` tells producers to walk "unde
 walks after dropping it -- sound, because the register and the sample share a critical section, but the contract
 should say what is actually required.
 
+### Addendum 6, same day (ninth self-compact, now on Opus 5): both audits came back, and the prosecutor's fix would have leaked the secret
+
+**Fable's credits ran out mid-run.** Both follow-up rounds died at their first line and were re-spawned on Opus 5 with
+the same-family preamble (CLAUDE.md: a dead round goes straight to the fallback). They are same-family reads, independent
+of my reasoning but not of my priors; the tier is noted in both closed lists.
+
+**Shed round 3: 0 P0 / 0 P1 / 1 P2 / 6 P3, all fixed in code (`85649c28`).** The P2 was a bug aux had already fixed on its
+own branch -- `spoor_clone` copied `COPEN`, so any Proc could open `/dev`, walk `consdrain` off it and close the leaf
+to disarm the console renderer's output drain. I cherry-picked aux's fix (`1d00cea7`, `-x`) and wrote the unprivileged
+route as its own test. The miss is the reusable part: the round found what aux's closed H-list already said, because
+main's self-audit never read it. The six P3s were the resolver's remaining union seams -- a live union handle still
+walked in its opened form after `..`, `unmount("/")` unable to name a mounted-over root, a remove caller re-probing
+state the resolver already knew, the dissolved-union rule enforced in stalk but not in two syscall consumers -- and a
+new on-device probe stage (`union-c`) whose members are Stratum directories, the 9P-strict class Addendum 5 showed the
+old stages could not see.
+
+**Poll round 4: 0 P0 / 2 P1 / 1 P2 / 9 P3 -- DIRTY, and the P1 I introduced.** F1: the console chooses a poller's hook
+list by state (a caller frozen by the trusted episode goes on `episode_poll_list`, which the per-byte relay never
+walks), and my re-arm from Addendum 2 kept hooks where the first scan put them. A poller that registered during an
+episode stayed on the episode list after END: `poll(-1)` on the console never saw another keystroke. The auditor's
+proposed fix was to re-register only such a hook. That fix is wrong in a way the auditor's model could not show: a
+poller registered BEFORE the SAK would stay on `poll_list` through the episode and be woken in-kernel once per SECRET
+key byte -- a kernel pass whose CPU cost the caller can time, which is the side channel the episode list exists to
+close. I wrote that half into `cons_poll.tla` first (`NoSecretCadence`, `5f4549d9`), then made every pass
+re-register: unhook everything, drop every retained ref, clear, then call each `.poll` WITH its hook again. The Dev
+re-chooses its list on every pass, and the fd re-resolves with its hook, which also dissolves the S1 item parked at the
+end of Addendum 5.
+
+F2 was the loop never checking death or stop itself. `tsleep`'s die-check and stop detour sit behind its cond test, so
+a producer that sets a flag in every re-sample window keeps every `tsleep` returning `AWOKEN` before either check -- a
+noise-driven `poll(-1)` was unkillable and unstoppable. `poll.tla` gained `dying`/`stop_req`, kept `TSleepCommit` in
+the code's real order (the order IS the bug), and two liveness buggy cfgs that fail `DeathTerminates` and
+`StopHonoured` (`e55b86ef`). One modelling surprise on the way: with unbounded stop/continue the CORRECT model violated
+`DeathTerminates` -- a debugger re-stopping forever can hold a dying thread in tsleep's detour, whose stop test precedes
+its die-check. That is a race the debugger must win every time and belongs to `debug_stop.tla`; the poll model now
+allows one stop per behaviour and says why. What I did not fix, because it is not mine to invent: syscalls run
+IRQ-masked end to end, so a noise-driven poll with nothing else runnable still spins with interrupts off. The loop now
+yields to queued work; a preemption point is the operator's call (`pipe_block_locked` and `chan_role_acquire` share the
+shape).
+
+F3 was older than all of this: the hook-list lock nests under `g_cons.lock`, which the UART RX interrupt takes, and
+`console_mgr` held it plain with interrupts on. An RX interrupt inside its walk spins on `g_cons.lock` while another CPU
+holds `g_cons.lock` spinning on the list lock -- a guest wedge. The vault's own lock note said "never widen this lock to
+irqsave"; the rule was half right (no interrupt should WALK a list) and half wrong (a lock nested under an
+interrupt-taken lock must be masked everywhere). Every list op is irqsave now. There is no deterministic test for it;
+the record says so instead of pretending.
+
+The P3s mostly corrected my own sentences -- "no pouch server polls an accepted socket" (stratumd does), "0039 is the
+series' first public-header patch" (0001 onward edit `bits/syscall.h`), an audit row that said a walk under the
+channel lock inverts the lock order (that nesting IS the order). One was a measurement I had claimed without taking:
+"the series applies with no fuzz/offset/reject line" was a property of `patch`'s quiet output; `--verbose` shows 0029
+two lines off. I re-headed it and made the musl apply `-F 0`, after checking the control both ways -- a perturbed
+context line applies under `-F 2` with exit 0 and fails under `-F 0`. F12 was pre-existing UB in 0005's timeout
+conversion (`tv_sec * 1000` in signed `long long`): `tv_sec = 2^62` wraps to a 0 ms timeout, so a caller meaning
+"forever" got an immediate 0. New patch 0042, and a prover leg with a helper thread whose late byte the call must still
+be parked to receive.
+
+**The sabotage that passed, again, and a test that would have flaked.** Each new test was booted RED on a kernel
+with its own fix reverted (`red3/kernel-sab2.py`, ten modes). Nine failed exactly as designed. The tenth -- the
+c2s-drain walk in `srvconn_server_recv_blocking`, the witness round 4 F9 asked for -- PASSED 1608/1608 with the walk
+removed, and the mechanism is the re-arm itself: without the wake, the poll's TIMEDOUT pass re-samples, finds the
+room the drain made and returns 1/POLLOUT, one second late. The test asserted the result, not the wake. It now
+asserts the return lands within 500 ms of the drain, and the re-run fails it ("still parked 2 s later"). The same
+day's Addendum 5 had the same shape (the deadline sabotage that passed); the reusable rule is that under a
+level-triggered re-sample, a missing wake is rescued by any later sample, so a wake test must pin TIME. Self-audit
+found the other: the privacy test demanded EXACTLY one pass after BEGIN, but BEGIN walks two lists and an idle peer
+may steal the poller between them -- a harmless second pass and a false failure. It now settles on "at least N
+passes, then stable", and the sabotage still fails it. And the union-c probe stage had never been shown to fail at
+all: a failing kernel suite extincts before userspace, so every sabotage boot of the resolver stopped before the
+probe ran. Booted without the in-kernel suite (`--set TESTS=n`), the `walkable` and `livewbase` sabotages fail
+union-c's "back at the base, member[0] is walked unopened" leg and the boot dies at symlink-probe.
+
+MEASUREMENTS
+
+## gate-r8a @78595d93 (22:23 CEST) -- the sabotage REDs, all as predicted
+Each pair baked + booted with the sabotage applied (red-k.sh), tree restored
+after each (r8-red-treestate.txt empty):
+- backstop+onemember 1610/1613: poll.backstop_sleeps_through_noise ("seen asleep
+  while the producer walked"), poll.backstop_keeps_the_deadline ("noise drove the
+  poller into the backstop"), stalk.union_one_member_creates_alike.
+- backoffzero+mountunion 1610/1613: sleeps_through_noise ("fires again and
+  again"), keeps_the_deadline ("AT its deadline"), stalk.mount_names_crossed_union_base.
+- backoffhooked+unbump 1611/1613: sleeps_through_noise ("holds NO hook"),
+  devdev.spawn_unbump_runs_close.
+- deadline+pointfblive 1611/1613: poll.timeout_survives_a_busy_list,
+  stalk.union_dissolved_point_unreachable.
+- loopdie+loopstop 1611/1613: the death + stop noise tests.
+- rename2 (TESTS=n): symlink-probe union-c 21 checks / 2 failures.
+Owed: teardownwalk (poll.devsrv_client_wakes_on_teardown) at the next bake.
+
+## A log line that cost five investigations
+`joey: pouch-smoke spawn FAILED` x2 on every ci boot: the generic smoke core's
+label, emitted when the OPTIONAL venus-prove / vk-sdl-prove binaries are absent.
+JOURNAL.md records five separate sessions stopping to classify it (1339, 2413,
+3001, 3588, 4025) and none fixing the label. Fixed: the core now prints
+`joey: spawn <name> FAILED (absent from this image, or refused)`.
+
+### Addendum 7, same day (tenth self-compact): the backstop that bounded the wrong thing, the property that could not fail, and the point
+
+**The last addendum's measurements name a `backstop` they never explain.** Round 5's F1 made round 4's parting note
+concrete: syscalls run IRQ-masked end to end, so a `poll(-1)` driven by noise spins a CPU with interrupts off, and
+every ingredient is unprivileged -- a pipe, a writer, a reader, and a poller registered with `events = 0` so it is
+woken by a wake it can never satisfy. I fixed it with a per-thread spin budget: after N fruitless passes the poller
+stops re-arming immediately and really sleeps for 1 ms, and a real sleep unmasks.
+
+**Round 6 came back 0 P0 / 0 P1 / 0 P2 / 2 P3, and the finding that mattered was my own.** The backstop keys on the
+THREAD; the obligation belongs to the CPU. Put two masked pollers on one CPU and each one hits its own budget, each
+one really sleeps -- and hands the CPU straight to the other through `sched()` *inside* the masked syscall. Neither
+thread ever returns to EL0, so neither ever unmasks, and the CPU serves no interrupt for as long as the pair is fed.
+K = 1 is safe. K >= 2 is not, and nothing in the mechanism notices the difference. A per-CPU backoff does not rescue
+it either: `g_timerwait` is global and `timerwait_tick` runs on every CPU's tick, so another CPU expires the backoff
+this one is counting on; with K pollers and a pass cost at or above the backoff period the CPU stays saturated with
+masked passes. The general statement is the useful one: **a sleep bounds the RATE of masked passes and never the
+masked SPAN.**
+
+**The operator asked two questions I had not earned the right to skip.** First, whether I had run a full research
+battery -- I had not; I had reasoned from memory, and said so, then ran one. The construct turns out to be standard
+practice with a name. seL4's `preemptionPoint()` polls `isIRQPending()` and restarts the syscall, never unmasking;
+Fiasco.OC's is literally `Proc::preemption_point(){ sti(); irq_chance(); cli(); }`; NOVA's is `daifclr` / `daifset`
+around a hazard check; and arm64 Linux's KVM run loop transiently unmasks with exactly `local_irq_enable(); isb();
+local_irq_disable();`. What no peer shares is the pair of traits that makes it load-bearing HERE -- syscall bodies
+masked from EL0 entry to return, AND blocking loops inside them. Our own heritage does not: 9front's `dosyscall`
+calls `spllo()`. Second, how I had hit it in practice. I had not. It came from reading the code and was never
+reproduced -- the honest answer, and the reason the formal model below matters more than a demo would have.
+
+**Then the operator asked where this architecture came from, and the answer is that nobody chose it.** Traced through
+git, the archived scripture, the vault and the JSONL: Phase 0 (`bc96ce55`, ARCH 8.1) deferred kernel PREEMPTION to
+Phase 7. P3-Ec (`48dfc5c4`) wired the SVC path and simply never unmasked -- so the deferral of *preemption* was built
+as *interrupts off*, which is a different property, and the difference was never written down. Every later race was
+then fixed by masking more (#713, #104), and #359 (`ce7bd352`) recorded the accident in ARCH 8.11 as a fact of the
+design. The Phase-7 deliverable that was supposed to correct it ("Kernel preemption enabled", ROADMAP:1091) never
+reached `phase7-status.md`, so no status doc has ever owed it. Scripture now says all of this in 8.1's as-built note,
+and the memory carries it so the next instance does not have to re-derive it.
+
+**The operator's ruling: the point now, the model next.** A preemption point in poll's loop today, and ARCH 8.1 built
+as written -- syscall bodies with interrupts ON, still non-preemptible -- as its own spec-first audited chunk before
+the F3-F9 browser kernel work, which deletes the point when it lands. `sched_preempt_point()` holds `preempt_count`
+first so the #360 gate DEFERS any switch, saves `daif`, `msr daifclr, #2`, `isb`, restores `daif`, drops the count,
+and only then consumes a deferred `need_resched` with `sched()`. It is unconditional, and that is the whole
+difference: a budget's bound is per-thread and does not compose, a point's bound is per-pass and does.
+
+**Round 7: 0 P0 / 0 P1 / 3 P2 / 4 P3, every P2 fixed -- and F2 is the one to read.** The spec property I had written
+for the point was
+
+    IrqLatencyBounded == []<>(pc \in RealSleep \cup {"atpoint"} \cup Terminal)
+
+which is IMPLIED by `[]<>(pc \in RealSleep)` by set inclusion. So the property was satisfied, in full, by the exact
+behaviour its own comment called insufficient -- the round-5 backstop. It had never checked S1 and could not have.
+The deeper defect is structural rather than textual: **a single-poller model cannot carry a composition claim at
+all**, because the thing that fails is what two pollers do to one CPU. `specs/poll_cpu.tla` models that directly --
+K pollers, one CPU, states `ready/run/atpoint/armed/sleep`, `Open == (cur = Idle) \/ (\E p : pc[p] = "atpoint")`,
+and round 5's entire guarantee GRANTED as fairness (`SF_vars(SleepStep(p))`). `CpuServesIrqs == []<>Open` holds with
+the point and is VIOLATED without it, which is S1 as a counterexample rather than as a paragraph. It ships with a
+positive control (`EachPollerSleeps` holds under the sleep-only rule -- so the buggy cfg fails for the right reason)
+and a K=1 control (holds, which is the "K=1 is safe" claim made checkable). The first cut of the module was wrong in
+a way worth recording: it let a poller sleep straight out of `run`, so the adversary could hand the CPU off before
+the point ever fired and the CLEAN cfg failed. The `armed` state exists to enforce the loop's real order -- a pass
+reaches its point before it can sleep again.
+
+**F3: the tests could not witness the mechanism they were named for.** Every test poller already runs with interrupts
+ON, so `point_services_noise` proves the loop makes progress and says nothing about masking. The witness masks
+deliberately: `spin_lock_irqsave(NULL)` (the sanctioned mask-only form, which by design does not touch
+`preempt_count`), spin 3 ms so a timer tick is certainly pending, read `gic_cpu_irq_count(cpu)` and assert it has NOT
+moved -- that is the control, and without it the test would be satisfied by a CPU that was never masked -- then cross
+the point and assert the count HAS moved. Removing the point fails both poll tests; removing the `daifclr` fails the
+witness at its own assertion with the masked control still passing.
+
+**And the third sabotage passed, which is the finding.** I had written the assertion as "drop the daifclr, OR the isb,
+and this fails". Booted with the `isb` removed and the `daifclr` kept, the suite is **1615/1615**. A sabotage that
+passes is a finding, and here it corrects the claim rather than the test: a direct write to PSTATE.DAIF takes effect
+with no barrier at all -- Linux's `__daif_local_irq_enable` is a bare `msr daifclr, #3`, and only the ICC_PMR_EL1
+priority-mask path needs a `pmr_sync()` -- so the `isb` is not what makes the unmask visible. What it buys is a
+synchronization event BETWEEN the two MSRs rather than leaving them adjacent, which is exactly the shape arm64 KVM
+uses to transiently unmask. It stays for that reason and at that cost. Following the correction down found the same
+overclaim in three more places, and the shape of the error is the part worth keeping: **the model was right and the
+prose around it was not.** The architecture gives no bound on when a pending unmasked interrupt is taken, only that it
+is taken in finite time -- so no single crossing can be guaranteed to deliver, and "every interrupt pending at that
+moment is taken" was never true of any implementation of this. What the point actually buys is that the CPU is
+REPEATEDLY interruptible, which is precisely what `poll_cpu.tla` already said (`Open` is "at a point or idle", never
+"an interrupt was taken here") and what the prose had quietly upgraded into a per-pass guarantee. The formal statement
+was the conservative one; four pieces of English drifted past it in the same direction, each one a little more
+confident than the last (`0434a4bc`). The sabotage stays in the script as a NON-discriminating control, labelled as
+one: if it ever goes red, the window got narrower than the architecture allows.
+
+**Two of my own defects, and the one that made a failure out of a success.** The splice that inserted
+`point_keeps_the_deadline` ate its closing brace. And `point_services_noise` took its point baseline before starting
+the poller and its sample baseline after -- a zero-length measurement window whose watch exited on its first check.
+It failed loudly this time, but it could as easily have passed vacuously, which is the failure mode that matters;
+both baselines are now taken together and the watch runs until BOTH counters advance. Worse than either: I reported a
+build green that had failed. My wrapper was `(tools/build.sh ... > log 2>&1; echo "bake exit=$?" >> log)` and I
+captured the wrapper's status, which is the ECHO's. The bake had exited 2 with five compile errors; `test.sh` then
+booted the kernel a PREVIOUS sabotage run had left in `build/`, which duly failed `poll.devsrv_client_wakes_on_teardown`
+-- and I wrote that up as a real regression from my own poll change. It was not. The project's own index already says
+it twice, in two different sentences: a gauge reading zero is satisfied by "it never started", and the one-liner that
+checks the checker is the one nothing reviews.
+
+MEASUREMENTS
+
+## The point @22332ef1 -- the suite, the specs, and four sabotages
+- Kernel suite **1615/1615 PASS** (halcyon worktree, `--config ci`), with
+  `sched.preempt_point_takes_a_pending_irq`, `poll.point_services_noise` and
+  `poll.point_keeps_the_deadline` all PASS.
+- `specs/check-poll.sh` **16/16 as claimed** -- `poll` 2194 distinct states,
+  `poll_notimeout` 968, `poll_cpu` 16, `poll_cpu_one_poller` 4,
+  `poll_cpu_sleep_bound_holds` 12, and `poll_cpu_buggy_sleep_only` violating
+  `CpuServesIrqs` (that is S1, mechanically).
+- Sabotage `nopoint` (the point deleted from poll's loop): 1612/1614, failing
+  BOTH `poll.point_services_noise` and `poll.point_keeps_the_deadline`.
+- Sabotage `nodaifclr` (the point never unmasks): 1614/1615, failing
+  `sched.preempt_point_takes_a_pending_irq` at "the point TAKES the pending
+  interrupt", with the masked control still passing.
+- Sabotage `noisb` (unmask kept, `isb` removed): **1615/1615 PASS** -- the
+  measurement that corrected the claim, not the test.
+- Tree restored clean after every sabotage (`red-k-treestate.txt` empty).
+
+## Where the masked syscall came from (traced 2026-09-22, at the operator's request)
+Phase 0 (`bc96ce55`, ARCH 8.1) deferred kernel PREEMPTION to Phase 7; P3-Ec
+(`48dfc5c4`) wired the SVC path and never unmasked, so non-preemption was built
+as "interrupts off" -- two different properties. Every later race was fixed by
+masking more (#713, #104), and #359 (`ce7bd352`) wrote the accident into ARCH
+8.11 as a fact. The Phase-7 "Kernel preemption enabled" deliverable
+(ROADMAP:1091) never reached `phase7-status.md`. The research battery found no
+other kernel that both masks in syscalls and loops in them; the heritage
+(9front `dosyscall` -> `spllo`) runs syscalls unmasked.
+
+**Still open, and tracked rather than mentioned.** Round 7's F1: nothing caps how many hooks a single
+`poll_waiter_list` can hold, so the PRODUCER's wake walk -- which crosses no point, because it runs in the waker's
+context -- and the per-pass unregister walks are both O(attacker-scaled) and masked. The point bounds the poller's
+half of the problem and not the producer's. It is in `docs/browser-status.md` with its three candidate fixes (round
+4 F8's keyed lists, a per-walk wake cap, an I-32 hooks-per-list axis). Round 7's F5 left a contract half standing:
+the `preempt_count` guard inside the point cannot SEE a mask-only `spin_lock_irqsave(NULL)` region, so a caller who
+crosses a point inside one gets no diagnostic -- documented at the declaration rather than papered over.
+
 ## 2026-09-21 (main, Fable 5.1, effort max) -- taking over a week of another agent's work: the graphical trusted path, the chord nobody could find, and the image that booted two UIs at once
 
 **Where the tree stood.** Claude credits ran out on 09-16; a Codex agent ("Astra")
