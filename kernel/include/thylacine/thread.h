@@ -298,6 +298,34 @@ struct Thread {
     // IRQ-masked, so that hold is non-preemptible by masking). KP_ZERO init.
     u32                preempt_count;
 
+    // ARCH 8.12: true while this thread is inside a SYSCALL BODY, which under
+    // that chunk runs with interrupts ON and must still never be preempted
+    // INVOLUNTARILY. Set at SVC entry, cleared before the EL0-return tail so
+    // the #107 syscall-return preempt still fires.
+    //
+    // IT IS NOT `preempt_count`, AND THAT IS NOT A STYLE CHOICE -- three live
+    // assertions forbid a syscall-wide count, each independently:
+    //
+    //   sched.c   `sched()` extincts on a nonzero count (lock-across-sleep),
+    //             and EVERY blocking syscall calls sched().
+    //   sched.c   `sched_preempt_point()` extincts on a nonzero count.
+    //   proc.c    `el0_return_die_check` extincts on "counted spinlock leaked
+    //   + sched.c to EL0 return" (#361) -- a syscall-wide count is
+    //             DEFINITIONALLY that leak.
+    //
+    // The two markers mean genuinely different things. `preempt_count` says a
+    // plain spinlock is held, and so forbids BOTH an involuntary switch and a
+    // voluntary sleep. This one says we are inside a syscall, and forbids only
+    // the involuntary switch -- a syscall that sleeps is the common case.
+    // `preempt_check_irq` consults it; `sched()` ignores it.
+    //
+    // Rejected: deciding from the interrupted frame (Linux's user_mode(regs)).
+    // It needs no new state, but a kernel THREAD interrupted in kernel code is
+    // indistinguishable from a syscall body, and kthreads must STAY preemptible
+    // or #810 ("a CPU-bound thread on a secondary cannot monopolize it") is
+    // lost. Modelled as `marker` in specs/syscall_irqs.tla; KP_ZERO init.
+    u8                 in_syscall;
+
     // #68 F1: true while this (last-out) Thread runs the pre-ZOMBIE handle
     // close in thread_exit_self. thread_die_pending() returns false while
     // set, so the close's 9P sends / RPC waits / sleeps behave like a live

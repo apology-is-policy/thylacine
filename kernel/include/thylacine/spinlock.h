@@ -203,6 +203,26 @@ static inline bool irqs_masked(void) {
 #define ASSERT_IRQS_ENABLED(why) \
     ASSERT_OR_DIE(!irqs_masked(), "IRQs must be ENABLED here: " why)
 
+// ARCH 8.12: the syscall body's unmask / re-mask. A DIRECT PSTATE.DAIF write
+// takes effect with no barrier -- Linux's __daif_local_irq_enable is a bare
+// `msr daifclr, #3` and carries none -- so there is no `isb` here and none is
+// owed. (Only the ICC_PMR_EL1 path needs pmr_sync(); this is not that path.
+// The B-0 preemption point once claimed an isb was load-bearing for DELIVERY;
+// a sabotage that removed it PASSED, and the claim was corrected rather than
+// the test.)
+//
+// These are deliberately NOT save/restore: the syscall body's entry state is
+// known by construction (the SVC vector masked), so a saved value would be a
+// variable standing in for a constant, and the re-mask must be unconditional
+// -- an eret out of KERNEL_EXIT under an inherited unmask is #713.
+static inline void irq_unmask_local(void) {
+    __asm__ __volatile__("msr daifclr, #2" ::: "memory");
+}
+
+static inline void irq_mask_local(void) {
+    __asm__ __volatile__("msr daifset, #2" ::: "memory");
+}
+
 typedef u64 irq_state_t;
 
 static inline irq_state_t spin_lock_irqsave(spin_lock_t *l) {

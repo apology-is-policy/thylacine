@@ -14569,15 +14569,63 @@ static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
     }
 }
 
+static void syscall_dispatch_body(struct exception_context *ctx);
+
+// ARCH 8.12. THE SYSCALL BODY RUNS WITH INTERRUPTS ON, AND IS STILL
+// NON-PREEMPTIBLE. This wrapper is the whole mechanism; the body below is
+// unchanged.
+//
+// Phase 0 deferred kernel PREEMPTION to Phase 7. P3-Ec wired the SVC path
+// under the mask exception entry sets and never lifted it, so the deferral of
+// preemption was BUILT as "interrupts off" -- a strictly stronger and
+// different property that nothing recorded (ARCH 8.1). The cost was that any
+// syscall which LOOPS held its CPU's interrupts for as long as it looped, and
+// making one loop takes no privilege.
+//
+// WHY A WRAPPER RATHER THAN EDITS IN vectors.S. The re-mask MUST precede
+// KERNEL_EXIT, which installs ELR/SPSR and erets under an INHERITED mask --
+// the one surviving #713-class window that does not mask locally. #713 was the
+// year-long AEGIS corruption: 3-13% of boots, never at -smp 1. A single-exit
+// wrapper makes "unmask leaks past the return tail" structurally impossible
+// rather than merely intended, and confines the unmask to the SVC body, so
+// kernel fault handling (the shared 0x400 slot) still runs masked and the #214
+// EL1-sync depth guard keeps its discriminator.
+//
+// ORDER IS LOAD-BEARING IN BOTH DIRECTIONS, and each order has a buggy cfg:
+//   enter: marker THEN unmask. Unmasking first opens a window where an IRQ
+//          sees no marker and preempts a thread already inside its syscall
+//          (specs/syscall_irqs_buggy_unmask_before_mark.cfg).
+//   leave: re-mask THEN clear. Clearing first leaves a window where we are
+//          unmasked with no marker, so the switch could be taken somewhere
+//          other than the boundary the design names.
+//
+// The deferred reschedule is not denied, only POSTPONED: with the marker
+// cleared, .Lel0_sync_return's preempt_check_irq takes it
+// (specs/syscall_irqs_buggy_marker_never_cleared.cfg is this clear removed,
+// and it violates TailTookItsPreempt).
+//
+// What this does NOT buy, so the claim reads no larger: a thread looping in a
+// syscall body still holds its CPU against other runnable threads until it
+// returns or sleeps. Interrupts are SERVED -- the SAK arrives, drivers run --
+// but the scheduler does not switch. That is what non-preemptible means, and
+// closing it is full kernel preemption (ROADMAP Phase 7).
 void syscall_dispatch(struct exception_context *ctx) {
-    // ARCH 8.12: the AS-BUILT model -- the SVC vector masks at exception entry
-    // and nothing lifts it, so a syscall body runs IRQ-masked end to end. That
-    // was never the design (ARCH 8.1 records the accident); this assert states
-    // the model the code is CURRENTLY in, so that when the 8.1 chunk unmasks
-    // the body it INVERTS here and the model change is visible in the diff
-    // rather than implied by its absence.
-    ASSERT_IRQS_MASKED("the SVC vector masks at entry and the body does not "
-                       "yet unmask (ARCH 8.11; 8.12 changes this)");
+    ASSERT_IRQS_MASKED("the SVC vector masks at exception entry");
+
+    struct Thread *t = current_thread();
+    if (t) t->in_syscall = 1u;
+    irq_unmask_local();
+
+    syscall_dispatch_body(ctx);
+
+    irq_mask_local();
+    if (t) t->in_syscall = 0u;
+
+    ASSERT_IRQS_MASKED("the re-mask must precede the KERNEL_EXIT eret window, "
+                       "which inherits its mask (#713)");
+}
+
+static void syscall_dispatch_body(struct exception_context *ctx) {
     // VIVARIUM V-1b: a phenotyped Proc's numbers are decoded through the
     // translation table before anything else looks at them. A native Proc
     // (phenotype == PHENO_NATIVE, the default and every Proc outside a
