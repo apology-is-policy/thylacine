@@ -33,6 +33,7 @@ eq "default CHUNK_DOSBOX"  "$(bc_get CHUNK_DOSBOX)"  "y"
 eq "default CHUNK_DUKE3D"  "$(bc_get CHUNK_DUKE3D)"  "y"
 eq "default CHUNK_TOMBRAIDER" "$(bc_get CHUNK_TOMBRAIDER)" "y"
 eq "default DOSBOX_CPU_PRESET" "$(bc_get DOSBOX_CPU_PRESET)" "pentium"
+eq "default CHUNK_WEBKIT (slow + foraged -> off)" "$(bc_get CHUNK_WEBKIT)" "n"
 
 echo "== preset: production =="
 bc_reset; bc_apply_preset production
@@ -88,8 +89,9 @@ if bc_set_one BOGUS y 2>/dev/null; then bad "unknown symbol accepted"; else ok "
 echo "== T-export: symbols -> build.sh knobs (incl. TICKLESS inversion + DEV_ACCOUNTS) =="
 build_type=""; kernel_tests=""; boot_probes=""; hardening_full=""; kaslr=""
 sanitize="__unset__"; no_tickless=""; dev_accounts=""; extra_cmake_args=()
-unset THYLACINE_BAKE_GOROOT THYLACINE_BAKE_CLADE THYLACINE_BAKE_DOSBOX THYLACINE_BAKE_DUKE3D THYLACINE_BAKE_TOMBRAIDER THYLACINE_DOSBOX_CPU_PRESET 2>/dev/null || true
+unset THYLACINE_BAKE_GOROOT THYLACINE_BAKE_CLADE THYLACINE_BAKE_DOSBOX THYLACINE_BAKE_DUKE3D THYLACINE_BAKE_TOMBRAIDER THYLACINE_DOSBOX_CPU_PRESET THYLACINE_BAKE_WEBKIT 2>/dev/null || true
 bc_reset; bc_apply_preset production; bc_resolve 2>/dev/null; bc_export
+eq "export THYLACINE_BAKE_WEBKIT (n -> 0)" "${THYLACINE_BAKE_WEBKIT:-}" "0"
 eq "export build_type"    "$build_type"    "Release"
 eq "export kernel_tests"  "$kernel_tests"  "OFF"
 eq "export boot_probes"   "$boot_probes"   "OFF"
