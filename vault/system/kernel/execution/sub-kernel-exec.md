@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/EXEC-LOAD-DESIGN.md", "docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-03
-updated: 2026-09-06
+updated: 2026-09-21
 ---
 ## Purpose
 
@@ -332,10 +332,26 @@ The file-backed path's whole point: the eager read is 16 KiB regardless of
 binary size, and text arrives on demand in read-ahead clusters. A binary of any
 size execs, which the retired whole-ELF slurp could not do.
 
-The eager stack is the standing cost — 1 MiB committed per Proc, raised from
-256 KiB after a real port overflowed it into the guard page. The Linux answer
-(a large lazy reservation committing only touched pages) is a recorded seam and
-the infrastructure for it already exists.
+The stack is NOT a standing cost, and this paragraph said it was until
+2026-09-21. It read "the eager stack is the standing cost — 1 MiB committed per
+Proc ... the Linux answer (a large lazy reservation) is a recorded seam" — a
+sentence that was true when written and had been false since LINEAGE L-4a
+(`c19ae8dc`, 2026-08-02), which made `exec_map_user_stack` a
+`burrow_create_anon_lazy`: exec commits only the pages the argv/auxv frame
+occupies at the top, and the rest demand-zeroes as the program descends.
+`exec.h`'s two comment blocks carried the same stale claim and were corrected
+in the same change. What the 1 MiB is now: a RESERVATION and an I-32 ceiling
+for a runaway recursion, not memory. It was caught because pouch patch 0033
+repeated the claim from the header, and the code was read before the patch
+landed. The size has ONE mirror outside the kernel — the pouch libc's
+`POUCH_MAIN_STACK_TOP` / `_SIZE` ([[sub-pouch-thread]]) — so changing it is a
+two-place edit. What makes forgetting the second place loud is
+`/pouch-hello-threads`, which reads the `stack` row of `/proc/<pid>/maps`
+(`format_maps`, keyed on `vaddr_start == EXEC_USER_STACK_BASE`) at run time
+and requires libc's answer to equal it. The prover's first version compared
+libc with the same two literals written again in the prover — a third mirror,
+green through exactly the change it was for (audit r1 F3); it holds no
+literal now.
 
 ## Prosecution
 

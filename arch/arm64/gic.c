@@ -51,10 +51,13 @@
 // low region, which must be programmed from each CPU for its own bank.
 
 #include "gic.h"
+#include "gic_its.h"
 
 #include "exception.h"
 #include "hwfeat.h"     // CACHE_LINE_MAX_BYTES for the per-CPU counter padding
 #include "mmu.h"
+#include "mmio.h"
+#include "timer.h"
 #include "uart.h"
 
 #include <stdint.h>
@@ -75,6 +78,7 @@
 #define GICD_ICENABLER(n)     (0x0180 + ((n)*4))
 #define GICD_ISPENDR(n)       (0x0200 + ((n)*4))
 #define GICD_ICPENDR(n)       (0x0280 + ((n)*4))
+#define GICD_ISACTIVER(n)    (0x0300 + ((n)*4))
 #define GICD_ICACTIVER(n)     (0x0380 + ((n)*4))
 #define GICD_IPRIORITYR(n)    (0x0400 + ((n)*4))
 #define GICD_ITARGETSR(n)     (0x0800 + ((n)*4))    // GICv2 only
@@ -179,6 +183,7 @@ static u32 g_max_intid;        // from GICD_TYPER
 static u64 g_cpu_base;
 static u64 g_cpu_pa;
 static u32 g_v2_eoi_token[DTB_MAX_CPUS];
+static u64 g_redist_mapped_size;
 
 // GICv3 redistributor region stride. Each CPU's redistributor frame is
 // 0x20000 bytes (RD_base 0x0..0xFFFF + SGI_base 0x10000..0x1FFFF). Per
@@ -197,6 +202,48 @@ struct gic_irq_slot {
     void *arg;
 };
 static struct gic_irq_slot g_handlers[GIC_NUM_INTIDS];
+// LPIs are a separate namespace: never use an architectural INTID as an
+// index into the SPI-sized array. The allocator owns this bounded LPI pool.
+static struct gic_irq_slot g_lpi_handlers[GIC_LPI_COUNT];
+static u64 g_irq_barrier_seen[DTB_MAX_CPUS];
+
+bool gic_intid_dispatchable(u32 id) {
+    return id < GIC_NUM_INTIDS ||
+        (g_version == GIC_VERSION_V3 && id >= GIC_LPI_MIN &&
+         id - GIC_LPI_MIN < GIC_LPI_COUNT);
+}
+static struct gic_irq_slot *irq_slot(u32 id) {
+    if (!gic_intid_dispatchable(id)) return NULL;
+    return id < GIC_NUM_INTIDS ? &g_handlers[id] : &g_lpi_handlers[id - GIC_LPI_MIN];
+}
+static void irq_barrier_handler(u32 intid, void *arg) {
+    (void)intid; (void)arg;
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu < DTB_MAX_CPUS)
+        __atomic_fetch_add(&g_irq_barrier_seen[cpu], 1, __ATOMIC_RELEASE);
+}
+static void irq_barrier_cpu_init(void) {
+    // Attach once on the boot CPU; secondary bring-up only enables its bank.
+    if (smp_cpu_idx_self() == 0) gic_attach(IPI_IRQ_BARRIER, irq_barrier_handler, NULL);
+    gic_enable_irq(IPI_IRQ_BARRIER);
+}
+bool gic_synchronize_cpu(unsigned cpu, u64 timeout_ns) {
+    if (cpu >= smp_cpu_count() || cpu >= DTB_MAX_CPUS || !timeout_ns) return false;
+    __asm__ volatile("dsb sy" ::: "memory");
+    // A thread executing here on the destination cannot overlap an IRQ on
+    // that same CPU. Migration after this observation cannot undo the proof.
+    if (cpu == smp_cpu_idx_self()) return true;
+    u64 before = __atomic_load_n(&g_irq_barrier_seen[cpu], __ATOMIC_ACQUIRE);
+    if (!gic_send_ipi(cpu, IPI_IRQ_BARRIER)) return false;
+    u64 start = timer_now_ns();
+    do {
+        if (__atomic_load_n(&g_irq_barrier_seen[cpu], __ATOMIC_ACQUIRE) != before)
+            return true;
+        __asm__ volatile("yield" ::: "memory");
+    } while (timer_now_ns() - start < timeout_ns);
+    return false;
+}
+
 
 // ---------------------------------------------------------------------------
 // MMIO helpers.
@@ -212,10 +259,6 @@ static inline void mmio_w32(u64 base, u32 off, u32 val) {
 
 static inline void mmio_w8(u64 base, u32 off, u8 val) {
     *(volatile u8 *)(uintptr_t)(base + off) = val;
-}
-
-static inline u64 mmio_r64(u64 base, u32 off) {
-    return *(volatile u64 *)(uintptr_t)(base + off);
 }
 
 static inline void mmio_w64(u64 base, u32 off, u64 val) {
@@ -529,6 +572,7 @@ static bool gic_init_v2(const char *compat) {
     dist_init_v2();
     gic_cpu_config_v2();
     cpu_iface_init_v2();
+    irq_barrier_cpu_init();
     return true;
 }
 
@@ -603,6 +647,7 @@ bool gic_init(void) {
     }
     g_dist_base   = (u64)(uintptr_t)dist_kva;
     g_redist_base = (u64)(uintptr_t)redist_kva;
+    g_redist_mapped_size = redist_used_size;
 
     // Step 4: bring up distributor + this CPU's redistributor + CPU
     // interface. Order matters: distributor first (so SPIs are
@@ -612,6 +657,7 @@ bool gic_init(void) {
     dist_init();
     redist_init_cpu(0);
     cpu_iface_init();
+    irq_barrier_cpu_init();
 
     return true;
 }
@@ -626,6 +672,7 @@ bool gic_init_secondary(unsigned cpu_idx) {
         // contract) -- same constraint as the v3 sysreg interface.
         gic_cpu_config_v2();
         cpu_iface_init_v2();
+        irq_barrier_cpu_init();
         return true;
     }
 
@@ -638,6 +685,7 @@ bool gic_init_secondary(unsigned cpu_idx) {
     // from THIS CPU). Same sequence as the boot CPU; the priority mask,
     // BPR, CTLR, and group-1 enable are all banked per-CPU.
     cpu_iface_init();
+    irq_barrier_cpu_init();
 
     return true;
 }
@@ -690,14 +738,15 @@ bool gic_send_ipi(unsigned target_cpu_idx, u32 sgi_intid) {
 // ---------------------------------------------------------------------------
 
 bool gic_attach(u32 intid, gic_irq_handler_t handler, void *arg) {
-    if (intid >= GIC_NUM_INTIDS) return false;
+    struct gic_irq_slot *slot = irq_slot(intid);
+    if (!slot) return false;
     // Reject NULL handler: the attach API exists to install a real
     // handler; "detach" should go through gic_disable_irq, not via
     // an attach with NULL that quietly arms a future "no handler"
     // extinction. Forces callers to be explicit.
     if (!handler) return false;
-    g_handlers[intid].handler = handler;
-    g_handlers[intid].arg     = arg;
+    slot->handler = handler;
+    slot->arg     = arg;
     return true;
 }
 
@@ -755,10 +804,11 @@ const void *gic_cpu_irq_count_slot_addr(unsigned cpu) {
 }
 
 void gic_dispatch(u32 intid) {
-    if (intid >= GIC_NUM_INTIDS) {
+    struct gic_irq_slot *slot = irq_slot(intid);
+    if (!slot) {
         extinction_with_addr("gic_dispatch: INTID out of range", (uintptr_t)intid);
     }
-    gic_irq_handler_t h = g_handlers[intid].handler;
+    gic_irq_handler_t h = slot->handler;
     if (!h) {
         extinction_with_addr("gic_dispatch: no handler for INTID", (uintptr_t)intid);
     }
@@ -773,7 +823,7 @@ void gic_dispatch(u32 intid) {
                          g_cpu_irq_count[cpu].n + 1, __ATOMIC_RELAXED);
     }
 
-    h(intid, g_handlers[intid].arg);
+    h(intid, slot->arg);
 }
 
 // ---------------------------------------------------------------------------
@@ -790,6 +840,7 @@ void gic_dispatch(u32 intid) {
 // ---------------------------------------------------------------------------
 
 bool gic_enable_irq(u32 intid) {
+    if (intid >= GIC_LPI_MIN) return gic_its_set_enabled(intid, true);
     if (intid >= GIC_NUM_INTIDS) return false;
     if (g_version == GIC_VERSION_V2) {
         // v2: SGI/PPI (0..31) live in the distributor's per-CPU-banked low
@@ -895,6 +946,59 @@ void gic_set_spi_edge_triggered(u32 intid) {
     __asm__ __volatile__("dsb sy" ::: "memory");
 }
 
+void gic_set_spi_level_triggered(u32 intid) {
+    // F-A1: configure a specific SPI to level-triggered (ICFGR 0b00). GIC init
+    // already defaults all SPIs to level, but kobj_irq_create calls this
+    // EXPLICITLY so a reused INTID (a freed edge IRQ, then a level claim on the
+    // same line) never inherits a stale edge config. The sibling
+    // gic_set_spi_edge_triggered documents the preconditions, the 2-bit ICFGR
+    // encoding, the RMW-vs-neighbor rationale, and the F200 dsb ordering; this
+    // is the same, writing 0b00 (both bits clear) instead of 0b10.
+    if (intid < GIC_SPI_MIN || intid > g_max_intid)
+        extinction("gic_set_spi_level_triggered: intid out of SPI range "
+                   "(precondition broken -- kernel-internal bug)");
+    if (g_dist_base == 0)
+        extinction("gic_set_spi_level_triggered: GIC not initialized "
+                   "(precondition broken -- boot-order discipline)");
+
+    _Static_assert((0x0u & 0x1u) == 0,
+                   "ICFGR level encoding 0b00 must keep SBZ bit clear");
+
+    u32 reg     = GICD_ICFGR(intid / 16);
+    u32 bit_off = (intid % 16) * 2;
+    u32 mask    = 0x3u << bit_off;
+    u32 val     = 0x0u << bit_off;  // 0b00 = level-triggered
+    if (g_version == GIC_VERSION_V2) {
+        u32 cur = v2_r32(g_dist_base, reg);
+        v2_w32(g_dist_base, reg, (cur & ~mask) | val);
+    } else {
+        u32 cur = mmio_r32(g_dist_base, reg);
+        mmio_w32(g_dist_base, reg, (cur & ~mask) | val);
+    }
+    __asm__ __volatile__("dsb sy" ::: "memory");
+}
+
+bool gic_drain_spi(u32 intid) {
+    if (intid < GIC_SPI_MIN || intid > g_max_intid || intid >= GIC_NUM_INTIDS)
+        return false;
+    u32 n = intid / 32, bit = 1u << (intid % 32);
+    // A retry must not restart an outstanding distributor write. Once the
+    // enable bit is clear, observe RWP below without writing ICENABLER again.
+    if (gic_intid_enabled(intid)) gic_disable_irq(intid);
+    if (g_version == GIC_VERSION_V2) {
+        v2_w32(g_dist_base, GICD_ICPENDR(n), bit);
+        __asm__ volatile("dsb sy" ::: "memory");
+        return !(v2_r32(g_dist_base, GICD_ISACTIVER(n)) & bit) &&
+               !(v2_r32(g_dist_base, GICD_ISPENDR(n)) & bit);
+    }
+    // RWP includes ICENABLER completion. Never wait with a domain spinlock.
+    if (mmio_r32(g_dist_base, GICD_CTLR) & (1u << 31)) return false;
+    mmio_w32(g_dist_base, GICD_ICPENDR(n), bit);
+    __asm__ volatile("dsb sy" ::: "memory");
+    return !(mmio_r32(g_dist_base, GICD_ISACTIVER(n)) & bit) &&
+           !(mmio_r32(g_dist_base, GICD_ISPENDR(n)) & bit);
+}
+
 bool gic_set_pending_spi(u32 intid) {
     // P4-Ic5-IRQ-probe: write GICD_ISPENDR<n>.bit to mark this SPI as
     // pending. SPI-only because the distributor frame's GICD_ISPENDR
@@ -913,6 +1017,7 @@ bool gic_set_pending_spi(u32 intid) {
 }
 
 bool gic_disable_irq(u32 intid) {
+    if (intid >= GIC_LPI_MIN) return gic_its_set_enabled(intid, false);
     if (intid >= GIC_NUM_INTIDS) return false;
     if (g_version == GIC_VERSION_V2) {
         u32 n = intid / 32, bit = intid % 32;
@@ -928,6 +1033,27 @@ bool gic_disable_irq(u32 intid) {
         mmio_w32(g_dist_base, GICD_ICENABLER(n), 1u << bit);
     }
     return true;
+}
+
+// gic_intid_enabled -- read-only query of the ISENABLER bit for `intid`
+// (F-A1 test support + general introspection). true = the line is enabled
+// (unmasked) at the distributor (SPI) or the calling CPU's redistributor
+// (SGI/PPI); the mirror of gic_enable_irq / gic_disable_irq's write. Lets a
+// test observe the level mask+ack: a level SPI reads DISABLED after
+// kobj_irq_dispatch masks it and ENABLED after kobj_irq_wait re-arms.
+bool gic_intid_enabled(u32 intid) {
+    if (intid >= GIC_LPI_MIN) return gic_its_enabled(intid);
+    if (intid >= GIC_NUM_INTIDS) return false;
+    u32 n = intid / 32, bit = intid % 32;
+    u32 v;
+    if (g_version == GIC_VERSION_V2) {
+        v = v2_r32(g_dist_base, GICD_ISENABLER(n));
+    } else if (intid < 32) {
+        v = mmio_r32(cpu_redist_base(smp_cpu_idx_self()), GICR_ISENABLER0);
+    } else {
+        v = mmio_r32(g_dist_base, GICD_ISENABLER(n));
+    }
+    return ((v >> bit) & 1u) != 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -954,7 +1080,7 @@ void gic_eoi(u32 intid) {
     // IHI 0069 §2.2.1 — must NOT EOI. The exception path filters these
     // before reaching here, but defend the API call too in case a
     // future caller (manual EOI in a handler) passes a stale IAR.
-    if (intid >= GIC_NUM_INTIDS) {
+    if (intid >= GIC_NUM_INTIDS && intid <= GIC_INTID_SPURIOUS) {
         return;
     }
     if (g_version == GIC_VERSION_V2) {
@@ -1001,3 +1127,21 @@ u64 gic_cpu_iface_pa(void)      { return g_cpu_pa; }
 // (g_max_intid, GIC_NUM_INTIDS] that would produce UNPREDICTABLE
 // register writes per IHI 0069 §12.9.7.
 u32 gic_max_intid(void)         { return g_max_intid; }
+
+// The base GIC driver currently maps contiguous 128KiB redistributors in CPU
+// order. MSI setup validates that seam explicitly before touching LPI tables.
+bool gic_redist_for_cpu(unsigned cpu, u64 *va, u64 *pa, u64 *typer) {
+    if (g_version != GIC_VERSION_V3 || cpu >= dtb_cpu_count() ||
+        ((u64)cpu + 1) * GICR_FRAME_STRIDE > g_redist_mapped_size) return false;
+    u64 base = cpu_redist_base(cpu);
+    u64 t = io_read64((void *)(uintptr_t)(base + GICR_TYPER));
+    u64 mpidr;
+    if (!dtb_cpu_mpidr(cpu, &mpidr)) return false;
+    u32 affinity = (u32)(mpidr & 0xffffffu) | (u32)((mpidr >> 8) & 0xff000000u);
+    if ((u32)(t >> 32) != affinity || affinity != cpu || (t & (1ull << 1)) ||
+        (cpu + 1 < dtb_cpu_count() && (t & (1ull << 4)))) return false;
+    if (va) *va = base;
+    if (pa) *pa = g_redist_pa + (u64)cpu * GICR_FRAME_STRIDE;
+    if (typer) *typer = t;
+    return true;
+}

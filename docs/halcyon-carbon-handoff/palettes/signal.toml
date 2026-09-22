@@ -1,0 +1,77 @@
+# Stock Halcyon schema: complete 57-key compatibility projection.
+# Not pixel-exact alone: pair with ui-palettes/signal.toml AFTER implementing Instrument v1.
+# Ember changes are an explicit new-profile policy amendment. No base inheritance.
+# ANSI and bevel faces are DERIVED, not sampled from the mockup.
+[meta]
+name = "Signal Amber"
+
+[palette]
+floor = "#0B0D0E"
+surface = "#15191B"
+header = "#101315"
+raised = "#191D1F"
+border = "#2A302E"
+blank = "#111416"
+selection = "#322C21"
+island_rule = "#8C6732"
+fg = "#E4E7E5"
+fg_dim = "#CDD1CF"
+fg_muted = "#929996"
+fg_subtle = "#606764"
+bevel_top = "#323435"
+bevel_left = "#212324"
+bevel_right = "#090A0B"
+bevel_bottom = "#060708"
+ember = "#D59A42"
+ember_dim = "#8C6732"
+ember_deep = "#8C6732"
+status_bg = "#0D1011"
+status_fg = "#E4E7E5"
+status_muted = "#929996"
+status_idle = "#606764"
+
+[palette.sage]
+key = "#70A17C"
+tint = "#101315"
+raised = "#191D1F"
+border = "#202523"
+fg = "#E4E7E5"
+fg_dim = "#929996"
+fg_muted = "#606764"
+
+[palette.cinnabar]
+key = "#C86B62"
+tint = "#101315"
+raised = "#191D1F"
+border = "#202523"
+fg = "#E4E7E5"
+fg_dim = "#929996"
+fg_muted = "#606764"
+
+[palette.syntax]
+slate = "#D59A42"
+sage = "#83A7A0"
+sand = "#C86B62"
+moss = "#8C6732"
+ash = "#70A17C"
+dusk = "#D9B374"
+smoke = "#606764"
+fen = "#70A17C"
+cinnabar = "#C86B62"
+
+[terminal]
+bg = "#111516"
+fg = "#B8BFBC"
+ansi = ["#111416", "#C86B62", "#70A17C", "#D59A42", "#83A7A0", "#8C6732", "#7AA48E", "#929996", "#606764", "#D08E87", "#90B599", "#D9B070", "#9EB9B3", "#A58B64", "#98B7A6", "#B8BFBC"]
+
+[type]
+smooth = 0
+
+[geometry]
+bevel = 2
+gap = 3
+hairline = 1
+header_h = 32
+status_h = 25
+tag_pad_x = 0
+tab_strip_h = 0

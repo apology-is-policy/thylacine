@@ -20,6 +20,7 @@
 //     INTID-based GIC IRQs; PCI INTx → GIC INTID mapping lands when
 //     a driver actually needs IRQ delivery.
 
+#include "../arch/arm64/mmio.h"
 #include <thylacine/virtio_pci.h>
 
 #include <thylacine/dtb.h>
@@ -76,18 +77,18 @@ static void *pci_cfg_kva(u8 bus, u8 dev, u8 fn) {
 // =============================================================================
 
 static inline u8 mmio_read8(const void *p) {
-    return *(const volatile u8 *)p;
+    return io_read8(p);
 }
 static inline u16 mmio_read16(const void *p) {
-    return *(const volatile u16 *)p;
+    return io_read16(p);
 }
 static inline u32 mmio_read32(const void *p) {
-    return *(const volatile u32 *)p;
+    return io_read32(p);
 }
 
-static inline void mmio_write8 (void *p, u8  v) { *(volatile u8  *)p = v; }
-static inline void mmio_write16(void *p, u16 v) { *(volatile u16 *)p = v; }
-static inline void mmio_write32(void *p, u32 v) { *(volatile u32 *)p = v; }
+static inline void mmio_write8 (void *p, u8  v) { io_write8(p, v); }
+static inline void mmio_write16(void *p, u16 v) { io_write16(p, v); }
+static inline void mmio_write32(void *p, u32 v) { io_write32(p, v); }
 
 u8 virtio_pci_cfg_read8(const struct virtio_pci_dev *d, u32 off) {
     if (!d || !d->cfg)      return 0xFFu;

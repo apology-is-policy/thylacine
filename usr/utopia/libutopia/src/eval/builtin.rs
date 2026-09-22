@@ -134,7 +134,7 @@ use super::value::Value;
 /// dispatch arms.
 pub const BUILTIN_NAMES: &[&str] = &[
     "cd", "pwd", "exit", "true", "false", "unset", "eval", "source", ".", "type",
-    "whence", "jobs", "fg", "bg", "wait", "kill", "abdicate", "mount", "unmount",
+    "whence", "jobs", "fg", "bg", "wait", "kill", "mount", "unmount", "abdicate",
 ];
 
 /// The built-in names, for the #115a completion command index.

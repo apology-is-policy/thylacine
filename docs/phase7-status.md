@@ -15,6 +15,55 @@ The Phase 7 entry decision (taken under the U-1 scripture conversation):
 - **Runtime**: native libthyla-rs (the Plan 9 split — see `docs/ARCHITECTURE.md §3.5` + `CLAUDE.md` "Native vs ported userspace programs").
 - **Workspace**: Cargo workspace at `usr/utopia/`; Helix vendored separately at `usr/helix/`.
 
+## Haul completion integration — 2026-09-17
+
+The operator authorized bringing Haul's required Imperium dependencies into
+main and requested single-agent work. The implementation provides
+`imperium post`, `haul --post NAME ... &`, and same-shell `mount`/`unmount`.
+The cap is elevation-only bit 13; kernel admission is bounded to two live
+posts per scope and four cap-owned registry slots, with generation-checked
+recycling of exited cap posters. TCB names remain protected.
+
+Verified before integration: encrypted remote file reads in the existing
+shell; rejection of a second mount; unmount/reap; repost under a new name;
+abdication with a live mount; existing private/child encrypted path and remote
+hangup; Imperium conferral/denial, background teardown and cross-user logout.
+The workflow also exposed and fixed the shell's early `$status` reset, with
+boot regression probes. The Imperium harness now waits for a complete PID
+line rather than accepting a prefix from a split serial read.
+
+Host tests, KATs, model results and the completed multi-boot matrix are recorded
+in the integration commit and `docs/HAUL-INTEGRATION-REVIEW.md`. This is a
+self-review, not a new independent adversarial audit. Existing credential
+custody and back-pressure test caveats remain in [[sub-haul]].
+
+## Aux media and Halcyon integration — 2026-09-17
+
+The committed aux-3 work through `b0ea1986` is being integrated with main.
+View now places session images at their ordered Beacon caption in the shell
+transcript. Gallery preserves aspect ratio, composites transparency over black,
+and exposes its title through the hosting pane tag; Halcyon counts native app
+panes independently of its PTYs. Real session captures verify pane creation,
+zoom, Escape, transcript preservation, and the rich Gallery manual on ITS and
+shared INTx configurations.
+
+The installed manual catalogue covers the reader, remote files/Haul, View,
+Gallery, Nocturne and DOSBox. Host format checks and the serial reader scenario
+pass. Real npxf mount, posting, remote-hangup and abdication scenarios pass
+through a temporary fixture on the Pi's Cloudflare SSH endpoint.
+
+The Lex curiata visual specification is operator-approved. The trusted display
+boundary and acceptance plan are in `docs/HALCYON-TRUSTED-EPISODE.md`; a regular
+Halcyon surface is not a trusted graphics sink. Graphical SAK implementation is
+not claimed by this design deliverable.
+
+The associated PCI work is governed by `docs/PCI-INTERRUPTS-DESIGN.md`.
+Function-bound shared INTx, mediated MSI-X, GICv2m, and ITS/LPI are implemented;
+1,568 kernel tests pass on HVF, including forced benchmark failure and a
+64-round last-close/dispatch race. Audio/controller and full SMP matrix gates
+remain in progress. Work is single-agent with self-review, not an independent
+auditor's approval. Main integration remains pending those checks.
+
 ## Landed chunks
 
 **The AUX-track notes / job-control block (2026-08-13..16)** sits at the top of

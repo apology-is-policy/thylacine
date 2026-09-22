@@ -1,0 +1,75 @@
+# Round 2: authored semantic ANSI16 + explicit contrast corrections.
+# Still a stock-schema compatibility projection, not the full UI profile.
+[meta]
+name = "Strogg Process"
+
+[palette]
+floor = "#070605"
+surface = "#181310"
+header = "#0D0B09"
+raised = "#231C17"
+border = "#45372D"
+blank = "#110E0C"
+selection = "#2D1E18"
+island_rule = "#723F34"
+fg = "#D7D0C6"
+fg_dim = "#C5BBB0"
+fg_muted = "#918679"
+fg_subtle = "#827A72"
+bevel_top = "#2F2E2D"
+bevel_left = "#1D1C1C"
+bevel_right = "#050504"
+bevel_bottom = "#040303"
+ember = "#A75B45"
+ember_dim = "#723F34"
+ember_deep = "#723F34"
+status_bg = "#0A0807"
+status_fg = "#D7D0C6"
+status_muted = "#918679"
+status_idle = "#62584E"
+
+[palette.sage]
+key = "#728060"
+tint = "#0D0B09"
+raised = "#231C17"
+border = "#2D251F"
+fg = "#D7D0C6"
+fg_dim = "#918679"
+fg_muted = "#827A72"
+
+[palette.cinnabar]
+key = "#B4473D"
+tint = "#0D0B09"
+raised = "#231C17"
+border = "#2D251F"
+fg = "#D7D0C6"
+fg_dim = "#918679"
+fg_muted = "#827A72"
+
+[palette.syntax]
+slate = "#AD6752"
+sage = "#8B835E"
+sand = "#BD5D54"
+moss = "#967168"
+ash = "#728060"
+dusk = "#B36D57"
+smoke = "#80786F"
+fen = "#728060"
+cinnabar = "#B4473D"
+
+[terminal]
+bg = "#0C0908"
+fg = "#BCB2A8"
+ansi = ["#776B60", "#BC796E", "#929B74", "#B49D65", "#8999AE", "#AE88A0", "#7FA59A", "#CEC2B3", "#A59581", "#DB9D8A", "#B3BA94", "#D5BD87", "#ABB8C9", "#CCABC0", "#A2C3B5", "#EDE1CF"]
+
+[type]
+smooth = 0
+
+[geometry]
+bevel = 2
+gap = 3
+hairline = 1
+header_h = 32
+status_h = 25
+tag_pad_x = 0
+tab_strip_h = 0

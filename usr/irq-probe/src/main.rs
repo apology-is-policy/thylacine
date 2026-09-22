@@ -13,20 +13,16 @@
 // probes split the surface so each one targets a single subsystem
 // without virtqueue+DMA+driver-machinery complication.
 //
-// Target: GIC SPI 96 — an SPI that is not used by any device on QEMU
-// virt. SPI 0..15 = PL011/PL031/PCI/GPIO/etc; SPI 16..47 = virtio-mmio
-// slots; SPI 96 is safely above any platform device on QEMU virt's
-// default config (GICD_TYPER reports up to 160 INTIDs there, so 96 is
-// in-range but unused). The choice is platform-specific to QEMU virt;
-// a Phase 5+ DTB-driven INTID allocator would lift this hardcoding.
+// Target: the kernel-selected synthetic SPI supplied in argv[1].
+// MSI/controller and firmware interrupt vectors are excluded by the kernel.
 //
 // Flow:
-//   1. t_irq_create(96, T_RIGHT_SIGNAL) → handle. Inside the kernel:
-//      - intid_try_claim(96) ✓ (not in g_intid_claimed kernel-reserve
+//   1. t_irq_create(intid, T_RIGHT_SIGNAL) → handle. Inside the kernel:
+//      - intid_try_claim(intid) ✓ (not in g_intid_claimed kernel-reserve
 //        bitmap; only SGI 0 + PPI 30 are reserved at irqfwd_init).
 //      - kmalloc + magic + ref=1.
-//      - gic_attach(96, kobj_irq_dispatch, k) — registers handler slot.
-//      - gic_enable_irq(96) — sets GICD_ISENABLER bit. Now both
+//      - gic_attach(intid, kobj_irq_dispatch, k) — registers handler slot.
+//      - gic_enable_irq(intid) — sets GICD_ISENABLER bit. Now both
 //        pending (set by the kernel test side before spawn — see
 //        test_irq_probe.c) AND enabled, so the GIC routes the IRQ to
 //        CPU 0 (Aff0=0 affinity from dist_init's GICD_IROUTER zeros).
@@ -52,7 +48,7 @@
 //     T_RIGHT_SIGNAL which is in T_RIGHT_ALL_HW), intid >= 32 (SPI
 //     range; SGI/PPI rejected by R9 F145).
 //   - HwResourceExclusive: intid_try_claim rejects duplicate claims;
-//     this probe is the sole claimant of SPI 96 at v1.0.
+//     this probe is the sole claimant of SPI intid at v1.0.
 //   - SYS_IRQ_WAIT arg validation: handle kind == KOBJ_IRQ, rights
 //     include RIGHT_SIGNAL.
 //   - F143 UAF borrow: kobj_irq_ref before sleep + kobj_irq_unref
@@ -74,25 +70,25 @@ use libthyla_rs::handle::Rights;
 use libthyla_rs::hardware::Irq;
 use libthyla_rs::{t_exits, t_putstr};
 
-// GIC SPI 96 — chosen as a safe unused SPI on QEMU virt's GIC. Pinned
-// in lockstep with kernel/test/test_irq_probe.c::IRQ_PROBE_TEST_INTID.
-// A mismatch between the two values produces a deterministic failure
-// (the kernel pre-pends a different SPI than the probe waits on; cond
-// stays false; t_irq_wait blocks forever; test runner times out).
-const IRQ_PROBE_INTID: u32 = 96;
-
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
     t_putstr("irq-probe: starting (P4-Ic5-IRQ-probe)\n");
 
-    // Claim SPI 96 with SIGNAL right (required for Irq::wait to
+    // Claim SPI intid with SIGNAL right (required for Irq::wait to
     // consume IRQs per sys_irq_wait_handler's RIGHT_SIGNAL check --
     // F148-era handles enforce rights-gating on the consumer side of
     // the handle). U-2h-hardware: typed Irq wraps SYS_IRQ_CREATE.
-    let irq = match Irq::new(IRQ_PROBE_INTID, Rights::SIGNAL) {
+    let intid = libthyla_rs::env::args().nth(1)
+        .and_then(|b| core::str::from_utf8(b).ok())
+        .and_then(|s| s.parse::<u32>().ok());
+    let Some(intid) = intid else {
+        t_putstr("irq-probe: missing kernel-selected SPI\n");
+        unsafe { t_exits(1) };
+    };
+    let irq = match Irq::new(intid, Rights::SIGNAL) {
         Ok(i) => i,
         Err(_) => {
-            t_putstr("irq-probe: Irq::new failed (intid may now be kernel-reserved or already-claimed; update probe to a different unclaimed SPI)\n");
+            t_putstr("irq-probe: Irq::new failed (intid may now be kernel-reserved or already-claimed; kernel-selected vector unavailable)\n");
             unsafe { t_exits(1) };
         }
     };
@@ -100,7 +96,7 @@ pub extern "C" fn rs_main() -> i64 {
 
     // Irq::wait blocks for a pending IRQ; returns the collapsed
     // pending-count consumed. With the kernel test's pre-pend
-    // (gic_set_pending_spi(96) before this child spawned) the IRQ is
+    // (gic_set_pending_spi(intid) before this child spawned) the IRQ is
     // delivered during gic_enable_irq inside Irq::new OR shortly after
     // on ERET; either way pending_count is >= 1 by the time we reach
     // the cond check.

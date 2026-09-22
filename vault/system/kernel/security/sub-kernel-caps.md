@@ -6,16 +6,32 @@ title: "Capabilities — the fork-grantable ceiling, the cap device, and the leg
 code:
   - kernel/include/thylacine/caps.h
   - kernel/devcap.c
+  - kernel/include/thylacine/devcap.h
   - kernel/proc.c
+  - kernel/test/test_devcap.c
 audit: hard
-guarded-by: []
-validated-by: [prose, gate-smp]
+guarded-by: [inv-i2, inv-i25]
+validated-by: [prose, spec-imperium, gate-smp]
 locks: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md section 5.5", "docs/IDENTITY-DESIGN.md section 9.8", "specs/corvus.tla", "specs/handles.tla"]
 created: 2026-08-02
-updated: 2026-09-09
+updated: 2026-09-21
 ---
+## Graphical grant commit
+
+A graphical grant is inserted with `seat_held` atomically under the grant
+lock. Redemption refuses it without consuming it, even when the requester polls
+`/use` before Corvus replies. Only the seat's successful RESTORED transition
+releases the exact target stripes/session. Failure cancels the matching held
+entry and zeroes the seat's record of it, so the RESTORED that later recovers a
+failed seat finds nothing to release (`cons.graphical_seat_grant_and_failure`
+drives both orders with a fresh requester). Both paths run in process-lock then grant-lock order; redemption takes
+only the grant lock, so the barrier adds no inverse edge. Serial grants retain
+their existing immediate redemption semantics. The grant bounds test covers early
+redeem, mismatched releases, cancellation, one-shot release and successful redeem.
+See [[sub-lictor]] for the physical restoration contract.
+
 ## Purpose
 
 A capability is an unforgeable per-Proc bit gating a class of privileged
@@ -30,6 +46,19 @@ and everything in this dossier exists to make that the only path.
 
 ## Contract
 
+**Propagating Imperium and Haul (2026-09-17).** `CAP_GRANTABLE_IMPERIUM`
+is DAC_OVERRIDE | CHOWN | KILL | POST_SERVICE. The last bit is 13 (12 remains
+reserved for audio); it is absent from CAP_ALL, present in CAP_ELEVATION_ONLY
+and CAP_GRANTABLE_CLEARANCE. `sys_cap_grant_imperium_core` accepts only the
+propagating flag and this subset. `proc_become_legate` rejects nested
+propagating redemption. During `rfork_internal`, only the parent's scoped
+`legate_caps` can survive the elevation strip, intersected with actual parent
+caps and the requested child mask. Ordinary clearance still does not flow.
+The scope tag is published last with release ordering. Child insertion checks
+parent teardown under the process-table lock, closing the fork/sweep gap.
+The trusted authorization and user interface are described in [[sub-imperium]].
+
+
 Two disjoint classes, pinned by `_Static_assert`:
 
 - **`CAP_ALL`** — the fork-grantable ceiling, what kproc holds at
@@ -37,8 +66,12 @@ Two disjoint classes, pinned by `_Static_assert`:
   `LOCK_PAGES`, `CSPRNG_READ`, `GRANT_HOSTOWNER`, `SET_IDENTITY`,
   `GRANT_CLEARANCE`.
 - **`CAP_ELEVATION_ONLY`** — held by no Proc at creation and stripped from
-  every child unconditionally: `HOSTOWNER`, `DAC_OVERRIDE`, `CHOWN`,
-  `KILL`, `DEBUG`, `JIT`.
+  every child (except a PROPAGATING legate scope's own `legate_caps`):
+  `HOSTOWNER`, `DAC_OVERRIDE`, `CHOWN`, `KILL`, `DEBUG`, `JIT`,
+  `AUDIO_GRAPH` (bit 12) and `POST_SERVICE` (bit 13). The macro in `caps.h`
+  is the authority for this list; a prose COUNT of it has been wrong four
+  times (four, five, six, seven -- in `caps.h`, CLAUDE.md and ARCH section 28
+  at once, 2026-09-21), so none is given here.
 
 `(CAP_ALL & CAP_ELEVATION_ONLY) == 0` is asserted, so every bit is
 fork-grantable **xor** elevation-only, never both. `CAP_ALL` is itself

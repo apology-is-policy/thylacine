@@ -395,6 +395,7 @@ bool sched_has_runnable_work(void);
 // Returns whether it dispatched.
 bool sched_yield_hint(void);
 
+
 // Internal — called by thread_free if t->state == THREAD_RUNNABLE so the
 // run tree doesn't carry a dangling pointer. Idempotent: safe to call
 // on an already-not-in-tree thread.

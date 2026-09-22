@@ -244,6 +244,24 @@ int thyla_tap_glsrc(ThylaTap *t, uint32_t ctx_pub)
     return t_write(t->ctl, cmd, (size_t)(p - cmd)) < 0 ? -1 : 0;
 }
 
+int thyla_tap_title(ThylaTap *t, const char *title)
+{
+    char cmd[256] = "title ";
+    size_t n = strnlen(title, sizeof(cmd) - 6);
+    if (t->ctl < 0)
+        return -1;
+    /* Do not split a UTF-8 codepoint at the bound. SDL supplies UTF-8. */
+    if (n == sizeof(cmd) - 6) {
+        while (n && ((unsigned char)title[n] & 0xc0) == 0x80)
+            n--;
+    }
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)title[i];
+        cmd[6 + i] = (c < 0x20 || c == 0x7f) ? ' ' : (char)c;
+    }
+    return t_write(t->ctl, cmd, 6 + n) == (long)(6 + n) ? 0 : -1;
+}
+
 /* reference/139 "Frame intent": declare this surface DYNAMIC (pin the
  * compositor clock while visible) or STATIC (throttle-eligible). SDL games/
  * video declare DYNAMIC after open; the compositor visible-gates the pin.

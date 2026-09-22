@@ -76,6 +76,11 @@ pub fn plan_tiles(leaves: &[Leaf], have: &[u32], closed: &[u32]) -> SessionPlan 
         })
         .map(|l| l.id)
         .collect();
+    // CANDIDATES, never a verdict: this says only "absent from the leaves you
+    // gave me". Since HALCYON-WORKSPACES W-1a the caller's `layout` rows are
+    // the ACTIVE root's, so a tile merely gone DORMANT in another workspace is
+    // absent too. The caller must confirm against the global `pane/` tree
+    // before tearing anything down -- see the probe in session::reconcile.
     let drop = have
         .iter()
         .copied()
@@ -95,6 +100,7 @@ mod tests {
             focused,
             surface,
             hidden: false,
+            backgrounded: false,
         }
     }
 

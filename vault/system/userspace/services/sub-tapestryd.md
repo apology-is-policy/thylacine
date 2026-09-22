@@ -3,7 +3,7 @@ id: sub-tapestryd
 type: sub
 title: "tapestryd — the compositor: the weave lifecycle, the present engine, and the retire ordering"
 parent: moc-userspace
-code: [usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs]
+code: [usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/va.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs, usr/tapestryd/Cargo.toml]
 audit: hard
 guarded-by: [inv-i40, inv-i5, inv-i34, inv-i1, inv-i45, inv-i9]
 validated-by: [spec-tapestry-present, prose, gate-smp]
@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
-updated: 2026-09-06
+updated: 2026-09-21
 ---
 ## Purpose
 
@@ -22,12 +22,10 @@ it pixels through a shared page (a *weave*) and a 32-byte present
 descriptor; it transfers, flushes, and either scans a client's resource
 out directly or composes several into its own screen buffer.
 
-The warden binds it to `virtio-pci:16` (GPU) **and** `virtio-pci:18`
-(keyboard) through the manifest's `gather` mode — one grant, one Proc,
-an I-34 allowance narrowed to exactly those functions. Both ride PCI
-because the six populated virtio-mmio slots share one page whose
-lifetime belongs to stratumd, so a second persistent MMIO claimant is
-structurally impossible.
+Warden gives Tapestry a DMA allowance and a normal seat-client designation.
+[[sub-lictor]] owns the physical GPU/input functions and mediates the typed
+broker. Tapestry retains surface layout, application contexts and normal
+composition, but has no display/input BARs, queues or IRQ authority.
 
 Since the Warp arc it is **also the GPU seam**: when the device offers
 `VIRTIO_GPU_F_VIRGL`, tapestryd serves a second tree, `/srv/warp`,
@@ -36,6 +34,14 @@ objects, and submits 3D command streams. That half holds [[inv-i45]] —
 whose **guest-exposure axis** is what this dossier describes; its host
 and v3d axes are reserved and unbuilt respectively, so cite the axis
 rather than the bare number.
+
+**Trusted episode boundary:** Tapestry pauses normal hardware requests while
+Lictor owns an episode. On the changed generation it releases held keys/buttons
+to their original live surface generations, clears modifier/chord state and
+forces a complete repaint. Its GPU/input modules are broker proxies; the raw
+transport lives in Lictor. Existing resource/present protocol semantics below
+remain at the application-facing boundary; references to physical queue execution
+belong to [[sub-lictor]]. Pi hardware qualification is separate.
 
 ## Contract
 
@@ -65,6 +71,21 @@ because the session **is** the capability.
 **The pane and layout tree is deliberately connection-global.** F2 gates
 surfaces; it never gates the shared tree, because the tree is the window
 manager's, not any one client's.
+
+### Native application metadata
+
+A hosted surface's `title TEXT` control updates its hosting pane's canonical
+`tag` and sends the session a layout event. Halcyon reads that tag for native
+applications as well as its own shell panes; there is no second, unread title
+store. The surface control remains restricted to the owning connection and
+cannot name a different pane. An unhosted surface has no pane title and the
+operation returns `EINVAL`.
+
+The layout text marks system-background leaves with an optional `backgrounded`
+token after the geometry/weight. This is distinct from `hidden`, which also
+covers foreground tabs and zoomed-out siblings. Halcyon's footer excludes
+background leaves explicitly; absence of a session PTY does not imply a
+background renderer. Gallery and other native graphical clients count as panes.
 
 ### The Warp tree — `/srv/warp`
 
@@ -579,8 +600,9 @@ page budget does not bound it), 8 connections, 32 fids, a 128-entry
 per-surface event queue, 64 rects per present.
 
 `Comp` holds the surfaces, the pane `Layout`, the `Gpu`, the scanout
-mode (`Off` / `Direct(n)` / `Composed`), and the bump-allocated weave VA
-window.
+mode (`Off` / `Direct(n)` / `Composed`), and the mapping window (`va`, a
+`VaWindow` over `[WEAVE_VA_BASE, WEAVE_VA_TOP)`: first-fit, a range returned only
+after its detach succeeded).
 
 The `tevent` record is 24 bytes, version-pinned; pointer MOVE packs
 surface-**relative** coordinates, never absolute screen ones.
@@ -775,9 +797,11 @@ construction: one IRQ wait per GPU command.
   and self-inflicted here (tapestryd's fids carry no refcount, so a
   clobbered binding leaks nothing), but it is the guard that carries
   ptyfs's `HupAtMostOnce` argument. Task #47.
-- The weave-mapping VA window is bump-allocated and freed VAs are not
-  reused — bounded by the surface caps per generation against a 47-bit
-  space. A free list is a v1.x seam.
+- **The weave-mapping VA window reuses what is freed (CLOSED 2026-09-16).** It
+  was a bump allocator ("a free list is a v1.x seam"). The I-8 review's F1 showed
+  a divider drag walks it into the exec stack, and the bump was never the real
+  bound: no detach below 4 GiB ever succeeded. See "Every detach below 4 GiB was
+  refused" below.
 - A session peer can close or steal focus from another client's pane.
   The v1.0 trust boundary is the per-territory `/srv`: `/srv/tapestry`
   lives in the driver's territory and only the trusted boot chain
@@ -794,6 +818,22 @@ construction: one IRQ wait per GPU command.
 
 ## Caveats
 
+- **The system tier is read from a root that never has it (2026-09-21, OPEN).**
+  `system_theme()` (`main.rs`) reads `/lib/halcyon/profile` and
+  `/lib/halcyon/theme.toml` once at startup, and every boot says `profile
+  built-in (no /lib/halcyon/profile)` -- on images whose pool carries both.
+  `joey` spawns warden (and so this process) BEFORE it pivots to the Stratum
+  pool (`usr/joey/joey.c`, the warden spawn well above `t_pivot_root`); a
+  territory is cloned at spawn, so this process's root is the ramfs for life
+  and the path exists only in the pool. The compositor agrees with the image
+  only because every halcyond resolves the bundle itself and PUSHES it before
+  it mints chrome (`theme applied (renderer push)` / `(session push)`), and the
+  default pre-login console (aurora) draws no compositor chrome -- so the
+  legacy built-in is in force only in the pre-push window. Cures, undecided:
+  bake both files into the ramfs too; re-read on the first renderer connect;
+  or delete the tier and name the push as the only channel (then HALCYON-THEME
+  3.4 changes with it). A gate must never read this boot line as "the profile
+  in force".
 - **`h_version` replies `9P2000.L` to any proposal** and sets
   `version_done` unconditionally, where ptyfs replies `unknown` for an
   unsupported version. Inert — the only client proposes `9P2000.L` —
@@ -1160,6 +1200,170 @@ at v1.0 (one session; trusted system daemons; a hostile same-user program is
 degradation, no crash. The fix (block a subtree containing a FOREIGN-owned
 empty leaf) refines the ratified 13.6 rule and lands with the multi-seat seam.
 
+## The `motion` verb -- a preference the compositor cannot read for itself (2026-09-16, I-8c-3a)
+
+`Comp.motion` decides whether tapestryd's OWN transitions run
+(HALCYON-INSTRUMENT 10 + 9.5 as amended). It is the fifth member of the
+apply-authority gate's seat set, beside `menu`, `tag ... status`, `scale` and
+`theme`, and it is there for the reason `theme` is: the preference lives in
+`/env/HALCYON_MOTION`, in the USER's environment, which this process is not
+entitled to read. **tapestryd reads no file of any kind** -- that is what
+9.5's "the compositor following" resolves to here, and it is why the channel
+is a verb rather than a second reader of the same lever.
+
+It defaults ON, which is 9.5's own default and therefore the right posture
+under the console renderer, where there is no session and so no preference to
+forward.
+
+**Not a layout verb, and so not budgeted like one.** `scale` and `theme` take
+`layout_verb_budget` because they move metrics and force a carve; `motion`
+moves no geometry and forces nothing. It only decides whether transitions the
+frame clock already drives are allowed to run.
+
+**The parse lives in [[sub-tapestryd]]'s lib, not in `server.rs`.** Same
+reason as `track_glow`: the bin has no host witness, so a verb parsed there
+could widen or narrow its vocabulary unmeasured. `pane::motion_word` accepts
+exactly `1`/`on`/`0`/`off` and REFUSES everything else -- deliberately NOT
+`libhalcyon::motion::admitted`'s rule, where absence and an empty word both
+mean ON. That default exists because a user who has written no file has stated
+nothing; reaching this verb at all means the seat HAS decided, so an
+unrecognised word is a sender bug and is answered `E_INVAL`.
+
+**The clock conjunct does not travel with the word.** `motion::admitted` folds
+the user's word with a live `monotonic_ns` sample, but the session forwards
+`motion::stated` -- the word alone. The two readers do not share a clock
+substrate: halcyond animates against `monotonic_ns` deadlines and tapestryd
+against its own `Instant`-paced frame tick, so forwarding the folded verdict
+would hand the compositor one process's clock fault dressed as the other
+process's user preference.
+
+**Said on a change only.** A session re-forwarding the default at every login
+would otherwise print a line per login saying nothing happened. The
+DISCRIMINATING witness is therefore halcyond's side: `motion 1 forwarded`
+prints only on `Ok(())`, so it reports that the gate admitted the verb and the
+parse accepted it -- a missing gate conjunct says `refused E_PERM` instead.
+
+## `split_flash` -- the flash's geometry and fade, before its wiring (2026-09-16, I-8c-4a)
+
+`pane::split_flash(pane, amber, pct, elapsed_ms) -> Option<SplitFlash>` is the
+whole of section 10's split flash that can be decided without a screen: the
+kit's `.split-flash { inset: 5px; border: 1px solid var(--amber); background:
+rgba(213,154,66,.04) }` faded by `animation: flash .25s ease-out forwards`. In
+the lib for the reason `track_glow` and `menu_effects` are -- `server.rs` is
+bin-only and has no host witness -- and landed BEFORE the wiring on the
+I-8b-3a precedent, so the wiring chunk has no geometry left to get wrong.
+
+**One rect carries both inks**, because the kit draws them on one element, and
+**both fade together**, because `opacity` animates the element and not its
+background. A version fading the fill while the border held is a different and
+entirely plausible picture that no endpoint check would catch -- both agree at
+0 ms and both are gone at 250 -- so the witness pins the RATIO the two inks
+hold across the whole span.
+
+**The fill is section 10's literal and the border is the TOKEN.** Section 10
+says only the fill is a literal, so the border takes the theme's `amber`; the
+sabotage that swaps in the literal trips the witness.
+
+**The degenerate guard runs before an unsigned subtraction.** `Rect` is all
+`u32`, so a pane narrower than two insets would WRAP rather than clamp; the
+check is `pane.w <= inset * 2` before the subtraction, not a clamp after it.
+
+**Not built, and recorded as a choice**: the kit's keyframe also carries
+`transform: scale(.99)`. Section 10 states the fill, the border and the
+duration and NOT the scale, so it is omitted deliberately rather than missed.
+
+## What a compositor-side TRANSITION would need, surveyed (2026-09-16, ahead of I-8c-3b / I-8c-4)
+
+Four of section 10's five transitions are the compositor's, and all four want
+the same mechanism, which does not exist yet. Surveyed before opening the
+chunk so the next one starts from facts rather than from section 10's
+paraphrase -- which was wrong twice in one day about what it was even
+describing (see `9187455e`).
+
+**What is already here, and is more than expected.**
+
+- `Comp::frame_tick` is a real wall-clock tick, 60 Hz by default, with
+  `drag_apply()` already inside it -- the exact shape a tween advance takes.
+  Test-mode freezes it and the `tick` ctl verb drives it, so a transition is
+  deterministically steppable from a gate.
+- `Surface.shown_slot` remembers the slot a client last presented, and
+  `prefill_from_shown` already loops `visible_hosted()` blitting each one back
+  into the screen buffer via `blit_composed_pixels(n, slot, x, y, pw, ph, _)`.
+  That IS the restore primitive a translucent overlay needs, and it takes a
+  destination rect, so it also serves an EASED destination.
+- `compose_geometry` builds `ComposeOp { src, dst, clip }` from the leaf's
+  `content` rect and already carries a scale arm (`place::nearest_src` /
+  `scaled_clip`) for `src != dst`. Animating a leaf's composited rect is
+  therefore a new USE of this, not new machinery.
+- `Comp.motion` (I-8c-3a) is the gate on whether any of it runs.
+- `paint_cartoon(&Cartoon, clip)` (I-8b-2) runs cartoon's executor straight
+  over the screen buffer, so `Op::RectAlpha` + `Op::Rect` give the flash its
+  fill and border with nothing new.
+
+**The restore already exists as a PAIR, and that was the last unknown.** A
+transient per-frame overlay needs RESTORE-then-BLEND-then-PUSH, because a
+blend is not idempotent (the I-8b-3c finding). Two intermediate readings of
+this were wrong and are recorded so nobody repeats them: it is NOT
+`prefill_from_shown` alone (that restores only what clients presented, never
+what the compositor paints itself -- the pane ground, the frame, the
+separator), and the gap is NOT that `paint_instrument` takes no clip.
+
+The answer is the structural-repaint arm inside `Comp::reconcile`, where the
+geometry signature changed:
+
+```
+self.paint_chrome();      // everything the compositor paints
+self.prefill_from_shown();// every visible client's last-presented slot
+self.geom_sig = sig;
+self.screen_flush_full();
+```
+
+That pair restores the whole screen buffer from current state, and the
+CONFIGURE fan is a SEPARATE step after it -- so calling the pair alone
+repaints without fanning, which is exactly the property a transition needs and
+the property `comp_repaint_pending` lacks. So a flash frame is
+`paint_chrome()` + `prefill_from_shown()` + `paint_cartoon(flash ops)` +
+`screen_push(flash_rect)`, with an expiry frame that is the same minus the
+blend. Nothing new is needed; the cost is one structural-repaint-sized buffer
+rebuild per frame for the effect's duration (~16 at 250 ms), pushing only the
+flash rect.
+
+**The trap that is already set.** `main.rs` drops the effective tick to
+`IDLE_HZ` unless the host is `frozen`, has seen input within `IDLE_AFTER_MS`,
+or `Comp::animating()` is true -- and `animating()` measures PRESENT pressure,
+not compositor-side motion. A transition started by a VERB rather than by a
+click (a `workspace` switch, a restore tool's split) during an idle stretch
+would therefore run at the idle rate. The condition set is incomplete the
+moment the first compositor transition exists, and widening it is part of that
+chunk, not a follow-up.
+
+**The throttle's witness is a test-build line (2026-09-21).** Each rate change
+says `tapestryd: idle-throttle A -> B Hz (quiet_ms=.. animating=.. dyn=..)`;
+`ls-gfx-throttle` reads it. It fires on every quiet second and again on the
+input that ends it, and a console renderer mirrors every daemon line into the
+transcript the operator is typing into (kernel #76), so it sits under
+`cfg(feature = "test-mode")` with the other levers rather than in every build.
+It reached `main` unconditional in the 09-17 aux merge and turned `ls-halcyon`
+red there: the gate's row arithmetic assumed no line lands between a command's
+output and the keypress that follows it
+([[sub-substrate-interactive]], the authoring rules).
+
+**The chunk owes THREE gates, not one, and that is what sizes it.** Widening
+the tick condition so a verb-started transition does not run at `IDLE_HZ`
+changes exactly what `tools/ci-idle-gate.sh` measures -- the residual-2 idle
+cost, re-measured at 7.2 % mean and defended by that gate. So the wiring owes
+a bake, `ls-halcyon-session-instrument`, AND the idle gate, with
+`THYLACINE_IDLE_STRICT` set, because the idle gate's default 80 % threshold
+catches spins rather than throttle regressions (its own audit F4). A
+transition that leaves the compositor awake at 60 Hz when nothing is animating
+is precisely the regression that gate exists for, and it will not be visible
+in the session gate at all.
+
+**What must NOT be reached for.** `comp_repaint_pending` looks like the frame
+hook a transition wants, and is not: `frame_tick` consumes it with a full
+`reconcile()`, which fans redraw CONFIGUREs to every client. Sixteen of those
+in 250 ms is precisely the CONFIGURE storm section 10's amendment refuses.
+
 ## Backgrounded-leaf tiling, structural transparency, and the hosting-fan defect (2026-09-05, KT-1.5d-3 F2)
 
 **Context the dossier lacked.** Since KT-1.5d-1b a SESSION (a logged-in
@@ -1444,7 +1648,12 @@ renderer's OR -- since H-4d -- the declared session compositor's, gated
 the user's rio summons the menu over its own tiles, but an idle declarer that
 hosts nothing is refused (else it could float a menu, take the grab, and force
 Composed with no tile of its own). `Comp.menu:
-Option<MenuState { n, gen, rect }>` is the ONE placed menu. Gated global verbs:
+Option<MenuState { n, gen, rect, fx }>` is the ONE placed menu -- `fx` being
+the region its section-10 EFFECTS cover, kept separate from `rect` for the
+reason the census below states, and `Rect::ZERO` under the legacy profile
+where those effects are not painted.
+`MenuState::heal_rect()` is what a dismiss must repair: `fx` when it exists
+(it contains `rect` by construction), the card alone otherwise. Gated global verbs:
 `menu place <surface-id> <x> <y>` (authority -> syntax -> a non-menu surface
 E_NOENT -> owned by the caller's PROCESS via `owner_peer == peer_stripes`
 E_PERM; clamp; replace; forces Composed; redraw CONFIGURE) and `menu dismiss`.
@@ -1464,13 +1673,18 @@ retired, live-routes only when unrecorded. `chord_down` widened to
 order let retire's arm clear the record -> the release leaked).
 
 **COMPOSITOR-OWNED DISMISS** = `retire`'s menu arm (unplace first,
-`menu N dismissed (<reason>)`, `menu_heal` at the tail), reached by EVERY path
+`menu N dismissed (<reason>)`, `menu_heal` at the tail -- *since 2026-09-16
+`menu_unplaced`, a plain upload of what the card reached; the card is laid on
+at upload and never stored, see "Nothing freezes"*), reached by EVERY path
 including ctl `destroy` / `retire_conn` / WEDGE. `menu_heal` targets the
 intersection: `paint_borders(false)` + strip intersections pushed, tag-bar
 headers + empty-leaf BG_COLOR filled (`placement_rect` = the crop),
 same-size CONFIGURE to intersecting hosted + `visible_chrome` surfaces.
 `menu_reassert` composes each `shown_slot` over any screen write under the
-menu (`screen_push` before upload, `screen_flush_rect`/`_full` after);
+menu (`screen_push` before upload, `screen_flush_rect`/`_full` after) -- and
+since I-8b-3c the SAME two entry points also SUPPRESS the effect ring, via
+`pane::menu_push_allowed`, so the once-painted backdrop and shadow are never
+re-blended over;
 `reconcile`'s structural repaint runs `prefill_from_shown()` after
 `paint_chrome()` (every visible hosted surface's `shown_slot` composed;
 GL adoptions and held slots skipped), and its Off/Direct `want` arms gained
@@ -1628,3 +1842,1115 @@ aux's real-DOSBox-X re-run. Folded from [[chg-2026-09-06-harc-audit-close-r1]]
 (the KT-1 inheritance: the peer's `no-dossier-change` deferred the vault prose to
 this track; the UI + beacon-relay half landed in [[chg-2026-09-06-harc-r1-fold-ui]]).
 
+## The delivered close chord -- Super+Q asks before it acts (2026-09-15, I-7b)
+
+`ChordAction::Close` is no longer performed here. `exec_chord` DELIVERS it to
+the registered rail's owner (`deliver_chord(3, id)`, the [[sub-libtapestry]]
+`TEV_CHORD` kind) carrying the FOCUSED PANE's id in `value` -- only the
+environment knows whether that tile has a job running, and only it owns the
+HALCYON-INSTRUMENT section 14.5 dialog that asks. The owner then closes by verb
+under its own authority, WITHOUT section 6.5's final-tile protection, which
+Super+Q deliberately does not carry: it is the structural act, and the only
+reading under which a pane holding a retained tile can be removed at all.
+
+The id rides in `value` rather than being re-derived by the owner because the
+owner's view of focus comes from the `layout` file it may have read a wake ago;
+the compositor's is authoritative at the instant the chord fires.
+
+**`deliver_chord` now REPORTS whether the owner actually has the chord**, and
+the close arm is the only caller that reads the answer. With no rail -- the
+legacy profile, or a seat whose rail is not up -- or onto a rail whose event
+queue was too full to take it (which retires the rail), the compositor closes
+the pane itself, exactly as it did before I-7b, so the chord can never degrade
+into a no-op. The picker (1) and help (2) chords have no such fallback BY
+DESIGN: both live only in the environment, so a false there is said and
+dropped, unchanged.
+
+Ground truth: `usr/tapestryd/src/server.rs` (`exec_chord`'s `Close` arm and
+`deliver_chord`); the code vocabulary is pinned in the `TEV_CHORD` contract
+comment in `usr/lib/libtapestry/src/lib.rs`. Witnessed in-guest by
+`ls-halcyon-session-instrument`'s I-7b legs -- `tapestryd: chord close -> rail
+owner`, then the confirmation dialog, then a Cancel that keeps both the tile
+and its job.
+
+
+## The pointer path's witnesses -- a lost press could not be told from a swallowed one (2026-09-15, the I-6 hunt)
+
+`ptr_btn` had one say on its way in (`ptr btn ... -> chrome`, and only for a
+chrome or rail target) and none at all on the arms that decline to act. The
+`code != BTN_LEFT || drag.is_some()` swallow returned silently; a `track_at`
+MISS fell through to the general routing silently; and an event that never
+reached the compositor is silent by definition. `hover_update` compounded it:
+its witness was gated on `now`, so a pointer LEAVING a track said nothing
+either, and the motion after a press was as quiet as the press.
+
+The consequence is a documentation-worthy property of this service rather than
+a mere gap: **three different faults produced a byte-identical log.** Four
+successive readings of the I-6 divider stall (the compositor emitting a hover
+say and then no `drag start` for the press that followed) were each refuted by
+ground truth without any of them being separable from the others -- not for
+want of reasoning, but because no arm of the press path could report. A
+hypothesis set that cannot be discriminated by the instrument is not a
+reasoning problem.
+
+**The witnesses now in the tree** are `#[cfg(feature = "test-mode")]` only; no
+production arm changed. `tapestryd: ptr btn code C P at X,Y drag D menu M
+track T` sits at the TOP of `ptr_btn`, before any routing decision: absent, the
+event never reached the compositor; present, the fault is past that line and
+`drag`/`menu`/`track` name the arm that took it. `divider press swallowed
+(btn C drag D)` speaks for the formerly silent swallow. `divider hover left at
+X,Y` speaks for the crossing off a track.
+
+**The eventq low-water mark** is read at the top of `InputDev::drain`, BEFORE
+the recycle and BEFORE the nothing-new early return, because the device can
+only deliver into descriptors this driver has published and it has not yet
+consumed: `avail_idx - cur_used` is exactly what the transport had to work with
+while the serve loop was away, and `QUEUE_SIZE` is 16. At zero it had none, and
+an event it could not place did not arrive -- a guest-side fact that holds
+whatever the transport chooses to do with such an event.
+
+**The slow-pass say** belongs with it because of a property of this loop worth
+stating plainly: the input devices are POLL-MODE and are NOT in the pollfd set,
+so nothing about an arriving event wakes the serve loop. The drain interval IS
+the pass period -- bounded by the frame tick, so <= ~67 ms at `IDLE_HZ` -- and a
+HELD pass is therefore the only condition under which a 16-deep eventq can run
+out of descriptors between drains. `serve pass took N ms` names such a pass.
+
+**Calibration (the control that makes a future firing mean something).** On a
+healthy run -- `ls-halcyon-instrument` PASS, 42 legs, 89 s -- `ptr btn code`
+fired 32 times while `input eventq LOW`, `serve pass took` and `gpu command
+never retired` fired ZERO times. Those three are nowhere near their thresholds
+in normal operation, so a future occurrence is signal rather than noise. The
+healthy shape of the leg that has been failing reads:
+
+    divider hover pane 2 track 0 at 994,404
+    ptr btn code 272 1 at 994,404 drag 0 menu 0 track 1
+    divider drag start pane 2 track 0 at 994,404
+    divider drag end pane 2 track 0 esc -> 687:580
+
+Reading the next occurrence: no `ptr btn` line means the event never arrived,
+and the eventq/slow-pass says then state whether a held pass starved the ring;
+a `ptr btn` line carrying `track 0` means the press arrived and `track_at`
+disagreed with the hover that had just fired; `drag 1` means a stale drag
+swallowed it.
+
+Ground truth: `usr/tapestryd/src/server.rs` (`ptr_btn`, `hover_update`),
+`usr/tapestryd/src/input.rs` (`drain`), `usr/tapestryd/src/main.rs` (the serve
+loop's pass clock). The defect these were built for is OPEN and intermittent;
+the green run above is a verdict, not a diagnosis.
+
+**SUPERSEDED IN PART (2026-09-16): the top-of-path `ptr btn code` say is gone,
+and the witness it was stands only where the compositor consumes the edge.**
+That say broke the legacy console gate's click leg on every run from
+`bd06c0ef` on, and the mechanism was MEASURED rather than argued. The console
+renderer mirrors every console write into its own transcript, and a say is a
+console write. So the press witness, printed before `push_btn`, reached
+halcyond by the drain while the press itself was still in transit on the
+ring.
+
+A test-mode dump of halcyond's open block at the press showed the
+`tapestryd: ptr btn c...` line already laid, with the frame current (`seq ==
+laid`). One extra 17 px line moved the addressed run past the gate's one-line
+compensation.
+
+An earlier attempt had printed the say AFTER the push, and it was recorded as
+refuting the mechanism. It could not refute it: the drain and the ring are two
+channels, and the order tapestryd writes to them does not order their
+delivery.
+
+**The rule now:**
+- Every arm that consumes an edge, or can deliver it nowhere, says so where
+  it decides:
+  - the drag start and end, both swallows, the double-click and the
+    click-away (as before);
+  - `ptr btn code C P at X,Y -> nothing` for a targetless press (NEW);
+  - `ptr btn code C 0 ... release dropped (owner gone)` (NEW).
+- A header's `-> chrome` routing say stays. Gates key on it, and a header's
+  hit test reads its own surface, never the transcript.
+- An edge delivered to a CONTENT surface or to the placed menu is the
+  RECEIVER's to witness, after its hit test: halcyond's console says
+  `halcyond: click at X,Y -> <ty ref>|no run`, and a session tile says
+  `halcyond: tile N click -> menu|no run`.
+
+The partition keeps the reading above: a press nobody witnesses never arrived.
+It also removes the observer from the path it observes. The calibration counts
+above (`ptr btn code` 32 times on a healthy run) describe the retired say.
+
+Gates on the change: `ls-halcyon` PASS 49/49, `ls-halcyon-instrument` PASS
+42/42 (its header legs still read `-> chrome`), both first attempt.
+
+## The live workspaces -- one root each, and the traversals that had to be re-judged (2026-09-15, W-1a)
+
+`Layout` grew `workspaces: Vec<Workspace>` (a live root plus a remembered
+focus each) and `active`. The notable choice is what did NOT happen: `root`
+was not kept as a stored field synced to `workspaces[active].root`. It became
+an ACCESSOR and the field was deleted, because the one failure a switch must
+not have is leaving a stale root behind, and a value that is never copied
+cannot go stale. Deleting the field also handed the blast radius to the
+compiler, which is why this is worth recording: a grep for `.root` had
+reported thirty-odd sites, but it MISSED line-broken calls (rustfmt splits
+`self.panes` from `.iter()`) and mis-attributed three `Conn.root` hits on an
+unrelated type. The compiler found exactly 34 in the lib and exactly ONE in
+the server.
+
+**What actually had to change, and what came free.** `recompute`'s first pass
+already marks every pane hidden and zero-rects it before walking from the
+root, so an inactive workspace goes dark with no new code -- and because that
+pass also clears `dividers`, `track_at` cannot match an inactive track either.
+The real work was the d-1b dormancy predicate: `apply_backgrounded` now also
+stamps every inactive root's subtree. It is stamped THERE rather than by the
+caller in `reconcile` because only the tree knows its own roots; a
+caller-supplied set would be a second copy able to drift.
+
+**The traversals that are safe only by construction.** Most whole-pool scans
+filter on `visible`, which pass 1 clears for inactive roots -- `visible_strips`,
+`visible_leaf_count`, `foreground_leaf_count`, `visible_hosted`, and
+`neighbor_dir` via `live_ids`. That is a real invariant and should be stated
+rather than rediscovered: *an inactive root's panes are invisible and
+zero-rect after every recompute.* The scans that do NOT filter on visibility
+are the ones that needed judging one at a time: `hosted_leaves` (feeds the
+d-1b session test, correctly spanning workspaces), `find_hosting` /
+`surface_at` / `find_claim` (a surface lives in exactly one leaf, so global is
+right), `live_ids` (the 9P `pane/` listing and `ctl`'s `panes` count stay
+GLOBAL on purpose -- those are resource and addressability facts, while the
+`layout` dump is the active root's; do not later "reconcile" the two), and
+`slot_of_id`, which is where the bug was.
+
+**Two defects this found.** The zoom resolves by id through the global
+`slot_of_id`, and `recompute` never checked the target belonged to the active
+root -- so a zoom made in one workspace would still match after a switch and
+fill the display with another workspace's pane. Guarded by `in_active_root`,
+and the switch clears the zoom as well, since `zoomed_id` is one field and a
+carried-over id would put a number in the `layout` header that the carve
+refuses to honour. The worse one: `close_inner`'s root arm freed the WHOLE
+pane pool, commented "the subtree was the whole tree" -- true with one root,
+and with nine it annihilates every other workspace and leaves `workspaces`
+pointing at freed slots. It now frees only that root's descendants, reading
+the children BEFORE the kind is replaced. The regression test is
+sabotage-measured in both directions.
+
+**The channel and the bound.** The `layout` header carries `workspaces N
+active K`, ONE-BASED to match the pane ids beside it and the `01`..`09` the
+rail paints; the per-pane rows stay the active root's, so the H-4b file-walk
+is unchanged. `MAX_WORKSPACES` = 9 PARTITIONS the existing `MAX_PANES` = 32
+pool -- workspaces add no resource ceiling, which is the honest I-32 story.
+
+Ground truth: `usr/tapestryd/src/pane.rs`, `usr/tapestryd/src/chords.rs` (the
+eighteen chords; `action_of` PARSES `workspace-N` / `move-to-N` rather than
+listing eighteen arms, so the render and parse directions cannot drift), and
+the two `exec_chord` arms in `server.rs`. Host-tested at 48 (41 before).
+The `workspace N` ctl verb and the battery leg landed in W-1b, below.
+
+## The workspace verb -- two homes, and why the second one is right (2026-09-15, W-1b then W-2b)
+
+W-1a gave the tree live roots but only one driver: `Super+N` on the
+compositor's own key path, intercepted ABOVE the event stream. A 9P client
+cannot inject that, so the acceptance battery had no way to exercise a switch.
+The verb exists to be that driver. **It was built twice, and the second
+placement is the one to read.**
+
+**W-1b put it on `ctl`, reasoning from the design's phrase "the seat class,
+like `scale`".** Two defects followed, both found by the gate rather than by
+the compiler or the host suite (`server.rs` carries no inline tests). First,
+`global_ctl`'s cfg-3 apply-authority gate is DEFAULT-DENY with one
+hand-written conjunct per exemption, and the new verb had none -- so it was
+reachable by the RENDERER ALONE and the declared session compositor could not
+switch at all. Second, once a conjunct was added the leg still failed
+identically: every conjunct is `conn_id`-scoped, and the battery holds TWO
+sessions (its own driver session plus libtapestry's per-client ring), so
+declaring on one and acting on the other is correctly refused. Both failures
+presented as the same flat `rc -1`, because the harness's raw write path
+collapses every errno.
+
+**The lesson that survives from W-1b, because it generalizes:** in that
+handler authority comes BEFORE syntax, so reading a verb arm's body proves
+nothing about whether the verb is gated. `scale`'s arm carries only
+`layout_verb_budget()` -- not because it is ungated, but because its authority
+was decided thirty lines above it.
+
+**W-2b moved it to the `layout` file, authorized by PRINCIPAL**
+(operator-ratified after an architecture review). `actor_may_switch` admits
+`Renderer`, or a `Session(p)` where p owns a hosted surface anywhere in the
+tree; `Actor::Client` is refused. Four things drive that, and they are worth
+keeping because the surface-level analogy to `scale` is genuinely seductive:
+
+1. **The reader and the writer must be the same file.** The `workspaces N
+   active K` header is rendered on `layout`, and halcyond parses it from
+   there. A verb on `ctl` changing state that only `layout` reports is the
+   split a 9P-heritage system exists to avoid.
+2. **`zoom` is the controlling precedent.** It has a workspace switch's exact
+   blast radius -- one leaf fills the display, every other tile vanishes --
+   and it is authorized on `layout` by owning ONE tile.
+3. **The session model already grants strictly more.** A same-principal
+   program may `close` the user's tiles: destructive and irreversible.
+   Refusing it a reversible view switch is non-monotonic in blast radius.
+4. **The `scale`/`theme` seat gate does not transfer.** Those are seat-scoped
+   because two painters -- the compositor's chrome and the session's content
+   -- must agree on one rendering contract, so exactly one party may decide
+   it. There is no second painter for which workspace is shown: the tree is
+   the compositor's alone and every client re-reads `layout`.
+
+Principal scoping also dissolves W-1b's second defect by construction: a
+client with several conns has one principal, so declaration and act can no
+longer disagree.
+
+**The bound and the dispositions.** ONE-BASED at the door (`0` or
+`> MAX_WORKSPACES` is `E_INVAL`); switching to the active workspace is
+idempotent, not an error; and a SKIPPED number or an exhausted pane table is
+the TREE's refusal, returned as `E_INVAL` rather than a silent success that
+would leave the caller believing it had switched. Syntax first, then authority
+-- this file's convention, and the inverse of `ctl`'s.
+
+**The witness is tile PRESENCE, not a pixel.** The `layout` per-pane rows are
+the active root's, so a live tile must LEAVE those rows while another
+workspace is up and come back when its own returns. The battery asserts the
+header at each step (`1 1` -> `2 2` -> `1 1`), the dormant tile's absence in
+between, the refusal of a skipped number, and the vanish of the empty
+workspace on the return. Gated: `ls-gfx-panes` PASS 48 s, one attempt.
+
+**What the E2E CANNOT witness, stated so it is not mistaken for coverage:**
+the authority axis. Refusal needs either a non-session principal or a session
+hosting nothing, and the battery is michael and hosts a tile -- it can
+construct neither. W-1b's "an undeclared client is refused" control was
+DELETED rather than left to pass for the wrong reason.
+
+Ground truth: `layout_cmd`'s `workspace` arm and `actor_may_switch` in
+`usr/tapestryd/src/server.rs`; the leg in `usr/tapestry-battery/src/main.rs`;
+the expect arms in `tools/interactive/ls-gfx-panes.exp`; and `halcyon
+workspace <n>` in `usr/halcyon/src/{lib,main}.rs`, which needed no new channel
+because the tool's own `/srv/tapestry` conn is already `Session(principal)`.
+
+## The workspace round: one P0 and the guard that was only ever in the carve (2026-09-15, HALCYON-WORKSPACES round 1)
+
+The first adversarial round over the whole W arc closed **DIRTY -- 1 P0 / 3 P1
+/ 2 P2 / 2 P3**. Every finding below is fixed and sabotage-measured in both
+directions (each fix reverted alone, its test run, the file restored and
+md5-verified). The round ran on the **Opus-5 fallback tier**: Fable 5.1 died on
+its first call to credit exhaustion, and a round is never skipped for want of
+Fable.
+
+**The one sentence that explains four of the findings.** `slot_of_id` is
+global BY DESIGN -- pane ids address panes in every workspace, and W-1a chose
+that deliberately so `pane/` readdir and `live_ids` remain resource and
+addressability facts. The consequence nobody drew at the time: **every verb
+that resolves an id must decide for itself whether a foreign-workspace target
+is legal.** Before this round `in_active_root` had exactly TWO non-test call
+sites, and both were carves. Not one verb used it. W-1a F2 had fixed what got
+DRAWN and left what could be REACHED.
+
+- **F1 [P0] -- `close()` on an inactive root was a no-op that still reported
+  the surfaces released.** `close_inner`'s root arm tested `slot ==
+  self.root()`, the ACTIVE root, so an inactive workspace's root fell through
+  to the parentless early return -- after `collect_surfaces` had already
+  filled the out-parameter. `retire` discards the return value (`let _ =
+  self.layout.close(leaf)`) and `mint` takes the first free surface slot, so
+  the leaf went on naming an index that was handed to the next client: another
+  principal's surface, composed and given the keyboard inside the first
+  principal's pane. `subtree_hosted` also stayed non-empty forever, so the
+  workspace could never be reaped. This is the EXACT INVERSE of the W-1a
+  defect, where the same arm was too BROAD and freed the whole pool -- both
+  from `self.root()` silently meaning "active". The arm now keys on
+  `workspace_of_root(slot)`, and an inactive root's collapse updates THAT
+  workspace's remembered focus.
+- **F2 [P1] -- the focus side-effects crossed workspaces.** `focus`,
+  `zoom_toggle` (which calls `focus`) and `split` (which assigns
+  `self.focused` directly) all took a global slot. Beyond keys routed to an
+  invisible tile, `host_for` places the next surface at `self.focused`, so the
+  NEXT CLIENT was hosted into the dormant workspace. `Layout::focus` is now a
+  refusing chokepoint, with the setter guarded too. Note `split` moves focus
+  in **two** places -- same-mode parents FLATTEN, different-mode NEST -- and
+  guarding one is not a property of the function; that is the W-1a F2 shape
+  recurring inside the fix for W-1a F2.
+- **F3 [P1] -- `Workspace.focused` stored a SLOT.** `alloc` hands out the
+  first FREE slot, so a pane created in another workspace could land on the
+  remembered slot and pass the `is_leaf` restore guard as a genuinely live
+  leaf. The field now stores a pane ID -- monotonic, never reused, so a dead
+  remembered focus resolves to nothing, which is exactly the fallback wanted.
+- **F4 [P1] -- `move_focused_to_workspace` detached before its last
+  allocation**, so an exhausted pane table orphaned the leaf: parentless, in
+  no tree, still hosting its surface, un-reapable, and still addressable by
+  id. `move_dir` already had the ordering right. Every pane the move needs is
+  now allocated before any mutation, with rollback.
+- **F7 [P3] -- `reap_session_empties`'s root arm** had the same
+  `self.root()`-means-active confusion; it uses `is_workspace_root` now.
+- **S5 [P2] -- the vanish rule freed RESERVED leaves.** It tested only for
+  hosted surfaces, so a workspace holding nothing but a half-built restore
+  skeleton -- empty leaves stamped with `creator_conn` by H-4d precisely so
+  the session's own compositor cannot fill them mid-build -- read as empty and
+  was destroyed. `subtree_reserved` now guards it.
+- **S2 [P2] -- `tab` mutated with no authority check on one path.** The check
+  sat INSIDE `if let Some(anc) = tab_ancestor(focused)`, so a focused leaf
+  with no tab ancestor skipped authority entirely and still reached
+  `unzoom()`. It was the only arm of `layout_cmd` reaching a mutation with no
+  authority predicate on any path, and `Actor::Client(0)` -- denied by every
+  other predicate in the file -- could cancel another principal's zoom. With
+  no ancestor there is nothing to cycle, so the arm now returns Ok(()) first.
+
+**Coverage gap, stated rather than implied**: `server.rs` has no test module,
+so S2 and F7 carry NO inline test and are witnessed by reasoning and the
+interactive gates only.
+
+**Still open**: F8 [P3] `split_fits` / `min_size` walk from the ACTIVE root, so
+a hypothetical leaf in another workspace is never encountered and the minima
+check passes vacuously -- a dormant split is unbounded. Bounded in consequence
+by the dormancy net. And S4 [P2], an operator design fork: the vanish rule
+RENUMBERS surviving workspaces, because a workspace's identity is its vector
+index.
+
+## Workspace numbers became identities (2026-09-15, S4)
+
+Operator-ratified after round 1 surfaced it. Scripture landed first
+(`5eae48f5`), then this.
+
+**What was wrong.** A workspace's identity was its position in
+`Layout.workspaces`. `reap_empty_workspaces` removes by index, so dropping an
+empty MIDDLE workspace shifted every higher one down: the user's tiles stayed
+alive but Super+3 no longer reached them -- it made a fresh empty workspace
+instead. Both cited precedents refuse that. i3 treats workspace numbers as
+NAMES rather than positions; tmux keeps stable numbers with gaps
+(`renumber-windows` is opt-in and off by default).
+
+**As built.** `Workspace` carries `number: u8` (1..=`MAX_WORKSPACES`) and the
+vector is kept SORTED ASCENDING by it; the set is sparse, so 1, 3, 4 is an
+ordinary state. `active` stays an internal INDEX -- positions are the right
+thing for the carve and the painters, numbers are the right thing for identity
+and labels -- with `active_number()` exposing the identity and
+`workspace_numbers()` the list.
+
+`ensure_workspace(n) -> Option<usize>` is the ONE find-or-create, and it exists
+as one function because the subtle part is local to it: a sorted set means a
+create INSERTS rather than pushes, and **an insert at or below `active` shifts
+the active index**, which must move with it or the seat silently changes
+workspace under the user. `switch_workspace` and `move_focused_to_workspace`
+both route through it and both read `self.active` AFTER the call for that
+reason. The move judges its empty-tile refusal BEFORE ensuring the target --
+but that closed only ONE of the two doors, and this paragraph asserted the
+whole claim until round 2 measured it (see the round-2 section below, F4).
+
+**The retired rule, and why it was wrong twice over.** "Only the next free
+number may be made" existed to keep a DENSE vector hole-free -- a property of
+the representation, not of the design -- and it was attributed to i3, which
+creates workspace 5 on Super+5 whether or not 2, 3 and 4 exist. So the ratified
+choice made the switch SIMPLER: `n` goes straight through from the chord and
+from the `layout` verb, with no index conversion and no skip check. The bound
+is still `MAX_WORKSPACES` = 9, which the digit row enforces on its own, and
+`ensure_workspace` states the count bound explicitly rather than leaving it as
+an inference from uniqueness.
+
+**The header is a format change on the ratified channel.** `workspaces N
+active K` became `workspaces <ascending,csv,of,numbers> active <number>`. A
+count cannot label a gapped set: a bar told "3" cannot know whether that means
+1,2,3 or 1,3,4. The count is the list's length, so nothing is lost, and an
+older reader fails CLOSED (the list does not parse as an integer).
+
+**Coverage note.** `creating_a_lower_number_keeps_the_seat_where_it_was` is the
+only test that reaches the index-shift line: every other workspace test creates
+in ascending order, so without it that line is unexercised and a sabotage there
+does not fire. `server.rs` still has no test module, so the `layout_cmd` arm
+and the chord arms are witnessed by the battery and the gates only.
+
+## The workspace round 2: a round-1 fix that disabled the vanish rule (2026-09-15, HALCYON-WORKSPACES round 2)
+
+Round 1 closed DIRTY (a P0 returned), so the project's re-audit rule owed a
+round aimed at THE FIXES. It found **1 P0 / 1 P1 / 1 P2 / 4 P3**, and the P0
+was created by a round-1 fix -- which is the outcome that rule exists to
+catch. Tier: OPUS fallback (Fable 5.1 credit-exhausted), so family diversity
+was forfeit and context independence was the whole of what the round bought.
+
+**F2 (P0) -- S5 made the vanish rule unreachable for any workspace a session
+had split in.** Round 1's S5 taught `reap_empty_workspaces` to respect a
+placement reservation by adding `&& !self.subtree_reserved(r)`, and
+`subtree_reserved` keys on `creator_conn != 0`. Nothing cleared that field
+when the leaf it reserved was FILLED, or when the root it sat on COLLAPSED --
+`host_for`, `host_into` and `close_inner`'s root arm each cleared
+`claim_token` and left it standing. The rail's SPLIT H stamps the splitting
+conn (H-4d), which for a session is halcyond's own conn, alive as long as the
+session. So: split a workspace, fill both tiles, close them, switch away --
+and the workspace never vanishes again, for the rest of the session. Ratified
+scripture silently stopped firing, and up to 9 roots stayed pinned out of
+`MAX_PANES` = 32.
+
+Fixed by ending the reservation where its purpose is served: cleared in
+`host_for`'s fill arm, in `host_into`, and in `close_inner`'s root-collapse
+reset (which already resets kind, status, claim, weight, dividers and
+separator -- the stamp simply was not on that list).
+
+**Why the battery could not see it.** The gate never issues a `split` VERB,
+so its roots keep `creator_conn == 0` and vanish normally. The chord split
+path does not stamp `creator_conn` either. Only the verb path -- the rail
+button, `halcyon layout restore`, the tile menu -- arms it.
+
+**A measurement worth keeping.** The end-to-end vanish test covers the host
+clear and the collapse clear TOGETHER: reverting either ONE alone left it
+green, because along that path the other still lifts the reservation. A
+property with no per-site witness is shape, not bound, so each site now has
+its own test (`filling_a_reserved_leaf_spends_its_reservation` and
+`a_collapsed_root_drops_its_reservation`), and both fire.
+
+**F1 (P1) -- `move_dir` grafted a pane out of a dormant workspace.** Round 1
+closed the cross-workspace class at the FOCUS chokepoint; `move_dir` is a
+STRUCTURAL verb taking a caller-supplied slot, and its root-wrap branch reads
+`self.root()` -- the ACTIVE root -- unconditionally. A `move` verb naming a
+dormant pane (reachable: `slot_of_id` is global by design, and the ownership
+check passes for a principal that owns the subtree) detached it, wrapped the
+ACTIVE root in a fresh container beside it, and re-seated the active
+workspace onto that container. Now guarded by `in_active_root`, matching
+`focus`'s precedent; teaching the wrap to re-seat the pane's OWN workspace
+root would be a new feature, not a fix.
+
+**F3 (P2) -- the move freed a RESERVED skeleton root.** `reap_empty_workspaces`
+was taught to respect a reservation; `move_focused_to_workspace` was not. It
+judged "placeholder" on emptiness alone, so an arriving tile ran
+`free_subtree` over a restore tool's reserved skeleton and the tool's later
+`create claim=` found nothing. The conjunct is now `&& !subtree_reserved`.
+
+**F4 (P3) -- and the correction to the S4 section above.** A refused move
+could still strand a freshly-minted empty workspace: the empty-tile check is
+judged before the ensure, but the two ALLOCATION refusals sit after it. Fixed
+by REORDERING rather than unwinding -- a newly-created workspace's root is
+always an empty placeholder, so `pre_container` can only fail for a workspace
+that already existed, which makes "ensure created it, then the leaf alloc
+failed" the single strand window; hoisting that alloc above the ensure closes
+it by construction. The stranded workspace was self-healing (the next reap
+drops it), which is why it is P3 -- but the commit body and this dossier both
+asserted an invariant the code did not hold, and that is the part worth
+recording.
+
+**Coverage.** tapestryd lib 65 (was 59): six new tests, every fix
+sabotage-measured in isolation with `pane.rs` restored byte-identical.
+`server.rs` still has no test module, so `layout_cmd`'s workspace arm, the
+chord arms and `reap_session_empties` remain witnessed by the gates alone.
+
+## The workspace round 3: the streak broke, and a witness that could not witness (2026-09-15, round 3)
+
+Round 2 closed DIRTY, so a third round was owed on ITS fixes. Result:
+**0 P0 / 0 P1 / 1 P2 / 4 P3** -- the two-round run of "the previous round's fix
+is the next round's P0" is **broken**; no P0 could be constructed against
+`move_focused_to_workspace`'s reordering or `move_dir`'s new refusal. The round
+also WITHDREW three of its own draft findings on re-derivation, including one
+that had asserted an arithmetic difference between `len.max(1) as u8` and
+`(len as u8).max(1)` and then found both yield the same value.
+
+**F1 [P2] -- the P0's third clear site had no witness, and the close said it
+did.** Round 2 cleared `creator_conn` at THREE sites (`host_for`, `host_into`,
+`close_inner`) and wrote TWO isolating tests, while its own commit body read
+"each site got its own isolating test and BOTH now fire". The word "both" for
+three sites was the tell, and nobody re-read it. CONFIRMED BY MEASUREMENT
+before fixing: reverting the `host_for` clear left all 65 tests green. It
+matters because `host_for` is the GENERAL production fill path -- the
+claim-less create and a claimed create whose `host_into` failed both land
+there. A third witness now exists and fires.
+
+**A VALUE'S WITNESS MUST BE ABSOLUTE.** Every bound assertion in `pane.rs` was
+phrased `MAX_WORKSPACES as u8 + 1`, i.e. RELATIVE to the constant -- so
+lowering the constant moves the goalpost with it and no test can notice.
+Measured: setting the shared bound to 8 left the entire tapestryd suite green
+while halcyond's went red. `the_ratified_bound_is_nine_workspaces` now pins the
+value absolutely, which is simultaneously the only proof this crate reads the
+SHARED definition rather than a private copy that merely agrees today.
+
+**F5 [P3]** -- the move allocated its replacement leaf before validating `n`,
+so an out-of-range number allocated a pane, rolled it back, and burned a
+monotonic id for a move that was never legal. Range check hoisted above the
+alloc. Its witness had to compare two identically-built layouts' probe ids,
+because the refusal ALREADY returned false before the fix: the burned id is the
+only observable, so asserting the refusal would have been a check that cannot
+fail.
+
+**F2 [P3], recorded rather than hidden** -- the round-2 root-collapse clear has
+a cost. Any peer may close an EMPTY leaf (`subtree_surfaces` is empty, so the
+ownership walk's `.all()` is vacuously true, which the server does
+deliberately), so a peer closing a reserved skeleton root now lets that
+workspace VANISH where it used to persist. Accepted: the pre-existing
+`claim_token = None` on the same arm already destroyed the tool's placement,
+and a stale claim degrades to focus placement rather than failing. Noted in the
+arm's comment.
+
+**Coverage.** tapestryd lib 68 (was 65). Every round-3 fix sabotage-measured in
+isolation, `pane.rs` and `libhalcyon/layout.rs` restored byte-identical.
+
+## F8: the minima judged the ACTIVE root in both directions (2026-09-15)
+
+Tracked from the workspace round 1, carried through rounds 2 and 3, fixed
+here. `split_fits`, `min_size`, `min_fits` and `fits_after` all walked from
+`self.root()` -- the ACTIVE root -- so a mutation in a DORMANT workspace was
+measured against a tree it does not live in. `min_size_hyp` never encountered
+the hypothetical leaf, the walk returned the active tree's ordinary minima,
+and the check passed VACUOUSLY: a dormant split was unbounded.
+
+**Reachable by verb, not hypothetical.** Most callers pass `self.focused`,
+which `Layout::focus` chokepoints to the active root, so they were never the
+problem. Two caller-supplied paths were: the `split` verb (`server.rs`, gated
+on ownership rather than on the active root) and the `mode` verb through
+`fits_after(|l| l.set_mode(slot, mode))` -- and `set_mode` carries no
+active-root guard of its own. Round 2's F1 guard had already closed the third,
+`move_dir`.
+
+**The fix is per-workspace, and F8 is on record as NOT a one-liner for a
+reason.** Widening the check to "every root must fit" is the tempting
+one-liner and is wrong in the other direction: a dormant workspace already past
+its minima -- a layout restored onto a smaller display -- would freeze the
+workspace the user is actually looking at. So 5.2's "already past its minima
+stays mutable" rule is preserved PER ROOT, and only a workspace that FIT before
+and does not after is a refusal.
+
+As built: a new `top_of(slot)` returns the parentless ancestor (no such helper
+existed anywhere in the crate -- measured); `split_fits` walks from
+`self.top_of(slot)`; `min_fits` became `min_fits_root(root)`; and `fits_after`
+compares each workspace's fit before and after, keyed by NUMBER rather than
+index, because a mutation may create or vanish a workspace and S4 made the
+number the identity while the index shifts under an insert.
+
+**The measurement that makes the inverse control a guard.** Three sabotages,
+all fired: restoring `self.root()` in `split_fits`; restoring the
+active-root-only `fits_after`; and -- the one that matters --
+IMPLEMENTING THE WRONG FIX, the every-root widening, which fails
+`a_dormant_overflow_does_not_freeze_the_active_workspace`. Without that third
+sabotage the inverse control would be decoration; with it, the test
+discriminates the over-correction and not merely the absence of a fix.
+
+tapestryd lib 71 (was 68). `pane.rs` restored byte-identical after each.
+
+
+## The effects the compositor paints, and why there is ONE blur (2026-09-15, I-8b-2)
+
+Some of section 10's effects cannot be painted by the client whose surface
+they decorate, and that is forced by the compose model rather than chosen. A
+drop shadow at (0,20) blur 55 lies OUTSIDE its card; a card is a `Role::Menu`
+surface; and `compose_cpu`'s 1:1 arm is a raw `copy_nonoverlapping` with no
+alpha, so a surface cannot carry transparent margin and its own cartoon can
+never reach those pixels. The compositor therefore paints them -- which keeps
+section 10's "two executor ops carry them" literally true, because the
+compositor RUNS the ops.
+
+**tapestryd depends on `cartoon` for exactly this** (operator-ratified
+2026-09-15; the scripture commit is `a861ca2b`). The alternative was a second
+box blur written here, and a second implementation of a bounded resource is
+the shape that produced three HALCYON-WORKSPACES defects -- a guard on one of
+two carves, a field cleared on set but not on reset, a pairing kept on write
+but not on clear. The second implementation is always the one nobody
+sabotages. `paint_cartoon` builds a `&mut [u32]` over the screen at stride
+`gpu.width` and hands it to the same executor halcyond paints with;
+`alloc_screen` maps `dw*dh*4` rounded UP to a page, so the slice is inside the
+mapping, and the executor clamps every write to the clip.
+
+**The glow is CLIPPED TO THE TRACK, and the reason is 4.5.9.** A blur of
+radius 10 wants to spread past the 7 px track onto the neighbouring panes, but
+those are client pixels: on the GPU-composed path the screen buffer holds none
+of them, and on the CPU path it mirrors them. A spreading glow would therefore
+look different on the two paths, which is the one thing GPU-DESIGN 4.5.9
+forbids. The tighter glow is the cost of staying inside what the compositor
+owns, and it is a deliberate deviation from the source's spread rather than an
+oversight.
+
+**The DECISION lives in `pane.rs`, not here.** `server.rs` is not in this
+crate's lib (the lib is `chords` / `keymap` / `pane` / `skein`), so a rule
+decided in `paint_track` would have no host witness at all -- the same trap
+that left `chords.rs`'s four tests dormant for the crate's life. So
+`pane::track_glow` is a pure verdict over scalars, in the shape
+`admit_status_bar` established, and `paint_track` only executes it. Its four
+witnesses cover the positive, the three states that must NOT glow, the scale
+following the same `ipx` the metrics take, and -- written in from the start --
+that the colour is section 10's LITERAL and not the `amber` token.
+
+**The drag state is threaded EXPLICITLY to both callers.** `paint_track` has
+exactly two (the structural walk and `repaint_track`), and both already hold
+`(cid, idx)` and call `track_ink`, the one discriminator. `track_dragged` is
+its sibling rather than an inference from the ink, because 9.2 paints the
+dragged rule `amber` and a painter reading the state back out of the colour
+would key an effect on a token. A token is not a state.
+
+**`menu_effect_region`, and the census that decided how it wired in
+(I-8b-3).** *SUPERSEDED TWICE on 2026-09-16 -- finally by "Nothing freezes"
+below, where no effect region is stored at all. Earlier that day: the region is now the WHOLE DISPLAY and
+`MenuState::heal_rect` is gone -- see "The backdrop covers the display" below.
+The census that follows still holds and is why the separate field survived.*
+The pure rule that says which display region a placed card's
+EFFECTS cover -- the card united with its drop shadow's reach, clamped to the
+display -- takes the REQUESTED blur radius rather than the clamped one,
+because the executor only ever clamps DOWN: the region is then always a
+superset of what is painted, and the asymmetry is the point (over-healing
+costs work; under-healing leaves a ring of un-healed backdrop after dismiss).
+Its arithmetic is i64 because `Rect` is u32 and a card at the origin grown by
+a radius would wrap.
+
+The census is recorded because conflating its three roles IS the defect.
+`MenuState` is built in exactly ONE place and `self.menu` is written in three.
+Its `m.rect` readers serve THREE roles: the HEAL sites, which must cover the
+effect region -- `menu_place`'s old-region heal, `menu_dismiss`'s fallback,
+and `retire`, which captures it into a local and is the path EVERY dismiss
+actually takes; the COMPOSE/PLACE sites, which must NOT grow, since
+`menu_reassert` maps screen pixels into the weave by `inter.x - m.rect.x` and
+`surface_target` places the card; and the HIT TEST sites, which must not grow
+either, or a click on the SHADOW counts as a click on the card. So the effect
+region is a SEPARATE field: one for what is painted, one for what the surface
+is. All three heal sites now read `MenuState::heal_rect()`; none of the other
+five readers was touched.
+
+**The effects are painted ONCE, and the ring is push-suppressed (section 10
+as amended at `b62a761b`, operator-answered).** *The ring is the whole display
+since 2026-09-16, and the dismiss no longer heals through `menu_heal` -- see
+below; the once-only argument here is unchanged.* An effect BLENDS against the
+destination, so unlike `menu_reassert`'s opaque `copy_nonoverlapping` it is
+not safe to repeat -- and `screen_flush_rect` provably re-asserts one region
+twice, once directly and once through the `screen_push` of its own return.
+Re-applying per push would darken what the previous push already darkened;
+tracking which writes carry fresh scene pixels would need a signal threaded
+through all SEVEN functions that write the screen buffer
+(`blit_composed_pixels`, `fill_rect`, `menu_heal`'s local fill,
+`paint_borders`, `paint_cartoon`, `paint_strips`, `compose_cpu`) -- the
+"N defended sites need N witnesses" hazard, which this dossier already
+records as stated and not closed.
+
+So idempotency is obtained by EXCLUDING writes rather than tracking them.
+`menu_paint_effects` blends the backdrop and shadow once, at placement, after
+the reconcile that repainted the scene beneath them, and pushes the region
+through `screen_push_raw` -- the transport half, which exists precisely
+because `screen_push` is the thing that withholds that region. From then
+until the dismiss, `pane::menu_push_allowed` splits every push and every
+flush into the parts outside `fx` plus the card's own rect. The buffer
+beneath may drift as clients present; the DISPLAY keeps the effected pixels;
+`menu_heal` reconciles both at dismiss. **The card's rect is re-admitted, and
+that is what makes this safe rather than merely cheap**: `menu_reassert` has
+just copied the card back opaquely, so any effect applied twice underneath it
+is provably invisible.
+
+The visible cost is stated rather than discovered: a program repainting behind
+a placed modal is hidden until dismiss -- a terminal scrolling behind a dialog
+freezes. At `BACKDROP_ALPHA` 184/255 the scene contributes about 28 % of each
+pixel, so a frozen frame differs from a live one only faintly. This is rio's
+save-under answer fitted to a damage-driven compositor; the modern
+per-frame-reblur answer (KWin, Hyprland, `NSVisualEffectView`) is idempotent
+for free only because those compositors re-composite the whole frame each
+vsync, which is a frame model tapestryd deliberately does not have.
+
+**`bars_around` moved here from `server.rs`** and gained its first host
+witnesses in the process: it had lived as an associated fn in the bin for its
+whole life, where tapestryd's lib -- `chords`/`keymap`/`pane`/`skein` -- could
+not reach it. `menu_push_allowed` is built on it rather than beside it, and
+its two existing callers (the floor under a cropped client, the heal under a
+dismissed menu) now have witnesses they never had.
+
+**What the host tests cannot reach.** The two-caller threading is bin-side and
+so has no unit witness; the guest gate `ls-halcyon-session-instrument` does
+drive a real divider drag (press the track, `divider drag start`, a 100 px
+drag, `divider drag end ... release`), which exercises `paint_cartoon` on real
+drag frames -- but no leg reads sub-pixel ink, so the gate witnesses that the
+path RUNS, never that the glow LOOKS right. That gap is stated, not closed.
+
+## The backdrop covers the display, the scene is rebuilt at dismiss, and a stack's members are tiles (2026-09-16, the operator's hands-on fixes)
+
+*The backdrop half is SUPERSEDED the same afternoon: nothing freezes, a menu
+takes only its shadow, and the card and its effects are laid on at upload --
+see "Nothing freezes" below. The stack half stands.*
+
+The operator drove the I-8 demo image by hand and found what seventeen green
+gate legs could not, because every leg reads logs and none reads ink. Two of
+the five issues land here; the scripture is `c065ec06` + `4257a4ab`.
+
+**The backdrop was a hard-edged dark RECTANGLE, by construction.**
+`menu_effect_region` sized the effect region from the card's shadow reach --
+`CARD_SHADOW_BLUR` 80 at 200 %, about 160 px, plus `dy` -- and
+`menu_paint_effects` darkened that region uniformly at `BACKDROP_ALPHA` while
+the scene outside stayed untouched. A straight edge was the only possible
+result; the kit's `dialog::backdrop` covers the viewport and so has none.
+`pane::menu_effect_region(card, disp_w, disp_h)` now returns the display (the
+card and the display non-degenerate), and `menu_fx_for` passes the geometry
+only. The consequences, each handled rather than inherited:
+
+- **Push admission is the card alone.** `menu_push_allowed(r, fx = display,
+  card)` has no bars left, so the whole scene behind a modal is FROZEN on the
+  display until the dismiss. The function stays general in `fx`, with a
+  witness at a sub-display region so its generic contract cannot rot.
+- **The structural flush freezes too.** `screen_flush_full` uploaded the
+  whole buffer unconditionally, so a structural repaint under a standing card
+  (a tile closing, a `comp_repaint_pending` tick) would have un-dimmed the
+  whole screen for the rest of the modal's life. It now routes through
+  `menu_push_allowed` whenever a card with effects stands on a display that is
+  ALREADY `Composed`. Entering `Composed` is the exception, and it must be:
+  the screen resource is not yet what the display shows, so it goes up whole
+  before `set_scanout` binds it.
+- **A display mode change dismisses the card.** `set_mode` swaps in a fresh,
+  zeroed screen; a frozen upload onto it would show nothing but the card, and
+  `fx` would name the old geometry. So `set_mode` calls
+  `menu_dismiss("mode")` after its validation and pre-flight and before the
+  new screen is built -- a modal ends there as it ends a divider drag.
+- **Effects are only ever laid over a REBUILT scene.** `menu_paint_effects`
+  starts with `scene_restore()`. Two reasons, both measured from the code
+  rather than supposed: on a MOVE (the same surface placed again) the buffer
+  still holds the previous placement's effects, and blending over them is the
+  double-darkening the once-only rule exists to prevent -- the old code healed
+  the old ring first, but the heal's own pushes were suppressed by the NEW
+  placement and client pixels under it stayed dimmed; and on the GPU composed
+  path the buffer holds no client pixels at all. After the paint the card is
+  copied back (`menu_reassert` over the region), so a moved card stays crisp
+  instead of arriving dimmed until its owner's next present.
+
+**The dismiss REBUILDS rather than heals.** `menu_heal`'s repaint +
+same-size CONFIGURE, run display-wide, would fill every header and both rails
+with their resting ground and leave every tile dimmed until its client
+re-presented: a whole-screen blink on every dismiss, exactly where the
+backdrop had been. The scripture had refused a display-sized heal for that
+flash; the reversal accepted the COST, and the mechanism is what keeps the
+flash out. `menu_heal_placement(m)` is now the one decision all three dismiss
+sites take (`retire`'s tail, `menu_dismiss`'s fallback, `menu_place`'s move):
+a placement WITHOUT effects (legacy, `fx` empty) heals its card's rect through
+`menu_heal` exactly as before; one WITH effects runs `menu_restore`:
+
+1. `scene_restore()` rebuilds the screen BUFFER from retained state, uploading
+   nothing: `paint_chrome`, then `restore_surface(n)` for every visible hosted
+   surface (backgrounded ones skipped, as the pre-fill skips them), then for
+   every visible chrome surface -- headers, rails, the bar -- except the menu.
+2. `screen_flush_full()` uploads the display in ONE push (`self.menu` is
+   already `None`, so nothing is withheld).
+3. Only the surfaces the rebuild could NOT reproduce get the redraw
+   CONFIGURE; a wedged one retires, as in `menu_heal`.
+
+`restore_surface(n)` composes `n`'s shown slot at its current target and
+answers whether that reproduced the frame. It refuses a GL adoption (the frame
+is host-side), a held slot (test-mode HOLD stays unshown, as `release`
+promises), and a surface with no shown slot or weave; an accumulator
+(`patchwork`, #56) is composed anyway, as the structural pre-fill always did,
+but reported owed. Why a shown slot is a WHOLE frame: a client honouring the
+buffer-age contract repaints each slot over the union of the damage since
+that slot's age (GPU-DESIGN 4.5.8b), so its last presented slot is its last
+frame, never a fragment. `prefill_from_shown` now calls `restore_surface` too,
+byte-identical in behaviour -- one implementation of "what can be recomposed".
+
+**Cost, measured on the host.** The backdrop's blur over a 2560x1664 display
+took 144 ms at the 200 % radius under cartoon's per-tap sum; cartoon's
+`blur_line` now runs its window and takes ~32 ms (see [[sub-cartoon]]). A
+placement is rebuild + blur + tint + one full upload; a dismiss is rebuild +
+one full upload. Neither is per frame.
+
+**A stack's members are TILES (HALCYON-INSTRUMENT 6.1 and invariant 9).** When
+the operator ran `tyr-quake` in a stacked tile, `host_for` chose `SplitH` from
+the tile's aspect and nested a split INSIDE the stack slot; `place_frame` never
+modelled a container member, so the group got a blank header, its own tiles
+re-numbered from 01, and on collapse the carve never descended -- the tiles
+vanished (hidden, not lost: `focus` reveals a container's first leaf, but only
+Super+Tab reached it, and macOS had taken that). The rule is enforced at the
+three places a container can enter a stack, all in `Layout`, Instrument only
+(the legacy i3 tree is unchanged, and each witness uses legacy as its
+one-variable control):
+
+- **`split_target(leaf, mode)`**, consulted by `split` itself so no caller can
+  bypass it: a split mode on a tile of a `Stacked` / `Tabbed` container acts on
+  the STACK -- the new pane lands beside it, flattening into the stack's parent
+  when that parent already has the mode, nesting otherwise; the kit's
+  `splitFocused` replaces the whole pane the same way. The stack's own mode
+  joins it. The OTHER stack-like mode has no target (`None`). The walk climbs
+  while the parent is stack-like, so even a pre-rule tree splits beside its
+  outermost stack.
+- **`host_for`** joins a stacked tile's stack (`stack_parent_mode`) before it
+  considers an aspect split, and refuses the host like a full pane table when
+  the join does not fit the minima.
+- **`set_mode`** refuses a stack-like mode on a target holding a container
+  child (`stacking_refused`) -- the one path left once splits and windows no
+  longer nest: from the welcome layout with its right pane split, Super+S on
+  the LEFT tile would make the right-hand split a stack member. The chord says
+  so (`chord mode refused: a stack holds only tiles`), since `set_mode`
+  refuses silently; the `mode` verb answers `E_INVAL` (a shape the tree does
+  not admit), not the minima's `E_NOMEM`.
+
+`split_fits` judges the node `split` will actually split, or a check and its
+mutation would disagree about which node grows; `min_size_hyp` gained the
+container-target arm (the stack's own minimum beside a new leaf along the
+axis) and the flatten branch's base became the node's own minimum rather than
+a tile's. Both are pinned absolutely: a root stack of three nests [stack / new]
+at 153 + 7 + 88 = 248 (the leaf-level nest the check used to judge would say
+282), and [a / stack(b, c)] split V flattens to 88 + 121 + 88 + 14 = 311 (a
+tile's minimum there would say 278 -- width cannot pin this, a stack is as
+narrow as a tile).
+
+**Super+N -- `ChordAction::NewTile`, `new-tile`.** A new empty tile in the
+focused pane: `new_tile_mode` is the tile's stack's own mode when it is a tile
+of one (the newcomer joins), else `Stacked` (a lone tile becomes a stack of
+two). The session fills the leaf with a shell exactly as it fills a split's:
+the chord and Super+H / Super+V now share `chord_split`, which stamps the new
+leaf's owner so the session can mint its claim (KT-1.5d-3). The keyboard
+reference lists it from the `chords` file like every other row.
+
+**Witnesses** (tapestryd lib 93, +6): `a_split_on_a_stacked_tile_splits_the_whole_stack`,
+`a_window_from_a_stacked_tile_joins_the_stack` (its legacy control IS the
+operator's defect), `stacking_a_group_that_holds_a_split_is_refused`,
+`a_new_tile_joins_its_stack_or_makes_one`,
+`no_mutation_builds_a_container_inside_a_stack` (EIGHT attempts on fresh trees
+-- both split modes, both stack modes, a host, a new tile, a move, stacking
+the root -- each asserting that the tree changed iff the attempt succeeded, so
+a no-op cannot satisfy the walk, and the legacy control shows the walk can
+fail), `a_split_on_a_stack_is_judged_on_the_stack`; and for the backdrop
+`the_effect_region_is_the_whole_display`, `while_a_card_stands_only_the_card_is_pushed`,
+`push_admission_is_general_in_the_region`. Sabotage-measured SEPARATELY, each
+failing its named witnesses and restored byte-identical: no redirect in
+`split_target` (3 fail), no join in `host_for` (1), no refusal in `set_mode`
+(2), no container-target arm (1), the flatten base back to a tile's (1).
+
+**What no host test reaches.** `scene_restore`, `restore_surface`,
+`menu_restore`, the frozen `screen_flush_full`, `set_mode`'s dismiss and the
+`NewTile` chord arm are bin-side -- the standing "N defended sites need N
+witnesses" gap, stated. The guest gate places and dismisses menus, so the
+paths RUN on live frames; no leg reads ink, so whether the dismiss leaves the
+screen exact is a thing a person verifies, and the operator's re-check is that
+person.
+
+## Nothing freezes: the card and its effects are laid on at UPLOAD (2026-09-16, section 10 revised again)
+
+The operator drove the full-viewport build and found the frozen, darkened
+screen "too dramatic for a menu -- it feels like a SAK episode". The kit
+agreed all along: `.theme-menu` carries `box-shadow: 0 20px 55px
+rgba(0,0,0,.32)` and nothing else, and `dialog::backdrop` reaches only a
+`<dialog>` opened with `showModal()` -- the help card. Scripture `2147d618`
+decided two classes and NO freeze; this section is the as-built mechanism, and
+it supersedes the frozen-scene design in both of the sections above.
+
+**The class travels as one word.** `menu place <id> <x> <y> [dialog]`, parsed
+by the pure `pane::menu_place_args` (a bare placement is `MenuClass::Menu`;
+`dialog` is `MenuClass::Dialog`; any other fourth word, or a fifth, is
+`E_INVAL`). halcyond's `summon` appends the word for `Model::Dialog` and
+`Model::Help`. `MenuState` is `{n, gen, rect, class, reach}` -- `fx`,
+`heal_rect` and the suppression are gone. The placed line
+(`tapestryd: menu N placed at X,Y WxH`) is byte-identical, because
+`ls-halcyon.exp` anchors a line end right after the size; the class is said on
+its own test-mode line, `tapestryd: menu N class dialog`.
+
+**The effects are the kit's two, not one.** `pane::menu_effects(card, class,
+instrument, pct, disp_w, disp_h)`: a menu takes `MENU_SHADOW` (black .32, dy
+20, blur 55) and NO backdrop, with `region` = the displaced card grown by the
+CLAMPED radius (`min(radius, cartoon::GLOW_RADIUS_MAX)`), on the display; a
+dialog takes `DIALOG_SHADOW` (.35, dy 24, blur 80) and the backdrop (rgb 3,4,4
+at 184/255, blur 3), with `region` = the display. The one-shadow collapse is
+undone -- it existed only because the compositor could not tell the cards
+apart. `pane::effect_cartoons` builds the two lists the compositor runs (the
+backdrop's `Blur` alone; then `RectAlpha` + `Glow`), so the host witness
+exercises the very ops the bin executes.
+
+**The mechanism: the buffer is the clean scene, ALWAYS.** Neither the card nor
+an effect is ever stored in the screen buffer. Every device-visible step goes
+through ONE function, `upload(r, carve_gl)` (`screen_push`,
+`screen_flush_full`, and `screen_flush_rect` under a card all route there),
+and where `r` meets what the card can change, `pane::overlay_plan` says what
+to do:
+
+1. `touch` = `r` ∩ the hull of `region` and the card's rect -- the pixels the
+   card or an effect can change;
+2. `save` = `touch` grown by the backdrop blur's clamped radius, on the
+   display (just `touch` for a menu, whose blends read nothing but their own
+   pixel);
+3. SAVE `save` into the scratch, run the `Blur` under clip `save`, the blends
+   under clip `touch`, lay the card over `r` (`menu_compose_card`, which was
+   `menu_reassert` and now writes only between a save and its restore),
+   TRANSFER `r`, and RESTORE `save`.
+
+So an effect is never applied twice -- by construction, not by excluding
+writes -- programs behind a menu or a dialog keep drawing, and a dismiss has
+nothing to heal. **`menu_unplaced(m)`** is the one step all three dismiss sites
+take (`retire`'s tail, `menu_dismiss`'s fallback, and a move in `menu_place`):
+upload `m.reach` ∪ the current reach, plainly. No repaint, no redraw request,
+no blink. `scene_restore`, `menu_restore`, `menu_heal`, `menu_heal_placement`,
+`menu_paint_effects`, `menu_fx_for`, `screen_push_raw`, `pane::menu_effect_region`
+and `pane::menu_push_allowed` are deleted; `restore_surface` stays (the
+structural pre-fill and `restore_under` use it).
+
+**Why the blur is EXACT on a piece of the display.** A pixel's box window
+reaches the radius either way, and the vertical pass reads horizontal results
+no further than the radius above or below, each of which read no further
+across -- so every tap of a pixel in `touch` lies in `save`, and where `save`
+meets the display's edge both runs clip the window identically. Witnessed, not
+assumed: cartoon's `a_blur_clipped_to_the_grown_target_is_exact_inside_the_target`
+(400 random fields, op rects overhanging the field, radii past the cap) with a
+control that an UNGROWN clip is inexact; and the end-to-end
+`an_upload_shows_exactly_the_whole_display_overlay` here.
+
+**Why the card must not be stored either.** A dialog's backdrop blur next to
+the card reads the pixels UNDER the card. With the card in the buffer, those
+are card pixels, and the card's ground bleeds a few pixels out into the dim --
+the kit blurs the page behind the dialog, never the dialog. Keeping the card
+out of the buffer is what leaves the scene there to read, and it is also what
+makes the legacy card's dismiss a plain upload instead of `menu_heal`'s
+repaint and redraw fan.
+
+**The menu's own present composes NOTHING into the buffer.**
+`blit_composed_pixels` returns the clip for the placed menu without composing,
+and the caller's push lays the card from its shown slot. `menu_card_shown`
+gives `Rect::ZERO` while the card has no frame yet, so the effects are laid
+where it will stand rather than leaving a hole (halcyond places, THEN paints).
+
+**The save scratch is not the heap.** tapestryd's global allocator is
+`ThylaAlloc` -- a fixed 4 MiB heap -- and a dialog's full-display save at
+2560x1664 is 17 MiB, so a `Vec` save would have failed silently for exactly
+the class that needs it. `fx_save` is a LAZY region (`t_burrow_attach_lazy`,
+demand-zero) sized to the display, attached at the first save, re-attached
+when the display outgrows it; only what a save touches is ever committed. If
+the attach fails, the upload lays nothing on (nothing it wrote could be taken
+off) and says so once.
+
+**The GPU composed path.** The overlay is laid over BUFFER pixels, and there
+the buffer does not hold what the GPU composed. Three rules close it, all
+stated in the code at the site:
+
+- **A surface under a standing card composes the CPU way** (`under_card(n)`
+  gates the slot path's `gpu_path`), so its pixels are in the buffer while the
+  card stands; the menu is under its own card by definition.
+- **The placement recomposes what lies under the new reach**
+  (`restore_under`, GPU path only: hosted content then chrome, from shown
+  slots, for every `restorable` surface); the unrestorable get the redraw
+  CONFIGURE. `screen_flush_rect` under a card does the same for its region
+  before `upload` (no CONFIGURE there, or a GL client would be asked to redraw
+  on every frame).
+- **A GL BLIT stays a blit and shows UNAFFECTED**, as scripture states: its
+  frame has no guest pixels. `bo_blit_arm(g)` is now the ONE statement of that
+  arm's condition -- the present dispatch routes by it and `gl_blit_holes`
+  carves by it -- and `upload` transfers `r` minus those placements (flushing
+  all of `r`), except where the card itself stands on one. On a dismiss or a
+  move, `heal_gl_under` asks the GL surfaces under the old card to redraw,
+  since the card's pixels over a host-side frame cannot come back from
+  anywhere else. A HOLD released after a card was placed, and a latch between
+  a blit and its readback, show their region unaffected or stale until the
+  surface's next present -- stated, not handled.
+
+**A defect found on the way, fixed here: `floor_bars_around` never reached
+the display.** It filled the bars around a re-placed client and then called
+`screen_flush_rect(c)`, which FLUSHES without transferring -- on both paths --
+so the #56 latch flip's floor (A-F4 of the H-arc round-1 audit, `839a966f`)
+never showed; the stale scaled projection stayed until the next structural
+repaint. It now pushes each bar.
+
+**Witnesses** (tapestryd lib **96**: 8 removed with the frozen design, 11 added):
+`menu_place_takes_an_optional_dialog_word`, `rect_union_is_the_hull_and_ignores_empties`
+(`rect_union` moved here from the bin), `grow_clamped_grows_then_clips_to_the_display`,
+`subtract_rects_covers_exactly_what_the_holes_leave` (pixel by pixel: no gap,
+no overlap, no spill), `a_menu_carries_only_the_theme_menus_shadow`,
+`a_dialog_carries_the_backdrop_and_the_help_cards_shadow` (with the paint
+ORDER pinned, since the upload witness builds its reference from the same
+lists and cannot see a swap), `the_card_effects_scale_but_the_reach_keeps_the_clamp`,
+`card_effects_are_instrument_only_and_refuse_degenerates`,
+`a_menus_region_holds_every_pixel_its_shadow_paints` (the dismiss re-uploads
+the region, so a painted pixel outside it would outlive the menu),
+`an_overlay_plan_touches_only_what_the_card_or_an_effect_can_change`, and THE
+witness, `an_upload_shows_exactly_the_whole_display_overlay`: random scenes and
+cards, both classes at 100 % and 200 %, legacy card-only, a card with no frame
+yet, ~160 upload rects each including the whole field, corner pixels and rects
+straddling the card's edge -- every uploaded pixel equals laying the overlay
+over the WHOLE display, and after the restore the buffer is the scene
+everywhere. **Sabotage-measured, each alone and restored byte-identical**: the
+save not grown by the blur (2 fail), grown ONE short (2), the reach from the
+unclamped radius (3), the reach not grown (4), a second class word accepted
+(1), a subtraction by the unclipped hole (1), the grow not clipped at the far
+edge (1), a union that counts an empty rect (2), a touch that ignores the card
+(2), the old one-shadow collapse (2).
+
+**What no host test reaches.** `upload`, `fx_save_take` / `fx_save_restore`,
+`menu_place`, `menu_unplaced`, `restore_under`, `heal_gl_under`, the forced CPU
+route and the menu's present arm are bin-side. The pure plan and the op lists
+they execute are witnessed; that the bin runs them in that order under those
+clips is the "N defended sites need N witnesses" gap, stated. The GPU composed
+path has no gate on this host (the operator's image and every local gate run
+the 2D screen).
+
+## Every detach below 4 GiB was refused -- the leak, the identity rule, and the mapping window (2026-09-16)
+
+**The finding (measured, not inferred).** The I-8 review's F1 witness is a
+600-move divider drag in one QMP session (`ls-halcyon-instrument`'s churn leg).
+It failed before any fix, and not on F1: `t_dma_create_weave` returned -1 after
+about 133 relayouts. A temporary kernel probe (never committed) measured the
+cause:
+- at the failure, 415 DMA objects were live of 461 created, 13631 pages were
+  free with nothing above order 6, and tapestryd held 22 handles;
+- `created - live` held at exactly **46** from the first Halcyon surface on, so
+  no DMA object was freed in the whole session;
+- a second probe showed the client's clunk-unmap working (`unmap_rc=0`, leaving
+  `hc=0 mc=1`) and tapestryd's detach NEVER reaching `detach_one_locked`.
+
+`detach_args_check` refused every vaddr below `EXEC_USER_BURROW_BASE`, and
+tapestryd has placed its maps at `0x0240_0000`+ since G-3a, discarding each
+`t_burrow_detach` result. So every weave generation, the screen buffer, every
+Warp BO, ring and probe page kept its pages until tapestryd exited. The Warp
+audit F4 fix ("`t_burrow_detach` before `t_close`, else up to 64 MiB leaks")
+had never taken effect for the same reason.
+
+**The kernel rule (operator-ratified; scripture `0fbeaf3c`).**
+`SYS_BURROW_DETACH` admits a DMA- or MMIO-backed VMA wherever it was placed
+(ARCH 6.5; [[sub-kernel-vma]]).
+
+**The compositor side.**
+- `detach_or_say` checks every detach and says a refusal ("its pages stay
+  mapped"). A silent `t_burrow_detach` is what hid this.
+- `map_dma` distinguishes `MapFail::Unmapped` (nothing at the address) from
+  `MapFail::Stranded` (a detach the kernel refused).
+- `map_in_window` takes an address from `Comp.va` and gives it back only when
+  nothing was left mapped there.
+- `window_unmap(win, va, size, what)` frees the range only after a successful
+  detach. A refused range stays out of circulation, since handing it out again
+  would steer the next map into a refusal.
+- The six bump sites and every release site go through them: the closures in
+  `warp_probe_res_kind` / `wbo_create` and the static `wring_teardown` /
+  `wbo_retire` / `warp_probe_undo_guest` take `&mut VaWindow`.
+- The effect save scratch is kernel-placed (a lazy attach in the burrow window),
+  so it uses `detach_or_say` and never touches the window; so does the hostmem
+  ring detach in `gpu.rs`.
+- The test-mode drag-end gauge reports `va.live()` / `va.peak()`.
+
+**The witness.** The churn leg reads `/ctl/memory`'s `free:` before and after,
+and fails on:
+- any `tapestryd: detach ... refused` line;
+- a mapping-window peak above an eighth of the window;
+- more than 8192 pages not returned by a drag that ends where it started.
+
+Measured after the cure: 410680 -> 417752 free pages, live 16 MiB, peak 28 MiB
+of 2011 MiB, 600 console relayouts, kernel suite 1527/1527. Sabotage-measured
+(each alone, restored):
+- the kernel identity arm off fails the two new kernel tests (1525/1527, boot
+  extinct);
+- the arm admitting ANON fails the window-confined control (1526/1527);
+- tapestryd skipping its detaches fails the window peak (764 MB after 60 moves);
+- tapestryd keeping its weave handles fails the page check (181512 pages after
+  60 moves, window unchanged).
+
+**The I-8 review's P3s, dispositioned with the fix:**
+- **F2 (fixed):** `fx_save_ensure` decides at `menu_place` -- no scratch, the
+  placement is refused `E_NOMEM` before anything changes, so a grab never stands
+  over an invisible card. The say names what is dropped.
+- **F3 (fixed):** `restore_under` calls `restore_surface` for every surface under
+  the area and owes a redraw on `false`, so a patchwork slot is composed rather
+  than skipped. The dead `restorable` is gone; its soundness argument moved to
+  `restore_surface`.
+- **F4 (fixed):** `apply_theme` / `apply_scale` dismiss a standing card first, as
+  `set_mode` and the chord path do.
+- **F5 (fixed):** `menu_place`'s wedged-owner early return still uploads a move's
+  old placement.
+- **F6 (fixed):** `menu place` charges `layout_verb_budget`.
+- **F8 (fixed):** `heal_gl_under` judges the placement rect, the one
+  `gl_blit_holes` carves.
+- **F7 (documented, not fixed):** under a dialog on the GPU composed path, the
+  backdrop blur within its clamped radius beside a GL blit hole reads the hole's
+  stale buffer bytes, a 3-6 px halo around a GL surface. No gate reaches it.
+
+**What no host test reaches.** `server.rs` is bin-only. The F2-F6/F8 fixes and
+the window wiring are witnessed by the gates, not host tests; the window itself
+is host-tested in `va.rs` (7 tests, including a 20000-frame drag).
+
+## Polled input and shared PCI lines
+
+`InputDev` still suppresses event-queue notifications; its claimed PCI function
+now also starts electrically quiet under the kernel's POLLED default. A pending
+configuration ISR can no longer assert the shared wire. GPU completion uses a
+function-bound endpoint: initial arm, ticket wait, drain/ISR acknowledgement,
+device barrier, then explicit completion. EAGAIN keeps the source masked and
+WAIT supplies a delayed retry. Warden grants BDF authority without raw IRQs.
+[[sub-kernel-pci-irq]] owns the protocol. GPU config/control/cursor queues
+select one readback-verified MSI-X vector through `PciIrq::for_virtio`, with
+initialization rollback before INTx fallback. Only INTx paths read ISR.
+
+Gpu Drop resets before endpoint/mapping/DMA field destruction. Fenced-lane DMA
+allocation failure after DRIVER_OK also resets before the earlier ring unwinds.
+Shared-INTx Instrument runs pass three times on HVF; MSI-X runs
+pass twice on HVF. The live Instrument workspace was inspected at 1280x800.
+Both synchronous waits and the asynchronous serve-loop pump now drain the
+used ring and complete the interrupt ticket. Idle queues still service a
+notification for work already retired by spin polling. Each asynchronous pass
+uses one bounded wait and leaves cooldown tickets for a later pass, so it
+cannot spin on shared-line retries. Live verification passes on ITS/TCG (176 seconds) and on GICv3/TCG with
+ITS disabled (174 seconds). The latter samples sound stable at 190 deliveries
+while GPU advances 309 -> 339 over eight seconds, with no retries/cooldowns.
+The full controller/mode/SMP matrix remains open. This work is not yet in main.

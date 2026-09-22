@@ -56,6 +56,28 @@ const ANSI: [u32; 16] = [
 // involvement). Cells bake RESOLVED colors at write time, so a theme switch
 // remaps existing cells by exact old->new color match (set_theme); truecolor
 // SGR passes through a switch untouched, by design.
+/// Remap one resolved colour from `old`'s palette entries to `new`'s: the
+/// default fg/bg and the ANSI sixteen move, everything else (a truecolor
+/// value that is not an entry -- even one that coincidentally equals one)
+/// passes through. The SINGLE definition of a live theme change's cell
+/// remap (HALCYON-INSTRUMENT 9.4): `Vt::set_palette` here and halcyond's
+/// retained-history remap both call it, so the seam and the scrollback
+/// beside it can never disagree on what an old colour becomes.
+pub fn remap_color(old: Palette, new: Palette, c: u32) -> u32 {
+    if c == old.fg {
+        return new.fg;
+    }
+    if c == old.bg {
+        return new.bg;
+    }
+    for i in 0..16 {
+        if c == old.ansi[i] {
+            return new.ansi[i];
+        }
+    }
+    c
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Palette {
     pub bg: u32,
@@ -2048,25 +2070,23 @@ impl Vt {
     /// theme keeps ansi[15] ~= fg). Marks every row dirty; the caller owns
     /// the margins refill (pal.bg changed).
     pub fn set_theme(&mut self, idx: usize) {
-        let new = THEMES[idx % THEMES.len()].1;
+        self.set_palette(THEMES[idx % THEMES.len()].1);
+    }
+
+    /// Re-theme the live screen in place (HALCYON-INSTRUMENT 9.4, I-7):
+    /// every cell whose ink or ground is an entry of the OLD palette (the
+    /// default pair, the ANSI sixteen) takes the same entry of the new one,
+    /// the pen's defaults follow, and every cell is marked so the next diff
+    /// ships the remap. A truecolor value that happens to equal an old
+    /// entry is remapped with it: cells hold resolved colours, not the SGR
+    /// index that produced them, so the two are indistinguishable here.
+    /// Same palette: nothing.
+    pub fn set_palette(&mut self, new: Palette) {
         let old = self.pal;
         if new == old {
             return;
         }
-        let map = |c: u32| -> u32 {
-            if c == old.fg {
-                return new.fg;
-            }
-            if c == old.bg {
-                return new.bg;
-            }
-            for i in 0..16 {
-                if c == old.ansi[i] {
-                    return new.ansi[i];
-                }
-            }
-            c
-        };
+        let map = |c: u32| remap_color(old, new, c);
         for c in self.cells.iter_mut().chain(self.alt_cells.iter_mut()) {
             c.fg = map(c.fg);
             c.bg = map(c.bg);
@@ -2100,6 +2120,41 @@ fn xterm256(pal: &Palette, n: u8) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    /// I-7: `set_palette` remaps every cell and the pen by the old
+    /// palette's entries and leaves every other colour alone.
+    #[test]
+    fn set_palette_remaps_cells_and_pen_in_place() {
+        use super::*;
+        let old = Palette { bg: 0xFF00_0001, fg: 0xFF00_0002, ansi: [0xFF00_0010; 16] };
+        let mut old = old;
+        for (i, a) in old.ansi.iter_mut().enumerate() {
+            *a = 0xFF00_0010 + i as u32;
+        }
+        let mut vt = Vt::with_palette(4, 2, old);
+        // Red (SGR 31) then a truecolor ink no entry holds, then a reset.
+        vt.feed(b"\x1b[31mA\x1b[38;2;9;9;9mB\x1b[0mC");
+        let new = Palette { bg: 0xFF00_0101, fg: 0xFF00_0102, ansi: [0xFF00_0110; 16] };
+        let mut new = new;
+        for (i, a) in new.ansi.iter_mut().enumerate() {
+            *a = 0xFF00_0110 + i as u32;
+        }
+        vt.set_palette(new);
+        assert_eq!(vt.pal, new);
+        assert_eq!(vt.cells[0].fg, new.ansi[1], "red follows the new ansi[1]");
+        assert_eq!(vt.cells[0].bg, new.bg, "its ground is the new default");
+        assert_eq!(vt.cells[1].fg, 0xFF09_0909, "a truecolor ink outside the palette stays");
+        assert_eq!(vt.cells[2].fg, new.fg, "the reset ink is the new default");
+        assert_eq!(vt.cells[3].fg, new.fg, "a blank cell follows too");
+        assert_eq!(vt.cells[3].bg, new.bg);
+        // The pen: the next byte is written in the new defaults.
+        vt.feed(b"D");
+        assert_eq!(vt.cells[3].ch, 'D');
+        assert_eq!(vt.cells[3].fg, new.fg);
+        // Idempotent on the same palette.
+        vt.set_palette(new);
+        assert_eq!(vt.cells[0].fg, new.ansi[1]);
+    }
+
     use super::*;
 
     // The VT parser is `no_std`+alloc but pure logic -- these host tests

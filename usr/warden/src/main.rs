@@ -80,7 +80,7 @@ macro_rules! say {
 /// -- a driver that always fails `probe`, restarted with back-off up to the bound
 /// then given up on (a SOFT per-device failure that does not fail the boot); the
 /// `virtio-pci:1` -> `netd` bind (net-2) is the network daemon -- it owns the NIC
-/// over the PCI transport, narrowed to its (bus,dev,fn) + INTID + DMA pool (no
+/// over the PCI transport, narrowed to its (bus,dev,fn) + DMA pool (no
 /// MMIO axis: a PCI function's registers are in BARs, mapped off the claimed
 /// KObj_PCI), and runs the TCP/IP stack (the live I-34-on-PCI proof, evolved from
 /// the 6b-3 ARP demo). v1.x reads `/lib/driver/*.manifest`.
@@ -105,12 +105,13 @@ driver "netdev-driver" {
 }
 "#,
     r#"
-driver "tapestryd" {
+driver "lictor" {
     abi   = 1
     binds = ["virtio-pci:16", "virtio-pci:18"]
     needs {
         pci = "node"
-        irq = "node:interrupts"
+        # The BDF claim authorizes function-bound interrupt endpoints.
+        irq = "none"
         # WEAVE-SKEIN: matches KOBJ_DMA_WEAVE_MAX_SIZE, the kernel's own
         # per-object envelope. It read 32 MiB and was the FIRST of the two
         # bounds a 2560x1664 display hit -- allowance_permits refuses a
@@ -125,7 +126,7 @@ driver "tapestryd" {
         # invisible way. The other axes (mmio, irq, pci) are untouched.
         dma = "pool: 64 MiB"
     }
-    serves    = "/dev/tapestry"
+    serves    = "/srv/lictor"
     restart   = on-crash
     lifecycle = persistent
     gather    = all
@@ -138,7 +139,8 @@ driver "netd" {
     binds = ["virtio-pci:1"]
     needs {
         pci = "node"
-        irq = "node:interrupts"
+        # The BDF claim authorizes function-bound interrupt endpoints.
+        irq = "none"
         dma = "pool: 64 KiB"
     }
     serves    = "/net"
@@ -152,7 +154,8 @@ driver "nocturned" {
     binds = ["virtio-pci:25"]
     needs {
         pci = "node"
-        irq = "node:interrupts"
+        # The BDF claim authorizes function-bound interrupt endpoints.
+        irq = "none"
         dma = "pool: 256 KiB"
     }
     serves    = "/dev/nocturne"
@@ -674,6 +677,34 @@ fn supervise(m: &Manifest, grant: &BoundResources, node_name: &str) -> Dispositi
     }
 }
 
+/// The normal compositor is a separate DMA-only leaf, never a child of the
+/// hardware service. Kernel designation binds its actual process incarnation.
+fn start_compositor(grant: &BoundResources) -> bool {
+    let mut normal = grant.clone();
+    normal.mmio.clear(); normal.irq.clear(); normal.pci = None; normal.pci_extra.clear();
+    let Ok(desc) = normal.to_descriptor() else { return false; };
+    let open_null = || OpenOptions::new().read(true).write(true).open("/dev/null");
+    let (Ok(nin), Ok(nerr)) = (open_null(), open_null()) else { return false; };
+    let mut cmd = Command::new("/tapestryd");
+    cmd.arg(desc).caps(T_CAP_HW_CREATE | T_CAP_CSPRNG_READ)
+        .allowance(to_allowance(&normal))
+        .perm(T_SPAWN_PERM_MAY_POST_SERVICE | libthyla_rs::T_SPAWN_PERM_SEAT_CLIENT)
+        .stdin(Stdio::File(nin)).stdout(Stdio::Piped).stderr(Stdio::File(nerr));
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => { say!("warden: compositor spawn failed {:?}", error); return false; }
+    };
+    if matches!(await_readiness(&mut child), Readiness::Signalled(ref line) if line == "READY") {
+        say!("warden: Tapestry pid={} READY with DMA-only allowance", child.pid());
+        true
+    } else {
+        say!("warden: compositor failed readiness");
+        let _ = child.kill();
+        let _ = child.wait();
+        false
+    }
+}
+
 /// Spawn the driver once for a conferred grant and watch it declare itself --
 /// the confer + one run attempt. Encodes the grant into the argv descriptor + the
 /// kernel allowance (both from one `BoundResources`), spawns the driver narrowed,
@@ -728,7 +759,12 @@ fn run_once(m: &Manifest, grant: &BoundResources) -> RunOutcome {
     // no namespace and is conferred nothing -- the grant is exactly as narrow as
     // the service that needs it.
     if m.lifecycle == Lifecycle::Persistent {
-        cmd.perm(T_SPAWN_PERM_MAY_POST_SERVICE);
+        // Boot-compiled designation, never a manifest-supplied permission.
+        // Both seat processes remain hardware-allowance leaves.
+        let seat = if m.name == "lictor" {
+            libthyla_rs::T_SPAWN_PERM_SEAT_SERVICE
+        } else { 0 };
+        cmd.perm(T_SPAWN_PERM_MAY_POST_SERVICE | seat);
     }
     // The boot-probe warden has no stdio fds of its own (joey spawns it without
     // any), so Command's default Stdio::Inherit -- which bumps the parent's fd
@@ -811,6 +847,11 @@ fn run_once(m: &Manifest, grant: &BoundResources) -> RunOutcome {
                         m.name,
                         pid
                     );
+                    if m.name == "lictor" && !start_compositor(grant) {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return RunOutcome::Exited(None);
+                    }
                     RunOutcome::Served
                 }
                 Lifecycle::Transient => {

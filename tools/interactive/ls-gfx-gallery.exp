@@ -63,7 +63,7 @@ lc_login michael correct-horse-battery-staple-v1
 set timeout 60
 lc_send "gallery /test.png"
 expect {
-    -re {gallery: /test\.png 640x400 shown (\d+)x(\d+) at \d+,\d+ on (\d+)x(\d+)} {
+    -re {gallery: /test\.png 640x400 shown (\d+)x(\d+) at \d+,\d+ on (\d+)x(\d+)\r} {
         lc_step "gallery: 640x400 decoded, shown $expect_out(1,string)x$expect_out(2,string)\
                  on $expect_out(3,string)x$expect_out(4,string)\
                  (read->decode->fullscreen->paint->present OK on hardware)"

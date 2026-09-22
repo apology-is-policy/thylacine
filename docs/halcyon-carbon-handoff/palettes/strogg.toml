@@ -1,0 +1,77 @@
+# Stock Halcyon schema: complete 57-key compatibility projection.
+# Not pixel-exact alone: pair with ui-palettes/strogg.toml AFTER implementing Instrument v1.
+# Ember changes are an explicit new-profile policy amendment. No base inheritance.
+# ANSI and bevel faces are DERIVED, not sampled from the mockup.
+[meta]
+name = "Strogg Process"
+
+[palette]
+floor = "#070605"
+surface = "#181310"
+header = "#0D0B09"
+raised = "#231C17"
+border = "#45372D"
+blank = "#110E0C"
+selection = "#2D1E18"
+island_rule = "#723F34"
+fg = "#D7D0C6"
+fg_dim = "#C5BBB0"
+fg_muted = "#918679"
+fg_subtle = "#62584E"
+bevel_top = "#2F2E2D"
+bevel_left = "#1D1C1C"
+bevel_right = "#050504"
+bevel_bottom = "#040303"
+ember = "#A75B45"
+ember_dim = "#723F34"
+ember_deep = "#723F34"
+status_bg = "#0A0807"
+status_fg = "#D7D0C6"
+status_muted = "#918679"
+status_idle = "#62584E"
+
+[palette.sage]
+key = "#728060"
+tint = "#0D0B09"
+raised = "#231C17"
+border = "#2D251F"
+fg = "#D7D0C6"
+fg_dim = "#918679"
+fg_muted = "#62584E"
+
+[palette.cinnabar]
+key = "#B4473D"
+tint = "#0D0B09"
+raised = "#231C17"
+border = "#2D251F"
+fg = "#D7D0C6"
+fg_dim = "#918679"
+fg_muted = "#62584E"
+
+[palette.syntax]
+slate = "#A75B45"
+sage = "#8B835E"
+sand = "#B4473D"
+moss = "#723F34"
+ash = "#728060"
+dusk = "#B36D57"
+smoke = "#62584E"
+fen = "#728060"
+cinnabar = "#B4473D"
+
+[terminal]
+bg = "#0C0908"
+fg = "#BCB2A8"
+ansi = ["#110E0C", "#B4473D", "#728060", "#A75B45", "#8B835E", "#723F34", "#7F825F", "#918679", "#62584E", "#BE6D63", "#8E967D", "#B47C69", "#A0997B", "#8E685D", "#98987C", "#BCB2A8"]
+
+[type]
+smooth = 0
+
+[geometry]
+bevel = 2
+gap = 3
+hairline = 1
+header_h = 32
+status_h = 25
+tag_pad_x = 0
+tab_strip_h = 0

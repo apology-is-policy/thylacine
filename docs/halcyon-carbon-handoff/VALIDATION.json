@@ -1,0 +1,15 @@
+{
+  "themes": 13,
+  "legacy_keys_per_theme_excluding_meta_name": 57,
+  "lossless_colors_per_theme": 35,
+  "toml_syntax": "PASS Python tomllib",
+  "stock_key_shape": "PASS exact template key set",
+  "ansi_length_uniqueness": "PASS",
+  "stock_geometry_bounds": "PASS",
+  "carbon_syntax_contrast": "PASS all 9 categories >=4.5:1",
+  "source_sha": "074bc5646b2f7a03872859890c2891017ceaaf9d",
+  "native_halcyon_lint": "NOT RUN: Halcyon source/binary not attached",
+  "native_pixel_and_behavior_tests": "NOT RUN: implementation deliverable is a specification",
+  "offline_fonts": "Not bundled; system-installed Plex required for typography match",
+  "contrast_policy": "Measured, not repaired; some non-Carbon tokens below 4.5:1 are preserved for fidelity"
+}

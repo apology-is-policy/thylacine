@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/POUNCE-DESIGN.md", "docs/FID-LIFECYCLE-DESIGN.md", "docs/DISTRO.md", "docs/VIVARIUM.md"]
 created: 2026-08-01
-updated: 2026-09-05
+updated: 2026-09-21
 ---
 ## Purpose
 
@@ -100,8 +100,15 @@ bool          stalk_union_has_child(p, dir, const char *name, u32 namelen);
 ### The per-component loop
 
 For each tokenized component: `.` continues; `..` does
-`spoor_clunk(trail[--depth])` — at `depth == 0` a hard no-op, so resolution
-can never escape above `start` (the chroot/pivot boundary, I-28). A real
+`spoor_clunk(trail[--depth])` — at the bottom a hard no-op, so resolution
+can never escape above `start` (the chroot/pivot boundary, I-28). The bottom
+is `floor_depth`, not 0: a base that is itself a mount point CROSSES before
+the loop, and its mounted root sits on the trail as `trail[0]`. Popping that
+entry left resolution standing on the uncrossed base — the directory the
+mount COVERS — so `"../x"` off such a base read under a mount that `"x"` read
+over (found 2026-09-21 by reading the arm while fixing the dissolved-union
+rule; `stalk.dotdot_crossed_base_floor` pins it, control legs included).
+`floor_depth` is set at the base cross on every pass. A real
 component: X-search the parent (on a `perm_enforced` Dev,
 `spoor_stat_native` + `perm_check(p, &st, PERM_X)` — fail-closed if the Dev
 cannot vouch); reject trail-full BEFORE the push; `nc = spoor_clone(parent)`;
@@ -217,7 +224,7 @@ point's); the base is crossed before the loop (the owned crossed clone
 becomes `trail[0]` since `start` is borrowed); the quarry is crossed at the
 end — EXCEPT under `STALK_MOUNT`, so `SYS_MOUNT`'s MREPL re-keys the same
 underlying point. `stalk_cross_mounts` loops a mount-over-mount chain to
-the leaf, bounded by `PGRP_MAX_MOUNTS` (20) — I-3 acyclicity is ENFORCED at
+the leaf, bounded by `PGRP_MAX_MOUNTS` (32; it read 20 here, two cap raises stale) — I-3 acyclicity is ENFORCED at
 `mount()` time (`would_create_mount_cycle`, the stalk-2 F1 fix,
 [[fnd-stalk2-r1-f1]]); the bound is a defensive backstop. `mount_lookup`
 returns a **ref-held** source under the Territory `ns_lock` (RW-4 SA-F1,
@@ -259,7 +266,13 @@ Two amodes exist because create and remove must pick *different* members:
 
 - **`STALK_CREATE`** crosses a union quarry to the **first `MCREATE` member**
   (`stalk_union_create_member`) — a create lands in the union's writable mount;
-  a union with no `MCREATE` member is `-T_E_ACCES` (no writable target).
+  a union with no `MCREATE` member is `-T_E_ACCES` (no writable target). A point
+  holding ONE member is not a union (ARCH 9.5: several mounts): the resolver
+  crosses it plainly, and since shed r4 F5 the helper answers that member too,
+  MCREATE or not, decided on its own atomic snapshot -- before, the dirfd routes
+  (`SYS_WALK_CREATE`, rename's destination) refused with `EACCES` a create that
+  `openat(O_CREAT)` through the same point performed. MCREATE routes a create
+  inside a union; the authority to create is the member Dev's own check.
 - **`STALK_REMOVE`** returns a union quarry **uncrossed** (like `STALK_MOUNT`),
   and the caller then calls `stalk_union_member_holding` to act on the member
   that actually **holds** the leaf (UM-7 F3) — not member 0, not the writable
@@ -270,6 +283,85 @@ I-3 acyclicity and I-1 isolation stay the territory's to keep (a union is a
 member SET at one identity, added under `ns_lock`); stalk only *resolves* across
 it. `union_snap_point_only` (UM-8c R2-F2) is the point-only retained snapshot a
 union DIRFD holds so the union can be re-reached off the handle.
+
+**The POINT is consulted in exactly two places, and each carries two
+obligations** (2026-09-21; ARCH 9.6.10). The places: the base-set `union_base`
+(the first component off a union base is searched through the members keyed at
+the point) and the zero-component `zbase` (`"/"` of a union root, `"."` of a
+union dirfd clone the point so the final cross keeps the union). The
+obligations:
+
+1. **Each is a SEED of the mount-table shed's closure**
+   ([[sub-kernel-territory]]). The point is a Spoor the walk never WALKED to —
+   it lives in whatever tree the union was mounted in — so a closure seeded from
+   the root alone sheds the union's own entries at the next `chroot` onto such
+   a handle (shed audit r1 F1: every name under the new root `ENOENT`). A NEW
+   base-time consult in this file is a new seed there, and no spec can notice
+   one missing from BOTH the rule and the walker. A change here fires the stalk
+   and UM audit rows, not the shed's; this paragraph and the two WHY comments
+   in the code are the back-pointer.
+2. **The point is consulted only while it still hosts a member in the caller's
+   Territory.** It is the directory the union was mounted OVER. Once its
+   entries are gone — a plain `unmount("/")` loop does it, no shed needed, and
+   so does a `chroot` elsewhere whose shed drops them — the uncrossed point IS
+   the covered directory: one the handle never named, in a tree its holder may
+   have no other path into (shed audit r2 F1). So the base-set site probes
+   `mount_member_at(point, 0)` before routing through the point, and the
+   zero-component site enforces it as a POST-condition of the cross
+   (`zero_from_point`: a point clone that does not cross is replaced by a clone
+   of member[0]), so a peer Thread's `unmount` opens no window between a check
+   and the cross. A dissolved union is a plain handle on member[0], which is
+   what `base` is — but a `STALK_OPEN` union handle is member[0] OPENED, and a
+   Dev may refuse to walk an opened Spoor (9P forbids a `Twalk`, the
+   zero-element clone included, from an opened fid; the test fixture refuses
+   what Stratum refuses). While the union lives that never shows, because every
+   resolution leaves through the point. Dissolved, both sites therefore resolve
+   from `stalk_union_handle_walkable(base)`: the UNOPENED clone of that member
+   which the full snap already retains for the readdir dedup probe, matched by
+   identity `(dc, devno, qid.path)` and never by index — the snap skips a member
+   it could not open, and a mount landing between the snapshot and the quarry's
+   own cross can make `m[0]` a different member than the handle. No match (the
+   point-only snap of an `O_PATH` handle, itself unopened) returns the handle.
+   The first version of this rule cloned `base` directly and was caught by its
+   own kernel test on the fixture, not by the on-device probe, whose members
+   are `/proc` and `/ctl` — kernel Devs that walk an opened Spoor happily. The
+   base-set site records the choice in `wbase` (where a depth-0 component is
+   walked from), recomputed on every pass since a symlink restart may re-anchor
+   `base`. `STALK_MOUNT` never degrades — it takes a mount point as a KEY
+   and hands no Spoor to EL0: a path THROUGH a union point keys the point,
+   live or dissolved (the point-unreachable fallback is skipped for it), and a
+   path that nets to a union HANDLE used as its base keys member[0], the
+   identity that handle names (see item 4; this said "untouched" until shed r4
+   F4 found the base case keying the point). The base-set site is also gated on `depth == 0`: a
+   base that CROSSED is searched as that mount, and a second `union_base` ref
+   would be overwritten unclunked by the descent branch (a race-only Spoor leak,
+   r2 F7.1).
+3. **Round 3 (2026-09-21) widened both to every consumer of the handle.**
+   `wbase` is the unopened form whenever the handle carries a snap, live or
+   dissolved: while the union lives the first component still goes through the
+   members, but a `..` back to the base, or a relative symlink found at the
+   union's top level, walks from `wbase` -- pre-fix that was the opened handle,
+   ENOENT on dev9p (r3 F2). A dissolved handle whose POINT will not clone (its
+   session gone) still yields member[0] for `"."`, probing the table for a
+   member before giving up. A `STALK_REMOVE` parent that is a union point is
+   reported by the resolver itself (`stalk_remove_parent`'s `union_point`),
+   because the consumer's old re-probe of the table after `stalk` returned read
+   a dissolve to ZERO members as "an ordinary directory" -- the covered one (r3
+   F3). And the syscall consumers of a union dirfd (fd-relative unlink / rename
+   / create, `SYS_WALK_CREATE`) ask `stalk_union_dissolved`, so a dissolved
+   union is member[0] for them exactly as for `openat` (r3 F5). `readdir` keeps
+   the members it opened, by design.
+4. **`STALK_MOUNT` names the base at the bottom of a crossed base** (r3 F4). A
+   base that is a mount point crosses before the loop; under `STALK_MOUNT` a
+   resolution that ends at `floor_depth` (`"/"`, `"."`, a `..` run back down)
+   unwinds that crossed clone and names the base, so `unmount("/")` names a
+   mount over the root and `MREPL` re-keys instead of stacking. Before, the key
+   was the mounted root's identity, which nothing is keyed on; d5c58d76's floor
+   had removed `"/.."`, the one spelling that reached the root's own key. For a
+   union HANDLE as the base (`.` on a union dirfd), "the base" is `wbase` --
+   member[0], the mount the path shows -- never the union point, which would
+   key an invisible member (shed r4 F4, `mount_names_base`;
+   `stalk.mount_names_crossed_union_base`).
 
 ### Symlink expansion (DISTRO D-1)
 
@@ -422,6 +514,11 @@ endpoint — stalk-3b-β). The adoption arm clunks the spent quarry, adopts
 the replacement, and transplants the walked name onto it (#66a F2,
 [[fnd-66a-r1-f2]] — fd2path must report `/srv/corvus`, not the endpoint's
 born-"/" name).
+
+A failed final `Dev.open` reads the 9P open errno before unwinding its
+unpublished quarry. `stalk_err` returns its positive magnitude to SYS_OPEN;
+unknown/non-9P errors remain EIO. Resource admission errors no longer collapse
+into transport failure. [[sub-kernel-ninep-dev9p]] owns the per-open record.
 
 ## Data structures
 
@@ -613,6 +710,16 @@ authoritative audit-trigger copy):
   target to native — over-declaration is I-43-safe, but under-declaration
   silently changes an image's ABI shape.
 
+- **A union handle's point is a capability on the COVERED directory unless
+  the two rules above hold.** Prosecute every amode through the zero-component
+  arm for a path that returns an uncrossed point clone to EL0, and every new
+  consult of `union_snap->point` for both obligations. Device witnesses:
+  `usr/symlink-probe` stages `union-a` (chroot ONTO a union of `/proc` + `/ctl`
+  over a Stratum directory — point and member[0] in different instances, the
+  only shape that discriminates — then dissolve it and open `"/"`) and
+  `union-b` (hold the dirfd, chroot elsewhere, open `"."`); a marker file in the
+  covered directory makes "which directory is this" a fact read back.
+
 ## Seams
 
 - [[seam-372-latched-double-xcheck]] — on a `wga_unsupported`-latched
@@ -640,6 +747,24 @@ authoritative audit-trigger copy):
 
 ## Caveats
 
+- **Two union resolver gaps, open and tracked (shed audit r2 F7):** from a
+  union base, `a/../b` resolves `b` in member[0] only (the base-set `union_base`
+  is consumed by the first real component, and the `..` pop lands on `base`,
+  not on the point); and `sys_walk_open_handler` never consults
+  `src->union_snap`, so `SYS_WALK_OPEN(FROM_ROOT, name)` on a union root sees
+  member[0] while `SYS_OPEN("/name")` sees the union. Neither affects the
+  shed's soundness (both resolve a SUBSET of what the union would).
+- **A quarry cloned from a snap's `walkable` carries the member SOURCE's Path**,
+  not the point's name (`stalk_build_union_snap` never transplants it), so
+  `fd2path` of a file reached through a dissolved OREAD union dirfd names the
+  source's original path, while an `O_PATH` handle falls back to a point-named
+  Spoor. Cosmetic under I-33 -- every `->path->s` reader is introspection
+  (devproc, exec's diagnostics, the ns render, `SYS_FD2PATH`) -- recorded so a
+  future reader that resolves from a Path knows it is not the union's name.
+- **The base cross is union-blind** (r3 F4 item 5): a union keyed at the base's
+  OWN identity (open a directory `O_PATH`, mount two members over it, `chroot` to
+  the fd) resolves member 0 only, because `stalk_cross_mounts` crosses member 0.
+  No in-tree consumer; tracked.
 - **`..` is contained at `start`, not the dirfd's real parent** — for a
   relative resolve from a dirfd, `..` at the base is a no-op.
   Over-restrictive vs POSIX `openat` (safe: it cannot escape).

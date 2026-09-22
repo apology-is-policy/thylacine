@@ -18,7 +18,7 @@ abis: []
 design:
   - docs/NET-DESIGN.md sections 13, 17
 created: 2026-08-04
-updated: 2026-08-04
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -86,8 +86,7 @@ their buffer addresses and only the length is rewritten per frame.
 **The two transports differ in what they are *given*, not only in how they
 drive.** The MMIO driver is granted a physical window and an interrupt
 number; it maps the window and reads registers at fixed offsets. The PCI
-driver is granted a bus function and an interrupt number and *no memory
-window at all* — its registers arrive through the BARs mapped off the claimed
+driver is granted a bus function and *no raw interrupt or memory window* — its registers arrive through the BARs mapped off the claimed
 function handle, and it locates each register group by walking the device's
 capability list. A boot log shows the asymmetry plainly: the MMIO bind
 reports one memory window and no bus function, the PCI bind reports one bus
@@ -100,8 +99,9 @@ itself supplies, scaled by a multiplier the device also supplies — so it
 bounds that arithmetic against the notify region's reported length at
 bring-up and refuses the device if a doorbell would land outside.
 Acknowledgement differs the same way: MMIO reads a status register and writes
-it back to a separate acknowledge register; PCI reads a single byte that
-clears on read.
+it back to a separate acknowledge register. PCI reads the clear-on-read ISR
+only in INTx mode; MSI-X notifications prompt queue inspection without an ISR
+read. Both PCI modes explicitly complete a generation/sequence ticket.
 
 ## Data structures
 
@@ -253,9 +253,10 @@ proven only by the in-guest round trips.
 
 ## Seams
 
-- **Interrupts are pin-based only.** Message-signalled interrupts are
-  undriven: both the config and per-queue vectors are parked at the
-  no-vector sentinel so the device routes through the legacy pin.
+- **PCI interrupt mode is selected during initialization.** `PciIrq::for_virtio`
+  prefers one MSI-X config/RX/TX vector and verifies device readback before DMA
+  setup. Failed setup resets before shared INTx fallback. Resident MSI-X startup
+  passes on HVF; sustained traffic and the controller/mode matrix remain owed.
 - **No offload of any kind** — the per-frame header is written as zeroes and
   skipped on receive; no segmentation offload, no checksum offload.
 - **One instance per transport per process**, because the mapped addresses

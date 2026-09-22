@@ -15,7 +15,7 @@ hazards: []
 abis: []
 design: ["docs/TAPESTRY.md"]
 created: 2026-08-04
-updated: 2026-09-05
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -55,7 +55,10 @@ the ring:
   to a pane (H-3b); renderer-gated server-side.
 - `Surface::menu_on(ring, w, h)` — the one ephemeral `Role::Menu` surface
   (H-3c); invisible until the compositor places it, and torn down by the
-  compositor itself.
+  compositor itself. The owner places it with `menu place <id> <x> <y>`, plus
+  the word `dialog` for a card that takes the backdrop (HALCYON-INSTRUMENT
+  section 10 as revised 2026-09-16); the library carries no verb of its own
+  for that, the owner writes it through `global_ctl`.
 - `Surface::status_on(ring, w, h)` — the `Role::Status` bottom bar (H-3d);
   `w` must be the display width and `h` one status unit or the compositor
   refuses.
@@ -384,5 +387,43 @@ damage from it is a hint, not a rotating accumulator's patchwork, and
 client); this is the brace. See [[sub-tapestryd]]'s fullscreen-zoom section and
 [[haz-latch-keyed-on-proxy]].
 
+## `TEV_CHORD` widened: the delivered close (2026-09-15, I-7b)
+
+`TEV_CHORD` (kind 12) carries the Super chords the compositor does NOT act on
+itself, because they live in the environment rather than in the compositor.
+I-7 defined `code` 1 = picker and 2 = help, both with `value` 1. I-7b adds
+**`code` 3 = close the focused pane**, and it is the one whose `value` is not
+1: it carries the FOCUSED PANE's id, so the owner acts on the compositor's
+focus at the instant the chord fired rather than re-deriving it from a
+`layout` file it may have read a wake ago.
+
+It is also the only delivered chord with a FALLBACK, and that asymmetry is
+deliberate. The picker and the keyboard reference exist nowhere but the
+environment, so with no registered rail there is nothing to do but say so and
+drop them. A close must still HAPPEN: [[sub-tapestryd]]'s `deliver_chord`
+therefore reports whether the rail actually took the event, and its `Close`
+arm performs the structural close itself when there is no rail (the legacy
+profile, or a seat whose rail is not up) or when the rail's queue was too full
+to take it -- which retires that rail. So the chord can never degrade into a
+no-op, which is the property a client of this ABI should rely on.
+
+The owner's half belongs to [[sub-halcyond]]: it asks with the
+HALCYON-INSTRUMENT 14.5 running-close dialog when the named tile's last
+command is RUNNING, and closes by verb otherwise, carrying NO final-tile
+protection -- section 6.5 reads `Super+Q` as the structural act.
+
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)
+
+### Frame intent and native titles
+
+`Surface::intent(FrameIntent::Static | Dynamic)` writes the existing compositor
+intent control. Static is the server default and allows idle throttling;
+Dynamic keeps the frame clock active only while the surface is visible.
+Gallery declares Static; animated clients may toggle intent as playback changes.
+This does not change presentation fences or buffer ownership.
+
+`Surface::surface_ctl("title ...")` updates the hosting pane's tag, which the
+session uses as the native application's header. It must follow successful
+surface creation. It does not create a second title store or confer authority
+over another pane.

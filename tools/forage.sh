@@ -7,8 +7,8 @@
 # section 5.
 #
 #   forage.sh                 report the status of every input
-#   forage.sh <target>        gather one: go|ambush|stratum|gopls|llvm|mesa|
-#                             alpine|busybox|static-curl|quake|duke3d|tombraider|
+#   forage.sh <target>        gather one: go|ambush|stratum|gopls|llvm|mesa|webkit|icu|
+#                             alpine|busybox|static-curl|static-git|quake|duke3d|tombraider|
 #                             clade|clade-gl
 #   forage.sh all             gather everything that can be gathered automatically
 #   FORAGE_DRY=1 forage.sh …   print what it WOULD do; touch nothing (git/net/gcp)
@@ -50,7 +50,7 @@ manifest_sections() {
         /^[[:space:]]*\[/ { s=$0; sub(/^[[:space:]]*\[/,"",s); sub(/\][[:space:]]*$/,"",s); gsub(/[[:space:]]/,"",s); if (index(s,pre)==1) print s }
     ' "$MANIFEST"
 }
-all_sections() { manifest_sections "fork."; manifest_sections "cache."; manifest_sections "network."; manifest_sections "remote."; }
+all_sections() { manifest_sections "fork."; manifest_sections "source."; manifest_sections "cache."; manifest_sections "network."; manifest_sections "remote."; }
 
 expand()    { case "$1" in "~/"*) printf '%s' "$HOME/${1#\~/}" ;; *) printf '%s' "$1" ;; esac; }
 sha_of()    { if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'; else sha256sum "$1" | awk '{print $1}'; fi; }
@@ -61,7 +61,7 @@ present() {
     local sec="$1" kind path probe dir file
     kind="$(manifest_get "$sec" forageable)"
     case "$kind" in
-        clone|manual|remote-source)
+        clone|clone-sparse|manual|remote-source)
             path="$(expand "$(manifest_get "$sec" path)")"; probe="$(manifest_get "$sec" probe)"
             if [[ -n "$probe" ]]; then [[ -e "$path/$probe" ]]; else [[ -d "$path" ]]; fi ;;
         download)
@@ -96,6 +96,55 @@ do_clone() {
     echo "    $sec now at $(git -C "$dest" rev-parse --short HEAD 2>/dev/null || echo '?')"
 }
 
+do_clone_sparse() {
+    # A partial sparse clone of a huge upstream, at an exact commit, plus our
+    # in-repo patch series. Idempotent: a checkout already at pin + series is
+    # left alone; one at the bare pin gets the series; anything else is REPORTED,
+    # never reset -- it may hold somebody's work.
+    local sec="$1" path repo tag commit branch sparse patches pp
+    path="$(expand "$(manifest_get "$sec" path)")"
+    repo="$(manifest_get "$sec" repo)"; tag="$(manifest_get "$sec" tag)"; commit="$(manifest_get "$sec" commit)"
+    branch="$(manifest_get "$sec" branch)"; sparse="$(manifest_get "$sec" sparse)"
+    patches="$REPO_ROOT/$(manifest_get "$sec" patches)"
+    if [[ -z "$repo" || -z "$tag" || -z "$commit" || -z "$branch" || -z "$sparse" ]]; then
+        echo "forage: $sec needs repo + tag + commit + branch + sparse" >&2; return 1; fi
+    if [[ "$DRY" == 1 ]]; then
+        echo "[dry-run] $sec: partial sparse clone of $repo @ $tag ($commit) -> $path [$sparse]; git am $patches/*.patch on '$branch'"
+        return 0
+    fi
+    if [[ ! -d "$path/.git" ]]; then
+        echo "==> $sec: partial sparse clone $repo @ $tag -> $path"
+        git clone --filter=blob:none --no-checkout --depth 1 --branch "$tag" "$repo" "$path" \
+            || { echo "forage: clone failed" >&2; return 1; }
+        git -C "$path" sparse-checkout init --cone || return 1
+        # shellcheck disable=SC2086  # the cone list is space-separated on purpose
+        git -C "$path" sparse-checkout set $sparse || return 1
+    fi
+    local at; at="$(git -C "$path" rev-parse "$tag^{commit}" 2>/dev/null || true)"
+    if [[ "$at" != "$commit" ]]; then
+        echo "forage: $sec: tag $tag resolves to '${at:-nothing}', the manifest pins $commit -- refusing" >&2
+        return 1
+    fi
+    if git -C "$path" rev-parse -q --verify "refs/heads/$branch" >/dev/null; then
+        git -C "$path" checkout -q "$branch" || return 1
+    else
+        git -C "$path" checkout -q -b "$branch" "$commit" || return 1
+    fi
+    for pp in "$patches"/*.patch; do
+        [[ -e "$pp" ]] || continue
+        if git -C "$path" apply --check --reverse "$pp" 2>/dev/null; then
+            echo "    $(basename "$pp"): already applied"
+        elif git -C "$path" -c user.name=forage -c user.email=forage@localhost am -q "$pp"; then
+            echo "    $(basename "$pp"): applied"
+        else
+            git -C "$path" am --abort 2>/dev/null || true
+            echo "forage: $sec: $(basename "$pp") neither applies nor is applied -- the checkout has drifted; inspect $path" >&2
+            return 1
+        fi
+    done
+    echo "    $sec now at $(git -C "$path" rev-parse --short HEAD) (pin $tag + $(ls "$patches"/*.patch 2>/dev/null | wc -l | tr -d ' ') patch(es))"
+}
+
 do_download() {
     local sec="$1" url dir file sha dest
     url="$(manifest_get "$sec" url)"; dir="$(manifest_get "$sec" dir)"; file="$(manifest_get "$sec" file)"; sha="$(manifest_get "$sec" sha256)"
@@ -119,6 +168,14 @@ do_remote_pull() {
     if [[ "$DRY" == 1 ]]; then echo "[dry-run] $sec: $pull  (needs the builder reachable)"; return 0; fi
     echo "==> $sec: pulling via '$pull' (needs the builder reachable)"
     ( cd "$REPO_ROOT" && eval "$pull" ) || { echo "forage: pull failed${rebuild:+; rebuild with $rebuild}" >&2; return 1; }
+    # A pulled FILE with a pin is verified like a download; a pulled tree has none.
+    local sha; sha="$(manifest_get "$sec" sha256)"
+    if [[ -n "$sha" && -f "$REPO_ROOT/$probe" ]]; then
+        if verify_sha "$REPO_ROOT/$probe" "$sha"; then echo "    sha256 OK ($probe)"; else
+            echo "forage: sha256 MISMATCH for $probe -- got $(sha_of "$REPO_ROOT/$probe"), want $sha" >&2
+            return 1
+        fi
+    fi
 }
 
 do_instruct() {   # SECTION -- print the manual remedy for a non-automatable input
@@ -137,6 +194,7 @@ forage_section() {
     kind="$(manifest_get "$sec" forageable)"
     case "$kind" in
         clone)        do_clone "$sec" ;;
+        clone-sparse) do_clone_sparse "$sec" ;;
         download)     do_download "$sec" ;;
         remote-pull)  do_remote_pull "$sec" ;;
         manual|remote-source|auto-at-build) do_instruct "$sec" ;;
@@ -154,9 +212,12 @@ target_sections() {
         gopls)    echo "fork.gopls" ;;
         llvm)     echo "fork.llvm" ;;
         mesa)     echo "fork.mesa" ;;
+        webkit)   echo "source.webkit cache.icu4c" ;;
+        icu)      echo "cache.icu4c" ;;
         alpine)   echo "cache.alpine cache.busybox" ;;
         busybox)  echo "cache.busybox" ;;
         static-curl) echo "cache.static-curl" ;;
+        static-git) echo "remote.static_git" ;;
         quake)    echo "network.quake" ;;
         duke3d)   echo "network.duke3d" ;;
         tombraider) echo "network.tombraider" ;;
@@ -177,7 +238,7 @@ forage_status() {
         printf '%-18s %-8s %-13s %s\n' "$sec" "$st" "$(manifest_get "$sec" forageable)" "$(manifest_get "$sec" feeds)"
     done
     echo
-    echo "Gather one:  tools/forage.sh <go|ambush|stratum|gopls|alpine|static-curl|clade|clade-gl|quake|duke3d|tombraider>"
+    echo "Gather one:  tools/forage.sh <go|ambush|stratum|gopls|alpine|static-curl|static-git|clade|clade-gl|quake|duke3d|tombraider>"
     echo "Gather all:  tools/forage.sh all   (FORAGE_DRY=1 to preview)"
 }
 

@@ -1082,6 +1082,11 @@ _Static_assert((PROC_FLAG_PIPE_TERMINATE_PENDING & PROC_FLAG_CAUGHT_NOTE_MASK) =
 // the pipe latch (18); the static_assert makes a future field-widening a
 // compile-time relocation rather than a silent alias.
 #define PROC_FLAG_SESSION_HANGUP    (1u << 19)
+// Boot-only graphical seat manager designation; not propagated through rfork.
+#define PROC_FLAG_SEAT_MANAGER       (1u << 20)
+_Static_assert((PROC_FLAG_SEAT_MANAGER & (PROC_FLAG_CAUGHT_NOTE_MASK |
+    PROC_FLAG_SESSION_HANGUP | PROC_FLAG_PIPE_TERMINATE_PENDING)) == 0,
+    "seat manager flag must not overlap note, session or pipe flags");
 _Static_assert((PROC_FLAG_SESSION_HANGUP & PROC_FLAG_CAUGHT_NOTE_MASK) == 0,
                "arm-6: the session-hangup flag must not overlap the caught-note "
                "sub-field; widening NOTE_MASK_SUPPORTED grows it upward -- "
@@ -1374,6 +1379,15 @@ void proc_set_name(struct Proc *p, const char *path, size_t len);
 //   running thread's in-flight slice since its last switch-in (< 1 slice; the
 //   design accepts the lag). Returns 0 for a NULL p.
 u64 proc_cpu_ns(const struct Proc *p);
+
+// proc_kstack_peak -- the deepest kernel stack any of p's threads has ever
+// reached, in bytes, and (via tid_out) which thread. Caller holds
+// g_proc_table_lock, exactly as for proc_cpu_ns. ARCH 8.12.
+u32 proc_kstack_peak(const struct Proc *p, int *tid_out, u32 *budget_words);
+
+// The whole-system peak + its owning pid/tid. The boot-complete report's
+// witness for the ARCH 8.12 static stack bound (audit F8).
+u32 proc_kstack_peak_system(int *pid_out, int *tid_out);
 
 // proc_thread_cap_ok -- the thread-spawn gate. Returns true if the Proc is
 //   exempt OR thread_count + loom_sqpoll_count < PROC_THREAD_MAX (SQPOLL

@@ -121,6 +121,7 @@ CHUNK_DOSBOX=y            # DX-8: the DOSBox-X emulator + /lib/dosbox-x/dosbox-x
 CHUNK_DUKE3D=y            # needs CHUNK_DOSBOX (lowered without it)
 CHUNK_TOMBRAIDER=y        # needs CHUNK_DOSBOX (lowered without it)
 DOSBOX_CPU_PRESET=pentium # xt|286|386|486|pentium|pentium2 -> the baked cycles=fixed N
+CHUNK_WEBKIT=n            # Boosty B-0: ICU + JavaScriptCore -> /webkit/jsc (SLOW; foraged)
 CHUNK_AURORA_CFG=n
 DISK_SIZE=16M
 MKFS_SEED=                # empty = random
@@ -145,7 +146,12 @@ it once, in the schema.
   `CHUNK_ALPINE`, `CHUNK_QUAKE`, `CHUNK_AURORA_CFG`; since DX-8 (2026-09-05)
   `CHUNK_DOSBOX`, `CHUNK_DUKE3D`, `CHUNK_TOMBRAIDER` and the choice
   `DOSBOX_CPU_PRESET` (the one non-bool bake symbol: the emulated CPU class the
-  baked DOSBox-X system config pins).
+  baked DOSBox-X system config pins); since Boosty B-0 (2026-09-21)
+  `CHUNK_WEBKIT` -- default OFF, because it costs ~40 min cold on the dev host
+  and its source is foraged, not vendored. It differs from every other chunk in
+  one way, on purpose: with the chunk ON, an absent input is an ERROR, not an
+  announced skip. A chunk that defaults off was asked for by name, so "skipped"
+  would be the silent omission section 5.3 exists to end.
 - **display** (added 2026-09-09) — `HALCYON_SESSION`, `HALCYON_CONSOLE`,
   `HALCYON_THEME`. The Halcyon axes, which had lived only as raw `THYLACINE_*`
   env vars and so were invisible to the configurator.
@@ -176,6 +182,22 @@ files as a numbered menu, labelled with each theme's own `[meta] name`
 `.toml` in and it appears; nothing in the tool needs editing. `libhalcyon`'s
 `every_shipped_theme_loads` test closes the loop from the other side, reading
 the same directory and failing by filename when a theme does not parse.
+
+*`HALCYON_PROFILE` (added 2026-09-21) is what selects the UI; the theme only
+colours it.* Until then the profile was a raw `THYLACINE_HALCYON_PROFILE` lever
+the schema did not know, so a config could name an Instrument theme and still
+build the legacy layout -- the loader projects a theme onto whichever profile
+is in force rather than refusing it, and the result is new colours on the old
+bezels, a UI nobody drew. The option is a `choice:instrument,legacy` whose
+default is `instrument`, so a profile file written before the option existed
+builds the current UI; `configs/default.config` pins `instrument` and
+`configs/ci.config` pins `legacy`, because the gate scenarios that predate
+Instrument assert the legacy literals. A caller-set env var still outranks
+either, which is how the Instrument gates build from the ci profile. The wizard
+tags every theme file with the schema its own `[meta]` declares and says so
+when the chosen theme and the chosen profile differ. The loader's built-in
+floor (no `/lib/halcyon/profile` at all) is still `legacy`; flipping that is the
+Instrument arc's I-9.
 
 ### 4.3 Presets replace the bundles (migration)
 
@@ -317,7 +339,19 @@ copies), incl. the isolation guard that the real `configs/` is never touched.
   llvmorg-22.1.8), `ambush` 563bae9, `gopls` f65d347, `mesa-thylacine` b7f9ed2,
   `stratum/v2` (`thylacine-pouch-arm`).
 - **Two manual-drop cache inputs**: Alpine minirootfs (3.21.0-aarch64) +
-  busybox-static (1.37.0-r14.apk) — URL + sha256 each.
+  busybox-static (1.37.0-r14.apk) — URL + sha256 each. Since Boosty B-0 also
+  `icu4c-78.3-sources.tgz`.
+- **One pinned UPSTREAM + an in-repo patch series** (`[source.webkit]`, kind
+  `clone-sparse`, since Boosty B-0): not a fork, because nothing of ours is
+  hosted. WebKit is ~13 GB whole; `forage` makes a partial (`blob:none`) sparse
+  clone of the cone JavaScriptCore needs (~230 MB) at tag `webkitgtk-2.54.0`,
+  REFUSES unless that tag resolves to the manifest's commit, and `git am`s
+  `usr/ports/webkit/patches/*` onto a local branch. It is idempotent, and a
+  checkout that has drifted is reported, never reset -- it may hold work.
+  `build.sh` re-checks the same thing from its side (`webkit_checkout_ok`: pin is
+  an ancestor, every patch reverse-applies, the tree is clean, and the files that
+  differ from the pin are exactly the files the series names), so the manifest's
+  commit and `WEBKIT_PIN` in `build.sh` must move together.
 - **Network inputs**: `quake106.zip`, and since DX-8 `3dduke13.zip` +
   `tomb3dem.zip` (each sha256-pinned in build.sh; the manifest mirrors the pins
   and `test-forage.sh` A9 fails on drift).

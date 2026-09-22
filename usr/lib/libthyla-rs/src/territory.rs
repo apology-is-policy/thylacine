@@ -224,9 +224,13 @@ pub fn unmount(mount_point: &str) -> Result<()> {
 /// work (e.g., joey's pivot from devramfs to disk-backed FS), prefer
 /// `pivot_root` -- it's the audit-tracked primitive for that flow.
 ///
-/// Errors:
-///   - `Error::BadHandle`: `new_root` is not a KOBJ_SPOOR.
-///   - `Error::PermissionDenied`: missing RIGHT_READ on `new_root`.
+/// A real swap also drops every mount entry the new root cannot reach
+/// (ARCH 9.6.10): names resolved from the new root are unaffected; a walk
+/// relative to a directory fd opened before the swap may stop crossing them.
+///
+/// Errors: the syscall fails flat, so every refusal is
+/// `Error::InvalidArgument` -- `new_root` is not a KOBJ_SPOOR, lacks
+/// RIGHT_READ, or is not a directory.
 pub fn chroot<F: AsFd + ?Sized>(new_root: &F) -> Result<()> {
     let rc = unsafe { t_chroot(new_root.as_raw_fd() as i64) };
     if rc < 0 {
@@ -241,7 +245,8 @@ pub fn chroot<F: AsFd + ?Sized>(new_root: &F) -> Result<()> {
 /// is for a Proc that has already established its territory and now
 /// needs to flip its root.
 ///
-/// Errors are the same as `chroot`.
+/// Errors are the same as `chroot`, plus: the caller has no current root to
+/// exchange (the initial root is `chroot`'s to install).
 pub fn pivot_root<F: AsFd + ?Sized>(new_root: &F) -> Result<()> {
     let rc = unsafe { t_pivot_root(new_root.as_raw_fd() as i64) };
     if rc < 0 {

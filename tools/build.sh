@@ -336,6 +336,10 @@ build_kernel() {
     # Clade CL-2: cross-build the C++ runtime (libunwind+libc++abi+libc++) into
     # the sysroot + the /pouch-hello-cxx prover. Skips if the LLVM fork is absent.
     build_libcxx
+    # Boosty B-0: ICU + JavaScriptCore (-> /webkit/jsc in the pool). DEFAULT-OFF:
+    # ~40 min cold on this host, and the source is a sibling sparse clone. Must
+    # follow build_libcxx (it links libc++) and precede the pool fixture.
+    [[ "${THYLACINE_BAKE_WEBKIT:-0}" == "1" ]] && build_jsc
     # P6-pouch-stratumd-boot (sub-chunk 16a): cross-build stratumd so it
     # lands in the ramfs alongside the pouch hello binaries. Incremental
     # on no-source-change rebuilds (CMake/ninja dep tracking inside
@@ -490,7 +494,7 @@ EOF
     # P4-Ia2: copy any built Rust-side userspace binaries from
     # build/usr-rs/<target>/release/. Same curation discipline.
     # Binary name = crate's [[bin]] name = directory under usr/.
-    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "nocturned" "nocturne-probe" "nocturne-vol" "nocturne-vol-probe" "nocturne-tap-probe" "nocturne-capture-probe" "ring-voice-probe" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "halcyon" "halcyond" "view" "gallery" "manual" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "diorama" "diorama-probe" "viv" "viv-probe" "viv-pheno-probe" "ptyhost" "jc-probe" "susp-mask-child" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "exec-probe" "fork-probe" "coreutil-smoke" "fs-mut-smoke" "symlink-probe" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "ps" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "aurora-push" "pipe-src" "pipe-sink" "legate-prover" "imperium-probe" "imperium" "jit-prover" "login" "ut" "nora" "prowl" "quarry" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" "warp-prove" "haul" "kaua-term" "kaua-term-probe" "caps-probe" )
+    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "nocturned" "nocturne-probe" "nocturne-vol" "nocturne-vol-probe" "nocturne-tap-probe" "nocturne-capture-probe" "ring-voice-probe" "lictor" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "halcyon" "halcyond" "view" "gallery" "manual" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "diorama" "diorama-probe" "viv" "viv-probe" "viv-pheno-probe" "ptyhost" "jc-probe" "susp-mask-child" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "exec-probe" "fork-probe" "coreutil-smoke" "fs-mut-smoke" "symlink-probe" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "ps" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "aurora-push" "pipe-src" "pipe-sink" "legate-prover" "imperium-probe" "imperium" "jit-prover" "login" "ut" "nora" "prowl" "quarry" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" "warp-prove" "haul" "kaua-term" "kaua-term-probe" "caps-probe" )
     local rs_release="$USR_RS_BUILD/$USR_RS_TARGET/release"
     for bin in "${usr_rs_bins[@]}"; do
         local src="$rs_release/$bin"
@@ -2311,11 +2315,17 @@ build_sysroot() {
     #    build (set -e); a rejected hunk also leaves a .rej file, caught
     #    below. The read loop's || [[ -n ]] guard handles a final
     #    newline-less line in series.
+    #    -F 0: a hunk whose context does not match EXACTLY fails. GNU patch
+    #    (the Linux builders) fuzzes up to 2 context lines by default and
+    #    says so only on stdout -- a hand-maintained patch that drifted would
+    #    apply somewhere near its target, exit 0. Measured 2026-09-21: the
+    #    series applies at fuzz 0 and zero offset; a perturbed context line
+    #    applies under -F 2 and fails under -F 0 (B-0 audit round 4 F6).
     echo "==> applying pouch patch series"
     while IFS= read -r patch_line || [[ -n "$patch_line" ]]; do
         case "$patch_line" in ''|\#*) continue ;; esac
         echo "    patch: $patch_line"
-        patch -p1 -t -d "$musl_src" -i "$patches_dir/$patch_line"
+        patch -p1 -t -F 0 -d "$musl_src" -i "$patches_dir/$patch_line"
     done < "$patches_dir/series"
     local rej
     rej="$(find "$musl_src" -name '*.rej')"
@@ -3608,6 +3618,19 @@ populate_stratum_pool() {
         echo "==> populate pool: Tomb Raider 3dfx demo baked at /tombraider"
     fi
 
+    # --- Boosty B-0: JavaScriptCore (-> /webkit/jsc). Staged by build_jsc; keyed
+    # on the flag AND the staged binary, so a stale stage never bakes past an
+    # opt-out. Read-only SYSTEM master, run in place (it writes nothing). ---
+    local webkit_stage="$BUILD_DIR/webkit/stage"
+    if [[ "${THYLACINE_BAKE_WEBKIT:-0}" == "1" && -f "$webkit_stage/jsc" ]]; then
+        echo "==> populate pool: baking JavaScriptCore ($webkit_stage -> /webkit, $(du -sh "$webkit_stage" | cut -f1))"
+        "$stratum_fs_bin" -s "$sock_path" put "$webkit_stage" /webkit \
+            || { echo "==> populate pool: put /webkit FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" sync \
+            || { echo "==> populate pool: sync after /webkit FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        echo "==> populate pool: JavaScriptCore baked at /webkit/jsc"
+    fi
+
     # --- VIVARIUM V-7: the container bundles (-> /vivarium; staged by
     # stage_viv_bundles per docs/VIVARIUM.md section 7.2). The probe bundle is
     # the V-7 boot gate's fixture -- joey spawns `viv run /vivarium/probe`
@@ -3966,6 +3989,34 @@ populate_stratum_pool() {
         echo "==> populate pool: HALCYON theme lever ENABLED (/lib/halcyon/theme.toml = ${THYLACINE_HALCYON_THEME})"
     fi
 
+    # HALCYON-INSTRUMENT 4.1 (I-2): the system PROFILE word.
+    # `THYLACINE_HALCYON_PROFILE=<legacy|instrument>` writes
+    # `/lib/halcyon/profile` -- the one word tapestryd and both halcyond
+    # resolvers read to pick the painters' state machine, geometry and type
+    # map (a user's `$HOME/lib/halcyon/profile` outranks it). The config
+    # schema's HALCYON_PROFILE supplies it and defaults to `instrument`
+    # (operator-directed 2026-09-21), so a configured build always bakes the
+    # word; configs/ci.config pins `legacy` for the pre-Instrument gates.
+    # Absent (build.sh driven with no config at all) = no file = the loader's
+    # built-in floor, which stays `legacy` until the I-9 rollout flips it.
+    # The word is constrained to the two the loader admits BEFORE it is
+    # written: a misspelt lever must fail the bake, not bake a file the
+    # loader refuses one tier down at every boot.
+    if [[ -n "${THYLACINE_HALCYON_PROFILE:-}" ]]; then
+        case "${THYLACINE_HALCYON_PROFILE}" in
+            legacy|instrument) ;;
+            *) echo "==> populate pool: THYLACINE_HALCYON_PROFILE must be legacy or instrument (got '${THYLACINE_HALCYON_PROFILE}')" >&2; kill -TERM "$stratumd_pid"; exit 1 ;;
+        esac
+        "$stratum_fs_bin" -s "$sock_path" mkdir /lib/halcyon >/dev/null 2>&1 || true
+        printf '%s\n' "${THYLACINE_HALCYON_PROFILE}" | "$stratum_fs_bin" -s "$sock_path" write /lib/halcyon/profile \
+            || { echo "==> populate pool: write /lib/halcyon/profile FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" sync \
+            || { echo "==> populate pool: sync (profile) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        [[ "$("$stratum_fs_bin" -s "$sock_path" read /lib/halcyon/profile)" == "${THYLACINE_HALCYON_PROFILE}" ]] \
+            || { echo "==> populate pool: /lib/halcyon/profile readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        echo "==> populate pool: HALCYON profile lever ENABLED (/lib/halcyon/profile = ${THYLACINE_HALCYON_PROFILE})"
+    fi
+
     # KT-1.5d-1a (HALCYON 14.12): the per-user session lever. Under
     # THYLACINE_HALCYON_SESSION=1 the device boots the per-user Halcyon
     # SESSION -- login reads the one-token /lib/halcyon/session file and, when
@@ -4077,6 +4128,7 @@ populate_stratum_pool() {
     local vp_duke3d="$BUILD_DIR/duke3d/stage"
     local vp_tombraider="$BUILD_DIR/tombraider/stage"
     local vp_dbxconf="$BUILD_DIR/dosbox-x-sysconf/dosbox-x.conf"
+    local vp_webkit="$BUILD_DIR/webkit/stage"
 
     # /thylacine-version is written unconditionally near the top of this
     # function, so it is the POSITIVE CONTROL: it proves `stat` can see a file
@@ -4125,6 +4177,10 @@ TOMBRAIDER /tombraider/TOMB.EXE"
         bake_want="$bake_want
 DBXCONF /lib/dosbox-x/dosbox-x.conf"
     fi
+    if [[ "${THYLACINE_BAKE_WEBKIT:-0}" == "1" && -f "$vp_webkit/jsc" ]]; then
+        bake_want="$bake_want
+WEBKIT /webkit/jsc"
+    fi
 
     local bake_missing=""
     local bake_present=""
@@ -4144,6 +4200,12 @@ DBXCONF /lib/dosbox-x/dosbox-x.conf"
         kill -TERM "$stratumd_pid"; exit 1
     fi
     echo "==> populate pool: bake config CLADE=${THYLACINE_BAKE_CLADE:-0} GOROOT=${THYLACINE_BAKE_GOROOT:-1}; payloads verified PRESENT in the pool:${bake_present:- (none gated on)}"
+    # The same verdict, for the host-side gates (lc_pool_has): appended to the
+    # mint's pool-contents, which the mint rewrote fresh for this bake, so a
+    # populate that dies before here leaves no payloads line and every gate
+    # skips. A gate that asked a STAGE instead ran ls-jsc against a pool baked
+    # without WebKit, because an earlier bake had left build/webkit/stage behind.
+    printf 'payloads=%s\n' "${bake_present# }" >> "$BUILD_DIR/pool-contents"
 
     # Clean stratumd shutdown: SIGTERM then wait. stratumd unmounts the
     # pool + flushes on its way out, so the pool.img bytes after this
@@ -4520,7 +4582,9 @@ build_sdl2() {
 
     local p
     for p in "$port_dir"/patches/*.patch; do
-        patch -s -p1 -t -d "$sdl_src" -i "$p"
+        # -F 0: exact context or fail, the pouch series' reason (GNU patch fuzzes
+        # 2 lines by default, quietly); every port patch applies at fuzz 0 (r5 F7).
+        patch -s -p1 -t -F 0 -d "$sdl_src" -i "$p"
     done
     cp "$port_dir/SDL_config.h" "$sdl_src/include/SDL_config.h"
     mkdir -p "$sdl_src/src/video/thylacine" "$sdl_src/src/audio/thylacine"
@@ -4944,7 +5008,9 @@ build_tyrquake() {
         "$tq_vendor/external" "$tq_src/"
     local qp
     for qp in "$port_dir"/patches/*.patch; do
-        patch -s -p1 -t -d "$tq_src" -i "$qp"
+        # -F 0: exact context or fail, the pouch series' reason (GNU patch fuzzes
+        # 2 lines by default, quietly); every port patch applies at fuzz 0 (r5 F7).
+        patch -s -p1 -t -F 0 -d "$tq_src" -i "$qp"
     done
 
     # The window-icon header is upstream-GENERATED (ImageMagick over the
@@ -5447,7 +5513,9 @@ build_dosbox_x() {
         # __thylacine__ defined but WITHOUT the dynrec CAP_JIT arm -> the malloc
         # fallback hands back a non-executable region -> a runtime fault the gate
         # only catches downstream. The dosbox patches all apply rc=0 (verified).
-        patch -s -p1 -t -d "$dbx_src" -i "$pp" || {
+        # -F 0: exact context or fail, the pouch series' reason (GNU patch fuzzes
+        # 2 lines by default, quietly); every port patch applies at fuzz 0 (r5 F7).
+        patch -s -p1 -t -F 0 -d "$dbx_src" -i "$pp" || {
             echo "==> dosbox-x: patch $(basename "$pp") FAILED to apply" >&2
             exit 1
         }
@@ -5690,7 +5758,9 @@ build_vkquake() {
     cp -R "$vq_vendor/Quake" "$vq_vendor/Shaders" "$vq_src/"
     local qp
     for qp in "$port_dir"/patches/*.patch; do
-        patch -s -p1 -t -d "$vq_src" -i "$qp"
+        # -F 0: exact context or fail, the pouch series' reason (GNU patch fuzzes
+        # 2 lines by default, quietly); every port patch applies at fuzz 0 (r5 F7).
+        patch -s -p1 -t -F 0 -d "$vq_src" -i "$qp"
     done
 
     # The curated object list (upstream Quake/Makefile OBJS; codecs
@@ -5816,7 +5886,9 @@ prepare_gnumake_src() {
     local p
     for p in "$port_dir"/patches/*.patch; do
         [[ -e "$p" ]] || continue
-        patch -s -p1 -t -d "$dest" -i "$p"
+        # -F 0: exact context or fail, the pouch series' reason (GNU patch fuzzes
+        # 2 lines by default, quietly); every port patch applies at fuzz 0 (r5 F7).
+        patch -s -p1 -t -F 0 -d "$dest" -i "$p"
     done
 }
 
@@ -6113,6 +6185,210 @@ build_libcxx() {
         esac
         echo "    pouch-hello-cxx: $(wc -c < "$progs_out/pouch-hello-cxx" | tr -d ' ') bytes (ET_EXEC, static)"
     fi
+}
+
+# --- Boosty (the browser arc, docs/BROWSER-DESIGN.md): ICU + JavaScriptCore -------
+# B-0: WebKit's JSCOnly port, static, every JIT tier OFF (the asm LLInt + IPInt
+# interpreters), against a cross-built ICU. DEFAULT-OFF (CHUNK_WEBKIT /
+# THYLACINE_BAKE_WEBKIT=1): ~10 min of ICU + ~30 min of JSC on this host, and the
+# source is neither vendored nor small (a sparse partial clone beside the other
+# forks). Pins live in tools/build-manifest.toml ([source.webkit], [cache.icu4c]);
+# `tools/forage.sh webkit` gathers both. Everything lands under build/pouch/ ON
+# PURPOSE: a sysroot rebuild wipes it, and a static binary linked against the old
+# libc.a is exactly what must not survive one.
+WEBKIT_PIN="5220e80b97a253c60ed899361654142ab5021998"   # tag webkitgtk-2.54.0
+ICU_VER="78.3"
+ICU_TGZ="icu4c-78.3-sources.tgz"
+ICU_SHA256="3a2e7a47604ba702f345878308e6fefeca612ee895cf4a5f222e7955fabfe0c0"
+
+webkit_jobs() {
+    # JSC's unified sources peak well over 1 GiB per job; this host has 8 GiB.
+    # Default = min(ncpu, RAM_GiB * 5 / 8), floor 2. WEBKIT_JOBS overrides.
+    if [[ -n "${WEBKIT_JOBS:-}" ]]; then echo "$WEBKIT_JOBS"; return; fi
+    local ncpu mem_gib j
+    ncpu="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
+    mem_gib="$(( $(sysctl -n hw.memsize 2>/dev/null || echo 8589934592) / 1073741824 ))"
+    j=$(( mem_gib * 5 / 8 )); (( j > ncpu )) && j="$ncpu"; (( j < 2 )) && j=2
+    echo "$j"
+}
+
+build_icu() {
+    # Two passes, because ICU's build runs its own tools (genrb, pkgdata, icupkg):
+    # a HOST build supplies them, the CROSS build consumes it via --with-cross-build.
+    # Static data packaging + --disable-dyload: Thylacine links statically and has
+    # no dlopen. The target triple goes in CC/CXX THEMSELVES -- with --target only
+    # in CFLAGS, ICU's dependency-generation steps compile for the host.
+    local sysroot="$BUILD_DIR/sysroot"
+    local fork="${LLVMFORK:-$HOME/projects/llvm-thylacine}"
+    local clang_c="${POUCH_CC:-$fork/build/bin/clang}"
+    local clangxx="${POUCH_CXX:-$fork/build/bin/clang++}"
+    local tgz="$BUILD_DIR/cache/$ICU_TGZ"
+    local base="$BUILD_DIR/pouch/icu"
+    local host="$BUILD_DIR/icu-host"          # host tools: survive a sysroot rebuild
+    local stage="$base/stage"
+    local jobs; jobs="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
+
+    if [[ ! -x "$clangxx" ]]; then
+        echo "==> icu: fork clang++ not found at $clangxx -- skipping (build the LLVM fork)"
+        return 0
+    fi
+    if [[ ! -f "$tgz" ]]; then
+        echo "==> icu: $tgz is absent -- run 'tools/forage.sh webkit' (pin: [cache.icu4c])" >&2
+        exit 1
+    fi
+    local have; have="$(shasum -a 256 "$tgz" | awk '{print $1}')"
+    if [[ "$have" != "$ICU_SHA256" ]]; then
+        echo "==> icu: $ICU_TGZ sha256 mismatch (got $have, want $ICU_SHA256)" >&2
+        exit 1
+    fi
+    [[ -f "$sysroot/lib/libc++.a" ]] || build_libcxx
+
+    if [[ -f "$stage/lib/libicuuc.a" && -f "$stage/lib/libicui18n.a" && -f "$stage/lib/libicudata.a" \
+          && ! "$sysroot/lib/libc++.a" -nt "$stage/lib/libicuuc.a" \
+          && ! "$tgz" -nt "$stage/lib/libicuuc.a" ]]; then
+        ledger "icu $ICU_VER: REUSED (cached + up-to-date)"
+        return 0
+    fi
+
+    echo "==> building ICU $ICU_VER (host tools, then aarch64-thylacine static, -j$jobs)"
+    rm -rf "$base"; mkdir -p "$base/src" "$base/cross"
+    tar -xzf "$tgz" -C "$base/src"
+    local src="$base/src/icu/source"
+    [[ -f "$src/configure" ]] || { echo "==> icu: unexpected tarball layout (no icu/source/configure)" >&2; exit 1; }
+
+    if [[ ! -x "$host/bin/genrb" || "$tgz" -nt "$host/bin/genrb" ]]; then
+        rm -rf "$host"; mkdir -p "$host"
+        ( cd "$host" && "$src/configure" --disable-shared --enable-static --disable-tests \
+              --disable-samples --disable-extras --disable-icuio --disable-layoutex \
+              > configure.log 2>&1 && make -j"$jobs" > build.log 2>&1 ) \
+            || { echo "==> icu: HOST build failed -- see $host/{configure,build}.log" >&2; exit 1; }
+    fi
+
+    local tflags="--target=aarch64-thylacine -march=armv8-a -moutline-atomics"
+    local cflags="-O2 -fno-pie -nostdlibinc -D_GNU_SOURCE=1 -isystem $sysroot/include"
+    local cxxflags="-O2 -fno-pie -nostdlibinc -D_GNU_SOURCE=1 -isystem $sysroot/include/c++/v1 -isystem $sysroot/include"
+    ( cd "$base/cross" && \
+      CC="$clang_c $tflags" CXX="$clangxx $tflags" \
+      CFLAGS="$cflags" CXXFLAGS="$cxxflags" LDFLAGS="--sysroot=$sysroot -static" \
+      AR="$LLVM_PREFIX/bin/llvm-ar" RANLIB="$LLVM_PREFIX/bin/llvm-ranlib" \
+      "$src/configure" --host=aarch64-unknown-linux-musl --with-cross-build="$host" \
+          --disable-shared --enable-static --with-data-packaging=static --disable-tests \
+          --disable-samples --disable-extras --disable-icuio --disable-layoutex \
+          --disable-dyload --prefix=/ > configure.log 2>&1 \
+      && make -j"$jobs" > build.log 2>&1 \
+      && make install DESTDIR="$stage" > install.log 2>&1 ) \
+        || { echo "==> icu: CROSS build failed -- see $base/cross/{configure,build,install}.log" >&2; exit 1; }
+    [[ -f "$stage/lib/libicuuc.a" && -f "$stage/include/unicode/uversion.h" ]] \
+        || { echo "==> icu: install produced no libicuuc.a / headers under $stage" >&2; exit 1; }
+    echo "    icu: $(du -sh "$stage/lib" | cut -f1) of static libs at $stage"
+    ledger "icu $ICU_VER: BUILT (static, data packaged in libicudata.a)"
+}
+
+webkit_checkout_ok() {
+    # The checkout must be the PINNED tree with EVERY port patch applied and
+    # nothing else: pin is an ancestor, each patch reverse-applies cleanly, and
+    # the tree is clean. Prints the first failing reason; returns nonzero.
+    local wk="$1" port_dir="$2" pp
+    [[ -d "$wk/.git" && -f "$wk/Source/JavaScriptCore/CMakeLists.txt" ]] \
+        || { echo "no checkout at $wk"; return 1; }
+    git -C "$wk" merge-base --is-ancestor "$WEBKIT_PIN" HEAD 2>/dev/null \
+        || { echo "HEAD does not descend from the pin $WEBKIT_PIN"; return 1; }
+    [[ -z "$(git -C "$wk" status --porcelain --untracked-files=no)" ]] \
+        || { echo "the checkout has uncommitted changes"; return 1; }
+    local want=""
+    for pp in "$port_dir"/patches/*.patch; do
+        [[ -e "$pp" ]] || continue
+        git -C "$wk" apply --check --reverse "$pp" 2>/dev/null \
+            || { echo "patch $(basename "$pp") is not applied"; return 1; }
+        want+="$(git -C "$wk" apply --numstat "$pp" 2>/dev/null | awk '{print $3}')"$'\n'
+    done
+    # "...and nothing else": the files that differ from the pin are exactly the
+    # files the series names. A reverse-apply check alone passes on a tree that
+    # carries the patches PLUS local edits to other files.
+    local got
+    got="$(git -C "$wk" diff --name-only "$WEBKIT_PIN" HEAD | sort -u)"
+    want="$(printf '%s' "$want" | sed '/^$/d' | sort -u)"
+    [[ "$got" == "$want" ]] \
+        || { echo "the checkout differs from the pin in files the patch series does not name"; return 1; }
+    return 0
+}
+
+build_jsc() {
+    local sysroot="$BUILD_DIR/sysroot"
+    local fork="${LLVMFORK:-$HOME/projects/llvm-thylacine}"
+    local wk="${WEBKITFORK:-$HOME/projects/webkit-thylacine}"
+    local port_dir="$REPO_ROOT/usr/ports/webkit"
+    local icu_stage="$BUILD_DIR/pouch/icu/stage"
+    local bdir="$BUILD_DIR/pouch/jsc"
+    local stage="$BUILD_DIR/webkit/stage"
+    local strip="$LLVM_PREFIX/bin/llvm-strip"
+    local readelf="$LLVM_PREFIX/bin/llvm-readelf"
+    local jobs; jobs="$(webkit_jobs)"
+
+    if [[ ! -x "$fork/build/bin/clang++" ]]; then
+        echo "==> jsc: fork clang++ not found under $fork/build -- skipping (build the LLVM fork)"
+        return 0
+    fi
+    local why
+    if ! why="$(webkit_checkout_ok "$wk" "$port_dir")"; then
+        echo "==> jsc: WebKit source is not usable: $why" >&2
+        echo "    run 'tools/forage.sh webkit' (pin: [source.webkit]; recipe: usr/ports/webkit/README.md)" >&2
+        exit 1
+    fi
+    command -v unifdef >/dev/null 2>&1 \
+        || { echo "==> jsc: host 'unifdef' not found (the sparse clone has no ThirdParty/unifdef)" >&2; exit 1; }
+    build_icu
+    [[ -f "$icu_stage/lib/libicuuc.a" ]] || { echo "==> jsc: ICU stage absent -- skipping"; return 0; }
+
+    local out="$bdir/bin/jsc"
+    if [[ -f "$out" && -f "$stage/jsc" && -z "${WEBKIT_FORCE:-}" ]]; then
+        local stale
+        stale="$(find "$port_dir" "$REPO_ROOT/cmake/Toolchain-aarch64-pouch-cxx.cmake" \
+                      "$REPO_ROOT/cmake/Platform/Thylacine.cmake" -type f -newer "$out" -print -quit 2>/dev/null)"
+        if [[ -z "$stale" && ! "$sysroot/lib/libc.a" -nt "$out" && ! "$sysroot/lib/libc++.a" -nt "$out" \
+              && ! "$icu_stage/lib/libicuuc.a" -nt "$out" && ! "$wk/.git/HEAD" -nt "$out" \
+              && "$(cat "$bdir/.webkit-head" 2>/dev/null)" == "$(git -C "$wk" rev-parse HEAD)" ]]; then
+            ledger "jsc (JavaScriptCore, JIT off): REUSED (cached + up-to-date)"
+            return 0
+        fi
+    fi
+
+    echo "==> building JavaScriptCore (WebKit $WEBKIT_PIN, PORT=JSCOnly, static, JIT off, -j$jobs)"
+    mkdir -p "$bdir" "$stage"
+    # A changed toolchain file or sysroot invalidates the cache wholesale; ninja's
+    # depfiles handle the rest (they track -isystem headers).
+    cmake -S "$wk" -B "$bdir" -G Ninja \
+        -DCMAKE_TOOLCHAIN_FILE="$REPO_ROOT/cmake/Toolchain-aarch64-pouch-cxx.cmake" \
+        -DLLVMFORK="$fork/build" -DHOSTLLVM="$LLVM_PREFIX" \
+        -DTHYLACINE_SYSROOT="$sysroot" -DTHYLACINE_EXTRA_ROOTS="$icu_stage" \
+        -DICU_ROOT="$icu_stage" -DCMAKE_BUILD_TYPE=Release \
+        -DPORT=JSCOnly -DENABLE_STATIC_JSC=ON \
+        -DENABLE_JIT=OFF -DENABLE_DFG_JIT=OFF -DENABLE_FTL_JIT=OFF -DENABLE_C_LOOP=OFF \
+        -DENABLE_WEBASSEMBLY=ON -DUSE_SYSTEM_MALLOC=ON \
+        -DENABLE_SAMPLING_PROFILER=OFF -DENABLE_REMOTE_INSPECTOR=OFF \
+        -DDEVELOPER_MODE=OFF -DUSE_LIBBACKTRACE=OFF -DUSE_SYSTEM_UNIFDEF=ON \
+        > "$bdir/configure.log" 2>&1 \
+        || { echo "==> jsc: cmake configure failed -- see $bdir/configure.log" >&2; tail -20 "$bdir/configure.log" >&2; exit 1; }
+    rm -f "$out"   # libc.a is not a ninja input: force the relink
+    ninja -C "$bdir" -j"$jobs" jsc > "$bdir/build.log" 2>&1 \
+        || { echo "==> jsc: build failed -- see $bdir/build.log" >&2; tail -30 "$bdir/build.log" >&2; exit 1; }
+
+    # The shape the platform requires (I-12 by construction): a static ET_EXEC,
+    # no PT_DYNAMIC, and NO segment both writable and executable.
+    local ph; ph="$("$readelf" -lW "$out")"
+    grep -q 'Elf file type is EXEC' <<< "$ph" \
+        || { echo "==> jsc: not an ET_EXEC" >&2; exit 1; }
+    if grep -qE '^[[:space:]]*DYNAMIC[[:space:]]' <<< "$ph"; then echo "==> jsc: has PT_DYNAMIC" >&2; exit 1; fi
+    # readelf prints the flags as three columns ("R E", "RW ", "RWE").
+    if grep -qE '^[[:space:]]*LOAD[[:space:]].*[[:space:]][R ]WE[[:space:]]+0x' <<< "$ph"; then
+        echo "==> jsc: a LOAD segment is both writable and executable (I-12)" >&2; exit 1
+    fi
+    [[ "$(grep -cE '^[[:space:]]*LOAD[[:space:]]' <<< "$ph")" -ge 2 ]] \
+        || { echo "==> jsc: readelf printed no LOAD segments -- the W+X check saw nothing" >&2; exit 1; }
+    "$strip" -o "$stage/jsc" "$out"
+    git -C "$wk" rev-parse HEAD > "$bdir/.webkit-head"
+    echo "    jsc: $(wc -c < "$stage/jsc" | tr -d ' ') bytes stripped ($(wc -c < "$out" | tr -d ' ') with symbols; ET_EXEC, static, no W+X)"
+    ledger "jsc (JavaScriptCore, JIT off): BUILT -> $stage/jsc (baked at /webkit/jsc)"
 }
 
 build_clade() {
@@ -6740,6 +7016,8 @@ case "$target" in
     dosbox-x)    build_dosbox_x    ;;
     gnumake)     build_gnumake     ;;
     libcxx)      build_libcxx      ;;
+    icu)         build_icu         ;;
+    jsc)         build_jsc         ;;
     quake-host)  build_quake_host  ;;
     clade)       build_clade       ;;
     stage-clade) stage_clade       ;;
@@ -6764,7 +7042,7 @@ case "$target" in
     clean)       clean             ;;
     *)
         echo "Unknown target: $target" >&2
-        echo "Valid: kernel, ramfs, sysroot, pouch-progs, rust-progs, sdl2, tyrquake, vkquake, dosbox-x, gnumake, libcxx, stratumd, userspace, disk, pool, go-probes, all, clean" >&2
+        echo "Valid: kernel, ramfs, sysroot, pouch-progs, rust-progs, sdl2, tyrquake, vkquake, dosbox-x, gnumake, libcxx, icu, jsc, stratumd, userspace, disk, pool, go-probes, all, clean" >&2
         exit 1
         ;;
 esac

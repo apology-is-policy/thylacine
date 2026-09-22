@@ -43,6 +43,23 @@ pub struct Grid {
 }
 
 impl Grid {
+    /// HALCYON-INSTRUMENT 9.4 (I-7): re-theme the live grid in place on a
+    /// theme change (the session tile's host re-emits its own screen, but
+    /// this closes the frame between the theme push and that CellDiff, and
+    /// the console path has no host to re-emit). Every cell and the blank
+    /// fill remap through `vt::remap_color`; the text is untouched.
+    pub fn remap_palette(&mut self, old: vt::Palette, new: vt::Palette) {
+        if old == new {
+            return;
+        }
+        for c in self.cells.iter_mut() {
+            c.fg = vt::remap_color(old, new, c.fg);
+            c.bg = vt::remap_color(old, new, c.bg);
+        }
+        self.fg = vt::remap_color(old, new, self.fg);
+        self.bg = vt::remap_color(old, new, self.bg);
+    }
+
     pub fn new(cols: usize, rows: usize, fg: u32, bg: u32) -> Grid {
         Grid {
             cols,

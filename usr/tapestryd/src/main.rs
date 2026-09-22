@@ -128,14 +128,13 @@ const GPU_FLANE_VA: u64 = 0x0220_0000;
 // wakes 4x. Disabled under test-mode (the frozen clock is ctl-driven). See
 // docs/reference/139-tapestryd.md "Idle throttle".
 const IDLE_HZ: u32 = 15;
-// Raised from 250ms: at 250ms the compositor clock dropped to IDLE_HZ in the gaps
-// between keystrokes (a >250ms gap is ordinary in interactive typing), so every
-// keystroke churned the clock 60<->15 -- and emitted a transition log line per
-// keystroke that interfered with typing in the console. 1s keeps the clock at the
-// ctl rate through normal typing and only throttles on a genuine idle, killing
-// both the churn and the log flood at the root (the log stays per-transition, so
-// ls-gfx-throttle's 60->15 witness still fires deterministically on real idle).
 const IDLE_AFTER_MS: u64 = 1000;
+// I-6: a serve pass longer than this is said under test-mode. At IDLE_HZ the
+// poll is bounded to ~67 ms, so anything past 250 ms means the loop was held
+// somewhere -- the only condition under which the 16-deep input eventq can
+// run out of descriptors between drains.
+#[cfg(feature = "test-mode")]
+const SLOW_PASS_MS: u64 = 250;
 
 const _: () = {
     assert!(GPU_BAR_WINDOW_VA + 6 * PCI_BAR_VA_STRIDE <= KBD_BAR_WINDOW_VA);
@@ -199,21 +198,46 @@ fn post_srv_warp() -> Result<i64, ()> {
 ///
 /// Refused-or-absent is not fatal: the built-in stands, loudly if a file was
 /// there and would not load.
-fn system_theme() -> libhalcyon::theme::Theme {
-    const PATH: &str = libhalcyon::theme::SYSTEM_THEME_PATH;
+fn system_theme() -> libhalcyon::instrument::Bundle {
+    // The system profile word first, then the system theme file: since I-1
+    // the compositor holds a BUNDLE (HALCYON-INSTRUMENT 4.1), no user tier.
+    let profile = read_system_file(libhalcyon::instrument::SYSTEM_PROFILE_PATH, "profile");
+    let text = read_system_file(libhalcyon::theme::SYSTEM_THEME_PATH, "theme");
+    let r = libhalcyon::instrument::resolve_bundle(libhalcyon::instrument::Sources {
+        system_profile: profile.as_deref(),
+        system_file: text.as_deref(),
+        ..Default::default()
+    });
+    for n in &r.notes {
+        say!("tapestryd: {}", n);
+    }
+    say!(
+        "tapestryd: theme {} ({:?}, {:?}); profile {} ({:?})",
+        if r.name.is_empty() {
+            "built-in"
+        } else {
+            &r.name
+        },
+        r.theme_tier,
+        r.schema,
+        r.bundle.profile.word(),
+        r.profile_tier
+    );
+    r.bundle
+}
+
+/// One system file, whole, or `None`: absent (4.1, one line said, since an
+/// absent path is otherwise indistinguishable from a read that never ran --
+/// measured: this left NO trace in the first gate capture) or not UTF-8.
+fn read_system_file(path: &str, what: &str) -> Option<alloc::string::String> {
     // SAFETY: SVC wrappers over a path literal and an owned buffer.
-    let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, PATH.as_ptr(), PATH.len(), T_OREAD) };
+    let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, path.as_ptr(), path.len(), T_OREAD) };
     if fd < 0 {
-        // 4.1: a missing file is not an error. It IS still worth one line --
-        // the absent path is otherwise indistinguishable from a read that
-        // never ran, and an unwitnessed load path is one nobody can tell has
-        // broken (measured: this function left NO trace in the first gate
-        // capture, which is how the gap was found).
-        say!("tapestryd: theme built-in (no {})", PATH);
-        return libhalcyon::theme::builtin();
+        say!("tapestryd: {} built-in (no {})", what, path);
+        return None;
     }
     // One byte past the cap, so a file AT the cap is distinguishable from one
-    // that was cut: `from_toml` refuses anything over it, and a short read
+    // that was cut: the loader refuses anything over it, and a short read
     // that filled the buffer would otherwise be a valid truncated prefix.
     let mut buf = alloc::vec![0u8; libhalcyon::theme::THEME_MAX + 1];
     let mut got = 0usize;
@@ -228,30 +252,14 @@ fn system_theme() -> libhalcyon::theme::Theme {
         }
     }
     unsafe { t_close(fd) };
-    let text = match core::str::from_utf8(&buf[..got]) {
-        Ok(t) => t,
+    buf.truncate(got);
+    match alloc::string::String::from_utf8(buf) {
+        Ok(t) => Some(t),
         Err(_) => {
-            say!(
-                "tapestryd: {} is not utf-8; the built-in theme stands",
-                PATH
-            );
-            return libhalcyon::theme::builtin();
+            say!("tapestryd: {} is not utf-8; the built-in {} stands", path, what);
+            None
         }
-    };
-    let r = libhalcyon::theme::resolve(Some(text), None);
-    for n in &r.notes {
-        say!("tapestryd: {}", n);
     }
-    say!(
-        "tapestryd: theme {} ({:?})",
-        if r.name.is_empty() {
-            "built-in"
-        } else {
-            &r.name
-        },
-        r.source
-    );
-    r.theme
 }
 
 fn declared_scale() -> Option<u16> {
@@ -447,8 +455,37 @@ impl Driver for Tapestryd {
         // Residual-2 idle throttle: the last time real INPUT arrived. Init to
         // now so bring-up runs at the ctl rate until the console settles.
         let mut last_input = Instant::now();
+        // I-6: the pass clock. The input devices are poll-mode and are NOT in
+        // the pollfd set, so nothing about an arriving event wakes this loop
+        // -- the drain interval IS the pass period, and a held pass is the
+        // only way the 16-deep eventq can fill. This names such a pass.
+        #[cfg(feature = "test-mode")]
+        let mut pass_mark = Instant::now();
 
+        let mut seat_generation = 0;
         loop {
+            let (generation, phase) = match self.comp.gpu.seat_state() {
+                Ok(state) => state,
+                Err(error) => { say!("tapestryd: seat state failed {:?}", error); return Err(error); }
+            };
+            if phase != 0 {
+                let _ = libthyla_rs::time::sleep(core::time::Duration::from_millis(10));
+                continue;
+            }
+            if generation != seat_generation {
+                seat_generation = generation;
+                self.mods = Mods::default();
+                self.comp.seat_resumed();
+            }
+
+            #[cfg(feature = "test-mode")]
+            {
+                let d = pass_mark.elapsed().as_millis() as u64;
+                if d > SLOW_PASS_MS {
+                    say!("tapestryd: serve pass took {} ms", d);
+                }
+                pass_mark = Instant::now();
+            }
             // Residual-2: did any input device drain a raw event this pass?
             // Set after each of the three drains below; bumps last_input.
             let mut input_seen = false;
@@ -462,6 +499,9 @@ impl Driver for Tapestryd {
                 kbd.drain(|ev| raw_events.push(ev));
                 input_seen |= !raw_events.is_empty();
                 for ev in &raw_events {
+                    if ev.etype == EV_SYN && ev.code == 3 {
+                        self.mods = Mods::default(); self.comp.seat_resumed(); continue;
+                    }
                     if ev.etype != EV_KEY {
                         continue; // EV_SYN separators etc.
                     }
@@ -618,6 +658,10 @@ impl Driver for Tapestryd {
                 // Witness the transition: `dyn` distinguishes an intent pin
                 // from an activity pin, and the flap the DYNAMIC pin removes
                 // was previously unobservable (the felt-but-uncaught bug).
+                // Test builds only: it fires on every input after a quiet
+                // second, and a console renderer mirrors it into the
+                // transcript the operator is typing into.
+                #[cfg(feature = "test-mode")]
                 if eff_hz != cur_hz {
                     say!(
                         "tapestryd: idle-throttle {} -> {} Hz (quiet_ms={} animating={} dyn={})",

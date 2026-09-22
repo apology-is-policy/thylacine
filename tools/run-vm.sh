@@ -236,6 +236,16 @@ if [[ -n "${THYLACINE_GUESTFWD:-}" ]]; then
         net1_opts="${net1_opts},guestfwd=tcp:10.0.2.100:$((7820 + gf_i))-tcp:127.0.0.1:$((gf_hostport + gf_i))"
     done
 fi
+# PCI interrupt verification topologies. Explicit high slots let all three
+# resident interrupt users share INTA while unrelated devices auto-place.
+# Two permutations detect authority/routing assumptions tied to slot order.
+pci_net_addr=""; pci_gpu_addr=""; pci_sound_addr=""
+case "${THYLACINE_PCI_LAYOUT:-default}" in
+    default) ;;
+    shared-a) pci_net_addr=",addr=0x9"; pci_gpu_addr=",addr=0xd"; pci_sound_addr=",addr=0x11" ;;
+    shared-b) pci_net_addr=",addr=0x11"; pci_gpu_addr=",addr=0x9"; pci_sound_addr=",addr=0xd" ;;
+    *) echo "THYLACINE_PCI_LAYOUT must be default, shared-a or shared-b" >&2; exit 1 ;;
+esac
 net_flags=()
 if [[ "${THYLACINE_NO_NET:-0}" != "1" ]]; then
     net_flags=(
@@ -251,7 +261,7 @@ if [[ "${THYLACINE_NO_NET:-0}" != "1" ]]; then
         # claims the mmio net above (MENAGERIE 5d-3). The PCI function is not a
         # virtio-mmio slot (like rng-pci), so the mmio slot map below is unchanged.
         -netdev "$net1_opts"
-        -device "virtio-net-pci,netdev=net1,disable-legacy=on,mac=52:54:00:12:34:57"
+        -device "virtio-net-pci,netdev=net1,disable-legacy=on,mac=52:54:00:12:34:57$pci_net_addr"
     )
 fi
 if [[ -n "${THYLACINE_NET_DUMP:-}" ]]; then
@@ -370,7 +380,7 @@ if [[ "${THYLACINE_NO_GPU:-0}" != "1" && "${THYLACINE_DISPLAY:-none}" != "consol
     fi
     gpu_flags=(
         -device "virtio-gpu-device,id=gpu-mmio0"
-        -device "$gpu_dev,id=gpu0,disable-legacy=on$gpu_res"
+        -device "$gpu_dev,id=gpu0,disable-legacy=on$gpu_res$pci_gpu_addr"
     )
     # vnc/egl-headless display modes drop the vestigial MMIO gpu: a display
     # backend binds QemuConsole 0, and gpu-mmio0 (probe-only, driverless in
@@ -386,7 +396,7 @@ if [[ "${THYLACINE_NO_GPU:-0}" != "1" && "${THYLACINE_DISPLAY:-none}" != "consol
     if [[ "${THYLACINE_DISPLAY:-none}" == vnc:* || "${THYLACINE_DISPLAY:-none}" == "egl-headless" \
        || "${THYLACINE_DISPLAY:-none}" == "dbus-gl" || "${THYLACINE_DISPLAY:-none}" == "gpu" ]]; then
         gpu_flags=(
-            -device "$gpu_dev,id=gpu0,disable-legacy=on$gpu_res"
+            -device "$gpu_dev,id=gpu0,disable-legacy=on$gpu_res$pci_gpu_addr"
         )
     fi
 fi
@@ -403,6 +413,25 @@ fi
 # window of half its points.
 if [[ "${THYLACINE_FULLSCREEN:-0}" != "0" ]]; then
     cocoa_display="$cocoa_display,full-screen=on"
+fi
+# Under cocoa the guest's Super is the Mac's Cmd, and macOS takes several Cmd
+# combos before any window sees them: Cmd+Tab (the app switcher), Cmd+H (Hide
+# -- Halcyon's Super+H split), Cmd+Shift+Q (Log Out -- Halcyon's close). So
+# the chord plane is unusable exactly where it collides. full-grab=on hands
+# every key to the guest while the window has focus (operator-chosen
+# 2026-09-16 over moving the chords off Super, which would have diverged from
+# the kit's labels). macOS asks once for Accessibility permission for QEMU.
+# THYLACINE_FULL_GRAB=0 opts out, for a session that needs Cmd+Tab back.
+if [[ "${THYLACINE_FULL_GRAB:-1}" != "0" ]]; then
+    cocoa_display="$cocoa_display,full-grab=on"
+fi
+# show-cursor=on draws the HOST pointer over the window. A STOPGAP, not the
+# fix: tapestryd sets up the virtio-gpu cursor queue but never issues
+# UPDATE_CURSOR, so the guest draws no pointer of its own and one is
+# invisible on VNC or any other display. Drop this once the guest does.
+# THYLACINE_SHOW_CURSOR=0 opts out.
+if [[ "${THYLACINE_SHOW_CURSOR:-1}" != "0" ]]; then
+    cocoa_display="$cocoa_display,show-cursor=on"
 fi
 
 # P4-K-events: QMP control socket for test-harness key injection.
@@ -552,7 +581,15 @@ case "${THYLACINE_DISPLAY:-none}" in
     # render node (docs/GPU-HOST-SETUP.md; tools/gl-host-probe.sh rung 6 is
     # the substrate witness). Serial stays on -serial below -- only
     # `none` implies -nographic.
-    egl-headless) display_flags=(-display egl-headless) ;;
+    egl-headless)
+        display_flags=(-display egl-headless)
+        # QEMU 10's QMP screendump refuses GL texture scanout. EGL readback
+        # still feeds 2D listeners: an explicitly requested private Unix VNC
+        # socket gives the visual test harness the actual displayed pixels.
+        if [[ -n "${THYLACINE_EGL_VNC_SOCKET:-}" ]]; then
+            display_flags+=(-vnc "unix:$THYLACINE_EGL_VNC_SOCKET")
+        fi
+        ;;
     # Headless GL WITHOUT the display readback (Warp-C C-4): the dbus display
     # in peer-to-peer mode with no listener attached gives the -gl models the
     # same render-node EGL context egl-headless does, but a RESOURCE_FLUSH
@@ -579,7 +616,15 @@ case "$accel" in
     kvm) cpu="${THYLACINE_CPU:-host}"; gicv="${THYLACINE_GIC:-host}" ;;
     *)   cpu="${THYLACINE_CPU:-max}";  gicv="${THYLACINE_GIC:-3}" ;;
 esac
-echo "==> qemu: accel=$accel cpu=$cpu gic=v$gicv smp=$cpus" >&2
+# Explicit controller-absence fixture: preserve QEMU's default unless requested.
+# With GICv3 and ITS off, drivers must fall back to function-bound shared INTx.
+its_machine_opt=""
+case "${THYLACINE_ITS:-auto}" in
+    auto) ;;
+    on|off) its_machine_opt=",its=$THYLACINE_ITS" ;;
+    *) echo "THYLACINE_ITS must be auto, on or off" >&2; exit 1 ;;
+esac
+echo "==> qemu: accel=$accel cpu=$cpu gic=v$gicv smp=$cpus its=${THYLACINE_ITS:-auto}" >&2
 
 # task #70: QEMU TCG programs DBGWVR/DBGWCR but never raises EC 0x34, and a guest
 # thread that touches a watched page then spins inside the emulator's retry of that
@@ -606,6 +651,13 @@ echo "==> qemu: accel=$accel cpu=$cpu gic=v$gicv smp=$cpus" >&2
 # would silently DROP nowatchpoint the moment a second token was added, and
 # re-wedge #70 under TCG.
 append_tokens=()
+# This script is the QEMU development/recovery launcher. Real boot firmware
+# gets no serial authorization without this explicit token. Set the knob to 0
+# to exercise the production graphical-only posture (including in CI).
+if [[ "${THYLACINE_SERIAL_SAK:-1}" == "1" ]]; then
+    append_tokens+=("thylacine.serial-sak=1")
+fi
+
 if [[ "$accel" == "tcg" ]]; then
     append_tokens+=("thylacine.nowatchpoint")
 fi
@@ -737,7 +789,16 @@ if [[ "${THYLACINE_NO_AUDIO:-0}" != "1" ]]; then
     if [[ "${THYLACINE_CAPTUREPROBE:-0}" == "1" ]]; then
         snd_streams=2
     fi
-    audio_flags+=(-device "virtio-sound-pci,id=snd-pci0,audiodev=snd0,streams=$snd_streams,disable-legacy=on")
+    audio_flags+=(-device "virtio-sound-pci,id=snd-pci0,audiodev=snd0,streams=$snd_streams,disable-legacy=on$pci_sound_addr")
+fi
+
+# THYLACINE_QEMU_EXTRA: whitespace-separated arguments appended verbatim, for a
+# caller that cannot reach this script's own argv (the interactive gates spawn
+# it with a fixed command line). The diagnostic lever: e.g.
+#   THYLACINE_QEMU_EXTRA="-trace virtio_gpu_cmd_set_scanout -D build/qemu-trace.log"
+if [[ -n "${THYLACINE_QEMU_EXTRA:-}" ]]; then
+    read -r -a _env_extra <<< "$THYLACINE_QEMU_EXTRA"
+    extra_qemu_args+=("${_env_extra[@]}")
 fi
 
 # Canonical QEMU flags per TOOLING.md §3.
@@ -747,7 +808,7 @@ fi
 # -device lands at slot 31. virtio-blk-probe scans 0..31 either way;
 # the ordering keeps slot 31 conventionally the "primary device."
 exec qemu-system-aarch64 \
-    -machine "virt,gic-version=$gicv,accel=$accel" \
+    -machine "virt,gic-version=$gicv,accel=$accel$its_machine_opt" \
     -cpu "$cpu" \
     -smp "$cpus" \
     -m "$mem_mib" \

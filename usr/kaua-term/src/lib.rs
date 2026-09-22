@@ -308,6 +308,14 @@ impl Producer {
         }
     }
 
+    /// Re-emit the diff against the shadow without feeding bytes (I-7): a
+    /// live palette change (`Vt::set_palette`) rewrote the cell colours in
+    /// place, so the shadow still holds the old and this ships exactly the
+    /// cells whose colour moved -- no full redraw, no geometry change.
+    pub fn reemit(&mut self, vt: &Vt, out: &mut Vec<Record>) {
+        self.flush(vt, out);
+    }
+
     fn flush(&mut self, vt: &Vt, out: &mut Vec<Record>) {
         self.flush_scroll(out);
         self.emit_celldiff(

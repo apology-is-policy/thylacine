@@ -1,6 +1,11 @@
 // libhalcyon -- the Halcyon environment library (HALCYON.md section 13).
 //
-// H-3a: the `theme` module (the Daylight tokens). H-4: the `layout` module
+// I-8: the `motion` module (section 10's durations and easing, section 9.5's
+// opt-out) -- shared because halcyond animates the tile, hover, body and
+// caret while the split flash is the compositor's.
+// H-3a: the `theme` module (the Daylight tokens); I-1: the `instrument`
+// module (the second schema, the projections, the bundle); I-2: the `carve`
+// module (the Instrument profile's split and stack arithmetic). H-4: the `layout` module
 // (the `halcyon-layout v1` format) + the `skeleton` module (the pure restore
 // planner). The chrome helpers + the verbs engine stay in halcyond/beacon.
 
@@ -8,7 +13,10 @@
 
 extern crate alloc;
 
+pub mod carve;
+pub mod instrument;
 pub mod layout;
+pub mod motion;
 pub mod place;
 pub mod scale;
 pub mod skeleton;

@@ -44,6 +44,7 @@
 
 #include <thylacine/caps.h>
 #include <thylacine/proc.h>
+#include <thylacine/seat.h>
 #include <thylacine/syscall.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
@@ -72,6 +73,9 @@ void test_sys_spawn_with_perms_holder_delegates_may_post(void);
 void test_sys_spawn_with_perms_console_trusted_not_delegable(void);
 void test_sys_spawn_with_perms_console_owner_grant_gate(void);
 void test_sys_spawn_with_perms_console_owner_set_wiring(void);
+void test_sys_spawn_with_perms_seat_roles(void);
+
+extern void proc_test_seat_reset(void);
 
 static void drain_zombies(void) {
     int status = 0;
@@ -389,4 +393,74 @@ void test_sys_spawn_with_perms_renderer_gate(void) {
     proc_free(aurora);
     if (!was_attached) proc_revoke_console_attached(t->proc);
     proc_test_clear_console_renderer();
+}
+
+// Graphical Lex curiata: the three seat roles. MANAGER is console-attach-only
+// (joey confers it on warden). SERVICE and CLIENT are conferrable by a
+// console-attached Proc or by a manager and by nobody else -- MAY_POST_SERVICE,
+// the other delegable mark, is no way in, and a manager cannot mint a second
+// manager. The bind is first-come and ORDERED: one service, then one client;
+// a client never binds before the service exists. The service is sealed
+// (NODUMP + NOTRACE) by the bind itself, before its first EL0 instruction.
+static u64 seat_roles_bound_client(struct Proc *service) {
+    struct seat_message m;
+    seat_zero(&m, sizeof(m));
+    return proc_seat_op(service, SEAT_CLIENT, &m) == 0 ? m.sequence : ~0ull;
+}
+
+void test_sys_spawn_with_perms_seat_roles(void) {
+    drain_zombies();
+    proc_test_seat_reset();
+
+    struct Proc *plain = proc_alloc(), *poster = proc_alloc(), *manager = proc_alloc();
+    struct Proc *service = proc_alloc(), *client = proc_alloc(), *late = proc_alloc();
+    TEST_ASSERT(plain && poster && manager && service && client && late, "procs");
+    const u32 roles[3] = { SPAWN_PERM_SEAT_MANAGER, SPAWN_PERM_SEAT_SERVICE,
+                           SPAWN_PERM_SEAT_CLIENT };
+
+    proc_mark_may_post_service(poster);
+    for (u32 i = 0; i < 3; i++) {
+        TEST_EXPECT_EQ(spawn_perm_grant_check(plain, roles[i]), -1,
+            "an unmarked Proc confers no seat role");
+        TEST_EXPECT_EQ(spawn_perm_grant_check(poster, roles[i]), -1,
+            "MAY_POST_SERVICE confers no seat role");
+    }
+
+    apply_spawn_perms(manager, SPAWN_PERM_SEAT_MANAGER);
+    TEST_ASSERT(proc_is_seat_manager(manager), "the MANAGER bit marks the manager");
+    TEST_EXPECT_EQ(spawn_perm_grant_check(manager,
+        SPAWN_PERM_SEAT_SERVICE | SPAWN_PERM_SEAT_CLIENT), 0,
+        "a manager confers the service and client roles");
+    TEST_EXPECT_EQ(spawn_perm_grant_check(manager, SPAWN_PERM_SEAT_MANAGER), -1,
+        "a manager cannot mint a second manager");
+    TEST_EXPECT_EQ(spawn_perm_grant_check(manager, SPAWN_PERM_CONSOLE_TRUSTED), -1,
+        "the manager role is not console trust");
+    TEST_EXPECT_EQ(spawn_perm_grant_check(manager, SPAWN_PERM_MAY_POST_SERVICE), -1,
+        "the manager role is not the posting mark");
+
+    // Ordered bind. A client before any service binds nothing.
+    apply_spawn_perms(client, SPAWN_PERM_SEAT_CLIENT);
+    apply_spawn_perms(service, SPAWN_PERM_SEAT_SERVICE);
+    TEST_ASSERT(proc_is_seat_service(service), "the SERVICE bit binds the service");
+    TEST_ASSERT((service->proc_flags & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE))
+                    == (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE),
+        "the bind seals the service against dump and trace");
+    TEST_EXPECT_EQ(seat_roles_bound_client(service), 0ull,
+        "a client spawned before the service was never bound");
+    apply_spawn_perms(client, SPAWN_PERM_SEAT_CLIENT);
+    TEST_EXPECT_EQ(seat_roles_bound_client(service), proc_stripes(client),
+        "the CLIENT bit binds the client once a service exists");
+
+    // First come, only come: a later claimant displaces neither role.
+    apply_spawn_perms(late, SPAWN_PERM_SEAT_SERVICE | SPAWN_PERM_SEAT_CLIENT);
+    TEST_ASSERT(proc_is_seat_service(service) && !proc_is_seat_service(late),
+        "a second service does not displace the first");
+    TEST_EXPECT_EQ(seat_roles_bound_client(service), proc_stripes(client),
+        "a second client does not displace the first");
+    TEST_EXPECT_EQ(seat_roles_bound_client(late), ~0ull,
+        "a refused claimant has no seat authority at all");
+
+    proc_test_seat_reset();
+    struct Proc *all[6] = { plain, poster, manager, service, client, late };
+    for (u32 i = 0; i < 6; i++) { all[i]->state = PROC_STATE_ZOMBIE; proc_free(all[i]); }
 }

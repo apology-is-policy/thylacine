@@ -65,6 +65,30 @@ source [file join [file dirname [info script]] lib.exp]
 lc_boot
 lc_login michael correct-horse-battery-staple-v1
 
+# GATED ON AN OPTIONAL BUILD INPUT: /viv/bin exists only when the bake found
+# build/cache/git-static-*-curl-aarch64-musl.tar.gz (sha-pinned in build.sh;
+# absent on a fresh clone -- the default build stays hermetic). Without it
+# there is no `git` to run, and ut reports a missing command only in $status,
+# so every leg below would time out looking like a broken git. Ask first.
+# The answer tokens are output-only (upper-cased; the typed line is lower).
+lc_send "ls /viv/bin/git-upload-pack | tr a-z A-Z; echo gs-probed | tr a-z A-Z"
+set have_git 0
+set timeout $lc_cmd_timeout
+expect {
+    -ex "GIT-UPLOAD-PACK" { set have_git 1; exp_continue }
+    -ex "GS-PROBED"       { }
+    -re {EXTINCTION:}     { lc_extinction_fail "kernel extinction probing /viv/bin" }
+    timeout               { lc_fail "no answer probing /viv/bin" }
+    eof                   { lc_fail "EOF probing /viv/bin" }
+}
+if {!$have_git} {
+    puts "\nLS-CI SKIP: this image has no /viv/bin git -- drop\
+ git-static-2.51.2-curl-aarch64-musl.tar.gz into build/cache/ and re-bake."
+    lc_quit
+    exit 77
+}
+lc_step "/viv/bin git tree baked"
+
 # HEAL AT START.
 lc_send "rm -rf /home/michael/gs /home/michael/gs2"
 sleep 1

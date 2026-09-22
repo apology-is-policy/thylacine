@@ -30,17 +30,19 @@ The source is installed in the operating system under `/manual` and read with th
 
 ## Sections
 
-No section is installed yet. The first sections, in the order they are being written:
+The integration image installs these checked sections:
 
-1. Utopia: the shell language, with examples; the native utilities; and how familiar `sh` syntax is written in Utopia.
-2. Imperium.
-3. Vivarium.
-4. Containers.
-5. Alpine: each of its utilities in a subsection with an example, its `sh`, and a note on `git`.
-6. Haul.
-7. View.
-8. Gallery.
-9. The bundled games, Quake, GLQuake, VkQuake, and DOSBox-X, with how to launch and configure each.
+| Name | Subject |
+|---|---|
+| `manual` | Reading the manual and choosing output format |
+| `remote-files` | Haul, network mounts and service posting |
+| `view` | Inline images and textual fallback |
+| `gallery` | Graphical image viewing |
+| `nocturne` | Audio playback and mixing |
+| `dosbox` | DOSBox-X launch and configuration |
+
+The remaining planned sections cover Utopia and native utilities, Imperium,
+Vivarium, containers, Alpine utilities and shell, and the bundled Quake variants.
 
 The writing order is not the book order; each section is numbered by the rule above.
 

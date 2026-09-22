@@ -141,6 +141,24 @@ pub const TEV_CLOSE: u16 = 8;
 /// without this the new empties waited for an unrelated event. `value` is
 /// the layout epoch.
 pub const TEV_LAYOUT: u16 = 10;
+/// The pointer left this CHROME surface (HALCYON-INSTRUMENT 9.1, I-3): sent
+/// only to a `Role::Chrome` surface, when the compositor's routing moves off
+/// it -- onto another surface, the desktop, a track, or a placed menu's grab.
+/// A header un-hovers on it; content surfaces never receive it.
+pub const TEV_PTR_LEAVE: u16 = 11;
+
+/// HALCYON-INSTRUMENT 9.3 (I-7, widened at I-7b): a Super chord the
+/// compositor does not act on itself -- the picker, the keyboard reference
+/// and the ask-before-closing-a-running-job live in the environment, not the
+/// compositor -- delivered to the REGISTERED RAIL's owner so it can act
+/// under its own authority. `code` names the request (1 = picker, 2 = help,
+/// 3 = close the focused pane); `value` is 1 for the first two and the
+/// FOCUSED PANE's id for the close, so the owner acts on the compositor's
+/// focus rather than re-deriving it from a layout file it may have read a
+/// wake ago. Sent only when a rail is registered: with none, the picker and
+/// the reference are said and dropped (the environment has neither there),
+/// while the CLOSE falls back to the compositor's own structural close.
+pub const TEV_CHORD: u16 = 12;
 
 /// A decoded tevent record (section 18.4; 24 bytes on the wire).
 #[derive(Clone, Copy, Debug)]
@@ -316,8 +334,8 @@ fn parse_one(text: &str, key: &str) -> Option<u32> {
 
 /// What `create` mints: a hosted content surface, a Role::Chrome surface
 /// bound to a pane's tag bar (H-3b), a Role::Menu surface (H-3c), the
-/// Role::Status bar (H-3d), or a content surface steered into a claimed
-/// empty leaf (H-4b).
+/// Role::Status bar (H-3d), the Role::Rail top rail (HALCYON-INSTRUMENT
+/// 8), or a content surface steered into a claimed empty leaf (H-4b).
 #[cfg(feature = "guest")]
 #[derive(Clone, Copy)]
 enum Mint {
@@ -325,6 +343,7 @@ enum Mint {
     Chrome(u32),
     Menu,
     Status,
+    Rail,
     Claim(u128),
 }
 
@@ -378,7 +397,8 @@ impl Surface {
     }
 
     /// H-3c: a Role::Menu surface on `ring` -- the one ephemeral menu the
-    /// compositor places (`menu place <id> <x> <y>`), grabs input for, and
+    /// compositor places (`menu place <id> <x> <y> [dialog]` -- the word
+    /// makes the card a dialog, with the backdrop), grabs input for, and
     /// tears down itself (Esc / click-away / a chord / the owner's death;
     /// HALCYON.md 13.6). Invisible until placed; renderer-gated server-side.
     /// Never hosted, never focusable.
@@ -395,6 +415,18 @@ impl Surface {
     /// new width on a display resize.
     pub fn status_on(ring: &EventRing, w: u32, h: u32) -> Result<Surface, TapError> {
         Self::open_on_bound(ring, w, h, Mint::Status)
+    }
+
+    /// HALCYON-INSTRUMENT 8: the Role::Rail surface on `ring` -- the
+    /// display-top rail the Instrument carve always reserves, placed there
+    /// by the compositor while it is THE registered rail. `w` must be the
+    /// display width and `h` the profile's `rail_h`, else E_INVAL; refused
+    /// under the legacy profile (no top rail exists there); one per
+    /// display; the same gate as the status bar (the renderer, or the
+    /// declared session while it hosts). Never hosted, never focusable;
+    /// pointer-routed like a header (9.1) for its buttons.
+    pub fn rail_on(ring: &EventRing, w: u32, h: u32) -> Result<Surface, TapError> {
+        Self::open_on_bound(ring, w, h, Mint::Rail)
     }
 
     /// H-4b: a W x H content surface hosted into the SPECIFIC empty leaf
@@ -473,7 +505,7 @@ impl Surface {
             None => return fail(&[ctl], TapError::Protocol),
         };
 
-        // create W H [role=chrome bind=<pane-id> | role=menu | role=status | claim=<tok>]
+        // create W H [role=chrome bind=<pane-id> | role=menu | role=status | role=rail | claim=<tok>]
         let mut cmd = alloc::string::String::new();
         let _ = core::fmt::write(&mut cmd, format_args!("create {} {}", w, h));
         match mint {
@@ -483,6 +515,7 @@ impl Surface {
             }
             Mint::Menu => cmd.push_str(" role=menu"),
             Mint::Status => cmd.push_str(" role=status"),
+            Mint::Rail => cmd.push_str(" role=rail"),
             // The 32-hex form `pane/<id>/claim` minted (the server refuses
             // any other width).
             Mint::Claim(tok) => {

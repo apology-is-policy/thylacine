@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/PTY-DESIGN.md section 4"]
 created: 2026-08-03
-updated: 2026-09-05
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -27,6 +27,14 @@ same park for an entirely unrelated reason. The whole difficulty is that
 one flag — is wrong in a way no single-owner test can detect.
 
 ## Contract
+
+**Session-leader exit (2026-09-17).** `proc_arm_session_hangup` marks the
+login session leader whose death must hang up the remaining session peers.
+`proc_session_hangup_if_leader` runs at the ZOMBIE transition under the process
+table lock. This cooperates with, but does not replace, membership-based
+Imperium scope revocation in [[sub-kernel-caps]]. The hangup note is distinct
+from an interactive Ctrl-C.
+
 
 | Function | Contract |
 |---|---|

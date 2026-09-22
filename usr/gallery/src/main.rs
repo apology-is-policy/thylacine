@@ -175,6 +175,11 @@ pub extern "C" fn rs_main() -> i64 {
         eprintln!("gallery: no compositor (no connect attempts)");
         return 1;
     };
+    let title = alloc::format!("title Gallery · {}", path);
+    if let Err(e) = surf.surface_ctl(&title) {
+        eprintln!("gallery: could not name its pane: {:?}", e);
+        return 1;
+    }
     // A still image: declare Static so the compositor does not pace us a frame
     // clock (we present once, and again only on a resize).
     let _ = surf.intent(FrameIntent::Static);

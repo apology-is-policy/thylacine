@@ -9,7 +9,9 @@ SYS_read:
       data), handling short writes. Same return + F_ERR contract.
 
   src/stdio/__stdio_read.c   one SYS_read straight into the caller buffer.
-      Drops musl's readahead-into-f->buf (throughput, not semantics).
+      Drops musl's readahead-into-f->buf ("throughput, not semantics" -- WRONG:
+      it broke the rpos[-1] pushback invariant and with it every fscanf on a
+      real FILE. 0035 restores the refill; read its header before this one).
 
 Binding design: docs/POUCH-DESIGN.md section 5.
 

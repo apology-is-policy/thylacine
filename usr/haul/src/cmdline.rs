@@ -21,6 +21,7 @@ pub enum TokenSource {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Plan {
+    pub post: bool,
     pub addr: String,
     pub mountpoint: String,
     pub aname: String,
@@ -36,6 +37,7 @@ pub enum Bad {
     WantsUsage,
     MissingValue(&'static str),
     UnknownOption,
+    InvalidPost,
     /// A dash-leading word sits where the command belongs. Ambiguous by
     /// construction -- an option written late, or a command that really is named
     /// with a dash -- so haul refuses rather than picking one silently.
@@ -67,8 +69,10 @@ pub enum Bad {
 /// which says which one they meant. Loud on both, silent on neither.
 pub fn plan(argv: &[&str]) -> Result<Plan, Bad> {
     let mut aname = String::from("/");
+    let mut aname_set = false;
     let mut token: Option<TokenSource> = None;
     let mut verbose = false;
+    let mut post = false;
     let mut positional: Vec<String> = Vec::new();
     let mut opts_done = false;
 
@@ -96,6 +100,7 @@ pub fn plan(argv: &[&str]) -> Result<Plan, Bad> {
         match a {
             "--" => opts_done = true,
             "-a" => {
+                aname_set = true;
                 i += 1;
                 match argv.get(i) {
                     Some(v) => aname = String::from(*v),
@@ -117,6 +122,7 @@ pub fn plan(argv: &[&str]) -> Result<Plan, Bad> {
                 }
             }
             "-v" | "--verbose" => verbose = true,
+            "--post" => post = true,
             "-h" | "--help" => return Err(Bad::WantsUsage),
             _ if a.starts_with('-') && a.len() > 1 => return Err(Bad::UnknownOption),
             _ => positional.push(String::from(a)),
@@ -127,14 +133,24 @@ pub fn plan(argv: &[&str]) -> Result<Plan, Bad> {
     if positional.len() < 2 {
         return Err(Bad::WantsUsage);
     }
+    if post && (positional.len() != 2 || aname_set ||
+        !valid_service_name(&positional[0])) {
+        return Err(Bad::InvalidPost);
+    }
     Ok(Plan {
-        addr: positional[0].clone(),
-        mountpoint: positional[1].clone(),
+        post,
+        addr: positional[if post { 1 } else { 0 }].clone(),
+        mountpoint: positional[if post { 0 } else { 1 }].clone(),
         aname,
         token,
         verbose,
         cmd: positional[2..].to_vec(),
     })
+}
+
+pub fn valid_service_name(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 32 && name != "." && name != ".." &&
+        name.bytes().all(|b| (0x21..=0x7e).contains(&b) && b != b'/')
 }
 
 #[cfg(test)]
@@ -144,6 +160,31 @@ mod tests {
 
     fn ok(argv: &[&str]) -> Plan {
         plan(argv).expect("should parse")
+    }
+
+    #[test]
+    fn post_requires_exactly_a_name_and_address() {
+        let p = ok(&["--post", "-t", "/cfg/key", "remote", "10.0.2.2!5640"]);
+        assert!(p.post);
+        assert_eq!(p.addr, "10.0.2.2!5640");
+        assert_eq!(p.mountpoint, "remote");
+        assert!(p.cmd.is_empty());
+        for args in [vec!["--post", "remote", "h!1", "/bin/ut"],
+                     vec!["--post", "../x", "h!1"],
+                     vec!["--post", "-a", "/", "remote", "h!1"],
+                     vec!["--post", "-a", "other", "remote", "h!1"]] {
+            assert_eq!(plan(&args), Err(Bad::InvalidPost));
+        }
+        assert_eq!(plan(&["--post", "remote", "h!1", "-t", "key"]), Err(Bad::DashAfterOperands));
+    }
+
+    #[test]
+    fn post_name_is_one_bounded_component() {
+        for name in ["", ".", "..", "a/b", "a b", "a\n", "é", "123456789012345678901234567890123"] {
+            assert!(!valid_service_name(name), "{name:?}");
+        }
+        assert!(valid_service_name("host-1"));
+        assert!(valid_service_name("12345678901234567890123456789012"));
     }
 
     #[test]

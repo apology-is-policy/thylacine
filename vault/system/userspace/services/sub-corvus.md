@@ -5,6 +5,7 @@ title: "corvus — the key agent: one session, one keypair in mlock'd RAM, and a
 parent: moc-userspace
 code:
   - usr/corvus/src/main.rs
+  - usr/corvus/src/provincia.rs
   - usr/corvus/Cargo.toml
 audit: hard
 guarded-by: [inv-i22, inv-i23]
@@ -14,8 +15,20 @@ hazards: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md", "docs/IDENTITY-DESIGN.md"]
 created: 2026-08-04
-updated: 2026-09-06
+updated: 2026-09-18
 ---
+## Graphical Lex curiata
+
+Corvus uses the kernel's current episode to select its serial or graphical
+transport. The graphical transport sends bounded semantic identity/capability/term
+frames to [[sub-lictor]], waits for their actual visibility acknowledgement, then
+reads key bytes only from the generation-bound kernel queue. Mask counts are
+separate from authorization content. Key verification, wrong-key counters,
+eligibility, requester-incarnation revalidation and request expiry remain Corvus
+policy. A graphical grant is held until physical restoration; Corvus ends the
+episode and waits for that commit before releasing the deferred success reply.
+The terminal tool receives status and capabilities, never the authorization key.
+
 ## Purpose
 
 The key agent. corvus is where a user's cryptographic identity lives: a
@@ -45,6 +58,27 @@ exist, but the interesting half is that everything above rides the same
 **15-verb** wire on the same one connection.
 
 ## Contract
+
+**Imperium authorization (2026-09-17).** Verbs 19 (IMPERIUM_REQUEST) and
+20 (CLEARANCE_LIST_SELF) add the lex curiata flow. The request records intent;
+only a SAK-backed trusted episode renders the exact restricted cap set and
+accepts the imperium key. `provincia.rs` composes that trusted panel. The
+imperium level includes DAC_OVERRIDE, CHOWN, KILL and POST_SERVICE; the tool
+can restrict it, never expand it. The pending peer is revalidated before
+conferral, and the propagating grant is redeemed through the kernel. Key
+state, eligibility and rate limits remain corvus-owned. See [[sub-imperium]]
+and `docs/IMPERIUM-DESIGN.md §11` for the integrated contract.
+
+
+Graphical service ownership was approved on 2026-09-18; see
+[[dec-2026-09-18-graphical-sak-portability]]. The visual specification is
+`docs/HALCYON-TRUSTED-EPISODE.md`; ownership and backend obligations are in
+`docs/GRAPHICAL-SAK-OWNERSHIP.md` and `docs/GRAPHICAL-SAK-PORTABILITY.md`.
+The service is a TCB member. Corvus must not accept secrets before exclusive
+presentation/input acknowledgement, or bypass existing request/grant validation.
+Pi 400/Pi 500 require independent hardware qualification. This is approved design,
+not implemented behavior; serial remains the enforced path. Halcyon and Beacon
+must never collect the Imperium key through an ordinary surface.
 
 **Reached as a 9P server.** corvus posts `/srv/corvus` and serves a
 two-node namespace: a directory root containing a single `ctl` file.

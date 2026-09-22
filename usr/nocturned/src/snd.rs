@@ -18,10 +18,9 @@ use core::time::Duration;
 use libdriver::driver::{alloc_dma, DriverVa};
 use libdriver::resource::BoundResources;
 use libdriver::Error;
-use libthyla_rs::handle::Rights;
 use libthyla_rs::hardware::{
     mmio_read16, mmio_read32, mmio_read8, mmio_write16, mmio_write32, mmio_write64, mmio_write8,
-    Dma, Irq, PciDev, PciRegion,
+    Dma, PciIrq, PciIrqMode, PciDev, PciRegion,
 };
 use libthyla_rs::virtio_rmb;
 
@@ -38,17 +37,14 @@ const STATUS_DRIVER_OK: u8 = 4;
 const STATUS_FEATURES_OK: u8 = 8;
 const STATUS_FAILED: u8 = 128;
 const VIRTIO_F_VERSION_1_BIT_HI: u32 = 1 << 0;
-const VIRTIO_MSI_NO_VECTOR: u16 = 0xFFFF;
 
 const CCFG_DEVICE_FEATURE_SELECT: u64 = 0x00;
 const CCFG_DEVICE_FEATURE: u64 = 0x04;
 const CCFG_DRIVER_FEATURE_SELECT: u64 = 0x08;
 const CCFG_DRIVER_FEATURE: u64 = 0x0C;
-const CCFG_CONFIG_MSIX_VECTOR: u64 = 0x10;
 const CCFG_DEVICE_STATUS: u64 = 0x14;
 const CCFG_QUEUE_SELECT: u64 = 0x16;
 const CCFG_QUEUE_SIZE: u64 = 0x18;
-const CCFG_QUEUE_MSIX_VECTOR: u64 = 0x1A;
 const CCFG_QUEUE_ENABLE: u64 = 0x1C;
 const CCFG_QUEUE_NOTIFY_OFF: u64 = 0x1E;
 const CCFG_QUEUE_DESC: u64 = 0x20;
@@ -166,11 +162,29 @@ pub struct Stats {
     pub rx_errors: u64,
 }
 
+/// Read-to-clear notification register, independent of mutable queue state.
+/// The non-returning cycle owns the PCI mapping for this daemon's lifetime.
+/// Clearing a notification never consumes a used-ring completion.
+pub struct IrqAck {
+    va: u64,
+    intx: bool,
+}
+
+impl IrqAck {
+    pub fn acknowledge(&self) {
+        // The mapped PCI ISR is device memory, not aliased Rust RAM. Complete
+        // its read-to-clear before PCI IRQ COMPLETE re-enables the function.
+        if self.intx { let _ = unsafe { r8(self.va) }; }
+        dsb_sy();
+    }
+}
+
 pub struct VirtioSnd {
     _pci: PciDev,
     pool: Dma,
     common_va: u64,
     isr_va: u64,
+    irq_mode: PciIrqMode,
     ctrl_notify_va: u64,
     tx_notify_va: u64,
     /// The TX avail index we last published (the driver's copy; the ring's is a mirror).
@@ -196,6 +210,10 @@ pub struct VirtioSnd {
 }
 
 impl VirtioSnd {
+    pub fn irq_acknowledger(&self) -> IrqAck {
+        IrqAck { va: self.isr_va, intx: self.irq_mode == PciIrqMode::Intx }
+    }
+
     /// Claim the function, run the modern-PCI handshake, set up the control +
     /// TX queues, and negotiate the playback stream (PCM_INFO -> SET_PARAMS ->
     /// PREPARE). `START` is deferred to `start()` so the stream begins with real
@@ -204,7 +222,7 @@ impl VirtioSnd {
     /// Returns the device AND its claimed IRQ separately: the IRQ is handed to a
     /// dedicated waiter thread (a KOBJ_IRQ has no poll-readiness arm, so it must
     /// be blocked on, never polled), leaving `VirtioSnd` free of the device line.
-    pub fn open(res: &BoundResources, va: &mut DriverVa) -> Result<(Self, Irq), Error> {
+    pub fn open(res: &BoundResources, va: &mut DriverVa) -> Result<(Self, PciIrq), Error> {
         let pci = unsafe { PciDev::claim(VIRTIO_DEVICE_ID_SND, BAR_WINDOW_VA) }.map_err(|e| {
             say!("nocturned: virtio-snd claim failed: {:?}", e);
             Error::Hardware
@@ -226,16 +244,11 @@ impl VirtioSnd {
             return Err(Error::Hardware);
         }
         let notify_mul = u64::from(pci.notify_off_multiplier());
-        let intid = pci.intid().ok_or_else(|| {
-            say!("nocturned: no INTx line for the sound function");
+        let irq = PciIrq::for_virtio(&pci, &[0, 1, 2, 3]).map_err(|_| {
+            say!("nocturned: sound PCI interrupt endpoint creation failed");
             Error::Hardware
         })?;
-        // The allowance the warden conferred names this INTID (I-34); the kernel
-        // gate rejects any other.
-        let irq = Irq::new(intid, Rights::SIGNAL).map_err(|_| {
-            say!("nocturned: IRQ {} claim failed (line shared with another driver?)", intid);
-            Error::Hardware
-        })?;
+        say!("nocturned: sound PCI IRQ mode={:?} vector={}", irq.mode(), irq.vector());
         let pool = alloc_dma(res, DMA_POOL_SIZE, va)?;
         let pool_va = pool.base_va() as u64;
         let pool_pa = pool.paddr();
@@ -247,10 +260,9 @@ impl VirtioSnd {
         }
 
         unsafe {
-            w8(common_va + CCFG_DEVICE_STATUS, 0);
+            // Reset/vector selection completed before DMA allocation.
             w8(common_va + CCFG_DEVICE_STATUS, STATUS_ACKNOWLEDGE);
             w8(common_va + CCFG_DEVICE_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER);
-            w16(common_va + CCFG_CONFIG_MSIX_VECTOR, VIRTIO_MSI_NO_VECTOR);
 
             w32(common_va + CCFG_DEVICE_FEATURE_SELECT, 0);
             let feat_lo = r32(common_va + CCFG_DEVICE_FEATURE);
@@ -280,8 +292,8 @@ impl VirtioSnd {
             let streams = r32(dev_va + 4);
             let chmaps = r32(dev_va + 8);
             say!(
-                "nocturned: virtio-snd features lo=0x{:08x} hi=0x{:08x} jacks={} streams={} chmaps={} intid={}",
-                feat_lo, feat_hi, jacks, streams, chmaps, intid
+                "nocturned: virtio-snd features lo=0x{:08x} hi=0x{:08x} jacks={} streams={} chmaps={} irq=PCI-INTx",
+                feat_lo, feat_hi, jacks, streams, chmaps
             );
             if streams == 0 {
                 say!("nocturned: device advertises no PCM streams");
@@ -369,6 +381,7 @@ impl VirtioSnd {
             pool,
             common_va,
             isr_va,
+            irq_mode: irq.mode(),
             ctrl_notify_va,
             tx_notify_va,
             tx_avail_idx: 0,
@@ -418,7 +431,7 @@ impl VirtioSnd {
             virtio_rmb();
             if cur != self.ctrl_used_idx {
                 self.ctrl_used_idx = self.ctrl_used_idx.wrapping_add(1);
-                let _ = unsafe { r8(self.isr_va) };
+                self.irq_acknowledger().acknowledge();
                 continue;
             }
             steps += 1;
@@ -488,7 +501,7 @@ impl VirtioSnd {
                 let len = unsafe { r32(entry + 4) } as usize;
                 self.ctrl_used_idx = self.ctrl_used_idx.wrapping_add(1);
                 // Level hygiene: the control completion raised INTx too.
-                let _ = unsafe { r8(self.isr_va) };
+                self.irq_acknowledger().acknowledge();
                 if id != 0 {
                     self.stats.bad_used = self.stats.bad_used.saturating_add(1);
                     return Err(Error::Hardware);
@@ -741,7 +754,7 @@ impl VirtioSnd {
 
     /// Drain the TX used ring, freeing slots, posting nothing.
     fn reap_without_repost(&mut self) {
-        let _ = unsafe { r8(self.isr_va) };
+        self.irq_acknowledger().acknowledge();
         let pv = self.pool_va();
         let used = pv + TXQ_USED_OFF as u64;
         let mut passes = 0usize;
@@ -778,7 +791,7 @@ impl VirtioSnd {
     /// nothing to look for).
     pub fn pump<F: FnMut(&mut [u8]) -> bool>(&mut self, mut next_period: F) -> usize {
         // Level hygiene: read-to-clear the ISR byte.
-        let _ = unsafe { r8(self.isr_va) };
+        self.irq_acknowledger().acknowledge();
         let pv = self.pool_va();
         let used = pv + TXQ_USED_OFF as u64;
         let mut reaped = 0usize;
@@ -926,7 +939,7 @@ impl VirtioSnd {
 
     /// Drain the RX used ring, freeing slots, posting nothing.
     fn reap_rx_without_repost(&mut self) {
-        let _ = unsafe { r8(self.isr_va) };
+        self.irq_acknowledger().acknowledge();
         let pv = self.pool_va();
         let used = pv + RXQ_USED_OFF as u64;
         let mut passes = 0usize;
@@ -957,7 +970,7 @@ impl VirtioSnd {
         if !self.rx_started {
             return 0;
         }
-        let _ = unsafe { r8(self.isr_va) };
+        self.irq_acknowledger().acknowledge();
         let pv = self.pool_va();
         let used = pv + RXQ_USED_OFF as u64;
         let mut reaped = 0usize;
@@ -1057,7 +1070,6 @@ fn setup_queue(common: u64, queue: u16, desc_pa: u64, avail_pa: u64, used_pa: u6
         w64(common + CCFG_QUEUE_DESC, desc_pa);
         w64(common + CCFG_QUEUE_DRIVER, avail_pa);
         w64(common + CCFG_QUEUE_DEVICE, used_pa);
-        w16(common + CCFG_QUEUE_MSIX_VECTOR, VIRTIO_MSI_NO_VECTOR);
         let off = r16(common + CCFG_QUEUE_NOTIFY_OFF);
         w16(common + CCFG_QUEUE_ENABLE, 1);
         Some(off)
@@ -1074,3 +1086,11 @@ const _: () = assert!(PERIOD_BYTES % FRAME_BYTES == 0);
 // The RX region reuses the TX geometry (same QUEUE_SIZE / PERIODS / PERIOD_BYTES),
 // so the queue/meta asserts above cover it; pin the total pool inside the grant.
 const _: () = assert!(DMA_POOL_SIZE <= 256 * 1024);
+
+// The separate IRQ thread retains a PCI reference. Closing only our parent
+// handle cannot stop DMA; reset before field destructors can release the pool.
+impl Drop for VirtioSnd {
+    fn drop(&mut self) {
+        unsafe { w8(self.common_va + CCFG_DEVICE_STATUS, 0); dsb_sy(); }
+    }
+}

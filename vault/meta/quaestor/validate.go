@@ -433,8 +433,17 @@ func checkCodePaths(reg *Registry) []string {
 		if i := strings.IndexAny(rel, " \t"); i > 0 {
 			rel = rel[:i]
 		}
-		if _, err := os.Stat(filepath.Join(base, rel)); err != nil {
+		fi, err := os.Stat(filepath.Join(base, rel))
+		if err != nil {
 			return fmt.Sprintf("%s: %s -> no such file '%s'", note, field, rel)
+		}
+		// Ownership is by EXACT path (owner.go), so a directory in `code:`
+		// claims nothing: `owner` reports every file under it UNOWNED and the
+		// dossier gate never fires for them. Stat is content with a directory,
+		// which is how sub-lictor claimed `usr/lictor` for three days -- the
+		// most security-sensitive new tree in the repo, owned by nothing.
+		if field == "code" && fi.IsDir() {
+			return fmt.Sprintf("%s: code -> '%s' is a directory; ownership is by exact file path, so this claims nothing -- list the files", note, rel)
 		}
 		return ""
 	}
@@ -505,6 +514,20 @@ func validateSub(n *Note, fails, warns *[]string) {
 		if orderSet[s] {
 			expect = append(expect, s)
 		}
+	}
+	// A DUPLICATED required heading makes `order` longer than `expect` --
+	// `order` walks the file (so it appends twice), `expect` walks the schema
+	// (so it appends once). Indexing `expect[i]` by `order`'s range then
+	// panics with an index-out-of-range, which is what a duplicated section
+	// used to produce: a crash from BOTH `lint` and `render`, with a Go stack
+	// trace and no mention of the file or the heading at fault. A checker must
+	// report bad input, never die on it.
+	if len(order) != len(expect) {
+		*fails = append(*fails, fmt.Sprintf(
+			"%s: dossier section repeated (%d required headings, %d distinct) -- "+
+				"a duplicated heading, often from an edit that re-appended the file's tail",
+			n.Rel, len(order), len(expect)))
+		return
 	}
 	for i := range order {
 		if order[i] != expect[i] {

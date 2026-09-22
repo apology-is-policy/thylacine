@@ -11,6 +11,7 @@
 
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use halcyond::layout::Sheet;
 use halcyond::raster::GlyphSource;
@@ -36,6 +37,75 @@ pub fn clock_hm() -> (u8, u8) {
     (((secs / 3600) % 24) as u8, ((secs / 60) % 60) as u8)
 }
 
+/// Milliseconds until the wall clock's next minute (at least 1, plus a
+/// short grace so the wake lands past the boundary): the clocks on both
+/// rails repaint on a change of the minute, and this is what wakes a
+/// blocking poll for it -- before, the minute lagged until an unrelated
+/// event.
+/// A test-mode say lands on the console (and the serial): a tile's strings
+/// -- its title, the cmd mark -- are untrusted bytes and must not reach the
+/// operator's terminal with their control characters (the r1 B-F1 finding;
+/// the TH-6 F4 chokepoint's sibling).
+#[cfg(feature = "test-mode")]
+fn scrub(s: &str) -> String {
+    s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
+}
+
+/// Under legacy the painter reads none of the Instrument fields, so they
+/// must not force a repaint: a `running` flip repainted and re-presented the
+/// legacy bar twice per command for the same pixels (the r1 B-F2 finding).
+fn legacy_same(a: &StatusModel, b: &StatusModel) -> bool {
+    // Destructured with no `..` (the TH-6 F2 shape): a field added to the
+    // model fails to compile here until it is named on one side or the
+    // other -- read by the legacy painter, or stripped (r2 C-F7).
+    let key = |m: &StatusModel| {
+        let StatusModel {
+            workspaces,
+            active,
+            name,
+            cwd,
+            cmd,
+            condition,
+            exit_code,
+            hour,
+            minute,
+            notice,
+            running: _,
+            pane_count: _,
+            host: _,
+            hints: _,
+        } = m;
+        (
+            // S4: the list is a Vec now, so it clones like the strings below
+            // rather than copying. This site is exactly why the destructure
+            // above carries no `..` -- the guard made a type change in the
+            // model fail to compile here instead of silently dropping the
+            // workspaces from the legacy bar's sameness key.
+            workspaces.clone(),
+            *active,
+            name.clone(),
+            cwd.clone(),
+            cmd.clone(),
+            *condition,
+            *exit_code,
+            *hour,
+            *minute,
+            notice.clone(),
+        )
+    };
+    key(a) == key(b)
+}
+
+pub fn clock_timeout_ms() -> i32 {
+    let mut ts = [0i64; 2];
+    let rc = unsafe { t_clock_gettime(T_CLOCK_REALTIME, ts.as_mut_ptr() as u64) };
+    if rc < 0 || ts[0] < 0 {
+        return 60_000;
+    }
+    let into = (ts[0] as u64 % 60) * 1000 + (ts[1].max(0) as u64 / 1_000_000);
+    (60_000u64.saturating_sub(into) as i32 + 50).clamp(1, 60_050)
+}
+
 pub struct StatusBar {
     ring: EventRing,
     surf: Option<Surface>,
@@ -47,7 +117,21 @@ pub struct StatusBar {
     /// condition state (`Slots::stable`: never the centred text's landing,
     /// never the label's width), never per paint, so the row-relative legs
     /// after a command see no extra row.
-    said_slots: Option<(halcyond::status::Slots, Condition)>,
+    /// (the fixed slots, the condition, the notice, running, the pane count
+    /// -- the count is in the key because `2 PANES` and `4 PANES` are one
+    /// width and would share a `clock` slot).
+    /// S4: the workspace half of the key is the LIST plus the active
+    /// position, not a count -- a switch between two workspaces of an equal
+    /// count would otherwise not change the key, and the re-say W-3 added
+    /// would stop firing on exactly the move it exists to witness.
+    said_slots: Option<(
+        halcyond::status::Slots,
+        Condition,
+        Option<(String, bool)>,
+        bool,
+        u32,
+        (Vec<u8>, u8),
+    )>,
     failed_said: bool,
     /// Whether a mint should be attempted: true at start and after a CLOSE
     /// (the compositor dropped the bar), cleared by each attempt. A FAILED
@@ -55,7 +139,14 @@ pub struct StatusBar {
     /// persistent failure costs one attempt per relayout -- ChromeSet's
     /// cadence -- not two sync RPCs every pass (the H-3d round F5).
     want_mint: bool,
+    /// HALCYON-INSTRUMENT 8.2: the transient status message (text,
+    /// is-a-refusal, its deadline on the monotonic clock in ns). The last
+    /// message resets the timer; `notice` clears it once expired.
+    notice: Option<(String, bool, u64)>,
 }
+
+/// How long a transient status message shows (8.2: 1800 ms).
+pub const NOTICE_MS: u64 = 1800;
 
 impl StatusBar {
     pub fn new(ring: EventRing) -> StatusBar {
@@ -66,7 +157,47 @@ impl StatusBar {
             said_slots: None,
             failed_said: false,
             want_mint: true,
+            notice: None,
         }
+    }
+
+    /// Show a transient message in the condition slot (8.2): `refusal`
+    /// picks the `error` ink over the action's `amber`. The last message
+    /// resets the timer. Said in test builds, so a gate can pair the
+    /// refusal with the paint that showed it.
+    pub fn notify(&mut self, text: &str, refusal: bool) {
+        let deadline = libthyla_rs::time::monotonic_ns().saturating_add(NOTICE_MS * 1_000_000);
+        self.notice = Some((String::from(text), refusal, deadline));
+        #[cfg(feature = "test-mode")]
+        say(&format!(
+            "halcyond: status notice \"{}\" ({})",
+            text,
+            if refusal { "refusal" } else { "action" }
+        ));
+    }
+
+    /// The live notice (text, is-a-refusal), expiring it on the way out:
+    /// the caller folds it into the model it paints.
+    pub fn notice(&mut self) -> Option<(String, bool)> {
+        match &self.notice {
+            Some((text, refusal, deadline)) => {
+                if libthyla_rs::time::monotonic_ns() >= *deadline {
+                    self.notice = None;
+                    None
+                } else {
+                    Some((text.clone(), *refusal))
+                }
+            }
+            None => None,
+        }
+    }
+
+    /// Milliseconds until the notice expires (at least 1), so a blocking
+    /// wait can wake to repaint the live model; None with no notice up.
+    pub fn notice_timeout_ms(&self) -> Option<i32> {
+        let (_, _, deadline) = self.notice.as_ref()?;
+        let now = libthyla_rs::time::monotonic_ns();
+        Some(((deadline.saturating_sub(now) / 1_000_000) as i32).clamp(1, i32::MAX))
     }
 
     /// Re-arm the mint retry: a prior failure may now succeed. A no-op
@@ -175,7 +306,13 @@ impl StatusBar {
 
     /// Paint `model` if it differs from what is showing.
     pub fn refresh(&mut self, model: &StatusModel, sheet: &Sheet, gs: &mut GlyphSource) {
-        if self.painted.as_ref() == Some(model) {
+        let inst = sheet.profile == libhalcyon::instrument::Profile::Instrument;
+        let same = match self.painted.as_ref() {
+            Some(p) if inst => p == model,
+            Some(p) => legacy_same(p, model),
+            None => false,
+        };
+        if same {
             return;
         }
         let surf = match self.surf.as_mut() {
@@ -198,18 +335,71 @@ impl StatusBar {
         );
         match surf.present(None) {
             Ok(()) => {
+                // The Instrument footer paints `running` and the pane count,
+                // so they are in its key; the legacy bar paints neither, and
+                // its key must not grow -- every say lands in the console
+                // transcript as a row (the drain mirrors daemon lines), and
+                // ls-halcyon's row-relative legs count them (the chrome-content
+                // round's lesson: a say per running flip is a row per command).
                 #[cfg(feature = "test-mode")]
-                if self.said_slots != Some((slots.stable(), model.condition)) {
-                    self.said_slots = Some((slots.stable(), model.condition));
+                let inst = sheet.profile == libhalcyon::instrument::Profile::Instrument;
+                #[cfg(feature = "test-mode")]
+                let key = (
+                    slots.stable(),
+                    model.condition,
+                    model.notice.clone(),
+                    inst && model.running,
+                    if inst { model.pane_count } else { 0 },
+                    // W-3: the workspace pair is part of what the bar SHOWS,
+                    // so it must be part of what decides a re-say. Without it
+                    // a switch that changes nothing else -- which is the
+                    // normal case, since the tiles go dormant rather than
+                    // away -- would repaint silently and no gate could see
+                    // the move.
+                    if inst {
+                        (model.workspaces.clone(), model.active)
+                    } else {
+                        (Vec::new(), 0)
+                    },
+                );
+                #[cfg(feature = "test-mode")]
+                if self.said_slots.as_ref() != Some(&key) {
+                    self.said_slots = Some(key);
+                    // S4: a Vec has no Display, and the witness wants the list
+                    // VERBATIM -- `1,3` must never be summarised to `2`, which
+                    // is the whole reason the header stopped being a count.
+                    let mut ws_list = String::new();
+                    for (i, n) in model.workspaces.iter().enumerate() {
+                        if i > 0 {
+                            ws_list.push(',');
+                        }
+                        let _ = core::fmt::write(&mut ws_list, format_args!("{}", n));
+                    }
                     say(&format!(
-                    "halcyond: status bar {} painted ws [{} {}] ctx [{} {}] cond [{} {}] clock [{} {}] context \"{}\" condition {:?} clock {:02}:{:02} ctxink [{} {}] exit {}",
+                    "halcyond: status bar {} painted ws [{} {}] ctx [{} {}] cond [{} {}] clock [{} {}] context \"{}\" condition {:?} clock {:02}:{:02} ctxink [{} {}] exit {} notice \"{}\" running {} panes {} workspaces {} active0 {}",
                     surf.id,
                     slots.ws.0, slots.ws.1, slots.ctx.0, slots.ctx.1, slots.cond.0, slots.cond.1,
                     slots.clock.0, slots.clock.1,
-                    halcyond::status::context_text(&model.name, &model.cwd, &model.cmd),
+                    scrub(&halcyond::status::context_text(&model.name, &model.cwd, &model.cmd)),
                     model.condition, model.hour, model.minute,
                     slots.ctx_ink.0, slots.ctx_ink.1,
-                    model.exit_code.map(|c| format!("{}", c)).unwrap_or_else(|| String::from("-"))
+                    model.exit_code.map(|c| format!("{}", c)).unwrap_or_else(|| String::from("-")),
+                    model.notice.as_ref().map(|n| n.0.as_str()).unwrap_or(""),
+                    model.running, model.pane_count,
+                    // S4: `workspaces` is the model's LIST of live numbers and
+                    // `active0` is the DERIVED POSITION into it, printed raw.
+                    //
+                    // The anti-echo property is preserved and sharpened. The
+                    // header now carries the active NUMBER, so a witness that
+                    // printed that number would merely agree with the
+                    // compositor; the position is a value the compositor never
+                    // sends, so a broken number-to-position resolution shows
+                    // up here. With `workspaces 1,3 active 3` this reads
+                    // `active0 1` -- neither the number nor a count.
+                    //
+                    // Note `ws [..]` above is the workspaces SLOT's geometry,
+                    // a different thing entirely.
+                    ws_list, model.active
                     ));
                 }
                 let _ = slots;
@@ -224,15 +414,49 @@ impl StatusBar {
 
 /// The model from the sources: the focused leaf (pane id, name, status),
 /// whether that leaf is one this process hosts (then its transcript's
-/// directory, command and last exit apply), and the clock.
+/// directory, command, last exit and running state apply), the clock,
+/// and -- for the Instrument footer (8.2) -- the pane count and the chord
+/// hints.
 pub fn model_from(
     focused: Option<&(u32, String, String)>,
     own_pane: Option<u32>,
     cwd: &str,
     cmd: Option<&str>,
     exit_code: Option<i64>,
+    notice: Option<(String, bool)>,
+    running: bool,
+    pane_count: u32,
+    // HALCYON-WORKSPACES W-2: the `layout` header's pair, ONE-BASED as the
+    // compositor writes it, or None when the header carries no workspace
+    // tokens (a compositor older than W-1a). None is carried this far rather
+    // than resolved at the parse so the "keep the default" decision is made
+    // once, here, instead of becoming a guess at the boundary.
+    workspaces: Option<(Vec<u8>, u8)>,
+    hints: alloc::vec::Vec<(String, String)>,
 ) -> StatusModel {
     let mut m = StatusModel::empty();
+    m.notice = notice;
+    m.pane_count = pane_count;
+    m.hints = hints;
+    if let Some((list, active)) = workspaces {
+        // S4: the header carries the active NUMBER and the bar compares
+        // `i == m.active` over
+        // the chips it lays out, so the number is resolved to its POSITION
+        // here. Getting this wrong lights the wrong chip -- and with a sparse
+        // set `number - 1` is no longer that position.
+        //
+        // `parse_workspaces` refuses a header whose active is absent from its
+        // own list, so the position exists by the time we are called; the
+        // fallback is a floor, not a guess.
+        //
+        // NOT the only site, and an earlier comment here claimed it was:
+        // `session.rs`'s `ws_pos` resolves the same number for the RAIL's
+        // model. Two models, two resolutions -- the shape that has already
+        // produced two defects in this arc (a guard on one of two chip
+        // painters, twice). Change one, change the other.
+        m.active = list.iter().position(|&n| n == active).unwrap_or(0) as u8;
+        m.workspaces = list;
+    }
     if let Some((id, name, status)) = focused {
         m.name = name.clone();
         m.condition = condition_for(status);
@@ -240,6 +464,7 @@ pub fn model_from(
             m.cwd = String::from(cwd);
             m.cmd = String::from(cmd.unwrap_or(""));
             m.exit_code = exit_code;
+            m.running = running;
         }
     }
     let (h, mi) = clock_hm();

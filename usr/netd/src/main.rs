@@ -22,7 +22,7 @@
 // (this sub-chunk) makes it LIVE: clone reserves a real smoltcp TCP socket, the
 // Net table owns the interface + socket set, writing `ctl` "connect a!p"
 // active-opens, status/local/remote report the live socket, and data read/write
-// is recv/send. The last clunk frees N AND its socket.
+// is recv/send. Last clunk frees N; TCP retires privately.
 //
 // Diagnostics go to the console (`t_putstr`): a warden-spawned driver's stderr
 // is /dev/null. A long-lived service signals readiness by writing exactly one
@@ -37,7 +37,10 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 #[global_allocator]
-static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
+// 64 TCP transports consume at most 8 MiB; 16 MiB leaves bounded headroom
+// for 9P connections, protocol metadata, DNS and temporary service buffers.
+static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAllocN<{ 16 * 1024 * 1024 }> =
+    libthyla_rs::alloc::ThylaAllocN;
 
 use libdriver::driver::{run, Driver};
 use libdriver::resource::BoundResources;
@@ -405,9 +408,18 @@ impl Driver for NetD {
         // + the dual-poll + clean teardown. No host coupling -> ASSERTED.
         let rlo = server::resident_lo_selftest(base);
         if rlo == "PASS" {
-            say!("netd: net-8a resident lo E2E PASS (127.x migrate + accept + data + no-leak)");
+            say!("netd: net-8a resident lo E2E PASS (127.x migrate + accept + close-drain + slot reuse + Weft detach + no-leak)");
         } else {
             say!("netd: net-8a resident lo E2E FAIL ({})", rlo);
+            return Err(Error::Hardware);
+        }
+
+        let close = server::close_retirement_selftest(base);
+        if close == "PASS" {
+            say!("netd: TCP retirement PASS (admission bound, queued data retained, deadline, handshake close, TIME-WAIT yields and nothing else does)");
+        } else {
+            say!("netd: TCP retirement FAIL ({})", close);
+            return Err(Error::Hardware);
         }
 
         // net-6a: the DETERMINISTIC in-guest blocking-read self-test -- a TCP

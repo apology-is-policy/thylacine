@@ -242,6 +242,14 @@ program (`nora`) can match. That export becomes a **rendering of the
 resolved theme** rather than a second hand-maintained list — one direction,
 file → `Theme` → env, never back.
 
+**Amended at HALCYON-INSTRUMENT I-5c (2026-09-14):** the export is a
+rendering of the resolved *bundle* and keyed on the profile in force —
+under `instrument` it carries twelve more roles (the three prompt inks and
+the nine class-named syntax roles, HALCYON-INSTRUMENT §7.4); under `legacy`
+the eleven, byte-identical. The reader of the prompt roles lives beside the
+writer (`theme::prompt_roles`), so the two sides of the seam share one
+vocabulary.
+
 ## 4. The failure modes, decided
 
 **4.1 — Missing file: silent fallback to `DAYLIGHT`.** The default
@@ -314,6 +322,20 @@ but the user is not always the author.
   `no_std` (format-fuzz class), a display-wide visual pushed over a ctl
   verb (the `scale` precedent's gate applies), and the §3.2 rule's
   enforcement.
+
+## 6.1 The second schema (I-1, 2026-09-14) — a pointer
+
+Since the Instrument arc (`docs/HALCYON-INSTRUMENT.md` §4) a theme file
+answers to ONE of two schemas, decided by `[meta] profile`: absent is the
+57-key schema this document specifies, unchanged; `"instrument-v1"` is the
+35-role Instrument schema (`libhalcyon::instrument`). `theme::load`
+parses once and dispatches; `Theme::from_toml` is the legacy schema alone
+and refuses an Instrument file at its `profile` line, which is what an
+older binary does with one. The gallery stays one directory; the loader
+resolves a *bundle* (the profile word + both themes, one native and one
+projected) and the push line grew from 72 to 127 fields with a
+terminator. §3.3, §4 and §5 above stand for the legacy schema and, in
+their failure posture, for both.
 
 ## 7. What this does not decide
 

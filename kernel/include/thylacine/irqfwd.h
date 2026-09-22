@@ -36,6 +36,7 @@
 
 #include <thylacine/rendez.h>
 #include <thylacine/types.h>
+struct PciIrq;
 
 // KOBJ_IRQ_MAGIC — sentinel set at kobj_irq_create; checked at every
 // public API entry. Sits at offset 0; SLUB freelist write on free
@@ -50,7 +51,7 @@
 #define KOBJ_IRQ_WAIT_BUSY 0xFFFFFFFFu
 
 // Reserved test SGI for irqfwd. SGI 0 = IPI_RESCHED (P2-Cdc); SGI 1 =
-// IPI_IRQFWD_TEST. The remaining SGIs (2..15) are available for future
+// IPI_IRQFWD_TEST. SGI 14 = IPI_MSI_FAULT; SGI 15 = IPI_IRQ_BARRIER. SGIs 2..13 are available for future
 // IPIs (e.g., a TLB shootdown IPI when SMP-aware ASID rollover lands).
 #define IPI_IRQFWD_TEST  1u
 
@@ -58,11 +59,16 @@ struct KObj_IRQ {
     u64           magic;        // KOBJ_IRQ_MAGIC
     u32           intid;        // GIC INTID (SGI / PPI / SPI)
     int           ref;          // refcount (kobj_irq_create starts at 1)
+    struct PciIrq *pci;          // NULL for raw IRQ, immutable PCI source kind
+    bool          level;        // F-A1: DTB-derived trigger. true = level (mask
+                                //   on dispatch, unmask on re-wait); false = edge
+                                //   (the no-mask fast path). Immutable post-create,
+                                //   published before gic_attach -> read lock-free.
     struct Rendez rendez;       // single-waiter; lock guards the fields below
     u32           pending_count; // collapsed-IRQ count since last wait
     bool          waiting;      // RW-7 R1-F1: a kobj_irq_wait holds the slot
     bool          dying;        // RW-7 R1-F2: teardown started; dispatch skips wake
-    bool          in_dispatch;  // RW-7 R1-F2: a dispatch is mid-flight on some CPU
+    u32           in_dispatch;  // dispatch pins, under rendez.lock (SGIs may span CPUs)
 };
 
 // One-time setup: pre-reserve INTIDs owned by kernel-internal callers
@@ -89,8 +95,8 @@ struct KObj_IRQ *kobj_irq_create(u32 intid);
 // Refcount ops. Mirrors burrow_ref / burrow_unref.
 void kobj_irq_ref(struct KObj_IRQ *k);
 
-// Decrement ref. If zero: gic_disable_irq + gic_attach(intid, NULL,
-// NULL) to unregister + kfree. After the unref that drops ref to 0,
+// Decrement ref. If zero: disable, unpublish the weak owner, drain dispatch
+// pins, and free. The permanent callback retains no object pointer. After ref 0,
 // `k` is INVALID.
 void kobj_irq_unref(struct KObj_IRQ *k);
 
@@ -108,6 +114,15 @@ void kobj_irq_destroy(struct KObj_IRQ *k);
 // Spurious wake from a non-IRQ source is ABSENT — sleep's cond loop
 // guarantees we only return when pending_count > 0.
 u32 kobj_irq_wait(struct KObj_IRQ *k);
+
+// Like kobj_irq_wait, bounded by `timeout_ns` (relative nanoseconds;
+// 0 == wait forever, i.e. exactly kobj_irq_wait). On a timeout the return
+// is a collapsed count of 0 -- a driver treats 0 the same on timeout as on
+// death (re-check the device used-ring and continue / unwind), so the two
+// need not be distinguished at the ABI. F-A1 (C): a level driver's timeout
+// wake re-checks the device, catching a lost completion instead of hanging
+// forever on a never-delivered interrupt. kobj_irq_wait is this with 0.
+u32 kobj_irq_wait_timed(struct KObj_IRQ *k, u64 timeout_ns);
 
 // Diagnostic: cumulative IRQ counter (every fire ever observed) +
 // live KObj_IRQ count.

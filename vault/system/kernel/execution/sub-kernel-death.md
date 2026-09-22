@@ -10,7 +10,7 @@ validated-by: [spec-death-wake, gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-09-09
+updated: 2026-09-21
 ---
 ## Purpose
 
@@ -46,6 +46,17 @@ lockless walk races `thread_free` into a use-after-free. Holding it also
 `group_exit_msg` only has to guard idempotency, never a genuine race.
 
 ## Mechanism
+
+**Scope and session cleanup (2026-09-17).** The imported Imperium teardown
+closes the publish-after-sweep race through the child insertion check in
+[[sub-kernel-proc]]. Process exit now releases the process's Territory at exit,
+rather than leaving namespace/session references pinned until reaping. This
+allows a login waiting on its home server to complete after shell exit.
+`proc_session_hangup_if_leader` delivers the session hangup to eligible peers
+when an armed leader dies; its table walk follows the existing held-lock death
+protocol. The cross-user arm of `tools/interactive/ls-imperium.exp` verifies
+that michael can abdicate/log out and cora can log in afterward.
+
 
 **The four steps of a cascade** (`proc_group_terminate`):
 
@@ -99,6 +110,15 @@ exit and a kill alike:
   an implicit-vs-local dependency recorded at `session_hangup_cb` (arm-6 audit F1);
 - clearing `g_console_owner`, `g_console_trusted_proc`, `g_console_renderer`
   and `g_init_proc` if this Proc held them, so none ever dangles;
+- the graphical seat's three arms, before the trusted-proc clear: the seat
+  SERVICE's death fails the seat; the compositor CLIENT's death fails it only
+  mid-episode and otherwise just clears the slot; corvus's death fails it when
+  an episode is in progress. A seat failure closes a console episode only when
+  the seat opened it ([[sub-kernel-proc]]). The client and service arms are
+  driven through this chokepoint by REAL deaths (an `rfork` child takes the
+  role, an episode opens over it, it exits and is reaped):
+  `cons.graphical_seat_deadline_and_death` and
+  `cons.graphical_seat_service_death`;
 - the POSIX 2.4.3 orphan rule, **before** the reparent (the children list is
   consumed there) — [[sub-kernel-jobctl]] owns it, and the ordering is the
   whole trick: it asks "orphaned once I am gone" while the answer is still
@@ -445,3 +465,19 @@ fallback — Fable out of credits): SOUND 0/0/0/2 P3 — F1 fixed (the `sid==pid
 isolation's dependency on non-recycling pids documented at `session_hangup_cb`),
 F2 tracked (the `setsid`-daemon residual, Mechanism + Caveats above). SMP gate
 40 boots, 0 corruption; ls-imperium arms 0-6 PASS.
+
+## PCI claims retained by register mappings (2026-09-17)
+
+The device-quiesce VMA sweep now recognizes the PCI owner retained by ordinary
+MMIO Burrows. Even after the PCI handle closes, the last address-space holder
+quiesces DMA before draining mappings and DMA buffers. Live hostmem aliases keep
+memory decoding enabled through the existing DMA-only quiesce rule. This extends
+the existing mmap-then-close death protection to PCI register mappings; it is not
+yet the approved interrupt-endpoint revocation path.
+
+## PCI endpoints as the final owner (2026-09-17)
+
+The handle sweep also resolves a PCI endpoint's retained function. It therefore
+quiesces DMA and revokes delivery even if both parent handle and register mappings
+were closed while an IRQ endpoint survived. Owner quiescence's terminal flag
+prevents concurrent ARM/COMPLETE from restoring delivery during teardown.

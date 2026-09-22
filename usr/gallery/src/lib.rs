@@ -60,9 +60,9 @@ pub fn fit_rect(sw: u32, sh: u32, dw: u32, dh: u32) -> Fit {
 
 /// Paint `dst` (a `dw x dh` ARGB 0xAARRGGBB frame) for a fullscreen view of the
 /// `sw x sh` image `src`: fill with the letterbox colour, then nearest-neighbor
-/// scale the image into the centred fit rect, forced opaque (the scanout is
-/// opaque; a source alpha is dropped -- compositing over the letterbox is a v1
-/// refinement). Slices shorter than their declared dimensions clamp rather than
+/// scale the image into the centred fit rect, compositing straight source alpha
+/// over the black letterbox. The resulting scanout is opaque.
+/// Slices shorter than their declared dimensions clamp rather than
 /// panic. Returns the fit rect used.
 pub fn paint(dst: &mut [u32], dw: u32, dh: u32, src: &[u32], sw: u32, sh: u32) -> Fit {
     let frame = (dw as usize).saturating_mul(dh as usize).min(dst.len());
@@ -85,7 +85,12 @@ pub fn paint(dst: &mut [u32], dw: u32, dh: u32, src: &[u32], sw: u32, sh: u32) -
             // src bound (a short/hostile raster) and dst bound (the frame) are
             // both re-checked, so no index can escape either buffer.
             if si < src_px && si < src.len() && di < frame {
-                dst[di] = 0xFF00_0000 | (src[si] & 0x00FF_FFFF);
+                let pixel = src[si];
+                let alpha = pixel >> 24;
+                let r = (((pixel >> 16) & 255) * alpha + 127) / 255;
+                let g = (((pixel >> 8) & 255) * alpha + 127) / 255;
+                let b = ((pixel & 255) * alpha + 127) / 255;
+                dst[di] = 0xFF00_0000 | (r << 16) | (g << 8) | b;
             }
         }
     }
@@ -134,12 +139,20 @@ mod tests {
     #[test]
     fn paint_fills_letterbox_then_scales_opaque() {
         // 1x1 red image into a 2x2 display -> width-bound (1:1 into 1:1) fills
-        // the whole 2x2; every pixel is the source colour, forced opaque.
-        let src = [0x00FF_0000u32]; // red, alpha 0 -> must be forced opaque
+        // the whole 2x2; every pixel is the opaque source colour.
+        let src = [0xFFFF_0000u32]; // opaque red
         let mut dst = [0u32; 4];
         let f = paint(&mut dst, 2, 2, &src, 1, 1);
         assert_eq!(f, Fit { ox: 0, oy: 0, fw: 2, fh: 2 });
         assert!(dst.iter().all(|&p| p == 0xFFFF_0000));
+    }
+
+    #[test]
+    fn transparent_pixels_composite_over_black() {
+        let src = [0x00FF_1234, 0x80FF_8040, 0xFFFF_8040];
+        let mut dst = [0xFFFF_FFFF; 3];
+        paint(&mut dst, 3, 1, &src, 3, 1);
+        assert_eq!(dst, [0xFF00_0000, 0xFF80_4020, 0xFFFF_8040]);
     }
 
     #[test]

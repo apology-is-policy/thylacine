@@ -18,6 +18,7 @@
 #include <thylacine/dev9p.h>
 #include <thylacine/poll.h>
 #include <thylacine/spoor.h>
+#include <thylacine/stalk.h>
 #include <thylacine/syscall.h>
 #include <thylacine/types.h>
 #include <thylacine/perm.h>
@@ -122,6 +123,7 @@ static u32  g_wire_seq;
 static u32  g_twrite_seen;
 static u32  g_twrite_last_seq, g_clunk_last_seq, g_tfsync_last_seq;
 static u32  g_twrite_fail_ecode;     // != 0: the NEXT Twrite answers Rlerror(ecode), then clears
+static u32  g_tlopen_fail_ecode; // one-shot Tlopen errno control
 static u32  g_tlcreate_fail_ecode;   // #99: != 0: the NEXT Tlcreate answers Rlerror(ecode), then clears
 static u8  *g_twrite_cap_buf;        // payload capture of the LAST Twrite (heap, 8 KiB)
 #define WB_CAP_BUF_SZ 8192u
@@ -243,6 +245,16 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
     }
     if (type == P9_TLOPEN) {
         g_lopen_seen++;
+        if (g_tlopen_fail_ecode) {
+            u32 error = g_tlopen_fail_ecode;
+            g_tlopen_fail_ecode = 0;
+            if (resp_cap < 11) return -1;
+            resp[0] = 11; resp[1] = resp[2] = resp[3] = 0;
+            resp[4] = P9_RLERROR;
+            resp[5] = (u8)tag; resp[6] = (u8)(tag >> 8);
+            for (int i = 0; i < 4; ++i) resp[7+i] = (u8)(error >> (8*i));
+            return 11;
+        }
         size_t total = P9_HDR_LEN + P9_QID_LEN + 4;
         if (resp_cap < total) return -1;
         resp[0] = (u8)(total & 0xff); resp[1] = 0; resp[2] = 0; resp[3] = 0;
@@ -582,6 +594,7 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
 // Helper: drive a client through handshake against the canonical
 // responder, returning a Spoor at the bound root.
 static struct Spoor *make_open_client_and_root(void) {
+    g_tlopen_fail_ecode = 0;
     if (p9_loopback_init(&g_loopback, g_loopback_resp, sizeof(g_loopback_resp),
                             dev9p_responder, NULL) != 0) return NULL;
     if (p9_client_init(&g_client, /*root_fid=*/0, 8192,
@@ -675,6 +688,32 @@ void test_dev9p_open_lopens_fid(void) {
     TEST_EXPECT_EQ((u64)opened->qid.path, (u64)0x42,
                     "open updated qid from Rlopen response");
 
+    spoor_clunk(nc);
+    teardown(root);
+}
+
+// Preserve a real server resource refusal; clear stale errno on success and
+// keep malformed/generic errors outside the syscall passthrough range.
+void test_dev9p_open_errno(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    struct Spoor *nc = spoor_clone(root);
+    TEST_ASSERT(nc != NULL, "clone");
+    const char *name = "file";
+    struct Walkqid *w = dev9p.walk(root, nc, &name, 1);
+    TEST_ASSERT(w != NULL, "walk");
+    walkqid_free(w);
+    g_tlopen_fail_ecode = 12;
+    TEST_ASSERT(dev9p.open(nc, 0) == NULL, "ENOMEM open refused");
+    TEST_EXPECT_EQ((u64)dev9p_open_errno(nc), (u64)(s64)-12, "preserve ENOMEM");
+    TEST_ASSERT(dev9p.open(nc, 0) == nc, "retry succeeds");
+    TEST_EXPECT_EQ((u64)dev9p_open_errno(nc), (u64)(s64)-1, "success clears errno");
+    struct dev9p_priv *priv = dev9p_priv_of(nc);
+    TEST_ASSERT(priv != NULL, "private state");
+    priv->open_errno = -4096;
+    TEST_EXPECT_EQ((u64)dev9p_open_errno(nc), (u64)(s64)-1, "invalid errno clamped");
+    priv->open_errno = -1;
+    TEST_EXPECT_EQ((u64)dev9p_open_errno(nc), (u64)(s64)-1, "generic error preserved");
     spoor_clunk(nc);
     teardown(root);
 }
@@ -3129,6 +3168,26 @@ static struct Proc *oc9_proc(struct Spoor *root, hidx_t *fd_out) {
     if (fd < 0) { spoor_clunk(nc); p->state = PROC_STATE_ZOMBIE; proc_free(p); return NULL; }
     *fd_out = fd;
     return p;
+}
+
+void test_dev9p_stalk_open_errno(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    hidx_t base = -1;
+    struct Proc *p = oc9_proc(root, &base);
+    TEST_ASSERT(p != NULL, "proc");
+    struct Handle h;
+    TEST_ASSERT(handle_get(p, base, &h) == 0, "base handle");
+    g_tlopen_fail_ecode = 12;
+    int error = 0;
+    struct Spoor *opened = stalk_err(p, (struct Spoor *)h.obj,
+                                    "file", 4, STALK_OPEN, 0, &error);
+    g_tlopen_fail_ecode = 0;
+    TEST_ASSERT(opened == NULL, "resolver open refuses");
+    TEST_EXPECT_EQ((u64)error, 12ull, "resolver preserves ENOMEM");
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+    teardown(root);
 }
 
 // The open-NOENT -> create leg: the leaf misses once (one-shot partial), the

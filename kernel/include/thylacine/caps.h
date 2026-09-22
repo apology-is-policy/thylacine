@@ -187,8 +187,16 @@ typedef u64 caps_t;
 // it (the audio authority lives in nocturned, the sink's owner).
 #define CAP_AUDIO_GRAPH     (1ull << 12)
 
+// CAP_POST_SERVICE -- authority to post a service into /srv, as a CAPABILITY
+// rather than the spawn-time PROC_FLAG_MAY_POST_SERVICE mark (IMPERIUM-DESIGN
+// 6.5). Elevation-only and a member of CAP_GRANTABLE_IMPERIUM: an operator
+// confers it on one command through the lex curiata (haul posts its mount
+// this way), and it flows to rfork children only inside that propagating
+// scope. Never held at creation, never fork-grantable.
+#define CAP_POST_SERVICE    (1ull << 13)
+
 // Reserved for Phase 5+ (one bit per capability domain; next free bit is
-// 1<<13):
+// 1<<14):
 //   CAP_NS_MOUNT     — bind/mount in /proc and /ctl (kernel admin Devs).
 //   CAP_NS_BIND      — bind in any namespace (forward-looking).
 //   CAP_NET_RAW      — open raw network sockets / Ethernet frames.
@@ -201,22 +209,22 @@ typedef u64 caps_t;
 // excluded from CAP_ALL that no Proc holds at creation and that rfork
 // MUST strip from every child, so an elevated parent cannot leak
 // elevation across a fork. rfork_internal ANDs the child's caps with
-// ~CAP_ELEVATION_ONLY (A-4-pre). All seven are acquired ONLY through the
-// `cap` device: CAP_HOSTOWNER (the unified fs-admin authority) plus the
-// A-4 finer caps split out of it — CAP_DAC_OVERRIDE, CAP_CHOWN, CAP_KILL —
-// plus CAP_DEBUG (the Stage-8a cross-Proc debug authority), CAP_JIT (the
-// CL-7k code-emission authority; I-42 requires it be non-heritable, so its
-// membership here is an invariant obligation, not a style choice), and
-// CAP_AUDIO_GRAPH (the Nocturne whole-sink authority; docs/NOCTURNE.md §6.8).
-// Maps to specs/handles.tla::ElevationOnly (which models the axis abstractly
-// as one representative member, so adding a concrete cap needs no spec change).
-#define CAP_ELEVATION_ONLY  (CAP_HOSTOWNER | CAP_DAC_OVERRIDE | CAP_CHOWN | CAP_KILL | CAP_DEBUG | CAP_JIT | CAP_AUDIO_GRAPH)
+// ~CAP_ELEVATION_ONLY (A-4-pre). Every member is acquired ONLY through the
+// `cap` device: CAP_HOSTOWNER (the unified fs-admin authority); the A-4
+// finer caps split out of it — CAP_DAC_OVERRIDE, CAP_CHOWN, CAP_KILL;
+// CAP_DEBUG (the Stage-8a cross-Proc debug authority); CAP_JIT (the CL-7k
+// code-emission authority; I-42 requires it be non-heritable, so its
+// membership here is an invariant obligation, not a style choice);
+// CAP_AUDIO_GRAPH (whole-sink audio authority); CAP_POST_SERVICE. The macro
+// below is the authority for the set; a count written in prose has been
+// wrong four times.
+// Maps to specs/handles.tla::ElevationOnly.
+#define CAP_ELEVATION_ONLY  (CAP_AUDIO_GRAPH | CAP_POST_SERVICE | CAP_HOSTOWNER | CAP_DAC_OVERRIDE | CAP_CHOWN | CAP_KILL | CAP_DEBUG | CAP_JIT)
 
 // CAP_ALL — the FORK-GRANTABLE capability ceiling: every capability a
 // Proc may legitimately hold from creation, and the mask kproc gets at
-// proc_init. Elevation-only capabilities (CAP_ELEVATION_ONLY:
-// CAP_HOSTOWNER, CAP_DAC_OVERRIDE, CAP_CHOWN, CAP_KILL, CAP_DEBUG, CAP_JIT,
-// CAP_AUDIO_GRAPH) are deliberately excluded — see above. A new fork-grantable CAP_* bit MUST be added
+// proc_init. Elevation-only capabilities (every bit of CAP_ELEVATION_ONLY,
+// above) are deliberately excluded. A new fork-grantable CAP_* bit MUST be added
 // here; an elevation-only one MUST NOT.
 #define CAP_ALL         (CAP_HW_CREATE | CAP_LOCK_PAGES | CAP_CSPRNG_READ | CAP_GRANT_HOSTOWNER | CAP_SET_IDENTITY | CAP_GRANT_CLEARANCE)
 

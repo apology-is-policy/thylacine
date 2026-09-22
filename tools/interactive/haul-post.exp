@@ -1,0 +1,144 @@
+#!/usr/bin/expect -f
+# Haul post -> mount in the same shell -> remote read -> unmount -> abdicate.
+# Requires a real npxf fixture, as haul-npxf.exp does; absence is SKIP, not PASS.
+set ::env(THYLACINE_ACCEL) hvf
+source [file join [file dirname [info script]] lib.exp]
+set hostport 15640
+if {[info exists ::env(HAUL_NPXF_PORT)]} { set hostport $::env(HAUL_NPXF_PORT) }
+if {![string is integer -strict $hostport] || $hostport < 1 || $hostport > 65535} {
+    error "HAUL_NPXF_PORT must be 1..65535"
+}
+set token "thylacine-haul-e2e-token"
+if {[info exists ::env(HAUL_NPXF_TOKEN)]} { set token $::env(HAUL_NPXF_TOKEN) }
+if {![regexp {^[a-zA-Z0-9_-]+$} $token]} { error "fixture token must be a shell-safe test token" }
+if {[catch {set probe [socket 127.0.0.1 $hostport]} err]} {
+    puts "LS-CI SKIP: npxf fixture absent: $err"
+    exit 77
+}
+close $probe
+proc sak_witness_within {secs phase} {
+    global timeout
+    set timeout $secs
+    expect {
+        -re {cons: SAK \(([a-z ]+)\)} {
+            set d $expect_out(1,string)
+            lc_step "saw: cons: SAK ($d) during '$phase'"
+            return $d
+        }
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during '$phase'" }
+        eof               { lc_fail "unexpected EOF during '$phase'" }
+        timeout           { return "" }
+    }
+}
+
+proc press_sak {phase} {
+    lc_raw_send "\001b" "monitor BREAK ($phase)"
+    set d [sak_witness_within 10 "the SAK witness ($phase)"]
+    if {$d eq ""} {
+        lc_fail "no `cons: SAK (...)` line within 10s of Ctrl-A b ($phase)"
+    }
+    if {$d ne "episode"} {
+        lc_fail "SAK decision was '$d', expected 'episode' ($phase) -- corvus not ARMED, or an episode already open"
+    }
+}
+
+# Wait for a wanted line; the tool's own failure family is a hard fail unless it
+# is the one expected (a red line fails now, not at the timeout -- #218).
+proc expect_tool_line {want phase} {
+    global lc_cmd_timeout timeout
+    set timeout $lc_cmd_timeout
+    expect {
+        -ex $want { lc_step "saw: $want ($phase)" }
+        -re {imperium: (denied|not eligible|no imperium|too many|timed out|another imperium|unexpected status|cannot reach|could not|needs an interactive|already elevated|malformed|refusing|transport error)[^\r\n]*} {
+            lc_fail "tool said \[$expect_out(0,string)\] while waiting for \[$want\] ($phase)"
+        }
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction ($phase)" }
+        timeout           { lc_fail "timeout (${lc_cmd_timeout}s) waiting for \[$want\] ($phase)" }
+        eof               { lc_fail "unexpected EOF ($phase)" }
+    }
+}
+
+
+proc read_peer_log {path} {
+    if {[catch {set f [open $path r]}]} { return "" }
+    set d [read $f]
+    close $f
+    return $d
+}
+proc wait_peer_log {path pattern} {
+    for {set i 0} {$i < 120} {incr i} {
+        set d [read_peer_log $path]
+        if {[string match $pattern $d]} { return $d }
+        after 100
+    }
+    lc_fail "peer log never matched $pattern: $d"
+}
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+lc_send "echo $token > npxf.token"
+lc_send "chmod 600 npxf.token"
+lc_send "mkdir -p /tmp/haul-post /tmp/haul-second"
+lc_run_expect "haul -v --post haul-e2e -t npxf.token 10.0.2.2!$hostport" "cannot post service"
+lc_pass "haul post denied outside imperium"
+lc_send "imperium post"
+expect_tool_line "as pid" "post request"
+press_sak "post"
+lc_expect "CONFERRING IMPERIUM" "trusted provincia"
+lc_expect "CAP_POST_SERVICE" "trusted panel names the posting authority"
+lc_expect "imperium key: " "trusted key prompt"
+lc_raw_send "imperium-key-michael-v1\r" "fixture key"
+lc_expect "imperium: conferred" "post capability conferred"
+lc_send "haul -v --post haul-e2e -t npxf.token 10.0.2.2!$hostport &"
+lc_expect "/srv/haul-e2e posted" "encrypted service posted"
+lc_expect "npxf encrypted" "encrypted mode"
+lc_send "mount /srv/haul-e2e /tmp/haul-post /"
+lc_expect "/srv/haul-e2e serving one mount" "same-shell mount connects"
+lc_send "cat /tmp/haul-post/hello.txt | tr a-z A-Z; echo read-completed | tr a-z A-Z"
+lc_expect "THE THYLACINE IS REAL" "same-shell remote file read"
+lc_expect "READ-COMPLETED" "read command and pipe have exited"
+lc_pass "posted encrypted tree is readable in the existing elevated shell"
+lc_send {mount /srv/haul-e2e /tmp/haul-second /; echo SECOND-STATUS=$status; echo $errstr}
+lc_expect "SECOND-STATUS=1" "second attach fails"
+lc_expect "mount: cannot attach" "stored attach error"
+lc_pass "a second mount is refused without sharing 9P fids/tags"
+lc_send "unmount /tmp/haul-post"
+lc_send "cat /tmp/haul-post/hello.txt"
+lc_expect "cat:" "unmount removes remote file"
+lc_send "wait; echo haul-first-reaped | tr a-z A-Z"
+lc_expect "HAUL-FIRST-REAPED" "unmount closes the transport and haul exits"
+# Remote EOF after authenticated handshake must also wake a POSTED attach.
+set peerlog $lc_repo/build/haul-post-hangup-[pid].log
+set peer_pid [exec python3 $lc_repo/tools/interactive/haul-hangup-peer.py \
+    --port 0 --log $peerlog --mode relay-handshake --upstream $hostport &]
+set d [wait_peer_log $peerlog "*listening*"]
+if {![regexp {listening 127\.0\.0\.1:([0-9]+)} $d -> hangport]} {
+    lc_fail "hangup peer did not report its port: $d"
+}
+lc_send "haul --post haul-hang -t npxf.token 10.0.2.2!$hangport &"
+lc_expect "/srv/haul-hang posted" "authenticated hangup service posted"
+lc_send {mount /srv/haul-hang /tmp/haul-post /; echo HANG-STATUS=$status; echo $errstr}
+lc_expect "HANG-STATUS=1" "remote EOF fails posted attach"
+lc_expect "mount: cannot attach" "remote EOF stored attach error"
+lc_send "wait; echo post-hangup-reaped | tr a-z A-Z"
+lc_expect "POST-HANGUP-REAPED" "failed posted relay exits"
+set d [wait_peer_log $peerlog "*guest: sent FIN*"]
+if {![string match "*accepted*" $d] || ![string match "*flight 3*" $d]} {
+    lc_fail "fixture did not relay authenticated handshake before FIN: $d"
+}
+lc_pass "authenticated remote EOF wakes posted attach and reaps the relay"
+
+lc_send "haul --post haul-again -t npxf.token 10.0.2.2!$hostport &"
+lc_expect "/srv/haul-again posted" "new name after service exit"
+lc_send "mount /srv/haul-again /tmp/haul-post /"
+lc_expect "/srv/haul-again serving one mount" "second lifetime mount"
+lc_send "cat /tmp/haul-post/hello.txt | tr a-z A-Z; echo read-completed | tr a-z A-Z"
+lc_expect "THE THYLACINE IS REAL" "reposted tree readable"
+lc_expect "READ-COMPLETED" "second read completed"
+lc_send "abdicate"
+lc_expect "imperium: relinquished" "scope teardown with a live haul mount"
+lc_send {mount /srv/haul-again /tmp/haul-post /; echo AFTER-STATUS=$status; echo $errstr}
+lc_expect "AFTER-STATUS=1" "service unavailable after abdication"
+lc_expect "mount: cannot connect" "stored connect error"
+lc_pass "abdication ends posted service and its mount transport"
+lc_quit

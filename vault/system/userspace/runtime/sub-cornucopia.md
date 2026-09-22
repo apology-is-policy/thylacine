@@ -1,7 +1,7 @@
 ---
 id: sub-cornucopia
 type: sub
-title: "cornucopia — five baked atlases, and the box characters deliberately left out"
+title: "cornucopia — eleven baked atlases, and the box characters deliberately left out"
 parent: moc-userspace-runtime
 code:
   - usr/lib/cornucopia/src/lib.rs
@@ -14,12 +14,12 @@ hazards: []
 abis: []
 design: ["docs/AURORA.md"]
 created: 2026-08-04
-updated: 2026-08-04
+updated: 2026-09-18
 ---
 ## Purpose
 
 The system typeface, already rasterized. One outline source is baked at
-build time into fixed-cell alpha bitmaps at five sizes and compiled in, so
+build time into fixed-cell alpha bitmaps at eleven sizes and compiled in, so
 the renderer needs no outline rasterizer at runtime and no font file at
 boot.
 
@@ -29,6 +29,12 @@ needs exactly one face at a handful of sizes. It also means the pre-login
 screen has a font before any filesystem is mounted.
 
 ## Contract
+
+The baked advances are 6, 7, 8, 9, 10, 11, 12, 13, 15, 18 and 20. U+2016 is
+included at every size for the Imperium rods. The regular/italic outline subsets
+retain their existing coverage and include that glyph for Halcyon's outline
+renderer. Trusted Lex curiata uses only the baked atlases, never filesystem fonts.
+
 
 `Atlas::for_advance(n)` returns a view over the blob baked at cell advance
 `n`; an unknown advance falls back to the default face rather than

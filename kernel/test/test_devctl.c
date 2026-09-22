@@ -28,6 +28,7 @@ void test_devctl_read_memory_format(void);
 void test_devctl_read_devices_format(void);
 void test_devctl_read_kernel_base_format(void);
 void test_devctl_kernel_base_gated(void);
+void test_devctl_kstack_gated(void);
 void test_devctl_read_sched_format(void);
 void test_devctl_read_cons_format(void);
 void test_devctl_read_cpu_format(void);
@@ -309,6 +310,51 @@ void test_devctl_kernel_base_gated(void) {
                 "F1: an unprivileged caller is denied the KASLR slide");
     TEST_ASSERT(!devctl_kernel_base_readable(NULL),
                 "NULL caller denied");
+}
+
+// ARCH 8.12 audit F2 REGRESSION. /ctl/kstack is CAP_HOSTOWNER-gated for a
+// different reason than kernel-base: it discloses no address, but its
+// formatter walks every live Proc under g_proc_table_lock WITH IRQS MASKED
+// and scans each thread's 16 KiB stack, recomputed on EVERY read. Left
+// world-readable it is an unprivileged masked-window lever (I-32).
+//
+// THE DENY LEG IS THE POINT and it must go through the REAL read path: the
+// predicate is shared with kernel-base, so a predicate-only test would pass
+// whether or not the gate is WIRED for this kind. Pre-fix the unelevated read
+// returns a positive count; post-fix it returns -1.
+void test_devctl_kstack_gated(void) {
+    struct Thread *t = current_thread();
+    u64 saved = __atomic_load_n(&t->proc->caps, __ATOMIC_ACQUIRE);
+
+    // DENY: kproc's CAP_ALL excludes the elevation-only CAP_HOSTOWNER.
+    struct Spoor *c = open_ctl_leaf("kstack");
+    char buf[512];
+    long denied = c ? devctl.read(c, buf, sizeof buf, 0) : 0;
+    if (c) spoor_clunk(c);
+
+    // ALLOW: the same read, elevated. Restore BEFORE the asserts so a failing
+    // assert can never leave kproc holding CAP_HOSTOWNER.
+    __atomic_store_n(&t->proc->caps, saved | CAP_HOSTOWNER, __ATOMIC_RELEASE);
+    struct Spoor *e = open_ctl_leaf("kstack");
+    long allowed = e ? devctl.read(e, buf, sizeof buf, 0) : -1;
+    __atomic_store_n(&t->proc->caps, saved, __ATOMIC_RELEASE);
+
+    TEST_ASSERT(denied < 0,
+                "F2: an unprivileged caller is DENIED /ctl/kstack");
+    TEST_ASSERT(e != NULL, "open /ctl/kstack (elevated)");
+    TEST_ASSERT(allowed > 0, "kstack read positive (elevated)");
+    TEST_ASSERT(contains(buf, (size_t)allowed, "usable:"), "has usable:");
+    TEST_ASSERT(contains(buf, (size_t)allowed, "peak:"),   "has peak:");
+    if (e) spoor_clunk(e);
+
+    // The mode must not lie about a file the caller cannot in fact read.
+    struct t_stat st;
+    struct Spoor *k = open_ctl_leaf("kstack");
+    TEST_ASSERT(k != NULL, "open /ctl/kstack for stat");
+    TEST_EXPECT_EQ(devctl.stat_native(k, &st), 0, "stat_native(kstack) ok");
+    TEST_EXPECT_EQ(st.mode, (u32)(T_S_IFREG | 0400u),
+                   "kstack = S_IFREG|0400 (the CAP_HOSTOWNER gate, stated)");
+    if (k) spoor_clunk(k);
 }
 
 void test_devctl_read_sched_format(void) {

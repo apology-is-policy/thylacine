@@ -23,7 +23,6 @@ use beacon::verbs::{parse as parse_verbs, Rule};
 use halcyond::chrome::{abbrev_home, parse_leaves_all, parse_rect, program_name};
 use halcyond::downq::DownQueue;
 use halcyond::input::{map_key, normal_key, Mode, NormalAct};
-use halcyond::layout::layout_block;
 use halcyond::layout::{sheet_for, Sheet};
 use halcyond::menu::{
     build_menu, hit_run, obj_of, run_rect, runs_on_row, step_run_with, Action, Menu, ObjRun,
@@ -37,6 +36,7 @@ use halcyond::tiles::{plan_tiles, tile_command};
 use kaua_term::wire::{encode_input, parse_record, FrameDecoder, Input};
 use kaua_term::{Record, ScreenMode};
 use libhalcyon::scale;
+use libhalcyon::instrument;
 use libhalcyon::theme::{self, env_palette};
 use libthyla_rs::fs::{self, File};
 use libthyla_rs::io::Write;
@@ -50,10 +50,14 @@ use tapestry::{
     TEV_LAYOUT, TEV_PTR_BTN, TEV_PTR_MOVE,
 };
 
-use crate::chromeset::{self, read_file};
+use crate::chromeset::{self, read_file, ChromeAction};
+use crate::railset;
 use crate::paneplace::PanePlaceServer;
 use crate::menuset::{self, MenuEvent};
 use crate::statusset;
+use halcyond::chrome::{Described, Fate};
+use halcyond::menu::{tile_menu, workspace_menu};
+use halcyond::rail::{hints_from_chords, reset_plan, RailModel};
 
 /// evdev BTN_LEFT (the tapestry PTR_BTN `code`).
 const BTN_LEFT: u16 = 0x110;
@@ -81,9 +85,7 @@ const CONNECT_TRIES: u32 = 200;
 const CONNECT_DELAY_MS: u64 = 25;
 /// A layout verb (`close`) can be refused E_AGAIN by the compositor's
 /// per-pass mutation budget; retry through it, as the restore tool does.
-const VERB_RETRIES: u32 = 40;
-const VERB_NAP_MS: u64 = 10;
-const E_AGAIN: i64 = -11;
+use crate::chromeset::{E_AGAIN, VERB_NAP_MS, VERB_RETRIES};
 /// A never-succeeding present is a wedge, not a dropped frame (#31); this many
 /// consecutive failures on any tile ends the session rather than spinning.
 const PRESENT_FAILS_FATAL: u32 = 240;
@@ -132,6 +134,18 @@ const HALCYON_PALETTE_ENV_PATH: &str = "/env/HALCYON_PALETTE";
 /// preference, never a source -- the compositor stays the authority and its
 /// ctl the channel, so the carve and the paint cannot disagree.
 const HALCYON_SCALE_ENV_PATH: &str = "/env/HALCYON_SCALE";
+/// The user's motion preference (HALCYON-INSTRUMENT 9.5 as amended at I-8):
+/// motion is ON and `0` is the opt-out. Read at session start exactly as the
+/// scale is, and for the same stated reason -- a user's preference rather
+/// than a guess made on their behalf.
+///
+/// It is read ONCE, here, and used twice: halcyond's own paint (section 10's
+/// caret blink) and the compositor's, which learns it as the `motion` verb.
+/// tapestryd reads no file of any kind, so section 9.5's "the compositor
+/// following" can only mean the seat forwarding what it read -- one reader of
+/// the user's preference, one owner of the motion it drives (section 10 as
+/// amended 2026-09-16).
+const HALCYON_MOTION_ENV_PATH: &str = "/env/HALCYON_MOTION";
 /// The per-pane inline-media place address (I-47, HALCYON.md 14.7.2):
 /// `/srv/halcyon-<user>/<hex(token)>/place`. Written per tile BEFORE its spawn
 /// and removed after -- the child snapshots it via the /env copy-at-spawn, so
@@ -148,20 +162,62 @@ const DECLARE_TRIES: u32 = 40;
 /// retried through the per-pass mutation budget. Best-effort: a wedged
 /// compositor is caught by the ring/poll error path, and the `closed` set is
 /// the authoritative respawn guard regardless of this verb's fate.
-fn layout_verb(troot: i64, cmd: &str) {
-    for _ in 0..VERB_RETRIES {
-        let fd =
-            unsafe { libthyla_rs::t_open(troot, b"layout".as_ptr(), 5, libthyla_rs::T_OWRITE) };
+fn layout_verb(troot: i64, cmd: &str) -> bool {
+    layout_verb_in(troot, cmd, &mut chromeset::VerbBudget::pass())
+}
+
+/// `layout_verb` on a shared retry budget: a plan of many verbs (the reset)
+/// naps at most one verb's worth across the whole pass (r2 C-F8).
+fn layout_verb_in(troot: i64, cmd: &str, budget: &mut chromeset::VerbBudget) -> bool {
+    loop {
+        // The path's LENGTH is the slice's: this said 5 for six bytes since
+        // I-3 -- opening `layou` -- and no gate had written a layout verb
+        // from the session until I-4's rail pressed SPLIT H.
+        let path = b"layout";
+        let fd = unsafe { libthyla_rs::t_open(troot, path.as_ptr(), path.len(), libthyla_rs::T_OWRITE) };
         if fd < 0 {
-            return;
+            say!("halcyond: layout verb \"{}\": open failed rc {}", cmd, fd);
+            return false;
         }
         let rc = unsafe { t_write(fd, cmd.as_ptr(), cmd.len()) };
         unsafe { libthyla_rs::t_close(fd) };
         if rc != E_AGAIN {
-            return;
+            if rc < 0 {
+                say!("halcyond: layout verb \"{}\" refused rc {}", cmd, rc);
+            }
+            return rc >= 0;
+        }
+        if !budget.nap() {
+            say!("halcyond: layout verb \"{}\" still busy after {} tries (the pass's budget)", cmd, VERB_RETRIES);
+            return false;
         }
         let _ = sleep(Duration::from_millis(VERB_NAP_MS));
     }
+}
+
+/// HALCYON-INSTRUMENT 14.9: parse a tile menu action `tile <verb> <id>`.
+fn tile_verb(act: &str) -> Option<(&str, u32)> {
+    let mut it = act.strip_prefix("tile ")?.split_ascii_whitespace();
+    let verb = it.next()?;
+    let id: u32 = it.next()?.parse().ok()?;
+    if it.next().is_some() {
+        return None;
+    }
+    Some((verb, id))
+}
+
+/// The size of the stack holding leaf `id`, off the layout (1 for a stack
+/// of one; the final-tile rule's input when a menu choice, not a header
+/// press, asks for a close).
+pub(crate) fn tile_count(troot: i64, id: u32) -> u32 {
+    read_file(troot, "layout")
+        .map(|l| {
+            halcyond::chrome::parse_tree(&l)
+                .iter()
+                .find(|t| t.leaf.id == id)
+                .map_or(1, |t| t.count)
+        })
+        .unwrap_or(1)
 }
 
 /// Mint + read the one-shot placement claim on leaf `id` (`pane/<id>/claim`).
@@ -226,11 +282,19 @@ struct SessionTile {
     scroll_up: i32,
     /// The pointer's last surface position (a BTN event carries none).
     ptr: (i32, i32),
-    /// None = live; Some(code) = the child is gone. A clean exit closes the
-    /// leaf immediately (reaped there); a crash keeps the tile as a frozen
-    /// affordance (14.11.10) -- its pipe skipped, its last frame held -- reaped
-    /// only when the user closes the leaf.
+    /// None = live; Some(code) = the child is gone. Under the legacy
+    /// profile a clean exit closes the leaf immediately (reaped there) and
+    /// anything else keeps the tile as a frozen affordance (14.11.10) --
+    /// its pipe skipped, its last frame held -- reaped only when the user
+    /// closes the leaf. Under Instrument every gone child is a RETAINED
+    /// tile (HALCYON-INSTRUMENT 14.6) with a `fate`.
     exit: Option<i32>,
+    /// HALCYON-INSTRUMENT 14.6: what became of the child, once gone -- the
+    /// header's metadata word and the body's mark (`Tile.fate` mirrors it).
+    fate: Fate,
+    /// The command line the tile hosts (`tile_command`), kept for a
+    /// Restart (14.6: a distinct NEW process in the same leaf).
+    argv: Vec<String>,
     /// The tile's program (its command line's first word: `ut` for the
     /// shell) -- the strip's name (HALCYON-VISUAL 4.1).
     program: String,
@@ -243,13 +307,17 @@ struct SessionTile {
 enum Ingested {
     /// Records applied (or a harmless empty wake); the tile is live.
     Live,
-    /// `Control::Exit` with a clean status: the shell exited normally, so the
-    /// pane closes (tmux rule) -- collapse the leaf, reap the tile.
-    CleanExit(i32),
-    /// An up-pipe EOF with a non-clean prior exit, or a `WireError` (an
-    /// oversize/malformed frame from the crash-isolated parser): keep the tile
-    /// frozen as an affordance.
-    Crash,
+    /// `Control::Exit` with this status (interleaved, or at the EOF that
+    /// follows it): the tile's program ended. Legacy: a clean one closes
+    /// the pane (tmux rule), a non-clean one freezes; Instrument: retained
+    /// as `EXIT n` (14.6).
+    Ended(i32),
+    /// An up-pipe EOF with NO exit reported: the connection went without a
+    /// word (14.6 `DISCONNECTED`; legacy: frozen).
+    Disconnected,
+    /// A `WireError` (an oversize / malformed frame from the crash-isolated
+    /// parser): the stream desynced (14.6 `CRASHED`; legacy: frozen).
+    Crashed,
 }
 
 impl SessionTile {
@@ -358,7 +426,40 @@ impl SessionTile {
             scroll_up: 0,
             ptr: (0, 0),
             exit: None,
+            fate: Fate::Live,
+            argv: argv.to_vec(),
         })
+    }
+
+    /// Mark the tile retained with `fate` (14.6): the child is killed and
+    /// reaped if it can be (a gone child costs one non-blocking wait), the
+    /// pipe drops out of the poll set (`exit`), the body repaints with its
+    /// state mark and no caret, the header's metadata says the word.
+    fn retain(&mut self, fate: Fate, code: i32) {
+        self.exit = Some(code);
+        self.fate = fate;
+        self.tile.fate = fate;
+        self.dirty = true;
+        let _ = self.child.kill();
+        let _ = self.child.try_wait();
+    }
+
+    /// Take the surface and the command line out of a retained tile for a
+    /// Restart (14.6): the terminal is hung up and reaped (killed past the
+    /// grace); the surface stays live, so the leaf keeps its place, its
+    /// weight and its frame.
+    fn into_parts(self) -> (Surface, Vec<String>) {
+        let SessionTile {
+            surf,
+            argv,
+            mut child,
+            _down,
+            leaf,
+            ..
+        } = self;
+        drop(_down);
+        end_terminal(&mut child, leaf);
+        (surf, argv)
     }
 
     /// The Normal-mode cursor as `Tile::render` paints it.
@@ -442,7 +543,7 @@ impl SessionTile {
         } else {
             sb.frozen_blocks().get(index)?
         };
-        Some(layout_block(b, self.surf.w as i32, sheet, gs))
+        Some(halcyond::layout::layout_block_media(b, self.surf.w as i32, sheet, gs, Some(&self.tile.media)))
     }
 
     /// A KEY in Normal mode, or the Esc that enters it (the caller gates on
@@ -733,6 +834,18 @@ impl SessionTile {
             wire_out.clear();
             encode_input(&Input::Resize { cols: nc, rows: nr }, wire_out);
             self.queue_resize(wire_out);
+            // The resize's witness (test builds): a divider drag reaches a
+            // tile as a CONFIGURE, and this is where it becomes the pts
+            // winsize (HALCYON-INSTRUMENT 9.2, the existing path).
+            #[cfg(feature = "test-mode")]
+            say!(
+                "halcyond: session tile leaf={} fit {}x{} px -> {} cols {} rows",
+                self.leaf,
+                self.surf.w,
+                self.surf.h,
+                nc,
+                nr
+            );
         }
     }
 
@@ -784,12 +897,8 @@ impl SessionTile {
             // EOF. If the child already reported a clean exit we handled it;
             // an unexpected EOF (no Exit record) is an abnormal death.
             return match self.tile.exited() {
-                Some(0) => Ingested::CleanExit(0),
-                Some(c) => {
-                    let _ = c;
-                    Ingested::Crash
-                }
-                None => Ingested::Crash,
+                Some(c) => Ingested::Ended(c),
+                None => Ingested::Disconnected,
             };
         }
         self.dec.push(&buf[..n as usize]);
@@ -820,10 +929,10 @@ impl SessionTile {
                         self.dirty = true;
                     }
                     // A malformed record from the untrusted parser: desync.
-                    Err(_) => return Ingested::Crash,
+                    Err(_) => return Ingested::Crashed,
                 },
                 // An oversize frame: unrecoverable stream desync.
-                Some(Err(_)) => return Ingested::Crash,
+                Some(Err(_)) => return Ingested::Crashed,
                 None => break,
             }
         }
@@ -847,10 +956,9 @@ impl SessionTile {
                 );
             }
         }
-        // A clean exit arrived interleaved in the record stream.
+        // An exit arrived interleaved in the record stream.
         match self.tile.exited() {
-            Some(0) => Ingested::CleanExit(0),
-            Some(_) => Ingested::Crash,
+            Some(c) => Ingested::Ended(c),
             None => Ingested::Live,
         }
     }
@@ -869,6 +977,12 @@ impl SessionTile {
     /// further key (see `DownQueue`).
     fn queue_resize(&mut self, bytes: &[u8]) {
         self.down.push_resize(bytes);
+    }
+
+    /// HALCYON-INSTRUMENT 9.4 (I-7): tell the tile's pts host the new
+    /// palette; never dropped, ahead of keys (like the geometry record).
+    fn queue_palette(&mut self, bytes: &[u8]) {
+        self.down.push_palette(bytes);
     }
 
     /// Deliver queued input without ever blocking the compositor: natives
@@ -897,12 +1011,52 @@ impl SessionTile {
         }
     }
 
-    /// Surface + pipe ends drop (Surface::drop says `destroy`; the pipe fds
-    /// close, EOFing the kaua-term's input pump if it still lives).
-    fn teardown(mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+    /// The terminal is hung up and reaped; the surface and the pipe ends
+    /// drop (Surface::drop says `destroy`).
+    fn teardown(self) {
+        let SessionTile {
+            mut child,
+            _down,
+            leaf,
+            ..
+        } = self;
+        drop(_down);
+        end_terminal(&mut child, leaf);
     }
+}
+
+/// The teardown's grace: on the down channel's EOF the kaua-term hangs its
+/// program up and exits by itself once it has REAPED it (the program's
+/// zombie is its parent's to collect, never joey's -- an orphaned zombie
+/// keeps its namespace, the user's home mount, until init reaps it, and init
+/// cannot while login waits on the session: the logout stall measured at
+/// I-4, the r1 B-F4 finding). Past the grace the kill is the fallback, for a
+/// terminal that does not come down (a program whose children hold the pts).
+const TEARDOWN_GRACE_MS: u64 = 2_000;
+const TEARDOWN_POLL_MS: u64 = 25;
+
+/// Hang up: `down` is already closed by the caller. Wait for the terminal
+/// to exit within the grace, else kill it; reaped either way.
+fn end_terminal(child: &mut Child, leaf: u32) {
+    let mut waited = 0u64;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => {
+                #[cfg(feature = "test-mode")]
+                say!("halcyond: tile {} hung up ({} ms)", leaf, waited);
+                return;
+            }
+            Ok(None) => {}
+        }
+        if waited >= TEARDOWN_GRACE_MS {
+            break;
+        }
+        let _ = sleep(Duration::from_millis(TEARDOWN_POLL_MS));
+        waited += TEARDOWN_POLL_MS;
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    say!("halcyond: tile {} killed after the hangup grace", leaf);
 }
 
 /// The session's user name for `/srv/halcyon-<user>` (I-47, 14.7.2), from the
@@ -994,6 +1148,38 @@ fn reconcile(
     let plan = plan_tiles(&leaves, &have, &closed_v);
 
     for leaf in plan.drop {
+        // HALCYON-WORKSPACES W-3: `plan.drop` is a CANDIDATE list -- it means
+        // only "absent from the rows we were given", and since W-1a those rows
+        // are the ACTIVE root's. Absence therefore means "not on screen", never
+        // "gone". The global `pane/` tree is the existence oracle: W-1a kept
+        // `live_ids` workspace-spanning on purpose and the readdir enumerates
+        // it, so a DORMANT tile still walks and a closed one does not.
+        //
+        // Without this probe a workspace switch dropped EVERY tile, tore each
+        // one down, and then broke the session loop on `tiles.is_empty()` --
+        // a full logout on a single keystroke. That is the same class as the
+        // two defects W-1a found by reading: invisible until a second root
+        // exists.
+        if read_file(troot, &format!("pane/{}/geometry", leaf)).is_some() {
+            continue;
+        }
+        // Round 1 F5: `read_file` answers None for a failed OPEN, a failed
+        // READ and non-UTF-8 alike, so "it is gone" and "I could not ask"
+        // were the same answer. A transient failure (fid budget, a wedged
+        // conn, an interrupted read) during the reconcile that follows a
+        // switch would drop EVERY tile, latch each id into `closed`
+        // PERMANENTLY (ids are never reused), and then break the session
+        // loop on `tiles.is_empty()` -- the same full logout W-3 fixed,
+        // reached from an error instead of a keystroke.
+        //
+        // A negative needs a POSITIVE CONTROL one variable away: `layout` is
+        // served by the same conn and always exists, so if it cannot be read
+        // either, this is "could not ask" and nothing is torn down this pass.
+        // A tile wrongly kept costs one reconcile; TEV_CLOSE remains the
+        // authoritative teardown signal either way.
+        if read_file(troot, "layout").is_none() {
+            continue;
+        }
         if let Some(t) = tiles.remove(&leaf) {
             closed.insert(leaf);
             if let Some(p) = places.as_mut() {
@@ -1065,7 +1251,7 @@ fn reconcile(
     // Every tile's share of the ONE scrollback budget follows the tile count.
     let share = SESSION_SCROLLBACK_BUDGET / tiles.len().max(1);
     for t in tiles.values_mut() {
-        t.tile.scrollback.set_max_cost(share);
+        t.tile.set_content_budget(share);
     }
 }
 
@@ -1087,13 +1273,13 @@ fn reconcile(
 /// attempt and gave up for the life of the boot -- and the console's push is
 /// the LOAD-BEARING one, since tapestryd comes up before the pool it would
 /// read the theme file from is mounted. One implementation, both renderers.
-pub(crate) fn push_theme(ring: &EventRing, theme: &libhalcyon::theme::Theme) {
-    let cmd = format!("theme {}", libhalcyon::theme::to_wire(theme));
+pub(crate) fn push_theme(ring: &EventRing, bundle: &libhalcyon::instrument::Bundle) -> bool {
+    let cmd = format!("theme {}", libhalcyon::theme::to_wire(bundle));
     for _ in 0..VERB_RETRIES {
         match ring.global_ctl(&cmd) {
             Ok(()) => {
                 say!("halcyond: theme pushed to the compositor");
-                return;
+                return true;
             }
             Err(TapError::Busy) => {
                 let _ = sleep(Duration::from_millis(VERB_NAP_MS));
@@ -1103,11 +1289,104 @@ pub(crate) fn push_theme(ring: &EventRing, theme: &libhalcyon::theme::Theme) {
                     "halcyond: theme push refused ({:?}) -- the chrome keeps its own",
                     e
                 );
-                return;
+                return false;
             }
         }
     }
     say!("halcyond: theme push kept busy -- the chrome keeps its own");
+    false
+}
+
+/// HALCYON-INSTRUMENT 9.4 (I-7): the picker's registry -- every
+/// `/lib/halcyon/themes/*.toml` that loads as an Instrument theme, as a
+/// `PickerTheme` (id, name, tagline, group, rank; the four miniature colours
+/// = the theme's own desktop / open / structure / amber). A file that fails
+/// to load, or is a legacy-schema theme, is skipped. Read at every open (13
+/// small files), so a theme dropped in appears without a restart.
+pub(crate) fn read_gallery() -> Vec<halcyond::picker::PickerTheme> {
+    let mut out = Vec::new();
+    let rd = match fs::read_dir(instrument::GALLERY_DIR) {
+        Ok(rd) => rd,
+        Err(_) => return out,
+    };
+    for ent in rd.flatten() {
+        let name = ent.file_name();
+        // The preview set must equal the committable set: require the stem to be
+        // a gallery id (gallery_bundle re-validates the same at commit), which
+        // also holds the dirent name to a single path component -- a hostile 9P
+        // server bound over the gallery dir cannot inject a "../" name here
+        // (defense in depth; halcyond has only the user's own authority).
+        let Some(stem) = name.strip_suffix(".toml") else {
+            continue;
+        };
+        if !instrument::is_gallery_id(stem) {
+            continue;
+        }
+        let mut path = String::from(instrument::GALLERY_DIR);
+        path.push('/');
+        path.push_str(name);
+        let Some(text) = read_file(libthyla_rs::T_WALK_OPEN_FROM_ROOT, &path) else {
+            continue;
+        };
+        if let Ok(instrument::LoadedAny::Instrument(l)) = theme::load(&text) {
+            out.push(halcyond::picker::PickerTheme {
+                id: l.id,
+                name: l.name,
+                tagline: l.tagline,
+                group: l.group,
+                rank: l.rank,
+                pv_bg: l.theme.desktop,
+                pv_pane: l.theme.open,
+                pv_rule: l.theme.structure,
+                pv_signal: l.theme.amber,
+            });
+        }
+    }
+    out
+}
+
+/// The resolved bundle for a gallery id under `profile` (9.4's commit): read
+/// the gallery file, load it, project to the profile. `(bundle, name)`, or
+/// None (the id names no loadable gallery file).
+pub(crate) fn gallery_bundle(id: &str, profile: instrument::Profile) -> Option<(instrument::Bundle, String)> {
+    let path = instrument::gallery_path(id)?;
+    let text = read_file(libthyla_rs::T_WALK_OPEN_FROM_ROOT, &path)?;
+    let any = theme::load(&text).ok()?;
+    let name = String::from(any.name());
+    Some((any.bundle(profile), name))
+}
+
+/// Durable-write the picker's word to `$HOME/lib/halcyon/theme` (9.4): mkdir
+/// -p the two components, then tmp + fsync + rename + fsync on the SAME
+/// OWRITE fd (the aurora-config idiom). False on any failure -- the theme is
+/// in force either way; only its persistence failed.
+fn write_user_pick(home: Option<&str>, id: &str) -> bool {
+    let Some(home) = home else { return false };
+    let base = alloc::format!("{}/lib", home.trim_end_matches('/'));
+    let dir = alloc::format!("{}/halcyon", base);
+    for d in [&base, &dir] {
+        match fs::create_dir(d) {
+            Ok(()) => {}
+            Err(e) if e == libthyla_rs::err::Error::Exists => {}
+            Err(_) => return false,
+        }
+    }
+    let path = alloc::format!("{}/theme", dir);
+    let tmp = alloc::format!("{}.tmp", path);
+    let mut f = match File::create(&tmp) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    if f.write_all(id.as_bytes()).is_err() {
+        return false;
+    }
+    let _ = unsafe { libthyla_rs::t_fsync(f.as_raw_fd() as i64, 0) };
+    if fs::rename(&tmp, &path).is_err() {
+        return false;
+    }
+    let ok = unsafe { libthyla_rs::t_fsync(f.as_raw_fd() as i64, 0) == 0 };
+    drop(f);
+    ok
 }
 
 /// HALCYON-SCALE 6: the user's `/env/HALCYON_SCALE` preference, written
@@ -1150,6 +1429,64 @@ fn request_env_scale(ring: &EventRing) {
     say!("halcyond: scale {} not admitted (budget) ({})", pct, HALCYON_SCALE_ENV_PATH);
 }
 
+/// Forward the motion preference to the compositor as the gated `motion`
+/// verb (section 10 as amended). The seat-held-while-hosting rule admits it
+/// exactly as it admits `scale`; undeclared it would be refused, so the
+/// caller gates on `declared` and the compositor's own default (on) stands.
+///
+/// Sent even when it agrees with that default: the compositor cannot tell
+/// "the user asked for motion" from "nobody has said anything yet", and a
+/// preference that is only transmitted when it differs is a preference the
+/// receiver can never distinguish from silence.
+fn request_env_motion(ring: &EventRing, on: bool) {
+    let cmd = if on { "motion 1" } else { "motion 0" };
+    for _ in 0..VERB_RETRIES {
+        match ring.global_ctl(cmd) {
+            Ok(()) => {
+                say!("halcyond: {} forwarded ({})", cmd, HALCYON_MOTION_ENV_PATH);
+                return;
+            }
+            Err(TapError::Busy) => {
+                let _ = sleep(Duration::from_millis(VERB_NAP_MS));
+            }
+            Err(e) => {
+                say!("halcyond: {} refused {:?}", cmd, e);
+                return;
+            }
+        }
+    }
+    say!("halcyond: {} not admitted (budget)", cmd);
+}
+
+/// The motion preference's WORD, said once with the posture it resolves to.
+///
+/// The word is kept rather than the verdict because `motion::admitted` folds
+/// it with a live clock sample, and the clock is the second condition:
+/// `monotonic_ns` is fail-soft 0, so a session that cannot read it degrades
+/// to 9.5's static caret -- a mode scripture already specifies -- instead of
+/// to a caret frozen mid-step, which would read as a hung compositor.
+fn env_motion_word() -> Option<String> {
+    let word = read_file(libthyla_rs::T_WALK_OPEN_FROM_ROOT, HALCYON_MOTION_ENV_PATH);
+    let now = libthyla_rs::time::monotonic_ns();
+    // The STATED preference outranks the clock in this message, though both
+    // turn motion off: a user who wrote `0` and is then told the clock is
+    // unreadable would go hunting a fault they caused on purpose.
+    let why = match (word.as_deref().map(str::trim), now) {
+        (Some("0"), _) => "=0",
+        (_, 0) => "monotonic clock unreadable",
+        (None, _) => "absent: on by default since I-8",
+        (Some(w), _) if w.is_empty() => "empty: not the opt-out word",
+        _ => "set",
+    };
+    say!(
+        "halcyond: motion {} ({} {})",
+        if libhalcyon::motion::admitted(word.as_deref(), now) { "on" } else { "off" },
+        HALCYON_MOTION_ENV_PATH,
+        why
+    );
+    word
+}
+
 /// HALCYON-SCALE 6: the compositor's scale changed (its ctl says a new
 /// percent): rebuild the render brain at it -- the Sheet (a new generation,
 /// so every layout cache re-lays), the glyph source (the mono bakes for the
@@ -1159,6 +1496,7 @@ fn request_env_scale(ring: &EventRing) {
 /// bar and the menu are the caller's (they live beside the tiles).
 fn rescale(
     pct: u16,
+    display_w: u32,
     sheet: &mut Sheet,
     gs: &mut GlyphSource,
     geom: &mut Geom,
@@ -1167,11 +1505,11 @@ fn rescale(
 ) {
     let from = sheet.scale;
     let gen = sheet.gen + 1;
-    let t = sheet.theme;
-    *sheet = sheet_for(&t, pct);
+    *sheet = sheet_for(&sheet.bundle(), pct, display_w);
     sheet.gen = gen;
     gs.set_scale(pct);
     gs.set_smooth(sheet.smooth_mem);
+    gs.set_kerning(sheet.kerning);
     let (cw, ch, _) = gs.mono_cell();
     geom.cell_w = cw;
     geom.cell_h = ch;
@@ -1273,7 +1611,7 @@ pub fn run(home: Option<String>) -> i64 {
     // console render brain) -- ONE mono glyph source + Daylight sheet shared
     // across every tile.
     let mut gs = GlyphSource::new_vendored(512);
-    if gs.face_count() != 4 {
+    if gs.face_count() != halcyond::raster::VENDORED_FACES {
         say!("halcyond: FAIL vendored face parse");
         return 1;
     }
@@ -1285,6 +1623,18 @@ pub fn run(home: Option<String>) -> i64 {
     if declared {
         request_env_scale(&ring);
     }
+    // Read unconditionally -- halcyond's own caret needs it whether or not the
+    // declare took -- but FORWARDED only once declared and hosting, which is
+    // the only state in which the compositor will accept the verb.
+    let motion_word = env_motion_word();
+    if declared {
+        // The STATED word, not `admitted`'s verdict: the clock conjunct is
+        // the reader's, and the compositor's clock is its own frame tick.
+        request_env_motion(&ring, libhalcyon::motion::stated(motion_word.as_deref()));
+    }
+    // A scale the table does not know is kept out of the sheet (r2 B-F11:
+    // the /env path validated, the compositor's did not); said once per value.
+    let mut scale_refused: Option<u16> = None;
     let mut display = ring.display_info().unwrap_or(DisplayInfo {
         w: root_surf.w,
         h: root_surf.h,
@@ -1297,34 +1647,67 @@ pub fn run(home: Option<String>) -> i64 {
     // nothing can remove. Every note is SAID -- a refused theme file that
     // fell back quietly is indistinguishable from one that applied and
     // happened to look the same (4.2).
-    let resolved = theme::resolve(
-        read_file(libthyla_rs::T_WALK_OPEN_FROM_ROOT, theme::SYSTEM_THEME_PATH).as_deref(),
+    // Since I-1 the resolution is a BUNDLE (HALCYON-INSTRUMENT 4.1): the
+    // profile word (user, then system), then the theme -- the picker's
+    // gallery choice, the user's file, the system's -- in either schema, the
+    // other side projected. The pick is a WORD; it becomes a path only once
+    // `gallery_path` has accepted it as an id (never `../`, never a slash).
+    let under_home = |rel: &str| {
         home.as_deref()
-            .map(|h| alloc::format!("{}{}", h.trim_end_matches('/'), theme::USER_THEME_REL))
+            .map(|h| alloc::format!("{}{}", h.trim_end_matches('/'), rel))
             .and_then(|p| read_file(libthyla_rs::T_WALK_OPEN_FROM_ROOT, &p))
-            .as_deref(),
-    );
+    };
+    let system_profile = read_file(libthyla_rs::T_WALK_OPEN_FROM_ROOT, instrument::SYSTEM_PROFILE_PATH);
+    let user_profile = under_home(instrument::USER_PROFILE_REL);
+    let user_pick = under_home(instrument::USER_PICK_REL);
+    let pick_file = user_pick
+        .as_deref()
+        .and_then(instrument::pick_id)
+        .and_then(instrument::gallery_path)
+        .and_then(|p| read_file(libthyla_rs::T_WALK_OPEN_FROM_ROOT, &p));
+    let system_file = read_file(libthyla_rs::T_WALK_OPEN_FROM_ROOT, theme::SYSTEM_THEME_PATH);
+    let user_file = under_home(theme::USER_THEME_REL);
+    let resolved = instrument::resolve_bundle(instrument::Sources {
+        system_profile: system_profile.as_deref(),
+        user_profile: user_profile.as_deref(),
+        user_pick: user_pick.as_deref(),
+        pick_file: pick_file.as_deref(),
+        user_file: user_file.as_deref(),
+        system_file: system_file.as_deref(),
+    });
     for n in &resolved.notes {
         say!("halcyond: {}", n);
     }
     say!(
-        "halcyond: theme {} ({:?}, {} inherited)",
+        "halcyond: theme {} ({:?}, {:?}, {} inherited); profile {} ({:?})",
         if resolved.name.is_empty() {
             "built-in"
         } else {
             &resolved.name
         },
-        resolved.source,
-        resolved.inherited.len()
+        resolved.theme_tier,
+        resolved.schema,
+        resolved.inherited.len(),
+        resolved.bundle.profile.word(),
+        resolved.profile_tier
     );
-    let theme = resolved.theme;
+    // HALCYON-INSTRUMENT 8.1: the theme's name, the rail's theme control.
+    let mut current_theme_id = resolved.id.clone();
+    let mut theme_name = if resolved.name.is_empty() {
+        String::from("built-in")
+    } else {
+        resolved.name.clone()
+    };
+    let bundle = resolved.bundle;
+    let theme = bundle.theme;
     // The compositor paints the chrome around our panes and cannot read the
     // user's file; a declared seat is the only party that can tell it.
     if declared {
-        push_theme(&ring, &theme);
+        let _ = push_theme(&ring, &bundle);
     }
-    let mut sheet = sheet_for(&theme, display.scale);
+    let mut sheet = sheet_for(&bundle, display.scale, display.w);
     gs.set_smooth(sheet.smooth_mem);
+    gs.set_kerning(sheet.kerning);
     let (cell_w, cell_h, _) = gs.mono_cell();
     let (disp_w, disp_h) = (root_surf.w, root_surf.h);
     let mut geom = Geom {
@@ -1358,13 +1741,16 @@ pub fn run(home: Option<String>) -> i64 {
     {
         say!("halcyond: could not mark {}", SESSION_ENV_PATH);
     }
-    // s7a-3: publish the Daylight palette so a tile's programs (nora) follow the
-    // session theme. Written BEFORE the first tile spawn, so every descendant
-    // inherits it via /env; best-effort, an unset value just leaves the program
-    // on its own default.
-    // DERIVED from the resolved theme (3.5), not a second hand-kept list:
-    // one direction, file -> Theme -> env, never back.
-    let palette = env_palette(&theme);
+    // s7a-3: publish the session palette so a tile's programs (nora, ut)
+    // follow the session theme. Written BEFORE the first tile spawn, so every
+    // descendant inherits it via /env; best-effort, an unset value just leaves
+    // the program on its own default.
+    // DERIVED from the resolved bundle (3.5), not a second hand-kept list:
+    // one direction, file -> Bundle -> env, never back. Keyed on the PROFILE:
+    // under Instrument the export also carries the prompt roles and the
+    // class-named syntax roles (HALCYON-INSTRUMENT 7.4), under legacy the
+    // eleven it always did.
+    let palette = env_palette(&bundle);
     match File::create(HALCYON_PALETTE_ENV_PATH).and_then(|mut f| f.write_all(palette.as_bytes())) {
         Ok(()) => say!(
             "halcyond: palette published ({} bytes) to {}",
@@ -1417,6 +1803,16 @@ pub fn run(home: Option<String>) -> i64 {
     say!("halcyond: {} verb rules loaded", rules.len());
     let mut menus = menuset::MenuSet::new(ring.clone());
     let mut menu_leaf: Option<u32> = None;
+    // HALCYON-INSTRUMENT I-3: header actions awaiting the pass that acts on
+    // them (the pump's, and the tile menu's choices), and a Restart request.
+    let mut tile_actions: Vec<ChromeAction> = Vec::new();
+    let mut restart_req: Option<u32> = None;
+    // HALCYON-INSTRUMENT 14.5 (I-7): the tile a running-close confirmation is
+    // asking about ((id, count)); the plan runs on the dialog's `close` tag.
+    // (pane, count, protected): `protected` is 6.5's final-tile rule, which
+    // the header's x carries and the Super+Q chord deliberately does not.
+    let mut pending_close: Option<(u32, u32, bool)> = None;
+    let inst_profile = bundle.profile == instrument::Profile::Instrument;
     // H-3b/H-3d: the per-leaf tag bars + the one display status bar, on the SAME
     // session ring (the H-3c-2 event set: their CONFIGUREs wake the unified
     // poll). The session compositor wires the Daylight chrome the single-tile
@@ -1425,6 +1821,11 @@ pub fn run(home: Option<String>) -> i64 {
     // + painting here.
     let mut chrome = chromeset::ChromeSet::new(ring.clone());
     let mut status = statusset::StatusBar::new(ring.clone());
+    // HALCYON-INSTRUMENT 8: the top rail (a Role::Rail surface on the same
+    // ring, under Instrument only) and the footer's chord hints from the
+    // compositor's `chords` file, re-read with every relayout.
+    let mut rail = railset::RailBar::new(ring.clone());
+    let mut hints: Vec<(String, String)> = Vec::new();
     // The tile-status feed's one-shot refusal notice (the H-3b round F4
     // posture: a refusal drops that exit, the next exit mark retries).
     let mut status_refusal_said = false;
@@ -1438,6 +1839,12 @@ pub fn run(home: Option<String>) -> i64 {
     let mut chrome_dirty = true;
     let mut up_announced = false;
     let mut ingest_announced = false;
+    // The blink's POST-marker, in the same shape as the two above: `motion
+    // on` at startup says what was RESOLVED, this says a step actually
+    // reached a tile. Only the second one can tell a live blink from a lever
+    // that parsed and then animated nothing -- the whole chain (clock ->
+    // phase -> `paints_caret` -> dirty) has to have run for it to print.
+    let mut caret_announced = false;
     let mut present_fails: u32 = 0;
     let mut logout: Option<i32> = None;
     // The session init child (H-4c: rio's `-i` idiom), spawned once after the
@@ -1489,14 +1896,197 @@ pub fn run(home: Option<String>) -> i64 {
             MenuEvent::Chosen(Action::Internal(act)) => {
                 menus.close();
                 menu_leaf = None;
-                say!("halcyond: internal action {} ignored (session)", act);
+                // HALCYON-INSTRUMENT 14.9: the tile verb menu's items are
+                // `tile <verb> <id>`, interpreted here under the session's
+                // own authority -- never a shell command.
+                if let Some(n) = act.strip_prefix("workspace ") {
+                    // 14.1: the workspace list's choice, acted on under this
+                    // session's own authority -- the compositor's `workspace`
+                    // verb on the layout file (W-2b). This used to only SAY
+                    // the choice, which read as working precisely because the
+                    // list it came from was itself hardcoded to one row.
+                    let _ = layout_verb(troot, &format!("workspace {}", n.trim()));
+                    continue;
+                }
+                match tile_verb(&act) {
+                    Some(("close", id)) => tile_actions.push(ChromeAction::Close {
+                        id,
+                        count: tile_count(troot, id),
+                    }),
+                    Some(("restart", id)) => restart_req = Some(id),
+                    Some((verb, id)) => {
+                        say!("halcyond: tile {} {} is not available yet", verb, id)
+                    }
+                    None => say!("halcyond: internal action {} ignored (session)", act),
+                }
+            }
+            MenuEvent::ThemeChosen(id) => {
+                // HALCYON-INSTRUMENT 9.4 (I-7): the live theme transaction.
+                menus.close();
+                menu_leaf = None;
+                match gallery_bundle(&id, sheet.bundle().profile) {
+                    Some((newb, name)) if push_theme(&ring, &newb) => {
+                        let old_term = sheet.theme.terminal;
+                        // The push was ACCEPTED by the compositor (9.4 (b)):
+                        // only now does the seat move, so the chrome and the
+                        // panes can never disagree. A refused push (the arm
+                        // below) keeps the previous bundle whole.
+                        // Rebuild the render brain at the new theme (a new
+                        // generation: every cached layout re-lays in the new
+                        // colours); the geometry does not move.
+                        let gen = sheet.gen + 1;
+                        sheet = sheet_for(&newb, sheet.scale, sheet.display_w);
+                        sheet.gen = gen;
+                        gs.set_smooth(sheet.smooth_mem);
+                        gs.set_kerning(sheet.kerning);
+                        let new_term = sheet.theme.terminal;
+                        // Re-theme every tile's retained history in place and
+                        // tell its pts host the new palette (its own re-emit
+                        // overwrites the live grid).
+                        for t in tiles.values_mut() {
+                            t.tile.set_palette(old_term, new_term);
+                            wire_out.clear();
+                            encode_input(&Input::Palette(new_term), &mut wire_out);
+                            t.queue_palette(&wire_out);
+                            t.dirty = true;
+                        }
+                        // Re-publish /env for FUTURE spawns (a running
+                        // program is not reached -- 9.4 / 13).
+                        let palette = env_palette(&newb);
+                        let _ = File::create(HALCYON_PALETTE_ENV_PATH)
+                            .and_then(|mut f| f.write_all(palette.as_bytes()));
+                        chrome.invalidate();
+                        status.invalidate();
+                        rail.invalidate();
+                        chrome_dirty = true;
+                        current_theme_id = id.clone();
+                        theme_name = if name.is_empty() { String::from("built-in") } else { name };
+                        say!("halcyond: theme {} applied", id);
+                        // Only the session seat persists the pick (9.4).
+                        if write_user_pick(home.as_deref(), &id) {
+                            say!("halcyond: theme {} written", id);
+                            status.notify(&format!("THEME \u{b7} {}", theme_name.to_uppercase()), false);
+                        } else {
+                            say!("halcyond: theme {} not written (no home or write failed)", id);
+                            status.notify(&format!("THEME \u{b7} {} (NOT SAVED)", theme_name.to_uppercase()), true);
+                        }
+                    }
+                    Some(_) => {
+                        // gallery_bundle succeeded but the compositor refused
+                        // the push (E_PERM final, or the busy cadence spent):
+                        // the previous bundle, check and colours stand (9.4 (b)).
+                        say!("halcyond: theme {} refused by the compositor -- keeping the current", id);
+                        status.notify("THEME REFUSED", true);
+                    }
+                    None => {
+                        say!("halcyond: theme {} refused (no gallery file)", id);
+                        status.notify("THEME REFUSED", true);
+                    }
+                }
+            }
+            MenuEvent::Dialog(tag) => {
+                menus.close();
+                menu_leaf = None;
+                match tag.as_str() {
+                    "reset" => {
+                        let plan = read_file(troot, "layout").map(|l| reset_plan(&l)).unwrap_or_default();
+                        say!("halcyond: reset: {} verb(s)", plan.len());
+                        let planned = plan.len();
+                        let mut landed = 0usize;
+                        let mut budget = chromeset::VerbBudget::pass();
+                        for (id, verb) in plan {
+                            let (word, args) = verb.split_once(' ').unwrap_or((verb.as_str(), ""));
+                            let cmd = if args.is_empty() {
+                                format!("{} {}", word, id)
+                            } else {
+                                format!("{} {} {}", word, id, args)
+                            };
+                            if layout_verb_in(troot, &cmd, &mut budget) {
+                                relayout = true;
+                                landed += 1;
+                            }
+                        }
+                        if planned == 0 || landed == planned {
+                            status.notify("LAYOUT RESET", false);
+                        } else if landed > 0 {
+                            status.notify("LAYOUT RESET (PARTIAL)", true);
+                        } else {
+                            status.notify("RESET REFUSED", true);
+                        }
+                    }
+                    "close" => {
+                        if let Some((id, _, protected)) = pending_close.take() {
+                            // Re-derive the count at resolution, not the snapshot
+                            // taken when the dialog opened: the final-tile
+                            // protection must hold against the CURRENT tree.
+                            // Super+Q carries no such protection (6.5): it is
+                            // the structural act, and the only reading under
+                            // which a pane holding a RETAINED tile can be
+                            // removed at all.
+                            if protected && tile_count(troot, id) <= 1 {
+                                status.notify("FINAL TILE IS PROTECTED", true);
+                            } else {
+                                layout_verb(troot, &format!("close {}", id));
+                                relayout = true;
+                            }
+                        }
+                    }
+                    _ => {
+                        // Cancel (or an unknown tag): nothing.
+                        pending_close = None;
+                    }
+                }
+            }
+            MenuEvent::HelpClosed => {
+                // The reference's own x (or Enter / Space): this side
+                // dismisses, and the tile it covered repaints.
+                menus.close();
+                say!("halcyond: help closed");
+                if let Some(t) = menu_leaf.take().and_then(|l| tiles.get_mut(&l)) {
+                    t.dirty = true;
+                }
             }
             MenuEvent::Closed => {
+                // A dismissed dialog is a Cancel; drop any pending close.
+                pending_close = None;
                 if let Some(t) = menu_leaf.take().and_then(|l| tiles.get_mut(&l)) {
                     t.dirty = true;
                 }
             }
             MenuEvent::None => {}
+        }
+
+        // (0e) HALCYON-INSTRUMENT section 10's caret: `steps(2, start)` over
+        // 1100 ms with opacity 0 at 55 %. Resolved ONCE per pass from the
+        // monotonic clock -- the phase is free-running, as a CSS animation
+        // with no restart trigger is, so no caret carries an origin -- and
+        // PUSHED into the tiles, because a tick that marks nothing paints
+        // nothing: `render_if_dirty` returns early unless the tile is dirty,
+        // and the poll wake below would otherwise be a wake for no reason.
+        //
+        // `inst_profile`, not the sheet's, is the profile word here on
+        // purpose: it is what decides whether a dead child's tile is RETAINED
+        // (the two arms below), and `paints_caret`'s 14.6 conjunct reads the
+        // `fate` that retention sets. A caret that judged itself by a
+        // different word than the retention did could suppress on a tile the
+        // session never retained.
+        let now_ns = libthyla_rs::time::monotonic_ns();
+        let motion = libhalcyon::motion::admitted(motion_word.as_deref(), now_ns);
+        // Under reduced motion the caret is STATIC, which is painted, not
+        // absent (9.5) -- so the step's resting value is up, not down.
+        let caret_on = !motion || libhalcyon::motion::caret_visible(now_ns / 1_000_000);
+        for t in tiles.values_mut() {
+            if t.tile.set_caret_on(caret_on, inst_profile) {
+                t.dirty = true;
+                if !caret_announced {
+                    caret_announced = true;
+                    say!(
+                        "halcyond: session caret blink live (leaf {} -> {})",
+                        t.leaf,
+                        if caret_on { "on" } else { "off" }
+                    );
+                }
+            }
         }
 
         // (1) Render dirty tiles at the TOP: the root's first present precedes
@@ -1595,7 +2185,16 @@ pub fn run(home: Option<String>) -> i64 {
                         // press; the menu grabs input while placed).
                         TEV_PTR_BTN if t.exit.is_none() => {
                             if e.code == BTN_LEFT && e.value == 1 {
-                                if let Some(req) = t.click(&rules, &sheet, &mut gs) {
+                                let req = t.click(&rules, &sheet, &mut gs);
+                                // The receiver's witness (the compositor says
+                                // nothing for a press it delivers to content).
+                                #[cfg(feature = "test-mode")]
+                                say!(
+                                    "halcyond: tile {} click -> {}",
+                                    leaf,
+                                    if req.is_some() { "menu" } else { "no run" }
+                                );
+                                if let Some(req) = req {
                                     menu_req = Some((leaf, req));
                                 }
                             }
@@ -1683,15 +2282,39 @@ pub fn run(home: Option<String>) -> i64 {
                     display.h = di.h;
                     gs.set_display(di.w, di.h);
                 }
-                if di.scale != sheet.scale {
-                    rescale(di.scale, &mut sheet, &mut gs, &mut geom, &mut tiles, &mut wire_out);
+                if di.scale != sheet.scale && !scale::is_valid_pct(di.scale) {
+                    if scale_refused != Some(di.scale) {
+                        say!("halcyond: display scale {} refused (not in the table); keeping {}", di.scale, sheet.scale);
+                        scale_refused = Some(di.scale);
+                    }
+                } else if di.scale != sheet.scale {
+                    rescale(di.scale, di.w, &mut sheet, &mut gs, &mut geom, &mut tiles, &mut wire_out);
                     display.scale = di.scale;
+                    scale_refused = None;
                     menus.close();
                     menu_leaf = None;
                     chrome.invalidate();
                     status.invalidate();
+                    rail.invalidate();
+                } else if di.w != sheet.display_w {
+                    // HALCYON-INSTRUMENT 7.5: the document's paddings and
+                    // H1 follow the DISPLAY width, so a resize at the same
+                    // scale rebuilds the sheet (a new generation) and every
+                    // tile re-lays.
+                    let gen = sheet.gen + 1;
+                    sheet = sheet_for(&sheet.bundle(), sheet.scale, di.w);
+                    sheet.gen = gen;
+                    // The source follows the sheet in force at EVERY rebuild
+                    // (r2 B-F7), not only the scale's.
+                    gs.set_smooth(sheet.smooth_mem);
+                    gs.set_kerning(sheet.kerning);
+                    for t in tiles.values_mut() {
+                        t.tile.invalidate_heights();
+                        t.dirty = true;
+                    }
                 }
             }
+            hints = hints_from_chords(&read_file(troot, "chords").unwrap_or_default());
             // A relayout re-arms the status bar's mint retry (the console
             // path's H-3d F5 cadence): the compositor retires a bar of the
             // old height on a scale change, and the re-mint at the new one
@@ -1740,8 +2363,99 @@ pub fn run(home: Option<String>) -> i64 {
                     chrome_dirty = true;
                 }
             }
-            if chrome.pump() {
+            if chrome.pump(&sheet, &mut gs) {
                 chrome_dirty = true;
+            }
+            // HALCYON-INSTRUMENT 9.1 / 6.5 / 14.9 / 14.6: the header
+            // actions the pump collected, each a pane verb under THIS
+            // session's authority (the compositor judges every write; a
+            // refused one is a no-op here). Focus expands the tile (the
+            // container's `active` follows focus); `x` closes it through
+            // the tile's existing lifecycle unless it is its stack's final
+            // tile, which is protected (the status notice says so);
+            // a secondary press summons the tile menu; the placard's
+            // action re-admits a closed empty leaf to the spawn plan.
+            tile_actions.extend(chrome.take_actions());
+            for a in core::mem::take(&mut tile_actions) {
+                match a {
+                    ChromeAction::Focus(id) => {
+                        layout_verb(troot, &format!("focus {}", id));
+                        relayout = true;
+                    }
+                    ChromeAction::Close { id, count } => {
+                        if count <= 1 {
+                            say!("halcyond: final tile is protected (pane {})", id);
+                            status.notify("FINAL TILE IS PROTECTED", true);
+                        } else if tiles.get(&id).is_some_and(|t| t.tile.scrollback.running()) {
+                            // HALCYON-INSTRUMENT 14.5 (I-7): a tile whose last
+                            // command is RUNNING asks before closing; the
+                            // close runs on the dialog's `close` tag.
+                            let t = tiles.get(&id).unwrap();
+                            let name = if t.tile.title.trim().is_empty() {
+                                t.program.clone()
+                            } else {
+                                String::from(t.tile.title.trim())
+                            };
+                            let cmd = halcyond::rail::sanitise_cmd(t.tile.scrollback.last_command().unwrap_or(""));
+                            pending_close = Some((id, count, true));
+                            if !menus.open_dialog(halcyond::dialog::Dialog::close_running(&name, &cmd), &sheet, &mut gs) {
+                                // The confirmation surface could not be minted
+                                // (surfaces scarce): refuse rather than close a
+                                // RUNNING tile unasked (14.5 (i)); the user can
+                                // retry once a surface frees.
+                                pending_close = None;
+                                status.notify("CANNOT CONFIRM CLOSE -- TRY AGAIN", true);
+                            }
+                        } else {
+                            layout_verb(troot, &format!("close {}", id));
+                            relayout = true;
+                        }
+                    }
+                    ChromeAction::Menu { id, count, x, y } => {
+                        let (name, retained) = tiles
+                            .get(&id)
+                            .map(|t| (t.program.clone(), t.fate != Fate::Live))
+                            .unwrap_or_default();
+                        if menus.open(tile_menu(id, &name, count, retained), x, y, (x, y, 0, 0), &sheet, &mut gs) {
+                            menu_leaf = None;
+                        }
+                    }
+                    ChromeAction::OpenShell(id) => {
+                        closed.remove(&id);
+                        relayout = true;
+                    }
+                }
+            }
+            if let Some(leaf) = restart_req.take() {
+                // 14.6 Restart: a distinct NEW process in the same leaf --
+                // the surface (and so the leaf's place, weight and frame)
+                // survives; the transcript starts fresh.
+                if let Some(old) = tiles.remove(&leaf) {
+                    if old.fate == Fate::Live {
+                        say!("halcyond: tile {} is live; restart refused", leaf);
+                        tiles.insert(leaf, old);
+                    } else {
+                        let (surf, argv) = old.into_parts();
+                        let budget = SESSION_SCROLLBACK_BUDGET / tiles.len().max(1);
+                        // Restart revokes the previous program's routing token.
+                        if let Some(p) = places.as_mut() { p.unregister_leaf(leaf); }
+                        let place_addr = pane_channel(&mut places, leaf);
+                        match SessionTile::spawn(leaf, surf, geom, &argv, budget, place_addr.as_deref(), sheet.theme.terminal) {
+                            Some(t) => {
+                                say!("halcyond: tile {} restarted", leaf);
+                                tiles.insert(leaf, t);
+                            }
+                            None => {
+                                // The surface went with the failed spawn (its
+                                // drop destroys it): the leaf closes.
+                                say!("halcyond: tile {} restart failed -- closing", leaf);
+                                if let Some(p) = places.as_mut() { p.unregister_leaf(leaf); }
+                                closed.insert(leaf);
+                            }
+                        }
+                        chrome_dirty = true;
+                    }
+                }
             }
             if chrome_dirty {
                 chrome_dirty = false;
@@ -1749,21 +2463,26 @@ pub fn run(home: Option<String>) -> i64 {
                 // `mark k=prog` at every prompt (BEACON.md 12.12), or a
                 // foreign program's OSC 0/2 title, latest wins -- else the
                 // command line's program (a tile whose program has not
-                // spoken yet, or never does).
+                // spoken yet, or never does). The fate and the command
+                // facts ride along for the Instrument header's metadata.
                 let describe = |leaf: u32| {
                     tiles.get(&leaf).map(|t| {
                         let title = t.tile.title.trim();
-                        (
-                            if title.is_empty() {
+                        Described {
+                            name: if title.is_empty() {
                                 t.program.clone()
                             } else {
                                 String::from(title)
                             },
-                            abbrev_home(t.tile.scrollback.cwd(), home.as_deref()),
-                        )
+                            trail: abbrev_home(t.tile.scrollback.cwd(), home.as_deref()),
+                            fate: t.fate,
+                            running: t.tile.scrollback.running(),
+                            last_exit: t.tile.scrollback.last_exit_code(),
+                            dirty: false,
+                        }
                     })
                 };
-                chrome.reconcile(troot, u32::MAX, &sheet, &mut gs, &describe);
+                chrome.reconcile(troot, u32::MAX, &sheet, &mut gs, &describe, true);
                 for t in tiles.values_mut() {
                     t.trail_painted = String::from(t.tile.scrollback.cwd());
                 }
@@ -1789,8 +2508,170 @@ pub fn run(home: Option<String>) -> i64 {
             // The context's directory folds home to `~` like the trail (the
             // mockups' `transcript · ~/thylacine · ut ~`).
             let cwd = abbrev_home(cwd, home.as_deref());
-            let sm = statusset::model_from(chrome.focused(), focused_leaf, &cwd, cmd, exit_code);
+            let notice = status.notice();
+            let running = focused_leaf
+                .and_then(|l| tiles.get(&l))
+                .map_or(false, |t| t.tile.scrollback.running());
+            let sm = statusset::model_from(
+                chrome.focused(),
+                focused_leaf,
+                &cwd,
+                cmd,
+                exit_code,
+                notice,
+                running,
+                chrome.pane_count(),
+                chrome.workspaces(),
+                hints.clone(),
+            );
             status.refresh(&sm, &sheet, &mut gs);
+            // HALCYON-INSTRUMENT 8.1: the top rail -- the focused tile's
+            // directory and name, the theme in force, the minute; its
+            // buttons act under THIS session's authority (the layout
+            // file), the picker and the help say what they are not yet.
+            rail.rearm();
+            rail.ensure(&sheet);
+            let _ = rail.pump(&sheet, &mut gs);
+            let title = focused_leaf
+                .and_then(|l| tiles.get(&l))
+                .map(|t| {
+                    let title = t.tile.title.trim();
+                    if title.is_empty() {
+                        t.program.clone()
+                    } else {
+                        String::from(title)
+                    }
+                })
+                .or_else(|| chrome.focused().map(|f| f.1.clone()))
+                .unwrap_or_default();
+            let (hour, minute) = statusset::clock_hm();
+            // Round 1 F6: the rail's chips and the workspace list were BOTH
+            // pinned to a single workspace -- `RailModel::empty()` sets
+            // `workspaces: 1` and the list opened with `workspace_menu(1, 0)`
+            // -- so neither could ever show a second workspace, and the
+            // session gate's leg (the menu opens, Esc dismisses) passed
+            // either way. The real pair already existed on the ChromeSet,
+            // feeding the bar; it simply never reached here. The header's
+            // `active` is ONE-based, `RailModel.active` zero-based.
+            let (ws_list, ws_active) = chrome
+                .workspaces()
+                .unwrap_or_else(|| (alloc::vec![1], 1));
+            // S4: the model paints from POSITIONS and labels from NUMBERS, so
+            // the active number is resolved to its position here -- the same
+            // resolution `statusset::model_from` does for the bar.
+            let ws_pos = ws_list.iter().position(|&n| n == ws_active).unwrap_or(0) as u8;
+            let rm = RailModel {
+                cwd: cwd.clone(),
+                title,
+                theme: theme_name.clone(),
+                hour,
+                minute,
+                workspaces: ws_list.clone(),
+                active: ws_pos,
+                ..RailModel::empty()
+            };
+            rail.refresh(&rm, &sheet, &mut gs);
+            for a in rail.take_actions() {
+                match a {
+                    railset::RailAction::SplitH | railset::RailAction::SplitV => {
+                        let dir = if a == railset::RailAction::SplitH { "h" } else { "v" };
+                        if let Some(id) = focused_leaf {
+                            if layout_verb(troot, &format!("split {} {}", id, dir)) {
+                                relayout = true;
+                            } else {
+                                say!("halcyond: split {} on pane {} refused", dir, id);
+                                status.notify("SPLIT REFUSED", true);
+                            }
+                        }
+                    }
+                    railset::RailAction::Reset => {
+                        // HALCYON-INSTRUMENT 9.5 / 14.5 (I-7): RESET asks
+                        // first now -- the plan runs on the dialog's `reset`
+                        // tag (the menu-service Dialog arm), never here.
+                        if !menus.open_dialog(halcyond::dialog::Dialog::reset(), &sheet, &mut gs) {
+                            status.notify("RESET REFUSED", true);
+                        }
+                    }
+                    railset::RailAction::Theme { x, y } => {
+                        // HALCYON-INSTRUMENT 9.4 (I-7): open the picker at the
+                        // control's anchor, focused on the current theme.
+                        let gallery = read_gallery();
+                        if gallery.is_empty() {
+                            say!("halcyond: no gallery themes to pick");
+                            status.notify("NO THEMES", true);
+                        } else {
+                            let picker = halcyond::picker::Picker::build(gallery, &current_theme_id);
+                            if menus.open_picker(picker, x, y, &sheet, &mut gs) {
+                                menu_leaf = None;
+                            }
+                        }
+                    }
+                    railset::RailAction::Help => {
+                        // HALCYON-INSTRUMENT 9.5 (I-7b): the keyboard
+                        // reference. Its rows are read from the compositor's
+                        // `chords` file at every open, so they name the
+                        // bindings in force -- never a literal, and a rebind
+                        // is a rebind of the reference.
+                        let text = read_file(troot, "chords").unwrap_or_default();
+                        let h = halcyond::help::Help::from_chords(&text);
+                        if h.rows.is_empty() {
+                            say!("halcyond: no chords published -- no reference to show");
+                            status.notify("NO CHORDS PUBLISHED", true);
+                        } else if menus.open_help(h, &sheet, &mut gs) {
+                            menu_leaf = None;
+                        }
+                    }
+                    railset::RailAction::CloseFocused(id) => {
+                        // 9.5 / 14.5 / 6.5 (I-7b): Super+Q, delivered here so
+                        // that a running job can be asked about -- only this
+                        // side knows there is one. NO final-tile protection
+                        // (6.5): the chord is the structural act.
+                        if let Some(t) = tiles.get(&id).filter(|t| t.tile.scrollback.running()) {
+                            let name = if t.tile.title.trim().is_empty() {
+                                t.program.clone()
+                            } else {
+                                String::from(t.tile.title.trim())
+                            };
+                            let cmd = halcyond::rail::sanitise_cmd(t.tile.scrollback.last_command().unwrap_or(""));
+                            pending_close = Some((id, 0, false));
+                            if !menus.open_dialog(halcyond::dialog::Dialog::close_running(&name, &cmd), &sheet, &mut gs) {
+                                // The same refusal the header's x makes: never
+                                // close a RUNNING tile unasked (14.5 (i)).
+                                pending_close = None;
+                                status.notify("CANNOT CONFIRM CLOSE -- TRY AGAIN", true);
+                            }
+                        } else if layout_verb(troot, &format!("close {}", id)) {
+                            relayout = true;
+                        } else {
+                            // The compositor refused it (a pane this seat does
+                            // not own). Say so: a chord that silently does
+                            // nothing is worse than one that reports.
+                            say!("halcyond: close of pane {} refused", id);
+                            status.notify("CLOSE REFUSED", true);
+                        }
+                    }
+                    railset::RailAction::Workspaces { x, y } => {
+                        let wm = workspace_menu(&ws_list, ws_pos);
+                        if menus.open(wm, x, y, (x, y, 0, 0), &sheet, &mut gs) {
+                            menu_leaf = None;
+                        }
+                    }
+                    railset::RailAction::Workspace(n) => {
+                        // The chip ACTS, under this session's own authority,
+                        // the way every other rail button does: the
+                        // compositor's `workspace` verb on the layout file
+                        // (W-2b). It used to only log.
+                        //
+                        // S4: `n` is already the workspace NUMBER -- railset
+                        // maps the chip's position through the model's list --
+                        // so it goes on the wire as-is. Adding one here would
+                        // switch to the wrong workspace the moment the set is
+                        // sparse.
+                        let _ = layout_verb(troot, &format!("workspace {}", n as u32));
+                    }
+                    railset::RailAction::ChipsScroll(_) => {}
+                }
+            }
         }
 
         // If any tile needs a paint (a new tile, a resize), render before we
@@ -1856,6 +2737,29 @@ pub fn run(home: Option<String>) -> i64 {
         } else {
             -1
         };
+        // A transient status notice expires on the clock (8.2): wake for it,
+        // so the live model returns without waiting on an unrelated event;
+        // and the rails' clocks turn with the minute.
+        let clock = statusset::clock_timeout_ms();
+        let timeout = libhalcyon::motion::fold_timeout(timeout, Some(clock));
+        let timeout = libhalcyon::motion::fold_timeout(timeout, status.notice_timeout_ms());
+        // Section 10's caret blink is the THIRD deadline. It is the distance
+        // to the next STEP, not `FRAME_MS`: a two-valued function changes
+        // twice per period, so a frame-rate wake would paint nothing on 33 of
+        // every 34 wakes (68.75 frames per 1100 ms, two of them useful).
+        // Folded only while a caret is
+        // actually on screen -- every tile may be retained, or every child
+        // may have hidden its cursor, and then there is nothing to wake for.
+        // Re-sampled here rather than reused from (0e) so the deadline is
+        // measured from the wait it bounds.
+        let caret_tick = if motion && tiles.values().any(|t| t.tile.paints_caret(inst_profile)) {
+            Some(libhalcyon::motion::caret_next_step_ms(
+                libthyla_rs::time::monotonic_ns() / 1_000_000,
+            ))
+        } else {
+            None
+        };
+        let timeout = libhalcyon::motion::fold_timeout(timeout, caret_tick);
         if unsafe { t_poll(fds.as_mut_ptr(), nfds, timeout) } < 0 {
             say!("halcyond: session poll failed (compositor gone); exiting");
             logout = Some(1);
@@ -1867,36 +2771,21 @@ pub fn run(home: Option<String>) -> i64 {
             }
         }
 
-        // (4b) I-47 (14.7.2): service the inline-media channel and inject each
-        // completed raster into ITS tile's scrollback. The per-pane STORED quota
-        // is the tile's own content budget (inject_image -> enforce_budget
-        // evicts frozen blocks by max_cost + max_blocks, failing clean); the
-        // per-image cap tracks the live heap residual / MAX_CONNS. A raster whose
-        // tile closed between walk and completion drops harmlessly (get_mut None).
+        // (4b) The text stream orders inline objects; the per-tile raster
+        // cache owns retention. Text and rasters each receive half of the
+        // ONE session budget. Admit against the smallest live cache as well
+        // as the heap residual, so a successful upload fits its pane even
+        // after the budget was redistributed by a new split. MAX_PANES bounds
+        // this share above the place server's 64 Kpx admission floor.
         if let Some(p) = places.as_mut() {
-            p.set_budget(place_cap(&gs), place_residual(&gs));
+            let stored_cap = tiles.values().map(|t| t.tile.media.max_pixels())
+                .min().unwrap_or(0);
+            p.set_budget(place_cap(&gs).min(stored_cap), place_residual(&gs));
             p.service();
             for img in p.take_completed() {
                 if let Some(t) = tiles.get_mut(&img.leaf) {
-                    // F1 (I-32/I-1): bound a single image to HALF the tile's
-                    // content-budget share. `enforce_budget` never evicts the
-                    // last frozen block, so a sole oversized image would survive
-                    // ABOVE the share; K image-panes would then aggregate past
-                    // the shared 32 MiB scrollback budget into a compositor OOM
-                    // (an unprivileged session extinction). Refusing here (drop +
-                    // log, the raster frees) keeps the per-tile stored image <=
-                    // share/2, so the sum over tiles stays within the budget --
-                    // fail clean, never extinct. The half leaves the other half
-                    // for text (matching the transient_cap discipline).
-                    let raster_bytes = img.argb.len() * core::mem::size_of::<u32>();
-                    if raster_bytes > t.tile.scrollback.max_cost() / 2 {
-                        say!(
-                            "halcyond: session inline leaf={} REFUSED {}x{} (over the pane's {}-byte budget)",
-                            img.leaf,
-                            img.w,
-                            img.h,
-                            t.tile.scrollback.max_cost() / 2
-                        );
+                    if !t.tile.place_image(img.id, img.w, img.h, img.argb) {
+                        say!("halcyond: session inline leaf={} cache refused", img.leaf);
                         continue;
                     }
                     say!(
@@ -1905,7 +2794,6 @@ pub fn run(home: Option<String>) -> i64 {
                         img.w,
                         img.h
                     );
-                    t.tile.scrollback.inject_image(img.w, img.h, img.argb);
                     t.dirty = true;
                 }
             }
@@ -1927,22 +2815,34 @@ pub fn run(home: Option<String>) -> i64 {
                         say!("halcyond: session tile ingest live");
                     }
                 }
-                Ingested::CleanExit(code) => {
-                    say!(
-                        "halcyond: session tile leaf={} exited (code {}) -- closing",
-                        leaf,
-                        code
-                    );
-                    // The shell exited: collapse the leaf (tmux rule). The
-                    // `closed` set guarantees no respawn even if the verb is
-                    // refused; the tile is reaped here.
-                    t.exit = Some(code);
-                    closed.insert(leaf);
-                    layout_verb(troot, &format!("close {}", leaf));
-                    relayout = true;
-                    reap.push(leaf);
+                Ingested::Ended(code) if !inst_profile => {
+                    if code == 0 {
+                        say!(
+                            "halcyond: session tile leaf={} exited (code {}) -- closing",
+                            leaf,
+                            code
+                        );
+                        // The shell exited: collapse the leaf (tmux rule). The
+                        // `closed` set guarantees no respawn even if the verb is
+                        // refused; the tile is reaped here.
+                        t.exit = Some(code);
+                        closed.insert(leaf);
+                        layout_verb(troot, &format!("close {}", leaf));
+                        relayout = true;
+                        reap.push(leaf);
+                    } else {
+                        // Legacy: a non-clean end freezes the tile as an
+                        // affordance (14.11.10), as it always did.
+                        say!(
+                            "halcyond: session tile leaf={} crashed -- affordance held",
+                            leaf
+                        );
+                        t.exit = Some(1);
+                        t.dirty = true;
+                        let _ = t.child.kill();
+                    }
                 }
-                Ingested::Crash => {
+                Ingested::Disconnected | Ingested::Crashed if !inst_profile => {
                     // The crash-isolated parser died or the stream desynced:
                     // freeze the tile as an affordance (14.11.10), stop polling
                     // its pipe, kill the kaua-term. Reaped when the user closes
@@ -1954,6 +2854,29 @@ pub fn run(home: Option<String>) -> i64 {
                     t.exit = Some(1);
                     t.dirty = true;
                     let _ = t.child.kill();
+                }
+                // HALCYON-INSTRUMENT 14.6: under Instrument a gone child is a
+                // RETAINED tile -- header, order, body and title kept, the
+                // metadata its word, no caret -- until the user closes or
+                // restarts it; nothing is cleared, nothing restarts itself.
+                Ingested::Ended(code) => {
+                    say!(
+                        "halcyond: session tile leaf={} ended (exit {}) -- retained",
+                        leaf,
+                        code
+                    );
+                    t.retain(Fate::Ended(code), code);
+                    chrome_dirty = true;
+                }
+                Ingested::Disconnected => {
+                    say!("halcyond: session tile leaf={} disconnected -- retained", leaf);
+                    t.retain(Fate::Disconnected, 1);
+                    chrome_dirty = true;
+                }
+                Ingested::Crashed => {
+                    say!("halcyond: session tile leaf={} crashed -- retained", leaf);
+                    t.retain(Fate::Crashed, 1);
+                    chrome_dirty = true;
                 }
             }
         }
@@ -1980,10 +2903,51 @@ pub fn run(home: Option<String>) -> i64 {
         let _ = c.kill();
         let _ = c.wait();
     }
-    for (_, t) in core::mem::take(&mut tiles) {
-        t.teardown();
-    }
+    // One grace for all (r2 C-F3): every tile is hung up first, then all
+    // are waited against a single deadline, then the stragglers killed --
+    // not N serial graces (up to 64 s at MAX_PANES before login could
+    // start unbinding).
+    end_terminals(core::mem::take(&mut tiles).into_values().collect());
     code as i64
+}
+
+/// `end_terminal` over a set: every down channel closed first, one
+/// `TEARDOWN_GRACE_MS` for all, then the kill for whoever is still up.
+fn end_terminals(tiles: Vec<SessionTile>) {
+    let mut pending: Vec<(Child, u32)> = Vec::new();
+    for t in tiles {
+        let SessionTile {
+            child,
+            _down,
+            leaf,
+            ..
+        } = t;
+        drop(_down);
+        pending.push((child, leaf));
+    }
+    let mut waited = 0u64;
+    loop {
+        pending.retain_mut(|(child, leaf)| match child.try_wait() {
+            Ok(Some(_)) | Err(_) => {
+                #[cfg(feature = "test-mode")]
+                say!("halcyond: tile {} hung up ({} ms)", leaf, waited);
+                #[cfg(not(feature = "test-mode"))]
+                let _ = leaf;
+                false
+            }
+            Ok(None) => true,
+        });
+        if pending.is_empty() || waited >= TEARDOWN_GRACE_MS {
+            break;
+        }
+        let _ = sleep(Duration::from_millis(TEARDOWN_POLL_MS));
+        waited += TEARDOWN_POLL_MS;
+    }
+    for (mut child, leaf) in pending {
+        let _ = child.kill();
+        let _ = child.wait();
+        say!("halcyond: tile {} killed after the hangup grace", leaf);
+    }
 }
 
 /// Spawn the session's startup command (HALCYON.md 13.7, H-4c): the user's

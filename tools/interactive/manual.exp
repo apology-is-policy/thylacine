@@ -2,11 +2,11 @@
 # tools/interactive/manual.exp -- the Operator's Manual reader over a real PTY
 # (docs/MANUAL-DESIGN.md 8.2).
 #
-# No section is installed yet (MANUAL-DESIGN 10), so the scenario writes small
-# fixture sections under /tmp from the shell and drives the reader against them.
+# The installed catalogue and by-name reader are exercised first; small
+# fixture sections under /tmp then check rendering and rejection behavior.
 # Each leg matches a token that only the command's OUTPUT can produce (the
 # LS-CI discipline, lib.exp), and no two legs share one:
-#   (a) `manual` with nothing installed -> "No sections are installed.", exit 0
+#   (a) `manual` lists Gallery; `manual gallery` resolves its installed section
 #   (b) --check on the fixture           -> no diagnostic, exit 0
 #   (c) the fixture by path, plain tier  -> its title "Fixture Reader Title" and
 #                                           "body has emphasis and ends." (both
@@ -79,9 +79,11 @@ proc manual_status {tag code phase {failpat ""}} {
 lc_boot
 lc_login michael correct-horse-battery-staple-v1
 
-lc_run_expect {manual; echo mfnone $status} "No sections are installed."
-manual_status mfnone 0 "manual(a) exit status"
-lc_pass "manual(a): the contents listing reports that no sections are installed, exit 0"
+lc_run_expect {manual; echo mflist $status} "Gallery"
+manual_status mflist 0 "manual(a) catalogue exit status" "No sections are installed."
+lc_run_expect {manual gallery; echo mfname $status} "Open and dismiss an image"
+manual_status mfname 0 "manual(a) by-name exit status" "manual: "
+lc_pass "manual(a): installed catalogue and by-name Gallery section, exit 0"
 
 # Braces keep Tcl from substituting; single quotes keep ut from globbing.
 lc_send {echo '# Fixture *Reader* Title' > /tmp/mf.md; echo '' >> /tmp/mf.md; echo 'The fixture body has *emphasis* and ends.' >> /tmp/mf.md}

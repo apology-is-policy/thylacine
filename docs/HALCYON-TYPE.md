@@ -346,7 +346,9 @@ halcyond today serves the bake for its islands and grid (`raster.rs`
 `FACE_MONO`), which cannot carry a per-theme dilation without a second bake
 set. The design follows the scripture: halcyond rasterizes Cornucopia
 **live from a subset TTF** (the 207 baked codepoints subset with fontTools:
-~100 KB against the 10.8 MB full font) at the bake's cell geometry table
+~100 KB against the 10.8 MB full font — 20 KB as cut at TY-4; 342
+codepoints and 26 KB since HALCYON-INSTRUMENT I-5a, plus a 28 KB Italic)
+at the bake's cell geometry table
 (`cell_w`, `cell_h`, `baseline` per advance stay the contract the cells
 tier shares), with the same stroke rule and the same box-glyph procedural
 path. The bake tool is unchanged for its other consumers. (If the operator
@@ -491,11 +493,48 @@ and §4.2–4.4 are properties of the pages, not of who samples them.
   `bug-mono-cell-clips-every-accented-capital`. Pinned meanwhile by
   `the_cell_clips_the_diacritics_the_bake_clips`, which fails when the
   geometry is corrected so it cannot be fixed silently.
+
+  **Amended at HALCYON-INSTRUMENT I-5a (2026-09-14).** The subset is a
+  SUPERSET of the bake (the six Instrument glyphs and U+2500–257F, by
+  `subset-cornucopia.py --extra`; 208 → 342 codepoints), a true Italic
+  subset shares its cell (`--match` in the tool; `italic_shares_the_cell`
+  re-checked at startup over every advance 6..20), and the mono tier has
+  two KINDS of slot: the cell faces (`FACE_MONO`, `FACE_MONO_ITALIC`) and a
+  free-running `FACE_MONO_TEXT` at any px — the fractional advance, the
+  phases, hhea metrics, the store's stroke — for the chrome's 10 / 11 px
+  roles, where the 6 px cell floor was the wrong tool. Because the subset
+  now carries the box-drawing block, the cell path consults the procedural
+  box glyphs BEFORE the face, so a font box glyph never enters a cell.
+  `the_subset_carries_every_baked_codepoint` still holds (207 baked, all
+  present); `the_derived_cell_table_is_the_baked_one` unchanged.
+
+  **Amended at HALCYON-INSTRUMENT I-5b (2026-09-14).** Two rules for the
+  Instrument document that the legacy path does not take: a mono ROW in
+  the fractional flow is placed by the face's hhea content box (11 + 2 at
+  12 px — the browser's 13 px fragment), not by the cell (14 rows, cut to
+  the OS/2 Windows descent), so the baseline lands where the golden's
+  does and the cell paints its extra row under it; and a symbol the
+  Instrument Sans lacks (ut's turnstile) is served by the free-running
+  Cornucopia at the SAME px, the mirror of `FACE_MONO_TEXT`'s Sans
+  fallback — the legacy cuts keep the island cell. `FACE_MONO_ITALIC`
+  gained its consumers: an SGR 3 in a mono run and in the raw grid.
 - **TY-5** The hinting lever (if voted).
 - **TY-6** The audit: the atlas bound under phases + stroke (I-32's
   in-process face); a hostile stream cannot make a stroke raster exceed
   bbox + 2·stroke; the untrusted-codepoint path unchanged. The
   AUDIT-TRIGGERS row for halcyond's raster surface gets its item.
+
+  **Amended at HALCYON-INSTRUMENT I-5d (2026-09-14).** "Kern stays 0" is
+  now the LEGACY posture only: under the Instrument profile
+  `GlyphSource::kern` reads Plex's GPOS `kern` feature (PairPos formats 1
+  and 2, HarfBuzz's first-match-per-lookup, summed) through the vendored
+  read-fonts and answers in the pen's 1/256 px; the switch is
+  `Sheet.kerning` → `set_kerning`, off under legacy so every legacy byte
+  stands (the I-5b fingerprints). The seam's unit changed with it — the
+  three folds (`run_width_fx`, the lay loop, `shape_run_spaced`'s carry)
+  take the value as-is, no longer scaled by the pen. Not a std rounding:
+  `round_half_away` is the crate's own, because `f32::round` is not in
+  `core`.
 
 ---
 

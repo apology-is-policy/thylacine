@@ -106,15 +106,17 @@ kernel → renderer "enter/leave trusted mode" signal), never to the shell.
 
 ---
 
-## 5. The four roles (the interface)
+## 5. The roles (the interface)
 
 - **Kernel**: owns SAK detection (per medium), the console-attach state machine + the
-  forced grant to corvus, the medium-aware trusted **sink** (§7), the unforgeable
-  indicator (§8), and the `proc_is_console_attached` gate. Its renderer-facing
+  forced grant to corvus, the episode generation and trusted-service binding (§7),
+  and the `proc_is_console_attached` gate. Its renderer-facing
   surface is the thin **enter/leave-trusted** signal.
 - **corvus**: the sole trusted authenticator. Runs every episode — login auth,
   imperium provincia + per-cap-key auth, the installer's credential mint. Produces
-  **medium-independent cell-grid content**; never touches a pixel or a UART.
+  **medium-independent content**; serial ANSI emission remains in Corvus.
+- **Trusted display/input service**: owns graphical rasterization, hardware and
+  physical input routing; an explicit TCB member under sections 7 and 8.
 - **Renderer** (serial term / Aurora / Halcyon): honors enter/leave-trusted; on
   entry it is **fully suspended** (the strong model — it leaves the TCB entirely).
   Not in the trust loop, hence interchangeable.
@@ -128,7 +130,12 @@ kernel → renderer "enter/leave trusted mode" signal), never to the shell.
 
 - **Serial**: a PL011 BREAK — a line condition, kernel-caught, unforgeable by data.
   Exists today (`cons.c` `DR.BE`).
-- **Graphical**: a reserved key-combo (Ctrl-Alt-Del-class). The trusted-path input
+- **Graphical**: a reserved key-combo. AS BUILT it is either Control + either Alt
+  + Delete **or F10** (the second final key because Delete is absent from compact
+  and laptop keyboards), scanned by the KERNEL from the trusted input owner's
+  key reports (`proc_seat_op` SEAT_INPUT; the codes are named in `seat.h`). No
+  compositor, shell or theme takes part in deciding what attention is, which is
+  also why the chord is not found by searching Halcyon's key maps. The trusted-path input
   device is either kernel-owned (the UART) or, on a board, a **trusted-tier system
   keyboard driver** (MENAGERIE.md §7 kernel-resident / system tier — never a
   third-party driver). That driver delivers raw HID events *through the kernel*,
@@ -137,74 +144,64 @@ kernel → renderer "enter/leave trusted mode" signal), never to the shell.
   **The honest residual**: a trusted-but-userspace keyboard driver sees every
   keystroke, including the passphrase typed to corvus — so it is a TCB member,
   minimal + audited like corvus. A compromised trusted driver is a keylog/DoS risk
-  (it can withhold the combo → the SAK does not respond, which is *detectable*, not a
-  spoof) — but it can **never forge a trusted episode**, because only the kernel
-  grants console-attach to corvus. (Pre-USB, the trusted path simply stays on serial.)
+  (it can withhold or fabricate input reports). The kernel alone grants trusted
+  attachment, but cannot distinguish fabricated reports from real keys after a
+  trusted input driver is compromised. The driver is therefore part of the TCB. (Pre-USB, the trusted path simply stays on serial.)
 
 ---
 
-## 7. The output path: corvus produces cells, the kernel's sink rasterizes
+## 7. The output path: Corvus content, isolated trusted hardware service
 
-The medium is a **DTB boot fact** (the same I-15 view `cons.c` already uses for
-`arm,pl011`; the graphical case adds a `simple-framebuffer` / virtio-gpu node). It
-is bound once at boot — there is no runtime "am I serial or graphical" branch in the
-SAK path. (Binding refinement 2026-07-17, TAPESTRY.md §18.7: the framebuffer episode
-binds only to KERNEL-REACHABLE linear framebuffers — simplefb-class; a
-virtio-gpu-only medium (QEMU) keeps the SERIAL trusted path, which QEMU always has —
-the kernel cannot paint through a userspace-owned GPU without violating ARCH §17.2's
-no-graphics-in-kernel posture.) The trusted output is a medium-aware **sink** with two backends:
+**Approved refinement, 2026-09-18.** The operator approved the isolated trusted
+display/input service in `GRAPHICAL-SAK-OWNERSHIP.md`, subject to portable backend
+obligations in `GRAPHICAL-SAK-PORTABILITY.md`. This supersedes the former
+kernel-only framebuffer rasterizer requirement. The service is an explicit TCB
+member; ordinary Tapestry, Halcyon and Beacon are outside the trusted episode.
+Corvus retains identity, policy, key verification and grant authority.
 
-```
-  corvus --(medium-INDEPENDENT cell grid: rows x cols of glyph+attr)--> kernel trusted sink
-                                                                         |- UART backend       -> bytes / ANSI (cursor + SGR)
-                                                                         |- framebuffer backend -> blit baked-font glyphs
-```
+Boot policy binds the trusted seat and service identity. Hardware discovery supplies
+resources, not runtime self-authorization. The service permanently owns presentation
+and physical input, with a bounded broker for normal graphics. The kernel binds
+Corvus and the service to an episode generation; secrets are accepted only after
+exclusive display/input acknowledgement. No raw hardware ownership is lent back
+to Tapestry. The logical contract is independent of PCI, virtio, HDMI and USB.
 
-- **corvus** does *layout* (it knows the content — the provincia, the fasces, the
-  password field) and emits a **cell grid** that has no idea of the medium.
-- **The kernel's trusted sink** does *rasterization*, picking the backend bound at
-  boot. On UART it emits ANSI/bytes; on a framebuffer it blits a baked font.
+Corvus sends bounded semantic content. The service uses baked fonts and palette,
+private trusted backing, and an immutable ordinary-frame snapshot or neutral field.
+All planes, cursors, outputs, capture paths, DMA access and pending submissions
+are part of the exclusion proof. A simple-framebuffer node or CPU mapping alone
+is insufficient evidence. Backends must pass conformance tests before enablement.
 
-Using a cell grid (not corvus-emitted ANSI) is deliberate: it keeps a VT-escape
-*parser* out of the kernel — the kernel only ever rasterizes cells.
+**As built:** the serial episode gates UART output to the attached trusted
+process. The QEMU graphical backend uses Lictor as the boot-trusted physical
+GPU/input owner, with Corvus semantic frames and kernel generation/visibility
+checks. Tapestry holds only the normal broker role. Grants remain held until
+acknowledged restoration; owner failure cancels them before redemption. A failed
+episode (a deadline, a refused device step, a malformed frame) cancels its grant
+and then RECOVERS: the owner restores normal output and the kernel returns the
+seat to normal, releasing nothing. A seat failure never closes a serial episode
+-- it closes only the episode the seat itself opened. The
+current backend uses the neutral field because private workspace capture is not
+implemented. Serial authorization requires `thylacine.serial-sak=1`; the QEMU dev
+launcher selects it unless `THYLACINE_SERIAL_SAK=0`.
 
-**As-built refinement (2026-09-07, `IMPERIUM-DESIGN.md` §11.3; ratified fork
-F1).** On the SERIAL medium the kernel's part of the sink is the
-**output-exclusivity gate**: during a trusted episode only the console-attached
-Proc's writes reach the UART and every other console writer parks (I-27
-property 2, enforced at IM-1); corvus composes the medium-independent cell grid
-and rasterizes it to ANSI in userspace through its console handle. The kernel
-cell ABI described above lands with the framebuffer backend (v1.x) and consumes
-that same composer. Same bytes on the wire, same security on serial (§8: the
-anchor is the chain, not the pixels), a smaller TCB delta, and no kernel ABI
-designed blind to the only backend that needs it.
-
-**Why this is small, and pays for itself twice.** The kernel already renders text to
-the UART (the boot banner; the Halls-of-Extinction crash dump) — the UART backend is
-essentially what exists. The new piece is the framebuffer backend (a baked font + a
-cell→pixel blit), and it is the *same* sink a **graphical Halls dump** needs (a board
-with no serial must still surface a panic). Both are the one problem: *the kernel
-must put trustworthy text on the medium when userspace is untrusted (an episode) or
-dead (a crash).*
-
-This realizes the strong model: during a framebuffer episode **no userspace maps the
-framebuffer at all** — the renderer is suspended, corvus hands only cells, the kernel
-is the sole painter.
+Lictor cannot be assumed available during a kernel panic; graphical Halls output
+needs a separate crash-ownership contract. Pi 400/Pi 500 remain unqualified.
 
 ---
 
-## 8. The unforgeable indicator + the serial asymmetry (stated honestly)
+## 8. The attention chain, not an uncopyable picture
 
-- **Framebuffer**: the kernel owns the pixels, so the indicator is *real* — a
-  kernel-drawn band the renderer cannot reproduce.
-- **Serial**: the host terminal is outside our trust boundary, so no on-screen
-  indicator can be truly unforgeable (any program can print "TRUSTED"). The anchor
-  there is the chain itself: the user pressed BREAK → the kernel attached corvus →
-  corvus is the kernel-guaranteed *sole writer* → the bytes you see are corvus's.
-  Sound *if* you trust your own serial terminal, which for serial-console admin you
-  do.
+Ordinary software can reproduce any dialog's appearance outside a trusted episode.
+The graphical anchor is the physical attention gesture followed by kernel-bound
+exclusive display/input routing. No screenshot, colour or logo proves authorization.
+A trusted service compromise can observe keys and control pixels; boot firmware,
+necessary non-isolated DMA drivers and physical input hardware are explicit trust
+assumptions. QEMU additionally trusts its host and virtual device implementation.
 
-Two threat models, both honest. §11 confines the weaker one to dev/recovery.
+Serial likewise trusts the host terminal and relies on BREAK, trusted attachment
+and sole-writer enforcement. Section 11 limits interactive serial to dev/recovery.
+Graphics failure cannot silently change that production policy.
 
 ---
 
@@ -251,8 +248,8 @@ The UART has two separable roles, and only one is an attack surface:
   in a production image.** On a Pi the UART pins are on the GPIO header, so a serial
   login or a BREAK→corvus prompt is a physical-access attack vector.
 
-So a **production image's trusted path is framebuffer-only — the strong, unforgeable
-one** — and the serial-output asymmetry (§8) is confined to **dev / recovery**. This
+So a **production image's trusted path is graphical-only, using the exclusive
+trusted service path**. Interactive serial is confined to **dev / recovery**. This
 is a per-image **posture flag** (a BSP/build setting), not silicon removal: dev/QEMU
 = UART console + serial trusted path ON; production (display-equipped) = serial
 interactive/trusted-path OFF, framebuffer-only, output crash-only.
@@ -315,25 +312,24 @@ login + elevation; join §25.4 at the sub-chunk that lands each):
 
 ## 13. Thematic naming + the Halls kinship
 
-Standard security terms stay (SAK, trusted path, I-27 — readers expect them). One
-kinship worth recording: the **kernel trusted sink** is the sibling of **Halls of
-Extinction** — both are the kernel rendering trustworthy text on a machine whose
-userspace cannot be trusted (an episode) or is dead (a crash). They should share the
-framebuffer text backend (the baked font + the cell/glyph blit).
+Standard security terms stay (SAK, trusted path, I-27). Lex curiata names the
+conferral ceremony; Corvus remains the authenticator. The approved trusted
+service may share pure baked-font rendering code with a future Halls crash sink,
+but not assume that a userspace GPU driver survives a kernel crash. Crash ownership
+requires its own design, without two simultaneous hardware owners.
 
 ---
 
 ## 14. Dependencies / lane split
 
-**Kernel owes (main-track):**
-1. The graphical SAK key-combo detection (the trusted-tier keyboard event path + the
-   kernel-owned scan); the serial BREAK exists.
-2. The medium-aware **trusted sink** (UART backend ~= exists via banner/Halls; the
-   framebuffer baked-font blit is new, shared with a graphical Halls).
-3. The unforgeable framebuffer indicator; the enter/leave-trusted renderer signal;
-   the medium binding at boot (DTB).
-4. The production **posture flag** (serial interactive/trusted-path disable) —
-   build/BSP tooling.
+**Kernel owes (main-track):** physical-source admission, attention detection,
+episode generations, trusted-service binding, secret routing gates and owner-death
+revocation. Production posture must disable serial interaction independently of
+whether graphical hardware succeeds.
+
+**Trusted hardware service owes:** bounded ordinary graphics brokerage, private
+trusted rendering and all portable backend obligations in
+`GRAPHICAL-SAK-PORTABILITY.md`. This is approved work, not current enforcement.
 
 **corvus owes (main-track userspace):** the medium-independent cell-grid trusted
 renderer; the pending-request consumption (imperium); the per-cap-key auth.

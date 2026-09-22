@@ -23,7 +23,7 @@ abis: []
 design:
   - "docs/UTOPIA-SHELL-DESIGN.md sections 5-10"
 created: 2026-08-03
-updated: 2026-09-16
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -41,6 +41,21 @@ main entry point's doc comment and a field comment one file away describe the
 same function in opposite terms.
 
 ## Contract
+
+**Haul and Imperium (2026-09-17).** `mount /srv/NAME PATH [ANAME]` connects
+a byte service, attaches it through SYS_ATTACH_9P_SRV, and mounts the returned
+root in the calling shell's Territory. `unmount PATH` removes that entry.
+Failures set `$status` and `$errstr`; they are not automatically printed.
+`abdicate` exits the elevated shell, allowing the imperium root to revoke the
+whole scope. Foreground external execution passes console bytes through while
+the child owns input, so the imperium key reaches the trusted episode.
+
+Argument expansion now preserves the previous command's `$status` (including
+`exit $status`). `Env.status_revision` detects whether expansion ran a
+status-producing substitution: an empty expansion with no such write succeeds,
+whereas an empty substitution retains its result. Boot probes cover prior
+failure, empty plain expansion, and empty successful/failed substitutions.
+
 
 Six public entry points, all over `&mut Env`:
 

@@ -2473,12 +2473,43 @@ pub fn note_class_for_name(name: &str) -> Option<NoteClass> {
 /// return: an idle interrupt drained between commands is discarded there
 /// (benign), exactly as before LS-8c.
 pub fn deliver_pending_notes(env: &mut Env) -> bool {
+    let notes = drain_pending_notes(env);
+    dispatch_notes(env, &notes)
+}
+
+/// The pending notes, in delivery order, WITHOUT dispatching them: the
+/// deferred ones first (they arrived before anything in the live queue),
+/// then the queue until it is empty or masked. Split from the dispatch so
+/// the idle prompt can decide what a batch will do BEFORE it prints
+/// (`Repl::on_notes_ready`): a batch that prints nothing must not move the
+/// prompt.
+pub fn drain_pending_notes(env: &mut Env) -> Vec<Note> {
     // Notes deferred during an interruptible foreground wait (U-7c-b) fire
     // first: they arrived before anything still sitting in the live queue.
     // Always drained -- even with the fd closed -- so a prior wait's residue
     // is never stranded.
-    let deferred = env.take_deferred_notes();
-    if deferred.is_empty() && env.notes().is_none() {
+    let mut notes = env.take_deferred_notes();
+    loop {
+        // The immutable borrow of `env` for `notes()` lives only across the
+        // `try_read` call; `next` is owned.
+        let next = match env.notes() {
+            Some(n) => n.try_read(),
+            None => break,
+        };
+        match next {
+            Ok(Some(note)) => notes.push(note),
+            // Empty/masked-only queue (Ok(None)) or a transient read error
+            // -> stop draining; the next sync point retries.
+            _ => break,
+        }
+    }
+    notes
+}
+
+/// Dispatch a drained batch in order; true when an UNHANDLED `interrupt`
+/// was among them (the shell's reactive cancel).
+pub fn dispatch_notes(env: &mut Env, notes: &[Note]) -> bool {
+    if notes.is_empty() {
         return false;
     }
     // Note delivery is transparent to `$status` (bash saves `$?` around a
@@ -2486,27 +2517,22 @@ pub fn deliver_pending_notes(env: &mut Env) -> bool {
     // the next prompt reports. Capture + restore around the whole drain.
     let saved_status = env.status();
     let mut unhandled_interrupt = false;
-    for note in &deferred {
+    for note in notes {
         unhandled_interrupt |= dispatch_note(env, note);
-    }
-    loop {
-        // The immutable borrow of `env` for `notes()` lives only across the
-        // `try_read` call; `next` is owned, so `env` is free for dispatch.
-        let next = match env.notes() {
-            Some(n) => n.try_read(),
-            None => break,
-        };
-        match next {
-            Ok(Some(note)) => {
-                unhandled_interrupt |= dispatch_note(env, &note);
-            }
-            // Empty/masked-only queue (Ok(None)) or a transient read error
-            // -> stop draining; the next sync point retries.
-            _ => break,
-        }
     }
     env.status_set(saved_status);
     unhandled_interrupt
+}
+
+/// Whether dispatching `note` can print or cancel nothing: an unhandled
+/// `tty:winch` / `tty:cont` is discarded by `dispatch_note`, so servicing
+/// it at the idle prompt must not move the prompt to a fresh line.
+pub fn note_is_silent(env: &Env, note: &Note) -> bool {
+    // Silent == dispatch_note prints/cancels nothing: no handler runs, and it is
+    // neither the printing tty:hup nor the line-cancelling interrupt. Keyed on the
+    // PROPERTY, not a name allowlist, so tty:susp (and any future discarded note)
+    // is classified silent -- no spurious prompt redraw at the idle prompt.
+    !env.note_handler_defined(&note.name) && note.name != "tty:hup" && note.name != "interrupt"
 }
 
 /// How often (in iterations) `eval_while` / `eval_for` poll the note queue for
@@ -2946,6 +2972,7 @@ fn dispatch_note(env: &mut Env, note: &Note) -> bool {
         // ignores its own SIGTSTP (the bash posture) and the v1.0 editor has
         // no resize consumer. The fd-0 EOF path backstops the hup.
         if note.name == "tty:hup" {
+            t_putstr("ut: hangup (tty:hup) -> exit 129\n");
             env.request_exit(129);
         }
         // A caught interrupt would have fired a handler above; an UNHANDLED

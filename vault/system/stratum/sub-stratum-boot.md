@@ -12,7 +12,7 @@ locks: []
 abis: []
 design: ["docs/reference/86-pouch-stratumd-boot.md (the 16c design section)"]
 created: 2026-08-02
-updated: 2026-09-06
+updated: 2026-09-21
 ---
 ## Purpose
 
@@ -23,6 +23,14 @@ process root onto the result — carrying forward every mount the old root
 held.
 
 ## Contract
+
+**Imperium boot fixtures (2026-09-17).** The integration adds the
+imperium capability/authorization probes to joey's test ladder and initializes
+the fixture imperium key for the eligible test identity. Production
+self-elevation still requires a corvus eligibility record and a trusted SAK
+episode; the tool does not bypass that path. Haul's posting gate is exercised
+by a separate interactive test against a real npxf server.
+
 
 Ordered, and every step is boot-fatal:
 
@@ -123,13 +131,21 @@ So the init program's mount question is not "carry it or lose it" but **"should
 this tree be global at all?"** — and the answer is no whenever the served tree's
 authority is per-connection.
 
-**The pivot is a swap, so everything else must be carried by hand.** Seven
+**The pivot is a swap, so everything else must be carried by hand.** Eight
 O_PATH handles are taken *before* the swap and re-grafted after: `/srv`,
-the whole devramfs root (→ `/bin`), `/proc`, `/ctl`, `/dev`, `/hw`, `/env`.
+the whole devramfs root (→ `/bin`), `/proc`, `/ctl`, `/dev`, `/hw`,
+`/hw/pci`, `/env`. The eighth is new (2026-09-21) and replaces an accident.
+`/hw/pci` is mounted INSIDE the devhw tree, on its synthetic `pci` child;
+it used to work post-pivot only because the orphaned boot-generation entry
+was keyed on that child, which the `/hw` re-graft made reachable again.
+The pivot now SHEDS the boot generation ([[sub-kernel-territory]]), so the
+re-graft is explicit — and the aliases the old devramfs root used to carry
+into `/bin` (`/bin/proc`, `/bin/srv`, `/bin/dev/cons`) are gone with it.
 O_PATH crosses each mount and yields the *Dev root*, not the synthetic
 mount point — that distinction is what makes the re-graft land the real
-tree. Each re-graft is `mkdir`-then-`MREPL`, and the `mkdir` must be
-idempotent because the pool persists across reboots and a later boot finds
+tree. Each re-graft onto the DISK root is `mkdir`-then-`MREPL` (`/hw/pci`
+alone has no `mkdir`: its point is devhw's synthetic `pci` child), and the
+`mkdir` must be idempotent because the pool persists across reboots and a later boot finds
 its own directories already there.
 
 **`/dev/pts` is grafted separately, after the swap, once ptyfs is up** — it is
@@ -202,7 +218,10 @@ event-driven; no timing constant appears in this path.
 - A new readiness signal must be emitted **after** the last fallible step.
   Any line printed before the bind is optimistic and unusable.
 - A new pre-pivot mount must acquire its O_PATH handle before the swap and
-  re-graft after, or it vanishes silently at pivot.
+  re-graft after, or it vanishes silently at pivot. That has been literally
+  true since the pivot sheds the old generation (2026-09-21); before, a
+  mount NESTED inside a re-grafted tree survived by accident, and the next
+  one to rely on that would have broken the day the shed landed.
 - **Before that: decide whether it should be a global mount at all.** If the
   served tree's authority is per-connection, a boot-time mount collapses every
   process onto init's single connection and is a privilege breach, not a
@@ -222,6 +241,16 @@ event-driven; no timing constant appears in this path.
 [[seam-791-smp1-joey]].
 
 ## Caveats
+
+- **joey's boot-fatal pouch provers are matched on a LEG CENSUS, and the four
+  census strings are not joey's to type.** `pouch_smoke_core` matches each
+  prover's marker (`<name>: legs=a,b,c: exit 0`) rather than `exit 0`, so a
+  stale binary cannot pass for one with a new leg; since 2026-09-21 the strings
+  come from `usr/pouch-hello/pouch-census.h`, which the prover that prints each
+  one reads too ([[sub-pouch-seam]]). `joey.c` includes it by relative path —
+  the only header it takes from outside `libt`. What those provers pin is
+  documented with the mechanisms they pin ([[sub-pouch-seam]],
+  [[sub-pouch-net]], [[sub-pouch-fs]], [[sub-pouch-thread]]), not here.
 
 - joey's **warden** spawn mask is `CAP_HW_CREATE | CAP_CSPRNG_READ` (+
   `SPAWN_PERM_MAY_POST_SERVICE`) since H-4b-1 (2026-09-02): the warden never

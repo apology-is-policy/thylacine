@@ -10,8 +10,33 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-09-09
+updated: 2026-09-21
 ---
+## Graphical seat incarnations
+
+The kernel binds one boot-designated hardware service, one normal compositor
+and Corvus to a generation-bearing seat. Manager/service/client spawn roles are
+not inherited. Only service and Corvus may operate the trusted endpoint; the
+normal designation admits broker connections but no trusted operations. Binding
+the service sets NODUMP and NOTRACE before userspace runs. The SERVICE's death
+fails the seat and no process inherits its hardware ownership. The compositor's
+death fails the seat only while an episode is in progress; in the normal phase it
+just clears the client slot, so warden can seat a new one. `proc_seat_fail_locked`
+cancels the held grant, scrubs the key queue and closes the console episode ONLY
+when the seat opened it (phase exclusive): a serial episode runs while the seat
+is normal, and closing it would unfreeze the console under a serial key entry.
+A failed seat returns to normal through SEAT_RESTORED, which releases nothing
+because the failure already zeroed the grant identity. The attention chord is
+scanned here (`seat_attention_held`: Control + Alt + Delete or F10). Episode
+transitions, pending-grant commit/cancellation and death serialize under the
+process-table lock. The three phase deadlines (5 s quiesce, 90 s exclusive, 5 s
+restoring) are checked LAZILY, at the next seat operation by the service or
+Corvus -- there is no kernel timer, so a seat whose two operators are both
+wedged stays frozen on the trusted scene: fail-closed for I-27, and an
+availability loss only if TCB processes hang. `proc_test_seat_expire`
+(KERNEL_TESTS only) zeroes the deadline so the suite can reach the three expiry
+arms without waiting out wall clock. See [[abi-trusted-seat]] and [[sub-lictor]].
+
 ## Purpose
 
 A `Proc` is the unit of isolation: one address space, one Territory, one
@@ -46,6 +71,15 @@ resolves against — a fresh monotonic u64 per `proc_alloc`, never inherited,
 `0` reserved as the fail-closed sentinel.
 
 ## Mechanism
+
+**Imperium scope flow (2026-09-17).** The `rfork_internal` capability carve
+and table-insertion race check now implement [[sub-kernel-caps#Contract]].
+`proc_become_legate` publishes the coherent scope block through the scope-id
+release store, refuses nested propagating scopes, and shortens an existing
+one-shot deadline rather than extending it. `proc_legate_teardown_if_root`
+marks every scoped member under the same process-table lock used by child
+publication. Membership, not reparenting, determines revocation.
+
 
 **Three shapes, one discriminator.** Since the fork arc there are exactly three
 answers to "what address space does the child get", and each *is* what its shape
@@ -231,6 +265,19 @@ either the reset all-`SIG_DFL` table (the new image's initial state) or the old
 dispositions (the POSIX latitude for a `sigaction` racing an in-flight signal).
 This is the commit half of Design D — the decision half is
 [[sub-kernel-syscall-dispatch]]'s execve, the resolver seed [[sub-kernel-stalk]]'s.
+
+
+### `proc_kstack_peak_system` -- the whole-system stack watermark
+
+Walks the proc table under `g_proc_table_lock` (which is also the lifetime pin
+the per-thread scan needs) and returns the deepest kernel stack ANY live thread
+has ever reached, with the owning pid and tid. Unbudgeted, unlike the
+`/ctl/kstack` path: its one caller is the boot-complete report, which runs once
+on a tree of a few dozen threads before any untrusted program could inflate the
+walk, and a budget there could only turn the number into a silent floor. The
+per-Proc `proc_kstack_peak` it calls DOES take a budget -- see
+[[sub-kernel-thread]] for why the scan's cost is inverted and why that made it
+a masked-window lever.
 
 ## Data structures
 

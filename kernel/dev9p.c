@@ -11,6 +11,7 @@
 #include <thylacine/burrow.h>  // G-2: burrow_unmap for the weave clunk-unmap
 #include <thylacine/dev.h>
 #include <thylacine/dev9p.h>
+#include <thylacine/cons.h>
 #include <thylacine/proc.h>    // G-2: the mapping Proc's vma_lock + pid
 #include <thylacine/sched.h>   // sched() -- the wb single-flight yield-wait
 #include <thylacine/thread.h>  // G-2: current_thread for the clunk-unmap pid match
@@ -78,6 +79,16 @@ s64 dev9p_create_errno(struct Spoor *c) {
     struct dev9p_priv *p = priv_of(c);
     if (!p) return -1;
     int e = p->create_errno;
+    return (e <= -2 && e >= -4095) ? (s64)e : -1;
+}
+
+// Like create, open is performed on a freshly walked, unpublished Spoor.
+// Preserve resource refusals so callers can distinguish admission from I/O
+// failure. Non-9P devices and invalid/unspecified wire errors keep EIO.
+s64 dev9p_open_errno(struct Spoor *c) {
+    struct dev9p_priv *p = priv_of(c);
+    if (!p) return -1;
+    int e = p->open_errno;
     return (e <= -2 && e >= -4095) ? (s64)e : -1;
 }
 
@@ -1292,6 +1303,7 @@ static struct Spoor *dev9p_open_cached(struct Spoor *c, const char *const *names
 static struct Spoor *dev9p_open(struct Spoor *c, int omode) {
     struct dev9p_priv *p = priv_of(c);
     if (!p) return NULL;
+    p->open_errno = 0;
     if (p->fid == P9_NOFID) return NULL;   // a fidless (cached-open) Spoor is
                                            // already open; no fid to Tlopen
     // Map Plan 9 omode → Linux O_* flags. Plan 9: OREAD=0, OWRITE=1,
@@ -1321,7 +1333,7 @@ static struct Spoor *dev9p_open(struct Spoor *c, int omode) {
     struct p9_qid qid;
     u32 iounit;
     int rc = p9_client_lopen(p->client, p->fid, flags, &qid, &iounit);
-    if (rc != 0) return NULL;
+    if (rc != 0) { p->open_errno = rc; return NULL; }
     // Update the cached qid with the server's response.
     c->qid.path = qid.path;
     c->qid.vers = qid.version;
@@ -1668,8 +1680,19 @@ static void dev9p_close(struct Spoor *c) {
             if (vic >= 0)
                 (void)p9_client_clunk_async(p->client, (u32)vic);
         }
-        if (!parked)
-            (void)p9_client_clunk_async(p->client, p->fid);
+        if (!parked) {
+            int crc = p9_client_clunk_async(p->client, p->fid);
+            if (crc < 0) {
+                struct cons_diag_line dl;
+                cons_diag_line_init(&dl);
+                cons_diag_line_puts(&dl, "9p: close: clunk of fid ");
+                cons_diag_line_putdec(&dl, (u64)p->fid);
+                cons_diag_line_puts(&dl, " refused rc ");
+                cons_diag_line_putdec(&dl, (u64)(-crc));
+                cons_diag_line_puts(&dl, "\n");
+                cons_diag_line_emit(&dl);
+            }
+        }
     }
 
     if (p->attached_owner) {

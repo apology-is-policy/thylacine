@@ -39,6 +39,8 @@
 #include <thylacine/devsrv.h>
 #include <thylacine/handle.h>
 #include <thylacine/proc.h>
+#include <thylacine/sched.h>
+#include <thylacine/thread.h>
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>
 #include <thylacine/types.h>
@@ -46,6 +48,8 @@
 // Test-support registry wipe (non-static; defined in kernel/devsrv.c;
 // deliberately not in devsrv.h — no production caller).
 extern void srv_registry_reset(void);
+extern bool srv_test_accept_pin(struct SrvService *svc, int mode);
+extern int sys_srv_accept_for_proc(struct Proc *p, hidx_t service_h);
 
 void test_devsrv_registered(void);
 void test_devsrv_open_root_dir(void);
@@ -522,4 +526,109 @@ void test_devsrv_post_listener(void) {
     drop_test_proc(u);
     drop_test_proc(p);
     srv_registry_reset();
+}
+
+
+void test_devsrv_cap_post_bounds(void);
+void test_devsrv_cap_post_bounds(void) {
+    srv_registry_reset();
+    struct Proc *p = make_test_proc(), *q = make_test_proc();
+    struct Proc *r = make_test_proc(), *s = make_test_proc();
+    struct Proc *tcb = make_marked_test_proc();
+    TEST_ASSERT(p && q && r && s && tcb, "allocate posters");
+    p->caps |= CAP_POST_SERVICE; q->caps |= CAP_POST_SERVICE;
+    r->caps |= CAP_POST_SERVICE; s->caps |= CAP_POST_SERVICE;
+    // Two children of the SAME scope cannot multiply its budget by forking.
+    p->legate_scope_id = q->legate_scope_id = 0x1234;
+    r->legate_scope_id = 0x5678;
+    s->legate_scope_id = 0x9abc;
+    TEST_EXPECT_EQ(proc_may_post_service(p), false, "cap does not confer TCB role");
+    TEST_ASSERT(post_svc_9p(p, "cap-a", 5) >= 0, "cap permits post");
+    TEST_ASSERT(post_svc_9p(q, "cap-b", 5) >= 0, "second post in scope");
+    TEST_EXPECT_EQ(post_svc_9p(q, "cap-c", 5), -1, "scope budget spans posters");
+    TEST_ASSERT(post_svc_9p(r, "cap-c", 5) >= 0, "another scope post");
+    TEST_ASSERT(post_svc_9p(r, "cap-d", 5) >= 0, "fourth global cap slot");
+    TEST_EXPECT_EQ(post_svc_9p(s, "cap-e", 5), -1, "global cap slots bounded");
+    TEST_ASSERT(post_svc_9p(tcb, "trusted", 7) >= 0, "TCB can post at cap limit");
+    srv_proc_exit_notify(tcb);
+    TEST_EXPECT_EQ(post_svc_9p(s, "trusted", 7), -1, "cannot capture TCB tombstone");
+    struct SrvService *old = srv_lookup_in(srv_boot_registry(), "cap-a", 5);
+    TEST_ASSERT(old != NULL, "find original slot");
+    u64 generation = old->generation;
+    // Model the exit-notify window with an accepter still holding its pin.
+    (void)srv_test_accept_pin(old, 1);
+    srv_proc_exit_notify(p);
+    int busy_recycle = post_svc_9p(s, "cap-e", 5);
+    int busy_rebind = post_svc_9p(s, "cap-a", 5);
+    (void)srv_test_accept_pin(old, 0);
+    TEST_EXPECT_EQ(busy_recycle, -1, "busy tombstone cannot recycle");
+    TEST_EXPECT_EQ(busy_rebind, -1, "busy tombstone cannot rebind");
+    TEST_ASSERT(post_svc_9p(s, "cap-e", 5) >= 0, "new name recycles dead cap slot");
+    TEST_EXPECT_EQ(old->generation, generation + 1, "recycle changes generation");
+    TEST_ASSERT(srv_lookup_in(srv_boot_registry(), "cap-a", 5) == NULL,
+                "old name cannot reach recycled service");
+    TEST_EXPECT_EQ(srv_registry_count(), 5, "recycling adds no permanent slot");
+    srv_proc_exit_notify(q); srv_proc_exit_notify(r); srv_proc_exit_notify(s);
+    p->legate_scope_id = q->legate_scope_id = r->legate_scope_id = s->legate_scope_id = 0;
+    drop_test_proc(p); drop_test_proc(q); drop_test_proc(r); drop_test_proc(s); drop_test_proc(tcb);
+    srv_registry_reset();
+}
+
+
+static struct SrvService *g_accept_service;
+static u64 g_accept_owner;
+static struct SrvConn *g_accept_result;
+static volatile bool g_accept_exited;
+
+static bool test_accept_pinned(struct SrvService *svc) {
+    return srv_test_accept_pin(svc, -1);
+}
+
+static bool test_accept_sleeping(struct SrvService *svc) {
+    irq_state_t irq = spin_lock_irqsave(&svc->accept_rendez.lock);
+    bool sleeping = svc->accept_rendez.waiter != NULL;
+    spin_unlock_irqrestore(&svc->accept_rendez.lock, irq);
+    return sleeping;
+}
+
+static void test_accept_worker(void) {
+    g_accept_result = srv_accept_blocking(g_accept_service, g_accept_owner);
+    test_kthread_park_terminal(&g_accept_exited);
+}
+
+void test_devsrv_accept_lifetime(void);
+void test_devsrv_accept_lifetime(void) {
+    srv_registry_reset();
+    struct Proc *p = make_marked_test_proc(), *q = make_marked_test_proc();
+    TEST_ASSERT(p && q, "allocate accept owners");
+    int listener = post_svc_9p(p, "accept", 6);
+    TEST_ASSERT(listener >= 0, "post accept service");
+    struct SrvService *svc = srv_lookup_in(srv_boot_registry(), "accept", 6);
+    TEST_ASSERT(svc != NULL, "find accept service");
+    TEST_ASSERT(srv_accept_blocking(svc, proc_stripes(q)) == NULL,
+                "foreign owner cannot accept");
+    g_accept_service = svc;
+    g_accept_owner = proc_stripes(p);
+    g_accept_result = NULL;
+    g_accept_exited = false;
+    struct Thread *worker = thread_create(kproc(), test_accept_worker);
+    TEST_ASSERT(worker != NULL, "allocate accept worker");
+    ready(worker);
+    TEST_YIELD_UNTIL_SOFT(test_accept_sleeping(svc));
+    bool pinned = test_accept_sleeping(svc) && test_accept_pinned(svc);
+    bool refused = pinned && srv_accept_blocking(svc, proc_stripes(p)) == NULL;
+    // Cleanup before assertions: the actual blocked accepter must observe EOF
+    // and release its pin even when an observation above fails.
+    srv_proc_exit_notify(p);
+    test_kthread_join_free(worker, &g_accept_exited);
+    bool released = !test_accept_pinned(svc);
+    bool ended = g_accept_result == NULL;
+    int rebound = post_svc_9p(q, "accept", 6);
+    bool stale_refused = rebound >= 0 && sys_srv_accept_for_proc(p, (hidx_t)listener) < 0;
+    srv_proc_exit_notify(q);
+    drop_test_proc(p); drop_test_proc(q);
+    srv_registry_reset();
+    TEST_ASSERT(pinned && refused, "second concurrent accept fails without a second Rendez waiter");
+    TEST_ASSERT(released && ended, "tombstone wakes and releases the old accepter");
+    TEST_ASSERT(rebound >= 0 && stale_refused, "reuse succeeds only for the new owner");
 }

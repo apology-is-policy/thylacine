@@ -17,3 +17,7 @@ path = "src/main.rs"
 # land in subsequent chunks.
 libthyla-rs = { path = "../../lib/libthyla-rs" }
 libutopia   = { path = "../libutopia" }
+# I-5c: the READ side of the session's palette export lives beside its
+# writer (`libhalcyon::theme::prompt_roles`), so the two cannot drift; the
+# binary reads /env and hands libutopia the resolved inks (the layering).
+libhalcyon  = { path = "../../lib/libhalcyon" }

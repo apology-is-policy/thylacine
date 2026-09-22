@@ -1,27 +1,28 @@
 // inlinewire -- the inline-media place-request wire (I-47, HALCYON.md 14.7).
 //
 // `view` (the unprivileged, sacrificial decoder) hands a decoded raster to
-// halcyond over a per-pane control endpoint as a BOUNDED WRITE: a 16-byte
+// halcyond over a per-pane control endpoint as a BOUNDED WRITE: a 32-byte
 // header, then w*h ARGB pixels (0xAARRGGBB, one LE u32 each) immediately
 // after it. halcyond validates the header BEFORE allocating, accumulates the
-// payload, and injects an Item::Image. This crate is the sole home of that
+// payload, and associates its ID with an ordered text caption in a session.
+// ID zero retains direct Item::Image insertion for the console renderer. This crate is the sole home of that
 // contract so the writer and reader can never drift; it carries NO decoder and
 // NO syscalls, so depending on it drags neither zune (into halcyond) nor
 // libthyla-rs (into a host test).
 
 #![no_std]
 
-/// Magic "HPL1" (Halcyon inline PLace v1), LE. A write that does not open with
+/// Magic "HPL2" (Halcyon inline PLace v2), LE. A write that does not open with
 /// it is not a place-request and is refused -- the first line of the
 /// format-fuzz defense (HALCYON.md 14.7.7).
-pub const MAGIC: u32 = 0x314c_5048; // b"HPL1" little-endian (pack()[0..4] == "HPL1")
+pub const MAGIC: u32 = 0x324c_5048; // b"HPL2" little-endian (pack()[0..4] == "HPL2")
 
 /// The only pixel format v0 carries: 0xAARRGGBB, one LE u32 per pixel, w-tight
 /// rows -- exactly what `cartoon::Op::Image` blits.
 pub const FORMAT_ARGB8888: u32 = 1;
 
-/// The fixed header size: magic + format + w + h, four LE u32s.
-pub const HEADER_LEN: usize = 16;
+/// The fixed header size: magic + format + w + h (four LE u32s), then a LE u128 ID.
+pub const HEADER_LEN: usize = 32;
 
 /// Per-dimension and total bounds -- refused before any allocation, so a
 /// hostile header can never drive a large reserve. MAX_PIXELS caps the payload
@@ -36,6 +37,7 @@ pub const MAX_PIXELS: u64 = 16 * 1024 * 1024;
 /// MAX_PIXELS`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PlaceHeader {
+    pub id: u128,
     pub format: u32,
     pub w: u32,
     pub h: u32,
@@ -46,6 +48,7 @@ impl PlaceHeader {
     /// [`parse`] is what enforces the bounds on the far side.
     pub fn argb(w: u32, h: u32) -> PlaceHeader {
         PlaceHeader {
+            id: 0,
             format: FORMAT_ARGB8888,
             w,
             h,
@@ -59,6 +62,7 @@ impl PlaceHeader {
         b[4..8].copy_from_slice(&self.format.to_le_bytes());
         b[8..12].copy_from_slice(&self.w.to_le_bytes());
         b[12..16].copy_from_slice(&self.h.to_le_bytes());
+        b[16..32].copy_from_slice(&self.id.to_le_bytes());
         b
     }
 
@@ -86,7 +90,7 @@ impl PlaceHeader {
         if (w as u64) * (h as u64) > MAX_PIXELS {
             return None;
         }
-        Some(PlaceHeader { format, w, h })
+        Some(PlaceHeader { id: u128::from_le_bytes(bytes[16..32].try_into().ok()?), format, w, h })
     }
 
     /// The payload byte count (w*h*4). Bounded by `MAX_PIXELS` for any parsed
@@ -110,7 +114,7 @@ mod tests {
         let h = PlaceHeader::argb(640, 400);
         let bytes = h.pack();
         assert_eq!(bytes.len(), HEADER_LEN);
-        assert_eq!(&bytes[0..4], b"HPL1", "magic reads as HPL1 in a hexdump");
+        assert_eq!(&bytes[0..4], b"HPL2", "magic reads as HPL2 in a hexdump");
         assert_eq!(PlaceHeader::parse(&bytes), Some(h));
         assert_eq!(h.payload_len(), 640 * 400 * 4);
         assert_eq!(h.total_len(), HEADER_LEN + 640 * 400 * 4);

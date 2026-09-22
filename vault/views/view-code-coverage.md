@@ -65,48 +65,49 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**450 owned · 76 unowned · 526 files (85% owned) · ~23852 unswept lines.**
+**523 owned · 48 unowned · 571 files (91% owned) · ~13165 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **73 files, ~32546 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **73 files, ~33174 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
 | usr/warp-prove | 0 | 1 | 4349 |
-| usr/nocturned | 0 | 3 | 3494 |
-| usr/pouch-hello | 0 | 22 | 3384 |
-| usr/haul | 0 | 5 | 2557 |
-| usr/ports | 14 | 9 | 2199 |
-| kernel | 123 | 15 | 2181 |
-| usr/lib | 59 | 5 | 1321 |
+| usr/pouch-hello | 6 | 17 | 2487 |
+| kernel | 127 | 14 | 1981 |
+| usr/ports | 19 | 4 | 1631 |
 | usr/quarry | 0 | 1 | 1033 |
-| usr/imperium | 0 | 1 | 591 |
-| usr/halcyond | 23 | 2 | 546 |
 | usr/stratumd-stub | 0 | 1 | 453 |
 | usr/kaua-term | 3 | 1 | 276 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
-| usr/corvus | 1 | 1 | 245 |
-| usr/tapestryd | 7 | 2 | 235 |
 | usr/libthyla-rs | 29 | 1 | 196 |
-| arch | 36 | 2 | 146 |
+| arch | 41 | 2 | 146 |
 | usr/susp-mask-child | 0 | 1 | 139 |
-| usr/nocturne-vol | 0 | 1 | 126 |
 | usr/stub-driver | 0 | 1 | 119 |
+| usr/lib | 66 | 1 | 72 |
+| usr/tapestryd | 8 | 2 | 21 |
 | mm | 8 | 0 | 0 |
 | usr/aurora | 4 | 0 | 0 |
 | usr/coreutils | 60 | 0 | 0 |
+| usr/corvus | 2 | 0 | 0 |
 | usr/curl | 3 | 0 | 0 |
 | usr/diorama | 2 | 0 | 0 |
 | usr/gallery | 2 | 0 | 0 |
 | usr/halcyon | 2 | 0 | 0 |
+| usr/halcyond | 32 | 0 | 0 |
+| usr/haul | 5 | 0 | 0 |
 | usr/httpd | 1 | 0 | 0 |
 | usr/https | 1 | 0 | 0 |
+| usr/imperium | 1 | 0 | 0 |
 | usr/joey | 1 | 0 | 0 |
+| usr/lictor | 25 | 0 | 0 |
 | usr/login | 1 | 0 | 0 |
 | usr/loom-stress | 1 | 0 | 0 |
 | usr/manual | 7 | 0 | 0 |
 | usr/net-echo | 1 | 0 | 0 |
 | usr/netd | 3 | 0 | 0 |
 | usr/netdev-driver | 1 | 0 | 0 |
+| usr/nocturne-vol | 1 | 0 | 0 |
+| usr/nocturned | 3 | 0 | 0 |
 | usr/nora | 13 | 0 | 0 |
 | usr/prowl | 3 | 0 | 0 |
 | usr/ptyfs | 2 | 0 | 0 |
@@ -128,58 +129,33 @@ Excluded as harness and counted here rather than dropped: **73 files, ~32546 lin
 | file | lines |
 |---|---:|
 | usr/warp-prove/src/main.rs | 4349 |
-| usr/nocturned/src/server.rs | 1976 |
 | usr/ports/gnumake/config.h | 1357 |
-| usr/haul/src/main.rs | 1125 |
-| usr/nocturned/src/snd.rs | 1076 |
 | usr/quarry/src/main.rs | 1033 |
-| usr/haul/src/npxf.rs | 1005 |
-| usr/lib/libhalcyon/src/toml.rs | 629 |
-| usr/imperium/src/main.rs | 591 |
 | usr/stratumd-stub/stratumd-stub.c | 453 |
-| usr/nocturned/src/main.rs | 442 |
-| usr/halcyond/src/outline.rs | 432 |
 | kernel/include/thylacine/errno.h | 388 |
-| usr/pouch-hello/pouch-hello-sockets.c | 366 |
 | usr/pouch-hello/pouch-hello-fs.c | 350 |
-| usr/lib/libhalcyon/src/scale.rs | 302 |
-| usr/haul/src/cmdline.rs | 296 |
-| usr/pouch-hello/pouch-hello-net.c | 284 |
+| usr/pouch-hello/pouch-hello-net.c | 293 |
 | kernel/include/thylacine/smp.h | 282 |
 | usr/pouch-hello/pouch-hello.c | 278 |
 | usr/kaua-term/src/cmdline.rs | 276 |
-| kernel/include/thylacine/devcap.h | 271 |
+| kernel/include/thylacine/spinlock.h | 275 |
 | usr/gl-sdl-prove/gl-sdl-prove.c | 262 |
 | usr/pouch-hello/pouch-hello-signals.c | 258 |
-| usr/ports/dosbox-x/config.h | 254 |
-| usr/corvus/src/provincia.rs | 245 |
-| usr/lib/fasces/src/lib.rs | 234 |
-| usr/ports/sdl2/thylacine/SDL_thylacineaudio.c | 231 |
 | usr/pouch-hello/pouch-hello-pty.c | 231 |
-| usr/tapestryd/src/skein.rs | 217 |
-| kernel/include/thylacine/spinlock.h | 204 |
 | kernel/include/thylacine/context.h | 201 |
 | usr/lib/libthyla-rs/src/sync.rs | 196 |
 | usr/pouch-hello/pouch-hello-sodium.c | 196 |
-| usr/pouch-hello/pouch-hello-poll.c | 179 |
 | usr/ports/gnumake/generated/glob.h | 163 |
 | kernel/include/thylacine/9p_srvconn_transport.h | 160 |
 | kernel/cpio.c | 152 |
 | usr/susp-mask-child/src/main.rs | 139 |
 | usr/pouch-hello/pouch-hello-reentry.c | 133 |
 | usr/pouch-hello/pouch-hello-spawn.c | 127 |
-| usr/nocturne-vol/src/main.rs | 126 |
 | usr/pouch-hello/pouch-hello-mallocng-torture.c | 126 |
-| usr/pouch-hello/pouch-hello-malloc.c | 122 |
-| usr/pouch-hello/pouch-hello-fopen.c | 120 |
-| usr/pouch-hello/pouch-hello-threads.c | 119 |
 | usr/stub-driver/stub-driver.c | 119 |
-| usr/halcyond/src/viewtest.rs | 114 |
-| usr/haul/src/addr.rs | 105 |
 | kernel/include/thylacine/9p_transport_loopback.h | 96 |
 | usr/pouch-hello/pouch-hello-exitgroup.c | 91 |
 | kernel/include/thylacine/9p_spoor_transport.h | 85 |
-| usr/lib/thylajit/thyla_jit.h | 84 |
 | kernel/include/thylacine/9p_transport_mq.h | 83 |
 | usr/pouch-hello/pouch-hello-getrandom.c | 79 |
 | arch/arm64/psci.c | 78 |
@@ -193,14 +169,11 @@ Excluded as harness and counted here rather than dropped: **73 files, ~32546 lin
 | kernel/include/thylacine/cpio.h | 61 |
 | usr/pouch-hello/pouch-hello-env.c | 57 |
 | usr/pouch-hello/pouch-hello-argv.c | 51 |
-| usr/ports/dosbox-x/glue/thylacine-audio-stubs.c | 47 |
 | usr/ports/vkquake/thy_vkloader.c | 47 |
 | usr/pouch-hello/pouch-hello-stdio.c | 42 |
 | usr/pouch-hello/pouch-hello-fault.c | 40 |
 | kernel/include/thylacine/types.h | 30 |
 | kernel/include/thylacine/devramfs.h | 27 |
-| usr/ports/sdl2/thylacine/SDL_thylacineaudio.h | 27 |
-| usr/haul/src/lib.rs | 26 |
-| usr/tapestryd/src/lib.rs | 18 |
-| usr/ports/dosbox-x/config_package.h | 9 |
+| usr/tapestryd/src/lib.rs | 19 |
+| usr/tapestryd/src/skein.rs | 2 |
 <!-- generated:end -->

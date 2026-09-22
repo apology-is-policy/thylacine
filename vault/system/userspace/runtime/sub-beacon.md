@@ -21,7 +21,7 @@ hazards: []
 abis: []
 design: ["docs/BEACON.md"]
 created: 2026-09-05
-updated: 2026-09-05
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -132,7 +132,8 @@ halcyond, not a new frame op.
 `verbs.default` also carries the two **inline-media** path verbs (I-47):
 **`view`** (`path view view {}`) renders an image INLINE in the transcript (via
 `/srv/halcyon`, [[sub-view]]) or falls back to `cat`; **`gallery`**
-(`path gallery gallery {}`) shows it FULLSCREEN on a tapestryd surface
+(`path gallery gallery {}`) shows it in a native tapestryd pane that Halcyon
+can zoom with its workspace controls
 ([[sub-gallery]]). Choosing either on a presented path types `<verb> '<path>'`
 into the pane. Unlike `ls`/`cat`/`stat` both templates omit `--`: each reads a
 bare path operand and does not yet consume the `--` separator (the file's
@@ -198,6 +199,12 @@ output layer:
   `expand` refuses rather than emit an unsafe command line.
 - `Tier::parse` / `BeaconMode::parse_when` return `None` on an unknown word;
   an absent `BEACON` value anywhere along the transport chain is None.
+  `Tier::parse` trims surrounding whitespace first (2026-09-16): `echo rich >
+  /env/BEACON` stores `rich\n`, and `ut`'s own reader (`env_beacon_tier`)
+  already trimmed, so the exact match gave ONE stored value two tiers -- rich
+  to the shell, none to every tool resolving through this function (the
+  coreutils' `beacon_gate`, halcyon). The test pins `rich\n` and ` cells `;
+  an untrimmed parse fails it (sabotaged).
 - A failed fd-class probe is `None` -> `effective_tier` returns None -> plain.
 
 ## Performance

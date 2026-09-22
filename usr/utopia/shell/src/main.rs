@@ -64,8 +64,8 @@ const UT_VERSION: &str = "0.9-dev";
 /// Emit the Pale Fire version banner. Three composed segments per
 /// UTOPIA-VISUAL.md section 3: the glyph-orange right-tack, white version
 /// text, path-blue tagline. Each coloured segment self-resets (ansi::fg),
-/// so colour cannot bleed into subsequent output. Goes to the UART via
-/// t_putstr (not fd 1), so it shows even when `ut` has no inherited stdout.
+/// so colour cannot bleed into subsequent output. Use the caller's terminal;
+/// the early boot probe without stdout uses the console.
 fn print_banner() {
     let mut banner = String::new();
     banner.push_str(&ansi::fg(palette::Role::Glyph, GLYPH));
@@ -74,7 +74,9 @@ fn print_banner() {
     banner.push_str(" -- ");
     banner.push_str(&ansi::fg(palette::Role::Path, "Thylacine textual shell"));
     banner.push('\n');
-    t_putstr(&banner);
+    use libthyla_rs::io::Write;
+    if io::stdout_is_live() { let _ = io::stdout().write_all(banner.as_bytes()); }
+    else { t_putstr(&banner); }
 }
 
 /// #94-B-b: parse "--consctl-fd N" from argv -> the inherited consctl fd, or -1
@@ -152,6 +154,12 @@ fn export_beacon(tier: &str) {
             t_putstr("ut: /env/BEACON create failed (children see none)\n");
         }
     }
+}
+
+/// An opaque `Argb` from the palette export as libutopia's `Rgb` (the alpha
+/// byte dropped; the export never carries one).
+fn argb_rgb(v: u32) -> palette::Rgb {
+    palette::Rgb::new((v >> 16) as u8, (v >> 8) as u8, v as u8)
 }
 
 fn parse_consctl_fd() -> i64 {
@@ -383,6 +391,21 @@ pub extern "C" fn rs_main() -> i64 {
             None => {
                 t_putstr("ut: beacon tier not advertised by the pts host (plain)\n");
             }
+        }
+        // HALCYON-INSTRUMENT 7.4 (I-5c): the prompt's three inks from the
+        // session's palette export, inherited in /env/HALCYON_PALETTE the way
+        // the tier is. All three or none (`libhalcyon::theme::prompt_roles`):
+        // a session under the Instrument profile exports them and the prompt
+        // takes the lambda shape in the session's inks; under legacy the
+        // export lacks them and the Bonfire shape stands. The console path is
+        // structurally without them -- no ancestor of a console `ut` is a
+        // session, so nothing can export to its /env (a recorded residue).
+        if let Some(r) = env::var("HALCYON_PALETTE").and_then(|t| libhalcyon::theme::prompt_roles(&t)) {
+            repl.set_prompt_roles(Some(palette::PromptRoles {
+                glyph: argb_rgb(r.glyph),
+                path: argb_rgb(r.path),
+                delim: argb_rgb(r.delim),
+            }));
         }
     }
 

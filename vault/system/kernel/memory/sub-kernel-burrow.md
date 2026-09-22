@@ -9,7 +9,7 @@ guarded-by: [inv-i7, inv-i32]
 validated-by: [spec-burrow, gate-smp]
 locks: [lock-burrow]
 created: 2026-08-02
-updated: 2026-09-06
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -440,3 +440,14 @@ flag. The only burrow change since the 2026-08-24 update is `3de39ad0`
 "SMP cross-CPU" (masking cannot serialize two CPUs; only `v->lock` can), and this
 dossier's prose already carries the SMP reasoning ("a peer CPU mutating one count
 between them"). The code is unchanged. Borrowed — nothing owed.
+
+## PCI mapping lifetime and routing protection (2026-09-17)
+
+`burrow_create_mmio_range` retains a whole MMIO claim while mapping a page-aligned
+subrange; its stored PA is the subrange base. `burrow_create_pci_mmio` additionally
+retains the owning PCI object, after checking MSI-X page exclusions. MMIO Burrows
+may therefore hold both `kobj_mmio` and `kobj_pci`; freeing drops both references.
+This prevents reassignment of a function while its old register mappings live.
+The hostmem constructor independently rejects protected table/PBA pages, so a
+valid shared-memory descriptor does not circumvent routing isolation. The guest
+PCI mapping lifetime and hostmem alias tests pass. [[abi-pci-windows]].

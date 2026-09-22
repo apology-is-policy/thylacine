@@ -680,9 +680,11 @@ if [[ "$JOBS" -gt 1 && "${LS_CI_POOL_RESTORE:-1}" == "0" ]]; then
     exit 2
 fi
 
-SLOTS="$BUILD_DIR/ls-ci-slots"
-rm -rf "$SLOTS" 2>/dev/null || true
-mkdir -p "$SLOTS"
+# macOS AF_UNIX paths must be shorter than 104 bytes. A checkout path plus
+# a long scenario name exceeds that limit before QEMU can even boot. Keep
+# per-run slot paths short and private; transcripts remain under BUILD_DIR.
+SLOTS="$(mktemp -d /tmp/thyla-ci.XXXXXX)"
+trap 'reap_qemu; rm -rf -- "$SLOTS"' EXIT
 
 # Mint the disk twin ONCE, here, before anything forks. disk_restore creates
 # $DISK_SNAP on demand when it is missing or the size changed, and that path

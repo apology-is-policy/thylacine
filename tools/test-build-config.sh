@@ -33,6 +33,7 @@ eq "default CHUNK_DOSBOX"  "$(bc_get CHUNK_DOSBOX)"  "y"
 eq "default CHUNK_DUKE3D"  "$(bc_get CHUNK_DUKE3D)"  "y"
 eq "default CHUNK_TOMBRAIDER" "$(bc_get CHUNK_TOMBRAIDER)" "y"
 eq "default DOSBOX_CPU_PRESET" "$(bc_get DOSBOX_CPU_PRESET)" "pentium"
+eq "default CHUNK_WEBKIT (slow + foraged -> off)" "$(bc_get CHUNK_WEBKIT)" "n"
 
 echo "== preset: production =="
 bc_reset; bc_apply_preset production
@@ -88,8 +89,9 @@ if bc_set_one BOGUS y 2>/dev/null; then bad "unknown symbol accepted"; else ok "
 echo "== T-export: symbols -> build.sh knobs (incl. TICKLESS inversion + DEV_ACCOUNTS) =="
 build_type=""; kernel_tests=""; boot_probes=""; hardening_full=""; kaslr=""
 sanitize="__unset__"; no_tickless=""; dev_accounts=""; extra_cmake_args=()
-unset THYLACINE_BAKE_GOROOT THYLACINE_BAKE_CLADE THYLACINE_BAKE_DOSBOX THYLACINE_BAKE_DUKE3D THYLACINE_BAKE_TOMBRAIDER THYLACINE_DOSBOX_CPU_PRESET 2>/dev/null || true
+unset THYLACINE_BAKE_GOROOT THYLACINE_BAKE_CLADE THYLACINE_BAKE_DOSBOX THYLACINE_BAKE_DUKE3D THYLACINE_BAKE_TOMBRAIDER THYLACINE_DOSBOX_CPU_PRESET THYLACINE_BAKE_WEBKIT 2>/dev/null || true
 bc_reset; bc_apply_preset production; bc_resolve 2>/dev/null; bc_export
+eq "export THYLACINE_BAKE_WEBKIT (n -> 0)" "${THYLACINE_BAKE_WEBKIT:-}" "0"
 eq "export build_type"    "$build_type"    "Release"
 eq "export kernel_tests"  "$kernel_tests"  "OFF"
 eq "export boot_probes"   "$boot_probes"   "OFF"
@@ -156,6 +158,37 @@ eq "default profile: console OFF" "$(bc_get HALCYON_CONSOLE)" "n"
 # gate fleet along with it.
 bc_reset; bc_apply_preset ci
 eq "ci profile: session OFF" "$(bc_get HALCYON_SESSION)" "n"
+
+# T-display-profile: WHICH Halcyon is drawn is a config option (2026-09-21). It
+# used to be an env lever the schema did not know, so a config could select an
+# Instrument THEME and still get the legacy UI -- new colours on old bezels.
+# The schema default is `instrument` so a profile written before the option
+# existed (it names no HALCYON_PROFILE) builds the current UI, not the old one.
+bc_reset
+eq "profile schema default is instrument" "$(bc_get HALCYON_PROFILE)" "instrument"
+bc_reset; bc_apply_preset default
+eq "default profile: the Instrument UI"   "$(bc_get HALCYON_PROFILE)" "instrument"
+# The gate fleet's pre-Instrument scenarios assert the legacy literals.
+bc_reset; bc_apply_preset ci
+eq "ci profile: the legacy UI (pinned)"   "$(bc_get HALCYON_PROFILE)" "legacy"
+# A choice, not a string: a misspelt profile must fail HERE, not bake a word
+# the loader refuses one tier down at every boot.
+bc_reset
+if bc_set_one HALCYON_PROFILE instrumnet >/dev/null 2>&1; then
+    eq "a misspelt profile is refused" "accepted" "refused"
+else
+    eq "a misspelt profile is refused" "refused" "refused"
+fi
+eq "a refused profile changes nothing" "$(bc_get HALCYON_PROFILE)" "instrument"
+unset THYLACINE_HALCYON_PROFILE
+bc_reset; bc_set_one HALCYON_PROFILE legacy >/dev/null; bc_export
+eq "export PROFILE (choice -> raw)" "${THYLACINE_HALCYON_PROFILE:-}" "legacy"
+# The caller's env still wins (bc__export_env never clobbers): this is how an
+# Instrument gate overrides the ci profile's pin.
+THYLACINE_HALCYON_PROFILE=instrument; export THYLACINE_HALCYON_PROFILE
+bc_reset; bc_apply_preset ci; bc_export
+eq "a caller-set PROFILE outranks the ci pin" "${THYLACINE_HALCYON_PROFILE:-}" "instrument"
+unset THYLACINE_HALCYON_PROFILE
 
 echo
 if [[ "$fail" == 0 ]]; then echo "ALL PASS"; exit 0; else echo "FAILURES"; exit 1; fi

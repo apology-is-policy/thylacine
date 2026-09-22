@@ -133,6 +133,22 @@ static void exception_unexpected_impl(struct exception_context *ctx, u64 vector_
 // runs IRQ-masked), and the failure mode of any miss is a spin, not
 // corruption.
 //
+// ARCH 8.12 (syscall bodies run with interrupts ON) does NOT open that
+// residual, and the reason is worth stating because the chunk looks like it
+// should. The unmask is confined to the SVC BODY -- syscall_dispatch's
+// wrapper, not the vector. Kernel fault handling -- what this counter measures
+// -- enters through the SEPARATE 0x200 current-EL sync slot, which the wrapper
+// never touches and which masks at exception entry, so it still runs masked end
+// to end. (The slot the SVC shares is 0x400, lower-EL sync, whose other
+// occupant is EL0 fault handling, which this counter does not measure.) A syscall body that faults enters EL1-sync through the
+// normal vector, which masks at exception entry, so the recursive chain this
+// guard bounds is masked exactly as before.
+//
+// The other half of the discriminator survives too: the counter is cleared at
+// every context switch, and a syscall body is NON-PREEMPTIBLE
+// (Thread.in_syscall), so an IRQ landing in a body does not switch and
+// therefore cannot spuriously clear it.
+//
 // The runaway path deliberately does NOT halls_dump (the dump machinery
 // is the likely faulting amplifier): print one raw banner with the frame
 // that killed the handler, and park THIS CPU with the stack corpse intact
@@ -388,7 +404,7 @@ static void exception_irq_curr_el_impl(struct exception_context *ctx) {
     // INTIDs 1020..1023 are reserved per ARM IHI 0069 §2.2.1 (1023 is
     // explicitly "spurious"; 1020..1022 are also reserved and must not
     // be dispatched or EOI'd). Treat the full range as spurious.
-    if (intid >= GIC_NUM_INTIDS) {
+    if (intid >= GIC_NUM_INTIDS && intid <= GIC_INTID_SPURIOUS) {
         return;
     }
     gic_dispatch(intid);

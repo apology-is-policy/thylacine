@@ -17,10 +17,12 @@
 //   MountRefcountConsistency (ARCH §9.6.6): every mount entry holds one
 //   refcount on its source Spoor. Maintained by:
 //     - mount(): spoor_ref(source) before insert.
-//     - unmount(): spoor_unref(source) after remove.
+//     - unmount(): spoor_clunk(source) after remove (outside the lock).
 //     - territory_clone(): spoor_ref(source) per cloned entry.
-//     - territory_unref() final release: spoor_unref(source) for each
+//     - territory_unref() final release: spoor_clunk(source) for each
 //       entry BEFORE kmem_cache_free.
+//   Always spoor_clunk, never spoor_unref: the entry's ref may be the LAST
+//   (the Proc closed its fd), and the source Dev's close hook must run.
 //
 //   Isolation (ARCH §28 I-1): all operations take a single Territory *.
 //   Two Territories' tables are never modified in the same call.
@@ -39,6 +41,7 @@
 // which requires spoor_init. The dependency is therefore satisfied
 // automatically by call ordering, not by init ordering.
 
+#include <thylacine/dev.h>
 #include <thylacine/extinction.h>
 #include <thylacine/path.h>
 #include <thylacine/spoor.h>
@@ -1135,6 +1138,107 @@ bool mount_noexec_covers(struct Territory *territory, int dc, u32 devno) {
 }
 
 // =============================================================================
+// The mount-table shed (ARCH 9.6.10; #80; specs/territory_shed.tla).
+// =============================================================================
+//
+// unmount() takes a RESOLVED mount point, so once a root swap makes a mount
+// point unreachable its entry can never be named again: it cannot be removed,
+// it is deep-copied into every child by territory_clone, and its slot is lost
+// for the life of the namespace. The shed drops those entries at the swap.
+//
+// Reachability is per DEVICE INSTANCE (dc, devno), the least set R with
+//      instance(new root) in R
+//      instance(mount point) in R  =>  instance(source) in R
+// which is sound because the resolver only descends ('..' pops stalk's in-call
+// trail and is a no-op at the base; a symlink re-anchors at root_spoor): every
+// Spoor a resolution from the new root can hold is in R, so an entry keyed
+// outside R can never fire for one (the spec's ShedLosesNothing). It is per
+// instance, not per directory, because the kernel cannot see inside a 9P tree;
+// that makes it conservative -- it may keep an entry no walk reaches, and never
+// drops one a walk can. A Dev whose walk does not preserve devno
+// (Dev.devno_per_walker: devenv) is matched on dc alone, conservative again.
+//
+// One Spoor is consulted at the base WITHOUT having been walked to: a union
+// root's mount point. An open of a union directory (O_PATH or OREAD -- both
+// pass the directory gate chroot / pivot_root apply) has member[0]'s identity
+// and carries the point in union_snap, and stalk routes every first
+// component from such a base through the entries keyed AT THE POINT
+// (union_base = base->union_snap->point). The point lives in the tree the union
+// was mounted in, so its instance is a second seed; without it the shed drops
+// the union's own entries and every name under the new root is ENOENT.
+struct shed_inst { int dc; u32 devno; bool any_devno; };
+
+static bool shed_has(const struct shed_inst *r, int n, int dc, u32 devno) {
+    for (int i = 0; i < n; i++)
+        if (r[i].dc == dc && (r[i].any_devno || r[i].devno == devno)) return true;
+    return false;
+}
+
+#define SHED_REACH_MAX (PGRP_MAX_MOUNTS + 2)
+
+// Caller has checked !shed_has(). Capacity: the two seeds plus one instance per
+// mount entry, and each add is preceded by a miss, so n <= nmounts + 2.
+static void shed_add(struct shed_inst *r, int *n, const struct Spoor *s) {
+    if (*n >= SHED_REACH_MAX) extinction("territory shed: reach[] overflow");
+    r[*n].dc        = s->dc;
+    r[*n].devno     = s->devno;
+    r[*n].any_devno = s->dev && s->dev->devno_per_walker;
+    (*n)++;
+}
+
+// Drop every mount entry unreachable from `root`. Called with ns_lock HELD, in
+// the same hold that installed `root` as root_spoor, so a peer thread sees
+// either the old root with the whole old table or the new root with the shed
+// one. No allocation, no sleep. Each dropped entry releases what unmount()
+// releases: its mp_path ref here (path_unref does not sleep) and its source ref
+// through clunk[] -- the caller spoor_clunk()s those OUTSIDE the lock, because a
+// Dev close hook may sleep. clunk[] holds PGRP_MAX_MOUNTS. Survivors keep their
+// relative order, which IS the union search order. Returns the clunk count.
+static int territory_shed_unreachable_locked(struct Territory *t,
+                                             const struct Spoor *root,
+                                             struct Spoor **clunk) {
+    struct shed_inst reach[SHED_REACH_MAX];
+    int nr = 0;
+    shed_add(reach, &nr, root);
+    // union_snap is set once before the Spoor is published and freed with it,
+    // and the caller holds a root ref, so this read needs no more than that.
+    if (root->union_snap && root->union_snap->point) {
+        const struct Spoor *pt = root->union_snap->point;
+        if (!shed_has(reach, nr, pt->dc, pt->devno)) shed_add(reach, &nr, pt);
+    }
+
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (int i = 0; i < t->nmounts; i++) {
+            const struct PgrpMount *m = &t->mounts[i];
+            if (!shed_has(reach, nr, m->mp_dc, m->mp_devno)) continue;
+            if (shed_has(reach, nr, m->source->dc, m->source->devno)) continue;
+            shed_add(reach, &nr, m->source);
+            changed = true;
+        }
+    }
+
+    int keep = 0, nclunk = 0;
+    for (int i = 0; i < t->nmounts; i++) {
+        struct PgrpMount *m = &t->mounts[i];
+        if (shed_has(reach, nr, m->mp_dc, m->mp_devno)) {
+            if (keep != i) t->mounts[keep] = *m;
+            keep++;
+        } else {
+            clunk[nclunk++] = m->source;
+            path_unref(m->mp_path);
+        }
+    }
+    // Vacated tail slots hold copies of pointers that now belong to a survivor
+    // or to clunk[]; clear them so nothing stale sits past nmounts.
+    for (int i = keep; i < t->nmounts; i++)
+        t->mounts[i] = (struct PgrpMount){0};
+    t->nmounts = keep;
+    return nclunk;
+}
+
+// =============================================================================
 // chroot (root-Spoor pivot) — P5-stratumd-stub-bringup-e2.
 // =============================================================================
 
@@ -1165,9 +1269,12 @@ int territory_chroot(struct Territory *territory, struct Spoor *source) {
     // inside; the displaced root's spoor_clunk is deferred to OUTSIDE the lock (its
     // Dev close hook may sleep).
     struct Spoor *old = NULL;
+    struct Spoor *shed[PGRP_MAX_MOUNTS];
+    int nshed;
     spin_lock(&territory->ns_lock);
     // Idempotent same-pointer: same Spoor reasserted as root -> no-op success;
-    // refcount unchanged. Matches spec precondition `root_spoor[p] # s`.
+    // refcount unchanged, and NO shed (no swap happened). Matches spec
+    // precondition `root_spoor[p] # s`.
     if (territory->root_spoor == source) {
         spin_unlock(&territory->ns_lock);
         return 0;
@@ -1177,8 +1284,11 @@ int territory_chroot(struct Territory *territory, struct Spoor *source) {
     // Spoor the swap is then infallible.
     spoor_ref(source);
     territory->root_spoor = source;
+    // ARCH 9.6.10: end the old generation in the same hold as the swap.
+    nshed = territory_shed_unreachable_locked(territory, source, shed);
     spin_unlock(&territory->ns_lock);
 
+    for (int i = 0; i < nshed; i++) spoor_clunk(shed[i]);
     if (old) {
         // spoor_clunk (not spoor_unref) -- see header comment + mount() MREPL
         // precedent. If this Territory was the last holder of `old`, the Dev's
@@ -1222,13 +1332,16 @@ int territory_pivot_root(struct Territory *territory, struct Spoor *source) {
     // the check or free `old` mid-read); the displaced root's spoor_clunk is
     // deferred to OUTSIDE the lock (its Dev close hook may sleep).
     struct Spoor *old = NULL;
+    struct Spoor *shed[PGRP_MAX_MOUNTS];
+    int nshed;
     spin_lock(&territory->ns_lock);
     if (!territory->root_spoor) {
         spin_unlock(&territory->ns_lock);
         return -1;
     }
     // Idempotent same-pointer: same Spoor reasserted as root -> no-op success;
-    // refcount unchanged. Matches territory_chroot + Plan 9 / Linux pivot-to-same.
+    // refcount unchanged, and NO shed (no swap happened). Matches
+    // territory_chroot + Plan 9 / Linux pivot-to-same.
     if (territory->root_spoor == source) {
         spin_unlock(&territory->ns_lock);
         return 0;
@@ -1238,7 +1351,12 @@ int territory_pivot_root(struct Territory *territory, struct Spoor *source) {
     // then infallible.
     spoor_ref(source);
     territory->root_spoor = source;
+    // ARCH 9.6.10: end the old generation in the same hold as the swap. This
+    // is what returns joey's seven boot-generation slots.
+    nshed = territory_shed_unreachable_locked(territory, source, shed);
     spin_unlock(&territory->ns_lock);
+
+    for (int i = 0; i < nshed; i++) spoor_clunk(shed[i]);
 
     // spoor_clunk (NOT spoor_unref) on the displaced root: if THIS Territory was
     // the last holder, the Dev's close hook runs. Same discipline as

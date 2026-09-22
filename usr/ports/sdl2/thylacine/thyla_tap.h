@@ -105,6 +105,9 @@ int thyla_tap_glsrc(ThylaTap *t, uint32_t ctx_pub);
  * ctl "intent <dynamic|static>". Returns 0 or -1. */
 int thyla_tap_intent(ThylaTap *t, int dynamic);
 
+/* Copy a bounded UTF-8 title to this surface's hosted pane. */
+int thyla_tap_title(ThylaTap *t, const char *title);
+
 /* Blocking read of up to `max` events (parks when none pending; returns
  * on the first delivery). Returns the record count, 0 on stream EOF
  * (surface retired under us), -1 on error. */

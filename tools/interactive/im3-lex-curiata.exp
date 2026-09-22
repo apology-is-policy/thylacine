@@ -9,7 +9,7 @@
 #   (1) CONFER: `imperium-probe chown dac` posts the request and parks;
 #       Ctrl-A b -> `cons: SAK (episode)` -> the provincia shows EXACTLY the
 #       restricted set (CAP_CHOWN + CAP_DAC_OVERRIDE, `axe: no`) -> the
-#       fixture key -> `imperium CONFERRED` -> the parked read returns OK ->
+#       fixture key -> `Authority conferred ...` -> the parked read returns OK ->
 #       the probe redeems and prints /proc/<pid>/imperium: `propagating 1`,
 #       `rods 2`, `axe 0` -- the kernel's unforgeable account.
 #   (2) WRONG KEY, with the axe: `imperium-probe kill` -> the provincia shows
@@ -88,7 +88,9 @@ lc_expect "CAP_CHOWN" "the restricted set names CAP_CHOWN (1)"
 lc_expect "axe:     no" "no axe for a request without CAP_KILL (1)"
 lc_expect "imperium key: " "the key prompt on the trusted path (1)"
 lc_raw_send "imperium-key-michael-v1\r" "the fixture key"
-lc_expect "imperium CONFERRED" "corvus's verdict on the trusted path (1)"
+# The verdict is the one line the serial and graphical prompts SHARE (it is the
+# semantic model's notice), so it is worded for the operator, not the log.
+lc_expect "Authority conferred to the requesting process." "corvus's verdict on the trusted path (1)"
 expect_probe_line "imperium-probe: OK session=" "the parked read returned OK (1)"
 expect_probe_line "propagating 1" "/proc/<pid>/imperium: the scope propagates (1)"
 expect_probe_line "imperium-probe: PASS" "the probe's own verdict (1)"

@@ -1,0 +1,75 @@
+# Round 2: authored semantic ANSI16 + explicit contrast corrections.
+# Still a stock-schema compatibility projection, not the full UI profile.
+[meta]
+name = "Signal Amber"
+
+[palette]
+floor = "#0B0D0E"
+surface = "#15191B"
+header = "#101315"
+raised = "#191D1F"
+border = "#2A302E"
+blank = "#111416"
+selection = "#322C21"
+island_rule = "#8C6732"
+fg = "#E4E7E5"
+fg_dim = "#CDD1CF"
+fg_muted = "#929996"
+fg_subtle = "#7A807D"
+bevel_top = "#323435"
+bevel_left = "#212324"
+bevel_right = "#090A0B"
+bevel_bottom = "#060708"
+ember = "#D59A42"
+ember_dim = "#8C6732"
+ember_deep = "#8C6732"
+status_bg = "#0D1011"
+status_fg = "#E4E7E5"
+status_muted = "#929996"
+status_idle = "#606764"
+
+[palette.sage]
+key = "#70A17C"
+tint = "#101315"
+raised = "#191D1F"
+border = "#202523"
+fg = "#E4E7E5"
+fg_dim = "#929996"
+fg_muted = "#7A807D"
+
+[palette.cinnabar]
+key = "#C86B62"
+tint = "#101315"
+raised = "#191D1F"
+border = "#202523"
+fg = "#E4E7E5"
+fg_dim = "#929996"
+fg_muted = "#7A807D"
+
+[palette.syntax]
+slate = "#D59A42"
+sage = "#83A7A0"
+sand = "#C86B62"
+moss = "#997849"
+ash = "#70A17C"
+dusk = "#D9B374"
+smoke = "#797F7C"
+fen = "#70A17C"
+cinnabar = "#C86B62"
+
+[terminal]
+bg = "#111516"
+fg = "#B8BFBC"
+ansi = ["#666D69", "#BD7770", "#7D9D78", "#BAA15D", "#7B98BA", "#AA86AD", "#6AA7A5", "#C1C7C1", "#909992", "#E29890", "#9DC196", "#DDC57F", "#A0BBDF", "#CBA8CD", "#8DCAC6", "#EDF1E9"]
+
+[type]
+smooth = 0
+
+[geometry]
+bevel = 2
+gap = 3
+hairline = 1
+header_h = 32
+status_h = 25
+tag_pad_x = 0
+tab_strip_h = 0

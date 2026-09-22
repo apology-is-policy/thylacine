@@ -14,12 +14,15 @@
 #   tools/qmp-sendtext.sh [-s QMP_SOCK] -p "abs 16000 16000"
 #   tools/qmp-sendtext.sh [-s QMP_SOCK] -p "btn left down|up"
 #   tools/qmp-sendtext.sh [-s QMP_SOCK] -p "wheel up|down"
+#   tools/qmp-sendtext.sh [-s QMP_SOCK] -p "dblclick left|right|middle"
+#   tools/qmp-sendtext.sh [-s QMP_SOCK] -p "drag left X0 Y X1 N MS"
 #
 # Lowercase letters, digits, space, '-', '.', '/' and '\n' only (the
 # scenario vocabulary); anything else is a hard error, not a silent skip.
 # -k sends ONE chord: '+'-separated qcodes pressed in order, released in
 # reverse (the G-6c Super-chord leg; qcodes pass through verbatim, e.g.
-# meta_l, shift, left/right/up/down, letters).
+# meta_l, shift, left/right/up/down, letters). A trailing @MS holds the
+# chord down for MS milliseconds first: -k "ctrl+alt+f10@6500".
 # -p sends ONE pointer op to the virtio tablet (G-7c): `abs X Y` moves
 # (QEMU's absolute axis range is 0..32767, scaled by the guest to the
 # display), `btn left|right|middle down|up` clicks, `wheel up|down`
@@ -65,10 +68,23 @@ SHIFTED = {**{c.upper(): c for c in "abcdefghijklmnopqrstuvwxyz"},
            "!": "1", "@": "2", "#": "3", "$": "4", "%": "5", "^": "6",
            "&": "7", "*": "8", "(": "9", ")": "0"}
 
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.settimeout(10)
-s.connect(sock_path)
+s = None
 buf = b""
+
+
+def connect():
+    """(Re)open the QMP session. QEMU serves ONE client per monitor socket, so
+    a helper that sleeps with the connection open blocks every other QMP user
+    (a screenshot, another key) for the whole sleep: the held chord drops the
+    connection while it waits and reopens it to release."""
+    global s, buf
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(10)
+    s.connect(sock_path)
+    buf = b""
+    msg()  # greeting
+    cmd("qmp_capabilities")
+
 
 
 def msg():
@@ -112,8 +128,7 @@ def send_events(events):
     cmd("input-send-event", events=events)
 
 
-msg()  # greeting
-cmd("qmp_capabilities")
+connect()
 if mode == "pointer":
     parts = text.split()
     if parts and parts[0] == "abs" and len(parts) == 3:
@@ -126,10 +141,39 @@ if mode == "pointer":
             parts[1] in ("left", "right", "middle") and parts[2] in ("down", "up"):
         send_events([{"type": "btn",
                       "data": {"down": parts[2] == "down", "button": parts[1]}}])
+    elif parts and parts[0] == "dblclick" and len(parts) == 2 and \
+            parts[1] in ("left", "right", "middle"):
+        # Two clicks in one QMP session, milliseconds apart -- the guest's
+        # double-click window (HALCYON-INSTRUMENT 9.2) is far wider than one
+        # process spawn per edge could promise under load.
+        for down in (True, False, True, False):
+            send_events([{"type": "btn",
+                          "data": {"down": down, "button": parts[1]}}])
     elif parts and parts[0] == "wheel" and len(parts) == 2 and \
             parts[1] in ("up", "down"):
         b = "wheel-up" if parts[1] == "up" else "wheel-down"
         send_events([{"type": "btn", "data": {"down": True, "button": b}}])
+        send_events([{"type": "btn", "data": {"down": False, "button": b}}])
+    elif parts and parts[0] == "drag" and len(parts) == 7 and \
+            parts[1] in ("left", "right", "middle"):
+        # A held-button drag in ONE QMP session: press at (X0, Y), then N
+        # moves alternating between X1 and X0 at MS ms apart, then release
+        # where the last move left the pointer. One process per move would
+        # spend the step budget on spawns and make the rate the host's, not
+        # the scenario's (the dblclick reasoning, for a long drag).
+        b = parts[1]
+        x0, y, x1, n, ms = (int(v) for v in parts[2:])
+        send_events([
+            {"type": "abs", "data": {"axis": "x", "value": x0}},
+            {"type": "abs", "data": {"axis": "y", "value": y}},
+        ])
+        time.sleep(0.2)
+        send_events([{"type": "btn", "data": {"down": True, "button": b}}])
+        time.sleep(0.2)
+        for i in range(n):
+            send_events([{"type": "abs",
+                          "data": {"axis": "x", "value": x1 if i % 2 == 0 else x0}}])
+            time.sleep(ms / 1000.0)
         send_events([{"type": "btn", "data": {"down": False, "button": b}}])
     elif parts and parts[0] == "rel" and len(parts) == 3:
         # Routed to the relative device (virtio-mouse) uniquely: the
@@ -145,6 +189,15 @@ if mode == "pointer":
     print(f"qmp-sendtext: pointer {text!r}")
     sys.exit(0)
 if mode == "chord":
+    # CHORD@MS holds the whole chord for MS milliseconds before releasing it
+    # (the held-attention leg: a chord kept down past the seat's deadline).
+    hold_ms = 0
+    if "@" in text:
+        text, _, ms = text.partition("@")
+        if not ms.isdigit():
+            print(f"qmp-sendtext: bad hold {ms!r}", file=sys.stderr)
+            sys.exit(1)
+        hold_ms = int(ms)
     codes = [c for c in text.split("+") if c]
     if not codes:
         print("qmp-sendtext: empty chord", file=sys.stderr)
@@ -152,6 +205,10 @@ if mode == "chord":
     for q in codes:
         key(q, True)
         time.sleep(0.03)
+    if hold_ms:
+        s.close()
+        time.sleep(hold_ms / 1000.0)
+        connect()
     for q in reversed(codes):
         key(q, False)
         time.sleep(0.03)

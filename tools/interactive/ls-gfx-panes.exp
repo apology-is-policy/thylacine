@@ -106,7 +106,7 @@ proc scale_legs {want} {
     }
     lc_pass "panes: the seat booted at scale $want ([expr {$want == 100 ? "EDID-derived" : "declared on the cmdline"}]) and Super+= stepped to [expr {$want + 25}]"
     expect {
-        -re {tapestryd: scale fan direct (\d+) configure serial (\d+)} {
+        -re {tapestryd: scale fan direct (\d+) configure serial (\d+)\r} {
             set fan_surf $expect_out(1,string); set fan_serial $expect_out(2,string)
         }
         timeout { lc_fail "the DIRECT console got no redraw CONFIGURE on the scale change (the arm fanned nothing -- the follower would stay at $want until an unrelated relayout)" }
@@ -122,7 +122,7 @@ proc scale_legs {want} {
         timeout { lc_fail "Super+0 never reset the scale (no `tapestryd: scale [expr {$want + 25}] -> $want (chord-reset)`)" }
     }
     expect {
-        -re {tapestryd: scale fan direct (\d+) configure serial (\d+)} {
+        -re {tapestryd: scale fan direct (\d+) configure serial (\d+)\r} {
             if {$expect_out(2,string) == $fan_serial} { lc_fail "the reset's fan re-used serial $fan_serial: no fresh CONFIGURE was queued" }
         }
         timeout { lc_fail "the DIRECT console got no redraw CONFIGURE on the scale reset" }
@@ -633,6 +633,40 @@ expect {
     -ex "battery: console leaf restored" { lc_pass "panes: session off restores the console leaf's column" }
     -ex "tapestry-battery: FAIL" { lc_fail_detail "the undeclare control failed" }
     timeout { lc_fail "session off never restored the console leaf" }
+}
+# HALCYON-WORKSPACES: the live-workspace leg -- the switch, the leaving tree
+# DORMANT (its live tile leaves the active root's rows), a SPARSE create, the
+# return, and the vanish of the empty inactive ones. Driven through the
+# `workspace N` verb on the `layout` file (W-2b): the battery is a client and
+# cannot inject Super+N, which lives on the compositor's own key path.
+expect {
+    -ex "battery: workspace 2 created and switched to; workspace 1 dormant" {
+        lc_pass "panes: a switch creates the next workspace and darkens the one it left"
+    }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the workspace switch/dormant leg failed" }
+    timeout { lc_fail "the workspace switch never reported" }
+}
+# S4: a number is an IDENTITY, so a skipped one is CREATED rather than refused
+# -- the inverse of the rule this leg used to assert.
+#
+# The set reads 1,9 rather than 1,2,9: leaving the empty workspace 2 VANISHED
+# it (the i3 rule, firing at the reconcile the switch triggers). That gap is
+# the sharper witness -- 1 and 9 are not contiguous, so a COUNT would render
+# `2` and the rail would label chips that do not exist, which is exactly what
+# the list form exists to prevent.
+expect {
+    -ex "battery: workspace 9 created from a gap; the header lists 1,9" {
+        lc_pass "panes: a skipped number is created and the header lists the sparse set (S4)"
+    }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the sparse-create leg failed" }
+    timeout { lc_fail "the sparse create never reported" }
+}
+expect {
+    -ex "battery: workspace 1 returned with its tile; the empty workspace vanished" {
+        lc_pass "panes: the return restores the tile and the empty workspace vanishes (i3)"
+    }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the workspace return/vanish leg failed" }
+    timeout { lc_fail "the workspace return never reported" }
 }
 expect {
     -ex "tapestry-battery: PASS" { lc_pass "panes: battery PASS" }

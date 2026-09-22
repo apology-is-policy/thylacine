@@ -170,15 +170,22 @@ connection fid moves through:
    write ctl "announce ..."  ►  ANNOUNCED    (smoltcp listen socket bound)
    open(listen) + inbound    ►  (mints a NEW fid in ESTABLISHED; the listen
                                   fid stays ANNOUNCED for the next call)
-   hangup / peer FIN / err   ►  CLOSING ──► CLOSED  (fid clunk frees N + the
-                                                     smoltcp socket)
+   hangup / peer FIN / err   ►  CLOSING ──► CLOSED  (last clunk frees N; private TCP
+                                                     retirement drains FIN)
 ```
 
 Invariants the impl must uphold (the audit prosecutes these):
 - **One fid ↔ one smoltcp socket** for its open lifetime (I-11 fid identity,
-  generalized to the netd session). A `clunk` is the *only* path that frees the
-  smoltcp socket; a half-open `data` read after `CLOSED` returns the `err`
-  reason, never a stale or reused socket's bytes.
+  generalized to the netd session). Last clunk releases the public connection;
+  an established/closing TCP socket transfers into the bounded private owner
+  specified by `NET-CLOSE-DESIGN.md` (operator approved 2026-09-17). That owner
+  drains queued TX and FIN, releases Closed sockets, and aborts at a 30-second
+  absolute deadline. It retains neither N nor a fid nor the Weft mapping. A
+  half-open `data` read after `CLOSED` never reads a reused socket's bytes.
+- **Bounded transports:** at most 64 active plus retiring TCP sockets, admitted
+  before clone or accept replacement allocation; at most 16 public slots.
+  Netd reserves retirement metadata and a 16 MiB heap. TCP stats expose
+  `transports`, `retiring`, and `close-timeouts` alongside public `active`.
 - **`N` reuse is gated on clunk** (I-10-style: the connection number is not
   reusable until its directory is fully torn down), so a late reply on an old
   `N` is never mis-attributed.
@@ -913,7 +920,8 @@ named in §2.)
 - **net-2c-2: LANDED** — the live TCP data path. The `socket-tcp` smoltcp
   feature; the `Net` table now owns the `Interface` + `SocketSet` (moved in
   post-DHCP) so the 9P dispatch reaches the stack; `clone` reserves a real
-  `tcp::Socket` (freed at the last clunk — the §3.4 `ALLOCATED` state). The `ctl`
+  `tcp::Socket` (originally freed at last clunk; now bounded retirement per
+  `NET-CLOSE-DESIGN.md` — the §3.4 `ALLOCATED` state). The `ctl`
   verb parser drives `connect a.b.c.d!port` (active-open: `socket.connect`, an
   ephemeral local port since smoltcp requires a non-zero one) and `hangup`;
   `announce`/options are honestly `EOPNOTSUPP` (net-3+). `status`/`local`/`remote`/

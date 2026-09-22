@@ -518,6 +518,10 @@ long srvconn_client_send_blocking(struct SrvConn *cn, const u8 *buf, long n);
 // srvconn_server_send — corvus writes `n` bytes toward the kernel
 // client (the s2c ring). Returns bytes accepted (0..n) or -1 if torn
 // down / bad args. Non-blocking.
+// Explicit nonblocking endpoint I/O: EAGAIN on no progress/role contention,
+// short progress when space/data is limited, read EOF=0 and write EOF=EPIPE.
+long srvconn_io_nonblock(struct SrvConn *cn, bool server, bool writing,
+                        void *buf, long n);
 long srvconn_server_send(struct SrvConn *cn, const u8 *buf, long n);
 
 // srvconn_server_send_blocking — the BLOCKING server-side write (#348).
@@ -554,22 +558,27 @@ long srvconn_server_send_blocking(struct SrvConn *cn, const u8 *buf, long n);
 long srvconn_server_recv(struct SrvConn *cn, u8 *buf, long n);
 
 // =============================================================================
-// poll — readiness probe on the server endpoint Spoor (P5-poll-b).
+// poll — readiness probe on a connection endpoint (P5-poll-b; both endpoints
+// since 2026-09-21).
 //
-// The Dev `.poll` slot for a devsrv connection Spoor (devsrv_poll) routes
-// to here. Server-endpoint semantics: POLLIN is c2s.count > 0 (bytes to
-// read), POLLOUT is !s2c.eof && s2c.count < s2c.cap (room to
-// write), POLLHUP is c2s.eof, POLLERR is s2c.eof. Both EOFs latch
-// together at srvconn_teardown so HUP and ERR fire on the same edge.
-// POLLIN may coexist with POLLHUP — POSIX: buffered bytes plus EOF.
+// The Dev `.poll` slot for a devsrv connection Spoor (devsrv_poll) routes to
+// here with `client` = the Spoor's CSRVCLIENT flag. An endpoint READS one
+// channel and WRITES the other (server: c2s / s2c; client: s2c / c2s):
+// POLLIN is rd.count > 0, POLLOUT is !wr.eof && wr.count < wr.cap, POLLHUP is
+// rd.eof, POLLERR is wr.eof. Both EOFs latch together at srvconn_teardown so
+// HUP and ERR fire on the same edge for either endpoint. POLLIN may coexist
+// with POLLHUP — buffered bytes plus EOF — and is NOT set at a drained EOF
+// (pipe-like; pouch's poll() adds the stream-socket shape for its sockets).
 //
 // Atomic register-then-sample under both channel locks (c2s then s2c —
-// fixed order, no path takes them in reverse). pw == NULL is the post-
-// wake sample-only call. Returns the masked revents (POLLIN/POLLOUT
-// gated by `events`, output-only bits always returned).
+// fixed order). pw == NULL is the sample-only call. Returns the masked
+// revents (POLLIN/POLLOUT gated by `events`, output-only bits always
+// returned). Every ring mutation in srvconn.c walks cn->poll_list; see the
+// function's comment for why one list may serve both endpoints.
 // =============================================================================
 
-short srvconn_poll(struct SrvConn *cn, short events, struct poll_waiter *pw);
+short srvconn_poll(struct SrvConn *cn, bool client, short events,
+                   struct poll_waiter *pw);
 
 // =============================================================================
 // Diagnostics.

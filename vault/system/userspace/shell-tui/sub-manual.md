@@ -14,6 +14,7 @@ code:
   - usr/manual/Cargo.toml
   - tools/manual-check/src/main.rs
   - tools/manual-check/Cargo.toml
+  - tools/manual-check/Cargo.lock
 audit: light
 guarded-by: []
 validated-by: [prose, gate-interactive]
@@ -22,7 +23,7 @@ hazards: []
 abis: []
 design: ["docs/MANUAL-DESIGN.md", "docs/thylacine-operators-manual-writing-guide.md", "docs/BEACON.md"]
 created: 2026-09-16
-updated: 2026-09-16
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -60,6 +61,19 @@ host-tested) and a thin libthyla-rs binary behind the `backend` feature.
   sanitize the names they repeat, so each stays one line.
 - `--beacon=auto|always|never` resolves the tier exactly as the coreutils do
   (`beacon::effective_tier` over `BEACON` + `fd_devclass(1)`).
+
+### Installed catalogue and integration evidence
+
+The image installs six checked sections: Manual, Remote Files, View, Gallery,
+Nocturne and DOSBox. `manual` lists them, and by-name lookup (including
+`manual gallery`) is exercised in the real serial scenario, alongside valid
+and invalid fixture rendering and discriminating exit-status checks.
+
+The Halcyon session media scenario renders the Gallery section after closing
+a native viewer, then revisits the earlier View image in scrollback. Reviewed
+captures show rich headings, paragraph spacing, and retained transcript order
+on ITS and on a no-MSI shared-INTx topology. The reader remains an ordinary
+transcript producer; it does not take ownership of the pane or add a pager.
 
 ## Mechanism
 

@@ -16,7 +16,7 @@ design:
   - "docs/PROWL-DESIGN.md OQ-4"
   - "docs/VIVARIUM.md section 6.2"
 created: 2026-08-02
-updated: 2026-09-06
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -31,6 +31,13 @@ The largest single file in the kernel tree. Its size is almost entirely the debu
 surface: the original P4-C Dev was `status`/`cmdline`/`ctl`/`ns`.
 
 ## Contract
+
+**`/proc/PID/imperium` (2026-09-17).** The kernel exposes the current
+scope's unforgeable identity, deadline and flowing capability mask. `imperium
+--list` and the shell's fasces use this data rather than environment variables.
+Plain processes report no scope. The process snapshot observes the published
+scope id before its dependent fields; [[sub-imperium]] owns the display/parser.
+
 
 Walk `/proc/<pid>/<file>`, read text; write verbs to `ctl`.
 

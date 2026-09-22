@@ -109,10 +109,10 @@ proc sweep {sign} {
     for {set i 0} {$i < 20} {incr i} { ptr "rel [expr {$sign * 500}] 0"; after 70 }
 }
 
-# Host-side skip: the staged tree is the same one the pool bakes, so its absence
-# here is the pool's absence -- checked before boot so the skip costs no VM time.
+# Host-side skip, before boot so it costs no VM time: the pool must HOLD the game
+# (the bake's verified payloads), not merely have had it staged once.
 set grp "$repo/build/duke3d/stage/DUKE3D.GRP"
-if {![file exists $grp]} {
+if {![file exists $grp] || ![lc_pool_has DUKE3D]} {
     puts "LS-CI SKIP: no Duke3D staged at build/duke3d/stage -- the game is not\
           baked into this pool (THYLACINE_BAKE_DUKE3D=0 or dosbox opted out)"
     exit 77

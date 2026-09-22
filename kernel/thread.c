@@ -135,6 +135,57 @@ static void thread_unlink_from_proc(struct Thread *t) {
     proc_table_lock_release(s);
 }
 
+// The kernel-stack watermark (ARCH 8.12). See thread.h for why it exists.
+//
+// The usable region is [kstack_base + GUARD_SIZE, kstack_base + TOTAL_SIZE):
+// kstack_base is the LOW address and the guard pages sit below the usable
+// stack, which grows DOWN from the top. So the first non-poison word scanning
+// UPWARD from the guard is the deepest point ever touched.
+void thread_kstack_poison(struct Thread *t) {
+    if (!t || !t->kstack_base)
+        return;
+    u64 *p   = (u64 *)((char *)t->kstack_base + THREAD_KSTACK_GUARD_SIZE);
+    u64 *end = (u64 *)((char *)t->kstack_base + THREAD_KSTACK_TOTAL_SIZE);
+    while (p < end)
+        *p++ = THREAD_KSTACK_POISON;
+}
+
+// Bytes of kernel stack this thread has ever used. 0 for a thread with no
+// kstack of its own (the bootstrap/idle threads run on a per-CPU BSS stack and
+// leave kstack_base NULL).
+//
+// A word of live stack data that happens to EQUAL the poison would be read as
+// untouched, making the answer shallower than the truth. With a 64-bit
+// distinctive constant that is a measure-zero concern, and it errs in the
+// direction a reader can detect: the static bound (ARCH 8.12) is the other
+// side of the same question, and the two disagreeing is itself the signal.
+//
+// BUDGETED because the scan's cost is INVERTED and that is a DoS lever (ARCH
+// 8.12 audit F2): a SHALLOW thread costs MORE, since the walk stops at the
+// first touched word and a shallow thread has a long untouched prefix. The
+// only in-tree caller walks every live Proc with IRQs MASKED, so an unbounded
+// scan is a masked window an unprivileged program can inflate by spawning
+// threads. `budget_words` (NULL = unlimited, for tests and one-off callers)
+// is decremented per word examined; a caller that finds it 0 on return MUST
+// treat the answer as a LOWER BOUND and say so, because a truncated scan
+// returns a SHALLOWER number than the truth -- the gauge-reads-zero trap.
+u32 thread_kstack_used(const struct Thread *t, u32 *budget_words) {
+    if (!t || !t->kstack_base)
+        return 0;
+    const u64 *p   = (const u64 *)((const char *)t->kstack_base
+                                   + THREAD_KSTACK_GUARD_SIZE);
+    const u64 *end = (const u64 *)((const char *)t->kstack_base
+                                   + THREAD_KSTACK_TOTAL_SIZE);
+    while (p < end && *p == THREAD_KSTACK_POISON) {
+        if (budget_words) {
+            if (*budget_words == 0u) break;     // exhausted: answer is a floor
+            (*budget_words)--;
+        }
+        p++;
+    }
+    return (u32)((const char *)end - (const char *)p);
+}
+
 void thread_init(void) {
     if (g_thread_cache) extinction("thread_init called twice");
     if (!kproc())       extinction("thread_init before proc_init");
@@ -373,6 +424,7 @@ static struct Thread *thread_create_internal(struct Proc *proc,
     t->proc        = proc;
     t->kstack_base = kalloc_base;          // P2-Dc: lowest page (guard)
     t->kstack_size = THREAD_KSTACK_TOTAL_SIZE;
+    thread_kstack_poison(t);               // ARCH 8.12: the depth witness
     t->weight      = 1;
     t->band        = SCHED_BAND_NORMAL;
     t->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
@@ -480,6 +532,7 @@ struct Thread *thread_create_user(struct Proc *proc,
     t->proc        = proc;
     t->kstack_base = kalloc_base;
     t->kstack_size = THREAD_KSTACK_TOTAL_SIZE;
+    thread_kstack_poison(t);               // ARCH 8.12: the depth witness
     t->weight      = 1;
     t->band        = SCHED_BAND_NORMAL;
     t->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
@@ -555,6 +608,7 @@ struct Thread *thread_create_forked(struct Proc *proc,
     t->proc        = proc;
     t->kstack_base = kalloc_base;
     t->kstack_size = THREAD_KSTACK_TOTAL_SIZE;
+    thread_kstack_poison(t);               // ARCH 8.12: the depth witness
     t->weight      = 1;
     t->band        = SCHED_BAND_NORMAL;
     t->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;

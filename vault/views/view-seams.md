@@ -12,6 +12,7 @@ Generated from note fields — do not edit between the markers
 <!-- generated:begin -->
 | seam | status | surface | opened by | tracker |
 |---|---|---|---|---|
+| [[seam-80-pivot-orphan-mounts]] | closed | sub-kernel-territory | chg-2026-05-26-16c-attach-srv | task #80 |
 | [[seam-848-pivot-walk-race]] | closed | sub-kernel-ninep-attach | fnd-16c-r1-f6 | task #848 |
 | [[seam-90-death-half]] | closed | sub-kernel-ninep-client | fnd-8c3-r1-f1 | task #90 |
 | [[seam-extinction-line-unserialized]] | closed | abi-boot-banner | chg-2026-08-16-cons-writer-set | unfiled -- yip to main 2026-08-16 |
@@ -31,7 +32,6 @@ Generated from note fields — do not edit between the markers
 | [[seam-66c-proc-fd]] | open | sub-kernel-path, sub-kernel-territory | fnd-66b-r1-f1 | task #66c |
 | [[seam-70-tcg-watchpoint]] | open | sub-substrate-machine, sub-substrate-gates | chg-2026-08-01-substrate-sweep | #70 |
 | [[seam-791-smp1-joey]] | open | sub-substrate-machine, sub-substrate-gates | chg-2026-08-01-substrate-sweep | #791 |
-| [[seam-80-pivot-orphan-mounts]] | open | sub-kernel-territory | chg-2026-05-26-16c-attach-srv | task #80 |
 | [[seam-841-mi-harness]] | open | sub-kernel-ninep-client | chg-2026-06-03-841-pipeline | standing (carried across #841/#845/#349/#375/#52-#53/Loom/8c-3/#90) |
 | [[seam-845-untrusted-server]] | open | sub-kernel-ninep-client | fnd-845-r1-f1 | v1.x (the n_uname trust-stamp seam family) |
 | [[seam-87-disk-write-proof]] | open | sub-substrate-interactive, sub-substrate-gates | chg-2026-08-01-substrate-sweep | #87 |
@@ -76,6 +76,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-netd-host-tests]] | open | sub-netd-server, sub-netd-nic | adt-net2d-r1 |  |
 | [[seam-nuname-trust-stamp]] | open | sub-kernel-syscall-dispatch, sub-kernel-ninep-attach | chg-2026-09-06-9p-identity-absorb | v1.x (the n_uname trust-stamp seam family) |
 | [[seam-poll-heap-waiters]] | open | sub-kernel-poll | chg-2026-06-24-355-poll-decouple | #355 companion |
+| [[seam-poll-hooks-per-list]] | open | sub-kernel-poll | fnd-b0poll-r7-f1 | v1.x |
 | [[seam-poll-srv-registry-retain]] | open | sub-kernel-poll | chg-2026-06-10-rw2-poll-retain | RW-2 R2-poll F1 (#18) |
 | [[seam-pouch-dirfd]] | open | sub-pouch-fs | chg-2026-07-23-cl1a-fs-wires | CL-1a |
 | [[seam-pouch-dup2-target]] | open | sub-pouch-process | chg-2026-07-23-cl1b-process | CL-1b |
@@ -108,6 +109,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-torpor-cross-proc]] | open | sub-kernel-torpor | chg-2026-05-23-torpor | POUCH-DESIGN section 7, Tier-2 burrows |
 | [[seam-torpor-lock-wake-spin]] | open | sub-kernel-torpor | chg-2026-05-23-torpor | torpor-8 audit F2 (P2, documented) |
 | [[seam-torpor-reclaim-uaccess]] | open | sub-kernel-torpor | chg-2026-07-04-torpor-lockfree | REVENANT R-5 F1 close; REVENANT section 9 |
+| [[seam-viv-tier2-frame]] | open | sub-kernel-syscall-abi, sub-kernel-vivarium | chg-2026-09-22-arch81-scripture | ARCH 8.1 prerequisite |
 | [[seam-warp-prove-unowned]] | open | sub-tapestryd | chg-2026-08-19-v3a-ring | V-3a coherent-ring doc pass, 2026-08-19 |
 | [[seam-wb-close-flush-slot]] | open | sub-kernel-ninep-dev9p | chg-2026-07-11-wb-staging |  |
 <!-- generated:end -->

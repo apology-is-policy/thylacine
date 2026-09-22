@@ -23,12 +23,15 @@
 
 #include "test.h"
 
+#include "../../arch/arm64/gic.h"      // gic_cpu_irq_count -- the point's witness
 #include "../../arch/arm64/timer.h"
 
 #include <thylacine/dtb.h>
+#include <thylacine/irqfwd.h>   // the software fire source: a DETERMINISTIC pending IRQ
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
 #include <thylacine/smp.h>
+#include <thylacine/spinlock.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -124,21 +127,23 @@ void test_sched_dispatch_smoke(void) {
 
 static volatile bool g_preempt_test_running;
 static volatile u64  g_preempt_test_counter[2];
+static volatile bool g_preempt_test_exited[2];
 
 static void preempt_test_thread_a(void) {
     while (g_preempt_test_running) {
         g_preempt_test_counter[0]++;
     }
-    // Exit signaled. Yield back to the scheduler; boot will reap.
-    sched();
-    // Unreachable — boot doesn't switch back.
+    // Exit signaled: park TERMINALLY for the reap. A bare sched() here was a
+    // yield -- still RUNNABLE, stealable by an idle peer, and thread_free raced
+    // the thread it had started running.
+    test_kthread_park_terminal(&g_preempt_test_exited[0]);
 }
 
 static void preempt_test_thread_b(void) {
     while (g_preempt_test_running) {
         g_preempt_test_counter[1]++;
     }
-    sched();
+    test_kthread_park_terminal(&g_preempt_test_exited[1]);
 }
 
 void test_sched_preemption_smoke(void) {
@@ -149,6 +154,8 @@ void test_sched_preemption_smoke(void) {
     g_preempt_test_running    = true;
     g_preempt_test_counter[0] = 0;
     g_preempt_test_counter[1] = 0;
+    g_preempt_test_exited[0]  = false;
+    g_preempt_test_exited[1]  = false;
 
     struct Thread *ta = thread_create(kproc(), preempt_test_thread_a);
     struct Thread *tb = thread_create(kproc(), preempt_test_thread_b);
@@ -196,11 +203,10 @@ void test_sched_preemption_smoke(void) {
     TEST_ASSERT(a < (u64)10 * b && b < (u64)10 * a,
         "preemption is severely unfair (>10× imbalance)");
 
-    // Cleanup. Both threads have called sched() after exiting their
-    // loops; both should be RUNNABLE in the tree (suspended inside
-    // their own sched()). thread_free removes them.
-    thread_free(ta);
-    thread_free(tb);
+    // Cleanup. Both threads parked terminally after exiting their loops
+    // (EXITING, off the tree); the joins reap them.
+    test_kthread_join_free(ta, &g_preempt_test_exited[0]);
+    test_kthread_join_free(tb, &g_preempt_test_exited[1]);
     TEST_EXPECT_EQ(sched_runnable_count(), 0u,
         "run tree empty after thread_free");
 }
@@ -1070,4 +1076,104 @@ void test_sched_preempt_gate_defers_while_locked(void) {
     }
     TEST_EXPECT_EQ(saw_clear, true, "released -> the deferred preempt is consumed");
     sched_clear_need_resched_for_test(smp_cpu_idx_self());  // leave no dangling preempt
+}
+
+// =============================================================================
+// sched_preempt_point's witness is GONE with the point (ARCH 8.12).
+// =============================================================================
+//
+// That test masked the way a syscall body was masked, raised a self-targeted
+// SGI, and asserted the point took it. It existed because the point's unmask
+// was the ONLY novel thing the point did, and no poll test could see it: poll's
+// test pollers are kthreads, entered through thread_trampoline's
+// `msr daifclr, #2`, so they already run IRQs-on and the window was
+// architecturally INERT there (B-0 audit round 7 F3).
+//
+// The property it witnessed is now structural rather than sampled. A syscall
+// body runs interrupts-on throughout, and syscall_dispatch_body carries
+// ASSERT_IRQS_ENABLED -- so every syscall of every boot, in the suite, the
+// fleet and the SMP gate, asserts what this one test asserted once per run.
+// A bespoke witness for a window that no longer exists would be a test of
+// nothing.
+
+// ---------------------------------------------------------------------------
+// ARCH 8.12: the kernel-stack watermark.
+//
+// The instrument exists because the 8.1 chunk puts an IRQ frame on a syscall
+// stack that has never carried one, and because until it landed NOTHING in the
+// tree could report stack depth -- the only figure was a static
+// `-fstack-usage` bound with 797 unfollowed indirect edges under it.
+//
+// THE TEST MEASURES A THREAD IT CREATES, NOT ITSELF, and the first draft
+// taught me why: it asserted on `current_thread()` and failed with "the test
+// thread owns a kstack" -- because the in-kernel test phase runs on the boot
+// kthread, which has kstack_base == NULL and lives on cpu0's _boot_stack. A
+// premise about the environment, not about the thing under test.
+//
+// Written to FAIL on each way the instrument can be wrong:
+//
+//   poison never written -> a never-run thread reads the FULL usable region
+//                           instead of 0, and the first assert fires. This is
+//                           the strongest discrimination available: a fresh
+//                           thread's stack is entirely poison by construction,
+//                           so the expected value is exact, not a range.
+//   scan runs the wrong  -> `used` collapses toward 0 and `used >= reached`
+//   way / off the end       fires, because we PROVABLY touched that address.
+//   watermark does not   -> same assert; `reached` is measured from a real
+//   follow the frontier     address in the probe's own frame, never computed
+//                           from the constant below.
+#define KSW_PROBE_BYTES 6144u
+
+static volatile u32 g_kstack_probe_reached;
+static volatile u32 g_kstack_probe_done;
+
+// Burns a frame of known size, then records the depth its own locals actually
+// reached -- measured from `&pad[0]`, so the assertion rests on where the
+// stack DID go rather than on where KSW_PROBE_BYTES says it should have.
+__attribute__((noinline))
+static void kstack_probe_entry(void) {
+    volatile u8 pad[KSW_PROBE_BYTES];
+    for (unsigned i = 0; i < KSW_PROBE_BYTES; i += 64)
+        pad[i] = (u8)i;
+
+    struct Thread *me = current_thread();
+    u64 top = (u64)(uintptr_t)me->kstack_base + THREAD_KSTACK_TOTAL_SIZE;
+    g_kstack_probe_reached = (u32)(top - (u64)(uintptr_t)&pad[0]);
+    __atomic_store_n(&g_kstack_probe_done, 1u, __ATOMIC_RELEASE);
+    sched();
+}
+
+void test_thread_kstack_watermark_follows_the_frontier(void) {
+    g_kstack_probe_reached = 0;
+    __atomic_store_n(&g_kstack_probe_done, 0u, __ATOMIC_RELAXED);
+
+    struct Thread *t = thread_create(kproc(), kstack_probe_entry);
+    TEST_ASSERT(t != NULL, "thread_create failed");
+    TEST_ASSERT(t->kstack_base != NULL,
+                "a thread_create'd thread owns a kstack of its own");
+
+    // The exact assert. A thread that has never been dispatched has touched
+    // none of its stack, so every word is still poison and the watermark is
+    // precisely 0. Without the poison this reads THREAD_KSTACK_SIZE.
+    TEST_EXPECT_EQ(thread_kstack_used(t, NULL), 0u,
+        "a never-run thread's usable stack is entirely poison");
+
+    ready(t);
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_kstack_probe_done, __ATOMIC_ACQUIRE) != 0u);
+
+    u32 reached = g_kstack_probe_reached;
+    u32 used    = thread_kstack_used(t, NULL);
+
+    TEST_ASSERT(reached >= KSW_PROBE_BYTES,
+                "the probe's frame really is as deep as it claims");
+    TEST_ASSERT(used >= reached,
+                "the watermark followed the frontier down to an address the "
+                "probe provably touched");
+    TEST_ASSERT(used < THREAD_KSTACK_SIZE,
+                "and stayed inside the usable region");
+
+    // The probe is suspended inside its own sched(), RUNNABLE in the tree --
+    // the dispatch_smoke pattern. thread_free unlinks and reclaims it, so the
+    // next test still finds an empty run tree.
+    thread_free(t);
 }

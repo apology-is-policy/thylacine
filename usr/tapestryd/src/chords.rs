@@ -25,6 +25,11 @@ pub enum ChordAction {
     Split(Mode),   // SplitH | SplitV
     SetMode(Mode), // Tabbed | Stacked
     Zoom,
+    /// HALCYON-INSTRUMENT 9.3 (I-7): the picker and help chords. The
+    /// compositor does not act on these -- they live in the environment --
+    /// it delivers TEV_CHORD to the registered rail's owner (server.rs).
+    Picker,
+    Help,
     SplitToggle,
     TabCycle(bool), // true = forward
     Close,
@@ -32,6 +37,18 @@ pub enum ChordAction {
     ScaleStep(i8),
     /// Back to the EDID-derived scale (`scale auto`).
     ScaleReset,
+    /// HALCYON-WORKSPACES 4 (ratified): switch to workspace n, creating it
+    /// when n is the next free number (i3). `n` is ONE-BASED, 1..=9 by
+    /// construction -- the defaults table and `action_of` are its only
+    /// constructors and both bound it.
+    Workspace(u8),
+    /// Move the focused tile to workspace n, ownership-preserving.
+    MoveToWorkspace(u8),
+    /// HALCYON-INSTRUMENT 6.1 (2026-09-16): a new empty tile in the focused
+    /// pane -- joining its stack, or making a lone tile a stack of two -- for
+    /// the session to fill with a shell. The kit has no such control (its
+    /// tiles are fixtures); Super+N is Halcyon's.
+    NewTile,
 }
 
 #[derive(Clone, Copy)]
@@ -53,6 +70,17 @@ pub struct Chords {
 
 // evdev key codes (linux/input-event-codes.h). Only the codes the default
 // chord set + the config grammar name.
+// HALCYON-WORKSPACES 4: the nine workspace digits. evdev numbers the top row
+// 1..9 as 2..10 with `0` at 11 -- all nine were unbound before this.
+const KEY_1: u16 = 2;
+const KEY_2: u16 = 3;
+const KEY_3: u16 = 4;
+const KEY_4: u16 = 5;
+const KEY_5: u16 = 6;
+const KEY_6: u16 = 7;
+const KEY_7: u16 = 8;
+const KEY_8: u16 = 9;
+const KEY_9: u16 = 10;
 const KEY_0: u16 = 11;
 const KEY_MINUS: u16 = 12;
 const KEY_EQUAL: u16 = 13;
@@ -60,9 +88,11 @@ const KEY_TAB: u16 = 15;
 const KEY_Q: u16 = 16;
 const KEY_E: u16 = 18;
 const KEY_T: u16 = 20;
+const KEY_SLASH: u16 = 53;
 const KEY_S: u16 = 31;
 const KEY_F: u16 = 33;
 const KEY_H: u16 = 35;
+const KEY_N: u16 = 49;
 const KEY_V: u16 = 47;
 const KEY_UP: u16 = 103;
 const KEY_LEFT: u16 = 105;
@@ -106,12 +136,133 @@ fn key_code(name: &str) -> Option<u16> {
         "left" => KEY_LEFT,
         "right" => KEY_RIGHT,
         "down" => KEY_DOWN,
+        "1" => KEY_1,
+        "2" => KEY_2,
+        "3" => KEY_3,
+        "4" => KEY_4,
+        "5" => KEY_5,
+        "6" => KEY_6,
+        "7" => KEY_7,
+        "8" => KEY_8,
+        "9" => KEY_9,
         "0" => KEY_0,
         "minus" => KEY_MINUS,
         "equal" => KEY_EQUAL,
+        "slash" => KEY_SLASH,
         _ => return None,
     })
 }
+
+/// The inverse of `key_code`: an evdev code -> its config NAME (the one
+/// `key_code` accepts for it). None for a code the grammar cannot name.
+pub fn key_name(code: u16) -> Option<&'static str> {
+    Some(match code {
+        30 => "a",
+        48 => "b",
+        46 => "c",
+        32 => "d",
+        18 => "e",
+        33 => "f",
+        34 => "g",
+        35 => "h",
+        23 => "i",
+        36 => "j",
+        37 => "k",
+        38 => "l",
+        50 => "m",
+        49 => "n",
+        24 => "o",
+        25 => "p",
+        16 => "q",
+        19 => "r",
+        31 => "s",
+        20 => "t",
+        22 => "u",
+        47 => "v",
+        17 => "w",
+        45 => "x",
+        21 => "y",
+        44 => "z",
+        KEY_TAB => "tab",
+        KEY_UP => "up",
+        KEY_LEFT => "left",
+        KEY_RIGHT => "right",
+        KEY_DOWN => "down",
+        KEY_1 => "1",
+        KEY_2 => "2",
+        KEY_3 => "3",
+        KEY_4 => "4",
+        KEY_5 => "5",
+        KEY_6 => "6",
+        KEY_7 => "7",
+        KEY_8 => "8",
+        KEY_9 => "9",
+        KEY_0 => "0",
+        KEY_MINUS => "minus",
+        KEY_EQUAL => "equal",
+        KEY_SLASH => "slash",
+        _ => return None,
+    })
+}
+
+/// The inverse of `action_of`: an action -> its config NAME.
+pub fn action_name(a: ChordAction) -> &'static str {
+    match a {
+        ChordAction::FocusDir(Dir::Left) => "focus-left",
+        ChordAction::FocusDir(Dir::Right) => "focus-right",
+        ChordAction::FocusDir(Dir::Up) => "focus-up",
+        ChordAction::FocusDir(Dir::Down) => "focus-down",
+        ChordAction::MoveDir(Dir::Left) => "move-left",
+        ChordAction::MoveDir(Dir::Right) => "move-right",
+        ChordAction::MoveDir(Dir::Up) => "move-up",
+        ChordAction::MoveDir(Dir::Down) => "move-down",
+        ChordAction::Split(Mode::SplitH) => "split-h",
+        ChordAction::Split(Mode::SplitV) => "split-v",
+        ChordAction::Split(_) => "split-h",
+        ChordAction::SplitToggle => "split-toggle",
+        ChordAction::Zoom => "zoom",
+        ChordAction::Picker => "picker",
+        ChordAction::Help => "help",
+        ChordAction::SetMode(Mode::Tabbed) => "tab",
+        ChordAction::SetMode(_) => "stack",
+        ChordAction::TabCycle(true) => "cycle",
+        ChordAction::TabCycle(false) => "cycle-back",
+        ChordAction::Close => "close",
+        ChordAction::ScaleStep(s) if s > 0 => "scale-up",
+        ChordAction::ScaleStep(_) => "scale-down",
+        ChordAction::ScaleReset => "scale-reset",
+        ChordAction::NewTile => "new-tile",
+        // n is 1..=9 BY CONSTRUCTION (see the variant's doc). The clamp is
+        // there because `u8` is not, and is unreachable; a table keeps this
+        // direction and `action_of` from drifting as 18 arms would.
+        ChordAction::Workspace(n) => WORKSPACE_NAMES[(n.clamp(1, 9) - 1) as usize],
+        ChordAction::MoveToWorkspace(n) => MOVE_TO_NAMES[(n.clamp(1, 9) - 1) as usize],
+    }
+}
+
+/// HALCYON-WORKSPACES 4: the nine switch names and the nine move names.
+const WORKSPACE_NAMES: [&str; 9] = [
+    "workspace-1",
+    "workspace-2",
+    "workspace-3",
+    "workspace-4",
+    "workspace-5",
+    "workspace-6",
+    "workspace-7",
+    "workspace-8",
+    "workspace-9",
+];
+const MOVE_TO_NAMES: [&str; 9] = [
+    "move-to-1",
+    "move-to-2",
+    "move-to-3",
+    "move-to-4",
+    "move-to-5",
+    "move-to-6",
+    "move-to-7",
+    "move-to-8",
+    "move-to-9",
+];
 
 /// An action NAME (config grammar) -> the action, or `None` for the special
 /// `none` unbind token (the caller removes the binding).
@@ -129,6 +280,8 @@ fn action_of(name: &str) -> Option<Option<ChordAction>> {
         "split-v" => ChordAction::Split(Mode::SplitV),
         "split-toggle" => ChordAction::SplitToggle,
         "zoom" => ChordAction::Zoom,
+        "picker" => ChordAction::Picker,
+        "help" => ChordAction::Help,
         "tab" => ChordAction::SetMode(Mode::Tabbed),
         "stack" => ChordAction::SetMode(Mode::Stacked),
         "cycle" => ChordAction::TabCycle(true),
@@ -137,8 +290,27 @@ fn action_of(name: &str) -> Option<Option<ChordAction>> {
         "scale-up" => ChordAction::ScaleStep(1),
         "scale-down" => ChordAction::ScaleStep(-1),
         "scale-reset" => ChordAction::ScaleReset,
+        "new-tile" => ChordAction::NewTile,
         "none" => return Some(None), // the unbind token
-        _ => return None,
+        // HALCYON-WORKSPACES 4: `workspace-1`..`-9` and `move-to-1`..`-9`,
+        // PARSED rather than listed, so this direction and `action_name`
+        // cannot drift apart the way eighteen hand-written arms would. The
+        // 1..=9 bound here is half of what makes the payload's invariant
+        // hold (the defaults table is the other half).
+        other => {
+            let (rest, mk): (&str, fn(u8) -> ChordAction) =
+                if let Some(r) = other.strip_prefix("workspace-") {
+                    (r, ChordAction::Workspace)
+                } else if let Some(r) = other.strip_prefix("move-to-") {
+                    (r, ChordAction::MoveToWorkspace)
+                } else {
+                    return None;
+                };
+            match rest.parse::<u8>() {
+                Ok(n) if (1..=9).contains(&n) => mk(n),
+                _ => return None,
+            }
+        }
     }))
 }
 
@@ -160,8 +332,11 @@ impl Chords {
                 d(KEY_H, false, Split(Mode::SplitH)),
                 d(KEY_V, false, Split(Mode::SplitV)),
                 d(KEY_F, false, Zoom),
-                d(KEY_T, false, SetMode(Mode::Tabbed)),
+                d(KEY_T, false, Picker),
+                d(KEY_T, true, SetMode(Mode::Tabbed)),
                 d(KEY_S, false, SetMode(Mode::Stacked)),
+                d(KEY_N, false, NewTile),
+                d(KEY_SLASH, false, Help),
                 d(KEY_E, false, SplitToggle),
                 d(KEY_TAB, false, TabCycle(true)),
                 d(KEY_TAB, true, TabCycle(false)),
@@ -171,6 +346,28 @@ impl Chords {
                 d(KEY_EQUAL, false, ScaleStep(1)),
                 d(KEY_MINUS, false, ScaleStep(-1)),
                 d(KEY_0, false, ScaleReset),
+                // HALCYON-WORKSPACES 4 (ratified 2026-09-15): Super+1..9
+                // switches (creating the next free number, i3);
+                // Super+Shift+1..9 moves the focused tile there. All
+                // eighteen keycodes were free in this table.
+                d(KEY_1, false, Workspace(1)),
+                d(KEY_2, false, Workspace(2)),
+                d(KEY_3, false, Workspace(3)),
+                d(KEY_4, false, Workspace(4)),
+                d(KEY_5, false, Workspace(5)),
+                d(KEY_6, false, Workspace(6)),
+                d(KEY_7, false, Workspace(7)),
+                d(KEY_8, false, Workspace(8)),
+                d(KEY_9, false, Workspace(9)),
+                d(KEY_1, true, MoveToWorkspace(1)),
+                d(KEY_2, true, MoveToWorkspace(2)),
+                d(KEY_3, true, MoveToWorkspace(3)),
+                d(KEY_4, true, MoveToWorkspace(4)),
+                d(KEY_5, true, MoveToWorkspace(5)),
+                d(KEY_6, true, MoveToWorkspace(6)),
+                d(KEY_7, true, MoveToWorkspace(7)),
+                d(KEY_8, true, MoveToWorkspace(8)),
+                d(KEY_9, true, MoveToWorkspace(9)),
             ],
             gaps: 1,
         }
@@ -213,6 +410,28 @@ impl Chords {
             });
         }
         Ok(())
+    }
+
+    /// HALCYON-INSTRUMENT 8.2: the table as text, one binding per line in
+    /// the config grammar (`super+[shift+]<key> <action>`), in table order
+    /// -- what the `chords` file publishes, so an environment derives its
+    /// chord hints from the bindings in force and never from a literal. A
+    /// binding on a key the grammar cannot name is skipped (none exists in
+    /// the default table; a config line cannot make one).
+    pub fn render(&self) -> alloc::string::String {
+        let mut out = alloc::string::String::new();
+        for b in &self.binds {
+            let Some(key) = key_name(b.key) else { continue };
+            out.push_str("super+");
+            if b.shift {
+                out.push_str("shift+");
+            }
+            out.push_str(key);
+            out.push(' ');
+            out.push_str(action_name(b.action));
+            out.push('\n');
+        }
+        out
     }
 
     pub fn set_gaps(&mut self, px: u32) -> Result<(), ()> {
@@ -297,6 +516,19 @@ mod tests {
         assert_eq!(key_code("equal"), Some(KEY_EQUAL));
         assert_eq!(key_code("minus"), Some(KEY_MINUS));
         assert_eq!(key_code("0"), Some(KEY_0));
+        // I-7 (ruling 13): Super+T opens the picker, Super+Shift+T is tabbed,
+        // Super+/ is help.
+        assert!(matches!(c.lookup(KEY_T, false), Some(ChordAction::Picker)));
+        assert!(matches!(c.lookup(KEY_T, true), Some(ChordAction::SetMode(Mode::Tabbed))));
+        assert!(matches!(c.lookup(KEY_SLASH, false), Some(ChordAction::Help)));
+        // HALCYON-INSTRUMENT 6.1 (2026-09-16): Super+N opens a new tile.
+        assert!(matches!(c.lookup(KEY_N, false), Some(ChordAction::NewTile)));
+        assert!(matches!(action_of("new-tile"), Some(Some(ChordAction::NewTile))));
+        assert_eq!(action_name(ChordAction::NewTile), "new-tile");
+        assert_eq!(key_code("n"), Some(KEY_N));
+        assert!(matches!(action_of("picker"), Some(Some(ChordAction::Picker))));
+        assert!(matches!(action_of("help"), Some(Some(ChordAction::Help))));
+        assert_eq!(key_code("slash"), Some(KEY_SLASH));
         // An unbound key (no default) -> plane-reserved, no action.
         assert!(c.lookup(34 /* g */, false).is_none());
         assert_eq!(c.gaps, 1);
@@ -351,6 +583,70 @@ mod tests {
             c.lookup(KEY_RIGHT, true),
             Some(ChordAction::MoveDir(Dir::Right))
         ));
+    }
+
+    /// HALCYON-INSTRUMENT 8.2: the rendered table round-trips through the
+    /// grammar it is written in -- every line re-binds to the same action --
+    /// and the two name maps are each other's inverse over the whole
+    /// vocabulary, so a hint derived from the file names the binding in
+    /// force.
+    #[test]
+    fn render_is_the_grammar_and_the_names_invert() {
+        let c = Chords::new();
+        let text = c.render();
+        assert!(text.contains("super+left focus-left\n"));
+        assert!(text.contains("super+shift+left move-left\n"));
+        assert!(text.contains("super+tab cycle\n"));
+        assert!(text.contains("super+shift+tab cycle-back\n"));
+        assert!(text.contains("super+shift+q close\n"));
+        assert!(text.contains("super+t picker\n"));
+        assert!(text.contains("super+shift+t tab\n"));
+        assert!(text.contains("super+slash help\n"));
+        assert!(text.contains("super+equal scale-up\n"));
+        assert!(text.contains("super+n new-tile\n"));
+        assert!(text.contains("super+1 workspace-1\n"));
+        assert!(text.contains("super+shift+9 move-to-9\n"));
+        // DERIVED, not a literal: this pinned 22 by hand and went stale the
+        // moment the workspace chords landed. The claim is "render emits one
+        // line per bind, none dropped and none duplicated" -- `render` is
+        // what is under test and `binds` is its input, so this stays a real
+        // assertion while becoming one that cannot rot.
+        assert_eq!(
+            text.lines().count(),
+            c.binds.len(),
+            "every default binding, one line each"
+        );
+        let mut d = Chords::new();
+        d.binds.clear();
+        for line in text.lines() {
+            let (combo, action) = line.split_once(' ').expect("two words");
+            assert!(d.bind(combo, action).is_ok(), "{} re-binds", line);
+        }
+        assert_eq!(d.render(), text, "a round trip is the identity");
+        // A rebind shows up; an unbind disappears.
+        assert!(d.bind("super+g", "zoom").is_ok());
+        assert!(d.render().contains("super+g zoom\n"));
+        assert!(d.bind("super+f", "none").is_ok());
+        assert!(!d.render().contains("super+f "));
+        // The name maps invert over the vocabulary.
+        for name in [
+            "a", "z", "tab", "up", "left", "right", "down", "0", "minus", "equal", "1", "5", "9",
+        ] {
+            assert_eq!(key_name(key_code(name).unwrap()), Some(name));
+        }
+        for name in [
+            "focus-left", "focus-right", "focus-up", "focus-down", "move-left", "move-right",
+            "move-up", "move-down", "split-h", "split-v", "split-toggle", "zoom", "tab", "stack",
+            "cycle", "cycle-back", "close", "scale-up", "scale-down", "scale-reset",
+            // HALCYON-WORKSPACES 4: the parsed pair must invert too -- this
+            // is the only check that the table direction and the parse
+            // direction agree about all eighteen.
+            "workspace-1", "workspace-5", "workspace-9", "move-to-1", "move-to-5", "move-to-9",
+        ] {
+            let a = action_of(name).unwrap().unwrap();
+            assert_eq!(action_name(a), name);
+        }
+        assert_eq!(key_name(1), None, "a code the grammar cannot name");
     }
 
     #[test]

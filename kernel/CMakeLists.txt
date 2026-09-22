@@ -42,6 +42,8 @@ set(KERNEL_SRCS
     ../arch/arm64/uaccess.S
     ../arch/arm64/vectors.S
     ../arch/arm64/gic.c
+    ../arch/arm64/gic_msi.c
+    ../arch/arm64/gic_its.c
     ../arch/arm64/timer.c
     ../arch/arm64/rtc.c
     ../arch/arm64/hwfeat.c
@@ -95,6 +97,7 @@ set(KERNEL_SRCS
     virtio_pci.c
     irqfwd.c
     mmio_handle.c
+    pci_irq.c
     pci_handle.c
     dma_handle.c
     9p_wire.c
@@ -190,6 +193,7 @@ set(KERNEL_TEST_SRCS
     test/test_caps.c
     test/test_mmio_handle.c
     test/test_dma_handle.c
+    test/test_pci_irq.c
     test/test_pci_handle.c
     test/test_handle_hw.c
     test/test_burrow_mmio.c

@@ -278,54 +278,70 @@ void kobj_mmio_destroy(struct KObj_MMIO *k) {
 // `ranges_overlap` rejects any subsequent overlapping create regardless
 // of which proc requests it.
 
-// Helper: insert one (pa, size) into g_mmio_claims as kernel-reserved.
-// Caller is in boot-time context; we don't bother with the spinlock
-// (single-CPU boot, no other claim path is active yet).
-//
-// Page-aligns the range (MMU works at PTE granularity) and DEDUPES
-// against existing reservations — multiple sub-page entries that
-// expand to the same page (e.g., QEMU virt has 8 virtio,mmio slots
-// per page, spaced 0x200 apart) collapse to one reservation.
-//
-// Extincts on table-full because the static slot count is sized
-// assuming kernel reservations + a few driver claims fit comfortably;
-// an exhausted table at boot is a system-design error worth screaming
-// about.
-static void reserve_kernel_range(u64 pa, size_t size, const char *what) {
-    if (size == 0)                              return;
-    // Page-align: kernel may register a sub-page range (e.g. some MMIO
-    // is < 4 KiB). Round outward to page boundaries so the claim
-    // covers the full range the MMU has mapped.
-    u64 aligned_pa  = pa & ~(u64)(PAGE_SIZE - 1);
-    u64 end         = pa + size;
-    u64 aligned_end = (end + PAGE_SIZE - 1) & ~(u64)(PAGE_SIZE - 1);
-    size_t aligned_size = (size_t)(aligned_end - aligned_pa);
-
-    // Dedupe: if the page-aligned range already overlaps a prior
-    // reservation, skip. ranges_overlap is the same predicate
-    // kobj_mmio_create uses, so the dedupe semantics are exact.
-    if (ranges_overlap(aligned_pa, aligned_size)) return;
-
+// Union overlapping kernel reservations. Mere overlap is not coverage:
+// [A,B) followed by [B-page,C) must protect all of [A,C), including the tail.
+// Pure table helper permits regression coverage without modifying live claims.
+// Boot is single-CPU; caller has not published any userspace claims yet.
+static bool reserve_range(struct mmio_claim *claims, u64 pa, size_t size) {
+    if (!size || pa >= (1ull << 40) || size > (1ull << 40) - pa) return false;
+    u64 first = pa & ~(u64)(PAGE_SIZE - 1);
+    u64 end = (pa + size + PAGE_SIZE - 1) & ~(u64)(PAGE_SIZE - 1);
+    bool changed;
+    do {
+        changed = false;
+        for (int i = 0; i < KOBJ_MMIO_MAX; i++) {
+            if (!claims[i].owner) continue;
+            u64 old_end = claims[i].pa + claims[i].size;
+            if (first >= old_end || claims[i].pa >= end) continue;
+            if (claims[i].owner != KOBJ_MMIO_KERNEL_RESERVED) return false;
+            if (claims[i].pa < first) { first = claims[i].pa; changed = true; }
+            if (old_end > end) { end = old_end; changed = true; }
+        }
+    } while (changed); // grows monotonically across at most MAX entries
     int slot = -1;
     for (int i = 0; i < KOBJ_MMIO_MAX; i++) {
-        if (!g_mmio_claims[i].owner) { slot = i; break; }
+        if (claims[i].owner && first < claims[i].pa + claims[i].size && claims[i].pa < end) {
+            claims[i] = (struct mmio_claim){0};
+        }
+        if (!claims[i].owner && slot < 0) slot = i;
     }
-    if (slot < 0) {
-        extinction("kobj_mmio_reserve_kernel_ranges: g_mmio_claims full "
-                   "(KOBJ_MMIO_MAX too small for kernel reservations + driver headroom)");
-    }
-    g_mmio_claims[slot].owner = KOBJ_MMIO_KERNEL_RESERVED;
-    g_mmio_claims[slot].pa    = aligned_pa;
-    g_mmio_claims[slot].size  = aligned_size;
-
-    uart_puts("  kobj_mmio: reserved kernel range ");
-    uart_puts(what);
-    uart_puts(" PA=");
-    uart_puthex64(aligned_pa);
-    uart_puts(" size=");
-    uart_puthex64((u64)aligned_size);
-    uart_puts("\n");
+    if (slot < 0) return false;
+    claims[slot] = (struct mmio_claim){ .owner = KOBJ_MMIO_KERNEL_RESERVED,
+                                      .pa = first, .size = (size_t)(end - first) };
+    return true;
 }
+static void reserve_kernel_range(u64 pa, size_t size, const char *what) {
+    if (!size) return;
+    if (!reserve_range(g_mmio_claims, pa, size))
+        extinction("kernel MMIO reservation invalid, conflicting or exhausted");
+    uart_puts("  kobj_mmio: reserved kernel range ");
+    uart_puts(what); uart_puts(" PA="); uart_puthex64(pa);
+    uart_puts(" size="); uart_puthex64((u64)size); uart_puts("\n");
+}
+#ifdef KERNEL_TESTS
+bool kobj_mmio_test_reservation_union(void);
+bool kobj_mmio_test_reservation_union(void) {
+    struct mmio_claim claims[KOBJ_MMIO_MAX];
+    for (size_t i = 0; i < sizeof(claims); i++) ((volatile u8 *)claims)[i] = 0;
+    // Reverse table order plus a bridging region exercises transitive union.
+    if (!reserve_range(claims, 0x5000, 0x2000) ||
+        !reserve_range(claims, 0x1000, 0x2000) ||
+        !reserve_range(claims, 0x2fff, 0x2002)) return false;
+    int n = 0;
+    for (int i = 0; i < KOBJ_MMIO_MAX; i++) if (claims[i].owner) {
+        n++;
+        if (claims[i].pa != 0x1000 || claims[i].size != 0x6000) return false;
+    }
+    if (n != 1 || reserve_range(claims, ~0ull - 100, 200) ||
+        reserve_range(claims, (1ull << 40) - 1, 2)) return false;
+    claims[1] = (struct mmio_claim){ .owner = (struct KObj_MMIO *)2,
+                                    .pa = 0x7000, .size = 0x1000 };
+    if (reserve_range(claims, 0x6000, 0x2000)) return false;
+    // A rejected non-kernel collision must not erase existing protection.
+    return claims[0].pa == 0x1000 && claims[0].size == 0x6000 &&
+           claims[1].owner == (struct KObj_MMIO *)2;
+}
+#endif
 
 // Try to reserve a single DTB compatible's reg range, if present.
 // Silently no-ops on DTB-absent (some compatibles may not exist on every
@@ -369,6 +385,13 @@ void kobj_mmio_reserve_kernel_ranges(void) {
             reserve_kernel_range(gic_pa, (size_t)gic_size, "gic-v2 cpu-iface");
         }
     }
+
+    // MSI doorbells and ITS command/table configuration remain kernel-owned
+    // even when the PCI host has no route to them or backend setup fails.
+    struct dtb_pci_msi msi;
+    for (u32 i = 0; dtb_msi_controller_n(i, &msi); i++)
+        reserve_kernel_range(msi.pa, (size_t)msi.size,
+                             msi.kind == DTB_MSI_V2M ? "GICv2m" : "GIC ITS");
 
     // PL011 UART: kernel diagnostic console. A userspace driver could
     // not legitimately claim this and userspace-driven UART access

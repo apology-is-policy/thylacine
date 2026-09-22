@@ -1,0 +1,91 @@
+{
+  "scenario": {
+    "id": "state-carbon-open-notes-baseDpr1",
+    "w": 1440,
+    "h": 900,
+    "scale": 100,
+    "dpr": 1,
+    "theme": "carbon",
+    "state": "open-notes"
+  },
+  "mode": "native",
+  "effectiveDpr": 1,
+  "actualDpr": 1,
+  "chromium": "153.0.8010.12",
+  "node": "v24.1.0",
+  "os": {
+    "platform": "darwin",
+    "release": "25.4.0",
+    "arch": "arm64"
+  },
+  "sourceHashes": {
+    "index.html": "ca50fb1e72cac25353f6580d9ae4aea7f07e8113ae4f1bc18b013ed152cc8b3d",
+    "styles.css": "8352435f2543340d23548261a984fa04580875308206f0783eeb053f8bcd2d84",
+    "app.js": "0a9a7f39e460b5764b3b4dc7d57f1d8a531043ffd05761900b6469732b2fe8ad"
+  },
+  "pngSha256": "53e934e76d9328a6598154dfc3a16c9f1ed8b1119871694aea95bc4c7ce9583e",
+  "fontManifest": [
+    {
+      "path": "/Users/northkillpd/projects/thylacine/third_party/ibm-plex/ttf/IBMPlexSans-Regular.ttf",
+      "weight": "400",
+      "style": "normal",
+      "version": "3.005",
+      "source": "github.com/IBM/plex (OFL) via third_party/ibm-plex/ttf @d3958d68",
+      "family": "IBM Plex Sans",
+      "absolute": "/Users/northkillpd/projects/thylacine/third_party/ibm-plex/ttf/IBMPlexSans-Regular.ttf",
+      "sha256": "975dcda37d80f038dcd143c22e33ca2d97a0cc5a929aace1c749153b0fe1afa5",
+      "size": 200500
+    },
+    {
+      "path": "/Users/northkillpd/projects/thylacine/third_party/ibm-plex/ttf/IBMPlexSans-Medium.ttf",
+      "weight": "500",
+      "style": "normal",
+      "version": "3.005",
+      "source": "github.com/IBM/plex (OFL) via third_party/ibm-plex/ttf @d3958d68",
+      "family": "IBM Plex Sans",
+      "absolute": "/Users/northkillpd/projects/thylacine/third_party/ibm-plex/ttf/IBMPlexSans-Medium.ttf",
+      "sha256": "331c8639d7598b2cde62a911a71db195e30cb655cd6bdf2e324a7e984955f907",
+      "size": 202460
+    },
+    {
+      "path": "/Users/northkillpd/projects/thylacine/third_party/ibm-plex/ttf/IBMPlexSans-SemiBold.ttf",
+      "weight": "600",
+      "style": "normal",
+      "version": "3.005",
+      "source": "github.com/IBM/plex (OFL) via third_party/ibm-plex/ttf @d3958d68",
+      "family": "IBM Plex Sans",
+      "absolute": "/Users/northkillpd/projects/thylacine/third_party/ibm-plex/ttf/IBMPlexSans-SemiBold.ttf",
+      "sha256": "a20caf8286023a6a7a85e40b1d2a4ae9fc3e3b1f9eda8f4c542dd4986af67bb1",
+      "size": 202632
+    },
+    {
+      "path": "/Users/northkillpd/Library/Fonts/cornucopia-Regular.ttf",
+      "weight": "400",
+      "style": "normal",
+      "version": "34.6.1",
+      "source": "~/projects/cornucopia-font @7cb874c (MIT, Michal Frdlik)",
+      "family": "Cornucopia",
+      "absolute": "/Users/northkillpd/Library/Fonts/cornucopia-Regular.ttf",
+      "sha256": "9a79c2a590655b68d24c6a81afd2bcad8fc38ce7285734c71400f22a3aca05d1",
+      "size": 10818752
+    }
+  ],
+  "fontSynthesis": "Cornucopia bold disabled; italic synthesis requested by source if no italic file",
+  "reducedMotion": true,
+  "freeze": {
+    "clock": "09:41",
+    "caret": "visible",
+    "animations": "disabled",
+    "transitions": "disabled",
+    "status": "fixture"
+  },
+  "errors": [],
+  "overlays": [
+    "Cornucopia at existing CSS sizes",
+    "contrast amendments",
+    "prompt turnstile",
+    "Super labels",
+    "capture freeze"
+  ],
+  "note": "Native scale maps to backing factor. Range boxes are fragments, not baselines. New workspace/native surfaces not mocked by this harness."
+}

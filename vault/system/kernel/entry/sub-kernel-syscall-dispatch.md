@@ -15,8 +15,24 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-09-09
+updated: 2026-09-21
 ---
+## Trusted-seat and nonblocking entries
+
+Native calls 121/122/123 are TRUSTED_SEAT, SEAT_IMPORT and SET_NONBLOCK;
+the native ceiling is 123. [[abi-trusted-seat]] and [[abi-native-nonblock]] pin
+the mirrors. TRUSTED_SEAT snapshots the bounded 544-byte envelope before taking
+the process lock, scrubs temporary key material and validates copyout. SEAT_IMPORT
+checks the bound service, owned live peer connection and DMA allowance before
+claiming that peer's weave/GPU-BO share; its body is `sys_seat_import_for_proc`
+(the `sys_weft_share_for_proc` shape) so the suite drives every refusal arm
+with synthetic Procs. The order is load-bearing: both IDENTITY gates (designated
+service, `CAP_HW_CREATE`) run before the claim, because the claim consumes the
+share -- a stranger must never be able to burn one. SET_NONBLOCK calls
+`handle_set_nonblock`, the same helper the phenotype's fcntl(F_SETFL) uses, so
+one function owns the flag word's lock-domain rules; a non-Spoor fd is a no-op
+success, as there.
+
 ## Purpose
 
 The single chokepoint where untrusted register values become typed C arguments.
@@ -35,6 +51,14 @@ A handler's own semantics are its subsystem's; a handler's *shape* is this
 dossier's.
 
 ## Contract
+
+**Imperium entry points (2026-09-17).** Dispatch 110 validates and executes
+the trusted-reader console-episode operation; 111 marshals the propagating
+clearance grant, preserving its kernel cap-subset and flag checks. DMA_SEGMENTS
+remains dispatch 112. Haul posting uses the existing WALK_CREATE devsrv branch,
+not a new syscall; its authorization and bounded reservation live in
+[[sub-kernel-devsrv]].
+
 
 `syscall_dispatch` receives the interrupted register frame. Since the phenotype
 prologue landed it no longer starts by reading `x8`: it first resolves the
@@ -506,6 +530,48 @@ presents `errno == EACCES`) where it once collapsed to a bare `-1` — the reaso
 that identity refusal is observable from Thylacine at all
 ([[sub-kernel-ninep-attach]]).
 
+### The body runs with interrupts ON (ARCH 8.12)
+
+`syscall_dispatch` is now a thin wrapper around the unchanged body. It sets the
+calling thread's in-syscall marker, unmasks, runs the body, re-masks, and
+clears the marker. Everything the dispatcher did before is in the body, and the
+body is where every handler still lives.
+
+The current thread is **asserted, not guarded**. A NULL thread here would run
+the body unmasked AND preemptible -- an involuntary switch inside a syscall
+body, the one thing the model forbids -- and an `if (t)` would let that happen
+in silence. No live path reaches the wrapper without a current thread, which is
+exactly why the impossible case is loud rather than tolerated: every other
+precondition in the wrapper is an assert, and this one was the odd branch out.
+Changed by the ARCH 8.12 audit round (F6).
+
+Three things about it are load-bearing rather than incidental:
+
+**It is a wrapper, not an edit to the vector.** The re-mask must precede
+KERNEL_EXIT, which installs ELR/SPSR and `eret`s under an INHERITED mask -- the
+one surviving #713-class window that does not mask locally. A single-exit
+wrapper makes "the unmask leaks past the return tail" structurally impossible
+rather than merely intended. It also confines the unmask to the SVC body, so
+kernel fault handling, which shares the EL0-synchronous slot, still runs masked
+and the recursion guard on that slot keeps its discriminator.
+
+**The order is load-bearing in both directions.** Marker THEN unmask on entry:
+unmasking first opens a window in which an interrupt sees no marker and
+preempts a thread already inside its syscall. Re-mask THEN clear on exit:
+clearing first leaves a window that is unmasked with no marker. Each order has
+its own buggy cfg in [[spec-syscall-irqs]].
+
+**The re-mask is unconditional, not save/restore.** The entry state is known by
+construction, so a saved value would be a variable standing in for a constant,
+and #713's window must not depend on one. The consequence is that a caller
+which was NOT masked gets masked on return -- which is why the kernel tests
+that drive `syscall_dispatch` directly bracket it with a mask-only
+`spin_lock_irqsave(NULL)`; that was found by the interrupt-state assert firing,
+not by review.
+
+`ASSERT_IRQS_ENABLED` sits at the top of the body, so the property is checked
+on every syscall of every boot rather than sampled by a test.
+
 ## Data structures
 
 None owned. The dispatcher operates on the exception frame
@@ -536,6 +602,20 @@ staging buffers are private by construction. Three shared concerns:
   the VMA struct, so that pointer dangles the moment it returns — and claims the
   page charge *before* the drop, because a freeing drop takes the payment record
   with it.
+
+### Detach admission is decided by identity (2026-09-16)
+
+`SYS_BURROW_DETACH`'s gate is three halves:
+- `detach_shape_check` checks the shape.
+- `detach_in_window` bounds the address.
+- `detach_is_hw_map_locked` admits a DMA- or MMIO-backed VMA outside the window,
+  read under `as->lock`.
+
+`sys_munmap_range_for_proc` keeps the window whole through `detach_args_check`,
+because it removes a range. The rule and its soundness argument live in
+[[sub-kernel-vma]]'s Prosecution section; ARCH 6.5 is the scripture. The gate is
+a caller-entitlement decision made before a geometry-only remover runs, which is
+exactly the kind of gate this file is allowed to hold.
 
 ### Who paid is recorded, not inferred
 
@@ -842,3 +922,26 @@ reset when the census owner changes, so spawning cannot re-arm it.
 (main#243) and are NOT a mechanical sweep -- boot-time and crash-path emitters
 are deliberately raw, because the ring is unarmed or its lock may be held by a
 dying peer.
+
+## PCI mapping windows (2026-09-17)
+
+The old four-register BAR-map handler and new six-register window-map handler
+share validation, preserving old unused argument-register semantics. Both enforce
+MSI-X table/PBA page exclusions, CAP_HW_CREATE, MAP and requested protection
+rights. The window query copies only fully initialized records and rejects short
+capacity rather than truncating a list. Hostmem resolution applies the same
+routing exclusion before creating a shareable alias. [[abi-pci-windows]].
+
+## PCI endpoint dispatch (2026-09-17)
+
+Calls 115..120 derive interrupt authority from acquired writable PCI handles,
+check BDF allowances, and publish through the allowance revocation recheck.
+Endpoint handle arguments are bounded before narrowing. WAIT's output copy
+cannot consume an event: only COMPLETE spends a ticket, allowing replay after
+EFAULT. INFO copies a fully initialized record. [[abi-pci-irq]].
+
+The single-hop `SYS_WALK_OPEN` failure path reads `dev9p_open_errno` before
+clunking the unpublished walked Spoor, then returns the bounded server errno
+or EIO for an unspecified/non-9P failure. The multi-component SYS_OPEN twin
+receives the same disposition from stalk. No syscall number or argument
+record changes; see [[sub-kernel-ninep-dev9p]].

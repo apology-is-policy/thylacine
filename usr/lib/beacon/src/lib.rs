@@ -47,8 +47,11 @@ pub enum Tier {
 
 impl Tier {
     /// Parse the `BEACON` environment value / the consctl tier word.
+    /// Surrounding whitespace is not part of the word: `echo rich >
+    /// /env/BEACON` stores a trailing newline, and ut's own reader trims,
+    /// so an exact match here gave one value two tiers.
     pub fn parse(s: &str) -> Option<Tier> {
-        match s {
+        match s.trim() {
             "none" => Some(Tier::None),
             "cells" => Some(Tier::Cells),
             "rich" => Some(Tier::Rich),
@@ -132,6 +135,12 @@ mod tests {
         }
         assert_eq!(Tier::parse("loud"), None);
         assert_eq!(Tier::parse(""), None);
+        // What `echo rich > /env/BEACON` stores, and what ut already reads
+        // as rich: every reader must agree on it.
+        assert_eq!(Tier::parse("rich\n"), Some(Tier::Rich));
+        assert_eq!(Tier::parse(" cells "), Some(Tier::Cells));
+        assert_eq!(Tier::parse("\n"), None);
+        assert_eq!(Tier::parse("ri ch"), None);
     }
 
     #[test]

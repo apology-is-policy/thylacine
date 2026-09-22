@@ -71,6 +71,17 @@ void test_poll_devsrv_conn_pollin_on_send(void);
 void test_poll_devsrv_conn_pollout_immediate(void);
 void test_poll_devsrv_conn_pollhup_on_teardown(void);
 void test_poll_devsrv_conn_block_then_wake_pollin(void);
+void test_poll_devsrv_client_row(void);
+void test_poll_devsrv_client_wakes_on_reply_only(void);
+void test_poll_devsrv_server_pollout_wakes_on_client_drain(void);
+void test_poll_devsrv_client_pollout_wakes_on_server_blocking_drain(void);
+void test_poll_devsrv_client_kernel_attached_pollnval(void);
+void test_poll_devsrv_client_wakes_on_teardown(void);
+void test_poll_timeout_survives_a_busy_list(void);
+void test_poll_death_ends_a_noise_driven_poll(void);
+void test_poll_stop_parks_a_noise_driven_poll(void);
+void test_poll_noise_keeps_it_looping(void);
+void test_poll_noise_keeps_the_deadline(void);
 void test_poll_null_obj_spoor_pollnval(void);
 void test_poll_mixed_spoor_and_srv(void);
 void test_poll_max_nfds(void);
@@ -206,18 +217,25 @@ void test_poll_timeout_positive_fires(void) {
 
 static volatile s64    g_poll_result;
 static volatile s16    g_poll_revents;
+static volatile bool   g_poll_exited;
 static struct Proc    *g_pollee_proc;
 static hidx_t          g_pollee_fd;
 
 // Block on a single fd with timeout=-1 (forever). Record poll's return
-// + the revents of pollfds[0], then park.
+// + the revents of pollfds[0], then park TERMINALLY. Every poller entry here
+// publishes its detail fields first and its result LAST, with a release store
+// the waiters acquire-load: a waiter that sees the result then reads the rest.
+// A trailing bare sched() was a YIELD: the helper stayed RUNNABLE, an idle peer
+// could steal and run it, and the thread_free that reaped it raced a running
+// thread (B-0 audit round 5 F2/F3).
 static void consumer_poll_forever_entry(void) {
     struct pollfd pfds[1] = {
         { .fd = g_pollee_fd, .events = POLLIN, .revents = 0 },
     };
-    g_poll_result  = sys_poll_for_proc(g_pollee_proc, pfds, 1, -1);
+    s64 r = sys_poll_for_proc(g_pollee_proc, pfds, 1, -1);
     g_poll_revents = pfds[0].revents;
-    sched();    // park
+    __atomic_store_n(&g_poll_result, r, __ATOMIC_RELEASE);
+    test_kthread_park_terminal(&g_poll_exited);
 }
 
 void test_poll_block_then_wake_pollin(void) {
@@ -231,7 +249,7 @@ void test_poll_block_then_wake_pollin(void) {
 
     g_pollee_proc  = p;
     g_pollee_fd    = hrd;
-    g_poll_result  = -999;
+    g_poll_result  = -999; g_poll_exited = false;
     g_poll_revents = 0;
 
     struct Thread *consumer = thread_create(kproc(), consumer_poll_forever_entry);
@@ -252,7 +270,7 @@ void test_poll_block_then_wake_pollin(void) {
     TEST_EXPECT_NE(consumer->state, THREAD_SLEEPING,
         "consumer left the rendez after poll-list signal");
 
-    TEST_YIELD_UNTIL(g_poll_result != -999);
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_poll_result, __ATOMIC_ACQUIRE) != -999);
     TEST_EXPECT_EQ(g_poll_result, 1L, "consumer's poll returns 1");
     TEST_EXPECT_EQ((s64)g_poll_revents, (s64)POLLIN,
         "consumer's revents = POLLIN");
@@ -261,7 +279,7 @@ void test_poll_block_then_wake_pollin(void) {
     // returns from its entry). Without this it leaks as a runnable thread for
     // the rest of the boot -- the band-NORMAL half of the #857 quiescence
     // pollution. Matches test_cons / test_sched hygiene.
-    thread_free(consumer);
+    test_kthread_join_free(consumer, &g_poll_exited);
     drop_test_proc(p);
 }
 
@@ -276,7 +294,7 @@ void test_poll_pollhup_on_close_write_end(void) {
 
     g_pollee_proc  = p;
     g_pollee_fd    = hrd;
-    g_poll_result  = -999;
+    g_poll_result  = -999; g_poll_exited = false;
     g_poll_revents = 0;
 
     struct Thread *consumer = thread_create(kproc(), consumer_poll_forever_entry);
@@ -292,12 +310,12 @@ void test_poll_pollhup_on_close_write_end(void) {
     TEST_EXPECT_NE(consumer->state, THREAD_SLEEPING,
         "consumer wakes after write-end close");
 
-    TEST_YIELD_UNTIL(g_poll_result != -999);
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_poll_result, __ATOMIC_ACQUIRE) != -999);
     TEST_EXPECT_EQ(g_poll_result, 1L, "consumer's poll returns 1");
     TEST_ASSERT((g_poll_revents & POLLHUP) != 0,
         "consumer's revents includes POLLHUP (POSIX hang-up)");
 
-    thread_free(consumer);          // reap the parked poll helper (see block_then_wake)
+    test_kthread_join_free(consumer, &g_poll_exited);          // reap the parked poll helper (see block_then_wake)
     drop_test_proc(p);
 }
 
@@ -330,7 +348,7 @@ void test_poll_cons_deferred_block_then_wake(void) {
 
     g_pollee_proc  = p;
     g_pollee_fd    = hc;
-    g_poll_result  = -999;
+    g_poll_result  = -999; g_poll_exited = false;
     g_poll_revents = 0;
 
     struct Thread *consumer = thread_create(kproc(), consumer_poll_forever_entry);
@@ -362,8 +380,8 @@ void test_poll_cons_deferred_block_then_wake(void) {
     // wake. Only "never armed" leaves both false.
     // #92-audit F2: "cleared" does NOT imply "the wake landed". The relay
     // clears the flag under g_cons.lock, releases it, and only then calls
-    // poll_waiter_list_wake (which takes the poll_list lock + nests a wakeup,
-    // both illegal under g_cons.lock). A concurrent console_mgr on a peer CPU
+    // poll_waiter_list_wake (the walk is kept out of g_cons.lock's hold). A
+    // concurrent console_mgr on a peer CPU
     // can therefore be observed post-clear, pre-wake -- both reads false, and
     // the implication misfires on a healthy kernel. If the flag reads cleared,
     // the wake is in flight, so waiting for it is sound and bounded.
@@ -399,11 +417,11 @@ void test_poll_cons_deferred_block_then_wake(void) {
     // Let the consumer resume + record. console_mgr is also RUNNABLE (the
     // cons_rx_input wake) but re-sleeps on the now-drained cond; a bounded yield
     // loop runs both regardless of order.
-    TEST_YIELD_UNTIL(g_poll_result != -999);
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_poll_result, __ATOMIC_ACQUIRE) != -999);
     TEST_EXPECT_EQ(g_poll_result, 1L, "consumer's poll returns 1");
     TEST_EXPECT_EQ((s64)g_poll_revents, (s64)POLLIN, "consumer's revents = POLLIN");
 
-    thread_free(consumer);
+    test_kthread_join_free(consumer, &g_poll_exited);
     cons_test_reset();
     TEST_YIELD_UNTIL(sched_runnable_count() == 0u);   // #92-audit F4: re-settle, verified
     drop_test_proc(p);
@@ -669,6 +687,7 @@ void test_poll_devsrv_listener_empty_not_ready(void) {
 // Block-then-wake harness state for the listener-poll thread.
 static volatile s64 g_listener_poll_result;
 static volatile s16 g_listener_poll_revents;
+static volatile bool g_listener_poll_exited;
 static struct Proc *g_listener_proc;
 static hidx_t       g_listener_fd;
 
@@ -676,9 +695,10 @@ static void listener_poll_forever_entry(void) {
     struct pollfd pfds[1] = {
         { .fd = g_listener_fd, .events = POLLIN, .revents = 0 },
     };
-    g_listener_poll_result  = sys_poll_for_proc(g_listener_proc, pfds, 1, -1);
+    s64 r = sys_poll_for_proc(g_listener_proc, pfds, 1, -1);
     g_listener_poll_revents = pfds[0].revents;
-    sched();    // park
+    __atomic_store_n(&g_listener_poll_result, r, __ATOMIC_RELEASE);
+    test_kthread_park_terminal(&g_listener_poll_exited);
 }
 
 void test_poll_devsrv_listener_block_then_wake(void) {
@@ -691,7 +711,7 @@ void test_poll_devsrv_listener_block_then_wake(void) {
 
     g_listener_proc         = corvus;
     g_listener_fd           = (hidx_t)svc_h;
-    g_listener_poll_result  = -999;
+    g_listener_poll_result  = -999; g_listener_poll_exited = false;
     g_listener_poll_revents = 0;
 
     struct Thread *poller = thread_create(kproc(), listener_poll_forever_entry);
@@ -712,12 +732,12 @@ void test_poll_devsrv_listener_block_then_wake(void) {
     TEST_EXPECT_NE(poller->state, THREAD_SLEEPING,
         "listener-poll wakes after the connect");
 
-    TEST_YIELD_UNTIL(g_listener_poll_result != -999);
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_listener_poll_result, __ATOMIC_ACQUIRE) != -999);
     TEST_EXPECT_EQ(g_listener_poll_result, 1L, "listener-poll returns 1");
     TEST_EXPECT_EQ((s64)g_listener_poll_revents, (s64)POLLIN,
         "wakeup revents = POLLIN");
 
-    thread_free(poller);            // reap the parked poll helper (see block_then_wake)
+    test_kthread_join_free(poller, &g_listener_poll_exited);            // reap the parked poll helper (see block_then_wake)
     srv_registry_reset();
     drop_test_proc(client);
     drop_test_proc(corvus);
@@ -733,7 +753,7 @@ void test_poll_devsrv_listener_pollhup_on_tombstone(void) {
 
     g_listener_proc         = corvus;
     g_listener_fd           = (hidx_t)svc_h;
-    g_listener_poll_result  = -999;
+    g_listener_poll_result  = -999; g_listener_poll_exited = false;
     g_listener_poll_revents = 0;
 
     struct Thread *poller = thread_create(kproc(), listener_poll_forever_entry);
@@ -751,12 +771,12 @@ void test_poll_devsrv_listener_pollhup_on_tombstone(void) {
     TEST_EXPECT_NE(poller->state, THREAD_SLEEPING,
         "listener-poll wakes on the tombstone");
 
-    TEST_YIELD_UNTIL(g_listener_poll_result != -999);
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_listener_poll_result, __ATOMIC_ACQUIRE) != -999);
     TEST_EXPECT_EQ(g_listener_poll_result, 1L, "listener-poll returns 1");
     TEST_ASSERT((g_listener_poll_revents & POLLHUP) != 0,
         "tombstone revents includes POLLHUP");
 
-    thread_free(poller);            // reap the parked poll helper (see block_then_wake)
+    test_kthread_join_free(poller, &g_listener_poll_exited);            // reap the parked poll helper (see block_then_wake)
     drop_test_proc(corvus);
 }
 
@@ -874,6 +894,7 @@ void test_poll_devsrv_conn_pollhup_on_teardown(void) {
 // Block-then-wake harness state for the connection-poll thread.
 static volatile s64 g_conn_poll_result;
 static volatile s16 g_conn_poll_revents;
+static volatile bool g_conn_poll_exited;
 static struct Proc *g_conn_poll_proc;
 static hidx_t       g_conn_poll_fd;
 
@@ -881,9 +902,10 @@ static void conn_poll_forever_entry(void) {
     struct pollfd pfds[1] = {
         { .fd = g_conn_poll_fd, .events = POLLIN, .revents = 0 },
     };
-    g_conn_poll_result  = sys_poll_for_proc(g_conn_poll_proc, pfds, 1, -1);
+    s64 r = sys_poll_for_proc(g_conn_poll_proc, pfds, 1, -1);
     g_conn_poll_revents = pfds[0].revents;
-    sched();    // park
+    __atomic_store_n(&g_conn_poll_result, r, __ATOMIC_RELEASE);
+    test_kthread_park_terminal(&g_conn_poll_exited);
 }
 
 void test_poll_devsrv_conn_block_then_wake_pollin(void) {
@@ -906,7 +928,7 @@ void test_poll_devsrv_conn_block_then_wake_pollin(void) {
 
     g_conn_poll_proc    = corvus;
     g_conn_poll_fd      = (hidx_t)conn_h;
-    g_conn_poll_result  = -999;
+    g_conn_poll_result  = -999; g_conn_poll_exited = false;
     g_conn_poll_revents = 0;
 
     struct Thread *poller = thread_create(kproc(), conn_poll_forever_entry);
@@ -924,15 +946,605 @@ void test_poll_devsrv_conn_block_then_wake_pollin(void) {
     TEST_EXPECT_NE(poller->state, THREAD_SLEEPING,
         "connection-poll wakes on the send");
 
-    TEST_YIELD_UNTIL(g_conn_poll_result != -999);
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_conn_poll_result, __ATOMIC_ACQUIRE) != -999);
     TEST_EXPECT_EQ(g_conn_poll_result, 1L, "connection-poll returns 1");
     TEST_EXPECT_EQ((s64)g_conn_poll_revents, (s64)POLLIN,
         "wakeup revents = POLLIN");
 
-    thread_free(poller);            // reap the parked poll helper (see block_then_wake)
+    test_kthread_join_free(poller, &g_conn_poll_exited);            // reap the parked poll helper (see block_then_wake)
     srv_registry_reset();
     drop_test_proc(client);
     drop_test_proc(corvus);
+}
+
+// =============================================================================
+// The CLIENT endpoint + the re-arm (2026-09-21; ARCH 23.3).
+//
+// Until this date devsrv_poll sent a CSRVCLIENT Spoor to the SERVER-endpoint
+// sample: a client was told POLLIN while its OWN unread request sat in c2s, was
+// never woken by its reply, and -- sys_poll_for_proc's half -- any wake whose
+// re-sample found nothing returned 0. Each test below names the half it pins.
+// =============================================================================
+
+// A generalized poller: fd / events / timeout from globals.
+static struct Proc  *g_cp_proc;
+static hidx_t        g_cp_fd;
+static s16           g_cp_events;
+static s32           g_cp_timeout;
+static volatile s64  g_cp_result;
+static volatile bool g_cp_exited;
+static volatile s16  g_cp_revents;
+
+static void cp_poll_entry(void) {
+    struct pollfd pfds[1] = {
+        { .fd = g_cp_fd, .events = g_cp_events, .revents = 0 },
+    };
+    s64 r = sys_poll_for_proc(g_cp_proc, pfds, 1, g_cp_timeout);
+    // revents BEFORE the result: the tests wait on g_cp_result and then read
+    // g_cp_revents, possibly from another CPU.
+    g_cp_revents = pfds[0].revents;
+    __atomic_store_n(&g_cp_result, r, __ATOMIC_RELEASE);
+    test_kthread_park_terminal(&g_cp_exited);
+}
+
+struct cp_fixture {
+    struct Proc    *corvus, *client;
+    struct SrvConn *cn;
+    int             svc_h, client_h, conn_h;
+};
+
+static bool cp_setup(struct cp_fixture *f) {
+    srv_registry_reset();
+    f->corvus = make_marked_test_proc();
+    if (!f->corvus) return false;
+    f->svc_h = post_svc_byte(f->corvus, "corvus", 6);
+    if (f->svc_h < 0) return false;
+    f->client = make_test_proc();
+    if (!f->client) return false;
+    struct Spoor *cs = connect_byte(f->client, "corvus");
+    if (!cs) return false;
+    f->client_h = handle_alloc(f->client, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, cs);
+    if (f->client_h < 0) return false;
+    f->cn = devsrv_conn_of(cs);
+    f->conn_h = sys_srv_accept_for_proc(f->corvus, (hidx_t)f->svc_h);
+    return f->conn_h >= 0 && f->cn != NULL;
+}
+
+static void cp_teardown(struct cp_fixture *f) {
+    srv_registry_reset();
+    drop_test_proc(f->client);
+    drop_test_proc(f->corvus);
+}
+
+static s16 cp_sample(struct Proc *p, int h, s16 events) {
+    struct pollfd pfds[1] = { { .fd = (hidx_t)h, .events = events, .revents = 0 } };
+    (void)sys_poll_for_proc(p, pfds, 1, 0);
+    return pfds[0].revents;
+}
+
+// The client row, bit by bit, against the server row on the SAME connection.
+void test_poll_devsrv_client_row(void) {
+    struct cp_fixture f;
+    TEST_ASSERT(cp_setup(&f), "fixture");
+    const s16 io = POLLIN | POLLOUT;
+
+    TEST_EXPECT_EQ((s64)cp_sample(f.client, f.client_h, io), (s64)POLLOUT,
+        "fresh client: room to write, nothing to read");
+
+    // THE defect: the client's own unread request is the SERVER's POLLIN.
+    static const u8 req[7] = { 'r','e','q','u','e','s','t' };
+    TEST_EXPECT_EQ(srvconn_client_send(f.cn, req, 7), 7L, "client queues a request");
+    TEST_EXPECT_EQ((s64)cp_sample(f.client, f.client_h, io), (s64)POLLOUT,
+        "a client is NOT readable because its own request is unread");
+    TEST_EXPECT_EQ((s64)cp_sample(f.corvus, f.conn_h, io), (s64)(POLLIN | POLLOUT),
+        "the server is");
+
+    static const u8 rep[5] = { 'r','e','p','l','y' };
+    TEST_EXPECT_EQ(srvconn_server_send(f.cn, rep, 5), 5L, "server queues a reply");
+    TEST_EXPECT_EQ((s64)cp_sample(f.client, f.client_h, io), (s64)(POLLIN | POLLOUT),
+        "the reply makes the client readable");
+
+    // Teardown with the reply still buffered: bytes first, then the latches.
+    srvconn_teardown(f.cn);
+    TEST_EXPECT_EQ((s64)cp_sample(f.client, f.client_h, io),
+        (s64)(POLLIN | POLLHUP | POLLERR), "buffered bytes + both EOFs");
+    u8 in[8];
+    TEST_EXPECT_EQ(srvconn_io_nonblock(f.cn, false, false, in, sizeof in), 5L, "drain the reply");
+    TEST_EXPECT_EQ((s64)cp_sample(f.client, f.client_h, io), (s64)(POLLHUP | POLLERR),
+        "pipe-like: no POLLIN at a drained EOF");
+
+    cp_teardown(&f);
+}
+
+// A parked client poller: walks for the OTHER endpoint's edges must not end its
+// poll (NoSpuriousZero), and the reply must (the lost wake).
+void test_poll_devsrv_client_wakes_on_reply_only(void) {
+    struct cp_fixture f;
+    TEST_ASSERT(cp_setup(&f), "fixture");
+
+    g_cp_proc = f.client;  g_cp_fd = (hidx_t)f.client_h;
+    g_cp_events = POLLIN;  g_cp_timeout = 30000;
+    g_cp_result = -999; g_cp_exited = false;    g_cp_revents = 0;
+
+    struct Thread *poller = thread_create(kproc(), cp_poll_entry);
+    TEST_ASSERT(poller != NULL, "thread_create");
+    ready(poller);
+    TEST_YIELD_UNTIL(poller->state == THREAD_SLEEPING);
+
+    // c2s FILL: the server's POLLIN edge, noise for this poller. Pre-fix the
+    // server-endpoint sample called this POLLIN and the poll returned 1 with
+    // nothing to read; with the right sample but no re-arm it returned 0 --
+    // "timed out", 30 s early.
+    u64 resleeps = poll_total_resleeps();
+    static const u8 req[3] = { 1, 2, 3 };
+    TEST_EXPECT_EQ(srvconn_client_send(f.cn, req, 3), 3L, "request queued");
+    TEST_YIELD_UNTIL(poll_total_resleeps() > resleeps && poller->state == THREAD_SLEEPING);
+    TEST_EXPECT_EQ(g_cp_result, -999L, "the client's own request does not end its poll");
+
+    // c2s DRAIN: the client's POLLOUT edge, which it did not ask about.
+    resleeps = poll_total_resleeps();
+    u8 in[8];
+    TEST_EXPECT_EQ(srvconn_server_recv(f.cn, in, sizeof in), 3L, "server consumes it");
+    TEST_YIELD_UNTIL(poll_total_resleeps() > resleeps && poller->state == THREAD_SLEEPING);
+    TEST_EXPECT_EQ(g_cp_result, -999L, "nor does the server reading it");
+
+    // s2c FILL: the edge this poller asked about. Pre-fix nothing walked the
+    // list here and the poller slept until its timeout.
+    static const u8 rep[4] = { 9, 8, 7, 6 };
+    TEST_EXPECT_EQ(srvconn_server_send(f.cn, rep, 4), 4L, "reply queued");
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_cp_result, __ATOMIC_ACQUIRE) != -999);
+    TEST_EXPECT_EQ(g_cp_result, 1L, "the reply ends it");
+    TEST_EXPECT_EQ((s64)g_cp_revents, (s64)POLLIN, "revents = POLLIN");
+
+    test_kthread_join_free(poller, &g_cp_exited);
+    cp_teardown(&f);
+}
+
+// A server that polled POLLOUT on a full s2c is woken by a BLOCKING client
+// drain (pre-fix only srvconn_io_nonblock's drain walked the list).
+void test_poll_devsrv_server_pollout_wakes_on_client_drain(void) {
+    struct cp_fixture f;
+    TEST_ASSERT(cp_setup(&f), "fixture");
+
+    static u8 chunk[1024];
+    for (;;) {
+        long put = srvconn_server_send(f.cn, chunk, sizeof chunk);
+        if (put < (long)sizeof chunk) break;
+    }
+    TEST_EXPECT_EQ((s64)(cp_sample(f.corvus, f.conn_h, POLLOUT) & POLLOUT), 0L,
+        "s2c is full: not writable");
+
+    g_cp_proc = f.corvus;  g_cp_fd = (hidx_t)f.conn_h;
+    g_cp_events = POLLOUT; g_cp_timeout = -1;
+    g_cp_result = -999; g_cp_exited = false;    g_cp_revents = 0;
+
+    struct Thread *poller = thread_create(kproc(), cp_poll_entry);
+    TEST_ASSERT(poller != NULL, "thread_create");
+    ready(poller);
+    TEST_YIELD_UNTIL(poller->state == THREAD_SLEEPING);
+
+    TEST_ASSERT(srvconn_client_recv(f.cn, chunk, sizeof chunk) > 0, "the client drains");
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_cp_result, __ATOMIC_ACQUIRE) != -999);
+    TEST_EXPECT_EQ(g_cp_result, 1L, "the drain ends the server's poll");
+    TEST_EXPECT_EQ((s64)g_cp_revents, (s64)POLLOUT, "revents = POLLOUT");
+
+    test_kthread_join_free(poller, &g_cp_exited);
+    cp_teardown(&f);
+}
+
+// The mirror: a client that polled POLLOUT on a full c2s is woken by the
+// server's BLOCKING read -- the byte-mode POSIX-server read() path. That walk
+// in srvconn_server_recv_blocking had no witness: deleting it passed every
+// kernel test (B-0 audit round 4 F9). The assertion is WHEN the poll returns,
+// not what it returns: without the walk the poll still reports POLLOUT -- its
+// timeout pass re-samples and finds the room -- so the first form of this
+// test, which asserted only the result, PASSED on the sabotaged kernel
+// (measured). The timeout is bounded so that kernel still reaps cleanly.
+#define CP_WAKE_LATE_NS (500ull * 1000ull * 1000ull)
+void test_poll_devsrv_client_pollout_wakes_on_server_blocking_drain(void) {
+    struct cp_fixture f;
+    TEST_ASSERT(cp_setup(&f), "fixture");
+
+    static u8 chunk[1024];
+    for (;;) {
+        long put = srvconn_client_send(f.cn, chunk, sizeof chunk);
+        if (put < (long)sizeof chunk) break;
+    }
+    TEST_EXPECT_EQ((s64)(cp_sample(f.client, f.client_h, POLLOUT) & POLLOUT), 0L,
+        "c2s is full: the client is not writable");
+
+    g_cp_proc = f.client;  g_cp_fd = (hidx_t)f.client_h;
+    g_cp_events = POLLOUT; g_cp_timeout = 3000;
+    g_cp_result = -999; g_cp_exited = false;    g_cp_revents = 0;
+
+    struct Thread *poller = thread_create(kproc(), cp_poll_entry);
+    TEST_ASSERT(poller != NULL, "thread_create");
+    ready(poller);
+    TEST_YIELD_UNTIL(poller->state == THREAD_SLEEPING);
+
+    const char *err = NULL;
+    u64 drained = timer_now_ns();
+    if (srvconn_server_recv_blocking(f.cn, chunk, sizeof chunk) <= 0)
+        err = "the server drains through the blocking read";
+    TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_cp_result, __ATOMIC_ACQUIRE) != -999);
+    u64 woke = timer_now_ns();
+    if (!err && __atomic_load_n(&g_cp_result, __ATOMIC_ACQUIRE) == -999)
+        err = "the drain woke the client's poll (it was still parked 2 s later)";
+    else if (!err && woke - drained >= CP_WAKE_LATE_NS)
+        err = "the poll ended at the drain, not at its timeout pass";
+    else if (!err && g_cp_result != 1)
+        err = "it returns 1";
+    else if (!err && g_cp_revents != POLLOUT)
+        err = "revents = POLLOUT";
+    // A kernel without the walk returns at the 3 s timeout: wait it out so the
+    // poller is reaped, never freed while still asleep. A poll that outlasts
+    // even that is left parked WITH its fixture: its timeout pass still reads it.
+    TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_cp_result, __ATOMIC_ACQUIRE) != -999);
+    if (__atomic_load_n(&g_cp_result, __ATOMIC_ACQUIRE) != -999) {
+        test_kthread_join_free(poller, &g_cp_exited);
+        cp_teardown(&f);
+    }
+    TEST_ASSERT(err == NULL, err ? err : "client POLLOUT on the blocking drain");
+}
+
+// The teardown edge, from the CLIENT's side: a client parked in poll(POLLIN) on
+// its own connection is woken by srvconn_teardown's walk and sees the hang-up
+// at once. Nothing witnessed that walk (B-0 audit round 5 F4): without it the
+// poll still reports POLLHUP -- its timeout pass re-samples the latched eof --
+// so the on-device prover that should have caught it passed ten seconds late.
+// As with the drain above, the assertion is WHEN it returns.
+void test_poll_devsrv_client_wakes_on_teardown(void) {
+    struct cp_fixture f;
+    TEST_ASSERT(cp_setup(&f), "fixture");
+    TEST_EXPECT_EQ((s64)(cp_sample(f.client, f.client_h, POLLIN) & (POLLIN | POLLHUP)), 0L,
+        "nothing to read and no hang-up yet");
+
+    g_cp_proc = f.client;  g_cp_fd = (hidx_t)f.client_h;
+    g_cp_events = POLLIN;  g_cp_timeout = 3000;
+    g_cp_result = -999; g_cp_exited = false;    g_cp_revents = 0;
+
+    struct Thread *poller = thread_create(kproc(), cp_poll_entry);
+    TEST_ASSERT(poller != NULL, "thread_create");
+    ready(poller);
+    TEST_YIELD_UNTIL(poller->state == THREAD_SLEEPING);
+
+    const char *err = NULL;
+    u64 torn = timer_now_ns();
+    srvconn_teardown(f.cn);
+    TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_cp_result, __ATOMIC_ACQUIRE) != -999);
+    u64 woke = timer_now_ns();
+    if (__atomic_load_n(&g_cp_result, __ATOMIC_ACQUIRE) == -999)
+        err = "the teardown woke the client's poll (it was still parked)";
+    else if (woke - torn >= CP_WAKE_LATE_NS)
+        err = "the poll ended at the teardown, not at its timeout pass";
+    else if (g_cp_result != 1)
+        err = "it returns 1";
+    else if ((g_cp_revents & POLLHUP) == 0)
+        err = "revents carries POLLHUP (s2c.eof, the direction the client reads)";
+    // A kernel without the walk returns at the 3 s timeout: wait it out so the
+    // poller is reaped, never freed while still asleep. A poll that outlasts
+    // even that is left parked WITH its fixture: its timeout pass still reads it.
+    TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_cp_result, __ATOMIC_ACQUIRE) != -999);
+    if (__atomic_load_n(&g_cp_result, __ATOMIC_ACQUIRE) != -999) {
+        test_kthread_join_free(poller, &g_cp_exited);
+        cp_teardown(&f);
+    }
+    TEST_ASSERT(err == NULL, err ? err : "client POLLIN woken by the teardown");
+}
+
+// A kernel-attached conn's rings are the kernel 9P client's.
+void test_poll_devsrv_client_kernel_attached_pollnval(void) {
+    struct cp_fixture f;
+    TEST_ASSERT(cp_setup(&f), "fixture");
+    srvconn_set_kernel_attached(f.cn);
+    TEST_EXPECT_EQ((s64)cp_sample(f.client, f.client_h, POLLIN | POLLOUT), (s64)POLLNVAL,
+        "client endpoint of a kernel-attached conn");
+    TEST_ASSERT((cp_sample(f.corvus, f.conn_h, POLLOUT) & POLLNVAL) == 0,
+        "the server endpoint is unaffected");
+    cp_teardown(&f);
+}
+
+// A producer that never stops walking the list must not hold a timed poller
+// past its deadline: tsleep prefers a set flag to a passed deadline, so the
+// re-arm loop carries its own test (specs/poll.tla PollTerminates).
+//
+// The window is between the loop's re-register and tsleep's cond check, and a
+// producer on another thread lands in it only by luck -- measured: with the
+// loop's deadline test removed, a send/recv producer still let this pass. So
+// the producer here is the polled object itself: a Dev whose .poll walks its
+// own hook list on EVERY sample, never ready. Each re-sample then re-flags the
+// hook inside the window, deterministically, and tsleep never sleeps.
+//
+// The walking stops on its own BUSY_WALK_NS after the FIRST sample so a kernel
+// WITHOUT the deadline test still returns (0, at the first quiet tsleep)
+// instead of spinning a CPU for the rest of the suite. What separates the two
+// is WHEN the last sample happened: at the 50 ms deadline, or at the end of the
+// walking. Every interval is measured from the first sample, never from before
+// thread_create: a poller the scheduler starts late must not read as one that
+// returned late (B-0 audit round 4 F9).
+//
+// Every poll here that pins one of the loop's OWN checks -- this deadline test,
+// and the die-check and stop park below -- needs no special setup: the
+// preemption point services interrupts but never ENDS a poll, so a kernel with
+// the loop's own check removed does not pass on the point's account (unlike the
+// round-5 backoff, whose own tsleep ended the noise poll and so had to be
+// disabled -- the same simplification the spec's die/stop cfgs show). The point
+// has tests of its own after these.
+#define BUSY_WALK_NS   (1000ull * 1000ull * 1000ull)
+#define BUSY_LATE_NS   ( 500ull * 1000ull * 1000ull)
+static struct poll_waiter_list g_busy_list = POLL_WAITER_LIST_INIT;
+static u64 g_busy_first_sample_ns;     // 0 until the first sample
+static u64 g_busy_until_ns;            // first sample + BUSY_WALK_NS
+static u64 g_busy_last_sample_ns;
+static volatile u64  g_busy_samples;
+static volatile bool g_busy_ready;     // report POLLIN (the way out of a poll(-1))
+
+static short busy_poll(struct Spoor *c, short events, struct poll_waiter *pw) {
+    (void)c;
+    if (pw) poll_waiter_list_register(&g_busy_list, pw);
+    u64 now = timer_now_ns();
+    if (g_busy_first_sample_ns == 0) {
+        g_busy_first_sample_ns = now;
+        g_busy_until_ns        = now + BUSY_WALK_NS;
+    }
+    g_busy_last_sample_ns = now;
+    g_busy_samples++;
+    if (g_busy_ready) return (short)(events & POLLIN);
+    if (now < g_busy_until_ns) poll_waiter_list_wake(&g_busy_list);
+    return 0;
+}
+
+static struct Dev g_busy_dev = {
+    .dc   = (int)'~',
+    .name = "pollbusy",
+    .poll = busy_poll,
+};
+
+static void busy_reset(void) {
+    g_busy_first_sample_ns = 0;
+    g_busy_until_ns        = 0;
+    g_busy_last_sample_ns  = 0;
+    g_busy_samples         = 0;
+    g_busy_ready           = false;
+}
+
+void test_poll_timeout_survives_a_busy_list(void) {
+    struct Proc *p = make_test_proc();
+    TEST_ASSERT(p != NULL, "test proc");
+    hidx_t h = install_spoor(p, dev_simple_attach(&g_busy_dev, 0), RIGHT_READ);
+    TEST_ASSERT(h >= 0, "busy fd installed");
+
+    g_cp_proc = p;         g_cp_fd = h;
+    g_cp_events = POLLIN;  g_cp_timeout = 50;
+    g_cp_result = -999; g_cp_exited = false;    g_cp_revents = 0;
+    busy_reset();
+    u64 resleeps0 = poll_total_resleeps();
+
+    struct Thread *poller = thread_create(kproc(), cp_poll_entry);
+    TEST_ASSERT(poller != NULL, "thread_create");
+    ready(poller);
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_cp_result, __ATOMIC_ACQUIRE) != -999);
+
+    TEST_EXPECT_EQ(g_cp_result, 0L, "timed out");
+    TEST_ASSERT(poll_total_resleeps() > resleeps0,
+        "non-vacuous: the loop re-slept on a flagged-but-empty wake");
+    TEST_ASSERT(g_busy_samples >= 3, "non-vacuous: the object was re-sampled");
+    TEST_ASSERT(g_busy_last_sample_ns - g_busy_first_sample_ns < BUSY_LATE_NS,
+        "returned at ITS deadline, not when the producer went quiet");
+
+    test_kthread_join_free(poller, &g_cp_exited);
+    drop_test_proc(p);
+}
+
+// A dying poller is not held by a producer's noise, and a stopped one parks
+// (specs/poll.tla DeathTerminates / StopHonoured; B-0 audit round 4 F2).
+// tsleep's own die-check and stop detour sit BEHIND its cond test, so a
+// producer that re-flags the hook in every pass -- the busy Dev, again --
+// keeps every tsleep returning AWOKEN before either check. The loop's own
+// checks end the poll (death) or park it (stop) on the next pass; a kernel
+// without them reaches tsleep's checks only when the walking stops, BUSY_WALK_NS
+// after the first sample. The poller is a thread of a real (non-kproc) Proc,
+// the only kind whose death and stop flags the checks read; the flags are set
+// the way the #811 cascade and the stop delivery set them, without the
+// machine-wide IPI (test_rendez_death_interrupts_sleep's reasoning). A noise
+// pass yields (sched_yield_hint), which is what lets this thread run at all.
+static struct Proc  *g_pn_proc;
+static hidx_t        g_pn_fd;
+static volatile s64  g_pn_result;
+static volatile s16  g_pn_revents;
+static volatile u64  g_pn_return_ns;
+static volatile bool g_pn_exited;
+
+static void pn_poll_entry(void) {
+    struct pollfd pfds[1] = {
+        { .fd = g_pn_fd, .events = POLLIN, .revents = 0 },
+    };
+    s64 r = sys_poll_for_proc(g_pn_proc, pfds, 1, -1);
+    g_pn_return_ns = timer_now_ns();
+    g_pn_revents   = pfds[0].revents;
+    __atomic_store_n(&g_pn_result, r, __ATOMIC_RELEASE);
+    test_kthread_park_terminal(&g_pn_exited);
+}
+
+// Start a poll(-1) on the busy Dev from a thread of a fresh Proc. NULL on any
+// failure (nothing started).
+static struct Thread *pn_start(void) {
+    g_pn_proc = proc_alloc();
+    if (!g_pn_proc) return NULL;
+    g_pn_fd = install_spoor(g_pn_proc, dev_simple_attach(&g_busy_dev, 0), RIGHT_READ);
+    if (g_pn_fd < 0) return NULL;
+    busy_reset();
+    g_pn_result = -999; g_pn_revents = 0; g_pn_return_ns = 0; g_pn_exited = false;
+    struct Thread *poller = thread_create(g_pn_proc, pn_poll_entry);
+    if (!poller) return NULL;
+    ready(poller);
+    return poller;
+}
+
+// Ends a poll the test could not end (a kernel without the fix): stop the
+// noise, report POLLIN, walk the list; then reap. Safe on every path.
+static void pn_finish(struct Thread *poller) {
+    if (poller) {
+        __atomic_store_n(&g_pn_proc->debug_stop_req, 0u, __ATOMIC_RELEASE);
+        (void)wakeup(&poller->debug_rendez);
+        g_busy_ready = true;
+        poll_waiter_list_wake(&g_busy_list);
+        TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_pn_result, __ATOMIC_ACQUIRE) != -999);
+        test_kthread_join_free(poller, &g_pn_exited);
+    }
+    if (g_pn_proc) {
+        g_pn_proc->state = PROC_STATE_ZOMBIE;
+        proc_free(g_pn_proc);
+        g_pn_proc = NULL;
+    }
+    busy_reset();
+}
+
+void test_poll_death_ends_a_noise_driven_poll(void) {
+    struct Thread *poller = pn_start();
+    const char *err = poller ? NULL : "poller setup";
+    if (!err) {
+        TEST_YIELD_UNTIL_SOFT(g_busy_samples >= 3);
+        if (g_busy_samples < 3) err = "non-vacuous: the poller is circling on the noise";
+    }
+    u64 died = 0;
+    if (!err) {
+        died = timer_now_ns();
+        __atomic_store_n(&g_pn_proc->group_exit_msg, "killed", __ATOMIC_RELEASE);
+        TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_pn_result, __ATOMIC_ACQUIRE) != -999);
+        if (__atomic_load_n(&g_pn_result, __ATOMIC_ACQUIRE) == -999)                        err = "the dying poll returned";
+        else if (g_pn_result != 0)                      err = "a dying poll returns 0";
+        else if (g_pn_return_ns - died >= BUSY_LATE_NS) err = "the loop's own die-check ended it, not the producer going quiet";
+        else if (!poll_waiter_list_empty(&g_busy_list)) err = "no hook left behind";
+    }
+    pn_finish(poller);
+    TEST_ASSERT(err == NULL, err ? err : "death");
+}
+
+void test_poll_stop_parks_a_noise_driven_poll(void) {
+    struct Thread *poller = pn_start();
+    const char *err = poller ? NULL : "poller setup";
+    if (!err) {
+        TEST_YIELD_UNTIL_SOFT(g_busy_samples >= 3);
+        if (g_busy_samples < 3) err = "non-vacuous: the poller is circling on the noise";
+    }
+    if (!err) {
+        u64 stopped = timer_now_ns();
+        __atomic_store_n(&g_pn_proc->debug_stop_req, 1u, __ATOMIC_RELEASE);
+        TEST_YIELD_UNTIL_SOFT((poller->state == THREAD_SLEEPING &&
+                               poller->rendez_blocked_on == &poller->debug_rendez) ||
+                              timer_now_ns() - stopped >= BUSY_LATE_NS);
+        if (!(poller->state == THREAD_SLEEPING &&
+              poller->rendez_blocked_on == &poller->debug_rendez))
+            err = "the stop parked the poller on its debug_rendez before the producer went quiet";
+        else if (!poll_waiter_list_empty(&g_busy_list))
+            err = "the loop parks with its hook OFF the list";
+        else if (__atomic_load_n(&g_pn_result, __ATOMIC_ACQUIRE) != -999)
+            err = "a stop parks the poll, it does not end it";
+    }
+    if (!err) {
+        u64 frozen = g_busy_samples;
+        for (int i = 0; i < 1000; i++) sched();
+        if (g_busy_samples != frozen) err = "a parked poller samples nothing";
+    }
+    if (!err) {
+        // Resume the way proc_debug_resume does (flag cleared BEFORE the wake),
+        // with readiness waiting: the resumed pass re-registers and returns it.
+        g_busy_ready = true;
+        __atomic_store_n(&g_pn_proc->debug_stop_req, 0u, __ATOMIC_RELEASE);
+        (void)wakeup(&poller->debug_rendez);
+        TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_pn_result, __ATOMIC_ACQUIRE) != -999);
+        if (g_pn_result != 1)               err = "the resumed poll returns the readiness";
+        else if (g_pn_revents != POLLIN)    err = "revents = POLLIN";
+    }
+    pn_finish(poller);
+    TEST_ASSERT(err == NULL, err ? err : "stop");
+}
+
+// The preemption point (specs/poll.tla Point / IrqLatencyBounded; B-0 audit
+// round 5 F1 + round-6 S1). A syscall runs IRQ-masked end to end, so a poll(-1)
+// the busy Dev keeps awake would hold its CPU with interrupts masked for the
+// producer's whole walking window -- the SAK included -- and any unprivileged
+// program can be that producer. The first fix was a sleep (round 5's backoff,
+// which bounded one thread but not one CPU: round-6 S1), the second a
+// preemption point crossed on every re-loop. BOTH ARE GONE: ARCH 8.12 runs the
+// whole syscall body interrupts-on, so the CPU is interruptible at every
+// instruction of this loop rather than at one chosen spot in it, and the
+// property is asserted on every syscall of every boot
+// (ASSERT_IRQS_ENABLED in syscall_dispatch_body) rather than sampled here.
+//
+// What is left for this test is the half a kthread test could always see, and
+// which the interrupt model does not supply: that a noise-driven poll keeps
+// genuinely RE-LOOPING (g_busy_samples climbs) without returning, and that
+// readiness still ends it.
+#define POINT_WATCH_NS (100ull * 1000ull * 1000ull)
+
+void test_poll_noise_keeps_it_looping(void) {
+    struct Thread *poller = pn_start();
+    const char *err = poller ? NULL : "poller setup";
+    if (!err) {
+        TEST_YIELD_UNTIL_SOFT(g_busy_samples >= 3);
+        if (g_busy_samples < 3) err = "non-vacuous: the poller is circling on the noise";
+    }
+    if (!err) {
+        // BOTH baselines are taken here, and the watch runs until BOTH have
+        // advanced: a point count read against a baseline taken before the
+        // poller started is already past 3 when the watch begins, so the
+        // sample check would then measure a zero-length window and fail (or,
+        // worse, pass vacuously). The window must be the same for both.
+        u64 s0 = g_busy_samples;
+        u64 t0 = timer_now_ns();
+        while (timer_now_ns() - t0 < POINT_WATCH_NS && g_busy_samples - s0 < 3)
+            sched();
+        if (g_busy_samples - s0 < 3)
+            err = "the noise-driven poll keeps re-looping (re-sampling)";
+        else if (__atomic_load_n(&g_pn_result, __ATOMIC_ACQUIRE) != -999)
+            err = "the point never ends the poll: poll(-1) returns only on readiness";
+    }
+    if (!err) {
+        g_busy_ready = true;
+        poll_waiter_list_wake(&g_busy_list);
+        TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_pn_result, __ATOMIC_ACQUIRE) != -999);
+        if (g_pn_result != 1)            err = "readiness still ends a noise-driven poll";
+        else if (g_pn_revents != POLLIN) err = "revents = POLLIN";
+    }
+    pn_finish(poller);
+    TEST_ASSERT(err == NULL, err ? err : "point");
+}
+
+// A timed poll under the same noise returns 0 AT its deadline: the point does
+// not sleep and does not end the poll, so the loop's own `now >= deadline_ns`
+// break is what ends it -- not the point (which never returns 0) and not the
+// producer going quiet. Timed from the first sample, as
+// test_poll_timeout_survives_a_busy_list is.
+#define POINT_TIMEOUT_MS 30
+
+void test_poll_noise_keeps_the_deadline(void) {
+    struct Proc *p = make_test_proc();
+    TEST_ASSERT(p != NULL, "test proc");
+    hidx_t h = install_spoor(p, dev_simple_attach(&g_busy_dev, 0), RIGHT_READ);
+    TEST_ASSERT(h >= 0, "busy fd installed");
+
+    g_cp_proc = p;         g_cp_fd = h;
+    g_cp_events = POLLIN;  g_cp_timeout = POINT_TIMEOUT_MS;
+    g_cp_result = -999; g_cp_exited = false;    g_cp_revents = 0;
+    busy_reset();
+    u64 bs0 = g_busy_samples;
+
+    struct Thread *poller = thread_create(kproc(), cp_poll_entry);
+    TEST_ASSERT(poller != NULL, "thread_create");
+    ready(poller);
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_cp_result, __ATOMIC_ACQUIRE) != -999);
+
+    TEST_EXPECT_EQ(g_cp_result, 0L, "timed out");
+    TEST_ASSERT(g_busy_samples > bs0 + 1,
+        "non-vacuous: the noise really drove the poller round its loop "
+        "(the point counter this used to read is gone with the point)");
+    TEST_ASSERT(g_busy_last_sample_ns - g_busy_first_sample_ns < BUSY_LATE_NS,
+        "returned at its deadline, not when the producer went quiet");
+
+    test_kthread_join_free(poller, &g_cp_exited);
+    drop_test_proc(p);
 }
 
 // =============================================================================

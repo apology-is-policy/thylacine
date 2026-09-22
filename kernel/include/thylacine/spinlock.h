@@ -23,6 +23,7 @@
 
 #include <thylacine/types.h>
 #include <atomic_lse.h>   // t_atomic_xchg_acq_u32 (W1.5 LSE-patchable test-and-set)
+#include <thylacine/extinction.h>  // ASSERT_OR_DIE (the ARCH 8.12 IRQ-state asserts)
 
 typedef struct spin_lock {
     // 0 = unlocked, 1 = locked. The test-and-set goes through the
@@ -38,17 +39,36 @@ typedef struct spin_lock {
 // #360 preemption discipline: a plain spin_lock hold makes the HOLDING
 // THREAD non-preemptible (the Linux "spin_lock disables preemption" rule).
 //
-// Why load-bearing: syscalls run IRQ-MASKED end-to-end (SVC masks DAIF;
-// no handler unmasks), so a syscall spinning on a contended lock cannot
-// be preempted. A holder that runs IRQ-ENABLED (a kproc kthread, or a
-// thunk on a fresh thread -- thread_trampoline `daifclr`s) COULD be
-// preempted mid-hold before #360: it goes RUNNABLE off-CPU still holding
-// the lock, IRQ-masked spinners occupy every CPU waiting for it, and the
-// holder never gets a CPU again -- a permanent whole-guest deadlock
-// (#359: the parallel `go build` wedge on the shared dev9p client's
-// c->lock; the same shape was latent on l->lock, g_dev9p_poll_lock, the
-// poll hook-list locks -- any lock shared between a preemptible context
-// and syscall paths).
+// Why load-bearing. THE ARGUMENT WAS REBUILT AT ARCH 8.12 and its old form
+// is now false, so read this rather than remembering the old one.
+//
+// It used to run: "syscalls are IRQ-MASKED end to end, so a syscall
+// spinning on a contended lock cannot be preempted." Syscall bodies now
+// run with interrupts ON (ARCH 8.12), so masking establishes nothing
+// here. What holds instead is a property, not a side effect: a syscall
+// body is NON-PREEMPTIBLE (Thread.in_syscall gates preempt_check_irq), so
+// a syscall spinning on a contended lock still cannot be switched out.
+//
+// The failure #360 exists to prevent is therefore UNCHANGED. A holder
+// that runs preemptible -- a kproc kthread, or a thunk on a fresh thread
+// (thread_trampoline `daifclr`s), neither of which carries the syscall
+// marker, and both of which must STAY preemptible or #810 is lost --
+// could be preempted mid-hold: it goes RUNNABLE off-CPU still holding the
+// lock, spinners occupy every CPU waiting for it, and the holder never
+// gets a CPU again. A permanent whole-guest deadlock (#359: the parallel
+// `go build` wedge on the shared dev9p client's c->lock; the same shape
+// was latent on l->lock, g_dev9p_poll_lock, the poll hook-list locks --
+// any lock shared between a preemptible context and syscall paths).
+//
+// ONE THING DID CHANGE, and it is smaller than it first looks. Those
+// spinners are no longer MASKED, so the wedged CPUs keep servicing
+// interrupts: the SAK still arrives, drivers still run, the operator can
+// still see the machine. But they are still non-preemptible, so they
+// still never yield, and the holder still never runs. The deadlock
+// SURVIVES -- it merely stops being deaf. (An earlier draft of ARCH 8.12
+// claimed this degraded the failure "from a whole-guest deadlock to
+// starvation". That was wrong, and wrong in the direction that would have
+// justified relaxing #360.)
 //
 // Mechanism: a PER-THREAD hold count (Thread.preempt_count; thread.h has
 // the full rationale for per-thread over per-CPU -- the count must travel
@@ -171,6 +191,57 @@ static inline bool spin_trylock_raw(spin_lock_t *l) {
 // On UP at v1.0 the spin part of spin_lock_irqsave is still a
 // no-op — but the IRQ mask discipline is real. Phase 2's SMP
 // adds the LL/SC contention.
+// ARCH 8.12: ASSERTIONS ON THE INTERRUPT STATE.
+//
+// Until these landed there were NONE, anywhere in the tree. Searched
+// irq_disabled / irqs_disabled / in_irq / ASSERT.*daif: zero hits across
+// kernel/, arch/, mm/ and lib/. Every one of those files depends on a masking
+// discipline that was load-bearing ONLY IN PROSE -- so when the premise
+// changed, nothing would fail loudly; it would just be quietly wrong in a
+// place nobody was looking.
+//
+// The ARCH 8.1 chunk changes exactly that premise (syscall bodies run with
+// interrupts ON), which is why the assert lands with it rather than after.
+// Read the messages as documentation of which model the code is in: when 8.1
+// lands, the assertions at the syscall entry INVERT, and the inversion is
+// visible in the diff.
+//
+// Cost is one `mrs` and a branch -- cheap enough to leave in every build, and
+// an assert compiled out of the build that ships is an assert that never
+// catches the thing it was written for.
+#define DAIF_I_BIT  (1ULL << 7)         // PSTATE.I -- the IRQ mask
+
+static inline bool irqs_masked(void) {
+    u64 daif;
+    __asm__ __volatile__("mrs %x0, daif" : "=r" (daif) :: "memory");
+    return (daif & DAIF_I_BIT) != 0;
+}
+
+#define ASSERT_IRQS_MASKED(why) \
+    ASSERT_OR_DIE(irqs_masked(), "IRQs must be MASKED here: " why)
+#define ASSERT_IRQS_ENABLED(why) \
+    ASSERT_OR_DIE(!irqs_masked(), "IRQs must be ENABLED here: " why)
+
+// ARCH 8.12: the syscall body's unmask / re-mask. A DIRECT PSTATE.DAIF write
+// takes effect with no barrier -- Linux's __daif_local_irq_enable is a bare
+// `msr daifclr, #3` and carries none -- so there is no `isb` here and none is
+// owed. (Only the ICC_PMR_EL1 path needs pmr_sync(); this is not that path.
+// The B-0 preemption point once claimed an isb was load-bearing for DELIVERY;
+// a sabotage that removed it PASSED, and the claim was corrected rather than
+// the test.)
+//
+// These are deliberately NOT save/restore: the syscall body's entry state is
+// known by construction (the SVC vector masked), so a saved value would be a
+// variable standing in for a constant, and the re-mask must be unconditional
+// -- an eret out of KERNEL_EXIT under an inherited unmask is #713.
+static inline void irq_unmask_local(void) {
+    __asm__ __volatile__("msr daifclr, #2" ::: "memory");
+}
+
+static inline void irq_mask_local(void) {
+    __asm__ __volatile__("msr daifset, #2" ::: "memory");
+}
+
 typedef u64 irq_state_t;
 
 static inline irq_state_t spin_lock_irqsave(spin_lock_t *l) {

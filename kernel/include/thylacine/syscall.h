@@ -552,8 +552,15 @@ enum {
     // → spoor_clunk on root_spoor). Idempotent: SYS_CHROOT to the same
     // Spoor returns 0 without bumping refcount.
     //
-    // Returns 0 on success, -1 on:
+    // A real swap also REMOVES mount entries: every entry whose mount point
+    // lies in a device instance unreachable from the new root is dropped under
+    // the same lock hold (ARCH 9.6.10). Nothing resolved from the new root
+    // changes; an fd-relative walk from a directory fd opened before the swap
+    // can.
+    //
+    // Returns 0 on success, -1 (flat; no errno) on:
     //   - spoor_fd not KOBJ_SPOOR / out-of-range / missing RIGHT_READ
+    //   - spoor_fd is not a DIRECTORY (QTDIR)
     //   - the caller has no Territory (kernel invariant; structurally
     //     impossible for a userspace Proc, defense-in-depth)
     //
@@ -603,21 +610,34 @@ enum {
     SYS_BURROW_ATTACH = 37,  // arg: length (x0)
 
     // P6-pouch-mem: SYS_BURROW_DETACH(vaddr, length) → 0 / -1
-    //   x0 = vaddr    the base VA a prior SYS_BURROW_ATTACH returned
-    //   x1 = length   the attached length — the caller's original
+    //   x0 = vaddr    the base VA of the mapping: one a prior
+    //                 SYS_BURROW_ATTACH* returned, or one the caller
+    //                 chose for SYS_DMA_MAP / SYS_MMIO_MAP /
+    //                 SYS_PCI_MAP_BAR
+    //   x1 = length   the mapped length — the caller's original
     //                 request OR any value that page-rounds to the
     //                 same span (the match is on the page-rounded
     //                 [vaddr, vaddr + round_up(length)) range)
-    // Detach a region previously attached by SYS_BURROW_ATTACH. The
-    // (vaddr, rounded length) must match an installed VMA exactly — no
-    // partial detach at v1.0 (mirrors burrow_unmap's constraint). The
-    // VMA is removed and, mapping_count reaching 0 with handle_count
-    // already 0, the Burrow's pages are freed.
+    // Detach one installed mapping. The (vaddr, rounded length) must
+    // match an installed VMA exactly — no partial detach at v1.0
+    // (mirrors burrow_unmap's constraint). The VMA is removed and, when
+    // that was the Burrow's last reference, its pages are freed (a
+    // hardware Burrow's KObj reference drops with it).
+    //
+    // Which mappings are detachable is decided by IDENTITY (ARCH 6.5):
+    // anything inside the burrow-attach window [EXEC_USER_BURROW_BASE,
+    // EXEC_USER_BURROW_TOP), and a DMA- or MMIO-backed mapping wherever
+    // the driver placed it. An ELF segment, the stack, its guard and the
+    // vDSO sit below the window and are never hardware-backed, so they
+    // stay refused.
     //
     // Returns 0 on success, -1 on:
-    //   - length == 0 or length > BURROW_ATTACH_MAX
-    //   - vaddr not page-aligned
+    //   - length == 0, vaddr not page-aligned, or the span leaves the
+    //     user address space
+    //   - a span inside the window with length > BURROW_ATTACH_MAX
+    //   - a span outside the window whose VMA is not DMA- or MMIO-backed
     //   - no VMA matches [vaddr, vaddr + round_up(length)) exactly
+    //   - a JIT code alias (the JIT syscalls own that lifetime)
     SYS_BURROW_DETACH = 38,  // arg: vaddr (x0), length (x1)
 
     // P6-pouch-wait-addr (sub-chunk 8): the `torpor` wait-on-address
@@ -1103,8 +1123,16 @@ enum {
     // around line 293-304 ("v1.x adds SYS_UNCHROOT or a proper
     // pivot_root").
     //
-    // Returns: 0 on success, -1 on:
+    // Like SYS_CHROOT, a real swap REMOVES the mount entries the new root
+    // cannot reach (ARCH 9.6.10) -- which is why a non-directory is refused
+    // here as it always was there: a bad pivot used to wedge resolution until
+    // the caller pivoted back; with the shed it would strip the table for good.
+    //
+    // Returns: 0 on success, -1 (flat; no errno) on:
     //   - new_root_fd not KOBJ_SPOOR / out-of-range / missing RIGHT_READ
+    //   - new_root_fd is not a DIRECTORY (QTDIR)
+    //   - the caller has NO CURRENT ROOT (pivot exchanges a root; the initial
+    //     root is SYS_CHROOT's to install)
     //   - caller has no Territory (kernel invariant -- structurally
     //     impossible for userspace; defense-in-depth)
     //
@@ -1627,8 +1655,9 @@ enum {
     //   VIVARIUM.md 6.27). For an append fd the kernel cursor is advisory: the
     //   server ignores the client offset, so a raw phenotype binary (git) gets
     //   correct appends without the kernel or a libc emulating them. (Pouch
-    //   ports still emulate O_APPEND above this layer for the native SYS_RW
-    //   path, which carries no append bit.)
+    //   ports pass the same bit from openat()'s O_APPEND translation; before
+    //   that existed they emulated O_APPEND with one seek at open, so a write
+    //   after a seek landed mid-file.)
     SYS_PWRITE = 86,   // arg: fd (x0), buf (x1), len (x2), off (x3)
 
     // SYS_YIELD() -> 0 (#33)
@@ -2222,7 +2251,7 @@ enum {
     // chrooted, exactly as SYS_CAP_GRANT_CLEARANCE). flags == 0 is a plain
     // clearance grant. CAP_GRANT_FLAG_PROPAGATING (1) makes the scope the
     // redeemer creates a PROPAGATING one: the redeemed caps (bounded to
-    // CAP_GRANTABLE_IMPERIUM = DAC_OVERRIDE|CHOWN|KILL) FLOW to its rfork
+    // CAP_GRANTABLE_IMPERIUM = DAC_OVERRIDE|CHOWN|KILL|POST_SERVICE) FLOW to its rfork
     // descendants, which die with it. Gated on CAP_GRANT_CLEARANCE (corvus).
     // The REDEEM still rides SYS_CAP_USE; a PROPAGATING grant is redeemable
     // only by a Proc in NO scope (propagating never nests -- abdicate first).
@@ -2247,7 +2276,27 @@ enum {
     // discloses the same thing: where the caller's own buffer physically
     // lives. REFUSES when count > max_entries rather than truncating -- a
     // short list would be attached as a whole backing and read past its end.
+    // 110 and 111 implement SYS_CONSOLE_EPISODE and SYS_CAP_GRANT_IMPERIUM.
+    // Do not fill them: both numbers already have consumers on a live branch,
+    // and duplicate enum values are legal C -- a second minting would compile
+    // silently on both sides and surface as two dispatch cases colliding.
     SYS_DMA_SEGMENTS = 112,  // arg: handle(x0) buf_va(x1) max_entries(x2)
+    SYS_PCI_MAP_WINDOW = 113, // h, va, bar, prot, offset, length (page aligned)
+    SYS_PCI_WINDOWS = 114,    // h, out records, capacity; returns count, never truncates
+
+    SYS_PCI_IRQ_CREATE = 115,
+    SYS_PCI_IRQ_ARM = 116,
+    SYS_PCI_IRQ_WAIT = 117,
+    SYS_PCI_IRQ_COMPLETE = 118,
+    SYS_PCI_IRQ_DISABLE = 119,
+    SYS_PCI_IRQ_INFO = 120,
+    // Kernel-bound trusted display/input endpoint; seat.h fixes the envelope.
+    SYS_TRUSTED_SEAT = 121,
+    // Trusted seat imports a share-admissible DMA buffer from its accepted
+    // connection peer; no raw PA is accepted. Returns non-transferable DMA fd.
+    SYS_SEAT_IMPORT = 122,
+    // Open-file nonblocking mode, shared by duplicate handles; fd, boolean.
+    SYS_SET_NONBLOCK = 123,
 
     // NOT A SYSCALL. One past the highest assigned number, so that
     // VIV_NATIVE_CEILING can be pinned to a value the compiler recomputes
@@ -2263,6 +2312,7 @@ enum {
     // tail -- which is the append-only rule the number space already runs on.
     SYS__NATIVE_TOP,
 };
+
 
 // SYS_CONSOLE_EPISODE ops (x0). ABI: mirrored by libthyla-rs
 // T_CONSOLE_EPISODE_* and docs/ERRORS.md.
@@ -2526,12 +2576,18 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, shm)         == 208, "t_pci
 // NOT a cap (rfork does not propagate proc_flags), so only the marked leader
 // carries the flag.
 #define SPAWN_PERM_SESSION_HANGUP    (1u << 5)
+#define SPAWN_PERM_SEAT_MANAGER      (1u << 6)
+#define SPAWN_PERM_SEAT_SERVICE      (1u << 7)
+#define SPAWN_PERM_SEAT_CLIENT       (1u << 8)
 #define SPAWN_PERM_ALL               (SPAWN_PERM_MAY_POST_SERVICE | \
                                       SPAWN_PERM_CONSOLE_TRUSTED | \
                                       SPAWN_PERM_CONSOLE_OWNER | \
                                       SPAWN_PERM_CONSOLE_RENDERER | \
                                       SPAWN_PERM_MAY_RAISE_PAGE_BUDGET | \
-                                      SPAWN_PERM_SESSION_HANGUP)
+                                      SPAWN_PERM_SESSION_HANGUP | \
+                                      SPAWN_PERM_SEAT_MANAGER | \
+                                      SPAWN_PERM_SEAT_SERVICE | \
+                                      SPAWN_PERM_SEAT_CLIENT)
 
 // A-1a (docs/IDENTITY-DESIGN.md §9.1): sys_spawn_args.identity_flags bits.
 // SPAWN_IDENTITY_SET requests that the child be born with the principal_id

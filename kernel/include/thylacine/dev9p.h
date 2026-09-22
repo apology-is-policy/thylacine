@@ -112,6 +112,9 @@ struct dev9p_priv {
     // (freeing this priv). Never shared: `nc` is a fresh clone-walk, not yet a
     // handle. 0 means "not recorded" -> the accessor returns -1 (prior behavior).
     int                create_errno;
+    // Dev.open also returns a pointer, so preserve its Rlerror on the fresh,
+    // unpublished walk result. Read before clunk; reset on every open attempt.
+    int                open_errno;
     // F2: attached_owner is the session-resource holder. NULL when the
     // p9_client is externally owned (test path); non-NULL for every priv
     // derived from a SYS_ATTACH_9P session (root + walks). Each non-NULL
@@ -269,6 +272,8 @@ struct dev9p_priv *dev9p_priv_of(struct Spoor *c);
 // errno (e.g. -T_E_EXIST). Self-gating: returns -1 (the prior generic-failure
 // sentinel) for a non-dev9p Spoor, an unrecorded value, or an out-of-range one.
 s64 dev9p_create_errno(struct Spoor *c);
+// Failed Tlopen cause in [-4095,-2], otherwise -1; only before clunk.
+s64 dev9p_open_errno(struct Spoor *c);
 
 // =============================================================================
 // dev9p.poll -- the readiness bridge (net-6b-2b; NET-DESIGN section 12.2,

@@ -72,23 +72,12 @@ struct Spoor;
 // footing: a Proc that must emit code (an llvmpipe-backed GL app) acquires the
 // authority through a bounded legate rather than by inheritance, which is what
 // keeps I-42's "non-heritable" clause true of every path, not just rfork.
-// CAP_AUDIO_GRAPH (Nocturne N-3a / I-46; docs/NOCTURNE.md §6.8) joins on the
-// SAME mask-driven footing -- a system-level audio program (a whole-sink EQ,
-// the sink-loopback recorder, a non-console volume setter) acquires the
-// whole-sink authority through a bounded legate, never by inheritance; no
-// devcap.c change is needed.
-#define CAP_GRANTABLE_CLEARANCE  (CAP_DAC_OVERRIDE | CAP_CHOWN | CAP_KILL | CAP_DEBUG | CAP_JIT | CAP_AUDIO_GRAPH)
+#define CAP_GRANTABLE_CLEARANCE  (CAP_AUDIO_GRAPH | CAP_POST_SERVICE | CAP_DAC_OVERRIDE | CAP_CHOWN | CAP_KILL | CAP_DEBUG | CAP_JIT)
 
-// RW-5 SA-2 -- pin the I-25 member-unelevated invariant at compile time. BOTH
-// grantable sets MUST be entirely elevation-only. The load-bearing consequence:
-// a clearance grant can confer ONLY rfork-stripped caps, so a legate scope
-// MEMBER (it inherits scope_id but rfork strips the elevated caps) is always
-// UNELEVATED -- which is exactly why a teardown-missed straggler is benign (a4a)
-// and why I-25's "no elevated Proc outlives the scope" rests on the ROOT alone.
-// A future FORK-GRANTABLE cap added to either set would let a legate confer it,
-// a child inherit it (not stripped), and an elevated straggler survive the
-// sweep -- silently breaking I-25. The runtime register-gates (cap_mask & ~MASK)
-// bound the VALUES; these asserts bound the MASKS themselves.
+// Both grantable sets must be elevation-only. Ordinary fork strips them;
+// only the explicit propagating-scope carve may retain granted authority.
+// The fork publication/teardown lock closes the formerly benign straggler
+// window now that scoped descendants can themselves hold elevated caps.
 _Static_assert((CAP_GRANTABLE & ~(caps_t)CAP_ELEVATION_ONLY) == 0,
                "CAP_GRANTABLE must be a subset of CAP_ELEVATION_ONLY -- a "
                "hostowner grant may confer only elevation-only (rfork-stripped) caps.");
@@ -102,15 +91,14 @@ _Static_assert((CAP_GRANTABLE_CLEARANCE & ~(caps_t)CAP_ELEVATION_ONLY) == 0,
 // IM-2 (IMPERIUM-DESIGN.md 11.4; I-25 STRENGTHENED): the PROPAGATING-grantable
 // subset -- the caps a CAP_GRANT_FLAG_PROPAGATING grant may carry, i.e. the
 // caps that may FLOW to a legate root's rfork descendants. Exactly the
-// imperium level (11.5): the fs-admin pair + the kill axis. Deliberately NOT
+// imperium level (11.5): fs-admin, kill and scoped service posting. NOT
 // the whole clearance set: CAP_DEBUG propagating would hand a debugger's own
 // debuggee the debug authority (I-39's two-axis gate is per-grant), CAP_JIT is
-// "non-heritable" by I-42's letter (a bounded legate, never inheritance), and
-// CAP_AUDIO_GRAPH is the whole-sink authority I-46 grants per program. Those
-// three stay plain (non-propagating) clearances, so their heritability clauses
+// "non-heritable" by I-42's letter (a bounded legate, never inheritance). These
+// stay plain (non-propagating) clearances, so their heritability clauses
 // hold BY CONSTRUCTION here, not by corvus's policy alone. A PROPAGATING grant
 // whose cap_mask escapes this mask is rejected at register.
-#define CAP_GRANTABLE_IMPERIUM  (CAP_DAC_OVERRIDE | CAP_CHOWN | CAP_KILL)
+#define CAP_GRANTABLE_IMPERIUM  (CAP_POST_SERVICE | CAP_DAC_OVERRIDE | CAP_CHOWN | CAP_KILL)
 _Static_assert((CAP_GRANTABLE_IMPERIUM & ~(caps_t)CAP_GRANTABLE_CLEARANCE) == 0,
                "CAP_GRANTABLE_IMPERIUM must be a subset of CAP_GRANTABLE_CLEARANCE: "
                "a propagating grant is a clearance grant with a flag, never a "
@@ -187,6 +175,11 @@ int cap_pending_count(void);
 // the target Proc's death."
 void cap_proc_exit_notify(struct Proc *p);
 
+// Cancel only an unredeemed clearance grant with this exact decision identity.
+// The trusted seat uses it on failure before normal restoration. Takes the cap
+// table lock; callers may hold g_proc_table_lock (the established exit ordering).
+void cap_cancel_imperium_pending(u64 stripes, u32 session_id);
+
 // cap_reset_table — drop all pending grants. Test-only; takes the
 // table lock. Production paths never call this.
 void cap_reset_table(void);
@@ -240,6 +233,12 @@ long cap_register_imperium_grant_for_writer(struct Proc *writer,
                                             caps_t cap_mask, u64 target_stripes,
                                             u64 valid_for_ns, u64 session_id,
                                             u64 flags);
+
+// Kernel-only graphical commit barrier. Held grants refuse redemption until
+// the seat's actual restoration; exact incarnation/session release is one-shot.
+long cap_register_seat_grant(struct Proc *writer, caps_t caps, u64 stripes,
+                             u64 term, u64 session, u64 flags);
+bool cap_release_seat_grant(u64 stripes, u32 session);
 
 // cap_redeem_grant_for_writer — the /use write core. Does ONE locked lookup
 // of the pending grant for the writer's stripes (so the grant's kind is read

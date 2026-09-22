@@ -574,17 +574,58 @@ var declPathRe = regexp.MustCompile(`(?:kernel|arch|mm|usr|lib|tools|specs|init)
 // kernel/include/thylacine/. Expanding that brace literally invents a header
 // path that has never existed, so a resolver that only stats the literal
 // string reports ~20 phantom headers and drowns the two real ones.
+//
+// "Real" means TRACKED. The resolver used to os.Stat the working tree, which
+// made a committed view a function of the checkout that rendered it: an
+// untracked scenario present in one worktree and absent in its sibling moved
+// the ghost count by two, so whichever checkout committed last made the view
+// stale everywhere else and the pre-commit lint blocked an unrelated commit
+// there. A view's subject is the tree git carries, never the directory.
 func declResolves(root, p string) bool {
-	if _, err := os.Stat(filepath.Join(root, p)); err == nil {
+	tracked := trackedSet(root)
+	if tracked == nil {
+		// No git census available: fall back to the filesystem rather than
+		// report the whole table as ghosts.
+		_, err := os.Stat(filepath.Join(root, p))
+		return err == nil
+	}
+	if tracked[strings.TrimRight(p, "/")] {
 		return true
 	}
 	if strings.HasSuffix(p, ".h") {
-		alt := filepath.Join(root, "kernel", "include", "thylacine", filepath.Base(p))
-		if _, err := os.Stat(alt); err == nil {
+		alt := filepath.ToSlash(filepath.Join("kernel", "include", "thylacine", filepath.Base(p)))
+		if tracked[alt] {
 			return true
 		}
 	}
 	return false
+}
+
+// trackedSet: every tracked file AND every directory that holds one, keyed by
+// slash path relative to root. Cached per root for the life of the process.
+var trackedSetCache = map[string]map[string]bool{}
+
+func trackedSet(root string) map[string]bool {
+	if set, ok := trackedSetCache[root]; ok {
+		return set
+	}
+	out, err := exec.Command("git", "-C", root, "ls-files").Output()
+	if err != nil {
+		trackedSetCache[root] = nil
+		return nil
+	}
+	set := map[string]bool{}
+	for _, f := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if f == "" {
+			continue
+		}
+		set[f] = true
+		for d := filepath.ToSlash(filepath.Dir(f)); d != "." && d != "/" && !set[d]; d = filepath.ToSlash(filepath.Dir(d)) {
+			set[d] = true
+		}
+	}
+	trackedSetCache[root] = set
+	return set
 }
 
 // negClaimRe: the row may be asserting a path's ABSENCE. Matched against the

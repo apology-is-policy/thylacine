@@ -75,6 +75,9 @@ void test_kthread_join_free(struct Thread *t, volatile bool *exited) {
 void test_kaslr_mix64_avalanche(void);
 void test_dtb_chosen_kaslr_seed_present(void);
 void test_dtb_pci_intx_route(void);
+void test_dtb_msi_map_bounds(void);
+void test_dtb_pci_msi_route(void);
+void test_dtb_pci_intid_is_level(void);
 void test_dtb_pci_mem_window(void);
 void test_dtb_pci_mem_window64(void);
 void test_phys_alloc_smoke(void);
@@ -84,6 +87,8 @@ void test_slub_leak_10k(void);
 void test_slub_kmalloc_overflow_guard(void);
 void test_slub_cache_destroy_guards(void);
 void test_gic_init_smoke(void);
+void test_gic_irq_barrier(void);
+void test_gic_its_commands(void);
 void test_gic_cpu_irq_counter_geometry(void);  // V-4c-3 F5 (#73)
 void test_timer_tick_increments(void);
 void test_timer_oneshot_tval_clamps(void);
@@ -490,6 +495,8 @@ void test_sys_burrow_attach_rounds_up(void);
 void test_sys_burrow_attach_rejects_bad_length(void);
 void test_sys_burrow_detach_rejects(void);
 void test_sys_burrow_detach_window_confined(void);
+void test_sys_burrow_detach_dma_map_by_identity(void);
+void test_sys_burrow_detach_mmio_map_by_identity(void);
 void test_sys_burrow_attach_lazy_window_va(void);
 void test_sys_burrow_attach_lazy_large(void);
 void test_sys_burrow_lazy_len_from_args(void);
@@ -707,9 +714,15 @@ void test_cons_episode_discards_pending_input(void);
 void test_cons_episode_freezes_nonattached_reader(void);
 void test_cons_episode_freezes_nonattached_writer(void);
 void test_cons_episode_freezes_feed_consctl_poll(void);
+void test_cons_episode_frozen_poller_follows_end(void);
+void test_cons_episode_prior_poller_not_woken_by_keys(void);
 void test_cons_episode_end_restores(void);
 void test_cons_episode_repeat_sak_idempotent(void);
 void test_cons_episode_gate(void);
+void test_cons_graphical_seat_gate(void);
+void test_cons_graphical_seat_grant_and_failure(void);
+void test_cons_graphical_seat_deadline_and_death(void);
+void test_cons_graphical_seat_service_death(void);
 void test_cons_episode_relinquish_ends(void);
 void test_cons_episode_trusted_death_ends(void);
 void test_cons_episode_saved_owner_death(void);
@@ -836,6 +849,7 @@ void test_devctl_read_memory_format(void);
 void test_devctl_read_devices_format(void);
 void test_devctl_read_kernel_base_format(void);
 void test_devctl_kernel_base_gated(void);
+void test_devctl_kstack_gated(void);
 void test_devctl_read_sched_format(void);
 void test_devctl_read_cons_format(void);
 void test_devctl_read_cpu_format(void);             // prowl-3b: /ctl/cpu read
@@ -858,6 +872,8 @@ void test_devdev_fd_devclass(void);              // H-1 (SYS_FD_DEVCLASS)
 void test_devdev_beacon_leaf(void);              // H-1 audit F1 (/dev/beacon)
 void test_devdev_renderer_gate(void);            // G-4
 void test_devdev_drain_opath_clone_no_disarm(void); // H9 (spoor_clone COPEN strip)
+void test_devdev_drain_walk_off_opened_dev_no_disarm(void); // the unprivileged route to H9
+void test_devdev_spawn_unbump_runs_close(void);       // shed r4 F1 / H6
 void test_devhw_bestiary_smoke(void);
 void test_devhw_attach_returns_root(void);
 void test_devhw_walk_node_and_prop(void);
@@ -990,11 +1006,20 @@ void test_stalk_union_readdir_nontagged(void);
 void test_stalk_union_create(void);
 void test_stalk_union_create_first_wins(void);
 void test_stalk_union_create_no_target(void);
+void test_stalk_union_one_member_creates_alike(void);
 void test_stalk_union_member_holding(void);
 void test_stalk_union_remove_uncrossed(void);
 void test_stalk_union_fd_base(void);
 void test_stalk_union_opath_base(void);
 void test_stalk_union_zero_component(void);
+void test_stalk_union_dissolved_degrades(void);
+void test_stalk_dotdot_crossed_base_floor(void);
+void test_stalk_union_live_dotdot_walks_unopened(void);
+void test_stalk_union_dissolved_point_unreachable(void);
+void test_stalk_remove_parent_reports_union_point(void);
+void test_stalk_mount_names_crossed_base(void);
+void test_stalk_mount_names_crossed_union_base(void);
+void test_stalk_union_dissolved_helper(void);
 void test_stalk_pheno_symlink_reanchor(void);
 void test_stalk_path_accumulate(void);
 void test_stalk_path_dotdot(void);
@@ -1027,6 +1052,8 @@ void test_devsrv_registered(void);
 void test_devsrv_open_root_dir(void);
 void test_devsrv_stat_native_root(void);
 void test_devsrv_post_gate(void);
+void test_devsrv_cap_post_bounds(void);
+void test_devsrv_accept_lifetime(void);
 void test_devsrv_post_basic(void);
 void test_devsrv_tombstone(void);
 void test_devsrv_registry_full(void);
@@ -1058,7 +1085,6 @@ void test_devcap_clearance_one_shot(void);
 void test_devcap_clearance_cross_stripes(void);
 void test_devcap_clearance_valid_until(void);
 void test_devcap_clearance_kind_isolation(void);
-void test_devcap_clearance_audio_graph(void);
 // IM-2: the propagating grant form + the two redeem arms + the nest refusal.
 void test_devcap_imperium_grant_gate_and_bounds(void);
 void test_devcap_imperium_redeem_propagating(void);
@@ -1067,6 +1093,7 @@ void test_devcap_further_redeem_keeps_scope(void);
 void test_srvconn_create_destroy(void);
 void test_srvconn_roundtrip(void);
 void test_srvconn_ring_capacity(void);
+void test_srvconn_nonblocking_backpressure(void);
 void test_srvconn_recv_blocks_then_wakes(void);
 void test_srvconn_recv_deadline_timeout(void);
 void test_srvconn_teardown_eofs(void);
@@ -1092,6 +1119,7 @@ void test_devsrv_srv_peer_dead_peer(void);
 void test_devsrv_srv_peer_renderer_flag(void);
 void test_devsrv_srv_peer_gate(void);
 void test_devsrv_srv_peer_bad_args(void);
+void test_devsrv_seat_import_gates(void);
 void test_srv_client_no_per_proc_cap(void);
 void test_srv_client_byte_mode_propagates_to_conn(void);
 void test_srv_client_byte_mode_conn_dispatch(void);
@@ -1113,6 +1141,9 @@ void test_irqfwd_refcount_lifecycle(void);
 void test_irqfwd_wait_wakes_on_sgi(void);
 void test_irqfwd_collapses_concurrent_fires(void);
 void test_irqfwd_second_waiter_refused(void);
+void test_irqfwd_detached_dispatch(void);
+void test_irqfwd_level_mask_ack(void);
+void test_irqfwd_wait_timeout(void);
 void test_virtio_pci_init_called(void);
 void test_virtio_pci_count_within_bound(void);
 void test_virtio_pci_devices_have_vendor(void);
@@ -1124,6 +1155,15 @@ void test_virtio_pci_cfg_write_bounds(void);
 void test_pci_bar_decode_size(void);
 void test_pci_walk_caps_hostile(void);
 void test_pci_walk_caps_shm(void);
+void test_pci_irq_shared_tickets(void);
+void test_pci_intx_recovery(void);
+void test_pci_intx_close_dispatch(void);
+void test_pci_msi_allocator(void);
+void test_pci_restart_placement(void);
+void test_pci_msix_rng(void);
+void test_pci_msix_failures(void);
+void test_pci_msix_windows(void);
+void test_pci_mapping_holds_function(void);
 void test_pci_claim_rng(void);
 void test_pci_claim_unknown(void);
 void test_pci_claim_exclusive(void);
@@ -1348,6 +1388,8 @@ void test_dev9p_attach_client_root_spoor(void);
 void test_dev9p_walk_one_component(void);
 void test_dev9p_walk_clone(void);
 void test_dev9p_open_lopens_fid(void);
+void test_dev9p_open_errno(void);
+void test_dev9p_stalk_open_errno(void);
 void test_dev9p_read_routes_through_client(void);
 void test_dev9p_write_routes_through_client(void);
 void test_dev9p_write_read_propagate_errno(void);
@@ -1437,7 +1479,19 @@ void test_territory_pivot_root_smoke(void);
 void test_territory_pivot_root_rejects_no_initial_root(void);
 void test_territory_pivot_root_idempotent_same_spoor(void);
 void test_territory_pivot_root_null_source_rejected(void);
-void test_territory_pivot_root_does_not_touch_mounts(void);
+void test_territory_pivot_root_keeps_reachable_mount(void);
+void test_territory_shed_pivot_drops_unreachable(void);
+void test_territory_shed_chroot_drops_unreachable(void);
+void test_territory_shed_keeps_transitive(void);
+void test_territory_shed_per_walker_dev_matched_on_dc(void);
+void test_territory_shed_same_root_is_a_noop(void);
+void test_territory_shed_preserves_union_order(void);
+void test_territory_shed_clone_before_pivot_unaffected(void);
+void test_territory_shed_union_root_keeps_point_entries(void);
+void test_territory_shed_drops_nested_orphan(void);
+void test_territory_shed_full_table_boundary(void);
+void test_territory_shed_releases_mp_path_once(void);
+void test_territory_shed_initial_chroot_and_root_as_source(void);
 void test_pipe_smoke(void);
 void test_pipe_read_on_empty_returns_zero(void);
 void test_pipe_write_to_full_returns_zero(void);
@@ -1479,6 +1533,18 @@ void test_poll_devsrv_conn_pollin_on_send(void);
 void test_poll_devsrv_conn_pollout_immediate(void);
 void test_poll_devsrv_conn_pollhup_on_teardown(void);
 void test_poll_devsrv_conn_block_then_wake_pollin(void);
+void test_poll_devsrv_client_row(void);
+void test_poll_devsrv_client_wakes_on_reply_only(void);
+void test_poll_devsrv_server_pollout_wakes_on_client_drain(void);
+void test_poll_devsrv_client_pollout_wakes_on_server_blocking_drain(void);
+void test_poll_devsrv_client_kernel_attached_pollnval(void);
+void test_poll_devsrv_client_wakes_on_teardown(void);
+void test_poll_timeout_survives_a_busy_list(void);
+void test_poll_death_ends_a_noise_driven_poll(void);
+void test_poll_stop_parks_a_noise_driven_poll(void);
+void test_thread_kstack_watermark_follows_the_frontier(void);
+void test_poll_noise_keeps_it_looping(void);
+void test_poll_noise_keeps_the_deadline(void);
 void test_poll_null_obj_spoor_pollnval(void);
 void test_poll_mixed_spoor_and_srv(void);
 void test_poll_max_nfds(void);
@@ -1553,6 +1619,7 @@ void test_sys_spawn_with_perms_holder_delegates_may_post(void);
 void test_sys_spawn_with_perms_console_trusted_not_delegable(void);
 void test_sys_spawn_with_perms_console_owner_grant_gate(void);
 void test_sys_spawn_with_perms_console_owner_set_wiring(void);
+void test_sys_spawn_with_perms_seat_roles(void);
 void test_sys_spawn_with_perms_renderer_gate(void);   // G-4
 void test_sys_spawn_full_argv_no_argv_acts_as_spawn_with_perms(void);
 void test_sys_spawn_full_argv_golden_argc4(void);
@@ -1573,6 +1640,7 @@ void test_stratumd_stub_fs_round_trip(void);
 void test_stratumd_stub_walk_round_trip(void);
 void test_stub_driver_round_trip(void);
 void test_irq_latency_bench(void);
+void test_irq_latency_bench_failure(void);
 void test_caps_kproc_has_all(void);
 void test_caps_kproc_has_hw_create(void);
 void test_caps_rfork_child_has_none(void);
@@ -1594,6 +1662,7 @@ void test_mmio_handle_create_adjacent_ok(void);
 void test_mmio_handle_create_unref_releases_slot(void);
 void test_mmio_handle_double_unref_extincts(void);
 void test_mmio_handle_create_kernel_reserved_rejected(void);
+void test_mmio_kernel_reservation_union(void);
 void test_mmio_handle_virtio_mmio_claimable(void);
 void test_mmio_handle_create_out_of_ips_rejected(void);
 void test_dma_handle_create_basic(void);
@@ -1642,7 +1711,11 @@ void test_mmio_map_proc_free_releases_kobj(void);
 struct test_case g_tests[] = {
     { "kaslr.mix64_avalanche",         test_kaslr_mix64_avalanche,         false, NULL },
     { "dtb.chosen_kaslr_seed_present", test_dtb_chosen_kaslr_seed_present, false, NULL },
+    { "mmio.kernel_reservation_union", test_mmio_kernel_reservation_union, false, NULL },
+    { "dtb.msi_map_bounds", test_dtb_msi_map_bounds, false, NULL },
+    { "dtb.pci_msi_route", test_dtb_pci_msi_route, false, NULL },
     { "dtb.pci_intx_route",            test_dtb_pci_intx_route,            false, NULL },
+    { "dtb.pci_intid_is_level",        test_dtb_pci_intid_is_level,        false, NULL },
     { "dtb.pci_mem_window",            test_dtb_pci_mem_window,            false, NULL },
     { "dtb.pci_mem_window64",          test_dtb_pci_mem_window64,          false, NULL },
     { "phys.alloc_smoke",              test_phys_alloc_smoke,              false, NULL },
@@ -1651,6 +1724,8 @@ struct test_case g_tests[] = {
     { "slub.leak_10k",                 test_slub_leak_10k,                 false, NULL },
     { "slub.kmalloc_overflow_guard",   test_slub_kmalloc_overflow_guard,   false, NULL },
     { "slub.cache_destroy_guards",     test_slub_cache_destroy_guards,     false, NULL },
+    { "gic.its_commands", test_gic_its_commands, false, NULL },
+    { "gic.irq_barrier", test_gic_irq_barrier, false, NULL },
     { "gic.init_smoke",                test_gic_init_smoke,                false, NULL },
     { "gic.cpu_irq_counter_geometry",  test_gic_cpu_irq_counter_geometry,  false, NULL },
     { "timer.tick_increments",         test_timer_tick_increments,         false, NULL },
@@ -1916,7 +1991,19 @@ struct test_case g_tests[] = {
     { "territory.pivot_root_rejects_no_initial_root",     test_territory_pivot_root_rejects_no_initial_root,     false, NULL },
     { "territory.pivot_root_idempotent_same_spoor",       test_territory_pivot_root_idempotent_same_spoor,       false, NULL },
     { "territory.pivot_root_null_source_rejected",        test_territory_pivot_root_null_source_rejected,        false, NULL },
-    { "territory.pivot_root_does_not_touch_mounts",       test_territory_pivot_root_does_not_touch_mounts,       false, NULL },
+    { "territory.pivot_root_keeps_reachable_mount",       test_territory_pivot_root_keeps_reachable_mount,       false, NULL },
+    { "territory.shed_pivot_drops_unreachable",           test_territory_shed_pivot_drops_unreachable,           false, NULL },
+    { "territory.shed_chroot_drops_unreachable",          test_territory_shed_chroot_drops_unreachable,          false, NULL },
+    { "territory.shed_keeps_transitive",                  test_territory_shed_keeps_transitive,                  false, NULL },
+    { "territory.shed_per_walker_dev_matched_on_dc",      test_territory_shed_per_walker_dev_matched_on_dc,      false, NULL },
+    { "territory.shed_same_root_is_a_noop",               test_territory_shed_same_root_is_a_noop,               false, NULL },
+    { "territory.shed_preserves_union_order",             test_territory_shed_preserves_union_order,             false, NULL },
+    { "territory.shed_clone_before_pivot_unaffected",     test_territory_shed_clone_before_pivot_unaffected,     false, NULL },
+    { "territory.shed_union_root_keeps_point_entries",    test_territory_shed_union_root_keeps_point_entries,    false, NULL },
+    { "territory.shed_drops_nested_orphan",               test_territory_shed_drops_nested_orphan,               false, NULL },
+    { "territory.shed_full_table_boundary",               test_territory_shed_full_table_boundary,               false, NULL },
+    { "territory.shed_releases_mp_path_once",             test_territory_shed_releases_mp_path_once,             false, NULL },
+    { "territory.shed_initial_chroot_and_root_as_source", test_territory_shed_initial_chroot_and_root_as_source, false, NULL },
     { "handles.alloc_close_smoke",     test_handles_alloc_close_smoke,     false, NULL },
     { "handles.rights_monotonic",      test_handles_rights_monotonic,      false, NULL },
     { "handles.dup_lifecycle",         test_handles_dup_lifecycle,         false, NULL },
@@ -2230,6 +2317,8 @@ struct test_case g_tests[] = {
     { "sys_burrow.attach_rejects_bad_length", test_sys_burrow_attach_rejects_bad_length, false, NULL },
     { "sys_burrow.detach_rejects",            test_sys_burrow_detach_rejects,            false, NULL },
     { "sys_burrow.detach_window_confined",    test_sys_burrow_detach_window_confined,    false, NULL },
+    { "sys_burrow.detach_dma_map_by_identity", test_sys_burrow_detach_dma_map_by_identity, false, NULL },
+    { "sys_burrow.detach_mmio_map_by_identity", test_sys_burrow_detach_mmio_map_by_identity, false, NULL },
     { "sys_burrow.attach_lazy_window_va",     test_sys_burrow_attach_lazy_window_va,     false, NULL },
     { "sys_burrow.attach_lazy_large",         test_sys_burrow_attach_lazy_large,         false, NULL },
     { "sys_burrow.lazy_len_from_args",        test_sys_burrow_lazy_len_from_args,        false, NULL },
@@ -2466,9 +2555,17 @@ struct test_case g_tests[] = {
                                        test_cons_episode_freezes_nonattached_writer, false, NULL },
     { "cons.episode_freezes_feed_consctl_poll",
                                        test_cons_episode_freezes_feed_consctl_poll, false, NULL },
+    { "cons.episode_frozen_poller_follows_end",
+                                       test_cons_episode_frozen_poller_follows_end, false, NULL },
+    { "cons.episode_prior_poller_not_woken_by_keys",
+                                       test_cons_episode_prior_poller_not_woken_by_keys, false, NULL },
     { "cons.episode_end_restores",     test_cons_episode_end_restores,     false, NULL },
     { "cons.episode_repeat_sak_idempotent",
                                        test_cons_episode_repeat_sak_idempotent, false, NULL },
+    { "cons.graphical_seat_gate", test_cons_graphical_seat_gate, false, NULL },
+    { "cons.graphical_seat_grant_and_failure", test_cons_graphical_seat_grant_and_failure, false, NULL },
+    { "cons.graphical_seat_deadline_and_death", test_cons_graphical_seat_deadline_and_death, false, NULL },
+    { "cons.graphical_seat_service_death", test_cons_graphical_seat_service_death, false, NULL },
     { "cons.episode_gate",             test_cons_episode_gate,             false, NULL },
     { "cons.episode_relinquish_ends",  test_cons_episode_relinquish_ends,  false, NULL },
     { "cons.episode_trusted_death_ends",
@@ -2604,6 +2701,7 @@ struct test_case g_tests[] = {
     { "devctl.read_kernel_base_format",
                                        test_devctl_read_kernel_base_format, false, NULL },
     { "devctl.kernel_base_gated",      test_devctl_kernel_base_gated,      false, NULL },
+    { "devctl.kstack_gated",           test_devctl_kstack_gated,           false, NULL },
     { "devctl.read_sched_format",      test_devctl_read_sched_format,      false, NULL },
     { "devctl.read_cons_format",       test_devctl_read_cons_format,       false, NULL },
     { "devctl.read_cpu_format",        test_devctl_read_cpu_format,        false, NULL },
@@ -2622,6 +2720,8 @@ struct test_case g_tests[] = {
     { "devdev.cons_gate",              test_devdev_cons_gate,              false, NULL },
     { "devdev.renderer_gate",          test_devdev_renderer_gate,          false, NULL },
     { "devdev.drain_opath_clone_no_disarm", test_devdev_drain_opath_clone_no_disarm, false, NULL },
+    { "devdev.drain_walk_off_opened_dev_no_disarm", test_devdev_drain_walk_off_opened_dev_no_disarm, false, NULL },
+    { "devdev.spawn_unbump_runs_close", test_devdev_spawn_unbump_runs_close, false, NULL },
     { "devdev.consctl_renderer_mint",  test_devdev_consctl_renderer_mint,  false, NULL },
     { "devdev.winsize_leaf",           test_devdev_winsize_leaf,           false, NULL },
     { "devdev.fd_devclass",            test_devdev_fd_devclass,            false, NULL },
@@ -2714,6 +2814,8 @@ struct test_case g_tests[] = {
     { "devsrv.open_root_dir",          test_devsrv_open_root_dir,          false, NULL },
     { "devsrv.stat_native_root",       test_devsrv_stat_native_root,       false, NULL },
     { "devsrv.post_gate",              test_devsrv_post_gate,              false, NULL },
+    { "devsrv.cap_post_bounds", test_devsrv_cap_post_bounds, false, NULL },
+    { "devsrv.accept_lifetime", test_devsrv_accept_lifetime, false, NULL },
     { "devsrv.post_basic",             test_devsrv_post_basic,             false, NULL },
     { "devsrv.tombstone",              test_devsrv_tombstone,              false, NULL },
     { "devsrv.registry_full",          test_devsrv_registry_full,          false, NULL },
@@ -2739,7 +2841,6 @@ struct test_case g_tests[] = {
     { "devcap.clearance_grant_gate_no_cap",   test_devcap_clearance_grant_gate_no_cap,   false, NULL },
     { "devcap.clearance_grant_bad_args",      test_devcap_clearance_grant_bad_args,      false, NULL },
     { "devcap.clearance_redeem_basic",        test_devcap_clearance_redeem_basic,        false, NULL },
-    { "devcap.clearance_audio_graph",         test_devcap_clearance_audio_graph,         false, NULL },
     { "devcap.imperium_grant_gate_and_bounds", test_devcap_imperium_grant_gate_and_bounds, false, NULL },
     { "devcap.imperium_redeem_propagating",   test_devcap_imperium_redeem_propagating,   false, NULL },
     { "devcap.imperium_nest_refused",         test_devcap_imperium_nest_refused,         false, NULL },
@@ -2752,6 +2853,7 @@ struct test_case g_tests[] = {
     { "devcap.clearance_kind_isolation",      test_devcap_clearance_kind_isolation,      false, NULL },
     { "srvconn.create_destroy",        test_srvconn_create_destroy,        false, NULL },
     { "srvconn.roundtrip",             test_srvconn_roundtrip,             false, NULL },
+    { "srvconn.nonblocking_backpressure", test_srvconn_nonblocking_backpressure, false, NULL },
     { "srvconn.ring_capacity",         test_srvconn_ring_capacity,         false, NULL },
     { "srvconn.recv_blocks_then_wakes",
                                        test_srvconn_recv_blocks_then_wakes,
@@ -2799,6 +2901,7 @@ struct test_case g_tests[] = {
     { "devsrv.srv_peer_renderer_flag", test_devsrv_srv_peer_renderer_flag, false, NULL },
     { "devsrv.srv_peer_gate",          test_devsrv_srv_peer_gate,          false, NULL },
     { "devsrv.srv_peer_bad_args",      test_devsrv_srv_peer_bad_args,      false, NULL },
+    { "devsrv.seat_import_gates",      test_devsrv_seat_import_gates,      false, NULL },
     { "srv_client.no_per_proc_cap",
                                        test_srv_client_no_per_proc_cap,
                                                                            false, NULL },
@@ -2835,6 +2938,9 @@ struct test_case g_tests[] = {
     { "irqfwd.collapses_concurrent_fires",
                                        test_irqfwd_collapses_concurrent_fires, false, NULL },
     { "irqfwd.second_waiter_refused",  test_irqfwd_second_waiter_refused,  false, NULL },
+    { "irqfwd.detached_dispatch", test_irqfwd_detached_dispatch, false, NULL },
+    { "irqfwd.level_mask_ack",         test_irqfwd_level_mask_ack,         false, NULL },
+    { "irqfwd.wait_timeout",           test_irqfwd_wait_timeout,           false, NULL },
     { "virtio_pci.init_called",        test_virtio_pci_init_called,        false, NULL },
     { "virtio_pci.count_within_bound", test_virtio_pci_count_within_bound, false, NULL },
     { "virtio_pci.devices_have_vendor",
@@ -2847,6 +2953,15 @@ struct test_case g_tests[] = {
     { "virtio_pci.cfg_write_bounds",   test_virtio_pci_cfg_write_bounds,   false, NULL },
     { "pci.bar_decode_size",           test_pci_bar_decode_size,           false, NULL },
     { "pci.walk_caps_hostile",         test_pci_walk_caps_hostile,         false, NULL },
+    { "pci.mapping_holds_function",   test_pci_mapping_holds_function,   false, NULL },
+    { "pci.msix_failures", test_pci_msix_failures, false, NULL },
+    { "pci.msix_rng", test_pci_msix_rng, false, NULL },
+    { "pci.restart_placement", test_pci_restart_placement, false, NULL },
+    { "pci.msi_allocator", test_pci_msi_allocator, false, NULL },
+    { "pci.intx_recovery", test_pci_intx_recovery, false, NULL },
+    { "pci.intx_close_dispatch", test_pci_intx_close_dispatch, false, NULL },
+    { "pci.shared_irq_tickets",        test_pci_irq_shared_tickets,        false, NULL },
+    { "pci.msix_windows",             test_pci_msix_windows,             false, NULL },
     { "pci.walk_caps_shm",             test_pci_walk_caps_shm,             false, NULL },
     { "pci.claim_rng",                 test_pci_claim_rng,                 false, NULL },
     { "pci.claim_unknown",             test_pci_claim_unknown,             false, NULL },
@@ -3208,6 +3323,8 @@ struct test_case g_tests[] = {
     { "dev9p.walk_one_component",      test_dev9p_walk_one_component,      false, NULL },
     { "dev9p.walk_clone",              test_dev9p_walk_clone,              false, NULL },
     { "dev9p.open_lopens_fid",         test_dev9p_open_lopens_fid,         false, NULL },
+    { "dev9p.open_errno", test_dev9p_open_errno, false, NULL },
+    { "dev9p.stalk_open_errno", test_dev9p_stalk_open_errno, false, NULL },
     { "dev9p.read_routes_through_client",
                                        test_dev9p_read_routes_through_client,
                                                                            false, NULL },
@@ -3382,6 +3499,18 @@ struct test_case g_tests[] = {
     { "poll.devsrv_conn_pollout_immediate",     test_poll_devsrv_conn_pollout_immediate,     false, NULL },
     { "poll.devsrv_conn_pollhup_on_teardown",   test_poll_devsrv_conn_pollhup_on_teardown,   false, NULL },
     { "poll.devsrv_conn_block_then_wake_pollin", test_poll_devsrv_conn_block_then_wake_pollin, false, NULL },
+    { "poll.devsrv_client_row", test_poll_devsrv_client_row, false, NULL },
+    { "poll.devsrv_client_wakes_on_reply_only", test_poll_devsrv_client_wakes_on_reply_only, false, NULL },
+    { "poll.devsrv_server_pollout_wakes_on_client_drain", test_poll_devsrv_server_pollout_wakes_on_client_drain, false, NULL },
+    { "poll.devsrv_client_pollout_wakes_on_server_blocking_drain", test_poll_devsrv_client_pollout_wakes_on_server_blocking_drain, false, NULL },
+    { "poll.devsrv_client_kernel_attached_pollnval", test_poll_devsrv_client_kernel_attached_pollnval, false, NULL },
+    { "poll.devsrv_client_wakes_on_teardown", test_poll_devsrv_client_wakes_on_teardown, false, NULL },
+    { "poll.timeout_survives_a_busy_list", test_poll_timeout_survives_a_busy_list, false, NULL },
+    { "poll.death_ends_a_noise_driven_poll", test_poll_death_ends_a_noise_driven_poll, false, NULL },
+    { "poll.stop_parks_a_noise_driven_poll", test_poll_stop_parks_a_noise_driven_poll, false, NULL },
+    { "thread.kstack_watermark_follows_the_frontier", test_thread_kstack_watermark_follows_the_frontier, false, NULL },
+    { "poll.noise_keeps_it_looping", test_poll_noise_keeps_it_looping, false, NULL },
+    { "poll.noise_keeps_the_deadline", test_poll_noise_keeps_the_deadline, false, NULL },
     { "poll.null_obj_spoor_pollnval",           test_poll_null_obj_spoor_pollnval,           false, NULL },
     { "poll.mixed_spoor_and_srv",               test_poll_mixed_spoor_and_srv,               false, NULL },
     { "poll.max_nfds",                          test_poll_max_nfds,                          false, NULL },
@@ -3456,6 +3585,7 @@ struct test_case g_tests[] = {
     { "sys_spawn_with_perms.console_trusted_not_delegable", test_sys_spawn_with_perms_console_trusted_not_delegable, false, NULL },
     { "sys_spawn_with_perms.console_owner_grant_gate",  test_sys_spawn_with_perms_console_owner_grant_gate,  false, NULL },
     { "sys_spawn_with_perms.console_owner_set_wiring",  test_sys_spawn_with_perms_console_owner_set_wiring,  false, NULL },
+    { "sys_spawn_with_perms.seat_roles", test_sys_spawn_with_perms_seat_roles, false, NULL },
     { "sys_spawn_with_perms.renderer_gate",             test_sys_spawn_with_perms_renderer_gate,             false, NULL },
     { "sys_spawn_full_argv.no_argv_acts_as_spawn_with_perms", test_sys_spawn_full_argv_no_argv_acts_as_spawn_with_perms, false, NULL },
     { "sys_spawn_full_argv.golden_argc4",              test_sys_spawn_full_argv_golden_argc4,              false, NULL },
@@ -3477,6 +3607,7 @@ struct test_case g_tests[] = {
     { "userspace.stratumd_stub_fs_round_trip",         test_stratumd_stub_fs_round_trip,                   false, NULL },
     { "userspace.stratumd_stub_walk_round_trip",       test_stratumd_stub_walk_round_trip,                 false, NULL },
     { "userspace.stub_driver_round_trip",              test_stub_driver_round_trip,                        false, NULL },
+    { "userspace.irq_latency_bench_failure", test_irq_latency_bench_failure, false, NULL },
     { "userspace.irq_latency_bench",   test_irq_latency_bench,             false, NULL },
     { "caps.kproc_has_all",            test_caps_kproc_has_all,            false, NULL },
     { "caps.kproc_has_hw_create",      test_caps_kproc_has_hw_create,      false, NULL },
@@ -3668,11 +3799,20 @@ struct test_case g_tests[] = {
     { "stalk.union_create",            test_stalk_union_create,            false, NULL },
     { "stalk.union_create_first_wins", test_stalk_union_create_first_wins, false, NULL },
     { "stalk.union_create_no_target",  test_stalk_union_create_no_target,  false, NULL },
+    { "stalk.union_one_member_creates_alike", test_stalk_union_one_member_creates_alike, false, NULL },
     { "stalk.union_member_holding",    test_stalk_union_member_holding,    false, NULL },
     { "stalk.union_remove_uncrossed",  test_stalk_union_remove_uncrossed,  false, NULL },
     { "stalk.union_fd_base",           test_stalk_union_fd_base,           false, NULL },
     { "stalk.union_opath_base",        test_stalk_union_opath_base,        false, NULL },
     { "stalk.union_zero_component",    test_stalk_union_zero_component,    false, NULL },
+    { "stalk.union_dissolved_degrades", test_stalk_union_dissolved_degrades, false, NULL },
+    { "stalk.dotdot_crossed_base_floor", test_stalk_dotdot_crossed_base_floor, false, NULL },
+    { "stalk.union_live_dotdot_walks_unopened", test_stalk_union_live_dotdot_walks_unopened, false, NULL },
+    { "stalk.union_dissolved_point_unreachable", test_stalk_union_dissolved_point_unreachable, false, NULL },
+    { "stalk.remove_parent_reports_union_point", test_stalk_remove_parent_reports_union_point, false, NULL },
+    { "stalk.mount_names_crossed_base", test_stalk_mount_names_crossed_base, false, NULL },
+    { "stalk.mount_names_crossed_union_base", test_stalk_mount_names_crossed_union_base, false, NULL },
+    { "stalk.union_dissolved_helper", test_stalk_union_dissolved_helper, false, NULL },
     { "stalk.pheno_symlink_reanchor",  test_stalk_pheno_symlink_reanchor,  false, NULL },
     { "stalk.path_accumulate",         test_stalk_path_accumulate,         false, NULL },
     { "stalk.path_dotdot",             test_stalk_path_dotdot,             false, NULL },
@@ -3733,7 +3873,12 @@ void test_soft_warn(const char *msg) {
     uart_puts("\n");
 }
 
+int proc_test_serial_sak(int posture);
 void test_run_all(void) {
+    // Legacy console transition tests require the serial recovery posture.
+    // Select it explicitly for the fixture; the real boot policy is restored
+    // before userspace and tested independently by graphical E2E.
+    int serial_posture = proc_test_serial_sak(1);
     passed_count = 0;
     failed_count = 0;
     total_count  = 0;
@@ -3854,6 +3999,7 @@ void test_run_all(void) {
     uart_puts(" child-Proc expiries\n");
 
     current_test = NULL;
+    (void)proc_test_serial_sak(serial_posture);
 }
 
 unsigned g_test_yield_calls;

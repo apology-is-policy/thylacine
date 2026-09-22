@@ -113,6 +113,17 @@ struct Dev {
     // `.stat_native != NULL` and the inference turned out to be wrong.
     bool         may_back_exec;
 
+    // devno_per_walker -- this Dev's walk stamps a devno that depends on WHO is
+    // walking rather than on the instance walked (devenv: the calling Proc's
+    // Env, an I-1 fix). Every other Dev's walk preserves (dc, devno), which is
+    // what lets the mount-table shed (ARCH 9.6.10) reason per device instance:
+    // a mount point inside a reachable tree carries that tree's (dc, devno). A
+    // Dev that breaks the premise says so here and is matched on dc alone --
+    // the conservative direction (the shed may keep an entry, never drop a
+    // reachable one). A new per-walk stamper that leaves this false makes the
+    // shed drop live mounts.
+    bool         devno_per_walker;
+
     // Lifecycle: called by the kernel.
     //   reset()    — re-initialize the dev (Plan 9 `dev->reset`);
     //                kernel-driven on hardware reset.

@@ -1,0 +1,77 @@
+# Stock Halcyon schema: complete 57-key compatibility projection.
+# Not pixel-exact alone: pair with ui-palettes/mineral.toml AFTER implementing Instrument v1.
+# Ember changes are an explicit new-profile policy amendment. No base inheritance.
+# ANSI and bevel faces are DERIVED, not sampled from the mockup.
+[meta]
+name = "Mineral Sage"
+
+[palette]
+floor = "#CBD2CA"
+surface = "#EEF1EB"
+header = "#D6DDD5"
+raised = "#C5CEC5"
+border = "#718078"
+blank = "#DFE5DD"
+selection = "#D1DCD5"
+island_rule = "#5C817A"
+fg = "#17201B"
+fg_dim = "#303C35"
+fg_muted = "#46544C"
+fg_subtle = "#6C7971"
+bevel_top = "#D3D9D2"
+bevel_left = "#D0D6CF"
+bevel_right = "#9EA49E"
+bevel_bottom = "#6E716D"
+ember = "#2F625B"
+ember_dim = "#5C817A"
+ember_deep = "#5C817A"
+status_bg = "#D8DED7"
+status_fg = "#17201B"
+status_muted = "#46544C"
+status_idle = "#6C7971"
+
+[palette.sage]
+key = "#456D50"
+tint = "#D6DDD5"
+raised = "#C5CEC5"
+border = "#BAC4BB"
+fg = "#17201B"
+fg_dim = "#46544C"
+fg_muted = "#6C7971"
+
+[palette.cinnabar]
+key = "#8D514B"
+tint = "#D6DDD5"
+raised = "#C5CEC5"
+border = "#BAC4BB"
+fg = "#17201B"
+fg_dim = "#46544C"
+fg_muted = "#6C7971"
+
+[palette.syntax]
+slate = "#2F625B"
+sage = "#49647B"
+sand = "#8D514B"
+moss = "#5C817A"
+ash = "#456D50"
+dusk = "#305C55"
+smoke = "#6C7971"
+fen = "#456D50"
+cinnabar = "#8D514B"
+
+[terminal]
+bg = "#E5EAE3"
+fg = "#26322C"
+ansi = ["#DFE5DD", "#8D514B", "#456D50", "#2F625B", "#49647B", "#5C817A", "#476966", "#46544C", "#6C7971", "#6C433E", "#385741", "#285049", "#3B5160", "#49665F", "#3A5551", "#26322C"]
+
+[type]
+smooth = 12
+
+[geometry]
+bevel = 2
+gap = 3
+hairline = 1
+header_h = 32
+status_h = 25
+tag_pad_x = 0
+tab_strip_h = 0

@@ -861,6 +861,13 @@ picture a client maps and draws into); `fb` is the fallback if it reads as
 obscuring. The tree is served by tapestryd over `/srv` + dev9p, mounted at
 `/dev/tapestry` by the boot chain (the /net mount precedent).
 
+A hosted surface's `title TEXT` writes the hosting pane's canonical tag and
+notifies the session to repaint its header. The surface owner cannot use this
+verb to name another pane. An unhosted surface returns `EINVAL`. Layout text
+has an optional `backgrounded` token after geometry/weight, separate from
+`hidden`: a hidden foreground tab still belongs to its pane, while a background
+system renderer is excluded from the session's pane count.
+
 ### 18.6 Determinism mode (the §16 wire, made concrete)
 
 `test-mode on` (global ctl; **dev/test builds only** — the #880
@@ -877,24 +884,15 @@ strip-for-production class, enforced at build time, not runtime):
 
 ### 18.7 Trusted-path + `/dev/cons` reconciliations
 
-- **Episodes bind to kernel-reachable framebuffers only.** TRUSTED-PATH's
-  strong model ("during a framebuffer episode NO userspace maps the
-  framebuffer; the kernel is the sole painter") requires the kernel to paint
-  WITHOUT the userspace GPU owner — possible on a linear simplefb-class
-  medium (kernel maps the firmware buffer), impossible on virtio-gpu without
-  a kernel virtio-gpu driver (rejected — ARCH §17.2's no-graphics-in-kernel
-  holds). RESOLUTION, mirroring TRUSTED-PATH's own pre-USB input answer
-  ("the trusted path simply stays on serial"): **on virtio-gpu-only media
-  (QEMU), the trusted path stays SERIAL** (BREAK-SAK, serial episode — QEMU
-  always has the UART); **framebuffer episodes + the graphical SAK land with
-  simplefb-class media** (boards), where the kernel trusted sink's
-  framebuffer backend + the graphical Halls dump are the same blit. On
-  serial-episode media a SAK does NOT suspend tapestryd (the trusted
-  conversation is on serial; the screen is not in the loop); the
-  enter/leave-trusted renderer signal becomes load-bearing only where a
-  framebuffer sink exists. I-27's medium-independence is preserved — the
-  MEDIUM determines the episode surface, bound once at boot from the DTB
-  fact, exactly as TRUSTED-PATH §7 specifies.
+- **Approved supersession (2026-09-18):** graphical episodes use an isolated
+  boot-trusted display/input service with kernel-bound episode authority. This
+  replaces the former simplefb-only/kernel-rasterization plan. See
+  `GRAPHICAL-SAK-OWNERSHIP.md` and `GRAPHICAL-SAK-PORTABILITY.md`: all planes,
+  outputs, input routes and DMA access must be covered, including Pi 400/Pi 500.
+  The service permanently owns hardware; Tapestry becomes a normal broker client.
+  As built, the virtio session still uses serial SAK; the graphical broker is not
+  implemented. Historical serial-only statements below describe that current
+  implementation, not a permanent QEMU restriction.
 - **The `/dev/cons` Aurora backend is a renderer-held drain/feed fid pair**
   (the LS-8 pump pattern, inverted): `cons.c` gains a backend selector (DTB
   medium fact, TRUSTED-PATH §7's binding); on the Aurora backend, console

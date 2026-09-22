@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 9", "docs/STALK-DESIGN.md"]
 created: 2026-08-03
-updated: 2026-08-03
+updated: 2026-09-21
 ---
 ## Purpose
 
@@ -127,8 +127,34 @@ struct Spoor {
     s64          offset;   // byte cursor
     void        *aux;      // dev-private, opaque here
     struct Path *path;     // #66 namespace name; I-33 non-load-bearing
+    struct union_snap *union_snap;  // UM: non-NULL iff opened ON a union point
 };
+
+struct union_snap { struct Spoor *point; int n; struct union_member m[]; };
 ```
+
+`union_snap` was missing from this listing until 2026-09-21, and the
+header's own comment on it was wrong in a way that mattered. It said
+"ONLY `spoor_readdir_run` consults it". True of the MEMBERS (`m[]`, the
+per-member directories opened at open time, merged by readdir); false of
+the retained **`point`** since UM-8c F5: stalk reads it whenever a union
+dirfd — or a union ROOT — is a resolution base
+(`union_base = base->union_snap->point`), the fd mutation handlers read
+it, and the mount-table shed seeds its reachability closure from it
+([[sub-kernel-territory]]; the omission there was a P1). The opened
+Spoor's own identity is member[0], so the point is the one Spoor a
+resolution consults without having walked to it — in exactly two places
+(the base-set `union_base` and the zero-component `zbase`), and only while
+the point still hosts a member in the caller's Territory: it names the
+directory the union was mounted OVER, so a dissolved union degrades to
+member[0], never to it ([[sub-kernel-stalk]]). A POINT-ONLY snap
+(`n == 0`) tags an `O_PATH` (STALK_WALK) open of a union; a STALK_OPEN
+carries the full one — the header comment said "opened (STALK_OPEN)" alone
+until 2026-09-21. The snap is set once before
+the Spoor is published, never inherited by `spoor_clone` (a clone is a
+walk position, not a union open), and freed — members and point clunked —
+at `spoor_free_internal`; that lifetime is why readers need no lock
+beyond a ref on the Spoor.
 
 `magic` at offset 0 is pinned by a `_Static_assert` whose message names
 the mechanism it defends: SLUB's freelist write at free lands at offset
@@ -260,32 +286,28 @@ Covered by `spoor.alloc_unref_round_trip`, `ref_lifecycle`,
 
 ## Caveats
 
-- **`spoor_clone` inherits `COPEN`, so `COPEN` does not mean "this
-  Spoor was opened".** It means "this Spoor, or an ancestor it was
-  cloned from, was opened". The mask excludes exactly one bit
-  (`CWALKONLY`), and the exclusion's comment argues from that flag's
-  own semantics — a per-flag reason, not a policy — so the other five
-  inherit by default with no reason written anywhere. Of the five, one
-  consumer is actively broken by it: `devdev_close` disarms the console
-  drain on `qid.path == DEV_KIND_CONSDRAIN && (flag & COPEN)` and its
-  comment calls that check load-bearing, so a failed walk from the
-  renderer's own drain fd silently disarms a live tap (task #74). A
-  second consumer lands on the safe side of the identical inheritance —
-  dev9p's dir-fid park gates on `COPEN == 0`, so a spurious set only
-  declines to park a parkable fid. The remaining three are saved by
-  mechanisms that have nothing to do with cloning: `CDEBUGOWNER` by the
-  release walk matching `debug_owner` on POINTER IDENTITY (whose
-  comment justifies the choice by pid reuse and post-reap staleness,
-  not by clones), `CCONSWINSZONLY` because it is restrictive so
-  inheriting it fails safe, and `CSRVCLIENT` because `devsrv_walk`
-  refuses a non-registry source outright. **Five flags inherit; the
-  safety of four is accidental relative to the rule that produces it.**
-- **The clone test asserts the property that breaks it.**
-  `spoor.clone_copies_state` sets `flag = COPEN | CMSG` and asserts
-  `nc->flag == c->flag` — "flag copied", a whole-word claim that has
-  been false since `CWALKONLY` was masked, and which passes only
-  because the chosen bits avoid the one exception. The test documents
-  that inheritance HAPPENS; nothing tests that it is SAFE.
+- **`spoor_clone` strips `COPEN` beside `CWALKONLY` (since 2026-09-21, aux's
+  c1b25cdf, carried onto main by the browser B-0 landing).** `COPEN` now means
+  "`open()` succeeded on THIS Spoor"; `dev->open` sets it fresh and dup / fork
+  share by `spoor_ref`, not by clone, so nothing loses open state. Until then a
+  clone of an opened Spoor read as opened, and `devdev_close`'s
+  `qid.path == DEV_KIND_CONSDRAIN && (flag & COPEN)` arm disarmed the live
+  console drain from a Spoor that never opened it. The reach was wider than first
+  recorded (H9 assumed a holder of the drain fd): the shed audit round 3 (F1)
+  showed ANY Proc could do it -- open the `/dev` directory itself (kind 0 has no
+  gate), walk `consdrain` off it, close. Pinned by `devdev.drain_opath_clone_no_disarm`
+  (the drain-fd route) and `devdev.drain_walk_off_opened_dev_no_disarm` (the
+  unprivileged route, through the real resolver), plus `spoor.clone_copies_state`
+  for the mechanism. Still inherited, and why that is safe: `CDEBUGOWNER`
+  (the release matches `debug_owner` on POINTER identity), `CCONSWINSZONLY`
+  (restrictive, so inheriting fails safe), `CSRVCLIENT` (`devsrv_walk` refuses a
+  non-registry source), `CMSG` (no production consumer). `mode` is still copied;
+  its one reader masks it to the access mode (`handle.c`, `& 3`) and handle
+  rights govern I/O, so an inherited `mode` is cosmetic. The rule the ABI states
+  -- "a normally-opened handle is not a valid base for walking children"
+  (`syscall.h`) -- is enforced only by 9P servers; kernel Devs walk an opened
+  Spoor. With `COPEN` stripped that is no longer a way to forge an open, but it
+  is still an unenforced ABI sentence (tracked).
 - **`struct Spoor.lock` is dead.** The `spin_lock_init` inside
   `spoor_alloc_internal` is the only reference in the tree; nothing
   acquires it. The header reserves it so "the SMP-safe refcount upgrade

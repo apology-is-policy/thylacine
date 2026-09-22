@@ -1,0 +1,77 @@
+# Stock Halcyon schema: complete 57-key compatibility projection.
+# Not pixel-exact alone: pair with ui-palettes/oxide.toml AFTER implementing Instrument v1.
+# Ember changes are an explicit new-profile policy amendment. No base inheritance.
+# ANSI and bevel faces are DERIVED, not sampled from the mockup.
+[meta]
+name = "Oxidized Archive"
+
+[palette]
+floor = "#0C0908"
+surface = "#1B1613"
+header = "#110E0C"
+raised = "#241C18"
+border = "#43372F"
+blank = "#15110F"
+selection = "#292B27"
+island_rule = "#526F69"
+fg = "#E8DED2"
+fg_dim = "#D3C6B8"
+fg_muted = "#AA9C8E"
+fg_subtle = "#70645A"
+bevel_top = "#333030"
+bevel_left = "#221F1E"
+bevel_right = "#090706"
+bevel_bottom = "#060504"
+ember = "#79A097"
+ember_dim = "#526F69"
+ember_deep = "#526F69"
+status_bg = "#100C0A"
+status_fg = "#E8DED2"
+status_muted = "#AA9C8E"
+status_idle = "#70645A"
+
+[palette.sage]
+key = "#7F9D7B"
+tint = "#110E0C"
+raised = "#241C18"
+border = "#2C241F"
+fg = "#E8DED2"
+fg_dim = "#AA9C8E"
+fg_muted = "#70645A"
+
+[palette.cinnabar]
+key = "#B56B58"
+tint = "#110E0C"
+raised = "#241C18"
+border = "#2C241F"
+fg = "#E8DED2"
+fg_dim = "#AA9C8E"
+fg_muted = "#70645A"
+
+[palette.syntax]
+slate = "#79A097"
+sage = "#B09271"
+sand = "#B56B58"
+moss = "#526F69"
+ash = "#7F9D7B"
+dusk = "#A9A48B"
+smoke = "#70645A"
+fen = "#7F9D7B"
+cinnabar = "#B56B58"
+
+[terminal]
+bg = "#120E0C"
+fg = "#CABDAF"
+ansi = ["#15110F", "#B56B58", "#7F9D7B", "#79A097", "#B09271", "#526F69", "#989876", "#AA9C8E", "#70645A", "#C38B7A", "#9CAF93", "#98B1A8", "#C0A78C", "#7C8E86", "#AEAC90", "#CABDAF"]
+
+[type]
+smooth = 0
+
+[geometry]
+bevel = 2
+gap = 3
+hairline = 1
+header_h = 32
+status_h = 25
+tag_pad_x = 0
+tab_strip_h = 0

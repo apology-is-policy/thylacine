@@ -20,8 +20,20 @@ design:
   - "docs/TAPESTRY.md section 18.7 (the renderer drain/feed)"
   - "docs/LIFE-SUPPORT.md LS-8"
 created: 2026-08-02
-updated: 2026-09-06
+updated: 2026-09-21
 ---
+## Graphical attention and serial posture
+
+Physical graphical attention enters through the bound [[sub-lictor]] service;
+ordinary injected input cannot invoke that transition. Serial BREAK uses the
+existing console manager but is authorized only by the exact immutable boot token
+`thylacine.serial-sak=1`. A live or failed graphical episode cannot redirect to
+serial. The QEMU development launcher selects recovery by default; setting
+`THYLACINE_SERIAL_SAK=0` omits the token. Kernel-only console fixtures explicitly
+select recovery during the test suite and restore the boot policy before userspace;
+that override is absent from production builds. The graphical regression uses
+serial-disabled boot and verifies that BREAK cannot start an episode.
+
 ## Purpose
 
 The kernel console: one physical UART presented as `/dev/cons`, with a line
@@ -42,7 +54,7 @@ wants to do with it is illegal there:
 
 | Wanted | Why it cannot run in the handler |
 |---|---|
-| wake a poller | [[lock-poll-list]] is non-irqsave and nests a wake |
+| wake a poller | a walk nests a wake per poller: O(pollers) work in a per-byte handler |
 | post the interrupt note | needs [[lock-proc-table]] |
 | perform the attention-key transition | same |
 | wait for room to echo | interrupt context may not sleep |
@@ -60,6 +72,32 @@ exist because a bounded spin in the handler is still a spin; the locks are
 leaves because a leaf is what an interrupt handler can take.
 
 ## Contract
+
+**Trusted serial episodes (Imperium, 2026-09-17).** `SYS_CONSOLE_EPISODE`
+110 arms or ends an episode for the registered trusted reader. A physical SAK
+starts the armed episode; ordinary console readers/writers are frozen while
+corvus renders the requested capability set and reads the key. Ending,
+abandonment, or trusted-process death restores the saved console owner. The
+process-table lock serializes owner lifetime; its cons leaf-lock edge has no
+reverse acquisition. `docs/TRUSTED-PATH.md` and `docs/IMPERIUM-DESIGN.md §11`
+describe the episode state machine. This is serial trusted input, not an
+assertion that every graphical input path is authenticated.
+
+**Pollers across an episode (B-0 audit round 4 F1, 2026-09-21).** A frozen
+caller's `cons_poll` samples no readiness and files its hook on
+`episode_poll_list`, which the per-byte relay never walks: every hook wake costs
+the poller a kernel pass, and one pass per secret key byte would hand it — in its
+own CPU time — the secret's length and cadence. BEGIN and END walk BOTH lists.
+The list choice holds for ONE pass: `sys_poll` re-registers on every pass
+([[sub-kernel-poll]]), so a poller woken at BEGIN moves itself to the episode
+list and one woken at END moves back. Until round 4 the poll loop kept a hook
+where the first scan put it, and a poller that registered frozen stayed on the
+episode list after END — `poll(-1)` on the console never saw another keystroke.
+[[spec-cons-poll]] pins both halves (`NoMissedConsPoll`, `NoSecretCadence`,
+`BUGGY_NO_REREGISTER`); `cons.episode_frozen_poller_follows_end` and
+`cons.episode_prior_poller_not_woken_by_keys` drive a real `sys_poll` poller
+through them.
+
 
 Two front doors, **one implementation**. A syscall mints a console fd directly;
 a namespace path walks to `/dev/cons` ([[sub-kernel-devdev]]). Both call the
@@ -485,11 +523,14 @@ gave up.
 
 ## Prosecution
 
-- **Nothing that needs [[lock-proc-table]] or a hook-list walk may be called
-  under [[lock-cons]].** This is the whole deferred design; a new deferred
-  action joins the flag set, it does not shortcut.
-- **A new interrupt-context readiness source must relay.** Do not widen
-  [[lock-poll-list]] to irqsave for a console-only need.
+- **Nothing that needs [[lock-proc-table]] may be called under [[lock-cons]],
+  and the hook-list walks run with it released.** This is the whole deferred
+  design; a new deferred action joins the flag set, it does not shortcut.
+- **A new interrupt-context readiness source must relay.** [[lock-poll-list]]
+  IS irqsave since 2026-09-21 (audit round 4 F3 -- it nests under
+  [[lock-cons]], which the RX handler takes, so an interruptible holder was an
+  ABBA through the interrupt edge); that fixed a deadlock, it did not license
+  an O(pollers) walk in the handler.
 - **The two transmit producers keep opposite blocking contracts.** The write
   path may sleep for room; echo must never. Blurring them puts a sleep in an
   interrupt handler or a drop in a program's output.

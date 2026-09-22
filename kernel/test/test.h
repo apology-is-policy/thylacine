@@ -26,6 +26,7 @@
 #define THYLACINE_KERNEL_TEST_H
 
 #include <thylacine/types.h>
+#include <thylacine/spinlock.h>   // ARCH 8.12: TEST_SYSCALL_DISPATCH's mask-only bracket
 
 struct test_case {
     const char *name;       // human-readable identifier
@@ -37,6 +38,10 @@ struct test_case {
 // Sentinel-terminated array of all tests. Defined in kernel/test/test.c.
 // New tests are added by extending the array (no constructors needed).
 extern struct test_case g_tests[];
+
+// Select an unused synthetic SPI, excluding MSI, active claims and firmware
+// interrupt properties. UINT32_MAX means this topology has no test vector.
+u32 test_irq_choose_spi(void);
 
 // Run every test in g_tests[]. Reports per-test PASS/FAIL on UART.
 // Sets each test_case's failed / fail_msg fields for post-run inspection.
@@ -267,6 +272,30 @@ extern const char *volatile g_test_proc_wait_what;
         }                                                                   \
         if (_yp_spun) TEST_YIELD_BUMP(g_test_yield_spun);                   \
         if (_yp_deep) TEST_YIELD_BUMP(g_test_yield_deep);                   \
+    } while (0)
+
+// TEST_SYSCALL_DISPATCH -- drive syscall_dispatch in the state its contract
+// assumes.
+//
+// Twenty tests call syscall_dispatch directly, with a synthetic
+// exception_context and no SVC. Its contract is the state the SVC vector
+// provides: IRQ-MASKED. Since ARCH 8.12 that matters twice over -- the wrapper
+// unmasks for the body and re-masks UNCONDITIONALLY (the re-mask must precede
+// the KERNEL_EXIT eret window, which inherits its mask; #713), so a test
+// calling it from the UNMASKED boot kthread would return with interrupts
+// masked and silently corrupt the harness thread's state from then on.
+//
+// spin_lock_irqsave(NULL) is the sanctioned mask-only form: it touches no
+// preempt_count, so it cannot trip #360's or #361's assertions.
+//
+// Found by ARCH 8.12's ASSERT_IRQS_MASKED, which fired here on its first boot.
+// Before that assert this tree had NO assertion on interrupt state anywhere,
+// so a call in the wrong interrupt state was invisible rather than merely
+// unreviewed.
+#define TEST_SYSCALL_DISPATCH(ctxp) do {                                    \
+        irq_state_t _tsd = spin_lock_irqsave(NULL);                         \
+        syscall_dispatch(ctxp);                                             \
+        spin_unlock_irqrestore(NULL, _tsd);                                 \
     } while (0)
 
 #endif // THYLACINE_KERNEL_TEST_H

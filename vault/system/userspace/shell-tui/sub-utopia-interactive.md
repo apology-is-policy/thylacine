@@ -20,9 +20,17 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-03
-updated: 2026-09-07
+updated: 2026-09-21
 area: userspace
 ---
+## Graphical elevation banner
+
+The interactive shell writes its banner through live stdout so a newly
+conferred Imperium shell appears inside its Halcyon terminal. The early boot
+probe without live stdout retains the kernel-console fallback. Elevated prompt
+state comes from the kernel scope through [[sub-imperium]]; the shell does not
+read or draw the trusted authorization prompt.
+
 ## Purpose
 
 The surface a person actually touches. [[sub-utopia-parser]] turns text into an
@@ -64,6 +72,22 @@ captures only the shell's own painting.
 session (a live fd 1) or the bare-spawn boot check, opens the note queue, runs the
 session dance, installs completion and history, and drives the poll loop.
 
+A nested foreground shell keeps the PTY's existing controlling session. The
+kernel-gated `TTY_GET_FG` proves membership; the caller must already be in the
+foreground group. It establishes its own group and seats that group before
+opening the same control/readiness siblings. It does not call `setsid` and then
+try to acquire an already-owned terminal. This applies equally to a plain nested
+`ut` and Imperium's elevated shell, preserving job control, Beacon and palette
+roles while keeping Ctrl-C off the waiting parent tool's group.
+
+The membership check WAITS, bounded at 500 ms. The parent shell seats a job
+after spawning it (`setpgid`, then `tty_set_fg`), so a child that samples the
+foreground once at startup can read its parent's group and refuse itself; a
+start that is genuinely in the background never converges and is refused at the
+bound. The post-spawn handoff itself is unchanged and is an open item: a
+foreground child that touches the terminal before its parent seats it is racing
+that handoff.
+
 **The session's beacon tier is inherited, not probed (H-4d).** Part of the session
 dance is reading `/env/BEACON` -- the render tier its pts host declared and the
 kernel deep-copied in at spawn (a tile's `kaua-term --beacon rich` is the word; the
@@ -82,6 +106,13 @@ aliases completable; a rejected mode-set leaves the shell in whatever mode it
 inherited. Nothing in this layer can fail startup.
 
 ## Mechanism
+
+**Elevated prompt and hangup (2026-09-17).** The REPL obtains its scope
+from `/proc` and renders the fasces through [[sub-imperium]]. Outside a scope
+it retains main's Instrument prompt behavior. Session hangup exits the console
+shell. The evaluator's foreground input passthrough prevents the waiting parent
+from discarding bytes intended for the trusted corvus episode.
+
 
 **The byte pipeline.** `ParserState` is a four-state machine — `Ground`, `Escape`,
 `Csi`, `Utf8`. Ground maps C0 controls to emacs bindings (`Ctrl-A/E/B/F/K/U/W/Y/D`,

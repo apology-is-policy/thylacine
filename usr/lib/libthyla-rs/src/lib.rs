@@ -256,6 +256,7 @@ pub const T_SYS_UNLINK: u64           = 58;
 // and composes create-else-open bounded (T_OEXCL / DMDIR are the exclusive
 // arms, server-atomic).
 pub const T_SYS_OPEN_CREATE: u64      = 109;
+pub const T_SYS_DMA_SEGMENTS: u64     = 112;   // WEAVE-SKEIN: a KObj_DMA's backing segment list (110/111 are Imperium)
 // IM-1 (IMPERIUM-DESIGN.md 11.3): the trusted EPISODE's control ops --
 // callable only by the trusted login authority (corvus). ARM declares the
 // caller an episode consumer (a serial BREAK then opens an episode: input
@@ -264,7 +265,6 @@ pub const T_SYS_OPEN_CREATE: u64      = 109;
 pub const T_SYS_CONSOLE_EPISODE: u64  = 110;
 pub const T_CONSOLE_EPISODE_ARM: u64  = 1;
 pub const T_CONSOLE_EPISODE_END: u64  = 2;
-pub const T_SYS_DMA_SEGMENTS: u64     = 112;   // WEAVE-SKEIN: a KObj_DMA's backing segment list (110/111 reserved to aux-3)
 // A-2a (IDENTITY-DESIGN.md section 9.5): chmod/chown via Tsetattr.
 pub const T_SYS_WSTAT: u64            = 59;
 pub const T_SYS_EXIT_GROUP: u64       = 60;
@@ -297,6 +297,26 @@ pub const T_SYS_GETGID: u64           = 74;     // LS-K identity: primary_gid
 pub const T_SYS_CLOCK_GETTIME: u64    = 75;     // LS-K clock: realtime/monotonic
 pub const T_SYS_PCI_CLAIM: u64        = 76;     // pci-1c: claim a VirtIO-PCI function
 pub const T_SYS_PCI_MAP_BAR: u64      = 77;     // pci-1c: map a KObj_PCI BAR
+pub const T_SYS_PCI_IRQ_CREATE: u64 = 115;
+pub const T_SYS_PCI_IRQ_ARM: u64 = 116;
+pub const T_SYS_PCI_IRQ_WAIT: u64 = 117;
+pub const T_SYS_PCI_IRQ_COMPLETE: u64 = 118;
+pub const T_SYS_PCI_IRQ_DISABLE: u64 = 119;
+pub const T_SYS_PCI_IRQ_INFO: u64 = 120;
+pub const T_SYS_TRUSTED_SEAT: u64 = 121;
+pub const T_SYS_SEAT_IMPORT: u64 = 122;
+pub const T_SYS_SET_NONBLOCK: u64 = 123;
+/// Set open-file nonblocking mode (shared by aliases). EAGAIN means retry after
+/// readiness; a successful write can be short. No authority is added.
+pub unsafe fn t_set_nonblock(fd: i64, on: bool) -> i64 {
+    let mut result = fd;
+    asm!("svc #0", inlateout("x0") result, in("x1") on as u64,
+         in("x8") T_SYS_SET_NONBLOCK, options(nostack));
+    result
+}
+
+pub const T_SYS_PCI_MAP_WINDOW: u64   = 113;
+pub const T_SYS_PCI_WINDOWS: u64      = 114;
 pub const T_SYS_PCI_INFO: u64         = 78;     // pci-1c: read KObj_PCI topology
 pub const T_SYS_CLOCK_SETTIME: u64    = 79;     // net-7a: step CLOCK_REALTIME (CAP_HOSTOWNER)
 pub const T_SYS_FD_DEVCLASS: u64      = 80;     // H-1: fd -> Dev class char ('c' = console)
@@ -616,6 +636,9 @@ pub const T_SPAWN_PERM_CONSOLE_OWNER: u64 = 1 << 2;
 // it). Bit 5 matches SPAWN_PERM_SESSION_HANGUP (bits 3/4 -- RENDERER, RAISE --
 // are unused by native callers, so they are not mirrored here).
 pub const T_SPAWN_PERM_SESSION_HANGUP: u64 = 1 << 5;
+pub const T_SPAWN_PERM_SEAT_MANAGER: u64 = 1 << 6;
+pub const T_SPAWN_PERM_SEAT_SERVICE: u64 = 1 << 7;
+pub const T_SPAWN_PERM_SEAT_CLIENT: u64 = 1 << 8;
 
 // poll event bits — MUST mirror POLL* in kernel/include/thylacine/poll.h.
 // Linux values; the future musl shim is a no-op.
@@ -740,6 +763,7 @@ pub const T_CAP_DAC_OVERRIDE: u64    = 1 << 7;   // elevation-only; perm_check r
 pub const T_CAP_CHOWN: u64           = 1 << 8;   // elevation-only; chown/chgrp-to-any
 pub const T_CAP_KILL: u64            = 1 << 9;   // elevation-only; cross-identity kill override
 pub const T_CAP_DEBUG: u64           = 1 << 10;  // elevation-only; cross-Proc debug authority (I-39)
+pub const T_CAP_POST_SERVICE: u64 = 1 << 13; // elevated /srv posting, propagated by imperium
 pub const T_CAP_JIT: u64             = 1 << 11;  // elevation-only; code-Burrow creation (I-42)
 pub const T_CAP_AUDIO_GRAPH: u64     = 1 << 12;  // elevation-only; Nocturne whole-sink authority (I-46; NOCTURNE.md 6.8)
 
@@ -976,6 +1000,86 @@ impl TPciInfo {
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+pub struct TPciIrqEvent {
+    pub generation: u64,
+    pub sequence: u64,
+    pub count: u32,
+    pub reason: u32,
+    pub retry_after_ns: u64,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+pub struct TPciIrqInfo {
+    pub generation: u64,
+    pub deliveries: u64,
+    pub retries: u64,
+    pub cooldowns: u64,
+    pub mode: u32,
+    pub state: u32,
+    pub table_index: u32,
+    pub reserved: u32,
+}
+const _: () = assert!(core::mem::size_of::<TPciIrqEvent>() == 32);
+const _: () = assert!(core::mem::size_of::<TPciIrqInfo>() == 48);
+// Private register shaper shared by the named PCI endpoint wrappers.
+unsafe fn pci_irq_call(nr: u64, h: i64, a1: u64, a2: u64) -> i64 {
+    let mut x0 = h;
+    asm!("svc #0", inlateout("x0") x0, in("x1") a1, in("x2") a2,
+        in("x8") nr, options(nostack));
+    x0
+}
+pub unsafe fn t_pci_irq_create(pci: i64, mode: u32, ordinal: u32) -> i64 {
+    pci_irq_call(T_SYS_PCI_IRQ_CREATE, pci, mode as u64, ordinal as u64)
+}
+pub unsafe fn t_pci_irq_arm(h: i64) -> i64 { pci_irq_call(T_SYS_PCI_IRQ_ARM, h, 0, 0) }
+pub unsafe fn t_pci_irq_disable(h: i64) -> i64 { pci_irq_call(T_SYS_PCI_IRQ_DISABLE, h, 0, 0) }
+pub unsafe fn t_pci_irq_complete(h: i64, generation: u64, sequence: u64) -> i64 {
+    pci_irq_call(T_SYS_PCI_IRQ_COMPLETE, h, generation, sequence)
+}
+pub unsafe fn t_pci_irq_wait(h: i64, timeout_ns: u64, event: *mut TPciIrqEvent) -> i64 {
+    pci_irq_call(T_SYS_PCI_IRQ_WAIT, h, timeout_ns, event as u64)
+}
+pub unsafe fn t_pci_irq_info(h: i64, info: *mut TPciIrqInfo) -> i64 {
+    pci_irq_call(T_SYS_PCI_IRQ_INFO, h, info as u64, 0)
+}
+
+/// A page-aligned mappable BAR window, excluding kernel-owned MSI-X pages.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct TPciWindow {
+    pub offset: u64,
+    pub length: u64,
+    pub bar: u32,
+    pub reserved: u32,
+}
+const _: () = assert!(core::mem::size_of::<TPciWindow>() == 24);
+const _: () = assert!(core::mem::offset_of!(TPciWindow, bar) == 16);
+pub const T_PCI_WINDOW_MAX: usize = 8;
+
+/// Fill the complete window list. A short buffer fails; no partial list is valid.
+/// # Safety
+/// `out` must address `capacity` writable records.
+pub unsafe fn t_pci_windows(h: i64, out: *mut TPciWindow, capacity: u64) -> i64 {
+    let mut x0 = h;
+    asm!("svc #0", inlateout("x0") x0, in("x1") out, in("x2") capacity,
+        in("x8") T_SYS_PCI_WINDOWS, options(nostack));
+    x0
+}
+
+/// Map an allowed page-aligned range of the caller's BAR.
+/// # Safety
+/// `va` must be an available user VA range of `length` bytes.
+pub unsafe fn t_pci_map_window(h: i64, va: u64, bar: u64, prot: u32,
+                               offset: u64, length: u64) -> i64 {
+    let mut x0 = h;
+    asm!("svc #0", inlateout("x0") x0, in("x1") va, in("x2") bar,
+        in("x3") prot as u64, in("x4") offset, in("x5") length,
+        in("x8") T_SYS_PCI_MAP_WINDOW, options(nostack));
+    x0
+}
+
 // t_pci_claim — the arg packs `virtio_device_id | nth<<32` (G-7c): the low 32
 // bits are the VIRTIO device id (1 = net, 4 = rng, 18 = input, ...), the high
 // 32 the 0-based enumeration-order instance selecting the nth same-id
@@ -1117,15 +1221,37 @@ pub unsafe fn t_irq_create(intid: u32, rights: u32) -> i64 {
 // rendez lock); -1 on validation failure (bad handle, missing
 // RIGHT_SIGNAL).
 //
-// Edge-triggered: multiple fires while the waiter is blocked collapse
-// to a single counter increment per actual GIC dispatch, but the
-// returned value reflects the count seen at wake time.
+// Multiple fires while the waiter is blocked collapse to a single counter
+// increment per actual GIC dispatch, but the returned value reflects the
+// count seen at wake time. x1 = 0 (wait forever); use t_irq_wait_timeout for
+// a bounded wait (F-A1 C -- SYS_IRQ_WAIT reads x1 as a ns timeout, so x1 MUST
+// be set even for the forever case, else a stale register reads as a timeout).
 #[inline(always)]
 pub unsafe fn t_irq_wait(handle: i64) -> i64 {
     let mut x0: i64 = handle;
     asm!(
         "svc #0",
         inlateout("x0") x0,
+        in("x1") 0u64,
+        in("x8") T_SYS_IRQ_WAIT,
+        options(nostack)
+    );
+    x0
+}
+
+// t_irq_wait_timeout — like t_irq_wait but bounded by `timeout_ns` relative
+// nanoseconds (0 == forever). On a timeout the return is a collapsed count of
+// 0 (indistinguishable from death at the ABI, which is intended: both mean "no
+// IRQ to service -- re-check the device or unwind"). F-A1 (C): a level driver's
+// timeout wake re-checks the device used-ring, catching a lost completion
+// instead of hanging forever on a never-delivered interrupt.
+#[inline(always)]
+pub unsafe fn t_irq_wait_timeout(handle: i64, timeout_ns: u64) -> i64 {
+    let mut x0: i64 = handle;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") timeout_ns,
         in("x8") T_SYS_IRQ_WAIT,
         options(nostack)
     );
@@ -2177,12 +2303,16 @@ pub unsafe fn t_burrow_attach(length: u64) -> i64 {
     x0
 }
 
-// t_burrow_detach — release a region previously attached by
-// t_burrow_attach. The (vaddr, page-rounded length) must match an
+// t_burrow_detach — release one mapping: a region t_burrow_attach* returned,
+// or a hardware map the caller placed with t_dma_map / t_mmio_map /
+// t_pci_map_bar, wherever it sits (the kernel decides by identity: a
+// sub-window mapping that is not DMA- or MMIO-backed -- ELF, stack, guard,
+// vDSO -- stays refused). The (vaddr, page-rounded length) must match an
 // installed VMA exactly — no partial detach at v1.0 (mirrors the
 // kernel-side burrow_unmap constraint). Returns 0 on success, -1 on:
-//   - length == 0 or length > BURROW_ATTACH_MAX
-//   - vaddr not page-aligned
+//   - length == 0, vaddr not page-aligned, or the span leaves user VA
+//   - an in-window span with length > BURROW_ATTACH_MAX
+//   - an out-of-window span that is not a hardware map
 //   - no VMA matches [vaddr, vaddr + round_up(length)) exactly
 //
 // `length` may be the original request OR any value that page-rounds

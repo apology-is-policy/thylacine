@@ -24,8 +24,9 @@
 // (`max_pixels`, the heap residual DIVIDED by MAX_CONNS -- set each loop by the
 // compositor) bounds a single transfer AND, times MAX_CONNS, the aggregate
 // in-flight; the per-pane stored quota (live placements + total raster bytes)
-// is the tile transcript's own content budget (`inject_image` -> enforce_budget
-// evicts frozen blocks: max_cost + max_blocks, failing clean, HALCYON.md 14.7.7).
+// is the tile's bounded ID-keyed raster cache. Text and rasters each get half
+// its content share; the cache evicts oldest rasters, leaving readable captions.
+// Admission and completion also honor the smallest live cache's pixel budget.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -107,8 +108,9 @@ fn is_dir(node: Node) -> bool {
 
 /// A raster fully received on a pane's place channel, TAGGED with the tile leaf
 /// it must inject into. The compositor drains these and calls the tile's
-/// `inject_image` (whose content budget is the per-pane stored quota).
+/// `Tile::place_image` (whose raster cache enforces the per-pane stored quota).
 pub struct PaneCompletedImage {
+    pub id: u128,
     pub leaf: u32,
     pub w: u32,
     pub h: u32,
@@ -477,21 +479,29 @@ impl Conn {
         let acc = &mut self.accum.as_mut().unwrap().1;
         match acc.write(a.offset, a.data) {
             AccumStep::More => p9::build_rwrite(&mut self.out_buf, tag, a.count),
-            AccumStep::Done { w, h, argb } => {
+            AccumStep::Done { id, w, h, argb } => {
                 // Route to the live leaf the token names. A token whose tile
                 // closed BETWEEN the walk and now (routes dropped it) resolves
                 // to nothing: the raster is DISCARDED (the pane is gone), not
                 // misrouted. The accumulator stays bound to the fid for a
                 // subsequent image on the same connection (inlineaccum's
                 // multi-image path), freed on clunk/teardown.
+                // A split can reduce the live quota after the first header.
+                // Reject before the success reply if this completed raster no
+                // longer fits; an id-less legacy upload cannot be ordered in a
+                // session transcript at all (the console path still accepts it).
+                if id == 0 || u64::from(w) * u64::from(h) > budget.max_pixels {
+                    return self.err(tag, p9::E_INVAL);
+                }
                 if let Some(&leaf) = routes.get(&token) {
-                    out.push(PaneCompletedImage { leaf, w, h, argb });
+                    out.push(PaneCompletedImage { id, leaf, w, h, argb });
                 } else {
                     say!(
                         "halcyond: place completed {}x{} but its token is not routed (tile gone)",
                         w,
                         h
                     );
+                    return self.err(tag, p9::E_NOENT);
                 }
                 p9::build_rwrite(&mut self.out_buf, tag, a.count)
             }

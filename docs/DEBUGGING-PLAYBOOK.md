@@ -754,8 +754,17 @@ a LIVE corpse. Three method entries earned here:
    every spinning CPU was IRQ-masked, so nothing could ever run it again.
 
 2. **The class: a plain spinlock held by a PREEMPTIBLE context, contended by
-   IRQ-masked spinners.** Thylacine syscalls/faults run IRQ-masked end-to-end;
-   kthreads and fresh-thread spawn thunks run IRQ-enabled. Any plain lock
+   NON-PREEMPTIBLE spinners.** The class is unchanged; its description was
+   rebuilt at ARCH 8.12 and the old one is now false. It read "contended by
+   IRQ-masked spinners ... syscalls/faults run IRQ-masked end-to-end". EL0
+   faults still do, but SYSCALL BODIES NOW RUN WITH INTERRUPTS ON -- what makes
+   a spinning syscall unable to yield is that a syscall body is
+   NON-PREEMPTIBLE (`Thread.in_syscall`), not that it is masked. The two tiers
+   are therefore "non-preemptible syscall bodies" against "preemptible kthreads
+   and fresh-thread spawn thunks", and the deadlock composes exactly as before.
+   One thing did change and it is smaller than it sounds: the wedged CPUs now
+   SERVICE INTERRUPTS, so the guest stops being deaf while it is stuck -- the
+   SAK arrives and the operator can capture it. It is still stuck. Any plain lock
    shared between the two tiers could deadlock exactly this way -- `c->lock`
    was merely the first the go build exposed. The fix is the rule, not the
    instance: plain `spin_lock` now disables preemption per-thread

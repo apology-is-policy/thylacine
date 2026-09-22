@@ -181,9 +181,17 @@ enum srv_mode {
 // BY VALUE (`poster_stripes`, `poster_pid`) — CORVUS-DESIGN.md §6.3: the
 // registry holds no raw Proc*, so a poster Proc that exits and is reaped
 // never turns a registry read into a use-after-free.
+// Cap-only posters share at most four slots, two per elevated scope.
+#define SRV_CAP_SLOTS 4u
+#define SRV_CAP_SCOPE_SLOTS 2u
+
 struct SrvService {
     u64            magic;            // SRV_SERVICE_MAGIC
     enum srv_state state;
+    bool           accept_active; // pins slot identity; at most one Rendez waiter
+    bool           cap_posted; // retained on tombstone; never reclaim a TCB name
+    u64            cap_scope;  // zero means a non-propagating/poster-local quota
+    u64            generation; // increases at reservation, never wraps or clears
     u8             name_len;         // 1..SRV_NAME_MAX; bytes valid in name[]
     char           name[SRV_NAME_MAX];
     u64            poster_stripes;   // poster Proc's stripes tag (by value)
@@ -395,9 +403,10 @@ struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode);
 // to the caller. Returns NULL if `svc` ceased to be LIVE while blocked
 // (the poster exited, or a test reset the registry).
 //
-// PRECONDITION: at most one thread accepts on a given service at a time
-// (corvus is single-threaded; the accept Rendez is single-waiter).
-struct SrvConn *srv_accept_blocking(struct SrvService *svc);
+// Caller ownership and one-active-accepter are checked under the registry
+// lock. A concurrent accept returns NULL; the identity pin blocks rebind until
+// the first call unwinds, including tombstone and interrupted-sleep paths.
+struct SrvConn *srv_accept_blocking(struct SrvService *svc, u64 poster_stripes);
 
 // devsrv_make_conn_spoor — wrap an accepted SrvConn in a devsrv connection
 // Spoor (dc='s', pre-opened). The Spoor's read/write route to the SrvConn

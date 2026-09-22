@@ -26,10 +26,44 @@
 #                                        # subset (e.g. a fast pre-push check)
 #
 # Configs (label / cpus / sanitizer / per-boot BOOT_TIMEOUT seconds):
+#   default-smp1   1   --         300    the UNIPROCESSOR control (see below)
 #   default-smp4   4   --         300    the canonical CI default
 #   default-smp8   8   --         300    max-CPU concurrency
 #   ubsan-smp4     4   undefined  420    the #860 amplifier (most sensitive)
 #   ubsan-smp8     8   undefined  420    amplifier + max concurrency
+#
+# WHY A 1-CPU ROW LIVES IN AN *SMP* GATE (added 2026-09-22, and it is not a
+# contradiction). A peer CPU is not only extra concurrency -- it is a RESCUE
+# MECHANISM, and a hazard that a rescue mechanism hides is a hazard this matrix
+# can no longer observe. The whole tree booted at 4 or 8 CPUs and nothing else:
+# test.sh defaults to -smp 4, every row here was smp4/smp8. So the one
+# configuration in which a thread spinning on ANOTHER THREAD's write cannot be
+# rescued by a peer was the one configuration nothing booted.
+#
+# It cost a 100% boot hang that ran unseen for 19 days. loom_free joined the
+# SQPOLL kthread with a spin, inside a syscall body -- which is non-preemptible
+# (Thread.in_syscall gates preempt_check_irq, ARCH 8.1), so servicing the timer
+# interrupt never handed the CPU over. At -smp 4 a peer ran the kthread and the
+# spin ended; at -smp 1 every boot wedged at loom-smoke's exit. Measured, one
+# variable: pre-fix -smp 1 = no banner in 120 s, last line "loom-smoke: PASS";
+# post-fix -smp 1 = banner + 1616/1616, 5/5 boots.
+#
+# "Single boots lie" is this gate's motto and it is TRUE -- about SMP races.
+# It was read as licence to stop booting singles at all, which is a different
+# claim and a false one. The row is cheap (1-vCPU boots are the fastest in the
+# matrix and have no bimodal P-core/E-core variance -- test.sh's own note
+# measures a 0.39 s spread) and it is the ONLY row that can see this class.
+#
+# CAVEAT, measured not assumed: test.sh's header records task #791 -- "at -smp 1
+# joey exits non-zero in ~45% of boots" (2026-05-30). That rate did NOT
+# reproduce on 2026-09-22: 5/5 boots clean, banner + 1616/1616 + zero non-zero
+# joey exits, on an otherwise-quiet host. Five boots is evidence the rate has
+# changed, NOT proof #791 is gone -- 0.55^5 is about 5%, so five cleans would be
+# unlucky but not impossible under the old rate. #791 is also definitively a
+# DIFFERENT bug from the hang above: it predates both the spin join (d043f641,
+# 2026-06-07) and the EL0 SQPOLL consumer that made the hang reachable at boot
+# (15796866, 2026-09-03). If this row goes red on a joey non-zero rather than a
+# CORRUPTION, suspect #791 and measure before concluding.
 #
 # Timeouts are sized for the go4c-ENFORCING boot (#362): every boot runs two
 # real on-device go builds (~65-70 s of the boot) plus the suite + fsbench, so
@@ -57,6 +91,7 @@ N="${SMP_GATE_N:-10}"
 
 # label  cpus  sanitizer  boot_timeout
 DEFAULT_MATRIX=(
+    "default-smp1 1 -       300"
     "default-smp4 4 -       300"
     "default-smp8 8 -       300"
     "ubsan-smp4   4 undefined 420"

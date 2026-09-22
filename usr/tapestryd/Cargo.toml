@@ -40,10 +40,19 @@ required-features = ["guest"]
 # by itself.
 [features]
 default = ["guest", "test-mode"]
-guest = ["dep:libdriver", "dep:libthyla-rs"]
-test-mode = []
+guest = ["dep:libdriver", "dep:libthyla-rs", "lictor/guest"]
+test-mode = ["lictor/test-mode"]
 
 [dependencies]
 libhalcyon = { path = "../lib/libhalcyon" }
+# HALCYON-INSTRUMENT 10 (amended at I-8, `a861ca2b`): the compositor paints
+# the effects whose geometry lies OUTSIDE a client's surface -- a drop shadow
+# falls past its card, and `compose_cpu` is an opaque copy with no alpha, so
+# no client cartoon can reach those pixels. It runs the SAME two ops rather
+# than growing a second box blur: one bounded implementation, one place to
+# sabotage. Pure no_std, zero dependencies, so the host-buildable lib stays
+# host-buildable.
+cartoon = { path = "../lib/cartoon" }
 libdriver = { path = "../lib/libdriver", optional = true }
 libthyla-rs = { path = "../lib/libthyla-rs", optional = true }
+lictor = { path = "../lictor", default-features = false }

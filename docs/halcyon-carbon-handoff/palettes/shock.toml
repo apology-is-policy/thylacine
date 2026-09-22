@@ -1,0 +1,77 @@
+# Stock Halcyon schema: complete 57-key compatibility projection.
+# Not pixel-exact alone: pair with ui-palettes/shock.toml AFTER implementing Instrument v1.
+# Ember changes are an explicit new-profile policy amendment. No base inheritance.
+# ANSI and bevel faces are DERIVED, not sampled from the mockup.
+[meta]
+name = "System Shock Node"
+
+[palette]
+floor = "#070609"
+surface = "#17131C"
+header = "#0C0A0F"
+raised = "#211A28"
+border = "#493B50"
+blank = "#100D13"
+selection = "#2B2231"
+island_rule = "#705A78"
+fg = "#E0DBE3"
+fg_dim = "#CEC5D0"
+fg_muted = "#9A8E9F"
+fg_subtle = "#685B6E"
+bevel_top = "#2F2E30"
+bevel_left = "#1D1C1F"
+bevel_right = "#050507"
+bevel_bottom = "#040305"
+ember = "#9978A5"
+ember_dim = "#705A78"
+ember_deep = "#705A78"
+status_bg = "#0B080D"
+status_fg = "#E0DBE3"
+status_muted = "#9A8E9F"
+status_idle = "#685B6E"
+
+[palette.sage]
+key = "#668D7B"
+tint = "#0C0A0F"
+raised = "#211A28"
+border = "#2D2533"
+fg = "#E0DBE3"
+fg_dim = "#9A8E9F"
+fg_muted = "#685B6E"
+
+[palette.cinnabar]
+key = "#B45E63"
+tint = "#0C0A0F"
+raised = "#211A28"
+border = "#2D2533"
+fg = "#E0DBE3"
+fg_dim = "#9A8E9F"
+fg_muted = "#685B6E"
+
+[palette.syntax]
+slate = "#9978A5"
+sage = "#699996"
+sand = "#B45E63"
+moss = "#705A78"
+ash = "#668D7B"
+dusk = "#A98BB2"
+smoke = "#685B6E"
+fen = "#668D7B"
+cinnabar = "#B45E63"
+
+[terminal]
+bg = "#0D0B11"
+fg = "#C4BBC7"
+ansi = ["#100D13", "#B45E63", "#668D7B", "#9978A5", "#699996", "#705A78", "#689389", "#9A8E9F", "#685B6E", "#C08187", "#88A398", "#AD94B6", "#8AABAC", "#8F7E96", "#8AA7A2", "#C4BBC7"]
+
+[type]
+smooth = 0
+
+[geometry]
+bevel = 2
+gap = 3
+hairline = 1
+header_h = 32
+status_h = 25
+tag_pad_x = 0
+tab_strip_h = 0

@@ -40,6 +40,7 @@ static void THYLACINE_VideoQuit(_THIS);
 static int THYLACINE_CreateWindow(_THIS, SDL_Window *window);
 static void THYLACINE_DestroyWindow(_THIS, SDL_Window *window);
 static void THYLACINE_SetWindowSize(_THIS, SDL_Window *window);
+static void THYLACINE_SetWindowTitle(_THIS, SDL_Window *window);
 static int THYLACINE_CreateWindowFramebuffer(_THIS, SDL_Window *window,
                                              Uint32 *format, void **pixels,
                                              int *pitch);
@@ -78,6 +79,7 @@ static SDL_VideoDevice *THYLACINE_CreateDevice(void)
     device->CreateSDLWindow = THYLACINE_CreateWindow;
     device->DestroyWindow = THYLACINE_DestroyWindow;
     device->SetWindowSize = THYLACINE_SetWindowSize;
+    device->SetWindowTitle = THYLACINE_SetWindowTitle;
     device->CreateWindowFramebuffer = THYLACINE_CreateWindowFramebuffer;
     device->UpdateWindowFramebuffer = THYLACINE_UpdateWindowFramebuffer;
     device->DestroyWindowFramebuffer = THYLACINE_DestroyWindowFramebuffer;
@@ -195,6 +197,7 @@ static int THYLACINE_CreateWindow(_THIS, SDL_Window *window)
     (void)thyla_tap_intent(&wd->tap, 1);
     window->driverdata = wd;
     vd->window = window;
+    THYLACINE_SetWindowTitle(_this, window);
 
     if (THYLACINE_StartEventPump(window) != 0) {
         vd->window = NULL;
@@ -230,6 +233,15 @@ static void THYLACINE_DestroyWindow(_THIS, SDL_Window *window)
     window->driverdata = NULL;
     if (vd->window == window) {
         vd->window = NULL;
+    }
+}
+
+/* SDL owns the title; each recreated compositor surface needs its own copy. */
+static void THYLACINE_SetWindowTitle(_THIS, SDL_Window *window)
+{
+    SDL_WindowData *wd = (SDL_WindowData *)window->driverdata;
+    if (wd) {
+        (void)thyla_tap_title(&wd->tap, window->title ? window->title : "");
     }
 }
 
@@ -271,6 +283,10 @@ static void THYLACINE_SetWindowSize(_THIS, SDL_Window *window)
         }
     }
     if (ok) {
+        /* Reopening creates a new surface with default metadata. Restore both
+         * the app title and dynamic intent before publishing new frames. */
+        (void)thyla_tap_intent(&wd->tap, 1);
+        THYLACINE_SetWindowTitle(_this, window);
         wd->frame_seq = 0;
         wd->presented_seq = 0;
         THYLACINE_StartEventPump(window);

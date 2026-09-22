@@ -328,18 +328,15 @@ Run with `cd usr && cargo test -p manual --lib --no-default-features --target aa
 
 ### 8.2 In-guest scenario
 
-`tools/interactive/manual.exp` runs on an image built with `--config ci`. Because
-no section is installed yet (section 10), the scenario writes a small fixture
-section under `/tmp` from the shell and exercises the reader against it. It checks
-that `manual` with no sections installed says so and exits 0, that the fixture
-renders by path and prints its title, that an unknown name produces a diagnostic
-and exit status 1, that `manual --check` accepts the fixture with exit status 0 and
-rejects a copy containing a link with exit status 1, and that displaying that copy
-prints its diagnostic, exits 1, and writes none of its rendering. The scenario does
-not drive the rich tier: the host tests fix its output byte for byte, and section
-8.3 reviews it on a Halcyon session. Name resolution against `/manual` is covered
-by the host tests until sections are installed, when the scenario gains a by-name
-case.
+`tools/interactive/manual.exp` runs on an image built with `--config ci`.
+It checks the installed catalogue, opens Gallery by name, and then writes a
+small fixture section under `/tmp` to exercise rendering and rejection. The
+fixture renders by path and prints its title; an unknown name produces a
+diagnostic and exit status 1. `manual --check` accepts the fixture with status 0
+and rejects a copy containing a link with status 1. Displaying that copy prints
+its diagnostic, exits 1, and writes none of its rendering. Host tests cover the
+empty catalogue and fix rich output byte for byte; section 8.3 reviews the rich
+result on a Halcyon session.
 
 ### 8.3 The rendered result
 
@@ -382,7 +379,9 @@ The three earlier pages moved to `docs/manual-drafts/`:
 | `41-audio.md` | Written 2026-09-05 to 2026-09-07 to the earlier page template. |
 
 A draft returns to `docs/manual/` when it has been rewritten to the guide and
-passes the check. Until then `/manual` is empty in a built image.
+passes the check. The 2026-09-17 integration image now installs six checked
+sections: `manual`, `remote-files`, `view`, `gallery`, `nocturne`, and `dosbox`.
+The earlier draft files remain preserved separately.
 
 ---
 

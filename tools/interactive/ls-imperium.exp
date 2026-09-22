@@ -25,9 +25,9 @@
 #       not a tty, so the tool fails fast BEFORE posting.
 #   (6) DENY, an ineligible user: cora (never granted imperium) -> `not eligible`.
 #
-# Witnesses are on the tool's / corvus's / a coreutil's OUTPUT, which names what
-# happened where an exit status only says that something failed, and never on
-# the prompt glyph. The fixture key `imperium-key-michael-v1` is joey's boot-ladder grant. Tcl trap:
+# Witnesses are on the tool's / corvus's / a coreutil's OUTPUT, so each arm
+# proves its operation rather than relying on a status or prompt glyph. The
+# fixture key `imperium-key-michael-v1` is joey's boot-ladder grant. Tcl trap:
 # "\001b" is Ctrl-A + b (the monitor BREAK = the SAK); "\x01b" would be ESC.
 
 set ::env(THYLACINE_ACCEL) hvf
@@ -122,7 +122,7 @@ set jobpid ""
 lc_send "sleep 314159 &"
 set timeout $lc_cmd_timeout
 expect {
-    -re {\[\d+\]\s+(\d+)} { set jobpid $expect_out(1,string); lc_step "bg job pid=$jobpid (3)" }
+    -re {\[\d+\][ \t]+(\d+)\r?\r?\n} { set jobpid $expect_out(1,string); lc_step "bg job pid=$jobpid (3)" }
     -re {EXTINCTION:}     { lc_extinction_fail "kernel extinction (3, bg launch)" }
     timeout              { lc_fail "no `\[N\] pid` job line for the background sleep (3)" }
     eof                  { lc_fail "unexpected EOF (3, bg launch)" }
@@ -148,7 +148,10 @@ lc_pass "IM-5(3): abdicate -> plain shell, cap denied again, the background job 
 
 # ---- (4) DENY: a wrong key, no sub-shell -----------------------------------
 lc_send "imperium kill"
-expect_tool_line "confer with the SAK" "the request posted (4)"
+# The request line names the cap and the pid; its tail is the operator hint and
+# was reworded when the graphical chord arrived ("press Ctrl-Alt-Delete (or
+# Ctrl-Alt-F10)"), so the leg keys on the part that is the CLAIM, not the hint.
+expect_tool_line "requesting CAP_KILL as pid" "the request posted (4)"
 press_sak "wrong key"
 lc_expect "CAP_KILL" "the provincia names CAP_KILL (4)"
 lc_raw_send "not-the-key\r" "a wrong key"

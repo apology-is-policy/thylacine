@@ -1,5 +1,12 @@
 # Imperium -- power-user clearance, the legate's command authority
 
+**Integration 2026-09-17:** the operator authorized bringing the required
+Imperium implementation into main for Haul. This imports IM-1 through IM-5
+and the scope/logout fixes, without unrelated aux graphics/audio work. The
+current propagating set also includes CAP_POST_SERVICE (bit 13), selected as
+`imperium post`; historical three-cap lists below describe the original IM
+implementation. See `vault/system/userspace/tools/sub-imperium.md`.
+
 **Status: ACCEPTED design (2026-06-08); landed in the canonical docs 2026-06-09.
 REVISIT DONE 2026-09-07 (§11) -- the IM phase is OPEN on the aux track**
 (operator-directed; the four forks ratified, §11.9). imperium is the post-LS
@@ -941,20 +948,15 @@ here so the operator can veto any of them:**
 
 ### 11.7 Honest scope
 
-**Open presentation choice for the v1.x framebuffer sink (operator question,
-2026-09-07).** When the kernel trusted sink lands, the episode does NOT suspend
-userspace threads -- it freezes the console world only (the audio cycle, netd
-and the compositor's clients keep running; I-46 forbids a stall) -- and what the
-compositor loses is the scanout and the keyboard: the kernel is the sole
-painter for the episode and scans the SAK combo through the Menagerie
-trusted-tier keyboard. Whether it presents corvus's cell grid FULL-FRAME or as
-a centered panel over a DIMMED SNAPSHOT of the last frame (the secure-desktop
-shape) is undecided and sound either way, on one condition: the backdrop must
-be a kernel-owned COPY of the last frame, never the compositor's live buffer
-(§8: the anchor is the chain, not the pixels). The dimmed-snapshot panel keeps
-the operator's context and is the recommendation; corvus supplies the panel
-content through the same composer the serial path uses, the kernel decides the
-framing. Settle it in the framebuffer-sink chunk, not before.
+**Presentation direction selected (2026-09-17).** The graphical episode takes
+the full screen, with an immutable frozen, dimmed/blurred workspace snapshot
+behind a centred Halcyon-styled SAK dialog. The snapshot is owned by the kernel
+trusted sink, never a live compositor buffer. Corvus supplies the provincia,
+requester, term and authentication state; the sink supplies framing and the
+trusted indicator. Applications and audio continue running while scanout and
+input are exclusive. `HALCYON-TRUSTED-EPISODE.md` specifies the visual treatment,
+Roman names, failure states, restoration and implementation acceptance. This
+settles presentation, not the still-unimplemented framebuffer trust boundary.
 
 On a virtio-gpu-only medium the trusted path is SERIAL (TRUSTED-PATH §7,
 2026-07-17): the SAK is the BREAK, corvus's prompt goes out the UART, and a

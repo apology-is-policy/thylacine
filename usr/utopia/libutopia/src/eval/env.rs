@@ -589,7 +589,7 @@ impl Env {
     fn special_set(&mut self, name: &str, value: &Value) -> bool {
         match name {
             "status" => {
-                self.status.set(value.as_int().unwrap_or(0) as i32);
+                self.status_set(value.as_int().unwrap_or(0) as i32);
                 true
             }
             "errstr" => {

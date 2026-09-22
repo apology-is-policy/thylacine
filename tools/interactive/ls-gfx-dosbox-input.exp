@@ -21,11 +21,9 @@
 # only serial-visible signal, so the shell must stay free to `cat` it while
 # DOSBox-X keeps the pane (and its keyboard focus) alive. ut's `&` is real.
 #
-# FOREGROUND-EXIT CHARACTERIZATION (DX-3 open item): after the input proof, a
-# non-failing leg runs a FOREGROUND dosbox that exits immediately and checks
-# whether the shell returns. DX-2c saw a foreground dosbox leave the shell
-# wedged; this harvests ground truth (it reports, it does not fail the gate --
-# once understood + fixed it graduates to a hard leg).
+# FOREGROUND EXIT: after the input proof, a required leg runs a FOREGROUND
+# dosbox through mount+program+exit and requires the shell to return. The
+# witness is transformed by tr, so an echoed input line cannot satisfy it.
 #
 # HVF posture (the ls-gfx sibling; TCG hangs at the 8a-2b hwwatch E2E, #27).
 
@@ -135,11 +133,12 @@ lc_pass "dosbox-x input: an injected keystroke reached a running DOS program (DX
 # the SERIAL console: DOSBox reads its input from the PANE (SDL events), not
 # serial, so a serial `exit` never reaches the DOS shell and the foreground
 # dosbox runs forever. The cure is an autoexec exit (here) or backgrounding.
-# The buffered `echo` marker fires the moment the shell reads input after dosbox.
+# The buffered lowercase marker is uppercased only when the shell executes
+# the pipeline after DOSBox exits; echoed input cannot satisfy the witness.
 lc_send "cp /bin/DX2C.COM /home/michael/DX2C.COM"
 after 1000
 lc_send "dosbox-x -c \"mount c /home/michael\" -c \"c:\" -c \"DX2C.COM\" -c \"exit\""
-lc_send "echo FG-EXIT-DONE-MARKER"
+lc_send "echo fg-exit-done-marker | tr a-z A-Z"
 set timeout 70
 expect {
     -re {FG-EXIT-DONE-MARKER} { lc_step "foreground-exit: mount+program+exit returned the shell -- SDL teardown clean, no hang" }

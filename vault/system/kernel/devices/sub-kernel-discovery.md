@@ -20,7 +20,7 @@ design:
   - "docs/ARCHITECTURE.md section 9.4"
   - "docs/ARCHITECTURE.md section 22.7"
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -252,3 +252,11 @@ Read from `kernel/virtio.c` (351), `kernel/virtio_pci.c` (305),
 `kernel/joey.c`, the death-time reset callers in `kernel/proc.c`, the entropy
 source's transport use, and the thirty-seven registered tests across the four
 files.
+
+## PCI interrupt authority boundary
+
+The published INTID is a routing observation, not authority over every function
+sharing that wire. [[sub-kernel-irqfwd#PCI shared-line boundary]] records the
+current limitation. The proposed function-bound API in
+`docs/PCI-INTERRUPTS-DESIGN.md` derives authority from an owned PCI capability;
+it is not implemented by this read-only discovery tree.

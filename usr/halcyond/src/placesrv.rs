@@ -112,6 +112,7 @@ fn mode_of(path: u64) -> u32 {
 /// A raster fully received on the place channel, awaiting injection into the
 /// transcript by the owner of the render loop.
 pub struct CompletedImage {
+    pub id: u128,
     pub w: u32,
     pub h: u32,
     pub argb: Vec<u32>,
@@ -439,13 +440,13 @@ impl Conn {
             AccumStep::More => {
                 p9::build_rwrite(&mut self.out_buf, tag, a.count)
             }
-            AccumStep::Done { w, h, argb } => {
+            AccumStep::Done { id, w, h, argb } => {
                 // Keep the accumulator bound to this fid: it has advanced its own
                 // base and reset its buffer, so a subsequent image on the same
                 // fid (whose first write arrives at the cumulative offset) is
                 // accepted -- the multi-image path `inlineaccum` is built + tested
                 // for. It is freed on clunk/teardown, or replaced on a Reject.
-                out.push(CompletedImage { w, h, argb });
+                out.push(CompletedImage { id, w, h, argb });
                 p9::build_rwrite(&mut self.out_buf, tag, a.count)
             }
             AccumStep::Reject => {

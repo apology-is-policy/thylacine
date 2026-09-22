@@ -2,12 +2,12 @@
 id: seam-80-pivot-orphan-mounts
 type: seam
 title: "Pre-pivot mounts orphan but persist; the cap grows instead of a GC running"
-status: open
+status: closed
 surface: [sub-kernel-territory]
 opened-by: chg-2026-05-26-16c-attach-srv
 tracker: "task #80"
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-09-21
 ---
 ## Owed
 
@@ -43,3 +43,18 @@ that pivots is init. It becomes real if pivoting ever generalizes to
 ordinary Procs (a container runtime pivoting per instance), where the
 per-pivot residue would be paid per container and the fixed cap becomes
 a hard ceiling on how many mounts a pivoting Proc may hold.
+
+## Closed (2026-09-21)
+
+Closed by the shed at pivot / chroot (ARCH 9.6.10;
+`territory_shed_unreachable_locked`; `specs/territory_shed.tla`). The risk
+paragraph above came true first: a container runner inheriting the
+session's 23 entries could not fit its ten recipe mounts, and `viv run`
+was broken on `main`. "No longer reachable" was given an exact meaning by
+reading the resolver — it only descends, so reachability is a closure
+over device instances from the new root — and the care this note asked
+for is the spec's `ShedLosesNothing`. The cap did NOT come back down: 32
+stays, by the operator's decision, as headroom rather than as a holding
+action. What remains is a different seam: a container still inherits the
+host's entries that are reachable *by instance*, and wants a clean
+spawn-time Territory instead.

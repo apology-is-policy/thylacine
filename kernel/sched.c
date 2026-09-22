@@ -1436,7 +1436,9 @@ void sched(void) {
 
         // prowl-3a (PROWL-DESIGN.md section 3.3): the per-thread scheduler
         // counters, stamped at this same single chokepoint. READ-ONLY telemetry
-        // (no decision reads them); single-writer per the run_ns discipline
+        // (no SCHEDULING decision reads them, and since the poll backstop was
+        // replaced by the preemption point (itself deleted at ARCH 8.12) nothing outside /proc reads nsleeps
+        // at all); single-writer per the run_ns discipline
         // (prev switches OUT on this one CPU; next was picked by this one CPU).
         // `this_cpu` is derived from cs (asserted == smp_cpu_idx_self() above)
         // to avoid a redundant MPIDR read.
@@ -2615,14 +2617,22 @@ bool sched_cpu_has_surplus_for_test(unsigned cpu) {
 //     the placed thread at this very syscall's return tail
 //     (preempt_check_irq runs on the EL0 sync-return path), and yield
 //     callers loop.
-//   - CPU-identity staleness (the #104/#107 TOCTOU shape) is HYPOTHETICAL
-//     today: syscalls run IRQ-masked end-to-end (spinlock.h), so no preempt
-//     can land inside the peek from the SVC path, and the test callers run
-//     on the cpu_pinned kthread. A future IRQ-enabled kthread caller could
-//     migrate between this_cpu_sched() and the loads and peek a FOREIGN
-//     CPU's heads -- still benign: no lock is taken and nothing is mutated
-//     on the peeked slot, and sched() re-derives the CPU under its own
-//     entry mask.
+//   - CPU-identity staleness (the #104/#107 TOCTOU shape) is STILL
+//     hypothetical, but the reason CHANGED at ARCH 8.12 and the old one is
+//     now false. It used to be "syscalls run IRQ-masked end-to-end, so no
+//     preempt can land inside the peek"; syscall bodies now run with
+//     interrupts ON, so an IRQ certainly can land inside the peek.
+//     What holds instead is STRONGER and does not depend on masking: a
+//     syscall body is NON-PREEMPTIBLE (Thread.in_syscall gates
+//     preempt_check_irq), so no INVOLUNTARY switch -- and therefore no
+//     migration -- can occur between this_cpu_sched() and the loads. The
+//     thread can only move at a voluntary sched(), and there is none in the
+//     peek. The test callers still run on the cpu_pinned kthread.
+//     An IRQ-enabled KTHREAD caller remains the one live way to peek a
+//     FOREIGN CPU's heads (a kthread carries no marker and stays
+//     preemptible, by #810) -- still benign for the original reason: no lock
+//     is taken, nothing is mutated on the peeked slot, and sched()
+//     re-derives the CPU under its own entry mask.
 //
 // Returns whether it dispatched (called sched()) -- consumed by the kernel
 // tests; the syscall handler discards it and returns 0 (POSIX sched_yield).
@@ -2633,6 +2643,14 @@ bool sched_yield_hint(void) {
     return true;
 }
 
+// sched_preempt_point is GONE (ARCH 8.12). It unmasked a window inside an
+// IRQ-masked syscall so a looping poll could not hold its CPU's interrupts --
+// the SAK included -- for as long as an unprivileged producer kept it awake.
+// It was a stopgap by decision, and a patch on one instance of a diagnosed
+// class: pipe_block_locked and chan_role_acquire had the same shape and no
+// point. Syscall bodies now run interrupts-on throughout, so there is no
+// window to open and nothing left for a point to do.
+//
 void sched_tick(void) {
     // P2-Cd: per-CPU need_resched + this CPU's sched state.
     unsigned cpu = smp_cpu_idx_self();
@@ -2704,6 +2722,27 @@ void preempt_check_irq(void) {
     // preemption). Reading the pre-increment value of a mid-RMW count is
     // safe: the thread holds nothing yet at that point (spinlock.h).
     if (t->preempt_count != 0u) return;
+
+    // ARCH 8.12: never preempt a thread INVOLUNTARILY inside a syscall body.
+    // Under that chunk the body runs with interrupts ON, so an IRQ landing
+    // here is normal and its handler has just run on this thread's own kernel
+    // stack; what must NOT happen is a context switch out of the body. The
+    // kernel is non-preemptible -- that is the property Phase 0 deferred and
+    // P3-Ec accidentally implemented as "interrupts off" instead (ARCH 8.1).
+    //
+    // Return WITHOUT consuming need_resched, exactly as the #360 gate above
+    // does and for the same reason: the flag may be the #866-F1 cross-CPU
+    // placement kick, set exactly once. The deferred switch is taken at the
+    // EL0-return tail, where syscall_dispatch has already cleared the marker
+    // -- so THIS call site gates while the .Lel0_sync_return one does not,
+    // from one flag and no extra state.
+    //
+    // A kernel THREAD is not gated here: it carries no marker, stays
+    // preemptible, and #810 depends on that. Modelled as `Defers` in
+    // specs/syscall_irqs.tla; `syscall_irqs_buggy_marker_ignored` is this
+    // check removed, and `syscall_irqs_kthread` is the control proving the
+    // machinery can still switch when the marker is absent.
+    if (t->in_syscall) return;
 
     // Clear the flag BEFORE sched() so a re-fire-during-sched doesn't double-
     // trigger. The cross-CPU write now exists for real (#866 F1: ready_on's

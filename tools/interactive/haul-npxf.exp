@@ -35,10 +35,11 @@
 #   HAUL_NPXF_PORT=5640 HAUL_NPXF_TOKEN=<token> tools/test-interactive.sh haul-npxf
 #
 # The exported tree must contain `hello.txt` holding exactly the line asserted
-# below. npxf is Linux-only (statfs/O_PATH/accept4), so on a macOS dev host the
-# server runs on thyla-pi with an `ssh -L` tunnel bound to 127.0.0.1 -- the guest
-# only ever reaches the HOST's loopback (via 10.0.2.2), so the tunnel is
-# transparent to it.
+# below. The supported npxf server builds natively on Linux and macOS with
+# CMake and OpenSSL 3 (https://github.com/apology-is-policy/npxf). Run it
+# directly on the development host, or reach a remote server through an
+# ssh -L tunnel bound to 127.0.0.1. The guest reaches the host loopback
+# through 10.0.2.2.
 
 # HVF: nothing here is hardware-specific -- it is a network + namespace path, so
 # it rides the fast accel. The TCG axis stays covered by the anchor set.

@@ -851,6 +851,36 @@ impl Transcript {
         }
     }
 
+    /// HALCYON-INSTRUMENT 9.4 (I-7): re-theme the retained history in place
+    /// on a live theme change. Every interned style in every block (frozen
+    /// and open) and the live pen have their fg/bg remapped from `old`'s
+    /// palette entries to `new`'s -- the SAME `vt::remap_color` the tile's
+    /// pts host and the compositor's chrome use, so the scrollback agrees
+    /// with the live screen the host re-emits beside it. A truecolor value
+    /// equal to an old entry is remapped with it (the documented cost, 9.4);
+    /// the cell TEXT is untouched. `pal` follows so a later append is in the
+    /// new theme.
+    pub fn remap_palette(&mut self, old: Palette, new: Palette) {
+        if old == new {
+            return;
+        }
+        let map = |c: u32| vt::remap_color(old, new, c);
+        for b in self.frozen.iter_mut() {
+            for st in b.styles.iter_mut() {
+                st.fg = map(st.fg);
+                st.bg = map(st.bg);
+            }
+        }
+        for st in self.open.styles.iter_mut() {
+            st.fg = map(st.fg);
+            st.bg = map(st.bg);
+        }
+        self.pen.fg = map(self.pen.fg);
+        self.pen.bg = map(self.pen.bg);
+        self.pal = new;
+        self.seq = self.seq.wrapping_add(1);
+    }
+
     pub fn frozen_blocks(&self) -> &VecDeque<Block> {
         &self.frozen
     }
@@ -886,6 +916,12 @@ impl Transcript {
     /// (OSC 7); empty before the first report.
     pub fn cwd(&self) -> &str {
         &self.cwd
+    }
+
+    /// HALCYON-INSTRUMENT 14.3: a command is running now -- the open block
+    /// carries a cmd mark and no exit yet (the prompt has not returned).
+    pub fn running(&self) -> bool {
+        self.open.cmd.is_some() && self.open.exit.is_none()
     }
 
     /// H-3d: the command running now (the open output block's mark) or,

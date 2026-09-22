@@ -11,6 +11,7 @@
 // machinery.)
 
 #include "test.h"
+#include <thylacine/dtb.h>
 
 #include <thylacine/extinction.h>
 #include <thylacine/mmio_handle.h>
@@ -123,6 +124,12 @@ void test_mmio_handle_create_unref_releases_slot(void) {
 // after `virtio_init` boot probe; the F154 close was over-broad). See
 // `test_mmio_handle_virtio_mmio_claimable` for the positive-case test.
 void test_mmio_handle_create_kernel_reserved_rejected(void) {
+    struct dtb_pci_msi msi;
+    for (u32 i = 0; dtb_msi_controller_n(i, &msi); i++) {
+        TEST_ASSERT(!kobj_mmio_create(msi.pa & ~4095ull, 4096),
+                    "MSI controller page must never be claimable by EL0");
+    }
+
     // GIC distributor on QEMU virt: PA 0x08000000, 64 KiB. The
     // reservation is page-aligned outward so the entire range is
     // protected. A kobj_mmio_create at the exact GIC PA must fail.
@@ -220,4 +227,11 @@ void test_mmio_handle_double_unref_extincts(void) {
     // We intentionally do NOT exercise the double-unref-extincts path
     // here (it would tear down the kernel test harness). The defense
     // is verified by inspection of kobj_mmio_unref's `ref <= 0` check.
+}
+
+extern bool kobj_mmio_test_reservation_union(void);
+void test_mmio_kernel_reservation_union(void);
+void test_mmio_kernel_reservation_union(void) {
+    TEST_ASSERT(kobj_mmio_test_reservation_union(),
+                "partial/transitive overlap must reserve entire union atomically");
 }

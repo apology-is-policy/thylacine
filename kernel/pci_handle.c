@@ -16,6 +16,7 @@
 // caller calls kobj_mmio_create, so the order is g_pci_lock then (separately)
 // g_mmio_lock, never nested. No cycle.
 
+#include <thylacine/pci_irq.h>
 #include <thylacine/dtb.h>
 #include <thylacine/extinction.h>
 #include <thylacine/mmio_handle.h>
@@ -26,6 +27,10 @@
 #include <thylacine/virtio_pci.h>
 
 #include "../arch/arm64/uart.h"
+#include "../arch/arm64/mmu.h"
+#include "../arch/arm64/mmio.h"
+#include "../arch/arm64/gic_msi.h"
+#include "../arch/arm64/timer.h"
 #include "../mm/slub.h"
 
 // Claim table. A handful of PCI functions are claimable at v1.0 (net is the
@@ -45,13 +50,35 @@ static u64              g_pci_created;
 static u64              g_pci_live;
 static bool             g_pci_initialized;
 
-// BAR bump arena: the host-bridge 32-bit MMIO window the kernel assigns BARs
-// from (bare boot, no UEFI). Lazily seeded from dtb_pci_mem_window on the first
-// allocation; advanced monotonically. The arena does NOT reclaim a freed BAR's
-// PA range (g_mmio_claims does reclaim it — a re-claim just bump-allocates a
-// fresh PA); with a ~768 MiB window and ~16 KiB BARs that is tens of thousands
-// of claims of headroom, ample for v1.0. A reclaiming PA allocator is a v1.x
-// item. All under g_pci_lock.
+// Hardware backing survives capability claims. The enumerated function set is
+// immutable (no hotplug); assigning each BAR once bounds both aperture use and
+// future kernel MSI-X/reset mappings across arbitrarily many driver restarts.
+// Geometry/placement are written only by the BDF's exclusive claim. Releasing
+// and reacquiring g_pci_lock publishes them to a later claimant. Live access
+// still requires fresh exclusive KObj_MMIO claims; these are not capabilities.
+struct pci_backing {
+    struct virtio_pci_dev *device; // immutable after init
+    u64 pa[PCI_BAR_COUNT], size[PCI_BAR_COUNT];
+    bool is64[PCI_BAR_COUNT];
+    void *table, *common;
+    u64 table_pa, table_size, common_pa;
+    struct gic_msi_route routes[PCI_MSIX_VECTOR_MAX];
+    bool routed[PCI_MSIX_VECTOR_MAX], retiring[PCI_MSIX_VECTOR_MAX];
+#ifdef KERNEL_TESTS
+    u32 test_msix_fail; // kernel-only one-shot readback-failure injection
+#endif
+};
+static struct pci_backing backings[VIRTIO_PCI_MAX_DEVS];
+static struct pci_backing *pci_backing(struct KObj_PCI *k) {
+    for (u32 i = 0; i < VIRTIO_PCI_MAX_DEVS; i++)
+        if (backings[i].device == k->vpd) return &backings[i];
+    return NULL;
+}
+
+
+// BAR aperture allocator. Each enumerated hardware BAR consumes one placement,
+// retained in its backing across capability claims. No per-restart advance.
+// All cursor accesses are under g_pci_lock.
 static bool g_pci_bar_inited;
 static u64  g_pci_bar_base;
 static u64  g_pci_bar_end;
@@ -80,6 +107,17 @@ void kobj_pci_init(void) {
     if (__atomic_exchange_n(&g_pci_initialized, true, __ATOMIC_ACQ_REL)) {
         extinction("kobj_pci_init called twice");
     }
+    // Before any shared wire is enabled, unclaimed supported functions must
+    // not assert INTx or master the bus. Enumeration is complete and immutable.
+    for (int i = 0; i < virtio_pci_dev_count(); i++) {
+        struct virtio_pci_dev *d = virtio_pci_dev_get(i);
+        backings[i].device = d;
+        u16 cmd = virtio_pci_cfg_read16(d, PCI_CFG_COMMAND);
+        cmd = (cmd | PCI_CMD_INTX_DISABLE) & ~(u16)(PCI_CMD_MEM_SPACE | PCI_CMD_BUS_MASTER);
+        virtio_pci_cfg_write16(d, PCI_CFG_COMMAND, cmd);
+        (void)virtio_pci_cfg_read16(d, PCI_CFG_COMMAND);
+    }
+    __asm__ volatile("dsb sy" ::: "memory");
     // BSS already zeroed g_pci_claims (all-free) + the counters.
     uart_puts("kobj_pci: claims=");
     uart_putdec((u64)KOBJ_PCI_MAX);
@@ -265,7 +303,15 @@ static int pci_assign_one_bar(struct KObj_PCI *k, struct virtio_pci_dev *d,
     u64 claim_size = bar_claim_size(size);
 
     u64 pa = 0;
-    if (!pci_bar_alloc(claim_size, is64, &pa)) return -1;  // exhausted / unplaceable
+    struct pci_backing *backing = pci_backing(k);
+    if (!backing) return -1;
+    if (backing->size[i]) {
+        if (backing->size[i] != size || backing->is64[i] != is64) return -1;
+        pa = backing->pa[i];
+    } else {
+        if (!pci_bar_alloc(claim_size, is64, &pa)) return -1;
+        backing->pa[i] = pa; backing->size[i] = size; backing->is64[i] = is64;
+    }
 
     // Program the BAR with the assigned PA. The PA is claim_size-aligned (>=
     // page), so its low attribute bits are 0; the device's read-only attribute
@@ -302,90 +348,289 @@ static int pci_assign_bars(struct KObj_PCI *k, struct virtio_pci_dev *d) {
 // VIRTIO_PCI_CAP capability walk (VIRTIO 1.2 §4.1.4).
 // =============================================================================
 
-// Resolve common/notify/isr/device config regions from the vendor-capability
-// list into k->regions[]. Bounded (cap pointers live in [0x40, 0x100); a 48-hop
-// guard breaks any loop). Validates each region's BAR index + extent against the
-// assigned BAR's decoded size (a region into an unassigned BAR or past its size
-// is hostile/malformed → reject the claim). Returns 0 (resolved what was
-// present, validated) or -1 (malformed). Non-static + header-declared so a
-// deterministic unit test drives the hostile-layout rejection branches (cap
-// loop / OOB bar / unassigned bar / oversized region) over a synthetic config.
+// Parse before publishing the claim. Capabilities are untrusted: each extent
+// must fit conventional config space, and a repeated pointer is a hard error.
 int pci_walk_caps(struct KObj_PCI *k, struct virtio_pci_dev *d) {
     u16 status = virtio_pci_cfg_read16(d, PCI_CFG_STATUS);
-    if (!(status & PCI_STATUS_CAP_LIST)) return 0;   // no caps (non-modern) — not an error
-
-    u32 ptr = virtio_pci_cfg_read8(d, PCI_CFG_CAP_PTR) & 0xFCu;   // dword-aligned
-    int guard = 0;
-    while (ptr != 0) {
-        if (ptr < 0x40u || ptr > 0xFCu) break;       // outside the cap window
-        if (++guard > 48) break;                     // loop guard (192 B / 4)
-
-        u8 cap_vndr = virtio_pci_cfg_read8(d, ptr + 0u);
-        u32 cap_next = virtio_pci_cfg_read8(d, ptr + 1u) & 0xFCu;
-
-        if (cap_vndr == PCI_CAP_ID_VNDR) {
-            u8  cfg_type = virtio_pci_cfg_read8(d, ptr + 3u);
-            if (cfg_type >= VIRTIO_PCI_CAP_COMMON_CFG &&
-                cfg_type <= VIRTIO_PCI_CAP_DEVICE_CFG) {
-                u8  bar    = virtio_pci_cfg_read8 (d, ptr + 4u);
-                u32 offset = virtio_pci_cfg_read32(d, ptr + 8u);
-                u32 length = virtio_pci_cfg_read32(d, ptr + 12u);
-
-                if (bar >= PCI_BAR_COUNT) return -1;            // hostile BAR index
-                if (!k->bars[bar].present) return -1;          // references an unassigned BAR
-                if ((u64)offset + (u64)length > k->bars[bar].size) return -1;  // OOB region
-
-                struct pci_region *r = &k->regions[cfg_type - 1u];
-                if (!r->present) {     // first cap of a kind wins
-                    r->present = true;
-                    r->bar     = bar;
-                    r->offset  = offset;
-                    r->length  = length;
-                    if (cfg_type == VIRTIO_PCI_CAP_NOTIFY_CFG) {
-                        k->notify_off_multiplier =
-                            virtio_pci_cfg_read32(d, ptr + 16u);
-                    }
+    if (!(status & PCI_STATUS_CAP_LIST)) return 0;
+    u32 ptr = virtio_pci_cfg_read8(d, PCI_CFG_CAP_PTR) & 0xFCu;
+    u64 visited = 0;
+    while (ptr) {
+        if (ptr < 0x40u || ptr > 0xFCu) return -1;
+        u64 bit = 1ull << (ptr / 4u);
+        if (visited & bit) return -1;
+        visited |= bit;
+        u8 id = virtio_pci_cfg_read8(d, ptr);
+        u32 next = virtio_pci_cfg_read8(d, ptr + 1u) & 0xFCu;
+        if (id == PCI_CAP_ID_MSIX) {
+            if (ptr > 0x100u - 12u || k->msix.cap_offset) return -1;
+            u16 ctrl = virtio_pci_cfg_read16(d, ptr + 2u);
+            u32 table = virtio_pci_cfg_read32(d, ptr + 4u);
+            u32 pba = virtio_pci_cfg_read32(d, ptr + 8u);
+            u32 tb = table & 7u, pb = pba & 7u;
+            u64 to = table & ~7u, po = pba & ~7u;
+            u32 entries = (ctrl & 0x7ffu) + 1u;
+            u64 tl = (u64)entries * 16u;
+            u64 pl = ((entries + 63u) / 64u) * 8u;
+            if (tb >= PCI_BAR_COUNT || pb >= PCI_BAR_COUNT ||
+                !k->bars[tb].present || !k->bars[pb].present) return -1;
+            if (to > k->bars[tb].size || tl > k->bars[tb].size - to ||
+                po > k->bars[pb].size || pl > k->bars[pb].size - po) return -1;
+            if (tb == pb && to < po + pl && po < to + tl) return -1;
+            k->msix = (struct pci_msix){ .cap_offset = (u16)ptr,
+                .entries = (u16)entries, .table_bar = (u8)tb, .pba_bar = (u8)pb,
+                .table_offset = (u32)to, .pba_offset = (u32)po };
+        } else if (id == PCI_CAP_ID_VNDR) {
+            u32 len = virtio_pci_cfg_read8(d, ptr + 2u);
+            if (len < 4u || len > 0x100u - ptr) return -1;
+            u8 type = virtio_pci_cfg_read8(d, ptr + 3u);
+            if (type >= 1u && type <= 4u) {
+                if (len < (type == VIRTIO_PCI_CAP_NOTIFY_CFG ? 20u : 16u)) return -1;
+                u8 bar = virtio_pci_cfg_read8(d, ptr + 4u);
+                u32 off = virtio_pci_cfg_read32(d, ptr + 8u);
+                u32 size = virtio_pci_cfg_read32(d, ptr + 12u);
+                if (bar >= PCI_BAR_COUNT || !k->bars[bar].present ||
+                    (u64)off + size > k->bars[bar].size) return -1;
+                struct pci_region *r = &k->regions[type - 1u];
+                if (!r->present) {
+                    *r = (struct pci_region){ .present = true, .bar = bar,
+                        .offset = off, .length = size };
+                    if (type == VIRTIO_PCI_CAP_NOTIFY_CFG)
+                        k->notify_off_multiplier = virtio_pci_cfg_read32(d, ptr + 16u);
                 }
-            } else if (cfg_type == VIRTIO_PCI_CAP_SHARED_MEMORY_CFG) {
-                // §4.1.4.7: a virtio_pci_cap64 — the base cap's offset/length
-                // are the LOW halves; the hi dwords follow the 16-byte cap.
-                // cap.id (@+5) is the shmid. Same hostile-layout posture as
-                // the regions above: a bad BAR reference or an extent past
-                // the decoded BAR size rejects the claim. The extent check is
-                // the non-wrapping form — offset + length on u64 halves can
-                // overflow, and a wrapped sum would pass a naive compare.
-                u8  bar  = virtio_pci_cfg_read8(d, ptr + 4u);
-                u8  shmid = virtio_pci_cfg_read8(d, ptr + 5u);
-                u64 off  = (u64)virtio_pci_cfg_read32(d, ptr + 8u)
-                         | ((u64)virtio_pci_cfg_read32(d, ptr + 16u) << 32);
-                u64 len  = (u64)virtio_pci_cfg_read32(d, ptr + 12u)
+            } else if (type == VIRTIO_PCI_CAP_SHARED_MEMORY_CFG) {
+                if (len < 24u) return -1;
+                u8 bar = virtio_pci_cfg_read8(d, ptr + 4u);
+                u8 shmid = virtio_pci_cfg_read8(d, ptr + 5u);
+                u64 off = (u64)virtio_pci_cfg_read32(d, ptr + 8u)
+                        | ((u64)virtio_pci_cfg_read32(d, ptr + 16u) << 32);
+                u64 size = (u64)virtio_pci_cfg_read32(d, ptr + 12u)
                          | ((u64)virtio_pci_cfg_read32(d, ptr + 20u) << 32);
-
-                if (bar >= PCI_BAR_COUNT) return -1;           // hostile BAR index
-                if (!k->bars[bar].present) return -1;          // unassigned BAR
-                if (off > k->bars[bar].size) return -1;        // OOB start
-                if (len > k->bars[bar].size - off) return -1;  // OOB extent (no wrap)
-
-                for (u32 s = 0; s < PCI_SHM_COUNT; s++) {
-                    if (k->shm[s].present) continue;
-                    k->shm[s].present = true;
-                    k->shm[s].shmid   = shmid;
-                    k->shm[s].bar     = bar;
-                    k->shm[s].offset  = off;
-                    k->shm[s].length  = len;
-                    break;             // further caps beyond the slots: ignored
+                if (bar >= PCI_BAR_COUNT || !k->bars[bar].present ||
+                    off > k->bars[bar].size || size > k->bars[bar].size - off) return -1;
+                for (u32 i = 0; i < PCI_SHM_COUNT; i++) {
+                    if (k->shm[i].present) continue;
+                    k->shm[i] = (struct pci_shm){ .present = true, .bar = bar,
+                        .shmid = shmid, .offset = off, .length = size };
+                    break;
                 }
             }
-            // cfg_type 5 (PCI_CFG) is not mapped here.
         }
-        ptr = cap_next;
+        ptr = next;
+    }
+    // Essential transport registers sharing a routing page cannot be directly
+    // mapped safely, even in INTx mode. Fail this unsupported layout at claim.
+    for (u32 i = 0; i < VIRTIO_PCI_CAP_REGION_COUNT; i++) {
+        const struct pci_region *r = &k->regions[i];
+        if (!r->present || !r->length) continue;
+        u64 lo = (u64)r->offset & ~(u64)(PAGE_SIZE - 1u);
+        u64 hi = ((u64)r->offset + r->length + PAGE_SIZE - 1u) & ~(u64)(PAGE_SIZE - 1u);
+        if (!kobj_pci_user_range(k, r->bar, lo, hi - lo)) return -1;
     }
     return 0;
+}
+
+// Rounded reserved intervals. Two intervals may share pages; callers must
+// subtract their union rather than assume distinct BARs or distinct pages.
+static void pci_msix_span(const struct KObj_PCI *k, u32 which,
+                          u32 *bar, u64 *lo, u64 *hi) {
+    const struct pci_msix *m = &k->msix;
+    u64 off = which ? m->pba_offset : m->table_offset;
+    u64 len = which ? ((m->entries + 63u) / 64u) * 8u : (u64)m->entries * 16u;
+    *bar = which ? m->pba_bar : m->table_bar;
+    *lo = off & ~(u64)(PAGE_SIZE - 1u);
+    *hi = (off + len + PAGE_SIZE - 1u) & ~(u64)(PAGE_SIZE - 1u);
+}
+
+bool kobj_pci_user_range(const struct KObj_PCI *k, u32 bar, u64 off, u64 len) {
+    if (!k || bar >= PCI_BAR_COUNT || !k->bars[bar].present || !len ||
+        ((off | len) & (PAGE_SIZE - 1u))) return false;
+    u64 size = k->bars[bar].size;
+    if (size > ~0ull - (PAGE_SIZE - 1u)) return false;
+    size = (size + PAGE_SIZE - 1u) & ~(u64)(PAGE_SIZE - 1u);
+    if (off > size || len > size - off) return false;
+    if (k->msix.cap_offset) {
+        for (u32 i = 0; i < 2u; i++) {
+            u32 b; u64 lo, hi;
+            pci_msix_span(k, i, &b, &lo, &hi);
+            if (b == bar && off < hi && lo < off + len) return false;
+        }
+    }
+    return true;
+}
+
+u32 kobj_pci_map_windows(const struct KObj_PCI *k,
+                         struct pci_map_window out[PCI_MAP_WINDOW_MAX]) {
+    u32 count = 0;
+    for (u32 bar = 0; bar < PCI_BAR_COUNT; bar++) {
+        if (!k->bars[bar].present) continue;
+        u64 size = k->bars[bar].size;
+        if (size > ~0ull - (PAGE_SIZE - 1u)) return 0;
+        size = (size + PAGE_SIZE - 1u) & ~(u64)(PAGE_SIZE - 1u);
+        u64 pos = 0;
+        while (pos < size) {
+            u64 next = size, skip = pos;
+            if (k->msix.cap_offset) {
+                for (u32 i = 0; i < 2u; i++) {
+                    u32 b; u64 lo, hi;
+                    pci_msix_span(k, i, &b, &lo, &hi);
+                    if (b != bar || hi <= pos) continue;
+                    if (lo <= pos) { if (hi > skip) skip = hi; }
+                    else if (lo < next) next = lo;
+                }
+            }
+            if (skip > pos) { pos = skip; continue; }
+            if (count >= PCI_MAP_WINDOW_MAX) extinction("PCI window bound");
+            out[count++] = (struct pci_map_window){ .bar = bar,
+                .offset = pos, .length = next - pos, .reserved = 0 };
+            pos = next;
+        }
+    }
+    return count;
 }
 
 // =============================================================================
 // Lifecycle.
 // =============================================================================
+
+// Kernel mappings belong to immutable hardware backing, not a capability
+// incarnation. Stable BAR placement bounds the permanent vmalloc footprint.
+static bool pci_map_control(struct KObj_PCI *k) {
+    struct pci_backing *b = pci_backing(k);
+    if (!b) return false;
+    struct pci_region *common = &k->regions[VIRTIO_PCI_CAP_COMMON_CFG - 1];
+    if (common->present && common->length >= 56) {
+        u64 pa = k->bars[common->bar].pa + common->offset;
+        if (pa & 7u) return false; // common queue addresses require 64-bit alignment
+        if (b->common && b->common_pa != pa) return false;
+        if (!b->common) {
+            b->common = mmu_map_mmio(pa, 56);
+            if (!b->common) return false;
+            b->common_pa = pa;
+        }
+        k->common_cfg = b->common;
+    }
+    if (k->msix.cap_offset) {
+        u64 pa = k->bars[k->msix.table_bar].pa + k->msix.table_offset;
+        u64 size = (u64)k->msix.entries * 16;
+        if (b->table && (b->table_pa != pa || b->table_size != size)) return false;
+        if (!b->table) {
+            b->table = mmu_map_mmio(pa, (size_t)size);
+            if (!b->table) return false;
+            b->table_pa = pa; b->table_size = size;
+        }
+        k->msix_table = b->table;
+    }
+    return true;
+}
+// No spinlock across reset completion. Caller first masks function delivery and
+// clears bus mastering, while keeping MEM decoding for the status readback.
+static bool pci_reset_transport(struct KObj_PCI *k) {
+    if (!k->common_cfg) return false;
+    volatile u8 *status = (volatile u8 *)k->common_cfg + 20;
+    io_write8(status, 0);
+    __asm__ volatile("dsb sy" ::: "memory");
+    u64 deadline = timer_now_ns() + 10000000ull;
+    do {
+        if (io_read8(status) == 0) {
+            __asm__ volatile("dsb sy" ::: "memory");
+            return true;
+        }
+        __asm__ volatile("yield" ::: "memory");
+    } while (timer_now_ns() < deadline);
+    return false;
+}
+static void pci_retire_route(struct KObj_PCI *k, u32 index, bool source_quiesced) {
+    struct pci_backing *b = pci_backing(k);
+    if (!b || index >= PCI_MSIX_VECTOR_MAX) return;
+    irq_state_t flags = spin_lock_irqsave(&k->cfg_lock);
+    if (!b->routed[index] || b->retiring[index]) {
+        spin_unlock_irqrestore(&k->cfg_lock, flags); return;
+    }
+    b->retiring[index] = true;
+    struct gic_msi_route route = b->routes[index];
+    spin_unlock_irqrestore(&k->cfg_lock, flags);
+    bool retired = gic_msi_retire(&route, source_quiesced);
+    flags = spin_lock_irqsave(&k->cfg_lock);
+    if (retired) b->routed[index] = false;
+    b->retiring[index] = false;
+    spin_unlock_irqrestore(&k->cfg_lock, flags);
+}
+static void pci_retire_routes(struct KObj_PCI *k, bool source_quiesced) {
+    for (u32 i = 0; i < PCI_MSIX_VECTOR_MAX; i++) pci_retire_route(k, i, source_quiesced);
+}
+void kobj_pci_msix_retire(struct KObj_PCI *k, u32 index) {
+    irq_state_t flags = spin_lock_irqsave(&k->cfg_lock);
+    bool proof = k->revoked && k->reset_complete;
+    spin_unlock_irqrestore(&k->cfg_lock, flags);
+    pci_retire_route(k, index, proof);
+}
+bool kobj_pci_msix_mask(struct KObj_PCI *k, u32 index, bool masked) {
+    if (!k->msix_table || index >= k->msix.entries || index >= PCI_MSIX_VECTOR_MAX) return false;
+    irq_state_t flags = spin_lock_irqsave(&k->cfg_lock);
+    bool ok = !k->revoked && (masked || !k->irq_faulted);
+    if (ok) {
+        volatile u32 *entry = (volatile u32 *)k->msix_table + index * 4;
+        io_write32(entry + 3, masked ? 1u : 0u);
+        ok = (io_read32(entry + 3) & 1u) == (masked ? 1u : 0u);
+#ifdef KERNEL_TESTS
+        struct pci_backing *b = pci_backing(k);
+        if (b && (b->test_msix_fail & 2u)) { b->test_msix_fail &= ~2u; ok = false; }
+#endif
+        __asm__ volatile("dsb sy" ::: "memory");
+    }
+    // Revocation already masks/disables the entire function before removing
+    // MEM decode. Never touch a BAR after that terminal transition.
+    spin_unlock_irqrestore(&k->cfg_lock, flags);
+    return ok;
+}
+int kobj_pci_msix_program(struct KObj_PCI *k, u32 index, const struct gic_msi_route *route) {
+    struct pci_backing *b = pci_backing(k);
+    if (!b || !route || !k->msix_table || !k->common_cfg ||
+        index >= k->msix.entries || index >= PCI_MSIX_VECTOR_MAX) return false;
+    irq_state_t flags = spin_lock_irqsave(&k->cfg_lock);
+    if (k->revoked || k->irq_faulted || b->routed[index] || b->retiring[index]) {
+        spin_unlock_irqrestore(&k->cfg_lock, flags); return false;
+    }
+    // Retain the lease before touching the table. A failed mask/readback is
+    // not proof that no message escaped; it must survive for quarantine/reset.
+    b->routes[index] = *route; b->routed[index] = true;
+    volatile u32 *entry = (volatile u32 *)k->msix_table + index * 4;
+    io_write32(entry + 3, 1);
+    bool ok = (io_read32(entry + 3) & 1u) != 0;
+    if (ok) {
+        io_write32(entry, (u32)route->address); io_write32(entry + 1, (u32)(route->address >> 32));
+        io_write32(entry + 2, route->data);
+        __asm__ volatile("dsb sy" ::: "memory");
+        ok = io_read32(entry) == (u32)route->address && io_read32(entry + 1) == (u32)(route->address >> 32) &&
+             io_read32(entry + 2) == route->data && (io_read32(entry + 3) & 1u);
+    }
+#ifdef KERNEL_TESTS
+    if (b->test_msix_fail & 1u) { b->test_msix_fail &= ~1u; ok = false; }
+#endif
+    if (ok) {
+        u32 off = k->msix.cap_offset + 2u;
+        u16 ctrl = virtio_pci_cfg_read16(k->vpd, off);
+        ctrl = (ctrl | PCI_MSIX_ENABLE) & ~(u16)PCI_MSIX_MASK_ALL;
+        virtio_pci_cfg_write16(k->vpd, off, ctrl);
+        ok = (virtio_pci_cfg_read16(k->vpd, off) & (PCI_MSIX_ENABLE | PCI_MSIX_MASK_ALL)) == PCI_MSIX_ENABLE;
+        __asm__ volatile("dsb sy" ::: "memory");
+    }
+
+    spin_unlock_irqrestore(&k->cfg_lock, flags);
+    return ok ? 1 : -1;
+}
+
+void kobj_pci_msix_off(struct KObj_PCI *k) {
+    if (!k->msix.cap_offset) return;
+    irq_state_t flags = spin_lock_irqsave(&k->cfg_lock);
+    u32 off = k->msix.cap_offset + 2u;
+    u16 ctrl = virtio_pci_cfg_read16(k->vpd, off);
+    virtio_pci_cfg_write16(k->vpd, off, (ctrl | PCI_MSIX_MASK_ALL) & ~(u16)PCI_MSIX_ENABLE);
+    (void)virtio_pci_cfg_read16(k->vpd, off);
+    __asm__ volatile("dsb sy" ::: "memory");
+    spin_unlock_irqrestore(&k->cfg_lock, flags);
+}
 
 // Quiesce the device, drop every assigned BAR claim, and release the
 // exclusivity slot. Shared by free_internal (last unref) and the claim-failure
@@ -396,38 +641,102 @@ int pci_walk_caps(struct KObj_PCI *k, struct virtio_pci_dev *d) {
 // a PCI driver's registers are BAR-decoded, so the virtio-MMIO reset sweep
 // cannot reach them, and a still-mastering device would DMA into pages the
 // exit path has already returned to the buddy.
-bool kobj_pci_quiesce(struct KObj_PCI *k) {
-    if (!k || k->magic != KOBJ_PCI_MAGIC || !k->vpd) return false;
-    u16 cmd = virtio_pci_cfg_read16(k->vpd, PCI_CFG_COMMAND);
-    if (!(cmd & (PCI_CMD_MEM_SPACE | PCI_CMD_BUS_MASTER))) return false;
-    cmd &= ~(u16)(PCI_CMD_MEM_SPACE | PCI_CMD_BUS_MASTER);
-    virtio_pci_cfg_write16(k->vpd, PCI_CFG_COMMAND, cmd);
-    return true;
+// Config completion pairs a same-function readback with the device barrier.
+// Caller holds cfg_lock (or the claim is not yet published).
+static void pci_command_write(struct KObj_PCI *k, u16 command) {
+    virtio_pci_cfg_write16(k->vpd, PCI_CFG_COMMAND, command);
+    (void)virtio_pci_cfg_read16(k->vpd, PCI_CFG_COMMAND);
+    __asm__ volatile("dsb sy" ::: "memory");
 }
-
-// V-2 (audit F1): clear only BUS_MASTER, leaving MEM_SPACE decoding. On owner
-// death this stops the dead device's DMA immediately while a client's live
-// BURROW_TYPE_HOSTMEM mapping keeps a valid, decoding BAR. MEM_SPACE is cleared
-// later by pci_release_bars_and_claim at the last kobj_pci_unref, once the last
-// hostmem burrow (hence the last client mapping) is gone.
-bool kobj_pci_quiesce_dma_only(struct KObj_PCI *k) {
-    if (!k || k->magic != KOBJ_PCI_MAGIC || !k->vpd) return false;
-    u16 cmd = virtio_pci_cfg_read16(k->vpd, PCI_CFG_COMMAND);
-    if (!(cmd & PCI_CMD_BUS_MASTER)) return false;
-    cmd &= ~(u16)PCI_CMD_BUS_MASTER;
-    virtio_pci_cfg_write16(k->vpd, PCI_CFG_COMMAND, cmd);
-    return true;
+bool kobj_pci_intx_set(struct KObj_PCI *k, bool enable) {
+    irq_state_t s = spin_lock_irqsave(&k->cfg_lock);
+    bool ok = !enable || (!k->revoked && !k->irq_faulted);
+    if (ok) {
+        u16 cmd = virtio_pci_cfg_read16(k->vpd, PCI_CFG_COMMAND);
+        if (enable) cmd &= ~(u16)PCI_CMD_INTX_DISABLE;
+        else cmd |= PCI_CMD_INTX_DISABLE;
+        pci_command_write(k, cmd);
+    }
+    spin_unlock_irqrestore(&k->cfg_lock, s);
+    return ok;
 }
+bool kobj_pci_intx_asserted(struct KObj_PCI *k) {
+    irq_state_t s = spin_lock_irqsave(&k->cfg_lock);
+    bool asserted = (virtio_pci_cfg_read16(k->vpd, PCI_CFG_STATUS) & PCI_STATUS_INTERRUPT) != 0;
+    spin_unlock_irqrestore(&k->cfg_lock, s);
+    return asserted;
+}
+#ifdef KERNEL_TESTS
+// Only the regression suite can request this hook; it has no syscall or
+// userspace control. The real MMIO write/read still occurs before failure.
+void pci_test_msix_fail(struct KObj_PCI *k, u32 stages);
+void pci_test_msix_fail(struct KObj_PCI *k, u32 stages) {
+    irq_state_t f = spin_lock_irqsave(&k->cfg_lock);
+    struct pci_backing *b = pci_backing(k);
+    if (b) b->test_msix_fail = stages;
+    spin_unlock_irqrestore(&k->cfg_lock, f);
+}
+#endif
+bool kobj_pci_irq_usable(struct KObj_PCI *k) {
+    irq_state_t f = spin_lock_irqsave(&k->cfg_lock);
+    bool usable = !k->revoked && !k->irq_faulted;
+    spin_unlock_irqrestore(&k->cfg_lock, f); return usable;
+}
+void kobj_pci_irq_fault(struct KObj_PCI *k) {
+    irq_state_t f = spin_lock_irqsave(&k->cfg_lock);
+    k->irq_faulted = true;
+    if (k->msix.cap_offset) {
+        u32 off = k->msix.cap_offset + 2u;
+        u16 ctrl = virtio_pci_cfg_read16(k->vpd, off);
+        virtio_pci_cfg_write16(k->vpd, off, (ctrl | PCI_MSIX_MASK_ALL) & ~(u16)PCI_MSIX_ENABLE);
+        (void)virtio_pci_cfg_read16(k->vpd, off);
+    }
+    u16 cmd = virtio_pci_cfg_read16(k->vpd, PCI_CFG_COMMAND);
+    pci_command_write(k, cmd | PCI_CMD_INTX_DISABLE);
+    spin_unlock_irqrestore(&k->cfg_lock, f);
+}
+bool kobj_pci_is_live(struct KObj_PCI *k) {
+    irq_state_t s = spin_lock_irqsave(&k->cfg_lock);
+    bool live = !k->revoked;
+    spin_unlock_irqrestore(&k->cfg_lock, s);
+    return live;
+}
+static bool pci_quiesce(struct KObj_PCI *k, bool keep_decode) {
+    if (!k || k->magic != KOBJ_PCI_MAGIC || !k->vpd) return false;
+    irq_state_t s = spin_lock_irqsave(&k->cfg_lock);
+    k->revoked = true;
+    u16 cmd = virtio_pci_cfg_read16(k->vpd, PCI_CFG_COMMAND);
+    bool decode = (cmd & PCI_CMD_MEM_SPACE) != 0;
+    bool changed = (cmd & (PCI_CMD_BUS_MASTER | (keep_decode ? 0 : PCI_CMD_MEM_SPACE))) != 0;
+    if (k->msix.cap_offset) {
+        u32 off = k->msix.cap_offset + 2u;
+        u16 ctrl = virtio_pci_cfg_read16(k->vpd, off);
+        virtio_pci_cfg_write16(k->vpd, off, (ctrl | PCI_MSIX_MASK_ALL) & ~(u16)PCI_MSIX_ENABLE);
+        (void)virtio_pci_cfg_read16(k->vpd, off);
+    }
+    pci_command_write(k, (cmd & ~(u16)PCI_CMD_BUS_MASTER) | PCI_CMD_INTX_DISABLE);
+    spin_unlock_irqrestore(&k->cfg_lock, s);
+    bool reset = decode && pci_reset_transport(k);
+    s = spin_lock_irqsave(&k->cfg_lock);
+    if (reset) k->reset_complete = true;
+    if (!keep_decode) {
+        cmd = virtio_pci_cfg_read16(k->vpd, PCI_CFG_COMMAND);
+        pci_command_write(k, cmd & ~(u16)PCI_CMD_MEM_SPACE);
+    }
+    bool proof = k->reset_complete;
+    spin_unlock_irqrestore(&k->cfg_lock, s);
+    pci_irq_revoke_function(k);
+    pci_retire_routes(k, proof);
+    return changed;
+}
+bool kobj_pci_quiesce(struct KObj_PCI *k) { return pci_quiesce(k, false); }
+bool kobj_pci_quiesce_dma_only(struct KObj_PCI *k) { return pci_quiesce(k, true); }
 
 static void pci_release_bars_and_claim(struct KObj_PCI *k) {
     // Quiesce: disable MEM-decode + bus-master before releasing the BAR PA
     // claims (which may be re-handed-out). Config space is kernel-owned, so the
     // write is always valid; harmless if decode was never enabled (rollback).
-    if (k->vpd) {
-        u16 cmd = virtio_pci_cfg_read16(k->vpd, PCI_CFG_COMMAND);
-        cmd &= ~(u16)(PCI_CMD_MEM_SPACE | PCI_CMD_BUS_MASTER);
-        virtio_pci_cfg_write16(k->vpd, PCI_CFG_COMMAND, cmd);
-    }
+    (void)kobj_pci_quiesce(k);
 
     for (u32 i = 0; i < PCI_BAR_COUNT; i++) {
         if (k->bars[i].present && k->bars[i].mmio) {
@@ -519,6 +828,7 @@ struct KObj_PCI *kobj_pci_claim(u32 virtio_device_id, u32 nth) {
     if (!k) return NULL;
     k->magic            = KOBJ_PCI_MAGIC;
     k->ref              = 1;
+    spin_lock_init(&k->cfg_lock);
     k->vpd              = d;
     k->bus              = d->bus;
     k->dev              = d->dev;
@@ -555,18 +865,43 @@ struct KObj_PCI *kobj_pci_claim(u32 virtio_device_id, u32 nth) {
     // back via unref.
     if (pci_assign_bars(k, d) < 0) { kobj_pci_unref(k); return NULL; }
     if (pci_walk_caps(k, d)  < 0)  { kobj_pci_unref(k); return NULL; }
+    if (!pci_map_control(k)) { kobj_pci_unref(k); return NULL; }
 
-    // Enable MEM-decode + bus-master now that the BARs decode at real PAs. The
-    // device still won't DMA until a driver completes the virtio handshake +
-    // DRIVER_OK over the mapped BAR.
+    // POLLED by default: routing pages remain protected, MSI-X disabled and
+    // function INTx disabled until a PCI endpoint is explicitly armed.
+    if (k->msix.cap_offset) {
+        u32 off = k->msix.cap_offset + 2u;
+        u16 ctrl = virtio_pci_cfg_read16(d, off);
+        virtio_pci_cfg_write16(d, off, (ctrl | PCI_MSIX_MASK_ALL) & ~(u16)PCI_MSIX_ENABLE);
+        (void)virtio_pci_cfg_read16(d, off);
+    }
+    // Decode registers with mastering still disabled. Reset completion makes
+    // a prior incarnation's retained MSI leases safe to drain/reclaim.
     u16 cmd = virtio_pci_cfg_read16(d, PCI_CFG_COMMAND);
-    virtio_pci_cfg_write16(d, PCI_CFG_COMMAND,
-                           cmd | PCI_CMD_MEM_SPACE | PCI_CMD_BUS_MASTER);
+    pci_command_write(k, (cmd | PCI_CMD_MEM_SPACE | PCI_CMD_INTX_DISABLE) & ~(u16)PCI_CMD_BUS_MASTER);
+    if (k->common_cfg && !pci_reset_transport(k)) { kobj_pci_unref(k); return NULL; }
+    if (k->common_cfg) pci_retire_routes(k, true);
+    if (k->msix_table) {
+        // Every unallocated entry remains masked even if the owner supplies
+        // that local vector index to a queue. Remove old routing addresses.
+        volatile u32 *table = k->msix_table;
+        for (u32 i = 0; i < k->msix.entries; i++) {
+            io_write32(table + i * 4 + 3, 1);
+            io_write32(table + i * 4, 0); io_write32(table + i * 4 + 1, 0); io_write32(table + i * 4 + 2, 0);
+            if (!(io_read32(table + i * 4 + 3) & 1u) || io_read32(table + i * 4) ||
+                io_read32(table + i * 4 + 1) || io_read32(table + i * 4 + 2)) {
+                kobj_pci_unref(k); return NULL;
+            }
+        }
+        __asm__ volatile("dsb sy" ::: "memory");
+    }
+    pci_command_write(k, cmd | PCI_CMD_MEM_SPACE | PCI_CMD_BUS_MASTER | PCI_CMD_INTX_DISABLE);
 
     // INTx routing (INTA). Non-fatal if the DTB interrupt-map is absent — a
     // driver can poll; intid_valid records the outcome.
     u32 intid = 0;
-    if (dtb_pci_intx_route(d->dev, PCI_INT_PIN_INTA, &intid)) {
+    u8 pin = virtio_pci_cfg_read8(d, PCI_CFG_INT_PIN);
+    if (pin >= 1 && pin <= 4 && dtb_pci_intx_route(d->dev, pin, &intid)) {
         k->intid       = intid;
         k->intid_valid = true;
     }

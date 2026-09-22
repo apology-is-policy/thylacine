@@ -86,3 +86,32 @@ void test_gic_cpu_irq_counter_geometry(void) {
                     "(bump it -- the IRQ counter padding is now too small)");
     }
 }
+
+void test_gic_irq_barrier(void) {
+    TEST_ASSERT(!gic_synchronize_cpu(DTB_MAX_CPUS, 100000000ull), "invalid barrier CPU rejected");
+    for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
+        if (cpu && !g_cpu_alive[cpu]) continue;
+        TEST_ASSERT(gic_synchronize_cpu(cpu, 100000000ull), "IPI IRQ barrier reaches live CPU");
+    }
+    TEST_ASSERT(!gic_intid_dispatchable(1020) && !gic_intid_dispatchable(1023),
+                "special IAR values are never dispatched");
+    TEST_ASSERT(!gic_intid_dispatchable(8191) &&
+                !gic_intid_dispatchable(GIC_LPI_MIN + GIC_LPI_COUNT), "LPI bounds are exact");
+    if (gic_version() == GIC_VERSION_V3) {
+        TEST_ASSERT(gic_intid_dispatchable(GIC_LPI_MIN), "LPI namespace starts at 8192");
+        for (unsigned cpu = 0; cpu < dtb_cpu_count(); cpu++) {
+            u64 va, pa, typer;
+            TEST_ASSERT(gic_redist_for_cpu(cpu, &va, &pa, &typer), "redistributor affinity validated");
+            TEST_ASSERT(va && pa, "redistributor has physical and kernel addresses");
+        }
+    } else {
+        TEST_ASSERT(!gic_intid_dispatchable(GIC_LPI_MIN), "v2 has no LPI namespace");
+        TEST_ASSERT(!gic_redist_for_cpu(0, NULL, NULL, NULL), "v2 has no redistributor");
+    }
+}
+
+#include "../../arch/arm64/gic_its.h"
+void test_gic_its_commands(void);
+void test_gic_its_commands(void) {
+    TEST_ASSERT(gic_its_test_command_ring(), "ITS ring wrap, saturation, stalled/invalid reader and timeout");
+}

@@ -28,6 +28,7 @@
 #include <thylacine/handle.h>
 #include <thylacine/image.h>           // D-3: the FILE mmap arm shares exec's Image cache
 #include <thylacine/irqfwd.h>
+#include <thylacine/pci_irq.h>
 #include <thylacine/loom.h>
 #include <thylacine/mmio_handle.h>
 #include <thylacine/notes.h>
@@ -53,6 +54,7 @@
 #include <thylacine/types.h>
 #include <thylacine/vivarium.h>         // the Linux translation table (V-1b branch)
 #include <thylacine/vma.h>
+#include <thylacine/seat.h>
 #include <thylacine/weft.h>             // share_id registry + binding (SYS_WEFT_*; Weft-6a-2)
 
 #include "../arch/arm64/exception.h"
@@ -362,11 +364,14 @@ static s64 sys_irq_create_handler(u64 intid, u64 rights) {
 // SYS_IRQ_WAIT — block until at least one IRQ has fired since last wait.
 // =============================================================================
 //
-// AArch64 ABI: x0 = handle index.
+// AArch64 ABI: x0 = handle index, x1 = timeout in nanoseconds (0 = wait
+// forever). F-A1 (C): a nonzero timeout bounds a lost completion -- the wait
+// then returns count 0 (indistinguishable from death at the ABI, which is
+// intended: both mean "no IRQ to service; re-check the device or unwind").
 //
-// Returns: count of collapsed IRQs that fired (always >= 1), or
-// (u64)-1 on bad handle / wrong kind / missing right.
-static s64 sys_irq_wait_handler(u64 hraw) {
+// Returns: count of collapsed IRQs that fired (always >= 1), 0 on timeout,
+// or (u64)-1 on bad handle / wrong kind / missing right.
+static s64 sys_irq_wait_handler(u64 hraw, u64 timeout_ns) {
     struct Thread *t = current_thread();
     if (!t)                                          return -1;
     struct Proc *p = t->proc;
@@ -395,7 +400,7 @@ static s64 sys_irq_wait_handler(u64 hraw) {
     struct KObj_IRQ *k = (struct KObj_IRQ *)hh.obj;
     if (!k)                                { handle_put(&hh); return -1; }
 
-    u32 count = kobj_irq_wait(k);
+    u32 count = kobj_irq_wait_timed(k, timeout_ns);
     handle_put(&hh);
     // RW-7 R1-F1: a 2nd concurrent waiter on the single-waiter KObj_IRQ is
     // refused (would otherwise extinct the kernel at sleep's single-waiter
@@ -663,7 +668,9 @@ int hostmem_resolve_subrange(const struct KObj_PCI *k, u64 shmid, u64 offset,
         if (bar >= PCI_BAR_COUNT || !k->bars[bar].present)      return -1;  // malformed
         if (offset > k->shm[s].length)                          return -1;  // OOB start
         if (length > k->shm[s].length - offset)                 return -1;  // OOB extent
-        *base_pa_out = k->bars[bar].pa + k->shm[s].offset + offset;
+        u64 bar_offset = k->shm[s].offset + offset;
+        if (bar_offset < offset || !kobj_pci_user_range(k, bar, bar_offset, length)) return -1;
+        *base_pa_out = k->bars[bar].pa + bar_offset;
         return 0;
     }
     return -1;   // no window with this shmid
@@ -1138,7 +1145,9 @@ s64 sys_pci_claim_handler(u64 virtio_device_id, u64 a1) {
 // rejected -- AArch64 has no W-only AP), resolves bar_index -> the BAR's
 // KObj_MMIO, wraps it in a BURROW_TYPE_MMIO Burrow, installs the VMA under
 // p->vma_lock, and drops the construction ref. Returns 0 / -1.
-s64 sys_pci_map_bar_handler(u64 hraw, u64 vaddr, u64 bar_index, u64 prot_raw) {
+static s64 pci_map_range(u64 hraw, u64 vaddr, u64 bar_index, u64 prot_raw,
+                         u64 offset, u64 length, bool whole_bar) {
+    if (hraw >= PROC_HANDLE_MAX) return -1;
     struct Thread *t = current_thread();
     if (!t)                                          return -1;
     struct Proc *p = t->proc;
@@ -1159,6 +1168,7 @@ s64 sys_pci_map_bar_handler(u64 hraw, u64 vaddr, u64 bar_index, u64 prot_raw) {
 
     // Bound prot by the handle rights; reject EXEC and the W-without-R construct
     // (identical to sys_mmio_map -- device memory, no W-only AP encoding).
+    if (prot_raw > 0xffffffffull) { handle_put(&hh); return -1; }
     u32 prot = (u32)prot_raw;
     if (prot == 0)                                   { handle_put(&hh); return -1; }
     if (prot & ~(u32)(VMA_PROT_READ | VMA_PROT_WRITE)) { handle_put(&hh); return -1; }
@@ -1179,7 +1189,11 @@ s64 sys_pci_map_bar_handler(u64 hraw, u64 vaddr, u64 bar_index, u64 prot_raw) {
     if (!km)                              { handle_put(&hh); return -1; }
     if (km->magic != KOBJ_MMIO_MAGIC)     { handle_put(&hh); return -1; }
 
-    struct Burrow *b = burrow_create_mmio(km);
+    if (whole_bar) length = km->size;
+    if (!kobj_pci_user_range(k, (u32)bar_index, offset, length)) {
+        handle_put(&hh); return -1;
+    }
+    struct Burrow *b = burrow_create_pci_mmio(k, (u32)bar_index, offset, length);
     if (!b)                               { handle_put(&hh); return -1; }
 
     // burrow_map walks + splices p->as->vmas, so it holds p->vma_lock (the #713
@@ -1187,7 +1201,7 @@ s64 sys_pci_map_bar_handler(u64 hraw, u64 vaddr, u64 bar_index, u64 prot_raw) {
     // full decoded BAR size; the user maps the whole BAR and indexes the
     // VIRTIO_PCI_CAP regions within it.
     spin_lock(&p->as->lock);
-    int rc = burrow_map(p, b, vaddr, km->size, prot);
+    int rc = burrow_map(p, b, vaddr, length, prot);
     if (rc < 0) {
         burrow_unref(b);
         spin_unlock(&p->as->lock);
@@ -1198,6 +1212,40 @@ s64 sys_pci_map_bar_handler(u64 hraw, u64 vaddr, u64 bar_index, u64 prot_raw) {
     spin_unlock(&p->as->lock);
     handle_put(&hh);
     return 0;
+}
+
+// The original four-argument syscall retains its ABI; a protected BAR now
+// fails closed. Do not read unused argument registers from old callers.
+s64 sys_pci_map_bar_handler(u64 hraw, u64 vaddr, u64 bar_index, u64 prot_raw) {
+    return pci_map_range(hraw, vaddr, bar_index, prot_raw, 0, 0, true);
+}
+
+static s64 sys_pci_map_window_handler(u64 hraw, u64 vaddr, u64 bar, u64 prot,
+                                     u64 offset, u64 length) {
+    return pci_map_range(hraw, vaddr, bar, prot, offset, length, false);
+}
+
+static s64 sys_pci_windows_handler(u64 hraw, u64 out_va, u64 capacity) {
+    if (hraw >= PROC_HANDLE_MAX) return -1;
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) return -1;
+    struct Handle hh;
+    if (handle_get(t->proc, (hidx_t)hraw, &hh) < 0) return -1;
+    if (hh.kind != KOBJ_PCI || !(hh.rights & RIGHT_READ)) {
+        handle_put(&hh); return -1;
+    }
+    // Every emitted record explicitly initializes its padding. The unused
+    // tail is neither read nor copied. Never truncate a list silently.
+    struct pci_map_window windows[PCI_MAP_WINDOW_MAX];
+    u32 n = kobj_pci_map_windows((const struct KObj_PCI *)hh.obj, windows);
+    handle_put(&hh);
+    if (capacity < n) return -1;
+    u64 bytes = n * sizeof(windows[0]);
+    if (bytes && !sys_validate_user_buf(out_va, bytes)) return -1;
+    const u8 *src = (const u8 *)windows;
+    for (u64 i = 0; i < bytes; i++)
+        if (uaccess_store_u8(out_va + i, src[i]) != 0) return -1;
+    return n;
 }
 
 // =============================================================================
@@ -1261,6 +1309,79 @@ s64 sys_pci_info_handler(u64 hraw, u64 info_va) {
     }
     handle_put(&hh);
     return 0;
+}
+
+// PCI IRQ authority comes from an owned writable PCI handle, never a raw
+// INTID allowance. Pin the parent across construction and recheck revocation
+// at handle publication through the existing allowance commit primitive.
+static s64 sys_pci_irq_create_handler(u64 hraw, u64 mode, u64 ordinal) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc || hraw >= PROC_HANDLE_MAX || mode > 0xffffffffull || ordinal > 0xffffffffull)
+        return -T_E_INVAL;
+    struct Proc *p = t->proc;
+    if (!(__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_HW_CREATE)) return -T_E_PERM;
+    struct Handle hh;
+    if (handle_get(p, (hidx_t)hraw, &hh) < 0) return -T_E_BADF;
+    if (hh.kind != KOBJ_PCI || !(hh.rights & RIGHT_WRITE)) {
+        handle_put(&hh); return -T_E_ACCES;
+    }
+    struct KObj_PCI *pci = hh.obj;
+    if (!allowance_permits(p, HW_RES_PCI, PCI_BDF_PACK(pci->bus, pci->dev, pci->fn), 0)) {
+        handle_put(&hh); return -T_E_PERM;
+    }
+    int error;
+    struct KObj_IRQ *irq = pci_irq_create(pci, (u32)mode, (u32)ordinal, &error);
+    handle_put(&hh);
+    if (!irq) return error;
+    hidx_t h = allowance_handle_alloc(p, KOBJ_IRQ, RIGHT_READ | RIGHT_WRITE | RIGHT_SIGNAL, irq);
+    if (h < 0) { kobj_irq_unref(irq); return -T_E_NOMEM; }
+    return h;
+}
+
+static s64 sys_pci_irq_op(u64 op, u64 hraw, u64 a1, u64 a2) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc || hraw >= PROC_HANDLE_MAX) return -T_E_INVAL;
+    struct Handle hh;
+    if (handle_get(t->proc, (hidx_t)hraw, &hh) < 0) return -T_E_BADF;
+    rights_t needed = op == SYS_PCI_IRQ_WAIT ? RIGHT_SIGNAL :
+                      op == SYS_PCI_IRQ_INFO ? RIGHT_READ : RIGHT_WRITE;
+    if (hh.kind != KOBJ_IRQ || !(hh.rights & needed) || !((struct KObj_IRQ *)hh.obj)->pci) {
+        handle_put(&hh); return -T_E_ACCES;
+    }
+    struct KObj_IRQ *irq = hh.obj;
+    s64 rc;
+    switch (op) {
+    case SYS_PCI_IRQ_ARM: rc = pci_irq_arm(irq); break;
+    case SYS_PCI_IRQ_COMPLETE: rc = pci_irq_complete(irq, a1, a2); break;
+    case SYS_PCI_IRQ_DISABLE: rc = pci_irq_disable(irq); break;
+    case SYS_PCI_IRQ_WAIT: {
+        struct pci_irq_event event;
+        if (!sys_validate_user_buf(a2, sizeof(event))) { rc = -T_E_FAULT; break; }
+        rc = pci_irq_wait(irq, a1, &event);
+        if (rc == 1) {
+            const u8 *src = (const u8 *)&event;
+            for (u64 i = 0; i < sizeof(event); i++)
+                if (uaccess_store_u8(a2 + i, src[i]) != 0) { rc = -T_E_FAULT; break; }
+            // No event was consumed. WAIT can replay it after a copy fault;
+            // only COMPLETE spends the generation/sequence ticket.
+        }
+        break;
+    }
+    case SYS_PCI_IRQ_INFO: {
+        struct pci_irq_info info;
+        if (!sys_validate_user_buf(a1, sizeof(info))) { rc = -T_E_FAULT; break; }
+        rc = pci_irq_get_info(irq, &info);
+        if (!rc) {
+            const u8 *src = (const u8 *)&info;
+            for (u64 i = 0; i < sizeof(info); i++)
+                if (uaccess_store_u8(a1 + i, src[i]) != 0) { rc = -T_E_FAULT; break; }
+        }
+        break;
+    }
+    default: rc = -T_E_INVAL; break;
+    }
+    handle_put(&hh);
+    return rc;
 }
 
 // =============================================================================
@@ -2346,10 +2467,10 @@ static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
     // #844: tx + rx are REF-HELD (sys_lookup_spoor transferred a ref each). The
     // adapter takes its OWN independent ref below; we then release the two
     // lookup borrows here (UNCONDITIONAL -- each lookup ref'd, even when
-    // rx==tx). The adapter ref + the fds' own handle-table refs keep tx/rx
-    // alive for the rest, so every existing error path's adapter rollback
-    // (spoor_unref) + the success path stay correct without further borrow
-    // bookkeeping.
+    // rx==tx). Every rollback below drops the adapter ref with spoor_clunk,
+    // never spoor_unref: a sibling thread may close the fd meanwhile, making
+    // the rollback's drop the LAST, and the pipe's close hook (its peer's EOF)
+    // must run then (shed audit r4 F1, the H6 class).
     spoor_ref(tx);
     if (rx != tx) spoor_ref(rx);
     spoor_clunk(tx);
@@ -2360,8 +2481,8 @@ static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
     u8 aname_scratch[SYS_ATTACH_ANAME_MAX];
     for (u64 i = 0; i < aname_len; i++) {
         if (uaccess_load_u8(aname_va + i, &aname_scratch[i]) != 0) {
-            spoor_unref(tx);
-            if (rx != tx) spoor_unref(rx);
+            spoor_clunk(tx);
+            if (rx != tx) spoor_clunk(rx);
             return -1;
         }
     }
@@ -2372,16 +2493,16 @@ static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
     // is what kfree's the adapter and spoor_clunks the transport Spoors.
     struct p9_spoor_transport *adapter = kmalloc(sizeof(*adapter), KP_ZERO);
     if (!adapter) {
-        spoor_unref(tx);
-        if (rx != tx) spoor_unref(rx);
+        spoor_clunk(tx);
+        if (rx != tx) spoor_clunk(rx);
         return -1;
     }
     // owns_spoors=false: dev9p (not the adapter) is the holder. The
     // attached's last unref releases tx/rx via spoor_clunk and kfree's
     // the adapter; the adapter's own close hook stays a no-op.
     if (p9_spoor_transport_init(adapter, tx, rx, false) != 0) {
-        spoor_unref(tx);
-        if (rx != tx) spoor_unref(rx);
+        spoor_clunk(tx);
+        if (rx != tx) spoor_clunk(rx);
         kfree(adapter);
         return -1;
     }
@@ -2407,8 +2528,8 @@ static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
         // (the create's transport_ops.close runs on rollback, which is
         // a no-op for owns=false). We must still kfree the adapter +
         // release transport refs since they never transferred.
-        spoor_unref(tx);
-        if (rx != tx) spoor_unref(rx);
+        spoor_clunk(tx);
+        if (rx != tx) spoor_clunk(rx);
         kfree(adapter);
         return attach_err_to_ret(aerr);
     }
@@ -2421,8 +2542,8 @@ static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
         // Shouldn't happen — first install on a fresh attached. If it
         // does, the attached doesn't own the adapter; rollback manually.
         p9_attached_unref(att);
-        spoor_unref(tx);
-        if (rx != tx) spoor_unref(rx);
+        spoor_clunk(tx);
+        if (rx != tx) spoor_clunk(rx);
         kfree(adapter);
         return -1;
     }
@@ -2612,9 +2733,23 @@ static s64 sys_attach_9p_srv_handler(u64 srv_fd_raw, u64 aname_va,
 // stratumd's mounted FS root.
 //
 // Audit-trigger: touches `kernel/territory.c` (CLAUDE.md §25.4 — Territory)
-// via territory_pivot_root. Adds no new mount-table edge (no I-3 / I-1
-// implications). MountRefcountConsistency holds via the matched bump +
-// drop in territory_pivot_root.
+// via territory_pivot_root. Adds no mount-table edge; since ARCH 9.6.10 it
+// REMOVES the entries unreachable from the new root (the shed), each releasing
+// what unmount releases.
+
+// The new root of SYS_CHROOT / SYS_PIVOT_ROOT: ref-held, RIGHT_READ, and a
+// DIRECTORY. One home for the gate because the two handlers are the two places
+// a handle becomes root_spoor, and pivot lacked it until audit r1 F3 of the
+// shed: a non-directory root wedges every later resolution at its first
+// component, and since the shed it also strips the mount table for good (the
+// closure from a pipe or /dev/null reaches almost nothing), so pivoting back to
+// a held directory fd no longer restores the namespace.
+static struct Spoor *sys_lookup_root_source(struct Proc *p, u64 fd_raw) {
+    struct Spoor *source = sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_READ);
+    if (!source)                                     return NULL;
+    if (!(source->qid.type & QTDIR))                 { spoor_clunk(source); return NULL; }
+    return source;
+}
 
 static s64 sys_pivot_root_handler(u64 new_root_fd_raw) {
     struct Thread *t = current_thread();
@@ -2630,7 +2765,7 @@ static s64 sys_pivot_root_handler(u64 new_root_fd_raw) {
     // from the freshly-cloned Spoor's Dev. Mount-style operations that
     // create new edges in the namespace need W; pivot only swaps an
     // existing R-rights name binding (R1 F10 close).
-    struct Spoor *source = sys_lookup_spoor(p, (hidx_t)new_root_fd_raw, RIGHT_READ);
+    struct Spoor *source = sys_lookup_root_source(p, new_root_fd_raw);
     if (!source)                                     return -1;
 
     // territory_pivot_root handles: NULL-source rejection, no-current-root
@@ -2987,13 +3122,10 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
         u32 omode_dev = (u32)(omode_raw & ~(u64)SYS_WALK_OPEN_NOFOLLOW);
         struct Spoor *opened = nc->dev->open(nc, (int)omode_dev);
         if (!opened) {
+            // Read before clunk frees the private error. Other Devs retain EIO.
+            s64 open_err = dev9p_open_errno(nc);
             spoor_clunk(nc);
-            // #80 seam: Dev.open returns Spoor* with no errno channel -- the
-            // same shape that forced #99's create_errno side-channel. Until it
-            // grows one, a failed open is EIO. Reachable causes today are a
-            // dev9p Tlopen refusal and a devsrv connect failure; the walk
-            // already succeeded, so this is never "no such file".
-            return -T_E_IO;
+            return open_err == -1 ? -T_E_IO : open_err;
         }
         if (opened != nc) {
             // #66 (audit F2): transplant the walked name onto the connection
@@ -3790,11 +3922,17 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
     // UM-8c F5: a union dirfd holds member[0]; a create must land in the union's
     // first MCREATE member, not member[0]. spoor_create_install CONSUMES the
     // parent ref, so swap in the MCREATE member (clunking member[0]) first.
+    // A DISSOLVED union makes the handle a plain handle on member[0] (ARCH
+    // 9.6.10): create there, in a fresh unopened clone.
     if (src->union_snap && src->union_snap->point) {
         int e = 0;
-        struct Spoor *cm = stalk_union_create_member(p, src->union_snap->point, &e);
+        struct Spoor *m0 = NULL;
+        bool dissolved = stalk_union_dissolved(p, src, &m0);
+        struct Spoor *cm = dissolved
+            ? m0
+            : stalk_union_create_member(p, src->union_snap->point, &e);
         spoor_clunk(src);
-        if (!cm) return e ? -(s64)e : -(s64)T_E_ACCES;
+        if (!cm) return dissolved ? -(s64)T_E_IO : (e ? -(s64)e : -(s64)T_E_ACCES);
         src = cm;
     }
 
@@ -4573,11 +4711,23 @@ static bool spoor_same_mount_identity(const struct Spoor *a, const struct Spoor 
 // the member the mutation should act on -- the holder of `leaf` (remove) or the
 // first MCREATE member (create) -- ref-held (caller clunks). Returns NULL when
 // `c` is not a union (caller acts on `c` directly, *err untouched) OR when a
-// union has no holder / MCREATE member (*err set to a negative -T_E_*).
+// union has no holder / MCREATE member (*err set to a negative -T_E_*). A union
+// that has DISSOLVED makes `c` a plain handle on member[0] (ARCH 9.6.10), which
+// is what the resolver already says for `openat(c, ...)`: act on member[0], in a
+// fresh unopened clone (the handle itself may be opened, and a Dev may refuse to
+// walk or create from an opened Spoor). `*dissolved`, when non-NULL, reports
+// which of the two it was.
 static struct Spoor *sys_union_dirfd_member(struct Proc *p, struct Spoor *c,
                                             const char *leaf, bool want_create,
-                                            s64 *err) {
+                                            s64 *err, bool *dissolved) {
+    if (dissolved) *dissolved = false;
     if (!c->union_snap || !c->union_snap->point) return NULL;
+    struct Spoor *m0 = NULL;
+    if (stalk_union_dissolved(p, c, &m0)) {
+        if (dissolved) *dissolved = true;
+        if (!m0) *err = -(s64)T_E_IO;
+        return m0;
+    }
     int e = 0;
     struct Spoor *m = want_create
         ? stalk_union_create_member(p, c->union_snap->point, &e)
@@ -4610,23 +4760,29 @@ static s64 sys_rename_handler(u64 olddir_fd_raw, u64 oldname_va, u64 oldname_len
 
     // UM-8c F5: a union dirfd holds member[0]. A rename reaches the member that
     // HOLDS the source (od) and lands the destination in the SAME member when
-    // both fds name one union (Plan 9 within-member rename), else the MCREATE
-    // member (nd). Non-union dirfds act on od/nd directly; a cross-member move
-    // then falls to spoor_rename_in_dirs's same-Dev guard (EXDEV -> EINVAL).
+    // both fds name one LIVE union (Plan 9 within-member rename), else the
+    // MCREATE member (nd). Non-union dirfds act on od/nd directly; a
+    // cross-member move then falls to spoor_rename_in_dirs's same-Dev guard
+    // (EXDEV -> EINVAL). Once the union has DISSOLVED each handle means its own
+    // member[0] -- two handles on one point may hold different ones (shed r4
+    // F2: taken while dissolved, the shortcut renamed into od's member[0] a
+    // directory the caller never named for the destination).
     bool same_union = od->union_snap && od->union_snap->point &&
                       nd->union_snap && nd->union_snap->point &&
                       spoor_same_mount_identity(od->union_snap->point,
                                                 nd->union_snap->point);
     s64 uerr = 0;
-    struct Spoor *od_m = sys_union_dirfd_member(p, od, old_scratch, false, &uerr);
+    bool od_dissolved = false;
+    struct Spoor *od_m = sys_union_dirfd_member(p, od, old_scratch, false, &uerr,
+                                                &od_dissolved);
     if (!od_m && uerr) { spoor_clunk(od); spoor_clunk(nd); return uerr; }
     struct Spoor *od_target = od_m ? od_m : od;
     struct Spoor *nd_m = NULL;
     struct Spoor *nd_target;
-    if (same_union) {
+    if (same_union && !od_dissolved) {
         nd_target = od_target;   // within-member: borrow od_m (clunked once below)
     } else {
-        nd_m = sys_union_dirfd_member(p, nd, new_scratch, true, &uerr);
+        nd_m = sys_union_dirfd_member(p, nd, new_scratch, true, &uerr, NULL);
         if (!nd_m && uerr) {
             if (od_m) spoor_clunk(od_m);
             spoor_clunk(od); spoor_clunk(nd);
@@ -4692,7 +4848,7 @@ static s64 sys_unlink_handler(u64 parent_fd_raw, u64 name_va, u64 name_len_raw,
     // UM-8c F5: a union dirfd holds member[0]; unlink acts on the member that
     // HOLDS the leaf, not member[0].
     s64 uerr = 0;
-    struct Spoor *um = sys_union_dirfd_member(p, c, scratch, false, &uerr);
+    struct Spoor *um = sys_union_dirfd_member(p, c, scratch, false, &uerr, NULL);
     if (!um && uerr) { spoor_clunk(c); return uerr; }
     struct Spoor *target = um ? um : c;
 
@@ -4837,9 +4993,10 @@ static s64 sys_wstat_handler(u64 hraw, u64 valid_raw, u64 mode_raw,
 // Chroot).
 //
 // Audit-trigger: touches `kernel/territory.c` (CLAUDE.md §25.4 — Territory).
-// Adds no new mount-table edge (no I-3 / I-1 implications); the only
-// invariant in play is MountRefcountConsistency, extended in the spec
-// for this chunk to include the root_spoor contribution.
+// Adds no mount-table edge (no I-3 / I-1 implications); since ARCH 9.6.10 it
+// REMOVES the entries unreachable from the new root (the shed). The root half
+// keeps MountRefcountConsistency, extended in the spec for that chunk to
+// include the root_spoor contribution.
 // =============================================================================
 
 static s64 sys_chroot_handler(u64 spoor_fd_raw) {
@@ -4853,11 +5010,10 @@ static s64 sys_chroot_handler(u64 spoor_fd_raw) {
     // serve as a walk source for SYS_WALK_OPEN(FROM_ROOT, ...). Without
     // READ the pivot is structurally inert (you cannot walk from it).
     // Mirrors SYS_MOUNT's source-rights gate exactly.
-    struct Spoor *source = sys_lookup_spoor(p, (hidx_t)spoor_fd_raw, RIGHT_READ);
-    if (!source)                                     return -1;
-
-    // The root must be a DIRECTORY -- the #81 single-hop gate, applied to the
-    // one other place a Spoor becomes a resolution base. Installing a non-dir
+    //
+    // The root must be a DIRECTORY -- the #81 single-hop gate, applied where a
+    // Spoor becomes a resolution base (here and SYS_PIVOT_ROOT, through the one
+    // sys_lookup_root_source). Installing a non-dir
     // wedges the Territory: every later resolution answers T_E_NOTDIR at its
     // first component, exec-from-namespace fails, and territory_root_ref hands
     // the same node to D-1's absolute-target re-anchor. Contained (the Proc only
@@ -4865,7 +5021,8 @@ static s64 sys_chroot_handler(u64 spoor_fd_raw) {
     // Pre-existing -- t_chroot of an O_PATH handle on a FILE did this before
     // D-1 too -- but D-1 shipped File::open_link, a documented API whose whole
     // job is to hand back a non-directory, so the shape is now easy to reach.
-    if (!(source->qid.type & QTDIR))                 { spoor_clunk(source); return -1; }
+    struct Spoor *source = sys_lookup_root_source(p, spoor_fd_raw);
+    if (!source)                                     return -1;
 
     // territory_chroot handles: idempotent same-pointer (returns 0 without ref
     // bump), prior-root displacement (spoor_clunk the old), spoor_ref of the
@@ -5748,33 +5905,73 @@ static s64 sys_burrow_attach_handler(u64 length_raw) {
     return sys_burrow_attach_for_proc(t->proc, length_raw);
 }
 
-// The shared argument gate for both detach entries (#199 factored it out): the
-// alignment/rounding rules and the window confinement are ONE set of rules, not
-// two. Writes *length_out only on success (0).
-static s64 detach_args_check(struct Proc *p, u64 vaddr_raw, u64 length_raw,
-                             u64 *length_out) {
+// The detach admission, in three halves (#199 factored the gate so both detach
+// entries share ONE set of shape rules; ARCH 6.5 split the address rule from the
+// identity rule). Each writes *length_out only on success (0).
+//
+// The shape half both detach syscalls share: a non-zero length, a page-aligned
+// base, and a span inside the user address space. The length is page-rounded
+// the way SYS_BURROW_ATTACH rounds it, so a caller may pass either its original
+// request or the rounded span and still match the installed VMA. Overflow-safe:
+// vaddr_raw < USER_VA_TOP bounds the subtraction, and a length_raw that passes is
+// below 2^47, so the round-up cannot wrap.
+static s64 detach_shape_check(struct Proc *p, u64 vaddr_raw, u64 length_raw,
+                              u64 *length_out) {
     if (!p)                                          return -1;
     if (length_raw == 0)                             return -1;
-    if (length_raw > BURROW_ATTACH_MAX)              return -1;
     if (vaddr_raw & (PAGE_SIZE - 1))                 return -1;
-
-    // Same page-rounding as SYS_BURROW_ATTACH, so a caller may pass
-    // either its original request or the rounded length and still match
-    // the installed VMA's span.
+    if (vaddr_raw >= USER_VA_TOP)                    return -1;
+    if (length_raw > USER_VA_TOP - vaddr_raw)        return -1;
     u64 length = (length_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
+    if (length > USER_VA_TOP - vaddr_raw)            return -1;
+    *length_out = length;
+    return 0;
+}
 
-    // Confine detach to the burrow-attach window (F1, P6-pouch-mem-a
-    // audit). burrow_unmap matches a VMA by geometry alone — without
-    // this bound a caller could pass the coordinates of its own ELF
-    // segment, stack, or stack-guard VMA and have burrow_unmap dismantle
-    // it (removing the stack guard silently retires a security page).
-    // Every burrow_attach region lives in the window and every ELF /
-    // stack / guard VMA sits below it, so the bound structurally
-    // excludes them. Overflow-safe: length <= BURROW_ATTACH_MAX, far
-    // below EXEC_USER_BURROW_TOP, so TOP - length never underflows.
-    if (vaddr_raw < EXEC_USER_BURROW_BASE)           return -1;
-    if (vaddr_raw > EXEC_USER_BURROW_TOP - length)   return -1;
+// The address half: the burrow-attach window (F1, P6-pouch-mem-a audit).
+// burrow_unmap matches a VMA by geometry alone, so without a bound a caller
+// could pass the coordinates of its own ELF segment, stack, or stack-guard VMA
+// and have burrow_unmap dismantle it (removing the stack guard silently retires
+// a security page). Every kernel-placed region lives in the window and every
+// ELF / stack / guard / vDSO VMA sits below it. BURROW_ATTACH_MAX keeps
+// TOP - length from underflowing.
+static bool detach_in_window(u64 vaddr, u64 length) {
+    if (length > BURROW_ATTACH_MAX)                  return false;
+    if (vaddr < EXEC_USER_BURROW_BASE)               return false;
+    if (vaddr > EXEC_USER_BURROW_TOP - length)       return false;
+    return true;
+}
 
+// The identity half (ARCH 6.5, "Detach is decided by identity"): a VMA backed by
+// a DMA or MMIO Burrow is detachable wherever it sits. Those two types reach an
+// address space only through SYS_DMA_MAP / SYS_MMIO_MAP / SYS_PCI_MAP_BAR -- a
+// driver's own placement -- or the weft share of a weave or GPU buffer, which
+// the kernel places inside the window anyway; addrspace_clone refuses to fork
+// either. No ELF, stack, guard, vDSO or CODE VMA is ever one, so this admits
+// nothing the window protected. A window-only rule refused every hardware map a
+// driver placed below 4 GiB, and tapestryd's weaves and GPU buffers leaked there
+// for the life of the process. Caller holds as->lock -- the same hold the
+// removal runs under -- so the type decided here is the type removed; the
+// geometry must match exactly, as burrow_unmap will require.
+static bool detach_is_hw_map_locked(struct Proc *p, u64 vaddr, u64 length) {
+    struct Vma *v = vma_lookup(p, vaddr);
+    if (!v || v->vaddr_start != vaddr || v->vaddr_end - vaddr != length)
+        return false;
+    struct Burrow *b = v->burrow;
+    if (!b || b->magic != VMO_MAGIC)                 return false;
+    return b->type == BURROW_TYPE_DMA || b->type == BURROW_TYPE_MMIO;
+}
+
+// The phenotype munmap range's admission: shape + window. It removes a RANGE,
+// so the identity half would have to hold per VMA; a Linux-phenotype Proc
+// cannot reach the three hardware-map syscalls, so the window is the whole rule
+// there.
+static s64 detach_args_check(struct Proc *p, u64 vaddr_raw, u64 length_raw,
+                             u64 *length_out) {
+    u64 length;
+    if (detach_shape_check(p, vaddr_raw, length_raw, &length) != 0)
+        return -1;
+    if (!detach_in_window(vaddr_raw, length))        return -1;
     *length_out = length;
     return 0;
 }
@@ -5782,7 +5979,8 @@ static s64 detach_args_check(struct Proc *p, u64 vaddr_raw, u64 length_raw,
 // The per-VMA detach body (#199 factored it from sys_burrow_detach_for_proc,
 // byte-identical semantics): exact-match [vaddr_raw, vaddr_raw+length) against
 // ONE installed VMA, remove it, settle the I-32 accounting. Caller holds
-// as->lock and has already run detach_args_check.
+// as->lock and has already admitted the span (detach_args_check, or the native
+// path's window-or-identity test).
 //
 // D-3c F1: `*out_free` receives the Burrow whose mapping-drop was the last ref
 // (or NULL) -- the caller pushes it onto a local stack and frees it with
@@ -5964,11 +6162,14 @@ static s64 detach_one_locked(struct Proc *p, u64 vaddr_raw, u64 length,
 
 s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
     u64 length;
-    if (detach_args_check(p, vaddr_raw, length_raw, &length) != 0)
+    if (detach_shape_check(p, vaddr_raw, length_raw, &length) != 0)
         return -1;
     struct Burrow *to_free = NULL;
+    s64 rc = -1;
     spin_lock(&p->as->lock);
-    s64 rc = detach_one_locked(p, vaddr_raw, length, &to_free);
+    if (detach_in_window(vaddr_raw, length) ||
+        detach_is_hw_map_locked(p, vaddr_raw, length))
+        rc = detach_one_locked(p, vaddr_raw, length, &to_free);
     spin_unlock(&p->as->lock);
     // D-3c F1: free OUTSIDE as->lock -- a FILE Burrow's free reaches a
     // possibly-sleeping spoor_clunk (a 9P Tclunk), and sleeping under a plain
@@ -8004,6 +8205,18 @@ static void sys_spawn_thunk(void *arg) {
 //
 // Note: bumped[] and bumped_rights[] are caller-allocated arrays of
 // SYS_SPAWN_MAX_FDS entries each.
+
+// The ONE way a spawn drops the fd refs it bumped but never handed to a child
+// (every failure unwind -- here and in the spawn handlers). spoor_clunk, never
+// spoor_unref: a sibling thread may close the fd while the spawn is in flight,
+// making this drop the LAST ref, and the Dev's close hook (the console drain's
+// disarm, a pipe's EOF, a SrvConn teardown, a 9P fid clunk) must run then
+// (shed audit r4 F1; aux's H6). Non-static for devdev.spawn_unbump_runs_close.
+void sys_spawn_unbump_fds(struct Spoor *const *bumped, u32 n);
+void sys_spawn_unbump_fds(struct Spoor *const *bumped, u32 n) {
+    for (u32 j = 0; j < n; j++) spoor_clunk(bumped[j]);
+}
+
 static int sys_bump_inherit_fds(struct Proc *p, const u32 *fds, u32 fd_count,
                                 struct Spoor *bumped[SYS_SPAWN_MAX_FDS],
                                 rights_t bumped_rights[SYS_SPAWN_MAX_FDS]) {
@@ -8015,7 +8228,7 @@ static int sys_bump_inherit_fds(struct Proc *p, const u32 *fds, u32 fd_count,
         struct Handle hh;
         if (handle_get(p, (hidx_t)fds[i], &hh) < 0 || hh.kind != KOBJ_SPOOR) {
             handle_put(&hh);
-            for (u32 j = 0; j < bumped_count; j++) spoor_unref(bumped[j]);
+            sys_spawn_unbump_fds(bumped, bumped_count);
             return -1;
         }
         struct Spoor *s = (struct Spoor *)hh.obj;
@@ -8333,14 +8546,14 @@ int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name, size_t name_le
     struct Spoor *exe = exec_resolve_from_namespace_ex(p, name, name_len, &exe_size,
                                                        &exe_pheno_linux);
     if (!exe) {
-        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
+        sys_spawn_unbump_fds(bumped, fd_count);
         return -1;
     }
 
     struct spawn_with_fds_args *sa = kmalloc(sizeof(*sa), KP_ZERO);
     if (!sa) {
         spoor_clunk(exe);
-        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
+        sys_spawn_unbump_fds(bumped, fd_count);
         return -1;
     }
     sa->exe      = exe;
@@ -8356,7 +8569,7 @@ int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name, size_t name_le
     if (pid < 0) {
         kfree(sa);
         spoor_clunk(exe);
-        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
+        sys_spawn_unbump_fds(bumped, fd_count);
         return -1;
     }
     return pid;
@@ -8493,14 +8706,14 @@ static int sys_spawn_full_with_perms_for_proc(struct Proc *p,
     struct Spoor *exe = exec_resolve_from_namespace_ex(p, name, name_len, &exe_size,
                                                        &exe_pheno_linux);
     if (!exe) {
-        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
+        sys_spawn_unbump_fds(bumped, fd_count);
         return -1;
     }
 
     struct spawn_with_fds_args *sa = kmalloc(sizeof(*sa), KP_ZERO);
     if (!sa) {
         spoor_clunk(exe);
-        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
+        sys_spawn_unbump_fds(bumped, fd_count);
         return -1;
     }
     sa->exe        = exe;
@@ -8517,7 +8730,7 @@ static int sys_spawn_full_with_perms_for_proc(struct Proc *p,
     if (pid < 0) {
         kfree(sa);
         spoor_clunk(exe);
-        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
+        sys_spawn_unbump_fds(bumped, fd_count);
         return -1;
     }
     return pid;
@@ -8549,6 +8762,9 @@ int sys_spawn_full_for_proc(struct Proc *p, const char *name, size_t name_len,
 // suite can drive the per-bit decision directly on synthetic Procs.
 int spawn_perm_grant_check(struct Proc *p, u32 perm_flags) {
     if (perm_flags & ~SPAWN_PERM_ALL)                              return -1;
+    if ((perm_flags & SPAWN_PERM_SEAT_MANAGER) && !proc_is_console_attached(p)) return -1;
+    if ((perm_flags & (SPAWN_PERM_SEAT_SERVICE | SPAWN_PERM_SEAT_CLIENT))
+            && !proc_is_console_attached(p) && !proc_is_seat_manager(p)) return -1;
     if ((perm_flags & SPAWN_PERM_CONSOLE_TRUSTED)
             && !proc_is_console_attached(p))                       return -1;
     if ((perm_flags & SPAWN_PERM_MAY_POST_SERVICE)
@@ -8599,6 +8815,10 @@ int spawn_perm_grant_check(struct Proc *p, u32 perm_flags) {
 // (a real spawn races the child's exit clearing g_console_owner, so the owner-set
 // wiring is unobservable through a full spawn).
 void apply_spawn_perms(struct Proc *p, u32 perm_flags) {
+    if (perm_flags & SPAWN_PERM_SEAT_MANAGER) proc_mark_seat_manager(p);
+    if (perm_flags & SPAWN_PERM_SEAT_SERVICE) (void)proc_set_seat_service(p);
+    if (perm_flags & SPAWN_PERM_SEAT_CLIENT) (void)proc_set_seat_client(p);
+
     if (perm_flags & SPAWN_PERM_MAY_POST_SERVICE) {
         proc_mark_may_post_service(p);
     }
@@ -9142,7 +9362,7 @@ static int sys_spawn_full_argv_with_perms_for_proc(
     struct Spoor *exe = exec_resolve_from_namespace_ex(p, name, name_len,
                                                        &exe_size, &exe_pheno_linux);
     if (!exe) {
-        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
+        sys_spawn_unbump_fds(bumped, fd_count);
         return -1;
     }
 
@@ -9154,7 +9374,7 @@ static int sys_spawn_full_argv_with_perms_for_proc(
         argv_data_copy = kmalloc(argv_data_len, 0);
         if (!argv_data_copy) {
             spoor_clunk(exe);
-            for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
+            sys_spawn_unbump_fds(bumped, fd_count);
             return -1;
         }
         for (u32 i = 0; i < argv_data_len; i++) argv_data_copy[i] = argv_data[i];
@@ -9164,7 +9384,7 @@ static int sys_spawn_full_argv_with_perms_for_proc(
     if (!sa) {
         if (argv_data_copy) kfree(argv_data_copy);
         spoor_clunk(exe);
-        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
+        sys_spawn_unbump_fds(bumped, fd_count);
         return -1;
     }
     sa->exe           = exe;
@@ -9205,7 +9425,7 @@ static int sys_spawn_full_argv_with_perms_for_proc(
         kfree(sa);
         if (argv_data_copy) kfree(argv_data_copy);
         spoor_clunk(exe);
-        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
+        sys_spawn_unbump_fds(bumped, fd_count);
         return -1;
     }
     return pid;
@@ -10159,12 +10379,11 @@ int sys_srv_accept_for_proc(struct Proc *p, hidx_t service_h) {
     // that was tombstoned and rebound by a different poster.
     u64 caller = proc_stripes(p);
     if (caller == 0)                                    return -1;
-    if (svc->poster_stripes != caller)                  return -1;
 
     // Block until a connection is on the backlog. NULL means the service
     // stopped being LIVE while we blocked (the poster exited / a test
     // reset the registry) — fail closed.
-    struct SrvConn *cn = srv_accept_blocking(svc);
+    struct SrvConn *cn = srv_accept_blocking(svc, caller);
     if (!cn) return -1;
 
     // Wrap the accepted SrvConn in a devsrv connection Spoor — corvus's
@@ -10294,6 +10513,46 @@ int sys_srv_peer_for_proc(struct Proc *p, hidx_t conn_h,
     // reports 0, never a pid a REUSED table entry now owns.
     out->pid          = peer_alive ? (u32)peer_pid : 0u;
     return 0;
+}
+
+// The native twin of the phenotype's fcntl(F_SETFL, O_NONBLOCK): one helper
+// owns the flag word's lock-domain rules, so both front doors share them.
+static s64 sys_set_nonblock_handler(u64 fd, u64 on) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc || fd >= PROC_HANDLE_MAX || on > 1) return -T_E_INVAL;
+    return handle_set_nonblock(t->proc, (hidx_t)fd, on != 0) == 0 ? 0 : -T_E_BADF;
+}
+
+// Non-static so the kernel tests drive every gate with a synthetic Proc (the
+// sys_weft_share_for_proc shape). Both identity gates run BEFORE the claim:
+// the claim consumes the share, so a stranger must never reach it.
+s64 sys_seat_import_for_proc(struct Proc *p, u64 conn, u64 share_id);
+s64 sys_seat_import_for_proc(struct Proc *p, u64 conn, u64 share_id) {
+    if (!p || conn >= PROC_HANDLE_MAX || !proc_is_seat_service(p)) return -1;
+    if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_HW_CREATE) == 0) return -1;
+    struct srv_peer_info peer;
+    if (sys_srv_peer_for_proc(p, (hidx_t)conn, &peer) != 0 || !peer.alive) return -1;
+    struct Burrow *v = weft_share_claim_from(share_id, peer.stripes);
+    if (!v) return -1;
+    // Never import device MMIO, queues, ANON, hostmem or trusted private DMA.
+    // Only the kernel's two explicitly share-admissible pixel/BO kinds qualify.
+    struct KObj_DMA *dma = v->type == BURROW_TYPE_DMA ? v->kobj_dma : NULL;
+    if (!dma || (!dma->weave && !dma->gpu_bo) ||
+            !allowance_permits(p, HW_RES_DMA, dma->size, 0)) {
+        burrow_unref(v);
+        return -1;
+    }
+    kobj_dma_ref(dma);
+    hidx_t fd = allowance_handle_alloc(p, KOBJ_DMA, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP, dma);
+    if (fd < 0) kobj_dma_unref(dma);
+    burrow_unref(v);
+    return (s64)fd;
+}
+
+static s64 sys_seat_import_handler(u64 conn, u64 share_id) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) return -1;
+    return sys_seat_import_for_proc(t->proc, conn, share_id);
 }
 
 static s64 sys_srv_peer_handler(u64 conn_h_raw, u64 out_va) {
@@ -10513,6 +10772,29 @@ static s64 sys_console_relinquish_handler(void) {
 // g_proc_table_lock hold in proc_console_episode; this handler only resolves
 // the caller. Returns 0 / -1 (a non-trusted caller, a bad op, END with no
 // open episode).
+static s64 sys_trusted_seat_handler(u64 op, u64 va) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc || op > SEAT_CLIENT || !va ||
+            va >= UACCESS_USER_VA_TOP || sizeof(struct seat_message) > UACCESS_USER_VA_TOP - va)
+        return -1;
+    struct seat_message message;
+    seat_zero(&message, sizeof(message));
+    u8 *bytes = (u8 *)&message;
+    for (u64 i = 0; i < sizeof(message); i++)
+        if (uaccess_load_u8(va + i, &bytes[i]) != 0) { seat_zero(&message, sizeof(message)); return -1; }
+    int rc = proc_seat_op(t->proc, (u32)op, &message);
+    if (rc < 0) { seat_zero(&message, sizeof(message)); return -1; }
+    for (u64 i = 0; i < sizeof(message); i++) {
+        if (uaccess_store_u8(va + i, bytes[i]) != 0) {
+            for (u64 j = 0; j < i; j++) (void)uaccess_store_u8(va + j, 0);
+            seat_zero(&message, sizeof(message));
+            return -1;
+        }
+    }
+    seat_zero(&message, sizeof(message));
+    return rc;
+}
+
 static s64 sys_console_episode_handler(u64 op) {
     struct Thread *t = current_thread();
     if (!t)                            return -1;
@@ -12615,23 +12897,25 @@ static struct Spoor *viv_mutation_parent(struct Proc *p, u64 path_va,
 
     struct Spoor *root = territory_root_ref(p->territory);
     if (!root)                   { *err_out = -(s64)T_E_INVAL;  return NULL; }
-    int serr = 0;
     // STALK_REMOVE (UM-7 F3): a union parent resolves to the mount point
     // UNCROSSED; *is_union_out then tells the caller to select the member that
-    // HOLDS the leaf (viv_union_member), not member 0 / the MCREATE member.
-    struct Spoor *parent = sys_stalk_parent(p, root, rpath, leaf_start,
-                                            STALK_REMOVE, &serr);
+    // HOLDS the leaf (viv_union_member), not member 0 / the MCREATE member. The
+    // resolver says so itself (stalk_remove_parent). This used to be a probe of
+    // the table AFTER stalk returned, which a peer's unmount could answer
+    // wrongly in both directions -- R2-F4 fixed the shrink to one member by
+    // probing index 0, and a shrink to ZERO still read as "not a union" and
+    // handed the COVERED directory to the mutation (shed audit round 3, F3).
+    // Now the answer is fixed when the resolver chooses: a union that dissolves
+    // afterwards makes stalk_union_member_holding find no member -> ENOENT,
+    // never the point.
+    const char *pp = (leaf_start == 0) ? "." : rpath;
+    u64 pl         = (leaf_start == 0) ? 1   : leaf_start;
+    int serr = T_E_NOENT;
+    bool upoint = false;
+    struct Spoor *parent = stalk_remove_parent(p, root, pp, pl, &serr, &upoint);
     spoor_clunk(root);
     if (!parent)                 { *err_out = -(s64)serr;       return NULL; }
-    if (p->territory) {
-        // R2-F4: probe index 0 ("is this the uncrossed mount point STALK_REMOVE
-        // left me"), NOT index 1. A >=2-member test flips to "not union" if a
-        // peer unmounts to a single member between stalk and here -- routing the
-        // unlink onto the covered mounted-onto directory. Index 0 is stable and
-        // stalk_union_member_holding handles any member count (1..N).
-        struct Spoor *m0 = mount_member_at(p->territory, parent, 0, NULL);
-        if (m0) { spoor_clunk(m0); *is_union_out = true; }
-    }
+    *is_union_out = upoint;
     return parent;
 }
 
@@ -12679,6 +12963,67 @@ static struct Spoor *viv_union_member(struct Proc *p, struct Spoor *resolved,
 // PARENT's frame -- the child's regs[0] was set to 0 in its own COPY of the
 // frame by fork_frame_init, before this function returns, and the child is a
 // different Thread on a different stack that never comes back through here.
+// getdents64's staging buffers are the reason this lives OUT OF LINE.
+// `viv_tier2` is one switch, and the compiler unions every case's locals into
+// ONE frame -- so raw[2048] + enc[2560] were allocated on EVERY Linux-phenotype
+// syscall, openat and read included. Measured at 4720 bytes per call, which put
+// the deepest phenotype chain at 86% of the 16 KiB kernel stack before this
+// chunk adds an IRQ frame to it (ARCHITECTURE.md 8.12). noinline is load-bearing,
+// not a hint: inlining this back into the switch restores the union.
+__attribute__((noinline))
+static s64 viv_getdents64_run(struct Proc *p, const u64 *args) {
+    // getdents64(fd, dirp, count): x0 fd, x1 dirp, x2 count. One raw
+    // fetch through the SAME spoor_readdir_run the native SYS_READDIR
+    // runs (dev-op + malformed guard + the #955 stale-cursor bound --
+    // extraction, not duplication), then the pure
+    // viv_dirent64_encode_run re-encode, then the copy-out, then the
+    // cursor commit. Order is load-bearing: the cursor advances to the
+    // last EMITTED entry's cookie only after the user copy succeeded
+    // (the F3 property both native and phenotype readers share), so a
+    // partial fit or a faulted copy re-fetches, never skips. A raw
+    // fetch the user buffer cannot hold ONE record of answers EINVAL
+    // (the Linux row), cursor unchanged.
+    //
+    // Frame note: 2048 raw + 2560 encoded. The encode's worst growth is
+    // align8(20+n)/(24+n), maximized at n==5 (32/29): 2048 * 32/29 =
+    // 2260 < 2560, so the cap never truncates what the fit-check would
+    // admit; the per-record fit-check enforces it regardless.
+    enum { VIV_GD_RAW = 2048, VIV_GD_ENC = 2560 };
+    u64 count = args[2];
+    if (count == 0)                          return -(s64)T_E_INVAL;
+    // Validate the user buffer BEFORE any access -- the getdents64 copy-out
+    // below writes straight to args[1] via uaccess_store_u8, whose fault
+    // fixup only engages for the USER half; a kernel-range dirp from an
+    // unprivileged phenotype would otherwise extinct (or, at a writable
+    // kernel VA, corrupt) rather than fault-gracefully. Mirror the native
+    // sys_readdir_handler, which validates its buffer up front. The write
+    // is bounded by dst_cap (<= VIV_GD_ENC), so validating that span covers
+    // every store the loop can make.
+    u64 dst_cap = (count < (u64)VIV_GD_ENC) ? count : (u64)VIV_GD_ENC;
+    if (!sys_validate_user_buf(args[1], dst_cap)) return -(s64)T_E_FAULT;
+    struct Spoor *c = sys_lookup_spoor(p, (hidx_t)args[0], RIGHT_READ);
+    if (!c)                                  return -(s64)T_E_BADF;
+    if (!(c->qid.type & QTDIR))            { spoor_clunk(c); return -(s64)T_E_NOTDIR; }
+
+    u8  raw[VIV_GD_RAW];
+    u64 run_cookie = 0;
+    s64 got = spoor_readdir_run(c, raw, (long)VIV_GD_RAW, &run_cookie);
+    if (got <= 0)                          { spoor_clunk(c); return got; }
+
+    u8  enc[VIV_GD_ENC];
+    u64 emit_cookie = 0;
+    u64 emitted = viv_dirent64_encode_run(raw, (u64)got, enc, dst_cap,
+                                          &emit_cookie);
+    if (emitted == 0)                      { spoor_clunk(c); return -(s64)T_E_INVAL; }
+
+    for (u64 i = 0; i < emitted; i++) {
+        if (uaccess_store_u8(args[1] + i, enc[i]) != 0)
+                                           { spoor_clunk(c); return -(s64)T_E_FAULT; }
+    }
+    c->offset = (s64)emit_cookie;
+    spoor_clunk(c);
+    return (s64)emitted;
+}
 static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
                      u64 linux_nr, const u64 *args) {
     switch (linux_nr) {
@@ -12870,59 +13215,8 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         return rc;
     }
 
-    case VIV_LINUX_GETDENTS64: {
-        // getdents64(fd, dirp, count): x0 fd, x1 dirp, x2 count. One raw
-        // fetch through the SAME spoor_readdir_run the native SYS_READDIR
-        // runs (dev-op + malformed guard + the #955 stale-cursor bound --
-        // extraction, not duplication), then the pure
-        // viv_dirent64_encode_run re-encode, then the copy-out, then the
-        // cursor commit. Order is load-bearing: the cursor advances to the
-        // last EMITTED entry's cookie only after the user copy succeeded
-        // (the F3 property both native and phenotype readers share), so a
-        // partial fit or a faulted copy re-fetches, never skips. A raw
-        // fetch the user buffer cannot hold ONE record of answers EINVAL
-        // (the Linux row), cursor unchanged.
-        //
-        // Frame note: 2048 raw + 2560 encoded. The encode's worst growth is
-        // align8(20+n)/(24+n), maximized at n==5 (32/29): 2048 * 32/29 =
-        // 2260 < 2560, so the cap never truncates what the fit-check would
-        // admit; the per-record fit-check enforces it regardless.
-        enum { VIV_GD_RAW = 2048, VIV_GD_ENC = 2560 };
-        u64 count = args[2];
-        if (count == 0)                          return -(s64)T_E_INVAL;
-        // Validate the user buffer BEFORE any access -- the getdents64 copy-out
-        // below writes straight to args[1] via uaccess_store_u8, whose fault
-        // fixup only engages for the USER half; a kernel-range dirp from an
-        // unprivileged phenotype would otherwise extinct (or, at a writable
-        // kernel VA, corrupt) rather than fault-gracefully. Mirror the native
-        // sys_readdir_handler, which validates its buffer up front. The write
-        // is bounded by dst_cap (<= VIV_GD_ENC), so validating that span covers
-        // every store the loop can make.
-        u64 dst_cap = (count < (u64)VIV_GD_ENC) ? count : (u64)VIV_GD_ENC;
-        if (!sys_validate_user_buf(args[1], dst_cap)) return -(s64)T_E_FAULT;
-        struct Spoor *c = sys_lookup_spoor(p, (hidx_t)args[0], RIGHT_READ);
-        if (!c)                                  return -(s64)T_E_BADF;
-        if (!(c->qid.type & QTDIR))            { spoor_clunk(c); return -(s64)T_E_NOTDIR; }
-
-        u8  raw[VIV_GD_RAW];
-        u64 run_cookie = 0;
-        s64 got = spoor_readdir_run(c, raw, (long)VIV_GD_RAW, &run_cookie);
-        if (got <= 0)                          { spoor_clunk(c); return got; }
-
-        u8  enc[VIV_GD_ENC];
-        u64 emit_cookie = 0;
-        u64 emitted = viv_dirent64_encode_run(raw, (u64)got, enc, dst_cap,
-                                              &emit_cookie);
-        if (emitted == 0)                      { spoor_clunk(c); return -(s64)T_E_INVAL; }
-
-        for (u64 i = 0; i < emitted; i++) {
-            if (uaccess_store_u8(args[1] + i, enc[i]) != 0)
-                                               { spoor_clunk(c); return -(s64)T_E_FAULT; }
-        }
-        c->offset = (s64)emit_cookie;
-        spoor_clunk(c);
-        return (s64)emitted;
-    }
+    case VIV_LINUX_GETDENTS64:
+        return viv_getdents64_run(p, args);
 
     case VIV_LINUX_FSYNC:
     case VIV_LINUX_FDATASYNC: {
@@ -14275,7 +14569,79 @@ static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
     }
 }
 
+static void syscall_dispatch_body(struct exception_context *ctx);
+
+// ARCH 8.12. THE SYSCALL BODY RUNS WITH INTERRUPTS ON, AND IS STILL
+// NON-PREEMPTIBLE. This wrapper is the whole mechanism; the body below is
+// unchanged.
+//
+// Phase 0 deferred kernel PREEMPTION to Phase 7. P3-Ec wired the SVC path
+// under the mask exception entry sets and never lifted it, so the deferral of
+// preemption was BUILT as "interrupts off" -- a strictly stronger and
+// different property that nothing recorded (ARCH 8.1). The cost was that any
+// syscall which LOOPS held its CPU's interrupts for as long as it looped, and
+// making one loop takes no privilege.
+//
+// WHY A WRAPPER RATHER THAN EDITS IN vectors.S. The re-mask MUST precede
+// KERNEL_EXIT, which installs ELR/SPSR and erets under an INHERITED mask --
+// the one surviving #713-class window that does not mask locally. #713 was the
+// year-long AEGIS corruption: 3-13% of boots, never at -smp 1. A single-exit
+// wrapper makes "unmask leaks past the return tail" structurally impossible
+// rather than merely intended, and confines the unmask to the SVC body, so
+// kernel fault handling (the shared 0x400 slot) still runs masked and the #214
+// EL1-sync depth guard keeps its discriminator.
+//
+// ORDER IS LOAD-BEARING IN BOTH DIRECTIONS, and each order has a buggy cfg:
+//   enter: marker THEN unmask. Unmasking first opens a window where an IRQ
+//          sees no marker and preempts a thread already inside its syscall
+//          (specs/syscall_irqs_buggy_unmask_before_mark.cfg).
+//   leave: re-mask THEN clear. Clearing first leaves a window where we are
+//          unmasked with no marker, so the switch could be taken somewhere
+//          other than the boundary the design names.
+//
+// The deferred reschedule is not denied, only POSTPONED: with the marker
+// cleared, .Lel0_sync_return's preempt_check_irq takes it
+// (specs/syscall_irqs_buggy_marker_never_cleared.cfg is this clear removed,
+// and it violates TailTookItsPreempt).
+//
+// What this does NOT buy, so the claim reads no larger: a thread looping in a
+// syscall body still holds its CPU against other runnable threads until it
+// returns or sleeps. Interrupts are SERVED -- the SAK arrives, drivers run --
+// but the scheduler does not switch. That is what non-preemptible means, and
+// closing it is full kernel preemption (ROADMAP Phase 7).
 void syscall_dispatch(struct exception_context *ctx) {
+    ASSERT_IRQS_MASKED("the SVC vector masks at exception entry");
+
+    // ASSERTED, not guarded (ARCH 8.12 audit F6). A NULL thread here would
+    // run the body unmasked AND preemptible -- an involuntary switch inside a
+    // syscall body, the one thing NoInvoluntarySwitchInBody forbids -- and an
+    // `if (t)` would let it happen in silence. No live path reaches here
+    // without a current thread (an EL0 SVC implies thread_init ran; the direct
+    // test callers run on the boot kthread), which is exactly why the
+    // impossible case should be loud rather than tolerated. Every other
+    // precondition in this wrapper is an assert; this one was the odd branch.
+    struct Thread *t = current_thread();
+    ASSERT_OR_DIE(t, "syscall_dispatch with no current thread");
+    t->in_syscall = 1u;
+    irq_unmask_local();
+
+    syscall_dispatch_body(ctx);
+
+    irq_mask_local();
+    t->in_syscall = 0u;
+
+    ASSERT_IRQS_MASKED("the re-mask must precede the KERNEL_EXIT eret window, "
+                       "which inherits its mask (#713)");
+}
+
+static void syscall_dispatch_body(struct exception_context *ctx) {
+    // ARCH 8.12's property, witnessed on EVERY syscall of every boot rather
+    // than in one test. This is what replaced poll's preemption point: the
+    // point unmasked for a window and had to prove it with a bespoke witness;
+    // the body is simply unmasked throughout, and this assert says so
+    // continuously, on every syscall the suite, the fleet and the SMP gate
+    // make.
+    ASSERT_IRQS_ENABLED("a syscall body runs interrupts-on (ARCH 8.12)");
     // VIVARIUM V-1b: a phenotyped Proc's numbers are decoded through the
     // translation table before anything else looks at them. A native Proc
     // (phenotype == PHENO_NATIVE, the default and every Proc outside a
@@ -14343,7 +14709,7 @@ void syscall_dispatch(struct exception_context *ctx) {
         return;
 
     case SYS_IRQ_WAIT:
-        ctx->regs[0] = (u64)sys_irq_wait_handler(ctx->regs[0]);
+        ctx->regs[0] = (u64)sys_irq_wait_handler(ctx->regs[0], ctx->regs[1]);
         return;
 
     case SYS_MMIO_MAP:
@@ -14381,6 +14747,23 @@ void syscall_dispatch(struct exception_context *ctx) {
                                                     ctx->regs[3]);
         return;
 
+    case SYS_PCI_IRQ_CREATE:
+        ctx->regs[0] = (u64)sys_pci_irq_create_handler(ctx->regs[0], ctx->regs[1], ctx->regs[2]);
+        return;
+    case SYS_PCI_IRQ_ARM:
+    case SYS_PCI_IRQ_WAIT:
+    case SYS_PCI_IRQ_COMPLETE:
+    case SYS_PCI_IRQ_DISABLE:
+    case SYS_PCI_IRQ_INFO:
+        ctx->regs[0] = (u64)sys_pci_irq_op(ctx->regs[8], ctx->regs[0], ctx->regs[1], ctx->regs[2]);
+        return;
+    case SYS_PCI_MAP_WINDOW:
+        ctx->regs[0] = (u64)sys_pci_map_window_handler(ctx->regs[0], ctx->regs[1],
+                            ctx->regs[2], ctx->regs[3], ctx->regs[4], ctx->regs[5]);
+        return;
+    case SYS_PCI_WINDOWS:
+        ctx->regs[0] = (u64)sys_pci_windows_handler(ctx->regs[0], ctx->regs[1], ctx->regs[2]);
+        return;
     case SYS_PCI_INFO:
         ctx->regs[0] = (u64)sys_pci_info_handler(ctx->regs[0],
                                                  ctx->regs[1]);
@@ -14754,6 +15137,18 @@ void syscall_dispatch(struct exception_context *ctx) {
         return;
 
     // IM-1: the trusted EPISODE (IMPERIUM-DESIGN.md 11.3; I-27).
+    case SYS_SET_NONBLOCK:
+        ctx->regs[0] = (u64)sys_set_nonblock_handler(ctx->regs[0], ctx->regs[1]);
+        return;
+
+    case SYS_SEAT_IMPORT:
+        ctx->regs[0] = (u64)sys_seat_import_handler(ctx->regs[0], ctx->regs[1]);
+        return;
+
+    case SYS_TRUSTED_SEAT:
+        ctx->regs[0] = (u64)sys_trusted_seat_handler(ctx->regs[0], ctx->regs[1]);
+        return;
+
     case SYS_CONSOLE_EPISODE:
         ctx->regs[0] = (u64)sys_console_episode_handler(ctx->regs[0]);
         return;

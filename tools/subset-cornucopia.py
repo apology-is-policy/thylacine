@@ -22,9 +22,30 @@
 # codepoint the font lacks, or one whose advance is not the monospace
 # advance, never entered the atlas and so never enters the subset.
 #
-# Box-drawing / block elements (U+2500-259F) stay out for the same reason
-# they stay out of the bake: halcyond draws them procedurally so the joins
-# are pixel-exact across cells (boxglyph.rs).
+# `--extra` ADDS codepoints the bake does not carry (HALCYON-INSTRUMENT
+# 7.1, I-5): the subset is then a SUPERSET of the atlas -- every baked
+# codepoint is still in it (halcyond's test holds), and the extras serve
+# only the outline tier. The Instrument set is the six glyphs its surfaces
+# use (lambda, the check mark, the angle quotes, minus, the command glyph)
+# plus the box-drawing block U+2500-257F:
+#
+#   --extra 03BB,2713,2039,203A,2212,2318,2500-257F
+#
+# The box-drawing glyphs are in the SUBSET but NOT in the bake, and the cell
+# path never uses them: halcyond draws U+2500-259F procedurally on the cell
+# so the joins are pixel-exact (boxglyph, consulted BEFORE the face), which
+# is why the bake omits them. They are cut in for the free-running mono
+# path (a chrome run at the type map's 10/11 px, no cell), where a font
+# glyph is the right thing and a procedural cell glyph does not exist.
+#
+# `--match <ttf>` cuts a SECOND FACE to the same codepoints (the Italic,
+# ruling 11) and refuses unless its cell-bearing tables -- upem, the OS/2
+# Windows ascent/descent, the advance of 'x' -- equal the given face's, so
+# the italic lands in the Regular's cell by construction:
+#
+#   --ttf ~/projects/cornucopia-font/cornucopia-Italic.ttf \
+#       --match usr/lib/cornucopia/src/cornucopia-subset.ttf \
+#       --extra ... --out usr/lib/cornucopia/src/cornucopia-subset-italic.ttf
 #
 # The output is a COMMITTED generated artifact, beside the atlases it was
 # cut alongside -- not a third_party vendoring, which is reserved for
@@ -55,17 +76,45 @@ def atlas_codepoints(path):
     return cps, (cell_w, cell_h, baseline)
 
 
+def parse_extra(text):
+    """`03BB,2713,2500-257F` -> the codepoints named (hex; LO-HI ranges)."""
+    out = []
+    for item in text.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if "-" in item:
+            lo, hi = item.split("-", 1)
+            lo, hi = int(lo, 16), int(hi, 16)
+            if hi < lo:
+                raise SystemExit(f"--extra: empty range {item}")
+            out.extend(range(lo, hi + 1))
+        else:
+            out.append(int(item, 16))
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ttf", required=True)
     ap.add_argument("--atlas", required=True,
                     help="a baked atlas; its glyph table IS the subset set")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--extra", default="",
+                    help="codepoints to ADD beyond the atlas: hex, comma-"
+                         "separated, ranges as LO-HI (e.g. 03BB,2500-257F)")
+    ap.add_argument("--match", default=None,
+                    help="a cut face whose cell-bearing tables this cut "
+                         "must equal (the Italic against the Regular)")
     args = ap.parse_args()
 
     cps, cell = atlas_codepoints(args.atlas)
     print(f"{args.atlas}: cell {cell[0]}x{cell[1]} baseline {cell[2]}, "
           f"{len(cps)} codepoints")
+    extra = parse_extra(args.extra)
+    if extra:
+        print(f"extra: {len(extra)} codepoints beyond the atlas")
+    cps = sorted(set(cps) | set(extra))
 
     font = TTFont(args.ttf)
     cmap = font.getBestCmap()
@@ -114,6 +163,24 @@ def main():
     if short:
         raise SystemExit("the subset dropped codepoints the atlas carries: "
                          + ", ".join("U+%04X" % c for c in short))
+    if args.match:
+        ref = TTFont(args.match)
+        rcmap = ref.getBestCmap()
+        want = (ref["head"].unitsPerEm, ref["OS/2"].usWinAscent,
+                ref["OS/2"].usWinDescent, ref["hmtx"][rcmap[ord("x")]][0])
+        got = (out["head"].unitsPerEm, os2.usWinAscent, os2.usWinDescent, adv)
+        if want != got:
+            raise SystemExit(f"{args.out}: cell-bearing tables (upem, "
+                             f"winAscent, winDescent, x advance) {got} != "
+                             f"{args.match}'s {want}: the two faces would "
+                             "not share a cell")
+        rk = set(rcmap)
+        if set(kept) != rk:
+            raise SystemExit(f"{args.out}: codepoint set differs from "
+                             f"{args.match}'s (+{len(set(kept) - rk)} "
+                             f"-{len(rk - set(kept))})")
+        print(f"matches {args.match}: the same cell tables, the same "
+              f"{len(kept)} codepoints")
 
 
 if __name__ == "__main__":

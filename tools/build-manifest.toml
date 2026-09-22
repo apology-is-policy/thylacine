@@ -18,6 +18,11 @@
 #
 # The `forageable` field tells forage.sh what it can DO with each input:
 #   clone         git clone/fetch the repo + checkout `commit` into `path`
+#   clone-sparse  a PARTIAL (blob:none) clone of a huge upstream at the pinned
+#                 `commit` (fetched via `tag`), a sparse cone (`sparse`, space-
+#                 separated dirs), a local `branch`, then `git am` of every
+#                 patch under the in-repo `patches` dir. Upstream + our series;
+#                 no fork of our own to host.
 #   download      curl `url` into `dir`/`file`, then verify `sha256`
 #   remote-pull   run `pull` (delegates to the Clade builder; needs it reachable)
 #   remote-source a source pin for a remotely-built artifact; not fetched locally
@@ -26,7 +31,7 @@
 
 [meta]
 schema  = "1"
-updated = "2026-09-05"
+updated = "2026-09-21"
 
 # --- forks: sibling git trees, pinned by commit ------------------------------
 # `path` is where the build expects the tree (the `env` override points here too);
@@ -88,6 +93,25 @@ commit     = "b7f9ed2"
 feeds      = "the Clade GL stack (virgl/V3D; built remotely; source pin only)"
 forageable = "remote-source"
 
+# --- source: a pinned UPSTREAM tree + an in-repo patch series -----------------
+# Not a fork: nothing of ours is hosted. WebKit is ~13 GB whole; the partial
+# sparse clone JavaScriptCore needs is ~230 MB. build.sh refuses a checkout that
+# is not exactly pin + series (webkit_checkout_ok), so this section and the
+# WEBKIT_PIN constant in tools/build.sh must move together.
+
+[source.webkit]
+path       = "~/projects/webkit-thylacine"
+env        = "WEBKITFORK"
+probe      = "Source/JavaScriptCore/CMakeLists.txt"
+repo       = "https://github.com/WebKit/WebKit.git"
+tag        = "webkitgtk-2.54.0"
+commit     = "5220e80b97a253c60ed899361654142ab5021998"
+branch     = "thylacine"
+sparse     = "Source/JavaScriptCore Source/WTF Source/bmalloc Source/cmake Tools/Scripts"
+patches    = "usr/ports/webkit/patches"
+feeds      = "CHUNK_WEBKIT (Boosty B-0: JavaScriptCore, /webkit/jsc)"
+forageable = "clone-sparse"
+
 # --- cache: manual-drop inputs, sha256-pinned --------------------------------
 # The sha256 is the source of truth; the URL is the canonical Alpine mirror. If a
 # URL 404s (Alpine archives an old -rN when a newer one lands), the sha still
@@ -115,6 +139,14 @@ dir        = "build/cache"
 url        = "https://github.com/stunnel/static-curl/releases/download/8.18.0/curl-linux-aarch64-musl-8.18.0.tar.xz"
 sha256     = "4df5282b8ef0e336c64faa52b546272b421146d522733606ae5343b416b646b2"
 feeds      = "the alpine-net bundle's /usr/bin/curl (the ROADMAP 9.2 curl-fetches-a-URL vehicle)"
+forageable = "download"
+
+[cache.icu4c]
+file       = "icu4c-78.3-sources.tgz"
+dir        = "build/cache"
+url        = "https://github.com/unicode-org/icu/releases/download/release-78.3/icu4c-78.3-sources.tgz"
+sha256     = "3a2e7a47604ba702f345878308e6fefeca612ee895cf4a5f222e7955fabfe0c0"
+feeds      = "CHUNK_WEBKIT (ICU 78.3, cross-built static for JavaScriptCore's Intl)"
 forageable = "download"
 
 # --- network: build.sh fetches it itself at build time -----------------------
@@ -155,6 +187,16 @@ forageable = "auto-at-build"
 # These cannot be cheaply rebuilt on the Mac (the cross-LLVM is ~45 GiB of build
 # tree). forage delegates the pull to the Clade builder driver, which needs the
 # permanent builder reachable; otherwise it instructs.
+
+[remote.static_git]
+path          = "build/cache"
+probe         = "build/cache/git-static-2.51.2-curl-aarch64-musl.tar.gz"
+builder       = "thyla-pi"
+source_commit = "git 2.51.2 + a static http/https-only libcurl over OpenSSL, aarch64-linux-musl (docs/GIT-ON-THYLACINE.md B1)"
+pull          = "mkdir -p build/cache && scp -q thyla-pi-cf:gitbuild/git-static-2.51.2-curl-aarch64-musl.tar.gz build/cache/"
+sha256        = "cea4a1d1712905f457509b0941108451d6b43576888aa9ca714f726eae374329"
+feeds         = "/viv/bin (the production Linux git + its https helper closure) and the git-probe / git-net / git-workflow bundles; absent -> no `git` in the image and tools/interactive/git-shell.exp SKIPs"
+forageable    = "remote-pull"
 
 [remote.clade_llvm]
 path          = "build/clade/llvm-build"

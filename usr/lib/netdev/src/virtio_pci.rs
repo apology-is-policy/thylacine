@@ -34,7 +34,7 @@ use core::arch::asm;
 use libthyla_rs::handle::Rights;
 use libthyla_rs::hardware::{
     mmio_read16, mmio_read32, mmio_read8, mmio_write16, mmio_write32, mmio_write64, mmio_write8,
-    Dma, Irq, PciDev, PciError, PciRegion, PCI_BAR_VA_STRIDE,
+    Dma, PciIrq, PciIrqMode, PciDev, PciError, PciRegion, PCI_BAR_VA_STRIDE,
 };
 use libthyla_rs::{virtio_rmb, T_PROT_READ, T_PROT_WRITE};
 
@@ -82,7 +82,6 @@ const ISR_QUEUE: u8 = 1 << 0;
 
 // MSI-X is undriven at v1.0 (INTx only) -- park both the config + per-queue
 // MSI-X vectors at NO_VECTOR so the device routes interrupts through INTx.
-const VIRTIO_MSI_NO_VECTOR: u16 = 0xFFFF;
 
 // =============================================================================
 // virtio_pci_common_cfg field offsets (VIRTIO 1.2 section 4.1.4.3).
@@ -92,11 +91,9 @@ const CCFG_DEVICE_FEATURE_SELECT: u64 = 0x00; // le32 RW
 const CCFG_DEVICE_FEATURE: u64 = 0x04; // le32 RO
 const CCFG_DRIVER_FEATURE_SELECT: u64 = 0x08; // le32 RW
 const CCFG_DRIVER_FEATURE: u64 = 0x0C; // le32 RW
-const CCFG_CONFIG_MSIX_VECTOR: u64 = 0x10; // le16 RW
 const CCFG_DEVICE_STATUS: u64 = 0x14; // u8 RW
 const CCFG_QUEUE_SELECT: u64 = 0x16; // le16 RW
 const CCFG_QUEUE_SIZE: u64 = 0x18; // le16 RW
-const CCFG_QUEUE_MSIX_VECTOR: u64 = 0x1A; // le16 RW
 const CCFG_QUEUE_ENABLE: u64 = 0x1C; // le16 RW
 const CCFG_QUEUE_NOTIFY_OFF: u64 = 0x1E; // le16 RO
 const CCFG_QUEUE_DESC: u64 = 0x20; // le64 RW
@@ -235,7 +232,7 @@ pub struct VirtioNetPci {
     // `VirtioNetPci::drop` quiesces the device (Rust runs the outer drop before
     // field drops), so the device is reset before any page release.
     _pci: PciDev,
-    _irq: Irq,
+    _irq: PciIrq,
     ring: Dma,
     txpool: Dma,
     rxpool: Dma,
@@ -283,9 +280,10 @@ impl VirtioNetPci {
             .filter(|&(_, len)| len >= DEVICE_CFG_MIN_LEN)
             .map(|(va, _)| va);
         let notify_mul = u64::from(pci.notify_off_multiplier());
-        let intid = pci.intid().ok_or(PciOpenError::NoIntid)?;
-
-        let irq = Irq::new(intid, Rights::SIGNAL).map_err(|_| PciOpenError::IrqClaim)?;
+        let irq = PciIrq::for_virtio(&pci, &[0, 1]).map_err(|_| PciOpenError::IrqClaim)?;
+        libthyla_rs::t_putstr(if irq.mode() == PciIrqMode::Msix {
+            "netd: PCI IRQ mode=Msix\n"
+        } else { "netd: PCI IRQ mode=Intx\n" });
 
         let ring = unsafe { Dma::new(RING_DMA_SIZE, rw_map, RING_DMA_USER_VA, prot) }
             .map_err(|_| PciOpenError::DmaAlloc)?;
@@ -316,6 +314,13 @@ impl VirtioNetPci {
             &mut tx_notify_va,
         )?;
 
+        if irq.mode() == PciIrqMode::Intx { unsafe { let _ = r8(isr_va); } }
+        dsb_sy();
+        if irq.arm().is_err() {
+            unsafe { w8(common_va + CCFG_DEVICE_STATUS, 0); }
+            dsb_sy();
+            return Err(PciOpenError::IrqClaim);
+        }
         Ok(Self {
             _pci: pci,
             _irq: irq,
@@ -461,8 +466,18 @@ impl VirtioNetPci {
     /// virtqueue progress (vs a config-change-only wake). Reading the ISR byte
     /// clears it -- no separate ACK register on the PCI transport.
     pub fn wait_irq(&self) -> bool {
-        let _ = self._irq.wait();
-        let isr = unsafe { r8(self.isr_va) };
+        let event = match self._irq.wait() {
+            Ok(Some(event)) => event,
+            _ => return false,
+        };
+        let isr = if self._irq.mode() == PciIrqMode::Intx { unsafe { r8(self.isr_va) } } else { ISR_QUEUE };
+        dsb_sy();
+        // A retry leaves delivery masked. The outer loop drains rings before
+        // waiting again; WAIT then supplies the same ticket after its cooldown.
+        match self._irq.complete(event) {
+            Ok(()) | Err(libthyla_rs::err::Error::WouldBlock) => {}
+            Err(_) => return false,
+        }
         isr & ISR_QUEUE != 0
     }
 
@@ -515,7 +530,6 @@ fn setup_queue(common: u64, queue: u16, desc_pa: u64, avail_pa: u64, used_pa: u6
         w64(common + CCFG_QUEUE_DESC, desc_pa);
         w64(common + CCFG_QUEUE_DRIVER, avail_pa);
         w64(common + CCFG_QUEUE_DEVICE, used_pa);
-        w16(common + CCFG_QUEUE_MSIX_VECTOR, VIRTIO_MSI_NO_VECTOR);
         let notify_off = r16(common + CCFG_QUEUE_NOTIFY_OFF);
         w16(common + CCFG_QUEUE_ENABLE, 1);
         Some(notify_off)
@@ -582,12 +596,10 @@ fn init_device(
     tx_notify_va: &mut u64,
 ) -> Result<u32, PciOpenError> {
     unsafe {
-        // Reset, then ACKNOWLEDGE + DRIVER.
-        w8(common + CCFG_DEVICE_STATUS, 0);
+        // The interrupt constructor reset and selected vectors; now ACKNOWLEDGE + DRIVER.
+        // PciIrq::for_virtio completed reset and selected queue vectors.
         w8(common + CCFG_DEVICE_STATUS, STATUS_ACKNOWLEDGE);
         w8(common + CCFG_DEVICE_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER);
-        // Park the device-config MSI-X vector (INTx).
-        w16(common + CCFG_CONFIG_MSIX_VECTOR, VIRTIO_MSI_NO_VECTOR);
 
         // Feature negotiation: low dword (net features), then high (VERSION_1).
         w32(common + CCFG_DEVICE_FEATURE_SELECT, 0);

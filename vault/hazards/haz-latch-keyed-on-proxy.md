@@ -3,7 +3,7 @@ id: haz-latch-keyed-on-proxy
 type: haz
 title: "A latch keyed on a proxy property fires on every class the proxy covers and the property does not"
 applies-to: [global]
-instances: [fnd-zoom-r1-f1]
+instances: [fnd-zoom-r1-f1, fnd-b0poll-r6-s1]
 created: 2026-09-05
 updated: 2026-09-05
 ---

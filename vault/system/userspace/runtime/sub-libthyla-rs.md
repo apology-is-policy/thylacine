@@ -42,7 +42,7 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-09-06
+updated: 2026-09-21
 ---
 ## Purpose
 
@@ -61,6 +61,13 @@ program ask the kernel to do" but **"what does the library add, and where does
 what it adds disagree with what it says it adds"**.
 
 ## Contract
+
+**Imperium/Haul ABI mirrors (2026-09-17).** The native wrappers add console
+episode operations at 110, propagating grant at 111, and POST_SERVICE bit 13,
+while preserving DMA_SEGMENTS=112. The cap helper exposes the grant flag, and
+the notes vocabulary includes session hangup. Haul uses existing WALK_CREATE,
+SRV_ACCEPT and SRV_PEER wrappers; it grants itself no authority in userspace.
+
 
 A native binary does three things and gets a runtime:
 
@@ -419,6 +426,19 @@ instant, and falling back to the syscall when the page is absent.
 
 ## Caveats
 
+- **`OpenOptions::append` carries `T_OAPPEND` since 2026-09-21; before that
+  the constant had a definition and no user.** Append was one seek-to-end at
+  open, so a write after any seek — and the second of two appenders to one
+  file: `>>` from two shells, the history file — landed mid-file over existing
+  bytes. Now the open carries the bit (the kernel forwards it to the 9P open;
+  Stratum lands each write at the file's current end) AND keeps the seek, which
+  is what makes the cursor agree. Inert on a Dev with no append notion. **Not
+  atomic against a CONCURRENT appender**: Stratum's append is stat-then-write
+  (a documented TOCTOU on its side), so two racing writers can still be handed
+  one end. `territory::chroot` / `pivot_root` fail flat — every refusal is
+  `InvalidArgument`, whatever the doc comments once promised — and a real swap
+  also drops the mount entries the new root cannot reach (ARCH 9.6.10).
+
 - **`Stdio::Null` is unimplemented for a reason that expired.** Three places
   say the discard mode cannot be built for want of a kernel bit-bucket device.
   That device has existed since `/dev` became a mounted namespace directory —
@@ -521,3 +541,50 @@ absorbed from docs/reference/89: `mmio_read32`/`write32` must be a single
 base-only instruction (ISV=1) so HVF can decode the emulated access -- a plain
 `read_volatile` can inline to a writeback/unscaled form (ISV=0) that trips HVF's
 `assert(isv)` (#890, the kernel-worked-userspace-tripped signature).
+
+2026-09-16: `PciDev::claim_nth` now unwinds a partial BAR mapping. A mid-loop
+`t_pci_map_bar` failure detaches the BARs this call already mapped, because each
+live mapping holds its own `kobj_mmio` reference, and the handle's drop alone
+left them and their claims until exit. The pci-3 F1 comment had called that
+unfixable ("SYS_BURROW_DETACH is confined to the burrow-attach window"); ARCH
+6.5's identity rule made the detach reachable. The `t_burrow_detach` doc
+comment names both detachable classes.
+
+## Hardware interrupt contract
+
+`hardware::Irq::wait` re-arms level-triggered sources in the current kernel.
+Its caller must complete device acknowledgement before waiting again; waking
+another thread to acknowledge later is insufficient. Queue state remains the
+source of truth when notifications coalesce.
+
+This raw interface is for non-PCI interrupts. PCI drivers use function-bound
+`PciIrq` endpoints and protected BAR windows, as specified by
+`docs/PCI-INTERRUPTS-DESIGN.md` and [[sub-kernel-pci-irq]].
+
+## Protected PCI mapping windows (2026-09-17)
+
+`PciDev::claim_nth` now queries a bounded list of kernel-approved BAR windows and
+maps those fitting the existing small-BAR stride. Routing-only BARs are omitted;
+a region is exposed only if one mapped window covers its entire extent. Every
+record is checked before mappings begin, and a later failure detaches all earlier
+windows. The old PCI_INFO layout remains unchanged. [[abi-pci-windows]] names the
+new record and syscall mirrors. Kernel/driver compile checks and guest mapping
+tests pass; resident driver migration is boot- and Instrument-verified on HVF.
+
+## PCI interrupt tickets and cleanup (2026-09-17)
+
+`hardware::PciIrq` exposes create, initial arm, replayable ticket wait, complete,
+terminal disable and info. It has no AsFd. EAGAIN completion leaves the source
+masked and WAIT delivers a timed retry. Drop disables the endpoint before its
+handle closes. `PciDev::drop` now detaches its mapped windows; its parent handle
+then closes, while an endpoint or hostmem mapping may still retain the function.
+Drivers must reset before DMA buffers are destroyed. [[abi-pci-irq]].
+
+`PciIrq::for_virtio` performs the initialization transaction: bounded reset,
+create a masked MSI-X endpoint, select config/queue vectors, verify readback,
+and reset/unwind before INTx fallback. `PCI_IRQ_MODE` accepts auto, intx or msix;
+forced MSI-X fails instead of silently falling back. `mode()` and `vector()`
+retain the kernel-reported selection, and drivers skip ISR reads in MSI-X mode.
+This helper runs before DMA setup; a subsequent driver reset would erase the
+selected vectors and is forbidden until rollback or shutdown. Full fallback
+fault-injection and the cross-controller matrix remain required.

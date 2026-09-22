@@ -2,6 +2,9 @@
 
 **Status**: AS-BUILT. Plain transport `5094f1ad`; the npxf secure channel this
 document specifies landed with the row added to `docs/AUDIT-TRIGGERS.md`.
+The supported host server now builds with CMake and OpenSSL 3 on Linux and
+macOS (2026-09-18, npxf `cd35c64`), preserving the NPXF v1 wire protocol.
+See the remote-files operator section for host setup.
 
 The thylacine ranged well beyond its den to feed; what it brought back went in
 the larder. `haul` grafts a tree from *outside the machine* into the local
@@ -15,7 +18,7 @@ cache, I-38). The name was **ratified by the operator 2026-09-09**, replacing
 ## 1. The problem
 
 The operator asked for Thylacine to mount an
-[npxf](https://github.com/) server — their own tool, `~/projects/npxf`, which
+[npxf](https://github.com/apology-is-policy/npxf) server — their own tool, `~/projects/npxf`, which
 exports a directory over 9P2000.L on an authenticated, encrypted channel — "as a
 directory, transparently."
 
@@ -565,6 +568,10 @@ nothing ran is strictly worse than a red, and this one appeared the moment an
 
 ## 4.6 The interactive shape — RATIFIED 2026-09-10
 
+**Implemented 2026-09-17:** `imperium post` grants scoped publishing authority;
+`haul --post NAME ... &` and the existing `mount` builtin provide this workflow.
+See the completion section for bounds and verified lifetime behavior.
+
 The ask was "mount that endpoint transparently as a directory", and §4.3 shows
 why the obvious shapes do not reach it. What follows is the ratified design; the
 capability half is specified in `IMPERIUM-DESIGN.md` §6.5 and the whole thing is
@@ -654,4 +661,67 @@ before it could cost this chunk an afternoon.)
   the expansion) — `"$host:$port"` is the working form. Making adjacent values
   glue is a parser change with a much wider blast radius than a lexer branch,
   and it is not obviously desirable.
-- **The name.** `haul` is unratified.
+- **The name.** `haul` was operator-ratified on 2026-09-09 (the binary header records the rename from `forage`).
+
+
+## Completion implementation (2026-09-17)
+
+The operator authorized integrating the required Imperium changes into main.
+The integration keeps the existing main graphics work and imports the trusted
+serial episode, propagating scopes, corvus authorization, imperium command,
+and the reviewed scope/logout teardown fixes from aux-3.
+
+Post form: `haul --post NAME [-t FILE | --token-env VAR] HOST!PORT`.
+The name is one /srv component. No mountpoint or child command is accepted in
+post mode; the shell supplies the attach name to `mount /srv/NAME /n/NAME ANAME`.
+The server accepts one same-principal client (kernel-stamped SRV_PEER), then
+relays that client's byte connection to the remote server. It keeps the listener
+for its process lifetime; later connections are refused/closed, never attached
+to the already-used remote session. Process exit ends all connections.
+The relay's two threads share the accepted descriptor; neither closes it while
+the other might use it. The main thread monitors their completion and exits,
+so an attach awaiting a remote reply sees EOF on transport failure.
+
+CAP_POST_SERVICE is bit 13, never in CAP_ALL. It joins all three elevation,
+clearance and propagating masks, is named `post` in imperium, and appears as
+CAP_POST_SERVICE on the trusted provincia. MAY_POST_SERVICE remains a separate
+TCB role; the new cap does not confer console ownership or PTY registration.
+
+Admission is checked atomically with slot reservation: at most two cap-posted
+LIVE/RESERVING services per imperium scope (one-off clearance uses the poster's
+stripes instead), and at most four cap-owned slots in the shared 16-slot registry.
+Trusted slots, including trusted tombstones, cannot be taken by a cap-only poster.
+Cap tombstones may be recycled for a new name, so repeated use does not exhaust
+four permanent names. Each reservation advances a generation; open checks both
+the requested name and captured generation before enqueue, preventing a delayed
+open from attaching to a different service after slot reuse. Scope and count
+accounting include RESERVING, so concurrent posts cannot over-admit. Failed
+handle allocation rolls the reservation back; accepted connections own their
+own references and are independent of the registry slot. The generation never
+wraps: an exhausted slot refuses reuse.
+
+
+Verified workflow (token provisioned separately):
+
+```sh
+imperium post
+# Complete the physical SAK and trusted key prompt.
+mkdir -p /tmp/remote
+haul --post -t /path/to/token remote 10.0.2.2!5640 &
+mount /srv/remote /tmp/remote /
+cat /tmp/remote/hello.txt
+unmount /tmp/remote
+wait
+abdicate
+```
+
+A posted service is single-session. A second mount fails; choose another
+posted service for another remote session, within the per-scope quota. A
+failed mount stores its reason in `$errstr`; `echo $errstr` displays it.
+The full `haul-post` scenario verifies real encrypted file reads, second-mount
+refusal, unmount/reap, a fresh post name, and teardown by abdication.
+
+Service reuse additionally waits for any active accept call to unwind. The
+kernel validates accepter ownership and reserves one accept waiter under the
+registry lock; concurrent accepts fail. This is required because process exit
+can tombstone a service before every peer thread has stopped.

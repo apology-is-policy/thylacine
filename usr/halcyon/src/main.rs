@@ -44,12 +44,13 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use halcyon::{
-    argv_of, device_layout_path, lint_active_line, lint_files, list_rows, name_is_valid,
+    argv_of, device_layout_path, lint_active_lines, lint_files, list_rows, name_is_valid,
     owner_is_env, parse_cmd, prog_candidates, session_dir_chain, session_layout_path,
     session_layouts_dir, Cmd, CmdError, LintReport, ThemeFile, DEVICE_LAYOUTS_DIR, SAVE_TMP_SUFFIX,
 };
 use libhalcyon::layout::{self, LayoutMode};
 use libhalcyon::skeleton::{self, Op};
+use libhalcyon::instrument;
 use libhalcyon::theme;
 use libthyla_rs::err::{Error, Result};
 use libthyla_rs::fs::{self, File};
@@ -120,6 +121,11 @@ usage: halcyon layout save <name>
   resolves (/lib/halcyon/theme.toml, then $HOME/lib/halcyon/theme.toml) and
   says which is active. Exits non-zero if a file is present and refused.
 
+  halcyon workspace <n>
+  Switch the display to workspace n, creating it if it does not exist.
+  One-based, as the bar and the rail show them. Usable from
+  $HOME/lib/halcyon.rc to fill several workspaces at session start.
+
   halcyon --help
 ";
 
@@ -149,6 +155,7 @@ fn run() -> i64 {
         Ok(Cmd::LayoutRestore { name }) => layout_restore(name),
         Ok(Cmd::LayoutList) => layout_list(),
         Ok(Cmd::LayoutDelete { name }) => layout_delete(name),
+        Ok(Cmd::Workspace { n }) => workspace(n),
         Ok(Cmd::Welcome) => welcome(),
         Ok(Cmd::ThemeLint { path }) => theme_lint(path),
         Err(e) => {
@@ -158,9 +165,30 @@ fn run() -> i64 {
     }
 }
 
+/// `halcyon workspace <n>`: switch the display to workspace n, creating it
+/// if it does not exist (S4: a number is an IDENTITY, so Super+5 makes
+/// workspace 5 whether or not 2..4 exist -- the "next free number" rule was
+/// retired as a property of the old dense representation). Rides the LAYOUT
+/// file, which a `Session(principal)` conn already drives -- which is why the
+/// tool needs no service of its own (HALCYON-WORKSPACES 4, W-2b).
+fn workspace(n: u32) -> i64 {
+    let Some(tap) = Tap::open() else {
+        eprintln!("halcyon: no compositor at /srv/tapestry");
+        return 1;
+    };
+    let rc = tap.verb(&format!("workspace {}", n));
+    if rc < 0 {
+        eprintln!("halcyon: workspace {}: refused (rc {})", n, rc);
+        return 1;
+    }
+    0
+}
+
 fn report_cmd_error(e: CmdError) {
     match e {
         CmdError::UnknownCommand => eprintln!("halcyon: unknown command (try `halcyon --help`)"),
+        CmdError::MissingWorkspace => eprintln!("halcyon: workspace: missing <n>"),
+        CmdError::BadWorkspace => eprintln!("halcyon: workspace: <n> must be 1..9"),
         CmdError::BadLayoutVerb => eprintln!("halcyon: layout: expected `save` or `restore`"),
         CmdError::MissingName => eprintln!("halcyon: layout: missing <name>"),
         CmdError::ExtraOperand => eprintln!("halcyon: layout: too many operands"),
@@ -262,7 +290,61 @@ fn theme_lint_tiers() -> i64 {
         None => None,
     };
 
+    // The picker's gallery choice (HALCYON-INSTRUMENT 4.1): a WORD under
+    // $HOME, resolved to a gallery file only when `gallery_path` accepts it
+    // as an id -- the lint reads the same file a session would, or none.
+    let pick_path: Option<String> = home.as_ref().map(|h| {
+        let mut s = h.clone();
+        s.push_str(instrument::USER_PICK_REL);
+        s
+    });
+    let pick: Option<String> = match &pick_path {
+        Some(p) => match read_theme(p) {
+            Ok(t) => t,
+            Err(()) => return 1,
+        },
+        None => None,
+    };
+    let pick_file_path: Option<String> = pick
+        .as_deref()
+        .and_then(instrument::pick_id)
+        .and_then(instrument::gallery_path);
+    let pick_file: Option<String> = match &pick_file_path {
+        Some(p) => match read_theme(p) {
+            Ok(t) => t,
+            Err(()) => return 1,
+        },
+        None => None,
+    };
+    // The profile words, both tiers.
+    let sys_profile = match read_theme(instrument::SYSTEM_PROFILE_PATH) {
+        Ok(t) => t,
+        Err(()) => return 1,
+    };
+    let user_profile_path: Option<String> = home.as_ref().map(|h| {
+        let mut s = h.clone();
+        s.push_str(instrument::USER_PROFILE_REL);
+        s
+    });
+    let user_profile: Option<String> = match &user_profile_path {
+        Some(p) => match read_theme(p) {
+            Ok(t) => t,
+            Err(()) => return 1,
+        },
+        None => None,
+    };
+
     let mut files: Vec<ThemeFile> = Vec::new();
+    if let Some(p) = &pick_file_path {
+        files.push(ThemeFile {
+            label: "pick",
+            path: p,
+            text: pick_file.as_deref(),
+        });
+    } else if let Some(w) = pick.as_deref() {
+        println!("pick {}: REFUSED -- not a gallery id", pick_path.as_deref().unwrap_or(""));
+        let _ = w;
+    }
     files.push(ThemeFile {
         label: "system",
         path: sys_path,
@@ -282,7 +364,16 @@ fn theme_lint_tiers() -> i64 {
     // $HOME unset the user file might exist and win, so naming the system one
     // "active" would be a confident wrong answer.
     if user_path.is_some() {
-        println!("{}", lint_active_line(sys.as_deref(), user.as_deref()));
+        let (active, profile) = lint_active_lines(instrument::Sources {
+            system_profile: sys_profile.as_deref(),
+            user_profile: user_profile.as_deref(),
+            user_pick: pick.as_deref(),
+            pick_file: pick_file.as_deref(),
+            user_file: user.as_deref(),
+            system_file: sys.as_deref(),
+        });
+        println!("{}", active);
+        println!("{}", profile);
     } else {
         println!("active: not determined -- $HOME is unset, so the user tier was not read");
     }
@@ -298,6 +389,18 @@ fn print_lint(r: &LintReport) -> i64 {
     } else {
         0
     }
+}
+
+/// The profile this seat resolves (HALCYON-INSTRUMENT 4.1): the user's word,
+/// then the system's, then legacy -- the same two tiers the session reads at
+/// start. `Err` when a tier exists but could not be read (`read_theme` has
+/// said why).
+fn seat_profile(home: &str) -> core::result::Result<instrument::Profile, ()> {
+    let system = read_theme(instrument::SYSTEM_PROFILE_PATH)?;
+    let mut user_path = String::from(home);
+    user_path.push_str(instrument::USER_PROFILE_REL);
+    let user = read_theme(&user_path)?;
+    Ok(instrument::resolve_profile(user.as_deref(), system.as_deref()).0)
 }
 
 /// Read a theme file. `Ok(None)` = it is not there, which for a TIER is the
@@ -807,6 +910,15 @@ fn layout_restore(name: &str) -> i64 {
             return 0;
         }
     };
+    // HALCYON-INSTRUMENT 6.1 (2026-09-16): under Instrument a stack's members
+    // are tiles and the compositor splits BESIDE a stack, never inside one,
+    // so a saved container member could not be rebuilt -- the build would
+    // diverge at its first split. Laid flat first, every tile restored.
+    let tree = match seat_profile(&home) {
+        Ok(instrument::Profile::Instrument) => layout::flatten_stack_members(&tree),
+        Ok(instrument::Profile::Legacy) => tree,
+        Err(()) => return 1,
+    };
 
     let tap = match Tap::open() {
         Some(t) => t,
@@ -940,6 +1052,26 @@ fn layout_restore(name: &str) -> i64 {
                 let rc = tap.verb(&format!("mode {} {}", id, mode.name()));
                 if rc < 0 {
                     eprintln!("halcyon: mode {} {} refused ({})", id, mode.name(), rc);
+                    return 1;
+                }
+            }
+            // HALCYON-INSTRUMENT 5.3: a v2 file's weights, on the nodes the
+            // splits made (the plan orders them after their nodes exist).
+            Op::Weight { target, w } => {
+                let id = match target {
+                    skeleton::NodeRef::Leaf(l) => leaf_ids[*l],
+                    skeleton::NodeRef::Cont(c) => cont_ids[*c],
+                };
+                let id = match id {
+                    Some(id) => id,
+                    None => {
+                        eprintln!("halcyon: plan weights an unbuilt node");
+                        return 1;
+                    }
+                };
+                let rc = tap.verb(&format!("weight {} {}", id, w));
+                if rc < 0 {
+                    eprintln!("halcyon: weight {} {} refused ({})", id, w, rc);
                     return 1;
                 }
             }

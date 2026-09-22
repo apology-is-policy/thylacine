@@ -1,6 +1,10 @@
-# Halcyon workspaces -- a PROPOSAL for the operator's vote (2026-09-08)
+# Halcyon workspaces -- RATIFIED 2026-09-15: mechanism (A), live roots
 
-**Status: PROPOSAL, NOT SCRIPTURE. Nothing in it is built.** The 2026-09-02
+**Status: RATIFIED SCRIPTURE 2026-09-15 (operator vote, AskUserQuestion):
+mechanism (A) with the section 4 defaults package accepted AS PROPOSED.
+Not yet built -- the build is W-1..W-3 (section 5).** The record of how it
+got here follows; the 2026-09-02 vote had DEFERRED the model, and this
+document did the research that fork needed. The 2026-09-02
 vote deferred the workspace model ("one filled indicator" over "pulling the
 workspace model forward" -- HALCYON.md 13's status-bar slots), and a vote
 that defers is a decision, so this document does the research the fork
@@ -81,18 +85,76 @@ the H-4 file format at v1 (a save is the active workspace's tree).
   arriving tree's surfaces get their CONFIGUREs (a same-size one is the
   redraw request; the atlas F1 rule holds -- a dormant surface paints
   nothing until asked). The Direct/Composed decision reads the active root
-  only. The `layout` file's header grows `workspaces N active K`; the
-  per-pane rows are the active root's (the D decision's file-walk keeps
-  working unchanged); a `workspace/<k>` subtree is NOT proposed -- one
-  line is enough for the bar and the tool.
+  only. The `layout` file's header grows `workspaces <list> active <n>`;
+  the per-pane rows are the active root's (the D decision's file-walk
+  keeps working unchanged); a `workspace/<k>` subtree is NOT proposed --
+  one line is enough for the bar and the tool.
+
+  **The channel's exact spelling, amended by the S4 ratification.** It was
+  `workspaces N active K`, with N the COUNT and K the active INDEX plus
+  one. Once the set is sparse a count can no longer label the chips -- a
+  bar told "3" cannot know whether that means 1,2,3 or 1,3,4 -- so the
+  token after `workspaces` is the ASCENDING COMMA-SEPARATED LIST of the
+  live numbers (no spaces, each 1..=9, never empty: there is always at
+  least one workspace), and `active` is the active workspace's stable
+  NUMBER rather than a position. The count is the list's length, so
+  nothing is lost. A header whose `active` is absent from its own list is
+  refused WHOLE by the reader, exactly as the old `k > n` pair was: a bar
+  that lights a chip with no workspace behind it is worse than a bar that
+  keeps its default.
+
+  This is a format change on a ratified channel, so it is named here
+  rather than left to the diff. An older reader fails CLOSED on it -- the
+  list does not parse as an integer, so `parse_workspaces` returns None
+  and the bar holds its default -- which is the honest degradation, and
+  both ends ship together in one image regardless.
 - **Chords** (free in the default table): Super+1..9 switch to workspace
-  N (creating it when N == count + 1, i3), Super+Shift+1..9 move the
+  N, **creating it if it does not exist**, and Super+Shift+1..9 move the
   focused leaf there. Keycodes 2..10 are unbound today.
-- **Vanishing**: an inactive workspace with no hosted leaf is dropped at
-  the next reconcile (i3); the active one never is. **Bound** (I-32):
+
+  The earlier rule -- "creating it when N == count + 1" -- is RETIRED with
+  the S4 ratification, and it is worth saying why it existed and why it
+  was wrong. It existed to keep a DENSE vector hole-free, which is a
+  property of the representation, not of the design; and it was attributed
+  to i3, which does no such thing -- i3 creates workspace 5 on Super+5
+  whether or not 2, 3 and 4 exist. With a sparse set numbered by identity
+  the constraint buys nothing, so the ratified choice makes the switch
+  SIMPLER rather than more complex. The bound is still `MAX_WORKSPACES`
+  = 9, which the digit row enforces on its own.
+- **Vanishing**: an inactive workspace with no hosted leaf **and no
+  RESERVED leaf** is dropped at the next reconcile (i3); the active one
+  never is. **A consequence worth stating, because it surprises**: the
+  reconcile a switch triggers is "the next reconcile", so merely PASSING
+  THROUGH an empty workspace does not leave it behind -- switching 1 -> 2
+  -> 9 lands on a set of {1, 9}, not {1, 2, 9}, because 2 was empty the
+  moment it stopped being active. Measured, not reasoned: a battery leg
+  asserted {1,2,9} and the gate corrected it. The reservation half is round 1's S5: H-4d stamps
+  `creator_conn` (and the claim mint a one-shot token) on the empty
+  skeleton a restore tool builds, precisely so the session's own
+  compositor cannot fill it mid-build -- and a rule testing only for
+  HOSTED surfaces destroyed exactly what that reservation protects.
+  **A workspace's NUMBER is its identity, and a vanish never renumbers
+  the survivors (operator-ratified 2026-09-15, round 1 S4).** Identity was
+  the VECTOR INDEX until then, so dropping an empty middle workspace
+  shifted every higher one down and the user's Super+3 stopped reaching
+  their work -- it made a fresh empty one instead. Both cited precedents
+  refuse that: i3 treats workspace numbers as NAMES rather than
+  positions, and tmux keeps stable numbers with gaps
+  (`renumber-windows` is opt-in and off by default). So `Workspace`
+  carries a `number` (1..=9) and the set is SPARSE: 1, 3, 4 is an
+  ordinary state, not a broken one. **Bound** (I-32):
   `MAX_WORKSPACES` = 9 -- Super+N is the whole keyboard's worth, and a
-  hostile client's `workspace` verb (if one is admitted at all -- the seat
-  class, like `scale`) cannot mint more.
+  hostile client's `workspace` verb cannot mint more. **The verb's home,
+  ratified 2026-09-15 after an architecture review**: the `layout` file,
+  authorized by PRINCIPAL (`Renderer`, or a `Session` whose principal hosts
+  a tile anywhere in the tree) -- NOT the conn-scoped seat `scale`/`theme`
+  carry. Those two are seat-gated because two painters must agree on one
+  rendering contract; there is no second painter for "which workspace is
+  shown". `zoom` is the precedent: the same blast radius (one leaf fills the
+  display, every other tile vanishes), authorized on `layout` by owning one
+  tile. The earlier phrase here -- "the seat class, like `scale`" -- was an
+  analogy from surface form rather than cause, and it produced W-1b's
+  mis-measurement before it was caught.
 - **The bar**: `StatusModel.workspaces`/`active` (already fields, 1/0
   today) read from the header line by the session's reconcile; the
   rendering is unchanged (HALCYON-VISUAL 6). The console (pre-login
@@ -100,9 +162,18 @@ the H-4 file format at v1 (a save is the active workspace's tree).
 - **H-4**: `halcyon layout save <name>` saves the ACTIVE workspace's tree
   (v1 format, unchanged); `restore` rebuilds into the active workspace.
   `halcyon.rc` may `halcyon workspace N` (a new tool verb, the seat-gated
-  ctl `workspace N` behind it) before a restore to fill several. Saving
-  every workspace at once (a v2 format with a `workspace` header) is
-  named, not proposed.
+  `layout` verb behind it) before a restore to fill several. **CORRECTION
+  (2026-09-15, operator-ratified after an architecture review):** an
+  earlier revision of this bullet said the tool must reach the switch
+  "THROUGH halcyond, the way the theme picker's word already travels."
+  Both halves were wrong. The picker is a menu INSIDE halcyond, and
+  `write_user_pick` is halcyond WRITING `$HOME/lib/halcyon/theme` -- the
+  precedent runs in the opposite direction, and halcyond posts no service
+  at all. The tool reaches the switch DIRECTLY, because the verb now lives
+  on the `layout` file, which a `Session(principal)` conn already drives
+  (HALCYON.md 13.7's ratified route, the one `halcyon layout restore`
+  uses at every session start). Saving every workspace at once (a v2
+  format with a `workspace` header) is named, not proposed.
 - **Under a session**: the workspaces are the SESSION's (the console leaf
   stays backgrounded in every one, as today). On logout the tree collapses
   to the console as today, workspaces and all.
@@ -111,8 +182,8 @@ the H-4 file format at v1 (a save is the active workspace's tree).
 
 `usr/tapestryd/src/pane.rs` (roots/active; recompute; the vanish rule),
 `server.rs` (the switch as a structural pass; the backgrounding predicate;
-the chords; the header line; an admitted `workspace N` verb under the seat
-gate), `chords.rs` (the nine keys), `usr/halcyond/src/{session,status}.rs`
+the chords; the header line; the `workspace N` verb on the LAYOUT file under
+`actor_may_switch`), `chords.rs` (the nine keys), `usr/halcyond/src/{session,status}.rs`
 (the two numbers), `usr/halcyon` (the tool verb), `docs/HALCYON.md` 13 +
 `HALCYON-VISUAL` 6 (the model, once ratified), AUDIT-TRIGGERS (a new row:
 the dormancy predicate widened; I-32 on the count; the switch's fan).
@@ -141,7 +212,23 @@ Super+1 returns, the bar reads 2/1). One Fable round over W-1..W-3.
 Both are registry amendments with a producer in nora and a consumer in
 halcyond; neither changes authority. Neither is built.
 
-## 7. For the operator
+## 7. For the operator -- ANSWERED 2026-09-15
+
+1. **(A) live workspaces**, with layout names as the naming. (B) was
+   declined on the doc's own argument: a switch that spawns the layout's
+   tags and abandons the live tree is a layout menu, not a workspace.
+2. **The section 4 package accepted AS PROPOSED**: the i3 vanish rule (an
+   inactive workspace with no hosted leaf drops at the next reconcile, the
+   active one never), `MAX_WORKSPACES` = 9 as the I-32 bound, Super+1..9 to
+   switch and Super+Shift+1..9 to move the focused leaf, and the `layout`
+   header line (`workspaces N active K`) as the channel -- NO `workspace/`
+   subtree.
+3. **Both marks ratified as BEACON 12.2 amendments, build sequenced AFTER
+   I-8/I-9** -- neither is needed to close the composition mockup (the
+   welcome shows no pills and a plain ok condition), so they are the
+   editor's delta and land with nora's chrome work, not inside this arc.
+
+The questions as they were put:
 
 1. (A) live workspaces with layout names, or (B) layouts as the list, or
    keep the deferral.

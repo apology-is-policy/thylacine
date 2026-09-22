@@ -70,6 +70,7 @@ struct cap_grant_entry {
                                        // window opens when the caps actually land
                                        // (avoids any userspace/kernel clock skew).
     u32                  session_id;   // CLEARANCE: corvus audit tag (-> legate)
+    bool                 seat_held;    // graphical grant cannot redeem before RESTORED
     u32                  flags;        // CLEARANCE: CAP_GRANT_FLAG_* (IM-2; 0 = plain)
 };
 
@@ -113,6 +114,7 @@ static void cap_clear_locked(struct cap_grant_entry *e) {
     e->valid_for_ns   = 0;
     e->session_id     = 0;
     e->flags          = 0;
+    e->seat_held      = false;
 }
 
 static int cap_find_free_locked(u64 now_ns) {
@@ -161,6 +163,7 @@ static void cap_set_entry_locked(struct cap_grant_entry *e,
     e->valid_for_ns   = valid_for_ns;
     e->session_id     = session_id;
     e->flags          = flags;
+    e->seat_held      = false;
 }
 
 // Find the slot index to write for `target_stripes` -- the existing PENDING
@@ -214,10 +217,10 @@ long cap_register_grant_for_writer(struct Proc *writer,
 // non-empty subset of CAP_GRANTABLE_CLEARANCE (of CAP_GRANTABLE_IMPERIUM when
 // PROPAGATING); session_id must be nonzero (sentinel) and fit u32; flags must
 // be within CAP_GRANT_FLAGS_VALID.
-long cap_register_imperium_grant_for_writer(struct Proc *writer,
+static long register_imperium(struct Proc *writer,
                                             caps_t cap_mask, u64 target_stripes,
                                             u64 valid_for_ns, u64 session_id,
-                                            u64 flags) {
+                                            u64 flags, bool seat_held) {
     if (!writer)                                              return -1;
     if (target_stripes == 0)                                 return -1;
     if (cap_mask == 0)                                       return -1;
@@ -247,9 +250,42 @@ long cap_register_imperium_grant_for_writer(struct Proc *writer,
     cap_set_entry_locked(&g_cap_grants.entries[idx], CAP_GRANT_KIND_CLEARANCE,
                          cap_mask, target_stripes, expiry, valid_for_ns,
                          (u32)session_id, (u32)flags);
+    g_cap_grants.entries[idx].seat_held = seat_held;
 
     spin_unlock_irqrestore(&g_cap_grants.lock, s);
     return (long)CAP_GRANT_IMPERIUM_WRITE_LEN;
+}
+
+// Only the trusted-seat state machine uses the held form. Registering the
+// held bit in the SAME grant-lock critical section prevents a polling requester
+// from redeeming in the gap between publication and a later hold operation.
+long cap_register_seat_grant(struct Proc *writer, caps_t caps, u64 stripes,
+                             u64 term, u64 session, u64 flags) {
+    return register_imperium(writer, caps, stripes, term, session, flags, true);
+}
+long cap_register_imperium_grant_for_writer(struct Proc *writer, caps_t caps,
+                                            u64 stripes, u64 term, u64 session,
+                                            u64 flags) {
+    return register_imperium(writer, caps, stripes, term, session, flags, false);
+}
+
+// Caller holds the proc-table lock: restoration, owner death and seat timeout
+// are ordered against this commit. Redeem uses only the grant lock, avoiding
+// a grant-lock -> proc-table-lock inversion. A refused release consumes nothing.
+bool cap_release_seat_grant(u64 stripes, u32 session) {
+    bool released = false;
+    irq_state_t lock = spin_lock_irqsave(&g_cap_grants.lock);
+    int idx = cap_find_stripes_locked(stripes);
+    if (idx >= 0) {
+        struct cap_grant_entry *e = &g_cap_grants.entries[idx];
+        if (e->kind == CAP_GRANT_KIND_CLEARANCE && e->seat_held &&
+                e->session_id == session && e->expiry_ns > timer_now_ns()) {
+            e->seat_held = false;
+            released = true;
+        }
+    }
+    spin_unlock_irqrestore(&g_cap_grants.lock, lock);
+    return released;
 }
 
 // A-4a clearance /grant core (32-byte form): the imperium core with flags == 0.
@@ -290,6 +326,13 @@ long cap_redeem_grant_for_writer(struct Proc *writer, caps_t cap_mask) {
     // Expired? Treat as not-found; clear the slot.
     if (e->expiry_ns <= now) {
         cap_clear_locked(e);
+        spin_unlock_irqrestore(&g_cap_grants.lock, s);
+        return -1;
+    }
+
+    // Even a malicious requester polling /use cannot get authority while the
+    // trusted display is active or restoring. Failure cancels this held entry.
+    if (e->seat_held) {
         spin_unlock_irqrestore(&g_cap_grants.lock, s);
         return -1;
     }
@@ -411,6 +454,18 @@ void cap_proc_exit_notify(struct Proc *p) {
     for (u32 i = 0; i < CAP_GRANT_MAX; i++) {
         struct cap_grant_entry *e = &g_cap_grants.entries[i];
         if (e->state == CAP_GRANT_PENDING && e->target_stripes == stripes)
+            cap_clear_locked(e);
+    }
+    spin_unlock_irqrestore(&g_cap_grants.lock, s);
+}
+
+void cap_cancel_imperium_pending(u64 stripes, u32 session_id) {
+    if (!stripes || !session_id) return;
+    irq_state_t s = spin_lock_irqsave(&g_cap_grants.lock);
+    for (u32 i = 0; i < CAP_GRANT_MAX; i++) {
+        struct cap_grant_entry *e = &g_cap_grants.entries[i];
+        if (e->state == CAP_GRANT_PENDING && e->kind == CAP_GRANT_KIND_CLEARANCE &&
+                e->target_stripes == stripes && e->session_id == session_id)
             cap_clear_locked(e);
     }
     spin_unlock_irqrestore(&g_cap_grants.lock, s);

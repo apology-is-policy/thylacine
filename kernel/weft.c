@@ -321,12 +321,16 @@ u64 weft_share_register(struct Proc *owner, struct Burrow *v) {
     return id;
 }
 
-struct Burrow *weft_share_claim(u64 share_id) {
+static struct Burrow *weft_share_claim_owner(u64 share_id, u64 owner_stripes) {
     if (share_id == 0u) return NULL;     // 0 is never a valid id
 
     spin_lock(&g_weft_lock);
     for (u32 i = 0; i < WEFT_MAX_SHARES; i++) {
         if (g_weft_shares[i].share_id == share_id) {
+            if (owner_stripes && proc_stripes(g_weft_shares[i].owner) != owner_stripes) {
+                spin_unlock(&g_weft_lock);
+                return NULL;
+            }
             struct Burrow *v = g_weft_shares[i].burrow;
             // Consume-exactly-once: free the slot. The registration pin is now
             // OWNED by the caller (transferred out of the registry) -- no extra
@@ -340,6 +344,14 @@ struct Burrow *weft_share_claim(u64 share_id) {
     }
     spin_unlock(&g_weft_lock);
     return NULL;
+}
+
+struct Burrow *weft_share_claim(u64 share_id) {
+    return weft_share_claim_owner(share_id, 0);
+}
+struct Burrow *weft_share_claim_from(u64 share_id, u64 owner_stripes) {
+    if (!owner_stripes) return NULL;
+    return weft_share_claim_owner(share_id, owner_stripes);
 }
 
 int weft_share_unregister(struct Proc *owner, u64 share_id) {

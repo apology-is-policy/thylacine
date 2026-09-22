@@ -18,12 +18,24 @@
 //   sys_burrow.detach_rejects
 //     wrong base / wrong length / unaligned base / zero length /
 //     double-detach → -1, and the VMA survives every rejected detach.
+//   sys_burrow.detach_window_confined
+//     an ANON VMA and a guard VMA below the window (the shapes of an ELF
+//     segment, the stack and its guard) are refused and survive.
+//   sys_burrow.detach_dma_map_by_identity
+//     a DMA map a driver placed below the window detaches (exact-match
+//     still enforced) and the DMA object is freed -- ARCH 6.5's identity
+//     rule; one variable (the Burrow type) away from the ANON control.
+//   sys_burrow.detach_mmio_map_by_identity
+//     an MMIO map below the window, larger than BURROW_ATTACH_MAX,
+//     detaches and releases the device-register claim.
 
 #include "test.h"
 
 #include <thylacine/burrow.h>
 #include <thylacine/dev.h>          // D-3c F1: a stub Dev with a close hook
+#include <thylacine/dma_handle.h>   // ARCH 6.5 identity detach: a DMA map below the window
 #include <thylacine/exec.h>
+#include <thylacine/mmio_handle.h>  // ARCH 6.5 identity detach: an MMIO map below the window
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>        // D-3c F1: spoor_alloc for a FILE burrow
@@ -39,6 +51,8 @@ void test_sys_burrow_attach_rounds_up(void);
 void test_sys_burrow_attach_rejects_bad_length(void);
 void test_sys_burrow_detach_rejects(void);
 void test_sys_burrow_detach_window_confined(void);
+void test_sys_burrow_detach_dma_map_by_identity(void);
+void test_sys_burrow_detach_mmio_map_by_identity(void);
 void test_sys_burrow_attach_lazy_window_va(void);
 void test_sys_burrow_lazy_len_from_args(void);
 
@@ -258,10 +272,101 @@ void test_sys_burrow_detach_window_confined(void) {
     TEST_ASSERT(vma_lookup(p, outside) != NULL,
         "the out-of-window VMA survives the rejected detach");
 
+    // A guard VMA (the stack guard's shape: no Burrow at all) below the window
+    // is refused too -- the identity rule admits only DMA- and MMIO-backed maps.
+    u64 guard_va = outside + 16 * PAGE_SIZE;
+    struct Vma *guard = vma_alloc_guard(guard_va, guard_va + PAGE_SIZE);
+    TEST_ASSERT(guard != NULL, "vma_alloc_guard failed");
+    spin_lock(&p->as->lock);
+    int grc = vma_insert(p, guard);
+    spin_unlock(&p->as->lock);
+    TEST_EXPECT_EQ(grc, 0, "install a sub-window guard VMA");
+    TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, guard_va, PAGE_SIZE), -1L,
+        "detach of a sub-window guard VMA rejected");
+    TEST_ASSERT(vma_lookup(p, guard_va) != NULL,
+        "the guard VMA survives the rejected detach");
+
     vma_drain(p);
     p->state = 2;                    // PROC_STATE_ZOMBIE
     proc_free(p);
     burrow_unref(burrow);
+}
+
+// ARCH 6.5 (detach by identity): a DMA map a CAP_HW_CREATE driver placed below
+// the window -- tapestryd's weaves sit at 0x0240_0000 -- is detachable, and the
+// detach is what frees the object. Before the identity rule this detach returned
+// -1 and the mapping held the pages for the life of the process.
+void test_sys_burrow_detach_dma_map_by_identity(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    u64 live_before = kobj_dma_live_count();
+    struct KObj_DMA *kd = kobj_dma_create(4 * PAGE_SIZE);
+    TEST_ASSERT(kd != NULL, "kobj_dma_create failed");
+    struct Burrow *b = burrow_create_dma(kd);        // {h:1, m:0}; kd ref 2
+    TEST_ASSERT(b != NULL, "burrow_create_dma failed");
+
+    u64 below = 0x02400000ull;                       // tapestryd's weave base
+    spin_lock(&p->as->lock);
+    int rc = burrow_map(p, b, below, 4 * PAGE_SIZE, VMA_PROT_RW);
+    spin_unlock(&p->as->lock);
+    TEST_EXPECT_EQ(rc, 0, "install a sub-window DMA map");
+    burrow_unref(b);                                 // the VMA owns the Burrow
+    kobj_dma_unref(kd);                              // the driver closed its handle
+    TEST_EXPECT_EQ(kobj_dma_live_count(), live_before + 1,
+        "the mapping alone keeps the DMA object alive");
+
+    // Exact-match still binds the identity arm.
+    TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, below, PAGE_SIZE), -1L,
+        "a short span of the DMA map is refused");
+    TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, below + PAGE_SIZE, 3 * PAGE_SIZE), -1L,
+        "an interior base of the DMA map is refused");
+    TEST_ASSERT(vma_lookup(p, below) != NULL,
+        "the DMA map survives the refused detaches");
+
+    TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, below, 4 * PAGE_SIZE), 0L,
+        "a sub-window DMA map detaches by identity");
+    TEST_ASSERT(vma_lookup(p, below) == NULL, "the DMA map's VMA is gone");
+    TEST_EXPECT_EQ(kobj_dma_live_count(), live_before,
+        "the detach freed the DMA object");
+
+    drop_proc(p);
+}
+
+// ARCH 6.5, the MMIO half: a BAR-shaped map below the window, larger than
+// BURROW_ATTACH_MAX (a 64-bit BAR can be), detaches, and dropping the mapping
+// releases the device-register claim -- the same PA window can be claimed again.
+void test_sys_burrow_detach_mmio_map_by_identity(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    const u64 pa   = 0x2000000000ull;               // 128 GiB: no RAM, no device
+    const u64 size = 512ull * 1024 * 1024;          // > BURROW_ATTACH_MAX
+    TEST_ASSERT(size > BURROW_ATTACH_MAX, "the span must exceed BURROW_ATTACH_MAX");
+    struct KObj_MMIO *km = kobj_mmio_create(pa, size);
+    TEST_ASSERT(km != NULL, "kobj_mmio_create failed");
+    struct Burrow *b = burrow_create_mmio(km);
+    TEST_ASSERT(b != NULL, "burrow_create_mmio failed");
+
+    u64 below = 0x20000000ull;                      // [512 MiB, 1 GiB)
+    spin_lock(&p->as->lock);
+    int rc = burrow_map(p, b, below, size, VMA_PROT_RW);
+    spin_unlock(&p->as->lock);
+    TEST_EXPECT_EQ(rc, 0, "install a sub-window MMIO map");
+    burrow_unref(b);
+    kobj_mmio_unref(km);                            // the driver closed its fd
+    TEST_ASSERT(kobj_mmio_create(pa, PAGE_SIZE) == NULL,
+        "the mapping still holds the claim");
+
+    TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, below, size), 0L,
+        "a sub-window MMIO map detaches by identity");
+    TEST_ASSERT(vma_lookup(p, below) == NULL, "the MMIO map's VMA is gone");
+
+    struct KObj_MMIO *again = kobj_mmio_create(pa, PAGE_SIZE);
+    TEST_ASSERT(again != NULL, "the detach released the device-register claim");
+    kobj_mmio_unref(again);
+
+    drop_proc(p);
 }
 
 // Overcommit / I-32 (ARCH section 6.5): a lazy attach reserves a window VA + an

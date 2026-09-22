@@ -1,0 +1,153 @@
+B-0 (Boosty) -- stdio input keeps musl's pushback invariant: fscanf works, and
+getc stops costing a syscall per byte.
+
+0002 replaced musl's readv-based __stdio_read with "a single SYS_read straight
+into the caller's buffer" and called the dropped half "a throughput
+optimization, not a semantic one". It was both, and the semantic half was
+load-bearing:
+
+  * __toread() parks the stream at rpos == rend == buf + buf_size.
+  * Upstream's read then REFILLS f->buf and returns the requested byte from
+    it, so the byte just handed out sits at f->rpos[-1].
+  * The scan helpers lean on exactly that: shunget() is a bare `rpos--`, and
+    __shgetc() stores the byte itself only when `rpos <= buf` (the unbuffered
+    case, into the UNGET area).
+
+With 0002 the byte went straight to the caller, rpos stayed at buf + buf_size,
+and every shunget() stepped back onto buf[buf_size-1] -- a stale byte, usually
+NUL. So on every real FILE, the scanf family failed at the first pushed-back
+delimiter: fscanf(f, "%7s %d %d") over "alpha 12 -7" returned 1 with an empty
+word. sscanf was never affected (a string pseudo-FILE has its own read). And
+because the buffer never filled, every getc/fgets/getline byte was its own
+SYS_read.
+
+Found 2026-09-21 by the 0034 device pin: pouch-hello-malloc parses /ctl/memory
+with fscanf and got 0. Ground truth before theory -- raw read(1), read(64),
+fgetc and fread over the same file all returned the right bytes, which cleared
+the kernel and devctl and left only the scan path.
+
+The fix needs no readv. Upstream's one-byte-request arm on a buffered stream
+was ALREADY a plain SYS_read into f->buf; this restores it, and generalises it
+to every request no larger than the buffer: read into f->buf, serve the caller
+from it, keep the surplus as readahead. So a run of small fread()s (TyrQuake
+reads its pak header and every demo message length this way: common/common.c,
+NQ/cl_demo.c) costs one syscall per buffer-full, as it does upstream, instead
+of one per call; on a 9P-backed file that is a round trip each. A request LARGER than the buffer, and any
+unbuffered stream, stays a direct read into the caller: no double copy, and no
+pushback slot needed (fread never ungets; an unbuffered stream takes
+__shgetc's buf[-1] path; ungetc() stores its byte itself). One SYS_read per
+call in both arms -- never a second read after a successful first, which would
+block a pipe or tty that had already delivered what it had. Readahead survives
+exactly where upstream's does: fread's loop calls __toread() (which drops the
+buffer) before EVERY f->read, the first included -- but it only gets there
+once the buffer is exhausted, and a second pass happens only after a SHORT
+count, which leaves no surplus. So nothing buffered is ever dropped.
+
+Behaviour changes to know about -- stdio input now reads AHEAD (up to BUFSIZ),
+as it does on every other libc, and everything that follows from that is now
+true here too:
+  * A program that mixes FILE reads with raw reads of the same fd, or hands
+    the fd to a child mid-stream, sees standard POSIX readahead instead of the
+    accidental byte-exact positioning 0002 gave it.
+  * fflush(stdin), fclose() and exit() on a NON-SEEKABLE stream (a pipe, a
+    tty, a socket) discard whatever was read ahead; on a seekable one they
+    seek the fd back, as upstream does.
+  * An update stream ("r+") that reads and then writes WITHOUT the fseek or
+    fflush ISO C requires between them writes at the readahead offset, not at
+    the logical position. Conforming programs are unaffected.
+  * Bytes read through a FILE now persist in its buffer until overwritten or
+    freed. A program that reads a SECRET with fgets() and wipes only its own
+    copy leaves one in the FILE (Stratum's janusd reads a passphrase this way:
+    src/janus/janusd.c). True on every libc; new here. setvbuf(f, 0, _IONBF, 0)
+    before the read is the portable way to opt out.
+  * TTY TYPE-AHEAD: a canonical-mode read should return at most one line, and
+    neither tty layer bounds it today (kernel/cons.c and ptyfs' ring_drain
+    both drain past the newline). 0002's byte-at-a-time reads hid that; a
+    BUFSIZ read now takes the whole type-ahead into the first reader's FILE,
+    so a line typed ahead for the NEXT program is consumed by this one. The
+    defect is the tty layers' (POSIX ICANON), tracked as its own item; recorded
+    here because this patch is what makes it observable.
+
+The arm boundary is `len > buf_size`, and the first draft of the generalised
+arm had `>=`. A host model of the read state machine (the audit's, extended
+with this arm; random short reads, buffer sizes 0/1/2/3/7/16/64/1024, mixed
+getc / fread / ungetc / scan / peek) failed 1889 of 2000 trials at
+buf_size == 1 and none anywhere else: a one-byte request on a one-byte buffer
+took the DIRECT arm and lost the pushback slot -- the original 0002 defect,
+reintroduced at one size. With `>`: 0 of 32000, against 26496 of 32000 for
+the 0002 backend on the same trials. pouch-hello-fopen's scan leg now runs a
+second pass on a setvbuf() buffer of UNGET+1 bytes to hold that boundary on
+the device.
+
+Device-side pin (same commit, not in this patch file): pouch-hello-fopen gains
+a `scan` leg -- three pushbacks deep, checked on VALUES -- measured RED on the
+unfixed backend (n=1, w1=[]) before this patch was applied.
+
+--- a/src/stdio/__stdio_read.c
++++ b/src/stdio/__stdio_read.c
+@@ -1,17 +1,58 @@
+ #include "stdio_impl.h"
++#include <string.h>
+ 
+ /* pouch: musl's __stdio_read issues one readv over {caller buffer, the
+-   stream's prefetch buffer}; Thylacine has no readv. pouch does a single
+-   SYS_read straight into the caller's buffer. The dropped half is the
+-   readahead into f->buf - a throughput optimization, not a semantic one:
+-   the stream simply refills on the next read. F_EOF / F_ERR are set
+-   exactly as musl's original does (cnt < 0 -> F_ERR, cnt == 0 -> F_EOF). */
++   stream's prefetch buffer}; Thylacine has no readv. Two arms, ONE SYS_read
++   each -- never a second read after a successful first, which would block an
++   interactive pipe or tty that has already delivered what it had.
++
++   The buffered arm: a request no larger than the stream's buffer reads into
++   f->buf and is served FROM it; the surplus stays as readahead. For the
++   one-byte request -- __uflow, so every getc/fgets/getline/scanf -- this is
++   upstream's own arm (it never used readv there), and it keeps the invariant
++   the scan helpers lean on: after a read the returned byte sits at
++   f->rpos[-1], so shunget()'s bare `rpos--` re-reads it. 0002 read the byte
++   straight into the caller and left rpos == rend == buf + buf_size, so every
++   pushback re-read buf[buf_size-1] (stale, usually NUL): fscanf/scanf on a
++   real FILE failed at the first pushed-back delimiter, and every getc was
++   its own syscall. For 1 < len <= buf_size -- fread's remainder loop on a
++   small record -- it is what upstream's readv bought: one syscall fills the
++   buffer and the next small freads are served from memory, where a direct
++   read would make each its own syscall (on a 9P-backed file, a round trip).
++
++   The direct arm (a request LARGER than the buffer, or any unbuffered
++   stream) reads straight into the caller: no double copy, and no pushback
++   slot is needed -- fread never ungets, and an unbuffered stream takes
++   __shgetc's buf[-1] path. The boundary is `>`, not `>=`: a one-byte request
++   on a ONE-byte buffer (setvbuf with UNGET+1 bytes) must still take the
++   buffered arm, or the scan helpers lose their pushback slot again.
++
++   A short count is returned as short; fread's loop calls again, exactly as
++   it does after upstream's short readv.
++
++   F_EOF / F_ERR exactly as upstream: cnt < 0 -> F_ERR, cnt == 0 -> F_EOF. */
+ size_t __stdio_read(FILE *f, unsigned char *buf, size_t len)
+ {
+-	long cnt = syscall(SYS_read, f->fd, buf, len);
++	long cnt;
++	size_t k;
++
++	if (!f->buf_size || len > f->buf_size) {
++		cnt = syscall(SYS_read, f->fd, buf, len);
++		if (cnt <= 0) {
++			f->flags |= cnt ? F_ERR : F_EOF;
++			return 0;
++		}
++		return (size_t)cnt;
++	}
++
++	cnt = syscall(SYS_read, f->fd, f->buf, f->buf_size);
+ 	if (cnt <= 0) {
+ 		f->flags |= cnt ? F_ERR : F_EOF;
+ 		return 0;
+ 	}
+-	return (size_t)cnt;
++	k = (size_t)cnt < len ? (size_t)cnt : len;
++	memcpy(buf, f->buf, k);
++	f->rpos = f->buf + k;
++	f->rend = f->buf + cnt;
++	return k;
+ }

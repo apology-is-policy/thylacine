@@ -166,6 +166,44 @@ the owner writes it, always under the owner's `wait_lock`; the cascade only
 reads it, under the same lock. That read-only waker→sleeper edge is what
 keeps the #811 lock graph acyclic.
 
+### Two fields added by ARCH 8.12
+
+`Thread.in_syscall` -- set at SVC entry, cleared before the EL0-return tail.
+While it is set, `preempt_check_irq` refuses to switch this thread out: the
+syscall body runs with interrupts ON but is still NON-PREEMPTIBLE, which is the
+property Phase 0 deferred and the implementation accidentally built as
+"interrupts off" instead. It is deliberately NOT `preempt_count`: three live
+assertions forbid a syscall-wide count, the decisive one being the leaked-count
+check at the EL0 return, where a syscall-wide count is definitionally the leak
+it extincts on. A kernel thread carries no marker and stays preemptible, which
+#810 depends on.
+
+The kernel-stack **watermark** -- the usable region is filled with a
+distinctive constant at every `thread_create` and scanned upward from the guard
+for the first word that is not it. That word is the deepest the stack has EVER
+reached. Reading a RUNNING thread's watermark is deliberate and its answer is
+honest in the direction that matters: a running thread only pushes its frontier
+lower, so a concurrent write makes the reported depth deeper, never shallower.
+The caller pins the Thread under the proc-table lock; the scan needs no lock.
+`/ctl/kstack` reports it per Proc and as a whole-system peak.
+
+It exists because nothing in the tree could report stack depth at all, and ARCH
+8.12 puts an IRQ frame on a syscall stack that has never carried one. The bound
+that sized that chunk is static and has 797 unfollowed indirect edges under it,
+so it is a LOWER bound and wanted a witness.
+
+`thread_kstack_used(t, budget_words)` takes a **scan budget** (NULL = unlimited)
+because the scan's cost is INVERTED: it stops at the first touched word, so a
+SHALLOW thread costs MORE than a deep one, and the only in-tree caller walks
+every live Proc with IRQs masked. That made an unprivileged program able to
+inflate a masked window simply by spawning threads -- it needs no privilege to
+do so, and only the READER is gated. The budget is decremented per word; a
+caller that finds it 0 on return MUST report the answer as a LOWER BOUND,
+because a truncated scan returns a SHALLOWER number than the truth and a
+silently-truncated watermark is worse than none. `/ctl/kstack` spends
+131072 words (1 MiB of loads) per read and says so in its output when it runs
+out. Found by the ARCH 8.12 audit round (F2).
+
 ## Concurrency
 
 `thread_link_into_proc` / `thread_unlink_from_proc` take

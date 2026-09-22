@@ -59,7 +59,7 @@ use crate::ansi;
 use crate::completion::ShellCompletionSource;
 use crate::eval::{builtin, deliver_pending_notes, eval_source, Env, Value};
 use crate::line_editor::{EditorAction, LineEditor};
-use crate::palette::Role;
+use crate::palette::{PromptRoles, Role};
 
 /// H-1c: render an exit code decimal into a stack buffer (no_std, no alloc
 /// on the hot path -- the mark fires once per command).
@@ -137,6 +137,12 @@ pub struct Repl {
     /// (cells / none / host tests) the zone methods emit NOTHING, so every
     /// existing byte-exact test and the serial console are untouched.
     beacon_rich: bool,
+    /// HALCYON-INSTRUMENT 7.4 (I-5c): the prompt's three inks from the
+    /// session's palette export, handed in by the ut binary (which reads
+    /// /env, keeping the layering above). `Some` takes the lambda shape in
+    /// those inks; `None` (the console, a legacy-profile session, host
+    /// tests) keeps the Bonfire shape byte for byte.
+    prompt_roles: Option<PromptRoles>,
     /// IM-4 (IMPERIUM-DESIGN.md 11.6): this shell's own legate scope, read
     /// ONCE from the kernel's `/proc/<pid>/imperium` flag by `probe_imperium`.
     /// `Some` iff the shell is elevated (an `imperium` sub-shell), in which
@@ -167,6 +173,7 @@ impl Repl {
             history_path: None,
             menu_shown: false,
             beacon_rich: false,
+            prompt_roles: None,
             imperium: None,
         }
     }
@@ -176,6 +183,13 @@ impl Repl {
     /// the rich arm without a renderer).
     pub fn set_beacon_rich(&mut self, on: bool) {
         self.beacon_rich = on;
+    }
+
+    /// I-5c: hand in the prompt's inks from the session's palette export
+    /// (all three resolved, or nothing -- `libhalcyon::theme::prompt_roles`
+    /// decides that in the binary). Takes effect at the next prompt draw.
+    pub fn set_prompt_roles(&mut self, roles: Option<PromptRoles>) {
+        self.prompt_roles = roles;
     }
 
     // The zone emitters. Frames only at rich; the payload around them is
@@ -352,17 +366,47 @@ impl Repl {
             Some(n) => n,
             None => return false,
         };
-        // SAFETY: scalar SVC wrappers; fd 0 is the pts slave just detected.
-        let sid = unsafe { libthyla_rs::t_setsid() };
-        if sid <= 0 {
-            t_putstr("ut: pts session: setsid failed\n");
-            return false;
-        }
-        let own_pgid = sid as u64; // a fresh session leader: sid == pgid == pid
-        if unsafe { libthyla_rs::t_tty_acquire(0) } < 0 {
-            t_putstr("ut: pts session: tty_acquire failed\n");
-            return false;
-        }
+        // A nested interactive shell (including Imperium's elevated shell)
+        // must stay in the terminal's existing session. setsid would detach
+        // it, after which tty_acquire correctly refuses the already-owned PTY.
+        // GET_FG on a slave is kernel-gated by controlling-session membership.
+        // Only an already-foreground caller may seat a nested shell; it gets
+        // its own group so ^C does not also terminate the waiting parent tool.
+        let mut foreground = unsafe { libthyla_rs::t_tty_get_fg(0) };
+        let own_pgid = if foreground >= 0 {
+            // The parent shell seats its job after the spawn; a nested shell
+            // that samples once can read the PARENT's group and refuse itself.
+            // A background start never converges and is refused at the bound.
+            let mut group = unsafe { libthyla_rs::t_getpgid(0) };
+            for _ in 0..50 {
+                if group > 0 && foreground == group { break; }
+                let _ = libthyla_rs::time::sleep(core::time::Duration::from_millis(10));
+                group = unsafe { libthyla_rs::t_getpgid(0) };
+                foreground = unsafe { libthyla_rs::t_tty_get_fg(0) };
+            }
+            if group <= 0 || foreground != group {
+                t_putstr("ut: pts session: nested shell is not foreground\n");
+                return false;
+            }
+            let pid = unsafe { libthyla_rs::t_getpid() };
+            if group != pid && unsafe { libthyla_rs::t_setpgid(0, 0) } < 0 {
+                t_putstr("ut: pts session: nested group creation failed\n");
+                return false;
+            }
+            pid as u64
+        } else {
+            // First shell created by the terminal host: establish the session.
+            let sid = unsafe { libthyla_rs::t_setsid() };
+            if sid <= 0 {
+                t_putstr("ut: pts session: setsid failed\n");
+                return false;
+            }
+            if unsafe { libthyla_rs::t_tty_acquire(0) } < 0 {
+                t_putstr("ut: pts session: tty_acquire failed\n");
+                return false;
+            }
+            sid as u64
+        };
         if unsafe { libthyla_rs::t_tty_set_fg(0, own_pgid) } < 0 {
             t_putstr("ut: pts session: tty_set_fg failed\n");
             return false;
@@ -581,6 +625,14 @@ impl Repl {
     /// strips the SGR escapes for width (ansi::visible_width), so the
     /// colour does not disturb cursor positioning.
     ///
+    /// Under a Halcyon session that handed down the prompt's inks
+    /// (HALCYON-INSTRUMENT 7.4, the Instrument profile) the shape is
+    /// `λ <cwd> ⊢ `: the lambda the one amber glyph of the prompt, the cwd in
+    /// the session's path ink, the turnstile a delimiter in its secondary
+    /// ink. The console has no export (no ancestor of a console `ut` is a
+    /// session), so it keeps the shape below -- a recorded residue with the
+    /// two renderers' divergence (I-7).
+    ///
     /// v1.0 emits this built-in default directly. Capturing the user's
     /// `prompt` shell function's stdout is deferred to a later U-* chunk
     /// (it needs rc loading + function-output capture).
@@ -592,26 +644,27 @@ impl Repl {
         // `ut` (no `--home`), where abbreviate_home returns the cwd unchanged.
         let home = self.env.get("home").as_scalar();
         let shown = crate::path::abbreviate_home(cwd, &home);
-        let mut p = ansi::fg(Role::Path, &shown);
-        match &self.imperium {
-            // IM-4 (IMPERIUM-DESIGN.md 4): an elevated shell shows the fasces in
-            // place of the tack -- one rod per held cap, the securis when
-            // CAP_KILL is held -- so how dangerous the shell is reads at a
-            // glance. A warning hue when the axe is present, ember otherwise.
-            // The whole fasces is ONE self-resetting SGR (no mid-token escape),
-            // so a scenario matching the `#` marker is not split by a color run.
-            Some(im) => {
-                let role = if im.axe { Role::Sand } else { Role::Glyph };
-                let f = fasces::render_fasces(im);
-                p.push(' ');
-                p.push_str(&ansi::fg(role, &f));
-                p.push(' ');
+        if let Some(im) = &self.imperium {
+            let mut p = ansi::fg(Role::Path, &shown);
+            let role = if im.axe { Role::Sand } else { Role::Glyph };
+            p.push(' ');
+            p.push_str(&ansi::fg(role, &fasces::render_fasces(im)));
+            p.push(' ');
+            return p;
+        }
+        match self.prompt_roles {
+            Some(r) => {
+                let mut p = ansi::fg_rgb(r.glyph, "\u{3bb} "); // GREEK SMALL LETTER LAMDA
+                p.push_str(&ansi::fg_rgb(r.path, &shown));
+                p.push_str(&ansi::fg_rgb(r.delim, " \u{22a2} ")); // RIGHT TACK
+                p
             }
             None => {
+                let mut p = ansi::fg(Role::Path, &shown);
                 p.push_str(&ansi::fg(Role::Glyph, " \u{22a2} ")); // RIGHT TACK
+                p
             }
         }
-        p
     }
 
     /// IM-4 (IMPERIUM-DESIGN.md 11.6): read this shell's own legate scope from
@@ -673,12 +726,16 @@ impl Repl {
     /// stdout, exactly like `open_notes` / `install_completion`, so the
     /// bare-spawn boot check + host tests never probe.
     pub fn probe_winsize(&mut self, out: &mut dyn IoWrite) {
-        // pts: the ldisc ctl render carries "... winsize <cols> <rows>". Read
-        // the fd the dance opened (offset 0, never yet read); no CPR.
+        // pts: the ldisc ctl render carries "... winsize <cols> <rows>". The
+        // fd the dance opened was already read at offset 0 by the startup probe
+        // (its offset is advanced), and ptyfs re-renders the ctl per read, so
+        // read at 0 EXPLICITLY (t_pread does not consume the fd offset) -- else a
+        // winch re-probe reads past the current render and never re-learns the
+        // resized width. No CPR.
         if self.env.job_control.is_some() {
             if let Some(fd) = self.env.consctl_fd {
                 let mut buf = [0u8; 128];
-                let n = unsafe { libthyla_rs::t_read(fd as i64, buf.as_mut_ptr(), buf.len()) };
+                let n = unsafe { libthyla_rs::t_pread(fd as i64, buf.as_mut_ptr(), buf.len(), 0) };
                 if n > 0 {
                     if let Some((c, r)) = parse_winsize(&buf[..n as usize]) {
                         if c > 0 && r > 0 {
@@ -977,13 +1034,19 @@ impl Repl {
     /// Public so a non-interactive probe can drive the real reap path
     /// (`/u-job-test`); the interactive shell calls it from `feed`.
     pub fn reap_jobs(&mut self) {
+        for line in self.reap_jobs_lines() {
+            self.env.emit_line(&line); // PTY-4b: the session terminal, not the UART
+        }
+    }
+
+    /// `reap_jobs`'s poll-and-mark half with the notification lines RETURNED
+    /// rather than printed, so the idle prompt can decide before it prints.
+    fn reap_jobs_lines(&mut self) -> Vec<String> {
         // The WNOHANG poll-and-mark half is shared with the `jobs` builtin's
         // refresh (`builtin::reap_background`); the drain-and-print half is the
         // prompt-cycle's own. One poll per live pid -- never a busy-loop.
         builtin::reap_background(&mut self.env);
-        for line in self.env.jobs_mut().take_done_notifications() {
-            self.env.emit_line(&line); // PTY-4b: the session terminal, not the UART
-        }
+        self.env.jobs_mut().take_done_notifications()
     }
 
     /// Open the shell's own note queue so `on note` / `mask note` handlers
@@ -1038,11 +1101,36 @@ impl Repl {
     /// leading `\r\n` mirrors the Cancel/Accept idiom: it moves off the
     /// in-progress line so the notification + fresh prompt land cleanly.
     pub fn on_notes_ready(&mut self, out: &mut dyn IoWrite) {
+        // Decide BEFORE printing what this batch will do. Reap finished bg
+        // jobs first (so an `on note child_exit` handler, if any, observes
+        // current job state), matching the prompt-cycle order.
+        let lines = self.reap_jobs_lines();
+        let notes = crate::eval::stmt::drain_pending_notes(&mut self.env);
+        let winch = notes.iter().any(|n| n.name == "tty:winch");
+        let silent = lines.is_empty()
+            && notes
+                .iter()
+                .all(|n| crate::eval::stmt::note_is_silent(&self.env, n));
+        if silent {
+            // Nothing to print, nothing to cancel: the prompt stays where it
+            // is. (Every pts-hosted shell drew its prompt TWICE at session
+            // start: the tile's first CONFIGURE resized the pts, the kernel
+            // posted `tty:winch`, and the fresh block below moved the prompt
+            // to a new line for a note that printed nothing.) A resize
+            // re-learns the width and redraws the prompt in place -- the
+            // editor had no resize consumer before.
+            let _ = crate::eval::stmt::dispatch_notes(&mut self.env, &notes);
+            if winch {
+                self.probe_winsize(out);
+                self.emit_prompt(out);
+            }
+            return;
+        }
         let _ = out.write_all(b"\r\n");
-        // Reap finished bg jobs first (so an `on note child_exit` handler, if
-        // any, observes current job state), matching the prompt-cycle order.
-        self.reap_jobs();
-        let interrupted = self.deliver_notes();
+        for line in &lines {
+            self.env.emit_line(line); // PTY-4b: the session terminal, not the UART
+        }
+        let interrupted = crate::eval::stmt::dispatch_notes(&mut self.env, &notes);
         if interrupted {
             self.editor.reset();
         }
@@ -1363,6 +1451,38 @@ mod tests {
         let p = repl.prompt();
         assert!(p.contains("/etc"));
         assert!(!p.contains('~'));
+    }
+
+    // I-5c (HALCYON-INSTRUMENT 7.4): with the session's three inks handed in
+    // the prompt is `λ <cwd> ⊢ ` -- each segment in the RESOLVED ink it was
+    // given, none of the Bonfire roles; without them the legacy shape stands
+    // byte for byte (no lambda, the Bonfire path and glyph escapes).
+    // NOTE: libutopia's unit tests cannot compile for a host target today
+    // (memory bug_libutopia_tests_cannot_compile); the wiring's live witness
+    // is ls-halcyon-session-instrument's prompt leg.
+    #[test]
+    fn prompt_takes_the_lambda_shape_with_the_session_inks() {
+        let mut repl = Repl::new();
+        repl.env_mut().cwd_set("/etc");
+        let roles = PromptRoles {
+            glyph: crate::palette::Rgb::new(0xc7, 0xb9, 0x8b),
+            path: crate::palette::Rgb::new(0x96, 0xaa, 0xa6),
+            delim: crate::palette::Rgb::new(0xaf, 0xb4, 0xb0),
+        };
+        repl.set_prompt_roles(Some(roles));
+        let p = repl.prompt();
+        let mut want = ansi::fg_rgb(roles.glyph, "\u{3bb} ");
+        want.push_str(&ansi::fg_rgb(roles.path, "/etc"));
+        want.push_str(&ansi::fg_rgb(roles.delim, " \u{22a2} "));
+        assert_eq!(p, want);
+        assert!(!p.contains(&ansi::fg_seq(crate::palette::GLYPH)), "no Bonfire ember");
+        assert_eq!(ansi::visible_width(&p), 2 + 4 + 3, "lambda, space, cwd, space, turnstile, space");
+        repl.set_prompt_roles(None);
+        let legacy = repl.prompt();
+        assert!(!legacy.contains('\u{3bb}'));
+        let mut want = ansi::fg(Role::Path, "/etc");
+        want.push_str(&ansi::fg(Role::Glyph, " \u{22a2} "));
+        assert_eq!(legacy, want);
     }
 
     // LS-8c: `on_notes_ready` is the idle-prompt wake of the multi-fd poll loop.

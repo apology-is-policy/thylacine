@@ -50,7 +50,20 @@ leaf that is in the table is automatically walkable, stattable and readable.
 
 ### The gate is a special case, and it is default-allow
 
-Exactly one leaf is gated: `kernel-base`, which discloses the live KASLR slide.
+Two leaves are gated, on the SAME `CAP_HOSTOWNER` check and for DIFFERENT
+reasons. `kernel-base` discloses the live KASLR slide. `kstack` discloses no
+address at all — it is gated because of its COST: its formatter walks every
+live Proc under `g_proc_table_lock` with IRQs MASKED and scans each thread's
+16 KiB stack for the poison boundary, recomputed on every `read()` at every
+offset, since these leaves are stateless. Left world-readable, a `pread` loop
+would hold a CPU masked and block every fork/exit/wait behind the proc-table
+lock, defeating on that CPU the very interrupt-latency property ARCH 8.12
+exists to establish (I-32). The scan is separately budgeted; the gate and the
+bound close different halves and both are wanted. Added by the ARCH 8.12 audit
+round (F2); `devctl.kstack_gated` is the deny-path regression, and it is a
+deny probe through the REAL read path because the predicate is shared and a
+predicate-only test would pass whether or not the gate were WIRED for a kind.
+
 The gate is a `CAP_HOSTOWNER` check with **no owner axis** — the kernel has no
 owner-principal, so the capability axis is the only one that could exist. A
 logged-in user is stripped of the elevation-only capabilities at fork, so it
@@ -61,8 +74,8 @@ with names, parents, states, thread counts, page counts and CPU time, visible to
 any Proc that can name `/ctl`. That is the deliberate posture, not an oversight —
 but see Caveats for the shape it leaves behind.
 
-The mode reported by `stat_native` follows the gate (0400 for `kernel-base`,
-0444 elsewhere) so the advertised mode does not lie about a file the caller
+The mode reported by `stat_native` follows the gate (0400 for `kernel-base`
+and `kstack`, 0444 elsewhere) so the advertised mode does not lie about a file the caller
 cannot in fact read — but as with `/proc`, `perm_enforced` is false, so that mode
 is documentation and the check at the read site is the enforcement.
 

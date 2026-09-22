@@ -42,7 +42,7 @@ use alloc::vec::Vec;
 use libdriver::driver::{run, Driver, DriverVa};
 use libdriver::resource::BoundResources;
 use libdriver::Error;
-use libthyla_rs::hardware::Irq;
+use libthyla_rs::hardware::PciIrq;
 use libthyla_rs::io::Write;
 use libthyla_rs::thread;
 use libthyla_rs::{
@@ -86,7 +86,7 @@ const IRQ_STACK: u64 = 32 * 1024;
 
 struct Nocturned {
     snd: VirtioSnd,
-    irq: Irq,
+    irq: PciIrq,
 }
 
 /// The cycle thread's context, leaked to 'static and handed to `cycle_entry`
@@ -97,13 +97,14 @@ struct CycleCtx {
     sh: &'static Shared,
 }
 
-/// The IRQ thread's context (spawn_raw's one u64 arg). It owns the claimed `Irq`
+/// The IRQ thread's context (spawn_raw's one u64 arg). It owns the claimed `PciIrq`
 /// -- the device's period-completion line -- and blocks on it so the cycle
 /// thread never waits on the (untrusted) device directly (I-46 no-stall): every
 /// dispatch pokes the cycle's `wake` word, which the cycle parks on with a
 /// bounded backstop.
 struct IrqCtx {
-    irq: Irq,
+    irq: PciIrq,
+    ack: snd::IrqAck,
     sh: &'static Shared,
 }
 
@@ -151,13 +152,15 @@ impl Driver for Nocturned {
         // immediately, no first-cycle race (N-3c-2).
         let sh: &'static Shared = Box::leak(Box::new(Shared::new(self.snd.has_capture())));
 
-        // Spawn the IRQ thread first: it owns the claimed Irq and blocks on the
+        // Spawn the IRQ thread first: it owns the claimed PciIrq and blocks on the
         // device's period-completion line (a KOBJ_IRQ has no poll-readiness arm,
         // so it MUST be blocked on, never polled), poking the cycle's `wake` word
         // on every dispatch. Isolating the device-wait here keeps the cycle
         // thread off the (untrusted) device entirely -- it parks on `wake` with a
         // bounded backstop, so a wedged device stalls only this thread (I-46).
-        let irq_ctx: &'static IrqCtx = Box::leak(Box::new(IrqCtx { irq: self.irq, sh }));
+        let irq_ctx: &'static IrqCtx = Box::leak(Box::new(IrqCtx {
+            ack: self.snd.irq_acknowledger(), irq: self.irq, sh,
+        }));
         let irq_stack = unsafe { t_burrow_attach(IRQ_STACK) };
         if irq_stack < 0 {
             say!("nocturned: irq-thread stack attach failed");
@@ -223,28 +226,35 @@ extern "C" fn cycle_entry(arg: u64) -> ! {
 /// The IRQ thread entry (spawn_raw ABI: one u64 arg = the leaked IrqCtx). Blocks
 /// on the device period-completion IRQ and pokes the cycle thread on each. A
 /// KOBJ_IRQ handle has no poll-readiness arm (kernel poll returns POLLNVAL), so
-/// this MUST block on `Irq::wait` (t_irq_wait), never poll -- the `impl AsFd for
-/// Irq` that let it be polled was removed to make that misuse a compile error.
+/// this MUST block on `PciIrq::wait` (t_irq_wait), never poll -- the `impl AsFd for
+/// PciIrq` that let it be polled was removed to make that misuse a compile error.
 extern "C" fn irq_entry(arg: u64) -> ! {
     // SAFETY: `arg` is the address of the IrqCtx leaked in serve(); it lives for
     // the Proc's life and only this thread touches it (shared &, never aliased mut).
     let ctx: &IrqCtx = unsafe { &*(arg as *const IrqCtx) };
+    // Initialization uses polled control RPCs. Clear their residue, then grant
+    // delivery once; subsequent WAIT calls never re-arm the function.
+    ctx.ack.acknowledge();
+    if ctx.irq.arm().is_err() {
+        say!("nocturned: PCI interrupt arm failed; cycle keeps its backstop");
+        thread::exit_self();
+    }
     loop {
         match ctx.irq.wait() {
-            // wait() blocks in-kernel until >=1 IRQ is pending, then reads-and-
-            // clears the counter; poke the cycle so it pumps this period promptly.
-            Ok(_) => ctx.sh.poke_cycle(),
-            // Err is effectively unreachable: a death-wake returns Ok(0) (the
-            // kernel's kobj_irq_wait yields 0 on interrupt) and the thread is
-            // then terminated at the syscall tail's die-check; the only Err
-            // paths are a second waiter (KOBJ_IRQ_WAIT_BUSY -- there is exactly
-            // one) or a closed handle (the IrqCtx is leaked, never dropped).
-            // Kept as a defensive backstop: exit_self (not driver-terminate) so
-            // that if a future change ever made it reachable it stops THIS
-            // thread cleanly -- no busy-spin, no restart loop. Not the last
-            // thread, so the Proc lives; the cycle keeps its 100ms backstop.
+            Ok(Some(event)) => {
+                ctx.ack.acknowledge();
+                ctx.sh.poke_cycle();
+                match ctx.irq.complete(event) {
+                    Ok(()) | Err(libthyla_rs::err::Error::WouldBlock) => {}
+                    Err(_) => {
+                        say!("nocturned: PCI interrupt completion failed; cycle keeps its backstop");
+                        thread::exit_self();
+                    }
+                }
+            }
+            Ok(None) => {}
             Err(_) => {
-                say!("nocturned: irq-thread wait failed (unexpected); cycle keeps its backstop");
+                say!("nocturned: PCI interrupt wait ended; cycle keeps its backstop");
                 thread::exit_self();
             }
         }
@@ -265,9 +275,9 @@ fn cycle_run(snd: &mut VirtioSnd, sh: &'static Shared) -> ! {
     loop {
         // Register-then-check (F1): snapshot `wake` BEFORE the pump reads the
         // used ring, so a poke landing after the pump but before we park is not
-        // absorbed. The IRQ line is edge-triggered and only the cycle re-arms it
-        // (by reading the ISR in pump), so an absorbed poke would strand every
-        // later completion until the 100ms backstop -- an audible dropout.
+        // absorbed. The IRQ waiter acknowledges the level-triggered PCI line
+        // before re-arming it. An absorbed poke could still strand a completed
+        // period until the 100ms backstop -- an audible dropout.
         let seen = sh.cycle_seen();
         match sh.graph.try_lock() {
             Some(mut g) => {

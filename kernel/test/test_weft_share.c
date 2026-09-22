@@ -99,9 +99,15 @@ void test_weft_share_register_claim(void) {
     TEST_ASSERT(weft_share_claim(0) == NULL, "share_id 0 is never valid");
     TEST_ASSERT(weft_share_claim(id + 1) == NULL, "an un-minted id claims nothing");
 
+    // Reverse broker import must match the registering peer, and a forged
+    // peer claim must leave the real share consumable (no theft or DoS).
+    TEST_ASSERT(weft_share_claim_from(id, 0) == NULL, "zero peer refused");
+    TEST_ASSERT(weft_share_claim_from(id, proc_stripes(netd) + 1) == NULL,
+        "different peer cannot steal a share");
+    TEST_EXPECT_EQ(burrow_handle_count(v), h_before + 1, "refused import retains the registration pin");
     // The real id claims the burrow exactly once; the pin is TRANSFERRED (no
     // count change -- ownership moved from the registry to us).
-    struct Burrow *claimed = weft_share_claim(id);
+    struct Burrow *claimed = weft_share_claim_from(id, proc_stripes(netd));
     TEST_EXPECT_EQ(claimed, v, "claim returns the registered Burrow");
     TEST_EXPECT_EQ(burrow_handle_count(v), h_before + 1,
         "claim transfers the pin -- handle_count unchanged");
@@ -1277,5 +1283,18 @@ void test_weft_hostmem_resolve(void) {
     TEST_EXPECT_EQ(hostmem_resolve_subrange(k, 1, 0, 0, &pa), -1, "zero length rejects");
     TEST_EXPECT_EQ(hostmem_resolve_subrange(k, 0x100, 0, PAGE_SIZE, &pa), -1,
         "shmid > 0xff rejects (the u8 truncation guard)");
+    // A valid SHM descriptor is not authority over kernel routing pages.
+    k->msix.cap_offset = 0x40;
+    k->msix.entries = 1;
+    k->msix.table_bar = 0;
+    k->msix.table_offset = 0x2800;
+    k->msix.pba_bar = 0;
+    k->msix.pba_offset = 0x3800;
+    TEST_EXPECT_EQ(hostmem_resolve_subrange(k, 1, 0x1000, PAGE_SIZE, &pa), -1,
+        "hostmem alias cannot expose table page");
+    TEST_EXPECT_EQ(hostmem_resolve_subrange(k, 1, 0x2000, PAGE_SIZE, &pa), -1,
+        "hostmem alias cannot expose PBA page");
+    TEST_EXPECT_EQ(hostmem_resolve_subrange(k, 1, 0, PAGE_SIZE, &pa), 0,
+        "unprotected hostmem prefix remains available");
     kfree(k);
 }

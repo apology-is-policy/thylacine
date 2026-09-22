@@ -4,7 +4,7 @@ type: moc
 title: "Userspace"
 parent: home
 created: 2026-07-31
-updated: 2026-09-07
+updated: 2026-09-17
 ---
 The native + ported userspace tree: the boot chain (joey, corvus, login,
 warden), the services (netd, stratumd-facing proxies, ptyfs, tapestryd),
@@ -14,6 +14,10 @@ Go fork + clade). Orientation only — the facts live in the `sub-*`
 dossiers.
 
 ## Children
+
+- [[sub-dosbox]] — the Cryptid DOSBox-X port and JIT boundary.
+- [[sub-webkit]] — the Boosty WebKit port: JavaScriptCore on Pouch (JIT off) and the platform findings it measured.
+- [[sub-nocturne-tools]] — audio clients and payload/authority witnesses.
 
 - [[moc-userspace-netd]] — the network daemon (the first userspace area;
   other area MOCs land with the per-subsystem sweep).
@@ -120,3 +124,5 @@ port needs and the boundary-line patches it carries.
   halves must agree on it.
 - Kernel boundaries these Procs stand on: [[moc-kernel-srv]] (post/
   connect), [[moc-kernel-ninep]] (the mounts that reach them).
+
+- [[sub-lictor]] - trusted display/input ownership and the normal hardware broker.

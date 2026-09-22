@@ -20,7 +20,7 @@ pub enum AccumStep {
     More,
     /// The full raster arrived. The accumulator has reset and may receive a
     /// subsequent image on the same fid (offsets continue cumulatively).
-    Done { w: u32, h: u32, argb: Vec<u32> },
+    Done { id: u128, w: u32, h: u32, argb: Vec<u32> },
     /// A protocol or bounds violation (bad header, over-cap dimensions, a
     /// non-sequential offset, or bytes past the declared image). The caller
     /// replies Rlerror and tears the transfer down -- a partial is discarded.
@@ -135,6 +135,7 @@ impl PlaceAccum {
             self.buf = Vec::new();
             self.header = None;
             return AccumStep::Done {
+                id: h.id,
                 w: h.w,
                 h: h.h,
                 argb,
@@ -176,7 +177,7 @@ mod tests {
 
     fn expect_done(step: AccumStep) -> (u32, u32, Vec<u32>) {
         match step {
-            AccumStep::Done { w, h, argb } => (w, h, argb),
+            AccumStep::Done { w, h, argb, .. } => (w, h, argb),
             AccumStep::More => panic!("expected Done, got More"),
             AccumStep::Reject => panic!("expected Done, got Reject"),
         }
@@ -207,7 +208,7 @@ mod tests {
             let end = (i + 10).min(msg.len());
             match a.write(off, &msg[i..end]) {
                 AccumStep::More => {}
-                AccumStep::Done { w, h, argb } => done = Some((w, h, argb)),
+                AccumStep::Done { w, h, argb, .. } => done = Some((w, h, argb)),
                 AccumStep::Reject => panic!("unexpected reject at {}", i),
             }
             off += (end - i) as u64;

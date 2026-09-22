@@ -141,6 +141,18 @@ pub extern "C" fn rs_main() -> i64 {
         }
     }
 
+    // Regression: command-word expansion must observe the preceding status.
+    {
+        let mut e = fresh();
+        if run(&mut e, "false; exit $status") != 1 || e.exit_requested() != Some(1) {
+            return fail("previous status in argv");
+        }
+        let mut e = fresh();
+        if run(&mut e, "false; $unset_status_test") != 0 {
+            return fail("empty expansion resets status");
+        }
+    }
+
     // 8b. $status read by a STATEMENT, the way a script reads it. Item 8 reads
     //     the field and cannot see a statement that resets the register
     //     before expanding its own words -- which made every read below 0

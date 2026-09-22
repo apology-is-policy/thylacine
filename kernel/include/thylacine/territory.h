@@ -56,28 +56,20 @@ struct Path;   // <thylacine/path.h> -- #66 namespace name retention (I-33)
 // eventual ramfs + /proc + /dev + /net binds.
 #define PGRP_MAX_BINDS  8
 
-// Mount-table size. Sufficient for the v1.0 boot path. joey is the high-water
-// mark: the kproc boot namespace mounts /srv + /proc + /ctl + /dev (4) onto
-// devramfs synth dirs (inherited by every Proc), and the long-running init then
-// re-grafts /srv + /bin + /proc + /ctl + /dev (5) onto the pivoted disk root --
-// 9 live entries (#57b). The pre-pivot kernel mounts ORPHAN after pivot (their
-// devramfs mount points become unreachable from the disk root) but remain in the
-// table, so the count is pre+post per re-grafted dir; a pivot-time GC of dead
-// mounts is the tracked seam (#80; would halve joey's count). 16 accommodates the
-// Menagerie 6b /hw/pci mediated-PCI mount (a pre-pivot orphan -- mounted in the
-// kproc boot namespace so the pre-pivot warden's PciSource reads it, dropped-but-
-// uncollected at pivot) plus restored headroom for /net (Phase 8); the pivot-time
-// GC (#80) is the real fix. The proc.rfork stress test clones Territories en
-// masse; each clone deep-copies mounts[] + bumps a spoor_ref per entry, so the cap
-// stays modest to hold the per-clone cost in check. G15 (Go Stage 4a) adds /env
-// (devenv) as a boot mount + a post-pivot re-graft (pre+post like the others),
-// so the cap grew 16 -> 20 to keep headroom under the #80 orphan accumulation.
-// V-7 (the vivarium) grows it 20 -> 32: a container runner INHERITS the session
-// territory (~15-16 entries incl. the #80 orphaned pre-pivot generation) and
-// adds its diorama mount plus up to ~10 recipe mounts (proc/sys/env + the /dev
-// leaves + net/tty) on top -- at 20 the recipe overflowed the table and the
-// first over-cap mount failed the container. 32 covers the recipe with
-// headroom; the per-clone deep-copy cost stays ~1.3 KiB per spawn.
+// Mount-table size. A shell in a login session holds 17 entries (measured
+// 2026-09-21: 15 that joey grafts onto the pivoted disk root, login's
+// /home/<user>, and ut's /tmp bind), and a container runner adds up to 11 recipe
+// mounts on top (/dio, eight fixed binds, /net and /dev/tty when granted). The
+// table is deep-copied per territory_clone (each entry a spoor_ref), so the cap
+// stays modest: ~1.3 KiB per spawn.
+//
+// History worth keeping: the cap went 8 -> 12 -> 16 -> 20 -> 32, every time for
+// the SAME cause. A root swap left the previous generation's entries in the table
+// -- unreachable, and un-unmountable because unmount takes a resolved mount
+// point -- so the boot generation rode along in every Proc (#80). At 32 the
+// session's 23 plus a container's 10 no longer fit and `viv run` broke. The fix
+// was never a bigger number: territory_pivot_root / territory_chroot now shed
+// what the new root cannot reach (ARCH 9.6.10), and the seven orphans are gone.
 #define PGRP_MAX_MOUNTS  32
 
 // Path identifier. At v1.0 abstract `u32` — bind/mount take whatever
@@ -571,6 +563,9 @@ void territory_declare_linux(struct Territory *territory);
 // idempotent-same-source REFCOUNT semantics, but not its flag convergence --
 // chroot carries no flags word to converge (#219).
 //
+// Mount table: a real swap sheds the entries unreachable from the new root,
+// as territory_pivot_root does -- see the block there and ARCH 9.6.10.
+//
 // Spec: maps to `specs/territory.tla::Chroot(p, s)`. Refcount discipline
 // pinned by MountRefcountConsistency (refcount[s] = mount-table-count +
 // |{p : root_spoor[p] = s}|).
@@ -619,21 +614,25 @@ int territory_chroot(struct Territory *territory, struct Spoor *source);
 // if the caller has no current root_spoor. Use territory_chroot for
 // the initial-chroot case (kproc's boot-time setup).
 //
-// Spec posture: same shape as `specs/territory.tla::Chroot(p, s)` --
-// the formal state transition is identical to chroot under the
-// renamed action. No new spec module per the 2026-05-23 spec-to-code
-// suspension; the no-cycle invariant (I-3) holds trivially because
-// pivot does not touch the bind graph, and refcount consistency
-// (§9.6.6) holds via the matched bump + drop pattern.
+// Spec posture: the ROOT swap has the shape of `specs/territory.tla::Chroot(p,
+// s)` under a renamed action; the no-cycle invariant (I-3) holds trivially
+// because pivot adds no edge, and refcount consistency (§9.6.6) holds via the
+// matched bump + drop pattern. The MOUNT-TABLE half does not refine that
+// action (it is `UNCHANGED bindings` there): the shed is
+// `specs/territory_shed.tla::Pivot`, and no module models refcounts together
+// with the shed -- kernel tests + the audit carry that.
 //
-// Bind / mount table state across pivot: at v1.0, the per-Territory
-// bind[] and mounts[] are NOT modified by territory_pivot_root. Any
-// mount entries that pointed at sub-trees of the OLD root remain
-// active; walking them post-pivot still routes through the mount-
-// table's Spoors (mount-table entries don't depend on root_spoor for
-// addressability -- they're keyed by path_id_t in the per-Territory
-// namespace). v1.x bind-survivor semantics (e.g., a `/dev` bind that
-// crosses the pivot) lift on top of this primitive.
+// Mount table across the swap (ARCH 9.6.10, #80): in the same ns_lock hold
+// that installs the new root, every mount entry whose mount point lies in a
+// device instance UNREACHABLE from the new root is dropped -- its source
+// clunked (outside the lock), its mp_path unref'd, exactly as unmount() would.
+// Such an entry can never be named again (unmount takes a resolved mount
+// point), so without this it is dead weight copied into every child; seven of
+// them is what filled the table and broke the container runner. Entries in
+// reachable trees survive in their original order. The idempotent same-root
+// call swaps nothing and sheds nothing. territory_chroot does the same.
+// bind[] is untouched. Spec: specs/territory_shed.tla (ShedLosesNothing,
+// NoResidueAfterPivot).
 //
 // Return values:
 //    0   success (root swapped or idempotent no-op).

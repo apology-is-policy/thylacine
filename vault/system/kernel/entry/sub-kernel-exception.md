@@ -17,7 +17,7 @@ design:
   - "docs/ARCHITECTURE.md section 12"
   - "docs/reference/08-exception.md"
 created: 2026-08-02
-updated: 2026-08-18
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -39,6 +39,15 @@ carry EL0 exceptions (synchronous, interrupt). The other twelve route to a
 diagnostic that names which one fired and halts.
 
 ## Mechanism
+
+### Full-width interrupt dispatch
+
+The reserved/spurious range is exactly INTIDs 1020 through 1023. The IRQ entry
+must not treat every larger ID as spurious: GICv3 LPIs start at 8192 and reach
+`gic_dispatch` and EOI with their full identifier. [[sub-kernel-gic]] owns the
+controller distinction and [[sub-kernel-pci-irq]] the endpoint lifetime. The
+ITS/TCG DMA/PBA and resident-driver gates exercise this path; dropping larger
+IDs would leave those endpoints permanently waiting.
 
 ### Everything is on the thread's own stack, and that is the design
 
@@ -87,9 +96,22 @@ mid-handler.
 
 The shared return trampoline handles the ordinary case: a thread that entered
 via an exception returns the way it came. It is always reached with interrupts
-masked — hardware masked them on entry and nothing on the path unmasks — so it
-installs the return address and the saved processor state in the same masked
-instant that it `eret`s.
+masked, so it installs the return address and the saved processor state in the
+same masked instant that it `eret`s.
+
+**Why it is reached masked changed at ARCH 8.12, and the old reason is no
+longer true.** It used to be "hardware masked them on entry and nothing on the
+path unmasks". A syscall body now runs with interrupts ON: `syscall_dispatch`
+unmasks after setting the per-thread in-syscall marker, and re-masks
+UNCONDITIONALLY before returning. So the property is preserved by a re-mask
+rather than by an absence, which is a weaker guarantee and is therefore
+asserted rather than assumed — `el0_return_stop_check` carries an
+interrupt-state assert, and it sits in that function precisely because its only
+two callers are the two tails that reach this trampoline.
+
+The unmask is confined to the syscall body. Kernel fault handling shares the
+EL0-synchronous slot and is **not** unmasked, so the recursion guard on that
+slot keeps its discriminator.
 
 The other two are hand-rolled. One takes a kernel thread into EL0 for the first
 time after loading an ELF; the other is the initial entry point for a thread

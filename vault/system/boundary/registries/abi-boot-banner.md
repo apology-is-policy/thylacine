@@ -10,6 +10,18 @@ pinned-by:
   - "kernel/cons.c (cons_kernel_writer_begin/end -- the DELIVERY half)"
   - "docs/TOOLING.md §10"
 mirrors:
+  - "tools/interactive/ls-halcyon-session-media.exp"
+  - "tools/interactive/ls-graphical-sak.exp"
+  - "tools/interactive/ls-graphical-sak-states.exp"
+  - "tools/interactive/ls-graphical-sak-recover.exp"
+  - "tools/interactive/git-shell.exp"
+  - "tools/interactive/ls-halcyon-session-dosbox.exp"
+  - tools/interactive/pci-net-load.exp
+  - "tools/interactive/im1-sak-lever.exp"
+  - "tools/interactive/im3-lex-curiata.exp"
+  - "tools/interactive/ls-bghome-stall.exp"
+  - "tools/interactive/ls-imperium.exp"
+  - "tools/interactive/haul-post.exp"
   - "tools/test.sh"
   - "tools/smp-multiboot.sh"
   - "tools/test-cross-reboot.sh"
@@ -35,6 +47,8 @@ mirrors:
   - "tools/interactive/ls-gfx-jpeg.exp"
   - "tools/interactive/ls-gfx-restore.exp"
   - "tools/interactive/ls-gfx-session.exp"
+  - "tools/interactive/ls-halcyon-instrument.exp"
+  - "tools/interactive/ls-halcyon-session-instrument.exp"
   - "tools/interactive/ls-gfx-session-image.exp"
   - "tools/interactive/ls-halcyon.exp"
   - "tools/interactive/pty-susp-pouch.exp"
@@ -65,7 +79,7 @@ literal-mentions:
   - "tools/warp-host.sh (a usage comment)"
   - "tools/interactive/go8d.exp (a prose note)"
 created: 2026-08-01
-updated: 2026-09-16
+updated: 2026-09-17
 ---
 ## The surface
 
@@ -106,20 +120,10 @@ fault-injection variant reports the protection did not fire.
 ## Why it is frozen
 
 It is the whole agentic loop's success signal, and the mirror set above is
-what that means concretely. The set has grown along both integration lines that
-met at the 2026-09-09 aux<-main merge: main's 2026-09 resync added thirteen
-consumer gates plus the s7 F3 gate `s7-nora-probe.exp` (both classified in the
-subsections below), and aux's arcs added the imperium gates (`im1-sak-lever.exp`,
-`im3-lex-curiata.exp`, `ls-imperium.exp`), the DOSBox gates
-(`ls-gfx-dosbox*.exp`, `ls-gfx-throttle.exp`), and arm-6's `ls-bghome-stall.exp`
-(the logout-stall regression). As of that merge the authoritative `mirrors` list
-holds **forty** entries; with the two comment-only `literal-mentions`
-(`tools/warp-host.sh`, `tools/interactive/go8d.exp`) that is the **forty-two**
-files under `tools/` that carry a literal — which the DERIVED check (below)
-verifies as a set, so the split by literal and by delivery is its business, not
-a hand-maintained tally here. Two constants survive the growth: `stall-watch.py`
-is the sole `kernel base:` matcher, and `real-pass-harness.log` is the one mirror
-that is data (a captured-log fixture), not a program.
+what that means concretely. The authoritative `mirrors` list below tracks the
+combined main and aux harnesses. The DERIVED check verifies the set;
+`stall-watch.py` matches `kernel base:` and `real-pass-harness.log` is a
+captured-log fixture rather than a program.
 
 **Reading the counts below.** The dated measurements further down (the 2026-08-18
 main#245 census, the delivery classification, the "resync grew to twenty-eight"
@@ -140,10 +144,10 @@ match a literal (verified by grep); by which:
 
 - **`Thylacine boot OK`** (5): `check-arc-gates.sh`, `verify-console-mode.exp`,
   `verify-gpu-headless-1b.exp`, `test-smp-classify.sh`, `real-pass-harness.log`.
-- **`EXTINCTION:`** (10): `verify-gpu-headless-1b.exp`, `item10-ctrlc.exp`,
+- **`EXTINCTION:`** (11): `verify-gpu-headless-1b.exp`, `item10-ctrlc.exp`,
   `ls-gfx-age.exp`, `ls-gfx-restore.exp`, `ls-gfx-session.exp`, `ls-halcyon.exp`,
-  `pty-susp-pouch.exp`, `r5f9-ash.exp`, `test-smp-classify.sh`,
-  `composed-screen.exp`.
+  `ls-halcyon-instrument.exp`, `pty-susp-pouch.exp`, `r5f9-ash.exp`,
+  `test-smp-classify.sh`, `composed-screen.exp`.
 - **`kernel base:`** — none; `stall-watch.py` remains the sole matcher.
 
 By the four-class taxonomy above (program / document / inert / phantom), eleven
@@ -177,6 +181,22 @@ table's `EXTINCTION:` matchers 24 -> 25 (boot-OK and kernel-base unchanged). It
 is a post-resync add, not one of that subsection's thirteen. Recorded by
 [[chg-2026-09-07-boot-banner-s7-nora-probe]], which carries `mirrors-checked`
 for the full twenty-nine under the same R6 grandfather rule.
+
+### The two HALCYON-INSTRUMENT gates: two EXTINCTION deliverers added (2026-09-14)
+
+The HALCYON-INSTRUMENT I-2 chunk added `tools/interactive/ls-halcyon-
+instrument.exp` to `mirrors` (the console-lever + profile image) without
+bumping the counts here, and the I-4 chunk added
+`tools/interactive/ls-halcyon-session-instrument.exp` (the session + profile
+image) — both `expect` gates that boot a real guest through `lib.exp` and fail
+on `EXTINCTION:` in each of their phases (before login, during the session
+spawn, before the root tile and the rails, through the footer's conditions,
+the rail's buttons, the retained tile and its restart, the logout). Each
+matches `EXTINCTION:` only (0 `Thylacine boot OK`, 0 `kernel base:`), so each
+is a **program that delivers**: a reworded extinction prefix fails to match
+real boot output and is caught. Together they bring the set to thirty-one and
+the delivery table's `EXTINCTION:` matchers 25 -> 27 (boot-OK and kernel-base
+unchanged).
 
 ### The co-update list has never described that population
 
@@ -364,17 +384,17 @@ what the guarantee is worth:
 ### The protected string has the narrower readership
 
 Forced to enumerate by the mirror rule, and the answer inverts the fix's value.
-Classifying all twenty-nine mirrors by which literal each actually matches
+Classifying all thirty-one mirrors by which literal each actually matches
 (a mirror matching two literals is counted in both rows):
 
 | Literal | Delivery | Mirrors matching |
 |---|---|---|
 | `Thylacine boot OK` | **serialized** (writer role) | 13 |
-| `EXTINCTION:` | **unserialized** — lock-free, no role | **25** |
+| `EXTINCTION:` | **unserialized** — lock-free, no role | **27** |
 | `kernel base:` | unserialized | 1 |
 
-**Almost every consumer of this ABI matches an unserialized string** — 25 of
-the 29 match `EXTINCTION:` and one matches `kernel base:`, both emitted without
+**Almost every consumer of this ABI matches an unserialized string** — 27 of
+the 31 match `EXTINCTION:` and one matches `kernel base:`, both emitted without
 the writer role — while the one string that got a delivery guarantee, the
 banner, is matched by under half of them. The crash path emits through the same lock-free byte-at-a-time put the
 banner used, does **not** stop peer processors first, and its pre-emit flush is

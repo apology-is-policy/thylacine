@@ -64,17 +64,23 @@
 
 #include "test.h"
 
+#include <thylacine/allowance.h>
+#include <thylacine/burrow.h>
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
 #include <thylacine/devsrv.h>
+#include <thylacine/dma_handle.h>
 #include <thylacine/handle.h>
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
+#include <thylacine/seat.h>
 #include <thylacine/spoor.h>
 #include <thylacine/srvconn.h>
 #include <thylacine/syscall.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+#include <thylacine/vma.h>
+#include <thylacine/weft.h>
 
 // Inner syscall cores (non-static; defined in kernel/syscall.c).
 extern int sys_srv_accept_for_proc(struct Proc *p, hidx_t service_h);
@@ -94,6 +100,10 @@ extern void srv_registry_reset(void);
 // these link / unlink a bare proc_alloc'd test Proc.
 extern void proc_test_link(struct Proc *p);
 extern void proc_test_unlink(struct Proc *p);
+extern void proc_test_seat_reset(void);
+extern s64 sys_seat_import_for_proc(struct Proc *p, u64 conn, u64 share_id);
+extern s64 sys_weft_share_for_proc(struct Proc *p, u64 ring_va, u64 ring_size_raw);
+extern s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw);
 
 void test_devsrv_walk_service(void);
 void test_devsrv_open_connect_byte(void);
@@ -109,6 +119,7 @@ void test_devsrv_srv_peer_dead_peer(void);
 void test_devsrv_srv_peer_renderer_flag(void);
 void test_devsrv_srv_peer_gate(void);
 void test_devsrv_srv_peer_bad_args(void);
+void test_devsrv_seat_import_gates(void);
 
 // ---------------------------------------------------------------------------
 // Helpers.
@@ -1034,3 +1045,214 @@ void test_devsrv_srv_peer_bad_args(void) {
     srv_registry_reset();
     drop_test_proc(corvus);
 }
+
+// ---------------------------------------------------------------------------
+// devsrv.seat_import_gates — SYS_SEAT_IMPORT, the ONE kernel-mediated
+// exception to I-5: a second KObj_DMA handle minted in the boot-designated
+// seat service over a buffer its accepted connection PEER shared. Every
+// refusal arm, that an identity refusal consumes nothing, the confused-deputy
+// arm (a share is importable only through its OWNER's connection), and the
+// import as a lifetime pin rather than a transfer.
+// ---------------------------------------------------------------------------
+
+#define SEAT_IMPORT_VA   0x13000000ull
+#define SEAT_IMPORT_VA2  0x13400000ull
+
+// Mint a DMA Burrow of `pages` mapped whole into `owner` with the construction
+// handle dropped ({h:0, m:1}) -- the SYS_DMA_CREATE + SYS_DMA_MAP shape.
+static struct Burrow *seat_import_mint(struct Proc *owner, u64 va, u32 pages,
+                                       bool weave) {
+    struct KObj_DMA *k = weave ? kobj_dma_create_weave((u64)pages * PAGE_SIZE)
+                               : kobj_dma_create((u64)pages * PAGE_SIZE);
+    if (!k) return NULL;
+    struct Burrow *v = burrow_create_dma(k);
+    kobj_dma_unref(k);                  // the Burrow's kobj ref is the sole holder
+    if (!v) return NULL;
+    spin_lock(&owner->as->lock);
+    int rc = burrow_map(owner, v, va, (u64)pages * PAGE_SIZE, VMA_PROT_RW);
+    spin_unlock(&owner->as->lock);
+    burrow_unref(v);                    // {h:0, m:1} on success; frees on failure
+    return rc == 0 ? v : NULL;
+}
+
+// A failed leg must still tear down: the peers are LINKED into the process
+// table, and leaving them there wedges the next test that spawns and waits
+// (measured: a sabotaged run stopped dead at sys_spawn.happy_path and hid
+// every verdict after it).
+#define IMPORT_CHECK(cond, why) do { if (!(cond)) { err = (why); goto cleanup; } } while (0)
+#define IMPORT_CHECK_EQ(a, b, why) IMPORT_CHECK((a) == (b), why)
+void test_devsrv_seat_import_gates(void) {
+    const char *err = NULL;
+    struct Proc *service = NULL, *peer = NULL, *stranger = NULL;
+    struct Spoor *ps = NULL, *ss = NULL;
+    struct Burrow *weave = NULL, *anon = NULL, *plain = NULL, *sweave = NULL, *big = NULL;
+    struct Vma *avma = NULL;
+    struct Handle got;
+    int svc_h = -1, peer_h = -1, conn_peer = -1, stranger_h = -1, conn_stranger = -1;
+    int anon_h = 0;
+    s64 id = 0, anon_va = 0, anon_id = 0, sid = 0, fd = -1, big_id = 0;
+    u64 live0 = 0, plain_id = 0;
+    bool shape = false;
+
+    srv_registry_reset();
+    proc_test_seat_reset();
+
+    service  = make_marked_test_proc();     // lictor's role
+    peer     = make_linked_test_proc();     // the compositor's role
+    stranger = make_linked_test_proc();     // a second client
+    IMPORT_CHECK(service && peer && stranger, "procs");
+    service->caps = CAP_HW_CREATE;
+    peer->caps = CAP_HW_CREATE;                          // SYS_WEFT_SHARE's gate
+    stranger->caps = CAP_HW_CREATE;
+
+    svc_h = post_svc_byte(service, "lictor", 6);
+    IMPORT_CHECK(svc_h >= 0, "post \"lictor\"");
+    ps = connect_byte(peer, "lictor");
+    IMPORT_CHECK(ps != NULL, "the peer connects");
+    peer_h = handle_alloc(peer, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, ps);
+    IMPORT_CHECK(peer_h >= 0, "the peer's connection handle");
+    conn_peer = sys_srv_accept_for_proc(service, (hidx_t)svc_h);
+    IMPORT_CHECK(conn_peer >= 0, "the service accepts the peer");
+    ss = connect_byte(stranger, "lictor");
+    IMPORT_CHECK(ss != NULL, "the stranger connects");
+    stranger_h = handle_alloc(stranger, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, ss);
+    IMPORT_CHECK(stranger_h >= 0, "the stranger's connection handle");
+    conn_stranger = sys_srv_accept_for_proc(service, (hidx_t)svc_h);
+    IMPORT_CHECK(conn_stranger >= 0, "the service accepts the stranger");
+
+    live0 = kobj_dma_live_count();
+    weave = seat_import_mint(peer, SEAT_IMPORT_VA, 2, true);
+    IMPORT_CHECK(weave != NULL, "the peer mints + maps a weave");
+    id = sys_weft_share_for_proc(peer, SEAT_IMPORT_VA, 2u * PAGE_SIZE);
+    IMPORT_CHECK(id > 0, "the peer shares its weave");
+    IMPORT_CHECK_EQ(burrow_handle_count(weave), 1, "the registration pin is held");
+
+    // Identity gates. Each holds a valid connection and a valid share, so only
+    // the gate under test can refuse -- and none of them may CONSUME the share
+    // (a stranger that could burn a share would deny the real import).
+    IMPORT_CHECK_EQ(sys_seat_import_for_proc(service, (u64)conn_peer, (u64)id), -1,
+        "a Proc that is not the designated seat service is refused");
+    IMPORT_CHECK_EQ(burrow_handle_count(weave), 1, "undesignated: share not consumed");
+    IMPORT_CHECK_EQ(proc_set_seat_service(service), 0, "designate the seat service");
+    service->caps = 0;
+    IMPORT_CHECK_EQ(sys_seat_import_for_proc(service, (u64)conn_peer, (u64)id), -1,
+        "the seat service without CAP_HW_CREATE is refused");
+    IMPORT_CHECK_EQ(burrow_handle_count(weave), 1, "cap-less: share not consumed");
+    service->caps = CAP_HW_CREATE;
+    IMPORT_CHECK_EQ(sys_seat_import_for_proc(service, (u64)svc_h, (u64)id), -1,
+        "a listener handle is not a connection");
+    IMPORT_CHECK_EQ(sys_seat_import_for_proc(service, PROC_HANDLE_MAX, (u64)id), -1,
+        "an out-of-range connection index is refused");
+    IMPORT_CHECK_EQ(burrow_handle_count(weave), 1, "bad connection: share not consumed");
+
+    // The confused deputy: the stranger names the PEER's share over its own
+    // connection. The owner check is the whole boundary -- without it any seat
+    // client could have the service pin (and then present) another's pixels.
+    IMPORT_CHECK_EQ(sys_seat_import_for_proc(service, (u64)conn_stranger, (u64)id), -1,
+        "a share is importable only through its owner's connection");
+    IMPORT_CHECK_EQ(burrow_handle_count(weave), 1, "wrong owner: share not consumed");
+    IMPORT_CHECK_EQ(sys_seat_import_for_proc(service, (u64)conn_peer, (u64)id + 1000u), -1,
+        "an unregistered share id is refused");
+
+    // Inadmissible kinds reach the claim, so the refusal must drop the pin it
+    // took. ANON rides the production share path; a plain (queue-class) DMA
+    // region cannot be registered through it at all, so the import's own kind
+    // check is reached by registering one directly.
+    anon_va = sys_burrow_attach_for_proc(peer, PAGE_SIZE);
+    IMPORT_CHECK(anon_va > 0, "the peer attaches an ANON region");
+    avma = vma_lookup(peer, (u64)anon_va);
+    IMPORT_CHECK(avma != NULL && avma->burrow != NULL, "the ANON VMA");
+    anon = avma->burrow;
+    anon_h = burrow_handle_count(anon);
+    anon_id = sys_weft_share_for_proc(peer, (u64)anon_va, PAGE_SIZE);
+    IMPORT_CHECK(anon_id > 0, "the peer shares the ANON region");
+    IMPORT_CHECK_EQ(sys_seat_import_for_proc(service, (u64)conn_peer, (u64)anon_id), -1,
+        "an ANON share is never importable");
+    IMPORT_CHECK_EQ(burrow_handle_count(anon), anon_h, "ANON refusal drops the claimed pin");
+
+    plain = seat_import_mint(peer, SEAT_IMPORT_VA2, 1, false);
+    IMPORT_CHECK(plain != NULL, "the peer mints + maps a plain DMA region");
+    plain_id = weft_share_register(peer, plain);
+    IMPORT_CHECK(plain_id != 0, "register the plain region directly");
+    IMPORT_CHECK_EQ(sys_seat_import_for_proc(service, (u64)conn_peer, plain_id), -1,
+        "a plain (non-weave, non-BO) DMA region is never importable");
+    IMPORT_CHECK_EQ(burrow_handle_count(plain), 0, "plain refusal drops the claimed pin");
+
+    // A dead peer imports nothing, and its share survives for the owner GC.
+    sweave = seat_import_mint(stranger, SEAT_IMPORT_VA, 1, true);
+    IMPORT_CHECK(sweave != NULL, "the stranger mints + maps a weave");
+    sid = sys_weft_share_for_proc(stranger, SEAT_IMPORT_VA, PAGE_SIZE);
+    IMPORT_CHECK(sid > 0, "the stranger shares its weave");
+    stranger->state = PROC_STATE_ZOMBIE;
+    IMPORT_CHECK_EQ(sys_seat_import_for_proc(service, (u64)conn_stranger, (u64)sid), -1,
+        "a dead peer's share is refused");
+    IMPORT_CHECK_EQ(burrow_handle_count(sweave), 1, "dead peer: share not consumed");
+    stranger->state = PROC_STATE_ALIVE;
+    IMPORT_CHECK_EQ(weft_share_unregister(stranger, (u64)sid), 0, "the stranger disarms");
+    vma_drain(stranger);
+
+    // The import. A NEW handle on the SAME kobj: KObj_DMA, R|W|MAP, and as
+    // non-duplicable as any hardware handle (I-5 still binds the import).
+    fd = sys_seat_import_for_proc(service, (u64)conn_peer, (u64)id);
+    IMPORT_CHECK(fd >= 0, "the designated service imports its peer's weave");
+    IMPORT_CHECK_EQ(burrow_handle_count(weave), 0, "the registration pin was consumed");
+    IMPORT_CHECK_EQ(handle_get(service, (hidx_t)fd, &got), 0, "the imported handle resolves");
+    shape = got.kind == KOBJ_DMA &&
+                 got.rights == (RIGHT_READ | RIGHT_WRITE | RIGHT_MAP) &&
+                 got.obj == (void *)weave->kobj_dma;
+    handle_put(&got);
+    IMPORT_CHECK(shape, "KObj_DMA, R|W|MAP, over the peer's own kobj");
+    IMPORT_CHECK(handle_dup(service, (hidx_t)fd, RIGHT_READ) < 0,
+        "the imported handle is not duplicable");
+    IMPORT_CHECK_EQ(sys_seat_import_for_proc(service, (u64)conn_peer, (u64)id), -1,
+        "a share imports exactly once");
+
+    // A pin, not a transfer: the peer tears its whole side down and the pixels
+    // outlive it for exactly as long as the service holds the handle.
+    vma_drain(peer);
+    IMPORT_CHECK_EQ(kobj_dma_live_count(), live0 + 1,
+        "the import alone keeps the weave's chunk alive");
+    IMPORT_CHECK_EQ(handle_close(service, (hidx_t)fd), 0, "the service closes the import");
+    fd = -1;
+    IMPORT_CHECK_EQ(kobj_dma_live_count(), live0, "closing the import frees the chunk");
+
+    // I-34 still binds the exception: a NARROWED seat service imports nothing
+    // larger than its DMA allowance.
+    big = seat_import_mint(peer, SEAT_IMPORT_VA, 2, true);
+    IMPORT_CHECK(big != NULL, "the peer mints a second weave");
+    big_id = sys_weft_share_for_proc(peer, SEAT_IMPORT_VA, 2u * PAGE_SIZE);
+    IMPORT_CHECK(big_id > 0, "the peer shares it");
+    IMPORT_CHECK_EQ(proc_confer_allowance(service, NULL, 0, NULL, 0, PAGE_SIZE, NULL, 0), 0,
+        "narrow the service to a one-page DMA allowance");
+    IMPORT_CHECK_EQ(sys_seat_import_for_proc(service, (u64)conn_peer, (u64)big_id), -1,
+        "an import over the service's DMA allowance is refused");
+    IMPORT_CHECK_EQ(burrow_handle_count(big), 0, "allowance refusal drops the claimed pin");
+    vma_drain(peer);
+    IMPORT_CHECK_EQ(kobj_dma_live_count(), live0, "every chunk freed");
+
+cleanup:
+    // Shares first (a registration pin outlives its Proc otherwise), then the
+    // mappings, then the handles; every step tolerates a leg that never ran.
+    if (peer) { weft_share_release_owner(peer); vma_drain(peer); }
+    if (stranger) {
+        stranger->state = PROC_STATE_ALIVE;
+        weft_share_release_owner(stranger);
+        vma_drain(stranger);
+    }
+    if (service && fd >= 0) handle_close(service, (hidx_t)fd);
+    if (service && conn_peer >= 0) handle_close(service, (hidx_t)conn_peer);
+    if (service && conn_stranger >= 0) handle_close(service, (hidx_t)conn_stranger);
+    if (peer && peer_h >= 0) handle_close(peer, (hidx_t)peer_h);
+    else if (ps) spoor_clunk(ps);
+    if (stranger && stranger_h >= 0) handle_close(stranger, (hidx_t)stranger_h);
+    else if (ss) spoor_clunk(ss);
+    proc_test_seat_reset();
+    srv_registry_reset();
+    drop_linked_test_proc(stranger);
+    drop_linked_test_proc(peer);
+    drop_test_proc(service);
+    (void)big; (void)sweave; (void)plain; (void)svc_h;
+    TEST_ASSERT(err == NULL, err ? err : "seat import gates");
+}
+#undef IMPORT_CHECK
+#undef IMPORT_CHECK_EQ

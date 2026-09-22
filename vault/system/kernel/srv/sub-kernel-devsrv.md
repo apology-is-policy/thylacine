@@ -12,8 +12,16 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/CORVUS-DESIGN.md"]
 created: 2026-07-31
-updated: 2026-07-31
+updated: 2026-09-21
 ---
+## Nonblocking endpoints
+
+`CNONBLOCK` selects `srvconn_io_nonblock` on raw client/server transport
+endpoints. A read or write makes bounded progress under the channel lock or
+returns EAGAIN; it never waits for a peer or a blocking reader/writer role.
+Kernel-attached clients retain their existing raw-I/O refusal. See
+[[sub-kernel-srvconn]] and [[abi-native-nonblock]].
+
 ## Purpose
 
 `/srv` is the kernel surface by which a userspace server publishes
@@ -34,6 +42,21 @@ transport those connections ride is [[sub-kernel-srvconn]]; this dossier
 owns the registry, the state machine, the Dev, and the syscall layer.
 
 ## Contract
+
+**Haul posting (2026-09-17).** `devsrv_post_listener` accepts either the
+TCB role described below or elevation-only `CAP_POST_SERVICE` (bit 13).
+Cap-only posters are bounded under `SrvRegistry.lock`: two LIVE/RESERVING
+entries per propagating scope (unscoped clearance uses poster stripes), four
+cap-owned slots per registry. Reservations count before handles are allocated.
+Cap callers cannot claim a TCB name, including its tombstone. Cap tombstones
+can be recycled under a different name once no accept call pins the slot, so repeated exited Haul processes do
+not exhaust the registry. The permanent-name rule below now applies to TCB
+entries only. A monotonically increasing, non-wrapping `generation` guards
+openers: name and LIVE are rechecked while capturing identity, and generation
+must still match at enqueue. A recycled slot can never splice an old opener
+into a new poster's connection queue. Existing accepted connections retain
+their own server identity and lifetime; they do not point back at the slot.
+
 
 **create=post** — `devsrv_post_listener(p, root, name, len, mode, bulk)`
 (reached from `sys_walk_create_handler`'s devsrv branch; a dedicated
@@ -193,9 +216,16 @@ extincts.
 kind dispatch → `srv_handle_poll` → `svc_listener_poll` (POLLIN ↔
 backlog non-empty; POLLHUP ↔ not LIVE; sample+register atomic under the
 registry lock; producers wake after release). A SrvConn-flavored
-KObj_Srv handle is POLLNVAL fail-closed (see [[sub-kernel-srvconn]]
-Caveats). The Dev `.poll` slot dispatches conn Spoors to `srvconn_poll`;
-roots and svc-refs report no events.
+KObj_Srv handle is POLLNVAL fail-closed — a guard on a path nothing has
+held since stalk-3b (see [[sub-kernel-srvconn]] Caveats). The Dev `.poll`
+slot (`devsrv_poll`) is where a connection is actually polled, and it
+dispatches **by endpoint**: `srvconn_poll(cn, client, ...)` with
+`client = (c->flag & CSRVCLIENT)`. Until 2026-09-21 it ignored the flag,
+though `devsrv_read` and `devsrv_write` both branch on it — a client was
+sampled as a server. A `CSRVCLIENT` Spoor on a **kernel-attached** conn
+answers `POLLNVAL` without registering anything: the rings belong to the
+kernel 9P client, the same reason read/write refuse it (the stalk-3b-E F1
+guard's third site). Roots and svc-refs report no events.
 
 ## Data structures
 
@@ -225,6 +255,17 @@ fast) · `SRV_MAX_CONNS` 64 (the global soft cap bounding worst-case
 ring memory at ≈32 MiB all-bulk).
 
 ## Concurrency
+
+**Accept identity pin (2026-09-17).** `srv_accept_blocking(svc, stripes)`
+validates LIVE state and caller ownership, then acquires `accept_active` under
+the registry lock. A second concurrent accept fails instead of entering the
+single-waiter Rendez. Rebind and recycling both refuse an active pin. This is
+necessary because `exits_code` tombstones before its peer threads quiesce.
+Every wake/EOF/interruption path releases the pin before returning; slot reuse
+cannot hide a tombstone from an old blocked accepter. The kernel regression
+runs a real blocked accept, checks concurrent refusal, wakes it through
+exit-notify, and verifies that a stale listener cannot accept after rebind.
+
 
 [[lock-srv-registry-lock]] serializes every entry + backlog mutation;
 heavy work (SrvConn teardown/unref, all wakes) runs outside it; the

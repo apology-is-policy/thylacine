@@ -12,7 +12,7 @@ locks: []
 abis: [abi-boot-banner]
 design: ["docs/TOOLING.md", "docs/PORTABILITY.md"]
 created: 2026-08-01
-updated: 2026-08-16
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -60,12 +60,15 @@ because each consumer stops at its first match from opposite ends.
 **`-device` ORDER is load-bearing for the PCI functions, for a reason that
 is not about slots at all.** qemu-virt's PCI INTx has only four shared
 lines, assigned `(slot + pin) % 4`, and `KObj_IRQ` is exclusive per INTID —
-so the two IRQ-CLAIMING functions (the PCI NIC → netd, the GPU →
-tapestryd) must land on distinct lines. Inserting the relative mouse before
+so the current IRQ-claiming functions (PCI NIC → netd, GPU → tapestryd,
+sound → nocturned) must land on distinct lines. Inserting the relative mouse before
 the GPU shifted the GPU one PCI slot onto the NIC's line (intid 35 → 36)
-and its `SYS_IRQ_CREATE` failed on exclusivity. The input functions are
-poll-mode and never claim an IRQ, so the mouse can share any line — which
-is why it expands LAST, after gpu and rng.
+and its `SYS_IRQ_CREATE` failed on exclusivity. The input functions are poll-mode and never claim an IRQ, but they can still
+assert configuration interrupts on a shared line. Device ordering therefore
+does not provide sound isolation: [[sub-kernel-irqfwd#PCI shared-line boundary]]
+is an active integration defect. The function-bound shared INTx/MSI-X design
+in `docs/PCI-INTERRUPTS-DESIGN.md` removes that assumption; it is not yet
+implemented.
 
 **The G-1 co-page rule is why persistent drivers are on PCI.** QEMU-virt
 packs every populated MMIO slot into ONE 4 KiB page (stride 0x200), and
@@ -227,6 +230,20 @@ sized for the slower TCG compat run. Idle cost under HVF was the subject of
 
 ## Caveats
 
+- **Under cocoa, the guest's Super is the Mac's Cmd, and macOS takes some Cmd
+  combos first** (2026-09-16, operator-found): Cmd+Tab (the app switcher),
+  Cmd+H (Hide -- Halcyon's split), Cmd+Shift+Q (Log Out -- Halcyon's close).
+  `run-vm.sh` therefore adds `full-grab=on` to the cocoa display by default,
+  handing every key to the guest while its window has focus; macOS asks once
+  for Accessibility permission for QEMU, and `THYLACINE_FULL_GRAB=0` opts out.
+  Chosen by the operator over moving the chord plane off Super. Verified
+  present in QEMU 10.0.2.
+- **`show-cursor=on` is a STOPGAP** (same date, `THYLACINE_SHOW_CURSOR=0` opts
+  out): it draws the HOST pointer over the window because the guest draws
+  none -- tapestryd sets up the virtio-gpu cursor queue and never issues
+  `UPDATE_CURSOR`. On VNC or any non-cocoa display there is still no pointer.
+  Remove it when the guest draws its own.
+
 - `--snapshot` is parsed but unimplemented: it prints "not yet implemented"
   and continues. TOOLING.md §6 describes the snapshot workflow as a
   Phase-5+ deliverable; the flag is a placeholder, not a feature.
@@ -245,3 +262,14 @@ sized for the slower TCG compat run. Idle cost under HVF was the subject of
 two boot tokens. The board accreted
 across the whole project; the load-bearing corrections are noted inline
 above (G-1 co-page, the INTx ordering, Lazarus W2/W3, task #70).
+
+
+## PCI interrupt verification controls
+
+`THYLACINE_ITS=auto|on|off` preserves QEMU's default unless explicitly set.
+GICv3 with ITS disabled is the controller-absence fixture for automatic shared
+INTx fallback. The boot command reports the actual ITS selection.
+`THYLACINE_PCI_LAYOUT=default|shared-a|shared-b` optionally places resident
+network/GPU/sound functions at slots 9/13/17 or 17/9/13. All three share INTA's
+wire while the two permutations exercise BDF-derived authority independent of
+device ordering. Production defaults are unchanged.

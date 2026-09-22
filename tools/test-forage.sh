@@ -64,6 +64,21 @@ for nsec in $nsecs; do
     done
 done
 
+# A10: the Boosty pins are the same two-copies-of-one-truth shape. build.sh
+# refuses a checkout that is not WEBKIT_PIN + the series and a tarball that is
+# not ICU_SHA256; forage gathers by the manifest's values. (Sabotage: edit one
+# hex digit of either manifest value -> FAIL.)
+for pin in "source.webkit commit" "cache.icu4c sha256" "cache.icu4c file"; do
+    set -- $pin
+    pval="$(manifest_get "$1" "$2")"
+    if [[ -n "$pval" ]] && grep -qF -- "\"$pval\"" "$REPO_ROOT/tools/build.sh"; then
+        ok "A10 pin: $1.$2 matches build.sh"
+    else
+        bad "A10 pin: $1.$2 NOT in build.sh (${pval:-empty}) -- manifest/build.sh drift"
+    fi
+done
+assert_grep "$(manifest_sections source.)" "source.webkit" "A10 enum: source. includes webkit"
+
 # --- B. status + gather via a fixture manifest (isolated to a temp root) ------
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 FIX="$TMP/manifest.toml"
@@ -165,6 +180,68 @@ if runf nosuch >/dev/null 2>&1; then bad "B9 unknown target should exit nonzero"
 
 # B10: dry-run touched nothing (alpine was never downloaded)
 if [[ -f "$TMP/cache/alpine.tar.gz" ]]; then bad "B10 dry-run created a file"; else ok "B10 dry-run touched nothing"; fi
+
+# --- C. clone-sparse: a pinned UPSTREAM + an in-repo patch series --------------
+# A local upstream stands in for the network: two dirs (one inside the cone, one
+# outside), a tag, and a one-patch series made with format-patch.
+UP="$TMP/upstream"; SER="$TMP/series"; G="git -c user.name=t -c user.email=t@t -c init.defaultBranch=main"
+mkdir -p "$UP/keep" "$UP/skip" "$SER/p"
+$G -C "$UP" init -q && echo one > "$UP/keep/a.txt" && echo x > "$UP/skip/b.txt"
+$G -C "$UP" add -A && $G -C "$UP" commit -qm base && $G -C "$UP" tag v1
+PINSHA="$($G -C "$UP" rev-parse HEAD)"
+$G clone -q "$UP" "$TMP/mk" && echo two > "$TMP/mk/keep/a.txt"
+$G -C "$TMP/mk" commit -qam port && $G -C "$TMP/mk" format-patch -q -1 -o "$SER/p"
+sparse_fix() {   # COMMIT -> a manifest with one clone-sparse section
+    cat > "$TMP/sparse.toml" <<EOF2
+[meta]
+schema = "1"
+
+[source.thing]
+path = "$TMP/co"
+probe = "keep/a.txt"
+repo = "file://$UP"
+tag = "v1"
+commit = "$1"
+branch = "port"
+sparse = "keep"
+patches = "series/p"
+feeds = "thing feed"
+forageable = "clone-sparse"
+EOF2
+}
+runs() { FORAGE_ROOT="$TMP" MANIFEST="$TMP/sparse.toml" "$FORAGE" "$@"; }
+
+# C1: a wrong pin is REFUSED (the tag must resolve to the manifest's commit)
+sparse_fix "0000000000000000000000000000000000000000"
+out="$(runs source.thing 2>&1)"; rc=$?
+if [[ $rc -ne 0 ]]; then ok "C1 wrong pin exits nonzero"; else bad "C1 wrong pin was accepted"; fi
+assert_grep "$out" "refusing" "C1 wrong pin names the refusal"
+if [[ "$(cat "$TMP/co/keep/a.txt" 2>/dev/null)" == "two" ]]; then bad "C1 patched a tree it refused"; else ok "C1 refused tree left unpatched"; fi
+rm -rf "$TMP/co"
+
+# C2: the right pin gathers -- cone honoured, series applied on the named branch
+sparse_fix "$PINSHA"
+out="$(runs source.thing 2>&1)"; rc=$?
+if [[ $rc -eq 0 ]]; then ok "C2 gather exits zero"; else bad "C2 gather failed: $out"; fi
+if [[ "$(cat "$TMP/co/keep/a.txt" 2>/dev/null)" == "two" ]]; then ok "C2 series applied (content changed)"; else bad "C2 series not applied"; fi
+if [[ -e "$TMP/co/skip/b.txt" ]]; then bad "C2 sparse cone ignored (skip/ is checked out)"; else ok "C2 sparse cone honoured"; fi
+if [[ "$(git -C "$TMP/co" branch --show-current)" == "port" ]]; then ok "C2 on the named branch"; else bad "C2 wrong branch"; fi
+assert_grep "$(runs status 2>&1)" "source.thing[[:space:]]+present" "C2 status: clone-sparse reports present"
+
+# C3: idempotent -- a second gather applies nothing and moves nothing
+h1="$(git -C "$TMP/co" rev-parse HEAD)"
+out="$(runs source.thing 2>&1)"
+assert_grep "$out" "already applied" "C3 second gather: already applied"
+if [[ "$(git -C "$TMP/co" rev-parse HEAD)" == "$h1" ]]; then ok "C3 HEAD unchanged"; else bad "C3 HEAD moved on a no-op gather"; fi
+
+# C4: a DRIFTED checkout is reported, never reset (it may hold somebody's work)
+echo three > "$TMP/co/keep/a.txt"; $G -C "$TMP/co" commit -qam drift
+h2="$(git -C "$TMP/co" rev-parse HEAD)"
+out="$(runs source.thing 2>&1)"; rc=$?
+if [[ $rc -ne 0 ]]; then ok "C4 drift exits nonzero"; else bad "C4 drift was accepted"; fi
+assert_grep "$out" "drifted" "C4 drift is named"
+if [[ "$(git -C "$TMP/co" rev-parse HEAD)" == "$h2" && "$(cat "$TMP/co/keep/a.txt")" == "three" ]]; then
+    ok "C4 drifted work left intact"; else bad "C4 forage modified a drifted checkout"; fi
 
 echo "== $pass passed, $fail failed =="
 [[ "$fail" -eq 0 ]]

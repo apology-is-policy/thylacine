@@ -1236,9 +1236,13 @@ bool thread_die_pending(struct Thread *t) {
     // flagged close parks the dying Proc unreapably; precondition = a
     // wedged trusted server, an already system-degraded state -- the
     // bounded/abortable close-flush is the recorded v1.x seam). The window
-    // is one bounded close pass; only the owning thread sets/clears it
-    // (inside proc_close_handles_at_exit), and every caller passes self,
-    // so the read needs no synchronization.
+    // is one bounded close pass; only the owning thread sets/clears it, and
+    // every caller passes self, so the read needs no synchronization. TWO
+    // setters since 2026-09-22 -- proc_close_handles_at_exit (the original)
+    // and loom_free's SQPOLL kthread join, which has the identical
+    // obligation (abandoning it frees a live Thread) and nests inside the
+    // first on the at-exit path, so it saves and restores rather than
+    // clearing. See thread.h's field comment for the rule a third would owe.
     if (t->exit_close_active) return false;
     struct Proc *p = t->proc;
     if (!p) return false;

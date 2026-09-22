@@ -147,5 +147,41 @@ case "$menu2" in
     *)  assert_eq "clean" "clean" "12 CONTROL: an empty theme dir offers nothing" ;;
 esac
 
+# --- 13. each theme is tagged with the SCHEMA its own file declares ----------
+# Two invented themes one line apart: only the file's [meta] profile line can
+# tell them apart, so a tag computed from anything else (the name, a list in
+# the script) fails one of the two. TEMPLATE.toml is an authoring skeleton and
+# must not be offered at all.
+SCH="$TMP/themes-schema"; mkdir -p "$SCH"
+printf '[meta]\nname = "Inv Instrument"\nprofile = "instrument-v1"\n' > "$SCH/inv-instr.toml"
+printf '[meta]\nname = "Inv Legacy"\n'                                > "$SCH/inv-legacy.toml"
+printf '[meta]\nname = "Skeleton"\n'                                  > "$SCH/TEMPLATE.toml"
+menu3="$(yes '' | BC_DIR_CONFIGS="$TMP" WZ_DIR_THEMES="$SCH" "$CONFIGURE" \
+           --from dev --name themeschema 2>&1 || true)"
+tag_of() { printf '%s\n' "$menu3" | grep -- "$1" | head -1 | sed -E 's/.*\[([a-z]+) *\].*/\1/'; }
+assert_eq "$(tag_of inv-instr)"  "instrument" "13 theme menu tags an Instrument-schema file"
+assert_eq "$(tag_of inv-legacy)" "legacy"     "13 theme menu tags a legacy-schema file"
+case "$menu3" in
+    *TEMPLATE*) assert_eq "offered" "hidden" "13 the authoring TEMPLATE is not offered as a theme" ;;
+    *)          assert_eq "hidden"  "hidden" "13 the authoring TEMPLATE is not offered as a theme" ;;
+esac
+# --- 14. a cross-schema pairing is SAID, and a matching one is not ----------
+# Seeded profiles, one variable apart: the same instrument profile with a
+# legacy-schema theme and with an Instrument-schema one. A note that always
+# prints is as useless as one that never does, so the control is the point.
+printf 'HALCYON_PROFILE=instrument\nHALCYON_THEME=inv-legacy\n' > "$TMP/pairmis.config"
+printf 'HALCYON_PROFILE=instrument\nHALCYON_THEME=inv-instr\n'  > "$TMP/pairok.config"
+note_mis="$(BC_DIR_CONFIGS="$TMP" WZ_DIR_THEMES="$SCH" "$CONFIGURE" --defaults --edit pairmis pairmis-out 2>&1 || true)"
+note_ok="$(BC_DIR_CONFIGS="$TMP" WZ_DIR_THEMES="$SCH" "$CONFIGURE" --defaults --edit pairok pairok-out 2>&1 || true)"
+case "$note_mis" in
+    *PROJECTED*) assert_eq "said" "said" "14 a legacy theme under the instrument profile is called out" ;;
+    *)           assert_eq "silent" "said" "14 a legacy theme under the instrument profile is called out" ;;
+esac
+case "$note_ok" in
+    *PROJECTED*) assert_eq "said" "silent" "14 CONTROL: a matching pairing prints no projection note" ;;
+    *)           assert_eq "silent" "silent" "14 CONTROL: a matching pairing prints no projection note" ;;
+esac
+assert_eq "$(cfg_val "$TMP/pairmis-out.config" HALCYON_PROFILE)" instrument "14 the profile option round-trips through a written profile"
+
 echo "== $pass passed, $fail failed =="
 [[ "$fail" -eq 0 ]]

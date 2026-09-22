@@ -1,12 +1,21 @@
-// layout -- the `halcyon-layout v1` save format (HALCYON.md 13.7, H-4).
+// layout -- the `halcyon-layout v1` / `v2` save format (HALCYON.md 13.7,
+// H-4; HALCYON-INSTRUMENT 5.3).
 //
 // The pure half of layout save/restore: a bounded, no-panic serializer +
 // parser for the pane tree's SHAPE (container modes + active child; per-leaf
-// tag = the command line). Surface ids are runtime, never saved -- a restored
-// leaf gets a fresh surface from the respawned program. Shared by halcyond
-// (the device-tier restore + the gesture) and the user-authority session tool
-// (the session-tier save/restore, the D decision), so it lives here in
-// libhalcyon rather than in either.
+// tag = the command line; since I-2 each child's WEIGHT in its parent).
+// Surface ids are runtime, never saved -- a restored leaf gets a fresh
+// surface from the respawned program. Shared by halcyond (the device-tier
+// restore + the gesture) and the user-authority session tool (the
+// session-tier save/restore, the D decision), so it lives here in libhalcyon
+// rather than in either.
+//
+// v2 = v1 plus ` w=<weight>` on a row whose node carries a non-default
+// weight. The writer emits the v2 header only when some weight is
+// non-default, so a tree with equal weights is byte-identical v1 and an old
+// reader keeps reading it; the v1 reader stays and a v1 file loads with equal
+// weights. A ` w=` under a v1 header is refused: the header says what the
+// rows may carry.
 //
 // The parser reads UNTRUSTED input (a layout file in the user's $home): every
 // path is bounded and fail-closed -- a malformed or oversize file returns an
@@ -17,8 +26,24 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
 
-/// The format's first line (exact match required).
+use crate::carve::DEFAULT_WEIGHT;
+
+/// How many workspaces may exist (HALCYON-WORKSPACES 4). It lives HERE for
+/// the reason this module already lives here: the compositor ENFORCES the
+/// bound and the renderer must not accept a header that exceeds it, and both
+/// link libhalcyon while neither links the other.
+///
+/// It was two hand-copied consts until 2026-09-15 (r3 F4). That drift is
+/// fail-closed but INVISIBLE: had the compositor's bound risen alone, the
+/// reader would have rejected legal headers and the bar would have silently
+/// kept its default -- wrong at the only place a user can see it. A comment
+/// naming the hazard does not prevent it; one definition does.
+pub const MAX_WORKSPACES: usize = 9;
+
+/// The format's first line (exact match required): v1, every weight default.
 pub const FMT_HEADER: &str = "halcyon-layout v1";
+/// The v2 header: rows may carry ` w=<weight>` (HALCYON-INSTRUMENT 5.3).
+pub const FMT_HEADER_V2: &str = "halcyon-layout v2";
 /// Container nesting cap (a hostile file cannot exhaust the parse stack; the
 /// real tree is far shallower -- a handful of splits).
 pub const MAX_DEPTH: usize = 32;
@@ -60,7 +85,9 @@ impl LayoutMode {
 
 /// A node of the saved tree: a leaf carrying its program's command line (the
 /// tag; empty = an empty pane), or a container with its mode, active-child
-/// index, and children.
+/// index, and children. Either carries its `weight` in its parent (5.2:
+/// `u16`, sum-normalised, `DEFAULT_WEIGHT` when equal; the root's is
+/// meaningless and written only if someone set it).
 ///
 /// `env` marks a leaf whose tile was NOT the saving session's at save time --
 /// the environment's (the console, a transcript pane) or another principal's.
@@ -72,12 +99,33 @@ pub enum LayoutNode {
     Leaf {
         tag: String,
         env: bool,
+        weight: u16,
     },
     Container {
         mode: LayoutMode,
         active: u32,
         children: Vec<LayoutNode>,
+        weight: u16,
     },
+}
+
+impl LayoutNode {
+    /// The node's weight in its parent.
+    pub fn weight(&self) -> u16 {
+        match self {
+            LayoutNode::Leaf { weight, .. } | LayoutNode::Container { weight, .. } => *weight,
+        }
+    }
+}
+
+/// Does any node carry a non-default weight (the v2 header's condition)?
+fn has_weights(node: &LayoutNode) -> bool {
+    match node {
+        LayoutNode::Leaf { weight, .. } => *weight != DEFAULT_WEIGHT,
+        LayoutNode::Container {
+            weight, children, ..
+        } => *weight != DEFAULT_WEIGHT || children.iter().any(has_weights),
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -101,16 +149,23 @@ pub enum ParseError {
     /// A container's declared `n=` did not match its actual child count, or a
     /// container had zero children.
     BadChildCount,
+    /// A ` w=` was not `1..=65535`, or appeared under the v1 header.
+    BadWeight,
 }
 
-/// Serialize a tree to the `halcyon-layout v1` format: the header, then one
-/// pre-order row per node, two spaces of indent per depth. A leaf is
-/// `leaf` (empty tag) or `leaf tag="<escaped>"`, with a trailing ` env` when
-/// the tile was the environment's; a container is
-/// `<mode> n=<count> active=<idx>` followed by its children.
+/// Serialize a tree to the `halcyon-layout` format: the header (v1, or v2
+/// iff some weight is non-default), then one pre-order row per node, two
+/// spaces of indent per depth. A leaf is `leaf` (empty tag) or `leaf
+/// tag="<escaped>"`, with a trailing ` env` when the tile was the
+/// environment's; a container is `<mode> n=<count> active=<idx>` followed by
+/// its children; a non-default weight ends its row as ` w=<weight>`.
 pub fn serialize(root: &LayoutNode) -> String {
     let mut s = String::new();
-    s.push_str(FMT_HEADER);
+    s.push_str(if has_weights(root) {
+        FMT_HEADER_V2
+    } else {
+        FMT_HEADER
+    });
     s.push('\n');
     ser_node(root, 0, &mut s);
     s
@@ -121,7 +176,7 @@ fn ser_node(node: &LayoutNode, depth: usize, out: &mut String) {
         out.push_str("  ");
     }
     match node {
-        LayoutNode::Leaf { tag, env } => {
+        LayoutNode::Leaf { tag, env, weight } => {
             out.push_str("leaf");
             if !tag.is_empty() {
                 out.push_str(" tag=\"");
@@ -131,12 +186,16 @@ fn ser_node(node: &LayoutNode, depth: usize, out: &mut String) {
             if *env {
                 out.push_str(" env");
             }
+            if *weight != DEFAULT_WEIGHT {
+                let _ = write!(out, " w={}", weight);
+            }
             out.push('\n');
         }
         LayoutNode::Container {
             mode,
             active,
             children,
+            weight,
         } => {
             let _ = write!(
                 out,
@@ -145,6 +204,9 @@ fn ser_node(node: &LayoutNode, depth: usize, out: &mut String) {
                 children.len(),
                 active
             );
+            if *weight != DEFAULT_WEIGHT {
+                let _ = write!(out, " w={}", weight);
+            }
             out.push('\n');
             for c in children {
                 ser_node(c, depth + 1, out);
@@ -180,6 +242,7 @@ pub fn prune_env(node: &LayoutNode) -> Option<LayoutNode> {
             mode,
             active,
             children,
+            weight,
         } => {
             let mut kept: Vec<LayoutNode> = Vec::new();
             let mut new_active: Option<u32> = None;
@@ -193,14 +256,111 @@ pub fn prune_env(node: &LayoutNode) -> Option<LayoutNode> {
             }
             match kept.len() {
                 0 => None,
-                1 => kept.pop(),
+                // The survivor takes the container's place in ITS parent, and
+                // its weight there (the compositor's dissolve rule).
+                1 => kept.pop().map(|k| k.with_weight(*weight)),
                 _ => Some(LayoutNode::Container {
                     mode: *mode,
                     active: new_active.unwrap_or(0),
                     children: kept,
+                    weight: *weight,
                 }),
             }
         }
+    }
+}
+
+/// HALCYON-INSTRUMENT 6.1 (2026-09-16): lay every stack's CONTAINER members
+/// flat. Under the Instrument profile a stack's members are tiles, and a
+/// saved layout that already holds a container inside a `Stacked` or
+/// `Tabbed` one -- saved before the rule, or edited by hand -- could not be
+/// rebuilt: the compositor splits beside a stack, never inside it. So each
+/// such member is replaced, in place, by its own leaves in order, and every
+/// tile survives (the kit: an already-loaded layout "must retain data ...
+/// not delete tiles"); only the nested arrangement is lost, and it was never
+/// renderable.
+///
+/// A member that was the stack's ACTIVE child hands the stack its own
+/// active-path leaf, so the tile that was open stays open. A laid-flat
+/// leaf takes the default weight -- a stack divides nothing. Split
+/// containers, and stacks whose members are already leaves, are unchanged.
+pub fn flatten_stack_members(node: &LayoutNode) -> LayoutNode {
+    match node {
+        LayoutNode::Leaf { .. } => node.clone(),
+        LayoutNode::Container {
+            mode,
+            active,
+            children,
+            weight,
+        } => {
+            let kids: Vec<LayoutNode> = children.iter().map(flatten_stack_members).collect();
+            if !matches!(mode, LayoutMode::Stacked | LayoutMode::Tabbed) {
+                return LayoutNode::Container {
+                    mode: *mode,
+                    active: *active,
+                    children: kids,
+                    weight: *weight,
+                };
+            }
+            let mut flat: Vec<LayoutNode> = Vec::new();
+            let mut new_active = 0u32;
+            for (i, c) in kids.iter().enumerate() {
+                if i as u32 == *active {
+                    new_active = (flat.len() + active_leaf_offset(c)) as u32;
+                }
+                match c {
+                    LayoutNode::Leaf { .. } => flat.push(c.clone()),
+                    LayoutNode::Container { .. } => push_leaves(c, &mut flat),
+                }
+            }
+            LayoutNode::Container {
+                mode: *mode,
+                active: new_active,
+                children: flat,
+                weight: *weight,
+            }
+        }
+    }
+}
+
+/// Every leaf under `node`, in order, at the default weight.
+fn push_leaves(node: &LayoutNode, out: &mut Vec<LayoutNode>) {
+    match node {
+        LayoutNode::Leaf { .. } => out.push(node.clone().with_weight(DEFAULT_WEIGHT)),
+        LayoutNode::Container { children, .. } => {
+            for c in children {
+                push_leaves(c, out);
+            }
+        }
+    }
+}
+
+/// The index, among `node`'s leaves in order, of the leaf on its active
+/// path (0 for a leaf).
+fn active_leaf_offset(node: &LayoutNode) -> usize {
+    match node {
+        LayoutNode::Leaf { .. } => 0,
+        LayoutNode::Container { active, children, .. } => {
+            let a = (*active as usize).min(children.len().saturating_sub(1));
+            let before: usize = children.iter().take(a).map(leaf_count).sum();
+            before + children.get(a).map_or(0, active_leaf_offset)
+        }
+    }
+}
+
+fn leaf_count(node: &LayoutNode) -> usize {
+    match node {
+        LayoutNode::Leaf { .. } => 1,
+        LayoutNode::Container { children, .. } => children.iter().map(leaf_count).sum(),
+    }
+}
+
+impl LayoutNode {
+    fn with_weight(mut self, w: u16) -> LayoutNode {
+        match &mut self {
+            LayoutNode::Leaf { weight, .. } | LayoutNode::Container { weight, .. } => *weight = w,
+        }
+        self
     }
 }
 
@@ -209,12 +369,13 @@ struct Frame {
     mode: LayoutMode,
     active: u32,
     n: u32,
+    weight: u16,
     children: Vec<LayoutNode>,
 }
 
 enum Row {
-    Leaf(String, bool),
-    Cont(LayoutMode, u32, u32),
+    Leaf(String, bool, u16),
+    Cont(LayoutMode, u32, u32, u16),
 }
 
 /// How many `env` leaves the tree holds.
@@ -257,20 +418,23 @@ pub fn active_is_env(root: &LayoutNode) -> bool {
     }
 }
 
-/// Parse the `halcyon-layout v1` format. Bounded + fail-closed on every path.
+/// Parse the `halcyon-layout v1` / `v2` format. Bounded + fail-closed on
+/// every path; a v1 file loads with every weight default.
 pub fn parse(input: &str) -> Result<LayoutNode, ParseError> {
     let mut lines = input.split('\n');
     let header = lines.next().unwrap_or("");
-    if header.trim_end_matches('\r') != FMT_HEADER {
-        return Err(ParseError::BadHeader);
-    }
+    let weighted = match header.trim_end_matches('\r') {
+        h if h == FMT_HEADER => false,
+        h if h == FMT_HEADER_V2 => true,
+        _ => return Err(ParseError::BadHeader),
+    };
     let mut rows: Vec<(usize, Row)> = Vec::new();
     for raw in lines {
         let line = raw.trim_end_matches('\r');
         if line.is_empty() {
             continue; // blank lines (incl. a trailing newline's tail) ignored
         }
-        rows.push(parse_row(line)?);
+        rows.push(parse_row(line, weighted)?);
         if rows.len() > MAX_NODES {
             return Err(ParseError::TooMany);
         }
@@ -287,7 +451,9 @@ pub fn parse(input: &str) -> Result<LayoutNode, ParseError> {
 /// by id to its command line + its `env` marker (the save tool reads
 /// `pane/<id>/tag` and compares `pane/<id>/owner` to its own principal); a tag
 /// longer than MAX_TAG_LEN is dropped to empty so the result always
-/// round-trips through serialize/parse. Bounded + fail-closed exactly like
+/// round-trips through serialize/parse. A row's ` w=<weight>` (emitted after
+/// the rect when the child's weight is non-default) is read wherever it
+/// falls among the trailing tokens. Bounded + fail-closed exactly like
 /// `parse`, so a garbled dump degrades (no save) rather than panicking (a
 /// silent exit in a no_std tool). This is the WRITE side's inverse of `parse`:
 /// `render_text` in -> `serialize` out.
@@ -340,14 +506,18 @@ fn assemble(rows: Vec<(usize, Row)>) -> Result<LayoutNode, ParseError> {
             return Err(ParseError::BadIndent);
         }
         match row {
-            Row::Leaf(tag, env) => {
-                attach(&mut stack, &mut root, LayoutNode::Leaf { tag, env }, depth)?
-            }
-            Row::Cont(mode, n, active) => stack.push(Frame {
+            Row::Leaf(tag, env, weight) => attach(
+                &mut stack,
+                &mut root,
+                LayoutNode::Leaf { tag, env, weight },
+                depth,
+            )?,
+            Row::Cont(mode, n, active, weight) => stack.push(Frame {
                 depth,
                 mode,
                 active,
                 n,
+                weight,
                 children: Vec::new(),
             }),
         }
@@ -395,11 +565,39 @@ fn finalize(f: Frame) -> Result<LayoutNode, ParseError> {
         mode: f.mode,
         active,
         children: f.children,
+        weight: f.weight,
     })
 }
 
+/// A `w=<weight>` token's value: `1..=65535`, digits only.
+fn parse_weight(tok: &str) -> Result<u16, ParseError> {
+    let v = tok.strip_prefix("w=").ok_or(ParseError::BadRow)?;
+    if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(ParseError::BadWeight);
+    }
+    match v.parse::<u16>() {
+        Ok(w) if w >= 1 => Ok(w),
+        _ => Err(ParseError::BadWeight),
+    }
+}
+
+/// The optional ` w=<weight>` a row may end with: absent = the default;
+/// present under a v1 header = refused.
+fn parse_row_weight(tok: Option<&str>, weighted: bool) -> Result<u16, ParseError> {
+    match tok {
+        None => Ok(DEFAULT_WEIGHT),
+        Some(t) if t.starts_with("w=") => {
+            if !weighted {
+                return Err(ParseError::BadWeight);
+            }
+            parse_weight(t)
+        }
+        Some(_) => Err(ParseError::BadRow),
+    }
+}
+
 /// Tokenize one row into its depth (leading-space pairs) and its content.
-fn parse_row(line: &str) -> Result<(usize, Row), ParseError> {
+fn parse_row(line: &str, weighted: bool) -> Result<(usize, Row), ParseError> {
     let spaces = line.len() - line.trim_start_matches(' ').len();
     if !spaces.is_multiple_of(2) {
         return Err(ParseError::BadIndent);
@@ -409,17 +607,16 @@ fn parse_row(line: &str) -> Result<(usize, Row), ParseError> {
         return Err(ParseError::TooDeep);
     }
     let rest = &line[spaces..];
-    if rest == "leaf" {
-        return Ok((depth, Row::Leaf(String::new(), false)));
-    }
-    if rest == "leaf env" {
-        return Ok((depth, Row::Leaf(String::new(), true)));
-    }
     if let Some(tail) = rest.strip_prefix("leaf tag=\"") {
-        let (tag, env) = parse_tag(tail)?;
-        return Ok((depth, Row::Leaf(tag, env)));
+        let (tag, after) = parse_tag(tail)?;
+        let (env, weight) = parse_leaf_tail(after, weighted)?;
+        return Ok((depth, Row::Leaf(tag, env, weight)));
     }
-    // A container: `<mode> n=<num> active=<num>`.
+    if let Some(after) = rest.strip_prefix("leaf") {
+        let (env, weight) = parse_leaf_tail(after, weighted)?;
+        return Ok((depth, Row::Leaf(String::new(), env, weight)));
+    }
+    // A container: `<mode> n=<num> active=<num>[ w=<weight>]`.
     let mut it = rest.split(' ');
     let mode = it
         .next()
@@ -435,19 +632,42 @@ fn parse_row(line: &str) -> Result<(usize, Row), ParseError> {
         .and_then(|t| t.strip_prefix("active="))
         .and_then(|v| v.parse::<u32>().ok())
         .ok_or(ParseError::BadRow)?;
+    let weight = parse_row_weight(it.next(), weighted)?;
     if it.next().is_some() {
         return Err(ParseError::BadRow); // trailing tokens
     }
     if n as usize > MAX_NODES {
         return Err(ParseError::TooMany);
     }
-    Ok((depth, Row::Cont(mode, n, active)))
+    Ok((depth, Row::Cont(mode, n, active, weight)))
+}
+
+/// What may follow `leaf` or a leaf's closing quote: nothing, ` env`,
+/// ` w=<weight>`, or ` env w=<weight>` -- exactly one space before each.
+fn parse_leaf_tail(after: &str, weighted: bool) -> Result<(bool, u16), ParseError> {
+    if after.is_empty() {
+        return Ok((false, DEFAULT_WEIGHT));
+    }
+    let toks = after.strip_prefix(' ').ok_or(ParseError::BadRow)?;
+    let mut it = toks.split(' ');
+    let first = it.next().ok_or(ParseError::BadRow)?;
+    let (env, wtok) = if first == "env" {
+        (true, it.next())
+    } else {
+        (false, Some(first))
+    };
+    let weight = parse_row_weight(wtok, weighted)?;
+    if it.next().is_some() {
+        return Err(ParseError::BadRow);
+    }
+    Ok((env, weight))
 }
 
 /// Tokenize one `render_text` row: leading-space pairs -> depth, then
 /// `<id>[*] leaf ...` or `<id>[*] <mode> n=<num> active=<num> ...`. The leaf's
-/// tag + env marker come from `leaf_of(id)` (render_text carries neither);
-/// surface/geometry tokens are read past and discarded.
+/// tag + env marker come from `leaf_of(id)` (render_text carries neither); a
+/// ` w=<weight>` token is read wherever it falls; surface/geometry tokens are
+/// read past and discarded.
 fn parse_render_row(
     line: &str,
     leaf_of: &impl Fn(u32) -> (String, bool),
@@ -467,6 +687,17 @@ fn parse_render_row(
         .map(|t| t.strip_suffix('*').unwrap_or(t))
         .and_then(|t| t.parse::<u32>().ok())
         .ok_or(ParseError::BadRow)?;
+    // The weight rides after the rect (`... [x,y,w,h] w=515 hidden`), so the
+    // token is looked for among the rest, not at a position.
+    let render_weight = |it: core::str::Split<'_, char>| -> Result<u16, ParseError> {
+        let mut w = DEFAULT_WEIGHT;
+        for t in it {
+            if t.starts_with("w=") {
+                w = parse_weight(t)?;
+            }
+        }
+        Ok(w)
+    };
     match it.next() {
         Some("leaf") => {
             let (tag, env) = leaf_of(id);
@@ -478,7 +709,8 @@ fn parse_render_row(
             } else {
                 tag
             };
-            Ok((depth, Row::Leaf(tag, env)))
+            let weight = render_weight(it)?;
+            Ok((depth, Row::Leaf(tag, env, weight)))
         }
         Some(tok) => {
             let mode = LayoutMode::parse(tok).ok_or(ParseError::BadRow)?;
@@ -495,30 +727,26 @@ fn parse_render_row(
             if n as usize > MAX_NODES {
                 return Err(ParseError::TooMany);
             }
-            Ok((depth, Row::Cont(mode, n, active)))
+            let weight = render_weight(it)?;
+            Ok((depth, Row::Cont(mode, n, active, weight)))
         }
         None => Err(ParseError::BadRow),
     }
 }
 
 /// Parse the body of `leaf tag="..."` (everything after the opening quote):
-/// unescape `\\`/`\"`/`\n` up to the closing unescaped quote, which must end
-/// the row or be followed by exactly ` env` (the environment marker).
-fn parse_tag(tail: &str) -> Result<(String, bool), ParseError> {
+/// unescape `\\`/`\"`/`\n` up to the closing unescaped quote; returns the
+/// tag and what follows the quote (the row's tail: nothing, ` env`, ` w=`).
+fn parse_tag(tail: &str) -> Result<(String, &str), ParseError> {
     let mut out = String::new();
     let mut chars = tail.char_indices();
     while let Some((i, ch)) = chars.next() {
         match ch {
             '"' => {
-                let env = match &tail[i + 1..] {
-                    "" => false,
-                    " env" => true,
-                    _ => return Err(ParseError::BadRow),
-                };
                 if out.len() > MAX_TAG_LEN {
                     return Err(ParseError::TagTooLong);
                 }
-                return Ok((out, env));
+                return Ok((out, &tail[i + 1..]));
             }
             '\\' => match chars.next() {
                 Some((_, '\\')) => out.push('\\'),
@@ -545,12 +773,14 @@ mod tests {
         LayoutNode::Leaf {
             tag: t.to_string(),
             env: false,
+            weight: DEFAULT_WEIGHT,
         }
     }
     fn env_leaf(t: &str) -> LayoutNode {
         LayoutNode::Leaf {
             tag: t.to_string(),
             env: true,
+            weight: DEFAULT_WEIGHT,
         }
     }
     fn cont(m: LayoutMode, a: u32, c: Vec<LayoutNode>) -> LayoutNode {
@@ -558,7 +788,11 @@ mod tests {
             mode: m,
             active: a,
             children: c,
+            weight: DEFAULT_WEIGHT,
         }
+    }
+    fn w(n: LayoutNode, weight: u16) -> LayoutNode {
+        n.with_weight(weight)
     }
 
     fn roundtrip(n: &LayoutNode) {
@@ -566,6 +800,78 @@ mod tests {
         assert!(s.starts_with("halcyon-layout v1\n"), "header: {:?}", s);
         let back = parse(&s).expect("parse own output");
         assert_eq!(&back, n, "round-trip\n---\n{}\n---", s);
+    }
+
+    /// HALCYON-INSTRUMENT 6.1: a stack's container member is laid flat in
+    /// place -- its tiles, in order -- and the open tile stays open: here the
+    /// member was active and its own active leaf is `c`.
+    #[test]
+    fn a_stacks_container_member_is_laid_flat_and_keeps_the_open_tile() {
+        let saved = cont(
+            LayoutMode::Stacked,
+            1,
+            vec![leaf("a"), w(cont(LayoutMode::SplitH, 1, vec![leaf("b"), w(leaf("c"), 700)]), 300), leaf("d")],
+        );
+        let flat = flatten_stack_members(&saved);
+        assert_eq!(
+            flat,
+            cont(LayoutMode::Stacked, 2, vec![leaf("a"), leaf("b"), leaf("c"), leaf("d")]),
+            "every tile, in order, the open one still open, split weights dropped"
+        );
+    }
+
+    /// Depth: a stack inside a split inside a stack, and a tabbed parent,
+    /// all come out as tiles; the split containers OUTSIDE any stack keep
+    /// their shape and their weights.
+    #[test]
+    fn flattening_reaches_every_depth_and_leaves_splits_alone() {
+        let saved = w(
+            cont(
+                LayoutMode::SplitV,
+                0,
+                vec![
+                    w(leaf("top"), 250),
+                    cont(
+                        LayoutMode::Tabbed,
+                        0,
+                        vec![
+                            cont(LayoutMode::SplitH, 0, vec![leaf("x"), cont(LayoutMode::Stacked, 1, vec![leaf("y"), leaf("z")])]),
+                            leaf("q"),
+                        ],
+                    ),
+                ],
+            ),
+            900,
+        );
+        let flat = flatten_stack_members(&saved);
+        let want = w(
+            cont(
+                LayoutMode::SplitV,
+                0,
+                vec![
+                    w(leaf("top"), 250),
+                    cont(LayoutMode::Tabbed, 0, vec![leaf("x"), leaf("y"), leaf("z"), leaf("q")]),
+                ],
+            ),
+            900,
+        );
+        assert_eq!(flat, want);
+    }
+
+    /// The control: a tree that holds no container member is returned
+    /// EQUAL, so the pass is safe to run on every restore.
+    #[test]
+    fn a_tree_without_container_members_is_unchanged() {
+        let saved = w(
+            cont(
+                LayoutMode::SplitH,
+                1,
+                vec![w(leaf("a"), 400), cont(LayoutMode::Stacked, 1, vec![leaf("b"), w(leaf("c"), 7)])],
+            ),
+            3,
+        );
+        assert_eq!(flatten_stack_members(&saved), saved);
+        assert_eq!(flatten_stack_members(&leaf("solo")), leaf("solo"));
     }
 
     #[test]
@@ -639,7 +945,11 @@ mod tests {
         // These are the untrusted-file cases: each must be an Err, no panic.
         assert_eq!(parse(""), Err(ParseError::BadHeader));
         assert_eq!(
-            parse("halcyon-layout v2\nleaf\n"),
+            parse("halcyon-layout v3\nleaf\n"),
+            Err(ParseError::BadHeader)
+        );
+        assert_eq!(
+            parse("halcyon-layout v2 \nleaf\n"),
             Err(ParseError::BadHeader)
         );
         assert_eq!(parse("halcyon-layout v1\n"), Err(ParseError::Empty));
@@ -1023,5 +1333,135 @@ mod tests {
         assert!(!active_is_env(
             &parse("halcyon-layout v1\nleaf tag=\"a\"\n").unwrap()
         ));
+    }
+
+    // HALCYON-INSTRUMENT 5.3: v2 = v1 plus ` w=<weight>`, emitted only when
+    // some weight is non-default -- so the equal-weight tree keeps its v1
+    // bytes and an old reader keeps reading it.
+    #[test]
+    fn a_weighted_tree_round_trips_as_v2_and_a_default_one_stays_v1() {
+        let t = cont(
+            LayoutMode::SplitH,
+            0,
+            vec![
+                w(leaf("a"), 515),
+                w(
+                    cont(LayoutMode::SplitV, 1, vec![w(leaf("b"), 49), w(env_leaf("c"), 51)]),
+                    485,
+                ),
+            ],
+        );
+        let s = serialize(&t);
+        assert_eq!(
+            s,
+            "halcyon-layout v2\nsplith n=2 active=0\n  leaf tag=\"a\" w=515\n  splitv n=2 active=1 w=485\n    leaf tag=\"b\" w=49\n    leaf tag=\"c\" env w=51\n"
+        );
+        assert_eq!(parse(&s), Ok(t));
+        let d = cont(LayoutMode::SplitH, 0, vec![leaf("a"), env_leaf("b")]);
+        let ds = serialize(&d);
+        assert!(ds.starts_with("halcyon-layout v1\n"), "{ds:?}");
+        assert!(!ds.contains("w="), "{ds:?}");
+        assert_eq!(parse(&ds), Ok(d));
+    }
+
+    #[test]
+    fn a_v1_file_loads_with_equal_weights_and_refuses_a_weight() {
+        let t = parse("halcyon-layout v1\nsplith n=2 active=0\n  leaf\n  leaf env\n").unwrap();
+        assert_eq!(t, cont(LayoutMode::SplitH, 0, vec![leaf(""), env_leaf("")]));
+        for bad in [
+            "halcyon-layout v1\nsplith n=2 active=0 w=3\n  leaf\n  leaf\n",
+            "halcyon-layout v1\nleaf w=3\n",
+            "halcyon-layout v1\nleaf tag=\"x\" w=3\n",
+            "halcyon-layout v1\nleaf env w=3\n",
+        ] {
+            assert_eq!(parse(bad), Err(ParseError::BadWeight), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_v2_weight_is_one_to_65535_and_the_tail_grammar_is_exact() {
+        assert_eq!(parse("halcyon-layout v2\nleaf\n"), Ok(leaf("")));
+        assert_eq!(parse("halcyon-layout v2\nleaf w=1\n"), Ok(leaf("")));
+        assert_eq!(parse("halcyon-layout v2\nleaf w=65535\n"), Ok(w(leaf(""), 65535)));
+        assert_eq!(parse("halcyon-layout v2\nleaf env w=7\n"), Ok(w(env_leaf(""), 7)));
+        assert_eq!(parse("halcyon-layout v2\nleaf tag=\"x\" env w=7\n"), Ok(w(env_leaf("x"), 7)));
+        assert_eq!(parse("halcyon-layout v2\nleaf tag=\"x\" w=7\n"), Ok(w(leaf("x"), 7)));
+        assert_eq!(
+            parse("halcyon-layout v2\nsplith n=2 active=1 w=9\n  leaf\n  leaf\n"),
+            Ok(w(cont(LayoutMode::SplitH, 1, vec![leaf(""), leaf("")]), 9))
+        );
+        for bad in [
+            "leaf w=0",
+            "leaf w=65536",
+            "leaf w=",
+            "leaf w=-1",
+            "leaf w=1x",
+            "leaf w=1 env",
+            "leaf w=1 w=2",
+            "leaf  w=1",
+            "leaf tag=\"x\"w=1",
+            "leaf tag=\"x\" envw=1",
+            "splith n=2 active=0 w=0\n  leaf\n  leaf",
+            "splith n=2 active=0 w=1 w=2\n  leaf\n  leaf",
+        ] {
+            let r = parse(&alloc::format!("halcyon-layout v2\n{bad}\n"));
+            assert!(
+                matches!(r, Err(ParseError::BadWeight) | Err(ParseError::BadRow)),
+                "{bad:?} -> {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_render_text_reads_the_weight_after_the_rect() {
+        let render = "epoch 4 focused 3\n\
+0 splith n=2 active=0 [3,37,1434,835]\n  \
+3* leaf surface=1 [4,70,733,704] w=515\n  \
+5 splitv n=2 active=1 [745,37,692,835] w=485\n    \
+6 leaf surface=2 [746,70,690,307] w=49\n    \
+7 leaf empty [0,0,0,0] w=51 hidden\n";
+        let t = from_render_text(render, |id| (alloc::format!("t{id}"), false)).unwrap();
+        assert_eq!(
+            t,
+            cont(
+                LayoutMode::SplitH,
+                0,
+                vec![
+                    w(leaf("t3"), 515),
+                    w(
+                        cont(LayoutMode::SplitV, 1, vec![w(leaf("t6"), 49), w(leaf("t7"), 51)]),
+                        485
+                    ),
+                ]
+            )
+        );
+        assert!(serialize(&t).starts_with("halcyon-layout v2\n"));
+        // A dump row without the token is the default; a bad token is
+        // refused, never guessed.
+        let plain = from_render_text("epoch 1 focused 1\n1 leaf empty [0,0,1,1]\n", |_| (String::new(), false));
+        assert_eq!(plain, Ok(leaf("")));
+        assert_eq!(
+            from_render_text("epoch 1 focused 1\n1 leaf empty [0,0,1,1] w=0\n", |_| (String::new(), false)),
+            Err(ParseError::BadWeight)
+        );
+    }
+
+    #[test]
+    fn prune_env_hands_a_dissolved_containers_weight_to_its_survivor() {
+        // [a w=3, splitv w=7 [env, b]]: the env leaf goes, the splitv dissolves
+        // and b takes the container's place AND its weight (the compositor's
+        // dissolve rule, mirrored).
+        let t = cont(
+            LayoutMode::SplitH,
+            0,
+            vec![
+                w(leaf("a"), 3),
+                w(cont(LayoutMode::SplitV, 0, vec![env_leaf("e"), leaf("b")]), 7),
+            ],
+        );
+        assert_eq!(
+            prune_env(&t),
+            Some(cont(LayoutMode::SplitH, 0, vec![w(leaf("a"), 3), w(leaf("b"), 7)]))
+        );
     }
 }

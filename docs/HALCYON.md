@@ -579,6 +579,15 @@ inline).** The visual identity is `docs/HALCYON-VISUAL.md` (Daylight), ratified
 this pass as binding scripture for the H-3 chrome. This section is the
 mechanics; Daylight is the look.
 
+> **2026-09-14: a second profile.** `docs/HALCYON-INSTRUMENT.md` (the
+> Instrument profile: Carbon Optics + twelve themes, the Astra mockup) keeps
+> every mechanism below — the chrome-surface path, the gates, the pane
+> tree's trust model, the status verb, the menu, the seat — and changes the
+> LOOK for its own profile: a flat 1 px frame instead of the ring, 32 px
+> headers for every tile of a stack (collapsed ones included, the
+> HALCYON-VISUAL §3.2 rule finally built), two rails, weighted splits with
+> divider tracks. Daylight stays the legacy profile's look, unchanged.
+
 **Survey ground truth** (tapestryd, verified 2026-09-01 — so no future session
 re-derives it): the pane tree (`pane.rs`) already carries per-leaf `tag: String`
 + `role: Role{Content,Chrome,PinTarget}` + `focusable`, but **`Role` is inert**
@@ -947,7 +956,15 @@ RATIFIED (H-3d design, 2026-09-02; the operator present -- two votes below):
 - **The four slots (Daylight 6), their sources.** *Workspaces*: **ONE filled
   `ember` indicator ("1") until H-4's layouts supply the list -- VOTE
   (2026-09-02): "one filled indicator" over an empty slot or pulling the
-  workspace model forward.** *Focused context*: the focused leaf's tag name
+  workspace model forward. SUPERSEDED 2026-09-15: the workspace model is
+  RATIFIED (HALCYON-WORKSPACES mechanism (A) -- live pane trees, per-workspace
+  focus, the i3 vanish rule, bound 9, Super+1..9); the slot reads the `layout`
+  file's `workspaces <list> active <n>` header. **W-1..W-3 HAVE LANDED**
+  (`667128ec`), so "shows one until then" no longer applies to the session
+  bar; the header's first token is the ASCENDING LIST of live workspace
+  numbers rather than a count, since S4 ratified stable gapped numbers
+  (2026-09-15) and a count cannot label a gapped set. The PRE-LOGIN CONSOLE
+  bar still shows one, by design rather than by absence.** *Focused context*: the focused leaf's tag name
   (`pane/<id>/tag`; "transcript" for the console) `·` its working directory
   `·` its last command -- the directory and the command are known only for
   the console (the transcript's own session), so another program's focused
@@ -2165,7 +2182,10 @@ proportional live.**
   resolved RGB, §14.3, so the palette is applied at the producer). One
   resolution note: the `surface` panel role resolves from Daylight `header` (the
   light lift), NOT the dark `status_bg` strip, so a program painting its own ink
-  on it keeps contrast.
+  on it keeps contrast. Amended at HALCYON-INSTRUMENT I-5c: under the
+  Instrument profile the export also carries the three prompt inks (`ut`'s
+  `λ <cwd> ⊢ `) and the nine class-named syntax roles (`nora`'s highlighter);
+  the legacy export is unchanged (HALCYON-INSTRUMENT §7.4).
 
 **Rendering is a sink choice; the pts stays a fixed-width grid.** The kaua-term
 producer is UNCHANGED — it still hosts a real pts, still maintains a fixed
@@ -2259,3 +2279,45 @@ session-render + format-fuzz class; AUDIT-TRIGGERS rows 142/151) and joins the
 batched stabilization audit at the arc's close. The producer/pts, the trust
 boundary (§14.11.10), the resize path (§14.11.8), and the alt-screen render are
 unchanged in shape.
+
+### 14.7 integration refinement: ordered inline references (2026-09-17)
+
+The first real Instrument-session screenshot exposed a prototype limitation:
+putting a raster directly into frozen scrollback places it before the command
+that invoked `view`, because that command is still on the live terminal grid.
+Inline placement must follow the same byte-stream ordering as text, including
+when the live grid scrolls into history.
+
+The session path therefore uses an opaque image reference carried by an
+ordinary Beacon object (`type=inline-image`, `ref=<32 hexadecimal digits>`).
+`view` first uploads the bounded raster with a fresh per-invocation 128-bit
+identifier, then emits a standalone object caption in its normal stdout
+stream. A pipe or renderer that does not know the object sees readable text.
+No compressed data enters Beacon and no new Beacon opcode is introduced.
+The caption's cells retain the same object identity across terminal records,
+soft wrapping and scrollback, so the raster appears exactly where that line
+belongs. The place wire is versioned to carry the identifier; zero is reserved
+for the console/test injection path.
+
+Each tile owns a bounded raster cache, independent of other panes. Text and
+raster retention share the existing per-tile content allowance equally.
+There are at most 64 cached images; eviction leaves the readable caption in
+place. A repeated reference does not duplicate retained raster storage. The
+layout resolver substitutes only a complete standalone inline-image object;
+ordinary text around an object is never silently discarded. New or evicted
+raster data invalidates the tile's layout-height cache. Restart drops both
+routing tokens and raster references. An id names presentation data only and
+confers no authority: service peer checks and per-pane routes remain the gates.
+
+Session upload admission is capped by both the transient heap residual and the
+smallest live raster cache. Completion rechecks the current cap before replying:
+opening another pane during an upload must not turn a reported success into a
+quota refusal afterward. A session requires a nonzero image identifier and a
+still-live routed pane; otherwise the final write fails and View reports the
+failed placement. The console's legacy id-less path remains separate.
+
+Acceptance includes command/image/prompt order on first paint, after enough
+output to scroll the caption into history, on resize, and with independent
+panes. Tests cover unavailable and evicted references, duplicate ids, invalid
+headers and quota reduction. No timing delay or forced terminal clear is an
+acceptable substitute for stream ordering.

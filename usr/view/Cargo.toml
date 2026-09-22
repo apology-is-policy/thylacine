@@ -34,6 +34,7 @@ required-features = ["backend"]
 libthyla-rs = { path = "../lib/libthyla-rs", optional = true }
 # The place-request wire contract, shared with halcyond (the reader).
 inlinewire = { path = "../lib/inlinewire" }
+beacon = { path = "../lib/beacon" }
 # no_std image decode. default-features=false drops zune's std (no_std + alloc).
 zune-png = { version = "0.4", default-features = false }
 zune-jpeg = { version = "0.4", default-features = false }

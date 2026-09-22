@@ -1,0 +1,50 @@
+#!/usr/bin/expect -f
+# Real NIC RX/TX across the selected PCI interrupt backend; the host checks
+# all 8 MiB, so netperf's best-effort/always-zero exit cannot pass this gate.
+if {[info exists ::env(LS_CI_GFX_ACCEL)]} {
+    set ::env(THYLACINE_ACCEL) $::env(LS_CI_GFX_ACCEL)
+}
+source [file join [file dirname [info script]] lib.exp]
+proc peer_log {} {
+    global peerlog
+    if {[catch {set f [open $peerlog r]}]} { return "" }
+    set text [read $f]
+    close $f
+    return $text
+}
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+set peerlog $lc_repo/build/pci-net-load-peer.log
+file delete -force $peerlog
+set peerpid [exec python3 $lc_repo/tools/interactive/pci-net-load-peer.py --log $peerlog &]
+set port 0
+for {set i 0} {$i < 50} {incr i} {
+    if {[regexp {listening ([0-9]+)} [peer_log] -> port]} { break }
+    after 100
+}
+if {!$port} { lc_fail "network fixture did not bind: [peer_log]" }
+lc_send "netperf nic 10.0.2.2 $port 200 8192 40"
+set timeout 180
+foreach witness {{netperf M6 rtt: 200 round-trips} {netperf M6 floor: 200 round-trips} {netperf M6 connect: 40 dials} {netperf M6 throughput: 8192 KiB}} {
+    expect {
+        -re {netperf M6[^\r\n]*(ERR|SKIP)} { lc_fail "NIC workload did not run: $expect_out(0,string)" }
+        -ex $witness { lc_step "saw $witness" }
+        -re {EXTINCTION:} { lc_extinction_fail "NIC load" }
+        timeout { lc_fail "NIC workload stalled before $witness" }
+        eof { lc_fail "EOF during NIC workload" }
+    }
+}
+for {set i 0} {$i < 100} {incr i} {
+    set proof [peer_log]
+    if {[string first "ERROR" $proof] >= 0} { lc_fail "host rejected NIC payload: $proof" }
+    if {[string first "sink EOF verified 8388608 bytes" $proof] >= 0} { break }
+    after 100
+}
+if {[string first "sink EOF verified 8388608 bytes" $proof] < 0} {
+    lc_fail "host did not receive complete NIC payload: $proof"
+}
+lc_step $proof
+catch {exec kill -TERM $peerpid}
+lc_run_expect "echo pci-load-returned | tr a-z A-Z" "PCI-LOAD-RETURNED"
+lc_pass "PCI NIC: 200 immediate/delayed round trips, 40 connections, 8 MiB verified at host"
+lc_quit

@@ -340,6 +340,37 @@ These are not v1.0 angles — they're recorded so a future direction isn't lost.
   the underground substrate connecting everything (the "wood wide web") — fitting
   the bushland palette and the universal-connective-tissue role.
 
+- **The browser as a capability graph — site isolation by namespace, not by
+  engine policy** (`docs/BROWSER-DESIGN.md` §8.3, ratified 2026-09-21; the
+  invariant is OWED, not yet allocated). Every other system confines a browser
+  **subtractively**: `pledge`/`unveil` (SerenityOS, OpenBSD), seccomp + Landlock
+  (Ladybird since June 2026), Seatbelt — a process born with the machine's
+  ambient surface hands pieces back, and what remains is still a reachable
+  network stack, a filesystem root and a syscall table to probe. Thylacine
+  confines **constructively**: a content Proc's namespace is *built* and holds
+  one channel to the chrome, one to the fetch Proc, read-only fonts — and no
+  `/net`, no `/srv`, no `/proc`, no `/dev` at all (I-1/I-28), no capability it
+  was not spawned with (I-2), no handle it was not handed over a session (I-4).
+  A compromised renderer does not face a *filtered* socket API; it faces the
+  absence of one. **Heritage**: Plan 9's `webfs(4)` put HTTP behind a file
+  server in 1995 and `mothra` never owned a socket; 9front's NetSurf port still
+  fetches through it. **SOTA**: Fuchsia's `fuchsia.web` `Context` is created
+  with a `service_directory` of exactly the capabilities the engine may use;
+  Genode routes GUI/NIC/FS sessions to the browser component and interposes a
+  GUI-server instance as a video bridge so the capability graph, not the app,
+  mediates the camera; SerenityOS's per-tab WebContent + RequestServer +
+  per-image ImageDecoder is the settled process shape — and Ladybird's four
+  years without a sandbox after leaving SerenityOS is the proof that *the
+  architecture is portable and the confinement is the OS's contribution*.
+  **The fusion, and what is new**: (1) the fetch service is the only Proc that
+  can name the network, and it knows its peer's identity; (2) revocation is
+  closing a session; (3) decode runs in throwaway Procs, which is already
+  I-47's pattern; (4) the JIT is a *granted capability* (`CAP_JIT`, I-42), so
+  "JIT on or off for this site" is a system decision — a Lockdown Mode that
+  falls out of the capability model rather than being built into the engine.
+  Engine-independent; nearly free on WebKit, whose UI / network / web process
+  split already matches. Composes I-1, I-2, I-4, I-12, I-28, I-32, I-42, I-47.
+
 - **Nocturne — an audio graph that is a file server, whose DSP is a
   capability-bounded client, not a plugin** (`docs/NOCTURNE.md`; captured
   2026-09-05 at the N-0 design pass; **an ACTIVE arc, operator-directed**, not

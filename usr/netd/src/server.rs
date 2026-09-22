@@ -14,8 +14,8 @@
 // interface + socket set (moved in after DHCP) so the 9P dispatch reaches them.
 // Writing `ctl` "connect a.b.c.d!port" active-opens the socket (CONNECTING);
 // `status`/`local`/`remote` report the live state + endpoints; `data` read/write
-// IS recv/send on the byte stream. The last clunk frees N AND removes its
-// smoltcp socket. `data` I/O is non-blocking at net-2c-2 (a 0-length read is
+// IS recv/send on the byte stream. Last clunk frees N; the socket transfers
+// to bounded private retirement (NET-CLOSE-DESIGN). `data` I/O is non-blocking at net-2c-2 (a 0-length read is
 // ambiguous between "no data yet" and EOF); blocking/readiness is the dev9p.poll
 // leg (net-6). `announce`/`listen` (the server side) is net-3.
 //
@@ -34,8 +34,8 @@
 use crate::NicDevice;
 use alloc::vec::Vec;
 use libthyla_rs::ninep as p9;
-use libthyla_rs::weft as weftlib;
 use libthyla_rs::time::{sleep, Duration, Instant};
+use libthyla_rs::weft as weftlib;
 use libthyla_rs::{
     t_close, t_open, t_walk_create, T_GID_SYSTEM, T_OPATH, T_OREAD, T_PRINCIPAL_SYSTEM,
     T_WALK_OPEN_FROM_ROOT,
@@ -62,6 +62,20 @@ const MAX_FIDS: usize = 32;
 /// (ENFILE) past this. Raise as the workload demands.
 const MAX_SLOTS: usize = 16;
 
+// Public slots and transport buffers have separate lifetimes. The event loop
+// owns both; admission counts every TCP socket before allocation. A last clunk
+// transfers a handle, never buffers, into preallocated retirement metadata.
+// No slot/generation/Weft mapping survives this transfer. See NET-CLOSE-DESIGN.
+const MAX_TCP_TRANSPORTS: usize = 64;
+const TCP_RETIRE_MS: u64 = 30_000;
+
+#[derive(Clone, Copy)]
+struct RetiredTcp {
+    handle: SocketHandle,
+    lo: bool,
+    deadline_ms: u64,
+}
+
 /// Max deferred accepts in flight (one held listen Rlopen per entry). Bounds the
 /// pending-accept table (#65 resource floor); a listen open past this is rejected
 /// (ENOMEM) rather than deferred.
@@ -80,8 +94,8 @@ const SRV_MSIZE_USIZE: usize = SRV_MSIZE as usize;
 /// KiB each (Weft-0 / NET-THROUGHPUT.md Tier A) covers the bandwidth-delay
 /// product at the Tier-A target over the NIC round-trip, 2x the 32 KiB per-op
 /// chunk so the NIC pipeline stays full while the next 9P op crosses. MAX_SLOTS
-/// * (rx + tx) bounds netd's socket memory (16 * 128 KiB = 2 MiB, allocated only
-/// for live slots; << the 256 MiB #65 per-Proc floor).
+/// is the public slot limit; MAX_TCP_TRANSPORTS * (rx + tx) bounds live plus
+/// retiring TCP buffers at 8 MiB within netd's explicit 16 MiB heap.
 const TCP_RX_BUF: usize = 65536;
 const TCP_TX_BUF: usize = 65536;
 
@@ -741,6 +755,9 @@ pub struct Net {
     base: Instant,
     next_local_port: u16,
     slots: [Slot; MAX_SLOTS],
+    retired: Vec<RetiredTcp>,
+    tcp_retire_expired: u32,
+    tcp_timewait_yielded: u32,
     tcp_active: u32,      // currently-live TCP connections (the `active` stat)
     tcp_opened: u32,      // total TCP connections ever minted
     udp_active: u32,      // currently-live UDP connections (net-3b)
@@ -802,6 +819,9 @@ impl Net {
             base,
             next_local_port: EPHEMERAL_LO,
             slots: [Slot::empty(); MAX_SLOTS],
+            retired: Vec::with_capacity(MAX_TCP_TRANSPORTS),
+            tcp_retire_expired: 0,
+            tcp_timewait_yielded: 0,
             tcp_active: 0,
             tcp_opened: 0,
             udp_active: 0,
@@ -919,7 +939,6 @@ impl Net {
         }
     }
 
-
     /// Stand up the resident loopback stack (net-8a): a second isolated smoltcp
     /// interface on a `Loopback` device, addressed `127.0.0.1/8`. Idempotent. The
     /// resident netd opts in (main.rs, after `new`); the E2E selftests do NOT (they
@@ -1009,9 +1028,16 @@ impl Net {
                 lo.sockets.add(sock)
             }
             _ => {
-                let rx = tcp::SocketBuffer::new(alloc::vec![0u8; TCP_RX_BUF]);
-                let tx = tcp::SocketBuffer::new(alloc::vec![0u8; TCP_TX_BUF]);
-                lo.sockets.add(tcp::Socket::new(rx, tx))
+                // Move the fresh TCP socket between sets. Allocating a replacement
+                // first would transiently exceed the admitted transport budget.
+                let old = match self.slots[i].socket.take() {
+                    Some(h) => h,
+                    None => return false,
+                };
+                match self.sockets.remove(old) {
+                    smoltcp::socket::Socket::Tcp(socket) => lo.sockets.add(socket),
+                    _ => unreachable!("TCP slot held another protocol"),
+                }
             }
         };
         // Drop the old NIC-set socket now that the lo socket is in hand.
@@ -1176,12 +1202,110 @@ impl Net {
     /// rather than waiting for the next poll timeout. `device` stays owned by
     /// the serve loop (only `iface.poll` borrows it).
     pub fn poll<D: Device + ?Sized>(&mut self, device: &mut D) {
+        self.reap_retired(self.now_ms());
         let ts = self.now();
         self.iface.poll(ts, device, &mut self.sockets);
         // Service the resident loopback stack on its own device/iface/set
         // (net-8a). Disjoint fields of `lo`, so no aliasing with the NIC poll.
         if let Some(lo) = self.lo.as_mut() {
             lo.iface.poll(ts, &mut lo.device, &mut lo.sockets);
+        }
+        self.reap_retired(self.now_ms());
+    }
+
+    /// Number of actual TCP transports, including unreferenced mints and
+    /// retirees. Timed-out connects with no socket do not consume capacity.
+    fn tcp_transports(&self) -> usize {
+        self.retired.len()
+            + self
+                .slots
+                .iter()
+                .filter(|s| s.used && s.proto == PROTO_TCP && s.socket.is_some())
+                .count()
+    }
+
+    /// Make room for one new TCP transport (NET-CLOSE-DESIGN, the 2026-09-21
+    /// refinement). Below the bound this is a plain yes. AT the bound, the
+    /// oldest retiree that has reached TIME-WAIT is released early: both FINs
+    /// are exchanged and acknowledged, so it holds no byte anyone is owed and
+    /// no close left to finish -- only the rest of its 2MSL quiet time. Removed
+    /// without an abort, so no RST is emitted. A retiree in any other state
+    /// still carries queued data or an unfinished close and is never touched;
+    /// with no TIME-WAIT retiree the answer is no, and the caller refuses with
+    /// the existing resource error exactly as before.
+    fn tcp_admit(&mut self) -> bool {
+        if self.tcp_transports() < MAX_TCP_TRANSPORTS {
+            return true;
+        }
+        let mut oldest: Option<(usize, u64)> = None;
+        for i in 0..self.retired.len() {
+            let r = self.retired[i];
+            let state = self.retired_set(r.lo).get_mut::<tcp::Socket>(r.handle).state();
+            if state == tcp::State::TimeWait && oldest.map_or(true, |(_, d)| r.deadline_ms < d) {
+                oldest = Some((i, r.deadline_ms));
+            }
+        }
+        let Some((i, _)) = oldest else {
+            return false;
+        };
+        let r = self.retired.swap_remove(i);
+        self.retired_set(r.lo).remove(r.handle);
+        self.tcp_timewait_yielded = self.tcp_timewait_yielded.saturating_add(1);
+        true
+    }
+
+    fn retired_set(&mut self, lo: bool) -> &mut SocketSet<'static> {
+        if lo {
+            &mut self.lo.as_mut().expect("retired lo stack").sockets
+        } else {
+            &mut self.sockets
+        }
+    }
+
+    /// All callers run on the same event loop. No allocation on last close:
+    /// a publicly held transport already owns one of the 64 capacity units.
+    fn retire_tcp(&mut self, handle: SocketHandle, lo: bool) {
+        let socket = self.retired_set(lo).get_mut::<tcp::Socket>(handle);
+        socket.close();
+        if socket.state() == tcp::State::Closed {
+            self.retired_set(lo).remove(handle);
+            return;
+        }
+        assert!(self.retired.len() < MAX_TCP_TRANSPORTS);
+        self.retired.push(RetiredTcp {
+            handle,
+            lo,
+            deadline_ms: self.now_ms().saturating_add(TCP_RETIRE_MS),
+        });
+    }
+
+    /// Drain abandoned RX so its window cannot pin FIN, then reap Closed or
+    /// expired transports. The explicit time argument permits deterministic
+    /// deadline controls without sleeping through the 30-second policy.
+    fn reap_retired(&mut self, now_ms: u64) {
+        let mut i = 0;
+        while i < self.retired.len() {
+            let retired = self.retired[i];
+            let socket = self
+                .retired_set(retired.lo)
+                .get_mut::<tcp::Socket>(retired.handle);
+            while socket.can_recv() {
+                let _ = socket.recv(|bytes| (bytes.len(), ()));
+            }
+            let closed = socket.state() == tcp::State::Closed;
+            let expired = !closed && now_ms >= retired.deadline_ms;
+            if expired {
+                socket.abort();
+            }
+            if closed || expired {
+                self.retired_set(retired.lo).remove(retired.handle);
+                self.retired.swap_remove(i);
+                if expired {
+                    self.tcp_retire_expired = self.tcp_retire_expired.saturating_add(1);
+                }
+            } else {
+                i += 1;
+            }
         }
     }
 
@@ -1198,7 +1322,18 @@ impl Net {
             .lo
             .as_mut()
             .and_then(|l| l.iface.poll_delay(ts, &l.sockets).map(|d| d.total_millis()));
-        match (nic, lo) {
+        let stack = match (nic, lo) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, b) => b,
+        };
+        let now = self.now_ms();
+        let retirement = self
+            .retired
+            .iter()
+            .map(|r| r.deadline_ms.saturating_sub(now))
+            .min();
+        match (stack, retirement) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (Some(a), None) => Some(a),
             (None, b) => b,
@@ -1372,6 +1507,11 @@ impl Net {
     /// full. The slot is NOT yet freeable -- only slot_unref frees, and the
     /// caller refs it before any unref can occur.
     fn tcp_clone(&mut self) -> Option<u32> {
+        // The free slot first: a clone refused for want of a SLOT must not
+        // have cost a TIME-WAIT retiree its quiet time.
+        if !self.slots.iter().any(|s| !s.used) || !self.tcp_admit() {
+            return None;
+        }
         let n = self.slots.iter().position(|s| !s.used)?;
         // Reserve the smoltcp socket now (the section-3.4 ALLOCATED state: one
         // socket bound to the connection for its whole open lifetime). It is
@@ -1509,16 +1649,16 @@ impl Net {
 
     /// Drop one reference to connection N. When the last reference goes, the
     /// connection is freed (the I-10/I-11 invariant: clunk is the only free
-    /// path; N is not reusable until fully torn down). net-2c-2 removes the
-    /// smoltcp socket here.
+    /// path; N is reusable once public ownership is fully torn down). TCP's
+    /// private retirement owner cannot access N, its generation or its Weft.
     fn slot_unref(&mut self, n: u32) {
         let i = n as usize;
         if i < MAX_SLOTS && self.slots[i].used && self.slots[i].refs > 0 {
             self.slots[i].refs -= 1;
             if self.slots[i].refs == 0 {
-                // Last reference gone: free the connection AND its smoltcp
-                // socket (the only free path -- I-10/I-11). remove() returns the
-                // Socket, dropped here, releasing its rx/tx buffers.
+                // Last public owner leaves. TCP buffers belong to the private
+                // retirement owner until FIN/ACK completion or deadline; the
+                // public slot and Weft mapping are released immediately.
                 let proto = self.slots[i].proto;
                 // Capture the Weft ring (if any) before the slot is cleared, so
                 // we can detach netd's mapping (drop netd's #847 mapping ref) --
@@ -1527,9 +1667,11 @@ impl Net {
                 // the guest's dev9p_close); netd only owns its own mapping.
                 let weft = self.slots[i].weft;
                 if let Some(h) = self.slots[i].socket.take() {
-                    // Remove from the slot's stack (lo or NIC); set_mut still reads
-                    // the slot's `lo` flag (only `socket` was taken). net-8a.
-                    let _ = self.set_mut(n).remove(h);
+                    if proto == PROTO_TCP {
+                        self.retire_tcp(h, self.slots[i].lo);
+                    } else {
+                        let _ = self.set_mut(n).remove(h);
+                    }
                 }
                 self.slots[i] = Slot::empty();
                 self.dec_active(proto);
@@ -2091,9 +2233,13 @@ impl Net {
     /// M's ctl. None if the slot table is full (the call stays buffered in N's
     /// socket) or the re-arm fails (N keeps the call; the accept retries).
     fn accept_swap(&mut self, n: u32) -> Option<u32> {
+        // Every other refusal first, so a swap that cannot happen yields nothing.
         let m = self.slots.iter().position(|s| !s.used)?;
         let established = self.slots[n as usize].socket?;
         let ep = self.slots[n as usize].listen_ep?;
+        if !self.tcp_admit() {
+            return None;
+        }
         // N's stack (lo or NIC): the established + re-armed sockets all live here.
         // M inherits it -- a loopback listener accepts loopback calls (net-8a).
         let nlo = self.slots[n as usize].lo;
@@ -2790,6 +2936,14 @@ impl Net {
                 c.push_dec(self.tcp_active);
                 c.push(b"\n  opened ");
                 c.push_dec(self.tcp_opened);
+                c.push(b"\n  transports ");
+                c.push_dec(self.tcp_transports() as u32);
+                c.push(b"\n  retiring ");
+                c.push_dec(self.retired.len() as u32);
+                c.push(b"\n  close-timeouts ");
+                c.push_dec(self.tcp_retire_expired);
+                c.push(b"\n  timewait-yielded ");
+                c.push_dec(self.tcp_timewait_yielded);
                 c.push(b"\n");
             }
             P_UDP_STATS => {
@@ -2923,7 +3077,13 @@ pub fn loopback_e2e(base: Instant) -> LoopbackResult {
     iface.update_ip_addrs(|a| {
         let _ = a.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8));
     });
-    let mut lo = Net::new(iface, SocketSet::new(Vec::new()), base, IfConfig::empty(), None);
+    let mut lo = Net::new(
+        iface,
+        SocketSet::new(Vec::new()),
+        base,
+        IfConfig::empty(),
+        None,
+    );
     LoopbackResult {
         icmp: lo_icmp_roundtrip(&mut lo, &mut device),
         udp: lo_udp_roundtrip(&mut lo, &mut device),
@@ -2953,7 +3113,13 @@ pub fn resident_lo_selftest(base: Instant) -> &'static str {
     iface.update_ip_addrs(|a| {
         let _ = a.push(IpCidr::new(IpAddress::v4(10, 0, 0, 1), 24));
     });
-    let mut net = Net::new(iface, SocketSet::new(Vec::new()), base, IfConfig::empty(), None);
+    let mut net = Net::new(
+        iface,
+        SocketSet::new(Vec::new()),
+        base,
+        IfConfig::empty(),
+        None,
+    );
     net.enable_loopback();
 
     // announce 127.0.0.1!port -> the listener migrates to the lo stack.
@@ -3039,13 +3205,270 @@ pub fn resident_lo_selftest(base: Instant) -> &'static str {
         return "data-mismatch";
     }
 
-    // Teardown -> the connection table returns to baseline (no fd/socket leak).
-    net.slot_unref(cn);
-    net.slot_unref(ln);
-    net.slot_unref(m);
-    if net.tcp_active != 0 {
-        return "leak";
+    close_retirement_legs(&mut net, &mut nic, m, cn, ln)
+}
+
+/// Exercise both ownership domains with real established sockets. Closing the
+/// client before the next stack poll is the regression trigger: every byte is
+/// still in its TX buffer. The peer must receive it and FIN after slot reuse.
+fn close_retirement_legs(
+    net: &mut Net,
+    nic: &mut Loopback,
+    m: u32,
+    cn: u32,
+    ln: u32,
+) -> &'static str {
+    let payload = alloc::vec![0xa5; TCP_TX_BUF];
+    let old_gen = net.slots[cn as usize].gen;
+    let old_handle = net.slots[cn as usize].socket.unwrap();
+    let on_lo = net.slots[cn as usize].lo;
+    // Fill unread client RX before dropping it, forcing retired RX drainage.
+    if net.data_send(m, &payload) != payload.len() {
+        return "unread-send";
     }
+    if !lo_drive(net, nic, |n| n.slot_can_recv(cn)) {
+        return "unread-arrival";
+    }
+    if net.data_send(cn, &payload) != payload.len() {
+        return "queued-send";
+    }
+    // A mapping owned by this flow must leave with the public slot; no share
+    // registration is needed to test netd's mapping half of the detach path.
+    let va = unsafe { libthyla_rs::t_burrow_attach(4096) };
+    if va < 0 {
+        return "weft-map";
+    }
+    net.slots[cn as usize].weft = Some(WeftFlow {
+        ring_va: va as u64,
+        ring_size: 4096,
+        share_id: 0,
+    });
+    net.slot_unref(cn);
+    if net.slot_live(cn) || net.retired.len() != 1 {
+        return "last-owner";
+    }
+    if unsafe { libthyla_rs::t_burrow_detach(va as u64, 4096) } >= 0 {
+        return "weft-not-detached";
+    }
+    let replacement = match net.tcp_clone() {
+        Some(n) => n,
+        None => return "reuse-clone",
+    };
+    net.slot_ref(replacement);
+    if replacement != cn
+        || net.slots[cn as usize].gen == old_gen
+        || net.slots[cn as usize].weft.is_some()
+        || net.retired[0].handle != old_handle
+        || net.retired[0].lo != on_lo
+    {
+        return "reuse-identity";
+    }
+    let mut total = 0;
+    let mut bad = false;
+    let mut buf = [0u8; 2048];
+    let eof = lo_drive(net, nic, |n| loop {
+        match n.data_recv_outcome(m, &mut buf) {
+            RecvOutcome::Data(k) if k > 0 => {
+                if buf[..k].iter().any(|b| *b != 0xa5) {
+                    bad = true;
+                }
+                total += k;
+            }
+            RecvOutcome::Eof => return true,
+            _ => return false,
+        }
+    });
+    if !eof || bad || total != payload.len() {
+        return "close-lost-data";
+    }
+    net.slot_unref(m);
+    net.slot_unref(ln);
+    net.slot_unref(replacement);
+    // Normal FIN completion reaches TIME-WAIT (or Closed on the passive side).
+    if !lo_drive(net, nic, |n| {
+        n.retired.iter().all(|r| {
+            let set = if r.lo {
+                &n.lo.as_ref().unwrap().sockets
+            } else {
+                &n.sockets
+            };
+            matches!(
+                set.get::<tcp::Socket>(r.handle).state(),
+                tcp::State::TimeWait | tcp::State::Closed
+            )
+        })
+    }) {
+        return "fin-completion";
+    }
+    // Advance only this isolated test stack's clock past 2MSL, before the
+    // retirement deadline. No production clock override or 10-second sleep.
+    let future = net.now_ms() + 11_000;
+    let ts = SmolInstant::from_millis(future as i64);
+    net.iface.poll(ts, nic, &mut net.sockets);
+    if let Some(lo) = net.lo.as_mut() {
+        lo.iface.poll(ts, &mut lo.device, &mut lo.sockets);
+    }
+    net.reap_retired(future);
+    if net.tcp_transports() != 0 || net.tcp_active != 0 || net.tcp_retire_expired != 0 {
+        return "normal-close-leak";
+    }
+    "PASS"
+}
+
+/// Admission and deadline controls use an isolated primary stack. Fixture
+/// transports fill the real SocketSet/metadata budget without a 30-second wait.
+/// A real established socket remains queued while both admission paths refuse.
+pub fn close_retirement_selftest(base: Instant) -> &'static str {
+    let mut device = Loopback::new(Medium::Ethernet);
+    let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress([
+        2, 0, 0, 0, 0, 9,
+    ])));
+    config.random_seed = LO_SEED;
+    let mut iface = Interface::new(config, &mut device, SmolInstant::from_millis(0));
+    iface.update_ip_addrs(|a| {
+        let _ = a.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8));
+    });
+    let mut net = Net::new(
+        iface,
+        SocketSet::new(Vec::new()),
+        base,
+        IfConfig::empty(),
+        None,
+    );
+    let (m, cn, ln) = match lo_establish_pair(&mut net, &mut device) {
+        Some(pair) => pair,
+        None => return "bound-establish",
+    };
+    net.slot_ref(m);
+    net.slot_ref(cn);
+    net.slot_ref(ln);
+    if net.data_send(cn, b"retirement-bound") != 16 {
+        return "bound-send";
+    }
+    net.slot_unref(cn);
+    let retiring = net.retired[0];
+    let queued = net.sockets.get::<tcp::Socket>(retiring.handle).send_queue();
+    while net.tcp_transports() < MAX_TCP_TRANSPORTS {
+        let rx = tcp::SocketBuffer::new(alloc::vec![0u8; TCP_RX_BUF]);
+        let tx = tcp::SocketBuffer::new(alloc::vec![0u8; TCP_TX_BUF]);
+        let handle = net.sockets.add(tcp::Socket::new(rx, tx));
+        net.retired.push(RetiredTcp {
+            handle,
+            lo: false,
+            deadline_ms: retiring.deadline_ms,
+        });
+    }
+    if net.tcp_clone().is_some()
+        || net.accept_swap(ln).is_some()
+        || net.sockets.get::<tcp::Socket>(retiring.handle).send_queue() != queued
+    {
+        return "bound-admission";
+    }
+    net.reap_retired(retiring.deadline_ms - 1);
+    if net.retired.len() != 1 || net.tcp_retire_expired != 0 {
+        return "early-reap";
+    }
+    if net.tcp_clone().is_none() {
+        return "capacity-return";
+    }
+    net.reap_retired(retiring.deadline_ms);
+    if !net.retired.is_empty() || net.tcp_retire_expired != 1 {
+        return "deadline-reap";
+    }
+    // A SYN-SENT last close removes immediately; no accepted data exists yet.
+    let handshake = match net.tcp_clone() {
+        Some(n) => n,
+        None => return "syn-clone",
+    };
+    net.slot_ref(handshake);
+    if net
+        .tcp_connect(handshake, [127, 0, 0, 2], LO_LOOPBACK_PORT)
+        .is_err()
+    {
+        return "syn-connect";
+    }
+    net.slot_unref(handshake);
+    if net.slot_live(handshake) || !net.retired.is_empty() {
+        return "syn-close";
+    }
+
+    // TIME-WAIT yields to admission; nothing else does. The refusal leg above
+    // is this leg's control -- the same full bound, no TIME-WAIT retiree, and
+    // both admission paths refuse. Here ONE retiree is a real TIME-WAIT (a
+    // normal close, client first) and one holds real queued bytes.
+    net.slot_unref(m);
+    net.slot_unref(ln);
+    let (m2, cn2, ln2) = match lo_establish_pair(&mut net, &mut device) {
+        Some(pair) => pair,
+        None => return "yield-establish",
+    };
+    net.slot_ref(m2);
+    net.slot_ref(cn2);
+    net.slot_ref(ln2);
+    net.slot_unref(cn2);
+    let mut scratch = [0u8; 8];
+    if !lo_drive(&mut net, &mut device, |n| {
+        matches!(n.data_recv_outcome(m2, &mut scratch), RecvOutcome::Eof)
+    }) {
+        return "yield-eof";
+    }
+    net.slot_unref(m2);
+    net.slot_unref(ln2);
+    if !lo_drive(&mut net, &mut device, |n| {
+        n.retired.len() == 1
+            && n.sockets.get::<tcp::Socket>(n.retired[0].handle).state() == tcp::State::TimeWait
+    }) {
+        return "yield-timewait";
+    }
+    let quiet = net.retired[0].handle;
+    let (m3, cn3, ln3) = match lo_establish_pair(&mut net, &mut device) {
+        Some(pair) => pair,
+        None => return "yield-establish-2",
+    };
+    net.slot_ref(m3);
+    net.slot_ref(cn3);
+    net.slot_ref(ln3);
+    if net.data_send(cn3, b"still-owed-bytes") != 16 {
+        return "yield-send";
+    }
+    net.slot_unref(cn3);
+    let owed = match net.retired.iter().find(|r| r.handle != quiet) {
+        Some(r) => r.handle,
+        None => return "yield-owed-missing",
+    };
+    let owed_queue = net.sockets.get::<tcp::Socket>(owed).send_queue();
+    if owed_queue == 0
+        || net.sockets.get::<tcp::Socket>(quiet).state() != tcp::State::TimeWait
+    {
+        return "yield-fixture";
+    }
+    while net.tcp_transports() < MAX_TCP_TRANSPORTS {
+        let rx = tcp::SocketBuffer::new(alloc::vec![0u8; TCP_RX_BUF]);
+        let tx = tcp::SocketBuffer::new(alloc::vec![0u8; TCP_TX_BUF]);
+        let handle = net.sockets.add(tcp::Socket::new(rx, tx));
+        net.retired.push(RetiredTcp {
+            handle,
+            lo: false,
+            deadline_ms: u64::MAX,
+        });
+    }
+    let yielded_before = net.tcp_timewait_yielded;
+    let admitted = match net.tcp_clone() {
+        Some(n) => n,
+        None => return "yield-refused",
+    };
+    if net.tcp_timewait_yielded != yielded_before + 1
+        || net.retired.iter().any(|r| r.handle == quiet)
+        || !net.retired.iter().any(|r| r.handle == owed)
+        || net.sockets.get::<tcp::Socket>(owed).send_queue() != owed_queue
+    {
+        return "yield-wrong-victim";
+    }
+    // The bound is full again and the only TIME-WAIT is gone: refusal returns.
+    if net.tcp_transports() != MAX_TCP_TRANSPORTS || net.tcp_clone().is_some() {
+        return "yield-unbounded";
+    }
+    net.free_orphan_mint(admitted);
     "PASS"
 }
 
@@ -3071,7 +3494,13 @@ pub fn echo_e2e(base: Instant) -> bool {
     iface.update_ip_addrs(|a| {
         let _ = a.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8));
     });
-    let mut lo = Net::new(iface, SocketSet::new(Vec::new()), base, IfConfig::empty(), None);
+    let mut lo = Net::new(
+        iface,
+        SocketSet::new(Vec::new()),
+        base,
+        IfConfig::empty(),
+        None,
+    );
     echo_e2e_inner(&mut lo, &mut device)
 }
 
@@ -3219,7 +3648,13 @@ pub fn connect_sweep_selftest(base: Instant) -> bool {
     config.random_seed = LO_SEED;
     let ts0 = SmolInstant::from_millis(base.elapsed().as_millis() as i64);
     let iface = Interface::new(config, &mut device, ts0);
-    let mut net = Net::new(iface, SocketSet::new(Vec::new()), base, IfConfig::empty(), None);
+    let mut net = Net::new(
+        iface,
+        SocketSet::new(Vec::new()),
+        base,
+        IfConfig::empty(),
+        None,
+    );
 
     let n = match net.tcp_clone() {
         Some(n) => n,
@@ -3256,7 +3691,13 @@ pub fn ipifc_e2e(base: Instant) -> bool {
     config.random_seed = LO_SEED;
     let ts0 = SmolInstant::from_millis(base.elapsed().as_millis() as i64);
     let iface = Interface::new(config, &mut device, ts0);
-    let mut net = Net::new(iface, SocketSet::new(Vec::new()), base, IfConfig::empty(), None);
+    let mut net = Net::new(
+        iface,
+        SocketSet::new(Vec::new()),
+        base,
+        IfConfig::empty(),
+        None,
+    );
 
     let has = |c: &Content, needle: &[u8]| {
         let s = c.as_slice();
@@ -3720,7 +4161,13 @@ pub fn recv_blocking_e2e(base: Instant) -> &'static str {
     iface.update_ip_addrs(|a| {
         let _ = a.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8));
     });
-    let mut lo = Net::new(iface, SocketSet::new(Vec::new()), base, IfConfig::empty(), None);
+    let mut lo = Net::new(
+        iface,
+        SocketSet::new(Vec::new()),
+        base,
+        IfConfig::empty(),
+        None,
+    );
 
     // Establish a connection (announce + connect + the deferred accept), KEEPING
     // the server side M (lo_tcp_accept discards it; here we recv on it).
@@ -3840,7 +4287,13 @@ pub fn ready_e2e(base: Instant) -> &'static str {
     iface.update_ip_addrs(|a| {
         let _ = a.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8));
     });
-    let mut lo = Net::new(iface, SocketSet::new(Vec::new()), base, IfConfig::empty(), None);
+    let mut lo = Net::new(
+        iface,
+        SocketSet::new(Vec::new()),
+        base,
+        IfConfig::empty(),
+        None,
+    );
     let (m, cn, ln) = match lo_establish_pair(&mut lo, &mut device) {
         Some(t) => t,
         None => return "establish",
@@ -5733,8 +6186,7 @@ impl Conn {
             // serve loop; see weft_recv_into_ring's note) -- a future concurrency
             // lift MUST keep the slot mapped across this raw read.
             let base = flow.ring_va as usize + geom.payload_off as usize + off;
-            let payload: &[u8] =
-                unsafe { core::slice::from_raw_parts(base as *const u8, len) };
+            let payload: &[u8] = unsafe { core::slice::from_raw_parts(base as *const u8, len) };
             let sent = net.data_send(n, payload);
             return p9::build_rweftio(&mut self.out_buf, tag, sent as u32);
         }

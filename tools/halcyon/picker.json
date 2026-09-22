@@ -1,0 +1,16 @@
+{
+  "_comment": "HALCYON-INSTRUMENT 9.4 (I-7): the theme picker's grouping, subtitles and order, transcribed from the mockup's DOM (docs/halcyon-carbon-handoff round 2 index.html + app.js). instrument-gallery.py writes these into each gallery file's [meta] group/tagline/rank (the three OPTIONAL keys). group is one of dark|terminal|light; rank is the order WITHIN the group (the mockup's top-to-bottom); tagline is the subtitle.",
+  "signal":  { "group": "dark",     "rank": 1, "tagline": "Graphite · industrial amber" },
+  "carbon":  { "group": "dark",     "rank": 2, "tagline": "High contrast · pale champagne" },
+  "abyssal": { "group": "dark",     "rank": 3, "tagline": "Blue-black · sea glass" },
+  "oxide":   { "group": "dark",     "rank": 4, "tagline": "Iron-black · verdigris" },
+  "combine": { "group": "terminal", "rank": 1, "tagline": "Occupation steel · cold relay" },
+  "deusex":  { "group": "terminal", "rank": 2, "tagline": "Midnight blue · aged gold" },
+  "shock":   { "group": "terminal", "rank": 3, "tagline": "Machine violet · surgical teal" },
+  "sin":     { "group": "terminal", "rank": 4, "tagline": "Petrol black · warning orange" },
+  "mesa":    { "group": "terminal", "rank": 5, "tagline": "Lab graphite · aged amber" },
+  "strogg":  { "group": "terminal", "rank": 6, "tagline": "Black iron · dried oxide" },
+  "genera":  { "group": "light",    "rank": 1, "tagline": "Cool ivory · ink blue" },
+  "mineral": { "group": "light",    "rank": 2, "tagline": "Gray green · deep teal" },
+  "logic":   { "group": "light",    "rank": 3, "tagline": "Putty paper · aubergine" }
+}

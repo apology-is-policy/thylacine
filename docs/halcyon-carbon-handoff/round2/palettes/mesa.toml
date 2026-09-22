@@ -1,0 +1,75 @@
+# Round 2: authored semantic ANSI16 + explicit contrast corrections.
+# Still a stock-schema compatibility projection, not the full UI profile.
+[meta]
+name = "Black Mesa Lab"
+
+[palette]
+floor = "#070A0A"
+surface = "#151B1A"
+header = "#0B1010"
+raised = "#1B2422"
+border = "#39433D"
+blank = "#0E1313"
+selection = "#2E2D23"
+island_rule = "#7D653D"
+fg = "#DDE1DA"
+fg_dim = "#C6CCC3"
+fg_muted = "#929A90"
+fg_subtle = "#777F76"
+bevel_top = "#2F3131"
+bevel_left = "#1D2020"
+bevel_right = "#050808"
+bevel_bottom = "#040505"
+ember = "#BC9458"
+ember_dim = "#7D653D"
+ember_deep = "#7D653D"
+status_bg = "#090D0D"
+status_fg = "#DDE1DA"
+status_muted = "#929A90"
+status_idle = "#5D665C"
+
+[palette.sage]
+key = "#64816A"
+tint = "#0B1010"
+raised = "#1B2422"
+border = "#252D29"
+fg = "#DDE1DA"
+fg_dim = "#929A90"
+fg_muted = "#777F76"
+
+[palette.cinnabar]
+key = "#A96258"
+tint = "#0B1010"
+raised = "#1B2422"
+border = "#252D29"
+fg = "#DDE1DA"
+fg_dim = "#929A90"
+fg_muted = "#777F76"
+
+[palette.syntax]
+slate = "#BC9458"
+sage = "#6D8A81"
+sand = "#AD695F"
+moss = "#8D7854"
+ash = "#64816A"
+dusk = "#C09C67"
+smoke = "#757D75"
+fen = "#64816A"
+cinnabar = "#A96258"
+
+[terminal]
+bg = "#0A100F"
+fg = "#BDC4BC"
+ansi = ["#6C746B", "#B97B70", "#88A17D", "#B5A16B", "#819AB3", "#A68EAB", "#78A79D", "#C7CDC1", "#98A18E", "#DC9E91", "#ABC19A", "#D8C38D", "#A5BAD1", "#C7AEC9", "#9AC6B9", "#ECF0E4"]
+
+[type]
+smooth = 0
+
+[geometry]
+bevel = 2
+gap = 3
+hairline = 1
+header_h = 32
+status_h = 25
+tag_pad_x = 0
+tab_strip_h = 0

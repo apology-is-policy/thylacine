@@ -1067,7 +1067,9 @@ unsafe fn seed_session_env(user: &[u8]) {
 unsafe fn unbind_home(mut sess: HomeSession) {
     let _ = t_unmount(sess.mount_path.as_ptr(), sess.mount_path.len());
     let _ = t_close(sess.attach_root);
+    t_putstr("login: logout: home unmounted; reaping the home proxy\n");
     let _ = sess.proxy.wait();
+    t_putstr("login: logout: home proxy reaped\n");
 }
 
 #[no_mangle]
@@ -1418,6 +1420,23 @@ pub extern "C" fn rs_main() -> i64 {
     // died mid-session returns non-zero (halcyond session::run: connect-fail /
     // compositor-gone -> 1; clean last-tile logout -> 0).
     let session_status = child.wait();
+    // The logout's steps SAY themselves: a stall between here and the
+    // getty's next prompt has no other witness (the console shows nothing
+    // until login exits), and the home proxy's reap below can block for as
+    // long as any process of the session outlives it.
+    match &session_status {
+        Ok(st) => {
+            let mut m = String::from("login: session ended (code ");
+            {
+                use core::fmt::Write as _;
+                let _ = write!(&mut m, "{})\n", st.raw());
+            }
+            t_putstr(&m);
+        }
+        Err(_) => {
+            t_putstr("login: session wait failed\n");
+        }
+    }
 
     // FALLBACK -- the console-lockout fix. The lever is on but halcyond exited
     // with failure. Without a fallback, login returns and joey's getty respawns
@@ -1453,8 +1472,10 @@ pub extern "C" fn rs_main() -> i64 {
     unsafe { unbind_home(home) };
     let _ = unsafe { evict_dek(ctl, dsid) };
     let _ = unsafe { t_close(ctl) };
+    t_putstr("login: logout: dek evicted\n");
     unsafe { session_close(conn, &token) };
     let _ = unsafe { t_close(conn) };
+    t_putstr("login: logout: session closed\n");
     // Scrub the session token (#828 A-F1); it is dead once the session is closed.
     unsafe {
         let _ = t_explicit_bzero(token.as_mut_ptr(), token.len());

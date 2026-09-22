@@ -353,9 +353,9 @@ fn m2_throughput(total: u64) -> Result<(), &'static str> {
 
 const MW_PORT: u16 = 7814;
 const MW_BUF: usize = 16 * 1024; // the drain server's read scratch.
-// The boot-probe transfer: a few weft rings' worth. Weft has no POLLOUT-per-
-// window cadence (each push parks on the Loom CQE), so a larger byte count
-// measures the rate stably without the M2 size-independence caveat.
+                                 // The boot-probe transfer: a few weft rings' worth. Weft has no POLLOUT-per-
+                                 // window cadence (each push parks on the Loom CQE), so a larger byte count
+                                 // measures the rate stably without the M2 size-independence caveat.
 const MW_BOOT_BYTES: u64 = 256 * 1024;
 
 static MW_SRV_TID: AtomicU32 = AtomicU32::new(0);
@@ -434,8 +434,11 @@ fn weft_throughput(total: u64) -> Result<(), &'static str> {
         return Err("server announce timeout");
     }
 
-    let mut client = TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, MW_PORT))
-        .map_err(|_| "connect")?;
+    // MW runs straight after M3's churn, when the transport bound may still be
+    // full of retirees: the admission signal is retried here as it is there. A
+    // plain connect made this phase -- and with it the BOOT -- depend on
+    // whether a retiree happened to have aged out yet.
+    let mut client = connect_with_admission(SocketAddrV4::new(Ipv4Addr::LOCALHOST, MW_PORT))?;
     // open() reads only the data fd (a Copy i32), holding no borrow of `client`,
     // so `client` stays usable for the shutdown below.
     let mut flow = WeftFlow::open(&client).map_err(|_| "weft open")?;
@@ -559,6 +562,42 @@ fn weft_breakdown(tag: &str, ops: u64, stalls: u64, send_us: u64, poll_us: u64) 
 // M3 -- TCP connect latency (single-threaded: connect + drain the backlog-of-1).
 // =============================================================================
 
+// Last close now preserves queued data and TIME-WAIT in a bounded pool.
+// A connection-churn benchmark can hit that admission limit legitimately.
+// Retry only the existing resource-exhaustion errno, bounded to 35 seconds;
+// include ALL admission waiting in the measured dial latency and print it.
+// This does not delay data-stream close or weaken the host byte-count gate.
+fn connect_with_admission(addr: SocketAddrV4) -> Result<TcpStream, &'static str> {
+    let start = Instant::now();
+    let mut refused = 0u32;
+    loop {
+        match TcpStream::connect(addr) {
+            Ok(stream) => {
+                if refused > 0 {
+                    t_putstr(&format!("netperf: admission recovered after {} resource refusals, {} ms (included in dial latency)\n",
+                        refused, start.elapsed().as_millis()));
+                }
+                return Ok(stream);
+            }
+            Err(libthyla_rs::err::Error::NoMemory) => {
+                if refused == 0 {
+                    t_putstr("netperf: admission resource exhaustion (ENOMEM); waiting for transport retirement\n");
+                }
+                refused += 1;
+                if start.elapsed() >= Duration::from_secs(35) {
+                    return Err("admission deadline");
+                }
+                libthyla_rs::time::sleep(Duration::from_millis(25))
+                    .map_err(|_| "admission sleep")?;
+            }
+            Err(e) => {
+                t_putstr(&format!("netperf: connect error {:?}\n", e));
+                return Err("connect");
+            }
+        }
+    }
+}
+
 /// Bind one listener, then repeatedly time the active open to ESTABLISHED
 /// (TcpStream::connect blocks until the PendingConnect deferred reply lands).
 /// Each iteration accepts (drains the backlog-of-1 so the next connect can
@@ -571,7 +610,7 @@ fn m3_connect(conns: u32) -> Result<(), &'static str> {
     let mut max_ns: u64 = 0;
     for _ in 0..conns {
         let t = Instant::now();
-        let client = TcpStream::connect(addr).map_err(|_| "connect")?;
+        let client = connect_with_admission(addr)?;
         let dt = t.elapsed().as_nanos() as u64;
         // Drain the established call (netd's backlog is 1) so the next connect
         // can land; drop both ends (closes the fids -> netd frees the slots).
@@ -772,7 +811,7 @@ fn m6_connect(addr: SocketAddrV4, conns: u32) -> Result<(), &'static str> {
     let mut max_ns: u64 = 0;
     for _ in 0..conns {
         let t = Instant::now();
-        let c = TcpStream::connect(addr).map_err(|_| "connect")?;
+        let c = connect_with_admission(addr)?;
         let dt = t.elapsed().as_nanos() as u64;
         drop(c); // FIN -> the host accept's recv(1) sees EOF + closes.
         total_ns += dt;
@@ -795,7 +834,8 @@ fn m6_connect(addr: SocketAddrV4, conns: u32) -> Result<(), &'static str> {
 }
 
 fn m6_throughput(addr: SocketAddrV4, total: u64) -> Result<(), &'static str> {
-    let mut client = TcpStream::connect(addr).map_err(|_| "connect")?;
+    // After m6_connect's churn: retry the admission signal, as MW does.
+    let mut client = connect_with_admission(addr)?;
     let ready = client.ready_fd().map_err(|_| "ready fd")?;
     let mut ps = PollSet::new();
     ps.add_raw(ready.as_raw_fd(), PollEvents::WRITE);

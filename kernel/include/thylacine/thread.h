@@ -298,6 +298,33 @@ struct Thread {
     // IRQ-masked, so that hold is non-preemptible by masking). KP_ZERO init.
     u32                preempt_count;
 
+    // ARCH 8.12: true while this thread is inside a SYSCALL BODY, which under
+    // that chunk runs with interrupts ON and must still never be preempted
+    // INVOLUNTARILY. Set at SVC entry, cleared before the EL0-return tail so
+    // the #107 syscall-return preempt still fires.
+    //
+    // IT IS NOT `preempt_count`, AND THAT IS NOT A STYLE CHOICE -- three live
+    // assertions forbid a syscall-wide count, each independently:
+    //
+    //   sched.c   `sched()` extincts on a nonzero count (lock-across-sleep),
+    //             and EVERY blocking syscall calls sched().
+    //   proc.c    `el0_return_die_check` extincts on "counted spinlock leaked
+    //   + sched.c to EL0 return" (#361) -- a syscall-wide count is
+    //             DEFINITIONALLY that leak.
+    //
+    // The two markers mean genuinely different things. `preempt_count` says a
+    // plain spinlock is held, and so forbids BOTH an involuntary switch and a
+    // voluntary sleep. This one says we are inside a syscall, and forbids only
+    // the involuntary switch -- a syscall that sleeps is the common case.
+    // `preempt_check_irq` consults it; `sched()` ignores it.
+    //
+    // Rejected: deciding from the interrupted frame (Linux's user_mode(regs)).
+    // It needs no new state, but a kernel THREAD interrupted in kernel code is
+    // indistinguishable from a syscall body, and kthreads must STAY preemptible
+    // or #810 ("a CPU-bound thread on a secondary cannot monopolize it") is
+    // lost. Modelled as `marker` in specs/syscall_irqs.tla; KP_ZERO init.
+    u8                 in_syscall;
+
     // #68 F1: true while this (last-out) Thread runs the pre-ZOMBIE handle
     // close in thread_exit_self. thread_die_pending() returns false while
     // set, so the close's 9P sends / RPC waits / sleeps behave like a live
@@ -306,8 +333,16 @@ struct Thread {
     // "dying" short-circuited the dev9p write-behind close-flush (silent
     // data loss for a file left open at a multi-thread exit) and the
     // close-time Tclunk (a server-side fid leak per fd). Set/cleared ONLY
-    // by the owning Thread around proc_close_handles_at_exit; read only
-    // via thread_die_pending(self). Fits in the tail padding.
+    // by the owning Thread, always around a CLOSE THAT MUST WAIT, and read
+    // only via thread_die_pending(self) -- so the read needs no
+    // synchronization. TWO setters since 2026-09-22, and a third would need
+    // the same justification: proc_close_handles_at_exit wraps the whole
+    // at-exit close (#68 F1, the original), and loom_free brackets its SQPOLL
+    // kthread join (the peer-close race that falls OUTSIDE that window --
+    // abandoning that join frees a live Thread). A NESTED setter must
+    // SAVE AND RESTORE, never bare-clear: loom_free runs inside the at-exit
+    // close on one of its paths, and clearing there would re-arm the death
+    // legs for every later fd in the same table. Fits in the tail padding.
     bool               exit_close_active;
 
     // 8a-1b-beta (I-39; docs/DEBUG-FS-DESIGN.md section 4.2; specs/debug_stop.tla):
@@ -475,7 +510,13 @@ struct Thread {
     //                   %CPU / run_ns, not nsched -- nsched is the complementary
     //                   "is it thrashing the scheduler" signal.
     //   nsleeps      -- times switched OUT voluntarily (state == SLEEPING) --
-    //                   the "parks" the process list surfaces (OQ-5).
+    //                   the "parks" the process list surfaces (OQ-5). No
+    //                   reader outside /proc, and none has ever driven a
+    //                   scheduling decision. poll's noise backstop briefly
+    //                   read its own thread's nsleeps across a pass; it was
+    //                   replaced by the preemption point, itself since deleted (ARCH 8.12), because what that
+    //                   read could establish was per-THREAD while the
+    //                   obligation it served belongs to the CPU.
     //   nmigrations  -- times dispatched on a DIFFERENT CPU than the previous
     //                   dispatch (the first-ever dispatch is skipped via the
     //                   nsched == 0 guard, so it is not miscounted as a move
@@ -575,6 +616,30 @@ _Static_assert(__builtin_offsetof(struct Thread, magic) == 0,
 #define THREAD_KSTACK_TOTAL_SIZE   (THREAD_KSTACK_SIZE + THREAD_KSTACK_GUARD_SIZE)
 #define THREAD_KSTACK_TOTAL_ORDER  3                  // 8 pages = 32 KiB
 #define THREAD_KSTACK_GUARD_PAGES  4                  // bottom 4 pages
+
+// The kernel-stack WATERMARK (ARCH 8.12).
+//
+// It exists because two things were true at once: ARCH 8.1's chunk puts an IRQ
+// frame on a syscall stack that has never carried one, and NOTHING IN THE TREE
+// COULD REPORT STACK DEPTH AT ALL. The bound that sized the chunk is a static
+// measurement (`-fstack-usage` over a call graph whose indirect edges resolve
+// through DWARF), and 797 indirect call sites stay unfollowed in it -- so it is
+// a LOWER bound, and a lower bound with ~4 KiB of headroom deserves a witness
+// rather than trust. Linux carries the same instrument for the same reason
+// (CONFIG_DEBUG_STACK_USAGE).
+//
+// The usable region is filled with THREAD_KSTACK_POISON at thread_create and
+// scanned upward from the guard for the first word that is not poison. That
+// word is the deepest the stack has EVER reached, not the depth right now.
+//
+// Reading a RUNNING thread's watermark is safe and its answer is honest: a
+// running thread can only push the frontier LOWER, so a concurrent write can
+// make the reported depth deeper but never shallower. The caller must pin the
+// Thread (the #95 proc-walk discipline); the scan itself needs no lock.
+#define THREAD_KSTACK_POISON  0x5354414b57415445ULL   // "STAKWATE", big-endian
+
+void thread_kstack_poison(struct Thread *t);
+u32  thread_kstack_used(const struct Thread *t, u32 *budget_words);
 
 // "current thread" is held in TPIDR_EL1, the per-CPU OS-use register.
 // Accessed by inline mrs / msr — no function call overhead in the

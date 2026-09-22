@@ -15,11 +15,13 @@ hazards: []
 abis: []
 design: ["docs/HALCYON.md"]
 created: 2026-09-09
-updated: 2026-09-09
+updated: 2026-09-17
 ---
 ## Purpose
 
-`gallery <image>` shows a picture FULLSCREEN. It is the `view --fullscreen`
+`gallery <image>` opens a dedicated graphical image surface. In a Halcyon
+session it participates in the pane layout; Super+F zooms it across the
+workspace and the same chord restores the layout. It is the `view --fullscreen`
 variant of inline media (I-47, `docs/HALCYON.md` 14.7): where [[sub-view]] hands
 a raster to halcyond for INLINE display in the transcript, gallery opens its own
 fullscreen [[sub-tapestryd]] surface and blits the image letterboxed to it -- the
@@ -56,8 +58,9 @@ black. The aspect comparison cross-multiplies in u64 (`sw*dh >= dw*sh` -> the
 width binds) so there is no float and no overflow.
 
 **The blit (`paint`).** Fill the frame with the opaque `LETTERBOX` colour, then
-nearest-neighbor scale the source into the fit rect, forced opaque
-(`0xFF000000 | rgb`). Every index into both `src` and `dst` is re-checked against
+nearest-neighbor scale the source into the fit rect, compositing straight alpha
+over black into an opaque scanout (each channel is multiplied by alpha with
+rounding). Every index into both `src` and `dst` is re-checked against
 its slice length, so a truncated/hostile raster or a short frame clamps rather
 than panics.
 
@@ -67,7 +70,7 @@ than panics.
 `GALLERY_MAX_PIXELS` = 12 Mpx) -> `decode_png`/`decode_jpeg` -> `drop(bytes)`
 (free the compressed input before the event loop) -> `Surface::fullscreen`
 (bounded connect retry, a labelled block that yields the Surface -- no post-loop
-`unwrap`) -> `FrameIntent::Static` -> `paint` into `pixels()` -> `present(None)`.
+`unwrap`) -> a `Gallery · <path>` pane title -> `FrameIntent::Static` -> `paint` into `pixels()` -> `present(None)`.
 The decode runs on a **192 MiB `ThylaAllocN` heap**, sized for the WORST decode
 mode: a PROGRESSIVE JPEG holds a full-image coefficient buffer per input component
 (~2 B * components * npx, zune mcu_prog.rs) alongside the output, so its peak ~=
@@ -146,12 +149,11 @@ Present is once (a `Static` surface), plus one repaint per CONFIGURE.
   surfaced to the operator) -- gallery is unaffected (it is a compositor client,
   not a place-channel writer).
 - Bilinear resample (shared v0-nearest posture with [[sub-view]]/cartoon's
-  `Blob::scaled`); a source alpha composited over the letterbox rather than
-  dropped.
+  `Blob::scaled`) remains a possible quality improvement.
 
 ## Caveats
 
-- Nearest-neighbor scale (v1); a source alpha is dropped (forced opaque).
+- Nearest-neighbor scaling; transparent pixels blend over the black letterbox.
 - Visibility over the console in `THYLACINE_HALCYON=1` mode depends on the
   scanout-focus model (see Prosecution).
 
@@ -179,3 +181,12 @@ component, ~2 B * components * npx, alongside the output -- peak ~12*npx vs the
 bumping the heap 128 -> 192 MiB (keeping the 12 Mpx cap; the JPEG round's F1) so a
 12 Mpx progressive photo (~160 MiB peak) fits. See [[sub-view]] + the I-47
 AUDIT-TRIGGERS row for the full JPEG-round close.
+
+Straight-alpha compositing is covered by fully transparent, half-alpha and
+opaque pixel controls. All 11 host tests pass.
+
+The native application title is the hosting pane tag, updated through the
+owning surface control. Halcyon includes Gallery in its pane count independently
+of its shell PTYs. The `ls-halcyon-session-media` gate exercises real inline
+View output followed by Gallery creation, zoom, Escape, and manual rendering;
+ITS and no-MSI/shared-INTx runs have passed with reviewed screenshots.

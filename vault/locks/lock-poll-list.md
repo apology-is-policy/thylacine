@@ -2,11 +2,11 @@
 id: lock-poll-list
 type: lock
 title: "poll_waiter_list.lock — the per-object hook list"
-kind: spin (non-irqsave)
+kind: spin (irqsave since 2026-09-21)
 guards: "the singly-linked poll_waiter hook chain, each hook's list backpointer, and the producer-side ready-flag writes during a wake walk"
 orders-before: [lock-timerwait, lock-rendez]
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-09-21
 ---
 ## Discipline
 
@@ -27,10 +27,24 @@ object lock, walks under the list lock, sets each `ready` then
 the poll sweep runs with no object lock, so it can never deadlock
 against a producer holding one.
 
-Non-irqsave — no IRQ handler may enter it. The console's IRQ-side
-readiness honors this by relaying to a kthread (the cons_poll
-deferred wake); any new IRQ-context readiness source must do the
-same, never widen this lock to irqsave.
+**Taken IRQSAVE by every operation** (B-0 audit round 4 F3,
+2026-09-21). This note said "non-irqsave -- never widen this lock to
+irqsave" until then, and the rule was half right. The half that
+stands: **no IRQ handler walks a hook list** -- a walk is O(pollers)
+nested wakeups, and the console's IRQ-side readiness is relayed to a
+kthread so the per-byte IRQ stays O(1) (the cons_poll deferred wake);
+a new IRQ-context readiness source relays the same way. The half that
+was wrong: the lock NESTS UNDER object locks that IRQ handlers take
+(`g_cons.lock`, `g_cons_drain.lock` -- the UART RX IRQ), and a lock
+taken while holding an IRQ-taken lock must be held with IRQs masked
+everywhere. Taken plain, console_mgr (a kthread, IRQs on) could be
+interrupted mid-walk by an RX IRQ spinning on `g_cons.lock` while
+another CPU held `g_cons.lock` in `cons_poll` spinning on this lock --
+an ABBA through the IRQ edge that wedges the guest. That is lockdep's
+"IRQ-unsafe lock nested under an IRQ-safe one"; Linux's wait-queue
+lock is irqsave for the same reason. No deterministic test reaches
+the interleaving; the guard is the comment at the list ops in
+`kernel/poll.c`, the poll audit row, and the SMP gate.
 
 ## Held across
 
@@ -46,3 +60,10 @@ that is the NoStaleHook tripwire firing.
 - The `ready`-before-`wakeup` write order inside the walk carries the
   flag through the rendez release/acquire pair; swapping them loses
   the flag for a cond that runs between.
+- Every acquisition irqsave -- one plain `spin_lock` on a list that
+  nests under an IRQ-taken object lock reopens the F3 wedge. And a NEW
+  object lock that some IRQ takes, with a hook list under it, is this
+  note's business before it is the Dev's.
+- The contract of a wake is an ORDER, not a lock: the walk follows the
+  readiness mutation's becoming visible under the lock the register +
+  sample holds -- under that lock or after dropping it.

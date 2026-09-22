@@ -131,9 +131,25 @@ fn split_service_addr(addr: &str) -> Option<(&str, &str)> {
 /// Hand the decoded raster to halcyond: open the place channel, write the
 /// inlinewire header then the ARGB payload in bounded chunks. `Ok` only when
 /// the whole message was accepted.
-fn place_on_halcyon(r: &Raster) -> Result<(), &'static str> {
+fn place_on_halcyon(r: &Raster) -> Result<u128, &'static str> {
+    let session = env::var("HALCYON_PLACE").is_some_and(|s| !s.is_empty());
+    let id = if session {
+        let tier = env::var("BEACON").and_then(|v| beacon::Tier::parse(&v)).unwrap_or(beacon::Tier::None);
+        if beacon::effective_tier(tier, libthyla_rs::fd_devclass(1), beacon::BeaconMode::Auto) != beacon::Tier::Rich {
+            return Err("stdout is not a rich Halcyon pane");
+        }
+        let mut bytes = [0u8; 16];
+        if unsafe { libthyla_rs::t_getrandom(bytes.as_mut_ptr(), bytes.len(), 0) } != 16 {
+            return Err("cannot create image reference");
+        }
+        let id = u128::from_le_bytes(bytes);
+        if id == 0 { return Err("cannot create image reference"); }
+        id
+    } else { 0 };
     let place = open_place_write()?;
-    let hdr = inlinewire::PlaceHeader::argb(r.w, r.h).pack();
+    let mut header = inlinewire::PlaceHeader::argb(r.w, r.h);
+    header.id = id;
+    let hdr = header.pack();
     // The payload is the ARGB u32s as their LE bytes -- aarch64 is little-endian,
     // so the in-memory bytes ARE the wire bytes the reader reconstructs with
     // from_le_bytes. SAFETY: argb is a live &[u32] (4-aligned, contiguous); the
@@ -144,7 +160,7 @@ fn place_on_halcyon(r: &Raster) -> Result<(), &'static str> {
     let ok = write_all(place, &hdr) && write_all(place, payload);
     let _ = unsafe { t_close(place) };
     if ok {
-        Ok(())
+        Ok(id)
     } else {
         Err("halcyon: short write on the channel")
     }
@@ -179,7 +195,18 @@ fn check_budget(path: &str, dims: Result<(u32, u32), &'static str>, max: u64) ->
 /// display) and still exit 0, keeping `view` useful standalone.
 fn place_decoded(path: &str, r: Raster) -> i64 {
     match place_on_halcyon(&r) {
-        Ok(()) => {
+        Ok(id) => {
+            if id != 0 {
+                // The object caption rides stdout, preserving its position
+                // across live cells, soft wrapping and frozen scrollback.
+                let key = alloc::format!("{:032x}", id);
+                let mut out = Vec::new();
+                beacon::wire::open(&mut out, beacon::wire::Op::Obj, &[("type", "inline-image"), ("ref", &key)]);
+                out.extend_from_slice(alloc::format!("image {}x{}", r.w, r.h).as_bytes());
+                beacon::wire::close(&mut out, beacon::wire::Op::Obj);
+                out.push(b'\n');
+                if !write_all(1, &out) { return 1; }
+            }
             libthyla_rs::println!("view: {} placed inline ({}x{})", path, r.w, r.h);
             0
         }

@@ -7,6 +7,13 @@ code:
   - tools/build.sh
   - tools/mkcpio.py
   - tools/mkdisk.py
+  - tools/build-config.sh
+  - tools/build-manifest.toml
+  - tools/forage.sh
+  - tools/test-forage.sh
+  - tools/test-build-config.sh
+  - tools/configure.sh
+  - tools/test-configure.sh
 audit: none
 guarded-by: []
 validated-by: [prose, gate-smp]
@@ -14,7 +21,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-09-06
+updated: 2026-09-21
 ---
 ## Purpose
 
@@ -33,19 +40,37 @@ all -> kernel -> { userspace, pouch-progs, stratumd, pool-fixture, ramfs, disk }
 Sub-targets build one stage each. `clean` is the only true from-scratch
 reset.
 
-**There are nineteen targets and three lists of them, no two of which
-agree.** The dispatcher's `case` arms are ground truth at nineteen; the
-"Unknown target" error advertises fifteen; the header comment block names
-ten. The two graphics/toolchain families — the Clade compiler stages and the
-ported-game builders — are the bulk of what the shorter lists omit. Nothing
-is advertised that does not exist, so there is no phantom; the drift is one
-directional, and it is toward silence.
+The dispatcher is authoritative for the target list: it has 21 named arms,
+including `dosbox-x` and the Clade staging targets. The unknown-target help
+lists 17 and omits `quake-host`, `clade`, `stage-clade`, and `stage-storm`;
+the introductory comments are also not an exhaustive inventory.
 
 **Every run ends with a `SUMMARY for target ...` block listing exactly what
 was BUILT / REUSED / PRESERVED.** That block is the contract: read it to
 know the resulting state rather than inferring it from the target name.
 
 ## Mechanism
+
+### Typed configuration and external inputs
+
+`build-config.sh` loads the typed configuration axes, presets and fragments;
+its tests check parsing and precedence. `build-manifest.toml` records external
+inputs, while `forage.sh` resolves and checks those inputs before a build.
+`MANIFEST` and `FORAGE_ROOT` isolate fixture tests; they are not permission to
+silently substitute downloaded bytes for a pinned archive. DOSBox and game
+baking follow the same configured input path as the existing toolchain.
+
+An input the manifest does not declare is invisible twice over: `forage.sh
+status` cannot report it missing, and whatever it feeds degrades without a
+word. The static Linux git (`/viv/bin`, and the git-probe / git-net /
+git-workflow bundles) was such an input until 2026-09-21 -- present only in one
+worktree's `build/cache`, hinted at by `build.sh` as a forage target that did
+not exist, and claimed as one by `docs/GIT-ON-THYLACINE.md`. `git-shell` had
+failed 3/3 on main for eleven days as a result, with a timeout that read like a
+broken git, because ut reports a missing command only in `$status`. It is now
+`remote.static_git`: a `remote-pull` from the Pi that built it, sha-pinned, and
+`do_remote_pull` verifies the pin of any pulled FILE (a pulled tree has none).
+The gate SKIPs on an image without it.
 
 **`build.sh kernel` is `build.sh all`, and this is the tree's most-repeated
 footgun.** It pulls the whole chain including a pool re-bake driven by the
@@ -115,6 +140,16 @@ Note what makes this different in kind from the two staleness checks: those
 watch mtimes and can only warn. This one reads the artifact's own internal
 arithmetic and refuses.
 
+**What the count check cannot see is WHERE a hunk lands** — and a review once
+read its clean output as "no fuzz/offset/reject line" (B-0 poll audit round 4
+F6, when pouch 0029 had in fact applied two lines off for its whole life). So
+the pouch musl series is applied with `patch -F 0`: a hunk whose context does
+not match exactly fails the build. That matters on the Linux builders, whose
+GNU `patch` fuzzes up to two context lines by default and says so only on
+stdout; the control was measured — a perturbed context line applies under
+`-F 2` with exit 0 and fails under `-F 0`. The port patch loops are not yet
+fuzz-strict.
+
 **A fourth guard warns about a stage the main chain never refreshes.** The
 compiler-toolchain staging step is reachable only as its own explicit
 target, never from `all`, so a rebuilt graphics binary does not reach the
@@ -144,6 +179,70 @@ pool root as *other* and joey's create in `/` was denied even with every baked
 file SYSTEM-owned. With root + baked files + runtime creates all SYSTEM-owned,
 the boot chain owns the whole tree. It is a stamped *value*, not a format change
 (`si_uid` / `si_gid` already exist in the inode).
+
+The aux integration adds default-on DOSBox-X build/staging and its system
+configuration at `/lib/dosbox-x/dosbox-x.conf`, plus optional Duke3D and Tomb
+Raider fixture stages. Emulator opt-out also skips its game data. Missing
+external C++ tooling is announced as a skipped build, not emulator coverage.
+View, Gallery, Manual, Nocturne and their probes are curated into the native
+ramfs binary list. `configs/ci.config` selects a serial shell for existing
+interactive scenarios; the default profile starts the Halcyon session.
+Use an explicit `HALCYON_SESSION=y` override for graphical session gates.
+
+`HALCYON_PROFILE` (`choice:instrument,legacy`, default `instrument`, since
+2026-09-21) is the option that selects WHICH Halcyon UI an image draws; it bakes
+`/lib/halcyon/profile`. The theme only colours the profile in force, and a
+theme of the other schema is projected rather than refused, so before the
+option existed a config that named an Instrument theme still built the legacy
+layout. `configs/default.config` pins `instrument`; `configs/ci.config` pins
+`legacy` because the pre-Instrument gate scenarios assert its literals, and an
+Instrument gate overrides that pin with a caller-set
+`THYLACINE_HALCYON_PROFILE=instrument`. `tools/configure.sh` tags each theme
+file with the schema its own `[meta]` declares, hides `TEMPLATE.toml`, and
+prints a note when the chosen theme and profile differ.
+
+**`CHUNK_WEBKIT` (default OFF, since Boosty B-0, 2026-09-21)** builds ICU and
+JavaScriptCore and bakes `/webkit/jsc` ([[sub-webkit]] describes the port; this
+paragraph describes the wiring). Three things about it are unlike every other
+chunk, each on purpose.
+
+*A new input class: a pinned upstream plus an in-repo series.* `[source.webkit]`
+is kind `clone-sparse`: nothing of ours is hosted, so it is not a `fork.`.
+`forage.sh` makes a partial (`blob:none`) sparse clone at a TAG, refuses unless
+that tag resolves to the manifest's commit, creates a local branch, and `git am`s
+`usr/ports/webkit/patches/*`. It is idempotent (a patch that reverse-applies is
+reported as already applied) and it never resets: a checkout where a patch
+neither applies nor reverse-applies is reported as drifted and left alone,
+because it may hold work. `test-forage.sh` C1-C4 drive all four outcomes against
+a local upstream with no network.
+
+*The build re-checks the checkout from its own side.* `webkit_checkout_ok`
+requires the pin to be an ancestor of HEAD, a clean tree, every series patch to
+reverse-apply, AND the files that differ from the pin to be exactly the files the
+series names -- the last because a reverse-apply check alone passes on a tree that
+carries the patches plus local edits elsewhere. So `WEBKIT_PIN` / `ICU_SHA256` in
+`build.sh` and the manifest are two copies of one truth, and `test-forage.sh` A10
+fails when they drift (sabotaged: one hex digit -> FAIL).
+
+*With the chunk ON, an absent input is an error, not an announced skip.* Every
+default-on chunk skips gracefully so a bare checkout still builds. This one
+defaults off, so reaching `build_jsc` means it was asked for by name, and
+"skipped" would be the silent omission detect-and-instruct exists to end.
+
+The objects live under `build/pouch/{icu,jsc}` deliberately: `build_sysroot` wipes
+`build/pouch/`, and a static binary linked against the old `libc.a` is exactly
+what must not survive a libc change. The ICU HOST tools (`build/icu-host`) do not
+depend on the sysroot and survive it. `libc.a` is not a ninja input, so
+`build_jsc` removes `bin/jsc` to force the relink. After the link it asserts the
+shape the platform requires -- `ET_EXEC`, no `PT_DYNAMIC`, no `LOAD` segment both
+writable and executable, and at least two `LOAD` segments seen, so a parse that
+matched nothing cannot read as "no W+X" -- then strips into `build/webkit/stage`.
+Parallelism is sized from RAM as well as cores (`webkit_jobs`): JSC's unified
+sources peak over 1 GiB per job, and eight jobs on an 8 GiB host is an OOM, not a
+speedup. Verification: the pool's bake-verify expects `/webkit/jsc` under the same
+predicate the populate arm uses; `check-v80-floor.py --all` scans the stage; the
+device gate is `tools/interactive/ls-jsc.exp` (SKIPs with 77 when nothing is
+staged).
 
 ## Data structures
 
@@ -203,9 +302,9 @@ LS-CI mints one with `mkdisk.py` at need.
   **THAT ADVICE IS NOW WRONG, AND THIS DOSSIER GAVE IT.** The header is
   still the best account of *what each target it names does* — the caching
   footguns, the pool/key coupling, the summary contract are all there and
-  all correct. But as a *list*, it is the least complete of the three: ten
-  entries against the dispatcher's nineteen, so it is silent about nine
-  working targets including every Clade toolchain stage.
+  all correct. But as a *list*, it is the least complete of the three: a partial
+  list against the dispatcher's complete target set, omitting working
+  targets including Clade stages.
 
   The failure is worth more than the correction. The claim was true when
   written and decayed without anything failing, because a target added to
@@ -235,9 +334,9 @@ LS-CI mints one with `mkdisk.py` at need.
   themes block writes every `docs/manual/NN-<name>.md` to `/manual` with the
   themes block's write + sync + readback-cmp shape, globbed so a new section ships
   by existing. It then `stat`s `/manual`, because `manual` reads an ABSENT
-  directory as "no sections installed" -- and until the first guide-written section
-  lands the directory IS empty, so a silently failed mkdir would be
-  indistinguishable from the correct result. The `manual` binary rides
+  directory as "no sections installed", so a silently failed mkdir could be
+  indistinguishable from a deliberately empty catalogue. Six checked sections
+  now ship: Manual, Remote files with Haul, View, Gallery, Nocturne and DOSBox-X. The `manual` binary rides
   `usr_rs_bins` like `view`. Same granularity note as above: no target-set change.
 
 - **The stale-stage warning claims a property it achieves by maintenance,

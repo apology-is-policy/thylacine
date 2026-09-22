@@ -93,6 +93,24 @@ fi
                                             # ~45% of boots (a separate smp1-
                                             # specific bug, task #791) AND it
                                             # loses in-kernel SMP coverage.
+                                            # RE-MEASURED 2026-09-22: that ~45%
+                                            # did NOT reproduce -- 5/5 boots
+                                            # clean (banner + 1616/1616 + zero
+                                            # non-zero joey exits) on a quiet
+                                            # host. Evidence the rate CHANGED,
+                                            # not proof #791 is gone: 0.55^5 is
+                                            # ~5%, so five cleans would be
+                                            # unlucky, not impossible. The note
+                                            # stays until a real sample says
+                                            # otherwise. Separately: -smp 1 was
+                                            # a 100% HANG (not a non-zero exit)
+                                            # from 2026-09-03 to 2026-09-22 --
+                                            # loom_free spun joining the SQPOLL
+                                            # kthread inside a non-preemptible
+                                            # syscall body, so no peer CPU
+                                            # meant no progress. Different bug,
+                                            # fixed; -smp 1 is now a gate row
+                                            # (ci-smp-gate.sh default-smp1).
                                             # macOS has no upward "pin to
                                             # P-cores" knob (taskpolicy only
                                             # clamps DOWN), so -smp 4 + this

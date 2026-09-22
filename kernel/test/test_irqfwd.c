@@ -12,12 +12,57 @@
 #include <thylacine/types.h>
 
 #include "../../arch/arm64/gic.h"
+#include "../../arch/arm64/timer.h"   // F-A1 (C): timer_now_ns for the timeout test
+
+// Synthetic tests select an unclaimed, non-firmware, non-MSI SPI.
+#include <thylacine/dtb.h>
+#include "../../arch/arm64/gic_msi.h"
+static bool irq_test_name(const char *a, const char *b) {
+    while (*a && *a == *b) { a++; b++; }
+    return *a == *b;
+}
+static bool firmware_mentions_spi(u32 intid) {
+    // Conservatively reject every matching cell in routing properties; this
+    // also rejects accidental matches in flags/phandles, which is harmless for
+    // a test allocator. No controller-specific routing may be overwritten.
+    u32 nodes[64], cursors[64];
+    u32 depth = 0; nodes[0] = DTB_NODE_ROOT; cursors[0] = 0;
+    for (;;) {
+        struct dtb_node_entry e;
+        if (!dtb_node_iter(nodes[depth], &cursors[depth], &e)) {
+            if (!depth) return false;
+            depth--; continue;
+        }
+        if (e.is_node) {
+            if (depth == 63) return true;
+            depth++; nodes[depth] = e.off; cursors[depth] = 0;
+        } else if (irq_test_name(e.name, "interrupts") ||
+                   irq_test_name(e.name, "interrupts-extended") ||
+                   irq_test_name(e.name, "interrupt-map")) {
+            if (e.datalen % 4) return true;
+            for (u32 off = 0; off < e.datalen; off += 4) {
+                const u8 *b = e.data + off;
+                u32 cell = (u32)b[0] << 24 | (u32)b[1] << 16 | (u32)b[2] << 8 | b[3];
+                if (cell == intid || cell == intid - 32) return true;
+            }
+        }
+    }
+}
+u32 test_irq_choose_spi(void) {
+    for (u32 id = gic_max_intid(); id >= 32; id--) {
+        if (!gic_msi_reserved(id) && !kobj_irq_intid_claimed(id) &&
+            !gic_intid_enabled(id) && !firmware_mentions_spi(id)) return id;
+    }
+    return 0xffffffffu;
+}
 
 void test_irqfwd_create_destroy(void);
 void test_irqfwd_refcount_lifecycle(void);
 void test_irqfwd_wait_wakes_on_sgi(void);
 void test_irqfwd_collapses_concurrent_fires(void);
 void test_irqfwd_second_waiter_refused(void);
+void test_irqfwd_level_mask_ack(void);
+void test_irqfwd_wait_timeout(void);
 
 // =============================================================================
 // Helpers.
@@ -144,4 +189,84 @@ void test_irqfwd_second_waiter_refused(void) {
 
     k->waiting = false;         // release the simulated slot before teardown
     kobj_irq_destroy(k);
+}
+
+// F-A1: the LEVEL mask+ack cycle. A level SPI (virtio-PCI INTx) must be MASKED
+// by kobj_irq_dispatch (so a still-asserted line does not storm after EOI) and
+// UNMASKED by the next kobj_irq_wait (re-arm) -- so a re-assertion arriving
+// while masked re-fires on the next wait instead of being lost (the F-A1
+// overlap). Force the level state kobj_irq_create builds for a PCI INTx line.
+void test_irqfwd_level_mask_ack(void) {
+    u32 intid = test_irq_choose_spi();
+    TEST_ASSERT(intid != 0xffffffffu, "topology needs a synthetic test SPI");
+    struct KObj_IRQ *k = kobj_irq_create(intid);
+    TEST_ASSERT(k != NULL, "kobj_irq_create(selected SPI) succeeds");
+    gic_set_spi_level_triggered(intid);
+    k->level = true;
+    TEST_ASSERT(gic_intid_enabled(intid),
+                "SPI enabled after create");
+
+    // Race-free: pend WHILE DISABLED so the assertion stays latched until the
+    // wait's entry re-arm delivers it (test_irq_probe's pend-before-enable
+    // pattern) -- otherwise an immediate delivery would run dispatch (and its
+    // mask) BEFORE the wait's unmask, and the wait would then re-enable the
+    // line, hiding the mask.
+    gic_disable_irq(intid);
+    TEST_ASSERT(!gic_intid_enabled(intid),
+                "disabled before the latched pend");
+    (void)gic_set_pending_spi(intid);
+
+    // Wait: entry unmasks -> the latched pending delivers -> dispatch masks the
+    // level line + counts -> the wait returns. 2 s guard so a broken re-arm
+    // fails via timeout (count 0), never a suite hang.
+    u32 c1 = kobj_irq_wait_timed(k, 2000000000ull);
+    TEST_ASSERT(c1 >= 1, "level IRQ delivered on re-arm");
+    TEST_ASSERT(!gic_intid_enabled(intid),
+                "LEVEL line MASKED by dispatch (mask+ack) -- the discriminator");
+
+    // Re-assert while masked, then wait: the unmask on re-entry re-fires the
+    // latched assertion -- it is NOT lost (the property edge-forcing dropped).
+    (void)gic_set_pending_spi(intid);
+    u32 c2 = kobj_irq_wait_timed(k, 2000000000ull);
+    TEST_ASSERT(c2 >= 1, "level IRQ re-fires after a re-assertion (unmask on re-wait)");
+    TEST_ASSERT(!gic_intid_enabled(intid),
+                "masked again after the re-fire");
+
+    kobj_irq_destroy(k);   // gic_disable_irq + release the claim
+}
+
+// F-A1 (C): the timed wait bounds a no-IRQ wait instead of blocking forever.
+void test_irqfwd_wait_timeout(void) {
+    struct KObj_IRQ *k = kobj_irq_create(IPI_IRQFWD_TEST);
+    TEST_ASSERT(k != NULL, "create OK");
+
+    // Nothing fires. The wait must RETURN (count 0) near the deadline; the
+    // pre-fix no-timeout kobj_irq_wait would block here forever.
+    u64 t0 = timer_now_ns();
+    u32 c = kobj_irq_wait_timed(k, 50000000ull);   // 50 ms
+    u64 dt = timer_now_ns() - t0;
+    TEST_EXPECT_EQ((u64)c, (u64)0u, "timeout returns count 0 (no IRQ)");
+    TEST_ASSERT(dt >= 30000000ull, "waited ~ the deadline (not an instant return)");
+    TEST_ASSERT(dt < 2000000000ull, "bounded -- did not block forever");
+
+    kobj_irq_destroy(k);
+}
+
+// The callback must resolve a live owner before its first object dereference.
+// A deliberately invalid callback argument catches the old raw-pointer path
+// even without allocator reuse or a particular interrupt/teardown race timing.
+void irqfwd_test_dispatch(u32 intid, void *untrusted_arg);
+void test_irqfwd_detached_dispatch(void);
+void test_irqfwd_detached_dispatch(void) {
+    struct KObj_IRQ *k = kobj_irq_create(IPI_IRQFWD_TEST);
+    TEST_ASSERT(k != NULL, "raw IRQ owner");
+    u64 before = kobj_irq_total_fires();
+    irqfwd_test_dispatch(IPI_IRQFWD_TEST, (void *)1);
+    u32 count = kobj_irq_wait_timed(k, 1);
+    kobj_irq_unref(k);
+    u64 live = kobj_irq_total_fires();
+    irqfwd_test_dispatch(IPI_IRQFWD_TEST, (void *)1);
+    u64 detached = kobj_irq_total_fires();
+    TEST_ASSERT(count == 1 && live == before + 1, "live callback resolved its registered owner");
+    TEST_ASSERT(detached == live, "late callback after free observes an empty owner slot");
 }

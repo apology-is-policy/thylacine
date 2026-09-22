@@ -30,6 +30,7 @@
 #include "../mm/slub.h"
 #include "test/test.h"
 
+#include <thylacine/pci_irq.h>
 #include <thylacine/canary.h>
 #include <thylacine/context.h>          // fp_enable_this_cpu (P4-Ic5-FP)
 
@@ -222,6 +223,33 @@ bool boot_mark_complete(void) {
     uart_puts(" wake-oneshot=");
     uart_putdec(wc.tickless_oneshot_wakes);
     uart_puts("\n");
+    // ARCH 8.12 audit F8: the kernel-stack bound that sized this chunk is
+    // STATIC and has 797 unfollowed indirect edges under it, so it is a LOWER
+    // bound. The runtime watermark is the other side of that question, and an
+    // instrument only reachable by hand rots (#245) -- so report it on EVERY
+    // boot, where the whole boot (exec, 9P, the phenotype probes) has already
+    // driven the deep paths. Printed from the kernel rather than read through
+    // /ctl/kstack because that leaf is CAP_HOSTOWNER-gated, and a witness that
+    // needs an elevation is a witness nothing routine will take.
+    //
+    // peak = the deepest any live thread's stack has EVER been; usable = the
+    // per-thread budget the guard sits below. The two disagreeing with ARCH
+    // 8.12's static table is itself the signal -- neither is authoritative
+    // alone, and a runtime peak ABOVE the static bound means the bound missed
+    // an edge.
+    {
+        int   kpid = 0, ktid = 0;
+        u32   kpeak = proc_kstack_peak_system(&kpid, &ktid);
+        uart_puts("boot-kstack: peak=");
+        uart_putdec(kpeak);
+        uart_puts(" usable=");
+        uart_putdec((u64)THREAD_KSTACK_SIZE);
+        uart_puts(" pid=");
+        uart_putdec((u64)kpid);
+        uart_puts(" tid=");
+        uart_putdec((u64)ktid);
+        uart_puts("\n");
+    }
     uart_puts("Thylacine boot OK\n");
     if (held) cons_kernel_writer_end();
     return true;
@@ -634,6 +662,7 @@ void boot_main(void) {
     // claims from the enumerated g_virtio_pci_devs[]). No DTB/HW access of its
     // own -- BARs are assigned lazily from dtb_pci_mem_window on the first claim.
     kobj_pci_init();
+    pci_irq_init();
 
     // W1.5: boot-time LSE alternatives-patching. Rewrites the LL/SC atomic
     // sites (the spinlock test-and-set, the Spoor/SrvConn refcounts, the

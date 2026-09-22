@@ -145,7 +145,30 @@ lc_send "halcyon theme lint /lib/halcyon/themes/nightjar.toml && echo th4c-ok | 
 lc_expect "TH4C-OK" "a clean lint exits zero"
 lc_pass "TH-4c(e): a clean lint exits zero"
 
+# I-1 (HALCYON-INSTRUMENT 4.2): ONE gallery, TWO schemas. The Instrument
+# files bake beside Nightjar and lint through the same `load` the renderers
+# use; the line names the schema and the id, and `keys set` again appears
+# only when every key of that schema was set. The id is asserted because the
+# picker's word becomes this filename: a gallery file whose [meta] id is not
+# its name would send a pick to nothing.
+lc_run_expect_hardfail "halcyon theme lint /lib/halcyon/themes/carbon.toml" \
+    "instrument-v1 (id carbon), all 42 keys set" "REFUSED"
+lc_pass "I-1(f): the shipped Carbon Optics theme lints COMPLETE under the\
+         Instrument schema, naming the schema and its id"
+
+# The no-argument form now also names the PROFILE in force and its tier. The
+# gate image is `--config ci`, which PINS `HALCYON_PROFILE=legacy`, and since
+# 2026-09-21 every bake writes the profile word (a bare build writes
+# `instrument`) -- so the SYSTEM tier names it, read back from the baked
+# /lib/halcyon/profile by the same resolution the renderers run. The no-file
+# floor (`legacy (built-in)`) is held by libhalcyon's host tests. With no tier
+# read this line would be `active: not determined`, so the profile line is the
+# witness that the bundle resolution ran, not just the theme's.
+lc_run_expect_hardfail "halcyon theme lint" "profile: legacy (system)" "REFUSED"
+lc_pass "I-1(g): the gate image's pinned legacy profile is named at the SYSTEM\
+         tier, from the same resolution the renderers run"
+
 lc_quit
 lc_pass "LS-CI ls-ci: login (LS-1) + stdout/pipeline/stderr (LS-2) + post-login\
-         CAP_JIT (#139) + theme lint (TH-4c) all verified"
+         CAP_JIT (#139) + theme lint (TH-4c, I-1) all verified"
 exit 0

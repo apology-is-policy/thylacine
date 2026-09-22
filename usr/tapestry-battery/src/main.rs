@@ -2053,6 +2053,144 @@ pub extern "C" fn rs_main() -> i64 {
     // from here: focusing a pane we do not own is exactly what the pane-tree
     // gate refuses (the H-3b round F2), and when our last surface retires
     // its leaf closes and the layout re-focuses the survivor.
+    // ---- HALCYON-WORKSPACES W-1b: switch, dormant, return, vanish ----
+    // This harness is a CLIENT: it cannot inject Super+N, which lives on the
+    // compositor's own key path, so the switch is driven by the `workspace N`
+    // ctl verb. Client `a`'s tile is the witness -- the `layout` rows are the
+    // ACTIVE root's, so a live tile must LEAVE those rows while another
+    // workspace is up and come back when its own returns.
+    {
+        // The verb lives on the LAYOUT file (W-2b, ratified 2026-09-15) and is
+        // authorized by PRINCIPAL, not by the conn-scoped seat -- so no
+        // declaration is needed and the driver session drives it, exactly as
+        // it drives `split`/`mode`/`tab`. W-1b put the verb on `ctl` and this
+        // leg failed twice: once because the verb sat below a default-deny
+        // gate with no conjunct, and once because the seat was a CONN and the
+        // declaration rode a different session than the verb. The principal
+        // rule dissolves both.
+        //
+        // NOT WITNESSED HERE: the authority axis. Refusal needs either a
+        // non-session principal or a session hosting nothing, and this harness
+        // is michael and hosts `a` -- it can construct neither. The old
+        // "undeclared is refused" control was deleted rather than left to pass
+        // for the wrong reason.
+        // S4: `workspaces` is the ascending LIST of live numbers and `active`
+        // is the active NUMBER -- identities, not a count and a position.
+        let ws_header = |s: &str| -> Option<(alloc::vec::Vec<u32>, u32)> {
+            let head = s.lines().next()?;
+            let (mut list, mut k) = (None, None);
+            let mut it = head.split_ascii_whitespace();
+            while let Some(tok) = it.next() {
+                match tok {
+                    "workspaces" => {
+                        list = it.next().map(|t| {
+                            t.split(',')
+                                .map(|p| p.parse::<u32>().ok())
+                                .collect::<Option<alloc::vec::Vec<u32>>>()
+                        })
+                    }
+                    "active" => k = it.next().and_then(|t| t.parse().ok()),
+                    _ => {}
+                }
+            }
+            Some((list??, k?))
+        };
+        let lay0 = read_file(root, "layout").unwrap_or_default();
+        let Some((n0, k0)) = ws_header(&lay0) else {
+            say!("tapestry-battery: FAIL workspaces: no `workspaces N active K` header");
+            return 1;
+        };
+        if n0.as_slice() != [1] || k0 != 1 {
+            say!("tapestry-battery: FAIL workspaces: header {:?} {}, want [1] 1", n0, k0);
+            return 1;
+        }
+        if find_pane(&lay0, a.id).is_none() {
+            say!("tapestry-battery: FAIL workspaces: our tile is not in workspace 1");
+            return 1;
+        }
+        // SWITCH (and create: 2 is the next free number, the i3 rule).
+        // On `a`'s RING session, never the driver session `root`: the seat is
+        // a CONN, the declaration above was made on the ring, and this
+        // harness holds two sessions (its own comment at the `root` open says
+        // so). Driving the verb through `root` is what failed twice -- the
+        // gate saw an undeclared conn that hosts nothing and refused E_PERM,
+        // which `raw_ctl`'s flat `rc -1` could not tell from a tree refusal.
+        if !write_file(root, "layout", "workspace 2") {
+            say!("tapestry-battery: FAIL workspaces: `workspace 2` refused");
+            return 1;
+        }
+        let lay1 = read_file(root, "layout").unwrap_or_default();
+        match ws_header(&lay1) {
+            Some((ref l, 2)) if l.as_slice() == [1, 2] => {}
+            other => {
+                say!("tapestry-battery: FAIL workspaces: header {:?} after the switch, want [1,2] 2", other);
+                return 1;
+            }
+        }
+        // DORMANT: workspace 1's tile is no longer in the active root's rows.
+        if find_pane(&lay1, a.id).is_some() {
+            say!("tapestry-battery: FAIL workspaces: the dormant tile is still tiled");
+            return 1;
+        }
+        say!("battery: workspace 2 created and switched to; workspace 1 dormant");
+        // S4: a SKIPPED number is CREATED, not refused -- the INVERSE of the
+        // assertion this replaces. A number is an identity now, so `workspace
+        // 9` makes workspace 9 whether or not 3..8 exist, which is what i3
+        // actually does; the old rule existed to keep a dense vector
+        // hole-free, a property of the representation.
+        //
+        // This is also the E2E proof of the LIST form: with 1, 2 and 9 live
+        // the header must read `1,2,9`. A count could not express it -- it
+        // would say `3`, and the rail would label chips that do not exist.
+        if !write_file(root, "layout", "workspace 9") {
+            say!("tapestry-battery: FAIL workspaces: `workspace 9` refused (S4: any free number may be made)");
+            return 1;
+        }
+        let lay_sparse = read_file(root, "layout").unwrap_or_default();
+        // [1,9], NOT [1,2,9]: leaving workspace 2 VANISHED it, because it was
+        // inactive, empty and unreserved -- the i3 rule firing on the way out,
+        // at the reconcile the switch triggers. This leg first asserted
+        // [1,2,9] and the gate corrected it; the measurement was right and the
+        // expectation was wrong.
+        //
+        // The gap is the better proof anyway: 1 and 9 are not contiguous, so a
+        // COUNT would render `2` here and could not describe the set at all.
+        match ws_header(&lay_sparse) {
+            Some((ref l, 9)) if l.as_slice() == [1, 9] => {}
+            other => {
+                say!(
+                    "tapestry-battery: FAIL workspaces: header {:?} on the sparse set, want [1,9] 9",
+                    other
+                );
+                return 1;
+            }
+        }
+        say!("battery: workspace 9 created from a gap; the header lists 1,9");
+        // RETURN, which also VANISHES the empty inactive workspace 9 (i3).
+        // Workspace 2 is already gone -- it was reaped when this leg left it
+        // for 9 -- so only one empty remains to drop here.
+        if !write_file(root, "layout", "workspace 1") {
+            say!("tapestry-battery: FAIL workspaces: `workspace 1` refused");
+            return 1;
+        }
+        let lay2 = read_file(root, "layout").unwrap_or_default();
+        if find_pane(&lay2, a.id).is_none() {
+            say!("tapestry-battery: FAIL workspaces: our tile did not come back");
+            return 1;
+        }
+        match ws_header(&lay2) {
+            Some((ref l, 1)) if l.as_slice() == [1] => {}
+            other => {
+                say!(
+                    "tapestry-battery: FAIL workspaces: header {:?} after the return, want [1] 1 (both empties must vanish)",
+                    other
+                );
+                return 1;
+            }
+        }
+        say!("battery: workspace 1 returned with its tile; the empty workspace vanished");
+    }
+
     unsafe { t_close(root) };
     say!("tapestry-battery: PASS");
     // `a` drops on return (`b` already did, scenario 3): the surfaces

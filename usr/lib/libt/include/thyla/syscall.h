@@ -131,6 +131,17 @@ enum {
     T_SYS_TTY_ACQUIRE       = 95,  // PTY-1d: controlling-terminal acquisition
     T_SYS_TTY_SET_FG        = 96,  // PTY-1d: tcsetpgrp
     T_SYS_TTY_GET_FG        = 97,  // PTY-1d: tcgetpgrp
+    T_SYS_PCI_IRQ_CREATE = 115,
+    T_SYS_PCI_IRQ_ARM = 116,
+    T_SYS_PCI_IRQ_WAIT = 117,
+    T_SYS_PCI_IRQ_COMPLETE = 118,
+    T_SYS_PCI_IRQ_DISABLE = 119,
+    T_SYS_PCI_IRQ_INFO = 120,
+    T_SYS_TRUSTED_SEAT = 121,
+    T_SYS_SEAT_IMPORT = 122,
+    T_SYS_SET_NONBLOCK = 123,
+    T_SYS_PCI_MAP_WINDOW    = 113,
+    T_SYS_PCI_WINDOWS       = 114,
     T_SYS_TTY_CONT          = 98,  // PTY-1f: fg/bg resume of a job-stopped pgrp
 };
 
@@ -294,6 +305,9 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 // consumer and is not mirrored here. No native C caller uses this today (login
 // is Rust); mirrored for ABI lockstep.
 #define T_SPAWN_PERM_SESSION_HANGUP    (1u << 5)
+#define T_SPAWN_PERM_SEAT_MANAGER      (1u << 6)
+#define T_SPAWN_PERM_SEAT_SERVICE      (1u << 7)
+#define T_SPAWN_PERM_SEAT_CLIENT       (1u << 8)
 
 // VIVARIUM V-1b / Design D (13.10): t_sys_spawn_args.pheno_flags bits (mirror
 // SPAWN_PHENO_* in the kernel header). The phenotype itself is DECIDED FROM
@@ -472,6 +486,7 @@ _Static_assert(__builtin_offsetof(struct t_allowance_desc, pci) == 180,
 #define T_CAP_GRANT_CLEARANCE (1UL << 6)   // fork-grantable; corvus-only; register clearance grants
 #define T_CAP_DAC_OVERRIDE    (1UL << 7)   // elevation-only; perm_check rwx bypass
 #define T_CAP_CHOWN           (1UL << 8)   // elevation-only; chown/chgrp-to-any
+#define T_CAP_POST_SERVICE    (1UL << 13) // elevation-only /srv posting
 #define T_CAP_KILL            (1UL << 9)   // elevation-only; cross-identity kill override
 
 // Maximum binary name length for t_spawn (mirror SYS_SPAWN_NAME_MAX).
@@ -595,14 +610,20 @@ static inline long t_irq_create(unsigned long intid, unsigned long rights) {
 // t_irq_wait — block until at least one IRQ has fired on the subscription
 // represented by handle `h`. Returns the collapsed-fire count (>=1), or
 // -1 on bad handle / wrong kind / missing T_RIGHT_SIGNAL.
+//
+// F-A1 (C): SYS_IRQ_WAIT reads x1 as a ns timeout (0 = wait forever), so x1
+// MUST be set even here -- else a stale register reads as a bogus timeout.
+// This C FFI has no timed variant (the timed wait is a Rust-driver concern);
+// it always waits forever.
 __attribute__((always_inline))
 static inline long t_irq_wait(long h) {
     register long x0 __asm__("x0") = h;
+    register long x1 __asm__("x1") = 0;   // timeout_ns = 0 (forever)
     register long x8 __asm__("x8") = T_SYS_IRQ_WAIT;
     __asm__ volatile (
         "svc #0"
         : "+r"(x0)
-        : "r"(x8)
+        : "r"(x1), "r"(x8)
         : "memory", "cc"
     );
     return x0;
@@ -1070,6 +1091,17 @@ static inline long t_close(long fd) {
         : "r"(x8)
         : "memory", "cc"
     );
+    return x0;
+}
+
+// Set nonblocking I/O on the shared open-file description. Duplicated handles
+// see the same mode; this changes no rights. `on` must be 0 or 1.
+__attribute__((always_inline))
+static inline long t_set_nonblock(long fd, long on) {
+    register long x0 __asm__("x0") = fd;
+    register long x1 __asm__("x1") = on;
+    register long x8 __asm__("x8") = T_SYS_SET_NONBLOCK;
+    __asm__ volatile ("svc #0" : "+r"(x0) : "r"(x1), "r"(x8) : "memory", "cc");
     return x0;
 }
 
@@ -1553,6 +1585,76 @@ static inline long t_pci_claim(unsigned long virtio_device_id) {
         : "r"(x8)
         : "memory", "cc"
     );
+    return x0;
+}
+
+struct t_pci_irq_event {
+    unsigned long generation, sequence;
+    unsigned int count, reason;
+    unsigned long retry_after_ns;
+};
+struct t_pci_irq_info {
+    unsigned long generation, deliveries, retries, cooldowns;
+    unsigned int mode, state, table_index, reserved;
+};
+_Static_assert(sizeof(struct t_pci_irq_event) == 32, "PCI IRQ event ABI");
+_Static_assert(sizeof(struct t_pci_irq_info) == 48, "PCI IRQ info ABI");
+#define T_PCI_IRQ_INTX 1
+#define T_PCI_IRQ_MSIX 2
+__attribute__((always_inline))
+static inline long t_pci_irq_call(long nr, long h, unsigned long a1, unsigned long a2) {
+    register long x0 __asm__("x0") = h;
+    register unsigned long x1 __asm__("x1") = a1;
+    register unsigned long x2 __asm__("x2") = a2;
+    register long x8 __asm__("x8") = nr;
+    __asm__ volatile ("svc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x8) : "memory", "cc");
+    return x0;
+}
+static inline long t_pci_irq_create(long pci, unsigned int mode, unsigned int ordinal) {
+    return t_pci_irq_call(T_SYS_PCI_IRQ_CREATE, pci, mode, ordinal);
+}
+static inline long t_pci_irq_arm(long h) { return t_pci_irq_call(T_SYS_PCI_IRQ_ARM, h, 0, 0); }
+static inline long t_pci_irq_disable(long h) { return t_pci_irq_call(T_SYS_PCI_IRQ_DISABLE, h, 0, 0); }
+static inline long t_pci_irq_complete(long h, unsigned long generation, unsigned long sequence) {
+    return t_pci_irq_call(T_SYS_PCI_IRQ_COMPLETE, h, generation, sequence);
+}
+static inline long t_pci_irq_wait(long h, unsigned long timeout_ns, struct t_pci_irq_event *event) {
+    return t_pci_irq_call(T_SYS_PCI_IRQ_WAIT, h, timeout_ns, (unsigned long)event);
+}
+static inline long t_pci_irq_info(long h, struct t_pci_irq_info *info) {
+    return t_pci_irq_call(T_SYS_PCI_IRQ_INFO, h, (unsigned long)info, 0);
+}
+
+// Mappable windows exclude every MSI-X table/PBA page. The list is complete
+// or fails (-1); count is returned on success. PCI_INFO remains 256 bytes.
+#define T_PCI_WINDOW_MAX 8
+struct t_pci_window {
+    unsigned long offset, length;
+    unsigned int bar, reserved;
+};
+_Static_assert(sizeof(struct t_pci_window) == 24, "PCI window ABI size");
+__attribute__((always_inline))
+static inline long t_pci_windows(long h, struct t_pci_window *out, unsigned long capacity) {
+    register long x0 __asm__("x0") = h;
+    register unsigned long x1 __asm__("x1") = (unsigned long)out;
+    register unsigned long x2 __asm__("x2") = capacity;
+    register long x8 __asm__("x8") = T_SYS_PCI_WINDOWS;
+    __asm__ volatile ("svc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x8) : "memory", "cc");
+    return x0;
+}
+__attribute__((always_inline))
+static inline long t_pci_map_window(long h, unsigned long va, unsigned long bar,
+                                    unsigned long prot, unsigned long offset,
+                                    unsigned long length) {
+    register long x0 __asm__("x0") = h;
+    register unsigned long x1 __asm__("x1") = va;
+    register unsigned long x2 __asm__("x2") = bar;
+    register unsigned long x3 __asm__("x3") = prot;
+    register unsigned long x4 __asm__("x4") = offset;
+    register unsigned long x5 __asm__("x5") = length;
+    register long x8 __asm__("x8") = T_SYS_PCI_MAP_WINDOW;
+    __asm__ volatile ("svc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3),
+        "r"(x4), "r"(x5), "r"(x8) : "memory", "cc");
     return x0;
 }
 

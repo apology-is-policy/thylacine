@@ -701,11 +701,13 @@ containment, and namespace-as-capability — is the NOVEL claim (§11).
   protocol every node uses, so the driver can later move to its own Proc
   (`nocturne-snd`, `serves = "/dev/nocturne/sinks/virtio0"`) — Genode's
   inversion, realized when a second driver (Pi HDMI, USB) makes it worth a
-  hop. **D-1c (threads)**: `nocturned` is the first native daemon with two
-  threads — the **cycle thread** (IRQ-waiting, hence INTERACTIVE by the
-  existing promotion; does only ring work, mixing, and pokes; never touches
-  9P) and the **control thread** (the `t_poll` loop serving `/srv/nocturne`,
-  graph edits, policy). They share the graph under a lock the cycle thread
+  hop. **D-1c (threads)**: `nocturned` uses three threads: the **IRQ waiter**
+  (INTERACTIVE by the existing wait promotion; acknowledges the PCI ISR before
+  re-arming and pokes the cycle), the **cycle thread** (NORMAL; bounded torpor
+  waits, ring work and mixing; never 9P), and the **control thread** (NORMAL;
+  the `t_poll` loop serving `/srv/nocturne`, graph edits and policy). Keeping
+  the unbounded device wait separate preserves the cycle's deadline backstop.
+  The cycle and control share the graph under a lock the cycle thread
   takes non-blockingly (a failed `try_lock` in the cycle = "graph edit in
   progress, run last cycle's plan"), and the control thread never holds it
   across a 9P reply. This is a §"Self-audit" multi-thread-per-Proc surface
@@ -736,8 +738,9 @@ at any input with several links (a gain per link).
 
 **The cycle** (one per device period; PipeWire §5.2 made local):
 
-1. The sink's period IRQ completes a TX message → the cycle thread wakes
-   (INTERACTIVE), reads the device position, **checks the previous cycle**:
+1. The sink's period IRQ completes a TX message → the IRQ waiter acknowledges
+   the device and pokes the cycle. The cycle reads the device position and
+   **checks the previous cycle**:
    every node whose slot was not marked FINISHED gets an xrun, and its
    substitute policy applies (§6.6).
 2. Sets each node's `pending = required` in its ring header, stamps the
@@ -1570,3 +1573,21 @@ stream: **on-demand** (the RX stream is dead unless an authorized reader holds
 D_INPUT stream => no `source`, playback untouched -- the streams=1 default boot must
 not regress N-1). Scripture-first (this commit), then the impl, then the focused
 audit. N-3c-1 (`@6d35b3f9`) is untouched.
+
+### PCI interrupt acknowledgement during Halcyon integration
+
+The dedicated IRQ waiter must acknowledge the virtio PCI ISR before its next
+`Irq::wait`. Main derives PCI INTx's level trigger from the DTB: dispatch masks
+the line, and the next wait unmasks it. Deferring ISR acknowledgement to the
+NORMAL-band cycle thread permits the INTERACTIVE-band IRQ waiter to repeatedly
+unmask the still-asserted line and starve that very cycle thread. An idle stream
+can retain a control completion interrupt, so playback need not be active.
+
+The waiter receives only a read-to-clear ISR register accessor, separate from
+the cycle's mutable device/ring state. It clears the ISR, completes the MMIO read
+with a device barrier, and then pokes the cycle before waiting again. The cycle
+still inspects all used rings; ISR bits are notification hints, never ownership
+or completion records. Concurrent control/pump ISR reads are harmless: whichever
+reader clears first, ring state remains authoritative and the bounded cycle
+backstop remains in force. The PCI mapping stays owned by the non-returning
+cycle context for the daemon's lifetime; neither thread unmaps it separately.

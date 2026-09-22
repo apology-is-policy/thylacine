@@ -129,6 +129,8 @@ static struct SrvService *srv_find_locked(struct SrvRegistry *reg,
 // own its `waiter` field, and clobbering it would strand a sleeper.
 static void srv_clear_locked(struct SrvService *e) {
     e->state          = SRV_STATE_FREE;
+    e->cap_posted     = false;
+    e->cap_scope      = 0;
     e->name_len       = 0;
     for (u32 i = 0; i < SRV_NAME_MAX; i++) e->name[i] = 0;
     e->poster_stripes = 0;
@@ -306,14 +308,52 @@ static int srv_reserve_in(struct SrvRegistry *reg,
     u64 stripes = proc_stripes(poster);
     if (stripes == 0) return -1;
 
+    bool cap_post = !proc_may_post_service(poster);
+    u64 scope = __atomic_load_n(&poster->legate_scope_id, __ATOMIC_ACQUIRE);
+    if (cap_post && (poster->caps & CAP_POST_SERVICE) == 0) return -1;
     irq_state_t s = spin_lock_irqsave(&reg->lock);
 
+    // Count reservations as well as live posts under the reservation lock.
+    // Tombstones consume the global cap partition but can be recycled below.
+    u32 cap_slots = 0, scope_slots = 0;
+    struct SrvService *recycle = NULL;
+    for (u32 i = 0; i < SRV_MAX_SERVICES; ++i) {
+        struct SrvService *slot = &reg->entries[i];
+        if (!slot->cap_posted || slot->state == SRV_STATE_FREE) continue;
+        ++cap_slots;
+        if (slot->state == SRV_STATE_TOMBSTONED && !slot->accept_active && slot->generation != ~(u64)0)
+            recycle = slot;
+        if ((slot->state == SRV_STATE_LIVE || slot->state == SRV_STATE_RESERVING) &&
+            (scope ? slot->cap_scope == scope :
+             (slot->cap_scope == 0 && slot->poster_stripes == stripes)))
+            ++scope_slots;
+    }
+    if (cap_post && scope_slots >= SRV_CAP_SCOPE_SLOTS) {
+        spin_unlock_irqrestore(&reg->lock, s);
+        return -1;
+    }
     struct SrvService *e = srv_find_locked(reg, name, name_len);
+    if (cap_post && e && !e->cap_posted) {
+        spin_unlock_irqrestore(&reg->lock, s);
+        return -1; // a live OR tombstoned TCB name is not user-postable
+    }
+    if (!e && cap_post && recycle) {
+        // Tombstoning may precede peer-thread death. Recycle only once the
+        // old accepter has released its identity pin (checked above).
+        // Openers hold a NAME, and generation validation guards delayed enqueue.
+        e = recycle;
+        e->mode = mode;
+        e->ring_msize = ring_msize;
+    }
+    if (cap_post && !e && cap_slots >= SRV_CAP_SLOTS) {
+        spin_unlock_irqrestore(&reg->lock, s);
+        return -1;
+    }
     if (e) {
         // The name exists. A LIVE or RESERVING entry must not be displaced
         // — no stealing a running or in-flight server. Only a TOMBSTONED
         // name (prior poster exited) is re-postable.
-        if (e->state != SRV_STATE_TOMBSTONED) {
+        if (e->state != SRV_STATE_TOMBSTONED || e->accept_active) {
             spin_unlock_irqrestore(&reg->lock, s);
             return -1;
         }
@@ -342,7 +382,8 @@ static int srv_reserve_in(struct SrvRegistry *reg,
     } else {
         // Fresh post — claim a FREE slot.
         for (u32 i = 0; i < SRV_MAX_SERVICES; i++) {
-            if (reg->entries[i].state == SRV_STATE_FREE) {
+            if (reg->entries[i].state == SRV_STATE_FREE && !reg->entries[i].accept_active &&
+                reg->entries[i].generation != ~(u64)0) {
                 e = &reg->entries[i];
                 break;
             }
@@ -354,6 +395,13 @@ static int srv_reserve_in(struct SrvRegistry *reg,
         *prior_out = SRV_STATE_FREE;
     }
 
+    if (e->generation == ~(u64)0) {
+        spin_unlock_irqrestore(&reg->lock, s);
+        return -1;
+    }
+    ++e->generation;
+    e->cap_posted = cap_post;
+    e->cap_scope = cap_post ? scope : 0;
     // e->magic is already SRV_SERVICE_MAGIC + e->reg is already set —
     // srv_registry_create stamped every entry once; both are permanent.
     e->state          = SRV_STATE_RESERVING;
@@ -433,10 +481,9 @@ int devsrv_post_listener(struct Proc *p, struct Spoor *root,
     if (*(const u64 *)root->aux != SRV_REGISTRY_MAGIC)   return -1;
     struct SrvRegistry *reg = (struct SrvRegistry *)root->aux;
 
-    // Post-gate — the SAME one-way joey-stamped bit SYS_POST_SERVICE checks
-    // (CORVUS-DESIGN.md §6.1; corvus.tla PostService precondition). Fail-closed
-    // for a bad Proc.
-    if (!proc_may_post_service(p))                       return -1;
+    // TCB posters retain the one-way role; scoped user services require the
+    // elevation-only capability. srv_reserve_in applies their bounded quota.
+    if (!proc_may_post_service(p) && (p->caps & CAP_POST_SERVICE) == 0) return -1;
 
     // Service-name hygiene, identical to sys_post_service_core: printable
     // ASCII, no '/' (a /srv path separator), no control bytes -- so the name
@@ -585,6 +632,18 @@ void srv_registry_reset(void) {
     srv_registry_drain(g_boot_srv_registry);
 }
 
+// Test-only observation/injection for the accepter identity-pin window.
+// Keep the registry representation private, and exercise the same lock as
+// production reservation. mode < 0 observes; otherwise it sets the pin.
+bool srv_test_accept_pin(struct SrvService *svc, int mode);
+bool srv_test_accept_pin(struct SrvService *svc, int mode) {
+    irq_state_t irq = spin_lock_irqsave(&svc->reg->lock);
+    if (mode >= 0) svc->accept_active = mode != 0;
+    bool active = svc->accept_active;
+    spin_unlock_irqrestore(&svc->reg->lock, irq);
+    return active;
+}
+
 // =============================================================================
 // Per-connection layer (P5-corvus-srv-impl-a3b).
 // =============================================================================
@@ -601,28 +660,40 @@ static int accept_cond_is_ready(void *arg) {
     return (svc->backlog_count > 0) || (svc->state != SRV_STATE_LIVE);
 }
 
-struct SrvConn *srv_accept_blocking(struct SrvService *svc) {
-    if (!svc || svc->magic != SRV_SERVICE_MAGIC || !svc->reg) return NULL;
-
-    for (;;) {
-        irq_state_t s = spin_lock_irqsave(&svc->reg->lock);
-        struct SrvConn *cn  = srv_backlog_pop_locked(svc);
-        enum srv_state  st  = svc->state;
+// An accept is an identity pin, not merely a waiter: exits_code can tombstone
+// a service BEFORE its peer threads leave their syscalls. Under reg->lock,
+// validate the caller, exclude a second waiter on the single-waiter Rendez,
+// and prevent rebind/recycle until this call unwinds. Sleep returns on death;
+// every exit below releases the pin before the EL0-return die check.
+struct SrvConn *srv_accept_blocking(struct SrvService *svc, u64 poster_stripes) {
+    if (!svc || svc->magic != SRV_SERVICE_MAGIC || !svc->reg || !poster_stripes)
+        return NULL;
+    irq_state_t s = spin_lock_irqsave(&svc->reg->lock);
+    if (svc->state != SRV_STATE_LIVE || svc->poster_stripes != poster_stripes ||
+        svc->accept_active) {
         spin_unlock_irqrestore(&svc->reg->lock, s);
-
-        if (cn) return cn;                 // dequeued — ownership to caller
-        if (st != SRV_STATE_LIVE) return NULL;   // service gone; give up
-
-        // Empty + LIVE: block until a client opens (a wakeup from the
-        // push) or the service stops being LIVE (a wakeup from the
-        // tombstone). sleep re-checks accept_cond under the Rendez lock —
-        // a wakeup between the unlock above and the sleep transition is
-        // not lost (specs/scheduler.tla NoMissedWakeup).
-        // #811 (ARCH §8.8.1): death-interrupted -> Proc group-terminating;
-        // return so the Thread unwinds to its EL0-return die-check.
-        if (sleep(&svc->accept_rendez, accept_cond_is_ready, svc) == SLEEP_INTR)
-            return NULL;
+        return NULL;
     }
+    svc->accept_active = true;
+    spin_unlock_irqrestore(&svc->reg->lock, s);
+
+    struct SrvConn *cn = NULL;
+    for (;;) {
+        s = spin_lock_irqsave(&svc->reg->lock);
+        enum srv_state st = svc->state;
+        if (st == SRV_STATE_LIVE) cn = srv_backlog_pop_locked(svc);
+        spin_unlock_irqrestore(&svc->reg->lock, s);
+        if (cn || st != SRV_STATE_LIVE) break;
+
+        // Register/recheck under the Rendez lock pairs with enqueue/tombstone
+        // wakeup. The identity pin prevents a new LIVE lifetime hiding EOF.
+        if (sleep(&svc->accept_rendez, accept_cond_is_ready, svc) == SLEEP_INTR)
+            break;
+    }
+    s = spin_lock_irqsave(&svc->reg->lock);
+    svc->accept_active = false;
+    spin_unlock_irqrestore(&svc->reg->lock, s);
+    return cn;
 }
 
 struct Spoor *devsrv_make_conn_spoor(struct SrvConn *cn) {
@@ -856,12 +927,14 @@ struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode) {
     // registry lock, atomically with the LIVE check (both immutable while LIVE).
     struct SrvService *svc = srv_lookup_in(reg, ref->name, ref->name_len);
     if (!svc) return NULL;
-    u64           poster_stripes;
+    u64           poster_stripes, generation;
     enum srv_mode service_mode;
     u32           ring_msize;
     {
         irq_state_t ls = spin_lock_irqsave(&reg->lock);
-        bool live      = (svc->state == SRV_STATE_LIVE);
+        bool live      = (svc->state == SRV_STATE_LIVE) &&
+                         srv_name_eq(svc->name, svc->name_len, ref->name, ref->name_len);
+        generation     = svc->generation;
         poster_stripes = svc->poster_stripes;
         service_mode   = svc->mode;
         ring_msize     = svc->ring_msize;   // CF-3 B: the conn's ring class,
@@ -882,7 +955,7 @@ struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode) {
     // A 2nd ref for the accept-backlog slot; the push re-validates LIVE atomically.
     srvconn_ref(cn);
     irq_state_t s = spin_lock_irqsave(&reg->lock);
-    int rc = srv_backlog_push_locked(svc, cn);
+    int rc = svc->generation == generation ? srv_backlog_push_locked(svc, cn) : -1;
     spin_unlock_irqrestore(&reg->lock, s);
     if (rc != 0) {
         srvconn_unref(cn);     // drop the backlog ref
@@ -1051,12 +1124,16 @@ static long devsrv_read(struct Spoor *c, void *buf, long n, s64 off) {
         // (3c) -- the only v1.0 byte client (joey -> stratum-fs) attach-wraps its
         // conn Spoor, so the kernel 9P client drives s2c via srvconn_client_recv
         // directly. The CSRVCLIENT direction is the mirror of the server arm.
+        if (spoor_flag_get(c) & CNONBLOCK)
+            return srvconn_io_nonblock(cn, false, false, buf, n);
         return srvconn_client_recv(cn, (u8 *)buf, n);
     }
     // SERVER endpoint (the poster's accepted Spoor): read c2s. Atomic acquire on
     // byte_mode (F5 close): pair the setter's ATOMIC_RELEASE in
     // srvconn_set_byte_mode so a multi-thread Proc reading this endpoint sees
     // the mode that was propagated at SrvConn mint.
+    if (spoor_flag_get(c) & CNONBLOCK)
+        return srvconn_io_nonblock(cn, true, false, buf, n);
     bool bm = __atomic_load_n(&cn->byte_mode, __ATOMIC_ACQUIRE);
     if (bm) {
         return srvconn_server_recv_blocking(cn, (u8 *)buf, n);
@@ -1089,6 +1166,8 @@ static long devsrv_write(struct Spoor *c, const void *buf, long n, s64 off) {
         // forwarding a Tmsg upstream is exactly that caller. Parks until the
         // server drains c2s or teardown; role-parked vs a concurrent
         // peer-thread writer (#354).
+        if (spoor_flag_get(c) & CNONBLOCK)
+            return srvconn_io_nonblock(cn, false, true, (void *)buf, n);
         return srvconn_client_send_blocking(cn, (const u8 *)buf, n);
     }
     // SERVER endpoint: write replies toward the client via s2c. BLOCKING
@@ -1100,6 +1179,8 @@ static long devsrv_write(struct Spoor *c, const void *buf, long n, s64 off) {
     // PARKS until the first releases the role (#354 close -- pre-fix it was
     // refused -1, sound only while stratumd's own write_mu serialized its
     // CF-2 worker threads' replies; the kernel no longer leans on that).
+    if (spoor_flag_get(c) & CNONBLOCK)
+        return srvconn_io_nonblock(cn, true, true, (void *)buf, n);
     return srvconn_server_send_blocking(cn, (const u8 *)buf, n);
 }
 
@@ -1182,16 +1263,11 @@ short srv_handle_poll(void *obj, short events, struct poll_waiter *pw) {
         return svc_listener_poll((struct SrvService *)obj, events, pw);
     }
     if (magic == SRV_CONN_MAGIC) {
-        // Client-side connection handle. `srvconn_poll`'s semantics are
-        // SERVER-endpoint (POLLIN ↔ c2s.count > 0 — bytes corvus reads;
-        // POLLOUT ↔ s2c room — room corvus writes). A client polling its
-        // OWN handle expects mirror-image semantics (POLLIN ↔ s2c has a
-        // reply; POLLOUT ↔ c2s has room) — delegating here would return
-        // misleading revents. No v1.0 caller polls this (joey drives 9P
-        // synchronously through the kernel client; corvus polls its
-        // accept-side Spoor, not its KObj_Srv). Fail-closed until the
-        // client-side poll story lands (its own SrvConn `client_poll`
-        // entry with mirrored semantics + a separate hook list).
+        // A connection held as a KObj_Srv. No path has minted one since
+        // stalk-3b moved the client endpoint to a CSRVCLIENT Spoor, which is
+        // where client-side poll lives (devsrv_poll -> srvconn_poll(client)).
+        // Fail closed rather than guess which endpoint a handle nobody can
+        // hold would be.
         return POLLNVAL;
     }
     // Unknown magic — corruption, or a future KObj_Srv flavor.
@@ -1211,7 +1287,14 @@ static short devsrv_poll(struct Spoor *c, short events,
     }
     u64 m = *(const u64 *)c->aux;
     if (m == SRV_CONN_MAGIC) {
-        return srvconn_poll((struct SrvConn *)c->aux, events, pw);
+        struct SrvConn *cn = (struct SrvConn *)c->aux;
+        bool client = (c->flag & CSRVCLIENT) != 0;
+        // A kernel-attached conn's rings belong to the kernel 9P client; its
+        // client endpoint is no more pollable than it is readable
+        // (devsrv_read / devsrv_write refuse it for the same reason). Nothing
+        // is registered, so the poller holds no hook here.
+        if (client && srvconn_is_kernel_attached(cn)) return POLLNVAL;
+        return srvconn_poll(cn, client, events, pw);
     }
     if (m == SRV_REGISTRY_MAGIC) {
         // /srv root Spoor — no readiness state. The caller is asking about

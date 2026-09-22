@@ -1,0 +1,75 @@
+# Round 2: authored semantic ANSI16 + explicit contrast corrections.
+# Still a stock-schema compatibility projection, not the full UI profile.
+[meta]
+name = "Mineral Sage"
+
+[palette]
+floor = "#CBD2CA"
+surface = "#EEF1EB"
+header = "#D6DDD5"
+raised = "#C5CEC5"
+border = "#718078"
+blank = "#DFE5DD"
+selection = "#D1DCD5"
+island_rule = "#5C817A"
+fg = "#17201B"
+fg_dim = "#303C35"
+fg_muted = "#46544C"
+fg_subtle = "#57615B"
+bevel_top = "#D3D9D2"
+bevel_left = "#D0D6CF"
+bevel_right = "#9EA49E"
+bevel_bottom = "#6E716D"
+ember = "#2F625B"
+ember_dim = "#5C817A"
+ember_deep = "#5C817A"
+status_bg = "#D8DED7"
+status_fg = "#17201B"
+status_muted = "#46544C"
+status_idle = "#6C7971"
+
+[palette.sage]
+key = "#456D50"
+tint = "#D6DDD5"
+raised = "#C5CEC5"
+border = "#BAC4BB"
+fg = "#17201B"
+fg_dim = "#46544C"
+fg_muted = "#57615B"
+
+[palette.cinnabar]
+key = "#8D514B"
+tint = "#D6DDD5"
+raised = "#C5CEC5"
+border = "#BAC4BB"
+fg = "#17201B"
+fg_dim = "#46544C"
+fg_muted = "#57615B"
+
+[palette.syntax]
+slate = "#2F625B"
+sage = "#49647B"
+sand = "#8D514B"
+moss = "#496661"
+ash = "#43694D"
+dusk = "#305C55"
+smoke = "#59635D"
+fen = "#456D50"
+cinnabar = "#8D514B"
+
+[terminal]
+bg = "#E5EAE3"
+fg = "#26322C"
+ansi = ["#6D776E", "#984B46", "#416D4B", "#7D622C", "#405F89", "#7F537A", "#2E6E68", "#2C3930", "#56645A", "#7E3632", "#2D5436", "#674D1C", "#2D486B", "#633D61", "#1D5550", "#15251A"]
+
+[type]
+smooth = 12
+
+[geometry]
+bevel = 2
+gap = 3
+hairline = 1
+header_h = 32
+status_h = 25
+tag_pad_x = 0
+tab_strip_h = 0

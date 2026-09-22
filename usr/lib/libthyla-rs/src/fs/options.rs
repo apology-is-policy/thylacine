@@ -14,10 +14,15 @@
 //     File::open_create_at_path (U-6d-b). `create` is create-or-open;
 //     `create_new` is exclusive. The new file's POSIX mode is `.mode(m)`
 //     (default 0644).
-//   - append -> the file is opened/created for write and positioned at
-//     end (Plan 9 omode has no O_APPEND; this seek-to-end-at-open is the
-//     single-writer approximation -- exact for the shell-redirect case,
-//     concurrent atomic-append is a v1.x kernel surface).
+//   - append -> the open carries T_OAPPEND (the kernel forwards it to the 9P
+//     open; the FS then lands every write at the file's CURRENT end, whatever
+//     the cursor says) AND the file is positioned at end, which is what makes
+//     the cursor and a first read agree with it. Until 2026-09-21 only the
+//     seek happened -- T_OAPPEND had a definition and no user -- so a write
+//     after any seek, and the second of two appenders to one file (`>>` from
+//     two shells, the history file), landed mid-file over existing bytes.
+//     NOT atomic against a CONCURRENT appender: Stratum's append is
+//     stat-then-write, so two racing writers can still be handed one end.
 //
 // CONSTRAINTS:
 //   - truncate / append / create_new require write.
@@ -174,6 +179,8 @@ impl OpenOptions {
         // append never truncates (it positions at end below).
         let base_omode = if self.truncate {
             omode | T_OTRUNC
+        } else if self.append {
+            omode | crate::T_OAPPEND
         } else {
             omode
         };
@@ -187,9 +194,9 @@ impl OpenOptions {
         )?;
 
         if self.append {
-            // Position at end so subsequent writes append. (Plan 9 omode
-            // has no O_APPEND; this seek-to-end-at-open is the
-            // single-writer approximation -- module header.)
+            // T_OAPPEND already lands every write at the end; the seek makes
+            // the CURSOR say so too (module header). On a Dev with no append
+            // notion the bit is inert and this seek is all there is.
             use crate::io::{Seek, SeekFrom};
             file.seek(SeekFrom::End(0))?;
         }

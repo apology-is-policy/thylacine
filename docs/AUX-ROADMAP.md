@@ -1,5 +1,25 @@
 # Aux track roadmap
 
+## 2026-09-17 integration update
+
+The historical arc ledger below predates the current integration. Committed
+`aux-3` through `b0ea1986` is being integrated with main in
+`codex/aux-halcyon`; uncommitted aux work is preserved separately. Haul and its
+required Imperium authority already reached main. View, Gallery, Nocturne,
+DOSBox-X and the manual reader are built together with the current Halcyon.
+Six checked manual sections are installed; the reader's Beacon and text paths
+are verified. PCI interrupt support now includes function-bound shared INTx,
+protected MSI-X, GICv2m and ITS/LPI, with byte-verified TCP retirement.
+
+See `PCI-INTERRUPTS-DESIGN.md`, `NET-CLOSE-DESIGN.md` and the owning Vault
+dossiers for current contracts and measured verification. The approved Lex
+curiata visual specification is in `HALCYON-TRUSTED-EPISODE.md`; a trusted
+graphical sink is not implemented. The full 40-boot SMP matrix and an additional
+eight-CPU ITS/TCG UBSan boot pass. `AUX-HALCYON-INTEGRATION.md` records the
+completed integration and its verification limits.
+
+## Historical arc ledger
+
 **As of 2026-08-16. Branch `aux-2`.** Read the branch off the worktree
 (`git branch --show-current`), never off this line — on 2026-08-16 three
 sources gave three answers (main's CLAUDE.md said `aux/userspace-apps`, this

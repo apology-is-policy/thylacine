@@ -3,7 +3,7 @@ id: haz-harness-fail-open
 type: haz
 title: "The harness fails open — a gate that cannot see the feature reports success"
 applies-to: [sub-substrate-gates, sub-substrate-interactive, sub-substrate-build, sub-substrate-builders]
-instances: []
+instances: [fnd-b0poll-r7-f2, fnd-b0poll-r7-f3]
 created: 2026-08-01
 updated: 2026-08-01
 ---

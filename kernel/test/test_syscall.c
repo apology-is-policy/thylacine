@@ -55,7 +55,7 @@ void test_syscall_dispatch_unknown(void) {
     for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
     ctx.regs[8] = 9999ull;       // not a real syscall
 
-    syscall_dispatch(&ctx);
+    TEST_SYSCALL_DISPATCH(&ctx);
     TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-1,
         "unknown syscall must return -1 (ENOSYS-equivalent)");
 }
@@ -77,7 +77,7 @@ void test_syscall_dispatch_puts_smoke(void) {
     ctx.regs[8] = SYS_PUTS;
     ctx.regs[0] = (u64)(uintptr_t)msg;       // kernel-half VA
     ctx.regs[1] = sizeof(msg) - 1;
-    syscall_dispatch(&ctx);
+    TEST_SYSCALL_DISPATCH(&ctx);
     TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-1,
         "SYS_PUTS must reject kernel-half VAs (R7 F127)");
 
@@ -85,7 +85,7 @@ void test_syscall_dispatch_puts_smoke(void) {
     ctx.regs[8] = SYS_PUTS;
     ctx.regs[0] = 0;
     ctx.regs[1] = 5;
-    syscall_dispatch(&ctx);
+    TEST_SYSCALL_DISPATCH(&ctx);
     TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-1, "NULL buf rejected");
 
     // Oversized rejected (still rejected — len > 4096 short-circuits
@@ -93,14 +93,14 @@ void test_syscall_dispatch_puts_smoke(void) {
     ctx.regs[8] = SYS_PUTS;
     ctx.regs[0] = (u64)(uintptr_t)msg;
     ctx.regs[1] = 8192;
-    syscall_dispatch(&ctx);
+    TEST_SYSCALL_DISPATCH(&ctx);
     TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-1, "oversized len rejected");
 
     // Zero len returns 0 (no-op; short-circuits before VA check).
     ctx.regs[8] = SYS_PUTS;
     ctx.regs[0] = (u64)(uintptr_t)msg;
     ctx.regs[1] = 0;
-    syscall_dispatch(&ctx);
+    TEST_SYSCALL_DISPATCH(&ctx);
     TEST_EXPECT_EQ(ctx.regs[0], 0ull, "zero len → 0 return");
 
     // R7 F127: synthetic user-VA pointer must pass the bound check.
@@ -110,7 +110,7 @@ void test_syscall_dispatch_puts_smoke(void) {
     ctx.regs[8] = SYS_PUTS;
     ctx.regs[0] = 0x10040ull;                // user-half VA (matches /init)
     ctx.regs[1] = 0;
-    syscall_dispatch(&ctx);
+    TEST_SYSCALL_DISPATCH(&ctx);
     TEST_EXPECT_EQ(ctx.regs[0], 0ull,
         "SYS_PUTS accepts user-half VAs (R7 F127 positive case)");
 
@@ -127,7 +127,7 @@ void test_syscall_dispatch_puts_smoke(void) {
     ctx.regs[8] = SYS_PUTS;
     ctx.regs[0] = 0x0000800000000000ull;     // = 1<<47 = USER_VA_TOP
     ctx.regs[1] = 1;
-    syscall_dispatch(&ctx);
+    TEST_SYSCALL_DISPATCH(&ctx);
     TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-1,
         "USER_VA_TOP itself is out-of-range (closed half-interval)");
 
@@ -138,7 +138,7 @@ void test_syscall_dispatch_puts_smoke(void) {
     ctx.regs[8] = SYS_PUTS;
     ctx.regs[0] = 0x4000000000000000ull;     // mid [2^47, 2^48)
     ctx.regs[1] = 1;
-    syscall_dispatch(&ctx);
+    TEST_SYSCALL_DISPATCH(&ctx);
     TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-1,
         "F210: buf_va in [2^47, 2^48) must be syscall-layer rejected "
         "(would extinct kernel via uaccess fault pre-fix)");
@@ -149,7 +149,7 @@ void test_syscall_dispatch_puts_smoke(void) {
     ctx.regs[8] = SYS_PUTS;
     ctx.regs[0] = 0x00007FFFFFFFFFFFull;     // = USER_VA_TOP - 1
     ctx.regs[1] = 0;                          // zero-len short-circuit
-    syscall_dispatch(&ctx);
+    TEST_SYSCALL_DISPATCH(&ctx);
     TEST_EXPECT_EQ(ctx.regs[0], 0ull,
         "F210: highest legal user byte (UACCESS_USER_VA_TOP - 1) "
         "accepted with len=0");
@@ -162,7 +162,7 @@ static void child_exits_ok(void *arg) {
     for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
     ctx.regs[8] = SYS_EXITS;
     ctx.regs[0] = 0;             // status 0 → "ok"
-    syscall_dispatch(&ctx);
+    TEST_SYSCALL_DISPATCH(&ctx);
     extinction("syscall_dispatch(SYS_EXITS) returned (impossible)");
 }
 
@@ -184,7 +184,7 @@ static void child_exits_fail(void *arg) {
     for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
     ctx.regs[8] = SYS_EXITS;
     ctx.regs[0] = 42;            // status 42 → exit_status 42 (#91)
-    syscall_dispatch(&ctx);
+    TEST_SYSCALL_DISPATCH(&ctx);
     extinction("syscall_dispatch(SYS_EXITS) returned (impossible)");
 }
 
@@ -212,7 +212,7 @@ static void child_exit_group_code(void *arg) {
     for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
     ctx.regs[8] = SYS_EXIT_GROUP;
     ctx.regs[0] = 42;            // status 42 → group_exit_code 42 → exit_status 42
-    syscall_dispatch(&ctx);
+    TEST_SYSCALL_DISPATCH(&ctx);
     extinction("syscall_dispatch(SYS_EXIT_GROUP) returned (impossible)");
 }
 
@@ -247,7 +247,7 @@ void test_syscall_dispatch_args_in_x0_to_x5(void) {
     // x2..x5 stay poisoned — should be ignored by SYS_PUTS.
     // x9..x30 stay poisoned — must not affect SYS_PUTS.
 
-    syscall_dispatch(&ctx);
+    TEST_SYSCALL_DISPATCH(&ctx);
     TEST_EXPECT_EQ(ctx.regs[0], 0ull,
         "SYS_PUTS reads x0 + x1 from ctx; ignores x2..x7 + x9..x30");
 }
@@ -267,7 +267,7 @@ void test_syscall_dispatch_set_tid_address(void) {
     for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
     ctx.regs[8] = SYS_SET_TID_ADDRESS;
     ctx.regs[0] = 0x10040ull;                // a plausible user-VA tidptr
-    syscall_dispatch(&ctx);
+    TEST_SYSCALL_DISPATCH(&ctx);
     TEST_EXPECT_EQ((s64)ctx.regs[0], expect_tid,
         "SYS_SET_TID_ADDRESS returns the calling thread's tid (== Proc pid)");
 
@@ -275,7 +275,7 @@ void test_syscall_dispatch_set_tid_address(void) {
     for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
     ctx.regs[8] = SYS_SET_TID_ADDRESS;
     ctx.regs[0] = 0;
-    syscall_dispatch(&ctx);
+    TEST_SYSCALL_DISPATCH(&ctx);
     TEST_EXPECT_EQ((s64)ctx.regs[0], expect_tid,
         "NULL tidptr is accepted (clear-child-tid deferred — §12.4)");
 }

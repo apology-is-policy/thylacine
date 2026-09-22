@@ -9,6 +9,14 @@ code:
   - usr/view/Cargo.toml
   - usr/lib/inlinewire/src/lib.rs
   - usr/lib/inlinewire/Cargo.toml
+  - usr/view/src/testdata/gray.jpg
+  - usr/view/src/testdata/2x2.png
+  - usr/view/src/testdata/prog.jpg
+  - usr/view/src/testdata/quad.jpg
+  - usr/view/testdata/make-test-jpg.sh
+  - usr/view/testdata/test.jpg
+  - usr/view/testdata/test.png
+  - usr/view/testdata/make-test-png.py
 audit: hard
 guarded-by: []
 validated-by: [prose, gate-interactive]
@@ -17,7 +25,7 @@ hazards: []
 abis: []
 design: ["docs/HALCYON.md"]
 created: 2026-09-09
-updated: 2026-09-09
+updated: 2026-09-17
 ---
 ## Purpose
 
@@ -26,8 +34,8 @@ recognized image it decodes them and the picture appears INLINE in the
 scrollback (letterboxed to the pane width, at native size when it fits); if they
 are not, it falls back to `cat`. This is the writer half of inline media (I-47,
 `docs/HALCYON.md` 14.7); the reader half -- the `/srv/halcyon` place channel and
-the transcript injection -- lives in [[sub-halcyond]]. The FULLSCREEN sibling
-(`view --fullscreen`) is [[sub-gallery]], which reuses this crate's decode and
+the transcript injection -- lives in [[sub-halcyond]]. The separate graphical sibling
+`gallery <path>` is [[sub-gallery]], which reuses this crate's decode and
 blits to its own tapestryd surface instead of the transcript.
 
 The load-bearing design choice: **the image decode runs HERE, in the
@@ -48,8 +56,8 @@ pure-Rust fuzz-friendly posture is kept either way.
   share the same headers-only budget gate then decode-and-place path, factored
   into `check_budget` + `place_decoded`.
 - The wire it speaks is `inlinewire` (this dossier's other half), shared verbatim
-  with halcyond's reader so writer and reader cannot drift: a 16-byte header
-  (magic `HPL1`, `FORMAT_ARGB8888`, w, h -- all LE) then w*h ARGB `u32`s as LE
+  with halcyond's reader so writer and reader cannot drift: a 32-byte header
+  (magic `HPL2`, format, w, h and u128 raster ID -- all integer fields LE) then w*h ARGB `u32`s as LE
   bytes.
 
 ## Mechanism
@@ -95,7 +103,8 @@ coefficient buffer per input component (~2 B * components * npx) alongside the
 output, so its peak ~= READ_CAP + 12*npx (vs baseline/PNG ~8*npx) -- 12*3M + 16
 MiB = 52 MiB fits 64; the pre-JPEG-slice 6M would OOM a progressive JPEG
 ([[sub-gallery]]'s JPEG-round F1, the sibling of its own R-GALLERY-1 OOM). The
-channel re-caps inline to ~1 Mpx downstream, so 3 Mpx rarely binds. Both image
+channel applies the current per-pane raster allowance downstream; a successful
+decode alone does not guarantee display admission. Both image
 arms produce a `Raster`; `Kind::Other` falls back to `cat`.
 
 `open_place_write` picks the channel (I-47, HALCYON.md 14.7.2). In a SESSION the
@@ -119,11 +128,17 @@ reconstructs with `from_le_bytes`). The token never enters the payload -- it is
 the path, validated once by the server at the walk. On an absent service or a
 short write it returns `Err`, and the caller falls back to reporting the decode.
 
+Session placement uses a fresh u128 raster ID, followed by a standalone Beacon
+`inline-image` caption with that ID. The text stream establishes output order;
+Halcyon's per-pane cache supplies the raster. Rich output is required when the
+per-pane endpoint is inherited, avoiding invisible placements through a pipe.
+Console placement retains ID zero and direct transcript insertion.
+
 ### inlinewire (the shared wire, pure, zero deps)
 
 The sole home of the place-request format so writer and reader never drift; it
 carries NO decoder and NO syscalls, so depending on it drags neither zune into
-halcyond nor libthyla-rs into a host test. `PlaceHeader::pack` builds the 16-byte
+halcyond nor libthyla-rs into a host test. `PlaceHeader::pack` builds the 32-byte
 header; `PlaceHeader::parse` FULLY validates it -- magic, `FORMAT_ARGB8888`, a
 non-zero in-bounds w/h, and `w*h <= MAX_PIXELS` (16 Mpx) -- before returning,
 so a `Some` result is safe to size an allocation from (`payload_len`/`total_len`
@@ -134,8 +149,8 @@ cannot overflow). This is the first line of the format-fuzz defense; halcyond's
 
 - `Kind` (`view`) -- Png / Jpeg / Other, from `sniff`.
 - `Raster` (`view`) -- `{ w, h, argb: Vec<u32> }`, w-tight `0xAARRGGBB` rows.
-- `PlaceHeader` (`inlinewire`) -- `{ format, w, h }`; `MAGIC`/`FORMAT_ARGB8888`/
-  `HEADER_LEN`=16/`MAX_W`=`MAX_H`=8192/`MAX_PIXELS`=16 Mpx.
+- `PlaceHeader` (`inlinewire`) -- `{ id, format, w, h }`; `MAGIC`/`FORMAT_ARGB8888`/
+  `HEADER_LEN`=32/`MAX_W`=`MAX_H`=8192/`MAX_PIXELS`=16 Mpx.
 
 ## Concurrency
 
@@ -185,7 +200,7 @@ write. No steady state.
   [[sub-gallery]]'s holotype F1).
 - **The wire against drift.** `inlinewire::parse` validates before it returns;
   the pack/parse round-trip + the bounds rejections are host-tested; the magic
-  reads as `HPL1` in a hexdump (a true-comment/wrong-value guard).
+  reads as `HPL2` in a hexdump (a true-comment/wrong-value guard).
 - **The handoff trust direction.** A bounded WRITE to a per-endpoint service, not
   a shared mapping; `view` holds no elevated capability; an absent renderer is a
   clean fallback, never a hang.
@@ -195,7 +210,7 @@ write. No steady state.
 - JPEG decode (`zune-jpeg`) LANDED: `decode_jpeg` + `jpeg_dimensions`, the same
   headers-only-budget-then-decode path as PNG, wired into both viewers' `Jpeg`
   arms; fixtures `testdata/test.jpg` (E2E) + `src/testdata/quad.jpg` (lib).
-- `--fullscreen` LANDED as `gallery` (a native libtapestry pane, [[sub-gallery]]);
+- The separate `gallery` command is implemented (a native libtapestry pane, [[sub-gallery]]);
   `Embed` (the out-of-band pixel surface for video) is unbuilt (I-47 / the HALCYON
   14.7 medium split: images native, video a ported C codec, audio -> Nocturne).
 - The obj-verbs (`path view view {}` + `path gallery gallery {}` in

@@ -40,12 +40,14 @@ that would catch it — has the owning dossier been updated since the row last
 changed on main? — is the next increment, tracked as task #169.
 
 <!-- generated:begin -->
-**148 declared surfaces · 143 covered by a hard-audit dossier · 4 soft-owned · 1 unowned · 0 unparsed · 19 cited path(s) that do not resolve.**
+**170 declared surfaces · 166 covered by a hard-audit dossier · 4 soft-owned · 0 unowned · 0 unparsed · 23 cited path(s) that do not resolve.**
 
 ### Cited paths that do not resolve
 
 | declared surface | cited path | |
 |---|---|---|
+| **HALCYON-INSTRUMENT I-1: the second theme schema + the dispatching lo… | `usr/lib/halcyon/themes/{13` | no such file in the tree |
+| **HALCYON-INSTRUMENT I-8c-3a: the `motion` verb -- a fifth member of t… | `lib/halcyon` | no such file in the tree |
 | **HALCYON-SCALE: the display scale -- the EDID-derived percent the com… | `tools/interactive/ls-gfx-compose.exp` | no such file in the tree |
 | **HAUL: the npxf secure channel -- a second implementation of a hand-r… | `lib/bin` | no such file in the tree |
 | A-5c RECOVER recovery keyslot (corvus) | `usr/corvus-mint` | no such file in the tree |
@@ -55,6 +57,8 @@ changed on main? — is the next increment, tracked as task #169.
 | Notes / signals | `specs/notes.tla` | **possibly a documented NEGATIVE — read the claim** |
 | Page fault + COW + W^X | `mm/vm.c` | **possibly a documented NEGATIVE — read the claim** |
 | Page fault + COW + W^X | `mm/wxe.c` | no such file in the tree |
+| SrvConn endpoint poll: BOTH endpoints + the four-edge wake (2026-09-21… | `kernel/test/test_srvconn` | no such file in the tree |
+| SrvConn endpoint poll: BOTH endpoints + the four-edge wake (2026-09-21… | `usr/lib/pouch/patches/0041` | no such file in the tree |
 | Syscall byte-I/O staging + bulk uaccess + the per-service bulk ring (C… | `kernel/user` | no such file in the tree |
 | VIVARIUM O_APPEND (FS pass-through) + pread64/pwrite64 (67/68): git co… | `init/add/commit/log/clone/verify` | no such file in the tree |
 | VMO / BURROW | `mm/vmo_pages.c` | no such file in the tree |
@@ -70,9 +74,8 @@ changed on main? — is the next increment, tracked as task #169.
 
 | declared surface | state | why |
 |---|---|---|
-| **HAUL: the npxf secure channel -- a second implementation of a hand-rolled AEAD protocol,… | soft-owned | owned by [[sub-substrate-machine]], none `audit: hard` |
 | Host-side pool populate via existing `stratumd + stratum-fs` (host build infra) | soft-owned | owned by [[sub-substrate-build]], none `audit: hard` |
 | Kaua console-TUI substrate: the cons/consctl backend + the ut raw-mode dance (LS-7) | soft-owned | owned by [[sub-kaua]], [[sub-nora-engine]], [[sub-nora-host]], [[sub-nora-view]] (+2 more), none `audit: hard` |
 | Thylacine mkfs RNG seed pinning | soft-owned | owned by [[sub-substrate-build]], none `audit: hard` |
-| mesa W-3d: the WSI DIRECT path -- vn_wsi_thylacine + the no-eager-mint marker + the img cl… | **unowned** | no dossier names `usr/ports/mesa/patches/0018`, `tools/warp-host.sh`, `tools/test-venus-verdict.sh` |
+| mesa W-3d: the WSI DIRECT path -- vn_wsi_thylacine + the no-eager-mint marker + the img cl… | soft-owned | owned by [[sub-substrate-remote-host]], none `audit: hard` |
 <!-- generated:end -->

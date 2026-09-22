@@ -1,0 +1,75 @@
+# Round 2: authored semantic ANSI16 + explicit contrast corrections.
+# Still a stock-schema compatibility projection, not the full UI profile.
+[meta]
+name = "Abyssal Sonar"
+
+[palette]
+floor = "#060D0F"
+surface = "#102024"
+header = "#081215"
+raised = "#15262A"
+border = "#294147"
+blank = "#0B1518"
+selection = "#203537"
+island_rule = "#507B73"
+fg = "#DCE8E5"
+fg_dim = "#C2D4D0"
+fg_muted = "#92A5A1"
+fg_subtle = "#6F817D"
+bevel_top = "#2E3435"
+bevel_left = "#1C2325"
+bevel_right = "#050A0C"
+bevel_bottom = "#030708"
+ember = "#78AFA4"
+ember_dim = "#507B73"
+ember_deep = "#507B73"
+status_bg = "#071113"
+status_fg = "#DCE8E5"
+status_muted = "#92A5A1"
+status_idle = "#5C706C"
+
+[palette.sage]
+key = "#7A9D80"
+tint = "#081215"
+raised = "#15262A"
+border = "#192D31"
+fg = "#DCE8E5"
+fg_dim = "#92A5A1"
+fg_muted = "#6F817D"
+
+[palette.cinnabar]
+key = "#BB726E"
+tint = "#081215"
+raised = "#15262A"
+border = "#192D31"
+fg = "#DCE8E5"
+fg_dim = "#92A5A1"
+fg_muted = "#6F817D"
+
+[palette.syntax]
+slate = "#78AFA4"
+sage = "#7E9DB0"
+sand = "#BB726E"
+moss = "#5D857D"
+ash = "#7A9D80"
+dusk = "#91BBB3"
+smoke = "#6F817D"
+fen = "#7A9D80"
+cinnabar = "#BB726E"
+
+[terminal]
+bg = "#081416"
+fg = "#B5C9C5"
+ansi = ["#64716F", "#B87977", "#77A58B", "#B0A16B", "#779FC4", "#A28CAF", "#69ADAD", "#B9CBC6", "#8FA6A0", "#D99B96", "#9CC7AC", "#D1C18C", "#9DC1E5", "#C2AED0", "#8DCECB", "#E4F1EA"]
+
+[type]
+smooth = 0
+
+[geometry]
+bevel = 2
+gap = 3
+hairline = 1
+header_h = 32
+status_h = 25
+tag_pad_x = 0
+tab_strip_h = 0

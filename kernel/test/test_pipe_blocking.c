@@ -65,6 +65,7 @@
 static struct Spoor *g_rd;
 static struct Spoor *g_wr;
 static volatile long g_consumer_result;
+static volatile bool g_consumer_exited;
 static u8            g_consumer_buf[PIPE_BUF_SIZE];
 
 static long dev_write(struct Spoor *c, const void *buf, long n) {
@@ -85,51 +86,63 @@ void test_pipe_blocking_close_write_end_wakes_reader_with_eof(void);
 void test_pipe_blocking_close_read_end_wakes_writer_with_epipe(void);
 
 // =============================================================================
-// Consumer entries. Each: do one blocking op; record result; park.
+// Consumer entries. Each: do one blocking op; publish the result (RELEASE, after
+// the buffer it describes); park TERMINALLY. A trailing bare sched() was a
+// yield: the helper stayed RUNNABLE, an idle peer could steal and run it, and
+// the thread_free that reaped it raced a running thread (the B-0 poll audit
+// round 5 F2 class). The waiters acquire-load the result.
 // =============================================================================
 
 static void consumer_read_entry(void) {
-    g_consumer_result = dev_read(g_rd, g_consumer_buf, (long)sizeof(g_consumer_buf));
-    sched();    // park — boot doesn't yield back to us
+    long r = dev_read(g_rd, g_consumer_buf, (long)sizeof(g_consumer_buf));
+    __atomic_store_n(&g_consumer_result, r, __ATOMIC_RELEASE);
+    test_kthread_park_terminal(&g_consumer_exited);
 }
 
 static void consumer_write_one_byte_entry(void) {
     static const u8 byte = 0x42;
-    g_consumer_result = dev_write(g_wr, &byte, 1L);
-    sched();
+    long r = dev_write(g_wr, &byte, 1L);
+    __atomic_store_n(&g_consumer_result, r, __ATOMIC_RELEASE);
+    test_kthread_park_terminal(&g_consumer_exited);
 }
 
 // The SECOND consumer of the two-waiter tests: its own result slot + buffer,
 // so the test can tell which of the two waiters an edge released.
 static volatile long g_consumer2_result;
+static volatile bool g_consumer2_exited;
 static u8            g_consumer2_buf[PIPE_BUF_SIZE];
 
 static void consumer2_read_entry(void) {
-    g_consumer2_result = dev_read(g_rd, g_consumer2_buf, (long)sizeof(g_consumer2_buf));
-    sched();
+    long r = dev_read(g_rd, g_consumer2_buf, (long)sizeof(g_consumer2_buf));
+    __atomic_store_n(&g_consumer2_result, r, __ATOMIC_RELEASE);
+    test_kthread_park_terminal(&g_consumer2_exited);
 }
 
 static void consumer2_write_one_byte_entry(void) {
     static const u8 byte = 0x43;
-    g_consumer2_result = dev_write(g_wr, &byte, 1L);
-    sched();
+    long r = dev_write(g_wr, &byte, 1L);
+    __atomic_store_n(&g_consumer2_result, r, __ATOMIC_RELEASE);
+    test_kthread_park_terminal(&g_consumer2_exited);
 }
 
 // A third consumer, so a single edge can be shown to release MORE THAN ONE
 // blocked waiter (the wake-ALL property specs/pipe.tla now pins) AND a woken
 // waiter can be shown to re-sample and re-sleep when a peer took the bytes.
 static volatile long g_consumer3_result;
+static volatile bool g_consumer3_exited;
 static u8            g_consumer3_buf[PIPE_BUF_SIZE];
 
 static void consumer3_read_entry(void) {
-    g_consumer3_result = dev_read(g_rd, g_consumer3_buf, (long)sizeof(g_consumer3_buf));
-    sched();
+    long r = dev_read(g_rd, g_consumer3_buf, (long)sizeof(g_consumer3_buf));
+    __atomic_store_n(&g_consumer3_result, r, __ATOMIC_RELEASE);
+    test_kthread_park_terminal(&g_consumer3_exited);
 }
 
 static void consumer3_write_one_byte_entry(void) {
     static const u8 byte = 0x44;
-    g_consumer3_result = dev_write(g_wr, &byte, 1L);
-    sched();
+    long r = dev_write(g_wr, &byte, 1L);
+    __atomic_store_n(&g_consumer3_result, r, __ATOMIC_RELEASE);
+    test_kthread_park_terminal(&g_consumer3_exited);
 }
 
 // =============================================================================
@@ -139,7 +152,7 @@ static void consumer3_write_one_byte_entry(void) {
 void test_pipe_blocking_write_wakes_sleeping_reader(void) {
     g_rd = NULL;
     g_wr = NULL;
-    g_consumer_result = -999;
+    g_consumer_result = -999; g_consumer_exited = false;
     TEST_EXPECT_EQ(pipe_create(&g_rd, &g_wr), 0, "create");
 
     struct Thread *consumer = thread_create(kproc(), consumer_read_entry);
@@ -164,7 +177,7 @@ void test_pipe_blocking_write_wakes_sleeping_reader(void) {
     // (count > 0); sleep returns; loop re-takes lock; drains; wakes
     // (no waiting writer — no-op); returns. Consumer sets
     // g_consumer_result + sched()s back.
-    TEST_YIELD_UNTIL(g_consumer_result != -999);
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_consumer_result, __ATOMIC_ACQUIRE) != -999);
     TEST_EXPECT_EQ(g_consumer_result, (long)sizeof(payload),
         "consumer drained payload-length bytes");
     for (size_t i = 0; i < sizeof(payload); i++) {
@@ -176,7 +189,7 @@ void test_pipe_blocking_write_wakes_sleeping_reader(void) {
     // (RUNNABLE, never returns from its entry). Without this it leaks as a
     // runnable thread for the rest of the boot -- the band-NORMAL half of the
     // #857 quiescence pollution. Matches test_cons / test_sched hygiene.
-    thread_free(consumer);
+    test_kthread_join_free(consumer, &g_consumer_exited);
     spoor_clunk(g_rd);
     spoor_clunk(g_wr);
 }
@@ -184,7 +197,7 @@ void test_pipe_blocking_write_wakes_sleeping_reader(void) {
 void test_pipe_blocking_read_wakes_sleeping_writer(void) {
     g_rd = NULL;
     g_wr = NULL;
-    g_consumer_result = -999;
+    g_consumer_result = -999; g_consumer_exited = false;
     TEST_EXPECT_EQ(pipe_create(&g_rd, &g_wr), 0, "create");
 
     // Boot fills the buffer completely so consumer's write blocks.
@@ -207,11 +220,11 @@ void test_pipe_blocking_read_wakes_sleeping_writer(void) {
     TEST_EXPECT_NE(consumer->state, THREAD_SLEEPING,
         "consumer left the rendez after read");
 
-    TEST_YIELD_UNTIL(g_consumer_result != -999);
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_consumer_result, __ATOMIC_ACQUIRE) != -999);
     TEST_EXPECT_EQ(g_consumer_result, 1L,
         "consumer wrote 1 byte after wake");
 
-    thread_free(consumer);          // reap the parked helper (see write_wakes)
+    test_kthread_join_free(consumer, &g_consumer_exited);          // reap the parked helper (see write_wakes)
     spoor_clunk(g_rd);
     spoor_clunk(g_wr);
 }
@@ -219,7 +232,7 @@ void test_pipe_blocking_read_wakes_sleeping_writer(void) {
 void test_pipe_blocking_close_write_end_wakes_reader_with_eof(void) {
     g_rd = NULL;
     g_wr = NULL;
-    g_consumer_result = -999;
+    g_consumer_result = -999; g_consumer_exited = false;
     TEST_EXPECT_EQ(pipe_create(&g_rd, &g_wr), 0, "create");
 
     struct Thread *consumer = thread_create(kproc(), consumer_read_entry);
@@ -235,18 +248,18 @@ void test_pipe_blocking_close_write_end_wakes_reader_with_eof(void) {
     TEST_EXPECT_NE(consumer->state, THREAD_SLEEPING,
         "consumer left the rendez after close");
 
-    TEST_YIELD_UNTIL(g_consumer_result != -999);
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_consumer_result, __ATOMIC_ACQUIRE) != -999);
     TEST_EXPECT_EQ(g_consumer_result, 0L,
         "consumer read returns 0 (EOF) after write end closed");
 
-    thread_free(consumer);          // reap the parked helper (see write_wakes)
+    test_kthread_join_free(consumer, &g_consumer_exited);          // reap the parked helper (see write_wakes)
     spoor_clunk(g_rd);
 }
 
 void test_pipe_blocking_close_read_end_wakes_writer_with_epipe(void) {
     g_rd = NULL;
     g_wr = NULL;
-    g_consumer_result = -999;
+    g_consumer_result = -999; g_consumer_exited = false;
     TEST_EXPECT_EQ(pipe_create(&g_rd, &g_wr), 0, "create");
 
     // Boot fills the buffer so consumer's write blocks.
@@ -269,7 +282,7 @@ void test_pipe_blocking_close_read_end_wakes_writer_with_epipe(void) {
     TEST_EXPECT_NE(consumer->state, THREAD_SLEEPING,
         "consumer left the rendez after close");
 
-    TEST_YIELD_UNTIL(g_consumer_result != -999);
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_consumer_result, __ATOMIC_ACQUIRE) != -999);
     // #100 (ER-3): the value matters -- this is the BLOCKED writer's arm, so
     // it proves the errno survives the wake path too, not just the immediate
     // read_eof reject the non-blocking sibling covers. The wait is BOUNDED
@@ -278,7 +291,7 @@ void test_pipe_blocking_close_read_end_wakes_writer_with_epipe(void) {
     TEST_EXPECT_EQ(g_consumer_result, (long)(-T_E_PIPE),
         "consumer write returns -T_E_PIPE after read end closed");
 
-    thread_free(consumer);          // reap the parked helper (see write_wakes)
+    test_kthread_join_free(consumer, &g_consumer_exited);          // reap the parked helper (see write_wakes)
     spoor_clunk(g_wr);
 }
 
@@ -301,13 +314,14 @@ void test_pipe_blocking_multi_readers_share_one_empty_pipe(void);
 void test_pipe_blocking_multi_readers_share_one_empty_pipe(void) {
     g_rd = NULL;
     g_wr = NULL;
-    g_consumer_result  = -999;
-    g_consumer2_result = -999;
-    g_consumer3_result = -999;
+    g_consumer_result  = -999; g_consumer_exited = false;
+    g_consumer2_result = -999; g_consumer2_exited = false;
+    g_consumer3_result = -999; g_consumer3_exited = false;
     TEST_EXPECT_EQ(pipe_create(&g_rd, &g_wr), 0, "create");
 
     struct Thread *cs[3];
     volatile long *rs[3] = { &g_consumer_result, &g_consumer2_result, &g_consumer3_result };
+    volatile bool *es[3] = { &g_consumer_exited, &g_consumer2_exited, &g_consumer3_exited };
     cs[0] = thread_create(kproc(), consumer_read_entry);
     cs[1] = thread_create(kproc(), consumer2_read_entry);
     cs[2] = thread_create(kproc(), consumer3_read_entry);
@@ -323,13 +337,13 @@ void test_pipe_blocking_multi_readers_share_one_empty_pipe(void) {
     // ONE 2-byte edge: exactly one reader drains it, two re-sample + re-sleep.
     const u8 payload[] = { 0xa1, 0xb2 };
     TEST_EXPECT_EQ(dev_write(g_wr, payload, 2L), 2L, "boot writes 2 bytes");
-    TEST_YIELD_UNTIL(*rs[0] != -999 || *rs[1] != -999 || *rs[2] != -999);
+    TEST_YIELD_UNTIL(__atomic_load_n(rs[0], __ATOMIC_ACQUIRE) != -999 || __atomic_load_n(rs[1], __ATOMIC_ACQUIRE) != -999 || __atomic_load_n(rs[2], __ATOMIC_ACQUIRE) != -999);
     // Let the two that did not win settle back to SLEEPING.
     for (int i = 0; i < 3; i++)
-        if (*rs[i] == -999) TEST_YIELD_UNTIL(cs[i]->state == THREAD_SLEEPING);
+        if (__atomic_load_n(rs[i], __ATOMIC_ACQUIRE) == -999) TEST_YIELD_UNTIL(cs[i]->state == THREAD_SLEEPING);
     int drained_idx = -1, asleep = 0, got_count = 0;
     for (int i = 0; i < 3; i++) {
-        if (*rs[i] != -999) { drained_idx = i; got_count++; }
+        if (__atomic_load_n(rs[i], __ATOMIC_ACQUIRE) != -999) { drained_idx = i; got_count++; }
         else if (cs[i]->state == THREAD_SLEEPING) asleep++;
     }
     long drained_val = (drained_idx >= 0) ? *rs[drained_idx] : -1;
@@ -337,12 +351,12 @@ void test_pipe_blocking_multi_readers_share_one_empty_pipe(void) {
     // The wake-all edge: close with TWO readers still asleep -> both get EOF.
     spoor_clunk(g_wr);
     for (int i = 0; i < 3; i++)
-        if (i != drained_idx) TEST_YIELD_UNTIL(*rs[i] != -999);
+        if (i != drained_idx) TEST_YIELD_UNTIL(__atomic_load_n(rs[i], __ATOMIC_ACQUIRE) != -999);
     int eof_count = 0;
     for (int i = 0; i < 3; i++)
         if (i != drained_idx && *rs[i] == 0) eof_count++;
 
-    for (int i = 0; i < 3; i++) thread_free(cs[i]);
+    for (int i = 0; i < 3; i++) test_kthread_join_free(cs[i], es[i]);
     spoor_clunk(g_rd);
 
     TEST_EXPECT_EQ(got_count, 1, "exactly one reader drained the write");
@@ -363,9 +377,9 @@ void test_pipe_blocking_multi_writers_share_one_full_pipe(void);
 void test_pipe_blocking_multi_writers_share_one_full_pipe(void) {
     g_rd = NULL;
     g_wr = NULL;
-    g_consumer_result  = -999;
-    g_consumer2_result = -999;
-    g_consumer3_result = -999;
+    g_consumer_result  = -999; g_consumer_exited = false;
+    g_consumer2_result = -999; g_consumer2_exited = false;
+    g_consumer3_result = -999; g_consumer3_exited = false;
     TEST_EXPECT_EQ(pipe_create(&g_rd, &g_wr), 0, "create");
 
     static u8 fill[PIPE_BUF_SIZE];
@@ -375,6 +389,7 @@ void test_pipe_blocking_multi_writers_share_one_full_pipe(void) {
 
     struct Thread *cs[3];
     volatile long *rs[3] = { &g_consumer_result, &g_consumer2_result, &g_consumer3_result };
+    volatile bool *es[3] = { &g_consumer_exited, &g_consumer2_exited, &g_consumer3_exited };
     cs[0] = thread_create(kproc(), consumer_write_one_byte_entry);
     cs[1] = thread_create(kproc(), consumer2_write_one_byte_entry);
     cs[2] = thread_create(kproc(), consumer3_write_one_byte_entry);
@@ -390,12 +405,12 @@ void test_pipe_blocking_multi_writers_share_one_full_pipe(void) {
     // ONE 1-byte drain: exactly one writer appends, two re-sample full + re-sleep.
     u8 one_drain[1];
     TEST_EXPECT_EQ(dev_read(g_rd, one_drain, 1L), 1L, "boot drains 1 byte");
-    TEST_YIELD_UNTIL(*rs[0] != -999 || *rs[1] != -999 || *rs[2] != -999);
+    TEST_YIELD_UNTIL(__atomic_load_n(rs[0], __ATOMIC_ACQUIRE) != -999 || __atomic_load_n(rs[1], __ATOMIC_ACQUIRE) != -999 || __atomic_load_n(rs[2], __ATOMIC_ACQUIRE) != -999);
     for (int i = 0; i < 3; i++)
-        if (*rs[i] == -999) TEST_YIELD_UNTIL(cs[i]->state == THREAD_SLEEPING);
+        if (__atomic_load_n(rs[i], __ATOMIC_ACQUIRE) == -999) TEST_YIELD_UNTIL(cs[i]->state == THREAD_SLEEPING);
     int wrote_idx = -1, asleep = 0, wrote_count = 0;
     for (int i = 0; i < 3; i++) {
-        if (*rs[i] != -999) { wrote_idx = i; wrote_count++; }
+        if (__atomic_load_n(rs[i], __ATOMIC_ACQUIRE) != -999) { wrote_idx = i; wrote_count++; }
         else if (cs[i]->state == THREAD_SLEEPING) asleep++;
     }
     long wrote_val = (wrote_idx >= 0) ? *rs[wrote_idx] : -1;
@@ -404,12 +419,12 @@ void test_pipe_blocking_multi_writers_share_one_full_pipe(void) {
     // both return -T_E_PIPE.
     spoor_clunk(g_rd);
     for (int i = 0; i < 3; i++)
-        if (i != wrote_idx) TEST_YIELD_UNTIL(*rs[i] != -999);
+        if (i != wrote_idx) TEST_YIELD_UNTIL(__atomic_load_n(rs[i], __ATOMIC_ACQUIRE) != -999);
     int epipe_count = 0;
     for (int i = 0; i < 3; i++)
         if (i != wrote_idx && *rs[i] == (long)(-T_E_PIPE)) epipe_count++;
 
-    for (int i = 0; i < 3; i++) thread_free(cs[i]);
+    for (int i = 0; i < 3; i++) test_kthread_join_free(cs[i], es[i]);
     spoor_clunk(g_wr);
 
     TEST_EXPECT_EQ(wrote_count, 1, "exactly one writer appended after the drain");
