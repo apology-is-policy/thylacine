@@ -198,10 +198,10 @@ added two commits earlier -- now `CAP_HOSTOWNER`-gated with a budgeted scan.
 | poll spec gate | ALL CFGS AS CLAIMED (4 clean + 7 buggy) |
 | `syscall_irqs` gate | 8 cfgs on their named verdicts, clean at 18 states; the tail-check sabotage now caught (it was NOT, before the close) |
 | SMP gate @`dd0e9ce1` | **PASS -- 40/40 boots, 0 corruption** (default/ubsan x smp4/smp8) |
-| SMP gate @tip | owed -- the close changed kernel code |
+| SMP gate @close `40261a8c` | **PASS -- 40/40 boots, 0 corruption** (default/ubsan x smp4/smp8). This gate matters more than usual here: #713 was 3-13% of boots and NEVER at `-smp 1`, so the HVF suite is structurally blind to the hazard this chunk sits closest to. |
 | `tools/test-fault.sh` | **8 PASS / 0 FAIL of 8** -- all three kernel-stack GUARD variants fire (`kstack_overflow`, `secondary_stack_guard`, `bootcpu_idle_guard`), plus `recursive_kernel_fault` and `el1_sync_runaway`, the nested-exception cases this chunk makes more reachable. Added to this chunk's bar MID-RUN: the chunk deepens the kernel stack and this is the only runtime witness that an overflow FAULTS into a no-access guard rather than corrupting its neighbour. A bar that omits the one gate aimed at the hazard the change creates is a bar that verifies around it. |
 | kstack runtime witness | **peak=10448 of 16384 = 63.8%** on a default boot, now printed every boot |
-| fleet | **NOT RUN** |
+| interactive fleet @`40261a8c` | **PASS -- 55/77, 0 FAIL** (22 SKIP = absent optional host artifacts + the documented ci-vs-halcyon image split, neither a guest result nor coverage). The ~15 scenarios that parse boot output all pass, which is the check that mattered: this chunk adds a `boot-kstack:` line before the banner. |
 
 ## Remaining work (in order; BROWSER-DESIGN section 9)
 
