@@ -31,14 +31,20 @@
 #   NO-TESTS  -- it host-builds fine and simply has no test to run.
 #
 # NO-HOST is the bucket that matters most, and collapsing it into "skipped" is
-# how the real problem stays invisible. A crate in it has `#[cfg(test)]` tests in
-# its source that CANNOT RUN ANYWHERE -- they read as coverage while being
-# unrunnable, which is worse than a test that is merely unrun. `libutopia` is the
-# standing example: its `console::tests::is_raw_command_*` tests look like they
-# guard the raw-mode allowlist and cannot execute on this host. Fixing that needs
-# a feature split (make the libthyla-rs dependency optional, as `manual`, `kaua`
-# and `lantern` do), which is a per-crate change, not something this script can
-# paper over. So it NAMES them, every run.
+# how the real problem stays invisible. A crate in it may have `#[cfg(test)]`
+# tests that CANNOT RUN ANYWHERE -- they read as coverage while being
+# unrunnable, which is worse than a test that is merely unrun. So the bucket
+# reports the STRANDED COUNT per crate, because "cannot be host-tested" and
+# "has tests that run nowhere" are different facts and only the second is a
+# debt: measured 2026-09-22, four of the five NO-HOST crates declare no tests
+# at all, and the blanket note this script used to print about "the NO-HOST
+# crates carry tests that cannot run" was false for every one of them.
+#
+# `libutopia` was the real case and is now FIXED (the `backend` feature split):
+# 399 stranded -> 296 running. Asking those tests to compile for the first time
+# produced 20 build errors and then 49 failures, of which 41 were one stale test
+# helper and 8 are genuine findings, now quarantined with `#[ignore]` reasons.
+# That is what a test nobody has ever run is worth knowing about.
 #
 # The convention this relies on is the tree's existing one: a lib+bin crate makes
 # `libthyla-rs` an OPTIONAL dependency behind a default `backend` feature, so
@@ -73,10 +79,37 @@ fi
 
 (( ${#crates[@]} > 0 )) || { echo "test-rust: no crates to test" >&2; exit 2; }
 
+# name -> source directory, for the stranded-test count below. Read from the
+# same `cargo metadata` the enumeration uses, and read UNCONDITIONALLY so an
+# explicit-crate run reports the same figures a full run does.
+declare -A cratesrc=()
+while IFS=$'\t' read -r name manifest; do
+    [[ -n "$name" ]] && cratesrc["$name"]="$(dirname "$manifest")/src"
+done < <(cd "$USR_DIR" && cargo metadata --no-deps --format-version 1 2>/dev/null \
+            | python3 -c 'import json,sys
+for p in json.load(sys.stdin)["packages"]:
+    print(p["name"] + "\t" + p["manifest_path"])')
+
+# How many `#[test]` blocks a crate's sources declare. For a NO-HOST crate this
+# is the number that CANNOT RUN ANYWHERE -- the only figure that says whether
+# un-host-testability costs anything here, as opposed to merely being true.
+stranded_tests() {
+    local dir="${cratesrc[$1]:-}"
+    [[ -n "$dir" && -d "$dir" ]] || { echo 0; return; }
+    # `|| true` is load-bearing under `set -euo pipefail`: grep exits 1 when it
+    # matches NOTHING, which is the ordinary answer here (a crate with no
+    # tests), and pipefail would turn that answer into a dead script. Caught by
+    # running this before committing it -- the summary printed its header and
+    # then nothing at all, which is what a `set -e` death looks like from
+    # outside.
+    { grep -rho '#\[test\]' "$dir" 2>/dev/null || true; } | wc -l | tr -d ' '
+}
+
 echo "==> test-rust: $HOST_TRIPLE, ${#crates[@]} crate(s)"
 
 pass=(); fail=(); nohost=(); notests=(); nolib=()
 declare -A counts=()
+declare -A ignored=()
 
 logdir="$(mktemp -d)"
 trap 'rm -rf "$logdir"' EXIT
@@ -95,6 +128,11 @@ for crate in "${crates[@]}"; do
         # crate whose tests silently vanished is not counted as a pass.
         n="$(awk '/^test result: ok\./ {for(i=1;i<=NF;i++) if($i=="passed;") print $(i-1)}' "$log" | paste -sd+ - | bc 2>/dev/null || echo 0)"
         n="${n:-0}"
+        # `#[ignore]`d tests are a PASS to cargo and a debt to us. Counted and
+        # reported separately so a quarantined failure cannot sit in a green
+        # column: an ignore is an IOU, and an IOU nobody prints is forgotten.
+        ig="$(awk '/^test result: ok\./ {for(i=1;i<=NF;i++) if($i=="ignored;") print $(i-1)}' "$log" | paste -sd+ - | bc 2>/dev/null || echo 0)"
+        ignored["$crate"]="${ig:-0}"
         if (( n > 0 )); then
             pass+=("$crate"); counts["$crate"]="$n"
         else
@@ -126,22 +164,55 @@ done
 
 echo
 echo "================ test-rust summary ================"
-for c in "${pass[@]:-}";    do [[ -n "$c" ]] && printf '  PASS      %-24s %s test(s)\n' "$c" "${counts[$c]}"; done
+for c in "${pass[@]:-}"; do
+    [[ -n "$c" ]] || continue
+    ig="${ignored[$c]:-0}"
+    if (( ig > 0 )); then
+        printf '  PASS      %-24s %s test(s), %s IGNORED (quarantined -- grep the reason)\n' "$c" "${counts[$c]}" "$ig"
+    else
+        printf '  PASS      %-24s %s test(s)\n' "$c" "${counts[$c]}"
+    fi
+done
 for c in "${notests[@]:-}"; do [[ -n "$c" ]] && printf '  NO-TESTS  %s\n' "$c"; done
 if (( ${#nolib[@]} > 0 )); then printf '  NO-LIB    %d crate(s) are bin-only (probes, smokes, benches): no --lib to test\n' "${#nolib[@]}"; fi
-for c in "${nohost[@]:-}";  do [[ -n "$c" ]] && printf '  NO-HOST   %-24s cannot host-test (unconditional libthyla-rs)\n' "$c"; done
+stranded=0
+for c in "${nohost[@]:-}"; do
+    [[ -n "$c" ]] || continue
+    n="$(stranded_tests "$c")"
+    stranded=$(( stranded + n ))
+    if (( n > 0 )); then
+        printf '  NO-HOST   %-24s cannot host-test -- %s test(s) STRANDED\n' "$c" "$n"
+    else
+        printf '  NO-HOST   %-24s cannot host-test (declares no tests; nothing stranded)\n' "$c"
+    fi
+done
 for c in "${fail[@]:-}";    do [[ -n "$c" ]] && printf '  FAIL      %s\n' "$c"; done
 echo "==================================================="
 
 total=0
-for c in "${pass[@]:-}"; do [[ -n "$c" ]] && total=$(( total + ${counts[$c]} )); done
+ig_total=0
+for c in "${pass[@]:-}"; do
+    [[ -n "$c" ]] || continue
+    total=$(( total + ${counts[$c]} ))
+    ig_total=$(( ig_total + ${ignored[$c]:-0} ))
+done
 echo "test-rust: ${#pass[@]} crate(s) passing, $total test(s); ${#nolib[@]} bin-only; ${#notests[@]} with no tests; ${#nohost[@]} un-host-testable; ${#fail[@]} FAILING"
 
-if (( ${#nohost[@]} > 0 )); then
-    echo "test-rust: NOTE -- the NO-HOST crates carry #[cfg(test)] tests that cannot run"
-    echo "           anywhere. Each needs libthyla-rs made OPTIONAL behind a default"
-    echo "           'backend' feature (the manual / kaua / lantern pattern) before its"
-    echo "           tests mean anything. They are NOT counted as passing."
+if (( ig_total > 0 )); then
+    echo "test-rust: $ig_total test(s) QUARANTINED with #[ignore]. cargo calls that a pass;"
+    echo "           this does not. Each carries a reason naming its finding --"
+    echo "           \`grep -rn '#\\[ignore' usr --include='*.rs'\` lists them."
+fi
+
+if (( stranded > 0 )); then
+    echo "test-rust: NOTE -- $stranded test(s) are STRANDED: declared in a NO-HOST crate,"
+    echo "           so they run on no machine at all and their assertions have never"
+    echo "           executed. The fix is per crate: make libthyla-rs OPTIONAL behind a"
+    echo "           default 'backend' feature (the manual / kaua / lantern pattern)."
+    echo "           They are NOT counted as passing."
+elif (( ${#nohost[@]} > 0 )); then
+    echo "test-rust: the NO-HOST crates declare no tests, so nothing is stranded --"
+    echo "           un-host-testable here costs coverage only if tests are added."
 fi
 
 (( ${#fail[@]} == 0 )) || exit 1

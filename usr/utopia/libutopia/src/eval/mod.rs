@@ -64,22 +64,44 @@
 // reference for this module. Per-sub-chunk extensions append rows
 // to its Status section.
 
-pub mod builtin;
-pub mod console;
-pub mod env;
 pub mod error;
-pub mod expr;
-pub mod glob;
 pub mod jobs;
-pub mod stmt;
 pub mod value;
 
-pub use env::Env;
+// `expr` is gated not for a syscall of its own -- it makes none -- but because
+// expansion genuinely reaches into command substitution, globbing and the
+// environment (`stmt`, `glob`, `env`). That is real coupling in the shell's
+// design, not an accident of imports: `$(...)` runs a pipeline and `*.md` asks
+// the filesystem. Separating it would be a restructure of the evaluator, so its
+// 29 tests stay stranded for now and are owed their own chunk.
+#[cfg(feature = "backend")]
+pub mod expr;
+
+// The syscall half (see lib.rs's `backend` note). `console` is gated for its
+// three `t_write`/`t_fstat` calls, which is a shame precisely because its
+// `is_raw_command` allowlist is pure and worth testing -- so that vocabulary is
+// split out below rather than left stranded with them.
+#[cfg(feature = "backend")]
+pub mod builtin;
+#[cfg(feature = "backend")]
+pub mod console;
+#[cfg(feature = "backend")]
+pub mod env;
+#[cfg(feature = "backend")]
+pub mod glob;
+#[cfg(feature = "backend")]
+pub mod stmt;
+
 pub use error::{EvalError, EvalErrorKind, EvalResult};
-pub use expr::eval_expr;
 pub use jobs::{Job, JobTable};
+pub use value::Value;
+
+#[cfg(feature = "backend")]
+pub use env::Env;
+#[cfg(feature = "backend")]
+pub use expr::eval_expr;
+#[cfg(feature = "backend")]
 pub use stmt::{
     aggregate_pipefail, deliver_pending_notes, eval_block, eval_script, eval_source,
     eval_statement, note_class_for_name, wait_pids_interruptible, StatementFlow,
 };
-pub use value::Value;

@@ -215,23 +215,35 @@ Nothing here is on a hot path — it runs once per line typed.
 
 ## Caveats
 
-- **189 of this parser's tests cannot compile, in the file that claims to be
-  host-testable.** The lexer's header says "Pure logic; no I/O; host-testable."
-  As configured it is none of the third: the workspace pins a bare-metal target
-  for every build, that target has no test harness, and the crate is
-  unconditionally `no_std`, so the test module fails to find the test crate
-  before a single assertion runs. The escape — building for the host — is
-  blocked one level down, in the runtime crate whose inline assembly will not
-  assemble for a host target. That diagnosis is exact for *this* crate: it
-  depends on libthyla-rs unconditionally, which is precisely what makes the
-  escape unavailable. The cross-crate figure once claimed here — 878 across six
-  crates — was wrong twice over. Measured, 398 test functions across **two**
-  crates are stranded (this one's 394 and tapestryd's 4), while 489 run today in
-  four others, so the pattern that fixes it is in production rather than merely
-  proven; see [[chg-2026-08-03-nora-engine-sweep]]. The parser *is* covered — but by a separate in-guest test
-  binary that drives it through the public entry points on every boot. Two
-  independently written bodies of test intent, of which the older and more
-  granular one is dead. Task #105.
+- **FIXED 2026-09-22: this parser's tests run.** They had never compiled — the
+  crate depended on libthyla-rs unconditionally, whose inline assembly will not
+  assemble for a host target, so the workspace's bare-metal pin had no escape
+  and the lexer's header claim ("Pure logic; no I/O; host-testable") was true of
+  the code and false of the build. `libutopia` now carries the tree's standard
+  `backend` feature, so `--no-default-features` leaves the pure half —
+  `parser`, `line_editor`, `ansi`, `path`, `palette`, `eval::{jobs, error,
+  value}` — host-buildable. **296 tests run where 0 did**; 399 were declared.
+
+  **What the first run found is the reason this caveat is worth reading rather
+  than deleting.** Asking never-compiled tests to compile produced 20 build
+  errors (all one missing `use alloc::vec`), and then 49 failures. 41 were a
+  single stale helper in `parser::expr::tests` — `lex()` handed
+  `parse_expr_tokens` the lexer's synthetic trailing `Eof`, which that function
+  documents itself as not taking and which every production caller in `parse.rs`
+  strips. The remaining **8 are 6 genuine defects**, quarantined with
+  `#[ignore = "UT-PARSE-n"]` reasons so the gate keeps its signal for new
+  breakage while each debt stays greppable: a redirect target that is a keyword
+  is refused (`cmd < in`); `(a; (b; c))` is rejected because the lexer emits
+  `DoubleRParen` for any `))` context-free; truncated input reports
+  `UnexpectedToken` where `UnexpectedEof` is expected, which needs checking
+  against the REPL's line-continuation logic before it is called cosmetic; `cmd
+  =arg` does not parse as two words though the test's comment records that
+  intent; a backtick fixture; and one line-editor ESC ESC case. Each is owed its
+  own chunk.
+
+  The separate in-guest binary that drives the public entry points on every boot
+  remains, so the parser now has BOTH bodies of test intent live — and the
+  granular one, dead since it was written, is what found the six. Task #105.
 
 - **A substitution body's errors are reported in the body's coordinate system,
   on the one path that forgot to re-anchor.** Spans inside a `$(...)` index the

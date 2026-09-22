@@ -469,16 +469,34 @@ one.
   in-progress line edit. Both paragraphs describe the same function; only the
   second is true.
 
-- **The job table was made pure specifically to be host-testable, and its
-  fifteen tests have never run.** The module header gives the design rationale:
-  the table performs no syscalls, so the REPL must drive the reaping and feed
-  results back, *"keeping the table pure makes it host-testable against injected
-  `(pid, status)` pairs."* The crate's tests do not compile (task #105). A real
-  design constraint was accepted to buy a property that has never existed. The
-  console module shows the same problem being met and worked around locally
-  rather than escalated: four compile-time asserts mirror four `#[cfg(test)]`
-  assertions, with a comment explaining that the crate *"has no host test
-  harness ... so the `#[cfg(test)]` literal asserts below never run. These do."*
+- **The job table was made pure specifically to be host-testable, and for its
+  whole life that property did not exist. It does now (2026-09-22).** The module
+  header gives the design rationale: the table performs no syscalls, so the REPL
+  must drive the reaping and feed results back, *"keeping the table pure makes
+  it host-testable against injected `(pid, status)` pairs."* The crate's tests
+  did not compile at all (task #105) — a real design constraint accepted to buy
+  a property that had never existed. The `backend` feature split fixed that:
+  `eval::jobs` is on the pure side of the line and its tests run.
+
+  **`eval::expr` and the syscall-bearing modules are still behind the gate, and
+  for `expr` the reason is worth stating.** It makes no syscall of its own, but
+  expansion genuinely reaches into `stmt` (command substitution), `glob` and
+  `env` — `$(...)` runs a pipeline and `*.md` asks the filesystem. That is
+  coupling in the shell's design, not an accident of imports, so its 29 tests
+  stay stranded until someone restructures the evaluator. `builtin`, `console`,
+  `env`, `glob` and `stmt` are gated because they do call syscalls, which is
+  exactly the layering rule the crate already states: only the built-ins whose
+  purpose is to mutate THIS Proc reach for one.
+
+  **`console` is the case that stings**, because its `is_raw_command` allowlist
+  — the hardcoded basename set that decides whether a child gets raw mode, most
+  recently extended for `lantern` — is pure and worth testing, and it sits in a
+  module gated for three unrelated `t_write`/`t_fstat` calls. The module already
+  shows the problem being worked around locally rather than escalated: four
+  compile-time asserts mirror four `#[cfg(test)]` assertions, with a comment
+  explaining that the crate *"has no host test harness ... so the `#[cfg(test)]`
+  literal asserts below never run. These do."* Lifting that vocabulary out of
+  the gated module is the obvious next slice.
 
 ## Provenance
 

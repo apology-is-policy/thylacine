@@ -9,6 +9,20 @@ license.workspace = true
 name = "libutopia"
 path = "src/lib.rs"
 
+# `backend` is libthyla-rs, and therefore the syscall half. It is ON by default,
+# so every consumer builds exactly what it built before; turning it OFF drops
+# the modules that reach for a syscall and leaves the pure ones -- which is what
+# makes `cargo test --no-default-features --target <host>` possible at all.
+#
+# Before this, libthyla-rs was an unconditional dependency and its ELF-only
+# `_start` asm could not link for a host target, so the crate could not be
+# compiled off the device and NOT ONE of its unit tests had ever executed
+# anywhere. The measured cost was 399 stranded tests -- the largest such block
+# in the tree by a wide margin (`tools/test-rust.sh` reports it per crate).
+[features]
+default = ["backend"]
+backend = ["dep:libthyla-rs"]
+
 [dependencies]
 # libutopia is the application-helpers layer for the Utopia surface
 # (palette + ANSI emission + path display). It depends on libthyla-rs
@@ -23,7 +37,7 @@ path = "src/lib.rs"
 # a spawned command cannot do. The layering rule that survives is narrower:
 # PARSING and formatting stay pure (and testable); only the built-ins whose
 # whole purpose is to mutate this Proc reach for a syscall.
-libthyla-rs = { path = "../../lib/libthyla-rs" }
+libthyla-rs = { path = "../../lib/libthyla-rs", optional = true }
 # IM-4: the shared, host-tested imperium /proc-line parser + fasces renderer
 # (one parser for the kernel ABI line, also used by the `imperium` tool).
 fasces = { path = "../../lib/fasces" }

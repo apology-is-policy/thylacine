@@ -32,13 +32,22 @@
 // is libthyla_rs::alloc::ThylaAlloc).
 extern crate alloc;
 
+// The `backend` split. A module is gated here iff it reaches for a syscall,
+// and the point of the line is the test suite: without it the crate could not
+// be compiled for a host target at all, so its 399 unit tests ran on no
+// machine. The modules ABOVE the line are the shell's thinking -- the lexer,
+// the parser, expression evaluation, the line editor -- which is the half
+// where a silent regression is both most likely and least visible from a boot.
 pub mod ansi;
-pub mod completion;
-pub mod eval;
 pub mod line_editor;
 pub mod palette;
 pub mod parser;
 pub mod path;
+
+pub mod eval;
+#[cfg(feature = "backend")]
+pub mod completion;
+#[cfg(feature = "backend")]
 pub mod repl;
 
 // Re-export the canonical Pale Fire glyph -- `⊢` U+22A2 RIGHT TACK
