@@ -1536,7 +1536,9 @@ void test_poll_point_keeps_the_deadline(void) {
     TEST_ASSERT(g_busy_last_sample_ns - g_busy_first_sample_ns < BUSY_LATE_NS,
         "returned at its deadline, not when the producer went quiet");
 
-
+    test_kthread_join_free(poller, &g_cp_exited);
+    drop_test_proc(p);
+}
 
 // =============================================================================
 // Regression + coverage (P5-poll audit close #538).
