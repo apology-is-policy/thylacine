@@ -4454,14 +4454,15 @@ void proc_group_terminate_code(struct Proc *p, int code, const char *msg) {
 }
 
 void el0_return_die_check(void) {
-    // ARCH 8.12: this runs INSIDE the approach to the KERNEL_EXIT eret window,
-    // which installs ELR/SPSR and erets under an INHERITED mask -- the one
-    // surviving #713-class window that does not mask locally. #713 was the
-    // year-long AEGIS corruption: 3-13% of boots, never at -smp 1. When the
-    // 8.1 chunk unmasks syscall bodies, THIS is the assert that catches an
-    // unmask that leaked past the re-mask.
-    ASSERT_IRQS_MASKED("the EL0-return tail approaches the KERNEL_EXIT eret "
-                       "window, which inherits its mask (#713)");
+    // NO interrupt-state assert here, and the absence is deliberate: this
+    // function HAS NO UNIFORM interrupt-state contract. Three of its callers
+    // arrive masked (.Lel0_sync_return, the 0x480 IRQ tail,
+    // thread_fork_trampoline), but userland_enter calls it UNMASKED ON
+    // PURPOSE -- userland.S puts it before the `msr daifset, #0xf` precisely
+    // so a die-path exit never enters that window (#713-safe by placement).
+    // The property belongs to the PATH, not to this function; it is asserted
+    // in el0_return_stop_check, whose only two callers are the tails that
+    // reach KERNEL_EXIT under an INHERITED mask.
     struct Thread *t = current_thread();
     if (!t || t->magic != THREAD_MAGIC) return;
     struct Proc *p = t->proc;
@@ -4538,6 +4539,19 @@ static int stop_park_wake_cond(void *arg) {
 }
 
 void el0_return_stop_check(struct exception_context *ctx) {
+    // ARCH 8.12. THE #713 GUARD, and this is the right function for it: the
+    // only two callers are vectors.S's EL0-return tails (the 0x480 IRQ tail
+    // and .Lel0_sync_return), and in both this is the LAST C call before
+    // `b .Lexception_return` -> KERNEL_EXIT, which installs ELR/SPSR and erets
+    // under an INHERITED mask. That is the one surviving #713-class window
+    // that does not mask locally; #713 was the year-long AEGIS corruption,
+    // 3-13% of boots, never at -smp 1.
+    //
+    // Since syscall bodies run with interrupts ON, this is the assert that
+    // catches an unmask leaking past syscall_dispatch's re-mask -- the single
+    // way this chunk could resurrect it.
+    ASSERT_IRQS_MASKED("the EL0-return tail is about to reach KERNEL_EXIT, "
+                       "which inherits its mask (#713)");
     struct Thread *t = current_thread();
     if (!t || t->magic != THREAD_MAGIC) return;
     struct Proc *p = t->proc;
