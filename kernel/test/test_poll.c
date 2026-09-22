@@ -1474,7 +1474,6 @@ void test_poll_stop_parks_a_noise_driven_poll(void) {
 #define POINT_WATCH_NS (100ull * 1000ull * 1000ull)
 
 void test_poll_point_services_noise(void) {
-    u64 pt0 = poll_total_points();
     struct Thread *poller = pn_start();
     const char *err = poller ? NULL : "poller setup";
     if (!err) {
@@ -1482,12 +1481,18 @@ void test_poll_point_services_noise(void) {
         if (g_busy_samples < 3) err = "non-vacuous: the poller is circling on the noise";
     }
     if (!err) {
+        // BOTH baselines are taken here, and the watch runs until BOTH have
+        // advanced: a point count read against a baseline taken before the
+        // poller started is already past 3 when the watch begins, so the
+        // sample check would then measure a zero-length window and fail (or,
+        // worse, pass vacuously). The window must be the same for both.
         u64 s0 = g_busy_samples;
+        u64 p0 = poll_total_points();
         u64 t0 = timer_now_ns();
         while (timer_now_ns() - t0 < POINT_WATCH_NS &&
-               poll_total_points() - pt0 < 3)
+               (poll_total_points() - p0 < 3 || g_busy_samples - s0 < 3))
             sched();
-        if (poll_total_points() - pt0 < 3)
+        if (poll_total_points() - p0 < 3)
             err = "the noise-driven poll keeps reaching the preemption point";
         else if (g_busy_samples - s0 < 3)
             err = "non-vacuous: each point crossing is a real re-loop (re-sampled)";
