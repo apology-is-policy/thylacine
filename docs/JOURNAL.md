@@ -194,15 +194,15 @@ footer, which is distracting on a projected slide. Hiding it means `ESC[?25l`,
 and whether that reaches halcyond's `paints_caret` is unknown -- so it is
 recorded, not guessed at.
 
-**What the earlier draft of this entry said, and why it is wrong.** Three visual questions stay
-open and reading more code cannot answer them: where a short slide sits in a tall
-tile; whether a slide's title should be emitted as `HdrClass::Title` (the class a
-rich stylesheet centres, which is the slide look) rather than the plain
-`Op::Hdr level=1` `manual::render` emits today; and whether to hide the cursor
-while presenting. Recorded in `docs/LANTERN-DESIGN.md` §11 as questions to settle
-by looking. The guest build has not been run either -- the SMP gate held all 8
-cores, and contending with a timing-sensitive gate to save ten minutes is how a
-red result becomes unattributable.
+**Posture at the close.** SMP gate PASS (5/5 configs, 50 boots, 0 corruption --
+including `default-smp1`, the row main warned might be red). `lantern.exp` 6/6
+legs on serial; `ls-halcyon-lantern.exp` 4/4 in a real tile. Host tests 23/23 for
+lantern, 1500 across the tree. Pushed to both mirrors, verified by `ls-remote`.
+
+One process note, since it shaped the order of everything above: the guest build
+waited until the SMP gate finished, because contending with a timing-sensitive
+gate to save ten minutes is how a red result becomes unattributable. The reading
+and authoring work filled that window instead.
 
 ---
 ## 2026-09-22, later still (main, Opus 5 1M, effort max) -- the loom join: a 100 % boot hang that no gate could see
