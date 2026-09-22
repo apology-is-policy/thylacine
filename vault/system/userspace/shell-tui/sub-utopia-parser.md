@@ -232,14 +232,36 @@ Nothing here is on a hot path — it runs once per line typed.
   documents itself as not taking and which every production caller in `parse.rs`
   strips. The remaining **8 are 6 genuine defects**, quarantined with
   `#[ignore = "UT-PARSE-n"]` reasons so the gate keeps its signal for new
-  breakage while each debt stays greppable: a redirect target that is a keyword
-  is refused (`cmd < in`); `(a; (b; c))` is rejected because the lexer emits
-  `DoubleRParen` for any `))` context-free; truncated input reports
-  `UnexpectedToken` where `UnexpectedEof` is expected, which needs checking
-  against the REPL's line-continuation logic before it is called cosmetic; `cmd
-  =arg` does not parse as two words though the test's comment records that
-  intent; a backtick fixture; and one line-editor ESC ESC case. Each is owed its
-  own chunk.
+  breakage while each debt stays greppable. **UT-PARSE-3 is FIXED** (below);
+  the rest are open: a redirect target that is a keyword is refused (`cmd <
+  in`); `cmd =arg` does not parse as two words though the test's comment
+  records that intent; a backtick fixture; and one line-editor ESC ESC case.
+  **UT-PARSE-4 was investigated and downgraded** -- truncated input reports
+  `UnexpectedToken` where `UnexpectedEof` is expected, and the theory that this
+  could break the REPL's line-continuation is FALSE: `line_editor` decides
+  submission with its own `balance(buffer)` tracker (*"intentionally
+  lightweight; the U-5 parser is authoritative"*), and nothing outside
+  `parser/` consumes `UnexpectedEof` at all. Its blast radius is the diagnostic
+  a truncated script file prints.
+
+- **`))` is split at the parse site, not lexed in context** (UT-PARSE-3, fixed
+  2026-09-22). The lexer is context-free and emits `DoubleRParen` for any `))`,
+  which is right for `$(( ))` and wrong for `(a; (b; c))`, where two subshells
+  close with nothing between them. `Parser::split_double_rparen` rewrites that
+  token in place into two `RParen`s carrying the two halves of its span, and is
+  called from `parse_block_statements_until` only when the end token IS
+  `RParen` -- so an arithmetic `))`, which `parse_arith_command`'s own depth
+  accounting consumes before this is reached, is untouched. It is called twice
+  per iteration and both sites are load-bearing: once before looking for the
+  end token, and once before JUDGING the statement terminator, because the
+  inner subshell's last statement finishes with `))` current and the terminator
+  check is what fires first.
+
+  **The opening side is deliberately NOT symmetric.** `((` is the arithmetic
+  opener, so `((a; b); c)` is read as arithmetic and fails on `a` -- exactly as
+  it does in sh, with the same remedy, a space. That is pinned by an assertion
+  rather than left as current behaviour, so a future lexer mode cannot silently
+  turn it into a subshell.
 
   The separate in-guest binary that drives the public entry points on every boot
   remains, so the parser now has BOTH bodies of test intent live — and the

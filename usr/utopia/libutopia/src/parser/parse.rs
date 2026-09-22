@@ -218,6 +218,32 @@ impl Parser {
     }
 
     /// Tokens that can legally follow a statement (terminators).
+    /// Split a `))` token in place into two `)`, when the parser is somewhere
+    /// that wants a single one.
+    ///
+    /// The lexer is context-free and emits `DoubleRParen` for any `))`, which
+    /// is right for `$(( ))` and wrong for a nested subshell -- `(a; (b; c))`
+    /// closes two subshells with no space between them, and arrived as one
+    /// arithmetic token that matched nothing. Splitting at the parse site is
+    /// the standard answer (Rust's own parser does it for `>>` closing two
+    /// generic lists) and is strictly safer than a lexer mode: it changes the
+    /// stream only where a single `)` is already what the grammar asks for,
+    /// so an arithmetic `))` -- consumed by `parse_arith_command`'s own depth
+    /// accounting before this is ever reached -- is untouched.
+    ///
+    /// The two halves carry the two halves of the original span, so a
+    /// diagnostic still points at the right column.
+    fn split_double_rparen(&mut self) {
+        if !matches!(self.peek_kind(), Some(TokenKind::DoubleRParen)) {
+            return;
+        }
+        let span = self.tokens[self.pos].span;
+        let mid = span.start + 1;
+        self.tokens[self.pos] = Token::new(TokenKind::RParen, Span::new(span.start, mid));
+        self.tokens
+            .insert(self.pos + 1, Token::new(TokenKind::RParen, Span::new(mid, span.end)));
+    }
+
     fn at_statement_terminator(&self) -> bool {
         matches!(
             self.peek_kind(),
@@ -796,8 +822,13 @@ impl Parser {
         end_token: TokenKind,
     ) -> ParseResult<Vec<Statement>> {
         let mut stmts = Vec::new();
+        let ends_on_rparen =
+            core::mem::discriminant(&end_token) == core::mem::discriminant(&TokenKind::RParen);
         loop {
             self.skip_separators();
+            if ends_on_rparen {
+                self.split_double_rparen();
+            }
             match self.peek_kind() {
                 Some(k) if core::mem::discriminant(k) == core::mem::discriminant(&end_token) => {
                     break
@@ -806,6 +837,13 @@ impl Parser {
                 _ => {}
             }
             let stmt = self.parse_statement()?;
+            // Before JUDGING the terminator, not only before looking for the
+            // end token: `(a; (b; c))` reaches this point with the inner
+            // subshell's `c` parsed and `))` current, and a `)` is exactly the
+            // terminator this is about to ask for.
+            if ends_on_rparen {
+                self.split_double_rparen();
+            }
             if !self.at_statement_terminator() {
                 return Err(ParseError {
                     kind: ParseErrorKind::UnexpectedToken {
@@ -2220,8 +2258,50 @@ mod tests {
         }
     }
 
+    /// UT-PARSE-3's fix, generalized -- and its other half: the split must not
+    /// touch a `))` that MEANS arithmetic.
+    ///
+    /// The single-case test below would pass for a fix that special-cased
+    /// exactly `(a; (b; c))`, so this nests three deep as well -- `)))` lexes
+    /// as DoubleRParen + RParen, a different shape from `))` -- and pairs it
+    /// with arithmetic in the positions where a lexer-mode fix would go wrong.
+    ///
+    /// The OPENING side is deliberately not symmetric, and this test is where
+    /// that gets recorded: `((` is the arithmetic opener, so `((a; b); c)` is
+    /// read as arithmetic and fails on `a`, exactly as it does in sh. The
+    /// remedy there is the same as sh's -- a space, `( (a; b); c)` -- and it is
+    /// asserted below so that behaviour is pinned rather than merely current.
     #[test]
-    #[ignore = "UT-PARSE-3: `(a; (b; c))` -- the lexer emits DoubleRParen for any `))`"]
+    fn adjacent_closing_parens_split_but_arithmetic_does_not() {
+        let subshell = |src: &str| {
+            let s = parse_ok(src);
+            assert_eq!(s.statements.len(), 1, "{src}");
+            assert!(
+                matches!(&s.statements[0].kind, StatementKind::Pipeline(p)
+                    if matches!(p.elements[0].command.kind, CommandKind::Subshell(_))),
+                "{src} is a subshell"
+            );
+        };
+        subshell("(a; (b; c))");
+        subshell("(a; (b; (c; d)))");
+        subshell("( (a; b); c)");
+
+        // Arithmetic still owns its own `))`: a statement-level `((...))`, and
+        // an expansion inside a subshell, where the closes ARE adjacent.
+        parse_ok("((1 + 2))");
+        parse_ok("echo $((1 + 2))");
+        parse_ok("(echo $((1 + 2)))");
+        parse_ok("(a; echo $((1 + 2)))");
+
+        // And the sh-shaped ambiguity, pinned: a leading `((` is arithmetic,
+        // so this is NOT a nested subshell and must not silently become one.
+        assert!(matches!(
+            parse_err("((a; b); c)"),
+            ParseErrorKind::InvalidArithLiteral
+        ));
+    }
+
+    #[test]
     fn nested_subshell_inside_subshell() {
         let s = parse_ok("(a; (b; c))");
         match &s.statements[0].kind {
