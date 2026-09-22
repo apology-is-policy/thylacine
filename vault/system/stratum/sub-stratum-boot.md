@@ -12,7 +12,7 @@ locks: []
 abis: []
 design: ["docs/reference/86-pouch-stratumd-boot.md (the 16c design section)"]
 created: 2026-08-02
-updated: 2026-09-21
+updated: 2026-09-22
 ---
 ## Purpose
 
@@ -242,8 +242,11 @@ event-driven; no timing constant appears in this path.
 
 ## Caveats
 
-- **joey's boot-fatal pouch provers are matched on a LEG CENSUS, and the four
-  census strings are not joey's to type.** `pouch_smoke_core` matches each
+- **joey's boot-fatal pouch provers are matched on a LEG CENSUS, and the
+  census strings are not joey's to type** (count them from the header with
+  `grep -c '^#define POUCH_CENSUS_' usr/pouch-hello/pouch-census.h` -- this
+  line said "four" until A-6 added a fifth, which is why it no longer says a
+  number).** `pouch_smoke_core` matches each
   prover's marker (`<name>: legs=a,b,c: exit 0`) rather than `exit 0`, so a
   stale binary cannot pass for one with a new leg; since 2026-09-21 the strings
   come from `usr/pouch-hello/pouch-census.h`, which the prover that prints each

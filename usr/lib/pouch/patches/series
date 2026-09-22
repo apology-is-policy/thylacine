@@ -128,3 +128,11 @@
 # early 0); pselect()'s microsecond round-up carried into tv_sec at TIME_MAX.
 # Clamp before the multiply; no carry past INT_MAX s. Pre-existing (0005).
 0042-pouch-timeout-clamp.patch
+# 0043: A-6 (IDENTITY-DESIGN 9.10) -- the identity calls stop lying. musl's
+# getuid/geteuid/getgid/getegid are CANNOT-FAIL (`return __syscall(SYS_x);`),
+# so the 0xFFFF sentinel's -ENOSYS was cast to uid_t and every Pouch program
+# was told its uid is 0xFFFFFFDA. Retargeted onto SYS_GETUID(73)/SYS_GETGID(74).
+# A DIFFERENT SHAPE from 0032/0033/0034/0037 -- those are unchecked wrappers
+# with an out-struct, and 0037's sweep looked for an IGNORED return, so it was
+# structurally blind to this one, where the return IS the lie.
+0043-pouch-identity-calls.patch

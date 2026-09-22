@@ -977,6 +977,23 @@ static int do_pouch_hello_smoke(void) {
         return -1;
     t_putstr("joey: pouch-hello-poll smoke ok (poll + select over SYS_POLL via devpipe)\n");
 
+    // A-6 (IDENTITY-DESIGN section 9.10): the identity calls tell the truth.
+    // musl's getuid/geteuid/getgid/getegid are CANNOT-FAIL by contract
+    // (`return __syscall(SYS_x);`), so while they sat on the 0xFFFF sentinel
+    // every Pouch program was told its uid was 0xFFFFFFDA -- a lie it could
+    // not detect, not an error it could check. Patch 0043 retargets them onto
+    // SYS_GETUID/SYS_GETGID. The probe does not assert a LITERAL principal
+    // (which would pass for the wrong reason the moment the boot principal
+    // changed, and would not prove the call reaches the kernel at all): it
+    // reads this same Proc's identity back through devproc's independent
+    // `principal:<N> gid:<M>` channel and demands the two AGREE.
+    static const char pid_name[]   = "pouch-hello-identity";
+    static const char pid_expect[] = POUCH_CENSUS_IDENTITY;
+    if (pouch_smoke_one(pid_name, sizeof(pid_name) - 1,
+                        pid_expect, sizeof(pid_expect) - 1) != 0)
+        return -1;
+    t_putstr("joey: pouch-hello-identity smoke ok (A-6: getuid/getgid agree with /proc; not the ENOSYS sentinel)\n");
+
     // P6-pouch-devnodes (sub-chunk 11): the getrandom proving binary.
     // Spawned with CAP_CSPRNG_READ so musl's getrandom(2) reaches the
     // SYS_GETRANDOM kernel handler (gated on the cap). This is the path

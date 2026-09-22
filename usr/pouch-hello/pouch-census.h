@@ -1,4 +1,4 @@
-// The four provers' LEG CENSUS markers -- one definition, read by the prover
+// The five provers' LEG CENSUS markers -- one definition, read by the prover
 // that prints it and by joey, which matches it.
 //
 // A marker names every leg its prover runs, so a STALE binary (the bake traps
@@ -17,5 +17,7 @@
     "pouch-hello-sockets: legs=refusals,paths,round-trip,peercred,stdio,ppoll,ppoll-eof,slots,fdset-guard: exit 0"
 #define POUCH_CENSUS_FOPEN \
     "pouch-hello-fopen: legs=create,append-omode,truncate,excl,unlink,remove,tmpfile,scan: exit 0"
+#define POUCH_CENSUS_IDENTITY \
+    "pouch-hello-identity: legs=getpid,proc-status,uid-agrees,gid-agrees,not-sentinel: exit 0"
 
 #endif

@@ -65,14 +65,14 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**523 owned · 48 unowned · 571 files (91% owned) · ~13165 unswept lines.**
+**524 owned · 48 unowned · 572 files (91% owned) · ~13165 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **73 files, ~33174 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
 | usr/warp-prove | 0 | 1 | 4349 |
-| usr/pouch-hello | 6 | 17 | 2487 |
+| usr/pouch-hello | 7 | 17 | 2487 |
 | kernel | 127 | 14 | 1981 |
 | usr/ports | 19 | 4 | 1631 |
 | usr/quarry | 0 | 1 | 1033 |

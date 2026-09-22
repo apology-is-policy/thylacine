@@ -22,6 +22,91 @@ needed the operator.
 
 
 ---
+## 2026-09-22, evening (main, Opus 5 1M, effort max) -- A-6: the libc that lied about who you are
+
+The identity chunk the operator ratified as option (B). Two commits so far --
+`c980b059` (scripture, no code) and the implementation below -- plus one in the
+Stratum tree.
+
+**The defect.** Pouch's libc lied about your uid. musl's five identity calls are
+**cannot-fail by contract** -- each is literally `return __syscall(SYS_x);` with
+no error path -- and patch 0001 parks their numbers at the `0xFFFF`
+unimplemented-syscall sentinel, so `-ENOSYS` was cast straight to `uid_t` and
+every Pouch program was told its uid was `0xFFFFFFDA`. Not an error it could
+check. A lie it could not detect.
+
+**The part worth keeping is WHY no sweep had found it.** The known family --
+0032/0033/0034/0037 -- is *an unchecked wrapper whose out-struct the caller then
+reads*, and 0037's sweep is scoped in its own words to "a wrapper over a
+sentinel whose RETURN VALUE IS IGNORED". Here the return is not ignored: **the
+return IS the lie.** A sweep scoped to ignored returns is structurally blind to
+it. **A sweep is bounded by the shape it names, and 0037's write-up records its
+method without noticing the gap.**
+
+So I ran the shape-2 sweep: parse the patched number table into parked (288) vs
+real (44), find every `return __syscall(` on a parked number, then judge each by
+whether the CALLER can tell. **Nine sites.** Five are the identity calls. Of the
+other four, two are genuine and open -- `times()` (which is BOTH shapes at once:
+raw return AND an unfilled `struct tms`, probably why neither sweep caught it)
+and `timer_delete()` -- one is dead code under the sentinel (`fcntl`, already
+tracked), and one is not a defect at all: a futex helper whose caller consumes
+the value AS an error code. That last one is the control that proves the sweep
+discriminates rather than flagging every raw return. The residue is enqueued,
+not folded, with the method recorded.
+
+**The Stratum half, and why both halves had to land together.** stratumd stamped
+its `/ctl` admin from its own `geteuid()`. That is sound on Linux, where a
+daemon's euid names the daemon; it is wrong on Thylacine, where
+`PRINCIPAL_SYSTEM` is a **shared TCB identity** -- init, the warden and every
+boot service share it. Landing the truthful libc first, against that file
+unchanged, would have turned a latent misconfiguration LIVE in one boot:
+`geteuid()` starts returning `PRINCIPAL_SYSTEM`, `admin_uid` becomes
+`PRINCIPAL_SYSTEM`, and every SYSTEM peer acquires `/ctl` admin. **The sentinel
+was masking a real misconfiguration -- the most dangerous kind of lie, one whose
+removal is itself the exploit.** New `--admin-uid` flag; omitted, the daemon does
+not call the setter at all and `admin_uid` keeps its deny-by-default. That
+reproduces today's behaviour exactly, because the sentinel already matched no
+principal.
+
+**The survey paid for itself.** A full read of every identity consumer in
+Stratum's `src/` found 3 `getuid` + 4 `geteuid` + 11 `getgid` + 1 `getegid` and
+zero `getppid`, and corrected my note in two places: the three "same fallback"
+sites are three DIFFERENT accept loops, and there are 8 `getgid()` sites in
+`stratum-fs` stamping `0xFFFFFFDA` as the group of every object the CLI creates,
+not the one I had spot-checked. It also showed the truthful half REPAIRS two
+gates that were refusing everything -- janus's self-uid peer check and the corvus
+keyslot-token gate were both comparing a real principal against the sentinel.
+
+**The witness, and the sabotage.** `pouch-hello-identity` deliberately does not
+assert a literal principal -- that would pass for the wrong reason the moment the
+boot principal changed, and would never prove the call reaches the kernel at all.
+It reads the same Proc's identity back through devproc's independent
+`principal:<N> gid:<M>` channel and demands agreement. Measured both ways:
+patch removed -> `uid=4294967258` (`0xFFFFFFDA`), the probe names the sentinel,
+**the boot fails**; patch applied -> both channels read `4294967294`, suite
+1616/1616.
+
+**Two wrong turns, both mine.**
+
+I wrote the probe to match on `exit 0`, then found in `sub-stratum-boot` that
+joey matches its boot-fatal provers on a **leg census** precisely so a stale
+binary from a bake trap cannot pass a probe whose legs it never ran. My probe
+has five legs. It now carries a census string like the others.
+
+And I ran `build.sh` **while the SMP gate was booting from the same tree** --
+so boots before and after my rebuild were booting different kernels. The verdict
+might still have come out green, and that is exactly the problem: it would no
+longer have been a coherent measurement of one tree. Killed it and restarted
+clean rather than keep a number I could not describe honestly. This is the
+second contention-shaped invalidation today; the first was a subagent's stray VM.
+**The gate owns the tree while it runs, and "I only rebuilt" is not an exception.**
+
+**A typed count, caught one edit before it rotted.** Two dossiers said the census
+had "four" strings. The caveat immediately below one of them warns "never from a
+number typed here: this caveat said 31 while the series was 38". Rather than
+retype "five", both now give the derivation command.
+
+---
 ## 2026-09-22, later still (main, Opus 5 1M, effort max) -- the loom join: a 100 % boot hang that no gate could see
 
 The first item of the run the operator ratified ("fold the loom fix into the
