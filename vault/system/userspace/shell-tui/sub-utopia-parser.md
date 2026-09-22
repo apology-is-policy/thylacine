@@ -232,12 +232,17 @@ Nothing here is on a hot path — it runs once per line typed.
   documents itself as not taking and which every production caller in `parse.rs`
   strips. The remaining **8 are 6 genuine defects**, quarantined with
   `#[ignore = "UT-PARSE-n"]` reasons so the gate keeps its signal for new
-  breakage while each debt stays greppable. **UT-PARSE-1, -3 and -5 are FIXED**
-  (below) and **UT-PARSE-2 was WITHDRAWN** -- it asserted `cmd =arg` is two
-  words, which contradicts `UTOPIA-SHELL-DESIGN.md` 6.1's documented
-  `x = value` assignment form, so the parser was right and the never-run test
-  had encoded an intent the grammar moved past. One line-editor ESC ESC case
-  (UT-EDIT-1) and UT-PARSE-4 remain open.
+  breakage while each debt stayed greppable. **All six are now closed, and the
+  split is the interesting part: four were real and two were the tests being
+  wrong.** FIXED: UT-PARSE-1 (reserved words off the command word), -3 (`))`
+  split), -4 (truncation reports Eof), -5 (the backtick form, operator-
+  ratified). WITHDRAWN: UT-PARSE-2 asserted `cmd =arg` is two words, which
+  contradicts `UTOPIA-SHELL-DESIGN.md` 6.1's documented `x = value` form, so
+  the parser was right; UT-EDIT-1 asserted `ESC ESC` returns to Ground, and the
+  editor deliberately restarts the sequence as the VT machine does. A test that
+  has never run has never had a chance to be right either, so each one was
+  settled from the CONTRACT -- scripture, the heritage, or the documented state
+  machine -- rather than by editing whichever side was cheaper.
   **UT-PARSE-4 was investigated and downgraded** -- truncated input reports
   `UnexpectedToken` where `UnexpectedEof` is expected, and the theory that this
   could break the REPL's line-continuation is FALSE: `line_editor` decides
@@ -245,6 +250,19 @@ Nothing here is on a hot path — it runs once per line typed.
   lightweight; the U-5 parser is authoritative"*), and nothing outside
   `parser/` consumes `UnexpectedEof` at all. Its blast radius is the diagnostic
   a truncated script file prints.
+
+- **Running out of input says so** (UT-PARSE-4, fixed 2026-09-22).
+  `expect_kind`'s `UnexpectedEof` arm keyed on `peek_kind() == None` and was
+  therefore UNREACHABLE: `tokenize` always appends a synthetic `Eof` TOKEN, so
+  exhausted input arrives as `Some(Eof)` and fell through to the general
+  wrong-token arm. Every expect site in the parser was discarding the fact that
+  the input had ended, reporting `{ a; b` as "unexpected token, expected `}`"
+  pointing at a token the user never typed. An explicit `Some(Eof)` arm
+  restores it. Not a continuation bug -- the line editor decides submission
+  with its own brace tracker -- so the blast radius is the diagnostic a
+  truncated script file prints. The test carries the control that matters: a
+  complete-but-malformed input must still NOT report Eof, which is the failure
+  mode of the careless version of this fix.
 
 - **A reserved word is reserved only in COMMAND-WORD position** (UT-PARSE-1,
   fixed 2026-09-22). Before this, the sixteen words in

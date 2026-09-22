@@ -168,6 +168,17 @@ impl Parser {
             Some(k) if core::mem::discriminant(k) == core::mem::discriminant(&want) => {
                 Ok(self.advance())
             }
+            // The stream always ENDS with a synthetic Eof token (`tokenize`),
+            // so running out of input arrives here as `Some(Eof)` and the
+            // `None` arm below is unreachable in practice. Without this arm,
+            // `{ a; b` reported "unexpected token, expected `}`" pointing at a
+            // token the user never typed, instead of "unexpected end of
+            // input" -- the fact that the input RAN OUT was being thrown away
+            // at every expect site in the parser.
+            Some(TokenKind::Eof) => Err(ParseError {
+                kind: ParseErrorKind::UnexpectedEof { expected: label },
+                span: self.eof_span(),
+            }),
             Some(_) => Err(ParseError {
                 kind: ParseErrorKind::UnexpectedToken { expected: label },
                 span: self.current_span(),
@@ -2442,8 +2453,34 @@ mod tests {
         }
     }
 
+    /// UT-PARSE-4: input that RAN OUT says so, and input that merely went
+    /// wrong still says THAT.
+    ///
+    /// The second half is the control, and without it this is satisfied by a
+    /// parser that answers `UnexpectedEof` to everything -- which is exactly
+    /// what a careless fix to `expect_kind` would produce, since the arm added
+    /// there sits in front of the general one.
     #[test]
-    #[ignore = "UT-PARSE-4: truncated input reports UnexpectedToken, not UnexpectedEof"]
+    fn truncation_reports_eof_and_a_real_wrong_token_still_does_not() {
+        for src in ["{ a; b", "if (x) { a", "fn f {", "while (x) {", "case $x {"] {
+            assert!(
+                matches!(parse_err(src), ParseErrorKind::UnexpectedEof { .. }),
+                "{src} ran out of input, so the error must say so: {:?}",
+                parse_err(src)
+            );
+        }
+        // Not truncated -- the input is complete and simply wrong. These must
+        // NOT become Eof errors.
+        for src in ["if x { a }", "fn { a }"] {
+            assert!(
+                !matches!(parse_err(src), ParseErrorKind::UnexpectedEof { .. }),
+                "{src} is complete but malformed, not truncated: {:?}",
+                parse_err(src)
+            );
+        }
+    }
+
+    #[test]
     fn unclosed_brace_errors() {
         match parse_err("{ a; b") {
             ParseErrorKind::UnexpectedEof { .. } => {}
@@ -2452,7 +2489,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "UT-PARSE-4: truncated input reports UnexpectedToken, not UnexpectedEof"]
     fn unclosed_if_errors() {
         match parse_err("if (x) { a") {
             ParseErrorKind::UnexpectedEof { .. } => {}

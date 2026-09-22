@@ -439,7 +439,13 @@ enum Action {
 // State transitions:
 //   Ground -> ESC seen -> Escape
 //   Escape -> '[' seen -> Csi (CSI/CSI prefix; parse params + final)
-//   Escape -> anything else -> Ground (sequence aborted)
+//   Escape -> ESC -> Escape (restart: the first ESC is abandoned,
+//                             the second begins a fresh sequence -- the
+//                             VT rule, and why ESC ESC does not return
+//                             to Ground)
+//   Escape -> anything else -> Ground (sequence aborted; the byte is
+//                             CONSUMED, which is the slot reserved for
+//                             future Alt-<letter> bindings)
 //   Csi -> digit -> accumulate param
 //   Csi -> ';' -> next param
 //   Csi -> final char -> apply action, Ground
@@ -2232,14 +2238,38 @@ mod tests {
         assert_eq!(le.buffer(), "a");
     }
 
+    /// UT-EDIT-1, investigated and WITHDRAWN: the editor is right.
+    ///
+    /// This asserted that `ESC ESC` returns to Ground, so a following `a` is
+    /// inserted. It does not, deliberately: `parse_escape` treats a second ESC
+    /// as RESTARTING the sequence, which is what the VT state machine does
+    /// (an ESC in escape state clears and re-enters escape), and the `a` is
+    /// then consumed as the final byte of `ESC a` -- the slot reserved for
+    /// Alt-key bindings.
+    ///
+    /// It is also internally consistent, which is the argument that settles
+    /// it: a SINGLE ESC already swallows the next printable for the same
+    /// reason, so `ESC ESC a` losing one character is the same rule applied
+    /// twice, not a second surprise. Having never run, the test encoded an
+    /// expectation the editor had not adopted.
     #[test]
-    #[ignore = "UT-EDIT-1: ESC ESC leaves the pending byte unconsumed"]
-    fn esc_esc_resets_parser() {
+    fn esc_esc_restarts_the_sequence_and_esc_letter_is_reserved() {
         let mut le = LineEditor::new();
         feed(&mut le, b"\x1b\x1b");
-        // Both ESCs should leave us in Ground; subsequent 'a' is inserted.
         le.feed_byte(b'a');
-        assert_eq!(le.buffer(), "a");
+        assert_eq!(le.buffer(), "", "ESC a is a reserved sequence, not text");
+        // Still live afterwards: the NEXT byte types normally, so a stray ESC
+        // costs one character and never wedges the line.
+        le.feed_byte(b'b');
+        assert_eq!(le.buffer(), "b");
+
+        // The single-ESC form is the same rule, stated once.
+        let mut le = LineEditor::new();
+        le.feed_byte(0x1b);
+        le.feed_byte(b'x');
+        assert_eq!(le.buffer(), "");
+        le.feed_byte(b'y');
+        assert_eq!(le.buffer(), "y");
     }
 
     #[test]
