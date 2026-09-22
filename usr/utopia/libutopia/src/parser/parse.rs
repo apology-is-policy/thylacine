@@ -2000,17 +2000,47 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "UT-PARSE-2: `cmd =arg` does not parse as a two-word simple command"]
-    fn equal_in_argument_position_is_literal() {
-        // A `=` in argument position is a literal, not an assignment (was
-        // UnexpectedEqualInCommand). `cmd =arg` -> two words: "cmd", "=arg".
-        let s = parse_ok("cmd =arg");
+    /// UT-PARSE-2, investigated and WITHDRAWN: the parser is right and this
+    /// test's original expectation was not.
+    ///
+    /// It asserted `cmd =arg` parses as the two words "cmd" and "=arg". That
+    /// contradicts `docs/UTOPIA-SHELL-DESIGN.md` section 6.1, which documents
+    /// bare assignment as `x = value` -- spaces around `=`, rc's form, not
+    /// POSIX's adjacency rule. Under that grammar `cmd =arg` IS an assignment,
+    /// and measuring confirms the parser is consistent about it: all four of
+    /// `cmd =arg`, `cmd = arg`, `cmd= arg` and `cmd=arg` are assignments.
+    /// Never having run, the test encoded an intent that the grammar had moved
+    /// past.
+    ///
+    /// **The case worth knowing about is `echo =arg`, which ASSIGNS** -- to a
+    /// variable named `echo` -- rather than printing `=arg`. That is inherent
+    /// to an rc-style assignment and rc behaves the same way; it is pinned here
+    /// so it is a known property of the grammar rather than a surprise
+    /// someone rediscovers. Changing it would be a scripture change, not a bug
+    /// fix.
+    ///
+    /// `=` IS a literal once a command word is established, which is the half
+    /// the original test was reaching for: `echo a =b` is three words.
+    #[test]
+    fn equal_is_assignment_at_statement_start_and_literal_after_a_word() {
+        for src in ["cmd =arg", "cmd = arg", "cmd= arg", "cmd=arg", "echo =arg"] {
+            let s = parse_ok(src);
+            assert!(
+                matches!(&s.statements[0].kind, StatementKind::Assign(_)),
+                "{src} is an assignment under UTOPIA-SHELL-DESIGN 6.1"
+            );
+        }
+        let s = parse_ok("echo a =b");
         match &s.statements[0].kind {
             StatementKind::Pipeline(p) => match &p.elements[0].command.kind {
-                CommandKind::Simple(sc) => assert_eq!(sc.words.len(), 2),
-                _ => panic!(),
+                CommandKind::Simple(sc) => assert_eq!(
+                    sc.words.len(),
+                    3,
+                    "past the command word a `=` is a literal argument"
+                ),
+                _ => panic!("expected a simple command"),
             },
-            _ => panic!(),
+            _ => panic!("expected a pipeline"),
         }
     }
 
