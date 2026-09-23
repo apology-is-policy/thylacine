@@ -16,7 +16,7 @@ locks: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md section 5.5", "docs/IDENTITY-DESIGN.md section 9.8", "specs/corvus.tla", "specs/handles.tla"]
 created: 2026-08-02
-updated: 2026-09-21
+updated: 2026-09-23
 ---
 ## Graphical grant commit
 
@@ -45,6 +45,40 @@ The single sanctioned path by which a Proc gains one is the `cap` device,
 and everything in this dossier exists to make that the only path.
 
 ## Contract
+
+**`CAP_TCB_DIAL` + a real coverage assert (U, 2026-09-23).** Bit 14, the
+fifteenth capability, gating open=connect on a TCB **byte** service in `/srv`
+([[sub-kernel-devsrv]], STALK-DESIGN 5.2 / D8). **FORK-GRANTABLE** -- a member
+of `CAP_ALL`, not of `CAP_ELEVATION_ONLY` -- because it flows down the vetted
+boot chain exactly as `CAP_SET_IDENTITY` does: kproc -> joey -> `/sbin/login` ->
+the per-user home proxy login spawns. That proxy runs as the USER, so the
+authority to dial cannot be an identity check; a clearance would be the wrong
+shape too, since the proxy is SPAWNED rather than elevated.
+
+The same chunk replaced the `CAP_ALL` assert, which compared the macro against
+its own definition token for token (`X == X`) and could not fail, with a real
+COVERAGE assert `(CAP_ALL | CAP_ELEVATION_ONLY) == CAP_DEFINED`. Its two sides
+are independent lists, so omitting a new bit from either one now fails the
+build. Task #35; the full account, including the sabotage that proves the new
+guard fires where the old one did not, is in [[abi-caps]].
+
+**A capability is not a boundary on its own -- the holder must also be
+unpuppetable ((U) F1, 2026-09-23).** The header comment beside `CAP_TCB_DIAL`
+used to say the hole in this reasoning was open; it is now closed, and the fix
+lives nowhere near this file. Because the home proxy runs AS the user, the user's
+own shell is the same principal, and [[inv-i39]]'s debug gate admits an OWNER --
+so the shell could debug-attach the proxy and drive its transport without ever
+holding bit 14. Closed by `SPAWN_PERM_NOTRACE` on the proxy's spawn
+([[sub-kernel-syscall-dispatch]], [[sub-stratum-session]]).
+
+The transferable lesson, and the reason it is recorded HERE rather than only at
+the fix: **granting a capability to a process that shares a principal with an
+attacker grants it to the attacker, unless something separately stops the
+attacker from driving that process.** A capability answers "who may act"; it says
+nothing about who may act THROUGH the actor. Any future fork-grantable bit handed
+to a service that runs as a user inherits this whole problem, and the checklist
+is two items, not one: give it the bit, and make it untraceable.
+
 
 **Propagating Imperium and Haul (2026-09-17).** `CAP_GRANTABLE_IMPERIUM`
 is DAC_OVERRIDE | CHOWN | KILL | POST_SERVICE. The last bit is 13 (12 remains
@@ -232,8 +266,11 @@ handful of times per boot. Not a hot surface.
 ## Prosecution
 
 - A new capability bit must be added to `CAP_ALL` **or** to
-  `CAP_ELEVATION_ONLY`, never both and never neither; both asserts must be
-  updated deliberately.
+  `CAP_ELEVATION_ONLY`, never both and never neither. Since (U) BOTH halves
+  are build-enforced -- disjointness forbids a bit in both classes, coverage
+  forbids one in neither. Prosecute that the coverage assert's two sides stay
+  INDEPENDENT lists: rewriting either in terms of the other restores the
+  tautology that was #35.
 - Any new register path must write **every** entry field, or a re-register
   across kinds leaves a stale discriminator.
 - The redeem must keep reading `kind` inside the same locked lookup that

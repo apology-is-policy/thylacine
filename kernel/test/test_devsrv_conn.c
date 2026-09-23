@@ -70,6 +70,7 @@
 #include <thylacine/dev.h>
 #include <thylacine/devsrv.h>
 #include <thylacine/dma_handle.h>
+#include <thylacine/errno.h>
 #include <thylacine/handle.h>
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
@@ -120,6 +121,8 @@ void test_devsrv_srv_peer_renderer_flag(void);
 void test_devsrv_srv_peer_gate(void);
 void test_devsrv_srv_peer_bad_args(void);
 void test_devsrv_seat_import_gates(void);
+void test_devsrv_srv_connect_gate_decides(void);
+void test_devsrv_srv_connect_gate(void);
 
 // ---------------------------------------------------------------------------
 // Helpers.
@@ -183,6 +186,22 @@ static int post_svc_byte(struct Proc *p, const char *name, size_t name_len) {
 // 9P) so the connect returns without a server handshake -- a unit test has no
 // server thread to answer Tversion/Tattach. `name` must be NUL-terminated.
 static struct Spoor *connect_byte(struct Proc *p, const char *name) {
+    // (U) the connect gate (STALK-DESIGN 5.2 / D8) refuses a capless Proc on a
+    // TCB-posted byte service. These tests model a LEGITIMATE dialer -- in
+    // production joey, login, or the per-user home proxy, each of which holds
+    // CAP_TCB_DIAL -- so the capability is stamped for the duration of the
+    // connect and every test goes on exercising its own subject. The gate's own
+    // arms are asserted in devsrv.srv_connect_gate{,_decides}.
+    //
+    // SAVED AND RESTORED, not simply OR-ed in: a fixture that silently widens
+    // its argument's authority and leaves it widened corrupts any later
+    // assertion ABOUT that authority. It did exactly that -- srv_peer_identity
+    // sets client->caps and then asserts SYS_SRV_PEER reads it back, and an
+    // un-restored stamp made the live read return the extra bit (audit F2).
+    // The gate only consults caps AT the connect, so the narrow scope is
+    // sufficient as well as safer.
+    caps_t lc_saved_caps = p->caps;
+    p->caps |= CAP_TCB_DIAL;
     struct Spoor *root = devsrv_attach_registry(srv_boot_registry());
     if (!root) return NULL;
     struct Spoor *sref = spoor_clone(root);
@@ -194,6 +213,7 @@ static struct Spoor *connect_byte(struct Proc *p, const char *name) {
     struct Spoor *cs = devsrv_open_connect(p, sref, /*omode ORDWR*/ 2);
     spoor_clunk(sref);                 // the spent quarry (open-returns-new)
     spoor_clunk(root);
+    p->caps = lc_saved_caps;
     return cs;
 }
 
@@ -303,7 +323,13 @@ void test_devsrv_open_connect_byte(void) {
     // clunks it below, mirroring the resolver.
     struct Proc *client = make_test_proc();
     TEST_ASSERT(client != NULL, "client proc");
+    // (U) the connect gate: model a LEGITIMATE dialer (production: joey / login /
+    // the home proxy, all CAP_TCB_DIAL holders). Restored straight after, so no
+    // later assertion ABOUT client->caps sees the fixture's stamp (audit F2).
+    caps_t saved_caps = client->caps;
+    client->caps |= CAP_TCB_DIAL;
     struct Spoor *cs = devsrv_open_connect(client, sref, /*omode ORDWR*/ 2);
+    client->caps = saved_caps;
     TEST_ASSERT(cs != NULL, "devsrv_open_connect -> a conn Spoor");
     TEST_ASSERT(cs != sref, "the returned endpoint is a NEW Spoor (open-returns-new)");
     TEST_EXPECT_EQ((int)cs->dc, (int)'s', "the conn Spoor is a devsrv Spoor");
@@ -387,7 +413,13 @@ void test_devsrv_kernel_attached_io_refused(void) {
 
     struct Proc *client = make_test_proc();
     TEST_ASSERT(client != NULL, "client proc");
+    // (U) the connect gate: model a LEGITIMATE dialer (production: joey / login /
+    // the home proxy, all CAP_TCB_DIAL holders). Restored straight after, so no
+    // later assertion ABOUT client->caps sees the fixture's stamp (audit F2).
+    caps_t saved_caps = client->caps;
+    client->caps |= CAP_TCB_DIAL;
     struct Spoor *cs = devsrv_open_connect(client, sref, /*omode ORDWR*/ 2);
+    client->caps = saved_caps;
     TEST_ASSERT(cs != NULL, "devsrv_open_connect -> a conn Spoor");
     TEST_ASSERT((cs->flag & CSRVCLIENT) != 0, "the conn Spoor is the CLIENT endpoint");
     struct SrvConn *cn = devsrv_conn_of(cs);
@@ -1256,3 +1288,164 @@ cleanup:
 }
 #undef IMPORT_CHECK
 #undef IMPORT_CHECK_EQ
+
+// ---------------------------------------------------------------------------
+// devsrv.srv_connect_gate_decides -- the (U) connect gate's DECISION, pure.
+//
+// devsrv_srv_connect_authorized is extracted from the connect path precisely so
+// every arm is assertable without a Proc, a registry or a Spoor. All sixteen
+// input combinations are enumerated rather than sampled: the point of the gate
+// is that exactly ONE of them reaches the capability, so a table is the only
+// honest way to show the other fifteen do not depend on it.
+// STALK-DESIGN.md section 5.2 / D8.
+// ---------------------------------------------------------------------------
+
+void test_devsrv_srv_connect_gate_decides(void) {
+    // 9P-mode is never gated: the kernel performs the Tattach itself and every
+    // later message rides its own 9P client. Both cap words, all four flag
+    // combinations below it.
+    for (int cp = 0; cp < 2; cp++) {
+        for (int sp = 0; sp < 2; sp++) {
+            TEST_ASSERT(devsrv_srv_connect_authorized(false, cp != 0, sp != 0, CAP_NONE),
+                "9P-mode admits a capless connect whatever the post authority");
+            TEST_ASSERT(devsrv_srv_connect_authorized(false, cp != 0, sp != 0, CAP_TCB_DIAL),
+                "9P-mode admits a cap holder likewise");
+        }
+    }
+
+    // A user's own scoped post (CAP_POST_SERVICE -- haul --post) is not a TCB
+    // surface: its reach is already bounded by the imperium scope that posted it.
+    TEST_ASSERT(devsrv_srv_connect_authorized(true, true, false, CAP_NONE),
+        "byte + user-posted admits a capless connect");
+
+    // The poster IS the server -- dialling itself conveys nothing new.
+    TEST_ASSERT(devsrv_srv_connect_authorized(true, false, true, CAP_NONE),
+        "byte + TCB-posted admits the POSTER itself with no cap");
+
+    // The one gated combination, both ways. This is the hole (U) closed.
+    TEST_ASSERT(!devsrv_srv_connect_authorized(true, false, false, CAP_NONE),
+        "byte + TCB-posted + not the poster + no cap -> REFUSED");
+    TEST_ASSERT(devsrv_srv_connect_authorized(true, false, false, CAP_TCB_DIAL),
+        "byte + TCB-posted + not the poster + CAP_TCB_DIAL -> admitted");
+
+    // The refusal must key on THIS capability, not on holding any capability at
+    // all -- a Proc rich in unrelated authority is still refused. Without this
+    // leg a gate that tested `caps != 0` would pass every assertion above.
+    TEST_ASSERT(!devsrv_srv_connect_authorized(true, false, false,
+                    CAP_HW_CREATE | CAP_LOCK_PAGES | CAP_CSPRNG_READ |
+                    CAP_SET_IDENTITY | CAP_HOSTOWNER | CAP_DAC_OVERRIDE),
+        "every OTHER capability, including DAC_OVERRIDE, still does not admit it");
+
+    // And it must be the bit, not the whole word: CAP_ALL contains it.
+    TEST_ASSERT(devsrv_srv_connect_authorized(true, false, false, CAP_ALL),
+        "CAP_ALL admits it (the bit is fork-grantable, so joey holds it)");
+}
+
+// ---------------------------------------------------------------------------
+// devsrv.srv_connect_gate -- the (U) gate on the real connect path.
+//
+// The integration half: a capless Proc is refused on a TCB-posted byte service
+// and the refusal reaches the caller as EACCES rather than the generic EIO; the
+// same Proc is admitted once it holds CAP_TCB_DIAL; the POSTER is admitted with
+// no cap; and a user-posted (CAP_POST_SERVICE) byte service still admits a
+// capless dialer. The 9P-mode arm lives in the pure test above -- a 9P connect
+// blocks on a Tversion/Tattach that a unit test has no server thread to answer.
+//
+// The admitted legs are the POSITIVE CONTROLS: without them a gate that refused
+// unconditionally would satisfy the refusal assertion.
+// ---------------------------------------------------------------------------
+
+void test_devsrv_srv_connect_gate(void) {
+    srv_registry_reset();
+
+    // A TCB poster (the MAY_POST_SERVICE mark) posts a byte service -- the
+    // /srv/stratum-fs shape exactly.
+    struct Proc *tcb = make_marked_test_proc();
+    TEST_ASSERT(tcb != NULL, "TCB poster proc");
+    TEST_ASSERT(post_svc_byte(tcb, "stratum-fs", 10) >= 0,
+        "TCB posts byte-mode \"stratum-fs\"");
+    struct SrvService *svc = srv_lookup_in(srv_boot_registry(), "stratum-fs", 10);
+    TEST_ASSERT(svc != NULL, "the byte service is registered");
+    TEST_ASSERT(!svc->cap_posted,
+        "it is TCB-posted (cap_posted == false) -- the gated class");
+
+    // Walk /srv/stratum-fs to a service-ref Spoor, as the resolver would.
+    struct Spoor *root = devsrv.attach(NULL);
+    TEST_ASSERT(root != NULL, "devsrv root");
+    struct Spoor *sref = spoor_clone(root);
+    TEST_ASSERT(sref != NULL, "spoor_clone for the service-ref");
+    const char *names[1] = { "stratum-fs" };
+    struct Walkqid *w = devsrv.walk(root, sref, names, 1);
+    TEST_ASSERT(w != NULL && w->spoor == sref, "walk /srv/stratum-fs");
+    walkqid_free(w);
+
+    // --- the hole: an ordinary capless Proc (the user's shell) is REFUSED.
+    struct Proc *shell = make_test_proc();
+    TEST_ASSERT(shell != NULL, "capless client proc");
+    TEST_EXPECT_EQ((int)(shell->caps & CAP_TCB_DIAL), 0,
+        "the shell holds no CAP_TCB_DIAL");
+    TEST_ASSERT(devsrv_open_connect(shell, sref, /*ORDWR*/ 2) == NULL,
+        "a capless connect to a TCB byte service is REFUSED");
+    TEST_EXPECT_EQ(srv_backlog_depth(svc), 0,
+        "the refused connect left NOTHING on the poster's accept backlog");
+    // The cause, not just the refusal: a permission denial must reach userspace
+    // as EACCES. A bare NULL renders as the generic EIO, which would tell the
+    // operator nothing -- and would make the device gate's "permission denied"
+    // assertion unfalsifiable.
+    TEST_EXPECT_EQ((int)spoor_open_errno(sref), -(int)T_E_ACCES,
+        "the refusal records EACCES for the open call sites");
+
+    // --- the same Proc, now holding the capability, is ADMITTED.
+    shell->caps |= CAP_TCB_DIAL;
+    struct Spoor *cs = devsrv_open_connect(shell, sref, /*ORDWR*/ 2);
+    TEST_ASSERT(cs != NULL, "with CAP_TCB_DIAL the SAME Proc is admitted");
+    TEST_EXPECT_EQ(srv_backlog_depth(svc), 1, "and its connection is enqueued");
+    spoor_clunk(cs);
+
+    // --- the POSTER dials its own service with no cap (the pouch-sock-demo
+    // shape: one Proc binds, then connects to itself).
+    TEST_EXPECT_EQ((int)(tcb->caps & CAP_TCB_DIAL), 0,
+        "the poster holds no CAP_TCB_DIAL either");
+    struct Spoor *self = devsrv_open_connect(tcb, sref, /*ORDWR*/ 2);
+    TEST_ASSERT(self != NULL,
+        "the POSTER is admitted to its own service with no capability");
+    spoor_clunk(self);
+    spoor_clunk(sref);
+    spoor_clunk(root);
+
+    // --- a USER-posted byte service (CAP_POST_SERVICE -- the haul --post shape)
+    // still admits a capless dialer: it is not a TCB surface.
+    struct Proc *user_poster = make_test_proc();
+    TEST_ASSERT(user_poster != NULL, "user poster proc");
+    user_poster->caps |= CAP_POST_SERVICE;     // unmarked -> cap_posted = true
+    TEST_ASSERT(post_svc_byte(user_poster, "hauled", 6) >= 0,
+        "a user posts byte-mode \"hauled\" under CAP_POST_SERVICE");
+    struct SrvService *usvc = srv_lookup_in(srv_boot_registry(), "hauled", 6);
+    TEST_ASSERT(usvc != NULL && usvc->cap_posted,
+        "it is user-posted (cap_posted == true) -- NOT the gated class");
+
+    struct Spoor *uroot = devsrv.attach(NULL);
+    TEST_ASSERT(uroot != NULL, "devsrv root");
+    struct Spoor *usref = spoor_clone(uroot);
+    TEST_ASSERT(usref != NULL, "spoor_clone");
+    const char *unames[1] = { "hauled" };
+    struct Walkqid *uw = devsrv.walk(uroot, usref, unames, 1);
+    TEST_ASSERT(uw != NULL, "walk /srv/hauled");
+    walkqid_free(uw);
+
+    struct Proc *mounter = make_test_proc();
+    TEST_ASSERT(mounter != NULL, "capless mounter proc");
+    struct Spoor *ucs = devsrv_open_connect(mounter, usref, /*ORDWR*/ 2);
+    TEST_ASSERT(ucs != NULL,
+        "a capless connect to a USER-posted byte service is admitted "
+        "(haul --post keeps working)");
+    spoor_clunk(ucs);
+    spoor_clunk(usref);
+    spoor_clunk(uroot);
+
+    drop_test_proc(mounter);
+    drop_test_proc(user_poster);
+    drop_test_proc(shell);
+    drop_test_proc(tcb);
+    srv_registry_reset();
+}

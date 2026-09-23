@@ -22,6 +22,7 @@
 #include "test.h"
 
 #include <thylacine/cons.h>
+#include <thylacine/caps.h>
 #include <thylacine/dev.h>
 #include <thylacine/devsrv.h>
 #include <thylacine/handle.h>
@@ -613,6 +614,22 @@ static int post_svc_byte(struct Proc *p, const char *name, size_t name_len) {
 // pushes the conn onto the poster's accept backlog (waking the listener-poll
 // list), the side effect these tests rely on. `name` must be NUL-terminated.
 static struct Spoor *connect_byte(struct Proc *p, const char *name) {
+    // (U) the connect gate (STALK-DESIGN 5.2 / D8) refuses a capless Proc on a
+    // TCB-posted byte service. These tests model a LEGITIMATE dialer -- in
+    // production joey, login, or the per-user home proxy, each of which holds
+    // CAP_TCB_DIAL -- so the capability is stamped for the duration of the
+    // connect and every test goes on exercising its own subject. The gate's own
+    // arms are asserted in devsrv.srv_connect_gate{,_decides}.
+    //
+    // SAVED AND RESTORED, not simply OR-ed in: a fixture that silently widens
+    // its argument's authority and leaves it widened corrupts any later
+    // assertion ABOUT that authority. It did exactly that -- srv_peer_identity
+    // sets client->caps and then asserts SYS_SRV_PEER reads it back, and an
+    // un-restored stamp made the live read return the extra bit (audit F2).
+    // The gate only consults caps AT the connect, so the narrow scope is
+    // sufficient as well as safer.
+    caps_t lc_saved_caps = p->caps;
+    p->caps |= CAP_TCB_DIAL;
     struct Spoor *root = devsrv_attach_registry(srv_boot_registry());
     if (!root) return NULL;
     struct Spoor *sref = spoor_clone(root);
@@ -624,6 +641,7 @@ static struct Spoor *connect_byte(struct Proc *p, const char *name) {
     struct Spoor *cs = devsrv_open_connect(p, sref, /*omode ORDWR*/ 2);
     spoor_clunk(sref);                 // the spent quarry (open-returns-new)
     spoor_clunk(root);
+    p->caps = lc_saved_caps;
     return cs;
 }
 

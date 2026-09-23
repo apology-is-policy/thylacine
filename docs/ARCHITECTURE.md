@@ -4900,7 +4900,7 @@ The complete list of load-bearing invariants. Source for `VISION.md §8`. Each m
 
 | # | Invariant | Enforcement | Spec |
 |---|---|---|---|
-| I-1 | Territory operations in process A don't affect process B | Kernel territory isolation | `territory.tla` |
+| I-1 | Territory operations in process A don't affect process B | Kernel territory isolation. `/srv` service *reach* is TWO mechanisms, not one (U, 2026-09-23): per-territory visibility (the mount table) bounds which services a Proc can **name**, and the `CAP_TCB_DIAL` connect gate bounds which TCB byte services it may **reach** (STALK-DESIGN §5.2 / D8). Visibility alone was insufficient -- a session inherits the boot registry, and the per-user home proxy must dial the coordinator from inside the session. The gate is a capability check, never an rwx one: `devsrv` stays NOT `perm_enforced` | `territory.tla` |
 | I-2 | Fork capability sets never exceed the parent and requested mask. Elevation-only bits are stripped except the parent's granted `legate_caps` in a PROPAGATING scope; ordinary clearance does not flow. All eight elevation-only bits (the `CAP_ELEVATION_ONLY` define in `caps.h` is the authority: HOSTOWNER, DAC_OVERRIDE, CHOWN, KILL, DEBUG, JIT, AUDIO_GRAPH at bit 12, POST_SERVICE at bit 13) remain excluded from CAP_ALL. Only the cap device may add elevation authority. | `rfork_internal` carve and publication lock; `proc_become_legate`; devcap grant/redeem gates | `handles.tla`, `imperium.tla`; [[inv-i2]] |
 | I-3 | Mount points form a DAG, never a cycle | Kernel mount validation | `territory.tla` |
 | I-4 | Handles transfer between processes only via 9P sessions | Syscall surface (no direct-transfer syscall exists) | `handles.tla` |

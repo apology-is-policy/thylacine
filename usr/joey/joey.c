@@ -3326,7 +3326,10 @@ static int do_corvus_bringup(long storage_dup_fd) {
 // SET_IDENTITY for the shell -- a shell is not an identity-stamper). login runs
 // as PRINCIPAL_SYSTEM (inherited) and is never console-attached (joey
 // relinquished; spawn does not confer CONSOLE_TRUSTED), so I-27 holds.
-#define LOGIN_CAPS (T_CAP_SET_IDENTITY | T_CAP_LOCK_PAGES | T_CAP_CSPRNG_READ)
+// T_CAP_TCB_DIAL (U): login dials /srv/stratum-ctl for the per-user DEK
+// lifecycle, and must HOLD the bit to confer it on the home proxy it spawns
+// (STALK-DESIGN 5.2 / D8). It is NOT in the shell's SHELL_CAPS.
+#define LOGIN_CAPS (T_CAP_SET_IDENTITY | T_CAP_LOCK_PAGES | T_CAP_CSPRNG_READ | T_CAP_TCB_DIAL)
 
 // LOGIN_PERMS (A-5b #827b) -- the SPAWN_PERM_* bits joey confers on /sbin/login.
 // MAY_POST_SERVICE makes login a *holder*, so login may re-confer the bit (one

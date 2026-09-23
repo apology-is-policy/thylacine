@@ -42,6 +42,7 @@
 #include <thylacine/9p_attach.h>
 #include <thylacine/dev.h>
 #include <thylacine/devsrv.h>
+#include <thylacine/errno.h>
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
 #include <thylacine/page.h>
@@ -919,6 +920,39 @@ static int devsrv_stat_native(struct Spoor *c, struct t_stat *out) {
 // devsrv (dc='s') is NOT perm_enforced, so stalk runs no rwx gate on the service
 // node; the per-territory /srv visibility (the mount table) is the isolation
 // boundary (I-1).
+// (U) The connect gate's DECISION, pure so every arm is assertable without
+// building a Proc, a registry or a Spoor. STALK-DESIGN.md section 5.2 / D8;
+// contract in <thylacine/devsrv.h>.
+//
+// Default-DENY is the shape that matters: the last line is the only `true` that
+// consults a capability, so a byte-mode TCB service that nobody thought about is
+// refused rather than admitted. The three earlier exits are each a reason the
+// connect cannot convey authority the caller lacks:
+//   - 9P-mode: the kernel performs the Tattach itself and every later message
+//     passes through its own client, where its rules apply. Only a byte connect
+//     hands over the raw transport.
+//   - cap_posted: the service was posted under CAP_POST_SERVICE inside an
+//     imperium scope -- a user's own scoped post (haul --post), whose reach is
+//     already bounded by that scope, not a TCB surface.
+//   - self_post: the connector posted this service, so it IS the server. It
+//     already holds the listener and serves every request; dialling itself adds
+//     nothing. `stripes` is a fresh per-Proc tag, so this is exactly "the same
+//     Proc" -- not its children, not its Proc group.
+bool devsrv_srv_connect_authorized(bool byte_mode, bool cap_posted,
+                                   bool self_post, caps_t caps) {
+    if (!byte_mode) return true;
+    if (cap_posted) return true;
+    if (self_post)  return true;
+    return (caps & CAP_TCB_DIAL) != 0;
+}
+
+s64 devsrv_open_errno(struct Spoor *c) {
+    if (!c || c->dc != 's' || !c->aux)            return -1;
+    if (*(const u64 *)c->aux != DEVSRV_SVC_MAGIC) return -1;
+    int e = ((struct devsrv_svc_ref *)c->aux)->open_errno;
+    return (e <= -2 && e >= -4095) ? (s64)e : -1;
+}
+
 struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode) {
     (void)omode;
     if (!p)                                        return NULL;
@@ -927,6 +961,13 @@ struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode) {
     struct devsrv_svc_ref *ref = (struct devsrv_svc_ref *)c->aux;
     struct SrvRegistry    *reg = ref->reg;
     if (!reg)                                      return NULL;
+
+    // (U) Each attempt starts with NO recorded cause. A service-ref Spoor can be
+    // opened more than once, so without this a refusal's EACCES would still be
+    // sitting here when a LATER attempt failed for an unrelated reason (OOM, a
+    // dead poster) -- and the caller, reading the channel only after a NULL,
+    // would report the stale cause. A wrong errno is worse than a generic one.
+    ref->open_errno = 0;
 
     // Global live-connection cap (soft; the per-service backlog is the hard
     // bound). The per-Proc cap was removed (stalk-3b-β / 3a-audit F4): a session
@@ -942,6 +983,7 @@ struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode) {
     enum srv_mode service_mode;
     u32           ring_msize;
     bool          service_cape;
+    bool          service_cap_posted;
     {
         irq_state_t ls = spin_lock_irqsave(&reg->lock);
         bool live      = (svc->state == SRV_STATE_LIVE) &&
@@ -952,8 +994,40 @@ struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode) {
         ring_msize     = svc->ring_msize;   // CF-3 B: the conn's ring class,
                                             // captured atomically with LIVE
         service_cape   = svc->cape;         // the identity cape, likewise
+        // (U) which posting authority minted this service -- the TCB mark or a
+        // user's CAP_POST_SERVICE. Captured HERE, atomically with LIVE and
+        // beside mode/cape, because it is a term of the connect decision: read
+        // outside the lock it could be re-sampled across a tombstone-then-rebind
+        // and name a different service's authority than the one we connect to.
+        service_cap_posted = svc->cap_posted;
         spin_unlock_irqrestore(&reg->lock, ls);
         if (!live) return NULL;
+    }
+
+    // (U) Connect admission (STALK-DESIGN.md section 5.2 / D8). Decided HERE,
+    // before any SrvConn exists, because a byte-mode connect hands the client
+    // the raw transport: afterwards the kernel is a pipe and cannot bound what
+    // the client asks the server for. Refusing before the mint also means a
+    // denied connect leaves nothing on the poster's accept backlog.
+    //
+    // `caps` is read ATOMICALLY: proc_become_legate is a cross-thread writer of
+    // p->caps, so a plain load is C11-racy (the devproc.c two-axis gates read it
+    // the same way). A stale-but-atomic sample can only reflect a cap the Proc
+    // genuinely held or genuinely lacked, never a fabricated one.
+    //
+    // poster_stripes is non-zero for any LIVE service (srv_reserve_in refuses a
+    // stripes-0 poster) and proc_stripes fail-closes to 0, so the explicit
+    // non-zero term below is belt-and-braces: a Proc the kernel cannot identify
+    // must never match its way into the self-post exemption.
+    u64 my_stripes = proc_stripes(p);
+    if (!devsrv_srv_connect_authorized(
+            service_mode == SRV_MODE_BYTE, service_cap_posted,
+            my_stripes != 0 && my_stripes == poster_stripes,
+            __atomic_load_n(&p->caps, __ATOMIC_ACQUIRE))) {
+        // Leave the cause for spoor_open_errno: a permission denial must reach
+        // userspace as EACCES, not as the generic EIO a bare NULL renders.
+        ref->open_errno = -(int)T_E_ACCES;
+        return NULL;
     }
 
     // Mint the connection (peer + server identity captured BY VALUE -- no raw

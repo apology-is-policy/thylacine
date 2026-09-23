@@ -1134,6 +1134,8 @@ void test_srvconn_client_send_blocking_backpressure(void);
 void test_srvconn_client_send_blocking_poll_edge(void);
 void test_devsrv_walk_service(void);
 void test_devsrv_open_connect_byte(void);
+void test_devsrv_srv_connect_gate_decides(void);
+void test_devsrv_srv_connect_gate(void);
 void test_devsrv_kernel_attached_io_refused(void);
 void test_devsrv_kernel_attached_server_close_eofs(void);
 void test_devsrv_accept_immediate(void);
@@ -1660,6 +1662,7 @@ void test_sys_spawn_with_perms_console_owner_grant_gate(void);
 void test_sys_spawn_with_perms_console_owner_set_wiring(void);
 void test_sys_spawn_with_perms_seat_roles(void);
 void test_sys_spawn_with_perms_renderer_gate(void);   // G-4
+void test_sys_spawn_with_perms_notrace_blocks_same_principal_debug(void);   // (U) F1
 void test_sys_spawn_full_argv_no_argv_acts_as_spawn_with_perms(void);
 void test_sys_spawn_full_argv_golden_argc4(void);
 void test_sys_spawn_full_argv_rejects_argc_over_max(void);
@@ -2955,6 +2958,8 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "devsrv.walk_service",           test_devsrv_walk_service,           false, NULL },
     { "devsrv.open_connect_byte",      test_devsrv_open_connect_byte,      false, NULL },
+    { "devsrv.srv_connect_gate_decides", test_devsrv_srv_connect_gate_decides, false, NULL },
+    { "devsrv.srv_connect_gate",       test_devsrv_srv_connect_gate,       false, NULL },
     { "devsrv.kernel_attached_io_refused",
                                        test_devsrv_kernel_attached_io_refused, false, NULL },
     { "devsrv.kernel_attached_server_close_eofs",
@@ -3671,6 +3676,7 @@ struct test_case g_tests[] = {
     { "sys_spawn_with_perms.console_owner_set_wiring",  test_sys_spawn_with_perms_console_owner_set_wiring,  false, NULL },
     { "sys_spawn_with_perms.seat_roles", test_sys_spawn_with_perms_seat_roles, false, NULL },
     { "sys_spawn_with_perms.renderer_gate",             test_sys_spawn_with_perms_renderer_gate,             false, NULL },
+    { "sys_spawn_with_perms.notrace_blocks_same_principal_debug", test_sys_spawn_with_perms_notrace_blocks_same_principal_debug, false, NULL },
     { "sys_spawn_full_argv.no_argv_acts_as_spawn_with_perms", test_sys_spawn_full_argv_no_argv_acts_as_spawn_with_perms, false, NULL },
     { "sys_spawn_full_argv.golden_argc4",              test_sys_spawn_full_argv_golden_argc4,              false, NULL },
     { "sys_spawn_full_argv.rejects_argc_over_max",     test_sys_spawn_full_argv_rejects_argc_over_max,     false, NULL },

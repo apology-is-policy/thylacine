@@ -3161,8 +3161,10 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
         u32 omode_dev = (u32)(omode_raw & ~(u64)SYS_WALK_OPEN_NOFOLLOW);
         struct Spoor *opened = nc->dev->open(nc, (int)omode_dev);
         if (!opened) {
-            // Read before clunk frees the private error. Other Devs retain EIO.
-            s64 open_err = dev9p_open_errno(nc);
+            // Read before clunk frees the private error. dev9p carries the
+            // server's ecode, devsrv a refused connect (T_E_ACCES); every other
+            // Dev has no channel and retains EIO.
+            s64 open_err = spoor_open_errno(nc);
             spoor_clunk(nc);
             return open_err == -1 ? -T_E_IO : open_err;
         }
@@ -9077,6 +9079,13 @@ void apply_spawn_perms(struct Proc *p, u32 perm_flags) {
         // the flag inert rather than hanging up the parent's session.
         if (proc_setsid(p) > 0)
             proc_arm_session_hangup(p);
+    }
+    if (perm_flags & SPAWN_PERM_NOTRACE) {
+        // (U) F1: the same one-way setter SYS_SET_TRACEABLE(0) uses, so there is
+        // a single writer of the flag and its one-way-to-zero semantics hold
+        // however the bit arrives. Reached pre-exec_setup, which is the whole
+        // point: a child that stamped itself would be attachable until it ran.
+        (void)sys_set_traceable_for_proc(p, 0);
     }
     if (perm_flags & ~SPAWN_PERM_ALL) {
         extinction("apply_spawn_perms: unknown SPAWN_PERM_* bit");

@@ -132,6 +132,14 @@ mount to its parent shell. The posted-service form and shell `mount` builtin
 exist to perform that mount in the calling shell itself. The service accepts
 only a client with the poster's kernel-stamped principal identity.
 
+Not every name in `/srv` is yours to open. A service that belongs to the
+system, such as the storage coordinator, refuses a connection from an ordinary
+program: the open fails and `mount` reports a permission error. Services you
+posted yourself, Haul's included, are unaffected — you may always mount a
+service you posted. The refusal depends on the authority of the program doing
+the opening, not on the permission bits of the name, so `ls -l /srv` does not
+predict it.
+
 ### File ownership
 
 A 9P server reports each file's owner as a numeric user and group id from the

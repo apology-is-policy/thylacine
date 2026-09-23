@@ -23,6 +23,7 @@ mirrors:
   - "tools/interactive/ls-imperium.exp"
   - "tools/interactive/haul-post.exp"
   - "tools/interactive/haul-cape.exp"
+  - "tools/interactive/srv-connect-gate.exp"
   - "tools/test.sh"
   - "tools/smp-multiboot.sh"
   - "tools/test-cross-reboot.sh"

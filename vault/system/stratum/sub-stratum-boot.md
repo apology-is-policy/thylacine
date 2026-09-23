@@ -24,6 +24,23 @@ held.
 
 ## Contract
 
+**`LOGIN_CAPS` gains `CAP_TCB_DIAL` (U, 2026-09-23).** joey dials
+`/srv/stratum-fs` itself for the boot readiness handshake and holds the bit via
+`CAP_ALL`. `/sbin/login` needs it for two reasons: it dials byte-mode
+`/srv/stratum-ctl` for the per-user DEK lifecycle, and it must HOLD the bit to
+confer it on the per-user home proxy it spawns ([[sub-stratum-session]]) -- a
+capability can only ever be narrowed on the way down (I-2), so an intermediary
+that lacks it cannot pass it on. It is deliberately absent from the shell's
+`SHELL_CAPS`. See [[sub-kernel-devsrv]] for the gate this feeds.
+
+The coordinator itself is still spawned with neither `--user-policy` nor
+`--datasets-allowed`, so it admits every Tattach that reaches its socket. That
+is now defence-in-depth rather than the boundary, and it is NOT a quick fix: the
+policy is a static argv list baked at boot, while users are minted at runtime by
+corvus from `FIRST_AUTO_ID` 1000, so at coordinator start there is no user to
+enumerate. Queued, not done.
+
+
 **Imperium boot fixtures (2026-09-17).** The integration adds the
 imperium capability/authorization probes to joey's test ladder and initializes
 the fixture imperium key for the eligible test identity. Production

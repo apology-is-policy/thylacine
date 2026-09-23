@@ -31,6 +31,30 @@ build checks that they agree.
 
 ## Contract
 
+**`T_CAP_TCB_DIAL` (U, 2026-09-23).** Bit 14 joins the `T_CAP_*` mirror set in
+both userspace copies -- `usr/lib/libthyla-rs/src/lib.rs` and
+`usr/lib/libt/include/thyla/syscall.h` -- alongside the kernel's `CAP_TCB_DIAL`
+in `kernel/include/thylacine/caps.h`. It is a capability constant, not a new
+syscall or argument record: the syscall number space and every argument shape
+are unchanged, so this is an additive mirror update, not an ABI break. The
+authoritative partition (fork-grantable vs elevation-only) lives in [[abi-caps]];
+the gate it feeds is in [[sub-kernel-devsrv]].
+
+**`T_SPAWN_PERM_NOTRACE` ((U) F1, 2026-09-23).** Bit 9 joins the
+`T_SPAWN_PERM_*` mirror set in the same two userspace copies, alongside the
+kernel's `SPAWN_PERM_NOTRACE` in `kernel/include/thylacine/syscall.h`, and is
+added to `SPAWN_PERM_ALL` -- which is the part that matters for the mirrors,
+because a bit outside that mask is rejected outright at the entry gate, so a
+kernel that does not know the bit refuses the spawn rather than ignoring it.
+Additive: no syscall number moves and no argument record changes shape, and a
+parent that never sets the bit is unaffected. The `perm_flags` field is `u32` on
+the wire (`TSpawnArgs`) while the Rust mirror types the constant as `u64` and
+narrows at the call (`self.perm_flags as u32`), so the mirror has 32 bits of
+headroom the ABI does not -- a future bit above 31 would truncate silently here.
+The gate's placement and the reason this one bit is ungated are in
+[[sub-kernel-syscall-dispatch]]; what it protects is in [[sub-stratum-session]].
+
+
 **Imperium integration (2026-09-17).** Reserved numbers 110 and 111 are
 now implemented as SYS_CONSOLE_EPISODE and SYS_CAP_GRANT_IMPERIUM. Main's
 SYS_DMA_SEGMENTS stays 112; later PCI appends now put SYS__NATIVE_TOP at 124. No existing syscall

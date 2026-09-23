@@ -45,6 +45,18 @@ same function in opposite terms.
 
 ## Contract
 
+**`mount` now names the CAUSE (U, 2026-09-23).** `bi_mount` discarded the
+errno on both of its failure legs, reporting only "mount: cannot connect
+<service>" / "cannot attach <service>" whatever went wrong. Since (U) a connect
+can be refused on AUTHORITY -- a TCB byte service needs a capability the shell
+does not hold -- and the kernel reports that as EACCES specifically so an
+operator can tell "denied" from "no such service" and from a broken transport.
+Discarding it left that channel leading nowhere at the one place the operator
+reads it. Both legs now append the rendered cause via
+`libthyla_rs::err::Error::from_syscall_return`. `$errstr` keeps its existing
+PREFIX, so assertions matching on "mount: cannot connect" still hold.
+
+
 **Haul and Imperium (2026-09-17).** `mount /srv/NAME PATH [ANAME]` connects
 a byte service, attaches it through SYS_ATTACH_9P_SRV, and mounts the returned
 root in the calling shell's Territory. `unmount PATH` removes that entry.

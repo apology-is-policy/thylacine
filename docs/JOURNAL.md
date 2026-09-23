@@ -22,6 +22,200 @@ needed the operator.
 
 
 ---
+## 2026-09-23, evening (aux, Opus 5.5 1M, effort max) -- /srv had no lock on the door
+
+**Found while auditing something else.** The Haul identity cape (L) was green,
+audit-clean and ready to fold. Its round-1 report raised a P3 -- F2, "the cape
+names the ATTACHER" -- which sent me to check what a TCB process mounting on a
+user's behalf would look like. Following that thread, I checked what an ordinary
+user could actually reach in `/srv`, and found that michael could
+`mount /srv/stratum-fs` -- the SYSTEM store -- and list the system root. Status
+0. Confirmed on device, not reasoned. (L) went on hold that minute.
+
+**Three mechanisms, each deferring to another.** Since A-3 the kernel is the
+only rwx enforcer, and Stratum checks no per-file permissions -- it stamps a new
+file's owner from the connection principal and nothing else. `devsrv_open_connect`
+(`kernel/devsrv.c:922`) ran no authority check whatsoever; its own header says
+the boundary is per-territory `/srv` *visibility* (I-1), and devsrv is
+0555/0444 and deliberately not `perm_enforced`. And joey spawns the coordinator
+with neither `--user-policy` nor `--datasets-allowed` (`usr/joey/joey.c:7096-7113`),
+so `stratumd_check_tattach` takes its `n_entries == 0` fast path and admits
+every Tattach (`stratum/v2/src/cmd/stratumd/serve.c:177`).
+
+So the whole boundary rested on visibility -- and visibility did not hold.
+STALK-DESIGN **D7** says login "can mount a fresh per-session registry". It was
+designed and never built; the session inherits boot's immortal registry. A
+design decision that was written down, agreed, and then quietly not implemented
+is the most expensive kind, because everything downstream cites it as though it
+were true. This row's own audit-trigger entry asserted visibility was the
+isolation boundary. It was not.
+
+**The operator chose the kernel connect check (option B) over namespace
+hygiene (C).** I had recommended B framed as Plan 9 `/srv` owner+mode -- an
+identity check. **That framing was wrong, and finding out why was the most
+useful hour of the session.** login spawns the per-user home proxy *as the
+user* (`usr/login/src/main.rs:872-887`), deliberately: the proxy's connection to
+the coordinator carries the user's credentials so the coordinator attributes
+the user's home files to them. And the ordinary shell is that same principal
+(`main.rs:71-75`). Proxy and shell are indistinguishable by identity. No
+owner+mode rule can admit one and refuse the other; only a capability can
+(I-22). I flagged the correction before drafting, and it refined B rather than
+reversing it -- still a kernel connect check, still fail-closed.
+
+It also settled C independently: the proxy lives *inside* the user's session
+and must dial the coordinator, so a per-session registry could not simply hide
+the coordinator from the session even once built. C stays queued as
+defence-in-depth, not as the boundary.
+
+**The rule.** A byte-mode service posted under the TCB mark
+(`SrvService.cap_posted == false`) is connectable only by a holder of the new
+fork-grantable `CAP_TCB_DIAL`. Byte-mode is the line because a byte connect
+hands the client the raw transport -- thereafter the kernel is a pipe and cannot
+bound what the client asks for -- whereas a 9P connect has the kernel perform
+the Tattach itself. I was careful to write that down precisely, because the
+sloppy version ("byte mode has no identity") is false: identity is stamped in
+both modes and readable through `SYS_SRV_PEER`. The asymmetry is whether the
+kernel can bound the *request*.
+
+The discriminator is derived from what the kernel already stamps at reserve, so
+it cannot go stale. I considered and rejected an explicit "I am privileged" post
+bit as the primary rule: a poster that forgets it fails **open**.
+
+**Two findings while implementing, both of which changed the design.**
+
+The first killed the escape hatch I had proposed and the operator had approved.
+`usr/pouch-hello/pouch-hello-sockets.c` binds `/srv/pouch-sock-demo` and then
+dials its own socket from a second thread in the *same Proc*, and it is
+joey-spawned with the TCB mark -- so the rule would have refused it. My proposed
+fix was an opt-out post bit. It cannot work: that demo reaches `/srv` through a
+POSIX `bind()`, which has no way to carry a Thylacine perm bit, and having pouch
+set the bit unconditionally would have set it for stratumd too and voided the
+entire fix. The correct answer was already available and is better than what I
+proposed: **a Proc may always connect to a service it posted itself.** It is the
+server; dialling itself conveys nothing. `stripes` is a fresh per-Proc tag
+(`kernel/proc.c:490`), so the exemption is exactly the same Proc -- not its
+children, not its Proc group. No new ABI, and it cannot fail open.
+
+The second: option D -- give the coordinator a `--user-policy` -- looked like a
+one-line hardening worth doing immediately. It is not available at all. The
+policy is a static argv list baked into joey's spawn at boot, while users are
+minted at runtime by corvus's `VERB_USER_CREATE` from `FIRST_AUTO_ID = 1000`
+(`usr/corvus/src/main.rs:396,421,1836`). When the coordinator starts there is no
+user to enumerate. That is a further argument for B: a capability is checked *at*
+the connect instead of listed in advance.
+
+**Two things I nearly got wrong.** A refused connect records its cause on the
+service-ref Spoor so the refusal reads as EACCES rather than the generic EIO --
+but a service-ref can be opened more than once, so a stale EACCES would have
+been reported as the cause of a *later*, unrelated failure. The channel is now
+cleared per attempt. A wrong errno is worse than a vague one. And the existing
+`devsrv.open_connect_byte` test connects with a capless Proc to a marked
+poster's byte service -- so the gate turned it red. That is the gate working:
+the test models a legitimate dialer, which in production is joey, login or the
+proxy, each a capability holder. The connect helpers now say so explicitly, and
+the gate's own arms get dedicated tests rather than riding on someone else's.
+
+**Deliberately NOT done: menu option A** (dropping the explicit
+`SYS_ATTACH_9P_CAPE` flag from `SYS_ATTACH_9P_SRV`). With the gate in place the
+flag is not a hole -- (L)'s no-escalation argument, that a byte-mode attacher
+already holds the raw transport, still stands. Removing it is an ABI reduction,
+and it belongs with (L), where the flag was introduced and is already tested and
+audited, not as a rider on this chunk.
+
+### F1: the gate was locked at the front and open at the side
+
+The audit round's one P1 was against my *reasoning*, not my code, which made it
+the more useful finding. I had written that "only a capability separates" the
+home proxy from the user's shell. False in general: `devproc_debug_authorized`
+separates on **identity**, and the proxy's owner is the user. So the shell could
+debug-attach the proxy and drive its live coordinator transport -- reaching the
+system store with no capability at all. I verified independently that no
+stratumd source calls `set_traceable`, so nothing protected it.
+
+Closed with a new `SPAWN_PERM_NOTRACE` (bit 9). Two decisions worth keeping:
+
+**It is the first deliberately ungated `SPAWN_PERM_*` bit.** Every other bit is
+adjudicated against the parent's authority. This one passes unconditionally,
+because any Proc may already call `SYS_SET_TRACEABLE(0)` on itself with no
+authority -- a gate could only change *when* the flag arrives, never *whether*
+it could, and the bit strictly reduces what may be done to the child. Gating it
+would have been theatre. The coupling I wrote down rather than left implicit: if
+`SYS_SET_TRACEABLE` ever acquires a gate, this bit needs the same one, and
+nothing in the code says so.
+
+**Spawn-time rather than the auditor's suggested self-call, because the
+self-call is racy.** A proxy sealing itself is attachable between exec and the
+call, and the Proc able to take that window is ordinary in a login session -- a
+second login, or something the user backgrounded in a prior session, is already
+running as the right principal when the new proxy appears.
+`proc_set_seat_service` already stamps `NODUMP|NOTRACE` this way, for this
+reason, so the precedent was in the tree.
+
+### Three wrong turns, each caught by a measurement rather than a hunch
+
+**The stray VM was worse than I had recorded.** I knew it blocked
+`test-interactive.sh`. It also holds the write lock on `build/disk.img`, so it
+blocks `tools/test.sh` -- the whole suite, not just the device gate. My handoff
+note had understated the blast radius.
+
+**A false RED from my own workaround.** Routing around the lock with
+`THYLACINE_DISK_IMG`/`THYLACINE_POOL_IMG` clones produced a kernel extinction:
+`stratumd: run failed (rc=-201)` = `STM_EBADTAG`, AEAD tag verification failed.
+For a moment that reads as a corruption-class defect in the storage path. It was
+mine: `system.key` regenerated at 18:27:50 and `pool.img` at 18:27:55 -- a
+matched pair -- while my clone was from 18:17:35, sealed under the previous key.
+The pool-and-key bake trap is in my own memory index and I walked into it
+anyway. Established by comparing mtimes, not by reasoning about it. Fixed by
+using the real `pool.img` (only `disk.img` was ever locked) and re-cloning.
+
+**A sabotage that PASSED, which was not a finding.** With the gate predicate
+neutered the suite still reported 1656/1656. The tempting read is "the tests do
+not discriminate." The actual cause: `tools/test.sh` builds only
+`if [[ ! -f "$KERNEL_ELF" ]]` -- it never rebuilds a *stale* ELF, so it silently
+booted the pre-sabotage kernel. The ELF was timestamped 18:25:05 against sources
+edited at 18:33:59, which is what gave it away. This also corrects a claim I had
+made earlier in the same run, that test.sh rebuilds; it does not. Every sabotage
+from then on chained `build.sh && test.sh` so the two cannot desynchronise. The
+tree-vs-artifact trap has a twin: a *sabotaged tree* is not a sabotaged
+artifact, exactly as a clean tree is not a clean artifact.
+
+### The sabotage matrix, once it was actually running
+
+Three sabotages, and the point of the middle one is discrimination between two
+tests that could otherwise have been one:
+
+| Sabotage | Reddened |
+|---|---|
+| predicate always admits | BOTH devsrv tests |
+| gate call site bypassed, predicate intact | the wiring test ONLY (`_decides` stayed green) |
+| the `NOTRACE` arm removed | the notrace test |
+
+Each failed at its own named assertion, with no collateral (1653/1656 and
+1655/1656 against a 1656 baseline). The middle row is the one worth having: it
+proves `srv_connect_gate` tests that the decision is *consulted*, not merely
+that the decision is correct.
+
+**Posture:** 1656/1656 on the default build (1653 baseline + 3 new). All three
+new tests sabotage-proven. NOT yet run: the `--config ci` image and
+`srv-connect-gate.exp`, both still blocked behind the stray VM, and the F1
+audit round.
+
+**A timing discrepancy, settled with main.** Main first put the stray VM's birth
+at ~14:34Z, through their whole gate window; I had two `etime` readings that
+disagreed. They re-measured with `lstart` and retracted; I measured the same
+value (15:43:36Z) and retracted my own figures, which I had quoted without ever
+timestamping them -- two unstamped durations are not evidence against a stamped
+start time. The VM is mine, born of my sourcing accident, after their gate. Main
+also corrected me usefully: they judged each RED by its red *set* against
+`red-expect.txt`, never by wall clock, so my advice to discount their timings
+was solving a problem they did not have.
+
+**Still open:** the F1 audit round, the `--config ci` + device-gate legs behind
+the stray VM (operator's call -- the QMP sockets that would allow a graceful
+shutdown were unlinked by my own failed run, so it is `kill` or nothing), the
+F3 two-Proc pouch AF_UNIX test, and (L), still on hold behind this. Neither (C)
+nor (D) is done; both are queued and named above.
+---
 ## 2026-09-23, afternoon, later (aux, Opus 5.5 1M, effort max) -- the mounter owns every file on a Haul mount
 
 **The symptom was the operator's.** Lantern over Haul, serving `~/decks` from

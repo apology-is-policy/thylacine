@@ -958,6 +958,16 @@ composition is load-bearing and prosecuted hard:
 - **`kproc` is never debuggable** (special-cased before the gate, as kill is);
   the session/console-owner and `PROC_FLAG_NOTRACE` seams (e.g. login forbids
   debug-attach for its session Proc) are honored.
+- **`PROC_FLAG_NOTRACE` has two routes in, and the spawn-time one is the load-
+  bearing one.** `SYS_SET_TRACEABLE(0)` lets a Proc seal itself; `SPAWN_PERM_NOTRACE`
+  ((U) F1) lets its spawner seal it before its first EL0 instruction. The
+  difference matters wherever the thing being sealed shares a principal with a
+  potential attacher -- login's per-user home proxy, which holds `CAP_TCB_DIAL`
+  and a live transport to the system store while running AS the user. A self-seal
+  leaves that proxy attachable for the window between exec and the call, and the
+  same-principal Proc that could take the window is ordinary (a second login, a
+  backgrounded process from a prior session). So for a service spawned as the
+  user it serves, treat the self-call as insufficient by default.
 
 ---
 

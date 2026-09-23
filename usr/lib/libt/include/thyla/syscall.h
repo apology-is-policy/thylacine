@@ -308,6 +308,12 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 #define T_SPAWN_PERM_SEAT_MANAGER      (1u << 6)
 #define T_SPAWN_PERM_SEAT_SERVICE      (1u << 7)
 #define T_SPAWN_PERM_SEAT_CLIENT       (1u << 8)
+// T_SPAWN_PERM_NOTRACE ((U) F1): stamp PROC_FLAG_NOTRACE on the child before its
+// first instruction, so the /proc debug surface refuses every attach -- including
+// a SAME-principal one, the case that matters for a service spawned as the user
+// it serves. Ungated: SYS_SET_TRACEABLE(0) is already self-reachable, so this
+// only moves the stamp earlier than the child could manage for itself.
+#define T_SPAWN_PERM_NOTRACE           (1u << 9)
 
 // VIVARIUM V-1b / Design D (13.10): t_sys_spawn_args.pheno_flags bits (mirror
 // SPAWN_PHENO_* in the kernel header). The phenotype itself is DECIDED FROM
@@ -487,6 +493,7 @@ _Static_assert(__builtin_offsetof(struct t_allowance_desc, pci) == 180,
 #define T_CAP_DAC_OVERRIDE    (1UL << 7)   // elevation-only; perm_check rwx bypass
 #define T_CAP_CHOWN           (1UL << 8)   // elevation-only; chown/chgrp-to-any
 #define T_CAP_POST_SERVICE    (1UL << 13) // elevation-only /srv posting
+#define T_CAP_TCB_DIAL        (1UL << 14) // fork-grantable; connect to a TCB byte service (U)
 #define T_CAP_KILL            (1UL << 9)   // elevation-only; cross-identity kill override
 
 // Maximum binary name length for t_spawn (mirror SYS_SPAWN_NAME_MAX).

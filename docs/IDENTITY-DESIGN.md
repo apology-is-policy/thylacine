@@ -276,6 +276,21 @@ travel with every mount. Three ways to set it:
 
 haul sets the cape on both of its paths.
 
+*The cape names the ATTACHER.* A TCB process that mounts on a user's behalf must
+therefore attach **as the user**, or every file would report the TCB's identity
+and the user would be refused by the kernel's own DAC -- the very fault the cape
+exists to fix. This is why the per-user home proxy is spawned with the user's
+identity rather than the system's. Where such a process must then dial a TCB
+service, the authority to dial it is a **capability** (`CAP_TCB_DIAL`,
+STALK-DESIGN §5.2 / D8), never the identity it runs as: the proxy and the user's
+own shell are the same principal, so no identity rule can separate them for
+that dial (I-22). The converse does not hold: the I-39 debug surface separates
+on identity, and a same-principal debug attach reaches the proxy's transport
+without the capability -- closed by `SPAWN_PERM_NOTRACE` on the proxy's spawn,
+not by the dial gate. The two mechanisms are not redundant: the capability says
+who may open the door, and NOTRACE says that whoever holds the key cannot be
+puppeted by a peer wearing the same identity.
+
 *Why it cannot escalate:* the attacher holds the transport. A pipe attach's
 server is behind the attacher's own pipes, and a `/srv` attach needs a byte-conn
 with READ+WRITE, over which the attacher could speak raw 9P and bypass kernel DAC

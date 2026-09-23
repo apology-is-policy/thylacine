@@ -15,6 +15,90 @@ The Phase 7 entry decision (taken under the U-1 scripture conversation):
 - **Runtime**: native libthyla-rs (the Plan 9 split — see `docs/ARCHITECTURE.md §3.5` + `CLAUDE.md` "Native vs ported userspace programs").
 - **Workspace**: Cargo workspace at `usr/utopia/`; Helix vendored separately at `usr/helix/`.
 
+## /srv connect gate (U) — 2026-09-23 (aux-3; audit round pending)
+
+An ordinary user could `mount /srv/stratum-fs` — the SYSTEM store — and list
+the system root. Confirmed on device. Three mechanisms each deferred to
+another: the kernel is the only rwx enforcer since A-3 and Stratum checks no
+per-file permissions; `devsrv_open_connect` ran no authority check at all,
+deferring to per-territory `/srv` *visibility* (I-1); and joey spawns the
+coordinator with no `--user-policy`, so it admits every Tattach. Visibility did
+not hold, because login never built STALK-DESIGN D7's per-session registry and
+the session inherits the boot registry.
+
+The fix is a capability gate at connect. A byte-mode service posted under the
+TCB mark (`cap_posted == false`) is connectable only by a holder of the new
+fork-grantable `CAP_TCB_DIAL`; a Proc may always dial a service it posted
+itself; user-posted byte services (`haul --post`) and every 9P-mode service are
+unchanged. Only `haul` sets `DMSRVBYTE` in-tree, so no native service is
+touched. The capability flows kproc -> joey -> login -> the per-user home
+proxy; the user's shell is spawned without it.
+
+**Identity could not be the axis, and that is the load-bearing finding.** The
+operator's first framing was Plan 9 `/srv` owner+mode. But login spawns the
+per-user home proxy *as the user* — deliberately, so the coordinator attributes
+the user's home files to them — and the user's shell is that same principal. No
+identity rule separates them *for this dial*; only a capability can (I-22).
+That is narrower than "only a capability can ever separate them", and the
+difference turned out to matter — see F1 below.
+
+`devsrv` stays system-owned 0555/0444 and NOT `perm_enforced`: the gate is a
+capability check, never an rwx check. A refusal is `T_E_ACCES`, carried to the
+open call sites through a new per-Dev `spoor_open_errno` dispatcher so it reads
+as "permission denied" and not the generic EIO.
+
+Scripture: STALK-DESIGN §5.2 + D8, ARCHITECTURE §28 I-1, IDENTITY-DESIGN §3.2.
+Tests: `devsrv.srv_connect_gate_decides` (all sixteen predicate combinations,
+plus a holds-every-other-capability leg so a `caps != 0` gate cannot pass) and
+`devsrv.srv_connect_gate` (refusal + EACCES + an untouched backlog; the same
+Proc admitted once capped; the poster self-dialling uncapped; a user-posted
+service still admitting a capless dialer — the admitted legs are the positive
+controls).
+
+Queued separately as defence-in-depth, neither load-bearing: a `--user-policy`
+for the coordinator (not the one-line change it appears to be — the policy is
+static argv baked at boot, while users are minted at runtime from uid 1000), and
+building D7's per-session registry in login.
+
+### F1 — the gate had a side door: `SPAWN_PERM_NOTRACE`
+
+The audit round's one P1 was against the reasoning above, not the code. The
+claim "only a capability separates them" is false in general: the I-39 debug
+surface separates on **identity** (`devproc_debug_authorized`'s owner axis), so
+the user's shell — the same principal as the proxy — could debug-attach the
+proxy and drive its live coordinator transport. No capability required. The
+front door was locked and the side door stood open. Verified independently that
+no stratumd source calls `set_traceable`, so the proxy had no protection.
+
+Closed by a new `SPAWN_PERM_NOTRACE` (bit 9): `apply_spawn_perms` stamps
+`PROC_FLAG_NOTRACE` through the existing one-way setter, so there stays exactly
+one writer of the flag, and login passes the bit on the proxy's spawn.
+
+**Spawn-time rather than a self-call, because a self-call is racy.** A proxy
+that sealed itself would be attachable between exec and the call, and the
+same-principal Proc able to take that window is ordinary — a second login, or a
+process backgrounded from a prior session. `proc_set_seat_service` stamps
+`NODUMP|NOTRACE` this way for the same reason.
+
+**It is deliberately the first ungated `SPAWN_PERM_*`**, and the reason is
+worth keeping: any Proc may already call `SYS_SET_TRACEABLE(0)` on itself with
+no authority, so a gate could only change *when* the flag arrives, never
+*whether* it could. The bit strictly reduces what may be done to the child. The
+coupling to watch is that if `SYS_SET_TRACEABLE` ever acquires a gate, this bit
+needs the same one or it becomes a bypass.
+
+Test: `sys_spawn_with_perms.notrace_blocks_same_principal_debug`. Its
+pre-F1 positive control runs the perm word login used *before* this change and
+asserts the attach is **admitted** — without it, the refusal leg would be
+equally satisfied by a fixture nothing could ever debug. The control is then
+re-checked while the caller holds `CAP_DEBUG|CAP_HOSTOWNER`, so the refusal
+cannot be a caller the test quietly poisoned.
+
+**Surviving caveat, recorded not fixed:** NOTRACE closes the debug route only.
+The planned `/proc/<pid>/fd/` (deferred at `kernel/devproc.c:27`) would be
+owner-gated and would reopen fd-dup theft of the proxy's coordinator fd. That
+surface must gate on more than the owner axis when it lands.
+
 ## Haul identity cape — 2026-09-23 (aux-3; audit round pending)
 
 The operator's Lantern-over-Haul run got "permission denied" on a private Mac

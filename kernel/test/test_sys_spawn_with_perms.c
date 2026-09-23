@@ -76,6 +76,10 @@ void test_sys_spawn_with_perms_console_owner_set_wiring(void);
 void test_sys_spawn_with_perms_seat_roles(void);
 
 extern void proc_test_seat_reset(void);
+// (U) F1: the I-39 debug-authority predicate, so the NOTRACE arm can assert the
+// CONSEQUENCE of the stamp and not merely that a bit landed in a word.
+extern bool devproc_debug_authorized(const struct Proc *caller,
+                                     const struct Proc *target);
 
 static void drain_zombies(void) {
     int status = 0;
@@ -463,4 +467,77 @@ void test_sys_spawn_with_perms_seat_roles(void) {
     proc_test_seat_reset();
     struct Proc *all[6] = { plain, poster, manager, service, client, late };
     for (u32 i = 0; i < 6; i++) { all[i]->state = PROC_STATE_ZOMBIE; proc_free(all[i]); }
+}
+
+// (U) F1: SPAWN_PERM_NOTRACE -- the bit that stops the /srv connect gate being
+// walked around instead of opened. The gate admits a TCB byte service only to a
+// CAP_TCB_DIAL holder, and in a session the sole holder is the per-user home
+// proxy -- which login spawns AS the user, so the user's own shell is the SAME
+// principal and devproc_debug_authorized's owner axis admits it. Attach to the
+// holder, drive its live coordinator transport, and the system store is reached
+// with no capability at all.
+//
+// Both halves are asserted on ONE principal, because that is the whole
+// difficulty: no identity rule can separate these two Procs.
+//   - the POSITIVE CONTROL runs the perm word login passed BEFORE F1 and proves
+//     the attach is ADMITTED there. Without it the refusal below would be
+//     equally satisfied by a fixture nothing could ever debug.
+//   - the refusal runs the word login passes NOW.
+void test_sys_spawn_with_perms_notrace_blocks_same_principal_debug(void) {
+    drain_zombies();
+
+    struct Proc *shell = proc_alloc();
+    struct Proc *bare  = proc_alloc();
+    struct Proc *proxy = proc_alloc();
+    TEST_ASSERT(shell && bare && proxy, "proc_alloc shell + bare + proxy");
+
+    shell->principal_id = 0xA11CEu;
+    shell->primary_gid  = 0x6u;
+    shell->caps         = 0;          // no CAP_DEBUG, no CAP_TCB_DIAL: a plain shell
+    shell->state        = PROC_STATE_ALIVE;
+    bare->principal_id  = 0xA11CEu;   // the same user, deliberately
+    bare->state         = PROC_STATE_ALIVE;
+    proxy->principal_id = 0xA11CEu;
+    proxy->state        = PROC_STATE_ALIVE;
+
+    // PRE-F1 control: MAY_POST_SERVICE alone, which is exactly what login used
+    // to pass. The child stays traceable and the shell gets in.
+    apply_spawn_perms(bare, SPAWN_PERM_MAY_POST_SERVICE);
+    TEST_EXPECT_EQ((u32)(bare->proc_flags & PROC_FLAG_NOTRACE), 0u,
+        "MAY_POST_SERVICE alone leaves the child traceable");
+    TEST_ASSERT(devproc_debug_authorized(shell, bare),
+        "PRE-F1 CONTROL: a same-principal shell CAN debug-attach the un-flagged proxy");
+
+    // The word login passes now.
+    apply_spawn_perms(proxy, SPAWN_PERM_MAY_POST_SERVICE | SPAWN_PERM_NOTRACE);
+    TEST_ASSERT((proxy->proc_flags & PROC_FLAG_NOTRACE) != 0,
+        "NOTRACE stamped the child");
+    TEST_ASSERT(proc_may_post_service(proxy),
+        "NOTRACE did not cost the child the posting mark it is spawned for");
+    TEST_ASSERT(!devproc_debug_authorized(shell, proxy),
+        "NOTRACE refuses a same-principal debug attach -- the side door is shut");
+
+    // The seam is not an identity tie-break: no capability re-opens it. Then the
+    // control is re-checked WITH those caps, so the refusal above is the flag's
+    // doing and not a caller this test quietly poisoned.
+    shell->caps = CAP_DEBUG | CAP_HOSTOWNER;
+    TEST_ASSERT(!devproc_debug_authorized(shell, proxy),
+        "NOTRACE refuses CAP_DEBUG and CAP_HOSTOWNER too");
+    TEST_ASSERT(devproc_debug_authorized(shell, bare),
+        "the un-flagged control is STILL debuggable with those caps -- caller is sound");
+
+    // NOTRACE is deliberately the one ungated SPAWN_PERM_* bit: it confers
+    // nothing a child could not already do to itself with SYS_SET_TRACEABLE(0),
+    // so an unmarked Proc must be allowed to request it. The seat roles are
+    // checked alongside to prove `plain` really is unprivileged -- otherwise a
+    // grant_check that said yes to everything would satisfy the line above.
+    struct Proc *plain = proc_alloc();
+    TEST_ASSERT(plain != NULL, "proc_alloc plain Proc");
+    TEST_EXPECT_EQ(spawn_perm_grant_check(plain, SPAWN_PERM_NOTRACE), 0,
+        "an unprivileged Proc may confer NOTRACE (self-reachable, so ungated)");
+    TEST_EXPECT_EQ(spawn_perm_grant_check(plain, SPAWN_PERM_MAY_POST_SERVICE), -1,
+        "the same Proc confers NO posting mark -- it is genuinely unprivileged");
+
+    struct Proc *all[4] = { shell, bare, proxy, plain };
+    for (u32 i = 0; i < 4; i++) { all[i]->state = PROC_STATE_ZOMBIE; proc_free(all[i]); }
 }

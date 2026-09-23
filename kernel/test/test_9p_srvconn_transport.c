@@ -34,6 +34,7 @@
 #include <thylacine/9p_srvconn_transport.h>
 #include <thylacine/9p_transport.h>
 #include <thylacine/9p_wire.h>
+#include <thylacine/caps.h>
 #include <thylacine/dev.h>
 #include <thylacine/devsrv.h>
 #include <thylacine/handle.h>
@@ -136,7 +137,13 @@ static struct SrvConn *open_byte_mode_pair_cape(struct Proc **out_server,
         drop_test_proc(server); drop_test_proc(client); return NULL;
     }
     walkqid_free(w);
+    // (U) the connect gate: model a LEGITIMATE dialer (production: joey / login /
+    // the home proxy, all CAP_TCB_DIAL holders). Restored straight after, so no
+    // later assertion ABOUT client->caps sees the fixture's stamp (audit F2).
+    caps_t saved_caps = client->caps;
+    client->caps |= CAP_TCB_DIAL;
     struct Spoor *cs = devsrv_open_connect(client, sref, /*omode ORDWR*/ 2);
+    client->caps = saved_caps;
     spoor_clunk(sref);                 // the spent quarry (open-returns-new)
     spoor_clunk(root);
     if (!cs) { drop_test_proc(server); drop_test_proc(client); return NULL; }

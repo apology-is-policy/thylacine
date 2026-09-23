@@ -2626,6 +2626,34 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, shm)         == 208, "t_pci
 #define SPAWN_PERM_SEAT_MANAGER      (1u << 6)
 #define SPAWN_PERM_SEAT_SERVICE      (1u << 7)
 #define SPAWN_PERM_SEAT_CLIENT       (1u << 8)
+// SPAWN_PERM_NOTRACE ((U) F1; STALK-DESIGN section 5.2 / D8, ARCH 28 I-39)
+// stamps PROC_FLAG_NOTRACE on the child BEFORE its first EL0 instruction, so
+// the debug surface refuses an attach for the whole of its life.
+//
+// What it is for: the /srv connect gate admits a TCB byte service only to a
+// CAP_TCB_DIAL holder, and in a login session the per-user home proxy is the
+// sole holder. But the proxy runs AS the user (login .identity()s it so the
+// coordinator attributes the user's home files to him), so the user's shell is
+// the SAME principal -- and devproc_debug_authorized's identity axis admits an
+// owner. Without this bit the shell attaches to the proxy and drives its live
+// coordinator transport, reaching the SYSTEM store with no capability at all:
+// the gate would hold at the front door and stand open at the side one.
+//
+// Why spawn-time and not a self-call to SYS_SET_TRACEABLE(0): a self-call is
+// racy. It leaves the child attachable between exec and the call, and a
+// same-principal Proc that could take that window really exists -- a second
+// login, or a backgrounded process left over from a prior session. Stamping in
+// the thunk closes the window rather than narrowing it. proc_set_seat_service
+// stamps NODUMP|NOTRACE this way, for this reason.
+//
+// Why this bit alone is UNGATED in spawn_perm_grant_check, where every other
+// SPAWN_PERM_* is gated: it confers no authority the child does not already
+// have. ANY Proc may call SYS_SET_TRACEABLE(0) on itself with no capability,
+// so a gate here could only change WHEN the flag arrives, never WHETHER it
+// could. The bit strictly REDUCES what may be done to the child, so there is
+// nothing to escalate -- and a gate that withholds a self-reachable hardening
+// step would be theater. NOT a cap (rfork does not propagate proc_flags).
+#define SPAWN_PERM_NOTRACE           (1u << 9)
 #define SPAWN_PERM_ALL               (SPAWN_PERM_MAY_POST_SERVICE | \
                                       SPAWN_PERM_CONSOLE_TRUSTED | \
                                       SPAWN_PERM_CONSOLE_OWNER | \
@@ -2634,7 +2662,8 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, shm)         == 208, "t_pci
                                       SPAWN_PERM_SESSION_HANGUP | \
                                       SPAWN_PERM_SEAT_MANAGER | \
                                       SPAWN_PERM_SEAT_SERVICE | \
-                                      SPAWN_PERM_SEAT_CLIENT)
+                                      SPAWN_PERM_SEAT_CLIENT | \
+                                      SPAWN_PERM_NOTRACE)
 
 // A-1a (docs/IDENTITY-DESIGN.md §9.1): sys_spawn_args.identity_flags bits.
 // SPAWN_IDENTITY_SET requests that the child be born with the principal_id

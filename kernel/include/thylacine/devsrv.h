@@ -34,6 +34,7 @@
 #ifndef THYLACINE_DEVSRV_H
 #define THYLACINE_DEVSRV_H
 
+#include <thylacine/caps.h>
 #include <thylacine/poll.h>
 #include <thylacine/rendez.h>
 #include <thylacine/types.h>
@@ -119,6 +120,14 @@ struct devsrv_svc_ref {
     // in devsrv_close). The service is resolved fresh in THIS registry
     // (devsrv_open in 3b), never a global — per-territory isolation.
     struct SrvRegistry *reg;
+    // (U) the connect-refusal cause. Dev.open returns a Spoor* with no room
+    // for an errno, so a refused connect leaves the reason here and the open
+    // call sites read it through spoor_open_errno() -- the devsrv twin of
+    // dev9p's `open_errno` channel. In [-4095,-2], or 0 for "no specific
+    // cause" (the caller then renders the generic EIO). Written only by
+    // devsrv_open_connect, on a Spoor thread-local to the opening syscall,
+    // so it needs no lock.
+    int  open_errno;
 };
 
 // F2 close (P5-corvus-srv-impl audit): pin the magic to offset 0. Read
@@ -404,6 +413,29 @@ int devsrv_post_listener(struct Proc *p, struct Spoor *root,
 // The Dev.open vtable slot (devsrv_open) calls this with current_thread()->proc;
 // it is non-static so the test harness can drive it with an explicit Proc.
 struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode);
+
+// devsrv_srv_connect_authorized -- (U) the connect gate's DECISION, extracted
+// pure so every arm is assertable without building a Proc, a registry or a
+// Spoor (STALK-DESIGN.md section 5.2 / D8). True iff this connect is admitted.
+//
+//   byte_mode     is the service byte-mode? A 9P-mode connect is never gated:
+//                 the kernel does the Tattach itself and bounds every later
+//                 message, whereas a byte connect hands over the RAW transport.
+//   cap_posted    was the service posted under CAP_POST_SERVICE (a user's own
+//                 scoped post) rather than the PROC_FLAG_MAY_POST_SERVICE TCB
+//                 mark? Only a mark-posted (TCB) byte service is gated.
+//   self_post     does the connector's `stripes` equal the poster's? A Proc may
+//                 always dial a service it posted -- it IS the server, so the
+//                 connect conveys nothing it does not already hold.
+//   caps          the connector's live capability word.
+bool devsrv_srv_connect_authorized(bool byte_mode, bool cap_posted,
+                                   bool self_post, caps_t caps);
+
+// devsrv_open_errno -- the cause a refused connect left on the service-ref
+// Spoor `c` (the devsrv twin of dev9p_open_errno; read through
+// spoor_open_errno at the two open call sites). Returns a value in [-4095,-2],
+// or -1 when `c` is not a devsrv service-ref Spoor or carries no cause.
+s64 devsrv_open_errno(struct Spoor *c);
 
 // srv_accept_blocking — the poster's accept: block until a connection is
 // on `svc`'s accept backlog, then dequeue and return it. The returned

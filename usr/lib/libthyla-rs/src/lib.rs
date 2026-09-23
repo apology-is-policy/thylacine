@@ -655,6 +655,13 @@ pub const T_SPAWN_PERM_SESSION_HANGUP: u64 = 1 << 5;
 pub const T_SPAWN_PERM_SEAT_MANAGER: u64 = 1 << 6;
 pub const T_SPAWN_PERM_SEAT_SERVICE: u64 = 1 << 7;
 pub const T_SPAWN_PERM_SEAT_CLIENT: u64 = 1 << 8;
+// T_SPAWN_PERM_NOTRACE ((U) F1): stamp PROC_FLAG_NOTRACE on the child before its
+// first instruction, so the /proc debug surface refuses every attach -- including
+// one from the SAME principal, which is the case that matters for a service
+// spawned as the user it serves (login's home proxy). Ungated: a Proc may
+// already make itself untraceable with SYS_SET_TRACEABLE(0), so this only moves
+// the stamp earlier than the child could manage for itself.
+pub const T_SPAWN_PERM_NOTRACE: u64 = 1 << 9;
 
 // poll event bits — MUST mirror POLL* in kernel/include/thylacine/poll.h.
 // Linux values; the future musl shim is a no-op.
@@ -780,6 +787,10 @@ pub const T_CAP_CHOWN: u64           = 1 << 8;   // elevation-only; chown/chgrp-
 pub const T_CAP_KILL: u64            = 1 << 9;   // elevation-only; cross-identity kill override
 pub const T_CAP_DEBUG: u64           = 1 << 10;  // elevation-only; cross-Proc debug authority (I-39)
 pub const T_CAP_POST_SERVICE: u64 = 1 << 13; // elevated /srv posting, propagated by imperium
+// (U) fork-grantable; gates open=connect on a TCB byte service in /srv
+// (STALK-DESIGN 5.2 / D8). joey -> login -> the per-user home proxy; the
+// user's shell is deliberately NOT given it.
+pub const T_CAP_TCB_DIAL: u64        = 1 << 14;
 pub const T_CAP_JIT: u64             = 1 << 11;  // elevation-only; code-Burrow creation (I-42)
 pub const T_CAP_AUDIO_GRAPH: u64     = 1 << 12;  // elevation-only; Nocturne whole-sink authority (I-46; NOCTURNE.md 6.8)
 

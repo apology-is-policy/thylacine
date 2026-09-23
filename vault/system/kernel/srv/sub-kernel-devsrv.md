@@ -43,6 +43,40 @@ owns the registry, the state machine, the Dev, and the syscall layer.
 
 ## Contract
 
+**Connect admission (U, 2026-09-23).** `devsrv_open_connect` now carries the
+FIRST authority check on the connect path. A **byte-mode** service posted under
+the TCB mark (`SrvService.cap_posted == false`) is connectable only by a Proc
+holding **`CAP_TCB_DIAL`**; refusal is `T_E_ACCES`. Two exemptions and one
+exclusion: a service posted under `CAP_POST_SERVICE` (a user's own scoped post --
+`haul --post`) is unaffected; a Proc may always dial a service **it posted
+itself** (`proc_stripes` == `poster_stripes`); and 9P-mode services are never
+gated at all.
+
+The line is byte-vs-9P because a byte connect hands the client the **raw
+transport** -- thereafter the kernel is a pipe and cannot bound what the client
+asks the server for -- whereas a 9P connect has the kernel perform the Tversion
+and Tattach itself, with every later message passing through its own 9P client.
+Peer identity is stamped in *both* modes and readable through `SYS_SRV_PEER`; the
+asymmetry is not whether identity exists but whether the kernel can bound the
+**request**.
+
+This **replaces** the claim that stood here and in this surface's audit-trigger
+row -- that per-territory `/srv` visibility (I-1) is the isolation boundary.
+It was not: an ordinary user could `mount /srv/stratum-fs`, the SYSTEM store,
+and list the system root (confirmed on device), because login never built
+[[sub-kernel-stalk]]'s D7 per-session registry and the session inherits boot's
+immortal one. Visibility still bounds which services a Proc can NAME; the gate
+bounds which TCB byte services it may REACH. `devsrv` remains system-owned
+0555/0444 and NOT `perm_enforced` -- the gate is a **capability** check, never an
+rwx one.
+
+Identity could not be the axis. login spawns the per-user home proxy **as the
+user** (deliberately -- so the coordinator attributes that user's home files to
+them), and the user's own shell is the same principal. Only a capability
+separates them ([[inv-i22]]). The bit is fork-grantable and flows
+kproc -> joey -> login -> the proxy; the shell is spawned without it.
+
+
 **Haul posting (2026-09-17).** `devsrv_post_listener` accepts either the
 TCB role described below or elevation-only `CAP_POST_SERVICE` (bit 13).
 Cap-only posters are bounded under `SrvRegistry.lock`: two LIVE/RESERVING
@@ -310,7 +344,9 @@ Everything returns −1/NULL fail-closed with full unwind: post (unmarked
 Proc, bad name byte/length, non-root parent, LIVE/RESERVING name
 collision, mode/class/cape rebind flip, a caped 9P-mode post, registry full, handle-table full →
 `srv_abort` rollback — no stale entry survives any failure); connect
-(dead/missing service, raced tombstone at the push, global cap, backlog
+(REFUSED by the connect gate -- recorded as `T_E_ACCES` on the service-ref
+for `spoor_open_errno`, and refused BEFORE the SrvConn is minted so nothing
+reaches the poster's backlog; dead/missing service, raced tombstone at the push, global cap, backlog
 full [double-unref: backlog + create refs], OOM, handshake failure
 [teardown-then-unref so the poster sees a dead conn]); accept (wrong
 kind/rights/magic, stripes mismatch, service died while blocked,
@@ -330,6 +366,20 @@ rendez sleep per idle wait. The costs that matter are memory bounds
 
 What an auditor attacks here:
 
+- **The connect gate (U)**: it is DEFAULT-DENY -- only the last line of
+  `devsrv_srv_connect_authorized` consults a capability, so a byte-mode TCB
+  service nobody considered is refused rather than admitted. `cap_posted` is
+  captured INSIDE the registry-lock block that checks LIVE, beside mode and
+  cape, because a tombstone-then-rebind could otherwise name a different
+  service's posting authority than the one connected to. `p->caps` is read with
+  an ACQUIRE load (`proc_become_legate` is a cross-thread writer). The self-post
+  exemption keys on `stripes`, a FRESH PER-PROC tag, so it means exactly the
+  same Proc -- prosecute any reading that would admit a child or a Proc group,
+  and that `proc_stripes` fail-closing to 0 cannot match a LIVE service's
+  non-zero `poster_stripes`. The refusal precedes the mint, so a denied connect
+  leaves nothing on the accept backlog. The errno channel is CLEARED per
+  attempt, or a refusal's `T_E_ACCES` would be reported as the cause of a
+  LATER, unrelated failure. Identity is deliberately NOT an axis.
 - **The post gate**: `MAY_POST_SERVICE` checked on the create=post path
   (an unmarked Proc must never post or rebind — corvus.tla
   ServicePosterEverMarked); the name hygiene (a name is a future path
@@ -419,7 +469,14 @@ recorded at their own arcs' sweeps.)
 
 ## Tests
 
-Roster verified against `kernel/test/test.c` — 26 `devsrv.*`:
+Roster verified against `kernel/test/test.c` — 28 `devsrv.*`:
+`srv_connect_gate_decides` (the U gate's pure decision: all sixteen input
+combinations, plus a holds-every-OTHER-capability leg so a `caps != 0` gate
+cannot pass) · `srv_connect_gate` (the same gate on the real connect path:
+refusal + `T_E_ACCES` + an untouched backlog; the SAME Proc admitted once it
+holds the bit; the poster self-dialling uncapped; a user-posted `haul --post`
+service still admitting a capless dialer -- the admitted legs are the POSITIVE
+CONTROLS against a gate that refused unconditionally) ·
 `registered` · `post_gate` · `post_basic` · `tombstone` ·
 `registry_full` · `registry_full_tombstone_rebinds` (#30's at-capacity
 asymmetry) · `post_rollback` · `post_listener` · `walk_service` ·
