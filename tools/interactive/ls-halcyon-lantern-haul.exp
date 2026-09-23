@@ -1,0 +1,273 @@
+#!/usr/bin/expect -f
+# A deck the image does not carry: lantern on a directory mounted over Haul,
+# in a real Halcyon tile.
+#
+# ls-halcyon-lantern.exp shows the demo deck baked into the pool at /deck, and
+# haul-npxf.exp reads one file through a Haul mount with `cat`. Neither reaches
+# the composition this one does: a Beacon deck read through the kernel's 9P
+# client over npxf's encrypted channel, laid out richly by the compositor, and
+# read AGAIN on every key -- so an edit on the host is on the guest's screen at
+# the next repaint.
+#
+# The deck is written on the host by this scenario and served by a
+# npxf-server it starts itself: nothing here is in the image, so a deck on the
+# screen can only have come through the mount.
+#
+# THE SHAPE OF THE COMMAND. A mount lands in the namespace of the process that
+# makes it (I-1), so `haul ... /tmp/remote` backgrounded would mount into
+# haul's namespace and the shell would see nothing. Haul therefore runs a
+# SUB-SHELL, `/bin/ut`, as its child: the nested ut shares the tile's terminal,
+# seats itself as the foreground group, and gives lantern the raw-mode dance
+# the outer shell would have given it. `haul ... lantern /tmp/remote/deck`
+# would NOT: ut decides the dance from argv[0], which would be `haul`.
+#
+# What it asserts:
+#   1. A slide PAINTS from the mount (ink, as ls-halcyon-lantern measures it).
+#   2. The host SERVED it: npxf-server's log names the deck's files. A painted
+#      diagnostic has ink too, so (1) alone cannot tell a slide from an error.
+#   3. SPACE pages: the screen changes and is still drawn.
+#   4. A HOST EDIT reaches the guest: the shown slide is rewritten on the host,
+#      Ctrl-L repaints, and the capture differs from the one before the edit.
+#      lantern re-opens the slide on every paint, so a stale screen here would
+#      mean the guest's 9P cache served the old bytes.
+#
+# Captures are kept at build/lantern-haul-*.png and the server log at
+# build/lantern-haul-npxf.log, whatever the verdict.
+#
+# Needs HALCYON_SESSION=y and a built npxf-server. Bake with:
+#   THYLACINE_HALCYON_SESSION=1 tools/build.sh kernel --config ci
+# The server is NPXF_SERVER, else ~/projects/npxf/build/release/npxf-server
+# (https://github.com/apology-is-policy/npxf). Without either this SKIPs (exit
+# 77): an absent fixture is neither a regression nor coverage.
+
+set ::env(THYLACINE_ACCEL) [expr {[info exists ::env(LS_CI_GFX_ACCEL)] ? $::env(LS_CI_GFX_ACCEL) : "hvf"}]
+source [file join [file dirname [info script]] lib.exp]
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+
+set npxf [expr {[info exists ::env(NPXF_SERVER)] \
+    ? $::env(NPXF_SERVER) : "$::env(HOME)/projects/npxf/build/release/npxf-server"}]
+if {![file executable $npxf]} {
+    puts "LS-CI SKIP: no npxf-server at $npxf -- build npxf or set NPXF_SERVER (see this file's header)"
+    exit 77
+}
+# Not 5640, haul-npxf's default, where an operator's own server may be running.
+set port [expr {[info exists ::env(HAUL_LANTERN_PORT)] ? $::env(HAUL_LANTERN_PORT) : 5641}]
+if {![lc_port_bindable $port]} {
+    lc_fail "127.0.0.1:$port is already in use -- set HAUL_LANTERN_PORT"
+}
+
+# The export, the token (outside the export) and the server's log.
+set work [exec mktemp -d -t thyla-lantern-haul]
+set export $work/export
+set deck $export/deck
+file mkdir $deck
+set token "thylacine-haul-lantern-token"
+set fh [open $work/token w]
+puts $fh $token
+close $fh
+set srvlog $repo/build/lantern-haul-npxf.log
+
+proc write_file {path text} {
+    set fh [open $path w]
+    puts -nonewline $fh $text
+    close $fh
+}
+write_file $deck/slides.toml {title = "From the host"
+slides = [
+    "01-host.md",
+    "02-path.md",
+    "03-live.md",
+]
+}
+write_file $deck/01-host.md {# Served from the Mac
+
+This deck lives on the development host. npxf exports its directory, and Haul
+carries it into the guest over an encrypted channel.
+
+- Every slide is read through the mount when it is shown.
+- Nothing in this deck was baked into the image.
+}
+write_file $deck/02-path.md {# The path a slide takes
+
+1. lantern opens the slide under the mount point.
+2. The kernel's 9P client sends the walk and the read to Haul.
+3. Haul seals each record and writes it to npxf over TCP.
+4. npxf reads the file on the host and answers the same way.
+
+## Why a sub-shell
+
+A mount lands in the namespace of the process that makes it. Haul runs `ut` as
+its child, so that shell and everything it starts can see the mount.
+}
+write_file $deck/03-live.md {# Edit me on the host
+
+Change this file on the Mac, then press Ctrl-L in the guest. lantern reads the
+slide again on every paint.
+}
+
+# Three -v: npxf logs each `opened <path>` only at level 3, and that line is
+# the witness that the host served the deck.
+set npxf_pid [exec $npxf -r $export -t $work/token -l 127.0.0.1:$port -R -v -v -v >& $srvlog &]
+# Whatever ends the run -- a pass, lc_fail, a skip -- stops the server and
+# removes the export. The log stays.
+exit -onexit {
+    catch {exec kill $::npxf_pid}
+    catch {file delete -force $::work}
+}
+set up 0
+for {set i 0} {$i < 50} {incr i} {
+    if {![catch {set probe [socket 127.0.0.1 $port]}]} {
+        close $probe
+        set up 1
+        break
+    }
+    after 100
+}
+if {!$up} {
+    lc_fail "npxf-server did not start listening on 127.0.0.1:$port (log: $srvlog)"
+}
+lc_step "npxf-server (pid $npxf_pid) serving $export read-only on 127.0.0.1:$port"
+
+# qmp-sendtext types US-layout text, shifted characters included.
+proc type {text} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp $text} e]} { lc_fail $e }
+    after 400
+}
+proc key {chord} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $chord} e]} { lc_fail $e }
+    after 700
+}
+proc capture {name} {
+    global repo qmp
+    after 1200
+    set out $repo/build/lantern-haul-$name.png
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} e]} { lc_fail $e }
+    lc_step "captured $out"
+    return $out
+}
+proc ink {png} {
+    global repo
+    return [exec python3 $repo/tools/interactive/gfx_ink.py $png]
+}
+# How many times npxf-server's log names a file (its level-3 `opened` lines).
+proc served {name} {
+    global srvlog
+    set fh [open $srvlog r]
+    set text [read $fh]
+    close $fh
+    return [regexp -all -- [string map {. \\.} $name] $text]
+}
+proc same {a b} {
+    return [expr {[catch {exec cmp -s $a $b}] == 0}]
+}
+
+lc_boot
+set timeout $lc_boot_timeout
+expect {
+    -ex "Thylacine login: " {}
+    -re {EXTINCTION:} { lc_extinction_fail "boot" }
+    timeout { lc_fail "no login" }
+    eof { lc_fail "EOF before login" }
+}
+lc_raw_send "michael\r" "login user"
+expect {
+    -ex "password: " {}
+    timeout { lc_fail "no password prompt" }
+    eof { lc_fail "EOF before password" }
+}
+lc_raw_send "correct-horse-battery-staple-v1\r" "login password"
+expect {
+    -ex "login: session compositor (halcyond) spawned" {}
+    -ex "Thylacine textual shell" {
+        puts "\nLS-CI SKIP: default (ut) image -- this scenario drives the session\
+ compositor. Bake with: THYLACINE_HALCYON_SESSION=1 tools/build.sh kernel --config ci"
+        lc_quit
+        exit 77
+    }
+    timeout { lc_fail "no graphical session" }
+    eof { lc_fail "EOF at session start" }
+}
+set timeout 120
+expect {
+    -re {halcyond: status bar [^\r\n]*panes [0-9]+} {}
+    -re {EXTINCTION:} { lc_extinction_fail "session" }
+    timeout { lc_fail "the session's shell did not become ready" }
+    eof { lc_fail "EOF before the session was ready" }
+}
+lc_step "the session is up"
+
+key "meta_l+f"
+type "echo $token > lantern.token\n"
+type "mkdir -p /tmp/remote\n"
+type "haul -t lantern.token 10.0.2.2!$port /tmp/remote /bin/ut\n"
+# The handshake, the attach and the nested shell's first prompt.
+after 4000
+set shell [capture shell]
+type "lantern /tmp/remote/deck\n"
+set one [capture slide1]
+set ink_one [ink $one]
+lc_step "ink on slide one: $ink_one"
+if {$ink_one < 2000} {
+    lc_fail "slide one painted almost nothing (ink $ink_one)"
+}
+lc_pass "ls-halcyon-lantern-haul(1): a slide paints in the tile"
+
+foreach f {slides.toml 01-host.md} {
+    if {![served $f]} {
+        lc_fail "npxf-server's log never names $f: the deck on the screen did not come through the mount (log: $srvlog)"
+    }
+}
+lc_pass "ls-halcyon-lantern-haul(2): the host served the manifest and the first slide"
+
+type " "
+set two [capture slide2]
+set ink_two [ink $two]
+lc_step "ink on slide two: $ink_two"
+if {[same $one $two]} {
+    lc_fail "SPACE changed nothing: slide one and slide two are byte-identical captures"
+}
+if {$ink_two < 2000} {
+    lc_fail "slide two is effectively blank (ink $ink_two)"
+}
+if {![served 02-path.md]} {
+    lc_fail "npxf-server's log never names 02-path.md after SPACE (log: $srvlog)"
+}
+lc_pass "ls-halcyon-lantern-haul(3): SPACE pages to a slide read through the mount"
+
+type " "
+set three [capture slide3]
+set opens_before [served 03-live.md]
+# Still a valid section, so the repaint shows a slide and not lantern's
+# in-place diagnostics -- those would change the screen too.
+write_file $deck/03-live.md {# Edited on the host
+
+This text was written on the Mac while the slide was on the screen.
+
+- The guest re-opened the file for the repaint.
+- Its 9P cache revalidated it and read the new bytes.
+}
+key "ctrl+l"
+set edited [capture slide3-edited]
+set ink_edited [ink $edited]
+lc_step "ink on the edited slide: $ink_edited"
+# Informational: a cached open can revalidate without a new Tlopen, so the
+# server's count is not asserted -- the screen is.
+lc_step "npxf opens of 03-live.md: $opens_before before the edit, [served 03-live.md] after Ctrl-L"
+if {[same $three $edited]} {
+    lc_fail "the host edit did not reach the screen: slide three is byte-identical before and after the edit and Ctrl-L"
+}
+if {$ink_edited < 2000} {
+    lc_fail "the edited slide is effectively blank (ink $ink_edited)"
+}
+lc_pass "ls-halcyon-lantern-haul(4): an edit on the host is on the guest's screen at the next repaint"
+
+type "q"
+type "exit\n"
+after 1500
+set after_exit [capture exited]
+lc_quit
+lc_pass "LS-CI ls-halcyon-lantern-haul: a deck served from the host over Haul renders, pages and follows a host edit in a Halcyon tile; captures at build/lantern-haul-*.png"
+exit 0

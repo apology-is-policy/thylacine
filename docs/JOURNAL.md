@@ -22,6 +22,86 @@ needed the operator.
 
 
 ---
+## 2026-09-23, late morning, later (aux, Opus 5.5 1M, effort max) -- main merged in, and a deck read from the Mac over Haul
+
+The operator asked for two things: merge main into aux-3, then see where lantern
+stands and test it, ideally on a directory mounted with Haul.
+
+**The merge (`7b64a06e`, 8 commits, 5 conflicts, all additive).** CLAUDE.md
+took main's trimmed file whole; our one change since the base, the HARNESS /
+OUTSIDE THE CODE CENSUS exception in the dossier step, sat in a paragraph the
+trim had moved to `docs/agent/DOC-DISCIPLINE.md`, so it went there verbatim.
+The two build lists and the workspace members were unioned by building the
+union from each side separately and checking the two agree. The journal was the
+interesting one: both sides had only prepended since the base, so main's four
+entries went in by the time each was first committed (the pickaxe on each
+heading), which puts main's "night" entry, committed at 09:08, between two of my
+morning ones. The labels are each author's; the order is the clock's. The
+merged kernel, arch, mm and specs trees are byte-identical to main's, so main's
+kernel gates carry over. The boot `ls-ci` runs is the kernel suite anyway
+(1638/1638), and main's new protect-probe passed in it. test-rust was unchanged
+at 1904 / 0 failing.
+
+**The Mac was main's.** Main held it for a kernel change of uncertain iteration
+count, 1.8 h left on the lease. I asked over yip (0102) for a window between
+their builds, naming the resource and the uncertainty rather than a duration.
+Main released at the end of a compile. I held it for 18 minutes and released
+before writing anything up.
+
+**lantern on a Haul mount works with no change on either side**, and
+`tools/interactive/ls-halcyon-lantern-haul.exp` now says so. It writes a
+three-slide deck on the host, serves it from a npxf-server it starts itself,
+and in a Halcyon tile types `haul -t lantern.token 10.0.2.2!5641 /tmp/remote
+/bin/ut`, then `lantern /tmp/remote/deck`. The sub-shell is required: a mount
+lands only in haul's namespace (I-1), and `haul ... lantern DECK` would run
+lantern in the pts's cooked `CHILD_MODE`, because ut picks the raw-mode dance
+from argv[0], which would be `haul`.
+
+The design of the gate turned on one question: what can a pass NOT come from?
+Ink cannot tell a slide from a diagnostic, since an error message has ink too.
+So the second leg reads npxf's own log, where `-v -v -v` records every open,
+and requires the manifest and the first slide in it. Measured both ways (legacy
+60 s, Instrument 61 s, first attempt each), and the edit leg is the one worth
+having. The shown slide is rewritten on the host and Ctrl-L repaints; the
+capture differs and reads "Edited on the host". The server saw `03-live.md`
+opened twice before the edit and a third time by the repaint, so the guest's
+cache revalidated rather than serving the old bytes.
+
+**A wrong turn, caught by looking.** The first run's captures had a grey bar
+between every block of every slide, the built-in deck's too, and at 200 % they
+were impossible to miss. No rendering code had changed since the deck arc
+(`git log` on halcyond, beacon, manual and vt), so this was not a regression.
+Reading the layout found the cause: a blank raw line becomes a zero-height
+paragraph break only under the Instrument profile's fractional flow
+(`layout.rs`, the `Role::Empty` arm), and the legacy profile keeps raw islands
+byte for byte. `--config ci` pins legacy. The deck arc looked under Instrument,
+and so will anyone presenting, since Instrument is the product default. A
+second run on an Instrument image confirmed a clean document. The dossier now
+says to judge the look on an Instrument image. Nothing here is a defect, but a
+gate image is not a product image, and the gate's own header said
+`--config ci` without saying what that does to the look.
+
+**Two small defects found, queued, not fixed:**
+- A `ut` started from another program's directory believes `$cwd` is `/`.
+  `Env` initializes it to `/`, and nothing under `usr/utopia` reads the kernel
+  cwd at startup (grep: no getcwd). Both captures show the nested prompt as `/`
+  against the outer `~`. By reading, its globs and relative `cd` would resolve
+  against `/` while its commands run in the directory the kernel handed it. The
+  effect on those is unmeasured.
+- Under Instrument, the footer reads `EXIT 0 . haul ...` while haul's
+  sub-shell is still running. That is the observation only; the mechanism
+  (probably the nested shell's first prompt closing the outer command's zone)
+  is not traced.
+
+**Owed and noticed:** lantern has no Operator's Manual section. It is a
+shipped, user-facing program, and the deck arc wrote a design doc and a dossier
+but no manual page.
+
+The stale-comment fix rides the same commit: `qmp-sendtext.sh` has typed
+shifted characters since H-4c, but its header still said "lowercase, digits and
+four marks", and my own lantern gate repeated the claim. The new gate types `>`
+and `!`, which is how it surfaced.
+
 ## 2026-09-23, late morning, continued (aux, Opus 5.5 1M, effort max) -- a word keeps its backslash, and `rm \*` no longer removes everything
 
 Queue item 0c, found while writing completion's quoting: the lexer resolved a

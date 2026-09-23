@@ -32,10 +32,10 @@ source [file join [file dirname [info script]] lib.exp]
 set repo $lc_repo
 set qmp [lc_qmp_sock]
 
-# qmp-sendtext accepts lowercase letters, digits, space, '-', '.', '/' and
-# '\n' (which it maps to the Enter key) -- and REFUSES anything else rather
-# than dropping it, which is how the first run of this scenario failed loudly
-# on a '\r' instead of silently typing nothing.
+# qmp-sendtext types printable US-ASCII and '\n' (which it maps to the Enter
+# key) -- and REFUSES anything else rather than dropping it, which is how the
+# first run of this scenario failed loudly on a '\r' instead of silently
+# typing nothing.
 proc type {text} {
     global repo qmp
     if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp $text} e]} { lc_fail $e }

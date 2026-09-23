@@ -17,8 +17,9 @@
 #   tools/qmp-sendtext.sh [-s QMP_SOCK] -p "dblclick left|right|middle"
 #   tools/qmp-sendtext.sh [-s QMP_SOCK] -p "drag left X0 Y X1 N MS"
 #
-# Lowercase letters, digits, space, '-', '.', '/' and '\n' only (the
-# scenario vocabulary); anything else is a hard error, not a silent skip.
+# Printable US-ASCII and '\n' (Enter): uppercase letters and the shifted
+# punctuation go under a held shift (the SHIFTED table). Anything else -- a
+# tab, a '\r', a non-ASCII character -- is a hard error, not a silent skip.
 # -k sends ONE chord: '+'-separated qcodes pressed in order, released in
 # reverse (the G-6c Super-chord leg; qcodes pass through verbatim, e.g.
 # meta_l, shift, left/right/up/down, letters). A trailing @MS holds the

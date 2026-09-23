@@ -12,6 +12,7 @@ code:
   - usr/lantern/deck/slides.toml
   - tools/interactive/lantern.exp
   - tools/interactive/ls-halcyon-lantern.exp
+  - tools/interactive/ls-halcyon-lantern-haul.exp
 audit: light
 guarded-by: []
 validated-by: [prose, gate-interactive]
@@ -20,7 +21,7 @@ hazards: []
 abis: []
 design: ["docs/LANTERN-DESIGN.md", "docs/MANUAL-DESIGN.md", "docs/BEACON.md"]
 created: 2026-09-22
-updated: 2026-09-22
+updated: 2026-09-23
 ---
 ## Purpose
 
@@ -194,6 +195,19 @@ Low-value target, but the two places worth attacking:
 - `usr/lantern/deck/` is a TRACKED demo deck installed to `/deck` **in the
   POOL** by `populate_stratum_pool` -- NOT the ramfs. The running `/` is the
   pool after the pivot, so a guest data file staged in the ramfs is never found.
+- **A deck on another machine** rides `[[sub-haul]]` with no change on either
+  side: `haul -t TOKEN HOST!PORT /tmp/remote /bin/ut`, then
+  `lantern /tmp/remote/deck` inside that sub-shell. The sub-shell is required,
+  not a convenience. A mount lands only in haul's own namespace (I-1), so
+  lantern must be haul's descendant; and `haul ... lantern DECK` would run
+  lantern in the terminal's cooked mode (canonical input, echo, `isig`),
+  because `is_raw_command` reads argv[0], sees `haul`, and the pts path gives
+  an ordinary job `CHILD_MODE` (by reading). The nested ut seats itself as the
+  foreground group and gives lantern the dance. lantern re-opens the slide on
+  every paint, so an edit on the host is on the screen at the next key:
+  `tools/interactive/ls-halcyon-lantern-haul.exp` serves a deck it writes from
+  a host npxf-server, and asserts the paint, the server's `opened` log lines,
+  paging, and a host edit shown after Ctrl-L (2026-09-23, both profiles).
 - `console::is_raw_command` in `[[sub-utopia-eval]]` gained `lantern`: the
   basename set is hardcoded, so membership is required for the INPUT half (raw
   mode) and is this chunk's only edit to an audit-trigger surface.
@@ -206,6 +220,14 @@ Low-value target, but the two places worth attacking:
 
 ## Caveats
 
+- **Judge the look on an Instrument image.** Under the legacy (Daylight)
+  profile -- the one `--config ci` pins, so the gates' default -- every blank
+  line between a slide's blocks lays out as a one-row raw island: the
+  zero-height paragraph break for a blank raw line is Instrument-only in
+  `[[sub-halcyond]]`'s layout (the `Role::Empty` arm keyed on `fractional`),
+  and legacy keeps raw islands byte for byte. Under Instrument, the product
+  default, a slide is a clean document. Build the gate image with
+  `THYLACINE_HALCYON_PROFILE=instrument` to see what a presenter sees.
 - Presenting requires a terminal on fd 0 AND fd 1, judged independently:
   `lantern deck | tee log` has a terminal on stdin and a pipe on stdout, and
   clearing a pipe would write escapes into a file.
@@ -224,5 +246,7 @@ Low-value target, but the two places worth attacking:
 - 2026-09-22 `58bedd35` -- the E2E gate and the gate-token pin.
 - 2026-09-22 `6743b2fe` -- the rich-tier gate in a real tile.
 - 2026-09-22 `05c7c0f9` -- the three operator decisions recorded as ratified.
+- 2026-09-23 -- the Haul composition gate (`ls-halcyon-lantern-haul.exp`) and
+  the profile caveat.
 - 2026-09-22 `1319b4ba` -- the caret escapes (its claim that they did not work
   was wrong; corrected in `ae30a6b3`).
