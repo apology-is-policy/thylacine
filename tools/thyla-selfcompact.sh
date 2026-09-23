@@ -108,6 +108,13 @@ NOTE_AGE=$(( $(date +%s) - $(stat -f %m "$NOTE" 2>/dev/null || echo 0) ))
 [ "$NOTE_AGE" -le "$NOTE_MAX_AGE" ] || deny "the resume note is ${NOTE_AGE}s old (max ${NOTE_MAX_AGE}s) -- rewrite it for THIS compaction rather than shipping a stale one"
 NOTE_CHARS=$(wc -c < "$NOTE" | tr -d ' ')
 [ "$NOTE_CHARS" -ge 200 ] || deny "the resume note is only ${NOTE_CHARS} chars -- too thin to orient a fresh context"
+# The note reaches the far side as SessionStart hook context, and the harness
+# spills hook context past its size limit to a file, showing only a 2 KB
+# preview. Measured 2026-09-23: a 9.8 KB note was spilled and had to be read
+# back by hand; 4.5-5.4 KB notes arrived inline. 8000 leaves room for the
+# header resume-note.py prepends.
+NOTE_MAX_CHARS=${THYLA_NOTE_MAX_CHARS:-8000}
+[ "$NOTE_CHARS" -le "$NOTE_MAX_CHARS" ] || deny "the resume note is ${NOTE_CHARS} chars (max ${NOTE_MAX_CHARS}) -- the harness would spill it to a file and show a 2 KB preview. Cut it: facts that live in memory or the design note belong there, referenced by path (put that file in the working set)"
 
 # --- the working set: what the far side loads before anything else ---------
 # A fresh context re-finds its footing by reading, and unguided it reads
