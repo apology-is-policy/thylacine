@@ -6,7 +6,7 @@ title: "The syscall dispatcher — argument marshalling, the staging tiers, and 
 code:
   - kernel/syscall.c
 audit: hard
-guarded-by: [inv-i13, inv-i32, inv-i22, inv-i27, inv-i34, inv-i43, inv-i44]
+guarded-by: [inv-i12, inv-i13, inv-i32, inv-i22, inv-i27, inv-i34, inv-i43, inv-i44]
 validated-by: [prose, gate-smp, gate-interactive]
 locks: []
 abis: []
@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-09-21
+updated: 2026-09-23
 ---
 ## Trusted-seat and nonblocking entries
 
@@ -58,6 +58,11 @@ clearance grant, preserving its kernel cap-subset and flag checks. DMA_SEGMENTS
 remains dispatch 112. Haul posting uses the existing WALK_CREATE devsrv branch,
 not a new syscall; its authorization and bounded reservation live in
 [[sub-kernel-devsrv]].
+
+**B-1a (2026-09-23).** Dispatch 124 / 125 are the two permission-ceiling
+syscalls (`sys_burrow_reserve_handler` / `sys_burrow_protect_handler`), and
+`VIV_LINUX_MPROTECT` is a tier-2 arm in the phenotype prologue; the section at
+the end of this dossier carries them.
 
 
 `syscall_dispatch` receives the interrupted register frame. Since the phenotype
@@ -649,6 +654,13 @@ not a pointer: a zero length passes unconditionally, which is correct because
 nothing is dereferenced, and is why every caller pairs it with the length it
 will actually touch.
 
+**[[inv-i12]]** — since B-1a this file holds the BOUNDARY refusal of X as a
+protect target: `burrow_prot_word_check` runs first in both ceiling syscalls
+and answers `-T_E_ACCES` before any lookup; the mechanism's own refusal is
+[[sub-kernel-vma]]'s. `SYS_BURROW_PROTECT` carries no capability check, on
+purpose: attenuation creates no authority, and the one way bytes a Proc wrote
+become executable stays `CAP_JIT`'s dual map.
+
 **[[inv-i32]]** — the staging budget is this file's contribution to the
 per-process resource floor, joined by two more axes since: the page charge's
 payer attribution above, and the spawn-time page budget, which a child inherits
@@ -945,3 +957,110 @@ clunking the unpublished walked Spoor, then returns the bounded server errno
 or EIO for an unspecified/non-9P failure. The multi-component SYS_OPEN twin
 receives the same disposition from stalk. No syscall number or argument
 record changes; see [[sub-kernel-ninep-dev9p]].
+
+## B-1a: the ceiling syscalls, the mprotect arm, the exact anon mints, the lazy-piece refund (2026-09-23)
+
+**The boundary half of "X is never a target" lives here.**
+`burrow_prot_word_check` runs first in both `sys_burrow_reserve_for_proc` and
+`sys_burrow_protect_for_proc`: `BURROW_PROT_EXEC` -> `-T_E_ACCES` before any
+other test and before any lookup, then stray bits and W-without-R ->
+`-T_E_INVAL` (no write-only AP, the RW-1 C-F3 rule). The order is observable
+-- `protect(X)` over an unmapped range is EACCES where `protect(R)` is ENOMEM
+-- and `protect.x_refused_before_lookup` plus the probe's leg 5 pin it. The
+mechanism refuses X a second time in `vma_reprotect_precheck_in`, so the
+boundary is not the only gate; it is the one a guest sees.
+
+**`sys_burrow_reserve_for_proc(p, length, prot, align_log2)`** is
+`SYS_BURROW_ATTACH_LAZY`'s posture with mint-time attributes: the prot word
+check; `align_log2` 0 or in [12, 30]; length non-zero and at most
+`BURROW_RESERVE_MAX`; page-round; then under `as->lock`,
+`vma_find_gap_aligned` in the burrow window `[EXEC_USER_BURROW_BASE,
+EXEC_USER_BURROW_TOP)`, `burrow_create_anon_lazy`, `burrow_map` at the
+requested prot, and -- under the SAME lock hold, before anything can observe
+the mapping -- the ceiling raised to RW through `vma_lookup` +
+`vma_set_prot_max`, because `vma_alloc` sets a mint's ceiling to its mint prot
+(the safe default for every other mint) and a reservation's whole point is to
+commit later. No page charge: pages are charged at fault and the VMA cap
+bounds the free reservation. The success-path `burrow_unref` is outside the
+lock (#193).
+
+**`sys_burrow_protect_for_proc(p, vaddr, length, prot, flags)`**: the prot
+word check, then flags (only `BURROW_PROTECT_SEAL`), length 0, an unaligned
+`vaddr`, the round-up wrap and the span wrap (all `-T_E_INVAL`), `USER_VA_TOP`
+(`-T_E_NOMEM`: never mapped), and then `burrow_protect` under `as->lock`. **No
+window confinement, deliberately**: RELRO is in the image region, a thread
+stack in the burrow window, a library's data wherever ldso placed it, and what
+may be protected is decided by the mapping (type, flags, ceiling) in the
+precheck, not by its address. That is the opposite of the detach gate above,
+and the two are different questions: a detach REMOVES a mapping the caller
+must be entitled to dismantle; a protect moves one within a ceiling the mint
+fixed.
+
+**The phenotype rows.** `VIV_LINUX_MPROTECT` (226) is a tier-2 arm over
+`SYS_BURROW_PROTECT`: `vivarium_mprotect_decide` admits R / W / X in any
+combination and declines BTI / MTE / GROWS* ([[sub-kernel-vivarium]]); a zero
+length succeeds having touched nothing and an unaligned address is the
+target's EINVAL (Linux's two specific answers, reproduced); `PROT_WRITE` alone
+maps RW as Linux/AArch64 does; X is passed through to the boundary and refused
+there as EACCES, so the guest sees the target's stated refusal and not ENOSYS.
+`VIV_LINUX_MMAP`'s anonymous arm mints the Linux prot EXACTLY through
+`sys_burrow_reserve_for_proc` (PROT_NONE at none, PROT_READ at R, PROT_WRITE
+at RW, all under the RW ceiling; `rc < 0` -> `-ENOMEM`), ending VIVARIUM
+6.21's degradation ("PROT_NONE yields a writable mapping"): a guard page is
+protective and a read-only anonymous mapping is read-only. The fixed-anon arm
+admits `PROT_NONE` (a FIXED none window over an existing mapping is a guard,
+or a reservation ldso will raise), and `sys_mmap_fixed_anon_for_proc` raises
+the new piece's ceiling to RW after `burrow_map_fixed` succeeds, under the
+same lock hold.
+
+**A lazy PIECE refunds its own range at detach (the first of the chunk's three
+findings).** `detach_one_locked` used to uncharge the WHOLE lazy Burrow's
+resident count once per detached VMA -- correct while a lazy Burrow had one
+VMA, an I-32 under-count once one has several (a D-3b window reached it; a
+protect split reaches it on every thread stack). It now runs `burrow_decommit(p,
+vaddr, length)` over the piece's exact range, only on the exact match the unmap
+below will accept (so a refused detach frees nothing), before
+`burrow_unmap_reporting`; the ANON arm's claim-before-drop attribution is
+unchanged. That also returns a detached piece's pages to the system at once.
+The native detach itself stays exact-match per VMA: the pieces a protect
+leaves detach one by one, and the range form is B-1a'.
+
+**Pre-existing, OWNED, not fixed here: the phenotype `munmap` is
+window-confined, so a MAP_FIXED mapping below the window leaks.**
+`sys_munmap_range_for_proc` runs `detach_args_check` -> `detach_in_window`
+(`vaddr < EXEC_USER_BURROW_BASE` refused), while the two D-3b fixed arms accept
+any page-aligned non-zero address -- so `viv-pheno-probe` L21's `MAP_FIXED`
+mapping at `0x40000000` is served and its `munmap` is declined
+(`vivarium: unserved linux syscall nr=215` in every boot log); the mapping
+leaks for the Proc's life. Real ldso overlays land inside the whole-span
+reservation (in the window), so libraries are unaffected; a caller-chosen
+`MAP_FIXED` below the window is the exposed shape. Surfaced by B-1a's L22
+rewrite (the "range just unmapped" was still mapped); the leg now uses a
+never-mapped range. Home: B-1a' (the range-detach rework), either refusing
+fixed addresses outside the window at the two decides or letting the range
+detach admit anything the phenotype itself mapped. Memory:
+`bug_pheno_munmap_below_window_leaks_fixed_mapping`.
+
+**The holotype audit's corrections in this file (the close commit).** F2
+(P2): `sys_munmap_range_for_proc`'s two loops re-scanned the list from the
+head per mapping (the pre-existing twin of the reprotect's four passes,
+[[sub-kernel-vma]]); the validation loop now walks successors after one scan,
+and the detach loop reads `nx = v->next` BEFORE `detach_one_locked` frees `v`
+-- the detach removes exactly `v` (an exact-geometry match), so the successor
+stays valid. F4 (P3): B-1a's fixed-anon arm admits `PROT_WRITE` alone (the
+R-required gate went when `PROT_NONE` was admitted), and `mmap_fixed_window`
+mapped the word bit for bit, so `vma_alloc`'s W-without-R refusal surfaced as
+ENOMEM for a legal request; the window now promotes W to RW as the non-fixed
+anon arm and the `mprotect` arm do, for both fixed arms
+(`sys_mmap.fixed_anon_w_alone_maps_rw`). F6 (P3): the `mprotect` arm
+short-circuited a zero length before testing the alignment; Linux's
+`do_mprotect_pkey` tests the alignment first, so `mprotect(unaligned, 0,
+prot)` is EINVAL there and answered 0 here -- reordered, and viv-pheno-probe
+L23i pins it. F5 (P3, OWNED, B-1a' owns the fix): the per-piece refund never
+reaches ORPHANED slots -- a D-3b window replaced inside a touched lazy mapping
+leaves the replaced slots resident and charged, `burrow_decommit` over a
+detached piece's own range does not see them, and the Burrow's last free
+returns them uncharged; a regression from the whole-Burrow refund, in the
+SAFE direction only (the Proc is capped tighter). Named at the site; the fix
+is `vma_replace_range_in` decommitting the replaced window of the old Burrow
+before the swap.

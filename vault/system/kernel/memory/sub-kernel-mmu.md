@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md", "docs/PORTABILITY.md"]
 created: 2026-08-03
-updated: 2026-09-07
+updated: 2026-09-23
 ---
 ## Purpose
 
@@ -302,6 +302,29 @@ future address-targeted optimization.
 
 **Three headers in this subsystem still describe `Proc.vma_lock` as future
 work.** It has existed since #713 and is taken at 116 sites. Task #60.
+
+## The range uninstall walks by subtree (2026-09-23; B-1a audit F2)
+
+`mmu_uninstall_user_range` used to call `mmu_uninstall_user_pte` once per
+page of the range, so a range with nothing under it still paid a four-level
+table miss per page -- and B-1a's `SYS_BURROW_PROTECT` became the first caller
+with no length cap, deliberately: a whole-region protect over a 4 GiB engine
+reservation is the producer the chunk exists for, and the burrow window is
+64 TiB. The range form now descends the tree once per subtree: an absent (or
+malformed) L0 / L1 / L2 entry skips 512 GiB / 1 GiB / 2 MiB at once
+(`uninstall_next_block`, clamped to the range end; `v < 2^47` and the shift is
+at most 39, so the arithmetic cannot wrap), and only inside a PRESENT L3 table
+does each page go through `mmu_uninstall_user_pte`. So every valid leaf is
+cleared with exactly the TLBI + DSB ISH it always got -- the load-bearing
+invariant (no stale cached translation observable when the call returns) is
+untouched, only the no-op iterations are gone -- and the per-leaf cost is
+bounded by the pages the address space has faulted in, which I-32 bounds. A
+malformed intermediate entry is skipped like an absent one; the per-page walk
+answered -1 for it and the range loop ignored that, so nothing changed there
+either. `mmu_uninstall_pte_calls()` counts the per-page calls and
+`protect.uninstall_range_skips_absent_subtrees` pins the walk: a GiB with one
+resident page costs exactly 512 calls (its present 2 MiB table), an empty GiB
+zero, where the per-page loop cost 262144 each.
 
 ## Provenance
 

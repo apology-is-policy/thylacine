@@ -348,6 +348,18 @@ pub const T_RFMEM: u64                = 0x0002;
 // kernel-internal copy-target callers; the native heap reserves lazily.
 pub const T_SYS_BURROW_ATTACH_LAZY: u64 = 83;   // reserve demand-zero VA, no pages until touched
 pub const T_SYS_BURROW_DECOMMIT: u64    = 84;   // drop resident pages (madvise DONTNEED analog)
+// B-1a: the permission ceiling (ARCH 6.5; scripture 96f24314). A reservation
+// minted at a prot under an RW ceiling, and the one permission mutation.
+pub const T_SYS_BURROW_RESERVE: u64     = 124;  // (length, prot, align_log2) -> vaddr / -errno
+pub const T_SYS_BURROW_PROTECT: u64     = 125;  // (vaddr, length, prot, flags) -> 0 / -errno
+// The prot word of both (kernel BURROW_PROT_*; the values are Linux's PROT_*).
+// There is no EXEC: it is never a target, and naming it here would only
+// invite a call the kernel refuses with EACCES.
+pub const T_BURROW_PROT_NONE: u64       = 0;
+pub const T_BURROW_PROT_READ: u64       = 1;
+pub const T_BURROW_PROT_WRITE: u64      = 2;
+// SYS_BURROW_PROTECT flags: SEAL lowers the ceiling to the new prot for good.
+pub const T_BURROW_PROTECT_SEAL: u64    = 1;
 // SYS_CLOCK_GETTIME clock ids (match Linux clockid_t).
 pub const T_CLOCK_REALTIME: u64       = 0;
 pub const T_CLOCK_MONOTONIC: u64      = 1;
@@ -2374,6 +2386,52 @@ pub unsafe fn t_burrow_decommit(vaddr: u64, length: u64) -> i64 {
         inlateout("x0") x0,
         in("x1") length,
         in("x8") T_SYS_BURROW_DECOMMIT,
+        options(nostack)
+    );
+    x0
+}
+
+// t_burrow_reserve -- the lazy reservation with MINT-TIME attributes (B-1a;
+// ARCH 6.5 "The permission ceiling"). Like t_burrow_attach_lazy -- a
+// demand-zero region in the burrow window, pages charged on first touch -- but
+// minted at `prot` (T_BURROW_PROT_NONE / READ / READ|WRITE) under a ceiling of
+// RW, so a PROT_NONE reservation faults until t_burrow_protect raises it, and
+// with its base aligned to 2^align_log2 (0 = page; else 12..30). Returns the
+// VA, or -errno: -EACCES for a prot with X (never a target), -EINVAL for
+// W-without-R / stray bits / a bad alignment / length 0, -ENOMEM for a length
+// over the reservation max, no aligned gap, or the VMA cap.
+#[inline(always)]
+pub unsafe fn t_burrow_reserve(length: u64, prot: u64, align_log2: u64) -> i64 {
+    let mut x0: i64 = length as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") prot,
+        in("x2") align_log2,
+        in("x8") T_SYS_BURROW_RESERVE,
+        options(nostack)
+    );
+    x0
+}
+
+// t_burrow_protect -- move [vaddr, vaddr + length) among none / R / RW under
+// each mapping's mint-time ceiling (B-1a; ARCH 6.5). X is never a target
+// (-EACCES, refused before any lookup); a raise past the ceiling is -EACCES; a
+// hole in the range is -ENOMEM; an unaligned vaddr, a zero length or unknown
+// flags are -EINVAL. T_BURROW_PROTECT_SEAL also lowers the ceiling to `prot`,
+// irrevocably -- a range sealed at none is a guard. All-or-nothing: a refusal
+// changes nothing. A resident page keeps its contents and its charge across a
+// lowering (t_burrow_decommit is how pages are returned).
+#[inline(always)]
+pub unsafe fn t_burrow_protect(vaddr: u64, length: u64, prot: u64, flags: u64) -> i64 {
+    let mut x0: i64 = vaddr as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") length,
+        in("x2") prot,
+        in("x3") flags,
+        in("x8") T_SYS_BURROW_PROTECT,
         options(nostack)
     );
     x0

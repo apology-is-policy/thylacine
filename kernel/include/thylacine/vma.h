@@ -62,6 +62,28 @@ struct AddrSpace;   // LINEAGE L-1/L-2: the *_in forms address by address space
 // write into a segfault.
 #define VMA_FLAG_COW        (1u << 1)
 
+// The permission CEILING (B-1a; ARCH 6.5 "The permission ceiling"; I-12): bits
+// 8..10 of `flags` hold the VMA_PROT_* set this mapping may never be raised past.
+// Fixed by the mint and lowered only by PROTECT_SEAL; nothing raises it.
+//
+// vma_alloc sets it to the MINT prot, which is the safe default and not merely
+// the lazy one: the vDSO clock page is a kernel-owned eager anon Burrow mapped
+// read-only into every address space (exec_map_vdso), and a default of RW would
+// let any Proc raise that mapping and write the kernel's clock. The reserve-style
+// mints -- SYS_BURROW_RESERVE, SYS_BURROW_ATTACH_LAZY, the phenotype anon arms --
+// raise it to RW explicitly, because their mapping may start at none or R and
+// commit later. A guard's ceiling is none. A split piece carries its parent's; a
+// fork's child VMA carries the parent's (clone_one_vma), which is also what keeps
+// the eager-anon SHARE arm sound: an eager mapping is shared across a fork only
+// when its CEILING excludes WRITE, since the current prot can be raised back.
+//
+// Lives in `flags` so struct Vma stays 64 bytes. The two bits below it are the
+// mapping's STATE (shared-in, COW); the D-3b split's "no flags" refusal reads
+// the state bits only (VMA_FLAG_STATE_MASK).
+#define VMA_FLAG_MAX_SHIFT  8
+#define VMA_FLAG_MAX_MASK   (7u << VMA_FLAG_MAX_SHIFT)
+#define VMA_FLAG_STATE_MASK (VMA_FLAG_SHARED_IN | VMA_FLAG_COW)
+
 // VMA_MAGIC at offset 0 — SLUB freelist clobber defense (mirrors
 // struct Proc / struct Thread / struct Burrow / struct Handle pattern).
 #define VMA_MAGIC 0x564D413043ADEFADULL    // 'VMA0' || 0xCADE'FADE
@@ -87,6 +109,14 @@ _Static_assert(sizeof(struct Vma) == 64,
                "field grows the SLUB cache; update this assert deliberately.");
 _Static_assert(__builtin_offsetof(struct Vma, magic) == 0,
                "magic must be at offset 0 for SLUB freelist clobber defense");
+
+static inline u32 vma_prot_max(const struct Vma *v) {
+    return (v->flags & VMA_FLAG_MAX_MASK) >> VMA_FLAG_MAX_SHIFT;
+}
+static inline void vma_set_prot_max(struct Vma *v, u32 prot) {
+    v->flags = (v->flags & ~VMA_FLAG_MAX_MASK) |
+               ((prot & 7u) << VMA_FLAG_MAX_SHIFT);
+}
 
 // Bring up the VMA subsystem (allocate the SLUB cache). Must run after
 // slub_init; before any vma_alloc.
@@ -182,6 +212,13 @@ struct Vma *vma_lookup(struct Proc *p, u64 vaddr);
 // discipline vma_insert / vma_remove already assume.
 int vma_find_gap(struct Proc *p, u64 length,
                  u64 window_start, u64 window_end, u64 *out_vaddr);
+
+// B-1a: the ALIGNED first-fit (SYS_BURROW_RESERVE's align_log2; Fuchsia's
+// ZX_VM_ALIGN_*). `align` is a power of two >= PAGE_SIZE, or 0 for page
+// alignment; the candidate base is rounded up to it after every VMA it jumps.
+// Same contract and lock discipline as vma_find_gap, which is this with 0.
+int vma_find_gap_aligned(struct Proc *p, u64 length, u64 align,
+                         u64 window_start, u64 window_end, u64 *out_vaddr);
 
 // Walk every VMA in Proc `p`'s list and free it. Used at proc_free
 // to release all VMAs (and decrement their VMOs' mapping counts).
@@ -281,8 +318,63 @@ struct Vma *vma_lookup_in(struct AddrSpace *as, u64 vaddr);
 struct Vma *vma_next_overlap_in(struct AddrSpace *as, u64 lo, u64 hi);
 void        vma_drain_in(struct AddrSpace *as);
 
+// B-1a: the permission change (ARCH 6.5 "The permission ceiling"). Move every
+// page of [vaddr, vaddr+length) to `prot` (a subset of R|W -- X is never a
+// target), splitting the first and last mapping where the range cuts them (at
+// most two new pieces, each carrying its parent's identity: for every VA a piece
+// still covers, `burrow_offset + (va - vaddr_start)` is unchanged) and changing
+// every interior mapping IN PLACE. `seal` also lowers each affected mapping's
+// ceiling to `prot`, irrevocably.
+//
+// ALL OR NOTHING. vma_reprotect_precheck_in decides every refusal before the
+// first mutation, and vma_reprotect_range_in runs it again before it touches
+// the list: a refusal leaves every mapping exactly as it was. Refused, as
+// -T_E_*:
+//   INVAL  unaligned / zero length / wrap; a prot with X, W-without-R, or
+//          bits beyond R|W
+//   NOMEM  a hole in the range (nothing mapped, or a gap between mappings), a
+//          guard (unmapped address space that happens to be reserved), or no
+//          I-32 headroom for the split pieces (decided in the precheck, before
+//          the caller's uninstall); a slab shortfall for a piece is the one
+//          refusal that can follow the uninstall, and it costs a re-fault
+//   ACCES  a shared-in mapping (another Proc's memory), a CODE alias (the I-42
+//          pair), a hardware mapping (MMIO / DMA / HOSTMEM), or `prot` above
+//          the mapping's ceiling
+// The range may span several mappings: a whole-region protect over a partially
+// committed reservation is two VMAs (rw then none), and Linux serves it. After
+// the change a MERGE pass coalesces each affected piece with a neighbour of the
+// same Burrow, prot, flags and contiguous offset, so the grow/shrink ladders an
+// engine runs over a reservation stay at two VMAs instead of one per step
+// (PROC_VMA_MAX is 65536, and a 4 GiB Wasm reservation grown in 64 KiB pages
+// would otherwise reach it).
+//
+// CALLER MUST HOLD as->lock, and MUST have already uninstalled the leaf PTEs of
+// the range (the D-3b rule: hardware resolves a PTE without the lock, so a
+// writable PTE must be gone before the prot that justified it is) -- see
+// burrow_protect_in, the wrapper that does both, and cow.tla's
+// BUGGY_PROTECT_KEEPS_PTE for what skipping it looks like.
+int vma_reprotect_precheck_in(struct AddrSpace *as, u64 vaddr, u64 length,
+                              u32 prot);
+int vma_reprotect_range_in(struct AddrSpace *as, bool exempt,
+                           u64 vaddr, u64 length, u32 prot, bool seal);
+
+// True when a protect over the (precheck-admitted) range would change nothing:
+// burrow_protect_in then answers 0 without an uninstall, and
+// vma_reprotect_range_in without a cut -- a no-op must not need I-32 headroom
+// for pieces the merge would fold straight back (B-1a audit F6).
+bool vma_reprotect_is_noop_in(struct AddrSpace *as, u64 vaddr, u64 length,
+                              u32 prot, bool seal);
+
+// The I-32 headroom for the pieces a cut would add: 0 or -T_E_NOMEM. Decided
+// by burrow_protect_in after the no-op short-circuit and BEFORE its uninstall,
+// so a cap hit changes nothing (the audit close); re-checked by
+// vma_reprotect_range_in under the same lock hold.
+int  vma_reprotect_headroom_in(struct AddrSpace *as, bool exempt, u64 vaddr,
+                              u64 length);
+
 // Diagnostic accessors.
 u64      vma_total_allocated(void);
 u64      vma_total_freed(void);
+u64      vma_scan_steps(void);      // nodes visited by vma_next_overlap_in (audit F2)
 
 #endif // THYLACINE_VMA_H

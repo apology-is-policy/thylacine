@@ -6,13 +6,13 @@ title: "VMAs — the per-Proc address-space description, and where W^X is actual
 code: [kernel/vma.c, kernel/include/thylacine/vma.h]
 audit: hard
 guarded-by: [inv-i12, inv-i7, inv-i32, inv-i44]
-validated-by: [prose, gate-smp]
+validated-by: [spec-cow, prose, gate-smp]
 locks: [lock-vma]
 hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md"]
 created: 2026-08-03
-updated: 2026-09-16
+updated: 2026-09-23
 ---
 ## Purpose
 
@@ -42,6 +42,21 @@ the phenotype munmap row needs to tell "nothing mapped" from a partial overlap.
 And `vma_free_deferred` is a `vma_free` that hands the caller the Burrow still
 owing a physical free instead of freeing it inline — the discipline a
 FILE-backed Burrow forces (Concurrency, below).
+
+B-1a (2026-09-23) added the **permission ceiling** and the **multi-mapping
+reprotect**. `vma_prot_max(v)` / `vma_set_prot_max(v, prot)` read and write the
+ceiling held in `flags` bits 8..10 (`VMA_FLAG_MAX_SHIFT` / `VMA_FLAG_MAX_MASK`);
+`vma_alloc` sets it to the mint prot. `vma_reprotect_precheck_in(as, vaddr,
+length, prot)` decides EVERY refusal of a protect over `[vaddr, vaddr+length)`
+without mutating anything, and `vma_reprotect_range_in(as, exempt, vaddr,
+length, prot, seal)` runs the precheck again, cuts the first and last mapping
+where the range crosses them, changes every interior mapping in place, and
+merges equal neighbours (Mechanism, below). `vma_find_gap_aligned(p, length,
+align, window_start, window_end, out)` is `vma_find_gap` with the candidate
+rounded up to a power-of-two `align` (`vma_find_gap` is now the `align = 0`
+wrapper). `VMA_FLAG_STATE_MASK` names the two STATE bits (`SHARED_IN | COW`)
+so the D-3b split's "no flags" refusal reads only those, and its right piece
+keeps the ceiling.
 
 **Four rejections at `vma_alloc`**, and the order they are written in is not
 the order they matter in:
@@ -115,6 +130,75 @@ hit leaves partial state. A SHARED_IN, COW, or CODE-alias VMA is refused rather
 than cut — none is reachable from the ldso overlay this serves, and the CODE
 refusal is a parity guard against orphaning a JIT pair's peer (F8).
 
+**The permission ceiling** (B-1a; ARCH 6.5). Every VMA carries, in `flags`
+bits 8..10, the `VMA_PROT_*` set its `prot` may never be raised past. The
+ceiling is fixed at the mint and only ever lowered (`seal`); nothing raises it.
+`vma_alloc` sets it to the MINT prot, which is the safe default rather than the
+lazy one: the vDSO clock page is a kernel-owned eager anon Burrow mapped
+read-only into every address space (`exec_map_vdso`), and a default of RW would
+let any Proc raise that mapping and write the kernel's clock. The mints that
+reserve now and commit later -- `SYS_BURROW_RESERVE`, the phenotype anon-mmap
+arm, the fixed-anon arm -- raise the ceiling to RW explicitly under the same
+lock hold, before anything can observe the mapping
+([[sub-kernel-syscall-dispatch]]). A guard's ceiling is none. A split piece
+carries its parent's; a fork's child carries the parent's
+([[sub-kernel-addrspace]]).
+
+**The multi-mapping reprotect** (`vma_reprotect_*`, B-1a). A protect moves
+every page of a range to a `prot` in {none, R, RW}. **X is never a target**,
+refused twice: at the syscall boundary before any lookup
+(`burrow_prot_word_check`, [[sub-kernel-syscall-dispatch]]) and again in
+`vma_reprotect_precheck_in`, so no in-kernel caller can reach an RX target by a
+path the boundary did not see. The precheck is the whole refusal set, decided
+BEFORE the first mutation: a malformed range or word (`-T_E_INVAL`); a hole, a
+guard, or no room for the split pieces (`-T_E_NOMEM`); a shared-in mapping, a
+CODE alias, a hardware mapping (MMIO / DMA / HOSTMEM -- `reprotect_admits`
+admits only ANON, ANON_LAZY and FILE), or a `prot` above the ceiling
+(`-T_E_ACCES`). A refusal leaves every mapping exactly as it was, which is
+STRONGER than Linux, where a failed `mprotect` may have changed part of the
+range.
+
+The range may span SEVERAL mappings, all-or-nothing. This is the one place the
+build departed from the ratified letter ("within ONE mapping; refused at v1, no
+producer"), and ARCH 6.5 is amended AS BUILT with the reasoning: the merge pass
+makes an engine's grow / shrink ladder over a reservation exactly two mappings
+-- the committed prefix and the `none` tail -- so a whole-region protect over a
+partially committed reservation IS a two-mapping range, and Linux serves it.
+Only the first and the last mapping can be cut, so at most two new pieces
+exist, allocated BEFORE the list is touched (the D-3b shape) and each carrying
+its parent's `flags` whole -- the ceiling AND the COW routing bit, since the
+per-page share counts are per page and a cut is sound for a forked mapping. The
+I-32 headroom for those pieces is checked before the mutation, so a cap hit
+changes nothing. The ORIGINAL structs survive as the in-range pieces, shrunk in
+place (`vaddr_start` and `burrow_offset` move by the same delta on a left cut;
+only `vaddr_end` on a right cut), so an interior mapping is never reallocated
+and no mapping ref ever drops -- the MAP_FIXED split's identity rule again: for
+every VA a piece still covers, `burrow_offset + (va - vaddr_start)` is
+unchanged. Then the APPLY loop sets `v->prot = prot` (and the ceiling too, on
+`seal`) on every overlapping VMA, and `reprotect_merge_in` coalesces each pair
+that involves an affected piece -- the left neighbour with the first piece, the
+pieces among themselves, the last piece with the right neighbour -- wherever
+`reprotect_mergeable` holds: same Burrow, adjacent, same `prot` and `flags`
+(so the same ceiling and the same COW bit), contiguous `burrow_offset`, and
+never a `SHARED_IN` mapping (its exact geometry is what the sharer's detach
+matches). The merge drops the absorbed VMA through `vma_free_deferred(b,
+NULL)`; its neighbour still maps the same Burrow, so that drop can never be
+the last, and the "owes a free" return is an extinction rather than a leak.
+
+**The PTE uninstall is the caller's half of the contract, and it runs FIRST.**
+`burrow_protect_in` ([[sub-kernel-burrow]]) is precheck ->
+`mmu_uninstall_user_range` over the range -> `vma_reprotect_range_in`, one
+locked step. The order is the D-3b rule and `addrspace_clone`'s phase-1
+argument: hardware resolves a PTE without taking `as->lock`, so a writable PTE
+must be gone before the prot that justified it is
+(`cow.tla::BUGGY_PROTECT_KEEPS_PTE`). The uninstall runs on a raise too,
+because `mmu_install_user_pte` refuses a mismatching install over a valid leaf
+-- the next fault after a raise must find the slot empty so it can install at
+the NEW prot ([[sub-kernel-fault]] step 2: refused at none, read-only at R,
+writable at RW). A resident page costs one re-fault and nothing else: its slot
+and its charge stay, as Linux keeps a PROT_NONE mapping's contents;
+`SYS_BURROW_DECOMMIT` is how pages are returned.
+
 ## Data structures
 
 `struct Vma` is 64 bytes, pinned by `_Static_assert`, with `magic` at offset 0
@@ -128,6 +212,14 @@ or a compositor weave) mapped in cross-Proc. It exists to make one accounting
 statement exact: the shared-mapping budget must equal the summed pages
 of flagged VMAs, so the flag is read at both teardown paths to uncharge exactly
 once per charge.
+
+**Bits 8..10 of `flags` are the permission ceiling** (B-1a), read by
+`vma_prot_max` and written by `vma_set_prot_max` -- placed in `flags` so the
+struct stays at its pinned 64 bytes. Everything below bit 8 is the mapping's
+STATE (`VMA_FLAG_STATE_MASK` = `SHARED_IN | COW`), and the two are kept apart
+so that a "has no flags" test (the D-3b split's refusal) reads the state bits
+only and does not refuse every mapping whose ceiling is non-zero -- which is
+all of them.
 
 The second flag marks a mapping as participating in **copy-on-write**, and three
 things about it are worth stating because each would be natural to get wrong.
@@ -153,7 +245,9 @@ That divergence does not touch [[inv-i12]], and the reason is worth being
 explicit about rather than assumed: a copy-on-write mapping is writable and not
 executable, so the rejected combination never arises. W^X is decided on the pair
 at allocation, and nothing here can turn a write-only mapping into a
-write-and-execute one afterward.
+write-and-execute one afterward. B-1a's reprotect keeps that true by
+construction rather than by a second check: its targets are {none, R, RW}, so
+no protect can add EXEC to anything (Invariants, below).
 
 ## Concurrency
 
@@ -219,13 +313,30 @@ A reader following that docblock would add a lock to the wrong structure, and th
 resulting code would look right and serialize nothing between two Procs sharing
 one address space. Task #60, and the extraction made it more expensive to leave.
 
+**A protect holds `as->lock` across the precheck, the uninstall and the cut,
+and takes no other lock.** `mmu_uninstall_user_range` allocates nothing and
+cannot fail; the two pieces are allocated before the list is touched; the merge
+drops through `vma_free_deferred`, whose drop can never be a Burrow's last here.
+So nothing under the hold can sleep and nothing after the uninstall can fail
+except a piece allocation, which leaves every `prot` unchanged. A peer thread
+storing through an already-installed writable PTE is the one actor the lock
+cannot reach, and the uninstall-first order is what reaches it.
+
 ## Invariants enforced
 
 [[inv-i12]] — the `WRITE|EXEC` rejection, the sole gate through which every
 user mapping in the system passes. The MAP_FIXED split/replace does not add a
 second gate: it mints its new piece through `vma_alloc`, so the pair check runs
 there, and it never mutates an existing VMA's `prot` (a split remainder keeps the
-prot it already passed).
+prot it already passed). B-1a's reprotect is the SECOND path that writes a
+VMA's `prot`, and it adds no second W^X gate for the same reason: EXEC is
+outside its target set entirely, refused by `vma_reprotect_precheck_in` before
+any other test (and by the syscall boundary before that). The ceiling adds a
+third statement, stronger than the gate: an RX mapping -- image text -- can
+only descend to R or none and never returns, because nothing raises a
+ceiling and a raise back to X is refused regardless. So "no page W and X" still
+has exactly one place where W and X are decided together (`vma_alloc`), and the
+one way bytes a Proc wrote become executable is still `CAP_JIT`'s dual map.
 
 [[inv-i7]] — `vma_alloc` acquires a mapping reference, `vma_free` releases it.
 The VMA's existence in a list *is* the mapping the Burrow's second refcount
@@ -245,7 +356,20 @@ The charge sits deliberately **after** the overlap walk (a rejected overlap
 must not consume budget) and **before** the list mutation (a cap hit must
 install nothing), so neither failure path needs a rollback. It bounds the DoS a
 free lazy reservation would otherwise open: the reservation itself costs no
-pages, so without a VMA cap a Proc could exhaust the descriptor slab.
+pages, so without a VMA cap a Proc could exhaust the descriptor slab. The
+reprotect keeps the same shape: `cnt > PROC_VMA_MAX - adding` is checked
+before the mutation for the (at most two) pieces a cut adds, the inserts then
+charge as usual, and the merge uncharges through `vma_remove_in`. The merge is
+also what keeps the count meaningful under an engine's ladder: `PROC_VMA_MAX`
+is 65536, and a 4 GiB Wasm reservation grown in 64 KiB pages would reach it
+without the coalesce (`protect.grow_ladder_stays_two_vmas`).
+
+[[inv-i44]] — a cut on a COW mapping copies the COW bit and the ceiling to
+the pieces, and the per-page share counts are per page, so the pieces break
+independently and soundly (`protect.cow_split_then_break`). The fork's side of
+that -- one clone per source Burrow rather than one per piece -- is
+[[sub-kernel-addrspace]]'s, and the reason it had to change is this file's
+split.
 
 ## Error paths
 
@@ -255,6 +379,11 @@ conditions that mean memory is already corrupt: a bad magic, freeing a VMA
 still in a list, inserting one already linked, or finding a corrupted entry
 mid-walk. Those are not error handling; they are the structure declaring it can
 no longer be trusted.
+
+The reprotect family is the first in this file to speak errno rather than
+`-1`: `-T_E_INVAL` / `-T_E_NOMEM` / `-T_E_ACCES`, the table in `vma.h`.
+Its callers are the two errno-returning syscalls and the phenotype `mprotect`
+row, which hands the values to a Linux guest as Linux's own.
 
 ## Performance
 
@@ -275,6 +404,18 @@ vaddr_start)` invariant across the cut; that any path freeing a Burrow under
 `as->lock` routes through the deferred free (a FILE Burrow's `spoor_clunk`
 sleeps) and never drops the `out_free` it is handed; and that every new mutator
 takes `vma_lock` — the header will not tell you to.
+
+Since B-1a, five more: that `vma_reprotect_precheck_in` refuses exactly the
+set `vma_reprotect_range_in` cannot handle (the second runs the first, so a
+precheck that admits what the cut cannot take is the hazard); that EXEC stays
+outside the target set at BOTH refusal sites; that the cut copies `flags`
+WHOLE -- a piece that dropped the COW bit would route a write on a shared page
+straight to the page (an [[inv-i44]] alias), and one that dropped the ceiling
+would default a reserve minted at none to un-raisable; that `reprotect_mergeable`
+compares `flags` whole (merging a sealed piece with an unsealed neighbour would
+give the merged mapping one ceiling for both); and that the uninstall in
+`burrow_protect_in` stays ahead of the first `prot` write, on a raise as much
+as on a lowering.
 
 A separate rule governs the geometry-matching *removers* rather than this file's
 own arithmetic: **`vma_remove` / `burrow_unmap` match a VMA by its coordinates
@@ -314,6 +455,17 @@ create failed mid-drag ([[sub-tapestryd]]). The identity form is Plan 9's:
 `syssegdetach` refuses the initial stack by `s == up->seg[SSEG]` and detaches any
 other segment, device segments at caller-chosen addresses included.
 
+**The lazy-piece refund (B-1a, the first of three findings the split made
+live).** Once a lazy Burrow has several VMAs -- a D-3b window, or the pieces a
+protect leaves -- the detach path's refund could no longer be the WHOLE
+Burrow's resident count per piece: that under-counted I-32 once per piece.
+`detach_one_locked` now refunds the piece's own range through `burrow_decommit`
+on the exact match, before `burrow_unmap_reporting`
+([[sub-kernel-syscall-dispatch]]), which also returns a detached piece's pages
+to the system at once. The native detach itself stays exact-match per VMA: the
+pieces a protect leaves detach one by one (`/protect-probe` does exactly that),
+and the range form is B-1a'.
+
 ## Seams
 
 - The header's stale lock commentary (task #60) is documentation, but it is the
@@ -324,6 +476,11 @@ other segment, device segments at caller-chosen addresses included.
   row can tell a boundary-straddle (refused) from a wholly-unmapped range (a Linux
   success).
 - An interval tree, if a workload ever puts enough VMAs on one Proc to matter.
+- The native `SYS_BURROW_DETACH` matches one VMA exactly while a protect can
+  leave several pieces, and a sealed piece can never merge back into an
+  unsealed neighbour; the range detach is B-1a' ([[arc-boosty]]). The phenotype
+  `munmap`'s window confinement -- a `MAP_FIXED` mapping below the window leaks
+  -- is owned there too ([[sub-kernel-syscall-dispatch]]).
 
 ## Caveats
 
@@ -375,6 +532,67 @@ ascending), and `vma.drain_releases_all` (insert four, drain, assert
 symmetry). Beyond the suite, `vma_alloc`'s rejections and the list walk are
 exercised indirectly by every demand-page and attach/detach test through the
 fault path.
+
+`kernel/test/test_protect.c` (B-1a; [[sub-kernel-protect-witness]]) drives the
+reprotect through the `_for_proc` inners on fresh Procs: `protect.reserve_mints_exactly`,
+`reserve_refusals`, `raise_and_write_keeps_contents`, `x_refused_before_lookup`
+(EACCES over an unmapped range where R answers ENOMEM), `ceiling_bounds_raise`
+(an eager mapping minted R cannot be raised; RX descends and never returns),
+`seal_lowers_ceiling`, `split_three_way_then_merge` (three pieces of one
+Burrow with every surviving byte's identity unchanged, merged back into ONE;
+pages and Vma structs return to their counts), `grow_ladder_stays_two_vmas`,
+`refusals_change_nothing` (a guard, a shared-in mapping, a CODE alias, an
+unaligned address, unknown flags, a zero length -- each its errno, the mapping
+byte-identical after), `multi_vma_and_hole` (two Burrows both change and do not
+merge; a leading, interior or trailing hole changes nothing),
+`pte_uninstalled_then_reinstalled_at_prot`, and `cow_split_then_break`. Four
+sabotages were measured against them (the uninstall skipped, both X refusals
+dropped, the ceiling compare skipped, a clone per VMA), each failing exactly its
+own assertions and nothing else.
+
+The holotype audit's regressions (the close commit): `protect.range_walk_is_linear`
+(1024 adjacent mappings; the protect's and the phenotype munmap's scans stay
+under 64 x k by the `vma_scan_steps` counter, where a re-scan per mapping cost
+k(k+1)/2 per pass), `protect.uninstall_range_skips_absent_subtrees`, and
+`protect.noop_protect_needs_no_headroom` (at `vma_count = PROC_VMA_MAX - 1` a
+same-prot protect answers 0 and uninstalls nothing; the same sub-range at a
+new prot is the ENOMEM control). A combined RED (every fix reverted, the
+diagnostics and tests kept) fails exactly the six new tests.
+
+## The holotype audit's corrections (2026-09-23)
+
+**Four quadratic passes under a non-preemptible lock (F2, P2).**
+`vma_next_overlap_in` restarts from the LIST HEAD on every call, and the
+precheck, the first/last scan and the apply loop each iterated a range with it
+-- Sigma(i + j) ~ k x i + k^2 / 2 node visits per pass over k mappings at
+list position i, four passes per protect, all under `as->lock`, whose holder
+is non-preemptible (`spinlock.h`). An unprivileged Proc can make k = 65535
+adjacent single-page reserves and protect them in one call: ~8.6e9 dependent
+pointer chases, seconds to tens of seconds with a CPU held and every sibling
+that needs the lock spinning non-preemptibly too. The phenotype `munmap`'s
+two loops had the same shape ([[sub-kernel-syscall-dispatch]]). Every range
+walk is now ONE scan from the head and then `v = v->next` while
+`v->vaddr_start < end` -- the list is sorted and the precheck has proven
+contiguity -- with the magic check kept per node. `vma_scan_steps()` counts
+the nodes `vma_next_overlap_in` visits, so the bound is pinned by a count,
+never by the clock. The uninstall leg of the same finding is
+[[sub-kernel-mmu]]'s.
+
+**A no-op protect needed headroom (F6, P3).** A sub-range protect to the prot
+it already had still cut two pieces (the cut is geometric) and demanded their
+I-32 slots before the merge folded them back, so at `PROC_VMA_MAX - 1` a
+no-op answered ENOMEM where Linux succeeds. `vma_reprotect_is_noop_in` (every
+mapping already at `prot`; with `seal`, every ceiling too) is consulted by
+`burrow_protect_in` before the uninstall and by `vma_reprotect_range_in`
+before the cut; a no-op costs the range nothing, not even a re-fault. The
+same test's control -- "the ENOMEM refusal changed nothing" -- was false on
+its first run, because the I-32 headroom for the pieces was decided in
+`vma_reprotect_range_in`, AFTER `burrow_protect_in`'s uninstall, so a cap hit
+refused with the range's PTEs already gone (the documented re-fault cost).
+`vma_reprotect_headroom_in` now decides it in `burrow_protect_in` after the
+no-op short-circuit and before the uninstall; `vma_reprotect_range_in` keeps
+its own check under the same lock hold. The only refusal that can follow the
+uninstall is a slab shortfall for a piece.
 
 ## Referenced by
 

@@ -2676,3 +2676,92 @@ double-`territory_unref`; the sleep is outside the lock); the A1 session-walk
 under `g_proc_table_lock` per its contract); the spawn-flag grant/apply seam
 (`SPAWN_PERM_SESSION_HANGUP` per-bit gate; `proc_setsid` leader-guard passes
 post-rfork); no session-hangup on a non-login setsid (the flag is the gate).
+
+### 9.10 A-6 -- the truthful identity calls + the NAMED Stratum admin (RESOLVED 2026-09-22, operator-voted)
+
+**The defect.** Pouch's libc lies about who you are. Patch 0001 parks
+`__NR_getuid` / `geteuid` / `getgid` / `getegid` / `getppid` at the `0xFFFF`
+unimplemented-syscall sentinel, and musl treats all five as **cannot-fail** --
+each is literally `return __syscall(SYS_x);` with no error path -- so the
+sentinel's `-ENOSYS` is cast straight to `uid_t` and every Pouch program is told
+its uid is `0xFFFFFFDA`. Not an error it could check: a **lie it cannot
+detect**. This is the pouch 0032 / 0033 / 0034 class (nprocs, main stack, phys
+pages) -- a sentinel-parked syscall whose libc caller does not report failure.
+
+The kernel has had the truthful answers all along: `SYS_GETUID` = 73 returns
+`Proc.principal_id`, `SYS_GETGID` = 74 returns `Proc.primary_gid` (A-1a), and
+the **native** substrate already uses them -- `libthyla-rs`'s `t_getuid` /
+`t_getgid` issue exactly those. So the asymmetry to fix is precise: *the native
+substrate tells the truth and the POSIX boundary-line lies.* CL-1a already wired
+`getpid` through this seam (`SYS_thyla_getpid` = 72); this is the same move for
+identity.
+
+**Why it is not a one-line libc fix.** `stratumd` runs on Pouch and CONSUMES the
+value to make security decisions -- the ctl admin identity, the corvus keyslot-
+token gate, the dataset-root owner, the unauthenticated-peer fallback. Changing
+libc's answer changes the storage daemon's behaviour, which is the A-3 identity
+surface. Hence a chunk, not a patch.
+
+**THE DECISION (operator-voted 2026-09-22): option (B) -- TRUTH + CONFIGURED
+AUTHORITY.** The identity calls return the REAL principal, **and** `stratumd`
+takes its admin identity from an EXPLICIT NAMED CONFIG rather than inferring it
+from `geteuid()`. *Identity tells the truth; authority is configured, never
+inferred.* That is the Plan 9 hostowner idiom -- the admin is a NAMED identity,
+not whoever happens to be running the daemon.
+
+**Why not (A), raw principal with euid-inferred admin.** It reads as the
+obvious, Linux-shaped answer and is wrong HERE for a Thylacine-specific reason:
+`PRINCIPAL_SYSTEM` is a **shared TCB identity**, not one daemon. Under (A) every
+SYSTEM-principal peer -- joey, warden, every boot service -- becomes a Stratum
+ctl admin, and the corvus-token gate starts ACCEPTING SYSTEM-owned tokens. On
+Linux `euid == admin` is sound because the daemon's euid names the daemon; here
+it names the whole trusted base. The inference is not wrong in general, it is
+wrong against *this* identity model, which is exactly the shape I-22 exists to
+catch.
+
+**Why not (C), keep the calls failing and patch the consumers.** It leaves a
+libc that lies to every FUTURE caller, and the lie propagates: Rust `std`
+exposes `getuid`, so the aux track's `std` port would inherit it. Fixing the
+consumers treats the symptom at each site and leaves the boundary-line wrong.
+
+**`effective` == `real`, and that is a FINDING, not a simplification.** There is
+no `setuid`, no `seteuid`, and no effective-uid field anywhere in the kernel
+(verified 2026-09-22: `Proc` carries `principal_id` + `primary_gid` and nothing
+else). That is I-22 holding by construction -- *no identity carries ambient
+super-authority; elevation only via the legate* -- so on Thylacine
+`geteuid() == getuid()` and `getegid() == getgid()` are the TRUE answers, not
+approximations of a distinction we have not built. A future setuid-shaped
+mechanism would be an I-22 violation before it was an ABI change.
+
+**Raw principal, not the vivarium mapping.** Pouch returns `principal_id`
+verbatim, NOT `vivarium_map_uid`'s root-mapped form: `SO_PEERCRED` (patch 0006)
+and `t_stat.uid` are already raw, and the consumers compare against those. A
+mapped `getuid` would disagree with the two channels it is compared to.
+
+**`getppid` is OUT OF SCOPE, and named rather than silently skipped.** It is the
+one of the five with no kernel syscall behind it, and it has **zero callers in
+the tree** (measured 2026-09-22 with a positive control on `getuid`). Its three
+honest options, for whoever needs it first: read `ppid:` from
+`/proc/<pid>/status` (`devproc.c`, the Plan 9 `#c/ppid` idiom -- no ABI change,
+but makes a cannot-fail call able to fail); add a native syscall (an ABI
+addition, so operator signoff); or leave it parked. It stays parked, and stays
+a KNOWN LIE until someone needs it -- recorded here so that is a decision rather
+than an oversight.
+
+**The Stratum half is OURS.** (Operator, 2026-09-21: "We own Stratum completely
+-- we wrote it together a long time ago.") `stratumd`'s ctl admin becomes a
+named principal supplied by an EXPLICIT NAMED CONFIGURATION -- a flag or a config
+key, whichever its existing option plumbing makes natural, and reusing any
+named-admin mechanism Stratum already has rather than inventing a second one;
+the corvus keyslot-token gate, the
+dataset-root owner and the unauthenticated-peer fallback are re-derived against
+the truthful values. Fixed in `~/projects/stratum/v2` on `thylacine-pouch-arm`.
+Never framed as external or as needing permission.
+
+**Audit-bearing** -- it lands on the A-3 identity surface (§9.7) and moves a
+security decision (`admin_uid`) from inference to configuration. Prosecute: that
+no SYSTEM-principal peer gains ctl admin by default; that the token gate's
+comparison is against the configured admin and not the running euid; that the
+dataset-root owner change does not silently re-own existing pool objects; and
+that a MISSING or MALFORMED admin config fails CLOSED (no admin) rather than
+open.

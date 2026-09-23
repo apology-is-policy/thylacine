@@ -500,6 +500,29 @@ void test_sys_burrow_detach_mmio_map_by_identity(void);
 void test_sys_burrow_attach_lazy_window_va(void);
 void test_sys_burrow_attach_lazy_large(void);
 void test_sys_burrow_lazy_len_from_args(void);
+// B-1a: the permission ceiling (test_protect.c).
+void test_protect_reserve_mints_exactly(void);
+void test_protect_reserve_refusals(void);
+void test_protect_raise_and_write_keeps_contents(void);
+void test_protect_x_refused_before_lookup(void);
+void test_protect_ceiling_bounds_raise(void);
+void test_protect_seal_lowers_ceiling(void);
+void test_protect_split_three_way_then_merge(void);
+void test_protect_grow_ladder_stays_two_vmas(void);
+void test_protect_refusals_change_nothing(void);
+void test_protect_multi_vma_and_hole(void);
+void test_protect_pte_uninstalled_then_reinstalled_at_prot(void);
+void test_protect_cow_split_then_break(void);
+void test_cow_clone_dedupes_split_pieces(void);
+void test_cow_clone_refuses_eager_anon_with_writable_ceiling(void);
+void test_sys_burrow_detach_piece_frees_only_its_pages(void);
+// The B-1a holotype audit's regressions (F1 in test_demand_page.c; the rest in test_protect.c).
+void test_protect_range_walk_is_linear(void);
+void test_protect_uninstall_range_skips_absent_subtrees(void);
+void test_protect_noop_protect_needs_no_headroom(void);
+void test_sys_mmap_fixed_anon_w_alone_maps_rw(void);
+void test_protect_file_pagein_racing_protect_bails_single(void);
+void test_protect_file_pagein_racing_protect_bails_cluster(void);
 // DISTRO D-3b -- the MAP_FIXED split/replace surgery.
 void test_burrow_map_fixed_split_left(void);
 void test_burrow_map_fixed_split_right(void);
@@ -768,6 +791,7 @@ void test_vivarium_mmap_domain(void);                    // VIVARIUM V-2d
 void test_vivarium_mmap_file_domain(void);               // DISTRO D-3
 void test_vivarium_mmap_fixed_domain(void);              // DISTRO D-3b
 void test_vivarium_mmap_arms_disjoint(void);             // DISTRO D-3
+void test_vivarium_mprotect_domain(void);                // B-1a
 void test_vivarium_clone_domain(void);                   // LINEAGE L-3d + N-3
 void test_vivarium_futex_decide(void);                   // N-3
 void test_vivarium_wait4_domain(void);                   // LINEAGE L-6b
@@ -2322,6 +2346,35 @@ struct test_case g_tests[] = {
     { "sys_burrow.attach_lazy_window_va",     test_sys_burrow_attach_lazy_window_va,     false, NULL },
     { "sys_burrow.attach_lazy_large",         test_sys_burrow_attach_lazy_large,         false, NULL },
     { "sys_burrow.lazy_len_from_args",        test_sys_burrow_lazy_len_from_args,        false, NULL },
+    // B-1a: the permission ceiling.
+    { "protect.reserve_mints_exactly",        test_protect_reserve_mints_exactly,        false, NULL },
+    { "protect.reserve_refusals",             test_protect_reserve_refusals,             false, NULL },
+    { "protect.raise_and_write_keeps_contents", test_protect_raise_and_write_keeps_contents, false, NULL },
+    { "protect.x_refused_before_lookup",      test_protect_x_refused_before_lookup,      false, NULL },
+    { "protect.ceiling_bounds_raise",         test_protect_ceiling_bounds_raise,         false, NULL },
+    { "protect.seal_lowers_ceiling",          test_protect_seal_lowers_ceiling,          false, NULL },
+    { "protect.split_three_way_then_merge",   test_protect_split_three_way_then_merge,   false, NULL },
+    { "protect.grow_ladder_stays_two_vmas",   test_protect_grow_ladder_stays_two_vmas,   false, NULL },
+    { "protect.refusals_change_nothing",      test_protect_refusals_change_nothing,      false, NULL },
+    { "protect.multi_vma_and_hole",           test_protect_multi_vma_and_hole,           false, NULL },
+    { "protect.pte_uninstalled_then_reinstalled_at_prot",
+                                              test_protect_pte_uninstalled_then_reinstalled_at_prot, false, NULL },
+    { "protect.cow_split_then_break",         test_protect_cow_split_then_break,         false, NULL },
+    { "cow.clone_dedupes_split_pieces",       test_cow_clone_dedupes_split_pieces,       false, NULL },
+    { "cow.clone_refuses_eager_anon_with_writable_ceiling",
+                                              test_cow_clone_refuses_eager_anon_with_writable_ceiling, false, NULL },
+    { "sys_burrow.detach_piece_frees_only_its_pages",
+                                              test_sys_burrow_detach_piece_frees_only_its_pages, false, NULL },
+    // The B-1a holotype audit's regressions.
+    { "protect.range_walk_is_linear",         test_protect_range_walk_is_linear,         false, NULL },
+    { "protect.uninstall_range_skips_absent_subtrees",
+                                              test_protect_uninstall_range_skips_absent_subtrees, false, NULL },
+    { "protect.noop_protect_needs_no_headroom", test_protect_noop_protect_needs_no_headroom, false, NULL },
+    { "sys_mmap.fixed_anon_w_alone_maps_rw",  test_sys_mmap_fixed_anon_w_alone_maps_rw,  false, NULL },
+    { "protect.file_pagein_racing_protect_bails_single",
+                                              test_protect_file_pagein_racing_protect_bails_single, false, NULL },
+    { "protect.file_pagein_racing_protect_bails_cluster",
+                                              test_protect_file_pagein_racing_protect_bails_cluster, false, NULL },
     { "burrow.map_fixed_split_left",          test_burrow_map_fixed_split_left,          false, NULL },
     { "burrow.map_fixed_split_right",         test_burrow_map_fixed_split_right,         false, NULL },
     { "burrow.map_fixed_split_three_way",     test_burrow_map_fixed_split_three_way,     false, NULL },
@@ -2613,6 +2666,7 @@ struct test_case g_tests[] = {
     { "vivarium.mmap_domain",            test_vivarium_mmap_domain,            false, NULL },
     { "vivarium.mmap_file_domain",       test_vivarium_mmap_file_domain,       false, NULL },
     { "vivarium.mmap_fixed_domain",      test_vivarium_mmap_fixed_domain,      false, NULL },
+    { "vivarium.mprotect_domain",        test_vivarium_mprotect_domain,        false, NULL },
     { "vivarium.mmap_arms_disjoint",     test_vivarium_mmap_arms_disjoint,     false, NULL },
     { "vivarium.clone_domain",           test_vivarium_clone_domain,           false, NULL },
     { "vivarium.futex_decide",           test_vivarium_futex_decide,           false, NULL },

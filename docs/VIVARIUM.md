@@ -2234,7 +2234,19 @@ anonymous memory exists to map.
 
 **The protection question, decided explicitly.** Thylacine anonymous memory is
 always RW/XN, and **there is no prot-mutation syscall at all** — that is an I-12
-design choice, not a gap. So a phenotyped `mmap` cannot honour `PROT_NONE` or
+design choice, not a gap. **BUILT at B-1a (2026-09-23; ARCH §6.5 "The permission
+ceiling"): `burrow_protect` exists (`SYS_BURROW_PROTECT` 125), a phenotyped
+`mmap` mints `PROT_NONE` and `PROT_READ` EXACTLY through `SYS_BURROW_RESERVE`
+(124) — a reservation at the requested prot under an RW ceiling, so a guard page
+faults and a read-only mapping is read-only — and `mprotect` (226) is a
+translated row (`vivarium_mprotect_decide`: R/W/X translate, X is then refused
+by the target with `EACCES` — never a target — and `EACCES` answers an increase
+beyond the ceiling; BTI / MTE / GROWS* decline; a zero length is 0 and an
+unaligned address `EINVAL`). The fixed-anon arm admits `PROT_NONE` too, under an
+RW ceiling. The degradation described below ENDED; the paragraphs stand as the
+record of why it was sanctioned while no prot-mutation syscall existed, and the
+`viv-pheno-probe` legs that pinned it (L22 / L23) fired exactly as designed
+when it did, and were rewritten to pin the served behaviour instead.** So a phenotyped `mmap` cannot honour `PROT_NONE` or
 `PROT_READ` exactly; it grants read+write regardless. Two options, and the strict
 one loses:
 
@@ -2267,7 +2279,7 @@ so it reaches `ENOSYS` through `vivarium_translate`'s default — the right answ
 by accident. The file's own standard is that "a number we have never considered
 and one we have considered and rejected are different facts", so it is recorded
 with its reason: musl tolerates `ENOSYS` here by construction, and Thylacine has
-no prot-mutation syscall to translate to.
+no prot-mutation syscall to translate to. [SUPERSEDED at B-1a (2026-09-23): a translated row over `burrow_protect` — the amendment above. The row is `VIV_TIER2`; `rejects_are_deliberate` asserts that, not `ENOSYS`.]
 
 **`munmap` (215) → `SYS_BURROW_DETACH` (38), over a domain the arguments cannot
 express.** V-2a's rejection stands on its facts: detach demands an exact VMA
@@ -2300,13 +2312,19 @@ call sites (`free.c:148`, `malloc.c:318`), so a declined unmap costs memory, not
 correctness.
 
 Coverage: `vivarium.mmap_domain` (each admitted argument and each decline by
-name, `PROT_EXEC` especially, both `MAP_FIXED` spellings), the `mprotect`-ENOSYS
-and `mmap`/`munmap`-are-T2 rows in `rejects_are_deliberate`, and `viv-pheno-probe`
-legs **L16–L23**: mmap 8 KiB, write a pattern through both ends of the mapping,
-read it back, unmap it exactly, then assert in-guest that `PROT_EXEC` and
-`MAP_FIXED` are refused, that `mprotect` answers `ENOSYS` *specifically* (musl
-depends on that errno, not merely on failure), and — deliberately — that a
-`PROT_NONE` mapping is writable, so the degradation cannot go stale unnoticed.
+name, `PROT_EXEC` especially, both `MAP_FIXED` spellings), the `mprotect`-is-T2
+(since B-1a) and `mmap`/`munmap`-are-T2 rows in `rejects_are_deliberate`,
+`vivarium.mprotect_domain`, and `viv-pheno-probe` legs **L16–L23i**: mmap 8
+KiB, write a pattern through both ends of the mapping, read it back, unmap it
+exactly, then assert in-guest that `PROT_EXEC` and `MAP_FIXED` are refused, that
+`mprotect` over the range just unmapped answers `ENOMEM` and with X `EACCES`
+(the refusal precedes the lookup, observably), and that a `PROT_NONE` mapping
+is minted exactly — raised, written, lowered with its bytes kept, X refused on
+it, released, a zero length a no-op, an unaligned address `EINVAL`. (Until
+2026-09-23 L22 pinned `mprotect == ENOSYS` and L23 pinned the writable
+`PROT_NONE` degradation, deliberately, so that real `PROT_NONE` landing would
+fail the ladder rather than let the entry go stale — which is exactly what
+happened at B-1a's first boot.)
 
 The two layers are not redundant, which V-2d's revert probes demonstrate rather
 than assert. Reverting the `mmap` table row, or widening the prot allow-list to
@@ -3350,7 +3368,7 @@ degradation; anything that changes what the guest can *reach* is not, and is OUT
 
 | Degradation | Detail |
 |---|---|
-| **Memory protection is advisory below `PROT_EXEC`** (§6.21) | Thylacine anonymous memory is always RW/XN and there is no prot-mutation syscall (an I-12 design choice), so a phenotyped `mmap` grants read+write whatever `prot` asks. Guard pages are therefore **not protective**, and a `PROT_READ` mapping is writable. `mprotect` answers `ENOSYS`, which musl anticipates (`mallocng/malloc.c:92`). `PROT_EXEC` is refused outright rather than degraded — that is I-42/`CAP_JIT` territory. Self-harm only: the pages are the guest's own |
+| **Memory protection is advisory below `PROT_EXEC`** (§6.21) | Thylacine anonymous memory is always RW/XN and there is no prot-mutation syscall (an I-12 design choice), so a phenotyped `mmap` grants read+write whatever `prot` asks. Guard pages are therefore **not protective**, and a `PROT_READ` mapping is writable. `mprotect` answers `ENOSYS`, which musl anticipates (`mallocng/malloc.c:92`). `PROT_EXEC` is refused outright rather than degraded — that is I-42/`CAP_JIT` territory. Self-harm only: the pages are the guest's own. **ENDED at B-1a (landed 2026-09-23): `burrow_protect` (ARCH §6.5) makes the mint exact and 226 a translated row — guard pages ARE protective and a `PROT_READ` mapping is read-only under the Linux phenotype now. The row stays as the record of the degradation and its sanction.** |
 | **`exit(N)` is boolean** (task #91) | Any nonzero status reports 1, a Thylacine-wide v1.0 property (`sys_exit_group_handler` collapses to `exits("fail")`). A shell reading `$?` in a container sees 0-or-1 |
 | **`lseek` on a non-seekable fd reports `EPERM`, not `ESPIPE`** (V-8 F1, tasks #100/#106) | The refusal is CORRECT — a pipe, socket or `/proc` file is not seekable and the call must fail — but the code naming it is wrong. `T_E_SPIPE` (29) is not in the errno registry and appending one is signoff-bearing, so `sys_lseek_handler`'s non-seekable arm still returns a bare `-1`, which stock musl's `__syscall_ret` reads as `errno = 1` = `EPERM`. Substituting `EINVAL` would be the "differently wrong" answer #100 explicitly declined: a caller that special-cases `ESPIPE` (the standard "this stream is not seekable, fall back to reading forward" idiom) sees a permission error instead and may report it as one. `pread`/`pwrite` carry the same residual in `spoor_read_common`/`spoor_write_common` but are not table rows yet, so today only `lseek` is reachable from a guest. Every OTHER error on the T1 byte-I/O surface names itself correctly as of #100 |
 | **`/proc/self` names the mounter** (task #90) | The per-container diorama reports `viv` rather than the reading Proc |

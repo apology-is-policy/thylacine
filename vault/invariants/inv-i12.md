@@ -3,11 +3,11 @@ id: inv-i12
 type: inv
 title: "I-12 — no page is ever writable and executable at once"
 number: I-12
-guards: [sub-kernel-mmu, sub-kernel-vma, sub-kernel-fault, sub-kernel-elf, sub-kernel-exec]
+guards: [sub-kernel-mmu, sub-kernel-vma, sub-kernel-fault, sub-kernel-elf, sub-kernel-exec, sub-kernel-syscall-dispatch]
 validated-by: [prose, gate-smp]
 strength: prose
 created: 2026-08-03
-updated: 2026-08-03
+updated: 2026-09-23
 ---
 ## Statement
 
@@ -57,10 +57,25 @@ canonical mapping stays RO + X. Two aliases of one physical page, each
 W^X-clean; no PTE is ever both, not even momentarily. The JIT surface (I-42)
 generalizes exactly this shape outward to userspace.
 
-**5. Structural absence.** There is no protection-changing syscall. Nothing can
-flip an existing mapping from writable to executable, because the operation
-does not exist — which is stronger than rejecting it, since there is no call to
-get wrong.
+**5. The protect surface never targets X — the structural absence became a
+stated refusal at B-1a (2026-09-23).** Until B-1a there was no
+protection-changing syscall at all, and this mechanism was that absence.
+`SYS_BURROW_PROTECT` (and the phenotype `mprotect` row over it) now moves a
+mapping's `prot` among {none, R, RW} under a mint-time ceiling, and EXEC is
+outside the target set at BOTH refusal sites: `burrow_prot_word_check` at the
+syscall boundary (`-EACCES`, before any lookup -- observable, since
+`protect(X)` over an unmapped range is EACCES where `protect(R)` is ENOMEM)
+and `vma_reprotect_precheck_in` in the mechanism, so no in-kernel caller
+reaches an RX target by a path the boundary did not see
+([[sub-kernel-syscall-dispatch]], [[sub-kernel-vma]]). Nothing raises a
+ceiling, so an RX mapping -- image text -- can only descend to R or none and
+never returns. The gate count is unchanged: `vma_alloc` remains the single
+place where a user mapping's W and X are decided together, the protect never
+adds X to anything, and the one path by which bytes a Proc wrote become
+executable is still `CAP_JIT`'s dual map (I-42, the JIT capability). Witnesses:
+`protect.x_refused_before_lookup`, `protect.ceiling_bounds_raise`, the
+`noxcheck` sabotage (both refusals removed -> exactly the three X assertions
+fail and nothing else), and `/protect-probe`'s fifth leg.
 
 ## Caveats
 
@@ -80,15 +95,16 @@ The invariant holds anyway, on the five mechanisms above. What is wrong is the
 `vma_alloc` line that is doing the work. See task #59, and
 [[chg-2026-08-03-mapping-core-sweep]] for the full chain.
 
-**A sixth document names a syscall that does not exist.** `kernel/elf.c`'s file
+**A sixth document names a syscall that did not exist.** `kernel/elf.c`'s file
 header calls the loader "one of three layers (PTE bits + mprotect + ELF
-loader)". There is no `mprotect` in this kernel — searching `kernel/`, `arch/`
-and `mm/` for it returns exactly one hit, that comment. Mechanism 5 above *is*
-about `mprotect`, but as an **absence**: what protects the invariant is that no
-such call exists to get wrong. Listing an absence as a layer alongside two real
-checks turns a strength into a phantom, and the same sentence omits
-`vma_alloc` — making [[sub-kernel-elf]] the sixth document to do so. Folded into
-task #59.
+loader)". When this was written there was no `mprotect` in this kernel —
+searching `kernel/`, `arch/` and `mm/` for it returned exactly one hit, that
+comment — and mechanism 5 was an **absence**. Since B-1a (2026-09-23) there IS
+a protect syscall, and it is still not a W^X layer: it cannot produce X, so
+the sentence is wrong in a new way rather than right. Listing it as a layer
+alongside two real checks turns a strength into a phantom, and the same
+sentence omits `vma_alloc` — making [[sub-kernel-elf]] the sixth document to
+do so. Folded into task #59.
 
 The pattern across all six is worth stating once: **every document that
 enumerates this invariant's enforcement names something that cannot fire, and
@@ -104,6 +120,8 @@ deliberately holds two mappings of one code region.
 
 ## Where it is enforced
 
-[[sub-kernel-vma]] (the gate) · [[sub-kernel-mmu]] (the encoders, the asserts,
-the patcher's alias) · [[sub-kernel-fault]] (every install passes `vma->prot`
-through unchanged).
+[[sub-kernel-vma]] (the gate, and the mechanism's refusal of X as a protect
+target) · [[sub-kernel-mmu]] (the encoders, the asserts, the patcher's alias) ·
+[[sub-kernel-fault]] (every install passes `vma->prot` through unchanged) ·
+[[sub-kernel-syscall-dispatch]] (the boundary's refusal of X, before any
+lookup).

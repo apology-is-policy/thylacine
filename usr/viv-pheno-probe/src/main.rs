@@ -502,6 +502,8 @@ const NEG_ENOSYS: i64 = -38;
 // V-2d: the T2 shells reproduce Linux's ARGUMENT errors exactly rather than
 // collapsing them into a decline, so EINVAL is a distinct expected answer.
 const NEG_EINVAL: i64 = -22;
+const NEG_ENOMEM: i64 = -12;
+const NEG_EACCES: i64 = -13;
 
 // LINEAGE L-6a: execve's failing shapes. ENOENT is the positive statement that
 // the argv walk got as far as the resolve; EFAULT is the fault-close.
@@ -1048,26 +1050,49 @@ unsafe fn run_linux() -> ! {
     );
     let _ = svc3(NR_MUNMAP, f as u64, MAP_LEN, 0);
 
-    // mprotect is the explicit ENOSYS row. musl DEPENDS on this answer being
-    // ENOSYS specifically: mallocng/malloc.c:92 proceeds when mprotect fails
-    // with ENOSYS and gives up on any other error, so a different errno here
-    // would break malloc rather than degrade it.
+    // mprotect is a TRANSLATED row since B-1a (the permission ceiling, ARCH
+    // 6.5): SYS_BURROW_PROTECT under each mapping's mint-time ceiling. Until
+    // then it was the explicit ENOSYS musl's mallocng tolerates, and this leg
+    // pinned that; the ceiling is what made a mutation admissible without
+    // loosening I-12. Over the range just unmapped it is ENOMEM -- a real
+    // lookup ran and found a hole -- while X is refused BEFORE that lookup
+    // with EACCES ("X is never a target"): the same unmapped range answers two
+    // different errnos on the prot word alone, which is the order made
+    // observable. The range is 0x50000000, never mapped by anything in this
+    // image: L21's fixed mapping at 0x40000000 is not a safe "unmapped" range
+    // to reuse, because its munmap rides the range row and that row can
+    // decline (the ladder's nr=215 line) -- a leaked mapping there would turn
+    // ENOMEM into a silent 0.
     leg!(
         rep,
-        svc3(NR_MPROTECT, 0x40000000, 4096, PROT_READ | PROT_WRITE) == NEG_ENOSYS,
+        svc3(NR_MPROTECT, 0x50000000, 4096, PROT_READ | PROT_WRITE) == NEG_ENOMEM,
         b"L22\n"
     );
+    leg!(
+        rep,
+        svc3(NR_MPROTECT, 0x50000000, 4096, PROT_READ | PROT_EXEC) == NEG_EACCES,
+        b"L22b\n"
+    );
 
-    // THE DEGRADATION, pinned deliberately (VIVARIUM.md §9's DEGRADED tier).
-    // PROT_NONE is admitted and yields a WRITABLE mapping, because Thylacine
-    // anonymous memory is always RW/XN and there is no prot-mutation syscall.
-    // This leg asserts the divergence rather than hiding it: should real
-    // PROT_NONE ever land, this fails and forces the ladder entry to be
-    // updated instead of silently going stale.
+    // PROT_NONE is minted EXACTLY since B-1a -- the degradation VIVARIUM.md
+    // 6.21 recorded (a writable mapping where none was asked for) ended with
+    // the ceiling. The mapping is returned and must be RAISED before it can be
+    // touched; a write here would be a snare death, which the native
+    // /protect-guard-child proves. These legs prove the reserve-then-commit
+    // ladder itself: the raise, the bytes surviving a lowering, X refused on
+    // a live mapping, the descent, and Linux's two argument answers.
     let n = svc6(NR_MMAP, 0, 4096, PROT_NONE, MAP_PRIVATE | MAP_ANON,
                  (-1i64) as u64, 0);
     leg!(rep, n > 0 && !(-4095..0).contains(&n), b"L23\n");
-    (n as *mut u64).write_volatile(0xDEAD_BEEF);   // writable despite PROT_NONE
+    leg!(rep, svc3(NR_MPROTECT, n as u64, 4096, PROT_READ | PROT_WRITE) == 0, b"L23b\n");
+    (n as *mut u64).write_volatile(0xDEAD_BEEF);          // committed: writable now
+    leg!(rep, svc3(NR_MPROTECT, n as u64, 4096, PROT_READ) == 0, b"L23c\n");
+    leg!(rep, (n as *const u64).read_volatile() == 0xDEAD_BEEF, b"L23d\n");   // read-only, bytes kept
+    leg!(rep, svc3(NR_MPROTECT, n as u64, 4096, PROT_READ | PROT_EXEC) == NEG_EACCES, b"L23e\n");
+    leg!(rep, svc3(NR_MPROTECT, n as u64, 4096, PROT_NONE) == 0, b"L23f\n");
+    leg!(rep, svc3(NR_MPROTECT, n as u64, 0, PROT_READ) == 0, b"L23g\n");           // len 0: nothing to do
+    leg!(rep, svc3(NR_MPROTECT, n as u64 + 1, 4096, PROT_READ) == NEG_EINVAL, b"L23h\n");
+    leg!(rep, svc3(NR_MPROTECT, n as u64 + 1, 0, PROT_READ) == NEG_EINVAL, b"L23i\n");     // alignment before len 0 (Linux order)
     let _ = svc3(NR_MUNMAP, n as u64, 4096, 0);
 
     // --- L24-L31: signals (V-6b) --------------------------------------------

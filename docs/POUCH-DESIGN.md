@@ -48,7 +48,7 @@ The resolution pattern: **pouch carries the burden of translation so that applic
 
 - **The Utopia userland** (coreutils, bash, rc) — that is the renamed Phase 7 (formerly Phase 6), built *on* pouch.
 - **Unmodified Linux binary execution** — running Linux ELFs as-is is a later phase (the "Linux compat + network" phase). pouch hosts *recompiled* C source, not Linux binaries.
-- **Dynamic linking / shared objects** — v1.0 is static-only. pouch ships `libc.a`; `.so` support is deferred.
+- **Dynamic linking / shared objects** — v1.0 is static-only. pouch ships `libc.a`; `.so` support is deferred. **AMENDED 2026-09-23 (ARCH §6.5 "Dynamic loading"; lands at B-1d): static stays the DEFAULT; a program that needs `dlopen` links dynamically against `libc.so` (musl's loader), and the sysroot ships `.so` only for runtime-loaded objects and for `libc.so` itself.**
 - **`AF_INET` / TCP sockets** — deferred to the network phase. pouch returns `EAFNOSUPPORT` for `AF_INET`.
 - **The exotic POSIX surface** — real-time signals, `fork()` (see §8.3), file-backed `mmap`, locale beyond `C`, `epoll`/`io_uring`/`inotify`. Each returns a documented error.
 
@@ -228,15 +228,15 @@ The synchronization primitives are the real design content:
 - **ANSI C, in full** — `string.h`, `stdio.h`, `stdlib.h`, `math.h`, `ctype.h`, `time.h` (the computational parts). Near-free from musl's upper half.
 - **File I/O** — the surface in §6.1.
 - **The POSIX runtime layer** — §6 in full (the supported subset of sockets / poll / signals; §7 threads).
-- **Memory** — the `malloc` family via musl's `mallocng`, resting on the native `burrow_attach` / `burrow_detach` syscalls (ARCHITECTURE.md §6.5, Tier 1). [RESOLVED 8.1: the lower half retargets musl's `__mmap` / `__munmap` onto the burrow-attach pair; `brk` / `madvise` / `mprotect` / `mremap` are tolerated no-ops — `mallocng` needs none of them.]
+- **Memory** — the `malloc` family via musl's `mallocng`, resting on the native `burrow_attach` / `burrow_detach` syscalls (ARCHITECTURE.md §6.5, Tier 1). [RESOLVED 8.1: the lower half retargets musl's `__mmap` / `__munmap` onto the burrow-attach pair; `brk` / `madvise` / `mprotect` / `mremap` are tolerated no-ops — `mallocng` needs none of them.] [AMENDED 2026-09-23, lands B-1b: `madvise` → `SYS_BURROW_DECOMMIT`, `mprotect` → `burrow_protect` (ARCH §6.5, the ceiling), partial `munmap` → range detach; `mremap` stays a copy fallback. `mallocng`'s `MADV_FREE` of freed slots inside a retained group is the path that loses pages today.]
 - **`clock_gettime`, `nanosleep`** — map onto Thylacine timer syscalls.
 - **`mlock` / `munlock`** — stratumd pins its passphrase; maps onto `SYS_MLOCKALL` / a future per-range lock.
 
 ### 8.2 Unsupported — documented errors, never silent-wrong
 
-`AF_INET`, dynamic linking, file-backed `mmap` (refused by design — ARCHITECTURE.md §6.5), real-time signals, `epoll`/`io_uring`/`inotify`/`signalfd`/`eventfd`/`timerfd`, locale beyond `C`, `fork()` (§8.3), `exec` of a Linux binary, System V IPC. Each: a documented `errno` (`ENOSYS` / `EAFNOSUPPORT` / `EINVAL`) and a manual-page note.
+`AF_INET`, dynamic linking (until B-1d), file-backed `mmap` (the WRITABLE shape refused by design — ARCHITECTURE.md §6.5; the read-only / executable shape arrives with the loader at B-1d), real-time signals, `epoll`/`io_uring`/`inotify`/`signalfd`/`eventfd`/`timerfd`, locale beyond `C`, `fork()` (§8.3), `exec` of a Linux binary, System V IPC. Each: a documented `errno` (`ENOSYS` / `EAFNOSUPPORT` / `EINVAL`) and a manual-page note.
 
-**Documented v1.0 limitation — stack guard pages on pthread stacks** (P6-pouch-threads-b audit F2). pouch's `__mmap` (0003-pouch-mman boundary-line patch) ignores `prot` and always returns RW; `__mprotect` returns `-ENOSYS`. musl's pthread_create allocates `[map, map+size)` with PROT_NONE then mprotects the writable portion — both calls return RW, so the nominal "guard" region at the stack base is also RW. Stack overflow corrupts guard bytes silently; only an overflow past the entire stack region hits an unmapped page and faults. Stratum-class workloads (no deep recursion) are bounded by this. **The real fix needs a new kernel syscall to flip VMA permissions (PROT_NONE-capable) — deferred to v1.x**; at v1.0, the limitation is documented in `docs/reference/82-pouch-pthread.md` "Known caveats / footguns" and callers can extend their stacks via `pthread_attr_setstacksize` for headroom.
+**Documented v1.0 limitation — stack guard pages on pthread stacks** (P6-pouch-threads-b audit F2). pouch's `__mmap` (0003-pouch-mman boundary-line patch) ignores `prot` and always returns RW; `__mprotect` returns `-ENOSYS`. musl's pthread_create allocates `[map, map+size)` with PROT_NONE then mprotects the writable portion — both calls return RW, so the nominal "guard" region at the stack base is also RW. Stack overflow corrupts guard bytes silently; only an overflow past the entire stack region hits an unmapped page and faults. Stratum-class workloads (no deep recursion) are bounded by this. **The real fix needs a new kernel syscall to flip VMA permissions (PROT_NONE-capable) — deferred to v1.x**; **RESOLVED IN DESIGN 2026-09-23: `burrow_protect` (ARCH §6.5 "The permission ceiling") is that syscall, and the pthread guard becomes real at B-1b**; at v1.0, the limitation is documented in `docs/reference/82-pouch-pthread.md` "Known caveats / footguns" and callers can extend their stacks via `pthread_attr_setstacksize` for headroom.
 
 ### 8.3 `fork()` — a deliberate decline
 

@@ -217,13 +217,19 @@ void addrspace_unref(struct AddrSpace *as);
 //                          would be a contradiction; it is refused.
 //   BURROW_TYPE_ANON       depends on WRITABILITY, and this is the one kind where
 //                          it does. Eager anon is one indivisible buddy block, so
-//                          a WRITABLE one has no per-page ownership for a break to
-//                          take and the fork is REFUSED. A READ-ONLY one has
-//                          nothing to break -- no prot-mutation syscall exists
-//                          (I-12), so read-only is permanent -- and is SHARED, on
-//                          exactly the FILE reasoning above. The vDSO clock page is
-//                          this case, and it is in EVERY address space, so without
-//                          the read-only arm no real fork clones at all (#136).
+//                          one whose CEILING carries WRITE has no per-page
+//                          ownership for a break to take and the fork is REFUSED.
+//                          One whose ceiling excludes it can never be written by
+//                          either side -- the ceiling is what makes read-only
+//                          permanent now that burrow_protect exists (B-1a) -- and
+//                          is SHARED, on exactly the FILE reasoning above. The
+//                          vDSO clock page is this case, and it is in EVERY
+//                          address space, so without the read-only arm no real
+//                          fork clones at all (#136).
+//   several VMAs, ONE      a lazy Burrow a protect has split into pieces is
+//   ANON_LAZY Burrow       cloned ONCE (the clone_cursor dedupe, B-1a); every
+//                          piece maps that one clone. cow.tla's
+//                          BUGGY_CLONE_PER_PIECE is the clone-per-VMA shape.
 //   guard VMA              reproduced as a guard (no Burrow, prot 0). Dropping it
 //                          would silently delete the child's stack guard page.
 //   anything else          REFUSED, so the fork fails cleanly rather than handing

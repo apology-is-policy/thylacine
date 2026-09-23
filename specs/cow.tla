@@ -72,15 +72,69 @@
 (* one agent per address space. L-4b reuses that arm rather than inventing  *)
 (* a second one.                                                            *)
 (***************************************************************************)
+
+(***************************************************************************)
+(* B-1a EXTENSION (2026-09-23; ARCH 6.5 "The permission ceiling"; I-12 +    *)
+(* I-44). `burrow_protect` moves a VMA's prot among rw / ro / none under    *)
+(* its mint-time ceiling, and that reaches this model in three places, each *)
+(* with its own bug flag (4-6, the same one-flag-per-cfg rule):             *)
+(*                                                                         *)
+(*  4. BUGGY_PROTECT_KEEPS_PTE -- a protect lowers the VMA's prot but       *)
+(*     leaves the writable PTE a break installed, so the hardware keeps     *)
+(*     granting writes the VMA no longer permits. The correct ProtectDown   *)
+(*     is the D-3b rule as ONE step under the address-space lock: uninstall *)
+(*     the range, then change the prot. -> NoWritablePteBeyondProt.         *)
+(*                                                                         *)
+(*  5. BUGGY_FAULT_IGNORES_PROT -- the write-fault arm enters the break     *)
+(*     without first enforcing the VMA's prot (fault.c's step 2 skipped). A *)
+(*     write to an ro/none COW mapping then allocates and copies for an     *)
+(*     access that had to be refused. -> BreakOnlyWhenWritable.             *)
+(*                                                                         *)
+(*  6. BUGGY_CLONE_PER_PIECE -- a fork mints one clone Burrow PER VMA, and  *)
+(*     a clone takes a share on EVERY resident page of its source. Once a   *)
+(*     protect (or a MAP_FIXED window, D-3b) has split one Burrow into k    *)
+(*     VMA pieces, the child holds k shares of every page while being ONE   *)
+(*     holder: the count lies from the fork onwards -- the child is charged *)
+(*     k x resident, and the parent can never take a page in place while    *)
+(*     the phantom clones live. -> ShareIsHolderCount, violated by the      *)
+(*     INITIAL state, which is exactly where this bug is.                   *)
+(*                                                                         *)
+(* prot[s] is the VMA's declared prot. ptew[s] says whether s has a         *)
+(* WRITABLE PTE installed: a fork uninstalls every writable PTE, so all     *)
+(* sides start FALSE and only a break or a re-fault installs one. A write   *)
+(* under a lowered prot is refused at the fault boundary BEFORE the Burrow  *)
+(* is resolved -- it is a snare death, i.e. Exit, never a break -- so Fault *)
+(* is guarded on prot = rw. Protect and the break serialise on the          *)
+(* address-space lock the fault holds across the whole demand_page, so      *)
+(* ProtectDown never interleaves an in-flight break (its pc guard). The     *)
+(* CEILING itself is a pure per-call comparison with no interleaving and is *)
+(* deliberately not modeled; the kernel tests are its witness. The FILE     *)
+(* arm is the one fault whose admission and install span an UNLOCK (the    *)
+(* page-in sleeps); it is beneath this model (above) and the kernel re-runs *)
+(* the admission after the sleep (fault.c::file_fault_still_admitted; the   *)
+(* B-1a audit's F1), witnessed by the two file_pagein_racing_protect tests. *)
+(*                                                                         *)
+(* ADDITIVE BY MEASUREMENT: every new action is gated on ALLOW_PROTECT, and *)
+(* with it FALSE the four pre-existing cfgs reproduce their counts exactly  *)
+(* (cow 580 / break 211 / teardown 124 / vfork 231; specs/check-cow.sh pins *)
+(* them). There ptew is a function of pc and prot is constant, so the       *)
+(* count is preserved by construction as well as by measurement.            *)
+(***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS
     Sharers,                          \* address spaces sharing the page (>= 2)
     BUGGY_BREAK_UNLOCKED,             \* 1: drop/decide not atomic
     BUGGY_TEARDOWN_NO_PIN,            \* 2: share dropped before the copy, no pin
-    BUGGY_VFORK_OBSERVE_BEFORE_PARK   \* 3: check-then-park, unlocked
+    BUGGY_VFORK_OBSERVE_BEFORE_PARK,  \* 3: check-then-park, unlocked
+    ALLOW_PROTECT,                    \* B-1a: the protect actions exist at all
+    Pieces,                           \* B-1a: VMA pieces one Burrow is split into
+    BUGGY_PROTECT_KEEPS_PTE,          \* 4: prot lowered, writable PTE kept
+    BUGGY_FAULT_IGNORES_PROT,         \* 5: the break entered before the prot check
+    BUGGY_CLONE_PER_PIECE             \* 6: one clone Burrow per VMA piece
 
 ASSUME Cardinality(Sharers) >= 2
+ASSUME Pieces \in Nat /\ Pieces >= 1
 
 (* At most one bug is enabled at a time, so a counterexample is unambiguous
    about which mechanism produced it. Counted arithmetically, NOT as
@@ -89,7 +143,10 @@ ASSUME Cardinality(Sharers) >= 2
    bugs enabled. The flags are values, not identities. *)
 ASSUME (IF BUGGY_BREAK_UNLOCKED           THEN 1 ELSE 0)
      + (IF BUGGY_TEARDOWN_NO_PIN          THEN 1 ELSE 0)
-     + (IF BUGGY_VFORK_OBSERVE_BEFORE_PARK THEN 1 ELSE 0) <= 1
+     + (IF BUGGY_VFORK_OBSERVE_BEFORE_PARK THEN 1 ELSE 0)
+     + (IF BUGGY_PROTECT_KEEPS_PTE         THEN 1 ELSE 0)
+     + (IF BUGGY_FAULT_IGNORES_PROT        THEN 1 ELSE 0)
+     + (IF BUGGY_CLONE_PER_PIECE           THEN 1 ELSE 0) <= 1
 
 (* Sharer program counters:
      "shared"  -- mapped READ-ONLY on the pristine page (the post-fork state)
@@ -105,15 +162,34 @@ PCs == {"shared", "acq", "dropped", "copying", "private", "inplace", "gone"}
 (* The vfork parent's sub-machine (L-3c-2). *)
 VPCs == {"forked", "checked", "parked", "resumed"}
 
+(* A VMA's declared prot (B-1a). X is never a protect target (ARCH 6.5), so an
+   anonymous mapping's whole ladder is these three; "none" keeps the Burrow and
+   its pages (a guard is a range sealed at none, not an unmapping). *)
+Prots == {"rw", "ro", "none"}
+Rank(q) == CASE q = "rw" -> 2 [] q = "ro" -> 1 [] q = "none" -> 0
+
 VARIABLES
     pc,         \* [Sharers -> PCs]
     share,      \* Nat: the pristine page's share count
     pin,        \* Nat: breakers holding the page across a copy
     nfree,      \* Nat: times the pristine page was returned to the buddy
     vpc,        \* VPCs: the vfork parent
-    vreleased   \* BOOLEAN: the vfork child stopped sharing (exec or exit)
+    vreleased,  \* BOOLEAN: the vfork child stopped sharing (exec or exit)
+    prot,       \* [Sharers -> Prots]: each sharer's VMA prot (B-1a)
+    ptew        \* [Sharers -> BOOLEAN]: a WRITABLE PTE is installed (B-1a)
 
-vars == <<pc, share, pin, nfree, vpc, vreleased>>
+vars == <<pc, share, pin, nfree, vpc, vreleased, prot, ptew>>
+
+(* How many shares of the page a sharer's fork left it holding. The correct
+   fork holds exactly one per address space. Under bug 6 every non-parent
+   sharer (a clone) holds one per VMA piece: the clone is minted per piece and
+   each mint walks the whole source Burrow. Which sharer is the parent is
+   immaterial to a symmetric model, so CHOOSE. *)
+Parent    == CHOOSE s \in Sharers : TRUE
+Held(s)   == IF BUGGY_CLONE_PER_PIECE /\ s # Parent THEN Pieces ELSE 1
+InitShare == IF BUGGY_CLONE_PER_PIECE
+               THEN 1 + Pieces * (Cardinality(Sharers) - 1)
+               ELSE Cardinality(Sharers)
 
 (* TRUE when the protocol drops the share BEFORE the copy rather than after. *)
 EarlyDrop == BUGGY_TEARDOWN_NO_PIN \/ BUGGY_BREAK_UNLOCKED
@@ -133,26 +209,37 @@ TypeOk ==
     /\ nfree     \in Nat
     /\ vpc       \in VPCs
     /\ vreleased \in BOOLEAN
+    /\ prot      \in [Sharers -> Prots]
+    /\ ptew      \in [Sharers -> BOOLEAN]
 
 Init ==
     /\ pc        = [s \in Sharers |-> "shared"]
-    /\ share     = Cardinality(Sharers)
+    /\ share     = InitShare
     /\ pin       = 0
     /\ nfree     = 0
     /\ vpc       = "forked"
     /\ vreleased = FALSE
+    /\ prot      = [s \in Sharers |-> "rw"]
+    /\ ptew      = [s \in Sharers |-> FALSE]   \* the fork uninstalled them all
 
-vunchanged  == UNCHANGED <<vpc, vreleased>>
-pgunchanged == UNCHANGED <<pc, share, pin, nfree>>
+vunchanged    == UNCHANGED <<vpc, vreleased>>
+protunchanged == UNCHANGED <<prot, ptew>>
+pgunchanged   == UNCHANGED <<pc, share, pin, nfree, prot, ptew>>
+pgunchanged_but_prot == UNCHANGED <<pc, share, pin, nfree>>
 
 (***************************************************************************)
-(* A sharer write-faults on its read-only mapping.                          *)
+(* A sharer write-faults on its read-only mapping. The VMA's prot is         *)
+(* enforced BEFORE the Burrow is resolved (fault.c step 2 before step 3): a *)
+(* write under ro/none never gets here -- it is refused, and the refusal is  *)
+(* a snare death (Exit). Bug 5 drops that guard.                             *)
 (***************************************************************************)
 Fault(s) ==
     /\ pc[s] = "shared"
+    /\ (prot[s] = "rw" \/ BUGGY_FAULT_IGNORES_PROT)
     /\ pc' = [pc EXCEPT ![s] = "acq"]
     /\ UNCHANGED <<share, pin, nfree>>
     /\ vunchanged
+    /\ protunchanged
 
 (***************************************************************************)
 (* CORRECT (and bug 2): the whole decide runs under the Burrow lock, so it  *)
@@ -166,12 +253,14 @@ DecideLocked(s) ==
     /\ ~BUGGY_BREAK_UNLOCKED
     /\ pc[s] = "acq"
     /\ IF share = 1
-         THEN /\ pc' = [pc EXCEPT ![s] = "inplace"]
+         THEN /\ pc'   = [pc EXCEPT ![s] = "inplace"]
+              /\ ptew' = [ptew EXCEPT ![s] = TRUE]   \* re-installed writable
               /\ UNCHANGED <<share, pin, nfree>>
          ELSE /\ pc'    = [pc EXCEPT ![s] = "copying"]
               /\ pin'   = IF TakesPin THEN pin + 1 ELSE pin
               /\ share' = IF BUGGY_TEARDOWN_NO_PIN THEN share - 1 ELSE share
-              /\ UNCHANGED nfree
+              /\ UNCHANGED <<nfree, ptew>>
+    /\ UNCHANGED prot
     /\ vunchanged
 
 (***************************************************************************)
@@ -186,17 +275,20 @@ DropUnlocked(s) ==
     /\ pc'    = [pc EXCEPT ![s] = "dropped"]
     /\ UNCHANGED <<pin, nfree>>
     /\ vunchanged
+    /\ protunchanged
 
 LookUnlocked(s) ==
     /\ BUGGY_BREAK_UNLOCKED
     /\ pc[s] = "dropped"
     /\ IF share = 0
          THEN \* "nobody else is left" -- take the page in place
-              /\ pc' = [pc EXCEPT ![s] = "inplace"]
+              /\ pc'   = [pc EXCEPT ![s] = "inplace"]
+              /\ ptew' = [ptew EXCEPT ![s] = TRUE]
               /\ UNCHANGED <<share, pin, nfree>>
          ELSE /\ pc'  = [pc EXCEPT ![s] = "copying"]
               /\ pin' = pin + 1
-              /\ UNCHANGED <<share, nfree>>
+              /\ UNCHANGED <<share, nfree, ptew>>
+    /\ UNCHANGED prot
     /\ vunchanged
 
 (***************************************************************************)
@@ -206,21 +298,26 @@ LookUnlocked(s) ==
 BreakFinish(s) ==
     /\ pc[s] = "copying"
     /\ pc'    = [pc EXCEPT ![s] = "private"]
+    /\ ptew'  = [ptew EXCEPT ![s] = TRUE]     \* the private page, writable
     /\ pin'   = IF TakesPin THEN pin - 1 ELSE pin
     /\ share' = IF EarlyDrop THEN share ELSE share - 1
-    /\ UNCHANGED nfree
+    /\ UNCHANGED <<nfree, prot>>
     /\ vunchanged
 
 (***************************************************************************)
-(* A sharer exits without ever writing: drop its share.                     *)
+(* A sharer exits without ever writing: drop what it holds. This is also    *)
+(* where a write refused under a lowered prot ends up -- the snare death    *)
+(* tears the address space down, and every clone the fork minted for it     *)
+(* (one, or Pieces under bug 6) drops its share with it.                    *)
 (***************************************************************************)
 Exit(s) ==
     /\ pc[s] = "shared"
-    /\ share > 0
-    /\ share' = share - 1
+    /\ share >= Held(s)
+    /\ share' = share - Held(s)
     /\ pc'    = [pc EXCEPT ![s] = "gone"]
     /\ UNCHANGED <<pin, nfree>>
     /\ vunchanged
+    /\ protunchanged
 
 (***************************************************************************)
 (* The pristine page returns to the buddy when the count says nothing maps  *)
@@ -235,6 +332,54 @@ FreePristine ==
     /\ nfree = 0
     /\ nfree' = 1
     /\ UNCHANGED <<pc, share, pin>>
+    /\ vunchanged
+    /\ protunchanged
+
+(***************************************************************************)
+(* B-1a: the protect actions (all gated on ALLOW_PROTECT).                  *)
+(*                                                                         *)
+(* A sharer with an address space (not mid-break: the break holds the same  *)
+(* lock, so the two serialise; not gone: no VMA) lowers or raises the VMA's *)
+(* prot. Lowering is the D-3b shape in ONE step: uninstall the range, then  *)
+(* change the prot -- a writable PTE cannot outlive the permission that     *)
+(* justified it. Bug 4 keeps the PTE. Raising installs nothing: the next    *)
+(* access faults and the fault arm installs under the NEW prot (Reinstall   *)
+(* for a page the sharer already owns; Fault + the break for a shared one). *)
+(***************************************************************************)
+Protectable(s) == pc[s] \in {"shared", "private", "inplace"}
+
+ProtectDown(s) ==
+    /\ ALLOW_PROTECT
+    /\ Protectable(s)
+    /\ \E q \in Prots :
+         /\ Rank(q) < Rank(prot[s])
+         /\ prot' = [prot EXCEPT ![s] = q]
+    /\ ptew' = [ptew EXCEPT ![s] = IF BUGGY_PROTECT_KEEPS_PTE THEN ptew[s] ELSE FALSE]
+    /\ pgunchanged_but_prot
+    /\ vunchanged
+
+ProtectUp(s) ==
+    /\ ALLOW_PROTECT
+    /\ Protectable(s)
+    /\ \E q \in Prots :
+         /\ Rank(q) > Rank(prot[s])
+         /\ prot' = [prot EXCEPT ![s] = q]
+    /\ UNCHANGED ptew
+    /\ pgunchanged_but_prot
+    /\ vunchanged
+
+(* A sharer that already owns its page (private copy, or the pristine page
+   taken in place) write-faults after a protect uninstalled its PTE: there is
+   nothing to break, the fault arm just re-installs -- writable only because
+   the prot says rw. *)
+Reinstall(s) ==
+    /\ ALLOW_PROTECT
+    /\ pc[s] \in {"private", "inplace"}
+    /\ ~ptew[s]
+    /\ prot[s] = "rw"
+    /\ ptew' = [ptew EXCEPT ![s] = TRUE]
+    /\ UNCHANGED prot
+    /\ pgunchanged_but_prot
     /\ vunchanged
 
 (***************************************************************************)
@@ -271,10 +416,19 @@ Next ==
          \/ Fault(s) \/ DecideLocked(s)
          \/ DropUnlocked(s) \/ LookUnlocked(s)
          \/ BreakFinish(s) \/ Exit(s)
+         \/ ProtectDown(s) \/ ProtectUp(s) \/ Reinstall(s)
     \/ FreePristine
     \/ VChildRelease \/ VParentCheck \/ VParentParkLate
 
 Spec == Init /\ [][Next]_vars /\ WF_vars(Next)
+
+(* With protect enabled the state graph has cycles (rw -> ro -> rw ...), so
+   weak fairness on Next alone admits a run that protects forever and never
+   lets the vfork child release -- a spurious liveness counterexample about a
+   sub-machine protect does not touch. The vfork release depends on nothing a
+   protect does, so it gets its own fairness. The old Spec is left as it was:
+   the four pre-existing cfgs are fingerprinted against it. *)
+SpecProtect == Spec /\ WF_vars(VChildRelease) /\ WF_vars(VParentCheck)
 
 (***************************************************************************)
 (* SAFETY -- I-44.                                                          *)
@@ -298,6 +452,30 @@ Safety ==
     /\ NoAliasedWritable
     /\ NoUseAfterFree
     /\ NoDoubleFree
+
+(***************************************************************************)
+(* SAFETY -- B-1a. Kept OUT of Safety so the pre-existing cfgs check exactly *)
+(* what they always did; cow_protect checks all of it.                      *)
+(***************************************************************************)
+
+(* The share count is the number of address spaces that hold the page -- not
+   the number of clone Burrows a fork happened to mint. Bug 6 breaks this in
+   the initial state. *)
+ShareIsHolderCount == share = Cardinality(Referencing)
+
+(* No writable PTE beyond the VMA's prot: a protect that lowers the prot took
+   the PTE with it (bug 4 keeps it). *)
+NoWritablePteBeyondProt == \A s \in Sharers : ptew[s] => prot[s] = "rw"
+
+(* The break is entered only for a write the VMA permits: prot is enforced at
+   the fault boundary before the Burrow is resolved (bug 5 skips it). *)
+BreakOnlyWhenWritable ==
+    \A s \in Sharers : pc[s] \in {"acq", "dropped", "copying"} => prot[s] = "rw"
+
+ProtectSafety ==
+    /\ ShareIsHolderCount
+    /\ NoWritablePteBeyondProt
+    /\ BreakOnlyWhenWritable
 
 (***************************************************************************)
 (* LIVENESS -- the vfork parent is always released (L-3c-2's NoStrand).     *)

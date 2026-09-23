@@ -6000,9 +6000,20 @@ static s64 detach_one_locked(struct Proc *p, u64 vaddr_raw, u64 length,
     // #65 (I-32): the uncharge must MATCH the charge. An EAGER attach charged
     // length/PAGE_SIZE at attach; a LAZY attach (SYS_BURROW_ATTACH_LAZY) charged only
     // the FAULTED-in pages (per-page, at fault time -- ARCH §6.5 overcommit). Read
-    // the VMA type + resident count BEFORE burrow_unmap frees the VMA/Burrow; under
-    // vma_lock so the count is stable. (For a wrong-base/length detach, burrow_unmap
-    // returns -1 and the uncharge is skipped.)
+    // the VMA type BEFORE burrow_unmap frees the VMA/Burrow; under vma_lock so the
+    // state is stable. (For a wrong-base/length detach, burrow_unmap returns -1
+    // and nothing is uncharged.)
+    //
+    // B-1a: a LAZY VMA may be one PIECE of a Burrow that a protect (or a D-3b
+    // window) split, so "the Burrow's resident count" is no longer this
+    // mapping's charge -- the other pieces still map the rest, and uncharging
+    // the whole count here refunded the same pages once per piece. The refund
+    // is now the piece's OWN range: burrow_decommit frees and uncharges exactly
+    // the resident slots inside it (COW-aware, PTEs cleared first), and the
+    // unmap that follows finds nothing left to release. For a mapping that is
+    // the whole Burrow this is the same pages freed a few lines earlier; for a
+    // piece it is the only correct answer, and it is also what the bar asks --
+    // a detached range's pages return to the system at once.
     struct Vma *dvma = vma_lookup(p, vaddr_raw);
 
     // I-42 (CL-7k self-audit): a CODE alias is NOT detachable here. A code
@@ -6105,7 +6116,6 @@ static s64 detach_one_locked(struct Proc *p, u64 vaddr_raw, u64 length,
     // never charged (nothing recorded a payer) now refunds nothing instead of
     // the recomputed occupancy -- the #122 rule, enforced by attribution rather
     // than by enumerating shapes.
-    u32 lazy_uncharge = 0;
     bool shared_out   = false;
     u32  paid         = 0;
     // Snapshot the BURROW pointer, not the VMA: burrow_unmap_reporting frees the
@@ -6116,9 +6126,22 @@ static s64 detach_one_locked(struct Proc *p, u64 vaddr_raw, u64 length,
     if (dvma && dvma->burrow && dvma->burrow->magic == VMO_MAGIC &&
         !(dvma->flags & VMA_FLAG_SHARED_IN)) {
         dv = dvma->burrow;
-        if (dv->type == BURROW_TYPE_ANON_LAZY)
-            lazy_uncharge = burrow_lazy_resident_count(dv);
-        else if (dv->type == BURROW_TYPE_ANON) {
+        if (dv->type == BURROW_TYPE_ANON_LAZY) {
+            // Only on the exact match the unmap below will accept, so a refused
+            // detach frees nothing.
+            //
+            // KNOWN OVER-CHARGE (B-1a audit F5; B-1a' owns the fix): a D-3b
+            // window replaced INSIDE a touched lazy mapping leaves the replaced
+            // slots resident and charged, and this per-piece refund never
+            // reaches them -- the Burrow's last free returns those pages to the
+            // system uncharged (burrow_free_internal is Proc-agnostic). Safe
+            // direction only: the Proc is capped tighter, never looser. The fix
+            // is vma_replace_range_in decommitting the replaced window of the
+            // OLD Burrow before the swap.
+            if (dvma->vaddr_start == vaddr_raw &&
+                dvma->vaddr_end   == vaddr_raw + length)
+                (void)burrow_decommit(p, vaddr_raw, (size_t)length);
+        } else if (dv->type == BURROW_TYPE_ANON) {
             shared_out = burrow_is_shared_out(dv);
             // Claim BEFORE the drop: a freeing drop takes the record with it.
             // Returns 0 unless this Proc is the recorded payer -- which is what
@@ -6139,8 +6162,6 @@ static s64 detach_one_locked(struct Proc *p, u64 vaddr_raw, u64 length,
     struct Burrow *tf = NULL;
     int rc = burrow_unmap_reporting(p, vaddr_raw, length, &freed, &tf);
     *out_free = tf;
-    if (rc == 0 && lazy_uncharge)
-        proc_page_uncharge(p, lazy_uncharge);
     if (paid) {
         // The refund is the RECORDED charge, not a recomputation: the record is
         // what the attach actually billed, so the two cannot drift even if this
@@ -6201,8 +6222,10 @@ s64 sys_munmap_range_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
 
     // Validation pass -- ALL refusals decided before the first removal, under
     // the same lock hold, so the detach loop below cannot stop midway.
-    for (struct Vma *v = vma_next_overlap_in(p->as, vaddr_raw, end); v;
-         v = vma_next_overlap_in(p->as, v->vaddr_end, end)) {
+    // One scan from the head, then successors -- the list is sorted (B-1a
+    // audit F2: a re-scan per mapping was O(k x N) under the lock).
+    for (struct Vma *v = vma_next_overlap_in(p->as, vaddr_raw, end);
+         v && v->vaddr_start < end; v = v->next) {
         if (v->vaddr_start < vaddr_raw || v->vaddr_end > end) {
             spin_unlock(&p->as->lock);
             return -1;                   // boundary straddle: partial unmap
@@ -6227,8 +6250,12 @@ s64 sys_munmap_range_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
     // stack via deferred_free_next -- an uncapped chain that needs no allocation
     // and no lock (each Burrow is at {0,0}, unreachable by any other path).
     struct Burrow *dead = NULL;
-    struct Vma *v;
-    while ((v = vma_next_overlap_in(p->as, vaddr_raw, end)) != NULL) {
+    // The successor is read BEFORE the detach frees `v`; the detach removes
+    // exactly `v` (an exact-geometry match), so `nx` stays valid. The old
+    // re-scan per removal walked the same prefix k times (B-1a audit F2).
+    for (struct Vma *v = vma_next_overlap_in(p->as, vaddr_raw, end), *nx = NULL;
+         v && v->vaddr_start < end; v = nx) {
+        nx = v->next;
         struct Burrow *tf = NULL;
         if (detach_one_locked(p, v->vaddr_start,
                               v->vaddr_end - v->vaddr_start, &tf) != 0) {
@@ -6516,7 +6543,11 @@ static s64 mmap_fixed_window(u64 addr, u64 length_raw, u32 pr,
 
     u32 prot = 0;
     if (pr & VIV_PROT_READ)  prot |= (u32)VMA_PROT_READ;
-    if (pr & VIV_PROT_WRITE) prot |= (u32)VMA_PROT_WRITE;
+    // PROT_WRITE alone maps RW, as Linux/AArch64 does (no write-only AP) and
+    // as the non-fixed anon arm and the mprotect arm already do; without the
+    // promotion vma_alloc's W-without-R refusal surfaced as ENOMEM for a legal
+    // request once B-1a admitted the word (audit F4).
+    if (pr & VIV_PROT_WRITE) prot |= (u32)(VMA_PROT_READ | VMA_PROT_WRITE);
     if (pr & VIV_PROT_EXEC)  prot |= (u32)VMA_PROT_EXEC;
 
     *length_out = length;
@@ -6730,6 +6761,13 @@ s64 sys_mmap_fixed_anon_for_proc(struct Proc *p, u64 addr, u64 length_raw,
     struct Burrow *fx_free = NULL;
     spin_lock(&p->as->lock);
     int rc = burrow_map_fixed(p, b, addr, (size_t)length, prot, /*offset=*/0, &fx_free);
+    if (rc == 0) {
+        // B-1a: an anonymous mint's ceiling is RW whatever prot it starts at --
+        // a FIXED PROT_NONE window (a guard, or a reservation ldso will raise)
+        // is admitted now that the raise exists, and it must be raisable.
+        struct Vma *nv = vma_lookup(p, addr);
+        if (nv) vma_set_prot_max(nv, VMA_PROT_RW);
+    }
     spin_unlock(&p->as->lock);
     if (fx_free) burrow_free_deferred(fx_free);
     burrow_unref(b);
@@ -6793,6 +6831,121 @@ static s64 sys_burrow_decommit_handler(u64 vaddr_raw, u64 length_raw) {
     struct Thread *t = current_thread();
     if (!t)                                          return -1;
     return sys_burrow_decommit_for_proc(t->proc, vaddr_raw, length_raw);
+}
+
+// =============================================================================
+// B-1a -- the permission ceiling (ARCH 6.5; scripture 96f24314). The lazy
+// reservation with mint-time attributes, and the one permission mutation.
+// =============================================================================
+
+// The native prot word IS the VMA prot word (syscall.h states it; this pins it),
+// and both are Linux's PROT_* values -- which is what lets the phenotype
+// mprotect row hand its word straight through.
+_Static_assert(BURROW_PROT_READ == VMA_PROT_READ && BURROW_PROT_WRITE == VMA_PROT_WRITE &&
+               BURROW_PROT_EXEC == VMA_PROT_EXEC && BURROW_PROT_READ == VIV_PROT_READ &&
+               BURROW_PROT_WRITE == VIV_PROT_WRITE && BURROW_PROT_EXEC == VIV_PROT_EXEC,
+               "BURROW_PROT_* must equal VMA_PROT_* and Linux PROT_*");
+
+// The prot both syscalls accept: {none, R, RW}. X first and separately, because
+// "X is never a target" is a stated refusal with its own errno (EACCES), not a
+// malformed word (EINVAL) -- and because the ORDER is observable: protect(X)
+// over an unmapped range answers EACCES, never ENOMEM, which is how a test
+// proves the refusal precedes the lookup.
+static s64 burrow_prot_word_check(u64 prot_raw) {
+    if (prot_raw & BURROW_PROT_EXEC)                            return -(s64)T_E_ACCES;
+    if (prot_raw & ~(u64)(BURROW_PROT_READ | BURROW_PROT_WRITE)) return -(s64)T_E_INVAL;
+    if ((prot_raw & BURROW_PROT_WRITE) && !(prot_raw & BURROW_PROT_READ))
+        return -(s64)T_E_INVAL;                       // no write-only AP (RW-1 C-F3)
+    return 0;
+}
+
+s64 sys_burrow_reserve_for_proc(struct Proc *p, u64 length_raw, u64 prot_raw,
+                                u64 align_log2) {
+    if (!p)                                          return -(s64)T_E_INVAL;
+    s64 perr = burrow_prot_word_check(prot_raw);
+    if (perr != 0)                                   return perr;
+    if (align_log2 != 0 &&
+        (align_log2 < BURROW_RESERVE_ALIGN_MIN_LOG2 ||
+         align_log2 > BURROW_RESERVE_ALIGN_MAX_LOG2))  return -(s64)T_E_INVAL;
+    if (length_raw == 0)                             return -(s64)T_E_INVAL;
+    if (length_raw > BURROW_RESERVE_MAX)             return -(s64)T_E_NOMEM;
+
+    u64 length = (length_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
+    u64 align  = align_log2 ? (1ull << align_log2) : 0;
+
+    spin_lock(&p->as->lock);
+    u64 vaddr;
+    if (vma_find_gap_aligned(p, length, align, EXEC_USER_BURROW_BASE,
+                             EXEC_USER_BURROW_TOP, &vaddr) != 0) {
+        spin_unlock(&p->as->lock);
+        return -(s64)T_E_NOMEM;
+    }
+    // No page charge here -- a reservation commits (and charges) per page at
+    // fault; the VMA-count cap inside burrow_map bounds the free reservation
+    // (the SYS_BURROW_ATTACH_LAZY posture, byte for byte).
+    struct Burrow *b = burrow_create_anon_lazy(length);
+    if (!b) {
+        spin_unlock(&p->as->lock);
+        return -(s64)T_E_NOMEM;
+    }
+    int rc = burrow_map(p, b, vaddr, length, (u32)prot_raw);
+    if (rc == 0) {
+        // The mint's ceiling is RW whatever prot it starts at (ARCH 6.5): this
+        // is the reserve-then-commit idiom, and the commit is a later
+        // SYS_BURROW_PROTECT. vma_alloc set the ceiling to the mint prot (the
+        // safe default for every OTHER mint); raise it here, under the same
+        // lock hold, before anything can observe the mapping.
+        struct Vma *nv = vma_lookup(p, vaddr);
+        if (nv) vma_set_prot_max(nv, VMA_PROT_RW);
+    } else {
+        burrow_unref(b);                 // the only ref; an empty lazy free never sleeps
+        spin_unlock(&p->as->lock);
+        return -(s64)T_E_NOMEM;
+    }
+    spin_unlock(&p->as->lock);
+    burrow_unref(b);                     // #193: the success-path drop, outside the lock
+    return (s64)vaddr;
+}
+
+s64 sys_burrow_protect_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw,
+                                u64 prot_raw, u64 flags_raw) {
+    if (!p)                                          return -(s64)T_E_INVAL;
+    // X is refused BEFORE any lookup -- the boundary half of "X is never a
+    // target" (the mechanism refuses it again in vma_reprotect_precheck_in).
+    s64 perr = burrow_prot_word_check(prot_raw);
+    if (perr != 0)                                   return perr;
+    if (flags_raw & ~(u64)BURROW_PROTECT_SEAL)       return -(s64)T_E_INVAL;
+    if (length_raw == 0)                             return -(s64)T_E_INVAL;
+    if (vaddr_raw & (PAGE_SIZE - 1))                 return -(s64)T_E_INVAL;
+
+    u64 length = (length_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
+    if (length < length_raw)                         return -(s64)T_E_INVAL;   // wrapped in the round-up
+    if (vaddr_raw + length < vaddr_raw)              return -(s64)T_E_INVAL;
+    if (vaddr_raw + length > USER_VA_TOP)            return -(s64)T_E_NOMEM;   // never mapped
+
+    // No window confinement, deliberately: RELRO is in the image region, a
+    // thread stack in the burrow window, a library's data wherever ldso placed
+    // it. What may be protected is decided by the mapping (its type, flags and
+    // ceiling), not by its address -- burrow_protect's precheck.
+    spin_lock(&p->as->lock);
+    int rc = burrow_protect(p, vaddr_raw, (size_t)length, (u32)prot_raw,
+                            (flags_raw & BURROW_PROTECT_SEAL) != 0);
+    spin_unlock(&p->as->lock);
+    return (s64)rc;
+}
+
+static s64 sys_burrow_reserve_handler(u64 length_raw, u64 prot_raw, u64 align_log2) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -(s64)T_E_INVAL;
+    return sys_burrow_reserve_for_proc(t->proc, length_raw, prot_raw, align_log2);
+}
+
+static s64 sys_burrow_protect_handler(u64 vaddr_raw, u64 length_raw,
+                                      u64 prot_raw, u64 flags_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -(s64)T_E_INVAL;
+    return sys_burrow_protect_for_proc(t->proc, vaddr_raw, length_raw,
+                                       prot_raw, flags_raw);
 }
 
 // =============================================================================
@@ -13582,7 +13735,17 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // no free gap / OOM). Translating its -1 rather than passing it through
         // matters: Thylacine signals failure with a bare -1, and a Linux libc
         // reads -1 as -EPERM.
-        s64 rc = sys_burrow_attach_lazy_for_proc(p, args[1]);
+        // B-1a: the mint carries the Linux prot EXACTLY -- PROT_NONE, PROT_READ
+        // or PROT_READ|PROT_WRITE -- under an RW ceiling, through the same
+        // reservation SYS_BURROW_RESERVE mints. VIVARIUM 6.21's degradation
+        // ("PROT_NONE yields a writable mapping") ended with the ceiling: a guard
+        // page is protective and a read-only anonymous mapping is read-only.
+        // PROT_WRITE alone maps RW, as Linux/AArch64 does (no write-only AP).
+        u32 lpr   = (u32)args[2];
+        u64 nprot = 0;
+        if (lpr & VIV_PROT_READ)  nprot |= BURROW_PROT_READ;
+        if (lpr & VIV_PROT_WRITE) nprot |= BURROW_PROT_READ | BURROW_PROT_WRITE;
+        s64 rc = sys_burrow_reserve_for_proc(p, args[1], nprot, 0);
         if (rc < 0) return -(s64)T_E_NOMEM;
 
         // A user VA is below 2^47, so a successful return is never mistaken for
@@ -13616,6 +13779,35 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // Claiming success would leave a mapping the guest believes is gone.
         // Declining is honest; faking is not.
         return -(s64)T_E_NOSYS;
+    }
+
+    case VIV_LINUX_MPROTECT: {
+        // mprotect(addr, len, prot): x0 addr, x1 len, x2 prot. B-1a: a
+        // translated row over SYS_BURROW_PROTECT (ARCH 6.5), ending the ENOSYS
+        // that musl tolerated and glibc would not have.
+        //
+        // The domain is the prot word (vivarium_mprotect_decide): R / W / X in
+        // any combination translate; a bit we cannot honour (BTI, MTE, the
+        // GROWS* pair) declines. The two argument answers Linux gives a specific
+        // errno are reproduced here: a zero length succeeds having touched
+        // nothing, and an unaligned address is EINVAL (the target's own
+        // answer). PROT_WRITE alone maps RW (AArch64 has no write-only AP;
+        // Linux does the same). Everything else -- X refused first with EACCES
+        // (never a target), EACCES for a raise above the ceiling (Linux's own
+        // "cannot be given the specified access"), ENOMEM for a hole -- is the
+        // native syscall's answer, and its errno values are Linux's.
+        if (vivarium_mprotect_decide(args[0], args[1], args[2]) != VIV_TRANSLATED)
+            return -(s64)T_E_NOSYS;
+        // Linux tests the alignment BEFORE the zero length (do_mprotect_pkey):
+        // mprotect(unaligned, 0, prot) is EINVAL, not a no-op (audit F6).
+        if (args[0] & (PAGE_SIZE - 1)) return -(s64)T_E_INVAL;
+        if (args[1] == 0) return 0;
+        u32 mpr   = (u32)args[2];
+        u64 nprot = 0;
+        if (mpr & VIV_PROT_READ)  nprot |= BURROW_PROT_READ;
+        if (mpr & VIV_PROT_WRITE) nprot |= BURROW_PROT_READ | BURROW_PROT_WRITE;
+        if (mpr & VIV_PROT_EXEC)  nprot |= BURROW_PROT_EXEC;   // refused at the boundary
+        return sys_burrow_protect_for_proc(p, args[0], args[1], nprot, 0);
     }
 
     case VIV_LINUX_RT_SIGACTION: {
@@ -15266,6 +15458,16 @@ static void syscall_dispatch_body(struct exception_context *ctx) {
     case SYS_BURROW_DECOMMIT:
         ctx->regs[0] = (u64)sys_burrow_decommit_handler(ctx->regs[0],
                                                         ctx->regs[1]);
+        return;
+
+    case SYS_BURROW_RESERVE:
+        ctx->regs[0] = (u64)sys_burrow_reserve_handler(ctx->regs[0], ctx->regs[1],
+                                                       ctx->regs[2]);
+        return;
+
+    case SYS_BURROW_PROTECT:
+        ctx->regs[0] = (u64)sys_burrow_protect_handler(ctx->regs[0], ctx->regs[1],
+                                                       ctx->regs[2], ctx->regs[3]);
         return;
 
     case SYS_LOOM_SETUP:

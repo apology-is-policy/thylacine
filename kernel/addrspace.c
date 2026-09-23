@@ -144,31 +144,52 @@ static bool clone_one_vma(struct AddrSpace *dst, bool exempt,
 
     switch (backing->type) {
     case BURROW_TYPE_ANON_LAZY:
-        minted = burrow_clone_cow(backing);
-        if (!minted) return false;
-        backing = minted;
-        flags   = VMA_FLAG_COW;
+        // B-1a: ONE clone per SOURCE BURROW, not per VMA. A protect (or a D-3b
+        // window) splits a lazy mapping into pieces that all name one Burrow,
+        // and a clone walks the WHOLE source, taking a share on every resident
+        // page -- so a clone per piece would leave the child holding k shares
+        // of every page while being one holder: the count lies from the fork
+        // onwards (cow.tla::BUGGY_CLONE_PER_PIECE). The first piece mints and
+        // parks its clone on the source's cursor; later pieces map that clone,
+        // taking only a mapping ref and charging nothing (the resident charge
+        // below rides the mint). The cursors are cleared before src->lock is
+        // dropped, whatever the outcome.
+        if (backing->clone_cursor) {
+            backing = backing->clone_cursor;
+        } else {
+            minted = burrow_clone_cow(backing);
+            if (!minted) return false;
+            backing->clone_cursor = minted;
+            backing = minted;
+        }
+        flags = VMA_FLAG_COW;
         break;
     case BURROW_TYPE_FILE:
         // Shared, not cloned -- see the header. A writable FILE VMA cannot exist
-        // (REVENANT's dispatch gate admits only non-writable segments), so this is
-        // a fail-closed check on an impossible shape rather than a live path.
-        if (src_vma->prot & VMA_PROT_WRITE) return false;
+        // (REVENANT's dispatch gate admits only non-writable segments, and a FILE
+        // ceiling never carries WRITE), so this is a fail-closed check on an
+        // impossible shape rather than a live path.
+        if (vma_prot_max(src_vma) & VMA_PROT_WRITE) return false;
         break;
     case BURROW_TYPE_ANON:
         // Eager anon is ONE indivisible buddy block, so there is no per-page
         // ownership for a break to take and a WRITABLE one cannot be COW-forked:
         // refuse the fork whole rather than hand the child the wrong sharing
-        // semantics. But a READ-ONLY one has nothing to break -- neither Proc can
-        // ever write it (there is no prot-mutation syscall; I-12) -- so it is
-        // shared outright, exactly as read-only FILE text above is.
+        // semantics. But one that can NEVER be written has nothing to break, so
+        // it is shared outright, exactly as read-only FILE text above is.
+        //
+        // "Can never be written" is the CEILING, not the current prot (B-1a):
+        // a mapping minted RW and protected down to R can be raised back by
+        // either side, and a share of it would then be one address space's
+        // writes landing in another's -- the I-44 violation. So the test is on
+        // vma_prot_max, which nothing raises.
         //
         // This is not a corner case, it is EVERY PROC (#136). The vDSO clock page
-        // is a single kernel-owned eager-anon page mapped VMA_PROT_READ into every
-        // address space by exec_map_vdso, so without this arm addrspace_clone
-        // refuses every REAL fork and succeeds only on the synthetic spaces the
-        // unit tests build for themselves.
-        if (src_vma->prot & VMA_PROT_WRITE) return false;
+        // is a single kernel-owned eager-anon page mapped VMA_PROT_READ (ceiling
+        // R) into every address space by exec_map_vdso, so without this arm
+        // addrspace_clone refuses every REAL fork and succeeds only on the
+        // synthetic spaces the unit tests build for themselves.
+        if (vma_prot_max(src_vma) & VMA_PROT_WRITE) return false;
         break;
     default:
         // MMIO and DMA (I-5 / I-34 hardware). Refused whatever the prot: mapping
@@ -180,13 +201,19 @@ static bool clone_one_vma(struct AddrSpace *dst, bool exempt,
     struct Vma *nv = vma_alloc(src_vma->vaddr_start, src_vma->vaddr_end,
                                src_vma->prot, backing, src_vma->burrow_offset);
     if (!nv) {
-        if (minted) burrow_unref(minted);
+        // The SOURCE's cursor, not `backing`'s: `backing` was rebound to the
+        // clone above, so clearing through it wrote the clone's own (already
+        // NULL) slot and left the source naming a Burrow the unref frees. The
+        // sweep in addrspace_clone masked it (audit F3).
+        if (minted) { src_vma->burrow->clone_cursor = NULL; burrow_unref(minted); }
         return false;
     }
-    nv->flags = flags;
+    // The child's mapping inherits the parent's CEILING (vma_alloc set it to the
+    // current prot, which may be lower after a protect), plus the COW routing.
+    nv->flags = flags | (src_vma->flags & VMA_FLAG_MAX_MASK);
     if (vma_insert_in(dst, exempt, nv) != 0) {
         vma_free(nv);                   // symmetric: releases the mapping ref
-        if (minted) burrow_unref(minted);
+        if (minted) { src_vma->burrow->clone_cursor = NULL; burrow_unref(minted); }
         return false;
     }
 
@@ -254,6 +281,13 @@ struct AddrSpace *addrspace_clone(struct AddrSpace *src, bool exempt) {
     bool ok = true;
     for (struct Vma *v = src->vmas; v && ok; v = v->next)
         ok = clone_one_vma(dst, exempt, v);
+
+    // B-1a: retire the per-Burrow dedupe cursors clone_one_vma parked, on every
+    // outcome, while src->lock still excludes the next clone of this space. A
+    // cursor that outlived the clone would name a Burrow the failed child's
+    // drain may already have freed.
+    for (struct Vma *v = src->vmas; v; v = v->next)
+        if (vma_is_cow(v)) v->burrow->clone_cursor = NULL;
 
     // PHASE 3 -- flag the parent, on success only, so a FAILED fork leaves it
     // semantically intact: unflagged, so the faults phase 1 just cost it install

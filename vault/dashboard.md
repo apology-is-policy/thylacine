@@ -134,6 +134,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-09-23 [[chg-2026-09-23-b1a-permission-ceiling]] — B-1a: the permission ceiling -- SYS_BURROW_RESERVE 124 / SYS_BURROW_PROTECT 125, the multi-mapping reprotect, the fork's per-Burrow clone dedupe, the phenotype mprotect row, the lazy-piece detach refund
 - 2026-09-22 [[chg-2026-09-22-arch81-scripture]] — ARCH 8.12: the design for syscall bodies with interrupts on, landed as scripture before any code
 - 2026-09-22 [[chg-2026-09-22-poll-preemption-point]] — poll crosses a preemption point each re-loop: the masked CPU gets a window the noise cannot close
 - 2026-09-21 [[chg-2026-09-21-boosty-b0-jsc]] — Boosty B-0: JavaScriptCore runs on Thylacine (JIT off) -- the port wiring
@@ -141,5 +142,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-09-21 [[chg-2026-09-21-pouch-b0-libc]] — Pouch 0033-0041: nine libc patches a JavaScript engine shook out -- lies, not errors
 - 2026-09-21 [[chg-2026-09-21-srvconn-two-endpoint-poll]] — poll: a wake is a hint (the re-arm), and a /srv connection is pollable from BOTH endpoints with a list walk on every ring mutation
 - 2026-09-18 [[chg-2026-09-18-npxf-host]] — Supported OpenSSL npxf hosts and pending graphical SAK ownership review
-- 2026-09-18 [[chg-2026-09-18-npxf-verification]] — Published npxf CI and actual Halcyon manual capture
 <!-- generated:end -->

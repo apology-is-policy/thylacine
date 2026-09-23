@@ -1,0 +1,120 @@
+A-6 (IDENTITY-DESIGN section 9.10) -- the identity calls stop lying.
+
+musl's five identity calls are CANNOT-FAIL by contract: each is literally
+`return __syscall(SYS_x);` with no error path. Patch 0001 parks __NR_getuid /
+geteuid / getgid / getegid at the 0xFFFF unimplemented-syscall sentinel, so the
+sentinel's -ENOSYS was cast straight to uid_t and every Pouch program was told
+its uid is 0xFFFFFFDA. Not an error it could check -- a LIE IT CANNOT DETECT.
+
+This is a DIFFERENT SHAPE from the 0032/0033/0034/0037 family, and the reason
+matters because it is why no sweep had found it. Those are an unchecked WRAPPER
+call whose out-struct the caller then reads; 0037's stated method is "every
+libc-internal call to a wrapper over a sentinel whose RETURN VALUE IS IGNORED".
+Here the return is not ignored -- the return IS the lie -- so a sweep scoped to
+ignored returns is structurally blind to it. The shape-2 sweep (parse the
+patched syscall.h.in into parked vs real, then find every `return __syscall(`
+on a parked number, then judge each by whether the CALLER can tell) found 9
+sites; these four are them minus getppid, fcntl (dead under the sentinel) and a
+futex helper whose caller consumes the value AS an error code.
+
+The kernel has had the truthful answers all along -- SYS_GETUID=73 returns
+Proc.principal_id and SYS_GETGID=74 returns Proc.primary_gid (A-1a) -- and the
+NATIVE substrate already used them (libthyla-rs's t_getuid / t_getgid issue
+exactly those). So the asymmetry this closes is: the native substrate told the
+truth and the POSIX boundary-line lied. CL-1a wired getpid through this same
+seam (SYS_thyla_getpid=72, patch 0024); this is that move for identity.
+
+effective == real, and that is a FINDING rather than a simplification: there is
+no setuid, no seteuid and no effective-uid field anywhere in the kernel, which
+is invariant I-22 holding by construction (no identity carries ambient super-
+authority; elevation only via the legate). So geteuid()==getuid() and
+getegid()==getgid() are the TRUE answers here, not approximations of a
+distinction Thylacine has not built.
+
+RAW principal, not vivarium_map_uid's root-mapped form: SO_PEERCRED (patch
+0006) and t_stat.uid are already raw, and the consumers compare against those.
+
+getppid stays PARKED -- it is the one of the five with no kernel syscall behind
+it and it has zero callers in the tree (measured, with a positive control on
+getuid). Left a known lie deliberately; the options are recorded in
+IDENTITY-DESIGN section 9.10 rather than decided here.
+
+diff --color -ruN musl-base/src/internal/_pouch_fs.h b/src/internal/_pouch_fs.h
+--- a/src/internal/_pouch_fs.h	2026-09-22 10:00:00
++++ b/src/internal/_pouch_fs.h	2026-09-22 10:00:00
+@@ -28,7 +28,9 @@
+ #define SYS_thyla_walk_create  54   /* (parent_fd, name, len, omode, perm) */
+ #define SYS_thyla_chdir        69   /* (path, len) */
+ #define SYS_thyla_getcwd       70   /* (buf, len) -> len */
+ #define SYS_thyla_getpid       72   /* () -> pid */
++#define SYS_thyla_getuid       73   /* () -> principal_id (A-1a; NEVER fails) */
++#define SYS_thyla_getgid       74   /* () -> primary_gid  (A-1a; NEVER fails) */
+ 
+ /* SYS_open sentinels / omode (mirror kernel/include/thylacine/syscall.h). */
+ #define POUCH_FROM_ROOT   ((long)-1)   /* SYS_WALK_OPEN_FROM_ROOT */
+diff --color -ruN musl-base/src/unistd/getuid.c b/src/unistd/getuid.c
+--- a/src/unistd/getuid.c	2026-09-22 10:00:00
++++ b/src/unistd/getuid.c	2026-09-22 10:00:00
+@@ -1,7 +1,12 @@
++/* pouch boundary-line (A-6): SYS_getuid = 0xFFFF -> Thylacine SYS_GETUID (73),
++ * which returns Proc.principal_id and cannot fail -- matching musl's
++ * cannot-fail contract for this call. Before this the sentinel's -ENOSYS was
++ * cast to uid_t and every caller was told 0xFFFFFFDA. */
+ #include <unistd.h>
+ #include "syscall.h"
++#include "_pouch_fs.h"
+ 
+ uid_t getuid(void)
+ {
+-	return __syscall(SYS_getuid);
++	return __syscall(SYS_thyla_getuid);
+ }
+diff --color -ruN musl-base/src/unistd/geteuid.c b/src/unistd/geteuid.c
+--- a/src/unistd/geteuid.c	2026-09-22 10:00:00
++++ b/src/unistd/geteuid.c	2026-09-22 10:00:00
+@@ -1,7 +1,13 @@
++/* pouch boundary-line (A-6): effective == real on Thylacine, and that is a
++ * FINDING, not a shortcut -- there is no setuid, no seteuid and no effective-
++ * uid field anywhere in the kernel, which is invariant I-22 holding by
++ * construction (elevation only via the legate). A future setuid-shaped
++ * mechanism would be an I-22 violation before it was an ABI change. */
+ #include <unistd.h>
+ #include "syscall.h"
++#include "_pouch_fs.h"
+ 
+ uid_t geteuid(void)
+ {
+-	return __syscall(SYS_geteuid);
++	return __syscall(SYS_thyla_getuid);
+ }
+diff --color -ruN musl-base/src/unistd/getgid.c b/src/unistd/getgid.c
+--- a/src/unistd/getgid.c	2026-09-22 10:00:00
++++ b/src/unistd/getgid.c	2026-09-22 10:00:00
+@@ -1,7 +1,11 @@
++/* pouch boundary-line (A-6): SYS_getgid = 0xFFFF -> Thylacine SYS_GETGID (74),
++ * which returns Proc.primary_gid and cannot fail. See getuid.c for why the
++ * sentinel's value was a lie rather than an error. */
+ #include <unistd.h>
+ #include "syscall.h"
++#include "_pouch_fs.h"
+ 
+ gid_t getgid(void)
+ {
+-	return __syscall(SYS_getgid);
++	return __syscall(SYS_thyla_getgid);
+ }
+diff --color -ruN musl-base/src/unistd/getegid.c b/src/unistd/getegid.c
+--- a/src/unistd/getegid.c	2026-09-22 10:00:00
++++ b/src/unistd/getegid.c	2026-09-22 10:00:00
+@@ -1,7 +1,10 @@
++/* pouch boundary-line (A-6): effective == real, for the same I-22 reason
++ * geteuid.c records. */
+ #include <unistd.h>
+ #include "syscall.h"
++#include "_pouch_fs.h"
+ 
+ gid_t getegid(void)
+ {
+-	return __syscall(SYS_getegid);
++	return __syscall(SYS_thyla_getgid);
+ }

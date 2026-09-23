@@ -58,6 +58,7 @@
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 #include <thylacine/burrow.h>
+#include <thylacine/errno.h>           // B-1a: burrow_protect reports -T_E_*
 
 #include "../mm/phys.h"
 #include "../mm/slub.h"
@@ -1127,6 +1128,45 @@ int burrow_map_fixed(struct Proc *p, struct Burrow *v, u64 vaddr, size_t length,
     if (!p) return -1;
     return burrow_map_fixed_in(p->as, proc_resource_exempt(p), v, vaddr, length,
                                prot, burrow_offset, out_free);
+}
+
+// B-1a: the permission ceiling's mutation. See burrow.h for the contract and
+// vma.h for the all-or-nothing argument.
+int burrow_protect_in(struct AddrSpace *as, bool exempt,
+                      u64 vaddr, size_t length, u32 prot, bool seal) {
+    if (!as)                            return -(int)T_E_INVAL;
+    if (length == 0)                    return -(int)T_E_INVAL;
+    if (vaddr  & (PAGE_SIZE - 1))       return -(int)T_E_INVAL;
+    if (length & (PAGE_SIZE - 1))       return -(int)T_E_INVAL;
+    if (vaddr + length < vaddr)         return -(int)T_E_INVAL;
+    if (vaddr + length > USER_VA_TOP)   return -(int)T_E_NOMEM;   // never mapped
+
+    // Every refusal BEFORE the uninstall, so a refused call costs the range's
+    // resident pages nothing -- not even a re-fault.
+    int rc = vma_reprotect_precheck_in(as, vaddr, (u64)length, prot);
+    if (rc != 0) return rc;
+    // A no-op (every mapping already at `prot`, every ceiling too if sealing)
+    // costs the range nothing: no uninstall, no cut, no headroom (audit F6).
+    if (vma_reprotect_is_noop_in(as, vaddr, (u64)length, prot, seal)) return 0;
+    // The I-32 headroom for the cut's pieces, BEFORE the uninstall: a cap hit
+    // refuses changing nothing, not even a re-fault.
+    rc = vma_reprotect_headroom_in(as, exempt, vaddr, (u64)length);
+    if (rc != 0) return rc;
+
+    // Uninstall FIRST (the D-3b rule; addrspace_clone's phase-1 argument): a
+    // peer thread holding an installed writable PTE stores in hardware with no
+    // fault and no lock, so the PTE must be gone before the prot that
+    // justified it is. mmu_uninstall_user_range allocates nothing and cannot
+    // fail; idempotent on never-faulted pages. asid arg vestigial (all-ASID
+    // tlbi vaae1is).
+    (void)mmu_uninstall_user_range(as->pgtable_root, 0, vaddr, vaddr + length);
+
+    return vma_reprotect_range_in(as, exempt, vaddr, (u64)length, prot, seal);
+}
+
+int burrow_protect(struct Proc *p, u64 vaddr, size_t length, u32 prot, bool seal) {
+    if (!p) return -(int)T_E_INVAL;
+    return burrow_protect_in(p->as, proc_resource_exempt(p), vaddr, length, prot, seal);
 }
 
 int burrow_unmap_reporting(struct Proc *p, u64 vaddr, size_t length,

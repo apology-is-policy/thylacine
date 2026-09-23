@@ -286,6 +286,18 @@ struct Burrow {
     // Burrow's free was non-sleeping (ANON free_pages); D-3 put a 9P-backed
     // FILE Burrow at a guest-detachable address, which is what made it live.
     struct Burrow   *deferred_free_next;
+
+    // B-1a: the fork's per-source dedupe cursor. addrspace_clone mints ONE
+    // clone per SOURCE Burrow, not per VMA: once a protect (or a D-3b window)
+    // has split a lazy mapping into pieces, several VMAs of one address space
+    // name one Burrow, and a clone per VMA would take one COW share per PIECE
+    // on every resident page -- the count would lie from the fork onwards
+    // (cow.tla::BUGGY_CLONE_PER_PIECE; ShareIsHolderCount). The first piece
+    // mints and parks the clone here; later pieces of the same Burrow map it.
+    // Meaningful ONLY under the source address space's lock, for the duration
+    // of one addrspace_clone, which clears every cursor it set before it
+    // unlocks -- NULL at all other times, and never read by anything else.
+    struct Burrow   *clone_cursor;
 };
 
 _Static_assert(__builtin_offsetof(struct Burrow, magic) == 0,
@@ -456,10 +468,13 @@ struct Burrow *burrow_create_code(size_t size);
 // turn forces the share count onto the PAGE rather than onto a slot.
 //
 // The clone preserves the property every other ANON_LAZY path already relies on:
-// ONE Burrow, ONE mapping, ONE address space (burrow_share_into admits only ANON
-// and the DMA weave, and SYS_BURROW_ATTACH_LAZY drops the construction handle, so
-// no ANON_LAZY Burrow is reachable from two address spaces). That is what lets the
-// break's slot swap be serialized by the faulting address space's OWN lock.
+// ONE Burrow, ONE address space (burrow_share_into admits only ANON and the DMA
+// weave, and SYS_BURROW_ATTACH_LAZY drops the construction handle, so no
+// ANON_LAZY Burrow is reachable from two address spaces). Since B-1a a Burrow
+// may be mapped by SEVERAL VMAs of that one address space -- a protect splits a
+// mapping into pieces -- and every one of them faults under the same as->lock,
+// which is still what lets the break's slot swap be serialized by the faulting
+// address space's OWN lock.
 //
 // NON-resident slots stay NULL in the clone, and that is correct rather than lazy:
 // a slot with no page has never been written, so it reads as zero -- and each side
@@ -700,6 +715,30 @@ int burrow_map_fixed(struct Proc *p, struct Burrow *v, u64 vaddr, size_t length,
 int burrow_map_fixed_in(struct AddrSpace *as, bool exempt, struct Burrow *v,
                         u64 vaddr, size_t length, u32 prot, u64 burrow_offset,
                         struct Burrow **out_free);
+
+// B-1a: burrow_protect -- the permission ceiling's one mutation (ARCH 6.5;
+// SYS_BURROW_PROTECT). Move [vaddr, vaddr+length) to `prot` in {none, R, RW}
+// under each mapping's ceiling, `seal` lowering the ceiling to `prot`. The D-3b
+// rule in one locked step: every refusal is decided first
+// (vma_reprotect_precheck_in, nothing mutated), then the range's leaf PTEs are
+// uninstalled -- necessarily BEFORE the prot changes, since hardware resolves a
+// PTE without taking as->lock and a writable PTE must not outlive the
+// permission that justified it (cow.tla::BUGGY_PROTECT_KEEPS_PTE) -- then the
+// VMAs are cut, changed in place and merged (vma_reprotect_range_in). A
+// resident page costs one re-fault and nothing else: its slot and its charge
+// stay (Linux keeps a PROT_NONE mapping's contents; SYS_BURROW_DECOMMIT is how
+// pages are returned).
+//
+// Returns 0 or -T_E_* (the vma.h contract: INVAL / NOMEM / ACCES). The one
+// failure after the uninstall -- no memory for a split piece -- leaves every
+// prot unchanged and merely costs the range's resident pages a re-fault.
+//
+// Caller holds as->lock (burrow_protect: p->as->lock), exactly as for
+// burrow_map. Any user mapping the precheck admits, in any region: RELRO lives
+// in the image, thread stacks in the burrow window.
+int burrow_protect(struct Proc *p, u64 vaddr, size_t length, u32 prot, bool seal);
+int burrow_protect_in(struct AddrSpace *as, bool exempt,
+                      u64 vaddr, size_t length, u32 prot, bool seal);
 
 // burrow_unmap: remove the VMA at user-VA range [vaddr, vaddr + length)
 // from Proc `p`. Calls vma_remove + vma_free (which calls

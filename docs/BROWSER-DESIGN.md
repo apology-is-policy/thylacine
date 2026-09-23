@@ -390,6 +390,20 @@ differently: guard regions as *never-committed reservation holes* (a lazy
 region that refuses to fault in), which covers (d) without any mutation.
 Audit-bearing (page fault + W^X row, overcommit row, `burrow_attach` row).
 
+**DECIDED 2026-09-23 (the B-1 scripture; ARCH 6.5 "The permission ceiling",
+"Range detach", "Capacity", "Dynamic loading"; `dec-2026-09-23-memory-surface-and-loader`).**
+(d) and (e) are served by a ceiling-bounded `burrow_protect` + `PROTECT_SEAL`
+with no capability on the call; (a) by `burrow_reserve` with a prot and an
+alignment; (b) by the `madvise` wiring; (c) by range detach. The monotone-only
+alternative was rejected by measurement, not by taste: release JavaScriptCore
+raises none -> RW inside its own reservations for resizable `ArrayBuffer` and
+shared WebAssembly memory (`ArrayBuffer.cpp:595/611`, `WasmMemory.cpp:234/378`),
+which B-0's probes never exercised. The same vote set the memory bar for both
+substrates (never refused while free memory exists; relinquished memory returns),
+the I-32 default (RAM minus a TCB reserve), the native allocator (`dlmalloc-rs`)
+and the loader model (dynamic Pouch, static by default). Section 9's B-1 rows
+carry the sequence.
+
 **P2. A channel that can carry memory.** Needed by: WebKit, Ladybird, Gecko.
 Not by single-process Servo or NetSurf. Engines want two things: a
 bidirectional message channel between related processes (we have `/srv` byte
@@ -600,7 +614,12 @@ kernel phase is audit-bearing and preceded by its own scripture commit.
 | Phase | What | Exit |
 |---|---|---|
 | **B-0** | **JavaScriptCore alone** (`JSCOnly` port, no JIT) cross-built for Thylacine. This is WebKit's own recommended first step for a new OS, and it answers the operator's JIT question early and cheaply. | `jsc` runs test262 samples and a benchmark on the device; the list of P1 gaps it actually hit, measured |
-| **B-1** | P1, scoped by what B-0 measured. Scripture first if I-12's wording moves. | the allocators run unmodified or with a Thylacine arm; SMP gate; audit |
+| **B-1** | P1, scoped by what B-0 measured; **ratified 2026-09-23 and split into five gated chunks after one scripture commit** (ARCH 6.5): | |
+| B-1a | permissions: `burrow_reserve` (prot, alignment) + `burrow_protect` + `PROTECT_SEAL`; the phenotype's `mprotect` row and exact `PROT_NONE`/`PROT_READ` mints; the split x COW interaction modelled in `cow.tla` first. Audit-bearing. | guard-page, RELRO and grow/shrink probes each with a RED; a deny-path probe (`burrow_protect(X)` refused before lookup); SMP gate; audit closed |
+| B-1a' | capacity: range detach; the charged on-touch sparse `filepages` (both per-reservation caps lifted); the I-32 default = RAM minus a boot-sized reserve; the >256 MiB detach refusal. Audit-bearing. | a 4 GiB reservation attached, touched, trimmed, detached; the reserve holds under a user-Proc memory bomb; SMP gate; audit closed |
+| B-1b | Pouch: `mprotect` / `madvise` / partial `munmap` / real pthread guards; the main-thread stack to 8 MiB with its extent in auxv. | `pouch-hello-*` legs incl. a pthread guard FAULT; the allocate-free-measure witness RED on the old libc |
+| B-1c | native: `dlmalloc-rs` over a Thylacine platform trait replaces the fixed 4 MiB heap; the witness on both substrates. | the kernel's page count rises past 4 MiB and FALLS after free, the trim sabotaged once |
+| B-1d | dlopen: PT_INTERP for native execs; `burrow_map_file`; the driver's `-shared` / PIE / `-dynamic-linker`; `libc.so` in the sysroot; ldso's boundary-line; the handle form designed. Lands before B-3. | a Pouch-built `.so` loaded by a Pouch host on the device; the deny paths (an `MNOEXEC` mount; a name outside the namespace) |
 | **B-2** | The JIT: separated WX heap on `SYS_JIT_CREATE`; `CAP_JIT` clearance for `jsc`. | same benchmark with JIT tiers; a deny-path probe (no `CAP_JIT` -> interpreter, never RWX); audit |
 | **B-3** | P3: the libraries, ICU first. | each library's own tests under Pouch |
 | **B-4** | P2: design document, then the primitive, then WebKit's `Platform/IPC` + `SharedMemory` backend. | two-process message + shared-bitmap witness; audit |
@@ -676,7 +695,10 @@ it after B-5.
 ### Open questions this document does not settle
 
 - **O-1** P1's shape: reservation holes versus an I-12 wording amendment.
-  Decided in B-1's scripture commit, informed by B-0's measurements.
+  **RESOLVED 2026-09-23: the I-12 wording moves by one clause (the one
+  permission-mutation call can neither add X nor exceed a mint-time ceiling);
+  guards are ranges sealed at none, not holes -- the same mechanism, named by
+  its ceiling. ARCH 6.5 "The permission ceiling".**
 - **O-2** Which WebKit line to track: `main` (where the PlayStation port
   lives) or Igalia's stable branches (which carry the security backports but
   are only tested for GTK and WPE). To be measured at B-5.

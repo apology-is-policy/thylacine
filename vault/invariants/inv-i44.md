@@ -7,7 +7,7 @@ guards: [sub-kernel-addrspace]
 validated-by: [spec-cow, gate-smp]
 strength: spec
 created: 2026-08-06
-updated: 2026-08-06
+updated: 2026-09-23
 ---
 ## Statement
 
@@ -59,15 +59,47 @@ slot-indexed count describes diverge, so the *free decision* computed from
 it would free a page another address space still maps.
 
 The **fork refuses** anything it cannot give correct sharing semantics —
-writable eager-anon (no per-page ownership to break), MMIO and DMA at any
-prot (a device window is an authority transfer, not a copy), and
-cross-Proc shared-in mappings. Refusing is what keeps the invariant from
+eager-anon with WRITE in its ceiling (no per-page ownership to break), MMIO
+and DMA at any prot (a device window is an authority transfer, not a copy),
+and cross-Proc shared-in mappings. Refusing is what keeps the invariant from
 being defended by a mechanism that does not exist for those kinds.
+
+Three more mechanisms since B-1a (2026-09-23), each with its own
+counterexample cfg:
+
+- **The eager-anon share keys on the CEILING, never the current prot.** An
+  eager mapping is shared across a fork only when `vma_prot_max` excludes
+  WRITE. Since `SYS_BURROW_PROTECT` exists, "read-only now" is not "read-only
+  forever": a mapping minted RW and protected to R can be raised back by
+  either side, and a share of it would be one address space's writes landing
+  in another's. The vDSO's ceiling is R, so it still shares; an eager attach
+  protected down to R is refused
+  (`cow.clone_refuses_eager_anon_with_writable_ceiling`).
+- **One COW clone per source Burrow.** A protect (or a MAP_FIXED window)
+  splits a lazy mapping into pieces naming one Burrow; a clone per piece would
+  give the child k shares of every page while being one holder, so `share`
+  would exceed the holder count from the fork onwards (`ShareIsHolderCount`,
+  `cow_buggy_clone_per_piece` — violated in the initial state).
+  `addrspace_clone` dedupes through `Burrow.clone_cursor`, cleared before the
+  source lock drops on every outcome.
+- **A writable PTE never outlives the permission that justified it.**
+  `burrow_protect_in` uninstalls the range's leaf PTEs before any `prot`
+  changes — the same phase-1 argument as the clone: hardware resolves a PTE
+  without the lock (`NoWritablePteBeyondProt`, `cow_buggy_protect_keeps_pte`);
+  and the break fires only on a mapping that is RW (`BreakOnlyWhenWritable`,
+  `cow_buggy_fault_ignores_prot`), which is the fault dispatcher's step 2.
+  The R-analog is the FILE page-in, whose admission and install span an
+  unlock: it re-runs the admission after the sleep, so a protect landing
+  mid-page-in never yields a readable PTE on a none page (the B-1a audit's
+  F1, [[sub-kernel-fault]]).
 
 ## Validation
 
 [[spec-cow]], model-first, with a clean cfg and three counterexamples —
-one per property, so each failure names its own mechanism. `NoAliasedWritable`,
+one per property, so each failure names its own mechanism — and, since B-1a,
+a second clean cfg (`cow_protect`, 10636 states under `SpecProtect`) with
+three more counterexamples behind `ALLOW_PROTECT`, additive by measurement:
+the first four cfgs reproduce their exact state counts with the switch off. `NoAliasedWritable`,
 `NoUseAfterFree` and `NoDoubleFree` are invariants; the vfork property is
 **liveness**, and that asymmetry is load-bearing: the lost-wake bug leaves
 safety entirely intact and produces a hang, so a spec that checked only

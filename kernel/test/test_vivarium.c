@@ -175,13 +175,12 @@ void test_vivarium_rejects_are_deliberate(void) {
                    "munmap is T2, never T1 -- burrow_detach is exact-match only");
     TEST_EXPECT_EQ((u64)out.nr, (u64)0xDEADu, "a T2 verdict leaves out untouched");
 
-    // mprotect is recorded rather than left to the default. It would reach
-    // ENOSYS anyway via the fallthrough, but the file's standard is that a
-    // number never considered and one considered-and-rejected are different
-    // facts. Thylacine has NO prot-mutation syscall (I-12), and musl tolerates
-    // exactly this (mallocng/malloc.c:92 checks `errno != ENOSYS`).
+    // mprotect is TIER2 since B-1a: a translated row over SYS_BURROW_PROTECT,
+    // the permission ceiling's one mutation (ARCH 6.5). Until then it was the
+    // recorded ENOSYS musl tolerated (mallocng/malloc.c:92 checks `errno !=
+    // ENOSYS`), because no prot-mutation syscall existed.
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_MPROTECT, args, &out),
-                   (int)VIV_ENOSYS, "mprotect is ENOSYS -- no prot-mutation syscall exists");
+                   (int)VIV_TIER2, "mprotect is TIER2 -- SYS_BURROW_PROTECT (B-1a)");
 
     // brk is the one honest ENOSYS: there is no break pointer to move at all, and
     // both musl and glibc fall back to mmap when brk reports unavailable.
@@ -1015,15 +1014,17 @@ void test_vivarium_mmap_fixed_domain(void) {
     TEST_EXPECT_EQ((int)vivarium_mmap_fixed_anon_decide(addr, rw, pfa, (u64)-1, 0),
                    (int)VIV_TRANSLATED, "RW private fixed anon is the measured shape");
 
-    // PROT_NONE declines HERE, and that DIVERGES from the non-fixed anon arm,
-    // which degrades it to writable. A fixed PROT_NONE over an existing mapping
-    // is a guard; answering it with a writable page is a hole, not a degradation.
+    // PROT_NONE is admitted on BOTH anon arms since B-1a, and minted exactly
+    // (none under an RW ceiling): a fixed PROT_NONE over an existing mapping is
+    // a guard, and a guard that faults is what it now gets. Until the raise
+    // existed the fixed arm declined -- a writable page where a guard was asked
+    // for would have been a hole, not a degradation.
     TEST_EXPECT_EQ((int)vivarium_mmap_decide(addr, 0, (u64)(VIV_MAP_PRIVATE |
                                                             VIV_MAP_ANONYMOUS),
                                              (u64)-1, 0),
-                   (int)VIV_TRANSLATED, "the NON-fixed anon arm does admit PROT_NONE");
+                   (int)VIV_TRANSLATED, "the NON-fixed anon arm admits PROT_NONE");
     TEST_EXPECT_EQ((int)vivarium_mmap_fixed_anon_decide(addr, 0, pfa, (u64)-1, 0),
-                   (int)VIV_FORWARD, "but the FIXED anon arm refuses it -- a guard");
+                   (int)VIV_TRANSLATED, "and so does the FIXED anon arm -- a real guard (B-1a)");
 
     TEST_EXPECT_EQ((int)vivarium_mmap_fixed_anon_decide(addr, rx, pfa, (u64)-1, 0),
                    (int)VIV_FORWARD, "PROT_EXEC declines on the anon arm (I-42/CAP_JIT)");
@@ -3278,7 +3279,38 @@ void test_vivarium_startup_batch_rows(void) {
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_BRK, args, &out),
                    (int)VIV_ENOSYS, "brk stays ENOSYS -- musl falls to mmap");
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_MPROTECT, args, &out),
-                   (int)VIV_ENOSYS, "mprotect stays ENOSYS -- I-12");
+                   (int)VIV_TIER2, "mprotect is TIER2 since B-1a (the ceiling keeps I-12)");
+}
+
+// B-1a: the mprotect domain is the prot word alone.
+void test_vivarium_mprotect_domain(void);
+void test_vivarium_mprotect_domain(void) {
+    const u64 a = 0x10000ull, l = 0x1000ull;
+    TEST_EXPECT_EQ((int)vivarium_mprotect_decide(a, l, (u64)VIV_PROT_NONE),
+                   (int)VIV_TRANSLATED, "PROT_NONE translates (a guard, or a release)");
+    TEST_EXPECT_EQ((int)vivarium_mprotect_decide(a, l, (u64)VIV_PROT_READ),
+                   (int)VIV_TRANSLATED, "PROT_READ translates");
+    TEST_EXPECT_EQ((int)vivarium_mprotect_decide(a, l, (u64)(VIV_PROT_READ | VIV_PROT_WRITE)),
+                   (int)VIV_TRANSLATED, "PROT_READ|PROT_WRITE translates");
+    TEST_EXPECT_EQ((int)vivarium_mprotect_decide(a, l, (u64)VIV_PROT_WRITE),
+                   (int)VIV_TRANSLATED, "PROT_WRITE alone translates (the shell maps it RW)");
+    // X is INSIDE the domain: the target answers EACCES ("X is never a target"),
+    // and the guest must see that errno, not ENOSYS.
+    TEST_EXPECT_EQ((int)vivarium_mprotect_decide(a, l, (u64)(VIV_PROT_READ | VIV_PROT_EXEC)),
+                   (int)VIV_TRANSLATED, "PROT_EXEC is in the domain -- refused downstream with EACCES");
+    // Bits we cannot honour decline.
+    TEST_EXPECT_EQ((int)vivarium_mprotect_decide(a, l, (u64)(VIV_PROT_READ | VIV_PROT_BTI)),
+                   (int)VIV_FORWARD, "PROT_BTI declines");
+    TEST_EXPECT_EQ((int)vivarium_mprotect_decide(a, l, (u64)(VIV_PROT_READ | VIV_PROT_MTE)),
+                   (int)VIV_FORWARD, "PROT_MTE declines");
+    TEST_EXPECT_EQ((int)vivarium_mprotect_decide(a, l, (u64)(VIV_PROT_READ | VIV_PROT_GROWSDOWN)),
+                   (int)VIV_FORWARD, "PROT_GROWSDOWN declines");
+    // addr and len are not the domain's business (the shell answers them).
+    TEST_EXPECT_EQ((int)vivarium_mprotect_decide(a + 1, 0, (u64)VIV_PROT_READ),
+                   (int)VIV_TRANSLATED, "addr/len are semantic, not domain");
+    // The word narrows to 32 bits like every Linux int argument.
+    TEST_EXPECT_EQ((int)vivarium_mprotect_decide(a, l, (1ull << 32) | (u64)VIV_PROT_READ),
+                   (int)VIV_TRANSLATED, "high bits of a 64-bit register are not the int");
 }
 
 void test_vivarium_writev_domain(void);

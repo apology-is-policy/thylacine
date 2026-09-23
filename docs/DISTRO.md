@@ -814,6 +814,13 @@ level only: an interpreter that itself carries PT_INTERP is refused. Both
 entries route here (the in-container execve T2 shell and the runner's ENTRY
 spawn), so there is ONE mechanism.
 
+**AMENDED 2026-09-23 (ARCH §6.5 "Dynamic loading"; lands at B-1d): the
+`PHENO_LINUX` gate is lifted to every phenotype — a native Pouch binary carrying
+PT_INTERP loads its interpreter the same way (resolved through its own
+namespace, one level), because the dynamic loader is the same object under both
+ABIs. The Linux-phenotype behaviour is unchanged; `docs/POUCH-DESIGN.md` §2.2
+carries the userspace half.**
+
 **The argv shape**, corrected 2026-08-10 from the 08-05 vote's
 `[interp_path, orig_path, orig argv[1..]]`:
 

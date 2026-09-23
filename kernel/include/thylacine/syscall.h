@@ -2298,6 +2298,44 @@ enum {
     // Open-file nonblocking mode, shared by duplicate handles; fd, boolean.
     SYS_SET_NONBLOCK = 123,
 
+    // B-1a -- the permission ceiling (ARCH 6.5 "The permission ceiling",
+    // operator-ratified 2026-09-23; scripture 96f24314). Two new syscalls rather
+    // than flags on SYS_BURROW_ATTACH_LAZY, per the 2026-06-23 blast-radius
+    // precedent. Both answer -T_E_* (never a bare -1), like every syscall
+    // minted since the errno registry.
+    //
+    // SYS_BURROW_RESERVE(length, prot, align_log2) -> vaddr / -errno. The lazy
+    //   reservation with MINT-TIME attributes: a demand-zero anonymous region in
+    //   the burrow-attach window, minted at prot in {none, R, RW}
+    //   (BURROW_PROT_*) under a ceiling of RW, its base aligned to
+    //   2^align_log2 (0 = page; else 12..30, Fuchsia's ZX_VM_ALIGN_*). The
+    //   Linux PROT_NONE-reserve-then-commit idiom minted exactly instead of
+    //   degraded to RW, and the alignment retires an allocator's
+    //   over-map-and-trim. Same page-rounding and I-32 posture as
+    //   SYS_BURROW_ATTACH_LAZY (pages charged at fault; the VMA count at
+    //   reserve). Refused: prot with X (-EACCES: never a target), W-without-R
+    //   or other bits / align out of range / length 0 (-EINVAL), length >
+    //   BURROW_RESERVE_MAX / no aligned gap / OOM / VMA cap (-ENOMEM).
+    SYS_BURROW_RESERVE = 124,  // arg: length (x0), prot (x1), align_log2 (x2)
+
+    // SYS_BURROW_PROTECT(vaddr, length, prot, flags) -> 0 / -errno. Move every
+    //   page of [vaddr, vaddr+length) to prot in {none, R, RW}, subject to each
+    //   mapping's mint-time ceiling; BURROW_PROTECT_SEAL also lowers the ceiling
+    //   to prot, irrevocably (Mach vm_protect(set_maximum)). X is NEVER a
+    //   target: refused at this boundary before any lookup, so an RX mapping only
+    //   descends. No capability gates the call (ARCH 6.5: attenuation creates
+    //   no authority; CAP_JIT gates the creation of code). Any user mapping the
+    //   kernel admits, in any region -- RELRO lives in the image, thread stacks
+    //   in the burrow window. All-or-nothing across a multi-mapping range; the
+    //   cut ends are split, interior mappings change in place, and equal
+    //   neighbours merge back. A resident page keeps its contents and its
+    //   charge and costs one re-fault (SYS_BURROW_DECOMMIT returns pages).
+    //   Refused: X (-EACCES, first), other bits / W-without-R / unknown flags /
+    //   unaligned vaddr / length 0 (-EINVAL), a hole or a guard in the range or
+    //   no room for the split (-ENOMEM), a shared-in / CODE / hardware mapping
+    //   or a prot above the ceiling (-EACCES). Nothing changes on a refusal.
+    SYS_BURROW_PROTECT = 125,  // arg: vaddr (x0), length (x1), prot (x2), flags (x3)
+
     // NOT A SYSCALL. One past the highest assigned number, so that
     // VIV_NATIVE_CEILING can be pinned to a value the compiler recomputes
     // rather than to a symbol a person must remember to re-point.
@@ -3216,6 +3254,26 @@ _Static_assert((SYS_WALK_CREATE_DMSRVBULK &
 // OOM (alloc fails -> attach -1) + PROC_VMA_MAX; the fix is a charged radix/sparse
 // metadata structure (the Linux page-table-radix shape), which also lifts this cap.
 #define BURROW_RESERVE_MAX  (1024ull * 1024ull * 1024ull)
+
+// B-1a: the prot word of SYS_BURROW_RESERVE / SYS_BURROW_PROTECT. The values
+// are the kernel's own VMA_PROT_* bits and, by construction, Linux's PROT_*
+// (kernel/syscall.c pins the former with a _Static_assert; the latter is what
+// lets the phenotype mprotect row pass its word through). EXEC is named only so
+// its refusal can be spelled: it is never accepted as a target (ARCH 6.5).
+#define BURROW_PROT_NONE    0u
+#define BURROW_PROT_READ    1u
+#define BURROW_PROT_WRITE   2u
+#define BURROW_PROT_EXEC    4u
+
+// SYS_BURROW_PROTECT flags (x3). SEAL lowers each affected mapping's ceiling to
+// the new prot; a guard page is a range sealed at none.
+#define BURROW_PROTECT_SEAL 1u
+
+// SYS_BURROW_RESERVE align_log2 bounds: 0 means page alignment; otherwise the
+// exponent lies in [12, 30] -- a 4 KiB page up to 1 GiB, which is the largest
+// alignment a BURROW_RESERVE_MAX region could usefully carry.
+#define BURROW_RESERVE_ALIGN_MIN_LOG2 12u
+#define BURROW_RESERVE_ALIGN_MAX_LOG2 30u
 
 // SYS_SPAWN_FULL_ARGV argument record (P6-pouch-stratumd-boot sub-chunk
 // 16b-alpha). The caller fills this in user memory and passes its

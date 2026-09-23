@@ -919,7 +919,7 @@ The model:
 - LSE detection at boot; kernel atomic primitives use LSE if available.
 - musl + dynamic linker built with the equivalent userspace flags.
 - ELF loader rejects RWX segments at load time.
-- `mprotect` syscall rejects W^X-violating transitions (e.g. R+W → R+X).
+- The one permission-mutation call (`burrow_protect`, ARCHITECTURE.md §6.5, ratified 2026-09-23) cannot express X at all and cannot exceed a mapping's mint-time ceiling — stronger than rejecting W^X-violating transitions: the transition is unspeakable, not refused. (The pre-2026 plan here read "`mprotect` rejects R+W → R+X"; no such syscall was ever built.)
 
 **Scope — deferred** (post-v1.0):
 - Hardware Branch Target Buffer (BTB) entries for indirect-call CFI on ARM (currently software-CFI only).
@@ -935,7 +935,7 @@ The model:
 - MTE on by default where hardware supports; runtime detection at boot.
 - LSE atomic primitives on Apple Silicon (verified via `objdump`).
 - Test: a deliberate UAF in a test program is detected by MTE (program receives SIGSEGV with MTE tag mismatch info).
-- Test: an attempt to `mprotect(addr, len, PROT_READ | PROT_WRITE | PROT_EXEC)` is rejected.
+- Test: an attempt to `burrow_protect(addr, len, X)` is refused before any lookup (the B-1a deny-path probe; the older wording asked for an `mprotect(RWX)` rejection).
 - Test: a forged kernel return address (PAC mismatch) panics the kernel cleanly with an attestation message.
 - Boot KASLR: kernel base address differs across boots (verified via `/ctl/kernel/base`).
 - Phase 7 audit pass on the security stack (the comprehensive hardening + audit + 8-CPU stress phase).
@@ -943,7 +943,7 @@ The model:
 **Dependencies**:
 - Compiler toolchain (Clang, supports all the flags).
 - ARM64 exception-level setup (Phase 1).
-- `mprotect` syscall (Phase 5).
+- `burrow_protect` (B-1a, designed 2026-09-23; the Phase-5 `mprotect` line here was never built).
 - ELF loader (Phase 2).
 
 **Complexity**:

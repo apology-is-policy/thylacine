@@ -516,7 +516,7 @@ enum {
 //
 // PCI mapping windows append 113/114; clock_gettime now has a per-number
 // collision argument above rather than the old ceiling argument.
-#define VIV_NATIVE_CEILING 123
+#define VIV_NATIVE_CEILING 125
 
 // -----------------------------------------------------------------------------
 // TIER 2 — translators (V-2b).
@@ -805,28 +805,25 @@ enum viv_verdict vivarium_faccessat_decide(u64 dirfd);
 // The target is SYS_BURROW_ATTACH_LAZY: it takes a length, picks the address,
 // and produces a demand-zero RW/XN anonymous region.
 //
-// THE PROTECTION QUESTION, and why the strict answer loses. Thylacine anonymous
-// memory is ALWAYS RW/XN and there is NO prot-mutation syscall anywhere — that
-// is an I-12 design choice, not a gap. So this row cannot honour PROT_NONE or a
-// read-only PROT_READ exactly; it grants read+write regardless.
+// THE PROTECTION QUESTION, as it stood until B-1a and as it stands now. Until
+// 2026-09-23 Thylacine anonymous memory was ALWAYS RW/XN and there was NO
+// prot-mutation syscall anywhere (an I-12 design choice), so this row could not
+// honour PROT_NONE or PROT_READ exactly and granted read+write regardless -- a
+// STATED FIDELITY DEGRADATION, sanctioned by musl's own ENOSYS-tolerant
+// mprotect (mallocng/malloc.c:92 checks `errno != ENOSYS`), because PROT_NONE
+// is the DOMINANT anonymous shape in musl (the thread guard page,
+// pthread_create.c:295; mallocng's meta areas, malloc.c:82) and declining it
+// meant nothing ran at all. VIVARIUM.md 6.21 recorded the cost: guard pages not
+// protective, a PROT_READ mapping writable.
 //
-// Declining every prot but PROT_READ|PROT_WRITE would be the letter of §6.19's
-// "never silently mistranslate". But PROT_NONE is the DOMINANT anonymous shape
-// in musl -- the thread guard page (pthread_create.c:295) and mallocng's meta
-// areas (malloc.c:82) -- so declining it means malloc never initialises and
-// nothing runs at all. Admitting it is a STATED FIDELITY DEGRADATION, and musl
-// itself is the evidence that it is the sanctioned one:
-//
-//     mallocng/malloc.c:92 -- if (mprotect(p, pagesize, PROT_READ|PROT_WRITE)
-//                                 && errno != ENOSYS) return 0;
-//
-// The libc ANTICIPATES a system with no mprotect and proceeds on the assumption
-// that the PROT_NONE mapping is already usable, which is exactly what Thylacine
-// produces. The consequence is named in VIVARIUM.md §9's DEGRADED tier rather
-// than buried here: guard pages are NOT protective under the Linux phenotype,
-// and a PROT_READ anonymous mapping is writable. It costs FIDELITY, never
-// AUTHORITY -- the pages are the guest's own, every gate is unchanged, and
-// nothing crosses a Proc boundary, so I-43 is untouched.
+// THAT ENDED WITH THE PERMISSION CEILING (B-1a; ARCH 6.5). The target is now
+// SYS_BURROW_RESERVE, the lazy reservation with MINT-TIME attributes: the shell
+// mints the mapping at the requested prot -- none, R or RW -- under a ceiling
+// of RW, and mprotect (a translated row over SYS_BURROW_PROTECT, below) raises
+// or lowers it within that ceiling. A guard page faults; a read-only mapping is
+// read-only; a reserve-then-commit ladder commits exactly what it asks for.
+// The domain of this row is unchanged (an allow-list of R and W), only what the
+// admitted word MEANS changed: it is now honoured, not degraded.
 //
 // PROT_EXEC is the hard line and is REFUSED, not degraded. An executable
 // anonymous mapping is what CAP_JIT / I-42 governs (JIT-ON-WX-DESIGN.md), and
@@ -974,12 +971,14 @@ enum viv_verdict vivarium_mmap_file_decide(u64 prot, u64 flags,
 // four-segment `R / R-X / R / RW-` layout that produces it; it is NOT claimed as
 // gate-covered.
 //
-// PROT_NONE DECLINES on both arms, and on arm 3 that deliberately diverges from
-// the non-fixed anon arm, which degrades PROT_NONE to writable. The difference
-// is that a FIXED PROT_NONE request over an existing mapping is a GUARD -- and
-// silently handing back a writable page where a guard was asked for is not a
-// degradation anyone would sanction. Measured, it costs nothing: arm 3 fires
-// only under PF_W, so its prot always carries R|W.
+// PROT_NONE DECLINES on the FILE arm (2): a PROT_NONE file window is a pure
+// reservation whose bytes must fault, and there is nothing to serve it with.
+// On the anon arm (3) it is ADMITTED since B-1a and minted exactly, at none
+// under an RW ceiling: a FIXED PROT_NONE over an existing mapping is a GUARD,
+// and with SYS_BURROW_PROTECT it is a guard that can later be raised. Until the
+// raise existed arm 3 declined too -- a writable page where a guard was asked
+// for would have been a hole, not a degradation. Measured, arm 3 fires only
+// under PF_W in stock ldso, so its prot always carries R|W there.
 //
 // `addr` is a REQUIREMENT here, not the hint it is on the non-fixed arms, so it
 // must be page-aligned and non-zero (a fixed map at NULL is refused).
@@ -1006,6 +1005,23 @@ enum viv_verdict vivarium_mmap_fixed_anon_decide(u64 addr, u64 prot, u64 flags,
 // those equalities into a mask test.
 bool vivarium_mmap_arms_disjoint(u64 addr, u64 prot, u64 flags,
                                  u64 fd, u64 offset);
+
+// -----------------------------------------------------------------------------
+// TIER 2 — mprotect (B-1a; ARCH 6.5 "The permission ceiling"). A translated row
+// over SYS_BURROW_PROTECT. PURE -- no user memory, no Proc, no locks.
+//
+// The domain is the prot word: any combination of PROT_READ / PROT_WRITE /
+// PROT_EXEC translates (X is then REFUSED by the target with EACCES -- "X is
+// never a target" -- which the guest must see as that errno, not as ENOSYS);
+// PROT_BTI / PROT_MTE / PROT_GROWSDOWN / PROT_GROWSUP decline. `addr` and `len`
+// are semantic, answered by the shell exactly as Linux does: len 0 succeeds
+// touching nothing, an unaligned addr is EINVAL, a hole is ENOMEM, a raise past
+// the mapping's mint-time ceiling is EACCES (Linux's own errno for "cannot be
+// given the specified access").
+//
+// Collision: 226 lies above VIV_NATIVE_CEILING, the ceiling argument.
+// -----------------------------------------------------------------------------
+enum viv_verdict vivarium_mprotect_decide(u64 addr, u64 len, u64 prot);
 
 // -----------------------------------------------------------------------------
 // TIER 0/2 — signals (V-6). See VIVARIUM.md §6.22.

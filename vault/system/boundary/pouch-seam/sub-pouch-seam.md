@@ -22,7 +22,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-09-21
+updated: 2026-09-22
 ---
 ## Purpose
 
@@ -450,8 +450,13 @@ per-call errno approximation built on top of it.
   here, not the directory. joey matches each prover on a LEG CENSUS
   (`<name>: legs=a,b,c: exit 0`), not on `exit 0` alone, so a stale binary
   — the bake traps that skip a populate — cannot pass for a new one. The
-  four strings live in ONE header, `usr/pouch-hello/pouch-census.h`, read by
-  the prover that prints each and by joey that matches it (they were typed
+  strings live in ONE header, `usr/pouch-hello/pouch-census.h`, read by
+  the prover that prints each and by joey that matches it — one per
+  census-bearing prover, and **counted from the header
+  (`grep -c '^#define POUCH_CENSUS_' usr/pouch-hello/pouch-census.h`), never
+  from a number typed here.** This sentence said "four" until A-6 added the
+  identity prover's, which is precisely the failure the caveat below this one
+  records about "seven patches"; a count in prose is a guard pinned to a name (they were typed
   twice, and the fopen one omitted its `remove` leg; r3 F10). Sharing the
   header does not weaken the stale-binary catch: the stale binary was
   compiled against the old string, joey against the new one.

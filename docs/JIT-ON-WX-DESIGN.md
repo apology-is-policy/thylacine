@@ -17,7 +17,12 @@ load-bearing parts into `docs/NOVEL.md` + `docs/ARCHITECTURE.md` when relevant.
 
 Thylacine enforces **strict W^X (invariant I-12)**: every page is writable XOR
 executable, and -- crucially -- there is **no prot-mutation syscall** (no
-`mprotect(RW->RX)` flip). This is deliberate and load-bearing.
+`mprotect(RW->RX)` flip). This is deliberate and load-bearing. [Amended
+2026-09-23: there is now `burrow_protect` (ARCH 6.5, the permission ceiling), and
+the load-bearing part is intact by construction -- it never accepts X as a target
+and never raises a mapping past a mint-time ceiling that, for anonymous memory, is
+RW. The three doors to X are unchanged: exec, a provenance-gated file map, and this
+document's `SYS_JIT_CREATE`.]
 
 Runtime **JIT** compilers want to *write* machine code and then *execute* it --
 the classic `mmap(RWX)` or `mprotect(RW then RX)` dance. That fights I-12 head

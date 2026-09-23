@@ -2334,6 +2334,63 @@ sharers) with Safety + `EventuallyReleased`; `cow_buggy_break` ->
 `NoAliasedWritable` violated; `cow_buggy_teardown` -> `NoUseAfterFree`
 violated; `cow_buggy_vfork` -> temporal property violated with Safety intact.
 
+### The B-1a extension (2026-09-23; ARCH 6.5 "The permission ceiling") -- the protect actions behind `ALLOW_PROTECT`
+
+**Spec-first for this surface, on the I-44 re-enablement**: the module was
+extended BEFORE the kernel code, and the extension is ADDITIVE BY MEASUREMENT.
+`burrow_protect` reaches the COW model in three places, each modeled with its
+own bug flag (4-6, the one-flag-per-cfg rule extended) and each mapped to one
+site:
+
+- **`ProtectDown` / `ProtectUp`** -> `kernel/burrow.c::burrow_protect_in`: the
+  precheck (`vma_reprotect_precheck_in`, every refusal decided before any
+  mutation), then `mmu_uninstall_user_range` over the range, then
+  `vma_reprotect_range_in` (the cut, the in-place change, the merge) -- ONE
+  step under `as->lock`. The model's `ptew' = FALSE` IS the uninstall;
+  `cow_buggy_protect_keeps_pte` is the prot change without it
+  (`NoWritablePteBeyondProt`). The pc guard (`Protectable`: never mid-break)
+  is the lock: the fault arm holds the same `as->lock` across the whole
+  `demand_page_locked`, so a protect and a break of one address space never
+  interleave.
+- **`Fault`'s `prot = rw` guard** -> `arch/arm64/fault.c::demand_page_locked`
+  step 2, which enforces `vma->prot` BEFORE step 3 resolves the Burrow: a write
+  under ro/none returns `FAULT_UNHANDLED_USER` (a snare death -- the model's
+  `Exit`), and no break runs. `cow_buggy_fault_ignores_prot` is the arm entering
+  the break first (`BreakOnlyWhenWritable`).
+- **`Reinstall`** -> the same arm's resident-hit paths (ANON_LAZY non-COW,
+  ANON, FILE) installing at `vma->prot` after a protect cleared the PTE; the
+  COW read arm's `install_prot = vma->prot & ~WRITE` is `ptew` staying FALSE.
+- **`Held(s)` / `InitShare` / `ShareIsHolderCount`** ->
+  `kernel/addrspace.c::clone_one_vma`'s `clone_cursor` dedupe: ONE
+  `burrow_clone_cow` per SOURCE Burrow per fork, every later piece of the same
+  Burrow mapping that clone. `cow_buggy_clone_per_piece` (`Pieces = 2`) is the
+  pre-B-1a clone-per-VMA shape, and it is violated by the INITIAL state -- the
+  fork itself is where that bug lives. Runtime twin:
+  `cow.clone_dedupes_split_pieces`.
+
+The ceiling itself (`prot <= prot_max`, X never a target) is a pure per-call
+comparison with no interleaving and is deliberately NOT in the model; its
+witnesses are `protect.ceiling_bounds_raise`, `protect.seal_lowers_ceiling`
+and `protect.x_refused_before_lookup`.
+
+Gate (2026-09-23, `specs/check-cow.sh`): with `ALLOW_PROTECT = FALSE` (and the
+three new flags FALSE, `Pieces = 1`) the four pre-existing cfgs reproduce
+EXACTLY -- `cow` **580** distinct states, `cow_buggy_break` NoAliasedWritable,
+`cow_buggy_teardown` NoUseAfterFree, `cow_buggy_vfork` **231** states with
+EventuallyReleased violated -- which is the additivity claim as a check rather
+than an assertion. `cow_protect` (3 sharers, ALLOW_PROTECT, `SpecProtect` =
+`Spec` + weak fairness on the vfork sub-machine, because the protect ladder
+makes the state graph cyclic and WF(Next) alone would admit a protect-forever
+run as a spurious liveness counterexample) is clean at **10636 distinct
+states** with Safety + ProtectSafety + EventuallyReleased; the three buggy cfgs
+each violate exactly the invariant they name.
+
+Runtime regressions (`kernel/test/test_protect.c`):
+`protect.pte_uninstalled_then_reinstalled_at_prot` (bug 4);
+`protect.reserve_mints_exactly` + `protect.cow_split_then_break` (bug 5: a
+write at none is refused, no break runs, the share count is untouched);
+`cow.clone_dedupes_split_pieces` (bug 6).
+
 
 ## `territory_shed.tla` -- the mount-table shed at pivot / chroot (#80, ARCH 9.6.10)
 

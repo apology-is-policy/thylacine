@@ -5,6 +5,8 @@ parent: moc-pouch-seam
 title: "Process lifecycle — posix_spawn, wait, pipe, the environ populate, the terminators"
 code:
   - usr/lib/pouch/patches/0026-pouch-process.patch
+  - usr/lib/pouch/patches/0043-pouch-identity-calls.patch
+  - usr/pouch-hello/pouch-hello-identity.c
   - usr/lib/pouch/patches/0025-pouch-env.patch
   - usr/lib/pouch/patches/0011-pouch-abort.patch
   - usr/lib/pouch/patches/0012-pouch-mallocng-crash.patch
@@ -16,8 +18,53 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md", "docs/LLVM-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-08-16
+updated: 2026-09-22
 ---
+## Identity — the calls that could not report failure (A-6)
+
+A program's own identity belongs here with the rest of what it knows about
+itself, and until 2026-09-22 Pouch lied about it.
+
+musl's `getuid` / `geteuid` / `getgid` / `getegid` are **cannot-fail by
+contract** — each is literally `return __syscall(SYS_x);` with no error path.
+The seam parks their numbers at the unimplemented-syscall sentinel, so the
+sentinel's `-ENOSYS` was cast straight to `uid_t` and every Pouch program was
+told its uid was `0xFFFFFFDA`. Not an error it could check: a **lie it could
+not detect**.
+
+**This is a second SHAPE of sentinel defect, and the distinction is why no
+sweep had found it.** The known family — the unchecked-wrapper patches — is
+*a call whose return is IGNORED and whose out-struct the caller then reads*,
+and the sweep that found them was scoped, in its own words, to "a wrapper over
+a sentinel whose return value is ignored". Here the return is not ignored:
+**the return IS the lie.** A sweep scoped to ignored returns is structurally
+blind to it. The shape-2 sweep — parse the patched number table into parked vs
+real, find every `return __syscall(` on a parked number, then judge each by
+whether the CALLER can tell — found nine sites; four were these, and the rest
+are recorded with the residue.
+
+The kernel had the truthful answers throughout, and the **native** substrate
+already used them, so the asymmetry this closed was precise: the native
+substrate told the truth and the POSIX boundary-line lied.
+
+`effective == real` here is a **finding, not a shortcut**: there is no
+`setuid`, no `seteuid` and no effective-uid field anywhere in the kernel, which
+is the no-ambient-authority invariant holding by construction. A future change
+that made `geteuid()` diverge would be an invariant violation before it was an
+ABI change.
+
+`getppid` is deliberately **left parked** — it is the only one of the five with
+no kernel call behind it, and it has zero callers in the tree. A known lie, by
+decision rather than oversight.
+
+The witness is `pouch-hello-identity`, and it deliberately does **not** assert a
+literal principal — that would pass for the wrong reason the moment the boot
+principal changed, and would never prove the call reaches the kernel at all.
+It reads the same Proc's identity back through devproc's independent
+`principal:<N> gid:<M>` channel and demands the two agree. Measured both ways:
+with the patch removed the probe reports the sentinel by name and the boot
+fails; with it applied the two channels agree.
+
 ## Purpose
 
 Making one program start, wait for, and talk to another on a kernel with

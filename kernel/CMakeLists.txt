@@ -240,6 +240,7 @@ set(KERNEL_TEST_SRCS
     test/test_sys_spawn_with_perms.c
     test/test_sys_spawn_full_argv.c
     test/test_sys_burrow.c
+    test/test_protect.c
     test/test_torpor.c
     test/test_loom.c
     test/test_weft_ring.c

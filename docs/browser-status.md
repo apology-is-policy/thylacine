@@ -94,8 +94,9 @@ and a fourth found and deliberately NOT fixed here:
 ### The measured platform findings -- the list for the operator conversation
 
 The operator, 2026-09-21: *"When you reach the need to design the kernel chunks -- mprotect,
-dlopen etc., let's talk about it."* Nothing below has been designed. This is what B-0
-measured, in the order the engine hit it, with what the probe did instead.
+dlopen etc., let's talk about it."* **DESIGNED 2026-09-23 -- see "The B-1
+decisions" below.** The table is B-0's measurement, kept as the record: what the engine hit, in
+order, and what the probe did instead.
 
 | # | What JavaScriptCore needs | What Pouch/Thylacine does today | What the probe did | Kind |
 |---|---|---|---|---|
@@ -108,6 +109,40 @@ measured, in the order the engine hit it, with what the probe did instead.
 | F7 | **per-thread async signal + machine context** (`SIGUSR1` for GC thread suspend, signal-based VM traps, the sampling profiler, Wasm fast-memory faults) | `sigaction` admits SIGINT/TERM/PIPE/CHLD only; no `pthread_kill`; no `ucontext` registers | polling VM traps; suspend made fatal; fault handler off. Costs nothing with one JS thread and no JIT; **matters for B-2 (JIT) and for multi-threaded JS** | kernel/Pouch design (notes are per-Proc, fd-first) |
 | F8 | a main-thread stack of several MiB (JSC asks 5) | fixed 1 MiB reservation; SPARSE since LINEAGE L-4a (`exec_map_user_stack` is `burrow_create_anon_lazy`) -- I first wrote "eager" here from `exec.h`'s comment, which was stale and is corrected in the same change | JSC clamps to what it gets | raising it costs nothing at exec: a constant in `exec.h`, its mirror in pouch 0033, the prover's pin, and a higher I-32 ceiling for runaway recursion. Better still: pass the extent in auxv so libc DERIVES it instead of mirroring |
 | F9 | `dlopen` | none (static only) | not needed by JSC | the operator named it; WebKit proper does not need it either (no plugins) |
+
+### The B-1 decisions (2026-09-23; `dec-2026-09-23-memory-surface-and-loader`)
+
+The conversation the operator asked for, held at max effort on Fable 5.1. Each vote was by blocking
+question; the research behind them -- Plan 9, Fuchsia, Genode, seL4, OpenBSD, Mach, and WebKit's own
+source read line by line -- is ARCH 6.5 "The permission ceiling", "Range detach", "Capacity" and
+"Dynamic loading".
+
+| # | Decision | Vote |
+|---|---|---|
+| 1 | the shape of the permission surface | **ceiling-bounded `burrow_protect`** (the Fuchsia / Mach shape): a mint-time `prot_max` per VMA; X never a target; a range within one mapping |
+| 2 | a capability on the call, like `CAP_JIT`? | **no -- the gate is structural.** Attenuation and a bounded re-grant create no authority; a cap here would be ambient (every pthread guard needs it) or would break every threaded program |
+| 3 | the one-way seal | **yes, same chunk** (`PROTECT_SEAL`; Mach `set_maximum`, not OpenBSD `mimmutable`) |
+| 4 | F8 / F9 | **dlopen designed now** (rows 5-6); the stack to 8 MiB with its extent in auxv (my reading of "as well", stated to the operator and not contradicted) |
+| 5 | the loader model | **L-A, dynamic Pouch**: `libc.so` is the loader; D-4's PT_INTERP rewrite lifted to native execs; `burrow_map_file` |
+| 6 | what the sysroot ships | **static by default; `.so` only for runtime-loaded objects and `libc.so`** |
+| 7 | the memory bar | **production-comparable, both substrates**: never refused while free memory exists; relinquished memory returns and the footprint shrinks |
+| 8 | the I-32 default | **physical RAM minus a boot-sized TCB reserve**; the cap is the confinement mechanism |
+| 9 | the native allocator | **`dlmalloc-rs`** over a Thylacine platform trait (alloc = lazy attach, free = detach, free_part = decommit) |
+| 10 | the capacity chunk | **range detach + the charged sparse `filepages`**, both in B-1a' |
+| 11 | the sequence | scripture -> **B-1a** permissions -> **B-1a'** capacity -> **B-1b** Pouch -> **B-1c** dlmalloc + witness -> **B-1d** dlopen, before B-3 |
+
+Measured against the bar before the vote (the reason 7-10 exist): four refusals with free memory --
+the fixed 4 MiB native heap (`alloc.rs:77`), the 256 MiB default budget against a 2 GiB VM
+(`proc.h:114`), the 256 MiB / 1 GiB per-reservation caps anchored to the flat uncharged `filepages`
+array (`syscall.h:3203/3217`), and eager attach's contiguity (rings only; not a bar issue) -- and three
+paths that keep relinquished pages: `mallocng`'s `MADV_FREE` inside a retained group (`free.c:124`,
+ENOSYS today), WebKit's own decommit (same), and the native allocator (never trims). Decommit itself
+already frees and uncharges (`burrow.c:1246-1266`); whole-group `munmap` already works.
+
+What the vote did NOT cover and stays open: F7 (a thread-directed async note + register capture --
+its own notes design, needed by B-2 and by multi-threaded JS); the fixed 1024-handle table (#355,
+flagged, not built); PIE for Pouch binaries (decided at B-1d); OOM victim selection (deliberately not
+built -- the reserve is the production property that matters).
 
 Also learned, not engine findings: **the host has 8 GiB of RAM and ~15 GiB of free disk** --
 JSC builds locally at `-j5`; all of WebKit will not, and belongs on the GCP builder (the Clade
@@ -134,9 +169,9 @@ per-round evidence; this is the ledger.
   c2s-drain sabotage (same shape), and `noisb` -- which is kept in the script as a labelled
   NON-discriminating control, because the `isb` widens the unmask window and cannot be witnessed here.
 
-- **Owed to the operator (a conversation, not a decision to take here):** the F3-F9 kernel design
-  (below: reservations/holes, decommit, guard pages, >256 MiB, per-thread signals, stack, dlopen); the
-  small-integer socket fd redesign; and unlink-while-open.
+- **DECIDED 2026-09-23 (was owed as a conversation): the F3-F9 kernel design** -- eleven votes in
+  "The B-1 decisions" above; the scripture is ARCH 6.5. Still owed as conversations: the
+  small-integer socket fd redesign; unlink-while-open; and F7 (per-thread signals).
 - **DECIDED 2026-09-22 ("point now, model next"), was owed:** syscalls run IRQ-masked end to end, so a
   noise-driven wait held its CPU's interrupts. poll now crosses a PREEMPTION POINT each re-loop
   (`sched_preempt_point`; ARCH 23.3, `specs/poll_cpu.tla` checks the CPU-level claim). Scheduled next,
@@ -234,7 +269,12 @@ hides is one the matrix can no longer observe.
 | Phase | What | Exit |
 |---|---|---|
 | **B-0** | `JSCOnly` cross-build, JIT off (asm LLInt + IPInt). Source lives OUTSIDE this repo (a `webkit-thylacine` fork beside `llvm-thylacine`); the repo carries the build wiring and patches. | `jsc` runs on the device; the measured list of P1 gaps |
-| **B-1** | P1, the anonymous-memory surface, scoped by B-0's measurements. **Scripture first** -- O-1 (reservation holes vs an I-12 wording amendment) needs the operator's signature. Audit-bearing. | allocators run; SMP gate; audit closed |
+| **B-1** | P1, the anonymous-memory surface. **Scripture LANDED 2026-09-23** (O-1 resolved; ARCH 6.5); five gated chunks follow in order: | |
+| B-1a | **LANDED 2026-09-23 `839c1745`; holotype audit r1 (Fable 5.1) 0 P0 / 1 P1 / 1 P2 / 4 P3, closed at `3fc95125` (SMP gate 5 rows x 10/10 clean) -- F1 the FILE page-in's admission spanned an unlock (a protect to none mid-page-in yielded a readable PTE on a guard), F2 four quadratic list passes + the per-page uninstall under a non-preemptible lock; both fixed with regressions, F5 (an over-charge after a D-3b window inside a touched lazy mapping) OWNED by B-1a'. The pouch (musl) substrate's `mprotect` is still ENOSYS -- B-1b's row, not this one.** permissions: `burrow_reserve` (124) + `burrow_protect` (125) + `PROTECT_SEAL`; the phenotype `mprotect` row + exact `PROT_NONE`/`PROT_READ` mints; `cow.tla` extended FIRST behind `ALLOW_PROTECT` (bugs 4-6; additive by measurement, `cow_protect` 10636 states). Built beyond the letter: multi-mapping ranges all-or-nothing + a merge pass (ARCH 6.5 amended as built); the fork's per-Burrow clone dedupe; the eager-ANON fork share keyed on the ceiling; the lazy-piece detach uncharge. 1632/1632 kernel tests; `/protect-probe` + `/protect-guard-child` at boot. Audit-bearing. | probes with REDs; the `burrow_protect(X)` deny path; SMP gate; audit closed |
+| B-1a' | capacity: range detach; the charged sparse `filepages`; the I-32 default = RAM minus a reserve; the >256 MiB detach refusal. Audit-bearing. | a 4 GiB reservation round-trips; the reserve holds under a memory bomb; SMP gate; audit closed |
+| B-1b | Pouch: `mprotect` / `madvise` / partial `munmap` / real pthread guards; stack 8 MiB + auxv extent. | `pouch-hello-*` legs incl. a guard FAULT; the witness RED on the old libc |
+| B-1c | native: `dlmalloc-rs` replaces the fixed 4 MiB heap; the two-substrate witness. | the page count rises past 4 MiB and FALLS after free, sabotaged once |
+| B-1d | dlopen: PT_INTERP for native execs; `burrow_map_file`; driver `-shared` / PIE / `-dynamic-linker`; `libc.so`; ldso boundary-line. Before B-3. | a Pouch `.so` loaded on the device; the two deny paths |
 | **B-2** | The JIT: JSC's separated WX heap on `SYS_JIT_CREATE` + `SYS_ICACHE_SYNC`; `CAP_JIT` clearance. Audit-bearing (I-42/I-12). | benchmark with JIT tiers; deny-path probe (no `CAP_JIT` -> interpreter, never RWX) |
 | **B-3** | P3: ICU, FreeType, HarfBuzz, sqlite, libxml2, png/jpeg/webp, libpsl, curl, OpenSSL; fontconfig decision (O-4). | each library's tests under Pouch |
 | **B-4** | P2: its own design document (O-3: generalise the Weft share gate vs Mycelium), the primitive, then WebKit's `Platform/IPC` + `SharedMemory` backend. Audit-bearing (I-4). | two-process message + shared-bitmap witness |
@@ -255,12 +295,18 @@ hides is one the matrix can no longer observe.
 
 - **Effort is `xhigh`, by the operator's vote, for the whole arc.** Say so in
   every audit-bearing commit body; do not re-ask.
-- **No permission-mutation syscall exists (I-12).** Do not add `mprotect` to
-  make an allocator happy. B-1 is a scripture commit with a signature first.
+- **The permission surface is `burrow_protect` under a mint-time ceiling (ARCH
+  6.5, ratified 2026-09-23; BUILT at B-1a as `SYS_BURROW_PROTECT` 125, with
+  `SYS_BURROW_RESERVE` 124), not `mprotect`.** X is never a target of it and no
+  capability gates it -- do not add either. The native detach is still
+  exact-match per mapping: after a protect has cut a reservation into pieces,
+  detach them piece by piece (B-1a' brings the range form).
 - **`SYS_WEFT_SHARE` is gated to the driver tier on purpose** (Weft-7 F1,
   `kernel/syscall.c`). Read that audit before proposing to lift it.
-- **Thylacine links statically and has no `dlopen`.** WebKit is LGPLv2: keep
-  the build reproducible from published source so LGPL section 6 is met.
+- **Thylacine links statically BY DEFAULT; `dlopen` arrives with B-1d as an
+  opt-in dynamic link against `libc.so`** (ARCH 6.5 "Dynamic loading"). WebKit
+  is LGPLv2: keep the build reproducible from published source so LGPL
+  section 6 is met.
 - **Swift is entering WebKit** (`ENABLE_BACK_FORWARD_LIST_SWIFT`; OFF when
   cross-compiling). Pin it OFF explicitly and watch for it becoming mandatory.
 - **WebKit cannot be built on thyla-pi** (1.5-2 GB per unified job). Host only.

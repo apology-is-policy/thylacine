@@ -127,6 +127,61 @@ still gave "a backslash-escaped glob character still globs" as a reason for
 completion's single quotes -- corrected in `0f027d4c`.
 
 ---
+## 2026-09-23, night (main, Fable 5.1, effort max) -- B-1a closed: the audit found the one arm that sleeps
+
+The holotype round on `839c1745` (Fable 5.1, MODEL start == end; read-only)
+returned 0 P0 / 1 P1 / 1 P2 / 4 P3, and the P1 is the lesson of the run.
+
+**The self-audit and the model drew the same wrong boundary.** Both said "the
+fault holds `as->lock` across the whole demand_page, so a protect and a fault
+serialise" -- true of the lazy, COW and eager arms the chunk wrote, and false
+of the one arm that SLEEPS. The FILE page-in drops the lock for its 9P read
+and re-validates only the geometry afterwards (same Burrow, same slot), which
+a whole-mapping protect leaves intact; so a sibling thread's
+`mprotect(page, PROT_NONE)` landing mid-page-in ended with
+`file_install_locked` installing at prot 0, which `make_user_pte_l3` encodes
+as a user-readable RO leaf. A guard that did not guard, on a page whose fault
+path would never run again. The prosecutor found it by asking which arm's
+admission and install span an unlock -- and `cow.tla` had that arm listed
+under "what this deliberately does not model", which is exactly where an
+auditor should look first. Fix: `file_fault_still_admitted` re-runs the
+admission after the sleep in both install paths and keeps the page-in (the
+bytes are the Burrow's, prot-independent). The regression interposes the
+protect from inside the stub `dev->read`, the stand-in the #190
+geometry-shift tests use: the read runs with the lock dropped, so it is the
+one deterministic place a sibling can be.
+
+**The quadratic walks were mine, four times over.** `vma_next_overlap_in`
+restarts from the list head, and I iterated a range with it in the precheck
+(run twice), the first/last scan and the apply loop -- k(k+1)/2 nodes per
+pass, the munmap row had the same shape already, and all of it under a lock
+whose holder is non-preemptible. Now one scan then successors everywhere,
+pinned by a node counter rather than a clock (`protect.range_walk_is_linear`,
+k = 1024: under 64k steps where the bug cost 524800 per pass). The uninstall
+leg got the fix the design notes had deferred to B-1a':
+`mmu_uninstall_user_range` walks by subtree, so an unfaulted GiB costs
+nothing and a resident page costs exactly what it always did (512 per-page
+calls for its 2 MiB table, measured; 262144 before).
+
+**A control written from the design, not measured.** The no-op test's control
+-- "the ENOMEM refusal changed nothing" -- failed on its first run: a cap hit
+refused AFTER the uninstall and cost the re-fault the header documented. The
+honest options were to weaken the assertion or to make it true; the headroom
+check now runs before the uninstall, after the no-op short-circuit (the first
+attempt put it before the short-circuit, and a no-op needs no headroom, so
+THAT failed the other assertion). Two boots to get one control right; it now
+says what it claims.
+
+**Results.** `check-cow.sh` all nine as claimed; kernel suite 1638/1638 at
+-smp 4 and at -smp 1 (six new regressions), zero extinctions, both probes and
+L23i in the ladder; the combined RED (every fix reverted, tests kept) is
+1632/1638 -- the six new tests and nothing else; SMP gate PASS -- default-smp1 / default-smp4 / default-smp8 / ubsan-smp4 / ubsan-smp8 each 10/10, 0 CORRUPTION / 0 EXTERNAL-KILL / 0 inject-miss / 0 timing / 0 other (N=10; 51 min). Owned, not fixed: F5, an over-charge after a D-3b
+window inside a touched lazy mapping (B-1a'); and, named by the round rather
+than found, the pouch substrate's `mprotect` is still ENOSYS -- 6.21 "ended"
+is phenotype-only until B-1b. The eight dossiers the chunk commit's trailer
+promised are written, plus the probes' new one and `sub-kernel-mmu`.
+
+---
 ## 2026-09-23, late morning (aux, Opus 5.5 1M, effort max) -- a name read as the shell reads it, and quoted after the prefix, not before
 
 Picked up after a self-compaction at `8ecb299a`, queue item 0b-a: Tab completion
@@ -284,6 +339,66 @@ Linux the assembly succeeds and the next error is the panic-handler clash. I
 stopped the run before it reached the other three crates in that bucket
 (libthyla-rs, ptyhold, tls), so whether they fail the same way is a prediction.
 Queued as 0e: derive the bucket from the dependency graph, not from a symptom.
+
+---
+## 2026-09-23, afternoon (main, Fable 5.1, effort max) -- B-1a: the permission ceiling, built
+
+The scripture from the morning (`96f24314`) became code the same day: spec
+first, then the kernel, then the probes. Two hosts of the truth this run:
+`specs/check-cow.sh` and the 1632/1632 suite.
+
+**The spec came first and was measured, not asserted.** `specs/cow.tla` gained
+the three ways `burrow_protect` reaches the COW model -- a protect that keeps
+the writable PTE (bug 4), a fault arm that breaks before it enforces the prot
+(bug 5), a fork that clones a split Burrow once per piece (bug 6) -- every new
+action gated on `ALLOW_PROTECT`. The additivity claim is a check in the gate,
+not a sentence: with the switch off the four pre-existing cfgs reproduce their
+morning baseline exactly (`cow` 580 states, `cow_buggy_vfork` 231 with the
+temporal violation, the two invariant cfgs by name), and `cow_protect` is clean
+at 10636 states. One wrong turn worth keeping: the first draft of the clean
+protect cfg inherited `WF_vars(Next)` alone, and the protect ladder makes the
+state graph cyclic -- a run that protects forever and never lets the vfork
+child release is a fair behaviour under that fairness and a spurious liveness
+counterexample. `SpecProtect` adds weak fairness on the vfork sub-machine,
+which is the faithful statement (the release depends on nothing a protect
+does); the old `Spec` stays untouched so the fingerprints mean what they meant.
+A second: the TLC wording for a liveness failure is "Temporal property X was
+violated", not the "Temporal properties were violated" the check first grepped
+for -- the gate now pins the property's NAME, as the invariant leg does.
+
+**Three findings the split made live, all closed in the chunk.** (1) A lazy
+VMA that is one PIECE of a Burrow uncharged the WHOLE Burrow's resident count
+at detach (`detach_one_locked`), once per piece -- an I-32 under-count the
+D-3b split could already reach in principle and a protect split reaches
+routinely (every pthread stack is guard + usable). The refund is now the
+piece's own range via `burrow_decommit` before the unmap, which also returns a
+detached piece's pages at once (the bar). (2) `clone_one_vma` shared an eager
+anon mapping across a fork when its PROT was read-only; with a raise available
+that is one address space's writes landing in another's (I-44), so the test
+is on the CEILING now (`vma_prot_max`), which nothing raises -- the vDSO
+(ceiling R) still shares, an eager attach protected down to R is refused,
+`cow.clone_refuses_eager_anon_with_writable_ceiling` holds both. (3) The
+ratified text said a protect range lies within ONE mapping; the merge pass
+makes a grown reservation exactly two (rw then none), so a whole-region
+protect over it is a two-mapping range Linux serves. Built as multi-mapping,
+all-or-nothing (the precheck decides every refusal before the first
+mutation -- stronger than Linux's partial failure), and ARCH 6.5 amended AS
+BUILT with the reasoning; the operator sees it in the report.
+
+**The tripwire fired as designed.** The first boot extincted on joey's ladder:
+`viv-pheno-probe` L22 pinned `mprotect == ENOSYS` and L23 pinned "a PROT_NONE
+mapping is writable" -- deliberately, so real PROT_NONE landing would fail the
+ladder instead of letting the entry go stale. It did. Both legs now pin the
+served behaviour (ENOMEM over a hole, EACCES for X before the lookup, the
+reserve-then-commit ladder end to end).
+
+**Results.** Kernel suite 1632/1632 at -smp 1 and 4 (15 new `protect.*` /
+`cow.*` / `sys_burrow.*` tests + `vivarium.mprotect_domain`); `/protect-probe`
+and `/protect-guard-child` (a page sealed at none dies via snare:segv, reaped
+by the expect-fault census) in the boot ladder; the four REDs and the SMP gate
+and the holotype audit recorded in the commit body. Open, not this chunk:
+B-1a' (range detach; the charged sparse `filepages`; the I-32 default) and the
+rest of the B-1 sequence.
 
 ---
 ## 2026-09-23, morning (aux, Opus 5.5 1M, effort max) -- the cap that bounded the wrong thing
@@ -446,6 +561,89 @@ also turned up a stale line in `sub-halcyond`, now mine: its purpose still names
 
 That landed as `8ecb299a`.
 
+## 2026-09-23 (main, Fable 5.1, effort max) -- the mprotect conversation, and what it turned out to be about
+
+The operator asked for the F3-F9 talk ("mprotect, dlopen etc., let's talk
+about it") and switched to Fable at max for it. Docs only this run; nothing
+built. The output is one scripture commit (this one) and eleven ratified votes.
+
+**The question that decided the shape was the operator's, not mine: "should
+mprotect be gated on a CAP, like JIT?"** The answer is no, and the argument is
+the same one that makes `CAP_JIT` right: a capability gates the CREATION of
+authority (bytes become code). Every use of `mprotect` in WebKit's own tree --
+read line by line in the sparse clone, not recalled -- is either an attenuation
+(guard pages, RELRO, the `WTFConfig` freeze) or a re-grant within what the
+mapping was minted with; neither creates authority and neither can reach X.
+Fuchsia draws exactly that line (`zx_vmar_protect` bounded by handle rights;
+execute needs the VMEX resource). A cap here would be ambient -- musl's
+`pthread_create` needs it for every thread -- which is the definition of
+not-a-capability. So the gate is structural: X is never a legal target of the
+call and no ceiling it can reach contains X.
+
+**The finding that decided monotone-vs-ceiling was in the source, not in the
+B-0 table.** B-0's F-list said WTF "ignores" `mprotect` failures -- true for
+guard pages. But release JavaScriptCore raises none -> RW inside its own
+reservations for resizable `ArrayBuffer` and shared Wasm memory
+(`ArrayBuffer.cpp:595/611`, `WasmMemory.cpp:234/378`), paths B-0's probes never
+ran. A reduce-only primitive would have needed an `mprotect` whose contract
+differed from its name -- the exact class of lie the last two chunks were about.
+Ceiling-bounded (Fuchsia / Mach) it is. The `StructureAlignedMemoryAllocator`
+raise is `ASSERT_ENABLED`-only; release uses `madvise`. Verified -- and the kind
+of detail that is wrong when remembered.
+
+**The scripture said two contradictory things, and both were era artifacts.**
+NOVEL.md 3.7 and ROADMAP still planned "an mprotect that rejects W^X-violating
+transitions" (Phase 2 / 5); ARCH 6.5, since `2fd9797`, said no `mprotect` at
+all. Neither described a system that had thought about {none, R, RW}.
+POUCH-DESIGN.md:239 had anticipated the exact syscall as "deferred to v1.x" --
+the browser is the forcing function, not the cause.
+
+**"The growable heap" was the operator naming a bar, not an item.** I read it
+as libthyla-rs's fixed 4 MiB `INITIAL_HEAP_SIZE` (the only "growable heap" in
+the tree; tripped over by #243, haul F8 and #120) and asked. The answer was
+the bar: production-comparable, never refused while free memory exists,
+relinquished memory returns, both substrates. Measured against it: four
+refusals with free memory (the 4 MiB heap; the 256 MiB default budget against
+a 2 GiB VM; the 256 MiB / 1 GiB reservation caps anchored to the flat uncharged
+`filepages` array; eager attach's contiguity -- rings only, not a bar issue)
+and three paths that keep pages (`mallocng`'s `MADV_FREE` inside a retained
+group -> ENOSYS; WebKit's decommit -> ENOSYS; the native allocator never trims).
+Decommit itself frees and uncharges (`burrow.c:1246`); whole-group `munmap`
+already works. Moving the I-32 default to RAM-minus-reserve is a scripture
+change and went to a vote rather than into a chunk.
+
+**dlopen: the operator took the non-recommended arm (design now), so it got
+the same treatment.** Prior art: Plan 9 static on purpose (Minnich's four
+reasons, 9p.io); Fuchsia's loader service hands libraries out as VMO handles;
+Genode's ldso IS the executable and takes ROM dataspaces; FreeBSD `fdlopen`.
+Tree: every kernel piece exists (D-2, D-3a/b, D-4) and every one is gated to
+`PHENO_LINUX` (`exec.c:1332`); no native file-map syscall; the driver pushes
+`-static`, non-PIE `ET_EXEC` (`Thylacine.cpp:25,44`); musl's static `dlopen` is
+a stub. The fit is the finding: `dlopen` is exec into the current address space
+and its security model is exec's (I-28 + the provenance rule) -- no new
+authority. Voted: dynamic Pouch (musl's real model), static by default, `.so`
+only for runtime-loaded objects + `libc.so`; the handle form designed, built
+with its first confined consumer.
+
+**Eleven votes; the record is
+`vault/record/decisions/dec-2026-09-23-memory-surface-and-loader.md` and
+browser-status.md "The B-1 decisions".** One reading of mine is recorded as
+such: the stack (8 MiB + an auxv extent) rode "design dlopen now as well" and
+was stated to the operator, not voted.
+
+**Sources that failed, and what stood in:** man.9front.org answered 402 (the
+9p.io copy served); the GNU Mach page 429'd twice (WebKit's own
+`WTFConfig.cpp:226`, "There's no going back now!", is the in-tree witness of
+`vm_protect(set_maximum)`); the seL4 api-doc page is x86-only (the ARM
+interface XML in the seL4 repo answered the remap semantics). Every prior-art
+claim in the scripture cites a fetched text or a file:line.
+
+Next: B-1a -- `burrow_reserve` + `burrow_protect` + `PROTECT_SEAL`,
+spec-first on `cow.tla` for the split x COW interaction; kernel;
+audit-bearing. The operator set max for THIS conversation; the arc's standing
+vote is xhigh, so B-1a's kernel work re-asks per the effort gate.
+
+---
 ## 2026-09-23, early morning (aux, Opus 5.5 1M, effort max) -- the gate that said "nothing is stranded", and the test it could not see running twice
 
 The operator asked how the run got from lantern to the Utopia tests. I answered
@@ -1009,6 +1207,91 @@ One process note, since it shaped the order of everything above: the guest build
 waited until the SMP gate finished, because contending with a timing-sensitive
 gate to save ten minutes is how a red result becomes unattributable. The reading
 and authoring work filled that window instead.
+
+---
+## 2026-09-22, evening (main, Opus 5 1M, effort max) -- A-6: the libc that lied about who you are
+
+The identity chunk the operator ratified as option (B). Two commits so far --
+`c980b059` (scripture, no code) and the implementation below -- plus one in the
+Stratum tree.
+
+**The defect.** Pouch's libc lied about your uid. musl's five identity calls are
+**cannot-fail by contract** -- each is literally `return __syscall(SYS_x);` with
+no error path -- and patch 0001 parks their numbers at the `0xFFFF`
+unimplemented-syscall sentinel, so `-ENOSYS` was cast straight to `uid_t` and
+every Pouch program was told its uid was `0xFFFFFFDA`. Not an error it could
+check. A lie it could not detect.
+
+**The part worth keeping is WHY no sweep had found it.** The known family --
+0032/0033/0034/0037 -- is *an unchecked wrapper whose out-struct the caller then
+reads*, and 0037's sweep is scoped in its own words to "a wrapper over a
+sentinel whose RETURN VALUE IS IGNORED". Here the return is not ignored: **the
+return IS the lie.** A sweep scoped to ignored returns is structurally blind to
+it. **A sweep is bounded by the shape it names, and 0037's write-up records its
+method without noticing the gap.**
+
+So I ran the shape-2 sweep: parse the patched number table into parked (288) vs
+real (44), find every `return __syscall(` on a parked number, then judge each by
+whether the CALLER can tell. **Nine sites.** Five are the identity calls. Of the
+other four, two are genuine and open -- `times()` (which is BOTH shapes at once:
+raw return AND an unfilled `struct tms`, probably why neither sweep caught it)
+and `timer_delete()` -- one is dead code under the sentinel (`fcntl`, already
+tracked), and one is not a defect at all: a futex helper whose caller consumes
+the value AS an error code. That last one is the control that proves the sweep
+discriminates rather than flagging every raw return. The residue is enqueued,
+not folded, with the method recorded.
+
+**The Stratum half, and why both halves had to land together.** stratumd stamped
+its `/ctl` admin from its own `geteuid()`. That is sound on Linux, where a
+daemon's euid names the daemon; it is wrong on Thylacine, where
+`PRINCIPAL_SYSTEM` is a **shared TCB identity** -- init, the warden and every
+boot service share it. Landing the truthful libc first, against that file
+unchanged, would have turned a latent misconfiguration LIVE in one boot:
+`geteuid()` starts returning `PRINCIPAL_SYSTEM`, `admin_uid` becomes
+`PRINCIPAL_SYSTEM`, and every SYSTEM peer acquires `/ctl` admin. **The sentinel
+was masking a real misconfiguration -- the most dangerous kind of lie, one whose
+removal is itself the exploit.** New `--admin-uid` flag; omitted, the daemon does
+not call the setter at all and `admin_uid` keeps its deny-by-default. That
+reproduces today's behaviour exactly, because the sentinel already matched no
+principal.
+
+**The survey paid for itself.** A full read of every identity consumer in
+Stratum's `src/` found 3 `getuid` + 4 `geteuid` + 11 `getgid` + 1 `getegid` and
+zero `getppid`, and corrected my note in two places: the three "same fallback"
+sites are three DIFFERENT accept loops, and there are 8 `getgid()` sites in
+`stratum-fs` stamping `0xFFFFFFDA` as the group of every object the CLI creates,
+not the one I had spot-checked. It also showed the truthful half REPAIRS two
+gates that were refusing everything -- janus's self-uid peer check and the corvus
+keyslot-token gate were both comparing a real principal against the sentinel.
+
+**The witness, and the sabotage.** `pouch-hello-identity` deliberately does not
+assert a literal principal -- that would pass for the wrong reason the moment the
+boot principal changed, and would never prove the call reaches the kernel at all.
+It reads the same Proc's identity back through devproc's independent
+`principal:<N> gid:<M>` channel and demands agreement. Measured both ways:
+patch removed -> `uid=4294967258` (`0xFFFFFFDA`), the probe names the sentinel,
+**the boot fails**; patch applied -> both channels read `4294967294`, suite
+1616/1616.
+
+**Two wrong turns, both mine.**
+
+I wrote the probe to match on `exit 0`, then found in `sub-stratum-boot` that
+joey matches its boot-fatal provers on a **leg census** precisely so a stale
+binary from a bake trap cannot pass a probe whose legs it never ran. My probe
+has five legs. It now carries a census string like the others.
+
+And I ran `build.sh` **while the SMP gate was booting from the same tree** --
+so boots before and after my rebuild were booting different kernels. The verdict
+might still have come out green, and that is exactly the problem: it would no
+longer have been a coherent measurement of one tree. Killed it and restarted
+clean rather than keep a number I could not describe honestly. This is the
+second contention-shaped invalidation today; the first was a subagent's stray VM.
+**The gate owns the tree while it runs, and "I only rebuilt" is not an exception.**
+
+**A typed count, caught one edit before it rotted.** Two dossiers said the census
+had "four" strings. The caveat immediately below one of them warns "never from a
+number typed here: this caveat said 31 while the series was 38". Rather than
+retype "five", both now give the derivation command.
 
 ---
 ## 2026-09-22, later still (main, Opus 5 1M, effort max) -- the loom join: a 100 % boot hang that no gate could see

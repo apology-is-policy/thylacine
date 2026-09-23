@@ -65,14 +65,14 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**530 owned · 49 unowned · 579 files (91% owned) · ~13225 unswept lines.**
+**532 owned · 49 unowned · 581 files (91% owned) · ~13225 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **73 files, ~33273 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **74 files, ~33472 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
 | usr/warp-prove | 0 | 1 | 4349 |
-| usr/pouch-hello | 6 | 17 | 2487 |
+| usr/pouch-hello | 7 | 17 | 2487 |
 | kernel | 127 | 14 | 1981 |
 | usr/ports | 19 | 5 | 1691 |
 | usr/quarry | 0 | 1 | 1033 |
@@ -110,6 +110,7 @@ Excluded as harness and counted here rather than dropped: **73 files, ~33273 lin
 | usr/nocturne-vol | 1 | 0 | 0 |
 | usr/nocturned | 3 | 0 | 0 |
 | usr/nora | 13 | 0 | 0 |
+| usr/protect-guard-child | 1 | 0 | 0 |
 | usr/prowl | 3 | 0 | 0 |
 | usr/ptyfs | 2 | 0 | 0 |
 | usr/ptyhost | 1 | 0 | 0 |
