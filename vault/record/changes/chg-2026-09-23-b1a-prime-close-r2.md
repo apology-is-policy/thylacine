@@ -4,7 +4,7 @@ type: chg
 title: "B-1a' (capacity), the round-2 close: the pool reclaims idle images before it refuses, a mapped file page is charged to its holder, the copy-on-write break replaces its leaf in place, a fork keeps the parent's tables -- round 2's four findings closed, round 3 on the fixes"
 date: 2026-09-23
 arc: arc-boosty
-commits: ["*(pending)*"]
+commits: ["387ffcd8"]
 touched:
   - sub-kernel-mm-phys
   - sub-kernel-mmu

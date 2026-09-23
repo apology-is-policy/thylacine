@@ -4,7 +4,7 @@ type: chg
 title: "B-1a' (capacity): the range detach over one core (SYS_BURROW_DETACH 38 in the Linux form + the phenotype munmap), the charged sparse pagemap, the user pool + the I-32 default = RAM minus a reserve, the window-confined fixed arms -- LANDING, audit pending"
 date: 2026-09-23
 arc: arc-boosty
-commits: ["*(pending)*"]
+commits: ["387ffcd8"]
 touched:
   - sub-kernel-vma
   - sub-kernel-burrow

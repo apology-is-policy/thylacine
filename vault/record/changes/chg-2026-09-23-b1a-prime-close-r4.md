@@ -4,7 +4,7 @@ type: chg
 title: "B-1a' (capacity), the round-4 close: the pager refuses the abort classes it cannot resolve, the pool's refusal is ENOMEM on the exec frame, the reclaim asks for the shortfall, the probe fires at the leaf write, cow.tla models the read-only leaf -- round 4's five findings closed, no round 5 owed"
 date: 2026-09-23
 arc: arc-boosty
-commits: ["*(pending)*"]
+commits: ["387ffcd8"]
 touched:
   - sub-kernel-mm-phys
   - sub-kernel-mmu

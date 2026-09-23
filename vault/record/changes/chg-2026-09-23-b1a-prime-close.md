@@ -4,7 +4,7 @@ type: chg
 title: "B-1a' (capacity), the audit close: the pool made PHYSICAL (charged at allocation, returned at free), the hardware page tables charged and reclaimed, F3/F4/F6/F7 -- round 1's seven findings closed, round 2's four in flight"
 date: 2026-09-23
 arc: arc-boosty
-commits: ["*(pending)*"]
+commits: ["387ffcd8"]
 touched:
   - sub-kernel-mm-phys
   - sub-kernel-mmu

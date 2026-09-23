@@ -4,7 +4,7 @@ type: chg
 title: "B-1a' (capacity), the round-3 close: the copy-on-write copy keeps its share until its leaf is replaced, a fault that finds a leaf already admitting its access is answered by it, the strip takes what is wanted, a refused allocation inside exec is ENOMEM -- round 3's five findings closed, round 4 on the fixes"
 date: 2026-09-23
 arc: arc-boosty
-commits: ["*(pending)*"]
+commits: ["387ffcd8"]
 touched:
   - sub-kernel-mm-phys
   - sub-kernel-mmu
