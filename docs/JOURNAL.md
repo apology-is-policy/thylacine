@@ -22,6 +22,149 @@ needed the operator.
 
 
 ---
+## 2026-09-23, afternoon (aux, Opus 5.5 1M, effort max) -- a directory handle carried a write right nobody had checked
+
+**Found while reading for the Haul cape, not while looking for it.** The cape
+needs Loom's GETATTR and its create ops to agree with the mount's owner, so I
+read how Loom's MKDIR/MKNOD/SYMLINK carry a gid. They send the SQE's gid
+verbatim. That was the small defect. The large one was one screen up: the six
+child-mutation ops (MKDIR, MKNOD, SYMLINK, UNLINKAT, RENAMEAT, LINK) gated on
+the registered handle's RIGHT_WRITE and nothing else.
+
+Why that was reachable by anyone:
+- an O_PATH directory handle is born R|W with no check on its target
+  (`syscall.c`, the create-from-a-base pattern), so its RIGHT_WRITE is hollow;
+- `SYS_LOOM_SETUP` is ungated;
+- since A-3b the kernel is the only rwx enforcer; Stratum checks dataset scope.
+So any principal that could X-search to a directory could create, unlink,
+rename, link or symlink in it. `LOOM_OP_SYMLINK` is the only way to make a
+symlink in the guest. Two earlier audits (#81 F2, go-stage5 F1) had cleared
+these ops as "like SYS_WALK_CREATE" -- but SYS_WALK_CREATE perm_checks the
+parent. The premise named the right twin and got its behaviour wrong.
+
+**The design, and what it rejected.**
+- Fail closed on O_PATH: rejected -- O_PATH is the only way to name the
+  directory these ops need, so it would have removed the symlink surface.
+- Earn the rights at registration: rejected -- a check at registration outlives
+  a legate's scope (I-25) and a chmod made after it.
+- Stat in the SQPOLL kthread: rejected -- a kthread blocked on a hung server
+  never reaches its stop flag, and `loom_free`'s join would hang the owner's
+  exit. SQPOLL rings refuse the six ops instead; nothing ships that issues them
+  there.
+- Chosen: the sync twins' parent W|X at submit, against the ring creator's LIVE
+  identity (`Loom.ident`, stamped before the handle publishes; a ring cannot be
+  passed, dup'd or forked, so the creator is every submitter).
+
+**A dependency pulled forward.** The stat blocks between an SQE's consume and
+its disposition. The CQ admission gate counted posted + in-flight only, so the
+Loom-5 audit's owed F2 residual (a sibling driver over-admitting into a slot)
+went from a narrow window to a wire RPC wide. `Loom.admitting` makes admission
+exact; the residual is closed rather than widened.
+
+**After compaction, a self-review of code that had never compiled.**
+- A `-fsyntax-only` pass found `struct Dev` incomplete in loom.c and the test
+  (a missing `<thylacine/dev.h>`) -- caught before the Mac window, not in it.
+- The create MODE had the same gap as the gid: the sync create masks
+  `perm & 0777`, Loom forwarded the SQE's mode, and Stratum keeps `& 07777`.
+  So a Loom mkdir could plant setuid/setgid/sticky bits that SYS_WSTAT refuses.
+  Inert today (the kernel honours none of them), but a create must not be the
+  way around chmod. Masked, with wire-read legs.
+- The comment that licensed the hole ("legitimately allowed like
+  SYS_WALK_CREATE") was still there, one block above the gate. Rewritten to say
+  why the ops are allowed: they answer to the parent's W|X, like the twin.
+- The fixture is not the server. The kernel legs patch Rgetattr in a loopback
+  responder; leg O of the boot-fatal symlink-probe now does it on real Stratum:
+  its own directory at 0555 must refuse a link, the same directory at 0755 must
+  take one, and the link's group must be the probe's primary group.
+
+**Round 1** (holotype-reviewer, Fable 5.1 start and end, static): 0 P0 / 0 P1 /
+0 P2 / 4 P3, and it confirmed the core claims (no path lets a submitter's
+identity differ from `l->ident`; the stat never runs under a lock or in the
+poll thread; `admitting` releases exactly once on every path). Two of its
+suggested fixes were wrong, and I did not take them:
+- F1 (names skipped `sys_copy_component`'s rule). Validating the shared buffer
+  in place is a TOCTOU: userspace rewrites the name between the check and the
+  send. Validating in the build thunk maps a bad name to -EIO under `c->lock`.
+  So the six ops copy their names into a tail on the op, validate the copy, and
+  the thunks send the copy.
+- F2 (a blocking ENTER gave up while a sibling was mid-submit). The one-line
+  fix -- count `admitting` in the give-up -- turns the loop into a busy-spin for
+  a whole wire RPC. My first repair slept on the old predicate, which could
+  leave a waiter asleep with an op in flight that nobody pumps. The waiter now
+  sleeps only while nothing is in flight and something is mid-submit, and every
+  reservation release wakes the CQ waiters.
+- F3 was a doc gap; F4 (a moved DIRECTORY needs no W on itself; Linux asks it,
+  for "..") is pre-existing, shared with the sync rename, and is the operator's
+  call.
+
+**A wrong turn of my own, caught by an anchor.** Dry-running the sabotage patches
+with `git checkout -- kernel/loom.c` as the restore threw away the uncommitted
+F1/F2 edits to loom.c. The next dry-run's anchors did not match, which is how I
+saw it. Re-applied the identical patch; committed before any further sabotage.
+
+**Evidence** (aux-3, the Mac held via yip):
+- full `tools/build.sh kernel --config ci`: clean; symlink-probe's leg O
+  compiled first time.
+- GREEN run 1: 1643/1644. The one failure was my test, not the kernel: the
+  "high garbage" mode leg passed `0x10000755`, whose low bits are HEX 0x755, so
+  the masked mode is 0525, not 0755. Fixed to `0x10000000 | 0755` (masked 0755;
+  unmasked the wire carries 0x100001ED, so it still discriminates).
+- GREEN run 2 (kernel md5 2c9b592e): 1644/1644, boot to login, symlink-probe
+  PASS with all five leg-O checks (0555 refuses, 0755 lands, the link's group is
+  the creator's primary gid) on real Stratum.
+- Five sabotage kernels, each failing exactly its targets and nothing else:
+  SAB-1 (gate call + `admitting` dropped from the reservation) 1639/1644:
+  admission_counts_admitting, mkdir_e2e, dirmut_dac, create_gid, dirmut_names;
+  SAB-2 (RENAMEAT newdir + mode mask) 1642: dirmut_dac, create_gid;
+  SAB-3 (LINK checks its source + chgrp dropped) 1642: dirmut_dac, create_gid;
+  SAB-4 (stat fails open + SQPOLL refusal dropped) 1642: dirmut_dac,
+  dirmut_sqpoll; SAB-5 (name rule + the old give-up) 1642: wait_counts_admitting,
+  dirmut_names.
+- Clean rebuild after the sabotage: md5 2c9b592e again, byte-identical to the
+  GREEN kernel.
+- The five sabotage boots never reach userspace (a failed kernel test extincts
+  the boot), so leg O had no sabotage of its own. SAB-6: the gate call alone
+  removed, the kernel built with KERNEL_TESTS=OFF so the probe ladder runs. On
+  live Stratum the link into the 0555 directory then LANDS and gets group 0;
+  the 0755 control still passes. So Stratum does not refuse it -- the kernel
+  gate is the only refusal, and the P0 was real on the live server, not just in
+  the fixture. Restored (KERNEL_TESTS=ON): md5 2c9b592e again.
+- TLC: all 27 loom cfgs as intended (19 buggy violate, 8 clean pass).
+
+**Round 2** (Fable 5.1 start and end, on the round-1 fixes): 0 P0 / 0 P1 / 0 P2
+/ 4 P3, and it found a real ordering gap next to my change, not in it. The DRAIN
+gate asked "is anything in flight or rearm-pending?" but not "is anything
+mid-submit?" -- so with two ENTER threads, a drain could run while a sibling's
+MKDIR was still in its parent stat, before that MKDIR reached the wire. 8.5.1 had
+widened that window from a few instructions to a round trip; `admitting` already
+held the missing fact. Fixed with one term, plus a test whose control proves the
+held drain still runs once the sibling is done. The other three: my wait test's
+verdict was a negative ("not returned after 256 yields") that an undispatched
+waiter also satisfies -- it now waits to SEE the waiter parked on the wait-list
+and asleep; the status row predated round 1; two span arms had no test. Two
+comments in loom.c still described the over-admit window `admitting` closed --
+"a comment true about the wrong version" -- rewritten.
+- Round 2 evidence: GREEN 1645/1645 + symlink-probe PASS (kernel md5 1fda1871);
+  SAB-7 (the drain gate without `admitting`) fails drain_waits_for_admitting;
+  SAB-8 / SAB-9 (the RENAMEAT / SYMLINK span arms) fail dirmut_names at their
+  own legs; SAB-5 re-run fails the reworked wait test on "the wait held";
+  restore byte-identical; TLC 27/27 again.
+
+**Landed** as fa91fb34 (five local WIPs folded; its tree is byte-identical to
+the verified one). **What "fixed" covers:** the six ops' parent DAC, names, gid
+and mode at submit, exact admission including the wait side and the drain gate.
+**Still open, the operator's:** R1-F4 (a moved directory needs no W on itself;
+shared with the sync rename), LINK's unchecked source, MKNOD device nodes, and
+the SQPOLL refusal and gid-0 rule as ABI semantics.
+
+**Operator.** "Take any time and depth you need." Stratum changes are
+permissible (not needed here: the server cannot know group membership). `ln`
+suggested -> queued as (R). Researched while waiting on the Mac: it needs no
+ABI change (DISTRO 4.4 names a library pair over Loom as the seam), and
+LIFE-SUPPORT LS-9's "symlinks force the handle-based cwd" is stale -- symlinks
+landed without it -- so that scripture is corrected first. Main's
+context-economy-2 relay -> merge main right after this lands.
+
 ## 2026-09-23, midday (aux, Opus 5.5 1M, effort max) -- the recipe failed on the operator's own deck, and a shell that forgot where it started
 
 **The plan was queue item (H).** A ut started without `--home` (imperium's
