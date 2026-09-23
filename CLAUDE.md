@@ -225,7 +225,7 @@ Auto-memory lives at `~/.claude/projects/-Users-northkillpd-projects-thylacine/m
 At every session boundary (compaction, explicit handoff, completing a phase/sub-chunk, any point where a new instance might pick up):
 
 1. Update `project_active.md` with current state.
-2. Update `project_next_session.md` with the pickup pointer: current tip SHA, what's landed, what's next, any invariants or traps the next session needs to know.
+2. Update `project_next_session.md` with the pickup pointer: current tip SHA, what's landed, what's next, any invariants or traps the next session needs to know, and the **working set** (the files to load first to continue, as in the resume note).
 3. Update the affected phase status doc.
 4. If audit findings remain open, summarize in memory.
 5. Commit the memory + status updates.
@@ -324,15 +324,16 @@ Every other gate, and what each one proves: `docs/agent/GATES.md`.
 
 ## Context economy and compaction
 
-**The compaction line is 400k.** Below it, run through checkpoints: land a chunk, give the three-line checkpoint, open the next one in the same run. At the `ctx-hook` CHECKPOINT WINDOW line (400k; the thresholds live in `.claude/ctx-thresholds`, read by both `~/.claude/ctx-hook.sh` and `tools/stop-hook.sh`), carry to a clean boundary, make your last message the resume note (what is in flight and what must NOT be redone), then run `tools/thyla-selfcompact.sh "<reason>"`. Past 500k: wind down, start no new arc. 880k: commit, hand off, yield. Invoke the self-compact only on the real signal -- a queued `/compact` cannot be cancelled by you, only by the operator. A belay (HEAD unmoved across two self-compactions) is a stop: hand back. If no CONTEXT line has ever appeared by about two thirds of the budget, treat the hook as absent and use judgement. Rationale: `docs/agent/SESSION-DISCIPLINE.md`.
+**The compaction line is 400k.** Below it, run through checkpoints: land a chunk, give the three-line checkpoint, open the next one in the same run. At the `ctx-hook` CHECKPOINT WINDOW line (400k; the thresholds live in `.claude/ctx-thresholds`, read by both `~/.claude/ctx-hook.sh` and `tools/stop-hook.sh`), carry to a clean boundary, make your last message the resume note -- what is in flight, what must NOT be redone, and a **Working set**: the files to load first to continue comfortably, one `- path` item each, in order (a bare path = the whole file, because the next step works across it; `path:A-B` = a window) -- write it to the note file (at most 8,000 characters, or the harness shows only a preview; long state belongs in the design memory, listed in the working set), then run `tools/thyla-selfcompact.sh "<reason>"`. Past 500k: wind down, start no new arc. 880k: commit, hand off, yield. Invoke the self-compact only on the real signal -- a queued `/compact` cannot be cancelled by you, only by the operator. A belay (HEAD unmoved across two self-compactions) is a stop: hand back. If no CONTEXT line has ever appeared by about two thirds of the budget, treat the hook as absent and use judgement. Rationale: `docs/agent/SESSION-DISCIPLINE.md`.
 
 **Every call re-reads the whole context**, so the cost of a round trip grows with the context. Therefore:
 - **Batch.** Memory stamps, status rows, index lines and journal fills go in ONE script, not one call each. Put independent calls in one message.
 - **Never poll a background job** -- wait for its completion notification.
 - **Load deferred tools once**, in one `ToolSearch select:` for the whole set, right after a compaction.
 - **Cap output.** Count before you dump (`grep -c`, `wc`), read windows not whole files; never `cat` a directory's headers. A result that spills to a file is a sign the command was wrong -- narrow it, do not Read the spill whole.
+- **After a compaction, load the resume note's working set first** -- and only once it is in context decide what else you need, reading windows. Do not re-survey the subsystem; the note already chose. `tools/thyla-selfcompact.sh` refuses a note without a working set or with a path that does not exist.
 - **Compact before researching the next chunk**, not after: when a chunk closes within ~100k of the line, compact first.
-- **Delegate bulk writing** (dossier passes, closed lists, journal entries) to a subagent when the main context is large; keep its result to a line.
+- **Write the dossier pass in the main session, at chunk close, while the code is still in context.** Do not hand it to a fresh subagent: it has to re-read the change it documents (measured 2026-09-23: the B-1a' pass as a subagent took 85 calls and 3.7M, peaking at 498k context, against 1.8M for the B-1a pass done in the main session). Delegate only work whose inputs are small and named -- a closed list, a journal entry from notes -- and give the subagent the diff, the exact files and sections to change, and a reading budget. Subagents cannot self-compact, so an open-ended brief grows the way the old 600k sessions did.
 - **Do not leave a session idle at high context** -- self-compact or `/clear` from the handoff first; a cold cache re-writes the whole context at 2x.
 
 **Stopping vs finishing.** The full summary (the `hand-back` skill) is for STOPPING: the compaction line, an escalation item, a genuine block, or the user asks. At a checkpoint you run through, three lines -- what landed, what is running, what is next -- then the next tool call. `tools/stop-hook.sh` asks once if you stop mid-budget without one of those reasons.

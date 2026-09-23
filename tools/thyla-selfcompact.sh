@@ -108,6 +108,41 @@ NOTE_AGE=$(( $(date +%s) - $(stat -f %m "$NOTE" 2>/dev/null || echo 0) ))
 [ "$NOTE_AGE" -le "$NOTE_MAX_AGE" ] || deny "the resume note is ${NOTE_AGE}s old (max ${NOTE_MAX_AGE}s) -- rewrite it for THIS compaction rather than shipping a stale one"
 NOTE_CHARS=$(wc -c < "$NOTE" | tr -d ' ')
 [ "$NOTE_CHARS" -ge 200 ] || deny "the resume note is only ${NOTE_CHARS} chars -- too thin to orient a fresh context"
+# The note reaches the far side as SessionStart hook context, and the harness
+# spills hook context past its size limit to a file, showing only a 2 KB
+# preview. Measured 2026-09-23: a 9.8 KB note was spilled and had to be read
+# back by hand; 4.5-5.4 KB notes arrived inline. 8000 leaves room for the
+# header resume-note.py prepends.
+NOTE_MAX_CHARS=${THYLA_NOTE_MAX_CHARS:-8000}
+[ "$NOTE_CHARS" -le "$NOTE_MAX_CHARS" ] || deny "the resume note is ${NOTE_CHARS} chars (max ${NOTE_MAX_CHARS}) -- the harness would spill it to a file and show a 2 KB preview. Cut it: facts that live in memory or the design note belong there, referenced by path (put that file in the working set)"
+
+# --- the working set: what the far side loads before anything else ---------
+# A fresh context re-finds its footing by reading, and unguided it reads
+# broadly: measured 2026-09-23, six 15-23 KB dumps took one session from 91k to
+# 169k in five calls, re-reading files it had read an hour earlier. The note
+# names them instead; the far side loads exactly these first, then decides what
+# else it needs. Format: a line starting "Working set", then one "- " item per
+# file, path first ("path" = whole file, "path:A-B" = a window), until a blank.
+WS=$(awk 'tolower($0) ~ /^[#*_ ]*working set/ {f=1; next} f && /^[[:space:]]*$/ {exit} f' "$NOTE")
+WS_ITEMS=$(printf '%s\n' "$WS" | sed -nE 's/^[[:space:]]*[-*][[:space:]]+`?([^`[:space:],]+).*/\1/p')
+[ -n "$WS_ITEMS" ] || deny "the resume note has no 'Working set' section
+  List the files to load first to continue comfortably, in order, one per item:
+    Working set:
+    - kernel/vma.c              whole -- the next step edits across it
+    - kernel/syscall.c:5900-6290  window -- only the detach path
+  The far side loads these first and then decides what else it needs."
+# The session's own tree (TOPLEVEL, from the cwd), not the script's: a worktree
+# session names paths in its worktree.
+WS_REPO=${TOPLEVEL:-$(git -C "$(dirname "$0")/.." rev-parse --show-toplevel 2>/dev/null)}
+WS_BAD=""; WS_N=0
+for item in $WS_ITEMS; do
+  f=${item%%:*}
+  case $f in /*) q=$f ;; "~"/*) q="$HOME/${f#\~/}" ;; *) q="$WS_REPO/$f" ;; esac
+  if [ -z "$WS_REPO" ] && [ "$q" = "/$f" ]; then WS_N=$((WS_N+1)); continue; fi
+  if [ -e "$q" ]; then WS_N=$((WS_N+1)); else WS_BAD="$WS_BAD $f"; fi
+done
+[ -z "$WS_BAD" ] || deny "the working set names paths that do not exist:$WS_BAD
+  (checked relative to $WS_REPO) -- fix them so the far side does not start on a wrong read"
 
 # --- the progress gate ----------------------------------------------------
 LAST_HEAD=""; NOPROG=0
@@ -215,7 +250,7 @@ tmux send-keys -t "$TMUX_PANE" C-u          # never submit residue
 tmux send-keys -t "$TMUX_PANE" "/compact"
 tmux send-keys -t "$TMUX_PANE" C-m          # fires when this turn ends
 say ""
-say "note armed  : $NOTE_PENDING (${NOTE_CHARS} chars, ${NOTE_AGE}s old)"
+say "note armed  : $NOTE_PENDING (${NOTE_CHARS} chars, ${NOTE_AGE}s old, working set ${WS_N} file(s))"
 say "/compact queued -- it submits when this turn ends."
 say "nudge       : $NUDGE_STATE"
 say "The far side consumes the pending note exactly once and is told this was a"
