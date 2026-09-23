@@ -32,8 +32,10 @@
 // Per the Plan 9 native split + UTOPIA-SHELL-DESIGN.md section 11.2: pure
 // userspace logic over libthyla-rs `fs::read_dir` (already audited, RW-8); the
 // audit-bearing raw-mode editor + consctl surface this rides on was discharged
-// at the Kaua T-4 audit (#101). The classification + path-split are pure (unit
-// tested below); only the directory read is a syscall, taken solely on Tab.
+// at the Kaua T-4 audit (#101). The classification + path-split are pure, and
+// the one syscall -- the directory read, taken solely on Tab -- goes through a
+// `ListDir`, so the tests below drive path completion over a fixed tree while
+// the shell hands in the live filesystem.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -45,21 +47,48 @@ use crate::line_editor::{Completions, CompletionSource};
 /// cap bounds both the work and the `MenuShow` cycle payload.
 const MAX_CANDIDATES: usize = 256;
 
+/// How path completion reads a directory: `visit(name, is_dir)` once per entry,
+/// stopping the moment `visit` returns false. An unreadable directory visits
+/// nothing. It STREAMS rather than returning the listing because the cap above
+/// bounds the work, and a returned listing would read a whole directory of
+/// thousands before the cap could apply.
+pub(crate) type ListDir = fn(dir: &str, visit: &mut dyn FnMut(&str, bool) -> bool);
+
+/// The live `ListDir`: libthyla-rs `fs::read_dir`. An entry the read cannot
+/// return is skipped, not fatal -- a partial menu beats none.
+#[cfg(feature = "backend")]
+fn read_dir_live(dir: &str, visit: &mut dyn FnMut(&str, bool) -> bool) {
+    if let Ok(rd) = libthyla_rs::fs::read_dir(dir) {
+        for ent in rd.flatten() {
+            if !visit(ent.file_name(), ent.is_dir()) {
+                break;
+            }
+        }
+    }
+}
+
 /// The production Tab-completion source. Owns a precomputed command index
 /// (builtins + aliases + funcs + `/bin`, sorted + deduped) for command-position
-/// completion; path completion reads the live filesystem on demand.
+/// completion; path completion reads directories on demand through `list_dir`.
 pub struct ShellCompletionSource {
     /// Known command names, sorted + deduped. Also the artifact #115c coloring
     /// consults (`LineEditor::set_known_commands`), built once by the shell.
     commands: Vec<String>,
+    list_dir: ListDir,
 }
 
 impl ShellCompletionSource {
     /// `commands` must be sorted + deduped (the shell's `refresh_command_index`
     /// guarantees it); command-position completion preserves that order so the
-    /// menu reads alphabetically.
+    /// menu reads alphabetically. Paths complete against the live filesystem.
+    #[cfg(feature = "backend")]
     pub fn new(commands: Vec<String>) -> Self {
-        Self { commands }
+        Self::with_dir_lister(commands, read_dir_live)
+    }
+
+    /// The same source, reading directories through `list_dir`.
+    pub(crate) fn with_dir_lister(commands: Vec<String>, list_dir: ListDir) -> Self {
+        Self { commands, list_dir }
     }
 
     /// Command-position completion: the known names extending `token`, each
@@ -97,7 +126,7 @@ impl CompletionSource for ShellCompletionSource {
 
         // Argument / command-by-path -> path completion. `cd` takes only dirs.
         let dirs_only = first_token(buffer) == "cd";
-        complete_path(token, start, cursor, dirs_only)
+        complete_path(self.list_dir, token, start, cursor, dirs_only)
     }
 }
 
@@ -160,33 +189,33 @@ fn readdir_target(dir_prefix: &str) -> &str {
 /// terminated (`/` for a directory so it can be drilled, space otherwise). A
 /// read failure (missing / unsearchable directory) yields no candidates -- Tab
 /// is then simply inert, never an error.
-fn complete_path(token: &str, start: usize, cursor: usize, dirs_only: bool) -> Completions {
+fn complete_path(
+    list_dir: ListDir,
+    token: &str,
+    start: usize,
+    cursor: usize,
+    dirs_only: bool,
+) -> Completions {
     let (dir_prefix, file_prefix) = split_path_token(token);
     let mut candidates: Vec<String> = Vec::new();
-    if let Ok(rd) = libthyla_rs::fs::read_dir(readdir_target(dir_prefix)) {
-        for ent in rd.flatten() {
-            let name = ent.file_name();
-            if !name.starts_with(file_prefix) {
-                continue;
-            }
-            // Hide dotfiles unless the user explicitly typed a leading '.'.
-            if file_prefix.is_empty() && name.starts_with('.') {
-                continue;
-            }
-            let is_dir = ent.is_dir();
-            if dirs_only && !is_dir {
-                continue;
-            }
-            let mut cand = String::with_capacity(dir_prefix.len() + name.len() + 1);
-            cand.push_str(dir_prefix);
-            cand.push_str(name);
-            cand.push(if is_dir { '/' } else { ' ' });
-            candidates.push(cand);
-            if candidates.len() >= MAX_CANDIDATES {
-                break;
-            }
+    list_dir(readdir_target(dir_prefix), &mut |name, is_dir| {
+        if !name.starts_with(file_prefix) {
+            return true;
         }
-    }
+        // Hide dotfiles unless the user explicitly typed a leading '.'.
+        if file_prefix.is_empty() && name.starts_with('.') {
+            return true;
+        }
+        if dirs_only && !is_dir {
+            return true;
+        }
+        let mut cand = String::with_capacity(dir_prefix.len() + name.len() + 1);
+        cand.push_str(dir_prefix);
+        cand.push_str(name);
+        cand.push(if is_dir { '/' } else { ' ' });
+        candidates.push(cand);
+        candidates.len() < MAX_CANDIDATES
+    });
     // read_dir order is FS-defined; sort so the menu + LCP are deterministic.
     candidates.sort();
     Completions {
@@ -199,12 +228,33 @@ fn complete_path(token: &str, start: usize, cursor: usize, dirs_only: bool) -> C
 mod tests {
     use super::*;
     use alloc::vec;
+    use core::fmt::Write;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A fixed tree standing in for the filesystem:
+    ///   .      script  src/  .hidden
+    ///   src    main.rs  mod/
+    ///   /      bin/  etc/
+    /// Any other directory is unreadable.
+    fn tree(dir: &str, visit: &mut dyn FnMut(&str, bool) -> bool) {
+        let entries: &[(&str, bool)] = match dir {
+            "." => &[("script", false), ("src", true), (".hidden", false)],
+            "src" => &[("main.rs", false), ("mod", true)],
+            "/" => &[("bin", true), ("etc", true)],
+            _ => &[],
+        };
+        for &(name, is_dir) in entries {
+            if !visit(name, is_dir) {
+                return;
+            }
+        }
+    }
 
     fn src(names: &[&str]) -> ShellCompletionSource {
         let mut v: Vec<String> = names.iter().map(|s| String::from(*s)).collect();
         v.sort();
         v.dedup();
-        ShellCompletionSource::new(v)
+        ShellCompletionSource::with_dir_lister(v, tree)
     }
 
     #[test]
@@ -239,14 +289,79 @@ mod tests {
 
     #[test]
     fn command_token_with_slash_is_not_command_completion() {
-        // `./scr` is a command-by-path -> path completion, NOT the index.
-        // The index has no entry starting "./scr"; path completion will
-        // readdir "." (no syscall on host -> empty), so candidates are empty
-        // and -- crucially -- NOT filtered from the command index.
-        let s = src(&["script-in-index"]);
+        // `./scr` is a command-by-path -> PATH completion, not the index. The
+        // assertion is positive on purpose: the index cannot hold a name with
+        // a '/', so an empty result would pass whichever route the token took.
+        // `script` can only have come from the directory.
+        let s = src(&["scrap"]);
         let c = s.complete("./scr", 5);
-        assert!(c.candidates.is_empty());
+        assert_eq!(c.candidates, vec!["./script "]);
         assert_eq!(c.replace_range, 0..5);
+        // The same prefix without the slash is command position: the index.
+        assert_eq!(s.complete("scr", 3).candidates, vec!["scrap "]);
+    }
+
+    #[test]
+    fn argument_position_completes_paths_with_terminators() {
+        let s = src(&["cat"]);
+        let c = s.complete("cat s", 5);
+        assert_eq!(c.replace_range, 4..5);
+        // A file ends in a space, a directory in a slash; sorted.
+        assert_eq!(c.candidates, vec!["script ", "src/"]);
+    }
+
+    #[test]
+    fn cd_completes_directories_only() {
+        let s = src(&["cd"]);
+        assert_eq!(s.complete("cd s", 4).candidates, vec!["src/"]);
+    }
+
+    #[test]
+    fn dotfiles_hide_until_a_dot_is_typed() {
+        let s = src(&["cat"]);
+        assert_eq!(s.complete("cat ", 4).candidates, vec!["script ", "src/"]);
+        assert_eq!(s.complete("cat .", 5).candidates, vec![".hidden "]);
+    }
+
+    #[test]
+    fn a_directory_prefix_is_kept_on_every_candidate() {
+        let s = src(&["cat"]);
+        assert_eq!(
+            s.complete("cat src/m", 9).candidates,
+            vec!["src/main.rs ", "src/mod/"]
+        );
+        assert_eq!(s.complete("cat /e", 6).candidates, vec!["/etc/"]);
+    }
+
+    #[test]
+    fn an_unreadable_directory_completes_to_nothing() {
+        let s = src(&["cat"]);
+        assert!(s.complete("cat nope/x", 10).candidates.is_empty());
+    }
+
+    /// Entries this lister has handed out, across the whole test binary --
+    /// only `the_cap_stops_the_read_not_just_the_menu` uses it.
+    static MANY_VISITED: AtomicUsize = AtomicUsize::new(0);
+
+    fn many(_dir: &str, visit: &mut dyn FnMut(&str, bool) -> bool) {
+        let mut name = String::new();
+        for i in 0..MAX_CANDIDATES + 44 {
+            name.clear();
+            let _ = write!(name, "f{:03}", i);
+            MANY_VISITED.fetch_add(1, Ordering::Relaxed);
+            if !visit(&name, false) {
+                return;
+            }
+        }
+    }
+
+    #[test]
+    fn the_cap_stops_the_read_not_just_the_menu() {
+        let s = ShellCompletionSource::with_dir_lister(Vec::new(), many);
+        let c = s.complete("cat f", 5);
+        assert_eq!(c.candidates.len(), MAX_CANDIDATES);
+        // The listing had 44 more entries; none of them were read.
+        assert_eq!(MANY_VISITED.load(Ordering::Relaxed), MAX_CANDIDATES);
     }
 
     #[test]

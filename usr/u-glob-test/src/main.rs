@@ -2,7 +2,7 @@
 //
 // Runs PRE-pivot (flat devramfs root). Two layers:
 //
-//   A. The load-bearing fs-walk -- libutopia::eval::glob::expand directly
+//   A. The load-bearing fs-walk -- libutopia::eval::pathname::expand directly
 //      against the boot ramfs. argv echoes to a dropped pipe at v1.0
 //      (no terminal-backed fd 1 until U-PTY), so the expansion itself is
 //      asserted here on the returned Vec rather than via command output:
@@ -28,7 +28,7 @@ use alloc::string::String;
 
 use libthyla_rs::alloc::ThylaAlloc;
 use libthyla_rs::t_putstr;
-use libutopia::eval::{eval_source, glob, Env};
+use libutopia::eval::{eval_source, pathname, Env};
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: ThylaAlloc = ThylaAlloc;
@@ -39,7 +39,7 @@ pub extern "C" fn rs_main() -> i64 {
     let env = Env::new();
 
     // A1. Prefix star: `u-*` names the u-prefixed binaries on the flat root.
-    let u = glob::expand(&env, "u-*");
+    let u = pathname::expand(&env, "u-*");
     if !contains(&u, "u-glob-test") {
         return fail("u-* missing self");
     }
@@ -55,7 +55,7 @@ pub extern "C" fn rs_main() -> i64 {
 
     // A2. Bare star: enumerates the whole flat root. Single-level (no `/`),
     //     no leading-dot leak, sorted, plausibly many entries.
-    let all = glob::expand(&env, "*");
+    let all = pathname::expand(&env, "*");
     if all.len() < 10 {
         return fail("* count implausibly low");
     }
@@ -76,13 +76,13 @@ pub extern "C" fn rs_main() -> i64 {
     }
 
     // A3. Single-char wildcard: `versio?` -> version.
-    let q = glob::expand(&env, "versio?");
+    let q = pathname::expand(&env, "versio?");
     if !contains(&q, "version") {
         return fail("versio? missing version");
     }
 
     // A4. Char class: `[vw]*` matches both version and welcome.
-    let cc = glob::expand(&env, "[vw]*");
+    let cc = pathname::expand(&env, "[vw]*");
     if !contains(&cc, "version") {
         return fail("[vw]* missing version");
     }
@@ -91,14 +91,14 @@ pub extern "C" fn rs_main() -> i64 {
     }
 
     // A5. rc nullglob (scripture 6.10): no match -> EMPTY list.
-    let none = glob::expand(&env, "no-match-prefix-zzz-*");
+    let none = pathname::expand(&env, "no-match-prefix-zzz-*");
     if !none.is_empty() {
         return fail("nullglob expanded to a non-empty list");
     }
 
     // A6. Absolute pattern: `/u-*` -> "/u-..." display (resolve_fs absolute
     //     branch + the join_display root branch).
-    let abs = glob::expand(&env, "/u-*");
+    let abs = pathname::expand(&env, "/u-*");
     if !contains(&abs, "/u-glob-test") {
         return fail("/u-* missing /u-glob-test");
     }

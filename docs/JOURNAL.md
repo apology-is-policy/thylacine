@@ -94,10 +94,52 @@ Adopted into `sub-substrate-gates`, and in the same edit the two gate changes of
 removed theirs from `quaestor stale` while leaving them undescribed.
 `sub-utopia-parser`'s count is corrected to the tip.
 
-**Posture**: `tools/test-rust.sh` **1,814 distinct tests / 26 crates / 0 failing
-/ 1 quarantined / 0 warnings; 100 STRANDED in 2 crates** (libutopia 91, aurora
-9). ls-ci PASS 37 s at `53c51671`. Device workspace build clean. quaestor lint
-1,270 notes, 0 fail.
+That landed as `801293fd` (1,814 distinct tests, 100 stranded in 2 crates).
+
+**Then the first 20 of libutopia's stranded tests.** Each stranded module is
+gated for a real reason, but two were gated for ONE call each. `eval::glob` had
+grown the argv-time filesystem walk beside the pattern matcher, so the matcher's
+11 tests -- all about matching -- were stranded with the one function that calls
+`fs::read_dir`. Moved the walk byte-for-byte into a gated `eval::pathname`
+(POSIX's "pathname expansion") and `glob` is the pure matcher its header always
+said it was. It also cut one of `expr`'s three couplings: `expr` only ever used
+the matcher. My caller search for the move covered `usr/utopia` and missed
+`u-glob-test`, which calls `expand` six times -- the device build caught it, and
+it is last night's lesson in a new costume: a search scoped to where you EXPECT
+callers is not a search for callers.
+
+`completion` was gated for one `read_dir`, and it could not be ungated with a
+stub, because of one test. `command_token_with_slash_is_not_command_completion`
+asserted an EMPTY result for `./scr` -- which BOTH routes return, since the
+command index cannot hold a name with a `/`. Measured, not argued: under a
+sabotage that sends slash tokens to the index, the old test body PASSES (against
+a lister that reads nothing, i.e. the old host). So the directory read became a
+seam -- a `ListDir` that STREAMS entries to a visitor, because the 256-candidate
+cap is documented as bounding the work and a returned listing would read a whole
+directory first. The rewritten test asserts `./script` from a fixed tree and
+fails under that sabotage; six new tests cover path completion on the host for
+the first time; and `the_cap_stops_the_read_not_just_the_menu` catches the
+sabotage the menu cannot see (read everything, keep 256: menu 256, read 300).
+All five sabotages caught.
+
+**The seam made a documented defect reproducible, and it is queued as its own
+fix, not folded in.** `sub-utopia-interactive` records that the cap is applied
+before the sort, so in a directory of more than 256 matches Tab can extend the
+line to a prefix that excludes valid candidates. Sorting first does not cure it
+-- the first 256 of a sorted set can share a prefix the full set does not.
+
+**Dossier currency, again by measurement.** `sub-utopia-interactive` read as
+stale on six files. Four were a merge artifact -- `git diff` showed the 09-22
+merge took main's side of all four EXACTLY, and main's last change to them was
+the same commit (`817c2339`) that last updated the dossier. The other two were
+mine (last night's `backend` split and the UT-EDIT-1 settlement), now written up.
+
+**Posture**: `tools/test-rust.sh` **1,840 distinct tests / 26 crates / 0 failing
+/ 1 quarantined / 0 warnings; 80 STRANDED in 2 crates** (libutopia 71 of 409,
+aurora 9). **ls-ci PASS 37 s on the split's own image**, the guest log carrying
+`u-glob-test reaped status=0` and `u-repl-test reaped status=0` -- the two boot
+witnesses for the moved walk and the live lister. Device workspace build clean.
+quaestor lint 1,270 notes, 0 fail.
 
 ---
 ## 2026-09-22, night (aux, Opus 5 1M, effort xhigh) -- all six closed: four real defects, two wrong tests, and a false measurement I handed the operator

@@ -32,21 +32,21 @@
 // is libthyla_rs::alloc::ThylaAlloc).
 extern crate alloc;
 
-// The `backend` split. A module is gated here iff it reaches for a syscall,
-// and the point of the line is the test suite: without it the crate could not
-// be compiled for a host target at all, so its 399 unit tests ran on no
-// machine. The modules ABOVE the line are the shell's thinking -- the lexer,
-// the parser, expression evaluation, the line editor -- which is the half
-// where a silent regression is both most likely and least visible from a boot.
+// The `backend` split. A module is gated here iff it reaches for a syscall it
+// cannot take through a seam, and the point of the line is the test suite:
+// without it the crate could not be compiled for a host target at all, so its
+// 399 unit tests ran on no machine. The modules ABOVE the line are the shell's
+// thinking -- the lexer, the parser, the line editor, Tab completion (whose one
+// directory read is injected) -- which is the half where a silent regression
+// is both most likely and least visible from a boot. `eval` gates per module.
 pub mod ansi;
+pub mod completion;
 pub mod line_editor;
 pub mod palette;
 pub mod parser;
 pub mod path;
 
 pub mod eval;
-#[cfg(feature = "backend")]
-pub mod completion;
 #[cfg(feature = "backend")]
 pub mod repl;
 

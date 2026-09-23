@@ -158,6 +158,7 @@ use super::env::Env;
 use super::error::{EvalError, EvalErrorKind, EvalResult};
 use super::expr::eval_expr;
 use super::glob;
+use super::pathname;
 use super::value::Value;
 
 /// The result of evaluating one statement (or one block).
@@ -1692,7 +1693,7 @@ fn evaluate_argv(env: &Env, words: &[Word]) -> EvalResult<Vec<String>> {
     let mut argv = Vec::new();
     for w in words {
         if let Some(pat) = glob_candidate(w) {
-            let hits = glob::expand(env, pat);
+            let hits = pathname::expand(env, pat);
             // rc nullglob (scripture 6.10): an empty match set drops the
             // word entirely rather than passing the literal pattern.
             argv.extend(hits);

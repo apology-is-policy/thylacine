@@ -12,6 +12,7 @@ code:
   - usr/utopia/libutopia/src/path.rs
   - usr/utopia/libutopia/src/lib.rs
   - usr/utopia/shell/src/main.rs
+  - usr/u-repl-test/src/main.rs
 audit: light
 guarded-by: [inv-i9, inv-i19, inv-i20, inv-i27]
 validated-by: [prose, gate-interactive]
@@ -20,7 +21,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-03
-updated: 2026-09-21
+updated: 2026-09-23
 area: userspace
 ---
 ## Graphical elevation banner
@@ -160,6 +161,32 @@ exhausted it enters the zsh-style cycling menu — apply candidate 0, emit
 `MenuShow`, and let the REPL paint a one-line strip below the prompt. Tab cycles,
 Enter finalizes without submitting, any other key dismisses and is re-dispatched.
 
+**The directory read is injected, not called (2026-09-23).** The source reads
+directories through a `ListDir` -- `fn(dir, visit)`, calling `visit(name,
+is_dir)` per entry until it returns false. `ShellCompletionSource::new` hands in
+the live `fs::read_dir` (the one `backend`-gated item left in the module); the
+unit tests hand in a fixed tree, so path completion -- routing, terminators,
+`cd`'s directories-only rule, dotfile hiding, the directory prefix -- is tested on
+the host rather than only at boot. It STREAMS rather than returning a listing
+because the 256 cap bounds the work: a returned listing would read a whole
+directory before the cap could apply. A test pins that the read itself stops
+(`the_cap_stops_the_read_not_just_the_menu`), because the menu alone cannot tell
+"stopped at 256" from "read everything, kept 256". The seam also exposed a test
+that could not fail: `command_token_with_slash_is_not_command_completion` asserted
+an EMPTY result for `./scr`, which is what BOTH routes return -- the index cannot
+hold a name with a `/` -- so a sabotage sending slash tokens to the index passed
+it. It now asserts `./script` from the tree, and that sabotage fails it.
+
+**What runs where.** Since the `backend` split (2026-09-22) the crate builds for
+the host, and `line_editor`, `completion`, `palette`, `ansi` and `path` run their
+unit tests under `tools/test-rust.sh`. `repl` -- the syscall loop -- stays
+device-only, witnessed at boot by `u-repl-test`, whose step 8 also reads a REAL
+directory through `ShellCompletionSource::new`, the one thing the host tests
+cannot. The line editor's `ESC ESC` restarts the escape sequence (the VT rule)
+and consumes the next byte as `ESC <byte>`, the slot reserved for Alt bindings;
+its header documents the transition. That behaviour was once a failing test
+(UT-EDIT-1) and the test was the side that was wrong.
+
 **The command index is built once per accepted line** — builtins plus aliases plus
 functions plus a cached `/bin` and `/goroot/bin` scan, sorted and deduped — and the
 *same* sorted vector is handed to both the completion source and the validity
@@ -294,7 +321,7 @@ accepted line and is deliberately syscall-free — the `/bin` scan is cached at
 install and only the alias and function tables are re-walked, then sorted and
 deduped. Completion takes exactly one `read_dir` per Tab in argument position and
 none in command position. Candidates are capped at 256 per Tab, which bounds both
-the work and the menu strip.
+the work and the menu strip -- the read stops at the cap, pinned by a host test.
 
 The history cap is 10 000 entries in memory, with on-disk history appended
 line-by-line at `~/.ut_history`, mode 0600 — the encrypted home already gates
@@ -374,7 +401,12 @@ so "the menu + LCP" are deterministic, which is the exact property the truncatio
 undoes. The engine computes its longest common prefix over whatever subset
 survived, so in a directory with more than 256 matches Tab can extend the line to a
 prefix that excludes valid candidates. Command completion is unaffected (its source
-vector is already sorted, so the cap takes a deterministic first 256).
+vector is already sorted, so the cap takes a deterministic first 256). **This is a
+defect, OWED as its own fix, and since 2026-09-23 it is reproducible on the host**
+through the `ListDir` seam. Sorting before the cap does not cure it -- the first
+256 of a sorted set can share a prefix the full set does not -- and the true prefix
+is unknowable once the read stops, so the sound behaviour for a truncated set is
+not to extend at all.
 
 **A multi-line render that shrinks leaves stale lines on screen, and the fix was
 assigned to a chunk that shipped without it.** The comment describes the defect

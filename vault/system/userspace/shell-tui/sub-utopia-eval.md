@@ -10,11 +10,13 @@ code:
   - usr/utopia/libutopia/src/eval/expr.rs
   - usr/utopia/libutopia/src/eval/env.rs
   - usr/utopia/libutopia/src/eval/glob.rs
+  - usr/utopia/libutopia/src/eval/pathname.rs
   - usr/utopia/libutopia/src/eval/jobs.rs
   - usr/utopia/libutopia/src/eval/console.rs
   - usr/utopia/libutopia/src/eval/discipline.rs
   - usr/utopia/libutopia/src/eval/value.rs
   - usr/utopia/libutopia/src/eval/error.rs
+  - usr/u-glob-test/src/main.rs
 audit: light
 guarded-by: [inv-i19, inv-i20, inv-i27, inv-i28]
 validated-by: [prose, gate-interactive]
@@ -24,7 +26,7 @@ abis: []
 design:
   - "docs/UTOPIA-SHELL-DESIGN.md sections 5-10"
 created: 2026-08-03
-updated: 2026-09-22
+updated: 2026-09-23
 ---
 ## Purpose
 
@@ -481,13 +483,25 @@ one.
 
   **`eval::expr` and the syscall-bearing modules are still behind the gate, and
   for `expr` the reason is worth stating.** It makes no syscall of its own, but
-  expansion genuinely reaches into `stmt` (command substitution), `glob` and
-  `env` — `$(...)` runs a pipeline and `*.md` asks the filesystem. That is
-  coupling in the shell's design, not an accident of imports, so its 29 tests
-  stay stranded until someone restructures the evaluator. `builtin`, `console`,
-  `env`, `glob` and `stmt` are gated because they do call syscalls, which is
-  exactly the layering rule the crate already states: only the built-ins whose
-  purpose is to mutate THIS Proc reach for one.
+  expansion genuinely reaches into `stmt` (command substitution) and `env` —
+  `$(...)` runs a pipeline. That is coupling in the shell's design, not an
+  accident of imports, so its 29 tests stay stranded until someone restructures
+  the evaluator. (Its use of `glob` is the pure matcher only -- the `matches`
+  operator and case-as-expression -- which stopped being a coupling on
+  2026-09-23.) `builtin`, `console`, `env`, `pathname` and `stmt` are gated
+  because they do call syscalls, which is exactly the layering rule the crate
+  already states: only the built-ins whose purpose is to mutate THIS Proc reach
+  for one. At 2026-09-23 the crate still strands 71 of its 409 tests: `eval::expr`
+  29, `eval::stmt` 14, `eval::env` 5, and `repl` 23 ([[sub-utopia-interactive]]).
+  `tools/test-rust.sh` prints the figure per crate ([[sub-substrate-gates]]).
+
+  **Globbing was split the same way (2026-09-23).** `eval::glob` had grown the
+  argv-time filesystem walk beside the pattern matcher, so the matcher's eleven
+  tests -- every one of them about matching, none about the filesystem -- were
+  stranded with the one function that calls `fs::read_dir`. `glob` is the pure
+  matcher again, as its own header always said it was, and its tests run on the
+  host; `eval::pathname` (POSIX's "pathname expansion") holds `expand` and its
+  walk, moved byte-for-byte and gated, and `u-glob-test` witnesses it at boot.
 
   **`console`'s vocabulary was lifted out** into `eval::discipline`
   (2026-09-22), and it is the clearest case for why the `backend` split was

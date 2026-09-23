@@ -133,8 +133,9 @@ pub extern "C" fn rs_main() -> i64 {
 
     // 8. #115a: the namespace-driven Tab completion source. Command-position
     //    completion is pure (filters the index); argument-position completion
-    //    reads the LIVE filesystem -- the in-QEMU proof of the read_dir path
-    //    that the host unit tests (libutopia cannot host-test) cannot exercise.
+    //    reads the LIVE filesystem -- the in-QEMU proof of the `read_dir`
+    //    binding. The host unit tests drive path completion over a fixed tree;
+    //    only a boot reads a real directory through `ShellCompletionSource::new`.
     {
         use alloc::string::String;
         use libutopia::completion::ShellCompletionSource;
