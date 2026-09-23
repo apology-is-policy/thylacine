@@ -43,7 +43,7 @@ Fable at start AND end -- no mid-run model fallback. Three lenses per area
 | R3-F4 | H4 | C/T | Partial walk -> `-EIO` instead of Plan 9 last-bound-qid | REGISTERED (documented) |
 | R4-F2 | P3 | C | SQPOLL back-pressure strands until next submit (busy-poll reap) | REGISTERED `#23` (doc + v1.x) |
 | R4-F3 | P3 | C | Multi-client Loom ring pumps only the first client -> starvation | REGISTERED `#23` (v1.x round-robin) |
-| R4-F4 | H2 | T | io_uring `SINGLE_ISSUER` + CQ overflow-list retires the over-admit residual + R4-F1 | REGISTERED `#23` (SURFACED, pre-rc) |
+| R4-F4 | H2 | T | io_uring `SINGLE_ISSUER` + CQ overflow-list retires the over-admit residual + R4-F1 | REGISTERED `#23` (SURFACED, pre-rc); the residual itself CLOSED 2026-09-23 by exact admission (`Loom.admitting`, LOOM.md 8.5.1) |
 | R-A-F1 | P2 | C | `18-territory.md` + `104-stalk.md` teach the PRE-fix contract (borrow + "no lock") | **FIXED** (this commit) |
 | R-A-F2 | P3 | -- | `sys_walk_open_handler` comment "src is NOT spoor_ref'd" contradicts the ref-held arms | **FIXED** (this commit) |
 | R-A-F3 | P3 | -- | `joey.c:222` the only bare `root_spoor` read | **FIXED** (this commit, -> `territory_root_ref`) |

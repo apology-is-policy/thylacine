@@ -7632,6 +7632,10 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
 
     struct Loom *l = loom_create(entries, cq_entries);
     if (!l)                                          return -1;
+    // LOOM.md 8.5.1: the directory-mutation identity, bound before anything
+    // below can publish the ring (the handle, or an SQPOLL kthread).
+    l->ident     = p;
+    l->ident_pid = p->pid;
 
     // #65 (I-32 / audit F1): the ring is anonymous pages mapped into the Proc's
     // address space -- the SAME memory-bomb class SYS_BURROW_ATTACH is capped

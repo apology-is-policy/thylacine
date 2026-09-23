@@ -17,6 +17,8 @@
 #include <thylacine/9p_transport_mq.h>   // Loom-6c multi-in-flight queueing transport
 #include <thylacine/9p_wire.h>
 #include <thylacine/burrow.h>     // Loom-6 white-box registered-buffer install
+#include <thylacine/caps.h>       // LOOM.md 8.5.1: the DAC-override + chown-any caps
+#include <thylacine/dev.h>        // dev9p.walk (the 8.5.1 second directory fid)
 #include <thylacine/dev9p.h>
 #include <thylacine/weft.h>       // Weft-6c: weft_binding_alloc + the zero-copy drive
 #include <thylacine/errno.h>
@@ -25,8 +27,10 @@
 #include <thylacine/page.h>       // pa_to_kva / page_to_pa (the buffer direct map)
 #include <thylacine/proc.h>       // 8c-3 (#89): struct Proc + debug_stop_req (handoff skip)
 #include <thylacine/rendez.h>
+#include <thylacine/sched.h>      // sched(): yield to the SQPOLL kthread
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
+#include <thylacine/syscall.h>    // T_S_IFDIR (the 8.5.1 directory Rgetattr)
 #include <thylacine/types.h>
 
 void test_9p_client_init_destroy(void);
@@ -73,6 +77,10 @@ void test_9p_client_loom_mkdir_e2e(void);
 void test_9p_client_loom_setattr_e2e(void);
 void test_9p_client_loom_renameat_e2e(void);
 void test_9p_client_loom_mutation_rejects(void);
+void test_9p_client_loom_dirmut_dac(void);
+void test_9p_client_loom_dirmut_sqpoll(void);
+void test_9p_client_loom_create_gid(void);
+void test_9p_client_loom_dirmut_names(void);
 
 // File-scope buffers (kernel test stack is 16 KiB — client struct is
 // ~4 KiB; multiple in one frame is fine but file-scope is cleaner).
@@ -2544,10 +2552,100 @@ static void loom_cap_name(u8 *dst, u32 *dlen, const u8 *src, u32 n) {
     for (u32 i = 0; i < n; i++) dst[i] = src[i];
     *dlen = n;
 }
+// LOOM.md 8.5.1 fixtures -- the parent-directory check reads the Rgetattr below.
+// With g_loom_ga_on, every Tgetattr answers a DIRECTORY of g_loom_ga_mode owned
+// by g_loom_ga_uid:g_loom_ga_gid, except fid g_loom_ga_deny_fid, which answers a
+// 0700 directory owned by LOOM_GA_OTHER_UID (writable by no identity under test).
+// g_loom_ga_fail answers every Tgetattr Rlerror (the no-stat leg). The wire side:
+// g_loom_wire_mut counts child-mutation T-messages that REACHED the server, and
+// g_loom_wire_gid is the gid the last Tmkdir / Tsymlink / Tmknod carried, and
+// g_loom_wire_mode the mode the last Tmkdir / Tmknod carried.
+#define LOOM_GA_OTHER_UID 0xAAAAu
+static bool g_loom_ga_on, g_loom_ga_fail;
+static u32  g_loom_ga_mode, g_loom_ga_uid, g_loom_ga_gid;
+static u32  g_loom_ga_deny_fid = P9_NOFID;
+static u32  g_loom_wire_mut, g_loom_wire_gid, g_loom_wire_mode;
+static void loom_ga_reset(void) {
+    g_loom_ga_on = g_loom_ga_fail = false;
+    g_loom_ga_mode = g_loom_ga_uid = g_loom_ga_gid = 0;
+    g_loom_ga_deny_fid = P9_NOFID;
+    g_loom_wire_mut = 0;
+    g_loom_wire_gid = 0xDEADBEEFu;
+    g_loom_wire_mode = 0xDEADBEEFu;
+}
+static void loom_ga_dir(u32 mode, u32 uid, u32 gid) {
+    g_loom_ga_on = true;
+    g_loom_ga_mode = mode; g_loom_ga_uid = uid; g_loom_ga_gid = gid;
+}
+static void loom_wr_le32(u8 *p, u32 v) {
+    for (int i = 0; i < 4; i++) p[i] = (u8)(v >> (8 * i));
+}
+// Bind a fresh identity as the Loom's 8.5.1 submitter (sys_loom_setup does
+// this for a real ring; loom_create alone leaves it NULL). Free the Loom first.
+static struct Proc *loom_test_ident(struct Loom *l, u32 principal, u32 gid,
+                                    caps_t caps) {
+    struct Proc *p = proc_alloc();
+    if (!p) return NULL;
+    p->principal_id = principal;
+    p->primary_gid  = gid;
+    p->caps         = caps;
+    l->ident        = p;
+    l->ident_pid    = p->pid;
+    return p;
+}
+static void loom_test_ident_drop(struct Proc *p) {
+    if (!p) return;
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+// The gid a create T-message carries, or 0xDEADBEEF when the frame is short.
+// Layouts: Tmkdir dfid name mode gid; Tsymlink fid name symtgt gid; Tmknod dfid
+// name mode major minor gid (9P2000.L).
+static u32 loom_wire_create_gid(u8 type, const u8 *req, size_t req_len) {
+    size_t off = (size_t)P9_HDR_LEN + 4;
+    if (req_len < off + 2) return 0xDEADBEEFu;
+    off += 2 + loom_rd_le16(req + off);
+    if (type == P9_TSYMLINK) {
+        if (req_len < off + 2) return 0xDEADBEEFu;
+        off += 2 + loom_rd_le16(req + off);
+    } else {
+        off += (type == P9_TMKNOD) ? 12 : 4;
+    }
+    return req_len >= off + 4 ? loom_rd_le32(req + off) : 0xDEADBEEFu;
+}
+
+// The mode a Tmkdir / Tmknod carries: the first field after the name.
+static u32 loom_wire_create_mode(const u8 *req, size_t req_len) {
+    size_t off = (size_t)P9_HDR_LEN + 4;
+    if (req_len < off + 2) return 0xDEADBEEFu;
+    off += 2 + loom_rd_le16(req + off);
+    return req_len >= off + 4 ? loom_rd_le32(req + off) : 0xDEADBEEFu;
+}
+
 static int loom_mut_capture_responder(void *ctx, const u8 *req, size_t req_len,
                                       u8 *resp, size_t cap) {
     u32 size; u8 type; u16 tag;
     if (p9_peek_header(req, req_len, &size, &type, &tag) >= 0) {
+        if (type == P9_TMKDIR || type == P9_TMKNOD || type == P9_TSYMLINK ||
+            type == P9_TUNLINKAT || type == P9_TRENAMEAT || type == P9_TLINK)
+            g_loom_wire_mut++;
+        if (type == P9_TMKDIR || type == P9_TMKNOD || type == P9_TSYMLINK)
+            g_loom_wire_gid = loom_wire_create_gid(type, req, req_len);
+        if (type == P9_TMKDIR || type == P9_TMKNOD)
+            g_loom_wire_mode = loom_wire_create_mode(req, req_len);
+        if (type == P9_TGETATTR && g_loom_ga_fail)
+            return rlerror_responder(ctx, req, req_len, resp, cap);
+        if (type == P9_TGETATTR && g_loom_ga_on && req_len >= (size_t)P9_HDR_LEN + 4) {
+            int n = canonical_responder(ctx, req, req_len, resp, cap);
+            if (n < (int)P9_HDR_LEN + 33) return n;
+            bool deny = loom_rd_le32(req + P9_HDR_LEN) == g_loom_ga_deny_fid;
+            resp[P9_HDR_LEN + 8] = P9_QTDIR;                        // qid.type
+            loom_wr_le32(resp + P9_HDR_LEN + 21,                    // mode
+                         T_S_IFDIR | (deny ? 0700u : g_loom_ga_mode));
+            loom_wr_le32(resp + P9_HDR_LEN + 25, deny ? LOOM_GA_OTHER_UID : g_loom_ga_uid);
+            loom_wr_le32(resp + P9_HDR_LEN + 29, deny ? LOOM_GA_OTHER_UID : g_loom_ga_gid);
+            return n;
+        }
         if (type == P9_TMKDIR && req_len >= (size_t)P9_HDR_LEN + 6) {
             u32 nl = loom_rd_le16(req + P9_HDR_LEN + 4);              // name s len
             if (req_len >= (size_t)P9_HDR_LEN + 6 + nl + 4) {
@@ -2579,6 +2677,8 @@ static int loom_mut_capture_responder(void *ctx, const u8 *req, size_t req_len,
 // per-op scalar decode + the RIGHT_WRITE dir gate.
 void test_9p_client_loom_mkdir_e2e(void) {
     g_loom_mname_len = 0; g_loom_mname_mode = 0;
+    loom_ga_reset();
+    loom_ga_dir(0755u, 0x1234u, 0x5678u);   // the creator's own dir (8.5.1 passes)
     int rc = p9_loopback_init(&g_loopback, g_loopback_resp, sizeof(g_loopback_resp),
                               loom_mut_capture_responder, NULL);
     TEST_EXPECT_EQ(rc, 0, "loopback init (mut capture)");
@@ -2598,6 +2698,8 @@ void test_9p_client_loom_mkdir_e2e(void) {
     TEST_ASSERT(l != NULL, "loom_create");
     rights_t rt = RIGHT_WRITE;          // create requires RIGHT_WRITE on the dir
     TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register write dir handle");
+    struct Proc *who = loom_test_ident(l, 0x1234u, 0x5678u, 0);
+    TEST_ASSERT(who != NULL, "bind the creator identity");
 
     struct Burrow *b; u8 *bkva;
     loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
@@ -2621,11 +2723,15 @@ void test_9p_client_loom_mkdir_e2e(void) {
     TEST_ASSERT(g_loom_mname[0]=='s' && g_loom_mname[3]=='d' && g_loom_mname[5]=='r',
                 "mkdir name bytes read from the pinned buffer");
     TEST_EXPECT_EQ((u64)g_loom_mname_mode, (u64)0755u, "mkdir mode decoded from the SQE");
+    TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)0x5678u,
+                   "SQE gid 0 -> the creator's primary group on the wire (8.5.1)");
     TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "op reaped");
     TEST_EXPECT_EQ(burrow_handle_count(b), hc0, "op buffer pin balanced");
 
     burrow_unref(b);
     loom_unref(l);
+    loom_test_ident_drop(who);
+    loom_ga_reset();
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);
 }
@@ -2648,6 +2754,7 @@ static s32 loom_cqe_result(const struct loom_cqe *cqes,
 
 void test_9p_client_loom_setattr_e2e(void) {
     g_loom_msetattr_valid = 0; g_loom_msetattr_mode = 0;
+    loom_ga_reset();
     int rc = p9_loopback_init(&g_loopback, g_loopback_resp, sizeof(g_loopback_resp),
                               loom_mut_capture_responder, NULL);
     TEST_EXPECT_EQ(rc, 0, "loopback init (mut capture)");
@@ -2752,6 +2859,8 @@ void test_9p_client_loom_setattr_e2e(void) {
 // Exercises the second-fid resolve+pin (two I-30 pins) + the two-name split.
 void test_9p_client_loom_renameat_e2e(void) {
     g_loom_mname_len = 0; g_loom_mname2_len = 0;
+    loom_ga_reset();
+    loom_ga_dir(0755u, 0x1234u, 0x5678u);   // both dirs the creator's own (8.5.1)
     int rc = p9_loopback_init(&g_loopback, g_loopback_resp, sizeof(g_loopback_resp),
                               loom_mut_capture_responder, NULL);
     TEST_EXPECT_EQ(rc, 0, "loopback init (mut capture)");
@@ -2772,6 +2881,8 @@ void test_9p_client_loom_renameat_e2e(void) {
     rights_t rt = RIGHT_WRITE;
     TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register olddir (slot 0)");
     loom_install_test_handle(l, 1, sp, RIGHT_WRITE);   // newdir (slot 1; same Spoor)
+    struct Proc *who = loom_test_ident(l, 0x1234u, 0x5678u, 0);
+    TEST_ASSERT(who != NULL, "bind the creator identity");
 
     struct Burrow *b; u8 *bkva;
     loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
@@ -2803,9 +2914,404 @@ void test_9p_client_loom_renameat_e2e(void) {
 
     burrow_unref(b);
     loom_unref(l);
+    loom_test_ident_drop(who);
+    loom_ga_reset();
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);
 }
+
+// =============================================================================
+// LOOM.md 8.5.1: the directory-mutation authority. The six child-mutation ops
+// run the sync twins' parent W|X perm_check against the creator's LIVE identity
+// (l->ident), an SQPOLL ring refuses them, and the create ops' SQE gid resolves
+// to one of the creator's own groups. Every refusal is inline and puts NOTHING on
+// the wire (g_loom_wire_mut is the server's own count, not the kernel's).
+// =============================================================================
+
+// The capture-responder client, opened the way mkdir_e2e opens it; returns the
+// root Spoor holding the attach's one ref.
+static struct Spoor *loom_mut_open(void) {
+    if (p9_loopback_init(&g_loopback, g_loopback_resp, sizeof(g_loopback_resp),
+                         loom_mut_capture_responder, NULL) != 0) return NULL;
+    if (p9_client_init(&g_client, /*root_fid=*/0, /*msize=*/8192,
+                       p9_loopback_ops_for(&g_loopback), g_recv_buf,
+                       sizeof(g_recv_buf)) != 0) return NULL;
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    if (p9_client_handshake(&g_client, uname, sizeof(uname), aname,
+                            sizeof(aname), 0) != 0) return NULL;
+    return dev9p_attach_client(&g_client, 0);
+}
+
+// A second directory Spoor with its own fid (a plain Twalk: no Twalkgetattr, so
+// the client never latches cacheable and every stat below is a live Tgetattr).
+static struct Spoor *loom_walk_sub(struct Spoor *root, u32 *out_fid) {
+    const char *name = "sub";
+    struct Spoor *nc = spoor_clone(root);
+    if (!nc) return NULL;
+    struct Walkqid *w = dev9p.walk(root, nc, &name, 1);
+    if (!w) { spoor_clunk(nc); return NULL; }
+    walkqid_free(w);
+    struct p9_client *cl; u32 fid;
+    if (dev9p_client_fid(nc, &cl, &fid) != 0) { spoor_clunk(nc); return NULL; }
+    *out_fid = fid;
+    return nc;
+}
+
+// Submit ONE mutation SQE at the ring's next slot (handle 0 = the directory; r3 =
+// the second handle), wait for it, reap its CQE, and return the result -- so a
+// long leg table never fills the CQ and each leg reads exactly its own CQE.
+static s32 loom_dm_submit(struct Loom *l, u8 opcode, u32 len, u64 offset,
+                          u64 r1, u64 r2, u64 r3) {
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+    u32 tail = __atomic_load_n(&h->sq_tail, __ATOMIC_ACQUIRE);
+    cl_stage_mut(l, tail & h->sq_mask, opcode, /*handle=*/0, offset, len,
+                 /*bidx=*/0, /*buf_off=*/0, r1, r2, r3,
+                 0x8510000000000000ULL | (u64)tail);
+    __atomic_store_n(&h->sq_tail, tail + 1u, __ATOMIC_RELEASE);
+    u32 ct = __atomic_load_n(&h->cq_tail, __ATOMIC_ACQUIRE);
+    (void)loom_enter(l, 1, 1, 0);
+    if (__atomic_load_n(&h->cq_tail, __ATOMIC_ACQUIRE) == ct) return 0x7FFFFFFF;
+    s32 r = cqes[ct & h->cq_mask].result;
+    __atomic_store_n(&h->cq_head, ct + 1u, __ATOMIC_RELEASE);
+    return r;
+}
+
+// One op, one identity: expect `want`, and expect the op on the wire iff want == 0.
+static void loom_dm_leg(struct Loom *l, u8 opcode, u32 len, u64 offset, u64 r1,
+                        u64 r2, u64 r3, s32 want, const char *what) {
+    u32 before = g_loom_wire_mut;
+    s32 got = loom_dm_submit(l, opcode, len, offset, r1, r2, r3);
+    TEST_EXPECT_EQ((u64)(s64)got, (u64)(s64)want, what);
+    TEST_EXPECT_EQ((u64)(g_loom_wire_mut - before), (u64)(want == 0 ? 1u : 0u), what);
+}
+
+// The six ops' SQE shapes over region "abcdef": a one-name op names "abc"; a
+// two-name op splits [0,3) ++ [3,6). gid 0 throughout (the creator's primary).
+#define DM_MKDIR(l, w, s)    loom_dm_leg(l, LOOM_OP_MKDIR,    3, 0, 0755u, 0, 0, w, s)
+#define DM_MKNOD(l, w, s)    loom_dm_leg(l, LOOM_OP_MKNOD,    3, 0, 0010644u, 0, 0, w, s)
+#define DM_SYMLINK(l, w, s)  loom_dm_leg(l, LOOM_OP_SYMLINK,  6, 0, 3, 0, 0, w, s)
+#define DM_UNLINKAT(l, w, s) loom_dm_leg(l, LOOM_OP_UNLINKAT, 3, 0, 0, 0, 0, w, s)
+#define DM_RENAMEAT(l, w, s) loom_dm_leg(l, LOOM_OP_RENAMEAT, 6, 0, 3, 0, 1, w, s)
+#define DM_LINK(l, w, s)     loom_dm_leg(l, LOOM_OP_LINK,     3, 0, 0, 0, 1, w, s)
+
+// The truth table. Directory: 0755 owned by 0x1234:0x5678. Handle 0 = that dir;
+// handle 1 = a second dir (RENAMEAT's newdir, LINK's source). Every leg's control
+// is the leg beside it: the same op, one identity bit apart.
+void test_9p_client_loom_dirmut_dac(void) {
+    loom_ga_reset();
+    loom_ga_dir(0755u, 0x1234u, 0x5678u);
+    struct Spoor *root = loom_mut_open();
+    TEST_ASSERT(root != NULL, "capture client + root");
+    u32 sub_fid = P9_NOFID;
+    struct Spoor *sub = loom_walk_sub(root, &sub_fid);
+    TEST_ASSERT(sub != NULL, "a second directory Spoor");
+    struct p9_client *root_cl; u32 root_fid = P9_NOFID;
+    TEST_ASSERT(dev9p_client_fid(root, &root_cl, &root_fid) == 0 && root_fid != sub_fid,
+                "the two directories carry distinct fids");
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create");
+    // O_PATH-shaped rights: R|W, the hollow RIGHT_WRITE this gate exists for.
+    loom_install_test_handle(l, 0, root, RIGHT_READ | RIGHT_WRITE);
+    loom_install_test_handle(l, 1, sub,  RIGHT_READ | RIGHT_WRITE);
+    struct Burrow *b; u8 *bkva;
+    loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
+    const char *nm = "abcdef";
+    for (u32 i = 0; i < 6; i++) bkva[i] = (u8)nm[i];
+
+    // (1) No identity (a kernel-internal Loom): every op fails closed.
+    DM_MKDIR(l, -(s32)T_E_ACCES, "no identity bound -> MKDIR -EACCES, nothing on the wire");
+
+    // (2) A stranger (other bits r-x): each op refused, never on the wire.
+    struct Proc *who = loom_test_ident(l, 0x9999u, 0x9999u, 0);
+    TEST_ASSERT(who != NULL, "bind a stranger");
+    DM_MKDIR(l,    -(s32)T_E_ACCES, "stranger MKDIR -> -EACCES");
+    DM_MKNOD(l,    -(s32)T_E_ACCES, "stranger MKNOD -> -EACCES");
+    DM_SYMLINK(l,  -(s32)T_E_ACCES, "stranger SYMLINK -> -EACCES");
+    DM_UNLINKAT(l, -(s32)T_E_ACCES, "stranger UNLINKAT -> -EACCES");
+    DM_RENAMEAT(l, -(s32)T_E_ACCES, "stranger RENAMEAT -> -EACCES");
+    DM_LINK(l,     -(s32)T_E_ACCES, "stranger LINK -> -EACCES");
+
+    // (3) The owner (owner bits rwx): each op reaches the wire.
+    who->principal_id = 0x1234u; who->primary_gid = 0x5678u;
+    DM_MKDIR(l,    0, "owner MKDIR reaches the wire");
+    DM_MKNOD(l,    0, "owner MKNOD reaches the wire");
+    DM_SYMLINK(l,  0, "owner SYMLINK reaches the wire");
+    DM_UNLINKAT(l, 0, "owner UNLINKAT reaches the wire");
+    DM_RENAMEAT(l, 0, "owner RENAMEAT reaches the wire");
+    DM_LINK(l,     0, "owner LINK reaches the wire");
+
+    // (4) W and X are both required, owner-first: an owner with rw- is refused
+    // even though group/other would not help it (owner bits only).
+    loom_ga_dir(0677u, 0x1234u, 0x5678u);
+    DM_MKDIR(l, -(s32)T_E_ACCES, "owner without X (rw-) -> -EACCES");
+    loom_ga_dir(0577u, 0x1234u, 0x5678u);
+    DM_MKDIR(l, -(s32)T_E_ACCES, "owner without W (r-x) -> -EACCES (owner-first)");
+
+    // (5) Group: a member is judged on the group triple.
+    who->principal_id = 0x7777u;                     // primary 0x5678 = the dir's group
+    loom_ga_dir(0755u, 0x1234u, 0x5678u);
+    DM_MKDIR(l, -(s32)T_E_ACCES, "group member, group r-x -> -EACCES");
+    loom_ga_dir(0775u, 0x1234u, 0x5678u);
+    DM_MKDIR(l, 0, "group member, group rwx -> reaches the wire");
+
+    // (6) The DAC override is a capability (I-22), read live: a stranger holding
+    // CAP_HOSTOWNER or CAP_DAC_OVERRIDE passes; the same stranger without it does not.
+    who->principal_id = 0x9999u; who->primary_gid = 0x9999u;
+    loom_ga_dir(0755u, 0x1234u, 0x5678u);
+    who->caps = CAP_HOSTOWNER;
+    DM_MKDIR(l, 0, "stranger + CAP_HOSTOWNER -> reaches the wire");
+    who->caps = CAP_DAC_OVERRIDE;
+    DM_MKDIR(l, 0, "stranger + CAP_DAC_OVERRIDE -> reaches the wire");
+    who->caps = 0;
+    DM_MKDIR(l, -(s32)T_E_ACCES, "the same stranger, caps dropped -> -EACCES (read live)");
+
+    // (7) RENAMEAT checks BOTH directories; LINK checks only where the link lands.
+    who->principal_id = 0x1234u; who->primary_gid = 0x5678u;
+    g_loom_ga_deny_fid = sub_fid;
+    DM_RENAMEAT(l, -(s32)T_E_ACCES, "RENAMEAT, newdir unwritable -> -EACCES");
+    DM_LINK(l, 0, "LINK whose SOURCE sits in an unwritable dir -> reaches the wire");
+    g_loom_ga_deny_fid = root_fid;
+    DM_RENAMEAT(l, -(s32)T_E_ACCES, "RENAMEAT, olddir unwritable -> -EACCES");
+    DM_LINK(l, -(s32)T_E_ACCES, "LINK into an unwritable dir -> -EACCES");
+    g_loom_ga_deny_fid = P9_NOFID;
+
+    // (8) No stat, no op: a Tgetattr the server refuses fails closed.
+    g_loom_ga_fail = true;
+    DM_UNLINKAT(l, -(s32)T_E_IO, "parent stat refused -> -EIO, nothing on the wire");
+    g_loom_ga_fail = false;
+
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "every op reaped");
+    burrow_unref(b);
+    loom_unref(l);
+    spoor_clunk(sub);
+    spoor_clunk(root);
+    loom_test_ident_drop(who);
+    loom_ga_reset();
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// An SQPOLL ring refuses the six ops (-EOPNOTSUPP): its kthread submits, and the
+// parent stat may be a wire RPC a hung server never answers -- the kthread would
+// then never reach its stop flag and loom_free's join would hang the owner's
+// exit. The identity is the creator's own and the dir its own 0755 dir, so the
+// refusal is the ring's mode, not the DAC.
+void test_9p_client_loom_dirmut_sqpoll(void) {
+    loom_ga_reset();
+    loom_ga_dir(0755u, 0x1234u, 0x5678u);
+    struct Spoor *root = loom_mut_open();
+    TEST_ASSERT(root != NULL, "capture client + root");
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->principal_id = 0x1234u; p->primary_gid = 0x5678u; p->caps = 0;
+
+    struct loom_params kp;
+    hidx_t fd = -1;
+    TEST_EXPECT_EQ(sys_loom_setup_for_proc(p, 8, LOOM_SETUP_SQPOLL, &kp, &fd), 0,
+                   "SQPOLL setup");
+    struct Handle hh;
+    TEST_ASSERT(handle_get(p, fd, &hh) == 0, "handle_get(loom fd)");
+    struct Loom *l = (struct Loom *)hh.obj;
+    TEST_ASSERT(l->sqpoll != NULL, "SQPOLL kthread spawned");
+    TEST_ASSERT(l->ident == p && l->ident_pid == p->pid,
+                "setup bound the creator as the 8.5.1 identity");
+    loom_install_test_handle(l, 0, root, RIGHT_READ | RIGHT_WRITE);
+    struct Burrow *b; u8 *bkva;
+    loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
+    bkva[0] = 'a'; bkva[1] = 'b'; bkva[2] = 'c';
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+    cl_stage_mut(l, 0, LOOM_OP_MKDIR, 0, 0, /*len=*/3, /*bidx=*/0, 0, 0755u, 0, 0,
+                 0x5A00000000000001ULL);
+    __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+    TEST_EXPECT_EQ(sys_loom_enter_for_proc(p, fd, 0, 0, 0), 0,
+                   "ENTER on SQPOLL only wakes the kthread");
+    bool posted = false;
+    for (u32 round = 0; round < 100000u; round++) {
+        if (__atomic_load_n(&h->cq_tail, __ATOMIC_ACQUIRE) >= 1u) { posted = true; break; }
+        sched();
+    }
+    TEST_ASSERT(posted, "the kthread posted the MKDIR's CQE");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)(s64)(-(s32)T_E_OPNOTSUPP),
+                   "SQPOLL MKDIR -> -EOPNOTSUPP");
+    TEST_EXPECT_EQ((u64)g_loom_wire_mut, (u64)0, "nothing reached the wire");
+
+    handle_put(&hh);
+    burrow_unref(b);
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);                                    // last handle -> loom_free joins
+    spoor_clunk(root);
+    loom_ga_reset();
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// The create ops' SQE gid: 0 is the creator's primary group; any other value must
+// be a group the creator is in unless it holds chown-any authority (CAP_HOSTOWNER
+// or CAP_CHOWN) -- perm_wstat_check's chgrp rule applied at birth. The wire gid is
+// the RESOLVED one. MKDIR/SYMLINK carry it in _resv1[2], MKNOD in `offset`.
+void test_9p_client_loom_create_gid(void) {
+    loom_ga_reset();
+    loom_ga_dir(0755u, 0x1234u, 0x5678u);
+    struct Spoor *root = loom_mut_open();
+    TEST_ASSERT(root != NULL, "capture client + root");
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create");
+    loom_install_test_handle(l, 0, root, RIGHT_READ | RIGHT_WRITE);
+    struct Burrow *b; u8 *bkva;
+    loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
+    const char *nm = "abcdef";
+    for (u32 i = 0; i < 6; i++) bkva[i] = (u8)nm[i];
+    struct Proc *who = loom_test_ident(l, 0x1234u, 0x5678u, 0);
+    TEST_ASSERT(who != NULL, "bind the creator");
+    who->supp_gids[0] = 0x4444u;
+    who->supp_gid_count = 1;
+
+    // MKDIR (gid in _resv1[2]).
+    TEST_EXPECT_EQ((u64)loom_dm_submit(l, LOOM_OP_MKDIR, 3, 0, 0755u, 0, 0), (u64)0, "gid 0");
+    TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)0x5678u, "gid 0 -> the primary group on the wire");
+    TEST_EXPECT_EQ((u64)loom_dm_submit(l, LOOM_OP_MKDIR, 3, 0, 0755u, 0x4444u, 0), (u64)0,
+                   "a supplementary group");
+    TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)0x4444u, "the supplementary group on the wire");
+    g_loom_wire_gid = 0xDEADBEEFu;
+    loom_dm_leg(l, LOOM_OP_MKDIR, 3, 0, 0755u, 0x3333u, 0, -(s32)T_E_ACCES,
+                "MKDIR into a group the creator is not in -> -EACCES");
+    TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)0xDEADBEEFu, "no create carried the refused gid");
+    loom_dm_leg(l, LOOM_OP_MKDIR, 3, 0, 0755u, 0x100005678ull, 0, -(s32)T_E_INVAL,
+                "a gid wider than u32 -> -EINVAL (never truncated onto the wire)");
+    who->caps = CAP_CHOWN;
+    TEST_EXPECT_EQ((u64)loom_dm_submit(l, LOOM_OP_MKDIR, 3, 0, 0755u, 0x3333u, 0), (u64)0,
+                   "CAP_CHOWN: any group");
+    TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)0x3333u, "the chosen group on the wire");
+    who->caps = CAP_HOSTOWNER;
+    TEST_EXPECT_EQ((u64)loom_dm_submit(l, LOOM_OP_MKDIR, 3, 0, 0755u, 0x3434u, 0), (u64)0,
+                   "CAP_HOSTOWNER: any group");
+    TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)0x3434u, "the chosen group on the wire");
+    who->caps = 0;
+
+    // SYMLINK (gid in _resv1[2]; _resv1[1] is the name split).
+    TEST_EXPECT_EQ((u64)loom_dm_submit(l, LOOM_OP_SYMLINK, 6, 0, 3, 0, 0), (u64)0, "SYMLINK gid 0");
+    TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)0x5678u, "SYMLINK: the primary group on the wire");
+    loom_dm_leg(l, LOOM_OP_SYMLINK, 6, 0, 3, 0x3333u, 0, -(s32)T_E_ACCES,
+                "SYMLINK into a foreign group -> -EACCES");
+
+    // MKNOD (gid in `offset`; _resv1[1..3] are mode/major/minor).
+    TEST_EXPECT_EQ((u64)loom_dm_submit(l, LOOM_OP_MKNOD, 3, 0, 0010644u, 0, 0), (u64)0,
+                   "MKNOD gid 0");
+    TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)0x5678u, "MKNOD: the primary group on the wire");
+    TEST_EXPECT_EQ((u64)loom_dm_submit(l, LOOM_OP_MKNOD, 3, 0x4444u, 0010644u, 0, 0), (u64)0,
+                   "MKNOD into a supplementary group");
+    TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)0x4444u, "MKNOD: the supplementary group on the wire");
+    loom_dm_leg(l, LOOM_OP_MKNOD, 3, 0x3333u, 0010644u, 0, 0, -(s32)T_E_ACCES,
+                "MKNOD into a foreign group -> -EACCES");
+
+    // The create mode: rwx only, as the sync create sends it. The 0755 legs are
+    // the control one variable away -- a plain mode crosses unchanged.
+    TEST_EXPECT_EQ((u64)loom_dm_submit(l, LOOM_OP_MKDIR, 3, 0, 0755u, 0, 0), (u64)0, "MKDIR 0755");
+    TEST_EXPECT_EQ((u64)g_loom_wire_mode, (u64)0755u, "MKDIR: a plain mode crosses unchanged");
+    TEST_EXPECT_EQ((u64)loom_dm_submit(l, LOOM_OP_MKDIR, 3, 0, 07777u, 0, 0), (u64)0, "MKDIR 07777");
+    TEST_EXPECT_EQ((u64)g_loom_wire_mode, (u64)0777u,
+                   "MKDIR: setuid/setgid/sticky never reach the wire");
+    TEST_EXPECT_EQ((u64)loom_dm_submit(l, LOOM_OP_MKDIR, 3, 0, 0x10000000ull | 0755u, 0, 0), (u64)0,
+                   "MKDIR with high garbage");
+    TEST_EXPECT_EQ((u64)g_loom_wire_mode, (u64)0755u, "MKDIR: bits past 0777 never reach the wire");
+    TEST_EXPECT_EQ((u64)loom_dm_submit(l, LOOM_OP_MKNOD, 3, 0, 0010755u, 0, 0), (u64)0, "MKNOD 0755");
+    TEST_EXPECT_EQ((u64)g_loom_wire_mode, (u64)0010755u, "MKNOD: the type + a plain mode cross");
+    TEST_EXPECT_EQ((u64)loom_dm_submit(l, LOOM_OP_MKNOD, 3, 0, 0016755u, 0, 0), (u64)0, "MKNOD 06755");
+    TEST_EXPECT_EQ((u64)g_loom_wire_mode, (u64)0010755u,
+                   "MKNOD: the type survives, setuid/setgid/sticky do not");
+
+    burrow_unref(b);
+    loom_unref(l);
+    spoor_clunk(root);
+    loom_test_ident_drop(who);
+    loom_ga_reset();
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// LOOM.md 8.5.1 (audit F1): a mutation op's names get the sync twins' component
+// rule -- 1..255 bytes, no '/' or NUL, not "." or ".." -- checked on the kernel
+// copy the wire carries, before any stat. SYMLINK's TARGET is a path and may
+// hold '/'. Every op's refusals sit beside the same op on a clean name.
+static void loom_nm_leg(struct Loom *l, u8 *bkva, u8 opcode, const char *region,
+                        u32 len, u64 r1, u64 r3, s32 want, const char *what) {
+    for (u32 i = 0; i < len; i++) bkva[i] = (u8)region[i];
+    loom_dm_leg(l, opcode, len, 0, r1, 0, r3, want, what);
+}
+#define NM(op, nm, len, r1, r3, want) \
+    loom_nm_leg(l, bkva, LOOM_OP_##op, nm, len, r1, r3, want, #op " " #nm " -> " #want)
+
+void test_9p_client_loom_dirmut_names(void) {
+    loom_ga_reset();
+    loom_ga_dir(0755u, 0x1234u, 0x5678u);
+    struct Spoor *root = loom_mut_open();
+    TEST_ASSERT(root != NULL, "capture client + root");
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create");
+    loom_install_test_handle(l, 0, root, RIGHT_READ | RIGHT_WRITE);
+    loom_install_test_handle(l, 1, root, RIGHT_READ | RIGHT_WRITE);
+    struct Burrow *b; u8 *bkva;
+    loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
+    struct Proc *who = loom_test_ident(l, 0x1234u, 0x5678u, 0);
+    TEST_ASSERT(who != NULL, "bind the owner");
+    const s32 INVAL = -(s32)T_E_INVAL;
+    const s32 ACCES = -(s32)T_E_ACCES;
+
+    NM(MKDIR,    "a/b",  3, 0755u,    0, INVAL);
+    NM(MKDIR,    ".",    1, 0755u,    0, INVAL);
+    NM(MKDIR,    "..",   2, 0755u,    0, INVAL);
+    NM(MKDIR,    "a\0b", 3, 0755u,    0, INVAL);
+    NM(MKDIR,    "abc",  3, 0755u,    0, 0);
+    NM(MKNOD,    "a/b",  3, 0010644u, 0, INVAL);
+    NM(MKNOD,    "..",   2, 0010644u, 0, INVAL);
+    NM(MKNOD,    "abc",  3, 0010644u, 0, 0);
+    NM(UNLINKAT, "a/b",  3, 0,        0, INVAL);
+    NM(UNLINKAT, ".",    1, 0,        0, INVAL);
+    NM(UNLINKAT, "..",   2, 0,        0, INVAL);
+    NM(UNLINKAT, "a\0b", 3, 0,        0, INVAL);
+    NM(UNLINKAT, "abc",  3, 0,        0, 0);
+    NM(LINK,     "a/b",  3, 0,        1, INVAL);
+    NM(LINK,     "..",   2, 0,        1, INVAL);
+    NM(LINK,     "abc",  3, 0,        1, 0);
+    // Two-name ops split at r1: SYMLINK's name, then its target (a path).
+    NM(SYMLINK,  "a/bt",     4, 3, 0, INVAL);
+    NM(SYMLINK,  "..t",      3, 2, 0, INVAL);
+    NM(SYMLINK,  "ok../x/y", 8, 2, 0, 0);
+    NM(RENAMEAT, "..b",      3, 2, 1, INVAL);
+    NM(RENAMEAT, "ax/y",     4, 1, 1, INVAL);
+    NM(RENAMEAT, "a.",       2, 1, 1, INVAL);
+    NM(RENAMEAT, "ab",       2, 1, 1, 0);
+    // The length bound: 256 bytes is one past SYS_WALK_OPEN_NAME_MAX.
+    for (u32 i = 0; i < 256; i++) bkva[i] = (u8)'x';
+    loom_dm_leg(l, LOOM_OP_MKDIR, 256, 0, 0755u, 0, 0, INVAL, "MKDIR a 256-byte name -> INVAL");
+    loom_dm_leg(l, LOOM_OP_MKDIR, 255, 0, 0755u, 0, 0, 0,     "MKDIR a 255-byte name -> 0");
+    // The two-name spans: RENAMEAT copies both names (up to 2 x 255 bytes), SYMLINK
+    // only its name -- the target is a path and stays in the buffer.
+    for (u32 i = 0; i < 511; i++) bkva[i] = (u8)'x';
+    loom_dm_leg(l, LOOM_OP_RENAMEAT, 510, 0, 255, 0, 1, 0,     "RENAMEAT two 255-byte names -> 0");
+    loom_dm_leg(l, LOOM_OP_RENAMEAT, 511, 0, 255, 0, 1, INVAL, "RENAMEAT a 256-byte new name -> INVAL");
+    loom_dm_leg(l, LOOM_OP_SYMLINK,  300, 0, 255, 0, 0, 0,     "SYMLINK a 255-byte name, 45-byte target -> 0");
+    loom_dm_leg(l, LOOM_OP_SYMLINK,  300, 0, 256, 0, 0, INVAL, "SYMLINK a 256-byte name -> INVAL");
+    // The name is judged before the identity: with no creator bound, a bad name
+    // is still -EINVAL, and the clean one is the -EACCES the gate answers.
+    l->ident = NULL;
+    NM(MKDIR,    "a/b",  3, 0755u,    0, INVAL);
+    NM(MKDIR,    "abc",  3, 0755u,    0, ACCES);
+    l->ident = who;
+
+    burrow_unref(b);
+    loom_unref(l);
+    spoor_clunk(root);
+    loom_test_ident_drop(who);
+    loom_ga_reset();
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+#undef NM
 
 // Submit-time rejections for the mutation ops -- the rights gate + the
 // memory-safety guards, all inline (no op goes async):

@@ -569,6 +569,9 @@ void test_loom_enter_nop(void);
 void test_loom_enter_submit_rejects(void);
 void test_loom_enter_flags_and_bad_index(void);
 void test_loom_enter_cq_admission_backpressure(void);
+void test_loom_admission_counts_admitting(void);
+void test_loom_wait_counts_admitting(void);
+void test_loom_drain_waits_for_admitting(void);
 void test_loom_cq_waiter_wake(void);
 void test_loom_poll(void);
 void test_loom_cq_waiter_no_spurious_wake_on_full(void);
@@ -1367,6 +1370,10 @@ void test_9p_client_loom_mkdir_e2e(void);
 void test_9p_client_loom_setattr_e2e(void);
 void test_9p_client_loom_renameat_e2e(void);
 void test_9p_client_loom_mutation_rejects(void);
+void test_9p_client_loom_dirmut_dac(void);
+void test_9p_client_loom_dirmut_sqpoll(void);
+void test_9p_client_loom_create_gid(void);
+void test_9p_client_loom_dirmut_names(void);
 void test_9p_client_loom_multi_inflight_e2e(void);
 void test_9p_client_loom_multi_inflight_read_e2e(void);
 void test_9p_client_async_clunk_burst_no_fid_leak(void);
@@ -2420,6 +2427,9 @@ struct test_case g_tests[] = {
     { "loom.enter_submit_rejects",       test_loom_enter_submit_rejects,       false, NULL },
     { "loom.enter_flags_and_bad_index",  test_loom_enter_flags_and_bad_index,  false, NULL },
     { "loom.enter_cq_admission_backpressure", test_loom_enter_cq_admission_backpressure, false, NULL },
+    { "loom.admission_counts_admitting",  test_loom_admission_counts_admitting, false, NULL },
+    { "loom.wait_counts_admitting",       test_loom_wait_counts_admitting,      false, NULL },
+    { "loom.drain_waits_for_admitting",   test_loom_drain_waits_for_admitting,  false, NULL },
     { "loom.cq_waiter_wake",             test_loom_cq_waiter_wake,             false, NULL },
     { "loom.poll",                       test_loom_poll,                       false, NULL },
     { "loom.cq_waiter_no_spurious_wake_on_full", test_loom_cq_waiter_no_spurious_wake_on_full, false, NULL },
@@ -3357,6 +3367,10 @@ struct test_case g_tests[] = {
     { "9p_client.loom_renameat_e2e",   test_9p_client_loom_renameat_e2e,   false, NULL },
     { "9p_client.loom_mutation_rejects",
                                        test_9p_client_loom_mutation_rejects, false, NULL },
+    { "9p_client.loom_dirmut_dac",       test_9p_client_loom_dirmut_dac,       false, NULL },
+    { "9p_client.loom_dirmut_sqpoll",    test_9p_client_loom_dirmut_sqpoll,    false, NULL },
+    { "9p_client.loom_create_gid",       test_9p_client_loom_create_gid,       false, NULL },
+    { "9p_client.loom_dirmut_names",     test_9p_client_loom_dirmut_names,     false, NULL },
     { "9p_client.async_clunk_burst_no_fid_leak",
                                        test_9p_client_async_clunk_burst_no_fid_leak, false, NULL },
     { "9p_client.loom_multi_inflight_e2e",

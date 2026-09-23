@@ -327,6 +327,82 @@ concurrent `clunk`/`close` cannot race it. The buffer slice is validated against
 the registered-buffer table at submit and the Burrow held (#847) for the op's
 lifetime.
 
+### 8.5.1 Directory-mutation authority (the kernel DAC at submit; 2026-09-23)
+
+The rights snapshot above is necessary for the child-mutation ops (`MKDIR`,
+`MKNOD`, `SYMLINK`, `UNLINKAT`, `RENAMEAT`, `LINK`), but it is not sufficient.
+Their directory handle is normally an `O_PATH` handle, which is born R|W with no
+permission check on its target (it has to be: `O_PATH` is the create-from-a-base
+pattern `SYS_WALK_CREATE` uses too). Its RIGHT_WRITE is therefore hollow. The
+sync twins treat it that way: `SYS_WALK_CREATE`, `SYS_UNLINK` and `SYS_RENAME`
+each run `perm_check(parent, W|X)` at the operation.
+
+Loom-6b-2 shipped these ops on the rights gate alone, on the premise that "the
+identity axis stays the dev9p server's". A-3b made that false. The kernel is
+the only rwx enforcer (IDENTITY-DESIGN 3.7), and Stratum checks only dataset
+scope. So any principal that could X-search to a directory could create,
+unlink, rename, link or symlink entries in it. Found 2026-09-23 (aux); the
+rule below closes it.
+
+- **At submit, each mutated directory is checked like the sync twin.** Stat it
+  (`spoor_stat_native`), then `perm_check(identity, st, W|X)`. `RENAMEAT`
+  checks both directories; `LINK` checks the directory the link lands in. A
+  stat failure answers `-EIO` and a denial `-EACCES`, inline, and nothing goes
+  on the wire. The check is gated on `perm_enforced`, as the twins are.
+- **The identity is the Loom's creator,** stamped at `SYS_LOOM_SETUP` before
+  the handle publishes. `KObj_Loom` is non-transferable and non-dup-able (I-5;
+  pinned in `handle.h`), so only the creator's threads can submit, and the
+  creator's live identity (principal, groups, caps) is exactly the submitter's.
+  It is read at submit, so a legate's `CAP_HOSTOWNER` counts only while the
+  scope holds it (I-25).
+- **An SQPOLL ring refuses these ops** (`-EOPNOTSUPP`). Its kthread submits,
+  and the stat may be a wire RPC. A kthread blocked on a hung server (a
+  partitioned Haul peer, say) would never reach the stop flag, `loom_free`'s
+  join would never return, and its owner's exit would hang. The check cannot run
+  there without blocking, so the ops fail closed there. This is the same
+  disposition 8.5's SETATTR took for identity-setattr, and no SQPOLL consumer
+  issues these ops. Mutation ops belong on a non-SQPOLL ring.
+- **The create ops' group is the creator's own.** The SQE's gid (`MKDIR`/`SYMLINK`
+  `_resv1[2]`, `MKNOD` `offset`) is resolved at submit:
+  - 0 (`GID_INVALID`) means the creator's primary group, as the sync create
+    always uses;
+  - any other value must be a group the creator is in, unless it holds
+    `CAP_HOSTOWNER` or `CAP_CHOWN`: perm_wstat_check's chgrp rule applied at
+    birth;
+  - a refusal answers `-EACCES`, and a value above u32 `-EINVAL`.
+
+  The resolved gid is written into the op's SQE snapshot, so the wire carries
+  it and never the ring's bytes.
+- **Names are checked like the sync twins', on the copy the wire carries.**
+  Each child name must be 1 to 255 bytes, hold no `/` or NUL, and not be `.`
+  or `..` (`sys_copy_component`'s rule); a bad one answers `-EINVAL` before
+  any stat. `SYMLINK`'s target is a path and is not a name. The names are
+  copied out of the registered buffer into the op at submit, and the build
+  sends that copy, so userspace cannot change a name after it was checked.
+- **A create mode carries the rwx bits only.** `MKDIR` sends `mode & 0777`
+  and `MKNOD` keeps its file type plus `mode & 0777`, as the sync create's
+  `perm & 0777` does. Setuid, setgid and sticky are never honoured and
+  `SYS_WSTAT` refuses them, so a create must not be a way to plant them.
+- **`LCREATE` joins this gate when it is dispatched.** It creates a child too.
+  Today it answers `-ENOSYS` with the other fid-lifecycle ops (the #916 seam),
+  so it is not reachable.
+- **The stat blocks, so admission is exact.** On a non-SQPOLL ring the stat runs
+  in the submitter's own `ENTER`, like the sync twin's. There it may wait on a
+  wire RPC between the op's consume and its disposition. The CQ admission gate
+  used to count posted-unreaped plus in-flight ops only, so a sibling driver
+  could not see an op in that gap and could over-admit into its slot. The
+  post-time guard then drops a completion (I-29). That is the Loom-5 audit's F2
+  residual, owed until now. Each consume or chain claim now holds its CQ slot in
+  `admitting`, in the same lock hold as the room check, until its CQE posts, it
+  goes in flight, or it parks HELD in the chain. The wait side counts it too:
+  a blocking `ENTER` does not give up while a sibling is mid-submit (loom.tla's
+  `CanStillComplete` counts that phase). With nothing in flight it sleeps
+  instead of pumping, only while that is still the state, and every release
+  of a reservation wakes the CQ waiters. A `DRAIN` waits for it as well: an
+  op a sibling consumed and has not disposed of is a prior op, neither posted
+  nor in flight, so the drain gate counts `admitting` beside in-flight and
+  rearm-pending ops (loom_order.tla `DrainOrdered`).
+
 ### 8.6 SQPOLL — the poll-thread + the CQ wait-list (Loom-4)
 
 **The design (Option 1, user-voted 2026-06-07).** With `LOOM_SETUP_SQPOLL`,

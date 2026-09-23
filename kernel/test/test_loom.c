@@ -41,6 +41,9 @@ void test_loom_enter_nop(void);
 void test_loom_enter_submit_rejects(void);
 void test_loom_enter_flags_and_bad_index(void);
 void test_loom_enter_cq_admission_backpressure(void);
+void test_loom_admission_counts_admitting(void);
+void test_loom_wait_counts_admitting(void);
+void test_loom_drain_waits_for_admitting(void);
 void test_loom_cq_waiter_wake(void);
 void test_loom_cq_waiter_no_spurious_wake_on_full(void);
 void test_loom_poll(void);
@@ -638,6 +641,88 @@ void test_loom_enter_cq_admission_backpressure(void) {
     loom_unref(l);
 }
 
+// Exact concurrent admission (the Loom-5 audit F2 residual, closed with LOOM.md
+// 8.5.1). A sibling driver between its consume and its disposition holds its CQ
+// slot in `admitting`, so this driver's admission counts it -- simulated white-box
+// here: siblings holding three of a cq-4 ring's slots leave room for exactly ONE
+// consume, not four. And every consume path gives its reservation back: after a
+// batch that runs the fast path, a HELD drain entry admitted later, and a LINK
+// whose failed head cancels its successor, `admitting` is 0 again.
+void test_loom_admission_counts_admitting(void) {
+    struct Loom *l = loom_create(4, 4);
+    TEST_ASSERT(l != NULL, "loom_create(4,4)");
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+
+    spin_lock(&l->lock);
+    l->admitting = 3;                                 // three siblings mid-dispatch
+    spin_unlock(&l->lock);
+    for (u32 i = 0; i < 4; i++) loom_stage_sqe(l, i, LOOM_OP_NOP, 0, 0, 0, 0x300u + i);
+    __atomic_store_n(&h->sq_tail, 4u, __ATOMIC_RELEASE);
+    int n1 = loom_enter(l, 4, 0, LOOM_ENTER_NONBLOCK);
+    TEST_EXPECT_EQ(n1, 1, "one consume fits beside three admitting siblings");
+    TEST_EXPECT_EQ((u64)h->overflow, (u64)0, "no completion dropped");
+    spin_lock(&l->lock);
+    TEST_EXPECT_EQ((u64)l->admitting, (u64)3, "this driver returned its own reservation");
+    l->admitting = 0;                                 // the siblings' dispositions land
+    spin_unlock(&l->lock);
+
+    __atomic_store_n(&h->cq_head, 1u, __ATOMIC_RELEASE);
+    int n2 = loom_enter(l, 4, 0, LOOM_ENTER_NONBLOCK);
+    TEST_EXPECT_EQ(n2, 3, "the siblings gone, the waiting three are consumed");
+    TEST_EXPECT_EQ((u64)l->admitting, (u64)0, "fast path: every reservation returned");
+    __atomic_store_n(&h->cq_head, 4u, __ATOMIC_RELEASE);
+
+    // A DRAIN entry goes HELD at consume (its reservation returned there) and is
+    // re-reserved when the admit pass dispatches it.
+    loom_stage_sqe(l, 0, LOOM_OP_NOP, LOOM_SQE_DRAIN, 0, 0, 0x400u);
+    __atomic_store_n(&h->sq_tail, 5u, __ATOMIC_RELEASE);
+    TEST_EXPECT_EQ(loom_enter(l, 1, 0, LOOM_ENTER_NONBLOCK), 1, "drain entry consumed");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)5, "the drain entry was admitted and completed");
+    TEST_EXPECT_EQ((u64)l->admitting, (u64)0, "chain dispatch: reservation returned");
+
+    // A LINK head that fails inline (a READ on an empty handle slot) cancels its
+    // successor: the cancel path reserves and returns too.
+    loom_stage_sqe(l, 1, LOOM_OP_READ, LOOM_SQE_LINK, 0, 8, 0x500u);
+    loom_stage_sqe(l, 2, LOOM_OP_NOP, 0, 0, 0, 0x501u);
+    __atomic_store_n(&h->sq_tail, 7u, __ATOMIC_RELEASE);
+    TEST_EXPECT_EQ(loom_enter(l, 2, 0, LOOM_ENTER_NONBLOCK), 2, "link pair consumed");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)7, "failed head + cancelled successor both posted");
+    TEST_EXPECT_EQ((u64)l->admitting, (u64)0, "cancel path: reservation returned");
+    TEST_EXPECT_EQ((u64)h->overflow, (u64)0, "no completion dropped anywhere");
+
+    loom_unref(l);
+}
+
+// A DRAIN waits for a sibling mid-dispatch (LOOM.md 8.5.1, round-2 audit F2;
+// loom_order.tla DrainOrdered). An op another driver consumed and has not disposed
+// of is neither posted nor in flight -- only `admitting` sees it, and 8.5.1 made
+// that window a parent-stat RPC wide. The bare admit pass after the release is the
+// control: the drain held, not stuck.
+void test_loom_drain_waits_for_admitting(void) {
+    struct Loom *l = loom_create(4, 4);
+    TEST_ASSERT(l != NULL, "loom_create(4,4)");
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    spin_lock(&l->lock);
+    l->admitting = 1;                                 // a sibling, mid-submit
+    spin_unlock(&l->lock);
+    loom_stage_sqe(l, 0, LOOM_OP_NOP, LOOM_SQE_DRAIN, 0, 0, 0x600u);
+    __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+    TEST_EXPECT_EQ(loom_enter(l, 1, 0, LOOM_ENTER_NONBLOCK), 1, "drain entry consumed");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)0, "the drain held behind the mid-submit sibling");
+    TEST_ASSERT(l->chain != NULL, "the drain is still in the chain");
+
+    spin_lock(&l->lock);
+    l->admitting = 0;                                 // the sibling's disposition lands
+    spin_unlock(&l->lock);
+    TEST_EXPECT_EQ(loom_enter(l, 0, 0, LOOM_ENTER_NONBLOCK), 0, "a bare admit pass");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)1, "the sibling disposed of, the drain runs");
+    TEST_EXPECT_EQ(cqes[0].user_data, 0x600u, "the drain's own CQE");
+    TEST_EXPECT_EQ((u64)h->overflow, (u64)0, "no completion dropped");
+    loom_unref(l);
+}
+
 // SA-2: KOBJ_LOOM is non-transferable, so handle_dup must reject a loom fd (the
 // same gate as the hardware / srv kinds). Pins the non-dup-ability explicitly.
 void test_loom_dup_rejected(void) {
@@ -1225,4 +1310,78 @@ void test_loom_regbuf_foreign_charge_not_refunded(void) {
     TEST_EXPECT_EQ(handle_close(user, loom_fd), 0, "close the loom fd");
     test_proc_drop(user);
     test_proc_drop(payer);
+}
+
+// LOOM.md 8.5.1 (audit F2): a blocking ENTER must not give up while a sibling
+// driver sits between its consume and its disposition (`admitting`; loom.tla's
+// CanStillComplete counts that phase). A kthread waits for one CQE on a ring
+// whose only pending op is a phantom mid-submit; with admitting 0 -- the
+// control, one variable away -- the same wait returns at once. The phantom's
+// CQE is posted as a rescue BEFORE the verdict, so a failure never strands the
+// waiter.
+static struct Loom *g_lwa_ring;
+static bool g_lwa_done, g_lwa_exited;
+
+static void lwa_waiter_entry(void) {
+    (void)loom_enter(g_lwa_ring, 0, 1, 0);
+    __atomic_store_n(&g_lwa_done, true, __ATOMIC_RELEASE);
+    // The terminal EXITING handshake (the loom_sqpoll_main idiom).
+    (void)spin_lock_irqsave(NULL);
+    current_thread()->state = THREAD_EXITING;
+    __atomic_store_n(&g_lwa_exited, true, __ATOMIC_RELEASE);
+    sched();
+    extinction("lwa_waiter_entry: returned from terminal sched");
+}
+
+static struct Thread *lwa_spawn(void) {
+    __atomic_store_n(&g_lwa_done, false, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_lwa_exited, false, __ATOMIC_RELAXED);
+    struct Thread *t = thread_create(kproc(), lwa_waiter_entry);
+    if (t) ready(t);
+    return t;
+}
+
+void test_loom_wait_counts_admitting(void) {
+    struct Loom *l = loom_create(4, 4);
+    TEST_ASSERT(l != NULL, "loom_create");
+    g_lwa_ring = l;
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+
+    struct Thread *t = lwa_spawn();
+    TEST_ASSERT(t != NULL, "spawn the control waiter");
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_lwa_done, __ATOMIC_ACQUIRE));
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_lwa_exited, __ATOMIC_ACQUIRE));
+    thread_free(t);
+
+    spin_lock(&l->lock);
+    l->admitting = 1;                       // a sibling driver, mid-gate
+    spin_unlock(&l->lock);
+    t = lwa_spawn();
+    TEST_ASSERT(t != NULL, "spawn the waiter");
+    // The verdict needs the waiter to have REACHED the wait: parked in its sleep
+    // (on the CQ wait-list AND sleeping), or returned. "Not returned yet" alone is
+    // also what an undispatched waiter looks like. Soft, so the rescue below runs
+    // on every verdict and a red one never strands the thread.
+    TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_lwa_done, __ATOMIC_ACQUIRE) ||
+                          (!poll_waiter_list_empty(&l->cq_waiters) &&
+                           t->state == THREAD_SLEEPING));
+    bool parked  = !poll_waiter_list_empty(&l->cq_waiters) && t->state == THREAD_SLEEPING;
+    bool gave_up = __atomic_load_n(&g_lwa_done, __ATOMIC_ACQUIRE);
+    // The rescue, as a real disposition lands: a CQE (which wakes), the
+    // reservation released, and loom_admitted's wake.
+    int posted = loom_post_cqe(l, 0xF2F2u, 0, 0);
+    spin_lock(&l->lock);
+    l->admitting = 0;
+    spin_unlock(&l->lock);
+    poll_waiter_list_wake(&l->cq_waiters);
+    TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_lwa_exited, __ATOMIC_ACQUIRE));
+    // A waiter that outlived the rescue still holds the ring: leak both rather
+    // than free under it.
+    TEST_ASSERT(__atomic_load_n(&g_lwa_exited, __ATOMIC_ACQUIRE), "the rescue ended the wait");
+    thread_free(t);
+    TEST_EXPECT_EQ((u64)posted, (u64)0, "post the phantom's CQE");
+    TEST_ASSERT(!gave_up, "the wait held while a sibling was mid-submit");
+    TEST_ASSERT(parked, "the waiter parked in the wait's sleep");
+    TEST_EXPECT_EQ((u64)(h->cq_tail - h->cq_head), (u64)1, "the phantom's CQE ended the wait");
+    loom_unref(l);
 }
