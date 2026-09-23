@@ -19,6 +19,7 @@
 #include <thylacine/proc.h>
 #include <thylacine/vma.h>
 #include <thylacine/burrow.h>
+#include <thylacine/errno.h>     // B-1a: vma_reprotect_* report -T_E_*
 
 #include "../mm/slub.h"
 
@@ -76,6 +77,7 @@ struct Vma *vma_alloc(u64 vaddr_start, u64 vaddr_end, u32 prot,
     v->prot        = prot;
     v->burrow         = burrow;
     v->burrow_offset  = burrow_offset;
+    vma_set_prot_max(v, prot);   // the ceiling is the mint (vma.h: why not RW)
     // next/prev left NULL via KP_ZERO; vma_insert wires them.
 
     // P2-Fd contract: burrow_acquire_mapping increments mapping_count. The
@@ -303,7 +305,9 @@ int vma_replace_range_in(struct AddrSpace *as, bool exempt,
     // just made, so the multi-VMA shape has no producer -- and inventing one
     // here would mean inventing its failure semantics too.
     if (vaddr < old->vaddr_start || end > old->vaddr_end)     return -1;
-    if (old->flags != 0 || !old->burrow)  return -1;
+    // B-1a: the ceiling bits are not a state flag -- a reserve minted at none
+    // under an RW ceiling is exactly what map_library overlays into.
+    if ((old->flags & VMA_FLAG_STATE_MASK) != 0 || !old->burrow)  return -1;
     // F8 (re-audit round 3): refuse a CODE-alias VMA, the parity detach_one_locked +
     // sys_munmap_range_for_proc already enforce. A CODE region is a JIT pair over one
     // charge; replacing or splitting one alias orphans its peer (SYS_JIT_DESTROY then
@@ -328,6 +332,7 @@ int vma_replace_range_in(struct AddrSpace *as, bool exempt,
         right = vma_alloc(end, old->vaddr_end, old->prot, old->burrow,
                           old->burrow_offset + (end - old->vaddr_start));
         if (!right) { vma_free(mid); return -1; }
+        right->flags = old->flags;   // B-1a: the remainder keeps its ceiling
     }
 
     // I-32 headroom, checked BEFORE the mutation so a cap-hit changes nothing.
@@ -435,6 +440,18 @@ struct Vma *vma_next_overlap_in(struct AddrSpace *as, u64 lo, u64 hi) {
 // the lowest free gap of `length` bytes in [window_start, window_end).
 int vma_find_gap(struct Proc *p, u64 length,
                  u64 window_start, u64 window_end, u64 *out_vaddr) {
+    return vma_find_gap_aligned(p, length, 0, window_start, window_end, out_vaddr);
+}
+
+// Round `va` up to `align` (a power of two). Returns 0 on wrap, which no
+// caller can confuse with a real base: the window starts above 0.
+static u64 round_up_align(u64 va, u64 align) {
+    u64 r = (va + (align - 1)) & ~(align - 1);
+    return (r < va) ? 0 : r;
+}
+
+int vma_find_gap_aligned(struct Proc *p, u64 length, u64 align,
+                         u64 window_start, u64 window_end, u64 *out_vaddr) {
     if (!p || !out_vaddr)                          return -1;
     if (length == 0)                               return -1;
     if (length        & (PAGE_SIZE - 1))           return -1;
@@ -442,12 +459,18 @@ int vma_find_gap(struct Proc *p, u64 length,
     if (window_end    & (PAGE_SIZE - 1))           return -1;
     if (window_start > window_end)                 return -1;
     if (window_end - window_start < length)        return -1;
+    if (align == 0) align = PAGE_SIZE;
+    if (align & (align - 1))                       return -1;   // not a power of two
+    if (align < PAGE_SIZE)                         return -1;
 
     // `cand` is the lowest VA not yet ruled out. Every comparison uses
     // subtraction guarded by an ordering check, so no `cand + length`
     // sum is ever formed — overflow-free for any window in the 2^47
-    // user-VA space.
-    u64 cand = window_start;
+    // user-VA space. B-1a: the candidate is rounded up to `align` at the
+    // start and after every jump; a VMA that begins below a rounded
+    // candidate but ends above it still overlaps it and still bounds it.
+    u64 cand = round_up_align(window_start, align);
+    if (cand == 0)                                 return -1;
     for (struct Vma *cur = p->as->vmas; cur; cur = cur->next) {
         if (cur->magic != VMA_MAGIC)
             extinction("vma_find_gap: corrupted list entry");
@@ -466,7 +489,8 @@ int vma_find_gap(struct Proc *p, u64 length,
         // No fit before `cur`; it overlaps or abuts `cand`. Jump the
         // candidate past it — cur->vaddr_end > cand here (the entirely-
         // below case was filtered by the first check).
-        cand = cur->vaddr_end;
+        cand = round_up_align(cur->vaddr_end, align);
+        if (cand == 0)                             return -1;
     }
     // Past the last constraining VMA — take the tail gap if it fits.
     if (cand < window_end && window_end - cand >= length) {
@@ -474,6 +498,182 @@ int vma_find_gap(struct Proc *p, u64 length,
         return 0;
     }
     return -1;
+}
+
+// =============================================================================
+// B-1a: the permission ceiling -- reprotect a range (vma.h has the contract).
+// =============================================================================
+
+// The backing kinds a protect may touch. CODE is the I-42 pair (one charge, two
+// aliases: neither is a plain mapping); MMIO / DMA / HOSTMEM are I-34 hardware
+// windows whose permissions were conferred, not chosen.
+static bool reprotect_admits(const struct Burrow *b) {
+    switch (b->type) {
+    case BURROW_TYPE_ANON:
+    case BURROW_TYPE_ANON_LAZY:
+    case BURROW_TYPE_FILE:
+        return true;
+    default:
+        return false;
+    }
+}
+
+int vma_reprotect_precheck_in(struct AddrSpace *as, u64 vaddr, u64 length,
+                              u32 prot) {
+    if (!as)                                            return -(int)T_E_INVAL;
+    if (length == 0)                                    return -(int)T_E_INVAL;
+    if (vaddr  & (PAGE_SIZE - 1))                       return -(int)T_E_INVAL;
+    if (length & (PAGE_SIZE - 1))                       return -(int)T_E_INVAL;
+    u64 end = vaddr + length;
+    if (end < vaddr)                                    return -(int)T_E_INVAL;
+    // X is never a target (ARCH 6.5). The syscall boundary refuses it before any
+    // lookup; this is the mechanism refusing it too, so no in-kernel caller can
+    // reach an RX target through a path the boundary did not see.
+    if (prot & VMA_PROT_EXEC)                           return -(int)T_E_ACCES;
+    if ((prot & VMA_PROT_WRITE) && !(prot & VMA_PROT_READ)) return -(int)T_E_INVAL;
+    if (prot & ~(u32)(VMA_PROT_READ | VMA_PROT_WRITE))  return -(int)T_E_INVAL;
+
+    u64 cur = vaddr;
+    struct Vma *v = vma_next_overlap_in(as, vaddr, end);
+    if (!v)                                             return -(int)T_E_NOMEM;
+    for (; v; v = vma_next_overlap_in(as, v->vaddr_end, end)) {
+        if (v->vaddr_start > cur)                       return -(int)T_E_NOMEM; // a hole
+        if (!v->burrow)                                 return -(int)T_E_NOMEM; // a guard: reserved, not mapped
+        if (v->burrow->magic != VMO_MAGIC)              return -(int)T_E_ACCES;
+        if (v->flags & VMA_FLAG_SHARED_IN)              return -(int)T_E_ACCES;
+        if (!reprotect_admits(v->burrow))               return -(int)T_E_ACCES;
+        if (prot & ~vma_prot_max(v))                    return -(int)T_E_ACCES; // above the ceiling
+        cur = v->vaddr_end;
+    }
+    if (cur < end)                                      return -(int)T_E_NOMEM; // a hole at the tail
+    return 0;
+}
+
+// Two adjacent VMAs that describe one contiguous window of one Burrow at one
+// prot are one mapping split by history. Shared-in mappings are never merged:
+// their exact (vaddr, length) is what the sharer's detach matches.
+static bool reprotect_mergeable(const struct Vma *a, const struct Vma *b) {
+    if (!a->burrow || !b->burrow)                  return false;
+    if (a->burrow != b->burrow)                    return false;
+    if (a->vaddr_end != b->vaddr_start)            return false;
+    if (a->prot != b->prot || a->flags != b->flags) return false;
+    if (a->flags & VMA_FLAG_SHARED_IN)             return false;
+    return a->burrow_offset + (a->vaddr_end - a->vaddr_start) == b->burrow_offset;
+}
+
+// Coalesce every pair that involves a piece inside [lo, hi): the left
+// neighbour with the first piece, the pieces among themselves, the last piece
+// with the right neighbour. Two mappings both outside the range are never
+// considered -- nothing about them changed.
+static void reprotect_merge_in(struct AddrSpace *as, u64 lo, u64 hi) {
+    struct Vma *v = vma_next_overlap_in(as, lo, hi);
+    if (!v) return;
+    struct Vma *a = v->prev ? v->prev : v;
+    while (a && a->next && a->vaddr_start < hi) {
+        struct Vma *b = a->next;
+        if (!reprotect_mergeable(a, b)) { a = b; continue; }
+        a->vaddr_end = b->vaddr_end;
+        vma_remove_in(as, b);
+        // `a` still maps the same Burrow, so this drop cannot be its last: the
+        // deferred form's "owes a free" return is the impossible case, and a
+        // free under as->lock is exactly what it exists to prevent.
+        if (vma_free_deferred(b, NULL) != NULL)
+            extinction("vma merge dropped the last ref of a Burrow its neighbour maps");
+    }
+}
+
+int vma_reprotect_range_in(struct AddrSpace *as, bool exempt,
+                           u64 vaddr, u64 length, u32 prot, bool seal) {
+    int rc = vma_reprotect_precheck_in(as, vaddr, length, prot);
+    if (rc != 0) return rc;
+    u64 end = vaddr + length;
+
+    struct Vma *first = vma_next_overlap_in(as, vaddr, end);
+    struct Vma *last  = first;
+    for (struct Vma *v = first; v; v = vma_next_overlap_in(as, v->vaddr_end, end))
+        last = v;
+
+    // Only the first and the last mapping can be cut, so at most two pieces --
+    // allocated BEFORE the list is touched (the D-3b shape), so a shortfall
+    // costs nothing but the frees below. Each piece re-derives its offset from
+    // the SAME (burrow, offset) relation its parent had, which is what keeps
+    // every surviving VA's byte identity unchanged across the cut, and copies
+    // the parent's flags whole: the ceiling AND the COW routing bit (the
+    // per-page share counts are per page, so a cut is sound for a forked
+    // mapping -- which is why addrspace_clone dedupes its clones per Burrow).
+    bool cut_left  = first->vaddr_start < vaddr;
+    bool cut_right = last->vaddr_end    > end;
+    struct Vma *lpiece = NULL, *rpiece = NULL;
+    if (cut_left) {
+        lpiece = vma_alloc(first->vaddr_start, vaddr, first->prot,
+                           first->burrow, first->burrow_offset);
+        if (!lpiece) return -(int)T_E_NOMEM;
+        lpiece->flags = first->flags;
+    }
+    if (cut_right) {
+        rpiece = vma_alloc(end, last->vaddr_end, last->prot, last->burrow,
+                           last->burrow_offset + (end - last->vaddr_start));
+        if (!rpiece) { if (lpiece) vma_free(lpiece); return -(int)T_E_NOMEM; }
+        rpiece->flags = last->flags;
+    }
+
+    // I-32 headroom, checked BEFORE the mutation so a cap-hit changes nothing.
+    // Under as->lock the count is stable, so the charges taken by the inserts
+    // below cannot then fail.
+    u32 adding = (lpiece ? 1u : 0u) + (rpiece ? 1u : 0u);
+    if (!exempt && adding) {
+        u32 cnt = __atomic_load_n(&as->vma_count, __ATOMIC_RELAXED);
+        if (cnt > PROC_VMA_MAX - adding) {
+            if (lpiece) vma_free(lpiece);
+            if (rpiece) vma_free(rpiece);
+            return -(int)T_E_NOMEM;
+        }
+    }
+
+    // The ORIGINAL structs survive as the in-range pieces (shrunk in place, so
+    // an interior mapping is never reallocated and no mapping ref ever drops);
+    // the new pieces are the remainders outside the range. Save what a
+    // rollback puts back.
+    u64 first_start = first->vaddr_start;
+    u64 first_off   = first->burrow_offset;
+    u64 last_end    = last->vaddr_end;
+    if (cut_left) {
+        // start and offset move by the SAME delta: identity preserved. Still
+        // sorted: the predecessor ends at or below the old start.
+        first->burrow_offset += vaddr - first->vaddr_start;
+        first->vaddr_start    = vaddr;
+    }
+    if (cut_right)
+        last->vaddr_end = end;          // same start, same offset
+
+    if (lpiece && vma_insert_in(as, exempt, lpiece) != 0) goto rollback;
+    if (rpiece && vma_insert_in(as, exempt, rpiece) != 0) {
+        if (lpiece) vma_remove_in(as, lpiece);
+        goto rollback;
+    }
+
+    // APPLY, in place. The range's leaf PTEs are already gone (the caller's
+    // half of the contract), so the next fault sees the new prot: refused at
+    // none, installed read-only at R, writable at RW -- fault.c step 2.
+    for (struct Vma *v = vma_next_overlap_in(as, vaddr, end); v;
+         v = vma_next_overlap_in(as, v->vaddr_end, end)) {
+        v->prot = prot;
+        if (seal) vma_set_prot_max(v, prot);
+    }
+
+    reprotect_merge_in(as, vaddr, end);
+    return 0;
+
+rollback:
+    // Nothing changed: the originals go back to exactly the ranges they had.
+    // Unreachable in practice (the cap was checked, the vacated ranges cannot
+    // overlap), kept so an insert refusal can never leave a hole.
+    if (lpiece) vma_free(lpiece);
+    if (rpiece) vma_free(rpiece);
+    first->vaddr_start   = first_start;
+    first->burrow_offset = first_off;
+    last->vaddr_end      = last_end;
+    return -(int)T_E_NOMEM;
 }
 
 void vma_drain(struct Proc *p) {

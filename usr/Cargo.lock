@@ -1394,6 +1394,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "protect-guard-child"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
+name = "protect-probe"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
 name = "prowl"
 version = "0.1.0"
 dependencies = [

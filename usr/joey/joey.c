@@ -5742,6 +5742,41 @@ int main(void) {
     }
     t_putstr("joey: /alloc-smoke reaped status=0; libthyla-rs::alloc verified\n");
 
+    // === /protect-probe + /protect-guard-child (B-1a: the permission ceiling) ===
+    // The EL0 half of ARCH 6.5's contract: SYS_BURROW_RESERVE mints at a prot
+    // under an RW ceiling, SYS_BURROW_PROTECT moves a range within it -- the
+    // raise installs on the next touch, bytes survive a lowering, X is refused
+    // before any lookup, a seal is for good, pieces detach one by one. The probe
+    // prints "protect-probe: ALL OK" and exits 0. The guard child then seals a
+    // page at none, prints its marker on fd 1, and writes through it: the fault
+    // MUST be refused (a snare:segv death, exit status 1), never served. The
+    // expect_fault census requires BOTH the marker and a non-zero status, so a
+    // guard that did not guard (SURVIVED, exit 0) fails the boot.
+    {
+        const char pp_name[] = "protect-probe";
+        long pp_pid = t_spawn(pp_name, sizeof(pp_name) - 1);
+        if (pp_pid <= 0) {
+            t_putstr("joey: t_spawn(\"protect-probe\") FAILED\n");
+            return 1;
+        }
+        int pp_status = -1;
+        long pp_reaped = t_wait_pid_for((int)pp_pid, 0, &pp_status);
+        if (pp_reaped != pp_pid || pp_status != 0) {
+            t_putstr("joey: /protect-probe FAILED\n");
+            return 1;
+        }
+        t_putstr("joey: /protect-probe reaped status=0; reserve/protect/seal/X-refusal verified from EL0\n");
+
+        static const char pg_name[]   = "protect-guard-child";
+        static const char pg_expect[] = "protect-guard-child: touching the guard";
+        if (pouch_smoke_one_expect_fault(pg_name, sizeof(pg_name) - 1,
+                                         pg_expect, sizeof(pg_expect) - 1) != 0) {
+            t_putstr("joey: /protect-guard-child FAILED (a page sealed at none did not fault)\n");
+            return 1;
+        }
+        t_putstr("joey: /protect-guard-child ok (a write through a sealed-none page died via snare:segv)\n");
+    }
+
     // === /burrow-torture (kernel-burrow + SMP regression guard) ===
     // Native attach/detach/re-attach stress over SYS_BURROW_ATTACH/DETACH -- no
     // musl, no Stratum, no mount. Born in the EBADTAG DFS to test whether the

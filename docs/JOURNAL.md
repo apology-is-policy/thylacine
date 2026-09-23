@@ -22,6 +22,66 @@ needed the operator.
 
 
 ---
+## 2026-09-23, afternoon (main, Fable 5.1, effort max) -- B-1a: the permission ceiling, built
+
+The scripture from the morning (`96f24314`) became code the same day: spec
+first, then the kernel, then the probes. Two hosts of the truth this run:
+`specs/check-cow.sh` and the 1632/1632 suite.
+
+**The spec came first and was measured, not asserted.** `specs/cow.tla` gained
+the three ways `burrow_protect` reaches the COW model -- a protect that keeps
+the writable PTE (bug 4), a fault arm that breaks before it enforces the prot
+(bug 5), a fork that clones a split Burrow once per piece (bug 6) -- every new
+action gated on `ALLOW_PROTECT`. The additivity claim is a check in the gate,
+not a sentence: with the switch off the four pre-existing cfgs reproduce their
+morning baseline exactly (`cow` 580 states, `cow_buggy_vfork` 231 with the
+temporal violation, the two invariant cfgs by name), and `cow_protect` is clean
+at 10636 states. One wrong turn worth keeping: the first draft of the clean
+protect cfg inherited `WF_vars(Next)` alone, and the protect ladder makes the
+state graph cyclic -- a run that protects forever and never lets the vfork
+child release is a fair behaviour under that fairness and a spurious liveness
+counterexample. `SpecProtect` adds weak fairness on the vfork sub-machine,
+which is the faithful statement (the release depends on nothing a protect
+does); the old `Spec` stays untouched so the fingerprints mean what they meant.
+A second: the TLC wording for a liveness failure is "Temporal property X was
+violated", not the "Temporal properties were violated" the check first grepped
+for -- the gate now pins the property's NAME, as the invariant leg does.
+
+**Three findings the split made live, all closed in the chunk.** (1) A lazy
+VMA that is one PIECE of a Burrow uncharged the WHOLE Burrow's resident count
+at detach (`detach_one_locked`), once per piece -- an I-32 under-count the
+D-3b split could already reach in principle and a protect split reaches
+routinely (every pthread stack is guard + usable). The refund is now the
+piece's own range via `burrow_decommit` before the unmap, which also returns a
+detached piece's pages at once (the bar). (2) `clone_one_vma` shared an eager
+anon mapping across a fork when its PROT was read-only; with a raise available
+that is one address space's writes landing in another's (I-44), so the test
+is on the CEILING now (`vma_prot_max`), which nothing raises -- the vDSO
+(ceiling R) still shares, an eager attach protected down to R is refused,
+`cow.clone_refuses_eager_anon_with_writable_ceiling` holds both. (3) The
+ratified text said a protect range lies within ONE mapping; the merge pass
+makes a grown reservation exactly two (rw then none), so a whole-region
+protect over it is a two-mapping range Linux serves. Built as multi-mapping,
+all-or-nothing (the precheck decides every refusal before the first
+mutation -- stronger than Linux's partial failure), and ARCH 6.5 amended AS
+BUILT with the reasoning; the operator sees it in the report.
+
+**The tripwire fired as designed.** The first boot extincted on joey's ladder:
+`viv-pheno-probe` L22 pinned `mprotect == ENOSYS` and L23 pinned "a PROT_NONE
+mapping is writable" -- deliberately, so real PROT_NONE landing would fail the
+ladder instead of letting the entry go stale. It did. Both legs now pin the
+served behaviour (ENOMEM over a hole, EACCES for X before the lookup, the
+reserve-then-commit ladder end to end).
+
+**Results.** Kernel suite 1632/1632 at -smp 1 and 4 (15 new `protect.*` /
+`cow.*` / `sys_burrow.*` tests + `vivarium.mprotect_domain`); `/protect-probe`
+and `/protect-guard-child` (a page sealed at none dies via snare:segv, reaped
+by the expect-fault census) in the boot ladder; the four REDs and the SMP gate
+and the holotype audit recorded in the commit body. Open, not this chunk:
+B-1a' (range detach; the charged sparse `filepages`; the I-32 default) and the
+rest of the B-1 sequence.
+
+---
 ## 2026-09-23 (main, Fable 5.1, effort max) -- the mprotect conversation, and what it turned out to be about
 
 The operator asked for the F3-F9 talk ("mprotect, dlopen etc., let's talk

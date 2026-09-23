@@ -65,9 +65,9 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**524 owned · 48 unowned · 572 files (91% owned) · ~13165 unswept lines.**
+**524 owned · 49 unowned · 573 files (91% owned) · ~13220 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **73 files, ~33174 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **74 files, ~33372 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
@@ -84,6 +84,7 @@ Excluded as harness and counted here rather than dropped: **73 files, ~33174 lin
 | usr/susp-mask-child | 0 | 1 | 139 |
 | usr/stub-driver | 0 | 1 | 119 |
 | usr/lib | 66 | 1 | 72 |
+| usr/protect-guard-child | 0 | 1 | 55 |
 | usr/tapestryd | 8 | 2 | 21 |
 | mm | 8 | 0 | 0 |
 | usr/aurora | 4 | 0 | 0 |
@@ -168,6 +169,7 @@ Excluded as harness and counted here rather than dropped: **73 files, ~33174 lin
 | usr/pouch-hello/pouch-hello-printf.c | 64 |
 | kernel/include/thylacine/cpio.h | 61 |
 | usr/pouch-hello/pouch-hello-env.c | 57 |
+| usr/protect-guard-child/src/main.rs | 55 |
 | usr/pouch-hello/pouch-hello-argv.c | 51 |
 | usr/ports/vkquake/thy_vkloader.c | 47 |
 | usr/pouch-hello/pouch-hello-stdio.c | 42 |

@@ -270,7 +270,7 @@ hides is one the matrix can no longer observe.
 |---|---|---|
 | **B-0** | `JSCOnly` cross-build, JIT off (asm LLInt + IPInt). Source lives OUTSIDE this repo (a `webkit-thylacine` fork beside `llvm-thylacine`); the repo carries the build wiring and patches. | `jsc` runs on the device; the measured list of P1 gaps |
 | **B-1** | P1, the anonymous-memory surface. **Scripture LANDED 2026-09-23** (O-1 resolved; ARCH 6.5); five gated chunks follow in order: | |
-| B-1a | permissions: `burrow_reserve` + `burrow_protect` + `PROTECT_SEAL`; the phenotype `mprotect` row; `cow.tla` first for the split x COW interaction. Audit-bearing. | probes with REDs; the `burrow_protect(X)` deny path; SMP gate; audit closed |
+| B-1a | **LANDED 2026-09-23 *(pending)*.** permissions: `burrow_reserve` (124) + `burrow_protect` (125) + `PROTECT_SEAL`; the phenotype `mprotect` row + exact `PROT_NONE`/`PROT_READ` mints; `cow.tla` extended FIRST behind `ALLOW_PROTECT` (bugs 4-6; additive by measurement, `cow_protect` 10636 states). Built beyond the letter: multi-mapping ranges all-or-nothing + a merge pass (ARCH 6.5 amended as built); the fork's per-Burrow clone dedupe; the eager-ANON fork share keyed on the ceiling; the lazy-piece detach uncharge. 1632/1632 kernel tests; `/protect-probe` + `/protect-guard-child` at boot. Audit-bearing. | probes with REDs; the `burrow_protect(X)` deny path; SMP gate; audit closed |
 | B-1a' | capacity: range detach; the charged sparse `filepages`; the I-32 default = RAM minus a reserve; the >256 MiB detach refusal. Audit-bearing. | a 4 GiB reservation round-trips; the reserve holds under a memory bomb; SMP gate; audit closed |
 | B-1b | Pouch: `mprotect` / `madvise` / partial `munmap` / real pthread guards; stack 8 MiB + auxv extent. | `pouch-hello-*` legs incl. a guard FAULT; the witness RED on the old libc |
 | B-1c | native: `dlmalloc-rs` replaces the fixed 4 MiB heap; the two-substrate witness. | the page count rises past 4 MiB and FALLS after free, sabotaged once |
@@ -296,9 +296,11 @@ hides is one the matrix can no longer observe.
 - **Effort is `xhigh`, by the operator's vote, for the whole arc.** Say so in
   every audit-bearing commit body; do not re-ask.
 - **The permission surface is `burrow_protect` under a mint-time ceiling (ARCH
-  6.5, ratified 2026-09-23), not `mprotect`.** X is never a target of it and no
-  capability gates it -- do not add either. Until B-1a lands, the as-built truth
-  is still "no permission-mutation syscall exists".
+  6.5, ratified 2026-09-23; BUILT at B-1a as `SYS_BURROW_PROTECT` 125, with
+  `SYS_BURROW_RESERVE` 124), not `mprotect`.** X is never a target of it and no
+  capability gates it -- do not add either. The native detach is still
+  exact-match per mapping: after a protect has cut a reservation into pieces,
+  detach them piece by piece (B-1a' brings the range form).
 - **`SYS_WEFT_SHARE` is gated to the driver tier on purpose** (Weft-7 F1,
   `kernel/syscall.c`). Read that audit before proposing to lift it.
 - **Thylacine links statically BY DEFAULT; `dlopen` arrives with B-1d as an

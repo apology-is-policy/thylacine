@@ -177,14 +177,15 @@ struct viv_row {
 //             semantics were exactly Linux's, refusal declines. No pure
 //             _decide exists for this row because the domain is a question
 //             about STATE, not about arguments.
-//   mprotect— ENOSYS, and recorded rather than left to the default. It would
-//             reach ENOSYS anyway (no row -> vivarium_translate's fallthrough),
-//             but this file's standard is that a number never considered and a
-//             number considered and rejected are different facts. Thylacine has
-//             NO prot-mutation syscall at all -- an I-12 design choice, not a
-//             gap -- so there is nothing to translate to. musl tolerates this
-//             BY CONSTRUCTION: mallocng/malloc.c:92 reads `if (mprotect(...)
-//             && errno != ENOSYS) return 0;`.
+//   mprotect— TIER2 since B-1a (2026-09-23): a translated row over
+//             SYS_BURROW_PROTECT, the permission ceiling's one mutation (ARCH
+//             6.5). Until then it was ENOSYS, recorded rather than left to the
+//             default, because Thylacine had NO prot-mutation syscall at all --
+//             an I-12 design choice musl tolerated BY CONSTRUCTION
+//             (mallocng/malloc.c:92 reads `if (mprotect(...) && errno !=
+//             ENOSYS) return 0;`). The ceiling is what made a mutation
+//             admissible without loosening I-12: X is never a target, and no
+//             mapping rises past what its mint conferred.
 //   brk     — ENOSYS, honestly. Thylacine's heap is Burrow-based; there is no
 //             break pointer, so there is nothing to translate to. Reporting
 //             ENOSYS lets a libc fall back to its mmap path, which is what musl
@@ -337,7 +338,7 @@ static const struct viv_reject g_viv_rejects[] = {
     { VIV_LINUX_NEWFSTATAT, VIV_TIER2   },  // V-2c: vivarium_fstatat_decide
     { VIV_LINUX_MMAP,       VIV_TIER2   },  // V-2d: vivarium_mmap_decide
     { VIV_LINUX_MUNMAP,     VIV_TIER2   },  // V-2d: the exact-match subset
-    { VIV_LINUX_MPROTECT,   VIV_ENOSYS  },  // V-2d: no prot-mutation syscall (I-12)
+    { VIV_LINUX_MPROTECT,   VIV_TIER2   },  // B-1a: vivarium_mprotect_decide over SYS_BURROW_PROTECT
     { VIV_LINUX_STATX,      VIV_FORWARD },  // wants a mask + a 256-byte struct
     { VIV_LINUX_BRK,        VIV_ENOSYS  },  // no counterpart; libc falls to mmap
 
@@ -1240,10 +1241,11 @@ enum viv_verdict vivarium_faccessat_decide(u64 dirfd) {
 // and generic musl PROT_GROWSDOWN/PROT_GROWSUP. None of those is honourable
 // either, and a deny-list would have admitted all four silently.
 //
-// PROT_NONE (== 0) is INSIDE the list, and is the one deliberate fidelity
-// degradation: it yields a writable mapping. That is argued in full in the
-// header -- musl's own ENOSYS-tolerant mprotect is the evidence it is the
-// sanctioned outcome -- and published in VIVARIUM.md §9's DEGRADED tier.
+// PROT_NONE (== 0) is INSIDE the list and, since B-1a, is minted EXACTLY: the
+// shell reserves at the requested prot under an RW ceiling (SYS_BURROW_RESERVE),
+// so a PROT_NONE mapping faults until mprotect raises it and a PROT_READ one is
+// read-only. The degradation this row carried until then ("PROT_NONE yields a
+// writable mapping", VIVARIUM.md 6.21) ended with the ceiling.
 #define VIV_MMAP_PROT_ADMITTED ((u32)(VIV_PROT_READ | VIV_PROT_WRITE))
 
 enum viv_verdict vivarium_mmap_decide(u64 addr, u64 prot, u64 flags,
@@ -1388,11 +1390,11 @@ enum viv_verdict vivarium_mmap_fixed_anon_decide(u64 addr, u64 prot, u64 flags,
     if (!fixed_addr_ok(addr))                    return VIV_FORWARD;
 
     if (pr & ~VIV_MMAP_FIXED_ANON_PROT_ADMITTED) return VIV_FORWARD;
-    // PROT_NONE declines rather than degrading to writable, which is the
-    // non-fixed anon arm's documented behaviour. A FIXED PROT_NONE over an
-    // existing mapping is a GUARD; handing back a writable page instead would
-    // not be a degradation but a hole. See the header.
-    if ((pr & VIV_PROT_READ) == 0)               return VIV_FORWARD;
+    // PROT_NONE is ADMITTED since B-1a and minted exactly: a FIXED PROT_NONE
+    // window over an existing mapping is a GUARD, and the fixed-anon arm now
+    // mints it at none under an RW ceiling, so it faults until raised. Until
+    // the raise existed this declined -- a writable page where a guard was
+    // asked for would have been a hole, not a degradation.
 
     if (fl != VIV_MMAP_FIXED_ANON_FLAGS_ADMITTED) return VIV_FORWARD;
     if ((s32)(u32)fd != -1)                       return VIV_FORWARD;
@@ -1413,6 +1415,27 @@ bool vivarium_mmap_arms_disjoint(u64 addr, u64 prot, u64 flags,
     if (vivarium_mmap_fixed_anon_decide(addr, prot, flags, fd, offset) == VIV_TRANSLATED)
         admitted++;
     return admitted <= 1;
+}
+
+// -----------------------------------------------------------------------------
+// TIER 2 — mprotect (B-1a; ARCH 6.5 "The permission ceiling"). See the header.
+// -----------------------------------------------------------------------------
+
+enum viv_verdict vivarium_mprotect_decide(u64 addr, u64 len, u64 prot) {
+    // `addr` and `len` are SEMANTIC questions the shell answers exactly (a
+    // zero length succeeds; an unaligned address is the target's EINVAL); the
+    // domain is the prot word alone. Linux declares prot as `int`.
+    (void)addr;
+    (void)len;
+    u32 pr = (u32)prot;
+
+    // An ALLOW-LIST, as every prot gate in this file: PROT_BTI / PROT_MTE /
+    // PROT_GROWSDOWN / PROT_GROWSUP are outside it without being enumerated.
+    // PROT_EXEC is INSIDE the domain although it is always refused -- the
+    // refusal is the target's stated EACCES ("X is never a target"), which a
+    // guest must see as that errno and not as ENOSYS.
+    if (pr & ~(u32)(VIV_PROT_READ | VIV_PROT_WRITE | VIV_PROT_EXEC)) return VIV_FORWARD;
+    return VIV_TRANSLATED;
 }
 
 // =============================================================================
