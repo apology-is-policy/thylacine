@@ -1,0 +1,5 @@
+# Context-window thresholds (tokens) read by ~/.claude/ctx-hook.sh and
+# tools/stop-hook.sh. CKPT = the self-compact line (CLAUDE.md "Context economy").
+CKPT=400000
+WARN=500000
+HARD=880000

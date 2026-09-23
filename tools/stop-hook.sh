@@ -3,7 +3,7 @@
 #
 # CLAUDE.md's guided-autonomy rule says a checkpoint is not a stopping point:
 # under granted autonomy you land a chunk, report it, and open the next one in
-# the same run, and the signal that ends the run is the 400k CHECKPOINT WINDOW (600k until 2026-09-23).
+# the same run, and the signal that ends the run is the CHECKPOINT WINDOW (CKPT in .claude/ctx-thresholds).
 # That rule was behavioural only -- CLAUDE.md itself noted the mechanism that
 # would make it structural is a Stop hook, "deliberately not built". This is it,
 # built at the user's request 2026-08-16 after a run stopped at a checkpoint it
@@ -49,7 +49,15 @@
 # work, where a stop is a decision. One or two means a reply.
 set -u
 FLOOR="${STOP_FLOOR:-120000}"        # below: conversational, stay silent
-CKPT="${CTX_CKPT:-400000}"           # at/above: stopping is correct, stay silent
+# Per-project thresholds: a tracked $CLAUDE_PROJECT_DIR/.claude/ctx-thresholds, so a
+# changed line lands with the branch that changes it and reaches another worktree
+# only when that worktree merges it. KEY=digits lines only; env still wins.
+ctx_threshold() {
+  local f="${CLAUDE_PROJECT_DIR:-}/.claude/ctx-thresholds" v=""
+  [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -r "$f" ] && v=$(sed -n "s/^$1=\([0-9][0-9]*\)$/\1/p" "$f" | tail -1)
+  printf '%s' "${v:-$2}"
+}
+CKPT="${CTX_CKPT:-$(ctx_threshold CKPT 600000)}"  # at/above: stopping is correct, stay silent
 LIMIT="${CTX_LIMIT:-900000}"
 MIN_TURNS="${STOP_MIN_TURNS:-6}"     # assistant turns since the user last spoke
 # ONE source for the token, used to EMIT the block below and to DETECT it in the
