@@ -234,6 +234,54 @@ mounter, checked at the namespace layer).
   source within the unified kernel permission layer — see §3.7; F-1 is subsumed
   into that layer, not a separate mechanism.)**
 
+**BUILT 2026-09-23 for Haul — the identity cape (operator-voted "mounter owns").**
+The seam's premise was "no permissionless backing is mounted at v1.0", and Haul
+(HAUL-DESIGN.md) broke it without anyone pulling the seam forward. An npxf server
+is not permissionless, but its owners are the *host's*: dev9p enforced the Mac's
+uid 501 / gid staff against Thylacine principals, so every guest user was
+"other" and a private (0700/0600) export was unreadable to the user who mounted
+it. The coincidences were worse: a Linux host's first user is uid 1000, and
+corvus's first principal is 1000 (`FIRST_AUTO_ID`), so michael would have held
+owner rights over that user's files by accident. A server's ids are foreign
+whenever they are not Thylacine principals, and F-4 already calls such a server
+untrusted/remote.
+
+*Semantics* (the sshfs `idmap=user` shape, chosen over this section's original
+uniform-mode cape):
+- Every stat from a caped session reports owner = the ATTACHING Proc's durable
+  principal id (F-5: never the legate annotation) and group = its primary gid.
+- The per-file mode is kept as the server reports it. The host owner's own
+  intent (private, shared, executable) survives the translation; one uniform
+  mode would lose the exec bits and the private/shared distinction.
+- The `valid`-mask fail-closed rule for mode is unchanged.
+
+*Nothing identity-bearing crosses to a caped server:*
+- Tattach sends `n_uname` = none (F-4).
+- A create sends gid `(u32)-1`, which a POSIX server reads as "leave the group".
+- chown and chgrp are refused before the wire (`EPERM`): the cape imposes
+  ownership, and a server-side change could not alter what the guest sees.
+- chmod passes through, since mode is the server's own vocabulary.
+
+*Mechanism:* a property of the 9P SESSION, fixed at attach before the root
+Spoor publishes. It is not a policy on the mount node, as the original text had
+it, because a session's root can be mounted more than once and the cape must
+travel with every mount. Three ways to set it:
+- `SYS_ATTACH_9P` gains a flags word (x5), with `SYS_ATTACH_9P_CAPE`.
+- `SYS_ATTACH_9P_SRV` admits the same bit.
+- A byte service posted with the `DMSRVCAPE` perm bit capes every attach over
+  it. Only its POSTER can set this, which is the server's own side, so ut's
+  plain `mount /srv/NAME` needs no option.
+
+haul sets the cape on both of its paths.
+
+*Why it cannot escalate:* the attacher holds the transport. A pipe attach's
+server is behind the attacher's own pipes, and a `/srv` attach needs a byte-conn
+with READ+WRITE, over which the attacher could speak raw 9P and bypass kernel DAC
+entirely. So the cape grants the attacher nothing its connection did not already
+grant, and third parties sharing the namespace see owner = the mounter and get
+at most the served group/other bits. A TCB posting never carries `DMSRVCAPE`:
+the poster sets it, and nothing else can.
+
 ### 3.3 Identity — the hybrid model (F-0: RESOLVED 2026-05-28)
 
 A principal has **two separate fields**: a durable **identity** (who — for
@@ -525,7 +573,8 @@ Mechanism: the chokepoint is **Dev-gated by a `Dev.perm_enforced` flag**
 **F2** (gate `dev9p_stat_native` on the `Rgetattr` valid mask) is closed here — the
 enforcement reads that stat, so a missing-`valid`-bit garbage mode would
 mis-enforce. A-2c's mount-cape stays a **seam** (no permissionless backing is
-mounted at v1.0). (Verified during impl: `/system.key` in devramfs is already
+mounted at v1.0; superseded 2026-09-23 -- Haul mounts one, and §3.2 records the
+cape built for it). (Verified during impl: `/system.key` in devramfs is already
 `0400` (build.sh `chmod 0400`), reported owner = `PRINCIPAL_SYSTEM` -- so a
 non-system principal cannot read it post-enforcement and the boot chain (owner)
 still can. The earlier "0644 -> tighten to 0600" flag was a wrong guess; no change
