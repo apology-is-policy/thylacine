@@ -22,6 +22,87 @@ needed the operator.
 
 
 ---
+## 2026-09-23, evening (main, Fable 5.1, effort max) -- prowl-6: the capacity figures reach the screen, and the census found two consumers the design had not
+
+**The ask.** The operator's next sub-chunk after B-1a' (recorded with the
+landing): a prowl telemetry sub-chunk on the figures capacity produces, a
+`/ctl/procs` tables column, and the manual folding in `tables:` and
+`/ctl/memory`. Designed in the previous context (the design memory carried
+every anchor) and executed here from a clean `main` at daf88c2d.
+
+**What it is.** `/ctl/procs` gains `TABLES` after `PAGES` (kernel/devctl.c,
+the address space's `pgtable_pages` as an atomic load under the same
+zero-means-overflow rule as its neighbours). prowl gains a third header row
+(the user-pool meter from `/ctl/memory`), a `TBL` column, and a first line in
+the `d` pane from `/proc/<pid>/status` -- which is ungated, unlike the sched
+half, so the footprint renders for every process. `ps` gains `TBL`. The manual
+gains `13-processes.md`.
+
+**The census, with its control.** The design listed the layout's consumers
+as prowl, `ps`, coreutil-smoke (header only) and diorama (two columns). The
+re-run here used the header string as the control (it lives in exactly one
+file, kernel/devctl.c, and the census must find it) and found two more that
+the design had not examined: coreutil-smoke ALSO asserts `ps`'s beacon table
+frame by its alignment string (`cols=rrllrrrr`, eight characters -- nine now),
+and Halcyon's `loaded_systems` parses `/ctl/procs` (usr/halcyon/src/main.rs:1451;
+it takes the first three tokens, so it needed nothing). The `Table::new("rrllrrrr")`
+in ps.rs was the third miss: an alignment string is a column count in disguise.
+Lesson kept: a column change has to be searched by every SHAPE the layout takes
+(a header, a token count, an alignment string), not by the file name.
+
+**The test's fixture order.** `devctl.procs_tables_column` tears its Proc and
+Burrow down BEFORE its assertions, because `TEST_ASSERT` returns on failure
+and a Proc left alive would carry its page in the pool for the rest of the
+boot -- the B-1a' fixture-leak lesson (daf88c2d) applied at the design stage
+rather than after a cascade.
+
+**Cores.** The aux held the mac for its (U) build through this chunk's
+verification window; the yip queue kept the place and the audit round ran on
+the diff in the meantime (a static round: the prompt forbade builds and boots
+while the lease was a peer's).
+
+**The fixture the design had, and the one that landed.** The design's kernel
+test mapped an eager page into a `proc_alloc` Proc and expected the holder
+count to be the page plus its tables. The first boot said otherwise, twice:
+the accounting assertion failed (an eager `burrow_map` page is charged to no
+address space -- the eager charge lives at the attach syscall, so PAGES was 3,
+equal to TABLES, and the fixture could not have told a renderer that prints
+PAGES twice from a correct one), and after the rewrite to a lazy reservation
+the row was never found, because `/ctl/procs` walks the TREE from kproc
+(kernel/proc.c:836) and an orphan from `proc_alloc` is in no tree. The landed
+fixture is an `rfork(RFPROC)` child of the test's Proc that reserves a lazy
+page, touches it (4 pages, 3 tables -- a one-slot pagemap is an inline leaf,
+uncharged), reads its own row, and is reaped before the assertions. The audit
+round, running statically on the diff while the suite ran, reported the same
+two defects against the first draft: the suite and the prosecutor converged
+on them independently.
+
+**The gate needed an image the operator's tree cannot hold.** `prowl.exp` logs
+in at a `ut` prompt; the operator's `build/` holds the Halcyon-session image,
+where the serial login lands in the tiled environment (observed: the steps
+stalled at the password with tapestryd throttling in the transcript). Rather
+than bake `--config ci` there, a git worktree (`prowl6-gate`, the diff
+applied) got an APFS-cloned `build/` (`cp -Rc`, 42 s, space-free) and its own
+CI bake; the clone's CMake caches (kernel, usr, stratumd) and two git-ignored
+vendored files cargo's fingerprints name had to be dropped or copied, and the
+clade LLVM archives restored, before the bake went through. The gate then
+PASSED in 52 s with the three prowl-6 legs seen. The recipe is in memory for
+the next chunk that needs a CI image beside the operator's.
+
+**Verification, re-taken on the final tree.** Kernel suite 1665/1665 at
+`-smp 4` and at `-smp 1` (one new test, `devctl.procs_tables_column`; the
+extended `devctl.read_procs_format` pins the header's column order), joey
+clean (CL-5 OK, bus-probe-child ok, `capacity-probe: ALL OK` + reaped, net-8a
+PASS), the snare baseline 8, coreutil-smoke's ps-rich leg RAN with `/ctl/procs`
+at 347 B (the budget is 500). The RED (TABLES rendering `page_count`): 1664/1665,
+exactly `devctl.procs_tables_column` red on "TABLES is the page-table count,
+not PAGES again", no cascade. `tools/test-interactive.sh prowl` PASS on the
+worktree's CI image. The manual checker (host, 72 tests) and the bake's own
+`manual-check` accept `13-processes.md`. Holotype round (Fable 5.1, static):
+0 P0 / 0 P1 / 0 P2 / 9 P3 -- eight fixed in the chunk, F5 closed with reason
+(`memory/audit_prowl6_closed_list.md`). Landed as one commit plus its hash
+fixup on `main`; not pushed (the operator pushes).
+
 ## 2026-09-23, day (main, Fable 5.1, effort max) -- B-1a' (capacity): the tests found two defects the design had not, and the boot found a third
 
 The chunk is ARCH 6.5's "Range detach" and "Capacity, and the I-32 default"

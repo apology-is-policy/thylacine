@@ -2,7 +2,7 @@
 //
 // One atomic read of /ctl/procs (the kernel renders the whole table under
 // g_proc_table_lock -- no readdir race), columns PID PPID NAME STATE THREADS
-// PAGES CHILDREN CPU_NS. Styled (a presentation tool, color auto): a boxed
+// PAGES TABLES CHILDREN CPU_NS. Styled (a presentation tool, color auto): a boxed
 // listing with CPU humanized (ns -> ms/s) and the state colored (ALIVE green,
 // ZOMBIE ember, STOPPED gold). Color off: the kernel text passes
 // through VERBATIM (parseable, byte-clean -- the ns/pelt discipline). If any
@@ -34,7 +34,7 @@ use libthyla_rs::{eprintln, io};
 const USAGE: &str = "\
 usage: ps [--color[=WHEN]] [--beacon=WHEN]
   List processes (one atomic /ctl/procs snapshot): PID, parent, name, state,
-  threads, resident pages, children, CPU time. Color off passes the kernel
+  threads, pages, page tables, children, CPU time. Color off passes the kernel
   text through verbatim (parseable).
   --color[=WHEN]  colorize: always | never | auto (default)
   --beacon=WHEN   semantic markup: auto (default) | always | never
@@ -57,6 +57,7 @@ struct PsRow {
     state: String,
     threads: String,
     pages: String,
+    tables: String,
     children: String,
     cpu: String, // humanized
 }
@@ -76,17 +77,18 @@ fn cpu_str(ns_text: &str) -> Option<String> {
 /// fields so a (hypothetical) spaced name cannot shear the numeric columns.
 fn parse_row(line: &str) -> Option<PsRow> {
     let f: Vec<&str> = line.split_whitespace().collect();
-    if f.len() < 8 {
+    if f.len() < 9 {
         return None;
     }
     let n = f.len();
     Some(PsRow {
         pid: String::from(f[0]),
         ppid: String::from(f[1]),
-        name: f[2..n - 5].join(" "),
-        state: String::from(f[n - 5]),
-        threads: String::from(f[n - 4]),
-        pages: String::from(f[n - 3]),
+        name: f[2..n - 6].join(" "),
+        state: String::from(f[n - 6]),
+        threads: String::from(f[n - 5]),
+        pages: String::from(f[n - 4]),
+        tables: String::from(f[n - 3]),
         children: String::from(f[n - 2]),
         cpu: cpu_str(f[n - 1])?,
     })
@@ -103,15 +105,15 @@ fn state_color(state: &str) -> &'static str {
     }
 }
 
-const HDR: [&str; 8] = ["PID", "PPID", "NAME", "STATE", "THR", "PAGES", "KIDS", "CPU"];
+const HDR: [&str; 9] = ["PID", "PPID", "NAME", "STATE", "THR", "PAGES", "TBL", "KIDS", "CPU"];
 
 /// Column cells for one row, header-order.
-fn cells(r: &PsRow) -> [&str; 8] {
-    [&r.pid, &r.ppid, &r.name, &r.state, &r.threads, &r.pages, &r.children, &r.cpu]
+fn cells(r: &PsRow) -> [&str; 9] {
+    [&r.pid, &r.ppid, &r.name, &r.state, &r.threads, &r.pages, &r.tables, &r.children, &r.cpu]
 }
 
 /// r/l alignment per column: numerics right, NAME/STATE left.
-const ALIGN: [u8; 8] = [b'r', b'r', b'l', b'l', b'r', b'r', b'r', b'r'];
+const ALIGN: [u8; 9] = [b'r', b'r', b'l', b'l', b'r', b'r', b'r', b'r', b'r'];
 
 fn pad_cell(out: &mut String, text: &str, width: usize, align: u8) {
     let pad = width.saturating_sub(text.chars().count());
@@ -131,7 +133,7 @@ fn pad_cell(out: &mut String, text: &str, width: usize, align: u8) {
 /// The boxed cells realization (color on): the ls -l furniture, the state +
 /// name colored, everything else plain.
 fn render_box(out: &mut io::OutSink, rows: &[PsRow], on: bool) {
-    let mut w = [0usize; 8];
+    let mut w = [0usize; 9];
     for (i, h) in HDR.iter().enumerate() {
         w[i] = h.chars().count();
     }
@@ -167,7 +169,7 @@ fn render_box(out: &mut io::OutSink, rows: &[PsRow], on: bool) {
         let cs = cells(r);
         let mut vis = 0usize;
         let _ = write!(out, "{}{} {}", color::col(palette::DIM, on), boxd::V, color::reset(on));
-        for i in 0..8 {
+        for i in 0..9 {
             if i > 0 {
                 out.put(b"  ");
                 vis += 2;
@@ -197,7 +199,7 @@ fn render_box(out: &mut io::OutSink, rows: &[PsRow], on: bool) {
 /// The Rich realization: a beacon table, PID cells presenting their pids.
 fn render_rich(out: &mut io::OutSink, rows: &[PsRow]) {
     use beacon::sink::{Cell, ObjType, Sink, Table};
-    let mut t = Table::new("rrllrrrr").hdr();
+    let mut t = Table::new("rrllrrrrr").hdr();
     t.push_row(HDR.iter().map(|h| Cell::plain(h)).collect());
     for r in rows {
         let cs = cells(r);

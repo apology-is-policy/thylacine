@@ -39,6 +39,16 @@ world's readers loop to EOF. Sibling Devs that report *real* sizes are correct t
 do so: their content is a static device-tree property or a config register, which
 does not move between the stat and the read.
 
+`procs` renders nine columns per process — `PID PPID NAME STATE THREADS PAGES
+TABLES CHILDREN CPU_NS` — the counters as atomic loads, since a cross-Proc
+reader holds no per-Proc lock. `TABLES` (prowl-6) is the page-table share of
+`PAGES`, the holder count, so a reader takes the data view without opening
+`/proc/<pid>/status`. The layout has consumers that parse by count (prowl) and
+from the end (`ps`, whose beacon table also carries one alignment per column)
+and one that checks the frame (coreutil-smoke); a column change moves all
+three in the same commit, while the leading-column readers (Halcyon's loaded
+systems, diorama) need nothing.
+
 ## Mechanism
 
 ### One table drives everything
@@ -254,8 +264,9 @@ the same offset-aware multi-read that `/proc` wants would fix both.
   mechanism fired once and landed benignly, which is what a default-allow shape
   does until the one time it does not.
 - **The process list is a full-system disclosure.** Names, parents, states,
-  thread and page counts and CPU time for every process, to any reader. This is
-  the Plan 9 posture and is shared with `/proc/<pid>/status`, but it is worth
+  thread, page and page-table counts and CPU time for every process, to any
+  reader. This is the Plan 9 posture and is shared with `/proc/<pid>/status`,
+  but it is worth
   stating plainly rather than leaving implied: `/ctl/procs` is the broadest
   ambient disclosure either introspection Dev makes.
 - **The formatting helpers are duplicated** from the sibling Dev, noted in the

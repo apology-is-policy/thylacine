@@ -41,7 +41,7 @@ use kaua::term::Terminal;
 mod sample;
 mod ui;
 
-use sample::{CpuRow, CpuSampler, ProcRow, Sampler, SchedDetail, Sort};
+use sample::{CpuRow, CpuSampler, MemDetail, MemRow, ProcRow, Sampler, SchedDetail, Sort};
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: ThylaAlloc = ThylaAlloc;
@@ -58,9 +58,9 @@ const SIZE_QUERY_TIMEOUT_MS: u32 = 150;
 /// to feel live. Keys wake the loop early (responsive nav) without resampling
 /// unless a full interval has elapsed.
 const REFRESH_MS: u32 = 1500;
-/// /ctl/procs caps at DEVCTL_READ_BUF (2048) kernel-side; 4 KiB holds the whole
-/// snapshot in one read with headroom. The past-~30-procs truncation is a kernel
-/// pagination seam (the #62 perf backlog), not prowl's.
+/// /ctl/procs caps at DEVCTL_READ_BUF (4 KiB) kernel-side, so one 4 KiB read
+/// holds the whole snapshot. The truncation past some fifty to sixty procs is a
+/// kernel pagination seam (the #62 perf backlog / task #158), not prowl's.
 const CTL_BUF: usize = 4096;
 
 /// The whole prowl UI state.
@@ -87,6 +87,12 @@ pub struct App {
     /// prowl-4: render the process list as a parent->child tree (indented by ppid
     /// depth) instead of the flat sorted list. Toggled by `t`.
     pub show_tree: bool,
+    /// prowl-6: the user pool (from /ctl/memory) behind the header's MEM meter,
+    /// refreshed every poll; None when the read was empty.
+    pub mem: Option<MemRow>,
+    /// prowl-6: the selected process's footprint (/proc/<pid>/status), refreshed
+    /// with the detail pane; None when the pane is closed or the process is gone.
+    pub mem_detail: Option<MemDetail>,
 }
 
 impl App {
@@ -105,6 +111,8 @@ impl App {
             show_detail: false,
             detail: None,
             show_tree: false,
+            mem: None,
+            mem_detail: None,
         }
     }
 
@@ -114,10 +122,17 @@ impl App {
     fn refresh_detail(&mut self) {
         if !self.show_detail {
             self.detail = None;
+            self.mem_detail = None;
             return;
         }
         self.detail = match self.selected_pid {
             Some(pid) => sample::parse_sched(&read_ctl_file(&format!("/proc/{}/sched", pid))),
+            None => None,
+        };
+        // prowl-6: the footprint line rides the same refresh; the status read is
+        // ungated, so it stays available where the sched read is denied.
+        self.mem_detail = match self.selected_pid {
+            Some(pid) => sample::parse_status_mem(&read_ctl_file(&format!("/proc/{}/status", pid))),
             None => None,
         };
     }
@@ -406,8 +421,8 @@ fn job_action(app: &mut App, verb: &[u8], ok_word: &str, deny_word: &str) -> Act
     Action::None
 }
 
-/// Read /ctl/procs + /ctl/cpu, derive %CPU + per-CPU util against the previous
-/// poll, sort, store; refresh the detail pane if open.
+/// Read /ctl/procs + /ctl/cpu + /ctl/memory, derive %CPU + per-CPU util against
+/// the previous poll, sort, store; refresh the detail pane if open.
 fn resample(app: &mut App) {
     let elapsed_ns = app.last_sample.elapsed().as_nanos() as u64;
     app.last_sample = Instant::now();
@@ -423,6 +438,9 @@ fn resample(app: &mut App) {
     let mut cpus = sample::parse_cpu(&read_ctl_file("/ctl/cpu"));
     app.cpu_sampler.update(&mut cpus, elapsed_ns);
     app.cpus = cpus;
+
+    // prowl-6: the user pool behind the MEM meter -- one /ctl/memory read per poll.
+    app.mem = sample::parse_memory(&read_ctl_file("/ctl/memory"));
 
     app.refresh_detail();
 }

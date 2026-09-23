@@ -5,8 +5,10 @@
 #include "test.h"
 
 
+#include <thylacine/addrspace.h>  // prowl-6: the counters the TABLES column reads
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
+#include <thylacine/page.h>       // prowl-6: PAGE_SIZE
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>     // V-4c-2b: sched_cpu_ctxt
 #include <thylacine/smp.h>       // V-4c-2b: smp_cpu_count
@@ -17,13 +19,20 @@
 #include <thylacine/types.h>
 
 #include "../../arch/arm64/gic.h"      // V-4c-2b: gic_cpu_irq_count
+#include "../../arch/arm64/fault.h"    // prowl-6: userland_demand_page
 #include "../../arch/arm64/hwfeat.h"   // V-4c-2b: hw_cpu_ident
+
+// prowl-6: the lazy reservation the capacity tests use (kernel/syscall.c), so the
+// probe's first touch is the EL0 shape of an allocation.
+extern s64 sys_burrow_reserve_for_proc(struct Proc *p, u64 length_raw, u64 prot_raw,
+                                       u64 align_log2_raw);
 
 void test_devctl_bestiary_smoke(void);
 void test_devctl_attach_returns_dir(void);
 void test_devctl_walk_to_each_leaf(void);
 void test_devctl_walk_unknown_misses(void);
 void test_devctl_read_procs_format(void);
+void test_devctl_procs_tables_column(void);
 void test_devctl_read_memory_format(void);
 void test_devctl_read_devices_format(void);
 void test_devctl_read_kernel_base_format(void);
@@ -138,6 +147,9 @@ void test_devctl_read_procs_format(void) {
     TEST_ASSERT(got > 0, "procs read positive");
     TEST_ASSERT(contains(buf, (size_t)got, "PID"),     "header has PID column");
     TEST_ASSERT(contains(buf, (size_t)got, "PPID"),    "prowl-4: header has the PPID (tree) column");
+    TEST_ASSERT(contains(buf, (size_t)got, "TABLES"),  "prowl-6: header has the TABLES (page-table) column");
+    TEST_ASSERT(contains(buf, (size_t)got, "PAGES    TABLES    CHILDREN"),
+                "prowl-6: TABLES sits between PAGES and CHILDREN (the consumers parse by position)");
     TEST_ASSERT(contains(buf, (size_t)got, "STATE"),   "header has STATE");
     TEST_ASSERT(contains(buf, (size_t)got, "ALIVE"),   "kproc shows ALIVE");
 
@@ -226,6 +238,112 @@ void test_devctl_cpu_sources_live(void) {
     TEST_ASSERT(id->midr != 0, "V-4c-2b: MIDR was actually read (unread reads 0)");
     TEST_ASSERT(((id->midr >> 16) & 0xFu) == 0xFu,
                 "V-4c-2b: MIDR.Architecture is the ARMv8 0xF sentinel");
+}
+
+// The /ctl/procs row whose first token is `pid`: its tokens as unsigned values
+// in out[0..max) (a token that is not a number reads 0). Returns the token
+// count, or 0 when no row starts with that pid.
+static int procs_row_of(const char *buf, size_t len, int pid, unsigned long *out, int max) {
+    size_t i = 0;
+    while (i < len) {
+        size_t e = i;
+        while (e < len && buf[e] != '\n') e++;
+        int n = 0;
+        bool mine = false;
+        size_t k = i;
+        while (k < e) {
+            while (k < e && buf[k] == ' ') k++;
+            if (k >= e) break;
+            size_t t = k;
+            while (k < e && buf[k] != ' ') k++;
+            unsigned long v = 0;
+            bool num = true;
+            for (size_t q = t; q < k; q++) {
+                if (buf[q] < '0' || buf[q] > '9') { num = false; break; }
+                v = v * 10u + (unsigned long)(buf[q] - '0');
+            }
+            if (n == 0) {
+                mine = num && v == (unsigned long)pid;
+                if (!mine) break;
+            }
+            if (n < max) out[n] = num ? v : 0ul;
+            n++;
+        }
+        if (mine) return n;
+        i = e + 1;
+    }
+    return 0;
+}
+
+// prowl-6: the probe child's report -- filled by the child on its own Proc,
+// read by the parent after the reap (the pgrp tests' idiom). /ctl/procs walks
+// the TREE from kproc, so the probe must be a real child of the test's Proc: an
+// orphan from proc_alloc is never listed.
+struct tbl_report {
+    s64           reserve;
+    int           handled;
+    u32           tables, pages;
+    long          got;
+    int           ntok;
+    unsigned long tok5, tok6;
+};
+static struct tbl_report g_tbl;
+
+static void procs_tables_thunk(void *arg) {
+    (void)arg;
+    struct Proc *self = current_thread()->proc;
+    g_tbl.reserve = sys_burrow_reserve_for_proc(self, PAGE_SIZE,
+                                                (u64)(BURROW_PROT_READ | BURROW_PROT_WRITE), 0);
+    if (g_tbl.reserve > 0) {
+        struct fault_info fi = { 0 };
+        fi.vaddr          = (u64)g_tbl.reserve;
+        fi.ec             = 0x24;          // EC_DATA_ABORT_LOWER
+        fi.fsc            = 0x07;          // FSC_TRANS_FAULT_L3
+        fi.fault_level    = 3;
+        fi.from_user      = true;
+        fi.is_write       = true;
+        fi.is_translation = true;
+        g_tbl.handled = (userland_demand_page(self, &fi) == FAULT_HANDLED);
+    }
+    g_tbl.tables = self->as ? __atomic_load_n(&self->as->pgtable_pages, __ATOMIC_ACQUIRE) : 0u;
+    g_tbl.pages  = self->as ? __atomic_load_n(&self->as->page_count, __ATOMIC_ACQUIRE) : 0u;
+
+    static char buf[2048];
+    struct Spoor *c = open_ctl_leaf("procs");
+    if (c) {
+        g_tbl.got = devctl.read(c, buf, sizeof buf, 0);
+        spoor_clunk(c);
+        unsigned long f[9] = { 0 };
+        if (g_tbl.got > 0) g_tbl.ntok = procs_row_of(buf, (size_t)g_tbl.got, self->pid, f, 9);
+        g_tbl.tok5 = f[5];
+        g_tbl.tok6 = f[6];
+    }
+    exits("ok");
+}
+
+// prowl-6: TABLES is the address space's page-table count and PAGES the holder
+// count that contains it. A child of the test's Proc reserves one lazy page and
+// touches it: the touch costs the page and the three tables of a fresh path (a
+// one-page map is an inline leaf, so no node -- PAGEMAP_INLINE_MAX), and its
+// own row reads the two counters back as the kernel holds them, 4 and 3. A
+// renderer that printed page_count twice would read 4 4 here. The child exits
+// and is reaped BEFORE the assertions, so a red leg leaves nothing behind.
+void test_devctl_procs_tables_column(void) {
+    g_tbl = (struct tbl_report){ 0 };
+    int pid = rfork(RFPROC, procs_tables_thunk, NULL);
+    int st = -1;
+    int reaped = (pid > 0) ? wait_pid_for(pid, 0, &st) : -1;
+
+    TEST_ASSERT(pid > 0, "rfork the probe child under the test's Proc");
+    TEST_ASSERT(reaped == pid, "reap the probe child");
+    TEST_ASSERT(g_tbl.reserve > 0, "one lazily reserved page");
+    TEST_ASSERT(g_tbl.handled, "the write touch is handled");
+    TEST_EXPECT_EQ(g_tbl.tables, 3u, "one touch costs its L1, L2 and L3");
+    TEST_EXPECT_EQ(g_tbl.pages, 4u, "the holder count is the page plus its three tables (an inline leaf charges no node)");
+    TEST_ASSERT(g_tbl.got > 0, "procs read positive (from the child)");
+    TEST_EXPECT_EQ((u32)g_tbl.ntok, 9u, "the probe's row has nine columns (PID PPID NAME STATE THREADS PAGES TABLES CHILDREN CPU_NS)");
+    TEST_EXPECT_EQ((u32)g_tbl.tok5, g_tbl.pages,  "PAGES is the holder count");
+    TEST_EXPECT_EQ((u32)g_tbl.tok6, g_tbl.tables, "TABLES is the page-table count, not PAGES again");
 }
 
 void test_devctl_read_memory_format(void) {

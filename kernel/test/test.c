@@ -897,6 +897,7 @@ void test_devctl_attach_returns_dir(void);
 void test_devctl_walk_to_each_leaf(void);
 void test_devctl_walk_unknown_misses(void);
 void test_devctl_read_procs_format(void);
+void test_devctl_procs_tables_column(void);
 void test_devctl_read_memory_format(void);
 void test_devctl_read_devices_format(void);
 void test_devctl_read_kernel_base_format(void);
@@ -2818,6 +2819,7 @@ struct test_case g_tests[] = {
     { "devctl.walk_to_each_leaf",      test_devctl_walk_to_each_leaf,      false, NULL },
     { "devctl.walk_unknown_misses",    test_devctl_walk_unknown_misses,    false, NULL },
     { "devctl.read_procs_format",      test_devctl_read_procs_format,      false, NULL },
+    { "devctl.procs_tables_column",    test_devctl_procs_tables_column,    false, NULL },
     { "devctl.cpu_sources_live",       test_devctl_cpu_sources_live,       false, NULL },
     { "devctl.read_memory_format",     test_devctl_read_memory_format,     false, NULL },
     { "devctl.read_devices_format",    test_devctl_read_devices_format,    false, NULL },

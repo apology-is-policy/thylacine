@@ -28,7 +28,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-04
-updated: 2026-09-06
+updated: 2026-09-23
 ---
 ## Purpose
 
@@ -102,8 +102,9 @@ the library rather than each reimplementing back-pressure.
 **`ps` presents the kernel's process table.** It reads `/ctl/procs` in one
 atomic slurp — the kernel renders the whole table under `g_proc_table_lock`,
 so there is no readdir race to lose a row to — and offers three
-realizations of the same eight columns (PID PPID NAME STATE THREADS PAGES
-CHILDREN CPU). Colour off *and* beacon off: the kernel text passes through
+realizations of the same nine columns (PID PPID NAME STATE THREADS PAGES
+TABLES CHILDREN CPU; TABLES since prowl-6, and the end-anchored parse moved
+with it). Colour off *and* beacon off: the kernel text passes through
 **verbatim**, byte-clean and parseable, raw `CPU_NS` intact — the same
 pass-through discipline `ns` uses. Colour on: a boxed listing, CPU
 humanized (ns -> ms/s) and STATE coloured against the kernel's own

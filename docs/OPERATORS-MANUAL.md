@@ -35,14 +35,16 @@ The integration image installs these checked sections:
 | Name | Subject |
 |---|---|
 | `manual` | Reading the manual and choosing output format |
+| `processes` | Processes, memory figures and the prowl display |
 | `remote-files` | Haul, network mounts and service posting |
 | `view` | Inline images and textual fallback |
 | `gallery` | Graphical image viewing |
 | `nocturne` | Audio playback and mixing |
+| `imperium` | Imperium and secure attention |
 | `dosbox` | DOSBox-X launch and configuration |
 
-The remaining planned sections cover Utopia and native utilities, Imperium,
-Vivarium, containers, Alpine utilities and shell, and the bundled Quake variants.
+The remaining planned sections cover Utopia and native utilities, Vivarium,
+containers, Alpine utilities and shell, and the bundled Quake variants.
 
 The writing order is not the book order; each section is numbered by the rule above.
 
@@ -71,3 +73,4 @@ A section is added when the facility it describes has settled, so sections appea
 | 2026-09-16 | Renamed to `docs/OPERATORS-MANUAL.md`; the writing guide adopted and the earlier page template withdrawn; the reader and `/manual` installation to be built before further sections. | Operator decisions. |
 | 2026-09-16 | `docs/MANUAL-DESIGN.md` adopted (source format, the `manual` reader, installation); the three earlier pages moved to `docs/manual-drafts/`. | Operator sign-off: nothing is installed until it is written to the guide. |
 | 2026-09-16 | The first sections and their writing order set, starting with Utopia; Containers remains a section of its own. | Operator decision. |
+| 2026-09-23 | `13-processes.md` (Processes and memory) added: the process list, `ps`, `prowl` with its memory view, `/proc/<pid>/status` and `/ctl/memory`; the `imperium` row added to the sections table, which had lacked it since `18-imperium.md` landed. | The prowl-6 sub-chunk (the B-1a' capacity figures reach the manual); index currency. |

@@ -299,6 +299,9 @@ pub extern "C" fn rs_main() -> i64 {
         }
         sz
     };
+    // The rich leg below is budget-gated at ps_raw_len * 7 < 3500; print the
+    // measurement on every boot so the margin is visible before a skip.
+    t_putstr(&format!("coreutil-smoke: /ctl/procs {}B (the ps rich leg needs x7 < 3500)\n", ps_raw_len));
     if ps_raw_len > 0 && ps_raw_len < 3500 {
         beacon_clean(&mut c, "ps auto pipe clean", "ps", &[]);
         // `ps` piped = the verbatim /ctl/procs snapshot (parseable): the
@@ -356,7 +359,7 @@ pub extern "C" fn rs_main() -> i64 {
             match run_tool("ps", &["--beacon=always"], b"") {
                 Some((0, out)) => {
                     if window_contains(&out, b"\x1b]1936;v1;obj;type=pid;ref=")
-                        && window_contains(&out, b"\x1b]1936;v1;table;cols=rrllrrrr")
+                        && window_contains(&out, b"\x1b]1936;v1;table;cols=rrllrrrrr")
                         && window_contains(&beacon::wire::strip(&out), b"joey")
                     {
                         c.pass("ps rich table + obj pid");
