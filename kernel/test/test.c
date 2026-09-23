@@ -22,6 +22,7 @@
 #include <thylacine/extinction.h>   // #109: terminal-park safety net
 #include <thylacine/sched.h>   // DEBUG (#857): sched_dump_runnable on any test failure
 #include <thylacine/spinlock.h>     // #109: preempt-mask across the terminal-park handshake
+#include "../../mm/phys.h"   // the pool park a failing test leaves behind
 #include <thylacine/thread.h>       // #109: THREAD_EXITING / current_thread / thread_free
 #include <thylacine/types.h>
 
@@ -4065,6 +4066,21 @@ void test_run_all(void) {
             uart_puts(") ");
             if (!current_test->failed)
                 test_fail("test left global console state armed (see LEAKED-STATE)");
+        }
+
+        // The user pool's test park is the seventh piece of that state. A
+        // capacity test parks the pool to its edge, asserts, and unparks on its
+        // last line, so the first failing assert left the pool FULL and every
+        // allocation after it refused: one red test became a hundred and
+        // seventy under the nowantstrip and noshortfall sabotages. Same
+        // discipline: release it, name it, redden a test that passed leaking it.
+        u32 parked = capacity_pool_unpark_all_for_test();
+        if (parked != 0) {
+            uart_puts("POOL-PARKED(");
+            uart_putdec(parked);
+            uart_puts(" pages released) ");
+            if (!current_test->failed)
+                test_fail("test left the pool parked (see POOL-PARKED)");
         }
 
         // #134: a bounded wait inside a CHILD PROC's entry thunk cannot fail the

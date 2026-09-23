@@ -40,7 +40,10 @@ table lists it as a trigger surface in its own right.
   changed on a refusal or OOM. `capacity_init()` sizes the pool once after
   `phys_init`; `capacity_pool_pages()` / `capacity_reserve_pages()` /
   `capacity_pool_charged()` read it; `capacity_pool_park_for_test` /
-  `_unpark_for_test` shrink it for a witness. `capacity_set_reclaim(fn)`
+  `_unpark_for_test` shrink it for a witness, and the runner releases whatever a
+  test left parked after every test (`capacity_pool_unpark_all_for_test`),
+  reddening a test that passed while leaking it -- a failing assertion in a
+  parking test otherwise left the pool full for the rest of the boot. `capacity_set_reclaim(fn)`
   registers the reclaim step the allocator tries before refusing (the Image
   cache's `image_cache_reclaim`; the round-2 close, below).
 - `kpage_alloc`/`kpage_free` — single-page convenience returning a

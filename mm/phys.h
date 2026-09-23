@@ -105,6 +105,9 @@ void capacity_set_reclaim(capacity_reclaim_fn fn);
 // never refused), and give them back.
 void capacity_pool_park_for_test(u32 npages);
 void capacity_pool_unpark_for_test(u32 npages);
+// The runner releases whatever a test left parked, after every test, and
+// reddens a test that passed while leaking it; answers the pages released.
+u32 capacity_pool_unpark_all_for_test(void);
 
 // Public allocation API per ARCHITECTURE.md §6.3.
 struct page *alloc_pages(unsigned order, unsigned flags);

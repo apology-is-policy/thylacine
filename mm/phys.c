@@ -337,8 +337,30 @@ static void pool_uncharge(u32 npages) {
     }
 }
 
-void capacity_pool_park_for_test(u32 npages)   { (void)pool_charge(npages, true); }
-void capacity_pool_unpark_for_test(u32 npages) { pool_uncharge(npages); }
+// What the tests have parked and not yet given back. The runner releases it
+// after every test: a parking test unparks on its last line, and a failing
+// assertion returns before that line with the pool full for every test after.
+static u32 g_pool_parked;
+void capacity_pool_park_for_test(u32 npages) {
+    if (pool_charge(npages, true))
+        __atomic_add_fetch(&g_pool_parked, npages, __ATOMIC_RELAXED);
+}
+void capacity_pool_unpark_for_test(u32 npages) {
+    u32 cur = __atomic_load_n(&g_pool_parked, __ATOMIC_RELAXED);
+    for (;;) {
+        u32 nv = (cur >= npages) ? cur - npages : 0;
+        if (__atomic_compare_exchange_n(&g_pool_parked, &cur, nv,
+                                        true, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+            break;
+    }
+    pool_uncharge(npages);
+}
+u32 capacity_pool_unpark_all_for_test(void) {
+    u32 n = __atomic_exchange_n(&g_pool_parked, 0u, __ATOMIC_RELAXED);
+    if (n != 0)
+        pool_uncharge(n);
+    return n;
+}
 
 static capacity_reclaim_fn g_capacity_reclaim;
 void capacity_set_reclaim(capacity_reclaim_fn fn) { g_capacity_reclaim = fn; }
