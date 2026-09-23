@@ -379,16 +379,40 @@ POUCH-DESIGN 6.2 open question 6.2). So the affected population is exactly:
 pouch programs that deliberately bind a `/srv` name *and* are dialled from a
 different Proc. Those already need `PROC_FLAG_MAY_POST_SERVICE`, which joey
 confers at spawn, so they are deliberate OS components rather than arbitrary
-user programs. **Still owed: a two-Proc POUCH test**, and it is worth being exact about which
-half is missing. The *rule* is already covered at both polarities in the kernel:
+user programs. **The two-Proc POUCH test landed 2026-09-23, and writing it found a defect.**
+The *rule* was already covered at both polarities in the kernel:
 `devsrv.srv_connect_gate` dials from a genuinely distinct Proc
 (`make_test_proc()`), refused on a TCB-posted byte service and admitted on a
-`CAP_POST_SERVICE`-posted one. What is untested is the **boundary line** -- that
-pouch's `bind()` really yields `cap_posted == false`, and that a second real
-Proc's `connect()` surfaces the refusal as the errno POSIX callers expect. That
-is a device-level test, so it is blocked behind the same stray-VM blocker as
-`srv-connect-gate.exp` and should land with it rather than as kernel-side
-coverage that would merely re-test the rule.
+`CAP_POST_SERVICE`-posted one. What was untested was the **boundary line**, and
+only a device test could settle it. `pouch-hello-sockets`' `xproc-gate` leg
+binds `/srv/pouch-sock-xproc` under the mark, `posix_spawn`s a second real Proc,
+and asserts three outcomes each one variable from the next: the poster dials its
+own service (the self-post exemption -- asserted FIRST, so a service nothing
+could reach can never be read as "the refusal below worked"), the child is
+refused `EACCES`, and the child is refused `ECONNREFUSED` on a name that is
+genuinely absent. It also confirms on device what this section asserts of
+`stripes`: a `posix_spawn`ed child's tag is its own, so the exemption does not
+reach children.
+
+The third leg is what earned its place. pouch's `connect()` mapped **every**
+`SYS_open` failure to `ECONNREFUSED`, so the `T_E_ACCES` this design carries out
+through `spoor_open_errno` died one frame later at the libc boundary: a POSIX
+caller denied on authority was told the service was ABSENT. That is not
+cosmetic. `ECONNREFUSED` is the TRANSIENT AF_UNIX error, the one every client
+retries on, so the universal back-off loop would retry forever against a
+permanent denial. Fixed in patch `0006-pouch-sockets` by a single
+`srv_open_errno` decision point. Leg 2 is the assertion that catches it, and
+the sabotage matrix proves it load-bearing: restoring the blanket map reddens
+leg 2 at `errno=111 want EACCES=13` while leg 1 stays green. The opposite
+blanket (every failure -> `EACCES`) is caught too, but one subtest EARLIER, by
+the pre-existing `connect`-to-an-absent-name leg in the poster's own Proc -- so
+leg 3 is **not** the control that catches it, and the first version of this
+paragraph said it was. Leg 3's unique reach is a CHILD-SPECIFIC spurious
+`EACCES`, which no sabotage of the shared helper can produce: it is reasoned
+coverage plus a diagnostic, not a sabotage-proven control. `bind()`'s mirror
+collapse (every post failure
+-> `EACCES`) is tracked rather than fixed: it is reachable today through the
+15/16 /srv registry headroom, where exhaustion reports as "permission denied".
 
 The rule, enforced in `devsrv_open_connect`:
 

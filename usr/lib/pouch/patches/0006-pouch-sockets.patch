@@ -660,7 +660,7 @@ close dance.
  }
 --- a/src/network/connect.c
 +++ b/src/network/connect.c
-@@ -1,7 +1,178 @@
+@@ -1,7 +1,193 @@
 +/* pouch -- connect(2) for AF_UNIX SOCK_STREAM (P6-pouch-sockets,
 + * sub-chunk 12). Extracts the service name from sun_path (same shape
 + * as bind), rebuilds "/srv/<name>", and opens it.
@@ -669,7 +669,8 @@ close dance.
 + * SYS_open("/srv/<name>", ORDWR) on a byte-mode service yields a
 + * bidirectional byte-conn Spoor (the client endpoint: read s2c / write
 + * c2s). ORDWR so the conn handle is born R+W (rights_for_omode). A
-+ * missing service makes SYS_open fail -> ECONNREFUSED. The per-Proc
++ * missing service makes SYS_open fail -> ECONNREFUSED; an authority
++ * refusal from the (U) connect gate -> EACCES (srv_open_errno). The per-Proc
 + * client cap was retired in stalk-3b (the global SRV_MAX_CONNS bounds
 + * memory), so bind + connect can coexist in one Proc.
 + *
@@ -759,6 +760,20 @@ close dance.
 +	return s;
 +}
 +
++/* The POSIX errno for a failed open=connect. Mapping the kernel's cause
++ * through rather than collapsing it is behavioural, not cosmetic:
++ * ECONNREFUSED is the TRANSIENT AF_UNIX error -- the one every client retries
++ * on -- so reporting a permanent authority denial that way makes a POSIX
++ * caller spin forever on a refusal that will never lift. The kernel names the
++ * denial (T_E_ACCES from the (U) connect gate, STALK-DESIGN section 5.2 / D8,
++ * carried out through spoor_open_errno) and leaves every other failure as the
++ * generic -T_E_IO; the errno registry is POSIX-aligned (docs/ERRORS.md), so
++ * the kernel's value is already the POSIX one. */
++static int srv_open_errno(long rc)
++{
++	return rc == -EACCES ? EACCES : ECONNREFUSED;
++}
++
  int connect(int fd, const struct sockaddr *addr, socklen_t len)
  {
 -	return socketcall_cp(connect, fd, addr, len, 0, 0, 0);
@@ -807,11 +822,11 @@ close dance.
 +	if (!walk) {
 +		/* stalk-3c open=connect: bare byte-mode service opened ORDWR
 +		 * returns the client byte-conn Spoor (read s2c / write c2s);
-+		 * a missing service or any open failure -> ECONNREFUSED. */
++		 * a missing service -> ECONNREFUSED, an authority refusal -> EACCES. */
 +		kfd = __syscall(SYS_open, (long)-1, path, path_len,
 +		                (long)POUCH_SRV_ORDWR);
 +		if (kfd < 0) {
-+			errno = ECONNREFUSED;
++			errno = srv_open_errno(kfd);
 +			return -1;
 +		}
 +	} else {
@@ -820,18 +835,18 @@ close dance.
 +		 * component (ORDWR -> the sub-fid), then drop the redundant root.
 +		 * The sub-fid's read/write map to Tread/Twrite (the verb stream).
 +		 * Mirrors the native two-step (usr/login: open /srv/corvus, then
-+		 * open "ctl" relative). Any step failing -> ECONNREFUSED. */
++		 * open "ctl" relative). Any step failing maps as above. */
 +		long root = __syscall(SYS_open, (long)-1, path, path_len,
 +		                      (long)POUCH_SRV_OREAD);
 +		if (root < 0) {
-+			errno = ECONNREFUSED;
++			errno = srv_open_errno(root);
 +			return -1;
 +		}
 +		kfd = __syscall(SYS_open, root, walk, walk_len,
 +		                (long)POUCH_SRV_ORDWR);
 +		__syscall(SYS_close, root);
 +		if (kfd < 0) {
-+			errno = ECONNREFUSED;
++			errno = srv_open_errno(kfd);
 +			return -1;
 +		}
 +	}

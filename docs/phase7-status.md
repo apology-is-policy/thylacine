@@ -15,7 +15,7 @@ The Phase 7 entry decision (taken under the U-1 scripture conversation):
 - **Runtime**: native libthyla-rs (the Plan 9 split — see `docs/ARCHITECTURE.md §3.5` + `CLAUDE.md` "Native vs ported userspace programs").
 - **Workspace**: Cargo workspace at `usr/utopia/`; Helix vendored separately at `usr/helix/`.
 
-## /srv connect gate (U) — 2026-09-23 (aux-3; audit round pending)
+## /srv connect gate (U) — 2026-09-23 (aux-3; rounds 1 + 2 closed)
 
 An ordinary user could `mount /srv/stratum-fs` — the SYSTEM store — and list
 the system root. Confirmed on device. Three mechanisms each deferred to
@@ -98,6 +98,47 @@ cannot be a caller the test quietly poisoned.
 The planned `/proc/<pid>/fd/` (deferred at `kernel/devproc.c:27`) would be
 owner-gated and would reopen fd-dup theft of the proxy's coordinator fd. That
 surface must gate on more than the owner axis when it lands.
+
+### F3 — the boundary line, and the errno that died at it
+
+Round 1's F3 left one thing owed: a genuine two-Proc pouch AF_UNIX test. The
+*rule* was already covered at both polarities by `devsrv.srv_connect_gate`,
+which dials from a distinct Proc; what was untested was the **boundary line** —
+that pouch's `bind()` really yields `cap_posted == false`, and that a second real
+Proc's `connect()` surfaces the refusal as an errno a POSIX caller can act on.
+
+`pouch-hello-sockets` grew an `xproc-gate` leg: bind `/srv/pouch-sock-xproc`
+under the mark, `posix_spawn` a second real Proc, three assertions each one
+variable from the next — the poster dials its own service (asserted **first**, so
+a service nothing could reach can never read as "the refusal below worked"), the
+child is refused `EACCES`, the child is refused `ECONNREFUSED` on an absent name.
+All three green on device; the census marker carries `xproc-gate`, so a stale
+binary cannot pass for this one. It also settles on device what STALK-DESIGN
+asserts of `stripes`: a `posix_spawn`ed child's tag is its own.
+
+**Writing it found a defect.** pouch's `connect()` mapped **every** `SYS_open`
+failure to `ECONNREFUSED`, so the `T_E_ACCES` this chunk built `spoor_open_errno`
+to carry died one frame later at the libc boundary. Not cosmetic: `ECONNREFUSED`
+is the *transient* AF_UNIX error, the one every client retries on, so the
+universal back-off loop would retry forever against a permanent denial. Fixed in
+patch `0006-pouch-sockets` by a single `srv_open_errno` decision point. Sabotage:
+restoring the blanket map reddens leg 2 at `errno=111 want EACCES=13` with leg 1
+still green.
+
+**Half a defect, written as a half.** `bind()`'s mirror collapse — every post
+failure to `EACCES` — is tracked, not fixed. It is reachable today through the
+15/16 `/srv` registry headroom, where exhaustion reports as "permission denied".
+Correcting it needs the enumeration of what `SYS_walk_create` returns on the post
+path, which is its own investigation.
+
+**A correction this chunk owes its own prose.** The first version of the leg's
+comment claimed leg 3 was what stopped a blanket-`EACCES` map satisfying leg 2 by
+accident. The sabotage matrix disproved it: a blanket `EACCES` reddens the
+*pre-existing* `connect`-to-an-absent-name leg one subtest earlier, in the
+poster's own Proc, and the prover never reaches this subtest. Leg 3's unique
+reach is a child-specific spurious `EACCES`, which no sabotage of a shared helper
+can produce — reasoned coverage plus a diagnostic, not a sabotage-proven control.
+Corrected in the comment, in STALK-DESIGN, and here.
 
 ## Haul identity cape — 2026-09-23 (aux-3; audit round pending)
 

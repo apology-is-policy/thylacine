@@ -627,7 +627,8 @@ static int pouch_smoke_core(const char *name, size_t name_len,
         (void)t_close(rd);
         return -1;
     }
-    // 2048 B headroom -- pouch-hello-sockets prints ~850 B of test progress
+    // 2048 B headroom -- pouch-hello-sockets prints 1331 B of test progress
+    // (measured 2026-09-23, after the xproc-gate leg; was ~850 B before it)
     // lines and the marker "<bin>: exit 0" must land inside the window. Earlier
     // 512 B sized for the leaner pre-sub-chunk-12 pouch binaries; bumped so the
     // marker is never truncated out (the failure mode looks like "expected

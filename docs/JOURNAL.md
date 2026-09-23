@@ -215,6 +215,83 @@ the stray VM (operator's call -- the QMP sockets that would allow a graceful
 shutdown were unlinked by my own failed run, so it is `kill` or nothing), the
 F3 two-Proc pouch AF_UNIX test, and (L), still on hold behind this. Neither (C)
 nor (D) is done; both are queued and named above.
+
+### Later the same run: the fold, and what the last owed test found
+
+**The operator killed the stray VM** (they authorised the `kill` from away), and
+everything behind it ran: `--config ci`, and `srv-connect-gate.exp` PASS [37s]
+with the full cause on the wire -- `GATE-VERDICT status=1 errstr=mount: cannot
+connect /srv/stratum-fs: permission denied`. The F1 audit round ran too, and a
+round 2 after it (0/0/0/6). Both closed.
+
+**A commit-shape decision, and the reason it was not cosmetic.** The plan said
+"fold the (U) WIPs into one commit". I folded three of four, keeping the round-2
+close separate so the audit anatomy stays greppable. The decisive argument was
+not tidiness: `ea0e19ef`'s message opened "UNBUILT AND UNTESTED" and `b7c999f2`'s
+said the device gate was "NOT run, and not claimed". Both were false by the time
+the chunk closed, and left standalone those commits would have carried stale
+claims into permanent history. Folded to `c7d35e35`; the close replayed as
+`dc200836`; `git diff 3521ae97 HEAD` empty, so the tree is bit-identical and
+every posture figure carried over without a re-run.
+
+**Then F3 -- the last owed piece -- and it found a defect.** The owed test was a
+two-Proc pouch AF_UNIX case: bind under the TCB mark in one Proc, `posix_spawn` a
+second real Proc, and check the refusal. Reading `connect.c` before writing it:
+
+    kfd = __syscall(SYS_open, (long)-1, path, path_len, (long)POUCH_SRV_ORDWR);
+    if (kfd < 0) { errno = ECONNREFUSED; return -1; }   /* ANY failure */
+
+This chunk built a whole new per-Dev `spoor_open_errno` channel so a refusal
+would reach userspace as `T_E_ACCES` instead of a generic EIO -- and pouch threw
+it away one frame later. **Not cosmetic:** `ECONNREFUSED` is the *transient*
+AF_UNIX error, the one every client retries on, so the universal back-off loop
+retries forever against a permanent denial. Attribution: the blanket map predates
+(U), but before (U) a cross-Proc dial *succeeded*, so (U) is what made the wrong
+branch reachable -- it lands here. Fixed by one `srv_open_errno` decision point.
+`bind()`'s mirror collapse (every post failure -> `EACCES`) is enqueued, not
+fixed: reachable today via the 15/16 `/srv` registry headroom, where exhaustion
+reports as "permission denied". Half a defect closed, written as a half.
+
+Device result, all three legs (`build/test-boot.log`): `xproc: poster dials its
+own service ok (self-post exemption)` / `xproc-child: EACCES on the TCB service
+ok` / `xproc-child: ECONNREFUSED on an absent name ok`. The census marker carries
+`xproc-gate`, so the binary cannot be a stale one. It also settles on device what
+STALK-DESIGN asserts of `stripes`: a `posix_spawn`ed child's tag is its own.
+
+**The wrong turn worth keeping: my sabotage falsified my own comment.** I
+predicted the two sabotages of `srv_open_errno` would redden one leg each.
+
+| sabotage | predicted | actual |
+|---|---|---|
+| blanket `ECONNREFUSED` (the old map) | leg 2 red | leg 2 red, `errno=111 want EACCES=13`, leg 1 green |
+| blanket `EACCES` | leg 3 red | **nothing in this subtest ran at all** |
+
+The second reddened `test_connect_nonexistent` -- a *pre-existing* leg, one
+subtest earlier, in the poster's own Proc (`build/test-boot.log:2350`, `wrong
+errno=13 (want ECONNREFUSED)`) -- and the prover exited before reaching mine. So
+the failure mode is caught, but **leg 3 is not what catches it**, and both my
+code comment and the scripture paragraph I had just written said it was. Leg 3's
+unique reach is narrower: a *child-specific* spurious `EACCES`, which no sabotage
+of a shared helper can produce. It is reasoned coverage plus a diagnostic, not a
+sabotage-proven control, and all three places now say so. This is the third time
+this arc that a sabotage corrected my prose rather than my code.
+
+**A side observation, and a dismissal I had to retract.** Editing a `patch -p1`
+file means keeping hunk headers honest, so I wrote a throwaway checker and
+discrimination-tested it. Its control failed on the *unmodified* patch, off by
+one on both sides -- a checker bug (it counted the file's trailing newline as a
+context line), fixed. It then flagged two other patches in the series. I judged
+those "almost certainly two more blind spots" and declined to file them. The
+build then printed `warn usr/lib/pouch/patches/0012-pouch-mallocng-crash.patch:68`
+-- the exact hunk, the exact line. `patch` recovers because it matches by context,
+not counts, so nothing is broken, but my dismissal was wrong and the build was
+the oracle. Enqueued with the one-character fix; `0003`'s flag really was a
+second checker blind spot, and the consumer's silence is what settles that.
+
+**Posture on the committed tree:** 1656/1656 (unchanged -- this leg is
+device-level, adding no kernel test), the `xproc-gate` leg green on device, leg 2
+sabotage-proven with leg 1 uncollateral. Re-measured after the last edit rather
+than recalled.
 ---
 ## 2026-09-23, afternoon, later (aux, Opus 5.5 1M, effort max) -- the mounter owns every file on a Haul mount
 
