@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/CORVUS-DESIGN.md"]
 created: 2026-07-31
-updated: 2026-09-21
+updated: 2026-09-23
 ---
 ## Nonblocking endpoints
 
@@ -58,7 +58,7 @@ into a new poster's connection queue. Existing accepted connections retain
 their own server identity and lifetime; they do not point back at the slot.
 
 
-**create=post** — `devsrv_post_listener(p, root, name, len, mode, bulk)`
+**create=post** — `devsrv_post_listener(p, root, name, len, mode, bulk, cape)`
 (reached from `sys_walk_create_handler`'s devsrv branch; a dedicated
 entry, not the `Dev.create` vtable slot, because a post yields a
 KObj_Srv listener HANDLE, not a Spoor). Gated on the one-way
@@ -66,7 +66,13 @@ joey-stamped `PROC_FLAG_MAY_POST_SERVICE`; name 1..`SRV_NAME_MAX` of
 printable non-`/` ASCII; the parent must be a devsrv root whose aux
 re-validates as `SRV_REGISTRY_MAGIC`. `perm & DMSRVBYTE` (bit 25)
 selects byte-mode; `perm & DMSRVBULK` (bit 24, CF-3 B) selects the
-128 KiB ring class. Returns the listener hidx (obj = the registry entry;
+128 KiB ring class; `perm & DMSRVCAPE` (bit 23) marks the service with the
+identity cape (IDENTITY-DESIGN 3.2: every attach over its connections owns
+every file as the attacher). The perm word's rules live in the tested
+predicate `sys_srv_post_perm_ok` (only DMSRV* bits; CAPE only beside BYTE),
+and `devsrv_post_listener` refuses a caped 9P-mode post itself too (−1):
+the cape's no-escalation argument rests on the attacher holding the raw
+transport, which a 9P-mode opener never does. Returns the listener hidx (obj = the registry entry;
 `RIGHT_READ|WRITE`; `handle_dup` refuses it) or −1.
 
 **open=connect** — `devsrv_open_connect(p, c, omode)` (the `Dev.open`
@@ -141,10 +147,12 @@ abort wipes, a TOMBSTONED-prior abort restores the tombstone with the
 dead-poster identity cleared). A RESERVING entry is never connectable;
 the window is bounded by one syscall. **Rebind identity**: a TOMBSTONED
 name is re-postable only through the same MAY_POST_SERVICE gate, and
-`mode` AND `ring_msize` are part of the service identity — a rebind that
-flips either is refused (a client mid-connect captured both atomically
-with LIVE; a flip would land a wrong-mode/wrong-geometry connection in
-the new poster's backlog). A LIVE or RESERVING name is never displaced.
+`mode`, `ring_msize` AND `cape` are part of the service identity — a
+rebind that flips any of them is refused (a client mid-connect captured
+all three atomically with LIVE; a flip would land a wrong-mode,
+wrong-geometry or wrongly-caped connection in the new poster's backlog --
+a client must be caped exactly when the poster it lands with posted the
+service caped). A LIVE or RESERVING name is never displaced.
 
 **Tombstoning**: `exits()` → `srv_proc_exit_notify` → every LIVE entry
 whose `poster_stripes` matches flips to TOMBSTONED (identity cleared),
@@ -174,9 +182,11 @@ distinct mount-key identity.
 **open=connect** (`devsrv_open_connect`): global soft cap
 (`created − freed ≥ SRV_MAX_CONNS` fails fast; the hard bound is the
 per-service backlog under the lock) → resolve the service and capture
-`poster_stripes` + `mode` + `ring_msize` under the registry lock
-ATOMICALLY with the LIVE check → `srvconn_create` (identity by value;
-create ref 1) → byte-mode flag if selected (before publication) → +1 ref
+`poster_stripes` + `mode` + `ring_msize` + `cape` under the registry
+lock ATOMICALLY with the LIVE check → `srvconn_create` (identity by value;
+create ref 1) → byte-mode flag and cape mark if selected
+(`srvconn_set_byte_mode` / `srvconn_set_cape`, both before publication)
+→ +1 ref
 for the backlog slot → `srv_backlog_push_locked` (re-checks LIVE
 atomically with the enqueue — the tombstone-between-check-and-push
 window is closed here, the pre-check being only an optimization) → wake
@@ -233,7 +243,8 @@ guard's third site). Roots and svc-refs report no events.
 irqsave lock, 16 entries. `struct SrvService` — magic @0
 (`SRV_SERVICE_MAGIC`, permanent), state, name (not NUL-terminated;
 `name_len` authoritative), poster stripes/pid by value, `mode`
-(9P/byte) + `ring_msize` (the CF-3 B class — both rebind-identity), the
+(9P/byte) + `ring_msize` (the CF-3 B class) + `cape` (the identity cape;
+all three rebind-identity, reset by `srv_clear_locked`), the
 bounded accept FIFO (`backlog[16]` + head/tail/count), `accept_rendez`
 (single-waiter), listener `poll_list`, the permanent `reg`
 back-pointer. `struct devsrv_svc_ref` — magic @0 (`DEVSRV_SVC_MAGIC`),
@@ -297,7 +308,7 @@ enforced by the by-value capture + the alive-gated fresh walk.
 
 Everything returns −1/NULL fail-closed with full unwind: post (unmarked
 Proc, bad name byte/length, non-root parent, LIVE/RESERVING name
-collision, mode/class rebind flip, registry full, handle-table full →
+collision, mode/class/cape rebind flip, a caped 9P-mode post, registry full, handle-table full →
 `srv_abort` rollback — no stale entry survives any failure); connect
 (dead/missing service, raced tombstone at the push, global cap, backlog
 full [double-unref: backlog + create refs], OOM, handshake failure
@@ -324,12 +335,19 @@ What an auditor attacks here:
   ServicePosterEverMarked); the name hygiene (a name is a future path
   component — a `/` or control byte that survives becomes a resolver
   ambiguity).
-- **Rebind identity**: mode + ring class immutable across a tombstone
-  rebind — a flip lands a wrong-geometry conn in the new poster's
-  backlog (the F2 discipline; `srv_client.byte_mode_mode_change_rebind_refused`).
+- **Rebind identity**: mode + ring class + cape immutable across a
+  tombstone rebind — a flip lands a wrong-geometry (or wrongly caped)
+  conn in the new poster's backlog (the F2 discipline;
+  `srv_client.byte_mode_mode_change_rebind_refused`,
+  `srv_client.cape_post`).
 - **Capture-atomic-with-LIVE**: the connect's
-  stripes/mode/class capture and the push's LIVE re-check both under the
-  registry lock; a capture outside it races the tombstone.
+  stripes/mode/class/cape capture and the push's LIVE re-check both under
+  the registry lock; a capture outside it races the tombstone.
+- **The cape is byte-mode only, at both ends**: the post predicate and
+  `devsrv_post_listener` refuse a caped 9P-mode service, and the attach
+  helper honours a conn's mark only on a byte conn. A caped 9P-mode service
+  would hand ownership of the server's files to openers who never hold its
+  transport.
 - **The ref dances**: open_connect's create/backlog/adapter refs across
   every failure branch (leak-free, no double-unref, teardown-before-
   abandon so no party strands); the walk's aux-normalize (a failed walk
@@ -394,7 +412,8 @@ refcounted registries), [[chg-2026-06-03-stalk3b-open-connect]]
 (open=connect + the 9P-unification), [[chg-2026-06-03-stalk3c-retire]]
 (the syscall retirement), [[chg-2026-06-24-348-s2c-blocking]] +
 [[chg-2026-07-08-cf3b-bulk-ring]] (the blocking-write arms + ring
-classes on the I/O dispatch). The A-1a identity fields, the cfg-3
+classes on the I/O dispatch), and (L) the Haul identity cape
+(`SrvService.cape` + the connect capture). The A-1a identity fields, the cfg-3
 renderer flag, and the V-4a-0b pid append on `srv_peer_info` are
 recorded at their own arcs' sweeps.)
 
@@ -414,6 +433,13 @@ F1) · `kernel_attached_server_close_eofs` (#841) · `srv_peer_identity` ·
 production create=post/open=connect cores end-to-end
 (`byte_mode_conn_dispatch` · `byte_mode_propagates_to_conn` ·
 `byte_mode_mode_change_rebind_refused` ·
-`byte_mode_server_recv_blocking_eof` · `no_per_proc_cap`). The 9p-mode
+`byte_mode_server_recv_blocking_eof` · `no_per_proc_cap`), and 3 for the
+cape: `srv_client.cape_post` (a caped 9P-mode post refused; the service
+and its conns carry the mark, an uncaped control does not; the rebind
+identity both ways), `srv_client.cape_admission` (the syscall predicates,
+`sys_srv_post_perm_ok` and `sys_attach_9p_flags_ok`, bit by bit), and
+`srv_client.cape_post_syscall` (a post through SYS_WALK_CREATE's own
+inner on a /srv root fd: the cape bit marks the service, a caped 9P-mode
+post answers -EINVAL and registers nothing). The 9p-mode
 connect has NO unit case ([[seam-srv-9p-connect-unit]]); the boot E2E
 (joey/login/legate → corvus + stratumd) is its regression.

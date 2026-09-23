@@ -225,14 +225,23 @@ void p9_attached_ctl_iterate(p9_attached_ctl_cb cb, void *arg);
 // path (srvconn_transport_close) has torn `cn` down (EOF both rings); for failures
 // BEFORE it, `cn` is untouched (the caller decides whether to teardown). Either
 // way the caller's own ref(s) on `cn` are NOT dropped here.
-// `loose` opts the minted client into the B1 per-attach loose mode (I-38
-// opt-in, docs/chase/B1-VOTE.md): set on p9_client.loose BEFORE the root
-// Spoor is returned, so the handle publication orders it against every use.
-// SYS_ATTACH_9P_SRV maps its validated SYS_ATTACH_9P_LOOSE flag here;
-// devsrv_open's 9p-mode connect passes false (strict).
+// `who` is the attaching Proc and `flags` the validated SYS_ATTACH_9P_* word:
+//   - SYS_ATTACH_9P_LOOSE opts the minted client into the B1 per-attach loose
+//     mode (I-38 opt-in, docs/chase/B1-VOTE.md);
+//   - SYS_ATTACH_9P_CAPE capes the session (IDENTITY-DESIGN 3.2): the Tattach
+//     names no user, and the client reports `who`'s principal + primary group
+//     as every file's owner.
+// A byte conn from a DMSRVCAPE service is caped whatever `flags` says. Without
+// the cape the Tattach asserts `who`'s principal (A-3 M4). Both marks are
+// stamped on the client BEFORE the root Spoor is returned, so the caller's
+// handle publication orders them against every use. SYS_ATTACH_9P_SRV passes
+// its validated flags; devsrv_open's 9p-mode connect passes 0 (strict, and a
+// 9P-mode conn never carries the cape).
 struct SrvConn;
+struct Proc;
 struct Spoor *srvconn_attach_dev9p_root(struct SrvConn *cn,
                                         const u8 *aname, size_t aname_len,
-                                        u32 n_uname, bool loose, int *out_err);
+                                        const struct Proc *who, u32 flags,
+                                        int *out_err);
 
 #endif  // THYLACINE_9P_ATTACH_H

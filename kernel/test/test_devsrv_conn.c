@@ -171,7 +171,7 @@ static void drop_linked_test_proc(struct Proc *p) {
 static int post_svc_byte(struct Proc *p, const char *name, size_t name_len) {
     struct Spoor *root = devsrv_attach_registry(srv_boot_registry());
     if (!root) return -1;
-    int h = devsrv_post_listener(p, root, name, name_len, SRV_MODE_BYTE, false);
+    int h = devsrv_post_listener(p, root, name, name_len, SRV_MODE_BYTE, false, false);
     spoor_clunk(root);
     return h;
 }

@@ -109,6 +109,13 @@ private tree has no system-mount byte reader. Those are the conditions
 under which [[inv-i38]]'s close-to-open guarantees still hold with
 revalidation relaxed. Any of them ceasing to be true revokes the flag here.
 
+**Neither of joey's attaches is caped.** The identity cape (IDENTITY-DESIGN
+3.2) makes the mounting principal the owner of every file, for a server whose
+ids mean nothing in the guest. Stratum's owners are guest principals, and the
+kernel's DAC must see them, so the SYSTEM mount passes no `T_ATTACH_9P_CAPE`.
+The viv-channel boot witness attaches its own diorama over a pipe pair with
+flags 0 for the same reason.
+
 **Not every served tree should be mounted, and the discriminator is where its
 authority lives.** This is the newest rule in the sequence and it arrived as a
 P1, so it is worth stating before the carry list rather than after.
@@ -343,3 +350,6 @@ and the stratumd spawn args have zero diff hits; the pivot line last moved
 KT-1.5d-1a login-spawned session bootstrap, the kaua-term boot-prove, the viv
 `/viv/bin` graft gates -- so the caveat's line/function count was refreshed
 (9771/~50 -> 11578/53) and the #177 ownership gap noted as wider.
+
+2026-09-23 (L): `SYS_ATTACH_9P` gained its x5 flags word; the viv-channel
+witness passes 0, and neither attach is caped (above).

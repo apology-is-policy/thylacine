@@ -525,7 +525,7 @@ fn run(bundle: &str, stdio_born: bool, notes: Option<&Notes>) -> Result<i64, Str
     // attach fails clean. The attach holds its own refs on both transport
     // Spoors, so our two fds close right after: the session, not the fds,
     // keeps the channel.
-    let dio_root = unsafe { t_attach_9p(c2s_wr, s2c_rd, b"/".as_ptr(), 1, 0) };
+    let dio_root = unsafe { t_attach_9p(c2s_wr, s2c_rd, b"/".as_ptr(), 1, 0, 0) };
     let _ = unsafe { t_close(c2s_wr) };
     let _ = unsafe { t_close(s2c_rd) };
     if dio_root < 0 {

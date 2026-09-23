@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-08-16
+updated: 2026-09-23
 ---
 ## Purpose
 
@@ -20,7 +20,7 @@ The mount-creation composition: wrap a transport in a heap `p9_client`,
 drive Tversion+Tattach, and hand back a refcounted session holder
 (`struct p9_attached`) whose root Spoor is dev9p-backed. Two entries: the
 generic `p9_attached_create` (any transport_ops; the SYS_ATTACH_9P pipe
-path and every test), and `srvconn_attach_dev9p_root` — the production
+path, which stamps its own cape the same way, and every test), and `srvconn_attach_dev9p_root` — the production
 path shared by SYS_ATTACH_9P_SRV and devsrv's open=connect (stalk-3b),
 which is how every real mount (Stratum system FS, per-user homes, netd
 `/net`, corvus) comes to exist.
@@ -44,14 +44,28 @@ which is how every real mount (Stratum system FS, per-user homes, netd
   last unref releases them in the right order.
 - `p9_attached_root_spoor` → `dev9p_attach_client(client, root_fid)` (a
   root with `fid_owned = false`).
-- `srvconn_attach_dev9p_root(cn, aname, aname_len, n_uname, loose,
-  out_err)` → the dev9p root Spoor over a byte-mode SrvConn, or NULL.
+- `srvconn_attach_dev9p_root(cn, aname, aname_len, who, flags, out_err)`
+  → the dev9p root Spoor over a SrvConn, or NULL. `who` is the attaching
+  Proc (its principal names the Tattach; with the cape, its principal and
+  primary gid own every file); `flags` is the attach's word
+  (`SYS_ATTACH_9P_LOOSE`, `SYS_ATTACH_9P_CAPE`), already validated by the
+  syscall. A NULL `cn` or `who` answers `-T_E_INVAL`.
 
 ## Mechanism
 
 **`srvconn_attach_dev9p_root`, step by step** (the production sequence —
 each step's ordering is load-bearing):
 
+0. **The cape decision** (IDENTITY-DESIGN 3.2), before anything is built:
+   the attach is caped if the flags ask for it OR the conn carries the
+   service's DMSRVCAPE mark AND is byte-mode. The mark is read off the
+   CONNECTION, so every attach over a caped byte conn is caped whichever
+   caller drives it -- SYS_ATTACH_9P_SRV passes its flags through, devsrv's
+   9P-mode connect passes 0. The byte-mode half is the no-escalation
+   argument: a byte-mode attacher holds the raw transport (it could speak
+   9P to the server itself), so owning every file grants it nothing new; a
+   9P-mode opener never holds the transport. The /srv post already refuses
+   DMSRVCAPE without DMSRVBYTE, so the gate is the helper's own second half.
 1. kmalloc + `p9_srvconn_transport_init` (takes ONE srvconn_ref). Pre-init
    failures leave `cn` untouched (caller decides teardown); post-init
    failures go through the adapter's close, which tears `cn` down.
@@ -63,7 +77,9 @@ each step's ordering is load-bearing):
    (16c R1-F1): the serial handshake is wall-clock-bounded — a hung server
    times out instead of wedging the caller; a handshake timeout tears down
    an UNSHARED client, so no desync is possible.
-4. `p9_attached_create` with **msize = recv_cap = `srvconn_msize(cn)`** —
+4. `p9_attached_create` with n_uname = `who->principal_id`, or
+   `PRINCIPAL_NONE` when caped (nothing identity-bearing crosses to a
+   server whose ids are foreign), and **msize = recv_cap = `srvconn_msize(cn)`** —
    the CONNECTION's ring class (CF-3 B): a DMSRVBULK service negotiates
    128 KiB, a default one 32 KiB; the proposal can never exceed what the
    rings carry (ring cap = 2× msize class).
@@ -71,12 +87,14 @@ each step's ordering is load-bearing):
    steady-state has NO per-op deadline** (#841): the pipelined elected
    reader blocks until reply / EOF / death, because a per-op timeout that
    abandons one in-flight op desyncs the stream every Proc shares.
-6. `att->client->loose = loose` — the **B1 per-attach loose mode** (the
-   I-38 opt-in consumed by the Larder write-behind/cached-open legs in
-   [[sub-kernel-ninep-dev9p]]). Stamped on the still-private client BEFORE
-   the root Spoor exists: the caller's handle publication orders it against
-   every subsequent dev9p op, so the plain bool needs no atomics and never
-   flips afterward.
+6. `loose` from `SYS_ATTACH_9P_LOOSE` — the **B1 per-attach loose mode**
+   (the I-38 opt-in consumed by the Larder write-behind/cached-open legs in
+   [[sub-kernel-ninep-dev9p]]) — and, when caped,
+   `p9_client_set_cape(client, who->principal_id, who->primary_gid)`. Both
+   are stamped on the still-private client BEFORE the root Spoor exists:
+   the caller's handle publication orders them against every subsequent
+   dev9p op, so the plain fields need no atomics and never flip afterward.
+   No stat runs in this layer, so no conversion can precede the cape.
 7. `p9_attached_install_transport(att, adapter-as-spoor-cast, NULL, NULL)`
    — tx/rx NULL because the SrvConn's lifetime is the adapter's own
    srvconn_ref, not a Spoor pair.
@@ -169,8 +187,10 @@ client; nothing is shared until the root handle publishes). The refcount is
 the only cross-thread state: dev9p_privs across threads/Procs ref/unref it,
 and the poll-pump + Loom borrow-guards take EXTRA refs to keep the client
 alive across blocking pumps ([[sub-kernel-ninep-dev9p-poll]]). The
-`loose` stamp's publication argument (step 6 above) is the one deliberate
-non-atomic: publication-ordered, never flipped.
+`loose` and cape stamps' publication argument (step 6 above) is the one
+deliberate non-atomic: publication-ordered, never flipped. The conn's cape
+mark is read with ACQUIRE (`srvconn_cape`, paired with its RELEASE setter at
+mint), and `byte_mode` likewise.
 
 ## Invariants enforced
 
@@ -216,8 +236,14 @@ are rare (mount-time); nothing here is hot.
 - **`kernel_attached` timing** (set before any blocking op, only after the
   adapter commits) and the dual-destroy magic contract (asserts in this
   TU).
-- **The `loose` stamp's pre-publication window** — a stamp after the root
-  handle publishes would race dev9p's relaxed reads.
+- **The `loose` and cape stamps' pre-publication window** — a stamp after
+  the root handle publishes would race dev9p's relaxed reads, and a cape
+  stamped after a stat would leave the Larder holding the server's ids.
+- **The cape decision's two halves.** The flag capes any attach; the conn's
+  mark capes only a BYTE conn. Dropping the byte-mode half would let a
+  9P-mode opener -- who never holds the transport -- own a server's files;
+  deciding the cape anywhere but here would let one caller of this helper
+  forget it. n_uname must be PRINCIPAL_NONE whenever the cape is.
 - **The registry unlink must stay first in teardown, and the walk must hold its
   lock throughout.** Neither half is safe alone: together they make list
   membership the liveness proof, which is why the walk takes no reference. Moving
@@ -249,14 +275,16 @@ are rare (mount-time); nothing here is hot.
 - `n_uname` is forwarded but v1.0-inert on the trusted-local path — the
   live identity channel is SO_PEERCRED (A-3); the n_uname trust-stamp gate
   is the recorded v1.x foreign-server seam ([[seam-nuname-trust-stamp]]).
+  A caped attach sends `PRINCIPAL_NONE` there instead of the principal.
 
 ## Provenance
 
 (generated from incoming `touched` edges — shaped by P5-attach-create,
 SYS_ATTACH_9P/55, 16c [[chg-2026-05-26-16c-attach-srv]] + its two audit
 rounds, stalk-3b's shared open=connect path, A-3c out_err, CF-3 B msize
-classes, B1 loose, and #210's session registry --
-[[chg-2026-08-16-ninep-attach-registry]].)
+classes, B1 loose, #210's session registry --
+[[chg-2026-08-16-ninep-attach-registry]] -- and (L) the Haul identity cape,
+which gave the helper the attaching Proc and the flags word.)
 
 ## Tests
 
@@ -265,5 +293,10 @@ handshake-failure cleanup (the OOM/rollback ladder), root-walk-read
 composition, and `p9_attached.walked_outlives_root_no_uaf` — the F236
 regression (close the root BEFORE the walks; pre-fix UAF'd on the walked
 clunk). `test_9p_srvconn_transport.c::kernel_attached_skips_teardown_on_handle_close`
-covers the 16c integration half; the live path is exercised by every boot
+covers the 16c integration half; `9p_srvconn_transport.cape_attach` covers the
+cape decision through the helper (a DMSRVCAPE service capes without a flag,
+the flag capes a plain service, the uncaped control names the principal,
+LOOSE alone is not the cape, a cape mark on a raw 9P-mode conn capes
+nothing) and through SYS_ATTACH_9P_SRV's inner (the flag reaches the helper,
+an unknown bit sends nothing), reading the Tattach's n_uname off the ring; the live path is exercised by every boot
 (all mounts route through `srvconn_attach_dev9p_root`).

@@ -420,6 +420,10 @@ pub const T_WALK_CREATE_DMSRVBYTE: u32 = 0x0200_0000;
 // (netd's /net stays default-class); stratumd posts it via the pouch
 // SO_SNDBUF mapping.
 pub const T_WALK_CREATE_DMSRVBULK: u32 = 0x0100_0000;
+// DMSRVCAPE (IDENTITY-DESIGN 3.2): on a BYTE-mode /srv service post, capes
+// every attach over the service (as if each attacher passed T_ATTACH_9P_CAPE).
+// Refused without DMSRVBYTE. Mirrors SYS_WALK_CREATE_DMSRVCAPE in the kernel.
+pub const T_WALK_CREATE_DMSRVCAPE: u32 = 0x0080_0000;
 
 // SYS_WALK_OPEN sentinel for "walk from the calling Proc's territory
 // root spoor" (P5-stratumd-stub-bringup-e2). Passed as spoor_fd when
@@ -1712,11 +1716,12 @@ pub unsafe fn t_pivot_root(new_root_fd: i64) -> i64 {
 /// duplex Spoor passed as both. The kernel runs Tversion + Tattach (asserting
 /// the caller's kernel-stamped principal as `n_uname`; the value passed here
 /// is vestigial) and returns a KOBJ_SPOOR rooting the attached tree
-/// (R|W|TRANSFER). The attach holds its own refs on both transport Spoors, so
-/// the pipe fds may be closed afterwards. Returns the new fd (>= 0) or -1.
+/// (R|W|TRANSFER). `flags` is 0 or [`T_ATTACH_9P_CAPE`]; unknown bits reject.
+/// The attach holds its own refs on both transport Spoors, so the pipe fds may
+/// be closed afterwards. Returns the new fd (>= 0) or -1.
 #[inline(always)]
 pub unsafe fn t_attach_9p(tx_fd: i64, rx_fd: i64, aname: *const u8, aname_len: usize,
-                          n_uname: u64) -> i64 {
+                          n_uname: u64, flags: u64) -> i64 {
     let mut x0: i64 = tx_fd;
     asm!(
         "svc #0",
@@ -1725,6 +1730,7 @@ pub unsafe fn t_attach_9p(tx_fd: i64, rx_fd: i64, aname: *const u8, aname_len: u
         in("x2") aname as u64,
         in("x3") aname_len as u64,
         in("x4") n_uname,
+        in("x5") flags,
         in("x8") T_SYS_ATTACH_9P,
         options(nostack)
     );
@@ -1737,6 +1743,13 @@ pub unsafe fn t_attach_9p(tx_fd: i64, rx_fd: i64, aname: *const u8, aname_len: u
 /// wire revalidation). docs/chase/B1-VOTE.md + the ARCH I-38 row.
 pub const T_ATTACH_9P_LOOSE: u64 = 0x1;
 
+/// SYS_ATTACH_9P / SYS_ATTACH_9P_SRV flags: the identity cape (IDENTITY-DESIGN
+/// 3.2). Every file on the session reports the attaching principal as owner and
+/// its primary group as group, with the server's mode kept; the attach names no
+/// user, a create leaves the server's group alone, and chown/chgrp are refused.
+/// For a server whose ids are not Thylacine principals (Haul's npxf).
+pub const T_ATTACH_9P_CAPE: u64 = 0x2;
+
 /// t_attach_9p_srv -- drive a 9P attach over a byte-mode `/srv` connection
 /// (16c; SYS_ATTACH_9P_SRV). `srv_fd` is a KOBJ_SPOOR CLIENT byte-conn from
 /// open=connect on a byte-mode service (must carry R+W; the kernel 9P client
@@ -1744,8 +1757,9 @@ pub const T_ATTACH_9P_LOOSE: u64 = 0x1;
 /// the caller's principal_id for `n_uname`) and returns a KOBJ_SPOOR rooting
 /// the attached tree (R|W|TRANSFER). `aname` is the server-side path /
 /// capability string (<= SYS_ATTACH_ANAME_MAX; pass NULL+0 for the default
-/// root). `flags` is 0 (strict close-to-open) or T_ATTACH_9P_LOOSE; unknown
-/// bits reject. After a successful attach the `srv_fd` handle may be closed
+/// root). `flags` is 0 (strict close-to-open), T_ATTACH_9P_LOOSE,
+/// T_ATTACH_9P_CAPE, or both (a service posted DMSRVCAPE capes every attach
+/// over it regardless); unknown bits reject. After a successful attach the `srv_fd` handle may be closed
 /// -- the attach holds its own ref and the rings are kernel_attached.
 /// Returns the new fd (>= 0) or -1.
 #[inline(always)]

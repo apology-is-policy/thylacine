@@ -416,6 +416,20 @@ void srvconn_set_byte_mode(struct SrvConn *cn) {
     __atomic_store_n(&cn->byte_mode, true, __ATOMIC_RELEASE);
 }
 
+void srvconn_set_cape(struct SrvConn *cn) {
+    if (!cn || cn->magic != SRV_CONN_MAGIC)
+        extinction("srvconn_set_cape: NULL or corrupted SrvConn");
+    if (srvconn_is_kernel_attached(cn))
+        extinction("srvconn_set_cape: kernel-attached "
+                   "(cape set on a published SrvConn)");
+    __atomic_store_n(&cn->cape, true, __ATOMIC_RELEASE);
+}
+
+bool srvconn_cape(const struct SrvConn *cn) {
+    if (!cn || cn->magic != SRV_CONN_MAGIC) return false;
+    return __atomic_load_n(&cn->cape, __ATOMIC_ACQUIRE);
+}
+
 void srvconn_set_kernel_attached(struct SrvConn *cn) {
     if (!cn || cn->magic != SRV_CONN_MAGIC)
         extinction("srvconn_set_kernel_attached: NULL or corrupted SrvConn");

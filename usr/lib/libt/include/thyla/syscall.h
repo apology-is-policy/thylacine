@@ -716,28 +716,36 @@ static inline long t_dma_create(unsigned long size, unsigned long rights) {
 // pass the matching write-end + read-end.
 //
 // aname is a server-side path or capability string (up to 256 bytes
-// at v1.0). n_uname is 0 for no-auth attach at v1.0; Phase 5+
-// authentication backends will use it as the per-user identifier.
+// at v1.0). n_uname is vestigial: the kernel asserts the caller's own
+// principal (or, caped, no user at all).
+//
+// flags: 0, or T_ATTACH_9P_CAPE -- the identity cape (IDENTITY-DESIGN
+// 3.2): every file reports the caller as owner and its primary group as
+// group, the server's mode kept, and chown/chgrp are refused. For a
+// server whose ids are not Thylacine principals. Unknown bits reject.
 //
 // Returns the new fd (>=0) on success, -1 on:
 //   - invalid tx_fd / rx_fd or missing R/W rights
 //   - aname out of user-VA bound / aname_len > 256
+//   - an unknown flags bit
 //   - server-side Rlerror on Tversion or Tattach
 //   - kmalloc OOM / handle table full
+#define T_ATTACH_9P_CAPE 0x2ul
 __attribute__((always_inline))
 static inline long t_attach_9p(long tx_fd, long rx_fd,
                                const char *aname, size_t aname_len,
-                               unsigned long n_uname) {
+                               unsigned long n_uname, unsigned long flags) {
     register long x0 __asm__("x0") = tx_fd;
     register long x1 __asm__("x1") = rx_fd;
     register long x2 __asm__("x2") = (long)(unsigned long)aname;
     register long x3 __asm__("x3") = (long)aname_len;
     register long x4 __asm__("x4") = (long)n_uname;
+    register long x5 __asm__("x5") = (long)flags;
     register long x8 __asm__("x8") = T_SYS_ATTACH_9P;
     __asm__ volatile (
         "svc #0"
         : "+r"(x0)
-        : "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x8)
+        : "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x5), "r"(x8)
         : "memory", "cc"
     );
     return x0;
@@ -2339,7 +2347,9 @@ static inline long t_lseek(long fd, long offset, long whence) {
 // flags: 0 (strict close-to-open, the I-38 default) or T_ATTACH_9P_LOOSE
 // (the B1 per-attach opt-in -- the caller asserts the single-writer
 // premise for this attach; cached-opens then serve full Larder-hint hits
-// without the per-open wire revalidation). Unknown bits reject.
+// without the per-open wire revalidation), T_ATTACH_9P_CAPE (the identity
+// cape, as for t_attach_9p; a service posted DMSRVCAPE capes every attach
+// over it regardless), or both. Unknown bits reject.
 //
 // Returns the new fd (>=0) on success, -1 on:
 //   - invalid srv_fd / wrong kind / missing R+W rights / not byte-mode

@@ -1151,6 +1151,9 @@ void test_srv_client_no_per_proc_cap(void);
 void test_srv_client_byte_mode_propagates_to_conn(void);
 void test_srv_client_byte_mode_conn_dispatch(void);
 void test_srv_client_byte_mode_mode_change_rebind_refused(void);
+void test_srv_client_cape_post(void);
+void test_srv_client_cape_admission(void);
+void test_srv_client_cape_post_syscall(void);
 void test_srv_client_byte_mode_server_recv_blocking_eof(void);
 void test_virtio_mmio_probe(void);
 void test_virtio_magic_value(void);
@@ -1373,6 +1376,7 @@ void test_9p_client_loom_mutation_rejects(void);
 void test_9p_client_loom_dirmut_dac(void);
 void test_9p_client_loom_dirmut_sqpoll(void);
 void test_9p_client_loom_create_gid(void);
+void test_9p_client_loom_cape(void);
 void test_9p_client_loom_dirmut_names(void);
 void test_9p_client_loom_multi_inflight_e2e(void);
 void test_9p_client_loom_multi_inflight_read_e2e(void);
@@ -1454,6 +1458,9 @@ void test_dev9p_wstat_native_drives_setattr(void);
 void test_dev9p_prw_wire_offset_and_cursor(void);
 void test_dev9p_wstat_readonly_fd(void);
 void test_dev9p_wstat_size(void);
+void test_dev9p_cape(void);
+void test_dev9p_path_create_refuses_dmsrvcape(void);
+void test_dev9p_walk_create_refuses_dmsrv_bits(void);
 void test_dev9p_walk_attrs(void);
 void test_dev9p_wga_unsupported_latches_by_errno(void);
 void test_dev9p_page_cache_serve_and_gate(void);
@@ -1499,6 +1506,7 @@ void test_9p_srvconn_transport_init_null_rejected(void);
 void test_9p_srvconn_transport_send_routes_to_c2s_ring(void);
 void test_9p_srvconn_transport_recv_routes_from_s2c_ring(void);
 void test_9p_srvconn_transport_large_frame_roundtrip(void);
+void test_9p_srvconn_transport_cape_attach(void);
 void test_9p_srvconn_transport_close_drops_srvconn_ref(void);
 void test_9p_srvconn_transport_kernel_attached_skips_teardown_on_handle_close(void);
 void test_9p_srvconn_transport_send_preserves_caller_deadline(void);
@@ -2981,6 +2989,9 @@ struct test_case g_tests[] = {
     { "srv_client.byte_mode_server_recv_blocking_eof",
                                        test_srv_client_byte_mode_server_recv_blocking_eof,
                                                                            false, NULL },
+    { "srv_client.cape_post",          test_srv_client_cape_post,          false, NULL },
+    { "srv_client.cape_admission",     test_srv_client_cape_admission,     false, NULL },
+    { "srv_client.cape_post_syscall",  test_srv_client_cape_post_syscall,  false, NULL },
     { "virtio.mmio_probe",             test_virtio_mmio_probe,             false, NULL },
     { "virtio.magic_value",            test_virtio_magic_value,            false, NULL },
     { "virtio.version_modern",         test_virtio_version_modern,         false, NULL },
@@ -3370,6 +3381,7 @@ struct test_case g_tests[] = {
     { "9p_client.loom_dirmut_dac",       test_9p_client_loom_dirmut_dac,       false, NULL },
     { "9p_client.loom_dirmut_sqpoll",    test_9p_client_loom_dirmut_sqpoll,    false, NULL },
     { "9p_client.loom_create_gid",       test_9p_client_loom_create_gid,       false, NULL },
+    { "9p_client.loom_cape",             test_9p_client_loom_cape,             false, NULL },
     { "9p_client.loom_dirmut_names",     test_9p_client_loom_dirmut_names,     false, NULL },
     { "9p_client.async_clunk_burst_no_fid_leak",
                                        test_9p_client_async_clunk_burst_no_fid_leak, false, NULL },
@@ -3463,6 +3475,9 @@ struct test_case g_tests[] = {
                                        test_dev9p_prw_wire_offset_and_cursor, false, NULL },
     { "dev9p.wstat_readonly_fd",       test_dev9p_wstat_readonly_fd,          false, NULL },
     { "dev9p.wstat_size",              test_dev9p_wstat_size,                 false, NULL },
+    { "dev9p.cape",                    test_dev9p_cape,                       false, NULL },
+    { "dev9p.path_create_refuses_dmsrvcape", test_dev9p_path_create_refuses_dmsrvcape, false, NULL },
+    { "dev9p.walk_create_refuses_dmsrv_bits", test_dev9p_walk_create_refuses_dmsrv_bits, false, NULL },
     { "dev9p.walk_attrs",              test_dev9p_walk_attrs,                 false, NULL },
     { "dev9p.wga_unsupported_by_errno", test_dev9p_wga_unsupported_latches_by_errno, false, NULL },
     { "dev9p.page_cache_serve_and_gate", test_dev9p_page_cache_serve_and_gate, false, NULL },
@@ -3519,6 +3534,7 @@ struct test_case g_tests[] = {
     { "9p_srvconn_transport.send_routes_to_c2s_ring",       test_9p_srvconn_transport_send_routes_to_c2s_ring,       false, NULL },
     { "9p_srvconn_transport.recv_routes_from_s2c_ring",     test_9p_srvconn_transport_recv_routes_from_s2c_ring,     false, NULL },
     { "9p_srvconn_transport.large_frame_roundtrip",         test_9p_srvconn_transport_large_frame_roundtrip,         false, NULL },
+    { "9p_srvconn_transport.cape_attach",                   test_9p_srvconn_transport_cape_attach,                   false, NULL },
     { "9p_srvconn_transport.close_drops_srvconn_ref",       test_9p_srvconn_transport_close_drops_srvconn_ref,       false, NULL },
     { "9p_srvconn_transport.kernel_attached_skips_teardown_on_handle_close", test_9p_srvconn_transport_kernel_attached_skips_teardown_on_handle_close, false, NULL },
     { "9p_srvconn_transport.send_preserves_caller_deadline", test_9p_srvconn_transport_send_preserves_caller_deadline, false, NULL },

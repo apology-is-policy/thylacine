@@ -22,6 +22,97 @@ needed the operator.
 
 
 ---
+## 2026-09-23, afternoon, later (aux, Opus 5.5 1M, effort max) -- the mounter owns every file on a Haul mount
+
+**The symptom was the operator's.** Lantern over Haul, serving `~/decks` from
+the Mac: the mount attached, then `ls`, `cd` and lantern's open all failed with
+"permission denied". dev9p enforces rwx in the kernel against the owner the
+server reports. npxf reported the Mac's uid 501 and group staff, no Thylacine
+principal is either, and the deck was 0700/0600, which gives "other" nothing.
+Every Haul gate had served 0755/0644, so none could see it. The operator voted
+"mounter owns" (HAUL-DESIGN 4.7, scripture `d10d1ff5`), which builds
+IDENTITY-DESIGN 3.2's mount-cape. That design had been left a seam on the
+premise that v1.0 had no permissionless backing, and Haul broke the premise.
+
+**What was built** (`5e152095`, local on aux-3):
+- The cape is a property of the 9P client session, stamped before the root
+  Spoor publishes and never flipped. It applies at `t_stat_from_p9_attr`,
+  which now takes the client: that is the one place the server's attributes
+  become a `t_stat`. The Larder caches converted stats and lives on the
+  client, so a caped session never caches an uncaped one. Loom's GETATTR copy
+  hands userspace the server's attributes directly, so it applies the cape
+  itself.
+- Nothing identity-bearing goes to the server: the Tattach names no user, a
+  create sends gid `(u32)-1` (npxf's `try_set_gid` leaves its own), and chown
+  and chgrp are refused before the wire. A Loom create naming any gid under the
+  cape is a chgrp and is refused.
+- `SYS_ATTACH_9P` gained an x5 flags word, and every in-tree caller passes it:
+  haul and the attach-probe pass the cape (the probe also checks that LOOSE
+  and an unknown bit are refused); viv, joey, stub-driver and
+  stub-walk-probe pass 0.
+  `DMSRVCAPE` marks a `/srv` post, and is admitted only beside `DMSRVBYTE`: a
+  byte-mode attacher holds the raw transport, so the cape grants it nothing it
+  lacked. The three DMSRV refusals share one derived mask.
+
+The first suite run was 1650/1651: the attach-probe's new mode leg failed
+under the stratumd-stub test, which reuses the probe against a server with
+other modes. The probe now asserts owner and group only; the mode leg lives
+where the fixture is known.
+
+**The sabotage plan found tests that could not fail.** Mapping each changed
+line to the test that should fail without it left four lines with none.
+Three sat in syscall handlers that only run from EL0: the fd create's DMSRV
+refusal, the post branch's predicate call, and the `/srv` attach's flags
+check. The fourth, the helper's byte-mode gate on the conn's mark, had no
+test that marked a 9P-mode conn. `2faee4dc` thins the `/srv` attach and
+walk-create handlers to inners callable from the kernel suite (the
+`sys_open_create_kpath_for_proc` pattern) and adds
+`dev9p.walk_create_refuses_dmsrv_bits`, `srv_client.cape_post_syscall` and
+four `/srv` legs in `9p_srvconn_transport.cape_attach`, one of which marks a
+9P-mode conn by hand and requires it to attach uncaped. Then 30 sabotages,
+each a one-line change, each caught by the test meant for it
+(`scratchpad/sab/results-l.txt`); the restored kernel's md5 equals the green
+one, `db81db66`. My notes said 31. Counting the ids in the sabotage script
+while writing this entry gives 30; the notes are corrected.
+
+**The device gate** (`8dde94ba`): `haul-cape.exp` starts its own writable npxf
+over a 0700/0600 export and compares the guest's view with the host file's
+own ids, so a fixture whose ids coincided with the mounter's would fail itself.
+Its first pass took 38 s, fast enough to distrust. The steps file and the
+transcript show every leg: Uid 1000 and Gid 1000 against the host's 501:20, the
+0700 directory searched, the create, mkdir and chmod seen on the host, and a
+plain `mount /srv/haul-cape` caped. The wrong turns before that pass:
+- `haul:` was in the fail-fast tool-error pattern, and haul reports its
+  successes on that prefix, so a working mount failed the run;
+- npxf warned that the token file was 0644;
+- the vault's pre-commit lint failed because the new script contains the
+  boot banner's `EXTINCTION:` literal and was not declared a consumer.
+
+**Device sabotage** (`9c7b05a8`), each a haul rebuild on the gate image:
+- the private attach with flags 0 fails the first read with
+  `cat: /tmp/cape/secret.txt: permission denied`, the operator's symptom;
+- a post without `DMSRVCAPE` passes both private legs and fails the posted read.
+
+The second one first failed on the text `cat: /tmp/cape` and nothing more.
+The error arm was unanchored and fired on the first chunk of the line, so the
+verdict was right and the evidence was cut off. It now ends at the line end,
+and the re-run reads `cat: /tmp/cape-post/posted.txt: permission denied`. The
+control on the restored tree passes in 88 s.
+
+**Found along the way:**
+- `sub-viv` still described the diorama channel as it was before 2026-08-18
+  (a posted `/srv/viv-dio`, `MAY_POST_SERVICE` passed on, a poll loop, no
+  concurrent containers). The channel has been a private pipe pair since
+  `437213c4`; five passages are corrected against the code.
+- quaestor counted `stratumd-stub` and `stub-driver` as unowned dossier debt.
+  Both are kernel-suite fixtures, and they join the harness list's named few.
+- Every Haul session end prints `9p: op abandoned (tag 0, death, flush sent)`
+  (`kernel/9p_client.c:1050`). It predates the cape (the lantern-haul log at
+  10:45 shows it), and it is enqueued as (S), to diagnose after this chunk.
+
+**Open:** the Fable audit round (dev9p is an audit-trigger surface), then the
+fold into one commit and the push to both mirrors.
+
 ## 2026-09-23, afternoon (aux, Opus 5.5 1M, effort max) -- a directory handle carried a write right nobody had checked
 
 **Found while reading for the Haul cape, not while looking for it.** The cape

@@ -14,7 +14,7 @@
 //   fd 1 = s2c_rd — read end of server→client pipe
 //
 // Sequence:
-//   1. t_attach_9p(0, 1, "/", 1, 0) → attach_fd
+//   1. t_attach_9p(0, 1, "/", 1, 0, 0) → attach_fd
 //   2. e1: t_walk_open(attach_fd, "hello", 5, T_OREAD) → hello_fd
 //          + t_read + content match + t_read EOF (count 0) + close
 //   3. e2: t_chroot(attach_fd) → 0
@@ -45,7 +45,7 @@ static int mem_eq(const unsigned char *a, const unsigned char *b, unsigned n) {
 void _start(void) {
     t_putstr("stub-walk-probe: t_attach_9p + t_walk_open + t_read + t_chroot on fds 0/1\n");
 
-    long attach_fd = t_attach_9p(TX_FD, RX_FD, "/", 1, 0);
+    long attach_fd = t_attach_9p(TX_FD, RX_FD, "/", 1, 0, 0);
     if (attach_fd < 0) {
         t_putstr("stub-walk-probe: FAIL t_attach_9p\n");
         t_exits(1);

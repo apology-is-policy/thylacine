@@ -67,6 +67,32 @@ abdicate
 Replace the example address, token path and filename with your server's values.
 `abdicate` ends the elevated scope and its background relays.
 
+### Ownership and permissions
+
+Thylacine reports every file on a Haul mount as owned by the user who mounted
+it, with that user's primary group. The permission bits are the host's. A
+private host tree, such as a `0700` directory of `0600` files, is therefore
+readable by the user who mounted it, and writable when the server permits
+writes. The private form and a mount of a posted service behave the same way,
+and neither needs an option. The host's own ownership does not change. To see
+the ownership Thylacine applies, run:
+
+```sh
+stat /tmp/remote/hello.txt
+id
+```
+
+The `Uid` and `Gid` fields that `stat` prints match the `uid` and `gid` that
+`id` prints, whatever ids the file has on the host. The `Mode` field is the
+host file's mode.
+
+`chmod` on a Haul mount changes the host file's mode. A change of owner or
+group is refused. A file or directory created through the mount belongs on the
+host to the server's account, with the group the host assigns by default.
+The host server still applies its own account's permissions. If a read fails
+with a permission error, check the file's mode on the host: its owner bits are
+the ones that apply to the user who mounted it.
+
 ### Command reference
 
 - `haul --post [-t FILE | --token-env VAR] [-v] NAME HOST!PORT`: publish a
@@ -105,6 +131,33 @@ Namespaces are per-process. Backgrounding the private mount form cannot add a
 mount to its parent shell. The posted-service form and shell `mount` builtin
 exist to perform that mount in the calling shell itself. The service accepts
 only a client with the poster's kernel-stamped principal identity.
+
+### File ownership
+
+A 9P server reports each file's owner as a numeric user and group id from the
+host. On macOS these are typically user 501 and group 20. No Thylacine user
+holds the host's ids, and the kernel checks file permissions itself, against
+the owner the server reports. Without an adjustment, every Thylacine user would
+be subject to the host file's "other" permission bits, and a private host
+directory would be unreadable to the user who mounted it.
+
+The kernel therefore marks a Haul session when it is attached. The private form
+requests the mark on its attach. `haul --post` marks the posted service, and
+every attach through that service carries the mark, which is why a plain
+`mount /srv/NAME` needs no option. On a marked session the kernel reports every
+file as owned by the attaching user and that user's primary group, and keeps the
+server's permission bits. The adjustment is made where the kernel converts the
+server's attributes, so `stat`, directory listings and the kernel's own
+permission checks all see the same owner. The mark is fixed before the mount's
+root becomes usable and does not change for the life of the session.
+
+The mark gives the mounting user no access to the server that the connection
+did not already give. The kernel accepts the mark only where the process that
+attaches holds the raw connection: the private form's own pipes to its relay,
+or a byte service. That process could send the same requests to the server
+directly. Nothing identity-related is sent to the server. The attach names no
+user, a create asks the server to keep its default group, and a change of owner
+or group is refused before it reaches the server.
 
 ### Failure and cleanup
 

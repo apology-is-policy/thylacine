@@ -258,8 +258,10 @@ uniform-mode cape):
 *Nothing identity-bearing crosses to a caped server:*
 - Tattach sends `n_uname` = none (F-4).
 - A create sends gid `(u32)-1`, which a POSIX server reads as "leave the group".
-- chown and chgrp are refused before the wire (`EPERM`): the cape imposes
-  ownership, and a server-side change could not alter what the guest sees.
+- chown and chgrp are refused before the wire, with `SYS_WSTAT`'s generic
+  failure like its other refusals (a Loom create that names a group is a chgrp
+  too, and answers `-EACCES`): the cape imposes ownership, and a server-side
+  change could not alter what the guest sees.
 - chmod passes through, since mode is the server's own vocabulary.
 
 *Mechanism:* a property of the 9P SESSION, fixed at attach before the root

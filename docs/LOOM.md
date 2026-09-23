@@ -369,10 +369,15 @@ rule below closes it.
   - any other value must be a group the creator is in, unless it holds
     `CAP_HOSTOWNER` or `CAP_CHOWN`: perm_wstat_check's chgrp rule applied at
     birth;
+  - on a caped session (IDENTITY-DESIGN.md 3.2, the identity cape) the group is
+    the cape's: 0 sends the server `(u32)-1`, "leave it", and any other value is
+    refused, since naming a group there is a chgrp and the cape refuses chgrp;
   - a refusal answers `-EACCES`, and a value above u32 `-EINVAL`.
 
   The resolved gid is written into the op's SQE snapshot, so the wire carries
-  it and never the ring's bytes.
+  it and never the ring's bytes. (On a caped session `GETATTR` likewise hands
+  userspace the cape's owner and group, with both `valid` bits set, so a ring
+  and `SYS_FSTAT` report the same owner.)
 - **Names are checked like the sync twins', on the copy the wire carries.**
   Each child name must be 1 to 255 bytes, hold no `/` or NUL, and not be `.`
   or `..` (`sys_copy_component`'s rule); a bad one answers `-EINVAL` before

@@ -867,10 +867,20 @@ static s32 loom_payload_result(struct loom_async_op *op, int status,
     }
     case LOOM_OP_GETATTR: {
         if (!dr) return 0;
+        // IDENTITY-DESIGN 3.2: userspace sees the owner the kernel's own stat
+        // reports -- on a caped session the cape's, marked valid like any
+        // server-filled field.
+        struct p9_attr a;
+        loom_bufcopy((u8 *)&a, (const u8 *)&dr->attr, (u32)sizeof(a));
+        if (op->client->cape) {
+            a.uid    = op->client->cape_uid;
+            a.gid    = op->client->cape_gid;
+            a.valid |= P9_GETATTR_UID | P9_GETATTR_GID;
+        }
         u32 got = (u32)sizeof(struct p9_attr);
         if (got > op->op_count) got = op->op_count;   // honor a short dest (no overrun)
         if (got != 0 && op->buf_kva)
-            loom_bufcopy(op->buf_kva, (const u8 *)&dr->attr, got);
+            loom_bufcopy(op->buf_kva, (const u8 *)&a, got);
         return loom_count_result(got);
     }
     case LOOM_OP_STATFS: {
@@ -1190,8 +1200,12 @@ static s32 loom_dir_writable(const struct Proc *who, struct Spoor *dir) {
 // For the create ops, *gid_out is the resolved group: SQE gid 0 (GID_INVALID) is
 // the creator's primary group, as the sync create always uses; any other must be
 // one the creator may chgrp a file it owns to (perm_wstat_check, cur_uid = the
-// creator: a member group, or chown-any authority).
+// creator: a member group, or chown-any authority). On a caped session
+// (IDENTITY-DESIGN 3.2) the group is the cape's and the wire carries P9_NOGID, so
+// the server leaves its own alone; naming a group there is a chgrp, which the cape
+// refuses.
 static s32 loom_dir_mutation_gate(const struct Loom *l, const struct loom_sqe *sqe,
+                                  const struct p9_client *cl,
                                   struct Spoor *dir, struct Spoor *dir2,
                                   u32 *gid_out, bool *gid_set) {
     const struct Proc *who = loom_ident_live(l);
@@ -1204,10 +1218,14 @@ static s32 loom_dir_mutation_gate(const struct Loom *l, const struct loom_sqe *s
     u64 raw = (sqe->opcode == LOOM_OP_MKNOD) ? sqe->offset : sqe->_resv1[2];
     if (raw > (u64)0xFFFFFFFFu)                      return -(s32)T_E_INVAL;
     u32 gid = (u32)raw;
-    if (gid == GID_INVALID)
+    if (cl->cape) {
+        if (gid != GID_INVALID)                      return -(s32)T_E_ACCES;
+        gid = P9_NOGID;
+    } else if (gid == GID_INVALID) {
         gid = who->primary_gid;
-    else if (perm_wstat_check(who, who->principal_id, T_WSTAT_GID, gid) != 0)
+    } else if (perm_wstat_check(who, who->principal_id, T_WSTAT_GID, gid) != 0) {
         return -(s32)T_E_ACCES;
+    }
     *gid_out = gid;
     *gid_set = true;
     return 0;
@@ -1405,7 +1423,7 @@ static void loom_submit_payload(struct Loom *l, const struct loom_sqe *sqe,
         if (!op)                                        { err = -(s32)T_E_NOMEM;     goto fail; }
         loom_bufcopy(op->names, buf_kva, nlen);
         if (!loom_names_ok(sqe, op->names, count))      { err = -(s32)T_E_INVAL;     goto fail; }
-        err = loom_dir_mutation_gate(l, sqe, sp, sp2, &cgid, &cgid_set);
+        err = loom_dir_mutation_gate(l, sqe, cl, sp, sp2, &cgid, &cgid_set);
         if (err != 0) goto fail;
     }
     // Weft-6c fast-path (NET-THROUGHPUT 6; I-37): a READ/WRITE whose pinned /net

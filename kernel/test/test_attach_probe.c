@@ -98,6 +98,11 @@ struct attach_probe_responder_ctx {
 static struct attach_probe_responder_ctx g_responder_ctx;
 static volatile bool                     g_responder_finished;
 static volatile u32                      g_responder_msgs_handled;
+// The identity cape's wire evidence: how many Tattach frames arrived (the
+// probe's refused-flags attaches must send none) and the n_uname the caped one
+// carried (none -- PRINCIPAL_NONE).
+static volatile u32                      g_responder_tattach_seen;
+static volatile u32                      g_responder_n_uname;
 // #108: release flag for the responder's EXITING-handshake reap (the loom_sqpoll
 // join idiom). The responder sets it RELEASE after marking itself EXITING; the
 // boot joiner observes it ACQUIRE then thread_free()s the responder. Replaces a
@@ -165,6 +170,18 @@ static int build_response(const u8 *req, size_t req_len, u8 *resp, size_t resp_c
     }
 
     if (type == P9_TATTACH) {
+        // Tattach body: fid[4] afid[4] uname[s] aname[s] n_uname[4].
+        g_responder_tattach_seen++;
+        size_t o = P9_HDR_LEN + 8;
+        if (req_len >= o + 2) {
+            o += 2 + ((size_t)req[o] | ((size_t)req[o + 1] << 8));
+            if (req_len >= o + 2) {
+                o += 2 + ((size_t)req[o] | ((size_t)req[o + 1] << 8));
+                if (req_len >= o + 4)
+                    g_responder_n_uname = (u32)req[o] | ((u32)req[o + 1] << 8) |
+                                          ((u32)req[o + 2] << 16) | ((u32)req[o + 3] << 24);
+            }
+        }
         // Rattach: 13-byte qid (type + version + path).
         size_t total = P9_HDR_LEN + P9_QID_LEN;
         if (resp_cap < total) return -1;
@@ -175,6 +192,29 @@ static int build_response(const u8 *req, size_t req_len, u8 *resp, size_t resp_c
         resp[7] = P9_QTDIR;
         for (int i = 0; i < 4; i++) resp[8 + i] = 0;
         resp[12] = 1; for (int i = 1; i < 8; i++) resp[12 + i] = 0;
+        return (int)total;
+    }
+
+    if (type == P9_TGETATTR) {
+        // Rgetattr: a HOST-owned private directory -- uid 501, gid 20 (a Mac's),
+        // mode S_IFDIR|0700 -- which the probe's caped session must report as
+        // its own. valid(8) qid(13) mode uid gid(4 each) + 15 u64 = 153 body.
+        size_t total = P9_HDR_LEN + 8 + P9_QID_LEN + 12 + 15 * 8;
+        if (resp_cap < total) return -1;
+        for (size_t i = 0; i < total; i++) resp[i] = 0;
+        resp[0] = (u8)(total & 0xff); resp[1] = (u8)((total >> 8) & 0xff);
+        resp[4] = P9_RGETATTR;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        size_t o = P9_HDR_LEN;
+        resp[o] = 0xff; resp[o + 1] = 0x07; o += 8;          // valid = BASIC
+        resp[o] = P9_QTDIR; o += 1 + 4; resp[o] = 1; o += 8; // qid: dir, path 1
+        { u32 m = 040700u;
+          resp[o] = (u8)m; resp[o + 1] = (u8)(m >> 8); o += 4; }
+        resp[o] = 0xF5; resp[o + 1] = 0x01; o += 4;          // uid = 501
+        resp[o] = 20; o += 4;                                // gid = 20
+        resp[o] = 1; o += 8;                                 // nlink
+        o += 8 + 8;                                          // rdev, size
+        resp[o + 1] = 0x10;                                  // blksize = 4096
         return (int)total;
     }
 
@@ -394,6 +434,8 @@ void test_attach_probe_round_trip(void) {
     g_responder_ctx.tx       = s2c_wr;
     g_responder_finished     = false;
     g_responder_msgs_handled = 0;
+    g_responder_tattach_seen = 0;
+    g_responder_n_uname      = 0xDEADBEEFu;
     __atomic_store_n(&g_responder_exited, false, __ATOMIC_RELAXED);
 
     struct Thread *responder = thread_create(kproc(), responder_thread_entry);
@@ -416,7 +458,8 @@ void test_attach_probe_round_trip(void) {
     int reaped = wait_pid(&status);
     TEST_EXPECT_EQ(reaped, pid, "wait_pid pid mismatch");
     TEST_EXPECT_EQ(status, 0,
-        "/attach-probe exit status (0 = PASS: attach_9p + mount + unmount round-trip)");
+        "/attach-probe exit status (0 = PASS; 2/3 = a refused flags word admitted, "
+        "4-6 = the caped root's fstat / owner / group)");
 
     // 4. The probe is dead; its handle table is gone; its closes have
     //    propagated EOF to the c2s ring (write_eof set on the c2s
@@ -476,4 +519,11 @@ void test_attach_probe_round_trip(void) {
     // chain working end-to-end.
     TEST_ASSERT(g_responder_msgs_handled >= 2,
         "responder handled at least Tversion + Tattach");
+
+    // The flags word: the probe's two refused attaches (exit 2 / 3 had they
+    // been admitted) sent nothing, and the caped one named no user.
+    TEST_EXPECT_EQ((u64)g_responder_tattach_seen, (u64)1,
+        "only the admitted attach reached the wire");
+    TEST_EXPECT_EQ((u64)g_responder_n_uname, (u64)PRINCIPAL_NONE,
+        "a caped Tattach names no user (IDENTITY-DESIGN 3.2)");
 }

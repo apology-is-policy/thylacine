@@ -519,3 +519,39 @@ neither (no C consumer; the subset rule above, still holding visibly).
 Consumers: `/protect-probe`, `/protect-guard-child`
 ([[sub-kernel-protect-witness]]) and the phenotype `mmap` / `mprotect` rows,
 which are the first production callers.
+
+## The identity cape: an x5 flags word and one perm bit ((L), 2026-09-23)
+
+No number changed and no record grew; the operator voted the additive shape
+(IDENTITY-DESIGN 3.2, HAUL-DESIGN 4.7). The native ceiling stays 125.
+
+- `SYS_ATTACH_9P` (13) reads **x5 flags**, under the #112 discipline: every
+  caller passes it, and the wrappers take it explicitly (libt
+  `t_attach_9p(tx, rx, aname, len, n_uname, flags)`, libthyla-rs the same
+  with `in("x5")`), so a stale caller cannot leave a register's garbage in
+  it silently. The one bit is `SYS_ATTACH_9P_CAPE` (0x2, mirrored as
+  `T_ATTACH_9P_CAPE` in both libraries): the session reports the attaching
+  principal as every file's owner and its primary gid as the group, keeps
+  the server's mode, and sends nothing identity-bearing. `SYS_ATTACH_9P_LOOSE`
+  (0x1) stays `SYS_ATTACH_9P_SRV`-only and is refused here with the flat -1,
+  like any unknown bit. Every in-tree caller was checked, and no sibling
+  tree (the Go port, the libc port, pouch's patches) issues the call raw.
+- `SYS_ATTACH_9P_SRV` (52) admits `SYS_ATTACH_9P_CAPE` in its x4 beside
+  LOOSE; a conn from a DMSRVCAPE service is caped whatever the word says.
+- `SYS_WALK_CREATE_DMSRVCAPE` (0x00800000, bit 23; libthyla-rs
+  `T_WALK_CREATE_DMSRVCAPE`) marks a `/srv` service post caped, and is
+  admitted ONLY beside `DMSRVBYTE`. `SYS_WALK_CREATE_DMSRV_BITS` (BYTE | BULK
+  | CAPE) is the derived mask all three refusals share -- the post branch's
+  "only DMSRV bits", and the fd-based and path-based creates' "no DMSRV bit
+  on a regular create" (-EINVAL) -- and `SYS_WALK_CREATE_PERM_VALID` derives
+  from it, so a fourth bit cannot reach one site and miss another. A static
+  assert pins that bit 23 collides with no other perm bit.
+- The rules live in two tested predicates beside
+  `sys_attach_9p_ends_are_pipes`: `sys_attach_9p_flags_ok(flags, srv)` and
+  `sys_srv_post_perm_ok(perm)` (`srv_client.cape_admission` drives both bit
+  by bit, including a bit above 32 that a truncation would lose).
+- Two handler inners joined `sys_open_create_kpath_for_proc` as
+  test-callable entries, the handler thinning to its user-copy:
+  `sys_walk_create_kname_for_proc` and `sys_attach_9p_srv_for_proc`. Their
+  checks repeat the handlers', so the syscall's answers and precedence are
+  unchanged ([[sub-kernel-syscall-dispatch]]).

@@ -10,9 +10,11 @@
 #include <thylacine/dev9p.h>
 #include <thylacine/errno.h>
 #include <thylacine/page.h>
+#include <thylacine/proc.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
 #include <thylacine/srvconn.h>
+#include <thylacine/syscall.h>
 #include <thylacine/types.h>
 
 #include "../arch/arm64/timer.h"
@@ -322,9 +324,17 @@ bool p9_attached_is_open(const struct p9_attached *a) {
 
 struct Spoor *srvconn_attach_dev9p_root(struct SrvConn *cn,
                                         const u8 *aname, size_t aname_len,
-                                        u32 n_uname, bool loose, int *out_err) {
+                                        const struct Proc *who, u32 flags,
+                                        int *out_err) {
     if (out_err) *out_err = 0;
-    if (!cn) { if (out_err) *out_err = -T_E_INVAL; return NULL; }
+    if (!cn || !who) { if (out_err) *out_err = -T_E_INVAL; return NULL; }
+    // A byte conn minted from a DMSRVCAPE service capes EVERY attach over it:
+    // its poster, the server's own side, declared the server's ids foreign
+    // (IDENTITY-DESIGN 3.2). Only a byte conn can carry that mark -- the cape's
+    // no-escalation argument rests on the attacher holding the raw transport,
+    // which a 9P-mode opener never does.
+    bool cape = (flags & SYS_ATTACH_9P_CAPE) != 0 ||
+                (srvconn_cape(cn) && __atomic_load_n(&cn->byte_mode, __ATOMIC_ACQUIRE));
 
     // The adapter wraps cn's c2s/s2c byte rings; its init takes ONE srvconn_ref.
     // Pre-init failures leave cn untouched (the caller decides on teardown);
@@ -361,7 +371,10 @@ struct Spoor *srvconn_attach_dev9p_root(struct SrvConn *cn,
         conn_msize,              // msize (client proposal; negotiated down)
         NULL, 0,                 // uname (empty; SO_PEERCRED is the live channel)
         aname_len > 0 ? aname : NULL, aname_len,
-        n_uname, &aerr);
+        // A-3 M4: the attacher's kernel-stamped principal; a caped attach names
+        // no user at all (IDENTITY-DESIGN 3.2 -- nothing identity-bearing
+        // crosses to a server whose ids are foreign).
+        cape ? PRINCIPAL_NONE : who->principal_id, &aerr);
     if (!att) {
         // Handshake failed (server unresponsive / deadline / Rlerror / OOM). The
         // adapter still holds its srvconn_ref; its close drops it AND tears cn
@@ -386,12 +399,14 @@ struct Spoor *srvconn_attach_dev9p_root(struct SrvConn *cn,
     // peer's pid (aname is often empty on the /srv path).
     p9_attached_set_ctl_ident(att, "srv", cn->peer_pid);
 
-    // B1 per-attach loose mode (I-38 opt-in): stamped on the still-private
-    // client BEFORE the root Spoor exists -- the caller's handle publication
-    // orders it against every subsequent dev9p op, so the plain bool needs no
-    // atomics and is never flipped after this point.
-    if (loose && att->client)
+    // B1 per-attach loose mode (I-38 opt-in) and the identity cape: stamped on
+    // the still-private client BEFORE the root Spoor exists -- the caller's
+    // handle publication orders them against every subsequent dev9p op, so the
+    // plain fields need no atomics and are never flipped after this point.
+    if ((flags & SYS_ATTACH_9P_LOOSE) && att->client)
         att->client->loose = true;
+    if (cape && att->client)
+        p9_client_set_cape(att->client, who->principal_id, who->primary_gid);
 
     // Transfer adapter ownership into the attached (tx == rx == NULL: the SrvConn
     // lifetime is the adapter's own srvconn_ref, not a transport-Spoor pair).

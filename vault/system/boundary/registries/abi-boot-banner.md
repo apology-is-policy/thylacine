@@ -22,6 +22,7 @@ mirrors:
   - "tools/interactive/ls-bghome-stall.exp"
   - "tools/interactive/ls-imperium.exp"
   - "tools/interactive/haul-post.exp"
+  - "tools/interactive/haul-cape.exp"
   - "tools/test.sh"
   - "tools/smp-multiboot.sh"
   - "tools/test-cross-reboot.sh"
@@ -83,7 +84,7 @@ literal-mentions:
   - "tools/warp-host.sh (a usage comment)"
   - "tools/interactive/go8d.exp (a prose note)"
 created: 2026-08-01
-updated: 2026-09-17
+updated: 2026-09-23
 ---
 ## The surface
 

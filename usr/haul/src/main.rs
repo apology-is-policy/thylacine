@@ -53,6 +53,14 @@
 // secrecy rests entirely on that scalar being unpredictable, so there is no
 // fallback source and no "degraded" mode: SYS_GETRANDOM (CAP_CSPRNG_READ) works
 // or haul refuses to connect.
+//
+// THE MOUNTER OWNS EVERY FILE (HAUL-DESIGN 4.7, IDENTITY-DESIGN 3.2). The server
+// reports the HOST's owners -- uid 501 / staff on a Mac -- and no Thylacine
+// principal is either, so the kernel's rwx check made every guest user "other"
+// and a private (0700/0600) export unreadable to the user who mounted it. Both
+// paths therefore cape the session: the direct mount passes T_ATTACH_9P_CAPE,
+// and --post posts its service DMSRVCAPE, so a plain `mount /srv/NAME` over it
+// is caped too. The server's per-file mode is kept.
 
 #![no_std]
 #![no_main]
@@ -70,7 +78,8 @@ use libthyla_rs::io::Read;
 use libthyla_rs::net::{Ipv4Addr, SocketAddrV4, TcpStream};
 use libthyla_rs::thread;
 use libthyla_rs::{
-    t_attach_9p, t_burrow_attach, t_close, t_mount, t_pipe, t_putstr, T_MREPL,
+    t_attach_9p, t_burrow_attach, t_close, t_mount, t_pipe, t_putstr, T_ATTACH_9P_CAPE,
+    T_MREPL,
 };
 
 #[global_allocator]
@@ -851,11 +860,11 @@ fn npxf_handshake(fd: i64, ready: Ready, token: &[u8]) -> Result<npxf::Session, 
 // Creation is the kernel capability gate. A failed post never dials the peer.
 fn post_listener(name: &str) -> Result<i64, &'static str> {
     use libthyla_rs::{t_open, t_walk_create, T_WALK_OPEN_FROM_ROOT, T_OPATH,
-                     T_OREAD, T_WALK_CREATE_DMSRVBYTE};
+                     T_OREAD, T_WALK_CREATE_DMSRVBYTE, T_WALK_CREATE_DMSRVCAPE};
     let srv = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv".as_ptr(), 4, T_OPATH) };
     if srv < 0 { return Err("cannot open /srv"); }
     let listener = unsafe { t_walk_create(srv, name.as_ptr(), name.len(), T_OREAD,
-                                          T_WALK_CREATE_DMSRVBYTE) };
+                                          T_WALK_CREATE_DMSRVBYTE | T_WALK_CREATE_DMSRVCAPE) };
     let _ = unsafe { t_close(srv) };
     if listener < 0 { return Err("cannot post service (requires imperium post, an unused name and a free service slot)"); }
     Ok(listener)
@@ -1003,6 +1012,7 @@ fn run(argv: Args) -> Result<(), &'static str> {
             args.aname.as_ptr(),
             args.aname.len(),
             0,
+            T_ATTACH_9P_CAPE,
         )
     };
     let _ = unsafe { t_close(c2s_wr) };

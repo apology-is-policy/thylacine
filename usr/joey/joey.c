@@ -10739,7 +10739,7 @@ int main(void) {
                     t_putstr("joey: viv-channel spawn diorama FAILED\n");
                     return 1;
                 }
-                long root = t_attach_9p(c2s_wr, s2c_rd, "/", 1, 0);
+                long root = t_attach_9p(c2s_wr, s2c_rd, "/", 1, 0, 0);
                 (void)t_close(c2s_wr);
                 (void)t_close(s2c_rd);
 

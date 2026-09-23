@@ -128,19 +128,25 @@ enum {
     // (Plan 9 pipes from SYS_PIPE), userspace creates two pipe pairs
     // and passes the matching write-end and read-end.
     //
-    // SYS_ATTACH_9P(tx_fd, rx_fd, aname_va, aname_len, n_uname)
+    // SYS_ATTACH_9P(tx_fd, rx_fd, aname_va, aname_len, n_uname, flags)
     //   x0 = tx_fd (client→server byte pipe)
     //   x1 = rx_fd (server→client byte pipe)
     //   x2 = aname_va (user-VA pointer to the attach name string)
     //   x3 = aname_len
-    //   x4 = n_uname (u32; 0 for no-auth attach at v1.0)
+    //   x4 = n_uname (u32; vestigial -- the kernel asserts the caller's
+    //        principal, or no user under the cape)
+    //   x5 = flags (SYS_ATTACH_9P_CAPE, the identity cape -- IDENTITY-DESIGN
+    //        3.2; unknown bits reject, LOOSE included. The #112 ABI
+    //        discipline: EVERY caller sets x5 -- the libt/libthyla-rs
+    //        wrappers take it as an explicit parameter)
     // Returns: x0 = new fd (>=0) on success; -1 on:
     //   - invalid tx_fd or rx_fd (not KOBJ_SPOOR / out-of-range)
     //   - missing RIGHT_READ on rx_fd / RIGHT_WRITE on tx_fd
     //   - aname_va outside user-VA bound / aname_len > SYS_ATTACH_ANAME_MAX
+    //   - an unknown flags bit
     //   - kmalloc OOM for adapter / p9_attached_create handshake failure
     //   - handle table full
-    SYS_ATTACH_9P   = 13,   // arg: tx_fd, rx_fd, aname_va, aname_len, n_uname
+    SYS_ATTACH_9P   = 13,   // arg: tx_fd, rx_fd, aname_va, aname_len, n_uname, flags
 
     // P5-mount-syscall: graft a Spoor's tree at a target path in the
     // caller's Territory mount table. The source Spoor can be ANY
@@ -1036,7 +1042,10 @@ enum {
     //                    asserts the single-writer premise for THIS attach
     //                    (docs/chase/B1-VOTE.md + the ARCH I-38 row); a
     //                    cached-open whose RPC-free hint fully hits then
-    //                    skips the per-open wire revalidation. Unknown
+    //                    skips the per-open wire revalidation.
+    //                    SYS_ATTACH_9P_CAPE capes the session
+    //                    (IDENTITY-DESIGN 3.2); a service posted DMSRVCAPE
+    //                    capes every attach over it regardless. Unknown
     //                    bits reject. The #112 ABI discipline: EVERY
     //                    caller sets x4 -- the libt/libthyla-rs wrappers
     //                    take it as an explicit parameter)
@@ -3024,6 +3033,13 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 // without the per-open wire revalidation (first touch / any hint miss
 // still wires; strict clients byte-unchanged). Unknown bits reject.
 #define SYS_ATTACH_9P_LOOSE   0x1u
+// SYS_ATTACH_9P (x5) + SYS_ATTACH_9P_SRV (x4): the identity cape
+// (IDENTITY-DESIGN 3.2, HAUL-DESIGN 4.7; operator vote 2026-09-23, "mounter
+// owns"). The session reports the ATTACHING principal as every file's owner
+// and its primary gid as the group, with the server's per-file mode kept; the
+// Tattach names no user, a create sends gid (u32)-1, and chown/chgrp are
+// refused. For a server whose ids are not Thylacine principals.
+#define SYS_ATTACH_9P_CAPE    0x2u
 
 // Maximum bytes transferred per SYS_READ / SYS_WRITE / SYS_PREAD /
 // SYS_PWRITE call. Userspace still loops for larger transfers (short
@@ -3195,7 +3211,7 @@ _Static_assert(SYS_WALK_OPEN_OAPPEND == 0x40u &&
 // sys_walk_create_handler; that branch is the ONLY place it is meaningful -- a
 // regular (non-/srv) create rejects it (it must not leak into a dev9p Tlcreate
 // perm). For a service post the valid perm bits are {0, DMSRVBYTE} |
-// {0, DMSRVBULK}.
+// {0, DMSRVBULK} | {0, DMSRVCAPE}, DMSRVCAPE only with DMSRVBYTE.
 #define SYS_WALK_CREATE_DMSRVBYTE   0x02000000u
 // DMSRVBULK (Thylacine extension; CF-3 B, CONCURRENT-FS.md): on a /srv
 // service post, selects the BULK ring class -- every connection minted on
@@ -3210,9 +3226,23 @@ _Static_assert(SYS_WALK_OPEN_OAPPEND == 0x40u &&
 // setsockopt(SO_SNDBUF/SO_RCVBUF >= 128 KiB) to this bit (stratumd's
 // listener setup is the consumer).
 #define SYS_WALK_CREATE_DMSRVBULK   0x01000000u
+// DMSRVCAPE (Thylacine extension; IDENTITY-DESIGN 3.2, HAUL-DESIGN 4.7): on a
+// /srv service post, capes every SYS_ATTACH_9P_SRV over the service (as if the
+// attacher had passed SYS_ATTACH_9P_CAPE). Admitted ONLY beside DMSRVBYTE: a
+// byte-mode attacher holds the raw transport, so the cape grants it nothing;
+// a 9P-mode opener never does. Only the POSTER can set it, and the poster is
+// the server's own side. Part of the service IDENTITY on a tombstone rebind,
+// like the mode and the ring class. Bit 23 is the next free bit below
+// DMSRVBULK. Like the other DMSRV bits it is meaningful ONLY on the
+// devsrv-post branch; a regular create rejects it.
+#define SYS_WALK_CREATE_DMSRVCAPE   0x00800000u
+// Every service-post bit: the one set a regular create refuses, so a new
+// DMSRV bit joins every refusal by joining this.
+#define SYS_WALK_CREATE_DMSRV_BITS  (SYS_WALK_CREATE_DMSRVBYTE | \
+                                     SYS_WALK_CREATE_DMSRVBULK | \
+                                     SYS_WALK_CREATE_DMSRVCAPE)
 #define SYS_WALK_CREATE_PERM_VALID  (0x1FFu | SYS_WALK_CREATE_DMDIR | \
-                                     SYS_WALK_CREATE_DMSRVBYTE | \
-                                     SYS_WALK_CREATE_DMSRVBULK)
+                                     SYS_WALK_CREATE_DMSRV_BITS)
 _Static_assert((SYS_WALK_CREATE_DMSRVBYTE &
                 (0x1FFu | SYS_WALK_CREATE_DMDIR)) == 0,
                "DMSRVBYTE must not collide with the mode bits or DMDIR");
@@ -3221,6 +3251,11 @@ _Static_assert((SYS_WALK_CREATE_DMSRVBULK &
                  SYS_WALK_CREATE_DMSRVBYTE)) == 0,
                "DMSRVBULK must not collide with the mode bits, DMDIR, or "
                "DMSRVBYTE");
+_Static_assert((SYS_WALK_CREATE_DMSRVCAPE &
+                (0x1FFu | SYS_WALK_CREATE_DMDIR |
+                 SYS_WALK_CREATE_DMSRVBYTE | SYS_WALK_CREATE_DMSRVBULK)) == 0,
+               "DMSRVCAPE must not collide with the mode bits, DMDIR, "
+               "DMSRVBYTE, or DMSRVBULK");
 
 // SYS_UNLINK flags: the only permitted bit at v1.0 is SYS_UNLINK_REMOVEDIR
 // (rmdir an empty directory vs unlink a non-directory). Mirrors the wire
@@ -3447,5 +3482,14 @@ void syscall_dispatch(struct exception_context *ctx);
 // the ACTUAL predicate the handler gates on, not a re-derivation.
 struct Spoor;
 bool sys_attach_9p_ends_are_pipes(const struct Spoor *tx, const struct Spoor *rx);
+
+// The identity cape's two admission predicates (defined in syscall.c;
+// non-static so the regressions exercise the handlers' own rules):
+//   - the flags word: SYS_ATTACH_9P takes SYS_ATTACH_9P_CAPE only (`srv`
+//     false); SYS_ATTACH_9P_SRV takes it and SYS_ATTACH_9P_LOOSE;
+//   - a /srv service post's perm (SYS_WALK_CREATE's devsrv branch): DMSRV
+//     bits only, and DMSRVCAPE only beside DMSRVBYTE.
+bool sys_attach_9p_flags_ok(u64 flags, bool srv);
+bool sys_srv_post_perm_ok(u32 perm);
 
 #endif // THYLACINE_SYSCALL_H

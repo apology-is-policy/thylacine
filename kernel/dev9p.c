@@ -741,8 +741,12 @@ static int dev9p_stat(struct Spoor *c, u8 *dp, int n) {
 // p9_attr -> struct t_stat conversion, shared by dev9p_stat_native (Tgetattr)
 // and dev9p_walk_attrs (the POUNCE Twalkgetattr per-component records — the
 // two paths MUST report identical shapes for the same server attrs, or the
-// pounce's X-search would diverge from the per-component loop's).
-static void t_stat_from_p9_attr(struct t_stat *out, const struct p9_attr *attr) {
+// pounce's X-search would diverge from the per-component loop's). It is also
+// the ONE place the identity cape applies: the Larder caches the converted
+// t_stat, and a cached-open's co_stat is a converted leaf, so every stat a
+// caped session serves passes through here.
+static void t_stat_from_p9_attr(struct t_stat *out, const struct p9_attr *attr,
+                                const struct p9_client *client) {
     for (size_t i = 0; i < sizeof(*out); i++) ((u8 *)out)[i] = 0;
     out->size      = attr->size;
     out->qid_path  = attr->qid.path;
@@ -762,8 +766,17 @@ static void t_stat_from_p9_attr(struct t_stat *out, const struct p9_attr *attr) 
     // Stratum fills BASIC, so this is dormant for the reference server; it makes
     // the A-3 dev9p enforcement (which reads these) sound against any server.
     if (attr->valid & P9_GETATTR_MODE) out->mode = attr->mode;
-    if (attr->valid & P9_GETATTR_UID)  out->uid  = attr->uid;
-    if (attr->valid & P9_GETATTR_GID)  out->gid  = attr->gid;
+    if (client->cape) {
+        // IDENTITY-DESIGN 3.2: the server's ids are foreign here, so the owner
+        // is the principal that attached and the group its primary group --
+        // whatever the server said, or left out. The mode stays the server's,
+        // under the same fail-closed rule as above.
+        out->uid = client->cape_uid;
+        out->gid = client->cape_gid;
+    } else {
+        if (attr->valid & P9_GETATTR_UID) out->uid = attr->uid;
+        if (attr->valid & P9_GETATTR_GID) out->gid = attr->gid;
+    }
 
     // D-1: the qid is the authority on symlink-ness -- it is what the RESOLVER
     // reads, so a server whose qid says QTSYMLINK gets its links expanded no
@@ -782,8 +795,8 @@ static void t_stat_from_p9_attr(struct t_stat *out, const struct p9_attr *attr) 
 
 // Native fstat surface (A-2a; IDENTITY-DESIGN.md §9.5) -> Stratum Tgetattr.
 // Fills *out from the server's Rgetattr. uid/gid are the server-reported owner
-// + group; for a per-user stratumd they are the connection's principal (A-3
-// completes per-user attribution). Unlike the .stat slot (the Plan 9 wire-stat,
+// + group (the cape's on a caped session); for a per-user stratumd they are the
+// connection's principal (A-3 completes per-user attribution). Unlike the .stat slot (the Plan 9 wire-stat,
 // still deferred), this is the metadata source the kernel rwx layer (A-2d) and
 // SYS_FSTAT consume. P9_GETATTR_BASIC covers mode/uid/gid/size/times/nlink.
 static int dev9p_stat_native(struct Spoor *c, struct t_stat *out) {
@@ -838,7 +851,7 @@ static int dev9p_stat_native(struct Spoor *c, struct t_stat *out) {
     int gr = p9_client_getattr(p->client, p->fid, P9_GETATTR_BASIC, &attr);
     if (gr != 0)
         return gr;
-    t_stat_from_p9_attr(out, &attr);
+    t_stat_from_p9_attr(out, &attr, p->client);
     // L1c populate (fs_cache.tla Refetch): install {attr, cvers} keyed by
     // qid.path; the seq0 gen guard skips it if an invalidate raced this getattr
     // (the populate-after-invalidate resurrection close -- larder.h note (2)).
@@ -1067,7 +1080,7 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
         w->qid[i].vers   = qids[i].version;
         w->qid[i].type   = qid_type_p9_to_kernel(qids[i].type);
         w->qid[i].pad[0] = w->qid[i].pad[1] = w->qid[i].pad[2] = 0;
-        t_stat_from_p9_attr(&sts[i], &attrs[i]);
+        t_stat_from_p9_attr(&sts[i], &attrs[i], src_priv->client);
         // L1c populate (free -- attrs already fetched): install each walked
         // component's attr keyed by its qid.path, with its content-version. A
         // getattr/walk_attrs qid carries the true si_cvers (never a readdir qid
@@ -1226,7 +1239,7 @@ static struct Spoor *dev9p_open_cached(struct Spoor *c, const char *const *names
         // during the RPC skips the install).
         u64 prev_path = c->qid.path;
         for (int i = 0; i < nname; i++) {
-            t_stat_from_p9_attr(&sts[i], &attrs[i]);
+            t_stat_from_p9_attr(&sts[i], &attrs[i], client);
             larder_attr_install(l, seq0, attrs[i].qid.path, attrs[i].qid.version,
                                 &sts[i]);
             larder_dentry_install(l, seq0, prev_path, names[i], name_lens[i],
@@ -1398,6 +1411,9 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
     u32 mode = perm & 0777u;
     struct p9_qid qid;
     u32 iounit = 0;
+    // IDENTITY-DESIGN 3.2: a caped session's group is the cape's; the server is
+    // told to leave its own alone.
+    if (p->client->cape) gid = P9_NOGID;
 
     if (perm & SYS_WALK_CREATE_DMDIR) {
         // Directory: Tmkdir leaves p->fid at the PARENT, so after creating
@@ -2207,6 +2223,10 @@ static int dev9p_wstat_native(struct Spoor *c, u32 valid, u32 mode,
                               u32 uid, u32 gid, u64 size) {
     struct dev9p_priv *p = priv_of(c);
     if (!p) return -1;
+    // IDENTITY-DESIGN 3.2: a caped session imposes its ownership, so chown and
+    // chgrp are refused before anything else happens (a write-behind flush
+    // included). chmod and truncate pass: the mode is the server's own.
+    if (p->client->cape && (valid & (T_WSTAT_UID | T_WSTAT_GID))) return -1;
     // FID-LIFECYCLE cached-open seam (section 3.3, documented + tested):
     // Tsetattr is fid-addressed and a fidless Spoor cannot late-bind (no
     // fid-from-qid op; a retained-path re-walk is rename-unsound), so

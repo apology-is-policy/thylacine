@@ -379,6 +379,12 @@ func TestHarnessIsNotOwedADossier(t *testing.T) {
 	if strings.Contains(out, "a NEW dossier is owed") {
 		t.Fatalf("a harness path was told a new dossier is owed:\n%s", out)
 	}
+	// The named few carry no harness suffix: the kernel suite's 9P fixtures.
+	for _, fx := range []string{"usr/stratumd-stub/stratumd-stub.c", "usr/stub-driver/stub-driver.c"} {
+		if !isHarness(fx) {
+			t.Fatalf("%s is a kernel-suite fixture, harness by the named list", fx)
+		}
+	}
 
 	// The control: an ordinary unowned program is still owed one -- and owed
 	// a DOSSIER, not a docs/reference section (frozen since 2026-09-06).

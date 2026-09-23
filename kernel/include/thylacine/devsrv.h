@@ -210,6 +210,12 @@ struct SrvService {
                                      // `mode` -- the F2 rebind discipline), so
                                      // an already-minted conn's geometry can
                                      // never disagree with a rebound poster.
+    bool           cape;             // the identity cape (a DMSRVCAPE post;
+                                     // IDENTITY-DESIGN 3.2): every attach
+                                     // over this service is caped. Byte mode
+                                     // only; set at srv_reserve and part of
+                                     // the IDENTITY on a tombstone rebind,
+                                     // like `mode` and `ring_msize`.
 
     // Accept backlog — a bounded FIFO ring of kernel-minted connections
     // awaiting SYS_SRV_ACCEPT. A client open enqueues one (holding a
@@ -357,7 +363,9 @@ int srv_registry_count(void);
 // class for every conn minted on this service (the default is
 // SRVCONN_MSIZE). The bulk class is bounded authority: the poster is
 // already MAY_POST_SERVICE-gated, and the per-conn cost is capped by the
-// two-point ring-class policy x SRV_MAX_CONNS.
+// two-point ring-class policy x SRV_MAX_CONNS. `cape` (the DMSRVCAPE bit)
+// capes every attach over the service (IDENTITY-DESIGN 3.2) and is refused
+// unless `mode` is SRV_MODE_BYTE.
 //
 // Gated on PROC_FLAG_MAY_POST_SERVICE — the SAME one-way joey-stamped gate
 // SYS_POST_SERVICE checks (CORVUS-DESIGN.md §6.1); an unmarked Proc gets -1.
@@ -376,7 +384,7 @@ int srv_registry_count(void);
 // create path; the handler branches to here and returns the hidx directly.
 int devsrv_post_listener(struct Proc *p, struct Spoor *root,
                          const char *name, size_t name_len, enum srv_mode mode,
-                         bool bulk);
+                         bool bulk, bool cape);
 
 // =============================================================================
 // Per-connection layer (P5-corvus-srv-impl-a3b).

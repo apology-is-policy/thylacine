@@ -377,7 +377,50 @@ ABI hygiene, then superseded). Against a trusted-local Stratum server this is
 inert — the live identity channel is `SO_PEERCRED` ([[sub-pouch-net]]) — so
 `n_uname` is forward-compat for a v1.x foreign server that honours it but has no
 peer-cred, gated behind a recorded trust-stamp seam
-([[seam-nuname-trust-stamp]]).
+([[seam-nuname-trust-stamp]]). Under the identity cape the attach asserts no
+identity at all: `n_uname` goes out as `PRINCIPAL_NONE` (next section).
+
+### The identity cape: one admission rule per word, a stamp before publication, two inners (2026-09-23)
+
+The cape (IDENTITY-DESIGN 3.2, HAUL-DESIGN 4.7) enters this file on two ABI
+words. `SYS_ATTACH_9P` and `SYS_ATTACH_9P_SRV` take an x5 `flags` word, and
+every caller passes it (the #112 discipline). `sys_attach_9p_flags_ok(flags,
+srv)` is the one rule: `SYS_ATTACH_9P_CAPE` on both handlers, the per-attach
+`LOOSE` opt-in on the `/srv` attach alone, and every other bit refused with the
+bare -1 before any handle lookup. On the create word the three service-post
+bits share one derived mask, `SYS_WALK_CREATE_DMSRV_BITS`:
+- the `/srv` post branch admits a perm only through `sys_srv_post_perm_ok`:
+  nothing outside the mask, and `DMSRVCAPE` only beside `DMSRVBYTE`, because a
+  byte-mode attacher holds the raw transport and a 9P-mode opener never does;
+- the fd create and the path create refuse any of the bits with `-EINVAL`
+  before a Dev sees the perm.
+
+A new service bit joins the mask once, and all three sites follow.
+
+The pipe handler decides its cape itself, in this order:
+1. `n_uname` goes to `p9_attached_create` as `PRINCIPAL_NONE`, because the
+   Tattach happens inside the create;
+2. `p9_client_set_cape(principal_id, primary_gid)` stamps the still-private
+   client;
+3. only then does `p9_attached_root_spoor` publish the root.
+
+No stat can run on the session before the stamp, and the Larder is per-client,
+so nothing uncaped is ever cached for it. The `/srv` handler passes its flags
+through, and [[sub-kernel-ninep-attach]]'s `srvconn_attach_dev9p_root` decides
+there, because a caped byte connection capes an attach that passed no flag.
+
+Two handlers thin to inners so the cape's refusals are testable without EL0, in
+the `sys_open_create_kpath_for_proc` pattern:
+- `sys_attach_9p_srv_for_proc` takes a kernel aname. The handler copies it
+  first; every refusal before the attach is the bare -1, so moving the copy
+  ahead of them changes no answer.
+- `sys_walk_create_kname_for_proc` takes a kernel name NUL-terminated at its
+  length and repeats the handler's checks. A kernel caller meets the same
+  refusals; a syscall already passed them, so its precedence is unchanged.
+
+Both keep their gates in the inner, as the first Prosecution rule requires.
+Tests: `dev9p.walk_create_refuses_dmsrv_bits`, `srv_client.cape_post_syscall`,
+and the `/srv` legs of `9p_srvconn_transport.cape_attach`.
 
 ### SYS_WSTAT is the third FS identity gate, and it splits metadata from content
 
@@ -905,6 +948,10 @@ the consumer-side Go len==0 divergence. The Dev-half `seekable` flag stays with
 [[sub-kernel-ninep-dev9p]]; the ABI numbers with [[sub-kernel-syscall-abi]]; the
 `wstat_native`/`perm_enforced` pin with [[sub-kernel-dev]]; SYS_WSTAT #47 was
 already folded above.
+
+2026-09-23 (L), the identity cape: the x5 flags word and its predicate, the
+DMSRV mask and `sys_srv_post_perm_ok`, the pipe handler's stamp order, and the
+two inners (the section above).
 
 ## A diagnostic on this path emits ONE unit, never a run of `uart_*` calls (2026-08-18)
 

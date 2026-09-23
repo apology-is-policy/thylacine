@@ -15,6 +15,31 @@ The Phase 7 entry decision (taken under the U-1 scripture conversation):
 - **Runtime**: native libthyla-rs (the Plan 9 split — see `docs/ARCHITECTURE.md §3.5` + `CLAUDE.md` "Native vs ported userspace programs").
 - **Workspace**: Cargo workspace at `usr/utopia/`; Helix vendored separately at `usr/helix/`.
 
+## Haul identity cape — 2026-09-23 (aux-3; audit round pending)
+
+The operator's Lantern-over-Haul run got "permission denied" on a private Mac
+tree (0700/0600). dev9p checked access against the host's owners (uid 501,
+group staff), which no Thylacine principal holds, so every guest user was
+"other". Operator vote "mounter owns" (HAUL-DESIGN 4.7, IDENTITY-DESIGN 3.2;
+scripture `d10d1ff5`). Built on aux-3:
+- The cape rides the 9P session: owner = the attaching principal, group = its
+  primary gid, the server's per-file mode kept. It is applied at dev9p's one
+  attribute conversion and in Loom's GETATTR copy, and stamped before the root
+  publishes. The Tattach names no user, a create sends no group, and chown and
+  chgrp are refused before the wire. Kernel DAC stays on.
+- ABI (additive, voted): `SYS_ATTACH_9P` gains an x5 flags word, which every
+  caller passes; `SYS_ATTACH_9P_CAPE` on both attach syscalls; `DMSRVCAPE`
+  (bit 23) on a byte-mode `/srv` post; one derived DMSRV mask behind every
+  refusal.
+- haul capes both paths, so a plain `mount /srv/NAME` of a `--post` service is
+  caped with no option.
+
+Verified: kernel suite 1653/1653 (default image); 30 kernel sabotages, each
+caught by the test meant for it; device gate `haul-cape` (its own npxf, a
+0700/0600 export) PASS, and FAIL with the operator's EACCES under both device
+sabotages. Pending: the Fable audit round, the fold into one commit, the push.
+Enqueued: (S), the "9p: op abandoned" line at the end of every Haul session.
+
 ## Haul completion integration — 2026-09-17
 
 The operator authorized bringing Haul's required Imperium dependencies into

@@ -24,10 +24,18 @@
 // probe can be ported.
 //
 // Sequence:
-//   1. t_attach_9p(0, 1, "/", 1, 0) → drives Tversion + Tattach
-//      handshake against the kernel responder; returns
+//   0. the flags word (x5): t_attach_9p with LOOSE (a /srv-only bit)
+//      and with an unknown bit must both fail -- before anything
+//      reaches the wire (the kernel test counts one Tattach).
+//   1. t_attach_9p(0, 1, "/", 1, 0, T_ATTACH_9P_CAPE) → drives Tversion +
+//      Tattach handshake against the kernel responder; returns
 //      attach_fd (KOBJ_SPOOR pointing at the 9P tree's root,
-//      backed by dev9p with attached_owner set).
+//      backed by dev9p with attached_owner set). The session is
+//      CAPED (IDENTITY-DESIGN 3.2): t_fstat on the root reports THIS
+//      Proc as owner and group, whatever ids the server reports (the
+//      kernel responder says 501:20, a Mac's; the stratumd-stub run
+//      reuses this probe against its own). The mode-kept half is the
+//      kernel tests' (dev9p.cape, 9p_client.loom_cape).
 //   2. t_mount(attach_fd, 99, 0) → grafts at target_path_id 99
 //      in the Proc's Territory mount table. Mount-table entry
 //      holds its own spoor_ref on the dev9p Spoor.
@@ -57,10 +65,35 @@ int main(void) {
 
     static const char aname[] = "/";
 
-    long attach_fd = t_attach_9p(tx_fd, rx_fd, aname, 1, 0);
+    if (t_attach_9p(tx_fd, rx_fd, aname, 1, 0, 0x1ul) >= 0) {
+        t_putstr("attach-probe: a pipe attach admitted LOOSE\n");
+        return 2;
+    }
+    if (t_attach_9p(tx_fd, rx_fd, aname, 1, 0, 0x4ul) >= 0) {
+        t_putstr("attach-probe: an unknown flags bit was admitted\n");
+        return 3;
+    }
+
+    long attach_fd = t_attach_9p(tx_fd, rx_fd, aname, 1, 0, T_ATTACH_9P_CAPE);
     if (attach_fd < 0) {
         t_putstr("attach-probe: t_attach_9p FAIL\n");
         return 1;
+    }
+
+    // This Proc is an rfork child of the kernel test's kproc, so it carries
+    // the TCB identity; the cape reports it as the owner of the whole tree.
+    struct t_stat st;
+    if (t_fstat(attach_fd, &st) != 0) {
+        t_putstr("attach-probe: t_fstat on the caped root FAIL\n");
+        return 4;
+    }
+    if (st.uid != T_PRINCIPAL_SYSTEM) {
+        t_putstr("attach-probe: the caped root is not owned by the attacher\n");
+        return 5;
+    }
+    if (st.gid != T_GID_SYSTEM) {
+        t_putstr("attach-probe: the caped root's group is not the attacher's\n");
+        return 6;
     }
 
     // stalk-2: mount is path-keyed. The kernel test thunk chrooted us to a

@@ -136,6 +136,7 @@ static void srv_clear_locked(struct SrvService *e) {
     e->poster_stripes = 0;
     e->poster_pid     = 0;
     e->ring_msize     = 0;
+    e->cape           = false;
     e->backlog_head   = 0;
     e->backlog_tail   = 0;
     e->backlog_count  = 0;
@@ -289,7 +290,7 @@ u64 srv_registry_total_destroyed(void) { return __atomic_load_n(&g_srv_registry_
 // srv_reserve binds the boot registry (the retained syscall path).
 static int srv_reserve_in(struct SrvRegistry *reg,
                           const char *name, u8 name_len, struct Proc *poster,
-                          enum srv_mode mode, u32 ring_msize,
+                          enum srv_mode mode, u32 ring_msize, bool cape,
                           struct SrvService **svc_out, enum srv_state *prior_out) {
     if (!reg)                                              return -1;
     if (!name || name_len == 0 || name_len > SRV_NAME_MAX) return -1;
@@ -344,6 +345,7 @@ static int srv_reserve_in(struct SrvRegistry *reg,
         e = recycle;
         e->mode = mode;
         e->ring_msize = ring_msize;
+        e->cape = cape;
     }
     if (cap_post && !e && cap_slots >= SRV_CAP_SLOTS) {
         spin_unlock_irqrestore(&reg->lock, s);
@@ -375,6 +377,13 @@ static int srv_reserve_in(struct SrvRegistry *reg,
         // geometry (and the kernel client's msize proposal) disagree with
         // its serve buffers. A class change requires a different name.
         if (e->ring_msize != ring_msize) {
+            spin_unlock_irqrestore(&reg->lock, s);
+            return -1;
+        }
+        // The cape is identity for the same reason: a client mid-connect
+        // captured it alongside the mode, and its attach must be caped exactly
+        // when the poster it lands with posted the service caped.
+        if (e->cape != cape) {
             spin_unlock_irqrestore(&reg->lock, s);
             return -1;
         }
@@ -411,6 +420,7 @@ static int srv_reserve_in(struct SrvRegistry *reg,
     e->poster_pid     = poster->pid;
     e->mode           = mode;
     e->ring_msize     = ring_msize;
+    e->cape           = cape;
     *svc_out = e;
 
     spin_unlock_irqrestore(&reg->lock, s);
@@ -466,11 +476,12 @@ void srv_abort(struct SrvService *svc, enum srv_state prior) {
 // close), so handle_release_obj's KOBJ_SRV case is a no-op for it.
 int devsrv_post_listener(struct Proc *p, struct Spoor *root,
                          const char *name, size_t name_len, enum srv_mode mode,
-                         bool bulk) {
+                         bool bulk, bool cape) {
     if (!p)                                              return -1;
     if (!name)                                           return -1;
     if (name_len == 0 || name_len > SRV_NAME_MAX)        return -1;
     if (mode != SRV_MODE_9P && mode != SRV_MODE_BYTE)    return -1;
+    if (cape && mode != SRV_MODE_BYTE)                   return -1;
     u32 ring_msize = bulk ? SRVCONN_BULK_MSIZE : SRVCONN_MSIZE;
 
     // The parent MUST be a devsrv root Spoor whose aux is a SrvRegistry. The
@@ -497,7 +508,7 @@ int devsrv_post_listener(struct Proc *p, struct Spoor *root,
     // LIVE until the handle below exists).
     struct SrvService *svc = NULL;
     enum srv_state     prior = SRV_STATE_FREE;
-    if (srv_reserve_in(reg, name, (u8)name_len, p, mode, ring_msize,
+    if (srv_reserve_in(reg, name, (u8)name_len, p, mode, ring_msize, cape,
                        &svc, &prior) != 0)
         return -1;
 
@@ -930,6 +941,7 @@ struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode) {
     u64           poster_stripes, generation;
     enum srv_mode service_mode;
     u32           ring_msize;
+    bool          service_cape;
     {
         irq_state_t ls = spin_lock_irqsave(&reg->lock);
         bool live      = (svc->state == SRV_STATE_LIVE) &&
@@ -939,6 +951,7 @@ struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode) {
         service_mode   = svc->mode;
         ring_msize     = svc->ring_msize;   // CF-3 B: the conn's ring class,
                                             // captured atomically with LIVE
+        service_cape   = svc->cape;         // the identity cape, likewise
         spin_unlock_irqrestore(&reg->lock, ls);
         if (!live) return NULL;
     }
@@ -951,6 +964,7 @@ struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode) {
                                         ring_msize);
     if (!cn) return NULL;
     if (service_mode == SRV_MODE_BYTE) srvconn_set_byte_mode(cn);
+    if (service_cape)                  srvconn_set_cape(cn);
 
     // A 2nd ref for the accept-backlog slot; the push re-validates LIVE atomically.
     srvconn_ref(cn);
@@ -988,9 +1002,12 @@ struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode) {
     // The blocking handshake runs lock-free here; the poster (corvus), woken
     // above, accepts + responds concurrently. On any failure the conn is torn
     // down so the poster's accept sees a dead conn.
+    // Strict and uncaped: the cape's no-escalation argument rests on the
+    // attacher holding the raw transport, which a 9P-mode opener never does
+    // (a DMSRVCAPE post is byte-mode only, so none reaches here).
     int err = 0;
-    struct Spoor *root = srvconn_attach_dev9p_root(cn, NULL, 0, p->principal_id,
-                                                   /*loose=*/false, &err);
+    struct Spoor *root = srvconn_attach_dev9p_root(cn, NULL, 0, p, /*flags=*/0,
+                                                   &err);
     if (!root) {
         srvconn_teardown(cn);      // idempotent (the helper may already have torn it)
         srvconn_unref(cn);         // drop the create ref; the poster drains the backlog ref

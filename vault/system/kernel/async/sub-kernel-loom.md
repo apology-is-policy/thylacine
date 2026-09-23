@@ -150,7 +150,10 @@ The gate now does what the sync twins do:
 - refuse the six ops on an SQPOLL ring (`-EOPNOTSUPP`) before any stat, because
   the poll thread must never block on a wire RPC;
 - resolve a create's gid: 0 means the primary group, anything else goes through
-  the chgrp rule of `perm_wstat_check`, and the wire carries the resolved value;
+  the chgrp rule of `perm_wstat_check`, and the wire carries the resolved value.
+  On a caped session (IDENTITY-DESIGN 3.2) 0 goes out as `P9_NOGID`, so the
+  server keeps its own group, and a named gid, even the primary one, is a chgrp
+  the cape refuses (`-EACCES`);
 - send a create's mode as its rwx bits only (`MKNOD` keeps its type), as the
   sync create does, so a create cannot plant the setuid, setgid or sticky bits
   that `SYS_WSTAT` refuses;
@@ -166,6 +169,14 @@ checked against the server's own count of what reached it;
 `9p_client.loom_dirmut_names` holds the name rule.
 `9p_client.loom_dirmut_sqpoll` and `9p_client.loom_create_gid` hold the other
 rules; the last also reads the create mode off the wire.
+
+The parent's DAC needs nothing extra under the cape: the stat it checks comes
+through dev9p's one conversion, which already reports the cape's owner.
+`GETATTR` is the one place Loom hands userspace the server's attributes
+directly, so its completion copy applies the cape itself: the cape's uid and gid
+replace the server's and are marked valid, as the kernel's own stat reports
+them. Userspace sees the owner the kernel's DAC enforces.
+`9p_client.loom_cape` holds both rules.
 
 ### Back-pressure at submit, not at completion
 
@@ -601,4 +612,5 @@ consumer.
 
 [[chg-2026-08-02-async-sweep]], [[chg-2026-08-16-loom-charge-ledger]],
 [[chg-2026-08-16-loom-backstop-closed]] (the thread-ledger backstop, and the
-one-line fix that would have leaked).
+one-line fix that would have leaked). 2026-09-23 (L): the identity cape's two
+Loom rules (the caped `GETATTR` copy; the caped create gid).

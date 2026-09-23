@@ -80,6 +80,7 @@ void test_9p_client_loom_mutation_rejects(void);
 void test_9p_client_loom_dirmut_dac(void);
 void test_9p_client_loom_dirmut_sqpoll(void);
 void test_9p_client_loom_create_gid(void);
+void test_9p_client_loom_cape(void);
 void test_9p_client_loom_dirmut_names(void);
 
 // File-scope buffers (kernel test stack is 16 KiB — client struct is
@@ -2563,11 +2564,13 @@ static void loom_cap_name(u8 *dst, u32 *dlen, const u8 *src, u32 n) {
 #define LOOM_GA_OTHER_UID 0xAAAAu
 static bool g_loom_ga_on, g_loom_ga_fail;
 static u32  g_loom_ga_mode, g_loom_ga_uid, g_loom_ga_gid;
+static u64  g_loom_ga_valid_clear;   // valid bits the Rgetattr leaves out
 static u32  g_loom_ga_deny_fid = P9_NOFID;
 static u32  g_loom_wire_mut, g_loom_wire_gid, g_loom_wire_mode;
 static void loom_ga_reset(void) {
     g_loom_ga_on = g_loom_ga_fail = false;
     g_loom_ga_mode = g_loom_ga_uid = g_loom_ga_gid = 0;
+    g_loom_ga_valid_clear = 0;
     g_loom_ga_deny_fid = P9_NOFID;
     g_loom_wire_mut = 0;
     g_loom_wire_gid = 0xDEADBEEFu;
@@ -2644,6 +2647,8 @@ static int loom_mut_capture_responder(void *ctx, const u8 *req, size_t req_len,
                          T_S_IFDIR | (deny ? 0700u : g_loom_ga_mode));
             loom_wr_le32(resp + P9_HDR_LEN + 25, deny ? LOOM_GA_OTHER_UID : g_loom_ga_uid);
             loom_wr_le32(resp + P9_HDR_LEN + 29, deny ? LOOM_GA_OTHER_UID : g_loom_ga_gid);
+            u64 v = loom_rd_le64(resp + P9_HDR_LEN) & ~g_loom_ga_valid_clear;
+            for (int i = 0; i < 8; i++) resp[P9_HDR_LEN + i] = (u8)(v >> (8 * i));
             return n;
         }
         if (type == P9_TMKDIR && req_len >= (size_t)P9_HDR_LEN + 6) {
@@ -3231,6 +3236,88 @@ void test_9p_client_loom_create_gid(void) {
     loom_ga_reset();
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);
+}
+
+// One GETATTR on handle 0 into buffer 0 at `off`; returns the CQE result.
+static s32 loom_ga_submit(struct Loom *l, u64 off) {
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+    u32 tail = __atomic_load_n(&h->sq_tail, __ATOMIC_ACQUIRE);
+    cl_stage_rw(l, tail & h->sq_mask, LOOM_OP_GETATTR, /*handle=*/0, P9_GETATTR_BASIC,
+                (u32)sizeof(struct p9_attr), /*bidx=*/0, off, 0x6A77000000000000ULL | tail);
+    __atomic_store_n(&h->sq_tail, tail + 1u, __ATOMIC_RELEASE);
+    u32 ct = __atomic_load_n(&h->cq_tail, __ATOMIC_ACQUIRE);
+    (void)loom_enter(l, 1, 1, 0);
+    if (__atomic_load_n(&h->cq_tail, __ATOMIC_ACQUIRE) == ct) return 0x7FFFFFFF;
+    s32 r = cqes[ct & h->cq_mask].result;
+    __atomic_store_n(&h->cq_head, ct + 1u, __ATOMIC_RELEASE);
+    return r;
+}
+
+// The identity cape (IDENTITY-DESIGN 3.2) on the Loom surface. The directory is
+// the operator's failing case: a private 0700 one owned by a HOST's ids (501:20,
+// a Mac's). Uncaped, it refuses the guest creator and GETATTR reports the host's
+// owner; caped, the parent check reads the caped stat, a create sends P9_NOGID
+// and refuses a named group (a chgrp, which the cape refuses), and GETATTR hands
+// userspace the caped owner, marked valid even when the server left it out.
+void test_9p_client_loom_cape(void) {
+    for (int caped = 0; caped <= 1; caped++) {
+        loom_ga_reset();
+        loom_ga_dir(0700u, 501u, 20u);
+        struct Spoor *root = loom_mut_open();
+        TEST_ASSERT(root != NULL, "capture client + root");
+        if (caped) p9_client_set_cape(&g_client, 0x1234u, 0x5678u);   // before any stat
+        struct Loom *l = loom_create(8, 16);
+        TEST_ASSERT(l != NULL, "loom_create");
+        loom_install_test_handle(l, 0, root, RIGHT_READ | RIGHT_WRITE);
+        struct Burrow *b; u8 *bkva;
+        loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
+        const char *nm = "abcdef";
+        for (u32 i = 0; i < 6; i++) bkva[i] = (u8)nm[i];
+        struct Proc *who = loom_test_ident(l, 0x1234u, 0x5678u, 0);
+        TEST_ASSERT(who != NULL, "bind the creator (the mounter)");
+        struct p9_attr *a = (struct p9_attr *)(bkva + 512);
+
+        if (!caped) {
+            DM_MKDIR(l, -(s32)T_E_ACCES, "uncaped: a host-owned 0700 dir refuses the guest");
+            TEST_EXPECT_EQ((u64)loom_ga_submit(l, 512), (u64)sizeof(struct p9_attr),
+                           "uncaped GETATTR");
+            TEST_EXPECT_EQ((u64)a->uid, (u64)501u, "uncaped GETATTR: the host's uid");
+            TEST_EXPECT_EQ((u64)a->gid, (u64)20u, "uncaped GETATTR: the host's gid");
+        } else {
+            DM_MKDIR(l, 0, "caped: the mounter owns the dir");
+            TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)P9_NOGID,
+                           "caped MKDIR: the server keeps its own group");
+            g_loom_wire_gid = 0xDEADBEEFu;
+            loom_dm_leg(l, LOOM_OP_MKDIR, 3, 0, 0755u, 0x5678u, 0, -(s32)T_E_ACCES,
+                        "caped: naming a group, even the primary, is a refused chgrp");
+            TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)0xDEADBEEFu, "no create carried it");
+            DM_SYMLINK(l, 0, "caped SYMLINK");
+            TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)P9_NOGID, "caped SYMLINK: gid (u32)-1");
+            DM_MKNOD(l, 0, "caped MKNOD");
+            TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)P9_NOGID, "caped MKNOD: gid (u32)-1");
+            DM_UNLINKAT(l, 0, "caped UNLINKAT: the owner's W|X");
+
+            g_loom_ga_valid_clear = P9_GETATTR_UID | P9_GETATTR_GID;
+            TEST_EXPECT_EQ((u64)loom_ga_submit(l, 512), (u64)sizeof(struct p9_attr),
+                           "caped GETATTR");
+            g_loom_ga_valid_clear = 0;
+            TEST_EXPECT_EQ((u64)a->uid, (u64)0x1234u, "caped GETATTR: the mounter's uid");
+            TEST_EXPECT_EQ((u64)a->gid, (u64)0x5678u, "caped GETATTR: the mounter's gid");
+            TEST_EXPECT_EQ((u64)(a->valid & (P9_GETATTR_UID | P9_GETATTR_GID)),
+                           (u64)(P9_GETATTR_UID | P9_GETATTR_GID),
+                           "caped GETATTR: the owner marked valid though the server left it out");
+            TEST_EXPECT_EQ((u64)a->mode, (u64)(T_S_IFDIR | 0700u), "caped GETATTR: the server's mode");
+        }
+
+        burrow_unref(b);
+        loom_unref(l);
+        spoor_clunk(root);
+        loom_test_ident_drop(who);
+        loom_ga_reset();
+        p9_client_destroy(&g_client);
+        p9_loopback_destroy(&g_loopback);
+    }
 }
 
 // LOOM.md 8.5.1 (audit F1): a mutation op's names get the sync twins' component
