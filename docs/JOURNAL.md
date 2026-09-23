@@ -22,6 +22,115 @@ needed the operator.
 
 
 ---
+## 2026-09-23, late morning (aux, Opus 5.5 1M, effort max) -- a name read as the shell reads it, and quoted after the prefix, not before
+
+Picked up after a self-compaction at `8ecb299a`, queue item 0b-a: Tab completion
+inserted file names byte for byte.
+
+**Three failing tests came first.** A file called `my file` completed to
+`cat my file `, which the lexer reads as two words; and a name holding an ESC
+put the raw byte into the line (`esc\u{1b}[31mred`), from where the editor,
+which draws its line verbatim, hands it to the terminal. The third,
+`a_completed_name_reads_back_as_that_name`, drives 27 awkward names -- a space,
+a quote, each glob meta, `$`, `;`, `|`, `&`, `#` first and inside, `~`, `!`,
+`=`, `^`, the brackets and braces, a backtick, a backslash, a tab, a newline --
+through Tab and then through the REAL lexer, and requires each to come back as
+one word whose value is the name: no operator, no comment eating the rest, no
+glued neighbour, no glob.
+
+**The design note I left myself was wrong in its one load-bearing sentence.**
+It said to quote the names and then take the common prefix, "since quoting
+changes it". Working a single example before writing code showed the reverse:
+spelled, `'abc 2' ` and `abc1 ` share nothing, though both names begin `abc`; and
+with backslash quoting, `a\ b` and `a\!c` share `a\`, half an escape, which
+would turn the line into a continuation. The prefix has to come from the NAMES
+and then be spelled -- readline's order (dequote, match, prefix, quote). That
+moved the prefix out of the engine altogether: the engine had computed it from
+the candidates, and spelled candidates are the wrong input. `Completions` lost
+the `Extent` that landed two commits earlier (`e306e275`) and now carries the
+source's `extension` and `unlisted`; the engine only applies what it is handed.
+`the_engine_takes_no_prefix_from_the_inserted_texts` pins it: two candidates that
+spell-share `'my file` and a source that says "no extension" must open the menu.
+
+**Single quotes, not bash's backslashes, and the reason turned up a defect.**
+The heritage quotes names whole with rc quotes (Plan 9's `%q`); scripture
+documents `'...'` and `"..."` and never mentions a backslash inside a bare word;
+bash, zsh and fish backslash-escape. Checking whether a backslash would even
+work found that it would not: `scan_word` turns `\*` into a bare `*`, and eval's
+`glob_candidate` gates on `has_meta(text)` after the escape is gone -- so `\*`
+still globs. By reading `evaluate_argv`, `rm \*` removes every file in the
+directory. That is not completion's defect and it is not fixed here; it is
+queued next and recorded as an OPEN caveat in `sub-utopia-parser`. Single quotes
+are correct today regardless of it.
+
+**The word has to be read the way the lexer reads it, and the lexer cannot read
+it.** Completion found its word by the last blank before the cursor -- wrong the
+moment a name holds a space, and blind to operators (`ls|gr<TAB>` offered
+nothing). The lexer is built for complete input and errors on an open quote,
+which is most of what completion sees. So `word_at` is a second scanner over the
+same grammar, sharing the lexer's character predicates (made `pub(crate)`) and
+pinned to it by `word_at_agrees_with_the_lexer` on complete lines. It found one
+thing I would have got wrong: in ut, only `^`, `~` and `=` join adjacent pieces,
+so `$home/fo` is TWO words, and a reader that completed the second as a path
+would have completed the wrong word. It now answers nothing there, as the old
+code did by accident (its `read_dir("$home")` failed).
+
+**My own test was wrong once, and the code was right.** `echo $(cat my f<TAB>`
+failed to complete; the input was two words, `my` and `f`, and nothing begins
+with `f`. The test now types `'my f`.
+
+**Control characters.** A name holding one (other than tab and newline, which
+double quotes spell) has no form in ut at all, so it is counted among the
+`+N more` and never listed or inserted -- and it still bounds the prefix, which
+stops before the character: Tab never extends past a name it cannot write. The
+line's other raw path, a history file written by another program, is queued
+separately; completion was only one way in.
+
+**29 sabotages, all caught -- and planning them was worth as much as running
+them.** Writing the list found three mechanisms no test reached, fixed before
+the run: `quote_word`'s own refusal of a control character (unreachable, since
+both callers filter first), the cap holding only names it can list (300
+unspellable names sorting first would otherwise take every held place), and
+`))` closing arithmetic as one token. It also found `plain` re-excluding glob
+metas that `has_meta` already refuses; the duplicate went, leaving the glob
+matcher's own predicate as the one source. The run itself caught every break,
+but two landed on other tests than I predicted, and each prediction exposed a
+weak test. The control-character test named no tab or newline name, and a raw
+newline inside double quotes reads back correctly, so only the unit test saw
+that break. The nested-command test could not tell `echo` from `cat`, since both
+complete files. Both now discriminate; both sabotages re-caught.
+
+**Where it ran, and a lapse.** Main held the Mac for its B-1a SMP gate for the
+whole of this. I ran three single-crate test builds before checking presence --
+a lapse; they overlapped main's hold -- then held off, queued first for the Mac,
+and moved the rest to thyla-pi: the tree's tracked `usr/` shipped as a 4 MB
+tarball, the Pi's own vendored crates reused (libutopia's are all path crates).
+On its aarch64 Linux host libutopia ran 381 of 381, cold in 18 s, each sabotage
+rebuild about 5 s; the same tree built the four affected crates for
+`aarch64-unknown-none` with no new warnings. Still owed before the push, on the
+Mac: the whole-tree `tools/test-rust.sh` and an ls-ci boot.
+
+That landed as `7bc32cfe`.
+
+**aurora's nine dormant tests run (queue item 3, batched into the same gate
+round).** A bin-only `no_std` crate cannot build for a host, so `render`, `osd`
+and `config` carried tests marked "DORMANT". The standard split -- a lib of the
+three modules, the bin requiring a `backend` feature that holds libthyla-rs and
+libtapestry, only `config`'s `load`/`save` gated -- and all nine passed on their
+first execution. aurora's `main.rs` is named in the G-4 drain/feed trigger row;
+the change there is two lines of module declarations, so instead of an audit
+round the release binary is compared before and after, before the push.
+
+That landed as `c6badff4`.
+
+**The halcyond "one-line currency fix" was not one line.** Queue item 1 was
+"`sub-halcyond`'s purpose still says fontdue". `quaestor stale` put the dossier
+27 files and about 13,000 lines behind since 2026-09-17, and the vault's lint
+requires a fresh `updated:` on any edit -- so fixing the word would have dated
+the whole dossier current, the exact false claim the stale check exists to
+catch. Reverted; item 1 is a full currency sweep.
+
+---
 ## 2026-09-23, morning (aux, Opus 5.5 1M, effort max) -- the cap that bounded the wrong thing
 
 Picked up after a self-compaction at `f45b098b`, the queue's item 0: the
@@ -179,6 +288,8 @@ corrected: `view`'s point is a decode "whose death costs a shell line, not the
 whole-session compositor", not the "shell prompt" I first wrote. Reading the six
 also turned up a stale line in `sub-halcyond`, now mine: its purpose still names
 "the fontdue rasterizer", which TY-1 replaced with skrifa + zeno. Queued.
+
+That landed as `8ecb299a`.
 
 ## 2026-09-23, early morning (aux, Opus 5.5 1M, effort max) -- the gate that said "nothing is stranded", and the test it could not see running twice
 
