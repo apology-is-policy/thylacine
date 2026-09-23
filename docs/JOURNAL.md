@@ -22,6 +22,89 @@ needed the operator.
 
 
 ---
+## 2026-09-23 (main, Fable 5.1, effort max) -- the mprotect conversation, and what it turned out to be about
+
+The operator asked for the F3-F9 talk ("mprotect, dlopen etc., let's talk
+about it") and switched to Fable at max for it. Docs only this run; nothing
+built. The output is one scripture commit (this one) and eleven ratified votes.
+
+**The question that decided the shape was the operator's, not mine: "should
+mprotect be gated on a CAP, like JIT?"** The answer is no, and the argument is
+the same one that makes `CAP_JIT` right: a capability gates the CREATION of
+authority (bytes become code). Every use of `mprotect` in WebKit's own tree --
+read line by line in the sparse clone, not recalled -- is either an attenuation
+(guard pages, RELRO, the `WTFConfig` freeze) or a re-grant within what the
+mapping was minted with; neither creates authority and neither can reach X.
+Fuchsia draws exactly that line (`zx_vmar_protect` bounded by handle rights;
+execute needs the VMEX resource). A cap here would be ambient -- musl's
+`pthread_create` needs it for every thread -- which is the definition of
+not-a-capability. So the gate is structural: X is never a legal target of the
+call and no ceiling it can reach contains X.
+
+**The finding that decided monotone-vs-ceiling was in the source, not in the
+B-0 table.** B-0's F-list said WTF "ignores" `mprotect` failures -- true for
+guard pages. But release JavaScriptCore raises none -> RW inside its own
+reservations for resizable `ArrayBuffer` and shared Wasm memory
+(`ArrayBuffer.cpp:595/611`, `WasmMemory.cpp:234/378`), paths B-0's probes never
+ran. A reduce-only primitive would have needed an `mprotect` whose contract
+differed from its name -- the exact class of lie the last two chunks were about.
+Ceiling-bounded (Fuchsia / Mach) it is. The `StructureAlignedMemoryAllocator`
+raise is `ASSERT_ENABLED`-only; release uses `madvise`. Verified -- and the kind
+of detail that is wrong when remembered.
+
+**The scripture said two contradictory things, and both were era artifacts.**
+NOVEL.md 3.7 and ROADMAP still planned "an mprotect that rejects W^X-violating
+transitions" (Phase 2 / 5); ARCH 6.5, since `2fd9797`, said no `mprotect` at
+all. Neither described a system that had thought about {none, R, RW}.
+POUCH-DESIGN.md:239 had anticipated the exact syscall as "deferred to v1.x" --
+the browser is the forcing function, not the cause.
+
+**"The growable heap" was the operator naming a bar, not an item.** I read it
+as libthyla-rs's fixed 4 MiB `INITIAL_HEAP_SIZE` (the only "growable heap" in
+the tree; tripped over by #243, haul F8 and #120) and asked. The answer was
+the bar: production-comparable, never refused while free memory exists,
+relinquished memory returns, both substrates. Measured against it: four
+refusals with free memory (the 4 MiB heap; the 256 MiB default budget against
+a 2 GiB VM; the 256 MiB / 1 GiB reservation caps anchored to the flat uncharged
+`filepages` array; eager attach's contiguity -- rings only, not a bar issue)
+and three paths that keep pages (`mallocng`'s `MADV_FREE` inside a retained
+group -> ENOSYS; WebKit's decommit -> ENOSYS; the native allocator never trims).
+Decommit itself frees and uncharges (`burrow.c:1246`); whole-group `munmap`
+already works. Moving the I-32 default to RAM-minus-reserve is a scripture
+change and went to a vote rather than into a chunk.
+
+**dlopen: the operator took the non-recommended arm (design now), so it got
+the same treatment.** Prior art: Plan 9 static on purpose (Minnich's four
+reasons, 9p.io); Fuchsia's loader service hands libraries out as VMO handles;
+Genode's ldso IS the executable and takes ROM dataspaces; FreeBSD `fdlopen`.
+Tree: every kernel piece exists (D-2, D-3a/b, D-4) and every one is gated to
+`PHENO_LINUX` (`exec.c:1332`); no native file-map syscall; the driver pushes
+`-static`, non-PIE `ET_EXEC` (`Thylacine.cpp:25,44`); musl's static `dlopen` is
+a stub. The fit is the finding: `dlopen` is exec into the current address space
+and its security model is exec's (I-28 + the provenance rule) -- no new
+authority. Voted: dynamic Pouch (musl's real model), static by default, `.so`
+only for runtime-loaded objects + `libc.so`; the handle form designed, built
+with its first confined consumer.
+
+**Eleven votes; the record is
+`vault/record/decisions/dec-2026-09-23-memory-surface-and-loader.md` and
+browser-status.md "The B-1 decisions".** One reading of mine is recorded as
+such: the stack (8 MiB + an auxv extent) rode "design dlopen now as well" and
+was stated to the operator, not voted.
+
+**Sources that failed, and what stood in:** man.9front.org answered 402 (the
+9p.io copy served); the GNU Mach page 429'd twice (WebKit's own
+`WTFConfig.cpp:226`, "There's no going back now!", is the in-tree witness of
+`vm_protect(set_maximum)`); the seL4 api-doc page is x86-only (the ARM
+interface XML in the seL4 repo answered the remap semantics). Every prior-art
+claim in the scripture cites a fetched text or a file:line.
+
+Next: B-1a -- `burrow_reserve` + `burrow_protect` + `PROTECT_SEAL`,
+spec-first on `cow.tla` for the split x COW interaction; kernel;
+audit-bearing. The operator set max for THIS conversation; the arc's standing
+vote is xhigh, so B-1a's kernel work re-asks per the effort gate.
+
+---
 ## 2026-09-22, evening (main, Opus 5 1M, effort max) -- A-6: the libc that lied about who you are
 
 The identity chunk the operator ratified as option (B). Two commits so far --

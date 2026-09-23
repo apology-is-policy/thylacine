@@ -176,7 +176,9 @@ invention — the point is the keystone. Two genuinely novel realizations:
 ## 5. The toolchain shape (decisions)
 
 1. **Static-only, one multicall binary.** Native no-dynamic-linking stands
-   (REVENANT §7 conviction untouched). The device toolchain is the static
+   (REVENANT §7 conviction untouched). [AMENDED 2026-09-23: static-by-DEFAULT stands; dynamic
+   linking is an opt-in for programs that load code at runtime — ARCH §6.5
+   "Dynamic loading", B-1d. The multicall toolchain binary itself stays static.] The device toolchain is the static
    `llvm` multicall (clang + tools; lld in-or-beside per the CL-0 check) +
    a static `clangd`. One multicall = ONE REVENANT Image whose text every
    concurrent compile in a `make -j` storm shares — the RAM answer. Disk:
@@ -704,7 +706,7 @@ late gfx work (disjoint surfaces).
 |---|---|---|
 | F1 | Arc name "Clade" | adopted |
 | F2 | Pin LLVM 22.x (host parity) | adopted |
-| F3 | Static-only + llvm-driver multicall | adopted (lld membership verified at CL-0) |
+| F3 | Static-only + llvm-driver multicall | adopted (lld membership verified at CL-0); **static-only narrowed to static-by-default 2026-09-23** (ARCH §6.5 "Dynamic loading"; the driver learns `-shared` / PIE / `-dynamic-linker` at B-1d) |
 | F4 | I-32 vs toolchain RSS | **(b)** spawn-time page-budget under a global hard cap; default unchanged |
 | F5 | Mesa delivery = gallium OSMesa → weave → tpresent | adopted (re-confirm frontend at CL-0) |
 | F6 | Rust std tier = over pouch (ports tier) | adopted |
