@@ -4,7 +4,7 @@ type: chg
 title: "prowl-6 (the memory view): the TABLES column in /ctl/procs, every consumer moved with the layout, prowl's pool meter and footprint line, the manual's Processes and memory section"
 date: 2026-09-23
 arc: arc-boosty
-commits: ["*(pending)*"]
+commits: ["e501940d"]
 touched:
   - sub-kernel-devctl
   - sub-prowl
