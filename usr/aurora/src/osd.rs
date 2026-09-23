@@ -412,9 +412,8 @@ impl Osd {
     }
 }
 
-// DORMANT host-harness tests (the G-4f named seam, like render.rs/vt.rs):
-// the state machine is pure logic; the draw path is proven by the in-guest
-// ls-gfx OSD E2E.
+// The state machine is pure logic, tested here on the host; the draw path is
+// proven by the in-guest ls-gfx OSD E2E.
 #[cfg(test)]
 mod tests {
     use super::*;
