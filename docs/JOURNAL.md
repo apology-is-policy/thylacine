@@ -22,6 +22,77 @@ needed the operator.
 
 
 ---
+## 2026-09-23, morning (aux, Opus 5.5 1M, effort max) -- the cap that bounded the wrong thing
+
+Picked up after a self-compaction at `f45b098b`, the queue's item 0: the
+completion defect the new `ListDir` seam had made reproducible.
+
+**The failing tests came first, and the second one found what the dossier said
+was not there.** `tab_never_extends_past_a_match_the_cap_left_out` feeds a
+directory of 300 entries, 256 `fa…` then 44 `fb…`: Tab on `cat f` extended to
+`cat fa`, leaving every `fb` unreachable. `sub-utopia-interactive` had called
+command completion unaffected, because its index is sorted so the cap takes "a
+deterministic first 256". Deterministic is not correct: with `aa000`..`aa299`
+plus `ab` the first 256 share `aa` and the whole set shares only `a`.
+`a_sorted_command_index_is_not_safe_either` extended `a` to `aa`. The dossier's
+own next sentence -- "the first 256 of a sorted set can share a prefix the full
+set does not" -- was the counterexample to the sentence before it.
+
+**The design my resume note prescribed was not the one built, and the
+difference is the lesson.** The note said a truncated set cannot know its prefix,
+so it should not extend. True, and it would have fixed the bug -- by making Tab
+stop extending in every directory of more than 256 matches, a regression against
+every shell a user has used. The prescription kept the property that caused the
+defect ("the cap bounds the work") and argued for its own smallness around it.
+The prior art settled it in one pass: bash, zsh and Plan 9's `libcomplete` all
+read the whole directory and extend to the common prefix of all of it; zsh's
+`LISTMAX`, which the code named as its model, bounds only what is *listed*; and
+`docs/UT-NORA-ERGONOMICS.md` had specified this menu as "show N + ... M more"
+all along. The as-built had capped the matching and dropped the count.
+
+So the cap now bounds what is held. A `Gather` sees every match, keeps the first
+256 alphabetically in a max-heap, counts the rest, and tracks the greatest match;
+the longest common prefix of a set is that of its least and greatest members,
+and the least is always kept, so the prefix every match shares costs one extra
+string. `Completions` carries an `Extent` (`Complete` / `Truncated { unlisted,
+shared }`), the engine extends to `shared` for a truncated set and never takes a
+truncated set's lone listed candidate as unique, and the menu strip ends with
+`+N more`. A `no_std` shell cannot hold every name of a huge directory and
+survive an allocation failure, so bounding memory rather than the read is also
+where Thylacine improves on bash, which holds them all.
+
+**Ten sabotages; the first run caught nine, and the tenth was my test.** Not
+budgeting the count's columns passed `menu_strip_keeps_to_80_columns_with_the_count`,
+because its 19-column candidates fit the same three per window with or without
+the reserve: a green that never reached the bound it claims to check. It now also
+drives two-column candidates, which fill the window to within a column of the
+budget, and the sabotage fails it.
+
+**Moving the renderer freed two more stranded tests, and one false claim.** The
+strip renderer lived in the device-only `repl`, so its two tests had never run,
+while `u-repl-test` described it as "host-tested". It is `line_editor::menu_strip`
+now, with those two and two new ones running.
+
+**Reading the menu code turned up three more defects, queued, not folded in.**
+Completion inserts names unquoted, so `my file` completes to two words --
+confirmed by reading, and now a dossier caveat. Two more are only SUSPECTED and
+stay out of the dossier until measured: the strip is drawn with DECSC, `\r\n`,
+strip, DECRC, and at the bottom row the `\r\n` scrolls while DECSC's saved row
+does not move, so the restore may land on the strip line; and the strip assumes 80
+columns, so a narrow tile wraps it and the one-line clear leaves the rest. Also
+queued as the next chunk: seven of the eight `u-*` device probes have no owning
+dossier, and `u-test` alone spans libthyla-rs, the editor, the parser and eval.
+
+**Posture**: libutopia **351 passed** on the host (from 338); `tools/test-rust.sh`
+**1,853 distinct tests / 26 crates / 0 failing / 1 quarantined / 0 warnings; 78
+STRANDED in 2 crates** (libutopia 69, aurora 9). **ls-ci PASS 37 s on this
+change's own image** (`--config ci`), the guest log carrying `u-test: all OK`
+(its line-editor flow now asserts `unlisted == 0`) and `u-repl-test: D4 menu
+completion OK`. Device workspace build clean, no new warnings. quaestor lint 1,270
+notes, 0 fail. The Mac hold lasted six minutes, and main was queued behind it.
+
+---
+
 ## 2026-09-23, early morning (aux, Opus 5.5 1M, effort max) -- the gate that said "nothing is stranded", and the test it could not see running twice
 
 The operator asked how the run got from lantern to the Utopia tests. I answered

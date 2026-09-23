@@ -29,6 +29,15 @@
 // the terminator always falls AFTER the first differing character of any two
 // distinct candidates (two entries can't share a name).
 //
+// Every match is read and counted, but at most `MAX_CANDIDATES` are held: the
+// first that many alphabetically, which is what the menu lists. When more
+// exist the source says so (`Extent::Truncated`) and reports the prefix EVERY
+// match shares, because the engine extends the line to the common prefix of
+// what it is handed, and a subset's can run past matches the subset left out.
+// That is the zsh model the menu was designed on (`LISTMAX` caps what is
+// shown, never what is matched); capping the matching would let Tab extend the
+// line past valid completions in any directory of more than 256 matches.
+//
 // Per the Plan 9 native split + UTOPIA-SHELL-DESIGN.md section 11.2: pure
 // userspace logic over libthyla-rs `fs::read_dir` (already audited, RW-8); the
 // audit-bearing raw-mode editor + consctl surface this rides on was discharged
@@ -37,32 +46,93 @@
 // `ListDir`, so the tests below drive path completion over a fixed tree while
 // the shell hands in the live filesystem.
 
+use alloc::collections::BinaryHeap;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::ops::Range;
 
-use crate::line_editor::{Completions, CompletionSource};
+use crate::line_editor::{longest_common_prefix, CompletionSource, Completions, Extent};
 
-/// Cap on the candidates returned from one Tab (the design's `LISTMAX`). A
-/// directory of thousands of entries must not flood the completion menu; the
-/// cap bounds both the work and the `MenuShow` cycle payload.
+/// Cap on the matches one Tab holds and lists (UT-NORA-ERGONOMICS.md's
+/// `LISTMAX`-ish "show N + ... M more"). A directory of thousands must flood
+/// neither the menu nor the shell's heap, which a `no_std` program cannot
+/// overrun and survive. It bounds what is HELD; every match is still read and
+/// counted.
 const MAX_CANDIDATES: usize = 256;
 
-/// How path completion reads a directory: `visit(name, is_dir)` once per entry,
-/// stopping the moment `visit` returns false. An unreadable directory visits
-/// nothing. It STREAMS rather than returning the listing because the cap above
-/// bounds the work, and a returned listing would read a whole directory of
-/// thousands before the cap could apply.
-pub(crate) type ListDir = fn(dir: &str, visit: &mut dyn FnMut(&str, bool) -> bool);
+/// How path completion reads a directory: `visit(name, is_dir)` once per entry.
+/// An unreadable directory visits nothing. It STREAMS rather than returning the
+/// listing so the source holds at most `MAX_CANDIDATES` names however large the
+/// directory is; a returned listing would hold all of them.
+pub(crate) type ListDir = fn(dir: &str, visit: &mut dyn FnMut(&str, bool));
 
 /// The live `ListDir`: libthyla-rs `fs::read_dir`. An entry the read cannot
-/// return is skipped, not fatal -- a partial menu beats none.
+/// return is skipped, not fatal -- a partial menu beats none -- and a failed
+/// refill ends the iteration, so the loop terminates.
 #[cfg(feature = "backend")]
-fn read_dir_live(dir: &str, visit: &mut dyn FnMut(&str, bool) -> bool) {
+fn read_dir_live(dir: &str, visit: &mut dyn FnMut(&str, bool)) {
     if let Ok(rd) = libthyla_rs::fs::read_dir(dir) {
         for ent in rd.flatten() {
-            if !visit(ent.file_name(), ent.is_dir()) {
-                break;
+            visit(ent.file_name(), ent.is_dir());
+        }
+    }
+}
+
+/// One Tab's matches under the cap: the first `MAX_CANDIDATES` alphabetically,
+/// a count of the rest, and the greatest match. The longest common prefix of a
+/// set is that of its least and greatest members, and the least is always
+/// kept, so those two give the prefix every match shares without holding the
+/// matches in between.
+struct Gather {
+    /// The least matches seen, as a max-heap so the greatest of them is the
+    /// one a smaller newcomer displaces.
+    kept: BinaryHeap<String>,
+    unlisted: usize,
+    greatest: String,
+}
+
+impl Gather {
+    fn new() -> Self {
+        Self {
+            kept: BinaryHeap::new(),
+            unlisted: 0,
+            greatest: String::new(),
+        }
+    }
+
+    /// Count `cand` as a match. It is copied only if it is kept.
+    fn offer(&mut self, cand: &str) {
+        if cand > self.greatest.as_str() {
+            self.greatest.clear();
+            self.greatest.push_str(cand);
+        }
+        if self.kept.len() < MAX_CANDIDATES {
+            self.kept.push(String::from(cand));
+            return;
+        }
+        // Full: one of `cand` and the greatest kept match goes unlisted.
+        self.unlisted += 1;
+        if let Some(mut top) = self.kept.peek_mut() {
+            if cand < top.as_str() {
+                top.clear();
+                top.push_str(cand);
             }
+        }
+    }
+
+    fn finish(self, replace_range: Range<usize>) -> Completions {
+        let candidates = self.kept.into_sorted_vec();
+        let extent = match candidates.first() {
+            Some(least) if self.unlisted > 0 => Extent::Truncated {
+                unlisted: self.unlisted,
+                shared: longest_common_prefix(&[least.as_str(), self.greatest.as_str()]),
+            },
+            _ => Extent::Complete,
+        };
+        Completions {
+            replace_range,
+            candidates,
+            extent,
         }
     }
 }
@@ -93,22 +163,18 @@ impl ShellCompletionSource {
 
     /// Command-position completion: the known names extending `token`, each
     /// terminated with a space so a unique pick lands ready for the next word.
+    /// Every name is offered even though the index is sorted: its first 256
+    /// matches can share a longer prefix than all of them do.
     fn complete_command(&self, token: &str, start: usize, cursor: usize) -> Completions {
-        let mut candidates: Vec<String> = Vec::new();
-        for c in &self.commands {
-            if c.starts_with(token) {
-                let mut s = c.clone();
-                s.push(' ');
-                candidates.push(s);
-                if candidates.len() >= MAX_CANDIDATES {
-                    break;
-                }
-            }
+        let mut gather = Gather::new();
+        let mut cand = String::new();
+        for c in self.commands.iter().filter(|c| c.starts_with(token)) {
+            cand.clear();
+            cand.push_str(c);
+            cand.push(' ');
+            gather.offer(&cand);
         }
-        Completions {
-            replace_range: start..cursor,
-            candidates,
-        }
+        gather.finish(start..cursor)
     }
 }
 
@@ -197,36 +263,35 @@ fn complete_path(
     dirs_only: bool,
 ) -> Completions {
     let (dir_prefix, file_prefix) = split_path_token(token);
-    let mut candidates: Vec<String> = Vec::new();
+    let mut gather = Gather::new();
+    let mut cand = String::new();
     list_dir(readdir_target(dir_prefix), &mut |name, is_dir| {
         if !name.starts_with(file_prefix) {
-            return true;
+            return;
         }
         // Hide dotfiles unless the user explicitly typed a leading '.'.
         if file_prefix.is_empty() && name.starts_with('.') {
-            return true;
+            return;
         }
         if dirs_only && !is_dir {
-            return true;
+            return;
         }
-        let mut cand = String::with_capacity(dir_prefix.len() + name.len() + 1);
+        cand.clear();
         cand.push_str(dir_prefix);
         cand.push_str(name);
         cand.push(if is_dir { '/' } else { ' ' });
-        candidates.push(cand);
-        candidates.len() < MAX_CANDIDATES
+        gather.offer(&cand);
     });
-    // read_dir order is FS-defined; sort so the menu + LCP are deterministic.
-    candidates.sort();
-    Completions {
-        replace_range: start..cursor,
-        candidates,
-    }
+    // Read order is the filesystem's; which matches are kept, and the menu's
+    // order, depend only on the names.
+    gather.finish(start..cursor)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::line_editor::{EditorAction, LineEditor};
+    use alloc::boxed::Box;
     use alloc::vec;
     use core::fmt::Write;
     use core::sync::atomic::{AtomicUsize, Ordering};
@@ -236,7 +301,7 @@ mod tests {
     ///   src    main.rs  mod/
     ///   /      bin/  etc/
     /// Any other directory is unreadable.
-    fn tree(dir: &str, visit: &mut dyn FnMut(&str, bool) -> bool) {
+    fn tree(dir: &str, visit: &mut dyn FnMut(&str, bool)) {
         let entries: &[(&str, bool)] = match dir {
             "." => &[("script", false), ("src", true), (".hidden", false)],
             "src" => &[("main.rs", false), ("mod", true)],
@@ -244,9 +309,7 @@ mod tests {
             _ => &[],
         };
         for &(name, is_dir) in entries {
-            if !visit(name, is_dir) {
-                return;
-            }
+            visit(name, is_dir);
         }
     }
 
@@ -340,28 +403,174 @@ mod tests {
     }
 
     /// Entries this lister has handed out, across the whole test binary --
-    /// only `the_cap_stops_the_read_not_just_the_menu` uses it.
+    /// only `the_cap_bounds_what_is_held_not_what_is_read` uses it.
     static MANY_VISITED: AtomicUsize = AtomicUsize::new(0);
 
-    fn many(_dir: &str, visit: &mut dyn FnMut(&str, bool) -> bool) {
+    fn many(_dir: &str, visit: &mut dyn FnMut(&str, bool)) {
         let mut name = String::new();
         for i in 0..MAX_CANDIDATES + 44 {
             name.clear();
             let _ = write!(name, "f{:03}", i);
             MANY_VISITED.fetch_add(1, Ordering::Relaxed);
-            if !visit(&name, false) {
-                return;
-            }
+            visit(&name, false);
         }
     }
 
     #[test]
-    fn the_cap_stops_the_read_not_just_the_menu() {
+    fn the_cap_bounds_what_is_held_not_what_is_read() {
         let s = ShellCompletionSource::with_dir_lister(Vec::new(), many);
         let c = s.complete("cat f", 5);
+        // Every entry is read, so all 300 are counted ...
+        assert_eq!(MANY_VISITED.load(Ordering::Relaxed), MAX_CANDIDATES + 44);
+        // ... and the first 256 alphabetically are held.
         assert_eq!(c.candidates.len(), MAX_CANDIDATES);
-        // The listing had 44 more entries; none of them were read.
-        assert_eq!(MANY_VISITED.load(Ordering::Relaxed), MAX_CANDIDATES);
+        assert_eq!(c.candidates[0], "f000 ");
+        assert_eq!(c.candidates[MAX_CANDIDATES - 1], "f255 ");
+        assert_eq!(
+            c.extent,
+            Extent::Truncated {
+                unlisted: 44,
+                shared: String::from("f"),
+            }
+        );
+    }
+
+    /// 300 entries, all matching "f": 256 `fa…` followed by 44 `fb…`. The
+    /// first 256 share "fa"; the whole directory shares only "f".
+    fn fa_then_fb(_dir: &str, visit: &mut dyn FnMut(&str, bool)) {
+        runs(&[("fa", MAX_CANDIDATES), ("fb", 44)], visit);
+    }
+
+    /// The same 300 entries, read in the other order.
+    fn fb_then_fa(_dir: &str, visit: &mut dyn FnMut(&str, bool)) {
+        runs(&[("fb", 44), ("fa", MAX_CANDIDATES)], visit);
+    }
+
+    /// 300 entries that all share "fab".
+    fn fab_300(_dir: &str, visit: &mut dyn FnMut(&str, bool)) {
+        runs(&[("fab", MAX_CANDIDATES + 44)], visit);
+    }
+
+    /// `lead000`, `lead001`, ... for each (lead, count), in that order.
+    fn runs(spec: &[(&str, usize)], visit: &mut dyn FnMut(&str, bool)) {
+        let mut name = String::new();
+        for &(lead, n) in spec {
+            for i in 0..n {
+                name.clear();
+                let _ = write!(name, "{}{:03}", lead, i);
+                visit(&name, false);
+            }
+        }
+    }
+
+    /// `(selected, unlisted)` when `r` is a `MenuShow`.
+    fn menu_at(r: &EditorAction) -> Option<(usize, usize)> {
+        match r {
+            EditorAction::MenuShow {
+                selected, unlisted, ..
+            } => Some((*selected, *unlisted)),
+            _ => None,
+        }
+    }
+
+    fn tab(src: ShellCompletionSource, typed: &str) -> (EditorAction, String) {
+        let mut le = LineEditor::new();
+        le.set_completion_source(Box::new(src));
+        let _ = le.feed_bytes(typed.as_bytes());
+        let r = le.feed_byte(0x09);
+        (r, String::from(le.buffer()))
+    }
+
+    #[test]
+    fn tab_never_extends_past_a_match_the_cap_left_out() {
+        let s = ShellCompletionSource::with_dir_lister(Vec::new(), fa_then_fb);
+        let (r, line) = tab(s, "cat f");
+        // Every match begins "f" and no longer prefix: nothing to extend, so
+        // Tab opens the menu on the first match.
+        assert_eq!(menu_at(&r), Some((0, 44)), "{:?}", r);
+        assert_eq!(line, "cat fa000 ");
+    }
+
+    #[test]
+    fn a_truncated_directory_still_extends_to_what_every_entry_shares() {
+        // The control for the test above: the cap must not stop Tab extending.
+        let s = ShellCompletionSource::with_dir_lister(Vec::new(), fab_300);
+        let (r, line) = tab(s, "cat f");
+        assert_eq!(r, EditorAction::Redraw);
+        assert_eq!(line, "cat fab");
+    }
+
+    #[test]
+    fn which_entries_are_kept_does_not_depend_on_read_order() {
+        let a = ShellCompletionSource::with_dir_lister(Vec::new(), fa_then_fb).complete("cat f", 5);
+        let b = ShellCompletionSource::with_dir_lister(Vec::new(), fb_then_fa).complete("cat f", 5);
+        assert_eq!(a, b);
+        assert_eq!(a.candidates[0], "fa000 ");
+        assert_eq!(a.candidates[MAX_CANDIDATES - 1], "fa255 ");
+    }
+
+    /// The gatherer against the obvious implementation -- hold every match,
+    /// sort, take the head, take the common prefix of all -- over a set far
+    /// larger than the cap, offered in a scrambled order. The least and
+    /// greatest names differ inside a two-byte character (`è` and `é` share
+    /// their lead byte), so the shared prefix must be cut back to a character
+    /// boundary; uncut, the slice would panic.
+    #[test]
+    fn gather_matches_holding_everything_and_sorting() {
+        let mut all: Vec<String> = Vec::new();
+        for i in 0..1000u32 {
+            let mut s = String::new();
+            let accent = if i % 7 == 0 { "\u{e9}" } else { "\u{e8}" };
+            let _ = write!(s, "k/{}{}{}-{}", accent, i % 3, i % 5, i);
+            all.push(s);
+        }
+        // A fixed LCG permutation: deterministic, far from sorted.
+        let mut order: Vec<usize> = (0..all.len()).collect();
+        let mut x: u32 = 12345;
+        for i in (1..order.len()).rev() {
+            x = x.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            order.swap(i, (x as usize >> 8) % (i + 1));
+        }
+        let mut g = Gather::new();
+        for &i in &order {
+            g.offer(&all[i]);
+        }
+        let got = g.finish(0..0);
+        let mut sorted = all.clone();
+        sorted.sort();
+        assert_eq!(got.candidates, sorted[..MAX_CANDIDATES]);
+        assert_eq!(
+            got.extent,
+            Extent::Truncated {
+                unlisted: all.len() - MAX_CANDIDATES,
+                shared: longest_common_prefix(&all),
+            }
+        );
+        // And at or under the cap it is exactly the sorted set, complete.
+        let mut g = Gather::new();
+        for s in sorted[..MAX_CANDIDATES].iter().rev() {
+            g.offer(s);
+        }
+        let got = g.finish(0..0);
+        assert_eq!(got.candidates, sorted[..MAX_CANDIDATES]);
+        assert_eq!(got.extent, Extent::Complete);
+    }
+
+    #[test]
+    fn a_sorted_command_index_is_not_safe_either() {
+        // The first 256 of the sorted index all begin "aa"; `ab` sorts after.
+        let mut v: Vec<String> = (0..300)
+            .map(|i| {
+                let mut s = String::new();
+                let _ = write!(s, "aa{:03}", i);
+                s
+            })
+            .collect();
+        v.push(String::from("ab"));
+        let s = ShellCompletionSource::with_dir_lister(v, tree);
+        let (r, line) = tab(s, "a");
+        assert_eq!(menu_at(&r), Some((0, 45)), "{:?}", r);
+        assert_eq!(line, "aa000 ");
     }
 
     #[test]

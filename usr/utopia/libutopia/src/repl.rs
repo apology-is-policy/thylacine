@@ -902,6 +902,7 @@ impl Repl {
                 EditorAction::MenuShow {
                     candidates,
                     selected,
+                    unlisted,
                 } => {
                     // D4: the editor has applied candidates[selected] to the
                     // buffer. Redraw the prompt+buffer line, then draw a
@@ -910,7 +911,7 @@ impl Repl {
                     // MenuShow (cycle) this redraws in place; on any other
                     // action the strip is cleared (above).
                     self.emit_prompt(out);
-                    let strip = render_menu_strip(&candidates, selected);
+                    let strip = crate::line_editor::menu_strip(&candidates, selected, unlisted);
                     let _ = out.write_all(b"\x1b7\r\n\x1b[K");
                     let _ = out.write_all(strip.as_bytes());
                     let _ = out.write_all(b"\x1b8");
@@ -1139,61 +1140,6 @@ impl Repl {
         self.editor.reset_render_position();
         self.emit_prompt(out);
     }
-}
-
-/// D4: render the completion-menu candidate strip (one line, below the prompt).
-/// The `selected` candidate is reverse-video highlighted. Candidates join with
-/// two spaces; if they would exceed a conservative column budget, a contiguous
-/// window AROUND `selected` is shown with `<`/`>` truncation markers so the
-/// current pick is always visible (the editor/REPL do not know the real
-/// terminal width -- 80-col is the safe assumption).
-fn render_menu_strip(cands: &[String], selected: usize) -> String {
-    const BUDGET: usize = 76;
-    if cands.is_empty() {
-        return String::new();
-    }
-    let sel = selected.min(cands.len() - 1);
-    let widths: Vec<usize> = cands.iter().map(|c| ansi::visible_width(c)).collect();
-    // Grow a window [lo, hi) outward from `sel` while it fits the budget.
-    let mut lo = sel;
-    let mut hi = sel + 1;
-    let mut used = widths[sel];
-    loop {
-        let mut grew = false;
-        if hi < cands.len() && used + 2 + widths[hi] <= BUDGET {
-            used += 2 + widths[hi];
-            hi += 1;
-            grew = true;
-        }
-        if lo > 0 && used + 2 + widths[lo - 1] <= BUDGET {
-            lo -= 1;
-            used += 2 + widths[lo];
-            grew = true;
-        }
-        if !grew {
-            break;
-        }
-    }
-    let mut out = String::new();
-    if lo > 0 {
-        out.push_str("< ");
-    }
-    for (n, i) in (lo..hi).enumerate() {
-        if n > 0 {
-            out.push_str("  ");
-        }
-        if i == sel {
-            out.push_str("\x1b[7m"); // reverse video
-            out.push_str(&cands[i]);
-            out.push_str("\x1b[0m"); // reset (self-contained so DECRC is clean)
-        } else {
-            out.push_str(&cands[i]);
-        }
-    }
-    if hi < cands.len() {
-        out.push_str(" >");
-    }
-    out
 }
 
 // DISPLAY-MODES.md section 3.4: pull the trailing `winsize <cols> <rows>` out
@@ -1566,45 +1512,5 @@ mod tests {
         let mut repl = Repl::new();
         let code = repl.run_script("/s.ut", &[], ")\n");
         assert_ne!(code, 0);
-    }
-
-    // ----- D4: the completion-menu candidate strip --------------------------
-
-    #[test]
-    fn menu_strip_highlights_selected() {
-        let c = [
-            String::from("apple"),
-            String::from("application"),
-            String::from("apparatus"),
-        ];
-        let r = render_menu_strip(&c, 1);
-        assert!(r.contains("\x1b[7mapplication\x1b[0m"), "highlight: {:?}", r);
-        assert!(r.contains("apple") && r.contains("apparatus"));
-        // All three fit the budget -> no truncation markers.
-        assert!(!r.starts_with("< ") && !r.ends_with(" >"));
-    }
-
-    #[test]
-    fn menu_strip_windows_around_selected_when_overflowing() {
-        // Many wide candidates: the selected one stays visible + markers appear.
-        let c: Vec<String> = (0..20)
-            .map(|i| {
-                let mut s = String::from("candidate-number-");
-                if i < 10 {
-                    s.push('0');
-                }
-                let mut n = String::new();
-                let _ = core::fmt::write(&mut FmtSink(&mut n), format_args!("{}", i));
-                s.push_str(&n);
-                s
-            })
-            .collect();
-        let r = render_menu_strip(&c, 15);
-        assert!(
-            r.contains("\x1b[7mcandidate-number-15\x1b[0m"),
-            "selected visible: {:?}",
-            r
-        );
-        assert!(r.starts_with("< "), "left truncation marker: {:?}", r);
     }
 }

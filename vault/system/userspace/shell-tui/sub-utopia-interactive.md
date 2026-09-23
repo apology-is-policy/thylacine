@@ -156,33 +156,80 @@ argument, or a command-by-path — splits the token at its last `/` and reads th
 directory live. `cd` restricts to directories. Each candidate carries its
 terminator, a space for a command or file and `/` for a directory, so a unique pick
 lands ready for the next token and a directory can be drilled with a second Tab.
-The engine then extends to the longest common prefix; when the prefix is already
-exhausted it enters the zsh-style cycling menu — apply candidate 0, emit
-`MenuShow`, and let the REPL paint a one-line strip below the prompt. Tab cycles,
-Enter finalizes without submitting, any other key dismisses and is re-dispatched.
+The engine then extends to the prefix every match shares -- computed from the
+candidates when the source handed over all of them, taken from the source when it
+kept only some (below); when the prefix is already exhausted it enters the
+zsh-style cycling menu — apply candidate 0, emit `MenuShow`, and let the REPL
+paint a one-line strip below the prompt. Tab cycles, Enter finalizes without
+submitting, any other key dismisses and is re-dispatched.
 
 **The directory read is injected, not called (2026-09-23).** The source reads
 directories through a `ListDir` -- `fn(dir, visit)`, calling `visit(name,
-is_dir)` per entry until it returns false. `ShellCompletionSource::new` hands in
-the live `fs::read_dir` (the one `backend`-gated item left in the module); the
-unit tests hand in a fixed tree, so path completion -- routing, terminators,
-`cd`'s directories-only rule, dotfile hiding, the directory prefix -- is tested on
-the host rather than only at boot. It STREAMS rather than returning a listing
-because the 256 cap bounds the work: a returned listing would read a whole
-directory before the cap could apply. A test pins that the read itself stops
-(`the_cap_stops_the_read_not_just_the_menu`), because the menu alone cannot tell
-"stopped at 256" from "read everything, kept 256". The seam also exposed a test
+is_dir)` once per entry. `ShellCompletionSource::new` hands in the live
+`fs::read_dir` (the one `backend`-gated item left in the module); the unit tests
+hand in a fixed tree, so path completion -- routing, terminators, `cd`'s
+directories-only rule, dotfile hiding, the directory prefix -- is tested on the
+host rather than only at boot. It STREAMS rather than returning a listing so the
+source holds at most 256 names however large the directory is. The seam's first
+version let the visitor stop the read at the cap, and a test pinned that it did;
+that stop was the defect the next paragraph records, and the test now pins the
+opposite (`the_cap_bounds_what_is_held_not_what_is_read`: 300 entries read, 256
+held, 44 counted). The seam also exposed a test
 that could not fail: `command_token_with_slash_is_not_command_completion` asserted
 an EMPTY result for `./scr`, which is what BOTH routes return -- the index cannot
 hold a name with a `/` -- so a sabotage sending slash tokens to the index passed
 it. It now asserts `./script` from the tree, and that sabotage fails it.
+
+**The cap bounds what is held, never what is matched (2026-09-23).** Both
+completion paths used to stop collecting at 256 matches, and the engine extended
+the line to the longest common prefix of whatever it was handed -- so in a
+directory, or an index, of more than 256 matches, Tab could extend the line past
+matches the cap had dropped, leaving them unreachable. The path path collected in
+filesystem order and sorted afterwards; the command path's index is already
+sorted, and this dossier used to call it unaffected for that reason. It was not:
+the first 256 of a sorted set can share a longer prefix than the whole set does
+(`aa000`..`aa299` plus `ab`: the first 256 share `aa`, all of them only `a`).
+Deterministic is not correct. Both failing tests were written before the fix
+(`tab_never_extends_past_a_match_the_cap_left_out`,
+`a_sorted_command_index_is_not_safe_either`) and both reproduced it.
+
+The prior art is unanimous that the prefix must come from every match: bash,
+zsh and Plan 9's `libcomplete` all read the whole directory and extend to the
+common prefix of all of it. zsh's `LISTMAX`, the cap this one was modelled on,
+bounds only what is *listed*, and UT-NORA-ERGONOMICS.md specified exactly that
+for this menu: "show N + ... M more". The as-built capped the matching and dropped
+the count. Now:
+
+- A `Gather` (in `completion.rs`) sees every match, keeps the first 256
+  alphabetically in a max-heap, counts the rest, and tracks the greatest match.
+  The longest common prefix of a set is that of its least and greatest members,
+  and the least is always kept, so the prefix every match shares costs one extra
+  string rather than every match. Which entries are kept depends only on their
+  names, never on read order.
+- `Completions` carries an `extent`: `Complete`, or `Truncated { unlisted,
+  shared }`. The engine extends to `shared` for a truncated set, never to the
+  subset's own prefix, and a truncated set's lone listed candidate is not taken
+  as the unique completion.
+- `MenuShow` carries `unlisted`, and `menu_strip` ends the strip with `+N more`
+  in the `Path` ink. The window's `<` / `>` mean "cycle to see more"; the count
+  means "no Tab reaches these", and without it a partial menu reads as the whole
+  set. The window gives way to the count, so the strip still keeps to 80 columns.
+
+The heap keeps the worst case at O(log 256) per entry even for a directory read in
+reverse order, and a candidate is copied only when it is kept. Ten sabotages were
+run against the change and all ten are caught; the first run caught nine, and the
+tenth -- not budgeting the count's columns -- exposed a test whose 19-column
+candidates left slack either way. It now also drives two-column candidates, which
+fill the window to within a column of its budget.
 
 **What runs where.** Since the `backend` split (2026-09-22) the crate builds for
 the host, and `line_editor`, `completion`, `palette`, `ansi` and `path` run their
 unit tests under `tools/test-rust.sh`. `repl` -- the syscall loop -- stays
 device-only, witnessed at boot by `u-repl-test`, whose step 8 also reads a REAL
 directory through `ShellCompletionSource::new`, the one thing the host tests
-cannot. The line editor's `ESC ESC` restarts the escape sequence (the VT rule)
+cannot. The menu strip's renderer lived in `repl` too, so its two tests had never
+run -- while `u-repl-test` described it as "host-tested". It moved to
+`line_editor::menu_strip` (2026-09-23), where they run beside two new ones. The line editor's `ESC ESC` restarts the escape sequence (the VT rule)
 and consumes the next byte as `ESC <byte>`, the slot reserved for Alt bindings;
 its header documents the transition. That behaviour was once a failing test
 (UT-EDIT-1) and the test was the side that was wrong.
@@ -236,17 +283,19 @@ parser state, the mode, a desired column for vertical navigation, an optional
 boxed completion source, and the command index.
 
 `LineEditorMode` — `Normal`, `Search { query, match_index, saved_buffer,
-saved_cursor }`, and `Menu { candidates, selected, anchor }`. The saved buffer is
+saved_cursor }`, and `Menu { candidates, selected, anchor, unlisted }`. The saved buffer is
 how Ctrl-R cancels restore; the anchor is where the applied candidate begins.
 
 `BalanceState` — three signed depths, two quote flags, and the trailing-backslash
 flag.
 
 `EditorAction` — `NoChange`, `Redraw`, `Accept(String)`, `Cancel`, `Eof`,
-`ClearScreen`, `MenuShow { candidates, selected }`.
+`ClearScreen`, `MenuShow { candidates, selected, unlisted }`.
 
-`Completions` — a byte range to replace plus candidate full-replacement strings in
-source order.
+`Completions` — a byte range to replace, candidate full-replacement strings in
+source order, and an `Extent`: `Complete`, or `Truncated { unlisted, shared }` --
+the candidates are then the first matches alphabetically, `unlisted` more exist,
+and every match begins with `shared`.
 
 `Repl` — the `Env`, the editor, the cached `/bin` scan, whether completion was
 installed, an optional history path, and whether a menu strip is currently drawn.
@@ -320,8 +369,10 @@ pass over the prefix before the cursor. `refresh_command_index` runs after every
 accepted line and is deliberately syscall-free — the `/bin` scan is cached at
 install and only the alias and function tables are re-walked, then sorted and
 deduped. Completion takes exactly one `read_dir` per Tab in argument position and
-none in command position. Candidates are capped at 256 per Tab, which bounds both
-the work and the menu strip -- the read stops at the cap, pinned by a host test.
+none in command position. The read runs to the end of the directory, however
+large: the prefix every match shares cannot be known otherwise, and `ls` and glob
+expansion read whole directories too. What the 256 cap bounds is memory -- at most
+256 names held, each entry O(log 256) -- and the menu strip.
 
 The history cap is 10 000 entries in memory, with on-disk history appended
 line-by-line at `~/.ut_history`, mode 0600 — the encrypted home already gates
@@ -345,9 +396,10 @@ not.
 - **Is the command index the same set the resolver searches?** Two consumers read
   it — completion and validity colouring — so a divergence produces both a missing
   completion and a wrong colour.
-- **Does the completion cap interact correctly with the prefix extension?** The
-  engine extends the buffer to the longest common prefix of whatever candidate set
-  it is handed.
+- **Does every source that keeps a subset say so?** The engine extends to the
+  common prefix of what it is handed unless `extent` says the set is truncated. A
+  source that caps and reports `Complete` reintroduces the 2026-09-23 defect, and
+  the engine cannot detect it. Every capping source should go through `Gather`.
 - **Are the editor's bounds defensive?** The buffer cap, the menu anchor's char
   boundaries, and the CSI parameter array are all fixed-size.
 
@@ -394,19 +446,14 @@ marked unresolvable while running fine. Currently latent: the session root holds
 only data files, and the shell that does run from a root-level namespace is the
 bare-spawn boot check, which never installs completion.
 
-**The 256-candidate cap is applied before the sort, so which candidates survive is
-filesystem-order-dependent.** Path completion iterates `read_dir` in FS order,
-breaks at the cap, and *then* sorts — and the comment on that sort says it exists
-so "the menu + LCP" are deterministic, which is the exact property the truncation
-undoes. The engine computes its longest common prefix over whatever subset
-survived, so in a directory with more than 256 matches Tab can extend the line to a
-prefix that excludes valid candidates. Command completion is unaffected (its source
-vector is already sorted, so the cap takes a deterministic first 256). **This is a
-defect, OWED as its own fix, and since 2026-09-23 it is reproducible on the host**
-through the `ListDir` seam. Sorting before the cap does not cure it -- the first
-256 of a sorted set can share a prefix the full set does not -- and the true prefix
-is unknowable once the read stops, so the sound behaviour for a truncated set is
-not to extend at all.
+**Completion inserts names unquoted.** A path candidate is the directory prefix,
+the entry's name byte for byte, and a terminator; nothing quotes it. A file
+called `my file` completes to `my file `, which the shell reads as two words, and
+the same goes for a name holding a quote, `$`, `;`, `|` or any other character
+the lexer gives meaning. The common-prefix extension can also end inside such a
+name, at the space. **This is a defect, OWED as its own fix**: the candidates need
+the lexer's quoting (rc-style `'...'`, with `''` for an embedded quote), applied
+before the common prefix is taken, since quoting changes it.
 
 **A multi-line render that shrinks leaves stale lines on screen, and the fix was
 assigned to a chunk that shipped without it.** The comment describes the defect

@@ -113,9 +113,12 @@ pub enum EditorAction {
     /// finalizes (dismiss the strip, keep the selection, no submit); any other
     /// key dismisses the menu and is processed normally. The Vec is in source
     /// order (NOT sorted) so the source's natural ordering propagates.
+    /// `unlisted` counts matches the source found but did not hand over; no Tab
+    /// can cycle to them, so the strip says they exist (`menu_strip`).
     MenuShow {
         candidates: Vec<String>,
         selected: usize,
+        unlisted: usize,
     },
 }
 
@@ -313,6 +316,23 @@ pub struct Completions {
     pub replace_range: core::ops::Range<usize>,
     /// Candidate full-replacement strings, in source order.
     pub candidates: Vec<String>,
+    /// Whether `candidates` is every match.
+    pub extent: Extent,
+}
+
+/// Whether a source handed over every match. A source that must bound what it
+/// holds keeps only some, and then supplies the one fact the engine can no
+/// longer derive from the list: the prefix EVERY match shares. The common
+/// prefix of a subset can run past matches the subset left out, and extending
+/// the line to it would leave those matches unreachable.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Extent {
+    /// `candidates` is every match.
+    #[default]
+    Complete,
+    /// `candidates` are the first matches alphabetically and `unlisted` more
+    /// exist. Every match, listed or not, begins with `shared`.
+    Truncated { unlisted: usize, shared: String },
 }
 
 /// A simple completion source backed by a fixed candidate list. Used
@@ -351,6 +371,7 @@ impl CompletionSource for StaticCompletionSource {
         Completions {
             replace_range: word_start..cursor,
             candidates: matches,
+            extent: Extent::Complete,
         }
     }
 }
@@ -358,17 +379,17 @@ impl CompletionSource for StaticCompletionSource {
 /// Longest common byte prefix of all `strs`. UTF-8 safe: the returned
 /// length is rounded DOWN to the nearest char boundary in the first
 /// string. Returns "" for empty input.
-fn longest_common_prefix(strs: &[String]) -> String {
+pub(crate) fn longest_common_prefix<S: AsRef<str>>(strs: &[S]) -> String {
     if strs.is_empty() {
         return String::new();
     }
     if strs.len() == 1 {
-        return strs[0].clone();
+        return String::from(strs[0].as_ref());
     }
-    let first = strs[0].as_bytes();
+    let first = strs[0].as_ref().as_bytes();
     let mut common_len = first.len();
     for s in &strs[1..] {
-        let other = s.as_bytes();
+        let other = s.as_ref().as_bytes();
         let mut i = 0;
         while i < common_len && i < other.len() && first[i] == other[i] {
             i += 1;
@@ -376,10 +397,86 @@ fn longest_common_prefix(strs: &[String]) -> String {
         common_len = i;
     }
     // Round to char boundary.
-    while common_len > 0 && !strs[0].is_char_boundary(common_len) {
+    let first = strs[0].as_ref();
+    while common_len > 0 && !first.is_char_boundary(common_len) {
         common_len -= 1;
     }
-    String::from(&strs[0][..common_len])
+    String::from(&first[..common_len])
+}
+
+/// D4: the one-line candidate strip the REPL draws below the prompt for a
+/// `MenuShow`. The `selected` candidate is reverse-video highlighted;
+/// candidates join with two spaces, and when they would exceed the column
+/// budget a contiguous window AROUND `selected` is shown, with `<` / `>` where
+/// it leaves candidates out, so the current pick is always visible. It assumes
+/// an 80-column terminal. `unlisted` matches -- ones the source never handed
+/// over -- are counted at the end: the window markers mean "cycle to see
+/// more", but no Tab reaches these, and without the count a partial menu reads
+/// as the whole set. The window gives way to the count, never the reverse.
+pub fn menu_strip(cands: &[String], selected: usize, unlisted: usize) -> String {
+    const BUDGET: usize = 76;
+    if cands.is_empty() {
+        return String::new();
+    }
+    let more = if unlisted > 0 {
+        format!("+{} more", unlisted)
+    } else {
+        String::new()
+    };
+    let budget = if more.is_empty() {
+        BUDGET
+    } else {
+        BUDGET.saturating_sub(2 + more.len())
+    };
+    let sel = selected.min(cands.len() - 1);
+    let widths: Vec<usize> = cands
+        .iter()
+        .map(|c| crate::ansi::visible_width(c))
+        .collect();
+    // Grow a window [lo, hi) outward from `sel` while it fits the budget.
+    let mut lo = sel;
+    let mut hi = sel + 1;
+    let mut used = widths[sel];
+    loop {
+        let mut grew = false;
+        if hi < cands.len() && used + 2 + widths[hi] <= budget {
+            used += 2 + widths[hi];
+            hi += 1;
+            grew = true;
+        }
+        if lo > 0 && used + 2 + widths[lo - 1] <= budget {
+            lo -= 1;
+            used += 2 + widths[lo];
+            grew = true;
+        }
+        if !grew {
+            break;
+        }
+    }
+    let mut out = String::new();
+    if lo > 0 {
+        out.push_str("< ");
+    }
+    for (n, i) in (lo..hi).enumerate() {
+        if n > 0 {
+            out.push_str("  ");
+        }
+        if i == sel {
+            out.push_str("\x1b[7m"); // reverse video
+            out.push_str(&cands[i]);
+            out.push_str("\x1b[0m"); // reset (self-contained so DECRC is clean)
+        } else {
+            out.push_str(&cands[i]);
+        }
+    }
+    if hi < cands.len() {
+        out.push_str(" >");
+    }
+    if !more.is_empty() {
+        out.push_str("  ");
+        out.push_str(&crate::ansi::fg(crate::palette::Role::Path, &more));
+    }
+    out
 }
 
 // =============================================================================
@@ -511,6 +608,8 @@ enum LineEditorMode {
         selected: usize,
         /// Buffer byte offset where the completed word begins.
         anchor: usize,
+        /// Matches the source left out of `candidates` (re-emitted per cycle).
+        unlisted: usize,
     },
 }
 
@@ -1811,16 +1910,20 @@ impl LineEditor {
         if comp.candidates.is_empty() {
             return EditorAction::NoChange;
         }
-        if comp.candidates.len() == 1 {
-            // Single candidate: replace and done.
-            let cand = comp.candidates[0].clone();
-            return self.apply_completion(comp.replace_range, &cand);
-        }
-        // Multiple candidates: first extend to the shared prefix if it grows
-        // the word (zsh: complete the common part). When the prefix is already
+        // What every match shares, and how many the list leaves out. A lone
+        // candidate is the completion only when nothing else matched.
+        let (common, unlisted) = match comp.extent {
+            Extent::Complete if comp.candidates.len() == 1 => {
+                let cand = comp.candidates[0].clone();
+                return self.apply_completion(comp.replace_range, &cand);
+            }
+            Extent::Complete => (longest_common_prefix(&comp.candidates), 0),
+            Extent::Truncated { unlisted, shared } => (shared, unlisted),
+        };
+        // Multiple matches: first extend to the shared prefix if it grows the
+        // word (zsh: complete the common part). When the prefix is already
         // exhausted, enter the D4 cycling menu -- apply candidate[0] and let
         // the main loop draw the highlighted strip.
-        let common = longest_common_prefix(&comp.candidates);
         let current_word_len = comp.replace_range.end - comp.replace_range.start;
         if common.len() > current_word_len {
             return self.apply_completion(comp.replace_range, &common);
@@ -1840,10 +1943,12 @@ impl LineEditor {
             candidates: candidates.clone(),
             selected: 0,
             anchor,
+            unlisted,
         };
         EditorAction::MenuShow {
             candidates,
             selected: 0,
+            unlisted,
         }
     }
 
@@ -1877,14 +1982,21 @@ impl LineEditor {
     /// while open), or the next candidate would exceed the buffer cap, bail out
     /// of menu mode cleanly.
     fn menu_cycle(&mut self) -> EditorAction {
-        let (anchor, old_len, next, candidates) = match &self.mode {
+        let (anchor, old_len, next, candidates, unlisted) = match &self.mode {
             LineEditorMode::Menu {
                 candidates,
                 selected,
                 anchor,
+                unlisted,
             } => {
                 let next = (*selected + 1) % candidates.len();
-                (*anchor, candidates[*selected].len(), next, candidates.clone())
+                (
+                    *anchor,
+                    candidates[*selected].len(),
+                    next,
+                    candidates.clone(),
+                    *unlisted,
+                )
             }
             _ => return EditorAction::NoChange,
         };
@@ -1903,10 +2015,12 @@ impl LineEditor {
             candidates: candidates.clone(),
             selected: next,
             anchor,
+            unlisted,
         };
         EditorAction::MenuShow {
             candidates,
             selected: next,
+            unlisted,
         }
     }
 
@@ -2857,9 +2971,11 @@ mod tests {
             EditorAction::MenuShow {
                 candidates,
                 selected,
+                unlisted,
             } => {
                 assert_eq!(candidates.len(), 3);
                 assert_eq!(selected, 0);
+                assert_eq!(unlisted, 0);
             }
             other => panic!("expected MenuShow; got {:?}", other),
         }
@@ -2952,6 +3068,163 @@ mod tests {
         let r = le.feed_byte(0x09);
         assert_eq!(r, EditorAction::NoChange);
         assert_eq!(le.buffer(), "ap");
+    }
+
+    /// A source with one fixed answer, so the engine can be handed an `Extent`
+    /// no shipped source produces on demand.
+    struct Fixed(Completions);
+
+    impl CompletionSource for Fixed {
+        fn complete(&self, _buffer: &str, _cursor: usize) -> Completions {
+            self.0.clone()
+        }
+    }
+
+    /// Type `typed`, install a source that lists `listed` of a larger set
+    /// sharing only `shared`, and press Tab.
+    fn tab_truncated(
+        typed: &str,
+        listed: &[&str],
+        unlisted: usize,
+        shared: &str,
+    ) -> (LineEditor, EditorAction) {
+        let mut le = LineEditor::new();
+        le.set_completion_source(alloc::boxed::Box::new(Fixed(Completions {
+            replace_range: 0..typed.len(),
+            candidates: listed.iter().map(|s| String::from(*s)).collect(),
+            extent: Extent::Truncated {
+                unlisted,
+                shared: String::from(shared),
+            },
+        })));
+        feed(&mut le, typed.as_bytes());
+        let r = le.feed_byte(0x09);
+        (le, r)
+    }
+
+    #[test]
+    fn a_truncated_list_extends_only_to_what_every_match_shares() {
+        // The listed two share "fab"; the whole set shares only "fa".
+        let (le, r) = tab_truncated("f", &["fab1 ", "fab2 "], 3, "fa");
+        assert_eq!(r, EditorAction::Redraw);
+        assert_eq!(le.buffer(), "fa");
+    }
+
+    #[test]
+    fn a_truncated_list_still_extends_when_the_whole_set_does() {
+        let (le, r) = tab_truncated("f", &["fab1 ", "fab2 "], 3, "fab");
+        assert_eq!(r, EditorAction::Redraw);
+        assert_eq!(le.buffer(), "fab");
+    }
+
+    #[test]
+    fn a_lone_listed_candidate_of_a_truncated_set_is_not_the_completion() {
+        // Applied as a unique match this would be a Redraw with the same
+        // buffer; the menu is what says other matches exist.
+        let (le, r) = tab_truncated("f", &["fab1 "], 3, "f");
+        match r {
+            EditorAction::MenuShow {
+                candidates,
+                selected: 0,
+                unlisted: 3,
+            } => assert_eq!(candidates, vec![String::from("fab1 ")]),
+            other => panic!("expected the menu; got {:?}", other),
+        }
+        assert_eq!(le.buffer(), "fab1 ");
+    }
+
+    /// `(selected, unlisted)` when `r` is a `MenuShow`.
+    fn menu_at(r: &EditorAction) -> Option<(usize, usize)> {
+        match r {
+            EditorAction::MenuShow {
+                selected, unlisted, ..
+            } => Some((*selected, *unlisted)),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn the_menu_carries_the_unlisted_count_through_every_cycle() {
+        let (mut le, r) = tab_truncated("fa", &["fa1 ", "fa2 "], 7, "fa");
+        assert_eq!(menu_at(&r), Some((0, 7)), "{:?}", r);
+        let r = le.feed_byte(0x09);
+        assert_eq!(menu_at(&r), Some((1, 7)), "{:?}", r);
+        let r = le.feed_byte(0x09);
+        assert_eq!(menu_at(&r), Some((0, 7)), "{:?}", r);
+        assert_eq!(le.buffer(), "fa1 ");
+    }
+
+    // ----- D4: the completion-menu candidate strip --------------------------
+
+    #[test]
+    fn menu_strip_highlights_selected() {
+        let c = [
+            String::from("apple"),
+            String::from("application"),
+            String::from("apparatus"),
+        ];
+        let r = menu_strip(&c, 1, 0);
+        assert!(
+            r.contains("\x1b[7mapplication\x1b[0m"),
+            "highlight: {:?}",
+            r
+        );
+        assert!(r.contains("apple") && r.contains("apparatus"));
+        // All three fit the budget -> no truncation markers, and no count.
+        assert!(!r.starts_with("< ") && !r.ends_with(" >"));
+        assert!(!r.contains("more"), "{:?}", r);
+    }
+
+    /// Twenty candidates of 19 columns each -- far past one 80-column line.
+    fn wide_candidates() -> Vec<String> {
+        (0..20)
+            .map(|i| format!("candidate-number-{:02}", i))
+            .collect()
+    }
+
+    #[test]
+    fn menu_strip_windows_around_selected_when_overflowing() {
+        // Many wide candidates: the selected one stays visible + markers appear.
+        let r = menu_strip(&wide_candidates(), 15, 0);
+        assert!(
+            r.contains("\x1b[7mcandidate-number-15\x1b[0m"),
+            "selected visible: {:?}",
+            r
+        );
+        assert!(r.starts_with("< "), "left truncation marker: {:?}", r);
+    }
+
+    #[test]
+    fn menu_strip_counts_the_matches_no_tab_reaches() {
+        let c = [String::from("fa1 "), String::from("fa2 ")];
+        let r = menu_strip(&c, 0, 44);
+        let count = crate::ansi::fg(crate::palette::Role::Path, "+44 more");
+        assert!(r.ends_with(&count), "{:?}", r);
+        assert!(
+            r.contains("\x1b[7mfa1 \x1b[0m") && r.contains("fa2 "),
+            "{:?}",
+            r
+        );
+    }
+
+    #[test]
+    fn menu_strip_keeps_to_80_columns_with_the_count() {
+        // The narrow set is the one that can fail: two-column candidates fill
+        // the window to within a column of its budget, so a count the budget
+        // did not make room for overruns the line. Wide ones leave slack.
+        let narrow: Vec<String> = (0..100).map(|i| format!("{:02}", i)).collect();
+        for (cands, sels) in [(wide_candidates(), [0, 10, 19]), (narrow, [0, 50, 99])] {
+            for sel in sels {
+                let r = menu_strip(&cands, sel, 65536);
+                assert!(
+                    r.ends_with(&crate::ansi::fg(crate::palette::Role::Path, "+65536 more")),
+                    "{:?}",
+                    r
+                );
+                let w = crate::ansi::visible_width(&r);
+                assert!(w <= 80, "{} columns: {:?}", w, r);
+            }
+        }
     }
 
     #[test]
