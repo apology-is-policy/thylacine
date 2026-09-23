@@ -201,7 +201,11 @@ static bool clone_one_vma(struct AddrSpace *dst, bool exempt,
     struct Vma *nv = vma_alloc(src_vma->vaddr_start, src_vma->vaddr_end,
                                src_vma->prot, backing, src_vma->burrow_offset);
     if (!nv) {
-        if (minted) { backing->clone_cursor = NULL; burrow_unref(minted); }
+        // The SOURCE's cursor, not `backing`'s: `backing` was rebound to the
+        // clone above, so clearing through it wrote the clone's own (already
+        // NULL) slot and left the source naming a Burrow the unref frees. The
+        // sweep in addrspace_clone masked it (audit F3).
+        if (minted) { src_vma->burrow->clone_cursor = NULL; burrow_unref(minted); }
         return false;
     }
     // The child's mapping inherits the parent's CEILING (vma_alloc set it to the

@@ -5,11 +5,11 @@ parent: moc-kernel-memory
 title: "The Burrow — a memory object with two refcounts and six backings"
 code: ["kernel/burrow.c", "kernel/include/thylacine/burrow.h"]
 audit: hard
-guarded-by: [inv-i7, inv-i32]
-validated-by: [spec-burrow, gate-smp]
+guarded-by: [inv-i7, inv-i32, inv-i44]
+validated-by: [spec-burrow, spec-cow, gate-smp]
 locks: [lock-burrow]
 created: 2026-08-02
-updated: 2026-09-17
+updated: 2026-09-23
 ---
 ## Purpose
 
@@ -54,6 +54,15 @@ operation has to report its own effect. Resource accounting is its only caller.
 address (the MAP_FIXED primitive [[sub-kernel-vma]] splits around).
 `burrow_share_into(dst, v, vaddr, prot)` is the cross-Proc form.
 `burrow_decommit` releases resident pages of a lazy region without unmapping it.
+
+**The permission change** is `burrow_protect(p, vaddr, length, prot, seal)` /
+`burrow_protect_in(as, exempt, ...)` (B-1a, 2026-09-23): move
+`[vaddr, vaddr+length)` to `prot` in {none, R, RW} under each mapping's
+mint-time ceiling, `seal` lowering the ceiling to `prot` for good. Caller
+holds `as->lock`, exactly as for `burrow_map`. Returns 0 or `-T_E_*` -- the
+first Burrow entry to speak errno, because its callers are `SYS_BURROW_PROTECT`
+and the phenotype `mprotect` row, both of which hand the value to userspace as
+is.
 
 **The deferred-free pair** — `burrow_release_mapping_deferred` and
 `burrow_free_deferred` — exists because a FILE-backed Burrow's free reaches
@@ -240,10 +249,58 @@ syscall. Same discipline as `BURROW_TYPE_CODE` — the admissibility is a
 property the kernel mints at creation, never one the caller asserts at map
 time.
 
+### The protect is one locked step, and the uninstall sits in the middle of it
+
+`burrow_protect_in` is `vma_reprotect_precheck_in` -> `mmu_uninstall_user_range`
+over the range -> `vma_reprotect_range_in`, under one `as->lock` hold
+([[sub-kernel-vma]] owns the cut and the merge). Every refusal is decided
+first, so a refused call costs the range's resident pages nothing -- not even
+a re-fault. Then the leaf PTEs go, and only then does any `prot` change. The
+order is the D-3b rule and `addrspace_clone`'s phase-1 argument: hardware
+resolves a PTE without taking `as->lock`, so a peer thread holding an installed
+writable PTE stores with no fault, no kernel entry and no lock, and a writable
+PTE must be gone before the permission that justified it is
+(`cow.tla::BUGGY_PROTECT_KEEPS_PTE`; `NoWritablePteBeyondProt` is the witness).
+The uninstall runs on a raise as well, because `mmu_install_user_pte` refuses a
+mismatching install over a valid leaf: the next fault must find the slot empty
+to install at the new prot. `mmu_uninstall_user_range` allocates nothing and
+cannot fail, which is what lets it run ahead of the one thing after it that
+still can -- no memory for a split piece -- and that failure leaves every prot
+unchanged and merely costs the range a re-fault. A resident page keeps its slot
+and its charge across a protect to none, as Linux keeps a `PROT_NONE`
+mapping's contents; returning pages is `burrow_decommit`'s job.
+
+The precheck admits ANON, ANON_LAZY and FILE only (`reprotect_admits`, in
+[[sub-kernel-vma]]). CODE is the I-42 pair -- one charge, two aliases, neither
+a plain mapping -- and MMIO / DMA / HOSTMEM are [[inv-i34]] windows whose
+permissions were conferred, not chosen. X is never a target; the mechanism
+refuses it in the precheck and the boundary refuses it before any lookup.
+
+### One clone per SOURCE Burrow: the fork's dedupe cursor
+
+Until B-1a a lazy Burrow had exactly one VMA, so "clone per VMA" and "clone per
+Burrow" were the same count. A protect (or a D-3b window) splits a lazy mapping
+into pieces that all name ONE Burrow, and `burrow_clone_cow` walks the WHOLE
+source, taking a COW share on every resident page -- so a clone per piece
+would leave the child holding k shares of every page while being one holder,
+charged k x the resident count, and the parent unable to take a page in place
+until the child died (`cow.tla::BUGGY_CLONE_PER_PIECE`, violated by the
+initial state: the fork itself is the bug). `struct Burrow.clone_cursor` is
+the fix: the first piece `addrspace_clone` meets mints the clone and parks it
+on the source's cursor; later pieces of the same Burrow map that clone, taking
+only a mapping ref and charging nothing. The cursor is meaningful ONLY under
+the source address space's lock for the duration of one `addrspace_clone`,
+which clears every cursor it set before it unlocks, on every outcome -- a
+cursor that outlived the clone would name a Burrow a failed child's drain may
+already have freed. Nothing else reads it ([[sub-kernel-addrspace]] owns the
+clone; `cow.clone_dedupes_split_pieces` counts exactly two holders per page).
+
 ## Data structures
 
 `struct Burrow`: magic, type, size, page count, the lock, the two counts, the
-charge record (`charge_pid` / `charge_pages` / `shared_out`), and then a
+charge record (`charge_pid` / `charge_pages` / `shared_out`), B-1a's
+`clone_cursor` (the fork's per-source dedupe slot, meaningful only under the
+source's lock during one clone -- NULL at all other times), and then a
 union-by-convention of per-type fields — `pages`/`order` for contiguous
 backings, a hardware-object pointer and PA for the foreign ones, a Spoor plus
 file offset plus cache-key scalars for file-backed, the sparse array shared
@@ -321,6 +378,22 @@ independent gates rather than an enforced property. That is worth keeping as a
 reasoning pattern: *a bound that holds only because of who happens to be
 running is not a bound*, and the first non-exempt driver on that path converts
 it to a real monotonic leak.
+
+**A lazy PIECE refunds its own range at detach** (B-1a, the first finding the
+protect split made live). Once one Burrow has several VMAs, the detach path's
+refund could no longer be the whole Burrow's resident count per piece -- it
+under-counted I-32 once per piece, a shape the D-3b split could already reach
+and a protect split reaches on every thread stack. `detach_one_locked`
+([[sub-kernel-syscall-dispatch]]) now runs `burrow_decommit` over the piece's
+exact range before `burrow_unmap_reporting`, which also returns a detached
+piece's pages to the system at once -- the operator's memory bar: relinquished
+memory returns (`sys_burrow.detach_piece_frees_only_its_pages`).
+
+[[inv-i44]] — two of its mechanisms sit in this file since B-1a: the
+uninstall-before-prot order in `burrow_protect_in` (a writable PTE never
+outlives the permission that justified it), and the one-clone-per-source
+cursor (the per-page share count equals the number of address spaces holding
+the page). Both have a named buggy cfg in [[spec-cow]].
 
 ## Error paths
 

@@ -721,6 +721,30 @@ if (cow_page_put(resident))
 // single-thread Procs (the v1.0 common case). Lock order vma_lock ->
 // buddy_lock matches SYS_BURROW_ATTACH (vma_lock held across
 // burrow_create_anon -> alloc_pages), so no inversion.
+// B-1a audit F1 (P1): the FILE slow path is the ONE fault arm whose admission
+// (step 2 of demand_page_locked, against vma->prot) and whose install are
+// separated by an unlock -- the page-in sleeps on the 9P read. A sibling
+// thread's SYS_BURROW_PROTECT may lower the mapping in that window (the
+// precheck admits FILE; a protect to none, sealed or not, is a guard), and the
+// re-lookup below proves only that the GEOMETRY still matches: the same
+// Burrow at the same slot answers yes for a piece protected to none.
+// Installing at the CURRENT vma->prot would then encode none as a
+// user-READABLE RO leaf (make_user_pte_l3 has no "no access" encoding), so
+// the guard would not guard and no fault would ever run step 2 again. Re-run
+// the admission for the recorded fault type against the prot as it reads NOW;
+// a refusal installs nothing and returns FAULT_UNHANDLED_USER, exactly what
+// the retry would answer (a read of a none page; an instruction fetch from a
+// page lowered to R). The page-in itself is KEPT: the bytes are the Burrow's,
+// prot-independent, and the geometry check already proved they belong in
+// that slot. Both install paths carry their own call, as they carry their
+// own copies of the geometry check.
+static bool file_fault_still_admitted(const struct Vma *vma,
+                                      const struct fault_info *fi) {
+    if (fi->is_write)       return (vma->prot & VMA_PROT_WRITE) != 0;  // never for FILE
+    if (fi->is_instruction) return (vma->prot & VMA_PROT_EXEC)  != 0;
+    return (vma->prot & VMA_PROT_READ) != 0;
+}
+
 // REVENANT R-2 / I-36: file_install_locked -- the FILE slow-path tail, run
 // under the RE-ACQUIRED p->vma_lock. The Burrow is pinned (freq->burrow's
 // burrow_ref, taken in demand_page_locked), so it cannot have been freed (nor
@@ -796,6 +820,11 @@ static enum fault_result file_install_locked(struct Proc *p,
     spin_unlock(&v->lock);
     if (resident != newpg)
         free_pages(newpg, 0);            // discard the loser's freshly-read page
+
+    // B-1a audit F1: the prot may have moved while we slept. The slot keeps
+    // its page; no PTE is installed under a prot that never admitted this
+    // fault (see file_fault_still_admitted).
+    if (!file_fault_still_admitted(vma, fi)) return FAULT_UNHANDLED_USER;
 
     // Install the leaf PTE at vma->prot (R+X for text, never writable -- W^X
     // I-12 holds by construction). Each FILE slot is its own order-0 page, so
@@ -967,6 +996,10 @@ static enum fault_result file_install_cluster_locked(struct Proc *p,
     // freq->slot is in [cstart, cstart+ncluster) by construction, so fault_pg is
     // always set; defensive bail keeps the invariant local.
     if (!fault_pg) return FAULT_UNHANDLED_USER;
+
+    // B-1a audit F1: the cluster is adopted (the bytes are the Burrow's), but
+    // the faulting page's PTE goes in only under a prot that still admits it.
+    if (!file_fault_still_admitted(vma, fi)) return FAULT_UNHANDLED_USER;
 
     // Install the leaf PTE at vma->prot (R+X for text, never writable -- W^X /
     // I-12). The asid arg is vestigial (all-ASID tlbi); pass 0.

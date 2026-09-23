@@ -1716,6 +1716,10 @@ int mmu_install_user_pte_attr(paddr_t pgtable_root, u16 asid,
     return 0;
 }
 
+// B-1a audit F2: calls into mmu_uninstall_user_pte -- the diagnostic the range
+// form's subtree skip is pinned against (a test, not a gauge).
+static u64 g_mmu_uninstall_pte_calls;
+
 // =============================================================================
 // P6 hardening #2 / audit F1 (P1): mmu_uninstall_user_pte
 // =============================================================================
@@ -1747,6 +1751,7 @@ int mmu_install_user_pte_attr(paddr_t pgtable_root, u16 asid,
 // L-2; an earlier version of this comment said otherwise.)
 int mmu_uninstall_user_pte(paddr_t pgtable_root, u16 asid, u64 vaddr) {
     (void)asid;   // reserved (tlbi vaae1is is all-ASID broadcast)
+    __atomic_add_fetch(&g_mmu_uninstall_pte_calls, 1, __ATOMIC_RELAXED);
 
     if (pgtable_root == 0)               return -1;
     if (vaddr & (PAGE_SIZE - 1))         return -1;
@@ -1805,6 +1810,13 @@ int mmu_uninstall_user_pte(paddr_t pgtable_root, u16 asid, u64 vaddr) {
     return 0;
 }
 
+// The first VA past the `shift`-sized block containing `v`, clamped to `end`.
+// v < 2^47 and shift <= 39, so the shifted sum cannot wrap.
+static u64 uninstall_next_block(u64 v, u32 shift, u64 end) {
+    u64 nb = ((v >> shift) + 1) << shift;
+    return (nb < end) ? nb : end;
+}
+
 int mmu_uninstall_user_range(paddr_t pgtable_root, u16 asid,
                              u64 vaddr_start, u64 vaddr_end) {
     if (pgtable_root == 0)                  return -1;
@@ -1813,22 +1825,53 @@ int mmu_uninstall_user_range(paddr_t pgtable_root, u16 asid,
     if (vaddr_start >= vaddr_end)           return -1;
     if (vaddr_end > (1ULL << 47))           return -1;
 
-    // Per-page iterate. Each call does its own tlbi vaae1is + dsb ish
-    // + isb. For a 256 MiB unmap that's 65536 pages * (one PTE clear
-    // + one TLBI + one DSB ISH); the dominant cost is the DSB ISH
-    // wait (microseconds per call). A future optimization can batch
-    // the TLBIs and issue one final DSB ISH at the end -- the
-    // load-bearing invariant (no stale cached translation observable
-    // when this returns) is preserved either way. Today's burrow
-    // sizes are small enough (<= 256 MiB; mallocng-mmap'd usually
-    // 128 KiB) that the unoptimized loop is fine.
-    for (u64 v = vaddr_start; v < vaddr_end; v += PAGE_SIZE) {
-        // Ignore per-page failures (already-cleared / unmapped paths
-        // are benign; argument-validation already happened at the
-        // range entry).
-        (void)mmu_uninstall_user_pte(pgtable_root, asid, v);
+    // Walk by SUBTREE, not by page (B-1a audit F2). An absent L0 / L1 / L2
+    // entry means nothing is mapped under it, so the walk skips 512 GiB /
+    // 1 GiB / 2 MiB at once instead of paying a four-level miss per page --
+    // a protect over a large, mostly-unfaulted reservation was otherwise a
+    // per-page loop under a non-preemptible lock, bounded only by the range
+    // (the burrow window is 64 TiB; SYS_BURROW_PROTECT caps no length, on
+    // purpose: a whole-region protect over a 4 GiB engine reservation is the
+    // producer this chunk exists for). Inside a PRESENT L3 table each page
+    // still goes through mmu_uninstall_user_pte, so every valid leaf is
+    // cleared with exactly the TLBI + DSB ISH it always got: the load-bearing
+    // invariant (no stale cached translation observable when this returns) is
+    // untouched, only the no-op iterations are gone. The per-leaf cost is
+    // bounded by the pages the address space has faulted in, which I-32
+    // bounds. A malformed (non-table) intermediate entry is skipped like an
+    // absent one -- the per-page walk answered -1 for it and this loop ignored
+    // that, so the behaviour is the same.
+    u64 *l0 = (u64 *)pa_to_kva(pgtable_root);
+    u64 v = vaddr_start;
+    while (v < vaddr_end) {
+        u64 e0 = l0[(v >> BLOCK_SHIFT_L0) & 0x1ff];
+        if (!(e0 & PTE_VALID) || !(e0 & PTE_TYPE_TABLE)) {
+            v = uninstall_next_block(v, BLOCK_SHIFT_L0, vaddr_end);
+            continue;
+        }
+        u64 *l1 = (u64 *)pa_to_kva(e0 & ~0xFFFull);
+        u64 e1 = l1[(v >> BLOCK_SHIFT_L1) & 0x1ff];
+        if (!(e1 & PTE_VALID) || !(e1 & PTE_TYPE_TABLE)) {
+            v = uninstall_next_block(v, BLOCK_SHIFT_L1, vaddr_end);
+            continue;
+        }
+        u64 *l2 = (u64 *)pa_to_kva(e1 & ~0xFFFull);
+        u64 e2 = l2[(v >> BLOCK_SHIFT_L2) & 0x1ff];
+        if (!(e2 & PTE_VALID) || !(e2 & PTE_TYPE_TABLE)) {
+            v = uninstall_next_block(v, BLOCK_SHIFT_L2, vaddr_end);
+            continue;
+        }
+        // A present L3 table: its pages in the range, one by one, each with
+        // its own clear + TLBI (per-page failures stay benign, as before).
+        u64 blk_end = uninstall_next_block(v, BLOCK_SHIFT_L2, vaddr_end);
+        for (; v < blk_end; v += PAGE_SIZE)
+            (void)mmu_uninstall_user_pte(pgtable_root, asid, v);
     }
     return 0;
+}
+
+u64 mmu_uninstall_pte_calls(void) {
+    return __atomic_load_n(&g_mmu_uninstall_pte_calls, __ATOMIC_RELAXED);
 }
 
 // =============================================================================

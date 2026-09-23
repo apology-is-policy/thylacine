@@ -10,7 +10,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
-updated: 2026-09-17
+updated: 2026-09-23
 ---
 ## Purpose
 
@@ -54,7 +54,8 @@ touches EL0.
 | `vivarium_{socket,listen}_decide`, the sockaddr/ctl codecs | bool + errno | V-5 |
 | `vivarium_{sigaction,sigprocmask}_decide`, the note maps | verdict / mask | V-6 |
 | `vivarium_{openat_create,mkdirat,unlinkat,renameat}_decide` | verdict + params | #50 path-mutation family (the create/remove decisions) |
-| `vivarium_{mmap_file,mmap_fixed_file,mmap_fixed_anon}_decide` | verdict | DISTRO D-3 file-backed mmap; PROT_WRITE **refused** to keep I-36 |
+| `vivarium_{mmap_file,mmap_fixed_file,mmap_fixed_anon}_decide` | verdict | DISTRO D-3 file-backed mmap; PROT_WRITE **refused** to keep I-36; the fixed-anon arm admits PROT_NONE since B-1a |
+| `vivarium_mprotect_decide` | verdict | B-1a: the prot word alone; `addr` / `len` are the shell's (a zero length succeeds, an unaligned address is EINVAL) |
 | `vivarium_{ppoll,pselect6}_decide` | verdict + params | the poll family; `exceptfds`/POLLPRI is the load-bearing decline (Error paths) |
 | `vivarium_{recvfrom,recvmsg,sendto}_decide` | bool + errno | V-5 socket data path |
 | `vivarium_{faccessat,ioctl,futex,getsockopt}_decide` | verdict | the 6.26 git batch + misc |
@@ -127,8 +128,11 @@ explicit about which:
   namespace is composed explicitly; nothing mounts as a side effect of
   traversal, and that is a property of the model rather than a v1.0 gap);
 - **a stated fidelity degradation**, published in VIVARIUM.md section 9's
-  DEGRADED tier rather than buried — `PROT_NONE` yields a *writable*
-  mapping, so guard pages are not protective under this phenotype.
+  DEGRADED tier rather than buried. The one example this bullet carried --
+  `PROT_NONE` yields a *writable* mapping, so guard pages are not protective
+  under this phenotype -- ENDED at B-1a (2026-09-23): the anon arm now mints
+  the Linux prot exactly under an RW ceiling, and the section-9 row reads
+  ENDED. The shape of the bullet stands for the next one.
 
 `O_NOFOLLOW` and `AT_SYMLINK_NOFOLLOW` are the instructive rejects:
 ignoring them is harmless **today** because symlinks do not exist, and
@@ -182,6 +186,19 @@ and into every other Proc sharing the Image. The refusal keeps "no userspace
 writable file mapping exists" true by construction, and it is an allow-list
 (`PROT_BTI`/`PROT_MTE`/`PROT_GROWSDOWN` fall outside it unenumerated) for the
 same reason the anon arm is; `len` is still deliberately unjudged.
+
+**The two anonymous arms changed at B-1a.** `vivarium_mmap_decide`'s allow-list
+(`VIV_MMAP_PROT_ADMITTED` = R|W) is unchanged, but `PROT_NONE` inside it is now
+minted EXACTLY rather than degraded: the shell mints the Linux prot through
+`sys_burrow_reserve_for_proc` under an RW ceiling, so a `PROT_NONE` mapping
+faults until `mprotect` raises it and a `PROT_READ` one is read-only. And
+`vivarium_mmap_fixed_anon_decide` ADMITS `PROT_NONE` where it used to decline
+-- a FIXED none window over an existing mapping is a guard, and the shell
+mints it at none under an RW ceiling. Until the raise existed a decline was the
+only honest answer: a writable page where a guard was asked for would have
+been a hole, not a degradation. `PROT_NONE` still DECLINES on the FILE arm: a
+none file window is a pure reservation with no raise path for file-backed
+pages at v1.
 
 **The #50 path-mutation family is the create/remove half of the layer.**
 `openat`'s `O_CREAT` (`vivarium_openat_create_decide`), `mkdirat`, `unlinkat` and
@@ -516,17 +533,18 @@ its reasoning fails a test rather than passing quietly.
   consequence is not untidiness: an auditor reading the top of an
   I-43-bearing file is told the surface is unreachable dead code. Tracked
   as task #163.
-- **`VIV_NATIVE_CEILING`'s declaration comment repeats the number the
-  symbol exists to stop repeating — and it stays stale as the ceiling
-  climbs.** The constant tracks the highest assigned native number and is now
-  **109** (`SYS_OPEN_CREATE`, the #50 family); the paragraph declaring it still
-  narrates only the 100 → 102 move (`SYS_EXECVE`/`SYS_RFORK` at L-2a/L-3b) and
-  the four comments that had lagged at 100 — never the later climb to 105 and
-  then 109. The same paragraph's "the two rows below it (pselect6 72, ppoll 73)"
-  is farther off than ever: there are **forty-two** `VIV_LINUX_*` enum values
-  below 109. Tracked as task #164 — the symbol does its job (nothing downstream
-  repeats the number), only its own prose lags, and the lag has widened twice
-  since the dossier first recorded it at 105.
+- **`VIV_NATIVE_CEILING`'s declaration comment used to repeat the number the
+  symbol exists to stop repeating, and went stale seven times.** The constant
+  is now **125** (`SYS_BURROW_PROTECT`, B-1a). The remedy was never going to be
+  a person remembering: since the 2026-09-17 PCI rewrite the assert is pinned
+  to the `SYS__NATIVE_TOP - 1` sentinel, which the compiler recomputes on every
+  append, and the declaration comment narrates that drift history instead of a
+  number -- so B-1a's append moved the sentinel, the assert failed until the
+  constant was bumped with it, and no prose lagged. The `pselect6 72, ppoll 73`
+  paragraph is still a two-row sample of a larger set: **forty-three**
+  `VIV_LINUX_*` enum values lie below 125. Task #164's substance (the
+  self-repeating number) is closed by the sentinel; the sample-size wording is
+  what remains of it.
 - **A dossier's file-level claims about wiring should be read against
   `syscall.c`, not against this file's prose.** Two of the three
   discrepancies above are of the same kind — a V-2-era snapshot preserved
@@ -554,3 +572,31 @@ now overlaps native PCI_MAP_WINDOW, so its old above-ceiling proof no longer
 applies. The existing Tier-2 row consumes the Linux syscall and invokes the
 CLOCK_GETTIME handler directly. A compile-time equality pin records this specific
 collision; all remaining above-ceiling assertions still compile. [[abi-pci-windows]].
+
+## Native ceiling 125 and the mprotect row (2026-09-23, B-1a)
+
+`VIV_NATIVE_CEILING` is 125 (`SYS_BURROW_PROTECT`), pinned to
+`SYS__NATIVE_TOP - 1` by `vivarium.c`'s static assert, so the append moved the
+sentinel and the constant with it. Linux `mprotect` (226) is above the
+ceiling; its collision argument is discharged by construction.
+
+`{ VIV_LINUX_MPROTECT, VIV_TIER2 }` lands with its shell (the tier-2 rule):
+`vivarium_mprotect_decide(addr, len, prot)` judges the prot word ALONE -- an
+allow-list of `PROT_READ | PROT_WRITE | PROT_EXEC`, so `PROT_BTI` /
+`PROT_MTE` / `PROT_GROWSDOWN` / `PROT_GROWSUP` decline without being
+enumerated -- while `addr` / `len` are semantic questions the shell answers
+exactly (a zero length succeeds having touched nothing; an unaligned address
+is the target's EINVAL). `PROT_EXEC` is INSIDE the domain although it is
+always refused: the refusal is the target's stated EACCES ("X is never a
+target"), which a guest must see as that errno and not as ENOSYS. The two
+prot words agree by `_Static_assert` (`BURROW_PROT_* == VIV_PROT_*` in
+`kernel/syscall.c`), which is what lets the shell hand the word through. The
+shell is [[sub-kernel-syscall-dispatch]]'s. `vivarium.mprotect_domain` pins the
+domain; the two `test_vivarium` asserts that pinned 226 at ENOSYS now expect
+TIER2, and the fixed-anon `PROT_NONE` assert that pinned a decline now expects
+TRANSLATED -- the old legs were deliberate tripwires for the degradation, and
+they fired as designed on the chunk's first boot.
+
+The header's `mprotect` paragraph (the old "ENOSYS; musl tolerates it, glibc
+would not") and the 6.21 degradation prose are rewritten; the "WHAT IS
+DELIBERATELY ABSENT" block (task #163, the first caveat above) is not.

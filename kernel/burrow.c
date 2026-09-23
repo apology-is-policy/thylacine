@@ -1145,6 +1145,13 @@ int burrow_protect_in(struct AddrSpace *as, bool exempt,
     // resident pages nothing -- not even a re-fault.
     int rc = vma_reprotect_precheck_in(as, vaddr, (u64)length, prot);
     if (rc != 0) return rc;
+    // A no-op (every mapping already at `prot`, every ceiling too if sealing)
+    // costs the range nothing: no uninstall, no cut, no headroom (audit F6).
+    if (vma_reprotect_is_noop_in(as, vaddr, (u64)length, prot, seal)) return 0;
+    // The I-32 headroom for the cut's pieces, BEFORE the uninstall: a cap hit
+    // refuses changing nothing, not even a re-fault.
+    rc = vma_reprotect_headroom_in(as, exempt, vaddr, (u64)length);
+    if (rc != 0) return rc;
 
     // Uninstall FIRST (the D-3b rule; addrspace_clone's phase-1 argument): a
     // peer thread holding an installed writable PTE stores in hardware with no

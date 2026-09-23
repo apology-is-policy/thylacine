@@ -54,10 +54,27 @@
 //   sys_burrow.detach_piece_frees_only_its_pages
 //     detaching one piece of a split lazy Burrow frees and uncharges exactly
 //     that piece's resident pages; the other piece's pages stay resident.
+//
+// The holotype audit's regressions (F2 / F4 / F6 here; F1's two file-arm
+// tests live in test_demand_page.c, beside the stub Dev they need):
+//   protect.range_walk_is_linear
+//     a protect and a phenotype munmap over k adjacent mappings visit O(k)
+//     list nodes, pinned by the scan-step counter (k(k+1)/2 per pass before).
+//   protect.uninstall_range_skips_absent_subtrees
+//     mmu_uninstall_user_range over a GiB with one resident page visits the
+//     one present 2 MiB table page by page (512 calls), and an empty GiB not
+//     at all (0) -- never 262144.
+//   protect.noop_protect_needs_no_headroom
+//     a protect that changes nothing answers 0 at PROC_VMA_MAX - 1 and
+//     uninstalls nothing; the same sub-range at a new prot is the ENOMEM
+//     control.
+//   sys_mmap.fixed_anon_w_alone_maps_rw
+//     the fixed-anon arm promotes PROT_WRITE alone to RW (was ENOMEM).
 
 #include "test.h"
 
 #include "../../arch/arm64/fault.h"
+#include "../../arch/arm64/mmu.h"
 #include "../../mm/magazines.h"
 #include "../../mm/phys.h"
 
@@ -70,6 +87,7 @@
 #include <thylacine/proc.h>
 #include <thylacine/syscall.h>
 #include <thylacine/types.h>
+#include <thylacine/vivarium.h>
 #include <thylacine/vma.h>
 
 void test_protect_reserve_mints_exactly(void);
@@ -87,6 +105,10 @@ void test_protect_cow_split_then_break(void);
 void test_cow_clone_dedupes_split_pieces(void);
 void test_cow_clone_refuses_eager_anon_with_writable_ceiling(void);
 void test_sys_burrow_detach_piece_frees_only_its_pages(void);
+void test_protect_range_walk_is_linear(void);
+void test_protect_uninstall_range_skips_absent_subtrees(void);
+void test_protect_noop_protect_needs_no_headroom(void);
+void test_sys_mmap_fixed_anon_w_alone_maps_rw(void);
 
 // The non-static inners of the SVC handlers (kernel/syscall.c).
 extern s64 sys_burrow_reserve_for_proc(struct Proc *p, u64 length_raw, u64 prot_raw,
@@ -95,6 +117,8 @@ extern s64 sys_burrow_protect_for_proc(struct Proc *p, u64 vaddr_raw, u64 length
                                        u64 prot_raw, u64 flags_raw);
 extern s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw);
 extern s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw);
+extern s64 sys_munmap_range_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw);
+extern s64 sys_mmap_fixed_anon_for_proc(struct Proc *p, u64 addr, u64 length_raw, u32 pr);
 
 #define P            PAGE_SIZE
 #define PR_NONE      ((u64)BURROW_PROT_NONE)
@@ -766,4 +790,133 @@ void test_sys_burrow_detach_piece_frees_only_its_pages(void) {
     drop(p);
     magazines_drain_all();
     TEST_EXPECT_EQ(phys_free_pages(), free0, "every page came back");
+}
+
+// =============================================================================
+// The holotype audit's regressions.
+// =============================================================================
+
+// Audit F2 (P2): every range walk is ONE scan from the head and then the
+// successors. The witness is the scan-step counter, never the clock: with a
+// re-scan per mapping the precheck alone visited k(k+1)/2 nodes -- 524800 for
+// k = 1024 -- and four passes ran it, under a lock that makes the holder
+// non-preemptible.
+void test_protect_range_walk_is_linear(void) {
+    struct Proc *p = mk();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    enum { K = 1024 };
+
+    s64 base = reserve(p, P, PR_RW, 0);
+    TEST_ASSERT(base > 0, "the first reserve");
+    bool adjacent = true;
+    for (int i = 1; i < K; i++) {
+        s64 va = reserve(p, P, PR_RW, 0);
+        if (va != base + (s64)i * (s64)P) adjacent = false;
+    }
+    TEST_ASSERT(adjacent, "first-fit reserves land adjacently");
+    TEST_EXPECT_EQ(count_vmas(p->as), (u32)K, "K single-page mappings");
+
+    u64 before = vma_scan_steps();
+    TEST_EXPECT_EQ(protect(p, (u64)base, (u64)K * P, PR_R, 0), 0, "protect over all K");
+    u64 steps = vma_scan_steps() - before;
+    TEST_ASSERT(steps < 64ull * K, "the protect's list scans are linear in K (not K^2/2)");
+    TEST_EXPECT_EQ(count_vmas(p->as), (u32)K, "K distinct Burrows: nothing merges");
+    struct Vma *v = vma_lookup(p, (u64)base + (K / 2) * P);
+    TEST_ASSERT(v != NULL && v->prot == VMA_PROT_READ, "and every piece changed");
+
+    before = vma_scan_steps();
+    TEST_EXPECT_EQ(sys_munmap_range_for_proc(p, (u64)base, (u64)K * P), 0,
+                   "the phenotype munmap over all K");
+    steps = vma_scan_steps() - before;
+    TEST_ASSERT(steps < 64ull * K, "the munmap's two loops are linear in K too");
+    TEST_EXPECT_EQ(count_vmas(p->as), 0u, "everything detached");
+
+    drop(p);
+}
+
+// Audit F2 (P2), the uninstall leg: mmu_uninstall_user_range walks by subtree,
+// so a range with nothing under an L1 / L2 entry costs no per-page visit. One
+// resident page in a GiB: exactly the 512 pages of its 2 MiB table are
+// visited (262144 without the skip); an empty GiB: none.
+void test_protect_uninstall_range_skips_absent_subtrees(void) {
+    struct Proc *p = mk();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    const u64 GIB = 1ull << 30;
+
+    s64 va = reserve(p, P, PR_RW, 30);   // a 1 GiB-aligned base
+    TEST_ASSERT(va > 0 && ((u64)va & (GIB - 1)) == 0, "a 1 GiB-aligned reserve");
+    TEST_EXPECT_EQ((int)fault(p, (u64)va, true), (int)FAULT_HANDLED, "fault the page in");
+    TEST_ASSERT(pte_of(p->as->pgtable_root, (u64)va) != 0, "the leaf is installed");
+
+    u64 before = mmu_uninstall_pte_calls();
+    TEST_EXPECT_EQ(mmu_uninstall_user_range(p->as->pgtable_root, 0, (u64)va, (u64)va + GIB),
+                   0, "uninstall the whole GiB");
+    TEST_EXPECT_EQ(mmu_uninstall_pte_calls() - before, 512ull,
+                   "only the one present 2 MiB table is visited page by page");
+    TEST_ASSERT(pte_of(p->as->pgtable_root, (u64)va) == 0, "the leaf is gone");
+
+    before = mmu_uninstall_pte_calls();
+    TEST_EXPECT_EQ(mmu_uninstall_user_range(p->as->pgtable_root, 0,
+                                            (u64)va + GIB, (u64)va + 2 * GIB),
+                   0, "an empty GiB");
+    TEST_EXPECT_EQ(mmu_uninstall_pte_calls() - before, 0ull,
+                   "nothing visited under an absent subtree");
+
+    drop(p);
+}
+
+// Audit F6 (P3): a protect that would change nothing answers 0 before any
+// uninstall or cut, so it needs no I-32 headroom -- at PROC_VMA_MAX - 1 it
+// used to answer ENOMEM where Linux succeeds. The same sub-range at a NEW prot
+// is the control: it does need the two slots.
+void test_protect_noop_protect_needs_no_headroom(void) {
+    struct Proc *p = mk();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    s64 va = reserve(p, 4 * P, PR_RW, 0);
+    TEST_ASSERT(va > 0, "reserve 4 pages RW");
+    TEST_EXPECT_EQ((int)fault(p, (u64)va + P, true), (int)FAULT_HANDLED, "page 1 resident");
+    u64 leaf = pte_of(p->as->pgtable_root, (u64)va + P);
+    TEST_ASSERT(leaf != 0, "page 1 has a writable leaf");
+
+    // The slab axis one below its cap.
+    u32 saved = __atomic_load_n(&p->as->vma_count, __ATOMIC_RELAXED);
+    __atomic_store_n(&p->as->vma_count, (u32)(PROC_VMA_MAX - 1), __ATOMIC_RELAXED);
+
+    TEST_EXPECT_EQ(protect(p, (u64)va + P, 2 * P, PR_RW, 0), 0,
+                   "a no-op protect (same prot) needs no headroom");
+    TEST_EXPECT_EQ(pte_of(p->as->pgtable_root, (u64)va + P), leaf,
+                   "and uninstalls nothing");
+    TEST_EXPECT_EQ(protect(p, (u64)va + P, 2 * P, PR_RW, BURROW_PROTECT_SEAL), 0,
+                   "sealing at the ceiling it already has is a no-op too");
+    TEST_EXPECT_EQ(protect(p, (u64)va + P, 2 * P, PR_R, 0), ERR(T_E_NOMEM),
+                   "control: a real sub-range cut at the cap is ENOMEM");
+    TEST_EXPECT_EQ(pte_of(p->as->pgtable_root, (u64)va + P), leaf,
+                   "and the refusal changed nothing");
+
+    __atomic_store_n(&p->as->vma_count, saved, __ATOMIC_RELAXED);
+    TEST_EXPECT_EQ(protect(p, (u64)va + P, 2 * P, PR_R, 0), 0, "with headroom the cut proceeds");
+    TEST_EXPECT_EQ(count_vmas(p->as), 3u, "three pieces");
+    TEST_ASSERT(pte_of(p->as->pgtable_root, (u64)va + P) == 0, "and that one was uninstalled");
+
+    drop(p);
+}
+
+// Audit F4 (P3): the fixed-anon arm admits PROT_WRITE alone since B-1a (it
+// admits PROT_NONE now, so the R-required gate went); the shell must promote
+// it to RW as the other two arms do, or vma_alloc's W-without-R refusal reads
+// as ENOMEM for a legal request.
+void test_sys_mmap_fixed_anon_w_alone_maps_rw(void) {
+    struct Proc *p = mk();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    s64 rc = sys_mmap_fixed_anon_for_proc(p, EXPLICIT_VA, P, (u32)VIV_PROT_WRITE);
+    TEST_EXPECT_EQ(rc, (s64)EXPLICIT_VA, "PROT_WRITE alone maps (was ENOMEM)");
+    struct Vma *v = vma_lookup(p, EXPLICIT_VA);
+    TEST_ASSERT(v != NULL, "mapped");
+    TEST_EXPECT_EQ(v->prot, (u32)VMA_PROT_RW, "as RW, the Linux/AArch64 promotion");
+    TEST_EXPECT_EQ(vma_prot_max(v), (u32)VMA_PROT_RW, "under an RW ceiling");
+    TEST_EXPECT_EQ((int)fault(p, EXPLICIT_VA, true), (int)FAULT_HANDLED, "and it is writable");
+
+    drop(p);
 }

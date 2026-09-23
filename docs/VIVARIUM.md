@@ -2314,7 +2314,7 @@ correctness.
 Coverage: `vivarium.mmap_domain` (each admitted argument and each decline by
 name, `PROT_EXEC` especially, both `MAP_FIXED` spellings), the `mprotect`-is-T2
 (since B-1a) and `mmap`/`munmap`-are-T2 rows in `rejects_are_deliberate`,
-`vivarium.mprotect_domain`, and `viv-pheno-probe` legs **L16–L23h**: mmap 8
+`vivarium.mprotect_domain`, and `viv-pheno-probe` legs **L16–L23i**: mmap 8
 KiB, write a pattern through both ends of the mapping, read it back, unmap it
 exactly, then assert in-guest that `PROT_EXEC` and `MAP_FIXED` are refused, that
 `mprotect` over the range just unmapped answers `ENOMEM` and with X `EACCES`

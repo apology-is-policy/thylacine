@@ -6129,6 +6129,15 @@ static s64 detach_one_locked(struct Proc *p, u64 vaddr_raw, u64 length,
         if (dv->type == BURROW_TYPE_ANON_LAZY) {
             // Only on the exact match the unmap below will accept, so a refused
             // detach frees nothing.
+            //
+            // KNOWN OVER-CHARGE (B-1a audit F5; B-1a' owns the fix): a D-3b
+            // window replaced INSIDE a touched lazy mapping leaves the replaced
+            // slots resident and charged, and this per-piece refund never
+            // reaches them -- the Burrow's last free returns those pages to the
+            // system uncharged (burrow_free_internal is Proc-agnostic). Safe
+            // direction only: the Proc is capped tighter, never looser. The fix
+            // is vma_replace_range_in decommitting the replaced window of the
+            // OLD Burrow before the swap.
             if (dvma->vaddr_start == vaddr_raw &&
                 dvma->vaddr_end   == vaddr_raw + length)
                 (void)burrow_decommit(p, vaddr_raw, (size_t)length);
@@ -6213,8 +6222,10 @@ s64 sys_munmap_range_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
 
     // Validation pass -- ALL refusals decided before the first removal, under
     // the same lock hold, so the detach loop below cannot stop midway.
-    for (struct Vma *v = vma_next_overlap_in(p->as, vaddr_raw, end); v;
-         v = vma_next_overlap_in(p->as, v->vaddr_end, end)) {
+    // One scan from the head, then successors -- the list is sorted (B-1a
+    // audit F2: a re-scan per mapping was O(k x N) under the lock).
+    for (struct Vma *v = vma_next_overlap_in(p->as, vaddr_raw, end);
+         v && v->vaddr_start < end; v = v->next) {
         if (v->vaddr_start < vaddr_raw || v->vaddr_end > end) {
             spin_unlock(&p->as->lock);
             return -1;                   // boundary straddle: partial unmap
@@ -6239,8 +6250,12 @@ s64 sys_munmap_range_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
     // stack via deferred_free_next -- an uncapped chain that needs no allocation
     // and no lock (each Burrow is at {0,0}, unreachable by any other path).
     struct Burrow *dead = NULL;
-    struct Vma *v;
-    while ((v = vma_next_overlap_in(p->as, vaddr_raw, end)) != NULL) {
+    // The successor is read BEFORE the detach frees `v`; the detach removes
+    // exactly `v` (an exact-geometry match), so `nx` stays valid. The old
+    // re-scan per removal walked the same prefix k times (B-1a audit F2).
+    for (struct Vma *v = vma_next_overlap_in(p->as, vaddr_raw, end), *nx = NULL;
+         v && v->vaddr_start < end; v = nx) {
+        nx = v->next;
         struct Burrow *tf = NULL;
         if (detach_one_locked(p, v->vaddr_start,
                               v->vaddr_end - v->vaddr_start, &tf) != 0) {
@@ -6528,7 +6543,11 @@ static s64 mmap_fixed_window(u64 addr, u64 length_raw, u32 pr,
 
     u32 prot = 0;
     if (pr & VIV_PROT_READ)  prot |= (u32)VMA_PROT_READ;
-    if (pr & VIV_PROT_WRITE) prot |= (u32)VMA_PROT_WRITE;
+    // PROT_WRITE alone maps RW, as Linux/AArch64 does (no write-only AP) and
+    // as the non-fixed anon arm and the mprotect arm already do; without the
+    // promotion vma_alloc's W-without-R refusal surfaced as ENOMEM for a legal
+    // request once B-1a admitted the word (audit F4).
+    if (pr & VIV_PROT_WRITE) prot |= (u32)(VMA_PROT_READ | VMA_PROT_WRITE);
     if (pr & VIV_PROT_EXEC)  prot |= (u32)VMA_PROT_EXEC;
 
     *length_out = length;
@@ -13779,6 +13798,9 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // native syscall's answer, and its errno values are Linux's.
         if (vivarium_mprotect_decide(args[0], args[1], args[2]) != VIV_TRANSLATED)
             return -(s64)T_E_NOSYS;
+        // Linux tests the alignment BEFORE the zero length (do_mprotect_pkey):
+        // mprotect(unaligned, 0, prot) is EINVAL, not a no-op (audit F6).
+        if (args[0] & (PAGE_SIZE - 1)) return -(s64)T_E_INVAL;
         if (args[1] == 0) return 0;
         u32 mpr   = (u32)args[2];
         u64 nprot = 0;

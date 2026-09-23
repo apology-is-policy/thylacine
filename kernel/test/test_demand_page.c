@@ -476,12 +476,27 @@ static s64  g_rev_read_eof   = -1;   // <0 = no EOF; >=0 = absolute file offset 
 // MAP_FIXED split would move it.
 static struct Vma *g_rev_shift_vma = NULL;
 
+// B-1a audit F1: a sibling thread's SYS_BURROW_PROTECT landing while the
+// page-in sleeps. Same stand-in as g_rev_shift_vma -- the stub read runs with
+// vma_lock DROPPED, so it is the one deterministic place a protect can be
+// interposed between the fault's admission and its install.
+static struct Proc *g_rev_protect_proc = NULL;
+static u64          g_rev_protect_va   = 0;
+static u64          g_rev_protect_prot = 0;
+extern s64 sys_burrow_protect_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw,
+                                       u64 prot_raw, u64 flags_raw);
+
 static long rev_test_read(struct Spoor *c, void *buf, long n, s64 off) {
     (void)c;
     g_rev_read_calls++;
     if (g_rev_shift_vma) {
         g_rev_shift_vma->burrow_offset += PAGE_SIZE;
         g_rev_shift_vma = NULL;          // shift ONCE, so a re-fault can settle
+    }
+    if (g_rev_protect_proc) {
+        (void)sys_burrow_protect_for_proc(g_rev_protect_proc, g_rev_protect_va,
+                                          PAGE_SIZE, g_rev_protect_prot, 0);
+        g_rev_protect_proc = NULL;       // protect ONCE
     }
     if (g_rev_read_fail) return -1;
     long m = n;
@@ -699,6 +714,115 @@ void test_demand_page_file_geometry_shift_bails_single(void) {
         "single-path: slot 0 not filled with the stale page");
     TEST_EXPECT_EQ(walk_to_l3_entry(p->as->pgtable_root, USER_VA), 0ull,
         "single-path: no PTE installed on the bail");
+
+    drop_proc(p);
+    burrow_unref(v);
+}
+
+// B-1a audit F1 (P1): a FILE read fault admitted at R, whose page-in sleeps
+// while a sibling protects the page to NONE, must NOT install. The FILE slow
+// path is the one arm whose admission and install span an unlock; the
+// re-lookup after the sleep verifies the geometry (same Burrow, same slot),
+// which a whole-mapping protect leaves intact, so only a second admission
+// check stands between the fault and a user-readable RO leaf on a none page
+// -- a guard that does not guard, with no fault ever running step 2 again.
+// Pre-fix: FAULT_HANDLED and a live RO PTE. The page-in is KEPT (the bytes
+// are the Burrow's), so a raise back to R resolves from the slot with no
+// second read. Single-path twin (a ONE-page Burrow degrades the cluster fill
+// to the single fill -- the same knob the geometry-shift pair uses).
+void test_protect_file_pagein_racing_protect_bails_single(void);
+void test_protect_file_pagein_racing_protect_bails_single(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    g_rev_read_fail  = false;
+    g_rev_read_calls = 0;
+    g_rev_read_chunk = 0;
+    g_rev_read_eof   = -1;
+    g_rev_shift_vma  = NULL;
+
+    struct Spoor *s = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc");
+    struct Burrow *v = burrow_create_file(s, 0, ONE_PAGE);
+    TEST_ASSERT(v != NULL, "burrow_create_file");
+    int rc = burrow_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_READ);
+    TEST_EXPECT_EQ(rc, 0, "burrow_map R-only 1 page");
+
+    // Arm: the read protects the page to NONE while the fault sleeps.
+    g_rev_protect_proc = p;
+    g_rev_protect_va   = USER_VA;
+    g_rev_protect_prot = 0;
+    struct fault_info fi;
+    make_fi(&fi, USER_VA + 0x40, /*is_write=*/false, /*is_instr=*/false);
+    enum fault_result r = userland_demand_page(p, &fi);
+    TEST_EXPECT_EQ(r, FAULT_UNHANDLED_USER,
+        "single-path: a read admitted at R and installed after a protect to none is REFUSED");
+    TEST_EXPECT_EQ(g_rev_read_calls, 1, "the read happened (the refusal is post-read)");
+    TEST_EXPECT_EQ(walk_to_l3_entry(p->as->pgtable_root, USER_VA), 0ull,
+        "NO PTE on a none page (pre-fix: a user-readable RO leaf)");
+    struct Vma *vma = vma_lookup(p, USER_VA);
+    TEST_ASSERT(vma != NULL && vma->prot == 0, "the mapping reads none");
+    TEST_ASSERT(burrow_file_slot_for_test(v, 0) != NULL,
+        "the page-in is kept: the bytes are the Burrow's, not the prot's");
+
+    // Raise back to R: the re-fault installs from the resident slot, no re-read.
+    TEST_EXPECT_EQ(sys_burrow_protect_for_proc(p, USER_VA, ONE_PAGE, 1 /*R*/, 0), 0,
+                   "protect back to R");
+    r = userland_demand_page(p, &fi);
+    TEST_EXPECT_EQ(r, FAULT_HANDLED, "the re-fault at R resolves");
+    TEST_EXPECT_EQ(g_rev_read_calls, 1, "from the resident slot: no second read");
+    u64 pte = walk_to_l3_entry(p->as->pgtable_root, USER_VA);
+    TEST_ASSERT(pte != 0, "installed");
+    TEST_EXPECT_EQ(pte & BIT_AP_FIELD, BIT_AP_RO_ANY, "read-only, as the mapping says");
+
+    drop_proc(p);
+    burrow_unref(v);
+}
+
+// The cluster-path twin (a two-page Burrow takes the read-ahead fill). The two
+// install paths carry SEPARATE copies of the admission re-check, as they do of
+// the geometry check, so one test cannot cover both.
+void test_protect_file_pagein_racing_protect_bails_cluster(void);
+void test_protect_file_pagein_racing_protect_bails_cluster(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    g_rev_read_fail  = false;
+    g_rev_read_calls = 0;
+    g_rev_read_chunk = 0;
+    g_rev_read_eof   = -1;
+    g_rev_shift_vma  = NULL;
+
+    struct Spoor *s = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc");
+    struct Burrow *v = burrow_create_file(s, 0, 2 * ONE_PAGE);
+    TEST_ASSERT(v != NULL, "burrow_create_file");
+    int rc = burrow_map(p, v, USER_VA, 2 * ONE_PAGE, VMA_PROT_READ);
+    TEST_EXPECT_EQ(rc, 0, "burrow_map R-only 2 pages");
+
+    g_rev_protect_proc = p;
+    g_rev_protect_va   = USER_VA;
+    g_rev_protect_prot = 0;
+    struct fault_info fi;
+    make_fi(&fi, USER_VA + 0x40, /*is_write=*/false, /*is_instr=*/false);
+    enum fault_result r = userland_demand_page(p, &fi);
+    TEST_EXPECT_EQ(r, FAULT_UNHANDLED_USER,
+        "cluster-path: a read admitted at R and installed after a protect to none is REFUSED");
+    TEST_EXPECT_EQ(g_rev_read_calls, 1, "one batched read (the cluster fill)");
+    TEST_EXPECT_EQ(walk_to_l3_entry(p->as->pgtable_root, USER_VA), 0ull,
+        "NO PTE on the none page");
+    TEST_ASSERT(burrow_file_slot_for_test(v, 0) != NULL, "slot 0 adopted (the cluster is kept)");
+    TEST_ASSERT(burrow_file_slot_for_test(v, 1) != NULL, "slot 1 adopted too");
+    struct Vma *vma = vma_lookup(p, USER_VA);
+    TEST_ASSERT(vma != NULL && vma->prot == 0, "page 0's piece reads none");
+    struct Vma *vma1 = vma_lookup(p, USER_VA + ONE_PAGE);
+    TEST_ASSERT(vma1 != NULL && vma1->prot == VMA_PROT_READ, "page 1's piece still reads R");
+
+    // Page 1 was never protected: its fault resolves from the adopted slot.
+    make_fi(&fi, USER_VA + ONE_PAGE + 0x10, /*is_write=*/false, /*is_instr=*/false);
+    r = userland_demand_page(p, &fi);
+    TEST_EXPECT_EQ(r, FAULT_HANDLED, "the untouched page resolves");
+    TEST_EXPECT_EQ(g_rev_read_calls, 1, "from the resident slot: no second read");
 
     drop_proc(p);
     burrow_unref(v);

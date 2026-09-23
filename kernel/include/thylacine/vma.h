@@ -334,7 +334,9 @@ void        vma_drain_in(struct AddrSpace *as);
 //          bits beyond R|W
 //   NOMEM  a hole in the range (nothing mapped, or a gap between mappings), a
 //          guard (unmapped address space that happens to be reserved), or no
-//          I-32 headroom / memory for the split pieces
+//          I-32 headroom for the split pieces (decided in the precheck, before
+//          the caller's uninstall); a slab shortfall for a piece is the one
+//          refusal that can follow the uninstall, and it costs a re-fault
 //   ACCES  a shared-in mapping (another Proc's memory), a CODE alias (the I-42
 //          pair), a hardware mapping (MMIO / DMA / HOSTMEM), or `prot` above
 //          the mapping's ceiling
@@ -356,8 +358,23 @@ int vma_reprotect_precheck_in(struct AddrSpace *as, u64 vaddr, u64 length,
 int vma_reprotect_range_in(struct AddrSpace *as, bool exempt,
                            u64 vaddr, u64 length, u32 prot, bool seal);
 
+// True when a protect over the (precheck-admitted) range would change nothing:
+// burrow_protect_in then answers 0 without an uninstall, and
+// vma_reprotect_range_in without a cut -- a no-op must not need I-32 headroom
+// for pieces the merge would fold straight back (B-1a audit F6).
+bool vma_reprotect_is_noop_in(struct AddrSpace *as, u64 vaddr, u64 length,
+                              u32 prot, bool seal);
+
+// The I-32 headroom for the pieces a cut would add: 0 or -T_E_NOMEM. Decided
+// by burrow_protect_in after the no-op short-circuit and BEFORE its uninstall,
+// so a cap hit changes nothing (the audit close); re-checked by
+// vma_reprotect_range_in under the same lock hold.
+int  vma_reprotect_headroom_in(struct AddrSpace *as, bool exempt, u64 vaddr,
+                              u64 length);
+
 // Diagnostic accessors.
 u64      vma_total_allocated(void);
 u64      vma_total_freed(void);
+u64      vma_scan_steps(void);      // nodes visited by vma_next_overlap_in (audit F2)
 
 #endif // THYLACINE_VMA_H

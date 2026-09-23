@@ -10,7 +10,7 @@ validated-by: [spec-cow, gate-smp]
 locks: [lock-vma, lock-cow]
 design: ["docs/LINEAGE.md", "docs/ARCHITECTURE.md"]
 created: 2026-08-06
-updated: 2026-09-06
+updated: 2026-09-23
 ---
 ## Purpose
 
@@ -122,10 +122,10 @@ and never learns a fork was attempted.
 
 | Kind | Becomes | Why |
 |---|---|---|
-| `ANON_LAZY` | **cloned**, both sides flagged COW | per-page ownership exists to break |
+| `ANON_LAZY` | **cloned ONCE per source Burrow**, both sides flagged COW | per-page ownership exists to break; the pieces a protect left all map the one clone (the cursor, below) |
 | `FILE` | **shared** | read-only by construction; sharing is the point of the I-36 Image cache |
-| `ANON` read-only | **shared** | one indivisible buddy block, but nothing can ever write it |
-| `ANON` writable | **refused** | no per-page ownership for a break to take |
+| `ANON` with a read-only CEILING | **shared** | one indivisible buddy block that nothing can EVER write -- the ceiling, not the current prot (B-1a) |
+| `ANON` with WRITE in its ceiling | **refused** | no per-page ownership for a break to take, and a raise could make it writable again |
 | guard | reproduced as a guard | dropping it silently deletes the child's stack guard page |
 | MMIO / DMA / SHARED_IN | **refused** | a device window is an *authority transfer*, not a copy — at any prot |
 
@@ -133,6 +133,43 @@ The read-only `ANON` arm is not a corner case, it is **every Proc**: the
 vDSO clock page is a kernel-owned eager-anon page mapped read-only into
 every address space, so without that arm no real fork clones at all and
 the tests pass on synthetic spaces only.
+
+Since B-1a the test is on `vma_prot_max`, never on `prot`. `SYS_BURROW_PROTECT`
+means "read-only now" is no longer "read-only forever": a mapping minted RW
+and protected down to R can be raised back by either side, and a share of it
+would be one address space's writes landing in another's -- the [[inv-i44]]
+violation, and the second of the three findings the protect made live. The
+vDSO's ceiling is R (a mint's ceiling is its mint prot), so it still shares;
+an eager attach protected down to R is refused
+(`cow.clone_refuses_eager_anon_with_writable_ceiling`). The child's VMA copies
+the parent's ceiling bits -- `nv->flags = flags | (src_vma->flags &
+VMA_FLAG_MAX_MASK)` -- so a child can raise exactly what its parent could and
+nothing more.
+
+**One clone per source Burrow, not per VMA** (the third finding). The
+per-address-space clone above walks the WHOLE source, taking a share on every
+resident page. Until B-1a one lazy Burrow had one VMA, so per-VMA and
+per-Burrow were the same count; a protect (or a D-3b window) splits a lazy
+mapping into pieces that all name one Burrow, and a clone per piece leaves
+the child holding k shares of every page while being one holder -- the child
+charged k x the resident count, the parent never able to take a page in place
+until the child died. That is `cow.tla::BUGGY_CLONE_PER_PIECE`, where
+`ShareIsHolderCount` fails in the INITIAL state, because the fork itself is
+the bug. `clone_one_vma` dedupes through `struct Burrow.clone_cursor`: the
+first piece mints the clone and parks it on the source; later pieces map that
+clone, taking only a mapping ref (the resident charge rides the mint). Every
+cursor the clone set is cleared in a sweep after phase 2, on every outcome,
+while `src->lock` still excludes the next clone of this space -- and on the
+two failure paths inside `clone_one_vma` before the minted clone is unreffed
+-- so a failed child's drain can never leave a cursor naming a freed Burrow.
+`cow.clone_dedupes_split_pieces` counts it: every page has exactly TWO
+holders, and the child is charged the resident count once. The holotype
+audit's F3 (P3): the `vma_alloc` failure arm cleared the cursor through the
+`backing` local, which the lazy arm had REBOUND to the clone -- so it wrote
+the clone's own (already NULL) slot and freed the clone while the source still
+named it; the sweep overwrote the dangling pointer before anything could read
+it, which is why nothing failed. It now clears the source's, as the insert
+failure arm two lines below always did.
 
 **The COW count lives on the page, not the slot**, and the reasoning is
 worth keeping because a slot-indexed count *almost* works. A break makes
@@ -257,8 +294,15 @@ accounting bound cannot do without; exactness is not.
   means the pairing is already broken and a silent 4-billion-page counter
   would hide it.
 - [[inv-i31]] — by construction: one address space, one `context_id`.
-- [[inv-i12]] — the read-only `ANON` share is only sound because
-  read-only is *permanent*; there is no prot-mutation syscall.
+- [[inv-i12]] / [[inv-i44]] — the eager-`ANON` share is sound only because
+  the CEILING is permanent. `SYS_BURROW_PROTECT` exists since B-1a, so
+  "read-only now" no longer means "read-only forever"; the share keys on
+  `vma_prot_max`, which nothing raises. EXEC is never a protect target, so a
+  shared read-only mapping cannot become executable through a raise either.
+- [[inv-i44]], second half (B-1a) — one clone per source Burrow, so the
+  per-page share count equals the number of address spaces holding the page
+  (`ShareIsHolderCount`); the cursor is cleared before the source lock drops on
+  every outcome.
 - [[inv-i5]] and [[inv-i34]] — MMIO and DMA VMAs are refused by the fork
   at any prot, so a child never inherits a second mapping of a device
   window.
@@ -389,6 +433,17 @@ closed on a kernel-only Proc), `addrspace.proc_alloc_in_shares` (an
 `addrspace.share_drains_at_last_ref` (the VMA drain runs at the last unref, not
 the first death — the L-3 fix). The COW break's two arms are pinned by
 [[spec-cow]]'s buggy cfgs and exercised at runtime through the fork path.
+
+B-1a (`kernel/test/test_protect.c`, [[sub-kernel-protect-witness]]):
+`cow.clone_dedupes_split_pieces` (a Burrow split into pieces is cloned ONCE
+per fork; every page has exactly two holders; the child is charged once),
+`cow.clone_refuses_eager_anon_with_writable_ceiling` (an eager mapping
+protected down to R is NOT shared; one whose ceiling is R is), and
+`protect.cow_split_then_break` (a protect on a forked mapping cuts it soundly:
+the child's break on a page in one piece copies, the parent's page is
+untouched). The `nodedupe` sabotage -- a clone per VMA again -- fails exactly
+"each page has exactly TWO holders, not one per piece". The three new
+counterexample cfgs are [[spec-cow]]'s.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

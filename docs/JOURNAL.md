@@ -22,6 +22,61 @@ needed the operator.
 
 
 ---
+## 2026-09-23, night (main, Fable 5.1, effort max) -- B-1a closed: the audit found the one arm that sleeps
+
+The holotype round on `839c1745` (Fable 5.1, MODEL start == end; read-only)
+returned 0 P0 / 1 P1 / 1 P2 / 4 P3, and the P1 is the lesson of the run.
+
+**The self-audit and the model drew the same wrong boundary.** Both said "the
+fault holds `as->lock` across the whole demand_page, so a protect and a fault
+serialise" -- true of the lazy, COW and eager arms the chunk wrote, and false
+of the one arm that SLEEPS. The FILE page-in drops the lock for its 9P read
+and re-validates only the geometry afterwards (same Burrow, same slot), which
+a whole-mapping protect leaves intact; so a sibling thread's
+`mprotect(page, PROT_NONE)` landing mid-page-in ended with
+`file_install_locked` installing at prot 0, which `make_user_pte_l3` encodes
+as a user-readable RO leaf. A guard that did not guard, on a page whose fault
+path would never run again. The prosecutor found it by asking which arm's
+admission and install span an unlock -- and `cow.tla` had that arm listed
+under "what this deliberately does not model", which is exactly where an
+auditor should look first. Fix: `file_fault_still_admitted` re-runs the
+admission after the sleep in both install paths and keeps the page-in (the
+bytes are the Burrow's, prot-independent). The regression interposes the
+protect from inside the stub `dev->read`, the stand-in the #190
+geometry-shift tests use: the read runs with the lock dropped, so it is the
+one deterministic place a sibling can be.
+
+**The quadratic walks were mine, four times over.** `vma_next_overlap_in`
+restarts from the list head, and I iterated a range with it in the precheck
+(run twice), the first/last scan and the apply loop -- k(k+1)/2 nodes per
+pass, the munmap row had the same shape already, and all of it under a lock
+whose holder is non-preemptible. Now one scan then successors everywhere,
+pinned by a node counter rather than a clock (`protect.range_walk_is_linear`,
+k = 1024: under 64k steps where the bug cost 524800 per pass). The uninstall
+leg got the fix the design notes had deferred to B-1a':
+`mmu_uninstall_user_range` walks by subtree, so an unfaulted GiB costs
+nothing and a resident page costs exactly what it always did (512 per-page
+calls for its 2 MiB table, measured; 262144 before).
+
+**A control written from the design, not measured.** The no-op test's control
+-- "the ENOMEM refusal changed nothing" -- failed on its first run: a cap hit
+refused AFTER the uninstall and cost the re-fault the header documented. The
+honest options were to weaken the assertion or to make it true; the headroom
+check now runs before the uninstall, after the no-op short-circuit (the first
+attempt put it before the short-circuit, and a no-op needs no headroom, so
+THAT failed the other assertion). Two boots to get one control right; it now
+says what it claims.
+
+**Results.** `check-cow.sh` all nine as claimed; kernel suite 1638/1638 at
+-smp 4 and at -smp 1 (six new regressions), zero extinctions, both probes and
+L23i in the ladder; the combined RED (every fix reverted, tests kept) is
+1632/1638 -- the six new tests and nothing else; SMP gate PASS -- default-smp1 / default-smp4 / default-smp8 / ubsan-smp4 / ubsan-smp8 each 10/10, 0 CORRUPTION / 0 EXTERNAL-KILL / 0 inject-miss / 0 timing / 0 other (N=10; 51 min). Owned, not fixed: F5, an over-charge after a D-3b
+window inside a touched lazy mapping (B-1a'); and, named by the round rather
+than found, the pouch substrate's `mprotect` is still ENOSYS -- 6.21 "ended"
+is phenotype-only until B-1b. The eight dossiers the chunk commit's trailer
+promised are written, plus the probes' new one and `sub-kernel-mmu`.
+
+---
 ## 2026-09-23, afternoon (main, Fable 5.1, effort max) -- B-1a: the permission ceiling, built
 
 The scripture from the morning (`96f24314`) became code the same day: spec

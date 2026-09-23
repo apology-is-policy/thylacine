@@ -17,7 +17,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-09-21
+updated: 2026-09-23
 ---
 ## Purpose
 
@@ -37,6 +37,13 @@ SYS_DMA_SEGMENTS stays 112; later PCI appends now put SYS__NATIVE_TOP at 124. No
 was renumbered. Native C and Rust mirrors include the new operations and
 CAP_POST_SERVICE at bit 13. The console operation accepts ARM=1 or END=2;
 unknown operations fail closed.
+
+**B-1a append (2026-09-23).** `SYS_BURROW_RESERVE` = 124 and
+`SYS_BURROW_PROTECT` = 125; `SYS__NATIVE_TOP` is 126 and `VIV_NATIVE_CEILING`
+125. Re-measured on this tree, not incremented: **123** live numbers, the span
+runs to 125 with the same three holes (26, 30, 43), `syscall_dispatch` has
+exactly 123 arms, and both set differences are empty. The section at the end
+of this dossier carries the two records.
 
 
 `x8` carries the syscall number, `x0..x5` the arguments, `x0` the result —
@@ -69,8 +76,10 @@ failure", and the header says so, steering POSIX-EPERM contours to
 
 ### The number space is coherent, and that is verifiable
 
-**107** numbers are live; `syscall_dispatch`'s switch has exactly **107** arms;
-the two sets are equal with **both** differences empty. Every mirrored number
+**123** numbers are live (re-measured 2026-09-23; this section was written at
+107 and the appends since are the dated sections at the end);
+`syscall_dispatch`'s switch has exactly **123** arms; the two sets are equal
+with **both** differences empty. Every mirrored number
 agrees across all three copies — there is no case where a name means one number
 to the kernel and another to a library. (Re-measured this sweep against the enum
 and the dispatch body: each set difference is empty, and no name overlapping a
@@ -83,8 +92,10 @@ difference in each direction is the claim worth making.
 That is worth stating precisely because it is *not* guaranteed by anything. It
 is the current state, maintained by hand.
 
-The allocated span runs to **109** with **three holes** — 26, 30 and 43, all
-`/srv` retirements. The 110 slots below the span are 107 live plus those three.
+The allocated span runs to **125** with **three holes** — 26, 30 and 43, all
+`/srv` retirements (it ran to 109 when this section was written; 110..125 are
+the Imperium, DMA-segments, PCI, trusted-seat, nonblock and B-1a appends
+below).
 
 Four numbers moved the census since the 103-live sweep, and this refresh folded
 them in by **re-measuring**, not incrementing — the same "measure, don't guess"
@@ -460,3 +471,51 @@ caller pivoted back; with the shed it would strip the table for good) -- and
 `SYS_CHROOT`'s to install. The `SYS_PWRITE` O_APPEND note changed with pouch
 0040: ports pass the kernel's `OAPPEND` omode bit instead of emulating append
 with one seek at open.
+
+## B-1a: SYS_BURROW_RESERVE 124 and SYS_BURROW_PROTECT 125 (2026-09-23)
+
+Two new numbers rather than flags on `SYS_BURROW_ATTACH_LAZY`, per the
+2026-06-23 blast-radius precedent; both answer `-T_E_*`, never a bare -1. The
+ceiling is 125 and `SYS__NATIVE_TOP` 126 (`vivarium.c`'s static assert pins
+`VIV_NATIVE_CEILING == SYS__NATIVE_TOP - 1`). Linux `mprotect` is 226, above
+the ceiling, so its collision argument is discharged by construction.
+
+`SYS_BURROW_RESERVE(length x0, prot x1, align_log2 x2) -> vaddr / -errno`: a
+demand-zero anonymous reservation in the burrow-attach window, minted at
+`prot` in {none, R, RW} under a ceiling of RW, its base aligned to
+`2^align_log2` (0 = page; else 12..30, `BURROW_RESERVE_ALIGN_MIN/MAX_LOG2`).
+Same page rounding and I-32 posture as `SYS_BURROW_ATTACH_LAZY` (pages charged
+at fault, the VMA count at reserve; `BURROW_RESERVE_MAX` = 1 GiB). Refused: a
+prot with X (`-EACCES`, first), W-without-R / other bits / an alignment out of
+range / length 0 (`-EINVAL`), over the max / no aligned gap / OOM / the VMA cap
+(`-ENOMEM`).
+
+`SYS_BURROW_PROTECT(vaddr x0, length x1, prot x2, flags x3) -> 0 / -errno`:
+move every page of the range to `prot` in {none, R, RW} under each mapping's
+ceiling; `BURROW_PROTECT_SEAL` (the only flag) also lowers the ceiling to
+`prot`, irrevocably. No window confinement and no capability: what may be
+protected is decided by the mapping, not by its address or the caller's caps
+(attenuation creates no authority; `CAP_JIT` gates the creation of code).
+All-or-nothing across several mappings. Refused: X (`-EACCES`, before any
+lookup -- so `protect(X)` over an unmapped range is EACCES where `protect(R)`
+is ENOMEM, which is how the boundary order is observable), other bits /
+W-without-R / unknown flags / an unaligned `vaddr` / length 0 (`-EINVAL`), a
+hole or a guard in the range or no room for the split (`-ENOMEM`), a shared-in
+/ CODE / hardware mapping or a prot above the ceiling (`-EACCES`).
+
+The prot word is `BURROW_PROT_NONE/READ/WRITE/EXEC` = 0/1/2/4 -- the kernel's
+own `VMA_PROT_*` and, by construction, Linux's `PROT_*`; `kernel/syscall.c`
+pins all three equal with a `_Static_assert`, which is what lets the phenotype
+`mprotect` row pass its word straight through. `EXEC` is named only so its
+refusal can be spelled.
+
+Mirrors: the Rust mirror carries both numbers and the constants
+(`T_SYS_BURROW_RESERVE` / `T_SYS_BURROW_PROTECT`,
+`T_BURROW_PROT_NONE/READ/WRITE`, `T_BURROW_PROTECT_SEAL`; `t_burrow_reserve` /
+`t_burrow_protect` in `usr/lib/libthyla-rs/src/lib.rs`), deliberately WITHOUT a
+`T_BURROW_PROT_EXEC` -- a constant nobody may pass is not worth mirroring, and
+the probe that watches X refused spells it as a literal. The C mirror carries
+neither (no C consumer; the subset rule above, still holding visibly).
+Consumers: `/protect-probe`, `/protect-guard-child`
+([[sub-kernel-protect-witness]]) and the phenotype `mmap` / `mprotect` rows,
+which are the first production callers.

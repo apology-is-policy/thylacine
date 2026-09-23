@@ -12,7 +12,7 @@ locks: []
 abis: []
 design: ["docs/reference/86-pouch-stratumd-boot.md (the 16c design section)"]
 created: 2026-08-02
-updated: 2026-09-22
+updated: 2026-09-23
 ---
 ## Purpose
 
@@ -30,6 +30,20 @@ the fixture imperium key for the eligible test identity. Production
 self-elevation still requires a corvus eligibility record and a trusted SAK
 episode; the tool does not bypass that path. Haul's posting gate is exercised
 by a separate interactive test against a real npxf server.
+
+**B-1a probes in the ladder (2026-09-23).** joey spawns `/protect-probe` and
+reaps it by pid with `t_wait_pid_for`, requiring status 0 -- eight legs of the
+permission ceiling driven from EL0 through `SYS_BURROW_RESERVE` /
+`SYS_BURROW_PROTECT`: reserve-raise-write, RELRO, grow / shrink / grow keeping
+contents, seal, X refused before the lookup, the malformed-word refusals, a
+2 MiB-aligned reserve, piece detach. Then
+`pouch_smoke_one_expect_fault("protect-guard-child", "protect-guard-child:
+touching the guard")` -- the expect-fault census, which requires BOTH the
+marker in the child's stdout pipe AND a non-zero exit status, so a page sealed
+at none that did not guard (the child prints SURVIVED and exits 0) fails the
+boot. Both rungs are boot-fatal like every other. The marker goes out on fd 1
+(`t_write`), not `t_putstr`: `SYS_PUTS` is the console, and the census reads
+the pipe ([[sub-kernel-protect-witness]]).
 
 
 Ordered, and every step is boot-fatal:
@@ -280,9 +294,10 @@ event-driven; no timing constant appears in this path.
   nothing. See [[chg-2026-08-03-syscall-abi-sweep]].
 
 - **THE FILE THAT SURVIVED THAT NARROWING IS ITSELF ONLY PARTLY DESCRIBED HERE,
-  AND THIS DOSSIER IS ITS SOLE OWNER.** `usr/joey/joey.c` is **11578 lines and
-  53 functions** (it was 9771 / ~50 at batch 35; the +1807 since is all in the
-  parts named below, never the bringup). What is written above is the bringup
+  AND THIS DOSSIER IS ITS SOLE OWNER.** `usr/joey/joey.c` is **12056 lines**
+  (11578 lines / 53 functions at the 2026-09-06 re-sweep, 9771 / ~50 at batch
+  35; the growth is all in the parts named below, never the bringup -- the
+  `SYS_PIVOT_ROOT` line last moved 2026-05-26). What is written above is the bringup
   sequence — the daemon spawn, the readiness handshake, the attach, the pivot and
   the re-grafts, plus the service-post decision. That is a few hundred lines, and
   it is unchanged: the `SYS_PIVOT_ROOT` line last moved 2026-05-26, months before

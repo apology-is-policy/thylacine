@@ -4,7 +4,7 @@ type: moc
 title: "Kernel memory: the physical allocator stack"
 parent: moc-kernel
 created: 2026-08-01
-updated: 2026-08-03
+updated: 2026-09-23
 ---
 Where every kernel byte comes from, and what names a region once it
 exists. Four layers:
@@ -46,6 +46,12 @@ The virtual side, swept at batch 29 and living here too:
 - **[[sub-kernel-vma]]** — the address-space description. Small, and
   where [[inv-i12]] is actually **decided**: `vma_alloc`'s `WRITE|EXEC`
   rejection is the single gate every user mapping in the system passes.
+  Since B-1a (2026-09-23) also the permission ceiling and the multi-mapping
+  reprotect: a mapping's prot moves among {none, R, RW} under a mint-time
+  ceiling, and X is never a target.
+- **[[sub-kernel-protect-witness]]** — the ceiling's three witnesses: the
+  in-kernel suite (`test_protect.c`), the EL0 probe, and the expect-fault
+  guard child that dies through a page sealed at none.
 - **[[sub-kernel-fault]]** — the dispatcher. Classification (six kernel
   branches, all fatal, each naming its own diagnosis) and demand paging
   across six backing arms, one of which must sleep and does so under a

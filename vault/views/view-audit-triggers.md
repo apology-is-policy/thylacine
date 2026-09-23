@@ -28,7 +28,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-asid]] | arch/arm64/asid.c, arch/arm64/asid.h | inv-i31 | - **The rollover-versus-switch race** is the whole surface. Any change to the |
 | [[sub-kernel-boot-entry]] | arch/arm64/start.S, arch/arm64/kernel.ld | inv-i16, inv-i21 | - **The eret window.** Any hand-rolled path that sets `ELR_EL1` and returns to |
 | [[sub-kernel-boot-sequence]] | kernel/main.c, arch/arm64/hwfeat.c, arch/arm64/hwfeat.h, kernel/canary.c, kernel/include/thylacine/canary.h, kernel/fault_test.c, tools/test-fault.sh | inv-i15 | - **Every reordering is a potential correctness change**, and the dependencies are |
-| [[sub-kernel-burrow]] | kernel/burrow.c, kernel/include/thylacine/burrow.h | inv-i7, inv-i32 | - **The free decision must stay under the lock and the free must stay outside |
+| [[sub-kernel-burrow]] | kernel/burrow.c, kernel/include/thylacine/burrow.h | inv-i7, inv-i32, inv-i44 | - **The free decision must stay under the lock and the free must stay outside |
 | [[sub-kernel-caps]] | kernel/include/thylacine/caps.h, kernel/devcap.c, kernel/include/thylacine/devcap.h, kernel/proc.c, kernel/test/test_devcap.c | inv-i2, inv-i25 | - A new capability bit must be added to `CAP_ALL` **or** to |
 | [[sub-kernel-cons]] | kernel/cons.c, kernel/include/thylacine/cons.h | inv-i27, inv-i9 | - **Nothing that needs [[lock-proc-table]] may be called under [[lock-cons]], |
 | [[sub-kernel-content]] | kernel/devramfs.c, kernel/devenv.c, kernel/env.c, kernel/include/thylacine/env.h, kernel/random.c, kernel/chacha20.c, kernel/include/thylacine/random.h, kernel/include/thylacine/chacha20.h | inv-i1, inv-i12, inv-i16, inv-i28, inv-i32, inv-i33 | - **The random buffer's first fill is not secret, and only boot ordering hides |
@@ -79,7 +79,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-srvconn]] | kernel/srvconn.c, kernel/include/thylacine/srvconn.h | inv-i9 | What an auditor attacks here (the CLAUDE.md CF-3 B row absorbed): |
 | [[sub-kernel-stalk]] | kernel/stalk.c, kernel/include/thylacine/stalk.h | inv-i28, inv-i33 | Standing obligations for any change (the ARCH §25.4 POUNCE row is the |
 | [[sub-kernel-syscall-abi]] | kernel/include/thylacine/syscall.h, usr/lib/libt/include/thyla/syscall.h, usr/lib/libt/include/thyla/poll.h, usr/lib/libt/src/start.S, usr/lib/libthyla-rs/src/lib.rs | inv-i5, inv-i13, inv-i32 | - **A new syscall appends. It never fills a hole.** The three retired numbers |
-| [[sub-kernel-syscall-dispatch]] | kernel/syscall.c | inv-i13, inv-i32, inv-i22, inv-i27, inv-i34, inv-i43, inv-i44 | - **A new syscall's authority gate goes in the inner, not the handler**, unless |
+| [[sub-kernel-syscall-dispatch]] | kernel/syscall.c | inv-i12, inv-i13, inv-i32, inv-i22, inv-i27, inv-i34, inv-i43, inv-i44 | - **A new syscall's authority gate goes in the inner, not the handler**, unless |
 | [[sub-kernel-territory]] | kernel/territory.c, kernel/include/thylacine/territory.h, kernel/test/test_territory_pivot_root.c, usr/symlink-probe/src/main.rs | inv-i1, inv-i3, inv-i33 | On any change to this file, prosecute: |
 | [[sub-kernel-thread]] | kernel/thread.c, kernel/include/thylacine/thread.h | inv-i21, inv-i31, inv-i44 | - **#788 is the shape to keep in mind.** `thread_free` freeing a |
 | [[sub-kernel-timer]] | arch/arm64/timer.c, arch/arm64/timer.h, arch/arm64/rtc.c, arch/arm64/rtc.h | inv-i15, inv-i17 | - The periodic path must stay byte-unchanged for a running CPU — the slice model |

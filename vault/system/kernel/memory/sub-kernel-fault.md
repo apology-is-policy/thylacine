@@ -6,13 +6,13 @@ title: "The fault dispatcher — classification, demand paging, seven backing ar
 code: [arch/arm64/fault.c, arch/arm64/fault.h]
 audit: hard
 guarded-by: [inv-i12, inv-i32, inv-i7, inv-i36, inv-i44]
-validated-by: [prose, gate-smp]
+validated-by: [spec-cow, prose, gate-smp]
 locks: []
 hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md", "docs/EXEC-LOAD-DESIGN.md"]
 created: 2026-08-03
-updated: 2026-09-06
+updated: 2026-09-23
 ---
 ## Purpose
 
@@ -192,7 +192,7 @@ now.
 | anonymous | contiguous chunk; offset arithmetic | the ordinary case |
 | **code** | *identical to anonymous* | I-42/JIT: two aliases of one region, each installing at **its own** VMA prot |
 | MMIO | device PA + offset, device attributes | |
-| DMA | pinned chunk PA + offset, cacheable | coherent on this platform's transports |
+| DMA | every page resolved through `kobj_dma_pa_at` (a weave is a SKEIN of blocks since 2026-09-09; `Burrow.pa` is 0 for a DMA Burrow, deliberately), cacheable | coherent on this platform's transports |
 | **HOSTMEM** | PCI BAR PA + offset, **host-dictated** MAIR attr | Warp-6 V-2: a hostmem subrange; `kobj_pci` non-NULL is the liveness guard |
 | file-backed | sparse per-slot pages, demand-read | the arm that sleeps |
 | lazy-anonymous | allocate + zero + install-once, all under the lock | no backing read, so no slow path |
@@ -296,6 +296,66 @@ deliberately, in the safe direction**: the fork fails up front where the
 failure can be reported, rather than the break running out later where there is
 nowhere good to put it. The break itself takes no charge, since one mapped page
 becomes one mapped page. See [[sub-kernel-burrow]] for the attribution half.
+
+## The permission a fault is checked against can now change (B-1a, 2026-09-23)
+
+Step 2 -- `vma->prot` against the access, before any Burrow is resolved -- did
+not change, but the value it reads became mutable: `SYS_BURROW_PROTECT`
+([[sub-kernel-burrow]], [[sub-kernel-vma]]) moves a mapping's `prot` among
+{none, R, RW} under its mint-time ceiling. Three consequences land here, and
+the dispatcher's own code changed for none of them.
+
+**A range at none is a guard, and this dispatcher is what makes it one.** A
+touch of a page whose mapping is `none` fails the permission check at step 2
+and returns `FAULT_UNHANDLED_USER` -> `snare:segv` with no Burrow consulted --
+the path a Burrow-less guard VMA already took. That is the whole of Linux's
+`PROT_NONE` guard semantics, and `/protect-guard-child` witnesses it on every
+boot: a page sealed at none, written through, dies; joey's expect-fault census
+requires the death ([[sub-kernel-protect-witness]]).
+
+**A protect uninstalls the range's PTEs, and the re-fault installs at the NEW
+prot.** `burrow_protect_in` clears the leaf PTEs before it changes any `prot`
+(the D-3b rule), on a lowering AND on a raise -- `mmu_install_user_pte` refuses
+a mismatching install over a valid leaf, so a raise that left the old
+read-only leaf in place would have this dispatcher's install fail on the next
+write. So every arm above re-runs for a resident page after a protect and
+installs at `vma->prot` as it now reads: refused at none, read-only at R,
+writable at RW (`protect.pte_uninstalled_then_reinstalled_at_prot`). This is
+`cow.tla`'s `Reinstall` action; `BUGGY_PROTECT_KEEPS_PTE` is the shape with the
+uninstall skipped, and the `nouninstall` sabotage fails exactly the two
+assertions that look through the page table.
+
+**The COW break still keys on the flag and installs from `vma->prot`.** A cut
+piece of a forked mapping keeps its COW bit and its ceiling, so a write into
+one piece breaks that page alone and the parent's page is untouched
+(`protect.cow_split_then_break`); the read arm's `vma->prot & ~WRITE` install
+is unaffected. `Fault` in the model is guarded on `prot = "rw"`:
+`BUGGY_FAULT_IGNORES_PROT` is a break arm that would fire on a mapping
+protected below RW, and `BreakOnlyWhenWritable` is its witness.
+
+The property that made all three possible is the one this dossier already
+states: every install passes `vma->prot` through unchanged, and nothing
+downstream re-derives a permission.
+
+**The FILE slow path is the one arm whose admission and install span an
+unlock, and it re-runs the admission after the sleep (the holotype audit's
+F1, P1, fixed in the close).** Step 2 admits a FILE read at the prot of that
+moment; the page-in then drops `as->lock` and sleeps on the 9P read; a sibling
+thread's `SYS_BURROW_PROTECT` to none (sealed or not) lands in that window --
+the precheck admits FILE, and a whole-mapping protect leaves the geometry the
+re-lookup verifies exactly as it was. Installing at the CURRENT `vma->prot`
+then encoded none as a user-READABLE RO leaf (`make_user_pte_l3` has no
+"no access" encoding): a guard that did not guard, with no fault ever running
+step 2 again for that page. `file_fault_still_admitted` now re-checks the
+recorded fault type against the prot as it reads after the sleep, in BOTH
+install paths (each carries its own copy, as each carries the geometry check);
+a refusal installs nothing and answers `FAULT_UNHANDLED_USER`, which is what
+the retry would answer, and the page-in is KEPT in the slot -- the bytes are
+the Burrow's, prot-independent, and the geometry check proved they belong
+there. `protect.file_pagein_racing_protect_bails_{single,cluster}` interpose
+the protect from inside the stub `dev->read` (the same stand-in the #190
+geometry-shift pair uses) and assert no PTE, the slot resident, and a raise
+back to R resolving with no second read.
 
 ## Error paths
 
@@ -406,6 +466,12 @@ of the path, unreachable-until-COW, hidden by a constant-mirroring unit test.
 including the read-ahead cluster's per-slot byte map, its boundedness, its
 one-batched-read property, an interior short read, and the fail-closed arm. The
 production path is exercised by every EL0 first touch on every boot.
+
+B-1a: `protect.pte_uninstalled_then_reinstalled_at_prot`,
+`protect.raise_and_write_keeps_contents` and `protect.cow_split_then_break`
+(`kernel/test/test_protect.c`) drive `arch_fault_handle` on synthetic faults
+after a protect; `/protect-guard-child` is the EL0 witness of the step-2
+refusal.
 
 ## Referenced by
 

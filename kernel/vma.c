@@ -422,10 +422,16 @@ struct Vma *vma_lookup_in(struct AddrSpace *as, u64 vaddr) {
 // #199: lowest-addressed VMA overlapping [lo, hi). Caller holds as->lock. The
 // list layout stays this file's business -- range consumers iterate through
 // this rather than walking as->vmas themselves.
+// B-1a audit F2: nodes visited by vma_next_overlap_in. A diagnostic, read by
+// the test that pins the range walks to ONE scan from the head -- a re-scan
+// per mapping was O(k x N) under a non-preemptible lock, four passes deep.
+static u64 g_vma_scan_steps;
+
 struct Vma *vma_next_overlap_in(struct AddrSpace *as, u64 lo, u64 hi) {
     if (!as || lo >= hi) return NULL;
 
     for (struct Vma *cur = as->vmas; cur; cur = cur->next) {
+        __atomic_add_fetch(&g_vma_scan_steps, 1, __ATOMIC_RELAXED);
         if (cur->magic != VMA_MAGIC)
             extinction("vma_next_overlap: corrupted list entry");
         if (cur->vaddr_start >= hi) return NULL;   // sorted: nothing later overlaps
@@ -536,7 +542,12 @@ int vma_reprotect_precheck_in(struct AddrSpace *as, u64 vaddr, u64 length,
     u64 cur = vaddr;
     struct Vma *v = vma_next_overlap_in(as, vaddr, end);
     if (!v)                                             return -(int)T_E_NOMEM;
-    for (; v; v = vma_next_overlap_in(as, v->vaddr_end, end)) {
+    // ONE scan from the head, then the successors: the list is sorted, so every
+    // later mapping in the range is a `next`. A re-scan per mapping was
+    // O(k x N), and this loop ran four times per protect (B-1a audit F2).
+    for (; v && v->vaddr_start < end; v = v->next) {
+        if (v->magic != VMA_MAGIC)
+            extinction("vma_reprotect_precheck: corrupted list entry");
         if (v->vaddr_start > cur)                       return -(int)T_E_NOMEM; // a hole
         if (!v->burrow)                                 return -(int)T_E_NOMEM; // a guard: reserved, not mapped
         if (v->burrow->magic != VMO_MAGIC)              return -(int)T_E_ACCES;
@@ -547,6 +558,28 @@ int vma_reprotect_precheck_in(struct AddrSpace *as, u64 vaddr, u64 length,
     }
     if (cur < end)                                      return -(int)T_E_NOMEM; // a hole at the tail
     return 0;
+}
+
+// The I-32 headroom for the (at most two) pieces a cut adds, decided by
+// burrow_protect_in BEFORE its uninstall -- so a cap hit refuses changing
+// nothing, not even a re-fault -- and AFTER the no-op short-circuit, since a
+// no-op cuts nothing. Caller has run the precheck (the range is contiguous).
+// vma_reprotect_range_in re-checks it under the same lock hold, where the
+// count cannot have moved.
+int vma_reprotect_headroom_in(struct AddrSpace *as, bool exempt, u64 vaddr,
+                              u64 length) {
+    if (exempt) return 0;
+    u64 end = vaddr + length;
+    struct Vma *first = vma_next_overlap_in(as, vaddr, end);
+    if (!first)                                         return -(int)T_E_NOMEM;
+    struct Vma *last = first;
+    for (struct Vma *v = first; v && v->vaddr_start < end; v = v->next)
+        last = v;
+    u32 adding = (first->vaddr_start < vaddr ? 1u : 0u) +
+                 (last->vaddr_end    > end   ? 1u : 0u);
+    if (!adding) return 0;
+    u32 cnt = __atomic_load_n(&as->vma_count, __ATOMIC_RELAXED);
+    return (cnt > PROC_VMA_MAX - adding) ? -(int)T_E_NOMEM : 0;
 }
 
 // Two adjacent VMAs that describe one contiguous window of one Burrow at one
@@ -582,16 +615,34 @@ static void reprotect_merge_in(struct AddrSpace *as, u64 lo, u64 hi) {
     }
 }
 
+// A protect that would change nothing -- every mapping in the range already at
+// `prot`, and (no seal, or) every ceiling already `prot` -- is answered 0
+// before any uninstall or cut. A sub-range cut would otherwise still demand up
+// to two slots of I-32 headroom for pieces the merge pass folds straight back,
+// so at PROC_VMA_MAX - 1 a no-op answered ENOMEM where Linux succeeds (B-1a
+// audit F6). Caller has run the precheck: the range is contiguous and admitted.
+bool vma_reprotect_is_noop_in(struct AddrSpace *as, u64 vaddr, u64 length,
+                              u32 prot, bool seal) {
+    u64 end = vaddr + length;
+    for (struct Vma *v = vma_next_overlap_in(as, vaddr, end);
+         v && v->vaddr_start < end; v = v->next) {
+        if (v->prot != prot)                        return false;
+        if (seal && vma_prot_max(v) != prot)        return false;
+    }
+    return true;
+}
+
 int vma_reprotect_range_in(struct AddrSpace *as, bool exempt,
                            u64 vaddr, u64 length, u32 prot, bool seal) {
     int rc = vma_reprotect_precheck_in(as, vaddr, length, prot);
     if (rc != 0) return rc;
+    if (vma_reprotect_is_noop_in(as, vaddr, length, prot, seal)) return 0;
     u64 end = vaddr + length;
 
     struct Vma *first = vma_next_overlap_in(as, vaddr, end);
     struct Vma *last  = first;
-    for (struct Vma *v = first; v; v = vma_next_overlap_in(as, v->vaddr_end, end))
-        last = v;
+    for (struct Vma *v = first; v && v->vaddr_start < end; v = v->next)
+        last = v;                        // one scan, then successors (audit F2)
 
     // Only the first and the last mapping can be cut, so at most two pieces --
     // allocated BEFORE the list is touched (the D-3b shape), so a shortfall
@@ -655,8 +706,8 @@ int vma_reprotect_range_in(struct AddrSpace *as, bool exempt,
     // APPLY, in place. The range's leaf PTEs are already gone (the caller's
     // half of the contract), so the next fault sees the new prot: refused at
     // none, installed read-only at R, writable at RW -- fault.c step 2.
-    for (struct Vma *v = vma_next_overlap_in(as, vaddr, end); v;
-         v = vma_next_overlap_in(as, v->vaddr_end, end)) {
+    for (struct Vma *v = vma_next_overlap_in(as, vaddr, end);
+         v && v->vaddr_start < end; v = v->next) {
         v->prot = prot;
         if (seal) vma_set_prot_max(v, prot);
     }
@@ -742,4 +793,8 @@ u64 vma_total_allocated(void) {
 
 u64 vma_total_freed(void) {
     return __atomic_load_n(&g_vma_freed, __ATOMIC_RELAXED);
+}
+
+u64 vma_scan_steps(void) {
+    return __atomic_load_n(&g_vma_scan_steps, __ATOMIC_RELAXED);
 }

@@ -1092,6 +1092,7 @@ unsafe fn run_linux() -> ! {
     leg!(rep, svc3(NR_MPROTECT, n as u64, 4096, PROT_NONE) == 0, b"L23f\n");
     leg!(rep, svc3(NR_MPROTECT, n as u64, 0, PROT_READ) == 0, b"L23g\n");           // len 0: nothing to do
     leg!(rep, svc3(NR_MPROTECT, n as u64 + 1, 4096, PROT_READ) == NEG_EINVAL, b"L23h\n");
+    leg!(rep, svc3(NR_MPROTECT, n as u64 + 1, 0, PROT_READ) == NEG_EINVAL, b"L23i\n");     // alignment before len 0 (Linux order)
     let _ = svc3(NR_MUNMAP, n as u64, 4096, 0);
 
     // --- L24-L31: signals (V-6b) --------------------------------------------

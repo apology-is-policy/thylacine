@@ -495,6 +495,10 @@ int mmu_uninstall_user_pte(paddr_t pgtable_root, u16 asid, u64 vaddr);
 int mmu_uninstall_user_range(paddr_t pgtable_root, u16 asid,
                              u64 vaddr_start, u64 vaddr_end);
 
+// Diagnostic (B-1a audit F2): calls into mmu_uninstall_user_pte so far -- the
+// witness that the range form skips absent subtrees instead of visiting pages.
+u64 mmu_uninstall_pte_calls(void);
+
 // 8a-1b-gamma (I-39; docs/DEBUG-FS-DESIGN.md 4.5): read-only, non-growing
 // cross-Proc user-memory access for /proc/<pid>/mem. Walk `pgtable_root` (the
 // TARGET's L0 PA) L0..L3 through the kernel direct map; NOT uaccess, NOT a

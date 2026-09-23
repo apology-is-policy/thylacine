@@ -516,6 +516,13 @@ void test_protect_cow_split_then_break(void);
 void test_cow_clone_dedupes_split_pieces(void);
 void test_cow_clone_refuses_eager_anon_with_writable_ceiling(void);
 void test_sys_burrow_detach_piece_frees_only_its_pages(void);
+// The B-1a holotype audit's regressions (F1 in test_demand_page.c; the rest in test_protect.c).
+void test_protect_range_walk_is_linear(void);
+void test_protect_uninstall_range_skips_absent_subtrees(void);
+void test_protect_noop_protect_needs_no_headroom(void);
+void test_sys_mmap_fixed_anon_w_alone_maps_rw(void);
+void test_protect_file_pagein_racing_protect_bails_single(void);
+void test_protect_file_pagein_racing_protect_bails_cluster(void);
 // DISTRO D-3b -- the MAP_FIXED split/replace surgery.
 void test_burrow_map_fixed_split_left(void);
 void test_burrow_map_fixed_split_right(void);
@@ -2358,6 +2365,16 @@ struct test_case g_tests[] = {
                                               test_cow_clone_refuses_eager_anon_with_writable_ceiling, false, NULL },
     { "sys_burrow.detach_piece_frees_only_its_pages",
                                               test_sys_burrow_detach_piece_frees_only_its_pages, false, NULL },
+    // The B-1a holotype audit's regressions.
+    { "protect.range_walk_is_linear",         test_protect_range_walk_is_linear,         false, NULL },
+    { "protect.uninstall_range_skips_absent_subtrees",
+                                              test_protect_uninstall_range_skips_absent_subtrees, false, NULL },
+    { "protect.noop_protect_needs_no_headroom", test_protect_noop_protect_needs_no_headroom, false, NULL },
+    { "sys_mmap.fixed_anon_w_alone_maps_rw",  test_sys_mmap_fixed_anon_w_alone_maps_rw,  false, NULL },
+    { "protect.file_pagein_racing_protect_bails_single",
+                                              test_protect_file_pagein_racing_protect_bails_single, false, NULL },
+    { "protect.file_pagein_racing_protect_bails_cluster",
+                                              test_protect_file_pagein_racing_protect_bails_cluster, false, NULL },
     { "burrow.map_fixed_split_left",          test_burrow_map_fixed_split_left,          false, NULL },
     { "burrow.map_fixed_split_right",         test_burrow_map_fixed_split_right,         false, NULL },
     { "burrow.map_fixed_split_three_way",     test_burrow_map_fixed_split_three_way,     false, NULL },
