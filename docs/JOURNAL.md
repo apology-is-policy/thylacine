@@ -22,6 +22,111 @@ needed the operator.
 
 
 ---
+## 2026-09-23, late morning, continued (aux, Opus 5.5 1M, effort max) -- a word keeps its backslash, and `rm \*` no longer removes everything
+
+Queue item 0c, found while writing completion's quoting: the lexer resolved a
+bare word's `\<char>` into the char, so eval's glob gate -- `has_meta` of the
+resolved text -- could not tell `\*` from `*`. By reading `evaluate_argv`,
+`rm \*` removed every file in the directory; an escaped star was a wildcard in
+a `case` arm and a `matches`; and `\if` was the keyword.
+
+**The design was already written down, in the wrong place to be read.**
+`TokenKind::Word`'s own doc says a word holds raw source bytes, with escapes
+left to the evaluator; the scanner did the opposite. Keeping the backslash
+leaves each reader to decide, and there turned out to be three: a value
+unescapes (`lexer::unescape`), an argv glob gates on `has_unescaped_meta` and
+the matcher reads `\x` as a literal `x` (POSIX fnmatch), and a `case` or
+`matches` pattern (`eval_pattern`) takes a bare word as written. The
+alternative, a side channel on the token recording which characters were
+escaped, would have left two spellings of every word to keep in step. The
+"hundred match sites" my own note feared were mostly tests: nineteen outside
+them read a word's kind or text, and each was classed by hand.
+
+**A regression I nearly built: quoted patterns.** An escape-aware matcher
+changes what a QUOTED pattern holding a backslash means: `case $p { 'C:\dir'
+=> ... }` evaluates its pattern to the value `C:\dir`, and the new matcher would
+read `\d` as `d`. So every evaluated part of a pattern enters through
+`escape_backslashes`, which keeps its backslashes literal as they always were,
+and a device leg pins exactly that case. Caught by working one example through
+the matcher before writing it, the same move that caught the completion
+prefix's order last chunk.
+
+**The invariant that makes the change safe is directly testable.** If
+`unescape` of every kept word equals what the lexer used to produce, no value
+anywhere changed and only globs and patterns see the difference.
+`unescape_gives_the_value_the_lexer_used_to_resolve` checks that against a
+test copy of the old resolution, over every printable ASCII escape at three
+positions, doubled and trailing backslashes, a continuation and multi-byte
+characters. Red first, it did NOT fail against stubs of today's behaviour, and
+that is correct: the old lexer with an identity `unescape` is today's
+behaviour, so the test pins what both sides must share. Its discrimination
+came from sabotage instead (H10-H12).
+
+**Arithmetic would have broken silently.** `$((2\*3))` works because the lexer
+stripped the escape before the arithmetic re-split; with the escape kept the
+split meets a `\` and the expression is refused. One unescape at the single
+arithmetic entry keeps it. No test reached that line; planning the sabotages is
+what found it, and the test came with the fix.
+
+**Planning the sabotages found three more gaps, before any ran.** The gated
+evaluator (stmt, expr, pathname) has no host tests, so nothing checked that an
+argv word or an expression atom drops its escapes, and nothing checked the
+quoted-pattern case above. u-glob-test gained device legs for all of them --
+`c\d /` must run the `cd` builtin, `a\ b == 'a b'` must hold, and each escaped
+`case` / `matches` / case-expression pattern has a twin that must fire, so a 0
+cannot come from a pattern that never matches. The third gap, the literal start
+directory of a path pattern (`my\ dir/*.txt` starts in `my dir`), had no
+possible device witness: no directory on the boot ramfs needs an escape. So
+pathname's preparation moved into a pure `glob::path_pattern`, where the host
+tests it, and the gated file keeps only what needs `read_dir`.
+
+**23 sabotages, all caught, each by the check aimed at it.** Fourteen on the
+host -- the matcher's escape arm, the class scanner and member reader,
+`has_unescaped_meta`, `escape_backslashes`, the escaped slash, the literal dot,
+`path_pattern`'s start and its absolute test, the lexer's kept backslash,
+`unescape`'s kept and trailing backslash, the keyword check, the arithmetic
+unescape -- each failing exactly the tests predicted, about a second apiece.
+Nine on the device, each a baked image booted until joey gates on
+`u-glob-test`, about 70 s apiece: the argv gate, both value paths, a pattern
+word read as a value, the quoted backslash, `matches`, the case statement, the
+case expression, and a walker matching the unescaped segment -- each stopped
+the boot at the check it was aimed at. The harness reported the first as
+caught "but by" another check; it was the predicted one, and my harness
+compared a truncated tag for equality -- a finding about the harness, not the
+test.
+
+**No audit round.** eval/stmt.rs is named in four trigger rows (Ctrl-C
+forwarding, namespace exec resolution, the raw-mode dance, the SAK note); none
+of those mechanisms moved, and the values that reach the exec-resolution sites
+are unchanged by the differential invariant -- except that an escaped star no
+longer globs into argv[0], which removed a way to run the first file in the
+cwd as a command. The evidence is the differential test, the sabotages and the
+device legs; recorded so the operator can call for a round.
+
+**For the operator.** A QUOTED meta in a `case` arm or a `matches` is still a
+wildcard (`'*'` matches everything); rc and POSIX make it literal, scripture
+7.1/7.3 is silent, and nothing in the tree depends on it (measured). And
+scripture documents backslash-in-a-word nowhere (UTOPIA-SHELL-DESIGN.md
+6.4-6.5): the three readings above are proposed as its text.
+
+**Mid-chunk, the operator asked for `claudemd-trim` in main.** It already was:
+main's reflog shows a fast-forward to `fb0b5ec5` at 09:47:54, not mine, with
+main's uncommitted kernel work untouched. The new Stop hook reads its
+checkpoint from a per-worktree `.claude/ctx-thresholds`, so it is live for
+every session but changes nothing here until aux-3 takes main. Not pushed:
+the request was to merge, and a push to a shared branch cannot be taken back.
+
+**Gates, on the Mac.** libutopia 393 host tests (381 before, 12 new);
+`tools/test-rust.sh` whole tree 27 crates / 1,904 tests / 0 failing / 0
+warnings, stranded still libutopia's 69; a clean `--config ci` bake (re-baked
+after the sabotages, whose last image was still in `build/`) and ls-ci PASS on
+the first attempt, with `u-glob-test: all OK` in the boot and the probe's new
+strings checked present in the ramfs. The code landed as `f3473dda`; the
+commit-msg gate then named a third dossier, `sub-utopia-interactive`, which
+still gave "a backslash-escaped glob character still globs" as a reason for
+completion's single quotes -- corrected in `0f027d4c`.
+
+---
 ## 2026-09-23, late morning (aux, Opus 5.5 1M, effort max) -- a name read as the shell reads it, and quoted after the prefix, not before
 
 Picked up after a self-compaction at `8ecb299a`, queue item 0b-a: Tab completion
