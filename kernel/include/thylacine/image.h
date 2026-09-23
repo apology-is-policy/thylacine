@@ -11,7 +11,7 @@
 // FILE Burrow over the executable's pinned Spoor (R-1) and demand-pages its
 // pages in (R-2); a SECOND exec of the same binary looks the qid up here and
 // REUSES that Burrow (handle_count++), so the two Procs map the same Burrow and
-// fault into the same `filepages[]` array — they share one set of physical text
+// fault into the same pagemap — they share one set of physical text
 // pages. This is the Plan 9 Image (the heritage name kept), realized directly on
 // the dual-refcount Burrow lifecycle (#847 / I-7).
 //
@@ -75,6 +75,20 @@ struct Burrow;
 // bring-up point + a future allocation hook. Call after burrow_init.
 void image_cache_init(void);
 
+// B-1a' audit F8: the pool's reclaim step (mm/phys.h capacity_set_reclaim;
+// registered by image_cache_init). Strips IDLE images -- cached, mapped by no
+// one, holding resident pages -- of their pages, least recently used first,
+// until `want` pages are freed or no idle image holds a page -- each pick
+// strips only what is still wanted (B-1a' audit F14), so a refused allocation
+// costs the cache its own size and an image stripped in part yields the rest
+// on the next pick. The entry stays cached, and empty once every page has
+// gone; the next mapper pages it in again (the Plan 9 imagereclaim shape: the
+// Image outlives its pages). Returns the pages freed. Runs in the
+// allocating context under whatever that holds (as->lock for a fault or an
+// attach); takes g_image_lock -> v->lock -> the buddy, never the cache's own
+// allocation path, and allocates nothing.
+u32 image_cache_reclaim(u32 want);
+
 // image_lookup_or_create — the exec text-segment entry point (R-4 consumer).
 // Resolve the file-backed text Burrow for the segment [file_offset,
 // file_offset+length) of the file behind `spoor`:
@@ -127,6 +141,8 @@ int image_cache_evict_idle_for_test(void);
 u64 image_cache_hits_for_test(void);
 u64 image_cache_creates_for_test(void);
 u64 image_cache_evictions_for_test(void);
+u64 image_cache_reclaims_for_test(void);         // reclaim calls that freed a page
+u64 image_cache_reclaimed_pages_for_test(void);
 #endif
 
 #endif // THYLACINE_IMAGE_H

@@ -42,6 +42,7 @@
 #include "../../arch/arm64/fault.h"
 #include "../../arch/arm64/mmu.h"
 #include "../../mm/phys.h"
+#include "../../mm/magazines.h"       // B-1a' round 3: the physical control's drain
 
 #include <thylacine/dev.h>           // REVENANT R-2: struct Dev for the stub backing Dev
 #include <thylacine/extinction.h>
@@ -51,6 +52,8 @@
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 #include <thylacine/burrow.h>
+#include <thylacine/addrspace.h>     // B-1a' audit F8: the holder's file_pages
+#include <thylacine/image.h>         // B-1a' audit F8: the cache's reclaim
 
 void test_pgtable_install_user_pte_smoke(void);
 void test_pgtable_install_user_pte_constraints(void);
@@ -61,6 +64,10 @@ void test_demand_page_permission_denied(void);
 void test_demand_page_lifecycle_round_trip(void);
 // REVENANT R-2: BURROW_TYPE_FILE demand-page fault arm.
 void test_demand_page_file_smoke(void);
+void test_demand_page_file_pages_charge_the_holder(void);
+void test_demand_page_idle_image_reclaimed_under_pressure(void);
+void test_demand_page_reclaim_asks_for_the_shortfall(void);
+void test_demand_page_alignment_abort_is_bus_not_handled(void);
 void test_demand_page_file_rodata_prot(void);
 void test_demand_page_file_read_error_snare_bus(void);
 void test_demand_page_file_multi_page(void);
@@ -154,7 +161,7 @@ void test_pgtable_install_user_pte_smoke(void) {
     paddr_t backing_pa = page_to_pa(backing_pg);
 
     // Install RW + R (no exec).
-    int rc = mmu_install_user_pte(p->as->pgtable_root, 0,
+    int rc = mmu_install_user_pte(p->as, proc_resource_exempt(p),
                                   USER_VA, backing_pa, VMA_PROT_RW,
                                   /*device_memory=*/false);
     TEST_EXPECT_EQ(rc, 0, "install RW PTE should succeed");
@@ -177,7 +184,7 @@ void test_pgtable_install_user_pte_smoke(void) {
     // Install RX (read-only + exec) at a different vaddr.
     paddr_t code_pa = page_to_pa(alloc_pages(0, KP_ZERO));
     TEST_ASSERT(code_pa != 0, "alloc_pages code backing failed");
-    rc = mmu_install_user_pte(p->as->pgtable_root, 0,
+    rc = mmu_install_user_pte(p->as, proc_resource_exempt(p),
                               USER_VA + ONE_PAGE, code_pa, VMA_PROT_RX,
                               /*device_memory=*/false);
     TEST_EXPECT_EQ(rc, 0, "install RX PTE should succeed");
@@ -204,7 +211,7 @@ void test_pgtable_install_user_pte_attr_index(void) {
     // _attr with NORMAL_NC: the new capability -- an AttrIndx == 1 (NC) PTE.
     paddr_t nc_pa = page_to_pa(alloc_pages(0, KP_ZERO));
     TEST_ASSERT(nc_pa != 0, "alloc NC backing");
-    TEST_EXPECT_EQ(mmu_install_user_pte_attr(p->as->pgtable_root, 0, USER_VA,
+    TEST_EXPECT_EQ(mmu_install_user_pte_attr(p->as, proc_resource_exempt(p), USER_VA,
                        nc_pa, VMA_PROT_RW, MAIR_IDX_NORMAL_NC), 0,
         "install NC PTE via _attr");
     u64 nc = walk_to_l3_entry(p->as->pgtable_root, USER_VA);
@@ -215,7 +222,7 @@ void test_pgtable_install_user_pte_attr_index(void) {
     // _attr with NORMAL_WB.
     paddr_t wb_pa = page_to_pa(alloc_pages(0, KP_ZERO));
     TEST_ASSERT(wb_pa != 0, "alloc WB backing");
-    TEST_EXPECT_EQ(mmu_install_user_pte_attr(p->as->pgtable_root, 0,
+    TEST_EXPECT_EQ(mmu_install_user_pte_attr(p->as, proc_resource_exempt(p),
                        USER_VA + ONE_PAGE, wb_pa, VMA_PROT_RW, MAIR_IDX_NORMAL_WB), 0,
         "install WB PTE via _attr");
     u64 wb = walk_to_l3_entry(p->as->pgtable_root, USER_VA + ONE_PAGE);
@@ -225,7 +232,7 @@ void test_pgtable_install_user_pte_attr_index(void) {
     // false is NOT MAIR_IDX_DEVICE (== 0), it maps to NORMAL_WB.
     paddr_t w2_pa = page_to_pa(alloc_pages(0, KP_ZERO));
     TEST_ASSERT(w2_pa != 0, "alloc wrapper-WB backing");
-    TEST_EXPECT_EQ(mmu_install_user_pte(p->as->pgtable_root, 0,
+    TEST_EXPECT_EQ(mmu_install_user_pte(p->as, proc_resource_exempt(p),
                        USER_VA + 2u * ONE_PAGE, w2_pa, VMA_PROT_RW, false), 0,
         "install via bool wrapper (false)");
     u64 w2 = walk_to_l3_entry(p->as->pgtable_root, USER_VA + 2u * ONE_PAGE);
@@ -234,7 +241,7 @@ void test_pgtable_install_user_pte_attr_index(void) {
 
     paddr_t dev_pa = page_to_pa(alloc_pages(0, KP_ZERO));
     TEST_ASSERT(dev_pa != 0, "alloc Device backing");
-    TEST_EXPECT_EQ(mmu_install_user_pte(p->as->pgtable_root, 0,
+    TEST_EXPECT_EQ(mmu_install_user_pte(p->as, proc_resource_exempt(p),
                        USER_VA + 3u * ONE_PAGE, dev_pa, VMA_PROT_RW, true), 0,
         "install via bool wrapper (true)");
     u64 dv = walk_to_l3_entry(p->as->pgtable_root, USER_VA + 3u * ONE_PAGE);
@@ -250,26 +257,26 @@ void test_pgtable_install_user_pte_constraints(void) {
     TEST_ASSERT(backing_pa != 0, "backing alloc");
 
     // Zero pgtable_root.
-    TEST_EXPECT_EQ(mmu_install_user_pte(0, 0, USER_VA, backing_pa, VMA_PROT_RW, false), -1,
+    TEST_EXPECT_EQ(mmu_install_user_pte(NULL, false, USER_VA, backing_pa, VMA_PROT_RW, false), -1,
         "pgtable_root=0 rejected");
 
     // Unaligned vaddr.
-    TEST_EXPECT_EQ(mmu_install_user_pte(p->as->pgtable_root, 0,
+    TEST_EXPECT_EQ(mmu_install_user_pte(p->as, proc_resource_exempt(p),
                                         USER_VA + 1, backing_pa, VMA_PROT_RW, false), -1,
         "unaligned vaddr rejected");
 
     // Unaligned pa.
-    TEST_EXPECT_EQ(mmu_install_user_pte(p->as->pgtable_root, 0,
+    TEST_EXPECT_EQ(mmu_install_user_pte(p->as, proc_resource_exempt(p),
                                         USER_VA, backing_pa + 1, VMA_PROT_RW, false), -1,
         "unaligned pa rejected");
 
     // vaddr in TTBR1 high half — installer rejects (top bits set).
-    TEST_EXPECT_EQ(mmu_install_user_pte(p->as->pgtable_root, 0,
+    TEST_EXPECT_EQ(mmu_install_user_pte(p->as, proc_resource_exempt(p),
                                         0xFFFF000000000000ull, backing_pa, VMA_PROT_RW, false), -1,
         "high-VA vaddr rejected");
 
     // W+X prot.
-    TEST_EXPECT_EQ(mmu_install_user_pte(p->as->pgtable_root, 0,
+    TEST_EXPECT_EQ(mmu_install_user_pte(p->as, proc_resource_exempt(p),
                                         USER_VA, backing_pa,
                                         VMA_PROT_READ | VMA_PROT_WRITE | VMA_PROT_EXEC, false), -1,
         "W+X rejected at PTE installer (defense-in-depth)");
@@ -284,7 +291,7 @@ void test_pgtable_install_user_pte_idempotent(void) {
     TEST_ASSERT(backing_pa != 0, "backing alloc");
 
     // First install.
-    int rc = mmu_install_user_pte(p->as->pgtable_root, 0,
+    int rc = mmu_install_user_pte(p->as, proc_resource_exempt(p),
                                   USER_VA, backing_pa, VMA_PROT_RW,
                                   /*device_memory=*/false);
     TEST_EXPECT_EQ(rc, 0, "first install ok");
@@ -293,16 +300,16 @@ void test_pgtable_install_user_pte_idempotent(void) {
     // new sub-tables.
     u64 free_before_second = phys_free_pages();
 
-    rc = mmu_install_user_pte(p->as->pgtable_root, 0,
+    rc = mmu_install_user_pte(p->as, proc_resource_exempt(p),
                               USER_VA, backing_pa, VMA_PROT_RW, false);
-    TEST_EXPECT_EQ(rc, 0, "idempotent second install returns 0");
+    TEST_EXPECT_EQ(rc, 1, "idempotent second install returns 1: already there, nothing written");
     TEST_EXPECT_EQ(phys_free_pages(), free_before_second,
         "no buddy alloc on idempotent re-install");
 
     // Mismatching install (different PA) returns -1.
     paddr_t other_pa = page_to_pa(alloc_pages(0, KP_ZERO));
     TEST_ASSERT(other_pa != 0, "other backing alloc");
-    rc = mmu_install_user_pte(p->as->pgtable_root, 0,
+    rc = mmu_install_user_pte(p->as, proc_resource_exempt(p),
                               USER_VA, other_pa, VMA_PROT_RW, false);
     TEST_EXPECT_EQ(rc, -1, "mismatching install rejected");
 
@@ -324,6 +331,8 @@ static void make_fi(struct fault_info *fi, u64 vaddr, bool is_write, bool is_ins
     fi->is_translation  = true;
     fi->is_permission   = false;
     fi->is_access_flag  = false;
+    fi->is_alignment  = false;
+    fi->is_external  = false;
     if (is_instr) {
         fi->ec = 0x20;     // EC_INST_ABORT_LOWER
     }
@@ -332,7 +341,7 @@ static void make_fi(struct fault_info *fi, u64 vaddr, bool is_write, bool is_ins
 void test_demand_page_smoke(void) {
     struct Proc *p = make_proc();
     TEST_ASSERT(p != NULL, "proc_alloc failed");
-    struct Burrow *v = burrow_create_anon(ONE_PAGE);
+    struct Burrow *v = burrow_create_anon(ONE_PAGE, false);
     TEST_ASSERT(v != NULL, "burrow_create_anon failed");
 
     int rc = burrow_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_RW);
@@ -372,7 +381,7 @@ void test_demand_page_no_vma(void) {
 void test_demand_page_permission_denied(void) {
     struct Proc *p = make_proc();
     TEST_ASSERT(p != NULL, "proc_alloc failed");
-    struct Burrow *v = burrow_create_anon(ONE_PAGE);
+    struct Burrow *v = burrow_create_anon(ONE_PAGE, false);
     TEST_ASSERT(v != NULL, "burrow_create_anon failed");
 
     // RO mapping.
@@ -412,7 +421,7 @@ void test_demand_page_lifecycle_round_trip(void) {
 
     // Allocate a 4-page BURROW. burrow_create_anon rounds up to 2^order;
     // page_count=4 → order=2 → exactly 4 pages.
-    struct Burrow *v = burrow_create_anon(FOUR_PAGES);
+    struct Burrow *v = burrow_create_anon(FOUR_PAGES, false);
     TEST_ASSERT(v != NULL, "burrow_create_anon");
     int rc = burrow_map(p, v, USER_VA, FOUR_PAGES, VMA_PROT_RW);
     TEST_EXPECT_EQ(rc, 0, "burrow_map");
@@ -1209,7 +1218,7 @@ void test_demand_page_file_eof_tail_zero(void) {
 //     page_count uncharged) but keeps the VMA; a later touch re-faults a fresh
 //     zero page + re-charges. No page leak across the whole cycle.
 //   demand_page.lazy_charge_on_fault_oom
-//     An over-PROC_PAGE_MAX commit fails the fault (FAULT_UNHANDLED_USER --
+//     An over-budget commit fails the fault (FAULT_UNHANDLED_USER --
 //     graceful per-Proc terminate, NEVER an extinction) with no page committed +
 //     page_count unchanged (the charge rolled back).
 //   demand_page.lazy_detach_uncharges_resident
@@ -1237,7 +1246,8 @@ void test_demand_page_lazy_zero_fill(void) {
 
     struct page *slot = burrow_lazy_slot_for_test(v, 0);
     TEST_ASSERT(slot != NULL, "slot 0 resident after fault");
-    TEST_EXPECT_EQ((u64)p->as->page_count, 1ull, "charge-on-fault: page_count == 1");
+    TEST_EXPECT_EQ((u64)(p->as->page_count - p->as->pgtable_pages), 1ull,
+                   "charge-on-fault: one data page charged (its tables aside)");
     u8 *bytes = (u8 *)pa_to_kva(page_to_pa(slot));
     TEST_EXPECT_EQ((u64)bytes[0], 0ull,             "demand-zero: byte 0 is zero");
     TEST_EXPECT_EQ((u64)bytes[0x800], 0ull,         "demand-zero: mid byte is zero");
@@ -1255,7 +1265,7 @@ void test_demand_page_lazy_zero_fill(void) {
     make_fi(&fi, USER_VA + 0x40, /*is_write=*/false, /*is_instr=*/false);
     r = userland_demand_page(p, &fi);
     TEST_EXPECT_EQ(r, FAULT_HANDLED, "second fault to resident lazy page resolves");
-    TEST_EXPECT_EQ((u64)p->as->page_count, 1ull, "re-fault does NOT double-charge (still 1)");
+    TEST_EXPECT_EQ((u64)(p->as->page_count - p->as->pgtable_pages), 1ull, "re-fault does NOT double-charge (still 1)");
 
     // Other slots stay sparse (only the faulted page committed).
     TEST_ASSERT(burrow_lazy_slot_for_test(v, 1) == NULL, "slot 1 sparse");
@@ -1280,7 +1290,7 @@ void test_demand_page_lazy_decommit_refault(void) {
         make_fi(&fi, USER_VA + (u64)i * ONE_PAGE + 0x10, /*is_write=*/true, /*is_instr=*/false);
         TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED, "fault page i");
     }
-    TEST_EXPECT_EQ((u64)p->as->page_count, 3ull, "3 faulted pages charged");
+    TEST_EXPECT_EQ((u64)(p->as->page_count - p->as->pgtable_pages), 3ull, "3 faulted pages charged");
     TEST_ASSERT(burrow_lazy_slot_for_test(v, 2) != NULL, "slot 2 resident");
     TEST_ASSERT(burrow_lazy_slot_for_test(v, 3) == NULL, "slot 3 sparse");
 
@@ -1298,7 +1308,7 @@ void test_demand_page_lazy_decommit_refault(void) {
     struct fault_info fi;
     make_fi(&fi, USER_VA + 0x20, /*is_write=*/false, /*is_instr=*/false);
     TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED, "re-fault after decommit");
-    TEST_EXPECT_EQ((u64)p->as->page_count, 1ull, "re-fault re-charges (1)");
+    TEST_EXPECT_EQ((u64)(p->as->page_count - p->as->pgtable_pages), 1ull, "re-fault re-charges (1)");
     struct page *slot = burrow_lazy_slot_for_test(v, 0);
     TEST_ASSERT(slot != NULL, "slot 0 re-resident");
     TEST_EXPECT_EQ((u64)((u8 *)pa_to_kva(page_to_pa(slot)))[0], 0ull, "re-faulted page is fresh-zero");
@@ -1315,14 +1325,14 @@ void test_demand_page_lazy_charge_on_fault_oom(void) {
     TEST_ASSERT(p != NULL, "proc_alloc failed");
     // A proc_alloc'd Proc is principal_id 0 (PRINCIPAL_INVALID) -> NOT exempt, so the
     // I-32 page cap applies. Park page_count AT the cap so the next commit fails.
-    p->as->page_count = PROC_PAGE_MAX;
+    p->as->page_count = p->as->page_budget;
 
     struct Burrow *v = burrow_create_anon_lazy(ONE_PAGE);
     TEST_ASSERT(v != NULL, "burrow_create_anon_lazy");
     int rc = burrow_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_RW);
     TEST_EXPECT_EQ(rc, 0, "burrow_map lazy");
 
-    // The fault tries to commit page #(PROC_PAGE_MAX+1) -> proc_page_charge refuses
+    // The fault tries to commit page #(budget+1) -> proc_page_charge refuses
     // -> graceful per-Proc terminate (FAULT_UNHANDLED_USER), NEVER an extinction.
     struct fault_info fi;
     make_fi(&fi, USER_VA, /*is_write=*/true, /*is_instr=*/false);
@@ -1330,7 +1340,7 @@ void test_demand_page_lazy_charge_on_fault_oom(void) {
     TEST_EXPECT_EQ(r, FAULT_UNHANDLED_USER, "over-cap commit fails the fault (graceful OOM)");
     TEST_ASSERT(burrow_lazy_slot_for_test(v, 0) == NULL, "no page committed on a cap-hit");
     TEST_ASSERT(walk_to_l3_entry(p->as->pgtable_root, USER_VA) == 0, "no PTE on a cap-hit");
-    TEST_EXPECT_EQ((u64)p->as->page_count, (u64)PROC_PAGE_MAX, "page_count unchanged (charge rolled back)");
+    TEST_EXPECT_EQ((u64)p->as->page_count, (u64)p->as->page_budget, "page_count unchanged (charge rolled back)");
 
     p->as->page_count = 0;     // reset (hygiene; drop_proc doesn't touch page_count)
     drop_proc(p);
@@ -1353,7 +1363,7 @@ void test_demand_page_lazy_detach_uncharges_resident(void) {
         make_fi(&fi, va + (u64)i * ONE_PAGE + 0x8, /*is_write=*/true, /*is_instr=*/false);
         TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED, "fault lazy page i");
     }
-    TEST_EXPECT_EQ((u64)p->as->page_count, 2ull, "2 resident pages charged");
+    TEST_EXPECT_EQ((u64)(p->as->page_count - p->as->pgtable_pages), 2ull, "2 resident pages charged");
 
     // Detach the whole region. The uncharge must be ONLY the 2 RESIDENT pages -- the
     // lazy region charged per-fault, NOT the whole 4-page span (the eager detach
@@ -1373,7 +1383,7 @@ void test_demand_page_lazy_detach_uncharges_resident(void) {
 // burrow_decommit). Without the unwind, as->page_count inflates permanently
 // while the pages themselves are freed, so it stops meaning true RSS
 // (ARCH section 6.5) and a guest that can drive a read error walks its own
-// counter to PROC_PAGE_MAX.
+// counter to its budget.
 //
 // The POSITIVE control comes first and is what stops this passing vacuously: a
 // test that only watched the failure path would pass identically against a
@@ -1571,4 +1581,271 @@ void test_demand_page_file_cluster_clamps_at_limit(void) {
 
     drop_proc(p);
     burrow_unref(v);
+}
+
+
+// =============================================================================
+// B-1a' audit F8: FILE pages are the Image cache's; their MAPPINGS are the
+// holder's, and an idle image is the pool's reserve under pressure.
+// =============================================================================
+
+// Each leaf the fault installs over a FILE mapping is charged to the mapping
+// space (page_count and file_pages); a re-fault charges nothing; the detach
+// refunds per leaf cleared while the pages stay resident in the Burrow.
+void test_demand_page_file_pages_charge_the_holder(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    g_rev_read_fail = false;
+    g_rev_read_calls = 0;
+
+    struct Spoor *s = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc");
+    struct Burrow *v = burrow_create_file(s, 0, 2 * ONE_PAGE);
+    TEST_ASSERT(v != NULL, "burrow_create_file");
+    TEST_EXPECT_EQ(burrow_map(p, v, USER_VA, 2 * ONE_PAGE, VMA_PROT_RX), 0, "burrow_map RX");
+
+    const u32 data0 = p->as->page_count - p->as->pgtable_pages;
+    TEST_EXPECT_EQ(p->as->file_pages, 0u, "no file page charged before a fault");
+
+    struct fault_info fi;
+    make_fi(&fi, USER_VA, /*is_write=*/false, /*is_instr=*/true);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED, "page 0 faults in");
+    TEST_EXPECT_EQ(p->as->page_count - p->as->pgtable_pages, data0 + 1, "one file page charged to the holder");
+    TEST_EXPECT_EQ(p->as->file_pages, 1u, "file: 1");
+
+    make_fi(&fi, USER_VA + ONE_PAGE, /*is_write=*/false, /*is_instr=*/true);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED, "page 1 faults in");
+    TEST_EXPECT_EQ(p->as->page_count - p->as->pgtable_pages, data0 + 2, "two file pages charged");
+    TEST_EXPECT_EQ(p->as->file_pages, 2u, "file: 2");
+
+    // A re-fault on a mapped page charges nothing more: the install finds the
+    // leaf already there (1) and the charge taken for it goes back.
+    make_fi(&fi, USER_VA + 0x100, /*is_write=*/false, /*is_instr=*/true);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED, "page 0 re-faults");
+    TEST_EXPECT_EQ(p->as->page_count - p->as->pgtable_pages, data0 + 2, "a re-fault charges nothing");
+    TEST_EXPECT_EQ(p->as->file_pages, 2u, "file: still 2");
+
+    // The detach clears both leaves and refunds both; the pages stay the
+    // Burrow's (resident: 2) -- the cache's posture, not the holder's.
+    struct Burrow *dead = NULL;
+    spin_lock(&p->as->lock);
+    int drc = vma_detach_range_in(p->as, false, NULL, USER_VA, 2 * ONE_PAGE, 0, &dead);
+    spin_unlock(&p->as->lock);
+    burrow_free_deferred(dead);
+    TEST_EXPECT_EQ(drc, 0, "detach (in-kernel: USER_VA sits below the burrow window the syscall form admits)");
+    TEST_EXPECT_EQ(p->as->page_count - p->as->pgtable_pages, data0, "the holder charge is refunded per leaf");
+    TEST_EXPECT_EQ(p->as->file_pages, 0u, "file: 0");
+    TEST_EXPECT_EQ(burrow_image_resident_count(v), 2u, "the pages stay resident in the Burrow");
+
+    // The refund follows the LEAVES cleared, not the span detached (audit F16):
+    // map the image again, fault ONE page, and detach the unfaulted half first
+    // -- a refund by span would take back a charge that was never made.
+    TEST_EXPECT_EQ(burrow_map(p, v, USER_VA, 2 * ONE_PAGE, VMA_PROT_RX), 0, "burrow_map RX again");
+    make_fi(&fi, USER_VA, /*is_write=*/false, /*is_instr=*/true);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED, "page 0 faults in (a resident hit)");
+    TEST_EXPECT_EQ(p->as->page_count - p->as->pgtable_pages, data0 + 1, "one leaf, one charge");
+    TEST_EXPECT_EQ(p->as->file_pages, 1u, "file: 1");
+    dead = NULL;
+    spin_lock(&p->as->lock);
+    drc = vma_detach_range_in(p->as, false, NULL, USER_VA + ONE_PAGE, ONE_PAGE, 0, &dead);
+    spin_unlock(&p->as->lock);
+    burrow_free_deferred(dead);
+    TEST_EXPECT_EQ(drc, 0, "detach the UNFAULTED page");
+    TEST_EXPECT_EQ(p->as->page_count - p->as->pgtable_pages, data0 + 1,
+                   "no leaf was cleared, so nothing is refunded (a refund by span would be)");
+    TEST_EXPECT_EQ(p->as->file_pages, 1u, "file: still 1");
+    dead = NULL;
+    spin_lock(&p->as->lock);
+    drc = vma_detach_range_in(p->as, false, NULL, USER_VA, ONE_PAGE, 0, &dead);
+    spin_unlock(&p->as->lock);
+    burrow_free_deferred(dead);
+    TEST_EXPECT_EQ(drc, 0, "detach the faulted page");
+    TEST_EXPECT_EQ(p->as->page_count - p->as->pgtable_pages, data0, "one leaf cleared, one refund");
+    TEST_EXPECT_EQ(p->as->file_pages, 0u, "file: 0");
+
+    drop_proc(p);
+    burrow_unref(v);
+}
+
+// An idle image (cached, mapped by no one) holding pool pages is stripped of
+// them when a user allocation would otherwise be refused; the allocation is
+// served, the entry stays cached, and the next lookup hits it.
+void test_demand_page_idle_image_reclaimed_under_pressure(void) {
+    (void)image_cache_evict_idle_for_test();      // start from no idle image
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    g_rev_read_fail = false;
+    g_rev_read_calls = 0;
+
+    struct Spoor *s = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc");
+    struct Burrow *v = image_lookup_or_create(s, 0, 2 * ONE_PAGE, /*exec=*/false,
+                                              BURROW_FILE_LIMIT_UNKNOWN);
+    TEST_ASSERT(v != NULL, "image_lookup_or_create");
+    TEST_EXPECT_EQ(burrow_handle_count(v), 2, "the cache's ref and ours");
+    TEST_EXPECT_EQ(burrow_map(p, v, USER_VA, 2 * ONE_PAGE, VMA_PROT_READ), 0, "burrow_map R");
+
+    struct fault_info fi;
+    make_fi(&fi, USER_VA, /*is_write=*/false, /*is_instr=*/false);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED, "page 0 in");
+    make_fi(&fi, USER_VA + ONE_PAGE, /*is_write=*/false, /*is_instr=*/false);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED, "page 1 in");
+    TEST_EXPECT_EQ(burrow_image_resident_count(v), 2u, "two resident pages");
+
+    // The mapper dies and its handle goes: the image is idle, {1,0}, holding
+    // two pool pages no address space is charged for.
+    drop_proc(p);
+    burrow_unref(v);
+    TEST_EXPECT_EQ(burrow_handle_count(v), 1, "the cache's ref alone");
+    TEST_EXPECT_EQ(burrow_mapping_count(v), 0, "unmapped");
+    TEST_ASSERT(image_cache_live_count_for_test() >= 1, "still cached");
+
+    // The physical control (magazines drained): what the pool releases the
+    // buddy must GAIN -- a strip that only uncharged would leave it where it was.
+    magazines_drain_all();
+    const u64 pf0 = phys_free_pages();
+    const u32 ch0 = capacity_pool_charged();
+
+    // Park the pool full: a user allocation must now be served by the reclaim,
+    // not refused, and it is the idle image that pays -- one page per page
+    // asked (audit F14: a strip takes what is wanted, not the whole image).
+    const u32 pool = capacity_pool_pages();
+    const u32 room = pool - ch0;
+    TEST_ASSERT(room > 0, "the pool has room to park");
+    capacity_pool_park_for_test(room);
+    TEST_EXPECT_EQ(capacity_pool_charged(), pool, "the pool is full");
+    const u64 r0  = image_cache_reclaims_for_test();
+    const u64 rp0 = image_cache_reclaimed_pages_for_test();
+    struct page *pg = alloc_user_pages(0, 0, /*exempt=*/false);
+    TEST_ASSERT(pg != NULL, "a user allocation at the pool's edge is served by stripping the idle image");
+    TEST_EXPECT_EQ(image_cache_reclaims_for_test(), r0 + 1, "one reclaim");
+    TEST_EXPECT_EQ(image_cache_reclaimed_pages_for_test(), rp0 + 1, "it freed ONE page: what was asked, not the image");
+    TEST_EXPECT_EQ(burrow_image_resident_count(v), 1u, "the image keeps its other page");
+    TEST_EXPECT_EQ(capacity_pool_charged(), pool, "one page out, one in");
+    // The next allocation strips the rest of the same (still least recently
+    // used) image.
+    struct page *pg2 = alloc_user_pages(0, 0, /*exempt=*/false);
+    TEST_ASSERT(pg2 != NULL, "served again");
+    TEST_EXPECT_EQ(image_cache_reclaims_for_test(), r0 + 2, "a second reclaim");
+    TEST_EXPECT_EQ(image_cache_reclaimed_pages_for_test(), rp0 + 2, "the image's second page");
+    TEST_EXPECT_EQ(burrow_image_resident_count(v), 0u, "the image is stripped");
+    TEST_EXPECT_EQ(capacity_pool_charged(), pool, "still at the edge");
+    free_pages(pg, 0);
+    free_pages(pg2, 0);
+    capacity_pool_unpark_for_test(room);
+    magazines_drain_all();
+    const u32 ch1 = capacity_pool_charged();
+    TEST_ASSERT(ch1 + 2u <= ch0, "the image's two pages left the pool");
+    TEST_EXPECT_EQ(phys_free_pages(), pf0 + (u64)(ch0 - ch1),
+                   "CONTROL: the buddy gained exactly what the pool released -- the pages "
+                   "were freed, not merely uncharged");
+
+    // The entry survived: the next lookup HITS the same Burrow, empty, which
+    // pages in again on its next fault.
+    const u64 hits0 = image_cache_hits_for_test();
+    struct Spoor *s2 = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s2 != NULL, "spoor_alloc");
+    struct Burrow *again = image_lookup_or_create(s2, 0, 2 * ONE_PAGE, /*exec=*/false,
+                                                  BURROW_FILE_LIMIT_UNKNOWN);
+    TEST_ASSERT(again == v, "the stripped image is still the cached one");
+    TEST_EXPECT_EQ(image_cache_hits_for_test(), hits0 + 1, "a hit");
+    burrow_unref(again);
+    TEST_ASSERT(image_cache_evict_idle_for_test() >= 1, "and it is evicted at the end");
+}
+
+// B-1a' audit F19: a refused charge asks the reclaim for its SHORTFALL in one
+// request. An exempt overshoot (the pool charged past its size by the TCB) is
+// folded in: one scan of the cache frees what the allocation is short by,
+// rather than one scan per page of the overshoot -- each of those under the
+// faulter's address-space lock.
+void test_demand_page_reclaim_asks_for_the_shortfall(void) {
+    (void)image_cache_evict_idle_for_test();      // start from no idle image
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    g_rev_read_fail = false;
+    g_rev_read_calls = 0;
+
+    struct Spoor *s = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc");
+    struct Burrow *v = image_lookup_or_create(s, 0, 2 * ONE_PAGE, /*exec=*/false,
+                                              BURROW_FILE_LIMIT_UNKNOWN);
+    TEST_ASSERT(v != NULL, "image_lookup_or_create");
+    TEST_EXPECT_EQ(burrow_map(p, v, USER_VA, 2 * ONE_PAGE, VMA_PROT_READ), 0, "burrow_map R");
+    struct fault_info fi;
+    make_fi(&fi, USER_VA, /*is_write=*/false, /*is_instr=*/false);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED, "page 0 in");
+    make_fi(&fi, USER_VA + ONE_PAGE, /*is_write=*/false, /*is_instr=*/false);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED, "page 1 in");
+    drop_proc(p);
+    burrow_unref(v);
+    TEST_EXPECT_EQ(burrow_handle_count(v), 1, "the cache's ref alone");
+    TEST_EXPECT_EQ(burrow_image_resident_count(v), 2u, "an idle image holding two pages");
+
+    // Park the pool ONE PAST full (an exempt overshoot): a one-page allocation
+    // is short by two. Asked per page, the reclaim would strip one, the charge
+    // would be refused again, and a second scan would strip the other.
+    const u32 pool = capacity_pool_pages();
+    const u32 room = pool - capacity_pool_charged();
+    TEST_ASSERT(room > 0, "the pool has room to park");
+    capacity_pool_park_for_test(room + 1);
+    TEST_EXPECT_EQ(capacity_pool_charged(), pool + 1, "over-full by one");
+    const u64 r0  = image_cache_reclaims_for_test();
+    const u64 rp0 = image_cache_reclaimed_pages_for_test();
+    struct page *pg = alloc_user_pages(0, 0, /*exempt=*/false);
+    TEST_ASSERT(pg != NULL, "served at the overshoot");
+    TEST_EXPECT_EQ(image_cache_reclaims_for_test(), r0 + 1,
+                   "ONE reclaim call: the shortfall was asked for whole (per page it would be two)");
+    TEST_EXPECT_EQ(image_cache_reclaimed_pages_for_test(), rp0 + 2,
+                   "and it freed the two pages the charge was short by");
+    TEST_EXPECT_EQ(burrow_image_resident_count(v), 0u, "the image is stripped");
+    TEST_EXPECT_EQ(capacity_pool_charged(), pool, "over-full + 1 - 2 = at the edge");
+    free_pages(pg, 0);
+    capacity_pool_unpark_for_test(room + 1);
+    TEST_ASSERT(image_cache_evict_idle_for_test() >= 1, "evicted at the end");
+}
+
+// B-1a' audit F17: an abort that is neither a translation, an access-flag nor
+// a permission fault -- an alignment fault (an exclusive, an acquire/release
+// or a Device access at an address the instruction cannot take) or a
+// synchronous external abort -- is raised on a MAPPED page by the instruction
+// itself. A pager that answers it HANDLED sends the ERET back into the same
+// abort, forever; the fault's class alone decides it: snare:bus, before any
+// lookup. The EL0 witness is joey's /bus-probe-child (a misaligned
+// load-exclusive must die, not hang the boot).
+void test_demand_page_alignment_abort_is_bus_not_handled(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    struct Burrow *v = burrow_create_anon_lazy(ONE_PAGE);
+    TEST_ASSERT(v != NULL, "burrow_create_anon_lazy failed");
+    TEST_EXPECT_EQ(burrow_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_RW), 0, "burrow_map RW");
+    burrow_unref(v);
+
+    struct fault_info fi;
+    make_fi(&fi, USER_VA + 0x11, /*is_write=*/false, /*is_instr=*/false);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED, "the page is faulted in");
+    TEST_ASSERT(mmu_user_pte_admits(p->as, USER_VA, /*write=*/false, /*exec=*/false),
+                "a valid leaf admits the read: an install has nothing left to do");
+
+    // An alignment fault on the mapped, admitting page (a misaligned ldxr).
+    make_fi(&fi, USER_VA + 0x11, /*is_write=*/false, /*is_instr=*/false);
+    fi.fsc            = 0x21;                     // FSC_ALIGN_FAULT
+    fi.fault_level    = 1;
+    fi.is_translation = false;
+    fi.is_alignment   = true;
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_USER_BUS,
+                   "an alignment fault on a mapped page is snare:bus, not HANDLED "
+                   "(HANDLED re-executes the same instruction into the same abort)");
+    // A synchronous external abort: the same disposition.
+    make_fi(&fi, USER_VA + 0x10, /*is_write=*/true, /*is_instr=*/false);
+    fi.fsc            = 0x10;                     // FSC_EXT_ABORT
+    fi.fault_level    = 0;
+    fi.is_translation = false;
+    fi.is_external    = true;
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_USER_BUS, "an external abort is snare:bus");
+    // CONTROL: the same VA, a translation fault -> HANDLED by the leaf that is
+    // there. The class decides, not the page.
+    make_fi(&fi, USER_VA + 0x10, /*is_write=*/true, /*is_instr=*/false);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED,
+                   "CONTROL: a translation fault on the same VA is HANDLED");
+    drop_proc(p);
 }

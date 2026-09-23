@@ -2282,7 +2282,9 @@ with its reason: musl tolerates `ENOSYS` here by construction, and Thylacine has
 no prot-mutation syscall to translate to. [SUPERSEDED at B-1a (2026-09-23): a translated row over `burrow_protect` — the amendment above. The row is `VIV_TIER2`; `rejects_are_deliberate` asserts that, not `ENOSYS`.]
 
 **`munmap` (215) → `SYS_BURROW_DETACH` (38), over a domain the arguments cannot
-express.** V-2a's rejection stands on its facts: detach demands an exact VMA
+express.** (**SUPERSEDED at B-1a', 2026-09-23 — see the closing paragraph of
+this row; the exact-match facts below are the V-2d record.**) V-2a's rejection
+stands on its facts: detach demands an exact VMA
 match while Linux permits partial and multi-mapping unmaps, and — the part that
 makes a bare renumber worse than merely incomplete — *Linux `munmap` of an
 unmapped range succeeds*, while detach returns `-1`. So the translation is wrong
@@ -2310,6 +2312,20 @@ and mallocng frees whole groups it allocated whole. It is also not load-bearing
 for liveness — measured, mallocng **ignores `munmap`'s return** at both of its
 call sites (`free.c:148`, `malloc.c:318`), so a declined unmap costs memory, not
 correctness.
+
+**B-1a' (2026-09-23): `munmap` is the range form.** The row is now
+`sys_munmap_range_for_proc` over `vma_detach_range_in` (ARCH 6.5 "Range
+detach"): partial and multi-mapping unmaps trim or split, an unmapped range
+succeeds (0, the Linux no-op), and every refusal is a named shape with -errno
+through — EINVAL malformed, EACCES a CODE alias or a cut shared-in mapping,
+ENOMEM no VMA slot for a middle cut — decided before the first mutation. The
+range must lie inside the burrow window: below `EXEC_USER_BURROW_BASE` the
+phenotype declines (ENOSYS), because the exec image, the stack and the pouch
+guard are not its to unmap. The divergence named above is closed, and the
+"costs memory" caveat with it: mallocng's freed groups now return their pages.
+Witnesses: pheno-probe L21 (a MAP_FIXED window at 0x1_4000_0000), L21c (its
+`munmap` answers 0) and L21d (a fixed request below the window is declined),
+plus `detach.*` in `kernel/test/test_capacity.c`.
 
 Coverage: `vivarium.mmap_domain` (each admitted argument and each decline by
 name, `PROT_EXEC` especially, both `MAP_FIXED` spellings), the `mprotect`-is-T2

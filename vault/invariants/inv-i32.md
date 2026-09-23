@@ -3,11 +3,11 @@ id: inv-i32
 type: inv
 title: "I-32 — the resource floor (per-Proc, and per-address-space since L-2)"
 number: I-32
-guards: [sub-kernel-proc, sub-kernel-hwcap, sub-kernel-content]
-validated-by: [gate-smp]
+guards: [sub-kernel-proc, sub-kernel-hwcap, sub-kernel-content, sub-kernel-addrspace, sub-kernel-pagemap, sub-kernel-mm-phys, sub-kernel-mmu]
+validated-by: [gate-smp, spec-capacity]
 strength: prose
 created: 2026-08-01
-updated: 2026-08-16
+updated: 2026-09-23
 ---
 ## Statement
 
@@ -32,7 +32,7 @@ address-space extraction three of them are **not per-Proc at all**:
 
 | Axis | Counter | Lives on | Cap | Charged under |
 |---|---|---|---|---|
-| anon pages | `page_count` (+ `page_peak`) | `AddrSpace` | `AddrSpace.page_budget` — the *enforced* cap, seeded from the creating Proc's `page_budget` *authorization*; ≤ `PROC_PAGE_HARD_MAX` | [[lock-vma]] — exact *against a sibling on the same address space* |
+| anon pages | `page_count` (+ `page_peak`) | `AddrSpace` | `AddrSpace.page_budget` — the *enforced* cap, seeded from the creating Proc's `page_budget` *authorization*; ≤ `proc_page_budget_hard_max()` = the user pool (B-1a'); the pool itself is PHYSICAL since the round-1 close -- charged where the page is allocated, returned where it is freed ([[sub-kernel-mm-phys]]) -- and the hardware page tables and the mapped file pages are inside `page_count` (`pgtable_pages` / `file_pages` tell them apart) | [[lock-vma]] — exact *against a sibling on the same address space* |
 | live VMAs | `vma_count` | `AddrSpace` | `PROC_VMA_MAX` | [[lock-vma]] — same |
 | shared-in pages | `shared_map_pages` | `AddrSpace` | `PROC_SHARED_MAP_MAX_PAGES` | [[lock-vma]] — same |
 | direct children | `child_count` | `Proc` | `PROC_CHILD_MAX` | [[lock-proc-table]] — bounded overshoot |
@@ -127,10 +127,84 @@ reduction, the I-2 shape), raised only with
 authority. Read it as the **authorization** half of the split above: what a Proc
 may seed into an address space, not what any address space is currently held to.
 
+**The user pool is the second, machine-wide bound above every cap, and the
+default cap IS the pool** (B-1a', 2026-09-23; ARCH 6.5 "Capacity, and the
+I-32 default"). The bar the operator set is production-comparable memory
+management: a program is never refused memory while free memory exists, and
+memory it relinquishes returns so its footprint shrinks. So the DEFAULT budget
+of an unconfined address space is RAM minus a TCB reserve of max(256 MiB,
+RAM/8) clamped to RAM/2, sized once at boot (`capacity_init`;
+[[sub-kernel-addrspace]]); `proc_default_page_budget()` =
+`proc_page_budget_hard_max()` = that pool, and the constants `PROC_PAGE_MAX`
+(256 MiB) and `PROC_PAGE_HARD_MAX` (4 GiB) no longer exist -- the cap is the
+CONFINEMENT mechanism a parent narrows a child with (containers, browser
+content Procs), no longer the everyday bound. What keeps the floor is the pool
+itself, and since the round-1 close it is PHYSICAL ([[sub-kernel-mm-phys]]
+"The user pool"): every user page -- data, pagemap node, page table, ring --
+is charged to it where it is ALLOCATED (`alloc_user_pages`; a non-exempt
+allocation refused before the buddy is entered when it would take the pool
+past its size; a `PRINCIPAL_SYSTEM` allocation counted but never refused, the
+reserve being theirs) and returned where it is FREED (`free_pages` of a
+`PG_USER` page, whoever frees it), so a COW-shared page is one charge and a
+fork costs the pool only its node mirror while each address space's
+`page_count` keeps the holder reading under its cap (the Linux memcg shape;
+the counter-shaped first build refused a fork with half the pool free, the
+round-1 audit's F5). N Procs each within the default therefore
+cannot together reach the reserve, user Procs are refused cleanly at
+exhaustion while the TCB keeps allocating, and the fault-time policy --
+terminate the faulting non-TCB Proc -- no longer risks the TCB; no OOM victim
+selection is built. Four consequences on the page axis: **metadata is charged
+where the data is** -- the pagemap's node pages ([[sub-kernel-pagemap]]) are
+charged to the address space that touched them, so `page_count` reads as data
+plus the nodes that index it and a reservation's byte size is no longer a
+resource (`BURROW_RESERVE_MAX` is the burrow window); **the hardware page
+tables are charged and reclaimed** (the round-1 audit's F1;
+[[sub-kernel-mmu]]): every L1 / L2 / L3 a touch grows is charged to the space
+(`addrspace_charge_table`) and taken from the pool before it is linked, and a
+clear that empties a table frees it up to the L0 entry, so a decommitted
+region's whole footprint returns -- uncharged, death-reclaimed tables were the
+hole that let a Proc touching one page per 2 MiB and decommitting empty the
+buddy at a charged count of three; and **a dying address space returns
+nothing by itself**, because the drain's frees return page by page (the death
+return of the first build would now double-return); and, from the round-2
+audit's F8, **the pool reclaims before it refuses, and a mapped file page is
+charged to its holder** -- the Image cache's pages are pool memory, charged
+to each address space that maps them per leaf (`addrspace_charge_file`;
+`file:`), and a non-exempt charge that would be refused first strips idle
+images (cached, mapped by no one) of their pages, least recently used first,
+then asks again (`capacity_set_reclaim`, `image_cache_reclaim`;
+[[sub-kernel-image]]), so a dead Proc's cached text cannot hold the pool and
+a confined Proc's text counts against its cap. From round 3 (F12 / F13 /
+F15): the copy-on-write copy keeps its share of the original until the leaf
+that could still translate to it is replaced; a fault that finds a leaf
+already admitting its access is answered by that leaf, never terminated for
+a mismatch -- fail clean covers the benign race too; and a refused
+allocation inside exec reports `-T_E_NOMEM`, not a malformed-binary code.
+From round 4 (F17 / F18 / F19): an EL0 abort no page install can resolve --
+an alignment fault or a synchronous external abort on a mapped page -- is
+refused on its class before any lookup and the Proc dies with `snare:bus`,
+where it used to be answered as handled and re-fault forever (a livelock is
+not fail clean); the pool's `-T_E_NOMEM` reaches the exec frame's populate
+and the VMA cap as it reaches the segments; and a refused charge asks the
+reclaim for its whole shortfall at once. The
+accounting law that keeps the counter refundable -- every path that unmaps a
+slot releases it FIRST, since `burrow_free_internal` refunds nothing -- is
+[[spec-capacity]]'s `NoOrphan`, kept by the range detach's release-before-
+reshape order ([[sub-kernel-vma]]). The fork clone's node pages ARE charged
+to the child (`burrow_lazy_footprint`; fixed in the chunk, the round-1 audit's
+F2).
+
 ## Validation
 
-Prose + the focused audits; [[gate-smp]] for the counter races. **blind-to:**
-there is no global or per-user aggregate — the counters vanish with the Proc,
-so a cgroup-equivalent reading them is a recorded seam. The two creation
-gates' overshoot is real and deliberate. `page_peak` is telemetry only; no
-policy reads it.
+Prose + the focused audits; [[gate-smp]] for the counter races; since B-1a'
+the page axis's conservation law is [[spec-capacity]] (`ChargeConserved`,
+`NoOrphan`) and the pool, the metadata charge, the table charge and the
+physical return are the sixteen `test_capacity` tests'
+([[sub-kernel-pagemap]]; `capacity.memory_bomb_leaves_the_reserve` is the
+round-1 attack refused), the holder charge and the reclaim the two round-2
+`demand_page` tests' (`file_pages_charge_the_holder`,
+`idle_image_reclaimed_under_pressure`). **blind-to:** there is
+a machine-wide aggregate now (the pool) but still no per-user one, so a
+cgroup-equivalent remains a recorded seam; the spec sees one address space and
+no metadata; the two creation gates' overshoot is real and deliberate;
+`page_peak` is telemetry only; no policy reads it.

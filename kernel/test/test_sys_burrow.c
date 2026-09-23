@@ -33,6 +33,7 @@
 
 #include <thylacine/burrow.h>
 #include <thylacine/dev.h>          // D-3c F1: a stub Dev with a close hook
+#include <thylacine/errno.h>        // B-1a': the range detach's -T_E_* refusals
 #include <thylacine/dma_handle.h>   // ARCH 6.5 identity detach: a DMA map below the window
 #include <thylacine/exec.h>
 #include <thylacine/mmio_handle.h>  // ARCH 6.5 identity detach: an MMIO map below the window
@@ -229,23 +230,31 @@ void test_sys_burrow_detach_rejects(void) {
     TEST_ASSERT(r > 0, "attach failed");
     u64 va = (u64)r;
 
-    // Wrong base / wrong length / unaligned base / zero length → -1, and
-    // the VMA survives every rejected detach.
-    TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, va + PAGE_SIZE, PAGE_SIZE),
-                   -1L, "detach at the wrong base rejected");
-    TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, va, 2 * PAGE_SIZE),
-                   -1L, "detach with the wrong length rejected");
+    // The shape refusals: an unaligned base and a zero length answer -1, and
+    // the VMA survives each.
     TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, va + 1, PAGE_SIZE),
                    -1L, "detach with an unaligned base rejected");
     TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, va, 0),
                    -1L, "detach with zero length rejected");
     TEST_ASSERT(vma_lookup(p, va) != NULL, "VMA survives the rejected detaches");
 
-    // The matching detach succeeds; a second (double) detach fails.
-    TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, va, PAGE_SIZE), 0,
-        "the matching detach succeeds");
-    TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, va, PAGE_SIZE), -1L,
-        "double-detach rejected");
+    // B-1a' (the range form, Linux munmap semantics): a range that maps
+    // nothing is an empty detach -- 0, nothing changed -- where the exact-match
+    // detach answered -1 to a "wrong base".
+    TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, va + PAGE_SIZE, PAGE_SIZE),
+                   0L, "a detach over nothing mapped is the Linux no-op success");
+    TEST_ASSERT(vma_lookup(p, va) != NULL, "the mapping is untouched by an empty detach");
+
+    // A range LONGER than the mapping removes it whole (the "wrong length" the
+    // exact-match rule refused): the mapping lies inside the range.
+    TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, va, 2 * PAGE_SIZE),
+                   0L, "a range covering the mapping and beyond removes it");
+    TEST_ASSERT(vma_lookup(p, va) == NULL, "the mapping is gone");
+
+    // A second detach of the same range is an empty detach: 0 again. munmap
+    // is idempotent; "double-detach rejected" was the exact-match rule.
+    TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, va, PAGE_SIZE), 0L,
+        "a repeated detach is an empty detach (Linux: 0)");
 
     drop_proc(p);
 }
@@ -257,7 +266,7 @@ void test_sys_burrow_detach_rejects(void) {
 void test_sys_burrow_detach_window_confined(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc failed");
-    struct Burrow *burrow = burrow_create_anon(PAGE_SIZE);
+    struct Burrow *burrow = burrow_create_anon(PAGE_SIZE, false);
     TEST_ASSERT(burrow != NULL, "burrow_create_anon failed");
 
     // Install a VMA BELOW the burrow window — the shape of an ELF
@@ -405,8 +414,9 @@ void test_sys_burrow_attach_lazy_window_va(void) {
 // Audit F1 regression: a LAZY reservation must NOT be capped at the eager
 // BURROW_ATTACH_MAX (256 MiB) -- a lazy region commits no pages at attach, so the
 // reservation can be large (Go-stock reserves a ~512-MiB page-summary). The lazy
-// cap is BURROW_RESERVE_MAX (1 GiB). Pre-fix, the lazy attach reused the 256-MiB
-// eager cap and -1'd a 512-MiB reservation, making the #321 Go-stock proof impossible.
+// cap is BURROW_RESERVE_MAX (B-1a': the whole burrow window). Pre-fix, the lazy
+// attach reused the 256-MiB eager cap and -1'd a 512-MiB reservation, making the
+// #321 Go-stock proof impossible.
 void test_sys_burrow_attach_lazy_large(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc failed");
@@ -425,7 +435,8 @@ void test_sys_burrow_attach_lazy_large(void) {
     TEST_EXPECT_EQ((u64)p->as->page_count, 0ull,
         "a 512-MiB lazy reservation commits NO pages (page_count 0)");
 
-    // Above BURROW_RESERVE_MAX (1 GiB) is still rejected (the lazy reservation cap).
+    // Above BURROW_RESERVE_MAX (the window) is still rejected: no reservation
+    // can be longer than the address space it lives in.
     TEST_EXPECT_EQ(sys_burrow_attach_lazy_for_proc(p, BURROW_RESERVE_MAX + PAGE_SIZE),
                    -1L, "lazy attach above BURROW_RESERVE_MAX rejected");
 
@@ -672,13 +683,9 @@ void test_burrow_map_fixed_refusals(void) {
 
     // NOTE an unmapped target is NOT here, and that is the #196 correction: a
     // fixed map into free space SUCCEEDS (Linux places it there rather than
-    // failing). burrow.map_fixed_into_free_space covers it positively, together
-    // with the partial-overlap range that IS still refused.
-
-    // Runs off the END of the covering VMA -- the window must be WHOLLY inside.
-    TEST_ASSERT(map_fixed_locked(p, nb, base + 6 * PAGE_SIZE, 4 * PAGE_SIZE,
-                                 VMA_PROT_RW, 0) != 0,
-                "a window overrunning the VMA is refused");
+    // failing). burrow.map_fixed_into_free_space covers it positively -- and
+    // since B-1a' a window that overruns or straddles a mapping is served too
+    // (the range detach trims it; the served overrun is at the end of this test).
 
     // Misaligned address and length.
     TEST_ASSERT(map_fixed_locked(p, nb, base + 1, PAGE_SIZE, VMA_PROT_RW, 0) != 0,
@@ -695,21 +702,19 @@ void test_burrow_map_fixed_refusals(void) {
                                  0) != 0,
                 "a W+X replacement is refused");
 
-    // A FLAGGED survivor is refused: SHARED_IN is another Proc's memory carrying
-    // a per-span budget charge, and COW would need per-page share counts
-    // reasoned across the cut. Set the flag directly -- building a real shared
-    // mapping here would test burrow_share_into, not this.
+    // A SHARED_IN mapping the window would CUT is refused (EACCES): it is
+    // another Proc's memory whose exact span is what the sharer's teardown
+    // matches. Set the flag directly -- building a real shared mapping here
+    // would test burrow_share_into, not this. (A COW survivor is served since
+    // B-1a': the per-page share counts make a cut sound, as the protect path
+    // already relies on -- protect.cow_split_then_break.)
     struct Vma *v = vma_lookup(p, base);
     TEST_ASSERT(v != NULL, "the base VMA must exist");
     u32 saved = v->flags;
-    v->flags = VMA_FLAG_COW;
-    TEST_ASSERT(map_fixed_locked(p, nb, base + PAGE_SIZE, PAGE_SIZE,
-                                 VMA_PROT_RW, 0) != 0,
-                "a flagged (COW) survivor is refused");
     v->flags = VMA_FLAG_SHARED_IN;
-    TEST_ASSERT(map_fixed_locked(p, nb, base + PAGE_SIZE, PAGE_SIZE,
-                                 VMA_PROT_RW, 0) != 0,
-                "a flagged (SHARED_IN) survivor is refused");
+    TEST_EXPECT_EQ(map_fixed_locked(p, nb, base + PAGE_SIZE, PAGE_SIZE,
+                                    VMA_PROT_RW, 0), -(int)T_E_ACCES,
+                   "a window cutting a SHARED_IN mapping is refused (EACCES)");
     v->flags = saved;
 
     // NOTHING above may have cut. One VMA, original bounds, original identity.
@@ -720,6 +725,21 @@ void test_burrow_map_fixed_refusals(void) {
     TEST_EXPECT_EQ(still->burrow_offset, 0ull,         "offset untouched");
     TEST_ASSERT(vma_lookup(p, base + 7 * PAGE_SIZE) == still,
                 "the whole span is still ONE VMA -- no refusal left a seam");
+
+    // B-1a': a window overrunning the mapping's end is SERVED -- the range
+    // detach trims the tail and the new mapping lands across the old end.
+    _Static_assert(D3B_LEN > 6 * PAGE_SIZE && D3B_LEN < 10 * PAGE_SIZE,
+                   "the overrun window must start inside the mapping and end past it");
+    TEST_EXPECT_EQ(map_fixed_locked(p, nb, base + 6 * PAGE_SIZE, 4 * PAGE_SIZE,
+                                    VMA_PROT_RW, 0), 0,
+                   "a window overrunning the VMA is served");
+    struct Vma *head = vma_lookup(p, base);
+    struct Vma *win  = vma_lookup(p, base + 6 * PAGE_SIZE);
+    TEST_ASSERT(head != NULL && head->vaddr_end == base + 6 * PAGE_SIZE,
+                "the old mapping keeps its head, trimmed at the window");
+    TEST_ASSERT(win != NULL && win->burrow == nb &&
+                win->vaddr_end == base + 10 * PAGE_SIZE,
+                "the window is the new mapping, across the old end");
 
     burrow_unref(nb);
     drop_proc(p);
@@ -806,27 +826,35 @@ void test_burrow_map_fixed_into_free_space(void) {
     TEST_ASSERT(a != NULL, "the anchor survives");
     TEST_EXPECT_EQ(a->vaddr_end, anchor + D3B_LEN, "the anchor was not cut");
 
-    // PARTIAL OVERLAP still refuses: a range that starts free and runs INTO an
-    // existing VMA is neither shape. Straddle the anchor's start.
+    // B-1a': a range that starts free and runs INTO an existing VMA is served
+    // -- the range detach trims the anchor's head and the new mapping lands
+    // across its old start (Linux MAP_FIXED semantics; #199's refusal ended).
     struct Burrow *ob = fresh_anon(4 * PAGE_SIZE);
     TEST_ASSERT(ob != NULL, "anon create failed");
-    TEST_ASSERT(map_fixed_locked(p, ob, anchor - 2 * PAGE_SIZE, 4 * PAGE_SIZE,
-                                 VMA_PROT_RW, 0) != 0,
-                "a range straddling a VMA boundary is refused");
-    TEST_ASSERT(vma_lookup(p, anchor) == a, "the straddled VMA is unchanged");
-    TEST_EXPECT_EQ(a->vaddr_start, anchor, "its start is unchanged");
+    TEST_EXPECT_EQ(map_fixed_locked(p, ob, anchor - 2 * PAGE_SIZE, 4 * PAGE_SIZE,
+                                    VMA_PROT_RW, 0), 0,
+                   "a range straddling a VMA's start is served");
+    struct Vma *ov = vma_lookup(p, anchor - 2 * PAGE_SIZE);
+    TEST_ASSERT(ov != NULL && ov->burrow == ob &&
+                ov->vaddr_end == anchor + 2 * PAGE_SIZE,
+                "the new mapping spans the straddle");
+    TEST_ASSERT(vma_lookup(p, anchor + 2 * PAGE_SIZE) == a,
+                "the anchor survives as its own tail");
+    TEST_EXPECT_EQ(a->vaddr_start, anchor + 2 * PAGE_SIZE, "trimmed at the window's end");
+    TEST_EXPECT_EQ(byte_identity(a, anchor + 2 * PAGE_SIZE), 2ull * PAGE_SIZE,
+                   "its offset moved by the same delta -- every surviving byte kept its identity");
     burrow_unref(ob);
 
     drop_proc(p);
 }
 
 // =============================================================================
-// #199 (D-3c): sys_munmap_range_for_proc -- the whole-VMA range detach the
-// phenotype munmap row serves. D-3b's split turns one library map into 2-3
-// VMAs; musl's unmap_library munmaps the WHOLE span in one call, which the
-// exact-match detach refused, leaking the library. The range form detaches
-// every VMA wholly inside (each one WHOLE -- never partial), succeeds on an
-// empty range (Linux no-op), and refuses ATOMICALLY on a boundary straddle.
+// #199 (D-3c): sys_munmap_range_for_proc -- the range detach the phenotype
+// munmap row serves. D-3b's split turns one library map into 2-3 VMAs; musl's
+// unmap_library munmaps the WHOLE span in one call, which the exact-match
+// detach refused, leaking the library. B-1a' made it the Linux range form
+// outright: every VMA wholly inside goes, a straddled one is trimmed, an empty
+// range succeeds (Linux no-op).
 // =============================================================================
 
 extern s64 sys_munmap_range_for_proc(struct Proc *p, u64 vaddr_raw,
@@ -875,14 +903,16 @@ void test_burrow_munmap_range_tiled(void) {
     drop_proc(p);
 }
 
-// A range that cuts INTO a VMA (its start lies outside) is TRUE partial unmap:
-// refused whole, nothing detached -- the atomicity that keeps "munmap returned
-// an error" meaning "your mappings are exactly as they were".
-void test_burrow_munmap_range_partial_refused(void) {
+// B-1a': a range that cuts INTO a VMA (its start lies outside) is the Linux
+// partial unmap, and it is served: the straddled mapping is trimmed to what
+// lies outside the range and the one wholly inside goes -- in one locked pass,
+// nothing half-done. (Before B-1a' this was refused whole.)
+void test_burrow_munmap_range_partial_trims(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc failed");
     u64 base = d3b_base(p);
     TEST_ASSERT(base != 0, "lazy attach failed");
+    u32 vmas0 = p->as->vma_count;
 
     u64 cut = base + 4 * PAGE_SIZE;
     struct Burrow *nb = fresh_anon(4 * PAGE_SIZE);
@@ -890,17 +920,19 @@ void test_burrow_munmap_range_partial_refused(void) {
     TEST_EXPECT_EQ(map_fixed_locked(p, nb, cut, 4 * PAGE_SIZE, VMA_PROT_RW, 0),
                    0, "tail replace must succeed");
     burrow_unref(nb);
+    TEST_EXPECT_EQ((u64)p->as->vma_count, (u64)vmas0 + 1, "two mappings after the overlay");
 
-    // [base+P, end): the first VMA straddles the range's left edge. The SECOND
-    // VMA lies wholly inside -- and must SURVIVE the refusal untouched.
+    // [base+P, end): the first VMA straddles the range's left edge -- it is
+    // trimmed to [base, base+P); the SECOND lies wholly inside and goes.
     TEST_EXPECT_EQ(sys_munmap_range_for_proc(p, base + PAGE_SIZE,
                                              D3B_LEN - PAGE_SIZE),
-                   -1, "boundary-straddling range refused");
+                   0, "a boundary-straddling range is served (partial unmap)");
     struct Vma *left = vma_lookup(p, base);
-    struct Vma *mid  = vma_lookup(p, cut);
-    TEST_ASSERT(left != NULL, "straddled VMA survives");
-    TEST_ASSERT(mid  != NULL, "the wholly-inside VMA ALSO survives (atomic refusal)");
-    TEST_EXPECT_EQ(left->vaddr_end, cut, "straddled VMA geometry untouched");
+    TEST_ASSERT(left != NULL, "the straddled VMA survives as its head");
+    TEST_EXPECT_EQ(left->vaddr_end, base + PAGE_SIZE, "trimmed at the range's start");
+    TEST_ASSERT(vma_lookup(p, base + PAGE_SIZE) == NULL, "the cut part is gone");
+    TEST_ASSERT(vma_lookup(p, cut) == NULL, "the wholly-inside VMA is gone");
+    TEST_EXPECT_EQ((u64)p->as->vma_count, (u64)vmas0, "one mapping remains");
 
     drop_proc(p);
 }
@@ -1057,7 +1089,7 @@ void test_burrow_map_fixed_replace_file_frees_outside_lock(void) {
 }
 
 // D-3c re-audit F8 [P3]: vma_replace_range_in must refuse a CODE-alias VMA -- the
-// parity detach_one_locked + sys_munmap_range_for_proc already enforce. A CODE
+// parity the detach core (vma_detach_range_in) enforces for every caller. A CODE
 // region is a JIT pair over one charge; MAP_FIXED-replacing one alias would orphan
 // its peer (SYS_JIT_DESTROY then refuses it), the I-42 lifetime harm. Unreachable in
 // production (MAP_FIXED is phenotype-only, CODE is native-only) -- a parity guard.
@@ -1068,7 +1100,7 @@ void test_burrow_map_fixed_refuses_code_alias(void) {
     TEST_ASSERT(p != NULL, "proc_alloc failed");
 
     // A CODE burrow mapped RX in the window -- the JIT-alias shape.
-    struct Burrow *code = burrow_create_code(PAGE_SIZE);
+    struct Burrow *code = burrow_create_code(PAGE_SIZE, false);
     TEST_ASSERT(code != NULL, "burrow_create_code failed");
     u64 va = EXEC_USER_BURROW_BASE;
     spin_lock(&p->as->lock);
@@ -1077,11 +1109,11 @@ void test_burrow_map_fixed_refuses_code_alias(void) {
     TEST_EXPECT_EQ(mrc, 0, "map the CODE burrow RX");
     burrow_unref(code);        // drop the construction handle; the mapping holds it
 
-    // MAP_FIXED exact-cover it -- MUST be refused (-1), CODE VMA survives intact.
+    // MAP_FIXED exact-cover it -- MUST be refused (EACCES), CODE VMA survives intact.
     struct Burrow *nb = fresh_anon(PAGE_SIZE);
     TEST_ASSERT(nb != NULL, "fresh anon burrow alloc failed");
     int rc = map_fixed_locked(p, nb, va, PAGE_SIZE, VMA_PROT_RW, 0);
-    TEST_EXPECT_EQ(rc, -1, "MAP_FIXED over a CODE alias is refused (I-42 parity)");
+    TEST_EXPECT_EQ(rc, -(int)T_E_ACCES, "MAP_FIXED over a CODE alias is refused (I-42 parity)");
     burrow_unref(nb);          // refused before any acquire_mapping -> our ref frees it
 
     struct Vma *vma = vma_lookup(p, va);

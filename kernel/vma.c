@@ -21,6 +21,7 @@
 #include <thylacine/burrow.h>
 #include <thylacine/errno.h>     // B-1a: vma_reprotect_* report -T_E_*
 
+#include "../arch/arm64/mmu.h"     // B-1a': the range detach's own PTE uninstall
 #include "../mm/slub.h"
 
 // =============================================================================
@@ -67,6 +68,15 @@ struct Vma *vma_alloc(u64 vaddr_start, u64 vaddr_end, u32 prot,
     // W-only prot would map RW (readable) -- a rights/PTE mismatch the MMIO/DMA
     // syscalls already guard. Reject it here so the VMA prot matches the PTE.
     if ((prot & VMA_PROT_WRITE) && !(prot & VMA_PROT_READ)) return NULL;
+
+    // B-1a' audit F3: the mapping must lie inside the Burrow. A VMA past the
+    // Burrow's end would name slots its pagemap does not have, and the range
+    // release walks the mapping's own slot bound -- refused here, at the one
+    // constructor, rather than defended in every walker. Written so neither
+    // term can overflow.
+    u64 span = (u64)burrow->page_count << PAGE_SHIFT;
+    if (burrow_offset > span)                          return NULL;
+    if (vaddr_end - vaddr_start > span - burrow_offset) return NULL;
 
     struct Vma *v = kmem_cache_alloc(g_vma_cache, KP_ZERO);
     if (!v) return NULL;
@@ -213,13 +223,14 @@ int vma_insert_in(struct AddrSpace *as, bool exempt, struct Vma *v) {
     // SYS_BURROW_ATTACH_LAZY reservation (uncharged at attach) would otherwise open.
     // Checked AFTER the overlap walk (so a rejected overlap doesn't consume the
     // budget) and BEFORE the list mutation (so a cap-hit installs nothing). A non-TCB
-    // address space at PROC_VMA_MAX is rejected here, identically to an overlap (the
-    // caller vma_frees the rejected Vma). The charge requires as->lock — every
+    // address space at PROC_VMA_MAX is rejected here as -T_E_NOMEM (an overlap is
+    // -1: the cap is a resource refusal, reportable as one -- B-1a' audit F18; the
+    // caller vma_frees the rejected Vma either way). The charge requires as->lock — every
     // vma_insert caller holds it (attach / share under vma_lock; the exec load path
     // builds a detached address space no other thread can reach). Paired by
     // addrspace_uncharge_vma in vma_remove_in. Charges nothing on failure, so no
     // rollback is needed on the rejected path.
-    if (!addrspace_charge_vma(as, exempt)) return -1;
+    if (!addrspace_charge_vma(as, exempt)) return -(int)T_E_NOMEM;
 
     // Insert v between prev and cur.
     v->prev = prev;
@@ -259,151 +270,195 @@ struct Vma *vma_lookup(struct Proc *p, u64 vaddr) {
     return vma_lookup_in(p->as, vaddr);
 }
 
-// DISTRO D-3b: the MAP_FIXED split/replace. See vma.h for the full contract --
-// in particular why the old Vma is reused as the survivor rather than removed,
-// and why that is what makes every failure path hole-free.
-int vma_replace_range_in(struct AddrSpace *as, bool exempt,
+// =============================================================================
+// B-1a': the range detach, and the MAP_FIXED replace over it (vma.h has the
+// contracts; specs/capacity.tla the accounting law they keep).
+// =============================================================================
+
+int vma_detach_range_in(struct AddrSpace *as, bool exempt, struct Proc *payer,
+                        u64 vaddr, u64 length, u32 extra_vmas,
+                        struct Burrow **out_dead) {
+    // Mandatory: a whole mapping's drop may be a FILE Burrow's last ref, whose
+    // free reaches a possibly-sleeping spoor_clunk, and this runs under
+    // as->lock (the D-3c F1 rule). Fail loud rather than free inline.
+    if (!out_dead) extinction("vma_detach_range_in without out_dead (would free under as->lock)");
+    *out_dead = NULL;
+    if (!as)                                            return -(int)T_E_INVAL;
+    if (length == 0)                                    return -(int)T_E_INVAL;
+    if (vaddr  & (PAGE_SIZE - 1))                       return -(int)T_E_INVAL;
+    if (length & (PAGE_SIZE - 1))                       return -(int)T_E_INVAL;
+    u64 end = vaddr + length;
+    if (end < vaddr)                                    return -(int)T_E_INVAL;
+    if (end > USER_VA_TOP)                              return -(int)T_E_INVAL;
+
+    // PHASE 1 -- decide every refusal, mutate nothing. One scan from the head,
+    // then successors: the list is sorted (B-1a audit F2).
+    struct Vma *first = vma_next_overlap_in(as, vaddr, end);
+    if (!first)                                         return 0;   // nothing mapped
+    struct Vma *last = first;
+    u32 whole_n = 0;
+    for (struct Vma *v = first; v && v->vaddr_start < end; v = v->next) {
+        if (v->magic != VMA_MAGIC)
+            extinction("vma_detach_range: corrupted list entry");
+        bool whole = v->vaddr_start >= vaddr && v->vaddr_end <= end;
+        if (v->burrow) {
+            if (v->burrow->magic != VMO_MAGIC)          return -(int)T_E_ACCES;
+            // I-42: a CODE region is a PAIR of aliases over one charge, and
+            // this path has no concept of the pair. Detaching one alias would
+            // refund the charge once per alias (a bound a CAP_JIT holder can
+            // drive to zero is not a bound) and orphan its peer (SYS_JIT_DESTROY
+            // then refuses it). The JIT syscalls own that lifetime.
+            if (v->burrow->type == BURROW_TYPE_CODE)    return -(int)T_E_ACCES;
+        }
+        if ((v->flags & VMA_FLAG_SHARED_IN) && !whole)  return -(int)T_E_ACCES;
+        if (whole) whole_n++;
+        last = v;
+    }
+    // Only a range strictly inside ONE mapping adds a mapping (its tail); every
+    // other shape trims or removes. The count is stable under as->lock, so the
+    // inserts that follow cannot fail once the headroom -- for the piece AND
+    // for whatever the caller inserts next -- clears against the count AFTER
+    // the removals.
+    bool middle = (first == last) &&
+                  first->vaddr_start < vaddr && first->vaddr_end > end;
+    if (!exempt) {
+        u32 cnt   = __atomic_load_n(&as->vma_count, __ATOMIC_RELAXED);
+        u32 after = cnt - whole_n + (middle ? 1u : 0u) + extra_vmas;
+        if (after > PROC_VMA_MAX)                       return -(int)T_E_NOMEM;
+    }
+    // The tail piece re-derives its offset from the SAME (burrow, offset)
+    // relation its parent has, so every surviving VA keeps its byte identity;
+    // it carries the parent's flags whole -- the ceiling and the COW routing
+    // bit (the per-page share counts are per page, so a cut is sound for a
+    // forked mapping). A guard's tail is a guard.
+    struct Vma *piece = NULL;
+    if (middle) {
+        piece = first->burrow
+              ? vma_alloc(end, first->vaddr_end, first->prot, first->burrow,
+                          first->burrow_offset + (end - first->vaddr_start))
+              : vma_alloc_guard(end, first->vaddr_end);
+        if (!piece)                                     return -(int)T_E_NOMEM;
+        piece->flags = first->flags;
+    }
+
+    // PHASE 2 -- the range's leaf PTEs go BEFORE any page is freed or any
+    // mapping changes (the burrow_unmap discipline: a stale PTE or TLB entry
+    // would alias a recycled page). Absent subtrees are skipped; the asid arg
+    // is vestigial (all-ASID tlbi vaae1is). Mapping by mapping, so a FILE
+    // mapping's leaves refund this space's holder charge (audit F8).
+    (void)vma_uninstall_range_in(as, vaddr, end);
+
+    // PHASE 3 -- release, then re-shape. The successor is read before a whole
+    // mapping is freed; the piece is consumed by the one shape that needs it.
+    struct Burrow *dead = NULL;
+    for (struct Vma *v = first, *nx = NULL; v && v->vaddr_start < end; v = nx) {
+        nx = v->next;
+        u64 lo = v->vaddr_start > vaddr ? v->vaddr_start : vaddr;
+        u64 hi = v->vaddr_end   < end   ? v->vaddr_end   : end;
+        struct Burrow *b = v->burrow;
+        bool shared_in = (v->flags & VMA_FLAG_SHARED_IN) != 0;
+
+        // The release FIRST (capacity.tla, Detach): the overlap's resident
+        // slots are freed and uncharged while the mapping still names them.
+        // burrow_free_internal cannot refund a page, so a slot unmapped while
+        // resident would be charged for the address space's life (NoOrphan).
+        if (b && !shared_in && b->type == BURROW_TYPE_ANON_LAZY)
+            (void)burrow_release_lazy_range_in(as, v, lo, hi);
+
+        if (lo == v->vaddr_start && hi == v->vaddr_end) {
+            // WHOLE: the mapping goes. A shared-in span's budget charge goes
+            // with it (the burrow_share_into pairing, exact under this lock).
+            if (shared_in)
+                addrspace_uncharge_shared_map(as, (u32)((hi - lo) / PAGE_SIZE));
+            // The eager-ANON refund (#130/#131): the charge RECORD says who
+            // paid, never the region's shape. Claimed BEFORE the drop (a
+            // freeing drop takes the record with it) and refunded iff the drop
+            // actually freed the pages -- a Loom ring, a registered buffer and
+            // a Weft share each hold a handle_count ref that can outlive the
+            // mapping -- or the region survives only in ANOTHER Proc, which
+            // this one can no longer reach and whose eventual last drop has no
+            // way to name the payer. Alive on one of this Proc's OWN claims,
+            // the claim is put back for that claim's drop to settle.
+            bool shared_out = false;
+            u32  paid       = 0;
+            if (payer && b && !shared_in && b->type == BURROW_TYPE_ANON) {
+                shared_out = burrow_is_shared_out(b);
+                paid       = burrow_charge_claim(b, payer);
+            }
+            vma_remove_in(as, v);
+            bool freed = false;
+            struct Burrow *tf = vma_free_deferred(v, &freed);
+            if (paid) {
+                if (freed || shared_out) addrspace_uncharge_pages(as, paid);
+                else                     burrow_charge_restore(b, payer, paid);
+            }
+            if (tf) { tf->deferred_free_next = dead; dead = tf; }
+        } else if (lo == v->vaddr_start) {
+            // The range covers the mapping's head: the survivor is its tail.
+            // start and offset move by the SAME delta (identity preserved);
+            // still sorted, since the predecessor ends at or below the old
+            // start.
+            v->burrow_offset += hi - v->vaddr_start;
+            v->vaddr_start    = hi;
+        } else if (hi == v->vaddr_end) {
+            // The range covers the mapping's tail: the survivor is its head
+            // (same start, same offset).
+            v->vaddr_end = lo;
+        } else {
+            // The range is strictly inside: the head survives in place and the
+            // pre-allocated tail lands in the space the shrink just vacated.
+            // Infallible by construction (no overlap; headroom checked), so a
+            // refusal here means the count's bookkeeping lied -- fail loud
+            // rather than leave the tail's bytes unreachable.
+            v->vaddr_end = lo;
+            if (vma_insert_in(as, exempt, piece) != 0)
+                extinction("vma_detach_range: the tail piece was refused after the headroom check");
+            piece = NULL;
+        }
+    }
+    *out_dead = dead;
+    return 0;
+}
+
+// DISTRO D-3b as rebuilt at B-1a': the range detach, then the insert. See vma.h.
+int vma_replace_range_in(struct AddrSpace *as, bool exempt, struct Proc *payer,
                          u64 vaddr, u64 length,
                          struct Burrow *nb, u32 prot, u64 nb_offset,
                          struct Burrow **out_free) {
-    // D-3c re-audit F5: the exact-cover arm frees `old`'s Burrow, which may be a
-    // sleeping-free FILE Burrow. Defer it past as->lock via out_free (see the vma.h
-    // contract). NULL on every path but the exact-cover free.
-    // F7 (re-audit round 3): out_free is MANDATORY. The exact-cover arm hands back a
-    // dead Burrow that vma_free_deferred does NOT free, so a NULL out_free would LEAK
-    // it (the slab slot + filepages + a FILE Burrow's pinned Spoor) -- strictly worse
-    // than F6's inline-free-under-lock, which at least freed. Fail loud, F6 parity.
-    if (!out_free) extinction("vma_replace_range_in without out_free (would leak the replaced Burrow)");
+    // F7 (re-audit round 3): out_free is MANDATORY. The detach hands back dead
+    // Burrows that vma_free_deferred does NOT free, so a NULL would LEAK them
+    // (the slab slot, the pagemap, a FILE Burrow's pinned Spoor). Fail loud.
+    if (!out_free) extinction("vma_replace_range_in without out_free (would leak the replaced Burrows)");
     *out_free = NULL;
-    if (!as || !nb)                       return -1;
-    if (length == 0)                      return -1;
-    if (vaddr  & (PAGE_SIZE - 1))         return -1;
-    if (length & (PAGE_SIZE - 1))         return -1;
+    if (!as || !nb)                       return -(int)T_E_INVAL;
+    if (length == 0)                      return -(int)T_E_INVAL;
+    if (vaddr  & (PAGE_SIZE - 1))         return -(int)T_E_INVAL;
+    if (length & (PAGE_SIZE - 1))         return -(int)T_E_INVAL;
     u64 end = vaddr + length;
-    if (end < vaddr)                      return -1;          // wrap
+    if (end < vaddr)                      return -(int)T_E_INVAL;
 
-    struct Vma *old = vma_lookup_in(as, vaddr);
-    if (!old) {
-        // FREE SPACE -- nothing to split, so this is a plain fixed-address map.
-        // Linux MAP_FIXED does not require the range to be already mapped; at an
-        // unmapped address it simply places the mapping there. Refusing here is
-        // what made the shell answer ENOMEM, which is a WORSE reply than the
-        // ENOSYS it replaced: ENOMEM is indistinguishable from real memory
-        // pressure, and an allocator reads it as OOM.
-        //
-        // vma_insert_in rejects any overlap, so this arm also catches the range
-        // that starts free and runs INTO a later VMA -- the partial-overlap
-        // case, which Linux would serve by unmapping the overlapped part and
-        // which we refuse because partial unmap is post-v1.0.
-        struct Vma *v = vma_alloc(vaddr, end, prot, nb, nb_offset);
-        if (!v) return -1;
-        if (vma_insert_in(as, exempt, v) != 0) { vma_free(v); return -1; }
-        return 0;
+    // The new mapping FIRST, so a slab shortfall changes nothing; it holds its
+    // mapping ref on `nb` across the detach.
+    struct Vma *nv = vma_alloc(vaddr, end, prot, nb, nb_offset);
+    if (!nv)                              return -(int)T_E_NOMEM;
+
+    struct Burrow *dead = NULL;
+    int rc = vma_detach_range_in(as, exempt, payer, vaddr, length, 1, &dead);
+    if (rc != 0) {
+        // Refused: the detach changed nothing. The new mapping's ref drops the
+        // deferred way -- the caller normally still holds `nb`'s construction
+        // handle, but this layer does not assume it.
+        struct Burrow *tf = vma_free_deferred(nv, NULL);
+        if (tf) { tf->deferred_free_next = dead; dead = tf; }
+        *out_free = dead;
+        return rc;
     }
-    // WHOLLY inside one VMA. A request spanning two VMAs is refused rather than
-    // handled: musl's overlay always lands inside the whole-span reservation it
-    // just made, so the multi-VMA shape has no producer -- and inventing one
-    // here would mean inventing its failure semantics too.
-    if (vaddr < old->vaddr_start || end > old->vaddr_end)     return -1;
-    // B-1a: the ceiling bits are not a state flag -- a reserve minted at none
-    // under an RW ceiling is exactly what map_library overlays into.
-    if ((old->flags & VMA_FLAG_STATE_MASK) != 0 || !old->burrow)  return -1;
-    // F8 (re-audit round 3): refuse a CODE-alias VMA, the parity detach_one_locked +
-    // sys_munmap_range_for_proc already enforce. A CODE region is a JIT pair over one
-    // charge; replacing or splitting one alias orphans its peer (SYS_JIT_DESTROY then
-    // refuses it) exactly as detaching it would. Unreachable today (MAP_FIXED is
-    // phenotype-only; CODE is minted only by native SYS_JIT_CREATE) -- a parity guard
-    // for the day either exclusivity relaxes.
-    if (old->burrow->type == BURROW_TYPE_CODE)  return -1;
-
-    bool want_left  = (vaddr > old->vaddr_start);
-    bool want_right = (end   < old->vaddr_end);
-
-    // Allocate every new piece BEFORE touching the list, so an allocation
-    // shortfall costs nothing but the frees below.
-    struct Vma *mid = vma_alloc(vaddr, end, prot, nb, nb_offset);
-    if (!mid)                             return -1;
-
-    // The right remainder re-derives its offset from the SAME (burrow, offset)
-    // relation the old VMA had, which is what keeps every surviving VA's byte
-    // identity unchanged across the cut.
-    struct Vma *right = NULL;
-    if (want_left && want_right) {
-        right = vma_alloc(end, old->vaddr_end, old->prot, old->burrow,
-                          old->burrow_offset + (end - old->vaddr_start));
-        if (!right) { vma_free(mid); return -1; }
-        right->flags = old->flags;   // B-1a: the remainder keeps its ceiling
-    }
-
-    // I-32 headroom, checked BEFORE the mutation so a cap-hit changes nothing.
-    // Under as->lock the count is stable (every mutator holds it), so the
-    // charges taken below cannot then fail. `right` is the only case that adds
-    // two VMAs; the others add one, and the exact-cover case adds none net.
-    u32 adding = 1u + (right ? 1u : 0u);
-    if (!exempt) {
-        u32 cur = __atomic_load_n(&as->vma_count, __ATOMIC_RELAXED);
-        u32 net = adding - ((want_left || want_right) ? 0u : 1u);
-        if (cur > PROC_VMA_MAX - net) {
-            vma_free(mid);
-            if (right) vma_free(right);
-            return -1;
-        }
-    }
-
-    // Save what a rollback has to put back.
-    u64 old_start  = old->vaddr_start;
-    u64 old_end    = old->vaddr_end;
-    u64 old_offset = old->burrow_offset;
-
-    if (want_left) {
-        // The survivor becomes the LEFT remainder: same start, same offset, so
-        // its resident PTEs stay correct untouched. Shrinking only the end
-        // cannot disturb the sort order.
-        old->vaddr_end = vaddr;
-    } else if (want_right) {
-        // The survivor becomes the RIGHT remainder. start and offset move by
-        // the SAME delta, so `burrow_offset + (va - vaddr_start)` is invariant
-        // for every VA it still covers. Still sorted: its predecessor ends at
-        // or below old_start < end, and its successor starts at or above
-        // old_end.
-        old->vaddr_start   = end;
-        old->burrow_offset = old_offset + (end - old_start);
-    } else {
-        // Exact cover -- no remainder. This is the one case that removes.
-        vma_remove_in(as, old);
-    }
-
-    if (vma_insert_in(as, exempt, mid) != 0) goto rollback_mid;
-    if (right && vma_insert_in(as, exempt, right) != 0) {
-        vma_remove_in(as, mid);
-        goto rollback_mid;
-    }
-
-    if (!want_left && !want_right) {
-        // Exact cover -- the old VMA is fully replaced and its Burrow's mapping
-        // ref drops here. D-3c re-audit F5 [P1]: if that drop is the last ref of a
-        // 9P-backed FILE Burrow (a bypassed image mmap at {h:0,m:1}), the free
-        // reaches a possibly-sleeping spoor_clunk, and we hold as->lock -- the
-        // lock-across-sleep extinction. Defer the physical free to the caller, past
-        // the unlock (the F1 pattern; this was the fourth inline-free-under-lock
-        // site F1 missed). The I-32 mapping-ref bookkeeping still settles here.
-        struct Burrow *tf = vma_free_deferred(old, NULL);
-        if (out_free) *out_free = tf;
-    }   // fully replaced
+    // Infallible: the range was just vacated (no overlap) and the detach
+    // cleared the headroom for this insert (extra_vmas = 1).
+    if (vma_insert_in(as, exempt, nv) != 0)
+        extinction("vma_replace_range_in: insert refused into the range the detach vacated");
+    *out_free = dead;
     return 0;
-
-rollback_mid:
-    // Nothing of the new mapping survives, and the survivor goes back to
-    // exactly the range it had. The exact-cover re-insert cannot fail: same
-    // lock hold, into the range just vacated (no overlap), with the count
-    // strictly below its entry value (no cap refusal).
-    vma_free(mid);
-    if (right) vma_free(right);
-    old->vaddr_start   = old_start;
-    old->vaddr_end     = old_end;
-    old->burrow_offset = old_offset;
-    if (!want_left && !want_right) (void)vma_insert_in(as, exempt, old);
-    return -1;
 }
 
 struct Vma *vma_lookup_in(struct AddrSpace *as, u64 vaddr) {
@@ -438,6 +493,22 @@ struct Vma *vma_next_overlap_in(struct AddrSpace *as, u64 lo, u64 hi) {
         if (cur->vaddr_end > lo) return cur;
     }
     return NULL;
+}
+
+long vma_uninstall_range_in(struct AddrSpace *as, u64 lo, u64 hi) {
+    long total = 0;
+    for (struct Vma *v = vma_next_overlap_in(as, lo, hi);
+         v && v->vaddr_start < hi; v = v->next) {
+        u64 a = v->vaddr_start > lo ? v->vaddr_start : lo;
+        u64 b = v->vaddr_end   < hi ? v->vaddr_end   : hi;
+        if (a >= b) continue;
+        long n = mmu_uninstall_user_range(as, a, b);
+        if (n <= 0) continue;
+        if (v->burrow && v->burrow->type == BURROW_TYPE_FILE)
+            addrspace_uncharge_file(as, (u32)n);
+        total += n;
+    }
+    return total;
 }
 
 // P6-pouch-mem: first-fit free-range finder for SYS_BURROW_ATTACH. The
@@ -778,9 +849,7 @@ void vma_drain_in(struct AddrSpace *as) {
         if (tf) { tf->deferred_free_next = dead; dead = tf; }
     }
     spin_unlock(&as->lock);
-    while (dead) { struct Burrow *n = dead->deferred_free_next;
-                   dead->deferred_free_next = NULL;
-                   burrow_free_deferred(dead); dead = n; }
+    burrow_free_deferred(dead);          // the whole chain, no lock held
 }
 
 // =============================================================================

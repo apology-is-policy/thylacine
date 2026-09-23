@@ -8,6 +8,8 @@ chunks:
   - chg-2026-09-21-boosty-b0-jsc
   - chg-2026-09-21-pouch-b0-libc
   - chg-2026-09-21-mount-shed
+  - chg-2026-09-23-b1a-permission-ceiling
+  - chg-2026-09-23-b1a-prime-capacity
 follow-ons: []
 exit-criteria:
   - "[x] B-0: JavaScriptCore (JIT off) builds through tools/build.sh and runs on the device"

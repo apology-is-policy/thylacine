@@ -5,6 +5,7 @@
 
 #include <thylacine/vivarium.h>
 
+#include <thylacine/exec.h>             // B-1a': the burrow window bounds the fixed arms
 #include <thylacine/handle.h>           // V-5c-2: PROC_HANDLE_MAX = the fd clamp
 #include <thylacine/notes.h>            // V-6b: the canonical note-name literals
 #include <thylacine/page.h>             // D-3: PAGE_SIZE bounds the FILE arm's offset
@@ -1346,9 +1347,17 @@ enum viv_verdict vivarium_mmap_file_decide(u64 prot, u64 flags,
 // the hint it is on the non-fixed arms, so it has to be a real page. Zero is
 // refused separately from misalignment because a fixed map at NULL is a distinct
 // mistake -- it would put a mapping where a null-pointer dereference must fault.
+// B-1a': and it has to lie in the burrow window, because the munmap row is
+// window-confined -- a fixed mapping placed below EXEC_USER_BURROW_BASE could
+// never be unmapped and leaked for the life of the process (pheno-probe L21,
+// every boot). musl's map_library overlays land inside the reservation it just
+// made, which is in the window, so nothing served is lost; a request below it
+// is declined honestly (ENOSYS + the unserved line) instead of half-served.
 static bool fixed_addr_ok(u64 addr) {
     if (addr == 0)                    return false;
     if (addr & (u64)(PAGE_SIZE - 1))  return false;
+    if (addr <  EXEC_USER_BURROW_BASE) return false;
+    if (addr >= EXEC_USER_BURROW_TOP)  return false;
     return true;
 }
 

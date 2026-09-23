@@ -59,7 +59,7 @@ struct page {
     // THE CONTRACT, which is the whole of its correctness:
     //
     //   cow_share is meaningful ONLY while the page sits in an anon Burrow's
-    //   filepages[] slot, and it is ESTABLISHED, NEVER INHERITED -- every site
+    //   pagemap slot, and it is ESTABLISHED, NEVER INHERITED -- every site
     //   that puts a page into such a slot sets it to 1 (cow_page_set_sole)
     //   rather than assuming what a previous user left behind.
     //
@@ -68,7 +68,7 @@ struct page {
     // recycled through the buddy carries whatever its last owner left, and a
     // stale count means a premature free or a leak. The sites are a closed,
     // enumerated set of three: burrow_lazy_populate, the demand-zero fault
-    // install (arch/arm64/fault.c), and the COW break. Every OTHER filepages[]
+    // install (arch/arm64/fault.c), and the COW break. Every OTHER pagemap
     // writer is BURROW_TYPE_FILE -- text, shared read-only through the Image
     // cache, never broken -- and deliberately does not participate.
     //
@@ -94,6 +94,9 @@ _Static_assert(sizeof(struct page) == 48,
                                 // struct-page array itself, low firmware)
 #define PG_KERNEL     (1u << 2) // page is allocated to the kernel
 #define PG_SLAB       (1u << 3) // page is a SLUB slab (slab_freelist + slab_cache valid)
+#define PG_USER       (1u << 4) // B-1a': allocated by alloc_user_pages and counted in the
+                                // user pool; free_pages clears it and returns the charge
+                                // (mm/phys.h). On the block's HEAD page, like the rest.
 
 // Allocation flags (caller-passed to alloc_pages / kpage_alloc).
 //

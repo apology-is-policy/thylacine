@@ -97,7 +97,7 @@ static void weft_teardown(struct Proc *netd, struct Proc *guest, struct Burrow *
 #define WEFT_SETUP(netd, guest, v, rv)                                              \
     struct Proc *netd = weft_make_proc(), *guest = weft_make_proc();                \
     TEST_ASSERT(netd != NULL && guest != NULL, "proc_alloc failed");                \
-    struct Burrow *v = burrow_create_anon(WEFT_RING_PAGES);                         \
+    struct Burrow *v = burrow_create_anon(WEFT_RING_PAGES, false);                         \
     TEST_ASSERT(v != NULL, "burrow_create_anon failed");                            \
     TEST_EXPECT_EQ(burrow_map(netd, v, WEFT_TEST_VA, WEFT_RING_PAGES, VMA_PROT_RW), \
                    0, "netd burrow_map");                                           \
@@ -327,7 +327,7 @@ void test_weft_should_ring_threshold(void) {
 // entries, the regions must fit, NULL + degenerate inputs fail closed.
 // ---------------------------------------------------------------------------
 void test_weft_ring_layout_constraints(void) {
-    struct Burrow *v = burrow_create_anon(WEFT_RING_PAGES);
+    struct Burrow *v = burrow_create_anon(WEFT_RING_PAGES, false);
     TEST_ASSERT(v != NULL, "burrow_create_anon failed");
     u8 *base = (u8 *)pa_to_kva(page_to_pa(v->pages));
     struct weft_ring_view rv;

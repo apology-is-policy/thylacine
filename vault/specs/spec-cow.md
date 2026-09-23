@@ -13,7 +13,9 @@ cfgs:
   - "cow_buggy_protect_keeps_pte.cfg -- a protect changes the prot and leaves the writable PTE installed: NoWritablePteBeyondProt (B-1a)"
   - "cow_buggy_fault_ignores_prot.cfg -- the break arm fires on a mapping protected below RW: BreakOnlyWhenWritable (B-1a)"
   - "cow_buggy_clone_per_piece.cfg -- a fork mints one clone Burrow PER VMA piece (Pieces = 2): ShareIsHolderCount, violated in the initial state (B-1a)"
-gate: "any change to kernel/cow.c, to addrspace_clone's phase order or its clone_cursor dedupe, to the vfork suspend/release path, to burrow_protect_in's uninstall-before-prot order, or to vma_reprotect_range_in's cut; specs/check-cow.sh runs all nine cfgs and pins the clean counts and the buggy cfgs by invariant name"
+  - "cow_leaf.cfg -- clean, MODEL_LEAF, three sharers: Safety + LeafSafety (NoReadableFreed + NoCrossSpaceRead) and EventuallyReleased; 2996 distinct states, pinned (B-1a')"
+  - "cow_buggy_put_before_replace.cfg -- the copy's share is put BEFORE its writable leaf replaces the read-only one: NoReadableFreed (B-1a')"
+gate: "any change to kernel/cow.c, to addrspace_clone's phase order or its clone_cursor dedupe, to the vfork suspend/release path, to burrow_protect_in's uninstall-before-prot order, to vma_reprotect_range_in's cut, or to the order of the COW break's step-5 replace and its cow_page_put; specs/check-cow.sh runs all ten cfgs and pins the clean counts and the buggy cfgs by invariant name"
 created: 2026-08-06
 updated: 2026-09-23
 ---
@@ -83,13 +85,33 @@ admits a protect-forever run that never releases the vfork parent, so the
 liveness cfg needs weak fairness on the vfork sub-machine. The one-flag ASSUME
 now spans six bug flags.
 
+**The B-1a' extension** (2026-09-23, behind `MODEL_LEAF`; the round-3 audit's
+F12, recorded by round 4's F21). The break's tail is two steps in the kernel --
+the leaf write (the copy's writable leaf REPLACES, in place, the read-only leaf
+an earlier read installed) and then the put of the share held across the copy
+-- and `BreakFinish` had them as one, so their order was outside the model.
+The wrong order carried a P1: put first, and for one step the space's read-only
+leaf still translates to a page it holds no share of, which the other holder
+is now free to take in place ([[inv-i44]]) or to free ([[inv-i13]]). `pter[s]`
+is that leaf; `ReadFault` sets it, the leaf write (`BreakReplace`), the
+in-place take, an exit and a protect clear it; `BreakRelease` then drops the
+pin and the share. Bug 7, `BUGGY_PUT_BEFORE_REPLACE`, runs `PutFirst` then
+`ReplaceLate`. `LeafSafety` is kept OUT of `Safety` as `ProtectSafety` is, and
+with the switch off `pter` is constant, so the eight older cfgs reproduce their
+counts exactly. Still beneath the model: the leaf write is itself a TLB
+break-before-make, and a sibling thread's fault inside it is answered by the
+dispatcher's step 2b (the round-3 audit's F13), not here.
+
 ## Action-site map
 
 | Action | Site |
 |---|---|
 | `Fault(s)` | the write-fault arm of `userland_demand_page` reaching a `VMA_FLAG_COW` region |
 | `DecideLocked(s)` | `cow_page_break_is_sole` — the whole decide under [[lock-cow]] as one step; `share = 1` -> take in place, else pin and copy |
-| `BreakFinish(s)` | the break's tail: install the private page, then `cow_page_put` — **the drop happens here, after the copy** |
+| `BreakFinish(s)` | the break's tail as one step (`MODEL_LEAF` off): install the private page, then `cow_page_put` — **the drop happens here, after the copy** |
+| `ReadFault(s)` | (B-1a') the read arm of `userland_demand_page` installing a read-only leaf over a shared page (`mmu_install_user_pte_attr`, `AP_RO_ANY`) |
+| `BreakReplace(s)` / `BreakRelease(s)` | (B-1a') step 5 of `demand_page_locked`: `mmu_replace_user_pte_attr` (the copy's writable leaf over the read-only one, one break-before-make), THEN `cow_page_put(cow_release)` — the order the round-3 audit's F12 restored |
+| `PutFirst` / `ReplaceLate` | **no site** — bug 7 only (the pre-F12 order) |
 | `Exit(s)` | `addrspace_unref`'s last drop -> `vma_drain_in` -> the Burrow's slot release -> `cow_page_put` |
 | `FreePristine` | `cow_page_put` returning true, and the caller freeing **outside** the lock |
 | `VChildRelease` | the vfork child's exec or exit releasing the shared address space |
@@ -108,6 +130,8 @@ now spans six bug flags.
 | `ShareIsHolderCount` | (B-1a) `share = Cardinality(Referencing)`: the per-page count equals the number of address spaces holding the page — a fork of a split mapping mints ONE clone |
 | `NoWritablePteBeyondProt` | (B-1a) a writable PTE never outlives the permission that justified it — the uninstall runs before the prot changes |
 | `BreakOnlyWhenWritable` | (B-1a) the break fires only on an rw mapping — the fault dispatcher checks `vma->prot` before it resolves the Burrow |
+| `NoReadableFreed` | (B-1a') a read-only leaf never outlives the page it names: the space's own translation is gone before its share is, so no exit frees the page under it |
+| `NoCrossSpaceRead` | (B-1a') a page one space still reads through a read-only leaf is never taken in place, writable, by another |
 
 `FreePristine` is deliberately **the real free decision** — it trusts
 `share` and `pin` exactly as the implementation does — so a protocol that
@@ -164,7 +188,21 @@ on, the initial state already has `share = 1 + 2 * (Sharers - 1)` against
 `Sharers` holders, so `ShareIsHolderCount` is violated by `Init`. That is the
 honest shape of the bug -- the fork IS the defect, not a race after it -- and
 it is why `addrspace_clone` dedupes through the source's cursor rather than
-fixing anything downstream. `specs/check-cow.sh` pins all nine cfgs: the
-clean counts (580 / 10636), the buggy cfgs by the name of the invariant TLC
+fixing anything downstream. `specs/check-cow.sh` pins all ten cfgs: the
+clean counts (580 / 10636 / 2996), the buggy cfgs by the name of the invariant TLC
 reports violated, and the vfork liveness by "Temporal property
 EventuallyReleased was violated" at 231 states.
+
+## The B-1a' counterexample
+
+`cow_buggy_put_before_replace` is the round-3 audit's F12 as a cfg. The
+breaker has copied the page out and holds the slot with its copy, and puts its
+share of the original BEFORE the leaf write. Its own read-only leaf -- the one
+its earlier read installed -- still translates to the original for that one
+step. Two sharers suffice: the other exits, the count reaches zero, the page
+returns to the buddy under a live leaf, and `NoReadableFreed` fails; had the
+other written instead, it would have found itself sole and taken the page in
+place, writable, under the same leaf (`NoCrossSpaceRead`). The kernel's
+`cow_release` is the put moved after step 5's replace, and
+`cow.break_copy_pins_the_original_until_replaced` is the same window seen
+through the probe. `cow_leaf` is the clean run at 2996 states.

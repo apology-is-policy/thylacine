@@ -1441,8 +1441,8 @@ void test_devproc_debug_mem(void) {
     u8 *rw_kva = (u8 *)pa_to_kva(rw_pa);
     u8 *ro_kva = (u8 *)pa_to_kva(ro_pa);
     for (int i = 0; i < 64; i++) { rw_kva[i] = (u8)(0xA0 + i); ro_kva[i] = (u8)(0x50 + i); }
-    TEST_EXPECT_EQ(mmu_install_user_pte(tgt->as->pgtable_root, 0, RW_VA, rw_pa, VMA_PROT_RW,   false), 0, "map RW page");
-    TEST_EXPECT_EQ(mmu_install_user_pte(tgt->as->pgtable_root, 0, RO_VA, ro_pa, VMA_PROT_READ, false), 0, "map RO page");
+    TEST_EXPECT_EQ(mmu_install_user_pte(tgt->as, proc_resource_exempt(tgt), RW_VA, rw_pa, VMA_PROT_RW,   false), 0, "map RW page");
+    TEST_EXPECT_EQ(mmu_install_user_pte(tgt->as, proc_resource_exempt(tgt), RO_VA, ro_pa, VMA_PROT_READ, false), 0, "map RO page");
 
     // --- Layer 1: the raw cross-Proc resolver ---
     u8 buf[64], wbuf[64];
@@ -2024,12 +2024,12 @@ void test_devproc_maps(void) {
 
     // (1) a plain RW anon mapping, well clear of the exec layout constants.
     const u64 plain_va = 0x0000000010000000ull;
-    struct Burrow *b1 = burrow_create_anon(PAGE_SIZE);
+    struct Burrow *b1 = burrow_create_anon(PAGE_SIZE, false);
     int rc1 = b1 ? burrow_map(tgt, b1, plain_va, PAGE_SIZE, VMA_PROT_RW) : -1;
     if (b1) burrow_unref(b1);            // the mapping ref keeps it alive
 
     // (2) an anon mapping exactly at the stack base -> role "stack".
-    struct Burrow *b2 = burrow_create_anon(PAGE_SIZE);
+    struct Burrow *b2 = burrow_create_anon(PAGE_SIZE, false);
     int rc2 = b2 ? burrow_map(tgt, b2, EXEC_USER_STACK_BASE, PAGE_SIZE, VMA_PROT_RW) : -1;
     if (b2) burrow_unref(b2);
 

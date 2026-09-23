@@ -6,7 +6,7 @@ title: "The Burrow — a memory object with two refcounts and six backings"
 code: ["kernel/burrow.c", "kernel/include/thylacine/burrow.h"]
 audit: hard
 guarded-by: [inv-i7, inv-i32, inv-i44]
-validated-by: [spec-burrow, spec-cow, gate-smp]
+validated-by: [spec-burrow, spec-cow, spec-capacity, gate-smp]
 locks: [lock-burrow]
 created: 2026-08-02
 updated: 2026-09-23
@@ -31,7 +31,7 @@ Burrow with `handle_count = 1, mapping_count = 0`:
 
 | constructor | backing | shape |
 |---|---|---|
-| `burrow_create_anon` | one contiguous buddy chunk, zeroed | eager |
+| `burrow_create_anon(size, exempt)` | one contiguous buddy chunk from the user pool, zeroed | eager |
 | `burrow_create_mmio` | a device PA range, via a held hardware object | eager, foreign |
 | `burrow_create_dma` | a kernel-chosen contiguous chunk, via a held hardware object | eager, foreign |
 | `burrow_create_file` | a byte range of a file, via a pinned Spoor | **sparse** |
@@ -50,10 +50,24 @@ whether *this* unmap was the drop that freed the pages. It exists because no
 caller can compute that beforehand — the Burrow's type does not say it, and a
 handle count sampled before the drop answers a different question — so the
 operation has to report its own effect. Resource accounting is its only caller.
-`burrow_map_fixed` / `burrow_map_fixed_in` place a mapping at a caller-chosen
-address (the MAP_FIXED primitive [[sub-kernel-vma]] splits around).
+`burrow_map_fixed(p, ..)` / `burrow_map_fixed_in(as, exempt, payer, v, vaddr,
+length, prot, burrow_offset, &out_free)` place a mapping at a caller-chosen
+address over whatever is there (the MAP_FIXED primitive; since B-1a'
+[[sub-kernel-vma]]'s range detach followed by an insert, so the wrapper owns
+only the address arithmetic and answers `-T_E_*`; the PTE teardown that used to
+run here unconditionally is the detach's own, after its refusals).
 `burrow_share_into(dst, v, vaddr, prot)` is the cross-Proc form.
-`burrow_decommit` releases resident pages of a lazy region without unmapping it.
+`burrow_decommit(p, ..)` / `burrow_decommit_in(as, vaddr, length)` release the
+resident pages of lazy mappings without unmapping them -- since B-1a' across the
+pieces a protect cut, every refusal decided before the first release;
+`burrow_release_lazy_range_in(as, v, lo, hi)` is the per-mapping half the
+decommit and the range detach both loop over, returning the slots it released.
+`burrow_lazy_resident_count` is O(1) (the pagemap keeps the count) and
+`burrow_lazy_footprint` adds the map's node pages to it.
+`burrow_image_resident_count(v)` / `burrow_image_strip(v, want)` are the FILE-side
+pair the Image cache's reclaim uses (the round-2 close, below): the resident
+count, and every resident page taken out of the map and freed, the Burrow left
+live, empty and cached.
 
 **The permission change** is `burrow_protect(p, vaddr, length, prot, seal)` /
 `burrow_protect_in(as, exempt, ...)` (B-1a, 2026-09-23): move
@@ -72,7 +86,10 @@ I-32 uncharge under the lock but does **not** free; it hands the caller the
 Burrow that still owes its physical free, collected on a `deferred_free_next`
 stack and passed to `burrow_free_deferred` after the unlock. The full mechanism —
 the `out_free` out-parameter every teardown path must thread and must never drop
-(a NULL `out_free` on the exact-cover arm would leak) — lives on [[sub-kernel-vma]].
+(a NULL `out_free` would leak the chain) — lives on [[sub-kernel-vma]].
+`burrow_free_deferred(v)` frees `v` and every Burrow chained behind it on
+`deferred_free_next` (B-1a': a range detach drops several last refs in one
+locked pass), NULL-safe, unlinking as it goes.
 
 **Charge attribution** is three more calls — `burrow_charge_record` /
 `burrow_charge_claim` / `burrow_charge_restore` — plus
@@ -111,17 +128,21 @@ deliberately so: it is the tripwire for a future caller that frees without it.
 ### Eager and sparse are two different lifetimes
 
 Three types hold **one contiguous chunk** in `pages` with an `order`; the free
-arm calls `free_pages` once. Two types hold a **sparse per-page array**
-(`filepages`), each slot null until faulted in, and the free arm walks it
-freeing every resident page individually before releasing the array.
+arm calls `free_pages` once. Two types hold a **sparse per-page slot table** --
+the pagemap `pm` ([[sub-kernel-pagemap]]; B-1a' replaced the flat `filepages`
+array), each slot absent until faulted in, its nodes allocated as slots fill and
+charged to the mapping address space for ANON_LAZY (uncharged for FILE, the
+Image cache's posture; a FILE map's PAGES are charged to each space that maps
+them, per leaf, by the fault -- [[sub-kernel-fault]]) -- and the free arm destroys it, putting every resident
+page (a plain free for FILE, a COW put for ANON_LAZY) and freeing the nodes.
 
 That split is the reason the type-dispatched free arm exists at all, and it is
 also why the per-type **liveness check** on every mapping acquire reads a
 different field per type: `pages` for the contiguous types, the held hardware
-object for the foreign ones, the pinned Spoor for file-backed, the array itself
-for lazy-anon. For the sparse types an *all-null* array is the normal
-freshly-mapped state, not a use-after-free — so their check is on the array's
-existence, not its contents.
+object for the foreign ones, the pinned Spoor for file-backed, `pagemap_live`
+for lazy-anon. For the sparse types an EMPTY map is the normal freshly-mapped
+(or fully decommitted) state, not a use-after-free — so their check is on the
+map's liveness, not its contents.
 
 ### Contiguity is bought with rounding, and the rounding is charged
 
@@ -169,14 +190,20 @@ rather than treating as one design.
 
 ### The charge record: a refund must be attributed
 
-`struct Burrow` records who paid: `charge_pid` (a pid, never a pointer — the
-payer can die while the region lives on in a consumer), `charge_pages` (the
+`struct Burrow` records who paid: `charge_as_id` (the paying ADDRESS
+SPACE's `id` -- a u64 from a global counter, never reused, never a pointer:
+the payer can die while the region lives on in a consumer; the B-1a' audit's
+F4 replaced the pid, which survives an exec and let a non-CLOEXEC Loom's
+close refund against the successor's space), `charge_pages` (the
 buddy-rounded count actually billed), and `shared_out`.
 
 - **`burrow_charge_record`** stamps the payer at each eager charge — the
   attach, the JIT create, the Loom ring.
-- **`burrow_charge_claim`** is a **read-and-clear**, returning what this Proc
-  paid or zero if it is not the recorded payer. The clear is what makes a
+- **`burrow_charge_claim`** is a **read-and-clear**, returning what this Proc's
+  ADDRESS SPACE paid or zero if it is not the recorded payer -- a record whose
+  space has died is never claimed: that space's count died with it and the
+  region's pages return to the pool when they are freed, so there is nothing
+  left to settle and the record simply stays. The clear is what makes a
   refund exactly-once: two paths racing to settle the same region cannot both
   win, so the counter can never be refunded twice — the direction that would
   inflate a Proc's budget.
@@ -187,9 +214,9 @@ buddy-rounded count actually billed), and `shared_out`.
   the charge outlives its region until the payer's next release point — an
   over-charge on the payer, never a refund to a Proc that did not pay.
 
-`charge_pages`, not `charge_pid`, is the held sentinel — **pid 0 is a
-legitimate identity**, since `proc_alloc` stamps 0 and the fork path assigns
-later.
+`charge_pages`, not `charge_as_id`, is the held sentinel — a charge of zero
+pages is meaningless, so zero pages IS "nothing held" (ids start at 1, but the
+rule does not lean on that).
 
 **The release rule is user-voted and is not "follow the pages".** A detach
 settles on `freed || shared_out`. `freed` is sufficient — if nothing holds the
@@ -295,16 +322,32 @@ cursor that outlived the clone would name a Burrow a failed child's drain may
 already have freed. Nothing else reads it ([[sub-kernel-addrspace]] owns the
 clone; `cow.clone_dedupes_split_pieces` counts exactly two holders per page).
 
+The clone's slot table is a `pagemap_mirror` (B-1a'): `burrow_clone_cow(src, exempt)`
+allocates the struct, an empty map of the same count, and a pool of exactly
+`pagemap_node_count(src)` node pages from the user pool
+(`pagemap_pool_alloc(.., exempt)`: the physical pool's only cost of a fork,
+[[sub-kernel-mm-phys]]) -- all OUTSIDE `src->lock`, charged to no address
+space until `clone_one_vma` charges the child the footprint --
+then mirrors under `src->lock` with `clone_take_share` (one `cow_page_get` per
+page, in the hold that writes the slot), frees the unconsumed pool, and on a
+short pool (a caller bug: the source grew under a lock the caller did not hold)
+destroys the partial clone through `lazy_put_page`, which puts back exactly the
+shares taken. The header says the caller charges the clone's footprint
+(`burrow_lazy_footprint`, resident + nodes) as one decision after the mapping
+ref lands; as built `clone_one_vma` charges the resident count only, so the
+clone's nodes are uncharged ([[sub-kernel-pagemap]] Seams).
+
 ## Data structures
 
 `struct Burrow`: magic, type, size, page count, the lock, the two counts, the
-charge record (`charge_pid` / `charge_pages` / `shared_out`), B-1a's
+charge record (`charge_as_id` / `charge_pages` / `shared_out`), B-1a's
 `clone_cursor` (the fork's per-source dedupe slot, meaningful only under the
 source's lock during one clone -- NULL at all other times), and then a
 union-by-convention of per-type fields — `pages`/`order` for contiguous
 backings, a hardware-object pointer and PA for the foreign ones, a Spoor plus
-file offset plus cache-key scalars for file-backed, the sparse array shared
-between file-backed and lazy-anon.
+file offset plus cache-key scalars for file-backed, the pagemap `pm` (32
+bytes, embedded) shared between file-backed and lazy-anon
+([[sub-kernel-pagemap]]).
 
 The fields are not an actual union; each type leaves the others zero. That is
 what lets the free arm's per-type double-free guards be simple null tests.
@@ -379,15 +422,25 @@ reasoning pattern: *a bound that holds only because of who happens to be
 running is not a bound*, and the first non-exempt driver on that path converts
 it to a real monotonic leak.
 
-**A lazy PIECE refunds its own range at detach** (B-1a, the first finding the
-protect split made live). Once one Burrow has several VMAs, the detach path's
-refund could no longer be the whole Burrow's resident count per piece -- it
-under-counted I-32 once per piece, a shape the D-3b split could already reach
-and a protect split reaches on every thread stack. `detach_one_locked`
-([[sub-kernel-syscall-dispatch]]) now runs `burrow_decommit` over the piece's
-exact range before `burrow_unmap_reporting`, which also returns a detached
-piece's pages to the system at once -- the operator's memory bar: relinquished
-memory returns (`sys_burrow.detach_piece_frees_only_its_pages`).
+**A release runs BEFORE its mapping goes, and the free refunds nothing**
+(B-1a', the law of [[spec-capacity]]). Once one Burrow has several VMAs, the
+detach path's refund could no longer be the whole Burrow's resident count per
+piece (B-1a's under-count, fixed then by a per-piece `burrow_decommit` in the
+exact-match detach); B-1a' made the refund the range core's own:
+`vma_detach_range_in` calls `burrow_release_lazy_range_in` over every plain
+ANON_LAZY mapping's overlap while the mapping still names the slots, and only
+then trims, splits or removes it. `burrow_free_internal` is Proc-agnostic -- it
+puts every resident page and frees every node UNCHARGED -- so a Burrow freed
+through a detach must arrive empty of anything this address space paid for;
+the D-3b window inside a touched lazy mapping (the B-1a audit's F5) is served
+by the same core and so releases its window's slots by construction. The
+operator's memory bar -- relinquished memory returns -- is
+`sys_burrow.detach_piece_frees_only_its_pages` and the six `detach.*` tests.
+`BURROW_RESERVE_MAX` is the burrow window since B-1a' (it was 1 GiB; the
+detach's own 256 MiB `BURROW_ATTACH_MAX` bound is gone): a reservation costs its
+struct and nothing per reserved page, so its size is not the resource -- the
+pages touched (and the nodes that index them) and the mappings held are
+(`detach.lazy_over_256mib_detaches`, `detach.four_gib_reservation_round_trips`).
 
 [[inv-i44]] — two of its mechanisms sit in this file since B-1a: the
 uninstall-before-prot order in `burrow_protect_in` (a writable PTE never
@@ -400,7 +453,9 @@ the page). Both have a named buggy cfg in [[spec-cow]].
 Constructors return NULL on allocation failure, having released anything they
 took. `burrow_map` returns -1 on misalignment, zero length, an address-space
 overflow, an address above the user ceiling, a W+X protection, a VMA overlap, or
-allocation failure — with no state changed on any of them.
+allocation failure — and `-T_E_NOMEM` when the address space is at its VMA cap
+(the resource refusal reported as one since B-1a' round 4, F18) — with no state
+changed on any of them.
 
 Everything else extincts, because everything else is structural: a null or
 corrupted Burrow, a ref on a zero-zero object, an unref below zero, a free with
@@ -451,16 +506,21 @@ which is the point.
 - **Never snapshot the VMA to reach the Burrow across an unmap.**
   `burrow_unmap_reporting` frees the `Vma`, so `vma->burrow` dangles the moment
   it returns. Snapshot the Burrow pointer first.
-- **`charge_pages` is the sentinel, not `charge_pid`.** Pid 0 is a legitimate
-  identity, so a zero-pid test reads "unpaid" on a real payer.
+- **`charge_pages` is the sentinel, not `charge_as_id`.** Zero pages is
+  "nothing held"; the id is the KEY -- the paying address space, never a pid,
+  because a pid survives an exec and an address space does not.
 
 ## Seams
 
 - **[[seam-kobj-handle-release]]** — the hardware-backed types hold a reference
   to a separately-refcounted object, so the user's handle to *that* object and
   the user's mapping of *this* Burrow can be dropped in either order.
-- Partial unmap does not exist: an unmap must match a VMA's range exactly.
-  Splitting a VMA is unbuilt.
+- `burrow_unmap` / `burrow_unmap_reporting` still match a VMA's range exactly;
+  the range form is [[sub-kernel-vma]]'s `vma_detach_range_in`, which both
+  detach syscalls use. The exact-match removers remain for the paths that own a
+  whole mapping (the weft share, the hardware maps).
+- The fork clone's node pages are uncharged as built ([[sub-kernel-pagemap]]
+  Seams).
 
 ## Caveats
 
@@ -524,3 +584,79 @@ This prevents reassignment of a function while its old register mappings live.
 The hostmem constructor independently rejects protected table/PBA pages, so a
 valid shared-memory descriptor does not circumvent routing isolation. The guest
 PCI mapping lifetime and hostmem alias tests pass. [[abi-pci-windows]].
+
+## B-1a': the pagemap arms, the range release, the window (2026-09-23)
+
+Every `filepages` reader and writer in this file became a pagemap call, and
+the discipline each kept is unchanged in substance. Every page this file
+mints comes from `alloc_user_pages(.., exempt)` since the round-1 close -- the
+eager `ANON` and `CODE` chunks (`burrow_create_anon(size, exempt)` /
+`_code`), the populate's pages, the clone's node pool -- and returns its pool
+charge at `free_pages` wherever it is freed ([[sub-kernel-mm-phys]]); the
+creators' `exempt` is the calling Proc's (`proc_resource_exempt(p)` at the
+syscalls, exec's own, `true` for the vDSO), because the machine-wide bound is
+decided at the allocation now, not at a charge. `burrow_lazy_populate`
+(exec's writable-segment fill) installs each page with `pagemap_install(&v->pm,
+&v->lock, slot, pg, as, exempt, &winner)`, so the map's nodes are charged to
+`as` on top of the run's own whole-run charge; a refused install (a cap hit or
+a node OOM) breaks the run off and the all-or-nothing unwind takes every page
+back through `pagemap_take` (the nodes it empties handed back and freed outside
+`v->lock`, uncharged from `as` inside the take) and puts them through their
+share count. `burrow_lazy_swap_slot` is `pagemap_swap`; `burrow_lazy_slot_kva`
+is `pagemap_get`; the mapping-acquire liveness check for the two sparse types
+is `pagemap_live` (an empty map is the normal state; a dead one is the UAF the
+`{0,0}` guard already covers); the test helpers install through the same
+install-once and read through `pagemap_get`.
+
+`burrow_release_lazy_range_in` admits a plain ANON_LAZY mapping only
+(`lazy_release_admits`: a Burrow with the right magic and type, not
+`SHARED_IN` -- a shared-in mapping is the sharer's commit, never this space's
+charge; a guard has no Burrow) and `[lo, hi)` inside it, maps the range to
+slots through `burrow_offset + (lo - vaddr_start)`, and loops
+`pagemap_take_next` from the first slot to the last, ending on the take's own
+answer (`if (!pg) break;` -- NULL iff nothing was taken; the round-1 audit's
+F3: the loop ran on its own unclamped bound, which a mapping past its
+Burrow's end would have spun, and `vma_alloc` now refuses that shape at the
+one constructor, [[sub-kernel-vma]]): each present node's page
+is put (`cow_page_put`; the buddy gets it only from the last holder), the
+nodes the take emptied are freed outside `v->lock`, and `freed` counts SLOTS,
+not pages returned -- this address space stops mapping the page either way, so
+its RSS drops whether or not a co-sharer keeps the page alive (LINEAGE L-4b).
+The pages' uncharge settles once at the end for the whole overlap; the nodes'
+settled inside each take. The walk is by resident slot, never by slot, because
+a reservation costs nothing and may be the whole window: a release must cost
+what was touched, the bound `mmu_uninstall_user_range` keeps for the PTEs (the
+B-1a audit's F2 shape) and `pagemap_walk_steps` witnesses.
+
+`burrow_decommit_in` is the same release over a RANGE of mappings: an
+admission pass (contiguous cover by plain ANON_LAZY mappings from
+`vma_next_overlap_in` and successors; a hole at the head, between or at the
+tail, or any other kind of mapping -- eager ANON, FILE, hardware, a shared-in,
+a guard -- answers -1 with nothing changed), then the range's PTEs cleared
+(the burrow_unmap discipline: TLBI before any page reaches the buddy), then
+each mapping's overlap released. It spans the pieces a protect cut, as Linux's
+`madvise` spans VMAs. `burrow_decommit(p, ..)` wraps it on `p->as`.
+
+`burrow_map_fixed_in` gained `payer` and lost its unconditional PTE teardown:
+the surgery is `vma_replace_range_in`, whose detach uninstalls after its
+refusals are decided, so a refused MAP_FIXED no longer costs the window a
+re-fault. Its shape refusals are `-T_E_INVAL` now, its surgery's `-T_E_*`
+pass through, and `burrow_map_fixed` passes the owner as the payer.
+
+**The strip (the round-2 close; bounded at round 3).** `burrow_image_strip(v,
+want)` is the Image cache's reclaim on a FILE Burrow ([[sub-kernel-image]]):
+`pagemap_take_next` by resident slot from 0 with `as = NULL` (a FILE map's
+nodes were never charged to a space), the nodes and the page freed OUTSIDE
+`v->lock` (leaf order), no COW put (FILE never shares a page), until `want`
+pages are freed or the map holds nothing (B-1a' audit F14: a pick costs what
+was asked, never a whole image; the next strip of the same image continues
+from the lowest slot left);
+the Burrow stays live and cached, so the next mapper's fault pages it in
+again from the pinned Spoor. The caller guarantees no mapping and no handle
+but the cache's can reach the map -- the {1,0} idleness the cache proves
+under its own lock -- which is what makes freeing a page nothing else names
+safe. No address space is refunded here: a FILE page's holders were refunded
+when their leaves went ([[sub-kernel-vma]]), and an idle image has none. The
+protect, the unmap, the decommit and the detach's phase 2 clear their leaves
+through `vma_uninstall_range_in` now, mapping by mapping, so a FILE mapping's
+refund lands on the right counter.

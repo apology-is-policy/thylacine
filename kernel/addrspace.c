@@ -12,7 +12,7 @@
 #include <thylacine/burrow.h>    // L-4b: burrow_clone_cow + the type dispatch
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
-#include <thylacine/proc.h>      // PROC_PAGE_MAX / PROC_VMA_MAX / PROC_SHARED_MAP_MAX_PAGES
+#include <thylacine/proc.h>      // PROC_VMA_MAX / PROC_SHARED_MAP_MAX_PAGES
 #include <thylacine/spinlock.h>
 #include <thylacine/types.h>
 #include <thylacine/vma.h>       // L-3: the last-reference drain lives here now
@@ -20,17 +20,22 @@
 #include "../arch/arm64/mmu.h"   // proc_pgtable_create / proc_pgtable_destroy
 #include "../mm/slub.h"          // kzalloc / kfree
 
+// B-1a' audit F4: address-space identities, for the records that outlive the
+// space they name (Burrow.charge_as_id). Never 0, never reused.
+static u64 g_addrspace_next_id;
+
 struct AddrSpace *addrspace_alloc(u32 page_budget) {
     // I-32 (A): an address space with no cap is the DoS hole the invariant
     // exists to close, so refuse rather than silently treat 0 as unlimited.
     // Every caller has a live Proc whose page_budget is non-zero by
     // construction (proc_alloc seeds it, rfork copies it, the spawn path
-    // validates into [1, PROC_PAGE_HARD_MAX]).
+    // validates into [1, proc_page_budget_hard_max()]).
     if (page_budget == 0) return NULL;
 
     struct AddrSpace *as = kzalloc(sizeof(*as), 0);
     if (!as) return NULL;
     as->page_budget = page_budget;
+    as->id          = __atomic_add_fetch(&g_addrspace_next_id, 1, __ATOMIC_RELAXED);
 
     // A fresh L0 (KP_ZERO; all 512 entries invalid), installed in TTBR0_EL1 at
     // context switch so each address space's user half is independent. The ASID
@@ -86,6 +91,11 @@ void addrspace_unref(struct AddrSpace *as) {
     // only ever taken from a Proc that already holds one (rfork, from a live
     // parent), so reaching zero means no holder is left to hand one out.
     vma_drain_in(as);
+
+    // B-1a': nothing returns to the pool here. The pool is physical -- every
+    // page the drain just freed returned its charge at free_pages, and the
+    // tables proc_pgtable_destroy frees below return theirs the same way --
+    // and the per-space count dies with the space, as a holder count should.
 
     // No TLB flush here, and no per-address-space ASID free: the rolling-ASID
     // model simply drops context_id, and its hardware ASID value stays reserved
@@ -157,7 +167,7 @@ static bool clone_one_vma(struct AddrSpace *dst, bool exempt,
         if (backing->clone_cursor) {
             backing = backing->clone_cursor;
         } else {
-            minted = burrow_clone_cow(backing);
+            minted = burrow_clone_cow(backing, exempt);
             if (!minted) return false;
             backing->clone_cursor = minted;
             backing = minted;
@@ -220,14 +230,21 @@ static bool clone_one_vma(struct AddrSpace *dst, bool exempt,
     if (minted) {
         // The child maps these pages too, so it counts them too (the Linux RSS
         // reading -- see the header on why over-counting here is the safe
-        // direction). Read the resident count BEFORE dropping the construction
-        // handle, purely so the two operations cannot be reordered by a later
-        // edit into a read of a Burrow whose only remaining ref is the mapping.
-        u32 resident = burrow_lazy_resident_count(minted);
+        // direction), and it holds a MIRROR of the node pages that index them,
+        // which its own takes will refund (pagemap_take uncharges the nodes it
+        // empties) -- so the charge is the footprint, pages PLUS nodes, or the
+        // child later refunds what it never paid and its count walks below the
+        // truth. The pool is not charged here: it is physical, the mirror's
+        // node pages paid it as they were allocated, and the shared data pages
+        // it already counts once (audit F5: a fork costs the pool only its
+        // nodes). Read BEFORE dropping the construction handle, purely so the
+        // two operations cannot be reordered by a later edit into a read of a
+        // Burrow whose only remaining ref is the mapping.
+        u32 footprint = burrow_lazy_footprint(minted);
         burrow_unref(minted);           // handle_count -> 0; the mapping keeps it
-        if (resident > 0) {
+        if (footprint > 0) {
             spin_lock(&dst->lock);
-            bool charged = addrspace_charge_pages(dst, resident, exempt);
+            bool charged = addrspace_charge_pages(dst, footprint, exempt);
             spin_unlock(&dst->lock);
             if (!charged) return false; // over cap -> the fork fails, not the break
         }
@@ -267,14 +284,17 @@ struct AddrSpace *addrspace_clone(struct AddrSpace *src, bool exempt) {
     // The flag is deliberately NOT set here -- see phase 3.
     //
     // Uninstalling rather than write-protecting costs one extra fault per page and
-    // needs no new MMU primitive. mmu_uninstall_user_range issues the TLBI per
-    // page, so a peer already running on another CPU cannot keep using a cached
-    // writable translation either. It allocates nothing and cannot fail, which is
-    // what lets it run ahead of the decision to commit.
+    // needs no new MMU primitive. The clear issues the TLBI per page, so a peer
+    // already running on another CPU cannot keep using a cached writable
+    // translation either. It allocates nothing and cannot fail, which is what
+    // lets it run ahead of the decision to commit. The KEEP-TABLES form (B-1a'
+    // audit F9): the parent re-faults every leaf cleared here, so its tables stay
+    // linked -- empty, still charged -- for the re-installs to find; reclaiming
+    // them made every break of a forked page free and rebuild the whole path
+    // (Linux keeps the parent's tables across fork as well).
     for (struct Vma *v = src->vmas; v; v = v->next) {
         if (!vma_is_cow(v)) continue;
-        mmu_uninstall_user_range(src->pgtable_root, 0,
-                                 v->vaddr_start, v->vaddr_end);
+        mmu_uninstall_user_range_keep_tables(src, v->vaddr_start, v->vaddr_end);
     }
 
     // PHASE 2 -- build the child. The only phase that can fail.
@@ -358,17 +378,54 @@ struct AddrSpace *addrspace_clone(struct AddrSpace *src, bool exempt) {
 // charge, so a wrap would mean the pairing is already broken, and silently
 // producing a 4-billion-page counter would hide it.
 
+bool addrspace_charge_table(struct AddrSpace *as, bool exempt) {
+    if (!addrspace_charge_pages(as, 1, exempt)) return false;
+    __atomic_add_fetch(&as->pgtable_pages, 1, __ATOMIC_RELAXED);
+    return true;
+}
+
+void addrspace_uncharge_table(struct AddrSpace *as) {
+    if (!as) return;
+    addrspace_uncharge_pages(as, 1);
+    u32 cur = __atomic_load_n(&as->pgtable_pages, __ATOMIC_RELAXED);
+    while (cur > 0 && !__atomic_compare_exchange_n(&as->pgtable_pages, &cur, cur - 1,
+                                                   true, __ATOMIC_RELAXED,
+                                                   __ATOMIC_RELAXED)) { }
+}
+
+bool addrspace_charge_file(struct AddrSpace *as, bool exempt) {
+    if (!addrspace_charge_pages(as, 1, exempt)) return false;
+    __atomic_add_fetch(&as->file_pages, 1, __ATOMIC_RELAXED);
+    return true;
+}
+
+void addrspace_uncharge_file(struct AddrSpace *as, u32 npages) {
+    if (!as || npages == 0) return;
+    addrspace_uncharge_pages(as, npages);
+    u32 cur = __atomic_load_n(&as->file_pages, __ATOMIC_RELAXED);
+    for (;;) {
+        u32 nv = (cur >= npages) ? cur - npages : 0;
+        if (__atomic_compare_exchange_n(&as->file_pages, &cur, nv, true,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+            return;
+    }
+}
+
 bool addrspace_charge_pages(struct AddrSpace *as, u32 npages, bool exempt) {
     if (!as) return false;
+    // B-1a': the machine-wide bound is not decided here -- the user pool is
+    // physical, charged where the page is allocated (mm/phys.h). This counter
+    // is the HOLDER count, under the space's own cap.
     u32 cur = __atomic_load_n(&as->page_count, __ATOMIC_RELAXED);
     for (;;) {
-        if (npages > 0xFFFFFFFFu - cur) return false; // counter overflow (refuse)
+        if (npages > 0xFFFFFFFFu - cur)               // counter overflow (refuse)
+            return false;
         // I-32 (A): the cap is this ADDRESS SPACE's own budget, seeded at
-        // addrspace_alloc from the creating Proc's authorization -- NOT the
-        // global PROC_PAGE_MAX (which is only the DEFAULT a Proc is seeded
-        // with) and NOT a caller-supplied parameter (the rejected shape).
-        // Re-read inside the loop: it is immutable today, but reading it here
-        // keeps the decision and the CAS looking at one consistent state.
+        // addrspace_alloc from the creating Proc's authorization -- the pool
+        // by default (B-1a'), or whatever a parent narrowed it to -- NOT a
+        // caller-supplied parameter (the rejected shape). Re-read inside the
+        // loop: it is immutable today, but reading it here keeps the decision
+        // and the CAS looking at one consistent state.
         if (!exempt && cur + npages > __atomic_load_n(&as->page_budget,
                                                       __ATOMIC_RELAXED))
             return false;                             // over cap -> caller -ENOMEM

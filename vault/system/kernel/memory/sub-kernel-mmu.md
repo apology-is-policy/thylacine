@@ -5,7 +5,7 @@ parent: moc-kernel-memory
 title: "The MMU — page tables, the PTE encoders, and the aliases that keep W^X true"
 code: [arch/arm64/mmu.c, arch/arm64/mmu.h]
 audit: hard
-guarded-by: [inv-i12, inv-i13, inv-i16, inv-i31, inv-i39]
+guarded-by: [inv-i12, inv-i13, inv-i16, inv-i31, inv-i32, inv-i39]
 validated-by: [prose, gate-smp]
 locks: [lock-vma]
 hazards: []
@@ -33,7 +33,7 @@ Grouped by what they are for, since the file is long:
 | bring-up | `mmu_enable`, `mmu_program_this_cpu`, `mmu_retire_ttbr0_identity` |
 | kernel views | `mmu_map_mmio`, `pa_to_kva` / `kva_to_pa` (in `page.h`) |
 | guard pages | `mmu_set_no_access[_range]`, `mmu_restore_normal[_range]`, `mmu_pagemap_directmap` |
-| per-Proc tables | `proc_pgtable_create` / `_destroy`, `mmu_install_user_pte`, `mmu_uninstall_user_pte[_range]` |
+| per-Proc tables | `proc_pgtable_create` / `_destroy`, `mmu_install_user_pte[_attr](as, exempt, ..)` (1 on an identical leaf), `mmu_replace_user_pte_attr` (the COW break's in-place leaf replace), `mmu_user_pte_admits` (the fault path's resolved-by-a-peer probe), `mmu_uninstall_user_pte(as, ..)`, `mmu_uninstall_user_range(as, ..)` (returns the leaves cleared) and `_keep_tables` (the fork's clear) -- the tables charged and reclaimed since B-1a' (below) |
 | self-modification | `mmu_patch_text`, `arch_icache_sync_range` |
 | cross-Proc | `mmu_cross_proc_read` / `_write` |
 | W^X | `pte_violates_wxe` — **and see Caveats: it has no callers** |
@@ -178,10 +178,17 @@ The patcher runs single-CPU with interrupts fully masked, before any secondary
 exists. Full masking rather than interrupt-only is deliberate: it also closes
 the window between asking the hardware for a translation and reading the result.
 
-Per-Proc table *teardown* is safe against a concurrent walk because the Proc is
-provably not running anywhere by then — its last thread has exited and the
-reaper spun until it was off-CPU — and its leaf mappings were already
-invalidated. The freed tables can therefore be recycled immediately.
+Per-Proc table *teardown at death* is safe against a concurrent walk because
+the Proc is provably not running anywhere by then — its last thread has exited
+and the reaper spun until it was off-CPU — and its leaf mappings were already
+invalidated. The freed tables can therefore be recycled immediately. A table
+reclaimed while the space is LIVE (B-1a' audit F1, below) has no such argument
+available -- a sibling thread may be running on another CPU -- so it is a
+break-before-make on the table descriptor: the parent entry written invalid,
+`dsb ishst`, `tlbi vaae1is` on a VA under it, `dsb ish`, and only then the
+page freed; the software walkers of a user tree (the debugger's
+`mmu_cross_proc_*`, the clone, the drain) all run under the space's lock,
+which the reclaim holds.
 
 ## Invariants enforced
 
@@ -247,7 +254,9 @@ sub-table, both return success. There is nothing to undo.
 ## Performance
 
 The unmap loop invalidates per page and waits each time — microseconds per page,
-against ranges bounded at 256 MiB and typically a few tens of kilobytes. The
+against ranges that may be a whole reservation since B-1a' (up to the burrow
+window; the subtree walk below keeps the cost to the pages present) and are
+typically a few tens of kilobytes. The
 batching optimization is noted in the code and deliberately not taken: the
 load-bearing property is that no stale translation is observable when the call
 returns, and that holds either way.
@@ -326,6 +335,147 @@ either. `mmu_uninstall_pte_calls()` counts the per-page calls and
 resident page costs exactly 512 calls (its present 2 MiB table), an empty GiB
 zero, where the per-page loop cost 262144 each.
 
+## User page tables are charged and reclaimed (2026-09-23; B-1a' audit F1)
+
+Until the B-1a' close every L1 / L2 / L3 table under a user L0 was allocated
+uncharged by `mmu_install_user_pte`'s walk-and-grow and freed only by
+`proc_pgtable_destroy` at death, on the argument that deciding emptiness meant
+scanning 512 slots and the pages went free at death anyway. The round-1 audit
+named the hole: with the reservation cap lifted to the window, an unprivileged
+Proc that reserves 64 TiB, touches one page per 2 MiB and decommits it leaves
+one uncharged, unreclaimable table page per iteration -- the buddy empty at a
+charged count of three, the reserve a fiction (and without any decommit the
+tables allocate 1:1 with charged pages, emptying the buddy at charged
+~RAM/2). The tables predate the chunk; the chunk removed the last incidental
+cost of the attack, and its scripture claim depended on them.
+
+As built: `user_table_alloc(as, exempt)` charges the space
+(`addrspace_charge_table`: `page_count` + the `pgtable_pages` telemetry,
+under the I-32 cap) and takes the page from the user pool
+(`alloc_user_pages(0, KP_ZERO, exempt)`, [[sub-kernel-mm-phys]]) BEFORE the
+table is linked, exactly as a pagemap node is; a refused charge or an empty
+buddy installs nothing, and a table this call linked but could not fill goes
+back (`mmu_install_user_pte_attr` calls `user_tables_reclaim` on its -1 path,
+which frees every table on the path whose occupancy is 0 -- only the ones
+this call linked can be). The install's signature is `(as, exempt, vaddr,
+pa, prot, ..)` and the uninstalls' `(as, ..)`; every caller passes
+`proc_resource_exempt(p)` or its creator's `exempt` ([[sub-kernel-fault]],
+[[sub-kernel-addrspace]], [[sub-kernel-vma]], [[sub-kernel-burrow]]).
+
+**Occupancy lives in the table page's own `page->refcount`**, ESTABLISHED at
+0 when the table is allocated (the buddy hands the head page over holding 1)
+and never inherited -- the pagemap's rule and `page.h`'s `cow_share`
+contract: an L3 counts its valid leaves, an L2 its L3 tables, an L1 its L2
+tables; the L0 is uncounted and never reclaimed here (one page per address
+space, bounded by the Proc axes like a kernel stack, freed by
+`proc_pgtable_destroy`). The install increments the parent when it links a
+new table and the L3 when it writes a leaf over an invalid entry; an
+idempotent re-install (`existing == want`) changes nothing and returns 1
+(since the round-2 close: a caller that charged for the leaf refunds it); a
+mismatching valid leaf is -1 with nothing to unwind -- the one legitimate
+mismatch, the copy-on-write break, has `mmu_replace_user_pte_attr` (below),
+a third leaf writer that changes no count. Since round 3 the demand-page
+path never asks for a mismatch: `mmu_user_pte_admits(as, va, write, exec)`
+reads the leaf without growing (a VALID leaf with EL0 access, AP[2] clear for
+a write, UXN clear for an instruction fetch) and a leaf that admits the
+access answers the fault before any arm runs (B-1a' audit F13 -- the read
+arm's read-only install over the writable leaf a sibling's break had left was
+exactly such a mismatch, and it terminated the Proc; [[sub-kernel-fault]]). Each uninstall
+(`mmu_uninstall_user_pte`; the range form per page inside a present L3) drops
+the L3's count for each valid leaf it clears (`table_occupancy_drop`: 0 -> -1
+is a miscount and extincts) and, when the L3 reaches 0, calls
+`user_tables_reclaim(as, va)` -- leaf upward, stopping at the first occupied
+table, since its ancestors are then occupied too.
+
+**`user_table_free` is a break-before-make on a TABLE descriptor**: the
+parent entry is written invalid, `dsb ishst` orders that write before the
+invalidate, `tlbi vaae1is` on one VA under the table drops any
+translation-walk-cache entry holding the old descriptor (a by-VA invalidate
+reaches every cached entry that could translate that VA, the intermediate
+levels included, ARM ARM D5.10.1 -- and every leaf beneath was invalidated the
+same way as it was cleared, so nothing under the table is cached), `dsb ish`
+waits for every CPU, then the 512 entries are RE-READ and a live one extincts
+(a table freed with a valid entry would be a translation walk through
+recycled memory: the count is load-bearing and the scan is its witness, at
+one page read per table freed), then `free_pages` (the pool takes the page
+back) and `addrspace_uncharge_table`. Serialisation is the caller's: every
+install, uninstall and reclaim of a tree runs under that address space's lock
+(the fault path, the detach, the decommit, the protect, the clone's phase 1),
+so the counts are plain increments and a parent-entry write never races a
+peer's walk-and-grow.
+
+What it costs and what it buys: a first touch in a fresh region charges its
+data page and three tables (the tests' `pages_of(as) = page_count -
+pgtable_pages` is the data view); a protect to none or a decommit reclaims
+them, down to the L0 entry (a clone's phase-1 clear keeps them, below); a
+sole-holder COW break used to churn the table of a page alone in its L3
+(uninstall-then-install), and a fork used to reclaim every table under every
+COW range -- both gone since the round-2 close (below). `/proc/<pid>/status`
+reports `tables:` beside `pages:` ([[sub-kernel-devproc]]). Witnesses:
+`capacity.page_tables_charged_and_reclaimed` (the path grows and shrinks
+table by table, the freed page back in the buddy, the range form reclaiming
+as the single form does), `capacity.memory_bomb_leaves_the_reserve` (the
+attack above refused within one touch's cost of the pool's room, the
+physical footprint bounded by the room, a decommit returning everything, the
+second round refused at the same point), and the REDs `notablecharge` /
+`notablereclaim`, each reddening both.
+
+## The COW break replaces its leaf in place, and a fork keeps the parent's tables (2026-09-23; B-1a' audit F9)
+
+The copy-on-write write arm used to clear the leaf before deciding the break
+-- `mmu_uninstall_user_pte` unconditionally, because the install refuses a
+mismatching valid leaf and both break outcomes mismatch (the copy changes the
+PA, the take-in-place the permission bits). With tables reclaimed on the
+clear, that line freed the leaf's L3 (and any emptied ancestor) to the pool,
+and the install that followed re-allocated the path through `pool_charge`,
+which respects no lock the faulter holds: at the pool's edge a peer's
+allocation takes the released pages and the Proc is terminated for writing a
+page it already holds -- SMP-only, non-deterministic, the round-2 audit's F9.
+And every sparse break paid a table free (TLBI + the verify scan) and an
+allocation; `addrspace_clone`'s phase 1 reclaimed every table under every COW
+range, so a forked parent rebuilt all of them one fault at a time.
+
+**`mmu_replace_user_pte_attr(as, exempt, va, pa, prot, mair)`** is the break's
+install now (the write arm sets `cow_replace`; [[sub-kernel-fault]]). It walks
+without growing; anything short of a valid leaf -- an absent level, an invalid
+entry -- is the plain install (which grows and may refuse as before); an
+identical leaf is 1; otherwise it is a break-before-make on the LEAF alone:
+the entry written invalid, `dsb ishst`, `tlbi vaae1is` on the VA, `dsb ish`,
+`isb`, the new entry written, the same drain and invalidate again (ARM ARM
+D5.10.1: changing a valid descriptor's output address or permissions needs an
+invalid write and a TLBI between the two valid states, or two translations
+for one VA can coexist in a TLB). One valid leaf became one valid leaf, so the
+table's occupancy is untouched and nothing is freed or allocated; a peer
+thread's write between the two valid states faults and waits on `as->lock`,
+which the faulter holds; a peer thread's READ between the two valid states,
+or one queued behind the break, is answered by `mmu_user_pte_admits` (round
+3's F13, above). `cow.break_sole_holder_takes_in_place` pins it: the pool
+AND `pgtable_pages` unchanged across the break -- and, since round 3, both
+break tests pin the L3 table's PA and `mmu_uninstall_pte_calls()` unchanged
+across it, because a free-then-realloc of the table leaves every count equal
+(round 3's F16: the count-only witness was satisfied by the defect it named).
+
+**`mmu_uninstall_user_range_keep_tables`** is the same range clear without the
+reclaim (a static `uninstall_range(as, lo, hi, reclaim)` sits behind both public
+forms, which now return the number of valid leaves cleared -- what a FILE
+mapping's holder is refunded, [[sub-kernel-vma]]). The clone's phase 1 uses it:
+every leaf it takes the parent re-faults, so the emptied tables stay linked --
+charged, at occupancy 0 -- for the re-installs to find, as Linux keeps the
+parent's tables across fork. An empty linked table is a state the install
+already tolerated (it fills it: 0 -> 1) and the reclaim already handled (a
+range clear over it finds nothing valid and frees it once its block is done;
+death frees it with the rest); its parents' counts are untouched because
+nothing was unlinked, so a kept L3 keeps its L2 occupied. What it costs: the
+parent's `pgtable_pages` (and `tables:`) over-report by the kept tables until
+its next range clear or its death -- telemetry, no policy reads it -- and a
+range clear visits the 512 slots of a kept table exactly as it visits any
+present table (the B-1a F2 bound is per PRESENT table and unchanged).
+Witnesses: `capacity.fork_clone_charges_pages_and_nodes` and
+`capacity.fork_costs_the_pool_only_its_nodes` (the parent's six and three
+tables stay across the fork; the pool pays the child only its node mirror),
+`protect.uninstall_range_skips_absent_subtrees` (the range form answers 1 for
+its one leaf).
+
 ## Provenance
 
 P1-C built the tables and the W^X encoding; P1-H added the branch-target
@@ -349,7 +499,10 @@ install API became a wrapper over the index-aware entry.
 
 ## Tests
 
-`demand_page.*` covers install, its rejections, and idempotence.
+`demand_page.*` covers install, its rejections, and idempotence (its charge
+figures read the data view, `page_count - pgtable_pages`, since B-1a');
+`capacity.page_tables_charged_and_reclaimed` and
+`capacity.memory_bomb_leaves_the_reserve` the table charge and reclaim.
 `alternatives.*` covers the patcher (every patchable site applied, and the
 patched instructions computing correctly). The guard pages and the direct map
 are proven by boot: a stack overflow is caught and named, and the boot

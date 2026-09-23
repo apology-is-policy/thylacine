@@ -56,6 +56,7 @@
 #include "../arch/arm64/timer.h"   // timer_now_ns (A-4a legate valid_until expiry)
 #include "../arch/arm64/uaccess.h"
 #include "../arch/arm64/uart.h"
+#include "../mm/phys.h"           // B-1a': capacity_pool_pages (the default budget)
 #include "../mm/slub.h"
 
 // Declared here rather than by including <thylacine/vivarium.h> ON PURPOSE.
@@ -213,12 +214,13 @@ static void proc_init_fields(struct Proc *p, int pid) {
     p->sid   = (u32)pid;
     p->pgid  = (u32)pid;
     p->state = PROC_STATE_ALIVE;
-    // CL-5: seed the anon budget to the historical constant. This is the ONE
-    // chokepoint every Proc passes through (proc_alloc for user Procs, proc_init
-    // for kproc), which matters because KP_ZERO would otherwise leave it 0 --
-    // and a 0 budget refuses EVERY charge, i.e. a Proc that cannot fault in a
-    // single anon page. rfork_internal overwrites it with the parent's.
-    p->page_budget = PROC_PAGE_MAX;
+    // CL-5: seed the anon budget to the default (B-1a': the user pool). This is
+    // the ONE chokepoint every Proc passes through (proc_alloc for user Procs,
+    // proc_init for kproc), which matters because KP_ZERO would otherwise leave
+    // it 0 -- and a 0 budget refuses EVERY charge, i.e. a Proc that cannot
+    // fault in a single anon page. rfork_internal overwrites it with the
+    // parent's.
+    p->page_budget = proc_default_page_budget();
     poll_waiter_list_init(&p->child_waiters);   // #344: multi-waiter child-reap
     // P3-Bcb: pgtable_root + context_id left at 0 by KP_ZERO. proc_alloc
     // (post-phys_init) installs a real pgtable_root and leaves context_id 0
@@ -357,8 +359,14 @@ struct Proc *proc_init_proc(void) {
 }
 
 struct Proc *proc_alloc(void) {
-    return proc_alloc_in(NULL, PROC_PAGE_MAX);
+    return proc_alloc_in(NULL, proc_default_page_budget());
 }
+
+// B-1a' (ARCH 6.5 "Capacity, and the I-32 default"; proc.h): both figures are
+// the user pool. Two names because they are two decisions -- what a Proc
+// starts with, and what a spawn may raise it to -- that happen to coincide.
+u32 proc_default_page_budget(void)  { return capacity_pool_pages(); }
+u32 proc_page_budget_hard_max(void) { return capacity_pool_pages(); }
 
 struct Proc *proc_alloc_in(struct AddrSpace *share, u32 page_budget) {
     if (!g_proc_cache) extinction("proc_alloc before proc_init");
@@ -415,7 +423,7 @@ struct Proc *proc_alloc_in(struct AddrSpace *share, u32 page_budget) {
         // authorization, passed in rather than read off the half-built Proc.
         //
         // It has to be a parameter, and that is the whole point of this line:
-        // proc_init_fields set p->page_budget to the PROC_PAGE_MAX default a
+        // proc_init_fields set p->page_budget to the default a
         // moment ago, and rfork_internal does not copy the parent's over it
         // until ~85 lines after this call returns -- by which time the space
         // exists and carries the default. Seeding from p->page_budget here
@@ -2838,11 +2846,12 @@ u32 proc_spawn_budget_resolve(const struct Proc *parent, u32 req) {
     // A parent whose own budget is somehow unset would otherwise hand its child
     // a 0 (= refuse-every-charge) budget. Treat it as the default; the invariant
     // is that a live Proc always carries a nonzero budget.
-    if (inherited == 0) inherited = PROC_PAGE_MAX;
+    if (inherited == 0) inherited = proc_default_page_budget();
     if (req == 0) return inherited;             // the compatible default
     // The hard cap binds EVERY request, authority or not: this is what keeps
-    // the box-cliff protection: no Proc can ever demand unbounded memory.
-    if (req > PROC_PAGE_HARD_MAX) return 0;     // refuse (never silently clamp)
+    // the box-cliff protection: no Proc can ever demand more than the machine
+    // has (B-1a': the user pool).
+    if (req > proc_page_budget_hard_max()) return 0;   // refuse (never silently clamp)
     if (req <= inherited) return req;           // reduction needs no authority
     if (proc_may_raise_page_budget(parent)) return req;
     return 0;                                   // raise without authority -> refuse

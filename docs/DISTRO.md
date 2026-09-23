@@ -438,9 +438,16 @@ Shape (b) is not a convenience: Linux MAP_FIXED does not require the target to
 be mapped already, and omitting it made an unmapped-address request answer
 **ENOMEM** — a WORSE reply than the ENOSYS it replaced, because ENOMEM cannot
 be told apart from real memory pressure and an allocator reads it as OOM. The
-residual divergence is the third shape (spanning two VMAs, or partially
-overlapping one), which Linux serves by unmapping the overlapped part and which
-we refuse because partial unmap is post-v1.0. Everything else about MAP_FIXED
+third shape (spanning two VMAs, or partially overlapping one), which Linux
+serves by unmapping the overlapped part, ARRIVED with B-1a' (2026-09-23):
+`vma_replace_range_in` is a range detach of the window followed by the insert,
+so a MAP_FIXED target may straddle or partially overlap the caller's mappings
+and free space alike (a CODE alias or a cut shared-in mapping still refuses,
+exactly as `munmap` does), and the window's slots are released BEFORE the
+swap (`specs/capacity.tla`). The fixed arms are confined to the burrow window:
+below `EXEC_USER_BURROW_BASE` the request is declined (ENOSYS), because the
+exec image, the stack and the pouch guard are not the phenotype's to replace.
+Everything else about MAP_FIXED
 stays refused — MAP_FIXED_NOREPLACE included. `addr` without MAP_FIXED stays
 ignored.
 `PROT_WRITE|PROT_EXEC` stays refused unconditionally; anonymous PROT_EXEC
@@ -543,6 +550,12 @@ over shared kernel core; no native mmap API is added.
   logic exists once. `unmap_library`'s error path and dlclose now tear down.
   The NATIVE `SYS_BURROW_DETACH` keeps exact-match — Linux semantics belong to
   the phenotype row, and the native ABI does not move under a phenotype chunk.
+  **Superseded at B-1a' (2026-09-23, a kernel chunk under the ARCH 6.5
+  ratification):** both entries are the range form over one core
+  (`vma_detach_range_in`) — partial unmaps trim or split, holes are permitted,
+  the release runs before the geometry changes, and the native
+  `SYS_BURROW_DETACH` took the range form with it (0 / -1; an empty range is
+  0). `detach_one_locked` is gone.
 - **#192 VERDICT: document, do not enforce.** File-backed `PROT_EXEC` mmap
   keeps requiring READ authority only — no X-bit check — because (a) it is the
   Linux semantic (the x bit gates execve, not mmap; noexec is a mount option we

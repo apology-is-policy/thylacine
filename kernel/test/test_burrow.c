@@ -89,7 +89,7 @@ static u64 destroyed_since_snap(void) {
 void test_vmo_create_close_round_trip(void) {
     snap_counters();
 
-    struct Burrow *v = burrow_create_anon(4096);
+    struct Burrow *v = burrow_create_anon(4096, false);
     TEST_ASSERT(v != NULL, "burrow_create_anon(4096) returned NULL");
     TEST_EXPECT_EQ(burrow_get_size(v), (size_t)4096, "size mismatch");
     TEST_EXPECT_EQ(burrow_handle_count(v), 1,
@@ -110,7 +110,7 @@ void test_vmo_create_close_round_trip(void) {
 void test_vmo_refcount_lifecycle(void) {
     snap_counters();
 
-    struct Burrow *v = burrow_create_anon(8192);   // 2 pages
+    struct Burrow *v = burrow_create_anon(8192, false);   // 2 pages
     TEST_ASSERT(v != NULL, "burrow_create_anon(8192) NULL");
     TEST_EXPECT_EQ(burrow_get_size(v), (size_t)8192, "size 8192");
 
@@ -133,7 +133,7 @@ void test_vmo_refcount_lifecycle(void) {
 void test_vmo_map_unmap_lifecycle(void) {
     snap_counters();
 
-    struct Burrow *v = burrow_create_anon(4096);
+    struct Burrow *v = burrow_create_anon(4096, false);
     TEST_ASSERT(v != NULL, "burrow_create_anon NULL");
 
     // Open a mapping. mapping_count = 1, handle_count = 1.
@@ -164,7 +164,7 @@ void test_vmo_handles_x_mappings_matrix(void) {
 
     // 1. close-handle-then-unmap (asymmetric: handle 1 + map 1)
     {
-        struct Burrow *v = burrow_create_anon(4096);
+        struct Burrow *v = burrow_create_anon(4096, false);
         TEST_ASSERT(v, "create_1 NULL");
         burrow_acquire_mapping(v);
         u64 before_destroys = destroyed_since_snap();
@@ -178,7 +178,7 @@ void test_vmo_handles_x_mappings_matrix(void) {
 
     // 2. unmap-then-close-handle (mirror of 1)
     {
-        struct Burrow *v = burrow_create_anon(4096);
+        struct Burrow *v = burrow_create_anon(4096, false);
         TEST_ASSERT(v, "create_2 NULL");
         burrow_acquire_mapping(v);
         u64 before_destroys = destroyed_since_snap();
@@ -192,7 +192,7 @@ void test_vmo_handles_x_mappings_matrix(void) {
 
     // 3. multiple handles + one mapping; close handles first
     {
-        struct Burrow *v = burrow_create_anon(4096);
+        struct Burrow *v = burrow_create_anon(4096, false);
         TEST_ASSERT(v, "create_3 NULL");
         burrow_ref(v);                  // handle_count = 2
         burrow_acquire_mapping(v);                  // mapping_count = 1
@@ -210,7 +210,7 @@ void test_vmo_handles_x_mappings_matrix(void) {
 
     // 4. multiple mappings + one handle; unmap first
     {
-        struct Burrow *v = burrow_create_anon(4096);
+        struct Burrow *v = burrow_create_anon(4096, false);
         TEST_ASSERT(v, "create_4 NULL");
         burrow_acquire_mapping(v); burrow_acquire_mapping(v);      // mapping_count = 2
         u64 before_destroys = destroyed_since_snap();
@@ -227,7 +227,7 @@ void test_vmo_handles_x_mappings_matrix(void) {
 
     // 5. interleaved: ref, map, unref, ref, unmap, unref, unref
     {
-        struct Burrow *v = burrow_create_anon(4096);
+        struct Burrow *v = burrow_create_anon(4096, false);
         TEST_ASSERT(v, "create_5 NULL");
         burrow_ref(v);                  // h=2
         burrow_acquire_mapping(v);                  // m=1
@@ -245,7 +245,7 @@ void test_vmo_handles_x_mappings_matrix(void) {
 
     // 6. only handles, no mappings (handle-only lifecycle)
     {
-        struct Burrow *v = burrow_create_anon(4096);
+        struct Burrow *v = burrow_create_anon(4096, false);
         TEST_ASSERT(v, "create_6 NULL");
         burrow_ref(v); burrow_ref(v); burrow_ref(v);   // h=4
         u64 before_destroys = destroyed_since_snap();
@@ -280,7 +280,7 @@ void test_vmo_via_handle_table(void) {
     struct Proc *p = test_proc_make_for_vmo();
     TEST_ASSERT(p, "test_proc_make NULL");
 
-    struct Burrow *v = burrow_create_anon(4096);
+    struct Burrow *v = burrow_create_anon(4096, false);
     TEST_ASSERT(v, "burrow_create_anon NULL");
 
     // handle_alloc on a KOBJ_BURROW. The BURROW's handle_count was set to 1
@@ -324,11 +324,11 @@ void test_vmo_size_overflow_rejected(void) {
     u64 destroyed_before = burrow_total_destroyed();
 
     // Just within the wrap boundary — must reject.
-    struct Burrow *v1 = burrow_create_anon((size_t)-1);    // SIZE_MAX
+    struct Burrow *v1 = burrow_create_anon((size_t)-1, false);    // SIZE_MAX
     TEST_EXPECT_EQ(v1, NULL,
         "burrow_create_anon(SIZE_MAX) must return NULL (overflow guard)");
 
-    struct Burrow *v2 = burrow_create_anon((size_t)-2);    // SIZE_MAX - 1
+    struct Burrow *v2 = burrow_create_anon((size_t)-2, false);    // SIZE_MAX - 1
     TEST_EXPECT_EQ(v2, NULL,
         "burrow_create_anon(SIZE_MAX-1) must return NULL (overflow guard)");
 
@@ -337,7 +337,7 @@ void test_vmo_size_overflow_rejected(void) {
         "rejected requests must not allocate or destroy any BURROW");
 
     // Sanity: a normal small size still works.
-    struct Burrow *v3 = burrow_create_anon(4096);
+    struct Burrow *v3 = burrow_create_anon(4096, false);
     TEST_ASSERT(v3 != NULL,
         "burrow_create_anon(4096) must succeed (overflow guard not over-broad)");
     burrow_unref(v3);
@@ -359,7 +359,7 @@ void test_vmo_dup_oom_rollback(void) {
     struct Proc *p = test_proc_make_for_vmo();
     TEST_ASSERT(p, "test_proc_make NULL");
 
-    struct Burrow *v = burrow_create_anon(4096);
+    struct Burrow *v = burrow_create_anon(4096, false);
     TEST_ASSERT(v, "burrow_create_anon NULL");
     // After burrow_create_anon: handle_count = 1 (consumed reference).
 
@@ -417,7 +417,7 @@ void test_vmo_handle_table_orphan_cleanup(void) {
     struct Proc *p = test_proc_make_for_vmo();
     TEST_ASSERT(p, "test_proc_make NULL");
 
-    struct Burrow *v = burrow_create_anon(4096);
+    struct Burrow *v = burrow_create_anon(4096, false);
     TEST_ASSERT(v, "burrow_create_anon NULL");
 
     hidx_t h = handle_alloc(p, KOBJ_BURROW, RIGHT_READ, v);
@@ -587,7 +587,7 @@ void test_burrow_backing_pages_matches_alloc(void) {
         size_t want = burrow_backing_pages(kSizes[i]);
         TEST_ASSERT(want != 0, "burrow_backing_pages returned 0 for a creatable size");
 
-        struct Burrow *v = burrow_create_anon(kSizes[i]);
+        struct Burrow *v = burrow_create_anon(kSizes[i], false);
         TEST_ASSERT(v != NULL, "burrow_create_anon failed");
         TEST_EXPECT_EQ(want, (size_t)1u << v->order,
             "burrow_backing_pages must equal the allocator's own 1 << order");
@@ -603,6 +603,6 @@ void test_burrow_backing_pages_matches_alloc(void) {
     TEST_EXPECT_EQ(burrow_backing_pages(0), (size_t)0, "size 0 -> 0 pages");
     TEST_EXPECT_EQ(burrow_backing_pages((size_t)-1), (size_t)0,
         "a size whose page round-up would wrap -> 0 pages (no silent truncation)");
-    TEST_ASSERT(burrow_create_anon((size_t)-1) == NULL,
+    TEST_ASSERT(burrow_create_anon((size_t)-1, false) == NULL,
         "and the creator refuses the same size (the guards agree)");
 }

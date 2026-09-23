@@ -22,6 +22,153 @@ needed the operator.
 
 
 ---
+## 2026-09-23, day (main, Fable 5.1, effort max) -- B-1a' (capacity): the tests found two defects the design had not, and the boot found a third
+
+The chunk is ARCH 6.5's "Range detach" and "Capacity, and the I-32 default"
+as built: the flat, uncharged `filepages[]` array becomes a charged radix
+pagemap (`kernel/pagemap.{c,h}`), `burrow_detach` and the phenotype `munmap`
+become one range-detach core (`vma_detach_range_in`), and the I-32 default
+becomes a user pool of RAM minus a boot-sized reserve. The design was derived
+from the code at `ee680a2b` into a memory file before a line was written, and
+the three WIP commits (`48e89c2b` does not build, `63b61384` compiles,
+`a1649f92` green) were executed from it. The chunk lands as one commit on top
+of main; the WIP commits are the working record, not the history.
+
+**Wrong turn 1 -- the design said "walk the overlap"; the pagemap made the
+overlap 2^34 slots.** `burrow_release_lazy_range_in` as first written walked
+every SLOT of the detached range, which was fine at the old 1 GiB reservation cap
+(262,144 iterations) and is not fine once a reservation may be the whole
+64 TiB window: a detach of an untouched window-sized reservation would have
+spun under `as->lock` for hours. Nothing in the suite would have said so --
+the suite reserves small. What caught it was writing the test the design
+listed LAST (`capacity.window_sized_reservation_releases_in_bounded_steps`)
+and asking, before running it, what its cost would be. The fix is
+`pagemap_take_next`: take the first resident slot in `[from, hi)` walking
+present nodes only, so a release costs O(depth x 512) per resident page and
+O(depth) for an empty range -- a present node always holds a resident slot
+beneath it, because the take that empties a node unlinks it. The test pins the
+bound with a step counter (`pagemap_walk_steps`: a few thousand for the whole
+window with two pages touched, not 2^34); the shape is `vma_scan_steps` from
+the B-1a audit's F2, which is the second time this run a walk was made linear
+by asking what it visits rather than what it covers.
+
+**Wrong turn 2 -- a machine-wide bound above a counter that dies with its
+owner.** The pool is a bound ABOVE the per-address-space `page_count`, so
+every charge is counted twice and every uncharge must be too. Deriving the
+death test's expectation (`capacity.death_returns_charges_to_pool`) showed
+that `vma_drain_in` frees a dying address space's pages Proc-agnostically
+(`burrow_free_internal` refunds nothing, by design -- that is `capacity.tla`'s
+`FreeIfLast`) and the counter simply died with the space. Harmless while the
+counter was the only bound; with the pool above it, every Proc death leaked
+its RSS into the pool forever, and a long-lived machine would have refused
+everyone. `addrspace_unref` now returns whatever is left after the drain --
+exactly what no release path settled. This is the model's blind spot made
+concrete: `capacity.tla` has one address space that never dies, and says so.
+
+**Wrong turn 3 -- an oracle built on a refusal is inverted by the change that
+makes the refusal a success.** The first boot with the kernel half green
+failed one line: `net-8a resident lo E2E FAIL (weft-not-detached)`. netd's
+proof that a ring was detached was a SECOND detach being refused (`-1`, the
+exact-match form's answer for "no such mapping"); the Linux range form answers
+`0` for an empty range, so the proof inverted -- a real regression the suite
+could not see because it lives in a daemon's oracle, not the kernel's. The
+oracle now asks the STATE (`t_burrow_protect(va, 4096, R, 0) == -ENOMEM`: a
+hole), not an error. The same boot failed joey's CL-5 probe for the same
+family of reason: it asked for 65,537 pages as "an unauthorized raise" -- a
+number chosen above the old `PROC_PAGE_MAX`, and below the new pool. It now
+reads its own `budget:` and asks for one more.
+
+**Decisions recorded as tests rather than prose.** Five older tests encoded
+the old semantics and each became a decision: eager pages go with the LAST
+piece of a cut eager mapping (`detach.eager_pages_go_with_the_last_piece`); a
+wrong-length piece detach TRIMS instead of refusing; a head or tail trim
+needs no VMA slot (the control in `detach.range_refusals_change_nothing`); a
+below-window `munmap` is ENOSYS, a native one `-1`; the fixed arms are
+window-confined. The exec charge assertions became `data + nodes(segment) +
+nodes(stack)`, which is the pagemap's cost stated where it is paid.
+
+**What the boot showed.** The first boot with the userspace fixes failed on the
+new probe's FIRST leg: `/capacity-probe` opened `/proc/self/status`, and
+Thylacine's devproc has no `self` -- it is Plan 9's `/proc/<pid>`, which
+joey's own reader has always used. A probe written against a Linux reflex,
+caught only by running it; it now builds the path from `t_getpid()`. The
+second boot is clean at both CPU counts: 1650/1650, joey clean (CL-5 OK,
+`capacity-probe: ALL OK` over seven legs, `net-8a resident lo E2E PASS`,
+`viv-pheno-probe: native PASS`), every `snare:` line a fixture's own fault
+(protect-guard-child, pouch-hello-fault, fork-probe, thread-fault-probe;
+the census identical at -smp 1).
+
+**The REDs.** Six sabotages, each baked and booted, each reverted (the anchor
+script asserts every anchor before it writes and the revert asserts the
+sabotage): `nodetachrefund` (the release call in phase 3 removed) reddens
+`detach.range_trims_left_right_middle` and `capacity.replace_window_releases_
+orphans` and, because a leaked charge is visible to every later charge-balance
+test, 31 more (torpor, loom, devsrv); `nonodecharge` (the fault arm installs
+nodes uncharged) reddens `capacity.pagemap_nodes_charged_and_reclaimed` and
+`detach.four_gib_reservation_round_trips` among 28; `nopool` (the pool charge
+skipped) reddens exactly `capacity.pool_refuses_users_keeps_tcb` and
+`capacity.death_returns_charges_to_pool`; `nowindow` (the fixed arms'
+window test dropped) reddens exactly `vivarium.mmap_fixed_domain`;
+`nodeathrefund` reddens exactly `capacity.death_returns_charges_to_pool` and
+`detach.range_refusals_change_nothing`; `noheadroom` (the phase-1 VMA
+headroom refusal dropped) does not produce a red assertion at all -- the
+suite EXTINCTS inside `detach.range_refusals_change_nothing` at the fail-loud
+tripwire (`the tail piece was refused after the headroom check`), which is
+the designed behaviour of phase 3 when phase 1's bookkeeping lies. The
+mechanism's absence is caught either way; the record says which way.
+
+**Wrong turn 4 -- a function written and never called.** The self-audit that
+the audit-round skill requires while the prosecutor runs re-derived the fork
+clone's charge from the code: `burrow_clone_cow` mirrors every NODE page of
+the source map (`want = pagemap_node_count(src)`), and `pagemap_take` refunds
+the nodes it empties to the address space that releases them -- but
+`clone_one_vma` charged the child `burrow_lazy_resident_count(minted)`, the
+resident DATA pages alone. `burrow_lazy_footprint` (pages plus nodes) existed,
+documented as "what a clone charges", with zero callers: the design was
+written into the header and not into the call. The consequence is the
+reverse of the death leak: a forked child that detaches a touched mapping
+refunds nodes it never paid for, its `page_count` drifts below the truth and
+`pool_uncharge(actual drop)` walks the machine-wide pool down with it -- fork
+and detach in a loop drive `charged` below what is held, and the bound is not
+a bound. Twelve tests and a green boot did not see it because none of them
+forked a touched lazy mapping and then released it from the child. Fixed by
+the one call; `capacity.fork_clone_charges_pages_and_nodes` is the witness
+(the parent's 3 pages + 5 nodes charged again to the child, a detach in the
+child refunding exactly one mapping's footprint, the pool exact throughout),
+and its RED is the bug itself. With the one call reverted the suite
+reads 1650/1651 and the red test is exactly that one.
+
+**The spec.** `specs/capacity.tla` (ChargeConserved, NoOrphan) was written in
+the first WIP commit and the detach core to it: the release BEFORE the
+geometry change, the replace as detach + insert (the B-1a audit's F5 closed
+by construction). `specs/check-capacity.sh` pins the clean cfg at 625 distinct states (4
+slots x 2 Burrows) and judges both buggy cfgs on `NoOrphan` with
+`ChargeConserved` listed AHEAD of it and holding: TLC reported `NoOrphan`
+both times, which is the proof that the counter cannot see an orphan -- the
+whole reason the second invariant exists. `check-cow.sh` (8 cfgs) still reads
+AS CLAIMED after the pagemap moved under the COW break. `burrow.tla`'s clean cfg still
+explores exactly 100 distinct states and its three buggy cfgs still violate
+(the reservation cap that moved to the window is below that model).
+
+**The SMP gate.** `tools/ci-smp-gate.sh` on `a08ac177` (WIP 12, the tree that lands): five configs times ten boots, 50/50, `ci-smp-gate: PASS -- 0 corruption across all configs` -- default-smp1 72-75 s a boot, default-smp4 53-55 s, default-smp8 55-72 s, ubsan-smp4 55-57 s, ubsan-smp8 58-60 s; 14:34Z to 15:25Z. **The sixteen REDs**, each a sabotage baked and booted on the same tree and reverted (`red.py` asserts every anchor before it writes and the sabotaged text before it reverts): every one reddened its named test, read back from the boot logs by name. nodetachrefund 1650/1664 (the fourteen detach-refund witnesses), nonodecharge 1580 (84), nopool 1655 (nine: round 1's four pool witnesses and the five the later rounds added), nofreereturn 1493, notablecharge 1581 (83), notablereclaim 1575 (89), nowindow 1663 (`vivarium.mmap_fixed_domain` alone), noclonefootprint 1588 (76), nocowpin 1662 (the pin witness and round 4's last-share witness), nopeercheck 1661 (the queued read and the two read legs), nowantstrip 1493, noexecnomem 1663, nostackerr 1663, noshortfall 1494, nobusgate 1663 (the alignment test; the failed suite extincts the boot before joey, so the EL0 child's livelock is not reached). noheadroom has no suite line: with the pre-mutation headroom check gone the boot EXTINCTS inside `detach.range_refusals_change_nothing` at `kernel/vma.c:415`, the kernel's own "the tail piece was refused after the headroom check" witness -- the guard is what makes that line unreachable. **And a fixture leak the REDs exposed.** Three REDs (nofreereturn, nowantstrip, noshortfall) cascade to 170-171 failures with an identical tail: after the first, every FILE page-in and every fork is refused, because the pool is FULL. `capacity_pool_park_for_test` is an exempt charge and the parking test unparks on its last line, while `TEST_EXPECT_EQ` is `test_fail(); return;` -- so the first failing assertion of `demand_page.idle_image_reclaimed_under_pressure` (or of `reclaim_asks_for_the_shortfall`) returned with the pool parked at its edge. Green on a clean tree (nothing fails, so nothing leaks), it would destroy the diagnosis of a real regression, which is exactly the class the runner's #130-R2 F2 block names for console state. The fix is that block's own discipline applied to the pool -- the runner releases what a test left parked, prints `POOL-PARKED(n pages released)` and reddens a test that passed while leaking -- and it lands as the commit after this one, with the three REDs re-run to show their true sets.
+
+**The audit.** Holotype round 1 (Fable 5.1, start == end) on the WIP tree: 0 P0 / 2 P1 / 0 P2 / 5 P3. F2 [P1] was the clone-footprint defect the self-audit had already found and fixed (`c35ec420`) -- the reviewer found it independently, which is the coverage signal the discipline asks for. F1 [P1] is the finding of the day, and it is a SYSTEM finding: hardware page tables (L1/L2/L3 under a user L0) were allocated uncharged at `mmu_install_user_pte` and never reclaimed before address-space death; with the reservation cap lifted to the window, an unprivileged Proc touching one page per 2 MiB and decommitting it left one uncharged, unreclaimable table page per iteration -- the buddy empty at a charged count of three, the reserve a fiction. Attribution: the uncharged, death-reclaimed tables PREDATE the chunk (P3-Dc); ownership: the chunk removed the last incidental cost of the attack and its scripture claim ("the reserve keeps PRINCIPAL_SYSTEM allocating") depended on it. Fixed before landing. F5 [P3] was a design tension the reviewer named honestly: under a holder-counted pool a fork of a Proc holding more than half the pool's room was refused while free memory existed -- against the ratified bar. One move resolves F5 and gives F1 its return path: the pool becomes PHYSICAL (`mm/phys.c`): `alloc_user_pages` charges it at allocation and tags the head page `PG_USER`, and `free_pages` -- the ONE place a page can leave -- returns the charge, whoever frees it (a detach, a decommit, a COW put, a pagemap take, a table reclaim, `proc_pgtable_destroy`, a failed install's unwind). The per-address-space count keeps the holder reading (a COW-shared page charged to both sharers; the cap bounds a fork), which is the Linux memcg shape; `addrspace_unref`'s pool return -- WIP 3's own fix -- is GONE, because it would now double-return. Every user-page allocation site converted (the ANON_LAZY miss, the COW copy, the FILE page-ins, the pagemap nodes, the eager and CODE chunks, `burrow_lazy_populate`, the Loom ring, the vDSO page, the tables); the creators gained an `exempt` parameter (`burrow_create_anon` / `_code`, `burrow_clone_cow`, `loom_create`, `pagemap_pool_alloc`), so the TCB's own Burrows are counted but never refused. F1 as built: each table is `addrspace_charge_table` (page_count + the new `pgtable_pages` telemetry) then `alloc_user_pages` BEFORE it is linked; occupancy in `page->refcount`, established at 0 (an L3 counts leaves, an L2 its L3s, an L1 its L2s; the L0 is per-space fixed overhead like a kernel stack); a clear that empties a table unlinks it (write invalid, `dsb ishst`, `tlbi vaae1is` on one VA under it -- a by-VA invalidate reaches every cached entry that could translate that VA, the walk cache included, and every leaf beneath was invalidated as it was cleared -- `dsb ish`), re-reads the 512 entries and extincts on a live one (the count is load-bearing; the scan is its witness), frees it and uncharges it, then asks the same of the parent; a failed install unwinds the tables it linked. `mmu_install_user_pte*` now take `(as, exempt)` and the uninstalls `as`; the range form walks a present L3 directly (the leaf-visit gauge kept its meaning: 512 per present table). F3: `burrow_release_lazy_range_in` ends on the take's answer (`if (!pg) break;`), and `vma_alloc` refuses a mapping past its Burrow's `page_count` -- the one constructor (it turned out `burrow_map_in` never checked the length against the Burrow). F4: `Burrow.charge_pid` -> `charge_as_id` (a global counter at `addrspace_alloc`), so a non-CLOEXEC Loom's close after exec never refunds against the successor's space; a dead space's record is simply never claimed. F6: netd's retirement oracle asks RW (a no-op on a live ring; ENOMEM on a hole). F7: `capacity.default_is_ram_minus_reserve` asserts pool + reserve == RAM, pool > 0, RAM/8 <= reserve <= RAM/2, the 256 MiB floor when RAM can spare it, and pins the 2 GiB guest's 65536 / 458752. Three new tests -- `capacity.page_tables_charged_and_reclaimed` (the path grows and shrinks table by table down to the L0 entry), `capacity.memory_bomb_leaves_the_reserve` (the round-1 attack refused within one touch's cost of the pool, tables counted, footprint bounded by the room, a decommit returning everything and the second round refused at the same point), `capacity.fork_costs_the_pool_only_its_nodes` (the fork served with room for four pages, not eight) -- and seven figures in four other files re-expressed as the data view (`page_count - pgtable_pages`): a first touch now costs its three tables, a protect to none or a clone's phase-1 uninstall reclaims them, and `cow.break_sole_holder_takes_in_place` measures the pool, not `phys_free_pages`, because a take-in-place of a page alone in its L3 churns that table (a refinement, not a defect: `mmu_uninstall_user_pte` + install is uninstall-then-rebuild). The REDs are nine: nopool moved to `mm/phys.c`, nodeathrefund retired with its mechanism, nofreereturn / notablecharge / notablereclaim new. The suite: 1654/1654 at the round-1 close, 1656 after round 2, 1659 after round 3, and on the final tree (WIP 11) 1664/1664 at `-smp 4` and again at `-smp 1`, no FAIL line, joey clean -- `/bus-probe-child ok (a misaligned load-exclusive died via snare:bus)` over the kernel's `user fault: pid=2180 reason="snare:bus" addr=0x10000000e pc=0x400060`, `CL-5 page-budget probe OK`, `capacity-probe: ALL OK` then reaped, `net-8a resident lo E2E`; eight `snare:` lines in the log, each a probe child dying the way its probe owed.
+
+**Rounds 2 and 3, and what one round's fix taught the next.** Round 2 (Fable 5.1, on the round-1 close) returned 0 P0 / 0 P1 / 2 P2 / 2 P3: F8, the Image cache as a pool hoard -- a FILE page-in pool-charged but counted against no space, surviving its toucher's death as an idle entry nothing reclaimed, so a dead Proc's cached text could hold the pool while free-able memory sat idle; F9, the copy-on-write break's unconditional uninstall freeing the leaf's tables to a pool it held no lock against -- a pool-edge termination race and a table churn per break. The fixes (WIP 7 `f1497e7f`): the pool reclaims before it refuses (`capacity_set_reclaim` / `image_cache_reclaim` / `burrow_image_strip`; Plan 9's `imagereclaim`), a FILE page charged to its holder per leaf (`addrspace_charge_file`; `file:` in status), the break's leaf replaced in place (`mmu_replace_user_pte_attr`, break-before-make on the entry), a fork keeping the parent's tables. Round 3 (Fable 5.1, on those fixes) then found what the replace had voided: 0 P0 / 2 P1 / 0 P2 / 3 P3. F12 is the lesson of the day and a regression of my own F9 fix: the uninstall I removed had been the load-bearing half of the I-44 argument -- with the only invalidation moved to the END of the fault, the copy branch's early `cow_page_put` left a window in which the space's own stale read-only leaf still translated to the original while the other holder, now sole, could take the page in place and write into what a sibling thread still read, or exit and free it under a live leaf. The fix is the order Linux's `wp_page_copy` keeps (the old page released after the new PTE is set): `cow_release`, put after the replace on every exit (WIP 9 `25cb0d5b`). A tests-only probe between the swap and the replace lets the regression test assert the control (the stale leaf still names the original there -- the window is real) and the claim (the share is still two). F13 was older than the chunk and sat in the function the fix rewrote: a read queued behind a peer thread's break asked the read arm -- the one arm that narrows -- for a read-only install over the writable leaf, the install refused the mismatch, and the Proc was terminated for reading a page it holds. Fixed the way Linux's fault path does it (re-check the PTE under the lock): step 2b, `mmu_user_pte_admits`, answers a fault whose access a valid leaf already admits before any arm runs. F14 (the strip took a whole image per pick: bounded to the pages wanted; its "give up when over-full" half declined with a reason -- the cache is the pool's only slack by design), F15 (a pool refusal inside exec reported EINVAL: `-T_E_NOMEM` through both mappers and `sys_execve_core`), F16 (the F9 witness was satisfied by the defect it named -- a free-then-realloc of the L3 leaves every count equal -- so both break tests now pin the table's PA and the uninstall gauge; the F8 refund witness could not tell leaves from slots, so the unfaulted half is detached first). Thirteen REDs (four new). The reviewer's open lock-order question -- a uaccess under a held Burrow lock against the reclaim's `g_image_lock -> v->lock` -- was answered by a census with a control: 130 uaccess-family call sites, one under a spinlock (`torpor.c:227`, `torpor_lock`, not a Burrow's), none of the 53 uaccess-calling helpers invoked inside the 20 Burrow-lock regions. Wrong turn worth recording: the round-3 patch's first bake failed on `PTE_OA_MASK`, defined two hundred lines below the new probe; the literal mask the sibling walkers use went in instead.
+
+**Round 4, and the witness that survived.** Round 4 (Fable 5.1, on the round-3 fixes) returned 0 P0 / 1 P1 / 0 P2 / 4 P3 and re-derived all five round-3 closes. F17 was older than the chunk and hid behind the very pre-check round 3 had added: an EL0 abort that is neither a translation, an access-flag nor a permission fault -- an alignment fault (FSC 0x21: an exclusive, an ordered or a Device access at an address the instruction cannot take) or a synchronous external abort -- reached `userland_demand_page` and was answered `FAULT_HANDLED`, by step 2b now and by the idempotent install's 1 before it, so the ERET re-executed the instruction into the same abort forever: a livelock where Linux delivers SIGBUS. The fix is a class gate at the top of the pager (`is_alignment` / `is_external` decoded; `!is_translation && !is_access_flag && !is_permission` -> `FAULT_USER_BUS` -> `snare:bus`), with a unit witness and an EL0 one. The EL0 one is the lesson of the round: the first draft of `/bus-probe-child` did `ldar` from `va + 1` and SURVIVED on the Apple core under HVF -- no fault, no loop, just a value. Not a kernel defect and not a QEMU one: FEAT_LSE2 with `SCTLR_EL1.nAA = 0` permits a misaligned ordered access inside one 16-byte quantity and faults only across a boundary, and the kernel's SCTLR (0x30D00800 | PAC | BT0 | M,C,I) leaves nAA clear. Exclusives keep their natural alignment under every rule, so the witness is an `ldxr` at offset 14 -- misaligned AND crossing -- and it died as owed (`pid=2180 reason="snare:bus" addr=0x10000000e`). The reviewer had flagged QEMU's version-dependent alignment enforcement as the chain's soft spot; the measurement found the soft spot one layer up, in the architecture's own relaxation. F18-F21 (WIP 11 `f2d8e329`): `-T_E_NOMEM` through `vma_insert_in`'s cap, `burrow_map_in` and the exec frame's `err_out` (F15's claim had held for the mappers' allocation arms only); `pool_shortfall(n)` so an exempt overshoot costs one reclaim request, not one full cache scan per page under the faulter's lock; the F12 probe moved to step 5 with two witnesses for the exits it could not see (the failed replace's put, the last share's free); and `cow.tla` extended behind `MODEL_LEAF` -- `pter[s]`, `BreakReplace` then `BreakRelease`, bug 7 `BUGGY_PUT_BEFORE_REPLACE`, `NoReadableFreed` / `NoCrossSpaceRead` -- so the model can now say what F12 exploited: `cow_leaf` clean at 2996 states, the buggy cfg failing on F12's exact chain (read, fault, copy, PUT, the peer exits, the page freed under the live leaf), the eight older cfgs at their pinned counts with the switch off. Sixteen REDs. Also found while there: `docs/ERRORS.md`'s `snare:bus` row still read "RESERVED -- no v1.0 emitter", stale since REVENANT made it one; corrected and flagged for the operator as a scripture note.
+
+**Decisions the operator made this run:** none new -- the eleven B-1 votes and
+the memory bar stand (`96f24314`); the two live asks (the CLAUDE.md trim, the
+resume note's working set) were answered and pushed before this chunk's boot.
+
+**Open, owned:** the pouch substrate's `mprotect` / `madvise` / partial
+`munmap` (B-1b); dlmalloc-rs for native (B-1c); the eager charge record is
+pid-keyed (enqueued); the operator's prowl telemetry sub-chunk is next.
+
+---
+
+---
 ## 2026-09-23, night (main, Fable 5.1, effort max) -- B-1a closed: the audit found the one arm that sleeps
 
 The holotype round on `839c1745` (Fable 5.1, MODEL start == end; read-only)

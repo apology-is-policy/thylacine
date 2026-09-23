@@ -618,26 +618,35 @@ enum {
     //                 request OR any value that page-rounds to the
     //                 same span (the match is on the page-rounded
     //                 [vaddr, vaddr + round_up(length)) range)
-    // Detach one installed mapping. The (vaddr, rounded length) must
-    // match an installed VMA exactly — no partial detach at v1.0
-    // (mirrors burrow_unmap's constraint). The VMA is removed and, when
-    // that was the Burrow's last reference, its pages are freed (a
-    // hardware Burrow's KObj reference drops with it).
+    // Unmap [vaddr, vaddr + round_up(length)) -- the Linux munmap form since
+    // B-1a' (ARCH 6.5 "Range detach"; kernel/vma.c::vma_detach_range_in).
+    // Inside the window the range is served whatever it cuts: a mapping
+    // wholly inside it goes, one cut at an end is trimmed in place, one the
+    // range lies strictly inside is split around it (one new mapping), holes
+    // are fine, and a range that maps nothing answers 0. A lazy region's pages
+    // under the range are released and uncharged; an eager region's block
+    // goes, and is refunded, with its LAST piece; a whole shared-in mapping
+    // refunds its shared-in budget. Any length up to the window
+    // (BURROW_RESERVE_MAX) -- a 4 GiB reservation detaches in one call.
     //
     // Which mappings are detachable is decided by IDENTITY (ARCH 6.5):
     // anything inside the burrow-attach window [EXEC_USER_BURROW_BASE,
     // EXEC_USER_BURROW_TOP), and a DMA- or MMIO-backed mapping wherever
-    // the driver placed it. An ELF segment, the stack, its guard and the
-    // vDSO sit below the window and are never hardware-backed, so they
+    // the driver placed it, whole. An ELF segment, the stack, its guard and
+    // the vDSO sit below the window and are never hardware-backed, so they
     // stay refused.
     //
-    // Returns 0 on success, -1 on:
+    // Returns 0 on success, -1 on (nothing changed on any refusal):
     //   - length == 0, vaddr not page-aligned, or the span leaves the
     //     user address space
-    //   - a span inside the window with length > BURROW_ATTACH_MAX
-    //   - a span outside the window whose VMA is not DMA- or MMIO-backed
-    //   - no VMA matches [vaddr, vaddr + round_up(length)) exactly
-    //   - a JIT code alias (the JIT syscalls own that lifetime)
+    //   - a span outside the window whose VMA is not DMA- or MMIO-backed,
+    //     or that does not cover such a mapping exactly
+    //   - a JIT code alias anywhere in the range (the JIT syscalls own
+    //     that lifetime)
+    //   - a shared-in mapping the range CUTS (its exact span is what the
+    //     sharer's teardown matches; whole is fine)
+    //   - no headroom for the mapping a split adds (PROC_VMA_MAX), or no
+    //     slab for it
     SYS_BURROW_DETACH = 38,  // arg: vaddr (x0), length (x1)
 
     // P6-pouch-wait-addr (sub-chunk 8): the `torpor` wait-on-address
@@ -1607,8 +1616,8 @@ enum {
     //   page_count is charged THERE (per page) -- the whole point is a free
     //   reservation, so page_count tracks true RSS. The VMA-count axis (PROC_VMA_MAX)
     //   IS charged at attach, so a free reservation cannot exhaust the vma slab.
-    //   -1 on: length == 0 / length > BURROW_ATTACH_MAX / no free gap / OOM. Same
-    //   page-rounding as SYS_BURROW_ATTACH.
+    //   -1 on: length == 0 / length > BURROW_RESERVE_MAX (the window: B-1a') /
+    //   no free gap / OOM. Same page-rounding as SYS_BURROW_ATTACH.
     SYS_BURROW_ATTACH_LAZY = 83,  // arg: length (x0)
 
     // SYS_BURROW_DECOMMIT(vaddr, length) -> 0 / -1. The madvise(MADV_DONTNEED)
@@ -1617,9 +1626,12 @@ enum {
     //   (+ TLBI before the page frees to the buddy), frees the page, NULLs the sparse
     //   slot, and uncharges page_count. The VMA + reservation stay; a later touch
     //   re-faults a fresh zero page. Idempotent on never-faulted pages. Confined to
-    //   the burrow-attach window (like SYS_BURROW_DETACH); rejects a non-ANON_LAZY
-    //   VMA / a range outside one VMA. Backs the Go runtime's sysUnused (the GC
-    //   shrinks RSS). -1 on a bad range / wrong VMA type.
+    //   the burrow-attach window (like SYS_BURROW_DETACH); the range may span the
+    //   pieces a protect cut (B-1a'), but every mapping in it must be a plain
+    //   ANON_LAZY one and there may be no hole -- else -1 with nothing changed.
+    //   The pagemap's nodes emptied by the release are freed and uncharged with
+    //   the pages. Backs the Go runtime's sysUnused (the GC shrinks RSS). -1 on a
+    //   bad range / wrong VMA type / a hole.
     SYS_BURROW_DECOMMIT = 84,     // arg: vaddr (x0), length (x1)
 
     // Positioned byte I/O (#37; the go-build clean+perf mission P2.1). The Dev
@@ -2414,7 +2426,7 @@ _Static_assert(__builtin_offsetof(struct t_jit_region, exec_va) == 8,   "t_jit_r
 // Largest single code region (I-42). 64 MiB is generous for a shader/method
 // JIT while staying well inside the I-32 per-Proc page budget, so a code
 // region can never be the instrument that exhausts a Proc's memory floor --
-// the pages are charged against PROC_PAGE_MAX exactly like SYS_BURROW_ATTACH's.
+// the pages are charged against the page budget exactly like SYS_BURROW_ATTACH's.
 #define JIT_REGION_MAX  (64u * 1024u * 1024u)
 
 // SYS_PTY_REGISTER ops.
@@ -2592,7 +2604,8 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, shm)         == 208, "t_pci
 // what lets joey confer it on /sbin/login, login on the session shell, and the
 // shell on a build driver, without any of them being console-attached.
 //
-// A raise is still bounded by PROC_PAGE_HARD_MAX, so this bit buys a LARGER
+// A raise is still bounded by proc_page_budget_hard_max() (the user pool,
+// B-1a'), so this bit buys a LARGER
 // budget, never an unbounded one: the box-cliff protection does not rest on it.
 // NOT a cap (rfork does not propagate it) -- but note the BUDGET ITSELF is
 // inherited, so a raised child passes its budget to its own children without
@@ -3240,20 +3253,21 @@ _Static_assert((SYS_WALK_CREATE_DMSRVBULK &
 // page-rounding so `length + PAGE_SIZE` cannot overflow.
 #define BURROW_ATTACH_MAX  (256u * 1024u * 1024u)
 
-// Overcommit / I-32 (ARCH §6.5): the maximum length for a single LAZY reservation
-// (SYS_BURROW_ATTACH_LAZY). DISTINCT from BURROW_ATTACH_MAX because a lazy
-// reservation commits NO data pages at attach -- the eager 256-MiB bound (sized for
-// the committed allocation) would defeat the whole purpose (Go's stock 64-bit page
-// allocator reserves a ~512-MiB page-summary; #321). The real bounds on a lazy
-// region's resource use are page_count (charged at FAULT, per touched page) +
-// PROC_VMA_MAX (the slab DoS) -- NOT the reservation byte size. 1 GiB is 2x Go-stock
-// with headroom; the only eager cost is the sparse `filepages` array (8 B / reserved
-// page -> 2 MiB for 1 GiB, a kmalloc -> alloc_pages order-9, within MAX_ORDER 18).
-// v1.x SEAM: the flat eager `filepages` array is UNCHARGED kernel memory and does not
-// scale to huge reservations -- a per-Proc array-DoS bounded today only by graceful-
-// OOM (alloc fails -> attach -1) + PROC_VMA_MAX; the fix is a charged radix/sparse
-// metadata structure (the Linux page-table-radix shape), which also lifts this cap.
-#define BURROW_RESERVE_MAX  (1024ull * 1024ull * 1024ull)
+// Overcommit / I-32 (ARCH 6.5 "Capacity"): the maximum length of a single LAZY
+// reservation (SYS_BURROW_ATTACH_LAZY / SYS_BURROW_RESERVE), of a decommit range,
+// of a MAP_FIXED window and of a detach range -- the WHOLE burrow window.
+// DISTINCT from BURROW_ATTACH_MAX because a lazy reservation commits NO data
+// pages at attach and, since B-1a', no metadata either until a slot is touched:
+// the per-page slot table is a 512-ary radix (kernel/pagemap.h) whose nodes are
+// allocated as slots fill and charged to page_count like the pages they index,
+// so an untouched reservation costs one small struct however large it is. The
+// real bounds on a lazy region's resource use are page_count (charged at FAULT,
+// per touched page and per node) + PROC_VMA_MAX -- never the reservation's byte
+// size, which is why a JS engine's 4 GiB region and a Wasm linear memory's
+// reservation are both admitted. Spelled in the window's own numbers because
+// this is the ABI header and cannot pull exec.h; kernel/syscall.c pins it equal
+// to EXEC_USER_BURROW_TOP - EXEC_USER_BURROW_BASE with a _Static_assert.
+#define BURROW_RESERVE_MAX  (0x0000400000000000ull - 0x0000000100000000ull)
 
 // B-1a: the prot word of SYS_BURROW_RESERVE / SYS_BURROW_PROTECT. The values
 // are the kernel's own VMA_PROT_* bits and, by construction, Linux's PROT_*
@@ -3270,8 +3284,8 @@ _Static_assert((SYS_WALK_CREATE_DMSRVBULK &
 #define BURROW_PROTECT_SEAL 1u
 
 // SYS_BURROW_RESERVE align_log2 bounds: 0 means page alignment; otherwise the
-// exponent lies in [12, 30] -- a 4 KiB page up to 1 GiB, which is the largest
-// alignment a BURROW_RESERVE_MAX region could usefully carry.
+// exponent lies in [12, 30] -- a 4 KiB page up to 1 GiB. The alignment bound is
+// ABI and stayed when B-1a' lifted the length bound to the window.
 #define BURROW_RESERVE_ALIGN_MIN_LOG2 12u
 #define BURROW_RESERVE_ALIGN_MAX_LOG2 30u
 
@@ -3337,7 +3351,8 @@ struct sys_spawn_args {
     //
     // Non-zero requests a specific budget. <= the spawner's own is always
     // allowed (monotonic reduction, no authority). ABOVE it requires
-    // SPAWN_PERM_MAY_RAISE_PAGE_BUDGET. Anything over PROC_PAGE_HARD_MAX is
+    // SPAWN_PERM_MAY_RAISE_PAGE_BUDGET. Anything over the hard maximum (the
+    // user pool; proc_page_budget_hard_max) is
     // REFUSED outright (never clamped -- a silent clamp would hand back a
     // budget the caller did not ask for and hide the misconfiguration).
     // Resolved by proc_spawn_budget_resolve; a refusal fails the spawn with -1.

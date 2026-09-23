@@ -530,8 +530,9 @@ _Static_assert(__builtin_offsetof(struct Loom, magic) == 0,
 // Allocates the ring Burrow (handle_count = 1, held by the returned Loom),
 // computes + stamps the geometry into the ring header, refcount = 1. Does NOT
 // map the ring into any address space -- SYS_LOOM_SETUP's handler does that.
-// Returns NULL on bad args / OOM.
-struct Loom *loom_create(u32 sq_entries, u32 cq_entries);
+// Returns NULL on bad args / OOM. `exempt` is the creator's I-32 exemption:
+// the ring is a user allocation, refused past the user pool unless exempt.
+struct Loom *loom_create(u32 sq_entries, u32 cq_entries, bool exempt);
 
 // Refcount. loom_unref's last drop clunks every registered Spoor and
 // burrow_unref's the ring (releasing the kernel's handle_count; the user

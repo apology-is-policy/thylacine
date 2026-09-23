@@ -234,7 +234,7 @@ void test_fork_table_copy(void) {
     // A real Burrow, so the refcount claim is measurable rather than asserted.
     // burrow_create_anon's count of 1 is CONSUMED by handle_alloc (the Burrow
     // convention), so the parent's handle is that one count.
-    struct Burrow *b = burrow_create_anon(PAGE_SIZE);
+    struct Burrow *b = burrow_create_anon(PAGE_SIZE, false);
     TEST_ASSERT(b != NULL, "burrow_create_anon");
 
     hidx_t h_burrow = handle_alloc(parent, KOBJ_BURROW, RIGHT_READ | RIGHT_WRITE, b);

@@ -14,7 +14,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | arc | status | chunks |
 |---|---|---|
 | [[arc-arch81]] | active | 1 |
-| [[arc-boosty]] | active | 3 |
+| [[arc-boosty]] | active | 5 |
 | [[arc-clade]] | active | 7 |
 | [[arc-corvus-srv]] | active | 3 |
 | [[arc-deep-smp-review]] | active | 4 |
@@ -135,11 +135,11 @@ Generated — do not edit between the markers (`quaestor render`).
 ## Recent changes
 
 - 2026-09-23 [[chg-2026-09-23-b1a-permission-ceiling]] — B-1a: the permission ceiling -- SYS_BURROW_RESERVE 124 / SYS_BURROW_PROTECT 125, the multi-mapping reprotect, the fork's per-Burrow clone dedupe, the phenotype mprotect row, the lazy-piece detach refund
+- 2026-09-23 [[chg-2026-09-23-b1a-prime-capacity]] — B-1a' (capacity): the range detach over one core (SYS_BURROW_DETACH 38 in the Linux form + the phenotype munmap), the charged sparse pagemap, the user pool + the I-32 default = RAM minus a reserve, the window-confined fixed arms -- LANDING, audit pending
+- 2026-09-23 [[chg-2026-09-23-b1a-prime-close-r2]] — B-1a' (capacity), the round-2 close: the pool reclaims idle images before it refuses, a mapped file page is charged to its holder, the copy-on-write break replaces its leaf in place, a fork keeps the parent's tables -- round 2's four findings closed, round 3 on the fixes
+- 2026-09-23 [[chg-2026-09-23-b1a-prime-close-r3]] — B-1a' (capacity), the round-3 close: the copy-on-write copy keeps its share until its leaf is replaced, a fault that finds a leaf already admitting its access is answered by it, the strip takes what is wanted, a refused allocation inside exec is ENOMEM -- round 3's five findings closed, round 4 on the fixes
+- 2026-09-23 [[chg-2026-09-23-b1a-prime-close-r4]] — B-1a' (capacity), the round-4 close: the pager refuses the abort classes it cannot resolve, the pool's refusal is ENOMEM on the exec frame, the reclaim asks for the shortfall, the probe fires at the leaf write, cow.tla models the read-only leaf -- round 4's five findings closed, no round 5 owed
+- 2026-09-23 [[chg-2026-09-23-b1a-prime-close]] — B-1a' (capacity), the audit close: the pool made PHYSICAL (charged at allocation, returned at free), the hardware page tables charged and reclaimed, F3/F4/F6/F7 -- round 1's seven findings closed, round 2's four in flight
 - 2026-09-22 [[chg-2026-09-22-arch81-scripture]] — ARCH 8.12: the design for syscall bodies with interrupts on, landed as scripture before any code
 - 2026-09-22 [[chg-2026-09-22-poll-preemption-point]] — poll crosses a preemption point each re-loop: the masked CPU gets a window the noise cannot close
-- 2026-09-21 [[chg-2026-09-21-boosty-b0-jsc]] — Boosty B-0: JavaScriptCore runs on Thylacine (JIT off) -- the port wiring
-- 2026-09-21 [[chg-2026-09-21-mount-shed]] — The mount-table shed at pivot / chroot (#80): the cap stays 32 and the orphans go
-- 2026-09-21 [[chg-2026-09-21-pouch-b0-libc]] — Pouch 0033-0041: nine libc patches a JavaScript engine shook out -- lies, not errors
-- 2026-09-21 [[chg-2026-09-21-srvconn-two-endpoint-poll]] — poll: a wake is a hint (the re-arm), and a /srv connection is pollable from BOTH endpoints with a list walk on every ring mutation
-- 2026-09-18 [[chg-2026-09-18-npxf-host]] — Supported OpenSSL npxf hosts and pending graphical SAK ownership review
 <!-- generated:end -->

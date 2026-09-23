@@ -39,6 +39,7 @@
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>         // struct Spoor + spoor_clunk + SPOOR_MAGIC + qid
 #include <thylacine/types.h>         // SIZE_MAX
+#include "../mm/phys.h"               // capacity_set_reclaim (B-1a' audit F8)
 
 // One cache slot. `burrow` holds the cache's single handle_count ref. The key
 // scalars are sampled from the Spoor at install (== the Burrow's file_* fields).
@@ -70,11 +71,14 @@ static u64 g_image_hits;          // returned an existing cached Burrow
 static u64 g_image_creates;       // registered a fresh Burrow
 static u64 g_image_evictions;     // dropped a victim to make room
 static u64 g_image_bypass;        // created un-cached (table full of live images)
+static u64 g_image_reclaims;      // B-1a' audit F8: reclaim calls that freed a page
+static u64 g_image_reclaimed_pages;
 
 void image_cache_init(void) {
     if (g_image_inited)
         extinction("image_cache_init called twice");
     g_image_inited = true;
+    capacity_set_reclaim(image_cache_reclaim);
 }
 
 // Page-round a length the same way burrow_create_file does, so the cache key's
@@ -218,6 +222,33 @@ struct Burrow *image_lookup_or_create(struct Spoor *spoor, u64 file_offset,
     return fresh;
 }
 
+u32 image_cache_reclaim(u32 want) {
+    u32 freed = 0;
+    spin_lock(&g_image_lock);
+    while (freed < want) {
+        // The least recently used IDLE entry that still holds pages. Idle
+        // ({1,0}) is STABLE under g_image_lock -- the file header's eviction
+        // proof: a mapper must pass through this lock first -- so the strip
+        // below, under the lock, runs against a map nothing else can reach:
+        // no PTE names its pages (the last mapping's teardown cleared them),
+        // no fault is filling it (a filler holds a handle ref).
+        int victim = -1;
+        u64 best = (u64)-1;
+        for (int i = 0; i < IMAGE_CACHE_MAX; i++) {
+            if (!g_image[i].used) continue;
+            struct Burrow *b = g_image[i].burrow;
+            if (burrow_handle_count(b) != 1 || burrow_mapping_count(b) != 0) continue;
+            if (burrow_image_resident_count(b) == 0) continue;
+            if (g_image[i].lru < best) { best = g_image[i].lru; victim = i; }
+        }
+        if (victim < 0) break;
+        freed += burrow_image_strip(g_image[victim].burrow, want - freed);
+    }
+    if (freed) { g_image_reclaims++; g_image_reclaimed_pages += freed; }
+    spin_unlock(&g_image_lock);
+    return freed;
+}
+
 #ifdef KERNEL_TESTS
 int image_cache_live_count_for_test(void) {
     spin_lock(&g_image_lock);
@@ -254,4 +285,6 @@ int image_cache_evict_idle_for_test(void) {
 u64 image_cache_hits_for_test(void)      { return g_image_hits; }
 u64 image_cache_creates_for_test(void)   { return g_image_creates; }
 u64 image_cache_evictions_for_test(void) { return g_image_evictions; }
+u64 image_cache_reclaims_for_test(void)        { return g_image_reclaims; }
+u64 image_cache_reclaimed_pages_for_test(void) { return g_image_reclaimed_pages; }
 #endif

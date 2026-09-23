@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/EXEC-LOAD-DESIGN.md", "docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-03
-updated: 2026-09-21
+updated: 2026-09-23
 ---
 ## Purpose
 
@@ -81,6 +81,15 @@ comment on the line reads *clean target only* — because the target is no longe
 the process. It is a **freshly allocated, detached address space**, and the swap
 happens one layer up ([[sub-kernel-proc]]) after the load has completely
 succeeded.
+
+**A refused allocation travels as `-T_E_NOMEM`** (2026-09-23; B-1a' audit
+F15). Both segment mappers return it from their allocation arms -- a creator
+that returned NULL, a refused `burrow_lazy_populate`, a refused VMA -- and
+`exec_setup_argv_body`'s segment loop and `exec_load_body`'s PT_LOAD arm pass
+it up unchanged; every other failure is still `-1`, which `sys_execve_core`
+reports as EINVAL (the tracked ENOEXEC gap). Before this a Proc that ran out
+of pool during exec was told its binary was malformed.
+`execve.load_refuses_nomem_at_the_pool_edge` parks the pool full and loads.
 
 That is worth stating as a shape rather than a fact, because it is the better
 answer to the problem the seam described. Teaching exec to replace in place
@@ -430,6 +439,29 @@ writes. A ninth entry added without bumping the macro would overrun the
 `AT_RANDOM` block in every process, and the assert would still pass. Correct
 today; the coupling is a comment.
 
+## The segments and the stack are user-pool allocations (2026-09-23; B-1a' round-1 close)
+
+Exec's eager writable segments and its stack reservation pass exec's own
+`exempt` into `burrow_create_anon` / `burrow_create_anon_lazy`, so every page
+they mint comes from the physical user pool with the new image's exemption
+and returns at `free_pages` ([[sub-kernel-mm-phys]]); the populate's pages
+and the pagemap nodes under them charge the same way ([[sub-kernel-burrow]]).
+Nothing else changed here.
+
+B-1a' round 4 (2026-09-23; F18): the round-3 claim -- a refused allocation
+inside the load travels as `-T_E_NOMEM` -- held for the two mappers'
+allocation arms only. `burrow_map_in` returned -1 for everything, so the
+"refused VMA" arm was dead and a Proc at `PROC_VMA_MAX` got EINVAL; and the
+frame builder answered 0 on a refused populate, so at the pool's edge execve
+reported ENOMEM or EINVAL depending on whether the refusal landed on a
+segment's populate or on the startup frame's pages. Now `vma_insert_in`'s cap
+refusal is `-T_E_NOMEM` ([[sub-kernel-vma]]), `burrow_map_in` propagates it
+([[sub-kernel-burrow]]), and `exec_map_user_stack`, its guard,
+`map_file_backed` and `exec_build_init_stack` (a new `int *err_out`:
+`-T_E_NOMEM` when the frame's populate or its `kzalloc` is refused, -1
+otherwise; 0 stays the unambiguous failed sp) carry it to `exec_load_into`
+and the blob entry.
+
 ## Provenance
 
 Born as the P3-Eb blob loader; grew argv at the pouch-stratumd boot chunk;
@@ -454,6 +486,14 @@ I-30 argv/envp bound, and the envp #140 decline-as-detector + the native-preserv
 / Linux-empty asymmetry.
 
 ## Tests
+
+B-1a' round 3 (2026-09-23): `execve.load_refuses_nomem_at_the_pool_edge` --
+the idle images evicted, the pool parked full, the RW segment's populate
+refused: the load answers `-T_E_NOMEM`, not `-1`. Round 4:
+`execve.load_refuses_nomem_on_the_frame` -- an ELF with no populated RW head
+at a parked pool: the frame's pages are the refused allocation and the load
+answers `-T_E_NOMEM`; CONTROLS: the text, the RW segment and the stack are
+mapped, so the refusal was the frame's.
 
 `exec.setup_*` covers both frame shapes, the auxv block with and without a
 covering phdr segment, multi-segment loads, the constraint rejects, a lifecycle

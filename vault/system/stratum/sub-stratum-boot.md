@@ -45,6 +45,27 @@ boot. Both rungs are boot-fatal like every other. The marker goes out on fd 1
 (`t_write`), not `t_putstr`: `SYS_PUTS` is the console, and the census reads
 the pipe ([[sub-kernel-protect-witness]]).
 
+**B-1a' rung (2026-09-23).** After the guard child, joey spawns
+`/capacity-probe` and reaps it by pid with `t_wait_pid_for`, requiring status
+0 -- the EL0 half of ARCH 6.5's capacity contract through the native syscalls,
+reading the census joey's own probes read (`/proc/<pid>/status`, the pid from
+`t_getpid`; there is no `/proc/self`, the Plan 9 shape; `pages:` is data plus
+the pagemap's nodes): a 4 GiB reservation admitted and costing nothing
+untouched, the census rising by 8 pages + 13 nodes when touched every 512 MiB,
+a protect of the middle GiB releasing nothing, a 2 GiB range detach across the
+pieces returning exactly 4 pages + 6 nodes with the survivors' bytes intact,
+the rest detached in one range with the census back at its baseline (and an
+empty range answering 0), a 512 MiB reservation detaching, an eager region
+staying charged until its last piece goes, and the refusals (unaligned, zero
+length, below the window) changing nothing. Boot-fatal like every other rung
+(`joey: /capacity-probe FAILED`). The CL-5 probe (`probe_cl5_page_budget`)
+reads joey's OWN `budget:` from its status file (`proc_status_field`) rather
+than restating a constant, asks for one page more (refused: a raise without
+authority) and for `0xFFFFFFFF` (refused at validation: over the hard maximum
+on any machine short of 16 TiB); since the default IS the hard maximum, the
+authority refusal proper -- a narrowed parent asking above itself but below
+the maximum -- is the kernel suite's (`resource.spawn_budget_resolve`).
+
 
 Ordered, and every step is boot-fatal:
 

@@ -65,15 +65,15 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**525 owned · 48 unowned · 573 files (91% owned) · ~13165 unswept lines.**
+**527 owned · 49 unowned · 576 files (91% owned) · ~13228 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **74 files, ~33373 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **75 files, ~33694 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
 | usr/warp-prove | 0 | 1 | 4349 |
 | usr/pouch-hello | 7 | 17 | 2487 |
-| kernel | 127 | 14 | 1981 |
+| kernel | 129 | 14 | 1981 |
 | usr/ports | 19 | 4 | 1631 |
 | usr/quarry | 0 | 1 | 1033 |
 | usr/stratumd-stub | 0 | 1 | 453 |
@@ -84,6 +84,7 @@ Excluded as harness and counted here rather than dropped: **74 files, ~33373 lin
 | usr/susp-mask-child | 0 | 1 | 139 |
 | usr/stub-driver | 0 | 1 | 119 |
 | usr/lib | 66 | 1 | 72 |
+| usr/bus-probe-child | 0 | 1 | 63 |
 | usr/tapestryd | 8 | 2 | 21 |
 | mm | 8 | 0 | 0 |
 | usr/aurora | 4 | 0 | 0 |
@@ -167,6 +168,7 @@ Excluded as harness and counted here rather than dropped: **74 files, ~33373 lin
 | kernel/vdso.c | 68 |
 | usr/ports/gnumake/generated/fnmatch.h | 64 |
 | usr/pouch-hello/pouch-hello-printf.c | 64 |
+| usr/bus-probe-child/src/main.rs | 63 |
 | kernel/include/thylacine/cpio.h | 61 |
 | usr/pouch-hello/pouch-hello-env.c | 57 |
 | usr/pouch-hello/pouch-hello-argv.c | 51 |

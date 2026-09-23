@@ -1032,13 +1032,19 @@ unsafe fn run_linux() -> ! {
     // would pass on any address the kernel felt like picking, which is the one
     // thing MAP_FIXED forbids.
     //
-    // 0x40000000 is unmapped here, so this is the FREE-space shape. It is served
-    // (Linux places a fixed mapping at an unmapped address rather than failing);
-    // answering ENOMEM instead was #196, and ENOMEM is the worse reply because an
-    // allocator cannot tell it from real memory pressure.
-    let f = svc6(NR_MMAP, 0x40000000, MAP_LEN, PROT_READ | PROT_WRITE,
+    // 0x1_4000_0000 -- a GiB into the burrow window, above anything this guest
+    // has mapped -- is unmapped here, so this is the FREE-space shape. It is
+    // served (Linux places a fixed mapping at an unmapped address rather than
+    // failing); answering ENOMEM instead was #196, and ENOMEM is the worse
+    // reply because an allocator cannot tell it from real memory pressure.
+    // Since B-1a' the fixed arms are CONFINED to the window: a fixed mapping
+    // below it could never be unmapped (munmap is the range row, itself
+    // window-confined), so such a request is declined (L21d) rather than
+    // served into a per-call leak.
+    const FIXED_VA: u64 = 0x1_4000_0000;
+    let f = svc6(NR_MMAP, FIXED_VA, MAP_LEN, PROT_READ | PROT_WRITE,
                  MAP_PRIVATE | MAP_ANON | MAP_FIXED, (-1i64) as u64, 0);
-    leg!(rep, f == 0x40000000, b"L21\n");
+    leg!(rep, f == FIXED_VA as i64, b"L21\n");
     // It is real memory, not just a bookkeeping entry: write and read back
     // through the LAST page, which also proves the whole span got mapped.
     (f as *mut u64).add((MAP_LEN / 8 - 1) as usize).write_volatile(0x5A5A_A5A5);
@@ -1048,7 +1054,17 @@ unsafe fn run_linux() -> ! {
             == 0x5A5A_A5A5,
         b"L21b\n"
     );
-    let _ = svc3(NR_MUNMAP, f as u64, MAP_LEN, 0);
+    // And it can be given back: the range munmap serves it (B-1a'), asserted
+    // rather than swallowed -- a fixed mapping that cannot be unmapped is a
+    // leak per call. Then the shape the window refuses: a fixed request below
+    // it is declined, never faked.
+    leg!(rep, svc3(NR_MUNMAP, f as u64, MAP_LEN, 0) == 0, b"L21c\n");
+    leg!(
+        rep,
+        svc6(NR_MMAP, 0x40000000, MAP_LEN, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANON | MAP_FIXED, (-1i64) as u64, 0) == NEG_ENOSYS,
+        b"L21d\n"
+    );
 
     // mprotect is a TRANSLATED row since B-1a (the permission ceiling, ARCH
     // 6.5): SYS_BURROW_PROTECT under each mapping's mint-time ceiling. Until
@@ -1059,10 +1075,7 @@ unsafe fn run_linux() -> ! {
     // with EACCES ("X is never a target"): the same unmapped range answers two
     // different errnos on the prot word alone, which is the order made
     // observable. The range is 0x50000000, never mapped by anything in this
-    // image: L21's fixed mapping at 0x40000000 is not a safe "unmapped" range
-    // to reuse, because its munmap rides the range row and that row can
-    // decline (the ladder's nr=215 line) -- a leaked mapping there would turn
-    // ENOMEM into a silent 0.
+    // image -- a range no leg has ever mapped is the only honest "unmapped".
     leg!(
         rep,
         svc3(NR_MPROTECT, 0x50000000, 4096, PROT_READ | PROT_WRITE) == NEG_ENOMEM,

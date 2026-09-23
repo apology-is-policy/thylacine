@@ -5,14 +5,14 @@ parent: moc-kernel-execution
 title: "The Image cache — one copy of a binary's text, and a proof that eviction cannot race a mapper"
 code: [kernel/image.c, kernel/include/thylacine/image.h]
 audit: hard
-guarded-by: [inv-i36, inv-i7]
+guarded-by: [inv-i36, inv-i7, inv-i32]
 validated-by: [prose, gate-smp]
 locks: []
 hazards: []
 abis: []
 design: ["docs/EXEC-LOAD-DESIGN.md"]
 created: 2026-08-03
-updated: 2026-09-06
+updated: 2026-09-23
 ---
 ## Purpose
 
@@ -31,7 +31,9 @@ the dual-refcount Burrow lifecycle.
 
 ## Contract
 
-One production entry point, and its ownership rule is the whole contract:
+Two production entry points since the round-2 close of B-1a' (2026-09-23):
+the lookup, whose ownership rule is the whole of its contract, and
+`image_cache_reclaim(want)`, the user pool's reclaim step (below).
 
 **`image_lookup_or_create` always consumes the caller's Spoor on success** —
 adopted into a new Burrow on a miss, clunked as redundant on a hit — and returns
@@ -108,10 +110,15 @@ file, so the cache must not depend on being able to re-read it.
 
 ## Concurrency
 
-One global lock, plain rather than IRQ-saving, justified by exec being process
-context only.
+One global lock, plain rather than IRQ-saving, justified by every entry being
+process context: exec, the phenotype `mmap` arm, and since the round-2 close
+the pool's reclaim, which runs in the allocating context -- a fault or an
+attach, under that space's `as->lock`.
 
-**Lock order is cache lock → Burrow lock**, never the reverse, and the reason it
+**Lock order is [`as->lock` →] cache lock → Burrow lock → the buddy**, never
+the reverse -- the reclaim adds the two ends: it may be entered with an
+address space's lock held and it frees pages under the Burrow lock's shadow
+(outside it, leaf order) -- and the reason it
 can never be the reverse is structural: the free path never re-enters the cache,
 because an entry is always detached from the table *before* the reference that
 frees it is dropped.
@@ -149,7 +156,14 @@ bytes — the condition that always justified it.
 
 [[inv-i7]] — the cache is a handle-count holder. Its reference is what keeps
 text resident after the last Proc unmaps, which is the temporal half of the
-Plan 9 design: exit and re-exec finds the pages still there.
+Plan 9 design: exit and re-exec finds the pages still there -- and, since the
+round-2 close, finds the ENTRY still there even when pressure has taken the
+pages: the Image outlives its pages, as Plan 9's does.
+
+[[inv-i32]] — the cache is the pool's reserve under pressure and its pages are
+charged to their holders (the round-2 audit's F8, below): a cached file's pages
+are pool memory, a mapping of them is the mapping space's charge, and an idle
+image gives its pages back before a user allocation is refused.
 
 ## Error paths
 
@@ -180,8 +194,11 @@ stays one-directional.
 
 ## Seams
 
-- **No pressure-triggered reclaim.** The LRU cap is the only bound; a memory
-  shortage cannot ask the cache to give pages back.
+- **Reclaim is per page since round 3, but still under the cache lock.** A
+  pick strips only the pages still wanted (B-1a' audit F14: a 256 MiB idle
+  image no longer costs one refused allocation 65536 takes), under
+  `g_image_lock` and the allocator's `as->lock`; an LRU within an image
+  (rather than lowest slot first) is a later refinement, not a hole.
 - **Bypass is invisible.** A cache full of live images silently stops sharing.
   There is a counter, and nothing reads it.
 - **No `/ctl` surface** for the four diagnostic counters, which are maintained
@@ -203,6 +220,67 @@ identity only. The cross-binary content scan that would be KSM is declined as an
 ASLR-defeating side channel — a decision, not a gap, and the header is careful
 to say so.
 
+## The cache is the pool's reserve under pressure (2026-09-23; B-1a' audit F8)
+
+The round-2 audit of B-1a' prosecuted the cache against the physical user pool
+([[sub-kernel-mm-phys]]): a FILE page-in takes a pool page and installs it
+against no address space, so a toucher's text pages counted against no cap
+(a confined Proc never saw its own text), and when the toucher died its
+images stayed -- handle 1 (the cache's), mapping 0, pool-charged -- evicted
+only when 120 more distinct images pushed them out of the 128-slot table.
+128 slots by 256 MiB of `sys_mmap_file` windows is 32 GiB of admissible
+hoard; with the pool physical, "eat all RAM" had become "hold the whole pool
+after death, while free-able memory exists", every later user allocation
+refused. Plan 9 answers it with `imagereclaim()` when the page pool runs low;
+Linux with page-cache reclaim under pressure and memcg charging the page cache
+to the toucher. Both halves are built.
+
+**The reclaim.** `image_cache_init` registers `image_cache_reclaim` with the
+allocator (`capacity_set_reclaim`); `alloc_user_pages` calls it with the pages
+it needs whenever `pool_charge` refuses a NON-exempt charge, and asks the pool
+again if it freed anything. Under `g_image_lock` the function picks, repeatedly,
+the least recently used IDLE entry that still holds pages -- `handle_count ==
+1`, `mapping_count == 0`, `burrow_image_resident_count > 0` -- and strips it
+(`burrow_image_strip(b, want - freed)`, [[sub-kernel-burrow]]: resident
+pages taken out of the map lowest slot first and freed, the nodes they empty
+too, no COW put since FILE never shares, stopping at the pages still wanted
+-- round 3's F14), until `want` pages are freed or no idle image holds a
+page; an image stripped in part stays the least recently used and yields the
+rest on the next pick. The entry STAYS cached, empty once every page has
+gone: the next lookup hits it and its next fault pages the same bytes in
+again from the pinned Spoor -- the Image outlives its pages.
+Diagnostics: `g_image_reclaims` (calls that freed a page) and
+`g_image_reclaimed_pages`.
+
+**Why the strip is safe is the eviction proof, reused.** Idle is stable under
+`g_image_lock`: to take a reference or add a mapping a Proc must first come
+through `image_lookup_or_create`, which takes this lock, so an entry showing
+exactly one handle reference and no mappings has no in-flight claimant and
+cannot gain one while the lock is held. Two more facts make the pages
+themselves unreachable: no PTE names them, because every mapping teardown
+clears its leaves (and invalidates) before it releases the mapping reference,
+and a dead space's stale translations cannot go live under its retired ASID;
+and no fault is filling the map, because a filler holds a handle reference
+(`file_demand_page_slow`'s pin) and so is not idle. What the reclaim may hold
+when it runs -- the allocator's caller's `as->lock` -- sits ABOVE the cache
+lock in the order; nothing takes the cache lock or a Burrow lock and then
+allocates a user page (the lookup creates outside the lock; the pagemap
+allocates its nodes outside `v->lock`), so the hook cannot deadlock against
+its own callers. An exempt charge never refuses, so the TCB never reclaims.
+
+**The holder charge.** Each FILE leaf a fault installs is charged to the
+mapping space (`addrspace_charge_file`: `page_count` + a `file_pages`
+telemetry; [[sub-kernel-fault]], [[sub-kernel-addrspace]]) and refunded per
+leaf a range clear removes (`vma_uninstall_range_in`, [[sub-kernel-vma]]);
+`/proc/<pid>/status` prints `file:` beside `tables:` ([[sub-kernel-devproc]]).
+The page is the cache's, the mapping is the holder's -- the Linux RSS reading,
+and the same shape this tree already used for a COW-shared page.
+
+Witnesses: `demand_page.idle_image_reclaimed_under_pressure` (an idle image
+with two resident pages; the pool parked full; one user allocation served by
+one reclaim that freed exactly those two; the image empty and still the one
+the next lookup returns) and `demand_page.file_pages_charge_the_holder`.
+
 ## Provenance
 
 [[arc-revenant]] R-3 built the cache with no consumer; R-4 wired exec into it.
@@ -210,7 +288,9 @@ to say so.
 same change's audit added the executability field to the key. DISTRO D-3c
 generalised the cache to the phenotype file-backed `mmap` arm and added the
 `file_limit` stamp (#194), re-justifying the uncharged-FILE posture by real,
-shared file bytes.
+shared file bytes. The B-1a' round-2 close (2026-09-23) made the cache the
+pool's reserve under pressure and charged its pages to their holders
+([[chg-2026-09-23-b1a-prime-close-r2]]).
 
 ## Tests
 
@@ -219,8 +299,13 @@ files, the version discriminator, distinct offsets within one file, the
 executability split, table exhaustion, and the zero-length reject. The idle-evict
 helper exists both for test isolation and as a real regression on the
 detach-under-lock / unref-outside lifetime.
+`demand_page.idle_image_reclaimed_under_pressure` drives the reclaim end to
+end (the pool parked full; one allocation; the image stripped and still
+cached; the next lookup a hit) and `demand_page.file_pages_charge_the_holder`
+the holder charge.
 
 ## Referenced by
 
-[[moc-kernel-execution]] · [[inv-i36]] · [[inv-i7]] · [[sub-kernel-exec]] ·
-[[sub-kernel-fault]] · [[sub-kernel-burrow]]
+[[moc-kernel-execution]] · [[inv-i36]] · [[inv-i7]] · [[inv-i32]] ·
+[[sub-kernel-exec]] · [[sub-kernel-fault]] · [[sub-kernel-burrow]] ·
+[[sub-kernel-mm-phys]]

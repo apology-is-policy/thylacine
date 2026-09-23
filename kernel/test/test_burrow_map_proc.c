@@ -64,7 +64,7 @@ static void drop_proc(struct Proc *p) {
 void test_vmo_map_proc_smoke(void) {
     struct Proc *p = make_proc();
     TEST_ASSERT(p != NULL, "proc_alloc failed");
-    struct Burrow *v = burrow_create_anon(ONE_PAGE);
+    struct Burrow *v = burrow_create_anon(ONE_PAGE, false);
     TEST_ASSERT(v != NULL, "burrow_create_anon failed");
 
     int mapping_before = burrow_mapping_count(v);
@@ -94,7 +94,7 @@ void test_vmo_map_proc_smoke(void) {
 void test_vmo_map_proc_constraints(void) {
     struct Proc *p = make_proc();
     TEST_ASSERT(p != NULL, "proc_alloc failed");
-    struct Burrow *v = burrow_create_anon(ONE_PAGE);
+    struct Burrow *v = burrow_create_anon(ONE_PAGE, false);
     TEST_ASSERT(v != NULL, "burrow_create_anon failed");
 
     int mapping_before = burrow_mapping_count(v);
@@ -152,7 +152,7 @@ void test_vmo_map_proc_constraints(void) {
 void test_vmo_map_proc_user_va_top_boundary(void) {
     struct Proc *p = make_proc();
     TEST_ASSERT(p != NULL, "proc_alloc failed");
-    struct Burrow *v = burrow_create_anon(ONE_PAGE);
+    struct Burrow *v = burrow_create_anon(ONE_PAGE, false);
     TEST_ASSERT(v != NULL, "burrow_create_anon failed");
 
     int mapping_before = burrow_mapping_count(v);
@@ -175,7 +175,7 @@ void test_vmo_map_proc_user_va_top_boundary(void) {
 void test_vmo_map_proc_overlap_rejected(void) {
     struct Proc *p = make_proc();
     TEST_ASSERT(p != NULL, "proc_alloc failed");
-    struct Burrow *v = burrow_create_anon(TWO_PAGES);
+    struct Burrow *v = burrow_create_anon(TWO_PAGES, false);
     TEST_ASSERT(v != NULL, "burrow_create_anon failed");
 
     int mapping_before = burrow_mapping_count(v);
@@ -213,7 +213,7 @@ void test_vmo_map_proc_overlap_rejected(void) {
 void test_vmo_unmap_proc_smoke(void) {
     struct Proc *p = make_proc();
     TEST_ASSERT(p != NULL, "proc_alloc failed");
-    struct Burrow *v = burrow_create_anon(ONE_PAGE);
+    struct Burrow *v = burrow_create_anon(ONE_PAGE, false);
     TEST_ASSERT(v != NULL, "burrow_create_anon failed");
 
     int mapping_before = burrow_mapping_count(v);
@@ -237,7 +237,7 @@ void test_vmo_unmap_proc_smoke(void) {
 void test_vmo_unmap_proc_no_match(void) {
     struct Proc *p = make_proc();
     TEST_ASSERT(p != NULL, "proc_alloc failed");
-    struct Burrow *v = burrow_create_anon(ONE_PAGE);
+    struct Burrow *v = burrow_create_anon(ONE_PAGE, false);
     TEST_ASSERT(v != NULL, "burrow_create_anon failed");
 
     int mapping_before = burrow_mapping_count(v);
@@ -294,7 +294,7 @@ void test_burrow_share_into_cross_proc(void) {
     struct Proc *guest = make_proc();   // receives the share (a mapping only)
     TEST_ASSERT(netd != NULL && guest != NULL, "proc_alloc failed");
 
-    struct Burrow *v = burrow_create_anon(ONE_PAGE);   // {h:1, m:0}
+    struct Burrow *v = burrow_create_anon(ONE_PAGE, false);   // {h:1, m:0}
     TEST_ASSERT(v != NULL, "burrow_create_anon failed");
 
     // netd maps the ring into its own AS: {h:1, m:1}.
@@ -348,7 +348,7 @@ void test_burrow_share_into_alive_while_either_maps(void) {
     struct Proc *guest = make_proc();
     TEST_ASSERT(netd != NULL && guest != NULL, "proc_alloc failed");
 
-    struct Burrow *v = burrow_create_anon(ONE_PAGE);   // {h:1, m:0}
+    struct Burrow *v = burrow_create_anon(ONE_PAGE, false);   // {h:1, m:0}
     TEST_ASSERT(v != NULL, "burrow_create_anon failed");
     TEST_EXPECT_EQ(burrow_map(netd, v, TEST_VA, ONE_PAGE, VMA_PROT_RW), 0, "netd map");
     TEST_EXPECT_EQ(burrow_share_into(guest, v, TEST_VA, VMA_PROT_RW), 0, "guest share");
@@ -382,7 +382,7 @@ void test_burrow_share_into_frees_on_last_drop(void) {
 
     // A 2-page ring: burrow_share_into maps the WHOLE Burrow (v->size), so it
     // also exercises the multi-page whole-ring share path.
-    struct Burrow *v = burrow_create_anon(TWO_PAGES);  // {h:1, m:0}
+    struct Burrow *v = burrow_create_anon(TWO_PAGES, false);  // {h:1, m:0}
     TEST_ASSERT(v != NULL, "burrow_create_anon failed");
     TEST_EXPECT_EQ(burrow_map(netd, v, TEST_VA, TWO_PAGES, VMA_PROT_RW), 0, "netd map");
     TEST_EXPECT_EQ(burrow_share_into(guest, v, TEST_VA, VMA_PROT_RW), 0, "guest whole-ring share");
@@ -407,7 +407,7 @@ void test_burrow_share_into_frees_on_last_drop(void) {
 void test_burrow_share_into_constraints(void) {
     struct Proc *guest = make_proc();
     TEST_ASSERT(guest != NULL, "proc_alloc failed");
-    struct Burrow *v = burrow_create_anon(ONE_PAGE);
+    struct Burrow *v = burrow_create_anon(ONE_PAGE, false);
     TEST_ASSERT(v != NULL, "burrow_create_anon failed");
 
     int mapping_before = burrow_mapping_count(v);

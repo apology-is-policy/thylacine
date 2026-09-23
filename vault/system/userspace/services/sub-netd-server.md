@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/NET-DESIGN.md", "docs/NET-THROUGHPUT.md", "docs/NET-CLOSE-DESIGN.md"]
 created: 2026-07-31
-updated: 2026-09-21
+updated: 2026-09-23
 ---
 ## Purpose
 
@@ -482,6 +482,19 @@ net-4d F1 regression — fails on pre-fix code by construction;
 `dns_loopback_e2e` drives the real resolver methods against a mock :53
 responder; `proto_selftest` is the parser battery incl. ndb;
 `connect_sweep_selftest` the #293 disposal; `resident_lo_selftest` the
-migration). Consumer-side: joey's per-chunk PROBE lines, the net-echo
+migration). `resident_lo_selftest`'s close-retirement legs
+(`close_retirement_legs`: unread-send / unread-arrival / queued-send /
+weft-map / last-owner / weft-not-detached / reuse-clone / reuse-identity /
+close-lost-data) changed one oracle at B-1a' (2026-09-23): "the Weft ring was
+detached" used to be a SECOND `t_burrow_detach` of the ring's page being
+refused, and the range detach inverts that -- an empty range answers 0, so a
+second detach cannot tell gone from there. The leg now asks
+`t_burrow_protect(va, 4096, T_BURROW_PROT_READ | T_BURROW_PROT_WRITE, 0) ==
+-12`: a protect looks the range up and answers ENOMEM for a hole and 0 for a live RW ring (a no-op
+reprotect), so it discriminates where the detach no longer can
+([[sub-kernel-syscall-abi]]). It asks RW, not R: the first form asked R, which
+a live eager RW ring ADMITS as a lowering, so the oracle's failure path
+mutated the ring it was only meant to inspect (the B-1a' round-1 audit's F6).
+It stays blind to VA reuse, as the old oracle was. Consumer-side: joey's per-chunk PROBE lines, the net-echo
 over-the-mount TCP/TLS/weft E2Es, the go-net Stage-3c listen/dial
 round-trip (the regression for the announce-`local` fix).

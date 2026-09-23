@@ -10,7 +10,7 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-09-21
+updated: 2026-09-23
 ---
 ## Graphical seat incarnations
 
@@ -349,7 +349,22 @@ accountant.
   what makes the vfork release comparison safe against recycling
   ([[sub-kernel-death]]).
 - [[inv-i32]] — the four axes charged here (pages, VMAs, shared-in pages,
-  children/threads) plus the unforgeable `PRINCIPAL_SYSTEM` exemption.
+  children/threads) plus the unforgeable `PRINCIPAL_SYSTEM` exemption. B-1a'
+  (2026-09-23): the page axis's DEFAULT is the user pool --
+  `proc_default_page_budget()` = `proc_page_budget_hard_max()` =
+  `capacity_pool_pages()` (RAM minus the TCB reserve, sized once at boot;
+  [[sub-kernel-addrspace]]) -- seeded at `proc_init_fields` (the one
+  chokepoint: kproc and every `proc_alloc`, which matters because `KP_ZERO`
+  would otherwise leave a zero budget that refuses every charge), copied by
+  `rfork_internal`, and bounded by the same figure in
+  `proc_spawn_budget_resolve` (over it is refused for everyone, never clamped;
+  a raise past the parent's own still needs `PROC_FLAG_MAY_RAISE_PAGE_BUDGET`;
+  a reduction never does). `PROC_PAGE_MAX` (65536, the old 256 MiB default)
+  and `PROC_PAGE_HARD_MAX` (the old 4 GiB cap) no longer exist: the cap is the
+  CONFINEMENT mechanism a parent narrows a child with, and the memory-bomb
+  floor is the pool, shared by every non-exempt Proc. Two names for one
+  figure because they are two decisions -- what a Proc starts with, and what a
+  spawn may raise it to -- that happen to coincide.
 - The I-2 capability strip — `& ~CAP_ELEVATION_ONLY` on every fork, the Linux
   `clone` included (`rfork_forked_with_caps` with `caps_mask = CAP_ALL`): a clone
   inherits the parent's full set, but the elevation bits are stripped

@@ -412,6 +412,9 @@ void boot_main(void) {
     if (!phys_init()) {
         extinction("phys_init failed");
     }
+    // B-1a': size the user pool (RAM minus the TCB reserve) before the first
+    // Proc is seeded with it (proc_init's kproc, then every proc_alloc).
+    capacity_init();
 
     u64 total_pages    = phys_total_pages();
     u64 free_pages_now = phys_free_pages();

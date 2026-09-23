@@ -39,6 +39,12 @@ struct fault_info {
     bool is_access_flag;  // FSC ∈ FSC_ACCESS_FAULT_L{1..3} — FEAT_HAFDBS hardware
                           // access-flag fault. v1.0 sets PTE_AF eagerly so this
                           // shouldn't fire at P3-C; we still classify defensively.
+    bool is_alignment;    // FSC == FSC_ALIGN_FAULT: an exclusive, an acquire/release
+                          // or a Device access at an address the instruction cannot
+                          // take (ARM ARM D5.10.3). Raised on a MAPPED page by the
+                          // instruction itself: no page install resolves it.
+    bool is_external;     // FSC ∈ FSC_EXT_ABORT{,_L0..L3}: a synchronous external
+                          // abort (the bus refused the access). Same disposition.
 };
 
 // Dispatcher result. The caller (exception_sync_curr_el / equivalent for
@@ -75,6 +81,10 @@ enum fault_result {
     // FAULT_FATAL comment in exception.c anticipated for SIGBUS-class user
     // faults. Distinct from FAULT_UNHANDLED_USER (snare:segv = a bad VA): a
     // FILE page-in error is a valid mapping whose backing store failed.
+    // Also the answer to an abort no page install can resolve -- an alignment
+    // fault or a synchronous external abort on a mapped page (the pager's
+    // class gate; B-1a' audit F17): answered HANDLED, the ERET would raise it
+    // again, forever.
     FAULT_USER_BUS        = 3,
 };
 
@@ -131,8 +141,18 @@ enum fault_result arch_fault_handle(const struct fault_info *fi);
 // =============================================================================
 
 struct Proc;
+struct page;
 
 enum fault_result userland_demand_page(struct Proc *p,
                                        const struct fault_info *fi);
+
+#ifdef KERNEL_TESTS
+// B-1a' audit F12 witness (tests only): the copy-on-write COPY branch fires
+// this at step 5, once the private copy holds the slot and immediately BEFORE
+// the leaf that still names the original is replaced (nothing runs between
+// the probe and the leaf write) -- the last instant the original's share must
+// still be held. `original` is the page the copy replaced.
+extern void (*g_cow_copy_probe_for_test)(struct Proc *p, struct page *original);
+#endif
 
 #endif // THYLACINE_ARCH_ARM64_FAULT_H

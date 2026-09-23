@@ -5,11 +5,11 @@ parent: moc-kernel-memory
 title: "The page allocator — phys bootstrap, buddy, per-CPU magazines"
 code: ["mm/phys.c", "mm/phys.h", "mm/buddy.c", "mm/buddy.h", "mm/magazines.c", "mm/magazines.h", "kernel/include/thylacine/page.h"]
 audit: hard
-guarded-by: []
-validated-by: [gate-smp]
+guarded-by: [inv-i32]
+validated-by: [gate-smp, spec-capacity]
 locks: [lock-buddy-zone]
 created: 2026-08-01
-updated: 2026-08-16
+updated: 2026-09-23
 ---
 ## Purpose
 
@@ -32,7 +32,17 @@ table lists it as a trigger surface in its own right.
   different VA sees zeroes. `KP_DMA`/`KP_NOWAIT`/`KP_COMPLETE` are
   accepted no-ops.
 - `free_pages(p, order)` — magazine first (`mag_free` returns false
-  for non-magazine orders), buddy fallback. NULL is a no-op.
+  for non-magazine orders), buddy fallback. NULL is a no-op. A `PG_USER`
+  page returns its user-pool charge here first (B-1a'; below).
+- `alloc_user_pages(order, flags, exempt)` — the user pool's allocation
+  (B-1a' round-1 close, 2026-09-23; "The user pool" below): charge the
+  pool, `alloc_pages`, tag the head page `PG_USER`; NULL with nothing
+  changed on a refusal or OOM. `capacity_init()` sizes the pool once after
+  `phys_init`; `capacity_pool_pages()` / `capacity_reserve_pages()` /
+  `capacity_pool_charged()` read it; `capacity_pool_park_for_test` /
+  `_unpark_for_test` shrink it for a witness. `capacity_set_reclaim(fn)`
+  registers the reclaim step the allocator tries before refusing (the Image
+  cache's `image_cache_reclaim`; the round-2 close, below).
 - `kpage_alloc`/`kpage_free` — single-page convenience returning a
   **direct-map KVA** (P3-Bb; `pa_to_kva`/`kva_to_pa` round-trip).
 - `phys_init()` — discover RAM, compute the FIVE reservations
@@ -95,7 +105,8 @@ sets with no coordination; test-harness and shutdown use only.
 `struct page` — **48 bytes, `_Static_assert`-pinned** (P1-I F35;
 the array scales with RAM — 24 MiB at 2 GiB — so silent growth is a
 BSS tax): `next`/`prev` (free-list), `order`, `flags`
-(`PG_FREE`/`PG_RESERVED`/`PG_KERNEL`/`PG_SLAB`), `refcount`,
+(`PG_FREE`/`PG_RESERVED`/`PG_KERNEL`/`PG_SLAB`/`PG_USER` — the last on
+a user allocation's HEAD page, B-1a'), `refcount`,
 **`cow_share`**, plus the two SLUB fields (`slab_freelist`,
 `slab_cache` — valid only under `PG_SLAB`; a deliberate no-union
 choice).
@@ -155,6 +166,16 @@ zone (SLUB slab ops), `vma_lock` → zone (demand paging), larder leaf
 `smp_init` under a full mask, so its block→table demotes race
 nothing.
 
+The user pool's counter (`g_user_pool_charged`, B-1a') is under no lock
+at all: `pool_charge` is a CAS that re-decides on failure (a non-exempt
+charge that would pass the pool, or any charge that would overflow the
+u32, is refused with nothing changed) and `pool_uncharge` a CAS that
+clamps at 0 rather than wrapping. The allocation and the free of one
+page may run on different CPUs under different locks (a fault under one
+address space's lock, a Loom close under another's, a reap under none),
+which is why the charge rides the PAGE (`PG_USER`) and not a caller's
+counter.
+
 ## Invariants enforced
 
 None numbered — deliberately recorded as such (the honest analog of
@@ -165,6 +186,15 @@ that surface is unswept), and the #808 page-map is what makes the
 kstack-guard path BBM-free. Validated by the boot smoke
 (alloc/free/drain round-trip to an exact free count), the suite under
 UBSan, and the multi-boot SMP gate.
+
+Since B-1a' the user pool is a numbered obligation's floor: [[inv-i32]]'s
+machine-wide bound is `alloc_user_pages`' refusal, and the memory bar's
+second half (memory relinquished returns) is `free_pages`' return -- one
+site for every path that frees a user page (a detach, a decommit, a COW
+put, a pagemap take, a table reclaim, `proc_pgtable_destroy`, a failed
+install's unwind), so no caller can forget it. Validated by the sixteen
+`test_capacity` tests and the REDs `nopool` / `nofreereturn`
+([[spec-capacity]] for what the model sees of it: nothing).
 
 ## Error paths
 
@@ -178,6 +208,112 @@ panics on OOM), order > MAX_ORDER at alloc.
 Hot path is a masked stack pop (~a dozen instructions); miss cost is
 8 buddy-lock round-trips (the seam); `KP_ZERO` is the dominant cost
 of a zeroed alloc (page-sized store loop + one `dsb ish`).
+
+## The user pool (B-1a', 2026-09-23; physical since the round-1 close)
+
+The memory bar (ARCH 6.5 "Capacity, and the I-32 default") says a program
+is never refused memory while free memory exists and the TCB keeps running
+under a memory bomb, so the I-32 DEFAULT budget is the whole machine but a
+reserve, and a per-address-space budget alone cannot keep the second half:
+N spaces each within the default would together take the reserve. The pool
+is the machine-wide bound. `capacity_init` reads `phys_total_pages()` once,
+after `phys_init` and before the first Proc ([[sub-kernel-boot-sequence]]),
+and fixes `reserve = max(CAPACITY_RESERVE_MIN_PAGES (65536 = 256 MiB),
+total / 8)` clamped to `total / 2` (a tiny guest keeps a pool) and `pool =
+total - reserve`, both u32 pages (clamped at 16 TiB); a second call, or a
+machine that leaves no pool, extincts; until it runs the pool reads 0 and
+refuses every non-exempt charge -- the fail-closed reading of "not sized
+yet". 256 MiB is the TCB's measured ceiling with headroom: the Larder
+caches at most 128 MiB, the DMA envelope 64 MiB, then the slabs, the kernel
+stacks and the direct map's tables; the Image cache is NOT in it -- its
+pages are pool memory, reclaimed under pressure (below). The 2 GiB CI guest
+reads 65536 / 458752
+(`capacity.default_is_ram_minus_reserve` pins it and asserts the facts a
+wrong formula would break -- pool + reserve == total, a non-empty pool,
+the reserve between total/8 and total/2 and at least 256 MiB when the
+machine can spare it -- rather than the formula itself, the round-1
+audit's F7).
+
+**The pool counts PHYSICAL user pages** (the round-1 close: the audit's F5,
+and the return path its F1 needed). Every page that exists because of an
+address space -- a demand-zero page, a COW copy, a FILE page-in, a pagemap
+node, an eager `ANON` or `CODE` chunk, the Loom ring, the vDSO page, a
+hardware page table -- comes from `alloc_user_pages(order, flags, exempt)`:
+`pool_charge(1 << order, exempt)` refuses a NON-exempt charge that would
+take the count past the pool (and any charge that would overflow the
+counter) before the buddy is entered, then `alloc_pages`, then `PG_USER`
+on the head page (a failed `alloc_pages` uncharges first). `free_pages` of
+a `PG_USER` page clears the tag and returns `1 << order` before the page
+reaches a magazine or the buddy -- the ONE return site, whoever the freer
+is. What the shape buys: a COW-shared page is one physical page and one
+charge, so a fork costs the pool only its node mirror
+(`capacity.fork_costs_the_pool_only_its_nodes`: served with room for four
+pages where a holder-counted pool refused eight); a dying address space
+returns nothing by itself, because the drain's frees return page by page
+(`capacity.death_returns_charges_to_pool`, tables included); a page freed
+by whoever holds it last returns exactly once. The per-address-space
+`page_count` keeps the HOLDER reading under its cap
+([[sub-kernel-addrspace]]): both sharers charged, a fork bounded by the
+cap. That is the Linux memcg shape -- the charge on the page, the cap on
+the holder -- chosen over the counter-shaped first build because the bar
+says free memory is never refused and a holder count refused a fork with
+half the pool free. `PRINCIPAL_SYSTEM` allocations are COUNTED but never
+refused: the TCB's pages are as real as anyone's and the reserve is what
+its unrefusable charges spend; a later non-exempt charge sees them. There
+is no OOM victim selection: a refused allocation fails the syscall or the
+fault (`FAULT_UNHANDLED_USER` -> `snare:segv`) of the Proc that asked,
+never a bystander. `/ctl/memory` publishes `reserve` / `pool` / `charged`
+([[sub-kernel-devctl]]).
+
+**What the pool does not count**: kernel stacks, slabs, the direct-map
+tables, DMA buffers ([[inv-i34]]'s allowance), the per-space L0 root
+(bounded by the Proc axes like a kernel stack) -- the kernel memory the
+reserve exists for. The Image cache's FILE pages ARE counted (they are user
+memory), and since the round-2 close they are also CHARGED -- to each
+address space that maps them, per leaf installed (`addrspace_charge_file`,
+[[sub-kernel-fault]]; refunded per leaf cleared, [[sub-kernel-vma]]), so a
+confined Proc's text counts against its cap like its data. The map's nodes
+stay the cache's.
+
+**The pool reclaims before it refuses** (the round-2 audit's F8: a dead
+Proc's cached text held the pool -- pool-charged, counted against no space,
+evicted only when 120 more distinct images pushed it out of the table -- so
+every later user allocation was refused while free-able memory existed).
+`capacity_set_reclaim(fn)` registers one function; `alloc_user_pages` asks
+it for the charge's SHORTFALL -- the pages that have to leave the pool for
+the charge to land, never 0 (`pool_shortfall`; the round-4 audit's F19: an
+exempt overshoot used to cost one full scan of the cache per PAGE, each under
+the faulter's `as->lock`, and is folded into the one request) -- each time
+`pool_charge` refuses a NON-exempt charge, and asks the pool again, giving up
+only when nothing is registered or nothing was reclaimable. The Image cache registers `image_cache_reclaim`
+([[sub-kernel-image]]): under `g_image_lock` it strips the least recently
+used IDLE entries -- one handle (the cache's), no mapping, resident pages --
+of their pages (`burrow_image_strip`, [[sub-kernel-burrow]]) and leaves
+them cached and empty for the next mapper to page in again: Plan 9's
+`imagereclaim` when the page pool runs low, Linux's page cache giving way
+to anonymous demand. It runs in the allocating context, under whatever that
+holds (`as->lock` for a fault or an attach), takes `g_image_lock` -> the
+victim's `v->lock` -> the buddy, and allocates nothing; no allocator caller
+holds any of those (the pagemap allocates its nodes outside `v->lock`; the
+cache creates outside its own lock). An exempt charge never refuses, so the
+TCB never reclaims and never waits on a strip.
+
+Witnesses: `demand_page.reclaim_asks_for_the_shortfall` (the pool parked ONE
+PAST full, a two-page idle image: one reclaim call frees both pages and the
+charge lands at the edge); `demand_page.idle_image_reclaimed_under_pressure` (the pool
+parked full, an idle image with two resident pages, one user allocation
+served by one reclaim that freed exactly those two, the image still cached
+and hit by the next lookup), `demand_page.file_pages_charge_the_holder`
+(two leaves charge two, a re-fault nothing, the range detach refunds both
+with the pages still resident), `capacity.pool_refuses_users_keeps_tcb` (the pool parked to K
+pages; a user Proc far under its cap refused at exactly K -- pages, nodes
+and tables; the TCB not; every page back),
+`capacity.memory_bomb_leaves_the_reserve` (the round-1 attack: one page per
+2 MiB of a large reservation, refused within one touch's cost of the room,
+tables counted, the physical footprint bounded by the room, a decommit
+returning everything, the second round refused at the same point), and
+the REDs `nopool` (the refusal skipped) and `nofreereturn` (the return
+skipped).
 
 ## Prosecution
 
@@ -234,6 +370,17 @@ The surviving form asserts the **difference between two otherwise
 identical runs**, so the incidental allocations on the path cancel
 instead of having to be reasoned about individually.
 
+The pool's questions (B-1a'): that every user-page allocation site is
+`alloc_user_pages`, never a bare `alloc_pages` (a page the pool never saw
+is a hole in the bound); that every `PG_USER` page is freed through
+`free_pages` at the ORDER it was allocated (only the head page carries the
+tag, so an order>0 block freed page by page returns one page of 2^k -- the
+tightening drift -- and a block freed at a larger order returns more than
+it charged -- the loosening one); that no path splits or coalesces a
+`PG_USER` block while allocated; that `alloc_pages` hands over a clear
+`PG_USER` (a stale tag on a recycled page would return a charge nobody
+made); and that the exempt path only ever ADDS to the count.
+
 ## Seams
 
 [[seam-buddy-bulk-op]] · [[seam-mm-directmap-cap-absolute]] ·
@@ -265,4 +412,6 @@ P3-Bb direct map / P3-Bda / P4-E initrd →
 [[chg-2026-05-31-807-magazines]] →
 [[chg-2026-05-31-808-directmap-pagemap]] →
 [[chg-2026-08-16-page-cow-share]] (the pad spent, and the
-order-0 instrument trap).
+order-0 instrument trap) →
+[[chg-2026-09-23-b1a-prime-capacity]] (the user pool, physical:
+`alloc_user_pages`, `PG_USER`, the return at `free_pages`).

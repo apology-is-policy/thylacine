@@ -20,6 +20,8 @@
 #include <thylacine/page.h>   // paddr_t (for mmu_map_mmio)
 #include <thylacine/types.h>
 
+struct AddrSpace;             // <thylacine/addrspace.h>: the user tree's owner (B-1a' audit F1)
+
 // ---------------------------------------------------------------------------
 // MAIR_EL1 attribute encodings.
 //
@@ -373,10 +375,12 @@ paddr_t mmu_kernel_ttbr0_pa(void);
 // layer (BURROW mapping_count). The walker frees only translation-table
 // pages.
 //
-// Pre-P3-Db, this only freed the L0 page. P3-Db extended it to handle
-// the post-P3-Dc world where demand-paging populates sub-tables.
-// Today's tree continues to have no sub-tables (P3-Db is wired in
-// advance of demand paging); the walk is no-op-on-empty.
+// Pre-P3-Db, this only freed the L0 page. P3-Db extended it to the
+// demand-paged tree. Since B-1a' (audit F1) the LIVE tree reclaims a table
+// the moment it empties (mmu_uninstall_user_*), so what the walk finds is
+// the tables still holding a leaf at death; each was charged to the address
+// space (whose count dies with it) and to the user pool (which free_pages
+// returns), the L0 to neither.
 //
 // Returns 0 on OOM (caller treats as ENOMEM and rolls back the Proc
 // allocation). Idempotent on input root == 0.
@@ -436,7 +440,22 @@ void    proc_pgtable_destroy(paddr_t root);
 // that need an ASID-targeted TLB invalidate.
 // =============================================================================
 
-// mmu_install_user_pte installs a leaf L3 PTE. The bool selects the MAIR
+// mmu_install_user_pte installs a leaf L3 PTE in `as`'s TTBR0 tree
+// (as->pgtable_root), growing the L1 / L2 / L3 tables it needs -- each CHARGED
+// to `as` under `exempt`'s policy (addrspace_charge_table) and taken from the
+// user pool (alloc_user_pages) BEFORE it is linked (B-1a' audit F1), so a
+// refused charge or an empty buddy installs nothing, and a table this call
+// linked but could not fill goes back. Returns 0 for a leaf installed, 1 for
+// an identical VALID leaf already there (idempotent: nothing written, nothing
+// allocated -- a caller that charged for the leaf refunds it), -1 for a NULL
+// or rootless `as`, a misaligned VA / PA, a VA outside the user half, a PA
+// past TCR.IPS, W+X, a malformed intermediate entry, a refused table, or a
+// VALID leaf that differs from the one asked for (the demand-page path never
+// asks for one: a leaf that already admits the access is answered by
+// mmu_user_pte_admits before any arm runs, and the copy-on-write break's
+// rewrite is mmu_replace_user_pte_attr).
+//
+// The bool selects the MAIR
 // attribute index: false -> MAIR_IDX_NORMAL_WB (cacheable RAM: BURROW_TYPE_ANON
 // /CODE/DMA), true -> MAIR_IDX_DEVICE (device-nGnRnE: BURROW_TYPE_MMIO device
 // registers). It is a thin wrapper over mmu_install_user_pte_attr; the bool is
@@ -449,17 +468,41 @@ void    proc_pgtable_destroy(paddr_t root);
 // BURROW_TYPE_HOSTMEM) which the bool cannot express. EXEC is permitted ONLY
 // with NORMAL_WB -- make_user_pte_l3 hard-rejects EXEC on Device/NC (W^X/I-12);
 // the VMA layer rejects W^X violations already.
-int mmu_install_user_pte(paddr_t pgtable_root, u16 asid,
+int mmu_install_user_pte(struct AddrSpace *as, bool exempt,
                          u64 vaddr, paddr_t pa, u32 prot,
                          bool device_memory);
-int mmu_install_user_pte_attr(paddr_t pgtable_root, u16 asid,
+int mmu_install_user_pte_attr(struct AddrSpace *as, bool exempt,
                               u64 vaddr, paddr_t pa, u32 prot,
                               u32 mair_idx);
 
-// P6 hardening #2 / F1: clear a single leaf PTE at `vaddr` in the
-// per-Proc TTBR0 tree rooted at `pgtable_root` AND issue tlbi vaae1is
-// + dsb ish + isb to invalidate any cached translation. Symmetric
-// counterpart to mmu_install_user_pte's leaf install.
+// mmu_replace_user_pte_attr: the copy-on-write break's install (B-1a' audit
+// F9). Where a VALID leaf is already at `vaddr` it is REPLACED in place --
+// break-before-make on the leaf alone: written invalid, the VA invalidated,
+// written anew, the VA invalidated again -- so the table's occupancy never
+// changes and no table is freed or allocated for a write to a page the space
+// already maps. Returns 1 when the leaf already is the one asked for, 0 on a
+// replace; with no valid leaf it is mmu_install_user_pte_attr (grows tables,
+// may refuse). The same argument checks, the same -1s.
+int mmu_replace_user_pte_attr(struct AddrSpace *as, bool exempt,
+                              u64 vaddr, paddr_t pa, u32 prot,
+                              u32 mair_idx);
+
+// mmu_user_pte_admits: does a VALID leaf at `vaddr` in `as`'s tree already
+// admit the access -- EL0 reachable, writable when `write`, executable when
+// `exec`? A non-growing walk that allocates and writes nothing: the
+// demand-page path's "resolved by a peer" check (B-1a' audit F13). A fault
+// decoded before as->lock was taken may find the leaf a sibling installed
+// meanwhile, and the leaf that admits the access is the answer -- never a
+// re-install that could refuse it as a mismatch. False for anything short of
+// such a leaf.
+bool mmu_user_pte_admits(struct AddrSpace *as, u64 vaddr, bool write, bool exec);
+
+// P6 hardening #2 / F1: clear a single leaf PTE at `vaddr` in `as`'s
+// TTBR0 tree AND issue tlbi vaae1is + dsb ish + isb to invalidate any cached
+// translation. Symmetric counterpart to mmu_install_user_pte's leaf install.
+// A clear that empties its L3 table reclaims the table -- unlinked from its
+// parent, invalidated, freed (the pool's charge returns), uncharged from `as`
+// -- and its ancestors if they empty too (B-1a' audit F1).
 //
 // Returns 0 in three cases (all benign):
 //   - PTE was VALID and is now cleared + TLB invalidated.
@@ -467,13 +510,9 @@ int mmu_install_user_pte_attr(paddr_t pgtable_root, u16 asid,
 //   - The walk found an L1/L2/L3 sub-table not yet allocated (nothing
 //     mapped at vaddr -> nothing to clear).
 //
-// Returns -1 only on argument-validation failure (NULL pgtable_root,
+// Returns -1 only on argument-validation failure (a NULL or rootless `as`,
 // misaligned vaddr, vaddr >> 47 != 0, or a malformed table descriptor
 // found mid-walk).
-//
-// `asid` is currently unused (`tlbi vaae1is` is all-ASID broadcast at
-// the tightest single-VA scope); reserved for a future
-// ASID-targeted optimization if needed.
 //
 // Per audit F1 (P1): without this call from burrow_unmap (and any
 // future mmap-unmap path), SYS_BURROW_DETACH leaves stale PTEs in
@@ -483,20 +522,36 @@ int mmu_install_user_pte_attr(paddr_t pgtable_root, u16 asid,
 // to the recycled physical page -> content-sensitive heap
 // corruption that fires only under specific allocation patterns
 // (the suspected root cause of the AEGIS-256 / mallocng bug).
-int mmu_uninstall_user_pte(paddr_t pgtable_root, u16 asid, u64 vaddr);
+int mmu_uninstall_user_pte(struct AddrSpace *as, u64 vaddr);
 
-// Range form: iterate per-page from vaddr_start to vaddr_end
-// (half-open, both page-aligned), calling mmu_uninstall_user_pte
-// for each. Optimized for the burrow_unmap pattern (range of
-// length up to BURROW_ATTACH_MAX = 256 MiB).
+// Range form: clear every leaf in [vaddr_start, vaddr_end) (half-open,
+// both page-aligned), walking by SUBTREE so an absent L0 / L1 / L2 entry
+// skips its whole span -- the cost is the pages present, never the range,
+// which may be a whole reservation (up to the burrow window since B-1a').
 //
-// Returns 0 on success. Returns -1 on argument-validation failure
-// (misaligned, vaddr_start >= vaddr_end, vaddr_end >> 47 != 0).
-int mmu_uninstall_user_range(paddr_t pgtable_root, u16 asid,
-                             u64 vaddr_start, u64 vaddr_end);
+// Tables the range empties are reclaimed as the single form reclaims them.
+//
+// Returns the number of VALID leaves cleared (0 when nothing in the range was
+// mapped) -- what a caller attributing the pages to their holder refunds
+// (vma_uninstall_range_in). Returns -1 on argument-validation failure (a NULL
+// or rootless `as`, misaligned, vaddr_start >= vaddr_end, vaddr_end >> 47 != 0).
+long mmu_uninstall_user_range(struct AddrSpace *as,
+                              u64 vaddr_start, u64 vaddr_end);
 
-// Diagnostic (B-1a audit F2): calls into mmu_uninstall_user_pte so far -- the
-// witness that the range form skips absent subtrees instead of visiting pages.
+// The same clear WITHOUT the table reclaim (B-1a' audit F9): a table the range
+// empties stays linked at occupancy 0, still charged to `as`, so leaves the
+// caller is about to put back -- addrspace_clone's phase 1, whose every leaf
+// the parent re-faults -- find their tables in place instead of freeing and
+// re-allocating the path per page. An empty linked table is a state the
+// install already tolerates; the next range clear over it, or the space's
+// death, reclaims it.
+long mmu_uninstall_user_range_keep_tables(struct AddrSpace *as,
+                                          u64 vaddr_start, u64 vaddr_end);
+
+// Diagnostic (B-1a audit F2): leaf visits so far -- one per
+// mmu_uninstall_user_pte call, one per page visited inside a PRESENT table by
+// the range form -- the witness that the range form skips absent subtrees
+// instead of visiting pages.
 u64 mmu_uninstall_pte_calls(void);
 
 // 8a-1b-gamma (I-39; docs/DEBUG-FS-DESIGN.md 4.5): read-only, non-growing

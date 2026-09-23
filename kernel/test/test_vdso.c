@@ -112,6 +112,8 @@ static void make_read_fi(struct fault_info *fi, u64 vaddr, bool is_write) {
     fi->is_translation = true;
     fi->is_permission  = false;
     fi->is_access_flag = false;
+    fi->is_alignment = false;
+    fi->is_external = false;
 }
 
 void test_vdso_maps_ro_read(void) {

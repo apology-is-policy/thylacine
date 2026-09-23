@@ -16,7 +16,7 @@ design:
   - "docs/PROWL-DESIGN.md OQ-4"
   - "docs/VIVARIUM.md section 6.2"
 created: 2026-08-02
-updated: 2026-09-17
+updated: 2026-09-23
 ---
 ## Purpose
 
@@ -294,6 +294,22 @@ slide (an I-16 secret gated elsewhere behind `CAP_HOSTOWNER`), so the raw
 columns go only to the `CAP_DEBUG`/`CAP_HOSTOWNER` tier. The owner axis gets the
 symbolic `name+offset` form, which is link-relative and therefore
 slide-independent — and which *is* the "why is it hung" diagnostic.
+
+## `status` gained `tables:` and `file:` (2026-09-23; B-1a' audits F1 and F8)
+
+`/proc/<pid>/status` reports, after `pages:` (the address space's holder
+count under its I-32 cap: data pages, the pagemap nodes that index them and,
+since the round-1 close, the hardware page tables the space grew), a
+`tables:` line with the page-table count alone (`AddrSpace.pgtable_pages`)
+and, since the round-2 close, a `file:` line with the mapped FILE pages
+(`AddrSpace.file_pages`: the Image cache's pages this space maps, charged per
+leaf -- the round-2 audit's F8), so a reader that wants the data census
+subtracts both (`/capacity-probe` does; [[sub-kernel-protect-witness]]).
+`peak:` is the holder count's high-water mark, tables and file pages
+included. Both are telemetry; no policy reads them
+([[inv-i32]], [[sub-kernel-mmu]]). Not yet in the Operator's Manual: the
+manual has no `/proc/<pid>/status` section, and the prowl telemetry
+sub-chunk that adds one folds `tables:`, `file:` and `/ctl/memory` in.
 
 ## Data structures
 

@@ -226,68 +226,73 @@ int vma_find_gap_aligned(struct Proc *p, u64 length, u64 align,
 // closure of BURROW handles independently decrements burrow->handle_count.
 void vma_drain(struct Proc *p);
 
-// DISTRO D-3b: place a mapping at a CHOSEN address, splitting whatever is
-// already there around it. The MAP_FIXED primitive: musl's map_library reserves
-// a whole-span mapping and then overlays each PT_LOAD onto it (dynlink.c:842 /
-// :851), which is precisely "swap the backing of a sub-range and keep the rest".
+// B-1a' (ARCH 6.5 "Range detach"): remove [vaddr, vaddr+length) from the
+// address space, whatever it cuts -- the Linux munmap shape, and the primitive
+// both detach syscalls and the MAP_FIXED replace are built from. A mapping
+// wholly inside the range goes; one the range cuts at an end is trimmed in
+// place; one the range lies strictly inside is cut into a head (the original
+// struct, shrunk) and a tail piece -- the ONE allocation, carrying its parent's
+// prot, flags (ceiling and COW routing) and byte identity: for every VA a piece
+// still covers, `burrow_offset + (va - vaddr_start)` is unchanged. Holes are
+// fine; a range that maps nothing answers 0.
 //
-// THE DOMAIN IS TWO SHAPES, and the second one is not optional:
-//   (a) [vaddr, vaddr+length) lies WHOLLY INSIDE one existing VMA -> split it.
-//   (b) the range is entirely FREE -> plain insert, nothing to split.
-// Anything else -- spanning two VMAs, or partially overlapping one -- is
-// refused. Linux serves that third shape by unmapping the overlapped part;
-// partial unmap is post-v1.0, so the divergence is stated rather than faked.
+// THE RELEASE PRECEDES THE GEOMETRY CHANGE (specs/capacity.tla, Detach). A
+// plain ANON_LAZY mapping's overlap has its resident slots released -- pages
+// freed (COW-aware), nodes reclaimed, page_count uncharged for both -- BEFORE
+// the mapping shrinks or goes, because the only refund paths walk mappings and
+// the Burrow's own free is Proc-agnostic: a slot that stopped being mapped while
+// still resident would be charged for the rest of the address space's life
+// (NoOrphan; the B-1a audit's F5, and the piece-detach bug before it). An EAGER
+// anon region's pages are one block and go with its LAST mapping: a whole
+// mapping that goes claims the region's charge record for `payer` and refunds
+// it iff that drop freed the pages or the region survives only in another Proc
+// (shared out); otherwise the claim is restored for the drop that does end it
+// (#130/#131). A trimmed eager mapping refunds nothing -- its pages are still
+// allocated. A SHARED_IN mapping that goes whole uncharges the shared-in budget
+// for its span; a guard goes with no accounting at all; a DMA / MMIO / HOSTMEM
+// window's pages are the device object's.
 //
-// Shape (b) exists because Linux MAP_FIXED does NOT require the target to be
-// mapped already. Omitting it made an unmapped-address request answer ENOMEM,
-// which is a worse reply than the ENOSYS it replaced -- ENOMEM cannot be told
-// apart from real memory pressure, so an allocator reads it as OOM. (#196.)
+// ALL OR NOTHING. Phase 1 decides every refusal before the first mutation;
+// phase 2 uninstalls the range's leaf PTEs (hardware resolves a PTE without the
+// lock, so a PTE must be gone before the page or the mapping that justified
+// it); phase 3 releases and re-shapes. Refused, as -T_E_*:
+//   INVAL  unaligned / zero length / wrap / above USER_VA_TOP
+//   ACCES  a CODE alias anywhere in the range (the I-42 pair is one charge and
+//          two aliases; the JIT syscalls own its lifetime), or a SHARED_IN
+//          mapping the range CUTS (its exact span is what the sharer's teardown
+//          matches; whole is fine)
+//   NOMEM  no I-32 headroom for the tail piece plus the `extra_vmas` the caller
+//          will insert itself (vma_replace_range_in reserves one), or no slab
+//          for the piece
+// `payer` names the Proc whose eager charges may be refunded; NULL settles none
+// (an eager region freed then stays charged -- the safe direction). `*out_dead`
+// (mandatory; written on every path) receives the chain (deferred_free_next) of
+// Burrows whose last mapping went, for the caller to hand to
+// burrow_free_deferred AFTER the unlock (a FILE Burrow's free may sleep).
 //
-// Neither existing primitive can express it: burrow_map_in has no burrow_offset
-// parameter (it hardcodes 0), and burrow_unmap demands an EXACT (vaddr, length)
-// match because partial unmap is post-v1.0. So this is new surgery, and it is
-// the audit-bearing half of D-3b.
+// CALLER MUST HOLD as->lock.
+int vma_detach_range_in(struct AddrSpace *as, bool exempt, struct Proc *payer,
+                        u64 vaddr, u64 length, u32 extra_vmas,
+                        struct Burrow **out_dead);
+
+// DISTRO D-3b / B-1a': place a mapping at a CHOSEN address over whatever is
+// there. The MAP_FIXED primitive: musl's map_library reserves a whole-span
+// mapping and overlays each PT_LOAD onto it (dynlink.c:842 / :851). As built at
+// B-1a' it is the range detach followed by an insert, so every shape the detach
+// serves -- free space, wholly inside one mapping, spanning several, cutting
+// one at either end -- is served here, and the replaced window's resident pages
+// are released BEFORE the swap, which closes the orphan-slot over-charge by
+// construction (capacity.tla, Replace; the B-1a audit's F5). The new mapping is
+// allocated first, so a slab shortfall changes nothing; the insert after the
+// detach cannot fail (the range was just vacated and the detach reserved the
+// headroom).
 //
-// NO HOLE CAN EXIST, on any path. The old Vma struct is REUSED as the surviving
-// remainder -- shrunk in place, never removed -- so an insert failure restores a
-// bound and frees an un-inserted piece rather than having to put back a mapping
-// it already tore out. Only the exact-cover case (no remainder at all) removes
-// the old VMA, and there the restoring re-insert is provably infallible: it runs
-// under the same as->lock hold, into the range it just vacated (so no overlap),
-// with the VMA count strictly below its value at entry (so no cap refusal).
-//
-// The survivor keeps its (burrow, offset) relationship EXACTLY: for any VA it
-// still covers, `burrow_offset + (va - vaddr_start)` is unchanged by the split.
-// That is what lets the caller uninstall only the REPLACED window's PTEs and
-// leave the remainder's resident pages installed -- and it is also what makes
-// the file-fault arm's post-sleep geometry check (arch/arm64/fault.c, the #190
-// verify-and-bail) come out right against a concurrent split: the check passes
-// exactly when the bytes read before the sleep still belong at that slot.
-//
-// Constraints (all rejected with -1, nothing mutated):
-//   - vaddr/length page-aligned, length > 0, vaddr+length does not wrap.
-//   - either no VMA covers vaddr and the range is free (shape b), or one VMA
-//     covers vaddr and the range lies wholly within it (shape a).
-//   - that VMA has flags == 0 and a non-NULL Burrow. A SHARED_IN VMA is another
-//     Proc's memory carrying a per-span budget charge, and a COW VMA's per-page
-//     share counts would have to be reasoned about across the cut; both are
-//     refused rather than handled, since neither is reachable from the ldso
-//     overlay this exists to serve.
-//   - `nb` non-NULL; `prot` whatever vma_alloc accepts (W+X and W-without-R are
-//     rejected there, so I-12 needs no separate gate here).
-//
-// CALLER MUST HOLD as->lock across the call, and MUST have already uninstalled
-// the leaf PTEs for [vaddr, vaddr+length) -- see burrow_map_fixed_in, which is
-// the wrapper that does both and is what callers outside vma.c should use.
-//
-// D-3c re-audit F5 [P1]: the exact-cover arm frees the REPLACED old VMA's Burrow,
-// which can be a 9P-backed FILE Burrow whose free reaches a possibly-sleeping
-// spoor_clunk -- and this runs under as->lock, so an inline free is the
-// lock-across-sleep extinction (the identical hazard F1 deferred at the three
-// teardown sites; this was the fourth). `*out_free` (non-NULL) receives the dead
-// Burrow (or NULL) instead of freeing it inline; the caller frees it with
-// burrow_free_deferred AFTER dropping as->lock. Written on every return path.
-int vma_replace_range_in(struct AddrSpace *as, bool exempt,
+// Returns 0 or the detach's -T_E_* (a NULL `nb` is INVAL; W+X and W-without-R
+// are refused by vma_alloc as NOMEM, so I-12 needs no separate gate here).
+// `*out_free` (mandatory; written on every path) receives the dead-Burrow chain
+// for burrow_free_deferred AFTER the unlock. CALLER MUST HOLD as->lock --
+// burrow_map_fixed_in is the wrapper callers outside vma.c use.
+int vma_replace_range_in(struct AddrSpace *as, bool exempt, struct Proc *payer,
                          u64 vaddr, u64 length,
                          struct Burrow *nb, u32 prot, u64 nb_offset,
                          struct Burrow **out_free);
@@ -316,6 +321,15 @@ struct Vma *vma_lookup_in(struct AddrSpace *as, u64 vaddr);
 // tell "nothing mapped here" (Linux: success) from a boundary-straddling
 // partial overlap (refused: partial unmap is post-v1.0).
 struct Vma *vma_next_overlap_in(struct AddrSpace *as, u64 lo, u64 hi);
+
+// B-1a' audit F8: clear the leaves of [lo, hi) mapping by mapping, so each
+// leaf's refund lands on the right counter: a FILE mapping's pages are the
+// Image cache's, charged to this space per leaf installed (the holder reading)
+// and refunded here per leaf cleared; every other type's pages settle with
+// their own release. Tables the range empties are reclaimed
+// (mmu_uninstall_user_range). Returns the leaves cleared. CALLER MUST HOLD
+// as->lock; the range may cover holes and mappings of any type.
+long vma_uninstall_range_in(struct AddrSpace *as, u64 lo, u64 hi);
 void        vma_drain_in(struct AddrSpace *as);
 
 // B-1a: the permission change (ARCH 6.5 "The permission ceiling"). Move every

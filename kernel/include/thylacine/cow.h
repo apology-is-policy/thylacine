@@ -10,7 +10,7 @@
 // pages from a page table (vma_drain frees Vma structs and drops mapping refs;
 // proc_pgtable_destroy frees TABLE pages), so a PTE-owned page would leak at
 // teardown. So a fork CLONES the Burrow per address space -- same size, its own
-// filepages[], the same page pointers -- which is Plan 9's dupseg.
+// pagemap, the same page pointers -- which is Plan 9's dupseg.
 //
 // After which a count indexed by SLOT cannot work: a break makes my slot and
 // the page the count describes diverge, so a later fork bumps an entry covering
@@ -42,7 +42,7 @@
 // THE CONTRACT (page.h states it too, next to the field)
 //
 //   cow_share is meaningful ONLY while the page sits in an anon Burrow's
-//   filepages[] slot, and it is ESTABLISHED, NEVER INHERITED.
+//   pagemap slot, and it is ESTABLISHED, NEVER INHERITED.
 //
 // A page recycled through the buddy carries whatever its last owner left, so
 // every site that puts a page into such a slot calls cow_page_set_sole. That is
@@ -60,7 +60,7 @@
 struct page;
 
 // Establish this page as solely held: cow_share = 1. Called by EVERY site that
-// puts a page into an anon Burrow's filepages[] slot -- the closed set is
+// puts a page into an anon Burrow's pagemap slot -- the closed set is
 // burrow_lazy_populate, the demand-zero fault install, and the COW break's
 // private page. Idempotent in effect but not in meaning: it OVERWRITES, which
 // is the point, because the previous value belongs to a previous owner.

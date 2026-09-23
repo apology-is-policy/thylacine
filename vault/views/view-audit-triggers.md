@@ -47,16 +47,16 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-handle]] | kernel/handle.c, kernel/include/thylacine/handle.h |  | - A new `kobj_kind` must be classified into exactly one partition; the |
 | [[sub-kernel-hwcap]] | kernel/mmio_handle.c, kernel/include/thylacine/mmio_handle.h, kernel/dma_handle.c, kernel/include/thylacine/dma_handle.h, kernel/pci_handle.c, arch/arm64/mmio.h, kernel/include/thylacine/pci_handle.h, kernel/test/test_mmio_handle.c, kernel/test/test_pci_handle.c | inv-i5, inv-i32, inv-i34 | - The three exclusivity mechanisms are **different code for the same property**. |
 | [[sub-kernel-hwdebug]] | arch/arm64/hwdebug.c, arch/arm64/hwdebug.h | inv-i39 | On any change, re-establish: |
-| [[sub-kernel-image]] | kernel/image.c, kernel/include/thylacine/image.h | inv-i36, inv-i7 | On any change: that every path still clunks the Spoor exactly once — miss adopts, |
+| [[sub-kernel-image]] | kernel/image.c, kernel/include/thylacine/image.h | inv-i36, inv-i7, inv-i32 | On any change: that every path still clunks the Spoor exactly once — miss adopts, |
 | [[sub-kernel-irqfwd]] | kernel/irqfwd.c, kernel/include/thylacine/irqfwd.h, kernel/test/test_irqfwd.c, kernel/test/test_irq_probe.c, kernel/test/test_irq_latency_bench.c, usr/irq-bench/src/main.rs, usr/irq-probe/src/main.rs | inv-i9, inv-i15 | - The pre-seeded reservations must cover every number the kernel attaches |
 | [[sub-kernel-jobctl]] | kernel/proc.c, kernel/include/thylacine/proc.h | inv-i20, inv-i39, inv-i9, inv-i19 | - The two stop flags must stay separate, and each resume must clear only its |
 | [[sub-kernel-joey]] | kernel/joey.c, kernel/include/thylacine/joey.h | inv-i27 | - **The trust-root stamps must stay in the child's own context, before exec.** |
 | [[sub-kernel-kaslr]] | arch/arm64/kaslr.c, arch/arm64/kaslr.h | inv-i16 | - **The never-zero guarantee** must survive any change to the mask or the mixing. |
 | [[sub-kernel-larder]] | kernel/larder.c, kernel/include/thylacine/larder.h | inv-i38 | - **The gen-ring event-logging completeness**: every NEW mutation path |
 | [[sub-kernel-loom]] | kernel/loom.c, kernel/include/thylacine/loom.h | inv-i29, inv-i30, inv-i32 | - **Never compute an index from a shared word.** The private counter and private |
-| [[sub-kernel-mm-phys]] | mm/phys.c, mm/phys.h, mm/buddy.c, mm/buddy.h, mm/magazines.c, mm/magazines.h, kernel/include/thylacine/page.h |  | - Any new caller of `pa_to_kva` on an allocator-returned PA is bound |
+| [[sub-kernel-mm-phys]] | mm/phys.c, mm/phys.h, mm/buddy.c, mm/buddy.h, mm/magazines.c, mm/magazines.h, kernel/include/thylacine/page.h | inv-i32 | - Any new caller of `pa_to_kva` on an allocator-returned PA is bound |
 | [[sub-kernel-mm-slub]] | mm/slub.c, mm/slub.h |  | - The destroy guard must stay `alloc_count - free_count` — reverting |
-| [[sub-kernel-mmu]] | arch/arm64/mmu.c, arch/arm64/mmu.h | inv-i12, inv-i13, inv-i16, inv-i31, inv-i39 | On any change here: that no PTE constructor can produce writable-and-executable |
+| [[sub-kernel-mmu]] | arch/arm64/mmu.c, arch/arm64/mmu.h | inv-i12, inv-i13, inv-i16, inv-i31, inv-i32, inv-i39 | On any change here: that no PTE constructor can produce writable-and-executable |
 | [[sub-kernel-ninep-attach]] | kernel/9p_attach.c, kernel/include/thylacine/9p_attach.h |  | - **The failure-path ledger**: every exit must leave (adapter ref × |
 | [[sub-kernel-ninep-client]] | kernel/9p_client.c, kernel/9p_session.c, kernel/9p_transport.c, kernel/9p_srvconn_transport.c, kernel/9p_transport_mq.c, kernel/9p_attach.c, kernel/include/thylacine/9p_client.h | inv-i9, inv-i10, inv-i11 | What an auditor attacks here (the single home of the trigger-row content for |
 | [[sub-kernel-ninep-dev9p]] | kernel/dev9p.c, kernel/include/thylacine/dev9p.h, kernel/test/test_dev9p.c | inv-i38 | - **The coherence pairing**: every mutation path must carry its exact |
@@ -65,6 +65,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-ninep-transport]] | kernel/9p_transport.c, kernel/9p_spoor_transport.c, kernel/9p_srvconn_transport.c, kernel/9p_transport_loopback.c, kernel/9p_transport_mq.c, kernel/include/thylacine/9p_transport.h |  | - **The EAGAIN classification boundary**: EAGAIN accepted anywhere past |
 | [[sub-kernel-ninep-wire]] | kernel/9p_wire.c, kernel/include/thylacine/9p_wire.h |  | What an auditor attacks here (changes to this surface ride the |
 | [[sub-kernel-notes]] | kernel/notes.c, kernel/include/thylacine/notes.h, kernel/devnotes.c | inv-i19, inv-i9, inv-i39 | On any change: that peek, pop and push stay inside one lock hold, and that every |
+| [[sub-kernel-pagemap]] | kernel/pagemap.c, kernel/include/thylacine/pagemap.h, kernel/test/test_capacity.c | inv-i32, inv-i7, inv-i44 | What a reviewer attacks here (the audit-trigger row's addenda; the holotype |
 | [[sub-kernel-path]] | kernel/path.c, kernel/include/thylacine/path.h | inv-i33 | - The refcount balances on EVERY create/destroy/replace path (the #66a |
 | [[sub-kernel-pci-irq]] | kernel/pci_irq.c, kernel/include/thylacine/pci_irq.h, kernel/test/test_pci_irq.c | inv-i5, inv-i9, inv-i15, inv-i34 | Guest shared-ticket test passes: two asserting functions, stalled peer isolation, |
 | [[sub-kernel-perm]] | kernel/perm.c, kernel/include/thylacine/perm.h |  | - No `principal_id` may ever be special-cased here. Adding a |

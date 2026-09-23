@@ -954,7 +954,7 @@ void test_vivarium_mmap_fixed_domain(void) {
     const u64 pfa  = (u64)(VIV_MAP_PRIVATE | VIV_MAP_FIXED | VIV_MAP_ANONYMOUS);
     const u64 rw   = (u64)(VIV_PROT_READ | VIV_PROT_WRITE);
     const u64 rx   = (u64)(VIV_PROT_READ | VIV_PROT_EXEC);
-    const u64 addr = 0x40001000ull;                  // a real page
+    const u64 addr = 0x100001000ull;                 // a real page, in the burrow window
     const u64 fd   = 3;
 
     // ---- arm 2 (dynlink.c:842) -----------------------------------------------
@@ -992,6 +992,11 @@ void test_vivarium_mmap_fixed_domain(void) {
                    (int)VIV_FORWARD, "a fixed map at NULL declines");
     TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(addr + 1, rw, pf, fd, 0),
                    (int)VIV_FORWARD, "a misaligned fixed addr declines");
+    // B-1a': below the burrow window declines -- a fixed mapping there could
+    // never be unmapped (the munmap row is window-confined), so it is declined
+    // honestly rather than half-served (pheno-probe L21 leaked one every boot).
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(0x40001000ull, rw, pf, fd, 0),
+                   (int)VIV_FORWARD, "a fixed map below the burrow window declines");
 
     // MAP_SHARED is the write-back semantics this whole arc refuses, arriving by
     // another door. Exact flag equality is what excludes it.
@@ -1034,6 +1039,8 @@ void test_vivarium_mmap_fixed_domain(void) {
                    (int)VIV_FORWARD, "a nonzero offset declines on the anonymous arm");
     TEST_EXPECT_EQ((int)vivarium_mmap_fixed_anon_decide(0, rw, pfa, (u64)-1, 0),
                    (int)VIV_FORWARD, "a fixed anon map at NULL declines");
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_anon_decide(0x40001000ull, rw, pfa, (u64)-1, 0),
+                   (int)VIV_FORWARD, "a fixed anon map below the burrow window declines (B-1a')");
 }
 
 // The FOUR mmap arms are pairwise DISJOINT. Every decider's comment claims it;
@@ -1063,9 +1070,11 @@ void test_vivarium_mmap_arms_disjoint(void) {
     };
     const u64 fds[]  = { 0, 3, (u64)-1, 0xFFFFFFFFull };
     const u64 offs[] = { 0, 1, 0x1000 };
-    // The FIXED arms judge `addr`, so it joins the sweep: 0 and a misaligned
-    // value must reach the two decliners, and a real page must reach admission.
-    const u64 addrs[] = { 0, 0x1000, 0x1001, 0x40000000ull };
+    // The FIXED arms judge `addr`, so it joins the sweep: 0, a misaligned value
+    // and a page below the burrow window (B-1a': the fixed arms are confined to
+    // it) must reach the decliners, and a real page inside the window must
+    // reach admission.
+    const u64 addrs[] = { 0, 0x1000, 0x1001, 0x40000000ull, 0x100001000ull };
 
     int adm_file = 0, adm_anon = 0, adm_fixed_file = 0, adm_fixed_anon = 0;
     for (unsigned ai = 0; ai < sizeof(addrs) / sizeof(addrs[0]); ai++)

@@ -4680,20 +4680,31 @@ static int probe_cl5_page_budget(void) {
     }
 
     // (b) A RAISE without SPAWN_PERM_MAY_RAISE_PAGE_BUDGET is REFUSED. joey's
-    //     own budget is the default, so asking for one page more is a raise.
-    // (c) A request over PROC_PAGE_HARD_MAX is refused for everyone -- rejected
+    //     own budget is the default -- since B-1a' the user pool (RAM minus the
+    //     TCB reserve), a machine figure, so it is READ from joey's own status
+    //     rather than restated -- and asking for one page more is a raise.
+    //     The default is also the hard maximum, so this refusal is decided at
+    //     validation; the authority refusal proper (a narrowed parent asking
+    //     above itself but below the maximum) is the kernel suite's.
+    // (c) A request over the hard maximum is refused for everyone -- rejected
     //     at validation, before the authority question is even asked.
+    //     0xFFFFFFFF is over it on any machine short of 16 TiB.
+    unsigned int mine = 0;
+    if (!proc_status_field(t_getpid(), "budget:", 7, &mine) || mine == 0) {
+        t_putstr("joey: CL-5 probe: cannot read joey's own budget\n");
+        return -1;
+    }
     static const char pa2[] = "/pouch-hello";
     struct t_sys_spawn_args bad = {
         .name_va = (unsigned long)pa2, .argv_data_va = (unsigned long)pa2,
         .name_len = 12, .argv_data_len = 13, .argc = 1,
-        .page_budget = 65536u + 1u,          // one page over the default
+        .page_budget = mine + 1u,             // one page over joey's own budget
     };
     if (t_spawn_full_argv(&bad) > 0) {
         t_putstr("joey: CL-5 probe: unauthorized RAISE was accepted\n");
         return -1;
     }
-    bad.page_budget = 1048576u + 1u;          // over PROC_PAGE_HARD_MAX
+    bad.page_budget = 0xFFFFFFFFu;            // over the hard maximum
     if (t_spawn_full_argv(&bad) > 0) {
         t_putstr("joey: CL-5 probe: over-hard-cap budget was accepted\n");
         return -1;
@@ -5775,6 +5786,52 @@ int main(void) {
             return 1;
         }
         t_putstr("joey: /protect-guard-child ok (a write through a sealed-none page died via snare:segv)\n");
+    }
+
+    // === /bus-probe-child (B-1a' audit F17: an abort the pager cannot resolve) ===
+    // The child touches a page (the leaf is in) and then does a load-exclusive
+    // from a misaligned address inside it, across a 16-byte boundary (the
+    // shape that faults under FEAT_LSE2's relaxed rule as well as ARMv8.0's):
+    // an alignment fault on a mapped page that admits the access. No page
+    // install resolves it, so the kernel MUST
+    // terminate the child via snare:bus -- answered HANDLED instead, the ERET
+    // re-executes the load into the same abort forever and this reap never
+    // returns. The expect_fault census requires BOTH the marker and a non-zero
+    // status, so a child that survived the load (exit 0) fails the boot too.
+    {
+        static const char bp_name[]   = "bus-probe-child";
+        static const char bp_expect[] = "bus-probe-child: misaligned load-exclusive across a 16-byte boundary";
+        if (pouch_smoke_one_expect_fault(bp_name, sizeof(bp_name) - 1,
+                                         bp_expect, sizeof(bp_expect) - 1) != 0) {
+            t_putstr("joey: /bus-probe-child FAILED (an alignment fault on a mapped page did not die)\n");
+            return 1;
+        }
+        t_putstr("joey: /bus-probe-child ok (a misaligned load-exclusive died via snare:bus)\n");
+    }
+
+    // === /capacity-probe (B-1a': capacity) ===
+    // The EL0 half of ARCH 6.5's capacity contract: a 4 GiB reservation is
+    // admitted (the old cap was 256 MiB), the census a program reads
+    // (/proc/self/status `pages:`) rises with what it touches, a range detach
+    // across the pieces a protect cut returns exactly those pages, a 512 MiB
+    // region detaches, an eager region stays charged until its last piece goes,
+    // and the census falls back to where it started when everything is given
+    // back -- the memory bar as a program sees it. Prints "capacity-probe: ALL
+    // OK" and exits 0.
+    {
+        const char cp_name[] = "capacity-probe";
+        long cp_pid = t_spawn(cp_name, sizeof(cp_name) - 1);
+        if (cp_pid <= 0) {
+            t_putstr("joey: t_spawn(\"capacity-probe\") FAILED\n");
+            return 1;
+        }
+        int cp_status = -1;
+        long cp_reaped = t_wait_pid_for((int)cp_pid, 0, &cp_status);
+        if (cp_reaped != cp_pid || cp_status != 0) {
+            t_putstr("joey: /capacity-probe FAILED\n");
+            return 1;
+        }
+        t_putstr("joey: /capacity-probe reaped status=0; 4 GiB reserve / range detach / census round-trip verified from EL0\n");
     }
 
     // === /burrow-torture (kernel-burrow + SMP regression guard) ===

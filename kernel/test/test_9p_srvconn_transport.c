@@ -749,7 +749,7 @@ void test_9p_srvconn_transport_devgone_posts_nodev_cqe(void) {
     TEST_EXPECT_EQ(sc_open_handshaked(cn, &st, &ops), 0,
         "handshake -> OPEN over the real srvconn");
 
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create(8,16)");
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
     struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
@@ -807,7 +807,7 @@ void test_9p_srvconn_transport_transport_err_posts_eio_cqe(void) {
     TEST_EXPECT_EQ(sc_open_handshaked(cn, &st, &ops), 0,
         "handshake -> OPEN over the real srvconn");
 
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create(8,16)");
     struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
 

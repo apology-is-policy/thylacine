@@ -15,7 +15,7 @@ design:
   - "docs/LOOM.md"
   - "docs/reference/107-loom.md"
 created: 2026-08-02
-updated: 2026-09-22
+updated: 2026-09-23
 ---
 ## Purpose
 
@@ -442,6 +442,17 @@ commit, not the trap.
 The completion ring defaults to twice the submission depth, which is what gives
 the admission rule room to work without back-pressuring a normally-reaping
 consumer.
+
+## The ring is a user-pool allocation (2026-09-23; B-1a' round-1 close)
+
+`loom_create(sq, cq, exempt)` builds its ring through
+`burrow_create_anon(size, exempt)`, so the ring's pages come from the physical
+user pool with the creating Proc's exemption (`sys_loom_setup` passes
+`proc_resource_exempt(p)`) and return at `free_pages` whoever frees them
+([[sub-kernel-mm-phys]]); the eager charge record it stamps is keyed on the
+paying ADDRESS SPACE's id, not the pid, so a non-CLOEXEC ring's close after
+an exec never refunds against the successor's space (the audit's F4;
+[[sub-kernel-burrow]]).
 
 ## Prosecution
 

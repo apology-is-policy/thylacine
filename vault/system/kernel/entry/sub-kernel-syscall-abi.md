@@ -485,7 +485,10 @@ demand-zero anonymous reservation in the burrow-attach window, minted at
 `prot` in {none, R, RW} under a ceiling of RW, its base aligned to
 `2^align_log2` (0 = page; else 12..30, `BURROW_RESERVE_ALIGN_MIN/MAX_LOG2`).
 Same page rounding and I-32 posture as `SYS_BURROW_ATTACH_LAZY` (pages charged
-at fault, the VMA count at reserve; `BURROW_RESERVE_MAX` = 1 GiB). Refused: a
+at fault, the VMA count at reserve; `BURROW_RESERVE_MAX` = the burrow window
+since B-1a', spelled numerically in `syscall.h` and pinned equal to
+`EXEC_USER_BURROW_TOP - EXEC_USER_BURROW_BASE` by a `_Static_assert` in
+`kernel/syscall.c`). Refused: a
 prot with X (`-EACCES`, first), W-without-R / other bits / an alignment out of
 range / length 0 (`-EINVAL`), over the max / no aligned gap / OOM / the VMA cap
 (`-ENOMEM`).
@@ -519,3 +522,39 @@ neither (no C consumer; the subset rule above, still holding visibly).
 Consumers: `/protect-probe`, `/protect-guard-child`
 ([[sub-kernel-protect-witness]]) and the phenotype `mmap` / `mprotect` rows,
 which are the first production callers.
+
+## B-1a': behaviour changes on existing numbers -- 38, 83, 84 (2026-09-23)
+
+No number, argument record or errno value moved; three existing numbers
+answer differently, and the header comments plus the Rust mirror's doc
+comments carry the new contracts.
+
+`SYS_BURROW_DETACH` (38) is the Linux `munmap` form inside the burrow window:
+`[vaddr, vaddr + round_up(length))` is removed whatever it cuts -- a mapping
+wholly inside goes, one cut at an end is trimmed, one the range lies strictly
+inside is split around it (one new mapping), holes are fine, and a range that
+maps nothing answers 0 (the exact-match form answered -1 to a wrong base, a
+wrong length and a second detach; all three are served or 0 now). The
+refusals, still `-1` with nothing changed: the shape (a zero length, an
+unaligned base, a span leaving user VA); an out-of-window span that is not a
+DMA / MMIO map covered exactly; a JIT code alias anywhere in the range; a
+shared-in mapping the range CUTS (whole is fine); no `PROC_VMA_MAX` headroom
+or slab for the mapping a split adds. Any length up to the window.
+
+`SYS_BURROW_ATTACH_LAZY` (83) admits any length up to `BURROW_RESERVE_MAX`,
+which is the whole burrow window (it was 1 GiB): an untouched reservation
+costs nothing, so its size is not the resource. `SYS_BURROW_DECOMMIT` (84)
+may span the pieces a protect cut, but every mapping in the range must be a
+plain ANON_LAZY one and there may be no hole -- else -1 with nothing changed;
+the pagemap's nodes emptied by the release are freed and uncharged with the
+pages. The spawn record's `page_budget` is bounded by the user pool
+(`proc_page_budget_hard_max()`) rather than a constant, and a `PROC_PAGE_MAX`
+/ `PROC_PAGE_HARD_MAX` no longer exists in `syscall.h`'s comments.
+
+Mirrors: `t_burrow_detach` and `t_burrow_attach_lazy` in
+`usr/lib/libthyla-rs/src/lib.rs` carry the new doc comments (the range
+semantics, the refusal list, the window-sized `BURROW_RESERVE_MAX`); no
+constant changed, so the C mirror is untouched. Consumers: `/capacity-probe`
+([[sub-kernel-protect-witness]]) is the first caller of the range form from
+EL0, and netd's retirement self-test could no longer use a second detach as
+its "gone" oracle ([[sub-netd-server]]).

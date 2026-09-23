@@ -281,6 +281,69 @@ void phys_zone_bounds(paddr_t *base, paddr_t *end) {
 }
 
 // ---------------------------------------------------------------------------
+// B-1a': the user pool (phys.h). Sized once at capacity_init; charged by every
+// alloc_user_pages and returned by every free_pages of a PG_USER page, under
+// no common lock, hence CAS. Zero until init, which refuses every non-exempt
+// charge -- the fail-closed reading of "not sized yet".
+// ---------------------------------------------------------------------------
+
+static u32 g_user_pool_pages;
+static u32 g_user_reserve_pages;
+static u32 g_user_pool_charged;
+
+void capacity_init(void) {
+    if (g_user_pool_pages) extinction("capacity_init called twice");
+    u64 total   = phys_total_pages();
+    u64 reserve = total / 8;
+    if (reserve < CAPACITY_RESERVE_MIN_PAGES) reserve = CAPACITY_RESERVE_MIN_PAGES;
+    if (reserve > total / 2)                  reserve = total / 2;   // a tiny guest keeps a pool
+    u64 pool = total - reserve;
+    if (pool == 0)             extinction("capacity_init: no RAM left for a user pool");
+    if (pool > 0xFFFFFFFFull)  pool = 0xFFFFFFFFull;                  // u32 pages: 16 TiB
+    g_user_reserve_pages = (u32)reserve;
+    g_user_pool_pages    = (u32)pool;
+}
+
+u32 capacity_pool_pages(void)    { return g_user_pool_pages; }
+u32 capacity_reserve_pages(void) { return g_user_reserve_pages; }
+u32 capacity_pool_charged(void)  {
+    return __atomic_load_n(&g_user_pool_charged, __ATOMIC_ACQUIRE);
+}
+
+// Refuses a non-exempt charge that would take the pool past its size, counts
+// every charge that proceeds. Returns false having changed nothing.
+static bool pool_charge(u32 npages, bool exempt) {
+    u32 pool = g_user_pool_pages;
+    u32 cur  = __atomic_load_n(&g_user_pool_charged, __ATOMIC_RELAXED);
+    for (;;) {
+        if (npages > 0xFFFFFFFFu - cur)      return false;   // counter overflow (refuse)
+        if (!exempt && cur + npages > pool)  return false;   // the machine-wide bound
+        if (__atomic_compare_exchange_n(&g_user_pool_charged, &cur, cur + npages,
+                                        true, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+            return true;
+    }
+}
+
+// Clamps at 0 rather than wrapping: every return pairs with a charge, so a
+// wrap would mean the pairing is already broken, and a four-billion-page
+// counter would hide it behind a pool that refuses everyone.
+static void pool_uncharge(u32 npages) {
+    u32 cur = __atomic_load_n(&g_user_pool_charged, __ATOMIC_RELAXED);
+    for (;;) {
+        u32 nv = (cur >= npages) ? cur - npages : 0;
+        if (__atomic_compare_exchange_n(&g_user_pool_charged, &cur, nv,
+                                        true, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+            return;
+    }
+}
+
+void capacity_pool_park_for_test(u32 npages)   { (void)pool_charge(npages, true); }
+void capacity_pool_unpark_for_test(u32 npages) { pool_uncharge(npages); }
+
+static capacity_reclaim_fn g_capacity_reclaim;
+void capacity_set_reclaim(capacity_reclaim_fn fn) { g_capacity_reclaim = fn; }
+
+// ---------------------------------------------------------------------------
 // Public alloc / free API.
 // ---------------------------------------------------------------------------
 
@@ -315,8 +378,48 @@ struct page *alloc_pages(unsigned order, unsigned flags) {
     return p;
 }
 
+// What a refused charge of `n` is short by: the pages that have to leave the
+// pool for it to land. An exempt overshoot (the TCB charged past the size) is
+// folded into the one request, so the reclaim scans its cache once per
+// allocation rather than once per page of the overshoot, each scan under the
+// faulter's address-space lock (B-1a' audit F19). Never 0: the charge was
+// refused, so at least one page is wanted; the read can race a return that
+// already made room, in which case the retry simply lands.
+static u32 pool_shortfall(u32 n) {
+    u64 cur  = __atomic_load_n(&g_user_pool_charged, __ATOMIC_RELAXED);
+    u64 pool = g_user_pool_pages;
+    u64 over = cur + n > pool ? cur + n - pool : 1;
+    return over > 0xFFFFFFFFull ? 0xFFFFFFFFu : (u32)over;
+}
+
+struct page *alloc_user_pages(unsigned order, unsigned flags, bool exempt) {
+    if (order > MAX_ORDER) return NULL;
+    u32 n = 1u << order;
+    // A refusal is first an offer to reclaim what the machine can spare (an
+    // idle image's pages), asked for the whole shortfall at once; the charge
+    // is asked again until it lands or nothing is left to reclaim. An exempt
+    // charge never refuses, so the TCB never reclaims and never waits on it.
+    while (!pool_charge(n, exempt)) {
+        if (!g_capacity_reclaim || g_capacity_reclaim(pool_shortfall(n)) == 0) return NULL;
+    }
+    struct page *p = alloc_pages(order, flags);
+    if (!p) { pool_uncharge(n); return NULL; }
+    // The tag rides the block's HEAD page: the descriptor the buddy keys
+    // everything on (flags, order, refcount) and the one free_pages is given.
+    p->flags |= PG_USER;
+    return p;
+}
+
 void free_pages(struct page *p, unsigned order) {
     if (!p) return;
+    // B-1a': the pool's ONE return site. Whoever frees a user page -- a
+    // detach, a decommit, a COW put, a pagemap take, a table reclaim,
+    // proc_pgtable_destroy, a failed install's unwind -- returns its charge
+    // here, so the pool cannot drift from the pages that exist.
+    if (p->flags & PG_USER) {
+        p->flags &= ~PG_USER;
+        pool_uncharge(1u << order);
+    }
     if (mag_free(p, order)) return;
     buddy_free(&g_zone0, p, order);
 }

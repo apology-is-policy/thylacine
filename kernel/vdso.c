@@ -33,7 +33,7 @@ static struct vdso_clock *g_vdso_page;
 void vdso_init(void) {
     if (g_vdso_burrow) return;                  // idempotent
 
-    struct Burrow *v = burrow_create_anon(PAGE_SIZE);
+    struct Burrow *v = burrow_create_anon(PAGE_SIZE, /*exempt=*/true);   // the kernel's own page
     if (!v) return;                             // best-effort: readers fall back
 
     // burrow_create_anon allocates the page KP_ZERO, so reserved[] is already 0

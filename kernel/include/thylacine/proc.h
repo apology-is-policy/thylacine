@@ -105,29 +105,32 @@ struct debug_hw;    // 8a-2b per-Proc HW-breakpoint table (arch/arm64/hwdebug.h)
 // coreutils + editor) yet a bomb hits them fast. The TCB (PRINCIPAL_SYSTEM) is
 // exempt (proc_resource_exempt). Full rationale: IDENTITY-DESIGN.md §3.8.
 //
-//   PROC_PAGE_MAX   -- live anon pages via SYS_BURROW_ATTACH (256 MiB). The
-//                      memory-bomb bound; checked under vma_lock so it is exact.
+//   page budget     -- live anon pages (the memory-bomb bound; checked under
+//                      as->lock so it is exact). B-1a' (ARCH 6.5 "Capacity, and
+//                      the I-32 default"): no longer a constant -- see
+//                      proc_default_page_budget below.
 //   PROC_THREAD_MAX -- live threads. Tighter than the others because a thread
 //                      pins THREAD_KSTACK_TOTAL bytes of UNSWAPPABLE kernel
 //                      kstack (256 threads -> 8 MiB kstacks).
 //   PROC_CHILD_MAX  -- live DIRECT children (the direct-fork rate).
-#define PROC_PAGE_MAX   65536u   // 256 MiB at 4-KiB pages -- the DEFAULT budget
-// CL-5 (Clade F4; docs/LLVM-DESIGN.md section 7): PROC_PAGE_MAX is the DEFAULT
-// per-Proc anon budget, not a constant ceiling -- a Proc carries its own
-// `page_budget`, seeded to PROC_PAGE_MAX and raisable at spawn up to this hard
-// cap. Measured on-device (the clade gate's CL-5 probe, `page_peak`): a 1959-byte
-// template-heavy C++ TU costs 64066 pages (250 MiB) through cc1, and real project
-// TUs project to ~500-650 MiB (host-measured 735-867 MiB RSS scaled by the
-// device's measured 0.70 anon fraction). So 256 MiB does not fit one real
-// compile, let alone `make -jN` -- yet raising the DEFAULT 8x for every Proc
-// would weaken the fork-bomb floor system-wide (the rejected option (a)).
 //
-// The hard cap is what keeps the box-cliff protection: a raise cannot exceed it,
-// so no Proc can demand unbounded memory, and physical exhaustion still fails
-// the fault -> proc_fault_terminate (graceful OOM, never a box extinction).
-// 4 GiB covers a real TU (~650 MiB) and a clang-sized lld link (~2-4 GiB) with
-// room, and is the value LLVM-DESIGN.md section 7 proposed before measurement.
-#define PROC_PAGE_HARD_MAX  1048576u   // 4 GiB at 4-KiB pages
+// B-1a': the DEFAULT anon budget a Proc is seeded with, and the hard maximum a
+// spawn may raise it to, are BOTH the user pool -- RAM minus the TCB reserve
+// (mm/phys.h, capacity_init) -- so a program is never refused memory while
+// free memory exists, and no Proc can be granted more than the machine has.
+// The per-Proc budget stays what a parent NARROWS a child with (monotonic
+// reduction with no authority; a raise past the parent's own needs
+// SPAWN_PERM_MAY_RAISE_PAGE_BUDGET -- CL-5), and the memory-bomb floor is the
+// POOL, shared by every non-exempt Proc, which is what keeps N Procs at the
+// default from reaching the reserve. History: the default was a 256 MiB
+// constant (PROC_PAGE_MAX) with a 4 GiB hard cap; measured on-device (the clade
+// gate's CL-5 probe), one template-heavy C++ TU costs ~250 MiB through cc1 and
+// real project TUs 500-650 MiB, so the constant did not fit one compile, and a
+// Wasm or JS engine reserves 4 GiB regions as a matter of course. Physical
+// exhaustion still fails the fault -> proc_fault_terminate (graceful OOM, never
+// a box extinction), and the TCB (exempt) keeps its reserve.
+u32 proc_default_page_budget(void);    // = capacity_pool_pages()
+u32 proc_page_budget_hard_max(void);   // = capacity_pool_pages()
 // CF-3 A audit F1: per-Proc cap on TRANSIENT byte-I/O bounce heap (the
 // SYS_RW_MAX kmalloc tier in the read/write/pread/pwrite handlers).
 // 512 KiB = four concurrent 128-KiB bulk ops -- ample for the measured
@@ -141,7 +144,7 @@ struct debug_hw;    // 8a-2b per-Proc HW-breakpoint table (arch/arm64/hwdebug.h)
 #define PROC_CHILD_MAX  256
 // PROC_VMA_MAX -- live VMAs (the I-32 FOURTH axis; overcommit, ARCH section 6.5).
 // The Linux vm.max_map_count analog. The eager attach path is already transitively
-// bounded (each VMA charges >=1 page, so PROC_PAGE_MAX caps eager VMAs), but a FREE
+// bounded (each VMA charges >=1 page, so the page budget caps eager VMAs), but a FREE
 // lazy reservation (SYS_BURROW_ATTACH_LAZY -- uncharged at attach) reopens a
 // VMA-slab DoS this axis closes. Charged at vma_insert / uncharged at vma_remove,
 // both under p->vma_lock; TCB-exempt. 65536 * sizeof(struct Vma) (64 B) = 4 MiB of
@@ -761,9 +764,9 @@ struct Proc {
     struct Path       *exe_path;
 
     // CL-5 (Clade F4; docs/LLVM-DESIGN.md section 7): this Proc's anon-page
-    // budget -- what proc_page_charge caps against, replacing the former
-    // hardcoded PROC_PAGE_MAX. Seeded to PROC_PAGE_MAX (so an unmodified Proc is
-    // byte-identical to pre-CL-5) and bounded by PROC_PAGE_HARD_MAX.
+    // budget -- what proc_page_charge caps against, replacing a former hardcoded
+    // constant. Seeded to proc_default_page_budget() (B-1a': the user pool) and
+    // bounded by proc_page_budget_hard_max() (the same pool).
     //
     // INHERITED across rfork/spawn, and that is load-bearing rather than
     // incidental: the toolchain chain is ut -> make -> clang -> cc1, and make and
@@ -780,7 +783,7 @@ struct Proc {
     // caller that already holds it).
     //
     // Never 0 on a live Proc: proc_alloc seeds it, rfork copies it, and the
-    // spawn path validates into [1, PROC_PAGE_HARD_MAX]. PRINCIPAL_SYSTEM is
+    // spawn path validates into [1, proc_page_budget_hard_max()]. PRINCIPAL_SYSTEM is
     // exempt from the cap entirely (proc_resource_exempt), so the TCB's budget
     // is maintained but not consulted.
     u32                page_budget;
@@ -1328,7 +1331,8 @@ bool proc_resource_exempt(const struct Proc *p);
 //   counter. The CALLER MUST HOLD p->vma_lock (the lock that serializes the
 //   attach/detach path), so the check + charge is atomic against sibling
 //   attaches and the page cap is EXACT. charge returns true (and adds npages)
-//   if the Proc is exempt OR the new total fits PROC_PAGE_MAX; false (charging
+//   if the Proc is exempt OR the new total fits the address space's budget and
+//   the user pool (addrspace.h, B-1a'); false (charging
 //   nothing) if it would exceed (caller rejects with -ENOMEM) or npages would
 //   overflow. uncharge clamp-subtracts (never underflows past 0).
 bool proc_page_charge(struct Proc *p, u32 npages);
@@ -2366,7 +2370,8 @@ bool proc_may_post_service(const struct Proc *p);
 // CL-5 (docs/LLVM-DESIGN.md section 7): the page-budget RAISE authority --
 // PROC_FLAG_MAY_RAISE_PAGE_BUDGET, stamped from SPAWN_PERM_MAY_RAISE_PAGE_BUDGET.
 // A holder may spawn a child whose page_budget exceeds its own (bounded by
-// PROC_PAGE_HARD_MAX). LOWERING never needs this. Fail-closed on NULL/corrupt.
+// proc_page_budget_hard_max()). LOWERING never needs this. Fail-closed on
+// NULL/corrupt.
 void proc_mark_may_raise_page_budget(struct Proc *p);
 bool proc_may_raise_page_budget(const struct Proc *p);
 
@@ -2382,8 +2387,8 @@ void proc_arm_session_hangup(struct Proc *p);
 // (every pre-CL-5 caller zero-fills the struct, so this is the compatible
 // default). Returns the child's budget, or 0 if the request must be REFUSED.
 //
-// Rules: inherit on 0; refuse anything over PROC_PAGE_HARD_MAX (the cap is
-// unbypassable, so no authority can demand unbounded memory); allow any value
+// Rules: inherit on 0; refuse anything over proc_page_budget_hard_max() (the
+// user pool: no authority can demand more than the machine has); allow any value
 // at-or-below the parent's own budget with no authority (monotonic reduction --
 // the I-2 shape); require PROC_FLAG_MAY_RAISE_PAGE_BUDGET to exceed it.
 u32 proc_spawn_budget_resolve(const struct Proc *parent, u32 req);

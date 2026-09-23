@@ -12,7 +12,7 @@ locks: [lock-proc-table]
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.4", "docs/PROWL-DESIGN.md section 3.4", "docs/VIVARIUM.md section 6.17"]
 created: 2026-08-02
-updated: 2026-09-06
+updated: 2026-09-23
 ---
 ## Purpose
 
@@ -47,6 +47,15 @@ A single leaf table carries `{name, kind, formatter}`, and walk, stat and read
 all resolve through it. That is structurally better than the sibling `/proc`,
 where adding a file means four separate registrations — here there is one, and a
 leaf that is in the table is automatically walkable, stattable and readable.
+
+**`/ctl/memory` carries the user pool since B-1a'** (2026-09-23): after the
+physical totals, `format_memory` emits three more lines -- `reserve:` (the TCB
+reserve, `capacity_reserve_pages`), `pool:` (RAM minus it,
+`capacity_pool_pages`: every Proc's default budget and hard maximum) and
+`charged:` (`capacity_pool_charged`: what every address space together holds
+of it, exempt ones included) -- all in pages, in the same `key:   value pages`
+shape as the lines above them. Two are boot-static and one is an atomic, so
+nothing here takes a lock ([[sub-kernel-addrspace]]).
 
 ### The gate is a special case, and it is default-allow
 

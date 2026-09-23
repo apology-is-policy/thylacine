@@ -378,6 +378,10 @@ void test_demand_page_no_vma(void);
 void test_demand_page_permission_denied(void);
 void test_demand_page_lifecycle_round_trip(void);
 void test_demand_page_file_smoke(void);
+void test_demand_page_file_pages_charge_the_holder(void);
+void test_demand_page_idle_image_reclaimed_under_pressure(void);
+void test_demand_page_reclaim_asks_for_the_shortfall(void);
+void test_demand_page_alignment_abort_is_bus_not_handled(void);
 void test_demand_page_file_rodata_prot(void);
 void test_demand_page_file_geometry_shift_bails(void);   // DISTRO D-3 / #190
 void test_demand_page_file_geometry_shift_bails_single(void);
@@ -422,6 +426,8 @@ void test_exec_writable_segment_is_sparse(void);
 void test_exec_stack_is_sparse(void);
 void test_execve_load_into_detached(void);
 void test_execve_load_into_rejects_dirty(void);
+void test_execve_load_refuses_nomem_at_the_pool_edge(void);
+void test_execve_load_refuses_nomem_on_the_frame(void);
 void test_execve_failed_load_leaves_target_drainable(void);
 void test_exec_native_rejects_dynamic_linux(void);
 void test_exec_load_failure_leaves_phenotype(void);    // Design D Leg B
@@ -474,6 +480,10 @@ void test_cow_addrspace_clone_refuses_and_leaves_parent_intact(void);
 void test_cow_clone_shares_readonly_eager_anon(void);
 void test_cow_break_read_then_write_copies(void);
 void test_cow_break_sole_holder_takes_in_place(void);
+void test_cow_break_copy_pins_the_original_until_replaced(void);
+void test_cow_read_queued_behind_break_is_handled(void);
+void test_cow_break_copy_releases_the_share_on_a_failed_replace(void);
+void test_cow_break_copy_last_share_frees_after_the_replace(void);
 void test_fork_frame_init(void);
 void test_fork_rfork_arg_rejection(void);
 void test_fork_table_copy(void);
@@ -533,12 +543,29 @@ void test_burrow_map_fixed_refusals(void);
 void test_burrow_map_fixed_successive(void);
 void test_burrow_map_fixed_into_free_space(void);
 void test_burrow_munmap_range_tiled(void);                    // #199 (D-3c)
-void test_burrow_munmap_range_partial_refused(void);
+void test_burrow_munmap_range_partial_trims(void);
 void test_burrow_munmap_range_empty_ok(void);
 void test_burrow_detach_file_frees_outside_lock(void);       // #F1 (D-3c round)
 void test_burrow_munmap_range_file_frees_outside_lock(void);
 void test_burrow_map_fixed_replace_file_frees_outside_lock(void);   // #F5 (D-3c re-audit)
 void test_burrow_map_fixed_refuses_code_alias(void);                 // #F8 (D-3c re-audit)
+// B-1a' (capacity): kernel/test/test_capacity.c
+void test_detach_range_trims_left_right_middle(void);
+void test_detach_range_across_burrows_and_holes(void);
+void test_detach_range_refusals_change_nothing(void);
+void test_detach_eager_pages_go_with_the_last_piece(void);
+void test_detach_lazy_over_256mib_detaches(void);
+void test_detach_four_gib_reservation_round_trips(void);
+void test_capacity_window_sized_reservation_releases_in_bounded_steps(void);
+void test_capacity_replace_window_releases_orphans(void);
+void test_capacity_pagemap_nodes_charged_and_reclaimed(void);
+void test_capacity_default_is_ram_minus_reserve(void);
+void test_capacity_pool_refuses_users_keeps_tcb(void);
+void test_capacity_death_returns_charges_to_pool(void);
+void test_capacity_fork_clone_charges_pages_and_nodes(void);
+void test_capacity_page_tables_charged_and_reclaimed(void);
+void test_capacity_memory_bomb_leaves_the_reserve(void);
+void test_capacity_fork_costs_the_pool_only_its_nodes(void);
 void test_mmap_eager_copy_charge_pairing(void);   // #197
 void test_torpor_wait_rejects_bad_args(void);
 void test_torpor_wait_rejects_unmapped_va(void);
@@ -2150,6 +2177,18 @@ struct test_case g_tests[] = {
                                        test_demand_page_lifecycle_round_trip,
                                                                            false, NULL },
     { "demand_page.file_smoke",        test_demand_page_file_smoke,        false, NULL },
+    { "demand_page.file_pages_charge_the_holder",
+                                       test_demand_page_file_pages_charge_the_holder,
+                                                                           false, NULL },
+    { "demand_page.idle_image_reclaimed_under_pressure",
+                                       test_demand_page_idle_image_reclaimed_under_pressure,
+                                                                           false, NULL },
+    { "demand_page.reclaim_asks_for_the_shortfall",
+                                       test_demand_page_reclaim_asks_for_the_shortfall,
+                                                                           false, NULL },
+    { "demand_page.alignment_abort_is_bus_not_handled",
+                                       test_demand_page_alignment_abort_is_bus_not_handled,
+                                                                           false, NULL },
     { "demand_page.file_rodata_prot",  test_demand_page_file_rodata_prot,  false, NULL },
     { "demand_page.file_geometry_shift_bails", test_demand_page_file_geometry_shift_bails, false, NULL },
     { "demand_page.file_geometry_shift_bails_single", test_demand_page_file_geometry_shift_bails_single, false, NULL },
@@ -2201,6 +2240,10 @@ struct test_case g_tests[] = {
     { "exec.setup_constraints",        test_exec_setup_constraints,        false, NULL },
     { "execve.load_into_detached",     test_execve_load_into_detached,     false, NULL },
     { "execve.load_into_rejects_dirty", test_execve_load_into_rejects_dirty, false, NULL },
+    { "execve.load_refuses_nomem_at_the_pool_edge",
+                                       test_execve_load_refuses_nomem_at_the_pool_edge, false, NULL },
+    { "execve.load_refuses_nomem_on_the_frame",
+                                       test_execve_load_refuses_nomem_on_the_frame, false, NULL },
     { "execve.failed_load_leaves_target_drainable",
                                        test_execve_failed_load_leaves_target_drainable,
                                                                            false, NULL },
@@ -2309,6 +2352,14 @@ struct test_case g_tests[] = {
                                        test_cow_break_read_then_write_copies, false, NULL },
     { "cow.break_sole_holder_takes_in_place",
                                        test_cow_break_sole_holder_takes_in_place, false, NULL },
+    { "cow.break_copy_pins_the_original_until_replaced",
+                                       test_cow_break_copy_pins_the_original_until_replaced, false, NULL },
+    { "cow.read_queued_behind_break_is_handled",
+                                       test_cow_read_queued_behind_break_is_handled, false, NULL },
+    { "cow.break_copy_releases_the_share_on_a_failed_replace",
+                                       test_cow_break_copy_releases_the_share_on_a_failed_replace, false, NULL },
+    { "cow.break_copy_last_share_frees_after_the_replace",
+                                       test_cow_break_copy_last_share_frees_after_the_replace, false, NULL },
     { "addrspace.alloc_shape",         test_addrspace_alloc_shape,         false, NULL },
     { "addrspace.refcount",            test_addrspace_refcount,            false, NULL },
     { "addrspace.kproc_has_none",      test_addrspace_kproc_has_none,      false, NULL },
@@ -2384,12 +2435,29 @@ struct test_case g_tests[] = {
     { "burrow.map_fixed_successive",          test_burrow_map_fixed_successive,          false, NULL },
     { "burrow.map_fixed_into_free_space",     test_burrow_map_fixed_into_free_space,     false, NULL },
     { "burrow.munmap_range_tiled",            test_burrow_munmap_range_tiled,            false, NULL },
-    { "burrow.munmap_range_partial_refused",  test_burrow_munmap_range_partial_refused,  false, NULL },
+    { "burrow.munmap_range_partial_trims",    test_burrow_munmap_range_partial_trims,    false, NULL },
     { "burrow.munmap_range_empty_ok",         test_burrow_munmap_range_empty_ok,         false, NULL },
     { "burrow.detach_file_frees_outside_lock", test_burrow_detach_file_frees_outside_lock, false, NULL },
     { "burrow.munmap_range_file_frees_outside_lock", test_burrow_munmap_range_file_frees_outside_lock, false, NULL },
     { "burrow.map_fixed_replace_file_frees_outside_lock", test_burrow_map_fixed_replace_file_frees_outside_lock, false, NULL },
     { "burrow.map_fixed_refuses_code_alias", test_burrow_map_fixed_refuses_code_alias, false, NULL },
+    { "detach.range_trims_left_right_middle",  test_detach_range_trims_left_right_middle,  false, NULL },
+    { "detach.range_across_burrows_and_holes", test_detach_range_across_burrows_and_holes, false, NULL },
+    { "detach.range_refusals_change_nothing",  test_detach_range_refusals_change_nothing,  false, NULL },
+    { "detach.eager_pages_go_with_the_last_piece", test_detach_eager_pages_go_with_the_last_piece, false, NULL },
+    { "detach.lazy_over_256mib_detaches",      test_detach_lazy_over_256mib_detaches,      false, NULL },
+    { "detach.four_gib_reservation_round_trips", test_detach_four_gib_reservation_round_trips, false, NULL },
+    { "capacity.window_sized_reservation_releases_in_bounded_steps",
+                                               test_capacity_window_sized_reservation_releases_in_bounded_steps, false, NULL },
+    { "capacity.replace_window_releases_orphans", test_capacity_replace_window_releases_orphans, false, NULL },
+    { "capacity.pagemap_nodes_charged_and_reclaimed", test_capacity_pagemap_nodes_charged_and_reclaimed, false, NULL },
+    { "capacity.default_is_ram_minus_reserve", test_capacity_default_is_ram_minus_reserve, false, NULL },
+    { "capacity.pool_refuses_users_keeps_tcb", test_capacity_pool_refuses_users_keeps_tcb, false, NULL },
+    { "capacity.death_returns_charges_to_pool", test_capacity_death_returns_charges_to_pool, false, NULL },
+    { "capacity.fork_clone_charges_pages_and_nodes", test_capacity_fork_clone_charges_pages_and_nodes, false, NULL },
+    { "capacity.page_tables_charged_and_reclaimed", test_capacity_page_tables_charged_and_reclaimed, false, NULL },
+    { "capacity.memory_bomb_leaves_the_reserve",   test_capacity_memory_bomb_leaves_the_reserve,   false, NULL },
+    { "capacity.fork_costs_the_pool_only_its_nodes", test_capacity_fork_costs_the_pool_only_its_nodes, false, NULL },
     { "demand_page.eager_copy_charge_pairing", test_mmap_eager_copy_charge_pairing,      false, NULL },
     { "torpor.wait_rejects_bad_args",          test_torpor_wait_rejects_bad_args,          false, NULL },
     { "torpor.wait_rejects_unmapped_va",       test_torpor_wait_rejects_unmapped_va,       false, NULL },

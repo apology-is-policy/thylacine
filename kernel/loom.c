@@ -182,7 +182,7 @@ static u32 align_up_u32(u32 x, u32 a) { return (x + (a - 1u)) & ~(a - 1u); }
 
 static bool is_pow2_u32(u32 x) { return x != 0u && (x & (x - 1u)) == 0u; }
 
-struct Loom *loom_create(u32 sq_entries, u32 cq_entries) {
+struct Loom *loom_create(u32 sq_entries, u32 cq_entries, bool exempt) {
     if (!is_pow2_u32(sq_entries) || sq_entries > LOOM_MAX_ENTRIES)  return NULL;
     if (!is_pow2_u32(cq_entries))                                   return NULL;
     if (cq_entries < sq_entries || cq_entries > 2u * LOOM_MAX_ENTRIES) return NULL;
@@ -203,7 +203,7 @@ struct Loom *loom_create(u32 sq_entries, u32 cq_entries) {
 
     struct Loom *l = kmalloc(sizeof(struct Loom), KP_ZERO);
     if (!l) return NULL;
-    struct Burrow *r = burrow_create_anon((size_t)ring_size);
+    struct Burrow *r = burrow_create_anon((size_t)ring_size, exempt);
     if (!r) { kfree(l); return NULL; }
 
     l->magic    = LOOM_MAGIC;

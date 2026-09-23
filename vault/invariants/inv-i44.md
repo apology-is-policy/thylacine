@@ -99,7 +99,14 @@ counterexample cfg:
 one per property, so each failure names its own mechanism — and, since B-1a,
 a second clean cfg (`cow_protect`, 10636 states under `SpecProtect`) with
 three more counterexamples behind `ALLOW_PROTECT`, additive by measurement:
-the first four cfgs reproduce their exact state counts with the switch off. `NoAliasedWritable`,
+the first four cfgs reproduce their exact state counts with the switch off.
+Since B-1a' (the round-4 audit's F21; 2026-09-23) a third clean cfg
+(`cow_leaf`, 2996 states behind `MODEL_LEAF`) models the space's read-only
+leaf and the break's tail as the two steps the kernel takes -- the leaf
+write, then the put -- with `cow_buggy_put_before_replace` as the round-3
+audit's F12 (the put first: the page freed under a live read-only leaf,
+`NoReadableFreed`); the eight older cfgs reproduce their counts with that
+switch off too. `NoAliasedWritable`,
 `NoUseAfterFree` and `NoDoubleFree` are invariants; the vfork property is
 **liveness**, and that asymmetry is load-bearing: the lost-wake bug leaves
 safety entirely intact and produces a hang, so a spec that checked only

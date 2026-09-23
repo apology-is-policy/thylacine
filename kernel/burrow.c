@@ -58,10 +58,28 @@
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 #include <thylacine/burrow.h>
+#include <thylacine/pagemap.h>   // B-1a': the charged sparse slot table
 #include <thylacine/errno.h>           // B-1a: burrow_protect reports -T_E_*
 
 #include "../mm/phys.h"
 #include "../mm/slub.h"
+
+// B-1a': the pagemap's per-page hooks. A FILE slot's page is the Image cache's
+// alone (a plain free); an ANON_LAZY slot's page may be COW-shared with a
+// fork sibling's Burrow, so it leaves through its share count (the buddy gets
+// it only from the last holder); a clone takes one share per page it mirrors.
+static void file_put_page(struct page *pg, void *ctx) {
+    (void)ctx;
+    free_pages(pg, 0);
+}
+static void lazy_put_page(struct page *pg, void *ctx) {
+    (void)ctx;
+    if (cow_page_put(pg)) free_pages(pg, 0);
+}
+static void clone_take_share(struct page *pg, void *ctx) {
+    (void)ctx;
+    cow_page_get(pg);
+}
 
 static struct kmem_cache *g_vmo_cache;
 static u64                g_vmo_created;
@@ -108,7 +126,7 @@ static unsigned order_for_pages(size_t page_count) {
 // loop zeroes (1 << order) << PAGE_SHIFT bytes, which is the allocation's own
 // statement of its size -- so a 2049-page request occupies 4096. Charging the
 // request instead of the occupancy let a Proc hold up to ~2x its I-32 budget:
-// page_count could read at most PROC_PAGE_MAX while real occupancy approached
+// page_count could read at most the budget while real occupancy approached
 // twice that. Bounded at 2x (the next order is never more than double), which
 // is why this is an understated floor rather than an unbounded hole.
 //
@@ -135,7 +153,7 @@ size_t burrow_backing_pages(size_t size) {
     return (size_t)1u << order_for_pages((size + PAGE_SIZE - 1) / PAGE_SIZE);
 }
 
-struct Burrow *burrow_create_anon(size_t size) {
+struct Burrow *burrow_create_anon(size_t size, bool exempt) {
     if (!g_vmo_cache) extinction("burrow_create_anon before burrow_init");
     if (size == 0)    return NULL;
     // Overflow guard: `size + PAGE_SIZE - 1` wraps to a small value when
@@ -151,7 +169,7 @@ struct Burrow *burrow_create_anon(size_t size) {
     size_t page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE;
     unsigned order = order_for_pages(page_count);
 
-    struct page *pages = alloc_pages(order, KP_ZERO);
+    struct page *pages = alloc_user_pages(order, KP_ZERO, exempt);
     if (!pages) {
         kmem_cache_free(g_vmo_cache, v);
         return NULL;
@@ -321,8 +339,8 @@ struct Burrow *burrow_create_hostmem(struct KObj_PCI *kobj_pci, u64 pa,
 // is the last step, so every error path below returns NULL having taken NO ref
 // (the caller retains ownership + must clunk it). Mirrors burrow_create_anon's
 // page_count/size rounding, but allocates NO backing pages: the per-page
-// physical pages fault in lazily (R-2) into the sparse `filepages` array, which
-// is the only allocation made here.
+// physical pages fault in lazily (R-2) into the sparse pagemap (B-1a'), which
+// allocates nothing until a slot is first installed.
 struct Burrow *burrow_create_file(struct Spoor *spoor, u64 file_offset, size_t length) {
     if (!g_vmo_cache) extinction("burrow_create_file before burrow_init");
     if (!spoor)       return NULL;
@@ -339,12 +357,11 @@ struct Burrow *burrow_create_file(struct Spoor *spoor, u64 file_offset, size_t l
     struct Burrow *v = kmem_cache_alloc(g_vmo_cache, KP_ZERO);
     if (!v) return NULL;
 
-    // The sparse per-page array: page_count slots, all NULL ("not resident").
-    // The R-2 fault arm fills a slot on the first fault to that page;
-    // burrow_free_internal frees every non-NULL slot. A few KiB even for a
-    // multi-MiB segment (8 bytes/page).
-    struct page **filepages = kmalloc(page_count * sizeof(struct page *), KP_ZERO);
-    if (!filepages) {
+    // The sparse per-page pagemap: page_count slots, none resident. The R-2
+    // fault arm installs a slot on the first fault to that page (allocating
+    // the map's nodes on the way, uncharged for FILE -- the Image cache's
+    // posture, bounded by EXEC_FILE_MAX); burrow_free_internal destroys it.
+    if (pagemap_init(&v->pm, page_count) != 0) {
         kmem_cache_free(g_vmo_cache, v);
         return NULL;     // no ref taken: caller still owns `spoor`
     }
@@ -369,16 +386,16 @@ struct Burrow *burrow_create_file(struct Spoor *spoor, u64 file_offset, size_t l
     v->file_devno    = spoor->devno;
     v->file_qid_path = spoor->qid.path;
     v->file_qid_vers = spoor->qid.vers;
-    v->filepages     = filepages;
     g_vmo_created++;
     return v;
 }
 
 // Overcommit / I-32: the demand-ZERO anonymous Burrow (ARCH §6.5 "The overcommit
 // model"; SYS_BURROW_ATTACH_LAZY). The structural twin of burrow_create_file minus
-// the backing Spoor: mirrors its page_count/size rounding + the sparse `filepages`
-// array (the only allocation), but allocates NO backing pages — each page faults in
-// zero-filled (R-2-style) on first touch. No spoor ref taken (anon).
+// the backing Spoor: mirrors its page_count/size rounding + the sparse pagemap
+// (B-1a': nothing allocated until a slot is touched), but allocates NO backing
+// pages — each page faults in zero-filled (R-2-style) on first touch. No spoor
+// ref taken (anon).
 struct Burrow *burrow_create_anon_lazy(size_t size) {
     if (!g_vmo_cache) extinction("burrow_create_anon_lazy before burrow_init");
     if (size == 0)    return NULL;
@@ -391,12 +408,14 @@ struct Burrow *burrow_create_anon_lazy(size_t size) {
     struct Burrow *v = kmem_cache_alloc(g_vmo_cache, KP_ZERO);
     if (!v) return NULL;
 
-    // The sparse per-page array: page_count slots, all NULL ("not resident"). The
-    // demand-zero fault arm fills a slot on the first fault to that page;
-    // burrow_free_internal frees every non-NULL slot. Same shape (8 bytes/page) as
-    // the FILE Burrow's filepages.
-    struct page **filepages = kmalloc(page_count * sizeof(struct page *), KP_ZERO);
-    if (!filepages) {
+    // The sparse per-page pagemap: page_count slots, none resident, NO node
+    // until a page is installed -- so a reservation costs its struct and
+    // nothing per reserved page (B-1a'; the flat array this replaced was 8 B
+    // per page, uncharged, and the reason every reservation had a cap). The
+    // demand-zero fault arm installs a slot on first touch, charging the
+    // nodes it needs to the mapping address space; burrow_free_internal
+    // destroys the map.
+    if (pagemap_init(&v->pm, page_count) != 0) {
         kmem_cache_free(g_vmo_cache, v);
         return NULL;
     }
@@ -409,7 +428,6 @@ struct Burrow *burrow_create_anon_lazy(size_t size) {
     v->mapping_count = 0;
     v->pages         = NULL;         // LAZY: no contiguous alloc_pages chunk
     v->order         = 0;
-    v->filepages     = filepages;
     g_vmo_created++;
     return v;
 }
@@ -425,7 +443,7 @@ struct Burrow *burrow_create_anon_lazy(size_t size) {
 // previous owner's bytes would be code the Proc can RUN without having emitted
 // it. All-zero AArch64 is UDF #0 (permanently undefined), so an un-emitted page
 // traps instead of executing residue.
-struct Burrow *burrow_create_code(size_t size) {
+struct Burrow *burrow_create_code(size_t size, bool exempt) {
     if (!g_vmo_cache) extinction("burrow_create_code before burrow_init");
     if (size == 0)    return NULL;
     // Same overflow guard as burrow_create_anon: size + PAGE_SIZE - 1 must not
@@ -438,7 +456,7 @@ struct Burrow *burrow_create_code(size_t size) {
     size_t page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE;
     unsigned order = order_for_pages(page_count);
 
-    struct page *pages = alloc_pages(order, KP_ZERO);
+    struct page *pages = alloc_user_pages(order, KP_ZERO, exempt);
     if (!pages) {
         kmem_cache_free(g_vmo_cache, v);
         return NULL;
@@ -465,7 +483,7 @@ int burrow_lazy_populate(struct AddrSpace *as, bool exempt, struct Burrow *v,
     if (!as || !v)                            return -1;
     if (v->magic != VMO_MAGIC)                return -1;
     if (v->type != BURROW_TYPE_ANON_LAZY)     return -1;
-    if (!v->filepages)                        return -1;
+    if (!pagemap_live(&v->pm))                return -1;
     if (n == 0)                               return 0;
     // Range within the Burrow, written so neither term can overflow.
     if (first >= v->page_count)               return -1;
@@ -473,7 +491,7 @@ int burrow_lazy_populate(struct AddrSpace *as, bool exempt, struct Burrow *v,
     if (n > 0xFFFFFFFFull)                    return -1;   // the u32 charge argument
 
     // Charge the WHOLE run before allocating anything: the cap decision has to see
-    // the entire request, or a run straddling PROC_PAGE_MAX would populate its
+    // the entire request, or a run straddling the budget would populate its
     // first half and only then discover it cannot finish. as->lock is the stated
     // precondition of addrspace_charge_pages -- it is what makes the cap exact
     // against a sibling charge on the same address space.
@@ -487,8 +505,8 @@ int burrow_lazy_populate(struct AddrSpace *as, bool exempt, struct Burrow *v,
         // alloc OUTSIDE v->lock: alloc_pages takes the buddy lock, and burrow.c's
         // leaf-lock discipline keeps the buddy strictly below v->lock (the same
         // reason burrow_decommit frees after unlocking).
-        struct page *pg = alloc_pages(0, KP_ZERO);
-        if (!pg) break;                       // OOM -> unwind below
+        struct page *pg = alloc_user_pages(0, KP_ZERO, exempt);
+        if (!pg) break;                       // OOM / pool refusal -> unwind below
 
         // LINEAGE L-4b: entry site 1 of 3. ESTABLISH the COW share before the
         // page becomes reachable through the slot -- a page just out of the
@@ -497,10 +515,13 @@ int burrow_lazy_populate(struct AddrSpace *as, bool exempt, struct Burrow *v,
         // is still private to this call, so it needs no nesting under v->lock.
         cow_page_set_sole(pg);
 
-        spin_lock(&v->lock);
-        bool installed = (v->filepages[first + done] == NULL);
-        if (installed) v->filepages[first + done] = pg;   // the Burrow owns pg now
-        spin_unlock(&v->lock);
+        // The install charges the nodes it allocates to `as` on top of the
+        // run's own charge, and refuses (nothing installed) on a cap hit or
+        // a node OOM -- the unwind below then returns the run's charge.
+        struct page *winner = NULL;
+        int irc = pagemap_install(&v->pm, &v->lock, first + done, pg, as, exempt, &winner);
+        if (irc < 0) { free_pages(pg, 0); break; }
+        bool installed = (irc == 0);
 
         if (!installed) {
             // The slot was ALREADY resident. exec populates each run exactly once
@@ -516,10 +537,11 @@ int burrow_lazy_populate(struct AddrSpace *as, bool exempt, struct Burrow *v,
         // All-or-nothing: undo exactly what this call did, so the Burrow is left as
         // it was found and a caller that gives up can simply burrow_unref.
         for (size_t i = 0; i < done; i++) {
-            spin_lock(&v->lock);
-            struct page *pg = v->filepages[first + i];
-            v->filepages[first + i] = NULL;
-            spin_unlock(&v->lock);
+            struct page *pg = NULL;
+            struct page *freed[PAGEMAP_MAX_DEPTH];
+            u32 nfreed = 0;
+            pagemap_take(&v->pm, &v->lock, first + i, as, &pg, freed, &nfreed);
+            for (u32 k = 0; k < nfreed; k++) free_pages(freed[k], 0);   // outside v->lock
             // These pages WERE in slots, so they leave through the share count
             // rather than by a direct free: the rule this file keeps is that a
             // page in a slot is released with cow_page_put and freed only when
@@ -541,23 +563,38 @@ int burrow_lazy_populate(struct AddrSpace *as, bool exempt, struct Burrow *v,
 // LINEAGE L-4b: dupseg. See burrow.h for why a fork clones the Burrow instead of
 // sharing a reference to it, and cow.h for why that forces the share count onto
 // the page.
-struct Burrow *burrow_clone_cow(struct Burrow *src) {
+struct Burrow *burrow_clone_cow(struct Burrow *src, bool exempt) {
     if (!g_vmo_cache)                       extinction("burrow_clone_cow before burrow_init");
     if (!src)                               return NULL;
     if (src->magic != VMO_MAGIC)            return NULL;
     if (src->type != BURROW_TYPE_ANON_LAZY) return NULL;
-    if (!src->filepages)                    return NULL;
+    if (!pagemap_live(&src->pm))            return NULL;
     if (src->page_count == 0)               return NULL;
 
-    // Allocate BOTH before taking a single share: an OOM after the shares were
-    // taken would have to walk them back, and the whole point of doing the
-    // allocation first is that there is then nothing to unwind.
+    // Allocate EVERYTHING before taking a single share: an OOM after the
+    // shares were taken would have to walk them back, and the whole point of
+    // doing the allocation first is that there is then nothing to unwind. The
+    // clone's nodes are exactly the source's count -- the source cannot grow
+    // under us: the caller holds its address space's lock, and an ANON_LAZY
+    // Burrow has no other faulter (burrow.h). The pool is allocated OUTSIDE
+    // src->lock (the buddy is never entered under v->lock) and uncharged: the
+    // caller charges the clone's footprint after the mapping ref lands.
     struct Burrow *dst = kmem_cache_alloc(g_vmo_cache, KP_ZERO);
     if (!dst) return NULL;
-    struct page **slots = kmalloc(src->page_count * sizeof(struct page *), KP_ZERO);
-    if (!slots) {
+    if (pagemap_init(&dst->pm, src->page_count) != 0) {
         kmem_cache_free(g_vmo_cache, dst);
         return NULL;
+    }
+    u32 want = pagemap_node_count(&src->pm);
+    struct page **pool = NULL;
+    if (want) {
+        pool = kmalloc((size_t)want * sizeof(struct page *), KP_ZERO);
+        if (!pool || pagemap_pool_alloc(pool, want, exempt) != want) {
+            if (pool) { pagemap_pool_free(pool, want); kfree(pool); }
+            pagemap_destroy(&dst->pm, NULL, NULL);
+            kmem_cache_free(g_vmo_cache, dst);
+            return NULL;
+        }
     }
 
     dst->magic         = VMO_MAGIC;
@@ -568,7 +605,6 @@ struct Burrow *burrow_clone_cow(struct Burrow *src) {
     dst->mapping_count = 0;
     dst->pages         = NULL;
     dst->order         = 0;
-    dst->filepages     = slots;
 
     // Snapshot under src->lock so a slot cannot be filled halfway through the
     // walk (the caller additionally holds the source address space's lock, which
@@ -577,21 +613,24 @@ struct Burrow *burrow_clone_cow(struct Burrow *src) {
     //
     // The share is taken for the slot that is about to point at the page, and the
     // slot is written in the same hold -- so there is no window in which the clone
-    // references a page it has not counted.
+    // references a page it has not counted. A pool that runs short (the source
+    // grew under a lock the caller did not hold -- a caller bug) leaves a partial
+    // mirror whose destroy puts back exactly the shares it took.
     spin_lock(&src->lock);
-    for (size_t i = 0; i < src->page_count; i++) {
-        struct page *pg = src->filepages[i];
-        if (!pg) continue;               // never touched: stays NULL, reads as zero
-        cow_page_get(pg);
-        slots[i] = pg;
-    }
+    int mrc = pagemap_mirror(&dst->pm, &src->pm, pool, want, clone_take_share, NULL);
     spin_unlock(&src->lock);
+    if (pool) { pagemap_pool_free(pool, want); kfree(pool); }   // the unconsumed rest
+    if (mrc != 0) {
+        pagemap_destroy(&dst->pm, lazy_put_page, NULL);
+        kmem_cache_free(g_vmo_cache, dst);
+        return NULL;
+    }
 
     g_vmo_created++;
     return dst;
 }
 
-// LINEAGE L-4b: the COW break's commit. Kept here so filepages[] and v->lock stay
+// LINEAGE L-4b: the COW break's commit. Kept here so the pagemap and v->lock stay
 // burrow.c's alone; the share-count ordering around it is the caller's, and is
 // spelled out in burrow.h.
 bool burrow_lazy_swap_slot(struct Burrow *v, size_t slot,
@@ -600,13 +639,8 @@ bool burrow_lazy_swap_slot(struct Burrow *v, size_t slot,
     if (v->magic != VMO_MAGIC)            return false;
     if (v->type != BURROW_TYPE_ANON_LAZY) return false;
     if (!expect || !replacement)          return false;
-
-    spin_lock(&v->lock);
-    bool ok = (v->filepages && slot < v->page_count &&
-               v->filepages[slot] == expect);
-    if (ok) v->filepages[slot] = replacement;
-    spin_unlock(&v->lock);
-    return ok;
+    if (!pagemap_live(&v->pm))            return false;
+    return pagemap_swap(&v->pm, &v->lock, slot, expect, replacement);
 }
 
 // LINEAGE L-4a: the direct-map address of one resident ANON_LAZY slot. The
@@ -617,8 +651,8 @@ void *burrow_lazy_slot_kva(struct Burrow *v, size_t slot) {
     if (!v)                                     return NULL;
     if (v->magic != VMO_MAGIC)                  return NULL;
     if (v->type != BURROW_TYPE_ANON_LAZY)       return NULL;
-    if (!v->filepages || slot >= v->page_count) return NULL;
-    struct page *pg = v->filepages[slot];
+    if (!pagemap_live(&v->pm))                  return NULL;
+    struct page *pg = pagemap_get(&v->pm, slot);
     return pg ? (void *)pa_to_kva(page_to_pa(pg)) : NULL;
 }
 
@@ -705,53 +739,43 @@ static void burrow_free_internal(struct Burrow *v) {
         // REVENANT / I-36: free every resident demand-paged page (order 0
         // each), then the sparse array, then clunk the adopted backing Spoor.
         // Runs at {handle_count==0 && mapping_count==0}, so no VMA maps this
-        // Burrow and no concurrent fault touches filepages -- the walk needs no
+        // Burrow and no concurrent fault touches the pagemap -- the walk needs no
         // lock. spoor_clunk (dev->close + unref) may sleep (a 9P Tclunk);
         // burrow_free_internal runs OUTSIDE v->lock (leaf discipline), so the
         // sleep is safe. The spoor==NULL double-free guard mirrors MMIO/DMA.
         if (!v->spoor)
             extinction("burrow_free_internal(FILE) with spoor already NULL (double-free)");
-        if (v->filepages) {
-            for (size_t i = 0; i < v->page_count; i++) {
-                if (v->filepages[i]) {
-                    free_pages(v->filepages[i], 0);
-                    v->filepages[i] = NULL;
-                }
-            }
-            kfree(v->filepages);
-            v->filepages = NULL;
-        }
+        if (pagemap_live(&v->pm))
+            pagemap_destroy(&v->pm, file_put_page, NULL);
         spoor_clunk(v->spoor);
         v->spoor = NULL;
         break;
     case BURROW_TYPE_ANON_LAZY:
         // Overcommit / I-32: free every resident demand-zeroed page (order 0 each),
-        // then the sparse array. Runs at {handle_count==0 && mapping_count==0}, so no
-        // VMA maps this Burrow and no concurrent faulter touches filepages -- the walk
-        // needs no lock (mirrors the FILE arm, minus the spoor_clunk; no kobj). The
-        // filepages==NULL double-free guard mirrors ANON's pages==NULL. NOTE: the
-        // per-Proc page_count for any STILL-resident page is uncharged by the caller
-        // BEFORE this runs (SYS_BURROW_DETACH reads burrow_lazy_resident_count then
-        // uncharges; burrow_free_internal is Proc-agnostic so it cannot uncharge).
-        if (!v->filepages)
-            extinction("burrow_free_internal(ANON_LAZY) with filepages already NULL (double-free)");
-        for (size_t i = 0; i < v->page_count; i++) {
-            if (v->filepages[i]) {
-                // LINEAGE L-4b: a page here may be COW-shared with a Burrow
-                // this fork's sibling holds, so the free is CONDITIONAL -- the
-                // page returns to the buddy only when this was its last holder.
-                // The walk itself still needs no lock (this runs at
-                // handle_count == 0 && mapping_count == 0, so nothing maps this
-                // Burrow), but cow_page_put does take the global COW lock,
-                // because the OTHER holder is reachable from a live address
-                // space and may be putting the same page concurrently.
-                if (cow_page_put(v->filepages[i]))
-                    free_pages(v->filepages[i], 0);
-                v->filepages[i] = NULL;
-            }
-        }
-        kfree(v->filepages);
-        v->filepages = NULL;
+        // then the pagemap's nodes. Runs at {handle_count==0 && mapping_count==0},
+        // so no VMA maps this Burrow and no concurrent faulter touches the pagemap
+        // -- the walk needs no lock (mirrors the FILE arm, minus the spoor_clunk;
+        // no kobj). The not-live double-free guard mirrors ANON's pages==NULL.
+        // NOTE: the page_count for any STILL-resident page (and node) is settled
+        // by the caller BEFORE this runs -- the range detach and the decommit
+        // release their overlap first (specs/capacity.tla, NoOrphan), and a dying
+        // address space returns whatever it still holds to the pool
+        // (addrspace_unref); burrow_free_internal is Proc-agnostic so it cannot
+        // uncharge.
+        if (!pagemap_live(&v->pm))
+            extinction("burrow_free_internal(ANON_LAZY) with the pagemap already destroyed (double-free)");
+        // LINEAGE L-4b: a page here may be COW-shared with a Burrow this
+        // fork's sibling holds, so the free is CONDITIONAL (lazy_put_page) --
+        // the page returns to the buddy only when this was its last holder.
+        // The walk itself needs no lock (this runs at handle_count == 0 &&
+        // mapping_count == 0, so nothing maps this Burrow), but cow_page_put
+        // does take the global COW lock, because the OTHER holder is reachable
+        // from a live address space and may be putting the same page
+        // concurrently. B-1a': the map's nodes go with it -- UNCHARGED, which
+        // is why every unmapping path releases its slots before the Burrow can
+        // reach here (specs/capacity.tla, NoOrphan): a Burrow freed through a
+        // detach arrives empty.
+        pagemap_destroy(&v->pm, lazy_put_page, NULL);
         break;
     case BURROW_TYPE_INVALID:
     default:
@@ -865,8 +889,8 @@ void burrow_acquire_mapping(struct Burrow *v) {
         }
         break;
     case BURROW_TYPE_FILE:
-        // REVENANT / I-36: liveness is the pinned backing Spoor. filepages MAY
-        // be all-NULL (no page faulted in yet) -- the normal fresh-mapping
+        // REVENANT / I-36: liveness is the pinned backing Spoor. The pagemap MAY
+        // be empty (no page faulted in yet) -- the normal fresh-mapping
         // state, not a UAF. spoor==NULL only post-free (the {0,0} resurrection
         // guard above already covers the freed case).
         if (!v->spoor) {
@@ -875,13 +899,13 @@ void burrow_acquire_mapping(struct Burrow *v) {
         }
         break;
     case BURROW_TYPE_ANON_LAZY:
-        // Overcommit: liveness is the sparse array. filepages MAY be all-NULL (no
-        // page faulted in yet, or fully decommitted) -- the normal state, not a UAF
-        // (mirror FILE). filepages==NULL only post-free (the {0,0} resurrection guard
-        // above already covers the freed case).
-        if (!v->filepages) {
+        // Overcommit: liveness is the pagemap. It MAY be empty (no page faulted
+        // in yet, or fully decommitted) -- the normal state, not a UAF (mirror
+        // FILE). Not live only post-free (the {0,0} resurrection guard above
+        // already covers the freed case).
+        if (!pagemap_live(&v->pm)) {
             spin_unlock(&v->lock);
-            extinction("burrow_acquire_mapping of ANON_LAZY BURROW with NULL filepages (UAF)");
+            extinction("burrow_acquire_mapping of ANON_LAZY BURROW with a dead pagemap (UAF)");
         }
         break;
     case BURROW_TYPE_INVALID:
@@ -942,10 +966,14 @@ struct Burrow *burrow_release_mapping_deferred(struct Burrow *v) {
 // state was established under v->lock by burrow_release_mapping_deferred and
 // nothing else can reach the Burrow, so no re-check is needed.
 void burrow_free_deferred(struct Burrow *v) {
-    if (!v) return;
-    if (v->magic != VMO_MAGIC)
-        extinction("burrow_free_deferred of corrupted BURROW (double free?)");
-    burrow_free_internal(v);
+    while (v) {
+        if (v->magic != VMO_MAGIC)
+            extinction("burrow_free_deferred of corrupted BURROW (double free?)");
+        struct Burrow *n = v->deferred_free_next;
+        v->deferred_free_next = NULL;
+        burrow_free_internal(v);
+        v = n;
+    }
 }
 
 // =============================================================================
@@ -960,11 +988,11 @@ void burrow_free_deferred(struct Burrow *v) {
 // =============================================================================
 
 void burrow_charge_record(struct Burrow *v, const struct Proc *p, u32 pages) {
-    if (!v || !p || pages == 0) return;
+    if (!v || !p || !p->as || pages == 0) return;
     if (v->magic != VMO_MAGIC)
         extinction("burrow_charge_record on corrupted BURROW (use-after-free?)");
     spin_lock(&v->lock);
-    v->charge_pid   = p->pid;
+    v->charge_as_id = p->as->id;
     v->charge_pages = pages;
     spin_unlock(&v->lock);
 }
@@ -975,14 +1003,17 @@ u32 burrow_charge_claim(struct Burrow *v, const struct Proc *p) {
         extinction("burrow_charge_claim on corrupted BURROW (use-after-free?)");
     u32 pages = 0;
     spin_lock(&v->lock);
-    // charge_pages -- not charge_pid -- is the "held" sentinel. pid 0 is a real
-    // value (proc_alloc stamps 0 and rfork_internal assigns the pid later), so
-    // using it as the released marker would conflate identity with state and
-    // silently refuse to settle a charge recorded before a pid was assigned.
-    // A charge of zero pages is meaningless, so zero pages IS "nothing held".
-    if (v->charge_pages != 0 && v->charge_pid == p->pid) {
+    // charge_pages -- not charge_as_id -- is the "held" sentinel: a charge of
+    // zero pages is meaningless, so zero pages IS "nothing held". The key is
+    // the ADDRESS SPACE that paid (B-1a' audit F4): a pid survives exec, and a
+    // handle that outlives the outgoing space (a non-CLOEXEC Loom) would
+    // otherwise refund against the successor's space, which never paid. A
+    // record whose space has died is never claimed -- that space's count died
+    // with it and the region's pages return to the pool when they are freed
+    // -- so there is nothing left to settle and the record simply stays.
+    if (v->charge_pages != 0 && p->as && v->charge_as_id == p->as->id) {
         pages           = v->charge_pages;
-        v->charge_pid   = 0;
+        v->charge_as_id = 0;
         v->charge_pages = 0;
     }
     spin_unlock(&v->lock);
@@ -990,7 +1021,7 @@ u32 burrow_charge_claim(struct Burrow *v, const struct Proc *p) {
 }
 
 void burrow_charge_restore(struct Burrow *v, const struct Proc *p, u32 pages) {
-    if (!v || !p || pages == 0) return;
+    if (!v || !p || !p->as || pages == 0) return;
     if (v->magic != VMO_MAGIC)
         extinction("burrow_charge_restore on corrupted BURROW (use-after-free?)");
     spin_lock(&v->lock);
@@ -1004,7 +1035,7 @@ void burrow_charge_restore(struct Burrow *v, const struct Proc *p, u32 pages) {
         spin_unlock(&v->lock);
         extinction("burrow_charge_restore: the region was re-charged mid-settle");
     }
-    v->charge_pid   = p->pid;
+    v->charge_as_id = p->as->id;
     v->charge_pages = pages;
     spin_unlock(&v->lock);
 }
@@ -1067,55 +1098,42 @@ int burrow_map_in(struct AddrSpace *as, bool exempt, struct Burrow *v,
     struct Vma *vma = vma_alloc(vaddr, vaddr + length, prot, v, /*offset=*/0);
     if (!vma) return -1;
 
-    // vma_insert returns -1 on overlap. On overlap, the Vma is still
-    // owned by us — vma_free releases the BURROW mapping ref symmetrically.
-    if (vma_insert_in(as, exempt, vma) != 0) {
+    // vma_insert refuses an overlap (-1) or the VMA cap (-T_E_NOMEM: a resource
+    // refusal the caller may report as one, B-1a' audit F18). Either way the
+    // Vma is still owned by us -- vma_free releases the BURROW mapping ref
+    // symmetrically.
+    int irc = vma_insert_in(as, exempt, vma);
+    if (irc != 0) {
         vma_free(vma);
-        return -1;
+        return irc == -(int)T_E_NOMEM ? irc : -1;
     }
     return 0;
 }
 
 // DISTRO D-3b: burrow_map_fixed -- install `v` over [vaddr, vaddr+length),
-// which must lie wholly inside one existing VMA, splitting that VMA around the
-// window. The MAP_FIXED half of the phenotype mmap; see vma.h's
-// vma_replace_range_in for the surgery's contract and its hole-free argument.
-//
-// This wrapper owns exactly two things the surgery does not: the address
-// arithmetic (the same bounds burrow_map_in enforces) and the PTE teardown.
-//
-// The teardown comes FIRST, and the order is load-bearing. Hardware resolves a
-// leaf PTE without taking as->lock, so a thread already in EL0 could read the
-// window through a stale PTE at any instant -- the only thing that stops it is
-// the PTE being gone and the TLB invalidated, after which the access faults and
-// blocks on the lock we hold. Mutating first and clearing second would leave a
-// window in which the new mapping is live but old bytes are still reachable.
-//
-// A REFUSED surgery therefore costs one wasted teardown of a window we did not
-// modify. That is benign -- every page refaults from backing that never changed
-// -- and it is the deliberate price of keeping the VMA-shape rules in ONE place
-// (the surgery) instead of mirroring them here to predict the refusal.
-int burrow_map_fixed_in(struct AddrSpace *as, bool exempt, struct Burrow *v,
-                        u64 vaddr, size_t length, u32 prot, u64 burrow_offset,
-                        struct Burrow **out_free) {
-    // D-3c re-audit F5: the surgery may free a sleeping-free FILE Burrow on its
-    // exact-cover arm; defer it to the caller past as->lock (see vma.h). NULL on
-    // every path but that free.
+// replacing whatever is there. B-1a': the surgery is vma_replace_range_in (the
+// range detach, then the insert); this wrapper owns only the address
+// arithmetic (the same bounds burrow_map_in enforces). The PTE teardown that
+// used to run here FIRST -- unconditionally, so a refused surgery cost the
+// window a re-fault -- is the detach's own now, ordered after its refusals and
+// before its first release, which is the same hardware argument (a PTE resolves
+// without as->lock, so it must be gone before the page or mapping it justified)
+// with no wasted teardown.
+int burrow_map_fixed_in(struct AddrSpace *as, bool exempt, struct Proc *payer,
+                        struct Burrow *v, u64 vaddr, size_t length, u32 prot,
+                        u64 burrow_offset, struct Burrow **out_free) {
     // F7 (re-audit round 3): out_free MANDATORY -- a NULL would leak the replaced
-    // Burrow (vma_free_deferred does not free). Fail loud at entry, F6 parity.
+    // Burrows (vma_free_deferred does not free). Fail loud at entry, F6 parity.
     if (!out_free) extinction("burrow_map_fixed_in without out_free (would leak the replaced Burrow)");
     *out_free = NULL;
-    if (!as || !v) return -1;
-    if (length == 0) return -1;
-    if (vaddr  & (PAGE_SIZE - 1)) return -1;
-    if (length & (PAGE_SIZE - 1)) return -1;
-    if (vaddr + length < vaddr) return -1;
-    if (vaddr + length > USER_VA_TOP) return -1;
+    if (!as || !v)                      return -(int)T_E_INVAL;
+    if (length == 0)                    return -(int)T_E_INVAL;
+    if (vaddr  & (PAGE_SIZE - 1))       return -(int)T_E_INVAL;
+    if (length & (PAGE_SIZE - 1))       return -(int)T_E_INVAL;
+    if (vaddr + length < vaddr)         return -(int)T_E_INVAL;
+    if (vaddr + length > USER_VA_TOP)   return -(int)T_E_INVAL;
 
-    // RW-1 B-F1: the asid arg is vestigial (all-ASID `tlbi vaae1is`); pass 0.
-    (void)mmu_uninstall_user_range(as->pgtable_root, 0, vaddr, vaddr + length);
-
-    return vma_replace_range_in(as, exempt, vaddr, (u64)length,
+    return vma_replace_range_in(as, exempt, payer, vaddr, (u64)length,
                                 v, prot, burrow_offset, out_free);
 }
 
@@ -1125,8 +1143,8 @@ int burrow_map_fixed(struct Proc *p, struct Burrow *v, u64 vaddr, size_t length,
     // replaced Burrow). Fail loud at the first entry rather than deep in the surgery.
     if (!out_free) extinction("burrow_map_fixed without out_free (would leak the replaced Burrow)");
     *out_free = NULL;
-    if (!p) return -1;
-    return burrow_map_fixed_in(p->as, proc_resource_exempt(p), v, vaddr, length,
+    if (!p)                             return -(int)T_E_INVAL;
+    return burrow_map_fixed_in(p->as, proc_resource_exempt(p), p, v, vaddr, length,
                                prot, burrow_offset, out_free);
 }
 
@@ -1156,10 +1174,11 @@ int burrow_protect_in(struct AddrSpace *as, bool exempt,
     // Uninstall FIRST (the D-3b rule; addrspace_clone's phase-1 argument): a
     // peer thread holding an installed writable PTE stores in hardware with no
     // fault and no lock, so the PTE must be gone before the prot that
-    // justified it is. mmu_uninstall_user_range allocates nothing and cannot
-    // fail; idempotent on never-faulted pages. asid arg vestigial (all-ASID
-    // tlbi vaae1is).
-    (void)mmu_uninstall_user_range(as->pgtable_root, 0, vaddr, vaddr + length);
+    // justified it is. vma_uninstall_range_in allocates nothing and cannot
+    // fail; idempotent on never-faulted pages; a FILE mapping's leaves refund
+    // the holder's charge, re-taken by the re-fault (audit F8). asid arg
+    // vestigial (all-ASID tlbi vaae1is).
+    (void)vma_uninstall_range_in(as, vaddr, vaddr + length);
 
     return vma_reprotect_range_in(as, exempt, vaddr, (u64)length, prot, seal);
 }
@@ -1217,8 +1236,8 @@ int burrow_unmap_reporting(struct Proc *p, u64 vaddr, size_t length,
     // we ignore the rc (vma_free still runs).
     // RW-1 B-F1: the asid arg is vestigial (mmu_uninstall_user_range does an
     // all-ASID `tlbi vaae1is`); pass 0 now that the Proc has no permanent ASID.
-    (void)mmu_uninstall_user_range(p->as->pgtable_root, 0,
-                                   vaddr, want_end);
+    // B-1a' audit F8: per mapping, so a FILE mapping's leaves refund the holder.
+    (void)vma_uninstall_range_in(p->as, vaddr, want_end);
 
     // G-2: a SHARED_IN VMA's teardown uncharges the client's shared-in budget
     // (paired with burrow_share_into's charge; same p->vma_lock hold, so the
@@ -1252,14 +1271,64 @@ int burrow_unmap(struct Proc *p, u64 vaddr, size_t length) {
 // Overcommit / I-32: lazy-anon decommit + resident-page accounting (ARCH §6.5).
 // =============================================================================
 
-// burrow_decommit: the madvise(MADV_DONTNEED) analog (SYS_BURROW_DECOMMIT). Release
-// the resident pages backing [vaddr, vaddr+length) of a BURROW_TYPE_ANON_LAZY
-// mapping WITHOUT removing the VMA. See burrow.h for the full contract. The caller
-// (sys_burrow_decommit_for_proc) holds p->vma_lock; that lock excludes a concurrent
-// faulter from filepages (a fault on the same Proc serializes on vma_lock), so the
-// per-slot read/NULL is race-free against the install-once fault arm.
-int burrow_decommit(struct Proc *p, u64 vaddr, size_t length) {
-    if (!p)                          return -1;
+// A plain ANON_LAZY mapping: the only kind a decommit or a range detach releases
+// page by page. A shared-in mapping is another Proc's memory (its pages are the
+// sharer's commit, never this address space's charge); a guard has no Burrow.
+static bool lazy_release_admits(const struct Vma *v) {
+    if (!v || !v->burrow || v->burrow->magic != VMO_MAGIC) return false;
+    if (v->flags & VMA_FLAG_SHARED_IN)                     return false;
+    return v->burrow->type == BURROW_TYPE_ANON_LAZY;
+}
+
+// The per-mapping release. Caller holds as->lock, has admitted `v` and has
+// already uninstalled the range's PTEs. The take runs under v->lock; every
+// free -- the page (a COW put, so the buddy gets it only from the last
+// holder) and the nodes the take emptied -- runs OUTSIDE it (leaf order). The
+// I-32 uncharge: the nodes settle inside the take; the pages settle here, once,
+// for the whole overlap. `freed` counts SLOTS, not pages returned to the buddy:
+// this address space stops mapping the page either way, so its RSS drops
+// whether or not a co-sharer keeps the page alive (LINEAGE L-4b).
+//
+// The walk is by RESIDENT slot (pagemap_take_next), never by slot: a
+// reservation costs nothing and may be the whole window, so a release must
+// cost what was touched, not what was reserved -- the same bound
+// mmu_uninstall_user_range keeps for the PTEs (the B-1a audit's F2 shape).
+u32 burrow_release_lazy_range_in(struct AddrSpace *as, const struct Vma *v,
+                                 u64 lo, u64 hi) {
+    if (!as || !lazy_release_admits(v))              return 0;
+    if (lo < v->vaddr_start || hi > v->vaddr_end)     return 0;
+    struct Burrow *b = v->burrow;
+    u32 freed = 0;
+    size_t slot    = (size_t)((v->burrow_offset + (lo - v->vaddr_start)) / PAGE_SIZE);
+    size_t hi_slot = slot + (size_t)((hi - lo) / PAGE_SIZE);
+    while (slot < hi_slot) {
+        struct page *pg = NULL;
+        struct page *nodes[PAGEMAP_MAX_DEPTH];
+        u32 nnodes = 0;
+        size_t took = pagemap_take_next(&b->pm, &b->lock, slot, hi_slot, as,
+                                        &pg, nodes, &nnodes);
+        for (u32 k = 0; k < nnodes; k++) free_pages(nodes[k], 0);
+        // Nothing taken means nothing left in the range: `took` is then the
+        // take's CLAMPED bound, which sits below hi_slot for a mapping past
+        // its Burrow's end (refused at construction, vma_alloc; audit F3), so
+        // the loop ends on the take's answer, never on its own arithmetic.
+        if (!pg) break;
+        if (cow_page_put(pg))
+            free_pages(pg, 0);
+        freed++;
+        slot = took + 1;
+    }
+    if (freed) addrspace_uncharge_pages(as, freed);
+    return freed;
+}
+
+// burrow_decommit_in: the madvise(MADV_DONTNEED) analog (SYS_BURROW_DECOMMIT).
+// See burrow.h for the contract. B-1a': the range may span the pieces a protect
+// cut, so it is walked as a range -- one scan from the head, then successors
+// (the B-1a audit's F2 shape) -- with every refusal decided before the first
+// PTE goes, so a refused call changes nothing.
+int burrow_decommit_in(struct AddrSpace *as, u64 vaddr, size_t length) {
+    if (!as)                         return -1;
     if (length == 0)                 return -1;
     if (vaddr & (PAGE_SIZE - 1))     return -1;
     if (length & (PAGE_SIZE - 1))    return -1;
@@ -1267,77 +1336,97 @@ int burrow_decommit(struct Proc *p, u64 vaddr, size_t length) {
     if (end < vaddr)                 return -1;     // overflow
     if (end > USER_VA_TOP)           return -1;
 
-    // The range must fall WITHIN a single BURROW_TYPE_ANON_LAZY VMA. vma_lookup
-    // finds the VMA covering vaddr; require it to span the whole [vaddr, end) and be
-    // ANON_LAZY (decommit is meaningless on eager anon / FILE / MMIO / DMA).
-    struct Vma *vma = vma_lookup(p, vaddr);
-    if (!vma)                                       return -1;
-    if (vaddr < vma->vaddr_start || end > vma->vaddr_end) return -1;  // not within one VMA
-    struct Burrow *v = vma->burrow;
-    if (!v || v->magic != VMO_MAGIC)                return -1;
-    if (v->type != BURROW_TYPE_ANON_LAZY)           return -1;
+    // 1. Admission: contiguous cover by plain ANON_LAZY mappings, nothing else.
+    u64 cur = vaddr;
+    for (struct Vma *v = vma_next_overlap_in(as, vaddr, end);
+         v && v->vaddr_start < end; v = v->next) {
+        if (v->vaddr_start > cur)          return -1;   // a hole
+        if (!lazy_release_admits(v))       return -1;   // not ours to release
+        cur = v->vaddr_end;
+    }
+    if (cur < end)                         return -1;   // a hole at the tail
 
-    // 1. Clear every leaf PTE in the range + broadcast TLBI -- BEFORE any page is
+    // 2. Clear every leaf PTE in the range + broadcast TLBI -- BEFORE any page is
     //    freed to the buddy, so no stale PTE/TLB entry aliases a recycled page (the
     //    burrow_unmap / "MMU user-PTE clear + TLBI" discipline). Idempotent on
-    //    never-faulted pages. asid arg vestigial (all-ASID tlbi). Held under vma_lock.
-    (void)mmu_uninstall_user_range(p->as->pgtable_root, 0, vaddr, end);
+    //    never-faulted pages; absent subtrees are skipped. asid arg vestigial.
+    (void)vma_uninstall_range_in(as, vaddr, end);
 
-    // 2. Free the resident slot pages + count them. The range maps to filepages
-    //    slots; slot = (vma->burrow_offset + (page_va - vma->vaddr_start)) / PAGE_SIZE
-    //    (burrow_offset is 0 for an attach VMA, but compute it generally). free_pages
-    //    runs OUTSIDE v->lock (leaf-lock discipline -- it takes the buddy lock); grab
-    //    + NULL the slot under v->lock (lock order vma_lock -> v->lock), free after.
-    u32 freed = 0;
-    for (u64 va = vaddr; va < end; va += PAGE_SIZE) {
-        u64    burrow_off = vma->burrow_offset + (va - vma->vaddr_start);
-        size_t slot       = burrow_off / PAGE_SIZE;
-        struct page *pg = NULL;
-        spin_lock(&v->lock);
-        if (v->filepages && slot < v->page_count && v->filepages[slot]) {
-            pg = v->filepages[slot];
-            v->filepages[slot] = NULL;
-        }
-        spin_unlock(&v->lock);
-        if (pg) {
-            // LINEAGE L-4b: releasing a SLOT is not the same as freeing a PAGE
-            // once the page can be COW-shared. The page goes back to the buddy
-            // only when this was its last holder; `freed` keeps counting SLOTS,
-            // because that is what the I-32 uncharge below is about -- this
-            // address space stops mapping the page either way, so its RSS drops
-            // whether or not a co-sharer keeps the page alive.
-            if (cow_page_put(pg))
-                free_pages(pg, 0);        // outside v->lock (leaf order)
-            freed++;
-        }
+    // 3. Release each mapping's overlap: pages + emptied nodes freed, page_count
+    //    uncharged for both. A later touch re-faults a fresh zero page + re-charges.
+    for (struct Vma *v = vma_next_overlap_in(as, vaddr, end);
+         v && v->vaddr_start < end; v = v->next) {
+        u64 lo = v->vaddr_start > vaddr ? v->vaddr_start : vaddr;
+        u64 hi = v->vaddr_end   < end   ? v->vaddr_end   : end;
+        (void)burrow_release_lazy_range_in(as, v, lo, hi);
     }
-
-    // 3. Uncharge the I-32 page_count for the released pages (the same per-page charge
-    //    the fault arm made). Under vma_lock, so it pairs exactly with the charge. A
-    //    later touch re-faults a fresh zero page + re-charges.
-    if (freed)
-        proc_page_uncharge(p, freed);
-
     return 0;
 }
 
-// burrow_lazy_resident_count: the count of resident (faulted-in, not-decommitted)
-// pages in an ANON_LAZY Burrow -- the amount SYS_BURROW_DETACH uncharges (a lazy
-// region charged page_count per FAULT, so a full detach uncharges only the resident
-// pages). Read under v->lock (caller holds vma_lock; order vma_lock -> v->lock).
-// NOT const-qualified: it TAKES v->lock (a logically-const observation that
+int burrow_decommit(struct Proc *p, u64 vaddr, size_t length) {
+    if (!p || !p->as) return -1;
+    return burrow_decommit_in(p->as, vaddr, length);
+}
+
+// burrow_lazy_resident_count: O(1) since B-1a' -- the pagemap keeps the count.
+// Read under v->lock (caller holds as->lock; order as->lock -> v->lock). NOT
+// const-qualified: it TAKES v->lock (a logically-const observation that
 // nonetheless mutates the lock word -- audit F3, dropping the const-cast).
 u32 burrow_lazy_resident_count(struct Burrow *v) {
     if (!v || v->magic != VMO_MAGIC)        return 0;
     if (v->type != BURROW_TYPE_ANON_LAZY)   return 0;
-    u32 n = 0;
     spin_lock(&v->lock);
-    if (v->filepages) {
-        for (size_t i = 0; i < v->page_count; i++)
-            if (v->filepages[i]) n++;
-    }
+    u32 n = pagemap_live(&v->pm) ? (u32)pagemap_resident(&v->pm) : 0;
     spin_unlock(&v->lock);
     return n;
+}
+
+u32 burrow_lazy_footprint(struct Burrow *v) {
+    if (!v || v->magic != VMO_MAGIC)        return 0;
+    if (v->type != BURROW_TYPE_ANON_LAZY)   return 0;
+    spin_lock(&v->lock);
+    u32 n = pagemap_live(&v->pm)
+          ? (u32)pagemap_resident(&v->pm) + pagemap_node_count(&v->pm) : 0;
+    spin_unlock(&v->lock);
+    return n;
+}
+
+u32 burrow_image_resident_count(struct Burrow *v) {
+    if (!v || v->magic != VMO_MAGIC)        return 0;
+    if (v->type != BURROW_TYPE_FILE)        return 0;
+    spin_lock(&v->lock);
+    u32 n = pagemap_live(&v->pm) ? (u32)pagemap_resident(&v->pm) : 0;
+    spin_unlock(&v->lock);
+    return n;
+}
+
+// The strip walks by RESIDENT slot (pagemap_take_next), so an image mostly
+// unread costs what was read, and stops at `want` pages -- the lowest slots
+// go first and a later strip of the same image continues from what is left --
+// so a refused allocation costs the cache its own size, never a whole image
+// (B-1a' audit F14). The take runs under v->lock and every free outside it
+// (leaf order: the buddy sits below v->lock). No address space is refunded:
+// a FILE page's holders were refunded when their leaves went, and an idle
+// image has none; the map's nodes were never charged to a space.
+u32 burrow_image_strip(struct Burrow *v, u32 want) {
+    if (!v || v->magic != VMO_MAGIC)        return 0;
+    if (v->type != BURROW_TYPE_FILE)        return 0;
+    u32 freed = 0;
+    size_t slot = 0;
+    const size_t hi = v->page_count;
+    while (slot < hi && freed < want) {
+        struct page *pg = NULL;
+        struct page *nodes[PAGEMAP_MAX_DEPTH];
+        u32 nnodes = 0;
+        size_t took = pagemap_take_next(&v->pm, &v->lock, slot, hi, NULL,
+                                        &pg, nodes, &nnodes);
+        for (u32 k = 0; k < nnodes; k++) free_pages(nodes[k], 0);
+        if (!pg) break;
+        free_pages(pg, 0);
+        freed++;
+        slot = took + 1;
+    }
+    return freed;
 }
 
 // =============================================================================
@@ -1595,14 +1684,15 @@ void burrow_file_install_page_for_test(struct Burrow *v, size_t idx) {
         extinction("burrow_file_install_page_for_test: bad Burrow");
     if (v->type != BURROW_TYPE_FILE)
         extinction("burrow_file_install_page_for_test: not a FILE Burrow");
-    if (!v->filepages || idx >= v->page_count)
+    if (!pagemap_live(&v->pm) || idx >= v->page_count)
         extinction("burrow_file_install_page_for_test: idx out of range");
-    if (v->filepages[idx])
+    if (pagemap_get(&v->pm, idx))
         extinction("burrow_file_install_page_for_test: slot already resident");
-    struct page *p = alloc_pages(0, KP_ZERO);
+    struct page *p = alloc_user_pages(0, KP_ZERO, true);
     if (!p)
         extinction("burrow_file_install_page_for_test: alloc_pages OOM");
-    v->filepages[idx] = p;
+    if (pagemap_install(&v->pm, &v->lock, idx, p, NULL, true, NULL) != 0)
+        extinction("burrow_file_install_page_for_test: install failed");
 }
 
 struct page *burrow_file_slot_for_test(const struct Burrow *v, size_t idx) {
@@ -1610,8 +1700,7 @@ struct page *burrow_file_slot_for_test(const struct Burrow *v, size_t idx) {
         extinction("burrow_file_slot_for_test: bad Burrow");
     if (v->type != BURROW_TYPE_FILE)
         extinction("burrow_file_slot_for_test: not a FILE Burrow");
-    if (!v->filepages || idx >= v->page_count) return NULL;
-    return v->filepages[idx];
+    return pagemap_get(&v->pm, idx);
 }
 
 struct page *burrow_lazy_slot_for_test(const struct Burrow *v, size_t idx) {
@@ -1619,7 +1708,6 @@ struct page *burrow_lazy_slot_for_test(const struct Burrow *v, size_t idx) {
         extinction("burrow_lazy_slot_for_test: bad Burrow");
     if (v->type != BURROW_TYPE_ANON_LAZY)
         extinction("burrow_lazy_slot_for_test: not an ANON_LAZY Burrow");
-    if (!v->filepages || idx >= v->page_count) return NULL;
-    return v->filepages[idx];
+    return pagemap_get(&v->pm, idx);
 }
 #endif

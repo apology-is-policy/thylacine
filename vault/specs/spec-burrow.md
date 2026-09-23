@@ -11,7 +11,7 @@ cfgs:
   - "burrow_buggy_never_free.cfg -- never free: NoUseAfterFree, delayed (43)"
 gate: "any change to the dual refcount, the free decision, or the type-dispatched release arm"
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-09-23
 ---
 ## Abstraction
 
@@ -41,7 +41,10 @@ merely asserted.
 - the **cross-Proc share**, where one object is reachable from two address
   spaces. Same arithmetic, references originating in different Procs, resting on
   the argument that a count does not care where a reference came from;
-- **partial unmap**, which does not exist in either;
+- **partial unmap**, which exists in the code since B-1a' ([[sub-kernel-vma]]'s
+  range detach) and stays beneath this model: a trim moves a mapping's bounds
+  without moving `mapping_count`, and the slot accounting it must keep is
+  [[spec-capacity]]'s;
 - the **magic sentinel** and the slab recycling it is placed against — a
   defense against violating the invariant, not part of stating it.
 
@@ -71,12 +74,17 @@ cosmetic.
 The model assumes an object's pages are **one thing**, allocated at create and
 released at free. Two of the six types are **sparse**: their pages arrive one at
 a time on fault and can be released individually while the object stays alive.
-For those, "the pages are alive" is not a boolean, and the release arm walks an
-array rather than making a single call.
+For those, "the pages are alive" is not a boolean, and the release arm destroys
+a pagemap ([[sub-kernel-pagemap]]; since B-1a' -- a flat array before) rather
+than making a single call.
 
 The dual-refcount arithmetic is genuinely unaffected — the object's lifetime is
-still exactly both-counts-above-zero, and the sparse array is released *at* the
-free transition like any other backing. What is unmodeled is the **per-slot**
+still exactly both-counts-above-zero, and the pagemap is destroyed *at* the
+free transition like any other backing -- UNCHARGED, which is the reason every
+unmapping path releases its slots before the free can run ([[spec-capacity]]).
+B-1a' changed that type-dispatched release arm and lifted `BURROW_RESERVE_MAX`
+to the burrow window; neither touches the two counts, and the chunk re-runs
+this gate at its close. What is unmodeled is the **per-slot**
 lifecycle underneath: install-once under the lock, the blocking page-in done
 outside it and installed on re-entry, and the decommit path that frees a
 resident slot while the object lives. Those are governed by the object's lock

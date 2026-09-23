@@ -698,7 +698,7 @@ void test_exec_user_stack_guard(void) {
 
     // Reservation: a VMA overlapping the guard is rejected by
     // vma_insert — a future mapping allocator cannot fill the guard.
-    struct Burrow *b = burrow_create_anon(PAGE_SIZE);
+    struct Burrow *b = burrow_create_anon(PAGE_SIZE, false);
     TEST_ASSERT(b != NULL, "burrow_create_anon for the overlap probe");
     struct Vma *intruder = vma_alloc(EXEC_USER_STACK_GUARD_BASE,
                                      EXEC_USER_STACK_GUARD_BASE + PAGE_SIZE,
@@ -1128,8 +1128,83 @@ void test_exec_from_spoor_bss_only_text_icache_synced(void) {
 
 void test_execve_load_into_detached(void);
 void test_execve_load_into_rejects_dirty(void);
+void test_execve_load_refuses_nomem_at_the_pool_edge(void);
+void test_execve_load_refuses_nomem_on_the_frame(void);
 void test_execve_failed_load_leaves_target_drainable(void);
 void test_exec_native_rejects_dynamic_linux(void);
+
+// B-1a' audit F15: a refused allocation inside the load is a resource refusal
+// (-T_E_NOMEM), not a malformed binary (-1, which sys_execve_core reports as
+// EINVAL); the syscall reports the one the load returns.
+void test_execve_load_refuses_nomem_at_the_pool_edge(void) {
+    (void)image_cache_evict_idle_for_test();      // nothing idle for the reclaim to strip
+    u32 flags[2] = { PF_R | PF_X, PF_R | PF_W };
+    size_t size = build_elf(flags, 2, /*filesz=*/0x1000);
+    g_blob_dev_size = size;
+
+    struct Spoor *exe = spoor_alloc(&g_blob_dev);
+    TEST_ASSERT(exe != NULL, "spoor_alloc");
+    exe->qid.path = 0x1E2DE9ull;      // distinct Image key
+    exe->qid.vers = 3;
+
+    struct AddrSpace *nas = addrspace_alloc(proc_default_page_budget());
+    TEST_ASSERT(nas != NULL, "addrspace_alloc");
+
+    const u32 room = capacity_pool_pages() - capacity_pool_charged();
+    TEST_ASSERT(room > 0, "the pool has room to park");
+    capacity_pool_park_for_test(room);
+    u64 entry = 0, sp = 0;
+    int rc = exec_load_into(nas, /*exempt=*/false, /*nsp=*/NULL, PHENO_NATIVE, exe, size, NULL, 0,
+                            NULL, 0, 0, NULL, 0, 0, &entry, &sp);
+    capacity_pool_unpark_for_test(room);
+    TEST_EXPECT_EQ(rc, -T_E_NOMEM, "the pool's refusal travels up as -T_E_NOMEM, not -1");
+
+    vma_drain_in(nas);
+    addrspace_unref(nas);
+    spoor_clunk(exe);
+}
+
+// B-1a' audit F18: the same refusal met on the FRAME. With no populated RW
+// head (filesz 0: the FILE text allocates nothing until a fault, the RW tail
+// is sparse) the load's only allocation is the startup frame's pages at the
+// top of the sparse stack -- refused, the frame builder answered 0 and the
+// load -1 (EINVAL); the pool's edge is -T_E_NOMEM wherever it is met.
+void test_execve_load_refuses_nomem_on_the_frame(void) {
+    (void)image_cache_evict_idle_for_test();      // nothing idle for the reclaim to strip
+    u32 flags[2] = { PF_R | PF_X, PF_R | PF_W };
+    size_t size = build_elf(flags, 2, /*filesz=*/0x1000);
+    struct Elf64_Phdr *ph = (struct Elf64_Phdr *)(g_elf_blob + sizeof(struct Elf64_Ehdr));
+    ph[1].p_filesz = 0;               // the RW segment: no populated head, nothing to allocate
+    g_blob_dev_size = size;
+
+    struct Spoor *exe = spoor_alloc(&g_blob_dev);
+    TEST_ASSERT(exe != NULL, "spoor_alloc");
+    exe->qid.path = 0x1E2DEAull;      // distinct Image key
+    exe->qid.vers = 3;
+
+    struct AddrSpace *nas = addrspace_alloc(proc_default_page_budget());
+    TEST_ASSERT(nas != NULL, "addrspace_alloc");
+
+    const u32 room = capacity_pool_pages() - capacity_pool_charged();
+    TEST_ASSERT(room > 0, "the pool has room to park");
+    capacity_pool_park_for_test(room);
+    u64 entry = 0, sp = 0;
+    int rc = exec_load_into(nas, /*exempt=*/false, /*nsp=*/NULL, PHENO_NATIVE, exe, size, NULL, 0,
+                            NULL, 0, 0, NULL, 0, 0, &entry, &sp);
+    capacity_pool_unpark_for_test(room);
+    TEST_EXPECT_EQ(rc, -T_E_NOMEM, "the frame's refused populate travels up as -T_E_NOMEM, not -1");
+    TEST_EXPECT_EQ(sp, 0ull, "no frame");
+    // CONTROL: the refusal was the frame's, not a segment's -- every mapping
+    // before it is in place.
+    TEST_ASSERT(vma_lookup_in(nas, 0x10000ull) != NULL, "CONTROL: the text segment is mapped");
+    TEST_ASSERT(vma_lookup_in(nas, 0x20000ull) != NULL, "CONTROL: the RW segment is mapped");
+    TEST_ASSERT(vma_lookup_in(nas, EXEC_USER_STACK_BASE) != NULL,
+                "CONTROL: the stack is mapped -- the load reached the frame");
+
+    vma_drain_in(nas);
+    addrspace_unref(nas);
+    spoor_clunk(exe);
+}
 
 void test_execve_load_into_detached(void) {
     struct Proc *p = make_proc();
@@ -1144,7 +1219,7 @@ void test_execve_load_into_detached(void) {
     exe->qid.path = 0x1E2DE7ull;      // distinct Image key
     exe->qid.vers = 3;
 
-    struct AddrSpace *nas = addrspace_alloc(PROC_PAGE_MAX);
+    struct AddrSpace *nas = addrspace_alloc(proc_default_page_budget());
     TEST_ASSERT(nas != NULL, "addrspace_alloc");
     TEST_ASSERT(nas != p->as, "the target is a DIFFERENT address space");
 
@@ -1200,7 +1275,7 @@ void test_execve_load_into_rejects_dirty(void) {
     exe->qid.path = 0x1E2DE8ull;
     exe->qid.vers = 3;
 
-    struct AddrSpace *nas = addrspace_alloc(PROC_PAGE_MAX);
+    struct AddrSpace *nas = addrspace_alloc(proc_default_page_budget());
     TEST_ASSERT(nas != NULL, "addrspace_alloc");
 
     // Load once -- succeeds and leaves the target populated.
@@ -1247,7 +1322,7 @@ void test_execve_failed_load_leaves_target_drainable(void) {
     exe->qid.path = 0x1E2DE9ull;
     exe->qid.vers = 3;
 
-    struct AddrSpace *nas = addrspace_alloc(PROC_PAGE_MAX);
+    struct AddrSpace *nas = addrspace_alloc(proc_default_page_budget());
     TEST_ASSERT(nas != NULL, "addrspace_alloc");
 
     u64 entry = 0, sp = 0;
@@ -1320,7 +1395,7 @@ void test_exec_native_rejects_dynamic_linux(void) {
     exe->qid.path = 0x1D7A11ull;
     exe->qid.vers = 1;
 
-    struct AddrSpace *nas = addrspace_alloc(PROC_PAGE_MAX);
+    struct AddrSpace *nas = addrspace_alloc(proc_default_page_budget());
     TEST_ASSERT(nas != NULL, "addrspace_alloc");
 
     u64 entry = 0, sp = 0;
@@ -1381,7 +1456,7 @@ void test_exec_load_failure_leaves_phenotype(void) {
     exe->qid.path = 0x1D7A12ull;
     exe->qid.vers = 1;
 
-    struct AddrSpace *nas = addrspace_alloc(PROC_PAGE_MAX);
+    struct AddrSpace *nas = addrspace_alloc(proc_default_page_budget());
     TEST_ASSERT(nas != NULL, "addrspace_alloc");
     u64 entry = 0, sp = 0;
 
@@ -1518,7 +1593,7 @@ void test_exec_interp_dispatch_follows_parameter(void) {
     exe->qid.vers = 1;
 
     // Decided LINUX: the dispatch must follow the parameter and load /hello.
-    struct AddrSpace *nas = addrspace_alloc(PROC_PAGE_MAX);
+    struct AddrSpace *nas = addrspace_alloc(proc_default_page_budget());
     TEST_ASSERT(nas != NULL, "addrspace_alloc");
     u64 entry = 0, sp = 0;
     int rc_linux = exec_load_into(nas, false, kp, PHENO_LINUX, exe, size, "x", 1,
@@ -1530,7 +1605,7 @@ void test_exec_interp_dispatch_follows_parameter(void) {
     addrspace_unref(nas);
 
     // Decided NATIVE, same fixture, same Proc: the control refuses.
-    nas = addrspace_alloc(PROC_PAGE_MAX);
+    nas = addrspace_alloc(proc_default_page_budget());
     TEST_ASSERT(nas != NULL, "addrspace_alloc (control)");
     entry = 0; sp = 0;
     int rc_native = exec_load_into(nas, false, kp, PHENO_NATIVE, exe, size, "x", 1,
@@ -1603,11 +1678,20 @@ void test_exec_writable_segment_is_sparse(void) {
     TEST_EXPECT_EQ((u64)b[64], 0ull, "the page's tail past filesz reads zero");
 
     // I-32: exec-image pages are now on the page axis (they were uncharged while
-    // eager). Exactly two: this segment's file-backed page, and the one page the
-    // argv/auxv frame occupies at the top of the stack. The vDSO is mapped from a
-    // kernel-owned Burrow and charges nothing.
-    TEST_EXPECT_EQ((u64)p->as->page_count, 2ull,
-        "charged exactly the pages exec made resident (data 1 + stack frame 1)");
+    // eager). Exactly two DATA pages: this segment's file-backed page, and the
+    // one page the argv/auxv frame occupies at the top of the stack. The vDSO is
+    // mapped from a kernel-owned Burrow and charges nothing. B-1a': the pagemap's
+    // nodes are charged where the data is, so the figure is data + nodes -- this
+    // segment's 1024-slot map holds its page under a root and a leaf (2), the
+    // stack's 256-slot map under one node (1); the count is read from the maps
+    // rather than restated, so the claim stays "data + exactly the nodes".
+    struct Vma *stk = vma_lookup(p, EXEC_USER_STACK_BASE);
+    TEST_ASSERT(stk != NULL && stk->burrow != NULL, "stack VMA + Burrow");
+    TEST_EXPECT_EQ((u64)pagemap_node_count(&vma->burrow->pm), 2ull, "root + leaf for the segment");
+    TEST_EXPECT_EQ((u64)pagemap_node_count(&stk->burrow->pm), 1ull, "one node for the stack");
+    TEST_EXPECT_EQ((u64)p->as->page_count,
+                   2ull + pagemap_node_count(&vma->burrow->pm) + pagemap_node_count(&stk->burrow->pm),
+        "charged exactly the pages exec made resident (data 1 + stack frame 1) plus their nodes");
 
     drop_proc(p);
 }
@@ -1641,8 +1725,10 @@ void test_exec_stack_is_sparse(void) {
     TEST_ASSERT(tv != NULL && tv->burrow != NULL, "text VMA + Burrow");
     TEST_EXPECT_EQ((int)tv->burrow->type, (int)BURROW_TYPE_ANON,
         "an executable segment stays EAGER (the I-cache reason)");
-    TEST_EXPECT_EQ((u64)p->as->page_count, 1ull,
-        "only the stack frame's page is charged (the eager text is not)");
+    // B-1a': plus the one node the stack's 256-slot map holds it under.
+    TEST_EXPECT_EQ((u64)pagemap_node_count(&sv->burrow->pm), 1ull, "one node for the stack");
+    TEST_EXPECT_EQ((u64)p->as->page_count, 1ull + pagemap_node_count(&sv->burrow->pm),
+        "only the stack frame's page is charged (the eager text is not), plus its node");
 
     drop_proc(p);
 }

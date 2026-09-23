@@ -509,7 +509,9 @@ static void exception_sync_lower_el_impl(struct exception_context *ctx) {
             // FAULT_FATAL comment below anticipated): a file-backed
             // (BURROW_TYPE_FILE) demand-page I/O error -- a dead/wedged FS
             // server, or a failed/death-interrupted dev->read while faulting in
-            // executable text. Terminate the faulting Proc with snare:bus (POSIX
+            // executable text -- or an abort no page install resolves, an
+            // alignment fault or a synchronous external abort on a mapped page
+            // (B-1a' audit F17). Terminate the faulting Proc with snare:bus (POSIX
             // SIGBUS for an I/O error on a mapped file), attributable to the
             // faulting VA -- NEVER a silent zero-fill of text, NEVER a kernel
             // extinction. proc_fault_terminate is noreturn (exits()).

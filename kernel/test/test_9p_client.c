@@ -897,7 +897,7 @@ static int test_build_clunk(struct p9_session *s, u8 *out, size_t cap, void *ctx
 // A demuxed reply drives on_complete, which posts a CQE carrying the op's
 // user_data + the mapped (success = 0) result.
 void test_9p_client_async_op_posts_cqe(void) {
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create(8,16)");
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
     struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
@@ -934,7 +934,7 @@ void test_9p_client_async_op_posts_cqe(void) {
 // A session death (transport error) completes an in-flight async op with an
 // error CQE -- there is no submitter rendez to wake (mark_dead's async arm).
 void test_9p_client_async_session_death_posts_error_cqe(void) {
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create(8,16)");
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
 
@@ -975,7 +975,7 @@ void test_9p_client_async_session_death_posts_error_cqe(void) {
 // terminal CQE, distinct from the transport -EIO above. force_eof drops the
 // staged reply WITHOUT closing the transport, so the next recv returns 0.
 void test_9p_client_async_peer_gone_posts_nodev_cqe(void) {
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create(8,16)");
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
     struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
@@ -1017,7 +1017,7 @@ void test_9p_client_async_peer_gone_posts_nodev_cqe(void) {
 // p9_client_mark_devgone to proactively fail every in-flight async op with the
 // device-gone -ENODEV terminal -- no transport interaction, fully deterministic.
 void test_9p_client_async_mark_devgone_posts_nodev_cqe(void) {
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create(8,16)");
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
     struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
@@ -1320,7 +1320,7 @@ void test_9p_client_loom_fsync_e2e(void) {
     struct Spoor *sp = dev9p_attach_client(&g_client, 0);   // root Spoor (fid 0)
     TEST_ASSERT(sp != NULL, "dev9p_attach_client");
 
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create(8,16)");
     rights_t rt = RIGHT_READ | RIGHT_WRITE;
     TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p spoor (adopts ref)");
@@ -1356,7 +1356,7 @@ void test_9p_client_loom_rights_deny(void) {
     struct Spoor *sp = dev9p_attach_client(&g_client, 0);
     TEST_ASSERT(sp != NULL, "dev9p_attach_client");
 
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create(8,16)");
     rights_t rt = RIGHT_READ;       // NO RIGHT_WRITE -> fsync denied
     TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register read-only handle");
@@ -1390,7 +1390,7 @@ void test_9p_client_loom_quiesce_abandons_inflight(void) {
     struct Spoor *sp = dev9p_attach_client(&g_client, 0);
     TEST_ASSERT(sp != NULL, "dev9p_attach_client");
 
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create(8,16)");
     rights_t rt = RIGHT_READ | RIGHT_WRITE;
     TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p spoor");
@@ -1455,7 +1455,7 @@ void test_9p_client_loom_multishot_stream(void) {
     struct Spoor *sp = dev9p_attach_client(&g_client, 0);
     TEST_ASSERT(sp != NULL, "dev9p_attach_client");
 
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create(8,16)");
     rights_t rt = RIGHT_READ | RIGHT_WRITE;
     TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p spoor");
@@ -1502,7 +1502,7 @@ void test_9p_client_loom_multishot_backpressure(void) {
     struct Spoor *sp = dev9p_attach_client(&g_client, 0);
     TEST_ASSERT(sp != NULL, "dev9p_attach_client");
 
-    struct Loom *l = loom_create(2, 2);   // cq_entries = 2 (smallest exercising the hold)
+    struct Loom *l = loom_create(2, 2, false);   // cq_entries = 2 (smallest exercising the hold)
     TEST_ASSERT(l != NULL, "loom_create(2,2)");
     rights_t rt = RIGHT_READ | RIGHT_WRITE;
     TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p spoor");
@@ -1577,7 +1577,7 @@ void test_9p_client_loom_link_cancel_cascade(void) {
     struct Spoor *sp = dev9p_attach_client(&g_client, 0);
     TEST_ASSERT(sp != NULL, "dev9p_attach_client");
 
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create(8,16)");
     rights_t rt = RIGHT_READ;            // NO RIGHT_WRITE -> the head FSYNC fails inline
     TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register read-only handle");
@@ -1615,7 +1615,7 @@ void test_9p_client_loom_link_success_ordering(void) {
     struct Spoor *sp = dev9p_attach_client(&g_client, 0);
     TEST_ASSERT(sp != NULL, "dev9p_attach_client");
 
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create(8,16)");
     rights_t rt = RIGHT_READ | RIGHT_WRITE;
     TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register write handle");
@@ -1657,7 +1657,7 @@ void test_9p_client_loom_drain_barrier(void) {
     struct Spoor *sp = dev9p_attach_client(&g_client, 0);
     TEST_ASSERT(sp != NULL, "dev9p_attach_client");
 
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create(8,16)");
     rights_t rt = RIGHT_READ | RIGHT_WRITE;
     TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register write handle");
@@ -1698,7 +1698,7 @@ void test_9p_client_loom_independent_past_held(void) {
     struct Spoor *sp = dev9p_attach_client(&g_client, 0);
     TEST_ASSERT(sp != NULL, "dev9p_attach_client");
 
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create(8,16)");
     rights_t rt = RIGHT_READ | RIGHT_WRITE;
     TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register write handle");
@@ -1740,7 +1740,7 @@ void test_9p_client_loom_drain_waits_for_rearm_pending(void) {
     struct Spoor *sp = dev9p_attach_client(&g_client, 0);
     TEST_ASSERT(sp != NULL, "dev9p_attach_client");
 
-    struct Loom *l = loom_create(2, 2);   // cq=2 forces the multishot to back-pressure
+    struct Loom *l = loom_create(2, 2, false);   // cq=2 forces the multishot to back-pressure
     TEST_ASSERT(l != NULL, "loom_create(2,2)");
     rights_t rt = RIGHT_READ | RIGHT_WRITE;
     TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p spoor");
@@ -1815,7 +1815,7 @@ static void cl_stage_rw(struct Loom *l, u32 slot, u8 opcode, u32 handle_idx,
 // the table's pin) + take one extra ref for the test to observe lifetime.
 static void loom_install_test_buf(struct Loom *l, u32 idx, u32 len,
                                   struct Burrow **out_b, u8 **out_kva) {
-    struct Burrow *b = burrow_create_anon(len);
+    struct Burrow *b = burrow_create_anon(len, false);
     u8 *kva = (u8 *)pa_to_kva(page_to_pa(b->pages));
     spin_lock(&l->lock);
     l->reg_buf[idx].burrow = b;
@@ -1855,7 +1855,7 @@ void test_9p_client_loom_read_e2e(void) {
     struct Spoor *sp = dev9p_attach_client(&g_client, 0);
     TEST_ASSERT(sp != NULL, "dev9p_attach_client");
 
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create");
     rights_t rt = RIGHT_READ | RIGHT_WRITE;
     TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p handle");
@@ -1907,7 +1907,7 @@ void test_9p_client_loom_write_e2e(void) {
     struct Spoor *sp = dev9p_attach_client(&g_client, 0);
     TEST_ASSERT(sp != NULL, "dev9p_attach_client");
 
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create");
     rights_t rt = RIGHT_READ | RIGHT_WRITE;
     TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p handle");
@@ -2032,7 +2032,7 @@ void test_9p_client_loom_weft_read_e2e(void) {
     struct Spoor *sp = dev9p_attach_client(&g_client, 20);
     TEST_ASSERT(sp != NULL, "dev9p_attach_client");
 
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create");
     rights_t rt = RIGHT_READ | RIGHT_WRITE;
     TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p handle");
@@ -2085,7 +2085,7 @@ void test_9p_client_loom_weft_write_e2e(void) {
     struct Spoor *sp = dev9p_attach_client(&g_client, 20);
     TEST_ASSERT(sp != NULL, "dev9p_attach_client");
 
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create");
     rights_t rt = RIGHT_READ | RIGHT_WRITE;
     TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p handle");
@@ -2135,7 +2135,7 @@ void test_9p_client_loom_weft_hybrid_fallback(void) {
     struct Spoor *sp = dev9p_attach_client(&g_client, 20);
     TEST_ASSERT(sp != NULL, "dev9p_attach_client");
 
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create");
     rights_t rt = RIGHT_READ | RIGHT_WRITE;
     TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p handle");
@@ -2181,7 +2181,7 @@ void test_9p_client_loom_weft_oob_rejected(void) {
     struct Spoor *sp = dev9p_attach_client(&g_client, 20);
     TEST_ASSERT(sp != NULL, "dev9p_attach_client");
 
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create");
     rights_t rt = RIGHT_READ | RIGHT_WRITE;
     TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p handle");
@@ -2221,7 +2221,7 @@ void test_9p_client_loom_rw_rejects(void) {
     struct Spoor *sp = dev9p_attach_client(&g_client, 0);
     TEST_ASSERT(sp != NULL, "dev9p_attach_client");
 
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create");
     rights_t rt = RIGHT_WRITE;          // NO RIGHT_READ -> a READ is denied
     TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register write-only handle");
@@ -2297,7 +2297,7 @@ void test_9p_client_loom_readdir_e2e(void) {
 
     struct Spoor *sp = dev9p_attach_client(&g_client, 0);
     TEST_ASSERT(sp != NULL, "dev9p_attach_client");
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create");
     rights_t rt = RIGHT_READ;
     TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p handle");
@@ -2334,7 +2334,7 @@ void test_9p_client_loom_readlink_e2e(void) {
     drive_client_open(&g_client, &g_loopback);
     struct Spoor *sp = dev9p_attach_client(&g_client, 0);
     TEST_ASSERT(sp != NULL, "dev9p_attach_client");
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create");
     rights_t rt = RIGHT_READ;
     TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p handle");
@@ -2371,7 +2371,7 @@ void test_9p_client_loom_getattr_e2e(void) {
     drive_client_open(&g_client, &g_loopback);
     struct Spoor *sp = dev9p_attach_client(&g_client, 0);
     TEST_ASSERT(sp != NULL, "dev9p_attach_client");
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create");
     rights_t rt = RIGHT_READ;
     TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p handle");
@@ -2410,7 +2410,7 @@ void test_9p_client_loom_statfs_e2e(void) {
     drive_client_open(&g_client, &g_loopback);
     struct Spoor *sp = dev9p_attach_client(&g_client, 0);
     TEST_ASSERT(sp != NULL, "dev9p_attach_client");
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create");
     rights_t rt = RIGHT_READ;
     TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p handle");
@@ -2448,7 +2448,7 @@ void test_9p_client_loom_metaread_rejects(void) {
     drive_client_open(&g_client, &g_loopback);
     struct Spoor *sp = dev9p_attach_client(&g_client, 0);
     TEST_ASSERT(sp != NULL, "dev9p_attach_client");
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create");
     rights_t rt = RIGHT_WRITE;          // NO RIGHT_READ -> a read-shaped op is denied
     TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register write-only handle");
@@ -2594,7 +2594,7 @@ void test_9p_client_loom_mkdir_e2e(void) {
                    0, "handshake");
     struct Spoor *sp = dev9p_attach_client(&g_client, 0);
     TEST_ASSERT(sp != NULL, "dev9p_attach_client");
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create");
     rights_t rt = RIGHT_WRITE;          // create requires RIGHT_WRITE on the dir
     TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register write dir handle");
@@ -2663,7 +2663,7 @@ void test_9p_client_loom_setattr_e2e(void) {
                    0, "handshake");
     struct Spoor *sp = dev9p_attach_client(&g_client, 0);
     TEST_ASSERT(sp != NULL, "dev9p_attach_client");
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create");
     rights_t rt = RIGHT_WRITE;          // setattr mutates metadata -> RIGHT_WRITE
     TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register write handle");
@@ -2767,7 +2767,7 @@ void test_9p_client_loom_renameat_e2e(void) {
                    0, "handshake");
     struct Spoor *sp = dev9p_attach_client(&g_client, 0);
     TEST_ASSERT(sp != NULL, "dev9p_attach_client");
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create");
     rights_t rt = RIGHT_WRITE;
     TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register olddir (slot 0)");
@@ -2818,7 +2818,7 @@ void test_9p_client_loom_mutation_rejects(void) {
     drive_client_open(&g_client, &g_loopback);   // canonical responder
     struct Spoor *sp = dev9p_attach_client(&g_client, 0);
     TEST_ASSERT(sp != NULL, "dev9p_attach_client");
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create");
     rights_t rt = RIGHT_READ;            // READ-only: a mutation op is denied
     TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register read-only handle");
@@ -2891,7 +2891,7 @@ void test_9p_client_loom_multi_inflight_e2e(void) {
 
     struct Spoor *sp = dev9p_attach_client(&g_client, 0);
     TEST_ASSERT(sp != NULL, "dev9p_attach_client");
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create(8,16)");
     rights_t rt = RIGHT_READ | RIGHT_WRITE;
     TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p spoor");
@@ -2953,7 +2953,7 @@ void test_9p_client_loom_multi_inflight_read_e2e(void) {
 
     struct Spoor *sp = dev9p_attach_client(&g_client, 0);
     TEST_ASSERT(sp != NULL, "dev9p_attach_client");
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create(8,16)");
     rights_t rt = RIGHT_READ | RIGHT_WRITE;
     TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p spoor");
@@ -3079,7 +3079,7 @@ void test_9p_client_send_backpressure_self_pump(void) {
                    0, "handshake over mq transport");
 
     // The async-op completion records into a Loom CQ (reuse the proven harness).
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create(8,16)");
 
     // Bind fid 20 so op A (an async Tclunk(20)) is well-formed.
@@ -3208,7 +3208,7 @@ void test_9p_client_send_backpressure_spill_survives_outbuf_reuse(void) {
     TEST_EXPECT_EQ(p9_client_handshake(&g_client, uname, sizeof(uname), aname, sizeof(aname), 0),
                    0, "handshake over mq transport");
 
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create(8,16)");
 
     // Op A: async Tclunk whose Rclunk stays queued -- the reply op B's self-pump
@@ -3269,7 +3269,7 @@ void test_9p_client_abandon_async_eagain_keeps_session_alive(void) {
     TEST_EXPECT_EQ(p9_client_handshake(&g_client, uname, sizeof(uname),
                                        aname, sizeof(aname), 0),
                    0, "handshake over mq transport");
-    struct Loom *l = loom_create(8, 16);
+    struct Loom *l = loom_create(8, 16, false);
     TEST_ASSERT(l != NULL, "loom_create(8,16)");
 
     // An async op in flight: the mq transport stages its Rclunk in the ring

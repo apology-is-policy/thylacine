@@ -2302,10 +2302,25 @@ that true, and reversing it (a per-Burrow lock) would NOT be sound. See
   from the act is `cow_buggy_break`: two sharers each drop, both then read zero,
   and both take the SAME page in place -> `NoAliasedWritable`.
 - **The pin across the copy** (`DecideLocked`'s `pin + 1`, released in
-  `BreakFinish`) -> `arch/arm64/fault.c`, the copy arm. The implementation
-  refines the model's explicit pin as a RETAINED SHARE: the breaker does not
-  drop its share until after the copy, so the count cannot reach zero while it
-  is reading. Same property, one counter instead of two.
+  `BreakFinish` -- or, under `MODEL_LEAF`, in `BreakRelease`) ->
+  `arch/arm64/fault.c`, the copy arm. The implementation refines the model's
+  explicit pin as a RETAINED SHARE: the breaker does not drop its share until
+  after the copy AND after the leaf write (`cow_release`, put after step 5's
+  replace), so the count cannot reach zero while it is reading, nor while its
+  own read-only leaf still translates to the original. Same property, one
+  counter instead of two.
+- **`BreakReplace` then `BreakRelease`** (B-1a', 2026-09-23; `MODEL_LEAF`) ->
+  step 5 of `demand_page_locked`: `mmu_replace_user_pte_attr` (the copy's
+  writable leaf over the read-only one, one break-before-make), THEN
+  `cow_page_put(cow_release)`. Until the round-3 audit's F12 the code put the
+  share BEFORE the replace -- `cow_buggy_put_before_replace` -- and the model
+  could not have caught it: `BreakFinish` is the two as one step, and a
+  read-only leaf had no variable. `pter[s]` (set by `ReadFault`, the read arm's
+  install) is that variable now; `NoReadableFreed` / `NoCrossSpaceRead` are the
+  two chains F12 named (a peer's exit frees the page under the leaf; a peer's
+  break takes it in place under the leaf). The window the model still does not
+  see: the leaf write itself is a TLB break-before-make; a sibling thread's
+  fault inside it is answered by step 2b (`mmu_user_pte_admits`, audit F13).
 - **`FreePristine`** -> the three release sites, all routed through
   `cow_page_put` so the rule stays checkable by inspection:
   `kernel/burrow.c`'s populate-unwind, `burrow_decommit`, and the ANON_LAZY free
@@ -2333,6 +2348,13 @@ Gate (2026-08-02): `cow.cfg` clean at **580 distinct states, depth 13** (3
 sharers) with Safety + `EventuallyReleased`; `cow_buggy_break` ->
 `NoAliasedWritable` violated; `cow_buggy_teardown` -> `NoUseAfterFree`
 violated; `cow_buggy_vfork` -> temporal property violated with Safety intact.
+
+Gate (2026-09-23, B-1a'): `specs/check-cow.sh` on the round-4 tree -- the
+eight older cfgs at their pinned counts (580 / 10636 / 231 and the five buggy
+cfgs by name; `MODEL_LEAF` off is additive by measurement), `cow_leaf` clean at
+**2996 distinct states** (3 sharers, Safety + `LeafSafety` +
+`EventuallyReleased`), `cow_buggy_put_before_replace` -> `NoReadableFreed`
+violated.
 
 ### The B-1a extension (2026-09-23; ARCH 6.5 "The permission ceiling") -- the protect actions behind `ALLOW_PROTECT`
 
@@ -2447,6 +2469,88 @@ rule = every tree, truth too small) each fail -- the property round 1's module
 lacked. `specs/check-territory-shed.sh` runs all seven cfgs, pins the two
 clean state counts, and asserts WHICH invariant each buggy cfg violates.
 
+## `capacity.tla` -- the I-32 page-accounting conservation law (B-1a', 2026-09-23)
+
+**Model-first, in the same chunk as the code it constrains.** The module landed
+in B-1a''s first WIP commit, before `vma_detach_range_in` existed, and the
+range detach core was then written to it: the release BEFORE the geometry
+change, and the D-3b replace as detach-then-insert. The trigger was two
+occurrences of one shape -- the pre-B-1a piece-detach bug and the B-1a audit's
+F5 (an over-charge after a MAP_FIXED window inside a touched lazy mapping) were
+both a path that unmapped a slot without releasing it, in a system whose free
+is Proc-agnostic. The model says why that is fatal rather than merely untidy:
+`burrow_free_internal` frees a resident page but has no Proc to refund, so a
+slot that loses its mapping while resident is charged for the address space's
+life. `ChargeConserved` (page_count == the resident count) is blind to it --
+the orphan is resident AND charged -- which is why `NoOrphan` exists as a
+second invariant and why both buggy cfgs are judged on it.
+
+- **`Touch(b, s)`** -> `arch/arm64/fault.c`, the ANON_LAZY miss: the data page
+  is charged first (`proc_page_charge(p, 1)`), then `pagemap_install(&v->pm,
+  .., p->as, ..)` charges the node pages it allocates to the SAME address space
+  (a refused charge installs nothing and takes the graceful per-Proc
+  terminate). Metadata rides the slot it indexes -- not modelled separately.
+- **`Decommit(b, s)`** -> `kernel/burrow.c::burrow_decommit_in`
+  (`SYS_BURROW_DECOMMIT` 84): take, free, uncharge per slot; the mapping kept.
+- **`Detach(b, s)`** -> `kernel/vma.c::vma_detach_range_in`, phase 3:
+  `burrow_release_lazy_range_in(as, v, lo, hi)` over the overlap BEFORE the
+  head/tail trim, the middle split or the whole removal. The release walks
+  the pagemap by PRESENT nodes (`pagemap_take_next`), puts each page
+  (`cow_page_put`) and uncharges the data pages plus the nodes each take
+  emptied. The mapping's own free is `vma_free_deferred` ->
+  `burrow_free_deferred` -> `burrow_free_internal`, after `as->lock` drops.
+- **`Replace(s)`** -> `kernel/vma.c::vma_replace_range_in` = allocate the new
+  piece, `vma_detach_range_in(.., extra_vmas = 1, ..)` the window (which
+  releases the window's slots of the OLD Burrow), insert. F5 closed by
+  construction: there is no second copy of the release to forget.
+- **`FreeIfLast`** -> `burrow_free_internal` (`pagemap_destroy` with the COW
+  put): Proc-agnostic, refunds nothing. The load-bearing fact.
+- **The address space's death** (not modelled: one address space that never
+  dies) -> `kernel/addrspace.c::addrspace_unref`: `vma_drain_in` frees
+  Proc-agnostically and `page_count` dies with the space; the pool is PHYSICAL
+  (`mm/phys.c`, the round-1 close), so every page the drain frees returns its
+  charge at `free_pages` and nothing is left to settle. (The first fix -- a
+  death return of the leftover count, found by the test that names it,
+  `capacity.death_returns_charges_to_pool`: before the pool existed a charge
+  that died with its counter cost nothing; with a machine-wide bound above it,
+  every death leaked its RSS forever -- was superseded by the physical pool: a
+  holder count returned at death would double-return what the frees return.)
+- **`ChargeConserved`** -> `detach.range_trims_left_right_middle`,
+  `detach.four_gib_reservation_round_trips` (8 pages + 13 nodes charged, 4 + 6
+  back at the middle detach, 0 at the end),
+  `capacity.pagemap_nodes_charged_and_reclaimed` (root included).
+- **`NoOrphan`** -> `capacity.replace_window_releases_orphans` (the Replace)
+  and `detach.range_across_burrows_and_holes` (a held Burrow ref sees the
+  whole mapping ALIVE with nothing resident: the release ran before the
+  mapping went).
+
+What the model cannot see, listed so the green reads no larger: one address
+space, so no fork clone of the pagemap (`pagemap_mirror` is `cow.tla`'s
+territory); the pool as a second bound above `page_count`, PHYSICAL since the round-1
+close -- charged at `alloc_user_pages`, returned at `free_pages`, a mirror of
+no counter (`capacity.pool_refuses_users_keeps_tcb`: refused at exactly K
+pages, nodes and tables counted, the TCB not;
+`capacity.memory_bomb_leaves_the_reserve`: the round-1 attack refused within
+one touch of the room, everything returned by the decommit); the hardware page
+tables, charged to the space and reclaimed as they empty (the model's slots
+have no tables; `capacity.page_tables_charged_and_reclaimed`); the Image
+cache's pages, charged to each space that maps them per leaf and reclaimed
+from idle images under pressure (the model has no cache; the round-2 audit's
+F8: `demand_page.file_pages_charge_the_holder`,
+`demand_page.idle_image_reclaimed_under_pressure`); the walk bound (`pagemap_walk_steps`;
+`capacity.window_sized_reservation_releases_in_bounded_steps`: the whole
+64 TiB window reserved, two pages touched, released in a few thousand entry
+visits, not 2^34).
+
+Gate: `specs/check-capacity.sh`. `capacity.cfg` clean, pinned at
+**625 distinct states** (4 slots x 2 Burrows);
+`capacity_buggy_replace_orphans.cfg` and `capacity_buggy_detach_no_refund.cfg`
+must each violate `NoOrphan` with `ChargeConserved` listed ahead of it and
+HOLDING -- a run that reported the counter instead would mean the model no
+longer says the counter is blind.
+
+---
+
 ## Spec-first re-enablement record (moved verbatim from CLAUDE.md, 2026-08-05)
 
 The six standalone re-enablement paragraphs below lived in `CLAUDE.md`'s
@@ -2484,6 +2588,8 @@ pty_stop, reader_frame, ...) are recorded per-row in
 | `NoElevatedOutlivesScope` | the union of the above; runtime witnesses `proc.rfork_refused_while_terminating`, `devcap.imperium_nest_refused`, `devcap.further_redeem_keeps_scope` |
 | `FlowOnlyUnderPropagating` / `FlowNeverWidens` | `caps.rfork_flows_under_propagating_scope` / `caps.rfork_no_flow_without_propagating` / `caps.rfork_flow_bounded_by_mask` |
 | `OneScopePerProc` / `ScopeTraitsSetOnce` / `MembersNeverRoot` / `PropagatingIsScopeWide` | `devcap.further_redeem_keeps_scope` (tag + traits kept) + `devcap.imperium_nest_refused` + the rfork inherit (`caps.rfork_inherits_legate_scope`: the ROOT flag never inherits) |
+
+**RE-ENABLED for the page-accounting conservation law (B-1a', 2026-09-23; ARCH 6.5 "Capacity, and the I-32 default").** The ninth instance, and the first applied to an ACCOUNTING law rather than a state machine. The B-1a holotype audit's F5 (an orphan-slot over-charge after a D-3b window inside a touched lazy mapping) and the pre-B-1a piece-detach bug it echoed were one defect twice: a path that unmaps a slot without first releasing it, in a system whose free (`burrow_free_internal`) is Proc-agnostic and so can never refund. The second occurrence is the trigger. `specs/capacity.tla` states the law -- `ChargeConserved` (page_count == the resident count) and `NoOrphan` (a resident slot is always mapped) -- with the range detach and the MAP_FIXED replace as actions, one buggy cfg per historical shape, and B-1a''s `vma_detach_range_in` / `vma_replace_range_in` were written to it (the release BEFORE the geometry change; replace = detach + insert). The map, the gate (`specs/check-capacity.sh`) and what the model does not cover are in the `capacity.tla` section above.
 
 ---
 

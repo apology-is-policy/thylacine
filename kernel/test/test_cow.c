@@ -46,12 +46,14 @@
 #include <thylacine/addrspace.h>
 #include <thylacine/burrow.h>
 #include <thylacine/cow.h>
+#include <thylacine/image.h>                // B-1a' audit F20: nothing idle for the reclaim
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 
 #include "../../arch/arm64/fault.h"
+#include "../../arch/arm64/mmu.h"           // B-1a' audit F16: mmu_uninstall_pte_calls
 #include "../../mm/magazines.h"
 #include "../../mm/phys.h"
 #include "test.h"
@@ -88,6 +90,10 @@ void test_cow_addrspace_clone_refuses_and_leaves_parent_intact(void);
 void test_cow_clone_shares_readonly_eager_anon(void);
 void test_cow_break_read_then_write_copies(void);
 void test_cow_break_sole_holder_takes_in_place(void);
+void test_cow_break_copy_pins_the_original_until_replaced(void);
+void test_cow_read_queued_behind_break_is_handled(void);
+void test_cow_break_copy_releases_the_share_on_a_failed_replace(void);
+void test_cow_break_copy_last_share_frees_after_the_replace(void);
 
 // One page's worth of Burrow -- enough for every property here, and it keeps
 // the filepages[] allocation identical between the two differential runs.
@@ -112,6 +118,21 @@ static u64 cow_test_pte(paddr_t pgtable_root, u64 vaddr) {
     return (leaf & VALID) ? leaf : 0;
 }
 
+// The PA of the L3 TABLE covering `vaddr` (0 when absent): the witness that a
+// break neither freed nor re-allocated the leaf's table -- the pool count
+// alone cannot tell a free-then-realloc from nothing (audit F9 / F16).
+static u64 cow_test_l3_pa(paddr_t pgtable_root, u64 vaddr) {
+    const u64 VALID = 1ull << 0, TABLE = 1ull << 1;
+    u64 *t = (u64 *)pa_to_kva(pgtable_root);
+    u64 e = 0;
+    for (int lvl = 0; lvl < 3; lvl++) {
+        e = t[(vaddr >> (39 - 9 * lvl)) & 0x1ff];
+        if (!(e & VALID) || !(e & TABLE)) return 0;
+        t = (u64 *)pa_to_kva(e & 0x0000FFFFFFFFF000ull);
+    }
+    return e & 0x0000FFFFFFFFF000ull;
+}
+
 // AP[2:1] at PTE bits 7:6 -- 0b01 user-RW, 0b11 user-RO.
 #define COW_AP_FIELD   (3ull << 6)
 #define COW_AP_RW_ANY  (1ull << 6)
@@ -130,6 +151,8 @@ static void cow_make_fi(struct fault_info *fi, u64 vaddr, bool is_write) {
     fi->is_translation = true;
     fi->is_permission  = false;
     fi->is_access_flag = false;
+    fi->is_alignment = false;
+    fi->is_external = false;
 }
 
 static void drop_proc_for_cow(struct Proc *p) {
@@ -214,7 +237,7 @@ static struct page *cow_test_make_populated(struct AddrSpace *as,
 }
 
 void test_burrow_lazy_free_is_conditional_on_share(void) {
-    struct AddrSpace *as = addrspace_alloc(PROC_PAGE_MAX);
+    struct AddrSpace *as = addrspace_alloc(proc_default_page_budget());
     TEST_ASSERT(as != NULL, "addrspace_alloc");
 
     // Run A -- NOT co-held. Tearing the Burrow down returns its page.
@@ -261,7 +284,7 @@ void test_burrow_lazy_free_is_conditional_on_share(void) {
 // =============================================================================
 
 void test_cow_burrow_clone_shares_resident_pages(void) {
-    struct AddrSpace *as = addrspace_alloc(PROC_PAGE_MAX);
+    struct AddrSpace *as = addrspace_alloc(proc_default_page_budget());
     TEST_ASSERT(as != NULL, "addrspace_alloc");
 
     // Four slots; make 0 and 2 resident, leave 1 and 3 untouched.
@@ -273,7 +296,7 @@ void test_cow_burrow_clone_shares_resident_pages(void) {
     struct page *p2 = burrow_lazy_slot_for_test(src, 2);
     TEST_ASSERT(p0 && p2, "both populated slots resident");
 
-    struct Burrow *clone = burrow_clone_cow(src);
+    struct Burrow *clone = burrow_clone_cow(src, /*exempt=*/true);
     TEST_ASSERT(clone != NULL, "burrow_clone_cow");
     TEST_ASSERT(clone != src, "the clone is a SEPARATE Burrow -- each address "
                               "space needs a slot it may overwrite at the break");
@@ -379,7 +402,7 @@ void test_cow_clone_shares_readonly_eager_anon(void) {
     burrow_unref(lazy);
 
     // The vDSO's shape: eager anon, mapped READ-ONLY.
-    struct Burrow *ro = burrow_create_anon(COW_ONE_PAGE);
+    struct Burrow *ro = burrow_create_anon(COW_ONE_PAGE, false);
     TEST_ASSERT(ro != NULL, "burrow_create_anon");
     TEST_EXPECT_EQ(burrow_map(parent, ro, COW_TEST_VA + 0x100000ull, COW_ONE_PAGE,
                               VMA_PROT_READ), 0, "map the read-only eager VMA");
@@ -441,7 +464,7 @@ void test_cow_addrspace_clone_refuses_and_leaves_parent_intact(void) {
 
     // High VA: an EAGER anon Burrow -- one indivisible buddy block, so there is no
     // per-page ownership for a break to take, and the fork must be refused whole.
-    struct Burrow *eager = burrow_create_anon(COW_ONE_PAGE);
+    struct Burrow *eager = burrow_create_anon(COW_ONE_PAGE, false);
     TEST_ASSERT(eager != NULL, "burrow_create_anon");
     TEST_EXPECT_EQ(burrow_map(parent, eager, COW_TEST_VA + 0x100000ull,
                               COW_ONE_PAGE, VMA_PROT_RW), 0, "map the eager VMA");
@@ -509,7 +532,7 @@ void test_cow_addrspace_clone_refuses_and_leaves_parent_intact(void) {
 // proc_alloc_in takes its own reference, so the caller drops the one it holds and
 // the child owns the space outright.
 static struct Proc *cow_adopt(struct AddrSpace *as) {
-    struct Proc *p = proc_alloc_in(as, PROC_PAGE_MAX);
+    struct Proc *p = proc_alloc_in(as, proc_default_page_budget());
     if (p) addrspace_unref(as);          // ref 2 -> 1, held by the child alone
     return p;
 }
@@ -554,11 +577,20 @@ void test_cow_break_read_then_write_copies(void) {
 
     // (b) Now the child WRITES. The write arrives at a VA that already has a
     // valid read-only PTE, and mmu_install_user_pte REFUSES a mismatching install
-    // over one -- so this leg fails outright unless the break clears it first.
+    // over one -- so this leg fails outright unless the break REPLACES it
+    // (mmu_replace_user_pte_attr, in place; audit F9).
+    const u64 l3_before     = cow_test_l3_pa(child->as->pgtable_root, COW_TEST_VA);
+    const u64 clears_before = mmu_uninstall_pte_calls();
+    TEST_ASSERT(l3_before != 0, "the read's leaf sits in a table");
     cow_make_fi(&fi, COW_TEST_VA + 0x10, /*is_write=*/true);
     TEST_EXPECT_EQ(userland_demand_page(child, &fi), FAULT_HANDLED,
                    "child write fault BREAKS (a stale read-only PTE must be "
                    "cleared first, or the install is refused and the Proc dies)");
+    TEST_EXPECT_EQ(cow_test_l3_pa(child->as->pgtable_root, COW_TEST_VA), l3_before,
+                   "the break REPLACED the leaf in its own table -- no table freed "
+                   "and re-allocated (audit F9; a count cannot see that, F16)");
+    TEST_EXPECT_EQ(mmu_uninstall_pte_calls(), clears_before,
+                   "and cleared no leaf on the way (the uninstall-then-install is gone)");
 
     struct Vma *cvma = vma_lookup_in(child->as, COW_TEST_VA);
     TEST_ASSERT(cvma != NULL, "child VMA");
@@ -585,6 +617,18 @@ void test_cow_break_read_then_write_copies(void) {
     // Divergence: a write to one is invisible to the other.
     cbytes[0] = 0xBEEFull;
     TEST_EXPECT_EQ(pbytes[0], 0xC0FFEEull, "the two address spaces have DIVERGED");
+
+    // (c) A READ that queued behind the break -- decoded while the leaf was
+    // invalid, run after the writable leaf is in -- is HANDLED and installs
+    // nothing narrower (B-1a' audit F13: the read arm's read-only install over
+    // the writable leaf was refused as a mismatch, and the Proc died reading a
+    // page it holds).
+    cow_make_fi(&fi, COW_TEST_VA + 0x30, /*is_write=*/false);
+    TEST_EXPECT_EQ(userland_demand_page(child, &fi), FAULT_HANDLED,
+                   "a read queued behind a peer's break is HANDLED, not a kill");
+    pte = cow_test_pte(child->as->pgtable_root, COW_TEST_VA);
+    TEST_EXPECT_EQ(pte & COW_AP_FIELD, COW_AP_RW_ANY, "the writable leaf stays");
+    TEST_EXPECT_EQ(pte & 0x0000FFFFFFFFF000ull, page_to_pa(priv), "and still maps the private page");
 
     drop_proc_for_cow(child);
     drop_proc_for_cow(parent);
@@ -621,20 +665,317 @@ void test_cow_break_sole_holder_takes_in_place(void) {
     // The parent's next write re-faults (the fork dropped its PTE) and must take
     // the page IN PLACE: no copy, no new page, no count change.
     magazines_drain_all();
-    free_before = phys_free_pages();
+    // The fork dropped the parent's PTE but KEPT its tables (audit F9), and the
+    // break replaces the leaf in place, so a take-in-place allocates NOTHING:
+    // the pool and the parent's tables are exactly what they were. A page COPY
+    // would be one page more; a table churn would show as a table freed and
+    // re-allocated under the same count -- hence the pool is pinned too.
+    free_before = capacity_pool_charged();
+    u32 tables_before = parent->as->pgtable_pages;
+    u32 data_before   = parent->as->page_count - tables_before;
+    const u64 l3_before     = cow_test_l3_pa(parent->as->pgtable_root, COW_TEST_VA);
+    const u64 clears_before = mmu_uninstall_pte_calls();
+    TEST_ASSERT(l3_before != 0, "the fork KEPT the parent's L3 table (audit F9)");
     cow_make_fi(&fi, COW_TEST_VA + 0x20, /*is_write=*/true);
     TEST_EXPECT_EQ(userland_demand_page(parent, &fi), FAULT_HANDLED, "parent re-faults");
     magazines_drain_all();
+    TEST_EXPECT_EQ(cow_test_l3_pa(parent->as->pgtable_root, COW_TEST_VA), l3_before,
+                   "the leaf landed in the KEPT table -- the same table page (audit F16: "
+                   "a free-then-realloc leaves every count equal)");
+    TEST_EXPECT_EQ(mmu_uninstall_pte_calls(), clears_before, "no leaf was cleared on the way");
 
     TEST_ASSERT(burrow_lazy_slot_for_test(pv, 0) == pg,
                 "a SOLE holder takes the page IN PLACE -- copying would be a page "
                 "and a page-copy spent to reach the state it is already in");
-    TEST_EXPECT_EQ(phys_free_pages(), free_before, "and allocated nothing");
+    TEST_EXPECT_EQ((u64)capacity_pool_charged(), free_before, "and allocated nothing: no page, no table");
+    TEST_EXPECT_EQ(parent->as->pgtable_pages, tables_before, "the parent's tables are untouched (no churn)");
+    TEST_EXPECT_EQ(parent->as->page_count - parent->as->pgtable_pages, data_before,
+                   "the parent's data charge is unchanged");
     TEST_EXPECT_EQ((u64)cow_page_share_for_test(pg), 1ull, "count unchanged by the decide");
 
     u64 pte = cow_test_pte(parent->as->pgtable_root, COW_TEST_VA);
     TEST_EXPECT_EQ(pte & COW_AP_FIELD, COW_AP_RW_ANY, "installed WRITABLE");
     TEST_EXPECT_EQ(pte & 0x0000FFFFFFFFF000ull, page_to_pa(pg), "same page");
 
+    // A read queued behind the take finds the writable leaf and is HANDLED
+    // (audit F13's sole-holder shape).
+    cow_make_fi(&fi, COW_TEST_VA + 0x40, /*is_write=*/false);
+    TEST_EXPECT_EQ(userland_demand_page(parent, &fi), FAULT_HANDLED, "a queued read is HANDLED");
+    TEST_EXPECT_EQ(cow_test_pte(parent->as->pgtable_root, COW_TEST_VA), pte,
+                   "and the writable leaf is untouched");
+
     drop_proc_for_cow(parent);
+}
+
+// B-1a' audit F12: the copy branch keeps the ORIGINAL's share until the leaf
+// that can still translate to it has been replaced. The probe fires between
+// the two, and the positive control is that the window is real: the faulter's
+// own read-only leaf still names the original there. Released early, the other
+// holder would be sole -- free to take the page in place and write into what
+// this space still reads (I-44), or to exit and free it under a live leaf
+// (I-13).
+static struct page *g_f12_original;
+static u64          g_f12_leaf_pa_at_probe;
+static u32          g_f12_share_at_probe;
+static int          g_f12_probe_calls;
+
+static void f12_probe(struct Proc *p, struct page *original) {
+    g_f12_probe_calls++;
+    g_f12_original         = original;
+    g_f12_leaf_pa_at_probe = cow_test_pte(p->as->pgtable_root, COW_TEST_VA) & 0x0000FFFFFFFFF000ull;
+    g_f12_share_at_probe   = cow_page_share_for_test(original);
+}
+
+void test_cow_break_copy_pins_the_original_until_replaced(void) {
+    struct Proc *parent = proc_alloc();
+    TEST_ASSERT(parent != NULL, "proc_alloc parent");
+
+    struct Burrow *pv = burrow_create_anon_lazy(COW_ONE_PAGE);
+    TEST_ASSERT(pv != NULL, "burrow_create_anon_lazy");
+    TEST_EXPECT_EQ(burrow_map(parent, pv, COW_TEST_VA, COW_ONE_PAGE, VMA_PROT_RW), 0,
+                   "burrow_map RW");
+    burrow_unref(pv);
+
+    struct fault_info fi;
+    cow_make_fi(&fi, COW_TEST_VA, /*is_write=*/true);
+    TEST_EXPECT_EQ(userland_demand_page(parent, &fi), FAULT_HANDLED, "parent faults in");
+    struct page *shared = burrow_lazy_slot_for_test(pv, 0);
+    TEST_ASSERT(shared != NULL, "resident");
+
+    struct AddrSpace *cas = addrspace_clone(parent->as, /*exempt=*/true);
+    TEST_ASSERT(cas != NULL, "addrspace_clone");
+    struct Proc *child = cow_adopt(cas);
+    TEST_ASSERT(child != NULL, "adopt the cloned address space");
+    TEST_EXPECT_EQ((u64)cow_page_share_for_test(shared), 2ull, "two holders");
+
+    // The child reads first: a read-only leaf naming the shared page.
+    cow_make_fi(&fi, COW_TEST_VA + 0x10, /*is_write=*/false);
+    TEST_EXPECT_EQ(userland_demand_page(child, &fi), FAULT_HANDLED, "child read fault");
+    TEST_EXPECT_EQ(cow_test_pte(child->as->pgtable_root, COW_TEST_VA) & 0x0000FFFFFFFFF000ull,
+                   page_to_pa(shared), "the read-only leaf names the shared page");
+
+    g_f12_probe_calls = 0; g_f12_original = NULL;
+    g_f12_leaf_pa_at_probe = 0; g_f12_share_at_probe = 0;
+    g_cow_copy_probe_for_test = f12_probe;
+    cow_make_fi(&fi, COW_TEST_VA + 0x10, /*is_write=*/true);
+    enum fault_result r = userland_demand_page(child, &fi);
+    g_cow_copy_probe_for_test = NULL;
+    TEST_EXPECT_EQ(r, FAULT_HANDLED, "child write fault breaks by copying");
+
+    TEST_EXPECT_EQ((u64)g_f12_probe_calls, 1ull, "the copy branch ran once");
+    TEST_ASSERT(g_f12_original == shared, "the probe saw the page the copy replaced");
+    TEST_EXPECT_EQ(g_f12_leaf_pa_at_probe, page_to_pa(shared),
+                   "CONTROL: at the probe the faulter's read-only leaf STILL named the "
+                   "original -- the window is real");
+    TEST_EXPECT_EQ((u64)g_f12_share_at_probe, 2ull,
+                   "and the original's share was STILL HELD across it: released early, "
+                   "the parent would be sole -- free to take the page in place under the "
+                   "child's live leaf (I-44), or to exit and free it (I-13)");
+
+    // After the replace the share is released and the leaf names the copy.
+    TEST_EXPECT_EQ((u64)cow_page_share_for_test(shared), 1ull, "released after the replace");
+    struct Vma *cvma = vma_lookup_in(child->as, COW_TEST_VA);
+    TEST_ASSERT(cvma != NULL, "child VMA");
+    struct page *priv = burrow_lazy_slot_for_test(cvma->burrow, 0);
+    TEST_ASSERT(priv != NULL && priv != shared, "the child holds a private copy");
+    u64 pte = cow_test_pte(child->as->pgtable_root, COW_TEST_VA);
+    TEST_EXPECT_EQ(pte & 0x0000FFFFFFFFF000ull, page_to_pa(priv), "the leaf names the copy");
+    TEST_EXPECT_EQ(pte & COW_AP_FIELD, COW_AP_RW_ANY, "writable");
+
+    drop_proc_for_cow(child);
+    drop_proc_for_cow(parent);
+}
+
+// B-1a' audit F13: two threads of one Proc touch a page after a fork. The
+// writer wins as->lock and breaks (a writable leaf lands); the reader's fault,
+// decoded while the leaf was invalid, then runs and the read arm asks for a
+// READ-ONLY install over it -- a mismatch the install refuses, which
+// terminated the Proc for reading a page it holds. The queued read is
+// answered by the leaf that is there. Both break shapes: the child's copy,
+// then the parent's take-in-place.
+void test_cow_read_queued_behind_break_is_handled(void) {
+    struct Proc *parent = proc_alloc();
+    TEST_ASSERT(parent != NULL, "proc_alloc parent");
+
+    struct Burrow *pv = burrow_create_anon_lazy(COW_ONE_PAGE);
+    TEST_ASSERT(pv != NULL, "burrow_create_anon_lazy");
+    TEST_EXPECT_EQ(burrow_map(parent, pv, COW_TEST_VA, COW_ONE_PAGE, VMA_PROT_RW), 0,
+                   "burrow_map RW");
+    burrow_unref(pv);
+
+    struct fault_info fi;
+    cow_make_fi(&fi, COW_TEST_VA, /*is_write=*/true);
+    TEST_EXPECT_EQ(userland_demand_page(parent, &fi), FAULT_HANDLED, "parent faults in");
+
+    struct AddrSpace *cas = addrspace_clone(parent->as, /*exempt=*/true);
+    TEST_ASSERT(cas != NULL, "addrspace_clone");
+    struct Proc *child = cow_adopt(cas);
+    TEST_ASSERT(child != NULL, "adopt the cloned address space");
+
+    // The writer wins: the child's first touch after the fork is a WRITE.
+    cow_make_fi(&fi, COW_TEST_VA, /*is_write=*/true);
+    TEST_EXPECT_EQ(userland_demand_page(child, &fi), FAULT_HANDLED, "the writer breaks (a copy)");
+    u64 pte = cow_test_pte(child->as->pgtable_root, COW_TEST_VA);
+    TEST_EXPECT_EQ(pte & COW_AP_FIELD, COW_AP_RW_ANY, "a writable leaf is in");
+
+    // The reader's fault runs next, exactly as it was decoded before the break.
+    cow_make_fi(&fi, COW_TEST_VA + 0x8, /*is_write=*/false);
+    TEST_EXPECT_EQ(userland_demand_page(child, &fi), FAULT_HANDLED,
+                   "the queued READ is handled by the writable leaf, not refused as a "
+                   "read-only mismatch");
+    TEST_EXPECT_EQ(cow_test_pte(child->as->pgtable_root, COW_TEST_VA), pte, "the leaf is untouched");
+
+    // The parent's side: sole now (the child copied), so its write takes the
+    // page in place -- and its queued read is handled the same way.
+    cow_make_fi(&fi, COW_TEST_VA, /*is_write=*/true);
+    TEST_EXPECT_EQ(userland_demand_page(parent, &fi), FAULT_HANDLED, "the parent takes in place");
+    u64 ppte = cow_test_pte(parent->as->pgtable_root, COW_TEST_VA);
+    TEST_EXPECT_EQ(ppte & COW_AP_FIELD, COW_AP_RW_ANY, "writable");
+    cow_make_fi(&fi, COW_TEST_VA + 0x8, /*is_write=*/false);
+    TEST_EXPECT_EQ(userland_demand_page(parent, &fi), FAULT_HANDLED, "the parent's queued read is HANDLED");
+    TEST_EXPECT_EQ(cow_test_pte(parent->as->pgtable_root, COW_TEST_VA), ppte, "untouched");
+
+    drop_proc_for_cow(child);
+    drop_proc_for_cow(parent);
+}
+
+// B-1a' audit F20 (i): the put after a FAILED replace. The child has no tables
+// under the page (the clone builds none; its first touch is this write) and
+// the pool is parked to exactly one free page: the copy's private page is
+// served, the install's first table is refused. The break fails clean -- the
+// Proc would die -- and the share of the original held across the copy is
+// released: no leak, and nothing of this space translates to the original.
+void test_cow_break_copy_releases_the_share_on_a_failed_replace(void) {
+    (void)image_cache_evict_idle_for_test();      // nothing idle for the reclaim to strip
+    struct Proc *parent = proc_alloc();
+    TEST_ASSERT(parent != NULL, "proc_alloc parent");
+
+    struct Burrow *pv = burrow_create_anon_lazy(COW_ONE_PAGE);
+    TEST_ASSERT(pv != NULL, "burrow_create_anon_lazy");
+    TEST_EXPECT_EQ(burrow_map(parent, pv, COW_TEST_VA, COW_ONE_PAGE, VMA_PROT_RW), 0,
+                   "burrow_map RW");
+    burrow_unref(pv);
+
+    struct fault_info fi;
+    cow_make_fi(&fi, COW_TEST_VA, /*is_write=*/true);
+    TEST_EXPECT_EQ(userland_demand_page(parent, &fi), FAULT_HANDLED, "parent faults in");
+    struct page *shared = burrow_lazy_slot_for_test(pv, 0);
+    TEST_ASSERT(shared != NULL, "resident");
+    ((u64 *)pa_to_kva(page_to_pa(shared)))[0] = 0x5EEDull;
+
+    struct AddrSpace *cas = addrspace_clone(parent->as, /*exempt=*/true);
+    TEST_ASSERT(cas != NULL, "addrspace_clone");
+    struct Proc *child = cow_adopt(cas);
+    TEST_ASSERT(child != NULL, "adopt the cloned address space");
+    TEST_EXPECT_EQ((u64)cow_page_share_for_test(shared), 2ull, "two holders");
+    TEST_EXPECT_EQ(cow_test_l3_pa(child->as->pgtable_root, COW_TEST_VA), 0ull,
+                   "the child has no tables under the page yet");
+
+    // Room for exactly ONE page: the private copy fits, its leaf's tables do not.
+    const u32 room = capacity_pool_pages() - capacity_pool_charged();
+    TEST_ASSERT(room > 1, "the pool has room to park");
+    capacity_pool_park_for_test(room - 1);
+    cow_make_fi(&fi, COW_TEST_VA + 0x10, /*is_write=*/true);
+    enum fault_result r = userland_demand_page(child, &fi);
+    capacity_pool_unpark_for_test(room - 1);
+    TEST_EXPECT_EQ(r, FAULT_UNHANDLED_USER,
+                   "the break fails clean at the pool's edge (the install's table refused)");
+
+    TEST_EXPECT_EQ((u64)cow_page_share_for_test(shared), 1ull,
+                   "the copy's share of the original is RELEASED on the failed replace: no leak");
+    struct Vma *cvma = vma_lookup_in(child->as, COW_TEST_VA);
+    TEST_ASSERT(cvma != NULL, "child VMA");
+    struct page *priv = burrow_lazy_slot_for_test(cvma->burrow, 0);
+    TEST_ASSERT(priv != NULL && priv != shared, "the copy holds the slot (the swap happened)");
+    TEST_EXPECT_EQ(((u64 *)pa_to_kva(page_to_pa(priv)))[0], 0x5EEDull, "and carries the bytes");
+    TEST_EXPECT_EQ((u64)cow_page_share_for_test(priv), 1ull, "the copy is sole");
+    TEST_EXPECT_EQ(cow_test_pte(child->as->pgtable_root, COW_TEST_VA), 0ull,
+                   "no leaf of the child's names the original (none was installed)");
+
+    drop_proc_for_cow(child);            // frees the copy (sole)
+    drop_proc_for_cow(parent);           // frees the original (the last share)
+}
+
+// B-1a' audit F20 (ii): the free on the LAST share. The other holder goes away
+// mid-break -- the probe, at the last instant before the leaf write, drains
+// the parent's mapping -- so the copy's own share is the last one: the put
+// after the replace frees the original, exactly once, and the child's leaf
+// names the copy.
+static struct Proc *g_f20_parent;
+static u64          g_f20_share_after_drain;
+static u64          g_f20_free_at_probe;
+static int          g_f20_probe_calls;
+
+static void f20_last_share_probe(struct Proc *p, struct page *original) {
+    (void)p;
+    if (g_f20_probe_calls++ != 0) return;
+    // The other holder's mapping goes: its share is put (2 -> 1). The Burrow's
+    // free runs deferred, after the parent's own lock; the buddy sits below
+    // every lock held here, and the harness's secondaries are parked, so the
+    // magazine drain is the quiescent one it is documented as.
+    vma_drain_in(g_f20_parent->as);
+    g_f20_share_after_drain = cow_page_share_for_test(original);
+    magazines_drain_all();
+    g_f20_free_at_probe = phys_free_pages();
+}
+
+void test_cow_break_copy_last_share_frees_after_the_replace(void) {
+    struct Proc *parent = proc_alloc();
+    TEST_ASSERT(parent != NULL, "proc_alloc parent");
+
+    struct Burrow *pv = burrow_create_anon_lazy(COW_ONE_PAGE);
+    TEST_ASSERT(pv != NULL, "burrow_create_anon_lazy");
+    TEST_EXPECT_EQ(burrow_map(parent, pv, COW_TEST_VA, COW_ONE_PAGE, VMA_PROT_RW), 0,
+                   "burrow_map RW");
+    burrow_unref(pv);
+
+    struct fault_info fi;
+    cow_make_fi(&fi, COW_TEST_VA, /*is_write=*/true);
+    TEST_EXPECT_EQ(userland_demand_page(parent, &fi), FAULT_HANDLED, "parent faults in");
+    struct page *shared = burrow_lazy_slot_for_test(pv, 0);
+    TEST_ASSERT(shared != NULL, "resident");
+    ((u64 *)pa_to_kva(page_to_pa(shared)))[0] = 0xB1A5ull;
+
+    struct AddrSpace *cas = addrspace_clone(parent->as, /*exempt=*/true);
+    TEST_ASSERT(cas != NULL, "addrspace_clone");
+    struct Proc *child = cow_adopt(cas);
+    TEST_ASSERT(child != NULL, "adopt the cloned address space");
+    TEST_EXPECT_EQ((u64)cow_page_share_for_test(shared), 2ull, "two holders");
+
+    // The child reads first: tables + a read-only leaf naming the original, so
+    // the write's replace allocates nothing and the free below is the ONLY
+    // physical movement after the probe.
+    cow_make_fi(&fi, COW_TEST_VA + 0x10, /*is_write=*/false);
+    TEST_EXPECT_EQ(userland_demand_page(child, &fi), FAULT_HANDLED, "child read fault");
+    TEST_EXPECT_EQ(cow_test_pte(child->as->pgtable_root, COW_TEST_VA) & 0x0000FFFFFFFFF000ull,
+                   page_to_pa(shared), "the read-only leaf names the original");
+
+    g_f20_parent = parent; g_f20_probe_calls = 0;
+    g_f20_share_after_drain = 0; g_f20_free_at_probe = 0;
+    g_cow_copy_probe_for_test = f20_last_share_probe;
+    cow_make_fi(&fi, COW_TEST_VA + 0x10, /*is_write=*/true);
+    enum fault_result r = userland_demand_page(child, &fi);
+    g_cow_copy_probe_for_test = NULL;
+    TEST_EXPECT_EQ(r, FAULT_HANDLED, "the write breaks by copying");
+    TEST_EXPECT_EQ((u64)g_f20_probe_calls, 1ull, "the probe fired once");
+    TEST_EXPECT_EQ(g_f20_share_after_drain, 1ull,
+                   "at the probe, the other holder gone, the copy's own share is the LAST -- "
+                   "held through the drain (put early, the drain would have freed the "
+                   "original under the child's live read-only leaf)");
+    magazines_drain_all();
+    TEST_EXPECT_EQ(phys_free_pages(), g_f20_free_at_probe + 1ull,
+                   "after the replace the last share's put returned the original to the "
+                   "buddy, exactly once");
+
+    struct Vma *cvma = vma_lookup_in(child->as, COW_TEST_VA);
+    TEST_ASSERT(cvma != NULL, "child VMA");
+    struct page *priv = burrow_lazy_slot_for_test(cvma->burrow, 0);
+    TEST_ASSERT(priv != NULL && priv != shared, "the child holds a private copy");
+    TEST_EXPECT_EQ(((u64 *)pa_to_kva(page_to_pa(priv)))[0], 0xB1A5ull, "with the bytes");
+    u64 pte = cow_test_pte(child->as->pgtable_root, COW_TEST_VA);
+    TEST_EXPECT_EQ(pte & 0x0000FFFFFFFFF000ull, page_to_pa(priv), "the leaf names the copy");
+    TEST_EXPECT_EQ(pte & COW_AP_FIELD, COW_AP_RW_ANY, "writable");
+
+    drop_proc_for_cow(child);
+    drop_proc_for_cow(parent);           // its mapping is already gone; the tables follow
 }
