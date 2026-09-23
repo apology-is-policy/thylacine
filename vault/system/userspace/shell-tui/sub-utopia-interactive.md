@@ -150,19 +150,20 @@ so it is left default rather than mis-flagged. An empty index disables colouring
 entirely.
 
 **Completion.** Tab dispatches to a `CompletionSource`. `ShellCompletionSource`
-classifies from the buffer: a bare name in command position (start of line, or
-after `| ; & { (`) completes against the command index; anything else — a later
-argument, or a command-by-path — splits the token at its last `/` and reads the
-directory live. `cd` restricts to directories. Each candidate carries its
-terminator, a space for a command or file and `/` for a directory, so a unique pick
-lands ready for the next token and a directory can be drilled with a second Tab.
-The engine then extends to the prefix every match shares -- computed from the
-candidates when the source handed over all of them, taken from the source when it
-kept only some (below); when the prefix is already exhausted it enters the
+reads the word under the cursor as the lexer will (below) and classifies it: a
+name with no `/` in command position — the first word of a command, after
+`| ; & { (`, a newline, or inside a `$(` — completes against the command index;
+anything else — a later argument, a redirect's target, or a command-by-path —
+splits the name at its last `/` and reads the directory live. `cd` restricts to
+directories, keyed on the command the word belongs to, so `ls; cd <TAB>`
+restricts and a quoted `'cd'` counts. Each candidate carries its terminator, a
+space for a command or file and `/` for a directory, so a unique pick lands ready
+for the next token and a directory can be drilled with a second Tab. The source,
+not the engine, supplies what every match shares (`extension`), already spelled
+for the line; the engine applies it, and when there is none it enters the
 zsh-style cycling menu — apply candidate 0, emit `MenuShow`, and the editor's
-own render paints a one-line strip below the block (next paragraph but three).
-Tab cycles, Enter finalizes without submitting, any other key dismisses and is
-re-dispatched.
+own render paints a one-line strip below the block (below). Tab cycles, Enter
+finalizes without submitting, any other key dismisses and is re-dispatched.
 
 **The directory read is injected, not called (2026-09-23).** The source reads
 directories through a `ListDir` -- `fn(dir, visit)`, calling `visit(name,
@@ -202,15 +203,17 @@ for this menu: "show N + ... M more". The as-built capped the matching and dropp
 the count. Now:
 
 - A `Gather` (in `completion.rs`) sees every match, keeps the first 256
-  alphabetically in a max-heap, counts the rest, and tracks the greatest match.
-  The longest common prefix of a set is that of its least and greatest members,
-  and the least is always kept, so the prefix every match shares costs one extra
-  string rather than every match. Which entries are kept depends only on their
-  names, never on read order.
-- `Completions` carries an `extent`: `Complete`, or `Truncated { unlisted,
-  shared }`. The engine extends to `shared` for a truncated set, never to the
-  subset's own prefix, and a truncated set's lone listed candidate is not taken
-  as the unique completion.
+  alphabetically in a max-heap, counts the rest, and tracks the least and the
+  greatest match. The longest common prefix of a set is that of its least and
+  greatest members, so the prefix every match shares costs two extra strings
+  rather than every match. Which entries are kept depends only on their names,
+  never on read order.
+- `Completions` carries that prefix, spelled, as `extension`, and the number of
+  matches it does not list as `unlisted`. (This first landed as an `extent` --
+  `Complete` or `Truncated { unlisted, shared }` -- with the engine computing the
+  prefix itself for a complete set; the quoting fix below moved all of it to the
+  source.) A lone listed candidate of a larger set is not taken as the unique
+  completion.
 - `MenuShow` carries `unlisted`, and `menu_strip` ends the strip with `+N more`
   in the `Path` ink. The window's `<` / `>` mean "cycle to see more"; the count
   means "no Tab reaches these", and without it a partial menu reads as the whole
@@ -261,6 +264,62 @@ and the first run of them proved the scroll test blind: it fed `app` and Tab as 
 read, so every action rendered the final state, and the erase before each redraw
 moved up one row from the wrong position and landed on the prompt by luck. It now
 feeds one byte per read, as typing arrives, and a separate test drives the paste.
+
+**Completion reads the word as the lexer does, and spells what it inserts
+(2026-09-23).** It used to find the word by the last blank before the cursor and
+insert names byte for byte, so a file called `my file` completed to two words; a
+name holding a quote, `$`, `;`, `|` or `#` broke the line, one holding `*`, `?`
+or `[` expanded as a glob, and one holding an ESC went raw into the line and the
+strip, and from there to the terminal -- under Halcyon, into a stream whose
+escape frames are parsed. Three failing tests came first: a name with a space
+completed to two words, and an ESC reached the line.
+
+`word_at` now reads the word with the lexer's own rules. It is a second scanner,
+because the lexer is built for complete input and completion is about the
+incomplete kind -- an open quote, an escape the cursor has not finished -- but it
+shares the lexer's character predicates (`is_word_char_byte` and the
+variable-name pair, made `pub(crate)` for this), and `word_at_agrees_with_the_lexer`
+checks that on complete input the two read the same word from the same byte.
+It removes escapes and quotes to give the text a name must begin with; tracks
+`$(`, `{`, `(`, `((`, `` `{ `` and process substitutions as nested levels; knows
+the command position, the command a word belongs to, and a redirect's target;
+and answers nothing where the lexer reads no standalone literal word -- a
+comment, a `$var`, a double quote that expands, a heredoc tag, a `/regex/`, and
+a word glued to what precedes it. That last is `$home/fo`, `~/fo`, `'a'b` and
+`a^b`: ut joins adjacent pieces only with `^`, `~` and `=`, so `$home/fo` is two
+words here (HAUL-DESIGN.md records the same fact for `$host!$port`), and
+completing its second half as a path would complete the wrong word. The one
+deliberate difference from the lexer: a `\` at the cursor is an escape not yet
+finished, where the lexer, at the end of its input, keeps a literal backslash.
+
+`quote_word` spells each match as rc and Plan 9's `%q` do: as it is when every
+character is a lexer word character and the glob matcher's own `has_meta` finds
+no meta; otherwise whole, in single quotes, with `''` for a quote. A double quote
+the user opened is continued with its escapes (`\\`, `\"`, `\$`, `\t`,
+`\n`), and a tab or newline, which only double quotes can spell, forces one. A
+directory is left open with its `/` inside (`'my dir/`), as bash leaves it:
+`'my dir'/` would be two words. A command named like a reserved word is quoted,
+because bare the parser reads the keyword. Single quotes rather than bash's
+backslashes for three reasons: they are the literal form scripture documents
+(UTOPIA-SHELL-DESIGN.md 6.4, where backslash-in-a-word does not appear at all);
+they are the heritage's; and a backslash-escaped glob character still globs in
+ut, because the escape is gone by the time `glob_candidate` looks at the word.
+That last is its own defect, found reading for this one.
+
+The prefix every match shares is taken from the NAMES and then spelled --
+readline's order. The pre-fix design note said the reverse ("quote before the
+common prefix is taken, since quoting changes it") and it was wrong: spelled,
+`'abc 2' ` and `abc1 ` share nothing though both names begin `abc`, and a
+backslash-spelled prefix can end in half an escape, which would make the line a
+continuation. Working one example caught it before any code. So the engine no
+longer computes a prefix at all: `Extent` is gone, and the source hands over
+`extension` and `unlisted` (the cap paragraph above).
+
+A name holding a control character other than tab or newline has no spelling in
+ut -- a single-quoted string would carry the raw byte, and the editor draws its
+line verbatim. Such a match is counted among the unlisted but never listed or
+inserted; it still bounds the shared prefix, which stops before its first
+control character, so Tab never extends past a name it cannot write.
 
 **What runs where.** Since the `backend` split (2026-09-22) the crate builds for
 the host, and `line_editor`, `completion`, `palette`, `ansi` and `path` run their
@@ -334,10 +393,18 @@ flag.
 `EditorAction` — `NoChange`, `Redraw`, `Accept(String)`, `Cancel`, `Eof`,
 `ClearScreen`, `MenuShow { candidates, selected, unlisted }`.
 
-`Completions` — a byte range to replace, candidate full-replacement strings in
-source order, and an `Extent`: `Complete`, or `Truncated { unlisted, shared }` --
-the candidates are then the first matches alphabetically, `unlisted` more exist,
-and every match begins with `shared`.
+`Completions` — a byte range to replace; the listed matches, each as the text
+that replaces it; `extension`, what every match shares as that text, when it says
+more than the buffer does; and `unlisted`, the matches no Tab reaches.
+
+In `completion.rs`: `WordAt { start, text, quote, command_position, command }`,
+the word the cursor ends with its quoting removed; `Quote` -- `Bare`, `Single` or
+`Double`, how the user began the word and so how its completion is spelled;
+`Gather { kept, unlisted, least, greatest }`, the capped heap of `(name,
+is_dir)` plus the two names that bound the shared prefix; and the reader's
+`Level` (one open code level: its closer, whether the next word begins a command,
+the command's name, a pending redirect target) and `Dq` (a double quote being
+read), stacked as `Frame`s.
 
 `Repl` — the `Env`, the editor, the cached `/bin` scan, whether completion was
 installed, and an optional history path.
@@ -410,8 +477,9 @@ the last command's status) and a read returning EOF or an error.
 pass over the prefix before the cursor. `refresh_command_index` runs after every
 accepted line and is deliberately syscall-free — the `/bin` scan is cached at
 install and only the alias and function tables are re-walked, then sorted and
-deduped. Completion takes exactly one `read_dir` per Tab in argument position and
-none in command position. The read runs to the end of the directory, however
+deduped. Completion reads the line once up to the cursor to find the word, then
+takes exactly one `read_dir` per Tab in argument position and none in command
+position. The read runs to the end of the directory, however
 large: the prefix every match shares cannot be known otherwise, and `ls` and glob
 expansion read whole directories too. What the 256 cap bounds is memory -- at most
 256 names held, each entry O(log 256) -- and the menu strip.
@@ -443,10 +511,20 @@ not.
   the cursor. The REPL erases it before any action that leaves the menu and
   before a notification; a new path that writes `\r\n` without `clear_menu()`
   strands a strip on screen.
-- **Does every source that keeps a subset say so?** The engine extends to the
-  common prefix of what it is handed unless `extent` says the set is truncated. A
-  source that caps and reports `Complete` reintroduces the 2026-09-23 defect, and
-  the engine cannot detect it. Every capping source should go through `Gather`.
+- **Does every source supply its own extension?** The engine takes no prefix
+  from the candidates -- it cannot, since they are spelled -- so a source that
+  leaves `extension` empty simply never extends, and one that computes it from
+  a capped subset reintroduces the 2026-09-23 defect. Every capping source should
+  go through `Gather`, which takes the prefix from every match's name.
+- **Does every name the source inserts read back as itself?** Plain, quoted or
+  double-quoted, the inserted word must lex to one token whose value is the name,
+  not glued to its neighbour, not a keyword, not a glob. `AWKWARD` in the tests
+  is the list of characters that have broken it; a new special character in the
+  lexer belongs there too.
+- **Do the two scanners still read one grammar?** `word_at` mirrors the lexer by
+  hand for incomplete input. A lexer change to what a word is -- a new word
+  character, a new quote or escape, a new gluing rule -- must change both, and
+  `word_at_agrees_with_the_lexer` only covers the forms on its list.
 - **Are the editor's bounds defensive?** The buffer cap, the menu anchor's char
   boundaries, and the CSI parameter array are all fixed-size.
 
@@ -493,18 +571,27 @@ marked unresolvable while running fine. Currently latent: the session root holds
 only data files, and the shell that does run from a root-level namespace is the
 bare-spawn boot check, which never installs completion.
 
-**Completion inserts names unquoted.** A path candidate is the directory prefix,
-the entry's name byte for byte, and a terminator; nothing quotes it. A file
-called `my file` completes to `my file `, which the shell reads as two words, and
-the same goes for a name holding a quote, `$`, `;`, `|` or any other character
-the lexer gives meaning. The common-prefix extension can also end inside such a
-name, at the space. **This is a defect, OWED as its own fix**: the candidates need
-the lexer's quoting (rc-style `'...'`, with `''` for an embedded quote), applied
-before the common prefix is taken, since quoting changes it. The same fix owes
-the display half: a name is also written raw into the menu strip and the line, so
-one holding an ESC or other control byte injects terminal escapes -- through
-Halcyon, into a stream whose OSC frames it parses. A control byte needs a visible
-form on screen, whichever form the line gets.
+**A name holding a control character is unreachable by Tab.** ut has no quoted
+form for one -- no `$'\e'` as zsh inserts -- so completion counts it among the
+`+N more` and stops the shared prefix short of it; a glob reaches it. The menu's
+count does not say why a name is unlisted, whether past the cap or unspellable.
+
+**Tab leaves a quote open where a word goes on.** A directory, or a shared
+prefix that needed quoting, is inserted with its quote open (`'my dir/`), as
+bash does, so Enter on such a line continues it rather than submitting. The
+alternative, closing the quote, would make anything typed next a separate word.
+
+**Completion expands neither `$var` nor `~`.** A word glued to either completes
+to nothing: in ut `$home/fo` is two words, and `~/fo` is one word whose leading
+`~` only eval expands. Variable-name completion after `$` (scripture 11.5) is
+unbuilt. The reader also does not track heredoc bodies, so Tab on a body line
+completes shell words there, as bash's does.
+
+**A line from the history file is drawn raw.** Completion no longer puts a
+control character into the buffer, but `install_history` loads `.ut_history`
+unfiltered and the editor still draws its buffer verbatim, so a line another
+program wrote with an ESC in it reaches the terminal on Up or Ctrl-R. Readline
+and zle draw control characters as `^X`, two columns wide. Owed as its own fix.
 
 **A multi-line render that shrinks leaves stale lines on screen -- when the width
 is unknown.** `render`'s doc comment still says the next chunk will track the

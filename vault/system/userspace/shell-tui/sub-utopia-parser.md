@@ -70,6 +70,12 @@ decide. The same admission appears for `%`, which is a word character so that a
 job specification and a literal percent both lex as words, with the expression
 layer re-splitting the word's text when it turns out to be arithmetic.
 
+Tab completion reads the word under the cursor with a second scanner over the
+same grammar, for the incomplete input the lexer is not built for; it shares the
+lexer's character predicates (`is_word_char_byte`, `is_var_name_start_byte`,
+`is_var_name_byte`, `pub(crate)` for that reason), and a test pins the two to
+one reading of complete input ([[sub-utopia-interactive]]).
+
 Two pieces of state make the scanner not quite context-free, both queued rather
 than backtracked: heredoc bodies are collected at the *next newline* after the
 tag that requested them, drained first-in-first-out; and a regex literal is
@@ -215,6 +221,20 @@ Nothing here is on a hot path — it runs once per line typed.
 
 ## Caveats
 
+- **OPEN (found 2026-09-23): a backslash-escaped glob character still globs.**
+  `scan_word` turns `\*` into a bare `*` inside `Word(text)`, and nothing records
+  that it was escaped; eval's `glob_candidate` then gates on `has_meta(text)`
+  and expands it. By reading `evaluate_argv` (not yet run on a device): `rm \*`
+  removes every file in the directory, and `grep a\*b f`, finding no file named
+  like `a*b`, loses the argument entirely under rc's no-match-is-empty rule. The
+  same loss makes an escaped `*` a wildcard in a `case` pattern or a `matches`,
+  and makes `\if` the keyword, where POSIX makes any quoted part of a reserved
+  word ordinary. Scripture documents backslash-in-a-word nowhere (UTOPIA-SHELL-
+  DESIGN.md 6.4-6.5 name only the two quotes), so the lexer's `\<char>` is an
+  extension whose meaning was never written down. The fix needs the escape to
+  survive lexing -- `Word(String)` has over a hundred match sites -- and is owed
+  as its own chunk. Tab completion quotes with single quotes partly for this
+  reason ([[sub-utopia-interactive]]).
 - **FIXED 2026-09-22: this parser's tests run.** They had never compiled — the
   crate depended on libthyla-rs unconditionally, whose inline assembly will not
   assemble for a host target, so the workspace's bare-metal pin had no escape

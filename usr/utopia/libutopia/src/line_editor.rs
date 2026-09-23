@@ -296,53 +296,51 @@ fn continuation_prefix(prompt_width: usize) -> alloc::string::String {
 // table, the function table, the cap registry, etc.). U-4d defines
 // the trait the shell implements + the editor-side machinery (Tab
 // key dispatches to the source; the source returns a structured
-// Completions; the editor inserts the common-prefix extension, then
-// opens the D4 cycling menu (MenuShow) when the prefix is exhausted).
+// Completions; the editor inserts the shared extension, then opens
+// the D4 cycling menu (MenuShow) when there is none).
 //
-// At U-4d, the engine ships a `StaticCompletionSource` that wraps a
-// fixed candidate list -- used by tests and as a placeholder until
-// U-6 wires in the real shell-driven source.
+// The text that goes into the line is the SOURCE's to write, never the
+// engine's. A source completes some grammar -- the shell's words, where a
+// name holding a space or a quote must be quoted -- and only it knows how a
+// value is spelled there. So each string it hands over is already the text
+// to insert, and so is the prefix its matches share: the engine cannot take
+// that prefix from the inserted forms, because quoting changes it. Quoted,
+// two names that part after a space can share a prefix ending inside the
+// quoting, or share nothing at all when only one of them needs quotes.
+//
+// The engine also ships a `StaticCompletionSource` over a fixed list, for
+// tests and the boot probes; the shell's is `completion::ShellCompletionSource`.
 
 /// A pluggable source for Tab completion candidates. Implementors
 /// receive the current buffer + cursor position and return the byte
-/// range to replace + the candidate strings.
+/// range to replace + the texts that may replace it.
 pub trait CompletionSource {
     fn complete(&self, buffer: &str, cursor: usize) -> Completions;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Completions {
-    /// Byte range in the buffer that each candidate replaces.
+    /// Byte range in the buffer that a completion replaces.
     pub replace_range: core::ops::Range<usize>,
-    /// Candidate full-replacement strings, in source order.
+    /// The listed matches, each as the text that replaces `replace_range`.
     pub candidates: Vec<String>,
-    /// Whether `candidates` is every match.
-    pub extent: Extent,
-}
-
-/// Whether a source handed over every match. A source that must bound what it
-/// holds keeps only some, and then supplies the one fact the engine can no
-/// longer derive from the list: the prefix EVERY match shares. The common
-/// prefix of a subset can run past matches the subset left out, and extending
-/// the line to it would leave those matches unreachable.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum Extent {
-    /// `candidates` is every match.
-    #[default]
-    Complete,
-    /// `candidates` are the first matches alphabetically and `unlisted` more
-    /// exist. Every match, listed or not, begins with `shared`.
-    Truncated { unlisted: usize, shared: String },
+    /// What every match shares, listed or not, as the text that replaces
+    /// `replace_range` -- present only when it says more than the buffer does.
+    pub extension: Option<String>,
+    /// Matches missing from `candidates`, which no Tab reaches: a source that
+    /// bounds what it holds lists only some, and one completing a grammar can
+    /// meet a match it has no way to write.
+    pub unlisted: usize,
 }
 
 /// A simple completion source backed by a fixed candidate list. Used
-/// by the U-4d tests + boot probes; production code (U-6+) will plug
-/// shell-driven sources (path search, $path scan, function table,
-/// alias table, etc.).
+/// by the U-4d tests + boot probes; the shell installs
+/// `completion::ShellCompletionSource`.
 ///
 /// `complete(buffer, cursor)`: finds the start of the current word
 /// (cursor backward to whitespace or buffer start) and returns the
 /// subset of `candidates` whose first chars match the word prefix.
+/// Each is inserted exactly as given: this source quotes nothing.
 pub struct StaticCompletionSource {
     pub candidates: Vec<String>,
 }
@@ -368,10 +366,13 @@ impl CompletionSource for StaticCompletionSource {
             .collect();
         // Preserve source-order; do NOT sort.
         matches.shrink_to_fit();
+        // Inserted as given, so what they share is their own common prefix.
+        let shared = longest_common_prefix(&matches);
         Completions {
             replace_range: word_start..cursor,
+            extension: (shared.len() > prefix.len()).then_some(shared),
             candidates: matches,
-            extent: Extent::Complete,
+            unlisted: 0,
         }
     }
 }
@@ -2031,27 +2032,20 @@ impl LineEditor {
             Some(src) => src.complete(&self.buffer, self.cursor),
             None => return EditorAction::NoChange,
         };
+        // A lone candidate is the completion only when nothing else matched.
+        if comp.candidates.len() == 1 && comp.unlisted == 0 {
+            return self.apply_completion(comp.replace_range, &comp.candidates[0]);
+        }
+        // Several matches: first extend to what they all share (zsh: complete
+        // the common part). When that is exhausted, enter the D4 cycling menu
+        // -- apply candidate[0] and let `render` draw the highlighted strip.
+        if let Some(ext) = &comp.extension {
+            return self.apply_completion(comp.replace_range, ext);
+        }
         if comp.candidates.is_empty() {
             return EditorAction::NoChange;
         }
-        // What every match shares, and how many the list leaves out. A lone
-        // candidate is the completion only when nothing else matched.
-        let (common, unlisted) = match comp.extent {
-            Extent::Complete if comp.candidates.len() == 1 => {
-                let cand = comp.candidates[0].clone();
-                return self.apply_completion(comp.replace_range, &cand);
-            }
-            Extent::Complete => (longest_common_prefix(&comp.candidates), 0),
-            Extent::Truncated { unlisted, shared } => (shared, unlisted),
-        };
-        // Multiple matches: first extend to the shared prefix if it grows the
-        // word (zsh: complete the common part). When the prefix is already
-        // exhausted, enter the D4 cycling menu -- apply candidate[0] and let
-        // the main loop draw the highlighted strip.
-        let current_word_len = comp.replace_range.end - comp.replace_range.start;
-        if common.len() > current_word_len {
-            return self.apply_completion(comp.replace_range, &common);
-        }
+        let unlisted = comp.unlisted;
         let anchor = comp.replace_range.start;
         let cand0 = comp.candidates[0].clone();
         // Apply candidate[0]; if it cannot be applied (would exceed the buffer
@@ -3194,8 +3188,8 @@ mod tests {
         assert_eq!(le.buffer(), "ap");
     }
 
-    /// A source with one fixed answer, so the engine can be handed an `Extent`
-    /// no shipped source produces on demand.
+    /// A source with one fixed answer, so the engine can be handed any
+    /// `Completions` -- ones no shipped source produces on demand included.
     struct Fixed(Completions);
 
     impl CompletionSource for Fixed {
@@ -3204,22 +3198,20 @@ mod tests {
         }
     }
 
-    /// Type `typed`, install a source that lists `listed` of a larger set
-    /// sharing only `shared`, and press Tab.
-    fn tab_truncated(
+    /// Type `typed`, install a source answering `listed`, `extension` and
+    /// `unlisted` for the whole of it, and press Tab.
+    fn tab_fixed(
         typed: &str,
         listed: &[&str],
+        extension: Option<&str>,
         unlisted: usize,
-        shared: &str,
     ) -> (LineEditor, EditorAction) {
         let mut le = LineEditor::new();
         le.set_completion_source(alloc::boxed::Box::new(Fixed(Completions {
             replace_range: 0..typed.len(),
             candidates: listed.iter().map(|s| String::from(*s)).collect(),
-            extent: Extent::Truncated {
-                unlisted,
-                shared: String::from(shared),
-            },
+            extension: extension.map(String::from),
+            unlisted,
         })));
         feed(&mut le, typed.as_bytes());
         let r = le.feed_byte(0x09);
@@ -3227,25 +3219,39 @@ mod tests {
     }
 
     #[test]
-    fn a_truncated_list_extends_only_to_what_every_match_shares() {
-        // The listed two share "fab"; the whole set shares only "fa".
-        let (le, r) = tab_truncated("f", &["fab1 ", "fab2 "], 3, "fa");
+    fn tab_extends_to_the_sources_extension_not_the_listed_prefix() {
+        // The listed two share "fab"; the source says every match shares only
+        // "fa" -- a list it capped, or matches it cannot write. Its word wins.
+        let (le, r) = tab_fixed("f", &["fab1 ", "fab2 "], Some("fa"), 3);
         assert_eq!(r, EditorAction::Redraw);
         assert_eq!(le.buffer(), "fa");
     }
 
     #[test]
-    fn a_truncated_list_still_extends_when_the_whole_set_does() {
-        let (le, r) = tab_truncated("f", &["fab1 ", "fab2 "], 3, "fab");
-        assert_eq!(r, EditorAction::Redraw);
-        assert_eq!(le.buffer(), "fab");
+    fn the_engine_takes_no_prefix_from_the_inserted_texts() {
+        // Quoted, these share "'my file" -- a prefix ending inside the quoting.
+        // With no extension from the source, Tab opens the menu instead.
+        let (le, r) = tab_fixed("my", &["'my file1' ", "'my file2' "], None, 0);
+        assert_eq!(menu_at(&r), Some((0, 0)), "{:?}", r);
+        assert_eq!(le.buffer(), "'my file1' ");
     }
 
     #[test]
-    fn a_lone_listed_candidate_of_a_truncated_set_is_not_the_completion() {
+    fn an_extension_applies_with_nothing_listed() {
+        // Every match unwritable: nothing to list, but the shared part is.
+        let (le, r) = tab_fixed("e", &[], Some("esc"), 2);
+        assert_eq!(r, EditorAction::Redraw);
+        assert_eq!(le.buffer(), "esc");
+        let (le, r) = tab_fixed("esc", &[], None, 2);
+        assert_eq!(r, EditorAction::NoChange);
+        assert_eq!(le.buffer(), "esc");
+    }
+
+    #[test]
+    fn a_lone_listed_candidate_of_a_larger_set_is_not_the_completion() {
         // Applied as a unique match this would be a Redraw with the same
         // buffer; the menu is what says other matches exist.
-        let (le, r) = tab_truncated("f", &["fab1 "], 3, "f");
+        let (le, r) = tab_fixed("f", &["fab1 "], None, 3);
         match r {
             EditorAction::MenuShow {
                 candidates,
@@ -3269,7 +3275,7 @@ mod tests {
 
     #[test]
     fn the_menu_carries_the_unlisted_count_through_every_cycle() {
-        let (mut le, r) = tab_truncated("fa", &["fa1 ", "fa2 "], 7, "fa");
+        let (mut le, r) = tab_fixed("fa", &["fa1 ", "fa2 "], None, 7);
         assert_eq!(menu_at(&r), Some((0, 7)), "{:?}", r);
         let r = le.feed_byte(0x09);
         assert_eq!(menu_at(&r), Some((1, 7)), "{:?}", r);

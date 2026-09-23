@@ -842,8 +842,10 @@ impl<'a> Lexer<'a> {
 ///
 /// Non-ASCII bytes (b >= 0x80) are always word chars; the lexer
 /// advances by whole UTF-8 chars so multibyte sequences are
-/// preserved verbatim into Word tokens.
-fn is_word_char_byte(b: u8) -> bool {
+/// preserved verbatim into Word tokens. Tab completion reads the word under
+/// the cursor with this same predicate, so the two cannot disagree on where a
+/// word ends.
+pub(crate) fn is_word_char_byte(b: u8) -> bool {
     // `%` is a word char in command context so a jobspec (`%1`) and a literal
     // `%` argument (`echo 100%`, `printf %d`) lex as words rather than erroring
     // as UnexpectedChar. Arith `%` (modulo) is unaffected: the expression
@@ -869,12 +871,12 @@ fn is_word_char_byte(b: u8) -> bool {
 
 /// True if `b` is a valid first char of a variable name. Names are
 /// `[a-zA-Z_][a-zA-Z0-9_]*`.
-fn is_var_name_start_byte(b: u8) -> bool {
+pub(crate) fn is_var_name_start_byte(b: u8) -> bool {
     matches!(b, b'a'..=b'z' | b'A'..=b'Z' | b'_')
 }
 
 /// True if `b` is a valid continuation char of a variable name.
-fn is_var_name_byte(b: u8) -> bool {
+pub(crate) fn is_var_name_byte(b: u8) -> bool {
     matches!(b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_')
 }
 
