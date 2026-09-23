@@ -22,6 +22,84 @@ needed the operator.
 
 
 ---
+## 2026-09-23, early morning (aux, Opus 5.5 1M, effort max) -- the gate that said "nothing is stranded", and the test it could not see running twice
+
+The operator asked how the run got from lantern to the Utopia tests. I answered
+from git and this journal rather than from my own resume note, and re-measuring
+the figures in it is what found everything below. **Three things I had told the
+operator were wrong, and I told them so:**
+
+1. **"They now run (313)", with `eval::expr`'s 29 named as what was left.** 91 of
+   libutopia's tests are still stranded: `expr` 29, `repl` 23, `stmt` 14,
+   `glob` 11, `completion` 9, `env` 5. My handoff understated the debt by 62.
+   Each module is gated for a real reason -- glob and completion each read a
+   directory, repl/stmt/env make syscalls, expr reaches into all three.
+2. **313 itself.** 312 distinct tests; one ran twice (below).
+3. **"ls-ci PASS" at the tip.** It passed on the image BEFORE `53c51671`, whose
+   `eval::discipline` split had been compiled and host-tested but never booted.
+   Booted this morning: **PASS 37 s, first attempt.**
+
+**The gate I built to make stranded tests visible could not see them.**
+`test-rust.sh` counted stranded tests only for NO-HOST crates, and the fix that
+made libutopia host-testable moved it into PASS -- taking its remaining debt out
+of the report with it. The summary line read *"the NO-HOST crates declare no
+tests, so nothing is stranded"* while 101 tests in three crates ran nowhere. The
+census closed exactly: 1,917 textual `#[test]`s against 1,815 compiled, and all
+102 attributed -- libutopia 91 (backend-gated modules), aurora 9 (a bin-only
+crate, which the gate never counted), cornucopia 1 (the `scale` feature twin),
+and one that is not a test at all (a `#[test]` inside a comment in libhalcyon's
+`theme.rs`). **A debt reported by category disappears the moment a fix changes
+the category.** STRANDED is now derived from each crate: declared (anchored at
+line start, so comments do not count) minus compiled. cornucopia's twin RUNS,
+via a one-entry `FEATURE_PASSES` table that decides only what runs, never what
+is counted.
+
+**Counting distinct names instead of summing cargo's footer found a test
+registered twice.** libutopia: cargo counted 313, the names came to 312.
+`equal_is_assignment_at_statement_start_and_literal_after_a_word` carried TWO
+`#[test]` attributes -- mine, from withdrawing UT-PARSE-2 (`2155e9e8`): I kept
+the old attribute above the new doc comment and wrote a second one below it.
+**rustc said so on every build** (`duplicate_macro_attributes`), and nobody saw
+it: the gate keeps each crate's log and prints it only on a FAIL, and my own runs
+filtered for the result line. The gate now FAILs a crate whose names repeat
+within one pass, reconciles every parse against cargo's own count before
+deriving anything from it, and prints each crate's compiler warnings -- 0 across
+the tree's test builds, once the duplicate was gone.
+
+Each of the six mechanisms was sabotaged and caught: a doubled `#[test]` FAILs
+naming it; a broken name parse FAILs "parsed 0, cargo counted 38"; with no table
+entry cornucopia's twin reads 1 STRANDED; a `#[cfg(any())]` beacon test reads 37
++ 1 STRANDED; an unanchored count strands libhalcyon's comment; a planted
+warning is counted. Every restore was a `cp` + `touch` + `cmp` against a copy
+taken first -- the mtime trap from last night stays paid.
+
+**Two things that looked like findings and were not.** `manual`'s test binary
+sat at 100% CPU for minutes. Sampling named `bounds::the_heap_bounds_hold`: 42
+worst-case shapes of a 1 MiB section at up to five settings, 101 s in the
+unoptimized test profile -- and the control, `--release`, took ~16 s, while its
+sibling test asserts the parser stays linear. Exhaustive by design. And
+tapestryd's device build warns `unused variable: nsegs` at three
+`map_in_window` sites on the WEAVE-SKEIN surface, which read like a scatter list
+being ignored. It is not: since the Lictor takeover the proxy shares the whole
+kernel object (`t_weft_share`) and Lictor resolves the segments itself -- "no
+caller physical addresses are transmitted" -- so tapestryd's list is a dead
+leftover. The device build has **29 distinct warning diagnostics** that no gate
+surfaces (cargo's footers sum to 216 only because they count a deduplicated
+warning once per target -- a figure I nearly quoted); their triage is queued.
+
+**Dossiers.** `test-rust.sh` had shipped on 2026-09-22 with no dossier -- mine.
+Adopted into `sub-substrate-gates`, and in the same edit the two gate changes of
+09-22 that landed without a dossier update (main's `default-smp1` row, the
+`/webkit` floor path), because bumping `updated:` for my file alone would have
+removed theirs from `quaestor stale` while leaving them undescribed.
+`sub-utopia-parser`'s count is corrected to the tip.
+
+**Posture**: `tools/test-rust.sh` **1,814 distinct tests / 26 crates / 0 failing
+/ 1 quarantined / 0 warnings; 100 STRANDED in 2 crates** (libutopia 91, aurora
+9). ls-ci PASS 37 s at `53c51671`. Device workspace build clean. quaestor lint
+1,270 notes, 0 fail.
+
+---
 ## 2026-09-22, night (aux, Opus 5 1M, effort xhigh) -- all six closed: four real defects, two wrong tests, and a false measurement I handed the operator
 
 The six findings from the entry below are closed the same day. The split is

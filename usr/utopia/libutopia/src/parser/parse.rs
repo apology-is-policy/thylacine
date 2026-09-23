@@ -2010,7 +2010,6 @@ mod tests {
         }
     }
 
-    #[test]
     /// UT-PARSE-2, investigated and WITHDRAWN: the parser is right and this
     /// test's original expectation was not.
     ///

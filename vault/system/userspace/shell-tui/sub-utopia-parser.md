@@ -21,7 +21,7 @@ abis: []
 design:
   - "docs/UTOPIA-SHELL-DESIGN.md sections 5-9"
 created: 2026-08-03
-updated: 2026-09-22
+updated: 2026-09-23
 ---
 ## Purpose
 
@@ -222,7 +222,16 @@ Nothing here is on a hot path — it runs once per line typed.
   the code and false of the build. `libutopia` now carries the tree's standard
   `backend` feature, so `--no-default-features` leaves the pure half —
   `parser`, `line_editor`, `ansi`, `path`, `palette`, `eval::{jobs, error,
-  value}` — host-buildable. **296 tests run where 0 did**; 399 were declared.
+  value}` — host-buildable. **296 tests ran where 0 did** at the split, of 399
+  declared. At `53c51671` the crate runs **312** distinct tests of **403**
+  declared, and **91 stay stranded** in the gated modules (`eval::expr` 29,
+  `repl` 23, `eval::stmt` 14, `eval::glob` 11, `completion` 9, `eval::env` 5),
+  which `tools/test-rust.sh` now counts per crate ([[sub-substrate-gates]]).
+  Cargo reported 313 until 2026-09-23 because
+  `equal_is_assignment_at_statement_start_and_literal_after_a_word` carried TWO
+  `#[test]` attributes -- a leftover of the UT-PARSE-2 withdrawal -- so libtest
+  registered and ran it twice. rustc's `duplicate_macro_attributes` warning said
+  so on every build, and nothing printed it.
 
   **What the first run found is the reason this caveat is worth reading rather
   than deleting.** Asking never-compiled tests to compile produced 20 build
