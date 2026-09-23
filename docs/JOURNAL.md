@@ -166,6 +166,20 @@ not-owed verdicts. One existing control asserted the OLD phrase's absence on an
 owned path -- a negative that went vacuous the moment the phrase stopped
 existing -- so it now names the new advice. Three sabotages, all caught.
 
+That landed as `1257a316`.
+
+**The shell MOC's list is complete for the first time since 2026-08-04.** It had
+said in place that six dossiers were missing from it -- the whole rendering half:
+`sub-lib-vt`, `sub-halcyond`, `sub-kaua-term`, `sub-view`, `sub-gallery`,
+`sub-manual`. All six existed and already named the MOC as parent; only the
+curated entries were owed, each one line of orientation that earns its place. A
+directory census confirmed exactly those six, and no dossier elsewhere names the
+MOC. Two claims were checked against their dossiers before landing, and one was
+corrected: `view`'s point is a decode "whose death costs a shell line, not the
+whole-session compositor", not the "shell prompt" I first wrote. Reading the six
+also turned up a stale line in `sub-halcyond`, now mine: its purpose still names
+"the fontdue rasterizer", which TY-1 replaced with skrifa + zeno. Queued.
+
 ## 2026-09-23, early morning (aux, Opus 5.5 1M, effort max) -- the gate that said "nothing is stranded", and the test it could not see running twice
 
 The operator asked how the run got from lantern to the Utopia tests. I answered
