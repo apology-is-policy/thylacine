@@ -27,7 +27,8 @@ shows masked characters; it does not send the key into the terminal transcript.
 Escape cancels the request.
 
 After a successful verdict, press a key to return. The elevated shell opens in
-the original terminal. Inspect its authority with:
+the original terminal, in the directory where you ran `imperium`. Inspect its
+authority with:
 
 ```sh
 imperium --list

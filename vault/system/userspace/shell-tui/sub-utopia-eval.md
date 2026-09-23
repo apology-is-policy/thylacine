@@ -74,6 +74,10 @@ Six public entry points, all over `&mut Env`:
 `Env` is the runtime state: a scope stack, a function table, an alias table, a
 note-handler registry, the job table, `$status` / `$errstr` / `$cwd`, and the
 mode flags (`interactive`, `stdio_inherit`, `consctl_fd`, `job_control`).
+`$cwd` starts at `/` in `Env` itself, which stays syscall-free for the host
+tests. The live shell replaces it with the kernel's cwd at startup
+(`Repl::adopt_kernel_cwd`, in [[sub-utopia-interactive]]), since `cd`'s
+`normalize_abs` and `pathname::expand` both join relative input onto it.
 
 ## Mechanism
 

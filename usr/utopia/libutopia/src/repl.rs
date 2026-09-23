@@ -465,13 +465,25 @@ impl Repl {
     /// `cd` with no argument resolves to, and the prompt abbreviates to `~` --
     /// and chdirs into it so a session `ut` starts in the user's home, syncing
     /// `$cwd` to the kernel cwd on success. A home that cannot be entered
-    /// (absent / no search permission) leaves `ut` at `/` rather than failing
-    /// startup; a bare-spawned `ut` (the boot check) is given no `--home` and
-    /// never calls this, so it runs unchanged at `/`.
+    /// (absent / no search permission) leaves `ut` where it started rather
+    /// than failing startup; a bare-spawned `ut` (the boot check) is given no
+    /// `--home` and never calls this.
     pub fn set_home(&mut self, path: String) {
         self.env.assign("home", Value::scalar(path.clone()));
         if libthyla_rs::env::set_current_dir(&path).is_ok() {
             self.env.cwd_set(path);
+        }
+    }
+
+    /// Take `$cwd` from the kernel: the directory this `ut` inherited from
+    /// whatever spawned it. `Env` starts `$cwd` at `/`, but `cd`, a relative
+    /// glob and the prompt all read `$cwd`, so a shell spawned elsewhere
+    /// without `--home` (imperium's sub-shell, haul's, a nested `ut`, a `#!`
+    /// script) would join a relative `cd` onto `/` and glob the root. Syncs
+    /// the variable only; it does not chdir. A failed read keeps `/`.
+    pub fn adopt_kernel_cwd(&mut self) {
+        if let Ok(cwd) = libthyla_rs::env::current_dir() {
+            self.env.cwd_set(cwd);
         }
     }
 
@@ -927,15 +939,8 @@ impl Repl {
     /// else 1). No line editor / prompt / notes loop -- a script reads no fd 0.
     pub fn run_script(&mut self, arg0: &str, args: &[String], src: &str) -> i32 {
         self.env.interactive = false;
-        // Sync `$cwd` to the real (inherited) kernel cwd. A script reads `$cwd`
-        // for its working directory, but unlike a login shell it gets no
-        // `--home` to seed it (a `#!` spawn passes none), so without this it
-        // would report the unset default `/` even though the spawned `ut`
-        // inherited the parent's cwd. This only syncs the shell variable; it
-        // does not chdir.
-        if let Ok(cwd) = libthyla_rs::env::current_dir() {
-            self.env.cwd_set(cwd);
-        }
+        // A `#!` spawn passes no `--home`, so nothing else seeds `$cwd`.
+        self.adopt_kernel_cwd();
         self.bind_positionals(arg0, args);
         if let Err(e) = eval_source(&mut self.env, src) {
             let mut msg = String::from("ut: ");

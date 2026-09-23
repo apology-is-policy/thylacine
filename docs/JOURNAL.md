@@ -22,6 +22,84 @@ needed the operator.
 
 
 ---
+## 2026-09-23, midday (aux, Opus 5.5 1M, effort max) -- the recipe failed on the operator's own deck, and a shell that forgot where it started
+
+**The plan was queue item (H).** A ut started without `--home` (imperium's
+elevated shell, haul's sub-shell, a nested `ut`) keeps `Env`'s initial `$cwd`
+of "/". Only script mode synced it from the kernel
+(`repl.rs::run_script`). The fix (`Repl::adopt_kernel_cwd`, called in ut's
+interactive startup and by `run_script`) and its legs were written while main
+held the Mac.
+
+**Then the operator ran the Lantern-over-Haul recipe from my report and got
+"permission denied" on everything.** `ls`, `cd` and lantern's open of
+`slides.toml` all failed, though the mount attached. The host side took one
+listing to read:
+- `~/decks` was `drwx------`, its slides `-rw-------`.
+- `/tmp/npxf.token` was 0600, 13 bytes ("pick-a-token\n").
+- All of it was created at 10:52, by MY recipe. It set `umask 077` for the
+  token file and then ran `mkdir -p ~/decks && cp -r .../usr/lantern/deck
+  ~/decks/demo` in the same shell, so the deck came out private too.
+
+dev9p enforces rwx in the kernel on the owner and mode the server reports, and
+npxf reports the Mac's uid 501 and gid 20. No principal is 501, so every guest
+user was "other". My gate had served 0755/0644, which is why it passed.
+
+Two more readings made it a design question rather than a chmod:
+- On a Linux host the coincidence runs the other way. corvus's first principal
+  is 1000 (`FIRST_AUTO_ID`), so michael would have held owner rights over the
+  host's first user's files.
+- `SYS_ATTACH_9P` asserts the caller's principal as `n_uname` to any server
+  (`syscall.c`, "forward-compat for a foreign 9P server"). That is the same
+  coincidence outbound, where F-4 says a remote attach presents `none`.
+
+IDENTITY-DESIGN 3.2 had the answer on paper since May: the mount-cape. 3.7.1
+left it a seam because "no permissionless backing is mounted at v1.0", and Haul
+broke that premise without anyone pulling it forward.
+
+**The operator voted "mounter owns"**, the sshfs `idmap=user` shape: owner =
+the attaching principal, group = its primary gid, per-file mode kept. They also
+approved default-level connection logging in npxf, after pointing out that the
+host log had shown nothing at all. Scripture landed first (`d10d1ff5`). The
+cape travels with the 9P session, not the mount node. It is safe because the
+attacher holds the transport, which is also why `DMSRVCAPE` is byte-mode only.
+The kernel change is the next chunk.
+
+**Wrong turns, each caught:**
+- **I called u-6-test flow 8's cwd check non-discriminating.** It was
+  discriminating, but only because flow 4's `cd /srv` leaves the process in
+  /srv. The flow now enters /srv itself.
+- **Flow 9's first cut globbed `/proc`.** devproc cannot list its root ("readdir
+  lands with 9P readdir"), and the boot said so:
+  `flow 9: a relative glob did not walk the adopted cwd`, with the library
+  intact. The premise was never tested. The ramfs root is flat pre-pivot (223
+  files, no directories, parsed from the cpio), so the glob leg now writes its
+  own `/env/U6CWDPROBE` and globs `/env`. The cd leg enters `/proc/<pid>` with
+  a measured `is_dir` premise and a control: the same `cd` from `$cwd=/` must
+  fail.
+- **The scratch measurement's nested-ut half was answered by the outer
+  shell.** A `ut` typed at the serial-console prompt drew one prompt showing
+  "/", then the outer shell's prompts returned. That is a separate defect,
+  queued as (O). imperium's sub-shell does hold the console, so ls-imperium arm
+  (1b) is the interactive witness.
+- **The npxf sabotage script restored with `git checkout`**, which would have
+  discarded the uncommitted logging change. Caught on re-reading; it now
+  restores from a saved copy.
+- **A docs-only commit failed the vault lint.** The coverage view's harness
+  line count moved with the UNSTAGED u-6-test. Queued as (P).
+
+**Evidence.**
+- Sabotage A (ut's call removed): u-6-test passes and ls-imperium fails at
+  (1b) with `imcwd1:/:`, measured from /home/michael.
+- Sabotage C (library no-op, `run_script`'s old sync restored): flow 8
+  passes, flow 9 fails with `$cwd is not the kernel's cwd`.
+- (J) measured: `cd mcwd-none/..` and `cd mcwd-file/..` both return 0, while
+  `ls mcwd-none/..` is refused by the kernel.
+- npxf: 120 tests, 0 failures, with the five new log checks.
+
+**Queued:** (N) `cd`'s "not a directory" for a permission failure; (J);
+(O); (P); the cape itself (L).
+
 ## 2026-09-23, late morning, later (aux, Opus 5.5 1M, effort max) -- main merged in, and a deck read from the Mac over Haul
 
 The operator asked for two things: merge main into aux-3, then see where lantern

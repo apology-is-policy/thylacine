@@ -73,6 +73,18 @@ captures only the shell's own painting.
 session (a live fd 1) or the bare-spawn boot check, opens the note queue, runs the
 session dance, installs completion and history, and drives the poll loop.
 
+**`$cwd` starts as the kernel's cwd, in every mode.** `Env` initialises `$cwd`
+to `/`, and `cd`, a relative glob and the prompt all read that variable rather
+than the kernel. So the first thing `ut` does after `Repl::new()` is
+`Repl::adopt_kernel_cwd()`: a `SYS_GETCWD`, and the answer into `$cwd`. It syncs
+the variable only; it never chdirs. `--home` then overrides it on a login
+shell. A shell spawned without `--home` keeps the directory its parent was in:
+imperium's elevated shell, haul's sub-shell, a nested `ut`, and a `#!` script,
+through `run_script`. Before 2026-09-23 only script mode adopted it. An
+interactive shell started away from `/` joined `cd imcwd-dir` onto `/`, walked
+the root for `*`, and showed `/` in its prompt, while its children ran in the
+real directory. A failed read keeps `/`, as before.
+
 A nested foreground shell keeps the PTY's existing controlling session. The
 kernel-gated `TTY_GET_FG` proves membership; the caller must already be in the
 foreground group. It establishes its own group and seats that group before
@@ -370,7 +382,8 @@ all. It binds the positional parameters (`0`/`1`/`2`/`*`) at the script's global
 scope (mirroring a function call), sets `interactive = false` so a non-zero
 `$status` **fail-fast-propagates** (scripture §8.9 — the opposite of the
 interactive REPL, which suppresses it), evaluates the whole source in one
-`eval_source` multi-statement parse, and returns the exit code (an explicit
+`eval_source` multi-statement parse (after `adopt_kernel_cwd`, since a
+shebang spawn passes no `--home`), and returns the exit code (an explicit
 `exit N` wins, else the last statement's `$status`; a parse/eval error is
 reported to the UART and yields non-zero). The `ut` binary's `parse_script`
 picks the first non-flag operand as the script, and a `#!/bin/ut` spawn arrives
@@ -500,6 +513,12 @@ not.
 - **Is the startup order preserved?** `open_notes` before the pts dance is a real
   precondition, not a preference: seating the shell as foreground makes it a signal
   target, and an un-self-managing target is terminated by its first `^C`.
+- **Can `$cwd` and the kernel's cwd disagree?** The kernel's is where children run
+  and what relative opens resolve against; `$cwd` is what `cd`, globs and the
+  prompt use. Every mode adopts the kernel's at startup, before `--home`, and `cd`
+  sets both. A new startup path must adopt too: u-6-test flow 9 witnesses the
+  method from `/proc`, and ls-imperium arm (1b) the interactive call site. A
+  plain assignment to `cwd` still moves only the variable.
 - **Do the two console paths stay one grammar?** The console (`--consctl-fd`) and
   pts (`/dev/pts/<n>ctl`) paths must write the same mode vocabulary; the restore
   after a foreground child must be byte-identical to the prompt-mode apply.
