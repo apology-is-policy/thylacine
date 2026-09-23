@@ -130,6 +130,56 @@ requires a fresh `updated:` on any edit -- so fixing the word would have dated
 the whole dossier current, the exact false claim the stale check exists to
 catch. Reverted; item 1 is a full currency sweep.
 
+**The binary comparison's premise was wrong, so the proof moved to the MIR.** I
+had written "identical modulo symbol names, or an audit round". Built on
+thyla-pi from `git archive` of `8ecb299a` and of the tip, in the same path with
+the same target directory, aurora's release binary is not identical: `.text`
+grew from 70,536 to 71,288 bytes and `.rodata` from 184,032 to 184,056. Every
+aurora symbol, and `_start`, is present on both sides under the same name, and
+all but `rs_main` are within 24 bytes of their old size; `rs_main` grew by
+1,236. The rest is the optimiser deciding differently once three modules sit in
+another crate, fat LTO and one codegen unit notwithstanding: helpers the base
+kept out of line (`encode_utf8_raw`, `CharIndices::next`, `<[u8]>::contains`)
+are inlined in the tip, `alloc::fmt::format`'s body moves the other way, and the
+machine outliner's `OUTLINED_FUNCTION_*` set is renumbered. That is what an
+optimiser does with an unchanged program -- but a size table cannot show that
+the program is unchanged. So the comparison went down a level, to MIR at
+opt-level 0, where no MIR inlining runs and a function's MIR is its own body in
+whichever crate holds it. Both sides have 139 items and 120 constant
+allocations. After normalising what the split changes without touching a body --
+crate and module qualifiers, closure and derive source positions (config.rs
+gained cfg lines, main.rs lost two), allocation numbering and the width it pads
+pointer markers to -- one line differs: the base's `_129 = Mode::Auto;` against
+the tip's `_129 = Auto;`, the same variant assigned to a local typed `osd::Mode`
+on both sides, printed with a trimmed path. The check discriminates: flipping
+one `Eq` to `Ne` in the base's MIR is caught. One visible difference remains,
+outside the MIR: a panic inside `config.rs` reports a line number 5 to 7 higher.
+No audit round was run for the G-4 row; its question, whether the drain/feed
+consumer changed, has a mechanical answer, recorded here so the operator can
+call for a round before this merges to main.
+
+**The gates.** The Mac came free at about 09:15, and the rest ran there. `tools/test-rust.sh`, whole tree: 27 crates passing, 1,892 tests, none
+failing and no warnings; the one quarantined test is haul's, as before, and the
+only stranded tests left are libutopia's 69, now that aurora's nine run.
+`tools/build.sh --config ci` (the binaries checked newer than their sources),
+then ls-ci: PASS on the first attempt, 38 s, with `u-test: line editor OK` and
+`u-repl-test: D4 menu completion OK` in the boot. Pushed to both mirrors as
+`eca56a21`, each checked with `git ls-remote`.
+
+**A partial fixture fails like a defect.** While the Mac was busy the same
+whole-tree run went to the Pi, which carries only the tracked `usr/` tree.
+libhalcyon failed eight tests and halcyond did not compile -- every failure a
+read of a file outside `usr/` (`docs/halcyon-carbon-handoff/`,
+`tools/halcyon/ansi16.json`, `third_party/ibm-plex/`), as the panics name, and
+all of it passes on the Mac. The run also found a real defect in the gate:
+`curl` failed on the Pi with a duplicate `panic_impl` lang item, where the Mac
+classes it as un-host-testable. test-rust.sh decides that bucket by grepping for
+the error macOS produces (libthyla-rs's ELF `_start` failing to assemble); on
+Linux the assembly succeeds and the next error is the panic-handler clash. I
+stopped the run before it reached the other three crates in that bucket
+(libthyla-rs, ptyhold, tls), so whether they fail the same way is a prediction.
+Queued as 0e: derive the bucket from the dependency graph, not from a symptom.
+
 ---
 ## 2026-09-23, morning (aux, Opus 5.5 1M, effort max) -- the cap that bounded the wrong thing
 
