@@ -76,6 +76,29 @@ lexer's character predicates (`is_word_char_byte`, `is_var_name_start_byte`,
 `is_var_name_byte`, `pub(crate)` for that reason), and a test pins the two to
 one reading of complete input ([[sub-utopia-interactive]]).
 
+### A word keeps its backslashes, and where it lands decides what they mean
+
+A bare word's `\<char>` makes the character part of the word whatever it is, and
+since 2026-09-23 the word's text KEEPS the backslash; only a `\<newline>`
+continuation is removed at lex time. That is what `TokenKind::Word`'s own doc
+had always said -- raw source bytes, escapes left to the evaluator -- while the
+scanner resolved every escape, so a word's text could not tell `\*` from `*`.
+The meaning now depends on where the word is read:
+
+| where the word is read | reads | so `\*` is |
+|---|---|---|
+| a value: an argv word, an expression atom, a redirect target | `lexer::unescape(text)` | a `*` character |
+| arithmetic | unescaped before the arithmetic re-split | the operator (`2\*3` is 6, as before) |
+| an argv glob, a `case` arm, a `matches` | the text as written | a literal star, never a wildcard |
+| keyword and identifier tests | the text as written | -- (`\if` is a word, `\x=1` no assignment) |
+
+`unescape` lives with the lexer because the lexer defines the escape.
+`unescape_gives_the_value_the_lexer_used_to_resolve` pins that `unescape` of
+every kept word equals what the lexer used to produce -- every printable ASCII
+escape at three positions, doubled and trailing backslashes, a continuation,
+multi-byte characters -- so no value changed, and only globs and patterns see the
+difference. The matcher's half is [[sub-utopia-eval]].
+
 Two pieces of state make the scanner not quite context-free, both queued rather
 than backtracked: heredoc bodies are collected at the *next newline* after the
 tag that requested them, drained first-in-first-out; and a regex literal is
@@ -221,20 +244,24 @@ Nothing here is on a hot path — it runs once per line typed.
 
 ## Caveats
 
-- **OPEN (found 2026-09-23): a backslash-escaped glob character still globs.**
-  `scan_word` turns `\*` into a bare `*` inside `Word(text)`, and nothing records
-  that it was escaped; eval's `glob_candidate` then gates on `has_meta(text)`
-  and expands it. By reading `evaluate_argv` (not yet run on a device): `rm \*`
-  removes every file in the directory, and `grep a\*b f`, finding no file named
-  like `a*b`, loses the argument entirely under rc's no-match-is-empty rule. The
-  same loss makes an escaped `*` a wildcard in a `case` pattern or a `matches`,
-  and makes `\if` the keyword, where POSIX makes any quoted part of a reserved
-  word ordinary. Scripture documents backslash-in-a-word nowhere (UTOPIA-SHELL-
-  DESIGN.md 6.4-6.5 name only the two quotes), so the lexer's `\<char>` is an
-  extension whose meaning was never written down. The fix needs the escape to
-  survive lexing -- `Word(String)` has over a hundred match sites -- and is owed
-  as its own chunk. Tab completion quotes with single quotes partly for this
-  reason ([[sub-utopia-interactive]]).
+- **FIXED 2026-09-23: a backslash-escaped glob character no longer globs.**
+  `scan_word` turned `\*` into a bare `*` inside `Word(text)`, so eval could not
+  tell it from a wildcard: by reading `evaluate_argv`, `rm \*` removed every file
+  in the directory, and `grep a\*b f`, finding no file named like `a*b`, lost the
+  argument under rc's no-match-is-empty rule. The same loss made an escaped `*` a
+  wildcard in a `case` arm or a `matches`, and made `\if` the keyword. Fixed by
+  keeping the escape (Mechanism, above) rather than by a side channel on the
+  token, which would have left two spellings of every word to keep in step. The
+  "hundred match sites" an early estimate feared were mostly tests: nineteen
+  outside them read a word's kind or text, and each is classed as a value, a
+  pattern, or the word as written. The side effects are each POSIX's reading and
+  each an edge a script must go looking for: an escaped reserved word is an
+  ordinary word; an escaped name is no identifier, so `\x=1` is not an assignment
+  and `fn \f` is refused; and `~\/x` is not the home form, since the
+  tilde-prefix ends at the first UNQUOTED slash. Scripture still documents
+  backslash-in-a-word nowhere (UTOPIA-SHELL-DESIGN.md 6.4-6.5 name only the two
+  quotes); the semantics above are proposed to the operator for 6.4. Tab
+  completion still spells names with single quotes ([[sub-utopia-interactive]]).
 - **FIXED 2026-09-22: this parser's tests run.** They had never compiled — the
   crate depended on libthyla-rs unconditionally, whose inline assembly will not
   assemble for a host target, so the workspace's bare-metal pin had no escape

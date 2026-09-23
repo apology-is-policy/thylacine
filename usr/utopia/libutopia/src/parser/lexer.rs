@@ -25,10 +25,14 @@
 //    `_`, `.`, `/`, `-`, `+`, `:`, `@`, `,`, and the glob meta
 //    chars `*`, `[`, `]`). The `?` glyph is a word char when
 //    followed by another word char (preserves `*.?s`); otherwise
-//    a Question operator. `\<char>` inside a word includes
-//    `<char>` literally (escape for the surrounding shell).
-//    Reserved keywords are matched against the scanned word text;
-//    a match emits the keyword token instead of Word.
+//    a Question operator. `\<char>` inside a word makes `<char>` part
+//    of the word whatever it is, and the word KEEPS the backslash:
+//    the evaluator removes it from a value (`unescape`) and honours
+//    it in a glob or a pattern, where `\*` is a star rather than a
+//    wildcard (`eval::glob`). Resolving it here lost that difference,
+//    and `rm \*` removed every file.
+//    Reserved keywords are matched against the word as written, so
+//    an escaped one (`\if`) is an ordinary word, as in POSIX.
 //
 // 3. Quoted strings: `'literal'` (rc convention: `''` is the only
 //    escape -- a doubled quote produces a single `'`); `"interp"`
@@ -208,7 +212,7 @@ impl<'a> Lexer<'a> {
             b'`' => self.scan_backtick(),
             // All other word chars start a word. Backslash-leading
             // (e.g. `\$` at top level) starts a word too -- the
-            // escaped char becomes the word's first char.
+            // escaped char is part of it.
             _ if is_word_char_byte(b) || b == b'\\' => self.scan_word(),
             // Anything else: control chars, DEL, etc. The legal
             // syntactic surface is fully covered above; anything
@@ -331,7 +335,7 @@ impl<'a> Lexer<'a> {
         while self.pos < self.bytes.len() {
             let b = self.bytes[self.pos];
             if b == b'\\' {
-                // \<char> includes <char> literally. \<nl> is line
+                // \<char> is kept as written (see the header). \<nl> is line
                 // continuation (consume both, continue scanning
                 // word).
                 if self.pos + 1 >= self.bytes.len() {
@@ -344,6 +348,7 @@ impl<'a> Lexer<'a> {
                     self.pos += 2;
                     continue;
                 }
+                text.push('\\');
                 self.pos += 1; // past the `\`
                 let char_len = self.peek_char_len();
                 text.push_str(&self.source[self.pos..self.pos + char_len]);
@@ -878,6 +883,21 @@ pub(crate) fn is_var_name_start_byte(b: u8) -> bool {
 /// True if `b` is a valid continuation char of a variable name.
 pub(crate) fn is_var_name_byte(b: u8) -> bool {
     matches!(b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_')
+}
+
+/// The value a bare word stands for: its text with each `\x` read as `x`.
+/// A lone `\` at the end stands for itself, as the lexer always read it.
+pub fn unescape(word: &str) -> String {
+    let mut out = String::with_capacity(word.len());
+    let mut chars = word.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            out.push(chars.next().unwrap_or('\\'));
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Find the byte index of the `)` that closes a paren opened with
@@ -1815,11 +1835,88 @@ mod tests {
     }
 
     #[test]
-    fn backslash_inside_word_escapes() {
-        // \$ in a bare word is literal $
+    fn backslash_inside_word_is_kept_for_the_evaluator() {
+        // The word keeps its spelling; `unescape` gives the value `$path`.
         assert_eq!(
             kinds_no_eof("\\$path"),
-            vec![TokenKind::Word("$path".into())]
+            vec![TokenKind::Word("\\$path".into())]
+        );
+        assert_eq!(unescape("\\$path"), "$path");
+    }
+
+    #[test]
+    fn an_escaped_reserved_word_is_a_word() {
+        // POSIX: a reserved word with any part quoted is an ordinary word.
+        assert_eq!(kinds_no_eof("\\if"), vec![TokenKind::Word("\\if".into())]);
+        assert_eq!(kinds_no_eof("i\\f"), vec![TokenKind::Word("i\\f".into())]);
+        assert_eq!(kinds_no_eof("if"), vec![TokenKind::If]);
+    }
+
+    /// The text the lexer produced for a word before it kept escapes: each
+    /// `\<char>` resolved to the char, `\<newline>` dropped, a lone `\` at
+    /// the end kept. `unescape` of the word as it is kept now must equal it
+    /// for every word, or a value somewhere changed.
+    fn resolved_as_before(src: &str) -> String {
+        let mut out = String::new();
+        let mut chars = src.chars();
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                out.push(c);
+                continue;
+            }
+            match chars.next() {
+                Some('\n') => {}
+                Some(n) => out.push(n),
+                None => out.push('\\'),
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn unescape_gives_the_value_the_lexer_used_to_resolve() {
+        let mut words: Vec<String> = Vec::new();
+        for b in 0x21u8..0x7f {
+            let c = b as char;
+            words.push(alloc::format!("a\\{}c", c));
+            words.push(alloc::format!("\\{}", c));
+            words.push(alloc::format!("x\\{}", c));
+        }
+        for w in [
+            "a\\ b",
+            "\\\\",
+            "\\\\\\\\",
+            "a\\\\*",
+            "tail\\",
+            "\\\u{e9}t\u{e9}",
+            "caf\\\u{e9}",
+            "ab\\\ncd",
+            "\\\\\\",
+            "\\?x",
+            "a\\!=",
+        ] {
+            words.push(String::from(w));
+        }
+        let mut checked = 0;
+        for src in &words {
+            let toks = match tokenize(src) {
+                Ok(t) => t,
+                Err(e) => panic!("{:?}: {:?}", src, e),
+            };
+            for t in &toks {
+                if let TokenKind::Word(text) = &t.kind {
+                    let spelled = &src[t.span.start..t.span.end];
+                    assert_eq!(unescape(text), resolved_as_before(spelled), "{:?}", src);
+                    checked += 1;
+                }
+            }
+        }
+        // Every constructed word yields at least one Word token.
+        assert!(
+            checked >= words.len(),
+            "{} words, {} checked",
+            words.len(),
+            checked
         );
     }
 

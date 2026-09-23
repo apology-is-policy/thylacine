@@ -16,6 +16,11 @@
 //
 // `**` is NOT special-cased: a `**` segment behaves as `*` (matches one path
 // component), so recursive descent is a v1.x refinement.
+//
+// The pattern arrives as the word was written, escapes and all (`glob`'s
+// header): a segment with no unescaped meta names one place and is read as a
+// value, `my\ dir` as `my dir`; a segment that globs is matched with its
+// escapes honoured, so `a\*b*` matches names beginning `a*b`.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -23,7 +28,7 @@ use alloc::vec::Vec;
 use libthyla_rs::fs;
 
 use super::env::Env;
-use super::glob::{has_meta, matches};
+use super::glob::{leading_dot, matches, path_pattern};
 
 /// Expand a glob `pattern` against the filesystem, returning the SORTED
 /// list of matching paths. The result preserves the pattern's shape: an
@@ -34,38 +39,19 @@ use super::glob::{has_meta, matches};
 /// 6.10) -- the caller (`evaluate_argv`) contributes no argv element in
 /// that case rather than falling back to the literal.
 ///
-/// PRECONDITION: the caller gates on `has_meta(pattern)`, so at least one
-/// `/`-separated segment carries a meta char. A pattern with no meta
-/// segment expands to nothing (it is never reached in practice).
+/// PRECONDITION: the caller gates on `has_unescaped_meta(pattern)`, so at
+/// least one `/`-separated segment carries a live meta char. A pattern with
+/// no such segment expands to nothing (it is never reached in practice).
 pub fn expand(env: &Env, pattern: &str) -> Vec<String> {
-    let leading_slash = pattern.as_bytes().first() == Some(&b'/');
-    // Drop empty segments so `//`, a leading `/`, and a trailing `/` all
-    // normalize away. (A trailing-slash "directories only" refinement is
-    // a v1.x item.)
-    let segs: Vec<&str> = pattern.split('/').filter(|s| !s.is_empty()).collect();
-
-    // The leading run of meta-free segments is the literal start directory
-    // (we don't readdir-match it -- it names exactly one place). The walk
-    // begins at the first segment carrying a meta char.
-    let walk_start = segs
-        .iter()
-        .position(|s| has_meta(s))
-        .unwrap_or(segs.len());
-    if walk_start >= segs.len() {
+    // Everything decided before the first read_dir -- the segments, where the
+    // walk starts, what the literal start directory is -- is `path_pattern`'s
+    // and host-tested there.
+    let Some(p) = path_pattern(pattern) else {
         return Vec::new(); // no meta segment (precondition violated) -> nothing
-    }
-    let (prefix_segs, walk_segs) = segs.split_at(walk_start);
-
-    let start_display = if leading_slash {
-        let mut s = String::from("/");
-        s.push_str(&prefix_segs.join("/"));
-        s
-    } else {
-        prefix_segs.join("/")
     };
 
     let mut out: Vec<String> = Vec::new();
-    walk(env.cwd(), leading_slash, &start_display, walk_segs, &mut out);
+    walk(env.cwd(), p.absolute, &p.start, &p.walk, &mut out);
     // bash sorts the final expansion as whole strings; do that once over
     // the full result (a per-level sort would diverge around the `/`
     // boundary, e.g. "a" vs "a.b").
@@ -82,11 +68,11 @@ fn walk(
     cwd: &str,
     leading_slash: bool,
     dir_display: &str,
-    segs: &[&str],
+    segs: &[String],
     out: &mut Vec<String>,
 ) {
     let seg = match segs.first() {
-        Some(s) => *s,
+        Some(s) => s.as_str(),
         None => return,
     };
     let last = segs.len() == 1;
@@ -97,10 +83,10 @@ fn walk(
         // readdir) contributes no matches -- nullglob for this branch.
         Err(_) => return,
     };
-    // A leading-dot name matches only a segment that itself begins with `.`
-    // (POSIX). `.`/`..` are not emitted by any Dev's readdir, so this rule
-    // does not need to special-case them.
-    let seg_dot = seg.as_bytes().first() == Some(&b'.');
+    // A leading-dot name matches only a segment that itself begins with a
+    // literal `.` (POSIX). `.`/`..` are not emitted by any Dev's readdir, so
+    // this rule does not need to special-case them.
+    let seg_dot = leading_dot(seg);
     for entry in rd {
         let entry = match entry {
             Ok(e) => e,

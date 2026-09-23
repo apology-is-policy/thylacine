@@ -272,6 +272,36 @@ through `note_class_for_name`, where any `tty:`-prefixed name (`tty:susp`,
 enumerating the five, because before this arm existed that exact `mask note
 'tty:susp'` parsed, ran its body, and masked nothing.
 
+### A backslash counts only where a word is a pattern
+
+A word reaches the evaluator as written, escapes and all
+([[sub-utopia-parser]]), and what a `\` means depends on which of three readers
+takes it:
+
+- **As a value** -- `eval_value_token` for an argv word or a redirect target,
+  `eval_expr` for an expression atom -- the word is `unescape`d: `a\ b` is
+  `a b`, `\*` is `*`.
+- **As an argv glob.** `glob_candidate` asks `glob::has_unescaped_meta`, so a
+  word globs only when it carries a meta its own `\` does not escape, and
+  `rm \*` removes a file named `*`. `pathname::expand` hands the word to
+  `glob::path_pattern`, which splits it on every `/` (an escaped one too: no
+  component can hold a slash), takes the leading meta-free segments as the
+  literal start directory -- a value, so `my\ dir/*.txt` starts in `my dir` --
+  and returns the rest as written for the matcher, where `\x` is a literal `x`
+  (POSIX fnmatch), inside a bracket expression too.
+- **As a `case` arm or a `matches` pattern** -- `expr::eval_pattern`. A bare
+  word contributes its text as written, so `a\*` matches only `a*`; every
+  evaluated part -- a quoted string, a variable, a substitution -- contributes
+  its value through `glob::escape_backslashes`, so its backslashes match
+  themselves, as a quoted pattern's always did. A `^` concatenation combines
+  the two through `concat_with`, the function the value path uses, so the two
+  readings cannot drift apart.
+
+Before 2026-09-23 the lexer resolved each escape and `glob_candidate` gated on
+`has_meta` of the resolved text, so by reading `evaluate_argv`, `rm \*` removed
+every file in the directory. Quoted parts of a pattern are unchanged, including
+their glob metas: a quoted `'*'` in a `case` arm is still a wildcard (Caveats).
+
 ### The recursion bound is ONE counter with two entry points
 
 `EVAL_MAX_DEPTH` (64) bounds the eval stack the way the parser's three counters
@@ -391,6 +421,16 @@ one.
   with the value already in the register. `u-subst-test` 6b pins that case
   (`false` then a bare `$(seq)` line reports 1).
 
+- **A new reader of a word's text must say which reading it wants.** The value
+  (`unescape`), the pattern (the text as written, through `has_unescaped_meta`,
+  `path_pattern` and the matcher), or the spelling (keywords, identifiers).
+  Reading the raw text as a value leaks a backslash into argv; unescaping a
+  pattern turns `\*` back into a wildcard, which is the defect this closed.
+- **A new pattern part enters through `pattern_value`.** An evaluated part that
+  skipped `escape_backslashes` would read a quoted `C:\dir` as `C:dir`;
+  `u-glob-test` C pins the quoted case, and each of its escaped cases has a twin
+  that must fire, so a 0 cannot come from a pattern that never matches.
+
 ## Seams
 
 - **Subshells and in-process pipeline elements are unimplemented**, and the
@@ -417,6 +457,23 @@ one.
 
 ## Caveats
 
+- **OPEN, the operator's vote (2026-09-23): a QUOTED glob meta in a `case` arm
+  or a `matches` is still a wildcard.** `case $x { '*' => ... }` matches every
+  `$x`, and so do `"*"` and a variable holding `*`: a pattern's evaluated parts
+  keep their metas live. rc and POSIX both make a quoted pattern character
+  literal (rc's `~ $x '*'` matches only a star). Scripture 7.1 and 7.3 say
+  nothing either way, and nothing in the tree depends on the current reading --
+  measured: three `.ut` scripts, 81 `.exp` gates and 29,838 Rust string
+  literals in 394 files, where the only quoted `case` patterns hold no meta.
+  The machinery for either answer is in place: `pattern_value`'s value arm
+  would escape a quoted part's metas as well as its backslashes. Held for the
+  operator, because it changes what an existing script means.
+- **Two escape paths have no device witness, by construction.** The dot rule's
+  call site in `pathname::walk` (`leading_dot`, host-tested) has nothing to
+  catch it on the boot ramfs, whose root holds no dotfile; and the literal
+  start directory's unescape is witnessed only by `path_pattern`'s host test,
+  since no directory on the ramfs has a name that needs an escape. A break at
+  either call site passes the boot.
 - **The main expression entry point is documented as a pure function and it
   spawns processes.** `eval_expr`'s doc comment says *"Pure function with
   respect to the AST; side effects are limited to errors raised through
@@ -502,6 +559,8 @@ one.
   matcher again, as its own header always said it was, and its tests run on the
   host; `eval::pathname` (POSIX's "pathname expansion") holds `expand` and its
   walk, moved byte-for-byte and gated, and `u-glob-test` witnesses it at boot.
+  The escape fix moved the walk's preparation back out (`glob::path_pattern`),
+  so the gated file now holds only what needs `read_dir`.
 
   **`console`'s vocabulary was lifted out** into `eval::discipline`
   (2026-09-22), and it is the clearest case for why the `backend` split was

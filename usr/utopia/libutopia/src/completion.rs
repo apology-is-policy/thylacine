@@ -1212,7 +1212,8 @@ mod tests {
     /// else -- an operator, a comment eating the rest, a `$`, a glob meta in a
     /// bare word -- is the failure, described.
     fn literal_words(line: &str) -> Result<Vec<String>, String> {
-        use crate::eval::glob::has_meta;
+        use crate::eval::glob::has_unescaped_meta;
+        use crate::parser::lexer::unescape;
         use crate::parser::{tokenize, DqPart, TokenKind};
         let toks = tokenize(line).map_err(|e| format!("{:?} lexing {:?}", e, line))?;
         let mut out = Vec::new();
@@ -1227,7 +1228,7 @@ mod tests {
             last_end = Some(t.span.end);
             match t.kind {
                 TokenKind::Eof => break,
-                TokenKind::Word(s) if !has_meta(&s) => out.push(s),
+                TokenKind::Word(s) if !has_unescaped_meta(&s) => out.push(unescape(&s)),
                 TokenKind::SingleQuoted(s) => out.push(s),
                 TokenKind::DoubleQuoted(parts) => {
                     let mut v = String::new();
@@ -1657,7 +1658,8 @@ mod tests {
             };
             let last = &toks[toks.len() - 2];
             let value = match &last.kind {
-                TokenKind::Word(s) | TokenKind::SingleQuoted(s) => s.clone(),
+                TokenKind::Word(s) => crate::parser::lexer::unescape(s),
+                TokenKind::SingleQuoted(s) => s.clone(),
                 TokenKind::DoubleQuoted(parts) => parts
                     .iter()
                     .map(|p| match p {
