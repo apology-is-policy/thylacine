@@ -3111,7 +3111,6 @@ void proc_apply_identity(struct Proc *p, u32 principal_id, u32 primary_gid,
         extinction("proc_apply_identity: principal_id is a reserved sentinel");
     if (primary_gid == GID_INVALID || primary_gid == GID_SYSTEM)
         extinction("proc_apply_identity: primary_gid is a reserved sentinel");
-    p->principal_id   = principal_id;
     p->primary_gid    = primary_gid;
     p->supp_gid_count = supp_gid_count;
     for (u8 i = 0; i < supp_gid_count; i++)
@@ -3119,6 +3118,16 @@ void proc_apply_identity(struct Proc *p, u32 principal_id, u32 primary_gid,
     // Zero the tail so no stale inherited gid survives past the new count.
     for (u8 i = supp_gid_count; i < PROC_SUPP_GIDS_MAX; i++)
         p->supp_gids[i] = 0u;
+    // principal_id is published LAST, with RELEASE, and both halves of that are
+    // load-bearing. The spawn thunk stamps the SPAWN_PERM_* marks (NOTRACE among
+    // them) before calling this, as two unlocked writes to a Proc a /proc reader
+    // can already see -- rfork publishes the child before the thunk runs. A reader
+    // that observes the new principal_id with an ACQUIRE load therefore observes
+    // the marks too, which is what stops devproc_debug_authorized admitting an
+    // owner-axis attach on a Proc that is already sealed. Publishing it last also
+    // fails SAFE while the record is half-written: a checker sees the INHERITED
+    // principal (SYSTEM, on the login chain) rather than the new one.
+    __atomic_store_n(&p->principal_id, principal_id, __ATOMIC_RELEASE);
 }
 
 // =============================================================================

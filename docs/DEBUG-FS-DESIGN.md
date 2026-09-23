@@ -968,6 +968,25 @@ composition is load-bearing and prosecuted hard:
   same-principal Proc that could take the window is ordinary (a second login, a
   backgrounded process from a prior session). So for a service spawned as the
   user it serves, treat the self-call as insufficient by default.
+- **The host owner pays for this, and that is the accepted price.** NOTRACE is
+  refused AHEAD of both authority axes, so `CAP_HOSTOWNER` loses `mem`, `regs`,
+  `wait` and the section-5b `kstack` settled-thread inspect on any sealed Proc --
+  including login's home proxy, where it had them before. That is the cost of
+  choosing a FLAG over a capability-keyed refusal, and it is the right cost for
+  the (U) boundary (a capability-keyed refusal would be re-openable by anything
+  that can obtain the capability), but it means "why is the user's home hung?" is
+  no longer answerable from `/proc` on the proxy. `kill`, `suspend` and `resume`
+  are unaffected -- `devproc_kill_authorized` has no NOTRACE term.
+- **The seal does not cross `fork`, and the holder must therefore not fork.**
+  `rfork_internal` deliberately does not copy `proc_flags`, while the fork shape
+  copies the whole handle table -- so a sealed Proc that forks yields a child that
+  is same-principal, UNSEALED, and holding the parent's handles, including any live
+  transport the seal existed to protect. Nothing enforces this; it holds today only
+  because stratumd's client role never forks or execs. Any future sealed service
+  must either avoid forking or the inheritance rule must change (an open design
+  item: whether `NODUMP|NOTRACE` should be the two `proc_flags` bits that DO
+  inherit, which is a scripture change, since `proc_flags` inheriting nothing is
+  currently stated flatly).
 
 ---
 

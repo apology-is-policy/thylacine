@@ -65,13 +65,21 @@ lc_send "mount /srv/stratum-fs /tmp/gate /"
 # $status must be non-zero AND $errstr must name the cause. Printed on one line
 # with a unique token so neither can be satisfied by residue from an earlier
 # command (the one-unique-token-per-leg rule).
-lc_send "echo GATE-VERDICT status=$status errstr=$errstr"
+# BRACES, not quotes: in Tcl a double-quoted $status substitutes a TCL variable
+# (and aborts with "can't read status: no such variable"). These must reach the
+# guest shell literally, for ut to expand from its own mount/unmount result.
+lc_send {echo GATE-VERDICT status=$status errstr=$errstr}
 set timeout $lc_cmd_timeout
 expect {
-    -re {GATE-VERDICT status=0 } {
+    -re {GATE-VERDICT status=0 \r?\n} {
         lc_fail "mount /srv/stratum-fs SUCCEEDED -- the (U) connect gate is not holding: an ordinary shell reached the SYSTEM store"
     }
-    -re {GATE-VERDICT status=([1-9][0-9]*) errstr=([^\r\n]*)} {
+    # ANCHORED on the line end. Without the trailing \r?\n, expect matches
+    # whatever has arrived so far: `[^\r\n]*` happily returns a PARTIAL errstr
+    # when the newline has not landed yet, and the string-match below then fails
+    # on a value that was merely incomplete. Attempt 1 of this gate died exactly
+    # that way, reporting errstr [mount: cann].
+    -re {GATE-VERDICT status=([1-9][0-9]*) errstr=([^\r\n]*)\r?\n} {
         set st $expect_out(1,string)
         set es [string trimright $expect_out(2,string)]
         if {![string match "*permission denied*" $es]} {
@@ -88,8 +96,10 @@ lc_pass "srv-connect-gate: michael's shell is REFUSED on /srv/stratum-fs, on aut
 # Nothing was mounted, so the mountpoint is still empty. `ls` of a system root
 # would show the system tree; this catches a refusal that failed the syscall but
 # grafted the mount anyway.
-lc_send "ls /tmp/gate | wc -l"
-lc_run_expect "0" "the refused mount grafted nothing onto /tmp/gate"
+# One call, (command, expected) -- NOT a send plus a run_expect whose arguments
+# read backwards. "0" is unambiguous here because neither the echoed command nor
+# the prompt contains a digit, so the only 0 on the line is wc's answer.
+lc_run_expect "ls /tmp/gate | wc -l" "0"
 lc_pass "srv-connect-gate: the refused connect left the mountpoint untouched"
 
 lc_quit

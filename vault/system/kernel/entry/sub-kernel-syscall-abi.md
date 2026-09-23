@@ -50,9 +50,26 @@ Additive: no syscall number moves and no argument record changes shape, and a
 parent that never sets the bit is unaffected. The `perm_flags` field is `u32` on
 the wire (`TSpawnArgs`) while the Rust mirror types the constant as `u64` and
 narrows at the call (`self.perm_flags as u32`), so the mirror has 32 bits of
-headroom the ABI does not -- a future bit above 31 would truncate silently here.
+headroom the ABI does not, so a future bit above 31 is a real hazard -- now
+refused rather than truncated (see the next paragraph).
 The gate's placement and the reason this one bit is ungated are in
 [[sub-kernel-syscall-dispatch]]; what it protects is in [[sub-stratum-session]].
+
+**The narrowing is now CHECKED, not silent (round 2).** `Command::spawn` refuses
+`perm_flags > u32::MAX` instead of truncating. The old `as u32` failed OPEN in the
+caller's eyes: a future bit >= 32 would be dropped and the spawn would SUCCEED
+without it, so login would believe it had sealed the proxy when it had not. The
+kernel cannot catch that on this path either -- its `& ~SPAWN_PERM_ALL` rejection
+only ever sees the low 32 bits (the legacy `SYS_SPAWN_WITH_PERMS` handler does check
+the full u64, so the two entry points differed). joey's C-side `(unsigned int)` cast
+has the same shape and is the remaining instance.
+
+**The bit's own comment was overstated and is now accurate.** It claimed the stamp
+makes the debug surface refuse an attach "for the whole of its life". It does not:
+`rfork` publishes the child before the thunk runs, so a window exists in which
+`proc_flags` is still 0. What closes that window for the case that matters is the
+identity/seam ordering described in [[sub-kernel-devproc]], not the stamp's timing
+alone. All three copies (kernel header, libt, libthyla-rs) say so now.
 
 
 **Imperium integration (2026-09-17).** Reserved numbers 110 and 111 are

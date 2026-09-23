@@ -54,6 +54,19 @@ keeps the tree rooted and therefore keeps every Proc findable.
 
 ## Contract
 
+
+**`proc_apply_identity` publishes `principal_id` LAST, with RELEASE ((U) F1 round 2,
+2026-09-23).** Both halves matter. The gid fields are written first and the principal
+last, so a reader that observes the new principal also observes everything the spawn
+thunk wrote before it -- including the `SPAWN_PERM_*` marks, which is what stops
+[[sub-kernel-devproc]]'s debug predicate admitting an owner-axis attach on a Proc
+whose NOTRACE stamp has landed but whose identity had not yet. Publishing it last
+also fails SAFE while the record is half-written: a checker sees the INHERITED
+principal (SYSTEM on the login chain) rather than the new one, which refuses rather
+than admits. The ordering was previously correct only by accident, via an unrelated
+CL-5 release/acquire pair that happened to sit between the two stores; it is now
+explicit at both ends, and the paired ACQUIRE load lives in `devproc_debug_authorized`.
+
 | Surface | Shape |
 |---|---|
 | `proc_alloc` / `proc_free` | allocate a KP_ZERO'd Proc with a fresh pid + stripes + pgtable + handle table + note queue; free one that is ZOMBIE with no threads and no children |

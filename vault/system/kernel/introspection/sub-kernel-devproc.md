@@ -32,6 +32,35 @@ surface: the original P4-C Dev was `status`/`cmdline`/`ctl`/`ns`.
 
 ## Contract
 
+
+**The debug predicate's READ ORDER is load-bearing ((U) F1 round 2, 2026-09-23).**
+`devproc_debug_authorized` now ACQUIRE-loads the target's `principal_id` FIRST and
+tests the `PROC_FLAG_NOTRACE` seam LAST. That is not style. A spawn stamps the
+`SPAWN_PERM_*` marks and then applies the child's identity as two separate unlocked
+writes in the thunk, and `rfork` has ALREADY published the child -- so this
+predicate can run against a half-initialised target. Testing the seam FIRST admitted
+the interleaving `R(proc_flags)=0 -> W(NOTRACE) -> W(principal_id=user) ->
+R(principal_id)=user`, which admits an owner-axis attach on a Proc that is already
+sealed. No weak memory is needed; a plain sequentially-consistent interleaving does
+it. `proc_apply_identity` publishes `principal_id` with RELEASE, so the ACQUIRE load
+here means the stamp is visible to the seam load below.
+
+Refusing LAST is identical in OUTCOME to refusing first, because NOTRACE is
+monotonic (one-way, never cleared) and no cap holder may debug a sealed target
+either -- so the reorder changes no verdict, only the window. The existing
+`devproc.debug_authorized_predicate` NOTRACE legs (refuses the owner, refuses a
+`CAP_DEBUG` holder) are the regression guard.
+
+**What the seam does NOT cover, measured rather than assumed.** Inspection is
+re-gated per operation (mem, regs, fpregs, hwbreak, hwwatch, step, kstack, wait).
+**Run control is NOT**: `devproc_runctl_walk_cb` gates stop/start/waitstop/exitkill
+on slot ownership ALONE, deliberately ("the debugger already passed the I-39 attach
+gate"), so a caller that won the race to attach keeps run control over a
+subsequently-sealed target. That is bounded at denial of service, because
+[[inv-i26]] already lets an owner kill its own Proc -- and the BOUND, not a
+re-check, is why it is acceptable. Do not "fix" it by re-gating run control: a
+target must not be able to escape its debugger by self-sealing.
+
 **`/proc/PID/imperium` (2026-09-17).** The kernel exposes the current
 scope's unforgeable identity, deadline and flowing capability mask. `imperium
 --list` and the shell's fasces use this data rather than environment variables.

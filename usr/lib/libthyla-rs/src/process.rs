@@ -361,6 +361,15 @@ impl Command {
         if self.name.is_empty() || self.name.len() > T_SPAWN_NAME_MAX {
             return Err(Error::InvalidArgument);
         }
+        // perm_flags is u32 on the wire while these constants are u64, so a bit
+        // above 31 would be TRUNCATED AWAY here and the spawn would succeed
+        // without it. For hardening bits (T_SPAWN_PERM_NOTRACE) that fails OPEN
+        // in the caller's eyes -- login would believe it had sealed the proxy.
+        // The kernel cannot catch it either: its `& ~SPAWN_PERM_ALL` rejection on
+        // this path only ever sees the low 32 bits. Refuse instead of narrowing.
+        if self.perm_flags > u32::MAX as u64 {
+            return Err(Error::InvalidArgument);
+        }
 
         // Build the argv buffer. argv_data is NUL-separated; each
         // entry is NUL-terminated; argc = NUL count. The kernel

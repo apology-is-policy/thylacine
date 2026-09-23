@@ -1326,17 +1326,33 @@ bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *targ
 bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *target) {
     if (!caller || !target)                            return false;
     if (target == kproc())                             return false;   // kernel: undebuggable
-    // NOTRACE is a monotonic one-way bit; a RELAXED read matches the setter
-    // (sys_set_traceable) and is sound (it is set at target startup, before any
-    // debugger could race — a stale-clear window cannot outlive the setter).
-    if (__atomic_load_n(&target->proc_flags, __ATOMIC_RELAXED) & PROC_FLAG_NOTRACE)
+    // The target's principal is read FIRST, with ACQUIRE, and the no-trace seam
+    // LAST. That order is load-bearing, not stylistic. A spawn stamps NOTRACE
+    // (SPAWN_PERM_NOTRACE) and then applies the child's identity as two separate
+    // unlocked writes in the spawn thunk, and rfork has ALREADY published the
+    // child, so this predicate can run against a half-initialised target. Testing
+    // the seam FIRST admitted the bad interleaving: read proc_flags before the
+    // stamp, read principal_id after the identity, and a Proc that is already
+    // sealed is admitted on the owner axis. proc_apply_identity publishes
+    // principal_id with RELEASE, so an ACQUIRE load of it here means every earlier
+    // write in the thunk, the stamp included, is visible to the seam load below.
+    //
+    // Refusing LAST is identical in OUTCOME to refusing first: no cap holder may
+    // debug a NOTRACE target either, and the bit is monotonic (one-way, never
+    // cleared), so a later read can only be more set. Do not reorder these.
+    u32 target_principal = __atomic_load_n(&target->principal_id, __ATOMIC_ACQUIRE);
+    bool axis = (caller->principal_id == target_principal);             // owner-rwx on 0600
+    if (!axis) {
+        // caps read ATOMICALLY (RW-5 F2): proc_become_legate is a cross-thread
+        // writer of caller->caps; a plain load is C11-racy (both axes are
+        // clearance-grantable).
+        axis = (__atomic_load_n(&caller->caps, __ATOMIC_ACQUIRE)
+                    & (CAP_HOSTOWNER | CAP_DEBUG)) != 0;   // host owner OR debug-anyone
+    }
+    if (!axis)                                         return false;
+    if (__atomic_load_n(&target->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_NOTRACE)
         return false;                                                   // no-trace seam
-    if (caller->principal_id == target->principal_id)  return true;    // owner-rwx on 0600
-    // caps read ATOMICALLY (RW-5 F2): proc_become_legate is a cross-thread writer
-    // of caller->caps; a plain load is C11-racy (both axes are clearance-grantable).
-    if (__atomic_load_n(&caller->caps, __ATOMIC_ACQUIRE) & (CAP_HOSTOWNER | CAP_DEBUG))
-        return true;                                                    // host owner OR debug-anyone
-    return false;
+    return true;
 }
 
 // =============================================================================

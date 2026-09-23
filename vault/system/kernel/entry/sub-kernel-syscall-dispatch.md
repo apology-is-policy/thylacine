@@ -288,7 +288,12 @@ own environment.
 `CONSOLE_TRUSTED` (the SAK re-grant anchor), `CONSOLE_OWNER` (the Ctrl-C target),
 the I-32 `MAY_RAISE_PAGE_BUDGET` above, the arm-6 `SESSION_HANGUP` (below), and
 the (U) F1 `NOTRACE` (bit 9) — which stamps `PROC_FLAG_NOTRACE` through the same
-one-way setter `SYS_SET_TRACEABLE(0)` uses, so the flag keeps exactly one writer.
+one-way setter `SYS_SET_TRACEABLE(0)` uses. That keeps the SPAWN_PERM path and
+the syscall on one writer, but the flag has a THIRD writer regardless:
+`proc_set_seat_service` ORs `NODUMP|NOTRACE` in directly. Harmless (an
+idempotent OR of a one-way bit) and the seat arm runs first, but a comment
+claiming a single writer is the class of wrong comment this project treats as a
+future ordering licence -- so it is stated correctly here instead.
 The mechanism is deliberately **two sites, and neither is the other's
 redundancy**:
 
@@ -822,10 +827,16 @@ threshold so small transfers never pay the extra handle lookup.
   page-budget comment right beside the `apply_spawn_perms` call already concedes
   exactly this ("nothing observes the inherited value except a /proc reader"). For
   NOTRACE that window is harmless ONLY because `devproc_debug_authorized` is
-  re-consulted at EVERY debug operation -- eight call sites in `kernel/devproc.c`,
-  covering mem, regs, fpregs, wait, kregs, kstack and ctl -- and not once at
-  attach. So a same-principal Proc that won the race to attach still gets nothing
-  from the moment the stamp lands. **This is a latent coupling: an optimisation
+  re-consulted on every INSPECTION -- eight call sites in `kernel/devproc.c`,
+  covering mem, regs, fpregs, hwbreak, hwwatch, step, kstack and wait -- rather
+  than once at attach. **Correction to an earlier claim of mine: that is NOT
+  every debug operation.** Run control (`stop`/`start`/`waitstop`/`exitkill`) is
+  gated on slot ownership ALONE (`devproc_runctl_walk_cb`: `target->debug_owner
+  != rc->ctl`), deliberately -- "the debugger already passed the I-39 attach
+  gate". So a Proc that won the race to attach keeps run control over a sealed
+  target and loses only the reads. The payoff is bounded at denial of service,
+  because [[inv-i26]] already lets an owner kill its own Proc, which is why this
+  is a P3 and not a hole -- but the bound is the reason, not the re-check. **This is a latent coupling: an optimisation
   that hoisted the authority check to attach-time and cached the verdict for the
   session would silently make that window exploitable.** A raced attach can still
   claim the debug slot and stop the target, which is a denial of service rather

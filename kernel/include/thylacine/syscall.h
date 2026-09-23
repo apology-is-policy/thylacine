@@ -2628,7 +2628,13 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, shm)         == 208, "t_pci
 #define SPAWN_PERM_SEAT_CLIENT       (1u << 8)
 // SPAWN_PERM_NOTRACE ((U) F1; STALK-DESIGN section 5.2 / D8, ARCH 28 I-39)
 // stamps PROC_FLAG_NOTRACE on the child BEFORE its first EL0 instruction, so
-// the debug surface refuses an attach for the whole of its life.
+// the debug surface refuses an attach from before the child carries the identity
+// that would admit an attacher. NOT "for the whole of its life" in the literal
+// sense: rfork publishes the child before the thunk runs, so a window exists in
+// which proc_flags is still 0 -- it is closed for the case that matters because
+// proc_apply_identity publishes principal_id with RELEASE and
+// devproc_debug_authorized ACQUIRE-loads it BEFORE the seam, so observing the
+// new identity implies observing the stamp.
 //
 // What it is for: the /srv connect gate admits a TCB byte service only to a
 // CAP_TCB_DIAL holder, and in a login session the per-user home proxy is the

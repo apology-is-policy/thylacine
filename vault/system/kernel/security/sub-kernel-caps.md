@@ -79,6 +79,13 @@ nothing about who may act THROUGH the actor. Any future fork-grantable bit hande
 to a service that runs as a user inherits this whole problem, and the checklist
 is two items, not one: give it the bit, and make it untraceable.
 
+Round 2 added a third item, from `kernel/proc.c`: **make the seal visible before the
+identity that would admit an attacker.** `proc_apply_identity` publishes
+`principal_id` with RELEASE precisely so a Proc cannot be caught carrying its new
+(user) identity while its NOTRACE stamp is not yet observable -- see
+[[sub-kernel-proc]] and [[sub-kernel-devproc]]. Granting the bit, sealing the holder
+and ordering the two are one obligation, not three independent ones.
+
 
 **Propagating Imperium and Haul (2026-09-17).** `CAP_GRANTABLE_IMPERIUM`
 is DAC_OVERRIDE | CHOWN | KILL | POST_SERVICE. The last bit is 13 (12 remains

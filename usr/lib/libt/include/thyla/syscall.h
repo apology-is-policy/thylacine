@@ -309,9 +309,10 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 #define T_SPAWN_PERM_SEAT_SERVICE      (1u << 7)
 #define T_SPAWN_PERM_SEAT_CLIENT       (1u << 8)
 // T_SPAWN_PERM_NOTRACE ((U) F1): stamp PROC_FLAG_NOTRACE on the child before its
-// first instruction, so the /proc debug surface refuses every attach -- including
-// a SAME-principal one, the case that matters for a service spawned as the user
-// it serves. Ungated: SYS_SET_TRACEABLE(0) is already self-reachable, so this
+// first instruction, so the /proc debug surface refuses a SAME-principal attach --
+// the case that matters for a service spawned as the user it serves. The kernel
+// orders the stamp ahead of the child's identity, so the window before the stamp
+// cannot admit the attacker. Ungated: SYS_SET_TRACEABLE(0) is already self-reachable, so this
 // only moves the stamp earlier than the child could manage for itself.
 #define T_SPAWN_PERM_NOTRACE           (1u << 9)
 
