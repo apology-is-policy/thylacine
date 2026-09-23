@@ -45,3 +45,10 @@ fasces = { path = "../../lib/fasces" }
 # syscalls; the ut binary resolves the tier and hands Repl the flag, so
 # the no-kernel-surfaces layering above holds).
 beacon = { path = "../../lib/beacon" }
+
+[dev-dependencies]
+# The terminal model Halcyon renders with (pure, zero dependencies), so the
+# line editor's tests can assert on the SCREEN a byte stream leaves rather than
+# on the bytes: the completion strip once came back to the wrong row after a
+# bottom-row scroll while every assertion on emitted bytes passed.
+vt = { path = "../../lib/vt" }

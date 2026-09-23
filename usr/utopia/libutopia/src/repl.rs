@@ -126,10 +126,6 @@ pub struct Repl {
     /// from `$home`. `None` keeps history in-memory only (a bare-spawned `ut`
     /// with no home, host tests) -- no append happens.
     history_path: Option<String>,
-    /// D4: whether a completion-menu candidate strip is currently drawn below
-    /// the prompt. Set on `MenuShow`; any other editor action first clears the
-    /// strip line, so a stale strip never lingers below the prompt.
-    menu_shown: bool,
     /// H-1c (BEACON.md 12.6): emit transcript zone frames. Set by the ut
     /// binary iff the resolved tier is Rich (the binary owns the consctl
     /// read + the fd-class probe + the /env/BEACON export -- Repl only ever
@@ -171,7 +167,6 @@ impl Repl {
             bin_commands: Vec::new(),
             completion_installed: false,
             history_path: None,
-            menu_shown: false,
             beacon_rich: false,
             prompt_roles: None,
             imperium: None,
@@ -789,21 +784,18 @@ impl Repl {
     /// (`None`) means "read more input".
     pub fn feed(&mut self, input: &[u8], out: &mut dyn IoWrite) -> Option<i32> {
         for action in self.editor.feed_bytes(input) {
-            // D4: a completion-menu strip is drawn on the line BELOW the prompt.
-            // Any action that leaves the menu must clear that strip first, so it
-            // never lingers under a fresh prompt / accepted line. Save cursor
-            // (DECSC) -> down + clear line -> restore (DECRC), leaving the cursor
-            // on the prompt line. MenuShow redraws it in place; NoChange means
-            // the editor stayed in the menu (e.g. an unknown CSI byte) -- both
-            // keep the strip.
-            if self.menu_shown
-                && !matches!(
-                    action,
-                    EditorAction::MenuShow { .. } | EditorAction::NoChange
-                )
-            {
-                let _ = out.write_all(b"\x1b7\r\n\x1b[K\x1b8");
-                self.menu_shown = false;
+            // D4: the editor draws the completion-menu strip below its block
+            // and knows where it is. Any action that leaves the menu erases it
+            // first, before this loop moves the cursor itself (an accepted
+            // line's `\r\n`), so it never lingers under a fresh prompt.
+            // MenuShow redraws it in place; NoChange means the editor stayed in
+            // the menu (e.g. an unknown CSI byte) -- both keep the strip.
+            if !matches!(
+                action,
+                EditorAction::MenuShow { .. } | EditorAction::NoChange
+            ) {
+                let clear = self.editor.clear_menu();
+                let _ = out.write_all(clear.as_bytes());
             }
             match action {
                 EditorAction::NoChange => {}
@@ -899,24 +891,12 @@ impl Repl {
                     self.editor.reset_render_position();
                     self.emit_prompt(out);
                 }
-                EditorAction::MenuShow {
-                    candidates,
-                    selected,
-                    unlisted,
-                } => {
+                EditorAction::MenuShow { .. } => {
                     // D4: the editor has applied candidates[selected] to the
-                    // buffer. Redraw the prompt+buffer line, then draw a
-                    // one-line candidate strip below it (selected highlighted),
-                    // restoring the cursor to the prompt line. On the next
-                    // MenuShow (cycle) this redraws in place; on any other
-                    // action the strip is cleared (above).
+                    // buffer, and in Menu mode its render draws the candidate
+                    // strip below the block (selected highlighted) and returns
+                    // the cursor to the prompt.
                     self.emit_prompt(out);
-                    let strip = crate::line_editor::menu_strip(&candidates, selected, unlisted);
-                    let _ = out.write_all(b"\x1b7\r\n\x1b[K");
-                    let _ = out.write_all(strip.as_bytes());
-                    let _ = out.write_all(b"\x1b8");
-                    let _ = out.flush();
-                    self.menu_shown = true;
                 }
             }
         }
@@ -1127,6 +1107,9 @@ impl Repl {
             }
             return;
         }
+        // A menu strip below the prompt is erased while its place is known.
+        let clear = self.editor.clear_menu();
+        let _ = out.write_all(clear.as_bytes());
         let _ = out.write_all(b"\r\n");
         for line in &lines {
             self.env.emit_line(line); // PTY-4b: the session terminal, not the UART

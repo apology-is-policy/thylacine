@@ -946,6 +946,7 @@ dependencies = [
  "beacon",
  "fasces",
  "libthyla-rs",
+ "vt",
 ]
 
 [[package]]

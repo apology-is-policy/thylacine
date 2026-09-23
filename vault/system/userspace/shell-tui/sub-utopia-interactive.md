@@ -159,9 +159,10 @@ lands ready for the next token and a directory can be drilled with a second Tab.
 The engine then extends to the prefix every match shares -- computed from the
 candidates when the source handed over all of them, taken from the source when it
 kept only some (below); when the prefix is already exhausted it enters the
-zsh-style cycling menu — apply candidate 0, emit `MenuShow`, and let the REPL
-paint a one-line strip below the prompt. Tab cycles, Enter finalizes without
-submitting, any other key dismisses and is re-dispatched.
+zsh-style cycling menu — apply candidate 0, emit `MenuShow`, and the editor's
+own render paints a one-line strip below the block (next paragraph but three).
+Tab cycles, Enter finalizes without submitting, any other key dismisses and is
+re-dispatched.
 
 **The directory read is injected, not called (2026-09-23).** The source reads
 directories through a `ListDir` -- `fn(dir, visit)`, calling `visit(name,
@@ -213,7 +214,8 @@ the count. Now:
 - `MenuShow` carries `unlisted`, and `menu_strip` ends the strip with `+N more`
   in the `Path` ink. The window's `<` / `>` mean "cycle to see more"; the count
   means "no Tab reaches these", and without it a partial menu reads as the whole
-  set. The window gives way to the count, so the strip still keeps to 80 columns.
+  set. The window gives way to the count, and the strip keeps to one row of
+  the terminal (below).
 
 The heap keeps the worst case at O(log 256) per entry even for a directory read in
 reverse order, and a candidate is copied only when it is kept. Ten sabotages were
@@ -222,14 +224,52 @@ tenth -- not budgeting the count's columns -- exposed a test whose 19-column
 candidates left slack either way. It now also drives two-column candidates, which
 fill the window to within a column of its budget.
 
+**The editor draws the strip, below its block, and comes back relatively
+(2026-09-23).** The REPL used to paint it after the prompt with a save and restore
+of the ABSOLUTE cursor position (`ESC 7`, `\r\n`, the strip, `ESC 8`). Wherever
+the prompt sat on the bottom row -- where it lives once a session has filled the
+screen -- the `\r\n` scrolled the screen and the restore returned to the strip's
+row, not the prompt's: typing landed on the strip, every further Tab scrolled
+again and left a copy of the prompt behind, and a dismiss left the last strip on
+screen for good. Measured on `vt`, Halcyon's own terminal model, not argued: three
+Tabs left three prompts. Nothing had seen it, because every gate asserts on the
+bytes a render emits, never on the screen they leave. Two more faults sat in the
+same four lines: the strip went below the CURSOR's row, which a completion in the
+middle of a multi-line buffer leaves above other rows of the block, so it
+overwrote them; and it assumed 80 columns, so in a narrow tile it wrapped and the
+one-row erase left the rest.
+
+Now `render` draws the strip whenever the editor is in `Menu` mode: down to the
+block's last row, `\r\n` (scrolling if it must), the strip, then back up by a
+relative count and across to the cursor's column -- relative moves are unaffected
+by the scroll. The strip is clipped to one row short of the known width
+(`clip_visible` measures as `ansi::visible_width` does), so it is always one row.
+The editor records where it drew it (`strip: Option<StripAt>`) and erases it
+itself: the width-known render's erase-below takes it, the width-unknown render
+erases it first, and `clear_menu()` gives the REPL the bytes to erase it before
+the REPL moves the cursor on its own -- an accepted line's `\r\n`, a
+notification. `reset_render_position` and `reset` forget it, because after the
+caller has moved the cursor its recorded place names nothing. The REPL's
+`menu_shown` flag is gone; the editor is the one owner.
+
+`libutopia` takes `vt` as a dev-dependency, and eight tests drive it: the
+bottom-row scroll and its control with room below, a paste that ends in the menu,
+the strip below the block, a narrow tile, the erase before a notification, and a
+render that leaves the menu erasing it unaided assert on the screen; an eighth
+pins that a moved cursor forgets the strip. Eleven sabotages, all caught --
+and the first run of them proved the scroll test blind: it fed `app` and Tab as ONE
+read, so every action rendered the final state, and the erase before each redraw
+moved up one row from the wrong position and landed on the prompt by luck. It now
+feeds one byte per read, as typing arrives, and a separate test drives the paste.
+
 **What runs where.** Since the `backend` split (2026-09-22) the crate builds for
 the host, and `line_editor`, `completion`, `palette`, `ansi` and `path` run their
 unit tests under `tools/test-rust.sh`. `repl` -- the syscall loop -- stays
 device-only, witnessed at boot by `u-repl-test`, whose step 8 also reads a REAL
 directory through `ShellCompletionSource::new`, the one thing the host tests
 cannot. The menu strip's renderer lived in `repl` too, so its two tests had never
-run -- while `u-repl-test` described it as "host-tested". It moved to
-`line_editor::menu_strip` (2026-09-23), where they run beside two new ones. The line editor's `ESC ESC` restarts the escape sequence (the VT rule)
+run -- while `u-repl-test` described it as "host-tested". It moved into the line
+editor (2026-09-23), where they run, and where `render` now draws the strip itself. The line editor's `ESC ESC` restarts the escape sequence (the VT rule)
 and consumes the next byte as `ESC <byte>`, the slot reserved for Alt bindings;
 its header documents the transition. That behaviour was once a failing test
 (UT-EDIT-1) and the test was the side that was wrong.
@@ -280,7 +320,9 @@ shebang ([[sub-utopia-eval]]) and script mode compose into a working `./s.ut`.
 `LineEditor` — the buffer plus a byte cursor always on a UTF-8 boundary, the kill
 buffer, in-memory history with a navigation position and a saved current line, the
 parser state, the mode, a desired column for vertical navigation, an optional
-boxed completion source, and the command index.
+boxed completion source, the command index, the known width, the row the last
+render left the cursor on, and where a drawn menu strip sits (`StripAt { down,
+col }`, relative to the cursor).
 
 `LineEditorMode` — `Normal`, `Search { query, match_index, saved_buffer,
 saved_cursor }`, and `Menu { candidates, selected, anchor, unlisted }`. The saved buffer is
@@ -298,7 +340,7 @@ the candidates are then the first matches alphabetically, `unlisted` more exist,
 and every match begins with `shared`.
 
 `Repl` — the `Env`, the editor, the cached `/bin` scan, whether completion was
-installed, an optional history path, and whether a menu strip is currently drawn.
+installed, and an optional history path.
 
 `Role` and `Rgb` — nineteen semantic colour roles resolved by a `const fn` match.
 The role *names* are the stable interface; hex is not, so a retheme changes one
@@ -396,6 +438,11 @@ not.
 - **Is the command index the same set the resolver searches?** Two consumers read
   it — completion and validity colouring — so a divergence produces both a missing
   completion and a wrong colour.
+- **Does every path that moves the cursor itself erase the strip first?** The
+  editor knows where the strip is only relative to where its last render left
+  the cursor. The REPL erases it before any action that leaves the menu and
+  before a notification; a new path that writes `\r\n` without `clear_menu()`
+  strands a strip on screen.
 - **Does every source that keeps a subset say so?** The engine extends to the
   common prefix of what it is handed unless `extent` says the set is truncated. A
   source that caps and reports `Complete` reintroduces the 2026-09-23 defect, and
@@ -453,17 +500,24 @@ the same goes for a name holding a quote, `$`, `;`, `|` or any other character
 the lexer gives meaning. The common-prefix extension can also end inside such a
 name, at the space. **This is a defect, OWED as its own fix**: the candidates need
 the lexer's quoting (rc-style `'...'`, with `''` for an embedded quote), applied
-before the common prefix is taken, since quoting changes it.
+before the common prefix is taken, since quoting changes it. The same fix owes
+the display half: a name is also written raw into the menu strip and the line, so
+one holding an ESC or other control byte injects terminal escapes -- through
+Halcyon, into a stream whose OSC frames it parses. A control byte needs a visible
+form on screen, whichever form the line gets.
 
-**A multi-line render that shrinks leaves stale lines on screen, and the fix was
-assigned to a chunk that shipped without it.** The comment describes the defect
-exactly and says the next chunk will track the previous render's line count and
-emit an erase-to-end-of-screen. That chunk landed — it is `repl.rs` — and neither
-the tracking nor the escape exists anywhere in the crate; the only screen clear is
-Ctrl-L's full-screen one. What is worth noting is the stated reason it was
-acceptable: "the boot probe only checks emitted bytes (not screen state) so this is
-invisible". Invisible to the probe. Visible to the user, and nothing ever forced
-the issue because the observer that would have complained cannot see screens.
+**A multi-line render that shrinks leaves stale lines on screen -- when the width
+is unknown.** `render`'s doc comment still says the next chunk will track the
+previous render's rows and erase to the end of the screen. For a KNOWN width that
+landed: `render_wrapped` moves up `prev_cursor_row` rows to the block's top and
+erases below it. The width-unknown fallback (`render_unwrapped`, a dumb pipe or an
+unanswered probe) still rewrites only the rows it draws and starts from the
+cursor's row, so a shrinking multi-line buffer leaves rows behind and a cursor on
+a later row redraws the block one row low. The comment is stale for the one path
+and true for the other. Its stated reason is the part worth keeping: "the boot
+probe only checks emitted bytes (not screen state) so this is invisible".
+Invisible to the probe, visible to the user -- and on 2026-09-23 the menu strip
+proved the same point, until tests began asserting on `vt`'s screen.
 
 **Construction snapshots again, now outside the eval modules.** `lib.rs` lists
 `line_editor` under "modules deferred to later U-* chunks" four lines above the
@@ -481,12 +535,12 @@ supersedes the U-1 *Pale Fire* palette". Twelve descriptions of the palette as
 the banner in `main.rs`. Every colour is correct; every account of what the colours
 are called is stale in six of the seven files that give one.
 
-**`ansi.rs` asserts a discipline its sibling already breaks.** It documents that
+**`ansi.rs`'s CSI-only discipline now holds in the shell.** It documents that
 non-CSI escapes would be over-counted and rests on "disciplined Utopia programs
-emit only CSI 24-bit-color SGR + reset". The REPL's menu strip emits `ESC 7` and
-`ESC 8` — save and restore cursor, two-byte non-CSI escapes that `visible_width`
-would count as two columns each. Harmless today only because the strip is written
-straight to the sink and never measured.
+emit only CSI 24-bit-color SGR + reset". The menu strip's `ESC 7` / `ESC 8` were
+the shell's one exception, harmless only because the strip was never measured.
+The 2026-09-23 strip fix removed both; a search of `libutopia` and the shell for
+them finds none (the same search finds three lines in the old `repl.rs`).
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

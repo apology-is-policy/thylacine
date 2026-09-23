@@ -91,7 +91,61 @@ change's own image** (`--config ci`), the guest log carrying `u-test: all OK`
 completion OK`. Device workspace build clean, no new warnings. quaestor lint 1,270
 notes, 0 fail. The Mac hold lasted six minutes, and main was queued behind it.
 
----
+That landed as `e306e275`.
+
+**The first suspected strip defect was real, and worse than suspected.** Before
+fixing it I fed the REPL's exact bytes -- `LineEditor::render`, then `ESC 7`,
+`\r\n`, the strip, `ESC 8` -- into `vt`, the terminal model Halcyon renders
+with, from a scratch harness. With room below the prompt: correct. With the prompt
+on the bottom row, where it lives once a session has filled the screen: the
+newline scrolled, the restore went back to the strip's row, and three Tabs left
+three stale copies of the prompt, the cursor sitting inside the strip. Nothing had
+seen it because every gate asserts on bytes. The same four lines also drew the
+strip below the CURSOR (over the rest of a multi-line block) and assumed 80
+columns (a narrow tile wrapped it past the one-row erase).
+
+The fix moves the strip into the editor, which knows its own block: `render`
+draws it in `Menu` mode below the block's last row and returns by relative moves,
+which a scroll cannot invalidate; `clip_visible` holds it to one row short of the
+width; the editor records where it is and erases it itself, and `clear_menu()`
+hands the REPL the bytes to erase it before the REPL moves the cursor on its own
+(Enter, a notification -- the notification path had the same fault). The REPL's
+`menu_shown` flag is gone. `libutopia` now takes `vt` as a dev-dependency, so
+eight tests assert on the SCREEN.
+
+**Three catches from checking the checks, none from the tests passing.**
+- My splice script bounded the old test by a SECOND search for a closing brace
+  and deleted the next test, `backspace_joins_continuation_line`, too. The suite
+  stayed green; the count was one short of what I had added. A name-diff of every
+  declared test against HEAD confirmed it and then confirmed nothing else was lost.
+- The sabotage run proved my scroll test blind to the defect it is named after.
+  It fed `app` and Tab as ONE read, so every action rendered the final menu
+  state, and the erase before each redraw moved up from the wrong row and landed
+  on the prompt by luck. It now feeds one byte per read, as typing arrives.
+- A paste leg I added then FAILED on the fixed code -- because my assertion was
+  wrong, not the code: a paste ending outside the menu never draws the strip, so
+  it never scrolls, and "the same screen as typing" is false by one legitimate
+  scroll. It asserts a clean screen instead, and a second test covers the paste
+  that ends inside the menu, where the screens must match exactly.
+Eleven sabotages then, all caught.
+
+**The probe-fleet "dossier debt" was the tool, not the vault.** `quaestor owner`
+called `u-test` and six sibling probes UNOWNED and said to write a reference doc;
+the coverage view's own `isHarness` classes every `usr/*-test` / `-probe` /
+`-smoke` program (and `u-test` by name) as harness, owed no dossier. My
+`e306e275` commit body queued a dossier on `owner`'s word. The defect is
+`owner`'s closing directive, which has no harness case -- exactly the
+contradiction its own comments describe -- and it is queued next.
+
+**Posture** (strip geometry): libutopia **360 passed** on the host; `tools/test-rust.sh`
+**1,862 distinct tests / 26 crates / 0 failing / 1 quarantined / 0 warnings; 78
+STRANDED** (unchanged: the screen tests are new, not freed). **ls-ci PASS 37 s on
+this change's own image** (baked 07:28), `u-test: all OK` and `u-repl-test: D4
+menu completion OK` in the guest log. The pure half of `libutopia` also builds
+warning-free as a plain `--no-default-features` library now -- `with_dir_lister`
+had been dead code there since the seam landed, a configuration no gate builds.
+Main held the Mac for its B-1a kernel suite while this waited; the queue worked
+as designed, and the wait went into the next two chunks' writing.
 
 ## 2026-09-23, early morning (aux, Opus 5.5 1M, effort max) -- the gate that said "nothing is stranded", and the test it could not see running twice
 

@@ -156,7 +156,9 @@ impl ShellCompletionSource {
         Self::with_dir_lister(commands, read_dir_live)
     }
 
-    /// The same source, reading directories through `list_dir`.
+    /// The same source, reading directories through `list_dir`. Only `new`
+    /// and the tests construct one.
+    #[cfg(any(test, feature = "backend"))]
     pub(crate) fn with_dir_lister(commands: Vec<String>, list_dir: ListDir) -> Self {
         Self { commands, list_dir }
     }

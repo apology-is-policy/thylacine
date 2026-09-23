@@ -186,8 +186,9 @@ pub extern "C" fn rs_main() -> i64 {
 
     // 10. D4: zsh-style menu completion -- cycle + finalize + dismiss, driven
     //     on the live LineEditor in-guest (the host #[cfg(test)] tab_menu_*
-    //     contract). The terminal strip rendering (`line_editor::menu_strip`)
-    //     is host-tested; here we prove the editor STATE MACHINE in QEMU.
+    //     contract). The strip itself -- what `LineEditor::render` draws in
+    //     Menu mode, and where -- is host-tested against the `vt` terminal
+    //     model; here we prove the editor STATE MACHINE in QEMU.
     {
         use alloc::boxed::Box;
         use alloc::string::String;
