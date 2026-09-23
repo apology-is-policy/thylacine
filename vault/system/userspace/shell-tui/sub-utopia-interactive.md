@@ -302,9 +302,12 @@ directory is left open with its `/` inside (`'my dir/`), as bash leaves it:
 because bare the parser reads the keyword. Single quotes rather than bash's
 backslashes for three reasons: they are the literal form scripture documents
 (UTOPIA-SHELL-DESIGN.md 6.4, where backslash-in-a-word does not appear at all);
-they are the heritage's; and a backslash-escaped glob character still globs in
-ut, because the escape is gone by the time `glob_candidate` looks at the word.
-That last is its own defect, found reading for this one.
+they are the heritage's; and when this was written a backslash-escaped glob
+character still globbed in ut, because the escape was gone by the time
+`glob_candidate` looked at the word. That was its own defect, found reading for
+this one and fixed the same day: a word now keeps its backslash for the
+evaluator ([[sub-utopia-parser]], [[sub-utopia-eval]]), so a backslash would
+work -- single quotes stay because the first two reasons do.
 
 The prefix every match shares is taken from the NAMES and then spelled --
 readline's order. The pre-fix design note said the reverse ("quote before the
@@ -524,7 +527,9 @@ not.
 - **Do the two scanners still read one grammar?** `word_at` mirrors the lexer by
   hand for incomplete input. A lexer change to what a word is -- a new word
   character, a new quote or escape, a new gluing rule -- must change both, and
-  `word_at_agrees_with_the_lexer` only covers the forms on its list.
+  `word_at_agrees_with_the_lexer` only covers the forms on its list. It compares
+  `word_at`'s reading with the VALUE of the lexer's word (`lexer::unescape`),
+  since the lexer's text keeps its escapes for the evaluator.
 - **Are the editor's bounds defensive?** The buffer cap, the menu anchor's char
   boundaries, and the CSI parameter array are all fixed-size.
 
