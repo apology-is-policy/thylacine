@@ -257,8 +257,8 @@ func TestOwnedPathStillReportsItsPins(t *testing.T) {
 	if !strings.Contains(out, "sub-kernel-boot-sequence") {
 		t.Fatalf("the owner is still the primary answer:\n%s", out)
 	}
-	if strings.Contains(out, "write the reference doc") {
-		t.Fatalf("an owned path must never be routed to the reference docs:\n%s", out)
+	if strings.Contains(out, "a NEW dossier is owed") {
+		t.Fatalf("an owned path must never be told a new dossier is owed:\n%s", out)
 	}
 }
 
@@ -349,5 +349,76 @@ func TestOwnerRefusesDocumentPaths(t *testing.T) {
 	}
 	if !strings.Contains(verdict, "NOT A CODE SURFACE") {
 		t.Fatalf("a document path did not print the refusal verdict:\n%s", out)
+	}
+}
+
+// TestHarnessIsNotOwedADossier: the coverage view's isHarness excludes a
+// program that exercises the system -- usr/*-test, -probe, -smoke, ... -- from
+// what a dossier is owed, as it excludes tools/. `owner` used to answer such a
+// path UNOWNED and close with "write the reference doc", contradicting the view
+// that decides what is owed. Raised 2026-09-23: seven u-* probes read as
+// dossier debt, and a session queued a dossier for them on that word.
+func TestHarnessIsNotOwedADossier(t *testing.T) {
+	root := t.TempDir()
+	mkdirAll(t, filepath.Join(root, "usr", "u-test", "src"))
+	writeFile(t, filepath.Join(root, "usr", "u-test", "src", "main.rs"), "x")
+	mkdirAll(t, filepath.Join(root, "usr", "utopia", "shell", "src"))
+	writeFile(t, filepath.Join(root, "usr", "utopia", "shell", "src", "main.rs"), "x")
+	reg := &Registry{byID: map[string]*Note{}}
+	idx := map[string][]*Note{}
+
+	h := answerOwner(root, reg, idx, nil, "usr/u-test/src/main.rs")
+	if !h.Harness {
+		t.Fatalf("usr/u-test is harness by the coverage view's own rule: %+v", h)
+	}
+	out := captureOwner(h)
+	verdict := strings.SplitN(out, "\n", 2)[0]
+	if strings.Contains(verdict, "UNOWNED") || !strings.Contains(verdict, "HARNESS") {
+		t.Fatalf("a harness path's verdict must be HARNESS, not UNOWNED:\n%s", out)
+	}
+	if strings.Contains(out, "a NEW dossier is owed") {
+		t.Fatalf("a harness path was told a new dossier is owed:\n%s", out)
+	}
+
+	// The control: an ordinary unowned program is still owed one -- and owed
+	// a DOSSIER, not a docs/reference section (frozen since 2026-09-06).
+	// Without this leg the test passes against `isHarness` returning true for
+	// everything.
+	p := answerOwner(root, reg, idx, nil, "usr/utopia/shell/src/main.rs")
+	if p.Harness || p.OutsideCensus {
+		t.Fatalf("the shell is part of the system, in the census: %+v", p)
+	}
+	out = captureOwner(p)
+	if !strings.HasPrefix(out, "usr/utopia/shell/src/main.rs  UNOWNED") ||
+		!strings.Contains(out, "a NEW dossier is owed") || strings.Contains(out, "reference doc") {
+		t.Fatalf("an unowned census path must be owed a new dossier, never a reference doc:\n%s", out)
+	}
+
+	// Outside the census entirely: a tools/ script and the vault's own
+	// tooling. The coverage view never counts them, so neither is owed one.
+	for _, q := range []string{"tools/test-rust.sh", "vault/meta/quaestor/owner.go"} {
+		o := answerOwner(root, reg, idx, nil, q)
+		if !o.OutsideCensus || o.Harness {
+			t.Fatalf("%s is outside the census and is not harness: %+v", q, o)
+		}
+		out := captureOwner(o)
+		if v := strings.SplitN(out, "\n", 2)[0]; !strings.Contains(v, "OUTSIDE THE CODE CENSUS") {
+			t.Fatalf("%s: wrong verdict:\n%s", q, out)
+		}
+		if strings.Contains(out, "a NEW dossier is owed") {
+			t.Fatalf("%s was told a new dossier is owed:\n%s", q, out)
+		}
+	}
+
+	// A dossier may claim a harness program as its surface's device witness,
+	// and then OWNED is the answer.
+	claim := &Note{ID: "sub-utopia-interactive", Rel: "vault/system/sub-utopia-interactive.md",
+		Front: frontWith("code", "usr/u-test/src/main.rs")}
+	reg2 := &Registry{byID: map[string]*Note{claim.ID: claim}, ordered: []*Note{claim}}
+	idx2 := map[string][]*Note{"usr/u-test/src/main.rs": {claim}}
+	o := answerOwner(root, reg2, idx2, nil, "usr/u-test/src/main.rs")
+	v := strings.SplitN(captureOwner(o), "\n", 2)[0]
+	if !o.Owned || !strings.HasSuffix(v, "OWNED") {
+		t.Fatalf("a claimed harness program must answer OWNED: %q", v)
 	}
 }

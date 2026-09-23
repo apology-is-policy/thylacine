@@ -147,6 +147,25 @@ had been dead code there since the seam landed, a configuration no gate builds.
 Main held the Mac for its B-1a kernel suite while this waited; the queue worked
 as designed, and the wait went into the next two chunks' writing.
 
+That landed as `9271c6a4`.
+
+**`quaestor owner` now agrees with the census it serves.** Two defects in one
+closing directive. It had no HARNESS case, so it told a session to document
+programs the coverage view excludes by name; and its default advice -- "write
+the reference doc as today, and file the sweep" -- had been stale since the
+cutover: `docs/reference` froze on 2026-09-06 and the vault agent that "file the
+sweep" meant was retired on 2026-09-15, so every UNOWNED answer sent its caller
+to a frozen tree and a retired agent, against CLAUDE.md's own step 0. Now three
+verdicts say no dossier is owed or where one goes: HARNESS (`isHarness`), OUTSIDE
+THE CODE CENSUS (`srcRe` -- a `tools/` script, the vault's own tooling), and for
+a census path "a NEW dossier is owed -- author it under `vault/system/`". Both
+not-owed rules are the view's own functions, called rather than restated, so
+the command and the view cannot drift apart again. `schema.md` carried the same
+stale sentence and is corrected; CLAUDE.md step 0's exit-0 clause now names the
+not-owed verdicts. One existing control asserted the OLD phrase's absence on an
+owned path -- a negative that went vacuous the moment the phrase stopped
+existing -- so it now names the new advice. Three sabotages, all caught.
+
 ## 2026-09-23, early morning (aux, Opus 5.5 1M, effort max) -- the gate that said "nothing is stranded", and the test it could not see running twice
 
 The operator asked how the run got from lantern to the Utopia tests. I answered
