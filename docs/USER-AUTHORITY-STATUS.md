@@ -86,3 +86,10 @@ with successful restoration; its result does not publish or mutate policy.
 Runtime receipts, transaction quotas, kernel ABI and durable publication remain
 unimplemented. Requested current prerequisite status again via Yip0116/0117;
 shared kernel and other agents' worktrees remain untouched.
+
+Provenance closure: canonical Mandate itself now owns the transaction ID rather
+than a codec-only wrapper. Ledger insertion and both revocation states retain
+it; zero IDs are rejected at policy insertion too. MDTM v1 bytes unchanged.
+49 host tests, bare-target check and host Clippy pass; evidence
+work/ua-policy/provenance.log. Dense fixture now retains4,193,344 payload bytes
+(the provenance adds16bytes/record); closure13ms, host debug only.

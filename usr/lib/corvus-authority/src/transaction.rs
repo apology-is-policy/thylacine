@@ -5,7 +5,7 @@
 //! output is deliberately not Clone and does not itself publish policy. The
 //! durable owner must serialize publication with source restriction, persist
 //! its audit, and recheck support at materialization (mandate_commit::Publish).
-use crate::{codec::Record, *};
+use crate::*;
 
 pub const PREPARE_LIFETIME_NS: u64 = 120_000_000_000;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,7 +46,7 @@ pub struct ViewReceipt {
 /// storage/audit reservations; this object only reserves its bounded byte image.
 #[derive(Debug)]
 pub struct PreparedIssue {
-    record: Record,
+    record: Mandate,
     canonical: Vec<u8>,
     peer: Peer,
     source: Reference,
@@ -63,7 +63,7 @@ pub struct PreparedIssue {
 /// and audit are still publication obligations; no runtime consumer exists yet.
 #[derive(Debug)]
 pub struct AdmittedIssue {
-    record: Record,
+    record: Mandate,
     canonical: Vec<u8>,
     peer: Peer,
     source: Reference,
@@ -73,7 +73,7 @@ pub struct AdmittedIssue {
     admitted_mono: u64,
 }
 impl AdmittedIssue {
-    pub fn record(&self) -> &Record {
+    pub fn record(&self) -> &Mandate {
         &self.record
     }
     pub fn canonical(&self) -> &[u8] {
@@ -105,13 +105,13 @@ impl PreparedIssue {
         ledger: &Ledger,
         peer: Peer,
         source: Reference,
-        record: Record,
+        record: Mandate,
         time: Time,
     ) -> Result<Self, Error> {
         if peer.stripes == 0 {
             return Err(Error::Invalid);
         }
-        ledger.preview_issue(peer.principal, source, &record.mandate, time)?;
+        ledger.preview_issue(peer.principal, source, &record, time)?;
         let canonical = record.encode()?;
         let expires = time
             .mono
@@ -133,7 +133,7 @@ impl PreparedIssue {
     pub fn phase(&self) -> Phase {
         self.phase
     }
-    pub fn record(&self) -> &Record {
+    pub fn record(&self) -> &Mandate {
         &self.record
     }
     pub fn canonical(&self) -> &[u8] {
@@ -238,7 +238,7 @@ impl PreparedIssue {
         if ledger.revision() != self.revision || a.policy_revision != self.revision {
             return Err(Error::Conflict);
         }
-        ledger.check_issue(a, &self.record.mandate, time)?;
+        ledger.check_issue(a, &self.record, time)?;
         Ok(AdmittedIssue {
             record: self.record,
             canonical: self.canonical,

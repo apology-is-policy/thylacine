@@ -36,6 +36,7 @@ fn envelope() -> Envelope {
 }
 fn root() -> Mandate {
     Mandate {
+        transaction: [0x42; 16],
         reference: reference(1),
         subject: 10,
         issuer: 0,
@@ -68,6 +69,7 @@ fn use_grant(id: u64, subject: u32, issuer: u32, support: u64) -> Mandate {
     let mut s = scope(Actions::NET_CONNECT);
     s.subjects = vec![subject];
     Mandate {
+        transaction: [0x42; 16],
         reference: reference(id),
         subject,
         issuer,
@@ -427,19 +429,13 @@ fn nested_administrative_auth_floor_cannot_be_weakened() {
     );
 }
 
-fn record(mandate: Mandate) -> codec::Record {
-    codec::Record {
-        mandate,
-        transaction: [0x42; 16],
-    }
-}
 #[test]
 fn canonical_record_has_a_pinned_header_and_roundtrips_all_states() {
-    let rec = record(use_grant(2, 20, 10, 1));
+    let rec = use_grant(2, 20, 10, 1);
     let bytes = rec.encode().unwrap();
     assert_eq!(&bytes[..16], b"MDTM\x01\0\0\0\x84\0\0\0\x01\x01\x01\0");
     assert_eq!(&bytes[72..88], &[0x42; 16]);
-    assert_eq!(codec::Record::decode(&bytes), Ok(rec));
+    assert_eq!(Mandate::decode(&bytes), Ok(rec));
     for state in [State::Live, State::Revoking, State::Revoked] {
         for term in [
             Term::UntilRevoked,
@@ -455,27 +451,24 @@ fn canonical_record_has_a_pinned_header_and_roundtrips_all_states() {
                 m.kind = kind;
                 m.state = state;
                 m.term = term;
-                let rec = record(m);
+                let rec = m;
                 let bytes = rec.encode().unwrap();
-                assert_eq!(codec::Record::decode(&bytes), Ok(rec));
+                assert_eq!(Mandate::decode(&bytes), Ok(rec));
             }
         }
     }
 }
 #[test]
 fn codec_rejects_every_truncation_and_trailing_data() {
-    let rec = record(admin(2, 20, 10, 1, 3));
+    let rec = admin(2, 20, 10, 1, 3);
     let good = rec.encode().unwrap();
     for n in 0..good.len() {
-        assert!(
-            codec::Record::decode(&good[..n]).is_err(),
-            "truncated at {n}"
-        );
+        assert!(Mandate::decode(&good[..n]).is_err(), "truncated at {n}");
         if n >= abi::MANDATE_HEADER_LEN {
             let mut bad = good[..n].to_vec();
             bad[8..12].copy_from_slice(&(n as u32).to_le_bytes());
             assert!(
-                codec::Record::decode(&bad).is_err(),
+                Mandate::decode(&bad).is_err(),
                 "truncated and patched at {n}"
             );
         }
@@ -483,13 +476,13 @@ fn codec_rejects_every_truncation_and_trailing_data() {
     let mut bad = good;
     bad.push(0);
     let len = bad.len() as u32;
-    assert!(codec::Record::decode(&bad).is_err());
+    assert!(Mandate::decode(&bad).is_err());
     bad[8..12].copy_from_slice(&len.to_le_bytes());
-    assert!(codec::Record::decode(&bad).is_err());
+    assert!(Mandate::decode(&bad).is_err());
 }
 #[test]
 fn codec_refuses_unknown_tags_reserved_bytes_and_counts() {
-    let good = record(use_grant(2, 20, 10, 1)).encode().unwrap();
+    let good = use_grant(2, 20, 10, 1).encode().unwrap();
     for (offset, value) in [
         (0, 0),
         (4, 2),
@@ -508,27 +501,24 @@ fn codec_refuses_unknown_tags_reserved_bytes_and_counts() {
     ] {
         let mut bad = good.clone();
         bad[offset] = value;
-        assert!(
-            codec::Record::decode(&bad).is_err(),
-            "accepted offset {offset}"
-        );
+        assert!(Mandate::decode(&bad).is_err(), "accepted offset {offset}");
     }
     let mut bad = good.clone();
     bad[72..88].fill(0);
-    assert!(codec::Record::decode(&bad).is_err());
+    assert!(Mandate::decode(&bad).is_err());
     let mut bad = good.clone();
     bad[63] = 0x80;
-    assert!(codec::Record::decode(&bad).is_err());
+    assert!(Mandate::decode(&bad).is_err());
     let mut bad = good.clone();
     bad[64] = 1;
-    assert!(codec::Record::decode(&bad).is_err());
+    assert!(Mandate::decode(&bad).is_err());
     let mut bad = good;
     bad[15] = 1;
-    assert!(codec::Record::decode(&bad).is_err());
+    assert!(Mandate::decode(&bad).is_err());
 }
 #[test]
 fn codec_refuses_invalid_envelope_and_noncanonical_selectors() {
-    let good = record(admin(2, 20, 10, 1, 3)).encode().unwrap();
+    let good = admin(2, 20, 10, 1, 3).encode().unwrap();
     let envelope_offset = abi::MANDATE_HEADER_LEN + 4 * 4 + 16 + 16;
     for (offset, value) in [
         (24, 0),
@@ -541,14 +531,14 @@ fn codec_refuses_invalid_envelope_and_noncanonical_selectors() {
     ] {
         let mut bad = good.clone();
         bad[envelope_offset + offset] = value;
-        assert!(codec::Record::decode(&bad).is_err());
+        assert!(Mandate::decode(&bad).is_err());
     }
     let mut bad = good.clone();
     bad[100..104].copy_from_slice(&10u32.to_le_bytes());
-    assert!(codec::Record::decode(&bad).is_err()); // repeated subject
+    assert!(Mandate::decode(&bad).is_err()); // repeated subject
     let mut bad = good;
     bad[12] = abi::KIND_USE as u8;
-    assert!(codec::Record::decode(&bad).is_err()); // admin envelope on Use
+    assert!(Mandate::decode(&bad).is_err()); // admin envelope on Use
 }
 #[test]
 fn maximum_record_fits_the_reserved_bound_without_extra_bytes() {
@@ -561,12 +551,12 @@ fn maximum_record_fits_the_reserved_bound_without_extra_bytes() {
     let e = m.envelope.as_mut().unwrap();
     e.scope.subjects = m.scope.subjects.clone();
     e.scope.resources = m.scope.resources.clone();
-    let rec = record(m);
+    let rec = m;
     let bytes = rec.encode().unwrap();
     assert_eq!(bytes.len(), abi::MANDATE_MAX_LEN);
-    assert_eq!(codec::Record::decode(&bytes), Ok(rec.clone()));
+    assert_eq!(Mandate::decode(&bytes), Ok(rec.clone()));
     let mut too_big = rec;
-    too_big.mandate.scope.subjects.push(17);
+    too_big.scope.subjects.push(17);
     assert_eq!(too_big.encode(), Err(Error::Invalid));
 }
 #[test]
@@ -574,10 +564,10 @@ fn decoding_never_turns_an_unauthorized_envelope_into_authority() {
     let l = ledger();
     let mut m = use_grant(2, 20, 10, 1);
     m.scope.actions = Actions::FS_WRITE;
-    let bytes = record(m).encode().unwrap();
-    let rec = codec::Record::decode(&bytes).unwrap();
+    let bytes = m.encode().unwrap();
+    let rec = Mandate::decode(&bytes).unwrap();
     assert_eq!(
-        l.check_issue(&activation(&l, 1, 10), &rec.mandate, T),
+        l.check_issue(&activation(&l, 1, 10), &rec, T),
         Err(Error::Denied)
     );
 }
@@ -662,12 +652,12 @@ fn revocation_finds_diamond_descendants_once_in_sorted_order() {
 }
 #[test]
 fn single_byte_mutations_are_either_refused_or_exactly_canonical() {
-    let good = record(admin(2, 20, 10, 1, 3)).encode().unwrap();
+    let good = admin(2, 20, 10, 1, 3).encode().unwrap();
     for pos in 0..good.len() {
         for byte in 0..=255u8 {
             let mut candidate = good.clone();
             candidate[pos] = byte;
-            if let Ok(decoded) = codec::Record::decode(&candidate) {
+            if let Ok(decoded) = Mandate::decode(&candidate) {
                 assert_eq!(
                     decoded.encode().unwrap(),
                     candidate,
@@ -750,14 +740,8 @@ fn txn_receipt(l: &Ledger) -> transaction::ViewReceipt {
     }
 }
 fn prepare_txn(l: &Ledger) -> transaction::PreparedIssue {
-    transaction::PreparedIssue::new(
-        l,
-        txn_peer(),
-        reference(1),
-        record(use_grant(2, 20, 10, 1)),
-        T,
-    )
-    .unwrap()
+    transaction::PreparedIssue::new(l, txn_peer(), reference(1), use_grant(2, 20, 10, 1), T)
+        .unwrap()
 }
 fn ready_txn(l: &Ledger) -> transaction::PreparedIssue {
     let mut tx = prepare_txn(l);
@@ -800,7 +784,7 @@ fn preparing_a_preview_does_not_require_or_manufacture_an_activation() {
     let mut bad = use_grant(2, 20, 10, 1);
     bad.scope.actions = Actions::FS_WRITE;
     assert!(matches!(
-        transaction::PreparedIssue::new(&l, txn_peer(), reference(1), record(bad), T),
+        transaction::PreparedIssue::new(&l, txn_peer(), reference(1), bad, T),
         Err(Error::Denied)
     ));
     assert_eq!(l.records().count(), 1);
@@ -954,7 +938,7 @@ fn preparation_expiry_and_live_scope_expiry_are_separate_gates() {
             &l,
             txn_peer(),
             reference(1),
-            record(use_grant(2, 20, 10, 1)),
+            use_grant(2, 20, 10, 1),
             time
         ),
         Err(Error::Overflow)
@@ -971,4 +955,35 @@ fn cancellation_before_admission_is_terminal() {
         tx.admit(&l, txn_peer(), txn_proof(&l), T),
         Err(Error::Conflict)
     ));
+}
+
+#[test]
+fn transaction_provenance_survives_issue_and_both_revocation_phases() {
+    let mut l = ledger();
+    let mut m = use_grant(2, 20, 10, 1);
+    m.transaction = [0xa7; 16];
+    let bytes = m.encode().unwrap();
+    l.issue(&activation(&l, 1, 10), Mandate::decode(&bytes).unwrap(), T)
+        .unwrap();
+    assert_eq!(l.get(reference(2)).unwrap().encode().unwrap(), bytes);
+    let closure = l
+        .begin_revoke(&activation(&l, 1, 10), &[reference(2)], T)
+        .unwrap();
+    assert_eq!(l.get(reference(2)).unwrap().transaction, [0xa7; 16]);
+    l.finish_revoke(l.revision(), &closure).unwrap();
+    let decoded = Mandate::decode(&l.get(reference(2)).unwrap().encode().unwrap()).unwrap();
+    assert_eq!(decoded.transaction, [0xa7; 16]);
+    assert_eq!(decoded.state, State::Revoked);
+}
+#[test]
+fn policy_cannot_insert_a_record_without_transaction_provenance() {
+    let mut l = ledger();
+    let rev = l.revision();
+    let mut m = use_grant(2, 20, 10, 1);
+    m.transaction = [0; 16];
+    assert_eq!(l.issue(&activation(&l, 1, 10), m, T), Err(Error::Invalid));
+    assert_eq!(l.revision(), rev);
+    let mut m = root();
+    m.transaction = [0; 16];
+    assert_eq!(Ledger::new().install_founding(m), Err(Error::Invalid));
 }

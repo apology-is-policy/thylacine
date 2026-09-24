@@ -27,7 +27,7 @@ Admin scopes/admission, Corvus album transactions and qualified resource-owner
 barriers remain required. No end-to-end enforcement claim yet.
 
 ## Validation
-[[spec-mandate]] and [[spec-mandate-commit]] bounded models +47 pure
+[[spec-mandate]] and [[spec-mandate-commit]] bounded models +49 pure
 policy/codec/admission host tests. **blind-to:** runtime
 wiring, durable replay, full runtime quota/memory behavior, account/group resolution,
 trusted kernel peer binding, backend resource revocation and physical seat.

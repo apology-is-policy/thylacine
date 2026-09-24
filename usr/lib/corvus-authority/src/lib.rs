@@ -274,6 +274,7 @@ pub enum State {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Mandate {
+    pub transaction: [u8; 16],
     pub reference: Reference,
     pub subject: u32,
     pub issuer: u32,
@@ -289,7 +290,8 @@ pub struct Mandate {
 impl Mandate {
     fn validate(&self, root: bool) -> Result<(), Error> {
         self.scope.validate()?;
-        if self.reference.id == 0
+        if self.transaction == [0; 16]
+            || self.reference.id == 0
             || self.reference.revision == 0
             || self.domain_generation == 0
             || !self.scope.actions.valid_for(self.kind)

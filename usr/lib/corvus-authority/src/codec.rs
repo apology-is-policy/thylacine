@@ -2,12 +2,6 @@
 //! Neither a founding flag nor a kernel Activation can be deserialized here.
 use crate::{abi::*, *};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Record {
-    pub mandate: Mandate,
-    pub transaction: [u8; 16],
-}
-
 struct Reader<'a> {
     bytes: &'a [u8],
     pos: usize,
@@ -106,18 +100,15 @@ fn selectors(out: &mut Vec<u8>, scope: &Scope) {
     }
 }
 
-impl Record {
-    fn validate(&self) -> Result<(), Error> {
-        if self.transaction == [0; 16] {
-            return Err(Error::Invalid);
-        }
-        self.mandate.validate(self.mandate.supports.is_empty())
+impl Mandate {
+    fn validate_wire(&self) -> Result<(), Error> {
+        self.validate(self.supports.is_empty())
     }
     /// Reserve the proven maximum before serializing. Even hostile in-memory
     /// objects are validated before an allocation or lossy length conversion.
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
-        self.validate()?;
-        let m = &self.mandate;
+        self.validate_wire()?;
+        let m = self;
         let mut out = Vec::new();
         out.try_reserve_exact(MANDATE_MAX_LEN)
             .map_err(|_| Error::Capacity)?;
@@ -271,22 +262,20 @@ impl Record {
             return Err(Error::Invalid);
         }
         let result = Self {
-            mandate: Mandate {
-                reference,
-                subject,
-                issuer,
-                kind,
-                scope,
-                term,
-                authentication,
-                envelope,
-                supports,
-                domain_generation,
-                state,
-            },
+            reference,
+            subject,
+            issuer,
+            kind,
+            scope,
+            term,
+            authentication,
+            envelope,
+            supports,
+            domain_generation,
+            state,
             transaction,
         };
-        result.validate()?;
+        result.validate_wire()?;
         Ok(result)
     }
 }

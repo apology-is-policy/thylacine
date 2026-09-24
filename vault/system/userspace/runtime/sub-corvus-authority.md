@@ -42,6 +42,8 @@ supports. `begin_revoke` closes the complete dependent graph before
 `install_founding` is a trusted installer/replay entry, never an ordinary verb.
 
 ## Data structures
+Mandate owns the nonzero transaction ID; canonical codec, prepared preview and
+ledger all retain one representation, including revoked tombstones.
 Sorted immutable-ID ledger; domain generations; typed Scope, Envelope, Mandate,
 Activation and Time. The record/action ABI is reserved by [[abi-user-authority]]; no runtime endpoint yet.
 
@@ -63,7 +65,7 @@ expiry without trusted UTC, missing support, over-limit graphs and unsupported
 issuance fail closed before mutation. Global revision overflow refuses mutation.
 
 ## Performance
-A dense 4096-record host fixture uses 4,127,808 bytes of retained Vec payload
+A dense 4096-record host fixture uses 4,193,344 bytes of retained Vec payload
 (excludes allocator bookkeeping and guest RSS); closure is about15ms in a macOS
 debug build. This is not a guest timing or end-to-end revocation result.
 
@@ -75,7 +77,7 @@ paths. Revocation uses one forward pass through topologically sorted IDs. Codec 
 the complete transaction reservation is still required before authentication.
 
 ## Prosecution
-47 host tests pass, bare-target check passes, host Clippy -D warnings passes.
+49 host tests pass, bare-target check passes, host Clippy -D warnings passes.
 TLC models pass 154 and 3768 states; fourteen named mutants fail as intended.
 Self-review only, under operator direction. No independent audit claimed.
 
