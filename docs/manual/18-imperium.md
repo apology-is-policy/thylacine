@@ -19,8 +19,9 @@ From an interactive Halcyon shell, request only the capabilities needed:
 imperium chown dac
 ```
 
-The command prints its process ID. Press Ctrl–Alt–Delete, or Ctrl–Alt–F10 on a
-keyboard without a Delete key, then release the keys.
+The command prints its process ID. Press Ctrl–Alt–F10, then release the keys. If your keyboard uses the
+function row for media controls, use its Fn key to send F10.
+Ctrl–Alt–Delete remains accepted as a compatibility gesture.
 Check that the dialog shows the same process and the intended identity and
 capabilities. Enter the Imperium key in that dialog and press Enter. The field
 shows masked characters; it does not send the key into the terminal transcript.
@@ -62,7 +63,7 @@ work outside that scope before authorizing administrative work.
 
 ### Cancel or recover
 
-Ctrl–Alt–Delete without a waiting request shows an informational panel. Press a
+Ctrl–Alt–F10 without a waiting request shows an informational panel. Press a
 key to return. A wrong key, cancellation, expired request, changed requester, or
 revoked eligibility does not confer authority. Repeated wrong keys cause a
 lockout.

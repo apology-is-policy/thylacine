@@ -4,7 +4,7 @@ type: chg
 title: "Preserve vendored source files across fresh checkouts"
 date: 2026-09-24
 arc: arc-astra-halcyon-followup
-commits: ["*(pending)*"]
+commits: ["6e1ba9a6"]
 touched: [sub-substrate-build]
 established: []
 closed: []

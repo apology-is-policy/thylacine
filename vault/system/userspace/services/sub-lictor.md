@@ -29,6 +29,14 @@ code:
   - usr/lictor/src/proxy/input.rs
   - usr/lictor/src/proxy/mod.rs
   - usr/lictor/src/render.rs
+  - usr/lictor/src/typography.rs
+  - usr/lictor/src/type_metrics.rs
+  - usr/lictor/src/type.bin
+  - usr/lictor/examples/render-preview.rs
+  - tools/bake-lictor.py
+  - tools/interactive/ls-graphical-sak.exp
+  - tools/interactive/ls-graphical-sak-states.exp
+  - tools/interactive/ls-graphical-sak-recover.exp
   - usr/lictor/src/rpc_client.rs
   - usr/lictor/src/skein.rs
   - usr/lictor/src/wire.rs
@@ -41,7 +49,7 @@ hazards: [haz-driver-panic-dos]
 abis: [abi-trusted-seat, abi-native-nonblock]
 design: ["docs/GRAPHICAL-SAK-OWNERSHIP.md", "docs/GRAPHICAL-SAK-PORTABILITY.md", "docs/HALCYON-TRUSTED-EPISODE.md"]
 created: 2026-09-18
-updated: 2026-09-21
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -93,7 +101,7 @@ fails closed rather than wrapping or using an incompatible high-bit namespace.
 
 ### Episode
 
-Physical Ctrl-Alt-Delete, or Ctrl-Alt-F10 where the keyboard has no Delete,
+Physical Ctrl-Alt-F10 (with Ctrl-Alt-Delete retained for compatibility)
 starts a kernel generation (the kernel scans the chord; [[abi-trusted-seat]]). Normal hardware requests
 park while the service drains all outstanding work, excludes every advertised
 scanout and selects private, non-shareable trusted backing. Held keys and buttons
@@ -129,6 +137,37 @@ that presentation, and a takeover that ends before a successor is bound
 restores to a blank output for the compositor to repaint. A failed episode cancels its still-unredeemed
 pending grant by exact target incarnation and session. Grants are held against early redemption until the RESTORED commit.
 Redeemed grants then use the existing legate lifecycle.
+
+### Trusted visual layout
+
+`render.rs` follows the approved HTML's dark green-black palette, 48 px rail,
+660 px bordered panel, left fasces, 29 px proportional heading, separate
+principal/PID columns, amber-edged capability area, lifetime explanation,
+outlined key field and footer actions. An axe and explicit termination wording
+accompany CAP_KILL. Every requested capability retains its exact kernel name.
+The PID is authenticated model data; no executable label is fabricated from the
+HTML's sample request. Numeric UID and eligibility level remain visible.
+
+`typography.rs` consumes committed alpha masks and generated metrics from
+`tools/bake-lictor.py`: repository-owned IBM Plex Sans and Cornucopia, 97 glyphs
+in each of eight fixed faces, 328151 bytes total. No TTF parsing, theme read,
+user atlas or GPU text renderer enters the trusted path. The host example
+`render-preview` uses the same rasterizer but is not an authorization channel.
+Normal OS builds require no Python font tooling.
+
+Layout measures the actual baked glyph advances before painting. It chooses a
+compact spacing/type variant if the ordinary layout will not fit; long names
+and notices wrap rather than being ellipsized. Invalid semantics, mask counts,
+geometry or backdrop length are rejected before any destination pixel changes.
+The minimum remains 800x720. Host tests cover all 127 nonempty capability
+subsets across nine verdict states with maximum-length principal, level,
+notice and lifetime values. This is bounded-layout evidence, separate from
+real display/input qualification.
+
+The backdrop remains neutral: the broker holds a normal resource, not a private
+completed-frame snapshot. `docs/LICTOR-BACKDROP-REVIEW.md` proposes the missing
+capture mechanism and records its costs; it is not implemented by this visual
+change. No live compositor memory is sampled to imitate blur.
 
 ## Data structures
 
@@ -177,7 +216,7 @@ or mask changes. The neutral background avoids unqualified capture operations.
 ## Prosecution
 
 QEMU graphical regression passes empty, confer, actual DAC elevation, abdicate,
-wrong-key (opened with Ctrl-Alt-F10) and Escape paths; `ls-graphical-sak-states`
+wrong-key and Escape paths, all entered with the primary Ctrl-Alt-F10 chord; `ls-graphical-sak-states`
 adds real expiry and the five-failure lockout at the 800x720 minimum; and
 `ls-graphical-sak-recover` holds the chord past the quiesce deadline, requires
 the failure notice, the recovery with nothing conferred, a live workspace and
@@ -211,6 +250,19 @@ may confer the three seat roles and the ordered first-come bind.
 These tests are blind to actual scanout/input timing and backend DMA isolation;
 QEMU end-to-end qualification and real screenshots are separate evidence. No
 Pi hardware qualification is claimed.
+
+### September 24 verification
+
+On main base `5ed51ff5` plus the fresh-checkout vendor repair and visual changes:
+25 pure host tests pass; the QEMU HVF `ls-graphical-sak` gate passes (90 s),
+`ls-graphical-sak-states` passes at 800x720 (185 s), and
+`ls-graphical-sak-recover` passes (66 s). A fresh kernel build followed by
+`tools/test.sh` reaches the boot banner with 1667/1667 kernel tests passing.
+External Alpine and Clade fixture gates are explicitly skipped, not coverage.
+The author inspected actual request, masked, denied, lockout and restored
+screenshots. This is a single-agent self-review under the operator's standing
+instruction, not a new independent adversarial audit. Main's queued B-1c/aux
+landings still need integration verification before this branch is merged.
 
 ## Seams
 

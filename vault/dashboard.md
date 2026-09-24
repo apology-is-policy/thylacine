@@ -14,7 +14,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | arc | status | chunks |
 |---|---|---|
 | [[arc-arch81]] | active | 1 |
-| [[arc-astra-halcyon-followup]] | active | 1 |
+| [[arc-astra-halcyon-followup]] | active | 2 |
 | [[arc-boosty]] | active | 5 |
 | [[arc-clade]] | active | 7 |
 | [[arc-corvus-srv]] | active | 3 |
@@ -134,6 +134,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-09-24 [[chg-2026-09-24-lex-curiata-fidelity]] — Restore Lex curiata dialog and make F10 primary
 - 2026-09-24 [[chg-2026-09-24-vendor-checkout-integrity]] — Preserve vendored source files across fresh checkouts
 - 2026-09-23 [[chg-2026-09-23-b1a-permission-ceiling]] — B-1a: the permission ceiling -- SYS_BURROW_RESERVE 124 / SYS_BURROW_PROTECT 125, the multi-mapping reprotect, the fork's per-Burrow clone dedupe, the phenotype mprotect row, the lazy-piece detach refund
 - 2026-09-23 [[chg-2026-09-23-b1a-prime-capacity]] — B-1a' (capacity): the range detach over one core (SYS_BURROW_DETACH 38 in the Linux form + the phenotype munmap), the charged sparse pagemap, the user pool + the I-32 default = RAM minus a reserve, the window-confined fixed arms -- LANDING, audit pending
@@ -141,5 +142,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-09-23 [[chg-2026-09-23-b1a-prime-close-r3]] — B-1a' (capacity), the round-3 close: the copy-on-write copy keeps its share until its leaf is replaced, a fault that finds a leaf already admitting its access is answered by it, the strip takes what is wanted, a refused allocation inside exec is ENOMEM -- round 3's five findings closed, round 4 on the fixes
 - 2026-09-23 [[chg-2026-09-23-b1a-prime-close-r4]] — B-1a' (capacity), the round-4 close: the pager refuses the abort classes it cannot resolve, the pool's refusal is ENOMEM on the exec frame, the reclaim asks for the shortfall, the probe fires at the leaf write, cow.tla models the read-only leaf -- round 4's five findings closed, no round 5 owed
 - 2026-09-23 [[chg-2026-09-23-b1a-prime-close]] — B-1a' (capacity), the audit close: the pool made PHYSICAL (charged at allocation, returned at free), the hardware page tables charged and reclaimed, F3/F4/F6/F7 -- round 1's seven findings closed, round 2's four in flight
-- 2026-09-23 [[chg-2026-09-23-b1b-pouch-memory]] — B-1b (the Pouch memory seam): mmap at the asked prot, mprotect / madvise / MAP_FIXED / partial munmap over RESERVE / PROTECT / DECOMMIT / DETACH, mallocng's MADV_FREE on, the real pthread guard, the 8 MiB main stack with its extent in auxv, __init_tls through __mmap, the phenotype madvise row
 <!-- generated:end -->

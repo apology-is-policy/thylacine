@@ -1,5 +1,27 @@
 # Working on Thylacine
 
+## Astra's permanent checkout (operator-directed, 2026-09-24)
+
+`/Users/northkillpd/projects/thylacine-astra`, branch `codex/astra`, is Astra's
+permanent worktree. Main and Aux work concurrently in their own checkouts.
+Use Yip from this checkout as `astra`; do not run its commands from another
+agent's checkout or override their identity. `yip ring` and `yip read` deliver
+messages; `yip say` replies and `yip note` records one-way updates. Check the
+line at startup and between work phases; Codex does not execute Claude hooks.
+
+Before builds, VM tests, model checking or other substantial host work, acquire
+the corresponding `mac` or `pi` resource with `yip hold`. If queued, continue
+source work and use `yip watch` for notifications. Never infer availability
+from CPU idleness, and never steal an unexpired lease. Release as soon as the
+resource work ends. Use only this checkout's build artifacts and VM processes.
+Coordinate main landings through Yip before integrating or final verification.
+
+The September 24 request is tracked in `docs/ASTRA-2026-09-24-STATUS.md`:
+Lex curiata visual fidelity, F10 as primary SAK, and reconciliation of the
+registry, Tapestry and remaining Lictor/ut notes. Existing single-agent and
+Claude-settings overrides below remain in force; communication with the
+already-running Main and Aux agents is explicitly authorized.
+
 Thylacine is a real ARM64, Plan 9-derived operating system. Preserve its
 namespace, capability, lifetime, and concurrency invariants. Finish the user's
 requested work, including verification and documentation, before reporting it
@@ -95,6 +117,14 @@ Create a dossier for new subsystems, follow `vault/meta/schema.md`, and update
 relevant user-facing design/help and phase status. Generated vault views must
 be rendered, not hand-edited. An exception trailer is not a substitute for
 updating an invariant that actually changed.
+
+The current quaestor has no note-body update command. Resolve/read the owning
+dossier through quaestor, edit its Markdown body and `updated:`/`code:` fields
+directly, then render and lint through quaestor. This is the supported body-edit
+workflow, clarified with Main on September 24; do not mistake the stale
+"note update" wording in DOC-DISCIPLINE for an available command. Use the CLI
+with this checkout's `--root`; the app's legacy quaestor MCP registration may
+still point at a retired checkout. Keep committed Record bodies append-only.
 
 Use concise ASCII commit messages describing the final change and validation.
 Never fabricate authorship or audit approval. Before integrating into `main`,

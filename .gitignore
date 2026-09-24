@@ -89,3 +89,5 @@ vault/meta/quaestor/quaestor
 !third_party/libsodium/builds/msvc/build/
 !third_party/libsodium/builds/msvc/build/buildall.bat
 !third_party/libsodium/builds/msvc/build/buildbase.bat
+# Trusted UI type is a reproducible baked asset, not a build output.
+!usr/lictor/src/type.bin

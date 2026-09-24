@@ -86,7 +86,7 @@ key "meta_l+f"
 capture workspace
 lc_raw_send "\001b" "serial BREAK must not authorize in graphical-only posture"
 witness baseline
-key "ctrl+alt+delete"
+key "ctrl+alt+f10"
 after 1000
 capture empty
 key "ret"
@@ -95,7 +95,7 @@ after 1200
 type "imperium chown dac\n"
 after 1200
 capture request
-key "ctrl+alt+delete"
+key "ctrl+alt+f10"
 after 1000
 capture prompt
 type "imperium-key-michael-v1"
@@ -125,7 +125,7 @@ witness restored
 # Wrong key: the requesting tool must return and the original shell stay plain.
 type "imperium kill\n"
 after 1200
-# The second reserved chord: keyboards without Delete (this leg proves F10).
+# The primary physical attention chord is also exercised on denial.
 key "ctrl+alt+f10"
 capture axe
 type "deliberately-wrong-key"
@@ -138,7 +138,7 @@ witness denied
 # Escape cancels without KDF/authority; input must not leak into the workspace.
 type "imperium chown\n"
 after 1200
-key "ctrl+alt+delete"
+key "ctrl+alt+f10"
 key "esc"
 capture cancelled
 key "ret"

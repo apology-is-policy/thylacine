@@ -1,10 +1,10 @@
 # Halcyon trusted episode
 
-Status: visual direction and Lex curiata visual specification approved by the
-operator, 2026-09-17; implementation design below. The operator
-requested a graphical SAK design alongside aux integration. This document
-specifies the experience and the boundary required to implement it; it does
-not claim that the current virtio-gpu session is a trusted framebuffer sink.
+Status: visual direction approved by the operator, 2026-09-17; isolated trusted
+service approved 2026-09-18 and implemented in Lictor. The September 24 follow-up
+restores the approved dialog's layout and makes Ctrl-Alt-F10 the primary physical
+attention gesture. This document specifies the experience and its security
+boundary; the owning Vault dossier records backend qualification and caveats.
 It refines TRUSTED-PATH sections 5–9 and IMPERIUM-DESIGN section 11.7.
 
 The approved, self-contained [visual preview](halcyon-lex-curiata-preview.html)
@@ -14,7 +14,7 @@ running authorization surface.
 Implementation and the isolated trusted hardware service were approved on
 2026-09-18. See [ownership](GRAPHICAL-SAK-OWNERSHIP.md) and the
 [portable backend contract](GRAPHICAL-SAK-PORTABILITY.md), including Pi 400
-and Pi 500 research. Approval does not imply an implemented trusted sink.
+and Pi 500 research. The QEMU implementation does not qualify those boards.
 
 ## Purpose and presentation
 
@@ -28,7 +28,7 @@ The operator selected a full-screen takeover with the workspace frozen, dimmed
 and softly blurred behind a centred Halcyon-styled dialog. The entire display
 belongs to the trusted sink: the panel is not a regular compositor surface.
 A narrow top rail identifies CORVUS and LEX CURIATA. The panel is titled
-**Conferring imperium**, its authority section **Provincia**, and its lifetime
+**Confer imperium**, its authority section **Provincia**, and its lifetime
 section **Term**. These retain the documented Roman vocabulary while plain
 explanations make the authorization understandable without knowing the theme.
 
@@ -47,9 +47,9 @@ Restore the user's theme unchanged when the episode ends.
 
 ## Reading order
 
-At a 1280 by 800 reference display, use a 48 px top rail and a 640 px wide
-reading column centred horizontally. Start its content near y=160. Keep the
-bottom help line at least 40 px above the display edge. At smaller sizes,
+At a 1280 by 800 reference display, use the preview's 48 px top rail and 660 px
+panel with 32 px horizontal padding, centred horizontally. Centre the panel
+below the rail; its height follows the complete request. At smaller sizes,
 reduce outer margins before reducing the font; wrap values and retain every
 requested capability. Never ellipsize a capability, principal or scope term.
 For an insufficient display, fail closed and offer the configured recovery
@@ -73,6 +73,17 @@ supplies these ordered fields:
 5. **Imperium key** — a labelled secret field, followed by explicit action
    hints. The sign-in password and the distinct imperium key must not be
    described as interchangeable.
+
+The runtime uses baked IBM Plex Sans for proportional text and Cornucopia for
+numeric/capability text. The HTML's platform system font is a visual reference,
+not a dependency on a host font or license. `tools/bake-lictor.py` generates
+immutable alpha masks from the repository-owned fonts; no TTF parser runs in
+the trusted service. The title is 29 px, body text 14 px, labels 12 px, with a
+compact layout for larger requests. All seven capabilities and maximum-length
+identity/term/verdict fields must fit the 800x720 minimum without elision.
+Only the kernel-stamped PID is shown for the process: the semantic model does
+not carry a verified executable name, so the preview's sample `ut` is not
+invented in the running dialog.
 
 Keep authority text bright and the explanations quieter, without relying on
 colour alone. KILL adds a textual warning beside the fasces with its axe;
@@ -123,9 +134,9 @@ indicator and the secret-input route. Beacon is deliberately not the protocol
 between these two components: it describes untrusted application content and
 cannot confer trusted status on a frame.
 
-The initial framebuffer implementation should accept a fixed maximum cell
-grid with a small closed set of semantic attributes, not pixels, font files,
-paths, terminal escapes, or general layout commands. Validate dimensions,
+The framebuffer implementation accepts a bounded LCUR semantic model: identity,
+PID, capabilities, lifetime, state and notice, not pixels, font files, paths,
+terminal escapes or general layout commands. Validate dimensions,
 lengths and attributes before replacing the current frame, so a malformed or
 short update cannot partially obscure a previous authorization. The trusted service
 rasterizes a build-baked, bounded font into private trusted backing.
@@ -146,10 +157,10 @@ Nocturne continues its real-time cycle throughout, as I-46 requires.
 
 ## Current hardware boundary
 
-Tapestry currently owns GPU and input hardware. The approved design extracts that
-ownership into a trusted service and places normal composition behind a bounded
-broker. Until implemented and verified, QEMU retains the existing serial path;
-a normal Halcyon dialog cannot collect the Imperium key. Production does not gain
+Lictor owns GPU and input hardware. Tapestry performs normal composition behind
+its bounded broker; a normal Halcyon dialog cannot collect the Imperium key.
+Ctrl-Alt-F10 enters the kernel's trusted episode, with Ctrl-Alt-Delete retained
+as a compatibility chord. Production does not gain
 serial authorization as a failure fallback. Each future backend, including the
 Pi 400 and Pi 500 controllers, must independently establish exclusive output,
 physical input provenance and DMA containment or explicit trusted-driver assumptions.

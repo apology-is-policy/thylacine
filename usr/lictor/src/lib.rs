@@ -9,6 +9,7 @@ pub mod endpoint;
 pub mod wire;
 pub mod model;
 pub mod render;
+mod typography;
 
 pub mod skein;
 pub mod keymap;
