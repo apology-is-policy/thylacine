@@ -7,7 +7,7 @@ surface: [sub-netd-nic]
 opened-by: adt-net8d-r1
 tracker: "task #242"
 created: 2026-07-31
-updated: 2026-07-31
+updated: 2026-09-24
 ---
 ## Owed
 
@@ -29,3 +29,12 @@ this cannot introduce a flake gate.
 Ship risk is ~zero today: the net-echo/go-net boot gates exit non-zero
 on a broken loopback path, so a regression cannot ship silently — the
 seam is defense-in-depth at the right layer, not a live hole.
+
+Narrowed 2026-09-24. `tools/test.sh` now fails the boot gate once netd is up
+(`netd: up mac=`) if netd prints any FAIL line, never serves, or omits the
+dial-verdict selftest by name. Until then no gate read these lines. Two
+consequences follow:
+- A deterministic FAIL in the two selftests that already end netd (resident lo,
+  TCP retirement) booted green with no `/net`.
+- The rest proceed after a FAIL, so the fail-closed change above is still owed.
+  It no longer hides a failure from the gate.

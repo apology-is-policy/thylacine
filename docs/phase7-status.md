@@ -420,6 +420,46 @@ The self-audit found the round's only P1, and it predates the seal: **`/proc/<pi
 
 Verification: canonical **1662/1662 PASS**, 0 FAIL lines (default image, isolated worktree), in-guest `/debug-probe` PASS on the owner axis; final rebuild after the sabotage legs **1662/1662**, ELF `0ef66f3df8964cd7`, no kernel source newer (276 compared). RED-first in two legs of two guards each, every pair in different tests, each FAIL naming its own guard: kregs' CAP tier forced open + environ dropped from the image set -> exactly `kregs (owner axis): x19..x28 withheld (I-16)` + the three environ-seal assertions (predicate, disclosure, scope) (1658); kregs dropped from the image set + imperium on the sealed predicate -> exactly `the dump seal refuses a kregs READ` + the owner AND the new cross-principal `CAP_HOSTOWNER` I-25 legs (1659). Restores byte-identical. In the sabotaged boots the kernel suite gates the boot, so the probe never ran there; its owner-axis zero check is proven by the canonical boots only. proc_seal's extinction is argued, not unit-tested (it halts).
 
+## HN-1: haul errors reach the terminal; netd's dial verdict stops racing — 2026-09-24
+
+From the operator's Lantern-over-Haul run in Halcyon: "haul doesn't error". Four defects stacked, each hiding
+the next:
+
+- **Routing (the root cause of the report).** haul wrote every line through SYS_PUTS, the KERNEL console,
+  not fd 2. In a Halcyon tile the lines went to serial and the tile showed nothing. On serial the two are
+  one device, so no scenario could see it. haul now writes stderr (sampled before anything is opened) and
+  falls back to the console only for a closed fd 2.
+- **netd B2.** A `data` open on a dial that had ALREADY been refused got a live Rlopen: only a pending
+  handshake was held. A refused connect "succeeded" whenever its RST beat the Tlopen. That race is the
+  cause of haul-hangup's old measurement, not slirp. It also hit pouch's `connect()`.
+- **netd B3.** An unanswered dial was reported ECONNREFUSED. The #293 sweep drops it at the slot deadline
+  before `poll_connects` sees its own. Fixed with `Slot.dial` + `data_open_verdict` + `dial_failure`.
+- **B4 + B5.** libthyla-rs `connect_timeout` called a refusal a timeout, and there was no name for errno
+  111; haul's error said only "connect". Added `Error::ConnectionRefused` and a `Dialing` type. haul now
+  names the address and reason, and prints a progress line after 2 s.
+- **The gate.** No gate read netd's selftest verdicts. `tools/test.sh` now fails a boot once netd is up if
+  netd prints any FAIL line, never serves, or omits the new dial-verdict line by name.
+
+Audit: holotype round 1 on WIP `84345875` (Opus fallback; Fable out of credits) = 0 P0 / 1 P1 / 2 P2 / 4 P3,
+all fixed. Not dirty. The P1: the new scenario used `2>`, which `ut` lacks; an `exec-probe stderr-to` launcher
+replaces it. -> memory `audit_hn1_closed_list`.
+
+Verification (default image, `~/projects/thylacine-aux-r2`):
+- Canonical: `test.sh` PASS, kernel suite **1662/1662**, `netd: dial-verdict selftest PASS`, netd serving.
+- RED-first, one boot reverting the two handler sites (h_lopen's refuse, poll_connects' ecode):
+  `test.sh` FAILED on exactly `netd: dial-verdict selftest FAIL (["refused-first-not-econnrefused",
+  "held-swept-not-etimedout", "swept-opened-not-etimedout"])`. All four controls stayed green.
+- An accidental extra leg: a first run booted the STALE image (`test.sh` builds only when the ELF is
+  missing), and the gate failed it by name for a netd that never ran the selftest.
+- Scenarios (CI image):
+  - `haul-unreachable` PASS on all three legs; `haul-hangup` PASS.
+  - Routing sabotage: `tell()` forced to the console failed leg 1's routing check.
+  - Measured: slirp on this host refuses a FREE host port in ~30 ms, but a port bound and not listening
+    only after ~8 s. The first run used the latter and tripped the 2 s progress line; leg 1 now dials a
+    free port.
+- Final: default image rebuilt after every restore. `test.sh` PASS, 1662/1662, kernel ELF
+  `844ed527d41f0d9d`.
+
 ## Haul completion integration — 2026-09-17
 
 The operator authorized bringing Haul's required Imperium dependencies into

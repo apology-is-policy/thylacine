@@ -389,6 +389,30 @@ case "$result" in
             echo "-----------------------------" >&2
             exit 1
         fi
+        # netd's boot selftests print PASS or FAIL, and until this block nothing
+        # read the verdict: a netd whose selftest regressed still booted green.
+        # Keyed on netd having STARTED (its `up mac=` line), never on it serving:
+        # two selftests (resident lo, TCP retirement) end netd before it posts
+        # /net, joey treats a missing /net as non-fatal, and the banner still
+        # prints -- so a check keyed on serving would skip exactly the
+        # deterministic failure. Once netd is up it must serve, print no FAIL
+        # line, and report the dial-verdict selftest BY NAME (an absent line
+        # passes a no-FAIL check).
+        if grep -aq 'netd: up mac=' "$LOG_FILE"; then
+            if grep -aqE 'netd: .*FAIL' "$LOG_FILE"; then
+                echo "==> FAIL: netd reported a FAIL line at boot." >&2
+                grep -aE 'netd: .*FAIL' "$LOG_FILE" >&2 || true
+                exit 1
+            fi
+            if ! grep -aq 'netd: serving /net' "$LOG_FILE"; then
+                echo "==> FAIL: netd came up but never served /net." >&2
+                exit 1
+            fi
+            if ! grep -aq 'netd: dial-verdict selftest PASS' "$LOG_FILE"; then
+                echo "==> FAIL: netd is serving /net but never reported its dial-verdict selftest." >&2
+                exit 1
+            fi
+        fi
         # #212: propagate the DISTRO D-5 / LINEAGE L-6c arc gates into the
         # verdict. Both soft-skip when their external Alpine bundle is absent,
         # which is right, but nothing carried the skip into the exit status --

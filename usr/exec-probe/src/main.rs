@@ -153,6 +153,54 @@ pub extern "C" fn rs_main() -> i64 {
         return 1;
     }
 
+    // ---- The stderr launcher: NOT a leg of this gate either. ---------------
+    //
+    // `exec-probe stderr-to <file> <path> [args...]` points fd 2 at <file>
+    // (created, or truncated) and replaces this image with <path>, argv =
+    // <path> [args...]. `ut` has no `2>` -- its parser models `<`, `>`, `>>`
+    // and heredocs only -- and on serial a program's stderr and the kernel
+    // console are one device, so a scenario asserting WHERE a program's
+    // diagnostics go has no other way to tell them apart. fd 2 is closed first
+    // so the create lands in slot 2 (the lowest free: 0 and 1 stay open), and
+    // the landing is checked rather than assumed.
+    if args.len() >= 4 && args.get_str(1) == Some("stderr-to") {
+        let file = match args.get_str(2) {
+            Some(f) => f,
+            None => return fail("stderr-to: the file name is not UTF-8"),
+        };
+        let mut packed: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+        let mut argc: u64 = 0;
+        for i in 3..args.len() {
+            match args.get_str(i) {
+                Some(s) => {
+                    packed.extend_from_slice(s.as_bytes());
+                    packed.push(0);
+                    argc += 1;
+                }
+                None => return fail("stderr-to: an argument is not UTF-8"),
+            }
+        }
+        let path = match args.get_str(3) {
+            Some(p) => p.as_bytes(),
+            None => return fail("stderr-to: no program named"),
+        };
+        let _ = unsafe { libthyla_rs::t_close(2) };
+        let f = match libthyla_rs::fs::File::create(file) {
+            Ok(f) => f,
+            Err(_) => return fail("stderr-to: cannot create the file"),
+        };
+        if f.as_raw_fd() != 2 {
+            return fail("stderr-to: the file did not land in fd 2");
+        }
+        // execve keeps the handle table: the file IS the next image's stderr.
+        core::mem::forget(f);
+        let rc = unsafe { t_execve(path, &packed, argc) };
+        t_putstr("exec-probe: FAIL stderr-to: execve returned rc=");
+        put_i64(rc);
+        t_putstr("\n");
+        return 1;
+    }
+
     // ---- Stage 1: the failure legs, then the exec. ------------------------
     if args.len() != 1 {
         return fail("stage1 expected exactly one argv entry");

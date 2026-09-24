@@ -3553,10 +3553,10 @@ static void proc_become_zombie_locked(struct Proc *p, int status, const char *ms
 // before notes_queue_free) is preserved: this close happens-before
 // proc_free's notes_queue_free (exit precedes reap).
 //
-// IDEMPOTENT: a Proc that does NOT pass through here (multi-thread, or a
-// direct `state=ZOMBIE; proc_free()` orphan/rollback path) keeps p->handles
-// set and proc_free's handle_table_free closes it; this path NULLs p->handles
-// so proc_free's handle_table_free(NULL) no-ops. No double-free either way.
+// IDEMPOTENT: a Proc that does NOT pass through here (a direct
+// `state=ZOMBIE; proc_free()` orphan/rollback path) keeps p->handles set and
+// proc_free's handle_table_free closes it; this path NULLs p->handles so
+// proc_free's handle_table_free(NULL) no-ops. No double-free either way.
 static void proc_close_handles_at_exit(struct Proc *p) {
     if (!p) return;
     if (p->handles) {

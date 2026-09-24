@@ -174,6 +174,23 @@ a failure reason. A second mount of one post is refused; a missing post, busy
 name or exhausted quota also fails. Confirm the service announcement before
 mounting, and use `haul -v` for connection and handshake progress.
 
+Haul writes its messages to standard error, so they appear in the terminal or
+Halcyon tile that ran it. When the server cannot be reached, Haul names the
+address and the reason, and exits with status 1 before it mounts anything:
+
+- `haul: cannot reach 10.0.2.2!5640: connection refused`: the host answered, but
+  nothing is listening on that port. Start the server, or check the port.
+- `haul: no answer from 10.0.2.2!5640 yet -- still trying`, after two seconds,
+  and then `haul: cannot reach 10.0.2.2!5640: no answer (timed out)` after about
+  15 seconds: the host never replied. Check the address and that the host is up.
+
+A Haul started with its standard error closed writes these messages to the
+system console instead. A launcher that connects standard error to `/dev/null`
+discards them. In the command form, lines
+that begin with `haul:` come from Haul and the command's own output does not
+carry that prefix; when the command exits with a non-zero status, Haul prints
+`haul: the command exited non-zero` and exits with status 1.
+
 A remote disconnect fails pending filesystem operations. The relay ends when
 its connection or elevated scope ends. Token retrieval through corvus is not
 implemented; continue to use the explicit file or environment-source interface.

@@ -136,6 +136,11 @@ pub enum Error {
     /// Maps `T_E_TIMEDOUT` = 110 (POSIX `ETIMEDOUT`).
     TimedOut,
 
+    /// Connection refused: the dial reached the peer and it turned the call
+    /// away (a RST), or netd rejected the dial.
+    /// Maps `T_E_CONNREFUSED` = 111 (POSIX `ECONNREFUSED`).
+    ConnectionRefused,
+
     /// Target is a directory where a non-directory was required (e.g.
     /// `unlink` of a directory -- use `remove_dir`). POSIX `EISDIR` = 21.
     ///
@@ -207,6 +212,7 @@ impl Error {
             Error::DirectoryNotEmpty => 39,
             Error::SymlinkLoop      => 40,
             Error::TimedOut         => 110,
+            Error::ConnectionRefused => 111,
             Error::Other(e)         => e,
             // Library-only variants have no POSIX errno mapping.
             Error::UnexpectedEof    => 0,
@@ -289,6 +295,7 @@ impl From<i32> for Error {
             39  => Error::DirectoryNotEmpty,
             40  => Error::SymlinkLoop,
             110 => Error::TimedOut,
+            111 => Error::ConnectionRefused,
             n   => Error::Other(n),
         }
     }
@@ -316,6 +323,7 @@ impl fmt::Display for Error {
             Error::DirectoryNotEmpty => "directory not empty",
             Error::SymlinkLoop      => "too many levels of symbolic links",
             Error::TimedOut         => "operation timed out",
+            Error::ConnectionRefused => "connection refused",
             Error::Other(_)         => "kernel error",
             Error::UnexpectedEof    => "unexpected end of file",
             Error::WriteZero        => "writer made no progress",

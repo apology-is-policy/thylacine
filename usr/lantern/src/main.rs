@@ -20,11 +20,11 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-// One section and its largest block, exactly as the `manual` reader bounds it
-// (MANUAL-DESIGN 8.1): lantern holds no more than that at once.
+// One section and its largest block, exactly as the `manual` reader holds them:
+// the manual's `bounds` test measures that peak under this heap (MANUAL-DESIGN
+// 8.1), and lantern holds no more than that at once.
 #[global_allocator]
-static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc =
-    libthyla_rs::alloc::ThylaAlloc;
+static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
 use beacon::sink::{Em, Sink};
 use beacon::{BeaconMode, Tier};

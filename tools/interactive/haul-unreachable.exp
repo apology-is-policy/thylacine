@@ -1,0 +1,121 @@
+#!/usr/bin/expect -f
+# tools/interactive/haul-unreachable.exp -- a server haul cannot reach must be
+# REPORTED, to the terminal that ran haul, with the address and the reason.
+#
+# THE DEFECT (the operator's "haul doesn't error", Halcyon, 2026-09-24). Three
+# faults stacked, and each hid the next:
+#   1. haul wrote every line through SYS_PUTS, which is the KERNEL console, not
+#      stderr. On the serial console the two are one device, so this fleet never
+#      saw the difference; in a Halcyon tile stderr is the tile's pty, and every
+#      haul line -- errors included -- went to serial. The tile showed nothing.
+#   2. netd answered a `data` open on a dial that had ALREADY been refused with a
+#      live Rlopen: only a dial still in flight was held. Whether a refused
+#      connect "succeeded" depended on whether the RST beat the client's Tlopen.
+#   3. The one line haul did print for a failed dial was `haul: connect`.
+# Plus the timeout twin of 2: the #293 sweep drops a stuck dial at the SLOT
+# deadline, which comes first, so an unanswered dial was reported ECONNREFUSED.
+#
+# THE LEGS. `ut` has no `2>`, and on serial stderr and the console are one
+# device, so legs 1-2 start haul through `exec-probe stderr-to FILE`, which
+# points fd 2 at a file before exec: a line that reaches the console instead is
+# the routing defect, and the file must hold it.
+#   1. refused: a host port with nothing on it. The file holds "connection
+#      refused", and no progress line: measured 2026-09-24, slirp on macOS
+#      refuses a dial to a free host port in ~30 ms. (A port held bound but
+#      NOT listening is refused only after ~8 s of the host's SYN retries --
+#      long enough to print the 2 s progress line -- so it is not used here.)
+#   2. no answer: 10.0.2.99 in slirp's subnet, which never answers ARP. The file
+#      holds the progress line, then "no answer (timed out)".
+#   3. no stderr, fd 2 TAKEN: a stdio-less park form dials a peer that accepts
+#      and hangs up, so haul's own data fid sits in slot 2 when the attach
+#      fails. The line must reach the console -- sampling fd 2 when printing,
+#      rather than at start, would write it into the connection instead.
+
+set ::env(THYLACINE_ACCEL) hvf
+# run-vm.sh's guestfwd rules make slirp answer ARP for their addresses.
+if {[info exists ::env(THYLACINE_GUESTFWD)]} { unset ::env(THYLACINE_GUESTFWD) }
+
+source [file join [file dirname [info script]] lib.exp]
+
+proc read_file {path} {
+    if {[catch {set f [open $path r]}]} { return "" }
+    set d [read $f]
+    close $f
+    return $d
+}
+
+proc wait_log {path pat secs} {
+    set d ""
+    for {set i 0} {$i < $secs * 10} {incr i} {
+        set d [read_file $path]
+        if {[string match $pat $d]} { break }
+        after 100
+    }
+    return $d
+}
+
+lc_boot
+lc_login cora kora
+
+# A host port with nothing on it: the kernel picks a free one, and it is
+# released at once. Something else taking it before the dial could only turn
+# the leg red (a connect that succeeds), never green.
+set freelog /tmp/haul-unreachable-free-[pid].log
+set free_code {import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print("free", s.getsockname()[1], flush=True)
+s.close()}
+exec python3 -c $free_code > $freelog
+if {![regexp {free ([0-9]+)} [read_file $freelog] -> port]} {
+    lc_fail "no free host port was reported -- [read_file $freelog]"
+}
+lc_step "leg 1: host port $port is free"
+
+# Any haul line on the console while its stderr is a file is the routing defect.
+set routed_wrong {haul: (cannot|no answer|connect|attach)}
+
+# --- Leg 1: refused ---------------------------------------------------------
+lc_send "mkdir -p /tmp/ur"
+lc_send "exec-probe stderr-to /tmp/ur.err /bin/haul 10.0.2.2!$port /tmp/ur"
+lc_run_expect_hardfail_re "echo refused-leg-done | tr a-z A-Z" \
+    "REFUSED-LEG-DONE" "$routed_wrong|exec-probe: FAIL"
+lc_run_expect_hardfail_re "cat /tmp/ur.err" \
+    "haul: cannot reach 10.0.2.2!$port: connection refused" \
+    {haul: attach \(|mounted at|no answer}
+lc_pass "haul-unreachable: a refused dial is reported on stderr as refused"
+
+# --- Leg 2: no answer -------------------------------------------------------
+# netd gives up at its 15 s connect deadline; the command budget must cover it.
+set ::lc_cmd_timeout [expr {$::lc_cmd_timeout < 45 ? 45 : $::lc_cmd_timeout}]
+lc_send "mkdir -p /tmp/nb"
+lc_send "exec-probe stderr-to /tmp/nb.err /bin/haul 10.0.2.99!564 /tmp/nb"
+lc_run_expect_hardfail_re "echo silent-leg-done | tr a-z A-Z" \
+    "SILENT-LEG-DONE" "$routed_wrong|exec-probe: FAIL"
+lc_run_expect_hardfail_re "cat /tmp/nb.err" \
+    "haul: no answer from 10.0.2.99!564 yet -- still trying" \
+    {connection refused|haul: attach \(|mounted at}
+lc_expect "haul: cannot reach 10.0.2.99!564: no answer (timed out)" \
+    "the timed-out verdict follows the progress line"
+lc_pass "haul-unreachable: an unanswered dial says so while waiting, then times out"
+
+# --- Leg 3: no stderr, and fd 2 taken by the connection ---------------------
+set peerlog /tmp/haul-unreachable-peer-[pid].log
+file delete -force $peerlog
+set peer_pid [exec python3 $lc_repo/tools/interactive/haul-hangup-peer.py \
+    --port 0 --log $peerlog --mode accept-close &]
+set d [wait_log $peerlog "*listening*" 5]
+if {![regexp {listening 127\.0\.0\.1:([0-9]+)} $d -> pport]} {
+    lc_fail "the hang-up peer never listened -- its log: $d"
+}
+lc_send "mkdir -p /tmp/sl"
+lc_run_expect_hardfail_re "exec-probe stdio-less /bin/haul 10.0.2.2!$pport /tmp/sl" \
+    "haul: attach (the server closed without replying)" \
+    {haul: cannot reach|mounted at|exec-probe: FAIL}
+lc_run_expect "echo stdio-less-done | tr a-z A-Z" "STDIO-LESS-DONE"
+lc_pass "haul-unreachable: with no stderr, the reason reaches the console, not the connection"
+
+catch {exec kill $peer_pid}
+file delete -force $peerlog $freelog
+lc_quit
+exit 0

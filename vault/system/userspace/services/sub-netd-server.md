@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/NET-DESIGN.md", "docs/NET-THROUGHPUT.md", "docs/NET-CLOSE-DESIGN.md"]
 created: 2026-07-31
-updated: 2026-09-23
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -184,7 +184,7 @@ teardown/Tversion `cancel_accepts_for_conn`.
 | `PendingAccept` | `open(listen)` on an ANNOUNCED slot | `poll_accepts` → `accept_swap` mints M (taking N's established socket; N re-armed listening) → `complete_accept` rebinds the fid onto M/ctl | held Rlopen |
 | `PendingRead` | `data` Tread, rx empty but open (blocking mode) | `poll_data` re-attempts the dequeue | held Rread (bytes; 0 on EOF) |
 | `PendingReady` | `ready` Tread, mask unsatisfied | `poll_ready` re-runs `check_ready` | held Rread (revents u32) |
-| `PendingConnect` | `data` Tlopen while the TCP handshake is in flight (**#257** — an immediate Rlopen let clients write into a SynSent socket; loopback's ~0 RTT masked it) | `poll_connects`: ESTABLISHED → Rlopen; RST → `E_CONNREFUSED`; deadline → abort + `E_TIMEDOUT` | held Rlopen / Rlerror |
+| `PendingConnect` | `data` Tlopen while the TCP handshake is in flight (**#257** — an immediate Rlopen let clients write into a SynSent socket; loopback's ~0 RTT masked it) | `poll_connects`: ESTABLISHED → Rlopen; failed → the slot's `dial_failure` ecode (`E_CONNREFUSED` for a RST, `E_TIMEDOUT` for a deadline drop); its own deadline → abort + `E_TIMEDOUT` | held Rlopen / Rlerror |
 | `PendingWeftRead` | `Tweftio(READ)`, rx empty but open | `poll_weftio` recvs in place into the ring | held Rweftio (count) |
 | `Query.deferred` | cs/dns Tread while the DNS query is in flight | `poll_dns` | held Rread (the formatted answer) |
 
@@ -235,6 +235,48 @@ ref it; `err` is set so `check_ready` reports POLLERR (completing a
 stranded readiness probe); `slot_unref` later finds `socket == None` —
 no double-remove. This bounds EVERY outbound connect, not only the
 deferred-open path.
+
+**The dial verdict (2026-09-24).** `Slot.dial` records how an outbound dial
+ended: `None`, `InFlight`, `Refused` or `TimedOut`. The socket cannot say this
+itself: a RST leaves it Closed, a #293 drop leaves no socket, and a slot that
+never dialed also reads Failed.
+
+The transitions:
+- `tcp_connect` sets `InFlight`.
+- The sweep sets `None` on ESTABLISHED, and `Refused` on Failed while still
+  `InFlight`.
+- `tcp_drop_stuck_connect` and `tcp_abort_connect` set `TimedOut`.
+
+`data_open_verdict` is the answer `h_lopen` gives a `data` open:
+- Pending → Hold.
+- Failed, with a failed dial → `Refuse(dial_failure)`: `E_CONNREFUSED` for
+  `InFlight`/`Refused`, `E_TIMEDOUT` for `TimedOut`.
+- Failed with `Dial::None`, and everything else → Open.
+
+`poll_connects`' Failed arm answers the same `dial_failure` ecode. So a failed
+dial gets one answer whether its RST landed before the client's Tlopen or while
+the open was held.
+
+A `hangup` on an `InFlight` dial resets it to `None`: the client ended its own
+dial, which is no refusal.
+
+One window remains. `dial` leaves `InFlight` only when the sweep observes the
+slot, and the sweep runs once per serve-loop pass. So a peer that completes the
+handshake and resets before the next sweep reads as `Refused`.
+
+Two bugs came from this missing record:
+- Before it, only Pending was held, so a RST that beat the Tlopen got a LIVE
+  Rlopen on a dead connection. A refused connect then "succeeded" on whichever
+  side of that race it fell (haul, and pouch's `connect()`, which reads the data
+  open as the verdict).
+- Separately, the sweep runs before `poll_connects` each tick and fires on the
+  SLOT's deadline, which is never later than the held open's. So a dial nobody
+  answered reached `poll_connects` as Failed and was reported `E_CONNREFUSED`.
+  The held open's own `E_TIMEDOUT` arm is now rarely reached. Two things still
+  reach it: the two deadline reads straddling a millisecond, and a slot deadline
+  re-armed by a hangup plus a re-connect.
+
+A never-dialed, listening or accepted slot keeps the old answer (Open).
 
 **The resident loopback routing (net-8a).** `Net.lo:
 Option<LoStack>` is a second, isolated smoltcp stack (own `Loopback`
@@ -341,8 +383,9 @@ construction. Three obligations a concurrency lift must re-establish
   full tables `E_NOMEM` (clone-mint ENFILE-class, fid table, pending
   tables); unannounced listen `E_INVAL`; malformed ctl/ipifc verbs
   `E_INVAL`; unsupported verbs/ops `E_OPNOTSUPP`/`E_NOSYS`; nonblock
-  empty read `E_AGAIN` (#52); deferred-connect failure
-  `E_CONNREFUSED`/`E_TIMEDOUT` (#257).
+  empty read `E_AGAIN` (#52); a failed dial's `data` open, held or not,
+  `E_CONNREFUSED` (RST) / `E_TIMEDOUT` (deadline) via `data_open_verdict`
+  (#257 + 2026-09-24).
 - cs/dns: unresolvable → the EMPTY answer (0-byte read), by design not
   an error.
 - A held-reply delivery write failure condemns the whole Conn
@@ -390,6 +433,10 @@ net-2d/3d/4d/8d/weft-7):
   riding every qid path (`qid_of` stays the single builder).
 - **#293**: the sweep must DROP (remove), never abort; the deadline
   disarms on every resolution arm.
+- **The dial verdict**: every `Slot` literal starts `Dial::None` (a reused
+  index must not inherit a verdict). Attack a slot that sits Failed with
+  `InFlight` between two sweeps, a second `connect` on a failed slot, and an
+  established-then-reset dial.
 
 ## Seams
 
@@ -495,6 +542,22 @@ reprotect), so it discriminates where the detach no longer can
 ([[sub-kernel-syscall-abi]]). It asks RW, not R: the first form asked R, which
 a live eager RW ring ADMITS as a lowering, so the oracle's failure path
 mutated the ring it was only meant to inspect (the B-1a' round-1 audit's F6).
-It stays blind to VA reuse, as the old oracle was. Consumer-side: joey's per-chunk PROBE lines, the net-echo
+It stays blind to VA reuse, as the old oracle was.
+
+`dial_verdict_selftest` drives the REAL handlers. A Tlopen goes through `h_lopen`
+and its reply is parsed. A held open is answered by the real `poll_connects`,
+whose Rlerror lands in a pipe that is the test Conn's handle. It has seven legs,
+all of which run:
+- never-dialed → Rlopen;
+- refused with the RST first → `h_lopen` ECONNREFUSED, fid left unopened;
+- held then refused → ECONNREFUSED;
+- held then swept → ETIMEDOUT;
+- swept then opened → ETIMEDOUT;
+- established → Rlopen;
+- established, swept and then reset → Rlopen (the sweep's Ready → `None`).
+
+`tools/test.sh` fails the boot once netd is up if netd prints any FAIL line, never
+serves, or omits the dial-verdict PASS line. Before 2026-09-24 no gate read these
+verdicts. Consumer-side: joey's per-chunk PROBE lines, the net-echo
 over-the-mount TCP/TLS/weft E2Es, the go-net Stage-3c listen/dial
 round-trip (the regression for the announce-`local` fix).

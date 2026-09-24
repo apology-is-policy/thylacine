@@ -234,44 +234,44 @@ pub struct TcpStream {
     n: u32,
 }
 
+/// A TCP dial in flight: the `connect` verb is written and the SYN is on its
+/// way, but the handshake is not settled. `wait` watches for the verdict without
+/// taking it; `finish` takes it. Dropping a `Dialing` abandons the dial (its
+/// `ctl` closes, and netd frees the connection).
+pub struct Dialing {
+    ctl: File,
+    ready: Option<File>,
+    n: u32,
+}
+
 impl TcpStream {
-    /// Active open: dial `addr` and block until the connection is ESTABLISHED.
-    pub fn connect(addr: SocketAddrV4) -> Result<TcpStream> {
+    /// Start an active open and return without waiting for the handshake.
+    /// `connect` is `dial` then `finish`; a caller that wants to say something
+    /// while a slow dial is still out calls `wait` in between.
+    pub fn dial(addr: SocketAddrV4) -> Result<Dialing> {
         let (mut ctl, n) = clone_conn("tcp")?;
         ctl.write_all(format!("connect {}", addr.wire()).as_bytes())?;
-        // Opening `data` blocks until ESTABLISHED (or fails on RST/refused).
-        let data = open_conn_file("tcp", n, "data", true, true)?;
-        Ok(TcpStream { ctl, data, n })
+        Ok(Dialing { ctl, ready: None, n })
     }
 
-    /// Active open with a bounded wait. Like `connect`, but instead of blocking
-    /// the `data` open until ESTABLISHED (which has no deadline short of netd's
-    /// 15 s connect timeout), it polls the QTPOLL `ready` sibling for POLLOUT --
-    /// netd's `check_ready` gates POLLOUT on `tcp::can_send()`, true only once
-    /// ESTABLISHED (a SynSent socket reports neither, net-6b) -- with `timeout`.
-    /// Returns `TimedOut` if the handshake does not complete in time (the
-    /// half-open `ctl` closes on drop). For a best-effort prober that must never
-    /// block on an unreachable peer (NET-PERF M6, the slirp `guestfwd` path).
+    /// Active open: dial `addr` and block until the connection is ESTABLISHED,
+    /// or the dial fails (`ConnectionRefused`; `TimedOut` at netd's own 15 s
+    /// connect deadline).
+    pub fn connect(addr: SocketAddrV4) -> Result<TcpStream> {
+        Self::dial(addr)?.finish()
+    }
+
+    /// Active open with a bounded wait: `TimedOut` if the handshake is still
+    /// out after `timeout` (the half-open `ctl` closes on drop). A refusal is
+    /// reported as `ConnectionRefused`, and at once rather than at the timeout.
+    /// For a best-effort prober that must never block on an unreachable peer
+    /// (NET-PERF M6, the slirp `guestfwd` path).
     pub fn connect_timeout(addr: SocketAddrV4, timeout: Duration) -> Result<TcpStream> {
-        let (mut ctl, n) = clone_conn("tcp")?;
-        ctl.write_all(format!("connect {}", addr.wire()).as_bytes())?;
-        // The readiness sibling is openable while the socket is still SynSent;
-        // POLLOUT fires only on ESTABLISHED (can_send). A RST leaves the socket
-        // !can_send, so a refused dial also resolves to the timeout (bounded).
-        let ready = open_conn_file("tcp", n, "ready", true, false)?;
-        let mut ps = PollSet::new();
-        ps.add_raw(ready.as_raw_fd(), PollEvents::WRITE);
-        let ms = timeout.as_millis().min(u32::MAX as u128) as u32;
-        let established = ps
-            .poll(PollTimeout::Millis(ms))
-            .map(|r| r.into_iter().any(|e| e.is_writable()))
-            .map_err(|_| Error::Io)?;
-        if !established {
+        let mut dialing = Self::dial(addr)?;
+        if !dialing.wait(timeout)? {
             return Err(Error::TimedOut);
         }
-        // ESTABLISHED: the `data` open returns at once (no further blocking).
-        let data = open_conn_file("tcp", n, "data", true, true)?;
-        Ok(TcpStream { ctl, data, n })
+        dialing.finish()
     }
 
     /// The connection number N (its `/net/tcp/N` directory).
@@ -325,6 +325,38 @@ impl TcpStream {
     /// a full send buffer returns a 0-count `Rwrite`, not a deferred reply.
     pub fn ready_fd(&self) -> Result<File> {
         open_conn_file("tcp", self.n, "ready", true, false)
+    }
+}
+
+impl Dialing {
+    /// Wait up to `timeout` for the handshake to settle. True once it has --
+    /// ESTABLISHED or failed -- and `finish` then answers at once; false while it
+    /// is still out. A refusal settles it early: the RST closes the socket, which
+    /// the `ready` sibling reports as POLLHUP (always reported, never masked),
+    /// and POLLOUT fires only on ESTABLISHED (netd gates it on `can_send`).
+    pub fn wait(&mut self, timeout: Duration) -> Result<bool> {
+        if self.ready.is_none() {
+            // Openable while the socket is still SynSent.
+            self.ready = Some(open_conn_file("tcp", self.n, "ready", true, false)?);
+        }
+        let fd = match &self.ready {
+            Some(f) => f.as_raw_fd(),
+            None => return Err(Error::Io),
+        };
+        let mut ps = PollSet::new();
+        ps.add_raw(fd, PollEvents::WRITE);
+        let ms = timeout.as_millis().min(u32::MAX as u128) as u32;
+        ps.poll(PollTimeout::Millis(ms))
+            .map(|r| r.into_iter().next().is_some())
+            .map_err(|_| Error::Io)
+    }
+
+    /// Take the verdict: the connection, or why the dial failed. Blocks until
+    /// the handshake settles (netd holds the `data` open); after `wait` returned
+    /// true it answers at once.
+    pub fn finish(self) -> Result<TcpStream> {
+        let data = open_conn_file("tcp", self.n, "data", true, true)?;
+        Ok(TcpStream { ctl: self.ctl, data, n: self.n })
     }
 }
 
