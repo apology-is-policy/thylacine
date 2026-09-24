@@ -4,7 +4,7 @@ type: chg
 title: "B-1b (the Pouch memory seam): mmap at the asked prot, mprotect / madvise / MAP_FIXED / partial munmap over RESERVE / PROTECT / DECOMMIT / DETACH, mallocng's MADV_FREE on, the real pthread guard, the 8 MiB main stack with its extent in auxv, __init_tls through __mmap, the phenotype madvise row"
 date: 2026-09-23
 arc: arc-boosty
-commits: ["*(pending)*"]
+commits: ["037f511d"]
 touched:
   - sub-pouch-mem
   - sub-pouch-thread
