@@ -4,6 +4,11 @@ type: sub
 parent: moc-substrate
 title: "The build — targets, the ledger, and the four guards on a stale artifact"
 code:
+  - .gitignore
+  - third_party/rust/smoltcp/.vscode/settings.json
+  - third_party/rust/thiserror/build/probe.rs
+  - third_party/libsodium/builds/msvc/build/buildall.bat
+  - third_party/libsodium/builds/msvc/build/buildbase.bat
   - tools/build.sh
   - tools/mkcpio.py
   - tools/mkdisk.py
@@ -21,7 +26,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-09-21
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -50,6 +55,27 @@ was BUILT / REUSED / PRESERVED.** That block is the contract: read it to
 know the resulting state rather than inferring it from the target name.
 
 ## Mechanism
+
+### Fresh-checkout vendor integrity
+
+Generic `build/` and `.vscode/` ignore rules also match inside vendored source.
+Exact exceptions in `.gitignore` preserve smoltcp's editor settings,
+thiserror's build probe and libsodium's two MSVC build scripts. These are
+upstream source, not generated artifacts. Cargo validates the Rust files
+against each crate's `.cargo-checksum.json`, so omitting them aborts a fresh
+worktree's build before compilation. The MSVC files do not participate in the
+ARM build, but must remain present to preserve the vendored tree.
+
+The September 24 repair was verified by enumerating all Cargo manifest paths
+and SHA-256 hashes, restoring the two absent Rust files only after hash
+comparison, comparing both libsodium files between the established Main/Aux
+checkouts, and completing a fresh `tools/build.sh kernel`. The broader local
+check is `git ls-files --others --ignored --exclude-standard third_party/`:
+review any result before vendoring or landing. A clean clone cannot detect
+files that were never committed; run that check in the populated source tree
+as well. An automatic build guard is a separate Aux follow-up.
+
+See [[chg-2026-09-24-vendor-checkout-integrity]].
 
 ### Typed configuration and external inputs
 

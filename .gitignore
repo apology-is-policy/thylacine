@@ -80,3 +80,12 @@ vault/meta/quaestor/quaestor
 !third_party/rust/**/*.o
 !third_party/rust/cc/src/target/
 !third_party/rust/cc/src/target/**
+# Cargo checksums cover these source files too; broad editor/build ignores
+# must not make a fresh worktree's vendored packages incomplete.
+!third_party/rust/smoltcp/.vscode/
+!third_party/rust/smoltcp/.vscode/settings.json
+!third_party/rust/thiserror/build/
+!third_party/rust/thiserror/build/probe.rs
+!third_party/libsodium/builds/msvc/build/
+!third_party/libsodium/builds/msvc/build/buildall.bat
+!third_party/libsodium/builds/msvc/build/buildbase.bat
