@@ -26,7 +26,7 @@ def main():
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     output = args.output or source.parent / "work" / "ua-model" / stamp
     output.mkdir(parents=True, exist_ok=False)
-    for path in [source / "mandate.tla", *source.glob("mandate*.cfg")]:
+    for path in [*source.glob("mandate*.tla"), *source.glob("mandate*.cfg")]:
         shutil.copy2(path, output / path.name)
     cases = [
         ("mandate", None),
@@ -37,13 +37,23 @@ def main():
         ("mandate_buggy_no_restore", "RestorationBeforeCommit"),
         ("mandate_buggy_replay", "NoReplayReopen"),
         ("mandate_buggy_no_audit", "AtomicAudit"),
+        ("mandate_commit", None),
+        ("mandate_commit_buggy_no_recheck", 'Supported'),
+        ("mandate_commit_buggy_group_delta", 'Bounded'),
+        ("mandate_commit_buggy_no_restore", 'RestorationBeforeAdmission'),
+        ("mandate_commit_buggy_fork_admin", 'TrustedActor'),
+        ("mandate_commit_buggy_repurpose", 'FrozenIntent'),
+        ("mandate_commit_buggy_no_audit", 'AtomicAudit'),
+        ("mandate_commit_buggy_replay", 'NoReplayReopen'),
+
     ]
     failed = False
     verdicts = []
     for name, invariant in cases:
         command = [args.java, "-Xmx512m", "-cp", str(Path(args.jar).resolve()),
                    "tlc2.TLC", "-workers", "1", "-metadir", name + ".states",
-                   "-config", name + ".cfg", "mandate.tla"]
+                   "-config", name + ".cfg",
+                   "mandate_commit.tla" if name.startswith("mandate_commit") else "mandate.tla"]
         with (output / (name + ".log")).open("w") as log:
             try:
                 result = subprocess.run(command, cwd=output, stdout=log,

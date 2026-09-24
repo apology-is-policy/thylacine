@@ -677,3 +677,60 @@ fn single_byte_mutations_are_either_refused_or_exactly_canonical() {
         }
     }
 }
+
+#[test]
+fn dense_ledger_at_capacity_keeps_graph_work_and_payload_bounded() {
+    extern crate std;
+    let mut l = Ledger::new();
+    let mut template = root();
+    template.scope.subjects = (100..116).collect();
+    template.scope.resources = (1..=16)
+        .map(|object| Resource { owner: 1, object })
+        .collect();
+    template.envelope.as_mut().unwrap().scope.subjects = template.scope.subjects.clone();
+    template.envelope.as_mut().unwrap().scope.resources = template.scope.resources.clone();
+    for id in 1..=8 {
+        let mut m = template.clone();
+        m.reference = reference(id);
+        m.subject = id as u32;
+        l.install_founding(m).unwrap();
+    }
+    let started = std::time::Instant::now();
+    for id in 9..=MAX_RECORDS as u64 {
+        let mut m = template.clone();
+        m.reference = reference(id);
+        m.subject = 100 + ((id - 9) % 16) as u32;
+        m.issuer = 1;
+        m.envelope.as_mut().unwrap().delegation_depth = 3;
+        m.supports = (1..=8).map(reference).collect();
+        l.issue(&activation(&l, 1, 1), m, T).unwrap();
+    }
+    let closure_start = std::time::Instant::now();
+    let closure = l.revocation_closure(&[reference(1)]).unwrap();
+    let closure_elapsed = closure_start.elapsed();
+    assert_eq!(closure.len(), MAX_RECORDS - 7);
+    assert_eq!(closure.first(), Some(&reference(1)));
+    assert_eq!(closure.last(), Some(&reference(MAX_RECORDS as u64)));
+    let scope_bytes = |s: &Scope| {
+        s.subjects.capacity() * core::mem::size_of::<u32>()
+            + s.resources.capacity() * core::mem::size_of::<Resource>()
+    };
+    let payload = l.entries.capacity() * core::mem::size_of::<Entry>()
+        + l.generations.capacity() * core::mem::size_of::<(u64, u64)>()
+        + l.entries
+            .iter()
+            .map(|e| {
+                let m = &e.mandate;
+                scope_bytes(&m.scope)
+                    + m.supports.capacity() * core::mem::size_of::<Reference>()
+                    + m.envelope.as_ref().map_or(0, |e| scope_bytes(&e.scope))
+            })
+            .sum::<usize>();
+    // This measures retained Vec payload, NOT allocator metadata or guest RSS.
+    std::println!("dense policy: {MAX_RECORDS} records, payload={payload} bytes, setup={:?}, closure={closure_elapsed:?}", started.elapsed());
+    assert!(payload < 5 * 1024 * 1024);
+    let mut m = template;
+    m.reference = reference(MAX_RECORDS as u64 + 1);
+    m.subject = 9999;
+    assert_eq!(l.install_founding(m), Err(Error::Capacity));
+}

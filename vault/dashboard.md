@@ -136,11 +136,11 @@ Generated — do not edit between the markers (`quaestor render`).
 ## Recent changes
 
 - 2026-09-24 [[chg-2026-09-24-authority-canonical-codec]] — Implement bounded canonical authority records
+- 2026-09-24 [[chg-2026-09-24-authority-commit-model]] — Model immutable authority commit and measure dense policy
 - 2026-09-24 [[chg-2026-09-24-authority-policy-core]] — Bounded authority core and mandate safety model
 - 2026-09-24 [[chg-2026-09-24-authority-record-abi]] — Reserve canonical authority record ABI
 - 2026-09-24 [[chg-2026-09-24-lex-curiata-fidelity]] — Restore Lex curiata dialog and make F10 primary
 - 2026-09-24 [[chg-2026-09-24-user-authority-ratification]] — Ratify administrative authority and mandate lifecycle contracts
 - 2026-09-24 [[chg-2026-09-24-user-authority-spec]] — Specify scoped user administration and Imperium transactions
 - 2026-09-24 [[chg-2026-09-24-vendor-checkout-integrity]] — Preserve vendored source files across fresh checkouts
-- 2026-09-23 [[chg-2026-09-23-b1a-permission-ceiling]] — B-1a: the permission ceiling -- SYS_BURROW_RESERVE 124 / SYS_BURROW_PROTECT 125, the multi-mapping reprotect, the fork's per-Burrow clone dedupe, the phenotype mprotect row, the lazy-piece detach refund
 <!-- generated:end -->

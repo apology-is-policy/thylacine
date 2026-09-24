@@ -35,8 +35,9 @@ First source tranche (2026-09-24), on ratification 4c889a13:
   auth/term attenuation, live activation, revocation closure and immutable IDs.
 - Self-review only. No kernel, Corvus runtime, durability or end-to-end claim.
 
-UA-0 and UA-1 remain open. The initial model lacks full group/account transitions
-and separate commit admission/publication. The library still needs discovery and complete pre-auth transaction reservations.
+UA-0 and UA-1 remain open. The initial execution-member model is supplemented by mandate_commit for
+separate commit admission/publication, group-dependent preview and account
+suspend/resume; full group/account policy resolution remains a runtime obligation. The library still needs discovery and complete pre-auth transaction reservations.
 Canonical codec and record-count/depth bounds now have host checks.
 Tombstones count toward its interim 4096 physical-record cap (stricter than the
 4096-live target); safe compaction must preserve high-water IDs and audit.
@@ -68,3 +69,11 @@ Yip census calling them free. Aux was notified. Recompute at the cleared seal ti
 add an overlap assertion for the new taint bit. Required lock order is process
 lifecycle before grant-table (seat paths already take that order), never its
 reverse. No kernel taint code changed yet.
+
+Third source tranche: mandate_commit clean 3768 states and seven new mutants;
+original mandate clean 154 and seven mutants also pass. 36 host tests now include
+4096 densely populated records, using 4,127,808 bytes of retained vector payload
+and about 15 ms for the closure on this Mac (debug build; excludes allocator
+bookkeeping and guest RSS). New test was rerun from usr/ --offline after an
+initial --manifest-path invocation selected usr/target. Host Clippy clean.
+These measurements do not qualify guest operation or revocation latency.

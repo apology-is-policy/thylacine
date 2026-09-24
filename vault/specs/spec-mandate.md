@@ -32,3 +32,9 @@ TLC violation exit code + invariant name. Logs/trace inputs are retained under
 work/ua-model; parser errors are failures, never successful negative evidence.
 The first run exposed unassigned Boolean variables in Init; explicit Boolean
 assignments repaired this model error before the successful run.
+
+## Transaction detail extension
+
+[[spec-mandate-commit]] now supplies separate admission/publication,
+group-dependent preview, suspension/resume and requester/issuer lifetime actions.
+The two models retain distinct abstraction limits; no full runtime proof claimed.

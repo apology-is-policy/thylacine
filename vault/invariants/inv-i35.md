@@ -4,7 +4,7 @@ type: inv
 title: "I-35 -- Supported mandates and live revocation"
 number: I-35
 guards: [sub-corvus-authority, sub-corvus, sub-kernel-caps]
-validated-by: [spec-mandate, "usr/lib/corvus-authority/src/tests.rs"]
+validated-by: [spec-mandate, spec-mandate-commit, "usr/lib/corvus-authority/src/tests.rs"]
 strength: spec
 created: 2026-09-24
 updated: 2026-09-24
@@ -27,6 +27,7 @@ Admin scopes/admission, Corvus album transactions and qualified resource-owner
 barriers remain required. No end-to-end enforcement claim yet.
 
 ## Validation
-[[spec-mandate]] initial model + 35 pure policy/codec host tests. **blind-to:** runtime
+[[spec-mandate]] and [[spec-mandate-commit]] bounded models +36 pure
+policy/codec host tests. **blind-to:** runtime
 wiring, durable replay, full runtime quota/memory behavior, account/group resolution,
 trusted kernel peer binding, backend resource revocation and physical seat.

@@ -6,7 +6,7 @@ parent: moc-userspace
 code: [usr/lib/corvus-authority/src/lib.rs, usr/lib/corvus-authority/src/tests.rs, usr/lib/corvus-authority/src/abi.rs, usr/lib/corvus-authority/src/codec.rs, kernel/include/thylacine/authority_wire.h, tools/check-authority-abi.py, usr/lib/corvus-authority/Cargo.toml]
 audit: hard
 guarded-by: [inv-i35]
-validated-by: [spec-mandate, "usr/lib/corvus-authority/src/tests.rs"]
+validated-by: [spec-mandate, spec-mandate-commit, "usr/lib/corvus-authority/src/tests.rs"]
 locks: []
 hazards: []
 abis: [abi-user-authority]
@@ -54,6 +54,10 @@ expiry without trusted UTC, missing support, over-limit graphs and unsupported
 issuance fail closed before mutation. Global revision overflow refuses mutation.
 
 ## Performance
+A dense 4096-record host fixture uses 4,127,808 bytes of retained Vec payload
+(excludes allocator bookkeeping and guest RSS); closure is about15ms in a macOS
+debug build. This is not a guest timing or end-to-end revocation result.
+
 4096 physical records including tombstones, 256 live/revoking per subject,
 16 selectors, 8 supports and depth 16. Tombstones currently consume the physical
 limit: safe but stricter than the design's 4096-live target. No compaction yet.
@@ -62,8 +66,8 @@ paths. Revocation uses one forward pass through topologically sorted IDs. Codec 
 the complete transaction reservation is still required before authentication.
 
 ## Prosecution
-35 host tests pass, bare-target check passes, host Clippy -D warnings passes.
-TLC composition model passes 154 states; seven named mutants fail as intended.
+36 host tests pass, bare-target check passes, host Clippy -D warnings passes.
+TLC models pass 154 and 3768 states; fourteen named mutants fail as intended.
 Self-review only, under operator direction. No independent audit claimed.
 
 ## Seams
