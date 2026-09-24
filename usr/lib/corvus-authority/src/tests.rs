@@ -734,3 +734,241 @@ fn dense_ledger_at_capacity_keeps_graph_work_and_payload_bounded() {
     m.subject = 9999;
     assert_eq!(l.install_founding(m), Err(Error::Capacity));
 }
+
+fn txn_peer() -> transaction::Peer {
+    transaction::Peer {
+        principal: 10,
+        stripes: 77,
+    }
+}
+fn txn_receipt(l: &Ledger) -> transaction::ViewReceipt {
+    transaction::ViewReceipt {
+        transaction: [0x42; 16],
+        policy_revision: l.revision(),
+        episode: 5,
+        sequence: 9,
+    }
+}
+fn prepare_txn(l: &Ledger) -> transaction::PreparedIssue {
+    transaction::PreparedIssue::new(
+        l,
+        txn_peer(),
+        reference(1),
+        record(use_grant(2, 20, 10, 1)),
+        T,
+    )
+    .unwrap()
+}
+fn ready_txn(l: &Ledger) -> transaction::PreparedIssue {
+    let mut tx = prepare_txn(l);
+    tx.await_sak(T.mono).unwrap();
+    tx.visible(txn_receipt(l), T.mono).unwrap();
+    tx.authenticated(txn_receipt(l), Auth::DistinctKey, T.mono)
+        .unwrap();
+    tx.restored(5).unwrap();
+    tx
+}
+fn txn_proof(l: &Ledger) -> transaction::Proof {
+    transaction::Proof {
+        activation: activation(l, 1, 10),
+        kind: transaction::ScopeKind::Administrative,
+        transaction: [0x42; 16],
+        root_stripes: 77,
+    }
+}
+#[test]
+fn issue_admission_binds_the_exact_immutable_preview_without_publishing() {
+    let l = ledger();
+    let tx = ready_txn(&l);
+    let shown = tx.canonical().to_vec();
+    let admitted = tx.admit(&l, txn_peer(), txn_proof(&l), T).unwrap();
+    assert_eq!(admitted.canonical(), shown);
+    assert_eq!(admitted.record().encode().unwrap(), shown);
+    assert_eq!(admitted.peer(), txn_peer());
+    assert_eq!(admitted.scope(), 1);
+    assert_eq!(admitted.source(), reference(1));
+    assert_eq!(admitted.policy_revision(), l.revision());
+    assert_eq!(admitted.authentication(), Auth::DistinctKey);
+    assert_eq!(admitted.admitted_mono(), T.mono);
+    assert_eq!(l.records().count(), 1); // durable owner still owes publication + audit
+}
+#[test]
+fn preparing_a_preview_does_not_require_or_manufacture_an_activation() {
+    let l = ledger();
+    let tx = prepare_txn(&l);
+    assert_eq!(tx.phase(), transaction::Phase::Prepared);
+    let mut bad = use_grant(2, 20, 10, 1);
+    bad.scope.actions = Actions::FS_WRITE;
+    assert!(matches!(
+        transaction::PreparedIssue::new(&l, txn_peer(), reference(1), record(bad), T),
+        Err(Error::Denied)
+    ));
+    assert_eq!(l.records().count(), 1);
+}
+#[test]
+fn no_issuance_can_be_admitted_before_successful_restoration() {
+    let l = ledger();
+    for phase in 0..4 {
+        let mut tx = prepare_txn(&l);
+        if phase > 0 {
+            tx.await_sak(T.mono).unwrap();
+        }
+        if phase > 1 {
+            tx.visible(txn_receipt(&l), T.mono).unwrap();
+        }
+        if phase > 2 {
+            tx.authenticated(txn_receipt(&l), Auth::DistinctKey, T.mono)
+                .unwrap();
+        }
+        assert!(matches!(
+            tx.admit(&l, txn_peer(), txn_proof(&l), T),
+            Err(Error::Conflict)
+        ));
+    }
+}
+#[test]
+fn a_child_or_new_incarnation_cannot_redeem_the_parents_transaction() {
+    let l = ledger();
+    let mut child = txn_peer();
+    child.stripes += 1;
+    let mut proof = txn_proof(&l);
+    proof.root_stripes = child.stripes;
+    assert!(matches!(
+        ready_txn(&l).admit(&l, child, proof, T),
+        Err(Error::Denied)
+    ));
+    let mut other = txn_peer();
+    other.principal += 1;
+    assert!(matches!(
+        ready_txn(&l).admit(&l, other, txn_proof(&l), T),
+        Err(Error::Denied)
+    ));
+}
+#[test]
+fn execution_scopes_and_unrelated_transaction_ids_are_not_admin_proofs() {
+    let l = ledger();
+    let mut proof = txn_proof(&l);
+    proof.kind = transaction::ScopeKind::Execution;
+    assert!(matches!(
+        ready_txn(&l).admit(&l, txn_peer(), proof, T),
+        Err(Error::Denied)
+    ));
+    let mut proof = txn_proof(&l);
+    proof.transaction[0] ^= 1;
+    assert!(matches!(
+        ready_txn(&l).admit(&l, txn_peer(), proof, T),
+        Err(Error::Denied)
+    ));
+    let mut proof = txn_proof(&l);
+    proof.activation.authority = reference(99);
+    assert!(matches!(
+        ready_txn(&l).admit(&l, txn_peer(), proof, T),
+        Err(Error::Denied)
+    ));
+}
+#[test]
+fn any_policy_revision_change_invalidates_the_old_approval() {
+    let mut l = ledger();
+    let tx = ready_txn(&l);
+    let mut r = root();
+    r.reference = reference(3);
+    r.subject = 40;
+    l.install_founding(r).unwrap();
+    assert!(matches!(
+        tx.admit(&l, txn_peer(), txn_proof(&l), T),
+        Err(Error::Conflict)
+    ));
+}
+#[test]
+fn admission_rechecks_support_even_if_a_version_bump_were_missed() {
+    let mut l = ledger();
+    let tx = ready_txn(&l);
+    // Corruption/sabotage fixture: bypass the public mutation API's revision
+    // bump. The independent support validation must still detect invalidation.
+    l.generations[0].1 += 1;
+    assert!(matches!(
+        tx.admit(&l, txn_peer(), txn_proof(&l), T),
+        Err(Error::Stale)
+    ));
+}
+#[test]
+fn trusted_receipts_cannot_cross_transactions_or_episodes() {
+    let l = ledger();
+    let mut tx = prepare_txn(&l);
+    tx.await_sak(T.mono).unwrap();
+    let mut wrong = txn_receipt(&l);
+    wrong.transaction[0] ^= 1;
+    assert_eq!(tx.visible(wrong, T.mono), Err(Error::Denied));
+    let mut wrong = txn_receipt(&l);
+    wrong.policy_revision += 1;
+    assert_eq!(tx.visible(wrong, T.mono), Err(Error::Denied));
+    tx.visible(txn_receipt(&l), T.mono).unwrap();
+    let mut wrong = txn_receipt(&l);
+    wrong.sequence += 1;
+    assert_eq!(
+        tx.authenticated(wrong, Auth::DistinctKey, T.mono),
+        Err(Error::Denied)
+    );
+    tx.authenticated(txn_receipt(&l), Auth::DistinctKey, T.mono)
+        .unwrap();
+    assert_eq!(tx.restored(6), Err(Error::Denied));
+    assert_eq!(tx.phase(), transaction::Phase::Authenticated);
+}
+#[test]
+fn authentication_is_checked_against_the_source_floor_and_bound_to_the_proof() {
+    let l = ledger();
+    let mut tx = prepare_txn(&l);
+    tx.await_sak(T.mono).unwrap();
+    tx.visible(txn_receipt(&l), T.mono).unwrap();
+    assert_eq!(
+        tx.authenticated(txn_receipt(&l), Auth::Session, T.mono),
+        Err(Error::Denied)
+    );
+    let mut proof = txn_proof(&l);
+    proof.activation.authentication = Auth::Founding;
+    assert!(matches!(
+        ready_txn(&l).admit(&l, txn_peer(), proof, T),
+        Err(Error::Denied)
+    ));
+}
+#[test]
+fn preparation_expiry_and_live_scope_expiry_are_separate_gates() {
+    let l = ledger();
+    let mut tx = prepare_txn(&l);
+    assert_eq!(
+        tx.await_sak(T.mono + transaction::PREPARE_LIFETIME_NS),
+        Err(Error::Expired)
+    );
+    let tx = ready_txn(&l);
+    let time = Time { mono: 20, ..T };
+    assert!(matches!(
+        tx.admit(&l, txn_peer(), txn_proof(&l), time),
+        Err(Error::Inactive)
+    ));
+    let time = Time {
+        mono: u64::MAX,
+        ..T
+    };
+    assert!(matches!(
+        transaction::PreparedIssue::new(
+            &l,
+            txn_peer(),
+            reference(1),
+            record(use_grant(2, 20, 10, 1)),
+            time
+        ),
+        Err(Error::Overflow)
+    ));
+}
+#[test]
+fn cancellation_before_admission_is_terminal() {
+    let l = ledger();
+    let mut tx = ready_txn(&l);
+    tx.cancel();
+    assert_eq!(tx.phase(), transaction::Phase::Cancelled);
+    assert_eq!(tx.await_sak(T.mono), Err(Error::Conflict));
+    assert!(matches!(
+        tx.admit(&l, txn_peer(), txn_proof(&l), T),
+        Err(Error::Conflict)
+    ));
+}

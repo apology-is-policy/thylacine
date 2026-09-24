@@ -21,8 +21,11 @@ model. mandate.tla separately covers member-copy/publication/drain; these are
 complementary bounded models, not a proof of the entire runtime composition.
 
 ## Action-site map
-UA-3 transaction implementation is not present yet. Prepare/Show/Authenticate/
-Restore/Admit/Publish and replay are explicit implementation obligations. The
+The isolated issuance approval core now maps Prepare to `PreparedIssue::new`
+plus `Ledger::preview_issue`; Show to `visible`; Authenticate to `authenticated`;
+Restore to `restored`; Admit to `admit` plus `Ledger::check_issue`. None is wired
+to a Corvus endpoint or physical receipt. Publish/replay, account/group mutation
+and actual issuer-death/admission machinery remain implementation obligations. The
 kernel must supply the live root's non-inherited scope identity at Admit; the
 client cannot name that identity as authority. Source recheck at Publish gives
 restriction priority without reusing the operator's approval for changed intent.

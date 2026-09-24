@@ -3,7 +3,7 @@ id: sub-corvus-authority
 type: sub
 title: "Corvus authority policy engine"
 parent: moc-userspace
-code: [usr/lib/corvus-authority/src/lib.rs, usr/lib/corvus-authority/src/tests.rs, usr/lib/corvus-authority/src/abi.rs, usr/lib/corvus-authority/src/codec.rs, kernel/include/thylacine/authority_wire.h, tools/check-authority-abi.py, usr/lib/corvus-authority/Cargo.toml]
+code: [usr/lib/corvus-authority/src/lib.rs, usr/lib/corvus-authority/src/tests.rs, usr/lib/corvus-authority/src/abi.rs, usr/lib/corvus-authority/src/codec.rs, usr/lib/corvus-authority/src/transaction.rs, kernel/include/thylacine/authority_wire.h, tools/check-authority-abi.py, usr/lib/corvus-authority/Cargo.toml]
 audit: hard
 guarded-by: [inv-i35]
 validated-by: [spec-mandate, spec-mandate-commit, "usr/lib/corvus-authority/src/tests.rs"]
@@ -27,6 +27,15 @@ Supports are conjunctive, immutable ID/revision references leading to founding
 roots. Cycles, transitive self-grants and ID reuse fail closed.
 
 ## Mechanism
+`PreparedIssue` owns one canonical grant and expected policy/source/peer binding.
+Planning checks eligibility without constructing a fake Activation. Trusted
+visibility/authentication/restoration receipts precede `admit`, which consumes
+the prepared object and rechecks full issue policy plus live Admin proof.
+`AdmittedIssue` is not Clone and exposes immutable data only; durable publication
+and audit remain the runtime owner's obligation. Neither type is a bearer token.
+No Corvus endpoint calls these methods yet. Receipts/proofs are trusted inputs,
+not decoded client assertions; pagination completion is still a renderer duty.
+
 `Ledger::check_issue` authorizes before `issue` mutates. `is_live` traverses all
 supports. `begin_revoke` closes the complete dependent graph before
 `finish_revoke`; runtime must supply the durable/kernel/backend barrier.
@@ -66,7 +75,7 @@ paths. Revocation uses one forward pass through topologically sorted IDs. Codec 
 the complete transaction reservation is still required before authentication.
 
 ## Prosecution
-36 host tests pass, bare-target check passes, host Clippy -D warnings passes.
+47 host tests pass, bare-target check passes, host Clippy -D warnings passes.
 TLC models pass 154 and 3768 states; fourteen named mutants fail as intended.
 Self-review only, under operator direction. No independent audit claimed.
 

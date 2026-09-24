@@ -16,6 +16,7 @@ extern crate alloc;
 
 pub mod abi;
 pub mod codec;
+pub mod transaction;
 
 use alloc::vec::Vec;
 
@@ -508,6 +509,23 @@ impl Ledger {
         }
         Ok(())
     }
+    // Eligibility for a preview is not activation. Only transaction planning
+    // uses this helper; mutation still requires the live administrative proof.
+    fn eligible(
+        &self,
+        actor: u32,
+        authority: Reference,
+        scope: &Scope,
+        time: Time,
+    ) -> Result<(), Error> {
+        scope.validate()?;
+        self.is_live(authority, time.utc)?;
+        let m = self.get(authority)?;
+        if m.kind != Kind::Admin || m.subject != actor || !m.scope.covers(scope) {
+            return Err(Error::Denied);
+        }
+        Ok(())
+    }
     fn ancestor_subject(&self, r: Reference, target: u32) -> Result<bool, Error> {
         Ok(self
             .support_indices(r, 1)?
@@ -517,18 +535,37 @@ impl Ledger {
     /// Validate a grant using ONE complete selected envelope. Other supports
     /// are conjunctive restrictions, never fragments that widen the envelope.
     pub fn check_issue(&self, a: &Activation, child: &Mandate, time: Time) -> Result<(), Error> {
+        self.check_issue_inner(a.actor, a.authority, Some(a), child, time)
+    }
+    pub(crate) fn preview_issue(
+        &self,
+        actor: u32,
+        authority: Reference,
+        child: &Mandate,
+        time: Time,
+    ) -> Result<(), Error> {
+        self.check_issue_inner(actor, authority, None, child, time)
+    }
+    fn check_issue_inner(
+        &self,
+        actor: u32,
+        authority: Reference,
+        activation: Option<&Activation>,
+        child: &Mandate,
+        time: Time,
+    ) -> Result<(), Error> {
         child.validate(false)?;
-        if child.state != State::Live || child.issuer != a.actor {
+        if child.state != State::Live || child.issuer != actor {
             return Err(Error::Invalid);
         }
         self.capacity(child)?;
-        if child.subject == a.actor {
+        if child.subject == actor {
             return Err(Error::SelfEscalation);
         }
-        if !child.supports.contains(&a.authority) {
+        if !child.supports.contains(&authority) {
             return Err(Error::Denied);
         }
-        let parent = &self.entry(a.authority)?.mandate;
+        let parent = &self.entry(authority)?.mandate;
         let action = if child.kind == Kind::Admin {
             Actions::DELEGATE
         } else {
@@ -540,7 +577,10 @@ impl Ledger {
             subjects: alloc::vec![child.subject],
             resources: child.scope.resources.clone(),
         };
-        self.authorize(a, &request, time)?;
+        match activation {
+            Some(a) => self.authorize(a, &request, time)?,
+            None => self.eligible(actor, authority, &request, time)?,
+        }
         let envelope = parent.envelope.as_ref().ok_or(Error::Denied)?;
         if !envelope.kinds.contains(child.kind)
             || !envelope.max_term.covers(child.term)

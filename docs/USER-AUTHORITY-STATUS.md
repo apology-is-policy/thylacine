@@ -77,3 +77,12 @@ and about 15 ms for the closure on this Mac (debug build; excludes allocator
 bookkeeping and guest RSS). New test was rerun from usr/ --offline after an
 initial --manifest-path invocation selected usr/target. Host Clippy clean.
 These measurements do not qualify guest operation or revocation latency.
+
+Fourth source tranche: pure issuance approval,47 host tests plus bare-target and
+Clippy checks pass; both model matrices rechecked. PreparedIssue checks preview
+eligibility without fake activation, owns immutable bytes and accepts only bound
+trusted receipts. Admit requires the same live peer/source/policy and Admin proof,
+with successful restoration; its result does not publish or mutate policy.
+Runtime receipts, transaction quotas, kernel ABI and durable publication remain
+unimplemented. Requested current prerequisite status again via Yip0116/0117;
+shared kernel and other agents' worktrees remain untouched.
