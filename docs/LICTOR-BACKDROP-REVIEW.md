@@ -1,9 +1,11 @@
 # Lex curiata backdrop: completed private pixels
 
-Status: implementation proposal, September 24. The existing approved visual
-contract requires a frozen, private copy of the last completed workspace frame,
-with a neutral field when safe capture is unavailable. This proposal explains
-the missing mechanism; it is not a claim that capture is implemented.
+Status: closed without implementation, September 24. The operator accepted the
+current solid background: "We don't have to blur the background. The current
+solid is sufficient." The neutral private field is the selected presentation,
+not an outstanding visual defect. No presentation-copy mechanism is authorized
+or required by this decision. The proposal below is retained for architectural
+reference only; its recommendations and options are historical.
 
 ## Finding in the current tree
 

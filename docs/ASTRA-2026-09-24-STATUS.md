@@ -33,9 +33,10 @@ and supplies the portable build-owned equivalent.
 
 The broker retains the previous normal GPU resource but has no private
 completed-frame snapshot. `Seat::step` always passes `None` as backdrop.
-Blurring shared live compositor backing would not satisfy the approved
-immutable-capture contract. Resolve capture provenance before enabling blur;
-the neutral private backdrop remains the current safe fallback.
+Blurring shared live compositor backing would not satisfy a private completed-
+frame capture contract. On September 24 the operator accepted the current solid
+background, closing capture/blur without implementation. The neutral private
+field is now the selected presentation.
 
 ## Verification
 
@@ -77,8 +78,9 @@ the neutral private backdrop remains the current safe fallback.
   (the existing stale-dossier warning remains).
 
 The mac lease has been released. Main is running his own close; no Astra VM or
-build remains active. `docs/LICTOR-BACKDROP-REVIEW.md` is a concrete proposal
-awaiting the operator's choice; no capture implementation is claimed.
+build remains active. `docs/LICTOR-BACKDROP-REVIEW.md` records the closed capture proposal and the
+operator's acceptance of the solid background. No capture implementation is
+claimed or required. UI/F10 commit `c68113a8` is ready for Main integration.
 
 ## Fresh-checkout defect found and repaired
 

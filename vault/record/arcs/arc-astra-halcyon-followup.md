@@ -29,3 +29,10 @@ QEMU success.
 
 ## Close summary
 (written at status flip to complete)
+
+## September 24 operator decision
+
+The operator accepted the current solid background and removed blur from the
+requested visual scope. The private-capture proposal is closed without
+implementation; the verified dialog/F10 change is `c68113a8`. Integration
+coordination and the registry/Tapestry follow-ups remain open.

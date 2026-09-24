@@ -4,7 +4,7 @@ type: chg
 title: "Restore Lex curiata dialog and make F10 primary"
 date: 2026-09-24
 arc: arc-astra-halcyon-followup
-commits: ["*(pending)*"]
+commits: ["c68113a8"]
 touched: [sub-lictor, sub-imperium]
 established: []
 closed: []

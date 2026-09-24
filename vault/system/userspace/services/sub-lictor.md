@@ -164,10 +164,11 @@ subsets across nine verdict states with maximum-length principal, level,
 notice and lifetime values. This is bounded-layout evidence, separate from
 real display/input qualification.
 
-The backdrop remains neutral: the broker holds a normal resource, not a private
-completed-frame snapshot. `docs/LICTOR-BACKDROP-REVIEW.md` proposes the missing
-capture mechanism and records its costs; it is not implemented by this visual
-change. No live compositor memory is sampled to imitate blur.
+The trusted scene uses a solid neutral background, accepted by the operator
+on September 24. Capture and blur are not required. The broker holds a normal
+resource, not a private completed-frame snapshot; no live compositor memory is
+sampled. `docs/LICTOR-BACKDROP-REVIEW.md` retains the closed, unimplemented
+capture proposal and its architectural findings.
 
 ## Data structures
 

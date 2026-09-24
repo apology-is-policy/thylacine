@@ -24,20 +24,19 @@ operator uses the physical attention gesture, reads the authority Corvus is
 about to confer, and either authenticates that request or cancels it. On
 completion the previous workspace returns with the same layout and focus.
 
-The operator selected a full-screen takeover with the workspace frozen, dimmed
-and softly blurred behind a centred Halcyon-styled dialog. The entire display
+The operator selected a full-screen takeover with a solid dark background
+behind a centred Halcyon-styled dialog (September 24 decision). The entire display
 belongs to the trusted sink: the panel is not a regular compositor surface.
 A narrow top rail identifies CORVUS and LEX CURIATA. The panel is titled
 **Confer imperium**, its authority section **Provincia**, and its lifetime
 section **Term**. These retain the documented Roman vocabulary while plain
 explanations make the authorization understandable without knowing the theme.
 
-Capture a trusted-service-owned, immutable copy of the last fully presented frame only
-after exclusive scanout ownership is established. Apply a bounded blur once,
-then dim it to keep the dialog dominant; no ordinary-client-writable buffer remains as
-the backdrop. Do not animate or refresh that snapshot during the episode.
-If safe capture is unavailable, use the same dialog on a neutral dark field.
-Failure to capture must never fall back to a live compositor backdrop.
+The workspace is suspended and restored on completion. The trusted scene uses
+its private neutral dark field; workspace capture and blur are not required.
+Do not sample live compositor backing to decorate the authorization scene.
+The earlier private-capture proposal is closed without implementation in
+`docs/LICTOR-BACKDROP-REVIEW.md`.
 
 The panel follows Instrument's spacing, fine rules, restrained amber and clear
 field labels. Its resources are build-baked and independent of user themes,
