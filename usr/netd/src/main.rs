@@ -478,6 +478,12 @@ impl Driver for NetD {
         } else {
             say!("netd: #293 connect-sweep selftest FAIL");
         }
+        let dv = server::dial_verdict_selftest(base);
+        if dv.is_empty() {
+            say!("netd: dial-verdict selftest PASS (refused before the open + swept timeout + never-dialed + established)");
+        } else {
+            say!("netd: dial-verdict selftest FAIL ({:?})", dv);
+        }
 
         // net-4d: deterministic in-guest proofs of the net-4 surface (no host
         // coupling -> ASSERTED PASS lines, like the loopback/ipifc selftests).

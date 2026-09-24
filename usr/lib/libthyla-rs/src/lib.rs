@@ -3543,11 +3543,11 @@ unsafe extern "C" fn __libthyla_rt_start(argc: usize, argv: *const *const u8) ->
     // SCOPE: the MAIN thread only. note_mask is per-thread and native thread-spawn
     // does NOT inherit it (the kernel rfork rule), so a thread started via
     // thread::spawn_raw begins PIPE-unmasked and would take the proc-wide pipe
-    // latch on a closed-pipe write. No shipping multi-threaded libthyla-rs program
-    // writes a closed pipe on a spawned thread (the spawners are all benchmarks /
-    // torture tests over sockets or CPU/memory), so this is a latent limitation,
-    // not a regression -- the Go runtime, which IS such a writer, masks per-M in
-    // minit. A spawned thread that needs EPIPE-not-death masks NOTE_BIT_PIPE itself.
+    // latch on a closed-pipe write. A spawned thread that writes pipes (or
+    // stderr, which a shell may hand over as a pipe nobody reads) masks
+    // NOTE_BIT_PIPE itself: haul does at each relay pump's entry, and the Go
+    // runtime per-M in minit. The other spawners are benchmarks and torture
+    // tests over sockets or CPU/memory.
     let _ = t_note_mask(1u64 << T_NOTE_BIT_PIPE, core::ptr::null_mut());
     rs_main()
 }

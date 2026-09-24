@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: [docs/HAUL-DESIGN.md]
 created: 2026-09-17
-updated: 2026-09-23
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -50,6 +50,23 @@ performs the entire npxf handshake before launching pumps. `accept_owner`
 uses fresh kernel SRV_PEER identity to reject dead or different-principal
 clients. Exactly one accepted connection owns the remote session; subsequent
 connections are closed instead of mixing their 9P tags and fids.
+
+The dial is `TcpStream::dial`, `Dialing::wait` for `SLOW_DIAL` (2 s), then
+`Dialing::finish` ([[sub-libthyla-rs]]). A dial still out at 2 s prints
+`no answer from ADDR yet -- still trying` and keeps waiting for netd's verdict
+(its 15 s connect deadline, [[sub-netd-server]]). A failure names the address
+as typed and the reason: `connection refused`, `no answer (timed out)`, or `no
+network` when `/net/tcp` is absent.
+
+Every line goes through `tell`: stderr when fd 2 was open at start, else the
+kernel console (SYS_PUTS). The fallback fires only for a CLOSED fd 2, as with a
+stdio-less exec. `/dev/null` is open, so a launcher that hands over /dev/null
+discards the lines. `rs_main` samples fd 2 before anything is opened.
+With slot 2 empty, the kernel hands out haul's own token and connection fds from
+the lowest free slot, so a later check could find the TCP data file there. The
+console was once the ONLY sink. It is a different device from a Halcyon tile's
+pty, so every haul line reached serial and the tile showed nothing. The serial
+fleet could not see the difference, because there fd 2 is the console.
 
 The private path uses two pipes and SYS_ATTACH_9P. The posted path uses one
 accepted byte-service descriptor, which the shell attaches with
@@ -107,7 +124,10 @@ Bad arguments, inaccessible tokens, denied posts, handshake failures, thread
 creation failures, and relay completion all exit the process and release its
 service/connection resources. Post creation failure never dials. An unexpected
 remote close fails a blocked attach via transport teardown. Mount/unmount
-builtins expose failures through `$status` and `$errstr`.
+builtins expose failures through `$status` and `$errstr`. A failed dial exits 1
+before anything is mounted or pumped. It says `connection refused` for a RST,
+and `no answer (timed out)` at netd's deadline, preceded by the 2 s progress
+line. The texts are the operator's (manual 14).
 
 ## Performance
 
@@ -127,6 +147,20 @@ read actual remote data and witness teardown, not merely a startup banner.
 second-attach rejection, unmount/reap, repost and abdication. The added remote-FIN
 arm checks an authenticated server disconnect during a posted attach. `haul-npxf` and
 `haul-hangup` cover the private/child path and remote-close regression.
+`haul-unreachable` starts haul through `exec-probe stderr-to FILE`, which points
+fd 2 at a file before exec, because `ut` has no `2>`. It asserts that no haul line
+reached the console. Its three legs:
+- a host port held bound but not listening -> `connection refused` in the file;
+- 10.0.2.99, which never answers ARP (guestfwd unset) -> the progress line, then
+  `no answer (timed out)`;
+- a stdio-less park form dialing a peer that accepts and hangs up. haul's own
+  data fid then occupies slot 2 when the attach fails, so the line must reach
+  the console. Sampling fd 2 at print time would instead write it into the
+  connection.
+
+The pumps mask the `pipe` note at entry. `tell` from a pump can meet a stderr
+that `ut` handed over as a pipe nobody reads, and the unmasked default would
+kill haul before its main thread reported.
 
 `haul-cape` serves a writable 0700/0600 export from its own npxf and compares
 the guest's view with the host file's own ids, so a fixture whose ids happened
@@ -166,3 +200,10 @@ Imperium interaction currently uses the serial SAK path.
 
 - 2026-09-17/18: the relay, `--post`, and the npxf OpenSSL host migration.
 - 2026-09-23 (L): the identity cape on both paths; the `haul-cape` gate.
+- 2026-09-24: the operator's "haul doesn't error" (Halcyon).
+  - Lines go to stderr; the console is only the fallback.
+  - The dial reports its address, its reason, and a slow-dial progress line.
+  - With netd's dial verdict, a refused dial is refused at the dial rather than
+    racing into the attach.
+  - `haul-unreachable` added; `haul-hangup`'s "connect to a closed port
+    succeeds" header corrected.

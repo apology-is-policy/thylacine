@@ -18,7 +18,7 @@ locks: []
 abis: [abi-boot-banner]
 design: ["docs/TOOLING.md", "docs/PORTABILITY.md", "docs/DEBUGGING-PLAYBOOK.md"]
 created: 2026-08-01
-updated: 2026-09-23
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -296,6 +296,19 @@ checker now FAILS on an ABSENT report (a dropped gate — the shape a green boot
 hides) and otherwise states what ran; `THYLA_ARC_GATES=require` /
 `THYLA_CLADE_GATES=require` make a skip fatal for shapes that ship the fixture.
 
+**netd's boot selftests reach the exit status (2026-09-24).** netd prints a
+`netd: <name> PASS/FAIL` line per selftest, and no gate read them. A netd whose
+selftest regressed booted green. The TCP-retirement FAIL of 2026-09-21
+(`20f73f27`, one boot in ~85) was noticed only because an extinction brought
+the log under review. Once netd has started (`netd: up mac=`), the verdict fails if netd prints any
+`netd: .*FAIL` line, never serves `/net`, or omits `netd: dial-verdict selftest
+PASS` by name (an absent line passes a no-FAIL check). It keys on netd STARTING,
+never on serving. Two selftests (resident lo, TCP retirement) end netd before it
+posts `/net`, joey treats a missing `/net` as non-fatal, and the banner still
+prints, so a check keyed on serving would skip exactly the deterministic
+failure. [[seam-242-selftest-nonfatal]] (the other selftests proceed after a
+FAIL) is narrowed by this capture, not closed.
+
 ### The host tests (`test-rust.sh`)
 
 **No gate ran `cargo test` until 2026-09-22**, so the largest body of tests in
@@ -495,4 +508,4 @@ shipped 2026-09-22 (`9e837771`) with no dossier -- with the per-crate STRANDED
 derivation, the name parse's two self-checks and the warning count; and the two
 gate changes of 2026-09-22 that landed without a dossier update recorded here:
 main's `default-smp1` row (`6e1cda16`, the loom join) and the `/webkit` floor
-path (`b70e1bfd`).
+path (`b70e1bfd`). 2026-09-24: the netd selftest verdict joins the exit status.

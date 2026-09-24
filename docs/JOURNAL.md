@@ -22,6 +22,50 @@ needed the operator.
 
 
 ---
+## 2026-09-24, evening (aux, Opus 5.5 1M, effort max) -- "haul doesn't error": three faults, each hiding the next
+
+The operator's first working Lantern-over-Haul run (Halcyon, cocoa) came back with "haul doesn't error" when the
+9P server was not up. I had triaged it from code as "the line is there, it just says `haul: connect`". That was
+the smallest of four defects.
+
+**The root cause was where the line went, not what it said.** haul's `say!` called `t_putstr` = SYS_PUTS, and
+`sys_puts_handler` writes the KERNEL console (`cons_output_write`), not fd 2 (kernel/syscall.c:209). In a
+Halcyon tile, fd 2 is the tile's pty: every haul line, errors included, went to serial. The whole gate fleet
+runs on serial, where fd 2 IS the console, so this could never have gone red there. A masking condition built
+into the harness.
+
+**The measured "fact" in a scenario header was a second cause wearing the first's clothes.** haul-hangup.exp
+recorded, as measured, that a connect to a closed host port SUCCEEDS, "consistent with slirp completing the
+handshake first". Reading netd's `h_lopen`: only a Pending handshake is held; a dial already Failed got a live
+Rlopen. So whenever slirp's RST reached netd before the client's Tlopen, connect "succeeded". The measurement
+was right; the attribution was a guess nobody tested (two causes, one reading). The same code made B3: the
+#293 sweep drops a stuck dial at the slot deadline, which comes before the held open's own, so every unanswered
+dial was reported ECONNREFUSED.
+
+**The reviewer caught my scenario using a shell feature that does not exist.** I wrote `haul ... 2>/tmp/e`
+from muscle memory; `ut` has no `2>` (ast.rs RedirectKind). The `2` would have become haul's argv. Every fleet
+run would have failed on a correct build. It also found:
+- my test.sh gate keyed on `netd: serving /net`, which misses the two selftests that end netd BEFORE it
+  serves (a deterministic failure booted green);
+- my selftest called the verdict function directly, so reverting the handlers left it green;
+- my own self-audit's "a pump's pipe death is equivalent" was wrong. `ut`'s fd-less mode hands stderr over
+  as a dead pipe, and the unmasked pump would kill haul before its main thread's console fallback.
+
+All fixed. The selftest now drives the real `h_lopen` and `poll_connects`, the latter through a pipe that is
+the test Conn's handle.
+
+**And `test.sh` does not build unless the ELF is missing.** My first sabotage "run" booted the stale seal-round
+image. The gate still failed it correctly, by name, because that netd never ran the selftest. The real
+sabotage boot then named exactly the three predicted legs.
+
+Evidence: canonical 1662/1662 + dial-verdict PASS; sabotage FAIL on exactly
+refused-first/held-swept/swept-opened. Scenarios: haul-unreachable (3 legs) + haul-hangup PASS; forcing
+haul's lines back to the console reds leg 1. One more measurement worth keeping: the reviewer's
+"hold the port bound, not listening" fixture is refused only after ~8 s on this host, against ~30 ms for a
+free port, so it tripped the 2 s progress line. I had adopted that fixture on the reviewer's word; its
+failure is what made me measure both, and the free port is chosen on the measurement. Decisions: none needed from the operator.
+The open question to them (hang vs silent vs sub-shell) is now answered from code: silent in the tile, on serial.
+
 ## 2026-09-24, late night (aux, Opus 5.5 1M, effort max) -- the round where the seal held and my own "verified" did not
 
 Round 3 on `34d1f14a`, the round-2 close. I wrote the brief to aim the reviewer at the fixes -- the lock above all, since round 2 had replaced an ordering argument with it -- and self-audited the same surface while it ran.

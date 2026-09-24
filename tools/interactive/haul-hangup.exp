@@ -18,17 +18,19 @@
 #
 # THREE ASSERTIONS, each closing a different way this could pass while wrong:
 #   1. haul names the side that ended -- the down pump -- and no other failure.
-#      An attach that somehow succeeded fails the leg at once. A peer that
-#      never accepted does NOT: the guest's connect to a host port nothing
-#      listens on still SUCCEEDS (measured, by this scenario's stdio leg on a
-#      pre-fix haul; consistent with slirp completing the guest-side handshake
-#      first), so haul reaches the attach and reads EOF -- the very line a real
-#      hang-up prints.
+#      An attach that somehow succeeded fails the leg at once, and so does a
+#      dial failure: a peer that never accepted is refused at the DIAL now
+#      (haul-unreachable.exp). This header once said the guest's connect to a
+#      host port nothing listens on SUCCEEDS, "consistent with slirp completing
+#      the guest-side handshake first". libslirp's tcp_input sends the SYN-ACK
+#      only after the host connect succeeds and answers a refusal with RST|ACK
+#      (its source; not measured here). What IS established is that netd
+#      handed a live `data` open to a dial that had already failed -- a race
+#      that explains the old success on its own, since fixed.
 #   2. The shell answers the next command, so haul EXITED rather than printing
 #      its error and then hanging.
-#   3. The peer's own log shows it accepted and hung up. Under slirp this is the
-#      ONLY assertion separating "the server hung up" from "nothing was
-#      listening", so it is load-bearing, not a sanity check.
+#   3. The peer's own log shows it accepted and hung up -- the positive half of
+#      assertion 1's "not a dial failure", from the other side of the wire.
 
 set ::env(THYLACINE_ACCEL) hvf
 
@@ -79,7 +81,7 @@ lc_step "hang-up peer listening on 127.0.0.1:$port (pid $peer_pid)"
 lc_send "mkdir -p /tmp/hang"
 lc_run_expect_hardfail_re "haul -v 10.0.2.2!$port /tmp/hang" \
     "attach (the server closed without replying)" \
-    {haul: (connect|attach \(9P|attach \(the connection)|mounted at}
+    {haul: (cannot reach|cannot dial|attach \(9P|attach \(the connection)|mounted at}
 lc_run_expect "echo haul-returned | tr a-z A-Z" "HAUL-RETURNED"
 
 set log [wait_log $peerlog "*guest: the other side*" 12]
@@ -99,13 +101,12 @@ lc_pass "haul-hangup: a server that hangs up before Rversion fails the attach, a
 # place; it checks its own closes before the exec, so a launcher that failed to
 # close cannot produce this leg's verdict either way. No server is needed: the
 # refusal comes before the dial. A haul that went ahead would dial the exited
-# peer's port, and -- measured on a pre-fix haul -- its connect SUCCEEDS anyway
-# and the attach reads EOF (see assertion 1). The hard-fail arm names that
-# line, and "connect" for a network that refuses outright.
+# peer's port and be refused there; the hard-fail arm names that line, and the
+# attach line a pre-fix netd let it reach instead (see assertion 1).
 lc_send "mkdir -p /tmp/hang2"
 lc_run_expect_hardfail_re "exec-probe stdio-less /bin/haul 10.0.2.2!$port /tmp/hang2 /bin/echo stdio-leg" \
     "the command form needs stdin, stdout and stderr open" \
-    {haul: connect|haul: attach \(|mounted at|exec-probe: FAIL}
+    {haul: cannot reach|haul: attach \(|mounted at|exec-probe: FAIL}
 lc_run_expect "echo stdio-leg-returned | tr a-z A-Z" "STDIO-LEG-RETURNED"
 lc_pass "haul-hangup: the command form refuses to start without stdio"
 
