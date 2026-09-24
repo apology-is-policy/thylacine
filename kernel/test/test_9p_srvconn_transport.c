@@ -73,6 +73,7 @@ void test_9p_srvconn_transport_transport_err_posts_eio_cqe(void);
 void test_9p_srvconn_transport_pts_slave_spoor_classifies_t(void);
 void test_9p_srvconn_transport_large_frame_roundtrip(void);
 void test_9p_srvconn_transport_cape_attach(void);
+void test_9p_srvconn_transport_cape_attach_srv(void);
 
 // =============================================================================
 // Helpers (mirror test_srv_client.c's pattern).
@@ -930,10 +931,12 @@ void test_9p_srvconn_transport_pts_slave_spoor_classifies_t(void) {
 // =============================================================================
 // 9p_srvconn_transport.cape_attach -- the identity cape (IDENTITY-DESIGN 3.2)
 // through srvconn_attach_dev9p_root, the helper both /srv attach paths share.
-// A conn from a DMSRVCAPE service capes the attach whatever the flags say, and
-// SYS_ATTACH_9P_CAPE capes one from a plain service; a caped Tattach names no
-// user. The control leg (plain service, no flag) asserts the attacher's
-// principal and leaves the session uncaped. Replies are pre-staged.
+// A conn from a DMSRVCAPE service capes the attach, and nothing else does: the
+// cape flag handed to the helper capes nothing (cape_attach), and
+// SYS_ATTACH_9P_SRV refuses it (cape_attach_srv, a separate test so that a
+// failure in one half cannot hide the other's). A caped Tattach names no user.
+// The control leg (plain service, no flag) asserts the attacher's principal and
+// leaves the session uncaped. Replies are pre-staged.
 // =============================================================================
 
 static u32 sc_le32(const u8 *p) {
@@ -1035,13 +1038,14 @@ extern s64 sys_attach_9p_srv_for_proc(struct Proc *p, u64 srv_fd_raw,
 // SYS_ATTACH_9P_SRV's own half, through its inner: the flags word reaches the
 // helper, and a refused word sends nothing (n_uname stays the 0xBAD0 no-frame
 // sentinel). *ret is the syscall's answer.
-static struct sc_cape_seen sc_srv_syscall_attach(u64 flags, s64 *ret) {
+static struct sc_cape_seen sc_srv_syscall_attach(bool service_cape, u64 flags, s64 *ret) {
     struct sc_cape_seen r = { false, false, false, 0, 0, 0 };
     *ret = 0x7BAD;
     srv_registry_reset();
     struct Proc *server = NULL, *client = NULL;
     int svc_h = -1, conn_h = -1;
-    struct SrvConn *cn = open_byte_mode_pair_cape(&server, &client, &svc_h, &conn_h, false);
+    struct SrvConn *cn = open_byte_mode_pair_cape(&server, &client, &svc_h, &conn_h,
+                                                  service_cape);
     if (!cn) return r;
     client->principal_id = 0x1234u;
     client->primary_gid  = 0x5678u;
@@ -1078,9 +1082,9 @@ void test_9p_srvconn_transport_cape_attach(void) {
     TEST_EXPECT_EQ((u64)r.n_uname, (u64)PRINCIPAL_NONE, "a caped Tattach names no user");
 
     r = sc_cape_attach(false, SYS_ATTACH_9P_CAPE);
-    TEST_ASSERT(r.attached && r.cape, "SYS_ATTACH_9P_CAPE capes a plain service's attach");
-    TEST_EXPECT_EQ((u64)r.uid, (u64)0x1234u, "flag cape: the attacher owns it");
-    TEST_EXPECT_EQ((u64)r.n_uname, (u64)PRINCIPAL_NONE, "flag cape: no user named");
+    TEST_ASSERT(r.attached, "attach with the cape flag handed to the helper");
+    TEST_ASSERT(!r.cape, "the cape flag capes no /srv session: the poster decides");
+    TEST_EXPECT_EQ((u64)r.n_uname, (u64)0x1234u, "flag, plain service: the attacher's principal");
 
     r = sc_cape_attach(false, 0);
     TEST_ASSERT(r.attached, "plain attach (control)");
@@ -1094,16 +1098,25 @@ void test_9p_srvconn_transport_cape_attach(void) {
     TEST_ASSERT(r.attached, "attach over a cape-marked 9P-mode conn");
     TEST_ASSERT(!r.cape, "a cape mark on a 9P-mode conn capes nothing");
     TEST_EXPECT_EQ((u64)r.n_uname, (u64)0x1234u, "9P-mode conn: the attacher's principal");
+}
 
+void test_9p_srvconn_transport_cape_attach_srv(void) {
     s64 ret = 0;
-    r = sc_srv_syscall_attach(SYS_ATTACH_9P_CAPE, &ret);
-    TEST_ASSERT(ret >= 0 && r.attached, "SYS_ATTACH_9P_SRV with the cape flag attaches");
-    TEST_ASSERT(r.cape, "SYS_ATTACH_9P_SRV: the flag reaches the helper");
+    struct sc_cape_seen r = sc_srv_syscall_attach(/*service_cape=*/true, 0, &ret);
+    TEST_ASSERT(ret >= 0 && r.attached, "SYS_ATTACH_9P_SRV over a DMSRVCAPE service attaches");
+    TEST_ASSERT(r.cape, "SYS_ATTACH_9P_SRV: the poster's mark capes with no flag");
     TEST_EXPECT_EQ((u64)r.uid, (u64)0x1234u, "SYS_ATTACH_9P_SRV cape: the attacher owns it");
     TEST_EXPECT_EQ((u64)r.n_uname, (u64)PRINCIPAL_NONE, "SYS_ATTACH_9P_SRV cape: no user named");
-    r = sc_srv_syscall_attach(0, &ret);
+    r = sc_srv_syscall_attach(false, SYS_ATTACH_9P_CAPE, &ret);
+    TEST_EXPECT_EQ((u64)ret, (u64)(s64)-1, "SYS_ATTACH_9P_SRV refuses the cape flag");
+    TEST_EXPECT_EQ((u64)r.n_uname, (u64)0xBAD0u, "the refused caped attach sent nothing");
+    r = sc_srv_syscall_attach(false, SYS_ATTACH_9P_LOOSE, &ret);
+    TEST_ASSERT(ret >= 0 && r.attached && r.loose && !r.cape,
+                "SYS_ATTACH_9P_SRV: LOOSE reaches the helper, uncaped");
+    r = sc_srv_syscall_attach(false, 0, &ret);
     TEST_ASSERT(ret >= 0 && r.attached && !r.cape, "SYS_ATTACH_9P_SRV, no flag: uncaped (control)");
-    r = sc_srv_syscall_attach(0x4u, &ret);
+    TEST_EXPECT_EQ((u64)r.n_uname, (u64)0x1234u, "SYS_ATTACH_9P_SRV, uncaped: the attacher's principal");
+    r = sc_srv_syscall_attach(false, 0x4u, &ret);
     TEST_EXPECT_EQ((u64)ret, (u64)(s64)-1, "SYS_ATTACH_9P_SRV refuses an unknown flag bit");
     TEST_EXPECT_EQ((u64)r.n_uname, (u64)0xBAD0u, "the refused attach sent nothing");
 }

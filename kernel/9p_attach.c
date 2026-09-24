@@ -330,11 +330,12 @@ struct Spoor *srvconn_attach_dev9p_root(struct SrvConn *cn,
     if (!cn || !who) { if (out_err) *out_err = -T_E_INVAL; return NULL; }
     // A byte conn minted from a DMSRVCAPE service capes EVERY attach over it:
     // its poster, the server's own side, declared the server's ids foreign
-    // (IDENTITY-DESIGN 3.2). Only a byte conn can carry that mark -- the cape's
+    // (IDENTITY-DESIGN 3.2). That mark is the ONLY input: no bit of `flags`
+    // capes a /srv session, so the cape stays the poster's decision whatever
+    // word a caller hands in. Only a byte conn can carry the mark -- the cape's
     // no-escalation argument rests on the attacher holding the raw transport,
     // which a 9P-mode opener never does.
-    bool cape = (flags & SYS_ATTACH_9P_CAPE) != 0 ||
-                (srvconn_cape(cn) && __atomic_load_n(&cn->byte_mode, __ATOMIC_ACQUIRE));
+    bool cape = srvconn_cape(cn) && __atomic_load_n(&cn->byte_mode, __ATOMIC_ACQUIRE);
 
     // The adapter wraps cn's c2s/s2c byte rings; its init takes ONE srvconn_ref.
     // Pre-init failures leave cn untouched (the caller decides on teardown);

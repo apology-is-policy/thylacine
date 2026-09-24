@@ -1043,10 +1043,11 @@ enum {
     //                    (docs/chase/B1-VOTE.md + the ARCH I-38 row); a
     //                    cached-open whose RPC-free hint fully hits then
     //                    skips the per-open wire revalidation.
-    //                    SYS_ATTACH_9P_CAPE capes the session
-    //                    (IDENTITY-DESIGN 3.2); a service posted DMSRVCAPE
-    //                    capes every attach over it regardless. Unknown
-    //                    bits reject. The #112 ABI discipline: EVERY
+    //                    Unknown bits reject, SYS_ATTACH_9P_CAPE among
+    //                    them: over /srv the identity cape is the
+    //                    POSTER's, and a service posted DMSRVCAPE capes
+    //                    every attach over it (IDENTITY-DESIGN 3.2).
+    //                    The #112 ABI discipline: EVERY
     //                    caller sets x4 -- the libt/libthyla-rs wrappers
     //                    take it as an explicit parameter)
     //
@@ -3075,12 +3076,13 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 // without the per-open wire revalidation (first touch / any hint miss
 // still wires; strict clients byte-unchanged). Unknown bits reject.
 #define SYS_ATTACH_9P_LOOSE   0x1u
-// SYS_ATTACH_9P (x5) + SYS_ATTACH_9P_SRV (x4): the identity cape
-// (IDENTITY-DESIGN 3.2, HAUL-DESIGN 4.7; operator vote 2026-09-23, "mounter
-// owns"). The session reports the ATTACHING principal as every file's owner
-// and its primary gid as the group, with the server's per-file mode kept; the
-// Tattach names no user, a create sends gid (u32)-1, and chown/chgrp are
-// refused. For a server whose ids are not Thylacine principals.
+// SYS_ATTACH_9P (x5): the identity cape (IDENTITY-DESIGN 3.2, HAUL-DESIGN 4.7;
+// operator vote 2026-09-23, "mounter owns"). The session reports the ATTACHING
+// principal as every file's owner and its primary gid as the group, with the
+// server's per-file mode kept; the Tattach names no user, a create sends gid
+// (u32)-1, and chown/chgrp are refused. For a server whose ids are not
+// Thylacine principals. SYS_ATTACH_9P_SRV refuses the bit: over /srv the cape
+// is the poster's decision (DMSRVCAPE), never the attacher's.
 #define SYS_ATTACH_9P_CAPE    0x2u
 
 // Maximum bytes transferred per SYS_READ / SYS_WRITE / SYS_PREAD /
@@ -3269,8 +3271,9 @@ _Static_assert(SYS_WALK_OPEN_OAPPEND == 0x40u &&
 // listener setup is the consumer).
 #define SYS_WALK_CREATE_DMSRVBULK   0x01000000u
 // DMSRVCAPE (Thylacine extension; IDENTITY-DESIGN 3.2, HAUL-DESIGN 4.7): on a
-// /srv service post, capes every SYS_ATTACH_9P_SRV over the service (as if the
-// attacher had passed SYS_ATTACH_9P_CAPE). Admitted ONLY beside DMSRVBYTE: a
+// /srv service post, capes every SYS_ATTACH_9P_SRV over the service -- what
+// SYS_ATTACH_9P_CAPE does to a pipe attach, and the ONLY way a /srv attach is
+// caped (SYS_ATTACH_9P_SRV refuses the flag). Admitted ONLY beside DMSRVBYTE: a
 // byte-mode attacher holds the raw transport, so the cape grants it nothing;
 // a 9P-mode opener never does. Only the POSTER can set it, and the poster is
 // the server's own side. Part of the service IDENTITY on a tombstone rebind,
@@ -3528,7 +3531,7 @@ bool sys_attach_9p_ends_are_pipes(const struct Spoor *tx, const struct Spoor *rx
 // The identity cape's two admission predicates (defined in syscall.c;
 // non-static so the regressions exercise the handlers' own rules):
 //   - the flags word: SYS_ATTACH_9P takes SYS_ATTACH_9P_CAPE only (`srv`
-//     false); SYS_ATTACH_9P_SRV takes it and SYS_ATTACH_9P_LOOSE;
+//     false); SYS_ATTACH_9P_SRV takes SYS_ATTACH_9P_LOOSE only;
 //   - a /srv service post's perm (SYS_WALK_CREATE's devsrv branch): DMSRV
 //     bits only, and DMSRVCAPE only beside DMSRVBYTE.
 bool sys_attach_9p_flags_ok(u64 flags, bool srv);

@@ -2424,10 +2424,13 @@ bool sys_attach_9p_ends_are_pipes(const struct Spoor *tx, const struct Spoor *rx
     return tx && rx && tx->dev == &devpipe && rx->dev == &devpipe;
 }
 
-// The per-attach LOOSE opt-in (B1) was voted for the /srv attach alone; the
-// identity cape rides both.
+// Each attach admits one bit. The per-attach LOOSE opt-in (B1) was voted for the
+// /srv attach alone. The identity cape is the pipe attach's: the mounter holds
+// both pipes, so the mounter decides. Over /srv the cape is the poster's
+// decision (DMSRVCAPE) and never the attacher's, so the bit is refused there
+// like any unknown one.
 bool sys_attach_9p_flags_ok(u64 flags, bool srv) {
-    u64 ok = SYS_ATTACH_9P_CAPE | (srv ? (u64)SYS_ATTACH_9P_LOOSE : 0);
+    u64 ok = srv ? (u64)SYS_ATTACH_9P_LOOSE : (u64)SYS_ATTACH_9P_CAPE;
     return (flags & ~ok) == 0;
 }
 
@@ -2689,8 +2692,9 @@ s64 sys_attach_9p_srv_for_proc(struct Proc *p, u64 srv_fd_raw,
     // is the B1 per-attach I-38 opt-in (docs/chase/B1-VOTE.md + the ARCH
     // I-38 row): the mounter asserts the single-writer premise for this
     // attach; the minted client's cached-opens then serve full hint hits
-    // without the per-open wire revalidation. SYS_ATTACH_9P_CAPE is the
-    // identity cape (IDENTITY-DESIGN 3.2). The #112 ABI discipline:
+    // without the per-open wire revalidation. SYS_ATTACH_9P_CAPE is refused
+    // here like any unknown bit: over /srv the identity cape is the poster's
+    // (DMSRVCAPE, IDENTITY-DESIGN 3.2). The #112 ABI discipline:
     // this is arg x4 -- EVERY caller sets it (the lib wrappers take it
     // explicitly, so a stale caller cannot pass garbage silently).
     if (!sys_attach_9p_flags_ok(flags, /*srv=*/true)) return -1;

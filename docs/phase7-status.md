@@ -157,7 +157,7 @@ reach is a child-specific spurious `EACCES`, which no sabotage of a shared helpe
 can produce — reasoned coverage plus a diagnostic, not a sabotage-proven control.
 Corrected in the comment, in STALK-DESIGN, and here.
 
-## Haul identity cape — 2026-09-23 (aux-3; audit round pending)
+## Haul identity cape — 2026-09-23 (aux-3; audit closed 0/0/0/3 P3; B 2026-09-24)
 
 The operator's Lantern-over-Haul run got "permission denied" on a private Mac
 tree (0700/0600). dev9p checked access against the host's owners (uid 501,
@@ -170,7 +170,8 @@ scripture `d10d1ff5`). Built on aux-3:
   publishes. The Tattach names no user, a create sends no group, and chown and
   chgrp are refused before the wire. Kernel DAC stays on.
 - ABI (additive, voted): `SYS_ATTACH_9P` gains an x5 flags word, which every
-  caller passes; `SYS_ATTACH_9P_CAPE` on both attach syscalls; `DMSRVCAPE`
+  caller passes; `SYS_ATTACH_9P_CAPE` on both attach syscalls (the `/srv`
+  half withdrawn by B, below); `DMSRVCAPE`
   (bit 23) on a byte-mode `/srv` post; one derived DMSRV mask behind every
   refusal.
 - haul capes both paths, so a plain `mount /srv/NAME` of a `--post` service is
@@ -179,8 +180,38 @@ scripture `d10d1ff5`). Built on aux-3:
 Verified: kernel suite 1653/1653 (default image); 30 kernel sabotages, each
 caught by the test meant for it; device gate `haul-cape` (its own npxf, a
 0700/0600 export) PASS, and FAIL with the operator's EACCES under both device
-sabotages. Pending: the Fable audit round, the fold into one commit, the push.
-Enqueued: (S), the "9p: op abandoned" line at the end of every Haul session.
+sabotages. Audit (Fable 5.1, max, no mid-run fallback): 0 P0 / 0 P1 / 0 P2 /
+3 P3, folded with the chunk into `797767f6`. F2 (the cape names the attacher)
+was closed by (U)'s scripture pass; F1 (Stratum stores a caped create's
+`(u32)-1` gid literally) and F3 (`haul-cape.exp` does not pin the host-side
+group) are open and tracked. Enqueued: (S), the "9p: op abandoned" line at the
+end of every Haul session.
+
+### B — the `/srv` attach stops taking the cape flag (2026-09-24, operator-approved, pre-push)
+
+`SYS_ATTACH_9P_SRV` refuses `SYS_ATTACH_9P_CAPE` like any unknown bit, and the
+helper both `/srv` attach paths share decides the cape from the service's
+`DMSRVCAPE` mark alone, reading no flag for it. Over `/srv` the cape is now
+purely the exporter's decision. The flag was never a hole: over a byte-mode
+service the attacher already holds the raw transport, so the cape gave it
+nothing. But it was an authority-adjacent option no caller used (ut passes 0,
+joey passes LOOSE, and haul's `/srv` path uses the mark), and every later audit
+of the cape would have had to reason about it. Withdrawing a published option
+is a format break, so it had to land before the first push. What it gives up is
+a caped mount of a service posted through POSIX `bind()` in pouch, which cannot
+carry the mark; no such program exists, and if one appears the fix is to let
+that poster set the mark.
+
+The helper's half matters as much as the syscall's: with the flag read gone, a
+later caller handing the helper an unvalidated word still cannot cape a `/srv`
+session. Tests: `srv_client.cape_admission` (the `/srv` word refuses CAPE and
+LOOSE|CAPE and admits 0 and LOOSE); `9p_srvconn_transport.cape_attach`, which
+now asserts that the flag handed straight to the helper capes nothing and the
+Tattach names the principal; and a new `9p_srvconn_transport.cape_attach_srv`,
+split out of it so a failure in one half cannot hide the other's, asserting
+that the syscall refuses CAPE and sends nothing, that LOOSE still reaches the
+helper, and that a `DMSRVCAPE` service capes through the syscall with flags
+0. Verified: kernel suite 1657/1657 twice (byte-identical canonical ELFs); a combined sabotage (the flag re-admitted on the `/srv` word, and the helper's flag read restored) reddened exactly the three tests above, each at its predicted assertion..
 
 ## Haul completion integration — 2026-09-17
 

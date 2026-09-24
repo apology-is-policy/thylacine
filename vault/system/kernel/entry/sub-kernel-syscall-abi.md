@@ -17,7 +17,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-09-23
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -577,8 +577,11 @@ No number changed and no record grew; the operator voted the additive shape
   (0x1) stays `SYS_ATTACH_9P_SRV`-only and is refused here with the flat -1,
   like any unknown bit. Every in-tree caller was checked, and no sibling
   tree (the Go port, the libc port, pouch's patches) issues the call raw.
-- `SYS_ATTACH_9P_SRV` (52) admits `SYS_ATTACH_9P_CAPE` in its x4 beside
-  LOOSE; a conn from a DMSRVCAPE service is caped whatever the word says.
+- `SYS_ATTACH_9P_SRV` (52) refuses `SYS_ATTACH_9P_CAPE` in its x4 like any
+  unknown bit and admits LOOSE alone: over `/srv` the cape is the poster's
+  decision, and only a conn from a DMSRVCAPE service is caped. (B,
+  2026-09-24: an operator decision taken before the flag was ever pushed. It
+  had been admitted beside LOOSE for a day, and no caller passed it.)
 - `SYS_WALK_CREATE_DMSRVCAPE` (0x00800000, bit 23; libthyla-rs
   `T_WALK_CREATE_DMSRVCAPE`) marks a `/srv` service post caped, and is
   admitted ONLY beside `DMSRVBYTE`. `SYS_WALK_CREATE_DMSRV_BITS` (BYTE | BULK

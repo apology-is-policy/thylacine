@@ -55,6 +55,64 @@ running, so the mac was taken with `yip steal` and a stated reason, and main was
 told the same minute; they confirmed the steal was right and queued three builds
 behind it. My `--config ci` bake waits behind those rather than jumping them.
 
+**Answering the operator surfaced a bigger hole than the one asked about.** The
+operator asked which permission channels a forked child inherits, remembering
+that imperium elevation was meant to reach children. It does, through dedicated
+legate fields (`kernel/proc.c`, the IM-2 carve: `child->caps = (parent & mask) &
+~(ELEVATION_ONLY & ~flow)`), while `proc_flags` -- NOTRACE and NODUMP among them
+-- never cross. Laying the table out showed what the seal question was really
+standing on: `devproc_debug_authorized` (`kernel/devproc.c`) admits on the owner
+axis alone and reads no capability of the target. So an unelevated process of
+user U can attach to U's own imperium-elevated sub-shell, or to any member of a
+propagating scope, and drive it -- the route (U)'s F1 closed for the home proxy,
+in general form. It is verified in code only, and enqueued at the top of the
+open-bug list (`bug_debug_gate_ignores_authority`). Linux's answer is
+`cap_ptrace_access_check`: the tracee's permitted set must be a subset of the
+tracer's, unless the tracer holds CAP_SYS_PTRACE. Here that means the owner axis
+admits only when the target's caps are a subset of the caller's. That one rule
+would have closed F1 by itself, and it shrinks decision A to what the seal
+still owns: secrets an EQUAL-authority peer must not read. It changes I-39's gate,
+so it waits for the operator's go-ahead; a RED predicate test comes first either
+way.
+
+**B: the `/srv` attach stops taking the cape flag (operator-approved, pre-push).**
+(L) had let `SYS_ATTACH_9P_SRV` take `SYS_ATTACH_9P_CAPE` beside LOOSE. It was
+never a hole -- a byte-mode attacher holds the raw transport, so the cape gave it
+nothing -- but no caller used it (ut passes 0, joey LOOSE, haul's `/srv` path the
+poster's mark), and every later audit of the cape would have had to reason about
+it. Withdrawing a published option is a format break, so it had to go before the
+push. Two halves: `sys_attach_9p_flags_ok(flags, srv)` now admits one bit per
+handler, and `srvconn_attach_dev9p_root` decides the cape from the conn's mark
+alone and reads no flag for it. The second half matters as much as the first,
+because the helper is where a later caller handing in an unvalidated word would
+land.
+
+**The test framework shaped the sabotage.** `TEST_ASSERT` returns at the first
+failure (`kernel/test/test.h:78-84`). With the helper legs and the syscall legs
+in one test function, a combined sabotage of both halves would have stopped at
+the helper leg and never reached the syscall legs -- one fix would have looked
+verified while going unexercised. So the syscall legs moved into their own test,
+`9p_srvconn_transport.cape_attach_srv`, and one combined run can red each half's
+test by name, each attributable to one sabotage by construction: the helper leg
+calls the helper directly, so only the helper's flag read can red it, and the
+syscall's refusal leg fails only if the flags check admits CAPE.
+**Verified, on the second attempt.** The first run's sabotage reds survived only
+as a count: `tools/test.sh` prints just the suite line, the per-test log is
+`build/test-boot.log`, and the script's own canonical run overwrote it. A
+matching count of three is not the right three names, so the run was redone with
+the log copied after each suite. Second run: 1654/1657, with exactly the predicted
+reds (`srv_client.cape_admission` at "the /srv cape is the poster's",
+`cape_attach` at "the cape flag capes no /srv session", `cape_attach_srv` at
+"SYS_ATTACH_9P_SRV refuses the cape flag"); canonical 1657/1657 both times, and
+the two canonical builds produced a byte-identical ELF (sha256 `1e29e172...`), as
+did the two sabotage builds (`f234c5f9...`).
+
+**A stale status caught in passing.** `docs/phase7-status.md` still headed the
+(L) section "audit round pending", with "Pending: the Fable audit round, the
+fold, the push", although the round closed 0/0/0/3 P3 and was folded into
+`797767f6`. A status field whose flip is nobody's step stays unflipped; fixed
+with B.
+
 ---
 ## 2026-09-23, evening (aux, Opus 5.5 1M, effort max) -- /srv had no lock on the door
 

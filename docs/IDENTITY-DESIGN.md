@@ -267,12 +267,21 @@ uniform-mode cape):
 *Mechanism:* a property of the 9P SESSION, fixed at attach before the root
 Spoor publishes. It is not a policy on the mount node, as the original text had
 it, because a session's root can be mounted more than once and the cape must
-travel with every mount. Three ways to set it:
-- `SYS_ATTACH_9P` gains a flags word (x5), with `SYS_ATTACH_9P_CAPE`.
-- `SYS_ATTACH_9P_SRV` admits the same bit.
+travel with every mount. Two ways to set it, one per kind of attach:
+- `SYS_ATTACH_9P` gains a flags word (x5), with `SYS_ATTACH_9P_CAPE`. The
+  mounter holds both pipes, so the mounter decides.
 - A byte service posted with the `DMSRVCAPE` perm bit capes every attach over
   it. Only its POSTER can set this, which is the server's own side, so ut's
   plain `mount /srv/NAME` needs no option.
+
+`SYS_ATTACH_9P_SRV` refuses `SYS_ATTACH_9P_CAPE` like any unknown bit
+(operator decision 2026-09-24, taken before the flag was ever pushed). Over
+`/srv` the cape is the exporter's decision alone: the helper both `/srv` attach
+paths share reads the service's mark and nothing else, so no audit of the cape
+has to reason about an option the attacher chooses. The cost is a caped mount
+of a service posted through POSIX `bind()` in pouch, which cannot carry the
+mark. No such program exists; if one appears, the fix is to let that poster set
+the mark, not to hand the choice back to the attacher.
 
 haul sets the cape on both of its paths.
 

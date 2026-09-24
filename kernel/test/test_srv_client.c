@@ -478,8 +478,11 @@ void test_srv_client_cape_admission(void) {
     TEST_ASSERT(sys_attach_9p_flags_ok(SYS_ATTACH_9P_CAPE, false),   "caped pipe attach");
     TEST_ASSERT(!sys_attach_9p_flags_ok(SYS_ATTACH_9P_LOOSE, false), "LOOSE is /srv-only");
     TEST_ASSERT(!sys_attach_9p_flags_ok(0x4u, false),                "unknown pipe-attach bit");
-    TEST_ASSERT(sys_attach_9p_flags_ok(SYS_ATTACH_9P_LOOSE | SYS_ATTACH_9P_CAPE, true),
-                "loose caped /srv attach");
+    TEST_ASSERT(sys_attach_9p_flags_ok(0, true),                     "/srv attach, no flags");
+    TEST_ASSERT(sys_attach_9p_flags_ok(SYS_ATTACH_9P_LOOSE, true),   "loose /srv attach");
+    TEST_ASSERT(!sys_attach_9p_flags_ok(SYS_ATTACH_9P_CAPE, true),   "the /srv cape is the poster's");
+    TEST_ASSERT(!sys_attach_9p_flags_ok(SYS_ATTACH_9P_LOOSE | SYS_ATTACH_9P_CAPE, true),
+                "LOOSE carries no cape in");
     TEST_ASSERT(!sys_attach_9p_flags_ok(0x4u, true),                 "unknown /srv-attach bit");
     TEST_ASSERT(!sys_attach_9p_flags_ok(1ull << 32, true),           "a high bit is not truncated away");
 }

@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-09-23
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -47,9 +47,9 @@ which is how every real mount (Stratum system FS, per-user homes, netd
 - `srvconn_attach_dev9p_root(cn, aname, aname_len, who, flags, out_err)`
   → the dev9p root Spoor over a SrvConn, or NULL. `who` is the attaching
   Proc (its principal names the Tattach; with the cape, its principal and
-  primary gid own every file); `flags` is the attach's word
-  (`SYS_ATTACH_9P_LOOSE`, `SYS_ATTACH_9P_CAPE`), already validated by the
-  syscall. A NULL `cn` or `who` answers `-T_E_INVAL`.
+  primary gid own every file); `flags` is the `/srv` attach's word, already
+  validated by the syscall, whose one bit is `SYS_ATTACH_9P_LOOSE`; no bit of
+  it capes the session. A NULL `cn` or `who` answers `-T_E_INVAL`.
 
 ## Mechanism
 
@@ -57,8 +57,10 @@ which is how every real mount (Stratum system FS, per-user homes, netd
 each step's ordering is load-bearing):
 
 0. **The cape decision** (IDENTITY-DESIGN 3.2), before anything is built:
-   the attach is caped if the flags ask for it OR the conn carries the
-   service's DMSRVCAPE mark AND is byte-mode. The mark is read off the
+   the attach is caped if and only if the conn carries the service's
+   DMSRVCAPE mark AND is byte-mode; no bit of `flags` enters (B, 2026-09-24:
+   the attacher's flag was withdrawn, so over /srv the cape is the poster's
+   decision alone, whatever word a caller hands in). The mark is read off the
    CONNECTION, so every attach over a caped byte conn is caped whichever
    caller drives it -- SYS_ATTACH_9P_SRV passes its flags through, devsrv's
    9P-mode connect passes 0. The byte-mode half is the no-escalation
@@ -284,7 +286,9 @@ SYS_ATTACH_9P/55, 16c [[chg-2026-05-26-16c-attach-srv]] + its two audit
 rounds, stalk-3b's shared open=connect path, A-3c out_err, CF-3 B msize
 classes, B1 loose, #210's session registry --
 [[chg-2026-08-16-ninep-attach-registry]] -- and (L) the Haul identity cape,
-which gave the helper the attaching Proc and the flags word.)
+which gave the helper the attaching Proc and the flags word; B (2026-09-24)
+then withdrew the attacher's cape flag, leaving the conn's mark the only
+input.)
 
 ## Tests
 
@@ -295,8 +299,11 @@ regression (close the root BEFORE the walks; pre-fix UAF'd on the walked
 clunk). `test_9p_srvconn_transport.c::kernel_attached_skips_teardown_on_handle_close`
 covers the 16c integration half; `9p_srvconn_transport.cape_attach` covers the
 cape decision through the helper (a DMSRVCAPE service capes without a flag,
-the flag capes a plain service, the uncaped control names the principal,
-LOOSE alone is not the cape, a cape mark on a raw 9P-mode conn capes
-nothing) and through SYS_ATTACH_9P_SRV's inner (the flag reaches the helper,
-an unknown bit sends nothing), reading the Tattach's n_uname off the ring; the live path is exercised by every boot
+the cape flag handed straight to the helper capes nothing, the uncaped control
+names the principal, LOOSE alone is not the cape, a cape mark on a raw 9P-mode
+conn capes nothing), and `9p_srvconn_transport.cape_attach_srv` covers it
+through SYS_ATTACH_9P_SRV's inner (a DMSRVCAPE service capes with flags 0, the
+cape flag is refused and sends nothing, LOOSE reaches the helper uncaped, an
+unknown bit sends nothing) -- two tests, so neither half's early return can
+hide the other's -- both reading the Tattach's n_uname off the ring; the live path is exercised by every boot
 (all mounts route through `srvconn_attach_dev9p_root`).

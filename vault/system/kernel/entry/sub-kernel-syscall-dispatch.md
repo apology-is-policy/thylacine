@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-09-23
+updated: 2026-09-24
 ---
 ## Trusted-seat and nonblocking entries
 
@@ -403,11 +403,14 @@ identity at all: `n_uname` goes out as `PRINCIPAL_NONE` (next section).
 ### The identity cape: one admission rule per word, a stamp before publication, two inners (2026-09-23)
 
 The cape (IDENTITY-DESIGN 3.2, HAUL-DESIGN 4.7) enters this file on two ABI
-words. `SYS_ATTACH_9P` and `SYS_ATTACH_9P_SRV` take an x5 `flags` word, and
-every caller passes it (the #112 discipline). `sys_attach_9p_flags_ok(flags,
-srv)` is the one rule: `SYS_ATTACH_9P_CAPE` on both handlers, the per-attach
-`LOOSE` opt-in on the `/srv` attach alone, and every other bit refused with the
-bare -1 before any handle lookup. On the create word the three service-post
+words. `SYS_ATTACH_9P` takes an x5 `flags` word and `SYS_ATTACH_9P_SRV` an x4
+one, and every caller passes it (the #112 discipline).
+`sys_attach_9p_flags_ok(flags, srv)` is the one rule: one bit per handler --
+`SYS_ATTACH_9P_CAPE` on the pipe attach, the per-attach `LOOSE` opt-in on the
+`/srv` attach -- and every other bit refused with the bare -1 before any handle
+lookup. Over `/srv` the cape is the poster's decision (DMSRVCAPE, read off the
+conn by the shared helper); the attacher's flag was withdrawn from
+`SYS_ATTACH_9P_SRV` on 2026-09-24 (B), before it was ever pushed. On the create word the three service-post
 bits share one derived mask, `SYS_WALK_CREATE_DMSRV_BITS`:
 - the `/srv` post branch admits a perm only through `sys_srv_post_perm_ok`:
   nothing outside the mask, and `DMSRVCAPE` only beside `DMSRVBYTE`, because a
@@ -1012,6 +1015,9 @@ already folded above.
 2026-09-23 (L), the identity cape: the x5 flags word and its predicate, the
 DMSRV mask and `sys_srv_post_perm_ok`, the pipe handler's stamp order, and the
 two inners (the section above).
+
+2026-09-24 (B): `SYS_ATTACH_9P_SRV` refuses the cape flag; the `/srv` cape is
+the poster's mark alone (the section above).
 
 ## A diagnostic on this path emits ONE unit, never a run of `uart_*` calls (2026-08-18)
 

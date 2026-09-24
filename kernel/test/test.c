@@ -1509,6 +1509,7 @@ void test_9p_srvconn_transport_send_routes_to_c2s_ring(void);
 void test_9p_srvconn_transport_recv_routes_from_s2c_ring(void);
 void test_9p_srvconn_transport_large_frame_roundtrip(void);
 void test_9p_srvconn_transport_cape_attach(void);
+void test_9p_srvconn_transport_cape_attach_srv(void);
 void test_9p_srvconn_transport_close_drops_srvconn_ref(void);
 void test_9p_srvconn_transport_kernel_attached_skips_teardown_on_handle_close(void);
 void test_9p_srvconn_transport_send_preserves_caller_deadline(void);
@@ -3540,6 +3541,7 @@ struct test_case g_tests[] = {
     { "9p_srvconn_transport.recv_routes_from_s2c_ring",     test_9p_srvconn_transport_recv_routes_from_s2c_ring,     false, NULL },
     { "9p_srvconn_transport.large_frame_roundtrip",         test_9p_srvconn_transport_large_frame_roundtrip,         false, NULL },
     { "9p_srvconn_transport.cape_attach",                   test_9p_srvconn_transport_cape_attach,                   false, NULL },
+    { "9p_srvconn_transport.cape_attach_srv",               test_9p_srvconn_transport_cape_attach_srv,               false, NULL },
     { "9p_srvconn_transport.close_drops_srvconn_ref",       test_9p_srvconn_transport_close_drops_srvconn_ref,       false, NULL },
     { "9p_srvconn_transport.kernel_attached_skips_teardown_on_handle_close", test_9p_srvconn_transport_kernel_attached_skips_teardown_on_handle_close, false, NULL },
     { "9p_srvconn_transport.send_preserves_caller_deadline", test_9p_srvconn_transport_send_preserves_caller_deadline, false, NULL },

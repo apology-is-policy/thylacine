@@ -2356,9 +2356,9 @@ static inline long t_lseek(long fd, long offset, long whence) {
 // flags: 0 (strict close-to-open, the I-38 default) or T_ATTACH_9P_LOOSE
 // (the B1 per-attach opt-in -- the caller asserts the single-writer
 // premise for this attach; cached-opens then serve full Larder-hint hits
-// without the per-open wire revalidation), T_ATTACH_9P_CAPE (the identity
-// cape, as for t_attach_9p; a service posted DMSRVCAPE capes every attach
-// over it regardless), or both. Unknown bits reject.
+// without the per-open wire revalidation). Unknown bits reject,
+// T_ATTACH_9P_CAPE among them: over /srv the identity cape is the
+// poster's, and a service posted DMSRVCAPE capes every attach over it.
 //
 // Returns the new fd (>=0) on success, -1 on:
 //   - invalid srv_fd / wrong kind / missing R+W rights / not byte-mode
