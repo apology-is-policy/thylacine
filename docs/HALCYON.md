@@ -1368,7 +1368,10 @@ pollable (§14.11.7 / §14.11.7a). The record set:
 
 - **Up** (kaua-term → halcyond): `CellDiff{ changed (row,col,cell)[], cursor(row,col,vis) }`
   (the live screen) · `ScrollOff{ rows: cell[] }` (normal-mode lines off the top →
-  the transcript) · `Control{ osc1936_raw | bell | title | exit(code) | winsize_ack }`
+  the transcript) · `Control{ osc1936_raw | bell | title | exit(code) | winsize_ack
+  | osc7_raw | screen_erased }` (the last two AMENDED 2026-09-24: `osc7_raw`, the
+  cwd report, had been on the wire as tag 5 and missing from this list;
+  `screen_erased` is TC-1's, §14.13)
   (the kaua-term forwards OSC 1936 Beacon frames **raw** — halcyond keeps the Beacon
   parser, R5) · `Mode{ normal | alt_screen }`. **Ordering is load-bearing** (a Beacon
   zone-frame must land at the exact point between the cells it separates), so the
@@ -2197,6 +2200,42 @@ halcyond PAINTS the grid's content in normal mode — the BEACON thesis exactly
 realizations"). Nothing about proportional-live changes the producer, the pts,
 or the wire records (§14.11.2); it changes the normal-mode composition in
 halcyond.
+
+**AMENDED 2026-09-24 (operator-ratified; TC-1) — one record IS added: the
+whole-screen erase.** The composition above cannot see a clear. The live tail is
+laid only through its content rows and the view is bottom-anchored (PL-4), so when
+a program erases the whole screen and draws something short at the top — a
+`lantern` slide, the prompt after `clear` — a tile with any history shows that
+history filling the view ABOVE it: the operator's "lantern doesn't clear"
+(2026-09-24, their first Lantern-over-Haul run), and `clear` broken the same way.
+A fresh tile has no history, which is why every capture in the Lantern arc looked
+clean.
+
+- **The rule.** After a whole-screen erase on the normal screen, the tile's view
+  pins the live tail's top to the view's top: the rest of the view is the cleared
+  screen, and the history stays above it, reachable by scrolling up. The pin holds
+  until the next `ScrollOff` — by then output has filled the screen, so the
+  ordinary bottom-anchored flow resumes with nothing to jump. Implemented as a
+  floor on the content height (a full view is reserved below the live tail's
+  top), so it is exact whatever the typeface metrics.
+- **How halcyond learns of it: an explicit record, never an inference.** The
+  producer's VT reports the erase and the kaua-term forwards it in stream order as
+  `Control::ScreenErased` (KAUA-TERM §1b; §14.3's mirror). Inferring it from blank
+  cells was rejected: a program that overwrites the screen with spaces is not a
+  clear, and an erase followed at once by a redraw never looks blank to the
+  consumer at all.
+- **The alt screen is untouched.** An erase there changes nothing: the alt screen
+  already renders full-tile, and the pin is a property of the NORMAL screen, so a
+  pin set before an alt-screen excursion (`clear`, then `nora`) still holds when
+  the normal screen returns.
+- **The history belongs to the user.** ED 3 ("erase saved lines", which `clear`
+  sends after ED 2) cleans the VIEW exactly as ED 2 does and **never deletes the
+  transcript**. A program cannot erase the record of what ran in a tile, Beacon
+  objects and their verbs included. Deleting a tile's history is a USER action: a
+  chrome chord (TC-1b). This follows Plan 9, where a window's text belongs to the
+  user, and the Genera listener, whose Clear Output History is a command the user
+  gives rather than an escape a program sends. xterm, VTE and kitty let ESC[3J
+  drop scrollback; Halcyon deliberately does not.
 
 **The core mechanism — logical lines, re-wrapped.** A fixed-width grid
 hard-wraps output at `cols` (mid-word: the operator's s5 "tho/ught"). Painting

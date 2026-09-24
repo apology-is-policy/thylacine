@@ -85,6 +85,15 @@ sets `span: 0`, so the previous slide's Beacon span tags leave with its text.
 It is not a mode change, so the tile stays in `ScreenMode::Normal`, the mode
 that lays the document out richly.
 
+**KNOWN GAP (2026-09-24, operator-found; fix ratified, TC-1a):** "the whole trick"
+is not whole. It proves slide two carries no residue of slide one, and says nothing
+about history from BEFORE the deck: in a tile with scrollback, halcyond
+bottom-anchors the live tail (PL-4), so the slide sits at the bottom of the view
+with earlier output above it -- and `clear` misbehaves the same way. Fresh tiles
+hide it. The fix is in halcyond's view, not here: an explicit `ScreenErased` wire
+record and a view pin (HALCYON 14.13 AMENDED 2026-09-24; LANTERN-DESIGN 3's
+withdrawn conclusion).
+
 **The alt screen is the one thing to avoid**, and the avoidance is structural
 rather than a convention: `ScreenMode::AltScreen` makes a tile paint its raw
 mono grid, discarding the rich rendering the facility exists for. lantern
