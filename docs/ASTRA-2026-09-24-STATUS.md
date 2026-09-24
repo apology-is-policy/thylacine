@@ -99,3 +99,18 @@ edit, render and lint (Main clarified the absent body-update API on Yip 0110).
 The local Yip installer adjusts `.claude/settings.json` only to remove duplicate
 legacy hooks while installing current hooks in ignored settings.local.json;
 that host-specific change is deliberately excluded from implementation commits.
+
+## UA-P0: elevation precursor integrity (open implementation prerequisite)
+
+Aux reported the missing debug-taint check at elevation redemption on Yip 0115.
+Source inspection confirms `cap_redeem_grant_for_writer` / `proc_become_legate`
+contain no prior-debug admission check. An equal-authority same-principal peer
+can modify an unelevated requester, detach, then leave modified execution to
+receive a later legitimate grant. This is a source-confirmed attack chain, not
+a newly executed exploit. Aux owns the existing kernel-side tracked repair;
+Astra owns its explicit dependency and acceptance conditions in
+`docs/USER-AUTHORITY-DESIGN.md` / `arc-user-authority`. Implementation cannot
+qualify new administrative elevation until the prerequisite is closed. The
+current capability-cover check also misses non-bit authority; UA-P1 requires
+coverage for administrative scopes and scoped-use grants. No runtime fix is
+claimed by this specification chunk.

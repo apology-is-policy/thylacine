@@ -14,10 +14,19 @@ guarded-by: [inv-i2, inv-i25]
 validated-by: [prose, spec-imperium, gate-smp]
 locks: []
 abis: []
-design: ["docs/CORVUS-DESIGN.md section 5.5", "docs/IDENTITY-DESIGN.md section 9.8", "specs/corvus.tla", "specs/handles.tla"]
+design: ["docs/CORVUS-DESIGN.md section 5.5", "docs/IDENTITY-DESIGN.md section 9.8", "specs/corvus.tla", "specs/handles.tla", "docs/USER-AUTHORITY-DESIGN.md"]
 created: 2026-08-02
 updated: 2026-09-21
 ---
+
+## Administrative authority specification
+
+`docs/USER-AUTHORITY-DESIGN.md` is an implementation specification for review,
+tracked by [[arc-user-authority]]. It does not describe implemented Admin scopes,
+mandates or transaction verbs. Existing code remains the as-built contract.
+The operator endorsed the use/admin/delegation distinction and Imperium client
+direction; detailed scope/ABI ratification is still required.
+
 ## Graphical grant commit
 
 A graphical grant is inserted with `seat_held` atomically under the grant

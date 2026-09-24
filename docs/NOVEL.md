@@ -47,6 +47,11 @@ kernel lift + the RPi4/5 grounding); it composes I-1 + I-5 + I-2/I-25 + I-15 +
 I-29/I-30 + pci-1b, inventing only the one allowance mechanism.
 
 **Angle #12 — unified runtime authority (imperium + mandate + the trusted path).**
+The September 24 specification for review, `docs/USER-AUTHORITY-DESIGN.md`,
+develops this synthesis with explicit use/admin/delegation separation and
+revocation provenance. Its related-work comparison is evidence for mechanisms,
+not proof of priority or novelty; implementation status remains explicit.
+
 One OS unifying **JIT self-elevation** (imperium — a fork-propagating legate scope
 for your own shell, SAK-gated, atomically de-escalated), **persistent attenuated
 delegation** (the mandate — a *censor* grants a citizen a bounded, standing,
@@ -54,16 +59,15 @@ revocable-by-key-rotation subset of its own authority, redeemed silently at
 login), and a **medium-independent trusted path** (the SAK episode below every
 renderer), all on a single `capability ∩ namespace ∩ time` substrate — and with
 **network authority expressed as namespace-shaped mandates** (a narrowed `/net`
-view + a netd per-principal policy) rather than packet-filter rules. Each peer
-holds only a fragment: cloud PIM (AWS STS / Azure PIM) has elevation but no
-namespace axis; macaroons/biscuit have attenuatable tokens but no kernel
-enforcement; seL4 has capability mint/revoke but no identity or persistence;
-Fuchsia routes capabilities but at build time, not runtime-delegatable; Plan 9 has
-namespace restriction but no scoped-cap delegation. The fusion — runtime,
-kernel-enforced, identity-bearing, namespace-AND-capability,
-self-elevation-AND-delegation, with the Roman public-law vocabulary
-(*imperium* / *legate* / *mandatum* / *censor* / *edictum*) naming the mechanism
-exactly — is new. Designed in `docs/IMPERIUM-DESIGN.md` (self-elevation, ACCEPTED)
+view + a netd per-principal policy) rather than packet-filter rules. The closest
+precedents supply different parts of this model: seL4
+provides object-capability delegation and revocation; Genode mediates scoped
+service sessions; Fuchsia routes component capabilities; Plan 9 composes
+namespaces and userspace authentication. The proposed contribution is their
+integration with persistent human policy and trusted, bounded self-elevation in
+Thylacine. This is a novelty candidate, not an established priority claim; the
+September 24 review does not show that each peer lacks all other pieces.
+Designed in `docs/IMPERIUM-DESIGN.md` (self-elevation, ACCEPTED)
 + `docs/MANDATE-DESIGN.md` (delegation, ACCEPTED) + `docs/TRUSTED-PATH.md` (the
 SAK); composes I-1/I-2/I-22/I-25/I-27/I-28 + the new I-35; v1.0 ships the
 namespace tier (imperium + mandate-namespace), the cap-resource-scope tier is v1.x.
