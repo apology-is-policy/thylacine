@@ -229,3 +229,17 @@ locator to Tapestry over the declared session connection. Tapestry reads STATE
 as the observer and confirms that exact host before acknowledging registration.
 This keeps the direct role gate intact. Binding IDs are also explicitly capped
 at INT64_MAX to keep success distinct from negative errno results.
+
+
+ABI source checkpoint: `b730a990`, on Astra only, with normal hooks passing.
+The commit hook required the dispatch dossier as well as the ABI dossier;
+both now describe the reservation accurately and no bypass was used. All four
+preserved draft files were compared again with stash
+`4f983db5dfc7aae852aa9debc8ebd9e90d73e1a5` and are byte-identical.
+
+The contract now maps the exact existing source hooks and adds the necessary
+post-unlock wake reference, bounded in-progress WATCH reservation, and
+read-copyout recovery rules. These are implementation obligations, not completed
+kernel behavior. Aux was asked for the cleared base on Yip 0108 turn 23; none
+has been announced at this checkpoint. No resource lease or VM is held, and
+no background automation was restarted for this new dependency.

@@ -216,3 +216,47 @@ base, including shared-address-space seal propagation and monotonic debug taint.
 5. Complete the real copy/paste/mode workflow and screenshots, then update the
    operator manual and as-built Vault dossiers. Untested ABI source is not a
    working clipboard, and QEMU evidence is not Pi bare-metal qualification.
+
+
+## Source integration anchors (reviewed before lifecycle edits)
+
+The current `pts_clear_locked` is the common FREE/GC retirement point; mint
+resets `ct_sid`/`fg_pgid`, and `pts_tty_acquire` plus `pts_tty_set_fg` are their
+only runtime mutators. The already-owned acquisition branch also returns
+success and must advance the interaction epoch under the stated contract.
+Do not change `pts_tty_cont` or signal fan semantics while adding observation.
+
+Process hooks belong immediately before publication in successful
+`proc_setsid`, `proc_setpgid`, the `proc_exec_replace` address-space swap and
+`proc_become_zombie_locked`. Refused operations do not invalidate anything.
+Group changes invalidate a nominated subject; exec/death also retire a binder
+or observer. Re-read these anchors on Aux's cleared base. Identity is presently
+immutable for running processes (`proc_apply_identity` is a spawn stamp); any
+future running-identity mutation must join this invalidation discipline.
+
+`poll_scan_one` already retains its Spoor after registering a waiter, and
+`poll_unhook_all` unregisters before releasing that reference. The new watch's
+close callback therefore releases its binding reference only after every
+registered poll borrow has gone. A binding also needs a temporary wake reference
+captured **under pts** before staging a post-unlock wake. Hold it through
+`poll_waiter_list_wake`, then release it under pts. Otherwise a concurrent final
+watch close could recycle/reset the binding's poll list between retirement and
+wake. A fixed at-most-64-entry wake batch suffices for process invalidation;
+there must be no unbounded retired or pending-wake allocation.
+
+Reserve each role's watcher slot and binding reference before allocating the
+Spoor outside locks. Revalidate when publishing it, and roll back both the slot
+and reference on allocation failure or intervening revocation. This keeps the
+two-watch bound true during construction as well as after publication.
+
+Native `spoor_read_common` invokes Dev.read on the synchronous calling thread;
+`poll_scan_one` invokes Dev.poll likewise. Those callbacks can resolve the real
+current process and fail a role mismatch before exposing state or registering
+a waiter. Kernel `_for_proc` test helpers do not supply an alternate caller to
+the Dev callback and must not be mistaken for such a mechanism. Current Loom
+payload submission requires `dev9p_client_fid`; the anonymous watcher is not a
+9P Spoor and must remain refused there. The synchronous reader's kernel scratch
+copy precedes syscall copyout: a copyout fault may consume a notification cursor,
+so STATE is the repeatable recovery query, and readiness is never the authority.
+Tests must cover this distinction without treating a lost notification as a
+successful admission or permission to retain stale ownership.
