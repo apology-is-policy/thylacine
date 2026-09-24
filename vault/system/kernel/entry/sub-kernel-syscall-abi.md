@@ -71,6 +71,19 @@ makes the debug surface refuse an attach "for the whole of its life". It does no
 identity/seam ordering described in [[sub-kernel-devproc]], not the stamp's timing
 alone. All three copies (kernel header, libt, libthyla-rs) say so now.
 
+**The bit's WHY was stale in the same block, and the audit caught it (F2,
+2026-09-24).** It still explained the seal as the answer to a debug surface that
+"separates on identity", which stopped being true the moment the owner axis
+gained capability cover -- and the commit that added cover said so in its body
+while touching neither this header nor `caps.h`. Both now state that the seal is
+the SECOND of two independent answers: cover refuses the shell's attach on
+authority (it lacks `CAP_TCB_DIAL`), and the seal is kept because it is the one
+that still holds between peers of EQUAL authority -- a caps-0 native fork of the
+proxy is covered by every same-principal peer while still holding the parent's
+handles. Lesson for this dossier's own class of prose: a comment that explains
+WHY a bit exists is invalidated by a change to the mechanism it names, and
+nothing in the build fails when it rots.
+
 
 **Imperium integration (2026-09-17).** Reserved numbers 110 and 111 are
 now implemented as SYS_CONSOLE_EPISODE and SYS_CAP_GRANT_IMPERIUM. Main's

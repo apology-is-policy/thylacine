@@ -16,7 +16,7 @@ locks: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md section 5.5", "docs/IDENTITY-DESIGN.md section 9.8", "specs/corvus.tla", "specs/handles.tla"]
 created: 2026-08-02
-updated: 2026-09-23
+updated: 2026-09-24
 ---
 ## Graphical grant commit
 
@@ -66,10 +66,17 @@ guard fires where the old one did not, is in [[abi-caps]].
 unpuppetable ((U) F1, 2026-09-23).** The header comment beside `CAP_TCB_DIAL`
 used to say the hole in this reasoning was open; it is now closed, and the fix
 lives nowhere near this file. Because the home proxy runs AS the user, the user's
-own shell is the same principal, and [[inv-i39]]'s debug gate admits an OWNER --
-so the shell could debug-attach the proxy and drive its transport without ever
-holding bit 14. Closed by `SPAWN_PERM_SEAL` on the proxy's spawn
-([[sub-kernel-syscall-dispatch]], [[sub-stratum-session]]).
+own shell is the same principal, and [[inv-i39]]'s debug gate admitted an OWNER
+outright when this was written -- so the shell could debug-attach the proxy and
+drive its transport without ever holding bit 14. **TWO independent answers close
+it now**, and the audit of 2026-09-24 caught this paragraph naming only one:
+`SPAWN_PERM_SEAL` on the proxy's spawn ([[sub-kernel-syscall-dispatch]],
+[[sub-stratum-session]]), and the capability-cover rule on the owner axis
+([[sub-kernel-devproc]], DEBUG-FS-DESIGN 3.1), which refuses the attach on
+authority because the shell lacks exactly bit 14. The seal is kept as the second
+answer, not made redundant: it is the one that still holds between peers of EQUAL
+authority, and a caps-0 NATIVE fork of the proxy is covered by every
+same-principal peer while still holding the parent's handles.
 
 The transferable lesson, and the reason it is recorded HERE rather than only at
 the fix: **granting a capability to a process that shares a principal with an
@@ -78,6 +85,19 @@ attacker from driving that process.** A capability answers "who may act"; it say
 nothing about who may act THROUGH the actor. Any future fork-grantable bit handed
 to a service that runs as a user inherits this whole problem, and the checklist
 is two items, not one: give it the bit, and make it untraceable.
+
+**And cover does not retire that second item -- it cannot see most of what is
+worth stealing.** The cover rule is a subset test over the `caps` word alone,
+while authority also lives in the `proc_flags` spawn perms
+(`PROC_FLAG_MAY_POST_SERVICE`, `SESSION_HANGUP`), the [[inv-i34]] hardware
+allowance, and the handle table. So a peer with EQUAL caps and FEWER perms
+covers, and debugging hands it the perms. Read the checklist as: give it the
+bit, and make it untraceable **whenever the bit is not a capability either** --
+a `SPAWN_PERM_*` granted to a Proc that runs as a user needs `SPAWN_PERM_SEAL`
+in the same `.perm()` call, because cover is blind to the thing just granted.
+Live instance, self-found at the 2026-09-24 close and OPEN: the Halcyon session
+compositor holds `MAY_POST_SERVICE` with the shell's own cap mask and no seal,
+so any tile program covers it exactly.
 
 Round 2 added a third item, from `kernel/proc.c`: **make the seal visible before the
 identity that would admit an attacker.** `proc_apply_identity` publishes

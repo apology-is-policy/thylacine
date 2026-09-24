@@ -1048,7 +1048,9 @@ size_t devproc_imperium_read_gated(const struct Proc *caller, struct Proc *targe
 
 // prowl-3b (prowl-5 F4): the OQ-4-gated sched read, factored out so the unit
 // suite can exercise the DENY wiring with a synthetic (caller, target) pair --
-// the in-kernel test runner is always kproc (CAP_ALL, always CAP_HOSTOWNER), so
+// the in-kernel test runner is always kproc, which holds CAP_ALL and is therefore
+// the OWNER of every Proc it can name (CAP_ALL excludes every elevation-only bit,
+// CAP_HOSTOWNER included -- it passes on the owner axis, not the cap axis), so
 // the deny leg is otherwise unreachable in-unit and a wiring regression (drop the
 // gate) would leave every test green. Sets *denied on an OQ-4 denial (caller
 // neither owner nor CAP_HOSTOWNER), returns 0, and formats NOTHING (no partial
@@ -1351,7 +1353,14 @@ bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *targ
     // That now covers the TARGET's set too, not just the caller's.
     caps_t caller_caps = __atomic_load_n(&caller->caps, __ATOMIC_ACQUIRE);
     bool axis = false;
-    if (caller->principal_id == target_principal) {                     // owner-rwx on 0600
+    if (caller == target) {
+        // Reflexive BY CONSTRUCTION, and load-bearing as a short-circuit rather
+        // than a comment: cover for a self-read would otherwise be two separate
+        // loads of the SAME word, so a peer thread's proc_become_legate landing
+        // between them could refuse a Proc access to ITSELF (reachable -- kstack
+        // and wait carry no stopped-only requirement). Cannot widen anything.
+        axis = true;
+    } else if (caller->principal_id == target_principal) {              // owner-rwx on 0600
         // The capability-cover rule (DEBUG-FS-DESIGN 3.1, scripture 389c06b9;
         // Linux's cap_ptrace_access_check): the owner axis admits only when the
         // caller's authority COVERS the target's. A debug attach is TOTAL
@@ -2382,7 +2391,8 @@ static int devproc_kstack_walk_cb(struct Proc *target, void *arg) {
     // I-16 (8b-1d holotype F1): raw slid kernel addresses reveal the KASLR slide, so
     // they go ONLY to the CAP_DEBUG/CAP_HOSTOWNER tier (the /ctl/kernel-base tier);
     // the owner axis gets the KASLR-independent symbolic form. Same acquire-load of
-    // caps as devproc_debug_authorized (both axes are clearance-grantable).
+    // caps as devproc_debug_authorized. (Not "both axes are clearance-grantable":
+    // CAP_HOSTOWNER is console-gated ADMIN_ELEVATE, outside CAP_GRANTABLE_CLEARANCE.)
     bool raw = (__atomic_load_n(&k->caller->caps, __ATOMIC_ACQUIRE)
                 & (CAP_HOSTOWNER | CAP_DEBUG)) != 0;
     k->total  = devproc_format_kstack(target, k->buf, k->cap, raw);

@@ -258,9 +258,41 @@ sealing every elevation (misses any future non-legate cap holder), ancestors-onl
 (does not cover the sub-shell, which descends from the user's own shell), and
 keeping the Plan 9 same-user reading (which has no capabilities to reason about).
 The seal is not made redundant — it still owns secrets an *equal*-authority peer
-must not read — but decision A (does the seal cross `fork`) now shrinks to that
-residue, since a forked child inherits its parent's caps and is already covered.
-**Owed: the audit round**, batched with B's on this branch, before main merges.
+must not read. **Decision A does NOT shrink, and the draft that said it did was
+wrong**: native fork passes `CAP_NONE` (`rfork_forked`, `kernel/proc.c:1867-1880`),
+so only a Linux-phenotype child inherits caps. A native forked child of a sealed
+Proc holds caps 0 — covered by every same-principal peer — while keeping the
+parent's inherited handles, so the cover rule does nothing for it and only the seal
+could. A is load-bearing (audit F3).
+**Audit round** (Opus fallback -- Fable was out of credits, and a fallback round
+that finishes is closed): 0 P0 / 1 P1 / 3 P2 / 6 P3, all dispositioned. The round
+falsified three things this chunk's own prose asserted: that the rule "closes the
+class" (it closes the post-elevation half; the pre-elevation injection window
+survives, F1), that a forked child inherits caps (false natively, F3), and two
+`caps.h`/`syscall.h` comments that still described the pre-rule behaviour (F2).
+Wording narrowed and comments corrected here; the debug-taint mechanism and the
+`environ` disclosure axis are enqueued as their own chunks. The reviewer notes a
+Fable round on these two chunks would still be worth having.
+**A fourth overclaim was self-found at the close**, by hunting the round's
+falsified claims through the vault rather than only the code: the rule
+"generalises" the (U) F1 answer along the CAPABILITY axis alone. Cover is a
+subset test over one word, while authority also lives in the `proc_flags` spawn
+perms, the I-34 allowance and the handle table. The live instance is the Halcyon
+session compositor -- login gives `/bin/halcyond` the shell's own `SHELL_CAPS`
+plus `MAY_POST_SERVICE` and no seal, and halcyond masks its tile children with
+`!CAP_SET_IDENTITY`, which spawn intersects to the same set, so a tile program
+covers the compositor exactly. Not a trusted-path break (the Lictor seat
+*service* is kernel-sealed at its bind; halcyond is only the untrusted seat
+client) and not a regression (identity alone admitted before). Scripture
+narrowed here and in DEBUG-FS 3.1; the one-line `SPAWN_PERM_SEAL` fix is the
+operator's vote, because it makes halcyond undebuggable mid-arc.
+**Verified RED-first in three legs** so each test reds for its own cause rather
+than for the other's: reverting the cover subset test reds
+`devproc.debug_cap_cover_predicate` + `devproc.debug_cap_cover_attach` and
+nothing else (`debug_authorized_predicate` and `9p_srvconn_transport.cape_attach`
+stay green); removing the `9p_attach` fail-closed guard reds `cape_attach` alone
+(both cover tests stay green); canonical is **1659/1659 PASS**, 0 FAIL lines, no
+source newer than the built ELF.
 
 ## Haul completion integration — 2026-09-17
 

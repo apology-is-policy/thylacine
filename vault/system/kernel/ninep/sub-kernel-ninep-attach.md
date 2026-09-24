@@ -47,9 +47,26 @@ which is how every real mount (Stratum system FS, per-user homes, netd
 - `srvconn_attach_dev9p_root(cn, aname, aname_len, who, flags, out_err)`
   → the dev9p root Spoor over a SrvConn, or NULL. `who` is the attaching
   Proc (its principal names the Tattach; with the cape, its principal and
-  primary gid own every file); `flags` is the `/srv` attach's word, already
-  validated by the syscall, whose one bit is `SYS_ATTACH_9P_LOOSE`; no bit of
-  it capes the session. A NULL `cn` or `who` answers `-T_E_INVAL`.
+  primary gid own every file); `flags` is the `/srv` attach's word, whose one
+  admissible bit is `SYS_ATTACH_9P_LOOSE`; no bit of it capes the session. A
+  NULL `cn` or `who` answers `-T_E_INVAL`.
+
+  **The helper VALIDATES that word itself (audit F5, 2026-09-24)** rather than
+  trusting the syscall to have done it, so the admissible domain is the helper's
+  own property: `sys_attach_9p_flags_ok(flags, srv=true)` fails closed with
+  `-T_E_INVAL` before anything is built. What that catches is precisely a word
+  the `/srv` handler would not have admitted -- the CAPE bit, whose meaning
+  belongs to the OTHER attach handler, and any unknown bit. It does NOT catch an
+  unvalidated `LOOSE`, which is legal here and so indistinguishable from a
+  validated one; the header's older claim that it did was corrected with the
+  guard. It never fires for the two production callers (devsrv's literal `0`,
+  and a word `syscall.c` already validated). Guard:
+  `9p_srvconn_transport.cape_attach` asserts the refusal BY ERRNO for both the
+  cape bit and an unknown bit, with an `SC_ERR_UNSET` sentinel so a fixture that
+  never reached the call cannot satisfy the negative, plus the admitted control
+  one variable away. That leaves `{0, LOOSE}` as the whole admissible domain and
+  both members are asserted not to cape, so "no flag word capes a /srv session"
+  is now covered over the entire domain rather than sampled.
 
 ## Mechanism
 

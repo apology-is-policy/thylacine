@@ -77,6 +77,29 @@ disjoint / both cap-axis overrides / `CAP_DAC_OVERRIDE` / NOTRACE-over-cover) an
 `devproc.debug_cap_cover_attach` (the same rule end-to-end through the `attach`
 verb, a SEPARATE test so a predicate regression cannot hide the real path's).
 
+**A self-read short-circuits BEFORE cover (audit F7).** `caller == target` sets
+the axis by construction rather than computing cover, because for a self-read the
+two sides are two separate ACQUIRE loads of the SAME word: a peer thread's
+`proc_become_legate` landing between them could refuse a Proc access to ITSELF,
+which is reachable since `kstack` and `wait` carry no stopped-only requirement.
+It cannot widen anything. The cross-Proc torn pair is sound in the other
+direction and deliberately so -- the caller is read first and caps on a live Proc
+only grow, so the race can manufacture a false REFUSAL but never a false
+admission.
+
+**Three things cover does NOT close**, recorded here because each looks like an
+oversight to a reader who expects a total rule (DEBUG-FS-DESIGN 3.1 carries the
+full argument). (1) It is POINT-IN-TIME: nothing records that a Proc *was*
+debugged, so an equal-authority peer may attach before a target redeems a grant
+and inject into the pre-elevation window -- Linux's other half, a monotonic debug
+taint refusing the privilege gain, is not implemented. (2) It governs CONTROL,
+not DISCLOSURE: `environ`, `sched` and `imperium` still gate on
+`devproc_owner_or_hostowner`, which weighs neither caps nor the seam. (3) It is a
+subset test over the `caps` word ALONE, so `proc_flags` spawn perms, the
+[[inv-i34]] allowance and the handle table are invisible to it -- see
+[[sub-kernel-caps]] for the checklist that follows. All three are tracked, none
+is a regression, and all three were in scripture before this dossier said so.
+
 **What the seam does NOT cover, measured rather than assumed.** Inspection is
 re-gated per operation (mem, regs, fpregs, hwbreak, hwwatch, step, kstack, wait).
 **Run control is NOT**: `devproc_runctl_walk_cb` gates stop/start/waitstop/exitkill

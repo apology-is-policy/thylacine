@@ -22,6 +22,110 @@ needed the operator.
 
 
 ---
+## 2026-09-24, mid (aux, Opus 5 1M, effort max) -- the audit round that falsified my own prose three times
+
+**The round ran on the fallback tier, and that is the whole point of it.** Fable
+5.1 died of credit exhaustion partway in with no report. The binding rule says a
+round is never skipped for want of Fable and a credit death goes straight to the
+fallback, so it re-spawned on Opus with explicit framing: family diversity is
+forfeited this round, context independence is not, so RE-DERIVE every load-bearing
+claim from the code rather than accepting comments or commit bodies written in the
+very commits under review. It returned 0 P0 / 1 P1 / 3 P2 / 6 P3 -- and it used
+exactly the property it was told it had. **Three of the findings are claims my own
+prose asserted and the code contradicts.**
+
+**F3, the one that mattered.** I had written in scripture, and told the operator,
+that a forked child inherits its parent's caps and is therefore already covered by
+the new rule -- so decision A (does the seal cross `fork`) had shrunk to a residue.
+False. `rfork_forked` passes `CAP_NONE` (`kernel/proc.c:1867-1880`), and the kernel
+says so in its own prose at `:1879`: native fork ZEROES caps, and only the
+phenotype clone path inherits. So a native forked child of a sealed Proc holds caps
+0 -- trivially covered by every same-principal peer -- while still holding the
+parent's inherited HANDLES, because a transport is a handle and not a capability.
+The cover rule does nothing for that child. **A is load-bearing, not residual**, and
+the recommendation I gave survives on a stronger footing than the one I gave it on.
+Corrected in DEBUG-FS 3.1, phase7-status, and to the operator directly.
+
+**F1 [P1], the limit that scripture had papered over.** Cover is evaluated at the
+instant of the call and nothing records that a Proc *was* debugged. So an
+equal-authority peer attaches to `/bin/imperium` BEFORE it redeems -- its caps are
+then a subset of the peer's, so cover admits -- stops it while it blocks on the
+deferred SAK reply, writes a return address, and detaches; the redeem consults no
+debug state and returns through the injected control flow holding the clearance.
+The chunk NARROWS (pre-change the peer could simply attach to the elevated shell
+afterwards, which is strictly easier); what promoted this above a footnote is that
+the chunk's own scripture had asserted the class was closed. The wording is fixed
+everywhere it was written; the mechanism -- Linux's other half, a monotonic debug
+taint that refuses the privilege gain -- is enqueued and needs the operator,
+because it gates the IMPERIUM redeem.
+
+**F4, settled by measurement rather than by argument.** `cfadd242` justified
+withdrawing a syscall flag without escalating a format break with "it lands before
+the first push", which the reviewer correctly called unsupportable from the tree --
+the commit that ADDED the flag is in `origin/aux-3`'s history. The checkable fact
+was in this session and not available to it: both mirrors sat at `1622ae1a`,
+ls-remote-verified, immediately before the single push that carried the flag's
+introduction AND its withdrawal together. No published tip ever offered it, so no
+consumer could have built against it. `IDENTITY-DESIGN.md` now states the
+measurement instead of the premise.
+
+**The self-audit found a fourth overclaim the round could not.** The round's scope
+was the two commits' files; I hunted its falsified claims through the VAULT as
+well, and `sub-kernel-caps.md:70` still carried F2's claim in a second copy,
+attributing the (U) F1 closure to the seal alone. Pulling that thread produced the
+real finding: **cover is a subset test over the `caps` word, and authority also
+lives in the `proc_flags` spawn perms, the I-34 allowance, and the handle table.**
+Every premise checked in the tree rather than assumed -- login spawns
+`/bin/halcyond` with `.caps(SHELL_CAPS)` + `MAY_POST_SERVICE` and NO seal
+(`usr/login/src/main.rs:1374-1385`), halcyond masks its tile children with
+`!T_CAP_SET_IDENTITY` (`usr/halcyond/src/session.rs:356`), spawn intersects that
+with the parent's actual caps (`kernel/syscall.c:8818`), so a tile child's caps
+equal the compositor's EXACTLY, and same-principal is guaranteed because halcyond
+holds no `CAP_SET_IDENTITY` and cannot spawn under another identity. Cover admits;
+a tile program can debug the session compositor and take its posting perm and
+every other tile's surface.
+
+**The wrong turn inside that finding, caught by looking.** I first read this as an
+I-27 trusted-path break and was ready to write it up as one. It is not:
+`proc_set_seat_service` stamps `NODUMP | NOTRACE` on the seat SERVICE before its
+first EL0 instruction (`kernel/proc.c:2536`), and halcyond is only the seat CLIENT,
+which `proc.c:2543` calls untrusted by design. Checking beat asserting, and the
+finding that survived is the narrower true one. What makes it a defect rather than
+"same user, no isolation expected" is that the project had already written the rule
+down: `sub-kernel-caps.md` says the checklist is "two items, not one: give it the
+bit, and make it untraceable." `MAY_POST_SERVICE` went to a service that runs as
+the user and the second item was not done.
+
+**F5's fix broke a green test, and the break was the useful part.** The fail-closed
+`sys_attach_9p_flags_ok` at the `/srv` helper's top meant the existing
+`cape_attach` leg -- which hands the helper `SYS_ATTACH_9P_CAPE` and asserted it
+ATTACHES while capeing nothing -- could no longer reach the property it was
+guarding. Rewritten to assert the refusal BY ERRNO with an `SC_ERR_UNSET` sentinel,
+so a fixture that never reached the call cannot satisfy the negative, plus an
+unknown-bit leg. Coverage went UP: `{0, LOOSE}` is now the whole admissible domain
+and both members are asserted not to cape, where before the property was sampled.
+Re-reading F5's own comment while there, it overstated what the guard buys -- it
+does NOT stop an unvalidated `LOOSE`, which is legal at this handler and
+indistinguishable from a validated one. Corrected, in the same class as the F2/F10
+comments the round caught.
+
+**Verification, RED-first in three legs rather than one.** A combined sabotage
+would have proven detection and not discrimination, so each mechanism was reverted
+alone: reverting the cover subset test reds `devproc.debug_cap_cover_predicate` and
+`devproc.debug_cap_cover_attach` and nothing else, with `debug_authorized_predicate`
+and `cape_attach` staying green; removing the `9p_attach` guard reds `cape_attach`
+alone with both cover tests green; canonical is 1659/1659 PASS with zero FAIL lines
+and no source newer than the built ELF. F6's premise -- that an UNTOUCHED kproc
+caller already fails cover against a `CAP_KILL` target, because `CAP_KILL` is
+elevation-only and outside `CAP_ALL` -- held, which is why that leg needs no caller
+mutation and is better discrimination for it.
+
+**Still the operator's, none of it assumed:** the seal's contract (cannot be DRIVEN
+vs cannot be EXTRACTED FROM), decision A (yes, and now load-bearing), the debug
+taint at the redeem, and the one-line seal on halcyond whose cost is an
+undebuggable compositor mid-arc.
+
+---
 ## 2026-09-24, early (aux, Opus 5.5 1M, effort max) -- the seal, renamed before anyone could depend on it
 
 **The operator's three answers.** Asked where things stood, the operator said

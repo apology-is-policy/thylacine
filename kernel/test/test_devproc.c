@@ -1152,12 +1152,20 @@ void test_devproc_debug_cap_cover_attach(void) {
     const long an = (long)sizeof(attach_cmd) - 1;
     const long dn = (long)sizeof(detach_cmd) - 1;
 
-    // The caller is the LIVE test Proc, so its caps are saved and restored BEFORE
-    // any assertion -- TEST_ASSERT returns, and leaking a zeroed cap set into the
-    // rest of the suite would be a fixture that generates its own bugs.
+    // The caller is the LIVE runner Proc (kproc), so its caps are saved and
+    // restored BEFORE any assertion -- TEST_ASSERT returns, and leaking a
+    // narrowed cap set into the rest of the suite would be a fixture that
+    // generates its own bugs.
     caps_t saved = __atomic_load_n(&caller->caps, __ATOMIC_ACQUIRE);
+    // The premise the refusal leg rests on, asserted rather than assumed (before
+    // any mutation, so this return is clean): CAP_KILL is elevation-only and so
+    // excluded from CAP_ALL, which is the runner's set. The refusal leg therefore
+    // needs NO caller mutation at all -- an untouched caller already fails cover
+    // against this target, which is strictly better discrimination, because
+    // nothing the fixture did can be blamed for the refusal.
+    TEST_ASSERT((saved & CAP_KILL) == 0,
+                "premise: the runner lacks the target's CAP_KILL (else the refusal is vacuous)");
 
-    __atomic_store_n(&caller->caps, (caps_t)0, __ATOMIC_RELEASE);
     struct Spoor *ctl = open_ctl_for_pid(elev->pid);
     long bare_ret  = ctl ? devproc.write(ctl, attach_cmd, an, 0) : -2;
     void *bare_own = ctl ? (void *)elev->debug_owner : (void *)-1;
@@ -1165,8 +1173,11 @@ void test_devproc_debug_cap_cover_attach(void) {
 
     // The control, one variable away: the SAME caller and target, caps now
     // covering. Without it, a broken fixture (an unopenable ctl, a dead target)
-    // would satisfy the refusal above on its own.
-    __atomic_store_n(&caller->caps, (caps_t)CAP_KILL, __ATOMIC_RELEASE);
+    // would satisfy the refusal above on its own. WIDENS the shared runner set by
+    // the one elevation-only bit rather than replacing it, so the window cannot
+    // strip CAP_HW_CREATE / CAP_TCB_DIAL / CAP_CSPRNG_READ from a kproc-context
+    // path running beside it.
+    __atomic_store_n(&caller->caps, saved | (caps_t)CAP_KILL, __ATOMIC_RELEASE);
     long cover_ret  = ctl ? devproc.write(ctl, attach_cmd, an, 0) : -2;
     void *cover_own = ctl ? (void *)elev->debug_owner : (void *)-1;
     if (ctl && cover_ret == an) (void)devproc.write(ctl, detach_cmd, dn, 0);

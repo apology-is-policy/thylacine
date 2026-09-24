@@ -275,7 +275,7 @@ travel with every mount. Two ways to set it, one per kind of attach:
   plain `mount /srv/NAME` needs no option.
 
 `SYS_ATTACH_9P_SRV` refuses `SYS_ATTACH_9P_CAPE` like any unknown bit
-(operator decision 2026-09-24, taken before the flag was ever pushed). Over
+(operator decision 2026-09-24; the flag was never a published TIP -- both mirrors sat at `1622ae1a` immediately before the single push that carried its introduction and its withdrawal together, ls-remote-verified, and no caller ever passed it, so withdrawing it broke no consumer). Over
 `/srv` the cape is the exporter's decision alone: the helper both `/srv` attach
 paths share reads the service's mark and nothing else, so no audit of the cape
 has to reason about an option the attacher chooses. The cost is a caped mount

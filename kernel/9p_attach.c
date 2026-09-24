@@ -328,6 +328,18 @@ struct Spoor *srvconn_attach_dev9p_root(struct SrvConn *cn,
                                         int *out_err) {
     if (out_err) *out_err = 0;
     if (!cn || !who) { if (out_err) *out_err = -T_E_INVAL; return NULL; }
+    // The header calls `flags` the VALIDATED word; enforce that here rather than
+    // trusting it, so the helper's admissible domain is its own property. What
+    // this catches is precisely a word the /srv handler would NOT have admitted:
+    // the CAPE bit, whose meaning belongs to the OTHER attach handler, and any
+    // unknown bit. It does NOT catch an unvalidated LOOSE -- that bit is legal
+    // here, so a raw LOOSE and a validated one are indistinguishable by
+    // construction. Fails closed, and never fires for the two current callers
+    // (devsrv's literal 0, and a word syscall.c already validated).
+    if (!sys_attach_9p_flags_ok(flags, /*srv=*/true)) {
+        if (out_err) *out_err = -T_E_INVAL;
+        return NULL;
+    }
     // A byte conn minted from a DMSRVCAPE service capes EVERY attach over it:
     // its poster, the server's own side, declared the server's ids foreign
     // (IDENTITY-DESIGN 3.2). That mark is the ONLY input: no bit of `flags`

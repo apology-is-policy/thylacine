@@ -219,15 +219,21 @@ typedef u64 caps_t;
 // check -- the proxy and the user's shell are the same principal.
 //
 // But do NOT read that as "only a capability can separate them" in general: it
-// is false, and the audit caught the claim. The I-39 debug surface separates on
-// IDENTITY (devproc_debug_authorized's owner axis), so the same principal can
-// attach to the proxy and drive its transport without ever holding this bit.
-// That route predates this gate and is closed, in the same chunk but not by
-// anything here, by SPAWN_PERM_SEAL: login spawns the proxy with the bit and
-// the kernel stamps PROC_FLAG_NOTRACE before its first EL0 instruction. The
-// general tension -- same principal, different authority -- survives, and the
-// PLANNED /proc/<pid>/fd/ surface (deferred at devproc.c:27) would reopen it on
-// the owner axis, where NOTRACE does not reach.
+// is false, and the audit caught the claim. The I-39 debug surface USED to
+// separate on IDENTITY alone (devproc_debug_authorized's owner axis), so the same
+// principal could attach to the proxy and drive its transport without ever
+// holding this bit. TWO answers now close that, and they are independent:
+//   - the capability-cover rule (2026-09-24, DEBUG-FS-DESIGN 3.1): the owner axis
+//     admits only while the caller's caps COVER the target's, and the user's
+//     shell lacks exactly this bit -- so the attach is refused on authority;
+//   - SPAWN_PERM_SEAL, the defense in depth: login spawns the proxy with the bit
+//     and the kernel stamps PROC_FLAG_NOTRACE before its first EL0 instruction.
+// The general tension -- same principal, different authority -- survives, and a
+// FUTURE surface that reads a target through an IDENTITY-only gate reopens it.
+// The PLANNED /proc/<pid>/fd/ surface (deferred at devproc.c:27) is safe only if
+// it routes through devproc_debug_authorized (which now weighs caps AND the
+// NOTRACE seam) and NOT through devproc_owner_or_hostowner, which weighs
+// neither -- the live instance of that hazard being /proc/<pid>/environ.
 //
 // Being fork-grantable, this bit is NOT auto-stripped at fork: every spawn mask
 // that must not confer the dial has to omit it deliberately. That is a standing

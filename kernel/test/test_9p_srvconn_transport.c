@@ -37,6 +37,7 @@
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
 #include <thylacine/devsrv.h>
+#include <thylacine/errno.h>
 #include <thylacine/handle.h>
 #include <thylacine/loom.h>
 #include <thylacine/dev9p.h>
@@ -931,12 +932,15 @@ void test_9p_srvconn_transport_pts_slave_spoor_classifies_t(void) {
 // =============================================================================
 // 9p_srvconn_transport.cape_attach -- the identity cape (IDENTITY-DESIGN 3.2)
 // through srvconn_attach_dev9p_root, the helper both /srv attach paths share.
-// A conn from a DMSRVCAPE service capes the attach, and nothing else does: the
-// cape flag handed to the helper capes nothing (cape_attach), and
-// SYS_ATTACH_9P_SRV refuses it (cape_attach_srv, a separate test so that a
-// failure in one half cannot hide the other's). A caped Tattach names no user.
-// The control leg (plain service, no flag) asserts the attacher's principal and
-// leaves the session uncaped. Replies are pre-staged.
+// A conn from a DMSRVCAPE service capes the attach, and nothing else does. The
+// helper validates its own word (audit F5), so the cape bit is REFUSED here
+// rather than merely ignored, and SYS_ATTACH_9P_SRV refuses it a second time
+// (cape_attach_srv, a separate test so that a failure in one half cannot hide
+// the other's). That leaves {0, LOOSE} as the whole admissible domain, and both
+// members are asserted not to cape -- so "no flag word capes a /srv session" is
+// covered over the entire domain rather than sampled. A caped Tattach names no
+// user. The control leg (plain service, no flag) asserts the attacher's
+// principal and leaves the session uncaped. Replies are pre-staged.
 // =============================================================================
 
 static u32 sc_le32(const u8 *p) {
@@ -961,13 +965,19 @@ static u32 sc_sent_n_uname(struct SrvConn *cn) {
     return sc_le32(t + o);
 }
 
+// A refusal must be distinguishable from a fixture that never reached the call:
+// `attached == false` alone is satisfied by an unopenable pair, so the err the
+// helper returned is carried out too, and SC_ERR_UNSET means the call never ran.
+enum { SC_ERR_UNSET = 0x7F };
+
 struct sc_cape_seen {
     bool attached, cape, loose;
     u32  uid, gid, n_uname;
+    int  err;
 };
 
 static struct sc_cape_seen sc_cape_attach(bool service_cape, u32 flags) {
-    struct sc_cape_seen r = { false, false, false, 0, 0, 0 };
+    struct sc_cape_seen r = { false, false, false, 0, 0, 0, SC_ERR_UNSET };
     srv_registry_reset();
     struct Proc *server = NULL, *client = NULL;
     int svc_h = -1, conn_h = -1;
@@ -980,6 +990,7 @@ static struct sc_cape_seen sc_cape_attach(bool service_cape, u32 flags) {
         sc_stage_reply(cn, P9_TATTACH, 0) == 0) {
         int err = 0;
         struct Spoor *root = srvconn_attach_dev9p_root(cn, NULL, 0, client, flags, &err);
+        r.err = err;
         if (root) {
             struct dev9p_priv *rp = dev9p_priv_of(root);
             r.attached = rp != NULL;
@@ -1003,7 +1014,7 @@ static struct sc_cape_seen sc_cape_attach(bool service_cape, u32 flags) {
 // byte-mode gate on a raw conn marked by hand. `attached` stays false unless the
 // mark took, so the leg cannot pass on an unmarked conn.
 static struct sc_cape_seen sc_cape_attach_marked_9p_conn(void) {
-    struct sc_cape_seen r = { false, false, false, 0, 0, 0 };
+    struct sc_cape_seen r = { false, false, false, 0, 0, 0, SC_ERR_UNSET };
     struct Proc *client = make_test_proc();
     if (!client) return r;
     client->principal_id = 0x1234u;
@@ -1039,7 +1050,7 @@ extern s64 sys_attach_9p_srv_for_proc(struct Proc *p, u64 srv_fd_raw,
 // helper, and a refused word sends nothing (n_uname stays the 0xBAD0 no-frame
 // sentinel). *ret is the syscall's answer.
 static struct sc_cape_seen sc_srv_syscall_attach(bool service_cape, u64 flags, s64 *ret) {
-    struct sc_cape_seen r = { false, false, false, 0, 0, 0 };
+    struct sc_cape_seen r = { false, false, false, 0, 0, 0, SC_ERR_UNSET };
     *ret = 0x7BAD;
     srv_registry_reset();
     struct Proc *server = NULL, *client = NULL;
@@ -1081,13 +1092,23 @@ void test_9p_srvconn_transport_cape_attach(void) {
     TEST_EXPECT_EQ((u64)r.gid, (u64)0x5678u, "the cape's group is the attacher's primary");
     TEST_EXPECT_EQ((u64)r.n_uname, (u64)PRINCIPAL_NONE, "a caped Tattach names no user");
 
+    // The helper validates its own word (F5): the cape bit is the other attach
+    // handler's, so /srv refuses it outright. Asserted by ERRNO, not by absence
+    // -- a broken fixture would satisfy !attached on its own, and SC_ERR_UNSET
+    // would then say the helper was never reached at all.
     r = sc_cape_attach(false, SYS_ATTACH_9P_CAPE);
-    TEST_ASSERT(r.attached, "attach with the cape flag handed to the helper");
-    TEST_ASSERT(!r.cape, "the cape flag capes no /srv session: the poster decides");
-    TEST_EXPECT_EQ((u64)r.n_uname, (u64)0x1234u, "flag, plain service: the attacher's principal");
+    TEST_ASSERT(!r.attached, "the helper refuses the cape flag: /srv capes by mark alone");
+    TEST_EXPECT_EQ((u64)(s64)r.err, (u64)(s64)-T_E_INVAL, "refused as invalid, and the call did run");
+
+    // An unknown bit is refused by the same gate -- the case F5 exists for, a
+    // future caller handing the helper a word it never validated.
+    r = sc_cape_attach(false, 0x4u);
+    TEST_ASSERT(!r.attached, "the helper refuses an unknown flag bit");
+    TEST_EXPECT_EQ((u64)(s64)r.err, (u64)(s64)-T_E_INVAL, "unknown bit: refused as invalid");
 
     r = sc_cape_attach(false, 0);
     TEST_ASSERT(r.attached, "plain attach (control)");
+    TEST_EXPECT_EQ((u64)(s64)r.err, (u64)0, "the admitted control returns no error");
     TEST_ASSERT(!r.cape, "no flag, plain service: uncaped");
     TEST_EXPECT_EQ((u64)r.n_uname, (u64)0x1234u, "uncaped: the attacher's principal (A-3 M4)");
 

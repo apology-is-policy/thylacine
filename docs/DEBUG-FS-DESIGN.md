@@ -153,7 +153,48 @@ is the same principal"). Concretely, before this rule:
 - the same route is the general form of the (U) F1 side door, which
   `SPAWN_PERM_SEAL` closed for login's home proxy alone: a capability
   (`CAP_TCB_DIAL`) is worthless if a peer *sharing the principal* can puppet the
-  holder. F1 sealed one asset; this rule closes the class.
+  holder. F1 sealed one asset; this rule generalises the answer **along the
+  capability axis** — see the third bullet below for the axes it does not reach.
+
+**What this rule does NOT close, stated so the next reader does not over-trust it**
+(audit 2026-09-24, findings F1 and F8; the third bullet self-found at the close):
+
+- **The pre-elevation window.** Cover is evaluated at the instant of the call, and
+  nothing records that a target *was* debugged. A same-principal peer of EQUAL
+  authority may attach to `/bin/imperium` *before* it redeems — at that moment its
+  caps are a subset of the peer's, so cover admits — stop it while it blocks on the
+  deferred SAK reply, write its writable memory, and detach. The redeem then
+  proceeds and returns through the injected control flow, holding the clearance.
+  `cap_redeem_grant_for_writer` and `proc_become_legate` consult no debug state of
+  the writer. So the rule closes debugging *the result* of an elevation, never
+  debugging *its precursor*. The missing half is the other half of Linux's model —
+  a monotonic debug taint that refuses the privilege gain — tracked as its own
+  chunk; until then the trusted panel's correct-pid display is the only defense
+  inside that window, which is why it is load-bearing and not cosmetic.
+- **Disclosure through identity-only surfaces.** `/proc/<pid>/environ`, `sched` and
+  `imperium` gate on `devproc_owner_or_hostowner`, which weighs neither caps nor
+  the NOTRACE seam, and `maps` is mode 0444. So an unelevated peer still READS an
+  elevated same-principal target — `environ` being the one that matters, since it
+  is where secrets live by convention. This rule governs *control*, not
+  *disclosure*; disclosure is the seal's axis, and the seal does not reach those
+  files either. Tracked.
+- **Authority that is not a capability.** Cover is a subset test over ONE word,
+  and Thylacine carries authority in three other places: the `proc_flags` spawn
+  perms (`PROC_FLAG_MAY_POST_SERVICE`, `SESSION_HANGUP`,
+  `MAY_RAISE_PAGE_BUDGET`), the I-34 hardware allowance, and the handle table —
+  a transport, an endowed fd or a surface share is a handle, never a cap. A
+  same-principal peer holding *equal caps* and *fewer perms* therefore covers,
+  and debugging hands it the perms. The live instance is the Halcyon session
+  compositor: login spawns `/bin/halcyond` with the shell's own `SHELL_CAPS`
+  plus `MAY_POST_SERVICE`, halcyond masks its tile children with
+  `!CAP_SET_IDENTITY` (which spawn intersects to the same set), so a tile
+  program's caps equal the compositor's exactly and it carries no seal. This is
+  *not* a trusted-path break — the Lictor seat **service** is kernel-sealed at
+  its bind, and halcyond is only the untrusted seat client — and it is not a
+  regression, since identity alone admitted before this rule. But it means the
+  (U) F1 checklist is **not superseded** by cover: a `SPAWN_PERM_*` bit handed
+  to a Proc that runs as a user still needs `SPAWN_PERM_SEAL` in the same call,
+  because cover cannot see the bit that was just granted. Tracked.
 
 **Prior art.** Linux's `cap_ptrace_access_check` refuses when the tracee's
 permitted set is not a subset of the tracer's, unless the tracer holds
@@ -195,10 +236,19 @@ between them.
 
 **What the seal still owns.** `SPAWN_PERM_SEAL` (NOTRACE + NODUMP) is *not*
 made redundant: it protects secrets an **equal-authority** peer must not read —
-seat key material, a proxy's keys — exactly the case the cover rule admits. It
-does narrow the open "does the seal cross `fork`" question (§F2/decision A) to
-that residue, since a forked child inherits the parent's caps and is therefore
-already covered by this rule.
+seat key material, a proxy's keys — exactly the case the cover rule admits.
+
+**And it does NOT narrow the "does the seal cross `fork`" question (§F2/decision
+A).** An earlier draft of this section claimed it did, on the premise that a forked
+child inherits its parent's caps. That premise is **false for the default path**,
+and the kernel says so at `kernel/proc.c:1879` — "Native fork keeps `CAP_NONE`
+(Thylacine's stronger fork-zeros-caps default) via `rfork_forked`". Only the
+phenotype clone path (`rfork_forked_with_caps`, `PHENO_LINUX`) inherits caps. So a
+**native** forked child of a sealed Proc holds caps 0, which every same-principal
+peer trivially covers, while still holding the parent's inherited *handles* — a
+transport is a handle, not a capability. The cover rule therefore does **nothing**
+for that child, and the seal is the only mechanism that could. Decision A is
+load-bearing, not residual. (Corrected 2026-09-24, audit F3.)
 
 ---
 

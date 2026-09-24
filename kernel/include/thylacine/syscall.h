@@ -2648,10 +2648,16 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, shm)         == 208, "t_pci
 // CAP_TCB_DIAL holder, and in a login session the per-user home proxy is the
 // sole holder. But the proxy runs AS the user (login .identity()s it so the
 // coordinator attributes the user's home files to him), so the user's shell is
-// the SAME principal -- and devproc_debug_authorized's identity axis admits an
-// owner. Without the seal the shell attaches to the proxy and drives its live
-// coordinator transport, reaching the SYSTEM store with no capability at all:
-// the gate would hold at the front door and stand open at the side one.
+// the SAME principal -- and devproc_debug_authorized's owner axis admitted an
+// owner outright when this seal was written. Without it the shell attached to the
+// proxy and drove its live coordinator transport, reaching the SYSTEM store with
+// no capability at all: the gate held at the front door and stood open at the
+// side one. Since 2026-09-24 the owner axis ALSO requires that the caller's caps
+// cover the target's (DEBUG-FS-DESIGN 3.1), which refuses that attach on its own
+// because the shell lacks CAP_TCB_DIAL -- so the seal is now the SECOND of two
+// independent answers, kept because it is the one that still holds between peers
+// of EQUAL authority (a caps-0 native fork of this proxy is covered by every
+// same-principal peer, and only the seal could speak to that).
 //
 // Why spawn-time and not a self-call to SYS_SET_TRACEABLE(0) / SYS_SET_DUMPABLE(0):
 // a self-call is racy. It leaves the child attachable between exec and the call,
