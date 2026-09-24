@@ -9,11 +9,12 @@ code:
   - usr/lib/libt/include/thyla/poll.h
   - usr/lib/libt/src/start.S
   - usr/lib/libthyla-rs/src/lib.rs
+  - usr/lib/libthyla-rs/src/pty_interaction.rs
 audit: hard
 guarded-by: [inv-i5, inv-i13, inv-i32]
 validated-by: [prose, gate-smp, gate-interactive]
 locks: []
-abis: [abi-t-stat, abi-handle-rights, abi-errno]
+abis: [abi-t-stat, abi-handle-rights, abi-errno, abi-pty-interaction]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
@@ -671,3 +672,26 @@ No number changed and no record grew; the operator voted the additive shape
   `sys_walk_create_kname_for_proc` and `sys_attach_9p_srv_for_proc`. Their
   checks repeat the handlers', so the syscall's answers and precedence are
   unchanged ([[sub-kernel-syscall-dispatch]]).
+
+## HI-1 terminal interaction reservation (2026-09-24)
+
+`PTY_INTERACTION_*` in the kernel header and the `T_` mirrors reserve six
+SYS_PTY_REGISTER suboperations 16..21. Existing operations 0..2 and every syscall
+number are unchanged. There is no dispatch implementation yet; the definitions
+alone grant no new authority. Rust exports the pure `pty_interaction` module
+through lib.rs, with `TPtyInteractionState` and `TPtyInteractionCheck`; the C
+names are `t_pty_interaction_state` and `t_pty_interaction_check`.
+
+[[abi-pty-interaction]] pins the complete 80-byte state and 24-byte request,
+every offset and alignment, the version/flag values and positive signed-ID
+ceiling. `tools/test-pty-interaction-abi.py` compiles both actual C headers and
+the standalone Rust module against an independent literal byte fixture. It
+runs on Linux/AArch64 without executing a Thylacine syscall. All three mirrors
+pass (`work/hi1-pty-abi-pi-headers.log`). The preceding attempt lacked the
+isolated staging directory's kernel headers and failed before compilation;
+that failed evidence is retained in `work/hi1-pty-abi-pi.log`.
+
+The approved future contract binds a sealed master holder to a service-poster
+incarnation, observes monotonic foreground epochs and checks a live nominated
+member. This checkpoint does **not** implement those semantics, poll/lifetime
+handling or the Halcyon clipboard transport; no runtime authority test is claimed.

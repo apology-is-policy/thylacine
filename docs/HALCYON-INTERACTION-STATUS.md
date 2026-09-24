@@ -212,3 +212,20 @@ for the host binding announcement (his ScreenErased is 6). His Yip turn 20
 requires taking the newly cleared aux-3 tip after H3+C's sabotage/SMP evidence;
 that SHA is not announced yet. Main's stable tip is 13607e58 (docs only). Keep
 proc lifecycle changes pending that base; ABI/pure source preparation can proceed.
+
+### Terminal ownership ABI checkpoint
+
+The scope contract is committed as `8d59b072`. All three ABI mirrors now reserve
+operations 16..21 and the 80/24-byte records. Compiled kernel C, libt C and Rust
+fixtures match a literal 200-byte oracle on Linux/AArch64
+(`work/hi1-pty-abi-pi-headers.log`). The first attempt failed before compilation
+because the isolated Pi staging directory lacked kernel headers; source headers
+were copied and the successful rerun retained separately. Pi was released.
+No kernel operations or lifecycle hooks are implemented yet.
+
+Self-review corrected the registration path: Halcyon is not a kernel binding
+role, so it cannot read STATE. It sends its actual child PID with the binding
+locator to Tapestry over the declared session connection. Tapestry reads STATE
+as the observer and confirms that exact host before acknowledging registration.
+This keeps the direct role gate intact. Binding IDs are also explicitly capped
+at INT64_MAX to keep success distinct from negative errno results.

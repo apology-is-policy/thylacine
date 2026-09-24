@@ -152,6 +152,67 @@ enum {
 #define T_PTY_REG_SLAVE  1
 #define T_PTY_REG_FREE   2
 
+// HI-1 terminal ownership ABI RESERVATION, not an implemented syscall front.
+// SYS_PTY_REGISTER subops 16..21: docs/HALCYON-INTERACTION-PTY-ABI.md.
+// Existing server-only subops 0..2 keep their contract. Records are little-endian
+// on the native AArch64 ABI. No padding, pointer fields or userspace bearer grant.
+#define T_PTY_INTERACTION_BIND 16u
+#define T_PTY_INTERACTION_UNBIND 17u
+#define T_PTY_INTERACTION_WATCH 18u
+#define T_PTY_INTERACTION_STATE 19u
+#define T_PTY_INTERACTION_ACK 20u
+#define T_PTY_INTERACTION_CHECK 21u
+#define T_PTY_INTERACTION_VERSION 1u
+#define T_PTY_INTERACTION_STATE_BYTES 80u
+#define T_PTY_INTERACTION_CHECK_BYTES 24u
+#define T_PTY_INTERACTION_LIVE 1u
+#define T_PTY_INTERACTION_ACKNOWLEDGED 2u
+#define T_PTY_INTERACTION_ID_MAX 0x7fffffffffffffffULL
+
+struct t_pty_interaction_state {
+    unsigned int version;
+    unsigned int flags;
+    unsigned long long binding_id;
+    unsigned long long pts_id;
+    unsigned long long foreground_epoch;
+    unsigned long long acknowledged_epoch;
+    unsigned long long revision;
+    unsigned int controlling_sid;
+    unsigned int foreground_pgid;
+    unsigned long long subject_stripes;
+    unsigned long long binder_stripes;
+    unsigned int binder_pid;
+    unsigned int reserved;
+};
+_Static_assert(sizeof(struct t_pty_interaction_state) == 80, "t_pty_interaction_state: size");
+_Static_assert(_Alignof(struct t_pty_interaction_state) == 8, "t_pty_interaction_state: alignment");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, version) == 0, "t_pty_interaction_state: version");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, flags) == 4, "t_pty_interaction_state: flags");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, binding_id) == 8, "t_pty_interaction_state: binding_id");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, pts_id) == 16, "t_pty_interaction_state: pts_id");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, foreground_epoch) == 24, "t_pty_interaction_state: foreground_epoch");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, acknowledged_epoch) == 32, "t_pty_interaction_state: acknowledged_epoch");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, revision) == 40, "t_pty_interaction_state: revision");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, controlling_sid) == 48, "t_pty_interaction_state: controlling_sid");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, foreground_pgid) == 52, "t_pty_interaction_state: foreground_pgid");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, subject_stripes) == 56, "t_pty_interaction_state: subject_stripes");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, binder_stripes) == 64, "t_pty_interaction_state: binder_stripes");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, binder_pid) == 72, "t_pty_interaction_state: binder_pid");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, reserved) == 76, "t_pty_interaction_state: reserved");
+
+struct t_pty_interaction_check {
+    unsigned int version;
+    unsigned int size;
+    unsigned long long expected_epoch;
+    unsigned long long subject_stripes;
+};
+_Static_assert(sizeof(struct t_pty_interaction_check) == 24, "t_pty_interaction_check: size");
+_Static_assert(_Alignof(struct t_pty_interaction_check) == 8, "t_pty_interaction_check: alignment");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_check, version) == 0, "t_pty_interaction_check: version");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_check, size) == 4, "t_pty_interaction_check: size");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_check, expected_epoch) == 8, "t_pty_interaction_check: expected_epoch");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_check, subject_stripes) == 16, "t_pty_interaction_check: subject_stripes");
+
 // SYS_TTY_SIGNAL classes (PTY-1d). TSTP (live since PTY-1f) is the
 // job-control suspend: a caught susp delivers the tty:susp note only; an
 // uncaught one on a non-orphaned foreground group takes the default STOP

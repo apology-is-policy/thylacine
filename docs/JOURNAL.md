@@ -31119,3 +31119,17 @@ The round over `e3b5ba1e` ran the way the H-3c-2 round did -- one holotype-revie
 **The lease that had expired was not free.** The `hold mac` came back NOT HELD: aux's lease had expired two minutes earlier, with a busy line declaring ~30 minutes of CPU-bound TLC + a kernel rebuild. An expired lease is a TTL that ran out under a long call, not a release, and the H-3d lever has pixel-timing legs that would starve against a TLC at 300% CPU (the 2026-08-16 measurement). So: ask, do not steal. The call (yip 0042) got an answer in 75 seconds -- aux's TLC and rebuild were already DONE, its next sub-chunk was pure code-writing, the host was mine. Thirteen minutes of quiet-host boots later: ls-halcyon PASS [118 s], 46 witness lines (the new carve leg the +1), 0 WEDGED; the default set 9/9 at the landing's exact counts on restored fixtures. Released the instant the last boot ended, before the docs and the commit -- the resource frees before the workflow does.
 
 **H-3 is closed.** Four sub-chunks (H-3a-1/2, H-3b-1..4, H-3c, H-3c-2, H-3d) and five audit rounds, every one closed, the last three not dirty. Next is H-4 (layouts, HALCYON.md 13.7), whose one deferred fork -- the restore read side, a new server verb or a walk of the pane files -- goes to the operator before a line of code.
+
+
+### 2026-09-24: HI-1 terminal ownership ABI reservation
+
+Operator-approved expansion: master-bound observation, foreground epochs and
+fresh admission checks, preserving legacy job control. Contract committed first
+as 8d59b072; this checkpoint pins operations 16..21 under syscall 93 and every
+byte/offset of the 80-byte state and 24-byte ACK/CHECK record in C/Rust mirrors.
+Compiled fixtures for both C headers and Rust pass on Linux/AArch64. The initial
+isolated staging lacked kernel headers; failure and corrected logs are retained.
+Single-agent self-review caught the Halcyon-vs-observer STATE role mismatch and
+signed syscall ID ceiling, corrected before consumers. No live dispatch, watcher
+or clipboard implementation is claimed. Await Aux's cleared H3+C base before
+lifecycle integration. Separate authority/settings drafts remain untouched.

@@ -106,3 +106,13 @@ suboperations on SYS_PTY_REGISTER, bounded pollable watchers, lifecycle-before-p
 checks and no new syscall number. Aux reserved terminal Control tag 6 and agreed
 Astra tag 7. Lifecycle implementation waits for his announced cleared H3+C base;
 no raw kernel/terminal code is inferred from this design checkpoint.
+
+
+### Terminal ownership ABI reservation
+
+After the operator's scope approval, the detailed contract was committed as
+`8d59b072`. Kernel/libt/Rust definitions and a compiled three-way byte fixture
+now pin the reservation ([[chg-2026-09-24-pty-interaction-abi]]). This adds no
+live syscall operation. Tapestry verifies the host identity in its observer role;
+Halcyon receives a registration result, not broader STATE access. Aux's cleared
+lifecycle base is still required before the kernel implementation.

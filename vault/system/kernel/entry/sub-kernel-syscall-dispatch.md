@@ -1258,3 +1258,15 @@ this file's comments. The holotype audit of this surface is owed.
 `loom_create` and binds ring identity before publication. Both independent
 contracts survive the Astra merge;1691/1691 kernel tests pass on the merged CI
 image. The new Aux test calls use the existing non-exempt false argument.
+
+
+## Reserved terminal interaction suboperations (2026-09-24)
+
+[[abi-pty-interaction]] adds header definitions for SYS_PTY_REGISTER subops
+16..21, but `sys_pty_register_for_proc` still only handles 0..2. Its existing
+entry gates and unknown-operation EINVAL path remain unchanged; no userspace
+consumer can use the reservation as a working ownership grant. The eventual
+front must select the interaction role gates separately from the old ptyfs-only
+registration gate, validate complete operands/records before taking lifecycle
+and pts locks, and copy outputs after releasing them. No frontend code changes
+or runtime admission verification are included in this ABI checkpoint.

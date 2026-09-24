@@ -182,3 +182,5 @@
 - HI-0 native pointer: Lictor cursor DMA/queue retirement and trusted exclusion; Tapestry surface ownership and cursor-free composition (`docs/HALCYON-INTERACTION.md` section 14).
 - HI-1 HIN1 bodies/framing: exact borrowed bodies, twenty C/Rust vectors, bounded fragmented assembly and poison/reset; syntax never authorizes a clipboard operation (`docs/HALCYON-INTERACTION-ABI.md`).
 - HI-1 clipboard storage: bounded slots/capacities, prepare-before-admission, immutable reads, generation conflicts, owner cancellation and deadline wakeups (`usr/halcyond/src/clipboard.rs`).
+
+- HI-1 terminal ownership ABI reservation: syscall 93 subops 16..21, compiled C/Rust byte mirrors; role/lifetime/poll implementation still pending (`docs/HALCYON-INTERACTION-PTY-ABI.md`).

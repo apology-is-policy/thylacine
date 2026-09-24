@@ -208,3 +208,5 @@ The current prosecution scope is recorded in the co-staged vault dossiers:
 (peer-gated relay lifetime). The integration's review and measured evidence
 are in `docs/HAUL-INTEGRATION-REVIEW.md`. The operator requested single-agent
 work; the record does not assert a new independent adversarial audit.
+
+| HI-1 terminal ownership ABI reservation | `kernel/include/thylacine/syscall.h`, `usr/lib/libt/include/thyla/syscall.h`, `usr/lib/libthyla-rs/src/pty_interaction.rs`, `tools/test-pty-interaction-abi.py` | Pin suboperations 16..21, every offset/alignment of the 80/24-byte records, reserved fields and signed-ID ceiling before consumers. Compare actual compiled C/Rust records to an independent literal oracle. No dispatch or lifecycle semantics exist in this checkpoint. Before enabling: prosecute master/observer provenance, fresh combined membership/epoch admission, inherited-handle refusal, lifecycle-before-pts lock order, stable poll-list borrows and retirement, and cancellation before trusted takeover. Single-agent self-review per operator direction; runtime verification remains owed. |

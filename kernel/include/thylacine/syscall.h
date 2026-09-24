@@ -2457,6 +2457,67 @@ _Static_assert(__builtin_offsetof(struct t_jit_region, exec_va) == 8,   "t_jit_r
 #define PTY_REG_SLAVE  1u
 #define PTY_REG_FREE   2u
 
+// HI-1 terminal ownership ABI RESERVATION, not an implemented syscall front.
+// SYS_PTY_REGISTER subops 16..21: docs/HALCYON-INTERACTION-PTY-ABI.md.
+// Existing server-only subops 0..2 keep their contract. Records are little-endian
+// on the native AArch64 ABI. No padding, pointer fields or userspace bearer grant.
+#define PTY_INTERACTION_BIND 16u
+#define PTY_INTERACTION_UNBIND 17u
+#define PTY_INTERACTION_WATCH 18u
+#define PTY_INTERACTION_STATE 19u
+#define PTY_INTERACTION_ACK 20u
+#define PTY_INTERACTION_CHECK 21u
+#define PTY_INTERACTION_VERSION 1u
+#define PTY_INTERACTION_STATE_BYTES 80u
+#define PTY_INTERACTION_CHECK_BYTES 24u
+#define PTY_INTERACTION_LIVE 1u
+#define PTY_INTERACTION_ACKNOWLEDGED 2u
+#define PTY_INTERACTION_ID_MAX 0x7fffffffffffffffULL
+
+struct t_pty_interaction_state {
+    u32 version;
+    u32 flags;
+    u64 binding_id;
+    u64 pts_id;
+    u64 foreground_epoch;
+    u64 acknowledged_epoch;
+    u64 revision;
+    u32 controlling_sid;
+    u32 foreground_pgid;
+    u64 subject_stripes;
+    u64 binder_stripes;
+    u32 binder_pid;
+    u32 reserved;
+};
+_Static_assert(sizeof(struct t_pty_interaction_state) == 80, "t_pty_interaction_state: size");
+_Static_assert(_Alignof(struct t_pty_interaction_state) == 8, "t_pty_interaction_state: alignment");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, version) == 0, "t_pty_interaction_state: version");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, flags) == 4, "t_pty_interaction_state: flags");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, binding_id) == 8, "t_pty_interaction_state: binding_id");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, pts_id) == 16, "t_pty_interaction_state: pts_id");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, foreground_epoch) == 24, "t_pty_interaction_state: foreground_epoch");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, acknowledged_epoch) == 32, "t_pty_interaction_state: acknowledged_epoch");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, revision) == 40, "t_pty_interaction_state: revision");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, controlling_sid) == 48, "t_pty_interaction_state: controlling_sid");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, foreground_pgid) == 52, "t_pty_interaction_state: foreground_pgid");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, subject_stripes) == 56, "t_pty_interaction_state: subject_stripes");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, binder_stripes) == 64, "t_pty_interaction_state: binder_stripes");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, binder_pid) == 72, "t_pty_interaction_state: binder_pid");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_state, reserved) == 76, "t_pty_interaction_state: reserved");
+
+struct t_pty_interaction_check {
+    u32 version;
+    u32 size;
+    u64 expected_epoch;
+    u64 subject_stripes;
+};
+_Static_assert(sizeof(struct t_pty_interaction_check) == 24, "t_pty_interaction_check: size");
+_Static_assert(_Alignof(struct t_pty_interaction_check) == 8, "t_pty_interaction_check: alignment");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_check, version) == 0, "t_pty_interaction_check: version");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_check, size) == 4, "t_pty_interaction_check: size");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_check, expected_epoch) == 8, "t_pty_interaction_check: expected_epoch");
+_Static_assert(__builtin_offsetof(struct t_pty_interaction_check, subject_stripes) == 16, "t_pty_interaction_check: subject_stripes");
+
 // SYS_TTY_SIGNAL classes. Values are ABI (append-only). The class carries
 // no payload; WINCH consumers re-read the winsize from the pts ctl (the
 // server-owned half of the seam).

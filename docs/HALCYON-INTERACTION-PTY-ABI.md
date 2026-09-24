@@ -2,7 +2,8 @@
 
 Scope approved September 24, 2026; see HALCYON-INTERACTION-PTY-REVIEW.md.
 This pins the implementation direction before consumers. No operation below is
-implemented yet. Existing SYS_PTY_REGISTER operations 0..2 remain unchanged.
+implemented yet. The constants and record mirrors are now reserved and tested;
+that does not enable the operations. Existing SYS_PTY_REGISTER operations 0..2 remain unchanged.
 New operations use that syscall's unused suboperation range 16..21, not a new
 syscall number. Main's pending SYS_BURROW_MAP_FILE = 126 remains untouched.
 
