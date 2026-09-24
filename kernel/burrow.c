@@ -1328,23 +1328,25 @@ u32 burrow_release_lazy_range_in(struct AddrSpace *as, const struct Vma *v,
 // (the B-1a audit's F2 shape) -- with every refusal decided before the first
 // PTE goes, so a refused call changes nothing.
 int burrow_decommit_in(struct AddrSpace *as, u64 vaddr, size_t length) {
-    if (!as)                         return -1;
-    if (length == 0)                 return -1;
-    if (vaddr & (PAGE_SIZE - 1))     return -1;
-    if (length & (PAGE_SIZE - 1))    return -1;
+    if (!as)                         return -(int)T_E_INVAL;
+    if (length == 0)                 return -(int)T_E_INVAL;
+    if (vaddr & (PAGE_SIZE - 1))     return -(int)T_E_INVAL;
+    if (length & (PAGE_SIZE - 1))    return -(int)T_E_INVAL;
     u64 end = vaddr + length;
-    if (end < vaddr)                 return -1;     // overflow
-    if (end > USER_VA_TOP)           return -1;
+    if (end < vaddr)                 return -(int)T_E_INVAL;     // overflow
+    if (end > USER_VA_TOP)           return -(int)T_E_INVAL;
 
     // 1. Admission: contiguous cover by plain ANON_LAZY mappings, nothing else.
+    //    The two refusals carry Linux's madvise errnos (B-1b): a hole is ENOMEM,
+    //    a mapping the release cannot apply to is EINVAL.
     u64 cur = vaddr;
     for (struct Vma *v = vma_next_overlap_in(as, vaddr, end);
          v && v->vaddr_start < end; v = v->next) {
-        if (v->vaddr_start > cur)          return -1;   // a hole
-        if (!lazy_release_admits(v))       return -1;   // not ours to release
+        if (v->vaddr_start > cur)          return -(int)T_E_NOMEM;   // a hole
+        if (!lazy_release_admits(v))       return -(int)T_E_INVAL;   // not ours to release
         cur = v->vaddr_end;
     }
-    if (cur < end)                         return -1;   // a hole at the tail
+    if (cur < end)                         return -(int)T_E_NOMEM;   // a hole at the tail
 
     // 2. Clear every leaf PTE in the range + broadcast TLBI -- BEFORE any page is
     //    freed to the buddy, so no stale PTE/TLB entry aliases a recycled page (the
@@ -1364,7 +1366,7 @@ int burrow_decommit_in(struct AddrSpace *as, u64 vaddr, size_t length) {
 }
 
 int burrow_decommit(struct Proc *p, u64 vaddr, size_t length) {
-    if (!p || !p->as) return -1;
+    if (!p || !p->as) return -(int)T_E_INVAL;
     return burrow_decommit_in(p->as, vaddr, length);
 }
 

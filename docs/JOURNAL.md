@@ -22,6 +22,187 @@ needed the operator.
 
 
 ---
+## 2026-09-24, early (main, Opus 5.5, effort max) -- B-1b closed: the holotype round withdrew the chunk's own headline
+
+**The ask.** Close B-1b: take the holotype round the previous context spawned,
+fix what it found, land. The round ran on Fable 5.1 (MODEL start == end); the
+operator switched this session to Opus 5.5 at max effort after its report
+arrived, so the close is Opus's -- under the OPERATOR AWAY grant's Opus clause
+(proceed on the regular autonomy rules, stop at the first escalation item).
+
+**The round: 0 P0 / 0 P1 / 1 P2 / 5 P3, and the P2 was the chunk's headline.**
+F1: the seam bug B-1b said it had found -- `__init_tls`'s raw six-argument
+mmap through the one-argument alias 83, "every large-TLS Pouch program dead
+before `main` for sixteen months" -- never existed. The kernel's 83 arm has
+read that exact shape since Clade CL-4 (4d6f0680; item 2 of its commit
+message; `burrow_lazy_len_from_args`, pinned by `test_sys_burrow.c`), and
+memory held it twice: `audit_cl4_closed_list.md` (line 26 verified the caller
+at disassembly; line 155 named the libc-side elimination as owed) and
+`bug_clade_multicall_startup.md` (layer 2 of clang++'s five). The design pass
+read the libc side and stopped. The evidence it cited was a sabotage on the
+NEW tree: `notls` drops 0046 but keeps 0044's sentinel, so it measures "0044
+without 0046" and could not confirm anything about the old libc -- the design
+memory had PLANNED the old-libc measurement, and the sabotage was taken for
+it. The previous context's concurrent self-audit re-read the libc side of the
+same claim and passed it. What stands: 0044's parking of `__NR_mmap` (a raw
+Linux-shaped mmap must not reach a number that maps RW whatever it asks)
+WOULD have broken `__init_tls`, so 0046 is required -- by 0044, not by a
+defect. Every copy was rewritten: 0044's and 0046's headers and in-file
+comments, the series, ARCH 6.5, POUCH-DESIGN 8.1, browser-status, AT row 194's
+title and body, the INDEX line, the entry below, two dossiers, the change
+note, `build.sh`'s SEAM comment, the kernel's CL-4 comment (the arm stays: a
+Clade stage linked before 0046 still sends the shape; retiring it is an
+ABI-shape change, left to the operator) and the unit test's comment; in memory
+the bug file is now a WITHDRAWN note carrying the lesson. A sweep of the tree
+for the claim's phrasings (control: 19 files name 0046) found only the
+generated dashboard, which the render rewrites.
+
+**A helper that failed its own control.** The F3 comment grew a hunk of 0044
+by three lines, so I wrote a recount helper and ran it first over the 46
+patches that apply cleanly: it disagreed with 12 headers. It had taken an empty
+body line -- a context line whose single space was stripped, as 0012's third
+line is -- for the end of the hunk. Dropped; the one header was moved by the
+exact three lines (`+2,93` -> `+2,96`) and checked by the project's
+`tools/check-patch-hunks.py` -- which, handed FILE arguments, said "0 hunks
+checked" (it takes ROOT directories; a search that found nothing proved
+nothing) and, run as `build.sh` runs it, 589 hunks / 0 warnings, while HEAD's
+malformed 0012 in a scratch root still drew its one warning. The whole series
+then applied at fuzz 0 into a scratch musl: 0 failures, 0 rejects.
+
+**F2-F6.** F2: `pouch-hello-guard` printed its marker before writing the first
+usable byte, so a boundary reported low faulted after the marker and satisfied
+`expect_fault` -- the "exact boundary" control was unobservable. `s[0] = 1`
+now precedes the marker, and the eighth sabotage, `guardlow` (the prover's own boundary moved one page down, the shape of a libc that reports it low), reddens the guard smoke by name: the child dies of `snare:segv` at 0x100003000 -- inside the guard, one page under the usable base 0x100004000 -- before its marker, joey reports the marker absent and the boot extincts; before the fix the same shape printed the marker first and passed. F3 (MAP_FIXED's second call can refuse
+after the discard: a range sealed below the asked prot is EACCES, no VMA slot
+for a middle cut is ENOMEM) is documented and queued in OPEN-BUGS: the atomic
+discard-and-protect is a `BURROW_PROTECT` flag bit, a syscall-interface change
+and so the operator's. F4 (the eager release's churn against Linux's lazy
+MADV_FREE: a TLBI, a re-fault and a zeroing per page-sized alloc/free) is a
+design note in the dossier; the cheap skip is a `free.c` change, which P-4
+forbids, and the heritage lazy-free list is tracked with the arc. F5:
+`exec.h`'s layout still drew the 1 MiB stack and taught the retired mirror;
+fixed, with the CL-4 comment and the previous context's "Thylacine has no
+fork" (Pouch has none; the kernel has the phenotype's). F6: three phenotype
+madvise divergences are written into VIVARIUM 6.28.
+
+**Results.** Re-verified on the final tree: 1667/1667 at -smp 4 with every owed line, `Thylacine boot OK`, the witness unchanged (madvise 10 -> 1038 -> 11; mallocng 11 -> 4263 -> 2339 -> 11); 1667/1667 at -smp 1 with every owed line and the same witness. Seven chunk sabotages + `guardlow`: eight, each scored by the lines that went red in its own boot log.
+
+**The landing.** One squashed commit on local `main` (the three WIP commits and
+this close), then the hash fixup that names it in the change note and
+browser-status. NOT pushed: the operator pushes both mirrors by URL with the
+merge-base guard (a1a030dd..; the auto-mode classifier denies the push here).
+
+**Lesson.** A defect claimed at a boundary is a hypothesis until the other
+side's handler for that exact call has been read -- and memory's closed lists
+are part of the other side. A sabotage on the new tree cannot stand in for a
+measurement of the old one.
+
+---
+## 2026-09-23, night (main, Fable 5.1, effort max) -- B-1b: the Pouch memory seam made exact, a census finding that was not a bug, and the sabotage that never reached its leg
+
+**The ask.** The next chunk of the browser arc after prowl-6: the Pouch (musl)
+substrate's half of the ARCH 6.5 memory bar -- `mprotect` / `madvise` /
+partial `munmap` / real pthread guards, the main stack to 8 MiB with its
+extent in the auxv (decision 4), the witness RED on the old libc. Designed in
+the previous context from the code at 2a5a2b3d, with every anchor in the
+design memory; executed here on the branch `b1b-pouch-mem` across three WIP
+commits and a self-compaction.
+
+**What it is.** Three patches on the musl series. 0044 rewrites `src/mman/`:
+`mmap` mints at the prot asked for over `SYS_BURROW_RESERVE` (PROT_NONE
+reserves; W implies R; X is EACCES), `mprotect` is `SYS_BURROW_PROTECT` with
+FOUR arguments (the seam's three-argument form would pass x3 as the flags word
+and a stray 1 would SEAL), `madvise` DONTNEED / FREE is `SYS_BURROW_DECOMMIT`,
+`MAP_FIXED` over one's own anonymous mapping is discard + reprotect and never
+a creation, and mallocng's `USE_MADV_FREE` is on. 0045 has
+`pthread_getattr_np` derive the main stack from the kernel's new
+`AT_STACK_BASE` / `AT_STACK_SIZE` and refuse a kernel that writes neither.
+0046 routes `__init_tls` through `__mmap` (below). Kernel: the 8 MiB stack, the pair (eleven auxv
+entries), `burrow_decommit_in` speaking errno behind `sys_burrow_decommit_core`
+(the native 84 still 0 / -1), `vma_range_is_mapped_in`, and the phenotype
+`madvise` row pulled forward so a Linux guest's allocator returns pages too.
+
+**The finding -- WITHDRAWN at the close (the entry above).** While censusing
+raw `SYS_mmap` callers (control: the wrapper itself must appear) the design
+pass found `src/env/__init_tls.c:137` issuing a six-argument Linux-shaped
+`SYS_mmap2` through 0003's one-argument alias 83, and concluded that x0 = 0
+reached the kernel as the length and that every Pouch program with static
+TLS past `builtin_tls` died before `main`. It read only the libc side. The
+kernel's 83 arm has read that exact shape since Clade CL-4 (4d6f0680; its
+comment names `__init_tls`), so the defect did not exist -- the holotype round
+read the arm, I did not. What stands: 0044 parks `__NR_mmap` at the sentinel,
+which WOULD break `__init_tls`, so 0046 routes it through `__mmap`; the tls
+leg witnesses that dependency, and the RED `notls` is 0044 without 0046 --
+it could never have confirmed a claim about the old libc.
+
+**Wrong turns, and what caught them.** (1) The patched `madvise.c` used the
+`MADV_*` names without `_GNU_SOURCE`; musl compiles with
+`-D_XOPEN_SOURCE=700`, so the first bake failed -- caught by the bake, fixed
+with musl's own idiom (`posix_madvise.c` has the define). (2) The sysroot's
+SEAM verification in `tools/build.sh` pinned `'#define SYS_mmap 83'` by
+literal, so the second bake failed verification: a guard pinned to a NAME only
+ever checks that nobody changed the thing it names -- re-pointed at the
+sentinel plus the four numbers of `_pouch_mman.h`, with a control that a wrong
+number is refused. (3) Two `test_exec` pins said "one node for the stack":
+2048 slots need a root and a leaf where 256 needed one -- the suite caught it
+(1665/1667) before joey ran. (4) The first green suite failed pheno-probe
+L23m: the phenotype `madvise` arm answered ENOSYS for a hole at `0x50000000`,
+which lies BELOW the burrow window the decommit core confines itself to. The
+decision, auto-accepted under the OPERATOR AWAY grant: Linux's ENOMEM for a
+hole wherever it lies; ENOSYS only for a MAPPED range outside the window, its
+bytes untouched (a false ENOMEM would tell an allocator its own `.bss` is
+unmapped) -- pinned by two new legs on the probe's own data page (L23s /
+L23t). (5) The change note named the new dossier before it existed and the
+vault lint refused the WIP commit -- the note and the seam close were parked
+in the scratchpad until the dossier was written.
+
+**Measured.** Identical at -smp 4 and -smp 1: madvise over 4 MiB touched page
+by page, data view 10 -> 1038 -> 11; mallocng-trim (400 x 40000 B) 11 -> 4263
+-> 2339 -> 11 -- a fall of 1924 pages with every group retained, against 4023
+(a fall of 240) on the sabotaged libc; the floor is 1200. `pouch-hello-guard`:
+"guard 2000 bytes below 0x100004000; touching", then `snare:segv`.
+`pouch-hello-threads`: 8388608 bytes, a 4 MiB frame at both ends, 5/5 workers'
+`---p` rows. 1667/1667 with every owed boot line.
+
+**The sabotages, scored by what went red, not by what I predicted.** joey
+stops at the first red prover, so a boot shows ONE prover's red: `noprot`
+(mmap minting RW whatever the prot) was caught by mem's x-refused, and the
+guard child behind it was never reached. That is why a seventh sabotage,
+`nonerw` (PROT_NONE alone minted RW), was added: it reddens the threads
+prover's guard-vma leg (`rw-p` where `---p` is required) -- the guard child
+still sits behind it, so its own red remains a property of joey's
+`expect_fault` (a status 0 is refused) rather than a measured boot. The rest
+went red where expected: `nomadvfree` at mallocng-trim alone; `nomadvise` at
+four legs; `noauxv` at `exec.setup_auxv` (the suite, before joey); `notls`
+(0044 without 0046) with no output at all; `nodecommit` at L23l.
+
+**While the holotype round ran: the self-audit on the same surface.** Read
+against the kernel arms, not the patch headers: every length the seam
+passes -- RESERVE, PROTECT, DECOMMIT, DETACH -- is rounded up to a page by
+the kernel (`sys_burrow_reserve_for_proc`, `sys_burrow_protect_for_proc`,
+`sys_burrow_decommit_core`, `detach_shape_check`), so a `MAP_FIXED` or a
+`madvise` with an unaligned length gets Linux's round-up and the two steps
+of `MAP_FIXED` see the same page-multiple; no libc rounding is owed. The
+one divergence not yet written down: `MAP_SHARED | MAP_ANON` mints the same
+private reservation as `MAP_PRIVATE` -- Pouch has no `fork` (0026), so
+within one process the two are indistinguishable; a caveat now, not a
+finding. Two records were wrong in a way the sabotage rule forbids: the
+dossier's Tests section and the change note still carried the PREDICTED
+reds ("`mmap` minting RW -> the guard child exits 0, threads' guard-vma,
+mem's x-refused") where the audit-trigger row carries the SCORED ones (joey
+stops at the first red prover: `noprot` showed x-refused alone, and `nonerw`
+was added to reach the guard legs) -- both now say seven, scored. And the
+census control was misstated: after the series `grep 'SYS_mmap' src` finds
+no CODE line at all (two comments), so "the wrapper only" named a control
+that no longer exists; the control is `SYS_munmap` in `munmap.c` /
+`__unmapself.c`, and the dossier says so. The aux's 0012 hunk-count fix
+(`@@ -29,8 +30,17 @@`, counted from the hunk body: 8 old / 17 new) rides
+this landing.
+
+**Closed** 2026-09-24: the holotype round and the landing are the entry above.
+
+---
+
 ## 2026-09-23, evening (main, Fable 5.1, effort max) -- prowl-6: the capacity figures reach the screen, and the census found two consumers the design had not
 
 **The ask.** The operator's next sub-chunk after B-1a' (recorded with the

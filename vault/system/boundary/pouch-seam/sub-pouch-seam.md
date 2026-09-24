@@ -22,7 +22,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-09-22
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -177,6 +177,33 @@ past ~1000 array elements. `pthread_getattr_np` probed the main stack with
 (0033). The sentinel is honest only where the caller propagates the error;
 where musl treats a call as cannot-fail, the sentinel produces a wrong
 *value*.
+
+**A renumbered call keeps its old callers' argument shape (Clade CL-4,
+2026-07-27; B-1b, 2026-09-23).** The sentinel's other blind spot is a number
+that was RETARGETED rather than parked. 0003 aliased `__NR_mmap` to 83
+(`SYS_BURROW_ATTACH_LAZY`, natively ONE argument: the length in x0) and
+rewrote `__mmap` to call it that way — but `src/env/__init_tls.c` does not go
+through `__mmap`: it issues `SYS_mmap2` raw, in Linux's six-argument shape,
+whenever the static TLS exceeds `builtin_tls`, so the call reached the kernel
+with x0 = 0 where the length belongs. CL-4 met it as one layer of clang++'s
+on-device startup failure (1232 B of TLS) and taught the kernel's 83 arm both
+shapes (`burrow_lazy_len_from_args`: the six-argument reading only for the
+anonymous-private form, so a file-backed raw call stays a loud refusal). The
+guard against an un-retargeted number is loud (ENOSYS); against a re-targeted
+one of a different shape it is silent. B-1b parks `__NR_mmap` back at the
+sentinel — the mapper's prot is exact now, and the 83 arm maps RW whatever
+prot is asked — which would have broken `__init_tls` again, so 0046 routes it
+through `__mmap` (CL-4's owed libc-side elimination) and the four memory
+numbers live in `src/internal/_pouch_mman.h` (the 0024 idiom); the sysroot's
+SEAM verification (`tools/build.sh`), which had pinned `SYS_mmap 83` by
+literal — a guard that only ever checked that nobody changed the thing it
+named — now pins the sentinel and the header's numbers. The rule: when a seam
+renumbers a call onto a target of a different shape, census every RAW caller
+of that number (`grep -rn 'SYS_<name>' src`; the wrapper is the control) and
+route each through the wrapper — and read the kernel's arm for the number
+before calling a caller broken: B-1b first recorded this one as a live crash,
+from the libc side alone, and the holotype round read the arm that had been
+serving it for two months. [[sub-pouch-mem]] carries the seam.
 
 0034's parser is deliberately strict where 0032's is soft. The key is
 matched at a line start only (`free:` cannot match inside another word), a

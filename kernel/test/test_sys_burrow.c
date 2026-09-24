@@ -459,7 +459,8 @@ void test_sys_burrow_lazy_len_from_args(void) {
     TEST_EXPECT_EQ(burrow_lazy_len_from_args(LEN, 0xdeadbeef, 0xdeadbeef, 7),
                    LEN, "native 1-arg takes x0 regardless of the other regs");
 
-    // Linux 6-arg anonymous-private (what __init_tls issues): length from x1.
+    // Linux 6-arg anonymous-private (what __init_tls issued before pouch 0046,
+    // and a binary linked against that libc still issues): length from x1.
     TEST_EXPECT_EQ(burrow_lazy_len_from_args(0, LEN, MAP_ANON | MAP_PRIVATE, NOFD),
                    LEN, "6-arg anonymous-private takes the length from x1");
 

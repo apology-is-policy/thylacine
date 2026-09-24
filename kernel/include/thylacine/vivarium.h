@@ -178,6 +178,7 @@ enum {
     VIV_LINUX_MUNMAP     = 215,
     VIV_LINUX_MMAP       = 222,
     VIV_LINUX_MPROTECT   = 226,
+    VIV_LINUX_MADVISE    = 233,  // B-1b: the release row over SYS_BURROW_DECOMMIT
     VIV_LINUX_STATX      = 291,
     VIV_LINUX_EXIT_GROUP = 94,
     VIV_LINUX_EXIT       = 93,   // N-3: a musl THREAD exits via SYS_exit(93)
@@ -846,6 +847,43 @@ enum {
     VIV_PROT_GROWSUP    = 0x02000000,
 };
 
+// Linux `madvise` advice values (generic musl `include/sys/mman.h`; the two
+// POPULATE_* are Linux 5.14+, absent from musl 1.2.5's header and read from
+// the kernel's uapi). Only the ones the row classifies are named.
+enum {
+    VIV_MADV_NORMAL         = 0,
+    VIV_MADV_RANDOM         = 1,
+    VIV_MADV_SEQUENTIAL     = 2,
+    VIV_MADV_WILLNEED       = 3,
+    VIV_MADV_DONTNEED       = 4,
+    VIV_MADV_FREE           = 8,
+    VIV_MADV_REMOVE         = 9,
+    VIV_MADV_DONTFORK       = 10,
+    VIV_MADV_DOFORK         = 11,
+    VIV_MADV_MERGEABLE      = 12,
+    VIV_MADV_UNMERGEABLE    = 13,
+    VIV_MADV_HUGEPAGE       = 14,
+    VIV_MADV_NOHUGEPAGE     = 15,
+    VIV_MADV_DONTDUMP       = 16,
+    VIV_MADV_DODUMP         = 17,
+    VIV_MADV_WIPEONFORK     = 18,
+    VIV_MADV_KEEPONFORK     = 19,
+    VIV_MADV_COLD           = 20,
+    VIV_MADV_PAGEOUT        = 21,
+    VIV_MADV_POPULATE_READ  = 22,
+    VIV_MADV_POPULATE_WRITE = 23,
+};
+
+// What a translated madvise does: RELEASE = the decommit core (DONTNEED and
+// FREE -- a MADV_FREE page is one Linux may take at any moment, so taking it
+// now is inside the contract); HINT = answer 0 over a mapped range, ENOMEM
+// over a hole, and change nothing (Linux's own effect for these, minus the
+// readahead / THP / dump-filter policy Thylacine has no counterpart for).
+enum viv_madvise_kind {
+    VIV_MADVISE_RELEASE = 0,
+    VIV_MADVISE_HINT    = 1,
+};
+
 // Linux `flags` bits (generic musl `include/sys/mman.h`).
 enum {
     VIV_MAP_SHARED          = 0x01,
@@ -1022,6 +1060,26 @@ bool vivarium_mmap_arms_disjoint(u64 addr, u64 prot, u64 flags,
 // Collision: 226 lies above VIV_NATIVE_CEILING, the ceiling argument.
 // -----------------------------------------------------------------------------
 enum viv_verdict vivarium_mprotect_decide(u64 addr, u64 len, u64 prot);
+
+// -----------------------------------------------------------------------------
+// TIER 2 -- madvise (B-1b; ARCH 6.5 "Capacity"). The domain is the ADVICE word
+// alone (addr and len are semantic questions the shell answers exactly, as for
+// mprotect): DONTNEED / FREE translate as a RELEASE (the decommit core -- the
+// SYS_BURROW_DECOMMIT contract, its errnos Linux's: ENOMEM a hole, EINVAL a
+// mapping that is not plain anonymous memory); the pure hints (NORMAL,
+// RANDOM, SEQUENTIAL, WILLNEED, HUGEPAGE, NOHUGEPAGE, DONTDUMP, DODUMP, COLD,
+// PAGEOUT, POPULATE_READ, POPULATE_WRITE) translate as a HINT; everything
+// else declines -- the fork-semantic pairs (DONTFORK / DOFORK, WIPEONFORK /
+// KEEPONFORK: a phenotype fork exists, so a silent 0 would be a lie about
+// what the child sees), KSM's MERGEABLE pair, REMOVE, the poison testers and
+// any value the tree has not reasoned about. Linux answers an unknown advice
+// with EINVAL; the tier's rule (declining is always safe) makes it ENOSYS
+// here, as an unknown prot bit is for mprotect. `kind_out` is set only on
+// VIV_TRANSLATED. The word narrows to 32 bits (Linux declares `int advice`).
+//
+// Collision: 233 lies above VIV_NATIVE_CEILING, the ceiling argument.
+// -----------------------------------------------------------------------------
+enum viv_verdict vivarium_madvise_decide(u64 advice, enum viv_madvise_kind *kind_out);
 
 // -----------------------------------------------------------------------------
 // TIER 0/2 — signals (V-6). See VIVARIUM.md §6.22.

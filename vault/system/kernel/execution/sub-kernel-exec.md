@@ -258,8 +258,9 @@ No types of its own. It consumes `struct elf_image` from [[sub-kernel-elf]] and
 produces VMAs and Burrows.
 
 The one layout it owns is the **System V startup frame**, in two shapes. Shape A
-is a fixed 176 bytes: argc, two NULL terminators, up to eight auxv entries, and a
-16-byte `AT_RANDOM` block at the end. Shape B is variable — real argc, an argv
+is a fixed 224 bytes: argc, two NULL terminators, `EXEC_INIT_AUXV_COUNT` (11: up
+to ten auxv entries and the terminator) slots of 16, and a 16-byte `AT_RANDOM`
+block at the end. Shape B is variable — real argc, an argv
 array pointing into a strings region, **an envp array between argv and auxv**,
 the same auxv block, the same random block 16-aligned, then both strings regions.
 
@@ -273,7 +274,7 @@ Both shapes route through one auxv builder, deliberately, *"so the entry set
 cannot diverge"* — which is the right instinct and the reason a reader can trust
 that a binary sees the same auxiliary vector however it was spawned.
 
-The frame always reserves room for all eight auxv entries even though
+The frame always reserves room for all the auxv entries even though
 `AT_VDSO_CLOCK` is written only when the clock page mapped. That is what keeps
 the random block and strings region at stable offsets: a conditional entry that
 *moved* everything after it would make the layout depend on a boot-time
@@ -349,12 +350,14 @@ sentence that was true when written and had been false since LINEAGE L-4a
 `burrow_create_anon_lazy`: exec commits only the pages the argv/auxv frame
 occupies at the top, and the rest demand-zeroes as the program descends.
 `exec.h`'s two comment blocks carried the same stale claim and were corrected
-in the same change. What the 1 MiB is now: a RESERVATION and an I-32 ceiling
-for a runaway recursion, not memory. It was caught because pouch patch 0033
+in the same change. What the 8 MiB (1 MiB until B-1b) is now: a RESERVATION
+and an I-32 ceiling for a runaway recursion, not memory. It was caught because pouch patch 0033
 repeated the claim from the header, and the code was read before the patch
-landed. The size has ONE mirror outside the kernel — the pouch libc's
-`POUCH_MAIN_STACK_TOP` / `_SIZE` ([[sub-pouch-thread]]) — so changing it is a
-two-place edit. What makes forgetting the second place loud is
+landed. The size HAD one mirror outside the kernel — the pouch libc's
+`POUCH_MAIN_STACK_TOP` / `_SIZE` — until B-1b, when exec began STATING the
+extent in the auxv pair `AT_STACK_BASE` / `AT_STACK_SIZE` and the libc derived
+it (patch 0045; [[sub-pouch-thread]]): the kernel is the single source now.
+What still makes a skew loud is
 `/pouch-hello-threads`, which reads the `stack` row of `/proc/<pid>/maps`
 (`format_maps`, keyed on `vaddr_start == EXEC_USER_STACK_BASE`) at run time
 and requires libc's answer to equal it. The prover's first version compared
@@ -461,6 +464,25 @@ refusal is `-T_E_NOMEM` ([[sub-kernel-vma]]), `burrow_map_in` propagates it
 `-T_E_NOMEM` when the frame's populate or its `kzalloc` is refused, -1
 otherwise; 0 stays the unambiguous failed sp) carry it to `exec_load_into`
 and the blob entry.
+
+## B-1b: the 8 MiB stack and its extent in the auxv (2026-09-23)
+
+`EXEC_USER_STACK_SIZE` is 8 MiB (decision 4 of the browser arc: JavaScriptCore
+asks for 5, glibc and musl programs assume Linux's 8), the base 0x7f800000;
+`ELF_PIE_LOAD_LIMIT` (0x60000000) still lies below the guard page, so no PIE
+segment can meet the stack. `exec_fill_auxv` writes two more entries after
+`AT_ENTRY` — `AT_STACK_BASE` (0x5342, the lowest usable VA) and
+`AT_STACK_SIZE` (0x5353) — from `EXEC_USER_STACK_BASE` / `_SIZE`, the
+constants that size the mapping, and BEFORE the optional `AT_VDSO_CLOCK`, so
+the mandatory indices stay fixed whether or not the clock page mapped
+(`EXEC_INIT_AUXV_COUNT` 9 → 11; the private tags sit above musl's `AUX_CNT` 38
+like `AT_VDSO_CLOCK`). A libc DERIVES the extent from the pair and never
+mirrors `exec.h` (pouch patch 0045 refuses a kernel that writes neither tag).
+`test_exec.setup_auxv` pins the pair against the `stack` VMA the same exec
+mapped (`vma_lookup(p, EXEC_USER_STACK_BASE)`), not against the constants; the
+two "one node for the stack" pins moved to root + leaf, since 2048 slots need
+two pagemap levels where 256 needed one. The sabotage `noauxv` (the pair
+mis-tagged) reddens that test and the threads prover's stack query.
 
 ## Provenance
 

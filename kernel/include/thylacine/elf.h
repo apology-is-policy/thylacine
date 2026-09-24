@@ -264,6 +264,16 @@ _Static_assert(sizeof(struct Elf64_Phdr) == 56,
 // (libthyla-rs, the Go fork) query it explicitly; absence -> fall back to
 // SYS_CLOCK_GETTIME.
 #define AT_VDSO_CLOCK 0x5654   // 'VT' — the clock vDSO page
+// B-1b: the initial thread's stack, as exec mapped it -- its lowest usable VA
+// (EXEC_USER_STACK_BASE; the guard page lies below) and its size in bytes.
+// Mandatory. The same private range as AT_VDSO_CLOCK, for the same reason:
+// musl keeps only tags below its AUX_CNT (38) in aux[], so a private tag must
+// sit above that or it would land in a slot the libc reads for something
+// else. A libc's pthread_getattr_np answers for the main thread from these
+// two; the pouch-hello-threads prover pins the answer against the `stack` row
+// of /proc/<pid>/maps, so the pair and the mapping cannot drift apart.
+#define AT_STACK_BASE 0x5342   // 'SB' — lowest usable VA of the initial stack
+#define AT_STACK_SIZE 0x5353   // 'SS' — its size in bytes
 
 // Elf64_auxv_t — one auxiliary-vector entry. 16 bytes; the initial
 // stack carries an array of these terminated by an AT_NULL entry.

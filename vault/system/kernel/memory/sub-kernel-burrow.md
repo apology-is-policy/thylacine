@@ -59,7 +59,10 @@ run here unconditionally is the detach's own, after its refusals).
 `burrow_share_into(dst, v, vaddr, prot)` is the cross-Proc form.
 `burrow_decommit(p, ..)` / `burrow_decommit_in(as, vaddr, length)` release the
 resident pages of lazy mappings without unmapping them -- since B-1a' across the
-pieces a protect cut, every refusal decided before the first release;
+pieces a protect cut, every refusal decided before the first release, and since
+B-1b speaking errno (`-T_E_NOMEM` for a hole, `-T_E_INVAL` for a mapping the
+release cannot apply to) for the phenotype `madvise` row and the Pouch wrapper
+-- the native `SYS_BURROW_DECOMMIT` still flattens to -1;
 `burrow_release_lazy_range_in(as, v, lo, hi)` is the per-mapping half the
 decommit and the range detach both loop over, returning the slots it released.
 `burrow_lazy_resident_count` is O(1) (the pagemap keeps the count) and
@@ -632,7 +635,10 @@ B-1a audit's F2 shape) and `pagemap_walk_steps` witnesses.
 admission pass (contiguous cover by plain ANON_LAZY mappings from
 `vma_next_overlap_in` and successors; a hole at the head, between or at the
 tail, or any other kind of mapping -- eager ANON, FILE, hardware, a shared-in,
-a guard -- answers -1 with nothing changed), then the range's PTEs cleared
+a guard -- answers with nothing changed: since B-1b `-T_E_NOMEM` for a hole
+and `-T_E_INVAL` for another kind of mapping, Linux's madvise errnos, which
+`sys_burrow_decommit_core` extends with the window's `-T_E_NOSYS` and the
+native 84 flattens to -1), then the range's PTEs cleared
 (the burrow_unmap discipline: TLBI before any page reaches the buddy), then
 each mapping's overlap released. It spans the pieces a protect cut, as Linux's
 `madvise` spans VMAs. `burrow_decommit(p, ..)` wraps it on `p->as`.

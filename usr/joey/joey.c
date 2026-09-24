@@ -930,6 +930,19 @@ static int do_pouch_hello_smoke(void) {
         return -1;
     t_putstr("joey: pouch-hello-malloc smoke ok (mallocng over SYS_BURROW_ATTACH / DETACH)\n");
 
+    // B-1b (ARCH 6.5): the Pouch memory seam made exact -- mmap at the asked
+    // prot over SYS_BURROW_RESERVE, mprotect over SYS_BURROW_PROTECT, madvise
+    // DONTNEED / FREE over SYS_BURROW_DECOMMIT, MAP_FIXED over one's own
+    // mapping, the partial munmap, mallocng's MADV_FREE path returning pages
+    // (the substrate witness: RED on a libc built with USE_MADV_FREE 0) and a
+    // 16 KiB static TLS (dies before main on the pre-0046 libc).
+    static const char pmem_name[]   = "pouch-hello-mem";
+    static const char pmem_expect[] = POUCH_CENSUS_MEM;
+    if (pouch_smoke_one(pmem_name, sizeof(pmem_name) - 1,
+                        pmem_expect, sizeof(pmem_expect) - 1) != 0)
+        return -1;
+    t_putstr("joey: pouch-hello-mem smoke ok (mprotect / madvise / MAP_FIXED / partial munmap over RESERVE / PROTECT / DECOMMIT / DETACH; mallocng returns pages)\n");
+
     // P6-pouch-threads (9b): the multi-thread proving binary. Drives
     // pthread_create + pthread_mutex_lock/unlock + pthread_join end-to-end
     // through the patched src/thread/ layer (0004-pouch-pthread) — every
@@ -1130,6 +1143,19 @@ static int do_pouch_hello_smoke(void) {
                                      pflt_expect, sizeof(pflt_expect) - 1) != 0)
         return -1;
     t_putstr("joey: pouch-hello-fault smoke ok (EL0 NULL deref terminated cleanly via snare:segv; kernel did NOT extinct)\n");
+
+    // B-1b: a pthread's guard page is real. A worker writes the first usable
+    // byte of its stack (the boundary is exact), then the byte below it -- the
+    // PROT_NONE guard musl minted through mmap(PROT_NONE) + mprotect(RW) --
+    // and dies of snare:segv. On the pre-0044 libc mmap minted RW whatever the
+    // prot and mprotect was ENOSYS, so the write succeeded and the child
+    // exited 0 -- the status expect_fault refuses.
+    static const char pgrd_name[]   = "pouch-hello-guard";
+    static const char pgrd_expect[] = POUCH_CENSUS_GUARD;
+    if (pouch_smoke_one_expect_fault(pgrd_name, sizeof(pgrd_name) - 1,
+                                     pgrd_expect, sizeof(pgrd_expect) - 1) != 0)
+        return -1;
+    t_putstr("joey: pouch-hello-guard smoke ok (a write into a pthread's guard page died of snare:segv)\n");
     return 0;
 }
 

@@ -4,11 +4,11 @@ type: moc
 title: "pouch — the POSIX boundary line"
 parent: moc-boundary
 created: 2026-08-01
-updated: 2026-09-21
+updated: 2026-09-23
 ---
 pouch is Thylacine's C library: musl 1.2.5 vendored pristine at
 `third_party/musl/`, with a **patch series** (`usr/lib/pouch/patches/`,
-31 patches / ~11.5 kLOC) replacing musl's lower half with Thylacine-native
+46 patches / ~13.9 kLOC) replacing musl's lower half with Thylacine-native
 code. The upper half — printf, qsort, strtol, the math library, mallocng's
 allocation logic — is musl's and stays musl's. The boundary line is musl's
 own syscall seam, which is what makes a patch series (rather than a fork)
@@ -24,6 +24,9 @@ Linux syscall numbers and no Linux kernel-ABI assumptions.
 - [[sub-pouch-fs]] — open / stat / readdir / the mutation family /
   readlink: POSIX paths over the stalk resolver + the parent-fd+leaf
   primitives.
+- [[sub-pouch-mem]] — the memory seam: `mmap` at the asked prot,
+  `mprotect` / `madvise` / `MAP_FIXED` / partial `munmap` over RESERVE /
+  PROTECT / DECOMMIT / DETACH, mallocng's page return, the real pthread guard.
 - [[sub-pouch-thread]] — pthreads over `SYS_THREAD_SPAWN` + torpor, and
   sleeping over the same wait-on-address primitive.
 - [[sub-pouch-process]] — `posix_spawn` / wait / pipe / dup, the `/env`

@@ -6560,20 +6560,25 @@ static s64 sys_burrow_attach_lazy_handler(u64 length_raw) {
 // the range may span the pieces a protect cut (burrow_decommit_in walks it as a
 // range); it still refuses, changing nothing, any mapping in it that is not a
 // plain ANON_LAZY one, and any hole.
-s64 sys_burrow_decommit_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
-    if (!p)                                          return -1;
-    if (length_raw == 0)                             return -1;
+// B-1b: the decommit core with its errno, the sys_munmap_range_for_proc shape,
+// for the phenotype madvise row: INVAL for the shape, NOSYS below the window
+// (every ELF, stack, guard and vDSO mapping lives there -- not the phenotype's
+// to release), else burrow_decommit_in's own answer (NOMEM for a hole, INVAL
+// for a mapping that is not plain lazy anonymous memory of this Proc).
+s64 sys_burrow_decommit_core(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+    if (!p)                                          return -(s64)T_E_INVAL;
+    if (length_raw == 0)                             return -(s64)T_E_INVAL;
     // BURROW_RESERVE_MAX is the window (B-1a'): a decommit range may span any
     // lazy region, and a lazy region may be the whole window.
-    if (length_raw > BURROW_RESERVE_MAX)             return -1;
-    if (vaddr_raw & (PAGE_SIZE - 1))                 return -1;
+    if (length_raw > BURROW_RESERVE_MAX)             return -(s64)T_E_INVAL;
+    if (vaddr_raw & (PAGE_SIZE - 1))                 return -(s64)T_E_INVAL;
 
     u64 length = (length_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
 
     // Window confinement (matches SYS_BURROW_DETACH): overflow-safe since
     // length <= BURROW_RESERVE_MAX = TOP - BASE, so TOP - length >= BASE.
-    if (vaddr_raw < EXEC_USER_BURROW_BASE)           return -1;
-    if (vaddr_raw > EXEC_USER_BURROW_TOP - length)   return -1;
+    if (vaddr_raw < EXEC_USER_BURROW_BASE)           return -(s64)T_E_NOSYS;
+    if (vaddr_raw > EXEC_USER_BURROW_TOP - length)   return -(s64)T_E_NOSYS;
 
     spin_lock(&p->as->lock);
     // burrow_decommit_in does the range's PTE clear (+ TLBI before any free),
@@ -6581,6 +6586,11 @@ s64 sys_burrow_decommit_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) 
     int rc = burrow_decommit(p, vaddr_raw, length);
     spin_unlock(&p->as->lock);
     return (s64)rc;
+}
+
+// The native SYS_BURROW_DECOMMIT (84) keeps its 0 / -1 ABI over the core.
+s64 sys_burrow_decommit_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+    return sys_burrow_decommit_core(p, vaddr_raw, length_raw) == 0 ? 0 : -1;
 }
 
 static s64 sys_burrow_decommit_handler(u64 vaddr_raw, u64 length_raw) {
@@ -13561,6 +13571,49 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         return sys_burrow_protect_for_proc(p, args[0], args[1], nprot, 0);
     }
 
+    case VIV_LINUX_MADVISE: {
+        // madvise(addr, len, advice): x0 addr, x1 len, x2 advice. B-1b: the
+        // release row over SYS_BURROW_DECOMMIT (ARCH 6.5 "Capacity"), so a
+        // Linux allocator's MADV_DONTNEED / MADV_FREE returns pages the way
+        // Pouch's and the native one's do.
+        //
+        // The domain is the advice word (vivarium_madvise_decide): the two
+        // release advices translate to the decommit core, whose errnos are
+        // Linux's (ENOMEM for a hole, EINVAL for a mapping the release cannot
+        // apply to); the pure hints answer as Linux does -- 0 over a mapped
+        // range, ENOMEM over a hole -- and change nothing; an advice we do not
+        // model (the fork-semantic pair, KSM, the poison testers) declines.
+        // Linux's argument order (do_madvise): the advice first, then the
+        // alignment, then a zero length succeeds having touched nothing.
+        //
+        // The core is window-confined (like the range detach): text, data, the
+        // stack and the vDSO lie below the burrow window and are never the
+        // phenotype's to release, so it declines them. Linux answers ENOMEM for
+        // a hole wherever the hole lies, so an UNMAPPED range outside the
+        // window says so (pheno-probe L23m); a mapped one stays declined, its
+        // bytes untouched (L23s / L23t) -- a false ENOMEM there would tell an
+        // allocator its own .bss is unmapped.
+        enum viv_madvise_kind kind;
+        if (vivarium_madvise_decide(args[2], &kind) != VIV_TRANSLATED)
+            return -(s64)T_E_NOSYS;
+        if (args[0] & (PAGE_SIZE - 1)) return -(s64)T_E_INVAL;
+        if (args[1] == 0) return 0;
+        u64 hlen = (args[1] + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
+        if (hlen < args[1] || args[0] + hlen < args[0]) return -(s64)T_E_INVAL;
+        if (kind == VIV_MADVISE_RELEASE) {
+            s64 rc = sys_burrow_decommit_core(p, args[0], args[1]);
+            if (rc != -(s64)T_E_NOSYS) return rc;
+            spin_lock(&p->as->lock);
+            bool held = vma_range_is_mapped_in(p->as, args[0], args[0] + hlen);
+            spin_unlock(&p->as->lock);
+            return held ? -(s64)T_E_NOSYS : -(s64)T_E_NOMEM;
+        }
+        spin_lock(&p->as->lock);
+        bool mapped = vma_range_is_mapped_in(p->as, args[0], args[0] + hlen);
+        spin_unlock(&p->as->lock);
+        return mapped ? 0 : -(s64)T_E_NOMEM;
+    }
+
     case VIV_LINUX_RT_SIGACTION: {
         // rt_sigaction(sig, act, oldact, sigsetsize): x0 sig, x1 act,
         // x2 oldact, x3 sigsetsize.
@@ -15172,16 +15225,23 @@ static void syscall_dispatch_body(struct exception_context *ctx) {
     case SYS_BURROW_ATTACH_LAZY: {
         // CL-4: accept BOTH the native 1-arg ABI (length in x0) AND the Linux
         // 6-arg anon-mmap ABI (addr in x0, length in x1). musl's __init_tls
-        // issues a RAW 6-arg mmap for a large-TLS binary such as clang++,
-        // bypassing the patched 1-arg __mmap wrapper -- and it is the ONLY raw
-        // SYS_mmap site in musl's whole src/ tree (src/env/__init_tls.c).
+        // issued a RAW 6-arg mmap for a large-TLS binary such as clang++,
+        // bypassing the patched 1-arg __mmap wrapper -- the ONLY raw SYS_mmap
+        // site in musl's whole src/ tree (src/env/__init_tls.c). Since B-1b no
+        // libc built from this tree sends it: pouch 0044 parks __NR_mmap at the
+        // seam's sentinel and 0046 routes __init_tls through __mmap (which
+        // mints over SYS_BURROW_RESERVE). A binary linked against an older libc
+        // still does -- the Clade toolchain is cross-built and staged by its
+        // own steps, never relinked by a sysroot rebuild -- so the arm stays
+        // until no pool carries a pre-0046 binary; retiring it is an ABI-shape
+        // change.
         //
         // The split is exact rather than heuristic, on three checked facts:
         // that site passes a LITERAL 0 addr under a `tls_size > builtin_tls`
-        // guard (so x0==0 and x1>0 always); the patched __mmap rejects both
-        // len==0 and MAP_FIXED, so no wrapper call can present a non-zero x0
-        // that is really an address; and the native ABI's length is never
-        // legally 0 (sys_burrow_attach_lazy_for_proc rejects it).
+        // guard (so x0==0 and x1>0 always); no wrapper call presents a non-zero
+        // x0 that is really an address (0003's __mmap rejected len==0 and
+        // MAP_FIXED; 0044's never calls 83); and the native ABI's length is
+        // never legally 0 (sys_burrow_attach_lazy_for_proc rejects it).
         //
         // But selecting the 6-arg reading is NOT sufficient. The wrapper's
         // refusals (file-backed, MAP_FIXED) are LIBC-side only -- the kernel

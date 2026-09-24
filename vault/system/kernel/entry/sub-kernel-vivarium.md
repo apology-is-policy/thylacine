@@ -10,7 +10,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
-updated: 2026-09-23
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -56,6 +56,7 @@ touches EL0.
 | `vivarium_{openat_create,mkdirat,unlinkat,renameat}_decide` | verdict + params | #50 path-mutation family (the create/remove decisions) |
 | `vivarium_{mmap_file,mmap_fixed_file,mmap_fixed_anon}_decide` | verdict | DISTRO D-3 file-backed mmap; PROT_WRITE **refused** to keep I-36; the fixed-anon arm admits PROT_NONE since B-1a; both fixed arms are confined to the burrow window since B-1a' (`fixed_addr_ok`) |
 | `vivarium_mprotect_decide` | verdict | B-1a: the prot word alone; `addr` / `len` are the shell's (a zero length succeeds, an unaligned address is EINVAL) |
+| `vivarium_madvise_decide` | verdict + kind | B-1b: the advice word alone -- RELEASE (`DONTNEED` / `FREE`) over the decommit core, HINT (twelve) answers 0 / ENOMEM and changes nothing, everything else declines; `addr` / `len` are the shell's |
 | `vivarium_{ppoll,pselect6}_decide` | verdict + params | the poll family; `exceptfds`/POLLPRI is the load-bearing decline (Error paths) |
 | `vivarium_{recvfrom,recvmsg,sendto}_decide` | bool + errno | V-5 socket data path |
 | `vivarium_{faccessat,ioctl,futex,getsockopt}_decide` | verdict | the 6.26 git batch + misc |
@@ -640,3 +641,38 @@ mapped" range stays `0x50000000` -- a range no leg has ever mapped is the only
 honest unmapped. `test_vivarium.c`'s `mmap_fixed_domain` adds the two
 below-window declines and its arms-disjoint sweep the in-window page. The
 probe itself remains unowned ([[sub-kernel-protect-witness]] Seams).
+
+## The madvise row (2026-09-23, B-1b)
+
+`{ VIV_LINUX_MADVISE, VIV_TIER2 }` (233) lands with its shell, so a Linux
+guest's allocator returns memory the way Pouch's and the native one do (ARCH
+6.5 "Capacity"; VIVARIUM 6.28). `vivarium_madvise_decide(advice, &kind)` judges
+the advice word ALONE, narrowed to 32 bits as the mprotect row's prot is:
+`MADV_DONTNEED` (4) and `MADV_FREE` (8) are RELEASE; the twelve pure hints
+(NORMAL, RANDOM, SEQUENTIAL, WILLNEED, HUGEPAGE, NOHUGEPAGE, DONTDUMP, DODUMP,
+COLD, PAGEOUT, POPULATE_READ, POPULATE_WRITE) are HINT; the fork-semantic
+quartet, KSM's pair, REMOVE, the poison testers and any unknown value decline
+(the tier's rule: none can be given Linux's meaning here, and a false 0 is a
+lie a later fork would expose). The shell ([[sub-kernel-syscall-dispatch]])
+keeps Linux's argument order -- the advice first, an unaligned address EINVAL,
+a zero length 0 -- and hands a RELEASE to `sys_burrow_decommit_core` (the
+-errno form of `SYS_BURROW_DECOMMIT`, which the native 84 flattens to -1): a
+hole ENOMEM, a mapping that is not plain anonymous memory of this space EINVAL.
+The core is window-confined like the range detach, and the shell refines its
+`-T_E_NOSYS` for a range outside the window with `vma_range_is_mapped_in`: an
+UNMAPPED range is still ENOMEM (a hole is a hole wherever it lies -- the first
+B-1b boot failed pheno-probe L23m, a hole at `0x50000000` answered ENOSYS), a
+MAPPED one is ENOSYS with its bytes untouched (a false ENOMEM would tell an
+allocator its own `.bss` is unmapped). A HINT is 0 over a mapped range and
+ENOMEM over a hole. Three divergences are recorded, not served (holotype F6;
+VIVARIUM 6.28): a RELEASE over a private FILE window is EINVAL (Linux drops
+the private pages); a range mixing mapped and unmapped parts releases nothing
+(Linux releases the mapped parts, then answers ENOMEM); a length past the
+window is EINVAL before any hole is looked for (Linux: ENOMEM). I-43 holds: the
+row confers no authority the native decommit does not gate. Witnesses: `vivarium.madvise_domain` (the three sets,
+the narrowing, a NULL out-parameter declining), the tier asserts at both
+sites, `vma.range_is_mapped`, and pheno-probe legs L23j-L23t (a written page
+released and re-read zero; a hole ENOMEM for both kinds; DONTFORK ENOSYS; an
+unaligned start EINVAL; a zero length 0; the probe's own data page declined
+and intact). The sabotage `nodecommit` (the arm answers 0 without the core)
+reddens L23l.

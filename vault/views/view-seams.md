@@ -19,6 +19,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-login-halcyond-fallback]] | closed | sub-stratum-session | fnd-kt1-r1-c12 | the KT-1 audit round 1 (C-F12); the d-1a deferral |
 | [[seam-loom-sqpoll-owner-unbackstopped]] | closed | sub-kernel-loom | chg-2026-08-16-loom-charge-ledger | unfiled -- yip to main 2026-08-16 |
 | [[seam-posix-pathname-form-gates]] | closed | sub-kernel-stalk | chg-2026-07-31-stalk-sweep | tasks #79-#87 (vivarium numbering) |
+| [[seam-pouch-guard-pages]] | closed | sub-pouch-thread, sub-pouch-process | chg-2026-05-23-p6-threads-b | threads-9b F2 |
 | [[seam-scripture-invariant-mirror-drift]] | closed | inv-i32 | chg-2026-08-16-i32-scope-correction | unfiled -- yip to main 2026-08-16 |
 | [[seam-union-mount-walk]] | closed | sub-kernel-territory, sub-kernel-stalk | chg-2026-05-13-p5-attach-mount | unfiled |
 | [[seam-220-netd-listener-poll]] | open | sub-netd-server | chg-2026-06-18-net6b-poll-bridge | task #220 |
@@ -82,7 +83,6 @@ Generated from note fields — do not edit between the markers
 | [[seam-pouch-dup2-target]] | open | sub-pouch-process | chg-2026-07-23-cl1b-process | CL-1b |
 | [[seam-pouch-errno-channel]] | open | sub-pouch-seam, sub-pouch-fs, sub-pouch-net | chg-2026-05-22-p6-syscall-seam | POUCH-DESIGN.md 5.1 |
 | [[seam-pouch-forkpty]] | open | sub-pouch-tty | chg-2026-07-18-pty3 | PTY-3 |
-| [[seam-pouch-guard-pages]] | open | sub-pouch-thread, sub-pouch-process | chg-2026-05-23-p6-threads-b | threads-9b F2 |
 | [[seam-pouch-process-shared]] | open | sub-pouch-thread | chg-2026-05-23-p6-threads-b | POUCH-DESIGN.md 8.2 |
 | [[seam-pouch-readyfd-aba]] | open | sub-pouch-net | chg-2026-06-18-net6b4-close | #222 |
 | [[seam-pouch-select-fd-bound]] | open | sub-pouch-net | chg-2026-06-24-355-poll-decouple | #355 companion |

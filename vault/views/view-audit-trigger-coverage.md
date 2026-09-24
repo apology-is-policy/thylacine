@@ -40,12 +40,13 @@ that would catch it — has the owning dossier been updated since the row last
 changed on main? — is the next increment, tracked as task #169.
 
 <!-- generated:begin -->
-**173 declared surfaces · 169 covered by a hard-audit dossier · 4 soft-owned · 0 unowned · 0 unparsed · 23 cited path(s) that do not resolve.**
+**174 declared surfaces · 170 covered by a hard-audit dossier · 4 soft-owned · 0 unowned · 0 unparsed · 24 cited path(s) that do not resolve.**
 
 ### Cited paths that do not resolve
 
 | declared surface | cited path | |
 |---|---|---|
+| **B-1b: the Pouch memory seam -- `mmap` at the asked prot over `SYS_BU… | `arch/aarch64/bits/syscall.h.in` | no such file in the tree |
 | **HALCYON-INSTRUMENT I-1: the second theme schema + the dispatching lo… | `usr/lib/halcyon/themes/{13` | no such file in the tree |
 | **HALCYON-INSTRUMENT I-8c-3a: the `motion` verb -- a fifth member of t… | `lib/halcyon` | no such file in the tree |
 | **HALCYON-SCALE: the display scale -- the EDID-derived percent the com… | `tools/interactive/ls-gfx-compose.exp` | no such file in the tree |

@@ -495,6 +495,18 @@ struct Vma *vma_next_overlap_in(struct AddrSpace *as, u64 lo, u64 hi) {
     return NULL;
 }
 
+bool vma_range_is_mapped_in(struct AddrSpace *as, u64 lo, u64 hi) {
+    if (!as || lo >= hi) return false;
+    u64 cur = lo;
+    for (struct Vma *v = vma_next_overlap_in(as, lo, hi);
+         v && v->vaddr_start < hi; v = v->next) {
+        if (v->vaddr_start > cur) return false;      // a gap before this one
+        cur = v->vaddr_end;
+        if (cur >= hi) return true;
+    }
+    return false;                                     // a gap at the tail
+}
+
 long vma_uninstall_range_in(struct AddrSpace *as, u64 lo, u64 hi) {
     long total = 0;
     for (struct Vma *v = vma_next_overlap_in(as, lo, hi);

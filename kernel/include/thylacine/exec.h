@@ -40,26 +40,25 @@ struct Spoor;   // REVENANT R-4: exec_setup_from_spoor's pinned executable
 //   0x0000_0000_0001_0000          User code/data (per ELF e_entry +
 //   ...                             per-segment vaddr).
 //   ...
-//   0x0000_0000_7FEF_F000          User stack GUARD page (4 KiB —
+//   0x0000_0000_7F7F_F000          User stack GUARD page (4 KiB —
 //                                   reserved, unmapped, prot==0).
-//   0x0000_0000_7FF0_0000          User stack base (EXEC_USER_STACK_BASE).
+//   0x0000_0000_7F80_0000          User stack base (EXEC_USER_STACK_BASE).
 //   0x0000_0000_8000_0000          User stack TOP (initial SP_EL0).
 //   0x0000_0001_0000_0000          Burrow-attach window base — the range
 //   ...                             SYS_BURROW_ATTACH places anonymous
 //   0x0000_4000_0000_0000          regions into (first-fit upward).
 //
 // The user-stack region is well below the TTBR1 split (0x0001_0000_*)
-// and well above typical ELF segment vaddrs + BSS heaps. Sized 1 MiB
-// (G-7b; was 256 KiB): a real ported program's call graph (TyrQuake's
-// model loader) overflowed 256 KiB into the guard page. The mapping is
+// and well above typical ELF segment vaddrs + BSS heaps. Sized 8 MiB
+// (B-1b; the history is below). The mapping is
 // SPARSE since LINEAGE L-4a (exec_map_user_stack: burrow_create_anon_lazy):
 // exec commits only the pages the argv/auxv frame occupies at the top, and
 // the rest demand-zeroes as the program descends -- the Linux model. So the
 // size is a RESERVATION plus an I-32 ceiling, not a per-Proc cost, and
-// raising it is a constant change here plus its one mirror: pouch's
-// pthread_getattr_np states [TOP - SIZE, TOP) for the initial thread. The
-// pouch-hello-threads boot prover requires that answer to equal this
-// mapping's `stack` row in /proc/<pid>/maps, so a stale mirror fails a boot.
+// raising it is a constant change here: exec_fill_auxv states the mapping
+// (AT_STACK_BASE / AT_STACK_SIZE), pouch's pthread_getattr_np derives it
+// (0045), and the pouch-hello-threads boot prover requires that answer to
+// equal this mapping's `stack` row in /proc/<pid>/maps.
 //
 // P5-secondary-stack-guard: a 4 KiB guard page sits directly below
 // EXEC_USER_STACK_BASE, installed by exec_map_user_stack as a prot==0
@@ -77,7 +76,14 @@ struct Spoor;   // REVENANT R-4: exec_setup_from_spoor's pinned executable
 // reason; L-4a has since made it sparse (see the layout note above), so the
 // eager-cost argument for 1 MiB no longer holds -- only the reservation and
 // the I-32 ceiling do.
-#define EXEC_USER_STACK_SIZE         (1024ull * 1024)
+//
+// 8 MiB since B-1b (2026-09-23; the browser arc's decision 4): Linux's default
+// RLIMIT_STACK, which is what a ported runtime sizes itself against (JSC asks
+// for 5 MiB and clamps to what it gets). The reservation is sparse, so the
+// price is address space and whatever a runaway recursion touches before I-32
+// refuses it. A libc DERIVES the extent from AT_STACK_BASE / AT_STACK_SIZE
+// (elf.h), never from a mirror of these two constants.
+#define EXEC_USER_STACK_SIZE         (8ull * 1024 * 1024)
 #define EXEC_USER_STACK_TOP          0x0000000080000000ull
 #define EXEC_USER_STACK_BASE         (EXEC_USER_STACK_TOP - EXEC_USER_STACK_SIZE)
 #define EXEC_USER_STACK_GUARD_SIZE   0x1000ull
@@ -151,6 +157,8 @@ _Static_assert((EXEC_USER_VDSO_BASE & 0xFFFull) == 0,
 //                                                        AT_PHENT, AT_PHNUM,
 //                                                        AT_PAGESZ, AT_HWCAP,
 //                                                        AT_RANDOM, AT_ENTRY,
+//                                                        AT_STACK_BASE,
+//                                                        AT_STACK_SIZE,
 //                                                        [AT_VDSO_CLOCK], AT_NULL)
 //   sp + ...                      (pad to the next 16-align)
 //   sp + R                        AT_RANDOM entropy     16 kernel-CSPRNG bytes
@@ -180,18 +188,22 @@ _Static_assert((EXEC_USER_VDSO_BASE & 0xFFFull) == 0,
 // that arithmetic), so nothing that used to take Shape A can observe the
 // change; what it buys is that envp now has exactly one place to be wrong.
 //
-// 9 = AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_HWCAP, AT_RANDOM,
-// AT_ENTRY, AT_VDSO_CLOCK, AT_NULL. The frame ALWAYS reserves room for all 9
-// (so the AT_RANDOM block + strings region offsets are stable); when the vDSO
-// page is absent the builder writes the AT_NULL terminator after 7 entries and
-// the AT_VDSO_CLOCK slot stays unused (zeroed) padding before the random
-// block. AT_HWCAP is unconditional (the hwcap word exists on every boot).
+// 11 = AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_HWCAP, AT_RANDOM,
+// AT_ENTRY, AT_STACK_BASE, AT_STACK_SIZE, AT_VDSO_CLOCK, AT_NULL. The frame
+// ALWAYS reserves room for all 11 (so the AT_RANDOM block + strings region
+// offsets are stable); when the vDSO page is absent the builder writes the
+// AT_NULL terminator after 9 entries and the AT_VDSO_CLOCK slot stays unused
+// (zeroed) padding before the random block. AT_HWCAP is unconditional (the
+// hwcap word exists on every boot); so are the two stack tags (B-1b): the
+// initial thread's stack is the mapping exec_map_user_stack makes, and a libc
+// that must answer pthread_getattr_np for the main thread reads its extent
+// here instead of probing for it (musl's mremap walk) or mirroring exec.h.
 //
 // AT_ENTRY joined at DISTRO D-2, placed after AT_RANDOM and BEFORE the
 // optional AT_VDSO_CLOCK. Every reader scans for its tag, so position is free;
 // what the placement buys is that the seven MANDATORY entries keep the frame
 // indices they had, and only the optional tail shifts by one 16-byte slot.
-#define EXEC_INIT_AUXV_COUNT   9
+#define EXEC_INIT_AUXV_COUNT   11
 
 // Environment bounds (#140). The env block is packed exactly like argv: a
 // run of NUL-terminated strings, here "NAME=VALUE" records, with envc equal
@@ -199,16 +211,17 @@ _Static_assert((EXEC_USER_VDSO_BASE & 0xFFFull) == 0,
 //
 // THESE ARE A DELIBERATE CHOICE, NOT THE PRODUCT OF THE TWO /env MAXIMA.
 // ENV_MAX_ENTRIES (64) × (ENV_NAME_MAX + ENV_VALUE_MAX) is 260 KiB, which
-// beside the 64 KiB argv bound would put ~330 KiB of FRAME under a 1 MiB
-// stack. That still passes the _Static_assert below — the assert only proves
+// beside the 64 KiB argv bound would put ~330 KiB of FRAME under the 1 MiB
+// stack of the time. That still passes the _Static_assert below — the assert only proves
 // the frame FITS — while leaving ~690 KiB of actual program stack against a
 // call graph G-7b measured overflowing 256 KiB (TyrQuake's model loader).
 // The failure it would buy is a squeezed stack, which the build cannot see.
 //
 // So the env block is bounded independently, on Linux's model (argv+envp
 // bounded as a fraction of the stack: 1/4 of RLIMIT_STACK, floor 32 pages).
-// A quarter of our 1 MiB is 256 KiB; 64 KiB argv + 32 KiB env is 96 KiB,
-// comfortably inside it, and leaves ~920 KiB of program stack. Against
+// A quarter of the 1 MiB stack the bound was sized against is 256 KiB; 64 KiB
+// argv + 32 KiB env is 96 KiB, comfortably inside it (and a sixteenth of the
+// 8 MiB stack since B-1b), leaving all but 96 KiB as program stack. Against
 // ENV_MAX_ENTRIES that is 512 bytes per variable on average — far above a
 // realistic NAME=VALUE, so no plausible environment reaches it, and one that
 // does is refused with T_E_2BIG rather than silently truncated.
@@ -249,8 +262,8 @@ _Static_assert((EXEC_USER_VDSO_BASE & 0xFFFull) == 0,
 // SYS_SPAWN_ARGV_MAX (512) with argv_data_len = SYS_SPAWN_ARGV_DATA_MAX
 // (64 KiB, both raised for the on-device Go toolchain's command lines), and
 // envc = EXEC_ENV_MAX with env_data_len = EXEC_ENV_DATA_MAX. ~104 KiB (was
-// ~68 KiB before the environment) — still far under the 1 MiB user-stack
-// budget; the _Static_assert below proves it.
+// ~68 KiB before the environment) — still far under the 8 MiB user-stack
+// budget (1 MiB until B-1b); the _Static_assert below proves it.
 #define EXEC_INIT_STACK_MAX_SIZE \
     EXEC_INIT_FRAME_SIZE(512u, EXEC_ENV_MAX, 65536u, EXEC_ENV_DATA_MAX)
 _Static_assert(EXEC_INIT_STACK_SIZE % 16 == 0,

@@ -103,6 +103,7 @@ void test_capacity_death_returns_charges_to_pool(void);
 void test_capacity_page_tables_charged_and_reclaimed(void);
 void test_capacity_memory_bomb_leaves_the_reserve(void);
 void test_capacity_fork_costs_the_pool_only_its_nodes(void);
+void test_vma_range_is_mapped(void);
 
 // The non-static inners of the SVC handlers (kernel/syscall.c).
 extern s64 sys_burrow_reserve_for_proc(struct Proc *p, u64 length_raw, u64 prot_raw,
@@ -1125,4 +1126,47 @@ void test_capacity_fork_costs_the_pool_only_its_nodes(void) {
     TEST_EXPECT_EQ(capacity_pool_charged(), pool0, "the pool is back");
     drop(p);
     TEST_EXPECT_EQ(phys_free_pages(), free_before, "phys free back to baseline");
+}
+
+// B-1b: the phenotype madvise row's hint answer -- a range is "mapped" only
+// when every byte of it is under some mapping (Linux's ENOMEM for a hole).
+void test_vma_range_is_mapped(void) {
+    struct Proc *p = mk();
+    TEST_ASSERT(p, "proc");
+    s64 va = sys_burrow_reserve_for_proc(p, 4 * P, PR_RW, 0);
+    TEST_ASSERT(va > 0, "reserve 4 pages");
+    u64 lo = (u64)va;
+    spin_lock(&p->as->lock);
+    bool whole = vma_range_is_mapped_in(p->as, lo, lo + 4 * P);
+    bool part  = vma_range_is_mapped_in(p->as, lo + P, lo + 3 * P);
+    bool past  = vma_range_is_mapped_in(p->as, lo, lo + 5 * P);
+    bool below = vma_range_is_mapped_in(p->as, lo - P, lo + P);
+    bool empty = vma_range_is_mapped_in(p->as, lo, lo);
+    spin_unlock(&p->as->lock);
+    TEST_ASSERT(whole, "the whole reservation is mapped");
+    TEST_ASSERT(part,  "an interior range is mapped");
+    TEST_ASSERT(!past, "a range running past the end is not");
+    TEST_ASSERT(!below, "a range starting below it is not");
+    TEST_ASSERT(!empty, "an empty range is not");
+    // Cut a hole in the middle: the two remaining pieces do not cover it.
+    TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, lo + P, 2 * P), (s64)0, "detach the middle");
+    spin_lock(&p->as->lock);
+    bool across = vma_range_is_mapped_in(p->as, lo, lo + 4 * P);
+    bool head   = vma_range_is_mapped_in(p->as, lo, lo + P);
+    bool tail   = vma_range_is_mapped_in(p->as, lo + 3 * P, lo + 4 * P);
+    spin_unlock(&p->as->lock);
+    TEST_ASSERT(!across, "a range across the hole is not mapped");
+    TEST_ASSERT(head && tail, "the two pieces are");
+    // The release core's errnos over the same shapes (B-1b): a hole is ENOMEM.
+    extern s64 sys_burrow_decommit_core(struct Proc *, u64, u64);
+    TEST_EXPECT_EQ(sys_burrow_decommit_core(p, lo, 4 * P), ERR(T_E_NOMEM),
+                   "decommit across the hole is ENOMEM");
+    TEST_EXPECT_EQ(sys_burrow_decommit_core(p, lo, P), (s64)0, "decommit the head piece");
+    TEST_EXPECT_EQ(sys_burrow_decommit_core(p, lo + 1, P), ERR(T_E_INVAL),
+                   "an unaligned decommit is EINVAL");
+    TEST_EXPECT_EQ(sys_burrow_decommit_core(p, EXEC_USER_STACK_BASE, P), ERR(T_E_NOSYS),
+                   "below the window the row is not served");
+    TEST_EXPECT_EQ(sys_burrow_decommit_for_proc(p, lo, 4 * P), (s64)-1,
+                   "the native 84 flattens the refusal to -1");
+    drop(p);
 }

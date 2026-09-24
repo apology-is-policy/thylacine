@@ -41,7 +41,12 @@ contents, seal, X refused before the lookup, the malformed-word refusals, a
 touching the guard")` -- the expect-fault census, which requires BOTH the
 marker in the child's stdout pipe AND a non-zero exit status, so a page sealed
 at none that did not guard (the child prints SURVIVED and exits 0) fails the
-boot. Both rungs are boot-fatal like every other. The marker goes out on fd 1
+boot. B-1b adds the Pouch side: `pouch_smoke_one("pouch-hello-mem",
+POUCH_CENSUS_MEM)` after the malloc smoke (twelve legs of the exact memory
+seam, the mallocng witness among them -- [[sub-pouch-mem]]), and
+`pouch_smoke_one_expect_fault("pouch-hello-guard", POUCH_CENSUS_GUARD)` after
+the fault smoke (a worker's write into its own guard dies of `snare:segv`);
+`/pouch-hello-threads`'s census grew by three legs. Both rungs are boot-fatal like every other. The marker goes out on fd 1
 (`t_write`), not `t_putstr`: `SYS_PUTS` is the console, and the census reads
 the pipe ([[sub-kernel-protect-witness]]).
 

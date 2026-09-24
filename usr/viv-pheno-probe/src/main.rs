@@ -160,6 +160,7 @@ const NR_BRK: u64 = 214;
 const NR_MUNMAP: u64 = 215;
 const NR_MMAP: u64 = 222;
 const NR_MPROTECT: u64 = 226;
+const NR_MADVISE: u64 = 233;
 const NR_RT_SIGACTION: u64 = 134;
 const NR_RT_SIGRETURN: u64 = 139;
 const NR_RT_SIGPROCMASK: u64 = 135;
@@ -225,6 +226,12 @@ static mut SIG_UC_END_MAGIC: u32 = 0xFFFF_FFFF;
 /// back and never returns, which is exactly the shape an optimiser is entitled
 /// to delete.
 static mut COW_WITNESS: u64 = 0x1111_1111;
+// A page of this binary's own data segment: mapped, and BELOW the burrow window
+// (L23s / L23t -- a release the phenotype may not perform is declined, not
+// misreported as a hole, and the page keeps its bytes).
+#[repr(C, align(4096))]
+struct Page([u8; 4096]);
+static mut BELOW_WINDOW_PAGE: Page = Page([0; 4096]);
 
 extern "C" fn viv_sig_handler(signo: i32, info: *const u8, uc: *const u8) {
     unsafe {
@@ -486,6 +493,9 @@ const PROT_EXEC: u64 = 4;
 const MAP_PRIVATE: u64 = 0x02;
 const MAP_FIXED: u64 = 0x10;
 const MAP_ANON: u64 = 0x20;
+const MADV_WILLNEED: u64 = 3;
+const MADV_DONTNEED: u64 = 4;
+const MADV_DONTFORK: u64 = 10;
 
 const AT_FDCWD: u64 = (-100i64) as u64;
 const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
@@ -1106,6 +1116,31 @@ unsafe fn run_linux() -> ! {
     leg!(rep, svc3(NR_MPROTECT, n as u64, 0, PROT_READ) == 0, b"L23g\n");           // len 0: nothing to do
     leg!(rep, svc3(NR_MPROTECT, n as u64 + 1, 4096, PROT_READ) == NEG_EINVAL, b"L23h\n");
     leg!(rep, svc3(NR_MPROTECT, n as u64 + 1, 0, PROT_READ) == NEG_EINVAL, b"L23i\n");     // alignment before len 0 (Linux order)
+
+    // madvise is a TRANSLATED row since B-1b (ARCH 6.5 "Capacity"): DONTNEED
+    // and FREE are the decommit core -- the page goes and a later read faults a
+    // fresh zero page in -- while a pure hint answers 0 over a mapped range and
+    // ENOMEM over a hole and changes nothing. An advice the tree does not
+    // model (DONTFORK: a phenotype fork exists) declines. Linux's argument
+    // order: alignment before a zero length.
+    leg!(rep, svc3(NR_MPROTECT, n as u64, 4096, PROT_READ | PROT_WRITE) == 0, b"L23j\n");
+    (n as *mut u64).write_volatile(0xDEAD_BEEF);
+    leg!(rep, svc3(NR_MADVISE, n as u64, 4096, MADV_DONTNEED) == 0, b"L23k\n");
+    leg!(rep, (n as *const u64).read_volatile() == 0, b"L23l\n");             // released: zero again
+    leg!(rep, svc3(NR_MADVISE, 0x50000000, 4096, MADV_DONTNEED) == NEG_ENOMEM, b"L23m\n");
+    leg!(rep, svc3(NR_MADVISE, n as u64, 4096, MADV_WILLNEED) == 0, b"L23n\n");
+    leg!(rep, svc3(NR_MADVISE, 0x50000000, 4096, MADV_WILLNEED) == NEG_ENOMEM, b"L23o\n");
+    leg!(rep, svc3(NR_MADVISE, n as u64, 4096, MADV_DONTFORK) == NEG_ENOSYS, b"L23p\n");
+    leg!(rep, svc3(NR_MADVISE, n as u64 + 1, 4096, MADV_DONTNEED) == NEG_EINVAL, b"L23q\n");
+    leg!(rep, svc3(NR_MADVISE, n as u64, 0, MADV_DONTNEED) == 0, b"L23r\n");
+    // Outside the burrow window the decommit core declines; a hole there is
+    // still Linux's ENOMEM (L23m), a MAPPED page -- this binary's own data --
+    // is ENOSYS and keeps its bytes (the positive control that "declined"
+    // means untouched).
+    let bw = &raw mut BELOW_WINDOW_PAGE as *mut u8;
+    bw.write_volatile(0x5a);
+    leg!(rep, svc3(NR_MADVISE, bw as u64, 4096, MADV_DONTNEED) == NEG_ENOSYS, b"L23s\n");
+    leg!(rep, bw.read_volatile() == 0x5a, b"L23t\n");
     let _ = svc3(NR_MUNMAP, n as u64, 4096, 0);
 
     // --- L24-L31: signals (V-6b) --------------------------------------------

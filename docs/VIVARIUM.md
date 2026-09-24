@@ -329,7 +329,7 @@ supervisor Proc could actually serve is **empty**.
 
 It is not a corner case. `third_party/musl/src/env/__init_tls.c:137` mmaps for
 TLS whenever it exceeds the builtin block, and mallocng needs
-`mmap`/`madvise`/`mremap` — a Linux guest cannot reach `main` without `mmap`.
+`mmap`/`madvise`/`mremap` (`madvise` translated since B-1b, 6.28) — a Linux guest cannot reach `main` without `mmap`.
 
 **Why the peers do not have this problem.** The research that should have
 accompanied §4 originally:
@@ -3071,6 +3071,50 @@ not already gate.
 break (the omode bit is additive; native opens that don't set it are unaffected).
 The whole arm is "carry two flags/numbers to machinery that already exists" —
 Stratum's server-side append and the native pread/pwrite handlers.
+
+### 6.28 Tier 2 — `madvise` (233): the decommit row (B-1b, as-built 2026-09-23)
+
+A Linux guest returns memory with `madvise(MADV_DONTNEED)` / `MADV_FREE`
+(glibc's arena trimming, Go's scavenger, every GC's decommit), and until B-1b
+the row was FORWARD: ENOSYS, which every caller ignores, so a guest's footprint
+only ever grew — the third substrate's share of ARCH 6.5's bar (Pouch's and the
+native allocator are the other two). The row is a Tier-2 translator over
+`SYS_BURROW_DECOMMIT`'s core (`sys_burrow_decommit_core`, the -errno form the
+native 84 flattens to -1). `vivarium_madvise_decide` sorts the advice into
+RELEASE (`MADV_DONTNEED` 4, `MADV_FREE` 8: the pages go, the mapping stays, a
+later touch re-faults zero — MADV_FREE's lazy reclaim taken at once, inside its
+contract), HINT ({NORMAL, RANDOM, SEQUENTIAL, WILLNEED, HUGEPAGE, NOHUGEPAGE,
+DONTDUMP, DODUMP, COLD, PAGEOUT, POPULATE_READ, POPULATE_WRITE}: nothing here
+to steer — 0 on a mapped range, ENOMEM on a hole, as Linux answers, and nothing
+changes), and FORWARD for everything else (the fork-semantic quartet DONTFORK /
+DOFORK / WIPEONFORK / KEEPONFORK, KSM's MERGEABLE / UNMERGEABLE, REMOVE,
+HWPOISON / SOFT_OFFLINE, an unknown value): the tier's rule that declining is
+always safe, since none of those can be given Linux's meaning here and a false
+"0" is a lie a later fork would expose. Linux's argument order is kept: the
+advice is judged first, an unaligned start is EINVAL, a zero length is 0. The
+release inherits the core's answers inside the burrow window — a hole ENOMEM,
+a mapping that is not plain anonymous memory of this space EINVAL — and the
+core DECLINES a range outside it (text, data, the stack and the vDSO lie below
+the window and are never the phenotype's to release): an unmapped range there
+is still Linux's ENOMEM (a hole is a hole wherever it lies), a mapped one is
+ENOSYS with its bytes untouched — a false ENOMEM would tell an allocator its
+own `.bss` is unmapped. The comparison narrows to 32 bits, as the `mprotect`
+row's prot does. Three divergences are recorded rather than served: a
+RELEASE over a private FILE window is EINVAL, where Linux drops the private
+pages and re-reads the file; a range mixing mapped and unmapped parts
+releases nothing and answers ENOMEM, where Linux releases the mapped parts
+first; and a length past the window (`BURROW_RESERVE_MAX`) is EINVAL before
+any hole is looked for, where Linux answers ENOMEM. I-43 holds: the row
+confers no authority the native decommit does not gate (the same window
+confinement, the same admission), and a phenotype Proc's release reaches only
+its own address space.
+
+Witnesses: `vivarium.madvise_domain` (the three sets and the narrowing),
+`vma.range_is_mapped`, and pheno-probe legs L23j–L23t (a written page released
+and re-read zero; a hole ENOMEM for both kinds; DONTFORK ENOSYS; an unaligned
+start EINVAL; a zero length 0; a page of the probe's own data segment declined
+and intact). The RED `nodecommit` (the arm answers 0 without the core) reddens
+L23l: the page keeps its bytes.
 
 ---
 

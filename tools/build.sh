@@ -612,7 +612,7 @@ EOF
     # P6-pouch-hello-smoke: copy the pouch POSIX test binaries (built
     # against the pouch sysroot by build_pouch_progs) into the cpio root.
     # Same curation discipline — explicit list, not a glob.
-    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fopen" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "pouch-hello-susp" "pouch-hello-reentry" "pouch-hello-identity" "pouch-hello-cxx" "sdl-probe" "sdl-audio-probe" "tyr-quake" "tyr-glquake" "make" )
+    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fopen" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "pouch-hello-susp" "pouch-hello-reentry" "pouch-hello-identity" "pouch-hello-mem" "pouch-hello-guard" "pouch-hello-cxx" "sdl-probe" "sdl-audio-probe" "tyr-quake" "tyr-glquake" "make" )
     local pouch_progs="$BUILD_DIR/pouch/progs"
     # DX-2 (Cryptid): dosbox-x (17.6 MB) is DEFAULT-ON (operator direction
     # 2026-09-03; mirrors build_go_goroot's opt-out). THYLACINE_BAKE_DOSBOX=0
@@ -2388,7 +2388,7 @@ build_sysroot() {
                     'SYS_rt_sigaction 0xFFFF' 'SYS_rt_sigprocmask 0xFFFF' \
                     'SYS_tkill 0xFFFF' 'SYS_kill 0xFFFF' \
                     'SYS_rt_sigreturn 0xFFFF' \
-                    'SYS_mmap 83' 'SYS_munmap 38' \
+                    'SYS_mmap 0xFFFF' 'SYS_munmap 38' \
                     'SYS_srv_accept 27' 'SYS_srv_peer 28' \
                     'SYS_mmio_create 2' 'SYS_irq_create 3' 'SYS_irq_wait 4' \
                     'SYS_mmio_map 5' 'SYS_dma_create 6' 'SYS_dma_map 7' \
@@ -2408,6 +2408,21 @@ build_sysroot() {
         for undef in SYS_fstat SYS_lseek; do
             grep -qE "^#undef[[:space:]]+$undef\$" "$syscall_h" || {
                 echo "    SEAM: '#undef $undef' (0010 retarget) missing from bits/syscall.h" >&2
+                fail=1
+            }
+        done
+        # B-1b (0044): SYS_mmap is a SENTINEL again -- the mapper's prot is
+        # exact now, and a raw Linux-shaped mmap reaching 83 would mint RW
+        # whatever it asked (the Clade CL-4 arm reads the length alone) -- and
+        # the mapper's numbers live in the internal header the seam's mman/
+        # files include. Require the header and its numbers, so a re-vendor
+        # that loses the patch fails here, not as a silent loss of every prot.
+        local mman_h="$musl_src/src/internal/_pouch_mman.h"
+        local ext
+        for ext in 'SYS_thyla_burrow_reserve 124' 'SYS_thyla_burrow_protect 125' \
+                   'SYS_thyla_burrow_decommit 84' 'SYS_thyla_burrow_detach 38'; do
+            grep -qE "^#define[[:space:]]+${ext% *}[[:space:]]+${ext#* }([[:space:]]|\$)" "$mman_h" 2>/dev/null || {
+                echo "    SEAM: '#define $ext' (0044) missing from src/internal/_pouch_mman.h" >&2
                 fail=1
             }
         done
@@ -4267,7 +4282,7 @@ build_pouch_progs() {
     rm -f "$progs_out"/pouch-hello*.o "$progs_out"/pouch-hello*
 
     local prog
-    for prog in pouch-hello pouch-hello-stdio pouch-hello-printf pouch-hello-malloc pouch-hello-mallocng-torture pouch-hello-threads pouch-hello-exitgroup pouch-hello-poll pouch-hello-getrandom pouch-hello-sockets pouch-hello-net pouch-hello-signals pouch-hello-sodium pouch-hello-argv pouch-hello-fault pouch-hello-pty pouch-hello-fopen pouch-hello-fs pouch-hello-env pouch-hello-spawn pouch-hello-susp pouch-hello-reentry pouch-hello-identity; do
+    for prog in pouch-hello pouch-hello-stdio pouch-hello-printf pouch-hello-malloc pouch-hello-mallocng-torture pouch-hello-threads pouch-hello-exitgroup pouch-hello-poll pouch-hello-getrandom pouch-hello-sockets pouch-hello-net pouch-hello-signals pouch-hello-sodium pouch-hello-argv pouch-hello-fault pouch-hello-pty pouch-hello-fopen pouch-hello-fs pouch-hello-env pouch-hello-spawn pouch-hello-susp pouch-hello-reentry pouch-hello-identity pouch-hello-mem pouch-hello-guard; do
         echo "==> pouch prog: $prog"
         # 1. compile (clang). -nostdinc + -isystem: pouch owns the include
         #    path. -fno-pie: non-PIC codegen for a fixed-address ET_EXEC.

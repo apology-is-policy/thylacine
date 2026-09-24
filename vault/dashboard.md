@@ -38,7 +38,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 91
+## Open seams: 90
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-221-idle-pump-wake]] (sub-kernel-ninep-dev9p-poll)
@@ -101,7 +101,6 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-pouch-dup2-target]] (sub-pouch-process)
 - [[seam-pouch-errno-channel]] (sub-pouch-seam, sub-pouch-fs, sub-pouch-net)
 - [[seam-pouch-forkpty]] (sub-pouch-tty)
-- [[seam-pouch-guard-pages]] (sub-pouch-thread, sub-pouch-process)
 - [[seam-pouch-process-shared]] (sub-pouch-thread)
 - [[seam-pouch-readyfd-aba]] (sub-pouch-net)
 - [[seam-pouch-select-fd-bound]] (sub-pouch-net)
@@ -140,6 +139,6 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-09-23 [[chg-2026-09-23-b1a-prime-close-r3]] — B-1a' (capacity), the round-3 close: the copy-on-write copy keeps its share until its leaf is replaced, a fault that finds a leaf already admitting its access is answered by it, the strip takes what is wanted, a refused allocation inside exec is ENOMEM -- round 3's five findings closed, round 4 on the fixes
 - 2026-09-23 [[chg-2026-09-23-b1a-prime-close-r4]] — B-1a' (capacity), the round-4 close: the pager refuses the abort classes it cannot resolve, the pool's refusal is ENOMEM on the exec frame, the reclaim asks for the shortfall, the probe fires at the leaf write, cow.tla models the read-only leaf -- round 4's five findings closed, no round 5 owed
 - 2026-09-23 [[chg-2026-09-23-b1a-prime-close]] — B-1a' (capacity), the audit close: the pool made PHYSICAL (charged at allocation, returned at free), the hardware page tables charged and reclaimed, F3/F4/F6/F7 -- round 1's seven findings closed, round 2's four in flight
+- 2026-09-23 [[chg-2026-09-23-b1b-pouch-memory]] — B-1b (the Pouch memory seam): mmap at the asked prot, mprotect / madvise / MAP_FIXED / partial munmap over RESERVE / PROTECT / DECOMMIT / DETACH, mallocng's MADV_FREE on, the real pthread guard, the 8 MiB main stack with its extent in auxv, __init_tls through __mmap, the phenotype madvise row
 - 2026-09-23 [[chg-2026-09-23-prowl6-memory-view]] — prowl-6 (the memory view): the TABLES column in /ctl/procs, every consumer moved with the layout, prowl's pool meter and footprint line, the manual's Processes and memory section
-- 2026-09-22 [[chg-2026-09-22-arch81-scripture]] — ARCH 8.12: the design for syscall bodies with interrupts on, landed as scripture before any code
 <!-- generated:end -->

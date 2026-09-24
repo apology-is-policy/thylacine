@@ -1,0 +1,439 @@
+pouch boundary-line patch 0044 - the memory seam made exact (B-1b).
+
+B-1b of the browser arc (ARCHITECTURE.md sec 6.5 "The permission ceiling",
+"Range detach", "Capacity"; docs/browser-status.md "The B-1 decisions"). The
+bar it serves is the operator's: a program is never refused memory while free
+memory exists, and memory it relinquishes returns to the system so its
+footprint shrinks at runtime -- on the Pouch substrate as on the native one.
+Until this patch pouch's mman/ lower half was the P6-pouch-mem shape (0003):
+mmap ignored prot and always minted RW, MAP_FIXED was refused, and mprotect,
+madvise and mremap sat at the ENOSYS sentinel -- tolerated by mallocng by
+construction (`&& errno != ENOSYS`), and the reason a pthread's guard was RW,
+mallocng's freed slots inside a retained group kept their pages, and a
+JavaScript engine's decommit returned nothing. Eight files:
+
+  src/internal/_pouch_mman.h  NEW. The four Thylacine numbers the seam calls
+      (SYS_thyla_burrow_reserve 124 / _protect 125 / _decommit 84 / _detach
+      38) in the 0019 SYS_thyla_* self-contained idiom, the SEAL flag and the
+      two auxv tags of 0045. NOT aliases of the Linux __NR_ names: three of
+      the four differ from their namesakes in argument SHAPE (see the header),
+      so the Linux names stay at the sentinel and a raw syscall(SYS_mprotect,
+      ...) from a port is a clean ENOSYS, never a misread register.
+
+  arch/aarch64/bits/syscall.h.in  __NR_mmap goes BACK to the sentinel. 0003
+      aliased it to 83 (SYS_BURROW_ATTACH_LAZY, natively one argument: the
+      length in x0); musl's one raw six-argument caller, src/env/__init_tls.c,
+      reached it in Linux's shape, which the kernel's 83 arm has read since
+      Clade CL-4 -- anonymous-private only, and RW whatever prot was asked.
+      Now that the mapper's prot is exact, a raw Linux-shaped mmap must not
+      reach a number that ignores its prot: parked, it is a clean ENOSYS, and
+      0046 routes __init_tls through __mmap (REQUIRED by this parking).
+      __NR_munmap stays 38: the range detach IS Linux's (addr, len). After a
+      musl re-vendor, 0001's awk filter loses m["mmap"] (0003 added it) and
+      keeps m["munmap"]="38".
+
+  src/mman/mmap.c  Rewritten on 0003's text. The anonymous subset is EXACT:
+      SYS_BURROW_RESERVE at the prot asked for under a mint-time ceiling of
+      RW (PROT_NONE mints a reservation that faults until raised; PROT_READ
+      read-only; W implies R as on AArch64 Linux; X is EACCES -- I-12 is
+      never degraded). MAP_FIXED over one's own anonymous mapping is Linux's
+      effect -- fresh zero pages at the new prot -- as SYS_BURROW_DECOMMIT
+      then SYS_BURROW_PROTECT; it never creates a mapping at an address, and
+      a range not wholly plain anonymous memory of this process is ENOMEM
+      (WebKit's OSAllocator places its guard pages this way). The two calls
+      are not one: a refusal of the second -- a range sealed below the prot
+      asked (EACCES), no VMA slot left for a middle cut (ENOMEM) -- comes
+      after the discard and leaves zero pages at the old prot; an atomic
+      discard-and-protect needs a kernel flag (tracked).
+      MAP_FIXED_NOREPLACE: ENOSYS. File-backed: ENOSYS, as before.
+
+  src/mman/munmap.c  Comment refresh (the range form since B-1a': partial
+      and multi-mapping unmaps, holes answer 0) and Linux's two shape errors
+      answered before the call (EINVAL for len 0 / an unaligned start).
+
+  src/mman/madvise.c  MADV_DONTNEED / MADV_FREE -> SYS_BURROW_DECOMMIT (the
+      pages go, the mapping stays, a later touch re-faults zero; the flat -1
+      of a refused range is ENOMEM). The pure hints answer 0 without a
+      syscall (Thylacine has no readahead / THP / dump policy to steer; a
+      hint on an unmapped range is 0 here, ENOMEM on Linux -- documented).
+      Any other advice: EINVAL.
+
+  src/mman/mprotect.c  -> SYS_BURROW_PROTECT with FOUR arguments (the
+      flags word, 0: the three-argument seam form would pass x3 as flags and
+      a stray 1 would SEAL the range). Linux's normalisation (a bit beyond
+      R|W|X is EINVAL; W implies R; a range that rounds to nothing is 0),
+      then the kernel's -errno through: EACCES for X, for a raise past the
+      ceiling, for a guard / shared / JIT mapping; ENOMEM for a hole.
+
+  src/mman/posix_madvise.c  Through __madvise (a hint is 0, not the raw
+      sentinel's ENOSYS); POSIX's advisory DONTNEED keeps its short-circuit.
+
+  src/malloc/mallocng/glue.h  USE_MADV_FREE 1 (upstream ships 0): free() of
+      a slot inside a RETAINED group madvise(MADV_FREE)s the whole pages
+      inside it (free.c), so the footprint falls without the group being
+      unmapped. A MADV_FREE page is one Linux may take at any moment, and
+      mallocng rewrites a slot's header at its next enframe and never reads
+      a freed slot's pages, so the eager release is inside the allocator's
+      contract. THE SUBSTRATE WITNESS: pouch-hello-mem's mallocng-trim leg
+      (the data-view page count of /proc/<pid>/status falls after every
+      other block of a retained class is freed) is RED on a libc built with
+      this line at 0.
+
+What this makes real without a musl change: pthread_create's guard
+(PROT_NONE mint + mprotect RW of the usable part -- src/thread/
+pthread_create.c:294-300, untouched) -- pouch-hello-guard proves the fault;
+mallocng's PROT_NONE metadata pages (malloc.c:82-95).
+
+Census of raw SYS_mmap / SYS_munmap / SYS_mprotect / SYS_madvise callers in
+musl src (control: src/mman/*.c must appear, and did): __init_tls.c (0046,
+required by the parking above), posix_madvise.c (here), mremap.c (stays the
+sentinel: realloc's copy fallback), the per-arch __unmapself (0004's aarch64
+retarget: one detach over the whole stack mapping, now a two-piece range --
+guard + body -- the range form serves).
+
+Binding design: docs/POUCH-DESIGN.md sec 8.1, 8.2 (as built at B-1b);
+ARCHITECTURE.md sec 6.5. Invariants P-1 (only Thylacine numbers cross the
+seam), P-3 (every surface a defined behaviour or a documented errno), P-4
+(mman/ and the mallocng OS glue are lower half). Kernel-side pins:
+kernel/include/thylacine/syscall.h (124 / 125 / 84 / 38, BURROW_PROT_* ==
+PROT_*).
+
+--- a/src/internal/_pouch_mman.h
++++ b/src/internal/_pouch_mman.h
+@@ -0,0 +1,33 @@
++#ifndef _POUCH_MMAN_H
++#define _POUCH_MMAN_H
++
++/* pouch boundary-line memory seam (B-1b; ARCHITECTURE.md sec 6.5 "The
++ * permission ceiling", "Range detach", "Capacity"). The Thylacine kernel
++ * syscall numbers the mman/ lower half calls, in the 0019 SYS_thyla_*
++ * self-contained idiom -- NOT aliases of the Linux __NR_ names, because three
++ * of the four differ from their Linux namesakes in argument SHAPE: reserve
++ * takes (length, prot, align_log2) and returns the VA; protect takes a FOURTH
++ * word, the flags, whose bit 0 SEALS the range; decommit takes (vaddr, length)
++ * only and would read a raw madvise's advice as nothing. The Linux names stay
++ * at the unimplemented sentinel, so a raw syscall(SYS_mprotect, ...) from a
++ * port is a clean ENOSYS, never a misread register (patch 0046 re-routes
++ * musl's one raw caller, __init_tls, which the parking would have broken).
++ *
++ * Mirrors of kernel/include/thylacine/syscall.h and elf.h. The pouch-hello-mem
++ * and pouch-hello-threads boot provers pin them by BEHAVIOUR against the
++ * kernel (a mint at PROT_NONE faults, a guard row appears in maps, the auxv
++ * pair equals the kernel's own `stack` row). */
++#define SYS_thyla_burrow_reserve   124   /* (length, prot, align_log2) -> vaddr | -errno */
++#define SYS_thyla_burrow_protect   125   /* (vaddr, length, prot, flags) -> 0 | -errno */
++#define SYS_thyla_burrow_decommit   84   /* (vaddr, length) -> 0 | -1 */
++#define SYS_thyla_burrow_detach     38   /* (vaddr, length) -> 0 | -1; = __NR_munmap */
++
++/* The prot word is Linux's PROT_* (the kernel pins BURROW_PROT_* to them). */
++#define POUCH_BURROW_PROTECT_SEAL   1u
++
++/* The auxiliary-vector tags the kernel writes for the initial thread's stack
++ * (elf.h AT_STACK_BASE / AT_STACK_SIZE; private tags above musl's AUX_CNT). */
++#define AT_THYLA_STACK_BASE  0x5342
++#define AT_THYLA_STACK_SIZE  0x5353
++
++#endif
+--- a/arch/aarch64/bits/syscall.h.in
++++ b/arch/aarch64/bits/syscall.h.in
+@@ -245,7 +245,7 @@
+ #define __NR_keyctl 0xFFFF
+ #define __NR_clone 0xFFFF
+ #define __NR_execve 0xFFFF
+-#define __NR_mmap 83
++#define __NR_mmap 0xFFFF
+ #define __NR_fadvise64 0xFFFF
+ #define __NR_swapon 0xFFFF
+ #define __NR_swapoff 0xFFFF
+--- a/src/mman/mmap.c
++++ b/src/mman/mmap.c
+@@ -2,52 +2,96 @@
+ #include <sys/mman.h>
+ #include <errno.h>
+ #include <stdint.h>
++#include "libc.h"
+ #include "syscall.h"
++#include "_pouch_mman.h"
+ 
+ /* pouch: musl's __mmap targets Linux mmap(2) with six arguments; Thylacine
+    has no file-backed mmap by design (a mapped file cannot be 9P-network-
+    transparent, a Plan 9 conviction kept as a Thylacine conviction -
+    ARCHITECTURE.md sec 6.5).
+ 
+-   pouch's __mmap retains the POSIX prototype for source-compatibility but
+-   maps only the anonymous subset onto Thylacine's SYS_BURROW_ATTACH_LAZY
+-   and refuses everything else with ENOSYS. The kernel chooses the VA; the
+-   region is demand-zero RW and overcommitted (no pages until first touch;
+-   W^X invariant I-12 forbids X, so mmap PROT bits are upgraded to RW); an
+-   anon region has no offset. `start`, `prot`, `fd`, `off` are ignored.
+-   MAP_FIXED is rejected (the v1.0 burrow-attach window is kernel-chosen).
++   B-1b (ARCHITECTURE.md sec 6.5 "The permission ceiling" / "Capacity"): the
++   anonymous subset is EXACT. A fresh mapping is SYS_BURROW_RESERVE at the
++   prot asked for, under a mint-time ceiling of RW: PROT_NONE mints a
++   reservation that faults until mprotect raises it (a guard page, or
++   reserve-then-commit), PROT_READ mints read-only, PROT_WRITE implies read
++   (AArch64 Linux has no write-only mapping), and PROT_EXEC is refused with
++   EACCES -- W^X (I-12) is never degraded; bytes a process wrote become code
++   only through the JIT syscalls. Bits beyond R|W|X are ignored, as Linux's
++   mmap ignores them. The kernel chooses the VA; the region is demand-zero
++   and overcommitted (no pages until first touch); `fd` and `off` are
++   ignored for an anonymous map.
+ 
+-   SYS_mmap is __NR_mmap after the 0001-syscall-seam-retarget aliases it
+-   to Thylacine number 83 (= SYS_BURROW_ATTACH_LAZY; see thylacine/syscall.h).
+-   The call passes ONE argument, the length - all other Linux mmap fields
+-   are stripped at the seam. */
++   MAP_FIXED over a range this process already maps as anonymous memory is
++   Linux's own effect -- fresh zero pages at the new prot -- done as two
++   native calls: SYS_BURROW_DECOMMIT discards the range's pages (the mapping
++   stays) and SYS_BURROW_PROTECT sets the prot. It never CREATES a mapping at
++   an address and never replaces a file, text or shared mapping: a range not
++   wholly plain anonymous memory of this process answers ENOMEM, before
++   anything is discarded. (WebKit's OSAllocator places its guard pages this
++   way; musl itself never asks.) The two calls are not one: a refusal of the
++   SECOND -- a range sealed below the prot asked (EACCES), no VMA slot left
++   for a middle cut (ENOMEM) -- comes after the discard and leaves zero pages
++   at the old prot. MAP_FIXED_NOREPLACE cannot be served (no fixed-address
++   creation): ENOSYS.
++
++   Errors: RESERVE and PROTECT return an explicit -errno, passed through;
++   DECOMMIT's flat -1 (the range is not wholly plain anonymous memory of
++   this process) is mapped to ENOMEM here, before __syscall_ret would make
++   it the generic EIO. */
+ void *__mmap(void *start, size_t len, int prot, int flags, int fd, off_t off)
+ {
+-	(void)start; (void)prot; (void)fd; (void)off;
++	(void)fd; (void)off;
+ 
+ 	/* File-backed mmap is refused. */
+ 	if (!(flags & MAP_ANON)) {
+ 		errno = ENOSYS;
+ 		return MAP_FAILED;
+ 	}
+-
+-	/* MAP_FIXED would force a VA - the kernel chooses, so reject. */
+-	if (flags & MAP_FIXED) {
+-		errno = ENOSYS;
+-		return MAP_FAILED;
+-	}
+-
+ 	if (len == 0) {
+ 		errno = EINVAL;
+ 		return MAP_FAILED;
+ 	}
+-
+ 	if (len >= PTRDIFF_MAX) {
+ 		errno = ENOMEM;
+ 		return MAP_FAILED;
+ 	}
+ 
+-	long ret = __syscall(SYS_mmap, len);
++	/* The prot word the kernel takes: Linux's values, W implying R. X is
++	   the kernel's EACCES; answering it here keeps a MAP_FIXED request from
++	   discarding a range it cannot then reprotect. */
++	unsigned pr = (unsigned)prot & (PROT_READ|PROT_WRITE|PROT_EXEC);
++	if (pr & PROT_WRITE) pr |= PROT_READ;
++	if (pr & PROT_EXEC) {
++		errno = EACCES;
++		return MAP_FAILED;
++	}
++
++	if (flags & MAP_FIXED_NOREPLACE) {
++		errno = ENOSYS;
++		return MAP_FAILED;
++	}
++	if (flags & MAP_FIXED) {
++		if ((uintptr_t)start & (PAGE_SIZE-1)) {
++			errno = EINVAL;
++			return MAP_FAILED;
++		}
++		long rc = __syscall(SYS_thyla_burrow_decommit, start, len);
++		if (rc == -1) rc = -ENOMEM;
++		if (rc < 0) {
++			__syscall_ret(rc);
++			return MAP_FAILED;
++		}
++		rc = __syscall(SYS_thyla_burrow_protect, start, len, pr, 0);
++		if (rc < 0) {
++			__syscall_ret(rc);
++			return MAP_FAILED;
++		}
++		return start;
++	}
++
++	long ret = __syscall(SYS_thyla_burrow_reserve, len, pr, 0);
+ 	return (void *)__syscall_ret(ret);
+ }
+ 
+--- a/src/mman/munmap.c
++++ b/src/mman/munmap.c
+@@ -1,17 +1,27 @@
+ #include <sys/mman.h>
++#include <errno.h>
++#include <stdint.h>
++#include "libc.h"
+ #include "syscall.h"
+ 
+-/* pouch: musl's __munmap targets Linux munmap(2); Thylacine's equivalent is
+-   SYS_BURROW_DETACH, which takes the same (vaddr, len) shape. The kernel
+-   matches against the installed VMA exactly - the page-rounded
+-   [start, start + len) range must match what SYS_BURROW_ATTACH_LAZY (= __mmap)
+-   produced. mallocng tracks `needed` exactly as the length it passed to
+-   __mmap, so the round-trip is lossless.
++/* pouch: musl's __munmap targets Linux munmap(2); Thylacine's SYS_BURROW_DETACH
++   (38) takes the same (vaddr, len) shape and, since B-1a', the same meaning:
++   every mapping and piece under the page-rounded range goes, a partial range
++   trims or splits (the two slack ends of an over-sized reservation -- WebKit's
++   aligned reserve -- or one page out of a mapping), holes are permitted and an
++   empty range answers 0. The two shape errors Linux reports are answered here
++   (EINVAL); the kernel's own refusals -- a JIT code alias in the range, a
++   shared-in mapping the range would cut, no VMA slot for a middle cut -- have
++   no Linux analogue and decode to the generic EIO.
+ 
+    SYS_munmap is __NR_munmap after the 0001-syscall-seam-retarget aliases it
+    to Thylacine number 38 (= SYS_BURROW_DETACH; see thylacine/syscall.h). */
+ int __munmap(void *start, size_t len)
+ {
++	if (len == 0 || ((uintptr_t)start & (PAGE_SIZE-1))) {
++		errno = EINVAL;
++		return -1;
++	}
+ 	return syscall(SYS_munmap, start, len);
+ }
+ 
+--- a/src/mman/madvise.c
++++ b/src/mman/madvise.c
+@@ -1,9 +1,58 @@
++#define _GNU_SOURCE
+ #include <sys/mman.h>
++#include <errno.h>
++#include <stdint.h>
++#include "libc.h"
+ #include "syscall.h"
++#include "_pouch_mman.h"
+ 
++/* pouch (B-1b; ARCHITECTURE.md sec 6.5 "Capacity"): madvise over
++   SYS_BURROW_DECOMMIT. MADV_DONTNEED and MADV_FREE release the range's
++   pages -- the mapping stays, a later touch faults a fresh zero page in,
++   and the process's footprint FALLS: this is how mallocng's freed slots
++   inside a retained group (free.c, USE_MADV_FREE) and an engine's decommit
++   give memory back. MADV_FREE is a lazy free on Linux, whose pages the
++   kernel may take at any moment; taking them at once is inside that
++   contract. The pure hints (NORMAL, RANDOM, SEQUENTIAL, WILLNEED, the THP
++   and dump-filter pairs, COLD, PAGEOUT) answer 0 without a syscall --
++   Thylacine has no readahead, THP or core-dump policy for them to steer;
++   the one divergence, documented: a hint on an unmapped range is 0 here
++   where Linux says ENOMEM. Any other advice is EINVAL, Linux's answer for
++   one it does not know.
++
++   The kernel's one refusal of a release is a flat -1 (the range is not
++   wholly plain anonymous memory of this process, or has a hole): ENOMEM,
++   mapped here before __syscall_ret would make it the generic EIO. Linux's
++   argument order is kept: alignment before a zero length. */
+ int __madvise(void *addr, size_t len, int advice)
+ {
+-	return syscall(SYS_madvise, addr, len, advice);
++	if ((uintptr_t)addr & (PAGE_SIZE-1)) {
++		errno = EINVAL;
++		return -1;
++	}
++	switch (advice) {
++	case MADV_DONTNEED:
++	case MADV_FREE: {
++		if (len == 0) return 0;
++		long rc = __syscall(SYS_thyla_burrow_decommit, addr, len);
++		if (rc == -1) rc = -ENOMEM;
++		return __syscall_ret(rc);
++	}
++	case MADV_NORMAL:
++	case MADV_RANDOM:
++	case MADV_SEQUENTIAL:
++	case MADV_WILLNEED:
++	case MADV_HUGEPAGE:
++	case MADV_NOHUGEPAGE:
++	case MADV_DONTDUMP:
++	case MADV_DODUMP:
++	case MADV_COLD:
++	case MADV_PAGEOUT:
++		return 0;
++	default:
++		errno = EINVAL;
++		return -1;
++	}
+ }
+ 
+ weak_alias(__madvise, madvise);
+--- a/src/mman/mprotect.c
++++ b/src/mman/mprotect.c
+@@ -1,13 +1,35 @@
+ #include <sys/mman.h>
++#include <errno.h>
+ #include "libc.h"
+ #include "syscall.h"
++#include "_pouch_mman.h"
+ 
++/* pouch (B-1b; ARCHITECTURE.md sec 6.5 "The permission ceiling"): mprotect
++   over SYS_BURROW_PROTECT (125), the one permission mutation, FOUR arguments
++   -- the fourth is the flags word (PROTECT_SEAL), passed as 0 here; the
++   seam's three-argument form would hand the kernel whatever x3 held, and a
++   stray 1 would SEAL the range. That is also why __NR_mprotect stays a
++   sentinel: a raw syscall(SYS_mprotect, ...) from a port cannot reach 125.
++
++   Linux's prot normalisation, then the kernel's own answers: a bit beyond
++   R|W|X is EINVAL; PROT_WRITE implies read; PROT_EXEC is refused with EACCES
++   before any lookup ("X is never a target": an RX text mapping may only
++   descend); a raise past the mapping's mint-time ceiling, a guard, a shared
++   or a JIT mapping is EACCES; a hole is ENOMEM. musl's own page rounding of
++   the ends is kept, and a range that rounds to nothing succeeds (Linux). */
+ int __mprotect(void *addr, size_t len, int prot)
+ {
+ 	size_t start, end;
++	if (prot & ~(PROT_READ|PROT_WRITE|PROT_EXEC)) {
++		errno = EINVAL;
++		return -1;
++	}
++	unsigned pr = (unsigned)prot;
++	if (pr & PROT_WRITE) pr |= PROT_READ;
+ 	start = (size_t)addr & -PAGE_SIZE;
+ 	end = (size_t)((char *)addr + len + PAGE_SIZE-1) & -PAGE_SIZE;
+-	return syscall(SYS_mprotect, start, end-start, prot);
++	if (end == start) return 0;
++	return __syscall_ret(__syscall(SYS_thyla_burrow_protect, start, end-start, pr, 0));
+ }
+ 
+ weak_alias(__mprotect, mprotect);
+--- a/src/mman/posix_madvise.c
++++ b/src/mman/posix_madvise.c
+@@ -1,9 +1,13 @@
+ #define _GNU_SOURCE
+ #include <sys/mman.h>
++#include <errno.h>
+ #include "syscall.h"
+ 
++/* pouch (B-1b): through __madvise, so a hint answers 0 instead of the raw
++   sentinel's ENOSYS. POSIX_MADV_DONTNEED keeps upstream's short-circuit:
++   POSIX's DONTNEED is advisory and must not discard, unlike Linux's. */
+ int posix_madvise(void *addr, size_t len, int advice)
+ {
+ 	if (advice == MADV_DONTNEED) return 0;
+-	return -__syscall(SYS_madvise, addr, len, advice);
++	return __madvise(addr, len, advice) ? errno : 0;
+ }
+--- a/src/malloc/mallocng/glue.h
++++ b/src/malloc/mallocng/glue.h
+@@ -25,7 +25,14 @@
+ #define realloc __libc_realloc
+ #define free __libc_free
+ 
+-#define USE_MADV_FREE 0
++/* Pouch (B-1b; ARCHITECTURE.md sec 6.5 "Capacity"): 1, where upstream ships 0.
++ * free() of a slot inside a RETAINED group madvise(MADV_FREE)s the whole pages
++ * inside it (free.c) -- SYS_BURROW_DECOMMIT here -- so the pages return to the
++ * pool and the process's footprint falls without the group being unmapped.
++ * mallocng rewrites a slot's header at its next enframe and never reads a
++ * freed slot's pages, and a MADV_FREE page is one Linux may take at any
++ * moment, so the eager release is inside the allocator's own contract. */
++#define USE_MADV_FREE 1
+ 
+ #if USE_REAL_ASSERT
+ #include <assert.h>

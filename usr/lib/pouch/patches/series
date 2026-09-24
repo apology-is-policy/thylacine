@@ -136,3 +136,19 @@
 # with an out-struct, and 0037's sweep looked for an IGNORED return, so it was
 # structurally blind to this one, where the return IS the lie.
 0043-pouch-identity-calls.patch
+# 0044: B-1b (the browser arc; ARCH 6.5) -- the memory seam made exact: mmap
+# mints at the prot asked for (RESERVE 124 under the RW ceiling; X is EACCES),
+# mprotect -> PROTECT 125 (four args), madvise DONTNEED/FREE -> DECOMMIT 84,
+# MAP_FIXED over one's own anonymous mapping = discard + reprotect, mallocng's
+# USE_MADV_FREE on (the retained-group path returns pages). __NR_mmap back to
+# the sentinel; the numbers live in src/internal/_pouch_mman.h.
+0044-pouch-mman-protect-decommit.patch
+# 0045: B-1b -- pthread_getattr_np() derives the main stack from the kernel's
+# AT_STACK_BASE / AT_STACK_SIZE auxv pair (8 MiB since B-1b) instead of 0033's
+# mirror; a kernel writing neither tag is refused (ENOSYS), never guessed.
+0045-pouch-main-stack-auxv.patch
+# 0046: B-1b -- REQUIRED BY 0044: __init_tls's raw six-argument SYS_mmap2
+# reached 83, whose kernel arm reads that Linux shape (Clade CL-4); with
+# __NR_mmap parked at the sentinel it would get ENOSYS and die before main
+# (it does not check). Through __mmap -- CL-4's owed libc-side elimination.
+0046-pouch-init-tls-mmap.patch

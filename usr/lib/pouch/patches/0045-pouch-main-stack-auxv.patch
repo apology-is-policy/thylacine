@@ -1,0 +1,89 @@
+pouch boundary-line patch 0045 - the main thread's stack extent from auxv (B-1b).
+
+Supersedes the mirror 0033 put in pthread_getattr_np(): POUCH_MAIN_STACK_TOP
+/ _SIZE, a hand-kept copy of the kernel's EXEC_USER_STACK_TOP / _SIZE. B-1b
+raises the initial stack from 1 MiB to 8 MiB (Linux's default RLIMIT_STACK;
+the browser arc's decision 4) and, rather than move the mirror, has the
+kernel STATE the mapping in the auxiliary vector: AT_STACK_BASE (0x5342, the
+lowest usable VA; the guard page lies below) and AT_STACK_SIZE (0x5353),
+private tags above musl's AUX_CNT so they land in no libc slot (the
+AT_VDSO_CLOCK precedent). One file:
+
+  src/thread/pthread_getattr_np.c  The main-thread arm walks libc.auxv for
+      the two tags and reports [base, base + size); _a_stackaddr is the TOP,
+      as for a created thread (pthread_attr_getstack subtracts the size). A
+      kernel that writes neither tag is refused with ENOSYS, never guessed
+      (0034's rule). The two mirror constants are gone.
+
+The pin stays two-sided on the device: pouch-hello-threads requires this
+answer to equal the `stack` row of /proc/<pid>/maps (the kernel's own VMA,
+read at run time) and to contain a main-thread local, and B-1b adds the
+decision itself (size >= 8 MiB) and a 4 MiB frame touched at both ends,
+which the old 1 MiB stack could not hold.
+
+Kernel side (same commit): kernel/include/thylacine/elf.h (the two tags),
+exec.h (EXEC_USER_STACK_SIZE 8 MiB, EXEC_INIT_AUXV_COUNT 11), exec.c
+(exec_fill_auxv writes the pair from the constants it mapped with), the
+exec test pins the pair against the stack VMA.
+
+--- a/src/thread/pthread_getattr_np.c
++++ b/src/thread/pthread_getattr_np.c
+@@ -1,9 +1,9 @@
+ #define _GNU_SOURCE
+ #include "pthread_impl.h"
++#include "libc.h"
++#include <errno.h>
++#include "_pouch_mman.h"
+ 
+-#define POUCH_MAIN_STACK_TOP  0x0000000080000000ul
+-#define POUCH_MAIN_STACK_SIZE (1024ul * 1024ul)
+-
+ int pthread_getattr_np(pthread_t t, pthread_attr_t *a)
+ {
+ 	*a = (pthread_attr_t){0};
+@@ -13,20 +13,31 @@
+ 		a->_a_stackaddr = (uintptr_t)t->stack;
+ 		a->_a_stacksize = t->stack_size;
+ 	} else {
+-		/* Thylacine: the initial thread's stack is the fixed exec
+-		 * mapping [TOP - SIZE, TOP), sparse demand-zero above a
+-		 * one-page guard (kernel exec.h: EXEC_USER_STACK_TOP / _SIZE,
+-		 * MIRRORED here; the pouch-hello-threads boot prover requires
+-		 * this answer to equal the `stack` row the kernel renders in
+-		 * /proc/<pid>/maps, so a stale mirror fails a boot). Upstream
+-		 * finds the extent by probing downward with mremap(), which
+-		 * the seam ENOSYSes -- so the loop ended on its first test and
+-		 * every pouch program was told its main stack is ONE PAGE. A runtime
+-		 * that sizes recursion or scans its stack from these bounds
+-		 * (JavaScriptCore, a conservative GC, Rust std's main-thread
+-		 * guard) then fails on its first call. */
+-		a->_a_stackaddr = POUCH_MAIN_STACK_TOP;
+-		a->_a_stacksize = POUCH_MAIN_STACK_SIZE;
++		/* Thylacine (B-1b, patch 0045): the initial thread's stack is the
++		 * mapping exec made, and the kernel STATES it in the auxiliary
++		 * vector -- AT_STACK_BASE (the lowest usable VA; the guard page
++		 * lies below) and AT_STACK_SIZE -- so libc DERIVES the extent
++		 * instead of mirroring the kernel's constants (0033) or probing
++		 * for it with mremap (upstream; the seam ENOSYSes it, which had
++		 * every pouch program told its main stack is one page). The
++		 * pouch-hello-threads prover requires this answer to equal the
++		 * `stack` row of /proc/<pid>/maps. A kernel that writes neither
++		 * tag is refused, never guessed: _a_stackaddr is the TOP, as for
++		 * a created thread (pthread_attr_getstack subtracts the size). */
++		uintptr_t base = 0, size = 0;
++		int have = 0;
++		for (size_t i = 0; libc.auxv[i]; i += 2) {
++			if (libc.auxv[i] == AT_THYLA_STACK_BASE) {
++				base = libc.auxv[i+1];
++				have |= 1;
++			} else if (libc.auxv[i] == AT_THYLA_STACK_SIZE) {
++				size = libc.auxv[i+1];
++				have |= 2;
++			}
++		}
++		if (have != 3 || !size) return ENOSYS;
++		a->_a_stackaddr = base + size;
++		a->_a_stacksize = size;
+ 	}
+ 	return 0;
+ }

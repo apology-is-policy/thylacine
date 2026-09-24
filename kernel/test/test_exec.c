@@ -743,9 +743,9 @@ void test_exec_setup_auxv(void) {
     TEST_EXPECT_EQ(w[1], 0ull, "argv[] terminator is NULL");
     TEST_EXPECT_EQ(w[2], 0ull, "envp[] terminator is NULL");
 
-    // auxv — nine (a_type, a_val) pairs: AT_PHDR/PHENT/PHNUM/PAGESZ,
-    // AT_HWCAP, AT_RANDOM, AT_ENTRY (D-2), AT_VDSO_CLOCK (the vDSO page maps
-    // at boot -- vdso_init ran), AT_NULL last.
+    // auxv — eleven (a_type, a_val) pairs: AT_PHDR/PHENT/PHNUM/PAGESZ,
+    // AT_HWCAP, AT_RANDOM, AT_ENTRY (D-2), AT_STACK_BASE + AT_STACK_SIZE (B-1b),
+    // AT_VDSO_CLOCK (the vDSO page maps at boot -- vdso_init ran), AT_NULL last.
     TEST_EXPECT_EQ(w[3],  (u64)AT_PHDR,   "auxv[0].a_type == AT_PHDR");
     TEST_EXPECT_EQ(w[4],  0x10040ull,     "AT_PHDR == seg0 vaddr + e_phoff");
     TEST_EXPECT_EQ(w[5],  (u64)AT_PHENT,  "auxv[1].a_type == AT_PHENT");
@@ -769,10 +769,18 @@ void test_exec_setup_auxv(void) {
     // have acquired one. The ET_DYN twin is elf.pie_load_bias.
     TEST_EXPECT_EQ(w[15], (u64)AT_ENTRY,  "auxv[6].a_type == AT_ENTRY");
     TEST_EXPECT_EQ(w[16], 0x10000ull,     "AT_ENTRY == e_entry (ET_EXEC: unbiased)");
-    TEST_EXPECT_EQ(w[17], (u64)AT_VDSO_CLOCK, "auxv[7].a_type == AT_VDSO_CLOCK");
-    TEST_EXPECT_EQ(w[18], EXEC_USER_VDSO_BASE, "AT_VDSO_CLOCK == EXEC_USER_VDSO_BASE");
-    TEST_EXPECT_EQ(w[19], (u64)AT_NULL,   "auxv[8].a_type == AT_NULL");
-    TEST_EXPECT_EQ(w[20], 0ull,           "AT_NULL.a_val == 0");
+    // B-1b: the stack pair names the MAPPING exec made, not the constants it
+    // was built from -- the VMA looked up above is the witness.
+    TEST_EXPECT_EQ(w[17], (u64)AT_STACK_BASE, "auxv[7].a_type == AT_STACK_BASE");
+    TEST_EXPECT_EQ(w[18], sv->vaddr_start,  "AT_STACK_BASE == the stack VMA's start");
+    TEST_EXPECT_EQ(w[19], (u64)AT_STACK_SIZE, "auxv[8].a_type == AT_STACK_SIZE");
+    TEST_EXPECT_EQ(w[20], sv->vaddr_end - sv->vaddr_start,
+                   "AT_STACK_SIZE == the stack VMA's length");
+    TEST_EXPECT_EQ(w[20], 8ull << 20,      "the initial stack is 8 MiB (B-1b)");
+    TEST_EXPECT_EQ(w[21], (u64)AT_VDSO_CLOCK, "auxv[9].a_type == AT_VDSO_CLOCK");
+    TEST_EXPECT_EQ(w[22], EXEC_USER_VDSO_BASE, "AT_VDSO_CLOCK == EXEC_USER_VDSO_BASE");
+    TEST_EXPECT_EQ(w[23], (u64)AT_NULL,   "auxv[10].a_type == AT_NULL");
+    TEST_EXPECT_EQ(w[24], 0ull,           "AT_NULL.a_val == 0");
 
     // AT_RANDOM points at the 16-byte entropy block, which must lie
     // within the user stack region.
@@ -962,10 +970,10 @@ void test_exec_setup_auxv_no_phdr_segment(void) {
     // a coherent "no phdrs" auxv (audit F1).
     TEST_EXPECT_EQ(w[6], 0ull, "AT_PHENT == 0 when AT_PHDR is unresolved");
     // The startup frame is otherwise well-formed. With the vDSO page mapped,
-    // AT_ENTRY occupies w[15] and AT_VDSO_CLOCK w[17], so AT_NULL terminates
-    // at w[19] (AT_HWCAP and then D-2's AT_ENTRY each shifted the tail by one).
+    // AT_ENTRY occupies w[15], the B-1b stack pair w[17] and w[19], and
+    // AT_VDSO_CLOCK w[21], so AT_NULL terminates at w[23].
     TEST_EXPECT_EQ(w[0],  0ull,          "argc == 0");
-    TEST_EXPECT_EQ(w[19], (u64)AT_NULL,  "auxv terminated by AT_NULL");
+    TEST_EXPECT_EQ(w[23], (u64)AT_NULL,  "auxv terminated by AT_NULL");
 
     drop_proc(p);
 }
@@ -1682,13 +1690,14 @@ void test_exec_writable_segment_is_sparse(void) {
     // one page the argv/auxv frame occupies at the top of the stack. The vDSO is
     // mapped from a kernel-owned Burrow and charges nothing. B-1a': the pagemap's
     // nodes are charged where the data is, so the figure is data + nodes -- this
-    // segment's 1024-slot map holds its page under a root and a leaf (2), the
-    // stack's 256-slot map under one node (1); the count is read from the maps
-    // rather than restated, so the claim stays "data + exactly the nodes".
+    // segment's 1024-slot map holds its page under a root and a leaf (2), and so
+    // does the stack's 2048-slot map (8 MiB since B-1b; the 1 MiB stack's 256
+    // slots sat under one node); the count is read from the maps rather than
+    // restated, so the claim stays "data + exactly the nodes".
     struct Vma *stk = vma_lookup(p, EXEC_USER_STACK_BASE);
     TEST_ASSERT(stk != NULL && stk->burrow != NULL, "stack VMA + Burrow");
     TEST_EXPECT_EQ((u64)pagemap_node_count(&vma->burrow->pm), 2ull, "root + leaf for the segment");
-    TEST_EXPECT_EQ((u64)pagemap_node_count(&stk->burrow->pm), 1ull, "one node for the stack");
+    TEST_EXPECT_EQ((u64)pagemap_node_count(&stk->burrow->pm), 2ull, "root + leaf for the stack");
     TEST_EXPECT_EQ((u64)p->as->page_count,
                    2ull + pagemap_node_count(&vma->burrow->pm) + pagemap_node_count(&stk->burrow->pm),
         "charged exactly the pages exec made resident (data 1 + stack frame 1) plus their nodes");
@@ -1696,8 +1705,8 @@ void test_exec_writable_segment_is_sparse(void) {
     drop_proc(p);
 }
 
-// The stack half (#49): 1 MiB reserved, only the frame's page resident. Every exec
-// used to allocate and zero all 256 pages whether or not the program descended
+// The stack half (#49): 8 MiB reserved (1 MiB until B-1b), only the frame's page
+// resident. Every exec used to allocate and zero all 256 pages whether or not the program descended
 // that far; now the stack grows downward by demand-zero fault, the Linux model.
 void test_exec_stack_is_sparse(void) {
     struct Proc *p = make_proc();
@@ -1714,9 +1723,9 @@ void test_exec_stack_is_sparse(void) {
         "the user stack is backed by a SPARSE Burrow");
     TEST_EXPECT_EQ((u64)sv->burrow->page_count,
                    (u64)(EXEC_USER_STACK_SIZE / PAGE_SIZE),
-        "the stack reserves its full 1 MiB (256 pages)");
+        "the stack reserves its full 8 MiB (2048 pages)");
     TEST_EXPECT_EQ((u64)burrow_lazy_resident_count(sv->burrow), 1ull,
-        "only the argv/auxv frame's page is resident; the other 255 demand-zero");
+        "only the argv/auxv frame's page is resident; the other 2047 demand-zero");
 
     // A PF_X segment stays EAGER (seg_may_be_sparse: nothing executable may arrive
     // through the demand-zero arm, which does no I-cache maintenance) -- so the
@@ -1725,10 +1734,11 @@ void test_exec_stack_is_sparse(void) {
     TEST_ASSERT(tv != NULL && tv->burrow != NULL, "text VMA + Burrow");
     TEST_EXPECT_EQ((int)tv->burrow->type, (int)BURROW_TYPE_ANON,
         "an executable segment stays EAGER (the I-cache reason)");
-    // B-1a': plus the one node the stack's 256-slot map holds it under.
-    TEST_EXPECT_EQ((u64)pagemap_node_count(&sv->burrow->pm), 1ull, "one node for the stack");
+    // B-1a': plus the nodes the stack's map holds it under -- a root and a leaf
+    // for 2048 slots (B-1b; one node for the 1 MiB stack's 256).
+    TEST_EXPECT_EQ((u64)pagemap_node_count(&sv->burrow->pm), 2ull, "root + leaf for the stack");
     TEST_EXPECT_EQ((u64)p->as->page_count, 1ull + pagemap_node_count(&sv->burrow->pm),
-        "only the stack frame's page is charged (the eager text is not), plus its node");
+        "only the stack frame's page is charged (the eager text is not), plus its nodes");
 
     drop_proc(p);
 }

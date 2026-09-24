@@ -322,6 +322,12 @@ struct Vma *vma_lookup_in(struct AddrSpace *as, u64 vaddr);
 // partial overlap (refused: partial unmap is post-v1.0).
 struct Vma *vma_next_overlap_in(struct AddrSpace *as, u64 lo, u64 hi);
 
+// B-1b: is every byte of [lo, hi) under some mapping? The phenotype madvise
+// row's answer for a pure hint (Linux: 0 over a mapped range, ENOMEM over a
+// hole, nothing changed either way). One scan then successors. Caller holds
+// as->lock. An empty range is not mapped.
+bool vma_range_is_mapped_in(struct AddrSpace *as, u64 lo, u64 hi);
+
 // B-1a' audit F8: clear the leaves of [lo, hi) mapping by mapping, so each
 // leaf's refund lands on the right counter: a FILE mapping's pages are the
 // Image cache's, charged to this space per leaf installed (the holder reading)

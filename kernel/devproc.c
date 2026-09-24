@@ -457,7 +457,7 @@ static size_t format_cwd(struct Proc *p, char *buf, size_t cap) {
 //
 //   start-end            perms off        type file      role
 //   0x400000-0x452000    r-xp 0x0         file 0x3:0x412 -
-//   0x7ff00000-0x80000000 rw-p 0x0        anon -         stack
+//   0x7f800000-0x80000000 rw-p 0x0        anon -         stack
 //
 // Columns are FIXED (never omitted) -- an optional trailing column would make
 // the line ambiguous to split. Absent values render "-".

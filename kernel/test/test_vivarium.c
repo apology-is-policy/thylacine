@@ -182,6 +182,12 @@ void test_vivarium_rejects_are_deliberate(void) {
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_MPROTECT, args, &out),
                    (int)VIV_TIER2, "mprotect is TIER2 -- SYS_BURROW_PROTECT (B-1a)");
 
+    // madvise is TIER2 since B-1b: the release row over SYS_BURROW_DECOMMIT
+    // (ARCH 6.5 "Capacity"), so a Linux allocator's MADV_DONTNEED / MADV_FREE
+    // returns pages. Until then it FORWARDed -- an ENOSYS glibc and Go ignore.
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_MADVISE, args, &out),
+                   (int)VIV_TIER2, "madvise is TIER2 -- SYS_BURROW_DECOMMIT (B-1b)");
+
     // brk is the one honest ENOSYS: there is no break pointer to move at all, and
     // both musl and glibc fall back to mmap when brk reports unavailable.
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_BRK, args, &out),
@@ -3289,6 +3295,8 @@ void test_vivarium_startup_batch_rows(void) {
                    (int)VIV_ENOSYS, "brk stays ENOSYS -- musl falls to mmap");
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_MPROTECT, args, &out),
                    (int)VIV_TIER2, "mprotect is TIER2 since B-1a (the ceiling keeps I-12)");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_MADVISE, args, &out),
+                   (int)VIV_TIER2, "madvise is TIER2 since B-1b (the decommit row)");
 }
 
 // B-1a: the mprotect domain is the prot word alone.
@@ -3320,6 +3328,50 @@ void test_vivarium_mprotect_domain(void) {
     // The word narrows to 32 bits like every Linux int argument.
     TEST_EXPECT_EQ((int)vivarium_mprotect_decide(a, l, (1ull << 32) | (u64)VIV_PROT_READ),
                    (int)VIV_TRANSLATED, "high bits of a 64-bit register are not the int");
+}
+
+// B-1b: the madvise domain is the advice word alone, sorted into a release,
+// a hint, or a decline.
+void test_vivarium_madvise_domain(void);
+void test_vivarium_madvise_domain(void) {
+    enum viv_madvise_kind k;
+    k = (enum viv_madvise_kind)77;
+    TEST_EXPECT_EQ((int)vivarium_madvise_decide((u64)VIV_MADV_DONTNEED, &k),
+                   (int)VIV_TRANSLATED, "MADV_DONTNEED translates");
+    TEST_EXPECT_EQ((int)k, (int)VIV_MADVISE_RELEASE, "MADV_DONTNEED is a release");
+    k = (enum viv_madvise_kind)77;
+    TEST_EXPECT_EQ((int)vivarium_madvise_decide((u64)VIV_MADV_FREE, &k),
+                   (int)VIV_TRANSLATED, "MADV_FREE translates");
+    TEST_EXPECT_EQ((int)k, (int)VIV_MADVISE_RELEASE, "MADV_FREE is a release");
+    // The pure hints: 0 over a mapped range, ENOMEM over a hole, nothing changed.
+    const u32 hints[] = { VIV_MADV_NORMAL, VIV_MADV_RANDOM, VIV_MADV_SEQUENTIAL,
+                          VIV_MADV_WILLNEED, VIV_MADV_HUGEPAGE, VIV_MADV_NOHUGEPAGE,
+                          VIV_MADV_DONTDUMP, VIV_MADV_DODUMP, VIV_MADV_COLD,
+                          VIV_MADV_PAGEOUT, VIV_MADV_POPULATE_READ,
+                          VIV_MADV_POPULATE_WRITE };
+    for (u32 i = 0; i < sizeof(hints) / sizeof(hints[0]); i++) {
+        k = (enum viv_madvise_kind)77;
+        TEST_EXPECT_EQ((int)vivarium_madvise_decide((u64)hints[i], &k),
+                       (int)VIV_TRANSLATED, "a pure hint translates");
+        TEST_EXPECT_EQ((int)k, (int)VIV_MADVISE_HINT, "a pure hint is a hint");
+    }
+    // The fork-semantic pairs, KSM, REMOVE, the poison testers and an unknown
+    // value decline (a phenotype fork exists: a silent 0 would lie to it).
+    const u32 declined[] = { VIV_MADV_DONTFORK, VIV_MADV_DOFORK, VIV_MADV_WIPEONFORK,
+                             VIV_MADV_KEEPONFORK, VIV_MADV_MERGEABLE,
+                             VIV_MADV_UNMERGEABLE, VIV_MADV_REMOVE, 100u, 101u, 99u };
+    for (u32 i = 0; i < sizeof(declined) / sizeof(declined[0]); i++) {
+        k = (enum viv_madvise_kind)77;
+        TEST_EXPECT_EQ((int)vivarium_madvise_decide((u64)declined[i], &k),
+                       (int)VIV_FORWARD, "an unmodelled advice declines");
+        TEST_EXPECT_EQ((int)k, 77, "a decline leaves kind_out untouched");
+    }
+    // The word narrows to 32 bits like every Linux int argument.
+    k = (enum viv_madvise_kind)77;
+    TEST_EXPECT_EQ((int)vivarium_madvise_decide((1ull << 32) | (u64)VIV_MADV_DONTNEED, &k),
+                   (int)VIV_TRANSLATED, "high bits of a 64-bit register are not the int");
+    TEST_EXPECT_EQ((int)vivarium_madvise_decide((u64)VIV_MADV_DONTNEED, NULL),
+                   (int)VIV_FORWARD, "no out-parameter: fail closed");
 }
 
 void test_vivarium_writev_domain(void);

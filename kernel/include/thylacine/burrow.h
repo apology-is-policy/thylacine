@@ -798,7 +798,7 @@ int burrow_unmap_reporting(struct Proc *p, u64 vaddr, size_t length,
 // cuts a reservation into pieces, and Linux's madvise spans VMAs), and every
 // refusal is decided BEFORE the first release: a hole, or any mapping in the
 // range that is not a plain BURROW_TYPE_ANON_LAZY one (eager ANON, FILE,
-// hardware, a shared-in or a guard) answers -1 with nothing changed. Then the
+// hardware, a shared-in or a guard) is refused with nothing changed. Then the
 // range's leaf PTEs are cleared (+ broadcast TLBI BEFORE any page is freed to
 // the buddy — the burrow_unmap / §"MMU user-PTE clear + TLBI" discipline) and
 // each mapping's overlap is released: every resident slot's page freed (a COW
@@ -807,8 +807,10 @@ int burrow_unmap_reporting(struct Proc *p, u64 vaddr, size_t length,
 // pages AND the nodes. The mappings + the reservation stay; a later touch
 // re-faults a fresh zero page. Idempotent on never-faulted slots.
 //
-// Returns 0 on success (>= 0 pages released), -1 on a bad range / a refused
-// mapping.
+// Returns 0 on success (>= 0 pages released); -T_E_INVAL on a bad range or a
+// mapping that is not plain lazy anonymous memory (Linux's "advice not
+// applicable to this mapping"); -T_E_NOMEM on a hole (B-1b: the errno reaches
+// the phenotype madvise row; the native SYS_BURROW_DECOMMIT flattens to -1).
 //
 // PRECONDITION: the caller MUST hold as->lock (a vmas reader + a pagemap
 // mutator — the #713 discipline, like burrow_unmap). Decommit relies on as->lock

@@ -65,7 +65,7 @@ this for stratumd (mount path runs single-thread).
  #include <stdint.h>
  #include <sys/mman.h>
  #include <pthread.h>
-@@ -29,7 +30,16 @@
+@@ -29,8 +30,17 @@
  #if USE_REAL_ASSERT
  #include <assert.h>
  #else

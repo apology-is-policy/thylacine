@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md", "docs/VIVARIUM.md", "docs/DISTRO.md"]
 created: 2026-08-03
-updated: 2026-09-06
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -242,6 +242,20 @@ its sibling's alignment guards. [[chg-2026-09-06-elf-distro-dynamic]].
 assertions, most of them a hostile or malformed header proving a specific code
 fires. `elf.brand_hint` adds eleven more, including the one that guards the
 `EI_OSABI` omission.
+
+## The initial stack's auxv pair (2026-09-23, B-1b)
+
+`elf.h` defines two private auxiliary-vector tags, `AT_STACK_BASE` (0x5342,
+the initial stack's lowest usable VA; the guard page lies below) and
+`AT_STACK_SIZE` (0x5353, its size in bytes -- 8 MiB since B-1b). They sit in
+`AT_VDSO_CLOCK`'s private range for the same reason: musl keeps only tags below
+its `AUX_CNT` (38) in `aux[]`, so a private tag below that would land in a slot
+the libc reads for something else. Exec writes the pair on every image
+(`exec_fill_auxv`, before the optional vDSO tag, so the mandatory indices are
+fixed -- [[sub-kernel-exec]]); Pouch's `pthread_getattr_np` derives the main
+thread's stack from them (patch 0045, [[sub-pouch-thread]]), and the
+`pouch-hello-threads` prover pins the answer against the `stack` row of
+`/proc/<pid>/maps`.
 
 ## Referenced by
 

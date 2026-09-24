@@ -40,7 +40,12 @@ DISTRO D-3 added three operations for file-backed phenotype mmap.
 range detach followed by an insert (Mechanism, below). `vma_next_overlap_in(lo,
 hi)` returns the lowest VMA overlapping a range — the point-probe `vma_lookup`
 is blind to a VMA lying strictly inside one, which every range operation here
-(the detach, the reprotect, the decommit) scans from. And `vma_free_deferred` is a `vma_free` that hands the caller the Burrow still
+(the detach, the reprotect, the decommit) scans from. `vma_range_is_mapped_in(as,
+lo, hi)` (B-1b) answers whether a range is covered end to end -- one scan from
+`vma_next_overlap_in` then successors; a gap or an empty range is false -- for
+the phenotype `madvise` row: a hint is 0 on a mapped range and ENOMEM on a
+hole, and a release outside the burrow window is ENOMEM for a hole, ENOSYS for
+memory the core declines to release. And `vma_free_deferred` is a `vma_free` that hands the caller the Burrow still
 owing a physical free instead of freeing it inline — the discipline a
 FILE-backed Burrow forces (Concurrency, below).
 
@@ -624,7 +629,12 @@ overlaps return -1; an adjacent range touching at a boundary is accepted — the
 half-open semantic), `vma.insert_sorted_invariant` (insert in mixed order, walk
 ascending), and `vma.drain_releases_all` (insert four, drain, assert
 `burrow_mapping_count` returns to baseline — the `vma_alloc` <-> `burrow_map`
-symmetry). Beyond the suite, `vma_alloc`'s rejections and the list walk are
+symmetry). `vma.range_is_mapped` (`test_capacity.c`, B-1b): a four-page
+reservation answers whole / part true and past / below / empty false; with the
+middle two pages detached, across the hole false and each remnant true; and
+the decommit core over the same shape -- across the hole `T_E_NOMEM`, a
+remnant 0, unaligned `T_E_INVAL`, the stack (below the window) `T_E_NOSYS`,
+the native form -1. Beyond the suite, `vma_alloc`'s rejections and the list walk are
 exercised indirectly by every demand-page and attach/detach test through the
 fault path.
 

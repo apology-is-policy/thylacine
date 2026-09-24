@@ -567,6 +567,7 @@ void test_capacity_fork_clone_charges_pages_and_nodes(void);
 void test_capacity_page_tables_charged_and_reclaimed(void);
 void test_capacity_memory_bomb_leaves_the_reserve(void);
 void test_capacity_fork_costs_the_pool_only_its_nodes(void);
+void test_vma_range_is_mapped(void);                     // B-1b
 void test_mmap_eager_copy_charge_pairing(void);   // #197
 void test_torpor_wait_rejects_bad_args(void);
 void test_torpor_wait_rejects_unmapped_va(void);
@@ -820,6 +821,7 @@ void test_vivarium_mmap_file_domain(void);               // DISTRO D-3
 void test_vivarium_mmap_fixed_domain(void);              // DISTRO D-3b
 void test_vivarium_mmap_arms_disjoint(void);             // DISTRO D-3
 void test_vivarium_mprotect_domain(void);                // B-1a
+void test_vivarium_madvise_domain(void);                 // B-1b
 void test_vivarium_clone_domain(void);                   // LINEAGE L-3d + N-3
 void test_vivarium_futex_decide(void);                   // N-3
 void test_vivarium_wait4_domain(void);                   // LINEAGE L-6b
@@ -2460,6 +2462,7 @@ struct test_case g_tests[] = {
     { "capacity.page_tables_charged_and_reclaimed", test_capacity_page_tables_charged_and_reclaimed, false, NULL },
     { "capacity.memory_bomb_leaves_the_reserve",   test_capacity_memory_bomb_leaves_the_reserve,   false, NULL },
     { "capacity.fork_costs_the_pool_only_its_nodes", test_capacity_fork_costs_the_pool_only_its_nodes, false, NULL },
+    { "vma.range_is_mapped",              test_vma_range_is_mapped,              false, NULL },
     { "demand_page.eager_copy_charge_pairing", test_mmap_eager_copy_charge_pairing,      false, NULL },
     { "torpor.wait_rejects_bad_args",          test_torpor_wait_rejects_bad_args,          false, NULL },
     { "torpor.wait_rejects_unmapped_va",       test_torpor_wait_rejects_unmapped_va,       false, NULL },
@@ -2737,6 +2740,7 @@ struct test_case g_tests[] = {
     { "vivarium.mmap_file_domain",       test_vivarium_mmap_file_domain,       false, NULL },
     { "vivarium.mmap_fixed_domain",      test_vivarium_mmap_fixed_domain,      false, NULL },
     { "vivarium.mprotect_domain",        test_vivarium_mprotect_domain,        false, NULL },
+    { "vivarium.madvise_domain",         test_vivarium_madvise_domain,         false, NULL },
     { "vivarium.mmap_arms_disjoint",     test_vivarium_mmap_arms_disjoint,     false, NULL },
     { "vivarium.clone_domain",           test_vivarium_clone_domain,           false, NULL },
     { "vivarium.futex_decide",           test_vivarium_futex_decide,           false, NULL },

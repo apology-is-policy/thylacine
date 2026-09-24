@@ -3097,8 +3097,8 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 // (~50 B each) ≈ 25 KiB + flags. The kernel copies it via kmalloc (the
 // handler's buffer is heap, NOT a kernel-stack array — the 16 KiB kstack
 // could not hold 64 KiB), and the System V init frame (structured + the
-// strings region, ≤ ~68 KiB) sits at the top of the 256 KiB user stack
-// (EXEC_USER_STACK_SIZE) with ~188 KiB to spare.
+// strings region, ≤ ~68 KiB) sits at the top of the 8 MiB user stack
+// (EXEC_USER_STACK_SIZE; 1 MiB until B-1b) with all but that to spare.
 #define SYS_SPAWN_ARGV_DATA_MAX  65536u
 
 // Maximum single-component name length for SYS_WALK_OPEN. Matches the

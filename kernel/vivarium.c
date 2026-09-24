@@ -187,6 +187,15 @@ struct viv_row {
 //             ENOSYS) return 0;`). The ceiling is what made a mutation
 //             admissible without loosening I-12: X is never a target, and no
 //             mapping rises past what its mint conferred.
+//   madvise — TIER2 since B-1b (2026-09-23): the release row over
+//             SYS_BURROW_DECOMMIT (ARCH 6.5 "Capacity": memory a program
+//             relinquishes returns to the system, on every substrate).
+//             DONTNEED / FREE decommit; the pure hints answer 0 over a
+//             mapped range and ENOMEM over a hole (Linux's own effect, the
+//             policy behind them having no counterpart here); the
+//             fork-semantic and KSM advices decline. Until then it was
+//             FORWARD (ENOSYS), which glibc's and Go's allocators ignore --
+//             and so never returned a page. See vivarium_madvise_decide.
 //   brk     — ENOSYS, honestly. Thylacine's heap is Burrow-based; there is no
 //             break pointer, so there is nothing to translate to. Reporting
 //             ENOSYS lets a libc fall back to its mmap path, which is what musl
@@ -340,6 +349,7 @@ static const struct viv_reject g_viv_rejects[] = {
     { VIV_LINUX_MMAP,       VIV_TIER2   },  // V-2d: vivarium_mmap_decide
     { VIV_LINUX_MUNMAP,     VIV_TIER2   },  // V-2d: the exact-match subset
     { VIV_LINUX_MPROTECT,   VIV_TIER2   },  // B-1a: vivarium_mprotect_decide over SYS_BURROW_PROTECT
+    { VIV_LINUX_MADVISE,    VIV_TIER2   },  // B-1b: vivarium_madvise_decide over SYS_BURROW_DECOMMIT
     { VIV_LINUX_STATX,      VIV_FORWARD },  // wants a mask + a 256-byte struct
     { VIV_LINUX_BRK,        VIV_ENOSYS  },  // no counterpart; libc falls to mmap
 
@@ -1445,6 +1455,40 @@ enum viv_verdict vivarium_mprotect_decide(u64 addr, u64 len, u64 prot) {
     // guest must see as that errno and not as ENOSYS.
     if (pr & ~(u32)(VIV_PROT_READ | VIV_PROT_WRITE | VIV_PROT_EXEC)) return VIV_FORWARD;
     return VIV_TRANSLATED;
+}
+
+// -----------------------------------------------------------------------------
+// TIER 2 — madvise (B-1b; ARCH 6.5 "Capacity"). See the header.
+// -----------------------------------------------------------------------------
+
+enum viv_verdict vivarium_madvise_decide(u64 advice, enum viv_madvise_kind *kind_out) {
+    if (!kind_out) return VIV_FORWARD;          // fail closed
+    // Linux declares `int advice`: the register's high half is not the word.
+    switch ((u32)advice) {
+    case VIV_MADV_DONTNEED:
+    case VIV_MADV_FREE:
+        *kind_out = VIV_MADVISE_RELEASE;
+        return VIV_TRANSLATED;
+    case VIV_MADV_NORMAL:
+    case VIV_MADV_RANDOM:
+    case VIV_MADV_SEQUENTIAL:
+    case VIV_MADV_WILLNEED:
+    case VIV_MADV_HUGEPAGE:
+    case VIV_MADV_NOHUGEPAGE:
+    case VIV_MADV_DONTDUMP:
+    case VIV_MADV_DODUMP:
+    case VIV_MADV_COLD:
+    case VIV_MADV_PAGEOUT:
+    case VIV_MADV_POPULATE_READ:
+    case VIV_MADV_POPULATE_WRITE:
+        *kind_out = VIV_MADVISE_HINT;
+        return VIV_TRANSLATED;
+    default:
+        // An ALLOW-LIST, as every gate in this file: the fork-semantic and
+        // KSM advices, REMOVE, the poison testers and any unknown value
+        // decline without being enumerated.
+        return VIV_FORWARD;
+    }
 }
 
 // =============================================================================

@@ -102,6 +102,13 @@ reclaimed when they empty. A file page is charged to each process that maps it.
 The page map's index pages are charged with the pages they index. `peak` only
 rises, and a zombie reports the peak of its whole life.
 
+A program's main stack is 8 MiB, reserved when the program starts and committed
+a page at a time as it is touched; the `stack` row of `/proc/<pid>/maps` shows
+it. A thread's stack carries a guard below it that no write can reach, so an
+overflow ends the process instead of corrupting memory. Memory a program gives
+back -- an allocation the C library returns to the system, a range the program
+says it no longer needs -- leaves its `pages` figure at once.
+
 `/ctl/procs` is one snapshot taken under the process-table lock, and it stops
 when its buffer of 4 KiB fills, at some fifty to sixty processes; `ps` and
 `prowl` show what they received. `/ctl/procs`, `/ctl/memory` and `/proc/<pid>/status` are readable by

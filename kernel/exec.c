@@ -6,9 +6,9 @@
 // backing pages) populated with blob bytes via the kernel direct map,
 // then mapped into the per-Proc TTBR0 tree via burrow_map.
 //
-// The user stack is a dedicated 1 MiB VMA at `[EXEC_USER_STACK_BASE,
-// EXEC_USER_STACK_TOP)` (sized for ML-KEM-768's stack-heavy FO transform
-// in corvus — see exec.h). v1.0 doesn't grow the stack; Phase 5+ adds
+// The user stack is a dedicated 8 MiB VMA at `[EXEC_USER_STACK_BASE,
+// EXEC_USER_STACK_TOP)` (1 MiB until B-1b, sized then for ML-KEM-768's
+// stack-heavy FO transform in corvus — see exec.h). v1.0 doesn't grow the stack; Phase 5+ adds
 // demand-grow on faults below stack base. The top EXEC_INIT_STACK_SIZE
 // bytes carry the System V process-startup frame (argc / argv / envp /
 // auxv) a C runtime reads at entry — see exec.h + exec_build_init_stack.
@@ -575,10 +575,12 @@ static bool exec_fill_ptr_vector(u64 *out, u64 base_va,
 // the user VA of the frame's `argc` word.
 // Fill the System V auxv block: AT_PHDR/PHENT/PHNUM/PAGESZ, AT_HWCAP (the
 // Linux-compatible feature word from g_hw_features.linux_hwcap — read-only
-// after boot, so a plain read is coherent), AT_RANDOM, AT_ENTRY, the OPTIONAL
+// after boot, so a plain read is coherent), AT_RANDOM, AT_ENTRY, the stack
+// pair AT_STACK_BASE / AT_STACK_SIZE (B-1b: the mapping exec_map_user_stack
+// makes, so a libc derives the main thread's extent), the OPTIONAL
 // AT_VDSO_CLOCK (only when vdso_va != 0 — the page mapped), then the AT_NULL
-// terminator. `a` has room for EXEC_INIT_AUXV_COUNT (9) entries; with no
-// vDSO it writes 8 and the 9th 16-byte slot stays the caller-zeroed padding
+// terminator. `a` has room for EXEC_INIT_AUXV_COUNT (11) entries; with no
+// vDSO it writes 10 and the 11th 16-byte slot stays the caller-zeroed padding
 // before the AT_RANDOM block (the reader stops at the AT_NULL terminator). Both
 // frame shapes route through here, so the entry set cannot diverge.
 //
@@ -586,10 +588,11 @@ static bool exec_fill_ptr_vector(u64 *out, u64 base_va,
 // carries the PIE bias. Unconditional: an ET_EXEC's entry is as real as a
 // PIE's, and a tag that appears only sometimes is the harder contract to
 // reason about. See elf.h for what it is and is not load-bearing for.
-_Static_assert(EXEC_INIT_AUXV_COUNT == 9,
-               "exec_fill_auxv reserves room for exactly 9 auxv entries "
+_Static_assert(EXEC_INIT_AUXV_COUNT == 11,
+               "exec_fill_auxv reserves room for exactly 11 auxv entries "
                "(AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_HWCAP, AT_RANDOM, "
-               "AT_ENTRY, AT_VDSO_CLOCK, AT_NULL) — keep this in sync with the macro");
+               "AT_ENTRY, AT_STACK_BASE, AT_STACK_SIZE, AT_VDSO_CLOCK, AT_NULL) "
+               "— keep this in sync with the macro");
 static void exec_fill_auxv(u64 *a, u64 phdr_va, u64 phent, u64 phnum,
                            u64 rand_va, u64 vdso_va, u64 entry_va) {
     *a++ = AT_PHDR;   *a++ = phdr_va;
@@ -599,6 +602,10 @@ static void exec_fill_auxv(u64 *a, u64 phdr_va, u64 phent, u64 phnum,
     *a++ = AT_HWCAP;  *a++ = g_hw_features.linux_hwcap;
     *a++ = AT_RANDOM; *a++ = rand_va;
     *a++ = AT_ENTRY;  *a++ = entry_va;
+    // The stack pair states the mapping exec_map_user_stack made, from the
+    // same two constants it mapped with -- the one place both are read.
+    *a++ = AT_STACK_BASE; *a++ = EXEC_USER_STACK_BASE;
+    *a++ = AT_STACK_SIZE; *a++ = EXEC_USER_STACK_SIZE;
     if (vdso_va) { *a++ = AT_VDSO_CLOCK; *a++ = vdso_va; }
     *a++ = AT_NULL;   *a++ = 0;
 }
