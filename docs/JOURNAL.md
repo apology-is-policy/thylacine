@@ -22,6 +22,68 @@ needed the operator.
 
 
 ---
+## 2026-09-24, night (aux, Opus 5.5 1M, effort max) -- the round where the seal stopped being a list
+
+**The re-audit of `038ab9c3` came back dirty again: 0 P0 / 1 P1 / 5 P2 / 7 P3** (Opus
+fallback, second consecutive round on this surface). Every finding checked out at the
+lines it cited; none withdrew on verification.
+
+The P1 was the same mistake the previous round had fixed, one file over. Round 1 found the
+seal missed `maps`; the fix added `maps` by name. Round 2 found `/proc/<pid>/ns` -- the whole
+mount table, with source paths -- ungated, and the tree's OWN comments said it "discloses
+strictly more" than `maps` (`devproc.c:494`, `:598`, `:2528`). `cwd`, `exe` and `cmdline`
+were the same class, and a NODUMP-only Proc handed a debugger every byte of `mem`. Two
+rounds, one cause: a list of files instead of a property. The seal now follows a property
+-- *everything the Proc holds* -- named by one predicate, `devproc_kind_is_image`, which
+every read site consults. The ledger (`status`, `sched`, `imperium`) stays unsealed.
+
+The finding I most expected was the one I got wrong. I told the prosecutor the `maps` path
+was the likeliest P1 because it skipped the authority predicate's ACQUIRE load. It said
+that premise was false: `maps` admits everyone, so there is no identity-based admission
+for the ordering to protect -- the argument is VACUOUS there, not missing. And then it
+showed the argument was CONDITIONAL everywhere else: an acquire load orders only against
+the release store it reads from, so round 1's "structural" composition held only for a
+reader admitted *because* it saw the new principal -- not a spawn that changes no identity,
+not a `CAP_HOSTOWNER` reader. So the fix stops deriving an order at all. `proc_seal` is the
+only writer of both bits and stamps them under `g_proc_table_lock`, which every `/proc`
+reader holds and renders under (I checked environ, maps and ns render inside the callback,
+not after it -- that is what makes "wholly before or wholly after the seal" true for a Proc
+that seals itself and then loads a secret).
+
+**What caught what:**
+- The prosecutor's F4 was that no test pinned the SET at a call site -- re-pointing
+  `environ` at the unsealed predicate left the suite green. The new
+  `devproc.dump_seal_disclosure` reads ten files through the real path, unsealed then
+  sealed.
+- Writing that test turned up a third copy of round 1's falsified "kproc holds
+  CAP_HOSTOWNER by CAP_ALL", in `test_devproc_environ`'s header -- where it was also the
+  reason its deny leg was believed unreachable end to end. Round 2 had checked only
+  `devproc.c` for survivors. The deny leg is reachable, and now tested.
+- Adding NODUMP legs to the regs test: that test links a STACK-LOCAL thread into the proc
+  table, so the new legs go LAST and assert only after cleanup -- placed earlier, the
+  one-way bit would have made the HF1 legs pass for the wrong reason, the exact trap round
+  1 hit.
+- The census claim I was about to copy from the reviewer ("joey grants at eight sites")
+  did not survive a grep; the claim that did -- no joey spawn initializer sets an identity
+  -- is what went into `caps.h`.
+- I stopped the verifier a minute in, because four doc comments in compiled headers still
+  named the old set. Editing them mid-build races the build; editing them after makes the
+  verified tree not the committed tree.
+
+**The operator ran the Lantern-over-Haul recipe on `038ab9c3` and it worked** -- the first
+end-to-end run of the Haul cape in the Halcyon window, and the Halcyon-image run B (the
+sealed compositor) was waiting for. Their four observations are queued (haul silent when
+the server is unreachable, `la` realm marking, Lantern's clear in a nested `ut`, slide
+flicker), with two feature requests owed a design pass. The fixes were built in a separate
+worktree (`thylacine-aux-r2`) so the operator's tree and its working image stayed put.
+
+**Handed on:** astra's operator-approved user-authority design needs the debug taint (my
+decision C) as its prerequisite, so C is astra's -- to start from my round-3-cleared tip,
+because it edits the exact callbacks round 2 changed. Semantics sent on yip 0117.
+
+Verified: canonical **1662/1662 PASS**, 0 FAIL lines (default image, isolated worktree); final rebuild after the sabotage legs ELF `9418e7b48163ea01`, no source newer (270 compared). RED-first in three legs, each redding ONLY its own guard: the read-dispatch check + mem + regs read refusals removed together -> exactly `refuses cmdline` / `a mem READ` / `a regs READ` (1659); environ on the unsealed predicate -> exactly `refuses environ` (1661); imperium on the sealed predicate -> exactly the imperium I-25 leg (1661). Restores byte-identical. F5's lock is argued, not unit-tested.
+
+---
 ## 2026-09-24, evening (aux, Opus 5 1M, effort max) -- three checks caught three things the step before them was confident about
 
 **The round was a dirty close on work I had already verified and committed**: 0 P0 /

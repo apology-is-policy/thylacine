@@ -309,14 +309,16 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 #define T_SPAWN_PERM_SEAT_SERVICE      (1u << 7)
 #define T_SPAWN_PERM_SEAT_CLIENT       (1u << 8)
 // T_SPAWN_PERM_SEAL ((U) F1/F5): seal the child before its first instruction --
-// PROC_FLAG_NOTRACE (the /proc debug surface refuses a SAME-principal attach) and
-// PROC_FLAG_NODUMP, which since 2026-09-24 is the EXTRACTION seal rather than a
-// future no-core-dump mark: it refuses /proc/<pid>/environ and /proc/<pid>/maps to
-// every other Proc, CAP_HOSTOWNER included (sched and imperium stay readable --
-// kernel attestation, not image content). The pair a seat service carries. The case that
-// matters is a service spawned as the user it serves. The kernel orders the stamp
-// ahead of the child's identity, so the window before it cannot admit the
-// attacker. Ungated: SYS_SET_TRACEABLE(0) and SYS_SET_DUMPABLE(0) are already
+// PROC_FLAG_NOTRACE (the CONTROL seal: the /proc debug surface refuses every
+// attach, a SAME-principal one included) and PROC_FLAG_NODUMP (the EXTRACTION seal:
+// every /proc/<pid> file that hands out something the child holds -- environ, maps,
+// ns, cwd, exe, cmdline, reads of mem/regs -- is refused to every other Proc,
+// CAP_HOSTOWNER included; status, sched and imperium stay readable, the kernel's
+// record ABOUT a Proc). The pair a seat service carries. The case that matters is a
+// service spawned as the user it serves. Both bits land in one step, under the lock
+// every /proc reader holds. Sealed before its first instruction, NOT before it is
+// visible in /proc: in that window its image is its parent's copy (DEBUG-FS-DESIGN
+// 3.2). Ungated: SYS_SET_TRACEABLE(0) and SYS_SET_DUMPABLE(0) are already
 // self-reachable, so this only moves the seal earlier than the child could.
 #define T_SPAWN_PERM_SEAL              (1u << 9)
 

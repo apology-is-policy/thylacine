@@ -111,12 +111,15 @@ authority it cannot otherwise obtain?* -- with all three answers recorded at
 from two examples, with its census taken from memory instead of from a grep, was false
 on the day it landed.
 
-Round 2 added a third item, from `kernel/proc.c`: **make the seal visible before the
-identity that would admit an attacker.** `proc_apply_identity` publishes
-`principal_id` with RELEASE precisely so a Proc cannot be caught carrying its new
-(user) identity while its NOTRACE stamp is not yet observable -- see
-[[sub-kernel-proc]] and [[sub-kernel-devproc]]. Granting the bit, sealing the holder
-and ordering the two are one obligation, not three independent ones.
+Round 2 added a third item: **make the seal visible before the identity that would
+admit an attacker.** It was first discharged by load order -- `proc_apply_identity`
+publishing `principal_id` with RELEASE so an ACQUIRE reader of the new identity also saw
+the stamp -- and the seal's own round-2 re-audit (2026-09-24) showed that held only for a
+reader admitted BECAUSE it saw the new identity: not for a spawn that changes none, not
+for a `CAP_HOSTOWNER` reader. It is now discharged by a lock: `proc_seal` stamps under
+`g_proc_table_lock`, which every `/proc` reader holds -- see [[sub-kernel-proc]] and
+[[sub-kernel-devproc]]. Granting the bit, sealing the holder and ordering the two are
+still one obligation, not three; the third is now held by construction.
 
 
 **Propagating Imperium and Haul (2026-09-17).** `CAP_GRANTABLE_IMPERIUM`

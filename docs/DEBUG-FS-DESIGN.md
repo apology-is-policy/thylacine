@@ -171,13 +171,15 @@ is the same principal"). Concretely, before this rule:
   a monotonic debug taint that refuses the privilege gain — tracked as its own
   chunk; until then the trusted panel's correct-pid display is the only defense
   inside that window, which is why it is load-bearing and not cosmetic.
-- **Disclosure through identity-only surfaces.** `/proc/<pid>/environ`, `sched` and
-  `imperium` gate on `devproc_owner_or_hostowner`, which weighs neither caps nor
-  the NOTRACE seam, and `maps` is mode 0444. So an unelevated peer still READS an
-  elevated same-principal target — `environ` being the one that matters, since it
-  is where secrets live by convention. This rule governs *control*, not
-  *disclosure*; disclosure is the seal's axis — and as of 3.2 below the seal now
-  DOES reach those files. What remains open is the other half: an **unsealed**
+- **Disclosure through identity-only surfaces.** `environ` gates on
+  owner-or-`CAP_HOSTOWNER` (`devproc_extract_authorized`), `sched` and `imperium` on
+  the same two axes (`devproc_owner_or_hostowner`), and `cmdline`, `ns`, `exe`,
+  `cwd` and `maps` are mode 0444 — none of them weighs caps. So an unelevated peer
+  still READS an elevated same-principal target — `environ` being the one that
+  matters, since it is where secrets live by convention. This rule governs
+  *control*, not *disclosure*; disclosure is the seal's axis, and 3.2 below says
+  which of those files the seal reaches: the image files, and deliberately **not**
+  `sched` or `imperium`. What remains open is the other half: an **unsealed**
   elevated target is still readable by an unelevated same-principal peer, because
   the disclosure gate's owner axis carries no cover condition. Linux applies its
   cover check to `/proc` reads as well as to attach; we deliberately have not
@@ -253,21 +255,23 @@ declines.
 **Concurrency obligation for the implementation.** Both sides are read
 **atomically**: `proc_become_legate` is a cross-thread writer of a running Proc's
 `caps`, so a plain load is C11-racy (the RW-5 F2 finding, already applied to the
-caller's caps). The existing ACQUIRE order is load-bearing and preserved — the
-target's `principal_id` is read FIRST (it is `proc_apply_identity`'s
-RELEASE-published word, so every earlier write in the spawn thunk, the NOTRACE
-stamp included, is visible), and the NOTRACE seam LAST; the two caps loads sit
-between them.
+caller's caps). The target's `principal_id` is read with ACQUIRE for the same
+reason (it is `proc_apply_identity`'s RELEASE-published word), and the NOTRACE seam
+last, with the two caps loads between them. The seam's *visibility* does not rest on
+that order: `proc_seal` stamps NOTRACE under `g_proc_table_lock`, which every caller
+of the gate holds (3.2, "by a lock, not by a load order").
 
 
 ### 3.2 The seal's contract: it means "cannot be EXTRACTED FROM" (2026-09-24)
 
 > **`PROC_FLAG_NOTRACE` forbids CONTROL. `PROC_FLAG_NODUMP` forbids EXTRACTION.**
 > `SPAWN_PERM_SEAL` sets both, so a sealed Proc can be neither driven nor read.
-> The extraction half covers the surfaces that hand out a piece of the target's
-> **image** — `environ` and `maps` — through `devproc_extract_authorized`. It
-> deliberately does **not** cover `sched` or `imperium`, which are the kernel's
-> attestation *about* a Proc rather than content *of* it.
+> The extraction half covers every file that hands out something the target
+> **holds** — `environ`, `maps`, `ns`, `cwd`, `exe`, `cmdline`, and the read
+> direction of `mem`, `regs` and `fpregs` — named by one predicate,
+> `devproc_kind_is_image`. It deliberately does **not** cover `status`, `sched` or
+> `imperium`, which are the kernel's record *about* a Proc rather than content *of*
+> it.
 
 **The question this settles.** The seal was documented as closing the route "a
 capability is worthless if a peer *sharing the principal* can debug-drive the
@@ -313,10 +317,24 @@ everything routed through that predicate. Two errors at once:
   own elevation, with no capability required and no way back. I-25's *enforcement*
   never depended on that file, but its **observability** does, and an audited party
   must not be able to switch off the audit.
+- The re-audit found the corrected set **still short** (round 2, P1). `ns` — the
+  Proc's entire mount table, mount point and source path for every entry — was `0444`
+  and reached with no gate, and the tree's own comments ranked it *above* `maps` in
+  what it discloses. `cwd`, `exe` and `cmdline` were the same class. And the read
+  direction of `mem`, `regs` and `fpregs` answered to NOTRACE alone, so a Proc that set
+  NODUMP by itself refused the host owner a map header while handing a debugger every
+  byte of its memory. Each miss had the same cause: a list of files instead of a
+  property.
 
-So the rule is: **the seal follows the image, not the ledger.** `environ` and `maps`
-are the Proc's own content; `sched` and `imperium` are the kernel's testimony, and the
-kernel does not keep secrets on a subject's behalf.
+So the rule is: **the seal follows the image, not the ledger** — and the image is
+*everything the Proc holds*: its memory and the layout of it, its user register state,
+its environment, its namespace, its working directory, the path of the image it runs,
+its arguments. The ledger is what the kernel *says about* it — `status`, `sched`,
+`imperium` — and the kernel does not keep secrets on a subject's behalf. The control
+files (`ctl`, `wait`) and the kernel's own execution state (`kregs`, `kstack`) are
+neither: they answer to NOTRACE. The set is one predicate, `devproc_kind_is_image`,
+consulted at every read site, so a new file is classified there or not at all.
+(`cmdline` carries no argv yet; it is in the set so that argv arrives sealed.)
 
 **Two properties of the enforcement, both deliberate.**
 
@@ -343,12 +361,12 @@ kernel does not keep secrets on a subject's behalf.
   has less to give up than Linux does, because `CAP_HOSTOWNER` is a console-gated
   capability rather than an ambient root identity (I-22).
 
-  **Accepted cost, stated fully.** A sealed Proc yields its `environ` and its `maps`
-  to nobody but itself, the host owner included. And because `SYS_SET_DUMPABLE(0)` is
-  an ungated self-call, *any* process may make itself opaque on those two files —
-  there is no authority check to pass. That is accepted because opacity there conveys
-  no authority: a process's environment and memory map are its own data, and hiding
-  them grants nothing it did not already have. Every *authority* surface is untouched,
+  **Accepted cost, stated fully.** A sealed Proc yields its image files to nobody but
+  itself, the host owner included. And because `SYS_SET_DUMPABLE(0)` is an ungated
+  self-call, *any* process may make itself opaque on them — there is no authority
+  check to pass. That is accepted because opacity there conveys no authority: a
+  process's image is its own data, and hiding it grants nothing it did not already
+  have. Every *authority* surface is untouched,
   so the operator keeps the `/ctl/procs` listing, the kill gate (I-26 is a separate
   predicate and weighs no seal), and all observation of external behaviour — and now
   also keeps `sched` and `imperium`, which is the correction above.
@@ -364,27 +382,54 @@ kernel does not keep secrets on a subject's behalf.
   deliberately not done here, because two classes of seal is more mechanism than the
   problem has so far earned.
 
-**How it is placed, now that the set is right.** `devproc_extract_authorized` is
-owner-or-hostowner **and** not dump-sealed, and it gates `environ`; a future per-pid
-file that hands out image content routes through it and inherits the seal by
-construction rather than by someone remembering. `devproc_owner_or_hostowner` keeps its
-old meaning and no seal, and gates `sched` and `imperium`. `maps` is the odd one and
-deliberately so: it is gated on the **seal alone**, not on the owner axis, because its
-long-standing posture is ambient all-pids visibility and this section is not the place
-to withdraw that. What changes for `maps` is only that a *sealed* Proc stops handing out
-its layout.
+**How it is placed.** One predicate, `devproc_kind_is_image`, names the set, and every
+read site consults it. `devproc_read_cb` refuses an image kind on the seal **before any
+formatter runs**, so `cmdline`, `ns`, `exe`, `cwd` and `maps` keep their ambient
+all-pids visibility for an *unsealed* Proc — this section does not withdraw that Plan 9
+posture — and hand out nothing for a sealed one. `environ`, the one image file with an
+owner gate of its own, composes the two in `devproc_extract_authorized`. The mem and
+regs paths refuse the read direction. `devproc_owner_or_hostowner` keeps its old
+meaning and no seal, and gates `sched` and `imperium`.
 
-The composition order inside `devproc_extract_authorized` is itself load-bearing, and
-getting it wrong was the round's P1: the authority predicate ACQUIRE-loads the target's
-`principal_id` **before** the seal is tested. A spawn stamps the seal and *then*
-publishes the child's identity, while `rfork` has already published the child — so
-testing the seal first admits the interleaving where a reader observes `proc_flags`
-before the stamp and `principal_id` after the identity, and a Proc that is *already*
-sealed is disclosed on the owner axis. `proc_apply_identity` publishes with RELEASE
-precisely so an ACQUIRE load of the identity carries the stamp with it. This is the same
-obligation `devproc_debug_authorized` states and the same one recorded at
-`proc_apply_identity`: **make the seal visible before the identity that would admit an
-attacker.** The planned `/proc/<pid>/fd/` is the next surface that will have to obey it.
+**NODUMP alone does not make a Proc safe from a peer that may still DRIVE it.** The
+dump seal refuses every *read* of the image, `mem`/`regs`/`fpregs` included; it does
+not refuse *control*, which is NOTRACE's. A debugger that may attach, stop and write
+registers can make the Proc disclose itself, so a Proc guarding a secret sets both
+bits — which `SPAWN_PERM_SEAL`, the seat bind and both live `SYS_SET_DUMPABLE(0)`
+callers (corvus, login) all do.
+
+**A read sees a Proc wholly sealed or wholly not — by a lock, not by a load order.**
+The first correction made the ordering structural by *composition*: the authority
+predicate ACQUIRE-loaded the target's `principal_id` before the seal was tested,
+pairing with `proc_apply_identity`'s RELEASE. The re-audit showed that guarantee was
+conditional (round 2, F5). An acquire load orders only against the release store it
+reads *from*, so it held only for a reader admitted **because** it saw the new
+principal — not for a spawn that changes no identity, which publishes nothing to pair
+with, and not for a `CAP_HOSTOWNER` reader, whose admission never consulted the
+identity at all. So the ordering is no longer derived. `proc_seal` is the **only**
+writer of both bits and stamps them under `g_proc_table_lock`; every `/proc` reader
+that tests them runs under that same lock (`proc_for_each`) and renders there too. A
+read therefore happens entirely before a seal or entirely after it, whichever axis
+admitted the reader — including against a Proc that seals *itself* and then loads a
+secret. `SPAWN_PERM_SEAL`'s two bits land in one critical section, so no reader ever
+sees half a seal. The acquire loads of `principal_id` remain, for C11 race-freedom
+only. The planned `/proc/<pid>/fd/` inherits all of this by testing the seal under the
+same lock, which is the only thing it has to remember.
+
+**What the seal does not follow: spawn copies the environment, and the seal is not
+copied with it.** `rfork` deep-copies the parent's environment into every child
+(`env_clone_into`), while `proc_flags` never inherit. So a sealed parent's environment
+is readable through any child it spawns *unsealed* — login seals itself and then
+spawns the session shell `ut` unsealed, so `ut`'s `environ` is login's. And a child
+spawned *with* `SPAWN_PERM_SEAL` is visible in `/proc` from the moment `rfork` links it
+until its thunk stamps the seal, a window in which its parent-copied image reads as
+unsealed. The seal refuses its Proc's image being **read**; it does not follow the
+image when spawn **copies** it. No secret travels that path today — login writes no
+environment variable at all (it hands the shell its home as an argument, and its own
+secrets are in memory, under NOTRACE) — but whoever puts one in a sealed Proc's
+environment must know. Stamping the seal *before* `rfork` links the child is the
+mechanism decision A (the seal crossing `fork`) needs anyway, and it would close the
+window for `SPAWN_PERM_SEAL` children.
 
 **What 3.2 does NOT close.** The disclosure gate's owner axis still carries no
 capability-cover condition, so an **unsealed** elevated target remains readable
@@ -406,7 +451,8 @@ fires, and the diorama renders an EMPTY environment — a denial its own code no
 lose its own `/proc/self/environ` with no error to observe. The same applies to
 `/proc/self/maps`, which the diorama proxies the same way and which this section newly
 seals — and the diorama's own header states the posture it relies on, "any Proc can read
-any Proc's status/exe/cwd/maps", which is now true only of an *unsealed* Proc.
+any Proc's status/exe/cwd/maps", which is now true of `status` always and of the other
+three only for an *unsealed* Proc.
 
 Refusing is nonetheless *correct*: a deputy that could read a sealed principal's
 environment on the principal's say-so would itself be the authority leak that proxy note

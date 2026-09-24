@@ -8234,14 +8234,12 @@ static s64 sys_mlockall_handler(u64 flags_raw) {
     return (s64)sys_mlockall_for_proc(p, (u32)flags_raw);
 }
 
-// SYS_SET_DUMPABLE — control core-dump permission. One-way to 0.
-// Setting to 1 from a Proc that already has PROC_FLAG_NODUMP is REFUSED.
+// SYS_SET_DUMPABLE — the EXTRACTION seal (PROC_FLAG_NODUMP; DEBUG-FS-DESIGN 3.2).
+// One-way to 0. Setting to 1 from a Proc that already has PROC_FLAG_NODUMP is REFUSED.
 int sys_set_dumpable_for_proc(struct Proc *p, u32 dumpable) {
     if (!p)                                          return -1;
     if (dumpable == 0) {
-        // Atomic RMW: the console bit shares this word and is multi-writer
-        // post-A-4c-2 (see sys_mlockall_for_proc).
-        __atomic_or_fetch(&p->proc_flags, PROC_FLAG_NODUMP, __ATOMIC_RELAXED);
+        proc_seal(p, PROC_FLAG_NODUMP);              // under the /proc readers' lock
         return 0;
     }
     if (dumpable == 1) {
@@ -8262,13 +8260,12 @@ static s64 sys_set_dumpable_handler(u64 dumpable_raw) {
     return (s64)sys_set_dumpable_for_proc(p, (u32)dumpable_raw);
 }
 
-// SYS_SET_TRACEABLE — control debug-Spoor attach permission. One-way to 0.
+// SYS_SET_TRACEABLE — the CONTROL seal (PROC_FLAG_NOTRACE; DEBUG-FS-DESIGN 3.2).
+// One-way to 0.
 int sys_set_traceable_for_proc(struct Proc *p, u32 traceable) {
     if (!p)                                          return -1;
     if (traceable == 0) {
-        // Atomic RMW: the console bit shares this word and is multi-writer
-        // post-A-4c-2 (see sys_mlockall_for_proc).
-        __atomic_or_fetch(&p->proc_flags, PROC_FLAG_NOTRACE, __ATOMIC_RELAXED);
+        proc_seal(p, PROC_FLAG_NOTRACE);             // under the /proc readers' lock
         return 0;
     }
     if (traceable == 1) {
@@ -9085,13 +9082,12 @@ void apply_spawn_perms(struct Proc *p, u32 perm_flags) {
             proc_arm_session_hangup(p);
     }
     if (perm_flags & SPAWN_PERM_SEAL) {
-        // (U) F1/F5: through the same one-way setters SYS_SET_DUMPABLE(0) and
-        // SYS_SET_TRACEABLE(0) use, so each flag keeps its one-way-to-zero
-        // semantics however the seal arrives. Reached pre-exec_setup, which is
-        // the whole point: a child that sealed itself would be attachable until
-        // it ran.
-        (void)sys_set_dumpable_for_proc(p, 0);
-        (void)sys_set_traceable_for_proc(p, 0);
+        // (U) F1/F5: through proc_seal, the one writer SYS_SET_DUMPABLE(0) and
+        // SYS_SET_TRACEABLE(0) also use -- OR-only, so one-way however the seal
+        // arrives -- and BOTH bits in one call, so no /proc reader sees half a
+        // seal. Reached pre-exec_setup, which is the whole point: a child that
+        // sealed itself would be attachable until it ran.
+        proc_seal(p, PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE);
     }
     if (perm_flags & ~SPAWN_PERM_ALL) {
         extinction("apply_spawn_perms: unknown SPAWN_PERM_* bit");

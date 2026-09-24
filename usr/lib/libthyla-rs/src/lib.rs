@@ -657,16 +657,18 @@ pub const T_SPAWN_PERM_SEAT_MANAGER: u64 = 1 << 6;
 pub const T_SPAWN_PERM_SEAT_SERVICE: u64 = 1 << 7;
 pub const T_SPAWN_PERM_SEAT_CLIENT: u64 = 1 << 8;
 // T_SPAWN_PERM_SEAL ((U) F1/F5): seal the child before its first instruction --
-// PROC_FLAG_NOTRACE (the /proc debug surface refuses an attach from the SAME
-// principal) and PROC_FLAG_NODUMP, which since 2026-09-24 is the EXTRACTION seal
-// and not merely a future no-core-dump mark: it refuses /proc/<pid>/environ and
-// /proc/<pid>/maps to every other Proc, CAP_HOSTOWNER included (sched and
-// imperium stay readable -- kernel attestation, not image content). The pair a
-// seat service carries. The case that matters is a service spawned as the user it serves
-// (login's home proxy). The kernel orders the stamp ahead of the child's identity
-// so the window before it cannot admit the attacker. Ungated: a Proc may already
-// seal itself with SYS_SET_TRACEABLE(0) + SYS_SET_DUMPABLE(0), so this only moves
-// the seal earlier than the child could manage for itself.
+// PROC_FLAG_NOTRACE (the CONTROL seal: the /proc debug surface refuses every
+// attach, one from the SAME principal included) and PROC_FLAG_NODUMP (the
+// EXTRACTION seal: every /proc/<pid> file that hands out something the child
+// holds -- environ, maps, ns, cwd, exe, cmdline, reads of mem/regs -- is refused
+// to every other Proc, CAP_HOSTOWNER included; status, sched and imperium stay
+// readable, the kernel's record ABOUT a Proc). The pair a seat service carries.
+// The case that matters is a service spawned as the user it serves (login's home
+// proxy). Both bits land in one step, under the lock every /proc reader holds.
+// Sealed before its first instruction, NOT before it is visible in /proc: in that
+// window its image is its parent's copy (DEBUG-FS-DESIGN 3.2). Ungated: a Proc may
+// already seal itself with SYS_SET_TRACEABLE(0) + SYS_SET_DUMPABLE(0), so this only
+// moves the seal earlier than the child could manage for itself.
 pub const T_SPAWN_PERM_SEAL: u64 = 1 << 9;
 
 // poll event bits — MUST mirror POLL* in kernel/include/thylacine/poll.h.
@@ -1976,16 +1978,19 @@ pub unsafe fn t_mlockall(flags: u64) -> i64 {
 //
 // THIS IS NOT ONLY ABOUT CORE DUMPS, and it is not forward-compat
 // scaffolding (changed 2026-09-24, DEBUG-FS-DESIGN 3.2). The flag is the
-// EXTRACTION seal: while set, /proc/<pid>/environ and /proc/<pid>/maps are
-// refused to every OTHER Proc, a CAP_HOSTOWNER holder included. The calling
-// Proc still reads its own. /proc/<pid>/sched and /proc/<pid>/imperium are
-// NOT sealed, deliberately -- they are the kernel's attestation ABOUT a Proc
-// rather than content of it, and an audited Proc must not be able to switch
-// off the audit.
+// EXTRACTION seal: while set, every /proc/<pid> file that hands out something
+// you hold -- environ, maps, ns, cwd, exe, cmdline, and reads of
+// mem/regs/fpregs -- is refused to every OTHER Proc, a CAP_HOSTOWNER holder
+// included. The calling Proc still reads its own. /proc/<pid>/status, sched and
+// imperium are NOT sealed, deliberately -- they are the kernel's record ABOUT a
+// Proc, and an audited Proc must not be able to switch off the audit.
 //
-// So calling this is choosing PERMANENT opacity of your environment and your
-// memory map to the rest of the machine, irreversibly and with no capability
-// required. That is usually what a hardening sequence wants; make sure it is
+// It does NOT stop a peer that may still DRIVE you: a debugger that can attach
+// and write your registers can make you disclose yourself. Guarding a secret
+// takes t_set_traceable(0) as well -- both, as corvus and login do.
+//
+// So calling this is choosing PERMANENT opacity of your image to the rest of
+// the machine, irreversibly and with no capability required. That is usually what a hardening sequence wants; make sure it is
 // what YOU want. Core dumps do not exist at v1.0, and when they land the
 // dump path must refuse a Proc with NODUMP set as well.
 #[inline(always)]

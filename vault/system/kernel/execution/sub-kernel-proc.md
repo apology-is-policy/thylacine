@@ -20,8 +20,10 @@ not inherited. Only service and Corvus may operate the trusted endpoint; the
 normal designation admits broker connections but no trusted operations. Binding
 the service sets NODUMP and NOTRACE before userspace runs. (Since 2026-09-24 those two
 bits are no longer near-synonyms: NOTRACE forbids CONTROL and NODUMP forbids
-EXTRACTION, gating `/proc/<pid>/environ` and `/proc/<pid>/maps` --
-DEBUG-FS-DESIGN 3.2 and [[sub-kernel-devproc]]. `sched` and `imperium` are
+EXTRACTION, gating every `/proc/<pid>` file that hands out something the Proc holds
+(`devproc_kind_is_image`: environ, maps, ns, cwd, exe, cmdline, reads of
+mem/regs/fpregs) -- DEBUG-FS-DESIGN 3.2 and [[sub-kernel-devproc]]. Both bits are
+written only by `proc_seal`, under `g_proc_table_lock`. `sched` and `imperium` are
 deliberately NOT sealed: they are the kernel's attestation ABOUT a Proc, and because
 `SYS_SET_DUMPABLE(0)` is an ungated one-way self-call, sealing them would have let an
 elevated Proc permanently suppress the kernel's record of its own elevation.) The
@@ -65,9 +67,12 @@ keeps the tree rooted and therefore keeps every Proc findable.
 **`proc_apply_identity` publishes `principal_id` LAST, with RELEASE ((U) F1 round 2,
 2026-09-23).** Both halves matter. The gid fields are written first and the principal
 last, so a reader that observes the new principal also observes everything the spawn
-thunk wrote before it -- including the `SPAWN_PERM_*` marks, which is what stops
-[[sub-kernel-devproc]]'s debug predicate admitting an owner-axis attach on a Proc
-whose NOTRACE stamp has landed but whose identity had not yet. Publishing it last
+thunk wrote before it -- including the `SPAWN_PERM_*` marks. That was once what
+stopped [[sub-kernel-devproc]]'s gates admitting a reader to a Proc whose seal had
+landed but whose identity had not; the seal's round-2 re-audit (2026-09-24) showed it
+held only for a reader admitted BY the new identity, so the seal now rests on
+`proc_seal`'s lock (`g_proc_table_lock`, which every `/proc` reader holds) and this
+ordering is kept for the record's own integrity. Publishing it last
 also fails SAFE while the record is half-written: a checker sees the INHERITED
 principal (SYSTEM on the login chain) rather than the new one, which refuses rather
 than admits. The ordering was previously correct only by accident, via an unrelated
@@ -84,6 +89,7 @@ explicit at both ends, and the paired ACQUIRE load lives in `devproc_debug_autho
 | `proc_page_charge` / `vma_charge` / `shared_map_charge` (+ uncharges) | **policy only** since L-2 — "has an address space" and "is exempt"; the counters and their arithmetic live on the `AddrSpace` ([[lock-vma]] for what the lock does and does not buy) |
 | `proc_thread_cap_ok` / `proc_child_cap_ok` | the I-32 creation gates (take the table lock themselves) |
 | `proc_apply_identity` | the single audited identity-mutation site |
+| `proc_seal` | the only writer of `PROC_FLAG_NODUMP`/`NOTRACE`: OR-only, under `g_proc_table_lock`, both SEAL bits in one critical section |
 | `proc_mark_*` / `proc_is_*` | the one-way `proc_flags` stamps and their fail-closed readers |
 
 `proc_stripes` is the unforgeable per-Proc identity a `/srv` peer query

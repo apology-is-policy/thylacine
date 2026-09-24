@@ -221,12 +221,15 @@ enum {
     // One-way: setting to 0 sets PROC_FLAG_NODUMP. Setting to 1 from a
     // Proc that already has PROC_FLAG_NODUMP set is REFUSED (-1).
     // NOT forward-compat scaffolding any more (2026-09-24): the flag is the
-    // EXTRACTION seal, and while set /proc/<pid>/environ and
-    // /proc/<pid>/maps are refused to every other Proc including a
+    // EXTRACTION seal: while set, every /proc/<pid> file that hands out
+    // something the Proc holds -- environ, maps, ns, cwd, exe, cmdline, and
+    // reads of mem/regs/fpregs -- is refused to every other Proc including a
     // CAP_HOSTOWNER holder (DEBUG-FS-DESIGN 3.2). Self still reads its own.
-    // sched and imperium are NOT sealed -- they are kernel attestation, not
-    // image content. This call is UNGATED and IRREVERSIBLE, so a caller is
-    // choosing permanent opacity on those two files, not only future dumps.
+    // status, sched and imperium are NOT sealed -- the kernel's record ABOUT a
+    // Proc. It does not refuse CONTROL (SYS_SET_TRACEABLE's), and a peer that
+    // may still drive a Proc can make it disclose itself. This call is UNGATED
+    // and IRREVERSIBLE: a caller is choosing permanent opacity of its image,
+    // not only future dumps.
     SYS_SET_DUMPABLE = 17,   // arg: dumpable (x0)
 
     // SYS_SET_TRACEABLE(traceable) → 0/-1

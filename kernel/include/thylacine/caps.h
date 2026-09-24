@@ -252,8 +252,12 @@ typedef u64 caps_t;
 // reader will wonder why the seal is absent.
 //
 // The user-running grant sites in the tree, with their answers. This is a CENSUS, not
-// a sample: `grep -rn '\.perm(' usr/ --include='*.rs'` finds six, and warden's two pass
-// no `.identity()`, so they are SYSTEM and outside the question.
+// a sample. `grep -rn '\.perm(' usr/ --include='*.rs'` prints six lines: one is a
+// comment (login main.rs:868), three are login's sites below, and warden's two pass no
+// `.identity()`, so they are SYSTEM and outside the question. That grep cannot see C:
+// usr/joey/joey.c grants perms through `perm_flags` (LOGIN_PERMS among them), and no
+// joey spawn initializer sets an identity field, so every joey grant lands on a SYSTEM
+// child and is outside the question too.
 //   - login's home proxy (main.rs:885), MAY_POST_SERVICE -- YES, sealed. It also holds
 //     CAP_TCB_DIAL and a live coordinator transport, which is the (U) F1 case.
 //   - login's session compositor (main.rs:1403), MAY_POST_SERVICE | SESSION_HANGUP --

@@ -44,11 +44,15 @@ the gate it feeds is in [[sub-kernel-devsrv]].
 
 **What the bit now means for a caller, which is an ABI-doc change and not only an
 implementation one.** `NODUMP` stopped being forward-compat scaffolding: while set, it
-refuses `/proc/<pid>/environ` and `/proc/<pid>/maps` to every OTHER Proc, `CAP_HOSTOWNER`
-included (DEBUG-FS-DESIGN 3.2). `sched` and `imperium` stay readable -- kernel
-attestation, not image content. So `SYS_SET_DUMPABLE(0)`, which is UNGATED and one-way,
-is now a caller choosing permanent opacity of its environment and memory map to the whole
-machine rather than only arming a future dump refusal, and TWO callers
+refuses every `/proc/<pid>` file that hands out something the Proc holds -- environ, maps,
+ns, cwd, exe, cmdline, and reads of mem/regs/fpregs -- to every OTHER Proc,
+`CAP_HOSTOWNER` included (DEBUG-FS-DESIGN 3.2; widened to the whole image by the seal's
+round-2 re-audit). `status`, `sched` and `imperium` stay readable -- the kernel's record,
+not image content. It does NOT refuse control, so it does not stand against a peer that
+may still drive the Proc; guarding a secret takes `SYS_SET_TRACEABLE(0)` too. Both
+setters and the `SPAWN_PERM_SEAL` stamp write through `proc_seal`, under
+`g_proc_table_lock`. So `SYS_SET_DUMPABLE(0)`, which is UNGATED and one-way, is now a
+caller choosing permanent opacity of its image to the whole machine rather than only arming a future dump refusal, and TWO callers
 (`usr/corvus/src/main.rs`, `usr/login/src/main.rs`) were already invoking it as hygiene
 on the strength of the older wording. All four copies of that wording -- this header,
 `proc.h`, libt and libthyla-rs -- were corrected in the same commit; the libthyla-rs

@@ -343,21 +343,65 @@ reader's header — it said the in-kernel runner passes the gate because kproc h
 `CAP_HOSTOWNER` "by `CAP_ALL`", which `CAP_ALL` excludes. It passes on the OWNER
 axis.
 
-RED-first in two sabotage legs so each half of the new predicate is proven
-load-bearing separately: removing the `NODUMP` refusal reds
-`devproc.dump_seal_predicate` and `devproc.dump_seal_disclosure` and nothing else;
-removing the self-exemption reds ONLY the self leg. Canonical **1661/1661 PASS**, 0
-FAIL lines, no source newer than the built ELF. The canonical green is also what
-proves the ORDERING — with self-exempt after the seal, `/proc/self` breaks.
+Verified RED-first on the committed tree (`038ab9c3`), each sabotage leg redding
+exactly its own guard: removing the seal from the extraction gate reds
+`devproc.dump_seal_predicate` and `dump_seal_scope`'s extraction leg; sealing the
+attestation gate (the first cut's error) reds `dump_seal_scope`'s attestation leg
+alone; removing the `maps` gate reds `devproc.dump_seal_disclosure` alone. Canonical
+**1662/1662 PASS**, 0 FAIL lines, no source newer than the built ELF. (An earlier
+version of this paragraph recorded the first cut's two-leg run at 1661 and claimed that
+removing the NODUMP refusal redded `dump_seal_disclosure`. That test drives `maps`,
+which that refusal never gated, and it passed in every leg until it got a control of
+its own — round 2, F6.)
 
-**A re-audit is owed** by the dirty-close rule (P1+P2 = 6), scoped at the fixes.
+**Round 1 was a dirty close** (P1+P2 = 6); round 2 ran on it — see below.
 
 **Still owed on this arc:** A1 (the seal crosses `fork`) is DECIDED but NOT landed,
 because its verification is genuinely end-to-end — the fork shape cannot be
 synthesized in-kernel and the only available parent is the runner, which must never
 be sealed since the bits are one-way. It needs a userspace probe first. B (seal the
-compositor) is cleared by both peers and pending a Halcyon-image run. C (the debug
-taint at the redeem) is decided and unstarted.
+compositor) LANDED here, and got its Halcyon-image run from the operator on
+2026-09-24: the Lantern-over-Haul recipe on this tip, in the cocoa window, with the
+compositor sealed and the session intact. C (the debug taint at the redeem) is
+decided and unstarted.
+
+## The seal completed — round 2: the image set, and a lock — 2026-09-24
+
+The re-audit of `038ab9c3` (the dirty-close rule; Opus fallback again) returned
+**0 P0 / 1 P1 / 5 P2 / 7 P3** — dirty again, so **round 3 is owed**. It is the round
+where the seal stopped being a list of files. Closed list:
+`audit_seal_completion_r2_closed_list.md` (memory).
+
+- **P1 — the set was still short.** `/proc/<pid>/ns` (the whole mount table, with
+  source paths) was ungated, and the tree's own comments ranked it above `maps`;
+  `cwd`, `exe` and `cmdline` likewise. Now ONE predicate, `devproc_kind_is_image`,
+  names the image set and every read site consults it: `cmdline`/`ns`/`exe`/`cwd`/
+  `maps` (refused before any formatter runs), `environ`, and the read direction of
+  `mem`/`regs`/`fpregs` (P2 — a NODUMP-only Proc used to hand a debugger every byte
+  of memory). `status`/`sched`/`imperium` stay unsealed; `ctl`/`wait`/`kregs`/
+  `kstack` answer to NOTRACE.
+- **The ordering is a lock (P2).** Round 1's "structural" composition held only for a
+  reader admitted by the new identity. `proc_seal` is now the only writer of both
+  bits, under `g_proc_table_lock`, which every `/proc` reader holds — a read is
+  wholly before or after a seal on every axis, and SEAL's two bits land in one
+  critical section.
+- **Tests at the call sites (P2).** `devproc.dump_seal_disclosure` reads ten files
+  unsealed then sealed through the real path (image refuses, ledger and control
+  answer) plus a cross-principal environ leg; `debug_mem`/`debug_regs` gained NODUMP
+  legs (reads refused, writes allowed). Every seal test sets the bit through
+  `proc_seal` and captures its verdicts before freeing its Procs (P3).
+- **Prose the tree contradicted, fixed:** DEBUG-FS 3.1 and the devproc dossier said
+  the seal covers `sched`/`imperium` (P2); this section recorded the first cut's
+  verification (P2); `/proc/self` resurfaced in two docs; the NOTRACE comment called
+  the debug surface hypothetical. Also: the kill gate's plain principal load, the
+  census's denominator and its C blind spot, a dossier paragraph spliced
+  mid-sentence, and the spawn-copy boundary (a sealed parent's environment reads
+  through an unsealed child), now stated in 3.2.
+- **Self-found:** `test_devproc_environ`'s header still carried round 1's falsified
+  "kproc holds CAP_HOSTOWNER by CAP_ALL" — which is also why its deny leg was believed
+  unreachable end to end. It is reachable, and now tested.
+
+Verification: canonical **1662/1662 PASS**, 0 FAIL lines (default image, isolated worktree); final rebuild after the sabotage legs ELF `9418e7b48163ea01`, no source newer (270 compared). RED-first in three legs, each redding ONLY its own guard: the read-dispatch check + mem + regs read refusals removed together -> exactly `refuses cmdline` / `a mem READ` / `a regs READ` (1659); environ on the unsealed predicate -> exactly `refuses environ` (1661); imperium on the sealed predicate -> exactly the imperium I-25 leg (1661). Restores byte-identical. F5's lock is argued, not unit-tested.
 
 ## Haul completion integration — 2026-09-17
 

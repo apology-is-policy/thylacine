@@ -267,27 +267,33 @@ struct Proc {
     // (rfork_internal deliberately does not copy proc_flags).
     //
     // PROC_FLAG_NODUMP   (bit 0) — set by SYS_SET_DUMPABLE(0). The
-    //                              EXTRACTION seal, and NO LONGER mere
-    //                              forward-compat scaffolding (2026-09-24,
-    //                              DEBUG-FS-DESIGN 3.2): while set,
-    //                              /proc/<pid>/environ and /proc/<pid>/maps
-    //                              are refused to every OTHER Proc,
-    //                              CAP_HOSTOWNER included, via
-    //                              devproc_extract_authorized. Self is
-    //                              exempt. It does NOT gate sched or
-    //                              imperium -- those are the kernel's
-    //                              attestation ABOUT a Proc, not content
-    //                              of it, and an audited Proc must not be
-    //                              able to switch off the audit. Future
-    //                              core-dump paths must also refuse.
-    //                              Set by corvus + per-user stratumd at
-    //                              startup, so the surfaces above are
-    //                              already closed for them.
-    // PROC_FLAG_NOTRACE  (bit 1) — set by SYS_SET_TRACEABLE(0). When
-    //                              set, future debug-Spoor attach paths
-    //                              must refuse to attach to this Proc.
-    //                              v1.0 has no debug Spoors; same
-    //                              scaffolding pattern.
+    //                              EXTRACTION seal (DEBUG-FS-DESIGN 3.2):
+    //                              while set, every /proc/<pid> file that
+    //                              hands out something the Proc HOLDS is
+    //                              refused to every OTHER Proc, CAP_HOSTOWNER
+    //                              included -- environ, maps, ns, cwd, exe,
+    //                              cmdline, and the READ direction of mem,
+    //                              regs and fpregs (devproc_kind_is_image).
+    //                              Self is exempt. It never gates status,
+    //                              sched or imperium: those are the kernel's
+    //                              record ABOUT a Proc, and an audited Proc
+    //                              must not be able to switch off the audit.
+    //                              Future core-dump paths must also refuse.
+    //                              Set at startup by corvus and login, both
+    //                              of which also set NOTRACE.
+    // PROC_FLAG_NOTRACE  (bit 1) — set by SYS_SET_TRACEABLE(0). The CONTROL
+    //                              seal: devproc_debug_authorized refuses
+    //                              every caller, CAP_HOSTOWNER included --
+    //                              attach, stop, step, breakpoints, wait,
+    //                              kregs, kstack, and mem/regs/fpregs in
+    //                              BOTH directions.
+    //                              NODUMP alone does not make a Proc safe
+    //                              from a peer that may still DRIVE it (a
+    //                              driver can make it disclose itself), so a
+    //                              Proc guarding a secret sets both --
+    //                              SPAWN_PERM_SEAL does.
+    //                              Both bits are written only by proc_seal(),
+    //                              under g_proc_table_lock.
     // PROC_FLAG_MLOCKED  (bit 2) — set by SYS_MLOCKALL. When set,
     //                              future swap-out paths must skip
     //                              this Proc's pages. v1.0 has no
@@ -2306,6 +2312,12 @@ bool proc_peer_snapshot_by_stripes(u64 stripes, caps_t *caps_out,
 // Confers NO caps (I-22).
 void proc_apply_identity(struct Proc *p, u32 principal_id, u32 primary_gid,
                          const u32 *supp_gids, u8 supp_gid_count);
+
+// Set seal bits (PROC_FLAG_NODUMP and/or PROC_FLAG_NOTRACE; any other bit is
+// ignored) under g_proc_table_lock, the lock every /proc reader holds -- so a read
+// of `p` happens wholly before the seal or wholly after it. The ONLY writer of the
+// two bits. One-way: it never clears.
+void proc_seal(struct Proc *p, u32 bits);
 
 // =============================================================================
 // A-4a: the legate stamp (the single audited legate-creation write site).

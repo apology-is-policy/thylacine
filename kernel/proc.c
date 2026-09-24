@@ -2523,6 +2523,28 @@ bool proc_is_seat_manager(struct Proc *p) {
 void proc_mark_seat_manager(struct Proc *p) {
     if (p) __atomic_fetch_or(&p->proc_flags, PROC_FLAG_SEAT_MANAGER, __ATOMIC_RELAXED);
 }
+// THE SEAL (DEBUG-FS-DESIGN 3.2). PROC_FLAG_NODUMP and PROC_FLAG_NOTRACE are
+// written ONLY through here, and only under g_proc_table_lock. Every /proc reader
+// that consults them runs under that same lock (proc_for_each), so a read of a Proc
+// happens wholly before its seal or wholly after it -- whichever axis admitted the
+// reader (an owner axis that read the new identity, a CAP_HOSTOWNER axis that read
+// no identity at all, a spawn that changed no identity), and including the read
+// that races a Proc sealing ITSELF and then loading a secret. An ordering built from
+// load order alone could not promise the last two. OR-only, so one-way by
+// construction; SPAWN_PERM_SEAL's two bits land in ONE critical section, so no
+// reader ever sees half a seal. The OR stays atomic: other bits of this word have
+// writers that do not hold this lock.
+static void proc_seal_locked(struct Proc *p, u32 bits) {
+    __atomic_fetch_or(&p->proc_flags,
+                      bits & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE), __ATOMIC_RELAXED);
+}
+void proc_seal(struct Proc *p, u32 bits) {
+    if (!p) return;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    proc_seal_locked(p, bits);
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+}
+
 int proc_set_seat_service(struct Proc *p) {
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
     int rc = -1;
@@ -2533,7 +2555,7 @@ int proc_set_seat_service(struct Proc *p) {
         g_seat.service = p;
         // Before its first EL0 instruction: physical keys/private pixels must
         // never be exposed through a debug attach or core dump, even briefly.
-        __atomic_fetch_or(&p->proc_flags, PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE, __ATOMIC_RELAXED);
+        proc_seal_locked(p, PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE);
         rc = 0;
     }
     spin_unlock_irqrestore(&g_proc_table_lock, s);
@@ -3118,15 +3140,14 @@ void proc_apply_identity(struct Proc *p, u32 principal_id, u32 primary_gid,
     // Zero the tail so no stale inherited gid survives past the new count.
     for (u8 i = supp_gid_count; i < PROC_SUPP_GIDS_MAX; i++)
         p->supp_gids[i] = 0u;
-    // principal_id is published LAST, with RELEASE, and both halves of that are
-    // load-bearing. The spawn thunk stamps the SPAWN_PERM_* marks (NOTRACE among
-    // them) before calling this, as two unlocked writes to a Proc a /proc reader
-    // can already see -- rfork publishes the child before the thunk runs. A reader
-    // that observes the new principal_id with an ACQUIRE load therefore observes
-    // the marks too, which is what stops devproc_debug_authorized admitting an
-    // owner-axis attach on a Proc that is already sealed. Publishing it last also
-    // fails SAFE while the record is half-written: a checker sees the INHERITED
-    // principal (SYSTEM, on the login chain) rather than the new one.
+    // principal_id is published LAST, with RELEASE: a reader's ACQUIRE load then
+    // sees a complete record, and while the record is half-written a checker sees
+    // the INHERITED principal (SYSTEM, on the login chain) rather than the new one
+    // -- it fails SAFE. The seal does NOT ride this ordering. It once did, and the
+    // guarantee was conditional: it held only for a reader admitted BECAUSE it saw
+    // the new principal, and a spawn with no identity change publishes nothing to
+    // pair with. The seal is stamped under g_proc_table_lock (proc_seal), which
+    // every /proc reader holds, so it needs no ordering from this store at all.
     __atomic_store_n(&p->principal_id, principal_id, __ATOMIC_RELEASE);
 }
 

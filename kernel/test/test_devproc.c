@@ -1196,183 +1196,228 @@ void test_devproc_debug_cap_cover_attach(void) {
     TEST_EXPECT_EQ(bare_own, (void *)NULL, "the refused attach claimed no slot");
 }
 
-// The DUMP SEAL on the disclosure axis (DEBUG-FS-DESIGN 3.2, operator-delegated
-// 2026-09-24). PROC_FLAG_NODUMP means "cannot be EXTRACTED FROM", so it gates the
-// owner-disclosure surfaces (environ / sched / imperium) the way PROC_FLAG_NOTRACE
-// gates control -- Linux's split, where dumpability and not the ptrace flag is what
-// governs /proc/<pid> reads. RED before the fix: devproc_owner_or_hostowner weighed
-// neither seal bit, so a SEALED Proc's environment was readable by any
-// same-principal peer -- the exact actor SPAWN_PERM_SEAL exists to shut out.
+// The DUMP SEAL's predicates (DEBUG-FS-DESIGN 3.2, operator-delegated 2026-09-24).
+// PROC_FLAG_NODUMP means "cannot be EXTRACTED FROM" and PROC_FLAG_NOTRACE "cannot be
+// DRIVEN" -- Linux's split, where dumpability and not the ptrace flag governs
+// /proc/<pid> content. RED before the fix: nothing read NODUMP, so a SEALED Proc's
+// environment was readable by any same-principal peer -- the exact actor
+// SPAWN_PERM_SEAL exists to shut out.
 //
-// Leg ORDER is load-bearing: both CONTROLS run while the target is still unsealed,
-// so neither refusal below can be satisfied by a caller that simply cannot pass on
-// any axis. The seal is set ONCE and never cleared, because it is a one-way bit and
-// a test that clears it would be asserting against a state the kernel cannot reach.
+// Every verdict is CAPTURED, the Procs are freed, and only then is anything
+// asserted: TEST_ASSERT returns, and a fixture released on the last line is released
+// only by a passing test. Leg ORDER still matters -- both CONTROLS are taken while the
+// target is unsealed, so no refusal below can be satisfied by a caller that passes on
+// no axis -- and the seal is set ONCE, through proc_seal (the production writer),
+// because it is one-way and a test that cleared it would assert against a state the
+// kernel cannot reach.
 void test_devproc_dump_seal_predicate(void) {
-    struct Proc *caller = proc_alloc();
-    struct Proc *target = proc_alloc();
-    TEST_ASSERT(caller && target, "proc_alloc caller + target");
-
-    target->principal_id = 0x5EA1Eu;
-    target->state        = PROC_STATE_ALIVE;
-    caller->principal_id = 0x5EA1Eu;              // the OWNER axis
-    caller->caps         = 0;
-    target->caps         = 0;
-
-    // The premise every refusal below rests on, asserted before any mutation so
-    // the leg cannot be vacuous.
-    TEST_ASSERT((target->proc_flags & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE)) == 0,
-                "premise: the target starts with NEITHER seal bit");
-
-    // 1. CONTROL, owner axis: an unsealed same-principal target discloses.
-    TEST_ASSERT(devproc_extract_authorized(caller, target),
-                "control: an unsealed same-principal target discloses");
-
-    // 2. CONTROL, cap axis: an unsealed CROSS-principal target discloses to
-    //    CAP_HOSTOWNER. Runs while unsealed for the reason in the header.
-    caller->principal_id = 0xD1FFu;               // no longer the owner
-    caller->caps         = CAP_HOSTOWNER;
-    TEST_ASSERT(devproc_extract_authorized(caller, target),
-                "control: CAP_HOSTOWNER discloses an unsealed cross-principal target");
-
-    // 3. THE MIRROR LEG (audit P3-7), on its OWN target. NOTRACE alone must NOT
-    //    refuse the EXTRACTION gate. Without this, a predicate written
-    //    `& (NODUMP | NOTRACE)` passes every other leg here while denying the
-    //    disclosure surfaces of every Proc that called only SYS_SET_TRACEABLE(0) --
-    //    the two setters are independent ungated self-calls, so that is reachable. A
-    //    symmetric check cannot catch a symmetric fault: this pins the NOTRACE side.
-    //
-    //    A SEPARATE Proc, because the bits are one-way in production and this test
-    //    must not leave NOTRACE on the shared target: the first cut set it here and
-    //    silently invalidated the premise of the debug-axis leg further down, which is
-    //    the shared-fixture-generates-its-own-bugs trap. Each leg now states the exact
-    //    seal state it needs.
+    struct Proc *caller       = proc_alloc();
+    struct Proc *target       = proc_alloc();
     struct Proc *notrace_only = proc_alloc();
-    TEST_ASSERT(notrace_only != NULL, "proc_alloc the NOTRACE-only target");
-    notrace_only->principal_id = caller->principal_id;
-    notrace_only->state        = PROC_STATE_ALIVE;
-    notrace_only->caps         = 0;
-    notrace_only->proc_flags  |= PROC_FLAG_NOTRACE;
-    TEST_ASSERT((notrace_only->proc_flags & PROC_FLAG_NODUMP) == 0,
-                "premise: the mirror target has NOTRACE and NOT NODUMP");
-    bool mirror_ok = devproc_extract_authorized(caller, notrace_only);
-    notrace_only->state = PROC_STATE_ZOMBIE;
-    proc_free(notrace_only);
-    TEST_ASSERT(mirror_ok,
-                "NOTRACE alone does NOT refuse extraction: it is the CONTROL bit");
+    bool allocated = caller && target && notrace_only;
+    bool premise = false, ctl_owner = false, ctl_host = false, mirror_premise = false;
+    bool mirror = false, sealed_host = true, sealed_peer = true, self = false;
+    bool debug_premise = false, debug_axis = false;
+    if (allocated) {
+        target->principal_id = 0x5EA1Eu;
+        target->state        = PROC_STATE_ALIVE;
+        target->caps         = 0;
+        caller->principal_id = 0x5EA1Eu;              // the OWNER axis
+        caller->caps         = 0;
+        premise = (target->proc_flags & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE)) == 0;
 
-    // 4. THE SEAL IS ABSOLUTE -- CAP_HOSTOWNER does not buy through it, exactly as
-    //    the NOTRACE seam refuses debug control to every cap holder. One variable
-    //    away from leg 2.
-    target->proc_flags |= PROC_FLAG_NODUMP;
-    TEST_ASSERT(!devproc_extract_authorized(caller, target),
-                "the dump seal refuses CAP_HOSTOWNER");
+        // 1. CONTROL, owner axis: an unsealed same-principal target discloses.
+        ctl_owner = devproc_extract_authorized(caller, target);
+        // 2. CONTROL, cap axis: CAP_HOSTOWNER discloses an unsealed cross-principal
+        //    target. Taken while unsealed, for the reason in the header.
+        caller->principal_id = 0xD1FFu;
+        caller->caps         = CAP_HOSTOWNER;
+        ctl_host = devproc_extract_authorized(caller, target);
 
-    // 5. THE REGRESSION: it refuses the same-principal PEER, the actor the seal
-    //    exists for. One variable away from leg 1.
-    caller->principal_id = 0x5EA1Eu;              // the owner again
-    caller->caps         = 0;
-    TEST_ASSERT(!devproc_extract_authorized(caller, target),
-                "the dump seal refuses a same-principal peer's extraction");
+        // 3. THE MIRROR LEG (round-1 P3-7), on its OWN Proc: NOTRACE alone must NOT
+        //    refuse extraction. Without it a predicate written `& (NODUMP | NOTRACE)`
+        //    passes every other leg while denying every Proc that called only
+        //    SYS_SET_TRACEABLE(0) -- a symmetric check cannot catch a symmetric fault.
+        //    Its own Proc because the bits are one-way: NOTRACE set on the shared
+        //    target once silently invalidated leg 7's premise.
+        notrace_only->principal_id = caller->principal_id;
+        notrace_only->state        = PROC_STATE_ALIVE;
+        notrace_only->caps         = 0;
+        proc_seal(notrace_only, PROC_FLAG_NOTRACE);
+        mirror_premise = (notrace_only->proc_flags & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE))
+                         == PROC_FLAG_NOTRACE;
+        mirror = devproc_extract_authorized(caller, notrace_only);
 
-    // 6. SELF is exempt -- a Proc reads its own environment by its own pid (devproc
-    //    has no `self` entry), and sealing it against itself protects nobody.
-    TEST_ASSERT(devproc_extract_authorized(target, target),
-                "a sealed Proc still extracts from ITSELF");
+        // 4. ABSOLUTE: CAP_HOSTOWNER does not buy through the seal. One variable
+        //    away from leg 2.
+        proc_seal(target, PROC_FLAG_NODUMP);
+        sealed_host = devproc_extract_authorized(caller, target);
+        // 5. THE REGRESSION: the same-principal PEER is refused. One variable away
+        //    from leg 1.
+        caller->principal_id = 0x5EA1Eu;
+        caller->caps         = 0;
+        sealed_peer = devproc_extract_authorized(caller, target);
+        // 6. SELF is exempt: a Proc reads itself by its own pid (devproc has no
+        //    `self` entry), and sealing it against itself protects nobody.
+        self = devproc_extract_authorized(target, target);
+        // 7. NODUMP is not a CONTROL refusal. The premise is captured, not assumed:
+        //    this leg was once vacuous when an earlier leg left NOTRACE on `target`.
+        debug_premise = (target->proc_flags & PROC_FLAG_NOTRACE) == 0;
+        debug_axis    = devproc_debug_authorized(target, target);
+    }
+    if (caller)       { caller->state = PROC_STATE_ZOMBIE;       proc_free(caller); }
+    if (target)       { target->state = PROC_STATE_ZOMBIE;       proc_free(target); }
+    if (notrace_only) { notrace_only->state = PROC_STATE_ZOMBIE; proc_free(notrace_only); }
 
-    // 7. NODUMP alone is not a debug refusal, so the two bits cannot have been
-    //    conflated in the other direction either. `target` carries NODUMP and has
-    //    never carried NOTRACE -- asserted, because this leg was silently vacuous
-    //    when an earlier leg set NOTRACE on it and the debug gate then refused for
-    //    the RIGHT reason while this assertion read as a failure.
-    TEST_ASSERT((target->proc_flags & PROC_FLAG_NOTRACE) == 0,
-                "premise: the target carries NODUMP and NOT NOTRACE");
-    TEST_ASSERT(devproc_debug_authorized(target, target),
-                "NODUMP does not refuse the NOTRACE-gated debug axis");
-
-    caller->state = PROC_STATE_ZOMBIE;
-    target->state = PROC_STATE_ZOMBIE;
-    proc_free(caller);
-    proc_free(target);
+    TEST_ASSERT(allocated, "proc_alloc caller + target + the NOTRACE-only target");
+    TEST_ASSERT(premise, "premise: the target starts with NEITHER seal bit");
+    TEST_ASSERT(ctl_owner, "control: an unsealed same-principal target discloses");
+    TEST_ASSERT(ctl_host, "control: CAP_HOSTOWNER discloses an unsealed cross-principal target");
+    TEST_ASSERT(mirror_premise, "premise: the mirror target has NOTRACE and NOT NODUMP");
+    TEST_ASSERT(mirror, "NOTRACE alone does NOT refuse extraction: it is the CONTROL bit");
+    TEST_ASSERT(!sealed_host, "the dump seal refuses CAP_HOSTOWNER");
+    TEST_ASSERT(!sealed_peer, "the dump seal refuses a same-principal peer's extraction");
+    TEST_ASSERT(self, "a sealed Proc still extracts from ITSELF");
+    TEST_ASSERT(debug_premise, "premise: the target carries NODUMP and NOT NOTRACE");
+    TEST_ASSERT(debug_axis, "NODUMP does not refuse the NOTRACE-gated debug axis");
 }
 
-// The same rule END TO END through a real gated reader rather than the predicate --
-// a SEPARATE test because TEST_ASSERT returns on the first failure, so a predicate
-// regression must not be able to hide the surface's. devproc_imperium_read_gated is
-// the narrowest of the three (it consults this gate and then formats), so the gate
-// is the only thing that can deny here.
+// The seal END TO END through every /proc/<pid> file the plain read path serves.
+// This pins the SET at the call sites, which no predicate test can: round 2 showed
+// that re-pointing environ back at the unsealed predicate, or imperium at the sealed
+// one, left every predicate-level test green. Each file is read once unsealed (the
+// control: an allowed read is >= 0, possibly 0 bytes on a synthetic Proc) and once
+// after proc_seal (the one variable); an image file must then refuse (-1) and a
+// ledger or control file must still answer. A second, CROSS-principal target pins
+// environ's own owner gate the same way -- the in-kernel runner holds no
+// CAP_HOSTOWNER (asserted below), so that deny leg is reachable end to end.
+// mem / regs / fpregs are the debug tests' (they need a stopped target).
 void test_devproc_dump_seal_disclosure(void) {
-    struct Proc *target = proc_alloc();
-    TEST_ASSERT(target != NULL, "alloc the target");
+    static const struct {
+        const char *name;
+        bool        image;
+        const char *control_msg;
+        const char *sealed_msg;
+    } files[] = {
+        { "status",   false, "control: status reads while unsealed",
+          "status is the kernel's record -- it still reads when sealed" },
+        { "cmdline",  true,  "control: cmdline reads while unsealed",
+          "the dump seal refuses cmdline" },
+        { "ctl",      false, "control: ctl reads while unsealed",
+          "ctl is a control file -- it still reads when sealed" },
+        { "ns",       true,  "control: ns reads while unsealed",
+          "the dump seal refuses ns (round-2 P1)" },
+        { "exe",      true,  "control: exe reads while unsealed",
+          "the dump seal refuses exe" },
+        { "cwd",      true,  "control: cwd reads while unsealed",
+          "the dump seal refuses cwd" },
+        { "maps",     true,  "control: maps reads while unsealed",
+          "the dump seal refuses maps" },
+        { "sched",    false, "control: sched reads while unsealed",
+          "sched is telemetry -- it still reads when sealed" },
+        { "imperium", false, "control: imperium reads while unsealed",
+          "imperium is the kernel's attestation -- it still reads when sealed (I-25)" },
+        { "environ",  true,  "control: environ reads while unsealed",
+          "the dump seal refuses environ" },
+    };
+    enum { NFILES = (int)(sizeof(files) / sizeof(files[0])) };
+
     struct Thread *th = current_thread();
     TEST_ASSERT(th && th->proc, "test thread has a proc");
-    target->principal_id = th->proc->principal_id;   // same principal as the reader
-    target->state        = PROC_STATE_ALIVE;
-    target->caps         = 0;
-    proc_test_link(target);
+    struct Proc *target = proc_alloc();
+    struct Proc *other  = proc_alloc();
+    bool allocated = target && other;
+    struct Spoor *f[NFILES];
+    long before[NFILES], after[NFILES];
+    bool premise = false;
+    long other_environ = -2, other_maps = -2;
+    char buf[512];
+    for (int i = 0; i < NFILES; i++) { f[i] = NULL; before[i] = -2; after[i] = -2; }
 
-    TEST_ASSERT((target->proc_flags & PROC_FLAG_NODUMP) == 0,
-                "premise: the target starts unsealed");
+    if (allocated) {
+        target->principal_id = th->proc->principal_id;   // the reader's own principal
+        target->state        = PROC_STATE_ALIVE;
+        target->caps         = 0;
+        proc_test_link(target);
+        premise = (target->proc_flags & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE)) == 0;
+        for (int i = 0; i < NFILES; i++) {
+            f[i] = open_pidfile_for(target->pid, files[i].name, 0);   // OREAD
+            before[i] = f[i] ? devproc.read(f[i], buf, (long)sizeof(buf), 0) : -2;
+        }
+        proc_seal(target, PROC_FLAG_NODUMP);
+        for (int i = 0; i < NFILES; i++)
+            after[i] = f[i] ? devproc.read(f[i], buf, (long)sizeof(buf), 0) : -2;
+        for (int i = 0; i < NFILES; i++) if (f[i]) spoor_clunk(f[i]);
+        proc_test_unlink(target);
 
-    // maps, through the REAL devproc read path. An allowed read is >= 0 (it may be 0
-    // bytes -- a synthetic Proc has no VMAs to format, and that is fine); a DENIED
-    // read is -1. The seal is the only variable between the two calls, and -1 vs >= 0
-    // is the discrimination, so the leg does not depend on the formatter producing
-    // anything.
-    char buf[256];
-    struct Spoor *f = open_pidfile_for(target->pid, "maps", 0);   // OREAD
-    long open_ret = f ? devproc.read(f, buf, (long)sizeof(buf), 0) : -2;
+        // environ's OWN gate, end to end: an UNSEALED target of another principal.
+        // maps is its one-variable control -- ambient, so it must still read.
+        other->principal_id = (th->proc->principal_id == 0x0D0D0D0Du) ? 0x0E0E0E0Eu
+                                                                       : 0x0D0D0D0Du;
+        other->state        = PROC_STATE_ALIVE;
+        other->caps         = 0;
+        proc_test_link(other);
+        struct Spoor *oe = open_pidfile_for(other->pid, "environ", 0);
+        struct Spoor *om = open_pidfile_for(other->pid, "maps", 0);
+        other_environ = oe ? devproc.read(oe, buf, (long)sizeof(buf), 0) : -2;
+        other_maps    = om ? devproc.read(om, buf, (long)sizeof(buf), 0) : -2;
+        if (oe) spoor_clunk(oe);
+        if (om) spoor_clunk(om);
+        proc_test_unlink(other);
+    }
+    if (target) { target->state = PROC_STATE_ZOMBIE; proc_free(target); }
+    if (other)  { other->state  = PROC_STATE_ZOMBIE; proc_free(other); }
 
-    target->proc_flags |= PROC_FLAG_NODUMP;
-    long sealed_ret = f ? devproc.read(f, buf, (long)sizeof(buf), 0) : -2;
-
-    if (f) spoor_clunk(f);
-    proc_test_unlink(target);
-    target->state = PROC_STATE_ZOMBIE;
-    proc_free(target);
-
-    TEST_ASSERT(f != NULL, "open /proc/<pid>/maps");
-    TEST_ASSERT(open_ret >= 0, "control: an unsealed maps read is not denied");
-    TEST_EXPECT_EQ(sealed_ret, (long)-1,
-                   "the dump seal denies the maps read end to end");
+    TEST_ASSERT(allocated, "alloc the sealed target + the cross-principal target");
+    TEST_ASSERT(premise, "premise: the target starts with neither seal bit");
+    TEST_ASSERT(!(__atomic_load_n(&th->proc->caps, __ATOMIC_ACQUIRE) & CAP_HOSTOWNER),
+                "premise: the runner holds no CAP_HOSTOWNER, so the cross-principal leg means something");
+    for (int i = 0; i < NFILES; i++) {
+        TEST_ASSERT(before[i] >= 0, files[i].control_msg);
+        if (files[i].image) TEST_ASSERT(after[i] == -1, files[i].sealed_msg);
+        else                TEST_ASSERT(after[i] >= 0, files[i].sealed_msg);
+    }
+    TEST_ASSERT(other_maps >= 0, "control: an unsealed cross-principal maps read is ambient");
+    TEST_EXPECT_EQ(other_environ, (long)-1,
+                   "environ refuses a cross-principal reader that holds no CAP_HOSTOWNER");
 }
 
-// The seal's SCOPE, pinned so the P2-3 correction cannot silently regress: the dump
-// seal covers EXTRACTION surfaces and must NOT cover the kernel's ATTESTATION about a
-// Proc. `imperium` is the section-4 unforgeable kernel flag and `sched` is scheduler
-// telemetry; neither is a piece of the image, and sealing them would let any Proc in a
-// live propagating legate scope permanently suppress the kernel's record of its own
-// elevation, because SYS_SET_DUMPABLE(0) is an ungated one-way self-call. The first cut
-// of the seal did exactly that.
+// The seal's SCOPE at the predicate level: the extraction gate is sealed and the
+// attestation gate is not. The same split is pinned at the CALL SITES by
+// test_devproc_dump_seal_disclosure; this test exists so a predicate regression is
+// reported as one. `imperium` and `sched` are the kernel's record ABOUT a Proc;
+// sealing them would let any Proc in a live propagating legate scope permanently
+// suppress the kernel's record of its own elevation, because SYS_SET_DUMPABLE(0) is
+// an ungated one-way self-call. The first cut of the seal did exactly that.
 void test_devproc_dump_seal_scope(void) {
     struct Proc *caller = proc_alloc();
     struct Proc *target = proc_alloc();
-    TEST_ASSERT(caller && target, "proc_alloc caller + target");
-    target->principal_id = 0x5EA1Eu;
-    target->state        = PROC_STATE_ALIVE;
-    caller->principal_id = 0x5EA1Eu;
-    caller->caps         = 0;
-    target->caps         = 0;
+    bool allocated = caller && target;
+    bool premise = false, agree = false, attest = false, extract = true;
+    if (allocated) {
+        target->principal_id = 0x5EA1Eu;
+        target->state        = PROC_STATE_ALIVE;
+        target->caps         = 0;
+        caller->principal_id = 0x5EA1Eu;
+        caller->caps         = 0;
+        premise = (target->proc_flags & PROC_FLAG_NODUMP) == 0;
+        // Both gates agree while unsealed -- so the divergence below is the seal's
+        // doing and not a difference the two predicates always had.
+        agree = devproc_owner_or_hostowner(caller, target) &&
+                devproc_extract_authorized(caller, target);
+        proc_seal(target, PROC_FLAG_NODUMP);
+        attest  = devproc_owner_or_hostowner(caller, target);
+        extract = devproc_extract_authorized(caller, target);
+    }
+    if (caller) { caller->state = PROC_STATE_ZOMBIE; proc_free(caller); }
+    if (target) { target->state = PROC_STATE_ZOMBIE; proc_free(target); }
 
-    TEST_ASSERT((target->proc_flags & PROC_FLAG_NODUMP) == 0,
-                "premise: the target starts unsealed");
-    // Both gates agree while unsealed -- so the divergence below is the seal's doing
-    // and not a difference the two predicates always had.
-    TEST_ASSERT(devproc_owner_or_hostowner(caller, target) &&
-                devproc_extract_authorized(caller, target),
-                "control: unsealed, the authority gate and the extraction gate agree");
-
-    target->proc_flags |= PROC_FLAG_NODUMP;
-    TEST_ASSERT(devproc_owner_or_hostowner(caller, target),
-                "the ATTESTATION gate (imperium/sched) is NOT sealed -- an audited "
-                "Proc cannot switch off the kernel's record of its own elevation");
-    TEST_ASSERT(!devproc_extract_authorized(caller, target),
-                "the EXTRACTION gate (environ/maps) IS sealed");
-
-    caller->state = PROC_STATE_ZOMBIE;
-    target->state = PROC_STATE_ZOMBIE;
-    proc_free(caller);
-    proc_free(target);
+    TEST_ASSERT(allocated, "proc_alloc caller + target");
+    TEST_ASSERT(premise, "premise: the target starts unsealed");
+    TEST_ASSERT(agree, "control: unsealed, the authority gate and the extraction gate agree");
+    TEST_ASSERT(attest, "the ATTESTATION gate (imperium/sched) is NOT sealed -- an audited "
+                        "Proc cannot switch off the kernel's record of its own elevation");
+    TEST_ASSERT(!extract, "the EXTRACTION gate (environ) IS sealed");
 }
 
 // 8a-1b: the attach/detach/close slot lifecycle (the model's Attach / DetachReq
@@ -1818,6 +1863,18 @@ void test_devproc_debug_mem(void) {
     tgt->principal_id = (caller->principal_id == 0x0D0D0D0Du) ? 0x0E0E0E0Eu : 0x0D0D0D0Du;
     TEST_EXPECT_EQ(devproc.read(mem, buf, 64, (s64)RW_VA), (long)-1,
                    "mem read by a non-owner (no CAP_DEBUG) is refused (I-39)");
+
+    // The dump seal refuses the READ direction only (DEBUG-FS-DESIGN 3.2): reading
+    // memory is extraction; writing it is control and answers to NOTRACE. LAST,
+    // because the bit is one-way. Back to the owner, still stopped, with a positive
+    // control one variable away from the seal.
+    tgt->principal_id = caller->principal_id;
+    long nd_control = devproc.read(mem, buf, 64, (s64)RW_VA);
+    proc_seal(tgt, PROC_FLAG_NODUMP);
+    long nd_read = devproc.read(mem, buf, 64, (s64)RW_VA);
+    for (int i = 0; i < 64; i++) wbuf[i] = (u8)(0x33 + i);
+    long nd_write  = devproc.write(mem, wbuf, 64, (s64)RW_VA);
+    u8   nd_landed = rw_kva[0];
     spoor_clunk(mem);
 
     // Cleanup: free MY backing pages (proc_pgtable_destroy leaves leaf data pages
@@ -1827,6 +1884,11 @@ void test_devproc_debug_mem(void) {
     free_pages(ro_pg, 0);
     tgt->state = PROC_STATE_ZOMBIE;
     proc_free(tgt);
+
+    TEST_EXPECT_EQ(nd_control, 64L, "control: the owner's mem read of a stopped target returns the bytes");
+    TEST_EXPECT_EQ(nd_read, (long)-1, "the dump seal refuses a mem READ");
+    TEST_EXPECT_EQ(nd_write, 64L, "the dump seal does not refuse a mem WRITE -- that is control, NOTRACE's");
+    TEST_ASSERT(nd_landed == 0x33, "the mem write to the NODUMP target landed");
 }
 
 // 8a-1b-gamma-2: /proc/<pid>/regs + fpregs -- the saved EL0 register frames of a
@@ -1950,6 +2012,24 @@ void test_devproc_debug_regs(void) {
     if (regs4) spoor_clunk(regs4);
     th.state = THREAD_SLEEPING;
 
+    // The dump seal refuses regs/fpregs READS (extraction) and neither WRITE
+    // (control, NOTRACE's). LAST, because the bit is one-way and every leg above
+    // would otherwise be refused by the seal instead of by the guard it names. HF1's
+    // perturbations are undone above (thread SLEEPING, no group exit); the target is
+    // stopped, and each read has a positive control one variable away.
+    tgt->debug_stop_req = 1;
+    struct Spoor *nd_r = open_pidfile_for(tgt->pid, "regs", 2);
+    struct Spoor *nd_f = open_pidfile_for(tgt->pid, "fpregs", 2);
+    long nd_regs_ctl = nd_r ? devproc.read(nd_r, &ur, (long)sizeof(ur), 0) : -2;
+    long nd_fp_ctl   = nd_f ? devproc.read(nd_f, &uf, (long)sizeof(uf), 0) : -2;
+    proc_seal(tgt, PROC_FLAG_NODUMP);
+    long nd_regs_rd  = nd_r ? devproc.read(nd_r, &ur, (long)sizeof(ur), 0) : -2;
+    long nd_fp_rd    = nd_f ? devproc.read(nd_f, &uf, (long)sizeof(uf), 0) : -2;
+    long nd_regs_wr  = nd_r ? devproc.write(nd_r, &wr, (long)sizeof(wr), 0) : -2;
+    long nd_fp_wr    = nd_f ? devproc.write(nd_f, &uf, (long)sizeof(uf), 0) : -2;
+    if (nd_r) spoor_clunk(nd_r);
+    if (nd_f) spoor_clunk(nd_f);
+
     // Cleanup BEFORE the HF1 asserts: unlink + drop the synthetic (stack-local)
     // thread BEFORE the frame dies, free the kstack, then the Proc. TEST_ASSERT
     // returns on failure -- asserting first would leave tgt linked with a
@@ -1964,6 +2044,12 @@ void test_devproc_debug_regs(void) {
                    "regs of a group-terminating target is refused (HF1)");
     TEST_EXPECT_EQ(hf1_exiting_rc, (long)-1,
                    "regs of an EXITING head thread is refused (HF1 backstop)");
+    TEST_EXPECT_EQ(nd_regs_ctl, (long)sizeof(ur), "control: regs reads before the seal");
+    TEST_EXPECT_EQ(nd_fp_ctl,   (long)sizeof(uf), "control: fpregs reads before the seal");
+    TEST_EXPECT_EQ(nd_regs_rd,  (long)-1, "the dump seal refuses a regs READ");
+    TEST_EXPECT_EQ(nd_fp_rd,    (long)-1, "the dump seal refuses an fpregs READ");
+    TEST_EXPECT_EQ(nd_regs_wr,  (long)sizeof(wr), "the dump seal does not refuse a regs WRITE (control)");
+    TEST_EXPECT_EQ(nd_fp_wr,    (long)sizeof(uf), "the dump seal does not refuse an fpregs WRITE (control)");
 }
 
 // 8a-1b-gamma-3: /proc/<pid>/{kregs,kstack,wait} -- the kernel-side inspection +
@@ -2417,11 +2503,11 @@ void test_devproc_maps(void) {
 // VIVARIUM V-4b-6: /proc/<pid>/environ -- the gate, the wiring, the 0400 mode,
 // and the short-read-not-truncation property of the per-call clamp.
 //
-// The gate's DENY leg is only reachable through the predicate: devproc_environ_-
-// read takes its caller from current_thread(), and the in-kernel runner is always
-// kproc (CAP_ALL, so always CAP_HOSTOWNER). Driving the predicate directly with a
-// synthetic (caller, target) pair is the prowl-5-F4 precedent -- without it a
-// wiring regression that dropped the gate would leave every test green.
+// The gate's axes, driven through environ's own predicate with synthetic (caller,
+// target) pairs -- the prowl-5-F4 precedent. The call site is pinned separately, end
+// to end, by test_devproc_dump_seal_disclosure: the in-kernel runner holds NO
+// CAP_HOSTOWNER (CAP_ALL excludes every elevation-only cap), so a cross-principal
+// environ read is reachable there and must read -1.
 void test_devproc_environ(void) {
     // --- the gate ----------------------------------------------------------
     struct Proc *caller = proc_alloc();
@@ -2431,19 +2517,19 @@ void test_devproc_environ(void) {
 
     caller->principal_id = 0xB0Bu;
     caller->caps         = 0;
-    TEST_ASSERT(!devproc_owner_or_hostowner(caller, target),
+    TEST_ASSERT(!devproc_extract_authorized(caller, target),
                 "V-4b-6: a non-owner without caps cannot read a peer's environ");
     caller->principal_id = 0xA11CEu;
-    TEST_ASSERT(devproc_owner_or_hostowner(caller, target),
+    TEST_ASSERT(devproc_extract_authorized(caller, target),
                 "V-4b-6: the owner can");
     caller->principal_id = 0xB0Bu;
     caller->caps         = CAP_HOSTOWNER;
-    TEST_ASSERT(devproc_owner_or_hostowner(caller, target),
+    TEST_ASSERT(devproc_extract_authorized(caller, target),
                 "V-4b-6: CAP_HOSTOWNER can");
     // CAP_DEBUG is deliberately NOT an axis: environ is an info file, and a
     // debugger's authority to stop a Proc is a different grant from a reader's.
     caller->caps = CAP_DEBUG;
-    TEST_ASSERT(!devproc_owner_or_hostowner(caller, target),
+    TEST_ASSERT(!devproc_extract_authorized(caller, target),
                 "V-4b-6: CAP_DEBUG alone is not an environ axis");
     caller->state = PROC_STATE_ZOMBIE;
     proc_free(caller);
