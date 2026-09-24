@@ -426,3 +426,254 @@ fn nested_administrative_auth_floor_cannot_be_weakened() {
         Err(Error::Denied)
     );
 }
+
+fn record(mandate: Mandate) -> codec::Record {
+    codec::Record {
+        mandate,
+        transaction: [0x42; 16],
+    }
+}
+#[test]
+fn canonical_record_has_a_pinned_header_and_roundtrips_all_states() {
+    let rec = record(use_grant(2, 20, 10, 1));
+    let bytes = rec.encode().unwrap();
+    assert_eq!(&bytes[..16], b"MDTM\x01\0\0\0\x84\0\0\0\x01\x01\x01\0");
+    assert_eq!(&bytes[72..88], &[0x42; 16]);
+    assert_eq!(codec::Record::decode(&bytes), Ok(rec));
+    for state in [State::Live, State::Revoking, State::Revoked] {
+        for term in [
+            Term::UntilRevoked,
+            Term::UntilUtc(1),
+            Term::UntilUtc(u64::MAX),
+        ] {
+            for kind in [Kind::Use, Kind::Activate, Kind::Admin] {
+                let mut m = if kind == Kind::Admin {
+                    admin(2, 20, 10, 1, 3)
+                } else {
+                    use_grant(2, 20, 10, 1)
+                };
+                m.kind = kind;
+                m.state = state;
+                m.term = term;
+                let rec = record(m);
+                let bytes = rec.encode().unwrap();
+                assert_eq!(codec::Record::decode(&bytes), Ok(rec));
+            }
+        }
+    }
+}
+#[test]
+fn codec_rejects_every_truncation_and_trailing_data() {
+    let rec = record(admin(2, 20, 10, 1, 3));
+    let good = rec.encode().unwrap();
+    for n in 0..good.len() {
+        assert!(
+            codec::Record::decode(&good[..n]).is_err(),
+            "truncated at {n}"
+        );
+        if n >= abi::MANDATE_HEADER_LEN {
+            let mut bad = good[..n].to_vec();
+            bad[8..12].copy_from_slice(&(n as u32).to_le_bytes());
+            assert!(
+                codec::Record::decode(&bad).is_err(),
+                "truncated and patched at {n}"
+            );
+        }
+    }
+    let mut bad = good;
+    bad.push(0);
+    let len = bad.len() as u32;
+    assert!(codec::Record::decode(&bad).is_err());
+    bad[8..12].copy_from_slice(&len.to_le_bytes());
+    assert!(codec::Record::decode(&bad).is_err());
+}
+#[test]
+fn codec_refuses_unknown_tags_reserved_bytes_and_counts() {
+    let good = record(use_grant(2, 20, 10, 1)).encode().unwrap();
+    for (offset, value) in [
+        (0, 0),
+        (4, 2),
+        (6, 1),
+        (7, 1),
+        (12, 4),
+        (13, 3),
+        (14, 4),
+        (15, 2),
+        (88, 17),
+        (89, 1),
+        (90, 0),
+        (92, 9),
+        (94, 2),
+        (95, 1),
+    ] {
+        let mut bad = good.clone();
+        bad[offset] = value;
+        assert!(
+            codec::Record::decode(&bad).is_err(),
+            "accepted offset {offset}"
+        );
+    }
+    let mut bad = good.clone();
+    bad[72..88].fill(0);
+    assert!(codec::Record::decode(&bad).is_err());
+    let mut bad = good.clone();
+    bad[63] = 0x80;
+    assert!(codec::Record::decode(&bad).is_err());
+    let mut bad = good.clone();
+    bad[64] = 1;
+    assert!(codec::Record::decode(&bad).is_err());
+    let mut bad = good;
+    bad[15] = 1;
+    assert!(codec::Record::decode(&bad).is_err());
+}
+#[test]
+fn codec_refuses_invalid_envelope_and_noncanonical_selectors() {
+    let good = record(admin(2, 20, 10, 1, 3)).encode().unwrap();
+    let envelope_offset = abi::MANDATE_HEADER_LEN + 4 * 4 + 16 + 16;
+    for (offset, value) in [
+        (24, 0),
+        (24, 8),
+        (25, 3),
+        (26, 17),
+        (27, 2),
+        (28, 17),
+        (30, 0),
+    ] {
+        let mut bad = good.clone();
+        bad[envelope_offset + offset] = value;
+        assert!(codec::Record::decode(&bad).is_err());
+    }
+    let mut bad = good.clone();
+    bad[100..104].copy_from_slice(&10u32.to_le_bytes());
+    assert!(codec::Record::decode(&bad).is_err()); // repeated subject
+    let mut bad = good;
+    bad[12] = abi::KIND_USE as u8;
+    assert!(codec::Record::decode(&bad).is_err()); // admin envelope on Use
+}
+#[test]
+fn maximum_record_fits_the_reserved_bound_without_extra_bytes() {
+    let mut m = admin(99, 20, 10, 1, 3);
+    m.scope.subjects = (1..=16).collect();
+    m.scope.resources = (1..=16)
+        .map(|object| Resource { owner: 1, object })
+        .collect();
+    m.supports = (1..=8).map(reference).collect();
+    let e = m.envelope.as_mut().unwrap();
+    e.scope.subjects = m.scope.subjects.clone();
+    e.scope.resources = m.scope.resources.clone();
+    let rec = record(m);
+    let bytes = rec.encode().unwrap();
+    assert_eq!(bytes.len(), abi::MANDATE_MAX_LEN);
+    assert_eq!(codec::Record::decode(&bytes), Ok(rec.clone()));
+    let mut too_big = rec;
+    too_big.mandate.scope.subjects.push(17);
+    assert_eq!(too_big.encode(), Err(Error::Invalid));
+}
+#[test]
+fn decoding_never_turns_an_unauthorized_envelope_into_authority() {
+    let l = ledger();
+    let mut m = use_grant(2, 20, 10, 1);
+    m.scope.actions = Actions::FS_WRITE;
+    let bytes = record(m).encode().unwrap();
+    let rec = codec::Record::decode(&bytes).unwrap();
+    assert_eq!(
+        l.check_issue(&activation(&l, 1, 10), &rec.mandate, T),
+        Err(Error::Denied)
+    );
+}
+#[test]
+fn per_subject_record_capacity_is_checked_before_mutation() {
+    let mut l = ledger();
+    for id in 2..=MAX_PER_SUBJECT as u64 + 1 {
+        l.issue(&activation(&l, 1, 10), use_grant(id, 20, 10, 1), T)
+            .unwrap();
+    }
+    let rev = l.revision();
+    assert_eq!(
+        l.issue(&activation(&l, 1, 10), use_grant(258, 20, 10, 1), T),
+        Err(Error::Capacity)
+    );
+    assert_eq!(l.revision(), rev);
+    assert_eq!(l.records().count(), MAX_PER_SUBJECT + 1);
+}
+#[test]
+fn total_physical_capacity_includes_revoked_tombstones() {
+    let mut l = Ledger::new();
+    for id in 1..=MAX_RECORDS as u64 {
+        let mut m = root();
+        m.reference = reference(id);
+        m.subject = id as u32;
+        l.install_founding(m).unwrap();
+    }
+    let mut m = root();
+    m.reference = reference(MAX_RECORDS as u64 + 1);
+    m.subject = 9999;
+    assert_eq!(l.install_founding(m), Err(Error::Capacity));
+    assert_eq!(l.records().count(), MAX_RECORDS);
+}
+#[test]
+fn support_graph_depth_is_bounded_even_without_administrative_redelegation() {
+    let mut l = ledger();
+    for id in 2..=MAX_DEPTH as u64 {
+        // Independent same-subject records are allowed; their dependency edges
+        // must use different principals to avoid a self-escalation path.
+        let mut r = root();
+        r.reference = reference(id);
+        r.subject = id as u32 + 100;
+        r.supports = vec![reference(id - 1)];
+        // Corruption fixture exercises the walker directly; ordinary insertion
+        // separately enforces envelope/depth and never gets this bypass.
+        l.entries.push(Entry {
+            mandate: r,
+            founding: false,
+        });
+    }
+    assert_eq!(l.is_live(reference(MAX_DEPTH as u64), T.utc), Ok(()));
+    let mut r = root();
+    r.reference = reference(MAX_DEPTH as u64 + 1);
+    r.supports = vec![reference(MAX_DEPTH as u64)];
+    l.entries.push(Entry {
+        mandate: r,
+        founding: false,
+    });
+    assert_eq!(
+        l.is_live(reference(MAX_DEPTH as u64 + 1), T.utc),
+        Err(Error::Depth)
+    );
+}
+#[test]
+fn revocation_finds_diamond_descendants_once_in_sorted_order() {
+    let mut l = ledger();
+    l.issue(&activation(&l, 1, 10), admin(2, 20, 10, 1, 3), T)
+        .unwrap();
+    l.issue(&activation(&l, 1, 10), admin(3, 30, 10, 1, 3), T)
+        .unwrap();
+    let mut child = use_grant(4, 40, 20, 2);
+    child.supports.push(reference(3));
+    l.issue(&activation(&l, 2, 20), child, T).unwrap();
+    assert_eq!(
+        l.revocation_closure(&[reference(1)]).unwrap(),
+        vec![reference(1), reference(2), reference(3), reference(4)]
+    );
+    assert_eq!(
+        l.revocation_closure(&[reference(2), reference(3)]).unwrap(),
+        vec![reference(2), reference(3), reference(4)]
+    );
+}
+#[test]
+fn single_byte_mutations_are_either_refused_or_exactly_canonical() {
+    let good = record(admin(2, 20, 10, 1, 3)).encode().unwrap();
+    for pos in 0..good.len() {
+        for byte in 0..=255u8 {
+            let mut candidate = good.clone();
+            candidate[pos] = byte;
+            if let Ok(decoded) = codec::Record::decode(&candidate) {
+                assert_eq!(
+                    decoded.encode().unwrap(),
+                    candidate,
+                    "noncanonical at {pos}"
+                );
+            }
+        }
+    }
+}

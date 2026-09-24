@@ -15,7 +15,7 @@ No unrelated worktree or unfinished tip is imported without coordination.
 - UA-0: ratification commit, exact ABI/codec contracts, mandate model and mutants,
   guest durability evidence before persistent transactions.
 - UA-1: bounded pure policy engine, provenance/coverage, canonical codec and
-  read-only discovery. Isolated core implemented and checked; codec/discovery pending; no mutation endpoint.
+  read-only discovery. Isolated core implemented and checked; canonical codec checked, discovery pending; no mutation endpoint.
 - UA-2..UA-7: typed scopes/admission, durable transactions/replay, client and
   trusted scene, standing grants/installer, scoped resources, full qualification.
 - Multiuser fixture prerequisite: registry headroom + bind errno, already Astra
@@ -36,8 +36,8 @@ First source tranche (2026-09-24), on ratification 4c889a13:
 - Self-review only. No kernel, Corvus runtime, durability or end-to-end claim.
 
 UA-0 and UA-1 remain open. The initial model lacks full group/account transitions
-and separate commit admission/publication. The library still needs canonical
-codec, discovery, quota/depth maximum tests and pre-auth fallible reservations.
+and separate commit admission/publication. The library still needs discovery and complete pre-auth transaction reservations.
+Canonical codec and record-count/depth bounds now have host checks.
 Tombstones count toward its interim 4096 physical-record cap (stricter than the
 4096-live target); safe compaction must preserve high-water IDs and audit.
 
@@ -55,3 +55,16 @@ No storage defect repair or guest crash test claimed yet.
 UA-0 record/verb reservations: see `docs/USER-AUTHORITY-ABI.md`. Aux confirms
 no Corvus/LCUR collision via Yip0119. The codec will consume this ABI after its
 reservation commit; no numeric kernel scope/admission allocation yet.
+
+Second source tranche: canonical codec after ABI reservation 8ab92592. 35 host
+checks pass, including a complete one-byte mutation sweep and maximum 896-byte
+record; invalid decode never returns a partial record. Bare target + host Clippy
+pass. C byte layouts compile for macOS and AArch64; 47 constants and all offsets
+match. The existing mandate clean/model-mutant matrix was rerun successfully.
+No guest durability test or kernel/Corvus integration is implied.
+
+UA-P0 allocation audit: bits 11..17 are the caught-note field, despite a previous
+Yip census calling them free. Aux was notified. Recompute at the cleared seal tip;
+add an overlap assertion for the new taint bit. Required lock order is process
+lifecycle before grant-table (seat paths already take that order), never its
+reverse. No kernel taint code changed yet.

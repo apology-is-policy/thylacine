@@ -3,7 +3,7 @@ id: sub-corvus-authority
 type: sub
 title: "Corvus authority policy engine"
 parent: moc-userspace
-code: [usr/lib/corvus-authority/src/lib.rs, usr/lib/corvus-authority/src/tests.rs, usr/lib/corvus-authority/src/abi.rs, kernel/include/thylacine/authority_wire.h, tools/check-authority-abi.py, usr/lib/corvus-authority/Cargo.toml]
+code: [usr/lib/corvus-authority/src/lib.rs, usr/lib/corvus-authority/src/tests.rs, usr/lib/corvus-authority/src/abi.rs, usr/lib/corvus-authority/src/codec.rs, kernel/include/thylacine/authority_wire.h, tools/check-authority-abi.py, usr/lib/corvus-authority/Cargo.toml]
 audit: hard
 guarded-by: [inv-i35]
 validated-by: [spec-mandate, "usr/lib/corvus-authority/src/tests.rs"]
@@ -45,6 +45,10 @@ Runtime must serialize commit and fetch fresh kernel-authenticated inputs.
 policy-level revocation. This does not implement process or resource teardown.
 
 ## Error paths
+Canonical decode rejects bad versions/tags, reserved bytes, impossible lengths,
+trailing bytes and malformed vectors. No partial record escapes. A decoded
+record is untrusted data; policy insertion still needs live source authority.
+
 Unknown actions, malformed/noncanonical selectors, stale generation/revision,
 expiry without trusted UTC, missing support, over-limit graphs and unsupported
 issuance fail closed before mutation. Global revision overflow refuses mutation.
@@ -54,21 +58,22 @@ issuance fail closed before mutation. Global revision overflow refuses mutation.
 16 selectors, 8 supports and depth 16. Tombstones currently consume the physical
 limit: safe but stricter than the design's 4096-live target. No compaction yet.
 Binary ID lookup; iterative depth-memo support walk avoids exponential diamond
-paths. Allocation is bounded logically but not yet reserved fallibly end to end.
+paths. Revocation uses one forward pass through topologically sorted IDs. Codec buffers, traversal scratch and ledger insertion allocations are fallible;
+the complete transaction reservation is still required before authentication.
 
 ## Prosecution
-24 host tests pass, bare-target check passes, host Clippy -D warnings passes.
+35 host tests pass, bare-target check passes, host Clippy -D warnings passes.
 TLC composition model passes 154 states; seven named mutants fail as intended.
 Self-review only, under operator direction. No independent audit claimed.
 
 ## Seams
 Kernel activation inputs must never be decoded from client bytes. Backend view
 containment, durable replay, account/group resolution, transaction binding,
-fallible pre-auth reservations and Corvus integration remain implementation work.
+complete pre-auth transaction reservations and Corvus integration remain implementation work.
 
 ## Caveats
 Exact selector sets only: no guessed path-prefix containment. Clock is an
 explicit trusted input. Revocation completion here is a pure state transition,
-not proof of runtime acknowledgements. No codec/discovery/runtime gate yet.
+not proof of runtime acknowledgements. Canonical MDTM v1 codec is present. No discovery/runtime gate yet.
 
 ## Provenance

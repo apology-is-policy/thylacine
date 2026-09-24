@@ -15,6 +15,7 @@
 extern crate alloc;
 
 pub mod abi;
+pub mod codec;
 
 use alloc::vec::Vec;
 
@@ -84,28 +85,28 @@ impl Kinds {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Actions(u64);
 impl Actions {
-    pub const ENROLL: Self = Self(1 << 0);
-    pub const PROFILE: Self = Self(1 << 1);
-    pub const SUSPEND: Self = Self(1 << 2);
-    pub const RESUME: Self = Self(1 << 3);
-    pub const RETIRE: Self = Self(1 << 4);
-    pub const GROUP_CREATE: Self = Self(1 << 5);
-    pub const GROUP_MEMBERSHIP: Self = Self(1 << 6);
-    pub const GRANT: Self = Self(1 << 7);
-    pub const REVOKE: Self = Self(1 << 8);
-    pub const DELEGATE: Self = Self(1 << 9);
-    pub const CLEARANCE_ENROLL: Self = Self(1 << 10);
-    pub const KEY_RESET: Self = Self(1 << 11);
-    pub const ROTATE_DOMAIN: Self = Self(1 << 12);
-    pub const FLOOR_DEFINE: Self = Self(1 << 13);
-    pub const AUDIT_READ: Self = Self(1 << 14);
-    pub const FS_READ: Self = Self(1 << 32);
-    pub const FS_WRITE: Self = Self(1 << 33);
-    pub const FS_CHOWN: Self = Self(1 << 34);
-    pub const NET_CONNECT: Self = Self(1 << 35);
-    pub const NET_LISTEN: Self = Self(1 << 36);
-    pub const SIGNAL: Self = Self(1 << 37);
-    pub const POST_SERVICE: Self = Self(1 << 38);
+    pub const ENROLL: Self = Self(abi::ACTION_ENROLL);
+    pub const PROFILE: Self = Self(abi::ACTION_PROFILE);
+    pub const SUSPEND: Self = Self(abi::ACTION_SUSPEND);
+    pub const RESUME: Self = Self(abi::ACTION_RESUME);
+    pub const RETIRE: Self = Self(abi::ACTION_RETIRE);
+    pub const GROUP_CREATE: Self = Self(abi::ACTION_GROUP_CREATE);
+    pub const GROUP_MEMBERSHIP: Self = Self(abi::ACTION_GROUP_MEMBERSHIP);
+    pub const GRANT: Self = Self(abi::ACTION_GRANT);
+    pub const REVOKE: Self = Self(abi::ACTION_REVOKE);
+    pub const DELEGATE: Self = Self(abi::ACTION_DELEGATE);
+    pub const CLEARANCE_ENROLL: Self = Self(abi::ACTION_CLEARANCE_ENROLL);
+    pub const KEY_RESET: Self = Self(abi::ACTION_KEY_RESET);
+    pub const ROTATE_DOMAIN: Self = Self(abi::ACTION_ROTATE_DOMAIN);
+    pub const FLOOR_DEFINE: Self = Self(abi::ACTION_FLOOR_DEFINE);
+    pub const AUDIT_READ: Self = Self(abi::ACTION_AUDIT_READ);
+    pub const FS_READ: Self = Self(abi::ACTION_FS_READ);
+    pub const FS_WRITE: Self = Self(abi::ACTION_FS_WRITE);
+    pub const FS_CHOWN: Self = Self(abi::ACTION_FS_CHOWN);
+    pub const NET_CONNECT: Self = Self(abi::ACTION_NET_CONNECT);
+    pub const NET_LISTEN: Self = Self(abi::ACTION_NET_LISTEN);
+    pub const SIGNAL: Self = Self(abi::ACTION_SIGNAL);
+    pub const POST_SERVICE: Self = Self(abi::ACTION_POST_SERVICE);
     const ADMIN_MASK: u64 = (1 << 15) - 1;
     const USE_MASK: u64 = ((1 << 7) - 1) << 32;
     pub fn new(bits: u64) -> Result<Self, Error> {
@@ -410,6 +411,10 @@ impl Ledger {
         }
         self.capacity(&m)?;
         let rev = self.next_revision()?;
+        self.entries.try_reserve(1).map_err(|_| Error::Capacity)?;
+        self.generations
+            .try_reserve(1)
+            .map_err(|_| Error::Capacity)?;
         match self.generations.iter().find(|g| g.0 == m.scope.domain) {
             Some(g) if g.1 != m.domain_generation => return Err(Error::Stale),
             None => self.generations.push((m.scope.domain, m.domain_generation)),
@@ -428,9 +433,24 @@ impl Ledger {
     /// Insertions only reference smaller, existing IDs; replay must use the
     /// same insertion validator, so an edge to self/newer ID is corruption.
     fn support_indices(&self, root: Reference, initial_depth: u8) -> Result<Vec<usize>, Error> {
-        let mut todo = alloc::vec![(root, initial_depth)];
-        let mut depths = alloc::vec![0u8; self.entries.len()];
+        if initial_depth == 0 || initial_depth as usize > MAX_DEPTH {
+            return Err(Error::Depth);
+        }
+        // DFS pending siblings fit depth * fanout. Reserve before traversal;
+        // fallible allocation never leaves a partially published mutation.
+        let mut todo = Vec::new();
+        todo.try_reserve_exact(MAX_DEPTH * MAX_SUPPORTS)
+            .map_err(|_| Error::Capacity)?;
+        todo.push((root, initial_depth));
+        let mut depths = Vec::new();
+        depths
+            .try_reserve_exact(self.entries.len())
+            .map_err(|_| Error::Capacity)?;
+        depths.resize(self.entries.len(), 0u8);
         let mut result = Vec::new();
+        result
+            .try_reserve_exact(self.entries.len())
+            .map_err(|_| Error::Capacity)?;
         while let Some((r, depth)) = todo.pop() {
             if depth as usize > MAX_DEPTH {
                 return Err(Error::Depth);
@@ -567,6 +587,7 @@ impl Ledger {
     pub fn issue(&mut self, a: &Activation, child: Mandate, time: Time) -> Result<(), Error> {
         self.check_issue(a, &child, time)?;
         let rev = self.next_revision()?;
+        self.entries.try_reserve(1).map_err(|_| Error::Capacity)?;
         self.high_id = child.reference.id;
         self.entries.push(Entry {
             mandate: child,
@@ -579,28 +600,48 @@ impl Ledger {
         if roots.is_empty() || roots.len() > MAX_SUPPORTS || !canonical(roots) {
             return Err(Error::Invalid);
         }
-        let mut closure = roots.to_vec();
+        let mut selected = Vec::new();
+        selected
+            .try_reserve_exact(self.entries.len())
+            .map_err(|_| Error::Capacity)?;
+        selected.resize(self.entries.len(), false);
         for &r in roots {
             if self.entry(r)?.mandate.state == State::Revoked {
                 return Err(Error::Revoked);
             }
+            let i = self
+                .entries
+                .binary_search_by_key(&r.id, |e| e.mandate.reference.id)
+                .map_err(|_| Error::Missing)?;
+            selected[i] = true;
         }
-        loop {
-            let before = closure.len();
-            for e in &self.entries {
-                let m = &e.mandate;
-                if m.state != State::Revoked
-                    && m.supports.iter().any(|r| closure.contains(r))
-                    && !closure.contains(&m.reference)
-                {
-                    closure.push(m.reference);
+        let mut closure = Vec::new();
+        closure
+            .try_reserve_exact(self.entries.len())
+            .map_err(|_| Error::Capacity)?;
+        // Insertion order is a topological order: every support ID is lower.
+        // A single forward pass computes transitive descendants without a
+        // quadratic growing-vector membership scan at the 4096-record limit.
+        for (i, e) in self.entries.iter().enumerate() {
+            let m = &e.mandate;
+            if m.state == State::Revoked {
+                continue;
+            }
+            for &support in &m.supports {
+                if support.id >= m.reference.id {
+                    return Err(Error::Cycle);
                 }
+                self.entry(support)?;
+                let parent = self
+                    .entries
+                    .binary_search_by_key(&support.id, |e| e.mandate.reference.id)
+                    .map_err(|_| Error::Missing)?;
+                selected[i] |= selected[parent];
             }
-            if closure.len() == before {
-                break;
+            if selected[i] {
+                closure.push(m.reference);
             }
         }
-        closure.sort_unstable();
         Ok(closure)
     }
     /// Return a public transaction plan; a caller cannot turn this into authority
@@ -675,8 +716,11 @@ impl Ledger {
         }
         if self.entries.iter().any(|e| {
             e.mandate.state != State::Revoked
-                && e.mandate.supports.iter().any(|s| closure.contains(s))
-                && !closure.contains(&e.mandate.reference)
+                && e.mandate
+                    .supports
+                    .iter()
+                    .any(|s| closure.binary_search(s).is_ok())
+                && closure.binary_search(&e.mandate.reference).is_err()
         }) {
             return Err(Error::Conflict);
         }
