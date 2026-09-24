@@ -1,10 +1,10 @@
 # Imperium -- power-user clearance, the legate's command authority
 
-**September 24 specification for review:** `docs/USER-AUTHORITY-DESIGN.md`
+**September 24 specification approved for implementation:** `docs/USER-AUTHORITY-DESIGN.md`
 consolidates administrative commands, typed legate scopes and trusted transaction confirmation.
-The operator endorsed the direction and commissioned the specification. Its
-section 2 identifies exact proposed replacements; detailed ratification and
-implementation are still required. Existing as-built behavior is unchanged.
+The operator approved implementation after reviewing `44d158c3`. Section 2
+identifies the superseded contracts; this is the governing specification for
+new authority work. Existing as-built behavior is unchanged until implemented.
 
 **Integration 2026-09-17:** the operator authorized bringing the required
 Imperium implementation into main for Haul. This imports IM-1 through IM-5

@@ -1,10 +1,10 @@
 # Thylacine Identity, Access & Privilege — Design Input (working)
 
-**September 24 specification for review:** `docs/USER-AUTHORITY-DESIGN.md`
+**September 24 specification approved for implementation:** `docs/USER-AUTHORITY-DESIGN.md`
 consolidates user lifecycle, scoped administration, founding and recovery.
-The operator endorsed the direction and commissioned the specification. Its
-section 2 identifies exact proposed replacements; detailed ratification and
-implementation are still required. Existing as-built behavior is unchanged.
+The operator approved implementation after reviewing `44d158c3`. Section 2
+identifies the superseded contracts; this is the governing specification for
+new authority work. Existing as-built behavior is unchanged until implemented.
 
 **Status:** **BINDING SCRIPTURE** — promoted 2026-05-28 (user-signed-off). All
 design forks F-0..F-7 (§5) are resolved; the five-axis model (§1), the legate /

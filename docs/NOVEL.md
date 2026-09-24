@@ -47,7 +47,7 @@ kernel lift + the RPi4/5 grounding); it composes I-1 + I-5 + I-2/I-25 + I-15 +
 I-29/I-30 + pci-1b, inventing only the one allowance mechanism.
 
 **Angle #12 — unified runtime authority (imperium + mandate + the trusted path).**
-The September 24 specification for review, `docs/USER-AUTHORITY-DESIGN.md`,
+The September 24 approved implementation specification, `docs/USER-AUTHORITY-DESIGN.md`,
 develops this synthesis with explicit use/admin/delegation separation and
 revocation provenance. Its related-work comparison is evidence for mechanisms,
 not proof of priority or novelty; implementation status remains explicit.

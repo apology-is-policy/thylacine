@@ -4,7 +4,7 @@ type: arc
 title: "Scoped user administration and durable delegation through Imperium"
 status: active
 design: [docs/USER-AUTHORITY-DESIGN.md, docs/MANDATE-DESIGN.md, docs/IMPERIUM-DESIGN.md]
-chunks: [chg-2026-09-24-user-authority-spec]
+chunks: [chg-2026-09-24-user-authority-spec, chg-2026-09-24-user-authority-ratification]
 follow-ons: []
 exit-criteria:
   - "[ ] UA-P0: integrate and verify the prior-debug taint gate at elevation redemption (Aux kernel repair)"
@@ -40,3 +40,10 @@ No new heavy host work or resource lease is needed for the specification.
 
 ## Close summary
 (written at status flip to complete)
+
+## Implementation authorization
+
+The operator approved the complete specification after reviewing 44d158c3.
+[[dec-2026-09-24-user-authority-implementation]] records the decision. Work and
+evidence are tracked in `docs/USER-AUTHORITY-STATUS.md`; no implementation gate
+is claimed by approval.

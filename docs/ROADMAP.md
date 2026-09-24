@@ -985,7 +985,7 @@ No new formal specs. Per the 2026-05-23 spec-to-code suspension (`CLAUDE.md`), t
 
 **Imperium/Authority arc** (binding design: `docs/MANDATE-DESIGN.md` + `docs/IMPERIUM-DESIGN.md` + `docs/TRUSTED-PATH.md`; invariant I-35; sequenced AFTER the net stack, BEFORE the container runner):
 
-September 24 implementation specification for review:
+September 24 approved implementation specification:
 `docs/USER-AUTHORITY-DESIGN.md` stages UA-P0/P1 and UA-0..UA-7, tracked by
 `vault/record/arcs/arc-user-authority.md`. It makes precursor integrity, scoped
 administrative eligibility, live revocation and the Imperium userspace driver

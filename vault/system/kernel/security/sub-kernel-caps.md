@@ -21,11 +21,11 @@ updated: 2026-09-21
 
 ## Administrative authority specification
 
-`docs/USER-AUTHORITY-DESIGN.md` is an implementation specification for review,
+`docs/USER-AUTHORITY-DESIGN.md` is approved for implementation,
 tracked by [[arc-user-authority]]. It does not describe implemented Admin scopes,
 mandates or transaction verbs. Existing code remains the as-built contract.
-The operator endorsed the use/admin/delegation distinction and Imperium client
-direction; detailed scope/ABI ratification is still required.
+The operator approved the detailed contract after reviewing `44d158c3`.
+Runtime implementation and exact numeric ABI reservations are still pending.
 
 ## Graphical grant commit
 

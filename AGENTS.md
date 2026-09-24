@@ -159,3 +159,12 @@ landed, what was verified, and any remaining limitations plainly.
   Follow GRAPHICAL-SAK-OWNERSHIP and GRAPHICAL-SAK-PORTABILITY. Research and
   design for Pi 400/Pi 500 and future display backends; do not overfit to QEMU.
 - Continue single-agent and preserve the earlier review/settings overrides.
+
+## User authority implementation (operator-approved, 2026-09-24)
+
+The operator approved implementing `docs/USER-AUTHORITY-DESIGN.md` after review
+of `44d158c3`. Work follows UA-P0/P1 and UA-0..UA-7. Keep source and evidence
+status in `docs/USER-AUTHORITY-STATUS.md`; do not repeat design permission
+questions already resolved by that approval. Numeric ABI reservations and model
+validation precede their consumers. Yip 0117 transfers debug-taint repair to Astra, conditional on the Aux
+round-3-cleared seal SHA. Coordinate all shared kernel surfaces.

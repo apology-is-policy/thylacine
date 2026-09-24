@@ -1,11 +1,10 @@
 # User authority: mandates, administrative legates and Imperium
 
-Status: implementation specification for review, 2026-09-24. The operator
-endorsed separating use, identity administration and delegation, and requested
-this specification with `imperium` as its userspace driver. The detailed
-contracts below are proposed implementation requirements, not an assertion that
-they are implemented or that every new ABI has been ratified. No numeric
-capability bits, syscall IDs or Corvus verb IDs are allocated by this document.
+Status: ACCEPTED for implementation, 2026-09-24. After reviewing specification
+commit `44d158c3`, the operator instructed: "Excellent. Let's implement this."
+This ratifies the detailed contracts below, including the listed prerequisites
+and default choices. No behavior is claimed implemented by design approval.
+Numeric ABI reservations land in the UA-0 ABI commit before their consumers.
 
 Owner: Astra, coordinated with Main and Aux through Yip 0114/0115. Read against
 main `5ed51ff5`; existing UI changes are in Astra's branch. Main's queued Aux
@@ -45,7 +44,7 @@ Imperium distinct-key authentication remains required for each new activation.
 
 ## 2. Relation to current scripture and code
 
-On ratification, this document refines MANDATE-DESIGN §§3, 4, 7–10 and 12:
+This document supersedes the conflicting contracts in MANDATE-DESIGN §§3, 4, 7–10 and 12:
 
 | Earlier formulation | Replacement contract |
 |---|---|
@@ -58,7 +57,7 @@ On ratification, this document refines MANDATE-DESIGN §§3, 4, 7–10 and 12:
 
 I-2/I-6 attenuation, I-22 no ambient superuser, I-25 execution-scope teardown,
 I-27 trusted attention and I-35 mandate revocation remain obligations. The I-35
-prose and its model must be amended at ratification to express these refinements.
+prose and its model are amended at ratification to express these refinements.
 Do not silently reinterpret the existing invariant while implementing.
 
 Verified existing mechanisms: Corvus's live `SYS_SRV_PEER` checks; clearance
@@ -291,20 +290,26 @@ path does not record or reject a previously debugged requester. An equal-cap
 peer can modify an unelevated process, detach, and wait for a legitimate later
 elevation. Source inspection confirms no prior-debug gate in
 `cap_redeem_grant_for_writer` / `proc_become_legate`; no exploit was executed in
-this design review. The existing kernel-side repair is owned by Aux; this arc
-tracks it as a blocking dependency, not a solved premise.
+this design review. Aux transferred this kernel-side repair to Astra on Yip 0117, conditional on
+starting from his round-3-cleared seal tip. This arc owns the blocker; do not
+modify those shared surfaces or import the uncleared Aux tip beforehand.
 
-Before new elevation ships, the kernel must remember debugger control capable
-of modifying an execution context, reject tainted contexts at every authority
-increase, and serialize debug attachment/control with grant redemption. Taint
-must survive detachment, forked address-space derivation and any transition
-that preserves attacker-modified execution; a client cannot clear it by sealing
-itself or changing identity labels. A clean executable-launch reset, if offered,
-needs an explicit proof that no controlled execution state or authority-bearing
-continuation survives; ordinary exec must not be assumed to provide that proof.
-The repair's exact flags and reset rules land in its own design/implementation.
-Tests attach/write/detach before SAK, race attach against redeem, and attempt
-taint laundering through native fork/exec. Refusal leaves no pending usable grant.
+The agreed kernel contract is a monotonic `PROC_FLAG_DEBUG_TAINTED`, set by
+successful attach and successful mem/regs/fpregs write, never reset. Set and
+redeem checks serialize under the process lifecycle lock. Both hostowner and
+clearance/Imperium redemption paths refuse tainted execution; defense-in-depth
+checks cover direct internal legate construction too. Native and Linux fork
+inherit it; exec retains it; fresh spawn does not inherit it because no modified
+address space/continuation is copied. Restrictions such as seal inheritance are
+separate; taint does not make the public authority ledger secret.
+
+First reproduce the stack-rewrite/redeem witness on the real paths before the
+fix. Then prove attach/detach cannot launder history, fork and exec retain it,
+fresh spawn works, attach races redemption safely, and failed writes do not
+incorrectly acquire authority. Separate sabotage legs remove each guard and
+must fail the corresponding regression. No user-callable operation clears taint.
+The operator's single-agent direction governs review staffing; no independent
+holotype review is claimed without one actually being performed.
 
 ### 8.1 Typed administrative legate
 
@@ -691,10 +696,10 @@ boot, SMP, model and interactive gates. Pi 400/500 qualification is measured on
 those platforms; QEMU results do not imply it. No gate is claimed run by this
 specification-only change.
 
-## 17. Ratification and review checklist
+## 17. Ratified implementation choices
 
-The operator has endorsed the authority separation and Imperium driver. The
-following concrete choices are exposed for review, rather than hidden in code:
+The operator approved this specification for implementation on September 24.
+The following choices are binding for the implementation:
 
 - Corvus-scoped administrative operations and zero-operational-bit Admin legates,
   with mandatory taint admission and non-bit debug coverage.
@@ -708,8 +713,8 @@ following concrete choices are exposed for review, rather than hidden in code:
   recovery kept separate from ordinary account administration.
 - The default terms, resource limits and staged scope in sections 6, 10 and 16.
 
-Ratification should amend I-35 and mirror these decisions in the owning design
-and ABI registry before implementation. This document intentionally makes the
+I-35 and owning design pointers carry this ratification. Exact ABI reservations
+remain a separate UA-0 commit before their implementation consumers. This document intentionally makes the
 costs and behavioral changes reviewable without first deploying them. The
 specification does not reserve implementation IDs or claim a full security audit.
 

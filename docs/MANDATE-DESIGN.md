@@ -1,10 +1,10 @@
 # Mandate -- persistent attenuated delegation (the *mandatum*, the censor, the album)
 
-**September 24 specification for review:** `docs/USER-AUTHORITY-DESIGN.md`
+**September 24 specification approved for implementation:** `docs/USER-AUTHORITY-DESIGN.md`
 consolidates administrative envelopes, provenance, live revocation and the Imperium driver.
-The operator endorsed the direction and commissioned the specification. Its
-section 2 identifies exact proposed replacements; detailed ratification and
-implementation are still required. Existing as-built behavior is unchanged.
+The operator approved implementation after reviewing `44d158c3`. Section 2
+identifies the superseded contracts; this is the governing specification for
+new authority work. Existing as-built behavior is unchanged until implemented.
 
 **Status: ACCEPTED design (2026-06-18). Binding scripture.** The delegation tier
 of the legate/imperium authority system: a *censor* persists a bounded, standing
