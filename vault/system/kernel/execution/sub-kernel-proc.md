@@ -10,7 +10,7 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-09-21
+updated: 2026-09-24
 ---
 ## Graphical seat incarnations
 
@@ -18,7 +18,14 @@ The kernel binds one boot-designated hardware service, one normal compositor
 and Corvus to a generation-bearing seat. Manager/service/client spawn roles are
 not inherited. Only service and Corvus may operate the trusted endpoint; the
 normal designation admits broker connections but no trusted operations. Binding
-the service sets NODUMP and NOTRACE before userspace runs. The SERVICE's death
+the service sets NODUMP and NOTRACE before userspace runs. (Since 2026-09-24 those two
+bits are no longer near-synonyms: NOTRACE forbids CONTROL and NODUMP forbids
+EXTRACTION, gating `/proc/<pid>/environ` and `/proc/<pid>/maps` --
+DEBUG-FS-DESIGN 3.2 and [[sub-kernel-devproc]]. `sched` and `imperium` are
+deliberately NOT sealed: they are the kernel's attestation ABOUT a Proc, and because
+`SYS_SET_DUMPABLE(0)` is an ungated one-way self-call, sealing them would have let an
+elevated Proc permanently suppress the kernel's record of its own elevation.) The
+SERVICE's death
 fails the seat and no process inherits its hardware ownership. The compositor's
 death fails the seat only while an episode is in progress; in the normal phase it
 just clears the client slot, so warden can seat a new one. `proc_seat_fail_locked`

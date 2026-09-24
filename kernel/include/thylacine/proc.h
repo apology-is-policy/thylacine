@@ -266,12 +266,23 @@ struct Proc {
     // syscalls). Like every proc_flags bit, none is propagated by rfork
     // (rfork_internal deliberately does not copy proc_flags).
     //
-    // PROC_FLAG_NODUMP   (bit 0) — set by SYS_SET_DUMPABLE(0). When set,
-    //                              future core-dump paths must refuse
-    //                              to dump this Proc. v1.0 has no core
-    //                              dumps; the flag is forward-compat
-    //                              scaffolding consumed by corvus +
-    //                              per-user stratumd at startup.
+    // PROC_FLAG_NODUMP   (bit 0) — set by SYS_SET_DUMPABLE(0). The
+    //                              EXTRACTION seal, and NO LONGER mere
+    //                              forward-compat scaffolding (2026-09-24,
+    //                              DEBUG-FS-DESIGN 3.2): while set,
+    //                              /proc/<pid>/environ and /proc/<pid>/maps
+    //                              are refused to every OTHER Proc,
+    //                              CAP_HOSTOWNER included, via
+    //                              devproc_extract_authorized. Self is
+    //                              exempt. It does NOT gate sched or
+    //                              imperium -- those are the kernel's
+    //                              attestation ABOUT a Proc, not content
+    //                              of it, and an audited Proc must not be
+    //                              able to switch off the audit. Future
+    //                              core-dump paths must also refuse.
+    //                              Set by corvus + per-user stratumd at
+    //                              startup, so the surfaces above are
+    //                              already closed for them.
     // PROC_FLAG_NOTRACE  (bit 1) — set by SYS_SET_TRACEABLE(0). When
     //                              set, future debug-Spoor attach paths
     //                              must refuse to attach to this Proc.

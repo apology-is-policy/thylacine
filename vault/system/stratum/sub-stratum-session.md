@@ -15,7 +15,7 @@ locks: []
 abis: []
 design: ["docs/IDENTITY-DESIGN.md section 9.9", "docs/CORVUS-DESIGN.md"]
 created: 2026-08-02
-updated: 2026-09-23
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -269,6 +269,16 @@ so `halcyond --session`, every kaua-term it spawned, every shell in every
 tile, and `aurora-push` (which parses a user-controlled file) ran with the
 setuid-equivalent: a program in any tile could spawn as any user. Now every
 `Command::new` under login carries a mask: stratumd `T_CAP_CSPRNG_READ`,
+**The compositor is SEALED as of 2026-09-24**, for the same reason the home proxy is
+and by the same bit. `halcyond --session` runs AS the user with the shell's own cap
+mask, and it masks its tile children with `!CAP_SET_IDENTITY`, which spawn intersects
+against its own set -- so every tile program's caps equal the compositor's EXACTLY and
+the I-39 cover rule admits all of them. Unsealed, any tile could have debug-attached the
+compositor and taken its `MAY_POST_SERVICE` (impersonating `/srv/halcyon-<user>`), its
+`SESSION_HANGUP`, and every other tile's surface share. Sealing it does NOT seal the
+tiles: they are SPAWNED, and the seal crosses fork only. The session shell `ut` is
+deliberately left unsealed -- see the census at `CAP_TCB_DIAL` in `caps.h`.
+
 aurora-push `0`, `ut` and `halcyond --session` `SHELL_CAPS` (LOCK_PAGES |
 CSPRNG_READ); the session compositor masks `!T_CAP_SET_IDENTITY` again on
 each tile spawn (the second hop's own guard), and the kernel intersects, so

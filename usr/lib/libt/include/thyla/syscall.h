@@ -310,7 +310,10 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 #define T_SPAWN_PERM_SEAT_CLIENT       (1u << 8)
 // T_SPAWN_PERM_SEAL ((U) F1/F5): seal the child before its first instruction --
 // PROC_FLAG_NOTRACE (the /proc debug surface refuses a SAME-principal attach) and
-// PROC_FLAG_NODUMP (no core dump), the pair a seat service carries. The case that
+// PROC_FLAG_NODUMP, which since 2026-09-24 is the EXTRACTION seal rather than a
+// future no-core-dump mark: it refuses /proc/<pid>/environ and /proc/<pid>/maps to
+// every other Proc, CAP_HOSTOWNER included (sched and imperium stay readable --
+// kernel attestation, not image content). The pair a seat service carries. The case that
 // matters is a service spawned as the user it serves. The kernel orders the stamp
 // ahead of the child's identity, so the window before it cannot admit the
 // attacker. Ungated: SYS_SET_TRACEABLE(0) and SYS_SET_DUMPABLE(0) are already

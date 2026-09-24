@@ -219,8 +219,14 @@ enum {
     // SYS_SET_DUMPABLE(dumpable) → 0/-1
     //   x0 = dumpable (u32; 0 = disable core dump, 1 = enable [default])
     // One-way: setting to 0 sets PROC_FLAG_NODUMP. Setting to 1 from a
-    // Proc that already has PROC_FLAG_NODUMP set is REFUSED (-1). v1.0
-    // has no core dumps; the flag is forward-compat scaffolding.
+    // Proc that already has PROC_FLAG_NODUMP set is REFUSED (-1).
+    // NOT forward-compat scaffolding any more (2026-09-24): the flag is the
+    // EXTRACTION seal, and while set /proc/<pid>/environ and
+    // /proc/<pid>/maps are refused to every other Proc including a
+    // CAP_HOSTOWNER holder (DEBUG-FS-DESIGN 3.2). Self still reads its own.
+    // sched and imperium are NOT sealed -- they are kernel attestation, not
+    // image content. This call is UNGATED and IRREVERSIBLE, so a caller is
+    // choosing permanent opacity on those two files, not only future dumps.
     SYS_SET_DUMPABLE = 17,   // arg: dumpable (x0)
 
     // SYS_SET_TRACEABLE(traceable) → 0/-1

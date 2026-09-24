@@ -89,6 +89,7 @@ bool devproc_kill_authorized(const struct Proc *caller, const struct Proc *targe
 bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *target);
 bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *target);
 bool devproc_owner_or_hostowner(const struct Proc *caller, const struct Proc *target);
+bool devproc_extract_authorized(const struct Proc *caller, const struct Proc *target);
 size_t devproc_sched_read_gated(const struct Proc *caller, struct Proc *target,
                                 char *buf, size_t cap, bool *denied);
 size_t devproc_imperium_read_gated(const struct Proc *caller, struct Proc *target,
@@ -1193,6 +1194,185 @@ void test_devproc_debug_cap_cover_attach(void) {
     TEST_EXPECT_EQ(cover_own, (void *)ctl, "control: the covering attach claimed the slot");
     TEST_EXPECT_EQ(bare_ret, (long)-1, "an uncovered same-principal attach is refused");
     TEST_EXPECT_EQ(bare_own, (void *)NULL, "the refused attach claimed no slot");
+}
+
+// The DUMP SEAL on the disclosure axis (DEBUG-FS-DESIGN 3.2, operator-delegated
+// 2026-09-24). PROC_FLAG_NODUMP means "cannot be EXTRACTED FROM", so it gates the
+// owner-disclosure surfaces (environ / sched / imperium) the way PROC_FLAG_NOTRACE
+// gates control -- Linux's split, where dumpability and not the ptrace flag is what
+// governs /proc/<pid> reads. RED before the fix: devproc_owner_or_hostowner weighed
+// neither seal bit, so a SEALED Proc's environment was readable by any
+// same-principal peer -- the exact actor SPAWN_PERM_SEAL exists to shut out.
+//
+// Leg ORDER is load-bearing: both CONTROLS run while the target is still unsealed,
+// so neither refusal below can be satisfied by a caller that simply cannot pass on
+// any axis. The seal is set ONCE and never cleared, because it is a one-way bit and
+// a test that clears it would be asserting against a state the kernel cannot reach.
+void test_devproc_dump_seal_predicate(void) {
+    struct Proc *caller = proc_alloc();
+    struct Proc *target = proc_alloc();
+    TEST_ASSERT(caller && target, "proc_alloc caller + target");
+
+    target->principal_id = 0x5EA1Eu;
+    target->state        = PROC_STATE_ALIVE;
+    caller->principal_id = 0x5EA1Eu;              // the OWNER axis
+    caller->caps         = 0;
+    target->caps         = 0;
+
+    // The premise every refusal below rests on, asserted before any mutation so
+    // the leg cannot be vacuous.
+    TEST_ASSERT((target->proc_flags & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE)) == 0,
+                "premise: the target starts with NEITHER seal bit");
+
+    // 1. CONTROL, owner axis: an unsealed same-principal target discloses.
+    TEST_ASSERT(devproc_extract_authorized(caller, target),
+                "control: an unsealed same-principal target discloses");
+
+    // 2. CONTROL, cap axis: an unsealed CROSS-principal target discloses to
+    //    CAP_HOSTOWNER. Runs while unsealed for the reason in the header.
+    caller->principal_id = 0xD1FFu;               // no longer the owner
+    caller->caps         = CAP_HOSTOWNER;
+    TEST_ASSERT(devproc_extract_authorized(caller, target),
+                "control: CAP_HOSTOWNER discloses an unsealed cross-principal target");
+
+    // 3. THE MIRROR LEG (audit P3-7), on its OWN target. NOTRACE alone must NOT
+    //    refuse the EXTRACTION gate. Without this, a predicate written
+    //    `& (NODUMP | NOTRACE)` passes every other leg here while denying the
+    //    disclosure surfaces of every Proc that called only SYS_SET_TRACEABLE(0) --
+    //    the two setters are independent ungated self-calls, so that is reachable. A
+    //    symmetric check cannot catch a symmetric fault: this pins the NOTRACE side.
+    //
+    //    A SEPARATE Proc, because the bits are one-way in production and this test
+    //    must not leave NOTRACE on the shared target: the first cut set it here and
+    //    silently invalidated the premise of the debug-axis leg further down, which is
+    //    the shared-fixture-generates-its-own-bugs trap. Each leg now states the exact
+    //    seal state it needs.
+    struct Proc *notrace_only = proc_alloc();
+    TEST_ASSERT(notrace_only != NULL, "proc_alloc the NOTRACE-only target");
+    notrace_only->principal_id = caller->principal_id;
+    notrace_only->state        = PROC_STATE_ALIVE;
+    notrace_only->caps         = 0;
+    notrace_only->proc_flags  |= PROC_FLAG_NOTRACE;
+    TEST_ASSERT((notrace_only->proc_flags & PROC_FLAG_NODUMP) == 0,
+                "premise: the mirror target has NOTRACE and NOT NODUMP");
+    bool mirror_ok = devproc_extract_authorized(caller, notrace_only);
+    notrace_only->state = PROC_STATE_ZOMBIE;
+    proc_free(notrace_only);
+    TEST_ASSERT(mirror_ok,
+                "NOTRACE alone does NOT refuse extraction: it is the CONTROL bit");
+
+    // 4. THE SEAL IS ABSOLUTE -- CAP_HOSTOWNER does not buy through it, exactly as
+    //    the NOTRACE seam refuses debug control to every cap holder. One variable
+    //    away from leg 2.
+    target->proc_flags |= PROC_FLAG_NODUMP;
+    TEST_ASSERT(!devproc_extract_authorized(caller, target),
+                "the dump seal refuses CAP_HOSTOWNER");
+
+    // 5. THE REGRESSION: it refuses the same-principal PEER, the actor the seal
+    //    exists for. One variable away from leg 1.
+    caller->principal_id = 0x5EA1Eu;              // the owner again
+    caller->caps         = 0;
+    TEST_ASSERT(!devproc_extract_authorized(caller, target),
+                "the dump seal refuses a same-principal peer's extraction");
+
+    // 6. SELF is exempt -- a Proc reads its own environment by its own pid (devproc
+    //    has no `self` entry), and sealing it against itself protects nobody.
+    TEST_ASSERT(devproc_extract_authorized(target, target),
+                "a sealed Proc still extracts from ITSELF");
+
+    // 7. NODUMP alone is not a debug refusal, so the two bits cannot have been
+    //    conflated in the other direction either. `target` carries NODUMP and has
+    //    never carried NOTRACE -- asserted, because this leg was silently vacuous
+    //    when an earlier leg set NOTRACE on it and the debug gate then refused for
+    //    the RIGHT reason while this assertion read as a failure.
+    TEST_ASSERT((target->proc_flags & PROC_FLAG_NOTRACE) == 0,
+                "premise: the target carries NODUMP and NOT NOTRACE");
+    TEST_ASSERT(devproc_debug_authorized(target, target),
+                "NODUMP does not refuse the NOTRACE-gated debug axis");
+
+    caller->state = PROC_STATE_ZOMBIE;
+    target->state = PROC_STATE_ZOMBIE;
+    proc_free(caller);
+    proc_free(target);
+}
+
+// The same rule END TO END through a real gated reader rather than the predicate --
+// a SEPARATE test because TEST_ASSERT returns on the first failure, so a predicate
+// regression must not be able to hide the surface's. devproc_imperium_read_gated is
+// the narrowest of the three (it consults this gate and then formats), so the gate
+// is the only thing that can deny here.
+void test_devproc_dump_seal_disclosure(void) {
+    struct Proc *target = proc_alloc();
+    TEST_ASSERT(target != NULL, "alloc the target");
+    struct Thread *th = current_thread();
+    TEST_ASSERT(th && th->proc, "test thread has a proc");
+    target->principal_id = th->proc->principal_id;   // same principal as the reader
+    target->state        = PROC_STATE_ALIVE;
+    target->caps         = 0;
+    proc_test_link(target);
+
+    TEST_ASSERT((target->proc_flags & PROC_FLAG_NODUMP) == 0,
+                "premise: the target starts unsealed");
+
+    // maps, through the REAL devproc read path. An allowed read is >= 0 (it may be 0
+    // bytes -- a synthetic Proc has no VMAs to format, and that is fine); a DENIED
+    // read is -1. The seal is the only variable between the two calls, and -1 vs >= 0
+    // is the discrimination, so the leg does not depend on the formatter producing
+    // anything.
+    char buf[256];
+    struct Spoor *f = open_pidfile_for(target->pid, "maps", 0);   // OREAD
+    long open_ret = f ? devproc.read(f, buf, (long)sizeof(buf), 0) : -2;
+
+    target->proc_flags |= PROC_FLAG_NODUMP;
+    long sealed_ret = f ? devproc.read(f, buf, (long)sizeof(buf), 0) : -2;
+
+    if (f) spoor_clunk(f);
+    proc_test_unlink(target);
+    target->state = PROC_STATE_ZOMBIE;
+    proc_free(target);
+
+    TEST_ASSERT(f != NULL, "open /proc/<pid>/maps");
+    TEST_ASSERT(open_ret >= 0, "control: an unsealed maps read is not denied");
+    TEST_EXPECT_EQ(sealed_ret, (long)-1,
+                   "the dump seal denies the maps read end to end");
+}
+
+// The seal's SCOPE, pinned so the P2-3 correction cannot silently regress: the dump
+// seal covers EXTRACTION surfaces and must NOT cover the kernel's ATTESTATION about a
+// Proc. `imperium` is the section-4 unforgeable kernel flag and `sched` is scheduler
+// telemetry; neither is a piece of the image, and sealing them would let any Proc in a
+// live propagating legate scope permanently suppress the kernel's record of its own
+// elevation, because SYS_SET_DUMPABLE(0) is an ungated one-way self-call. The first cut
+// of the seal did exactly that.
+void test_devproc_dump_seal_scope(void) {
+    struct Proc *caller = proc_alloc();
+    struct Proc *target = proc_alloc();
+    TEST_ASSERT(caller && target, "proc_alloc caller + target");
+    target->principal_id = 0x5EA1Eu;
+    target->state        = PROC_STATE_ALIVE;
+    caller->principal_id = 0x5EA1Eu;
+    caller->caps         = 0;
+    target->caps         = 0;
+
+    TEST_ASSERT((target->proc_flags & PROC_FLAG_NODUMP) == 0,
+                "premise: the target starts unsealed");
+    // Both gates agree while unsealed -- so the divergence below is the seal's doing
+    // and not a difference the two predicates always had.
+    TEST_ASSERT(devproc_owner_or_hostowner(caller, target) &&
+                devproc_extract_authorized(caller, target),
+                "control: unsealed, the authority gate and the extraction gate agree");
+
+    target->proc_flags |= PROC_FLAG_NODUMP;
+    TEST_ASSERT(devproc_owner_or_hostowner(caller, target),
+                "the ATTESTATION gate (imperium/sched) is NOT sealed -- an audited "
+                "Proc cannot switch off the kernel's record of its own elevation");
+    TEST_ASSERT(!devproc_extract_authorized(caller, target),
+                "the EXTRACTION gate (environ/maps) IS sealed");
+
+    caller->state = PROC_STATE_ZOMBIE;
+    target->state = PROC_STATE_ZOMBIE;
+    proc_free(caller);
+    proc_free(target);
 }
 
 // 8a-1b: the attach/detach/close slot lifecycle (the model's Attach / DetachReq

@@ -294,6 +294,71 @@ stay green); removing the `9p_attach` fail-closed guard reds `cape_attach` alone
 (both cover tests stay green); canonical is **1659/1659 PASS**, 0 FAIL lines, no
 source newer than the built ELF.
 
+## The seal completed — A2: the dump seal on the disclosure axis — 2026-09-24
+
+The operator delegated all four open seal decisions ("go with your gut"). A2 is the
+second of them and the first to land: **the seal's contract is "cannot be EXTRACTED
+FROM", and `PROC_FLAG_NODUMP` is the bit that enforces it.**
+
+The seal's own construction always implied this — `SPAWN_PERM_SEAL` stamps `NODUMP`
+alongside `NOTRACE`, and a dump bit is a disclosure bit — so a sealed Proc whose
+`environ` any same-principal peer could read was an inconsistency, not a boundary.
+The precise gate is `NODUMP` rather than the `NOTRACE` seam, which is Linux's split:
+there, dumpability and not the ptrace flag governs `/proc/<pid>` reads, because
+refusing to be dumped and refusing to be driven are different promises. Reading a
+Proc's environment is extracting part of its image. A side effect worth naming: the
+bit had no runtime reader at all before this beyond the re-enable refusal in its own
+setter, so it protected nothing despite v1.0 having no core dumps.
+
+**The audit round changed the SET, and that correction is the substance of this
+chunk.** Dirty close: 0 P0 / 1 P1 / 5 P2 / 2 P3, Opus fallback (Fable out of credits
+twice that day), five of eight findings being claims the code or tree contradicted.
+The first cut enforced the seal inside `devproc_owner_or_hostowner`, which was wrong
+in both directions: it MISSED `maps` (mode 0444, reached with no gate, so a sealed
+Proc's whole VMA table stayed world-readable including which ranges are `SHARED_IN`
+another Proc's memory — while the draft cited a precedent that *names* `maps`), and it
+CAPTURED `sched` and `imperium`, which are the kernel's attestation *about* a Proc
+rather than content *of* it. The second was actively harmful: `SYS_SET_DUMPABLE(0)` is
+an ungated one-way self-call, so any Proc in a live propagating legate scope could have
+permanently suppressed the kernel's record of its own elevation, with no capability
+required. I-25's enforcement never depended on that file; its observability does.
+
+**The rule that survives: the seal follows the IMAGE, not the LEDGER.**
+`devproc_extract_authorized` (owner-or-hostowner AND not sealed) gates `environ`;
+`maps` is gated on the seal ALONE, keeping its ambient 0444 posture for an unsealed
+Proc; `devproc_owner_or_hostowner` keeps its old meaning with no seal and gates `sched`
+and `imperium`. Self is exempt and exempt first. Otherwise absolute, `CAP_HOSTOWNER`
+included — a deliberate divergence from Linux, which lets `CAP_SYS_PTRACE` through.
+`devproc.dump_seal_scope` pins the split so it cannot silently regress.
+
+The round's P1 was a memory-ordering defect in the same four lines: the seal was read
+BEFORE the principal comparison, the target's `principal_id` was read plainly, and the
+justifying comment asserted an ACQUIRE/RELEASE pairing that does not exist. The order
+now falls out of the composition — the authority predicate ACQUIRE-loads `principal_id`
+before the seal is tested, which is the obligation `proc_apply_identity`'s RELEASE
+exists to serve and which the tree states in three places.
+
+Also corrected here: a third copy of the claim audit F10 struck, at the imperium
+reader's header — it said the in-kernel runner passes the gate because kproc holds
+`CAP_HOSTOWNER` "by `CAP_ALL`", which `CAP_ALL` excludes. It passes on the OWNER
+axis.
+
+RED-first in two sabotage legs so each half of the new predicate is proven
+load-bearing separately: removing the `NODUMP` refusal reds
+`devproc.dump_seal_predicate` and `devproc.dump_seal_disclosure` and nothing else;
+removing the self-exemption reds ONLY the self leg. Canonical **1661/1661 PASS**, 0
+FAIL lines, no source newer than the built ELF. The canonical green is also what
+proves the ORDERING — with self-exempt after the seal, `/proc/self` breaks.
+
+**A re-audit is owed** by the dirty-close rule (P1+P2 = 6), scoped at the fixes.
+
+**Still owed on this arc:** A1 (the seal crosses `fork`) is DECIDED but NOT landed,
+because its verification is genuinely end-to-end — the fork shape cannot be
+synthesized in-kernel and the only available parent is the runner, which must never
+be sealed since the bits are one-way. It needs a userspace probe first. B (seal the
+compositor) is cleared by both peers and pending a Halcyon-image run. C (the debug
+taint at the redeem) is decided and unstarted.
+
 ## Haul completion integration — 2026-09-17
 
 The operator authorized bringing Haul's required Imperium dependencies into

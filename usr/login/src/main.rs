@@ -1386,7 +1386,22 @@ pub extern "C" fn rs_main() -> i64 {
             // (login holds the bit from joey, as it grants the home proxy) that
             // lets the session compositor post its per-user inline-media service
             // /srv/halcyon-<user>. A fork-grantable perm, never an elevation.
-            .perm(T_SPAWN_PERM_SESSION_HANGUP | T_SPAWN_PERM_MAY_POST_SERVICE)
+            // SEAL: and because of that perm, not despite it. A perm is authority
+            // the I-39 cover rule CANNOT SEE -- cover compares the caps word, and
+            // these bits live in proc_flags. halcyond runs AS the user with the
+            // SHELL's exact cap mask, and it masks its own tile children with
+            // !CAP_SET_IDENTITY, which spawn intersects against the parent's caps
+            // -- so a tile program's caps equal the compositor's EXACTLY and cover
+            // admits it. Unsealed, any tile could debug-attach halcyond and take
+            // the posting bit granted just above (impersonating
+            // /srv/halcyon-<user>), the hangup, and every other tile's surface
+            // share. This is the checklist the capability model already states:
+            // granting a bit to a process that shares a principal with an attacker
+            // grants it to the attacker unless something stops the attacker driving
+            // that process, so the bit and the seal are ONE step, not two. The home
+            // proxy above takes it for the same reason with CAP_TCB_DIAL.
+            .perm(T_SPAWN_PERM_SESSION_HANGUP | T_SPAWN_PERM_MAY_POST_SERVICE
+                  | T_SPAWN_PERM_SEAL)
             .stdin(Stdio::Inherit)
             .stdout(Stdio::Inherit)
             .stderr(Stdio::Inherit);

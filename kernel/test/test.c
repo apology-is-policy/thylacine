@@ -694,6 +694,9 @@ void test_devproc_ctl_suspend_resume_dispatch(void);   // prowl-4: job-control s
 void test_devproc_debug_authorized_predicate(void);
 void test_devproc_debug_cap_cover_predicate(void);
 void test_devproc_debug_cap_cover_attach(void);
+void test_devproc_dump_seal_predicate(void);
+void test_devproc_dump_seal_disclosure(void);
+void test_devproc_dump_seal_scope(void);
 void test_devproc_debug_attach_detach_lifecycle(void);
 void test_devproc_debug_exitkill_terminates_on_close(void);
 void test_devproc_debug_stop_start_resume(void);
@@ -2573,6 +2576,9 @@ struct test_case g_tests[] = {
     { "devproc.debug_authorized_predicate",   test_devproc_debug_authorized_predicate,   false, NULL },
     { "devproc.debug_cap_cover_predicate",     test_devproc_debug_cap_cover_predicate,     false, NULL },
     { "devproc.debug_cap_cover_attach",        test_devproc_debug_cap_cover_attach,        false, NULL },
+    { "devproc.dump_seal_predicate",           test_devproc_dump_seal_predicate,           false, NULL },
+    { "devproc.dump_seal_disclosure",          test_devproc_dump_seal_disclosure,          false, NULL },
+    { "devproc.dump_seal_scope",               test_devproc_dump_seal_scope,               false, NULL },
     { "devproc.debug_attach_detach_lifecycle", test_devproc_debug_attach_detach_lifecycle, false, NULL },
     { "devproc.debug_exitkill_terminates_on_close", test_devproc_debug_exitkill_terminates_on_close, false, NULL },
     { "devproc.debug_stop_start_resume",       test_devproc_debug_stop_start_resume,       false, NULL },

@@ -40,7 +40,23 @@ are unchanged, so this is an additive mirror update, not an ABI break. The
 authoritative partition (fork-grantable vs elevation-only) lives in [[abi-caps]];
 the gate it feeds is in [[sub-kernel-devsrv]].
 
-**`T_SPAWN_PERM_SEAL` ((U) F1, 2026-09-23; renamed from `T_SPAWN_PERM_NOTRACE` and widened to stamp NODUMP as well by F5, 2026-09-24, before the bit was ever pushed).** Bit 9 joins the
+**`T_SPAWN_PERM_SEAL` ((U) F1, 2026-09-23; renamed from `T_SPAWN_PERM_NOTRACE` and widened to stamp NODUMP as well by F5, 2026-09-24, before the bit was ever pushed; its NODUMP half acquired REAL EFFECT 2026-09-24).**
+
+**What the bit now means for a caller, which is an ABI-doc change and not only an
+implementation one.** `NODUMP` stopped being forward-compat scaffolding: while set, it
+refuses `/proc/<pid>/environ` and `/proc/<pid>/maps` to every OTHER Proc, `CAP_HOSTOWNER`
+included (DEBUG-FS-DESIGN 3.2). `sched` and `imperium` stay readable -- kernel
+attestation, not image content. So `SYS_SET_DUMPABLE(0)`, which is UNGATED and one-way,
+is now a caller choosing permanent opacity of its environment and memory map to the whole
+machine rather than only arming a future dump refusal, and TWO callers
+(`usr/corvus/src/main.rs`, `usr/login/src/main.rs`) were already invoking it as hygiene
+on the strength of the older wording. All four copies of that wording -- this header,
+`proc.h`, libt and libthyla-rs -- were corrected in the same commit; the libthyla-rs
+`t_set_dumpable` doc was the sharpest, having called a live irreversible switch a no-op.
+Note also that `syscall.h`'s reason SEAL is the one UNGATED perm ("strictly REDUCES what
+may be done to the child") never weighed that it now also reduces what a THIRD PARTY may
+learn; that argument still holds for the child but is no longer the whole story.
+ Bit 9 joins the
 `T_SPAWN_PERM_*` mirror set in the same two userspace copies, alongside the
 kernel's `SPAWN_PERM_SEAL` in `kernel/include/thylacine/syscall.h`, and is
 added to `SPAWN_PERM_ALL` -- which is the part that matters for the mirrors,

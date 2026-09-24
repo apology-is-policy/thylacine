@@ -87,6 +87,76 @@ direction and deliberately so -- the caller is read first and caps on a live Pro
 only grow, so the race can manufacture a false REFUSAL but never a false
 admission.
 
+**The EXTRACTION surfaces now honour the DUMP seal (2026-09-24, DEBUG-FS-DESIGN 3.2).**
+`devproc_extract_authorized` is owner-or-hostowner AND not dump-sealed, and it gates
+`environ`; `maps` is gated on the SEAL ALONE (keeping its ambient 0444 posture for an
+unsealed Proc); and `devproc_owner_or_hostowner` keeps its old meaning with NO seal,
+gating `sched` and `imperium`.
+
+**That set is a correction, and the correction is the part worth reading.** The first cut
+put the seal inside `devproc_owner_or_hostowner`, which was wrong in both directions. It
+MISSED `maps` -- mode 0444, reached with no gate -- so a sealed Proc's whole VMA table
+stayed world-readable including which ranges are `SHARED_IN` another Proc's memory,
+while the draft cited a precedent that names `maps`. And it CAPTURED `imperium` and
+`sched`, which are the kernel's attestation ABOUT a Proc rather than content OF it;
+because `SYS_SET_DUMPABLE(0)` is an ungated one-way self-call, that let any Proc in a
+live propagating legate scope permanently suppress the kernel's record of its own
+elevation. I-25's enforcement never depended on that file; its observability does. The
+rule that survives: **the seal follows the image, not the ledger.** The two seal bits are NOT synonyms and
+this is the split that makes them distinct: `NOTRACE` forbids CONTROL and is read by
+`devproc_debug_authorized`; `NODUMP` forbids EXTRACTION and is read here. That is
+Linux's division, where dumpability rather than the ptrace flag governs
+`/proc/<pid>` reads, because refusing to be dumped and refusing to be driven are
+different promises. Reading a Proc's environment IS extracting part of its image.
+Before this the bit had NO runtime reader but the re-enable refusal in its own
+setter, so a SEALED Proc's environment was readable by any same-principal peer --
+the exact actor `SPAWN_PERM_SEAL` exists to shut out.
+
+Two properties, both deliberate and both separately guarded. **Self is exempt, and
+exempt FIRST** -- a Proc reads its own `environ` through this same gate, so sealing
+it against itself would break `/proc/self` and protect nobody; the ORDER is what
+makes that true, and the canonical suite green is what proves the order (with the
+two swapped, a sealed Proc cannot read itself). **Otherwise ABSOLUTE** --
+`CAP_HOSTOWNER` does not buy through it, exactly as the `NOTRACE` seam refuses
+control to every cap holder; a confidentiality seal the host can peek through is not
+a seal, and the seat bind's own words are "physical keys/private pixels must never
+be exposed through a debug attach or core dump", where keys are extracted by
+READING. Accepted cost: a sealed Proc yields no `sched`/`imperium` diagnostics to
+anyone but itself.
+
+**The composition order inside `devproc_extract_authorized` is load-bearing**, and
+getting it wrong was the round's P1. The authority predicate ACQUIRE-loads the target's
+`principal_id` BEFORE the seal is tested, because a spawn stamps the seal and THEN
+publishes the identity while `rfork` has already published the child -- so testing the
+seal first admits a reader whose `proc_flags` load lands pre-stamp and whose
+`principal_id` load lands post-identity, disclosing a Proc that is already sealed. This
+is the obligation `proc_apply_identity`'s RELEASE exists to serve and that
+[[sub-kernel-caps]] records as a three-item set: grant the bit, seal the holder, and
+order the two. The first cut applied two of the three, and its justifying comment
+asserted an ACQUIRE/RELEASE pairing that did not exist (an acquire load of `proc_flags`
+pairs with a release store TO `proc_flags`, not to the identity). The target's
+`principal_id` is now ACQUIRE-loaded rather than read plainly, which it was even before
+the seal existed.
+
+Guards: `devproc.dump_seal_predicate` (seven legs -- both controls run while UNSEALED so
+neither refusal can be satisfied by a caller that could not pass anyway; then a NOTRACE-
+ONLY leg asserting the extraction gate still ALLOWS, which is the mirror the first cut
+lacked and without which a predicate written `& (NODUMP | NOTRACE)` passed every leg;
+then the absolute-vs-hostowner refusal, the same-principal peer refusal, the self
+exemption, and NODUMP-is-not-a-debug-refusal), `devproc.dump_seal_scope` (pins the SET:
+a sealed target is still allowed through the ATTESTATION gate and refused by the
+EXTRACTION one, so the correction cannot silently regress), and
+`devproc.dump_seal_disclosure` (end to end through the real read path on `maps`, a
+SEPARATE test so a predicate regression cannot hide the surface's).
+
+**What 3.2 does not close:** the disclosure gate's owner axis still carries no
+capability-cover condition, so an UNSEALED elevated target stays readable by an
+unelevated same-principal peer -- its `imperium` file even enumerates the caps it
+holds. Tracked as its own question rather than folded in, because cover exists to
+stop amplification through CONTROL and a read amplifies nothing, so the case for it
+here rests on secrecy and its cost (peers lose diagnostics on each other) has not
+been weighed.
+
 **Three things cover does NOT close**, recorded here because each looks like an
 oversight to a reader who expects a total rule (DEBUG-FS-DESIGN 3.1 carries the
 full argument). (1) It is POINT-IN-TIME: nothing records that a Proc *was*
@@ -94,7 +164,9 @@ debugged, so an equal-authority peer may attach before a target redeems a grant
 and inject into the pre-elevation window -- Linux's other half, a monotonic debug
 taint refusing the privilege gain, is not implemented. (2) It governs CONTROL,
 not DISCLOSURE: `environ`, `sched` and `imperium` still gate on
-`devproc_owner_or_hostowner`, which weighs neither caps nor the seam. (3) It is a
+`devproc_owner_or_hostowner`, which weighs no CAPS (it does, since 2026-09-24, weigh
+the dump seal on the extraction surfaces -- see the section above; `sched` and
+`imperium` deliberately remain unsealed). (3) It is a
 subset test over the `caps` word ALONE, so `proc_flags` spawn perms, the
 [[inv-i34]] allowance and the handle table are invisible to it -- see
 [[sub-kernel-caps]] for the checklist that follows. All three are tracked, none

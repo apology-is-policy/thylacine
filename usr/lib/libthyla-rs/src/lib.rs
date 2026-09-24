@@ -658,8 +658,11 @@ pub const T_SPAWN_PERM_SEAT_SERVICE: u64 = 1 << 7;
 pub const T_SPAWN_PERM_SEAT_CLIENT: u64 = 1 << 8;
 // T_SPAWN_PERM_SEAL ((U) F1/F5): seal the child before its first instruction --
 // PROC_FLAG_NOTRACE (the /proc debug surface refuses an attach from the SAME
-// principal) and PROC_FLAG_NODUMP (no core dump), the pair a seat service
-// carries. The case that matters is a service spawned as the user it serves
+// principal) and PROC_FLAG_NODUMP, which since 2026-09-24 is the EXTRACTION seal
+// and not merely a future no-core-dump mark: it refuses /proc/<pid>/environ and
+// /proc/<pid>/maps to every other Proc, CAP_HOSTOWNER included (sched and
+// imperium stay readable -- kernel attestation, not image content). The pair a
+// seat service carries. The case that matters is a service spawned as the user it serves
 // (login's home proxy). The kernel orders the stamp ahead of the child's identity
 // so the window before it cannot admit the attacker. Ungated: a Proc may already
 // seal itself with SYS_SET_TRACEABLE(0) + SYS_SET_DUMPABLE(0), so this only moves
@@ -1971,9 +1974,20 @@ pub unsafe fn t_mlockall(flags: u64) -> i64 {
 // (kernel returns -1). Returns 0 on first successful set-to-0; -1 on
 // any other input or attempted re-enable.
 //
-// Core dumps don't exist at v1.0 — the flag is forward-compat
-// scaffolding. When core dumps land, the kernel-side dump path must
-// check this flag and refuse to dump a Proc with NODUMP set.
+// THIS IS NOT ONLY ABOUT CORE DUMPS, and it is not forward-compat
+// scaffolding (changed 2026-09-24, DEBUG-FS-DESIGN 3.2). The flag is the
+// EXTRACTION seal: while set, /proc/<pid>/environ and /proc/<pid>/maps are
+// refused to every OTHER Proc, a CAP_HOSTOWNER holder included. The calling
+// Proc still reads its own. /proc/<pid>/sched and /proc/<pid>/imperium are
+// NOT sealed, deliberately -- they are the kernel's attestation ABOUT a Proc
+// rather than content of it, and an audited Proc must not be able to switch
+// off the audit.
+//
+// So calling this is choosing PERMANENT opacity of your environment and your
+// memory map to the rest of the machine, irreversibly and with no capability
+// required. That is usually what a hardening sequence wants; make sure it is
+// what YOU want. Core dumps do not exist at v1.0, and when they land the
+// dump path must refuse a Proc with NODUMP set as well.
 #[inline(always)]
 pub unsafe fn t_set_dumpable(dumpable: u64) -> i64 {
     let mut x0: i64 = dumpable as i64;

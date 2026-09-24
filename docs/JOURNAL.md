@@ -22,6 +22,143 @@ needed the operator.
 
 
 ---
+## 2026-09-24, evening (aux, Opus 5 1M, effort max) -- three checks caught three things the step before them was confident about
+
+**The round was a dirty close on work I had already verified and committed**: 0 P0 /
+1 P1 / 5 P2 / 2 P3, six P1+P2. Opus fallback again -- Fable died of credit exhaustion a
+second time the same day. Five of its eight findings were claims the code or the tree
+contradicted, which is the same failure mode the previous round found three of, one
+round earlier, in the same author's work. Writing a lesson down is evidently not the
+same as learning it.
+
+**It confirmed my self-audit's finding and found a third defect in the same four lines
+that I had missed.** I had caught the inverted read order and the plain load of
+`principal_id`. What I missed: my own justifying comment claimed "ACQUIRE pairs with the
+spawn thunk's RELEASE publication of the identity", and that pairing does not exist --
+an acquire load of `proc_flags` pairs with a release store TO `proc_flags`, not to a
+different location. I wrote a comment asserting a memory-ordering property the code did
+not have, which is exactly the class of error I had spent the morning finding in other
+people's comments. The fix makes the order fall out of the COMPOSITION rather than from
+remembering to write two loads in sequence: the authority predicate ACQUIRE-loads the
+identity, and the extraction gate tests the seal after it.
+
+**The finding that changed the design: the seal follows the IMAGE, not the LEDGER.** My
+contract ("cannot be extracted from") was right and I had applied it to the wrong set.
+It missed `maps` -- ungated at 0444, so a sealed Proc's entire VMA table stayed readable
+by anyone, including which ranges are another Proc's memory mapped cross-Proc -- while
+the precedent I had cited in the same breath *names* `maps`. And it captured `sched` and
+`imperium`, which are the kernel's testimony ABOUT a process, not content OF it. That
+half was not merely over-broad: `SYS_SET_DUMPABLE(0)` is ungated and one-way, so any
+process in a live propagating legate scope could have permanently switched off the
+kernel's record of its own elevation. My own accepted-cost paragraph had argued "hiding
+it grants nothing it did not already have" and invited the next reader to re-test it;
+the next reader did, immediately, and it is true of an environment and false of an
+attestation.
+
+**And the rule I had written into the authoritative capability header was false on
+arrival.** I claimed a `SPAWN_PERM_*` granted to a user-running Proc must carry `SEAL`,
+and that both of login's spawn sites obeyed. There are three. The session shell holds
+two perms with no seal and *should* -- neither is onward-conferrable and a peer can
+already end the session by killing it, so sealing would make the user's own shell
+undebuggable and buy nothing. I generalised from two examples and took the census from
+memory instead of from a grep, which is this project's own pinned lesson about searches
+that do not state their denominator. It is now a question with all three answers
+recorded, including why the third is exempt.
+
+**Then my own fix broke a test, and only the suite caught it.** Adding the
+NOTRACE-mirror leg the audit asked for set that bit on the SHARED target, which silently
+invalidated the premise of a leg further down: the debug gate then refused for entirely
+correct reasons while the assertion read as a failure. Canonical went red. Two things
+worth keeping: a fix that ADDS a leg to an existing test can invalidate a later leg,
+because the legs share one mutable fixture -- so every leg should assert the state it
+needs rather than inherit it; and note which direction this failed in. Loudly, as a red
+canonical. The dangerous version of the same mistake is the one that goes green.
+
+**A third gap surfaced from the sabotage legs rather than the code:** the end-to-end
+test passed in EVERY sabotage leg, including the one that removed the seal -- correct,
+because `maps` is gated directly rather than through the predicate being sabotaged, but
+it meant nothing proved that test could fail at all. It has its own control leg now. A
+green test with no leg that reds it is a test of unknown value.
+
+**Final posture, measured:** 1662/1662 canonical, 0 FAIL lines, and four sabotage legs
+each redding exactly its own guard -- the extraction gate, the attestation split, the
+maps gate, and (from the earlier round) the cover rule. Three independent checks caught
+three different things this session: the reviewer caught the design, the compiler caught
+a `static` used above its definition, and the suite caught the test. A re-audit is owed
+on the fix state, because the close was dirty.
+
+---
+## 2026-09-24, later (aux, Opus 5 1M, effort max) -- the operator delegated four decisions, so I had to be right rather than persuasive
+
+**"I'm going to go with your guts on these decisions."** Four open votes -- the
+seal's contract, whether the seal crosses `fork`, the debug taint at the redeem, and
+the halcyond seal -- handed to me at once. The useful discipline that came out of it:
+a recommendation and a decision are not the same object. Twice, writing the decision
+down properly changed it.
+
+**The seal's contract got SHARPER under that pressure.** I had recommended "cannot be
+extracted from, so fold the NOTRACE seam into the disclosure gate". Writing it up, the
+heritage corrected the mechanism: Linux gates `/proc/<pid>/{environ,maps,mem,...}` on
+DUMPABILITY, not on the ptrace flag, because refusing to be dumped and refusing to be
+driven are different promises a process may want to make separately. So the right bit
+is `NODUMP`, not `NOTRACE` -- and that reading is confirmed from inside our own tree,
+because `SPAWN_PERM_SEAL` already stamps `NODUMP` next to `NOTRACE`. The seal's
+construction had been telling us its contract all along. Bonus: `NODUMP` had no
+runtime reader but its own setter's re-enable refusal, so the bit protected nothing;
+it has teeth now even though v1.0 still has no core dumps.
+
+**A1's decision also improved by looking at the code instead of arguing from
+principle.** The objection to the seal crossing `fork` was that scripture says
+`proc_flags` never inherit. The answer is that the convention exists to stop
+AUTHORITY leaking -- console attachment, the legate root, the posting perm -- and a
+seal is the opposite kind of bit. The governing law is "inheritance may never WIDEN",
+which a restriction obeys by only narrowing. But the *placement* is what made it
+convincing: `rfork_internal` already keys handle-table and socktab inheritance off
+`fc != NULL`, with the contract comment "the child IS the parent ... it must see what
+the parent sees" (`kernel/proc.c:1662-1682`). The seal belongs in that same block,
+and the one-line justification is **the seal crosses fork because the handle table
+does**. Not an exception bolted on; the same rule the file already states.
+
+**Then A1 stopped being landable, which is the honest outcome.** Its verification is
+end-to-end only, and I measured both walls rather than assuming: the fork SHAPE
+cannot be synthesized in-kernel (the suite's `rfork(RFPROC, thunk, NULL)` calls are
+the ENTRY form, `fc == NULL`, which is exactly the shape the change deliberately does
+NOT seal, and a synthetic frame gives the child an invalid user PC), and the only
+parent available in-kernel is the runner -- which must never be sealed, because both
+bits are ONE-WAY and would refuse every later debug test in the same boot. So A1 is
+decided, written down, and NOT landed until a userspace probe exists. An unverified
+kernel security change is worse than an open tracked one.
+
+**A2 landed, RED-first in two legs rather than one**, because I wanted each half of
+the new predicate proven load-bearing on its own: removing the `NODUMP` refusal reds
+the predicate and the end-to-end test and nothing else; removing the self-exemption
+reds ONLY the self leg. That second leg matters more than it looks -- the
+self-exemption has to come BEFORE the seal check, and had I written them in the other
+order a sealed process could not read its own `/proc/self/environ`. The canonical
+green is what proves the ordering; the sabotage proves the line is not decoration.
+1661/1661.
+
+**The cross-track coordination was worth more than the code this time.** Astra joined
+mid-arc on the graphical SAK, and the halcyond seal sits in their territory. Two
+things came out of talking rather than landing: first, I had described the seal's cost
+to them as "no attach, no dump" an hour before A2 made it WIDER -- a sealed Proc now
+also refuses `environ`/`sched`/`imperium` -- so I went back and corrected it before
+they cleared it, and they re-checked all three of their harnesses concretely and
+confirmed none reads those files. Second, a consequence in their favour that neither
+of us had stated: sealing halcyond does NOT seal the tile programs, because tiles are
+SPAWNED (`Command::new`, `session.rs:356`) and the seal crosses fork only. Main
+separately confirmed no reason to keep the compositor debuggable. A one-line change
+with two peers' verified clearance behind it.
+
+**Open and honest about it:** A1 needs its probe, B needs a Halcyon-image run, C (the
+debug taint, which gates the IMPERIUM redeem) is unstarted. The disclosure axis also
+kept a residue I deliberately did NOT fold in: an UNSEALED elevated target is still
+readable by an unelevated same-principal peer, because the disclosure gate's owner
+axis has no cover condition. Linux does apply cover to `/proc` reads; we have not
+followed it there, because losing peer diagnostics is a different cost from losing
+peer control and nobody has weighed it. Tracked, not smuggled.
+
+---
 ## 2026-09-24, mid (aux, Opus 5 1M, effort max) -- the audit round that falsified my own prose three times
 
 **The round ran on the fallback tier, and that is the whole point of it.** Fable

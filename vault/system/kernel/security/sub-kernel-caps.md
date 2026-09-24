@@ -95,9 +95,21 @@ covers, and debugging hands it the perms. Read the checklist as: give it the
 bit, and make it untraceable **whenever the bit is not a capability either** --
 a `SPAWN_PERM_*` granted to a Proc that runs as a user needs `SPAWN_PERM_SEAL`
 in the same `.perm()` call, because cover is blind to the thing just granted.
-Live instance, self-found at the 2026-09-24 close and OPEN: the Halcyon session
-compositor holds `MAY_POST_SERVICE` with the shell's own cap mask and no seal,
-so any tile program covers it exactly.
+Live instance, self-found at the 2026-09-24 close and **since CLOSED**: the Halcyon
+session compositor held `MAY_POST_SERVICE` with the shell's own cap mask and no seal,
+so any tile program covered it exactly. It is sealed now.
+
+**And the sweeping form of this rule did not survive its own audit.** The draft said a
+`SPAWN_PERM_*` granted to a user-running Proc *must* carry `SEAL`, and claimed both of
+login's spawn sites obeyed. There are **three**: the session shell (`main.rs:1341`,
+`CONSOLE_OWNER | SESSION_HANGUP`) is deliberately unsealed, because neither bit is
+onward-conferrable by `ut` and a same-principal peer can already end the session by
+killing it, so sealing would make the user's own shell undebuggable and buy nothing.
+The durable form is a QUESTION, not a rule -- *would puppeting the holder give that peer
+authority it cannot otherwise obtain?* -- with all three answers recorded at
+`CAP_TCB_DIAL` in `caps.h`. The instructive part is the failure mode: a rule generalised
+from two examples, with its census taken from memory instead of from a grep, was false
+on the day it landed.
 
 Round 2 added a third item, from `kernel/proc.c`: **make the seal visible before the
 identity that would admit an attacker.** `proc_apply_identity` publishes

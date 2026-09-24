@@ -230,10 +230,53 @@ typedef u64 caps_t;
 //     and the kernel stamps PROC_FLAG_NOTRACE before its first EL0 instruction.
 // The general tension -- same principal, different authority -- survives, and a
 // FUTURE surface that reads a target through an IDENTITY-only gate reopens it.
-// The PLANNED /proc/<pid>/fd/ surface (deferred at devproc.c:27) is safe only if
-// it routes through devproc_debug_authorized (which now weighs caps AND the
-// NOTRACE seam) and NOT through devproc_owner_or_hostowner, which weighs
-// neither -- the live instance of that hazard being /proc/<pid>/environ.
+// The PLANNED /proc/<pid>/fd/ surface (deferred at devproc.c:27) inherits whichever
+// gate it routes through: devproc_debug_authorized weighs caps AND the NOTRACE
+// seam, and since 2026-09-24 devproc_owner_or_hostowner weighs the NODUMP seal
+// (DEBUG-FS-DESIGN 3.2), so BOTH now honour a seal -- what separates them is that
+// only the debug predicate weighs CAPABILITY. A descriptor list is closer to
+// control than to disclosure, so route it through the debug predicate. (This clause
+// used to end "and NOT through devproc_owner_or_hostowner, which weighs neither --
+// the live instance of that hazard being /proc/<pid>/environ". The environ hazard is
+// the half that 3.2 closed; the sentence is kept in this shape as a reminder that a
+// WHY-comment naming a mechanism goes stale the moment the mechanism moves, and
+// nothing in the build fails when it does.)
+//
+// THE QUESTION TO ASK AT EVERY SUCH GRANT, because the next instance will not be a
+// capability at all: the I-39 cover rule compares the CAPS word, and SPAWN_PERM_* bits
+// live in proc_flags, so cover cannot see them. A same-principal peer holding EQUAL
+// caps and FEWER perms therefore COVERS the grantee and may debug-drive it. So for
+// every perm granted to a Proc that runs AS a user, ask: **would puppeting the holder
+// give that peer authority it cannot otherwise obtain?** If yes, the grant and
+// SPAWN_PERM_SEAL are ONE step, not two. If no, say so at the site, because the next
+// reader will wonder why the seal is absent.
+//
+// The user-running grant sites in the tree, with their answers. This is a CENSUS, not
+// a sample: `grep -rn '\.perm(' usr/ --include='*.rs'` finds six, and warden's two pass
+// no `.identity()`, so they are SYSTEM and outside the question.
+//   - login's home proxy (main.rs:885), MAY_POST_SERVICE -- YES, sealed. It also holds
+//     CAP_TCB_DIAL and a live coordinator transport, which is the (U) F1 case.
+//   - login's session compositor (main.rs:1403), MAY_POST_SERVICE | SESSION_HANGUP --
+//     YES, sealed. Posting as the holder is durable impersonation of
+//     /srv/halcyon-<user>, and every tile child's caps equal the compositor's EXACTLY
+//     (it masks them with !CAP_SET_IDENTITY, which spawn intersects against its own
+//     set), so cover admits every program in every tile.
+//   - login's session shell (main.rs:1341), CONSOLE_OWNER | SESSION_HANGUP -- **NO,
+//     deliberately UNSEALED.** Neither bit is onward-conferrable by `ut` (conferring
+//     CONSOLE_OWNER requires MAY_POST_SERVICE, which `ut` does not hold), and a
+//     same-principal peer can ALREADY end the session by killing `ut`, since I-26's
+//     owner axis is unconditional. Sealing it would make the user's own shell
+//     undebuggable and buy no authority. What a puppeteer would actually gain there is
+//     `ut`'s private /dev/consctl fd -- a HANDLE, so it belongs to the
+//     cover-is-blind-to-handles problem, not to this one.
+//
+// An earlier draft of this block stated a MECHANICAL rule -- "a SPAWN_PERM_* granted
+// to a user-running proc must carry SEAL" -- and asserted that both of login's sites
+// obeyed it. Both halves were wrong: there are three sites, and the third neither
+// obeys the rule nor should. Recorded rather than quietly replaced, because the failure
+// is the instructive part: a rule generalised from two examples, with its census taken
+// from memory instead of from a grep. There is no static guard behind the question
+// either -- see the standing obligation below, which is the same shape.
 //
 // Being fork-grantable, this bit is NOT auto-stripped at fork: every spawn mask
 // that must not confer the dial has to omit it deliberately. That is a standing
