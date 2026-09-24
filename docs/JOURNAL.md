@@ -22,6 +22,23 @@ needed the operator.
 
 
 ---
+## 2026-09-24 (Astra) -- clipboard storage with deferred publication
+
+The storage core now reserves two staged writes, two immutable read snapshots and
+one current value, bounded to 5 MiB payload. It freezes validated writes before
+a focus check and publishes by moving the preallocated buffer after admission.
+The adapter remains absent: these methods must not be mistaken for proof that
+focus or terminal foreground ownership is already integrated.
+
+335/335 Halcyon library tests pass on Linux/aarch64, including nine new storage
+tests (`work/hi1b-pi-deadline-fixed.log`). The isolated Pi checkout initially
+lacked the font fixtures; copying the pristine files allowed the suite to run.
+The final deadline test initially moved its injected clock backward, and the
+store correctly expired the transfer. Fixing the fixture's event order preserved
+the fail-closed clock rule. `next_deadline` supports timeout-driven expiry rather
+than a new polling loop. The Pi lease is released; no new guest UI is claimed.
+
+---
 ## 2026-09-24 (Astra) -- typed interaction protocol before service admission
 
 The pointer checkpoint is followed by the clipboard wire contract: exact bodies,

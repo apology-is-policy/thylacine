@@ -4,7 +4,7 @@ type: arc
 title: "Halcyon interaction: pointer, clipboard and modal text"
 status: active
 design: [docs/HALCYON-INTERACTION.md]
-chunks: [chg-2026-09-24-hi0-pointer, chg-2026-09-24-hin1-envelope, chg-2026-09-24-hin1-bodies]
+chunks: [chg-2026-09-24-hi0-pointer, chg-2026-09-24-hin1-envelope, chg-2026-09-24-hin1-bodies, chg-2026-09-24-clipboard-storage]
 follow-ons: []
 exit-criteria:
   - "[ ] Portable guest cursor works over composed/fullscreen content and capture transitions"
@@ -73,3 +73,10 @@ HI-1a now pins all operation bodies and existing-errno failures, with a bounded
 fragment receiver and twenty frozen C/Rust vectors. The 148 library tests and C
 fixture pass on the isolated Pi host. This remains protocol groundwork: no live
 clipboard endpoint, mode widget or new runtime workflow is claimed.
+
+## Storage checkpoint, September 24
+
+HI-1b adds the pure bounded clipboard store and deferred read/commit admission.
+The endpoint is still absent; focus/controller authentication is explicitly left
+to the next broker integration. Atomic publication, snapshot isolation, stale
+owners, SAK cancellation, deadlines and payload limits have dedicated tests.

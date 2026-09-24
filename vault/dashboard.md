@@ -21,7 +21,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-deep-smp-review]] | active | 4 |
 | [[arc-go-build]] | active | 27 |
 | [[arc-go-ide]] | active | 2 |
-| [[arc-halcyon-interaction]] | active | 2 |
+| [[arc-halcyon-interaction]] | active | 4 |
 | [[arc-holotype-rw]] | active | 9 |
 | [[arc-identity-detour]] | active | 12 |
 | [[arc-life-support]] | active | 2 |

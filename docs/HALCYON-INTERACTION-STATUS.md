@@ -19,7 +19,7 @@ Cocoa's forced host pointer is disabled by default.
 HI-1a provides the HIN1 envelope, exact request/response bodies, error mapping,
 canonical clipboard-text validation, a bounded fragmented receiver and twenty
 matching C/Rust fixtures. There is no clipboard
-endpoint, storage service, controller registration, Nora bridge or mode widget
+endpoint, controller registration, Nora bridge or mode widget
 change yet. See `HALCYON-INTERACTION-ABI.md`.
 
 ## Verified on September 24
@@ -112,7 +112,7 @@ and unrelated `work/` evidence. Safety stashes remain referenced by
 `work/hi0-before-merge.diff`. `work/hi0-compile.py` preserves the authority test
 files for builds. The compiled `work/quaestor` now matches current source.
 
-HI-1 next adds bounded clipboard storage,
+HI-1 next connects the pure clipboard store to
 authenticated controller ownership and focus integration. HI-2 adds mode reports
 and Nora's Space-y/p bridge. HI-3 adds transcript motions/search/typed paste.
 HI-4 joins Main's Boosty fields; HI-5 closes workflows and manuals. No extra
@@ -144,3 +144,32 @@ kernel console-renderer peer. Focus integration must authenticate that exact
 declared connection and its hosted leaves, rather than require the unrelated
 console-renderer flag or accept any same-principal client. PTY foreground changes
 also need the approved ordered bridge; periodic pgrp sampling is insufficient.
+
+## HI-1b bounded storage checkpoint
+
+`usr/halcyond/src/clipboard.rs` supplies pure storage, not a live service. It
+bounds current/staged/pinned payloads at 5 MiB, checks exact owners and session
+generations, and separates prepare from admission completion. Reads pin before
+the check; commit validates/freezes before the check and publishes without
+allocation. Stale tickets cannot revive cancelled work. Absolute and idle expiry
+use a next-deadline API for event-loop integration. The complete connection and
+metadata ledger remains pending with the broker.
+
+The initial Pi compile lacked this isolated checkout's IBM Plex fixture files;
+no tests ran in that attempt (`work/hi1b-pi-tests.log`). After copying the pristine
+fixtures into the isolated directory, 334 Halcyon tests passed. A ninth storage
+test then added the deadline wakeup/refusal checks; final evidence is recorded
+below. No shared Pi checkout or paired boot artifact was changed.
+
+Foreground integration is still under review: kaua-term's existing wire has no
+explicit foreground-owner notification, and ut's job-control path currently
+ignores set-foreground errors. Main has been notified before any edits there.
+The bridge must acknowledge actual handovers; terminal output and sampled pgrp
+are not substitutes for the approved ownership contract.
+
+Final storage validation: 335/335 Halcyon library tests pass on Linux/aarch64
+(`work/hi1b-pi-deadline-fixed.log`), including nine storage tests. The preceding
+335-test run failed the new deadline fixture because it supplied time 150 after
+time 200; regressing time correctly expired the write. Reordering the fixture
+timestamps fixes the test without weakening expiry. Failure evidence remains
+`work/hi1b-pi-final.log`. Pi is released, no VM was started.

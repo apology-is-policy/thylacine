@@ -5,6 +5,7 @@ title: "halcyond — the Halcyon environment client: the transcript renderer and
 parent: moc-userspace-shell-tui
 code:
   - usr/halcyond/src/lib.rs
+  - usr/halcyond/src/clipboard.rs
   - usr/halcyond/src/main.rs
   - usr/halcyond/src/transcript.rs
   - usr/halcyond/src/layout.rs
@@ -82,6 +83,48 @@ console trio; on `/srv/tapestry` the `layout` file (visible leaves), `pane/<id>/
 `/lib/halcyon/session` (login's per-user choice) -- both one-token, fail-safe.
 
 ## Mechanism
+
+### Session clipboard storage (HI-1b; no live endpoint yet)
+
+`clipboard::Clipboard` is the pure storage half. Its nonzero session generation
+must be freshly chosen by the future session broker. `Owner` combines the
+broker's authenticated connection identity with the issued controller/context
+scope; it is not taken on trust from request bytes. Exact owner equality gates
+chunks, cancellation and admission completion. One transfer per controller is
+shared across its contexts, and each session has two write slots and two read
+slots. The current value plus these four slots conservatively reserve at most
+5 MiB payload. Capacity, not written length, is counted; shared read buffers may
+be counted twice. This is the storage ledger only: connection buffers and the
+complete 7.375 MiB service ledger remain an adapter obligation.
+
+BeginCopy follows a successful broker focus check. It reserves the full declared
+capacity before returning a transfer. Contiguous nonempty chunks cannot exceed
+16 KiB or the declared extent. `prepare_commit` requires full canonical UTF-8,
+compares the expected generation and serializes all pending commits. Its ticket
+freezes staging before the broker asks for authoritative focus admission.
+`publish` consumes that ticket, checks its lifetime and moves the preallocated
+immutable buffer into the current value without allocation or text scanning.
+Generation exhaustion refuses rather than wrapping. Cancellation cannot undo an
+already published value. Source exit retains the current value.
+
+Get pins the current `Rc<Vec<u8>>` before the focus request; the pending read is
+unreadable until its matching ticket is admitted. Later copies cannot mix its
+bytes or alter its generation. Admitted reads can finish after focus loss;
+unfinished writes are cancelled by the ordered focus-loss callback. Peer/context
+loss and trusted-seat takeover cancel pending and admitted transfers, making
+late tickets stale. The future adapter must serialize those callbacks with
+Tapestry replies; these pure methods neither authenticate focus nor prove that
+integration. They are not connected to the pane service yet.
+
+Thirty-second idle and 120-second absolute deadlines use monotonic milliseconds.
+`next_deadline` integrates with an event-loop timeout without a polling timer.
+An operation that observes expiry returns Timeout and retires its slot; an ID
+already reaped by `expire` is Gone. Wrong owner is Denied, generation mismatch
+Conflict, pool/identifier exhaustion Busy, malformed offsets/text Invalid,
+oversize input TooLarge, and refused payload reservation NoMemory. Chunk and
+read failures leave contents untouched and do not refresh deadlines. The fixed
+slot arrays, transfer metadata and bounded Rc control blocks do not grow with
+traffic; the final adapter must include their sizes in its metadata ledger.
 
 ### lib is the brain, bin is the body
 
@@ -878,6 +921,11 @@ presents are a recorded optimization.
   halcyond's loop branch. A targeted repro is owed.
 
 ## Tests
+
+- **HI-1b, September 24:** 335/335 Halcyon library tests pass on Linux/aarch64,
+  including nine clipboard storage tests for generations, pinning, ownership,
+  deferred publication, cancellation, expiry and capacity bounds. Evidence:
+  `work/hi1b-pi-deadline-fixed.log`. No live clipboard adapter is tested yet.
 
 - **Host: 301 `#[test]`, all green** (re-measured 2026-09-16: transcript 54,
   raster 42, layout 37, tile 30, chrome 27, input 12, rail 11, grid 11, tiles 10,
