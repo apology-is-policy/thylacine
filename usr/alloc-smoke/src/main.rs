@@ -23,16 +23,15 @@
 // tagged FAIL message + exits 1.
 //
 // The failure modes this binary catches:
-//   - SYS_BURROW_ATTACH return-value misinterpretation in
-//     ensure_initialized.
-//   - linked_list_allocator init pointer/size mistakes.
-//   - alloc/dealloc protocol mismatches that would corrupt the free
-//     list before another binary noticed.
+//   - a heap that cannot serve its first allocation (the first
+//     reservation refused or misread).
+//   - alloc/dealloc protocol mismatches that would corrupt the heap
+//     before another binary noticed.
 //   - Path/PathBuf method off-by-one bugs that would surface as wrong
 //     parent / file_name results once a real shell parses paths.
 //
 // Not a comprehensive stress test (no concurrency, no fragmentation
-// scenarios, no large allocations near INITIAL_HEAP_SIZE). The
+// scenarios; the heap's growth and give-back are /heap-probe's). The
 // libthyla-rs U-2-test sub-chunk exercises the integrated surface
 // across all U-2X modules.
 

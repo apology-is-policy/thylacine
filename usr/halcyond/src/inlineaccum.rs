@@ -29,8 +29,8 @@ pub enum AccumStep {
 
 /// Accumulates one place-request at a time from sequential writes. `max_pixels`
 /// is the caller's heap-safe per-image cap; it MUST be <= `inlinewire::MAX_PIXELS`
-/// (the wire's own ceiling) and is what keeps a decoded raster from exhausting
-/// the renderer's fixed heap. Held per (connection, place-fid); dropped -- with
+/// (the wire's own ceiling) and is what keeps a decoded raster within the
+/// renderer's working budget (placesrv.rs). Held per (connection, place-fid); dropped -- with
 /// any partial -- when that fid clunks or the connection tears down.
 pub struct PlaceAccum {
     header: Option<PlaceHeader>,
@@ -117,7 +117,7 @@ impl PlaceAccum {
                 // capacity (a 2x overshoot), which is what let MAX_CONNS
                 // accumulators reach the whole 64 MiB heap (audit F1/F2). With
                 // reserve_exact the footprint is exactly total_len, so the
-                // heap budget (placesrv PLACE_MAX_PIXELS x MAX_CONNS) is real.
+                // working budget (placesrv PLACE_MAX_PIXELS x MAX_CONNS) is real.
                 self.buf.reserve_exact(h.total_len() - self.buf.len());
                 self.buf.extend_from_slice(data);
                 h

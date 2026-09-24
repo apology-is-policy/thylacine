@@ -55,7 +55,8 @@ service construction so last close cannot require an allocation.
 
 The two 64 KiB TCP buffers contribute at most 8 MiB at this bound. Increase
 netd's explicit heap to 16 MiB and account separately for 9P buffers, stack
-metadata, DNS, and pending accepts. Weft mappings are detached at last clunk
+metadata, DNS, and pending accepts. (Done; since B-1c netd's heap grows on
+demand (thyla-heap), and the 8 MiB bound stands on its own.) Weft mappings are detached at last clunk
 and are not retained for TCP closing. Retired handles belong to either the
 NIC SocketSet or the loopback SocketSet; moving or reusing a public slot cannot
 change that choice. The single netd event loop serializes all transitions.

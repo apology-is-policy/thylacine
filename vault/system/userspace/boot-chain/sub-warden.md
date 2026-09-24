@@ -152,14 +152,15 @@ worth cannot deadlock against a broker waiting to reap it. The read is capped
 so that a runaway or hostile helper cannot exhaust the broker's memory — the
 broker is trusted, the helper is not.
 
-**Detecting an exit without reading the pipe.** A driver's pipe does *not*
-reach end-of-file when the driver exits: a single-threaded process defers
-closing its descriptors to *reap*, not to exit. So blocking on the pipe to
-learn that a driver died would deadlock — the broker holds the only read end
-and cannot reap while blocked reading it. It therefore polls for the exit
-separately and uses the pipe only for the readiness data. This is the same
-asymmetry that makes a shell's drain-before-reap work, seen from the side
-that must not rely on it.
+**Detecting an exit without reading the pipe.** The broker polls for the
+driver's exit separately and uses the pipe only for the readiness data, with
+every wait bounded. Blocking on the pipe could not tell it that a driver had
+died or stalled: a live service may hold the pipe open for its whole life,
+and a driver that neither says READY nor exits would hold a blocking read
+forever. A dead
+driver's pipe does reach end-of-file, since the kernel closes a process's
+descriptors at its exit rather than at its reap, but the broker does not rely
+on that.
 
 ## Invariants enforced
 

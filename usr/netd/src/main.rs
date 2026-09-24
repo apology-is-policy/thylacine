@@ -37,10 +37,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 #[global_allocator]
-// 64 TCP transports consume at most 8 MiB; 16 MiB leaves bounded headroom
-// for 9P connections, protocol metadata, DNS and temporary service buffers.
-static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAllocN<{ 16 * 1024 * 1024 }> =
-    libthyla_rs::alloc::ThylaAllocN;
+static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
 use libdriver::driver::{run, Driver};
 use libdriver::resource::BoundResources;

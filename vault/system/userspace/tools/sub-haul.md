@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: [docs/HAUL-DESIGN.md]
 created: 2026-09-17
-updated: 2026-09-18
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -61,7 +61,9 @@ scope, including a relay with an active mount.
 the fd that actually carries readiness: TCP uses its `/ready` sibling; a pipe
 or accepted byte connection uses its own fd. `STOPPED` atomically publishes
 which pump ended. Tokens are wiped after handshake; record buffers are bounded
-by MSG_MAX (64 KiB).
+by MSG_MAX (64 KiB), set when libthyla-rs's heap was a fixed 4 MiB (two records
+were a quarter of it); since B-1c the heap grows, and the bound stays the
+record's own.
 
 ## Concurrency
 

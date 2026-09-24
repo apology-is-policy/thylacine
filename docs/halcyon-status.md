@@ -305,9 +305,11 @@ cd usr && cargo test -p coreutils --lib --no-default-features --target aarch64-a
 - **The boot ramfs is FLAT**: pre-pivot, only root + the empty synth mounts
   are listable directories. A smoke leg wanting a bounded `ls` subject uses
   explicit file operands, not a directory.
-- **coreutil-smoke's REAP-BEFORE-READ deadlocks the BOOT on child output >
-  4096 bytes** (PIPE_BUF) — every new leg budgets its output; the ps-rich leg
-  self-guards (measure raw, skip loudly).
+- **coreutil-smoke keeps at most 64 KiB of a tool's stdout** (and 300 bytes
+  of its stderr). Since B-1c its capture reads the pipes as they fill and kills
+  a tool at the check's bound, so no output size can hold the BOOT (the old
+  reap-before-read deadlock is gone), but a leg whose answer is longer compares
+  a truncated capture.
 - The tier resets at `cons_drain_close` + `cons_test_reset` (NOT "where
   winsize unsets" — winsize never reset on detach). **The consctl fd's
   offset is SHARED down the joey→login→ut chain and advanced by every mode
@@ -334,9 +336,11 @@ cd usr && cargo test -p coreutils --lib --no-default-features --target aarch64-a
 - **A chord split focuses the NEW (empty) leaf** (`pane.rs` split) — a
   follow-up zoom then targets the empty pane and HIDES the renderer
   (no frame ticks, no CONFIGURE). Focus back first (`Super+Left`).
-- **The fixed 4 MiB libthyla-rs heap dies as a SILENT exit(1)** (no_std
-  OOM → panic → bare `t_exits(1)`). A binary with a real working set
-  declares `ThylaAllocN<{N}>` (lazy demand-zero — physical as touched).
+- **A native program that runs out of memory exits 1 without a word** (a
+  refused allocation → the no_std panic → a bare `t_exits(1)`; a page the pool
+  cannot back → a fault kill, also 1). Since B-1c the heap grows on demand
+  (thyla-heap), so there is no heap size to declare: bound what an input or a
+  peer can make a program hold.
 - **A renderer must present BEFORE its first wait**: the scanout is
   first-present-wins and frame ticks reach only visible surfaces — a
   never-presented renderer is dark AND event-starved forever.

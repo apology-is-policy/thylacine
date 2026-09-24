@@ -129,6 +129,9 @@ fn run(args: Args) -> i64 {
     let mut status = 0;
     let mut out = io::OutSink::new();
     for &path in &operands {
+        if out.failed() {
+            break;
+        }
         let md = fs::metadata(path).ok();
         let rkind = match &md {
             Some(m) => meta::kind_of(m),
@@ -160,11 +163,7 @@ fn run(args: Args) -> i64 {
         }
         out.put(b"\n");
     }
-    if out.failed() {
-        eprintln!("pelt: write error");
-        return 1;
-    }
-    status
+    out.finish("pelt", status)
 }
 
 /// Read a directory's entries (name + whether readdir called it a directory),
@@ -204,6 +203,10 @@ fn walk(
     let entries = read_entries(dir, all, dirs_only)?;
     let n = entries.len();
     for (i, (name, rd_dir)) in entries.iter().enumerate() {
+        // Nothing more reaches stdout, so the rest of the tree is not walked.
+        if out.failed() {
+            break;
+        }
         let last = i + 1 == n;
         let branch = if last { "└── " } else { "├── " };
         let path = join(dir, name);

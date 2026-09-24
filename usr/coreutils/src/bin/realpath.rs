@@ -80,9 +80,5 @@ fn run(args: Args) -> i64 {
         eprintln!("realpath: missing operand");
         return 1;
     }
-    if out.failed() {
-        eprintln!("realpath: write error");
-        return 1;
-    }
-    status
+    out.finish("realpath", status)
 }

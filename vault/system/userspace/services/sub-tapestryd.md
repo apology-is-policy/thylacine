@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
-updated: 2026-09-21
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -2776,10 +2776,11 @@ and the caller's push lays the card from its shown slot. `menu_card_shown`
 gives `Rect::ZERO` while the card has no frame yet, so the effects are laid
 where it will stand rather than leaving a hole (halcyond places, THEN paints).
 
-**The save scratch is not the heap.** tapestryd's global allocator is
-`ThylaAlloc` -- a fixed 4 MiB heap -- and a dialog's full-display save at
-2560x1664 is 17 MiB, so a `Vec` save would have failed silently for exactly
-the class that needs it. `fx_save` is a LAZY region (`t_burrow_attach_lazy`,
+**The save scratch is not the heap.** It was built when tapestryd's global
+allocator, `ThylaAlloc`, was a fixed 4 MiB heap and a dialog's full-display
+save at 2560x1664 is 17 MiB, so a `Vec` save would have failed silently for
+exactly the class that needs it. Since B-1c the heap grows
+([[sub-thyla-heap]]), and the region stays. `fx_save` is a LAZY region (`t_burrow_attach_lazy`,
 demand-zero) sized to the display, attached at the first save, re-attached
 when the display outgrows it; only what a save touches is ever committed. If
 the attach fails, the upload lays nothing on (nothing it wrote could be taken

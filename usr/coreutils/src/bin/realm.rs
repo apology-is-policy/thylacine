@@ -142,11 +142,7 @@ fn run(args: Args) -> i64 {
             color::reset(on)
         );
     }
-    if out.failed() {
-        eprintln!("realm: write error");
-        return 1;
-    }
-    status
+    out.finish("realm", status)
 }
 
 /// `--color=auto`: stdout is the interactive console iff its Dev class is

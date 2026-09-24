@@ -291,9 +291,5 @@ fn run(args: Args) -> i64 {
             render_box(&mut out, &rows, on);
         }
     }
-    if out.failed() {
-        eprintln!("ps: write error");
-        return 1;
-    }
-    0
+    out.finish("ps", 0)
 }

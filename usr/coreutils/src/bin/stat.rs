@@ -187,11 +187,7 @@ fn run(args: Args) -> i64 {
     if !had {
         return usage::die("stat", "missing operand");
     }
-    if out.failed() {
-        eprintln!("stat: write error");
-        return 1;
-    }
-    status
+    out.finish("stat", status)
 }
 
 /// `--color=auto`: stdout is the interactive console iff its Dev class is

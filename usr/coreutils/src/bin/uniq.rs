@@ -3,20 +3,20 @@
 // -c prefixes each output line with its run count. -d prints only duplicated
 // groups (count > 1); -u prints only unique lines (count == 1); -i compares
 // case-insensitively (the first line of each group is emitted as-is). Reads one
-// FILE (or stdin). Like GNU uniq, only ADJACENT duplicates are merged (sort
-// first to dedupe globally).
+// FILE (or stdin), a line at a time. Like GNU uniq, only ADJACENT duplicates
+// are merged (sort first to dedupe globally), and with nothing to count or
+// select a line goes out as its run begins, not once the run has ended.
 
 #![no_std]
 #![no_main]
-
-extern crate alloc;
-use alloc::vec::Vec;
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
 use core::fmt::Write as _;
+use coreutils::stream;
 use libthyla_rs::env::{self, Args};
+use libthyla_rs::err;
 use libthyla_rs::fs::File;
 use libthyla_rs::{eprintln, io};
 
@@ -39,6 +39,26 @@ fn same(a: &[u8], b: &[u8], ignore_case: bool) -> bool {
         a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.eq_ignore_ascii_case(y))
     } else {
         a == b
+    }
+}
+
+/// Collapse one input's adjacent duplicates, until the input ends or stdout is
+/// gone: every run's line as the run begins (coreutils::stream::firsts), or with
+/// `want` the runs it selects once each has ended (coreutils::stream::runs).
+fn collapse<R: io::Read + ?Sized>(out: &mut io::OutSink, input: &mut R, ignore_case: bool, with_count: bool, want: Option<&dyn Fn(usize) -> bool>) -> Result<(), stream::Error<err::Error>> {
+    let read = |buf: &mut [u8]| input.read(buf);
+    let eq = |a: &[u8], b: &[u8]| same(a, b, ignore_case);
+    match want {
+        None => stream::firsts(read, eq, |first| {
+            emit(out, first, 1, false);
+            !out.failed()
+        }),
+        Some(want) => stream::runs(read, eq, |first, count| {
+            if want(count) {
+                emit(out, first, count, with_count);
+            }
+            !out.failed()
+        }),
     }
 }
 
@@ -99,8 +119,11 @@ fn run(args: Args) -> i64 {
         (false, true) => count == 1,
         (false, false) => true,
     };
+    // Counting or selecting needs each run's end; showing every run does not.
+    let want = (with_count || only_dup || only_uniq).then_some(&want as &dyn Fn(usize) -> bool);
 
-    let data = match args.get(idx) {
+    let mut out = io::OutSink::new();
+    let (name, r) = match args.get(idx) {
         Some(op) => {
             let path = match core::str::from_utf8(op) {
                 Ok(p) => p,
@@ -109,55 +132,16 @@ fn run(args: Args) -> i64 {
                     return 1;
                 }
             };
-            match File::open(path).and_then(|mut f| io::slurp(&mut f)) {
-                Ok(d) => d,
-                Err(e) => {
-                    eprintln!("uniq: {}: {}", path, e);
-                    return 1;
-                }
-            }
+            let r = File::open(path)
+                .map_err(stream::Error::Read)
+                .and_then(|mut f| collapse(&mut out, &mut f, ignore_case, with_count, want));
+            (path, r)
         }
-        None => match io::slurp(&mut io::stdin()) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("uniq: stdin: {}", e);
-                return 1;
-            }
-        },
+        None => ("stdin", collapse(&mut out, &mut io::stdin(), ignore_case, with_count, want)),
     };
-
-    let mut lines: Vec<&[u8]> = data.split(|&b| b == b'\n').collect();
-    if data.last() == Some(&b'\n') {
-        lines.pop(); // drop the spurious empty after a trailing newline
-    }
-
-    let mut out = io::OutSink::new();
-    let mut prev: Option<&[u8]> = None;
-    let mut count = 0usize;
-    for line in lines {
-        match prev {
-            Some(p) if same(p, line, ignore_case) => count += 1,
-            Some(p) => {
-                if want(count) {
-                    emit(&mut out, p, count, with_count);
-                }
-                prev = Some(line);
-                count = 1;
-            }
-            None => {
-                prev = Some(line);
-                count = 1;
-            }
-        }
-    }
-    if let Some(p) = prev {
-        if want(count) {
-            emit(&mut out, p, count, with_count);
-        }
-    }
-    if out.failed() {
-        eprintln!("uniq: write error");
+    if let Err(e) = r {
+        eprintln!("uniq: {}: {}", name, e);
         return 1;
     }
-    0
+    out.finish("uniq", 0)
 }

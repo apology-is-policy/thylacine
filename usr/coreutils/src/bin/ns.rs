@@ -117,10 +117,11 @@ fn run(args: Args) -> i64 {
         }
     };
 
+    let mut out = io::OutSink::new();
     // --color=never: pass the raw kernel rendering through, byte-clean.
     if !on {
-        io::out(&data);
-        return 0;
+        out.put(&data);
+        return out.finish("ns", 0);
     }
 
     let text = core::str::from_utf8(&data).unwrap_or("");
@@ -141,17 +142,12 @@ fn run(args: Args) -> i64 {
     // we parse nothing while the text clearly has mounts, pass the raw text
     // through rather than show an empty box (never lose the user's data).
     if mounts.is_empty() && text.contains("mount") {
-        io::out(&data);
-        return 0;
+        out.put(&data);
+        return out.finish("ns", 0);
     }
 
-    let mut out = io::OutSink::new();
     render(&mut out, pid, &mounts, binds, on);
-    if out.failed() {
-        eprintln!("ns: write error");
-        return 1;
-    }
-    0
+    out.finish("ns", 0)
 }
 
 /// Render the boxed namespace view: MOUNTPOINT / SOURCE / REALM, each cell

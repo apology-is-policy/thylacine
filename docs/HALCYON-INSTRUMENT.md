@@ -1834,8 +1834,8 @@ not say, both forced by the code: **the card is not stored in the buffer
 either** -- a dialog's blur beside the card reads the pixels under it, and the
 kit blurs the page, never the dialog -- so a dismiss is a plain upload of what
 the card reached, with no repaint and no redraw request; and **the save is not
-the compositor's heap** (a fixed 4 MiB against a 17 MiB full-display save at
-2560x1664) but a lazy region sized to the display. The witness plan is gate
+the compositor's heap** (then a fixed 4 MiB against a 17 MiB full-display save
+at 2560x1664; the heap grows since B-1c) but a lazy region sized to the display. The witness plan is gate
 ink legs in `ls-halcyon-session-instrument`: a dialog dims a flat region to
 exactly `rgb(3,4,4)` at 184/256 over it, the footer changes under a standing
 dialog as a job ends (the frozen design fails that), and a menu dims nothing

@@ -1811,9 +1811,9 @@ pub struct Comp {
     /// saves the buffer pixels into before laying a card and its effects
     /// over them, and restores them from after -- `(va, size)`, a LAZY
     /// region sized to the display (demand-zero: only what a save touches
-    /// is ever committed). Not the heap: tapestryd's is 4 MiB and a
-    /// dialog's full-display save is four times that. Attached at the first
-    /// save, re-attached when the display outgrows it.
+    /// is ever committed). Not the heap: when this was built, tapestryd's
+    /// was a fixed 4 MiB and a dialog's full-display save is four times that.
+    /// Attached at the first save, re-attached when the display outgrows it.
     fx_save: Option<(u64, u64)>,
     /// The scratch could not be attached: said once, not per upload.
     fx_save_failed_said: bool,

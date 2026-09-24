@@ -421,11 +421,7 @@ fn run(args: Args) -> i64 {
         out.put(line);
         out.put(b"\n");
     }
-    if out.failed() {
-        eprintln!("sort: write error");
-        return 1;
-    }
-    0
+    out.finish("sort", 0)
 }
 
 /// Whether two adjacent output lines are "equal" for -u: all keys compare

@@ -1,198 +1,109 @@
-// libthyla-rs::alloc — Thylacine native heap allocator.
+// libthyla-rs::alloc -- the native heap (B-1c; ARCH 6.5 "Capacity").
 //
-// Provides `ThylaAlloc`, a `core::alloc::GlobalAlloc` implementation
-// backed by a single SYS_BURROW_ATTACH_LAZY region subdivided by
-// `linked_list_allocator`. Binaries opt in by declaring:
+// `ThylaAlloc` is the `core::alloc::GlobalAlloc` a native binary opts into:
 //
 //     #[global_allocator]
 //     static ALLOC: libthyla_rs::alloc::ThylaAlloc =
 //         libthyla_rs::alloc::ThylaAlloc;
 //     extern crate alloc;
 //
-// After that, the `alloc` crate (Box, Vec, String, BTreeMap, ...) is
-// usable throughout the binary. Lazy init: the first allocation
-// triggers one SYS_BURROW_ATTACH_LAZY (which reserves but commits no
-// physical pages); subsequent allocations subdivide that region
-// locally, faulting in pages as blocks are written. Binaries that
-// never call alloc never pay the syscall.
+// after which the `alloc` crate (Box, Vec, String, BTreeMap, ...) is usable
+// throughout the binary.
 //
-// Foundation chunk: U-2b per docs/UTOPIA-SHELL-DESIGN.md §15.
+// The heap has no fixed size: it grows until the system is out of memory and
+// gives memory back as it is freed. The policy is thyla-heap's -- dlmalloc
+// over lazy reservations for blocks under 256 KiB whose alignment is under
+// 256 KiB too, a reservation of its own for a larger or more aligned block,
+// detached when it is freed. This module supplies the
+// three kernel calls it is built from: SYS_BURROW_RESERVE (124) at RW,
+// SYS_BURROW_DECOMMIT (84) and SYS_BURROW_DETACH (38, the range form). Nothing
+// is reserved before the first allocation, and a reservation costs address
+// space only: its pages are charged to the I-32 budget as they are touched.
 //
 // WHY libthyla-rs DOES NOT DECLARE `#[global_allocator]` ITSELF:
-// Rust requires exactly one `#[global_allocator]` per binary's
-// dependency tree. corvus already declares its own static-BSS-backed
-// allocator (usr/corvus/src/main.rs); a duplicate declaration here
-// would break corvus's link. Future native binaries that want the
-// canonical heap declare the line shown above explicitly. The minor
-// boilerplate buys per-binary choice (most pick ThylaAlloc;
-// resource-constrained or pre-burrow_attach binaries can pick their
-// own).
+// Rust requires exactly one `#[global_allocator]` per binary's dependency
+// tree, and corvus declares its own static-BSS-backed allocator
+// (usr/corvus/src/main.rs); a declaration here would break corvus's link.
 //
-// SIZING:
-//   - INITIAL_HEAP_SIZE = 4 MiB. Fits the shell + a few coreutils +
-//     parser ASTs + tab-completion caches comfortably; far below
-//     BURROW_RESERVE_MAX (= 1 GiB) so the lazy attach never bumps the
-//     upper bound. Because the region is reserved (not committed), the
-//     4 MiB costs nothing until blocks are written -- a binary that
-//     allocates a few KiB has a few KiB of RSS. Growable heap is a v1.x
-//     consideration; v1 binaries that need more allocate explicit
-//     Burrows themselves.
+// THREAD SAFETY: dlmalloc runs under a spinlock (spinning_top, the lock this
+// heap has always taken), so peer threads' allocations serialize. A direct
+// block's reserve and detach run outside it.
 //
-// THREAD SAFETY:
-//   - `LockedHeap` from `linked_list_allocator` uses an internal
-//     spin::Mutex (the crate's `use_spin` feature, enabled in
-//     Cargo.toml). Multi-thread allocations on multi-Thread Procs
-//     (Phase 6 sub-chunk 9a's SYS_THREAD_SPAWN) serialize through
-//     the spinlock. Low contention is expected (allocations are
-//     short; the lock is held briefly).
-//   - The initialization state machine uses a separate AtomicU8 with
-//     acquire/release ordering; the loser of the init CAS spins
-//     until the winner's STATE_READY release publishes the heap
-//     bounds.
-//
-// FAULT POLICY:
-//   - If the initial SYS_BURROW_ATTACH_LAZY fails (no VA gap, VMA cap,
-//     or invalid request), the program calls t_exits(1). LockedHeap would
-//     otherwise return null pointers, which alloc-aware code mostly
-//     treats as "abort with OOM" via the global alloc_error_handler
-//     — but the panic message would be opaque. Failing fast at init
-//     with a clear cause is better for debugging.
-//   - We do NOT install a custom alloc_error_handler. The default
-//     no_std handler panics; libthyla-rs's `#[panic_handler]` routes
-//     panics to t_exits(1). So an OOM during normal operation
-//     terminates the program with exit status 1.
+// FAULT POLICY: an allocation the kernel refuses returns null. The default
+// no_std alloc_error_handler panics on it, and libthyla-rs's #[panic_handler]
+// exits 1; the fallible forms (`Vec::try_reserve` and the like) see the
+// refusal instead. The kernel refuses a reservation only when address space
+// runs out: memory runs out at a page, when it is first touched, and the
+// kernel ends whichever program touched it (exit status 1, docs/ERRORS.md) --
+// not necessarily the one that grew, since nothing picks a victim (ARCH 6.5).
 
-use crate::{t_burrow_attach_lazy, t_exits};
 use core::alloc::{GlobalAlloc, Layout};
-use core::sync::atomic::{AtomicU8, Ordering};
 
-use linked_list_allocator::LockedHeap;
+use thyla_heap::{Backend, Heap};
 
-/// The initial heap size requested from the kernel on first
-/// allocation. 4 MiB. Sized to comfortably host the shell + coreutils
-/// + parser ASTs. Below `BURROW_ATTACH_MAX` (256 MiB) by ~64x.
-///
-/// v1.x growable-heap support would re-attach additional burrows on
-/// demand; v1 fixes the initial allocation.
-pub const INITIAL_HEAP_SIZE: usize = 4 * 1024 * 1024;
+use crate::{t_burrow_decommit, t_burrow_detach, t_burrow_reserve, T_BURROW_PROT_READ, T_BURROW_PROT_WRITE};
 
-// Lazy-init state machine. Three states, single-byte atomic.
-//
-// Transitions are:
-//   UNINIT --(CAS by first caller)--> INITIALIZING --(store-Release after init)--> READY
-//   UNINIT --(CAS loser)--> still UNINIT, spin loop on STATE until READY
-//
-// Acquire/Release on STATE pairs with the linked_list_allocator's
-// LockedHeap so the heap-bottom + heap-size are visible cross-CPU.
-const STATE_UNINIT:       u8 = 0;
-const STATE_INITIALIZING: u8 = 1;
-const STATE_READY:        u8 = 2;
+#[derive(Clone, Copy)]
+struct Svc;
 
-static STATE: AtomicU8 = AtomicU8::new(STATE_UNINIT);
-static HEAP: LockedHeap = LockedHeap::empty();
+impl Backend for Svc {
+    fn reserve(&self, len: usize, align_log2: u32) -> Option<usize> {
+        let rw = T_BURROW_PROT_READ | T_BURROW_PROT_WRITE;
+        let va = unsafe { t_burrow_reserve(len as u64, rw, align_log2 as u64) };
+        if va > 0 {
+            Some(va as usize)
+        } else {
+            None
+        }
+    }
 
-/// The Thylacine global allocator.
-///
-/// Zero-sized; the actual heap state is in the module-level `HEAP`
-/// static. Binaries instantiate this in their `#[global_allocator]`
-/// declaration:
-///
-/// ```ignore
-/// #[global_allocator]
-/// static ALLOC: libthyla_rs::alloc::ThylaAlloc =
-///     libthyla_rs::alloc::ThylaAlloc;
-/// extern crate alloc;
-/// ```
+    fn decommit(&self, va: usize, len: usize) -> bool {
+        unsafe { t_burrow_decommit(va as u64, len as u64) == 0 }
+    }
+
+    fn detach(&self, va: usize, len: usize) -> bool {
+        unsafe { t_burrow_detach(va as u64, len as u64) == 0 }
+    }
+}
+
+static HEAP: Heap<Svc> = Heap::new(Svc);
+
+/// The Thylacine global allocator. Zero-sized; the heap is this module's.
 pub struct ThylaAlloc;
 
 unsafe impl GlobalAlloc for ThylaAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ensure_initialized(INITIAL_HEAP_SIZE);
         HEAP.alloc(layout)
     }
 
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // Reaching dealloc means alloc succeeded, which means
-        // ensure_initialized completed at least once. Skip the
-        // check on the hot path.
-        HEAP.dealloc(ptr, layout)
-    }
-}
-
-/// The sized variant (H-2): identical machinery, a per-BINARY heap span.
-/// The span is LAZY (demand-zero overcommit), so a big span costs address
-/// space only until touched -- physical pages commit one at a time as the
-/// high-water mark rises, and the I-32 page budget charges at fault time.
-/// A binary with a real working set (halcyond: two parsed faces, atlas
-/// pages, the transcript's content budget) declares
-/// `ThylaAllocN<{64 * 1024 * 1024}>`; everything else keeps `ThylaAlloc`
-/// (4 MiB) and is byte-for-byte unaffected. Only one global allocator
-/// exists per binary, so the singleton HEAP/STATE stay correct.
-pub struct ThylaAllocN<const BYTES: usize>;
-
-unsafe impl<const BYTES: usize> GlobalAlloc for ThylaAllocN<BYTES> {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ensure_initialized(BYTES);
-        HEAP.alloc(layout)
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        HEAP.alloc_zeroed(layout)
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         HEAP.dealloc(ptr, layout)
     }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        HEAP.realloc(ptr, layout, new_size)
+    }
 }
 
-// ensure_initialized — single-init dispatch. First caller wins the
-// CAS and performs SYS_BURROW_ATTACH + heap init; subsequent callers
-// (or losers of a concurrent first-call race) observe STATE_READY
-// and skip the work.
-//
-// Inlining is left to the compiler; the fast-path is a single
-// atomic load + compare. Realistic call sites are deeply inlined
-// inside Box::new / Vec::push / etc., so even hot allocation loops
-// pay only the load.
-unsafe fn ensure_initialized(heap_bytes: usize) {
-    if STATE.load(Ordering::Acquire) == STATE_READY {
-        return;
-    }
+/// Bytes the heap holds from the system: dlmalloc's segments plus the direct
+/// blocks. The data pages the kernel charges for them are at most this; its
+/// count adds the page tables and pagemap nodes that map them, about one page
+/// in 256.
+pub fn footprint() -> usize {
+    HEAP.footprint()
+}
 
-    match STATE.compare_exchange(
-        STATE_UNINIT,
-        STATE_INITIALIZING,
-        Ordering::AcqRel,
-        Ordering::Relaxed,
-    ) {
-        Ok(_) => {
-            // Won the race. Perform the one-time init. The heap region is
-            // RESERVED lazily (overcommit): the span costs nothing until
-            // the linked-list allocator hands out blocks that get written,
-            // which fault pages in one at a time. A binary that allocates
-            // little commits little.
-            let rc = t_burrow_attach_lazy(heap_bytes as u64);
-            if rc <= 0 {
-                // SYS_BURROW_ATTACH_LAZY returns a positive VA on success
-                // and -1 on failure. Treat both 0 and negative as
-                // failure (0 would be the null VA, which the kernel
-                // never returns from this syscall but we defend
-                // against anyway).
-                //
-                // No path to recover at heap init time. Fail fast.
-                t_exits(1);
-            }
-            HEAP.lock().init(rc as usize as *mut u8, heap_bytes);
+/// Give back what the heap can now, rather than at the next trim a free
+/// triggers (once dlmalloc's top chunk passes 2 MiB).
+pub fn trim() -> bool {
+    HEAP.trim()
+}
 
-            // Publish the initialized heap bounds. Release pairs
-            // with the Acquire load above (and with the spin loop
-            // in the CAS-loser branch).
-            STATE.store(STATE_READY, Ordering::Release);
-        }
-        Err(_) => {
-            // Lost the race (some other thread is initializing).
-            // Spin until the initializer publishes STATE_READY.
-            // Bounded by one SYS_BURROW_ATTACH + a small amount of
-            // heap-init work — microseconds at most.
-            while STATE.load(Ordering::Acquire) != STATE_READY {
-                core::hint::spin_loop();
-            }
-        }
-    }
+/// How many reservations dlmalloc's segments occupy.
+pub fn reservations() -> usize {
+    HEAP.reservations()
 }

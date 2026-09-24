@@ -1,11 +1,13 @@
 // cat [-AbEnstTuv] [FILE...] -- concatenate files (or stdin) to stdout.
 //
-// With no operands (or "-"), copies stdin. With no flags the plain path
-// streams bytes via io::copy (byte-clean -- cat is a pipe payload tool). Any
-// of -n/-b (number), -E/-T/-v/-A (show ends/tabs/nonprinting), or -s (squeeze
-// blank runs) switches to a line-oriented path: a user-requested transform,
-// still plain text and pipe-safe. The line counter and the squeeze state are
-// continuous across every operand. Absolute paths only (no cwd resolution).
+// With no operands (or "-"), copies stdin. With no flags the bytes go out as
+// they are read (byte-clean -- cat is a pipe payload tool). Any of -n/-b
+// (number), -E/-T/-v/-A (show ends/tabs/nonprinting), or -s (squeeze blank
+// runs) passes each read through coreutils::stream::CatLines: a user-requested
+// transform, still plain text and pipe-safe, that holds no line, so a line with
+// no end streams like any other input. The line counter and the squeeze state
+// are continuous across every operand, which is numbered as one input.
+// Absolute paths only (no cwd resolution).
 
 #![no_std]
 #![no_main]
@@ -16,10 +18,11 @@ use alloc::vec::Vec;
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
+use coreutils::stream::{self, CatLines};
 use libthyla_rs::env::{self, Args};
-use libthyla_rs::err::Result;
+use libthyla_rs::err::Error;
 use libthyla_rs::fs::File;
-use libthyla_rs::io::{self, BufRead, BufReader, Read, Write};
+use libthyla_rs::io::{self, Read, Write};
 use libthyla_rs::eprintln;
 
 #[no_mangle]
@@ -46,43 +49,13 @@ Examples:
   cat a b > both        # concatenate two files
 ";
 
-/// Which line transforms are active. `line_mode()` is true when any of them
-/// is set (otherwise cat takes the raw byte-copy fast path).
-#[derive(Default)]
-struct Opts {
-    number: bool,
-    number_nonblank: bool,
-    squeeze: bool,
-    show_ends: bool,
-    show_tabs: bool,
-    show_nonprint: bool,
-}
-
-impl Opts {
-    fn line_mode(&self) -> bool {
-        self.number
-            || self.number_nonblank
-            || self.squeeze
-            || self.show_ends
-            || self.show_tabs
-            || self.show_nonprint
-    }
-}
-
-/// Output state carried across every operand (continuous numbering + squeeze).
-#[derive(Default)]
-struct State {
-    lineno: u64,
-    prev_blank: bool,
-}
-
 fn run(args: Args) -> i64 {
     if let Some(rc) = coreutils::usage::help_if_requested(args, USAGE) {
         return rc;
     }
 
     let mut idx = 1;
-    let mut opts = Opts::default();
+    let mut lines = CatLines::default();
     while let Some(a) = args.get_str(idx) {
         if a == "--" {
             idx += 1;
@@ -91,24 +64,24 @@ fn run(args: Args) -> i64 {
         if a.starts_with('-') && a.len() > 1 {
             for ch in a[1..].chars() {
                 match ch {
-                    'n' => opts.number = true,
-                    'b' => opts.number_nonblank = true,
-                    's' => opts.squeeze = true,
-                    'E' => opts.show_ends = true,
-                    'T' => opts.show_tabs = true,
-                    'v' => opts.show_nonprint = true,
+                    'n' => lines.number = true,
+                    'b' => lines.number_nonblank = true,
+                    's' => lines.squeeze = true,
+                    'E' => lines.show_ends = true,
+                    'T' => lines.show_tabs = true,
+                    'v' => lines.show_nonprint = true,
                     'e' => {
-                        opts.show_nonprint = true;
-                        opts.show_ends = true;
+                        lines.show_nonprint = true;
+                        lines.show_ends = true;
                     }
                     't' => {
-                        opts.show_nonprint = true;
-                        opts.show_tabs = true;
+                        lines.show_nonprint = true;
+                        lines.show_tabs = true;
                     }
                     'A' => {
-                        opts.show_nonprint = true;
-                        opts.show_ends = true;
-                        opts.show_tabs = true;
+                        lines.show_nonprint = true;
+                        lines.show_ends = true;
+                        lines.show_tabs = true;
                     }
                     'u' => {} // unbuffered: already effectively so
                     _ => {
@@ -124,10 +97,8 @@ fn run(args: Args) -> i64 {
     }
 
     let mut status = 0;
-    let mut out = io::stdout();
     let mut had = false;
-    let mut st = State::default();
-
+    let mut staged = Vec::new();
     let mut i = idx;
     while let Some(op) = args.get(i) {
         i += 1;
@@ -140,125 +111,67 @@ fn run(args: Args) -> i64 {
                 continue;
             }
         };
-        if path == "-" {
-            if let Err(e) = cat_reader(io::stdin(), &mut out, &opts, &mut st) {
-                eprintln!("cat: -: {}", e);
-                status = 1;
+        let r = if path == "-" {
+            cat_reader(&mut io::stdin(), &mut lines, &mut staged)
+        } else {
+            match File::open(path) {
+                Ok(mut f) => cat_reader(&mut f, &mut lines, &mut staged),
+                Err(e) => Err(Failed::Input(e)),
             }
-            continue;
-        }
-        match File::open(path) {
-            Ok(f) => {
-                if let Err(e) = cat_reader(f, &mut out, &opts, &mut st) {
-                    eprintln!("cat: {}: {}", path, e);
-                    status = 1;
-                }
-            }
-            Err(e) => {
-                eprintln!("cat: {}: {}", path, e);
-                status = 1;
-            }
+        };
+        if !settle(path, r, &mut status) {
+            return status;
         }
     }
 
     if !had {
-        if let Err(e) = cat_reader(io::stdin(), &mut out, &opts, &mut st) {
-            eprintln!("cat: stdin: {}", e);
-            status = 1;
-        }
+        settle("stdin", cat_reader(&mut io::stdin(), &mut lines, &mut staged), &mut status);
     }
     status
 }
 
-/// Stream one source to `out`: byte-for-byte when no transform is active, or
-/// line-oriented (numbering / squeeze / show-ends-tabs-nonprinting) when one
-/// is, continuing the cross-operand `st`.
-fn cat_reader<R: Read>(r: R, out: &mut impl Write, opts: &Opts, st: &mut State) -> Result<()> {
-    if !opts.line_mode() {
-        let mut r = r;
-        return io::copy(&mut r, out).map(|_| ());
+/// Why one input was not all written: the input, or stdout.
+enum Failed {
+    Input(Error),
+    Output(Error),
+}
+
+/// Report one input's outcome into `status`; false once stdout is gone.
+fn settle(name: &str, r: Result<(), Failed>, status: &mut i64) -> bool {
+    match r {
+        Ok(()) => true,
+        Err(Failed::Input(e)) => {
+            eprintln!("cat: {}: {}", name, e);
+            *status = 1;
+            true
+        }
+        // A reader that went away had what it wanted.
+        Err(Failed::Output(Error::BrokenPipe)) => false,
+        Err(Failed::Output(e)) => {
+            eprintln!("cat: write error: {}", e);
+            *status = 1;
+            false
+        }
     }
-    let mut br = BufReader::new(r);
-    let mut line: Vec<u8> = Vec::new();
+}
+
+/// Copy one input to stdout a read at a time, through `lines` when a transform
+/// is on (`staged` holds one read's transformed bytes).
+fn cat_reader<R: Read + ?Sized>(r: &mut R, lines: &mut CatLines, staged: &mut Vec<u8>) -> Result<(), Failed> {
+    let mut buf = [0u8; stream::BUF];
+    let mut out = io::stdout();
     loop {
-        line.clear();
-        if br.read_until(b'\n', &mut line)? == 0 {
-            break; // EOF
+        let got = r.read(&mut buf).map_err(Failed::Input)?;
+        if got == 0 {
+            return Ok(());
         }
-        let is_blank = line.as_slice() == b"\n";
-        // -s: collapse a run of blank lines to a single one.
-        if opts.squeeze && is_blank && st.prev_blank {
-            continue;
-        }
-        st.prev_blank = is_blank;
-        // Numbering: -b numbers nonblank only (and subsumes -n); -n numbers all.
-        let number_this = if opts.number_nonblank {
-            !is_blank
+        let bytes = if lines.active() {
+            staged.clear();
+            lines.feed(&buf[..got], staged);
+            &staged[..]
         } else {
-            opts.number
+            &buf[..got]
         };
-        if number_this {
-            st.lineno += 1;
-            write!(out, "{:6}\t", st.lineno)?;
-        }
-        emit_content(out, &line, opts)?;
+        out.write_all(bytes).map_err(Failed::Output)?;
     }
-    Ok(())
-}
-
-/// Emit one line's content with -E/-T/-v transforms. `line` includes its
-/// trailing '\n' (if any); the newline is emitted last, preceded by '$' under
-/// -E. A final line without a newline gets neither.
-fn emit_content(out: &mut impl Write, line: &[u8], opts: &Opts) -> Result<()> {
-    let has_nl = line.last() == Some(&b'\n');
-    let content = if has_nl { &line[..line.len() - 1] } else { line };
-    if opts.show_tabs || opts.show_nonprint {
-        for &b in content {
-            match b {
-                b'\t' if opts.show_tabs => out.write_all(b"^I")?,
-                // -v leaves TAB literal (only -T renders it); printable ASCII
-                // passes through; other controls/high-bit render under -v.
-                b'\t' | 0x20..=0x7e => out.write_all(&[b])?,
-                _ if opts.show_nonprint => write_nonprint(out, b)?,
-                _ => out.write_all(&[b])?, // -T only: non-tab controls stay literal
-            }
-        }
-    } else {
-        out.write_all(content)?;
-    }
-    if opts.show_ends && has_nl {
-        out.write_all(b"$")?;
-    }
-    if has_nl {
-        out.write_all(b"\n")?;
-    }
-    Ok(())
-}
-
-/// Render one nonprinting byte in GNU `cat -v` notation: a high bit becomes a
-/// `M-` prefix over the low 7 bits; a control char becomes `^X` (X = c+0x40);
-/// DEL (0x7f) becomes `^?`.
-fn write_nonprint(out: &mut impl Write, b: u8) -> Result<()> {
-    let mut buf = [0u8; 4];
-    let mut n = 0;
-    let mut c = b;
-    if c >= 0x80 {
-        buf[n] = b'M';
-        buf[n + 1] = b'-';
-        n += 2;
-        c &= 0x7f;
-    }
-    if c < 0x20 {
-        buf[n] = b'^';
-        buf[n + 1] = c + 0x40;
-        n += 2;
-    } else if c == 0x7f {
-        buf[n] = b'^';
-        buf[n + 1] = b'?';
-        n += 2;
-    } else {
-        buf[n] = c;
-        n += 1;
-    }
-    out.write_all(&buf[..n])
 }

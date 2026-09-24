@@ -4,7 +4,7 @@ type: moc
 title: "The shell and TUI stack — text in, effects out, and a screen in between"
 parent: moc-userspace
 created: 2026-08-03
-updated: 2026-08-04
+updated: 2026-09-24
 ---
 What a person actually touches, and what they look at while doing it: `ut`, the
 rc-shaped shell — its parser, its evaluator, and the line editor in front of
@@ -91,7 +91,8 @@ visible. In particular, two failure modes are worth not conflating:
 ## Cross-cutting
 
 - Everything here is native, so it stands on [[sub-libthyla-rs]] — the same
-  ownership, error and allocation discipline, and the same fixed heap.
+  ownership, error and allocation discipline, and the same heap, which grows as
+  it is used and gives memory back ([[sub-thyla-heap]]).
 - The shell is also the thing that *starts* other programs, so its evaluator is
   the busiest consumer of the process and namespace surfaces the kernel plane
   describes.

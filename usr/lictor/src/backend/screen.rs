@@ -11,9 +11,9 @@ const CHUNK: usize = 1024 * 1024;
 const BASE: u64 = 0x0400_0000;
 
 /// CPU-only, non-exportable raster workspace, committed before broker admission.
-/// A framebuffer can exceed the entire general-purpose heap (35 MiB at the
-/// maximum supported geometry). Reserving it separately also prevents normal
-/// resource churn from fragmenting the allocation needed to enter SAK.
+/// A framebuffer is 35 MiB at the maximum supported geometry. Reserving it
+/// separately keeps normal resource churn from fragmenting the allocation
+/// needed to enter SAK.
 struct Raster { base: u64, bytes: u64 }
 impl Raster {
     fn new(bytes: usize) -> Result<Self, Error> {

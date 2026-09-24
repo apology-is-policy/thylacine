@@ -76,8 +76,8 @@ const MAX_DIM: u16 = 1000;
 // past this budget is still caught by the steady-state resize backstop
 // (bug_nora_hvf_cpr_handshake).
 const SIZE_QUERY_TIMEOUT_MS: u32 = 150;
-/// The largest file nora will load (matches the Stratum POC's 2 MiB cap and
-/// leaves headroom under the userspace heap for the editor's working set).
+/// The largest file nora will load (matches the Stratum POC's 2 MiB cap; it
+/// was set to leave headroom under what was then a fixed 4 MiB heap).
 const MAX_FILE: usize = 2 * 1024 * 1024;
 
 #[no_mangle]

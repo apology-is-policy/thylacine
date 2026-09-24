@@ -118,12 +118,13 @@ macro_rules! step {
 /// and there is no path by which a larger frame is legitimate here. 64 KiB
 /// therefore leaves sixteen-fold headroom for a future msize bump while keeping
 /// the worst case a hostile server can drive to two 64 KiB buffers, one per
-/// pump, against `INITIAL_HEAP_SIZE` (4 MiB, and NOT growable).
+/// pump.
 ///
 /// It was 1 MiB, which was described as "far below a length a hostile peer could
-/// use to make us allocate the heap". Two of those is a quarter of the heap, and
-/// on exhaustion the panic handler calls `t_exits(1)` -- so a bound written to
-/// prevent a denial of service was set where it could deliver one.
+/// use to make us allocate the heap". When the heap was a fixed 4 MiB, two of
+/// those were a quarter of it, and on exhaustion the panic handler calls
+/// `t_exits(1)` -- so a bound written to prevent a denial of service was set
+/// where it could deliver one.
 const MSG_MAX: u32 = 64 * 1024;
 
 /// A 9P message is at minimum `size[4] type[1] tag[2]`. npxf's server refuses

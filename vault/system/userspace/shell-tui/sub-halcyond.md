@@ -45,7 +45,7 @@ hazards: [haz-budget-stored-not-derived]
 abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md", "docs/BEACON.md", "docs/KAUA-TERM.md", "docs/HALCYON-INSTRUMENT.md"]
 created: 2026-09-05
-updated: 2026-09-17
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -574,8 +574,8 @@ halcyond's exposure is a bounded WRITE of untrusted bytes, not a codec.
   write carries an `inlinewire` header (magic/format/w/h) then the ARGB payload.
   `PlaceAccum::write` validates the header -- magic, `FORMAT_ARGB8888`,
   dimensions, and a heap-safe per-image pixel cap (`PLACE_MAX_PIXELS` = 1 Mpx,
-  deliberately BELOW `inlinewire::MAX_PIXELS`, so a decoded raster cannot exhaust
-  halcyond's fixed 64 MiB heap) -- BEFORE it allocates a byte of payload, and
+  deliberately BELOW `inlinewire::MAX_PIXELS`, so a decoded raster cannot crowd
+  halcyond's 64 MiB working budget) -- BEFORE it allocates a byte of payload, and
   `reserve_exact`s the exact `total_len` so the buffer never Vec-doubles (the
   audit-F2 2x overshoot); accumulates sequential writes bounded by the header's
   own declared total; and on completion yields the `w*h` ARGB `Vec<u32>` for
@@ -589,7 +589,7 @@ halcyond's exposure is a bounded WRITE of untrusted bytes, not a codec.
     accumulator + a 4 MiB completion `Vec<u32>` at 1 Mpx). The per-image cap is
     DISPLAY-ADAPTIVE (`main.rs place_cap_for` -> `PlaceServer::set_max_pixels` each
     loop): the atlas scales with the scanout (~6 MiB at 1280x800, ~18 MiB at 4K),
-    so the cap is the heap RESIDUAL after it -- holding the full 1 Mpx (native-size)
+    so the cap is the budget RESIDUAL after it -- holding the full 1 Mpx (native-size)
     through 2560x1600 (the operator's HiDPI) and shrinking only past ~3K, where a
     fixed 8 MiB place peak beside the ~18 MiB atlas + 32 MiB transcript would
     OOM. The round-1 defect was `MAX_CONNS`=4 x a doubled 16 MiB = the whole heap;
@@ -740,7 +740,7 @@ anchors are the H-2 / H-3b / H-3c / H-3d / KT-1 trigger rows +
   sequential-only and cannot grow the buffer past the header's declared total;
   a clunk mid-transfer discards the partial. So a hostile / oversize / truncated
   place-request can neither drive a large reserve nor exhaust the renderer's
-  fixed heap -- it is refused (Rlerror) and the transfer torn down.
+  working budget -- it is refused (Rlerror) and the transfer torn down.
 - **The session-path channel is pane-isolated on TWO axes** (I-47/I-1/I-22, the
   `--session` deployment). A place-request reaches only the pane that owns the
   secret token: the token is a CSPRNG `u128` path component living solely in that

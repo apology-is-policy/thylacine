@@ -184,7 +184,7 @@ Invariants the impl must uphold (the audit prosecutes these):
   half-open `data` read after `CLOSED` never reads a reused socket's bytes.
 - **Bounded transports:** at most 64 active plus retiring TCP sockets, admitted
   before clone or accept replacement allocation; at most 16 public slots.
-  Netd reserves retirement metadata and a 16 MiB heap. TCP stats expose
+  Netd reserves retirement metadata; its heap grows (B-1c). TCP stats expose
   `transports`, `retiring`, and `close-timeouts` alongside public `active`.
 - **`N` reuse is gated on clunk** (I-10-style: the connection number is not
   reusable until its directory is fully torn down), so a late reply on an old

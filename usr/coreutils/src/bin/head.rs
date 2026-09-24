@@ -2,7 +2,8 @@
 //
 // Streams: stops reading after the N-th newline, so it does not slurp a
 // whole large file or block forever on an endless stream. Multiple files
-// get "==> name <==" banners (GNU style). No operand / "-" reads stdin.
+// get "==> name <==" banners (GNU style). No operand / "-" reads stdin. Once
+// stdout's reader is gone, head stops, silently.
 
 #![no_std]
 #![no_main]
@@ -11,10 +12,10 @@
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
 use libthyla_rs::env::{self, Args};
-use libthyla_rs::err::Result;
+use libthyla_rs::err::Error;
 use libthyla_rs::fs::File;
 use libthyla_rs::io::{self, Read, Write};
-use libthyla_rs::{eprintln, print};
+use libthyla_rs::eprintln;
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
@@ -42,43 +43,43 @@ fn run(args: Args) -> i64 {
     let mut bytes = false;
     let mut idx = 1;
     loop {
-        match args.get_str(idx) {
-            Some("-n") | Some("-c") => {
-                let want_bytes = args.get_str(idx) == Some("-c");
-                match args.get_str(idx + 1).and_then(|s| s.parse::<usize>().ok()) {
-                    Some(v) => {
-                        n = v;
-                        bytes = want_bytes;
-                        idx += 2;
-                    }
-                    None => {
-                        eprintln!("head: invalid count");
-                        return 1;
-                    }
-                }
+        // The count and where it was: `-n N`, attached `-nN`, or legacy `-N`.
+        let (text, want_bytes, took) = match args.get_str(idx) {
+            // `--` ends the options, so an operand may look like one.
+            Some("--") => {
+                idx += 1;
+                break;
             }
-            // Attached forms `-cN` / `-nN`.
+            Some(flag @ ("-n" | "-c")) => match args.get_str(idx + 1) {
+                Some(t) => (t, flag == "-c", 2),
+                None => {
+                    eprintln!("head: invalid count");
+                    return 1;
+                }
+            },
             Some(a)
                 if a.len() > 2
                     && (a.starts_with("-c") || a.starts_with("-n"))
                     && a[2..].bytes().all(|c| c.is_ascii_digit()) =>
             {
-                n = a[2..].parse::<usize>().unwrap_or(10);
-                bytes = a.starts_with("-c");
-                idx += 1;
+                (&a[2..], a.starts_with("-c"), 1)
             }
-            // Legacy `-N` = first N lines.
-            Some(a)
-                if a.len() > 1
-                    && a.starts_with('-')
-                    && a != "-"
-                    && a[1..].bytes().all(|c| c.is_ascii_digit()) =>
-            {
-                n = a[1..].parse::<usize>().unwrap_or(10);
-                bytes = false;
-                idx += 1;
+            Some(a) if a.len() > 1 && a.starts_with('-') && a[1..].bytes().all(|c| c.is_ascii_digit()) => {
+                (&a[1..], false, 1)
             }
             _ => break,
+        };
+        // A count too large to hold is refused, whichever form it came in.
+        match text.parse::<usize>() {
+            Ok(v) => {
+                n = v;
+                bytes = want_bytes;
+                idx += took;
+            }
+            Err(_) => {
+                eprintln!("head: invalid count");
+                return 1;
+            }
         }
     }
 
@@ -107,36 +108,65 @@ fn run(args: Args) -> i64 {
             }
         };
         if count_ops > 1 {
-            if !first {
-                io::out(b"\n");
-            }
-            print!("==> {} <==\n", path);
+            let r = banner(path, first);
             first = false;
+            if !settle(path, r, &mut status) {
+                return status;
+            }
         }
-        match File::open(path) {
-            Ok(mut f) => {
-                if let Err(e) = emit(&mut f, n, bytes) {
-                    eprintln!("head: {}: {}", path, e);
-                    status = 1;
-                }
+        let r = if path == "-" {
+            emit(&mut io::stdin(), n, bytes)
+        } else {
+            match File::open(path) {
+                Ok(mut f) => emit(&mut f, n, bytes),
+                Err(e) => Err(Failed::Input(e)),
             }
-            Err(e) => {
-                eprintln!("head: {}: {}", path, e);
-                status = 1;
-            }
+        };
+        if !settle(path, r, &mut status) {
+            return status;
         }
     }
 
     if !had {
-        if let Err(e) = emit(&mut io::stdin(), n, bytes) {
-            eprintln!("head: stdin: {}", e);
-            status = 1;
-        }
+        settle("stdin", emit(&mut io::stdin(), n, bytes), &mut status);
     }
     status
 }
 
-fn emit<R: Read>(r: &mut R, n: usize, bytes: bool) -> Result<()> {
+/// The line naming each input when there are several, with a blank line
+/// before all but the first, written whole or failed (GNU's header).
+fn banner(path: &str, first: bool) -> Result<(), Failed> {
+    let sep = if first { "" } else { "\n" };
+    let name = if path == "-" { "standard input" } else { path };
+    writeln!(io::stdout(), "{}==> {} <==", sep, name).map_err(Failed::Output)
+}
+
+/// Why one input's head was not all written: the input, or stdout.
+enum Failed {
+    Input(Error),
+    Output(Error),
+}
+
+/// Report one input's outcome into `status`; false once stdout is gone.
+fn settle(name: &str, r: Result<(), Failed>, status: &mut i64) -> bool {
+    match r {
+        Ok(()) => true,
+        Err(Failed::Input(e)) => {
+            eprintln!("head: {}: {}", name, e);
+            *status = 1;
+            true
+        }
+        // A reader that went away had what it wanted.
+        Err(Failed::Output(Error::BrokenPipe)) => false,
+        Err(Failed::Output(e)) => {
+            eprintln!("head: write error: {}", e);
+            *status = 1;
+            false
+        }
+    }
+}
+
+fn emit<R: Read>(r: &mut R, n: usize, bytes: bool) -> Result<(), Failed> {
     if bytes {
         emit_head_bytes(r, n)
     } else {
@@ -144,7 +174,7 @@ fn emit<R: Read>(r: &mut R, n: usize, bytes: bool) -> Result<()> {
     }
 }
 
-fn emit_head_lines<R: Read>(r: &mut R, n: usize) -> Result<()> {
+fn emit_head_lines<R: Read>(r: &mut R, n: usize) -> Result<(), Failed> {
     if n == 0 {
         return Ok(());
     }
@@ -152,7 +182,7 @@ fn emit_head_lines<R: Read>(r: &mut R, n: usize) -> Result<()> {
     let mut buf = [0u8; 4096];
     let mut lines = 0usize;
     loop {
-        let got = r.read(&mut buf)?;
+        let got = r.read(&mut buf).map_err(Failed::Input)?;
         if got == 0 {
             return Ok(());
         }
@@ -169,14 +199,14 @@ fn emit_head_lines<R: Read>(r: &mut R, n: usize) -> Result<()> {
                 }
             }
         }
-        out.write_all(&chunk[..emit_to])?;
+        out.write_all(&chunk[..emit_to]).map_err(Failed::Output)?;
         if done {
             return Ok(());
         }
     }
 }
 
-fn emit_head_bytes<R: Read>(r: &mut R, n: usize) -> Result<()> {
+fn emit_head_bytes<R: Read>(r: &mut R, n: usize) -> Result<(), Failed> {
     if n == 0 {
         return Ok(());
     }
@@ -184,12 +214,12 @@ fn emit_head_bytes<R: Read>(r: &mut R, n: usize) -> Result<()> {
     let mut buf = [0u8; 4096];
     let mut remaining = n;
     loop {
-        let got = r.read(&mut buf)?;
+        let got = r.read(&mut buf).map_err(Failed::Input)?;
         if got == 0 {
             return Ok(());
         }
         let take = got.min(remaining);
-        out.write_all(&buf[..take])?;
+        out.write_all(&buf[..take]).map_err(Failed::Output)?;
         remaining -= take;
         if remaining == 0 {
             return Ok(());

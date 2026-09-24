@@ -13,12 +13,11 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-// The library's working set is bounded by one section and its largest block,
-// and the host test `bounds` holds the worst sections within SECTION_MAX under
-// this heap with the allocator ThylaAllocN uses (MANUAL-DESIGN 8.1).
+// The library's working set is bounded by one section and its largest block;
+// the host test `bounds` measures the worst sections under this allocator's
+// policy and holds them within half of HEAP_BYTES (MANUAL-DESIGN 8.1).
 #[global_allocator]
-static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAllocN<{ manual::HEAP_BYTES }> =
-    libthyla_rs::alloc::ThylaAllocN;
+static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
 use beacon::{BeaconMode, Tier};
 use libthyla_rs::env;

@@ -208,7 +208,7 @@ them, which is coherent but must be *decided*, not discovered; and whether
 |---|---|---|
 | **X-1** | **`S_IFMT` mask** before the `mode & ~0777` gate in `vivarium_mkdirat_decide:829` and `vivarium_openat_create_decide:790`. busybox passes the full mode (`S_IFDIR\|0755`, `S_IFREG\|0644`, established by disassembly); the gate was written to refuse setuid/sgid/sticky and catches `S_IFMT` as collateral. Linux defines those bits as ignored here, so masking is exact, and the deliberate `07000` refusal survives. | W2-a, every archive tool |
 | **X-2** | restage the alpine bundle with `/bin` links **relative** (`-> busybox`, currently 80 of 80 are absolute `-> /bin/busybox`), then mount it `MPHENO_LINUX` like `/viv/bin` (`joey.c:7115`, ~25 lines) and add to both path lists. Absolute targets re-anchor at the caller's root (`stalk.c:383-403`, I-28 working as designed), which is exactly why they resolve inside a container and ghost outside one. | W2-a, and the operator's standing "invoke alpine bins directly" ask |
-| **X-3** | raise `INITIAL_HEAP_SIZE` (`alloc.rs:77`) from 4 MiB to 64 MiB. **Costs zero committed pages**: `burrow_attach_lazy` charges nothing at attach (`syscall.c:5468`), the fault charges one page at a time (`fault.c:635`), and `HoleList::new` writes a single 16-byte header. Also fix the doc comment, which cites `BURROW_ATTACH_MAX` (256 MiB, the *eager* cap) where the real bound is `BURROW_RESERVE_MAX` (1 GiB). | nora, every native program |
+| **X-3** | raise `INITIAL_HEAP_SIZE` (`alloc.rs:77`) from 4 MiB to 64 MiB. **Costs zero committed pages**: `burrow_attach_lazy` charges nothing at attach (`syscall.c:5468`), the fault charges one page at a time (`fault.c:635`), and `HoleList::new` writes a single 16-byte header. Also fix the doc comment, which cites `BURROW_ATTACH_MAX` (256 MiB, the *eager* cap) where the real bound is `BURROW_RESERVE_MAX` (1 GiB). **SUPERSEDED 2026-09-24 by B-1c (`docs/browser-status.md`):** the heap has no fixed size -- thyla-heap, dlmalloc over lazy reservations that grow and give back -- and `INITIAL_HEAP_SIZE` is gone with the comment. | nora, every native program |
 | **X-4** | **make panics say something.** `lib.rs:3269` is `fn panic(_info) -> ! { t_exits(1) }` -- info discarded, silent exit 1. Every OOM and panic in native userspace is currently indistinguishable from "the program did nothing". | all of them |
 | **X-5** | ut: stop the prompt render erasing a partial last row (`line_editor.rs:803` emits `\r` + `\x1b[K` first), which eats the last line of any output lacking a trailing newline. | all of them |
 | **X-6** | ut: print on spawn failure. `eval/stmt.rs:1490` sets `$errstr`, sets `$status=127`, and returns `Ok` -- nothing prints on the `Ok` path, so an unknown command is silent. | all of them |
@@ -233,6 +233,8 @@ them, which is coherent but must be *decided*, not discovered; and whether
    and has **zero callers**. `linked_list_allocator` has `extend` and no
    `shrink`, so a native program's peak stays resident and charged for its whole
    lifetime. Go reclaims (`joey.c:5820`); pouch does not; native Rust does not.
+   **DONE 2026-09-24:** pouch's `madvise` decommits since B-1b, and native
+   Rust's heap since B-1c (thyla-heap's `free_part` is the decommit).
 
 ---
 

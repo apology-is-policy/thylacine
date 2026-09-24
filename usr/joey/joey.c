@@ -5860,6 +5860,28 @@ int main(void) {
         t_putstr("joey: /capacity-probe reaped status=0; 4 GiB reserve / range detach / census round-trip verified from EL0\n");
     }
 
+    // === /heap-probe (B-1c: the native heap) ===
+    // libthyla-rs's heap as a program sees it (ARCH 6.5 "Capacity"): 64 MiB of
+    // small blocks raise the census past the old fixed heap's 4 MiB and give it
+    // back as they are freed, a 32 MiB block returns its pages while a small one
+    // stays live, and a reservation dlmalloc emptied is released. Prints
+    // "heap-probe: ALL OK" and exits 0.
+    {
+        const char hp_name[] = "heap-probe";
+        long hp_pid = t_spawn(hp_name, sizeof(hp_name) - 1);
+        if (hp_pid <= 0) {
+            t_putstr("joey: t_spawn(\"heap-probe\") FAILED\n");
+            return 1;
+        }
+        int hp_status = -1;
+        long hp_reaped = t_wait_pid_for((int)hp_pid, 0, &hp_status);
+        if (hp_reaped != hp_pid || hp_status != 0) {
+            t_putstr("joey: /heap-probe FAILED\n");
+            return 1;
+        }
+        t_putstr("joey: /heap-probe reaped status=0; the heap grows past 4 MiB and gives back on free (small blocks, a large block, a reservation) verified from EL0\n");
+    }
+
     // === /burrow-torture (kernel-burrow + SMP regression guard) ===
     // Native attach/detach/re-attach stress over SYS_BURROW_ATTACH/DETACH -- no
     // musl, no Stratum, no mount. Born in the EBADTAG DFS to test whether the

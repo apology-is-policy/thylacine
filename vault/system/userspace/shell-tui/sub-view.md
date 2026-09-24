@@ -25,7 +25,7 @@ hazards: []
 abis: []
 design: ["docs/HALCYON.md"]
 created: 2026-09-09
-updated: 2026-09-17
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -72,7 +72,8 @@ after its own palette/sub-8-bit expansion -- Luma / LumaA / RGB / RGBA, 8- or
 replicated across RGB; a missing alpha opaque). `cartoon::Op::Image` composites
 the alpha over the pane ground, so a transparent PNG shows the pane through.
 `MAX_PIXELS` (64 Mpx) is the absolute ceiling; the REAL bound is the caller's
-heap. `png_dimensions` reads the IHDR WITHOUT decoding and `within_pixel_budget`
+pixel budget, since the heap grows to hold the decode. `png_dimensions` reads
+the IHDR WITHOUT decoding and `within_pixel_budget`
 compares `w*h` (in u64, no overflow) to a caller budget, so a viewer rejects an
 over-budget image from the headers alone -- BEFORE the heap-hungry decode
 (`decode_png` allocates the samples buffer + the ARGB buffer + holds the input,
@@ -96,13 +97,16 @@ The bin flow: read (`slurp_capped`, 16 MiB cap) -> sniff -> **reject over-budget
 from the headers** (`check_budget` on `png_dimensions`/`jpeg_dimensions` +
 `within_pixel_budget` vs `VIEW_MAX_PIXELS` = 3 Mpx) -> `decode_png`/`decode_jpeg`
 -> `drop(bytes)` -> `place_decoded` (`place_on_halcyon` + the standalone report).
-The decode runs on a **64 MiB `ThylaAllocN` heap**; `VIEW_MAX_PIXELS` = 3 Mpx is
-the real bound, sized for the WORST decode mode's peak + the held input, checked
-before decode. The worst mode is a PROGRESSIVE JPEG: zune holds a full-image
-coefficient buffer per input component (~2 B * components * npx) alongside the
-output, so its peak ~= READ_CAP + 12*npx (vs baseline/PNG ~8*npx) -- 12*3M + 16
-MiB = 52 MiB fits 64; the pre-JPEG-slice 6M would OOM a progressive JPEG
-([[sub-gallery]]'s JPEG-round F1, the sibling of its own R-GALLERY-1 OOM). The
+The decode runs on libthyla-rs's growable heap ([[sub-thyla-heap]], B-1c);
+`VIEW_MAX_PIXELS` = 3 Mpx is the real bound on the WORST decode mode's peak + the
+held input, checked before decode. The worst mode is a PROGRESSIVE JPEG: zune
+holds a full-image coefficient buffer per input component (~2 B * components *
+npx) alongside the output, so its peak ~= READ_CAP + 12*npx (vs baseline/PNG
+~8*npx) -- 12*3M + 16 MiB = 52 MiB. The 3 Mpx figure was sized to the fixed 64
+MiB heap the program declared until B-1c, where the pre-JPEG-slice 6M would OOM a
+progressive JPEG ([[sub-gallery]]'s JPEG-round F1, the sibling of its own
+R-GALLERY-1 OOM); whether it should now follow the system's memory is an open
+policy question (OPEN-BUGS). The
 channel applies the current per-pane raster allowance downstream; a successful
 decode alone does not guarantee display admission. Both image
 arms produce a `Raster`; `Kind::Other` falls back to `cat`.
@@ -178,8 +182,8 @@ bound and the enforcement of the parse against hostile bytes are the reader's
 
 ## Performance
 
-A one-shot: one file read (`slurp_capped`, 16 MiB cap) on a 64 MiB heap, a
-headers-only dimension read, one zune decode (`bytes` freed after), one channel
+A one-shot: one file read (`slurp_capped`, 16 MiB cap), a headers-only
+dimension read, one zune decode (`bytes` freed after), one channel
 write. No steady state.
 
 ## Prosecution
@@ -195,9 +199,10 @@ write. No steady state.
 - **The heap against a dimension bomb.** A small compressed PNG/JPEG can declare
   huge dimensions; `png_dimensions`/`jpeg_dimensions` + `within_pixel_budget`
   reject `w*h > VIEW_MAX_PIXELS` from the headers before the decoder allocates, so
-  an over-budget image is a clean report, never a silent OOM-exit (the pre-fix
-  defect: a bare `MAX_PIXELS` far above the heap was a phantom bound --
-  [[sub-gallery]]'s holotype F1).
+  an over-budget image is a clean report, never a death at a page fault when the
+  system runs out of memory mid-decode (the pre-fix defect, on the fixed heap: a
+  bare `MAX_PIXELS` far above the heap was a phantom bound -- [[sub-gallery]]'s
+  holotype F1).
 - **The wire against drift.** `inlinewire::parse` validates before it returns;
   the pack/parse round-trip + the bounds rejections are host-tested; the magic
   reads as `HPL2` in a hexdump (a true-comment/wrong-value guard).

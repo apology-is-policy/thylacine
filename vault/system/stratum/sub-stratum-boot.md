@@ -12,7 +12,7 @@ locks: []
 abis: []
 design: ["docs/reference/86-pouch-stratumd-boot.md (the 16c design section)"]
 created: 2026-08-02
-updated: 2026-09-23
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -63,7 +63,15 @@ the rest detached in one range with the census back at its baseline (and an
 empty range answering 0), a 512 MiB reservation detaching, an eager region
 staying charged until its last piece goes, and the refusals (unaligned, zero
 length, below the window) changing nothing. Boot-fatal like every other rung
-(`joey: /capacity-probe FAILED`). The CL-5 probe (`probe_cl5_page_budget`)
+(`joey: /capacity-probe FAILED`). **B-1c rung (2026-09-24).** After it, joey
+spawns `/heap-probe` and reaps it by pid, requiring status 0 -- libthyla-rs's
+heap as a program sees it ([[sub-thyla-heap]]): 64 MiB of small blocks raise the
+data view by at least their pages and by no more than the heap's footprint, and
+fall back to within dlmalloc's kept top of the base with no trim asked for and
+to the base after one; a 32 MiB block returns every page while a small block
+stays live; a reservation switch releases the emptied first reservation; and the
+churn is timed on either side of dlmalloc's trim threshold. Boot-fatal
+(`joey: /heap-probe FAILED`). The CL-5 probe (`probe_cl5_page_budget`)
 reads joey's OWN `budget:` from its status file (`proc_status_field`) rather
 than restating a constant, asks for one page more (refused: a raise without
 authority) and for `0xFFFFFFFF` (refused at validation: over the hard maximum

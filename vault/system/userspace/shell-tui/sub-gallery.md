@@ -15,7 +15,7 @@ hazards: []
 abis: []
 design: ["docs/HALCYON.md"]
 created: 2026-09-09
-updated: 2026-09-17
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -71,15 +71,18 @@ than panics.
 (free the compressed input before the event loop) -> `Surface::fullscreen`
 (bounded connect retry, a labelled block that yields the Surface -- no post-loop
 `unwrap`) -> a `Gallery · <path>` pane title -> `FrameIntent::Static` -> `paint` into `pixels()` -> `present(None)`.
-The decode runs on a **192 MiB `ThylaAllocN` heap**, sized for the WORST decode
-mode: a PROGRESSIVE JPEG holds a full-image coefficient buffer per input component
-(~2 B * components * npx, zune mcu_prog.rs) alongside the output, so its peak ~=
-READ_CAP + 12*npx (vs baseline/PNG ~8*npx) -- 12*12M + 16 MiB = 160 MiB fits, to
-view a ~12 Mpx photo. `GALLERY_MAX_PIXELS` (12 Mpx) is checked BEFORE decode, so
-the pixel bound is REAL, not a phantom the allocator OOM-exits past (the pre-JPEG
-128 MiB OOM-exited a 12 Mpx progressive JPEG -- the JPEG round's F1). ThylaAllocN
-is lazy demand-zero overcommit, so the 192 MiB reservation commits only touched
-pages, within the 256 MiB per-AddrSpace page budget (I-32). The success is announced on serial
+The decode runs on libthyla-rs's growable heap ([[sub-thyla-heap]], B-1c): each
+large buffer is a lazy mapping of its own, detached when freed, and pages are
+charged to the per-AddrSpace page budget (I-32) only as they are touched. The
+WORST decode mode is a PROGRESSIVE JPEG, which holds a full-image coefficient
+buffer per input component (~2 B * components * npx, zune mcu_prog.rs) alongside
+the output, so its peak ~= READ_CAP + 12*npx (vs baseline/PNG ~8*npx) -- 12*12M +
+16 MiB = 160 MiB at the cap. `GALLERY_MAX_PIXELS` (12 Mpx) is checked BEFORE
+decode, so an image past it is a clean error, never a death at a page fault when
+the system runs out of memory mid-decode. The 12 Mpx figure was sized to the
+fixed 192 MiB heap the program declared until B-1c (the pre-JPEG 128 MiB
+OOM-exited a 12 Mpx progressive JPEG -- the JPEG round's F1); whether it should
+now follow the system's memory is an open policy question (OPEN-BUGS). The success is announced on serial
 (`gallery: <path> WxH shown FWxFH at OX,OY on DWxDH`, where WxH is the NATIVE
 raster and FWxFH the fitted size) -- printed only after a successful present, so
 it is the end-to-end witness the E2E keys on. Then an event loop: `TEV_KEY` ->
@@ -121,9 +124,9 @@ EventRing + one Loom ring), whose ring lifecycle libtapestry owns.
 Nearest-neighbor scale is one `dst`-pixel iteration: O(dw*dh), independent of the
 source size (a huge source only changes the sample stride). The compressed input
 is `drop`ped after decode, so only the raster (<= `GALLERY_MAX_PIXELS`*4 bytes,
-~48 MiB at the 12 Mpx cap) is held for the viewer's lifetime -- comfortably
-inside the 192 MiB heap (the transient DECODE peak, ~160 MiB for a progressive
-JPEG, is the sizing constraint) and bounded by the per-AddrSpace page budget (I-32).
+~48 MiB at the 12 Mpx cap) is held for the viewer's lifetime -- below the
+transient DECODE peak (~160 MiB for a progressive JPEG at the cap), and bounded by
+the per-AddrSpace page budget (I-32).
 Present is once (a `Static` surface), plus one repaint per CONFIGURE.
 
 ## Prosecution

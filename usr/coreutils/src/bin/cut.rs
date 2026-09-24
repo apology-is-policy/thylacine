@@ -8,13 +8,13 @@
 #![no_std]
 #![no_main]
 
-extern crate alloc;
-use alloc::vec::Vec;
-
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
+use coreutils::select::{self, Range};
+use coreutils::stream;
 use libthyla_rs::env::{self, Args};
+use libthyla_rs::err;
 use libthyla_rs::fs::File;
 use libthyla_rs::{eprintln, io};
 
@@ -23,77 +23,25 @@ pub extern "C" fn rs_main() -> i64 {
     run(env::args())
 }
 
-// Inclusive 1-based range; hi == usize::MAX means open-ended.
-fn parse_list(s: &str) -> Option<Vec<(usize, usize)>> {
-    let mut out = Vec::new();
-    for part in s.split(',') {
-        if part.is_empty() {
-            return None;
-        }
-        if let Some((a, b)) = part.split_once('-') {
-            let lo = if a.is_empty() { 1 } else { a.parse().ok()? };
-            let hi = if b.is_empty() { usize::MAX } else { b.parse().ok()? };
-            if lo == 0 || hi < lo {
-                return None;
+/// Cut one input a line at a time (coreutils::stream), holding only the line,
+/// until the input ends or stdout is gone.
+fn process<R: io::Read + ?Sized>(out: &mut io::OutSink, input: &mut R, by_field: bool, delim: u8, ranges: &[Range]) -> Result<(), stream::Error<err::Error>> {
+    stream::lines(
+        |buf| input.read(buf),
+        |line, _| {
+            let put = |piece: &[u8]| {
+                out.put(piece);
+                !out.failed()
+            };
+            if by_field {
+                select::fields(line, delim, ranges, put);
+            } else {
+                select::bytes(line, ranges, put);
             }
-            out.push((lo, hi));
-        } else {
-            let n: usize = part.parse().ok()?;
-            if n == 0 {
-                return None;
-            }
-            out.push((n, n));
-        }
-    }
-    Some(out)
-}
-
-fn selected(pos: usize, ranges: &[(usize, usize)]) -> bool {
-    ranges.iter().any(|&(lo, hi)| pos >= lo && pos <= hi)
-}
-
-fn cut_line_fields(out: &mut io::OutSink, line: &[u8], delim: u8, ranges: &[(usize, usize)]) {
-    let fields: Vec<&[u8]> = line.split(|&b| b == delim).collect();
-    // If there is no delimiter, GNU cut prints the whole line unchanged.
-    if fields.len() == 1 {
-        out.put(line);
-        out.put(b"\n");
-        return;
-    }
-    let mut first = true;
-    for (i, fld) in fields.iter().enumerate() {
-        if selected(i + 1, ranges) {
-            if !first {
-                out.put(&[delim]);
-            }
-            out.put(fld);
-            first = false;
-        }
-    }
-    out.put(b"\n");
-}
-
-fn cut_line_chars(out: &mut io::OutSink, line: &[u8], ranges: &[(usize, usize)]) {
-    for (i, &b) in line.iter().enumerate() {
-        if selected(i + 1, ranges) {
-            out.put(&[b]);
-        }
-    }
-    out.put(b"\n");
-}
-
-fn process(out: &mut io::OutSink, data: &[u8], by_field: bool, delim: u8, ranges: &[(usize, usize)]) {
-    let mut lines: Vec<&[u8]> = data.split(|&b| b == b'\n').collect();
-    if data.last() == Some(&b'\n') {
-        lines.pop();
-    }
-    for line in lines {
-        if by_field {
-            cut_line_fields(out, line, delim, ranges);
-        } else {
-            cut_line_chars(out, line, ranges);
-        }
-    }
+            out.put(b"\n");
+            !out.failed()
+        },
+    )
 }
 
 const USAGE: &str = "\
@@ -167,7 +115,7 @@ fn run(args: Args) -> i64 {
             return 1;
         }
     };
-    let ranges = match parse_list(list_str) {
+    let ranges = match select::parse_list(list_str) {
         Some(r) => r,
         None => {
             eprintln!("cut: invalid list '{}'", list_str);
@@ -180,6 +128,9 @@ fn run(args: Args) -> i64 {
     let mut had = false;
     let mut i = idx;
     while let Some(op) = args.get(i) {
+        if out.failed() {
+            break;
+        }
         i += 1;
         had = true;
         let path = match core::str::from_utf8(op) {
@@ -190,8 +141,11 @@ fn run(args: Args) -> i64 {
                 continue;
             }
         };
-        match File::open(path).and_then(|mut f| io::slurp(&mut f)) {
-            Ok(data) => process(&mut out, &data, by_field, delim, &ranges),
+        match File::open(path)
+            .map_err(stream::Error::Read)
+            .and_then(|mut f| process(&mut out, &mut f, by_field, delim, &ranges))
+        {
+            Ok(()) => {}
             Err(e) => {
                 eprintln!("cut: {}: {}", path, e);
                 status = 1;
@@ -199,17 +153,13 @@ fn run(args: Args) -> i64 {
         }
     }
     if !had {
-        match io::slurp(&mut io::stdin()) {
-            Ok(data) => process(&mut out, &data, by_field, delim, &ranges),
+        match process(&mut out, &mut io::stdin(), by_field, delim, &ranges) {
+            Ok(()) => {}
             Err(e) => {
                 eprintln!("cut: stdin: {}", e);
                 status = 1;
             }
         }
     }
-    if out.failed() {
-        eprintln!("cut: write error");
-        return 1;
-    }
-    status
+    out.finish("cut", status)
 }

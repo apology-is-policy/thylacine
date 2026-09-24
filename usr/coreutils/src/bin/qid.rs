@@ -136,11 +136,7 @@ fn run(args: Args) -> i64 {
             }
         }
     }
-    if out.failed() {
-        eprintln!("qid: write error");
-        return 1;
-    }
-    status
+    out.finish("qid", status)
 }
 
 /// `--color=auto`: stdout is the interactive console iff its Dev class is

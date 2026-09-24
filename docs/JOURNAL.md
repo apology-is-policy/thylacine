@@ -22,6 +22,146 @@ needed the operator.
 
 
 ---
+## 2026-09-24, late afternoon (main, Opus 5.5, effort max) -- B-1c round 4: clean, and a sweep that needed the old mechanism's own words
+
+**Round 3's fixes verified, as WIP 12 (7c54ef71).** Host coreutils 42/42. Restoring the reap-first capture hung the boot at the first capture check. A capture that dropped a cut-off tool's pipes and reaped it for its own code, with tail and uniq at their round-2 code, failed exactly six checks by name ("got code=Some(0)" for `yes`). Both smp: 1667/1667, heap-probe ALL OK, smoke 101/101.
+
+**Round 4: 0 P0 / 0 P1 / 0 P2 / 9 P3 (Opus 5.5 fallback; Fable was out of credits at spawn; MODEL start == end).** Clean by count, and every fix is local, so no round 5. The P3s, and what "fixed" covers for each:
+- F4, F5, F6 and F9 are harness edges no correct boot reaches.
+  - F4: converse could spin. The kernel reports POLLOUT with one byte free (pipe.c:552), but a non-blocking write of n <= PIPE_BUF needs n free (pipe.c:493-519). It now pauses 1 ms on WouldBlock. The kernel's parity with Linux, which sets POLLOUT only with PIPE_BUF free, is enqueued: every poll-driven non-blocking writer can spin the same way.
+  - F5: `yes`'s one second counted its exec setup. The second now starts at its first output.
+  - F6: a failed kill led to a wait with no bound. `end()` bounds it and reports a survivor.
+  - F9: the spawn error's cause is printed.
+  - None of the four has a RED, because none of their conditions occurs on a correct boot.
+- F8 was behaviour, pre-existing: `tail` refused POSIX's `-n -N`, and `tail` and `head` read `--` as a file. Fixed with three device checks.
+- F1, F2, F3 and F7 were my own docs overreaching.
+  - F1: the presenters' #54 paragraph was false for 8 of its 16 tools. `nc` and `con` report a gone reader as a failure, enqueued; six others swallow every failed write.
+  - F2: `seq` and `yes` exit 0 on any failed write. The census pattern behind C2-2 could not see that loop shape.
+  - F3: round 3's finding note claimed its check pinned the kill-before-drop order, but the cut-off path reports None whichever order it takes. The RED came from the sabotage's reap. Corrected in the squash.
+  - F7: four places still described the replaced capture.
+
+**Closing it found three more (C4-1..3).**
+- C4-1, pre-existing: `head`'s attached and legacy counts fell back to 10 on overflow, so `head -99999999999999999999` printed ten lines and exited 0. The parse is now one path, and an overflow is refused with a check.
+- C4-2: round 4 advised searching by the replaced mechanism's own vocabulary. That search (`ThylaAllocN`, `linked_list_allocator`, "fixed 4 MiB", "dies mute": 73 hits over 2402 files) found fixed-heap claims C3-1 had missed:
+  - the Halcyon traps list still told a binary to declare `ThylaAllocN`. C3-1 skipped status docs as history, but a traps list is live instruction.
+  - five AUDIT-TRIGGERS rows, one index line and AUX-ROADMAP's reclaim arc, now done by B-1b and B-1c;
+  - B-1c's own trigger row, which said every native program's memory rides thyla-heap. corvus's does not: it keeps a static 24 MiB arena, an operator question in OPEN-BUGS.
+- C4-3: the same words ("silent exit") surfaced a warden comment saying a child's pipes close at its reap, false since #68. A wider census found:
+  - two more such comments in warden, and the same claim in its dossier. My first census missed the dossier because it italicizes *reap*, so the census now strips markup before matching.
+  - the holotype register's HT02.SA-3, still TRACKED although #68's kernel test (`test_sys_spawn_killed_child_delivers_pipe_eof_before_reap`) resolves it;
+  - a kernel comment, proc.c:3523, which I enqueued as a separate comment-only commit after the land, not this squash. The kernel is a shared surface.
+
+  warden's code was right either way.
+- My first pass at that census, a `grep -o` with a bounded repeat, returned ZERO lines, because ugrep exceeded its complexity limit. A census that finds nothing proves nothing, so it was redone in Python with the known historical hits as the control.
+
+**A wrong turn in the run script.** run8.sh began with `rm -f run8.*.log`, which matched its own driver log. Its restore check also compared whole-tree diffs while I was editing docs, so it stopped after the sabotage leg. I re-verified the restore per file (sha256 of the kept copies, and each file's diff equal to its pre-run diff), and ran the clean phases as run9. A cleanup glob can match the script's own output, and a restore check must compare only what the sabotage touched.
+
+**Verified.** Host 42/42, and no clippy warning in any touched file. Before the sabotage, smp4: 1667/1667, heap-probe ALL OK, smoke 105/105. With `tail.rs` and `head.rs` at 7c54ef71, exactly the four new checks went RED by name and the other 101 passed. After a clean rebuild, smp4 and smp1 each gave 1667/1667, heap-probe ALL OK and smoke 105/105.
+
+---
+## 2026-09-24, afternoon (main, Opus 5.5, effort max) -- B-1c round 3, and what a merge rehearsal found
+
+**While round 3 ran: B-1c had left present-tense claims about the heap it removed.** A census covered every `git grep heap` line that also names MiB, fixed, arena or OOM, over docs/, vault/system/ and usr/ (1198 + 208 files). It skipped the JOURNAL, the status docs and the record plane, whose history may name the old heap. It found 17 files still describing a fixed heap in the present tense:
+- tapestryd's `fx_save` comment and dossier ("tapestryd's is 4 MiB"), and HALCYON-INSTRUMENT's matching sentence;
+- netd's "explicit 16 MiB heap" in server.rs, NET-DESIGN and NET-CLOSE-DESIGN;
+- view and gallery's "a pixel cap above the heap is a phantom", and sub-view's "the REAL bound is the caller's heap";
+- sub-parley's caveat that the 64 MiB body cap "cannot fire". Since B-1c it can; it is still untested.
+- the shell MOC's "the same fixed heap", and holotype RW-8's SA-4, which B-1c resolves.
+
+All of them are fixed in the tree. The miss has a cause: round 1's sweep searched for the removed NAMES (`ThylaAllocN`, `SLURP_CAP`), and a claim about the old heap need not name it. The census also found ut's history (HT09.R3-F6: an entry cap and no byte cap) to be one more unbounded consumer that lost its 4 MiB containment. It is added to that OPEN-BUGS entry.
+
+**The aux-3 merge, rehearsed in a scratch worktree.** `git merge d819d8f1` onto b409f80b gave the plan's eight textual conflicts, whose resolutions are now scripted. It also showed two conflicts that no textual merge reports, both compile errors:
+- aux's new tests call `loom_create` with two arguments, but main's has taken three since B-1a' (387ffcd8, `exempt`);
+- aux's new `lantern` declares `ThylaAllocN`, which B-1c removed.
+
+A census of the prototypes and pub items main changed, against the calls aux added, found no third. Main added no caller of the syscall aux widened (SYS_ATTACH_9P's x5 flags), so no silent ABI mismatch comes the other way. The aux has since cleared 3fd54782 (yip 0122), which supersedes d819d8f1: the same rehearsal against it gives nine textual conflicts and the same two semantic ones, and the scripts apply clean.
+
+**Round 3: 0 P0 / 0 P1 / 1 P2 / 9 P3 (Opus 5.5 fallback, MODEL start == end).** Its P2 was in the harness I reworked in round 2, not in the filters. `run_tool` fed a tool its input, waited for it with no bound, and only then read its stdout, so any output past the 4096-byte pipe blocked the tool and hung the boot where a check should have failed (joey waits for the smoke unbounded, usr/joey/joey.c:2112). The order dated from before #68, when a child's pipes did not close at its exit, and outlived its reason. My own round-2 check `grep -o every match of a line` expected 3000 bytes, a margin of 1.37x. The fix, `converse`, feeds a non-blocking stdin and reads stdout and stderr under one poll, within the check's bound, and every helper now goes through it. One wrong turn while writing it: my first version dropped the pipes and then killed a tool cut off at the bound, and `yes` would have exited 0 on the EPIPE in between, a code produced by losing its reader rather than by the tool. It now kills first. Two checks hold the capture itself: 18.9 KB through `cat` (the old capture deadlocks on it) and a `yes` cut off at one second.
+
+**Two P3s were behaviour, and one of them was GNU's.** The reviewer read GNU uniq's `check_file`: the default mode has its own loop that prints a line as its run begins, and only `-c`, `-d` and `-u` wait for the run's end. Ours waited in every mode, so `yes | uniq` printed nothing and a read error lost the open run. `runs_within` gained a `begin` hook and `stream::firsts` uses it. The other was pre-existing: Rust's `usize` parse accepts a leading `+`, so `tail -n +2`, POSIX's "from line 2", printed the last two lines and exited 0. tail now parses `[+]N` itself and copies through `stream::Skip`, which holds nothing.
+
+**The docs owed by round 3 are written; the code is not yet compiled.** The mac was leased to astra for the whole of it. One census of my own needed its control: my first pattern for the tools that swallow write errors matched `eprintln!`, and cat.rs, the control, hit four times. The corrected pattern reproduces round 2's nineteen, fifteen of them in the filters dossier. "Fixed" above means the code is in WIP 11 (92a1f11c) and the docs are in the working tree. Neither is verified until the host tests, the sabotages and both smp have run.
+
+---
+
+## 2026-09-24, midday (main, Opus 5.5, effort max) -- B-1c round 2: a bound on the bytes a filter holds is not a bound on what it builds from them
+
+**The round (Opus 5.5 fallback, start == end), on `82b5f0d7`.** 0 P0 / 0 P1 / 1 P2 / 8 P3, merged with my parallel self-audit (SA2-1..SA2-8). The round and I found the same P2 (F1 = SA2-1). Round 1's `LINE_MAX` bounded the line a filter held, and I had written in both registers that R4-F2's input half was CLOSED. It was not. grep built a `Vec` of match spans for every styled line: 16 B a match, and `grep -o x` on a line of `x` finds as many matches as bytes, so 1 GiB at the bound. cut built a `Vec` of the line's fields, 16 B each and doubling as it grew: up to 2 GiB. The lesson was already pinned from kt1 ("stored bytes don't bound the DERIVED set"), and I did not apply it to my own fix.
+
+My SA2-2 had wider reach. cat's line mode read through `BufReader::read_until`, which has no bound, so `cat -A /dev/zero` grew until the pool ran out. It is the only `BufRead` line reader in native code (a census of 395 .rs files, with cat.rs as the control). Round 1's list missed it because it enumerated the six rewritten filters instead of searching for the pattern. The round rated it P3 (its F6); round 1's precedent is to take the higher severity.
+
+**The fixes (WIP 9 `49ab2157`, then part 2).**
+- `coreutils::find` and `coreutils::select` hand each match or field to a callback and never collect them.
+- `stream::CatLines` applies cat's transforms a read at a time, with three scalars of state.
+- The claim is measured, not argued. A test-only counting global allocator (per-thread, with its own positive control) shows that a 1 MiB line of matches, or of delimiters, allocates 0 bytes.
+
+The P3s:
+- F2: `grep -c` after a gone reader stopped at its first operand and exited 1 for files it never searched. It now searches the rest silently, only as far as a first match (`-q`'s semantics).
+- F3: #54's gaps:
+  - `head`/`tail` banners went through the swallowing `print!`;
+  - hexdump's operand loop never stopped;
+  - pelt's walk and ls's directory loop never checked for a failed write;
+  - cat and head went on after a write error and blamed the input.
+- F4: ns's raw path swallowed a write error.
+- F5: an input's EPIPE was read as a gone reader.
+- F7: the reader-leaves harness had four faults:
+  - its first read had no deadline;
+  - a filter that ended by itself passed;
+  - stderr was drained only after the wait;
+  - the header was stale since #68.
+- F9: four doc wordings.
+- SA2-3: uniq reserved amortized.
+- SA2-4: `tail -n 0` read an endless input.
+
+F8 is pre-existing and the operator's: `grep -r` opens netd's `clone` and reads conversations' `data`, which netd types as regular files.
+
+**Two of my own claims were wrong.**
+- SA2-7 said `grep -r /` would read `/srv` and `/proc`. Neither device has a `.readdir` (SYS_READDIR returns -1), so -r cannot list them; withdrawn.
+- My new `readable_within` comment said descriptors close at reap. I had copied that from the smoke header, and the round's F7(d) showed the header stale since #68 (`proc_close_handles_at_exit`, kernel/proc.c:3527). Both are corrected.
+
+**Closing round 2 found two more.**
+- C2-1: head and tail documented `-` as stdin but opened a file named `-`. Fixed, with GNU's "standard input" banner.
+- C2-2: a census of stdout writes (52 bins, echo.rs the control) found 19 one-shot tools still writing through `io::out`/`print!`, so `echo x > /dev/full` exits 0. Enqueued in OPEN-BUGS as its own chunk.
+
+While writing the presenters dossier I also found its grep caveat described the removed spans. `emit_match` now reads the colour flags itself, so no caller can style a payload by forgetting the check.
+
+**A device check built so it cannot race.** A "reader gone before the first write" check that dropped the read end after the spawn would race the child's first write. `reader_gone_first` closes the pipe's reader before the spawn, so the child's first write always finds none.
+
+**Verification.**
+- Host:
+  - coreutils lib 36/36;
+  - six sabotages RED by name: find and select collecting, cat holding a line, cat restarting a line per read, the counter counting nothing, uniq reserving amortized.
+- run8 (-smp 4): 1667/1667 and coreutil-smoke 93/93. It ran before the styling gate and the capture fix.
+- run9, one device sabotage leg. It set head, tail and ns back to WIP 9, dropped tail's n == 0 return, and reverted grep's verdict search. Exactly the eight new checks of 93 failed, each by its own mechanism:
+  - code 1 with the tool's `-` diagnostic;
+  - "still running 20 s";
+  - code 1 for grep's verdict;
+  - code 0 on `/dev/full`.
+  The kernel suite held at 1667/1667.
+- **The leg's own report found one more (C2-3).** Its tail `-` failure said stderr "". `stderr_of`, which re-runs a failed tool to capture what it said, dropped the re-run's stdout. Since #54 a tool stops at its first write once its reader is gone, so the re-run ended before the error it was meant to show. head's report showed its message only because its `-` came first. This is the verdict-and-capture lesson again: the verdict half was sound and the capture half was not. The fix reads both pipes as they fill, within the bound. run10, the same leg, now shows "tail: -: no such file or namespace entry".
+- run11/run12, the final tree rebuilt clean, at -smp 1 (1/1 cpus online, read from the log) and at -smp 4 (4/4): 1667/1667, heap-probe ALL OK and coreutil-smoke 93/93 in each.
+
+**Owed.**
+- Round 3, on the fixes.
+- To the operator: F8 (netd's stat types); the one-shot tools' sweep; and the items round 1 left open (the 64 MiB figure, victim selection or per-consumer caps, R4-F2's pressure half, the ERRORS.md correction, the `/dev` listing).
+
+---
+## 2026-09-24, late morning (main, Opus 5.5, effort max) -- B-1c round 1 closed: the fix for R4-F2 had an unbounded line of its own, and two of the close's own tests were wrong
+
+**The round (Opus 5.5 fallback: Fable died of credits at spawn; start == end).** 0 P0 / 1 P1 / 1 P2 / 10 P3 on `f7da956e`, merged with my parallel self-audit (S-A1..S-A4). The P1 was a defect in my own fix for HT09.R4-F2. `coreutils::stream` removed the slurp's cap without a bound of its own: `grep x /dev/zero`, or `grep -r` walking into `/dev`, grew one line until the pool refused a page, and the fault kill's exit 1 is grep's "no match" -- the class R4-F2 names, reopened by the streaming that closed it. The fix is `stream::LINE_MAX` = 64 MiB. POSIX lets a text utility refuse a line past its LINE_MAX; the number is my call and is flagged for the operator. `hold` grows a line by a fallible reservation that never passes the bound. grep exits 2 and cut, uniq and tail exit 1, each saying "a line longer than 64 MiB". The pressure-driven half stays open for the operator: with no victim selection, another program exhausting the pool still ends grep at any page with exit 1. The P2 and my S-A4 were the two halves of #54 (HT09.RND2-F2's follow-up, unblocked since #100 returns `-T_E_PIPE`): a reader that left was an error (`cat big | grep -l x` failed under ut's pipefail), and the streaming filters kept reading after it left (`yes | grep y | head -1` never ended). `OutSink::reader_gone` / `finish` is now the one place a filter's output failure becomes a status, and all nineteen filters follow it. The self-audit's findings: a witness leg that could not fail (S-A1 = the round's F4: `trim-returns-the-rest` read 14 pages before and after the trim on all three run4 boots, because the frees had already trimmed), `Tail` with n = 0 holding its whole input (S-A2), and `add_direct` able to overflow with two concurrent near-`isize::MAX` requests (S-A3 = F12). All fixed in WIP 4 `e335d005`.
+
+**A wrong premise in my own check found a hazard in my own fix (run5, WIP 5 `4e583ff2`).** run5 verified WIP 4 at 1667/1667 on both smp, and the no-op-trim sabotage failed the new leg by name (`got=211 want<=32`). The one smoke failure was mine: `grep -r .. /dev` exited 2, because `/dev` has no directory listing (`devdev_read` answers `DEV_KIND_ROOT` with -1, "readdir deferred"; errno 95; enqueued in OPEN-BUGS). The check was removed, and a failed smoke check now re-runs its tool and prints its stderr. Reading why exposed a live hazard in WIP 4's `-r` rule: it skipped whatever `is_file()` denied, and dev9p never sets `S_IFREG`, so `grep -r` could have skipped every file on Stratum. The rule is now GNU's: skip a character device the walk finds (the only device type the kernel reports) and read everything else.
+
+**A test of a helper is not a test of its call site (WIP 6 `20bc9d48`).** Every round-1 regression test was sabotaged on the host, one at a time. Nine went RED by name. One did not: deleting the `release_long` call in `lines` left every test green, because the F11 test called the helper and never the loop that uses it. The loops now take their buffers from the caller, so a test reads the buffer the loop used. uniq's grouping held a third copy of the rule in a binary that no host test reaches. It moved into the library as `stream::runs`, checked against the whole-input answer at every read size, exact and case-folded. Seven more sabotages went RED, among them the helper releasing always, each call site deleted, and runs ignoring a stop.
+Then every host sabotage the chunk had written was re-run on the final code (the older batteries' anchors updated to it): all 39 RED by name, 26 of `stream` and 13 of the heap.
+
+**A device check that lent what it did not have (WIP 7 `d82ce0f0`).** The #54 regression is `reader_leaves` in coreutil-smoke: `yes` (or `seq`) feeds the filter, whose output is read to its first bytes and dropped. The filter must then exit 0 within 20 s with nothing on stderr, and the producer must stop too. The producer never ends, so a filter that kept reading would never exit. run6's CLEAN boot failed all five with "producer spawn failed", seq included, which the same program spawns fine through `run_tool`. I stopped the run, restored the sabotage the driver had already applied, and read joey: it starts coreutil-smoke with a bare `t_spawn`, so the program has no descriptors of its own, and my producer inherited stdin and stderr. `run_tool` pipes all three for exactly that reason; the check now does too, and a failed spawn reports its cause.
+
+**run7 (WIP 7, 09:23-09:33Z).** 1667/1667 at -smp 4 and at -smp 1 (`4/4` and `1/1 cpus online` read from the boot logs, not assumed), heap-probe ALL OK (13 pages over the base after the frees; the trim leg 243 pages kept and returned), coreutil-smoke 77/77. Leg A broke the status half: grep's guard, `OutSink::finish`, cat's and tee's arms. Exactly the five checks failed (5 of 77), each with its own tool's status and message: grep 2 "write error", cut and uniq 1 through `finish`, cat 1 "broken pipe", tee 1. Leg B broke the stop half: grep, cut and uniq ignoring the failed write, tee never breaking. Exactly those four failed with "still running 20 s after its reader left", and cat, left intact as the control, passed.
+
+**Owed.** To the operator: the 64 MiB figure; victim selection or per-consumer caps for the unbounded consumers (F3: ut's `$(...)`, `source`, sort); R4-F2's pressure half (the exit-status ABI); the drafted ERRORS.md correction; the `/dev` listing (kernel). The manual has no section for the native utilities yet (OPERATORS-MANUAL.md lists it as planned). The filters' behaviour changes -- the line bound, the silent gone reader, `-r`'s device skip, and cmp, cut and uniq printing what they read before an error -- are recorded in the sub-coreutils dossiers for that section to carry. "Processes and memory" gained the native heap's return policy, and which process an exhaustion ends.
+
+---
 ## 2026-09-24, morning (main, Opus 5.5, effort max) -- B-1c: the native heap, designed from the crate's source
 
 **The design came from reading dlmalloc, not from the plan's parenthetical.** B-1c replaces libthyla-rs's fixed 4 MiB `linked_list_allocator` heap (`alloc.rs:77`) with `dlmalloc-rs`. ARCH 6.5 and B-1 vote 9 mapped its platform trait as `alloc` = lazy attach, `free` = detach, `free_part` = decommit. The crate is dlmalloc 0.2.14, the copy Rust's own standard library vendors: rust-src `library/vendor/dlmalloc-0.2.14`, whose `.cargo-checksum.json` package hash `ad5208a1...` is the crates.io checksum rust-src's `Cargo.lock` pins. Its only dependency on our target is cfg-if; libc and windows-sys are gated to unix and windows, and every vendored version satisfies it, so vendoring adds one directory. Reading `dlmalloc.rs` gave three facts the parenthetical did not contain:
@@ -38,6 +178,29 @@ needed the operator.
 The third call needed no vote because scripture's own mapping requires it: **the platform owns reservations.** dlmalloc's `alloc` carves at a bump pointer from the latest lazy reservation. `free_part` decommits and rolls the bump back, so the address space is reused. `free` detaches a whole reservation. One reservation is one segment and one VMA. Recorded as `dec-2026-09-24-native-heap-large-blocks`; ARCH 6.5, MANUAL-DESIGN 8.1 and browser-status decisions 12 and 13 carry it.
 
 **A tool trap, found on the way.** The quaestor MCP server is still registered against the retired `thylacine-vault` worktree: `vault_new_note` wrote the decision note there. The stray file was removed and that worktree is clean again. Vault operations go through the CLI with `--root` until the operator re-registers it.
+
+**Building it (WIP 1 `d7a714f8`, WIP 2 `16f51cf2`).** The policy is its own crate, `usr/lib/thyla-heap`, so the real dlmalloc over the real `Reservations` runs on the host against a model of the kernel's three calls: first-fit placement in one arena (as `vma_find_gap` places them, so adjacency is the normal case), every page it takes back poisoned, a decommit or detach outside one live mapping refused. Each platform rule has a sabotage that turns the host tests red: orphaned tail, no bump rollback, decommit of the head (a SIGSEGV, counted red by the crash), a carve that fills its reservation, a leaked direct block, the literal attach-per-call mapping, no halving retry, a direct block missing from the peak.
+
+**Four things the tests and the self-audit caught that the design did not.**
+
+- **The peak missed its own worst moment.** The manual harness first sampled the footprint after each call. A realloc that moves a block holds both copies for an instant and is back to one by the time the call returns, so that instant was never sampled. The heap now keeps the peak itself, at the only two points the footprint grows (a carve; a direct block counted). A host test pins the realloc's both-live moment.
+- **A comment claimed a bound that did not hold.** `RESERVATIONS_MAX` said doubling "toward 64 GiB puts this beyond the burrow window". But 32 reservations of up to 64 GiB is about 1.6 TiB of a 64 TiB window, so a fragmented window could fill the table while memory stayed free. Now: 17 doublings to 32 TiB, 64 slots, and a refused length asked again at half down to the carve itself (a host test fills the arena with a wall and counts the halvings).
+- **The probe's own bookkeeping would have pinned what it measured.** The reservation-switch leg recorded its blocks in a `Vec` that grew inside the first reservation, so dlmalloc could never have released it: the leg would have failed for a reason in the probe, not the heap. The records vector is 256 KiB up front, a direct block of its own.
+- **A reader could see less than was held (SA-1).** A direct block was counted after its reservation came back, outside the lock, so for an instant the footprint under-read. It is now counted before the reserve (uncounted if refused) and uncounted after the detach. A host backend that reads the footprint, as a peer thread would, at each reserve and detach pins the order, and three new sabotages go red on it.
+
+**Measured, not assumed.** B-1b's F4 asked what churn across the trim threshold costs. `/heap-probe` times it: 1070 ns per page per cycle for 4 MiB blocks (freeing trims past the 2 MiB threshold every cycle) against 48 for 1.5 MiB blocks (under it). Small-block alloc+touch 1630 ns/page, free 351; a large block's touch 1062, its detach 344. On the device (16f51cf2, both smp): 64 MiB of small blocks +16432 pages, then +14 after free with no trim asked; a 32 MiB block +8209, then +0 with a small block still live; a reservation switch releases the emptied first reservation. The device sabotage (the backend's decommit and detach answering true without the syscall) went red by name, `small-blocks-fall got=16432 want<=560` and four more, with the boot's `joey: /heap-probe FAILED`.
+
+**The regression the cap had been hiding (HT09.R4-F2).** `io::slurp`'s 2 MiB cap existed because the heap was 4 MiB, and B-1c removed both. The cap had also been doing a second job. Reservations are lazy, so `try_reserve` sees a refusal only when address space runs out. An input larger than free memory ends the program at the first page the system cannot back, and v1.0 reports that fault as exit status 1 (`exits()` maps every non-"ok" message to 1; #91 carries an explicit code's low byte, but a fault is a message). That is `cmp`'s "differ" and `grep`'s "no match": a silently wrong verdict, the finding the cap had closed. The fix is the streaming R4-F2 had deferred, pulled forward to all six filters that do not need their whole input, through one pure module, `coreutils::stream`:
+- `lines` for grep, cut and uniq;
+- `compare` for cmp, two buffers at their own pace;
+- `Tail` for tail, a window drained only at twice what it keeps;
+- wc counts a buffer at a time, its word state carried across reads.
+
+The module is host-tested against reads cut at every boundary and against the old whole-input answers, and thirteen sabotages go red. Two behaviours changed with it, both toward GNU: an empty input has no lines (`grep -v x </dev/null` used to print a blank line), and `grep -l` stops reading at its first match. Only `sort` still holds its input; its status 1 is an error status, so no verdict collides. Two claims written earlier in this chunk were false and are corrected: `alloc.rs`'s FAULT POLICY and the libthyla-rs dossier both said a program survives exhaustion with the fallible forms, but those see only the address space running out. Separately, `docs/ERRORS.md` (lines 55, 183) and the `kernel/proc.c:3694` comment still say every non-zero exit collapses to 1, stale since #91. ERRORS.md needs the operator's signoff, so that is queued for them.
+
+**Around the chunk.** The operator granted pushes ("authorized to push at will"); main went to both mirrors at `5ed51ff5`. The aux cleared aux-3 (`d819d8f1`) to merge after its audit round, and main merges it right after B-1c. A trial merge conflicts in 7 files, 3 of which carry audit corrections; the aux left a three-leg verifier for the merged tree. A memory-stamp script of mine spliced `s[:i] + new` without `s[j:]`, which truncated the B-1c design memory to its STATE line. It was restored from the session transcript an hour later.
+
+**WIP 3 verified on the device.** 1667/1667 at -smp 4 and at -smp 1, with `heap-probe: ALL OK` and coreutil-smoke's 70 checks, 15 of them new. The streaming's device checks were proven to discriminate. A build with the line carry dropped, wc's word state reset per read, and tail holding n-1 lines failed six checks by name (`grep -c long line`, `cut long line`, `wc -w long word`, `wc long input`, `tail -n window`, and the old `tail -n`), and the boot stopped on `joey: /coreutil-smoke FAILED`. One design correction came out of sabotaging the host tests: tail's window was first sized at n+1 newlines. The sabotage that cut it to n stayed green, because a window that starts at a line and holds n newlines already contains the last n lines, whether or not the input ends in one. So n is the true bound. The comment had claimed n+1 was needed; it now says n, and the sabotage now cuts to n-1, which goes red.
 
 ---
 ## 2026-09-24, early (main, Opus 5.5, effort max) -- B-1b closed: the holotype round withdrew the chunk's own headline

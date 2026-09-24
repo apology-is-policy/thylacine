@@ -21,7 +21,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-09-21
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -337,7 +337,8 @@ LS-CI mints one with `mkdisk.py` at need.
   directory as "no sections installed", so a silently failed mkdir could be
   indistinguishable from a deliberately empty catalogue. Six checked sections
   now ship: Manual, Remote files with Haul, View, Gallery, Nocturne and DOSBox-X. The `manual` binary rides
-  `usr_rs_bins` like `view`. Same granularity note as above: no target-set change.
+  `usr_rs_bins` like `view`, as does `heap-probe` (B-1c, the native heap's EL0
+  witness). Same granularity note as above: no target-set change.
 
 - **The stale-stage warning claims a property it achieves by maintenance,
   not by construction — and its own comment is the argument against

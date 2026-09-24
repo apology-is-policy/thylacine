@@ -656,17 +656,21 @@ pub fn err(buf: &[u8]) {
 /// exists to produce); a silent truncation that still exits 0 is the data-loss
 /// class this guards against. The `core::fmt::Write` impl is infallible by
 /// design (it routes through the latch), so `write!(sink, ...)` never returns
-/// an error to handle -- check `failed()` once when done.
+/// an error to handle -- check `failed()` once when done, or let `finish` say
+/// what the exit status is. A write that failed because the reader went away
+/// (EPIPE) is latched the same way but is not an error: a filter stops there,
+/// silently, and exits as it would have.
 pub struct OutSink {
     out: Stdout,
     failed: bool,
+    reader_gone: bool,
 }
 
 impl OutSink {
     #[inline]
     #[must_use]
     pub fn new() -> Self {
-        OutSink { out: Stdout, failed: false }
+        OutSink { out: Stdout, failed: false, reader_gone: false }
     }
 
     /// Write all of `buf` to stdout. A no-op once a prior write has failed.
@@ -675,16 +679,37 @@ impl OutSink {
         if self.failed {
             return;
         }
-        if self.out.write_all(buf).is_err() {
+        if let Err(e) = self.out.write_all(buf) {
             self.failed = true;
+            self.reader_gone = e == Error::BrokenPipe;
         }
     }
 
-    /// True once any write has failed -- the caller's nonzero-exit signal.
+    /// True once any write has failed: nothing more reaches stdout, so a
+    /// filter stops reading.
     #[inline]
     #[must_use]
     pub fn failed(&self) -> bool {
         self.failed
+    }
+
+    /// True if the failed write found the reader gone (EPIPE).
+    #[inline]
+    #[must_use]
+    pub fn reader_gone(&self) -> bool {
+        self.reader_gone
+    }
+
+    /// The exit status once the payload is written: `status`, unless a write
+    /// failed for a reason other than the reader going away -- that is
+    /// reported (`prog: write error`) and exits 1.
+    #[must_use]
+    pub fn finish(&self, prog: &str, status: i64) -> i64 {
+        if self.failed && !self.reader_gone {
+            let _ = stderr().write_fmt(format_args!("{}: write error\n", prog));
+            return 1;
+        }
+        status
     }
 }
 
@@ -705,26 +730,23 @@ impl core::fmt::Write for OutSink {
     }
 }
 
-/// Upper bound on a single `slurp`. Leaves headroom under the 4 MiB
-/// userspace heap (`alloc::INITIAL_HEAP_SIZE`) for the caller's derived
-/// working set (sort's line-ref vector, etc.), so an oversized input yields
-/// a graceful `NoMemory` error instead of an allocator OOM-abort -- with
-/// `panic = "abort"` an OOM kills the Proc, which for the session shell is a
-/// logout. Streaming utilities should prefer chunked reads; `slurp` is only
-/// for whole-input loads that genuinely need the bytes resident.
-pub const SLURP_CAP: usize = 2 * 1024 * 1024;
-
-/// Read all of `reader` into a fresh `Vec`, bounded by `SLURP_CAP`. The
-/// "load the whole input" helper for `wc`/`sort`/`cut`/`uniq`/`grep`/`cmp`/
-/// `tail`. Returns `NoMemory` if the input exceeds the cap.
+/// Read all of `reader` into a fresh `Vec`, for an input that must be resident
+/// whole (`sort`, a bounded file). A growth the heap refuses is `NoMemory`, but
+/// the heap reserves lazily, so in practice that is the address space running
+/// out: an input larger than free memory exhausts it, and the next program to
+/// touch a page the system cannot back -- this one, or any other, since nothing
+/// picks a victim (ARCH 6.5) -- ends there, which v1.0 reports as exit status 1
+/// (docs/ERRORS.md). A program whose status 1 means something else must not
+/// slurp an input of unbounded size; the filters stream theirs
+/// (`coreutils::stream`).
 pub fn slurp<R: Read + ?Sized>(reader: &mut R) -> Result<Vec<u8>> {
-    slurp_capped(reader, SLURP_CAP)
+    slurp_capped(reader, usize::MAX)
 }
 
 /// Like `slurp` but with an explicit byte limit. Reads until EOF or `limit`
 /// bytes consumed, returning `NoMemory` the moment the input would exceed
-/// `limit` (the caller fails gracefully rather than OOM-aborting on an
-/// unbounded input). Chunked, so it never over-allocates past the limit.
+/// `limit` or the heap refuses the growth. Chunked, so it never
+/// over-allocates past the limit.
 pub fn slurp_capped<R: Read + ?Sized>(reader: &mut R, limit: usize) -> Result<Vec<u8>> {
     let mut v = Vec::new();
     let mut buf = [0u8; 8 * 1024];
@@ -733,9 +755,10 @@ pub fn slurp_capped<R: Read + ?Sized>(reader: &mut R, limit: usize) -> Result<Ve
         if n == 0 {
             break;
         }
-        if v.len() + n > limit {
+        if n > limit - v.len() {
             return Err(Error::NoMemory);
         }
+        v.try_reserve(n).map_err(|_| Error::NoMemory)?;
         v.extend_from_slice(&buf[..n]);
     }
     Ok(v)

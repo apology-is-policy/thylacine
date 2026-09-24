@@ -42,7 +42,7 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-09-21
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -147,18 +147,26 @@ in it are worth naming, because each is a decision rather than a default:
   32-bit range would wrap-cast onto a real errno value; it saturates to the
   maximum so the kernel bug surfaces as a visibly impossible error.
 
-### The heap is one lazy reservation, initialized once
+### The heap grows, and gives memory back
 
-The global allocator takes a single 4 MiB *lazy* anonymous region on the first
-allocation and subdivides it locally. Lazy is the operative word: the region is
-reserved, not committed, so a program that allocates a few kilobytes has a few
-kilobytes resident, and a program that never allocates never makes the call.
+The global allocator is thyla-heap's ([[sub-thyla-heap]]): dlmalloc for blocks
+under 256 KiB aligned to less than that, carved from lazy reservations it opens
+as it grows, and a lazy reservation of its own for any larger or more aligned
+block, detached when the block is freed.
+It has no fixed size and no initialization step. The heap is a constant static,
+nothing is reserved before the first allocation, and a reservation costs
+address space only until it is touched, so a program that allocates a few
+kilobytes has a few kilobytes resident. Memory goes back two ways: dlmalloc's
+trim decommits the free tail of its top segment once that tail passes 2 MiB,
+and releases a reservation it has emptied; a large block's pages leave with its
+detach.
 
-Initialization is a three-state atomic. The first caller wins a
-compare-exchange, makes the syscall, initializes the heap, and publishes with a
-release store; a loser spins on an acquire load until it sees the published
-state. If the reservation fails there is no recovery, so the winner exits the
-process — which is also what unblocks the losers, by killing them.
+This module supplies the three kernel calls the policy is built from —
+`SYS_BURROW_RESERVE` at read-write, `SYS_BURROW_DECOMMIT` and the range form of
+`SYS_BURROW_DETACH` — and exposes the heap's `footprint()`, `trim()` and
+`reservations()`. dlmalloc runs under a spinlock, so peer threads' small
+allocations serialize; a large block's reserve and detach run outside it, taking
+the lock only to count the block.
 
 ### The kernel resolves; userspace only splits
 
@@ -313,9 +321,10 @@ does is *compose* with several invariants, in one of two ways:
 **[[inv-i5]]** and **I-42** — composed by absence, as described in Mechanism.
 The library cannot express the violating operation.
 
-**[[inv-i32]]** — the allocator's lazy reservation is charged per page as the
-heap is touched, so a native program's heap counts against its own page
-budget as it grows rather than at reservation.
+**[[inv-i32]]** — the heap's reservations are lazy, so its pages are charged
+to the program's page budget as they are touched, not at reservation, and
+uncharged as the heap decommits or detaches them: a native program's footprint
+follows what it holds, in both directions.
 
 **I-2** and **I-6** (capability and rights monotonic reduction — neither has a
 note yet) — composed by the crate-private handle constructor: rights are fixed
@@ -354,6 +363,16 @@ newline — into one buffer before the one `SYS_PUTS`, rather than one syscall p
 format fragment. This is not a performance tidy: the console's writer role is
 claimed PER WRITE, so the fragment-per-syscall form let a concurrent console
 writer interleave mid-line (the torn-line the session gate's rc leg first hit).
+
+**`OutSink` is a filter's stdout, and the one place its failure becomes a
+status.** It writes through, stops writing at the first failure, and records
+whether that write found the reader gone (`reader_gone()`: EPIPE, which the
+kernel returns for a pipe that has lost its reader). `finish(prog, status)`
+turns the outcome into the exit status: a reader that went away had what it
+wanted, so the status stands and nothing is printed -- the behaviour `yes` and
+`seq` already had -- while any other failed write is reported as `prog: write
+error` and exits 1. A streaming filter checks `failed()` after each line and
+stops reading, which is what lets `yes | grep y | head -1` end.
 
 ## Performance
 
@@ -402,9 +421,13 @@ instant, and falling back to the syscall when the page is absent.
   field and the builder hardcodes it to inherit. Nothing native can raise or
   lower a child's budget without hand-building the record, which is the one
   structure the typed layer exists to avoid.
-- **The heap does not grow.** It is one fixed reservation; a program needing
-  more must attach its own regions. See Caveats for what exceeding it looks
-  like.
+- **Small blocks freed below a live one keep their pages.** dlmalloc returns
+  memory only from the top of its newest segment and from a segment it has
+  wholly emptied, so a run of small blocks freed beneath one that stays live is
+  reused by later allocations but not returned. That is dlmalloc's documented
+  behaviour, and glibc's main arena's
+  (`dec-2026-09-24-native-heap-large-blocks`). A block of 256 KiB or more is
+  exempt: it is its own mapping.
 - **Per-command environment and working directory are absent.** Environment is
   inherited wholesale — the ABI's reserved field is still reserved. Working
   directory is a whole-namespace operation, so a per-spawn one needs a
@@ -463,23 +486,21 @@ instant, and falling back to the syscall when the page is absent.
   handle accessor has exactly one caller, the file accessor has none — so the
   wrong value is currently inert. Task #100.
 
-- **Exhausting the heap is indistinguishable from a panic, and neither says
-  anything.** There is no custom allocation-error handler, so an allocation
-  past 4 MiB panics, and the panic handler exits with status 1 discarding the
-  message. A failed initial reservation also exits 1. Three quite different
-  failures — out of memory, a logic panic, and a runtime that could not start —
-  are one exit status and no output. The panic handler's own comment scopes a
-  richer path as future work; until then, a native program that dies has told
-  its parent almost nothing.
-
-- **One heap comment names the wrong bound of a near-miss pair.** The module
-  header correctly names the reservation ceiling (one gigabyte) for the lazy
-  call it makes; the constant's own documentation names the *eager* attach
-  ceiling (256 MiB) instead. Both constants are real and distinct. The
-  arithmetic quoted is right for the constant named, and the error is in the
-  safe direction — it understates the available headroom fourfold — but it is
-  the second consecutive sweep to find a documented constant that is the wrong
-  one of a similar-looking pair, and the previous one was not safe.
+- **Exhausting memory is indistinguishable from a panic, and neither says
+  anything.** There is no custom allocation-error handler, so an allocation the
+  system refuses panics, and the panic handler exits with status 1 discarding
+  the message. Out of memory and a logic panic are one exit status and no
+  output. The panic handler's own comment scopes a richer path as future work;
+  until then, a native program that dies has told its parent almost nothing.
+  The fallible forms (`Vec::try_reserve` and the like) see a refusal, but the
+  heap reserves lazily, so a refusal means the address space ran out; memory
+  runs out at the page a program first touches, and the kernel ends whichever
+  program touched it -- not necessarily the one that grew, since nothing picks
+  a victim (ARCH 6.5) -- with the same status 1. So no allocation form lets a
+  program survive exhaustion, and a program whose status 1 is a verdict
+  (`cmp`'s "differ", `grep`'s "no match") must not hold an input of unbounded
+  size -- the filters stream theirs, a line of at most `LINE_MAX`
+  (`coreutils::stream`, sub-coreutils-lib).
 
 - **The rights bitflag carries its own copy of the all-rights literal.** The
   kernel states that bound as an unpinned literal too, at six validation sites
