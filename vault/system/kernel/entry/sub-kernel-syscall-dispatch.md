@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-09-23
+updated: 2026-09-24
 ---
 ## Trusted-seat and nonblocking entries
 
@@ -51,6 +51,16 @@ A handler's own semantics are its subsystem's; a handler's *shape* is this
 dossier's.
 
 ## Contract
+
+**The single-hop open's failure cause is per-Dev (U, 2026-09-23).**
+`sys_walk_open_handler`'s open-failure arm read the cause through
+`dev9p_open_errno`, which is gated on the dev9p Dev char and so yielded the
+generic EIO for every other Dev. It now reads `spoor_open_errno`
+([[sub-kernel-dev]]), which dispatches by Dev char, so a `/srv` connect refused
+by the (U) capability gate ([[sub-kernel-devsrv]]) surfaces as EACCES. dev9p's
+behaviour and the `-1 -> T_E_IO` fallback are unchanged. The read stays BEFORE
+the clunk -- the clunk frees the Dev-private struct holding the cause.
+
 
 **Imperium entry points (2026-09-17).** Dispatch 110 validates and executes
 the trusted-reader console-episode operation; 111 marshals the propagating
@@ -281,7 +291,17 @@ own environment.
 `SPAWN_PERM_*` bits the parent asks to stamp on the child — `MAY_POST_SERVICE`
 (the child may register a `/srv/<name>` server, [[sub-kernel-devsrv]]),
 `CONSOLE_TRUSTED` (the SAK re-grant anchor), `CONSOLE_OWNER` (the Ctrl-C target),
-the I-32 `MAY_RAISE_PAGE_BUDGET` above, and the arm-6 `SESSION_HANGUP` (below).
+the I-32 `MAY_RAISE_PAGE_BUDGET` above, the arm-6 `SESSION_HANGUP` (below), and
+the (U) `SEAL` (bit 9; `NOTRACE` until the F5 widening) — which stamps
+`PROC_FLAG_NODUMP` and `PROC_FLAG_NOTRACE` through the same one-way setters
+`SYS_SET_DUMPABLE(0)` and `SYS_SET_TRACEABLE(0)` use. That keeps the SPAWN_PERM
+path and the syscalls on one writer each, but the flags have a THIRD writer
+regardless:
+`proc_set_seat_service` ORs `NODUMP|NOTRACE` in directly. Harmless (an
+idempotent OR of one-way bits) and the seat arm runs first, but a comment
+claiming a single writer is the class of wrong comment this project treats as a
+future ordering licence -- so it is stated correctly here instead. (The arm's own
+code comment still made the single-writer claim until the seal rename rewrote it.)
 The mechanism is deliberately **two sites, and neither is the other's
 redundancy**:
 
@@ -382,7 +402,53 @@ ABI hygiene, then superseded). Against a trusted-local Stratum server this is
 inert — the live identity channel is `SO_PEERCRED` ([[sub-pouch-net]]) — so
 `n_uname` is forward-compat for a v1.x foreign server that honours it but has no
 peer-cred, gated behind a recorded trust-stamp seam
-([[seam-nuname-trust-stamp]]).
+([[seam-nuname-trust-stamp]]). Under the identity cape the attach asserts no
+identity at all: `n_uname` goes out as `PRINCIPAL_NONE` (next section).
+
+### The identity cape: one admission rule per word, a stamp before publication, two inners (2026-09-23)
+
+The cape (IDENTITY-DESIGN 3.2, HAUL-DESIGN 4.7) enters this file on two ABI
+words. `SYS_ATTACH_9P` takes an x5 `flags` word and `SYS_ATTACH_9P_SRV` an x4
+one, and every caller passes it (the #112 discipline).
+`sys_attach_9p_flags_ok(flags, srv)` is the one rule: one bit per handler --
+`SYS_ATTACH_9P_CAPE` on the pipe attach, the per-attach `LOOSE` opt-in on the
+`/srv` attach -- and every other bit refused with the bare -1 before any handle
+lookup. Over `/srv` the cape is the poster's decision (DMSRVCAPE, read off the
+conn by the shared helper); the attacher's flag was withdrawn from
+`SYS_ATTACH_9P_SRV` on 2026-09-24 (B), before it was ever pushed. On the create word the three service-post
+bits share one derived mask, `SYS_WALK_CREATE_DMSRV_BITS`:
+- the `/srv` post branch admits a perm only through `sys_srv_post_perm_ok`:
+  nothing outside the mask, and `DMSRVCAPE` only beside `DMSRVBYTE`, because a
+  byte-mode attacher holds the raw transport and a 9P-mode opener never does;
+- the fd create and the path create refuse any of the bits with `-EINVAL`
+  before a Dev sees the perm.
+
+A new service bit joins the mask once, and all three sites follow.
+
+The pipe handler decides its cape itself, in this order:
+1. `n_uname` goes to `p9_attached_create` as `PRINCIPAL_NONE`, because the
+   Tattach happens inside the create;
+2. `p9_client_set_cape(principal_id, primary_gid)` stamps the still-private
+   client;
+3. only then does `p9_attached_root_spoor` publish the root.
+
+No stat can run on the session before the stamp, and the Larder is per-client,
+so nothing uncaped is ever cached for it. The `/srv` handler passes its flags
+through, and [[sub-kernel-ninep-attach]]'s `srvconn_attach_dev9p_root` decides
+there, because a caped byte connection capes an attach that passed no flag.
+
+Two handlers thin to inners so the cape's refusals are testable without EL0, in
+the `sys_open_create_kpath_for_proc` pattern:
+- `sys_attach_9p_srv_for_proc` takes a kernel aname. The handler copies it
+  first; every refusal before the attach is the bare -1, so moving the copy
+  ahead of them changes no answer.
+- `sys_walk_create_kname_for_proc` takes a kernel name NUL-terminated at its
+  length and repeats the handler's checks. A kernel caller meets the same
+  refusals; a syscall already passed them, so its precedence is unchanged.
+
+Both keep their gates in the inner, as the first Prosecution rule requires.
+Tests: `dev9p.walk_create_refuses_dmsrv_bits`, `srv_client.cape_post_syscall`,
+and the `/srv` legs of `9p_srvconn_transport.cape_attach`.
 
 ### SYS_WSTAT is the third FS identity gate, and it splits metadata from content
 
@@ -750,6 +816,46 @@ threshold so small transfers never pay the extra handle lookup.
   delegates, because a service-poster conferring console-trust would breach
   [[inv-i27]]. The tail `extinction` in `apply_spawn_perms` is the proof the two
   sites agree.
+- **One `SPAWN_PERM_*` bit is deliberately ungated, and the reason is the test
+  for any future one.** The `SEAL` ((U) F1/F5) passes `spawn_perm_grant_check`
+  unconditionally, because any Proc may already call `SYS_SET_TRACEABLE(0)` and
+  `SYS_SET_DUMPABLE(0)` on itself with no authority at all: a gate could only change *when* the flag
+  arrives, never *whether* it could, and the bit strictly REDUCES what may be done
+  to the child. So the question a new bit must answer is not "who should be
+  allowed to ask for this" but "does asking for it obtain anything the child could
+  not obtain alone" — if not, gating it is theatre. The coupling to watch: if
+  `SYS_SET_TRACEABLE` or `SYS_SET_DUMPABLE` ever acquires a gate, this bit needs
+  the same one or it becomes a bypass. `SPAWN_PERM_SEAL`'s header comment now
+  says so.
+- **The spawn-time stamp is a RACE fix, not a tidiness preference.** What
+  the `SEAL` buys over the self-calls is the closing of the window between `exec`
+  and the call, and that window is reachable: login's per-user home proxy holds
+  `CAP_TCB_DIAL` plus a live transport to the system store while running AS the
+  user, so a same-principal Proc (a second login, a process backgrounded from a
+  prior session) could attach first and drive the transport — the identity axis
+  of [[inv-i39]] admits an owner. Any refactor that moves a stamp later than
+  pre-`exec_setup` reopens whatever that stamp was protecting.
+- **Pre-EL0 is not pre-VISIBLE, and what closes that gap is a property of the
+  debug gate rather than of the stamp.** `rfork` publishes the child into the proc
+  table BEFORE the thunk runs, so there is a real window in which a `/proc` reader
+  can see a child whose `SPAWN_PERM_*` marks have not landed -- the CL-5
+  page-budget comment right beside the `apply_spawn_perms` call already concedes
+  exactly this ("nothing observes the inherited value except a /proc reader"). For
+  NOTRACE that window is harmless ONLY because `devproc_debug_authorized` is
+  re-consulted on every INSPECTION -- eight call sites in `kernel/devproc.c`,
+  covering mem, regs, fpregs, hwbreak, hwwatch, step, kstack and wait -- rather
+  than once at attach. **Correction to an earlier claim of mine: that is NOT
+  every debug operation.** Run control (`stop`/`start`/`waitstop`/`exitkill`) is
+  gated on slot ownership ALONE (`devproc_runctl_walk_cb`: `target->debug_owner
+  != rc->ctl`), deliberately -- "the debugger already passed the I-39 attach
+  gate". So a Proc that won the race to attach keeps run control over a sealed
+  target and loses only the reads. The payoff is bounded at denial of service,
+  because [[inv-i26]] already lets an owner kill its own Proc, which is why this
+  is a P3 and not a hole -- but the bound is the reason, not the re-check. **This is a latent coupling: an optimisation
+  that hoisted the authority check to attach-time and cached the verdict for the
+  session would silently make that window exploitable.** A raced attach can still
+  claim the debug slot and stop the target, which is a denial of service rather
+  than an escalation, since an owner may already kill its own Proc ([[inv-i26]]).
 - **A positioned-I/O gate order is part of its contract.** The non-seekable
   refusal must precede the `len == 0` short-circuit, or a zero-length positioned
   probe on a stream Dev succeeds where POSIX reports ESPIPE; the overflow guard
@@ -913,6 +1019,13 @@ the consumer-side Go len==0 divergence. The Dev-half `seekable` flag stays with
 [[sub-kernel-ninep-dev9p]]; the ABI numbers with [[sub-kernel-syscall-abi]]; the
 `wstat_native`/`perm_enforced` pin with [[sub-kernel-dev]]; SYS_WSTAT #47 was
 already folded above.
+
+2026-09-23 (L), the identity cape: the x5 flags word and its predicate, the
+DMSRV mask and `sys_srv_post_perm_ok`, the pipe handler's stamp order, and the
+two inners (the section above).
+
+2026-09-24 (B): `SYS_ATTACH_9P_SRV` refuses the cape flag; the `/srv` cape is
+the poster's mark alone (the section above).
 
 ## A diagnostic on this path emits ONE unit, never a run of `uart_*` calls (2026-08-18)
 

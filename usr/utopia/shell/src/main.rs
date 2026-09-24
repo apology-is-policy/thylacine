@@ -334,6 +334,9 @@ pub extern "C" fn rs_main() -> i64 {
     print_banner();
 
     let mut repl = Repl::new();
+    // Before --home (which overrides it) and before the first prompt reports
+    // the cwd: a shell spawned without --home starts where its parent was.
+    repl.adopt_kernel_cwd();
     // LS-2: a session `ut` holds the console as fd 0/1/2 (login spawned it
     // with Stdio::Inherit), so external commands should inherit fd 1/2 -- their
     // output then reaches the terminal. The probe (a zero-length write to fd 1)
@@ -472,8 +475,9 @@ pub extern "C" fn rs_main() -> i64 {
 
     // #113: a session ut learns its home from login (--home <path>) -- set $home
     // and chdir into it, so the shell starts in the user's home and the first
-    // prompt below already shows ~ (a bare-spawned ut gets no --home: skipped,
-    // runs at /). Before draw_prompt so the initial prompt reflects the home.
+    // prompt below already shows ~ (a ut given no --home -- the bare-spawned
+    // boot check, a nested or imperium shell -- stays in the cwd it adopted
+    // above). Before draw_prompt so the initial prompt reflects the home.
     if let Some(home) = parse_home_arg() {
         bind_user_tmp(&home);
         repl.set_home(home);

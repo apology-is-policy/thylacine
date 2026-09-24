@@ -380,6 +380,8 @@ struct Slot {
     // the M6 boot probe to 10.0.2.100 killed DNS at 60s). Independent of the
     // PendingConnect deadline, which only exists on the deferred data-open path.
     connect_deadline_ms: u64,
+    // The verdict of this slot's outbound dial, for the `data` open (see Dial).
+    dial: Dial,
     // #52: the connection is in nonblocking-read mode (set by the `nonblock 1`
     // ctl verb; the pouch FIONBIO / a native nonblock socket). When set, an
     // empty-but-open `data` read answers E_AGAIN (Rlerror 11 -> the guest's
@@ -434,6 +436,7 @@ impl Slot {
             lo: false,
             weft: None,
             connect_deadline_ms: 0,
+            dial: Dial::None,
             nonblock: false,
         }
     }
@@ -481,6 +484,27 @@ enum ConnectState {
     Pending, // SynSent/SynReceived -- the handshake is in flight
     Ready,   // ESTABLISHED (or a non-TCP slot) -- `data` is usable
     Failed,  // Closed/aborted -- the connect was refused/reset/gave up
+}
+
+/// How a slot's outbound dial ended, kept for the `data` open that has to report
+/// it. The socket cannot say: a refusal leaves it Closed, the #293 deadline drop
+/// leaves no socket at all, and a slot that never dialed reads Failed too -- so
+/// without this a refused dial whose RST landed BEFORE the client's data open got
+/// a live Rlopen on a dead connection, and a timed-out one was reported refused.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum Dial {
+    None,     // never dialed, or the dial ESTABLISHED
+    InFlight, // `connect` accepted; no verdict seen by the sweep yet
+    Refused,  // the handshake failed (RST/reset) -> ECONNREFUSED
+    TimedOut, // no answer by the connect deadline -> ETIMEDOUT
+}
+
+/// What a `data` open on a connection gets right now.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum DataOpen {
+    Hold,        // the handshake is in flight: poll_connects answers the open
+    Refuse(u32), // the dial failed: Rlerror with this ecode
+    Open,        // established, non-TCP, or never dialed: Rlopen at once
 }
 
 /// A deferred TCP `data` open held until the connection reaches ESTABLISHED
@@ -1120,6 +1144,31 @@ impl Net {
         }
     }
 
+    /// The ecode a FAILED dial on slot `n` reports, or None if the slot has no
+    /// failed dial to report (it never dialed, or the dial established). A Failed
+    /// socket whose dial is still InFlight failed after the last sweep: refused.
+    fn dial_failure(&self, n: u32) -> Option<u32> {
+        match self.slots.get(n as usize).map(|s| s.dial) {
+            Some(Dial::InFlight) | Some(Dial::Refused) => Some(p9::E_CONNREFUSED),
+            Some(Dial::TimedOut) => Some(p9::E_TIMEDOUT),
+            _ => None,
+        }
+    }
+
+    /// What a `data` open on connection `n` gets now. The answer to a failed dial
+    /// is the same whether the failure arrived before the open or while it was
+    /// held: the order of a RST and a Tlopen is a race, and the verdict must not be.
+    fn data_open_verdict(&self, n: u32) -> DataOpen {
+        match self.tcp_connect_state(n) {
+            ConnectState::Pending => DataOpen::Hold,
+            ConnectState::Ready => DataOpen::Open,
+            ConnectState::Failed => match self.dial_failure(n) {
+                Some(e) => DataOpen::Refuse(e),
+                None => DataOpen::Open,
+            },
+        }
+    }
+
     /// Abort a TCP slot's in-flight connect (on a deadline expiry) so the socket
     /// leaves SynSent -> the next poll_connects sees Failed and replies Rlerror.
     fn tcp_abort_connect(&mut self, n: u32) {
@@ -1131,6 +1180,7 @@ impl Net {
         }
         if (n as usize) < MAX_SLOTS {
             self.slots[n as usize].connect_deadline_ms = 0;
+            self.slots[n as usize].dial = Dial::TimedOut;
         }
     }
 
@@ -1155,6 +1205,7 @@ impl Net {
         }
         self.slots[i].err = Some("connect timed out");
         self.slots[i].connect_deadline_ms = 0;
+        self.slots[i].dial = Dial::TimedOut;
     }
 
     /// #293: sweep every TCP slot with an armed connect deadline. A slot that has
@@ -1188,9 +1239,17 @@ impl Net {
                 }
                 // ESTABLISHED or already Closed/aborted: the connect resolved, so
                 // disarm (tcp_abort_connect already disarms the Failed-by-abort
-                // case; this also disarms a normal establish + a peer RST).
-                ConnectState::Ready | ConnectState::Failed => {
+                // case; this also disarms a normal establish + a peer RST), and
+                // keep the verdict for a data open that has not happened yet.
+                ConnectState::Ready => {
                     self.slots[i].connect_deadline_ms = 0;
+                    self.slots[i].dial = Dial::None;
+                }
+                ConnectState::Failed => {
+                    self.slots[i].connect_deadline_ms = 0;
+                    if self.slots[i].dial == Dial::InFlight {
+                        self.slots[i].dial = Dial::Refused;
+                    }
                 }
             }
         }
@@ -1534,6 +1593,7 @@ impl Net {
             lo: false,
             weft: None,
             connect_deadline_ms: 0,
+            dial: Dial::None,
             nonblock: false,
         };
         self.tcp_active += 1;
@@ -1570,6 +1630,7 @@ impl Net {
             lo: false,
             weft: None,
             connect_deadline_ms: 0,
+            dial: Dial::None,
             nonblock: false,
         };
         self.udp_active += 1;
@@ -1615,6 +1676,7 @@ impl Net {
             lo: false,
             weft: None,
             connect_deadline_ms: 0,
+            dial: Dial::None,
             nonblock: false,
         };
         self.icmp_active += 1;
@@ -2087,6 +2149,7 @@ impl Net {
                 // it next tick); a NIC dial is SynSent until the handshake, and an
                 // UNREACHABLE peer would stay SynSent + re-ARP forever without this.
                 self.slots[n as usize].connect_deadline_ms = self.now_ms() + CONNECT_TIMEOUT_MS;
+                self.slots[n as usize].dial = Dial::InFlight;
                 Ok(())
             }
             None => {
@@ -2099,6 +2162,13 @@ impl Net {
     /// The `hangup` ctl verb: close the connection's socket. TCP drains + FINs;
     /// UDP just unbinds. The fid clunk later frees N and removes the socket.
     fn ctl_hangup(&mut self, n: u32) {
+        // A dial the client hung up on itself is not a refusal: its later data
+        // open keeps the pre-existing answer rather than ECONNREFUSED.
+        if let Some(s) = self.slots.get_mut(n as usize) {
+            if s.dial == Dial::InFlight {
+                s.dial = Dial::None;
+            }
+        }
         let h = match self.slot_socket(n) {
             Some(h) => h,
             None => return,
@@ -2287,6 +2357,7 @@ impl Net {
             lo: nlo,
             weft: None,
             connect_deadline_ms: 0,
+            dial: Dial::None,
             nonblock: false,
         };
         self.tcp_active += 1;
@@ -3696,6 +3767,268 @@ pub fn connect_sweep_selftest(base: Instant) -> bool {
     }
     net.sweep_stale_connects();
     true
+}
+
+/// The port the dial-verdict selftest dials with nothing listening.
+const LO_CLOSED_PORT: u16 = 7713;
+
+/// The dial verdict, driven through the REAL handlers: a Tlopen goes to
+/// `h_lopen` and its reply is parsed, and a held open is answered by the real
+/// `poll_connects`, whose Rlerror lands in a pipe this test reads back. So a
+/// regression in either handler -- not only in the verdict function -- turns a
+/// leg red. Seven legs over one loopback stack, every leg runs, and the result
+/// names each one that failed (empty = PASS):
+///   never-dialed           Rlopen (the pre-existing answer, kept)
+///   refused, RST first     h_lopen -> ECONNREFUSED (the state that used to get
+///                          a live Rlopen on a dead connection)
+///   held, then refused     poll_connects -> ECONNREFUSED
+///   held, then swept       poll_connects -> ETIMEDOUT (the #293 drop used to
+///                          make it "refused")
+///   swept, then opened     h_lopen -> ETIMEDOUT
+///   established            Rlopen
+///   established, reset     Rlopen: the dial succeeded, so a later reset is no
+///                          dial failure (the sweep's Ready -> Dial::None)
+pub fn dial_verdict_selftest(base: Instant) -> Vec<&'static str> {
+    let mut device = Loopback::new(Medium::Ethernet);
+    let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress([
+        0x02, 0x00, 0x00, 0x00, 0x00, 0x0d,
+    ])));
+    config.random_seed = LO_SEED;
+    let ts0 = SmolInstant::from_millis(base.elapsed().as_millis() as i64);
+    let mut iface = Interface::new(config, &mut device, ts0);
+    iface.update_ip_addrs(|a| {
+        let _ = a.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8));
+    });
+    let mut lo = Net::new(
+        iface,
+        SocketSet::new(Vec::new()),
+        base,
+        IfConfig::empty(),
+        None,
+    );
+    // The Conn's handle is a pipe's write end: whatever poll_connects sends
+    // for a held open is read back from the other end.
+    let (rd, wr) = unsafe { libthyla_rs::t_pipe() };
+    if rd < 0 || wr < 0 {
+        return alloc::vec!["pipe"];
+    }
+    let mut conn = Conn::new(wr);
+    let legs = [
+        dial_leg_never_dialed(&mut conn, &mut lo),
+        dial_leg_refused_first(&mut conn, &mut lo, &mut device),
+        dial_leg_held_refused(&mut conn, &mut lo, &mut device, rd),
+        dial_leg_held_swept(&mut conn, &mut lo, rd),
+        dial_leg_swept_opened(&mut conn, &mut lo),
+        dial_leg_established(&mut conn, &mut lo, &mut device),
+    ];
+    let _ = unsafe { libthyla_rs::t_close(rd) };
+    let _ = unsafe { libthyla_rs::t_close(wr) };
+    legs.iter().filter_map(|l| *l).collect()
+}
+
+/// What a data open got from the real Tlopen handler.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum Opened {
+    Live,         // Rlopen
+    Refused(u32), // Rlerror, with its ecode
+    Held,         // no reply yet: poll_connects owes it
+    Broken,       // the handler failed, or replied with neither
+}
+
+/// The fid table slot and fid number the selftest opens through.
+const DV_FID_SLOT: usize = 0;
+const DV_FID: u32 = 0x0d1a;
+
+/// Open connection `n`'s data file through `h_lopen`, exactly as a Tlopen from
+/// the kernel client arrives.
+fn dv_open(conn: &mut Conn, net: &mut Net, n: u32, tag: u16) -> Opened {
+    conn.fids[DV_FID_SLOT] = Some(Fid {
+        fid: DV_FID,
+        path: make_conn(PROTO_TCP, n, FK_DATA),
+        opened: false,
+    });
+    let mut msg = [0u8; 15];
+    msg[0..4].copy_from_slice(&15u32.to_le_bytes());
+    msg[4] = p9::P9_TLOPEN;
+    msg[5..7].copy_from_slice(&tag.to_le_bytes());
+    msg[7..11].copy_from_slice(&DV_FID.to_le_bytes());
+    msg[11..15].copy_from_slice(&2u32.to_le_bytes()); // ORDWR
+    conn.out_buf.clear();
+    conn.out_buf.resize(SRV_MSIZE_USIZE, 0);
+    conn.defer = false;
+    let len = match conn.h_lopen(net, &msg, tag) {
+        Ok(l) => l,
+        Err(()) => return Opened::Broken,
+    };
+    if conn.defer {
+        conn.defer = false;
+        return Opened::Held;
+    }
+    dv_reply(&conn.out_buf[..len])
+}
+
+/// Classify one R-message.
+fn dv_reply(r: &[u8]) -> Opened {
+    if r.len() >= 11 && r[4] == p9::P9_RLERROR {
+        Opened::Refused(u32::from_le_bytes([r[7], r[8], r[9], r[10]]))
+    } else if r.len() >= 5 && r[4] == p9::P9_RLOPEN {
+        Opened::Live
+    } else {
+        Opened::Broken
+    }
+}
+
+/// Answer a held open through the real `poll_connects` and read what it sent.
+/// Reads only after the held entry is gone, so a handler that sent nothing
+/// fails the leg instead of blocking the boot on an empty pipe.
+fn dv_answer_held(conn: &mut Conn, net: &mut Net, rd: i64) -> Opened {
+    if !conn.poll_connects(net) || conn.has_pending_connects() {
+        conn.pending_connects.clear();
+        return Opened::Broken;
+    }
+    let mut r = [0u8; 64];
+    let got = unsafe { libthyla_rs::t_read(rd, r.as_mut_ptr(), r.len()) };
+    if got <= 0 {
+        return Opened::Broken;
+    }
+    dv_reply(&r[..got as usize])
+}
+
+/// A fresh TCP slot dialing 127.0.0.1 where nothing listens. The SYN is queued,
+/// not sent: the stack has not run.
+fn dv_dial_closed(net: &mut Net) -> Option<u32> {
+    let n = net.tcp_clone()?;
+    if net.tcp_connect(n, [127, 0, 0, 1], LO_CLOSED_PORT).is_err() {
+        net.free_orphan_mint(n);
+        return None;
+    }
+    Some(n)
+}
+
+fn dv_done(conn: &mut Conn, net: &mut Net, n: u32) {
+    conn.fids[DV_FID_SLOT] = None;
+    net.free_orphan_mint(n);
+}
+
+fn dial_leg_never_dialed(conn: &mut Conn, lo: &mut Net) -> Option<&'static str> {
+    let n = match lo.tcp_clone() {
+        Some(n) => n,
+        None => return Some("never-dialed-clone"),
+    };
+    let got = dv_open(conn, lo, n, 1);
+    dv_done(conn, lo, n);
+    (got != Opened::Live).then_some("never-dialed-not-live")
+}
+
+fn dial_leg_refused_first(conn: &mut Conn, lo: &mut Net, device: &mut Loopback) -> Option<&'static str> {
+    let r = match dv_dial_closed(lo) {
+        Some(n) => n,
+        None => return Some("refused-first-dial"),
+    };
+    // The local stack answers the SYN with its RST before any data open exists.
+    let failed = lo_drive(lo, device, |lo| {
+        matches!(lo.tcp_connect_state(r), ConnectState::Failed)
+    });
+    let got = if failed { dv_open(conn, lo, r, 2) } else { Opened::Broken };
+    let unopened = conn.fids[DV_FID_SLOT].map(|f| !f.opened).unwrap_or(false);
+    dv_done(conn, lo, r);
+    if !failed {
+        Some("refused-first-never-failed")
+    } else if got != Opened::Refused(p9::E_CONNREFUSED) {
+        Some("refused-first-not-econnrefused")
+    } else if !unopened {
+        Some("refused-first-fid-opened")
+    } else {
+        None
+    }
+}
+
+fn dial_leg_held_refused(
+    conn: &mut Conn,
+    lo: &mut Net,
+    device: &mut Loopback,
+    rd: i64,
+) -> Option<&'static str> {
+    let r = match dv_dial_closed(lo) {
+        Some(n) => n,
+        None => return Some("held-refused-dial"),
+    };
+    let stage = if dv_open(conn, lo, r, 3) != Opened::Held {
+        Some("held-refused-not-held")
+    } else if !lo_drive(lo, device, |lo| {
+        matches!(lo.tcp_connect_state(r), ConnectState::Failed)
+    }) {
+        conn.pending_connects.clear();
+        Some("held-refused-never-failed")
+    } else if dv_answer_held(conn, lo, rd) != Opened::Refused(p9::E_CONNREFUSED) {
+        Some("held-refused-not-econnrefused")
+    } else {
+        None
+    };
+    dv_done(conn, lo, r);
+    stage
+}
+
+fn dial_leg_held_swept(conn: &mut Conn, lo: &mut Net, rd: i64) -> Option<&'static str> {
+    let t = match dv_dial_closed(lo) {
+        Some(n) => n,
+        None => return Some("held-swept-dial"),
+    };
+    let stage = if dv_open(conn, lo, t, 4) != Opened::Held {
+        Some("held-swept-not-held")
+    } else {
+        // Past the SLOT's deadline, the #293 sweep drops the stuck dial first.
+        lo.slots[t as usize].connect_deadline_ms = lo.now_ms().saturating_sub(1).max(1);
+        lo.sweep_stale_connects();
+        if dv_answer_held(conn, lo, rd) != Opened::Refused(p9::E_TIMEDOUT) {
+            Some("held-swept-not-etimedout")
+        } else {
+            None
+        }
+    };
+    dv_done(conn, lo, t);
+    stage
+}
+
+fn dial_leg_swept_opened(conn: &mut Conn, lo: &mut Net) -> Option<&'static str> {
+    let t = match dv_dial_closed(lo) {
+        Some(n) => n,
+        None => return Some("swept-opened-dial"),
+    };
+    lo.slots[t as usize].connect_deadline_ms = lo.now_ms().saturating_sub(1).max(1);
+    lo.sweep_stale_connects();
+    let got = dv_open(conn, lo, t, 5);
+    dv_done(conn, lo, t);
+    (got != Opened::Refused(p9::E_TIMEDOUT)).then_some("swept-opened-not-etimedout")
+}
+
+fn dial_leg_established(conn: &mut Conn, lo: &mut Net, device: &mut Loopback) -> Option<&'static str> {
+    let (m, cn, ln) = match lo_establish_pair(lo, device) {
+        Some(t) => t,
+        None => return Some("established-pair"),
+    };
+    lo.sweep_stale_connects(); // sees ESTABLISHED: the dial is over (Dial::None)
+    let mut stage = None;
+    if dv_open(conn, lo, cn, 6) != Opened::Live {
+        stage = Some("established-not-live");
+    } else {
+        conn.fids[DV_FID_SLOT] = None;
+        // The server resets. A dial that SUCCEEDED is not a failed dial, so the
+        // client's data still opens (the old answer for a reset connection).
+        lo.tcp_abort_connect(m);
+        if !lo_drive(lo, device, |lo| {
+            matches!(lo.tcp_connect_state(cn), ConnectState::Failed)
+        }) {
+            stage = Some("established-reset-never-failed");
+        } else if dv_open(conn, lo, cn, 7) != Opened::Live {
+            stage = Some("established-reset-not-live");
+        }
+    }
+    conn.fids[DV_FID_SLOT] = None;
+    lo.free_orphan_mint(m);
+    lo.free_orphan_mint(cn);
+    lo.free_orphan_mint(ln);
+    stage
 }
 
 pub fn ipifc_e2e(base: Instant) -> bool {
@@ -5233,7 +5566,11 @@ impl Conn {
                 }
                 ConnectState::Failed => {
                     self.pending_connects.remove(i);
-                    if !self.deliver_connect_err(pc.tag, p9::E_CONNREFUSED) {
+                    // The #293 sweep runs first each tick and drops a stuck dial
+                    // at the SLOT's deadline, which is never later than this
+                    // open's -- so a timeout reaches here as Failed, not Pending.
+                    let e = net.dial_failure(pc.slot_n).unwrap_or(p9::E_CONNREFUSED);
+                    if !self.deliver_connect_err(pc.tag, e) {
                         return false;
                     }
                 }
@@ -5797,11 +6134,18 @@ impl Conn {
             // Rlopen on ESTABLISHED (or Rlerror on failure/timeout). Loopback
             // establishes within a poll -> resolves on the first poll. UDP/ICMP
             // have no handshake (ConnectState::Ready), and an accepted TCP M is
-            // already ESTABLISHED -> both reply immediately below.
-            if is_conn(f.path)
-                && conn_filekind(f.path) == FK_DATA
-                && net.tcp_connect_state(conn_n(f.path)) == ConnectState::Pending
-            {
+            // already ESTABLISHED -> both reply immediately below. A dial that has
+            // ALREADY failed is refused here, with the ecode poll_connects would
+            // have sent had the open arrived first.
+            let verdict = if is_conn(f.path) && conn_filekind(f.path) == FK_DATA {
+                net.data_open_verdict(conn_n(f.path))
+            } else {
+                DataOpen::Open
+            };
+            if let DataOpen::Refuse(e) = verdict {
+                return self.err(tag, e);
+            }
+            if verdict == DataOpen::Hold {
                 if self.pending_connects.len() >= MAX_FIDS {
                     return self.err(tag, p9::E_NOMEM);
                 }

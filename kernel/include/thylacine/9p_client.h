@@ -293,6 +293,16 @@ struct p9_client {
     // ordered by the handle publication, never flipped at runtime, so a plain
     // read is sound. Default false = strict close-to-open (I-38's default).
     bool                 loose;
+    // The identity cape (IDENTITY-DESIGN 3.2, HAUL-DESIGN 4.7): every stat from
+    // this session reports cape_uid:cape_gid -- the ATTACHING principal and its
+    // primary group -- as the owner, with the server's mode kept, and nothing
+    // identity-bearing goes to the server (the Tattach names no user, a create
+    // sends P9_NOGID, chown/chgrp are refused). Stamped ONCE by the attach path
+    // (p9_client_set_cape) before the root Spoor publishes -- ordered by that
+    // publication like `loose`, never flipped, so plain reads are sound.
+    bool                 cape;
+    u32                  cape_uid;
+    u32                  cape_gid;
     // The Larder -- the guest-side FS cache (L1c; docs/LARDER-DESIGN.md, I-38).
     // Shared by every Proc/thread resolving through this mount; protected by its
     // OWN near-leaf lock (never held with c->lock -- the RPCs that take c->lock
@@ -316,6 +326,14 @@ struct p9_client {
     u32                  total_ops;
     u32                  total_errors;
 };
+
+// Stamp the identity cape on a client no other thread can reach yet: the
+// attach path, before the root Spoor publishes.
+static inline void p9_client_set_cape(struct p9_client *c, u32 uid, u32 gid) {
+    c->cape_uid = uid;
+    c->cape_gid = gid;
+    c->cape     = true;
+}
 
 // =============================================================================
 // Lifecycle.

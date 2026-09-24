@@ -118,7 +118,10 @@ handler applies (the #81 hollow-rights close — an `O_PATH` handle is born `R|W
 but `perm_check`-exempt, so its `RIGHT_WRITE` is hollow — extended to the async
 path here). But MODE/UID/GID are authorized by *identity*, the sync side's
 owner-only `perm_wstat_check`, which the submit path cannot evaluate without a
-blocking owner-stat it is structurally forbidden from making. So the async
+blocking owner-stat. (The poll thread may never block; a submitter's own
+`ENTER` may, and since 2026-09-23 the directory-mutation gate below does. So
+async identity-setattr now has a mechanism to reuse, on non-SQPOLL rings only.
+It has not been done.) So the async
 `SETATTR` splits by authority kind: SIZE dispatches, and MODE/UID/GID are
 **rejected fail-closed** — v1.0 Loom `SETATTR` is truncate-only; an async
 identity-setattr (a submit-stat, or a completion-recheck design) is a v1.x seam.
@@ -127,6 +130,53 @@ path as on the sync one, *plus* the broader gap that the async path ran no
 identity check at all — both closed by the split. (`9p_client.loom_setattr_e2e`:
 chmod rejected and never on the wire; truncate reaches the wire; `O_PATH`
 truncate rejected.)
+
+**The directory-mutation ops re-check the DAC at submit (LOOM.md 8.5.1,
+2026-09-23).** `MKDIR`, `MKNOD`, `SYMLINK`, `UNLINKAT`, `RENAMEAT` and `LINK`
+used to gate on the handle's `RIGHT_WRITE` alone. The header said "the
+identity axis stays the dev9p server's"; A-3b had made that false, since the
+kernel is the only rwx enforcer and Stratum checks dataset scope only. Their
+directory handle is normally `O_PATH`, whose `RIGHT_WRITE` is hollow, so any
+principal that could X-search to a directory could create, unlink, rename, link
+or symlink entries in it. `SYMLINK` is the only way to make a symlink in the
+guest, so the widest door was the one every symlink goes through.
+
+The gate now does what the sync twins do:
+- stat each mutated directory and `perm_check` it for W|X (`RENAMEAT` both,
+  `LINK` only where the link lands; `-EIO` with no stat, `-EACCES` denied);
+- check against the ring creator's LIVE identity. `ident` is stamped at setup
+  before the handle publishes; the ring is non-transferable, so the creator is
+  every submitter;
+- refuse the six ops on an SQPOLL ring (`-EOPNOTSUPP`) before any stat, because
+  the poll thread must never block on a wire RPC;
+- resolve a create's gid: 0 means the primary group, anything else goes through
+  the chgrp rule of `perm_wstat_check`, and the wire carries the resolved value.
+  On a caped session (IDENTITY-DESIGN 3.2) 0 goes out as `P9_NOGID`, so the
+  server keeps its own group, and a named gid, even the primary one, is a chgrp
+  the cape refuses (`-EACCES`);
+- send a create's mode as its rwx bits only (`MKNOD` keeps its type), as the
+  sync create does, so a create cannot plant the setuid, setgid or sticky bits
+  that `SYS_WSTAT` refuses;
+- check each child name with `sys_copy_component`'s rule (`-EINVAL` before any
+  stat) on a copy taken into the op at submit. The build sends that copy, so
+  userspace cannot rewrite a checked name in the shared buffer.
+
+`LCREATE` also creates a child. It is not dispatched yet (`-ENOSYS`, the #916
+seam), and it joins this gate when it is.
+
+`9p_client.loom_dirmut_dac` holds the truth table per op, with every refusal
+checked against the server's own count of what reached it;
+`9p_client.loom_dirmut_names` holds the name rule.
+`9p_client.loom_dirmut_sqpoll` and `9p_client.loom_create_gid` hold the other
+rules; the last also reads the create mode off the wire.
+
+The parent's DAC needs nothing extra under the cape: the stat it checks comes
+through dev9p's one conversion, which already reports the cape's owner.
+`GETATTR` is the one place Loom hands userspace the server's attributes
+directly, so its completion copy applies the cape itself: the cape's uid and gid
+replace the server's and are marked valid, as the kernel's own stat reports
+them. Userspace sees the owner the kernel's DAC enforces.
+`9p_client.loom_cape` holds both rules.
 
 ### Back-pressure at submit, not at completion
 
@@ -140,6 +190,19 @@ So the reservation is made when the operation starts, and a full ring
 back-pressures at the front door: the entry waits for the next enter. The
 completion-time full check remains as a guard, and its counter is meant to stay
 at zero.
+
+Until 2026-09-23 that held for one driver only. Two drivers on one ring could
+over-admit: two `ENTER`s of a multi-thread Proc, or an `ENTER` beside the poll
+thread. An op between its consume and its dispatch was counted nowhere, so a
+sibling admitted into its slot and the guard then dropped a completion (I-29).
+This was the Loom-5 audit's owed F2 residual. The directory-mutation gate made
+it worse, because its stat can hold a driver in that gap for a whole RPC. The
+gap is now counted: `admitting` holds the slot from the consume, or the chain
+claim, until the op's CQE posts, the op is in flight, or it parks HELD.
+`loom.admission_counts_admitting` holds the arithmetic and the return to zero
+on every path.
+
+The wait side counts `admitting` too. A blocking `ENTER` no longer gives up while a sibling is mid-submit; with nothing in flight it sleeps rather than pumps, and only while that is still the state. Every release of a reservation wakes the CQ waiters, so an op that went in flight meanwhile finds a thread to pump it. `loom.wait_counts_admitting` holds it. A `DRAIN` counts `admitting` too: an op a sibling consumed and has not disposed of is a prior op the drain must wait for, and `loom.drain_waits_for_admitting` holds that.
 
 ### What the completion callback may not do
 
@@ -560,4 +623,5 @@ an exec never refunds against the successor's space (the audit's F4;
 
 [[chg-2026-08-02-async-sweep]], [[chg-2026-08-16-loom-charge-ledger]],
 [[chg-2026-08-16-loom-backstop-closed]] (the thread-ledger backstop, and the
-one-line fix that would have leaked).
+one-line fix that would have leaked). 2026-09-23 (L): the identity cape's two
+Loom rules (the caped `GETATTR` copy; the caped create gid).

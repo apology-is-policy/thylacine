@@ -322,6 +322,12 @@ impl Sqe {
     /// `symlink` -- create `name` under the registered O_PATH directory handle
     /// `dir_idx` (requires `RIGHT_WRITE`), pointing at `target`.
     ///
+    /// The kernel also checks, at submit, that the directory grants this ring's
+    /// creator write and search permission (`EACCES` otherwise), and refuses the
+    /// op on an SQPOLL ring (`EOPNOTSUPP`). `gid` 0 means the creator's primary
+    /// group; any other value must be a group the creator is in (`EACCES`
+    /// otherwise). LOOM.md 8.5.1.
+    ///
     /// Both strings live in ONE registered-buffer span: `name` occupies
     /// `[buf_off, buf_off + name_len)` and `target` the rest, up to
     /// `buf_off + total_len`. The kernel splits at `name_len` and validates

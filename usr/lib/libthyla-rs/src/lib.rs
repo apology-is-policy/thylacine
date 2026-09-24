@@ -420,6 +420,11 @@ pub const T_WALK_CREATE_DMSRVBYTE: u32 = 0x0200_0000;
 // (netd's /net stays default-class); stratumd posts it via the pouch
 // SO_SNDBUF mapping.
 pub const T_WALK_CREATE_DMSRVBULK: u32 = 0x0100_0000;
+// DMSRVCAPE (IDENTITY-DESIGN 3.2): on a BYTE-mode /srv service post, capes
+// every attach over the service -- what T_ATTACH_9P_CAPE does to a pipe
+// attach, and the only way a /srv attach is caped. Refused without DMSRVBYTE.
+// Mirrors SYS_WALK_CREATE_DMSRVCAPE in the kernel.
+pub const T_WALK_CREATE_DMSRVCAPE: u32 = 0x0080_0000;
 
 // SYS_WALK_OPEN sentinel for "walk from the calling Proc's territory
 // root spoor" (P5-stratumd-stub-bringup-e2). Passed as spoor_fd when
@@ -651,6 +656,20 @@ pub const T_SPAWN_PERM_SESSION_HANGUP: u64 = 1 << 5;
 pub const T_SPAWN_PERM_SEAT_MANAGER: u64 = 1 << 6;
 pub const T_SPAWN_PERM_SEAT_SERVICE: u64 = 1 << 7;
 pub const T_SPAWN_PERM_SEAT_CLIENT: u64 = 1 << 8;
+// T_SPAWN_PERM_SEAL ((U) F1/F5): seal the child before its first instruction --
+// PROC_FLAG_NOTRACE (the CONTROL seal: the /proc debug surface refuses every
+// attach, one from the SAME principal included) and PROC_FLAG_NODUMP (the
+// EXTRACTION seal: every /proc/<pid> file that hands out something the child
+// holds -- environ, maps, ns, cwd, exe, cmdline, reads of mem/regs -- is refused
+// to every other Proc, CAP_HOSTOWNER included; status, sched and imperium stay
+// readable, the kernel's record ABOUT a Proc). The pair a seat service carries.
+// The case that matters is a service spawned as the user it serves (login's home
+// proxy). Both bits land in one step, under the lock every /proc reader holds.
+// Sealed before its first instruction, NOT before it is visible in /proc: in that
+// window its image is its parent's copy (DEBUG-FS-DESIGN 3.2). Ungated: a Proc may
+// already seal itself with SYS_SET_TRACEABLE(0) + SYS_SET_DUMPABLE(0), so this only
+// moves the seal earlier than the child could manage for itself.
+pub const T_SPAWN_PERM_SEAL: u64 = 1 << 9;
 
 // poll event bits — MUST mirror POLL* in kernel/include/thylacine/poll.h.
 // Linux values; the future musl shim is a no-op.
@@ -776,6 +795,10 @@ pub const T_CAP_CHOWN: u64           = 1 << 8;   // elevation-only; chown/chgrp-
 pub const T_CAP_KILL: u64            = 1 << 9;   // elevation-only; cross-identity kill override
 pub const T_CAP_DEBUG: u64           = 1 << 10;  // elevation-only; cross-Proc debug authority (I-39)
 pub const T_CAP_POST_SERVICE: u64 = 1 << 13; // elevated /srv posting, propagated by imperium
+// (U) fork-grantable; gates open=connect on a TCB byte service in /srv
+// (STALK-DESIGN 5.2 / D8). joey -> login -> the per-user home proxy; the
+// user's shell is deliberately NOT given it.
+pub const T_CAP_TCB_DIAL: u64        = 1 << 14;
 pub const T_CAP_JIT: u64             = 1 << 11;  // elevation-only; code-Burrow creation (I-42)
 pub const T_CAP_AUDIO_GRAPH: u64     = 1 << 12;  // elevation-only; Nocturne whole-sink authority (I-46; NOCTURNE.md 6.8)
 
@@ -1712,11 +1735,12 @@ pub unsafe fn t_pivot_root(new_root_fd: i64) -> i64 {
 /// duplex Spoor passed as both. The kernel runs Tversion + Tattach (asserting
 /// the caller's kernel-stamped principal as `n_uname`; the value passed here
 /// is vestigial) and returns a KOBJ_SPOOR rooting the attached tree
-/// (R|W|TRANSFER). The attach holds its own refs on both transport Spoors, so
-/// the pipe fds may be closed afterwards. Returns the new fd (>= 0) or -1.
+/// (R|W|TRANSFER). `flags` is 0 or [`T_ATTACH_9P_CAPE`]; unknown bits reject.
+/// The attach holds its own refs on both transport Spoors, so the pipe fds may
+/// be closed afterwards. Returns the new fd (>= 0) or -1.
 #[inline(always)]
 pub unsafe fn t_attach_9p(tx_fd: i64, rx_fd: i64, aname: *const u8, aname_len: usize,
-                          n_uname: u64) -> i64 {
+                          n_uname: u64, flags: u64) -> i64 {
     let mut x0: i64 = tx_fd;
     asm!(
         "svc #0",
@@ -1725,6 +1749,7 @@ pub unsafe fn t_attach_9p(tx_fd: i64, rx_fd: i64, aname: *const u8, aname_len: u
         in("x2") aname as u64,
         in("x3") aname_len as u64,
         in("x4") n_uname,
+        in("x5") flags,
         in("x8") T_SYS_ATTACH_9P,
         options(nostack)
     );
@@ -1737,6 +1762,14 @@ pub unsafe fn t_attach_9p(tx_fd: i64, rx_fd: i64, aname: *const u8, aname_len: u
 /// wire revalidation). docs/chase/B1-VOTE.md + the ARCH I-38 row.
 pub const T_ATTACH_9P_LOOSE: u64 = 0x1;
 
+/// SYS_ATTACH_9P flags: the identity cape (IDENTITY-DESIGN 3.2). Every file on
+/// the session reports the attaching principal as owner and its primary group
+/// as group, with the server's mode kept; the attach names no user, a create
+/// leaves the server's group alone, and chown/chgrp are refused. For a server
+/// whose ids are not Thylacine principals (Haul's npxf). SYS_ATTACH_9P_SRV
+/// refuses it: over /srv the cape is the poster's ([`T_WALK_CREATE_DMSRVCAPE`]).
+pub const T_ATTACH_9P_CAPE: u64 = 0x2;
+
 /// t_attach_9p_srv -- drive a 9P attach over a byte-mode `/srv` connection
 /// (16c; SYS_ATTACH_9P_SRV). `srv_fd` is a KOBJ_SPOOR CLIENT byte-conn from
 /// open=connect on a byte-mode service (must carry R+W; the kernel 9P client
@@ -1745,8 +1778,10 @@ pub const T_ATTACH_9P_LOOSE: u64 = 0x1;
 /// the attached tree (R|W|TRANSFER). `aname` is the server-side path /
 /// capability string (<= SYS_ATTACH_ANAME_MAX; pass NULL+0 for the default
 /// root). `flags` is 0 (strict close-to-open) or T_ATTACH_9P_LOOSE; unknown
-/// bits reject. After a successful attach the `srv_fd` handle may be closed
-/// -- the attach holds its own ref and the rings are kernel_attached.
+/// bits reject, T_ATTACH_9P_CAPE among them (over /srv the cape is the
+/// poster's: a service posted DMSRVCAPE capes every attach over it). After a
+/// successful attach the `srv_fd` handle may be closed -- the attach holds its
+/// own ref and the rings are kernel_attached.
 /// Returns the new fd (>= 0) or -1.
 #[inline(always)]
 pub unsafe fn t_attach_9p_srv(srv_fd: i64, aname: *const u8, aname_len: usize,
@@ -1941,9 +1976,23 @@ pub unsafe fn t_mlockall(flags: u64) -> i64 {
 // (kernel returns -1). Returns 0 on first successful set-to-0; -1 on
 // any other input or attempted re-enable.
 //
-// Core dumps don't exist at v1.0 — the flag is forward-compat
-// scaffolding. When core dumps land, the kernel-side dump path must
-// check this flag and refuse to dump a Proc with NODUMP set.
+// THIS IS NOT ONLY ABOUT CORE DUMPS, and it is not forward-compat
+// scaffolding (changed 2026-09-24, DEBUG-FS-DESIGN 3.2). The flag is the
+// EXTRACTION seal: while set, every /proc/<pid> file that hands out something
+// you hold -- environ, maps, ns, cwd, exe, cmdline, and reads of
+// mem/regs/fpregs/kregs -- is refused to every OTHER Proc, a CAP_HOSTOWNER holder
+// included. The calling Proc still reads its own. /proc/<pid>/status, sched and
+// imperium are NOT sealed, deliberately -- they are the kernel's record ABOUT a
+// Proc, and an audited Proc must not be able to switch off the audit.
+//
+// It does NOT stop a peer that may still DRIVE you: a debugger that can attach
+// and write your registers can make you disclose yourself. Guarding a secret
+// takes t_set_traceable(0) as well -- both, as corvus and login do.
+//
+// So calling this is choosing PERMANENT opacity of your image to the rest of
+// the machine, irreversibly and with no capability required. That is usually what a hardening sequence wants; make sure it is
+// what YOU want. Core dumps do not exist at v1.0, and when they land the
+// dump path must refuse a Proc with NODUMP set as well.
 #[inline(always)]
 pub unsafe fn t_set_dumpable(dumpable: u64) -> i64 {
     let mut x0: i64 = dumpable as i64;
@@ -1956,13 +2005,13 @@ pub unsafe fn t_set_dumpable(dumpable: u64) -> i64 {
     x0
 }
 
-// t_set_traceable — control debug-Spoor attach permission. Same
-// one-way-to-0 semantics as t_set_dumpable. Sets PROC_FLAG_NOTRACE.
-//
-// Debug Spoors don't exist at v1.0 — the flag is forward-compat
-// scaffolding. When debug-Spoor attach lands, the kernel-side attach
-// path must check this flag and refuse to attach to a Proc with
-// NOTRACE set.
+// t_set_traceable — the CONTROL seal (DEBUG-FS-DESIGN 3.2). t_set_traceable(0)
+// sets PROC_FLAG_NOTRACE: every debugger is refused -- CAP_HOSTOWNER and
+// CAP_DEBUG included -- at attach, step, breakpoints, wait, kregs, kstack and
+// mem/regs/fpregs in both directions. A debugger that attached BEFORE the call
+// keeps its slot's run-control verbs, so seal before the Proc is exposed.
+// Ungated and one-way: t_set_traceable(1) on a sealed Proc is REFUSED.
+// Guarding a secret takes t_set_dumpable(0) as well.
 #[inline(always)]
 pub unsafe fn t_set_traceable(traceable: u64) -> i64 {
     let mut x0: i64 = traceable as i64;
@@ -3500,11 +3549,11 @@ unsafe extern "C" fn __libthyla_rt_start(argc: usize, argv: *const *const u8) ->
     // SCOPE: the MAIN thread only. note_mask is per-thread and native thread-spawn
     // does NOT inherit it (the kernel rfork rule), so a thread started via
     // thread::spawn_raw begins PIPE-unmasked and would take the proc-wide pipe
-    // latch on a closed-pipe write. No shipping multi-threaded libthyla-rs program
-    // writes a closed pipe on a spawned thread (the spawners are all benchmarks /
-    // torture tests over sockets or CPU/memory), so this is a latent limitation,
-    // not a regression -- the Go runtime, which IS such a writer, masks per-M in
-    // minit. A spawned thread that needs EPIPE-not-death masks NOTE_BIT_PIPE itself.
+    // latch on a closed-pipe write. A spawned thread that writes pipes (or
+    // stderr, which a shell may hand over as a pipe nobody reads) masks
+    // NOTE_BIT_PIPE itself: haul does at each relay pump's entry, and the Go
+    // runtime per-M in minit. The other spawners are benchmarks and torture
+    // tests over sockets or CPU/memory.
     let _ = t_note_mask(1u64 << T_NOTE_BIT_PIPE, core::ptr::null_mut());
     rs_main()
 }

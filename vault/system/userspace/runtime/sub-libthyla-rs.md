@@ -279,10 +279,26 @@ None crossing a boundary; every ABI record belongs to
   to stay dependency-free. It carries its own copy of the all-rights literal,
   which is one more unpinned copy of a bound the kernel also states as a
   literal.
-- **`Error`** — a flat enum of fifteen errno-mapped variants, a catch-all
+- **`Error`** — a flat enum of twenty errno-mapped variants (measured from
+  `as_errno`, 2026-09-24: nineteen registry values plus `DirectoryNotEmpty`'s
+  39, which has no `T_E_*`), a catch-all
   carrying an integer, and two library-only variants for a read that ended
   early and a write that stopped making progress. No allocation: variants are
   unit or carry one integer, and `Display` uses static strings.
+- **`Dialing`** (`net.rs`) — a TCP dial in flight. `TcpStream::dial` writes
+  `connect` and returns it. `wait(timeout)` polls the `ready` sibling, opened
+  lazily, and returns true once the handshake has settled: POLLOUT on
+  ESTABLISHED, or POLLHUP when a RST closed the socket. `finish` opens `data`
+  and returns the verdict; netd holds that open until the dial settles.
+  `connect` = `dial` + `finish`. `connect_timeout` = `dial` + `wait` +
+  `finish`, so a refusal comes back as `ConnectionRefused` at once. It used to
+  return `TimedOut`: the old code tested only writability, and a RST sets
+  HUP, not POLLOUT, which also made `dial` and `con` print "unreachable" for a
+  refused port.
+  - `wait` also returns true on POLLERR (a #293 drop sets the slot's `err`).
+  - It also returns true on the kernel poll bridge's always-ready fallback when
+    it cannot allocate the probe (`dev9p_poll.c`). There `finish` still blocks,
+    until netd settles the dial.
 - **`Stdio` / `PreparedStdio`** — the spawn plumbing. The prepared form splits
   what the parent must hold *through* the syscall from what it keeps *after*,
   which is the distinction that gets end-of-file semantics right.
@@ -562,6 +578,10 @@ absorbed from docs/reference/89: `mmio_read32`/`write32` must be a single
 base-only instruction (ISV=1) so HVF can decode the emulated access -- a plain
 `read_volatile` can inline to a writeback/unscaled form (ISV=0) that trips HVF's
 `assert(isv)` (#890, the kernel-worked-userspace-tripped signature).
+
+2026-09-24: `Error::ConnectionRefused` (111). A refused dial used to surface as
+`Other(111)`, "kernel error (errno 111)". Added `Dialing` as above (haul's slow
+dial names itself while it waits).
 
 2026-09-16: `PciDev::claim_nth` now unwinds a partial BAR mapping. A mid-loop
 `t_pci_map_bar` failure detaches the BARs this call already mapped, because each

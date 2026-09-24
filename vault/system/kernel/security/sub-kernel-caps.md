@@ -16,7 +16,7 @@ locks: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md section 5.5", "docs/IDENTITY-DESIGN.md section 9.8", "specs/corvus.tla", "specs/handles.tla"]
 created: 2026-08-02
-updated: 2026-09-21
+updated: 2026-09-24
 ---
 ## Graphical grant commit
 
@@ -45,6 +45,91 @@ The single sanctioned path by which a Proc gains one is the `cap` device,
 and everything in this dossier exists to make that the only path.
 
 ## Contract
+
+**`CAP_TCB_DIAL` + a real coverage assert (U, 2026-09-23).** Bit 14, the
+fifteenth capability, gating open=connect on a TCB **byte** service in `/srv`
+([[sub-kernel-devsrv]], STALK-DESIGN 5.2 / D8). **FORK-GRANTABLE** -- a member
+of `CAP_ALL`, not of `CAP_ELEVATION_ONLY` -- because it flows down the vetted
+boot chain exactly as `CAP_SET_IDENTITY` does: kproc -> joey -> `/sbin/login` ->
+the per-user home proxy login spawns. That proxy runs as the USER, so the
+authority to dial cannot be an identity check; a clearance would be the wrong
+shape too, since the proxy is SPAWNED rather than elevated.
+
+The same chunk replaced the `CAP_ALL` assert, which compared the macro against
+its own definition token for token (`X == X`) and could not fail, with a real
+COVERAGE assert `(CAP_ALL | CAP_ELEVATION_ONLY) == CAP_DEFINED`. Its two sides
+are independent lists, so omitting a new bit from either one now fails the
+build. Task #35; the full account, including the sabotage that proves the new
+guard fires where the old one did not, is in [[abi-caps]].
+
+**A capability is not a boundary on its own -- the holder must also be
+unpuppetable ((U) F1, 2026-09-23).** The header comment beside `CAP_TCB_DIAL`
+used to say the hole in this reasoning was open; it is now closed, and the fix
+lives nowhere near this file. Because the home proxy runs AS the user, the user's
+own shell is the same principal, and [[inv-i39]]'s debug gate admitted an OWNER
+outright when this was written -- so the shell could debug-attach the proxy and
+drive its transport without ever holding bit 14. **TWO independent answers close
+it now**, and the audit of 2026-09-24 caught this paragraph naming only one:
+`SPAWN_PERM_SEAL` on the proxy's spawn ([[sub-kernel-syscall-dispatch]],
+[[sub-stratum-session]]), and the capability-cover rule on the owner axis
+([[sub-kernel-devproc]], DEBUG-FS-DESIGN 3.1), which refuses the attach on
+authority because the shell lacks exactly bit 14. The seal is kept as the second
+answer, not made redundant: it is the one that still holds between peers of EQUAL
+authority, and a caps-0 NATIVE fork of the proxy is covered by every
+same-principal peer while still holding the parent's handles.
+
+The transferable lesson, and the reason it is recorded HERE rather than only at
+the fix: **granting a capability to a process that shares a principal with an
+attacker grants it to the attacker, unless something separately stops the
+attacker from driving that process.** A capability answers "who may act"; it says
+nothing about who may act THROUGH the actor. Any future fork-grantable bit handed
+to a service that runs as a user inherits this whole problem, and the checklist
+is two items, not one: give it the bit, and make it untraceable.
+
+**And cover does not retire that second item -- it cannot see most of what is
+worth stealing.** The cover rule is a subset test over the `caps` word alone,
+while authority also lives in the `proc_flags` spawn perms
+(`PROC_FLAG_MAY_POST_SERVICE`, `SESSION_HANGUP`), the [[inv-i34]] hardware
+allowance, and the handle table. So a peer with EQUAL caps and FEWER perms
+covers, and debugging hands it the perms. Read the checklist as: give it the
+bit, and make it untraceable **whenever the bit is not a capability either** --
+a `SPAWN_PERM_*` granted to a Proc that runs as a user needs `SPAWN_PERM_SEAL`
+in the same `.perm()` call, because cover is blind to the thing just granted.
+Live instance, self-found at the 2026-09-24 close and **since CLOSED**: the Halcyon
+session compositor held `MAY_POST_SERVICE` with the shell's own cap mask and no seal,
+so any tile program covered it exactly. It is sealed now.
+
+**And the sweeping form of this rule did not survive its own audit.** The draft said a
+`SPAWN_PERM_*` granted to a user-running Proc *must* carry `SEAL`, and claimed both of
+login's spawn sites obeyed. There are **three**: the session shell (`main.rs:1341`,
+`CONSOLE_OWNER | SESSION_HANGUP`) is deliberately unsealed, because neither bit is
+onward-conferrable by `ut` and a same-principal peer can already end the session by
+killing it, so sealing would make the user's own shell undebuggable and buy nothing.
+The durable form is a QUESTION, not a rule -- *would puppeting the holder give that peer
+authority it cannot otherwise obtain?* -- with all three answers recorded at
+`CAP_TCB_DIAL` in `caps.h`. The instructive part is the failure mode: a rule generalised
+from two examples, with its census taken from memory instead of from a grep, was false
+on the day it landed.
+
+Round 2 added a third item: **make the seal visible before the identity that would
+admit an attacker.** It was first discharged by load order -- `proc_apply_identity`
+publishing `principal_id` with RELEASE so an ACQUIRE reader of the new identity also saw
+the stamp -- and the seal's own round-2 re-audit (2026-09-24) showed that held only for a
+reader admitted BECAUSE it saw the new identity: not for a spawn that changes none, not
+for a `CAP_HOSTOWNER` reader. It is now discharged by a lock: `proc_seal` stamps under
+`g_proc_table_lock`, which every `/proc` reader holds -- see [[sub-kernel-proc]] and
+[[sub-kernel-devproc]]. Granting the bit, sealing the holder and ordering the two are
+still one obligation, not three; the third is now held by construction.
+
+**A new `/proc` surface picks its gates by what they weigh.** `devproc_debug_authorized`
+weighs capability cover and the NOTRACE seam; `devproc_owner_or_hostowner` weighs
+neither capability nor any seal; the dump seal sits beside both, in
+`devproc_kind_is_image` and `devproc_read_sealed`. So the planned `/proc/<pid>/fd/`
+routes through the debug predicate (a descriptor list is closer to control than to
+disclosure) and, because it hands out what the Proc holds, is classified as image and
+gets a `dump_seal_disclosure` row. `caps.h` once said the owner gate weighs NODUMP --
+written by the very commit that moved the seal out of it (seal round 3, F1).
+
 
 **Propagating Imperium and Haul (2026-09-17).** `CAP_GRANTABLE_IMPERIUM`
 is DAC_OVERRIDE | CHOWN | KILL | POST_SERVICE. The last bit is 13 (12 remains
@@ -232,8 +317,11 @@ handful of times per boot. Not a hot surface.
 ## Prosecution
 
 - A new capability bit must be added to `CAP_ALL` **or** to
-  `CAP_ELEVATION_ONLY`, never both and never neither; both asserts must be
-  updated deliberately.
+  `CAP_ELEVATION_ONLY`, never both and never neither. Since (U) BOTH halves
+  are build-enforced -- disjointness forbids a bit in both classes, coverage
+  forbids one in neither. Prosecute that the coverage assert's two sides stay
+  INDEPENDENT lists: rewriting either in terms of the other restores the
+  tautology that was #35.
 - Any new register path must write **every** entry field, or a re-register
   across kinds leaves a stale discriminator.
 - The redeem must keep reading `kind` inside the same locked lookup that

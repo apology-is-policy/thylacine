@@ -171,8 +171,15 @@ later patch's direct slot writes ride the same assumption.
 
 ## Error paths
 
-`ECONNREFUSED` (any connect failure), `EACCES` (any bind failure) — both
-coarse by the flat-`-1` collapse. `ENOTCONN` / `EBADF` from the slot
+`connect` is **two-valued since (U)**: `EACCES` when the kernel names an
+authority refusal (`-T_E_ACCES` from the /srv connect gate, carried out of
+`devsrv_open_connect` through `spoor_open_errno`), `ECONNREFUSED` for every
+other failure, a missing service included. `srv_open_errno` in 0006's
+`connect.c` is the single place that decides it, and the distinction is
+behavioural rather than cosmetic: `ECONNREFUSED` is the TRANSIENT AF_UNIX
+error every client retries on, so reporting a permanent denial that way makes
+a POSIX caller spin forever. `EACCES` (any bind failure) — **still** coarse by
+the flat-`-1` collapse, and now the only half that is. `ENOTCONN` / `EBADF` from the slot
 resolver. `ENOPROTOOPT` for unsupported options. `EOPNOTSUPP` for
 unsupported flags. `POLLNVAL` for a FRESH or vacant tagged slot (the
 POSIX EBADF surface for a poll).
@@ -232,6 +239,16 @@ lazy ready-fd slot-reuse ABA, task #222 — pre-registered by the net-6b
 round against this surface before it had a node).
 
 ## Caveats
+
+- **`bind()` still collapses every failure into `EACCES`.** Right for the
+  `PROC_FLAG_MAY_POST_SERVICE` denial it was written for, wrong for every other
+  cause, and **reachable today**: the /srv registry runs at 15/16, so a third
+  user's post fails and is reported as "permission denied" rather than
+  exhaustion. A name already in use should be `EADDRINUSE`, a full registry
+  `ENOSPC`. Not fixed with (U)'s `connect` half because the correct mapping
+  needs the enumeration of what `SYS_walk_create` returns on the post path --
+  adjacent scope, tracked at
+  `memory/bug_pouch_socket_boundary_discards_the_cause.md`.
 
 - **The `select()`/`pselect()` fd-VALUE bound is stale and now wrong.**
   Both reject any fd ≥ 64 set in an input set, commented as "unreachable
@@ -370,4 +387,8 @@ the kernel byte-mode SrvConn; [[adt-sockets12-r1]] 2 P1) →
 [[chg-2026-09-06-9p-identity-absorb]] (the A-3 `SO_PEERCRED`-carries-principal
 marshal in 0006, folded at the docs/reference retirement). 0038 (stdio over
 a tagged fd) landed with the Boosty B-0 libc fixes, 2026-09-21; its audit
-record is `memory/audit_pouch_0033_0035_closed_list.md` finding F4.
+record is `memory/audit_pouch_0033_0035_closed_list.md` finding F4. (U) the
+/srv connect gate, 2026-09-23: `connect`'s errno stopped collapsing an
+authority refusal into `ECONNREFUSED`, and `pouch-hello-sockets` grew the
+`xproc-gate` leg -- the two-Proc boundary test the gate's round-1 F3 left
+owed. Closed list: `memory/audit_u_srv_connect_gate_closed_list.md`.

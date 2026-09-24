@@ -113,9 +113,12 @@ pub enum EditorAction {
     /// finalizes (dismiss the strip, keep the selection, no submit); any other
     /// key dismisses the menu and is processed normally. The Vec is in source
     /// order (NOT sorted) so the source's natural ordering propagates.
+    /// `unlisted` counts matches the source found but did not hand over; no Tab
+    /// can cycle to them, so the strip says they exist (`menu_strip`).
     MenuShow {
         candidates: Vec<String>,
         selected: usize,
+        unlisted: usize,
     },
 }
 
@@ -293,36 +296,51 @@ fn continuation_prefix(prompt_width: usize) -> alloc::string::String {
 // table, the function table, the cap registry, etc.). U-4d defines
 // the trait the shell implements + the editor-side machinery (Tab
 // key dispatches to the source; the source returns a structured
-// Completions; the editor inserts the common-prefix extension, then
-// opens the D4 cycling menu (MenuShow) when the prefix is exhausted).
+// Completions; the editor inserts the shared extension, then opens
+// the D4 cycling menu (MenuShow) when there is none).
 //
-// At U-4d, the engine ships a `StaticCompletionSource` that wraps a
-// fixed candidate list -- used by tests and as a placeholder until
-// U-6 wires in the real shell-driven source.
+// The text that goes into the line is the SOURCE's to write, never the
+// engine's. A source completes some grammar -- the shell's words, where a
+// name holding a space or a quote must be quoted -- and only it knows how a
+// value is spelled there. So each string it hands over is already the text
+// to insert, and so is the prefix its matches share: the engine cannot take
+// that prefix from the inserted forms, because quoting changes it. Quoted,
+// two names that part after a space can share a prefix ending inside the
+// quoting, or share nothing at all when only one of them needs quotes.
+//
+// The engine also ships a `StaticCompletionSource` over a fixed list, for
+// tests and the boot probes; the shell's is `completion::ShellCompletionSource`.
 
 /// A pluggable source for Tab completion candidates. Implementors
 /// receive the current buffer + cursor position and return the byte
-/// range to replace + the candidate strings.
+/// range to replace + the texts that may replace it.
 pub trait CompletionSource {
     fn complete(&self, buffer: &str, cursor: usize) -> Completions;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Completions {
-    /// Byte range in the buffer that each candidate replaces.
+    /// Byte range in the buffer that a completion replaces.
     pub replace_range: core::ops::Range<usize>,
-    /// Candidate full-replacement strings, in source order.
+    /// The listed matches, each as the text that replaces `replace_range`.
     pub candidates: Vec<String>,
+    /// What every match shares, listed or not, as the text that replaces
+    /// `replace_range` -- present only when it says more than the buffer does.
+    pub extension: Option<String>,
+    /// Matches missing from `candidates`, which no Tab reaches: a source that
+    /// bounds what it holds lists only some, and one completing a grammar can
+    /// meet a match it has no way to write.
+    pub unlisted: usize,
 }
 
 /// A simple completion source backed by a fixed candidate list. Used
-/// by the U-4d tests + boot probes; production code (U-6+) will plug
-/// shell-driven sources (path search, $path scan, function table,
-/// alias table, etc.).
+/// by the U-4d tests + boot probes; the shell installs
+/// `completion::ShellCompletionSource`.
 ///
 /// `complete(buffer, cursor)`: finds the start of the current word
 /// (cursor backward to whitespace or buffer start) and returns the
 /// subset of `candidates` whose first chars match the word prefix.
+/// Each is inserted exactly as given: this source quotes nothing.
 pub struct StaticCompletionSource {
     pub candidates: Vec<String>,
 }
@@ -348,9 +366,13 @@ impl CompletionSource for StaticCompletionSource {
             .collect();
         // Preserve source-order; do NOT sort.
         matches.shrink_to_fit();
+        // Inserted as given, so what they share is their own common prefix.
+        let shared = longest_common_prefix(&matches);
         Completions {
             replace_range: word_start..cursor,
+            extension: (shared.len() > prefix.len()).then_some(shared),
             candidates: matches,
+            unlisted: 0,
         }
     }
 }
@@ -358,17 +380,17 @@ impl CompletionSource for StaticCompletionSource {
 /// Longest common byte prefix of all `strs`. UTF-8 safe: the returned
 /// length is rounded DOWN to the nearest char boundary in the first
 /// string. Returns "" for empty input.
-fn longest_common_prefix(strs: &[String]) -> String {
+pub(crate) fn longest_common_prefix<S: AsRef<str>>(strs: &[S]) -> String {
     if strs.is_empty() {
         return String::new();
     }
     if strs.len() == 1 {
-        return strs[0].clone();
+        return String::from(strs[0].as_ref());
     }
-    let first = strs[0].as_bytes();
+    let first = strs[0].as_ref().as_bytes();
     let mut common_len = first.len();
     for s in &strs[1..] {
-        let other = s.as_bytes();
+        let other = s.as_ref().as_bytes();
         let mut i = 0;
         while i < common_len && i < other.len() && first[i] == other[i] {
             i += 1;
@@ -376,10 +398,129 @@ fn longest_common_prefix(strs: &[String]) -> String {
         common_len = i;
     }
     // Round to char boundary.
-    while common_len > 0 && !strs[0].is_char_boundary(common_len) {
+    let first = strs[0].as_ref();
+    while common_len > 0 && !first.is_char_boundary(common_len) {
         common_len -= 1;
     }
-    String::from(&strs[0][..common_len])
+    String::from(&first[..common_len])
+}
+
+/// D4: the one-line candidate strip `render` draws below the block in `Menu`
+/// mode, for a terminal `width` columns wide. The `selected` candidate is
+/// reverse-video highlighted; candidates join with two spaces, and when they
+/// would not fit, a contiguous window AROUND `selected` is shown, with `<` /
+/// `>` where it leaves candidates out, so the current pick is always visible.
+/// `unlisted` matches -- ones the source never handed over -- are counted at
+/// the end: the window markers mean "cycle to see more", but no Tab reaches
+/// these, and without the count a partial menu reads as the whole set. The
+/// window gives way to the count, never the reverse.
+///
+/// The strip is ONE row, whatever it holds: it is erased as one row, so a tail
+/// that wrapped would stay on screen. It stops short of the last column as
+/// well, which leaves no terminal in its pending-wrap state.
+fn menu_strip(cands: &[String], selected: usize, unlisted: usize, width: usize) -> String {
+    if cands.is_empty() {
+        return String::new();
+    }
+    let room = width.saturating_sub(1);
+    let more = if unlisted > 0 {
+        format!("+{} more", unlisted)
+    } else {
+        String::new()
+    };
+    // Four columns for the `< ` / ` >` markers, and the count's own.
+    let count_w = if more.is_empty() { 0 } else { 2 + more.len() };
+    let budget = room.saturating_sub(4 + count_w);
+    let sel = selected.min(cands.len() - 1);
+    let widths: Vec<usize> = cands
+        .iter()
+        .map(|c| crate::ansi::visible_width(c))
+        .collect();
+    // Grow a window [lo, hi) outward from `sel` while it fits the budget.
+    let mut lo = sel;
+    let mut hi = sel + 1;
+    let mut used = widths[sel];
+    loop {
+        let mut grew = false;
+        if hi < cands.len() && used + 2 + widths[hi] <= budget {
+            used += 2 + widths[hi];
+            hi += 1;
+            grew = true;
+        }
+        if lo > 0 && used + 2 + widths[lo - 1] <= budget {
+            lo -= 1;
+            used += 2 + widths[lo];
+            grew = true;
+        }
+        if !grew {
+            break;
+        }
+    }
+    let mut out = String::new();
+    if lo > 0 {
+        out.push_str("< ");
+    }
+    for (n, i) in (lo..hi).enumerate() {
+        if n > 0 {
+            out.push_str("  ");
+        }
+        if i == sel {
+            out.push_str("\x1b[7m"); // reverse video
+            out.push_str(&cands[i]);
+            out.push_str("\x1b[0m"); // reset (self-contained so DECRC is clean)
+        } else {
+            out.push_str(&cands[i]);
+        }
+    }
+    if hi < cands.len() {
+        out.push_str(" >");
+    }
+    if !more.is_empty() {
+        out.push_str("  ");
+        out.push_str(&crate::ansi::fg(crate::palette::Role::Path, &more));
+    }
+    // The window always holds `selected`, which alone can be wider than a
+    // narrow terminal.
+    clip_visible(&out, room)
+}
+
+/// `s` cut to at most `max` visible columns, measured as `ansi::visible_width`
+/// measures: a CSI escape costs nothing and is kept, and a cut string ends with
+/// a reset so no colour opened before the cut stays open.
+fn clip_visible(s: &str, max: usize) -> String {
+    if crate::ansi::visible_width(s) <= max {
+        return String::from(s);
+    }
+    let mut out = String::new();
+    let mut cols = 0usize;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            out.push(c);
+            out.push('[');
+            chars.next();
+            // Parameter and intermediate bytes, then one final byte --
+            // whatever it is, as `visible_width` takes it.
+            while let Some(&n) = chars.peek() {
+                if !('\x20'..='\x3f').contains(&n) {
+                    break;
+                }
+                out.push(n);
+                chars.next();
+            }
+            if let Some(n) = chars.next() {
+                out.push(n);
+            }
+            continue;
+        }
+        if cols == max {
+            break;
+        }
+        out.push(c);
+        cols += 1;
+    }
+    out.push_str(crate::ansi::RESET);
+    out
 }
 
 // =============================================================================
@@ -439,7 +580,13 @@ enum Action {
 // State transitions:
 //   Ground -> ESC seen -> Escape
 //   Escape -> '[' seen -> Csi (CSI/CSI prefix; parse params + final)
-//   Escape -> anything else -> Ground (sequence aborted)
+//   Escape -> ESC -> Escape (restart: the first ESC is abandoned,
+//                             the second begins a fresh sequence -- the
+//                             VT rule, and why ESC ESC does not return
+//                             to Ground)
+//   Escape -> anything else -> Ground (sequence aborted; the byte is
+//                             CONSUMED, which is the slot reserved for
+//                             future Alt-<letter> bindings)
 //   Csi -> digit -> accumulate param
 //   Csi -> ';' -> next param
 //   Csi -> final char -> apply action, Ground
@@ -505,6 +652,8 @@ enum LineEditorMode {
         selected: usize,
         /// Buffer byte offset where the completed word begins.
         anchor: usize,
+        /// Matches the source left out of `candidates` (re-emitted per cycle).
+        unlisted: usize,
     },
 }
 
@@ -557,6 +706,20 @@ pub struct LineEditor {
     /// line (submit / cancel / clear-screen / `reset_render_position`).
     /// Untouched while `cols` is `None`.
     prev_cursor_row: usize,
+    /// The completion-menu strip on screen, if one is: `render` draws it below
+    /// the block while the editor is in `Menu` mode, and every later render or
+    /// `clear_menu` erases it. Recorded RELATIVE to where the render left the
+    /// cursor, because a strip drawn below the bottom row scrolls the screen
+    /// and an absolute position (DECSC) would no longer name the prompt.
+    strip: Option<StripAt>,
+}
+
+/// Where a drawn menu strip sits: `down` rows below the cursor's row, which
+/// the cursor left at column `col`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StripAt {
+    down: usize,
+    col: usize,
 }
 
 impl Default for LineEditor {
@@ -581,6 +744,7 @@ impl LineEditor {
             known_commands: Vec::new(),
             cols: None,
             prev_cursor_row: 0,
+            strip: None,
         }
     }
 
@@ -606,6 +770,23 @@ impl LineEditor {
     /// fresh block instead of trying to move up to a stale block top.
     pub fn reset_render_position(&mut self) {
         self.prev_cursor_row = 0;
+        self.strip = None;
+    }
+
+    /// The bytes that erase the completion-menu strip, if one is drawn, and
+    /// put the cursor back where the render left it; "" when none is. The
+    /// caller emits them before moving the cursor itself (an accepted line's
+    /// `\r\n`, a notification): after that the strip's position is no longer
+    /// known, and it would stay on screen.
+    pub fn clear_menu(&mut self) -> String {
+        let mut out = String::new();
+        if let Some(at) = self.strip.take() {
+            out.push_str(&format!("\x1b[{}B\r\x1b[K\x1b[{}A\r", at.down, at.down));
+            if at.col > 0 {
+                out.push_str(&format!("\x1b[{}C", at.col));
+            }
+        }
+        out
     }
 
     /// Install a Tab completion source (U-4d). The shell main loop
@@ -645,6 +826,7 @@ impl LineEditor {
         self.mode = LineEditorMode::Normal;
         self.desired_col = None;
         self.prev_cursor_row = 0;
+        self.strip = None;
         // kill_buffer survives Cancel/Accept -- yank can paste across
         // a Cancel boundary (standard emacs behaviour). cols persists --
         // the terminal did not change size.
@@ -739,7 +921,8 @@ impl LineEditor {
 
     /// Render the prompt + current buffer + cursor positioning as an
     /// ANSI byte sequence. The main loop emits this to stdout after
-    /// any Redraw EditorAction.
+    /// any Redraw EditorAction. In `Menu` mode it also draws the completion
+    /// strip below the block, and it erases a strip it no longer wants.
     ///
     /// Single-line strategy:
     ///   1. \r       -- cursor to column 0
@@ -772,20 +955,63 @@ impl LineEditor {
         // search prompt + the matched line (or empty if no match).
         // Cursor positions at the end of the query inside the
         // (reverse-i-search)`...': prefix.
-        if let LineEditorMode::Search {
-            query, match_index, ..
-        } = &self.mode
-        {
-            return self.render_search(query, *match_index);
+        if matches!(self.mode, LineEditorMode::Search { .. }) {
+            let mut out = self.clear_menu();
+            if let LineEditorMode::Search {
+                query, match_index, ..
+            } = &self.mode
+            {
+                out.push_str(&self.render_search(query, *match_index));
+            }
+            return out;
         }
         // Width unknown -> the newline-only geometry (today's behaviour): a
         // dumb pipe or an unanswered probe has no width to wrap against, and a
         // GUESS would emit wrong cursor-up counts. Width known -> the
         // visual-wrapped-row path that fixes the wrap-and-move duplication.
-        match self.cols {
-            None => self.render_unwrapped(prompt),
-            Some(cols) => self.render_wrapped(prompt, cols),
+        let (mut out, below, col) = match self.cols {
+            None => {
+                // This path rewrites only its own rows, so a strip drawn below
+                // them is erased first.
+                let mut out = self.clear_menu();
+                let (body, below, col) = self.render_unwrapped(prompt);
+                out.push_str(&body);
+                (out, below, col)
+            }
+            Some(cols) => {
+                // Its erase-below from the block's top takes the strip with it.
+                self.strip = None;
+                self.render_wrapped(prompt, cols)
+            }
+        };
+        if let LineEditorMode::Menu {
+            candidates,
+            selected,
+            unlisted,
+            ..
+        } = &self.mode
+        {
+            // D4: the strip goes on the row below the whole block -- not below
+            // the cursor, which a completion mid-buffer leaves above other
+            // rows -- and the way back is relative. At the bottom row the
+            // `\r\n` scrolls the screen; a save/restore of the absolute
+            // position would then return to the strip's row, not the prompt's.
+            let strip = menu_strip(candidates, *selected, *unlisted, self.cols.unwrap_or(80));
+            if below > 0 {
+                out.push_str(&format!("\x1b[{}B", below));
+            }
+            out.push_str("\r\n\x1b[K");
+            out.push_str(&strip);
+            out.push_str(&format!("\x1b[{}A\r", below + 1));
+            if col > 0 {
+                out.push_str(&format!("\x1b[{}C", col));
+            }
+            self.strip = Some(StripAt {
+                down: below + 1,
+                col,
+            });
         }
+        out
     }
 
     /// The newline-only render (the `cols == None` fallback). Positions the
@@ -793,8 +1019,9 @@ impl LineEditor {
     /// single logical line that overflows the terminal width is mis-positioned
     /// (the pre-fix behaviour, kept verbatim for the width-unknown case where
     /// nothing better is possible). Takes `&self`: it tracks no cross-render
-    /// state.
-    fn render_unwrapped(&self, prompt: &str) -> String {
+    /// state. Also returns where it left the cursor: the rows from its row down
+    /// to the block's last, and its column.
+    fn render_unwrapped(&self, prompt: &str) -> (String, usize, usize) {
         let prompt_w = crate::ansi::visible_width(prompt);
         let cont = continuation_prefix(prompt_w);
         let cont_w = crate::ansi::visible_width(&cont);
@@ -851,7 +1078,7 @@ impl LineEditor {
             out.push_str(&format!("\x1b[{}C", target_col));
         }
 
-        out
+        (out, lines_to_up, target_col)
     }
 
     /// The visual-wrapped-row render (`cols == Some`). Counts the PHYSICAL
@@ -875,7 +1102,10 @@ impl LineEditor {
     ///   5. Move from that end position UP to the cursor's physical row, CR,
     ///      then right to its column.
     ///   6. Record the cursor's physical row for the next render.
-    fn render_wrapped(&mut self, prompt: &str, cols: usize) -> String {
+    ///
+    /// Also returns where it left the cursor: the rows from its row down to
+    /// the block's last (the forced row included), and its column.
+    fn render_wrapped(&mut self, prompt: &str, cols: usize) -> (String, usize, usize) {
         let cols = cols.max(1); // defensive: never divide by zero
         let prompt_w = crate::ansi::visible_width(prompt);
         let cont = continuation_prefix(prompt_w);
@@ -959,7 +1189,7 @@ impl LineEditor {
         // 6. Remember where this render left the cursor.
         self.prev_cursor_row = cursor_row;
 
-        out
+        (out, end_row.saturating_sub(cursor_row), cursor_col)
     }
 
     /// #115c: colour line 0's first token (the command) -- `fen` if it
@@ -1802,23 +2032,20 @@ impl LineEditor {
             Some(src) => src.complete(&self.buffer, self.cursor),
             None => return EditorAction::NoChange,
         };
+        // A lone candidate is the completion only when nothing else matched.
+        if comp.candidates.len() == 1 && comp.unlisted == 0 {
+            return self.apply_completion(comp.replace_range, &comp.candidates[0]);
+        }
+        // Several matches: first extend to what they all share (zsh: complete
+        // the common part). When that is exhausted, enter the D4 cycling menu
+        // -- apply candidate[0] and let `render` draw the highlighted strip.
+        if let Some(ext) = &comp.extension {
+            return self.apply_completion(comp.replace_range, ext);
+        }
         if comp.candidates.is_empty() {
             return EditorAction::NoChange;
         }
-        if comp.candidates.len() == 1 {
-            // Single candidate: replace and done.
-            let cand = comp.candidates[0].clone();
-            return self.apply_completion(comp.replace_range, &cand);
-        }
-        // Multiple candidates: first extend to the shared prefix if it grows
-        // the word (zsh: complete the common part). When the prefix is already
-        // exhausted, enter the D4 cycling menu -- apply candidate[0] and let
-        // the main loop draw the highlighted strip.
-        let common = longest_common_prefix(&comp.candidates);
-        let current_word_len = comp.replace_range.end - comp.replace_range.start;
-        if common.len() > current_word_len {
-            return self.apply_completion(comp.replace_range, &common);
-        }
+        let unlisted = comp.unlisted;
         let anchor = comp.replace_range.start;
         let cand0 = comp.candidates[0].clone();
         // Apply candidate[0]; if it cannot be applied (would exceed the buffer
@@ -1834,10 +2061,12 @@ impl LineEditor {
             candidates: candidates.clone(),
             selected: 0,
             anchor,
+            unlisted,
         };
         EditorAction::MenuShow {
             candidates,
             selected: 0,
+            unlisted,
         }
     }
 
@@ -1871,14 +2100,21 @@ impl LineEditor {
     /// while open), or the next candidate would exceed the buffer cap, bail out
     /// of menu mode cleanly.
     fn menu_cycle(&mut self) -> EditorAction {
-        let (anchor, old_len, next, candidates) = match &self.mode {
+        let (anchor, old_len, next, candidates, unlisted) = match &self.mode {
             LineEditorMode::Menu {
                 candidates,
                 selected,
                 anchor,
+                unlisted,
             } => {
                 let next = (*selected + 1) % candidates.len();
-                (*anchor, candidates[*selected].len(), next, candidates.clone())
+                (
+                    *anchor,
+                    candidates[*selected].len(),
+                    next,
+                    candidates.clone(),
+                    *unlisted,
+                )
             }
             _ => return EditorAction::NoChange,
         };
@@ -1897,10 +2133,12 @@ impl LineEditor {
             candidates: candidates.clone(),
             selected: next,
             anchor,
+            unlisted,
         };
         EditorAction::MenuShow {
             candidates,
             selected: next,
+            unlisted,
         }
     }
 
@@ -1998,13 +2236,21 @@ fn is_whitespace_byte(b: u8) -> bool {
 }
 
 // =============================================================================
-// Tests -- cfg(test); cargo test on a host target would exercise these.
-// The production build (aarch64-unknown-none) strips them at compile.
+// Tests. `cargo test -p libutopia --lib --no-default-features --target <host>`
+// runs these; `tools/test-rust.sh` does it for the whole tree.
+//
+// Until 2026-09-22 this block said a host run "would exercise these", which was
+// true of the command and false of the world: libthyla-rs was an unconditional
+// dependency, so the crate could not be built for a host target at all and
+// these tests had never compiled, let alone run. The twenty errors that turned
+// up the first time they were asked to compile were all this one missing
+// import -- benign, but only findable by actually running them.
 // =============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     fn feed(le: &mut LineEditor, bytes: &[u8]) -> Vec<EditorAction> {
         le.feed_bytes(bytes)
@@ -2224,13 +2470,38 @@ mod tests {
         assert_eq!(le.buffer(), "a");
     }
 
+    /// UT-EDIT-1, investigated and WITHDRAWN: the editor is right.
+    ///
+    /// This asserted that `ESC ESC` returns to Ground, so a following `a` is
+    /// inserted. It does not, deliberately: `parse_escape` treats a second ESC
+    /// as RESTARTING the sequence, which is what the VT state machine does
+    /// (an ESC in escape state clears and re-enters escape), and the `a` is
+    /// then consumed as the final byte of `ESC a` -- the slot reserved for
+    /// Alt-key bindings.
+    ///
+    /// It is also internally consistent, which is the argument that settles
+    /// it: a SINGLE ESC already swallows the next printable for the same
+    /// reason, so `ESC ESC a` losing one character is the same rule applied
+    /// twice, not a second surprise. Having never run, the test encoded an
+    /// expectation the editor had not adopted.
     #[test]
-    fn esc_esc_resets_parser() {
+    fn esc_esc_restarts_the_sequence_and_esc_letter_is_reserved() {
         let mut le = LineEditor::new();
         feed(&mut le, b"\x1b\x1b");
-        // Both ESCs should leave us in Ground; subsequent 'a' is inserted.
         le.feed_byte(b'a');
-        assert_eq!(le.buffer(), "a");
+        assert_eq!(le.buffer(), "", "ESC a is a reserved sequence, not text");
+        // Still live afterwards: the NEXT byte types normally, so a stray ESC
+        // costs one character and never wedges the line.
+        le.feed_byte(b'b');
+        assert_eq!(le.buffer(), "b");
+
+        // The single-ESC form is the same rule, stated once.
+        let mut le = LineEditor::new();
+        le.feed_byte(0x1b);
+        le.feed_byte(b'x');
+        assert_eq!(le.buffer(), "");
+        le.feed_byte(b'y');
+        assert_eq!(le.buffer(), "y");
     }
 
     #[test]
@@ -2818,9 +3089,11 @@ mod tests {
             EditorAction::MenuShow {
                 candidates,
                 selected,
+                unlisted,
             } => {
                 assert_eq!(candidates.len(), 3);
                 assert_eq!(selected, 0);
+                assert_eq!(unlisted, 0);
             }
             other => panic!("expected MenuShow; got {:?}", other),
         }
@@ -2915,6 +3188,457 @@ mod tests {
         assert_eq!(le.buffer(), "ap");
     }
 
+    /// A source with one fixed answer, so the engine can be handed any
+    /// `Completions` -- ones no shipped source produces on demand included.
+    struct Fixed(Completions);
+
+    impl CompletionSource for Fixed {
+        fn complete(&self, _buffer: &str, _cursor: usize) -> Completions {
+            self.0.clone()
+        }
+    }
+
+    /// Type `typed`, install a source answering `listed`, `extension` and
+    /// `unlisted` for the whole of it, and press Tab.
+    fn tab_fixed(
+        typed: &str,
+        listed: &[&str],
+        extension: Option<&str>,
+        unlisted: usize,
+    ) -> (LineEditor, EditorAction) {
+        let mut le = LineEditor::new();
+        le.set_completion_source(alloc::boxed::Box::new(Fixed(Completions {
+            replace_range: 0..typed.len(),
+            candidates: listed.iter().map(|s| String::from(*s)).collect(),
+            extension: extension.map(String::from),
+            unlisted,
+        })));
+        feed(&mut le, typed.as_bytes());
+        let r = le.feed_byte(0x09);
+        (le, r)
+    }
+
+    #[test]
+    fn tab_extends_to_the_sources_extension_not_the_listed_prefix() {
+        // The listed two share "fab"; the source says every match shares only
+        // "fa" -- a list it capped, or matches it cannot write. Its word wins.
+        let (le, r) = tab_fixed("f", &["fab1 ", "fab2 "], Some("fa"), 3);
+        assert_eq!(r, EditorAction::Redraw);
+        assert_eq!(le.buffer(), "fa");
+    }
+
+    #[test]
+    fn the_engine_takes_no_prefix_from_the_inserted_texts() {
+        // Quoted, these share "'my file" -- a prefix ending inside the quoting.
+        // With no extension from the source, Tab opens the menu instead.
+        let (le, r) = tab_fixed("my", &["'my file1' ", "'my file2' "], None, 0);
+        assert_eq!(menu_at(&r), Some((0, 0)), "{:?}", r);
+        assert_eq!(le.buffer(), "'my file1' ");
+    }
+
+    #[test]
+    fn an_extension_applies_with_nothing_listed() {
+        // Every match unwritable: nothing to list, but the shared part is.
+        let (le, r) = tab_fixed("e", &[], Some("esc"), 2);
+        assert_eq!(r, EditorAction::Redraw);
+        assert_eq!(le.buffer(), "esc");
+        let (le, r) = tab_fixed("esc", &[], None, 2);
+        assert_eq!(r, EditorAction::NoChange);
+        assert_eq!(le.buffer(), "esc");
+    }
+
+    #[test]
+    fn a_lone_listed_candidate_of_a_larger_set_is_not_the_completion() {
+        // Applied as a unique match this would be a Redraw with the same
+        // buffer; the menu is what says other matches exist.
+        let (le, r) = tab_fixed("f", &["fab1 "], None, 3);
+        match r {
+            EditorAction::MenuShow {
+                candidates,
+                selected: 0,
+                unlisted: 3,
+            } => assert_eq!(candidates, vec![String::from("fab1 ")]),
+            other => panic!("expected the menu; got {:?}", other),
+        }
+        assert_eq!(le.buffer(), "fab1 ");
+    }
+
+    /// `(selected, unlisted)` when `r` is a `MenuShow`.
+    fn menu_at(r: &EditorAction) -> Option<(usize, usize)> {
+        match r {
+            EditorAction::MenuShow {
+                selected, unlisted, ..
+            } => Some((*selected, *unlisted)),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn the_menu_carries_the_unlisted_count_through_every_cycle() {
+        let (mut le, r) = tab_fixed("fa", &["fa1 ", "fa2 "], None, 7);
+        assert_eq!(menu_at(&r), Some((0, 7)), "{:?}", r);
+        let r = le.feed_byte(0x09);
+        assert_eq!(menu_at(&r), Some((1, 7)), "{:?}", r);
+        let r = le.feed_byte(0x09);
+        assert_eq!(menu_at(&r), Some((0, 7)), "{:?}", r);
+        assert_eq!(le.buffer(), "fa1 ");
+    }
+
+    // ----- D4: the completion-menu candidate strip --------------------------
+
+    #[test]
+    fn menu_strip_highlights_selected() {
+        let c = [
+            String::from("apple"),
+            String::from("application"),
+            String::from("apparatus"),
+        ];
+        let r = menu_strip(&c, 1, 0, 80);
+        assert!(
+            r.contains("\x1b[7mapplication\x1b[0m"),
+            "highlight: {:?}",
+            r
+        );
+        assert!(r.contains("apple") && r.contains("apparatus"));
+        // All three fit the budget -> no truncation markers, and no count.
+        assert!(!r.starts_with("< ") && !r.ends_with(" >"));
+        assert!(!r.contains("more"), "{:?}", r);
+    }
+
+    /// Twenty candidates of 19 columns each -- far past one 80-column line.
+    fn wide_candidates() -> Vec<String> {
+        (0..20)
+            .map(|i| format!("candidate-number-{:02}", i))
+            .collect()
+    }
+
+    #[test]
+    fn menu_strip_windows_around_selected_when_overflowing() {
+        // Many wide candidates: the selected one stays visible + markers appear.
+        let r = menu_strip(&wide_candidates(), 15, 0, 80);
+        assert!(
+            r.contains("\x1b[7mcandidate-number-15\x1b[0m"),
+            "selected visible: {:?}",
+            r
+        );
+        assert!(r.starts_with("< "), "left truncation marker: {:?}", r);
+    }
+
+    #[test]
+    fn menu_strip_counts_the_matches_no_tab_reaches() {
+        let c = [String::from("fa1 "), String::from("fa2 ")];
+        let r = menu_strip(&c, 0, 44, 80);
+        let count = crate::ansi::fg(crate::palette::Role::Path, "+44 more");
+        assert!(r.ends_with(&count), "{:?}", r);
+        assert!(
+            r.contains("\x1b[7mfa1 \x1b[0m") && r.contains("fa2 "),
+            "{:?}",
+            r
+        );
+    }
+
+    #[test]
+    fn menu_strip_keeps_to_one_row_at_any_width() {
+        // The narrow set is the one that can fail the budget: two-column
+        // candidates fill the window to within a column of it, so a count the
+        // budget did not make room for runs the line over (and the clip then
+        // cuts the count off). The wide set overflows narrow terminals on its
+        // own, which only the clip can stop.
+        let narrow: Vec<String> = (0..100).map(|i| format!("{:02}", i)).collect();
+        let count = crate::ansi::fg(crate::palette::Role::Path, "+65536 more");
+        for width in [80, 40, 20, 12, 5, 1] {
+            for (cands, sels) in [
+                (wide_candidates(), [0, 10, 19]),
+                (narrow.clone(), [0, 50, 99]),
+            ] {
+                for sel in sels {
+                    let r = menu_strip(&cands, sel, 65536, width);
+                    let w = crate::ansi::visible_width(&r);
+                    assert!(
+                        w < width.max(1),
+                        "{} columns at width {}: {:?}",
+                        w,
+                        width,
+                        r
+                    );
+                    if width >= 40 {
+                        assert!(r.ends_with(&count), "width {}: {:?}", width, r);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn clip_visible_counts_columns_not_escapes() {
+        assert_eq!(clip_visible("abc", 5), "abc");
+        let cut = clip_visible("\x1b[7mabcdef\x1b[0m", 3);
+        assert_eq!(cut, "\x1b[7mabc\x1b[0m");
+        assert_eq!(crate::ansi::visible_width(&cut), 3);
+        assert_eq!(
+            crate::ansi::visible_width(&clip_visible("x\x1b[38;2;1;2;3myz", 2)),
+            2
+        );
+    }
+
+    // ----- D4: the strip on a real terminal model ---------------------------
+    //
+    // These feed the editor's bytes to `vt` -- the terminal Halcyon renders
+    // with -- and assert on the SCREEN. The strip used to be drawn with a
+    // save/restore of the absolute cursor position; at the bottom row the
+    // newline before it scrolled the screen, the restore landed on the strip's
+    // row, and each Tab left a stale copy of the prompt behind. Every
+    // assertion on emitted bytes passed.
+
+    /// What the REPL does with each action, screen-wise: anything that leaves
+    /// the menu erases the strip first; a redraw or the menu renders. One byte
+    /// per read, as typing arrives. A single chunk renders every action in the
+    /// FINAL state, and that hid the bottom-row defect: the erase before each
+    /// redraw moved up from the wrong row and landed on the prompt by luck.
+    fn drive(vt: &mut vt::Vt, le: &mut LineEditor, prompt: &str, bytes: &[u8]) {
+        for &b in bytes {
+            for a in le.feed_bytes(&[b]) {
+                if !matches!(a, EditorAction::MenuShow { .. } | EditorAction::NoChange) {
+                    vt.feed(le.clear_menu().as_bytes());
+                }
+                if matches!(a, EditorAction::Redraw | EditorAction::MenuShow { .. }) {
+                    vt.feed(le.render(prompt).as_bytes());
+                }
+            }
+        }
+    }
+
+    /// The same, with every byte in one read (a paste): each action then
+    /// renders the final state.
+    fn drive_as_one_read(vt: &mut vt::Vt, le: &mut LineEditor, prompt: &str, bytes: &[u8]) {
+        for a in le.feed_bytes(bytes) {
+            if !matches!(a, EditorAction::MenuShow { .. } | EditorAction::NoChange) {
+                vt.feed(le.clear_menu().as_bytes());
+            }
+            if matches!(a, EditorAction::Redraw | EditorAction::MenuShow { .. }) {
+                vt.feed(le.render(prompt).as_bytes());
+            }
+        }
+    }
+
+    fn screen(vt: &vt::Vt) -> Vec<String> {
+        (0..vt.rows).map(|r| screen_row(vt, r)).collect()
+    }
+
+    fn screen_row(vt: &vt::Vt, r: usize) -> String {
+        let s: String = (0..vt.cols).map(|c| vt.cells[r * vt.cols + c].ch).collect();
+        String::from(s.trim_end())
+    }
+
+    /// A `cols`x5 screen with `above` rows of output, then the prompt; the
+    /// editor told the width or not.
+    fn prompt_on_screen(
+        cols: usize,
+        above: usize,
+        width_known: bool,
+        cands: &[&str],
+    ) -> (vt::Vt, LineEditor) {
+        let mut vt = vt::Vt::new(cols, 5);
+        for i in 0..above {
+            vt.feed(format!("out{}\r\n", i).as_bytes());
+        }
+        let mut le = LineEditor::new();
+        if width_known {
+            le.set_cols(cols);
+        }
+        le.set_completion_source(alloc::boxed::Box::new(StaticCompletionSource::new(
+            cands.iter().map(|s| String::from(*s)).collect(),
+        )));
+        vt.feed(le.render("% ").as_bytes());
+        (vt, le)
+    }
+
+    const APPS: [&str; 3] = ["apple", "application", "apparatus"];
+    const STRIP: &str = "apple  application  apparatus";
+
+    #[test]
+    fn the_strip_survives_a_scroll_at_the_bottom_row() {
+        for width_known in [true, false] {
+            let (mut vt, mut le) = prompt_on_screen(40, 4, width_known, &APPS);
+            drive(&mut vt, &mut le, "% ", b"app\t");
+            // The strip's newline scrolled the screen by one row.
+            assert_eq!(
+                screen_row(&vt, 3),
+                "% apple",
+                "width known: {}",
+                width_known
+            );
+            assert_eq!(screen_row(&vt, 4), STRIP);
+            assert_eq!((vt.cy, vt.cx), (3, 7));
+            drive(&mut vt, &mut le, "% ", b"\t\t");
+            assert_eq!(screen_row(&vt, 0), "out1");
+            assert_eq!(screen_row(&vt, 2), "out3");
+            assert_eq!(screen_row(&vt, 3), "% apparatus");
+            assert_eq!(screen_row(&vt, 4), STRIP);
+            assert_eq!((vt.cy, vt.cx), (3, 11));
+            // A key that leaves the menu takes the strip with it.
+            drive(&mut vt, &mut le, "% ", b"x");
+            assert_eq!(screen_row(&vt, 3), "% apparatusx");
+            assert_eq!(screen_row(&vt, 4), "");
+            assert_eq!((vt.cy, vt.cx), (3, 12));
+            // The same keys as one read (a paste) end outside the menu, so no
+            // strip is ever drawn and nothing scrolls. The screen differs from
+            // the typed one only by that scroll, and must be as clean: one
+            // prompt row, the cursor after its text, no strip anywhere.
+            let (mut pasted, mut le2) = prompt_on_screen(40, 4, width_known, &APPS);
+            drive_as_one_read(&mut pasted, &mut le2, "% ", b"app\t\t\tx");
+            let rows = screen(&pasted);
+            let prompts: Vec<usize> = (0..rows.len())
+                .filter(|&r| rows[r].starts_with("% "))
+                .collect();
+            assert_eq!(prompts, [pasted.cy], "{:?}", rows);
+            assert_eq!(rows[pasted.cy], "% apparatusx");
+            assert_eq!(pasted.cx, 12);
+            assert!(
+                !rows.iter().any(|r| r.contains("application")),
+                "{:?}",
+                rows
+            );
+        }
+    }
+
+    #[test]
+    fn a_paste_that_ends_in_the_menu_leaves_what_typing_does() {
+        // Every action in the read renders the final state, strip included, so
+        // the strip is drawn -- at the bottom row -- once per action.
+        for width_known in [true, false] {
+            let (mut typed, mut le) = prompt_on_screen(40, 4, width_known, &APPS);
+            drive(&mut typed, &mut le, "% ", b"app\t\t");
+            let (mut pasted, mut le2) = prompt_on_screen(40, 4, width_known, &APPS);
+            drive_as_one_read(&mut pasted, &mut le2, "% ", b"app\t\t");
+            assert_eq!(
+                screen(&pasted),
+                screen(&typed),
+                "width known: {}",
+                width_known
+            );
+            assert_eq!((pasted.cy, pasted.cx), (typed.cy, typed.cx));
+            assert_eq!(screen_row(&typed, 3), "% application");
+            assert_eq!(screen_row(&typed, 4), STRIP);
+        }
+    }
+
+    #[test]
+    fn with_room_below_nothing_scrolls() {
+        // The control: the same keys where the prompt has rows beneath it.
+        for width_known in [true, false] {
+            let (mut vt, mut le) = prompt_on_screen(40, 1, width_known, &APPS);
+            drive(&mut vt, &mut le, "% ", b"app\t\t");
+            assert_eq!(screen_row(&vt, 0), "out0");
+            assert_eq!(screen_row(&vt, 1), "% application");
+            assert_eq!(screen_row(&vt, 2), STRIP);
+            assert_eq!((vt.cy, vt.cx), (1, 13));
+            drive(&mut vt, &mut le, "% ", b"x");
+            assert_eq!(screen_row(&vt, 2), "");
+        }
+    }
+
+    #[test]
+    fn the_strip_goes_below_the_block_not_below_the_cursor() {
+        // `{ app` + Enter continues the line (the brace is open), `}` closes
+        // it, and two Lefts put the cursor back after `app` on the first row.
+        let (mut vt, mut le) = prompt_on_screen(40, 0, true, &APPS);
+        drive(&mut vt, &mut le, "% ", b"{ app\r}\x1b[D\x1b[D\t");
+        assert_eq!(le.buffer(), "{ apple\n}");
+        assert_eq!(screen_row(&vt, 0), "% { apple");
+        assert!(
+            screen_row(&vt, 1).ends_with('}'),
+            "{:?}",
+            screen_row(&vt, 1)
+        );
+        assert_eq!(screen_row(&vt, 2), STRIP);
+        assert_eq!((vt.cy, vt.cx), (0, 9));
+        drive(&mut vt, &mut le, "% ", b"x");
+        assert!(
+            screen_row(&vt, 1).ends_with('}'),
+            "{:?}",
+            screen_row(&vt, 1)
+        );
+        assert_eq!(screen_row(&vt, 2), "");
+    }
+
+    #[test]
+    fn a_narrow_terminal_keeps_the_strip_to_one_row() {
+        let long = ["apple-one-two-three-four", "application-name-too-long"];
+        let (mut vt, mut le) = prompt_on_screen(20, 0, true, &long);
+        drive(&mut vt, &mut le, "% ", b"app\t");
+        assert_eq!(le.buffer(), "appl");
+        drive(&mut vt, &mut le, "% ", b"\t");
+        // The applied pick wraps the prompt's own block (two rows); the strip
+        // is the one row below it, and nothing below that.
+        assert!(!screen_row(&vt, 2).is_empty());
+        assert_eq!(screen_row(&vt, 3), "");
+        drive(&mut vt, &mut le, "% ", b"x");
+        assert_eq!(screen_row(&vt, 2), "");
+        assert_eq!(screen_row(&vt, 3), "");
+    }
+
+    #[test]
+    fn clear_menu_erases_the_strip_before_the_cursor_moves_elsewhere() {
+        // The REPL's note path: erase, move off the line, print, redraw.
+        let (mut vt, mut le) = prompt_on_screen(40, 0, true, &APPS);
+        drive(&mut vt, &mut le, "% ", b"app\t");
+        assert_eq!(screen_row(&vt, 1), STRIP);
+        vt.feed(le.clear_menu().as_bytes());
+        // Erased, and the cursor is back where the render left it.
+        assert_eq!(screen_row(&vt, 1), "");
+        assert_eq!((vt.cy, vt.cx), (0, 7));
+        vt.feed(b"\r\nnote\r\n");
+        le.reset_render_position();
+        vt.feed(le.render("% ").as_bytes());
+        // The old strip is gone; the menu is still open, so it is redrawn
+        // below the fresh prompt.
+        assert_eq!(screen_row(&vt, 0), "% apple");
+        assert_eq!(screen_row(&vt, 1), "note");
+        assert_eq!(screen_row(&vt, 2), "% apple");
+        assert_eq!(screen_row(&vt, 3), STRIP);
+        assert_eq!(le.clear_menu().is_empty(), false);
+        assert!(
+            le.clear_menu().is_empty(),
+            "a second clear has nothing to erase"
+        );
+    }
+
+    #[test]
+    fn a_render_that_leaves_the_menu_erases_the_strip_itself() {
+        // The REPL erases first; a render must not depend on it.
+        for width_known in [true, false] {
+            let (mut vt, mut le) = prompt_on_screen(40, 0, width_known, &APPS);
+            drive(&mut vt, &mut le, "% ", b"app\t");
+            assert_eq!(screen_row(&vt, 1), STRIP);
+            le.feed_byte(b'x');
+            vt.feed(le.render("% ").as_bytes());
+            assert_eq!(screen_row(&vt, 1), "", "width known: {}", width_known);
+            assert!(le.clear_menu().is_empty(), "the render took the strip");
+            // Into search mode, the same.
+            let (mut vt, mut le) = prompt_on_screen(40, 0, width_known, &APPS);
+            drive(&mut vt, &mut le, "% ", b"app\t");
+            le.feed_byte(0x12); // Ctrl-R
+            assert!(le.is_searching());
+            vt.feed(le.render("% ").as_bytes());
+            assert_eq!(screen_row(&vt, 1), "", "width known: {}", width_known);
+        }
+    }
+
+    #[test]
+    fn a_cursor_moved_elsewhere_forgets_the_strip() {
+        // After the caller moves the cursor (clear-screen, a notification),
+        // the strip's recorded place names nothing: erasing "there" could
+        // erase a row of whatever is drawn now.
+        let (mut vt, mut le) = prompt_on_screen(40, 0, true, &APPS);
+        drive(&mut vt, &mut le, "% ", b"app\t");
+        le.reset_render_position();
+        assert!(le.clear_menu().is_empty());
+        let (mut vt, mut le) = prompt_on_screen(40, 0, true, &APPS);
+        drive(&mut vt, &mut le, "% ", b"app\t");
+        le.reset();
+        assert!(le.clear_menu().is_empty());
+    }
     #[test]
     fn backspace_joins_continuation_line() {
         let mut le = LineEditor::new();

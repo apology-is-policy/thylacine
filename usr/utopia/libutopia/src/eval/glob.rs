@@ -10,21 +10,9 @@
 //      (scripture section 7.3).
 //
 // Both are PATTERN MATCH ONLY -- the matcher (`matches` / `has_meta`)
-// does no filesystem I/O.
-//
-// === Filesystem expansion (U-6e-b-2) ===
-//
-// `expand` (below) is the argv-time filesystem walk (scripture 6.10:
-// `*.rs` -> the list of files it names). It splits the pattern on `/`,
-// walks the directory tree one segment at a time (read_dir + `matches`
-// per level, descending only into directories for non-final segments),
-// and returns the SORTED list of matching paths. A pattern matching
-// nothing expands to the EMPTY list (rc nullglob), NOT the literal. It
-// is invoked from `stmt::evaluate_argv` only for a bare unquoted word
-// carrying a meta char; quoted words and `^`-concats never expand.
-//
-// `**` is NOT special-cased: a `**` segment behaves as `*` (matches one
-// path component), so recursive descent is a v1.x refinement.
+// does no filesystem I/O, which is what lets this module run its tests on
+// the host. The argv-time filesystem walk (scripture 6.10: `*.rs` -> the
+// files it names) is `super::pathname`, gated with the syscall half.
 //
 // === Pattern syntax ===
 //
@@ -51,7 +39,20 @@
 //     (refusing `/`) and retry.
 //   - `?` -> match exactly one byte (refusing `/`).
 //   - `[...]` -> match the character class.
+//   - `\x` -> match `x` literally, whatever it is (inside a class too).
 //   - any other byte -> match literally.
+//
+// === Escapes ===
+//
+// A pattern is a bare word AS WRITTEN: the lexer keeps a word's `\` and the
+// evaluator decides what it means where the word lands. In a value it is
+// removed (`parser::lexer::unescape`); in a glob or a pattern it makes the
+// next character literal, so `\*` names a star and never globs -- POSIX
+// fnmatch's rule, and the only reading under which `rm \*` is safe. Evaluated
+// parts of a pattern (quotes, variables, substitutions) enter through
+// `escape_backslashes`, which keeps their backslashes literal as they always
+// were; `has_meta` stays the check for a LITERAL string (a file name being
+// quoted), `has_unescaped_meta` the check for a pattern.
 //
 // We operate on bytes, not codepoints, because:
 //   - The pattern's `[a-z]` ranges are conventionally byte-level in
@@ -64,9 +65,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use libthyla_rs::fs;
-
-use super::env::Env;
+use crate::parser::lexer::unescape;
 
 /// Match a glob `pattern` against `input`. Returns true on full
 /// match. Pattern and input are bytes (UTF-8 safe per module docs).
@@ -151,8 +150,15 @@ fn match_bytes(pat: &[u8], inp: &[u8]) -> bool {
                 }
             }
             Some(c) => {
+                // `\x` matches `x` itself, meta or not; a lone `\` at the
+                // end of the pattern matches a `\`.
+                let (c, width) = if c == b'\\' && pi + 1 < pat.len() {
+                    (pat[pi + 1], 2)
+                } else {
+                    (c, 1)
+                };
                 if c == inp[ii] {
-                    pi += 1;
+                    pi += width;
                     ii += 1;
                 } else if let Some(retry) = star_pat {
                     if inp[star_inp] == b'/' {
@@ -207,197 +213,157 @@ fn find_class_end(pat: &[u8], start: usize) -> Option<usize> {
         i += 1;
     }
     while i < pat.len() {
-        if pat[i] == b']' {
-            return Some(i);
+        match pat[i] {
+            b']' => return Some(i),
+            // An escaped `]` is a member, not the end.
+            b'\\' => i += 2,
+            _ => i += 1,
         }
-        i += 1;
     }
     None
 }
 
 fn char_class_match(class: &[u8], c: u8) -> bool {
     let mut i = 0;
-    let mut prev: Option<u8> = None;
     while i < class.len() {
-        if class[i] == b'-' && prev.is_some() && i + 1 < class.len() {
-            // Range: prev..=class[i+1].
-            let lo = prev.unwrap();
-            let hi = class[i + 1];
+        let (lo, next) = class_member(class, i);
+        // `lo-hi` is a range when the `-` is unescaped and not the last byte.
+        if next + 1 < class.len() && class[next] == b'-' {
+            let (hi, after) = class_member(class, next + 1);
             if c >= lo.min(hi) && c <= lo.max(hi) {
                 return true;
             }
-            prev = None;
-            i += 2;
+            i = after;
             continue;
         }
-        if class[i] == c {
+        if lo == c {
             return true;
         }
-        prev = Some(class[i]);
-        i += 1;
+        i = next;
     }
     false
 }
 
-/// Whether a string contains any glob meta characters. Used by argv
-/// expansion (U-6e) to decide whether to invoke fs walk vs treat the
-/// word as literal. At U-6a only exposed for callers that may want
-/// to short-circuit pattern compilation.
+/// The class member at `i` -- a byte, or the byte an escape names -- and the
+/// index past it.
+fn class_member(class: &[u8], i: usize) -> (u8, usize) {
+    if class[i] == b'\\' && i + 1 < class.len() {
+        (class[i + 1], i + 2)
+    } else {
+        (class[i], i + 1)
+    }
+}
+
+/// Whether a LITERAL string -- a file name, not a pattern -- contains a glob
+/// meta character, so that writing it bare would glob. A pattern's escapes
+/// need `has_unescaped_meta`.
 pub fn has_meta(s: &str) -> bool {
     s.bytes().any(|b| matches!(b, b'*' | b'?' | b'['))
 }
 
-// ===========================================================================
-// Filesystem expansion (U-6e-b-2)
-// ===========================================================================
-
-/// Expand a glob `pattern` against the filesystem, returning the SORTED
-/// list of matching paths. The result preserves the pattern's shape: an
-/// absolute pattern yields absolute matches; a relative pattern yields
-/// matches relative to `env.cwd()`.
-///
-/// Returns the EMPTY vector when nothing matches (rc nullglob, scripture
-/// 6.10) -- the caller (`evaluate_argv`) contributes no argv element in
-/// that case rather than falling back to the literal.
-///
-/// PRECONDITION: the caller gates on `has_meta(pattern)`, so at least one
-/// `/`-separated segment carries a meta char. A pattern with no meta
-/// segment expands to nothing (it is never reached in practice).
-pub fn expand(env: &Env, pattern: &str) -> Vec<String> {
-    let leading_slash = pattern.as_bytes().first() == Some(&b'/');
-    // Drop empty segments so `//`, a leading `/`, and a trailing `/` all
-    // normalize away. (A trailing-slash "directories only" refinement is
-    // a v1.x item.)
-    let segs: Vec<&str> = pattern.split('/').filter(|s| !s.is_empty()).collect();
-
-    // The leading run of meta-free segments is the literal start directory
-    // (we don't readdir-match it -- it names exactly one place). The walk
-    // begins at the first segment carrying a meta char.
-    let walk_start = segs
-        .iter()
-        .position(|s| has_meta(s))
-        .unwrap_or(segs.len());
-    if walk_start >= segs.len() {
-        return Vec::new(); // no meta segment (precondition violated) -> nothing
+/// Whether a pattern -- a bare word as written, escapes and all -- carries a
+/// meta character its own `\` does not escape: the test for whether the word
+/// globs at all.
+pub fn has_unescaped_meta(pattern: &str) -> bool {
+    let b = pattern.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'\\' => i += 2,
+            b'*' | b'?' | b'[' => return true,
+            _ => i += 1,
+        }
     }
-    let (prefix_segs, walk_segs) = segs.split_at(walk_start);
+    false
+}
 
-    let start_display = if leading_slash {
-        let mut s = String::from("/");
-        s.push_str(&prefix_segs.join("/"));
-        s
-    } else {
-        prefix_segs.join("/")
-    };
-
-    let mut out: Vec<String> = Vec::new();
-    walk(env.cwd(), leading_slash, &start_display, walk_segs, &mut out);
-    // bash sorts the final expansion as whole strings; do that once over
-    // the full result (a per-level sort would diverge around the `/`
-    // boundary, e.g. "a" vs "a.b").
-    out.sort();
+/// `value` as a pattern whose backslashes match themselves. Only a bare
+/// word's own `\` escapes; a value -- a quoted string, a variable, a
+/// substitution -- has always matched its backslashes literally, and its
+/// glob metas stay live.
+pub fn escape_backslashes(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        if c == '\\' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
     out
 }
 
-/// Walk one pattern segment against the directory named by `dir_display`,
-/// recursing into matching subdirectories for the non-final segments and
-/// pushing matched paths for the final one. Recursion depth is bounded by
-/// the segment count (each call consumes one segment), independent of the
-/// tree's depth -- there is no unbounded descent.
-fn walk(
-    cwd: &str,
-    leading_slash: bool,
-    dir_display: &str,
-    segs: &[&str],
-    out: &mut Vec<String>,
-) {
-    let seg = match segs.first() {
-        Some(s) => *s,
-        None => return,
-    };
-    let last = segs.len() == 1;
-    let dir_fs = resolve_fs(cwd, dir_display, leading_slash);
-    let rd = match fs::read_dir(dir_fs.as_str()) {
-        Ok(rd) => rd,
-        // An unreadable directory (missing, not a dir, mount with no
-        // readdir) contributes no matches -- nullglob for this branch.
-        Err(_) => return,
-    };
-    // A leading-dot name matches only a segment that itself begins with `.`
-    // (POSIX). `.`/`..` are not emitted by any Dev's readdir, so this rule
-    // does not need to special-case them.
-    let seg_dot = seg.as_bytes().first() == Some(&b'.');
-    for entry in rd {
-        let entry = match entry {
-            Ok(e) => e,
-            // A mid-stream readdir error stops this directory; keep what we
-            // already collected.
-            Err(_) => break,
-        };
-        let is_dir = entry.is_dir();
-        let name = entry.into_file_name();
-        if name.as_bytes().first() == Some(&b'.') && !seg_dot {
-            continue;
+/// A path pattern's `/`-separated segments, empty ones dropped (so `//` and
+/// a leading or trailing `/` normalize away). An escaped `/` separates too,
+/// as in POSIX: no path component can hold one, and keeping the `\` would
+/// leave a segment ending in a lone backslash.
+pub fn pattern_segments(pattern: &str) -> Vec<String> {
+    let mut segs = Vec::new();
+    let mut cur = String::new();
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => match chars.next() {
+                Some('/') => take_segment(&mut cur, &mut segs),
+                Some(n) => {
+                    cur.push('\\');
+                    cur.push(n);
+                }
+                None => cur.push('\\'),
+            },
+            '/' => take_segment(&mut cur, &mut segs),
+            _ => cur.push(c),
         }
-        if !matches(seg, &name) {
-            continue;
-        }
-        if last {
-            out.push(join_display(dir_display, &name));
-        } else if is_dir {
-            let child = join_display(dir_display, &name);
-            walk(cwd, leading_slash, &child, &segs[1..], out);
-        }
-        // else: a non-final segment matched a non-directory -- cannot
-        // descend, so this candidate yields nothing.
+    }
+    take_segment(&mut cur, &mut segs);
+    segs
+}
+
+fn take_segment(cur: &mut String, segs: &mut Vec<String>) {
+    if !cur.is_empty() {
+        segs.push(core::mem::take(cur));
     }
 }
 
-/// Append `name` to a directory display path, preserving the path's
-/// relative/absolute shape (empty dir = relative first level; `/` = the
-/// root).
-fn join_display(dir: &str, name: &str) -> String {
-    if dir.is_empty() {
-        String::from(name)
-    } else if dir == "/" {
-        let mut s = String::with_capacity(1 + name.len());
-        s.push('/');
-        s.push_str(name);
-        s
-    } else {
-        let mut s = String::with_capacity(dir.len() + 1 + name.len());
-        s.push_str(dir);
-        s.push('/');
-        s.push_str(name);
-        s
-    }
+/// Whether a pattern segment begins with a literal `.` -- the only thing that
+/// may match a name's leading dot (POSIX 2.13.3). A bracket expression never
+/// does.
+pub fn leading_dot(segment: &str) -> bool {
+    segment.starts_with('.') || segment.starts_with("\\.")
 }
 
-/// Map a pattern-shaped display path to the filesystem path to `read_dir`.
-/// An absolute display is used as-is (already starts with `/`); a relative
-/// display is joined onto `cwd` (an empty relative display is the cwd
-/// itself).
-fn resolve_fs(cwd: &str, display: &str, leading_slash: bool) -> String {
-    if leading_slash {
-        if display.is_empty() {
-            String::from("/")
-        } else {
-            String::from(display)
-        }
-    } else if display.is_empty() {
-        String::from(cwd)
-    } else if cwd == "/" {
-        let mut s = String::with_capacity(1 + display.len());
-        s.push('/');
-        s.push_str(display);
-        s
-    } else {
-        let mut s = String::with_capacity(cwd.len() + 1 + display.len());
-        s.push_str(cwd);
-        s.push('/');
-        s.push_str(display);
-        s
+/// A path pattern read for the filesystem walk (`pathname::expand`), which
+/// is gated: everything decided before the first `read_dir` is here, where
+/// the host tests it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PathPattern {
+    /// It names a path from the root.
+    pub absolute: bool,
+    /// The directory its leading meta-free segments name -- a value, so
+    /// their escapes are removed (`my\ dir` is `my dir`).
+    pub start: String,
+    /// The segments to match from `start` on, as written, escapes kept for
+    /// the matcher.
+    pub walk: Vec<String>,
+}
+
+/// Read `pattern` for the walk; `None` when no segment carries a live meta.
+pub fn path_pattern(pattern: &str) -> Option<PathPattern> {
+    // An escaped `/` separates too (`pattern_segments`), so it leads.
+    let absolute = pattern.starts_with('/') || pattern.starts_with("\\/");
+    let mut segs = pattern_segments(pattern);
+    let at = segs.iter().position(|s| has_unescaped_meta(s))?;
+    let walk = segs.split_off(at);
+    let prefix: Vec<String> = segs.iter().map(|s| unescape(s)).collect();
+    let mut start = String::new();
+    if absolute {
+        start.push('/');
     }
+    start.push_str(&prefix.join("/"));
+    Some(PathPattern {
+        absolute,
+        start,
+        walk,
+    })
 }
 
 /// Match a glob pattern against a list of candidate strings,
@@ -500,5 +466,109 @@ mod tests {
         assert!(has_meta("foo*"));
         assert!(has_meta("foo?"));
         assert!(has_meta("foo[abc]"));
+    }
+
+    #[test]
+    fn an_escaped_meta_matches_only_itself() {
+        assert!(matches("a\\*b", "a*b"));
+        assert!(!matches("a\\*b", "aXb"));
+        assert!(matches("\\*", "*"));
+        assert!(!matches("\\*", "x"));
+        assert!(matches("\\?", "?"));
+        assert!(!matches("\\?", "x"));
+        assert!(matches("\\[a]", "[a]"));
+        assert!(!matches("\\[a]", "a"));
+    }
+
+    #[test]
+    fn an_escape_mixes_with_live_metas() {
+        // `a\*b*`: the first star is a character, the second a wildcard.
+        assert!(matches("a\\*b*", "a*b"));
+        assert!(matches("a\\*b*", "a*bcd"));
+        assert!(!matches("a\\*b*", "aXbcd"));
+        // An escaped character after a star, reached by backtracking.
+        assert!(matches("*\\*x", "a*b*x"));
+        assert!(matches("*\\*", "ab*"));
+        assert!(!matches("*\\*", "ab"));
+        // A pattern ending in an escaped star is not a trailing wildcard.
+        assert!(!matches("a\\*", "a"));
+    }
+
+    #[test]
+    fn a_backslash_escapes_itself_and_a_lone_one_is_itself() {
+        assert!(matches("a\\\\", "a\\"));
+        assert!(!matches("a\\\\", "a\\\\"));
+        assert!(matches("a\\", "a\\"));
+        assert!(matches("\\a", "a"));
+    }
+
+    #[test]
+    fn an_escape_inside_a_class_is_a_member() {
+        assert!(matches("[\\]a]", "]"));
+        assert!(matches("[\\]a]", "a"));
+        assert!(!matches("[\\]a]", "\\"));
+        assert!(matches("[a\\-z]", "-"));
+        assert!(!matches("[a\\-z]", "m"));
+        assert!(matches("[a-z]", "m"));
+    }
+
+    #[test]
+    fn has_unescaped_meta_skips_escaped_metas() {
+        assert!(!has_unescaped_meta("\\*"));
+        assert!(!has_unescaped_meta("a\\?b\\[c"));
+        assert!(has_unescaped_meta("a\\*b*"));
+        assert!(has_unescaped_meta("\\\\*"));
+        assert!(!has_unescaped_meta("plain"));
+        assert!(!has_unescaped_meta("tail\\"));
+        // has_meta reads a literal string: the star is there either way.
+        assert!(has_meta("\\*"));
+    }
+
+    #[test]
+    fn a_value_escaped_for_a_pattern_matches_itself() {
+        for v in ["C:\\dir", "a\\b\\", "\\", "plain", "tr\\*ail"] {
+            let p = escape_backslashes(v);
+            assert!(matches(&p, v), "{:?} as {:?}", v, p);
+        }
+        assert!(!matches(&escape_backslashes("C:\\dir"), "C:dir"));
+        // Only the backslashes are made literal; a value's metas stay live.
+        assert!(matches(&escape_backslashes("a*"), "abc"));
+    }
+
+    #[test]
+    fn pattern_segments_split_on_every_slash() {
+        assert_eq!(pattern_segments("my\\ dir/*.txt"), ["my\\ dir", "*.txt"]);
+        assert_eq!(pattern_segments("/a//b*/"), ["a", "b*"]);
+        assert_eq!(pattern_segments("a\\/b*"), ["a", "b*"]);
+        assert_eq!(pattern_segments("tail\\"), ["tail\\"]);
+        assert_eq!(pattern_segments("caf\\\u{e9}/*"), ["caf\\\u{e9}", "*"]);
+    }
+
+    #[test]
+    fn a_path_pattern_starts_at_the_directory_its_literal_segments_name() {
+        let read = |p: &str| path_pattern(p).map(|p| (p.absolute, p.start, p.walk));
+        let v = |xs: &[&str]| xs.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            read("my\\ dir/*.txt"),
+            Some((false, "my dir".into(), v(&["*.txt"])))
+        );
+        assert_eq!(read("/a\\/b/c*"), Some((true, "/a/b".into(), v(&["c*"]))));
+        assert_eq!(read("\\/u-*"), Some((true, "/".into(), v(&["u-*"]))));
+        // Past the first glob every segment is matched, escapes and all.
+        assert_eq!(
+            read("*/x\\ y"),
+            Some((false, "".into(), v(&["*", "x\\ y"])))
+        );
+        assert_eq!(read("a\\*b"), None);
+        assert_eq!(read("plain/path"), None);
+    }
+
+    #[test]
+    fn only_a_literal_dot_leads() {
+        assert!(leading_dot(".b*"));
+        assert!(leading_dot("\\.b*"));
+        assert!(!leading_dot("[.]b*"));
+        assert!(!leading_dot("*b"));
+        assert!(!leading_dot("\\\\.b"));
     }
 }

@@ -22,6 +22,8 @@ mirrors:
   - "tools/interactive/ls-bghome-stall.exp"
   - "tools/interactive/ls-imperium.exp"
   - "tools/interactive/haul-post.exp"
+  - "tools/interactive/haul-cape.exp"
+  - "tools/interactive/srv-connect-gate.exp"
   - "tools/test.sh"
   - "tools/smp-multiboot.sh"
   - "tools/test-cross-reboot.sh"
@@ -32,6 +34,10 @@ mirrors:
   - "tools/warp/boot-probe.sh"
   - "tools/interactive/lib.exp"
   - "tools/interactive/dap-nora.exp"
+  - "tools/interactive/rust-std-hello.exp (EXTINCTION: only — track R's std-on-device gate)"
+  - "tools/interactive/lantern.exp (EXTINCTION: only — the deck presenter's gate)"
+  - "tools/interactive/ls-halcyon-lantern.exp (EXTINCTION: only — the deck presenter in a Halcyon tile)"
+  - "tools/interactive/ls-halcyon-lantern-haul.exp (EXTINCTION: only — the deck presenter on a Haul mount in a Halcyon tile)"
   - "tools/interactive/flood-174.exp"
   - "tools/interactive/freeze-172.exp"
   - "tools/interactive/ls-gfx-font.exp"
@@ -79,7 +85,7 @@ literal-mentions:
   - "tools/warp-host.sh (a usage comment)"
   - "tools/interactive/go8d.exp (a prose note)"
 created: 2026-08-01
-updated: 2026-09-17
+updated: 2026-09-23
 ---
 ## The surface
 

@@ -8,9 +8,10 @@ updated: 2026-09-24
 ---
 What a person actually touches, and what they look at while doing it: `ut`, the
 rc-shaped shell — its parser, its evaluator, and the line editor in front of
-both — the console-TUI substrate and the editor built on it, and the renderer
-that turns the console itself into pixels. Orientation only; the facts live in
-the `sub-*` dossiers.
+both — the console-TUI substrate and the editor built on it, the renderers
+that turn a terminal into pixels (the console's and the Halcyon session's), and
+the readers that put a picture, a slide or a manual page on screen. Orientation
+only; the facts live in the `sub-*` dossiers.
 
 ## The organizing fact
 
@@ -87,6 +88,41 @@ visible. In particular, two failure modes are worth not conflating:
   Everything else here paints *into* a terminal; aurora paints the terminal.
   Also the area's sharpest instance of a test suite that does not run — and one
   module that says it does.
+- [[sub-lib-vt]] — the screen side of the terminal protocol: a byte stream in, a
+  cell grid out, for exactly the subset the tree's own emitters produce, with
+  everything else parsed and dropped rather than allowed to desync the stream.
+  A crate because three consumers must interpret identically or drift apart;
+  since 2026-09-23 also the screen the line editor's tests assert against.
+- [[sub-halcyond]] — the Halcyon environment client, "the only place that
+  thinks": the transcript renderer and the per-user session compositor. Every
+  byte it renders is untrusted app output, which makes it the display's
+  format-fuzz frontier — and the reason the untrusted parses were moved OUT of
+  it wherever they could be.
+- [[sub-kaua-term]] — one crash-isolated terminal per session tile: it holds the
+  pts, runs the VT parse, and hands halcyond pre-digested records instead of
+  bytes. The isolation boundary is the design — a hostile app's output is parsed
+  where a death costs one restartable tile, not the session compositor.
+- [[sub-view]] — inline media: decode an image in a short-lived, unprivileged
+  process and hand halcyond a finished raster. Where the decode runs is the
+  load-bearing choice — a codec is a format-fuzz surface, so it lives in the
+  process whose death costs a shell line, not the session compositor.
+- [[sub-gallery]] — the fullscreen sibling: view's decode, blitted to a surface
+  of its own. It adds no compositor or kernel code; it rides the surface-share
+  and GPU-authority invariants purely as a client, which is what keeps a new
+  window from being a new trust boundary.
+
+- [[sub-lantern]] — a folder of Markdown slides, shown one at a time: the deck
+  presenter. The area's clearest case of a facility that needed *no* new
+  mechanism — the clear-and-rerender rich path already existed as a grid
+  operation, so the renderer is untouched and the only structural decision is
+  an exclusion (it links [[sub-kaua]] without the feature that owns the alt
+  screen, so there is no code path to the mode that would discard the
+  rendering). Its manifest refuses every display key it might plausibly carry,
+  which is where a content format's authority boundary is drawn.
+- [[sub-manual]] — the Operator's Manual reader: a strict Markdown subset,
+  checked, rendered as Beacon on a rich tile and as plain text everywhere else.
+  The format is exactly what this parser accepts, and every accepted form has
+  both realizations — so a page that renders is a page that renders on serial.
 
 ## Cross-cutting
 

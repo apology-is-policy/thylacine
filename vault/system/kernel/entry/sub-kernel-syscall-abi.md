@@ -17,7 +17,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-09-23
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -30,6 +30,80 @@ It is three files saying the same thing in three languages, and nothing in the
 build checks that they agree.
 
 ## Contract
+
+**`T_CAP_TCB_DIAL` (U, 2026-09-23).** Bit 14 joins the `T_CAP_*` mirror set in
+both userspace copies -- `usr/lib/libthyla-rs/src/lib.rs` and
+`usr/lib/libt/include/thyla/syscall.h` -- alongside the kernel's `CAP_TCB_DIAL`
+in `kernel/include/thylacine/caps.h`. It is a capability constant, not a new
+syscall or argument record: the syscall number space and every argument shape
+are unchanged, so this is an additive mirror update, not an ABI break. The
+authoritative partition (fork-grantable vs elevation-only) lives in [[abi-caps]];
+the gate it feeds is in [[sub-kernel-devsrv]].
+
+**`T_SPAWN_PERM_SEAL` ((U) F1, 2026-09-23; renamed from `T_SPAWN_PERM_NOTRACE` and widened to stamp NODUMP as well by F5, 2026-09-24, before the bit was ever pushed; its NODUMP half acquired REAL EFFECT 2026-09-24).**
+
+**What the bit now means for a caller, which is an ABI-doc change and not only an
+implementation one.** `NODUMP` stopped being forward-compat scaffolding: while set, it
+refuses every `/proc/<pid>` file that hands out something the Proc holds -- environ, maps,
+ns, cwd, exe, cmdline, and reads of mem/regs/fpregs/kregs -- to every OTHER Proc,
+`CAP_HOSTOWNER` included (DEBUG-FS-DESIGN 3.2; widened to the whole image by the seal's
+round-2 re-audit). `status`, `sched` and `imperium` stay readable -- the kernel's record,
+not image content. It does NOT refuse control, so it does not stand against a peer that
+may still drive the Proc; guarding a secret takes `SYS_SET_TRACEABLE(0)` too. Both
+setters and the `SPAWN_PERM_SEAL` stamp write through `proc_seal`, under
+`g_proc_table_lock`. So `SYS_SET_DUMPABLE(0)`, which is UNGATED and one-way, is now a
+caller choosing permanent opacity of its image to the whole machine rather than only arming a future dump refusal, and TWO callers
+(`usr/corvus/src/main.rs`, `usr/login/src/main.rs`) were already invoking it as hygiene
+on the strength of the older wording. All four copies of that wording -- this header,
+`proc.h`, libt and libthyla-rs -- were corrected in the same commit; the libthyla-rs
+`t_set_dumpable` doc was the sharpest, having called a live irreversible switch a no-op.
+Note also that `syscall.h`'s reason SEAL is the one UNGATED perm ("strictly REDUCES what
+may be done to the child") never weighed that it now also reduces what a THIRD PARTY may
+learn; that argument still holds for the child but is no longer the whole story.
+ Bit 9 joins the
+`T_SPAWN_PERM_*` mirror set in the same two userspace copies, alongside the
+kernel's `SPAWN_PERM_SEAL` in `kernel/include/thylacine/syscall.h`, and is
+added to `SPAWN_PERM_ALL` -- which is the part that matters for the mirrors,
+because a bit outside that mask is rejected outright at the entry gate, so a
+kernel that does not know the bit refuses the spawn rather than ignoring it.
+Additive: no syscall number moves and no argument record changes shape, and a
+parent that never sets the bit is unaffected. The `perm_flags` field is `u32` on
+the wire (`TSpawnArgs`) while the Rust mirror types the constant as `u64` and
+narrows at the call (`self.perm_flags as u32`), so the mirror has 32 bits of
+headroom the ABI does not, so a future bit above 31 is a real hazard -- now
+refused rather than truncated (see the next paragraph).
+The gate's placement and the reason this one bit is ungated are in
+[[sub-kernel-syscall-dispatch]]; what it protects is in [[sub-stratum-session]].
+
+**The narrowing is now CHECKED, not silent (round 2).** `Command::spawn` refuses
+`perm_flags > u32::MAX` instead of truncating. The old `as u32` failed OPEN in the
+caller's eyes: a future bit >= 32 would be dropped and the spawn would SUCCEED
+without it, so login would believe it had sealed the proxy when it had not. The
+kernel cannot catch that on this path either -- its `& ~SPAWN_PERM_ALL` rejection
+only ever sees the low 32 bits (the legacy `SYS_SPAWN_WITH_PERMS` handler does check
+the full u64, so the two entry points differed). joey's C-side `(unsigned int)` cast
+has the same shape and is the remaining instance.
+
+**The bit's own comment was overstated and is now accurate.** It claimed the stamp
+makes the debug surface refuse an attach "for the whole of its life". It does not:
+`rfork` publishes the child before the thunk runs, so a window exists in which
+`proc_flags` is still 0. What closes that window for the case that matters is the
+identity/seam ordering described in [[sub-kernel-devproc]], not the stamp's timing
+alone. All three copies (kernel header, libt, libthyla-rs) say so now.
+
+**The bit's WHY was stale in the same block, and the audit caught it (F2,
+2026-09-24).** It still explained the seal as the answer to a debug surface that
+"separates on identity", which stopped being true the moment the owner axis
+gained capability cover -- and the commit that added cover said so in its body
+while touching neither this header nor `caps.h`. Both now state that the seal is
+the SECOND of two independent answers: cover refuses the shell's attach on
+authority (it lacks `CAP_TCB_DIAL`), and the seal is kept because it is the one
+that still holds between peers of EQUAL authority -- a caps-0 native fork of the
+proxy is covered by every same-principal peer while still holding the parent's
+handles. Lesson for this dossier's own class of prose: a comment that explains
+WHY a bit exists is invalidated by a change to the mechanism it names, and
+nothing in the build fails when it rots.
+
 
 **Imperium integration (2026-09-17).** Reserved numbers 110 and 111 are
 now implemented as SYS_CONSOLE_EPISODE and SYS_CAP_GRANT_IMPERIUM. Main's
@@ -558,3 +632,42 @@ constant changed, so the C mirror is untouched. Consumers: `/capacity-probe`
 ([[sub-kernel-protect-witness]]) is the first caller of the range form from
 EL0, and netd's retirement self-test could no longer use a second detach as
 its "gone" oracle ([[sub-netd-server]]).
+
+## The identity cape: an x5 flags word and one perm bit ((L), 2026-09-23)
+
+No number changed and no record grew; the operator voted the additive shape
+(IDENTITY-DESIGN 3.2, HAUL-DESIGN 4.7). The native ceiling stays 125.
+
+- `SYS_ATTACH_9P` (13) reads **x5 flags**, under the #112 discipline: every
+  caller passes it, and the wrappers take it explicitly (libt
+  `t_attach_9p(tx, rx, aname, len, n_uname, flags)`, libthyla-rs the same
+  with `in("x5")`), so a stale caller cannot leave a register's garbage in
+  it silently. The one bit is `SYS_ATTACH_9P_CAPE` (0x2, mirrored as
+  `T_ATTACH_9P_CAPE` in both libraries): the session reports the attaching
+  principal as every file's owner and its primary gid as the group, keeps
+  the server's mode, and sends nothing identity-bearing. `SYS_ATTACH_9P_LOOSE`
+  (0x1) stays `SYS_ATTACH_9P_SRV`-only and is refused here with the flat -1,
+  like any unknown bit. Every in-tree caller was checked, and no sibling
+  tree (the Go port, the libc port, pouch's patches) issues the call raw.
+- `SYS_ATTACH_9P_SRV` (52) refuses `SYS_ATTACH_9P_CAPE` in its x4 like any
+  unknown bit and admits LOOSE alone: over `/srv` the cape is the poster's
+  decision, and only a conn from a DMSRVCAPE service is caped. (B,
+  2026-09-24: an operator decision taken before the flag was ever pushed. It
+  had been admitted beside LOOSE for a day, and no caller passed it.)
+- `SYS_WALK_CREATE_DMSRVCAPE` (0x00800000, bit 23; libthyla-rs
+  `T_WALK_CREATE_DMSRVCAPE`) marks a `/srv` service post caped, and is
+  admitted ONLY beside `DMSRVBYTE`. `SYS_WALK_CREATE_DMSRV_BITS` (BYTE | BULK
+  | CAPE) is the derived mask all three refusals share -- the post branch's
+  "only DMSRV bits", and the fd-based and path-based creates' "no DMSRV bit
+  on a regular create" (-EINVAL) -- and `SYS_WALK_CREATE_PERM_VALID` derives
+  from it, so a fourth bit cannot reach one site and miss another. A static
+  assert pins that bit 23 collides with no other perm bit.
+- The rules live in two tested predicates beside
+  `sys_attach_9p_ends_are_pipes`: `sys_attach_9p_flags_ok(flags, srv)` and
+  `sys_srv_post_perm_ok(perm)` (`srv_client.cape_admission` drives both bit
+  by bit, including a bit above 32 that a truncation would lose).
+- Two handler inners joined `sys_open_create_kpath_for_proc` as
+  test-callable entries, the handler thinning to its user-copy:
+  `sys_walk_create_kname_for_proc` and `sys_attach_9p_srv_for_proc`. Their
+  checks repeat the handlers', so the syscall's answers and precedence are
+  unchanged ([[sub-kernel-syscall-dispatch]]).

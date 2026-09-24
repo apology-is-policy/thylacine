@@ -15,6 +15,451 @@ The Phase 7 entry decision (taken under the U-1 scripture conversation):
 - **Runtime**: native libthyla-rs (the Plan 9 split — see `docs/ARCHITECTURE.md §3.5` + `CLAUDE.md` "Native vs ported userspace programs").
 - **Workspace**: Cargo workspace at `usr/utopia/`; Helix vendored separately at `usr/helix/`.
 
+## /srv connect gate (U) — 2026-09-23 (aux-3; rounds 1 + 2 closed)
+
+An ordinary user could `mount /srv/stratum-fs` — the SYSTEM store — and list
+the system root. Confirmed on device. Three mechanisms each deferred to
+another: the kernel is the only rwx enforcer since A-3 and Stratum checks no
+per-file permissions; `devsrv_open_connect` ran no authority check at all,
+deferring to per-territory `/srv` *visibility* (I-1); and joey spawns the
+coordinator with no `--user-policy`, so it admits every Tattach. Visibility did
+not hold, because login never built STALK-DESIGN D7's per-session registry and
+the session inherits the boot registry.
+
+The fix is a capability gate at connect. A byte-mode service posted under the
+TCB mark (`cap_posted == false`) is connectable only by a holder of the new
+fork-grantable `CAP_TCB_DIAL`; a Proc may always dial a service it posted
+itself; user-posted byte services (`haul --post`) and every 9P-mode service are
+unchanged. Only `haul` sets `DMSRVBYTE` in-tree, so no native service is
+touched. The capability flows kproc -> joey -> login -> the per-user home
+proxy; the user's shell is spawned without it.
+
+**Identity could not be the axis, and that is the load-bearing finding.** The
+operator's first framing was Plan 9 `/srv` owner+mode. But login spawns the
+per-user home proxy *as the user* — deliberately, so the coordinator attributes
+the user's home files to them — and the user's shell is that same principal. No
+identity rule separates them *for this dial*; only a capability can (I-22).
+That is narrower than "only a capability can ever separate them", and the
+difference turned out to matter — see F1 below.
+
+`devsrv` stays system-owned 0555/0444 and NOT `perm_enforced`: the gate is a
+capability check, never an rwx check. A refusal is `T_E_ACCES`, carried to the
+open call sites through a new per-Dev `spoor_open_errno` dispatcher so it reads
+as "permission denied" and not the generic EIO.
+
+Scripture: STALK-DESIGN §5.2 + D8, ARCHITECTURE §28 I-1, IDENTITY-DESIGN §3.2.
+Tests: `devsrv.srv_connect_gate_decides` (all sixteen predicate combinations,
+plus a holds-every-other-capability leg so a `caps != 0` gate cannot pass) and
+`devsrv.srv_connect_gate` (refusal + EACCES + an untouched backlog; the same
+Proc admitted once capped; the poster self-dialling uncapped; a user-posted
+service still admitting a capless dialer — the admitted legs are the positive
+controls).
+
+Queued separately as defence-in-depth, neither load-bearing: a `--user-policy`
+for the coordinator (not the one-line change it appears to be — the policy is
+static argv baked at boot, while users are minted at runtime from uid 1000), and
+building D7's per-session registry in login.
+
+### F1 — the gate had a side door: `SPAWN_PERM_SEAL`
+
+The audit round's one P1 was against the reasoning above, not the code. The
+claim "only a capability separates them" is false in general: the I-39 debug
+surface separates on **identity** (`devproc_debug_authorized`'s owner axis), so
+the user's shell — the same principal as the proxy — could debug-attach the
+proxy and drive its live coordinator transport. No capability required. The
+front door was locked and the side door stood open. Verified independently that
+no stratumd source calls `set_traceable`, so the proxy had no protection.
+
+Closed by a new `SPAWN_PERM_SEAL` (bit 9; `SPAWN_PERM_NOTRACE` until the F5 widening below): `apply_spawn_perms` stamps
+`PROC_FLAG_NOTRACE` through the existing one-way setter, so there stays exactly
+one writer of the flag, and login passes the bit on the proxy's spawn.
+
+**Spawn-time rather than a self-call, because a self-call is racy.** A proxy
+that sealed itself would be attachable between exec and the call, and the
+same-principal Proc able to take that window is ordinary — a second login, or a
+process backgrounded from a prior session. `proc_set_seat_service` stamps
+`NODUMP|NOTRACE` this way for the same reason.
+
+**It is deliberately the first ungated `SPAWN_PERM_*`**, and the reason is
+worth keeping: any Proc may already call `SYS_SET_TRACEABLE(0)` on itself with
+no authority, so a gate could only change *when* the flag arrives, never
+*whether* it could. The bit strictly reduces what may be done to the child. The
+coupling to watch is that if `SYS_SET_TRACEABLE` ever acquires a gate, this bit
+needs the same one or it becomes a bypass.
+
+Test: `sys_spawn_with_perms.notrace_blocks_same_principal_debug`. Its
+pre-F1 positive control runs the perm word login used *before* this change and
+asserts the attach is **admitted** — without it, the refusal leg would be
+equally satisfied by a fixture nothing could ever debug. The control is then
+re-checked while the caller holds `CAP_DEBUG|CAP_HOSTOWNER`, so the refusal
+cannot be a caller the test quietly poisoned.
+
+**Surviving caveat, recorded not fixed:** NOTRACE closes the debug route only.
+The planned `/proc/<pid>/fd/` (deferred at `kernel/devproc.c:27`) would be
+owner-gated and would reopen fd-dup theft of the proxy's coordinator fd. That
+surface must gate on more than the owner axis when it lands.
+
+### F5 — the seal widened to cover dumps (2026-09-24, operator-approved, pre-push)
+
+Audit round 2's F5 found the proxy sealed against trace but not dump, while
+`proc_set_seat_service` seals a seat service against both for the same stated
+reason. The operator approved renaming the bit to a seal: `SPAWN_PERM_SEAL`
+(and the `T_SPAWN_PERM_SEAL` mirrors) now stamps `PROC_FLAG_NODUMP` as well as
+`PROC_FLAG_NOTRACE`, each through its existing one-way setter. It had to land
+before the first push, because renaming or widening a published bit afterwards
+is a format break. Still ungated, for the same reason: `SYS_SET_DUMPABLE(0)` is
+as self-reachable as `SYS_SET_TRACEABLE(0)`. NODUMP's only runtime reader today
+is the re-enable refusal, so the test drives that directly — a sealed child
+cannot make itself dumpable or traceable again, and the unsealed control takes
+the same calls as no-ops — and a sabotage removing the NODUMP half reddens
+exactly the new assertion. Rewriting the arm also removed a comment still
+claiming "a single writer of the flag", which round 2's F4 had disproved in the
+dossier but missed in the code.
+
+### F3 — the boundary line, and the errno that died at it
+
+Round 1's F3 left one thing owed: a genuine two-Proc pouch AF_UNIX test. The
+*rule* was already covered at both polarities by `devsrv.srv_connect_gate`,
+which dials from a distinct Proc; what was untested was the **boundary line** —
+that pouch's `bind()` really yields `cap_posted == false`, and that a second real
+Proc's `connect()` surfaces the refusal as an errno a POSIX caller can act on.
+
+`pouch-hello-sockets` grew an `xproc-gate` leg: bind `/srv/pouch-sock-xproc`
+under the mark, `posix_spawn` a second real Proc, three assertions each one
+variable from the next — the poster dials its own service (asserted **first**, so
+a service nothing could reach can never read as "the refusal below worked"), the
+child is refused `EACCES`, the child is refused `ECONNREFUSED` on an absent name.
+All three green on device; the census marker carries `xproc-gate`, so a stale
+binary cannot pass for this one. It also settles on device what STALK-DESIGN
+asserts of `stripes`: a `posix_spawn`ed child's tag is its own.
+
+**Writing it found a defect.** pouch's `connect()` mapped **every** `SYS_open`
+failure to `ECONNREFUSED`, so the `T_E_ACCES` this chunk built `spoor_open_errno`
+to carry died one frame later at the libc boundary. Not cosmetic: `ECONNREFUSED`
+is the *transient* AF_UNIX error, the one every client retries on, so the
+universal back-off loop would retry forever against a permanent denial. Fixed in
+patch `0006-pouch-sockets` by a single `srv_open_errno` decision point. Sabotage:
+restoring the blanket map reddens leg 2 at `errno=111 want EACCES=13` with leg 1
+still green.
+
+**Half a defect, written as a half.** `bind()`'s mirror collapse — every post
+failure to `EACCES` — is tracked, not fixed. It is reachable today through the
+15/16 `/srv` registry headroom, where exhaustion reports as "permission denied".
+Correcting it needs the enumeration of what `SYS_walk_create` returns on the post
+path, which is its own investigation.
+
+**A correction this chunk owes its own prose.** The first version of the leg's
+comment claimed leg 3 was what stopped a blanket-`EACCES` map satisfying leg 2 by
+accident. The sabotage matrix disproved it: a blanket `EACCES` reddens the
+*pre-existing* `connect`-to-an-absent-name leg one subtest earlier, in the
+poster's own Proc, and the prover never reaches this subtest. Leg 3's unique
+reach is a child-specific spurious `EACCES`, which no sabotage of a shared helper
+can produce — reasoned coverage plus a diagnostic, not a sabotage-proven control.
+Corrected in the comment, in STALK-DESIGN, and here.
+
+## Haul identity cape — 2026-09-23 (aux-3; audit closed 0/0/0/3 P3; B 2026-09-24)
+
+The operator's Lantern-over-Haul run got "permission denied" on a private Mac
+tree (0700/0600). dev9p checked access against the host's owners (uid 501,
+group staff), which no Thylacine principal holds, so every guest user was
+"other". Operator vote "mounter owns" (HAUL-DESIGN 4.7, IDENTITY-DESIGN 3.2;
+scripture `d10d1ff5`). Built on aux-3:
+- The cape rides the 9P session: owner = the attaching principal, group = its
+  primary gid, the server's per-file mode kept. It is applied at dev9p's one
+  attribute conversion and in Loom's GETATTR copy, and stamped before the root
+  publishes. The Tattach names no user, a create sends no group, and chown and
+  chgrp are refused before the wire. Kernel DAC stays on.
+- ABI (additive, voted): `SYS_ATTACH_9P` gains an x5 flags word, which every
+  caller passes; `SYS_ATTACH_9P_CAPE` on both attach syscalls (the `/srv`
+  half withdrawn by B, below); `DMSRVCAPE`
+  (bit 23) on a byte-mode `/srv` post; one derived DMSRV mask behind every
+  refusal.
+- haul capes both paths, so a plain `mount /srv/NAME` of a `--post` service is
+  caped with no option.
+
+Verified: kernel suite 1653/1653 (default image); 30 kernel sabotages, each
+caught by the test meant for it; device gate `haul-cape` (its own npxf, a
+0700/0600 export) PASS, and FAIL with the operator's EACCES under both device
+sabotages. Audit (Fable 5.1, max, no mid-run fallback): 0 P0 / 0 P1 / 0 P2 /
+3 P3, folded with the chunk into `797767f6`. F2 (the cape names the attacher)
+was closed by (U)'s scripture pass; **F3 (the gate did not pin the host-side
+group) closed 2026-09-24** -- `haul-cape.exp` now stats the guest's create and
+mkdir host-side for their group, and the discriminating sabotage is SERVER-side
+(npxf's `try_set_gid` forced to a concrete group: it reaches login and reddens
+that one line, where a kernel-side gid sabotage instead extincts the boot suite
+at `dev9p.cape`, never reaching the device script); F1 (Stratum stores a caped
+create's `(u32)-1` gid literally) is open and tracked, and lives in the Stratum
+tree. Enqueued: (S), the "9p: op abandoned" line at the
+end of every Haul session.
+
+### B — the `/srv` attach stops taking the cape flag (2026-09-24, operator-approved, pre-push)
+
+`SYS_ATTACH_9P_SRV` refuses `SYS_ATTACH_9P_CAPE` like any unknown bit, and the
+helper both `/srv` attach paths share decides the cape from the service's
+`DMSRVCAPE` mark alone, reading no flag for it. Over `/srv` the cape is now
+purely the exporter's decision. The flag was never a hole: over a byte-mode
+service the attacher already holds the raw transport, so the cape gave it
+nothing. But it was an authority-adjacent option no caller used (ut passes 0,
+joey passes LOOSE, and haul's `/srv` path uses the mark), and every later audit
+of the cape would have had to reason about it. Withdrawing a published option
+is a format break, so it had to land before the first push. What it gives up is
+a caped mount of a service posted through POSIX `bind()` in pouch, which cannot
+carry the mark; no such program exists, and if one appears the fix is to let
+that poster set the mark.
+
+The helper's half matters as much as the syscall's: with the flag read gone, a
+later caller handing the helper an unvalidated word still cannot cape a `/srv`
+session. Tests: `srv_client.cape_admission` (the `/srv` word refuses CAPE and
+LOOSE|CAPE and admits 0 and LOOSE); `9p_srvconn_transport.cape_attach`, which
+now asserts that the flag handed straight to the helper capes nothing and the
+Tattach names the principal; and a new `9p_srvconn_transport.cape_attach_srv`,
+split out of it so a failure in one half cannot hide the other's, asserting
+that the syscall refuses CAPE and sends nothing, that LOOSE still reaches the
+helper, and that a `DMSRVCAPE` service capes through the syscall with flags
+0. Verified: kernel suite 1657/1657 twice (byte-identical canonical ELFs); a combined sabotage (the flag re-admitted on the `/srv` word, and the helper's flag read restored) reddened exactly the three tests above, each at its predicted assertion..
+
+## I-39 capability cover — 2026-09-24 (aux-3; scripture 389c06b9, audit round owed)
+
+Found while answering the operator's question about which permission channels a
+forked child inherits. `devproc_debug_authorized` gated on identity and read no
+capability state of the target, so the owner axis admitted a same-principal
+caller to a target holding caps the caller lacked. Since elevation deliberately
+does not change identity (I-22; IMPERIUM-DESIGN 11.6, "the sub-shell is the same
+principal"), an **unelevated** shell of user U passed the gate against U's own
+imperium-elevated sub-shell, and against every member of a propagating legate
+scope, and could attach and drive it — borrowing a trusted-path elevation
+(I-25/I-27) from a process that never went through the trusted path. It is the
+general form of (U) F1's side door, which `SPAWN_PERM_SEAL` had closed for
+login's home proxy alone.
+
+Demonstrated before it was fixed: a probe on `cfadd242` (uncommitted, restored)
+gave 1657/1658 with the one red naming the admitted attach — caller caps 0,
+target the same principal holding `CAP_KILL`, through the real `attach` verb.
+
+**The rule** (operator-voted; scripture first at `389c06b9`, then the code): the
+owner axis admits only when `(target->caps & ~caller->caps) == 0`; an uncovered
+same-principal caller needs `CAP_DEBUG`/`CAP_HOSTOWNER`. Prior art is Linux's
+`cap_ptrace_access_check` and FreeBSD's `p_candebug` — in capability terms, no
+amplification through control. Nothing regresses for shell-spawned debugging,
+because fork-grantable caps only shrink (I-2), so a spawner always covers its
+children. **Debug deliberately diverges from the I-26 kill gate here**, whose
+owner axis stays unconditional: killing a more-capable target destroys it, while
+debugging one uses its authority.
+
+Two regressions, kept separate so a predicate failure cannot hide the real
+path's: `devproc.debug_cap_cover_predicate` (equal, superset, exact,
+one-cap-short, disjoint, both cap-axis overrides, `CAP_DAC_OVERRIDE`, and NOTRACE
+still winning over a fully-covering owner) and `devproc.debug_cap_cover_attach`
+(end-to-end through the `attach` verb, its covering control asserted first).
+Verified: kernel suite 1659/1659 on the default build, and a revert of the cover test to the pre-fix unconditional owner axis gives 1657/1659 with both new tests red at their cover assertions while the pre-existing `devproc.debug_authorized_predicate` stays green -- so the new tests, not an older one, are what catch this.
+
+The three alternatives were rejected on the record in the scripture commit:
+sealing every elevation (misses any future non-legate cap holder), ancestors-only
+(does not cover the sub-shell, which descends from the user's own shell), and
+keeping the Plan 9 same-user reading (which has no capabilities to reason about).
+The seal is not made redundant — it still owns secrets an *equal*-authority peer
+must not read. **Decision A does NOT shrink, and the draft that said it did was
+wrong**: native fork passes `CAP_NONE` (`rfork_forked`, `kernel/proc.c:1867-1880`),
+so only a Linux-phenotype child inherits caps. A native forked child of a sealed
+Proc holds caps 0 — covered by every same-principal peer — while keeping the
+parent's inherited handles, so the cover rule does nothing for it and only the seal
+could. A is load-bearing (audit F3).
+**Audit round** (Opus fallback -- Fable was out of credits, and a fallback round
+that finishes is closed): 0 P0 / 1 P1 / 3 P2 / 6 P3, all dispositioned. The round
+falsified three things this chunk's own prose asserted: that the rule "closes the
+class" (it closes the post-elevation half; the pre-elevation injection window
+survives, F1), that a forked child inherits caps (false natively, F3), and two
+`caps.h`/`syscall.h` comments that still described the pre-rule behaviour (F2).
+Wording narrowed and comments corrected here; the debug-taint mechanism and the
+`environ` disclosure axis are enqueued as their own chunks. The reviewer notes a
+Fable round on these two chunks would still be worth having.
+**A fourth overclaim was self-found at the close**, by hunting the round's
+falsified claims through the vault rather than only the code: the rule
+"generalises" the (U) F1 answer along the CAPABILITY axis alone. Cover is a
+subset test over one word, while authority also lives in the `proc_flags` spawn
+perms, the I-34 allowance and the handle table. The live instance is the Halcyon
+session compositor -- login gives `/bin/halcyond` the shell's own `SHELL_CAPS`
+plus `MAY_POST_SERVICE` and no seal, and halcyond masks its tile children with
+`!CAP_SET_IDENTITY`, which spawn intersects to the same set, so a tile program
+covers the compositor exactly. Not a trusted-path break (the Lictor seat
+*service* is kernel-sealed at its bind; halcyond is only the untrusted seat
+client) and not a regression (identity alone admitted before). Scripture
+narrowed here and in DEBUG-FS 3.1; the one-line `SPAWN_PERM_SEAL` fix is the
+operator's vote, because it makes halcyond undebuggable mid-arc.
+**Verified RED-first in three legs** so each test reds for its own cause rather
+than for the other's: reverting the cover subset test reds
+`devproc.debug_cap_cover_predicate` + `devproc.debug_cap_cover_attach` and
+nothing else (`debug_authorized_predicate` and `9p_srvconn_transport.cape_attach`
+stay green); removing the `9p_attach` fail-closed guard reds `cape_attach` alone
+(both cover tests stay green); canonical is **1659/1659 PASS**, 0 FAIL lines, no
+source newer than the built ELF.
+
+## The seal completed — A2: the dump seal on the disclosure axis — 2026-09-24
+
+The operator delegated all four open seal decisions ("go with your gut"). A2 is the
+second of them and the first to land: **the seal's contract is "cannot be EXTRACTED
+FROM", and `PROC_FLAG_NODUMP` is the bit that enforces it.**
+
+The seal's own construction always implied this — `SPAWN_PERM_SEAL` stamps `NODUMP`
+alongside `NOTRACE`, and a dump bit is a disclosure bit — so a sealed Proc whose
+`environ` any same-principal peer could read was an inconsistency, not a boundary.
+The precise gate is `NODUMP` rather than the `NOTRACE` seam, which is Linux's split:
+there, dumpability and not the ptrace flag governs `/proc/<pid>` reads, because
+refusing to be dumped and refusing to be driven are different promises. Reading a
+Proc's environment is extracting part of its image. A side effect worth naming: the
+bit had no runtime reader at all before this beyond the re-enable refusal in its own
+setter, so it protected nothing despite v1.0 having no core dumps.
+
+**The audit round changed the SET, and that correction is the substance of this
+chunk.** Dirty close: 0 P0 / 1 P1 / 5 P2 / 2 P3, Opus fallback (Fable out of credits
+twice that day), five of eight findings being claims the code or tree contradicted.
+The first cut enforced the seal inside `devproc_owner_or_hostowner`, which was wrong
+in both directions: it MISSED `maps` (mode 0444, reached with no gate, so a sealed
+Proc's whole VMA table stayed world-readable including which ranges are `SHARED_IN`
+another Proc's memory — while the draft cited a precedent that *names* `maps`), and it
+CAPTURED `sched` and `imperium`, which are the kernel's attestation *about* a Proc
+rather than content *of* it. The second was actively harmful: `SYS_SET_DUMPABLE(0)` is
+an ungated one-way self-call, so any Proc in a live propagating legate scope could have
+permanently suppressed the kernel's record of its own elevation, with no capability
+required. I-25's enforcement never depended on that file; its observability does.
+
+**The rule that survives: the seal follows the IMAGE, not the LEDGER.**
+`devproc_extract_authorized` (owner-or-hostowner AND not sealed) gates `environ`;
+`maps` is gated on the seal ALONE, keeping its ambient 0444 posture for an unsealed
+Proc; `devproc_owner_or_hostowner` keeps its old meaning with no seal and gates `sched`
+and `imperium`. Self is exempt and exempt first. Otherwise absolute, `CAP_HOSTOWNER`
+included — a deliberate divergence from Linux, which lets `CAP_SYS_PTRACE` through.
+`devproc.dump_seal_scope` pins the split so it cannot silently regress.
+
+*(Superseded by the seal's round 2: the order argument below held only for a reader
+admitted by the new identity; the seal now rests on `proc_seal`'s lock.)* The round's P1
+was a memory-ordering defect in the same four lines: the seal was read
+BEFORE the principal comparison, the target's `principal_id` was read plainly, and the
+justifying comment asserted an ACQUIRE/RELEASE pairing that does not exist. The order
+now falls out of the composition — the authority predicate ACQUIRE-loads `principal_id`
+before the seal is tested, which is the obligation `proc_apply_identity`'s RELEASE
+exists to serve and which the tree states in three places.
+
+Also corrected here: a third copy of the claim audit F10 struck, at the imperium
+reader's header — it said the in-kernel runner passes the gate because kproc holds
+`CAP_HOSTOWNER` "by `CAP_ALL`", which `CAP_ALL` excludes. It passes on the OWNER
+axis.
+
+Verified RED-first on the committed tree (`038ab9c3`), each sabotage leg redding
+exactly its own guard: removing the seal from the extraction gate reds
+`devproc.dump_seal_predicate` and `dump_seal_scope`'s extraction leg; sealing the
+attestation gate (the first cut's error) reds `dump_seal_scope`'s attestation leg
+alone; removing the `maps` gate reds `devproc.dump_seal_disclosure` alone. Canonical
+**1662/1662 PASS**, 0 FAIL lines, no source newer than the built ELF. (An earlier
+version of this paragraph recorded the first cut's two-leg run at 1661 and claimed that
+removing the NODUMP refusal redded `dump_seal_disclosure`. That test drives `maps`,
+which that refusal never gated, and it passed in every leg until it got a control of
+its own — round 2, F6.)
+
+**Round 1 was a dirty close** (P1+P2 = 6); round 2 ran on it — see below.
+
+**Still owed on this arc:** A1 (the seal crosses `fork`) is DECIDED but NOT landed,
+because its verification is genuinely end-to-end — the fork shape cannot be
+synthesized in-kernel and the only available parent is the runner, which must never
+be sealed since the bits are one-way. It needs a userspace probe first. B (seal the
+compositor) LANDED here, and got its Halcyon-image run from the operator on
+2026-09-24: the Lantern-over-Haul recipe on this tip, in the cocoa window, with the
+compositor sealed and the session intact. C (the debug taint at the redeem) is
+decided and unstarted.
+
+## The seal completed — round 2: the image set, and a lock — 2026-09-24
+
+The re-audit of `038ab9c3` (the dirty-close rule; Opus fallback again) returned
+**0 P0 / 1 P1 / 5 P2 / 7 P3** — dirty again, so **round 3 is owed**. It is the round
+where the seal stopped being a list of files. Closed list:
+`audit_seal_completion_r2_closed_list.md` (memory).
+
+- **P1 — the set was still short.** `/proc/<pid>/ns` (the whole mount table, with
+  source paths) was ungated, and the tree's own comments ranked it above `maps`;
+  `cwd`, `exe` and `cmdline` likewise. Now ONE predicate, `devproc_kind_is_image`,
+  names the image set and every read site consults it: `cmdline`/`ns`/`exe`/`cwd`/
+  `maps` (refused before any formatter runs), `environ`, and the read direction of
+  `mem`/`regs`/`fpregs` (P2 — a NODUMP-only Proc used to hand a debugger every byte
+  of memory). `status`/`sched`/`imperium` stay unsealed; `ctl`/`wait`/`kregs`/
+  `kstack` answer to NOTRACE.
+- **The ordering is a lock (P2).** Round 1's "structural" composition held only for a
+  reader admitted by the new identity. `proc_seal` is now the only writer of both
+  bits, under `g_proc_table_lock`, which every `/proc` reader holds — a read is
+  wholly before or after a seal on every axis, and SEAL's two bits land in one
+  critical section.
+- **Tests at the call sites (P2).** `devproc.dump_seal_disclosure` reads ten files
+  unsealed then sealed through the real path (image refuses, ledger and control
+  answer) plus a cross-principal environ leg; `debug_mem`/`debug_regs` gained NODUMP
+  legs (reads refused, writes allowed). Every seal test sets the bit through
+  `proc_seal` and captures its verdicts before freeing its Procs (P3).
+- **Prose the tree contradicted, fixed:** DEBUG-FS 3.1 and the devproc dossier said
+  the seal covers `sched`/`imperium` (P2); this section recorded the first cut's
+  verification (P2); `/proc/self` resurfaced in two docs; the NOTRACE comment called
+  the debug surface hypothetical. Also: the kill gate's plain principal load, the
+  census's denominator and its C blind spot, a dossier paragraph spliced
+  mid-sentence, and the spawn-copy boundary (a sealed parent's environment reads
+  through an unsealed child), now stated in 3.2.
+- **Self-found:** `test_devproc_environ`'s header still carried round 1's falsified
+  "kproc holds CAP_HOSTOWNER by CAP_ALL" — which is also why its deny leg was believed
+  unreachable end to end. It is reachable, and now tested.
+
+Verification: canonical **1662/1662 PASS**, 0 FAIL lines (default image, isolated worktree); final rebuild after the sabotage legs ELF `9418e7b48163ea01`, no source newer (270 compared). RED-first in three legs, each redding ONLY its own guard: the read-dispatch check + mem + regs read refusals removed together -> exactly `refuses cmdline` / `a mem READ` / `a regs READ` (1659); environ on the unsealed predicate -> exactly `refuses environ` (1661); imperium on the sealed predicate -> exactly the imperium I-25 leg (1661). Restores byte-identical. F5's lock is argued, not unit-tested.
+
+## The seal completed — round 3: the prose again, and a leak the seal work uncovered — 2026-09-24
+
+Round 3 re-audited `34d1f14a` (the dirty-close rule; Opus fallback, the third in a row on this surface). The reviewer found 0 P0 / 0 P1 / 3 P2 / 9 P3, and **cleared the round-2 restructure**: `proc_seal` is the only production writer of the seal bits, every other `proc_flags` writer is an atomic RMW that cannot touch them, every seal reader runs and renders inside `proc_for_each`, the lock order is clean at all four call contexts, and the ten-row call-site table reds in both directions. All three P2s were prose the tree contradicts — including this arc's own round-2 claim, "verified", that login writes no environment variable. It writes six (`HOME`, `USER`, `PATH`, `GIT_EXEC_PATH`, `GIT_CONFIG_SYSTEM`, `OPENSSL_armcap`); the search had keyed on an API name the code does not use.
+
+The self-audit found the round's only P1, and it predates the seal: **`/proc/<pid>/kregs` handed the unprivileged owner axis the KASLR slide** — the raw `ctx.lr` of a debug-parked thread is the return into `sched` — plus kernel stack and heap addresses. It is the class 8b-1d's F1 fixed for `kstack` and never applied to `kregs`; the in-guest `/debug-probe`, which runs on the owner axis, had been asserting the leak at every boot. The kernel half now goes only to the `CAP_DEBUG`/`CAP_HOSTOWNER` tier; the owner axis reads zeroes and keeps `tpidr_el0`, the one field Delve reads. `kregs` also joined the image set (it carries `tpidr_el0`, an EL0 register).
+
+- **Every read site asks one helper.** `devproc_read_sealed(caller, target, kind)` — dispatch, `environ`, `mem`, `regs`/`fpregs`/`kregs`, `kstack`, `wait` — so "classified in `devproc_kind_is_image`" means sealed on every path; `environ`'s entry had been dead code (F5).
+- **`proc_seal` extincts on a non-seal bit** instead of silently sealing nothing (F9), and says it must never be called under the lock — the trap decision C would have walked into.
+- **Tests (F8, F12).** `dump_seal_scope` gained a cross-principal `CAP_HOSTOWNER` leg (the ledger still answers it; extraction still refuses it); `debug_kregs_kstack_wait` gained the owner/CAP tier split and a NODUMP leg; `debug_regs`'s inline asserts moved into a helper so a failure can no longer leave a stack-local thread linked.
+- **Prose (F1-F4, F10).** caps.h's stale gate clause, the six login keys in 3.2, the CONTROL seal's ABI docs in all three userspace headers, the ACQUIRE-order survivors, the stratumd hardening claims, the NOTRACE comment's `stop` (run control is slot-gated).
+- **Userspace (F6, F11).** The diorama names a sealed Proc from the ledger `name:` line; halcyon reads and advertises `/proc/<pid>/ns` (devproc has no `self`).
+- **Tracked, not fixed:** the diorama's empty file where Linux answers `EACCES` (F6), and a seal refusal reading as "I/O error" (F7, an errno ABI question for the operator). The `kregs` fix is self-found and not independently reviewed; it is a named focus of the next devproc audit.
+
+Verification: canonical **1662/1662 PASS**, 0 FAIL lines (default image, isolated worktree), in-guest `/debug-probe` PASS on the owner axis; final rebuild after the sabotage legs **1662/1662**, ELF `0ef66f3df8964cd7`, no kernel source newer (276 compared). RED-first in two legs of two guards each, every pair in different tests, each FAIL naming its own guard: kregs' CAP tier forced open + environ dropped from the image set -> exactly `kregs (owner axis): x19..x28 withheld (I-16)` + the three environ-seal assertions (predicate, disclosure, scope) (1658); kregs dropped from the image set + imperium on the sealed predicate -> exactly `the dump seal refuses a kregs READ` + the owner AND the new cross-principal `CAP_HOSTOWNER` I-25 legs (1659). Restores byte-identical. In the sabotaged boots the kernel suite gates the boot, so the probe never ran there; its owner-axis zero check is proven by the canonical boots only. proc_seal's extinction is argued, not unit-tested (it halts).
+
+## HN-1: haul errors reach the terminal; netd's dial verdict stops racing — 2026-09-24
+
+From the operator's Lantern-over-Haul run in Halcyon: "haul doesn't error". Four defects stacked, each hiding
+the next:
+
+- **Routing (the root cause of the report).** haul wrote every line through SYS_PUTS, the KERNEL console,
+  not fd 2. In a Halcyon tile the lines went to serial and the tile showed nothing. On serial the two are
+  one device, so no scenario could see it. haul now writes stderr (sampled before anything is opened) and
+  falls back to the console only for a closed fd 2.
+- **netd B2.** A `data` open on a dial that had ALREADY been refused got a live Rlopen: only a pending
+  handshake was held. A refused connect "succeeded" whenever its RST beat the Tlopen. That race is the
+  cause of haul-hangup's old measurement, not slirp. It also hit pouch's `connect()`.
+- **netd B3.** An unanswered dial was reported ECONNREFUSED. The #293 sweep drops it at the slot deadline
+  before `poll_connects` sees its own. Fixed with `Slot.dial` + `data_open_verdict` + `dial_failure`.
+- **B4 + B5.** libthyla-rs `connect_timeout` called a refusal a timeout, and there was no name for errno
+  111; haul's error said only "connect". Added `Error::ConnectionRefused` and a `Dialing` type. haul now
+  names the address and reason, and prints a progress line after 2 s.
+- **The gate.** No gate read netd's selftest verdicts. `tools/test.sh` now fails a boot once netd is up if
+  netd prints any FAIL line, never serves, or omits the new dial-verdict line by name.
+
+Audit: holotype round 1 on WIP `84345875` (Opus fallback; Fable out of credits) = 0 P0 / 1 P1 / 2 P2 / 4 P3,
+all fixed. Not dirty. The P1: the new scenario used `2>`, which `ut` lacks; an `exec-probe stderr-to` launcher
+replaces it. -> memory `audit_hn1_closed_list`.
+
+Verification (default image, `~/projects/thylacine-aux-r2`):
+- Canonical: `test.sh` PASS, kernel suite **1662/1662**, `netd: dial-verdict selftest PASS`, netd serving.
+- RED-first, one boot reverting the two handler sites (h_lopen's refuse, poll_connects' ecode):
+  `test.sh` FAILED on exactly `netd: dial-verdict selftest FAIL (["refused-first-not-econnrefused",
+  "held-swept-not-etimedout", "swept-opened-not-etimedout"])`. All four controls stayed green.
+- An accidental extra leg: a first run booted the STALE image (`test.sh` builds only when the ELF is
+  missing), and the gate failed it by name for a netd that never ran the selftest.
+- Scenarios (CI image):
+  - `haul-unreachable` PASS on all three legs; `haul-hangup` PASS.
+  - Routing sabotage: `tell()` forced to the console failed leg 1's routing check.
+  - Measured: slirp on this host refuses a FREE host port in ~30 ms, but a port bound and not listening
+    only after ~8 s. The first run used the latter and tripped the 2 s progress line; leg 1 now dials a
+    free port.
+- Final: default image rebuilt after every restore. `test.sh` PASS, 1662/1662, kernel ELF
+  `844ed527d41f0d9d`.
+
 ## Haul completion integration — 2026-09-17
 
 The operator authorized bringing Haul's required Imperium dependencies into

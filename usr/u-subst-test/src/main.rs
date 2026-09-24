@@ -101,9 +101,12 @@ pub extern "C" fn rs_main() -> i64 {
         return fail("$(echo .. | tr ..) pipeline capture wrong");
     }
 
-    // 6. rc-traditional backtick form `{cmd}` (closing backtick required by
-    //    the lexer), identical capture semantics to $(cmd).
-    if eval_source(&mut env, "let b = `{echo hi}`").is_err() {
+    // 6. rc-traditional backtick form `{cmd}` -- the `}` ends it, with NO
+    //    closing backtick (UTOPIA-SHELL-DESIGN.md 6.6, which is rc's real
+    //    form). Identical capture semantics to $(cmd). This test used the
+    //    closing-backtick spelling the lexer used to require, and was the ONE
+    //    consumer in the tree when that deviation was corrected.
+    if eval_source(&mut env, "let b = `{echo hi}").is_err() {
         return fail("eval backtick-substitution errored");
     }
     if env.get("b").as_scalar() != "hi" {

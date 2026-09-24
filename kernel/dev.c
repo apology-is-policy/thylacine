@@ -11,6 +11,7 @@
 // to a small hash or RB-tree.
 
 #include <thylacine/dev.h>
+#include <thylacine/dev9p.h>
 #include <thylacine/devcap.h>
 #include <thylacine/devsrv.h>
 #include <thylacine/extinction.h>
@@ -194,4 +195,25 @@ struct Spoor *dev_simple_open(struct Spoor *c, int omode) {
 void dev_simple_close(struct Spoor *c) {
     if (!c) return;
     c->flag &= ~COPEN;
+}
+
+// spoor_open_errno -- the cause a FAILED Dev.open left behind, dispatched by Dev.
+//
+// A Dev.open returns a Spoor* with no room for an errno, so a Dev that wants to
+// report a specific cause stashes it on the Spoor and the two open call sites
+// (stalk's resolver tail + the single-hop SYS_WALK_OPEN) read it back through
+// here. dev9p carries the server's bounded Rlerror ecode; devsrv carries a
+// refused connect (T_E_ACCES -- the (U) connect gate, STALK-DESIGN section 5.2 /
+// D8). Every other Dev has no channel and reads -1, which the call sites render
+// as the generic EIO -- the pre-existing behaviour, unchanged.
+//
+// Dispatch on `dc` rather than probing each Dev's aux: each channel is gated on
+// its own Dev char + magic, so a Spoor of the wrong Dev can never be coerced
+// into the wrong private struct (a devsrv service-ref and a dev9p priv are both
+// reached through `aux`).
+s64 spoor_open_errno(struct Spoor *c) {
+    if (!c) return -1;
+    if (c->dc == DEV9P_DC) return dev9p_open_errno(c);
+    if (c->dc == 's')      return devsrv_open_errno(c);   // devsrv's Dev char
+    return -1;
 }

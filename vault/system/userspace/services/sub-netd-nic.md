@@ -47,8 +47,10 @@ admission or a TIME-WAIT one fails to. See
   contract (each step gates the next): DHCP lease (bounded; FAIL exits
   non-zero → the warden's bounded restart, then soft give-up — the box
   boots without `/net`) → `Net::new` + `enable_loopback` → the selftest
-  battery (asserted PASS/FAIL boot lines; a FAIL is currently non-fatal
-  — [[seam-242-selftest-nonfatal]]) → `post_srv_net` (fail-closed: a
+  battery (PASS/FAIL boot lines). The resident-lo and TCP-retirement FAILs end
+  netd; the others log and proceed ([[seam-242-selftest-nonfatal]]). Since
+  2026-09-24, any of them fails the `tools/test.sh` boot gate, which keys on
+  netd starting, not serving. → `post_srv_net` (fail-closed: a
   post failure means netd never signals READY) → the `READY` line on
   stdout LAST (so READY also means "`/srv/net` is up" — joey's
   post-warden mount is guaranteed to find it) → the resident loop.
@@ -152,6 +154,7 @@ dual-stack migrate/accept/data/no-leak proof — the primary stack is
 WouldBlock/Data/Eof), `echo_e2e` (net-6a-3: ≥2-concurrent accept +
 bidirectional echo), `ready_e2e` (net-6b: POLLOUT/POLLIN/EOF-readable),
 `ipifc_e2e` (net-4c), `connect_sweep_selftest` (#293 disposal),
+`dial_verdict_selftest` (a failed dial's `data` open, refused or timed out),
 `proto_selftest` + `dns_defer_guard_selftest` + `dns_loopback_e2e`
 (net-4d). The host-coupled BEST-EFFORT probes (`udp_dns_probe`,
 `icmp_ping_probe`, `dns_live_probe`) are logged, never asserted — slirp
@@ -314,7 +317,8 @@ No host tests (netd is a `no_std` aarch64 bin — the named
 [[seam-netd-host-tests]]). The in-guest roster, asserted as boot lines
 every boot: `net-3d loopback E2E` · `net-8a resident lo E2E` ·
 `net-6a recv-blocking E2E` · `net-6a-3 echo E2E` · `net-6b ready E2E` ·
-`net-4c ipifc E2E` · `#293 connect-sweep selftest` · `net-4d proto
+`net-4c ipifc E2E` · `#293 connect-sweep selftest` · `dial-verdict
+selftest` · `net-4d proto
 selftest` · `net-4d dns defer-guard` · `net-4d dns loopback E2E`; plus
 the logged best-effort `net-3b` UDP/DNS, `net-3c` ICMP, `net-4b` live
 DNS probes; plus joey's boot-fatal `/net` mount + per-chunk PROBE lines

@@ -37,6 +37,7 @@
 
 #include "test.h"
 
+#include <thylacine/caps.h>
 #include <thylacine/dev.h>
 #include <thylacine/devsrv.h>
 #include <thylacine/handle.h>
@@ -63,6 +64,9 @@ void test_srv_client_byte_mode_propagates_to_conn(void);
 void test_srv_client_byte_mode_conn_dispatch(void);
 void test_srv_client_byte_mode_mode_change_rebind_refused(void);
 void test_srv_client_byte_mode_server_recv_blocking_eof(void);
+void test_srv_client_cape_post(void);
+void test_srv_client_cape_admission(void);
+void test_srv_client_cape_post_syscall(void);
 
 // ---------------------------------------------------------------------------
 // Helpers.
@@ -91,7 +95,16 @@ static void drop_test_proc(struct Proc *p) {
 static int post_svc_byte(struct Proc *p, const char *name, size_t name_len) {
     struct Spoor *root = devsrv_attach_registry(srv_boot_registry());
     if (!root) return -1;
-    int h = devsrv_post_listener(p, root, name, name_len, SRV_MODE_BYTE, false);
+    int h = devsrv_post_listener(p, root, name, name_len, SRV_MODE_BYTE, false, false);
+    spoor_clunk(root);
+    return h;
+}
+
+static int post_svc_cape(struct Proc *p, const char *name, size_t name_len,
+                         enum srv_mode mode) {
+    struct Spoor *root = devsrv_attach_registry(srv_boot_registry());
+    if (!root) return -1;
+    int h = devsrv_post_listener(p, root, name, name_len, mode, false, true);
     spoor_clunk(root);
     return h;
 }
@@ -99,7 +112,7 @@ static int post_svc_byte(struct Proc *p, const char *name, size_t name_len) {
 static int post_svc_9p(struct Proc *p, const char *name, size_t name_len) {
     struct Spoor *root = devsrv_attach_registry(srv_boot_registry());
     if (!root) return -1;
-    int h = devsrv_post_listener(p, root, name, name_len, SRV_MODE_9P, false);
+    int h = devsrv_post_listener(p, root, name, name_len, SRV_MODE_9P, false, false);
     spoor_clunk(root);
     return h;
 }
@@ -110,6 +123,22 @@ static int post_svc_9p(struct Proc *p, const char *name, size_t name_len) {
 // caller owns it (wrap in a KOBJ_SPOOR handle or spoor_clunk). `name` must be
 // NUL-terminated (the devsrv walk reads it as a C string).
 static struct Spoor *connect_byte(struct Proc *p, const char *name) {
+    // (U) the connect gate (STALK-DESIGN 5.2 / D8) refuses a capless Proc on a
+    // TCB-posted byte service. These tests model a LEGITIMATE dialer -- in
+    // production joey, login, or the per-user home proxy, each of which holds
+    // CAP_TCB_DIAL -- so the capability is stamped for the duration of the
+    // connect and every test goes on exercising its own subject. The gate's own
+    // arms are asserted in devsrv.srv_connect_gate{,_decides}.
+    //
+    // SAVED AND RESTORED, not simply OR-ed in: a fixture that silently widens
+    // its argument's authority and leaves it widened corrupts any later
+    // assertion ABOUT that authority. It did exactly that -- srv_peer_identity
+    // sets client->caps and then asserts SYS_SRV_PEER reads it back, and an
+    // un-restored stamp made the live read return the extra bit (audit F2).
+    // The gate only consults caps AT the connect, so the narrow scope is
+    // sufficient as well as safer.
+    caps_t lc_saved_caps = p->caps;
+    p->caps |= CAP_TCB_DIAL;
     struct Spoor *root = devsrv_attach_registry(srv_boot_registry());
     if (!root) return NULL;
     struct Spoor *sref = spoor_clone(root);
@@ -121,6 +150,7 @@ static struct Spoor *connect_byte(struct Proc *p, const char *name) {
     struct Spoor *cs = devsrv_open_connect(p, sref, /*omode ORDWR*/ 2);
     spoor_clunk(sref);                 // the spent quarry (open-returns-new)
     spoor_clunk(root);
+    p->caps = lc_saved_caps;
     return cs;
 }
 
@@ -344,4 +374,115 @@ void test_srv_client_byte_mode_server_recv_blocking_eof(void) {
     srv_registry_reset();
     drop_test_proc(server);
     drop_test_proc(client);
+}
+
+// ---------------------------------------------------------------------------
+// The identity cape on /srv (IDENTITY-DESIGN 3.2): a DMSRVCAPE post marks the
+// service, open=connect carries the mark onto the conn (captured with LIVE, like
+// the mode), a 9P-mode service cannot carry it, and it is part of the service's
+// identity on a tombstone rebind.
+// ---------------------------------------------------------------------------
+
+void test_srv_client_cape_post(void) {
+    srv_registry_reset();
+    struct Proc *server1 = make_marked_test_proc();
+    struct Proc *client  = make_test_proc();
+    TEST_ASSERT(server1 != NULL && client != NULL, "procs");
+
+    TEST_EXPECT_EQ(post_svc_cape(server1, "capenine", 8, SRV_MODE_9P), -1,
+                   "a 9P-mode service cannot be caped");
+    TEST_ASSERT(post_svc_cape(server1, "caped", 5, SRV_MODE_BYTE) >= 0, "caped byte post");
+    TEST_ASSERT(post_svc_byte(server1, "plain", 5) >= 0, "uncaped byte post (control)");
+    struct SrvService *svc = srv_lookup_in(srv_boot_registry(), "caped", 5);
+    TEST_ASSERT(svc != NULL && svc->cape, "the service carries the cape");
+
+    struct Spoor *cs = connect_byte(client, "caped");
+    TEST_ASSERT(cs != NULL, "connect to the caped service");
+    TEST_ASSERT(srvconn_cape(devsrv_conn_of(cs)), "the conn carries the cape");
+    struct Spoor *ps = connect_byte(client, "plain");
+    TEST_ASSERT(ps != NULL, "connect to the uncaped service");
+    TEST_ASSERT(!srvconn_cape(devsrv_conn_of(ps)), "an uncaped service mints uncaped conns");
+    spoor_clunk(cs);
+    spoor_clunk(ps);
+
+    // Rebind: the cape is identity, like the mode and the ring class.
+    srv_proc_exit_notify(server1);
+    svc = srv_lookup_in(srv_boot_registry(), "caped", 5);
+    TEST_ASSERT(svc != NULL, "tombstone persists");
+    TEST_EXPECT_EQ((int)svc->state, (int)SRV_STATE_TOMBSTONED, "poster exit tombstoned it");
+    struct Proc *server2 = make_marked_test_proc();
+    TEST_ASSERT(server2 != NULL, "server2");
+    TEST_EXPECT_EQ(post_svc_byte(server2, "caped", 5), -1,
+                   "rebinding a caped name uncaped -> -1");
+    TEST_EXPECT_EQ(post_svc_cape(server2, "plain", 5, SRV_MODE_BYTE), -1,
+                   "rebinding an uncaped name caped -> -1");
+    TEST_ASSERT(post_svc_cape(server2, "caped", 5, SRV_MODE_BYTE) >= 0,
+                "a caped rebind of the caped name");
+    svc = srv_lookup_in(srv_boot_registry(), "caped", 5);
+    TEST_EXPECT_EQ((int)svc->state, (int)SRV_STATE_LIVE, "the caped rebind is LIVE");
+
+    drop_test_proc(server2);
+    drop_test_proc(server1);
+    drop_test_proc(client);
+    srv_registry_reset();
+}
+
+extern s64 sys_walk_create_kname_for_proc(struct Proc *p, u64 parent_fd_raw,
+                                          const char *kname, u64 klen,
+                                          u64 omode_raw, u64 perm_raw);
+
+// A service post through SYS_WALK_CREATE's own path (its inner): the cape bit
+// reaches the post and marks the service, and a caped 9P-mode post is refused
+// before anything is registered.
+void test_srv_client_cape_post_syscall(void) {
+    srv_registry_reset();
+    struct Proc *server = make_marked_test_proc();
+    TEST_ASSERT(server != NULL, "proc");
+    struct Spoor *root = devsrv_attach_registry(srv_boot_registry());
+    TEST_ASSERT(root != NULL, "/srv root");
+    hidx_t fd = handle_alloc(server, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, root);
+    TEST_ASSERT(fd >= 0, "/srv root fd");
+    const u32 BYTE = SYS_WALK_CREATE_DMSRVBYTE, CAPE = SYS_WALK_CREATE_DMSRVCAPE;
+    TEST_EXPECT_EQ((u64)sys_walk_create_kname_for_proc(server, (u64)fd, "capenine", 8, 0, CAPE),
+                   (u64)(s64)-T_E_INVAL, "a caped 9P-mode post -> -EINVAL");
+    TEST_ASSERT(srv_lookup_in(srv_boot_registry(), "capenine", 8) == NULL,
+                "the refused post registered nothing");
+    TEST_ASSERT(sys_walk_create_kname_for_proc(server, (u64)fd, "caped", 5, 0, BYTE | CAPE) >= 0,
+                "a caped byte post");
+    TEST_ASSERT(sys_walk_create_kname_for_proc(server, (u64)fd, "plain", 5, 0, BYTE) >= 0,
+                "an uncaped byte post (control)");
+    struct SrvService *svc = srv_lookup_in(srv_boot_registry(), "caped", 5);
+    TEST_ASSERT(svc != NULL && svc->cape, "the syscall's cape bit marks the service");
+    svc = srv_lookup_in(srv_boot_registry(), "plain", 5);
+    TEST_ASSERT(svc != NULL && !svc->cape, "no cape bit, no mark");
+    drop_test_proc(server);
+    srv_registry_reset();
+}
+
+// The syscall-level admission rules, through the handlers' own predicates.
+void test_srv_client_cape_admission(void) {
+    const u32 BYTE = SYS_WALK_CREATE_DMSRVBYTE, BULK = SYS_WALK_CREATE_DMSRVBULK;
+    const u32 CAPE = SYS_WALK_CREATE_DMSRVCAPE;
+    TEST_ASSERT(sys_srv_post_perm_ok(0),                  "9P post");
+    TEST_ASSERT(sys_srv_post_perm_ok(BYTE),               "byte post");
+    TEST_ASSERT(sys_srv_post_perm_ok(BYTE | BULK),        "bulk byte post");
+    TEST_ASSERT(sys_srv_post_perm_ok(BYTE | CAPE),        "caped byte post");
+    TEST_ASSERT(sys_srv_post_perm_ok(BYTE | BULK | CAPE), "caped bulk byte post");
+    TEST_ASSERT(!sys_srv_post_perm_ok(CAPE),              "caped 9P post refused");
+    TEST_ASSERT(!sys_srv_post_perm_ok(BULK | CAPE),       "caped bulk 9P post refused");
+    TEST_ASSERT(!sys_srv_post_perm_ok(BYTE | 0644u),      "mode bits on a post refused");
+    TEST_ASSERT(!sys_srv_post_perm_ok(BYTE | SYS_WALK_CREATE_DMDIR), "DMDIR on a post refused");
+    TEST_ASSERT((SYS_WALK_CREATE_PERM_VALID & CAPE) != 0, "DMSRVCAPE reaches the post branch");
+
+    TEST_ASSERT(sys_attach_9p_flags_ok(0, false),                    "pipe attach, no flags");
+    TEST_ASSERT(sys_attach_9p_flags_ok(SYS_ATTACH_9P_CAPE, false),   "caped pipe attach");
+    TEST_ASSERT(!sys_attach_9p_flags_ok(SYS_ATTACH_9P_LOOSE, false), "LOOSE is /srv-only");
+    TEST_ASSERT(!sys_attach_9p_flags_ok(0x4u, false),                "unknown pipe-attach bit");
+    TEST_ASSERT(sys_attach_9p_flags_ok(0, true),                     "/srv attach, no flags");
+    TEST_ASSERT(sys_attach_9p_flags_ok(SYS_ATTACH_9P_LOOSE, true),   "loose /srv attach");
+    TEST_ASSERT(!sys_attach_9p_flags_ok(SYS_ATTACH_9P_CAPE, true),   "the /srv cape is the poster's");
+    TEST_ASSERT(!sys_attach_9p_flags_ok(SYS_ATTACH_9P_LOOSE | SYS_ATTACH_9P_CAPE, true),
+                "LOOSE carries no cape in");
+    TEST_ASSERT(!sys_attach_9p_flags_ok(0x4u, true),                 "unknown /srv-attach bit");
+    TEST_ASSERT(!sys_attach_9p_flags_ok(1ull << 32, true),           "a high bit is not truncated away");
 }

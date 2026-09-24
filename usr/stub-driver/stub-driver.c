@@ -20,7 +20,7 @@
 //      the fds the child now holds. Without this, the child can't
 //      see EOF when the driver finishes (the ring would still have
 //      readers/writers via the driver's handle).
-//   4. t_attach_9p(c2s_wr, s2c_rd, "/", 1, 0) — drive the 9P
+//   4. t_attach_9p(c2s_wr, s2c_rd, "/", 1, 0, 0) — drive the 9P
 //      handshake (Tversion + Tattach) over the byte-pipe pair, with
 //      stratumd-stub serving the responder side.
 //   5. t_mount(attach_fd, 99, 0) — graft at path_id 99.
@@ -72,7 +72,7 @@ int main(void) {
 
     // Drive the 9P handshake against the stub.
     static const char aname[] = "/";
-    long attach_fd = t_attach_9p(c2s_wr, s2c_rd, aname, 1, 0);
+    long attach_fd = t_attach_9p(c2s_wr, s2c_rd, aname, 1, 0, 0);
     if (attach_fd < 0) {
         t_putstr("stub-driver: t_attach_9p FAIL\n");
         return 1;

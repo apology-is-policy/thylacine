@@ -12,7 +12,7 @@ Generated from note fields — do not edit between the markers
 <!-- generated:begin -->
 | surface | code | invariants | prosecution |
 |---|---|---|---|
-| [[sub-aurora]] | usr/aurora/src/main.rs, usr/aurora/src/render.rs, usr/aurora/src/osd.rs, usr/aurora/src/config.rs, usr/aurora/Cargo.toml | inv-i27 | - **The drain and feed opens must precede surface creation.** Without the |
+| [[sub-aurora]] | usr/aurora/src/lib.rs, usr/aurora/src/main.rs, usr/aurora/src/render.rs, usr/aurora/src/osd.rs, usr/aurora/src/config.rs, usr/aurora/Cargo.toml | inv-i27 | - **The drain and feed opens must precede surface creation.** Without the |
 | [[sub-corvus]] | usr/corvus/src/main.rs, usr/corvus/src/provincia.rs, usr/corvus/Cargo.toml | inv-i22, inv-i23 | - **The authority gates re-query.** Any new gated verb must ask the kernel |
 | [[sub-corvus-crypto]] | usr/lib/corvus-crypto/src/lib.rs, usr/lib/corvus-crypto/src/bip39_wordlist.rs, usr/lib/corvus-crypto/Cargo.toml |  | - **A new wrap kind needs a new associated-data prefix**, built through a |
 | [[sub-corvus-mint]] | tools/corvus-mint/src/main.rs, tools/corvus-mint/Cargo.toml | inv-i22 | - **The self-verify must survive any change to the wrap path.** It is the |

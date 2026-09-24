@@ -42,9 +42,7 @@ extern crate alloc;
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
-mod config;
-mod osd;
-mod render;
+use aurora::{config, osd, render};
 
 use alloc::string::String;
 use alloc::vec::Vec;

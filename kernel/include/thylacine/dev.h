@@ -461,4 +461,11 @@ struct Dev *dev_lookup_by_name(const char *name);
 // verify boot-time registration count.
 int dev_count(void);
 
+// spoor_open_errno — the cause a FAILED `Dev.open` left on `c`, dispatched by
+// the Spoor's Dev. Returns a value in [-4095,-2], or -1 when the Dev has no
+// errno channel or recorded no specific cause (the caller then renders the
+// generic EIO). Read ONLY after a `Dev.open` returned NULL, and before the
+// Spoor is clunked (a clunk frees the Dev-private struct holding the cause).
+s64 spoor_open_errno(struct Spoor *c);
+
 #endif  // THYLACINE_DEV_H

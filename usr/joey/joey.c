@@ -627,7 +627,8 @@ static int pouch_smoke_core(const char *name, size_t name_len,
         (void)t_close(rd);
         return -1;
     }
-    // 2048 B headroom -- pouch-hello-sockets prints ~850 B of test progress
+    // 2048 B headroom -- pouch-hello-sockets prints 1331 B of test progress
+    // (measured 2026-09-23, after the xproc-gate leg; was ~850 B before it)
     // lines and the marker "<bin>: exit 0" must land inside the window. Earlier
     // 512 B sized for the leaner pre-sub-chunk-12 pouch binaries; bumped so the
     // marker is never truncated out (the failure mode looks like "expected
@@ -3352,7 +3353,10 @@ static int do_corvus_bringup(long storage_dup_fd) {
 // SET_IDENTITY for the shell -- a shell is not an identity-stamper). login runs
 // as PRINCIPAL_SYSTEM (inherited) and is never console-attached (joey
 // relinquished; spawn does not confer CONSOLE_TRUSTED), so I-27 holds.
-#define LOGIN_CAPS (T_CAP_SET_IDENTITY | T_CAP_LOCK_PAGES | T_CAP_CSPRNG_READ)
+// T_CAP_TCB_DIAL (U): login dials /srv/stratum-ctl for the per-user DEK
+// lifecycle, and must HOLD the bit to confer it on the home proxy it spawns
+// (STALK-DESIGN 5.2 / D8). It is NOT in the shell's SHELL_CAPS.
+#define LOGIN_CAPS (T_CAP_SET_IDENTITY | T_CAP_LOCK_PAGES | T_CAP_CSPRNG_READ | T_CAP_TCB_DIAL)
 
 // LOGIN_PERMS (A-5b #827b) -- the SPAWN_PERM_* bits joey confers on /sbin/login.
 // MAY_POST_SERVICE makes login a *holder*, so login may re-confer the bit (one
@@ -10844,7 +10848,7 @@ int main(void) {
                     t_putstr("joey: viv-channel spawn diorama FAILED\n");
                     return 1;
                 }
-                long root = t_attach_9p(c2s_wr, s2c_rd, "/", 1, 0);
+                long root = t_attach_9p(c2s_wr, s2c_rd, "/", 1, 0, 0);
                 (void)t_close(c2s_wr);
                 (void)t_close(s2c_rd);
 

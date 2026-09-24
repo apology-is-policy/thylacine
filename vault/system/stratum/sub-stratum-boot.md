@@ -24,6 +24,23 @@ held.
 
 ## Contract
 
+**`LOGIN_CAPS` gains `CAP_TCB_DIAL` (U, 2026-09-23).** joey dials
+`/srv/stratum-fs` itself for the boot readiness handshake and holds the bit via
+`CAP_ALL`. `/sbin/login` needs it for two reasons: it dials byte-mode
+`/srv/stratum-ctl` for the per-user DEK lifecycle, and it must HOLD the bit to
+confer it on the per-user home proxy it spawns ([[sub-stratum-session]]) -- a
+capability can only ever be narrowed on the way down (I-2), so an intermediary
+that lacks it cannot pass it on. It is deliberately absent from the shell's
+`SHELL_CAPS`. See [[sub-kernel-devsrv]] for the gate this feeds.
+
+The coordinator itself is still spawned with neither `--user-policy` nor
+`--datasets-allowed`, so it admits every Tattach that reaches its socket. That
+is now defence-in-depth rather than the boundary, and it is NOT a quick fix: the
+policy is a static argv list baked at boot, while users are minted at runtime by
+corvus from `FIRST_AUTO_ID` 1000, so at coordinator start there is no user to
+enumerate. Queued, not done.
+
+
 **Imperium boot fixtures (2026-09-17).** The integration adds the
 imperium capability/authorization probes to joey's test ladder and initializes
 the fixture imperium key for the eligible test identity. Production
@@ -142,6 +159,13 @@ own-writes invalidate through this same client's Larder, and corvus's
 private tree has no system-mount byte reader. Those are the conditions
 under which [[inv-i38]]'s close-to-open guarantees still hold with
 revalidation relaxed. Any of them ceasing to be true revokes the flag here.
+
+**Neither of joey's attaches is caped.** The identity cape (IDENTITY-DESIGN
+3.2) makes the mounting principal the owner of every file, for a server whose
+ids mean nothing in the guest. Stratum's owners are guest principals, and the
+kernel's DAC must see them, so the SYSTEM mount passes no `T_ATTACH_9P_CAPE`.
+The viv-channel boot witness attaches its own diorama over a pipe pair with
+flags 0 for the same reason.
 
 **Not every served tree should be mounted, and the discriminator is where its
 authority lives.** This is the newest rule in the sequence and it arrived as a
@@ -377,3 +401,6 @@ and the stratumd spawn args have zero diff hits; the pivot line last moved
 KT-1.5d-1a login-spawned session bootstrap, the kaua-term boot-prove, the viv
 `/viv/bin` graft gates -- so the caveat's line/function count was refreshed
 (9771/~50 -> 11578/53) and the #177 ownership gap noted as wider.
+
+2026-09-23 (L): `SYS_ATTACH_9P` gained its x5 flags word; the viv-channel
+witness passes 0, and neither attach is caped (above).

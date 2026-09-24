@@ -64,22 +64,48 @@
 // reference for this module. Per-sub-chunk extensions append rows
 // to its Status section.
 
-pub mod builtin;
-pub mod console;
-pub mod env;
+pub mod discipline;
 pub mod error;
-pub mod expr;
 pub mod glob;
 pub mod jobs;
-pub mod stmt;
 pub mod value;
 
-pub use env::Env;
+// `expr` is gated not for a syscall of its own -- it makes none -- but because
+// expansion genuinely reaches into command substitution and the environment
+// (`stmt`, `env`): `$(...)` runs a pipeline. That is real coupling in the
+// shell's design, not an accident of imports, so separating it is a restructure
+// of the evaluator and its 29 tests stay stranded until that chunk. (Its use of
+// `glob` is the pure matcher only, which is no longer a coupling.)
+#[cfg(feature = "backend")]
+pub mod expr;
+
+// The syscall half (see lib.rs's `backend` note). `console` is gated for its
+// three `t_write`/`t_fstat` calls; its pure VOCABULARY -- the mode strings and
+// the `is_raw_command` allowlist -- lives in `discipline` above, so those
+// assertions run on the host instead of being stranded with the syscalls. The
+// same split for globbing: the matcher is `glob` above, and `pathname` -- the
+// filesystem walk behind `*.rs` -- is gated here.
+#[cfg(feature = "backend")]
+pub mod builtin;
+#[cfg(feature = "backend")]
+pub mod console;
+#[cfg(feature = "backend")]
+pub mod env;
+#[cfg(feature = "backend")]
+pub mod pathname;
+#[cfg(feature = "backend")]
+pub mod stmt;
+
 pub use error::{EvalError, EvalErrorKind, EvalResult};
-pub use expr::eval_expr;
 pub use jobs::{Job, JobTable};
+pub use value::Value;
+
+#[cfg(feature = "backend")]
+pub use env::Env;
+#[cfg(feature = "backend")]
+pub use expr::eval_expr;
+#[cfg(feature = "backend")]
 pub use stmt::{
     aggregate_pipefail, deliver_pending_notes, eval_block, eval_script, eval_source,
     eval_statement, note_class_for_name, wait_pids_interruptible, StatementFlow,
 };
-pub use value::Value;

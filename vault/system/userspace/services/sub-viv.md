@@ -10,7 +10,7 @@ validated-by: [prose]
 locks: []
 design: ["docs/VIVARIUM.md"]
 created: 2026-08-06
-updated: 2026-09-07
+updated: 2026-09-23
 ---
 ## Purpose
 
@@ -26,10 +26,13 @@ The claim that makes it interesting is what it does **not** hold:
 
 `chroot`, `mount` and `chdir` are per-territory operations; the container
 principal is the invoker's, with no `CAP_SET_IDENTITY` anywhere; no
-hardware allowance is conferred; and the only spawn permission it passes
-on is `MAY_POST_SERVICE` to its own diorama — which is also the one
-permission viv itself must be spawned with. A container is a *namespace*,
-not a privilege domain, which is what [[inv-i23]] means in practice.
+hardware allowance is conferred; and it passes no spawn permission on, so a
+plain session shell can run it. (Until 2026-08-18 it passed
+`MAY_POST_SERVICE` to its diorama, which posted `/srv/viv-dio`; nothing past
+login holds that permission, so an interactive `viv run` was refused at the
+spawn. The channel is a private pipe pair now.) A container is a
+*namespace*, not a privilege domain, which is what [[inv-i23]] means in
+practice.
 
 It is also the **only thing in the system that can declare a Linux
 phenotype**. The manifest annotation is the declaration; the ELF byte is a
@@ -63,9 +66,14 @@ env bounds sit *behind* these, so nothing relies on downstream rejection.
 **The assembly order is forced by capability mechanics**, and is the part
 worth reading twice:
 
-1. Parse the manifest; spawn the **per-container diorama**
-   (`--vivarium <us>`, posting `/srv/viv-dio`) and mount it over `/dio` in
-   *our own* territory.
+1. Parse the manifest; make a **private 9P channel** of two pipes; spawn
+   the **per-container diorama** (`--vivarium <us>`) with the server ends as
+   its fds 0 and 1; attach the client ends (`SYS_ATTACH_9P`, the Plan 9
+   `mount(fd)` idiom) and mount the root over `/dio` in *our own*
+   territory. No `/srv` name is involved, so nothing else can reach the
+   diorama and two containers cannot collide. The attach passes flags 0: the
+   identity cape is for a server whose ids mean nothing in the guest, and the
+   diorama's are the guest's own.
 2. Set our own `/env` to exactly the manifest's set — the child's
    environment is the kernel Env clone taken at spawn, so "inherits
    nothing the manifest does not name" is achieved by making the *parent*
@@ -170,18 +178,13 @@ Env names are additionally restricted to alphanumerics and underscore.
 ## Concurrency
 
 Single-threaded, no locks. The only concurrency it must reason about is
-**its own child's liveness while waiting for `/srv/viv-dio` to appear**,
-and the poll loop handles it by asking `child_exited` each iteration
-rather than burning the full timeout: a dead diorama can never post.
+**its own child's liveness during the attach**, and the channel handles it
+with no poll loop. viv drops its copies of the server ends before attaching,
+so a diorama that dies (in its selftest, say) takes the last reply writer
+with it; the attach's read sees EOF and the attach fails clean.
 
-`sleep_ms` is implemented as a poll on the read end of a pipe nothing
-writes — there is no sleep syscall, so a wait with a timeout on a
-never-ready fd is the sleep.
-
-**The fixed `/srv/viv-dio` name means containers cannot run concurrently.**
-That is a known limit rather than a fault, and the failure message says so
-explicitly, because the symptom (a diorama that exits before posting) is
-otherwise indistinguishable from a broken bundle.
+Containers run concurrently: nothing names the channel, and each run mounts
+`/dio` in its own territory.
 
 ## Invariants enforced
 
@@ -196,16 +199,17 @@ otherwise indistinguishable from a broken bundle.
 
 ## Error paths
 
-Every failure after the diorama spawns **kills and reaps it** — a leaked
-half-container daemon would hold the fixed `/srv/viv-dio` name against the
-next run. The one exception is the already-reaped case, where
-`child_exited` did the reap and a second `reap_diorama` would write `kill`
-to a reaped pid's `/proc` path.
+Every failure after the diorama spawns **kills and reaps it**, so no
+half-container daemon outlives the run. Before the chroot the kill goes
+through the diorama's `/proc/<pid>/ctl` path; after it, through the ctl fd
+pre-opened for exactly that. A diorama that already died is reaped either
+way.
 
 Two error messages are unusually detailed, and both earn it:
 
-- **the diorama-never-posted message** names the concurrent-`viv run`
-  cause, because that is the likely one and it is otherwise a mystery;
+- **the failed-attach message** points at the diorama's selftest line on
+  the console, because a diorama that dies before serving is the likely
+  cause and the attach alone cannot say why;
 - **the failed-entrypoint-spawn message** re-opens `args[0]` with OEXEC
   and reports whether *that* passes. OEXEC runs the same leaf permission
   gate and Dev open the spawn-time resolve runs, so a failed spawn with a
@@ -241,7 +245,6 @@ What a change must re-establish:
 
 - **`viv pull`** — image acquisition, the separately-owned v1.x sibling.
   The v1.0 bundles are host-baked into the pool by the build script.
-- **Concurrent containers**, blocked on the fixed `/srv/viv-dio` name.
 - **The sigpipe selftest is a bundle-scoped test facility**, and it exists
   because it is *the only way a v1.0 Linux guest can cause a catchable
   signal at all*: `kill` and `tkill` are not translation rows, and `clone`

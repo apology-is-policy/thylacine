@@ -65,29 +65,27 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**534 owned · 49 unowned · 583 files (91% owned) · ~13228 unswept lines.**
+**541 owned · 48 unowned · 589 files (91% owned) · ~12716 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **76 files, ~34724 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **78 files, ~35614 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
 | usr/warp-prove | 0 | 1 | 4349 |
 | usr/pouch-hello | 9 | 17 | 2487 |
 | kernel | 129 | 14 | 1981 |
-| usr/ports | 19 | 4 | 1631 |
+| usr/ports | 19 | 5 | 1691 |
 | usr/quarry | 0 | 1 | 1033 |
-| usr/stratumd-stub | 0 | 1 | 453 |
 | usr/kaua-term | 3 | 1 | 276 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
 | usr/libthyla-rs | 29 | 1 | 196 |
 | arch | 41 | 2 | 146 |
 | usr/susp-mask-child | 0 | 1 | 139 |
-| usr/stub-driver | 0 | 1 | 119 |
 | usr/lib | 67 | 1 | 72 |
 | usr/bus-probe-child | 0 | 1 | 63 |
 | usr/tapestryd | 8 | 2 | 21 |
 | mm | 8 | 0 | 0 |
-| usr/aurora | 4 | 0 | 0 |
+| usr/aurora | 5 | 0 | 0 |
 | usr/coreutils | 64 | 0 | 0 |
 | usr/corvus | 2 | 0 | 0 |
 | usr/curl | 3 | 0 | 0 |
@@ -100,6 +98,7 @@ Excluded as harness and counted here rather than dropped: **76 files, ~34724 lin
 | usr/https | 1 | 0 | 0 |
 | usr/imperium | 1 | 0 | 0 |
 | usr/joey | 1 | 0 | 0 |
+| usr/lantern | 4 | 0 | 0 |
 | usr/lictor | 25 | 0 | 0 |
 | usr/login | 1 | 0 | 0 |
 | usr/loom-stress | 1 | 0 | 0 |
@@ -115,7 +114,7 @@ Excluded as harness and counted here rather than dropped: **76 files, ~34724 lin
 | usr/ptyfs | 2 | 0 | 0 |
 | usr/ptyhost | 1 | 0 | 0 |
 | usr/sntp | 1 | 0 | 0 |
-| usr/utopia | 26 | 0 | 0 |
+| usr/utopia | 28 | 0 | 0 |
 | usr/view | 2 | 0 | 0 |
 | usr/virtio-blk-rw | 1 | 0 | 0 |
 | usr/virtio-gpu | 1 | 0 | 0 |
@@ -133,7 +132,6 @@ Excluded as harness and counted here rather than dropped: **76 files, ~34724 lin
 | usr/warp-prove/src/main.rs | 4349 |
 | usr/ports/gnumake/config.h | 1357 |
 | usr/quarry/src/main.rs | 1033 |
-| usr/stratumd-stub/stratumd-stub.c | 453 |
 | kernel/include/thylacine/errno.h | 388 |
 | usr/pouch-hello/pouch-hello-fs.c | 350 |
 | usr/pouch-hello/pouch-hello-net.c | 293 |
@@ -154,7 +152,6 @@ Excluded as harness and counted here rather than dropped: **76 files, ~34724 lin
 | usr/pouch-hello/pouch-hello-reentry.c | 133 |
 | usr/pouch-hello/pouch-hello-spawn.c | 127 |
 | usr/pouch-hello/pouch-hello-mallocng-torture.c | 126 |
-| usr/stub-driver/stub-driver.c | 119 |
 | kernel/include/thylacine/9p_transport_loopback.h | 96 |
 | usr/pouch-hello/pouch-hello-exitgroup.c | 91 |
 | kernel/include/thylacine/9p_spoor_transport.h | 85 |
@@ -170,6 +167,7 @@ Excluded as harness and counted here rather than dropped: **76 files, ~34724 lin
 | usr/pouch-hello/pouch-hello-printf.c | 64 |
 | usr/bus-probe-child/src/main.rs | 63 |
 | kernel/include/thylacine/cpio.h | 61 |
+| usr/ports/rust/r1-hello/src/main.rs | 60 |
 | usr/pouch-hello/pouch-hello-env.c | 57 |
 | usr/pouch-hello/pouch-hello-argv.c | 51 |
 | usr/ports/vkquake/thy_vkloader.c | 47 |

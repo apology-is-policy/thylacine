@@ -598,6 +598,9 @@ void test_loom_enter_nop(void);
 void test_loom_enter_submit_rejects(void);
 void test_loom_enter_flags_and_bad_index(void);
 void test_loom_enter_cq_admission_backpressure(void);
+void test_loom_admission_counts_admitting(void);
+void test_loom_wait_counts_admitting(void);
+void test_loom_drain_waits_for_admitting(void);
 void test_loom_cq_waiter_wake(void);
 void test_loom_poll(void);
 void test_loom_cq_waiter_no_spurious_wake_on_full(void);
@@ -718,6 +721,11 @@ void test_devproc_stat_native_ctl_owner(void);
 void test_devproc_write_ctl_kill_dispatch(void);
 void test_devproc_ctl_suspend_resume_dispatch(void);   // prowl-4: job-control stop/cont verb
 void test_devproc_debug_authorized_predicate(void);
+void test_devproc_debug_cap_cover_predicate(void);
+void test_devproc_debug_cap_cover_attach(void);
+void test_devproc_dump_seal_predicate(void);
+void test_devproc_dump_seal_disclosure(void);
+void test_devproc_dump_seal_scope(void);
 void test_devproc_debug_attach_detach_lifecycle(void);
 void test_devproc_debug_exitkill_terminates_on_close(void);
 void test_devproc_debug_stop_start_resume(void);
@@ -1162,6 +1170,8 @@ void test_srvconn_client_send_blocking_backpressure(void);
 void test_srvconn_client_send_blocking_poll_edge(void);
 void test_devsrv_walk_service(void);
 void test_devsrv_open_connect_byte(void);
+void test_devsrv_srv_connect_gate_decides(void);
+void test_devsrv_srv_connect_gate(void);
 void test_devsrv_kernel_attached_io_refused(void);
 void test_devsrv_kernel_attached_server_close_eofs(void);
 void test_devsrv_accept_immediate(void);
@@ -1179,6 +1189,9 @@ void test_srv_client_no_per_proc_cap(void);
 void test_srv_client_byte_mode_propagates_to_conn(void);
 void test_srv_client_byte_mode_conn_dispatch(void);
 void test_srv_client_byte_mode_mode_change_rebind_refused(void);
+void test_srv_client_cape_post(void);
+void test_srv_client_cape_admission(void);
+void test_srv_client_cape_post_syscall(void);
 void test_srv_client_byte_mode_server_recv_blocking_eof(void);
 void test_virtio_mmio_probe(void);
 void test_virtio_magic_value(void);
@@ -1398,6 +1411,11 @@ void test_9p_client_loom_mkdir_e2e(void);
 void test_9p_client_loom_setattr_e2e(void);
 void test_9p_client_loom_renameat_e2e(void);
 void test_9p_client_loom_mutation_rejects(void);
+void test_9p_client_loom_dirmut_dac(void);
+void test_9p_client_loom_dirmut_sqpoll(void);
+void test_9p_client_loom_create_gid(void);
+void test_9p_client_loom_cape(void);
+void test_9p_client_loom_dirmut_names(void);
 void test_9p_client_loom_multi_inflight_e2e(void);
 void test_9p_client_loom_multi_inflight_read_e2e(void);
 void test_9p_client_async_clunk_burst_no_fid_leak(void);
@@ -1478,6 +1496,9 @@ void test_dev9p_wstat_native_drives_setattr(void);
 void test_dev9p_prw_wire_offset_and_cursor(void);
 void test_dev9p_wstat_readonly_fd(void);
 void test_dev9p_wstat_size(void);
+void test_dev9p_cape(void);
+void test_dev9p_path_create_refuses_dmsrvcape(void);
+void test_dev9p_walk_create_refuses_dmsrv_bits(void);
 void test_dev9p_walk_attrs(void);
 void test_dev9p_wga_unsupported_latches_by_errno(void);
 void test_dev9p_page_cache_serve_and_gate(void);
@@ -1523,6 +1544,8 @@ void test_9p_srvconn_transport_init_null_rejected(void);
 void test_9p_srvconn_transport_send_routes_to_c2s_ring(void);
 void test_9p_srvconn_transport_recv_routes_from_s2c_ring(void);
 void test_9p_srvconn_transport_large_frame_roundtrip(void);
+void test_9p_srvconn_transport_cape_attach(void);
+void test_9p_srvconn_transport_cape_attach_srv(void);
 void test_9p_srvconn_transport_close_drops_srvconn_ref(void);
 void test_9p_srvconn_transport_kernel_attached_skips_teardown_on_handle_close(void);
 void test_9p_srvconn_transport_send_preserves_caller_deadline(void);
@@ -1676,6 +1699,7 @@ void test_sys_spawn_with_perms_console_owner_grant_gate(void);
 void test_sys_spawn_with_perms_console_owner_set_wiring(void);
 void test_sys_spawn_with_perms_seat_roles(void);
 void test_sys_spawn_with_perms_renderer_gate(void);   // G-4
+void test_sys_spawn_with_perms_seal_blocks_debug_and_dump(void);   // (U) F1/F5
 void test_sys_spawn_full_argv_no_argv_acts_as_spawn_with_perms(void);
 void test_sys_spawn_full_argv_golden_argc4(void);
 void test_sys_spawn_full_argv_rejects_argc_over_max(void);
@@ -2493,6 +2517,9 @@ struct test_case g_tests[] = {
     { "loom.enter_submit_rejects",       test_loom_enter_submit_rejects,       false, NULL },
     { "loom.enter_flags_and_bad_index",  test_loom_enter_flags_and_bad_index,  false, NULL },
     { "loom.enter_cq_admission_backpressure", test_loom_enter_cq_admission_backpressure, false, NULL },
+    { "loom.admission_counts_admitting",  test_loom_admission_counts_admitting, false, NULL },
+    { "loom.wait_counts_admitting",       test_loom_wait_counts_admitting,      false, NULL },
+    { "loom.drain_waits_for_admitting",   test_loom_drain_waits_for_admitting,  false, NULL },
     { "loom.cq_waiter_wake",             test_loom_cq_waiter_wake,             false, NULL },
     { "loom.poll",                       test_loom_poll,                       false, NULL },
     { "loom.cq_waiter_no_spurious_wake_on_full", test_loom_cq_waiter_no_spurious_wake_on_full, false, NULL },
@@ -2620,6 +2647,11 @@ struct test_case g_tests[] = {
     { "devproc.write_ctl_kill_dispatch",   test_devproc_write_ctl_kill_dispatch,   false, NULL },
     { "devproc.ctl_suspend_resume_dispatch", test_devproc_ctl_suspend_resume_dispatch, false, NULL },
     { "devproc.debug_authorized_predicate",   test_devproc_debug_authorized_predicate,   false, NULL },
+    { "devproc.debug_cap_cover_predicate",     test_devproc_debug_cap_cover_predicate,     false, NULL },
+    { "devproc.debug_cap_cover_attach",        test_devproc_debug_cap_cover_attach,        false, NULL },
+    { "devproc.dump_seal_predicate",           test_devproc_dump_seal_predicate,           false, NULL },
+    { "devproc.dump_seal_disclosure",          test_devproc_dump_seal_disclosure,          false, NULL },
+    { "devproc.dump_seal_scope",               test_devproc_dump_seal_scope,               false, NULL },
     { "devproc.debug_attach_detach_lifecycle", test_devproc_debug_attach_detach_lifecycle, false, NULL },
     { "devproc.debug_exitkill_terminates_on_close", test_devproc_debug_exitkill_terminates_on_close, false, NULL },
     { "devproc.debug_stop_start_resume",       test_devproc_debug_stop_start_resume,       false, NULL },
@@ -3012,6 +3044,8 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "devsrv.walk_service",           test_devsrv_walk_service,           false, NULL },
     { "devsrv.open_connect_byte",      test_devsrv_open_connect_byte,      false, NULL },
+    { "devsrv.srv_connect_gate_decides", test_devsrv_srv_connect_gate_decides, false, NULL },
+    { "devsrv.srv_connect_gate",       test_devsrv_srv_connect_gate,       false, NULL },
     { "devsrv.kernel_attached_io_refused",
                                        test_devsrv_kernel_attached_io_refused, false, NULL },
     { "devsrv.kernel_attached_server_close_eofs",
@@ -3046,6 +3080,9 @@ struct test_case g_tests[] = {
     { "srv_client.byte_mode_server_recv_blocking_eof",
                                        test_srv_client_byte_mode_server_recv_blocking_eof,
                                                                            false, NULL },
+    { "srv_client.cape_post",          test_srv_client_cape_post,          false, NULL },
+    { "srv_client.cape_admission",     test_srv_client_cape_admission,     false, NULL },
+    { "srv_client.cape_post_syscall",  test_srv_client_cape_post_syscall,  false, NULL },
     { "virtio.mmio_probe",             test_virtio_mmio_probe,             false, NULL },
     { "virtio.magic_value",            test_virtio_magic_value,            false, NULL },
     { "virtio.version_modern",         test_virtio_version_modern,         false, NULL },
@@ -3432,6 +3469,11 @@ struct test_case g_tests[] = {
     { "9p_client.loom_renameat_e2e",   test_9p_client_loom_renameat_e2e,   false, NULL },
     { "9p_client.loom_mutation_rejects",
                                        test_9p_client_loom_mutation_rejects, false, NULL },
+    { "9p_client.loom_dirmut_dac",       test_9p_client_loom_dirmut_dac,       false, NULL },
+    { "9p_client.loom_dirmut_sqpoll",    test_9p_client_loom_dirmut_sqpoll,    false, NULL },
+    { "9p_client.loom_create_gid",       test_9p_client_loom_create_gid,       false, NULL },
+    { "9p_client.loom_cape",             test_9p_client_loom_cape,             false, NULL },
+    { "9p_client.loom_dirmut_names",     test_9p_client_loom_dirmut_names,     false, NULL },
     { "9p_client.async_clunk_burst_no_fid_leak",
                                        test_9p_client_async_clunk_burst_no_fid_leak, false, NULL },
     { "9p_client.loom_multi_inflight_e2e",
@@ -3524,6 +3566,9 @@ struct test_case g_tests[] = {
                                        test_dev9p_prw_wire_offset_and_cursor, false, NULL },
     { "dev9p.wstat_readonly_fd",       test_dev9p_wstat_readonly_fd,          false, NULL },
     { "dev9p.wstat_size",              test_dev9p_wstat_size,                 false, NULL },
+    { "dev9p.cape",                    test_dev9p_cape,                       false, NULL },
+    { "dev9p.path_create_refuses_dmsrvcape", test_dev9p_path_create_refuses_dmsrvcape, false, NULL },
+    { "dev9p.walk_create_refuses_dmsrv_bits", test_dev9p_walk_create_refuses_dmsrv_bits, false, NULL },
     { "dev9p.walk_attrs",              test_dev9p_walk_attrs,                 false, NULL },
     { "dev9p.wga_unsupported_by_errno", test_dev9p_wga_unsupported_latches_by_errno, false, NULL },
     { "dev9p.page_cache_serve_and_gate", test_dev9p_page_cache_serve_and_gate, false, NULL },
@@ -3580,6 +3625,8 @@ struct test_case g_tests[] = {
     { "9p_srvconn_transport.send_routes_to_c2s_ring",       test_9p_srvconn_transport_send_routes_to_c2s_ring,       false, NULL },
     { "9p_srvconn_transport.recv_routes_from_s2c_ring",     test_9p_srvconn_transport_recv_routes_from_s2c_ring,     false, NULL },
     { "9p_srvconn_transport.large_frame_roundtrip",         test_9p_srvconn_transport_large_frame_roundtrip,         false, NULL },
+    { "9p_srvconn_transport.cape_attach",                   test_9p_srvconn_transport_cape_attach,                   false, NULL },
+    { "9p_srvconn_transport.cape_attach_srv",               test_9p_srvconn_transport_cape_attach_srv,               false, NULL },
     { "9p_srvconn_transport.close_drops_srvconn_ref",       test_9p_srvconn_transport_close_drops_srvconn_ref,       false, NULL },
     { "9p_srvconn_transport.kernel_attached_skips_teardown_on_handle_close", test_9p_srvconn_transport_kernel_attached_skips_teardown_on_handle_close, false, NULL },
     { "9p_srvconn_transport.send_preserves_caller_deadline", test_9p_srvconn_transport_send_preserves_caller_deadline, false, NULL },
@@ -3716,6 +3763,7 @@ struct test_case g_tests[] = {
     { "sys_spawn_with_perms.console_owner_set_wiring",  test_sys_spawn_with_perms_console_owner_set_wiring,  false, NULL },
     { "sys_spawn_with_perms.seat_roles", test_sys_spawn_with_perms_seat_roles, false, NULL },
     { "sys_spawn_with_perms.renderer_gate",             test_sys_spawn_with_perms_renderer_gate,             false, NULL },
+    { "sys_spawn_with_perms.seal_blocks_debug_and_dump", test_sys_spawn_with_perms_seal_blocks_debug_and_dump, false, NULL },
     { "sys_spawn_full_argv.no_argv_acts_as_spawn_with_perms", test_sys_spawn_full_argv_no_argv_acts_as_spawn_with_perms, false, NULL },
     { "sys_spawn_full_argv.golden_argc4",              test_sys_spawn_full_argv_golden_argc4,              false, NULL },
     { "sys_spawn_full_argv.rejects_argc_over_max",     test_sys_spawn_full_argv_rejects_argc_over_max,     false, NULL },

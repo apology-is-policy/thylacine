@@ -53,6 +53,14 @@
 // secrecy rests entirely on that scalar being unpredictable, so there is no
 // fallback source and no "degraded" mode: SYS_GETRANDOM (CAP_CSPRNG_READ) works
 // or haul refuses to connect.
+//
+// THE MOUNTER OWNS EVERY FILE (HAUL-DESIGN 4.7, IDENTITY-DESIGN 3.2). The server
+// reports the HOST's owners -- uid 501 / staff on a Mac -- and no Thylacine
+// principal is either, so the kernel's rwx check made every guest user "other"
+// and a private (0700/0600) export unreadable to the user who mounted it. Both
+// paths therefore cape the session: the direct mount passes T_ATTACH_9P_CAPE,
+// and --post posts its service DMSRVCAPE, so a plain `mount /srv/NAME` over it
+// is caped too. The server's per-file mode is kept.
 
 #![no_std]
 #![no_main]
@@ -61,26 +69,51 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use haul::{cmdline, npxf};
 use libthyla_rs::env::{self, Args};
 use zeroize::{Zeroize, Zeroizing};
+use libthyla_rs::err::Error;
 use libthyla_rs::io::Read;
 use libthyla_rs::net::{Ipv4Addr, SocketAddrV4, TcpStream};
+use libthyla_rs::time::Duration;
 use libthyla_rs::thread;
 use libthyla_rs::{
-    t_attach_9p, t_burrow_attach, t_close, t_mount, t_pipe, t_putstr, T_MREPL,
+    t_attach_9p, t_burrow_attach, t_close, t_mount, t_pipe, t_putstr, T_ATTACH_9P_CAPE,
+    T_MREPL,
 };
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
+/// Whether fd 2 was open when haul STARTED. Decided once, before haul opens
+/// anything: with slot 2 empty, the kernel hands haul's own files out from the
+/// lowest free slot, so a later look at "fd 2" can find the token file or the
+/// TCP data file -- and a diagnostic written there would go into the 9P stream.
+static STDERR_LIVE: AtomicBool = AtomicBool::new(false);
+
+/// One line for the operator, on stderr, where the terminal that ran haul
+/// shows it. `t_putstr` (SYS_PUTS) writes the KERNEL console instead: the same
+/// device as stderr on the serial console, and a different one in a Halcyon
+/// tile, where every haul line -- errors included -- used to land on serial and
+/// the tile showed nothing. The console is only the fallback, for the park form
+/// under a launcher that gave it no stderr.
+fn tell(line: &str) {
+    if STDERR_LIVE.load(Ordering::Relaxed) {
+        use libthyla_rs::io::Write;
+        if libthyla_rs::io::stderr().write_all(line.as_bytes()).is_ok() {
+            return;
+        }
+    }
+    let _ = t_putstr(line);
+}
+
 macro_rules! say {
     ($($a:tt)*) => {{
         let mut s = alloc::format!($($a)*);
         s.push('\n');
-        let _ = libthyla_rs::t_putstr(&s);
+        tell(&s);
     }};
 }
 
@@ -100,7 +133,7 @@ macro_rules! step {
             let mut s = alloc::string::String::from("haul: .. ");
             s.push_str(&alloc::format!($($a)*));
             s.push('\n');
-            let _ = libthyla_rs::t_putstr(&s);
+            tell(&s);
         }
     }};
 }
@@ -403,6 +436,7 @@ fn finish_down(ctx: &DownCtx) -> ! {
 /// them on the wire -- as-is when plain, or as one AEAD record each when the
 /// channel is secured.
 extern "C" fn pump_up(arg: u64) {
+    mask_pipe_note();
     // SAFETY: `arg` is the leaked Box handed to spawn_raw below, and this
     // thread is its only reader for the rest of the process's life.
     let ctx = unsafe { &mut *(arg as *mut UpCtx) };
@@ -430,6 +464,7 @@ extern "C" fn pump_up(arg: u64) {
 /// server -> kernel. Takes R-messages off the wire and writes them into the
 /// kernel's pipe, decrypting first when the channel is secured.
 extern "C" fn pump_down(arg: u64) {
+    mask_pipe_note();
     // SAFETY: as pump_up.
     let ctx = unsafe { &mut *(arg as *mut DownCtx) };
     let mut buf: Vec<u8> = Vec::new();
@@ -503,6 +538,18 @@ fn read_record(src: i64, o: &mut npxf::Opener, buf: &mut Vec<u8>) -> RecordIn {
         return RecordIn::Ended;
     }
     RecordIn::Message(n)
+}
+
+/// A pump's writes to a closed pipe come back as EPIPE, never as the `pipe`
+/// note's default death. libthyla-rs masks the note on the MAIN thread only (the
+/// mask is per-thread and spawn_raw does not inherit it), and a pump writes
+/// both pipes and, through `tell`, stderr -- which `ut` hands a command as a
+/// pipe nobody reads when it has no console to give. Unmasked, one diagnostic
+/// there would kill haul before its main thread could report on the console.
+fn mask_pipe_note() {
+    let _ = unsafe {
+        libthyla_rs::t_note_mask(1u64 << libthyla_rs::T_NOTE_BIT_PIPE, core::ptr::null_mut())
+    };
 }
 
 /// A pump context, bound to the one entry point allowed to receive it.
@@ -763,7 +810,7 @@ fn parse_args(args: Args) -> Result<Parsed, &'static str> {
     let plan = match cmdline::plan(&argv) {
         Ok(p) => p,
         Err(cmdline::Bad::WantsUsage) => {
-            let _ = t_putstr(USAGE);
+            tell(USAGE);
             return Err("");
         }
         Err(cmdline::Bad::MissingValue(m)) => return Err(m),
@@ -852,11 +899,11 @@ fn npxf_handshake(fd: i64, ready: Ready, token: &[u8]) -> Result<npxf::Session, 
 // Creation is the kernel capability gate. A failed post never dials the peer.
 fn post_listener(name: &str) -> Result<i64, &'static str> {
     use libthyla_rs::{t_open, t_walk_create, T_WALK_OPEN_FROM_ROOT, T_OPATH,
-                     T_OREAD, T_WALK_CREATE_DMSRVBYTE};
+                     T_OREAD, T_WALK_CREATE_DMSRVBYTE, T_WALK_CREATE_DMSRVCAPE};
     let srv = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv".as_ptr(), 4, T_OPATH) };
     if srv < 0 { return Err("cannot open /srv"); }
     let listener = unsafe { t_walk_create(srv, name.as_ptr(), name.len(), T_OREAD,
-                                          T_WALK_CREATE_DMSRVBYTE) };
+                                          T_WALK_CREATE_DMSRVBYTE | T_WALK_CREATE_DMSRVCAPE) };
     let _ = unsafe { t_close(srv) };
     if listener < 0 { return Err("cannot post service (requires imperium post, an unused name and a free service slot)"); }
     Ok(listener)
@@ -877,7 +924,30 @@ fn accept_owner(listener: i64) -> Result<i64, &'static str> {
     }
 }
 
-fn run(argv: Args) -> Result<(), &'static str> {
+/// How long a dial may take before haul says it is still out. A refusal answers
+/// in milliseconds; past this the host is slow, down, or behind something that
+/// drops the call, and silence until netd gives up would read as a hang.
+const SLOW_DIAL: Duration = Duration::from_secs(2);
+
+/// Dial `addr`, saying so while a slow answer is still out, and naming the
+/// reason when there is none. `shown` is the address as the operator wrote it.
+fn dial(addr: SocketAddrV4, shown: &str) -> Result<TcpStream, String> {
+    let unreachable = |e: Error| -> String {
+        match e {
+            Error::ConnectionRefused => alloc::format!("cannot reach {}: connection refused", shown),
+            Error::TimedOut => alloc::format!("cannot reach {}: no answer (timed out)", shown),
+            Error::NotFound => alloc::format!("cannot dial {}: no network (/net/tcp is not there)", shown),
+            e => alloc::format!("cannot reach {}: {}", shown, e),
+        }
+    };
+    let mut dialing = TcpStream::dial(addr).map_err(unreachable)?;
+    if !dialing.wait(SLOW_DIAL).map_err(unreachable)? {
+        say!("haul: no answer from {} yet -- still trying", shown);
+    }
+    dialing.finish().map_err(unreachable)
+}
+
+fn run(argv: Args) -> Result<(), String> {
     let mut args = parse_args(argv)?;
 
     // THE COMMAND FORM REFUSES TO START WITHOUT STDIO, before it opens anything.
@@ -894,7 +964,7 @@ fn run(argv: Args) -> Result<(), &'static str> {
     // daemon-style launcher, the one that produces it, runs the park form. So
     // only the command form is refused.
     if !args.cmd.is_empty() && (0..3).any(|fd| libthyla_rs::fd_devclass(fd).is_none()) {
-        return Err("the command form needs stdin, stdout and stderr open (the command would otherwise inherit the connection)");
+        return Err("the command form needs stdin, stdout and stderr open (the command would otherwise inherit the connection)".into());
     }
 
     let listener = if args.post { Some(post_listener(&args.mountpoint)?) } else { None };
@@ -904,7 +974,7 @@ fn run(argv: Args) -> Result<(), &'static str> {
     let port = haul::addr::parse_port(port).ok_or("the port must be 1..=65535")?;
     let addr = SocketAddrV4::new(ip, port);
     step!("dialing {}", addr);
-    let stream = TcpStream::connect(addr).map_err(|_| "connect")?;
+    let stream = dial(addr, &args.addr)?;
     step!("connected");
     // The connection's READINESS fd, opened while the stream still exists to
     // name it. This is `/net/tcp/N/ready`, the QTPOLL sibling -- the only file
@@ -956,7 +1026,7 @@ fn run(argv: Args) -> Result<(), &'static str> {
         step!("watching the posted connection and listener");
         loop {
             if STOPPED.load(Ordering::Acquire) != STOP_NONE {
-                return Err("posted connection ended");
+                return Err("posted connection ended".into());
             }
             // The remote 9P session belongs to the first client. Never splice
             // a second client's tags/fids into it; close queued clients promptly.
@@ -972,7 +1042,7 @@ fn run(argv: Args) -> Result<(), &'static str> {
     let (c2s_rd, c2s_wr) = unsafe { t_pipe() };
     let (s2c_rd, s2c_wr) = unsafe { t_pipe() };
     if c2s_rd < 0 || c2s_wr < 0 || s2c_rd < 0 || s2c_wr < 0 {
-        return Err("pipe pair");
+        return Err("pipe pair".into());
     }
 
     // BOTH PUMPS BEFORE THE ATTACH. SYS_ATTACH_9P drives Tversion + Tattach
@@ -1004,6 +1074,7 @@ fn run(argv: Args) -> Result<(), &'static str> {
             args.aname.as_ptr(),
             args.aname.len(),
             0,
+            T_ATTACH_9P_CAPE,
         )
     };
     let _ = unsafe { t_close(c2s_wr) };
@@ -1012,11 +1083,11 @@ fn run(argv: Args) -> Result<(), &'static str> {
         // The pumps have the diagnosis: a server that hung up mid-handshake
         // stops one of them, and which one says whether we failed to send or
         // failed to hear back.
-        return Err(match STOPPED.load(Ordering::Acquire) {
+        return Err(String::from(match STOPPED.load(Ordering::Acquire) {
             STOP_UP => "attach (the connection closed while sending)",
             STOP_DOWN => "attach (the server closed without replying)",
             _ => "attach (9P handshake refused)",
-        });
+        }));
     }
 
     step!("attached; mounting at {}", args.mountpoint);
@@ -1030,7 +1101,7 @@ fn run(argv: Args) -> Result<(), &'static str> {
     };
     let _ = unsafe { t_close(root) };
     if rc < 0 {
-        return Err("mount");
+        return Err("mount".into());
     }
 
     // Under -v, prove the mount from INSIDE this Proc before anyone else tries
@@ -1120,7 +1191,7 @@ fn run(argv: Args) -> Result<(), &'static str> {
         let status = loop {
             match child.try_wait() {
                 Ok(Some(st)) => break st,
-                Err(_) => return Err("waiting for the command"),
+                Err(_) => return Err("waiting for the command".into()),
                 Ok(None) => {}
             }
             if STOPPED.load(Ordering::Acquire) != STOP_NONE {
@@ -1128,7 +1199,7 @@ fn run(argv: Args) -> Result<(), &'static str> {
                     "haul: {} closed the connection while the command was running",
                     args.addr
                 );
-                return Err("the connection ended under the command");
+                return Err("the connection ended under the command".into());
             }
             let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(50));
         };
@@ -1137,7 +1208,7 @@ fn run(argv: Args) -> Result<(), &'static str> {
         return if status.success() {
             Ok(())
         } else {
-            Err("the command exited non-zero")
+            Err("the command exited non-zero".into())
         };
     }
 
@@ -1150,7 +1221,7 @@ fn run(argv: Args) -> Result<(), &'static str> {
             // NOT Ok(()). A supervisor that restarts on a non-zero exit would
             // read success for a mount that is gone, and the command form's twin
             // above already returns Err for the same event.
-            return Err("the peer closed the connection");
+            return Err("the peer closed the connection".into());
         }
         let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(200));
     }
@@ -1158,11 +1229,13 @@ fn run(argv: Args) -> Result<(), &'static str> {
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
+    // First, before anything opens a file (see STDERR_LIVE).
+    STDERR_LIVE.store(libthyla_rs::fd_devclass(2).is_some(), Ordering::Relaxed);
     match run(env::args()) {
         Ok(()) => 0,
         // The empty reason is --help / usage: already printed, and a second
         // line naming it as a failure would be wrong.
-        Err("") => 2,
+        Err(why) if why.is_empty() => 2,
         Err(why) => {
             say!("haul: {}", why);
             1

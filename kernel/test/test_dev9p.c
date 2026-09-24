@@ -64,6 +64,9 @@ void test_dev9p_wb_populate_readback(void);
 void test_dev9p_wb_populate_append_chain(void);
 void test_dev9p_wb_populate_failed_flush(void);
 void test_dev9p_wb_writethrough_range_invalidate(void);
+void test_dev9p_cape(void);
+void test_dev9p_path_create_refuses_dmsrvcape(void);
+void test_dev9p_walk_create_refuses_dmsrv_bits(void);
 
 // File-scope buffers — client is ~80 KiB (the embedded Larder attr+dentry+page
 // metadata), won't fit on the 16 KiB test thread stack alongside a few locals.
@@ -125,6 +128,8 @@ static u32  g_twrite_last_seq, g_clunk_last_seq, g_tfsync_last_seq;
 static u32  g_twrite_fail_ecode;     // != 0: the NEXT Twrite answers Rlerror(ecode), then clears
 static u32  g_tlopen_fail_ecode; // one-shot Tlopen errno control
 static u32  g_tlcreate_fail_ecode;   // #99: != 0: the NEXT Tlcreate answers Rlerror(ecode), then clears
+static u64  g_ga_valid = 0x7ffu;     // the Rgetattr valid mask (default BASIC)
+static u32  g_create_gid;            // the gid the last Tlcreate / Tmkdir carried
 static u8  *g_twrite_cap_buf;        // payload capture of the LAST Twrite (heap, 8 KiB)
 #define WB_CAP_BUF_SZ 8192u
 static u32  g_twrite_cap_len;
@@ -360,6 +365,11 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
     }
     if (type == P9_TLCREATE) {
         g_tlcreate_seen++;                        // #50: arrival counter
+        // Tlcreate body: fid[4] name[s] flags[4] mode[4] gid[4].
+        if (req_len >= (size_t)P9_HDR_LEN + 6) {
+            size_t go = (size_t)P9_HDR_LEN + 6 + ((u32)req[11] | ((u32)req[12] << 8)) + 8;
+            if (req_len >= go + 4) g_create_gid = le32_at(req + go);
+        }
         if (g_tlcreate_fail_ecode) {              // #99: inject an Rlerror (e.g. EEXIST)
             u32 ec = g_tlcreate_fail_ecode;
             g_tlcreate_fail_ecode = 0;
@@ -386,6 +396,11 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         return (int)total;
     }
     if (type == P9_TMKDIR) {
+        // Tmkdir body: dfid[4] name[s] mode[4] gid[4].
+        if (req_len >= (size_t)P9_HDR_LEN + 6) {
+            size_t go = (size_t)P9_HDR_LEN + 6 + ((u32)req[11] | ((u32)req[12] << 8)) + 4;
+            if (req_len >= go + 4) g_create_gid = le32_at(req + go);
+        }
         // Rmkdir = qid(13). path 0x55 distinguishes a mkdir'd dir.
         size_t total = P9_HDR_LEN + P9_QID_LEN;
         if (resp_cap < total) return -1;
@@ -488,7 +503,8 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         resp[4] = P9_RGETATTR;
         resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
         size_t o = P9_HDR_LEN;
-        resp[o] = 0xff; resp[o + 1] = 0x07; o += 8;          // valid = 0x7ff (BASIC)
+        for (int b = 0; b < 8; b++) resp[o + b] = (u8)(g_ga_valid >> (8 * b));
+        o += 8;                                              // valid (BASIC unless a test narrows it)
         resp[o] = P9_QTFILE; o += 1 + 4; resp[o] = 0x33; o += 8;   // qid (path 0x33)
         { u32 m = 0100644u;                                  // mode S_IFREG|0644
           resp[o] = (u8)m; resp[o + 1] = (u8)(m >> 8);
@@ -3289,4 +3305,173 @@ void test_dev9p_open_create_excl_eexist_exact(void) {
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
     teardown(root);
+}
+
+// =============================================================================
+// The identity cape (IDENTITY-DESIGN 3.2, HAUL-DESIGN 4.7). The loopback owns
+// every file as 0x1234:0x5678 -- the SERVER's ids. A caped session reports the
+// attaching principal instead, keeps the server's mode (and its fail-closed
+// rule), sends P9_NOGID on a create, and refuses chown/chgrp before the wire.
+// Each caped leg sits beside an uncaped control one variable away.
+// =============================================================================
+
+#define CAPE_UID 0xC0DEu
+#define CAPE_GID 0xCAFEu
+
+// A create on a fresh session (the single-slot loopback holds one reply, so each
+// create gets its own); returns the gid its T-message carried.
+static u32 cape_create_gid(bool cape, u32 perm, u32 gid) {
+    struct Spoor *root = make_open_client_and_root();
+    if (!root) return 0xBAD0u;
+    if (cape) p9_client_set_cape(&g_client, CAPE_UID, CAPE_GID);
+    u32 seen = 0xBAD1u;
+    struct Spoor *nc = spoor_clone(root);
+    if (nc) {
+        struct Walkqid *w = dev9p.walk(root, nc, NULL, 0);   // clone-walk
+        if (w) {
+            walkqid_free(w);
+            g_create_gid = 0xDEADBEEFu;
+            bool dir = (perm & SYS_WALK_CREATE_DMDIR) != 0;
+            if (dev9p.create(nc, "capefile", dir ? 0 : 1, perm, gid) == nc)
+                seen = g_create_gid;
+        }
+        spoor_clunk(nc);
+    }
+    teardown(root);
+    return seen;
+}
+
+void test_dev9p_cape(void) {
+    // Uncaped control: the server's ids, and a chown reaches the wire.
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "uncaped client + root");
+    struct t_stat st;
+    TEST_EXPECT_EQ((u64)dev9p.stat_native(root, &st), (u64)0, "uncaped stat");
+    TEST_EXPECT_EQ((u64)st.uid, (u64)0x1234u, "uncaped: the server's uid");
+    TEST_EXPECT_EQ((u64)st.gid, (u64)0x5678u, "uncaped: the server's gid");
+    g_setattr_valid = 0xdeadbeefu;
+    TEST_EXPECT_EQ((u64)dev9p.wstat_native(root, T_WSTAT_UID, 0, 1000u, 0, 0), (u64)0,
+                   "uncaped chown");
+    TEST_EXPECT_EQ((u64)g_setattr_valid, (u64)T_WSTAT_UID, "uncaped: the chown reached the wire");
+    teardown(root);
+
+    // Caped, stamped before the first stat as the attach path stamps it.
+    root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "caped client + root");
+    p9_client_set_cape(&g_client, CAPE_UID, CAPE_GID);
+    TEST_EXPECT_EQ((u64)dev9p.stat_native(root, &st), (u64)0, "caped stat");
+    TEST_EXPECT_EQ((u64)st.uid, (u64)CAPE_UID, "caped: the attacher owns it");
+    TEST_EXPECT_EQ((u64)st.gid, (u64)CAPE_GID, "caped: the attacher's primary group");
+    TEST_EXPECT_EQ((u64)st.mode, (u64)0100644u, "caped: the server's mode kept");
+    TEST_EXPECT_EQ((u64)st.size, (u64)0x100u, "caped: the rest of the stat untouched");
+
+    // A server that leaves the trio out: the mode stays fail-closed (0), and the
+    // owner is the cape's, which never came from the server.
+    g_ga_valid = 0x7ffu & ~(u64)(P9_GETATTR_MODE | P9_GETATTR_UID | P9_GETATTR_GID);
+    TEST_EXPECT_EQ((u64)dev9p.stat_native(root, &st), (u64)0, "caped stat, trio omitted");
+    g_ga_valid = 0x7ffu;
+    TEST_EXPECT_EQ((u64)st.mode, (u64)0, "caped: an omitted mode stays fail-closed");
+    TEST_EXPECT_EQ((u64)st.uid, (u64)CAPE_UID, "caped: the owner needs no server field");
+    TEST_EXPECT_EQ((u64)st.gid, (u64)CAPE_GID, "caped: the group needs no server field");
+
+    // chown / chgrp refused before the wire; chmod passes.
+    g_setattr_valid = 0xdeadbeefu;
+    TEST_EXPECT_EQ((u64)(s64)dev9p.wstat_native(root, T_WSTAT_UID, 0, 1000u, 0, 0),
+                   (u64)(s64)-1, "caped chown refused");
+    TEST_EXPECT_EQ((u64)(s64)dev9p.wstat_native(root, T_WSTAT_GID, 0, 0, 2000u, 0),
+                   (u64)(s64)-1, "caped chgrp refused");
+    TEST_EXPECT_EQ((u64)(s64)dev9p.wstat_native(root, T_WSTAT_MODE | T_WSTAT_GID, 0600u,
+                                                0, 2000u, 0),
+                   (u64)(s64)-1, "caped chmod+chgrp refused whole");
+    TEST_EXPECT_EQ((u64)g_setattr_valid, (u64)0xdeadbeefu, "no refused call reached the wire");
+    TEST_EXPECT_EQ((u64)dev9p.wstat_native(root, T_WSTAT_MODE, 0640u, 0, 0, 0), (u64)0,
+                   "caped chmod");
+    TEST_EXPECT_EQ((u64)g_setattr_valid, (u64)T_WSTAT_MODE, "caped: the chmod reached the wire");
+    TEST_EXPECT_EQ((u64)g_setattr_mode, (u64)0640u, "caped: the chmod's mode");
+
+    // The fused walk's per-component records -- what the resolver's X-search
+    // and the Larder read -- carry the cape too (the server says 0x1111:0x2222).
+    {
+        const char  *names[2] = { "dirA", "fileB" };
+        const size_t lens[2]  = { 4, 5 };
+        struct Spoor *nc = spoor_clone(root);
+        TEST_ASSERT(nc != NULL, "clone");
+        struct t_stat sts[2];
+        struct Walkqid *w = dev9p.walk_attrs(root, nc, names, lens, 2, sts);
+        TEST_ASSERT(w != NULL && w->nqid == 2, "caped walk_attrs");
+        TEST_EXPECT_EQ((u64)sts[0].uid, (u64)CAPE_UID, "caped walk: element 0 owner");
+        TEST_EXPECT_EQ((u64)sts[1].uid, (u64)CAPE_UID, "caped walk: element 1 owner");
+        TEST_EXPECT_EQ((u64)sts[1].gid, (u64)CAPE_GID, "caped walk: element 1 group");
+        TEST_EXPECT_EQ((u64)sts[1].mode, (u64)0100644u, "caped walk: the server's mode");
+        walkqid_free(w);
+        spoor_clunk(nc);
+        (void)p9_client_reader_pump_once(&g_client);   // drain the async Rclunk
+    }
+    teardown(root);
+
+    // A create names no group to a caped server; the uncaped one sends the
+    // caller's.
+    TEST_EXPECT_EQ((u64)cape_create_gid(false, 0644u, 1000u), (u64)1000u,
+                   "uncaped Tlcreate: the caller's gid");
+    TEST_EXPECT_EQ((u64)cape_create_gid(true, 0644u, 1000u), (u64)P9_NOGID,
+                   "caped Tlcreate: gid (u32)-1");
+    TEST_EXPECT_EQ((u64)cape_create_gid(false, SYS_WALK_CREATE_DMDIR | 0755u, 1000u),
+                   (u64)1000u, "uncaped Tmkdir: the caller's gid");
+    TEST_EXPECT_EQ((u64)cape_create_gid(true, SYS_WALK_CREATE_DMDIR | 0755u, 1000u),
+                   (u64)P9_NOGID, "caped Tmkdir: gid (u32)-1");
+}
+
+// DMSRVCAPE is a service-post bit: a path create refuses it before resolving
+// anything, like its DMSRV siblings.
+void test_dev9p_path_create_refuses_dmsrvcape(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "client+root");
+    hidx_t base = -1;
+    struct Proc *p = oc9_proc(root, &base);
+    TEST_ASSERT(p != NULL, "proc + start fd");
+    g_tlcreate_seen = 0;
+    TEST_EXPECT_EQ((u64)sys_open_create_kpath_for_proc(p, (u64)base, "newfile", 7, 1,
+                                                       SYS_WALK_CREATE_DMSRVCAPE | 0644u),
+                   (u64)(s64)-T_E_INVAL, "DMSRVCAPE on a path create -> -EINVAL");
+    TEST_EXPECT_EQ((u64)g_tlcreate_seen, (u64)0, "nothing reached the wire");
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+    teardown(root);
+}
+
+extern s64 sys_walk_create_kname_for_proc(struct Proc *p, u64 parent_fd_raw,
+                                          const char *kname, u64 klen,
+                                          u64 omode_raw, u64 perm_raw);
+
+// One fd-based create on a fresh session; *seen = the Tlcreates it sent.
+static s64 wc_dmsrv_create(u32 perm, u32 *seen) {
+    *seen = 0xBADu;
+    struct Spoor *root = make_open_client_and_root();
+    if (!root) return 0x7BAD;
+    hidx_t base = -1;
+    struct Proc *p = oc9_proc(root, &base);
+    if (!p) { teardown(root); return 0x7BAE; }
+    g_tlcreate_seen = 0;
+    s64 r = sys_walk_create_kname_for_proc(p, (u64)base, "capefile", 8, 1 /*OWRITE*/, perm);
+    *seen = g_tlcreate_seen;
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+    teardown(root);
+    return r;
+}
+
+// The DMSRV* service-post bits on a REGULAR fd create would reach a Tlcreate's
+// wire perm, so spoor_create_install refuses each before any Dev create runs.
+// The plain create is the control one variable away.
+void test_dev9p_walk_create_refuses_dmsrv_bits(void) {
+    u32 seen = 0;
+    TEST_ASSERT(wc_dmsrv_create(0644u, &seen) >= 0, "plain fd create (control)");
+    TEST_EXPECT_EQ((u64)seen, (u64)1, "control: the create reached the wire");
+    const u32 bits[3] = { SYS_WALK_CREATE_DMSRVBYTE, SYS_WALK_CREATE_DMSRVBULK,
+                          SYS_WALK_CREATE_DMSRVCAPE };
+    for (int i = 0; i < 3; i++) {
+        TEST_EXPECT_EQ((u64)wc_dmsrv_create(bits[i] | 0644u, &seen), (u64)(s64)-T_E_INVAL,
+                       "a DMSRV bit on a regular fd create -> -EINVAL");
+        TEST_EXPECT_EQ((u64)seen, (u64)0, "a refused fd create sent no Tlcreate");
+    }
 }

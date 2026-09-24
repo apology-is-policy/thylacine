@@ -330,6 +330,13 @@ build_kernel() {
     # Clade CL-2: cross-build the C++ runtime (libunwind+libc++abi+libc++) into
     # the sysroot + the /pouch-hello-cxx prover. Skips if the LLVM fork is absent.
     build_libcxx
+    # Track R (Rust std port), R-1: cross-build the cargo std hello (/r1hello).
+    # Must FOLLOW build_libcxx: `panic = "unwind"` links -lunwind, and libunwind
+    # is built by CL-2 above, not by build_sysroot. SKIPS cleanly off the track-R
+    # box (no nightly / no libc fork / no patched rust-src / no libunwind), so
+    # this is inert on a normal build and self-skips announced. Staged into
+    # $progs_out for build_ramfs, like the pouch progs.
+    build_rust_progs
     # Boosty B-0: ICU + JavaScriptCore (-> /webkit/jsc in the pool). DEFAULT-OFF:
     # ~40 min cold on this host, and the source is a sibling sparse clone. Must
     # follow build_libcxx (it links libc++) and precede the pool fixture.
@@ -488,7 +495,7 @@ EOF
     # P4-Ia2: copy any built Rust-side userspace binaries from
     # build/usr-rs/<target>/release/. Same curation discipline.
     # Binary name = crate's [[bin]] name = directory under usr/.
-    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "nocturned" "nocturne-probe" "nocturne-vol" "nocturne-vol-probe" "nocturne-tap-probe" "nocturne-capture-probe" "ring-voice-probe" "lictor" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "halcyon" "halcyond" "view" "gallery" "manual" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "diorama" "diorama-probe" "viv" "viv-probe" "viv-pheno-probe" "ptyhost" "jc-probe" "susp-mask-child" "alloc-smoke" "protect-probe" "protect-guard-child" "bus-probe-child" "capacity-probe" "heap-probe" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "exec-probe" "fork-probe" "coreutil-smoke" "fs-mut-smoke" "symlink-probe" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "ps" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "aurora-push" "pipe-src" "pipe-sink" "legate-prover" "imperium-probe" "imperium" "jit-prover" "login" "ut" "nora" "prowl" "quarry" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" "warp-prove" "haul" "kaua-term" "kaua-term-probe" "caps-probe" )
+    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "nocturned" "nocturne-probe" "nocturne-vol" "nocturne-vol-probe" "nocturne-tap-probe" "nocturne-capture-probe" "ring-voice-probe" "lictor" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "halcyon" "halcyond" "view" "gallery" "manual" "lantern" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "diorama" "diorama-probe" "viv" "viv-probe" "viv-pheno-probe" "ptyhost" "jc-probe" "susp-mask-child" "alloc-smoke" "protect-probe" "protect-guard-child" "bus-probe-child" "capacity-probe" "heap-probe" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "exec-probe" "fork-probe" "coreutil-smoke" "fs-mut-smoke" "symlink-probe" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "ps" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "aurora-push" "pipe-src" "pipe-sink" "legate-prover" "imperium-probe" "imperium" "jit-prover" "login" "ut" "nora" "prowl" "quarry" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" "warp-prove" "haul" "kaua-term" "kaua-term-probe" "caps-probe" )
     local rs_release="$USR_RS_BUILD/$USR_RS_TARGET/release"
     for bin in "${usr_rs_bins[@]}"; do
         local src="$rs_release/$bin"
@@ -612,7 +619,11 @@ EOF
     # P6-pouch-hello-smoke: copy the pouch POSIX test binaries (built
     # against the pouch sysroot by build_pouch_progs) into the cpio root.
     # Same curation discipline — explicit list, not a glob.
-    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fopen" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "pouch-hello-susp" "pouch-hello-reentry" "pouch-hello-identity" "pouch-hello-mem" "pouch-hello-guard" "pouch-hello-cxx" "sdl-probe" "sdl-audio-probe" "tyr-quake" "tyr-glquake" "make" )
+    # Track R (Rust std port): /r1hello is the R-1 witness (built by
+    # build_rust_progs, staged into $pouch_progs like the pouch binaries). The
+    # -f guard in the copy loop below stages nothing when build_rust_progs
+    # self-skipped off the track-R box, so this entry is inert there.
+    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fopen" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "pouch-hello-susp" "pouch-hello-reentry" "pouch-hello-identity" "pouch-hello-mem" "pouch-hello-guard" "pouch-hello-cxx" "sdl-probe" "sdl-audio-probe" "tyr-quake" "tyr-glquake" "make" "r1hello" )
     local pouch_progs="$BUILD_DIR/pouch/progs"
     # DX-2 (Cryptid): dosbox-x (17.6 MB) is DEFAULT-ON (operator direction
     # 2026-09-03; mirrors build_go_goroot's opt-out). THYLACINE_BAKE_DOSBOX=0
@@ -670,6 +681,7 @@ DOSBOXCONF
         chmod 0644 "$ramfs_src/dosbox-x.conf"
         ledger "ramfs.cpio: staged dosbox-x.conf (DX-3b sample config/autoexec)"
     fi
+
 
     # P6-pouch-stratumd-boot (sub-chunk 16a): copy the cross-built stratumd
     # daemon binary if build_stratumd has produced it. Separate from
@@ -3962,6 +3974,54 @@ populate_stratum_pool() {
     done <<< "$manual_sections"
     echo "==> populate pool: $sections manual section(s) baked + readback-verified into /manual (MANUAL-DESIGN 6)"
 
+    # LANTERN: install the demo deck at /deck, so `lantern /deck` has something
+    # to show on a fresh boot. It goes in the POOL, beside /manual and
+    # /test.png -- NOT the ramfs, whose root is not the running system's `/`
+    # (the pool is, after the pivot), so a deck baked there would simply not be
+    # found. Unconditional: a deck is content, not a lever.
+    #
+    # The slides are CHECKED first, with the manual's own checker, and a failure
+    # is fatal -- so a deck that stopped being a valid section set cannot ship.
+    # They are checked in a temp directory holding only the .md files because
+    # manual-check reads a whole directory and requires every entry to be named
+    # NN-<name>.md, which `slides.toml` is not: that rule is the manual BOOK's
+    # ordering, and a deck's order comes from its manifest instead.
+    local deck_src="$REPO_ROOT/usr/lantern/deck"
+    if [[ -d "$deck_src" ]]; then
+        local deck_check
+        deck_check="$(mktemp -d)" || { echo "==> populate pool: mktemp for the deck check FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        cp "$deck_src"/*.md "$deck_check/" \
+            || { echo "==> populate pool: no deck slides to check in $deck_src" >&2; rm -rf "$deck_check"; kill -TERM "$stratumd_pid"; exit 1; }
+        if ! "$mc_bin" "$deck_check" >/dev/null; then
+            echo "==> populate pool: the lantern demo deck FAILS the section check (manual-check above)" >&2
+            "$mc_bin" "$deck_check" >&2 || true
+            rm -rf "$deck_check"
+            kill -TERM "$stratumd_pid"
+            exit 1
+        fi
+        rm -rf "$deck_check"
+        "$stratum_fs_bin" -s "$sock_path" mkdir /deck >/dev/null 2>&1 || true
+        "$stratum_fs_bin" -s "$sock_path" stat /deck >/dev/null 2>&1 \
+            || { echo "==> populate pool: mkdir /deck FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        local deck_file deck_files=0
+        for deck_file in "$deck_src"/*; do
+            local deck_base
+            deck_base="$(basename "$deck_file")"
+            "$stratum_fs_bin" -s "$sock_path" write "/deck/$deck_base" < "$deck_file" \
+                || { echo "==> populate pool: write /deck/$deck_base FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+            deck_files=$((deck_files + 1))
+        done
+        "$stratum_fs_bin" -s "$sock_path" sync \
+            || { echo "==> populate pool: sync (deck) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        for deck_file in "$deck_src"/*; do
+            local deck_base
+            deck_base="$(basename "$deck_file")"
+            "$stratum_fs_bin" -s "$sock_path" read "/deck/$deck_base" | cmp -s - "$deck_file" \
+                || { echo "==> populate pool: /deck/$deck_base readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        done
+        echo "==> populate pool: $deck_files lantern deck file(s) baked + readback-verified into /deck (LANTERN-DESIGN 1)"
+    fi
+
     # TH-5b: put a gallery theme IN FORCE. `THYLACINE_HALCYON_THEME=<name>`
     # copies `/lib/halcyon/themes/<name>.toml` to `/lib/halcyon/theme.toml`,
     # which is what both renderers and tapestryd actually read. A lever rather
@@ -4234,6 +4294,181 @@ WEBKIT /webkit/jsc"
     cp -c "$keyfile" "$keyfile.baked-snapshot" 2>/dev/null \
         || cp "$keyfile" "$keyfile.baked-snapshot"
     echo "==> populate pool: snapshot twins refreshed (pool.img/system.key .baked-snapshot)"
+}
+
+build_rust_progs() {
+    # Track R (Rust std port), R-1 witness. Cross-build the first cargo-built
+    # Rust `std` program (usr/ports/rust/r1-hello) for aarch64-unknown-thylacine
+    # via `-Z build-std` over the forked libc + the patched rust-src, link it
+    # with pouch-clang (a static ET_EXEC -- the pouch-hello shape kernel/elf.c
+    # accepts), strip it, and stage it at $progs_out/r1hello so build_ramfs bakes
+    # /r1hello. Witnessed by tools/interactive/rust-std-hello.exp.
+    # See usr/ports/rust/README.md "R-1" + usr/ports/rust/patches/README.md.
+    #
+    # GATED on the full track-R toolset (the pinned nightly + a rust-src carrying
+    # the thylacine patch + the ../libc-thylacine fork + pouch-clang). This is an
+    # out-of-tree fork build only the track-R dev box carries; absent any piece
+    # it SKIPS cleanly (announced) so a normal image build never requires the
+    # Rust std toolchain.
+    local rust_dir="$REPO_ROOT/usr/ports/rust"
+    local crate_dir="$rust_dir/r1-hello"
+    local target_json="$rust_dir/aarch64-unknown-thylacine.json"
+    local triple="aarch64-unknown-thylacine"
+    local nightly="nightly-2026-09-20"
+    local libc_fork="${LIBC_THYLACINE:-$HOME/projects/libc-thylacine}"
+    local progs_out="$BUILD_DIR/pouch/progs"
+    local target_dir="$BUILD_DIR/rust/r1-hello"
+    local staged="$progs_out/r1hello"
+    local pouch_clang="$REPO_ROOT/tools/pouch-clang"
+    local llvm_strip="$LLVM_PREFIX/bin/llvm-strip"
+    local readelf="$LLVM_PREFIX/bin/llvm-readelf"
+
+    # --- gates: skip cleanly (announced) unless the whole track-R toolset is present ---
+    command -v cargo >/dev/null 2>&1 \
+        || { ledger "rust progs: SKIP (no cargo -- track-R toolchain absent)"; return 0; }
+    rustc "+$nightly" --version >/dev/null 2>&1 \
+        || { ledger "rust progs: SKIP (pinned $nightly not installed)"; return 0; }
+    local rust_src_root
+    rust_src_root="$(rustc "+$nightly" --print sysroot 2>/dev/null)/lib/rustlib/src/rust"
+    local std_build="$rust_src_root/library/std/build.rs"
+    local errno_arm="$rust_src_root/library/std/src/sys/io/error/unix.rs"
+    if [[ ! -f "$std_build" ]] || ! grep -q 'thylacine' "$std_build"; then
+        ledger "rust progs: SKIP (rust-src absent or missing the thylacine patch -- see usr/ports/rust/patches/README.md)"
+        return 0
+    fi
+    [[ -d "$libc_fork" ]] || { ledger "rust progs: SKIP ($libc_fork fork absent)"; return 0; }
+    [[ -x "$pouch_clang" ]] || { ledger "rust progs: SKIP (tools/pouch-clang absent)"; return 0; }
+
+    # The link pulls libc.a + the static-PIE CRT from the pouch sysroot; ensure
+    # it (build_pouch_progs already did when we run in the chain, but
+    # `tools/build.sh rust-progs` may be invoked standalone).
+    local sysroot="$BUILD_DIR/sysroot"
+    if sysroot_is_stale; then
+        echo "==> rust progs: pouch sysroot missing/stale -- building it first"
+        build_sysroot
+    fi
+    # libunwind.a is NOT one of those: build_sysroot makes musl + compiler-rt +
+    # libsodium, while libunwind comes from build_libcxx (the LLVM-fork C++
+    # runtime). `panic = "unwind"` links -lunwind, so this is a REAL dependency
+    # and it is ENSURED here rather than assumed from call order. It has to be:
+    # R-1 linked only because an earlier build had left libunwind.a in the
+    # sysroot, and the first pouch-patch change to rebuild the sysroot from
+    # pristine broke the link -- i.e. this never built from a clean tree.
+    if [[ ! -f "$sysroot/lib/libunwind.a" ]]; then
+        echo "==> rust progs: libunwind.a absent -- building the C++ runtime first"
+        build_libcxx
+    fi
+    [[ -f "$sysroot/lib/libunwind.a" ]] \
+        || { ledger "rust progs: SKIP (no libunwind.a -- the LLVM fork is absent, so panic=unwind cannot link)"; return 0; }
+    mkdir -p "$progs_out"
+
+    # Staleness: reuse the staged /r1hello when it is newer than every input.
+    # This ALSO defeats the build-std fingerprint trap -- `-Z build-std` silently
+    # reuses a stale libc/std rlib on a libc/rust-src SOURCE edit and reports a
+    # false result, so a source change must force the from-scratch rebuild
+    # (rm -rf target_dir) that build-std needs in order to see it.
+    #
+    # The rust-src half is DERIVED, not a name list: `grep -rl thylacine` finds
+    # EVERY patched std file (stock rust-src has zero thylacine mentions), so a
+    # newly-patched file (e.g. sys/fd/unix.rs) can never be silently missed the
+    # way a hand-kept `$std_build $errno_arm` list would be -- a guard pinned to
+    # a derived value cannot go stale.
+    local fresh=1  # 1 = must rebuild
+    if [[ -f "$staged" ]]; then
+        fresh=0
+        local input
+        for input in "$crate_dir" "$libc_fork/src" "$target_json"; do
+            if [[ -n "$(find "$input" -type f -newer "$staged" 2>/dev/null)" ]]; then
+                fresh=1; break
+            fi
+        done
+        if [[ "$fresh" == "0" ]]; then
+            # EVERY branch below must end with status 0. This runs under
+            # `set -euo pipefail`, where a trailing `[[ ... ]] &&` that tests
+            # FALSE returns 1 and errexit kills the whole build with NO message.
+            # That is exactly how this block died: the old form piped grep into a
+            # `while ... [[ -nt ]] && { echo; break; }`, so when nothing was newer
+            # -- the steady-state REUSE case, i.e. the only path a second
+            # consecutive build takes -- the loop returned 1, pipefail propagated
+            # it to the assignment, and the build stopped silently right after
+            # pouch-hello-cxx. The do-nothing path was the one path never run.
+            # Process substitution (not a pipeline) keeps pipefail out of it, and
+            # `|| true` covers grep's no-match exit; `fresh` is set directly so
+            # there is no trailing `&&` left to return 1.
+            local pf
+            while IFS= read -r pf; do
+                if [[ -n "$pf" && "$pf" -nt "$staged" ]]; then
+                    fresh=1
+                    break
+                fi
+            done < <(grep -rl 'thylacine' "$rust_src_root/library/std/src" 2>/dev/null || true)
+        fi
+    fi
+    if [[ "$fresh" == "0" ]]; then
+        ledger "rust progs: r1hello REUSED (cached + up-to-date; force by touching a rust source, or 'tools/build.sh clean')"
+        return 0
+    fi
+
+    echo "==> rust prog: r1hello (cargo std hello for $triple)"
+    # build-std STALENESS TRAP: a from-scratch target dir is the definitive fix
+    # -- `-Z build-std` does not reliably rebuild a patched libc or re-run std's
+    # build.rs on a source edit; it reuses a stale rlib.
+    rm -rf "$target_dir"
+    mkdir -p "$target_dir"
+
+    # Invoke from a NEUTRAL cwd ($BUILD_DIR), NOT the crate dir, and reach the
+    # crate via --manifest-path. r1-hello sits under usr/, whose
+    # usr/.cargo/config.toml replaces crates-io with the native no_std
+    # workspace's vendored third_party/rust -- which (correctly) has none of
+    # std's build-std deps (hashbrown, gimli, object, ...). Cargo's config
+    # discovery walks up from the INVOCATION cwd, so building from $BUILD_DIR
+    # (no .cargo/config ancestor, no global config) bypasses that replacement
+    # and resolves the deps from the real registry. --offline uses the ~/.cargo
+    # cache (a full `build-std=std` build populates it; a fresh box primes it
+    # once with network). The nightly is pinned via `+$nightly`, not the
+    # rust-toolchain.toml upward-walk, so a neutral cwd is safe.
+    #
+    # pouch-clang is the link driver (JSON linker-flavor=gnu-cc). The env pins
+    # the absolute wrapper (the JSON names it bare, which would otherwise need it
+    # on PATH) and the sysroot it links against. `-Z json-target-spec` is
+    # required on this nightly to accept a .json target; panic_unwind rides in
+    # via build-std=std under the target's panic-strategy=unwind.
+    ( cd "$BUILD_DIR" \
+      && CARGO_TARGET_AARCH64_UNKNOWN_THYLACINE_LINKER="$pouch_clang" \
+         POUCH_SYSROOT="$BUILD_DIR/sysroot" LLVM_PREFIX="$LLVM_PREFIX" LLD_PREFIX="$LLD_PREFIX" \
+         cargo "+$nightly" build --release \
+           -Z build-std=core,alloc,std \
+           -Z json-target-spec \
+           --target "$target_json" \
+           --manifest-path "$crate_dir/Cargo.toml" \
+           --target-dir "$target_dir" \
+           --offline ) \
+      || { echo "    r1hello: cargo build FAILED" >&2; exit 1; }
+
+    local built="$target_dir/$triple/release/r1hello"
+    [[ -f "$built" ]] || { echo "    r1hello: expected binary missing at $built" >&2; exit 1; }
+
+    if [[ -x "$llvm_strip" ]]; then
+        "$llvm_strip" -o "$staged" "$built" \
+            || { echo "    r1hello: llvm-strip FAILED" >&2; exit 1; }
+    else
+        cp "$built" "$staged"
+    fi
+    chmod 0755 "$staged"
+
+    # Verify the loader-required shape (ET_EXEC, no PT_DYNAMIC), same as
+    # build_pouch_progs -- a DYNAMIC PIE would fault at exec, not here.
+    local elf_hdr elf_phdrs
+    elf_hdr="$("$readelf" -h "$staged")"
+    elf_phdrs="$("$readelf" -l "$staged")"
+    case "$elf_hdr" in
+        *"Type:"*EXEC*) ;;
+        *) echo "    r1hello: not ET_EXEC -- kernel/elf.c would reject it" >&2; exit 1 ;;
+    esac
+    case "$elf_phdrs" in
+        *DYNAMIC*) echo "    r1hello: has PT_DYNAMIC -- kernel/elf.c would reject it" >&2; exit 1 ;;
+    esac
+    ledger "rust progs: r1hello BUILT ($(wc -c < "$staged" | tr -d ' ') bytes, ET_EXEC static, staged /r1hello)"
 }
 
 build_pouch_progs() {
@@ -6868,6 +7103,7 @@ case "$target" in
     ramfs)       build_ramfs       ;;
     sysroot)     build_sysroot     ;;
     pouch-progs) build_pouch_progs ;;
+    rust-progs)  build_rust_progs  ;;
     sdl2)        build_sdl2        ;;
     tyrquake)    build_tyrquake    ;;
     vkquake)     build_vkquake     ;;
@@ -6900,7 +7136,7 @@ case "$target" in
     clean)       clean             ;;
     *)
         echo "Unknown target: $target" >&2
-        echo "Valid: kernel, ramfs, sysroot, pouch-progs, sdl2, tyrquake, vkquake, dosbox-x, gnumake, libcxx, icu, jsc, stratumd, userspace, disk, pool, go-probes, all, clean" >&2
+        echo "Valid: kernel, ramfs, sysroot, pouch-progs, rust-progs, sdl2, tyrquake, vkquake, dosbox-x, gnumake, libcxx, icu, jsc, stratumd, userspace, disk, pool, go-probes, all, clean" >&2
         exit 1
         ;;
 esac

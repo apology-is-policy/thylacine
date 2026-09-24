@@ -168,6 +168,17 @@ impl Parser {
             Some(k) if core::mem::discriminant(k) == core::mem::discriminant(&want) => {
                 Ok(self.advance())
             }
+            // The stream always ENDS with a synthetic Eof token (`tokenize`),
+            // so running out of input arrives here as `Some(Eof)` and the
+            // `None` arm below is unreachable in practice. Without this arm,
+            // `{ a; b` reported "unexpected token, expected `}`" pointing at a
+            // token the user never typed, instead of "unexpected end of
+            // input" -- the fact that the input RAN OUT was being thrown away
+            // at every expect site in the parser.
+            Some(TokenKind::Eof) => Err(ParseError {
+                kind: ParseErrorKind::UnexpectedEof { expected: label },
+                span: self.eof_span(),
+            }),
             Some(_) => Err(ParseError {
                 kind: ParseErrorKind::UnexpectedToken { expected: label },
                 span: self.current_span(),
@@ -218,6 +229,55 @@ impl Parser {
     }
 
     /// Tokens that can legally follow a statement (terminators).
+    /// Demote a reserved-word token in place to the ordinary `Word` it spells.
+    ///
+    /// A reserved word is reserved only in COMMAND-WORD position -- POSIX's
+    /// rule 1, and what rc does with its own last-token flag. Everywhere else
+    /// `in`, `if`, `case` and the rest are ordinary text: `echo if`, `cd in`
+    /// and `cmd < in` name an argument and a file, and a shell that refuses
+    /// them has made sixteen words unusable as filenames.
+    ///
+    /// Done in the parser rather than with a lexer mode for the same reason as
+    /// [`Self::split_double_rparen`]: the lexer is context-free and a mode has
+    /// to be right everywhere, while a demotion only has to be right where a
+    /// word is already what the grammar asks for. The rewrite keeps the
+    /// original span, so diagnostics still point at the source text, and the
+    /// result is an ordinary `TokenKind::Word` -- so nothing downstream, in
+    /// the expression parser or the evaluator, needs to know this happened.
+    fn demote_reserved_word(&mut self) {
+        let Some(text) = self.peek_kind().and_then(TokenKind::reserved_word_text) else {
+            return;
+        };
+        let span = self.tokens[self.pos].span;
+        self.tokens[self.pos] = Token::new(TokenKind::Word(String::from(text)), span);
+    }
+
+    /// Split a `))` token in place into two `)`, when the parser is somewhere
+    /// that wants a single one.
+    ///
+    /// The lexer is context-free and emits `DoubleRParen` for any `))`, which
+    /// is right for `$(( ))` and wrong for a nested subshell -- `(a; (b; c))`
+    /// closes two subshells with no space between them, and arrived as one
+    /// arithmetic token that matched nothing. Splitting at the parse site is
+    /// the standard answer (Rust's own parser does it for `>>` closing two
+    /// generic lists) and is strictly safer than a lexer mode: it changes the
+    /// stream only where a single `)` is already what the grammar asks for,
+    /// so an arithmetic `))` -- consumed by `parse_arith_command`'s own depth
+    /// accounting before this is ever reached -- is untouched.
+    ///
+    /// The two halves carry the two halves of the original span, so a
+    /// diagnostic still points at the right column.
+    fn split_double_rparen(&mut self) {
+        if !matches!(self.peek_kind(), Some(TokenKind::DoubleRParen)) {
+            return;
+        }
+        let span = self.tokens[self.pos].span;
+        let mid = span.start + 1;
+        self.tokens[self.pos] = Token::new(TokenKind::RParen, Span::new(span.start, mid));
+        self.tokens
+            .insert(self.pos + 1, Token::new(TokenKind::RParen, Span::new(mid, span.end)));
+    }
+
     fn at_statement_terminator(&self) -> bool {
         matches!(
             self.peek_kind(),
@@ -556,6 +616,14 @@ impl Parser {
         let mut words = Vec::new();
         let mut redirects = Vec::new();
         loop {
+            // Past the command word, a reserved word is just a word. Guarded on
+            // `words.is_empty()` so the COMMAND-WORD position keeps its
+            // reservation -- that is the whole of POSIX rule 1, and without the
+            // guard a pipeline element starting with a keyword would silently
+            // become a command named `if`.
+            if !words.is_empty() {
+                self.demote_reserved_word();
+            }
             match self.peek_kind() {
                 Some(k) if is_value_token(k) => {
                     words.push(self.parse_word()?);
@@ -751,6 +819,9 @@ impl Parser {
     }
 
     fn parse_redirect_target(&mut self, label: &'static str) -> ParseResult<Word> {
+        // A redirect target is never a command word, so the demotion is
+        // unconditional here: `cmd < in` reads from a file named `in`.
+        self.demote_reserved_word();
         match self.peek_kind() {
             Some(k) if is_value_token(k) => self.parse_word(),
             _ => Err(ParseError {
@@ -796,8 +867,13 @@ impl Parser {
         end_token: TokenKind,
     ) -> ParseResult<Vec<Statement>> {
         let mut stmts = Vec::new();
+        let ends_on_rparen =
+            core::mem::discriminant(&end_token) == core::mem::discriminant(&TokenKind::RParen);
         loop {
             self.skip_separators();
+            if ends_on_rparen {
+                self.split_double_rparen();
+            }
             match self.peek_kind() {
                 Some(k) if core::mem::discriminant(k) == core::mem::discriminant(&end_token) => {
                     break
@@ -806,6 +882,13 @@ impl Parser {
                 _ => {}
             }
             let stmt = self.parse_statement()?;
+            // Before JUDGING the terminator, not only before looking for the
+            // end token: `(a; (b; c))` reaches this point with the inner
+            // subshell's `c` parsed and `))` current, and a `)` is exactly the
+            // terminator this is about to ask for.
+            if ends_on_rparen {
+                self.split_double_rparen();
+            }
             if !self.at_statement_terminator() {
                 return Err(ParseError {
                     kind: ParseErrorKind::UnexpectedToken {
@@ -1508,6 +1591,45 @@ mod tests {
     use alloc::string::ToString;
     use alloc::vec;
 
+    /// UT-PARSE-1: a reserved word is reserved only in COMMAND-WORD position.
+    ///
+    /// Sixteen words -- `if`, `in`, `for`, `case`, `fn`, ... -- could not be
+    /// used as an argument or a filename ANYWHERE: `echo if`, `cd in`,
+    /// `cat case` and `cmd < in` were all parse errors. The finding arrived as
+    /// a redirect-only failure; the list below is what measuring the blast
+    /// radius actually returned, and it is kept as the test because the
+    /// redirect case alone would pass for a fix that only patched
+    /// `parse_redirect_target`.
+    ///
+    /// `ls in/` is here as the control that says something about the fix's
+    /// SHAPE rather than its effect: it passed before this change too, because
+    /// `in/` is not the bare word `in`, so a test made only of failures could
+    /// not tell a demotion from the lexer simply never reserving anything.
+    #[test]
+    fn reserved_words_are_ordinary_words_off_the_command_word() {
+        for src in [
+            // Argument position, every reserved word.
+            "echo fn", "echo let", "echo if", "echo else", "echo case", "echo for",
+            "echo while", "echo in", "echo try", "echo catch", "echo return",
+            "echo break", "echo continue", "echo on", "echo mask", "echo trace",
+            // Not just the second word, and not just `echo`.
+            "echo a in b", "cd in", "cat if", "ls in/",
+            // Redirect targets, which is where the finding surfaced.
+            "cmd < in", "cmd > for", "cmd >> case",
+        ] {
+            parse(src).unwrap_or_else(|e| panic!("{src}: {e:?}"));
+        }
+
+        // The command word KEEPS its reservation -- without that conjunct the
+        // demotion would turn every control-flow statement into a command
+        // named after its keyword, which is the failure this guard exists for.
+        parse_ok("if (x) { a }");
+        parse_ok("for (i in xs) { echo $i }");
+        parse_ok("while (x) { a }");
+        assert!(matches!(parse_err("in"), ParseErrorKind::InvalidStatement));
+        assert!(matches!(parse_err("else"), ParseErrorKind::InvalidStatement));
+    }
+
     fn parse_ok(src: &str) -> Script {
         parse(src).unwrap_or_else(|e| panic!("parse failed: {:?}", e))
     }
@@ -1888,17 +2010,47 @@ mod tests {
         }
     }
 
+    /// UT-PARSE-2, investigated and WITHDRAWN: the parser is right and this
+    /// test's original expectation was not.
+    ///
+    /// It asserted `cmd =arg` parses as the two words "cmd" and "=arg". That
+    /// contradicts `docs/UTOPIA-SHELL-DESIGN.md` section 6.1, which documents
+    /// bare assignment as `x = value` -- spaces around `=`, rc's form, not
+    /// POSIX's adjacency rule. Under that grammar `cmd =arg` IS an assignment,
+    /// and measuring confirms the parser is consistent about it: all four of
+    /// `cmd =arg`, `cmd = arg`, `cmd= arg` and `cmd=arg` are assignments.
+    /// Never having run, the test encoded an intent that the grammar had moved
+    /// past.
+    ///
+    /// **The case worth knowing about is `echo =arg`, which ASSIGNS** -- to a
+    /// variable named `echo` -- rather than printing `=arg`. That is inherent
+    /// to an rc-style assignment and rc behaves the same way; it is pinned here
+    /// so it is a known property of the grammar rather than a surprise
+    /// someone rediscovers. Changing it would be a scripture change, not a bug
+    /// fix.
+    ///
+    /// `=` IS a literal once a command word is established, which is the half
+    /// the original test was reaching for: `echo a =b` is three words.
     #[test]
-    fn equal_in_argument_position_is_literal() {
-        // A `=` in argument position is a literal, not an assignment (was
-        // UnexpectedEqualInCommand). `cmd =arg` -> two words: "cmd", "=arg".
-        let s = parse_ok("cmd =arg");
+    fn equal_is_assignment_at_statement_start_and_literal_after_a_word() {
+        for src in ["cmd =arg", "cmd = arg", "cmd= arg", "cmd=arg", "echo =arg"] {
+            let s = parse_ok(src);
+            assert!(
+                matches!(&s.statements[0].kind, StatementKind::Assign(_)),
+                "{src} is an assignment under UTOPIA-SHELL-DESIGN 6.1"
+            );
+        }
+        let s = parse_ok("echo a =b");
         match &s.statements[0].kind {
             StatementKind::Pipeline(p) => match &p.elements[0].command.kind {
-                CommandKind::Simple(sc) => assert_eq!(sc.words.len(), 2),
-                _ => panic!(),
+                CommandKind::Simple(sc) => assert_eq!(
+                    sc.words.len(),
+                    3,
+                    "past the command word a `=` is a literal argument"
+                ),
+                _ => panic!("expected a simple command"),
             },
-            _ => panic!(),
+            _ => panic!("expected a pipeline"),
         }
     }
 
@@ -2218,6 +2370,49 @@ mod tests {
         }
     }
 
+    /// UT-PARSE-3's fix, generalized -- and its other half: the split must not
+    /// touch a `))` that MEANS arithmetic.
+    ///
+    /// The single-case test below would pass for a fix that special-cased
+    /// exactly `(a; (b; c))`, so this nests three deep as well -- `)))` lexes
+    /// as DoubleRParen + RParen, a different shape from `))` -- and pairs it
+    /// with arithmetic in the positions where a lexer-mode fix would go wrong.
+    ///
+    /// The OPENING side is deliberately not symmetric, and this test is where
+    /// that gets recorded: `((` is the arithmetic opener, so `((a; b); c)` is
+    /// read as arithmetic and fails on `a`, exactly as it does in sh. The
+    /// remedy there is the same as sh's -- a space, `( (a; b); c)` -- and it is
+    /// asserted below so that behaviour is pinned rather than merely current.
+    #[test]
+    fn adjacent_closing_parens_split_but_arithmetic_does_not() {
+        let subshell = |src: &str| {
+            let s = parse_ok(src);
+            assert_eq!(s.statements.len(), 1, "{src}");
+            assert!(
+                matches!(&s.statements[0].kind, StatementKind::Pipeline(p)
+                    if matches!(p.elements[0].command.kind, CommandKind::Subshell(_))),
+                "{src} is a subshell"
+            );
+        };
+        subshell("(a; (b; c))");
+        subshell("(a; (b; (c; d)))");
+        subshell("( (a; b); c)");
+
+        // Arithmetic still owns its own `))`: a statement-level `((...))`, and
+        // an expansion inside a subshell, where the closes ARE adjacent.
+        parse_ok("((1 + 2))");
+        parse_ok("echo $((1 + 2))");
+        parse_ok("(echo $((1 + 2)))");
+        parse_ok("(a; echo $((1 + 2)))");
+
+        // And the sh-shaped ambiguity, pinned: a leading `((` is arithmetic,
+        // so this is NOT a nested subshell and must not silently become one.
+        assert!(matches!(
+            parse_err("((a; b); c)"),
+            ParseErrorKind::InvalidArithLiteral
+        ));
+    }
+
     #[test]
     fn nested_subshell_inside_subshell() {
         let s = parse_ok("(a; (b; c))");
@@ -2254,6 +2449,33 @@ mod tests {
                 _ => panic!(),
             },
             _ => panic!(),
+        }
+    }
+
+    /// UT-PARSE-4: input that RAN OUT says so, and input that merely went
+    /// wrong still says THAT.
+    ///
+    /// The second half is the control, and without it this is satisfied by a
+    /// parser that answers `UnexpectedEof` to everything -- which is exactly
+    /// what a careless fix to `expect_kind` would produce, since the arm added
+    /// there sits in front of the general one.
+    #[test]
+    fn truncation_reports_eof_and_a_real_wrong_token_still_does_not() {
+        for src in ["{ a; b", "if (x) { a", "fn f {", "while (x) {", "case $x {"] {
+            assert!(
+                matches!(parse_err(src), ParseErrorKind::UnexpectedEof { .. }),
+                "{src} ran out of input, so the error must say so: {:?}",
+                parse_err(src)
+            );
+        }
+        // Not truncated -- the input is complete and simply wrong. These must
+        // NOT become Eof errors.
+        for src in ["if x { a }", "fn { a }"] {
+            assert!(
+                !matches!(parse_err(src), ParseErrorKind::UnexpectedEof { .. }),
+                "{src} is complete but malformed, not truncated: {:?}",
+                parse_err(src)
+            );
         }
     }
 

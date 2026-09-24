@@ -301,6 +301,12 @@ struct SrvConn {
     // (which all reach cn through a lock-paired path).
     bool                byte_mode;
 
+    // The identity cape (IDENTITY-DESIGN 3.2), propagated from a DMSRVCAPE
+    // service at mint exactly like byte_mode (captured under the registry lock
+    // with LIVE; srvconn_set_cape is the one-way pre-publication setter).
+    // SYS_ATTACH_9P_SRV capes every attach over a conn that carries it.
+    bool                cape;
+
     // P6-pouch-stratumd-boot 16c: kernel-attached gate.
     //
     // SYS_ATTACH_9P_SRV wraps a byte-mode SrvConn in a kernel-owned 9P
@@ -382,6 +388,12 @@ long srvconn_server_recv_blocking(struct SrvConn *cn, u8 *buf, long n);
 // `cn` must be a freshly-minted SrvConn from srvconn_create — undefined
 // behavior on a NULL or already-published SrvConn.
 void srvconn_set_byte_mode(struct SrvConn *cn);
+
+// srvconn_set_cape -- one-way setter for cn->cape, with srvconn_set_byte_mode's
+// contract: called at mint, BEFORE the conn is enqueued or kernel-attached.
+// srvconn_cape reads it (false on a NULL / corrupted conn).
+void srvconn_set_cape(struct SrvConn *cn);
+bool srvconn_cape(const struct SrvConn *cn);
 
 // srvconn_set_kernel_attached — one-way setter for cn->kernel_attached.
 // P6-pouch-stratumd-boot 16c. Called from sys_attach_9p_srv_handler

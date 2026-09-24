@@ -90,10 +90,13 @@ loop with no blockers:
 
 > **I-39 (debug authority bounded, never bypasses memory-safety).** A Proc may
 > debug a target iff it can *name* `/proc/<pid>` in its namespace AND passes the
-> two-axis gate (**owner** — same `principal_id` on the `0600` ctl — **OR** the
+> two-axis gate (**owner-covers-target** — same `principal_id` on the `0600` ctl
+> **AND** the target's capability set a subset of the caller's — **OR** the
 > capability axis `CAP_HOSTOWNER`/`CAP_DEBUG`), the I-26-analog (owner OR the host
-> owner OR the domain cap, exactly as the kill gate is owner OR
-> `CAP_HOSTOWNER`/`CAP_KILL`). `CAP_HOSTOWNER` is a debug axis (the Plan 9 "eve"
+> owner OR the domain cap, as the kill gate is owner OR
+> `CAP_HOSTOWNER`/`CAP_KILL`) **with the owner axis narrowed by the
+> capability-cover rule of §3.1 — debug is the one axis where same-principal is
+> necessary but not sufficient.** `CAP_HOSTOWNER` is a debug axis (the Plan 9 "eve"
 > super-user shape; the host owner already kills/chowns/DAC-overrides any target,
 > and debug is strictly less invasive than kill — user-voted 2026-07-15);
 > `CAP_DEBUG` is the clearance-grantable cross-identity axis for a non-hostowner
@@ -126,6 +129,374 @@ composes — adds no bypass to — I-1 (namespace containment), I-12 (W^X), I-13
 elevation-only, never an identity), I-36 (the Image cache), and the #811/#68
 death-path invariants (§8).
 
+### 3.1 The capability-cover rule (operator-voted 2026-09-24)
+
+> **The owner axis admits only when the caller's authority COVERS the target's:**
+> `(target->caps & ~caller->caps) == 0`. A same-principal caller that does *not*
+> cover the target needs `CAP_DEBUG`/`CAP_HOSTOWNER` like any stranger. `kproc`
+> and the `PROC_FLAG_NOTRACE` seam are still refused ahead of every axis.
+
+**Why same-principal was never sufficient.** A debug attach is *total control* of
+the target — its memory, its registers, its execution. So the gate must answer a
+capability question, not only an identity one: **debugging must not hand a caller
+authority it does not already hold.** Identity cannot separate the two parties
+here, because elevation in Thylacine deliberately does *not* change identity
+(IMPERIUM-DESIGN §11.6 / I-22: "the durable identity is unchanged; the sub-shell
+is the same principal"). Concretely, before this rule:
+
+- an **unelevated** shell of user U passed the owner axis against U's own
+  **imperium-elevated sub-shell**, and against every member of a **propagating
+  legate scope** (which hold the flowed `CAP_CHOWN`/`CAP_DAC_OVERRIDE`/`CAP_KILL`
+  class), and could attach and drive it. That borrows a **trusted-path**
+  elevation (I-25/I-27) from a process that never went through the trusted path —
+  the SAK confer is bypassed by debugging its result.
+- the same route is the general form of the (U) F1 side door, which
+  `SPAWN_PERM_SEAL` closed for login's home proxy alone: a capability
+  (`CAP_TCB_DIAL`) is worthless if a peer *sharing the principal* can puppet the
+  holder. F1 sealed one asset; this rule generalises the answer **along the
+  capability axis** — see the third bullet below for the axes it does not reach.
+
+**What this rule does NOT close, stated so the next reader does not over-trust it**
+(audit 2026-09-24, findings F1 and F8; the third bullet self-found at the close):
+
+- **The pre-elevation window.** Cover is evaluated at the instant of the call, and
+  nothing records that a target *was* debugged. A same-principal peer of EQUAL
+  authority may attach to `/bin/imperium` *before* it redeems — at that moment its
+  caps are a subset of the peer's, so cover admits — stop it while it blocks on the
+  deferred SAK reply, write its writable memory, and detach. The redeem then
+  proceeds and returns through the injected control flow, holding the clearance.
+  `cap_redeem_grant_for_writer` and `proc_become_legate` consult no debug state of
+  the writer. So the rule closes debugging *the result* of an elevation, never
+  debugging *its precursor*. The missing half is the other half of Linux's model —
+  a monotonic debug taint that refuses the privilege gain — tracked as its own
+  chunk; until then the trusted panel's correct-pid display is the only defense
+  inside that window, which is why it is load-bearing and not cosmetic.
+- **Disclosure through identity-only surfaces.** `environ` gates on
+  owner-or-`CAP_HOSTOWNER` (`devproc_extract_authorized`), `sched` and `imperium` on
+  the same two axes (`devproc_owner_or_hostowner`), and `cmdline`, `ns`, `exe`,
+  `cwd` and `maps` are mode 0444 — none of them weighs caps. So an unelevated peer
+  still READS an elevated same-principal target — `environ` being the one that
+  matters, since it is where secrets live by convention. This rule governs
+  *control*, not *disclosure*; disclosure is the seal's axis, and 3.2 below says
+  which of those files the seal reaches: the image files, and deliberately **not**
+  `sched` or `imperium`. What remains open is the other half: an **unsealed**
+  elevated target is still readable by an unelevated same-principal peer, because
+  the disclosure gate's owner axis carries no cover condition. Linux applies its
+  cover check to `/proc` reads as well as to attach; we deliberately have not
+  followed it there yet, because losing peer *diagnostics* is a different cost from
+  losing peer *control* and no one has weighed it. Tracked separately.
+- **Authority that is not a capability.** Cover is a subset test over ONE word,
+  and Thylacine carries authority in three other places: the `proc_flags` spawn
+  perms (`PROC_FLAG_MAY_POST_SERVICE`, `SESSION_HANGUP`,
+  `MAY_RAISE_PAGE_BUDGET`), the I-34 hardware allowance, and the handle table —
+  a transport, an endowed fd or a surface share is a handle, never a cap. A
+  same-principal peer holding *equal caps* and *fewer perms* therefore covers,
+  and debugging hands it the perms. The live instance is the Halcyon session
+  compositor: login spawns `/bin/halcyond` with the shell's own `SHELL_CAPS`
+  plus `MAY_POST_SERVICE`, halcyond masks its tile children with
+  `!CAP_SET_IDENTITY` (which spawn intersects to the same set), so a tile
+  program's caps equal the compositor's exactly, and until chunk B it carried no
+  seal (it does now — see the census in `caps.h`). This is
+  *not* a trusted-path break — the Lictor seat **service** is kernel-sealed at
+  its bind, and halcyond is only the untrusted seat client — and it is not a
+  regression, since identity alone admitted before this rule. But it means the
+  (U) F1 checklist is **not superseded** by cover: a `SPAWN_PERM_*` bit handed
+  to a Proc that runs as a user may need `SPAWN_PERM_SEAL` in the same call, because
+  cover cannot see the bit that was just granted. The **question** to ask at each such
+  grant is stated at `CAP_TCB_DIAL` in `caps.h` (the authoritative file for the
+  capability model): *would puppeting the holder give a same-principal peer authority
+  it cannot otherwise obtain?* If yes, the grant and the seal are one step.
+
+  It is a question and not a mechanical rule, and that correction was earned: an
+  earlier draft of this bullet asserted the rule as universal and claimed "both of
+  login's spawn sites" obeyed it. **There are three**, and the third — the session
+  shell at `main.rs:1341`, holding `CONSOLE_OWNER | SESSION_HANGUP` — is deliberately
+  unsealed, because neither bit is onward-conferrable by `ut` and a peer can already
+  end the session by killing it, so sealing would make the user's own shell
+  undebuggable and buy nothing. A rule generalised from two examples, with its census
+  taken from memory rather than from a grep, was false on the day it landed. The
+  compositor and the home proxy are sealed; `caps.h` carries all three answers.
+
+  What is still missing is a *guard*: nothing fails the build if a future site answers
+  the question wrongly or never asks it, and the two candidate enforcement points (a
+  source check over the spawn builders that flags a site for REVIEW, or a kernel
+  refusal when a perm grant coincides with a non-TCB identity) are tracked as their own
+  question, since the kernel one is a spawn-ABI change.
+
+**Prior art.** Linux's `cap_ptrace_access_check` refuses when the tracee's
+permitted set is not a subset of the tracer's, unless the tracer holds
+`CAP_SYS_PTRACE`; FreeBSD's `p_candebug` layers credential checks on the same
+idea. In capability terms it is the no-amplification-through-control rule: a
+controller may never exceed its own authority by controlling something stronger.
+
+**What does NOT regress, and why.** Fork-grantable caps only ever *shrink*
+(I-2, "growth only via the `cap` device"), so a child's set is always a subset of
+its spawner's — **a shell can still debug every program it spawns.** The rule can
+only bite where the target *gained* authority the caller lacks, which happens
+only through the `cap` device or a legate redeem. To debug an elevated process
+you either elevate the debugger into the same scope (its caps then cover) or hold
+the cross-identity `CAP_DEBUG`. This is the intended shape: debug an elevated
+thing from an equally-elevated context.
+
+**This is where debug DIVERGES from the I-26 kill analog.** Kill stays
+owner-OR-cap with an unconditional owner axis: killing a more-capable
+same-principal target destroys it, and never *uses* its authority. Debug does —
+so only debug carries the cover condition. The asymmetry is deliberate, not an
+oversight in one of the two gates.
+
+**Scope of the predicate.** One predicate (`devproc_debug_authorized`) gates every
+debug surface, so the rule applies uniformly — including the §5b settled-`kstack`
+diagnostic read, whose raw-address half is separately `CAP_HOSTOWNER`/`CAP_DEBUG`-only
+(§5b.2). An unelevated owner therefore loses the *symbolic* kstack of its own
+more-capable sub-shell; forking the predicate per surface would buy that back at
+the cost of two authority rules to audit instead of one, which this design
+declines.
+
+**Concurrency obligation for the implementation.** Both sides are read
+**atomically**: `proc_become_legate` is a cross-thread writer of a running Proc's
+`caps`, so a plain load is C11-racy (the RW-5 F2 finding, already applied to the
+caller's caps). The target's `principal_id` is read with ACQUIRE for the same
+reason (it is `proc_apply_identity`'s RELEASE-published word), and the NOTRACE seam
+last, with the two caps loads between them. The seam's *visibility* does not rest on
+that order: `proc_seal` stamps NOTRACE under `g_proc_table_lock`, which every caller
+of the gate holds (3.2, "by a lock, not by a load order").
+
+
+### 3.2 The seal's contract: it means "cannot be EXTRACTED FROM" (2026-09-24)
+
+> **`PROC_FLAG_NOTRACE` forbids CONTROL. `PROC_FLAG_NODUMP` forbids EXTRACTION.**
+> `SPAWN_PERM_SEAL` sets both, so a sealed Proc can be neither driven nor read.
+> The extraction half covers every file that hands out something the target
+> **holds** — `environ`, `maps`, `ns`, `cwd`, `exe`, `cmdline`, and the read
+> direction of `mem`, `regs` and `fpregs` — named by one predicate,
+> `devproc_kind_is_image`. It deliberately does **not** cover `status`, `sched` or
+> `imperium`, which are the kernel's record *about* a Proc rather than content *of*
+> it.
+
+**The question this settles.** The seal was documented as closing the route "a
+capability is worthless if a peer *sharing the principal* can debug-drive the
+holder", which left a reader unable to tell whether the promise was *cannot be
+driven* or *cannot be extracted from*. It is the latter, and the seal's own
+construction always said so: `SPAWN_PERM_SEAL` stamps `NODUMP` alongside
+`NOTRACE`, and a dump bit is a *disclosure* bit. A sealed Proc whose `environ`
+any same-principal peer could read was therefore an inconsistency, not a
+boundary — and `environ` is where secrets live by universal convention.
+
+**Why the two bits are not synonyms, and why NODUMP is the one that gates reads.**
+This is Linux's split, and it is the right one: there, *dumpability* — not the
+ptrace flag — governs `/proc/<pid>/{environ,maps,mem,…}`, because refusing to be
+dumped and refusing to be driven are different promises a process may want to
+make separately. Reading a Proc's environment *is* extracting a piece of its
+image, so it belongs to the dump axis. A useful consequence: before this,
+`NODUMP` had no runtime reader but the re-enable refusal in its own setter, so
+the bit protected nothing at all; now it has teeth even though v1.0 still has no
+core dumps.
+
+**Choosing the BIT was the easy half; choosing the SET was where the first cut went
+wrong** (audit 2026-09-24, P2-3), and the correction is the load-bearing part of this
+section. The seal was first applied inside `devproc_owner_or_hostowner`, which swept in
+everything routed through that predicate. Two errors at once:
+
+- It **missed `maps`**, which is mode `0444` and reached with no gate at all — so a
+  sealed Proc's complete VMA table stayed readable by every Proc on the machine: each
+  range, its `rwxp`/`s` (where `s` means the backing Burrow is *another* Proc's memory
+  mapped cross-Proc — a netd flow ring, a tapestryd weave), the backing type, the file
+  `dev:qid`, and the `stack`/`vdso`/`guard` roles. The draft cited a precedent that
+  *names* `maps` and then left `maps` open. The old justification for `0444` — that
+  `maps` "discloses nothing a peer could not already read" — is **circular** once a
+  seal exists, because the seal's whole premise is that this peer must not read this
+  target. The canonical victim was the kernel-sealed Lictor seat service, leaking its
+  full layout including the `SHARED_IN` private-pixel regions.
+- It **wrongly captured `imperium` and `sched`**. Neither is a piece of the image:
+  `imperium` is the kernel's own unforgeable statement about a Proc (scope, session,
+  flowing set, rods, axe, deadline) and `sched` is scheduler telemetry. "Cannot be
+  extracted from" does not reach the kernel's attestation about its subject. And
+  sealing them was not merely over-broad but **actively harmful**, because
+  `SYS_SET_DUMPABLE(0)` is an ungated one-way self-call: any Proc holding a live
+  propagating legate scope could have permanently suppressed the kernel's record of its
+  own elevation, with no capability required and no way back. I-25's *enforcement*
+  never depended on that file, but its **observability** does, and an audited party
+  must not be able to switch off the audit.
+- The re-audit found the corrected set **still short** (round 2, P1). `ns` — the
+  Proc's entire mount table, mount point and source path for every entry — was `0444`
+  and reached with no gate, and the tree's own comments ranked it *above* `maps` in
+  what it discloses. `cwd`, `exe` and `cmdline` were the same class. And the read
+  direction of `mem`, `regs` and `fpregs` answered to NOTRACE alone, so a Proc that set
+  NODUMP by itself refused the host owner a map header while handing a debugger every
+  byte of its memory. Each miss had the same cause: a list of files instead of a
+  property.
+
+So the rule is: **the seal follows the image, not the ledger** — and the image is
+*everything the Proc holds*: its memory and the layout of it, its user register state,
+its environment, its namespace, its working directory, the path of the image it runs,
+its arguments. The ledger is what the kernel *says about* it — `status`, `sched`,
+`imperium` — and the kernel does not keep secrets on a subject's behalf. The control
+files (`ctl`, `wait`) and the kernel's own execution state (`kstack`) are neither:
+they answer to NOTRACE. `kregs` is in the set: beside the kernel's saved frame it
+carries `tpidr_el0`, an EL0 register the Proc holds. The set is one predicate,
+`devproc_kind_is_image`, which every read site asks through `devproc_read_sealed` with
+the kind it serves, so a file is classified there or not at all — and a new read path
+must make the same call (its row in `dump_seal_disclosure` is what catches one that
+does not). `name`, the exe path's basename stamped at exec, is ledger: `status`,
+`sched` and `/ctl/procs` carry it, as Linux keeps a non-dumpable process's `comm`
+public.
+(`cmdline` carries no argv yet; it is in the set so that argv arrives sealed.)
+
+**Two properties of the enforcement, both deliberate.**
+
+- **Self is exempt, and exempt first.** A Proc reads its own `environ` through this
+  same gate — **by its own pid**, because devproc has no `self` entry at all; an
+  earlier draft justified the exemption by "it would break `/proc/self`", which named
+  a surface this filesystem does not have. The exemption is still right, for the
+  reason that survives: sealing a Proc against itself protects nobody, since it
+  already holds the secret. The one thing in the tree actually spelled
+  `/proc/self/environ` is the diorama's Linux re-presentation, and the exemption does
+  **not** reach it — see the residue at the end of this section.
+- **Otherwise absolute: `CAP_HOSTOWNER` does not buy through it**, exactly as the
+  `NOTRACE` seam refuses debug control to every cap holder including the host
+  owner. **This is a deliberate DIVERGENCE from Linux, and the precedent above does
+  not extend to it.** Linux is the authority for *which bit* gates disclosure; it is
+  not the authority for absoluteness, because there a non-dumpable process's `/proc`
+  entries become root-owned and `CAP_SYS_PTRACE` still reads them. We refuse the
+  equivalent, for one reason that outranks the convenience: the canonical sealed
+  asset is the one the kernel seals itself at the seat bind, whose stated contract is
+  that "physical keys/private pixels must never be exposed through a debug attach or
+  core dump" — and keys are extracted by *reading*. A seal the host owner can read
+  through does not hold that contract, so a host-owner override would make the
+  strongest seal in the system weaker than its own documented promise. Thylacine also
+  has less to give up than Linux does, because `CAP_HOSTOWNER` is a console-gated
+  capability rather than an ambient root identity (I-22).
+
+  **Accepted cost, stated fully.** A sealed Proc yields its image files to nobody but
+  itself, the host owner included. And because `SYS_SET_DUMPABLE(0)` is an ungated
+  self-call, *any* process may make itself opaque on them — there is no authority
+  check to pass. That is accepted because opacity there conveys no authority: a
+  process's image is its own data, and hiding it grants nothing it did not already
+  have. Every *authority* surface is untouched,
+  so the operator keeps the `/ctl/procs` listing, the kill gate (I-26 is a separate
+  predicate and weighs no seal), and all observation of external behaviour — and now
+  also keeps `sched` and `imperium`, which is the correction above.
+
+  An earlier draft made this same argument while the seal still covered `sched` and
+  `imperium`, and said a future reader "should re-test rather than assume" it. The very
+  next reader did, and it does not hold for `imperium`: a self-suppressible record of
+  one's own elevation is exactly a case where opacity *does* convey something. The
+  argument was sound for the image and was being applied to the ledger. If the
+  remaining cost is ever found wanting, the narrower fix is to distinguish a
+  KERNEL-imposed seal (the seat bind) from a self-imposed one and let the host owner
+  through the latter only —
+  deliberately not done here, because two classes of seal is more mechanism than the
+  problem has so far earned.
+
+**How it is placed.** One predicate, `devproc_kind_is_image`, names the set, and every
+read site asks it through `devproc_read_sealed` with the kind it serves — the dispatch,
+and each walk with its own read path (`environ`, `mem`, `regs`/`fpregs`/`kregs`,
+`kstack`, `wait`). `devproc_read_cb` refuses an image kind on the seal **before any
+formatter runs**, so `cmdline`, `ns`, `exe`, `cwd` and `maps` keep their ambient
+all-pids visibility for an *unsealed* Proc — this section does not withdraw that Plan 9
+posture — and hand out nothing for a sealed one. `environ`, the one image file with an
+owner gate of its own, composes the two in `devproc_extract_authorized`. The mem and
+regs paths refuse the read direction. `devproc_owner_or_hostowner` keeps its old
+meaning and no seal, and gates `sched` and `imperium`.
+
+**NODUMP alone does not make a Proc safe from a peer that may still DRIVE it.** The
+dump seal refuses every *read* of the image, `mem`/`regs`/`fpregs`/`kregs` included; it does
+not refuse *control*, which is NOTRACE's. A debugger that may attach, stop and write
+registers can make the Proc disclose itself, so a Proc guarding a secret sets both
+bits — which `SPAWN_PERM_SEAL`, the seat bind and both live `SYS_SET_DUMPABLE(0)`
+callers (corvus, login) all do.
+
+**A read sees a Proc wholly sealed or wholly not — by a lock, not by a load order.**
+The first correction made the ordering structural by *composition*: the authority
+predicate ACQUIRE-loaded the target's `principal_id` before the seal was tested,
+pairing with `proc_apply_identity`'s RELEASE. The re-audit showed that guarantee was
+conditional (round 2, F5). An acquire load orders only against the release store it
+reads *from*, so it held only for a reader admitted **because** it saw the new
+principal — not for a spawn that changes no identity, which publishes nothing to pair
+with, and not for a `CAP_HOSTOWNER` reader, whose admission never consulted the
+identity at all. So the ordering is no longer derived. `proc_seal` is the **only**
+writer of both bits and stamps them under `g_proc_table_lock`; every `/proc` reader
+that tests them runs under that same lock (`proc_for_each`) and renders there too. A
+read therefore happens entirely before a seal or entirely after it, whichever axis
+admitted the reader — including against a Proc that seals *itself* and then loads a
+secret. `SPAWN_PERM_SEAL`'s two bits land in one critical section, so no reader ever
+sees half a seal. The acquire loads of `principal_id` remain, for C11 race-freedom
+only. The planned `/proc/<pid>/fd/` inherits all of this by testing the seal under the
+same lock, which is the only thing it has to remember.
+
+**What the seal does not follow: spawn copies the environment, and the seal is not
+copied with it.** `rfork` deep-copies the parent's environment into every child
+(`env_clone_into`), while `proc_flags` never inherit. So a sealed parent's environment
+is readable through any child it spawns *unsealed* — login seals itself and then
+spawns the session shell `ut` unsealed, so `ut`'s `environ` is login's. And a child
+spawned *with* `SPAWN_PERM_SEAL` is visible in `/proc` from the moment `rfork` links it
+until its thunk stamps the seal, a window in which its parent-copied image reads as
+unsealed. The seal refuses its Proc's image being **read**; it does not follow the
+image when spawn **copies** it. No secret travels that path today, but the path is in use:
+login seeds six variables into its own environment before it spawns the session
+shell — `HOME`, `USER`, `PATH`, `GIT_EXEC_PATH`, `GIT_CONFIG_SYSTEM` and
+`OPENSSL_armcap`, all plain values (`seed_session_env`, `usr/login/src/main.rs`) — and
+every session child inherits a copy that reads on its own owner axis. Login's secrets
+are in memory, under NOTRACE. The guard is the comment on that key list: no
+credential, token or key may enter it, because the seal does not follow the copy.
+Whoever puts one in a sealed Proc's environment must know. Stamping the seal *before* `rfork` links the child is the
+mechanism decision A (the seal crossing `fork`) needs anyway, and it would close the
+window for `SPAWN_PERM_SEAL` children.
+
+**What 3.2 does NOT close.** The disclosure gate's owner axis still carries no
+capability-cover condition, so an **unsealed** elevated target remains readable
+by an unelevated same-principal peer — its `imperium` file even enumerates the
+caps it holds. That is the disclosure twin of 3.1 and is tracked as its own
+question, not folded in here: cover exists to stop amplification *through
+control*, and a read amplifies nothing, so the argument for it on this axis has
+to be made on secrecy grounds and its cost (peers lose diagnostics on each other)
+weighed on its own.
+
+**And the exemption does not reach through a DEPUTY, which silently empties the one
+`/proc/self/environ` that exists.** The exemption is `caller == target`, pointer
+identity, and devproc's own proxy note is explicit that this family of gates "keys on
+the READER, so a 9P server proxying this file for a client is authorized as ITSELF, not
+as its client". The diorama re-presents a Linux `/proc/self/environ` by reading its
+*peer's* file, so it arrives here as a cross-Proc read: `caller != target`, the seal
+fires, and the diorama renders an EMPTY environment — a denial its own code notes is
+"indistinguishable from an empty environment". So a sealed Linux-phenotype service would
+lose its own `/proc/self/environ` with no error to observe. The same applies to
+`/proc/self/maps`, which the diorama proxies the same way and which this section newly
+seals — and the diorama's own header states the posture it relies on, "any Proc can read
+any Proc's status/exe/cwd/maps", which is now true of `status` always and of the other
+three only for an *unsealed* Proc.
+
+Refusing is nonetheless *correct*: a deputy that could read a sealed principal's
+environment on the principal's say-so would itself be the authority leak that proxy note
+warns about. The loss is functionality, not security, and the real answer is MANDATE
+(I-35, a deputy acting with its client's authority), reserved and unbuilt — the proxy
+note already says so for the pre-existing both-ways version of this problem, and this is
+that problem wearing the seal. Currently unreachable, with both triggers named:
+`PR_SET_DUMPABLE` is not implemented in the vivarium, and no phenotype process is
+spawned with `SPAWN_PERM_SEAL`. It goes live the moment either changes, and whoever
+implements the first of them should read this paragraph. The diorama's view of OTHER
+sealed Procs is live today: a Linux program in a vivarium container reading
+`/proc/<corvus pid>/exe` (or `cmdline`, `cwd`, `maps`) gets an empty file where Linux
+answers `EACCES` for a non-dumpable target — the refusal holds, its errno does not
+(tracked). Its `status` takes `Name:` from the native ledger `name:` line, so a sealed
+Proc is not nameless there.
+
+**What the seal still owns.** `SPAWN_PERM_SEAL` (NOTRACE + NODUMP) is *not*
+made redundant: it protects secrets an **equal-authority** peer must not read —
+seat key material, a proxy's keys — exactly the case the cover rule admits.
+
+**And it does NOT narrow the "does the seal cross `fork`" question (§F2/decision
+A).** An earlier draft of this section claimed it did, on the premise that a forked
+child inherits its parent's caps. That premise is **false for the default path**,
+and the kernel says so at `kernel/proc.c:1879` — "Native fork keeps `CAP_NONE`
+(Thylacine's stronger fork-zeros-caps default) via `rfork_forked`". Only the
+phenotype clone path (`rfork_forked_with_caps`, `PHENO_LINUX`) inherits caps. So a
+**native** forked child of a sealed Proc holds caps 0, which every same-principal
+peer trivially covers, while still holding the parent's inherited *handles* — a
+transport is a handle, not a capability. The cover rule therefore does **nothing**
+for that child, and the seal is the only mechanism that could. Decision A is
+load-bearing, not residual. (Corrected 2026-09-24, audit F3.)
+
 ---
 
 ## 4. 8a-1 — the software-checkpoint tier
@@ -149,7 +520,7 @@ files today: `status`, `cmdline`, `ctl`, `ns`. The debug surface adds flat files
 | `regs` | `0600` | RW the saved EL0 GPR frame (`x0..x30`, `SP_EL0`, `ELR_EL1`, `SPSR_EL1`); writes stopped-only |
 | `fpregs` | `0600` | RW the saved FP/SIMD frame; stopped-only writes |
 | `wait` | `0400` | read blocks until the target stops at a trap/checkpoint (the debugger's stop-notification channel) |
-| `kregs` | `0400` | RO the kernel-side saved frame (`t->ctx` callee-saved + the kstack PC) — feeds the unified stack (§4.6) |
+| `kregs` | `0400` | RO the kernel-side saved frame (`t->ctx` callee-saved + the kstack PC) + `tpidr_el0` — feeds the unified stack (§4.6). The kernel half goes only to the `CAP_DEBUG`/`CAP_HOSTOWNER` tier (I-16; the raw-address gate, §5b); the owner axis reads it as zero and gets `tpidr_el0` alone |
 
 Every readable debug file gates at the READ site on the I-39 two-axis check
 (modes are advisory — `devproc.perm_enforced==false`), following the
@@ -451,6 +822,16 @@ DWARF at 8c); the **owner axis** gets the KASLR-INDEPENDENT symbolic form
 diagnostic. Without this, an unprivileged owner reads its own `koff` off a settled
 head thread — 8b widened the pre-existing 8a owner-`attach`-and-`stop`-another-
 owned-Proc path (which reached the same raw kstack) to a no-attach self-read.
+
+**`kregs` takes the same gate (2026-09-24).** Its kernel half is the same secret in
+another form: a debug-parked thread's `ctx.lr` is the return into `sched`, so `lr`
+minus that site's link address is the slide, and `fp`, `sp` and `x19`–`x28` are kernel
+stack and heap addresses. It reached the owner axis unconditionally from 8a until the
+seal's round-3 self-audit found it; the kstack fix above never covered it.
+`devproc_build_regs` now fills the kernel half only for the `CAP_DEBUG`/`CAP_HOSTOWNER`
+tier. The owner axis reads those fields as zero and keeps `tpidr_el0`, the one field a
+debugger of its own program reads (Delve's `g` recovery). The in-guest `/debug-probe`
+runs on the owner axis and asserts the zeroes.
 
 ### 5b.3 v1.x seams
 
@@ -958,6 +1339,35 @@ composition is load-bearing and prosecuted hard:
 - **`kproc` is never debuggable** (special-cased before the gate, as kill is);
   the session/console-owner and `PROC_FLAG_NOTRACE` seams (e.g. login forbids
   debug-attach for its session Proc) are honored.
+- **`PROC_FLAG_NOTRACE` has two routes in, and the spawn-time one is the load-
+  bearing one.** `SYS_SET_TRACEABLE(0)` lets a Proc seal itself; `SPAWN_PERM_SEAL`
+  ((U) F1) lets its spawner seal it before its first EL0 instruction. The
+  difference matters wherever the thing being sealed shares a principal with a
+  potential attacher -- login's per-user home proxy, which holds `CAP_TCB_DIAL`
+  and a live transport to the system store while running AS the user. A self-seal
+  leaves that proxy attachable for the window between exec and the call, and the
+  same-principal Proc that could take the window is ordinary (a second login, a
+  backgrounded process from a prior session). So for a service spawned as the
+  user it serves, treat the self-call as insufficient by default.
+- **The host owner pays for this, and that is the accepted price.** NOTRACE is
+  refused AHEAD of both authority axes, so `CAP_HOSTOWNER` loses `mem`, `regs`,
+  `wait` and the section-5b `kstack` settled-thread inspect on any sealed Proc --
+  including login's home proxy, where it had them before. That is the cost of
+  choosing a FLAG over a capability-keyed refusal, and it is the right cost for
+  the (U) boundary (a capability-keyed refusal would be re-openable by anything
+  that can obtain the capability), but it means "why is the user's home hung?" is
+  no longer answerable from `/proc` on the proxy. `kill`, `suspend` and `resume`
+  are unaffected -- `devproc_kill_authorized` has no NOTRACE term.
+- **The seal does not cross `fork`, and the holder must therefore not fork.**
+  `rfork_internal` deliberately does not copy `proc_flags`, while the fork shape
+  copies the whole handle table -- so a sealed Proc that forks yields a child that
+  is same-principal, UNSEALED, and holding the parent's handles, including any live
+  transport the seal existed to protect. Nothing enforces this; it holds today only
+  because stratumd's client role never forks or execs. Any future sealed service
+  must either avoid forking or the inheritance rule must change (an open design
+  item: whether `NODUMP|NOTRACE` should be the two `proc_flags` bits that DO
+  inherit, which is a scripture change, since `proc_flags` inheriting nothing is
+  currently stated flatly).
 
 ---
 

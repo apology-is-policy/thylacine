@@ -133,8 +133,9 @@ pub extern "C" fn rs_main() -> i64 {
 
     // 8. #115a: the namespace-driven Tab completion source. Command-position
     //    completion is pure (filters the index); argument-position completion
-    //    reads the LIVE filesystem -- the in-QEMU proof of the read_dir path
-    //    that the host unit tests (libutopia cannot host-test) cannot exercise.
+    //    reads the LIVE filesystem -- the in-QEMU proof of the `read_dir`
+    //    binding. The host unit tests drive path completion over a fixed tree;
+    //    only a boot reads a real directory through `ShellCompletionSource::new`.
     {
         use alloc::string::String;
         use libutopia::completion::ShellCompletionSource;
@@ -185,8 +186,9 @@ pub extern "C" fn rs_main() -> i64 {
 
     // 10. D4: zsh-style menu completion -- cycle + finalize + dismiss, driven
     //     on the live LineEditor in-guest (the host #[cfg(test)] tab_menu_*
-    //     contract). The terminal strip rendering (render_menu_strip) is host-
-    //     tested; here we prove the editor STATE MACHINE in QEMU.
+    //     contract). The strip itself -- what `LineEditor::render` draws in
+    //     Menu mode, and where -- is host-tested against the `vt` terminal
+    //     model; here we prove the editor STATE MACHINE in QEMU.
     {
         use alloc::boxed::Box;
         use alloc::string::String;

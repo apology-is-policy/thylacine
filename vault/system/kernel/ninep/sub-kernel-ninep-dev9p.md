@@ -15,7 +15,7 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: [docs/LARDER-DESIGN.md, docs/FID-LIFECYCLE-DESIGN.md, docs/POUNCE-DESIGN.md]
 created: 2026-07-31
-updated: 2026-09-17
+updated: 2026-09-23
 ---
 ## Purpose
 
@@ -40,6 +40,9 @@ in-struct comment records the reconciliation that made the flip sound).
 Legacy stubs: `.stat`/`.wstat` (Plan 9 wire-stat — native slots supersede),
 `.remove` (wrong shape; `.unlink` replaces), `.bread`/`.bwrite`, `.attach`
 (dev9p Spoors are minted via `dev9p_attach_client`, not a spec string).
+
+A CAPED session (the identity cape, below) changes what four of these slots
+report or send; no slot changes shape.
 
 Exports beyond the vtable: `dev9p_client_fid` (the Loom I-30 submit pin
 resolve), `dev9p_weft_try_write`/`_read` (the zero-copy data-drive arms),
@@ -215,7 +218,8 @@ channel** (the voted NFS model: a latched flush error surfaces here even
 after the run is gone) — then Tfsync with real-errno propagation.
 
 `dev9p_wstat_native` (Tsetattr; `T_WSTAT_* == P9_SETATTR_*` pinned by four
-`_Static_assert`s): cached-open fails LOUD ([[seam-co-fidless-wstat]]);
+`_Static_assert`s): a caped session refuses UID/GID before anything else
+(the cape, below); cached-open fails LOUD ([[seam-co-fidless-wstat]]);
 write-behind: flush first (a truncate must land after the staged bytes)
 then de-eligibilize (a size change destroys the append anchor); on success
 attr invalidate (CRITICAL — the base X-check perm_checks the cached mode,
@@ -259,6 +263,43 @@ byte position** — Stratum derives it from an entry hash, so real cookies
 exceed INT64_MAX; the bits pass straight through (`(u64)off`), and clamping
 a "negative" cookie to 0 restarts enumeration forever (#955). This is why
 byte reads clamp negative offsets but readdir must not.
+
+### The identity cape (IDENTITY-DESIGN 3.2; HAUL-DESIGN 4.7)
+
+A server whose ids are foreign -- a Haul export of a host tree, owned by the
+host's uid 501 and group staff, which no Thylacine principal is -- would leave
+every principal "other" under kernel DAC, and a private (0700/0600) tree
+unreadable to the user who mounted it. Such a session is CAPED:
+`client->cape` with `cape_uid` / `cape_gid`, stamped once by
+`p9_client_set_cape` before the root Spoor publishes, never flipped
+([[sub-kernel-ninep-attach]] decides when; [[sub-kernel-ninep-client]] holds
+the fields). dev9p consults it at exactly three points:
+
+- **The conversion.** `t_stat_from_p9_attr(out, attr, client)` is the ONE
+  place a server attr becomes a `t_stat`: `stat_native` and both
+  `walk_attrs` record sites call it, the Larder caches its output, and a
+  cached-open's `co_stat` is a converted leaf -- so the cape applies there
+  and nowhere else. uid = `cape_uid` (the attaching principal) and gid =
+  `cape_gid` (its primary gid), whatever the server said or left out; the
+  mode stays the server's under the same valid-mask fail-closed rule (an
+  omitted mode is 0). perm_check, the resolver's X-search, the Larder serve
+  and fstat therefore all see one owner. The Larder is per-client and the
+  stamp precedes the first stat, so a caped session can never hold an
+  uncaped conversion.
+- **create.** `dev9p_create` sends gid `P9_NOGID` ((u32)-1) on a caped
+  session: chown(2)'s "leave it", which a POSIX server hands to its
+  set-group call as a no-op (npxf's `try_set_gid` passes it to
+  `fchownat` as the group; `haul-cape.exp`'s create and mkdir land on the
+  host through it). The creator's group never crosses.
+- **wstat_native.** UID or GID in `valid` is refused FIRST -- ahead of the
+  cached-open seam and any write-behind flush -- with the path's generic
+  -1. chmod and truncate pass: the mode is the server's own.
+
+Kernel DAC stays on. The owner bits of the server's mode now apply to the
+mounter, so a 0600 host file is readable by the principal that mounted it,
+and any other principal reaching the mount is "other". The Tattach's
+PRINCIPAL_NONE is the attach layer's; the Loom GETATTR copy and the Loom
+create gid are [[sub-kernel-loom]]'s.
 
 ### The write-behind engine (F1/G1; the deepest block)
 
@@ -364,7 +405,8 @@ deliberately not owned here — the resolver post-scans.
 ## Error paths
 
 Real-errno propagation on read/write/fsync/getattr (#3/Area-F) and on
-rename/unlink (#80). `dev9p_create`'s errno record + accessor (#99).
+rename/unlink (#80). A chown/chgrp on a caped session answers `-1` before
+the wire (sys_wstat's generic refusal, like its other refusals). `dev9p_create`'s errno record + accessor (#99).
 NULL/`-1` per the Dev convention elsewhere. `walk_attrs` returns the
 distinct `DEV_WALK_ATTRS_UNSUPPORTED` sentinel for the capability miss (NOT
 a walk failure — nothing about the path was learned).
@@ -438,6 +480,12 @@ kmalloc per walk; the attrs scratch on the walk_attrs RPC path (heap — 16
   the three paths above answer it differently — check which one you are on
   before copying a neighbour's treatment.
 - **Budget balance** on every path (grow, fallback, error, close, death).
+- **The cape has one conversion point.** A new path that turns a
+  `p9_attr` into a `t_stat` -- or hands the raw attr to userspace, as Loom's
+  GETATTR does -- without the client's cape reports the host's ids on a
+  caped session, and perm_check then denies the mounter its own files. The
+  create gid and the wstat refusal are the other two consults; nothing
+  identity-bearing may reach a caped server.
 
 ## Seams
 
@@ -468,7 +516,8 @@ kmalloc per walk; the attrs scratch on the walk_attrs RPC path (heap — 16
   (close-to-open-legal).
 - `t_stat_from_p9_attr` is shared by stat_native and walk_attrs — the two
   MUST report identical shapes or the pounce X-search diverges from the
-  per-component loop.
+  per-component loop. It takes the client because the identity cape is
+  applied inside it.
 - The dispatch of every partial-walk/create failure leaves `p->fid` at a
   defined owner (parent or swapped child) so the caller's clunk hits the
   right fid — the per-arm comments track which.
@@ -479,7 +528,8 @@ kmalloc per walk; the attrs scratch on the walk_attrs RPC path (heap — 16
 P5-attach-dev, FS-alpha/beta/gamma, A-2a/A-3b, #37, #99, POUNCE P-3,
 Larder L1c/L1d/L1e, wb F1, G1/G2/G3/G4, FID-LIFECYCLE cached-open,
 Weft-6b-2/6b-3a, net-6b QTPOLL wiring, #955, D44, task-#44, #80 the
-name-op errno propagation, and the V-4c-3 self-audit's class correction.)
+name-op errno propagation, the V-4c-3 self-audit's class correction, and (L)
+the Haul identity cape.)
 [[chg-2026-08-16-dev9p-errno-class]] records the last two.
 
 ## Tests
@@ -499,7 +549,15 @@ writethrough_range}`), the G2 dirfid battery
 create_reuse_drop,rmdir_drop_and_no_stale_repark,suspect_not_reparked}`),
 cached-open (`dev9p.cached_open_*`), the poll teardown
 (`dev9p.poll_cancel_at_close`, `dev9p.poll_regular_file_always_ready`),
-and the prw wire-offset capture (`dev9p.prw_wire_offset_and_cursor`).
+the prw wire-offset capture (`dev9p.prw_wire_offset_and_cursor`), and the
+identity cape: `dev9p.cape` (an uncaped control whose chown reaches the
+wire; the caped stat with the mode kept; a server that omits the trio;
+chown, chgrp and chmod+chgrp refused with no Tsetattr; chmod passing; the
+`walk_attrs` records; the Tlcreate/Tmkdir gid, `P9_NOGID` caped and the
+caller's uncaped) plus the two DMSRV* create refusals that sit on this
+fixture, `dev9p.path_create_refuses_dmsrvcape` and
+`dev9p.walk_create_refuses_dmsrv_bits` (the fd create through
+`sys_walk_create_kname_for_proc`, a plain create as its control).
 Boot-level: every boot exercises the full stack against live Stratum; the
 go-build oracle is the standing stress ([[gate-smp]] the SMP witness).
 

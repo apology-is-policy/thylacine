@@ -2,7 +2,7 @@
 id: sub-substrate-gates
 type: sub
 parent: moc-substrate
-title: "The gates — boot verdict, multi-boot classification, the v8.0 floor"
+title: "The gates — boot verdict, multi-boot classification, the v8.0 floor, the host tests"
 code:
   - tools/test.sh
   - tools/smp-multiboot.sh
@@ -10,6 +10,7 @@ code:
   - tools/ci-smp-gate.sh
   - tools/check-v80-floor.py
   - tools/screendump.sh
+  - tools/test-rust.sh
 audit: none
 guarded-by: []
 validated-by: [prose, gate-smp, gate-v80-floor]
@@ -17,14 +18,16 @@ locks: []
 abis: [abi-boot-banner]
 design: ["docs/TOOLING.md", "docs/PORTABILITY.md", "docs/DEBUGGING-PLAYBOOK.md"]
 created: 2026-08-01
-updated: 2026-09-06
+updated: 2026-09-24
 ---
 ## Purpose
 
 The non-interactive verdicts. `test.sh` decides whether ONE boot passed;
 `smp-multiboot.sh` decides what a failure MEANS; `ci-smp-gate.sh` decides
 whether the matrix as a whole is clean; `check-v80-floor.py` decides whether
-what shipped can run on the baseline CPU.
+what shipped can run on the baseline CPU. `test-rust.sh` decides whether the
+userspace Rust crates' host unit tests pass -- and, as important, how many of
+them run on no machine at all.
 
 ## Contract
 
@@ -35,6 +38,12 @@ what shipped can run on the baseline CPU.
 - `ci-smp-gate.sh` → builds each kernel once, runs the matrix, aggregates.
 - `check-v80-floor.py` → exit non-zero if any tracked build input asks above
   ARMv8.0-A, or any shipped userspace binary carries an ungated LSE.
+- `test-rust.sh [crate...]` (`make test-rust`) → exit 0 iff no crate FAILs:
+  its lib tests failed in any pass, or its test output could not be reconciled
+  with cargo's own count. Prints per crate the bucket, the tests run, the
+  quarantined ignores, the compiler warnings, and STRANDED -- the `#[test]`s the
+  sources declare that compiled into no pass. Stranded tests and warnings are
+  reported, never fatal.
 
 ## Mechanism
 
@@ -54,8 +63,26 @@ opposite. This is uniform across all four scripts.
 are layout- and timing-sensitive and pass most single boots — a one-shot
 `test.sh` "is the thing that masked #860 for weeks." The gate is therefore
 N≥10 boots per config against ONE built kernel (host jitter varies the
-timing), across four configs. UBSan-smp4 is the amplifier: on the broken
+timing), across five configs. UBSan-smp4 is the amplifier: on the broken
 bringup it crashed 33–43% of boots and 0% of a single lucky one.
+
+**One of those five rows boots ONE CPU, and that is a control, not a
+contradiction (`default-smp1`, 2026-09-22).** A peer CPU is not only extra
+concurrency -- it is a RESCUE MECHANISM, and a hazard a rescue mechanism hides
+is one a matrix of smp4/smp8 rows cannot observe. Every row booted 4 or 8 CPUs
+(and `test.sh` defaults to `-smp 4`), so the one configuration in which a
+thread spinning on another thread's write cannot be rescued was the one nothing
+booted. It cost a 100% boot hang that ran unseen for 19 days: `loom_free` joined
+the SQPOLL kthread with a spin inside a syscall body, which is non-preemptible,
+so at `-smp 4` a peer ran the kthread and the spin ended, and at `-smp 1` every
+boot wedged at `loom-smoke`'s exit. "Single boots lie" is true about SMP races;
+it was read as licence to stop booting single CPUs at all, which is a different
+claim. The row is cheap -- 1-vCPU boots are the fastest in the matrix, with no
+bimodal P-core/E-core spread. **If it goes red on a joey non-zero exit rather
+than a CORRUPTION, suspect task #791 and measure before concluding:** `test.sh`'s
+header records #791's ~45% `-smp 1` joey failure (2026-05-30) and, beside it,
+that the rate did NOT reproduce on 2026-09-22 (5/5 clean) -- evidence it
+changed, not proof it is gone, since 0.55^5 is about 5%.
 
 **The classifier has FIVE classes, and three of them fail the gate.** The
 ladder is ordered, so each row is also "everything above it did not match".
@@ -211,7 +238,9 @@ and #71's postmortem says why — `tools/pouch-clang` was not in the first
 enumeration (cmake + build.sh + cargo); it was found only because measuring
 the output left two ungated instructions in a shipped binary. **"Enumerating
 the files you expect is not the same as measuring what shipped."** Three
-more `-march` sites have appeared since.
+more `-march` sites have appeared since. `--all` extends the binary scan to the
+big pool payloads -- `/clade`, `/goroot`, and since the WebKit arc `/webkit`'s
+stage -- which is where the ~6-minute cost comes from.
 
 The gating rule is structural, not symbol-based: an LSE is gated iff a
 nearby preceding feature-byte load pairs with a conditional branch whose
@@ -267,6 +296,75 @@ checker now FAILS on an ABSENT report (a dropped gate — the shape a green boot
 hides) and otherwise states what ran; `THYLA_ARC_GATES=require` /
 `THYLA_CLADE_GATES=require` make a skip fatal for shapes that ship the fixture.
 
+**netd's boot selftests reach the exit status (2026-09-24).** netd prints a
+`netd: <name> PASS/FAIL` line per selftest, and no gate read them. A netd whose
+selftest regressed booted green. The TCP-retirement FAIL of 2026-09-21
+(`20f73f27`, one boot in ~85) was noticed only because an extinction brought
+the log under review. Once netd has started (`netd: up mac=`), the verdict fails if netd prints any
+`netd: .*FAIL` line, never serves `/net`, or omits `netd: dial-verdict selftest
+PASS` by name (an absent line passes a no-FAIL check). It keys on netd STARTING,
+never on serving. Two selftests (resident lo, TCP retirement) end netd before it
+posts `/net`, joey treats a missing `/net` as non-fatal, and the banner still
+prints, so a check keyed on serving would skip exactly the deterministic
+failure. [[seam-242-selftest-nonfatal]] (the other selftests proceed after a
+FAIL) is narrowed by this capture, not closed.
+
+### The host tests (`test-rust.sh`)
+
+**No gate ran `cargo test` until 2026-09-22**, so the largest body of tests in
+userspace ran only when someone transcribed a command out of a `Cargo.toml`
+comment. `test-rust.sh` runs every workspace crate's lib tests on the host --
+`cargo test -p <crate> --lib --no-default-features --target <host>`, the triple
+read from `rustc -vV`, the crate list from `cargo metadata` so a new crate is
+picked up without an edit -- and puts each crate in ONE of five buckets: PASS,
+FAIL, NO-LIB (bin-only: every probe, smoke and bench), NO-HOST (links
+`libthyla-rs` unconditionally, whose `_start` asm is ELF-only), NO-TESTS. Only
+FAIL fails. The five exist because a two-way split was red on its first run: the
+first draft called all 93 bin-only crates FAIL.
+
+**STRANDED is derived from the crate, never from its bucket -- and that is a
+correction.** Per crate it is the `#[test]`s its `src/` declares minus the tests
+that compiled into a pass (passed or ignored). The first version counted NO-HOST
+crates only, so the fix that made `libutopia` host-testable moved it into PASS
+and took its remaining 91 stranded tests out of the report with it: the summary
+said "nothing is stranded" while 101 tests in three crates ran nowhere
+(2026-09-23). **A debt reported by CATEGORY disappears the moment a fix changes
+the category.** Derived per crate, a PASS crate strands whatever
+`--no-default-features` compiles out (libutopia's `backend`-gated modules), a
+NO-LIB crate strands every test it declares (aurora's, inside a `no_main`
+binary), and a NO-HOST crate strands all of its own.
+
+**The declared count is anchored at the start of a line**, because a `#[test]`
+that a comment mentions is not a test -- libhalcyon's `theme.rs` has one, and the
+unanchored count called it stranded.
+
+**Every figure comes from parsed test NAMES, and the parse proves itself first.**
+Per pass, the names parsed must equal cargo's own passed + ignored, or the crate
+FAILs: a parse that silently matched nothing would call every test stranded, and
+one that matched some would print a plausible number that is wrong. A name twice
+in ONE pass also FAILs, because it is a test registered twice -- and the first
+full run found one: `libutopia`'s
+`equal_is_assignment_at_statement_start_and_literal_after_a_word` carried two
+`#[test]` attributes, so libtest ran it twice and cargo's count (313) was one
+more than the crate's distinct tests (312). A count summed from cargo's footer
+could never have seen that; a count of distinct names made it a one-line diff.
+
+**`FEATURE_PASSES` decides only what RUNS.** `cornucopia` tests its `scale`
+bakes only with the feature and their absence only without it, so any single
+pass strands one of the pair. A `crate:features` entry adds a pass, and a test
+counts as run if it compiled in any of its crate's passes, by name. The table is
+the one name-keyed part of the script and deliberately cannot hide anything: the
+stranded figure is derived regardless, so a crate missing from it shows as
+stranded, never as quietly passing.
+
+**Compiler warnings are counted per crate and printed, never fatal.** rustc
+warned `duplicate_macro_attributes` at that doubled `#[test]` on every build for
+a day; the gate keeps each crate's log and prints it only on a FAIL, so the one
+line that named the defect was swallowed. A gate that fails on warnings gets
+bypassed, and one that swallows them hides the warning that matters. The count
+is taken from cargo's per-crate footer, so a dependency's warnings are not
+charged to the crate that happened to rebuild it.
+
 ## Data structures
 
 None persistent. `build/multiboot-fails/` accumulates captured logs. A label's
@@ -311,6 +409,14 @@ UBSan is ~150–300 s. A full N=10 four-config matrix is tens of minutes to
 hours — "that cost IS the gate." The full matrix sits at the 600 s Bash
 ceiling, so it is run as subsets via `SMP_GATE_CONFIGS`.
 
+`test-rust.sh` is ~5 minutes for the whole tree, and most of that is `manual`'s
+two bounds tests: 101 s + 42 s in the unoptimized profile `cargo test` uses,
+~16 s + ~7 s with `--release` (measured 2026-09-23). They are exhaustive by
+design -- 42 worst-case shapes of a 1 MiB section at up to five tier/width
+settings, under the guest's first-fit allocator -- and the second one asserts the
+parser stays linear. They look like a hang (one test binary at 100% CPU for
+minutes) and are not one.
+
 ## Prosecution
 
 - Any new classification bucket must be anchored on text the guest EMITS on
@@ -340,6 +446,18 @@ ceiling, so it is run as subsets via `SMP_GATE_CONFIGS`.
   correctly call it ungated.
 - A revert-probe is the only proof a gate is live. Every gate here that
   failed did so by passing.
+- **Derive a per-item figure from the item, never from the category it was
+  sorted into.** `test-rust.sh`'s STRANDED counted a bucket, so the fix that
+  moved a crate out of that bucket deleted its debt from the report.
+- **A gate that parses a tool's output must reconcile the parse with the tool's
+  own count before deriving anything from it** -- and a count of DISTINCT items
+  sees what a summed total cannot (the doubled `#[test]`).
+- `test-rust.sh`'s six mechanisms were each sabotage-verified on 2026-09-23 --
+  a doubled `#[test]` FAILs naming it; a broken name parse FAILs "parsed 0,
+  cargo counted 38"; dropping the `FEATURE_PASSES` entry strands cornucopia's
+  twin; a `#[cfg(any())]` test reads as 1 STRANDED; an unanchored count strands
+  libhalcyon's comment; a planted warning is counted. A change to any of them
+  re-owes its sabotage.
 
 ## Seams
 
@@ -371,6 +489,13 @@ ceiling, so it is run as subsets via `SMP_GATE_CONFIGS`.
   larger kill window. A per-unit-time hazard rate needs these numbers from
   ordinary gate runs, so they ride every boot line (`(Ns)`) rather than a bespoke
   experiment nobody re-runs.
+- **`test-rust.sh`'s STRANDED figure is informational**: a newly stranded test
+  raises the printed number and does not fail the gate. The tree carries 100
+  (libutopia 91, aurora 9) at 2026-09-23. Only a FAIL is red.
+- **Tests outside `src/` are not counted, and there are none**: measured
+  2026-09-23, zero `.rs` files outside `src/` across the 123 workspace crates,
+  against 393 inside. A crate that grows a `tests/` directory would strand it
+  silently -- `--lib` never runs it and the declared count never sees it.
 
 ## Provenance
 
@@ -378,4 +503,9 @@ ceiling, so it is run as subsets via `SMP_GATE_CONFIGS`.
 fifth class and the G-2 socket override; [[chg-2026-09-06-substrate-gates-detectors]]
 the second EXTERNAL-KILL arm (#222), the sourceable classifier + producer
 cross-check (#234/#212), archive-not-delete (#223), and the lean-shape / arc-gate
-propagation (#228/#229/#230/#232).
+propagation (#228/#229/#230/#232). 2026-09-23: `test-rust.sh` ADOPTED -- it
+shipped 2026-09-22 (`9e837771`) with no dossier -- with the per-crate STRANDED
+derivation, the name parse's two self-checks and the warning count; and the two
+gate changes of 2026-09-22 that landed without a dossier update recorded here:
+main's `default-smp1` row (`6e1cda16`, the loom join) and the `/webkit` floor
+path (`b70e1bfd`). 2026-09-24: the netd selftest verdict joins the exit status.

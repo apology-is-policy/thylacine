@@ -905,6 +905,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "lantern"
+version = "0.1.0"
+dependencies = [
+ "beacon",
+ "kaua",
+ "libhalcyon",
+ "libthyla-rs",
+ "manual",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -967,6 +978,7 @@ dependencies = [
  "beacon",
  "fasces",
  "libthyla-rs",
+ "vt",
 ]
 
 [[package]]

@@ -234,6 +234,16 @@ This is the clean first target: it exercises attach + the full inspect surface
 already a superpower (§5.3 of the charter — attach to *any* process you have
 rights to: netd, stratumd, a stuck shell).
 
+*Narrower since 2026-09-24 (I-39's capability-cover rule, DEBUG-FS-DESIGN §3.1):*
+"rights to" now means the owner axis AND the caller's caps covering the target's,
+so a same-principal target holding a clearance the debugger lacks is refused —
+`dlv` attaching to an imperium-elevated shell, or to `stratumd`'s
+`CAP_TCB_DIAL`-holding home proxy, needs `CAP_DEBUG` (or an equally-elevated
+debugger). Launch-then-attach is unaffected: caps only shrink at fork, so a
+debugger always covers what it spawned. Note also that a refused `attach` write is
+a bare `-1` shared with "not found", "not ALIVE" and `Einuse`, so the backend
+cannot yet tell the operator which one it hit (tracked).
+
 **`dlv exec <bin>` / `dlv debug` (launch — 8c-1/8c-4).** Delve must gain control
 *before* the Go runtime runs, to set breakpoints before `main.main`. Thylacine
 has no "stop at exec/entry" primitive today. Two paths:

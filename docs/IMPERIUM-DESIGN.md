@@ -661,7 +661,8 @@ so the operator can veto any of them:**
    not by corvus's policy alone. A propagating grant naming any other bit is
    refused at register.
 3. **`/proc/<pid>/imperium` is 0400 + the read-site owner-or-`CAP_HOSTOWNER`
-   gate** (`devproc_owner_or_hostowner`, the `sched`/`environ` predicate), not
+   gate** (`devproc_owner_or_hostowner`, the `sched` predicate; `environ` adds the
+   dump seal, `devproc_extract_authorized`), not
    the 0444 the bullet said: `status` is UNGATED (0444 to every pid), so "the
    two-axis gate like `status`" described a gate that file does not have. Who
    is elevated and what flows is a disclosure about another user's authority;

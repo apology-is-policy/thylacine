@@ -10,10 +10,13 @@ code:
   - usr/utopia/libutopia/src/eval/expr.rs
   - usr/utopia/libutopia/src/eval/env.rs
   - usr/utopia/libutopia/src/eval/glob.rs
+  - usr/utopia/libutopia/src/eval/pathname.rs
   - usr/utopia/libutopia/src/eval/jobs.rs
   - usr/utopia/libutopia/src/eval/console.rs
+  - usr/utopia/libutopia/src/eval/discipline.rs
   - usr/utopia/libutopia/src/eval/value.rs
   - usr/utopia/libutopia/src/eval/error.rs
+  - usr/u-glob-test/src/main.rs
 audit: light
 guarded-by: [inv-i19, inv-i20, inv-i27, inv-i28]
 validated-by: [prose, gate-interactive]
@@ -23,7 +26,7 @@ abis: []
 design:
   - "docs/UTOPIA-SHELL-DESIGN.md sections 5-10"
 created: 2026-08-03
-updated: 2026-09-17
+updated: 2026-09-23
 ---
 ## Purpose
 
@@ -41,6 +44,18 @@ main entry point's doc comment and a field comment one file away describe the
 same function in opposite terms.
 
 ## Contract
+
+**`mount` now names the CAUSE (U, 2026-09-23).** `bi_mount` discarded the
+errno on both of its failure legs, reporting only "mount: cannot connect
+<service>" / "cannot attach <service>" whatever went wrong. Since (U) a connect
+can be refused on AUTHORITY -- a TCB byte service needs a capability the shell
+does not hold -- and the kernel reports that as EACCES specifically so an
+operator can tell "denied" from "no such service" and from a broken transport.
+Discarding it left that channel leading nowhere at the one place the operator
+reads it. Both legs now append the rendered cause via
+`libthyla_rs::err::Error::from_syscall_return`. `$errstr` keeps its existing
+PREFIX, so assertions matching on "mount: cannot connect" still hold.
+
 
 **Haul and Imperium (2026-09-17).** `mount /srv/NAME PATH [ANAME]` connects
 a byte service, attaches it through SYS_ATTACH_9P_SRV, and mounts the returned
@@ -71,6 +86,10 @@ Six public entry points, all over `&mut Env`:
 `Env` is the runtime state: a scope stack, a function table, an alias table, a
 note-handler registry, the job table, `$status` / `$errstr` / `$cwd`, and the
 mode flags (`interactive`, `stdio_inherit`, `consctl_fd`, `job_control`).
+`$cwd` starts at `/` in `Env` itself, which stays syscall-free for the host
+tests. The live shell replaces it with the kernel's cwd at startup
+(`Repl::adopt_kernel_cwd`, in [[sub-utopia-interactive]]), since `cd`'s
+`normalize_abs` and `pathname::expand` both join relative input onto it.
 
 ## Mechanism
 
@@ -206,9 +225,9 @@ lets a native `ut` service Ctrl-C at an otherwise-idle pts prompt.
 ### The raw-mode set is a closed allowlist, and joining it is a deliberate act
 
 Programs that need the console as an unprocessed byte pipe — the editor, the
-pseudoterminal host, the process monitor, and now the graphics bench launcher —
-are named in a **fixed list** matched on the command's basename, with the path
-form covered too.
+pseudoterminal host, the process monitor, the graphics bench launcher, and now
+the deck presenter — are named in a **fixed list** matched on the command's
+basename, with the path form covered too.
 
 **The default is cooked, and joining requires an edit plus a test.** Nothing
 infers raw mode from what a program does, so a new full-screen program gets the
@@ -223,6 +242,25 @@ wants the outer console as a raw pipe **because the terminal it hosts is the one
 line discipline** — two disciplines in series would double-cook. The others are
 full-screen renderers. A future entry owes its own sentence; "it looks like a
 TUI" is not the criterion.
+
+The deck presenter (2026-09-22) is the first entry that is **not** a full-screen
+renderer, and it pays the sentence the paragraph above asks for. It joins for the
+**input half only**: it needs byte-at-a-time reads with no echo so a keystroke
+turns a slide, and it needs signal cooking off so its own quit handling runs
+rather than a note terminating a talk. It deliberately never enters the alternate
+screen — that is the mode in which a tile paints its raw character grid instead
+of the rich document, which would discard the very rendering it exists to show —
+so the restore backstop's leave-alt-screen escape is inert for it, harmlessly.
+
+That splits the entry's cost in two, and only the second half is obvious. Signal
+cooking off means **the habitual interrupt key becomes a byte the program must
+answer itself**, so a member that does not answer it cannot be left by the key
+every user reaches for first. Output translation off means a member emitting a
+**document** rather than positioned cells must supply its own line-ending
+translation, because the argument for turning it off — that a full-screen program
+owns every byte it writes — is an argument about renderers, and a document's
+lines end in a bare feed. Both are properties of *membership*, not of being a
+TUI, which is why a non-renderer can hold the entry at all.
 
 ### A note read while looking for something else is held, not dropped
 
@@ -249,6 +287,36 @@ through `note_class_for_name`, where any `tty:`-prefixed name (`tty:susp`,
 'tty:susp'` masks the whole tty family — matched by prefix rather than by
 enumerating the five, because before this arm existed that exact `mask note
 'tty:susp'` parsed, ran its body, and masked nothing.
+
+### A backslash counts only where a word is a pattern
+
+A word reaches the evaluator as written, escapes and all
+([[sub-utopia-parser]]), and what a `\` means depends on which of three readers
+takes it:
+
+- **As a value** -- `eval_value_token` for an argv word or a redirect target,
+  `eval_expr` for an expression atom -- the word is `unescape`d: `a\ b` is
+  `a b`, `\*` is `*`.
+- **As an argv glob.** `glob_candidate` asks `glob::has_unescaped_meta`, so a
+  word globs only when it carries a meta its own `\` does not escape, and
+  `rm \*` removes a file named `*`. `pathname::expand` hands the word to
+  `glob::path_pattern`, which splits it on every `/` (an escaped one too: no
+  component can hold a slash), takes the leading meta-free segments as the
+  literal start directory -- a value, so `my\ dir/*.txt` starts in `my dir` --
+  and returns the rest as written for the matcher, where `\x` is a literal `x`
+  (POSIX fnmatch), inside a bracket expression too.
+- **As a `case` arm or a `matches` pattern** -- `expr::eval_pattern`. A bare
+  word contributes its text as written, so `a\*` matches only `a*`; every
+  evaluated part -- a quoted string, a variable, a substitution -- contributes
+  its value through `glob::escape_backslashes`, so its backslashes match
+  themselves, as a quoted pattern's always did. A `^` concatenation combines
+  the two through `concat_with`, the function the value path uses, so the two
+  readings cannot drift apart.
+
+Before 2026-09-23 the lexer resolved each escape and `glob_candidate` gated on
+`has_meta` of the resolved text, so by reading `evaluate_argv`, `rm \*` removed
+every file in the directory. Quoted parts of a pattern are unchanged, including
+their glob metas: a quoted `'*'` in a `case` arm is still a wildcard (Caveats).
 
 ### The recursion bound is ONE counter with two entry points
 
@@ -369,6 +437,16 @@ one.
   with the value already in the register. `u-subst-test` 6b pins that case
   (`false` then a bare `$(seq)` line reports 1).
 
+- **A new reader of a word's text must say which reading it wants.** The value
+  (`unescape`), the pattern (the text as written, through `has_unescaped_meta`,
+  `path_pattern` and the matcher), or the spelling (keywords, identifiers).
+  Reading the raw text as a value leaks a backslash into argv; unescaping a
+  pattern turns `\*` back into a wildcard, which is the defect this closed.
+- **A new pattern part enters through `pattern_value`.** An evaluated part that
+  skipped `escape_backslashes` would read a quoted `C:\dir` as `C:dir`;
+  `u-glob-test` C pins the quoted case, and each of its escaped cases has a twin
+  that must fire, so a 0 cannot come from a pattern that never matches.
+
 ## Seams
 
 - **Subshells and in-process pipeline elements are unimplemented**, and the
@@ -395,6 +473,23 @@ one.
 
 ## Caveats
 
+- **OPEN, the operator's vote (2026-09-23): a QUOTED glob meta in a `case` arm
+  or a `matches` is still a wildcard.** `case $x { '*' => ... }` matches every
+  `$x`, and so do `"*"` and a variable holding `*`: a pattern's evaluated parts
+  keep their metas live. rc and POSIX both make a quoted pattern character
+  literal (rc's `~ $x '*'` matches only a star). Scripture 7.1 and 7.3 say
+  nothing either way, and nothing in the tree depends on the current reading --
+  measured: three `.ut` scripts, 81 `.exp` gates and 29,838 Rust string
+  literals in 394 files, where the only quoted `case` patterns hold no meta.
+  The machinery for either answer is in place: `pattern_value`'s value arm
+  would escape a quoted part's metas as well as its backslashes. Held for the
+  operator, because it changes what an existing script means.
+- **Two escape paths have no device witness, by construction.** The dot rule's
+  call site in `pathname::walk` (`leading_dot`, host-tested) has nothing to
+  catch it on the boot ramfs, whose root holds no dotfile; and the literal
+  start directory's unescape is witnessed only by `path_pattern`'s host test,
+  since no directory on the ramfs has a name that needs an escape. A break at
+  either call site passes the boot.
 - **The main expression entry point is documented as a pure function and it
   spawns processes.** `eval_expr`'s doc comment says *"Pure function with
   respect to the AST; side effects are limited to errors raised through
@@ -450,16 +545,57 @@ one.
   in-progress line edit. Both paragraphs describe the same function; only the
   second is true.
 
-- **The job table was made pure specifically to be host-testable, and its
-  fifteen tests have never run.** The module header gives the design rationale:
-  the table performs no syscalls, so the REPL must drive the reaping and feed
-  results back, *"keeping the table pure makes it host-testable against injected
-  `(pid, status)` pairs."* The crate's tests do not compile (task #105). A real
-  design constraint was accepted to buy a property that has never existed. The
-  console module shows the same problem being met and worked around locally
-  rather than escalated: four compile-time asserts mirror four `#[cfg(test)]`
-  assertions, with a comment explaining that the crate *"has no host test
-  harness ... so the `#[cfg(test)]` literal asserts below never run. These do."*
+- **The job table was made pure specifically to be host-testable, and for its
+  whole life that property did not exist. It does now (2026-09-22).** The module
+  header gives the design rationale: the table performs no syscalls, so the REPL
+  must drive the reaping and feed results back, *"keeping the table pure makes
+  it host-testable against injected `(pid, status)` pairs."* The crate's tests
+  did not compile at all (task #105) — a real design constraint accepted to buy
+  a property that had never existed. The `backend` feature split fixed that:
+  `eval::jobs` is on the pure side of the line and its tests run.
+
+  **`eval::expr` and the syscall-bearing modules are still behind the gate, and
+  for `expr` the reason is worth stating.** It makes no syscall of its own, but
+  expansion genuinely reaches into `stmt` (command substitution) and `env` —
+  `$(...)` runs a pipeline. That is coupling in the shell's design, not an
+  accident of imports, so its 29 tests stay stranded until someone restructures
+  the evaluator. (Its use of `glob` is the pure matcher only -- the `matches`
+  operator and case-as-expression -- which stopped being a coupling on
+  2026-09-23.) `builtin`, `console`, `env`, `pathname` and `stmt` are gated
+  because they do call syscalls, which is exactly the layering rule the crate
+  already states: only the built-ins whose purpose is to mutate THIS Proc reach
+  for one. At 2026-09-23 the crate still strands 71 of its 409 tests: `eval::expr`
+  29, `eval::stmt` 14, `eval::env` 5, and `repl` 23 ([[sub-utopia-interactive]]).
+  `tools/test-rust.sh` prints the figure per crate ([[sub-substrate-gates]]).
+
+  **Globbing was split the same way (2026-09-23).** `eval::glob` had grown the
+  argv-time filesystem walk beside the pattern matcher, so the matcher's eleven
+  tests -- every one of them about matching, none about the filesystem -- were
+  stranded with the one function that calls `fs::read_dir`. `glob` is the pure
+  matcher again, as its own header always said it was, and its tests run on the
+  host; `eval::pathname` (POSIX's "pathname expansion") holds `expand` and its
+  walk, moved byte-for-byte and gated, and `u-glob-test` witnesses it at boot.
+  The escape fix moved the walk's preparation back out (`glob::path_pattern`),
+  so the gated file now holds only what needs `read_dir`.
+
+  **`console`'s vocabulary was lifted out** into `eval::discipline`
+  (2026-09-22), and it is the clearest case for why the `backend` split was
+  worth making. The mode strings, the screen-restore sequence and the two name
+  predicates are pure; `is_raw_command` in particular is the hardcoded basename
+  set deciding whether a child gets the raw-mode dance — extended for `lantern`
+  in that same arc — and it sat in a module gated for three unrelated
+  `t_write`/`t_fstat` calls, so its tests ran nowhere. The module had already
+  met the problem and worked around it locally rather than escalating: four
+  compile-time asserts mirroring four `#[cfg(test)]` assertions, under a
+  comment saying the crate *"has no host test harness ... so the `#[cfg(test)]`
+  literal asserts below never run. These do."*
+
+  A pure sibling replaces the mirrors with execution. The `const _: ()` guards
+  are KEPT anyway, deliberately: they fire on the device build, where a host
+  test cannot, so the two now cover different machines rather than the same one
+  twice. Measured — dropping `lantern` from the allowlist fails
+  `is_raw_command_matches_nora_by_basename` on the host in milliseconds, where
+  before it could only have been caught by a boot.
 
 ## Provenance
 

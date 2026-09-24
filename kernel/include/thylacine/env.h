@@ -99,8 +99,9 @@ u32  env_devno(struct Proc *p);   // 0 if the Proc has no env yet (nothing under
 // "NAME=VALUE\0" block for /proc/<pid>/environ (VIVARIUM V-4b-6), copying only
 // [off, off+n). Unlike the per-name ops this CAN be cross-Proc -- devproc
 // resolves `p` under g_proc_table_lock and is not necessarily the Proc that
-// owns the Env -- so its DISCLOSURE gate lives at that call site (owner or
-// CAP_HOSTOWNER, devproc_owner_or_hostowner). Nothing here checks identity.
+// owns the Env -- so its DISCLOSURE gate lives at that call site
+// (devproc_extract_authorized: owner or CAP_HOSTOWNER, and not dump-sealed).
+// Nothing here checks identity.
 //
 // THE SECOND CALLER IS exec_stage_env (#140), the /env -> envp projection that
 // puts a real environment on a new image's stack, and it deliberately carries

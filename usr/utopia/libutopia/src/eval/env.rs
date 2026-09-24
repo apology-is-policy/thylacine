@@ -125,7 +125,8 @@ pub struct Env {
     /// scripture 8.5). Initialized to "".
     errstr: String,
     /// $cwd -- current working directory. Initialized to "/" until
-    /// the first cd or until the caller sets it.
+    /// the first cd or until the caller sets it (ut sets it from the
+    /// kernel at startup: `Repl::adopt_kernel_cwd`).
     cwd: String,
     /// Interactive-shell mode (scripture 8.9: "the implicit-fail
     /// model applies to scripts and functions. At the interactive

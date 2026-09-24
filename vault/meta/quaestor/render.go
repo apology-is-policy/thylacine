@@ -407,7 +407,8 @@ func isHarness(p string) bool {
 	case "hello", "hello-rs", "u-test", "cpubench", "netperf", "fsbench",
 		"tlsperf", "nettest", "pipe-src", "pipe-sink", "debug-child",
 		"stack-child", "parley-echo", "hwbp-verify", "jit-prover",
-		"coreutil-smoke", "tapestry-battery", "tapestry-demo", "legate-prover":
+		"coreutil-smoke", "tapestry-battery", "tapestry-demo", "legate-prover",
+		"stratumd-stub", "stub-driver":
 		return true
 	}
 	return false

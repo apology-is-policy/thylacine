@@ -234,6 +234,80 @@ mounter, checked at the namespace layer).
   source within the unified kernel permission layer — see §3.7; F-1 is subsumed
   into that layer, not a separate mechanism.)**
 
+**BUILT 2026-09-23 for Haul — the identity cape (operator-voted "mounter owns").**
+The seam's premise was "no permissionless backing is mounted at v1.0", and Haul
+(HAUL-DESIGN.md) broke it without anyone pulling the seam forward. An npxf server
+is not permissionless, but its owners are the *host's*: dev9p enforced the Mac's
+uid 501 / gid staff against Thylacine principals, so every guest user was
+"other" and a private (0700/0600) export was unreadable to the user who mounted
+it. The coincidences were worse: a Linux host's first user is uid 1000, and
+corvus's first principal is 1000 (`FIRST_AUTO_ID`), so michael would have held
+owner rights over that user's files by accident. A server's ids are foreign
+whenever they are not Thylacine principals, and F-4 already calls such a server
+untrusted/remote.
+
+*Semantics* (the sshfs `idmap=user` shape, chosen over this section's original
+uniform-mode cape):
+- Every stat from a caped session reports owner = the ATTACHING Proc's durable
+  principal id (F-5: never the legate annotation) and group = its primary gid.
+- The per-file mode is kept as the server reports it. The host owner's own
+  intent (private, shared, executable) survives the translation; one uniform
+  mode would lose the exec bits and the private/shared distinction.
+- The `valid`-mask fail-closed rule for mode is unchanged.
+
+*Nothing identity-bearing crosses to a caped server:*
+- Tattach sends `n_uname` = none (F-4).
+- A create sends gid `(u32)-1`, which a POSIX server reads as "leave the group".
+- chown and chgrp are refused before the wire, with `SYS_WSTAT`'s generic
+  failure like its other refusals (a Loom create that names a group is a chgrp
+  too, and answers `-EACCES`): the cape imposes ownership, and a server-side
+  change could not alter what the guest sees.
+- chmod passes through, since mode is the server's own vocabulary.
+
+*Mechanism:* a property of the 9P SESSION, fixed at attach before the root
+Spoor publishes. It is not a policy on the mount node, as the original text had
+it, because a session's root can be mounted more than once and the cape must
+travel with every mount. Two ways to set it, one per kind of attach:
+- `SYS_ATTACH_9P` gains a flags word (x5), with `SYS_ATTACH_9P_CAPE`. The
+  mounter holds both pipes, so the mounter decides.
+- A byte service posted with the `DMSRVCAPE` perm bit capes every attach over
+  it. Only its POSTER can set this, which is the server's own side, so ut's
+  plain `mount /srv/NAME` needs no option.
+
+`SYS_ATTACH_9P_SRV` refuses `SYS_ATTACH_9P_CAPE` like any unknown bit
+(operator decision 2026-09-24; the flag was never a published TIP -- both mirrors sat at `1622ae1a` immediately before the single push that carried its introduction and its withdrawal together, ls-remote-verified, and no caller ever passed it, so withdrawing it broke no consumer). Over
+`/srv` the cape is the exporter's decision alone: the helper both `/srv` attach
+paths share reads the service's mark and nothing else, so no audit of the cape
+has to reason about an option the attacher chooses. The cost is a caped mount
+of a service posted through POSIX `bind()` in pouch, which cannot carry the
+mark. No such program exists; if one appears, the fix is to let that poster set
+the mark, not to hand the choice back to the attacher.
+
+haul sets the cape on both of its paths.
+
+*The cape names the ATTACHER.* A TCB process that mounts on a user's behalf must
+therefore attach **as the user**, or every file would report the TCB's identity
+and the user would be refused by the kernel's own DAC -- the very fault the cape
+exists to fix. This is why the per-user home proxy is spawned with the user's
+identity rather than the system's. Where such a process must then dial a TCB
+service, the authority to dial it is a **capability** (`CAP_TCB_DIAL`,
+STALK-DESIGN §5.2 / D8), never the identity it runs as: the proxy and the user's
+own shell are the same principal, so no identity rule can separate them for
+that dial (I-22). The converse does not hold: the I-39 debug surface separates
+on identity, and a same-principal debug attach reaches the proxy's transport
+without the capability -- closed by `SPAWN_PERM_SEAL` (NOTRACE + NODUMP) on the proxy's spawn,
+not by the dial gate. The two mechanisms are not redundant: the capability says
+who may open the door, and the seal says that whoever holds the key cannot be
+puppeted by a peer wearing the same identity.
+
+*Why it cannot escalate:* the attacher holds the transport. A pipe attach's
+server is behind the attacher's own pipes, and a `/srv` attach needs a byte-conn
+with READ+WRITE, over which the attacher could speak raw 9P and bypass kernel DAC
+entirely. So the cape grants the attacher nothing its connection did not already
+grant, and third parties sharing the namespace see owner = the mounter and get
+at most the served group/other bits. A TCB posting never carries `DMSRVCAPE`:
+the poster sets it, and nothing else can.
+
 ### 3.3 Identity — the hybrid model (F-0: RESOLVED 2026-05-28)
 
 A principal has **two separate fields**: a durable **identity** (who — for
@@ -525,7 +599,8 @@ Mechanism: the chokepoint is **Dev-gated by a `Dev.perm_enforced` flag**
 **F2** (gate `dev9p_stat_native` on the `Rgetattr` valid mask) is closed here — the
 enforcement reads that stat, so a missing-`valid`-bit garbage mode would
 mis-enforce. A-2c's mount-cape stays a **seam** (no permissionless backing is
-mounted at v1.0). (Verified during impl: `/system.key` in devramfs is already
+mounted at v1.0; superseded 2026-09-23 -- Haul mounts one, and §3.2 records the
+cape built for it). (Verified during impl: `/system.key` in devramfs is already
 `0400` (build.sh `chmod 0400`), reported owner = `PRINCIPAL_SYSTEM` -- so a
 non-system principal cannot read it post-enforcement and the boot chain (owner)
 still can. The earlier "0644 -> tighten to 0600" flag was a wrong guess; no change

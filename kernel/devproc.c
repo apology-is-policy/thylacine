@@ -505,11 +505,11 @@ static size_t format_cwd(struct Proc *p, char *buf, size_t cap) {
 // "fix" the truncation by continuing the walk past a full buffer without
 // re-deriving that bound.
 //
-// Posture: 0444, ungated -- the exe / cwd / ns posture (devproc.perm_enforced
-// == false, Plan 9 all-pids-visible). Sound TODAY because Thylacine has no
-// USER-space ASLR: every VA here is either an exec.h constant or an ELF link
-// address, so the layout is not a secret, and /proc/<pid>/ns already discloses
-// strictly more. None of these are kernel VAs, so I-16 (the KASLR slide) is not
+// Posture: 0444 and all-pids-visible for an UNSEALED Proc (devproc.perm_enforced
+// == false, Plan 9), refused for a dump-SEALED one (devproc_kind_is_image). The
+// ambient half is sound TODAY because Thylacine has no USER-space ASLR: every VA
+// here is either an exec.h constant or an ELF link address, so the layout is not a
+// secret. None of these are kernel VAs, so I-16 (the KASLR slide) is not
 // engaged -- unlike /proc/<pid>/kstack, which had to gate its raw addresses for
 // exactly that reason (8b-1d F1). FORWARD OBLIGATION: if user ASLR ever lands,
 // this posture must be revisited in the same chunk -- maps would then leak the
@@ -608,11 +608,10 @@ static size_t format_maps(struct Proc *p, char *buf, size_t cap) {
 // itself is immutable + ref-held for p's whole life, so the string is stable for
 // the copy. Same discipline as format_ns reading the Territory's mount Paths.
 //
-// Posture: ungated, like status / cmdline / ns (devproc.perm_enforced == false,
-// Plan 9 all-pids-visible). This adds nothing to the disclosure envelope --
-// /proc/<pid>/ns already renders the target's ENTIRE mount list with source
-// names, which strictly dominates one executable path. Visibility, not
-// authority (the #57a line); the I-26 two-axis gate on ctl writes is untouched.
+// Posture: all-pids-visible for an UNSEALED Proc (devproc.perm_enforced == false,
+// Plan 9), refused for a dump-SEALED one -- the path of the image a Proc runs is
+// something it HOLDS (devproc_kind_is_image). Visibility, not authority (the #57a
+// line); the I-26 two-axis gate on ctl writes is untouched.
 static size_t format_exe(struct Proc *p, char *buf, size_t cap) {
     const struct Path *path = p->exe_path;
     if (!path) return 0;
@@ -1055,6 +1054,14 @@ static void devproc_close(struct Spoor *c) {
 // devproc_kill_authorized). Non-static -- the test suite exercises it.
 bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *target);
 bool devproc_owner_or_hostowner(const struct Proc *caller, const struct Proc *target);
+bool devproc_extract_authorized(const struct Proc *caller, const struct Proc *target);
+// Forward-declared STATIC: devproc_read_cb (below) asks devproc_read_sealed, and
+// sits above the definitions.
+static bool devproc_kind_is_image(u32 kind);
+static bool devproc_dump_sealed_against(const struct Proc *caller,
+                                        const struct Proc *target);
+static bool devproc_read_sealed(const struct Proc *caller, const struct Proc *target,
+                                u32 kind);
 size_t devproc_sched_read_gated(const struct Proc *caller, struct Proc *target,
                                 char *buf, size_t cap, bool *denied);
 size_t devproc_imperium_read_gated(const struct Proc *caller, struct Proc *target,
@@ -1062,7 +1069,9 @@ size_t devproc_imperium_read_gated(const struct Proc *caller, struct Proc *targe
 
 // prowl-3b (prowl-5 F4): the OQ-4-gated sched read, factored out so the unit
 // suite can exercise the DENY wiring with a synthetic (caller, target) pair --
-// the in-kernel test runner is always kproc (CAP_ALL, always CAP_HOSTOWNER), so
+// the in-kernel test runner is always kproc, which holds CAP_ALL and is therefore
+// the OWNER of every Proc it can name (CAP_ALL excludes every elevation-only bit,
+// CAP_HOSTOWNER included -- it passes on the owner axis, not the cap axis), so
 // the deny leg is otherwise unreachable in-unit and a wiring regression (drop the
 // gate) would leave every test green. Sets *denied on an OQ-4 denial (caller
 // neither owner nor CAP_HOSTOWNER), returns 0, and formats NOTHING (no partial
@@ -1122,10 +1131,13 @@ static size_t format_imperium(struct Proc *p, char *buf, size_t cap) {
 }
 
 // IM-2: the gated imperium read -- the sched shape (prowl-5 F4): factored so the
-// unit suite can drive the DENY leg with a synthetic (caller, target) pair,
-// since the in-kernel runner is kproc (CAP_HOSTOWNER by CAP_ALL, always
-// allowed). Same policy predicate as sched/environ (devproc_owner_or_hostowner),
-// deliberately NOT the I-39 debug predicate. Non-static: test-driven.
+// unit suite can drive the DENY leg with a synthetic (caller, target) pair, since
+// the in-kernel runner passes the gate on its own. (It does so on the OWNER axis,
+// not the cap one: CAP_ALL excludes every elevation-only bit, CAP_HOSTOWNER among
+// them -- the same wrong parenthetical audit F10 struck at devproc.c:1051 and
+// :2392, which this copy outlived.) Same policy predicate as sched/environ
+// (devproc_owner_or_hostowner), deliberately NOT the I-39 debug predicate.
+// Non-static: test-driven.
 size_t devproc_imperium_read_gated(const struct Proc *caller, struct Proc *target,
                                    char *buf, size_t cap, bool *denied) {
     if (!devproc_owner_or_hostowner(caller, target)) { *denied = true; return 0; }
@@ -1151,6 +1163,15 @@ static int devproc_read_cb(struct Proc *p, void *arg) {
     struct devproc_read_ctx *r = (struct devproc_read_ctx *)arg;
     if (p->pid != r->pid) return 0;          // continue
     r->found = true;
+    // The dump seal, ONCE, before any formatter runs -- so the set of sealed files is
+    // what devproc_kind_is_image says it is, not whichever cases remembered a check.
+    // Only the SEAL here, not an owner axis: cmdline / ns / exe / cwd / maps stay
+    // ambient all-pids-visible for an unsealed Proc, their long-standing Plan 9
+    // posture. What changes is that a SEALED Proc no longer hands them out.
+    if (devproc_read_sealed(r->caller, p, r->kind)) {
+        r->denied = true;
+        return 1;                             // matched + refused -> stop
+    }
     switch (r->kind) {
     case PQS_STATUS:  r->total = format_status(p, r->buf, r->cap);  break;
     case PQS_CMDLINE: r->total = format_cmdline(p, r->buf, r->cap); break;
@@ -1273,7 +1294,11 @@ static struct Block *devproc_bread(struct Spoor *c, long n, s64 off) {
 // identities). Non-static: the kernel test suite exercises the predicate.
 bool devproc_kill_authorized(const struct Proc *caller, const struct Proc *target) {
     if (!caller || !target)                            return false;
-    if (caller->principal_id == target->principal_id)  return true;   // owner-rwx on 0600
+    // ACQUIRE, as in its two siblings: proc_apply_identity is a cross-thread RELEASE
+    // writer of the target's principal, so a plain load is C11-racy. The owner axis
+    // itself stays UNCONDITIONAL (I-26) -- this is load hygiene, not a new condition.
+    u32 target_principal = __atomic_load_n(&target->principal_id, __ATOMIC_ACQUIRE);
+    if (caller->principal_id == target_principal)      return true;   // owner-rwx on 0600
     // caps read ATOMICALLY (RW-5 F2): proc_become_legate is a cross-thread writer
     // of caller->caps since A-4a; a plain load is C11-racy (CAP_KILL is clearance-grantable).
     if (__atomic_load_n(&caller->caps, __ATOMIC_ACQUIRE) & (CAP_HOSTOWNER | CAP_KILL))
@@ -1302,14 +1327,120 @@ bool devproc_kill_authorized(const struct Proc *caller, const struct Proc *targe
 // admits CAP_DEBUG: these are info files, not debug surfaces, and a debugger's
 // authority to stop and single-step a Proc is a different grant from a reader's
 // authority to see its internals.
+//
+// It weighs NO seal, and that is a correction rather than an omission (audit
+// 2026-09-24, P2-3). The first cut of the dump seal was applied here, which
+// swept in every surface routed through this predicate -- including `imperium`
+// and `sched`. Those two are not pieces of a Proc's image at all: `imperium` is
+// the kernel's own unforgeable statement ABOUT a Proc (scope, session, flowing
+// set, deadline) and `sched` is scheduler telemetry. A seal meaning "cannot be
+// EXTRACTED FROM" does not reach the kernel's attestation about its subject, and
+// sealing it was actively harmful: SYS_SET_DUMPABLE(0) is an UNGATED one-way
+// self-call, so any Proc holding a live propagating legate scope could have
+// permanently suppressed the kernel's record of its own elevation, with no
+// capability required. I-25's ENFORCEMENT never depended on that file, but its
+// observability does, and an audited party must not be able to switch off the
+// audit. The extraction axis lives in devproc_extract_authorized below.
 bool devproc_owner_or_hostowner(const struct Proc *caller, const struct Proc *target) {
     if (!caller || !target)                            return false;
-    if (caller->principal_id == target->principal_id)  return true;   // owner
+    if (caller == target)                              return true;   // self, always
+    // The target's principal is read with ACQUIRE, not plainly: proc_apply_identity
+    // is a cross-thread RELEASE writer of it, so a plain load is C11-racy exactly as
+    // the caller's caps were before RW-5 F2. That is ALL this load is for. It does
+    // not order the seal: the seal is stamped under g_proc_table_lock (proc_seal),
+    // which every caller of this predicate holds.
+    u32 target_principal = __atomic_load_n(&target->principal_id, __ATOMIC_ACQUIRE);
+    if (caller->principal_id == target_principal)      return true;   // owner
     // caps read ATOMICALLY (RW-5 F2): proc_become_legate is a cross-thread writer
     // of caller->caps; CAP_HOSTOWNER is clearance-grantable, so a plain load is racy.
     if (__atomic_load_n(&caller->caps, __ATOMIC_ACQUIRE) & CAP_HOSTOWNER)
         return true;                                                   // host owner
     return false;
+}
+
+// The EXTRACTION axis -- the dump seal (PROC_FLAG_NODUMP), DEBUG-FS-DESIGN 3.2.
+// True iff `target`'s seal forbids `caller` taking a piece of its image out. Self is
+// never forbidden: a Proc reads its own environment by its own pid (devproc has no
+// `self` entry -- every native self-read is by pid), and sealing a Proc against
+// itself would protect nobody, since it already holds the secret.
+//
+// The two seal bits are not synonyms. PROC_FLAG_NOTRACE forbids CONTROL and is read
+// by devproc_debug_authorized; NODUMP forbids EXTRACTION and is read here. That split
+// is Linux's -- dumpability, not the ptrace flag, is what gates /proc/<pid> content
+// there -- because refusing to be dumped and refusing to be driven are different
+// promises a process may want to make separately. Before this the NODUMP bit had no
+// runtime reader but the re-enable refusal in its own setter, so a SEALED Proc's
+// environment was readable by any same-principal peer: the exact actor
+// SPAWN_PERM_SEAL exists to shut out.
+//
+// ABSOLUTE once it applies -- CAP_HOSTOWNER does not buy through it, exactly as the
+// NOTRACE seam refuses debug control to every cap holder including the host owner.
+// This DIVERGES from Linux deliberately (there a non-dumpable Proc's /proc becomes
+// root-owned and CAP_SYS_PTRACE still reads it): the canonical sealed asset is the one
+// the kernel seals itself at the seat bind, whose stated contract is that "physical
+// keys/private pixels must never be exposed through a debug attach or core dump", and
+// keys are extracted by READING.
+static bool devproc_dump_sealed_against(const struct Proc *caller,
+                                        const struct Proc *target) {
+    if (caller == target) return false;                  // never against itself
+    // Every caller holds g_proc_table_lock, and proc_seal stamps the bit under it,
+    // so this load sees the target wholly sealed or wholly not -- for a reader
+    // admitted on ANY axis, and for a Proc that seals itself mid-read (the read
+    // completes first, or is refused). One-way, so a later read is only more set.
+    return (__atomic_load_n(&target->proc_flags, __ATOMIC_RELAXED)
+            & PROC_FLAG_NODUMP) != 0;
+}
+
+// THE IMAGE SET -- which /proc/<pid> files the dump seal refuses. A file is in the
+// set iff it hands out something the target HOLDS: its arguments, its namespace, the
+// path of the image it runs, its working directory, the layout of its memory, its
+// environment, and the READ direction of its memory and register state -- kregs
+// included, because it carries tpidr_el0, an EL0 register the target holds. What
+// the kernel SAYS ABOUT the target is never in it -- status, sched, imperium -- so
+// an audited Proc cannot switch off the audit; the control files (ctl, wait) and the
+// kernel's own execution state (kstack) belong to NOTRACE, through
+// devproc_debug_authorized. One predicate, asked through devproc_read_sealed at every
+// read site -- the dispatch and each walk with its own read path -- so a file is
+// classified here or not at all. cmdline carries no argv yet; it is in the set so
+// that argv arrives sealed. `name` -- the exe path's basename, stamped at exec -- is
+// ledger: status, sched and /ctl/procs carry it, as Linux keeps a non-dumpable
+// process's comm public.
+static bool devproc_kind_is_image(u32 kind) {
+    switch (kind) {
+    case PQS_CMDLINE:
+    case PQS_NS:
+    case PQS_EXE:
+    case PQS_CWD:
+    case PQS_MAPS:
+    case PQS_ENVIRON:
+    case PQS_MEM:
+    case PQS_REGS:
+    case PQS_FPREGS:
+    case PQS_KREGS:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// The seal at a read site. Every read site -- the dispatch and each walk with its
+// own read path -- asks THIS with the kind of the file it serves, so a kind classified
+// in devproc_kind_is_image is sealed on every path that reads it. A NEW read path
+// that skips the call is the one gap the classification cannot close; its row in
+// test_devproc_dump_seal_disclosure is what catches it.
+static bool devproc_read_sealed(const struct Proc *caller, const struct Proc *target,
+                                u32 kind) {
+    return devproc_kind_is_image(kind) && devproc_dump_sealed_against(caller, target);
+}
+
+// Owner-or-hostowner AND not dump-sealed: the gate for environ, the one image file
+// that is not ambient to begin with. Authority first, then the seal -- the order is
+// for legibility, not safety: both run under g_proc_table_lock, which is what makes
+// the pair atomic against proc_seal.
+bool devproc_extract_authorized(const struct Proc *caller, const struct Proc *target) {
+    if (!caller || !target)                            return false;
+    if (!devproc_owner_or_hostowner(caller, target))   return false;   // authority
+    return !devproc_read_sealed(caller, target, PQS_ENVIRON);           // the seal
 }
 
 bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *target) {
@@ -1323,7 +1454,12 @@ bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *targ
 // Two-axis authority for the /proc/<pid> debug surface (attach + the mem/regs/
 // wait reads in later sub-chunks), the I-26 kill-gate analog. ctl is 0600
 // (owner rw), so:
-//   - identity axis: the OWNER (same principal_id) may debug its own target;
+//   - identity axis: the OWNER (same principal_id) may debug its own target, but
+//     ONLY while its own caps COVER the target's (the capability-cover rule,
+//     DEBUG-FS-DESIGN §3.1) — debug is total control, so same-principal is
+//     necessary and NOT sufficient. This is where debug deliberately diverges
+//     from the I-26 kill gate, whose owner axis is unconditional: killing a
+//     more-capable target destroys it, debugging one USES its authority;
 //   - capability axis: CAP_HOSTOWNER (the host owner / Plan 9 "eve" — user-voted
 //     a debug axis 2026-07-15: it already kills/chowns/DAC-overrides any target,
 //     and debug is strictly less invasive than kill) OR CAP_DEBUG (the
@@ -1340,17 +1476,47 @@ bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *targ
 bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *target) {
     if (!caller || !target)                            return false;
     if (target == kproc())                             return false;   // kernel: undebuggable
-    // NOTRACE is a monotonic one-way bit; a RELAXED read matches the setter
-    // (sys_set_traceable) and is sound (it is set at target startup, before any
-    // debugger could race — a stale-clear window cannot outlive the setter).
-    if (__atomic_load_n(&target->proc_flags, __ATOMIC_RELAXED) & PROC_FLAG_NOTRACE)
+    // The target's principal is read with ACQUIRE (proc_apply_identity is a
+    // cross-thread RELEASE writer of it; a plain load is C11-racy), and the no-trace
+    // seam is tested last. The ORDER no longer carries the safety. Every caller holds
+    // g_proc_table_lock and proc_seal stamps NOTRACE under it, so the seam load sees
+    // the target wholly sealed or wholly not -- including a spawn whose identity
+    // never changes and a caller admitted on the CAP_HOSTOWNER / CAP_DEBUG axis,
+    // neither of which an ordering built from this identity load could cover (it
+    // once carried the safety, and held only for a reader admitted BECAUSE it saw
+    // the new principal). Refusing last is identical in OUTCOME to refusing first:
+    // no cap holder may debug a NOTRACE target either.
+    u32 target_principal = __atomic_load_n(&target->principal_id, __ATOMIC_ACQUIRE);
+    // BOTH caps words are read ATOMICALLY (RW-5 F2): proc_become_legate is a
+    // cross-thread writer of a RUNNING Proc's caps, so a plain load is C11-racy.
+    // That now covers the TARGET's set too, not just the caller's.
+    caps_t caller_caps = __atomic_load_n(&caller->caps, __ATOMIC_ACQUIRE);
+    bool axis = false;
+    if (caller == target) {
+        // Reflexive BY CONSTRUCTION, and load-bearing as a short-circuit rather
+        // than a comment: cover for a self-read would otherwise be two separate
+        // loads of the SAME word, so a peer thread's proc_become_legate landing
+        // between them could refuse a Proc access to ITSELF (reachable -- kstack
+        // and wait carry no stopped-only requirement). Cannot widen anything.
+        axis = true;
+    } else if (caller->principal_id == target_principal) {              // owner-rwx on 0600
+        // The capability-cover rule (DEBUG-FS-DESIGN 3.1, scripture 389c06b9;
+        // Linux's cap_ptrace_access_check): the owner axis admits only when the
+        // caller's authority COVERS the target's. A debug attach is TOTAL
+        // control, so admitting a caller that lacks one of the target's caps
+        // would hand it that cap -- and identity cannot separate the two, because
+        // elevation leaves the principal unchanged (I-22; IMPERIUM 11.6's
+        // same-principal sub-shell). Caps only shrink at fork (I-2), so a spawner
+        // always covers its own children and shell-spawned debugging is untouched.
+        caps_t target_caps = __atomic_load_n(&target->caps, __ATOMIC_ACQUIRE);
+        axis = (target_caps & ~caller_caps) == 0;
+    }
+    if (!axis)
+        axis = (caller_caps & (CAP_HOSTOWNER | CAP_DEBUG)) != 0;   // host owner OR debug-anyone
+    if (!axis)                                         return false;
+    if (__atomic_load_n(&target->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_NOTRACE)
         return false;                                                   // no-trace seam
-    if (caller->principal_id == target->principal_id)  return true;    // owner-rwx on 0600
-    // caps read ATOMICALLY (RW-5 F2): proc_become_legate is a cross-thread writer
-    // of caller->caps; a plain load is C11-racy (both axes are clearance-grantable).
-    if (__atomic_load_n(&caller->caps, __ATOMIC_ACQUIRE) & (CAP_HOSTOWNER | CAP_DEBUG))
-        return true;                                                    // host owner OR debug-anyone
-    return false;
+    return true;
 }
 
 // =============================================================================
@@ -1475,6 +1641,11 @@ static int devproc_mem_walk_cb(struct Proc *target, void *arg) {
     if (target->pid != m->target_pid) return 0;   // keep walking
     if (target == kproc())                              { m->result = -1; return 1; }
     if (!devproc_debug_authorized(m->caller, target))   { m->result = -1; return 1; }  // I-39
+    // The dump seal refuses EXTRACTION, and reading a target's memory is the largest
+    // extraction there is (DEBUG-FS-DESIGN 3.2). A write is CONTROL -- NOTRACE's, via
+    // the gate above -- so a NODUMP-only target's debugger may still write it.
+    if (!m->is_write
+        && devproc_read_sealed(m->caller, target, PQS_MEM)) { m->result = -1; return 1; }
     if (!devproc_target_fully_stopped(target))          { m->result = -1; return 1; }  // stopped-only
 
     irq_state_t vs = spin_lock_irqsave(&target->as->lock);
@@ -1548,7 +1719,8 @@ struct Thread *devproc_focus_thread(struct Proc *target) {
 // memory (TTBR1) -- a plain deref, no cross-Proc walk. Caller holds
 // g_proc_table_lock + has gated I-39 + fully-stopped (so on_cpu==false: the
 // frame + ctx are settled, not being written by a live cpu_switch_context).
-static long devproc_build_regs(struct Proc *target, u32 kind, u8 *out) {
+// `raw` admits kregs's kernel half (the CAP_DEBUG/CAP_HOSTOWNER tier; see below).
+static long devproc_build_regs(struct Proc *target, u32 kind, u8 *out, bool raw) {
     struct Thread *th = devproc_focus_thread(target);   // 8c-2 #95: the M at the stop (else head)
     // 8a-1c holotype F1 (defense-in-depth): never read an EXITING head thread's
     // ctx/trapframe -- it is running its exit path (the final sched() writes
@@ -1562,16 +1734,25 @@ static long devproc_build_regs(struct Proc *target, u32 kind, u8 *out) {
     // (context.h), so this is a verbatim field copy. tpidr_el0 is the EL0 TLS
     // base dlv reads for the Go `g` (DEBUG-FS 4.5); ttbr0 is omitted (a kernel
     // pgtable PA -- info-leak, no debug value).
+    //
+    // I-16: the kernel half is raw slid state. ctx.lr is the return into sched, so
+    // lr minus its link address IS the KASLR slide, and fp/sp/x19..x28 are kernel
+    // stack and heap addresses. Like kstack's raw addresses it goes only to the
+    // CAP_DEBUG/CAP_HOSTOWNER tier (`raw`); the owner axis -- any user debugging its
+    // own program -- gets the TLS base alone, which is all Delve reads here.
     if (kind == PQS_KREGS) {
         struct t_kernel_regs *kr = (struct t_kernel_regs *)out;
-        kr->x[0] = th->ctx.x19; kr->x[1] = th->ctx.x20; kr->x[2] = th->ctx.x21;
-        kr->x[3] = th->ctx.x22; kr->x[4] = th->ctx.x23; kr->x[5] = th->ctx.x24;
-        kr->x[6] = th->ctx.x25; kr->x[7] = th->ctx.x26; kr->x[8] = th->ctx.x27;
-        kr->x[9] = th->ctx.x28;
-        kr->fp        = th->ctx.fp;
-        kr->lr        = th->ctx.lr;
-        kr->sp        = th->ctx.sp;
+        for (size_t i = 0; i < sizeof(*kr); i++) ((u8 *)kr)[i] = 0;
         kr->tpidr_el0 = th->ctx.tpidr_el0;
+        if (raw) {
+            kr->x[0] = th->ctx.x19; kr->x[1] = th->ctx.x20; kr->x[2] = th->ctx.x21;
+            kr->x[3] = th->ctx.x22; kr->x[4] = th->ctx.x23; kr->x[5] = th->ctx.x24;
+            kr->x[6] = th->ctx.x25; kr->x[7] = th->ctx.x26; kr->x[8] = th->ctx.x27;
+            kr->x[9] = th->ctx.x28;
+            kr->fp   = th->ctx.fp;
+            kr->lr   = th->ctx.lr;
+            kr->sp   = th->ctx.sp;
+        }
         return (long)sizeof(struct t_kernel_regs);
     }
 
@@ -1661,6 +1842,10 @@ static int devproc_regs_walk_cb(struct Proc *target, void *arg) {
     if (target->pid != r->target_pid) return 0;
     if (target == kproc())                              { r->result = -1; return 1; }
     if (!devproc_debug_authorized(r->caller, target))   { r->result = -1; return 1; }  // I-39
+    // regs/fpregs/kregs READS are extraction (the dump seal; kregs carries tpidr_el0,
+    // an EL0 register); writes are control -- NOTRACE's, through the gate above.
+    if (!r->is_write
+        && devproc_read_sealed(r->caller, target, r->kind)) { r->result = -1; return 1; }
     if (!devproc_target_fully_stopped(target))          { r->result = -1; return 1; }  // stopped-only
 
     // Build the current struct, apply the [off,off+n) slice (write) or copy it
@@ -1668,7 +1853,11 @@ static int devproc_regs_walk_cb(struct Proc *target, void *arg) {
     // the current bytes for the untouched fields -- and the pstate guard holds
     // regardless of the write's offset (devproc_apply_regs never writes SPSR).
     u8 scratch[sizeof(struct t_user_fpregs)];   // the larger struct (520)
-    long size = devproc_build_regs(target, r->kind, scratch);
+    // I-16: only the CAP tier sees kregs's kernel half. Same acquire-load of caps as
+    // devproc_debug_authorized and the kstack reader.
+    bool raw = (__atomic_load_n(&r->caller->caps, __ATOMIC_ACQUIRE)
+                & (CAP_HOSTOWNER | CAP_DEBUG)) != 0;
+    long size = devproc_build_regs(target, r->kind, scratch, raw);
     if (size == 0)       { r->result = -1; return 1; }   // no head thread / no kstack
     if (r->off >= size)  { r->result = 0;  return 1; }   // off past EOF -> 0
     long avail = size - (long)r->off;
@@ -2355,6 +2544,7 @@ static int devproc_kstack_walk_cb(struct Proc *target, void *arg) {
     if (target->pid != k->target_pid) return 0;   // keep walking
     if (target == kproc())                            { k->result = -1; return 1; }
     if (!devproc_debug_authorized(k->caller, target)) { k->result = -1; return 1; }   // I-39
+    if (devproc_read_sealed(k->caller, target, PQS_KSTACK)) { k->result = -1; return 1; }
     // 8b: the SETTLED-thread inspect -- NO debug-stop required (unlike mem/regs/
     // kregs/wait, which keep the fully_stopped gate). devproc_format_kstack gates
     // the head on on_cpu==false; the walk is bounded to the thread's own kstack
@@ -2364,7 +2554,8 @@ static int devproc_kstack_walk_cb(struct Proc *target, void *arg) {
     // I-16 (8b-1d holotype F1): raw slid kernel addresses reveal the KASLR slide, so
     // they go ONLY to the CAP_DEBUG/CAP_HOSTOWNER tier (the /ctl/kernel-base tier);
     // the owner axis gets the KASLR-independent symbolic form. Same acquire-load of
-    // caps as devproc_debug_authorized (both axes are clearance-grantable).
+    // caps as devproc_debug_authorized. (Not "both axes are clearance-grantable":
+    // CAP_HOSTOWNER is console-gated ADMIN_ELEVATE, outside CAP_GRANTABLE_CLEARANCE.)
     bool raw = (__atomic_load_n(&k->caller->caps, __ATOMIC_ACQUIRE)
                 & (CAP_HOSTOWNER | CAP_DEBUG)) != 0;
     k->total  = devproc_format_kstack(target, k->buf, k->cap, raw);
@@ -2404,15 +2595,16 @@ static long devproc_kstack_read(struct Spoor *c, void *buf, long n, s64 off) {
 // VIVARIUM V-4b-6: /proc/<pid>/environ -- the flat NUL-separated environment
 // block, the source the diorama re-presents as Linux's /proc/self/environ.
 //
-// GATED, unlike its info-file siblings. exe/cwd/ns/maps are 0444 all-pids-
-// visible on the argument that they disclose nothing a peer could not already
-// read (/proc/<pid>/ns discloses strictly more than any of them). That argument
-// does NOT extend here: /env resolves current_thread()->proc->env BY
-// CONSTRUCTION, so today NOTHING lets one Proc read another's environment, and
-// environment variables are where secrets live by universal convention. So this
-// file is a real new cross-Proc disclosure and carries the owner-or-CAP_HOSTOWNER
+// GATED, unlike its info-file siblings. cmdline/exe/cwd/ns/maps are 0444
+// all-pids-visible for an UNSEALED Proc (Plan 9's posture), and every one of them
+// -- this file too -- is refused for a dump-SEALED Proc (devproc_kind_is_image).
+// Environ gets an owner gate on top because it is a new cross-Proc disclosure:
+// /env resolves current_thread()->proc->env BY CONSTRUCTION, so nothing else lets
+// one Proc read another's environment, and environment variables are where
+// secrets live by universal convention. So it carries the owner-or-CAP_HOSTOWNER
 // gate -- the same policy sched uses, and the same posture Linux itself takes
-// (mode 0400 plus a ptrace_may_access check).
+// (mode 0400 plus a ptrace_may_access check) -- composed with the seal in
+// devproc_extract_authorized.
 //
 // A denial is -1, formatting nothing: no partial leak, and the same shape the
 // sched gate returns. devproc.perm_enforced is false, so the 0400 mode is
@@ -2448,7 +2640,7 @@ struct devproc_environ_ctx {
 static int devproc_environ_walk_cb(struct Proc *target, void *arg) {
     struct devproc_environ_ctx *k = (struct devproc_environ_ctx *)arg;
     if (target->pid != k->target_pid) return 0;                 // keep walking
-    if (!devproc_owner_or_hostowner(k->caller, target)) {
+    if (!devproc_extract_authorized(k->caller, target)) {
         k->result = -1;                                          // denied: no bytes
         return 1;
     }
@@ -2512,6 +2704,7 @@ static int devproc_waitscan_cb(struct Proc *target, void *arg) {
     if (target->pid != w->target_pid) return 0;   // keep walking -> not found -> stays -1
     if (target == kproc())                            { w->state = -2; return 1; }  // undebuggable
     if (!devproc_debug_authorized(w->caller, target)) { w->state = -2; return 1; }  // I-39
+    if (devproc_read_sealed(w->caller, target, PQS_WAIT)) { w->state = -2; return 1; }
     if (target->state != PROC_STATE_ALIVE)            { w->state = -1; return 1; }  // exiting/zombie -> "exited"
     w->state = devproc_target_fully_stopped(target) ? 1 : 0;   // debug_stop_req + all parked
     return 1;

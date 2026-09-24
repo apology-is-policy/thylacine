@@ -16,7 +16,7 @@ design:
   - "docs/PROWL-DESIGN.md OQ-4"
   - "docs/VIVARIUM.md section 6.2"
 created: 2026-08-02
-updated: 2026-09-23
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -31,6 +31,168 @@ The largest single file in the kernel tree. Its size is almost entirely the debu
 surface: the original P4-C Dev was `status`/`cmdline`/`ctl`/`ns`.
 
 ## Contract
+
+
+**The debug predicate's read order is for legibility, not safety ((U) F1 round 2, 2026-09-23; superseded by the seal's lock, 2026-09-24).**
+`devproc_debug_authorized` now ACQUIRE-loads the target's `principal_id` FIRST and
+tests the `PROC_FLAG_NOTRACE` seam LAST. The order once carried the safety: a spawn
+stamps the `SPAWN_PERM_*` marks and then applies the child's identity while `rfork` has
+already published the child, and the ACQUIRE load of `principal_id` paired with
+`proc_apply_identity`'s RELEASE so the stamp was visible. That guarantee held only for a
+reader admitted BECAUSE it saw the new principal (seal round 2, F5) -- a spawn that
+changes no identity publishes nothing to pair with, and a `CAP_HOSTOWNER`/`CAP_DEBUG`
+caller's admission never consults the identity. Since 2026-09-24 the seal's visibility
+rests on a LOCK: `proc_seal` is the only writer of NOTRACE/NODUMP and stamps under
+`g_proc_table_lock`, which every caller of this predicate holds (`proc_for_each`), so
+the seam load sees the target wholly sealed or wholly not, on every axis. The ACQUIRE
+load stays, for C11 race-freedom.
+
+Refusing LAST is identical in OUTCOME to refusing first, because NOTRACE is
+monotonic (one-way, never cleared) and no cap holder may debug a sealed target
+either -- so the order changes no verdict. The existing
+`devproc.debug_authorized_predicate` NOTRACE legs (refuses the owner, refuses a
+`CAP_DEBUG` holder) are the regression guard.
+
+**The owner axis is CONDITIONAL on capability cover (2026-09-24, scripture
+`389c06b9`; DEBUG-FS-DESIGN 3.1).** Same-principal is necessary and NOT sufficient:
+the owner axis admits only while `(target->caps & ~caller->caps) == 0`. A debug
+attach is total control, so admitting a caller that lacks one of the target's caps
+would hand it that cap, and identity cannot separate the two parties because
+elevation leaves the principal unchanged ([[inv-i22]]; IMPERIUM's same-principal
+sub-shell). Before the rule an UNELEVATED shell passed the gate against its own
+imperium-elevated sub-shell and against every member of a propagating legate scope,
+borrowing a trusted-path elevation ([[inv-i25]]/[[inv-i27]]) -- the general form of
+the (U) F1 side door that `SPAWN_PERM_SEAL` closed for one asset. Prior art: Linux
+`cap_ptrace_access_check`, FreeBSD `p_candebug`.
+
+Two consequences worth stating, because both look like bugs to a reader who does not
+know the rule. (1) **This is where debug DIVERGES from the kill gate above**: kill's
+owner axis stays unconditional, since killing a more-capable target destroys it and
+never USES its authority, while debugging one does. (2) **Nothing regresses for
+shell-spawned debugging**: fork-grantable caps only shrink ([[inv-i2]]), so a
+spawner's set always covers its children's. Both caps words are now ACQUIRE-loaded
+(`proc_become_legate` is a cross-thread writer of a running Proc's caps -- the RW-5
+F2 rule, which now applies to the TARGET's set too), sitting between the
+`principal_id` load and the seam load so the order above is preserved. Guards:
+`devproc.debug_cap_cover_predicate` (equal / superset / exact / one-cap-short /
+disjoint / both cap-axis overrides / `CAP_DAC_OVERRIDE` / NOTRACE-over-cover) and
+`devproc.debug_cap_cover_attach` (the same rule end-to-end through the `attach`
+verb, a SEPARATE test so a predicate regression cannot hide the real path's).
+
+**A self-read short-circuits BEFORE cover (audit F7).** `caller == target` sets
+the axis by construction rather than computing cover, because for a self-read the
+two sides are two separate ACQUIRE loads of the SAME word: a peer thread's
+`proc_become_legate` landing between them could refuse a Proc access to ITSELF,
+which is reachable since `kstack` and `wait` carry no stopped-only requirement.
+It cannot widen anything. The cross-Proc torn pair is sound in the other
+direction and deliberately so -- the caller is read first and caps on a live Proc
+only grow, so the race can manufacture a false REFUSAL but never a false
+admission.
+
+**The EXTRACTION surfaces honour the DUMP seal (2026-09-24, DEBUG-FS-DESIGN 3.2).**
+One predicate, `devproc_kind_is_image`, names the IMAGE SET -- every file that hands out
+something the target HOLDS: `cmdline`, `ns`, `exe`, `cwd`, `maps`, `environ`, and the
+READ direction of `mem`, `regs`, `fpregs` and `kregs` (which carries `tpidr_el0`, an EL0
+register). Every read site asks it through `devproc_read_sealed` with the kind it serves:
+`devproc_read_cb` refuses an image kind on the seal before any formatter runs (so the
+0444 files keep their ambient all-pids visibility for an UNSEALED Proc); `environ`
+composes its owner-or-hostowner gate with the seal in `devproc_extract_authorized`; the
+mem and regs walks refuse reads (writes are control, NOTRACE's); `kstack` and `wait` ask
+too and sit outside the set. `name`, the exe's basename, is ledger (`status`, `sched`,
+`/ctl/procs`), as Linux keeps a non-dumpable process's comm public. `devproc_owner_or_hostowner`
+keeps its old meaning with NO seal and gates `sched` and `imperium`; `status` is
+ungated.
+
+**The set took two corrections, and they are the part worth reading.** The first cut put
+the seal inside `devproc_owner_or_hostowner`, wrong in both directions: it MISSED `maps`
+(0444, ungated -- a sealed Proc's whole VMA table, including which ranges are
+`SHARED_IN` another Proc's memory) and it CAPTURED `imperium` and `sched`, the kernel's
+attestation ABOUT a Proc. Because `SYS_SET_DUMPABLE(0)` is an ungated one-way self-call,
+that let any Proc in a live propagating legate scope permanently suppress the kernel's
+record of its own elevation; I-25's enforcement never depended on that file, but its
+observability does. The re-audit then found the corrected set still short (round 2, P1):
+`ns` -- the whole mount table with source paths, ranked by this file's own comments
+ABOVE `maps` -- plus `cwd`, `exe` and `cmdline` were ungated image files, and a
+NODUMP-only Proc handed a debugger every byte of `mem`. Each miss had one cause: a list
+instead of a property. The rule: **the seal follows the image, not the ledger** -- the
+image is everything the Proc holds; the ledger (`status`, `sched`, `imperium`) is what
+the kernel says about it; the control files (`ctl`, `wait`) and the kernel's own state
+(`kstack`) answer to NOTRACE, and `kregs` is image for its `tpidr_el0`. The two bits are NOT synonyms: `NOTRACE` forbids
+CONTROL (read by `devproc_debug_authorized`), `NODUMP` forbids EXTRACTION (read through
+`devproc_kind_is_image`) -- Linux's division, where dumpability rather than the ptrace
+flag governs `/proc/<pid>` content. NODUMP alone does not stop a peer that may still
+DRIVE a Proc (a driver can make it disclose itself), which is why every real sealer
+sets both.
+
+**Self is exempt; otherwise ABSOLUTE.** A Proc reads itself by its own pid -- devproc
+has no `self` entry -- and sealing it against itself protects nobody, since it already
+holds the secret. `CAP_HOSTOWNER` does not buy through it, exactly as the `NOTRACE` seam
+refuses control to every cap holder; the seat bind's own words are "physical
+keys/private pixels must never be exposed through a debug attach or core dump", and
+keys are extracted by READING. A deliberate divergence from Linux, where
+`CAP_SYS_PTRACE` still reads a non-dumpable process. Accepted cost: a sealed Proc yields
+its image files to nobody but itself; `status`, `sched` and `imperium` stay readable.
+
+**Ordering is a LOCK, not a load order.** `proc_seal` (kernel/proc.c) is the only writer
+of both seal bits and stamps them under `g_proc_table_lock`; every read above tests the
+seal under that same lock and renders there too (environ under `env->lock`, maps under
+`vma_lock`, ns under `ns_lock`, the mem copy directly -- all leaves below it). So a read
+happens wholly before or wholly after a seal, whichever axis admitted the reader,
+including against a Proc that seals itself and then loads a secret, and
+`SPAWN_PERM_SEAL`'s two bits land in one critical section. The first correction had
+made this structural by composition instead (ACQUIRE `principal_id` first, seal last);
+round 2 showed that held only for a reader admitted BECAUSE it saw the new identity --
+not for a spawn that changes no identity, nor for a `CAP_HOSTOWNER` reader. The boundary
+that remains: spawn COPIES the parent's environment into the child and the seal is not
+copied, so a sealed parent's environment reads through any child it spawns unsealed
+(login -> `ut`), and a `SPAWN_PERM_SEAL` child is visible, unsealed, between `rfork`'s
+link and its thunk's stamp. Documented in DEBUG-FS 3.2; no secret travels that path
+today.
+
+Guards: `devproc.dump_seal_disclosure` (THE SET at the call sites: ten files read
+through the real path unsealed then sealed -- image files must refuse,
+`status`/`ctl`/`sched`/`imperium` must still answer -- plus a cross-principal target
+pinning environ's own owner gate end to end); `devproc.debug_mem` and
+`devproc.debug_regs` (a NODUMP target refuses mem/regs/fpregs READS and still takes
+WRITES, each with a positive control one variable away); `devproc.dump_seal_predicate`
+(seven legs: both controls unsealed, the NOTRACE-only mirror, absolute-vs-hostowner,
+the same-principal peer, the self exemption, NODUMP-is-not-a-debug-refusal);
+`devproc.dump_seal_scope` (the same split at the predicate level, so a predicate
+regression is reported as one). Every seal test sets the bit through `proc_seal`, the
+production writer, and captures its verdicts before freeing its Procs.
+
+**What 3.2 does not close:** the disclosure gate's owner axis still carries no
+capability-cover condition, so an UNSEALED elevated target stays readable by an
+unelevated same-principal peer -- its `imperium` file even enumerates the caps it
+holds. Tracked as its own question rather than folded in, because cover exists to
+stop amplification through CONTROL and a read amplifies nothing, so the case for it
+here rests on secrecy and its cost (peers lose diagnostics on each other) has not
+been weighed.
+
+**Three things cover does NOT close**, recorded here because each looks like an
+oversight to a reader who expects a total rule (DEBUG-FS-DESIGN 3.1 carries the
+full argument). (1) It is POINT-IN-TIME: nothing records that a Proc *was*
+debugged, so an equal-authority peer may attach before a target redeems a grant
+and inject into the pre-elevation window -- Linux's other half, a monotonic debug
+taint refusing the privilege gain, is not implemented. (2) It governs CONTROL,
+not DISCLOSURE: `environ`, `sched` and `imperium` still gate on
+`devproc_owner_or_hostowner`, which weighs no CAPS (it does, since 2026-09-24, weigh
+the dump seal on the extraction surfaces -- see the section above; `sched` and
+`imperium` deliberately remain unsealed). (3) It is a
+subset test over the `caps` word ALONE, so `proc_flags` spawn perms, the
+[[inv-i34]] allowance and the handle table are invisible to it -- see
+[[sub-kernel-caps]] for the checklist that follows. All three are tracked, none
+is a regression, and all three were in scripture before this dossier said so.
+
+**What the seam does NOT cover, measured rather than assumed.** Inspection is
+re-gated per operation (mem, regs, fpregs, hwbreak, hwwatch, step, kstack, wait).
+**Run control is NOT**: `devproc_runctl_walk_cb` gates stop/start/waitstop/exitkill
+on slot ownership ALONE, deliberately ("the debugger already passed the I-39 attach
+gate"), so a caller that won the race to attach keeps run control over a
+subsequently-sealed target. That is bounded at denial of service, because
+[[inv-i26]] already lets an owner kill its own Proc -- and the BOUND, not a
+re-check, is why it is acceptable. Do not "fix" it by re-gating run control: a
+target must not be able to escape its debugger by self-sealing.
 
 **`/proc/PID/imperium` (2026-09-17).** The kernel exposes the current
 scope's unforgeable identity, deadline and flowing capability mask. `imperium
@@ -293,7 +455,11 @@ Its output then splits on capability: raw slid kernel addresses reveal the KASLR
 slide (an I-16 secret gated elsewhere behind `CAP_HOSTOWNER`), so the raw
 columns go only to the `CAP_DEBUG`/`CAP_HOSTOWNER` tier. The owner axis gets the
 symbolic `name+offset` form, which is link-relative and therefore
-slide-independent — and which *is* the "why is it hung" diagnostic.
+slide-independent — and which *is* the "why is it hung" diagnostic. `kregs` splits the
+same way: its kernel half (`x19`–`x28`, `fp`, `lr`, `sp`) is filled only for that tier,
+because a parked thread's `lr` is the return into `sched` and gives away the slide as
+surely as a raw frame; the owner axis reads those fields as zero and keeps `tpidr_el0`
+(2026-09-24 -- kregs had gone to the owner axis unconditionally since 8a).
 
 ## `status` gained `tables:` and `file:` (2026-09-23; B-1a' audits F1 and F8)
 
@@ -363,15 +529,16 @@ and its ctl-fd close then resumes the target.
 [[inv-i26]] (cross-process control is explicitly two-axis) — enforced here and
 nowhere else, by the kill gate, for both `kill`/`killgrp` and `suspend`/`resume`.
 
-[[inv-i39]] (debug authority is namespace-plus-two-axis, stopped-only, never
-stranding the quarry) — this file *is* its enforcement surface: the gate, the
+[[inv-i39]] (debug authority is namespace-plus-two-axis -- the owner half
+capability-COVERED since 2026-09-24 -- stopped-only, never stranding the quarry) — this file *is* its enforcement surface: the gate, the
 stopped-only conjunction, the SPSR guard, the slot lifetime, and the
 resume-*or-terminate*-on-release that discharges NoStrand — an attached target
 resumes, a launched `exitkill`-marked one dies with its launcher (die-with-launcher,
 above). Modelled by [[spec-debug-stop]]; its composition with the second stop
 owner by [[spec-pty-stop]].
 
-**I-16** (the KASLR slide is a secret) — by the kstack raw/symbolic split.
+**I-16** (the KASLR slide is a secret) — by the kstack raw/symbolic split and kregs'
+CAP-tier kernel half.
 
 **I-22** (no identity carries ambient authority) — negatively, and deliberately:
 every gate is computed directly rather than through `perm_check`, so no identity
