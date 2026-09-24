@@ -300,9 +300,16 @@ long cap_register_clearance_grant_for_writer(struct Proc *writer,
     return (rc < 0) ? -1 : (long)CAP_GRANT_CLEARANCE_WRITE_LEN;
 }
 
-long cap_redeem_grant_for_writer(struct Proc *writer, caps_t cap_mask) {
+static long cap_redeem_grant_locked(struct Proc *writer, caps_t cap_mask) {
     if (!writer)        return -1;
     if (cap_mask == 0)  return -1;    // a redeem must request >= one cap
+    // The precursor gate, on BOTH arms below rather than the clearance one only:
+    // an image that has been under debug control, or that is still shared with
+    // another Proc, does not gain authority. Checked under the LIFECYCLE lock,
+    // so it is atomic against a peer thread's rfork -- publication takes that
+    // same lock, so a sharer either already exists here or is published after
+    // the caps have landed, where the fork carve bounds the child instead.
+    if (!proc_elevation_allowed_locked(writer)) return -1;
 
     u64 stripes = proc_stripes(writer);
     if (stripes == 0)   return -1;
@@ -386,8 +393,12 @@ long cap_redeem_grant_for_writer(struct Proc *writer, caps_t cap_mask) {
         // overwriting the first's flowing set -- IM-2 made that a privilege
         // question), and stamping first means a refusal inside the stamp (the
         // defensive twin of the check above) never loses the grant.
-        // proc_become_legate takes no lock and cannot sleep.
-        if (proc_become_legate(writer, to_or, session, valid_until, lflags) != 0) {
+        // We already hold the lifecycle lock (taken before this one by the
+        // wrapper), so the stamp goes through the _locked entry: taking it again
+        // here would deadlock, and taking it in the other order would invert the
+        // established edge (the seat failure path calls into this file while
+        // holding the lifecycle lock).
+        if (proc_become_legate_locked(writer, to_or, session, valid_until, lflags) != 0) {
             spin_unlock_irqrestore(&g_cap_grants.lock, s);
             return -1;
         }
@@ -428,6 +439,19 @@ long cap_redeem_grant_for_writer(struct Proc *writer, caps_t cap_mask) {
     // but the same multi-thread-lift class as the proc_flags sweep -- close it.
     __atomic_fetch_or(&writer->caps, to_or, __ATOMIC_ACQ_REL);
     return (long)CAP_USE_WRITE_LEN;
+}
+
+// LOCK ORDER: lifecycle (g_proc_table_lock) BEFORE the grant table. Not a new
+// rule -- the existing edge runs this way already, since the seat failure path
+// calls cap_cancel_imperium_pending and cap_release_seat_grant from inside a
+// g_proc_table_lock hold. Taking them in the other order here would close the
+// cycle. Held across the whole redeem so the elevation check, the legate stamp
+// and the caps OR are one atom with respect to a peer thread's rfork.
+long cap_redeem_grant_for_writer(struct Proc *writer, caps_t cap_mask) {
+    irq_state_t s = proc_table_lock_acquire();
+    long rc = cap_redeem_grant_locked(writer, cap_mask);
+    proc_table_lock_release(s);
+    return rc;
 }
 
 // =============================================================================

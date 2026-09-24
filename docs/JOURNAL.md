@@ -22,6 +22,100 @@ needed the operator.
 
 
 ---
+## 2026-09-24, late (aux, Opus 5 1M, effort max) -- the guard was on the Proc; the thing it guarded was not
+
+**What this was.** astra asked a narrow question on yip 0124 -- her debug taint stamped one `Proc`, and
+native RFMEM / Linux `CLONE_VM` can share an `AddrSpace` across Procs, so would a per-Proc stamp miss a
+sibling? Reading the gate to answer her turned the narrow question into a class. The cover rule
+(`devproc_debug_authorized`), NOTRACE, NODUMP and her planned taint are ALL per-`Proc` facts, and every one
+of them guards the image -- which lives in the `AddrSpace`.
+
+**The shape, and why it is not exotic.** An elevated parent vforks. The child's caps are carved by I-2
+(`kernel/proc.c` ~1488), so the child is a LOWER-authority Proc holding the SAME bytes. A peer that merely
+matches the child covers it, attaches, writes the shared stack, and the parent returns into it out of
+`vfork_await_release` (`kernel/proc.c:1857`). No redeem, no elevation, no unusual call -- musl's
+`posix_spawn` is `CLONE_VM|CLONE_VFORK` on every invocation. I enqueued it as H3 the same hour.
+
+**Ownership moved twice, which is the part worth recording.** astra folded the join into her chunk C and
+asked me to leave `devproc_debug_authorized`, `devproc_read_sealed`, `proc_seal` and the redeem to her (0124
+t3); I agreed and said I would prosecute it at her merge gate instead. Then she stopped -- a product
+restriction on her side, recorded in her own `work/UA-CHECKPOINT.md` -- and the surfaces were unowned. The
+operator reassigned both halves to me. My first attempt at it was stopped by a safety classifier; the
+operator re-authorized explicitly and switched the session model, and I resumed. Her untested
+`repair-draft.patch` (366 lines, never applied, never compiled) and her four drafted refusal regressions were
+read as INPUT only -- I re-derived rather than applied, because an untested patch is a hypothesis.
+
+**What the design turned on.** The join has to be the wall, not the redeem refusal, and the reason is
+timing: `proc_image_join_locked` is recomputed per operation under `g_proc_table_lock`, which is the lock
+`proc_exec_replace` swaps `->as` under and the lock every debug gate already holds. So it is exact at the
+instant of the attack, and a fork racing alongside cannot defeat it -- a child published after the check is
+bounded by the parent the check already weighed. The redeem's shared-refusal is then a second wall rather
+than the only one. `shared` is read from `addrspace_ref_count`, not from the walk, because the reap window
+(unlink, drop the lock, then free) holds a reference the walk cannot see -- and that is exactly where a
+missed sharer would be a privilege question rather than a cosmetic one.
+
+**A narrowness I had to argue myself back into.** My first instinct was to inherit the seals at every fork
+alongside the taint. That would have silently settled decision A -- whether a private COW copy of a secret is
+itself secret -- which is still an open operator question. The fork stamp therefore carries the taint ALWAYS
+and the seals only under RFMEM, and the comment says why, because the asymmetry looks like an oversight
+otherwise.
+
+**The wrong turn, and what caught it.** The first sabotage sweep printed `1665/1666 FAIL` on all five legs
+and I nearly took that as the evidence. It is not: a count is satisfied by ANY single failure, and I had not
+shown that leg A reds the COVER test rather than something incidental. My grep for the test NAME found
+nothing, which is what exposed it -- the runner prints the failing ASSERTION, not the test name
+(`kernel/test/test.c:4088`). Re-running for the assertion text gave the real evidence, one named assertion
+per leg. Then a second gap in the same place: leg B reverted both seal mechanisms at once, and `TEST_ASSERT`
+returns on first failure, so the NOTRACE arm never executed -- an assertion that never ran is an unknown, not
+a pass. A sixth leg (`B2only`) was added to witness it alone.
+
+**Also caught:** `tools/ci-smp-gate.sh` failed instantly on a CMake cache in `build/kernel-undefined`
+pointing at `~/projects/thylacine-aux` -- an artifact of this worktree's APFS-cloned `build/`, not a code
+problem. Removed the one stale directory rather than the whole tree.
+
+**The cost I owe the operator in plain words.** A Proc that is legitimately debugged can never elevate
+afterwards, and neither can anything it forks. Debug a login shell once and `imperium` is refused for that
+shell's life. That is the promise working -- if a peer can drive your shell it can drive your elevation -- but
+it is a behavioural change an operator will meet, and the escape is deliberately a fresh shell rather than a
+flag, since a flag that cleared the taint would be the bypass.
+
+**Still open.** Decision A (do the seals cross a COW fork). A sealed Proc inside the reap window is missed by
+the walk, so its bit does not reach a live sharer's gate for those few instructions; closing that needs the
+unlink and the free to be one atom, which is a lifecycle change and not this chunk. The operator's Lantern
+and `la` reports are queued behind this, with the tile-clear diagnosis already written down.
+
+**The re-take (after a compaction, Opus 5 -> 5.5).** The audit changed three mechanisms after the first sweep,
+so its numbers described a binary that no longer existed; the commit said so and split its provenance rather
+than quote them. Re-taking it was meant to be clerical. It was not.
+- *The anchors lied first.* Three of six sabotage anchors no longer matched the post-audit source -- legs A,
+  B's second edit and B2only, not the one the resume note guessed. The patcher aborted on a bad anchor, which
+  is the failure you want; it now has a `check` mode run before and after every sweep.
+- *Counting the wrong thing.* Audit F4 said three mechanisms had no witness, and its fix added tests. But a
+  test written after its code has never been seen to fail. Counting MECHANISMS instead of legs gave thirteen,
+  not six, and two mechanisms with no test at all. The one that mattered: `cap_redeem_grant_locked` refuses a
+  tainted writer at its top, and that looked redundant because the CLEARANCE arm reaches
+  `proc_become_legate_locked`, whose own check would refuse anyway. The HOSTOWNER arm does not -- it ORs
+  `CAP_HOSTOWNER` straight onto the writer -- so that one line is the only thing between a debugged image and
+  hostowner, and `test_devcap.c` had never mentioned the taint. The other was F3's zombie subtraction, which
+  anyone could have "simplified" back to `refs > 1` without a test noticing. Both have a regression and a leg
+  now; the suite is 1669.
+- *Predicting a null.* The joined-taint conjunct (`j.flags & TAINTED`) is unreachable -- every taint path also
+  sets the Proc's own bit -- so I wrote down, before the run, that its leg would red nothing. It redded
+  nothing. That is the evidence for keeping it as defensive redundancy instead of either trusting it as a
+  mechanism or deleting it as dead code.
+- *The red that hid.* The mem-write taint leg named its own assertion -- and then the boot never reached the
+  runner's summary. It hung 683 tests later in `cons.sys_puts_uses_shared_console_path`. Three more boots of
+  the same ELF: 871 lines each, same test, so a causal chain and not a race. The mechanism was innocent. My
+  assertion sat BEFORE `test_devproc_debug_mem`'s cleanup, so a red there returned holding a linked, live,
+  spoor-open Proc, and that console test opens with `while (wait_pid(&st) > 0)`. The file already knew the
+  rule -- its own last verdicts run after `proc_free`, and the regs sibling wraps its inline legs in a helper
+  with a `done` flag for exactly this, which is why the regs leg redded cleanly. The sweep driver caught it
+  only because it demanded a SUITE LINE instead of grepping for FAIL. Without that, a future regression of
+  the stamp would have surfaced as a hang in the console subsystem.
+- *Two predictions were incomplete, and I said so when the run produced them rather than after:* legs D2 and D3
+  each also redded the zombie test's ALIVE control. Correctly -- that control is refused by the very arm both
+  remove -- but my written expectations predated the test and were never revised.
+
 ## 2026-09-24, evening (aux, Opus 5.5 1M, effort max) -- "haul doesn't error": three faults, each hiding the next
 
 The operator's first working Lantern-over-Haul run (Halcyon, cocoa) came back with "haul doesn't error" when the

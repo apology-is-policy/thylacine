@@ -435,6 +435,36 @@ the reason is exact: they are blind to each other in **both** directions —
 dropping the term fails only the pure assertion, while hardcoding the argument at
 the call site fails only the walk, with every pure assertion still green.
 
+### Every guard on an image is asked of every Proc that maps it
+
+The gate weighs the target's caps and the target's seal bits, and for most of
+this file's life that was the whole answer -- because a Proc and its image were
+the same thing. They are not. The image lives in the `AddrSpace`, and
+`rfork(RFPROC|RFMEM)` hands it to a second Proc.
+
+So the shape that breaks the per-Proc reading is not exotic: an elevated parent
+vforks, the child is born with the elevation-only caps carved away ([[inv-i2]]),
+and the child is now a **lower-authority Proc holding the higher-authority
+image**. A peer that merely matches the child covers it, attaches, and writes the
+parent's live memory; the parent returns into it out of `vfork_await_release`.
+No redeem, no elevation, no exotic call -- musl's `posix_spawn` builds this on
+every invocation. The seals failed the same way round, and worse, because they
+were the defence one would reach for: `NOTRACE` on the parent did not refuse an
+attach to the unsealed child, and `NODUMP` on the parent did not refuse reading
+the child's `mem` or `maps`.
+
+`proc_image_join_locked` is the answer, and the reason it is exact rather than
+best-effort is that it is recomputed **per operation, under `g_proc_table_lock`**
+-- the lock every gate on this surface already holds, and the lock
+`proc_exec_replace` swaps `->as` under. A fork racing alongside cannot defeat it:
+a child published after the check is bounded by the parent the check already
+weighed. Cover must cover the union; `NOTRACE` on any mapper refuses; `NODUMP` on
+any mapper seals `mem` and `maps` and nothing else, because those two are the
+only image files served out of the address space rather than out of the Proc.
+
+The walk is skipped entirely when `addrspace_ref_count == 1`, which is almost
+always, so the ordinary debug operation pays nothing for it.
+
 ### The register write has a privilege guard
 
 Applying an edited `regs` struct writes x0–x30, SP_EL0 and ELR_EL1 — and
@@ -514,7 +544,9 @@ and its ctl-fd close then resumes the target.
 nowhere else, by the kill gate, for both `kill`/`killgrp` and `suspend`/`resume`.
 
 [[inv-i39]] (debug authority is namespace-plus-two-axis -- the owner half
-capability-COVERED since 2026-09-24 -- stopped-only, never stranding the quarry) — this file *is* its enforcement surface: the gate, the
+capability-COVERED since 2026-09-24, and every image guard JOINED over the
+address space's mappers since the same day -- stopped-only, never stranding the
+quarry) — this file *is* its enforcement surface: the gate, the
 stopped-only conjunction, the SPSR guard, the slot lifetime, and the
 resume-*or-terminate*-on-release that discharges NoStrand — an attached target
 resumes, a launched `exitkill`-marked one dies with its launcher (die-with-launcher,

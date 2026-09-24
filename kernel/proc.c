@@ -1632,8 +1632,11 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
         return -1;
     }
 
-    // P5-hostowner-a: child->proc_flags stays 0 (KP_ZERO from
-    // proc_alloc) — deliberately NOT copied from the parent. In
+    // P5-hostowner-a: child->proc_flags starts 0 (KP_ZERO from proc_alloc).
+    // ONE bit is copied from the parent, at the publication below and nowhere
+    // else: PROC_FLAG_DEBUG_TAINTED, which is a RESTRICTION and must cross
+    // because the child's memory is the parent's debugged memory. Every other
+    // bit -- every one that CONFERS anything -- is deliberately not copied. In
     // particular PROC_FLAG_CONSOLE_ATTACHED is never conferred by
     // rfork: console-attachment grows ONLY via an explicit
     // proc_mark_console_attached (specs/corvus.tla — console_attached
@@ -1797,6 +1800,35 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
         rfork_rollback_unpublished(child, ct);
         return -1;
     }
+    // The debug taint reaches the child, in the SAME lock hold as the
+    // publication, so no gate or sweep can see a child that is linked but not
+    // yet restricted.
+    //
+    // WHY THE TAINT MUST CROSS: the child's memory IS the parent's debugged
+    // memory -- a copy of it under a COW fork, the very same bytes under RFMEM.
+    // A child that could still elevate would be a clean elevator minted out of a
+    // dirty image, and the refusal at the redeem would mean nothing. This is NOT
+    // redundant with the image join, and that is exactly why it is here: the
+    // join only sees Procs sharing an address space RIGHT NOW, so once the child
+    // execs -- fresh space, no sharing -- the join has nothing left to say, and
+    // only an inherited bit still carries the history.
+    //
+    // WHY THE SEALS DELIBERATELY DO NOT CROSS, in either fork shape. Under RFMEM
+    // the child maps the sealed bytes, so it looks like it should inherit -- but
+    // the join ALREADY refuses every attach to it and every mem/maps read of it,
+    // by reading the parent's bit at the moment of the access, including for a
+    // child that was still mid-rfork when the parent sealed. Inheriting as well
+    // would buy nothing and cost something real: the bit is one-way, so it would
+    // outlive the sharing and leave the child permanently undebuggable and
+    // unreadable after it execs onto an image the seal was never about. And a
+    // COW child gets a private COPY, where whether a copy of a secret is itself
+    // secret is decision A -- still the operator's open question, which
+    // inheriting here would settle by accident.
+    u32 pflags = __atomic_load_n(&parent->proc_flags, __ATOMIC_ACQUIRE);
+    if (pflags & PROC_FLAG_DEBUG_TAINTED)
+        __atomic_fetch_or(&child->proc_flags, PROC_FLAG_DEBUG_TAINTED,
+                          __ATOMIC_RELAXED);
+
     proc_link_child(parent, child);
     spin_unlock_irqrestore(&g_proc_table_lock, s);
 
@@ -2534,12 +2566,156 @@ void proc_mark_seat_manager(struct Proc *p) {
 // construction; SPAWN_PERM_SEAL's two bits land in ONE critical section, so no
 // reader ever sees half a seal. The OR stays atomic: other bits of this word have
 // writers that do not hold this lock.
+// The image join + stamp. Both traverse the proc table, so both need
+// g_proc_table_lock, which every caller already holds (the /proc gates run
+// inside proc_for_each; the seal and the redeem take it themselves).
+//
+// WHY THIS TRAVERSAL IS ITERATIVE AND proc_for_each_walk IS NOT USED. That
+// helper descends one C frame per tree LEVEL, and these run INSIDE a walk that
+// is already doing exactly that -- so a recursive join would put two full-depth
+// recursions on one 16 KiB kernel stack. Nothing bounds the tree's DEPTH:
+// PROC_CHILD_MAX caps a parent's children (breadth), and no global Proc count or
+// ancestry limit exists, so an EL0 program can build P1 -> P2 -> ... -> PN with
+// one child each. The path is unprivileged-reachable -- /proc/<pid>/maps is mode
+// 0444 and its read asks the seal, which asks the join. The sibling and parent
+// links already encode the return path a stack frame would have held, so the
+// same traversal costs O(1) stack here. (The pre-existing recursion in
+// proc_for_each_walk is its own problem and is tracked separately; this chunk
+// declines to double it.)
+//
+// WHO COUNTS AS A MAPPER: every Proc in the table whose `as` is the target's,
+// whatever its state -- zombies INCLUDED for the caps and flags union. A zombie
+// keeps its address-space reference until it is REAPED (proc_free), so its bytes
+// are still in the image and a seal it took must still refuse a read of them.
+// Its caps cost nothing real either: a child's caps are always a subset of its
+// parent's (the I-2 carve), so a dead sibling can only repeat authority a live
+// mapper already contributes. `shared` is the ONE question a zombie must NOT
+// answer -- see proc_image_join_locked.
+struct proc_image_walk {
+    const struct Proc    *target;
+    struct ProcImageJoin *out;
+    u32                   zombies;   // zombie mappers the traversal actually saw
+    u32                   bits;      // the stamp's payload
+};
+
+// Visit every Proc in the table, without recursion. Caller holds
+// g_proc_table_lock, which is what makes the links stable across the walk.
+static void proc_image_visit(void (*fn)(struct Proc *, struct proc_image_walk *),
+                             struct proc_image_walk *w) {
+    struct Proc *root = kproc();
+    struct Proc *q = root;
+    while (q) {
+        fn(q, w);
+        if (q->children) { q = q->children; continue; }
+        while (q && q != root && !q->sibling) q = q->parent;
+        if (!q || q == root) break;
+        q = q->sibling;
+    }
+}
+
+static void proc_image_join_one(struct Proc *q, struct proc_image_walk *w) {
+    if (q == w->target || q->as != w->target->as) return;
+    w->out->caps  |= __atomic_load_n(&q->caps, __ATOMIC_ACQUIRE);
+    w->out->flags |= __atomic_load_n(&q->proc_flags, __ATOMIC_ACQUIRE);
+    if (q->state == PROC_STATE_ZOMBIE) w->zombies++;
+}
+
+void proc_image_join_locked(const struct Proc *p, struct ProcImageJoin *out) {
+    if (!out) extinction("proc_image_join_locked: NULL out");
+    out->caps   = CAP_NONE;
+    out->flags  = 0;
+    out->shared = false;
+    if (!p || !p->as) return;
+
+    // No other reference at all: nothing to join, and no traversal to pay for.
+    // This is the overwhelmingly common case, which is what keeps a per-operation
+    // join off the cost budget.
+    //
+    // Note what is NOT claimed. proc_quiesce_owned_devices reads the same count
+    // and may conclude "sole, and staying sole", because THERE the reader is the
+    // last holder itself. This reader is a third party -- a debugger's thread, or
+    // one thread of a redeeming Proc -- and addrspace_ref runs under no lock
+    // inside proc_alloc_in, so the count genuinely CAN rise between this load and
+    // the caller's decision. What makes that harmless is not stability but the
+    // I-2 publication bound: a child published after the check carries caps
+    // bounded by the parent this join already weighed, so it widens nothing the
+    // check admitted.
+    int refs = addrspace_ref_count(p->as);
+    if (refs <= 1) return;
+
+    struct proc_image_walk w = { .target = p, .out = out, .zombies = 0, .bits = 0 };
+    proc_image_visit(proc_image_join_one, &w);
+
+    // `shared` asks "could another Proc still USE this image", and a ZOMBIE
+    // cannot: an attach refuses a non-ALIVE target and the stopped-only gate
+    // requires ALIVE, so neither its memory nor its registers is reachable. It
+    // still holds the address-space reference until it is reaped, though, so
+    // counting references alone refuses every elevation its parent attempts --
+    // permanently, for a parent that never waits. A vfork child that _exits
+    // instead of exec'ing releases its parent into exactly that state.
+    //
+    // Subtracting only the zombies the traversal SAW keeps the reap window
+    // conservative: a Proc unlinked but not yet freed (wait_pid_for unlinks,
+    // drops the lock, then frees) is invisible to the traversal while its
+    // reference still counts, so it lands in the difference and `shared` stays
+    // true -- which is the direction that matters, since a missed sharer here is
+    // a privilege question rather than a cosmetic one.
+    u32 others = (u32)(refs - 1);
+    out->shared = others > w.zombies;
+}
+
+static void proc_image_stamp_one(struct Proc *q, struct proc_image_walk *w) {
+    if (q != w->target && q->as == w->target->as)
+        __atomic_fetch_or(&q->proc_flags, w->bits, __ATOMIC_RELAXED);
+}
+
+void proc_image_stamp_locked(struct Proc *p, u32 bits) {
+    if (!p || p->magic != PROC_MAGIC)
+        extinction("proc_image_stamp_locked: NULL or corrupted Proc");
+    __atomic_fetch_or(&p->proc_flags, bits, __ATOMIC_RELAXED);
+    if (!p->as || addrspace_ref_count(p->as) <= 1) return;
+    struct proc_image_walk w = { .target = p, .out = NULL, .zombies = 0, .bits = bits };
+    proc_image_visit(proc_image_stamp_one, &w);
+}
+
+void proc_mark_debug_tainted_locked(struct Proc *p) {
+    proc_image_stamp_locked(p, PROC_FLAG_DEBUG_TAINTED);
+}
+
+bool proc_elevation_allowed_locked(const struct Proc *p) {
+    if (!p || p->magic != PROC_MAGIC)                 return false;
+    if (p->state == PROC_STATE_ZOMBIE)                return false;
+    if (__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_DEBUG_TAINTED)
+        return false;
+    struct ProcImageJoin j;
+    proc_image_join_locked(p, &j);
+    // SHARED refuses too. NOT because caps spread -- they do not: the redeem ORs
+    // one Proc's word, and sharing an AddrSpace shares no `caps`. It refuses
+    // because a mapper can DRIVE the elevated Proc's memory and so wield its
+    // authority indirectly, and because keeping elevated-and-shared from arising
+    // is cheaper than reasoning about it everywhere afterwards.
+    //
+    // It is also NOT what makes the publication race safe -- the JOIN is. A peer
+    // thread's rfork takes the address-space reference outside any lock, so this
+    // check can read "not shared", grant the caps, and only then have the child
+    // published against a now-elevated parent. That state is harmless because the
+    // join weighs the union at the instant of any later attack, not because this
+    // refusal prevented it. Crediting the refusal would be how the join later
+    // gets deleted as redundant.
+    if (j.shared)                                     return false;
+    return (j.flags & PROC_FLAG_DEBUG_TAINTED) == 0;
+}
+
 static void proc_seal_locked(struct Proc *p, u32 bits) {
     // Only the two seal bits, and at least one. A caller passing a SPAWN_PERM_* value
     // or some other flag would otherwise seal nothing and say nothing.
     if (bits == 0 || (bits & ~(PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE)))
         extinction("proc_seal: not a seal bit");
-    __atomic_fetch_or(&p->proc_flags, bits, __ATOMIC_RELAXED);
+    // Across the IMAGE, not this Proc alone: a seal binding only the sealer would
+    // leave every Proc sharing its address space as an unsealed door to the same
+    // bytes -- which is the whole point of sealing at the seat bind, where the
+    // asset is physical keys and private pixels.
+    proc_image_stamp_locked(p, bits);
 }
 void proc_seal(struct Proc *p, u32 bits) {
     if (!p) return;
@@ -3169,11 +3345,21 @@ static u32 legate_scope_alloc(void) {
     return id;
 }
 
-int proc_become_legate(struct Proc *p, u64 caps_to_or, u32 session_id,
-                       u64 valid_until, u32 legate_flags) {
+int proc_become_legate_locked(struct Proc *p, u64 caps_to_or, u32 session_id,
+                              u64 valid_until, u32 legate_flags) {
     if (!p || p->magic != PROC_MAGIC)
         extinction("proc_become_legate: NULL or corrupted Proc");
     if ((legate_flags & ~LEGATE_FLAGS_VALID) != 0u) return -1;   // fail closed
+
+    // The precursor gate. The capability-cover rule asks whether a debugger may
+    // drive this Proc; it says nothing about a Proc that ALREADY WAS driven, and
+    // the two are different questions with the same answer only if authority
+    // never moves afterwards. It does move, here. So an image that has been under
+    // debug control -- or that is shared, and therefore still reachable by
+    // whoever maps it -- cannot be the one that gains caps. Refusing costs a
+    // legitimately-debugged Proc its ability to elevate, which is exactly the
+    // promise: debug it or elevate it, not both.
+    if (!proc_elevation_allowed_locked(p)) return -1;
 
     // IM-2 (imperium.tla RedeemFurther; IMPERIUM-DESIGN.md 11.4 G6): ONE scope
     // per Proc, set once. A Proc already in a scope keeps its tag, its root
@@ -3221,11 +3407,23 @@ int proc_become_legate(struct Proc *p, u64 caps_to_or, u32 session_id,
     p->legate_flags       = legate_flags;
     __atomic_store_n(&p->legate_scope_id, scope, __ATOMIC_RELEASE);
 
-    // Mark the ROOT. One-way; NEVER inherited by rfork (proc_flags never are),
-    // so an rfork child is a scope MEMBER (carries scope_id, not the flag),
-    // never a second root. RELEASE pairs with the ACQUIRE read in exits().
+    // Mark the ROOT. One-way; NEVER inherited by rfork (the publication copies
+    // only the debug taint, never this), so an rfork child is a scope MEMBER
+    // (carries scope_id, not the flag), never a second root. RELEASE pairs with the ACQUIRE read in exits().
     __atomic_fetch_or(&p->proc_flags, PROC_FLAG_LEGATE_ROOT, __ATOMIC_RELEASE);
     return 0;
+}
+
+// For callers that do NOT already hold g_proc_table_lock. The clearance redeem
+// is not one of them: it takes the lifecycle lock itself, before the grant
+// table, and calls the _locked form above.
+int proc_become_legate(struct Proc *p, u64 caps_to_or, u32 session_id,
+                       u64 valid_until, u32 legate_flags) {
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    int rc = proc_become_legate_locked(p, caps_to_or, session_id, valid_until,
+                                       legate_flags);
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return rc;
 }
 
 // Teardown walk context + callback. The callback group-terminates every Proc
@@ -4235,9 +4433,10 @@ static void proc_exec_drop_image_state(struct Proc *p, struct Thread *self,
     // OFF: every non-kill note stranded, the ring filling, the caught bit
     // armed and never drained. A native image that wants the mark re-opens
     // its fd (the Plan 9 "exec resets" rule the mask clear above follows).
-    // rfork never copies proc_flags, so only a DIRECT execve by a
-    // self-managing Proc changes behaviour, and only toward the default
-    // disposition. Atomic AND: the word is multi-writer (the SAK kthread).
+    // rfork does not copy THIS bit (the publication copies only the debug
+    // taint), so only a DIRECT execve by a self-managing Proc changes
+    // behaviour, and only toward the default disposition. A future bit added to
+    // that inherit set would need this sufficiency argument re-made. Atomic AND: the word is multi-writer (the SAK kthread).
     __atomic_and_fetch(&p->proc_flags, ~PROC_FLAG_SELF_MANAGING_NOTES,
                        __ATOMIC_RELAXED);
 

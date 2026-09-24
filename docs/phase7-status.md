@@ -420,6 +420,78 @@ The self-audit found the round's only P1, and it predates the seal: **`/proc/<pi
 
 Verification: canonical **1662/1662 PASS**, 0 FAIL lines (default image, isolated worktree), in-guest `/debug-probe` PASS on the owner axis; final rebuild after the sabotage legs **1662/1662**, ELF `0ef66f3df8964cd7`, no kernel source newer (276 compared). RED-first in two legs of two guards each, every pair in different tests, each FAIL naming its own guard: kregs' CAP tier forced open + environ dropped from the image set -> exactly `kregs (owner axis): x19..x28 withheld (I-16)` + the three environ-seal assertions (predicate, disclosure, scope) (1658); kregs dropped from the image set + imperium on the sealed predicate -> exactly `the dump seal refuses a kregs READ` + the owner AND the new cross-principal `CAP_HOSTOWNER` I-25 legs (1659). Restores byte-identical. In the sabotaged boots the kernel suite gates the boot, so the probe never ran there; its owner-axis zero check is proven by the canonical boots only. proc_seal's extinction is argued, not unit-tested (it halts).
 
+## H3 + C: the image join, and the debug taint — 2026-09-24
+
+astra raised the shared-address-space question on yip 0124 while designing the debug taint; aux widened it
+from her one instance to the whole class. She then stopped (a product restriction on her side), and the
+operator reassigned both halves here.
+
+**The class.** The capability-cover rule (I-39), both seal bits and the planned taint are per-`Proc` facts.
+The thing they guard is not: the image lives in the `AddrSpace`, and `rfork(RFPROC|RFMEM)` shares it. An
+elevated parent's vfork child is born with the elevation-only caps carved away (I-2), so it is a
+*lower-authority Proc holding the same bytes* — a peer that merely matches the child covers it, attaches, and
+writes the parent's live image, which the parent returns into out of `vfork_await_release`. No redeem is
+involved; musl's `posix_spawn` builds the shape on every call. The seals broke the same way round: `NOTRACE`
+on the parent did not refuse an attach to the unsealed child, and `NODUMP` did not refuse reading the child's
+`mem` or `maps`.
+
+**The fix.** `proc_image_join_locked` — the union of every other live mapper's caps and flags — is asked at
+every gate, per operation, under `g_proc_table_lock` (the lock `proc_exec_replace` swaps `->as` under, and the
+one every debug gate already holds), so it is exact at the instant of the access and no fork racing alongside
+can defeat it. Cover must cover the union; `NOTRACE` on any mapper refuses control; `NODUMP` on any mapper
+seals `mem` and `maps` (and only those two — the rest of the image set is per-Proc state no sharer copies);
+`proc_seal` stamps every mapper; `rfork` publication inherits the taint (and, after the audit, ONLY the taint
+— the join already refuses an `RFMEM` child by reading the parent's bit at the access, so inheriting the seals
+would add nothing and would leave a one-way bit outliving the sharing after the child execs). `shared` is
+"references minus the zombies the traversal saw": a zombie keeps its reference until reaped but can be neither
+attached to nor stopped, so counting references alone refused a parent's elevation forever if it never waited.
+The traversal is iterative, because the join runs inside a walk that already recurses one frame per tree level
+and nothing bounds tree depth. Fast path: `ref_count == 1` skips it entirely.
+
+**The taint (C).** `PROC_FLAG_DEBUG_TAINTED`, stamped at the `attach` claim and at every mem/regs write,
+refused at `cap_redeem_grant_for_writer` and `proc_become_legate`. Monotone: it crosses fork because the
+child's memory *is* the debugged memory, and survives exec because the attacker chose what its victim execs.
+The redeem also refuses a SHARED image. Lock order: lifecycle **before** the grant table — the reverse edge
+already exists (`proc_seat_fail_locked` calls into devcap under the lifecycle lock), so the redeem was split
+into a `_locked` inner and a lock-taking wrapper.
+
+**The cost, stated for the operator.** A legitimately-debugged Proc can never elevate afterwards, and neither
+can anything it forks. Debug a shell once and `imperium` is refused for that shell's life. That is the
+promise working, not a defect — but it is a real behavioural change, and the escape is a fresh shell, never a
+flag, because a flag that cleared the taint would be the bypass.
+
+Tests: `devproc.image_cover_join`, `devproc.image_seal_join`, `proc.seal_stamps_the_image`,
+`proc.debug_taint_refuses_elevation`, `proc.debug_taint_crosses_fork`,
+`devcap.taint_refuses_hostowner_redeem`, `proc.elevation_ignores_a_zombie_sharer`, plus taint witnesses folded
+into the existing `devproc.debug_mem` and `devproc.debug_regs` legs. **Thirteen** sabotage legs, one mechanism
+each, every leg read by its named FAIL line and never by its count. -> `docs/DEBUG-FS-DESIGN.md` §3.3.
+
+The evidence was RE-TAKEN on the post-audit source, and the re-take found more than it confirmed. Three of the
+six original anchors had gone stale under the audit's own refactor. Counting MECHANISMS rather than legs found
+six with no leg and two with no test at all: the precursor gate on the redeem's HOSTOWNER arm (that arm ORs the
+capability onto the writer and never reaches the legate stamp, so one line in `devcap.c` is the only refusal
+there, and `test_devcap.c` had never mentioned the taint), and audit F3's zombie subtraction. Both now carry a
+regression and a leg. The joined-taint conjunct's leg reds NOTHING, as predicted in writing before the run: it
+is kept as measured defensive redundancy, not deleted. And the mem-write leg named its assertion and then WEDGED
+the boot 683 tests later, because the assertion sat before its test's cleanup and leaked a linked live Proc into
+a later `wait_pid` loop: deterministic 4 of 4, fixed by verdicting after the cleanup. A red is not finished until
+it is readable.
+
+Evidence, on the committed tree: kernel suite 1669/1669; 13 sabotage legs as above; restored ELF byte-identical to canonical (`069c2073702f05fcde74c4454226c25f`); `tools/ci-smp-gate.sh` PASS, 50 boots across default-smp1/4/8 + ubsan-smp4/8, 0 corruption; imperium.tla clean + 4 buggy and handles.tla 11 buggy cfgs re-run, every buggy cfg still tripping.
+
+Audit: holotype round 1, OPUS FALLBACK (a Fable spawn died on credit exhaustion, and a credit death goes
+straight to the fallback tier) = **0 P0 / 0 P1 / 4 P2 / 6 P3**, all fixed. P1+P2 = 4 and nothing structural,
+so NOT dirty; no round 2. The reviewer independently verified the core sound — all 8 gate sites converted and
+all inside `proc_for_each`, the lock-order edge real, the publication/stamp race closed in both interleavings,
+the taint's monotonicity exhaustive, `pthread_create` NOT address-space-sharing across Procs (so multithreaded
+programs do not regress). What it found was mostly my own prose overreaching the code: three of eleven findings
+were claims the diff asserted and the code did not support. The four P2s: the authoritative ARCH I-39
+*definition* cell still declared the window open while its own new addendum said closed (I had appended to the
+validation cell only); the join doubled kernel-stack depth on an EL0-reachable path; an unreaped vfork zombie
+refused its parent's elevation forever; and three mechanisms — the fork inherit and both write-taint stamps —
+had landed unwitnessed, so my "each shown RED" claim covered less than it said. A Fable diversity pass is owed
+when credits return; that is the operator's budget call. -> memory `audit_h3c_closed_list`.
+
 ## HN-1: haul errors reach the terminal; netd's dial verdict stops racing — 2026-09-24
 
 From the operator's Lantern-over-Haul run in Halcyon: "haul doesn't error". Four defects stacked, each hiding
