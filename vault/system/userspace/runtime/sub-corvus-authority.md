@@ -3,13 +3,13 @@ id: sub-corvus-authority
 type: sub
 title: "Corvus authority policy engine"
 parent: moc-userspace
-code: [usr/lib/corvus-authority/src/lib.rs, usr/lib/corvus-authority/src/tests.rs, usr/lib/corvus-authority/Cargo.toml]
+code: [usr/lib/corvus-authority/src/lib.rs, usr/lib/corvus-authority/src/tests.rs, usr/lib/corvus-authority/src/abi.rs, kernel/include/thylacine/authority_wire.h, tools/check-authority-abi.py, usr/lib/corvus-authority/Cargo.toml]
 audit: hard
 guarded-by: [inv-i35]
 validated-by: [spec-mandate, "usr/lib/corvus-authority/src/tests.rs"]
 locks: []
 hazards: []
-abis: []
+abis: [abi-user-authority]
 design: ["docs/USER-AUTHORITY-DESIGN.md", "docs/USER-AUTHORITY-STATUS.md"]
 created: 2026-09-24
 updated: 2026-09-24
@@ -34,7 +34,7 @@ supports. `begin_revoke` closes the complete dependent graph before
 
 ## Data structures
 Sorted immutable-ID ledger; domain generations; typed Scope, Envelope, Mandate,
-Activation and Time. Numeric actions are internal, not a public ABI reservation.
+Activation and Time. The record/action ABI is reserved by [[abi-user-authority]]; no runtime endpoint yet.
 
 ## Concurrency
 No shared statics, syscall or lock. Exclusive mutation via Rust borrowing.

@@ -10,9 +10,11 @@
 //! Storage is intentionally bounded. Grants have one immutable record revision;
 //! replacement is revoke + a newly allocated ID. IDs are never reused, including
 //! revoked records. The durable allocator/replay layer owns monotonic IDs across
-//! restarts. Internal numeric action bits are not a reserved public wire ABI.
+//! restarts. Record/action wire reservations are in abi.rs; decoding never confers authority.
 #![no_std]
 extern crate alloc;
+
+pub mod abi;
 
 use alloc::vec::Vec;
 

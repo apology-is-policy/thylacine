@@ -51,3 +51,7 @@ post-rename directory fsync result. New authority transactions must not inherit
 that best-effort acknowledgement contract. Trace Stratum's actual guest commit
 and block flush, then run crash/fault probes before claiming durable outcomes.
 No storage defect repair or guest crash test claimed yet.
+
+UA-0 record/verb reservations: see `docs/USER-AUTHORITY-ABI.md`. Aux confirms
+no Corvus/LCUR collision via Yip0119. The codec will consume this ABI after its
+reservation commit; no numeric kernel scope/admission allocation yet.

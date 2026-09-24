@@ -14,7 +14,7 @@ Generated from note fields — do not edit between the markers
 |---|---|---|---|
 | [[sub-aurora]] | usr/aurora/src/main.rs, usr/aurora/src/render.rs, usr/aurora/src/osd.rs, usr/aurora/src/config.rs, usr/aurora/Cargo.toml | inv-i27 | - **The drain and feed opens must precede surface creation.** Without the |
 | [[sub-corvus]] | usr/corvus/src/main.rs, usr/corvus/src/provincia.rs, usr/corvus/Cargo.toml | inv-i22, inv-i23 | - **The authority gates re-query.** Any new gated verb must ask the kernel |
-| [[sub-corvus-authority]] | usr/lib/corvus-authority/src/lib.rs, usr/lib/corvus-authority/src/tests.rs, usr/lib/corvus-authority/Cargo.toml | inv-i35 | 24 host tests pass, bare-target check passes, host Clippy -D warnings passes. |
+| [[sub-corvus-authority]] | usr/lib/corvus-authority/src/lib.rs, usr/lib/corvus-authority/src/tests.rs, usr/lib/corvus-authority/src/abi.rs, kernel/include/thylacine/authority_wire.h, tools/check-authority-abi.py, usr/lib/corvus-authority/Cargo.toml | inv-i35 | 24 host tests pass, bare-target check passes, host Clippy -D warnings passes. |
 | [[sub-corvus-crypto]] | usr/lib/corvus-crypto/src/lib.rs, usr/lib/corvus-crypto/src/bip39_wordlist.rs, usr/lib/corvus-crypto/Cargo.toml |  | - **A new wrap kind needs a new associated-data prefix**, built through a |
 | [[sub-corvus-mint]] | tools/corvus-mint/src/main.rs, tools/corvus-mint/Cargo.toml | inv-i22 | - **The self-verify must survive any change to the wrap path.** It is the |
 | [[sub-diorama]] | usr/diorama/src/server.rs, usr/diorama/src/main.rs, usr/diorama/Cargo.toml, usr/diorama-probe/src/main.rs | inv-i43 | - **Every new file needs a native source.** The rule is at the top of the |

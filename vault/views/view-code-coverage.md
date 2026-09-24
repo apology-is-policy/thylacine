@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**533 owned · 49 unowned · 582 files (91% owned) · ~13228 unswept lines.**
+**535 owned · 49 unowned · 584 files (91% owned) · ~13228 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **75 files, ~33732 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -73,7 +73,7 @@ Excluded as harness and counted here rather than dropped: **75 files, ~33732 lin
 |---|---:|---:|---:|
 | usr/warp-prove | 0 | 1 | 4349 |
 | usr/pouch-hello | 9 | 17 | 2487 |
-| kernel | 129 | 14 | 1981 |
+| kernel | 130 | 14 | 1981 |
 | usr/ports | 19 | 4 | 1631 |
 | usr/quarry | 0 | 1 | 1033 |
 | usr/stratumd-stub | 0 | 1 | 453 |
@@ -83,7 +83,7 @@ Excluded as harness and counted here rather than dropped: **75 files, ~33732 lin
 | arch | 41 | 2 | 146 |
 | usr/susp-mask-child | 0 | 1 | 139 |
 | usr/stub-driver | 0 | 1 | 119 |
-| usr/lib | 67 | 1 | 72 |
+| usr/lib | 68 | 1 | 72 |
 | usr/bus-probe-child | 0 | 1 | 63 |
 | usr/tapestryd | 8 | 2 | 21 |
 | mm | 8 | 0 | 0 |
