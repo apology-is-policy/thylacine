@@ -90,10 +90,13 @@ loop with no blockers:
 
 > **I-39 (debug authority bounded, never bypasses memory-safety).** A Proc may
 > debug a target iff it can *name* `/proc/<pid>` in its namespace AND passes the
-> two-axis gate (**owner** — same `principal_id` on the `0600` ctl — **OR** the
+> two-axis gate (**owner-covers-target** — same `principal_id` on the `0600` ctl
+> **AND** the target's capability set a subset of the caller's — **OR** the
 > capability axis `CAP_HOSTOWNER`/`CAP_DEBUG`), the I-26-analog (owner OR the host
-> owner OR the domain cap, exactly as the kill gate is owner OR
-> `CAP_HOSTOWNER`/`CAP_KILL`). `CAP_HOSTOWNER` is a debug axis (the Plan 9 "eve"
+> owner OR the domain cap, as the kill gate is owner OR
+> `CAP_HOSTOWNER`/`CAP_KILL`) **with the owner axis narrowed by the
+> capability-cover rule of §3.1 — debug is the one axis where same-principal is
+> necessary but not sufficient.** `CAP_HOSTOWNER` is a debug axis (the Plan 9 "eve"
 > super-user shape; the host owner already kills/chowns/DAC-overrides any target,
 > and debug is strictly less invasive than kill — user-voted 2026-07-15);
 > `CAP_DEBUG` is the clearance-grantable cross-identity axis for a non-hostowner
@@ -125,6 +128,77 @@ composes — adds no bypass to — I-1 (namespace containment), I-12 (W^X), I-13
 (kernel/user isolation), I-22 (no ambient super-authority; `CAP_DEBUG` is
 elevation-only, never an identity), I-36 (the Image cache), and the #811/#68
 death-path invariants (§8).
+
+### 3.1 The capability-cover rule (operator-voted 2026-09-24)
+
+> **The owner axis admits only when the caller's authority COVERS the target's:**
+> `(target->caps & ~caller->caps) == 0`. A same-principal caller that does *not*
+> cover the target needs `CAP_DEBUG`/`CAP_HOSTOWNER` like any stranger. `kproc`
+> and the `PROC_FLAG_NOTRACE` seam are still refused ahead of every axis.
+
+**Why same-principal was never sufficient.** A debug attach is *total control* of
+the target — its memory, its registers, its execution. So the gate must answer a
+capability question, not only an identity one: **debugging must not hand a caller
+authority it does not already hold.** Identity cannot separate the two parties
+here, because elevation in Thylacine deliberately does *not* change identity
+(IMPERIUM-DESIGN §11.6 / I-22: "the durable identity is unchanged; the sub-shell
+is the same principal"). Concretely, before this rule:
+
+- an **unelevated** shell of user U passed the owner axis against U's own
+  **imperium-elevated sub-shell**, and against every member of a **propagating
+  legate scope** (which hold the flowed `CAP_CHOWN`/`CAP_DAC_OVERRIDE`/`CAP_KILL`
+  class), and could attach and drive it. That borrows a **trusted-path**
+  elevation (I-25/I-27) from a process that never went through the trusted path —
+  the SAK confer is bypassed by debugging its result.
+- the same route is the general form of the (U) F1 side door, which
+  `SPAWN_PERM_SEAL` closed for login's home proxy alone: a capability
+  (`CAP_TCB_DIAL`) is worthless if a peer *sharing the principal* can puppet the
+  holder. F1 sealed one asset; this rule closes the class.
+
+**Prior art.** Linux's `cap_ptrace_access_check` refuses when the tracee's
+permitted set is not a subset of the tracer's, unless the tracer holds
+`CAP_SYS_PTRACE`; FreeBSD's `p_candebug` layers credential checks on the same
+idea. In capability terms it is the no-amplification-through-control rule: a
+controller may never exceed its own authority by controlling something stronger.
+
+**What does NOT regress, and why.** Fork-grantable caps only ever *shrink*
+(I-2, "growth only via the `cap` device"), so a child's set is always a subset of
+its spawner's — **a shell can still debug every program it spawns.** The rule can
+only bite where the target *gained* authority the caller lacks, which happens
+only through the `cap` device or a legate redeem. To debug an elevated process
+you either elevate the debugger into the same scope (its caps then cover) or hold
+the cross-identity `CAP_DEBUG`. This is the intended shape: debug an elevated
+thing from an equally-elevated context.
+
+**This is where debug DIVERGES from the I-26 kill analog.** Kill stays
+owner-OR-cap with an unconditional owner axis: killing a more-capable
+same-principal target destroys it, and never *uses* its authority. Debug does —
+so only debug carries the cover condition. The asymmetry is deliberate, not an
+oversight in one of the two gates.
+
+**Scope of the predicate.** One predicate (`devproc_debug_authorized`) gates every
+debug surface, so the rule applies uniformly — including the §5b settled-`kstack`
+diagnostic read, whose raw-address half is separately `CAP_HOSTOWNER`/`CAP_DEBUG`-only
+(§5b.2). An unelevated owner therefore loses the *symbolic* kstack of its own
+more-capable sub-shell; forking the predicate per surface would buy that back at
+the cost of two authority rules to audit instead of one, which this design
+declines.
+
+**Concurrency obligation for the implementation.** Both sides are read
+**atomically**: `proc_become_legate` is a cross-thread writer of a running Proc's
+`caps`, so a plain load is C11-racy (the RW-5 F2 finding, already applied to the
+caller's caps). The existing ACQUIRE order is load-bearing and preserved — the
+target's `principal_id` is read FIRST (it is `proc_apply_identity`'s
+RELEASE-published word, so every earlier write in the spawn thunk, the NOTRACE
+stamp included, is visible), and the NOTRACE seam LAST; the two caps loads sit
+between them.
+
+**What the seal still owns.** `SPAWN_PERM_SEAL` (NOTRACE + NODUMP) is *not*
+made redundant: it protects secrets an **equal-authority** peer must not read —
+seat key material, a proxy's keys — exactly the case the cover rule admits. It
+does narrow the open "does the seal cross `fork`" question (§F2/decision A) to
+that residue, since a forked child inherits the parent's caps and is therefore
+already covered by this rule.
 
 ---
 
