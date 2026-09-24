@@ -7,6 +7,8 @@ code:
   - usr/lib/libhalcyon/src/lib.rs
   - usr/lib/libhalcyon/src/cursor.rs
   - usr/lib/libhalcyon/src/interaction_wire.rs
+  - usr/lib/libhalcyon/src/interaction_body.rs
+  - usr/lib/libhalcyon/src/interaction_frame.rs
   - usr/lib/libhalcyon/include/halcyon_interaction.h
   - usr/lib/libhalcyon/src/theme.rs
   - usr/lib/libhalcyon/src/layout.rs
@@ -69,12 +71,28 @@ OWN module, not a dependency.
 
 ## Contract
 
-The HIN1 envelope foundation reserves a 24-byte little-endian header, operation
-and mode numbers, bounded record sizes and canonical clipboard text validation.
-The C mirror uses byte offsets rather than native structs. It does not provide
-operation-body decoders, controller authorization or a running clipboard service.
-Those remain HI-1 prerequisites in `docs/HALCYON-INTERACTION-ABI.md`; accepting
-an envelope alone must never dispatch its operation.
+The HIN1 contract pins a 24-byte little-endian header, ten exact request and
+response bodies, existing 9P errno mappings, bounds and canonical text rules.
+`interaction_body` borrows decoded data, rejects trailing or reserved bytes and
+checks nonzero identities and transfer bounds. Chunk bytes remain raw until the
+whole clipboard value can be validated; a UTF-8 sequence may cross chunks.
+The C mirror uses byte offsets rather than native structs. Twenty frozen vectors
+are consumed by Rust and an independent C encoder in `tools/test-interaction-wire.py`.
+
+`interaction_frame::Receiver` withholds a record until its contiguous writes
+complete. It validates the fixed header and declared extent before reserving
+body storage, accounts actual capacity, and poisons on every failure until reset.
+Its allowance includes its own reservation; a service must subtract reservations
+of every other fid before calling it. The receiver does not implement aggregate
+accounting, replay, controller authorization or clipboard storage. Accepting a
+header or typed body never admits an operation. Those service obligations remain
+in `docs/HALCYON-INTERACTION-ABI.md` and the approved interaction design.
+
+Tests cover every split and truncation, malformed fields, wrong response identity,
+poison/reset, exact extents and budget contraction. All 148 library tests and the
+C fixtures passed on Linux/aarch64 on September 24; no clipboard runtime is yet
+implemented or claimed. This checkpoint has single-agent self-review under the
+operator's direction, not an independent adversarial audit.
 
 `theme::DAYLIGHT` is the `Theme` (colours + syntax), `theme::METRICS` the
 `Metrics`, `theme::hairline(&Theme)` the derived rule colour, and

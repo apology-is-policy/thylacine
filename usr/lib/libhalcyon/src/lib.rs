@@ -17,6 +17,8 @@ pub mod carve;
 pub mod cursor;
 pub mod instrument;
 pub mod interaction_wire;
+pub mod interaction_body;
+pub mod interaction_frame;
 pub mod layout;
 pub mod motion;
 pub mod place;

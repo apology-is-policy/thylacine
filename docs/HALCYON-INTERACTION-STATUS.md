@@ -16,8 +16,9 @@ Trusted takeover replaces the cursor with transparent pixels and hides every
 output before acknowledging exclusion; restoration republishes normal state.
 Cocoa's forced host pointer is disabled by default.
 
-HI-1 currently provides only the HIN1 envelope, numeric reservations, canonical
-clipboard-text validation, a C mirror and matching fixture. There is no clipboard
+HI-1a provides the HIN1 envelope, exact request/response bodies, error mapping,
+canonical clipboard-text validation, a bounded fragmented receiver and twenty
+matching C/Rust fixtures. There is no clipboard
 endpoint, storage service, controller registration, Nora bridge or mode widget
 change yet. See `HALCYON-INTERACTION-ABI.md`.
 
@@ -111,7 +112,7 @@ and unrelated `work/` evidence. Safety stashes remain referenced by
 `work/hi0-before-merge.diff`. `work/hi0-compile.py` preserves the authority test
 files for builds. The compiled `work/quaestor` now matches current source.
 
-HI-1 next pins typed bodies and C/Rust fixtures, then bounded clipboard storage,
+HI-1 next adds bounded clipboard storage,
 authenticated controller ownership and focus integration. HI-2 adds mode reports
 and Nora's Space-y/p bridge. HI-3 adds transcript motions/search/typed paste.
 HI-4 joins Main's Boosty fields; HI-5 closes workflows and manuals. No extra
@@ -127,3 +128,19 @@ not a landing into Main. Normal hooks pass. The new pointer harness is declared
 in the boot-banner mirror registry, and generated views were rendered after
 adding the new source files to the index. The separate authority/settings drafts
 remain outside the checkpoint and still match the saved stash bytes.
+
+## HI-1a typed protocol checkpoint
+
+All 148 libhalcyon tests and the independent C encoder's twenty frozen wire
+vectors pass on Linux/aarch64 (`work/hi1a-pi-all.log`). Initial optional rustfmt
+invocation on Pi found no formatter and stopped before testing; the corrected
+run passed, and local rustfmt changed whitespace only. Pi was released.
+The receiver's allowance is supplied by its future owner; aggregate accounting,
+replay, ownership/focus checks and storage are not implemented by this codec.
+Source review remains single-agent, not an independent adversarial audit.
+
+The existing Halcyon session is a declared Tapestry session connection, not a
+kernel console-renderer peer. Focus integration must authenticate that exact
+declared connection and its hosted leaves, rather than require the unrelated
+console-renderer flag or accept any same-principal client. PTY foreground changes
+also need the approved ordered bridge; periodic pgrp sampling is insufficient.

@@ -1,9 +1,9 @@
 # Halcyon interaction wire reservations
 
-HI-1 envelope foundation for the approved HALCYON-INTERACTION design. This
-reserves identifiers; it does not enable a clipboard endpoint. Operation body
-layouts, ownership/focus integration, aggregate allocation accounting and the
-asynchronous C/Rust client API must land before any client consumes the service.
+HI-1a typed wire contract for the approved HALCYON-INTERACTION design. This
+pins identifiers, exact operation bodies, errors and fragmented assembly; it
+does not enable a clipboard endpoint. Ownership/focus integration, aggregate
+allocation accounting and asynchronous C/Rust clients remain service prerequisites.
 
 Rust definitions: `usr/lib/libhalcyon/src/interaction_wire.rs`. C mirror:
 `usr/lib/libhalcyon/include/halcyon_interaction.h`. All integers are explicitly
@@ -48,3 +48,55 @@ srv slot, 9P message type, kernel syscall or kernel capability is reserved here.
 The operation-body/error mapping and C/Rust fixture gate remain prerequisites
 for service integration. The current source tests exercise only envelope bounds,
 canonical text and malformed input; they are not end-to-end clipboard evidence.
+
+## Typed bodies (HI-1a)
+
+All offsets here start after the 24-byte envelope. IDs are u64 and nonzero,
+except clipboard generations (initial value zero). Every body is exact: extra
+bytes, nonzero reserved fields, unsupported modes/flags and malformed text fail.
+The session ID is the Hello generation, not a username. Context/epoch name the
+host-published binding; a peer cannot create authority by choosing those values.
+
+`Scope` is four u64 fields: session, controller generation, context ID, context
+epoch, at offsets 0/8/16/24. Scope is 32 bytes. Peer process incarnation comes
+from the connection's kernel peer record, never from this payload.
+
+| Operation | Request body | Successful response body |
+|---|---|---|
+| Hello | empty | session u64; max text/chunk/label/record u32; write/read/controller slots u16; reserved u16; inactivity/lifetime milliseconds u32 (40 bytes) |
+| BindController | session/context/epoch u64 (24) | controller generation u64 (8) |
+| ReportMode | Scope; sequence u64; mode u8; readonly flags u8 (only bit 0); reserved u16; label length u32; UTF-8 label (48 + length) | empty |
+| GetClipboard | Scope (32) | transfer u64; generation u64; length u32; reserved u32 (24) |
+| ReadClipboard | transfer u64; offset/count u32 (16) | offset/count u32; bytes (8 + count) |
+| BeginCopy | Scope; length u32; reserved u32 (40) | transfer u64 (8) |
+| WriteCopy | transfer u64; offset/count u32; bytes (16 + count) | accepted count u32; reserved u32 (8) |
+| CommitCopy | Scope; transfer u64; expected generation u64 (48) | published generation u64 (8) |
+| Cancel | transfer u64 (8) | empty |
+| UnbindController | Scope (32) | empty |
+
+Read count and write payload are nonzero and at most 16384. Read responses may
+be empty at EOF. Offset plus requested/returned count must not exceed the 1 MiB
+text limit; actual transfer bounds are checked by the service. Empty copies are
+valid and publish an empty clipboard. Labels are at most 64 UTF-8 bytes with no
+control characters, including tabs/newlines; they are never trusted identity.
+Sequences are nonzero. The Hello slot counts are 2 writes, 2 reads, 32 controllers;
+transfer inactivity/lifetime are 30000/120000 milliseconds. These are fixed v1
+limits. Consumers must assert MAX_PANES equals the controller count.
+
+`interaction_body` decodes borrowed bytes, and encoding uses those same typed
+bounds. `interaction_frame` accumulates one record without exposing a partial
+operation. Its caller must supply the remaining connection input budget; the
+receiver counts its fixed header plus body capacity. Any framing error poisons
+that receiver until explicit reset. Per-fid duplicate replay, response retention,
+connection-wide accounting and application admission remain broker obligations.
+
+## Error mapping
+
+Failures use existing 9P Rlerror values, never a successful empty HIN1 response:
+Denied=EPERM(1), Gone/invalidated generation=ENOENT(2), TooLarge=E2BIG(7),
+BadHandle=EBADF(9), Conflict=EAGAIN(11), NoMemory=ENOMEM(12), Busy=EBUSY(16),
+Invalid=EINVAL(22), Unsupported=EOPNOTSUPP(95), Timeout=ETIMEDOUT(110).
+`interaction_wire::Failure` and the C enum mirror these existing registry values.
+Unknown transport errors are preserved as transport failures. Framing budget
+exhaustion maps to Busy, malformed offset/body to Invalid; transfer timeout and
+lost owner remain distinct. This allocates no new kernel errno.

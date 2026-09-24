@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**554 owned · 48 unowned · 602 files (92% owned) · ~12716 unswept lines.**
+**556 owned · 48 unowned · 604 files (92% owned) · ~12716 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **78 files, ~35670 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -81,7 +81,7 @@ Excluded as harness and counted here rather than dropped: **78 files, ~35670 lin
 | usr/libthyla-rs | 29 | 1 | 196 |
 | arch | 41 | 2 | 146 |
 | usr/susp-mask-child | 0 | 1 | 139 |
-| usr/lib | 74 | 1 | 72 |
+| usr/lib | 76 | 1 | 72 |
 | usr/bus-probe-child | 0 | 1 | 63 |
 | usr/tapestryd | 8 | 2 | 21 |
 | mm | 8 | 0 | 0 |

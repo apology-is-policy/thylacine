@@ -22,6 +22,20 @@ needed the operator.
 
 
 ---
+## 2026-09-24 (Astra) -- typed interaction protocol before service admission
+
+The pointer checkpoint is followed by the clipboard wire contract: exact bodies,
+existing-errno failures and bounded fragmented assembly. Twenty frozen vectors
+are checked by independent C construction and Rust, alongside the now-148-test
+library suite (`work/hi1a-pi-all.log`). This pins syntax without silently admitting
+clients. The service still owes owner/focus checks, aggregate budgets and replay.
+Tracing that next layer found a naming trap: the actual per-user Halcyon process
+is a declared Tapestry session, not the kernel console-renderer. The existing
+connection/hosted-leaf gate is the relevant authority; same UID alone is not.
+The authority drafts remain separate. Single-agent self-review is recorded as
+such, and no clipboard runtime or new UI screenshot is claimed.
+
+---
 ## 2026-09-24, evening (main, Opus 5.5, effort max) -- the aux-3 merge: two conflicts no conflict marker showed, a journal the squash had re-dated, and a sabotage that tested nothing
 
 **The target moved twice before it landed.** The aux cleared d819d8f1 (yip 0106), then 3fd54782, the seal arc's round-3 close (0122), then 0a668bb8, which adds HN-1 (0129). Each clearance superseded the one before. Each was rehearsed in a scratch worktree against the tree main was about to become: B-1c's WIP tips b409f80b and 92a1f11c, then b65bedc7 once B-1c had landed. The real merge on main (fc234a44) hit exactly the rehearsal's ten conflicts, and the scripts written against the rehearsal resolved them. Each script asserts its hunk count before it writes.

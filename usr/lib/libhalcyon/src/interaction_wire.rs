@@ -71,6 +71,23 @@ pub enum Error {
     TooLarge,
 }
 
+/// Existing Thylacine/Linux errnos carried by 9P Rlerror, not HIN1 bodies.
+/// Unknown transport errors remain transport errors; never map them to success.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum Failure {
+    Denied = 1,
+    Gone = 2,
+    TooLarge = 7,
+    BadHandle = 9,
+    Conflict = 11,
+    NoMemory = 12,
+    Busy = 16,
+    Invalid = 22,
+    Unsupported = 95,
+    Timeout = 110,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Header {
     pub operation: Operation,

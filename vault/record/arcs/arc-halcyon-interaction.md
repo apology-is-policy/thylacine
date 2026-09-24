@@ -4,7 +4,7 @@ type: arc
 title: "Halcyon interaction: pointer, clipboard and modal text"
 status: active
 design: [docs/HALCYON-INTERACTION.md]
-chunks: [chg-2026-09-24-hi0-pointer, chg-2026-09-24-hin1-envelope]
+chunks: [chg-2026-09-24-hi0-pointer, chg-2026-09-24-hin1-envelope, chg-2026-09-24-hin1-bodies]
 follow-ons: []
 exit-criteria:
   - "[ ] Portable guest cursor works over composed/fullscreen content and capture transitions"
@@ -66,3 +66,10 @@ The final pointer harness, including the embedded raw-pixel assertions, also
 passed on VirGL. Pi was released with no VM left running and the queue heartbeat
 was paused after completing its requested runtime verification. Captures and
 remaining obligations are indexed by `docs/HALCYON-INTERACTION-STATUS.md`.
+
+## Typed ABI checkpoint, September 24
+
+HI-1a now pins all operation bodies and existing-errno failures, with a bounded
+fragment receiver and twenty frozen C/Rust vectors. The 148 library tests and C
+fixture pass on the isolated Pi host. This remains protocol groundwork: no live
+clipboard endpoint, mode widget or new runtime workflow is claimed.
