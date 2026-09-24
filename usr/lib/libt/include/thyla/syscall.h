@@ -308,13 +308,14 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 #define T_SPAWN_PERM_SEAT_MANAGER      (1u << 6)
 #define T_SPAWN_PERM_SEAT_SERVICE      (1u << 7)
 #define T_SPAWN_PERM_SEAT_CLIENT       (1u << 8)
-// T_SPAWN_PERM_NOTRACE ((U) F1): stamp PROC_FLAG_NOTRACE on the child before its
-// first instruction, so the /proc debug surface refuses a SAME-principal attach --
-// the case that matters for a service spawned as the user it serves. The kernel
-// orders the stamp ahead of the child's identity, so the window before the stamp
-// cannot admit the attacker. Ungated: SYS_SET_TRACEABLE(0) is already self-reachable, so this
-// only moves the stamp earlier than the child could manage for itself.
-#define T_SPAWN_PERM_NOTRACE           (1u << 9)
+// T_SPAWN_PERM_SEAL ((U) F1/F5): seal the child before its first instruction --
+// PROC_FLAG_NOTRACE (the /proc debug surface refuses a SAME-principal attach) and
+// PROC_FLAG_NODUMP (no core dump), the pair a seat service carries. The case that
+// matters is a service spawned as the user it serves. The kernel orders the stamp
+// ahead of the child's identity, so the window before it cannot admit the
+// attacker. Ungated: SYS_SET_TRACEABLE(0) and SYS_SET_DUMPABLE(0) are already
+// self-reachable, so this only moves the seal earlier than the child could.
+#define T_SPAWN_PERM_SEAL              (1u << 9)
 
 // VIVARIUM V-1b / Design D (13.10): t_sys_spawn_args.pheno_flags bits (mirror
 // SPAWN_PHENO_* in the kernel header). The phenotype itself is DECIDED FROM

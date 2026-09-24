@@ -223,7 +223,7 @@ typedef u64 caps_t;
 // IDENTITY (devproc_debug_authorized's owner axis), so the same principal can
 // attach to the proxy and drive its transport without ever holding this bit.
 // That route predates this gate and is closed, in the same chunk but not by
-// anything here, by SPAWN_PERM_NOTRACE: login spawns the proxy with the bit and
+// anything here, by SPAWN_PERM_SEAL: login spawns the proxy with the bit and
 // the kernel stamps PROC_FLAG_NOTRACE before its first EL0 instruction. The
 // general tension -- same principal, different authority -- survives, and the
 // PLANNED /proc/<pid>/fd/ surface (deferred at devproc.c:27) would reopen it on

@@ -68,7 +68,7 @@ used to say the hole in this reasoning was open; it is now closed, and the fix
 lives nowhere near this file. Because the home proxy runs AS the user, the user's
 own shell is the same principal, and [[inv-i39]]'s debug gate admits an OWNER --
 so the shell could debug-attach the proxy and drive its transport without ever
-holding bit 14. Closed by `SPAWN_PERM_NOTRACE` on the proxy's spawn
+holding bit 14. Closed by `SPAWN_PERM_SEAL` on the proxy's spawn
 ([[sub-kernel-syscall-dispatch]], [[sub-stratum-session]]).
 
 The transferable lesson, and the reason it is recorded HERE rather than only at

@@ -363,7 +363,7 @@ impl Command {
         }
         // perm_flags is u32 on the wire while these constants are u64, so a bit
         // above 31 would be TRUNCATED AWAY here and the spawn would succeed
-        // without it. For hardening bits (T_SPAWN_PERM_NOTRACE) that fails OPEN
+        // without it. For hardening bits (T_SPAWN_PERM_SEAL) that fails OPEN
         // in the caller's eyes -- login would believe it had sealed the proxy.
         // The kernel cannot catch it either: its `& ~SPAWN_PERM_ALL` rejection on
         // this path only ever sees the low 32 bits. Refuse instead of narrowing.

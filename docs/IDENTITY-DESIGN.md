@@ -286,9 +286,9 @@ STALK-DESIGN §5.2 / D8), never the identity it runs as: the proxy and the user'
 own shell are the same principal, so no identity rule can separate them for
 that dial (I-22). The converse does not hold: the I-39 debug surface separates
 on identity, and a same-principal debug attach reaches the proxy's transport
-without the capability -- closed by `SPAWN_PERM_NOTRACE` on the proxy's spawn,
+without the capability -- closed by `SPAWN_PERM_SEAL` (NOTRACE + NODUMP) on the proxy's spawn,
 not by the dial gate. The two mechanisms are not redundant: the capability says
-who may open the door, and NOTRACE says that whoever holds the key cannot be
+who may open the door, and the seal says that whoever holds the key cannot be
 puppeted by a peer wearing the same identity.
 
 *Why it cannot escalate:* the attacher holds the transport. A pipe attach's

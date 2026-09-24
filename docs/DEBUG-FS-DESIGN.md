@@ -959,7 +959,7 @@ composition is load-bearing and prosecuted hard:
   the session/console-owner and `PROC_FLAG_NOTRACE` seams (e.g. login forbids
   debug-attach for its session Proc) are honored.
 - **`PROC_FLAG_NOTRACE` has two routes in, and the spawn-time one is the load-
-  bearing one.** `SYS_SET_TRACEABLE(0)` lets a Proc seal itself; `SPAWN_PERM_NOTRACE`
+  bearing one.** `SYS_SET_TRACEABLE(0)` lets a Proc seal itself; `SPAWN_PERM_SEAL`
   ((U) F1) lets its spawner seal it before its first EL0 instruction. The
   difference matters wherever the thing being sealed shares a principal with a
   potential attacher -- login's per-user home proxy, which holds `CAP_TCB_DIAL`

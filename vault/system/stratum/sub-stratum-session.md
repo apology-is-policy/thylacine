@@ -44,7 +44,7 @@ must not be puppetable by a peer wearing the same identity. `devproc_debug_-`
 `authorized` admits the OWNER, and the proxy's owner is the user -- so the user's
 shell could debug-attach the proxy and drive its live coordinator transport,
 reaching the system store with no capability at all. The front door was locked
-and the side door stood open. Closed by login passing `T_SPAWN_PERM_NOTRACE`
+and the side door stood open. Closed by login passing `T_SPAWN_PERM_SEAL` (NOTRACE + NODUMP)
 (bit 9) on the proxy spawn, so the kernel stamps `PROC_FLAG_NOTRACE` before the
 proxy's first EL0 instruction; the bit's placement and its deliberate lack of a
 grant gate are in [[sub-kernel-syscall-dispatch]].

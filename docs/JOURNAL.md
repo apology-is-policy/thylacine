@@ -22,6 +22,40 @@ needed the operator.
 
 
 ---
+## 2026-09-24, early (aux, Opus 5.5 1M, effort max) -- the seal, renamed before anyone could depend on it
+
+**The operator's three answers.** Asked where things stood, the operator said
+yes to renaming `SPAWN_PERM_NOTRACE` to a seal, authorised pushing at will, and
+asked to hear more about the two decisions still open (does the seal cross
+`fork`; does the `/srv` attach keep an attacher-chosen cape flag). Explained,
+with a recommendation on each; both still theirs.
+
+**Why the rename had a deadline.** Audit round 2's F5: the proxy was sealed
+against trace but not dump, while `proc_set_seat_service` seals both for the same
+stated reason. v1.0 has no core dumps, so nothing was reachable -- but the bit
+was unpushed, and renaming or widening a published bit afterwards is a format
+break. So it landed first, the push second.
+
+**The one fact the whole change rested on, checked first.** Keeping the bit
+UNGATED needed `SYS_SET_DUMPABLE(0)` to be as self-reachable as
+`SYS_SET_TRACEABLE(0)`. It is (`kernel/syscall.c`, `sys_set_dumpable_for_proc`,
+one-way to 0, no authority), so the argument carries unchanged and the coupling
+now runs to both self-calls. Also checked before trusting the device result to
+carry: NODUMP has exactly one runtime reader, the re-enable refusal in that same
+setter -- nothing in the login path reads it -- so adding it to the proxy cannot
+change what the device gate observes. The test drives that one reader directly.
+
+**A comment F4 missed.** Rewriting the arm surfaced its comment still claiming "a
+single writer of the flag" -- the claim round 2's F4 disproved (the seat arm ORs
+the bits directly). F4's correction reached the dossier and AUDIT-TRIGGERS; the
+code comment survived it. Gone with the rewrite.
+
+**Host etiquette.** main's mac lease had expired 6.6h earlier with no qemu
+running, so the mac was taken with `yip steal` and a stated reason, and main was
+told the same minute; they confirmed the steal was right and queued three builds
+behind it. My `--config ci` bake waits behind those rather than jumping them.
+
+---
 ## 2026-09-23, evening (aux, Opus 5.5 1M, effort max) -- /srv had no lock on the door
 
 **Found while auditing something else.** The Haul identity cape (L) was green,

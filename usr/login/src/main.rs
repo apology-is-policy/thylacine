@@ -45,7 +45,7 @@ use libthyla_rs::{
     t_readdir, t_set_dumpable, t_set_traceable, t_torpor_wait, t_unmount, t_walk_create,
     t_walk_open, t_write, TPollFd, T_CAP_CSPRNG_READ, T_CAP_LOCK_PAGES, T_CAP_TCB_DIAL, T_MREPL, T_OPATH, T_ORDWR,
     T_OREAD, T_OWRITE, T_POLLIN, T_SPAWN_PERM_CONSOLE_OWNER, T_SPAWN_PERM_MAY_POST_SERVICE,
-    T_SPAWN_PERM_NOTRACE,
+    T_SPAWN_PERM_SEAL,
     T_SPAWN_PERM_SESSION_HANGUP,
     T_WALK_CREATE_DMDIR, T_WALK_OPEN_FROM_ROOT,
 };
@@ -877,12 +877,12 @@ unsafe fn bind_home(user: &[u8], pid: u32, gid: u32, supp: &[u32]) -> Option<Hom
         // identity cannot admit it -- only this capability can, and the user's
         // own shell is spawned without it (SHELL_CAPS). STALK-DESIGN 5.2 / D8.
         .caps(T_CAP_CSPRNG_READ | T_CAP_TCB_DIAL)
-        // T_SPAWN_PERM_NOTRACE ((U) F1): the proxy holds CAP_TCB_DIAL and a live
+        // T_SPAWN_PERM_SEAL ((U) F1/F5): the proxy holds CAP_TCB_DIAL and a live
         // transport to the system coordinator, and it runs as the user -- so the
         // user's own shell is the same principal and the /proc debug surface
         // would admit it on the OWNER axis. Without this the connect gate above
         // is bypassable by attaching to the holder instead of dialling directly.
-        .perm(T_SPAWN_PERM_MAY_POST_SERVICE | T_SPAWN_PERM_NOTRACE)
+        .perm(T_SPAWN_PERM_MAY_POST_SERVICE | T_SPAWN_PERM_SEAL)
         .arg("--role")
         .arg("client")
         .arg("--listen")

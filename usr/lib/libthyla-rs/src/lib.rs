@@ -655,14 +655,15 @@ pub const T_SPAWN_PERM_SESSION_HANGUP: u64 = 1 << 5;
 pub const T_SPAWN_PERM_SEAT_MANAGER: u64 = 1 << 6;
 pub const T_SPAWN_PERM_SEAT_SERVICE: u64 = 1 << 7;
 pub const T_SPAWN_PERM_SEAT_CLIENT: u64 = 1 << 8;
-// T_SPAWN_PERM_NOTRACE ((U) F1): stamp PROC_FLAG_NOTRACE on the child before its
-// first instruction, so the /proc debug surface refuses an attach from the SAME
-// principal -- the case that matters for a service spawned as the user it serves
+// T_SPAWN_PERM_SEAL ((U) F1/F5): seal the child before its first instruction --
+// PROC_FLAG_NOTRACE (the /proc debug surface refuses an attach from the SAME
+// principal) and PROC_FLAG_NODUMP (no core dump), the pair a seat service
+// carries. The case that matters is a service spawned as the user it serves
 // (login's home proxy). The kernel orders the stamp ahead of the child's identity
-// so the window before the stamp cannot admit the attacker. Ungated: a Proc may
-// already make itself untraceable with SYS_SET_TRACEABLE(0), so this only moves
-// the stamp earlier than the child could manage for itself.
-pub const T_SPAWN_PERM_NOTRACE: u64 = 1 << 9;
+// so the window before it cannot admit the attacker. Ungated: a Proc may already
+// seal itself with SYS_SET_TRACEABLE(0) + SYS_SET_DUMPABLE(0), so this only moves
+// the seal earlier than the child could manage for itself.
+pub const T_SPAWN_PERM_SEAL: u64 = 1 << 9;
 
 // poll event bits — MUST mirror POLL* in kernel/include/thylacine/poll.h.
 // Linux values; the future musl shim is a no-op.

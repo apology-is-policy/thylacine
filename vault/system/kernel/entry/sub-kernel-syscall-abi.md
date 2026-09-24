@@ -40,9 +40,9 @@ are unchanged, so this is an additive mirror update, not an ABI break. The
 authoritative partition (fork-grantable vs elevation-only) lives in [[abi-caps]];
 the gate it feeds is in [[sub-kernel-devsrv]].
 
-**`T_SPAWN_PERM_NOTRACE` ((U) F1, 2026-09-23).** Bit 9 joins the
+**`T_SPAWN_PERM_SEAL` ((U) F1, 2026-09-23; renamed from `T_SPAWN_PERM_NOTRACE` and widened to stamp NODUMP as well by F5, 2026-09-24, before the bit was ever pushed).** Bit 9 joins the
 `T_SPAWN_PERM_*` mirror set in the same two userspace copies, alongside the
-kernel's `SPAWN_PERM_NOTRACE` in `kernel/include/thylacine/syscall.h`, and is
+kernel's `SPAWN_PERM_SEAL` in `kernel/include/thylacine/syscall.h`, and is
 added to `SPAWN_PERM_ALL` -- which is the part that matters for the mirrors,
 because a bit outside that mask is rejected outright at the entry gate, so a
 kernel that does not know the bit refuses the spawn rather than ignoring it.

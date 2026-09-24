@@ -287,13 +287,16 @@ own environment.
 (the child may register a `/srv/<name>` server, [[sub-kernel-devsrv]]),
 `CONSOLE_TRUSTED` (the SAK re-grant anchor), `CONSOLE_OWNER` (the Ctrl-C target),
 the I-32 `MAY_RAISE_PAGE_BUDGET` above, the arm-6 `SESSION_HANGUP` (below), and
-the (U) F1 `NOTRACE` (bit 9) — which stamps `PROC_FLAG_NOTRACE` through the same
-one-way setter `SYS_SET_TRACEABLE(0)` uses. That keeps the SPAWN_PERM path and
-the syscall on one writer, but the flag has a THIRD writer regardless:
+the (U) `SEAL` (bit 9; `NOTRACE` until the F5 widening) — which stamps
+`PROC_FLAG_NODUMP` and `PROC_FLAG_NOTRACE` through the same one-way setters
+`SYS_SET_DUMPABLE(0)` and `SYS_SET_TRACEABLE(0)` use. That keeps the SPAWN_PERM
+path and the syscalls on one writer each, but the flags have a THIRD writer
+regardless:
 `proc_set_seat_service` ORs `NODUMP|NOTRACE` in directly. Harmless (an
-idempotent OR of a one-way bit) and the seat arm runs first, but a comment
+idempotent OR of one-way bits) and the seat arm runs first, but a comment
 claiming a single writer is the class of wrong comment this project treats as a
-future ordering licence -- so it is stated correctly here instead.
+future ordering licence -- so it is stated correctly here instead. (The arm's own
+code comment still made the single-writer claim until the seal rename rewrote it.)
 The mechanism is deliberately **two sites, and neither is the other's
 redundancy**:
 
@@ -803,17 +806,18 @@ threshold so small transfers never pay the extra handle lookup.
   [[inv-i27]]. The tail `extinction` in `apply_spawn_perms` is the proof the two
   sites agree.
 - **One `SPAWN_PERM_*` bit is deliberately ungated, and the reason is the test
-  for any future one.** `NOTRACE` ((U) F1) passes `spawn_perm_grant_check`
-  unconditionally, because any Proc may already call `SYS_SET_TRACEABLE(0)` on
-  itself with no authority at all: a gate could only change *when* the flag
+  for any future one.** The `SEAL` ((U) F1/F5) passes `spawn_perm_grant_check`
+  unconditionally, because any Proc may already call `SYS_SET_TRACEABLE(0)` and
+  `SYS_SET_DUMPABLE(0)` on itself with no authority at all: a gate could only change *when* the flag
   arrives, never *whether* it could, and the bit strictly REDUCES what may be done
   to the child. So the question a new bit must answer is not "who should be
   allowed to ask for this" but "does asking for it obtain anything the child could
   not obtain alone" — if not, gating it is theatre. The coupling to watch: if
-  `SYS_SET_TRACEABLE` ever acquires a gate, this bit needs the same one or it
-  becomes a bypass; the two are a pair, and nothing in the code says so.
+  `SYS_SET_TRACEABLE` or `SYS_SET_DUMPABLE` ever acquires a gate, this bit needs
+  the same one or it becomes a bypass. `SPAWN_PERM_SEAL`'s header comment now
+  says so.
 - **The spawn-time stamp is a RACE fix, not a tidiness preference.** What
-  `NOTRACE` buys over the self-call is the closing of the window between `exec`
+  the `SEAL` buys over the self-calls is the closing of the window between `exec`
   and the call, and that window is reachable: login's per-user home proxy holds
   `CAP_TCB_DIAL` plus a live transport to the system store while running AS the
   user, so a same-principal Proc (a second login, a process backgrounded from a

@@ -60,7 +60,7 @@ for the coordinator (not the one-line change it appears to be — the policy is
 static argv baked at boot, while users are minted at runtime from uid 1000), and
 building D7's per-session registry in login.
 
-### F1 — the gate had a side door: `SPAWN_PERM_NOTRACE`
+### F1 — the gate had a side door: `SPAWN_PERM_SEAL`
 
 The audit round's one P1 was against the reasoning above, not the code. The
 claim "only a capability separates them" is false in general: the I-39 debug
@@ -70,7 +70,7 @@ proxy and drive its live coordinator transport. No capability required. The
 front door was locked and the side door stood open. Verified independently that
 no stratumd source calls `set_traceable`, so the proxy had no protection.
 
-Closed by a new `SPAWN_PERM_NOTRACE` (bit 9): `apply_spawn_perms` stamps
+Closed by a new `SPAWN_PERM_SEAL` (bit 9; `SPAWN_PERM_NOTRACE` until the F5 widening below): `apply_spawn_perms` stamps
 `PROC_FLAG_NOTRACE` through the existing one-way setter, so there stays exactly
 one writer of the flag, and login passes the bit on the proxy's spawn.
 
@@ -98,6 +98,23 @@ cannot be a caller the test quietly poisoned.
 The planned `/proc/<pid>/fd/` (deferred at `kernel/devproc.c:27`) would be
 owner-gated and would reopen fd-dup theft of the proxy's coordinator fd. That
 surface must gate on more than the owner axis when it lands.
+
+### F5 — the seal widened to cover dumps (2026-09-24, operator-approved, pre-push)
+
+Audit round 2's F5 found the proxy sealed against trace but not dump, while
+`proc_set_seat_service` seals a seat service against both for the same stated
+reason. The operator approved renaming the bit to a seal: `SPAWN_PERM_SEAL`
+(and the `T_SPAWN_PERM_SEAL` mirrors) now stamps `PROC_FLAG_NODUMP` as well as
+`PROC_FLAG_NOTRACE`, each through its existing one-way setter. It had to land
+before the first push, because renaming or widening a published bit afterwards
+is a format break. Still ungated, for the same reason: `SYS_SET_DUMPABLE(0)` is
+as self-reachable as `SYS_SET_TRACEABLE(0)`. NODUMP's only runtime reader today
+is the re-enable refusal, so the test drives that directly — a sealed child
+cannot make itself dumpable or traceable again, and the unsealed control takes
+the same calls as no-ops — and a sabotage removing the NODUMP half reddens
+exactly the new assertion. Rewriting the arm also removed a comment still
+claiming "a single writer of the flag", which round 2's F4 had disproved in the
+dossier but missed in the code.
 
 ### F3 — the boundary line, and the errno that died at it
 

@@ -1328,7 +1328,7 @@ bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *targ
     if (target == kproc())                             return false;   // kernel: undebuggable
     // The target's principal is read FIRST, with ACQUIRE, and the no-trace seam
     // LAST. That order is load-bearing, not stylistic. A spawn stamps NOTRACE
-    // (SPAWN_PERM_NOTRACE) and then applies the child's identity as two separate
+    // (SPAWN_PERM_SEAL) and then applies the child's identity as two separate
     // unlocked writes in the spawn thunk, and rfork has ALREADY published the
     // child, so this predicate can run against a half-initialised target. Testing
     // the seam FIRST admitted the bad interleaving: read proc_flags before the

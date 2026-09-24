@@ -9080,11 +9080,13 @@ void apply_spawn_perms(struct Proc *p, u32 perm_flags) {
         if (proc_setsid(p) > 0)
             proc_arm_session_hangup(p);
     }
-    if (perm_flags & SPAWN_PERM_NOTRACE) {
-        // (U) F1: the same one-way setter SYS_SET_TRACEABLE(0) uses, so there is
-        // a single writer of the flag and its one-way-to-zero semantics hold
-        // however the bit arrives. Reached pre-exec_setup, which is the whole
-        // point: a child that stamped itself would be attachable until it ran.
+    if (perm_flags & SPAWN_PERM_SEAL) {
+        // (U) F1/F5: through the same one-way setters SYS_SET_DUMPABLE(0) and
+        // SYS_SET_TRACEABLE(0) use, so each flag keeps its one-way-to-zero
+        // semantics however the seal arrives. Reached pre-exec_setup, which is
+        // the whole point: a child that sealed itself would be attachable until
+        // it ran.
+        (void)sys_set_dumpable_for_proc(p, 0);
         (void)sys_set_traceable_for_proc(p, 0);
     }
     if (perm_flags & ~SPAWN_PERM_ALL) {
