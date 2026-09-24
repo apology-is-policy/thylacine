@@ -343,7 +343,7 @@ the pouch `libc.a` is built non-PIC. Unblocking it needs a PIC rebuild of
 the pouch musl (re-codegens every pouch binary, its own audit surface) plus
 a Clade-track driver change. It is also strictly WEAKER evidence than the
 ldso gate, which exercises an AT_PHDR path a static-PIE never touches, and
-nothing in D-3/D-4/D-5 needs our toolchain to emit PIE.
+nothing in D-3/D-4/D-5 needs our toolchain to emit PIE. **AMENDED 2026-09-24 (ARCH §6.5, the B-1d PIE vote): the driver refuses `-static-pie` instead of dropping it; a dynamic program is a PIE (`-pie`) and a static one stays `ET_EXEC`.**
 
 Audit posture: audit-noted (the loader row extends; no new invariant — the
 W^X/segment gates are byte-identical, only the base moves). AS-BUILT: the
@@ -469,7 +469,7 @@ condition 5 now reachable from a new entry); partial-failure rollback (a
 half-built multi-segment library map unwinds fully); I-32 accounting
 (private copies charged; demand-paged FILE pages keep the R-5 uncharged-at-
 v1.0 posture, documented). Native scope: NONE — this is a phenotype row
-over shared kernel core; no native mmap API is added.
+over shared kernel core; no native mmap API is added. **AMENDED (ARCH §6.5 "Dynamic loading", ratified 2026-09-23, the address argument voted 2026-09-24; lands at B-1d): the native surface gains `burrow_map_file(fd, offset, length, prot, flags, addr)` over these same three cores, for the dynamic loader.**
 
 **D-3b as-built notes.**
 - The writable arm-2 request is served by an eager private copy because musl
@@ -833,6 +833,8 @@ PT_INTERP loads its interpreter the same way (resolved through its own
 namespace, one level), because the dynamic loader is the same object under both
 ABIs. The Linux-phenotype behaviour is unchanged; `docs/POUCH-DESIGN.md` §2.2
 carries the userspace half.**
+
+**The native interpreter (voted 2026-09-24): `/lib/libc.so`.** Pouch's `libc.so` is the loader and is named directly. The string differs from the Linux phenotype's `/lib/ld-musl-aarch64.so.1`, so a namespace can never hand a native binary a Linux-ABI loader. `/lib` is bound into the native namespace from the initrd, as `/bin` is. A dynamic native program is a PIE: in direct mode the loader places it (ARCH §6.5).
 
 **The argv shape**, corrected 2026-08-10 from the 08-05 vote's
 `[interp_path, orig_path, orig argv[1..]]`:

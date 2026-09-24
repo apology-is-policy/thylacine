@@ -22,6 +22,30 @@ needed the operator.
 
 
 ---
+## 2026-09-24, evening (main, Opus 5.5, effort max) -- B-1d's four open questions, and two of my own claims corrected after the vote
+
+**What the ratified design left open.** B-1's scripture (@96f24314) fixed the loader model -- `libc.so` is the loader, D-4's PT_INTERP rewrite serves native execs, `burrow_map_file` exposes D-3's file-map arms natively -- and left one point open by name: PIE, "decided at B-1d". Reading the ratified text against the tree found three more:
+- **Direct mode places the program.** D-4 execs the interpreter with the program's path in argv, and musl's `map_library` maps the program itself. It places an `ET_EXEC` only through an address hint, without MAP_FIXED (`third_party/musl/ldso/dynlink.c:809-816`), and D-3 ignores hints. So a dynamic program must be an `ET_DYN`, whatever the PIE policy for static programs.
+- **The ratified call has no address.** `burrow_map_file(fd, offset, length, prot, flags)` cannot say where the FIXED overlay goes, and musl maps every later segment (:842) and the bss tail (:848) at fixed addresses. The kernel cores it exposes all take one (`kernel/syscall.c:6232`, `:6484`, `:6579`).
+- **The device has no `/lib`.** The ramfs is flat and served as `/bin`; ARCH 9.6's tree has none.
+- **The handle form's dependencies.** ARCH adopted "the library as a handle" but not how a library loaded by handle finds its own `DT_NEEDED` objects.
+
+I read FreeBSD's `fdlopen(3)` and `rtld(1)` for the last one rather than citing them from memory: `LD_LIBRARY_PATH_FDS` is "a colon separated list of file descriptor numbers for library directories ... for use within capsicum(4) sandboxes". Exec grants no authority by which image it loads, so direct mode re-opening the program by name is no confused deputy.
+
+**The vote.** Under the away grant's Opus clause these were the first items needing the operator, so I asked all four by blocking question and stopped. The operator answered each on the recommended option:
+- PIE only where the loader places code: static stays `ET_EXEC`, `-pie` is a dynamic PIE, `-shared` a `.so`, `-static-pie` refused.
+- `burrow_map_file` gains `addr` as its sixth argument, read only under `BURROW_MAP_FIXED`.
+- PT_INTERP `/lib/libc.so`, with `/lib` bound from the initrd.
+- `fdlopen` plus directory handles endowed at spawn.
+
+The scripture commit lands those, and nothing else, before any code.
+
+**Two claims in my questions were wrong, caught while writing the scripture.**
+- The PIE question said "Measured: PIC code adds no instruction beyond the ARMv8.0 floor". That was reasoning, not measurement. Measured since: musl's non-PIC (`.o`) and PIC (`.lo`) compiles of eight sources emit identical instruction sets. On a C11 atomic, PIC adds only `ldr` (the GOT load). The control is the same atomic at `-march=armv8.1-a`, which adds `ldaddal`, so the comparison can see an addition. My first control used musl's `__lock` and saw nothing: musl's aarch64 atomics are inline-assembly LL/SC, which `-march` does not touch. A control that could not fail, caught because it came back empty.
+- The interpreter question said `dlopen` searches `/lib` "then LD_LIBRARY_PATH". musl's order is the reverse (`dynlink.c:1119-1163`). And on Thylacine the loader ignores `LD_LIBRARY_PATH` and `LD_PRELOAD` entirely. musl reads a missing `AT_UID` / `AT_EUID` / `AT_GID` / `AT_EGID` as a secure process (:1819-1826), and `exec_fill_auxv` (`kernel/exec.c:596-612`) emits none of them, for both phenotypes. So Alpine's dynamic binaries in a vivarium already run that way, and every static Pouch start runs musl's fd 0-2 sanitisation. Nobody chose it. It fails safe: no injected library rides into a Proc that later elevates through the cap device. It is enqueued in OPEN-BUGS as the operator's call, and the scripture states it as found rather than as designed.
+
+**Decisions.** The operator's four votes above (`dec-2026-09-24-b1d-loader-shape`). None of mine.
+
 ## 2026-09-24, evening (main, Opus 5.5, effort max) -- the aux-3 merge: two conflicts no conflict marker showed, a journal the squash had re-dated, and a sabotage that tested nothing
 
 **The target moved twice before it landed.** The aux cleared d819d8f1 (yip 0106), then 3fd54782, the seal arc's round-3 close (0122), then 0a668bb8, which adds HN-1 (0129). Each clearance superseded the one before. Each was rehearsed in a scratch worktree against the tree main was about to become: B-1c's WIP tips b409f80b and 92a1f11c, then b65bedc7 once B-1c had landed. The real merge on main (fc234a44) hit exactly the rehearsal's ten conflicts, and the scripts written against the rehearsal resolved them. Each script asserts its hunk count before it writes.

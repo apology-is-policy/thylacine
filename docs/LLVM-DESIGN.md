@@ -706,7 +706,7 @@ late gfx work (disjoint surfaces).
 |---|---|---|
 | F1 | Arc name "Clade" | adopted |
 | F2 | Pin LLVM 22.x (host parity) | adopted |
-| F3 | Static-only + llvm-driver multicall | adopted (lld membership verified at CL-0); **static-only narrowed to static-by-default 2026-09-23** (ARCH §6.5 "Dynamic loading"; the driver learns `-shared` / PIE / `-dynamic-linker` at B-1d) |
+| F3 | Static-only + llvm-driver multicall | adopted (lld membership verified at CL-0); **static-only narrowed to static-by-default 2026-09-23** (ARCH §6.5 "Dynamic loading"; the driver learns `-shared` / PIE / `-dynamic-linker` at B-1d; **PIE decided 2026-09-24**: a dynamic program and a `.so` are PIC, a static program stays a non-PIE `ET_EXEC`, and `-static-pie` is refused) |
 | F4 | I-32 vs toolchain RSS | **(b)** spawn-time page-budget under a global hard cap; default unchanged |
 | F5 | Mesa delivery = gallium OSMesa → weave → tpresent | adopted (re-confirm frontend at CL-0) |
 | F6 | Rust std tier = over pouch (ports tier) | adopted |
