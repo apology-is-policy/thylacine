@@ -218,6 +218,50 @@ that the syscall refuses CAPE and sends nothing, that LOOSE still reaches the
 helper, and that a `DMSRVCAPE` service capes through the syscall with flags
 0. Verified: kernel suite 1657/1657 twice (byte-identical canonical ELFs); a combined sabotage (the flag re-admitted on the `/srv` word, and the helper's flag read restored) reddened exactly the three tests above, each at its predicted assertion..
 
+## I-39 capability cover — 2026-09-24 (aux-3; scripture 389c06b9, audit round owed)
+
+Found while answering the operator's question about which permission channels a
+forked child inherits. `devproc_debug_authorized` gated on identity and read no
+capability state of the target, so the owner axis admitted a same-principal
+caller to a target holding caps the caller lacked. Since elevation deliberately
+does not change identity (I-22; IMPERIUM-DESIGN 11.6, "the sub-shell is the same
+principal"), an **unelevated** shell of user U passed the gate against U's own
+imperium-elevated sub-shell, and against every member of a propagating legate
+scope, and could attach and drive it — borrowing a trusted-path elevation
+(I-25/I-27) from a process that never went through the trusted path. It is the
+general form of (U) F1's side door, which `SPAWN_PERM_SEAL` had closed for
+login's home proxy alone.
+
+Demonstrated before it was fixed: a probe on `cfadd242` (uncommitted, restored)
+gave 1657/1658 with the one red naming the admitted attach — caller caps 0,
+target the same principal holding `CAP_KILL`, through the real `attach` verb.
+
+**The rule** (operator-voted; scripture first at `389c06b9`, then the code): the
+owner axis admits only when `(target->caps & ~caller->caps) == 0`; an uncovered
+same-principal caller needs `CAP_DEBUG`/`CAP_HOSTOWNER`. Prior art is Linux's
+`cap_ptrace_access_check` and FreeBSD's `p_candebug` — in capability terms, no
+amplification through control. Nothing regresses for shell-spawned debugging,
+because fork-grantable caps only shrink (I-2), so a spawner always covers its
+children. **Debug deliberately diverges from the I-26 kill gate here**, whose
+owner axis stays unconditional: killing a more-capable target destroys it, while
+debugging one uses its authority.
+
+Two regressions, kept separate so a predicate failure cannot hide the real
+path's: `devproc.debug_cap_cover_predicate` (equal, superset, exact,
+one-cap-short, disjoint, both cap-axis overrides, `CAP_DAC_OVERRIDE`, and NOTRACE
+still winning over a fully-covering owner) and `devproc.debug_cap_cover_attach`
+(end-to-end through the `attach` verb, its covering control asserted first).
+Verified: kernel suite 1659/1659 on the default build, and a revert of the cover test to the pre-fix unconditional owner axis gives 1657/1659 with both new tests red at their cover assertions while the pre-existing `devproc.debug_authorized_predicate` stays green -- so the new tests, not an older one, are what catch this.
+
+The three alternatives were rejected on the record in the scripture commit:
+sealing every elevation (misses any future non-legate cap holder), ancestors-only
+(does not cover the sub-shell, which descends from the user's own shell), and
+keeping the Plan 9 same-user reading (which has no capabilities to reason about).
+The seal is not made redundant — it still owns secrets an *equal*-authority peer
+must not read — but decision A (does the seal cross `fork`) now shrinks to that
+residue, since a forked child inherits its parent's caps and is already covered.
+**Owed: the audit round**, batched with B's on this branch, before main merges.
+
 ## Haul completion integration — 2026-09-17
 
 The operator authorized bringing Haul's required Imperium dependencies into

@@ -692,6 +692,8 @@ void test_devproc_stat_native_ctl_owner(void);
 void test_devproc_write_ctl_kill_dispatch(void);
 void test_devproc_ctl_suspend_resume_dispatch(void);   // prowl-4: job-control stop/cont verb
 void test_devproc_debug_authorized_predicate(void);
+void test_devproc_debug_cap_cover_predicate(void);
+void test_devproc_debug_cap_cover_attach(void);
 void test_devproc_debug_attach_detach_lifecycle(void);
 void test_devproc_debug_exitkill_terminates_on_close(void);
 void test_devproc_debug_stop_start_resume(void);
@@ -2569,6 +2571,8 @@ struct test_case g_tests[] = {
     { "devproc.write_ctl_kill_dispatch",   test_devproc_write_ctl_kill_dispatch,   false, NULL },
     { "devproc.ctl_suspend_resume_dispatch", test_devproc_ctl_suspend_resume_dispatch, false, NULL },
     { "devproc.debug_authorized_predicate",   test_devproc_debug_authorized_predicate,   false, NULL },
+    { "devproc.debug_cap_cover_predicate",     test_devproc_debug_cap_cover_predicate,     false, NULL },
+    { "devproc.debug_cap_cover_attach",        test_devproc_debug_cap_cover_attach,        false, NULL },
     { "devproc.debug_attach_detach_lifecycle", test_devproc_debug_attach_detach_lifecycle, false, NULL },
     { "devproc.debug_exitkill_terminates_on_close", test_devproc_debug_exitkill_terminates_on_close, false, NULL },
     { "devproc.debug_stop_start_resume",       test_devproc_debug_stop_start_resume,       false, NULL },

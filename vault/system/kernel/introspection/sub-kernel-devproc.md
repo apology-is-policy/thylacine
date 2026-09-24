@@ -16,7 +16,7 @@ design:
   - "docs/PROWL-DESIGN.md OQ-4"
   - "docs/VIVARIUM.md section 6.2"
 created: 2026-08-02
-updated: 2026-09-17
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -50,6 +50,32 @@ monotonic (one-way, never cleared) and no cap holder may debug a sealed target
 either -- so the reorder changes no verdict, only the window. The existing
 `devproc.debug_authorized_predicate` NOTRACE legs (refuses the owner, refuses a
 `CAP_DEBUG` holder) are the regression guard.
+
+**The owner axis is CONDITIONAL on capability cover (2026-09-24, scripture
+`389c06b9`; DEBUG-FS-DESIGN 3.1).** Same-principal is necessary and NOT sufficient:
+the owner axis admits only while `(target->caps & ~caller->caps) == 0`. A debug
+attach is total control, so admitting a caller that lacks one of the target's caps
+would hand it that cap, and identity cannot separate the two parties because
+elevation leaves the principal unchanged ([[inv-i22]]; IMPERIUM's same-principal
+sub-shell). Before the rule an UNELEVATED shell passed the gate against its own
+imperium-elevated sub-shell and against every member of a propagating legate scope,
+borrowing a trusted-path elevation ([[inv-i25]]/[[inv-i27]]) -- the general form of
+the (U) F1 side door that `SPAWN_PERM_SEAL` closed for one asset. Prior art: Linux
+`cap_ptrace_access_check`, FreeBSD `p_candebug`.
+
+Two consequences worth stating, because both look like bugs to a reader who does not
+know the rule. (1) **This is where debug DIVERGES from the kill gate above**: kill's
+owner axis stays unconditional, since killing a more-capable target destroys it and
+never USES its authority, while debugging one does. (2) **Nothing regresses for
+shell-spawned debugging**: fork-grantable caps only shrink ([[inv-i2]]), so a
+spawner's set always covers its children's. Both caps words are now ACQUIRE-loaded
+(`proc_become_legate` is a cross-thread writer of a running Proc's caps -- the RW-5
+F2 rule, which now applies to the TARGET's set too), sitting between the
+`principal_id` load and the seam load so the order above is preserved. Guards:
+`devproc.debug_cap_cover_predicate` (equal / superset / exact / one-cap-short /
+disjoint / both cap-axis overrides / `CAP_DAC_OVERRIDE` / NOTRACE-over-cover) and
+`devproc.debug_cap_cover_attach` (the same rule end-to-end through the `attach`
+verb, a SEPARATE test so a predicate regression cannot hide the real path's).
 
 **What the seam does NOT cover, measured rather than assumed.** Inspection is
 re-gated per operation (mem, regs, fpregs, hwbreak, hwwatch, step, kstack, wait).
@@ -376,8 +402,8 @@ and its ctl-fd close then resumes the target.
 [[inv-i26]] (cross-process control is explicitly two-axis) — enforced here and
 nowhere else, by the kill gate, for both `kill`/`killgrp` and `suspend`/`resume`.
 
-[[inv-i39]] (debug authority is namespace-plus-two-axis, stopped-only, never
-stranding the quarry) — this file *is* its enforcement surface: the gate, the
+[[inv-i39]] (debug authority is namespace-plus-two-axis -- the owner half
+capability-COVERED since 2026-09-24 -- stopped-only, never stranding the quarry) — this file *is* its enforcement surface: the gate, the
 stopped-only conjunction, the SPSR guard, the slot lifetime, and the
 resume-*or-terminate*-on-release that discharges NoStrand — an attached target
 resumes, a launched `exitkill`-marked one dies with its launcher (die-with-launcher,

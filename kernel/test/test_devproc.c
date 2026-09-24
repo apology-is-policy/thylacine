@@ -60,6 +60,8 @@ void test_devproc_write_ctl_kill_dispatch(void);
 void test_devproc_ctl_suspend_resume_dispatch(void);   // prowl-4: job-control stop/cont verb
 // 8a-1b: the I-39 debug gate + the attach/detach/close slot lifecycle.
 void test_devproc_debug_authorized_predicate(void);
+void test_devproc_debug_cap_cover_predicate(void);
+void test_devproc_debug_cap_cover_attach(void);
 void test_devproc_debug_attach_detach_lifecycle(void);
 void test_devproc_debug_stop_start_resume(void);
 void test_devproc_debug_mem(void);
@@ -1049,6 +1051,137 @@ void test_devproc_debug_authorized_predicate(void) {
     target->state = PROC_STATE_ZOMBIE;
     proc_free(caller);
     proc_free(target);
+}
+
+// The capability-cover rule (DEBUG-FS-DESIGN 3.1, scripture 389c06b9): the owner
+// axis admits only while the caller's caps COVER the target's. RED before the
+// fix -- a same-principal caller with NO caps was admitted to a target holding
+// CAP_KILL, which is how an unelevated shell reached its own imperium-elevated
+// sub-shell (and any propagating-scope member), borrowing a trusted-path
+// elevation (I-25/I-27) it never went through the trusted path to get.
+//
+// Every leg restores nothing on the CALLER here: both Procs are synthetic, so
+// their caps are set freely. The cap-axis legs deliberately use a caller whose
+// caps do NOT cover, proving the cap axis still overrides the cover refusal.
+void test_devproc_debug_cap_cover_predicate(void) {
+    struct Proc *caller = proc_alloc();
+    struct Proc *target = proc_alloc();
+    TEST_ASSERT(caller && target, "proc_alloc caller + target");
+
+    target->principal_id = 0xA11CEu;
+    target->state        = PROC_STATE_ALIVE;
+    caller->principal_id = 0xA11CEu;              // the OWNER axis, every leg below
+
+    // 1. Equal authority -> admitted (the common case: a peer of the same power).
+    target->caps = 0;
+    caller->caps = 0;
+    TEST_ASSERT(devproc_debug_authorized(caller, target),
+                "cover: equal caps (both empty) admits");
+
+    // 2. The caller's caps are a STRICT SUPERSET -> admitted. This is the
+    //    shell-debugs-its-child case, and I-2 guarantees it: fork-grantable caps
+    //    only shrink, so a spawner always covers its children.
+    target->caps = CAP_KILL;
+    caller->caps = CAP_KILL | CAP_CHOWN;
+    TEST_ASSERT(devproc_debug_authorized(caller, target),
+                "cover: a superset caller admits (the spawner case, I-2)");
+
+    // 3. Exact cover -> admitted.
+    caller->caps = CAP_KILL;
+    TEST_ASSERT(devproc_debug_authorized(caller, target),
+                "cover: an exactly-covering caller admits");
+
+    // 4. THE REGRESSION: one cap the caller lacks -> REFUSED on the owner axis.
+    caller->caps = 0;
+    TEST_ASSERT(!devproc_debug_authorized(caller, target),
+                "cover: a same-principal caller lacking the target's CAP_KILL is refused");
+
+    // 5. A DISJOINT cap set is not cover either (the caller is powerful, but not
+    //    in the way the target is) -- a subset test, never a "has any caps" test.
+    caller->caps = CAP_CHOWN;
+    TEST_ASSERT(!devproc_debug_authorized(caller, target),
+                "cover: disjoint caps are not cover");
+
+    // 6. The cap axis still overrides a cover refusal, both bits, with the
+    //    caller's own set still NOT covering the target.
+    caller->caps = CAP_DEBUG;
+    TEST_ASSERT(devproc_debug_authorized(caller, target),
+                "cover: CAP_DEBUG admits an uncovered owner-axis target");
+    caller->caps = CAP_HOSTOWNER;
+    TEST_ASSERT(devproc_debug_authorized(caller, target),
+                "cover: CAP_HOSTOWNER admits an uncovered owner-axis target");
+
+    // 7. CAP_DAC_OVERRIDE is still not a debug axis, and being merely "elevated"
+    //    is not cover -- the fs-admin bit cannot buy a debug it does not cover.
+    caller->caps = CAP_DAC_OVERRIDE;
+    TEST_ASSERT(!devproc_debug_authorized(caller, target),
+                "cover: CAP_DAC_OVERRIDE neither covers nor is a debug axis");
+
+    // 8. The NOTRACE seam still wins over a FULLY-COVERING owner (the seal keeps
+    //    its job for equal-authority peers -- it is not made redundant).
+    target->proc_flags |= PROC_FLAG_NOTRACE;
+    caller->caps = CAP_KILL;
+    TEST_ASSERT(!devproc_debug_authorized(caller, target),
+                "cover: NOTRACE still refuses a covering owner");
+
+    caller->state = PROC_STATE_ZOMBIE;
+    target->state = PROC_STATE_ZOMBIE;
+    proc_free(caller);
+    proc_free(target);
+}
+
+// The same rule END TO END, through devproc's own `attach` verb rather than the
+// predicate -- a SEPARATE test because TEST_ASSERT returns on the first failure,
+// so a predicate regression must not be able to hide the real attach path's.
+// The attach verb consults only ALIVE, this gate and Einuse, so the gate is the
+// only thing that can refuse here.
+void test_devproc_debug_cap_cover_attach(void) {
+    struct Thread *th = current_thread();
+    TEST_ASSERT(th && th->proc, "test thread has a proc");
+    struct Proc *caller = th->proc;
+
+    struct Proc *elev = proc_alloc();
+    TEST_ASSERT(elev != NULL, "alloc the elevated target");
+    elev->principal_id = caller->principal_id;     // same principal (I-22)
+    elev->state        = PROC_STATE_ALIVE;
+    elev->caps         = CAP_KILL;                 // a cap the bare caller lacks
+    proc_test_link(elev);
+
+    const char attach_cmd[] = "attach";
+    const char detach_cmd[] = "detach";
+    const long an = (long)sizeof(attach_cmd) - 1;
+    const long dn = (long)sizeof(detach_cmd) - 1;
+
+    // The caller is the LIVE test Proc, so its caps are saved and restored BEFORE
+    // any assertion -- TEST_ASSERT returns, and leaking a zeroed cap set into the
+    // rest of the suite would be a fixture that generates its own bugs.
+    caps_t saved = __atomic_load_n(&caller->caps, __ATOMIC_ACQUIRE);
+
+    __atomic_store_n(&caller->caps, (caps_t)0, __ATOMIC_RELEASE);
+    struct Spoor *ctl = open_ctl_for_pid(elev->pid);
+    long bare_ret  = ctl ? devproc.write(ctl, attach_cmd, an, 0) : -2;
+    void *bare_own = ctl ? (void *)elev->debug_owner : (void *)-1;
+    if (ctl && bare_ret == an) (void)devproc.write(ctl, detach_cmd, dn, 0);
+
+    // The control, one variable away: the SAME caller and target, caps now
+    // covering. Without it, a broken fixture (an unopenable ctl, a dead target)
+    // would satisfy the refusal above on its own.
+    __atomic_store_n(&caller->caps, (caps_t)CAP_KILL, __ATOMIC_RELEASE);
+    long cover_ret  = ctl ? devproc.write(ctl, attach_cmd, an, 0) : -2;
+    void *cover_own = ctl ? (void *)elev->debug_owner : (void *)-1;
+    if (ctl && cover_ret == an) (void)devproc.write(ctl, detach_cmd, dn, 0);
+
+    __atomic_store_n(&caller->caps, saved, __ATOMIC_RELEASE);
+    if (ctl) spoor_clunk(ctl);
+    proc_test_unlink(elev);
+    elev->state = PROC_STATE_ZOMBIE;
+    proc_free(elev);
+
+    TEST_ASSERT(ctl != NULL, "open the elevated target's ctl");
+    TEST_EXPECT_EQ(cover_ret, an, "control: a covering owner's attach succeeds");
+    TEST_EXPECT_EQ(cover_own, (void *)ctl, "control: the covering attach claimed the slot");
+    TEST_EXPECT_EQ(bare_ret, (long)-1, "an uncovered same-principal attach is refused");
+    TEST_EXPECT_EQ(bare_own, (void *)NULL, "the refused attach claimed no slot");
 }
 
 // 8a-1b: the attach/detach/close slot lifecycle (the model's Attach / DetachReq

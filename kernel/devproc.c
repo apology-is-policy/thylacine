@@ -1309,7 +1309,12 @@ bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *targ
 // Two-axis authority for the /proc/<pid> debug surface (attach + the mem/regs/
 // wait reads in later sub-chunks), the I-26 kill-gate analog. ctl is 0600
 // (owner rw), so:
-//   - identity axis: the OWNER (same principal_id) may debug its own target;
+//   - identity axis: the OWNER (same principal_id) may debug its own target, but
+//     ONLY while its own caps COVER the target's (the capability-cover rule,
+//     DEBUG-FS-DESIGN §3.1) — debug is total control, so same-principal is
+//     necessary and NOT sufficient. This is where debug deliberately diverges
+//     from the I-26 kill gate, whose owner axis is unconditional: killing a
+//     more-capable target destroys it, debugging one USES its authority;
 //   - capability axis: CAP_HOSTOWNER (the host owner / Plan 9 "eve" — user-voted
 //     a debug axis 2026-07-15: it already kills/chowns/DAC-overrides any target,
 //     and debug is strictly less invasive than kill) OR CAP_DEBUG (the
@@ -1341,14 +1346,25 @@ bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *targ
     // debug a NOTRACE target either, and the bit is monotonic (one-way, never
     // cleared), so a later read can only be more set. Do not reorder these.
     u32 target_principal = __atomic_load_n(&target->principal_id, __ATOMIC_ACQUIRE);
-    bool axis = (caller->principal_id == target_principal);             // owner-rwx on 0600
-    if (!axis) {
-        // caps read ATOMICALLY (RW-5 F2): proc_become_legate is a cross-thread
-        // writer of caller->caps; a plain load is C11-racy (both axes are
-        // clearance-grantable).
-        axis = (__atomic_load_n(&caller->caps, __ATOMIC_ACQUIRE)
-                    & (CAP_HOSTOWNER | CAP_DEBUG)) != 0;   // host owner OR debug-anyone
+    // BOTH caps words are read ATOMICALLY (RW-5 F2): proc_become_legate is a
+    // cross-thread writer of a RUNNING Proc's caps, so a plain load is C11-racy.
+    // That now covers the TARGET's set too, not just the caller's.
+    caps_t caller_caps = __atomic_load_n(&caller->caps, __ATOMIC_ACQUIRE);
+    bool axis = false;
+    if (caller->principal_id == target_principal) {                     // owner-rwx on 0600
+        // The capability-cover rule (DEBUG-FS-DESIGN 3.1, scripture 389c06b9;
+        // Linux's cap_ptrace_access_check): the owner axis admits only when the
+        // caller's authority COVERS the target's. A debug attach is TOTAL
+        // control, so admitting a caller that lacks one of the target's caps
+        // would hand it that cap -- and identity cannot separate the two, because
+        // elevation leaves the principal unchanged (I-22; IMPERIUM 11.6's
+        // same-principal sub-shell). Caps only shrink at fork (I-2), so a spawner
+        // always covers its own children and shell-spawned debugging is untouched.
+        caps_t target_caps = __atomic_load_n(&target->caps, __ATOMIC_ACQUIRE);
+        axis = (target_caps & ~caller_caps) == 0;
     }
+    if (!axis)
+        axis = (caller_caps & (CAP_HOSTOWNER | CAP_DEBUG)) != 0;   // host owner OR debug-anyone
     if (!axis)                                         return false;
     if (__atomic_load_n(&target->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_NOTRACE)
         return false;                                                   // no-trace seam

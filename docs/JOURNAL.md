@@ -107,6 +107,40 @@ reds (`srv_client.cape_admission` at "the /srv cape is the poster's",
 the two canonical builds produced a byte-identical ELF (sha256 `1e29e172...`), as
 did the two sabotage builds (`f234c5f9...`).
 
+**The operator took the cap-cover rule, so I-39 changed.** They voted the
+recommended option: the debug gate's owner axis admits only when the caller's caps
+cover the target's. Scripture first (`389c06b9`: DEBUG-FS-DESIGN's new 3.1, the
+ARCH section 28 row, the CLAUDE.md one-liner), then the code, per the design-fork
+discipline — the implementation commit cites that SHA. The thing I made myself
+write down is the DIVERGENCE: kill's owner axis stays unconditional and debug's
+does not, because killing a more-capable target destroys it while debugging one
+uses its authority. Without that recorded, the next reader "fixes" the asymmetry.
+
+**The probe told me how to order the real test's assertions.** My throwaway probe
+returned at the predicate assertion, so its end-to-end attach assertion never
+executed — I had a red result and no evidence about the path that actually
+matters. The regression therefore asserts the covering CONTROL first and the
+refusal second, and the end-to-end attach lives in its own test rather than after
+the predicate legs, because `TEST_ASSERT` returns on first failure
+(`kernel/test/test.h:78-84`). Reverting the predicate to the pre-fix owner axis
+reds both new tests by name and leaves the pre-existing
+`devproc.debug_authorized_predicate` PASSING — which is the part that proves the
+new tests, and not an old one, are what catch this.
+
+**My first F3 sabotage was the wrong probe, and it took a full device cycle to
+learn it.** To prove haul-cape's new host-side gid assertion discriminates, I
+made the kernel send a real gid instead of `P9_NOGID`. The gate failed — at
+"extinction before login", because the boot's own `dev9p.cape` test catches that
+gid in the in-kernel suite, so the device script never ran. I had reddened a
+pre-existing kernel test and learned nothing about my line. The faithful probe is
+the layer the finding actually named as unprotected: the SERVER. Forcing npxf's
+`try_set_gid` to a concrete group (12, one the host user belongs to, so
+`fchownat` takes) leaves the kernel canonical, reaches login, and reds exactly
+one line — "the guest's create left the host file in group 12, not the export's
+20" — 3/3 attempts. The lesson generalises past this gate: when the contract is
+already pinned at one layer, a sabotage at THAT layer cannot prove a new
+assertion at another; sabotage the layer the assertion is actually watching.
+
 **A stale status caught in passing.** `docs/phase7-status.md` still headed the
 (L) section "audit round pending", with "Pending: the Fable audit round, the
 fold, the push", although the round closed 0/0/0/3 P3 and was folded into
