@@ -4,7 +4,7 @@ type: chg
 title: "HIN1 envelope and canonical clipboard text foundation"
 date: 2026-09-24
 arc: arc-halcyon-interaction
-commits: ["*(pending)*"]
+commits: ["12af4d53"]
 touched: [sub-libhalcyon]
 established: ["HIN1 envelope and operation/mode reservations with C mirror"]
 closed: []

@@ -4,7 +4,7 @@ type: chg
 title: "HI-0: native pointer through Lictor and surface shape preferences"
 date: 2026-09-24
 arc: arc-halcyon-interaction
-commits: ["*(pending)*"]
+commits: ["12af4d53"]
 touched: [sub-lictor, sub-tapestryd, sub-libtapestry, sub-libhalcyon, sub-substrate-machine]
 established: ["Bounded standard pointer shapes and a private VirtIO cursor lane"]
 closed: []

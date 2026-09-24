@@ -121,3 +121,9 @@ The queued verification is complete. Pi was released after 20 minutes, with no
 QEMU left running. The heartbeat `resume-halcyon-after-yip-lease` is PAUSED as
 instructed, so it will not silently reacquire a resource after this checkpoint.
 Use fresh Yip leases for the next implementation/build phase.
+
+Implementation and evidence checkpoint: `12af4d53` on `codex/astra`; this is
+not a landing into Main. Normal hooks pass. The new pointer harness is declared
+in the boot-banner mirror registry, and generated views were rendered after
+adding the new source files to the index. The separate authority/settings drafts
+remain outside the checkpoint and still match the saved stash bytes.
