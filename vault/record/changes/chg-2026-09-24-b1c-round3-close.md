@@ -4,7 +4,7 @@ type: chg
 title: "B-1c holotype round 3 close: a bounded capture, a run's line as it begins, tail +N (0 P0 / 0 P1 / 1 P2 / 9 P3)"
 date: 2026-09-24
 arc: arc-boosty
-commits: ["*(pending)*"]
+commits: ["96b51346"]
 touched:
   - sub-coreutils-lib
   - sub-coreutils-filters

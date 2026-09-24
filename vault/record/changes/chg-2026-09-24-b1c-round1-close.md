@@ -4,7 +4,7 @@ type: chg
 title: "B-1c holotype round 1 close: a line bound, filters that stop quietly when their reader leaves, small over-aligned blocks in dlmalloc, witness legs that can fail (0 P0 / 1 P1 / 1 P2 / 10 P3, four self-found)"
 date: 2026-09-24
 arc: arc-boosty
-commits: ["*(pending)*"]
+commits: ["96b51346"]
 touched:
   - sub-thyla-heap
   - sub-libthyla-rs

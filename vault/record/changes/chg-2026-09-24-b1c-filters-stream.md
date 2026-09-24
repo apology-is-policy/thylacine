@@ -4,7 +4,7 @@ type: chg
 title: "B-1c WIP 3: a direct block counted for as long as it is held; the six filters that do not need their whole input stream it (HT09.R4-F2 reopened by the uncapped slurp, closed)"
 date: 2026-09-24
 arc: arc-boosty
-commits: ["*(pending)*"]
+commits: ["96b51346"]
 touched:
   - sub-thyla-heap
   - sub-libthyla-rs

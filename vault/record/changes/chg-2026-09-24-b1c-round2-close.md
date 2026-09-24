@@ -4,7 +4,7 @@ type: chg
 title: "B-1c holotype round 2 close: nothing collected from a line, cat's transforms stream, every write can fail loudly (0 P0 / 0 P1 / 1 P2 / 8 P3, one P2 self-found)"
 date: 2026-09-24
 arc: arc-boosty
-commits: ["*(pending)*"]
+commits: ["96b51346"]
 touched:
   - sub-libthyla-rs
   - sub-coreutils-lib

@@ -4,7 +4,7 @@ type: chg
 title: "B-1c holotype round 4 close: tail's signed counts and --, a bounded end, the #54 docs' reach (0 P0 / 0 P1 / 0 P2 / 9 P3)"
 date: 2026-09-24
 arc: arc-boosty
-commits: ["*(pending)*"]
+commits: ["96b51346"]
 touched:
   - sub-coreutils-filters
   - sub-coreutils-presenters

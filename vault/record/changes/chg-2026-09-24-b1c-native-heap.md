@@ -4,7 +4,7 @@ type: chg
 title: "B-1c (the native heap): thyla-heap -- dlmalloc 0.2.14 over reservations the platform owns, a block of 256 KiB or more its own mapping -- under libthyla-rs's ThylaAlloc; the fixed heaps, ThylaAllocN and slurp's cap gone; the manual's bound under dlmalloc; /heap-probe"
 date: 2026-09-24
 arc: arc-boosty
-commits: ["*(pending)*"]
+commits: ["96b51346"]
 touched:
   - sub-thyla-heap
   - sub-libthyla-rs
