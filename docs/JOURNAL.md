@@ -22,6 +22,24 @@ needed the operator.
 
 
 ---
+## 2026-09-24, morning (main, Opus 5.5, effort max) -- B-1c: the native heap, designed from the crate's source
+
+**The design came from reading dlmalloc, not from the plan's parenthetical.** B-1c replaces libthyla-rs's fixed 4 MiB `linked_list_allocator` heap (`alloc.rs:77`) with `dlmalloc-rs`. ARCH 6.5 and B-1 vote 9 mapped its platform trait as `alloc` = lazy attach, `free` = detach, `free_part` = decommit. The crate is dlmalloc 0.2.14, the copy Rust's own standard library vendors: rust-src `library/vendor/dlmalloc-0.2.14`, whose `.cargo-checksum.json` package hash `ad5208a1...` is the crates.io checksum rust-src's `Cargo.lock` pins. Its only dependency on our target is cfg-if; libc and windows-sys are gated to unix and windows, and every vendored version satisfies it, so vendoring adds one directory. Reading `dlmalloc.rs` gave three facts the parenthetical did not contain:
+
+- **No large-block path.** `sys_alloc` (`dlmalloc.rs:440`) only makes or extends segments. C dlmalloc's `mmap_alloc` (256 KiB threshold) was never ported, a wasm-ism. The pages of a free chunk below a live one are never returned. Memory goes back only when the top segment's tail is trimmed (`sys_trim` :1351, once the top chunk passes 2 MiB) or a wholly free non-head segment is released (`release_unused_segments` :1407).
+- **`free_part` shrinks the segment in dlmalloc's own view.** The crate's unix platform unmaps the tail. Implemented as a decommit over a fresh attach per call, the tail stays behind as a live VMA dlmalloc has forgotten, and the later `free(base, newsize)` orphans it: one leaked VMA per trim-and-release cycle, heading toward `PROC_VMA_MAX` (65536, `proc.h:152`). That is a refusal while free memory exists, the first half of the bar. An attach per 64 KiB growth step also costs a VMA each, and `vma_find_gap` (`vma.c:542`) is a first-fit list walk.
+- **The merge test is `seg.flags >> 1 == flags`**, so any nonzero flags value disables merging: a quirk to design around, not a lever.
+
+**Two votes (the operator, by blocking question).** On Opus the away grant says stop at the first question that needs the operator; these were those questions.
+
+1. **Large blocks: direct-map at 256 KiB and above**, C dlmalloc's own threshold, restored one layer up. GlobalAlloc hands dealloc the layout, so no header is needed.
+2. **The manual's bounds test: peak use under dlmalloc.** MANUAL-DESIGN 8.1 named `ThylaAllocN`'s `linked_list_allocator`, and `HEAP_BYTES` becomes the reader's working-set bound.
+
+The third call needed no vote because scripture's own mapping requires it: **the platform owns reservations.** dlmalloc's `alloc` carves at a bump pointer from the latest lazy reservation. `free_part` decommits and rolls the bump back, so the address space is reused. `free` detaches a whole reservation. One reservation is one segment and one VMA. Recorded as `dec-2026-09-24-native-heap-large-blocks`; ARCH 6.5, MANUAL-DESIGN 8.1 and browser-status decisions 12 and 13 carry it.
+
+**A tool trap, found on the way.** The quaestor MCP server is still registered against the retired `thylacine-vault` worktree: `vault_new_note` wrote the decision note there. The stray file was removed and that worktree is clean again. Vault operations go through the CLI with `--root` until the operator re-registers it.
+
+---
 ## 2026-09-24, early (main, Opus 5.5, effort max) -- B-1b closed: the holotype round withdrew the chunk's own headline
 
 **The ask.** Close B-1b: take the holotype round the previous context spawned,

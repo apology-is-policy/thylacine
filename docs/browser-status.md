@@ -130,6 +130,8 @@ source read line by line -- is ARCH 6.5 "The permission ceiling", "Range detach"
 | 9 | the native allocator | **`dlmalloc-rs`** over a Thylacine platform trait (alloc = lazy attach, free = detach, free_part = decommit) |
 | 10 | the capacity chunk | **range detach + the charged sparse `filepages`**, both in B-1a' |
 | 11 | the sequence | scripture -> **B-1a** permissions -> **B-1a'** capacity -> **B-1b** Pouch -> **B-1c** dlmalloc + witness -> **B-1d** dlopen, before B-3 |
+| 12 | B-1c's large blocks (2026-09-24, `dec-2026-09-24-native-heap-large-blocks`) | **direct-map at 256 KiB and above** (C dlmalloc's own threshold, which the Rust port dropped): a block that size gets its own lazy reservation and is detached on free. Designing B-1c also showed the literal row-9 mapping leaks a VMA per trim-and-release cycle unless the platform owns its reservations, so it does (scripture's own mapping, made sound; no vote) |
+| 13 | the manual's bounds test (2026-09-24) | **peak use under dlmalloc**: MANUAL-DESIGN 8.1 measures the reader under the guest's allocator, and `HEAP_BYTES` becomes its working-set bound |
 
 Measured against the bar before the vote (the reason 7-10 exist): four refusals with free memory --
 the fixed 4 MiB native heap (`alloc.rs:77`), the 256 MiB default budget against a 2 GiB VM
