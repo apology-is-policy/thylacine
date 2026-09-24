@@ -40,7 +40,7 @@ that would catch it — has the owning dossier been updated since the row last
 changed on main? — is the next increment, tracked as task #169.
 
 <!-- generated:begin -->
-**175 declared surfaces · 171 covered by a hard-audit dossier · 4 soft-owned · 0 unowned · 0 unparsed · 24 cited path(s) that do not resolve.**
+**177 declared surfaces · 172 covered by a hard-audit dossier · 5 soft-owned · 0 unowned · 0 unparsed · 24 cited path(s) that do not resolve.**
 
 ### Cited paths that do not resolve
 
@@ -75,6 +75,7 @@ changed on main? — is the next increment, tracked as task #169.
 
 | declared surface | state | why |
 |---|---|---|
+| **HI-1 HIN1 envelope and clipboard text validation** | soft-owned | owned by [[sub-libhalcyon]], none `audit: hard` |
 | Host-side pool populate via existing `stratumd + stratum-fs` (host build infra) | soft-owned | owned by [[sub-substrate-build]], none `audit: hard` |
 | Kaua console-TUI substrate: the cons/consctl backend + the ut raw-mode dance (LS-7) | soft-owned | owned by [[sub-kaua]], [[sub-nora-engine]], [[sub-nora-host]], [[sub-nora-view]] (+2 more), none `audit: hard` |
 | Thylacine mkfs RNG seed pinning | soft-owned | owned by [[sub-substrate-build]], none `audit: hard` |

@@ -255,6 +255,10 @@ const SLOT_UNSEEN: u64 = u64::MAX;
 
 const UD_EVENT: u64 = 2;
 
+/// Standard pointer shapes; preferences apply only over the owning surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CursorShape { Arrow, Text, Link, ResizeHorizontal, ResizeVertical }
+
 /// One mapped surface on an `EventRing` (its session + its Loom ring).
 #[cfg(feature = "guest")]
 pub struct Surface {
@@ -831,6 +835,18 @@ impl Surface {
             return Err(TapError::Protocol);
         }
         Ok(())
+    }
+
+    /// Choose a standard pointer shape for this surface. Images and pointer
+    /// position are compositor-owned; this does not capture or warp input.
+    pub fn set_cursor(&self, shape: CursorShape) -> Result<(), TapError> {
+        self.surface_ctl(match shape {
+            CursorShape::Arrow => "cursor arrow",
+            CursorShape::Text => "cursor text",
+            CursorShape::Link => "cursor link",
+            CursorShape::ResizeHorizontal => "cursor resize-h",
+            CursorShape::ResizeVertical => "cursor resize-v",
+        })
     }
 
     /// reference/139 "Frame intent": declare this surface's throttle posture.

@@ -393,7 +393,7 @@ if [[ "${THYLACINE_NO_GPU:-0}" != "1" && "${THYLACINE_DISPLAY:-none}" != "consol
     # (NO backend), so QEMU only maintains a console surface for a BOUND scanout
     # -- keep gpu-mmio0 (exactly the default -nographic device set) or gpu0's
     # scanout gets no surface and aurora waits forever for its first present.
-    if [[ "${THYLACINE_DISPLAY:-none}" == vnc:* || "${THYLACINE_DISPLAY:-none}" == "egl-headless" \
+    if [[ "${THYLACINE_DISPLAY:-none}" == vnc:* || "${THYLACINE_DISPLAY:-none}" == "vnc-unix" || "${THYLACINE_DISPLAY:-none}" == "egl-headless" \
        || "${THYLACINE_DISPLAY:-none}" == "dbus-gl" || "${THYLACINE_DISPLAY:-none}" == "gpu" ]]; then
         gpu_flags=(
             -device "$gpu_dev,id=gpu0,disable-legacy=on$gpu_res$pci_gpu_addr"
@@ -425,12 +425,10 @@ fi
 if [[ "${THYLACINE_FULL_GRAB:-1}" != "0" ]]; then
     cocoa_display="$cocoa_display,full-grab=on"
 fi
-# show-cursor=on draws the HOST pointer over the window. A STOPGAP, not the
-# fix: tapestryd sets up the virtio-gpu cursor queue but never issues
-# UPDATE_CURSOR, so the guest draws no pointer of its own and one is
-# invisible on VNC or any other display. Drop this once the guest does.
-# THYLACINE_SHOW_CURSOR=0 opts out.
-if [[ "${THYLACINE_SHOW_CURSOR:-1}" != "0" ]]; then
+# Halcyon supplies its own pointer through Lictor's cursor plane. Showing
+# another host arrow would mask guest-pointer failures and duplicate it.
+# The explicit override is useful only for diagnosing an older guest image.
+if [[ "${THYLACINE_SHOW_CURSOR:-0}" != "0" ]]; then
     cocoa_display="$cocoa_display,show-cursor=on"
 fi
 
@@ -576,6 +574,13 @@ case "${THYLACINE_DISPLAY:-none}" in
     # mode 1a; cocoa is the operator-facing one.
     gpu-headless) display_flags=(-nographic) ;;
     cocoa) display_flags=(-display "$cocoa_display") ;;
+    vnc-unix)
+        if [[ -z "${THYLACINE_VNC_SOCKET:-}" ]]; then
+            echo "run-vm.sh: vnc-unix requires THYLACINE_VNC_SOCKET" >&2
+            exit 2
+        fi
+        display_flags=(-display "vnc=unix:$THYLACINE_VNC_SOCKET")
+        ;;
     vnc:*) display_flags=(-display "vnc=127.0.0.1:${THYLACINE_DISPLAY#vnc:}") ;;
     # Headless GL for the Warp arc: needs a Linux host with an openable DRM
     # render node (docs/GPU-HOST-SETUP.md; tools/gl-host-probe.sh rung 6 is
@@ -600,7 +605,7 @@ case "${THYLACINE_DISPLAY:-none}" in
     # (no screendump, no VNC): it is the lane for measuring the guest's own
     # present costs, and only that.
     dbus-gl) display_flags=(-display dbus,p2p=on,gl=on) ;;
-    *)     echo "run-vm.sh: unknown THYLACINE_DISPLAY='${THYLACINE_DISPLAY}' (none|console|gpu|gpu-headless|cocoa|vnc:N|egl-headless|dbus-gl)" >&2
+    *)     echo "run-vm.sh: unknown THYLACINE_DISPLAY='${THYLACINE_DISPLAY}' (none|console|gpu|gpu-headless|cocoa|vnc:N|vnc-unix|egl-headless|dbus-gl)" >&2
            exit 2 ;;
 esac
 

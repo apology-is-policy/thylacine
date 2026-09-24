@@ -9,6 +9,8 @@ code:
   - usr/lictor/Cargo.toml
   - usr/lictor/src/backend/device.rs
   - usr/lictor/src/backend/gpu.rs
+  - usr/lictor/src/backend/gpu/cursor.rs
+  - usr/lictor/src/cursor_queue.rs
   - usr/lictor/src/backend/import.rs
   - usr/lictor/src/backend/input.rs
   - usr/lictor/src/backend/mod.rs
@@ -105,8 +107,17 @@ Physical Ctrl-Alt-F10 (with Ctrl-Alt-Delete retained for compatibility)
 starts a kernel generation (the kernel scans the chord; [[abi-trusted-seat]]). Normal hardware requests
 park while the service drains all outstanding work, excludes every advertised
 scanout and selects private, non-shareable trusted backing. Held keys and buttons
-must be released before Corvus can receive input. No ordinary cursor commands
-are exposed by this backend.
+must be released before Corvus can receive input. Operation 65 admits only
+standard normal pointer shapes, scale and position from the authenticated
+compositor. Private cursor DMA never enters the normal object ledger. Before
+trusted scanout every cursor plane receives a transparent image followed by a
+hide, with each queue retirement checked. The transparent replacement also
+clears display listeners that ignore visibility updates. A failed cursor queue
+retains its backing until GPU reset and prevents trusted acknowledgement.
+Cursor waits share controlq's sticky allowance for an outstanding GPU readback;
+the two queues share the device loop, so a delayed readback is not itself proof
+of a dead cursor queue. Input latency under that load remains a runtime gate.
+See `docs/HALCYON-INTERACTION.md` section 14.
 
 Corvus sends bounded semantic frames containing identity, exact capabilities,
 term and verdict. Lictor uses baked fonts and colors. Corvus receives key bytes
@@ -325,3 +336,10 @@ Open after that review:
 Architecture and portability decisions are recorded in
 [[dec-2026-09-18-graphical-sak-portability]]. Runtime evidence is tracked by the
 integration verification record when the change lands.
+
+HI-0 runtime checkpoint (2026-09-24): `ls-halcyon-pointer` passes on QEMU/KVM
+with the 2D and VirGL/EGL backends at 1280x800, scale 100. Actual VNC cursor
+planes show five shapes, edge clipping, divider selection and owner retirement;
+the SAK plane is fully transparent and the cursor returns after restoration.
+Raw fixture interiors remain byte-exact before and after pointer changes.
+This qualifies those composed paths, not bare-metal Pi or direct scanout.

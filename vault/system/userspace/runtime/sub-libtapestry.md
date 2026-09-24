@@ -15,7 +15,7 @@ hazards: []
 abis: []
 design: ["docs/TAPESTRY.md"]
 created: 2026-08-04
-updated: 2026-09-17
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -427,3 +427,11 @@ This does not change presentation fences or buffer ownership.
 session uses as the native application's header. It must follow successful
 surface creation. It does not create a second title store or confer authority
 over another pane.
+
+## Pointer shape preference
+
+`Surface::set_cursor(CursorShape)` sends the standard surface ctl command.
+The owning connection and live surface generation gate the write. The stored
+preference affects only the surface under the pointer; it cannot change another
+surface, upload an image, warp the pointer or capture input. Divider tracks have
+a compositor-owned resize shape (`docs/HALCYON-INTERACTION.md` section 14).

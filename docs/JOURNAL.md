@@ -53,6 +53,43 @@ The rehearsal's build found both. I then checked every kernel prototype main had
 **Decisions.** None were new. The operator gave H3 and C back to the aux (about 14:05Z); they will arrive in a later merge.
 
 ---
+## 2026-09-24 (Astra) -- interaction implementation, pointer first
+
+The operator approved HALCYON-INTERACTION at `658acdae`. The CPU mirror cannot
+erase a software cursor over GPU-only content safely, so the first backend
+uses Lictor's private VirtIO cursor plane and shares only pure geometry/raster
+helpers. Source review required transparent replacement before hide because
+QEMU VNC ignores visibility, and the same sticky readback deadline as controlq
+because the queues share a device loop. Neither observation is a new hardware
+qualification claim. See HALCYON-INTERACTION section 14.
+
+Mac was leased to Aux. The Pi's existing Rust toolchain was absent from SSH's
+PATH, not absent from the machine. With a Pi lease and an isolated staging
+directory, the latest host suite passed 274 tests, affected crates cross-checked,
+and Lictor/Tapestry/the battery linked in release mode (47.61 s). The first run
+lacked theme fixtures; the first cross-check caught byte argv compared to str.
+Both failures and the corrected runs are preserved in `work/hi0-pi-*` logs.
+The HIN1 C envelope fixture also passed on the Pi; no clipboard endpoint exists
+yet. Pi was released immediately after linking. The Mac boot-image build,
+actual pointer captures, SAK exclusion and accelerated-content runtime checks
+remain blocked on the resource slot. The staged Main reconciliation and the
+handed-off authority drafts remain separate from this uncommitted source.
+Pickup is in HALCYON-INTERACTION-STATUS; nothing remains running.
+
+The heartbeat then acquired Mac at about 16:01 UTC. Main's verified `5857b6bf`
+was integrated as `08c26509` through normal hooks, and the CI image built; the
+four separate authority/settings drafts match their stash bytes. Mac was
+released immediately. Under a Pi lease, an isolated QEMU/KVM run passed the
+pointer scenario on both 2D and VirGL 3D composition: five shapes, edges,
+divider, owner exit, transparent SAK exclusion and restoration. The first
+harness wrongly expected arrow after closing the demo at the restored divider;
+asserting resize-h there and arrow inside the tile passed both backends.
+Sixteen raw scene captures preserved the exact flat fixture pixels. All three
+accelerated SAK scenarios passed, including real expiry, lockout and held-chord
+recovery. Refreshed host tests pass 274/274; the boot/probe gate passes with the
+external Alpine/clade and production compile rows explicitly skipped. These
+are composed-path checks, not direct-scanout, latency or bare-metal evidence.
+
 ## 2026-09-24, late afternoon (main, Opus 5.5, effort max) -- B-1c round 4: clean, and a sweep that needed the old mechanism's own words
 
 **Round 3's fixes verified, as WIP 12 (7c54ef71).** Host coreutils 42/42. Restoring the reap-first capture hung the boot at the first capture check. A capture that dropped a cut-off tool's pipes and reaped it for its own code, with tail and uniq at their round-2 code, failed exactly six checks by name ("got code=Some(0)" for `yes`). Both smp: 1667/1667, heap-probe ALL OK, smoke 101/101.

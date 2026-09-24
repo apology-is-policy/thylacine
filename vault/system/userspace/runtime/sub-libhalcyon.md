@@ -5,6 +5,9 @@ title: "libhalcyon -- the Daylight tokens, the save format, and the restore plan
 parent: moc-userspace-runtime
 code:
   - usr/lib/libhalcyon/src/lib.rs
+  - usr/lib/libhalcyon/src/cursor.rs
+  - usr/lib/libhalcyon/src/interaction_wire.rs
+  - usr/lib/libhalcyon/include/halcyon_interaction.h
   - usr/lib/libhalcyon/src/theme.rs
   - usr/lib/libhalcyon/src/layout.rs
   - usr/lib/libhalcyon/src/skeleton.rs
@@ -27,7 +30,7 @@ hazards: []
 abis: [abi-halcyon-palette]
 design: ["docs/HALCYON.md section 13", "docs/HALCYON-VISUAL.md", "docs/HALCYON-INSTRUMENT.md"]
 created: 2026-09-05
-updated: 2026-09-16
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -65,6 +68,13 @@ everything else is pure `no_std` + `alloc` -- the TOML subset is the crate's
 OWN module, not a dependency.
 
 ## Contract
+
+The HIN1 envelope foundation reserves a 24-byte little-endian header, operation
+and mode numbers, bounded record sizes and canonical clipboard text validation.
+The C mirror uses byte offsets rather than native structs. It does not provide
+operation-body decoders, controller authorization or a running clipboard service.
+Those remain HI-1 prerequisites in `docs/HALCYON-INTERACTION-ABI.md`; accepting
+an envelope alone must never dispatch its operation.
 
 `theme::DAYLIGHT` is the `Theme` (colours + syntax), `theme::METRICS` the
 `Metrics`, `theme::hairline(&Theme)` the derived rule colour, and
@@ -740,3 +750,12 @@ says why) rather than guessing a profile and building the wrong tree.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)
+
+## Standard pointer geometry
+
+`cursor` defines the five standard shapes, scaled hotspots, clipped placement,
+premultiplied rasterization and composition onto a cursor-free software scene.
+Lictor uses the same pixels in its private VirtIO cursor plane. The software
+helper is not a qualification claim for a future framebuffer backend: its
+caller must supply the complete scene and correct damage. The CPU mirror of a
+GPU-only surface is not such a scene (`docs/HALCYON-INTERACTION.md` section 14).

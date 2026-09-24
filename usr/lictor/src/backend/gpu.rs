@@ -700,6 +700,7 @@ fn setup_queue(
 struct DevInit {
     /// The controlq doorbell VA (`notify_base + ctrl_off * notify_mul`).
     notify_va: u64,
+    cursor_notify_va: u64,
     /// VIRTIO_GPU_F_VIRGL: the 3D command path exists.
     virgl: bool,
     /// VIRTIO_GPU_F_EDID negotiated: GET_EDID is legal on the wire (the
@@ -849,6 +850,7 @@ fn init_device(
         );
         Ok(DevInit {
             notify_va: notify_base + u64::from(ctrl_off) * notify_mul,
+            cursor_notify_va: notify_base + u64::from(cursor_off) * notify_mul,
             virgl,
             edid,
             ctxinit,
@@ -1779,11 +1781,14 @@ unsafe fn write_rect(va: u64, x: u32, y: u32, w: u32, h: u32) {
     w32(va + 12, h);
 }
 
+mod cursor;
+
 /// The GPU device: the claimed PCI function, the command ring, and the
 /// display geometry. Owns the RAII handles for the Proc's lifetime
 /// (persistent driver; the RW-7 quiesce at reap is the teardown).
 pub struct Gpu {
     ctrl: Controlq,
+    cursor: cursor::Plane,
     ring_va: u64,
     pub width: u32,
     pub height: u32,
@@ -1960,6 +1965,7 @@ impl Gpu {
 
         let DevInit {
             notify_va,
+            cursor_notify_va,
             virgl,
             edid,
             ctxinit,
@@ -1999,6 +2005,7 @@ impl Gpu {
             return Err(Error::Hardware);
         }
         let mut gpu = Gpu {
+            cursor: cursor::Plane::new(cursor_notify_va),
             ctrl: Controlq {
                 ring_va,
                 ring_pa,
@@ -4369,16 +4376,15 @@ impl Gpu {
     /// An abandoned fence is still device work until a late used entry retires
     /// it. Counting only the public in-flight counter would lose that case.
     pub fn all_work_retired(&self) -> bool {
-        !self.ctrl.dead && !self.ctrl.sync_pending && !self.ctrl.sync2_pending
+        self.cursor.queue.idle() && !self.ctrl.dead && !self.ctrl.sync_pending && !self.ctrl.sync2_pending
             && self.ctrl.fslots.iter().all(Option::is_none)
             && self.ctrl.fslot_poisoned.iter().all(|poisoned| !poisoned)
     }
 
     /// Disable every advertised output before selecting trusted scanout 0.
-    /// Not part of the normal broker's request vocabulary. The cursor queue is
-    /// initialized empty and has no submission API; normal clients cannot put
-    /// a hardware cursor above this scene. A new backend must prove that
-    /// exclusion independently, including any platform overlay/writeback plane.
+    /// Not part of the normal broker's request vocabulary. Every cursor plane
+    /// is hidden with proven queue retirement before any trusted pixels appear.
+    /// A new backend must prove exclusion of its own overlays/writeback planes.
     pub fn exclude_all_outputs(&mut self) -> Result<(), Error> {
         if !self.all_work_retired() { return Err(Error::Hardware); }
         let (cfg, len) = self.pci.region(PciRegion::Device).ok_or(Error::Hardware)?;
@@ -4386,6 +4392,7 @@ impl Gpu {
         let outputs = unsafe { r32(cfg + 8) };
         if outputs == 0 || outputs > 16 { return Err(Error::Hardware); }
         for output in 0..outputs {
+            self.cursor_hide_output(output)?;
             let req = self.ring_va + REQ_OFF;
             unsafe {
                 write_ctrl_hdr(req, VIRTIO_GPU_CMD_SET_SCANOUT);

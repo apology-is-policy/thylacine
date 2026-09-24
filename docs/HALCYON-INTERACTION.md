@@ -392,9 +392,13 @@ Only the owner of the live surface under the pointer may request its cursor
 shape. Requests include the surface incarnation; retirement, leave or replacement
 restores the default. Compositor-owned menu/divider state overrides client shape.
 Pointer shape does not change keyboard focus or the mode widget. A stalled
-client cannot stop pointer motion. Relative-capture requests use the existing
-capture authority; on release/death restore a visible pointer at a clamped
-position and stop delivering relative deltas to the retired owner.
+client cannot stop pointer motion. Relative-capture requests require an explicit
+compositor-owned capture bound to the focused live surface; on release/death
+restore a visible pointer at a clamped position and stop delivering relative
+deltas to the retired owner. The initial source audit found divider capture but
+no general application capture operation. Existing relative-motion delivery is
+not capture authority and does not hide the pointer. The explicit application
+capture operation and its client migrations remain a named HI-0 follow-up.
 
 Software drawing always composites the cursor over cursor-free scene pixels;
 never save/restore stale application pixels under a moving pointer. Damage is
@@ -477,3 +481,49 @@ APIs. Clipboard generations are service values, never 9P fids. Future handle-
 bearing formats require their own content/ownership contract; text v1 does not
 pre-allocate a fake SCM_RIGHTS mechanism. Consolidate duplicated transport code
 in the separate Mycelium arc, as explicitly directed by the operator.
+
+## 14. HI-0 backend contract
+
+Tapestry's CPU scene is not an authoritative copy of accelerated pixels. A
+cursor cannot be painted there and later erased by restoring that stale copy.
+The first backend therefore uses VirtIO's cursor plane, through Lictor. Shared
+`libhalcyon::cursor` geometry/raster/composition is the software implementation
+primitive; a future framebuffer backend must provide a complete cursor-free
+scene and damage integration before claiming that fallback is qualified.
+
+Lictor broker version 1 reserves operation 65, `Cursor`: shape u8 (0 arrow,
+1 text, 2 link, 3 horizontal resize, 4 vertical resize), scale u16 (100..200,
+steps of 25), x/y u32 in display pixels, visible bool. This is a semantic
+request from the authenticated normal compositor; it carries no resource ID,
+image bytes, DMA address or output selector. It is parked outside NORMAL like
+other normal presentation operations. Surface `cursor <shape>` chooses only a
+standard shape for the owning surface; Tapestry resolves hover and overrides
+divider tracks. Ordinary motion never implies a capture/hide request.
+
+Lictor owns a private 64x64 cursor resource and 20 KiB DMA allocation (pixels
+plus disjoint request/reply scratch). Only a fenced controlq completion permits
+cursorq to use newly uploaded pixels. One cursor chain is outstanding at a
+time; its used-ring retirement, never an interrupt alone, permits descriptor
+reuse. Unexpected IDs, lengths, index progress, errors or timeout poison the
+lane and retain its backing until device reset. A queue fault also prevents
+trusted takeover. Cursor updates are coalesced at Tapestry's frame boundary.
+The cursor wait shares controlq's sticky readback deadline allowance: both
+queues share the device loop, and a GPU readback can delay either queue.
+Completion is still required; a timeout never qualifies a trusted takeover.
+
+Before selecting trusted scanout, Lictor replaces the cached cursor image with
+transparent pixels (some display listeners ignore visibility changes), then
+hides the cursor on **every advertised
+output** and observes each cursorq completion. It then disables ordinary
+scanouts and binds the trusted scene. Admission remains closed throughout.
+Restore leaves the cursor hidden; Tapestry's changed seat epoch invalidates its
+last-sent state and publishes fresh normal geometry. This replaces the earlier
+proof based on an unused cursorq. No normal pointer appears over Lex curiata.
+
+The [VirtIO GPU specification](https://docs.oasis-open.org/virtio/virtio/v1.3/virtio-v1.3.html)
+defines the 64x64 image and controlq fencing. QEMU's
+[`virtio_gpu_handle_cursor`](https://github.com/qemu/qemu/blob/master/hw/display/virtio-gpu.c)
+updates the cursor before returning a zero-length used entry; implementations
+returning the documented OK_NODATA reply are accepted only with a complete,
+successful reply. These are backend obligations, not assumptions a future Pi
+display driver may inherit without qualification.

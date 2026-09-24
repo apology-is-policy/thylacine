@@ -957,6 +957,7 @@ impl FrameIntent {
 }
 
 struct Surface {
+    cursor: libhalcyon::cursor::Shape,
     gen: u32,        // the slot-reuse guard (net-3d); fids capture it at bind
     owner_conn: u64, // F2: the minting conn's id
     /// The minting conn's peer PROCESS (the kernel's per-Proc `stripes`
@@ -1855,6 +1856,9 @@ pub struct Comp {
     /// seeded with the stage-0 defaults, remapped by the gated `chord`
     /// ctl verb. Also holds the inter-pane `gaps` inset.
     chords: Chords,
+    /// Last hardware-acknowledged normal pointer, invalidated at seat resume.
+    cursor_sent: Option<(u8, u16, u32, u32)>,
+    cursor_failed: bool,
     /// The pointer's last display position (G-7c; tablet-absolute, scaled
     /// by the input drain). Buttons/scroll route by it.
     ptr_x: u32,
@@ -2570,6 +2574,8 @@ impl Comp {
             menu_reason: "retire",
             chord_down: [0; KEYCODE_SPAN / 64],
             chords: Chords::new(),
+            cursor_sent: None,
+            cursor_failed: false,
             ptr_x: 0,
             abs_last: None,
             ptr_over: None,
@@ -2670,6 +2676,7 @@ impl Comp {
         let n = self.surfaces.iter().position(|s| s.is_none())?;
         self.gen_seq = self.gen_seq.wrapping_add(1);
         self.surfaces[n] = Some(Surface {
+            cursor: libhalcyon::cursor::Shape::Arrow,
             gen: self.gen_seq,
             owner_conn: conn_id,
             owner_peer: peer,
@@ -9061,6 +9068,7 @@ impl Comp {
         // per frame -- the motion between ticks coalesces to its last
         // position; the release and Escape apply the final one themselves.
         self.drag_apply();
+        self.cursor_sync();
         // Warp-C C-3: a GPU-composition latch asked for a structural repaint
         // (chrome + the redraw CONFIGURE fan). Run it HERE, at the tick,
         // never inline in the present dispatch that found the latch: the
@@ -9154,6 +9162,9 @@ impl Comp {
     /// follow their original live surface/generation; authorization Enter/Escape
     /// never enter this path. Layout and surviving focus remain unchanged.
     pub fn seat_resumed(&mut self) {
+        // Lictor hid the normal plane before trusted activation. Even an
+        // unchanged pointer must be republished for this normal seat epoch.
+        self.cursor_sent = None;
         for code in 0..KEYCODE_SPAN {
             if self.key_owner[code] != 0 { self.key_event(code as u16, 0, 0, 0); }
         }
@@ -9461,6 +9472,49 @@ impl Comp {
                 Some((m.n, sx, sy))
             }
             None => self.ptr_target(px, py),
+        }
+    }
+
+    /// Resolve the shape afresh from live surface ownership each frame: slot
+    /// reuse, layout changes, menu dismissal and scale changes cannot leave a
+    /// stale client's shape latched on another surface. No saved backdrop.
+    fn cursor_sync(&mut self) {
+        use libhalcyon::cursor::Shape;
+        if self.cursor_failed || self.gpu.width == 0 || self.gpu.height == 0 {
+            return;
+        }
+        self.ptr_x = self.ptr_x.min(self.gpu.width - 1);
+        self.ptr_y = self.ptr_y.min(self.gpu.height - 1);
+        let track = if self.menu.is_none() {
+            self.drag
+                .map(|d| (d.cid, d.idx))
+                .or_else(|| self.track_under(self.ptr_x, self.ptr_y))
+        } else {
+            None
+        };
+        let shape = track
+            .and_then(|(id, _)| self.layout.slot_of_id(id))
+            .and_then(|slot| self.layout.get(slot))
+            .and_then(|p| match p.kind {
+                pane::Kind::Container { mode: Mode::SplitH, .. } => Some(Shape::ResizeHorizontal),
+                pane::Kind::Container { mode: Mode::SplitV, .. } => Some(Shape::ResizeVertical),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                self.ptr_route(self.ptr_x, self.ptr_y)
+                    .and_then(|(n, _, _)| self.surf(n))
+                    .map_or(Shape::Arrow, |s| s.cursor)
+            });
+        let state = (shape as u8, self.scale, self.ptr_x, self.ptr_y);
+        if self.cursor_sent == Some(state) {
+            return;
+        }
+        match self.gpu.cursor(state.0, state.1, state.2, state.3, true) {
+            Ok(()) => self.cursor_sent = Some(state),
+            Err(_) => {
+                self.cursor_failed = true;
+                say!("tapestryd: pointer backend failed; cursor updates stopped");
+            }
         }
     }
 
@@ -16108,6 +16162,14 @@ impl Conn {
                     comp.menu_text()
                 ),
             );
+            match comp.cursor_sent {
+                Some((shape, scale, x, y)) => {
+                    let name = libhalcyon::cursor::Shape::from_code(shape).unwrap().name();
+                    let _ = core::fmt::write(&mut s, format_args!("cursor {} {} {} {} {}\n",
+                        name, scale, x, y, if comp.cursor_failed { "failed" } else { "ready" }));
+                }
+                None => s.push_str(if comp.cursor_failed { "cursor failed\n" } else { "cursor pending\n" }),
+            }
             // Warp-C C-3: which composed-pixel path presents are taking,
             // and whether the GPU one latched off. Both paths must stay
             // live wherever the seam exists (4.5.9), so a silent slide to
@@ -18639,6 +18701,13 @@ impl Conn {
     fn surface_ctl(&mut self, comp: &mut Comp, n: usize, data: &[u8]) -> Result<(), u32> {
         let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
         let s = s.trim();
+        if let Some(name) = s.strip_prefix("cursor ") {
+            let shape = libhalcyon::cursor::Shape::parse(name).ok_or(p9::E_INVAL)?;
+            // h_write resolved the live generation and owning connection.
+            // The preference takes effect only while this surface is hovered.
+            comp.surf_mut(n).ok_or(p9::E_NOENT)?.cursor = shape;
+            return Ok(());
+        }
         if let Some(rest) = s.strip_prefix("create ") {
             let mut it = rest.split_ascii_whitespace();
             let w: u32 = it
@@ -20108,4 +20177,3 @@ fn parse_u32(name: &[u8]) -> Option<u32> {
     }
     Some(v)
 }
-

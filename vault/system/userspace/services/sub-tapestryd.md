@@ -16,7 +16,7 @@ updated: 2026-09-24
 ---
 ## Purpose
 
-The compositor: it owns both graphics-path PCI functions, serves
+The compositor serves
 `/dev/tapestry`, and holds the server half of [[inv-i40]]. Clients hand
 it pixels through a shared page (a *weave*) and a 32-byte present
 descriptor; it transfers, flushes, and either scans a client's resource
@@ -2955,3 +2955,20 @@ cannot spin on shared-line retries. Live verification passes on ITS/TCG (176 sec
 ITS disabled (174 seconds). The latter samples sound stable at 190 deliveries
 while GPU advances 309 -> 339 over eight seconds, with no retries/cooldowns.
 The full controller/mode/SMP matrix remains open. This work is not yet in main.
+
+## Native pointer (HI-0)
+
+The compositor resolves live hover, menu ownership and divider dragging at the
+frame boundary, then sends changed shape/scale/position through Lictor. It never
+paints over a stale CPU mirror of accelerated content or restores saved pointer
+background pixels. Preferences live in surface incarnations and vanish with
+them. A seat generation change invalidates the last-sent pointer state because
+Lictor hid it during the trusted episode. The portable cursor raster lives in
+[[sub-libhalcyon]]; VirtIO queue ownership and exclusion live in [[sub-lictor]].
+
+HI-0 runtime checkpoint (2026-09-24): `ls-halcyon-pointer` passes on QEMU/KVM
+with the 2D and VirGL/EGL backends at 1280x800, scale 100. Actual VNC cursor
+planes show five shapes, edge clipping, divider selection and owner retirement;
+the SAK plane is fully transparent and the cursor returns after restoration.
+Raw fixture interiors remain byte-exact before and after pointer changes.
+This qualifies those composed paths, not bare-metal Pi or direct scanout.

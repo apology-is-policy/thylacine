@@ -15,6 +15,7 @@ pub mod skein;
 pub mod keymap;
 pub mod limits;
 pub mod fence;
+pub mod cursor_queue;
 #[cfg(feature = "backend")]
 pub mod backend;
 pub mod gpu_api;

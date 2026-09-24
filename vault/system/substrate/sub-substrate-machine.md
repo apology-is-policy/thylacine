@@ -12,7 +12,7 @@ locks: []
 abis: [abi-boot-banner]
 design: ["docs/TOOLING.md", "docs/PORTABILITY.md"]
 created: 2026-08-01
-updated: 2026-09-17
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -238,11 +238,15 @@ sized for the slower TCG compat run. Idle cost under HVF was the subject of
   for Accessibility permission for QEMU, and `THYLACINE_FULL_GRAB=0` opts out.
   Chosen by the operator over moving the chord plane off Super. Verified
   present in QEMU 10.0.2.
-- **`show-cursor=on` is a STOPGAP** (same date, `THYLACINE_SHOW_CURSOR=0` opts
-  out): it draws the HOST pointer over the window because the guest draws
-  none -- tapestryd sets up the virtio-gpu cursor queue and never issues
-  `UPDATE_CURSOR`. On VNC or any non-cocoa display there is still no pointer.
-  Remove it when the guest draws its own.
+- Halcyon supplies its native pointer through Lictor. Cocoa's forced host
+  pointer is off by default; `THYLACINE_SHOW_CURSOR=1` remains an explicit
+  diagnostic override for older images. `THYLACINE_DISPLAY=vnc-unix` with
+  `THYLACINE_VNC_SOCKET` provides a private capture socket, selecting gpu0 as
+  the displayed device. `vnc_capture.py --cursor-at X Y` captures the actual
+  AlphaCursor plane and records its hotspot/visible pixels beside the image.
+  Its position must come from the guest's `cursor` ctl line: QEMU VNC supplies
+  pixels but does not publish cursor position. Raw screendumps alone do not
+  prove a cursor plane was displayed.
 
 - `--snapshot` is parsed but unimplemented: it prints "not yet implemented"
   and continues. TOOLING.md §6 describes the snapshot workflow as a

@@ -65,9 +65,9 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**549 owned · 48 unowned · 597 files (91% owned) · ~12716 unswept lines.**
+**554 owned · 48 unowned · 602 files (92% owned) · ~12716 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **78 files, ~35614 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **78 files, ~35670 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
@@ -81,7 +81,7 @@ Excluded as harness and counted here rather than dropped: **78 files, ~35614 lin
 | usr/libthyla-rs | 29 | 1 | 196 |
 | arch | 41 | 2 | 146 |
 | usr/susp-mask-child | 0 | 1 | 139 |
-| usr/lib | 71 | 1 | 72 |
+| usr/lib | 74 | 1 | 72 |
 | usr/bus-probe-child | 0 | 1 | 63 |
 | usr/tapestryd | 8 | 2 | 21 |
 | mm | 8 | 0 | 0 |
@@ -99,7 +99,7 @@ Excluded as harness and counted here rather than dropped: **78 files, ~35614 lin
 | usr/imperium | 1 | 0 | 0 |
 | usr/joey | 1 | 0 | 0 |
 | usr/lantern | 4 | 0 | 0 |
-| usr/lictor | 28 | 0 | 0 |
+| usr/lictor | 30 | 0 | 0 |
 | usr/login | 1 | 0 | 0 |
 | usr/loom-stress | 1 | 0 | 0 |
 | usr/manual | 7 | 0 | 0 |

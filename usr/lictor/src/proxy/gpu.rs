@@ -194,6 +194,9 @@ impl Gpu {
     pub fn set_scanout(&mut self, resource_id: u32, w: u32, h: u32) -> Result<(), Error> {
         self.invoke(Request::SetScanout { resource_id, w, h }).unwrap_or(Err(Error::Hardware))
     }
+    pub fn cursor(&mut self, shape: u8, scale: u16, x: u32, y: u32, visible: bool) -> Result<(), Error> {
+        self.invoke(Request::Cursor { shape, scale, x, y, visible }).unwrap_or(Err(Error::Hardware))
+    }
     pub fn set_scanout_blob_probe(&mut self, resource_id: u32, w: u32, h: u32, format: u32, stride: u32) -> Result<u32, ()> {
         self.invoke(Request::SetScanoutBlobProbe { resource_id, w, h, format, stride }).unwrap_or(Err(()))
     }
