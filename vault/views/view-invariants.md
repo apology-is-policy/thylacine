@@ -39,6 +39,7 @@ Generated from note fields — do not edit between the markers
 | I-32 | [[inv-i32]] | prose | sub-kernel-proc, sub-kernel-hwcap, sub-kernel-content, sub-kernel-addrspace, sub-kernel-pagemap, sub-kernel-mm-phys, sub-kernel-mmu | gate-smp, spec-capacity |
 | I-33 | [[inv-i33]] | prose | sub-kernel-path, sub-kernel-spoor, sub-kernel-stalk, sub-kernel-territory, sub-kernel-content | gate-smp |
 | I-34 | [[inv-i34]] | spec | sub-kernel-allowance, sub-kernel-hwcap, sub-kernel-discovery, sub-libdriver-grant, sub-libdriver-discovery, sub-warden | spec-allowance, prose, gate-smp |
+| I-35 | [[inv-i35]] | spec | sub-corvus-authority, sub-corvus, sub-kernel-caps | spec-mandate, usr/lib/corvus-authority/src/tests.rs |
 | I-36 | [[inv-i36]] | prose | sub-kernel-exec, sub-kernel-image, sub-kernel-fault, sub-kernel-burrow | prose, gate-smp |
 | I-37 | [[inv-i37]] | spec | sub-kernel-weft | spec-weft, spec-weft-readiness, gate-smp |
 | I-38 | [[inv-i38]] | spec | sub-kernel-ninep-dev9p, sub-kernel-larder | spec-fs-cache |

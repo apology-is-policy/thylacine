@@ -15,7 +15,7 @@ No unrelated worktree or unfinished tip is imported without coordination.
 - UA-0: ratification commit, exact ABI/codec contracts, mandate model and mutants,
   guest durability evidence before persistent transactions.
 - UA-1: bounded pure policy engine, provenance/coverage, canonical codec and
-  read-only discovery. Starting independent source work; no mutation endpoint.
+  read-only discovery. Isolated core implemented and checked; codec/discovery pending; no mutation endpoint.
 - UA-2..UA-7: typed scopes/admission, durable transactions/replay, client and
   trusted scene, standing grants/installer, scoped resources, full qualification.
 - Multiuser fixture prerequisite: registry headroom + bind errno, already Astra
@@ -23,7 +23,31 @@ No unrelated worktree or unfinished tip is imported without coordination.
 
 ## Evidence
 
-No new runtime/model tests claimed yet. Heavy host tests/builds require Yip mac
-lease; Aux holds it, Main queued ahead of Astra. Source work continues meanwhile.
-Single-agent review direction remains binding; existing Main/Aux coordination
-is not an independent review claim. Update this file at each verified stage.
+First source tranche (2026-09-24), on ratification 4c889a13:
+
+- `corvus-authority`: 24 host tests pass; bare-target check passes, with the
+  existing outline-atomics unstable-feature warning; host Clippy -D warnings clean.
+- `specs/check-mandate.py`: clean 154 states and seven mutants each report their
+  intended invariant. First attempt had a model Boolean-assignment error; repaired
+  before the successful run. Both attempts retained under work/ua-model.
+- Policy tests: cross-domain/resource denial, no use-to-admin conversion, complete
+  envelope selection, conjunctive support/revisions, self/cyclic delegation,
+  auth/term attenuation, live activation, revocation closure and immutable IDs.
+- Self-review only. No kernel, Corvus runtime, durability or end-to-end claim.
+
+UA-0 and UA-1 remain open. The initial model lacks full group/account transitions
+and separate commit admission/publication. The library still needs canonical
+codec, discovery, quota/depth maximum tests and pre-auth fallible reservations.
+Tombstones count toward its interim 4096 physical-record cap (stricter than the
+4096-live target); safe compaction must preserve high-water IDs and audit.
+
+The mac lease was acquired after Main's release and returned after the checks.
+Main resumes B-1c verification; source work continues without competing builds.
+
+## Storage investigation
+
+Source-confirmed: existing Corvus identity/key-wrap rename helpers ignore the
+post-rename directory fsync result. New authority transactions must not inherit
+that best-effort acknowledgement contract. Trace Stratum's actual guest commit
+and block flush, then run crash/fault probes before claiming durable outcomes.
+No storage defect repair or guest crash test claimed yet.

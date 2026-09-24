@@ -135,6 +135,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-09-24 [[chg-2026-09-24-authority-policy-core]] — Bounded authority core and mandate safety model
 - 2026-09-24 [[chg-2026-09-24-lex-curiata-fidelity]] — Restore Lex curiata dialog and make F10 primary
 - 2026-09-24 [[chg-2026-09-24-user-authority-ratification]] — Ratify administrative authority and mandate lifecycle contracts
 - 2026-09-24 [[chg-2026-09-24-user-authority-spec]] — Specify scoped user administration and Imperium transactions
@@ -142,5 +143,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-09-23 [[chg-2026-09-23-b1a-permission-ceiling]] — B-1a: the permission ceiling -- SYS_BURROW_RESERVE 124 / SYS_BURROW_PROTECT 125, the multi-mapping reprotect, the fork's per-Burrow clone dedupe, the phenotype mprotect row, the lazy-piece detach refund
 - 2026-09-23 [[chg-2026-09-23-b1a-prime-capacity]] — B-1a' (capacity): the range detach over one core (SYS_BURROW_DETACH 38 in the Linux form + the phenotype munmap), the charged sparse pagemap, the user pool + the I-32 default = RAM minus a reserve, the window-confined fixed arms -- LANDING, audit pending
 - 2026-09-23 [[chg-2026-09-23-b1a-prime-close-r2]] — B-1a' (capacity), the round-2 close: the pool reclaims idle images before it refuses, a mapped file page is charged to its holder, the copy-on-write break replaces its leaf in place, a fork keeps the parent's tables -- round 2's four findings closed, round 3 on the fixes
-- 2026-09-23 [[chg-2026-09-23-b1a-prime-close-r3]] — B-1a' (capacity), the round-3 close: the copy-on-write copy keeps its share until its leaf is replaced, a fault that finds a leaf already admitting its access is answered by it, the strip takes what is wanted, a refused allocation inside exec is ENOMEM -- round 3's five findings closed, round 4 on the fixes
 <!-- generated:end -->
