@@ -5,7 +5,8 @@
 // regex engine in libthyla-rs). -i case-insensitive, -v invert, -n line
 // numbers, -c count-only, -w whole-word match, -o print only the matched part,
 // -l print only names of files with a match, -r recurse into directories. No
-// operand FILE reads stdin.
+// operand FILE reads stdin. Input is read a line at a time (coreutils::stream),
+// so a file of any length is searched; only its longest line must fit.
 //
 // Beacon (docs/BEACON.md): at the Rich tier the SAME plain bytes go out,
 // bracketed by semantic frames -- `obj type=path` on the filename prefix
@@ -26,8 +27,9 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 
 use core::fmt::Write as _;
 use coreutils::color::{self, ColorMode};
-use coreutils::{palette, usage};
+use coreutils::{find, palette, stream, usage};
 use libthyla_rs::env::{self, Args};
+use libthyla_rs::err;
 use libthyla_rs::fs::{self, File};
 use libthyla_rs::{eprintln, io};
 
@@ -54,89 +56,38 @@ pub extern "C" fn rs_main() -> i64 {
     run(env::args())
 }
 
-fn is_word_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
-}
-
-/// A `[s,e)` match is word-bounded when neither neighbour is a word byte.
-fn word_bounded(hay: &[u8], s: usize, e: usize) -> bool {
-    (s == 0 || !is_word_byte(hay[s - 1])) && (e == hay.len() || !is_word_byte(hay[e]))
-}
-
-fn matches_at(hay: &[u8], i: usize, needle: &[u8], ci: bool) -> bool {
-    if ci {
-        hay[i..i + needle.len()]
-            .iter()
-            .zip(needle)
-            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+/// Emit one match's bytes as the flags say: at Rich, an `em class=strong`
+/// frame around the SAME bytes (strip-clean); with colour on, bold ember
+/// (SGR); otherwise plain. `frame` is scratch for the frame bytes.
+fn emit_match(out: &mut io::OutSink, m: &[u8], f: &Flags, frame: &mut Vec<u8>) {
+    if f.rich {
+        frame.clear();
+        beacon::wire::open(frame, beacon::wire::Op::Em, &[("class", "strong")]);
+        out.put(frame);
+        out.put(m);
+        frame.clear();
+        beacon::wire::close(frame, beacon::wire::Op::Em);
+        out.put(frame);
+    } else if f.on {
+        let _ = write!(out, "{}{}", palette::BOLD, palette::EMBER);
+        out.put(m);
+        let _ = write!(out, "{}", palette::RESET);
     } else {
-        &hay[i..i + needle.len()] == needle
+        out.put(m);
     }
 }
 
-fn has_match(hay: &[u8], needle: &[u8], ci: bool, word: bool) -> bool {
-    if needle.is_empty() {
-        return true;
-    }
-    if needle.len() > hay.len() {
-        return false;
-    }
-    let mut i = 0;
-    while i + needle.len() <= hay.len() {
-        if matches_at(hay, i, needle, ci) && (!word || word_bounded(hay, i, i + needle.len())) {
-            return true;
-        }
-        i += 1;
-    }
-    false
-}
-
-/// Byte spans of every non-overlapping occurrence of `needle` in `hay` (for the
-/// highlight + -o), honoring -w word boundaries.
-fn find_spans(hay: &[u8], needle: &[u8], ci: bool, word: bool) -> Vec<(usize, usize)> {
-    let mut spans = Vec::new();
-    if needle.is_empty() || needle.len() > hay.len() {
-        return spans;
-    }
-    let mut i = 0;
-    while i + needle.len() <= hay.len() {
-        if matches_at(hay, i, needle, ci) && (!word || word_bounded(hay, i, i + needle.len())) {
-            spans.push((i, i + needle.len()));
-            i += needle.len(); // non-overlapping
-        } else {
-            i += 1;
-        }
-    }
-    spans
-}
-
-/// Emit `line`, wrapping each matched span in bold ember (SGR) or, at Rich,
-/// in an `em class=strong` frame around the SAME bytes (strip-clean). `spans`
-/// empty -> the plain line.
-fn emit_line(out: &mut io::OutSink, line: &[u8], spans: &[(usize, usize)], rich: bool) {
-    if spans.is_empty() {
-        out.put(line);
-        return;
-    }
+/// Emit `line` with each match of `pat` styled as it is found (a line can
+/// hold as many matches as bytes, so they are never collected).
+fn emit_line(out: &mut io::OutSink, line: &[u8], pat: &[u8], f: &Flags) {
+    let mut frame = Vec::new();
     let mut last = 0;
-    let mut f: Vec<u8> = Vec::new();
-    for &(s, e) in spans {
+    find::each_match(line, pat, f.ci, f.word, |s, e| {
         out.put(&line[last..s]);
-        if rich {
-            f.clear();
-            beacon::wire::open(&mut f, beacon::wire::Op::Em, &[("class", "strong")]);
-            out.put(&f);
-            out.put(&line[s..e]);
-            f.clear();
-            beacon::wire::close(&mut f, beacon::wire::Op::Em);
-            out.put(&f);
-        } else {
-            let _ = write!(out, "{}{}", palette::BOLD, palette::EMBER);
-            out.put(&line[s..e]);
-            let _ = write!(out, "{}", palette::RESET);
-        }
+        emit_match(out, &line[s..e], f, &mut frame);
         last = e;
-    }
+        !out.failed()
+    });
     out.put(&line[last..]);
 }
 
@@ -155,13 +106,17 @@ struct Flags {
     only: bool,
     list: bool,
     recursive: bool,
+    // SGR highlight, and the Rich tier's frames (the second turns the first off).
+    on: bool,
+    rich: bool,
 }
 
 /// The filename (slate) + `:` and, with -n, the line number (moss) + `:` that
 /// prefix a matching line/match. Byte-clean when color is off. At Rich the
 /// filename carries an `obj type=path` frame (cleaned absolute ref; no frame
 /// when the ref cannot be canonicalized) around the SAME shown text.
-fn emit_prefix(out: &mut io::OutSink, prefix: Option<&str>, n: usize, number: bool, on: bool, rich: bool) {
+fn emit_prefix(out: &mut io::OutSink, prefix: Option<&str>, n: usize, f: &Flags) {
+    let (on, rich) = (f.on, f.rich);
     if let Some(p) = prefix {
         if rich {
             {
@@ -185,7 +140,7 @@ fn emit_prefix(out: &mut io::OutSink, prefix: Option<&str>, n: usize, number: bo
             );
         }
     }
-    if number {
+    if f.number {
         let _ = write!(
             out,
             "{}{}{}{}:{}",
@@ -198,59 +153,68 @@ fn emit_prefix(out: &mut io::OutSink, prefix: Option<&str>, n: usize, number: bo
     }
 }
 
-/// Grep one in-memory buffer. Returns the match count. With -o, emits each
-/// matched span on its own line; with -l, stops at the first match (the caller
-/// prints the filename). -c output is the caller's job.
-fn grep_data(out: &mut io::OutSink, data: &[u8], pat: &[u8], f: &Flags, prefix: Option<&str>, on: bool, rich: bool) -> usize {
-    let mut lines: Vec<&[u8]> = data.split(|&b| b == b'\n').collect();
-    if data.last() == Some(&b'\n') {
-        lines.pop();
-    }
+/// Grep one input a line at a time (coreutils::stream), holding only the line
+/// being searched. Returns the match count. With -o, emits each matched span on
+/// its own line; with -l, stops reading at the first match (the caller prints
+/// the filename). -c output is the caller's job.
+fn grep_input<R: io::Read + ?Sized>(out: &mut io::OutSink, input: &mut R, pat: &[u8], f: &Flags, prefix: Option<&str>) -> Result<usize, stream::Error<err::Error>> {
     let mut matches = 0usize;
-    for (n, line) in lines.iter().enumerate() {
-        if has_match(line, pat, f.ci, f.word) == f.invert {
-            continue;
-        }
-        matches += 1;
-        if f.list {
-            break; // one match suffices; the caller prints the name
-        }
-        if f.count {
-            continue; // the caller prints the total
-        }
-        if f.only {
-            // Only the matched substrings (an inverted line has none -> nothing).
-            for &(s, e) in &find_spans(line, pat, f.ci, f.word) {
-                emit_prefix(out, prefix, n, f.number, on, rich);
-                let sub = &line[s..e];
-                if on || rich {
-                    // The whole emitted text IS the match span (styled).
-                    emit_line(out, sub, &[(0, sub.len())], rich);
+    stream::lines(
+        |buf| input.read(buf),
+        |line, n| {
+            if find::has_match(line, pat, f.ci, f.word) == f.invert {
+                return true;
+            }
+            matches += 1;
+            // One match suffices: -l prints only the name, and once the reader
+            // is gone only the verdict is left to find.
+            if f.list || out.reader_gone() {
+                return false;
+            }
+            if f.count {
+                return true; // the caller prints the total
+            }
+            if f.only {
+                // Only the matched substrings (an inverted line has none -> nothing).
+                let mut frame = Vec::new();
+                find::each_match(line, pat, f.ci, f.word, |s, e| {
+                    emit_prefix(out, prefix, n, f);
+                    emit_match(out, &line[s..e], f, &mut frame);
+                    out.put(b"\n");
+                    !out.failed()
+                });
+            } else {
+                emit_prefix(out, prefix, n, f);
+                // A styled realization marks the matches: SGR highlight (color
+                // on) or the Rich em frames. A plain line needs no search for
+                // them, and an inverted line has none.
+                if (f.on || f.rich) && !f.invert {
+                    emit_line(out, line, pat, f);
                 } else {
-                    out.put(sub);
+                    out.put(line);
                 }
                 out.put(b"\n");
             }
-        } else {
-            emit_prefix(out, prefix, n, f.number, on, rich);
-            // Spans are found when a styled realization wants them: SGR
-            // highlight (color on) or the Rich em frames. Inverted lines
-            // carry no matched span by definition.
-            let spans = if (on || rich) && !f.invert {
-                find_spans(line, pat, f.ci, f.word)
-            } else {
-                Vec::new()
-            };
-            emit_line(out, line, &spans, rich);
-            out.put(b"\n");
-        }
-    }
-    matches
+            // Nothing more reaches stdout once a write has failed.
+            !out.failed()
+        },
+    )?;
+    Ok(matches)
 }
 
-/// Grep a path: a regular file is slurped + searched; a directory recurses
-/// under -r (else an error). Returns `(any_match, had_error)`.
-fn grep_path(out: &mut io::OutSink, path: &str, pat: &[u8], f: &Flags, on: bool, rich: bool, show_prefix: bool) -> (bool, bool) {
+/// How a path reached grep: named on the command line (and whether its lines
+/// carry the name), or found under a directory by -r.
+#[derive(Clone, Copy)]
+enum Operand {
+    Named { prefix: bool },
+    Found,
+}
+
+/// Grep a path: a file is searched; a directory recurses under -r (else an
+/// error). `found` is whether a line was selected before it. Returns
+/// `(any_match, had_error)`.
+fn grep_path(out: &mut io::OutSink, path: &str, pat: &[u8], f: &Flags, how: Operand, found: bool) -> (bool, bool) {
+    let show_prefix = matches!(how, Operand::Found | Operand::Named { prefix: true });
     match fs::metadata(path) {
         Ok(m) if m.is_dir() => {
             if !f.recursive {
@@ -266,6 +230,9 @@ fn grep_path(out: &mut io::OutSink, path: &str, pat: &[u8], f: &Flags, on: bool,
             };
             let (mut any, mut err) = (false, false);
             for ent in entries {
+                if stopped(out, found || any) {
+                    break;
+                }
                 let ent = match ent {
                     Ok(e) => e,
                     Err(e) => {
@@ -278,19 +245,24 @@ fn grep_path(out: &mut io::OutSink, path: &str, pat: &[u8], f: &Flags, on: bool,
                 if name == "." || name == ".." {
                     continue;
                 }
-                let (a, e) = grep_path(out, &join(path, name), pat, f, on, rich, true);
+                let (a, e) = grep_path(out, &join(path, name), pat, f, Operand::Found, found || any);
                 any |= a;
                 err |= e;
             }
             (any, err)
         }
-        Ok(_) => match File::open(path).and_then(|mut fh| io::slurp(&mut fh)) {
-            Ok(data) => {
-                let prefix = if show_prefix { Some(path) } else { None };
-                let m = grep_data(out, &data, pat, f, prefix, on, rich);
+        // A device -r finds is skipped, as GNU grep skips it: /dev/zero has no
+        // end and no lines. Anything else is read, including a file whose
+        // server reports no type.
+        Ok(m) if matches!(how, Operand::Found) && m.is_char_device() => (false, false),
+        Ok(_) => match File::open(path)
+            .map_err(stream::Error::Read)
+            .and_then(|mut fh| grep_input(out, &mut fh, pat, f, show_prefix.then_some(path)))
+        {
+            Ok(m) => {
                 if f.list {
                     if m > 0 {
-                        if rich {
+                        if f.rich {
                             {
                                 let mut sout = coreutils::beacon_gate::SinkOut(out);
                                 let mut s = beacon::sink::Sink::new(&mut sout, beacon::Tier::Rich);
@@ -301,7 +273,7 @@ fn grep_path(out: &mut io::OutSink, path: &str, pat: &[u8], f: &Flags, on: bool,
                             }
                             out.put(b"\n");
                         } else {
-                            let _ = writeln!(out, "{}{}{}", color::col(palette::SLATE, on), path, color::reset(on));
+                            let _ = writeln!(out, "{}{}{}", color::col(palette::SLATE, f.on), path, color::reset(f.on));
                         }
                     }
                 } else if f.count {
@@ -325,6 +297,16 @@ fn grep_path(out: &mut io::OutSink, path: &str, pat: &[u8], f: &Flags, on: bool,
     }
 }
 
+/// Whether the search is over once stdout has failed. A reader that went away
+/// leaves the verdict still to find if nothing was selected yet (`-c` writes a
+/// file's count of none): the rest is searched without output to a first
+/// match, as GNU's `-q` searches. With no match that reads all the command
+/// would have read for a reader; after one, no later operand (nor its error) is
+/// reached.
+fn stopped(out: &io::OutSink, found: bool) -> bool {
+    out.failed() && (found || !out.reader_gone())
+}
+
 fn join(dir: &str, name: &str) -> String {
     let mut s = String::from(dir.trim_end_matches('/'));
     s.push('/');
@@ -346,6 +328,8 @@ fn run(args: Args) -> i64 {
         only: false,
         list: false,
         recursive: false,
+        on: false,
+        rich: false,
     };
     // Both gates default Auto (the H-1 unification): a pipe is byte-clean
     // by construction (dc != 'c'), the console highlights + may frame.
@@ -414,8 +398,8 @@ fn run(args: Args) -> i64 {
         }
     }
     // The emission gate (BEACON.md 12.4); SGR is off inside rich output.
-    let rich = coreutils::beacon_gate::resolve(bmode) == beacon::Tier::Rich;
-    let on = !rich && mode.resolve(stdout_is_console);
+    f.rich = coreutils::beacon_gate::resolve(bmode) == beacon::Tier::Rich;
+    f.on = !f.rich && mode.resolve(stdout_is_console);
 
     let pat = match args.get(idx) {
         Some(p) => p,
@@ -446,9 +430,8 @@ fn run(args: Args) -> i64 {
     let mut out = io::OutSink::new();
 
     if files.is_empty() {
-        match io::slurp(&mut io::stdin()) {
-            Ok(data) => {
-                let m = grep_data(&mut out, &data, pat, &f, None, on, rich);
+        match grep_input(&mut out, &mut io::stdin(), pat, &f, None) {
+            Ok(m) => {
                 if f.list {
                     if m > 0 {
                         let _ = writeln!(out, "(standard input)");
@@ -465,13 +448,18 @@ fn run(args: Args) -> i64 {
         }
     } else {
         for path in files {
-            let (a, e) = grep_path(&mut out, path, pat, &f, on, rich, show_prefix);
+            if stopped(&out, any_match) {
+                break;
+            }
+            let (a, e) = grep_path(&mut out, path, pat, &f, Operand::Named { prefix: show_prefix }, any_match);
             any_match |= a;
             status_err |= e;
         }
     }
 
-    if out.failed() {
+    // A reader that went away had what it wanted; any other failed write is an
+    // error.
+    if out.failed() && !out.reader_gone() {
         eprintln!("grep: write error");
         status_err = true;
     }

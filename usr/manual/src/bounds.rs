@@ -1,14 +1,16 @@
 //! The reader's resource bounds (MANUAL-DESIGN.md 8.1). Sections built to be
-//! expensive are read, checked and rendered as `manual` does, under the
-//! allocator the guest heap uses, and the heap's high-water mark must stay
-//! within the reader's working set, which is half of `HEAP_BYTES`; the same
-//! sections must take time, and write output, linear in their size.
+//! expensive are read, checked and rendered as `manual` does, on the heap the
+//! guest runs it on, and that heap's peak footprint must stay within the
+//! reader's working set, which is half of `HEAP_BYTES`; the same sections must
+//! take time, and write output, linear in their size.
 //!
-//! The high-water mark is what a lazily committed `ThylaAllocN` heap touches:
-//! the furthest address `linked_list_allocator` has handed out, so the space a
-//! first-fit heap loses to fragmentation counts, not only the bytes in use.
-//! That heap is this test binary's allocator for the thread being measured; every
-//! other allocation, and every other test, uses the system allocator.
+//! The heap is libthyla-rs's (thyla-heap: dlmalloc for small blocks, a mapping of
+//! its own for a large one). Its footprint is everything it holds from the
+//! system -- what dlmalloc has carved, in use or free, and the direct blocks --
+//! so what fragmentation costs counts, not only the bytes in use. That heap, over
+//! an arena standing in for the kernel, is this test binary's allocator for the
+//! thread being measured; every other allocation, and every other test, uses the
+//! system allocator.
 
 extern crate std;
 
@@ -16,14 +18,13 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::Cell;
-use core::ptr::{addr_of_mut, NonNull};
+use core::ptr::{self, addr_of_mut};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::alloc::System;
 use std::time::{Duration, Instant};
 
-use linked_list_allocator::Heap;
-
 use beacon::Tier;
+use thyla_heap::{Backend, Heap, PAGE, RESERVATION_LEN};
 
 use crate::format::{self, Problem, TABLE_CELL_MAX, TABLE_COLUMNS_MAX};
 use crate::render::{render, CHUNK};
@@ -33,60 +34,175 @@ std::thread_local! {
     static MEASURING: Cell<bool> = const { Cell::new(false) };
 }
 
-/// The guest-shaped heap spans more than `HEAP_BYTES`, so exceeding the bound is
-/// a measurement rather than an abort; with first fit, a placement below
-/// `HEAP_BYTES` is the placement a heap of exactly that size would make.
-const ARENA: usize = 4 * HEAP_BYTES;
+/// The address space the kernel stand-in hands out: the heap's first
+/// reservation, and room for direct blocks far past the working set, so
+/// exceeding the bound is a measurement rather than an abort.
+const ARENA: usize = RESERVATION_LEN + 4 * HEAP_BYTES;
+
+const MAPPINGS_MAX: usize = 64;
+
+/// The stand-in's mappings, `live[..n]` as `(base, len)` sorted by base. Nothing
+/// at or above `touched` has been handed out, so it is still zero.
+struct Mappings {
+    live: [(usize, usize); MAPPINGS_MAX],
+    n: usize,
+    touched: usize,
+}
 
 static LOCK: AtomicBool = AtomicBool::new(false);
-static mut HEAP: Heap = Heap::empty();
+static mut MAPPINGS: Mappings = Mappings {
+    live: [(0, 0); MAPPINGS_MAX],
+    n: 0,
+    touched: 0,
+};
 static BOTTOM: AtomicUsize = AtomicUsize::new(0);
-static HIGH_WATER: AtomicUsize = AtomicUsize::new(0);
 
-fn lock() {
+fn mappings<R>(f: impl FnOnce(&mut Mappings) -> R) -> R {
     while LOCK
         .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_err()
     {
         core::hint::spin_loop();
     }
+    let r = f(unsafe { &mut *addr_of_mut!(MAPPINGS) });
+    LOCK.store(false, Ordering::Release);
+    r
 }
 
-fn unlock() {
-    LOCK.store(false, Ordering::Release);
+fn mapping_of(m: &Mappings, va: usize, len: usize) -> Option<usize> {
+    m.live[..m.n]
+        .iter()
+        .position(|&(b, l)| va >= b && va + len <= b + l)
+}
+
+/// The kernel's three calls over one arena, a reservation placed first fit as
+/// the kernel places it. The heap makes them from inside the global allocator,
+/// so they never allocate.
+#[derive(Clone, Copy)]
+struct Arena;
+
+impl Backend for Arena {
+    fn reserve(&self, len: usize, align_log2: u32) -> Option<usize> {
+        let align = PAGE.max(1 << align_log2);
+        let bottom = BOTTOM.load(Ordering::Relaxed);
+        mappings(|m| {
+            if m.n == MAPPINGS_MAX {
+                return None;
+            }
+            let (mut at, mut i) = (bottom, 0);
+            while i < m.n && at.next_multiple_of(align) + len > m.live[i].0 {
+                at = m.live[i].0 + m.live[i].1;
+                i += 1;
+            }
+            let at = at.next_multiple_of(align);
+            if at + len > bottom + ARENA {
+                return None;
+            }
+            m.live.copy_within(i..m.n, i + 1);
+            m.live[i] = (at, len);
+            m.n += 1;
+            if at < m.touched {
+                unsafe { ptr::write_bytes(at as *mut u8, 0, m.touched.min(at + len) - at) };
+            }
+            m.touched = m.touched.max(at + len);
+            Some(at)
+        })
+    }
+
+    fn decommit(&self, va: usize, len: usize) -> bool {
+        mappings(|m| {
+            let inside = mapping_of(m, va, len).is_some();
+            if inside {
+                unsafe { ptr::write_bytes(va as *mut u8, 0, len) };
+            }
+            inside
+        })
+    }
+
+    fn detach(&self, va: usize, len: usize) -> bool {
+        mappings(|m| {
+            let Some(i) = mapping_of(m, va, len) else {
+                return false;
+            };
+            let (b, l) = m.live[i];
+            let pieces = [(b, va - b), (va + len, b + l - (va + len))];
+            let kept = pieces.iter().filter(|p| p.1 > 0).count();
+            if m.n - 1 + kept > MAPPINGS_MAX {
+                return false;
+            }
+            m.live.copy_within(i + 1..m.n, i + kept);
+            for (j, p) in pieces.into_iter().filter(|p| p.1 > 0).enumerate() {
+                m.live[i + j] = p;
+            }
+            m.n = m.n - 1 + kept;
+            true
+        })
+    }
+}
+
+static HEAP: Heap<Arena> = Heap::new(Arena);
+
+/// Blocks the measured work holds in the heap.
+static LIVE: AtomicUsize = AtomicUsize::new(0);
+
+fn measuring() -> bool {
+    MEASURING.with(|m| m.get())
+}
+
+fn in_arena(p: *mut u8) -> bool {
+    let bottom = BOTTOM.load(Ordering::Relaxed);
+    bottom != 0 && p as usize >= bottom && (p as usize) < bottom + ARENA
+}
+
+fn took(p: *mut u8) -> *mut u8 {
+    if !p.is_null() {
+        LIVE.fetch_add(1, Ordering::Relaxed);
+    }
+    p
 }
 
 struct GuestHeap;
 
 unsafe impl GlobalAlloc for GuestHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if !MEASURING.with(|m| m.get()) {
-            return System.alloc(layout);
+        if measuring() {
+            took(HEAP.alloc(layout))
+        } else {
+            System.alloc(layout)
         }
-        lock();
-        let r = (*addr_of_mut!(HEAP)).allocate_first_fit(layout);
-        unlock();
-        match r {
-            Ok(p) => {
-                // The heap rounds a block up to two words and to word alignment.
-                let size = (layout.size().max(16) + 7) & !7;
-                let end = p.as_ptr() as usize + size - BOTTOM.load(Ordering::Relaxed);
-                HIGH_WATER.fetch_max(end, Ordering::Relaxed);
-                p.as_ptr()
-            }
-            Err(()) => core::ptr::null_mut(),
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        if measuring() {
+            took(HEAP.alloc_zeroed(layout))
+        } else {
+            System.alloc_zeroed(layout)
         }
     }
 
     unsafe fn dealloc(&self, p: *mut u8, layout: Layout) {
-        let bottom = BOTTOM.load(Ordering::Relaxed);
-        let a = p as usize;
-        if bottom != 0 && a >= bottom && a < bottom + ARENA {
-            lock();
-            (*addr_of_mut!(HEAP)).deallocate(NonNull::new_unchecked(p), layout);
-            unlock();
+        if in_arena(p) {
+            HEAP.dealloc(p, layout);
+            LIVE.fetch_sub(1, Ordering::Relaxed);
         } else {
             System.dealloc(p, layout);
+        }
+    }
+
+    // A block in the heap is resized by the heap, as in the guest, which may
+    // grow it where it lies.
+    unsafe fn realloc(&self, p: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        if in_arena(p) {
+            HEAP.realloc(p, layout, new_size)
+        } else if measuring() {
+            let q = self.alloc(Layout::from_size_align_unchecked(new_size, layout.align()));
+            if !q.is_null() {
+                ptr::copy_nonoverlapping(p, q, layout.size().min(new_size));
+                System.dealloc(p, layout);
+            }
+            q
+        } else {
+            System.realloc(p, layout, new_size)
         }
     }
 }
@@ -102,32 +218,31 @@ static ALLOCATOR: GuestHeap = GuestHeap;
 const WORKING_SET_MAX: usize = 8 * SECTION_MAX;
 const _: () = assert!(WORKING_SET_MAX <= HEAP_BYTES / 2);
 
-/// The two bounds tests run one at a time: they share the arena, and neither
+/// The two bounds tests run one at a time: they share the heap, and neither
 /// should time the other.
 static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Run `f` on a fresh guest-shaped heap and return its high-water mark. `f`
-/// must free everything it allocates.
-fn high_water(f: impl FnOnce()) -> usize {
-    unsafe {
-        if BOTTOM.load(Ordering::Relaxed) == 0 {
-            let p = System.alloc(Layout::from_size_align(ARENA, 16).unwrap());
-            assert!(!p.is_null());
-            BOTTOM.store(p as usize, Ordering::Relaxed);
-        }
-        lock();
-        let heap = &mut *addr_of_mut!(HEAP);
-        *heap = Heap::empty();
-        heap.init(BOTTOM.load(Ordering::Relaxed) as *mut u8, ARENA);
-        unlock();
+/// Run `f` on the heap, trimmed first, and return its peak footprint while `f`
+/// ran. `f` must free everything it allocates.
+fn peak_footprint(f: impl FnOnce()) -> usize {
+    if BOTTOM.load(Ordering::Relaxed) == 0 {
+        // calloc's fresh pages from the system: zero until touched.
+        let arena = Layout::from_size_align(ARENA + PAGE, 16).unwrap();
+        let p = unsafe { System.alloc_zeroed(arena) };
+        assert!(!p.is_null());
+        BOTTOM.store((p as usize).next_multiple_of(PAGE), Ordering::Relaxed);
     }
-    HIGH_WATER.store(0, Ordering::Relaxed);
+    HEAP.trim();
+    HEAP.reset_peak();
     MEASURING.with(|m| m.set(true));
     f();
     MEASURING.with(|m| m.set(false));
-    let used = unsafe { (*addr_of_mut!(HEAP)).used() };
-    assert_eq!(used, 0, "the measured work left memory allocated");
-    HIGH_WATER.load(Ordering::Relaxed)
+    assert_eq!(
+        LIVE.load(Ordering::Relaxed),
+        0,
+        "the measured work left memory allocated"
+    );
+    HEAP.peak()
 }
 
 /// How `read_capped` sizes its buffer: from the length `fstat` reports, or, when
@@ -459,34 +574,42 @@ fn the_heap_bounds_hold() {
                 break;
             }
             let mut passed = false;
-            let hw = high_water(|| passed = show(src.as_bytes(), read, tier, width).is_some());
+            let peak = peak_footprint(|| passed = show(src.as_bytes(), read, tier, width).is_some());
             assert_eq!(passed, passes, "{}: whether it passes the check", name);
             std::eprintln!(
-                "bounds: {:<50} {:?}/{:?}/{:?}: high water {:>6} KiB ({:.2} bytes per byte)",
+                "bounds: {:<50} {:?}/{:?}/{:?}: peak footprint {:>6} KiB ({:.2} bytes per byte)",
                 name,
                 read,
                 tier,
                 width,
-                hw / 1024,
-                hw as f64 / src.len() as f64
+                peak / 1024,
+                peak as f64 / src.len() as f64
+            );
+            // The reader holds the whole section, so a smaller peak means the
+            // heap never saw its allocations.
+            assert!(
+                peak >= src.len(),
+                "{}: a peak footprint of {} bytes is less than the section",
+                name,
+                peak
             );
             assert!(
-                hw <= WORKING_SET_MAX,
-                "{} at {:?}/{:?}/{:?}: a high-water mark of {} bytes exceeds the {}-byte working set",
+                peak <= WORKING_SET_MAX,
+                "{} at {:?}/{:?}/{:?}: a peak footprint of {} bytes exceeds the {}-byte working set",
                 name,
                 read,
                 tier,
                 width,
-                hw,
+                peak,
                 WORKING_SET_MAX
             );
-            if hw > worst.0 {
-                worst = (hw, name);
+            if peak > worst.0 {
+                worst = (peak, name);
             }
         }
     }
     std::eprintln!(
-        "bounds: worst high water {} KiB ({})",
+        "bounds: worst peak footprint {} KiB ({})",
         worst.0 / 1024,
         worst.1
     );

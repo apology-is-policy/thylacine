@@ -28,7 +28,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-04
-updated: 2026-09-23
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -88,7 +88,8 @@ namespace name appears as a device specifier. The realm column is derived
 from that device character — precise, available now, and requiring no new
 kernel surface. With colour off it passes the kernel text through
 untouched, which is the right escape hatch for a tool whose subject is
-already text.
+already text, and through the same failing-write path as the box, so a text
+it could not write is reported.
 
 **`pelt` walks the tree and stops at every graft.** That is its reason to
 exist: a general tree walker that descended into a live kernel namespace
@@ -160,7 +161,47 @@ for failure. The network tools distinguish an unresolvable host from a
 malformed dial string, which is the distinction a user needs.
 
 `grep` continues across an unreadable operand and reports it, returning
-non-zero at the end.
+non-zero at the end. It reads each input a line at a time
+(`coreutils::stream`), so a file of any length is searched, `-l` stops reading
+at the first match, and an empty input has no lines. That keeps its exit 1 a
+verdict ("no match"): a program that outgrows memory ends at a fault, which
+v1.0 also reports as 1. A line longer than 64 MiB (`LINE_MAX`) is an error, exit
+two with "a line longer than 64 MiB", so `grep x /dev/zero` never reads as "no
+match"; and `-r` skips a character device it finds while walking (GNU's rule;
+the kernel reports no other device type) and reads everything else, while an
+operand named on the command line is always read. Lines matched before a read
+error are printed before the diagnostic, and after `-l`'s first match a later
+read error is never reached. A match is found by `coreutils::find` and styled
+as it is found, never collected, since one line can hold as many matches as
+bytes.
+
+The eight presenters that write through `OutSink` (`ls`, `pelt`, `ns`, `qid`,
+`realm`, `stat`, `ps` and `grep`) treat a reader that goes away as no error:
+once a write finds the reader gone (EPIPE), each prints nothing to stderr and
+keeps its status.
+`grep`'s status is its verdict, so it stops at once only if a line has been
+selected; the one write that can find the reader gone before that is a `-c`
+count of none. Then it searches on, silently, only as far as a first selected
+line, as GNU's `-q` searches: `grep -c x a b c | head -1`, with only `c`
+matching, exits zero whether or not the reader is gone by `b`'s count. The
+cost is the command's own: with no match it reads every remaining operand to
+its end, as it would have for a reader, and an endless one (`/dev/random`)
+until it is interrupted. What it never reaches is anything after that first
+line: `grep -c Thylacine /dev/null /version /nonexistent` exits zero once its
+reader has gone, where with its reader it reports `/nonexistent` and exits two
+(the trade-off `-l` makes, above). An error met before that line still makes
+the status two. Any other failed write is reported (a write error, on stderr)
+and exits non-zero: two for `grep`, one for the others, and the presenter
+stops there: `ls` reads no further directory and `pelt` walks no further once
+its output has failed.
+
+The network tools do not, yet. `nc` and `con` report every failed stdout write,
+a gone reader's included, as `stdout write failed` and exit one, so
+`nc host 7 | head -1` fails under ut's pipefail. `dial`, `nslookup`, `ping`,
+`netstat`, `ipconfig` and `tcpproxy` write through `print!` or a helper that
+drops a write's error, so no failed write is reported or seen in their status.
+Both fixes are owed, the second with the one-shot tools' sweep
+([[sub-coreutils-filters]]).
 
 `ps` reports a `/ctl/procs` open/read failure on stderr and exits non-zero;
 a row it cannot parse is *not* an error but a trigger to emit the kernel
@@ -227,23 +268,14 @@ cost a read per listing.
   too — the shared probe was built rather than a sixteenth stub added
   (Prosecution, task #156 closed).
 
-- **`grep` still gates styling two different ways in one file, and one of
-  them cannot be seen from the function that relies on it.** The H-1c-2
-  rewrite kept the shape: the prefix path (`emit_prefix`) checks the `on`
-  flag directly around each escape write, while the match path (`emit_line`)
-  is gated by whether it was *handed* any spans — the caller computes spans
-  only when `(colour || rich) && !invert`, and an empty span list yields the
-  plain line. `emit_line` now serves both realizations off that one data
-  gate: non-empty spans wrap in SGR bold-ember when colouring, or in an
-  `em class=strong` frame at the Rich tier.
-
-  That is sound today — verified — and it is a legitimate pattern: gate the
-  data rather than the emission. But `emit_line`'s signature still cannot
-  express the precondition, so a second caller that computed spans without
-  consulting the flag would style a payload with nothing to stop it. In a
-  crate whose top-level rule is about exactly that, it is the one place where
-  the rule depends on a convention rather than on structure — and the Rich
-  path now rides the same convention.
+- **`grep`'s styling gate is structural again — RESOLVED in B-1c's round-2
+  close.** Until then the match path was gated by whether its caller had
+  *handed* it any spans, computed only when `(colour || rich) && !invert`,
+  so a second caller that computed spans without the check would have styled
+  a payload. The spans are gone (a line's matches are no longer collected),
+  and `emit_match` now reads the flags itself: an `em class=strong` frame at
+  Rich, SGR bold-ember with colour on, the plain bytes otherwise. The
+  callers' own check only skips a search a plain line does not need.
 
 - **No unit tests.** These link the runtime unconditionally, so the host
   harness cannot build them — the structural reason is unchanged. The
@@ -255,8 +287,7 @@ cost a read per listing.
   producer witness in `coreutil-smoke` — `ls -l --beacon=always /version`
   emits `1936;v1;pre` + `1936;v1;obj` and strips to the box (`┌`/`│`), "ls -l
   rich pre-box (PL-5)", 56 checks — pins the `pre`-box emission directly.
-  (`usr/coreutil-smoke` is UNOWNED by the vault — a sweep is filed, like the
-  yip-0029 Warp paths.) The colour flag matrices — in particular the
+  (`usr/coreutil-smoke` is [[sub-coreutils-filters]]'s since 2026-09-24.) The colour flag matrices — in particular the
   `auto`-resolves-off-in-a-pipe guarantee that the whole H-1c-2 change turns
   on — the graft classification, and every network error path remain
   unpinned.

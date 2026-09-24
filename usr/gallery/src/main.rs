@@ -13,19 +13,13 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-// An image decoder's working set far exceeds the default 4 MiB heap, and the
-// worst case is a PROGRESSIVE JPEG: zune holds a full-image coefficient buffer
-// per input component (~2 B * components * npx, up to 4 for CMYK, zune
-// mcu_prog.rs) ALONGSIDE the output during decode -- peak ~= READ_CAP + 12*npx,
-// vs a baseline/PNG ~8*npx. To view a ~12 Mpx photo (12*12M + 16 MiB = 160 MiB)
-// the heap is 192 MiB (lazy demand-zero overcommit -- only touched pages commit,
-// and 160 MiB is well under the 256 MiB per-AddrSpace page budget, I-32).
-// GALLERY_MAX_PIXELS rejects anything larger up front, so the bound is REAL, not
-// a phantom the allocator OOMs past (the former 128 MiB OOM-exited a 12 Mpx
-// progressive JPEG -- holotype F1).
+// An image decoder's working set is large, and the worst case is a PROGRESSIVE
+// JPEG: zune holds a full-image coefficient buffer per input component (~2 B *
+// components * npx, up to 4 for CMYK, zune mcu_prog.rs) ALONGSIDE the output
+// during decode -- peak ~= READ_CAP + 12*npx, vs a baseline/PNG ~8*npx. The heap
+// grows to hold it; GALLERY_MAX_PIXELS below is what bounds it.
 #[global_allocator]
-static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAllocN<{ 192 * 1024 * 1024 }> =
-    libthyla_rs::alloc::ThylaAllocN;
+static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
 use libthyla_rs::env;
 use libthyla_rs::eprintln;
@@ -49,11 +43,11 @@ macro_rules! say {
 // 16 MiB holds any real image's compressed bytes with room to spare.
 const READ_CAP: usize = 16 * 1024 * 1024;
 
-// The decode pixel budget, sized to the 192 MiB heap for the worst-case
-// progressive-JPEG peak (~= READ_CAP + 12*npx; see the allocator note): 12*12M +
-// 16 MiB = 160 MiB, inside the heap with margin. Rejected BEFORE decode via a
-// headers-only dimension read, so an over-budget image gets a clean error instead
-// of a silent OOM-exit.
+// The decode pixel budget: the worst-case progressive-JPEG peak (~= READ_CAP +
+// 12*npx; see the allocator note) at 12 Mpx is 12*12M + 16 MiB = 160 MiB. It is
+// checked from the headers BEFORE decode, so an image past it is a clean error,
+// never a death at a page fault when the system runs out of memory mid-decode.
+// The figure was set when the heap was a fixed 192 MiB.
 const GALLERY_MAX_PIXELS: u64 = 12 * 1024 * 1024;
 
 // tapestryd is warden-spawned well before this, but a slow bring-up must not
@@ -62,9 +56,9 @@ const CONNECT_TRIES: u32 = 25;
 const CONNECT_DELAY_MS: u64 = 200;
 
 /// Reject an over-budget image from its headers BEFORE the heap-hungry decode
-/// (the decode peak can dwarf a fixed heap; a pixel cap above the heap is a
-/// phantom the allocator OOMs past). `Err(code)` bails with that exit code; a
-/// failed dimension read (malformed headers) also bails clean.
+/// (the heap grows to hold whatever the decode asks, so the pixel budget is its
+/// only bound). `Err(code)` bails with that exit code; a failed dimension read
+/// (malformed headers) also bails clean.
 fn check_budget(path: &str, dims: Result<(u32, u32), &'static str>, max: u64) -> Result<(), i64> {
     match dims {
         Ok((w, h)) if !within_pixel_budget(w, h, max) => {

@@ -23,8 +23,8 @@ use alloc::vec::Vec;
 // One section and its largest block, exactly as the `manual` reader bounds it
 // (MANUAL-DESIGN 8.1): lantern holds no more than that at once.
 #[global_allocator]
-static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAllocN<{ manual::HEAP_BYTES }> =
-    libthyla_rs::alloc::ThylaAllocN;
+static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc =
+    libthyla_rs::alloc::ThylaAlloc;
 
 use beacon::sink::{Em, Sink};
 use beacon::{BeaconMode, Tier};

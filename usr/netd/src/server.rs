@@ -95,7 +95,7 @@ const SRV_MSIZE_USIZE: usize = SRV_MSIZE as usize;
 /// product at the Tier-A target over the NIC round-trip, 2x the 32 KiB per-op
 /// chunk so the NIC pipeline stays full while the next 9P op crosses. MAX_SLOTS
 /// is the public slot limit; MAX_TCP_TRANSPORTS * (rx + tx) bounds live plus
-/// retiring TCP buffers at 8 MiB within netd's explicit 16 MiB heap.
+/// retiring TCP buffers at 8 MiB.
 const TCP_RX_BUF: usize = 65536;
 const TCP_TX_BUF: usize = 65536;
 

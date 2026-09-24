@@ -21,9 +21,9 @@ use alloc::string::String;
 /// The largest section the reader accepts (MANUAL-DESIGN.md 3.1).
 pub const SECTION_MAX: usize = 1024 * 1024;
 
-/// The reader's heap (MANUAL-DESIGN.md 4.4). The `bounds` test checks and
-/// renders the sections most expensive to hold under the guest's allocator and
-/// asserts they stay below it.
+/// The reader's memory budget (MANUAL-DESIGN.md 8.1). The `bounds` test checks
+/// and renders the sections most expensive to hold on the guest's heap and
+/// asserts its peak footprint stays within half of it.
 pub const HEAP_BYTES: usize = 16 * 1024 * 1024;
 
 /// A console narrower than this is treated as width-unknown (4.3).

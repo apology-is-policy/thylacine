@@ -20,7 +20,7 @@ hazards: []
 abis: []
 design: ["docs/NET-DESIGN.md"]
 created: 2026-08-04
-updated: 2026-09-07
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -65,7 +65,8 @@ parse. There are two response paths: a buffered one bounded by a response
 cap for small fetches the caller wants to inspect, and a streaming one
 that writes the body to a sink chunk by chunk while timing connect,
 first-byte and total. The streaming path exists so a large download never
-accumulates in a fixed heap.
+accumulates in memory: it was written for a fixed heap, and since B-1c, when
+the heap grows ([[sub-thyla-heap]]), it keeps a download from growing it.
 
 **The time client's self-test asserts a denial.** As the boot process
 spawns it unelevated, stepping the clock must fail with a permission

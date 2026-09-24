@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/NET-DESIGN.md", "docs/NET-THROUGHPUT.md", "docs/NET-CLOSE-DESIGN.md"]
 created: 2026-07-31
-updated: 2026-09-21
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -27,9 +27,10 @@ passes, and the accept/service/teardown choreography.
 
 ## Contract
 
-Netd uses an explicit 16 MiB lazy heap: at most 8 MiB for the 64 admitted
-TCP transports' RX/TX buffers, with headroom for bounded 9P connections,
-non-TCP buffers, stack metadata and DNS. Private retirement is driven by
+Netd runs on libthyla-rs's growable heap ([[sub-thyla-heap]]; an explicit 16 MiB
+lazy heap until B-1c): the 64 admitted TCP transports' RX/TX buffers take at
+most 8 MiB, beside bounded 9P connections, non-TCP buffers, stack metadata and
+DNS. Private retirement is driven by
 `Net::poll` before and after stack progress; `poll_delay_ms` also includes
 retirement expiry. The new deterministic close controls fail startup if
 queued data, admission, mapping cleanup or deadline invariants fail -- and,

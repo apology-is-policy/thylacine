@@ -1,0 +1,22 @@
+[package]
+name = "thyla-heap"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lib]
+name = "thyla_heap"
+path = "src/lib.rs"
+
+# The native heap's policy (B-1c; ARCH 6.5 "Capacity"): dlmalloc over lazy
+# reservations for small blocks, a reservation of its own for a large one.
+# Generic over the kernel calls, so libthyla-rs supplies the syscalls and a host
+# test measures the guest's policy with its own backend.
+#
+# dlmalloc is the copy the Rust standard library vendors (0.2.14); on
+# aarch64-unknown-none its only dependency is cfg-if. spinning_top is the lock
+# libthyla-rs's heap has always taken (it was linked_list_allocator's).
+[dependencies]
+dlmalloc = "0.2.14"
+spinning_top = "0.2"

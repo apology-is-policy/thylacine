@@ -459,8 +459,8 @@ const MAX_PARAMS: usize = 16;
 // incremental ceiling that is checked as bytes/frames ARRIVE, not at a
 // boundary. All are fail-safe: at the cap, content is soft-wrapped or
 // dropped, never grown -- halcyond IS the console, and its own OOM is a
-// silent `t_exits(1)` (the fixed-heap no_std OOM), i.e. the machine's face
-// vanishing.
+// silent exit 1 (a no_std program's end when memory runs out), i.e. the
+// machine's face vanishing.
 const MAX_LINE_CELLS: usize = 4096; // == the CUF/CHA col clamps; a longer line soft-wraps
 const MAX_OBJS_PER_BLOCK: usize = 4096; // also keeps the idx+1 encoding inside u16
 const MAX_STYLES_PER_BLOCK: usize = 4096; // also bounds the style_idx scan (no O(n^2))

@@ -4,7 +4,7 @@ type: moc
 title: "The runtime libraries — what a native program stands on"
 parent: moc-userspace
 created: 2026-08-03
-updated: 2026-08-04
+updated: 2026-09-24
 ---
 The libraries a native Thylacine program links rather than the programs
 themselves: the runtime that turns a syscall into a typed call and a
@@ -97,8 +97,14 @@ why nothing has broken.
 
 - [[sub-libthyla-rs]] — the runtime proper: the prologue that runs before
   `rs_main`, RAII over the handle table, one error type with the bare-sentinel
-  ambiguity resolved in one place, the lazy heap, and the two invariants it
-  makes unexpressible rather than checking.
+  ambiguity resolved in one place, the heap's syscalls, and the two invariants
+  it makes unexpressible rather than checking.
+- [[sub-thyla-heap]] — the native heap: dlmalloc over lazy reservations the
+  platform owns (a bump carve, a trim that decommits and rolls the bump back, a
+  release that detaches a whole reservation) and a mapping of its own for any
+  block of 256 KiB or more. `audit: hard` although it is client code: every
+  native program's memory rides it, so a decommit that reaches a live chunk is
+  corruption in all of them at once.
 - [[sub-libdriver-grant]] — the driver framework's authority core: the manifest
   schema, the node-intersect-needs computation that produces a grant, the
   spawn-descriptor codec, and the runtime a driver is written against. One

@@ -559,13 +559,11 @@ const READY_WAIT_TRIES: u32 = 100;
 /// Wait for a freshly-spawned driver to either signal readiness on its stdout
 /// pipe ("READY") or exit.
 ///
-/// A driver's stdout pipe does NOT EOF when the driver exits: a libdriver
-/// driver exits via SYS_EXIT_GROUP, and a single-thread Proc defers its
-/// handle-table close -- including the pipe write end -- to REAP, not exit (the
-/// #926 asymmetry). So the warden cannot block reading the pipe to detect an
-/// exit; it would deadlock (it holds the only reader and cannot reap while
-/// blocked in the read). Instead it detects an exit with `try_wait` (off the
-/// pipe) and polls the pipe only for the readiness DATA, bounded by a give-up.
+/// The pipe alone cannot answer that: a live service may hold it open for its
+/// whole life, and a driver that neither signals nor exits would hold a
+/// blocking read forever. So the warden detects an exit with `try_wait` (off
+/// the pipe) and polls the pipe only for the readiness DATA, bounded by a
+/// give-up.
 fn await_readiness(child: &mut Child) -> Readiness {
     let Some(mut pipe) = child.stdout.take() else {
         return Readiness::Untracked;
@@ -578,7 +576,7 @@ fn await_readiness(child: &mut Child) -> Readiness {
     // so a hostile stream cannot keep us busy past the give-up budget.
     let mut pipe_done = false;
     for _ in 0..READY_WAIT_TRIES {
-        // Catch an exit independent of the pipe (it will not EOF until reap).
+        // Catch an exit independent of the pipe.
         match child.try_wait() {
             Ok(Some(status)) => return Readiness::Exited(status),
             Ok(None) => {}
@@ -802,8 +800,9 @@ fn run_once(m: &Manifest, grant: &BoundResources) -> RunOutcome {
 
     // Wait for the driver to declare itself: "READY" (a long-lived service still
     // holding its device) or an exit (a one-shot proof, or a bring-up crash).
-    // We must NOT block reading the pipe to EOF -- a driver's fds close at reap,
-    // not exit (#926), so a silent exit would deadlock the reader.
+    // We must NOT block reading the pipe to EOF: a live service may hold it
+    // open for its whole life, and a driver that neither says READY nor exits
+    // would hold the read.
     // await_readiness detects the exit via try_wait and polls only for the data.
     match await_readiness(&mut child) {
         Readiness::Exited(status) => {

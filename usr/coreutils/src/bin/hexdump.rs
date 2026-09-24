@@ -58,6 +58,10 @@ fn dump<R: Read>(out: &mut io::OutSink, r: &mut R) -> Result<()> {
         }
         out.put(b"|\n");
         offset += n as u64;
+        // Nothing more reaches stdout once a write has failed.
+        if out.failed() {
+            return Ok(());
+        }
     }
     let _ = write!(out, "{:08x}\n", offset);
     Ok(())
@@ -83,6 +87,10 @@ fn run(args: Args) -> i64 {
     let mut out = io::OutSink::new();
     let mut had = false;
     for op in args.operands() {
+        // Nothing more reaches stdout once a write has failed.
+        if out.failed() {
+            break;
+        }
         had = true;
         let path = match core::str::from_utf8(op) {
             Ok(p) => p,
@@ -118,9 +126,5 @@ fn run(args: Args) -> i64 {
             status = 1;
         }
     }
-    if out.failed() {
-        eprintln!("hexdump: write error");
-        return 1;
-    }
-    status
+    out.finish("hexdump", status)
 }

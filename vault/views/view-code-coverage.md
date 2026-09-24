@@ -65,9 +65,9 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**544 owned · 48 unowned · 592 files (91% owned) · ~12716 unswept lines.**
+**549 owned · 48 unowned · 597 files (91% owned) · ~12716 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **77 files, ~34574 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **78 files, ~35566 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
@@ -81,12 +81,12 @@ Excluded as harness and counted here rather than dropped: **77 files, ~34574 lin
 | usr/libthyla-rs | 29 | 1 | 196 |
 | arch | 41 | 2 | 146 |
 | usr/susp-mask-child | 0 | 1 | 139 |
-| usr/lib | 70 | 1 | 72 |
+| usr/lib | 71 | 1 | 72 |
 | usr/bus-probe-child | 0 | 1 | 63 |
 | usr/tapestryd | 8 | 2 | 21 |
 | mm | 8 | 0 | 0 |
 | usr/aurora | 5 | 0 | 0 |
-| usr/coreutils | 60 | 0 | 0 |
+| usr/coreutils | 64 | 0 | 0 |
 | usr/corvus | 2 | 0 | 0 |
 | usr/curl | 3 | 0 | 0 |
 | usr/diorama | 2 | 0 | 0 |

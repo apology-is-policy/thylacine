@@ -2,7 +2,8 @@
 //
 // Exit 0 if identical; 1 if they differ (prints "FILE1 FILE2 differ: byte N,
 // line M" to stdout, GNU-style; or "EOF on SHORTER" to stderr if one is a
-// prefix of the other); 2 on an open/read error. Reads both files fully.
+// prefix of the other); 2 on an open/read error. Streams both files through
+// two fixed buffers (coreutils::stream), so no file is too large to compare.
 
 #![no_std]
 #![no_main]
@@ -10,9 +11,10 @@
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
+use coreutils::stream::{self, Diff};
 use libthyla_rs::env::{self, Args};
 use libthyla_rs::fs::File;
-use libthyla_rs::io;
+use libthyla_rs::io::Read;
 use libthyla_rs::{eprintln, println};
 
 #[no_mangle]
@@ -43,36 +45,35 @@ fn run(args: Args) -> i64 {
         }
     };
 
-    let d1 = match File::open(p1).and_then(|mut f| io::slurp(&mut f)) {
-        Ok(d) => d,
+    let mut f1 = match File::open(p1) {
+        Ok(f) => f,
         Err(e) => {
             eprintln!("cmp: {}: {}", p1, e);
             return 2;
         }
     };
-    let d2 = match File::open(p2).and_then(|mut f| io::slurp(&mut f)) {
-        Ok(d) => d,
+    let mut f2 = match File::open(p2) {
+        Ok(f) => f,
         Err(e) => {
             eprintln!("cmp: {}: {}", p2, e);
             return 2;
         }
     };
 
-    let min = d1.len().min(d2.len());
-    let mut line = 1usize;
-    for i in 0..min {
-        if d1[i] != d2[i] {
-            println!("{} {} differ: byte {}, line {}", p1, p2, i + 1, line);
-            return 1;
+    let name = |side| if side == 0 { p1 } else { p2 };
+    match stream::compare(|b| f1.read(b), |b| f2.read(b)) {
+        Ok(Diff::Same) => 0,
+        Ok(Diff::At { byte, line }) => {
+            println!("{} {} differ: byte {}, line {}", p1, p2, byte, line);
+            1
         }
-        if d1[i] == b'\n' {
-            line += 1;
+        Ok(Diff::Eof(side)) => {
+            eprintln!("cmp: EOF on {}", name(side));
+            1
+        }
+        Err((side, e)) => {
+            eprintln!("cmp: {}: {}", name(side), e);
+            2
         }
     }
-    if d1.len() != d2.len() {
-        let shorter = if d1.len() < d2.len() { p1 } else { p2 };
-        eprintln!("cmp: EOF on {}", shorter);
-        return 1;
-    }
-    0
 }

@@ -24,7 +24,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-03
-updated: 2026-09-07
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -251,26 +251,24 @@ boot) is what caught it.
 
 ## Caveats
 
-**The body cap is sixteen times the heap, so it cannot fire in the band where
-it is needed.** `MAX_BODY_BYTES` is 64 MiB; `libthyla_rs::alloc`'s
-`INITIAL_HEAP_SIZE` is 4 MiB and *fixed* — the header is explicit that a
-growable heap is a v1.x consideration. So a declared `Content-Length` above 64
-MiB is refused cleanly, as designed, but any declaration between roughly 4 and
-64 MiB passes the check and the decoder then buffers toward it until the
-allocator fails. An allocation failure in a native binary reaches the default
-`no_std` handler, which panics, which `libthyla-rs`'s panic handler turns into
-`t_exits(1)` — so the editor exits silently instead of producing the
-`FrameError` whose whole documented purpose is to let the caller tear the
-connection down and say why. The effective threshold is lower still, because a
-frame costs roughly two to three times its own size at peak: the decoder's
-buffer, the copy `next_frame` drains out of it, and the parsed tree on top.
-Filed as task #120. Whether real `gopls` traffic reaches that band is a
-consumer question (nora, task #117); the guard being unreachable is a property
-of this crate regardless.
+**The body cap was sixteen times the heap until B-1c.** `MAX_BODY_BYTES` is
+64 MiB, and `libthyla_rs::alloc`'s heap was a fixed 4 MiB, so a declared
+`Content-Length` between roughly 4 and 64 MiB passed the check and the decoder
+buffered toward it until the allocator failed: the default `no_std` handler
+panicked, `libthyla-rs`'s panic handler turned that into `t_exits(1)`, and the
+editor exited silently instead of producing the `FrameError` whose whole
+documented purpose is to let the caller tear the connection down and say why
+(filed as task #120). Since B-1c the heap grows ([[sub-thyla-heap]]), so the
+cap fires as designed: a declaration above 64 MiB is refused cleanly, and one
+below it is served while memory lasts. A frame costs roughly two to three times
+its own size at peak -- the decoder's buffer, the copy `next_frame` drains out
+of it, and the parsed tree on top -- so a peer can make a client hold two or
+three times the cap. Whether real `gopls` traffic comes near it is a consumer
+question (nora, task #117).
 
-**And the untested cap is the one that is wrong.** `oversized_header_errors`
-covers `MAX_HEADER_BYTES`; nothing covers `MAX_BODY_BYTES`. Eleven framing
-tests, and the gap is exactly the constant that does not work.
+**And the cap that mattered is untested.** `oversized_header_errors` covers
+`MAX_HEADER_BYTES`; nothing covers `MAX_BODY_BYTES`. Eleven framing tests, and
+the gap is exactly the constant the fixed heap made unreachable.
 
 **The manifest is a construction snapshot.** `Cargo.toml` lists three modules
 under "Hosts, incrementally" — one of them tagged "this slice" — while the

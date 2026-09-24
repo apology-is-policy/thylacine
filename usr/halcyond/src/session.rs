@@ -102,7 +102,8 @@ struct Geom {
 }
 
 /// The scrollback budget ONE session shares across all its tiles (their sum
-/// must fit the 64 MiB heap; each tile's share moves as tiles come and go).
+/// must fit the renderer's 64 MiB working budget; each tile's share moves as
+/// tiles come and go).
 const SESSION_SCROLLBACK_BUDGET: usize = 32 << 20;
 
 /// The kernel's `POLL_MAX_NFDS` (poll.h): a larger set is refused -1 before
@@ -1090,19 +1091,19 @@ fn mint_place_token() -> u128 {
 }
 
 /// The per-image pixel cap for the session place channel (I-47, 14.7.2): the
-/// 64 MiB heap residual after the shared 32 MiB scrollback budget, the ~10 MiB
+/// 64 MiB working-budget residual after the shared 32 MiB scrollback budget, the ~10 MiB
 /// baseline, and the display-scaled atlas, DIVIDED by the server's MAX_CONNS so
 /// the aggregate of all in-flight transfers still fits the residual (8 bytes/px
 /// peak: the accumulator + its completion Vec). paneplace clamps it to
 /// [PLACE_MIN_PIXELS, PLACE_MAX_PIXELS_HARD]. Mirrors main.rs `place_cap_for`,
 /// divided for the multi-connection session service.
 fn place_residual(gs: &GlyphSource) -> u64 {
-    const HEAP: u64 = 64 * 1024 * 1024;
+    const BUDGET: u64 = 64 * 1024 * 1024;
     const TRANSCRIPT_RESERVE: u64 = SESSION_SCROLLBACK_BUDGET as u64;
     const BASELINE_RESERVE: u64 = 10 * 1024 * 1024;
     const ATLAS_PAGE_BYTES: u64 = 512 * 512;
     let atlas = gs.evict_pages() as u64 * ATLAS_PAGE_BYTES;
-    HEAP.saturating_sub(TRANSCRIPT_RESERVE + BASELINE_RESERVE + atlas)
+    BUDGET.saturating_sub(TRANSCRIPT_RESERVE + BASELINE_RESERVE + atlas)
 }
 
 fn place_cap(gs: &GlyphSource) -> u64 {

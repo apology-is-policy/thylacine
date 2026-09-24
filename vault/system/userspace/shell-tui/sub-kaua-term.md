@@ -16,7 +16,7 @@ hazards: []
 abis: []
 design: ["docs/KAUA-TERM.md"]
 created: 2026-09-05
-updated: 2026-09-06
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -121,8 +121,9 @@ rows: Vec<Vec<Cell>> }` | `Control(Control)` | `Mode(ScreenMode)`. `Control` =
 `Err(TooLarge)` on a declared length past `MAX_FRAME` (an unrecoverable stream
 desync). `MAX_FRAME` = 4 MiB, `MAX_TITLE` = 256.
 
-The bin's shared state: `ThylaAllocN<32 MiB>` global allocator (B-F4: 4 MiB
-could not hold one capped `ScrollOff` and its two serializations),
+The bin's shared state: libthyla-rs's growable `ThylaAlloc` ([[sub-thyla-heap]];
+until B-1c a fixed 32 MiB `ThylaAllocN`, because the 4 MiB default could not hold
+one capped `ScrollOff` and its two serializations -- B-F4),
 `master_write: WriteLock` (a `torpor` futex), and two relaxed atomics —
 `app_cursor` and `pending_resize`.
 
@@ -161,7 +162,7 @@ tile shows the status rather than a dead grid.
 
 ## Performance
 
-One 32 MiB heap span, lazily backed. The three-copies cost of a record (cells
+The heap grows with the working set and gives it back. The three-copies cost of a record (cells
 -> serialized -> framed) is what `scroll_cap` and the sink budget are sized
 against. The steady state is a `CellDiff` per boundary batch plus coalesced
 `ScrollOff`s; the sink bounds the transient working set to `SCROLL_ACC_BYTES`

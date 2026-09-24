@@ -87,6 +87,13 @@ then refuses: a program that asked for memory receives `ENOMEM`, and a program
 that touched a page it had reserved is terminated with a fault note. The kernel
 and its services are charged but never refused.
 
+A native program reserves its heap as address space and is charged for each page
+when it first touches that page, so at exhaustion a native program is usually
+terminated at a page rather than refused. The process terminated is the one
+whose touch found the pool full, which need not be the process that filled it,
+because the kernel does not choose which process to end. Its parent sees exit
+status 1, and the console line that reports the fault gives its process ID.
+
 ## Technical Details
 
 The pool is the machine's memory less the reserve. The reserve is an eighth of
@@ -107,7 +114,12 @@ a page at a time as it is touched; the `stack` row of `/proc/<pid>/maps` shows
 it. A thread's stack carries a guard below it that no write can reach, so an
 overflow ends the process instead of corrupting memory. Memory a program gives
 back -- an allocation the C library returns to the system, a range the program
-says it no longer needs -- leaves its `pages` figure at once.
+says it no longer needs -- leaves its `pages` figure at once. A native
+program's heap gives memory back in two ways: a block of 256 KiB or more has a
+reservation of its own and leaves when it is freed, and smaller freed blocks are
+returned once the free space at the top of the heap passes 2 MiB. Freed small
+blocks that lie below a block still in use stay charged, and the program's later
+allocations reuse them.
 
 `/ctl/procs` is one snapshot taken under the process-table lock, and it stops
 when its buffer of 4 KiB fills, at some fifty to sixty processes; `ps` and

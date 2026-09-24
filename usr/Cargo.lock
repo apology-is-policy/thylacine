@@ -500,6 +500,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "dlmalloc"
+version = "0.2.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad5208a115eaba24916f7456929832e310a81518c641f93fee4f89aa93aa3675"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "windows-sys",
+]
+
+[[package]]
 name = "ecdsa"
 version = "0.16.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -721,6 +732,13 @@ dependencies = [
  "subtle",
  "x25519-dalek",
  "zeroize",
+]
+
+[[package]]
+name = "heap-probe"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
 ]
 
 [[package]]
@@ -954,7 +972,7 @@ dependencies = [
 name = "libthyla-rs"
 version = "0.1.0"
 dependencies = [
- "linked_list_allocator",
+ "thyla-heap",
 ]
 
 [[package]]
@@ -1043,7 +1061,7 @@ version = "0.1.0"
 dependencies = [
  "beacon",
  "libthyla-rs",
- "linked_list_allocator",
+ "thyla-heap",
 ]
 
 [[package]]
@@ -1932,6 +1950,14 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "thyla-heap"
+version = "0.1.0"
+dependencies = [
+ "dlmalloc",
+ "spinning_top",
 ]
 
 [[package]]

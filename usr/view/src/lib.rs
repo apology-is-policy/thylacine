@@ -50,8 +50,8 @@ pub const MAX_PIXELS: u64 = 64 * 1024 * 1024;
 /// Read a PNG's pixel dimensions from its headers WITHOUT decoding the image.
 /// Callers use this to reject an over-budget image (a clean error) BEFORE the
 /// full decode, whose peak working set (samples + argb + the compressed input)
-/// can dwarf a fixed heap -- a bare `MAX_PIXELS` that exceeds the heap is a
-/// phantom bound (the allocator OOMs first). Cheap: parses only the IHDR.
+/// is several times the pixel count, and the heap grows to hold it: the
+/// caller's budget is the only bound. Cheap: parses only the IHDR.
 pub fn png_dimensions(bytes: &[u8]) -> Result<(u32, u32), &'static str> {
     use zune_png::PngDecoder;
     let mut dec = PngDecoder::new(bytes);
@@ -60,12 +60,12 @@ pub fn png_dimensions(bytes: &[u8]) -> Result<(u32, u32), &'static str> {
     Ok((w as u32, h as u32))
 }
 
-/// Does an image of `w x h` fit a decode budget of `max` pixels? The budget must
-/// be sized to the CALLER's heap, not to [`MAX_PIXELS`]: the decode peak is the
-/// compressed input + the samples buffer + the ARGB buffer, all live at once, so
-/// a pixel bound larger than the heap can serve is a phantom the allocator OOMs
-/// past. Both viewers (`view` inline, `gallery` fullscreen) call this on the
-/// [`png_dimensions`] result before decoding. Checked in u64 -- no overflow.
+/// Does an image of `w x h` fit a decode budget of `max` pixels? The budget is
+/// the CALLER's, not [`MAX_PIXELS`]: the decode peak is the compressed input +
+/// the samples buffer + the ARGB buffer, all live at once, and the heap grows
+/// to hold it, so the budget is what bounds the decode. Both viewers (`view`
+/// inline, `gallery` fullscreen) call this on the [`png_dimensions`] result
+/// before decoding. Checked in u64 -- no overflow.
 pub fn within_pixel_budget(w: u32, h: u32, max: u64) -> bool {
     (w as u64) * (h as u64) <= max
 }

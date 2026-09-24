@@ -3,7 +3,8 @@
 // Default output: lines, words, bytes (GNU order), each in a 7-wide field,
 // then the name. Multiple files add a "total" line. Flags select a subset:
 // -l lines, -w words, -c bytes, -m chars (approximated as bytes at v1 --
-// no multibyte awareness). Reads each file fully via io::slurp.
+// no multibyte awareness). Reads each input a buffer at a time, so a file of
+// any length is counted.
 
 #![no_std]
 #![no_main]
@@ -12,7 +13,9 @@
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
 use core::fmt::Write as _;
+use coreutils::stream;
 use libthyla_rs::env::{self, Args};
+use libthyla_rs::err;
 use libthyla_rs::fs::File;
 use libthyla_rs::{eprintln, io};
 
@@ -27,24 +30,30 @@ struct Counts {
     bytes: usize,
 }
 
-fn count(data: &[u8]) -> Counts {
-    let bytes = data.len();
-    let mut lines = 0usize;
-    let mut words = 0usize;
+/// Count an input a buffer at a time; a word may span two reads.
+fn count<R: io::Read + ?Sized>(input: &mut R) -> err::Result<Counts> {
+    let mut c = Counts { lines: 0, words: 0, bytes: 0 };
     let mut in_word = false;
-    for &b in data {
-        if b == b'\n' {
-            lines += 1;
+    let mut buf = [0u8; stream::BUF];
+    loop {
+        let got = input.read(&mut buf)?;
+        if got == 0 {
+            return Ok(c);
         }
-        let ws = matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c);
-        if ws {
-            in_word = false;
-        } else if !in_word {
-            words += 1;
-            in_word = true;
+        c.bytes += got;
+        for &b in &buf[..got] {
+            if b == b'\n' {
+                c.lines += 1;
+            }
+            let ws = matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c);
+            if ws {
+                in_word = false;
+            } else if !in_word {
+                c.words += 1;
+                in_word = true;
+            }
         }
     }
-    Counts { lines, words, bytes }
 }
 
 fn print_counts(out: &mut io::OutSink, c: &Counts, l: bool, w: bool, by: bool, name: Option<&str>) {
@@ -114,6 +123,10 @@ fn run(args: Args) -> i64 {
     let mut had = false;
     let mut i = idx;
     while let Some(op) = args.get(i) {
+        // Nothing more reaches stdout once a write has failed.
+        if out.failed() {
+            break;
+        }
         i += 1;
         had = true;
         let path = match core::str::from_utf8(op) {
@@ -124,9 +137,8 @@ fn run(args: Args) -> i64 {
                 continue;
             }
         };
-        match File::open(path).and_then(|mut f| io::slurp(&mut f)) {
-            Ok(data) => {
-                let c = count(&data);
+        match File::open(path).and_then(|mut f| count(&mut f)) {
+            Ok(c) => {
                 print_counts(&mut out, &c, want_l, want_w, want_c, Some(path));
                 total.lines += c.lines;
                 total.words += c.words;
@@ -141,9 +153,8 @@ fn run(args: Args) -> i64 {
     }
 
     if !had {
-        match io::slurp(&mut io::stdin()) {
-            Ok(data) => {
-                let c = count(&data);
+        match count(&mut io::stdin()) {
+            Ok(c) => {
                 print_counts(&mut out, &c, want_l, want_w, want_c, None);
             }
             Err(e) => {
@@ -154,9 +165,5 @@ fn run(args: Args) -> i64 {
     } else if nfiles > 1 {
         print_counts(&mut out, &total, want_l, want_w, want_c, Some("total"));
     }
-    if out.failed() {
-        eprintln!("wc: write error");
-        return 1;
-    }
-    status
+    out.finish("wc", status)
 }
