@@ -834,7 +834,7 @@ namespace, one level), because the dynamic loader is the same object under both
 ABIs. The Linux-phenotype behaviour is unchanged; `docs/POUCH-DESIGN.md` §2.2
 carries the userspace half.**
 
-**The native interpreter (voted 2026-09-24): `/lib/libc.so`.** Pouch's `libc.so` is the loader and is named directly. The string differs from the Linux phenotype's `/lib/ld-musl-aarch64.so.1`, so a namespace can never hand a native binary a Linux-ABI loader. `/lib` is bound into the native namespace from the initrd, as `/bin` is. A dynamic native program is a PIE: in direct mode the loader places it (ARCH §6.5).
+**The native interpreter (voted 2026-09-24): `/lib/libc.so`.** Pouch's `libc.so` is the loader and is named directly. The string differs from the Linux phenotype's `/lib/ld-musl-aarch64.so.1`, so a namespace can never hand a native binary a Linux-ABI loader. After the pivot joey binds the initrd's `lib/` `MBEFORE` the disk's `/lib`: a Plan 9 union (ARCH §9.5), so `libc.so` ships with the binaries it serves and the disk's own `/lib` files stay visible through the covered directory (`dec-2026-09-24-union-covered-directory`). A dynamic native program is a PIE: in direct mode the loader places it (ARCH §6.5).
 
 **The argv shape**, corrected 2026-08-10 from the 08-05 vote's
 `[interp_path, orig_path, orig argv[1..]]`:
