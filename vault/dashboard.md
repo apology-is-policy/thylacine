@@ -135,6 +135,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-09-24 [[chg-2026-09-24-astra-seal-integration]] — Integrate the cleared Aux seal prerequisite into Astra
 - 2026-09-24 [[chg-2026-09-24-authority-admission-core]] — Bind immutable issuance approval to live administrative proof
 - 2026-09-24 [[chg-2026-09-24-authority-canonical-codec]] — Implement bounded canonical authority records
 - 2026-09-24 [[chg-2026-09-24-authority-commit-model]] — Model immutable authority commit and measure dense policy
@@ -142,5 +143,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-09-24 [[chg-2026-09-24-authority-provenance]] — Retain authority transaction provenance in the policy ledger
 - 2026-09-24 [[chg-2026-09-24-authority-record-abi]] — Reserve canonical authority record ABI
 - 2026-09-24 [[chg-2026-09-24-lex-curiata-fidelity]] — Restore Lex curiata dialog and make F10 primary
-- 2026-09-24 [[chg-2026-09-24-user-authority-ratification]] — Ratify administrative authority and mandate lifecycle contracts
 <!-- generated:end -->

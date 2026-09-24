@@ -308,9 +308,12 @@ static NODES: [Node; N_COUNT as usize] = [
 // boundary rather than leave it implied:
 //
 //   * The five files are 0444 with devproc.perm_enforced == false -- Plan 9's
-//     all-pids-visible posture. Any Proc can read any Proc's status/exe/cwd/maps
-//     natively. So the diorama serves EXACTLY what native /proc serves, to
-//     exactly the same set of readers: no new authority, section 6.2 intact.
+//     all-pids-visible posture -- EXCEPT that a dump-sealed Proc's exe/cmdline/
+//     cwd/maps refuse every reader but itself (DEBUG-FS-DESIGN 3.2). The diorama
+//     reads them natively AS ITSELF, so a sealed Proc refuses it exactly as it
+//     refuses any other reader: no new authority, section 6.2 intact. A refused
+//     read renders as an EMPTY file where Linux answers EACCES (tracked); Name:
+//     comes from the native ledger `name:` line, which the seal leaves readable.
 //   * What it does NOT do is scope the pid set to a container, because THERE IS
 //     NO SUCH SCOPING NATIVELY YET -- /ctl/procs lists every Proc on the box.
 //
@@ -1347,37 +1350,39 @@ fn render_cmdline(pid: u32, r: &mut Render) {
 /// read has no such channel and parses the same two values out of the native
 /// render, which is the same kernel state (devproc's format_status prints
 /// p->principal_id / p->primary_gid, the identical fields srv_peer_info stamps).
+/// The value of devproc's `name:` line (format_status: `name:    <name>\n`), or
+/// empty when the render has none.
+fn native_status_name(text: &[u8]) -> &[u8] {
+    for line in text.split(|&b| b == b'\n') {
+        if let Some(rest) = line.strip_prefix(b"name:") {
+            let start = rest.iter().position(|&b| b != b' ' && b != b'\t').unwrap_or(rest.len());
+            return &rest[start..];
+        }
+    }
+    &[]
+}
+
 fn render_status(pid: u32, ids: Option<(u32, u32)>, r: &mut Render) {
-    // Name: basename of the exe.
-    let mut ebuf = [0u8; RENDER_MAX];
-    let mut elen = 0usize;
-    {
-        let mut pbuf = [0u8; 64];
-        let n = native_proc_path(pid, b"exe", &mut pbuf);
-        if let Some(got) = read_native(&pbuf[..n], &mut ebuf) {
-            elen = got;
-        }
-    }
-    let mut base = 0usize;
-    for i in 0..elen {
-        if ebuf[i] == b'/' {
-            base = i + 1;
-        }
-    }
+    // Name: the native `name:` line -- the exe's basename, stamped at exec, and
+    // LEDGER, so it still reads for a dump-sealed Proc whose `exe` does not (Linux
+    // keeps a non-dumpable process's comm public). An unstamped Proc renders "?"
+    // natively; Linux has no such name, so it stays empty here.
+    let mut sbuf = [0u8; RENDER_MAX];
+    let mut pbuf = [0u8; 64];
+    let n = native_proc_path(pid, b"status", &mut pbuf);
+    let got = read_native(&pbuf[..n], &mut sbuf).unwrap_or(0);
+    let text = &sbuf[..got];
+    let name = native_status_name(text);
+    let shown: &[u8] = if name == b"?" { &[] } else { name };
     r.push(b"Name:\t");
-    r.push(&ebuf[base..elen]);
+    r.push(shown);
     r.push(b"\n");
 
     r.push(b"Pid:\t");
     r.push_dec(pid as u64);
     r.push(b"\n");
 
-    // Threads + VmRSS + (for a per-pid read) the ids, from the native render.
-    let mut sbuf = [0u8; RENDER_MAX];
-    let mut pbuf = [0u8; 64];
-    let n = native_proc_path(pid, b"status", &mut pbuf);
-    let got = read_native(&pbuf[..n], &mut sbuf).unwrap_or(0);
-    let text = &sbuf[..got];
+    // Threads + VmRSS + (for a per-pid read) the ids, from the same native render.
 
     // Linux prints four ids (real/effective/saved/fs); Thylacine has one
     // principal, so all four columns are the same value -- honest, and it keeps

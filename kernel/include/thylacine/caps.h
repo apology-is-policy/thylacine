@@ -31,7 +31,8 @@ typedef u64 caps_t;
 // CAP_LOCK_PAGES — required to call SYS_MLOCKALL (P5-corvus-syscalls;
 // CORVUS-DESIGN.md §4.1.1). Holders can pin pages to prevent swap-out.
 // v1.0 has no swap; the cap + syscall are forward-looking scaffolding
-// consumed by corvus + per-user stratumd at startup. kproc + corvus
+// consumed by corvus at startup (per-user stratumd calls no hardening
+// syscall; it wipes secrets with its libc's explicit_bzero). kproc + corvus
 // + per-user stratumd hold this cap; ordinary user procs do not.
 #define CAP_LOCK_PAGES  (1ull << 1)
 
@@ -195,8 +196,102 @@ typedef u64 caps_t;
 // scope. Never held at creation, never fork-grantable.
 #define CAP_POST_SERVICE    (1ull << 13)
 
+// CAP_TCB_DIAL -- the authority to CONNECT to a TCB byte service in /srv
+// (STALK-DESIGN.md section 5.2 / D8; ARCH section 28 I-1). A byte-mode connect
+// hands the client the RAW transport, so from that point the kernel is a pipe
+// and cannot bound what the client asks the server for -- admission has to be
+// decided at the connect. A byte-mode service posted under the
+// PROC_FLAG_MAY_POST_SERVICE TCB mark (SrvService.cap_posted == false) is
+// therefore connectable only by a holder of this bit. A user's own scoped post
+// (cap_posted == true, via CAP_POST_SERVICE -- haul --post) and every 9P-mode
+// service are unaffected, as is a Proc dialling a service it posted itself.
+//
+// FORK-GRANTABLE (a member of CAP_ALL), deliberately NOT elevation-only: it
+// flows down the vetted boot chain exactly as CAP_SET_IDENTITY does --
+// kproc -> joey -> /sbin/login -> the per-user home proxy login spawns. joey
+// and login are HOLDERS in their own right, not just carriers: joey dials
+// /srv/stratum-fs for the boot readiness handshake and login dials byte-mode
+// /srv/stratum-ctl for the DEK lifecycle. login omits the bit from the shell's
+// spawn mask, and caps never grow post-creation (I-2), so no user Proc can
+// acquire it.
+//
+// The proxy runs as the USER (so the coordinator attributes the user's home
+// files to them), which is why THIS gate is a capability and not an identity
+// check -- the proxy and the user's shell are the same principal.
+//
+// But do NOT read that as "only a capability can separate them" in general: it
+// is false, and the audit caught the claim. The I-39 debug surface USED to
+// separate on IDENTITY alone (devproc_debug_authorized's owner axis), so the same
+// principal could attach to the proxy and drive its transport without ever
+// holding this bit. TWO answers now close that, and they are independent:
+//   - the capability-cover rule (2026-09-24, DEBUG-FS-DESIGN 3.1): the owner axis
+//     admits only while the caller's caps COVER the target's, and the user's
+//     shell lacks exactly this bit -- so the attach is refused on authority;
+//   - SPAWN_PERM_SEAL, the defense in depth: login spawns the proxy with the bit
+//     and the kernel stamps PROC_FLAG_NOTRACE before its first EL0 instruction.
+// The general tension -- same principal, different authority -- survives, and a
+// FUTURE surface that reads a target through an IDENTITY-only gate reopens it.
+// The PLANNED /proc/<pid>/fd/ surface (deferred at devproc.c:27) inherits whichever
+// gate it routes through: devproc_debug_authorized weighs caps AND the NOTRACE
+// seam; devproc_owner_or_hostowner weighs NEITHER capability nor any seal -- the
+// dump seal sits beside it, in devproc_kind_is_image + devproc_read_sealed
+// (DEBUG-FS-DESIGN 3.2). A descriptor list is closer to control than to disclosure,
+// so route it through the debug predicate; and because it hands out something the
+// Proc HOLDS, classify it in devproc_kind_is_image, ask devproc_read_sealed at its
+// read site, and give it a row in test_devproc_dump_seal_disclosure. (Keep this
+// clause in step with devproc.c: it has named the wrong gate before, and nothing in
+// the build fails when it does.)
+//
+// THE QUESTION TO ASK AT EVERY SUCH GRANT, because the next instance will not be a
+// capability at all: the I-39 cover rule compares the CAPS word, and SPAWN_PERM_* bits
+// live in proc_flags, so cover cannot see them. A same-principal peer holding EQUAL
+// caps and FEWER perms therefore COVERS the grantee and may debug-drive it. So for
+// every perm granted to a Proc that runs AS a user, ask: **would puppeting the holder
+// give that peer authority it cannot otherwise obtain?** If yes, the grant and
+// SPAWN_PERM_SEAL are ONE step, not two. If no, say so at the site, because the next
+// reader will wonder why the seal is absent.
+//
+// The user-running grant sites in the tree, with their answers. This is a CENSUS, not
+// a sample. `grep -rn '\.perm(' usr/ --include='*.rs'` prints six lines: one is a
+// comment (login main.rs:868), three are login's sites below, and warden's two pass no
+// `.identity()`, so they are SYSTEM and outside the question. That grep cannot see C:
+// usr/joey/joey.c grants perms through `perm_flags` (LOGIN_PERMS among them), and no
+// joey spawn initializer sets an identity field, so every joey grant lands on a SYSTEM
+// child and is outside the question too.
+//   - login's home proxy (main.rs:885), MAY_POST_SERVICE -- YES, sealed. It also holds
+//     CAP_TCB_DIAL and a live coordinator transport, which is the (U) F1 case.
+//   - login's session compositor (main.rs:1403), MAY_POST_SERVICE | SESSION_HANGUP --
+//     YES, sealed. Posting as the holder is durable impersonation of
+//     /srv/halcyon-<user>, and every tile child's caps equal the compositor's EXACTLY
+//     (it masks them with !CAP_SET_IDENTITY, which spawn intersects against its own
+//     set), so cover admits every program in every tile.
+//   - login's session shell (main.rs:1341), CONSOLE_OWNER | SESSION_HANGUP -- **NO,
+//     deliberately UNSEALED.** Neither bit is onward-conferrable by `ut` (conferring
+//     CONSOLE_OWNER requires MAY_POST_SERVICE, which `ut` does not hold), and a
+//     same-principal peer can ALREADY end the session by killing `ut`, since I-26's
+//     owner axis is unconditional. Sealing it would make the user's own shell
+//     undebuggable and buy no authority. What a puppeteer would actually gain there is
+//     `ut`'s private /dev/consctl fd -- a HANDLE, so it belongs to the
+//     cover-is-blind-to-handles problem, not to this one.
+//
+// An earlier draft of this block stated a MECHANICAL rule -- "a SPAWN_PERM_* granted
+// to a user-running proc must carry SEAL" -- and asserted that both of login's sites
+// obeyed it. Both halves were wrong: there are three sites, and the third neither
+// obeys the rule nor should. Recorded rather than quietly replaced, because the failure
+// is the instructive part: a rule generalised from two examples, with its census taken
+// from memory instead of from a grep. There is no static guard behind the question
+// either -- see the standing obligation below, which is the same shape.
+//
+// Being fork-grantable, this bit is NOT auto-stripped at fork: every spawn mask
+// that must not confer the dial has to omit it deliberately. That is a standing
+// obligation on anyone defining a new user-facing spawn mask, with no static
+// guard behind it.
+// Requiring a corvus clearance instead would be the wrong shape -- the proxy is
+// SPAWNED, not elevated.
+#define CAP_TCB_DIAL        (1ull << 14)
+
 // Reserved for Phase 5+ (one bit per capability domain; next free bit is
-// 1<<14):
+// 1<<15):
 //   CAP_NS_MOUNT     — bind/mount in /proc and /ctl (kernel admin Devs).
 //   CAP_NS_BIND      — bind in any namespace (forward-looking).
 //   CAP_NET_RAW      — open raw network sockets / Ethernet frames.
@@ -226,15 +321,40 @@ typedef u64 caps_t;
 // proc_init. Elevation-only capabilities (every bit of CAP_ELEVATION_ONLY,
 // above) are deliberately excluded. A new fork-grantable CAP_* bit MUST be added
 // here; an elevation-only one MUST NOT.
-#define CAP_ALL         (CAP_HW_CREATE | CAP_LOCK_PAGES | CAP_CSPRNG_READ | CAP_GRANT_HOSTOWNER | CAP_SET_IDENTITY | CAP_GRANT_CLEARANCE)
+#define CAP_ALL         (CAP_HW_CREATE | CAP_LOCK_PAGES | CAP_CSPRNG_READ | CAP_GRANT_HOSTOWNER | CAP_SET_IDENTITY | CAP_GRANT_CLEARANCE | CAP_TCB_DIAL)
 
-// _Static_assert pins CAP_ALL — adding a new fork-grantable CAP_* bit
-// requires bumping this expression so kproc's initial mask includes it.
-_Static_assert(CAP_ALL == (CAP_HW_CREATE | CAP_LOCK_PAGES | CAP_CSPRNG_READ | CAP_GRANT_HOSTOWNER | CAP_SET_IDENTITY | CAP_GRANT_CLEARANCE),
-               "caps.h drift: when adding a new FORK-GRANTABLE CAP_* bit, "
-               "update CAP_ALL so kproc's initial mask reflects it. "
-               "Elevation-only caps (CAP_ELEVATION_ONLY) are deliberately "
-               "excluded from CAP_ALL.");
+// CAP_DEFINED — every capability bit this header defines. The COVERAGE assert
+// below cross-checks it against the two class sets, so a bit must be listed
+// here AND in exactly one class or the build fails.
+//
+// This replaces an assert that read as the coverage check and was not one: it
+// compared `CAP_ALL` against `CAP_ALL`'s own definition, token for token, so it
+// was true unconditionally and could not fail (measured in
+// vault abi-caps: a standalone reproduction defining a new fork-grantable bit
+// and deliberately omitting it from CAP_ALL compiled clean). That is task #35,
+// closed here because (U) adds exactly the kind of bit it failed to protect —
+// a new FORK-GRANTABLE one. The old guard's own comment described the drift it
+// did not catch.
+//
+// Why this one can fail where that one could not: the two sides are INDEPENDENT
+// lists. Omit the new bit from CAP_ALL and the union loses it while CAP_DEFINED
+// keeps it; omit it from CAP_DEFINED and the union gains a bit the mask lacks.
+// Either way the comparison is between two different expressions, not one
+// expression with itself.
+#define CAP_DEFINED     (CAP_HW_CREATE | CAP_LOCK_PAGES | CAP_CSPRNG_READ | \
+                         CAP_HOSTOWNER | CAP_GRANT_HOSTOWNER | CAP_SET_IDENTITY | \
+                         CAP_GRANT_CLEARANCE | CAP_DAC_OVERRIDE | CAP_CHOWN | \
+                         CAP_KILL | CAP_DEBUG | CAP_JIT | CAP_AUDIO_GRAPH | \
+                         CAP_POST_SERVICE | CAP_TCB_DIAL)
+
+_Static_assert((CAP_ALL | CAP_ELEVATION_ONLY) == CAP_DEFINED,
+               "caps.h drift: a defined CAP_* bit is in NEITHER CAP_ALL nor "
+               "CAP_ELEVATION_ONLY (it would be defined, documented and DEAD -- "
+               "kproc never holds it, so rfork's mask-AND clears it at every hop "
+               "and the gate it guards refuses everyone), or a bit is in a class "
+               "set without being listed in CAP_DEFINED. Every capability is "
+               "fork-grantable XOR elevation-only; add a new bit to CAP_DEFINED "
+               "and to exactly one of the two class sets.");
 
 // CAP_ALL and CAP_ELEVATION_ONLY are disjoint by construction — a bit is
 // either fork-grantable or elevation-only, never both. Pin it.

@@ -1,0 +1,9 @@
+# A deck names its slides in order. Nothing else: a manifest carries content
+# and order, never display authority -- the scale and the theme belong to the
+# compositor and reach it through its own verbs.
+title = "Beacon slides"
+slides = [
+    "01-title.md",
+    "02-how.md",
+    "03-keys.md",
+]

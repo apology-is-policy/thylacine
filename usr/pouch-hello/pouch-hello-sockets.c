@@ -57,6 +57,7 @@ extern char **environ;
 static const char SELF[] = "/pouch-hello-sockets";
 
 static const char SOCK_PATH[]    = "/srv/pouch-sock-demo";
+static const char XPROC_PATH[]   = "/srv/pouch-sock-xproc";
 static const char NONEXIST_PATH[] = "/srv/pouch-sock-nonex";
 static const char MSG_PING[]     = "PING\n";
 static const char MSG_PONG[]     = "PONG\n";
@@ -419,6 +420,160 @@ static int stdio_over_socket(int c)
     return 0;
 }
 
+/* ---------- subtest D: the (U) cross-Proc connect gate ---------- */
+
+/* STALK-DESIGN section 5.2 / D8: a byte-mode service posted under the TCB mark
+ * (PROC_FLAG_MAY_POST_SERVICE, which joey grants this binary) is cap_posted ==
+ * false, so only its poster -- or a CAP_TCB_DIAL holder -- may dial it. The
+ * kernel test devsrv.srv_connect_gate already covers the RULE at both
+ * polarities from a distinct Proc. What only a device test can settle is the
+ * BOUNDARY LINE: that pouch's bind() really posts under the mark rather than a
+ * capability, and that a second real Proc's connect() surfaces the refusal as
+ * an errno a POSIX caller can act on.
+ *
+ * Three legs, each one variable from the next:
+ *   1. the POSTER dials its own service            -> MUST SUCCEED
+ *   2. a distinct Proc dials the same service      -> MUST fail EACCES
+ *   3. that same Proc dials a name that is ABSENT  -> MUST fail ECONNREFUSED
+ *
+ * Leg 1 runs first: a service nothing could reach would satisfy leg 2 on its
+ * own.
+ *
+ * Leg 3's job, stated precisely, because the sabotage matrix corrected the first
+ * version of this comment. It is NOT what catches a process-wide blanket errno
+ * map: test_connect_nonexistent already REQUIRES ECONNREFUSED one subtest
+ * earlier, in the poster's own Proc, so a helper returning EACCES for every
+ * failure reddens THAT leg ("wrong errno=13 (want ECONNREFUSED)", measured)
+ * before this subtest is reached at all. What leg 3 alone reaches is a
+ * CHILD-SPECIFIC spurious EACCES -- one the child would get on any /srv open
+ * whatever the gate decided -- and nothing in the shared helper can produce
+ * that, so leg 3 is reasoned coverage, NOT sabotage-proven. It also pays for
+ * itself diagnostically: when leg 2 fails, leg 3's verdict in the same log
+ * separates "the gate misfired" from "the child cannot reach /srv at all".
+ *
+ * The defect this subtest was written against: connect() mapped EVERY open
+ * failure to ECONNREFUSED, so the kernel's EACCES died at the libc boundary and
+ * a POSIX caller saw the TRANSIENT error (the one clients retry on) for a
+ * permanent denial. Leg 2 is the assertion that catches it, and sabotage proves
+ * it load-bearing.
+ */
+
+/* The child leg: a genuinely distinct Proc, spawned by the poster, holding no
+ * CAP_TCB_DIAL. Distinct exit codes so the parent can name the failed leg from
+ * the status alone, since its stdout and the child's share one pipe. */
+static int xproc_child(void)
+{
+    struct sockaddr_un addr;
+    int c = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (c < 0) {
+        printf("xproc-child: socket failed errno=%d\n", errno);
+        return 2;
+    }
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    memcpy(addr.sun_path, XPROC_PATH, sizeof(XPROC_PATH));
+    if (connect(c, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
+        printf("xproc-child: connect(%s) SUCCEEDED -- the (U) gate admits a "
+               "second Proc\n", XPROC_PATH);
+        close(c);
+        return 3;
+    }
+    if (errno != EACCES) {
+        printf("xproc-child: connect(%s) errno=%d want EACCES=%d -- refused, "
+               "but on a cause a POSIX caller misreads\n",
+               XPROC_PATH, errno, EACCES);
+        close(c);
+        return 4;
+    }
+    printf("xproc-child: EACCES on the TCB service ok\n");
+    close(c);
+
+    /* The control for the leg above, one variable away: same Proc, same call, a
+     * name that is genuinely absent. ECONNREFUSED here proves the child reaches
+     * /srv at all -- so the EACCES above was a DECISION, not a namespace
+     * missing the service -- and that the two causes stay distinguished. */
+    c = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (c < 0) {
+        printf("xproc-child: second socket failed errno=%d\n", errno);
+        return 5;
+    }
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    memcpy(addr.sun_path, NONEXIST_PATH, sizeof(NONEXIST_PATH));
+    if (connect(c, (struct sockaddr *)&addr, sizeof(addr)) == 0 ||
+        errno != ECONNREFUSED) {
+        printf("xproc-child: connect(absent) errno=%d want ECONNREFUSED=%d\n",
+               errno, ECONNREFUSED);
+        close(c);
+        return 6;
+    }
+    printf("xproc-child: ECONNREFUSED on an absent name ok (causes distinct)\n");
+    close(c);
+    return 0;
+}
+
+static int test_cross_proc_gate(void)
+{
+    struct sockaddr_un addr;
+    int s = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (s < 0) {
+        printf("xproc: socket failed errno=%d\n", errno);
+        return -1;
+    }
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    memcpy(addr.sun_path, XPROC_PATH, sizeof(XPROC_PATH));
+    if (bind(s, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        printf("xproc: bind(%s) failed errno=%d\n", XPROC_PATH, errno);
+        close(s);
+        return -1;
+    }
+    if (listen(s, 1) != 0) {
+        printf("xproc: listen failed errno=%d\n", errno);
+        close(s);
+        return -1;
+    }
+    printf("xproc: bind+listen ok\n");
+
+    /* Leg 1. A connect lands on the accept backlog, so the poster's own dial
+     * completes with nothing accepting it -- no second thread needed here. */
+    int self_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (self_fd < 0) {
+        printf("xproc: control socket failed errno=%d\n", errno);
+        close(s);
+        return -1;
+    }
+    if (connect(self_fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        printf("xproc: the POSTER's OWN connect was refused errno=%d -- the "
+               "self-post exemption is broken, and a refusal in the child "
+               "would then prove nothing\n", errno);
+        close(self_fd);
+        close(s);
+        return -1;
+    }
+    printf("xproc: poster dials its own service ok (self-post exemption)\n");
+    close(self_fd);
+
+    /* Legs 2 and 3, in a Proc whose stripes are its own. */
+    char *cargv[] = { (char *)SELF, (char *)"xproc", NULL };
+    pid_t pid;
+    int   st = 0;
+    if (posix_spawn(&pid, SELF, NULL, NULL, cargv, environ) != 0) {
+        printf("xproc: respawn failed errno=%d\n", errno);
+        close(s);
+        return -1;
+    }
+    if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+        printf("xproc: child status %#x (exit %d) -- its own line says which "
+               "leg\n", (unsigned)st, WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+        close(s);
+        return -1;
+    }
+    printf("xproc: 2nd Proc refused on the service the poster just dialled ok\n");
+    close(s);
+    return 0;
+}
+
 /* A socket fd does not fit an fd_set, and FD_SET must say so instead of
  * storing 128 MiB past the set. The child does exactly that and must die by
  * abort() -- 127 here -- not return, and not fault on some unmapped page. */
@@ -579,6 +734,8 @@ static int test_round_trip(void)
 int main(int argc, char **argv)
 {
     /* CHILD (self-respawn, the fd_set guard leg). */
+    if (argc >= 2 && !strcmp(argv[1], "xproc")) return xproc_child();
+
     if (argc >= 2 && !strcmp(argv[1], "fdsetoob")) {
         int s = socket(AF_UNIX, SOCK_STREAM, 0);
         if (s < 0) return 3;
@@ -594,6 +751,7 @@ int main(int argc, char **argv)
     if (test_path_validation() != 0)     return 1;
     if (test_connect_nonexistent() != 0) return 1;
     if (test_round_trip() != 0)          return 1;
+    if (test_cross_proc_gate() != 0)     return 1;
     if (test_fdset_guard() != 0)         return 1;
 
     /* The census is what joey matches: a stale binary prints the old marker. */

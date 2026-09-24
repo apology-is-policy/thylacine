@@ -35,6 +35,7 @@
 // Riders, because this is the one native probe that runs on the live FS and
 // performs a real chroot -- each is argued where it is defined:
 //   N append        an append open carries T_OAPPEND (write-after-seek lands at END)
+//   O dac           a Loom create answers to the directory's own W|X (LOOM.md 8.5.1)
 //   U union-a/-b    a UNION root under chroot, and the dissolved union (ARCH 9.6.10)
 //
 // Legs L and K together are the I-28 containment proof, and they are two legs
@@ -69,6 +70,7 @@ use alloc::vec::Vec;
 use libthyla_rs::err::{Error, Result};
 use libthyla_rs::fs::{self, File};
 use libthyla_rs::io::Read;
+use libthyla_rs::identity;
 use libthyla_rs::loom::{RegisteredBuffer, Ring, Sqe};
 use libthyla_rs::{t_chroot, t_exits, t_pivot_root, t_putstr};
 
@@ -150,12 +152,12 @@ fn open_err(path: &str) -> Result<()> {
     File::open(path).map(|_| ())
 }
 
-/// Mint `name` -> `target` under the registered O_PATH directory (handle 0).
+/// Mint `name` -> `target` under the registered O_PATH directory `hidx`.
 ///
 /// The kernel splits ONE pinned span at `name_len`, so both strings are copied
 /// adjacently into the registered buffer and the split is handed over in the
 /// SQE. It validates `0 < split < total` at submit -- neither half may be empty.
-fn mklink(ring: &Ring, buf: &mut RegisteredBuffer, name: &str, target: &str) -> Result<()> {
+fn mklink(ring: &Ring, buf: &mut RegisteredBuffer, hidx: u32, name: &str, target: &str) -> Result<()> {
     let n = name.len();
     let t = target.len();
     {
@@ -166,7 +168,7 @@ fn mklink(ring: &Ring, buf: &mut RegisteredBuffer, name: &str, target: &str) -> 
         slice[..n].copy_from_slice(name.as_bytes());
         slice[n..n + t].copy_from_slice(target.as_bytes());
     }
-    let sqe = Sqe::symlink(0, 0, 0, n as u32, (n + t) as u32, 0, 0xD1_0000 + n as u64);
+    let sqe = Sqe::symlink(hidx, 0, 0, n as u32, (n + t) as u32, 0, 0xD1_0000 + n as u64);
     ring.submit_one_wait(&sqe)?.ok().map(|_| ())
 }
 
@@ -181,6 +183,12 @@ fn pre_clean() {
         let _ = fs::remove_file(&format!("{}/{}", WORK, name));
     }
     let _ = fs::remove_file(APPEND_FILE);
+    // A run that died inside leg O can leave the directory at 0555.
+    let _ = fs::chmod(DAC_DIR, 0o755);
+    for name in ["l_allowed", "l_denied"] {
+        let _ = fs::remove_file(&format!("{}/{}", DAC_DIR, name));
+    }
+    let _ = fs::remove_dir(DAC_DIR);
     let _ = fs::remove_file(INNER);
     let _ = fs::remove_file(TARGET);
     let _ = fs::remove_dir(SUB);
@@ -233,6 +241,37 @@ fn append_leg(c: &mut Checker) {
         "N append: the write landed at END despite the seek (T_OAPPEND)",
         read_all(APPEND_FILE).as_deref() == Ok(b"one\ntwo\n".as_slice()),
     );
+}
+
+// Leg O rides here for the same reason as N: it needs the live server's own
+// mode bits. A Loom create answers to the directory's W|X for the ring's
+// creator, as the sync create does (LOOM.md 8.5.1). The probe holds no
+// DAC-override cap (elevation-only caps are stripped at spawn), so its own
+// directory at 0555 must refuse a link, and the same directory at 0755 -- the
+// control, one variable away -- must take one. Both chmods go through another
+// fid, so the leg also proves the gate reads the directory at SUBMIT, not a
+// mode latched when the handle was registered. The link's group is the
+// creator's primary group, because the SQE carries gid 0.
+const DAC_DIR: &str = "/d1-symlink/dac";
+const DAC_HANDLE: u32 = 1;
+
+fn dac_leg(c: &mut Checker, ring: &Ring, buf: &mut RegisteredBuffer) {
+    c.ok("O dac: chmod 0555", fs::chmod(DAC_DIR, 0o555).is_ok());
+    c.errs(
+        "O dac: a link into the 0555 directory is refused",
+        mklink(ring, buf, DAC_HANDLE, "l_denied", "target"),
+        Error::PermissionDenied,
+    );
+    c.ok("O dac: chmod 0755", fs::chmod(DAC_DIR, 0o755).is_ok());
+    c.ok(
+        "O dac: a link into the 0755 directory lands",
+        mklink(ring, buf, DAC_HANDLE, "l_allowed", "target").is_ok(),
+    );
+    let gid_ok = File::open_link(&format!("{}/l_allowed", DAC_DIR))
+        .and_then(|f| f.metadata())
+        .map(|m| m.is_symlink() && m.gid() == identity::gid())
+        .unwrap_or(false);
+    c.ok("O dac: the link's group is the creator's primary group", gid_ok);
 }
 
 const UNION_DIR: &str = "/d1-union";
@@ -546,6 +585,9 @@ pub extern "C" fn rs_main() -> i64 {
     if fs::create_dir(SUB).is_err() {
         fail("symlink-probe: FAIL -- create_dir sub\n");
     }
+    if fs::create_dir(DAC_DIR).is_err() {
+        fail("symlink-probe: FAIL -- create_dir dac\n");
+    }
     for (path, body) in [(TARGET, TARGET_BODY), (INNER, INNER_BODY)] {
         match File::create(path) {
             Ok(mut f) => {
@@ -577,7 +619,11 @@ pub extern "C" fn rs_main() -> i64 {
         Ok(f) => f,
         Err(_) => fail("symlink-probe: FAIL -- O_PATH open of the work dir\n"),
     };
-    if ring.register_handles(&[dir.as_raw_fd()]).is_err() {
+    let dac = match File::open_with_opath(DAC_DIR) {
+        Ok(f) => f,
+        Err(_) => fail("symlink-probe: FAIL -- O_PATH open of the dac dir\n"),
+    };
+    if ring.register_handles(&[dir.as_raw_fd(), dac.as_raw_fd()]).is_err() {
         fail("symlink-probe: FAIL -- register_handles\n");
     }
 
@@ -593,7 +639,7 @@ pub extern "C" fn rs_main() -> i64 {
         ("l_root", "/target"), // resolves ONLY after it
     ];
     for (name, target) in links {
-        if let Err(e) = mklink(&ring, &mut buf, name, target) {
+        if let Err(e) = mklink(&ring, &mut buf, 0, name, target) {
             t_putstr(&format!(
                 "symlink-probe: FAIL -- LOOM_OP_SYMLINK {} -> {} errno {}\n",
                 name,
@@ -820,6 +866,7 @@ pub extern "C" fn rs_main() -> i64 {
     }
 
     append_leg(&mut c);
+    dac_leg(&mut c, &ring, &mut buf);
 
     // The union-root stages, each in its own child (see union_stage).
     run_union_stage(&mut c, "union-a");

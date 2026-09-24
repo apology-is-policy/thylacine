@@ -60,6 +60,8 @@ void test_devproc_write_ctl_kill_dispatch(void);
 void test_devproc_ctl_suspend_resume_dispatch(void);   // prowl-4: job-control stop/cont verb
 // 8a-1b: the I-39 debug gate + the attach/detach/close slot lifecycle.
 void test_devproc_debug_authorized_predicate(void);
+void test_devproc_debug_cap_cover_predicate(void);
+void test_devproc_debug_cap_cover_attach(void);
 void test_devproc_debug_attach_detach_lifecycle(void);
 void test_devproc_debug_stop_start_resume(void);
 void test_devproc_debug_mem(void);
@@ -87,6 +89,7 @@ bool devproc_kill_authorized(const struct Proc *caller, const struct Proc *targe
 bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *target);
 bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *target);
 bool devproc_owner_or_hostowner(const struct Proc *caller, const struct Proc *target);
+bool devproc_extract_authorized(const struct Proc *caller, const struct Proc *target);
 size_t devproc_sched_read_gated(const struct Proc *caller, struct Proc *target,
                                 char *buf, size_t cap, bool *denied);
 size_t devproc_imperium_read_gated(const struct Proc *caller, struct Proc *target,
@@ -1035,7 +1038,7 @@ void test_devproc_debug_authorized_predicate(void) {
 
     // 7. A PROC_FLAG_NOTRACE target is refused, even for the owner AND a
     //    CAP_DEBUG holder (the no-trace seam, DEBUG-FS section 8).
-    target->proc_flags |= PROC_FLAG_NOTRACE;
+    proc_seal(target, PROC_FLAG_NOTRACE);
     caller->principal_id = target->principal_id;    // owner
     caller->caps         = 0;
     TEST_ASSERT(!devproc_debug_authorized(caller, target),
@@ -1049,6 +1052,398 @@ void test_devproc_debug_authorized_predicate(void) {
     target->state = PROC_STATE_ZOMBIE;
     proc_free(caller);
     proc_free(target);
+}
+
+// The capability-cover rule (DEBUG-FS-DESIGN 3.1, scripture 389c06b9): the owner
+// axis admits only while the caller's caps COVER the target's. RED before the
+// fix -- a same-principal caller with NO caps was admitted to a target holding
+// CAP_KILL, which is how an unelevated shell reached its own imperium-elevated
+// sub-shell (and any propagating-scope member), borrowing a trusted-path
+// elevation (I-25/I-27) it never went through the trusted path to get.
+//
+// Every leg restores nothing on the CALLER here: both Procs are synthetic, so
+// their caps are set freely. The cap-axis legs deliberately use a caller whose
+// caps do NOT cover, proving the cap axis still overrides the cover refusal.
+void test_devproc_debug_cap_cover_predicate(void) {
+    struct Proc *caller = proc_alloc();
+    struct Proc *target = proc_alloc();
+    TEST_ASSERT(caller && target, "proc_alloc caller + target");
+
+    target->principal_id = 0xA11CEu;
+    target->state        = PROC_STATE_ALIVE;
+    caller->principal_id = 0xA11CEu;              // the OWNER axis, every leg below
+
+    // 1. Equal authority -> admitted (the common case: a peer of the same power).
+    target->caps = 0;
+    caller->caps = 0;
+    TEST_ASSERT(devproc_debug_authorized(caller, target),
+                "cover: equal caps (both empty) admits");
+
+    // 2. The caller's caps are a STRICT SUPERSET -> admitted. This is the
+    //    shell-debugs-its-child case, and I-2 guarantees it: fork-grantable caps
+    //    only shrink, so a spawner always covers its children.
+    target->caps = CAP_KILL;
+    caller->caps = CAP_KILL | CAP_CHOWN;
+    TEST_ASSERT(devproc_debug_authorized(caller, target),
+                "cover: a superset caller admits (the spawner case, I-2)");
+
+    // 3. Exact cover -> admitted.
+    caller->caps = CAP_KILL;
+    TEST_ASSERT(devproc_debug_authorized(caller, target),
+                "cover: an exactly-covering caller admits");
+
+    // 4. THE REGRESSION: one cap the caller lacks -> REFUSED on the owner axis.
+    caller->caps = 0;
+    TEST_ASSERT(!devproc_debug_authorized(caller, target),
+                "cover: a same-principal caller lacking the target's CAP_KILL is refused");
+
+    // 5. A DISJOINT cap set is not cover either (the caller is powerful, but not
+    //    in the way the target is) -- a subset test, never a "has any caps" test.
+    caller->caps = CAP_CHOWN;
+    TEST_ASSERT(!devproc_debug_authorized(caller, target),
+                "cover: disjoint caps are not cover");
+
+    // 6. The cap axis still overrides a cover refusal, both bits, with the
+    //    caller's own set still NOT covering the target.
+    caller->caps = CAP_DEBUG;
+    TEST_ASSERT(devproc_debug_authorized(caller, target),
+                "cover: CAP_DEBUG admits an uncovered owner-axis target");
+    caller->caps = CAP_HOSTOWNER;
+    TEST_ASSERT(devproc_debug_authorized(caller, target),
+                "cover: CAP_HOSTOWNER admits an uncovered owner-axis target");
+
+    // 7. CAP_DAC_OVERRIDE is still not a debug axis, and being merely "elevated"
+    //    is not cover -- the fs-admin bit cannot buy a debug it does not cover.
+    caller->caps = CAP_DAC_OVERRIDE;
+    TEST_ASSERT(!devproc_debug_authorized(caller, target),
+                "cover: CAP_DAC_OVERRIDE neither covers nor is a debug axis");
+
+    // 8. The NOTRACE seam still wins over a FULLY-COVERING owner (the seal keeps
+    //    its job for equal-authority peers -- it is not made redundant).
+    proc_seal(target, PROC_FLAG_NOTRACE);
+    caller->caps = CAP_KILL;
+    TEST_ASSERT(!devproc_debug_authorized(caller, target),
+                "cover: NOTRACE still refuses a covering owner");
+
+    caller->state = PROC_STATE_ZOMBIE;
+    target->state = PROC_STATE_ZOMBIE;
+    proc_free(caller);
+    proc_free(target);
+}
+
+// The same rule END TO END, through devproc's own `attach` verb rather than the
+// predicate -- a SEPARATE test because TEST_ASSERT returns on the first failure,
+// so a predicate regression must not be able to hide the real attach path's.
+// The attach verb consults only ALIVE, this gate and Einuse, so the gate is the
+// only thing that can refuse here.
+void test_devproc_debug_cap_cover_attach(void) {
+    struct Thread *th = current_thread();
+    TEST_ASSERT(th && th->proc, "test thread has a proc");
+    struct Proc *caller = th->proc;
+
+    struct Proc *elev = proc_alloc();
+    TEST_ASSERT(elev != NULL, "alloc the elevated target");
+    elev->principal_id = caller->principal_id;     // same principal (I-22)
+    elev->state        = PROC_STATE_ALIVE;
+    elev->caps         = CAP_KILL;                 // a cap the bare caller lacks
+    proc_test_link(elev);
+
+    const char attach_cmd[] = "attach";
+    const char detach_cmd[] = "detach";
+    const long an = (long)sizeof(attach_cmd) - 1;
+    const long dn = (long)sizeof(detach_cmd) - 1;
+
+    // The caller is the LIVE runner Proc (kproc), so its caps are saved and
+    // restored BEFORE any assertion -- TEST_ASSERT returns, and leaking a
+    // narrowed cap set into the rest of the suite would be a fixture that
+    // generates its own bugs.
+    caps_t saved = __atomic_load_n(&caller->caps, __ATOMIC_ACQUIRE);
+    // The premise the refusal leg rests on, asserted rather than assumed (before
+    // any mutation, so this return is clean): CAP_KILL is elevation-only and so
+    // excluded from CAP_ALL, which is the runner's set. The refusal leg therefore
+    // needs NO caller mutation at all -- an untouched caller already fails cover
+    // against this target, which is strictly better discrimination, because
+    // nothing the fixture did can be blamed for the refusal.
+    TEST_ASSERT((saved & CAP_KILL) == 0,
+                "premise: the runner lacks the target's CAP_KILL (else the refusal is vacuous)");
+
+    struct Spoor *ctl = open_ctl_for_pid(elev->pid);
+    long bare_ret  = ctl ? devproc.write(ctl, attach_cmd, an, 0) : -2;
+    void *bare_own = ctl ? (void *)elev->debug_owner : (void *)-1;
+    if (ctl && bare_ret == an) (void)devproc.write(ctl, detach_cmd, dn, 0);
+
+    // The control, one variable away: the SAME caller and target, caps now
+    // covering. Without it, a broken fixture (an unopenable ctl, a dead target)
+    // would satisfy the refusal above on its own. WIDENS the shared runner set by
+    // the one elevation-only bit rather than replacing it, so the window cannot
+    // strip CAP_HW_CREATE / CAP_TCB_DIAL / CAP_CSPRNG_READ from a kproc-context
+    // path running beside it.
+    __atomic_store_n(&caller->caps, saved | (caps_t)CAP_KILL, __ATOMIC_RELEASE);
+    long cover_ret  = ctl ? devproc.write(ctl, attach_cmd, an, 0) : -2;
+    void *cover_own = ctl ? (void *)elev->debug_owner : (void *)-1;
+    if (ctl && cover_ret == an) (void)devproc.write(ctl, detach_cmd, dn, 0);
+
+    __atomic_store_n(&caller->caps, saved, __ATOMIC_RELEASE);
+    if (ctl) spoor_clunk(ctl);
+    proc_test_unlink(elev);
+    elev->state = PROC_STATE_ZOMBIE;
+    proc_free(elev);
+
+    TEST_ASSERT(ctl != NULL, "open the elevated target's ctl");
+    TEST_EXPECT_EQ(cover_ret, an, "control: a covering owner's attach succeeds");
+    TEST_EXPECT_EQ(cover_own, (void *)ctl, "control: the covering attach claimed the slot");
+    TEST_EXPECT_EQ(bare_ret, (long)-1, "an uncovered same-principal attach is refused");
+    TEST_EXPECT_EQ(bare_own, (void *)NULL, "the refused attach claimed no slot");
+}
+
+// The DUMP SEAL's predicates (DEBUG-FS-DESIGN 3.2, operator-delegated 2026-09-24).
+// PROC_FLAG_NODUMP means "cannot be EXTRACTED FROM" and PROC_FLAG_NOTRACE "cannot be
+// DRIVEN" -- Linux's split, where dumpability and not the ptrace flag governs
+// /proc/<pid> content. RED before the fix: nothing read NODUMP, so a SEALED Proc's
+// environment was readable by any same-principal peer -- the exact actor
+// SPAWN_PERM_SEAL exists to shut out.
+//
+// Every verdict is CAPTURED, the Procs are freed, and only then is anything
+// asserted: TEST_ASSERT returns, and a fixture released on the last line is released
+// only by a passing test. Leg ORDER still matters -- both CONTROLS are taken while the
+// target is unsealed, so no refusal below can be satisfied by a caller that passes on
+// no axis -- and the seal is set ONCE, through proc_seal (the production writer),
+// because it is one-way and a test that cleared it would assert against a state the
+// kernel cannot reach.
+void test_devproc_dump_seal_predicate(void) {
+    struct Proc *caller       = proc_alloc();
+    struct Proc *target       = proc_alloc();
+    struct Proc *notrace_only = proc_alloc();
+    bool allocated = caller && target && notrace_only;
+    bool premise = false, ctl_owner = false, ctl_host = false, mirror_premise = false;
+    bool mirror = false, sealed_host = true, sealed_peer = true, self = false;
+    bool debug_premise = false, debug_axis = false;
+    if (allocated) {
+        target->principal_id = 0x5EA1Eu;
+        target->state        = PROC_STATE_ALIVE;
+        target->caps         = 0;
+        caller->principal_id = 0x5EA1Eu;              // the OWNER axis
+        caller->caps         = 0;
+        premise = (target->proc_flags & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE)) == 0;
+
+        // 1. CONTROL, owner axis: an unsealed same-principal target discloses.
+        ctl_owner = devproc_extract_authorized(caller, target);
+        // 2. CONTROL, cap axis: CAP_HOSTOWNER discloses an unsealed cross-principal
+        //    target. Taken while unsealed, for the reason in the header.
+        caller->principal_id = 0xD1FFu;
+        caller->caps         = CAP_HOSTOWNER;
+        ctl_host = devproc_extract_authorized(caller, target);
+
+        // 3. THE MIRROR LEG (round-1 P3-7), on its OWN Proc: NOTRACE alone must NOT
+        //    refuse extraction. Without it a predicate written `& (NODUMP | NOTRACE)`
+        //    passes every other leg while denying every Proc that called only
+        //    SYS_SET_TRACEABLE(0) -- a symmetric check cannot catch a symmetric fault.
+        //    Its own Proc because the bits are one-way: NOTRACE set on the shared
+        //    target once silently invalidated leg 7's premise.
+        notrace_only->principal_id = caller->principal_id;
+        notrace_only->state        = PROC_STATE_ALIVE;
+        notrace_only->caps         = 0;
+        proc_seal(notrace_only, PROC_FLAG_NOTRACE);
+        mirror_premise = (notrace_only->proc_flags & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE))
+                         == PROC_FLAG_NOTRACE;
+        mirror = devproc_extract_authorized(caller, notrace_only);
+
+        // 4. ABSOLUTE: CAP_HOSTOWNER does not buy through the seal. One variable
+        //    away from leg 2.
+        proc_seal(target, PROC_FLAG_NODUMP);
+        sealed_host = devproc_extract_authorized(caller, target);
+        // 5. THE REGRESSION: the same-principal PEER is refused. One variable away
+        //    from leg 1.
+        caller->principal_id = 0x5EA1Eu;
+        caller->caps         = 0;
+        sealed_peer = devproc_extract_authorized(caller, target);
+        // 6. SELF is exempt: a Proc reads itself by its own pid (devproc has no
+        //    `self` entry), and sealing it against itself protects nobody.
+        self = devproc_extract_authorized(target, target);
+        // 7. NODUMP is not a CONTROL refusal. The premise is captured, not assumed:
+        //    this leg was once vacuous when an earlier leg left NOTRACE on `target`.
+        debug_premise = (target->proc_flags & PROC_FLAG_NOTRACE) == 0;
+        debug_axis    = devproc_debug_authorized(target, target);
+    }
+    if (caller)       { caller->state = PROC_STATE_ZOMBIE;       proc_free(caller); }
+    if (target)       { target->state = PROC_STATE_ZOMBIE;       proc_free(target); }
+    if (notrace_only) { notrace_only->state = PROC_STATE_ZOMBIE; proc_free(notrace_only); }
+
+    TEST_ASSERT(allocated, "proc_alloc caller + target + the NOTRACE-only target");
+    TEST_ASSERT(premise, "premise: the target starts with NEITHER seal bit");
+    TEST_ASSERT(ctl_owner, "control: an unsealed same-principal target discloses");
+    TEST_ASSERT(ctl_host, "control: CAP_HOSTOWNER discloses an unsealed cross-principal target");
+    TEST_ASSERT(mirror_premise, "premise: the mirror target has NOTRACE and NOT NODUMP");
+    TEST_ASSERT(mirror, "NOTRACE alone does NOT refuse extraction: it is the CONTROL bit");
+    TEST_ASSERT(!sealed_host, "the dump seal refuses CAP_HOSTOWNER");
+    TEST_ASSERT(!sealed_peer, "the dump seal refuses a same-principal peer's extraction");
+    TEST_ASSERT(self, "a sealed Proc still extracts from ITSELF");
+    TEST_ASSERT(debug_premise, "premise: the target carries NODUMP and NOT NOTRACE");
+    TEST_ASSERT(debug_axis, "NODUMP does not refuse the NOTRACE-gated debug axis");
+}
+
+// The seal END TO END through every /proc/<pid> file the plain read path serves.
+// This pins the SET at the call sites, which no predicate test can: round 2 showed
+// that re-pointing environ back at the unsealed predicate, or imperium at the sealed
+// one, left every predicate-level test green. Each file is read once unsealed (the
+// control: an allowed read is >= 0, possibly 0 bytes on a synthetic Proc) and once
+// after proc_seal (the one variable); an image file must then refuse (-1) and a
+// ledger or control file must still answer. A second, CROSS-principal target pins
+// environ's own owner gate the same way -- the in-kernel runner holds no
+// CAP_HOSTOWNER (asserted below), so that deny leg is reachable end to end.
+// mem / regs / fpregs are the debug tests' (they need a stopped target).
+void test_devproc_dump_seal_disclosure(void) {
+    static const struct {
+        const char *name;
+        bool        image;
+        const char *control_msg;
+        const char *sealed_msg;
+    } files[] = {
+        { "status",   false, "control: status reads while unsealed",
+          "status is the kernel's record -- it still reads when sealed" },
+        { "cmdline",  true,  "control: cmdline reads while unsealed",
+          "the dump seal refuses cmdline" },
+        { "ctl",      false, "control: ctl reads while unsealed",
+          "ctl is a control file -- it still reads when sealed" },
+        { "ns",       true,  "control: ns reads while unsealed",
+          "the dump seal refuses ns (round-2 P1)" },
+        { "exe",      true,  "control: exe reads while unsealed",
+          "the dump seal refuses exe" },
+        { "cwd",      true,  "control: cwd reads while unsealed",
+          "the dump seal refuses cwd" },
+        { "maps",     true,  "control: maps reads while unsealed",
+          "the dump seal refuses maps" },
+        { "sched",    false, "control: sched reads while unsealed",
+          "sched is telemetry -- it still reads when sealed" },
+        { "imperium", false, "control: imperium reads while unsealed",
+          "imperium is the kernel's attestation -- it still reads when sealed (I-25)" },
+        { "environ",  true,  "control: environ reads while unsealed",
+          "the dump seal refuses environ" },
+    };
+    enum { NFILES = (int)(sizeof(files) / sizeof(files[0])) };
+
+    struct Thread *th = current_thread();
+    TEST_ASSERT(th && th->proc, "test thread has a proc");
+    struct Proc *target = proc_alloc();
+    struct Proc *other  = proc_alloc();
+    bool allocated = target && other;
+    struct Spoor *f[NFILES];
+    long before[NFILES], after[NFILES];
+    bool premise = false;
+    long other_environ = -2, other_maps = -2;
+    char buf[512];
+    for (int i = 0; i < NFILES; i++) { f[i] = NULL; before[i] = -2; after[i] = -2; }
+
+    if (allocated) {
+        target->principal_id = th->proc->principal_id;   // the reader's own principal
+        target->state        = PROC_STATE_ALIVE;
+        target->caps         = 0;
+        proc_test_link(target);
+        premise = (target->proc_flags & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE)) == 0;
+        for (int i = 0; i < NFILES; i++) {
+            f[i] = open_pidfile_for(target->pid, files[i].name, 0);   // OREAD
+            before[i] = f[i] ? devproc.read(f[i], buf, (long)sizeof(buf), 0) : -2;
+        }
+        proc_seal(target, PROC_FLAG_NODUMP);
+        for (int i = 0; i < NFILES; i++)
+            after[i] = f[i] ? devproc.read(f[i], buf, (long)sizeof(buf), 0) : -2;
+        for (int i = 0; i < NFILES; i++) if (f[i]) spoor_clunk(f[i]);
+        proc_test_unlink(target);
+
+        // environ's OWN gate, end to end: an UNSEALED target of another principal.
+        // maps is its one-variable control -- ambient, so it must still read.
+        other->principal_id = (th->proc->principal_id == 0x0D0D0D0Du) ? 0x0E0E0E0Eu
+                                                                       : 0x0D0D0D0Du;
+        other->state        = PROC_STATE_ALIVE;
+        other->caps         = 0;
+        proc_test_link(other);
+        struct Spoor *oe = open_pidfile_for(other->pid, "environ", 0);
+        struct Spoor *om = open_pidfile_for(other->pid, "maps", 0);
+        other_environ = oe ? devproc.read(oe, buf, (long)sizeof(buf), 0) : -2;
+        other_maps    = om ? devproc.read(om, buf, (long)sizeof(buf), 0) : -2;
+        if (oe) spoor_clunk(oe);
+        if (om) spoor_clunk(om);
+        proc_test_unlink(other);
+    }
+    if (target) { target->state = PROC_STATE_ZOMBIE; proc_free(target); }
+    if (other)  { other->state  = PROC_STATE_ZOMBIE; proc_free(other); }
+
+    TEST_ASSERT(allocated, "alloc the sealed target + the cross-principal target");
+    TEST_ASSERT(premise, "premise: the target starts with neither seal bit");
+    TEST_ASSERT(!(__atomic_load_n(&th->proc->caps, __ATOMIC_ACQUIRE) & CAP_HOSTOWNER),
+                "premise: the runner holds no CAP_HOSTOWNER, so the cross-principal leg means something");
+    for (int i = 0; i < NFILES; i++) {
+        TEST_ASSERT(before[i] >= 0, files[i].control_msg);
+        if (files[i].image) TEST_ASSERT(after[i] == -1, files[i].sealed_msg);
+        else                TEST_ASSERT(after[i] >= 0, files[i].sealed_msg);
+    }
+    TEST_ASSERT(other_maps >= 0, "control: an unsealed cross-principal maps read is ambient");
+    TEST_EXPECT_EQ(other_environ, (long)-1,
+                   "environ refuses a cross-principal reader that holds no CAP_HOSTOWNER");
+}
+
+// The seal's SCOPE at the predicate level: the extraction gate is sealed and the
+// attestation gate is not. The same split is pinned at the CALL SITES by
+// test_devproc_dump_seal_disclosure; this test exists so a predicate regression is
+// reported as one. `imperium` and `sched` are the kernel's record ABOUT a Proc;
+// sealing them would let any Proc in a live propagating legate scope permanently
+// suppress the kernel's record of its own elevation, because SYS_SET_DUMPABLE(0) is
+// an ungated one-way self-call. The first cut of the seal did exactly that.
+void test_devproc_dump_seal_scope(void) {
+    struct Proc *caller = proc_alloc();
+    struct Proc *target = proc_alloc();
+    struct Proc *host   = proc_alloc();
+    bool allocated = caller && target && host;
+    bool premise = false, agree = false, attest = false, extract = true;
+    bool host_attest = false, host_extract = true;
+    bool host_imp_denied = true, host_sched_denied = true;
+    size_t host_imp = 0, host_sched = 0;
+    if (allocated) {
+        target->principal_id = 0x5EA1Eu;
+        target->state        = PROC_STATE_ALIVE;
+        target->caps         = 0;
+        caller->principal_id = 0x5EA1Eu;
+        caller->caps         = 0;
+        premise = (target->proc_flags & PROC_FLAG_NODUMP) == 0;
+        // Both gates agree while unsealed -- so the divergence below is the seal's
+        // doing and not a difference the two predicates always had.
+        agree = devproc_owner_or_hostowner(caller, target) &&
+                devproc_extract_authorized(caller, target);
+        proc_seal(target, PROC_FLAG_NODUMP);
+        attest  = devproc_owner_or_hostowner(caller, target);
+        extract = devproc_extract_authorized(caller, target);
+        // CAP_HOSTOWNER of ANOTHER principal: the seal is absolute against it for
+        // extraction, and the ledger still answers it -- the operator's view of an
+        // audited Proc (I-25) must not hang on being its owner. Through the gated
+        // readers the dispatch calls, not only their predicate.
+        host->principal_id = (target->principal_id == 0x0B0B0B0Bu) ? 0x0C0C0C0Cu
+                                                                   : 0x0B0B0B0Bu;
+        host->caps         = CAP_HOSTOWNER;
+        host_attest  = devproc_owner_or_hostowner(host, target);
+        host_extract = devproc_extract_authorized(host, target);
+        char hbuf[512];
+        host_imp   = devproc_imperium_read_gated(host, target, hbuf, sizeof(hbuf),
+                                                 &host_imp_denied);
+        host_sched = devproc_sched_read_gated(host, target, hbuf, sizeof(hbuf),
+                                              &host_sched_denied);
+    }
+    if (caller) { caller->state = PROC_STATE_ZOMBIE; proc_free(caller); }
+    if (target) { target->state = PROC_STATE_ZOMBIE; proc_free(target); }
+    if (host)   { host->state   = PROC_STATE_ZOMBIE; proc_free(host); }
+
+    TEST_ASSERT(allocated, "proc_alloc caller + target");
+    TEST_ASSERT(premise, "premise: the target starts unsealed");
+    TEST_ASSERT(agree, "control: unsealed, the authority gate and the extraction gate agree");
+    TEST_ASSERT(attest, "the ATTESTATION gate (imperium/sched) is NOT sealed -- an audited "
+                        "Proc cannot switch off the kernel's record of its own elevation");
+    TEST_ASSERT(!extract, "the EXTRACTION gate (environ) IS sealed");
+    TEST_ASSERT(host_attest, "a cross-principal CAP_HOSTOWNER passes the attestation "
+                             "gate on a sealed Proc");
+    TEST_ASSERT(!host_extract, "the seal is absolute for extraction -- CAP_HOSTOWNER included");
+    TEST_ASSERT(!host_imp_denied && host_imp > 0,
+                "imperium still formats for a cross-principal CAP_HOSTOWNER when sealed (I-25)");
+    TEST_ASSERT(!host_sched_denied && host_sched > 0,
+                "sched still formats for a cross-principal CAP_HOSTOWNER when sealed");
 }
 
 // 8a-1b: the attach/detach/close slot lifecycle (the model's Attach / DetachReq
@@ -1494,6 +1889,18 @@ void test_devproc_debug_mem(void) {
     tgt->principal_id = (caller->principal_id == 0x0D0D0D0Du) ? 0x0E0E0E0Eu : 0x0D0D0D0Du;
     TEST_EXPECT_EQ(devproc.read(mem, buf, 64, (s64)RW_VA), (long)-1,
                    "mem read by a non-owner (no CAP_DEBUG) is refused (I-39)");
+
+    // The dump seal refuses the READ direction only (DEBUG-FS-DESIGN 3.2): reading
+    // memory is extraction; writing it is control and answers to NOTRACE. LAST,
+    // because the bit is one-way. Back to the owner, still stopped, with a positive
+    // control one variable away from the seal.
+    tgt->principal_id = caller->principal_id;
+    long nd_control = devproc.read(mem, buf, 64, (s64)RW_VA);
+    proc_seal(tgt, PROC_FLAG_NODUMP);
+    long nd_read = devproc.read(mem, buf, 64, (s64)RW_VA);
+    for (int i = 0; i < 64; i++) wbuf[i] = (u8)(0x33 + i);
+    long nd_write  = devproc.write(mem, wbuf, 64, (s64)RW_VA);
+    u8   nd_landed = rw_kva[0];
     spoor_clunk(mem);
 
     // Cleanup: free MY backing pages (proc_pgtable_destroy leaves leaf data pages
@@ -1503,6 +1910,11 @@ void test_devproc_debug_mem(void) {
     free_pages(ro_pg, 0);
     tgt->state = PROC_STATE_ZOMBIE;
     proc_free(tgt);
+
+    TEST_EXPECT_EQ(nd_control, 64L, "control: the owner's mem read of a stopped target returns the bytes");
+    TEST_EXPECT_EQ(nd_read, (long)-1, "the dump seal refuses a mem READ");
+    TEST_EXPECT_EQ(nd_write, 64L, "the dump seal does not refuse a mem WRITE -- that is control, NOTRACE's");
+    TEST_ASSERT(nd_landed == 0x33, "the mem write to the NODUMP target landed");
 }
 
 // 8a-1b-gamma-2: /proc/<pid>/regs + fpregs -- the saved EL0 register frames of a
@@ -1511,6 +1923,62 @@ void test_devproc_debug_mem(void) {
 // trapframe + FP ctx. The headline check is the SPSR (pstate) privilege guard:
 // a regs write applies x0..x30 + sp + pc but NEVER SPSR -- an arbitrary SPSR
 // could eret the target to EL1.
+// The legs that assert INLINE run in this helper, so a failing TEST_ASSERT returns
+// HERE and test_devproc_debug_regs still unlinks its stack-local thread before that
+// frame dies. `*done` is set only when every leg passed.
+static void debug_regs_inline_legs(struct Proc *tgt, struct Thread *th,
+                                   struct exception_context *tf,
+                                   struct t_user_regs *ur, struct t_user_regs *wr,
+                                   struct t_user_fpregs *uf, bool *done) {
+    // --- regs read ---
+    struct Spoor *regs = open_pidfile_for(tgt->pid, "regs", 2);   // ORDWR
+    TEST_ASSERT(regs != NULL, "open /proc/<pid>/regs");
+    TEST_EXPECT_EQ(devproc.read(regs, ur, (long)sizeof(*ur), 0), (long)sizeof(*ur), "regs read: full struct");
+    bool m = true; for (int i = 0; i < 31; i++) if (ur->regs[i] != 0x1000ull + (u64)i) m = false;
+    TEST_ASSERT(m, "regs read: x0..x30");
+    TEST_EXPECT_EQ(ur->sp,     0xDEAD0000ull, "regs read: sp = SP_EL0");
+    TEST_EXPECT_EQ(ur->pc,     0xCAFE0000ull, "regs read: pc = ELR_EL1");
+    TEST_EXPECT_EQ(ur->pstate, 0x60000000ull, "regs read: pstate = SPSR_EL1");
+
+    // --- regs write: x0..x30 + sp + pc applied; pstate (SPSR) IGNORED (guard) ---
+    // Field-wise init (every field is set below), NOT `*wr = *ur`: the 272-byte
+    // struct copy lowers to a memcpy call the freestanding kernel does not link
+    // under the UBSan (low-opt) build.
+    for (int i = 0; i < 31; i++) wr->regs[i] = 0x2000ull + (u64)i;
+    wr->sp     = 0xBEEF0000ull;
+    wr->pc     = 0xF00D0000ull;
+    wr->pstate = 0x00000005ull;   // an EL1h-mode SPSR (M[3:0]=0b0101) -- MUST be ignored
+    TEST_EXPECT_EQ(devproc.write(regs, wr, (long)sizeof(*wr), 0), (long)sizeof(*wr), "regs write");
+    m = true; for (int i = 0; i < 31; i++) if (tf->regs[i] != 0x2000ull + (u64)i) m = false;
+    TEST_ASSERT(m, "regs write applied x0..x30");
+    TEST_EXPECT_EQ(tf->sp,  0xBEEF0000ull, "regs write applied sp (SP_EL0)");
+    TEST_EXPECT_EQ(tf->elr, 0xF00D0000ull, "regs write applied pc (ELR_EL1)");
+    TEST_EXPECT_EQ(tf->spsr, 0x60000000ull,
+                   "regs write did NOT change SPSR (the EL1-mode pstate was ignored -- privilege guard)");
+    spoor_clunk(regs);
+
+    // --- fpregs read + write (all fields; no privilege bits) ---
+    struct Spoor *fp = open_pidfile_for(tgt->pid, "fpregs", 2);
+    TEST_ASSERT(fp != NULL, "open /proc/<pid>/fpregs");
+    TEST_EXPECT_EQ(devproc.read(fp, uf, (long)sizeof(*uf), 0), (long)sizeof(*uf), "fpregs read: full struct");
+    m = true; for (int i = 0; i < 512; i++) if (uf->vregs[i] != (u8)(0x30 + (i & 0x3f))) m = false;
+    TEST_ASSERT(m, "fpregs read: V0..V31");
+    TEST_EXPECT_EQ(uf->fpsr, 0xFEEDFACEu, "fpregs read: fpsr");
+    TEST_EXPECT_EQ(uf->fpcr, 0x0BADF00Du, "fpregs read: fpcr");
+    uf->fpcr = 0x11112222u;
+    TEST_EXPECT_EQ(devproc.write(fp, uf, (long)sizeof(*uf), 0), (long)sizeof(*uf), "fpregs write");
+    TEST_EXPECT_EQ(th->ctx.fpcr, 0x11112222u, "fpregs write applied fpcr");
+    spoor_clunk(fp);
+
+    // --- not-stopped -> refused (stopped-only) ---
+    tgt->debug_stop_req = 0;
+    struct Spoor *regs2 = open_pidfile_for(tgt->pid, "regs", 2);
+    TEST_EXPECT_EQ(devproc.read(regs2, ur, (long)sizeof(*ur), 0), (long)-1,
+                   "regs of a NOT-stopped target is refused");
+    spoor_clunk(regs2);
+    *done = true;
+}
+
 void test_devproc_debug_regs(void) {
     struct Thread *tt = current_thread();
     TEST_ASSERT(tt && tt->proc, "test thread has a proc");
@@ -1523,6 +1991,7 @@ void test_devproc_debug_regs(void) {
 
     // A real kstack buffer (8 pages) + a synthetic parked head thread.
     struct page *kstk = alloc_pages(THREAD_KSTACK_TOTAL_ORDER, KP_ZERO);
+    if (!kstk) { tgt->state = PROC_STATE_ZOMBIE; proc_free(tgt); }
     TEST_ASSERT(kstk != NULL, "alloc synthetic kstack");
     u8 *kbase = (u8 *)pa_to_kva(page_to_pa(kstk));
 
@@ -1555,55 +2024,13 @@ void test_devproc_debug_regs(void) {
     tgt->debug_stop_req = 1;     // "stopped" (this one parked thread + on_cpu==false)
     proc_test_link(tgt);
 
-    // --- regs read ---
-    struct Spoor *regs = open_pidfile_for(tgt->pid, "regs", 2);   // ORDWR
-    TEST_ASSERT(regs != NULL, "open /proc/<pid>/regs");
-    struct t_user_regs ur;
-    TEST_EXPECT_EQ(devproc.read(regs, &ur, (long)sizeof(ur), 0), (long)sizeof(ur), "regs read: full struct");
-    bool m = true; for (int i = 0; i < 31; i++) if (ur.regs[i] != 0x1000ull + (u64)i) m = false;
-    TEST_ASSERT(m, "regs read: x0..x30");
-    TEST_EXPECT_EQ(ur.sp,     0xDEAD0000ull, "regs read: sp = SP_EL0");
-    TEST_EXPECT_EQ(ur.pc,     0xCAFE0000ull, "regs read: pc = ELR_EL1");
-    TEST_EXPECT_EQ(ur.pstate, 0x60000000ull, "regs read: pstate = SPSR_EL1");
-
-    // --- regs write: x0..x30 + sp + pc applied; pstate (SPSR) IGNORED (guard) ---
-    // Field-wise init (every field is set below), NOT `wr = ur`: the 272-byte
-    // struct copy lowers to a memcpy call the freestanding kernel does not link
-    // under the UBSan (low-opt) build.
-    struct t_user_regs wr;
-    for (int i = 0; i < 31; i++) wr.regs[i] = 0x2000ull + (u64)i;
-    wr.sp     = 0xBEEF0000ull;
-    wr.pc     = 0xF00D0000ull;
-    wr.pstate = 0x00000005ull;   // an EL1h-mode SPSR (M[3:0]=0b0101) -- MUST be ignored
-    TEST_EXPECT_EQ(devproc.write(regs, &wr, (long)sizeof(wr), 0), (long)sizeof(wr), "regs write");
-    m = true; for (int i = 0; i < 31; i++) if (tf->regs[i] != 0x2000ull + (u64)i) m = false;
-    TEST_ASSERT(m, "regs write applied x0..x30");
-    TEST_EXPECT_EQ(tf->sp,  0xBEEF0000ull, "regs write applied sp (SP_EL0)");
-    TEST_EXPECT_EQ(tf->elr, 0xF00D0000ull, "regs write applied pc (ELR_EL1)");
-    TEST_EXPECT_EQ(tf->spsr, 0x60000000ull,
-                   "regs write did NOT change SPSR (the EL1-mode pstate was ignored -- privilege guard)");
-    spoor_clunk(regs);
-
-    // --- fpregs read + write (all fields; no privilege bits) ---
-    struct Spoor *fp = open_pidfile_for(tgt->pid, "fpregs", 2);
-    TEST_ASSERT(fp != NULL, "open /proc/<pid>/fpregs");
+    // Zeroed here: the capture legs below reuse them even if a leg above failed.
+    struct t_user_regs ur, wr;
     struct t_user_fpregs uf;
-    TEST_EXPECT_EQ(devproc.read(fp, &uf, (long)sizeof(uf), 0), (long)sizeof(uf), "fpregs read: full struct");
-    m = true; for (int i = 0; i < 512; i++) if (uf.vregs[i] != (u8)(0x30 + (i & 0x3f))) m = false;
-    TEST_ASSERT(m, "fpregs read: V0..V31");
-    TEST_EXPECT_EQ(uf.fpsr, 0xFEEDFACEu, "fpregs read: fpsr");
-    TEST_EXPECT_EQ(uf.fpcr, 0x0BADF00Du, "fpregs read: fpcr");
-    uf.fpcr = 0x11112222u;
-    TEST_EXPECT_EQ(devproc.write(fp, &uf, (long)sizeof(uf), 0), (long)sizeof(uf), "fpregs write");
-    TEST_EXPECT_EQ(th.ctx.fpcr, 0x11112222u, "fpregs write applied fpcr");
-    spoor_clunk(fp);
-
-    // --- not-stopped -> refused (stopped-only) ---
-    tgt->debug_stop_req = 0;
-    struct Spoor *regs2 = open_pidfile_for(tgt->pid, "regs", 2);
-    TEST_EXPECT_EQ(devproc.read(regs2, &ur, (long)sizeof(ur), 0), (long)-1,
-                   "regs of a NOT-stopped target is refused");
-    spoor_clunk(regs2);
+    for (size_t i = 0; i < sizeof(ur); i++) { ((u8 *)&ur)[i] = 0; ((u8 *)&wr)[i] = 0; }
+    for (size_t i = 0; i < sizeof(uf); i++) ((u8 *)&uf)[i] = 0;
+    bool inline_ok = false;
+    debug_regs_inline_legs(tgt, &th, tf, &ur, &wr, &uf, &inline_ok);
 
     // --- 8a-1c holotype HF1 regression: a DYING target is never debug-stopped ---
     // (a) A pending group_exit_msg (SYS_EXIT_GROUP / kill in flight): the parked
@@ -1626,6 +2053,24 @@ void test_devproc_debug_regs(void) {
     if (regs4) spoor_clunk(regs4);
     th.state = THREAD_SLEEPING;
 
+    // The dump seal refuses regs/fpregs READS (extraction) and neither WRITE
+    // (control, NOTRACE's). LAST, because the bit is one-way and every leg above
+    // would otherwise be refused by the seal instead of by the guard it names. HF1's
+    // perturbations are undone above (thread SLEEPING, no group exit); the target is
+    // stopped, and each read has a positive control one variable away.
+    tgt->debug_stop_req = 1;
+    struct Spoor *nd_r = open_pidfile_for(tgt->pid, "regs", 2);
+    struct Spoor *nd_f = open_pidfile_for(tgt->pid, "fpregs", 2);
+    long nd_regs_ctl = nd_r ? devproc.read(nd_r, &ur, (long)sizeof(ur), 0) : -2;
+    long nd_fp_ctl   = nd_f ? devproc.read(nd_f, &uf, (long)sizeof(uf), 0) : -2;
+    proc_seal(tgt, PROC_FLAG_NODUMP);
+    long nd_regs_rd  = nd_r ? devproc.read(nd_r, &ur, (long)sizeof(ur), 0) : -2;
+    long nd_fp_rd    = nd_f ? devproc.read(nd_f, &uf, (long)sizeof(uf), 0) : -2;
+    long nd_regs_wr  = nd_r ? devproc.write(nd_r, &wr, (long)sizeof(wr), 0) : -2;
+    long nd_fp_wr    = nd_f ? devproc.write(nd_f, &uf, (long)sizeof(uf), 0) : -2;
+    if (nd_r) spoor_clunk(nd_r);
+    if (nd_f) spoor_clunk(nd_f);
+
     // Cleanup BEFORE the HF1 asserts: unlink + drop the synthetic (stack-local)
     // thread BEFORE the frame dies, free the kstack, then the Proc. TEST_ASSERT
     // returns on failure -- asserting first would leave tgt linked with a
@@ -1635,11 +2080,18 @@ void test_devproc_debug_regs(void) {
     free_pages(kstk, THREAD_KSTACK_TOTAL_ORDER);
     tgt->state = PROC_STATE_ZOMBIE;
     proc_free(tgt);
+    if (!inline_ok) return;   // its failure is already recorded; the captures are moot
 
     TEST_EXPECT_EQ(hf1_msg_rc, (long)-1,
                    "regs of a group-terminating target is refused (HF1)");
     TEST_EXPECT_EQ(hf1_exiting_rc, (long)-1,
                    "regs of an EXITING head thread is refused (HF1 backstop)");
+    TEST_EXPECT_EQ(nd_regs_ctl, (long)sizeof(ur), "control: regs reads before the seal");
+    TEST_EXPECT_EQ(nd_fp_ctl,   (long)sizeof(uf), "control: fpregs reads before the seal");
+    TEST_EXPECT_EQ(nd_regs_rd,  (long)-1, "the dump seal refuses a regs READ");
+    TEST_EXPECT_EQ(nd_fp_rd,    (long)-1, "the dump seal refuses an fpregs READ");
+    TEST_EXPECT_EQ(nd_regs_wr,  (long)sizeof(wr), "the dump seal does not refuse a regs WRITE (control)");
+    TEST_EXPECT_EQ(nd_fp_wr,    (long)sizeof(uf), "the dump seal does not refuse an fpregs WRITE (control)");
 }
 
 // 8a-1b-gamma-3: /proc/<pid>/{kregs,kstack,wait} -- the kernel-side inspection +
@@ -1711,13 +2163,20 @@ void test_devproc_debug_kregs_kstack_wait(void) {
     proc_test_link(tgt);
 
     // --- Capture every result while linked+stopped (NO content asserts yet) ---
-    struct t_kernel_regs kr;
-    for (size_t i = 0; i < sizeof(kr); i++) ((u8 *)&kr)[i] = 0;
-    long kregs_rlen = -999, kregs_wlen = -999;
+    // Pre-filled, so a field the kernel withholds reads as a WRITTEN zero rather
+    // than a byte the read never touched.
+    struct t_kernel_regs kr, kr_cap;
+    for (size_t i = 0; i < sizeof(kr); i++) { ((u8 *)&kr)[i] = 0xA5; ((u8 *)&kr_cap)[i] = 0xA5; }
+    long kregs_rlen = -999, kregs_wlen = -999, kregs_cap_rlen = -999;
     struct Spoor *kregs = open_pidfile_for(tgt->pid, "kregs", 0);   // OREAD
     if (kregs) {
-        kregs_rlen = devproc.read(kregs, &kr, (long)sizeof(kr), 0);
+        kregs_rlen = devproc.read(kregs, &kr, (long)sizeof(kr), 0);   // the OWNER axis
         kregs_wlen = devproc.write(kregs, &kr, (long)sizeof(kr), 0);   // RO -> -1
+        // I-16: the raw kernel frame belongs to the CAP tier, like kstack's raw
+        // addresses -- the one variable between this read and the one above.
+        __atomic_fetch_or(&caller->caps, CAP_DEBUG, __ATOMIC_RELEASE);
+        kregs_cap_rlen = devproc.read(kregs, &kr_cap, (long)sizeof(kr_cap), 0);
+        __atomic_fetch_and(&caller->caps, ~(u64)CAP_DEBUG, __ATOMIC_RELEASE);
         spoor_clunk(kregs);
     }
 
@@ -1730,6 +2189,26 @@ void test_devproc_debug_kregs_kstack_wait(void) {
     struct Spoor *ks = open_pidfile_for(tgt->pid, "kstack", 0);
     if (ks) { slen = devproc.read(ks, sbuf, (long)sizeof(sbuf), 0); spoor_clunk(ks); }
     __atomic_fetch_and(&caller->caps, ~(u64)CAP_DEBUG, __ATOMIC_RELEASE);
+
+    // The dump seal, after every unsealed kregs/kstack read (it is one-way): kregs
+    // carries tpidr_el0, something the target HOLDS, so a sealed target refuses it;
+    // kstack is the kernel's own state and still answers -- the one-variable
+    // control. The wait legs below run on the sealed target on purpose: wait is
+    // control, and the seal must not change it.
+    proc_seal(tgt, PROC_FLAG_NODUMP);
+    long nd_kregs = -999, nd_kstack = -999;
+    struct Spoor *kregs_nd = open_pidfile_for(tgt->pid, "kregs", 0);
+    if (kregs_nd) {
+        struct t_kernel_regs junk;
+        nd_kregs = devproc.read(kregs_nd, &junk, (long)sizeof(junk), 0);
+        spoor_clunk(kregs_nd);
+    }
+    struct Spoor *ks_nd = open_pidfile_for(tgt->pid, "kstack", 0);
+    if (ks_nd) {
+        char junk[256];
+        nd_kstack = devproc.read(ks_nd, junk, (long)sizeof(junk), 0);
+        spoor_clunk(ks_nd);
+    }
 
     char wbuf[16], ebuf[16]; long wl = -999, wl_nonowner = -999, el = -999;
     for (size_t i = 0; i < sizeof(wbuf); i++) { wbuf[i] = 0; ebuf[i] = 0; }
@@ -1757,16 +2236,28 @@ void test_devproc_debug_kregs_kstack_wait(void) {
     proc_free(tgt);
 
     // --- Now assert on the captured results (safe: nothing linked) ---
-    // kregs: the kernel-side saved frame + TLS base.
-    TEST_EXPECT_EQ(kregs_rlen, (long)sizeof(kr), "kregs read: full struct");
+    // kregs, OWNER axis: the EL0 TLS base only. The kernel half is raw slid state
+    // (ctx.lr is the return into sched), i.e. the KASLR slide (I-16).
+    TEST_EXPECT_EQ(kregs_rlen, (long)sizeof(kr), "kregs read (owner axis): full struct");
+    bool withheld = true;
+    for (int i = 0; i < 10; i++) if (kr.x[i] != 0) withheld = false;
+    TEST_ASSERT(withheld, "kregs (owner axis): x19..x28 withheld (I-16)");
+    TEST_EXPECT_EQ(kr.fp,        0ull,      "kregs (owner axis): fp withheld (I-16)");
+    TEST_EXPECT_EQ(kr.lr,        0ull,      "kregs (owner axis): lr withheld -- it is the KASLR slide (I-16)");
+    TEST_EXPECT_EQ(kr.sp,        0ull,      "kregs (owner axis): sp withheld (I-16)");
+    TEST_EXPECT_EQ(kr.tpidr_el0, 0xC104ull, "kregs (owner axis): tpidr_el0 still delivered (Delve's g)");
+    // kregs, CAP_DEBUG tier: the whole saved frame.
+    TEST_EXPECT_EQ(kregs_cap_rlen, (long)sizeof(kr_cap), "kregs read (CAP tier): full struct");
     bool m = true;
-    for (int i = 0; i < 10; i++) if (kr.x[i] != 0xC200ull + (u64)i) m = false;
-    TEST_ASSERT(m, "kregs read: x19..x28 (callee-saved)");
-    TEST_EXPECT_EQ(kr.fp,        (u64)(uintptr_t)fp0, "kregs read: fp = ctx.fp (kstack-walk start)");
-    TEST_EXPECT_EQ(kr.lr,        0x11110000ull,       "kregs read: lr = ctx.lr");
-    TEST_EXPECT_EQ(kr.sp,        0xC096ull,           "kregs read: sp");
-    TEST_EXPECT_EQ(kr.tpidr_el0, 0xC104ull,           "kregs read: tpidr_el0 (TLS base for Delve's g)");
+    for (int i = 0; i < 10; i++) if (kr_cap.x[i] != 0xC200ull + (u64)i) m = false;
+    TEST_ASSERT(m, "kregs (CAP tier): x19..x28 (callee-saved)");
+    TEST_EXPECT_EQ(kr_cap.fp,        (u64)(uintptr_t)fp0, "kregs (CAP tier): fp = ctx.fp (kstack-walk start)");
+    TEST_EXPECT_EQ(kr_cap.lr,        0x11110000ull,       "kregs (CAP tier): lr = ctx.lr");
+    TEST_EXPECT_EQ(kr_cap.sp,        0xC096ull,           "kregs (CAP tier): sp");
+    TEST_EXPECT_EQ(kr_cap.tpidr_el0, 0xC104ull,           "kregs (CAP tier): tpidr_el0");
     TEST_EXPECT_EQ(kregs_wlen,   (long)-1,            "kregs is RO (write refused)");
+    TEST_EXPECT_EQ(nd_kregs, (long)-1, "the dump seal refuses a kregs READ (it carries tpidr_el0)");
+    TEST_ASSERT(nd_kstack > 0, "control: kstack is the kernel's own state -- it still reads when sealed");
 
     // kstack: the symbolized kernel fp-chain walk. Three frames: #0 = ctx.lr
     // (0x11110000), #1 = LR0 (0x22220000), #2 = LR1 (0x33330000). KASLR is off in
@@ -2093,11 +2584,11 @@ void test_devproc_maps(void) {
 // VIVARIUM V-4b-6: /proc/<pid>/environ -- the gate, the wiring, the 0400 mode,
 // and the short-read-not-truncation property of the per-call clamp.
 //
-// The gate's DENY leg is only reachable through the predicate: devproc_environ_-
-// read takes its caller from current_thread(), and the in-kernel runner is always
-// kproc (CAP_ALL, so always CAP_HOSTOWNER). Driving the predicate directly with a
-// synthetic (caller, target) pair is the prowl-5-F4 precedent -- without it a
-// wiring regression that dropped the gate would leave every test green.
+// The gate's axes, driven through environ's own predicate with synthetic (caller,
+// target) pairs -- the prowl-5-F4 precedent. The call site is pinned separately, end
+// to end, by test_devproc_dump_seal_disclosure: the in-kernel runner holds NO
+// CAP_HOSTOWNER (CAP_ALL excludes every elevation-only cap), so a cross-principal
+// environ read is reachable there and must read -1.
 void test_devproc_environ(void) {
     // --- the gate ----------------------------------------------------------
     struct Proc *caller = proc_alloc();
@@ -2107,19 +2598,19 @@ void test_devproc_environ(void) {
 
     caller->principal_id = 0xB0Bu;
     caller->caps         = 0;
-    TEST_ASSERT(!devproc_owner_or_hostowner(caller, target),
+    TEST_ASSERT(!devproc_extract_authorized(caller, target),
                 "V-4b-6: a non-owner without caps cannot read a peer's environ");
     caller->principal_id = 0xA11CEu;
-    TEST_ASSERT(devproc_owner_or_hostowner(caller, target),
+    TEST_ASSERT(devproc_extract_authorized(caller, target),
                 "V-4b-6: the owner can");
     caller->principal_id = 0xB0Bu;
     caller->caps         = CAP_HOSTOWNER;
-    TEST_ASSERT(devproc_owner_or_hostowner(caller, target),
+    TEST_ASSERT(devproc_extract_authorized(caller, target),
                 "V-4b-6: CAP_HOSTOWNER can");
     // CAP_DEBUG is deliberately NOT an axis: environ is an info file, and a
     // debugger's authority to stop a Proc is a different grant from a reader's.
     caller->caps = CAP_DEBUG;
-    TEST_ASSERT(!devproc_owner_or_hostowner(caller, target),
+    TEST_ASSERT(!devproc_extract_authorized(caller, target),
                 "V-4b-6: CAP_DEBUG alone is not an environ axis");
     caller->state = PROC_STATE_ZOMBIE;
     proc_free(caller);

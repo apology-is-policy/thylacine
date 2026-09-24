@@ -431,11 +431,25 @@ newline-delimited JSON-RPC over stdio exposing the same operations as
 tools; wired via `.mcp.json`).
 
 `quaestor owner <path>` is the per-surface cutover test: does the vault
-already carry this surface, so an edit belongs in a dossier rather than in a
-new reference doc? Exit 0 says go to the vault, 1 says write the reference
-doc as today and file the sweep. It exists because the cutover rule is only
-worth adopting if the test is one command — "grep the vault for the path"
-gets two conventions wrong, and both wrong answers are confident.
+already carry this surface, so an edit belongs in its dossier? Exit 0 says
+go to the vault -- or that no dossier is owed at all (below); 1 says a NEW
+dossier is owed, authored under `vault/system/` by whoever touched the surface
+(`docs/reference` has been frozen since 2026-09-06, and the vault agent that
+"file the sweep" once meant was retired 2026-09-15; the directive said both
+until 2026-09-23). It exists because the cutover rule is only worth adopting if
+the test is one command — "grep the vault for the path" gets two conventions
+wrong, and both wrong answers are confident.
+
+Two verdicts say **no dossier is owed**, and both are the coverage view's own
+rules, called rather than restated, so the command and the view cannot disagree
+about what is owed: **HARNESS** (`isHarness` -- a `usr/*-test`, `-probe`,
+`-smoke`, `-bench` or `-torture` program, or one of a named few, which exercises
+the system rather than being part of it) and **OUTSIDE THE CODE CENSUS** (not
+matched by `srcRe`: a `tools/` script, the vault's own tooling). Before
+2026-09-23 both answered UNOWNED with "write the reference doc", and a session
+queued a dossier for seven `u-*` probes on that word. A dossier may still claim
+a harness program -- as its surface's device witness -- and then the answer is
+OWNED.
 
 It reports **two** verdicts and they are not the same question:
 

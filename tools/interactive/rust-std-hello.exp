@@ -1,0 +1,56 @@
+#!/usr/bin/expect -f
+# tools/interactive/rust-std-hello.exp -- Track R (Rust std port), the R-1
+# on-device witness. Proves the first cargo-built Rust `std` program RUNS on
+# Thylacine, not just that it links: /r1hello exercises stdout, a HashMap
+# (alloc + hashing), threads (spawn/join over the pthread/torpor path), and a
+# caught panic (the unwinder + libunwind link), then prints `R1-HELLO: PASS`
+# and exits 0. File read + TCP connect are informational (no guaranteed file /
+# no netd listener in the boot-test image), so they do NOT gate the verdict.
+#
+# Why an .exp and not joey's pouch_smoke_one: ut connects a child's stdout to
+# the console, so each R1-* token prints as plain text on its own line and is
+# matchable here; pouch_smoke_one drains a child to a buffer and does not echo,
+# so it cannot witness the per-leg tokens.
+#
+# Meaningful only on the track-R box + a `--config ci` image baked there:
+# /r1hello exists ONLY when build_rust_progs ran (the pinned nightly + the
+# ../libc-thylacine fork + the patched rust-src all present). Off that box the
+# binary is absent and this gate is not run. See usr/ports/rust/README.md "R-1".
+#
+# Echo discipline (lib.exp): every asserted token is an upper-case R1-* string
+# the ut line editor cannot emit while echoing the typed `/r1hello` (lower-case,
+# no digits-after-R1), so a single exact match is unambiguous.
+
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# Run the witness. Assert each core leg's OK token in the program's print order;
+# a leg that fails prints `<LEG>: FAIL` (not the OK token), so its assert misses
+# and names the failing leg. The final verdict below is the fail-fast arm.
+lc_send "/bin/r1hello"
+lc_expect "R1-HELLO: std alive on thylacine" "std entry -- main reached, stdout live"
+lc_expect "R1-HASHMAP: ok" "HashMap -- alloc + hashing"
+lc_expect "R1-THREADS: ok" "threads -- spawn/join over the pthread/torpor path"
+lc_expect "R1-PANIC-UNWIND: ok" "caught panic -- the unwinder + libunwind link"
+
+# The overall verdict, with a fast FAIL arm (a core leg reported FAIL upstream)
+# so a red run does not burn the whole command timeout. R1-FILE / R1-TCP are
+# informational lines that print just before this and are intentionally not
+# asserted; the -ex PASS match scans past them.
+set ct $::lc_cmd_timeout
+set timeout $ct
+expect {
+    -ex "R1-HELLO: PASS" { lc_step "saw: R1-HELLO PASS" }
+    -ex "R1-HELLO: FAIL" { lc_fail "r1hello reported FAIL -- a core std leg failed on device" }
+    -re {EXTINCTION:}    { lc_extinction_fail "kernel extinction while running /r1hello" }
+    timeout             { lc_fail "timeout (${ct}s) waiting for the R1-HELLO verdict" }
+    eof                 { lc_fail "qemu exited while running /r1hello" }
+}
+lc_pass "R-1: the cargo-built Rust std hello RAN on device -- stdout + HashMap +\
+         threads + caught-panic-unwind all live, R1-HELLO: PASS"
+
+lc_quit
+lc_pass "rust-std-hello: R-1 on-device witness verified (std runs on thylacine)"
+exit 0

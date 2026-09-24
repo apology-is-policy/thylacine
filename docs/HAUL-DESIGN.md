@@ -631,6 +631,49 @@ before it could cost this chunk an afternoon.)
 | widening `MAY_POST_SERVICE` to the session shell | hands every user program service-posting AND console-owner re-designation; the header names that containment explicitly |
 | shared namespaces (RFNAMEG) | architectural, unsupported at v1.0, and I-1-adjacent |
 
+## 4.7 Ownership on a Haul mount — the cape (RATIFIED 2026-09-23)
+
+**What failed.** The operator served `~/decks` from the Mac and ran lantern on
+it in the guest. The mount attached, then `ls`, `cd` and lantern's open of
+`slides.toml` all failed with "permission denied". dev9p enforces rwx in the
+kernel (IDENTITY-DESIGN.md 3.7), on the owner and mode the server reports:
+- npxf reports the Mac's: uid 501, gid 20 (staff).
+- No Thylacine principal is 501, so every guest user was "other".
+- The deck was `drwx------` / `-rw-------`, which gives "other" nothing.
+
+Every Haul gate had served a 0755/0644 fixture, so none could see it. The host
+log showed nothing either: the refusal happened in the guest, after
+the server had answered the stat correctly.
+
+**The decision** (operator vote, 2026-09-23: "mounter owns") builds
+IDENTITY-DESIGN 3.2's mount-cape, which had been left a seam. A caped session
+reports:
+- owner = the principal that attached it;
+- group = that principal's primary group;
+- the server's per-file mode, kept.
+
+The npxf token already grants that principal everything the server serves, so
+the guest's view now matches the real authority. Nothing identity-bearing goes
+the other way:
+- the attach names no user (`n_uname` = none);
+- a create sends the group as `(u32)-1`, which npxf's `try_set_gid` reads as
+  "leave it";
+- chown and chgrp are refused in the guest.
+
+**haul's part:**
+- The private mount passes `SYS_ATTACH_9P_CAPE` on `SYS_ATTACH_9P`'s new flags
+  word.
+- `--post` creates its service with `DMSRVCAPE` beside `DMSRVBYTE`. Every
+  attach over the service is caped, so the operator's plain
+  `mount /srv/NAME PATH /` needs no new option.
+- The kernel admits `DMSRVCAPE` only on a byte-mode post. There the attacher
+  holds a raw READ+WRITE connection, so the cape grants it nothing that
+  connection did not; a 9P-mode opener never holds the transport, and that
+  argument would not hold for it.
+
+The full semantics, the mechanism and the escalation argument are in
+IDENTITY-DESIGN.md 3.2.
+
 ## 5. Open
 
 - **Where the guest gets the token.** Today: `-t FILE` or `--token-env VAR`,

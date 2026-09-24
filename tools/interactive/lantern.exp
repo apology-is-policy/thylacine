@@ -1,0 +1,143 @@
+#!/usr/bin/expect -f
+# tools/interactive/lantern.exp -- the Beacon deck presenter over a real PTY
+# (docs/LANTERN-DESIGN.md).
+#
+# This gate exists for a reason beyond its own legs: NOTHING in the tree runs
+# `cargo test`, so lantern's 22 pure-half host tests are re-run only when a human
+# remembers to. Its manifest parsing, key map and navigation are covered there;
+# what is covered ONLY here is the part no host test can reach -- that the
+# program actually runs on the device, finds its deck in the pool, pages with
+# real keystrokes through a real line discipline, and leaves.
+#
+# The legs, each matching a token only that leg's OUTPUT can produce, and no two
+# sharing one (the LS-CI discipline, lib.exp):
+#   (a) --check on the installed /deck   -> "3 slides, all valid", exit 0
+#   (b) `lantern /deck | cat`            -> the CAT posture (stdout is a pipe, so
+#                                           no clear and no keys): one token from
+#                                           each of the three slides IN ORDER,
+#                                           plus the last footer "3 / 3", exit 0
+#   (c) a manifest naming a path         -> "carries no '/'", exit 1
+#   (d) a manifest with an unknown key   -> "sets only 'slides'", exit 1
+#   (e) a directory with no manifest     -> the manifest named, exit 1
+#   (f) THE PRESENTATION: `lantern /deck` with the console on both fds -> slide
+#                                           one; SPACE advances to slide two; `q`
+#                                           leaves; exit 0
+#
+# Leg (f) is the one that proves the facility. It is also the only leg that
+# depends on `lantern` being a member of ut's raw-mode set: without membership a
+# console child is handed piped-then-dropped stdin and EOFs at birth, so the
+# SPACE would never arrive and the leg would time out rather than mis-pass.
+#
+# The RICH tier is NOT driven here, for the reason manual.exp records: this
+# image's console advertises `cells` (which every plain-tier realization renders
+# identically), and `echo -n rich > /env/BEACON` cannot change it from the shell
+# -- ut truncates its own BEACON while echo's write lands in echo's dying copy.
+# Rich is seen for real only in a Halcyon tile, whose pts advertises it. So every
+# token below is plain text, and a rich regression is NOT in this gate's reach.
+
+# HVF: the scenario is boot-dominated, and nothing lantern does depends on the
+# CPU model or the GIC version the TCG anchor set covers.
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+# Wait for `<tag> <code>` at the end of a line; a different code for the same tag
+# fails at once instead of waiting out the timeout, and so does `failpat` (exact
+# text no correct run prints). expect picks the FIRST listed pattern matching what
+# has arrived, so `failpat` precedes the status: output and status arriving in one
+# read then fail, where the other order would pass on the status.
+proc lantern_status {tag code phase {failpat ""}} {
+    global lc_cmd_timeout timeout
+    set timeout $lc_cmd_timeout
+    if {$failpat eq ""} {
+        expect {
+            -ex "$tag $code\r"      { lc_step "saw: $phase" }
+            -re "$tag (\[0-9\]+)\r" { lc_fail "$phase: exit status $expect_out(1,string), want $code" }
+            -re {EXTINCTION:}       { lc_extinction_fail "kernel extinction during '$phase'" }
+            timeout                 { lc_fail "timeout (${lc_cmd_timeout}s) waiting for \[$tag $code\] during '$phase'" }
+            eof                     { lc_fail "unexpected EOF during '$phase'" }
+        }
+        return
+    }
+    expect {
+        -ex $failpat            { lc_fail "$phase: \[$failpat\] was printed" }
+        -ex "$tag $code\r"      { lc_step "saw: $phase" }
+        -re "$tag (\[0-9\]+)\r" { lc_fail "$phase: exit status $expect_out(1,string), want $code" }
+        -re {EXTINCTION:}       { lc_extinction_fail "kernel extinction during '$phase'" }
+        timeout                 { lc_fail "timeout (${lc_cmd_timeout}s) waiting for \[$tag $code\] during '$phase'" }
+        eof                     { lc_fail "unexpected EOF during '$phase'" }
+    }
+}
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# (a) The installed deck validates. "cannot be shown" is the per-slide failure
+# line, which a passing check never prints.
+lc_run_expect {lantern --check /deck; echo lnchk $status} "3 slides, all valid"
+lantern_status lnchk 0 "lantern(a) --check exit status" "cannot be shown"
+lc_pass "lantern(a): the installed /deck validates whole, exit 0"
+
+# (b) The CAT posture. Down a pipe there is no clear and no keys, so all three
+# slides arrive in order -- which makes this the leg that pins the ORDER coming
+# from the manifest rather than from the file names. Each token is a phrase only
+# a rendering of that slide produces.
+lc_run_expect {lantern /deck | cat; echo lncat $status} "renderer already knows how to draw one"
+lc_expect "raw character grid" "lantern(b) slide two follows slide one"
+lc_expect "keeping the slide on screen" "lantern(b) slide three follows slide two"
+lc_expect "3 / 3" "lantern(b) the last slide's footer counts the deck"
+lantern_status lncat 0 "lantern(b) exit status"
+lc_pass "lantern(b): the cat posture renders all three slides in the manifest's order with their footers, exit 0"
+
+# (c) A slide name that is a path is refused. The diagnostic's words are not in
+# the line typed to create the file, so only lantern can produce them.
+lc_send {mkdir /tmp/bad1}
+lc_send {echo 'slides = ["sub/a.md"]' > /tmp/bad1/slides.toml}
+lc_run_expect {lantern /tmp/bad1; echo lnpath $status} "carries no '/'"
+lantern_status lnpath 1 "lantern(c) exit status"
+lc_pass "lantern(c): a slide name carrying a path separator is refused, exit 1"
+
+# (d) An unknown key is refused rather than ignored -- and `scale` is the one
+# worth pinning, because refusing it is what keeps display authority out of a
+# deck file someone else wrote.
+lc_send {mkdir /tmp/bad2}
+lc_send {echo 'slides = ["01-title.md"]' > /tmp/bad2/slides.toml}
+lc_send {echo 'scale = 200' >> /tmp/bad2/slides.toml}
+lc_run_expect {lantern /tmp/bad2; echo lnkey $status} "sets only 'slides'"
+lantern_status lnkey 1 "lantern(d) exit status"
+lc_pass "lantern(d): an unknown manifest key is refused, so a deck file carries no display authority, exit 1"
+
+# (e) A directory with no manifest names the file it wanted.
+lc_send {mkdir /tmp/bad3}
+lc_run_expect {lantern /tmp/bad3; echo lnnom $status} "slides.toml"
+lantern_status lnnom 1 "lantern(e) exit status"
+lc_pass "lantern(e): a deck directory with no manifest is a diagnostic naming it, exit 1"
+
+# (f) THE PRESENTATION. Both fds are the console, so lantern pages. It is typed
+# without a status read on the same line: the presentation owns the console until
+# `q`, and the status is read from the next prompt.
+# The tokens here are HEADINGS and FOOTERS, deliberately: unlike leg (b), this
+# posture has a console width, so `plain_width` is Some and body prose is WRAPPED
+# -- a multi-word body token could straddle a line break and turn a real pass
+# into a timeout. A heading and a footer each occupy their own short line. The
+# `slide_tokens_render_contiguously` host test pins that for both postures
+# against the shipped slides themselves, so a renderer change breaks a test
+# rather than this gate mysteriously.
+lc_send {lantern /deck}
+lc_expect "1 / 3" "lantern(f) slide one is presented, its footer counting the deck"
+# SPACE is a bare byte, not a line: the discipline is raw, so nothing is waiting
+# for a newline. A deck that ignored it would time out here rather than pass.
+lc_raw_send " " "lantern(f) SPACE to advance"
+lc_expect "How it works" "lantern(f) SPACE advanced: slide two's own heading"
+lc_expect "2 / 3" "lantern(f) the footer followed the advance"
+lc_raw_send "q" "lantern(f) q to leave"
+# Expecting 0 here is weak on its own -- a status read stuck at 0 would pass it.
+# Legs (c), (d) and (e) are its controls: each expects 1, so a constant would
+# fail one pair or the other.
+lc_send {echo lnpres $status}
+lantern_status lnpres 0 "lantern(f) presentation exit status"
+lc_pass "lantern(f): the presentation paints a slide, advances on a keystroke, and leaves on q, exit 0"
+
+lc_quit
+lc_pass "LS-CI lantern: the check, the cat posture with manifest order, three refusals, and a real keystroke-driven presentation"
+exit 0

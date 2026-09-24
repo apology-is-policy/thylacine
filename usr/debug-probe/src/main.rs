@@ -16,7 +16,8 @@
 //                  VAs, pstate M[3:0] == 0 (EL0t) -- the SPSR privilege bits,
 //        - mem:    read 8 bytes at the x21 VA == SENTINEL_MEM (cross-Proc read of
 //                  a genuinely-resident EL0 page against a foreign pgtable_root),
-//        - kregs:  fp/lr/sp are kernel (TTBR1, bit-63) VAs,
+//        - kregs:  the owner axis gets NO kernel frame -- x19..x28/fp/lr/sp read
+//                  as 0 (they are the KASLR slide, CAP tier only; I-16),
 //        - kstack: a non-empty symbolized kernel backtrace starting at "#0",
 //        - wait:   returns "stopped" (the notification channel, already parked),
 //   5. MODIFY + RESUME: write 1 to the child's resume flag via /proc/<pid>/mem
@@ -232,18 +233,21 @@ fn debug_flow(child: &mut Child) -> Result<(), &'static str> {
     }
     t_putstr("debug-probe: mem read ok (cross-Proc SENTINEL_MEM)\n");
 
-    // --- kregs: the kernel-side frame (fp/lr/sp are TTBR1 VAs) ---
-    let mut kregs = [0u8; KREGS_LEN];
+    // --- kregs, OWNER axis: this probe holds neither CAP_DEBUG nor CAP_HOSTOWNER
+    //     (both are elevation-only, stripped at spawn), so the kernel half --
+    //     x19..x28, fp, lr, sp: the KASLR slide -- must read as zero (I-16) ---
+    let mut kregs = [0xA5u8; KREGS_LEN];
     if read_exact_at(kregs_f.as_raw_fd() as i64, 0, &mut kregs).is_err() {
         return Err("debug-probe: FAIL -- read kregs\n");
     }
-    let kfp = u64_le(&kregs, K_FP);
-    let klr = u64_le(&kregs, K_LR);
-    let ksp = u64_le(&kregs, K_SP);
-    if (kfp >> 63) != 1 || (klr >> 63) != 1 || (ksp >> 63) != 1 {
-        return Err("debug-probe: FAIL -- kregs fp/lr/sp not kernel VAs\n");
+    let kernel_half_zero = (0..10).all(|i| u64_le(&kregs, i * 8) == 0)
+        && u64_le(&kregs, K_FP) == 0
+        && u64_le(&kregs, K_LR) == 0
+        && u64_le(&kregs, K_SP) == 0;
+    if !kernel_half_zero {
+        return Err("debug-probe: FAIL -- kregs handed the owner axis a kernel address (I-16)\n");
     }
-    t_putstr("debug-probe: kregs ok (kernel-side frame)\n");
+    t_putstr("debug-probe: kregs ok (owner axis: no kernel frame)\n");
 
     // --- kstack: a non-empty symbolized kernel backtrace starting at "#0" ---
     let mut kbuf = [0u8; 256];

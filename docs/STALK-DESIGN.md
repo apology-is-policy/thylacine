@@ -353,6 +353,89 @@ Spoor's registry, mint a `SrvConn`, return a **`KOBJ_SPOOR`** endpoint.
   root. That syscall **stays**, retargeted to accept a `KOBJ_SPOOR` devsrv
   byte-Spoor (via `devsrv_conn_of`) instead of a `KObj_Srv` handle.
 
+**Connect admission (U, 2026-09-23).** A byte-mode connect hands the client the
+**raw transport**: from that point the kernel is a pipe and cannot bound what
+the client asks the server for. A 9P-mode connect is the opposite -- the kernel
+performs the Tversion + Tattach itself and every later message passes through
+its own 9P client, where the kernel's rules apply. Peer identity is stamped in
+*both* modes and reachable through `SYS_SRV_PEER`; the asymmetry is not whether
+identity exists but whether the kernel can bound the **request**. Admission for
+a byte-mode service must therefore be decided **at connect**.
+
+**A cross-Proc pouch AF_UNIX server must post under `CAP_POST_SERVICE`.** A
+byte socket bound through POSIX `bind()` by a `MAY_POST_SERVICE`-marked Proc is
+`cap_posted == false` -- the TCB class -- so a *different* unprivileged Proc
+connecting to it is now refused. The only in-tree consumer self-connects, so the
+self-post exemption hides this; a genuine cross-Proc server must therefore post
+with the capability rather than the mark.
+
+**The blast radius is narrow, and it was measured rather than assumed
+(2026-09-23).** This is not a compatibility break in ported POSIX software,
+because pouch's `bind()` never supported the ordinary POSIX idiom in the first
+place: `sun_path` maps only `"/srv/<name>"` or a bare relative `"<name>"`, and
+**anything else -- `/tmp/foo.sock` and every other filesystem path -- has
+returned `EINVAL` since the seam landed** (patch `0006-pouch-sockets`,
+POUCH-DESIGN 6.2 open question 6.2). So the affected population is exactly:
+pouch programs that deliberately bind a `/srv` name *and* are dialled from a
+different Proc. Those already need `PROC_FLAG_MAY_POST_SERVICE`, which joey
+confers at spawn, so they are deliberate OS components rather than arbitrary
+user programs. **The two-Proc POUCH test landed 2026-09-23, and writing it found a defect.**
+The *rule* was already covered at both polarities in the kernel:
+`devsrv.srv_connect_gate` dials from a genuinely distinct Proc
+(`make_test_proc()`), refused on a TCB-posted byte service and admitted on a
+`CAP_POST_SERVICE`-posted one. What was untested was the **boundary line**, and
+only a device test could settle it. `pouch-hello-sockets`' `xproc-gate` leg
+binds `/srv/pouch-sock-xproc` under the mark, `posix_spawn`s a second real Proc,
+and asserts three outcomes each one variable from the next: the poster dials its
+own service (the self-post exemption -- asserted FIRST, so a service nothing
+could reach can never be read as "the refusal below worked"), the child is
+refused `EACCES`, and the child is refused `ECONNREFUSED` on a name that is
+genuinely absent. It also confirms on device what this section asserts of
+`stripes`: a `posix_spawn`ed child's tag is its own, so the exemption does not
+reach children.
+
+The third leg is what earned its place. pouch's `connect()` mapped **every**
+`SYS_open` failure to `ECONNREFUSED`, so the `T_E_ACCES` this design carries out
+through `spoor_open_errno` died one frame later at the libc boundary: a POSIX
+caller denied on authority was told the service was ABSENT. That is not
+cosmetic. `ECONNREFUSED` is the TRANSIENT AF_UNIX error, the one every client
+retries on, so the universal back-off loop would retry forever against a
+permanent denial. Fixed in patch `0006-pouch-sockets` by a single
+`srv_open_errno` decision point. Leg 2 is the assertion that catches it, and
+the sabotage matrix proves it load-bearing: restoring the blanket map reddens
+leg 2 at `errno=111 want EACCES=13` while leg 1 stays green. The opposite
+blanket (every failure -> `EACCES`) is caught too, but one subtest EARLIER, by
+the pre-existing `connect`-to-an-absent-name leg in the poster's own Proc -- so
+leg 3 is **not** the control that catches it, and the first version of this
+paragraph said it was. Leg 3's unique reach is a CHILD-SPECIFIC spurious
+`EACCES`, which no sabotage of the shared helper can produce: it is reasoned
+coverage plus a diagnostic, not a sabotage-proven control. `bind()`'s mirror
+collapse (every post failure
+-> `EACCES`) is tracked rather than fixed: it is reachable today through the
+15/16 /srv registry headroom, where exhaustion reports as "permission denied".
+
+The rule, enforced in `devsrv_open_connect`:
+
+- A byte-mode service posted under the `PROC_FLAG_MAY_POST_SERVICE` TCB mark
+  (`SrvService.cap_posted == false`) is connectable only by a Proc holding
+  **`CAP_TCB_DIAL`**. Refusal is `T_E_ACCES`.
+- **A Proc may always connect to a service it posted itself** (the connector's
+  `proc_stripes` equals the service's `poster_stripes`). It is the server; a
+  self-connect conveys nothing it does not already hold. `stripes` is a fresh
+  per-Proc tag, so this exemption is exactly "the same Proc" -- not its children,
+  not its Proc group.
+- A byte-mode service posted under `CAP_POST_SERVICE` (`cap_posted == true`: a
+  user's own scoped post, e.g. `haul --post`) is unaffected, as is every
+  9P-mode service.
+
+The discriminator is **derived** from state the kernel already stamps at reserve,
+so it cannot go stale and a TCB byte service is gated the day it is posted --
+no poster has to remember a bit. This is default-deny for the TCB class.
+
+`devsrv` stays system-owned 0555/0444 and NOT `perm_enforced`: the connect gate
+is a **capability** check, never an rwx check, so it does not reintroduce a
+permission surface on `/srv` (I-22).
+
 The connection endpoint is `KOBJ_SPOOR`, not the current `KObj_Srv` (the §18.2
 `KObj_Srv` kind is retained only for the **listener** side, §5.3). A devsrv
 connection Spoor stays **non-dup-able** (a `dc='s'` guard in `handle_dup`),
@@ -568,6 +651,7 @@ attach-9p unification); integer/bounds on the tokenizer.
 | **D5** | 9P-mode service path resolution (Q1, 2026-06-02) | **Two-step explicit attach** — `open("/srv/corvus")` connects + returns a dev9p root; the client then opens `"ctl"` relative to it. `stalk` performs no connect-cross / no blocking 9P handshake mid-resolution (path resolution stays I/O-free; matches Plan 9 open-then-mount; smallest audit surface). One-call `open("/srv/corvus/ctl")` rejected over the convenience-but-hidden-I/O alternative. |
 | **D6** | post-by-create mode encoding (Q2, 2026-06-02) | **`DMSRVBYTE` `perm` bit** — `create("/srv/x", perm=DMSRVBYTE)` posts byte-mode, default posts 9P-mode (Plan 9 `DM*` perm-bit idiom). Chosen over an `omode` bit (mode-of-the-service is an attribute, not an open intent). |
 | **D7** | per-territory registry scope (Q3, 2026-06-02) | **Full multiplicity now** — `SrvRegistry` becomes heap-allocated + refcounted, reached through the mounted devsrv root Spoor; boot mounts one global registry at `/srv`; login (A-5b-body) can mount a fresh per-session registry. The refcount-lifecycle work lands + is audited in stalk-3a. Chosen over single-registry-now / defer-multiplicity (the isolation crux gets its own focused round, per "build the fuller thing" + §0 "required for the feature"). |
+| **D8** | `/srv` connect admission (U, 2026-09-23) | **A capability gate at connect, default-deny for TCB byte services** (§5.2). D5/D7 left the boundary at per-territory *visibility*; that is not sufficient. login never built D7's per-session registry, so boot's immortal registry is inherited by every session -- and a per-session registry could not fully help even once built, because the per-user home proxy lives INSIDE the session and must dial the coordinator. **Owner+mode was considered and rejected**: the proxy runs AS the user (`login` stamps its identity so the coordinator attributes the home files to that user), so no identity rule separates it from the user's own shell -- authority *for this dial* has to be a capability, never an identity (I-22). **That is not a claim that only a capability can ever separate them**: the I-39 debug surface separates on identity, so the same principal can attach to the proxy and drive its transport with no capability at all. That route predates this gate, and is closed in this same chunk by `SPAWN_PERM_SEAL` ((U) F1, widened by F5 to cover dumps): login spawns the proxy with the bit and the kernel stamps `PROC_FLAG_NOTRACE` and `PROC_FLAG_NODUMP` before the child's first EL0 instruction, so there is no window in which the shell could attach first -- a self-call to `SYS_SET_TRACEABLE(0)` would leave one, and a same-principal Proc able to use it really exists (a second login, or a process backgrounded from a prior session). That bit is deliberately the one UNGATED `SPAWN_PERM_*`, because it confers nothing a child could not already do to itself. The route would be reopened on the owner axis by the planned `/proc/<pid>/fd/` (deferred at devproc.c:27), which NOTRACE does not cover: that surface must gate on more than the owner axis when it lands. **An explicit "I am privileged" post bit was also rejected** as the primary rule, on two grounds: a poster that forgets it fails OPEN, and the one poster that would have needed the opposite (an opt-out) reaches `/srv` through a POSIX `bind()`, which has no way to carry a Thylacine perm bit at all. The self-post exemption in §5.2 covers that case exactly and adds no ABI. |
 
 ---
 

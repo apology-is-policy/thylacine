@@ -1,0 +1,25 @@
+# R-1 witness: the first cargo-built Rust `std` program for Thylacine.
+# Built by tools/build.sh build_rust_progs (gated on the track-R toolchain);
+# staged into the image as /r1hello; run by tools/interactive/rust-std-hello.exp.
+
+# Own workspace root -- DETACHES this crate from usr/Cargo.toml. It sits under
+# usr/, so cargo would otherwise walk up and bind it to the native no_std
+# workspace (aarch64-unknown-none, stable), which it is NOT: r1-hello is a ports
+# crate built for aarch64-unknown-thylacine on the pinned nightly via -Z
+# build-std. An empty [workspace] table stops the upward walk (cargo's own
+# "keep it out of the workspace" fix); the rust-toolchain.toml pin at
+# usr/ports/rust/ still applies (toolchain discovery is a separate upward walk).
+[workspace]
+
+[package]
+name = "r1hello"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "r1hello"
+path = "src/main.rs"
+
+[profile.release]
+panic = "unwind"

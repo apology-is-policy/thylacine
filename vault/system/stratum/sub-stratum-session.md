@@ -15,7 +15,7 @@ locks: []
 abis: []
 design: ["docs/IDENTITY-DESIGN.md section 9.9", "docs/CORVUS-DESIGN.md"]
 created: 2026-08-02
-updated: 2026-09-17
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -24,6 +24,64 @@ read, without `login` ever holding the key and without the two users'
 sessions being able to name each other's data.
 
 ## Contract
+
+**The home proxy holds `CAP_TCB_DIAL` (U, 2026-09-23).** The proxy dials
+byte-mode `/srv/stratum-fs`, a TCB service, which since (U) requires that
+capability ([[sub-kernel-devsrv]]). login confers it in the proxy's spawn
+`.caps(...)`, one hop, exactly as it confers `MAY_POST_SERVICE`.
+
+**This is the case that forced the gate to be a capability rather than an
+identity check.** The proxy runs AS THE USER on purpose -- that is the whole
+mechanism by which the coordinator attributes the user's home files to them --
+and the user's own shell is the same principal, spawned by the same login. No
+owner+mode rule can admit one and refuse the other; only a capability can
+([[inv-i22]]). The shell's `SHELL_CAPS` omits the bit, and capabilities never
+grow after creation (I-2), so nothing the user runs can acquire it.
+
+**But the capability alone was not enough, and that is the (U) F1 finding.**
+Holding the key is only half the problem; the other half is that the key-holder
+must not be puppetable by a peer wearing the same identity. `devproc_debug_-`
+`authorized` admits the OWNER, and the proxy's owner is the user -- so the user's
+shell could debug-attach the proxy and drive its live coordinator transport,
+reaching the system store with no capability at all. The front door was locked
+and the side door stood open. Closed by login passing `T_SPAWN_PERM_SEAL` (NOTRACE + NODUMP)
+(bit 9) on the proxy spawn, so the kernel stamps `PROC_FLAG_NOTRACE` before the
+proxy's first EL0 instruction; the bit's placement and its deliberate lack of a
+grant gate are in [[sub-kernel-syscall-dispatch]].
+
+**Spawn-time, not a self-call, and the difference is a real race here.** A proxy
+that sealed itself with `SYS_SET_TRACEABLE(0)` would be attachable between exec
+and the call. The Proc able to use that window is not hypothetical in a login
+session: a second login, or a process the user backgrounded in a prior session,
+is already running as the right principal when the new proxy appears.
+
+**The caveat to carry, because NOTRACE does not cover it.** Only the debug route
+is closed. The planned `/proc/<pid>/fd/` surface (deferred in `kernel/devproc.c`,
+in the header comment enumerating the per-pid files) would be gated on the OWNER
+axis, and an owner-gated fd
+listing reopens the same reach by a different mechanism -- dup the proxy's live
+coordinator fd instead of attaching to the proxy. That surface must gate on more
+than the owner axis, and this dossier is where the requirement is recorded
+because the proxy is the asset it would expose.
+
+**And `/proc/<pid>/fd/` is not the only one -- the class is "owner-gated per-pid
+file", and it has a second member already named.** Enumerating the per-pid files
+by their gate rather than by their purpose (self-audit, (U) F1): `mem`, `regs`,
+`fpregs`, `wait`, `kregs` and `kstack` take the DEBUG gate, which is what makes
+NOTRACE sufficient today. But `environ`, `sched`, `maps`, `cwd`, `exe`, `status`,
+`cmdline` and `imperium` take **owner-or-`CAP_HOSTOWNER`**, so the user's shell
+reads all of them on the proxy right now. None leaks anything today: `environ` is
+empty because envp pass-through does not exist at v1.0 (`_pad_envp` "must be 0",
+rejected loudly), and the rest are names, addresses and counters.
+
+The one to watch is `environ`. **When envp pass-through lands, anything login puts
+in the proxy's environment becomes readable by that user's own shell** -- so the
+proxy must never be handed a secret that way, and `haul`'s `--token-env` is
+precedent that we do sometimes pass secrets through the environment. Recorded here
+rather than at the envp work, because the requirement belongs to the asset.
+(The owner being able to KILL the proxy is expected, not a hole: [[inv-i26]] makes
+kill two-axis, and a user may always end their own session.)
+
 
 At login, in order:
 
@@ -216,6 +274,17 @@ CSPRNG_READ); the session compositor masks `!T_CAP_SET_IDENTITY` again on
 each tile spawn (the second hop's own guard), and the kernel intersects, so
 both hops are monotone. Witness: `/bin/caps-probe` in a session tile -- a
 plain spawn succeeds, the same spawn with an identity request is REFUSED.
+
+**The compositor is SEALED as of 2026-09-24**, for the same reason the home proxy is
+and by the same bit. `halcyond --session` runs AS the user with the shell's own cap
+mask, and it masks its tile children with `!CAP_SET_IDENTITY`, which spawn intersects
+against its own set -- so every tile program's caps equal the compositor's EXACTLY and
+the I-39 cover rule admits all of them. Unsealed, any tile could have debug-attached the
+compositor and taken its `MAY_POST_SERVICE` (impersonating `/srv/halcyon-<user>`), its
+`SESSION_HANGUP`, and every other tile's surface share. Sealing it does NOT seal the
+tiles: they are SPAWNED, and the seal crosses no spawn (nor, until decision A lands,
+any fork). The session shell `ut` is
+deliberately left unsealed -- see the census at `CAP_TCB_DIAL` in `caps.h`.
 
 ## login degrades to the console shell when the compositor cannot start (2026-09-07)
 

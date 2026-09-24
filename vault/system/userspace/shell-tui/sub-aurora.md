@@ -1,9 +1,10 @@
 ---
 id: sub-aurora
 type: sub
-title: "aurora — the console renderer, and eighteen tests that cannot compile"
+title: "aurora — the console renderer, and eighteen tests that could not compile"
 parent: moc-userspace-shell-tui
 code:
+  - usr/aurora/src/lib.rs
   - usr/aurora/src/main.rs
   - usr/aurora/src/render.rs
   - usr/aurora/src/osd.rs
@@ -17,7 +18,7 @@ hazards: []
 abis: []
 design: ["docs/AURORA.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-04
-updated: 2026-09-07
+updated: 2026-09-23
 ---
 ## Purpose
 
@@ -244,13 +245,19 @@ after closing; a tap does not.
   the parser trapped inside aurora's unconditionally-no_std crate;
   extracting it *was* the fix.
 
-- **Aurora's own modules remain no_std and host-untestable**, so `cargo
-  test` on the aurora crate still cannot build. The render side — the atlas
-  blit, the damage-to-present rectangle, the loop — is proven by the
-  in-guest end-to-end battery, which drives keystrokes through the full path
-  and asserts on rendered output. That is a different kind of proof than a
-  unit test: it exercises the paths a session takes, not malformed-input
-  paths, which is now [[sub-lib-vt]]'s to cover.
+- **FIXED 2026-09-23: aurora's own modules run their tests too.** They
+  were the other nine: a bin-only `no_std` crate cannot build for a host, so
+  `render`, `osd` and `config` carried their tests marked "DORMANT", pinned
+  contracts nothing ran, and `tools/test-rust.sh` counted them stranded. The
+  crate now has a lib (`lib.rs`: the three modules) and a bin (`main.rs`: the
+  drain/feed pair, the surface, the loop), with libthyla-rs and libtapestry
+  behind a default-on `backend` feature. Only the config file's `load` and
+  `save` take a syscall, so only they are gated; `--no-default-features`
+  builds the rest for the host. The render side past the unit tests -- the
+  atlas blit, the damage-to-present rectangle, the loop -- is still proven by
+  the in-guest end-to-end battery, a different kind of proof: it exercises
+  the paths a session takes, not malformed-input paths, which are
+  [[sub-lib-vt]]'s to cover.
 
 - **The window-size report at boot is silent by construction.** The
   transition from zero to a real grid is a change, so the kernel attempts

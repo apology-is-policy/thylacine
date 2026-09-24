@@ -139,6 +139,7 @@ use crate::parser::ast::{
     MaskNoteStmt, OnNoteStmt, Pipeline, Redirect, RedirectKind, Script, Statement,
     StatementKind, TraceStmt, TryStmt, WhileStmt, Word,
 };
+use crate::parser::lexer::unescape;
 use crate::parser::token::{DqPart, Token, TokenKind};
 use crate::parser::Span;
 
@@ -156,8 +157,9 @@ use super::builtin;
 use super::console;
 use super::env::Env;
 use super::error::{EvalError, EvalErrorKind, EvalResult};
-use super::expr::eval_expr;
+use super::expr::{eval_expr, eval_pattern};
 use super::glob;
+use super::pathname;
 use super::value::Value;
 
 /// The result of evaluating one statement (or one block).
@@ -1682,8 +1684,8 @@ fn trace_echo(argv: &[String]) {
 /// `$"var` form is the only way to collapse a multi-element value
 /// into one argv element.
 ///
-/// A bare unquoted word carrying a glob meta char is expanded against
-/// the filesystem (scripture 6.10, U-6e-b-2): it contributes the SORTED
+/// A bare unquoted word carrying an unescaped glob meta char is expanded
+/// against the filesystem (scripture 6.10, U-6e-b-2): it contributes the SORTED
 /// list of matching paths, or -- if nothing matches -- NO argv element
 /// at all (rc nullglob: a no-match glob expands to the empty list, never
 /// the literal). Quoted strings, `$var`, and `^`-concat words are taken
@@ -1692,7 +1694,7 @@ fn evaluate_argv(env: &Env, words: &[Word]) -> EvalResult<Vec<String>> {
     let mut argv = Vec::new();
     for w in words {
         if let Some(pat) = glob_candidate(w) {
-            let hits = glob::expand(env, pat);
+            let hits = pathname::expand(env, pat);
             // rc nullglob (scripture 6.10): an empty match set drops the
             // word entirely rather than passing the literal pattern.
             argv.extend(hits);
@@ -1712,17 +1714,19 @@ fn evaluate_argv(env: &Env, words: &[Word]) -> EvalResult<Vec<String>> {
     Ok(env.expand_alias(argv))
 }
 
-/// If `w` is a bare unquoted word carrying a glob meta char, return its
-/// pattern for filesystem expansion; otherwise `None` (the word is taken
-/// via normal value evaluation). Only `Word::Single(TokenKind::Word)`
-/// qualifies -- a single/double-quoted string, a `$var`, and a `^`-concat
-/// word are rc-literal (`echo "*.c"` and `echo a^*` do not glob).
+/// If `w` is a bare unquoted word carrying a glob meta char that its own `\`
+/// does not escape, return it as written -- the pattern for filesystem
+/// expansion; otherwise `None` (the word is taken via normal value
+/// evaluation, which removes its escapes, so `\*` is a literal `*`). Only
+/// `Word::Single(TokenKind::Word)` qualifies -- a single/double-quoted
+/// string, a `$var`, and a `^`-concat word are rc-literal (`echo "*.c"` and
+/// `echo a^*` do not glob).
 fn glob_candidate(w: &Word) -> Option<&str> {
     match w {
         Word::Single(Token {
             kind: TokenKind::Word(s),
             ..
-        }) if glob::has_meta(s) => Some(s.as_str()),
+        }) if glob::has_unescaped_meta(s) => Some(s.as_str()),
         _ => None,
     }
 }
@@ -1805,7 +1809,7 @@ fn eval_word(env: &Env, word: &Word) -> EvalResult<Value> {
 /// the Word layer carries.
 fn eval_value_token(env: &Env, tok: &Token) -> EvalResult<Value> {
     match &tok.kind {
-        TokenKind::Word(s) => Ok(Value::scalar(s.clone())),
+        TokenKind::Word(s) => Ok(Value::scalar(unescape(s))),
         // A `=` glued into a word (e.g. `-std=c++20`) is a literal character.
         TokenKind::Equal => Ok(Value::scalar(String::from("="))),
         TokenKind::SingleQuoted(s) => Ok(Value::scalar(s.clone())),
@@ -2322,8 +2326,7 @@ fn eval_case_stmt(env: &mut Env, stmt: &CaseStmt) -> EvalResult<StatementFlow> {
     let scrutinee_str = scrutinee.as_scalar();
     for arm in &stmt.arms {
         for pat in &arm.patterns {
-            let pv = eval_expr(env, pat)?;
-            let pat_str = pv.as_scalar();
+            let pat_str = eval_pattern(env, pat)?;
             if glob::matches(&pat_str, &scrutinee_str) {
                 return eval_statement(env, &arm.body);
             }

@@ -12,7 +12,7 @@ hazards: [haz-single-waiter-rendez, haz-death-path-wake]
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-09-21
+updated: 2026-09-23
 ---
 ## Event-loop I/O
 
@@ -76,7 +76,14 @@ flip on a published conn would corrupt a live 9P session) ·
 `srvconn_set_kernel_attached` / `srvconn_is_kernel_attached`
 (release/acquire pair; once set, a userspace close of the client
 endpoint must NOT tear the rings down — they are load-bearing for the
-kernel client; teardown migrates to the transport adapter's close).
+kernel client; teardown migrates to the transport adapter's close) ·
+`srvconn_set_cape` / `srvconn_cape` (the service's DMSRVCAPE mark,
+IDENTITY-DESIGN 3.2: set at mint before publication with
+`set_byte_mode`'s contract, RELEASE; read with ACQUIRE, false on a NULL or
+corrupted conn; marking a NULL, corrupted or kernel-attached conn
+extincts. The conn only CARRIES the mark: the attach helper decides what
+it means, and honours it only on a byte conn —
+[[sub-kernel-ninep-attach]]).
 
 **Deadline** — `srvconn_set_client_deadline(cn, abs_ns)` (0 = none;
 clears `client_timed_out`) · `srvconn_client_timed_out` (distinguishes
@@ -300,7 +307,8 @@ one-way) · the by-value identity four (`peer_stripes`, `peer_pid`,
 peer exit or a tombstone-rebind never turns a read into a UAF) · `msize`
 (immutable class) · `client_deadline_ns` + `client_timed_out` · two
 `struct srvconn_chan` (`c2s`, `s2c`) · the conn-wide `poll_list` ·
-`byte_mode` (release/acquire) · `kernel_attached` (release/acquire).
+`byte_mode` (release/acquire) · `kernel_attached` (release/acquire) ·
+`cape` (release/acquire; one-way, set at mint).
 
 `struct srvconn_chan`: `lock`, `cap`, `count`/`head`/`tail`, `eof`,
 `reading`/`writing` (the roles), `rendez` (consumer) + `wrendez`
@@ -401,7 +409,9 @@ What an auditor attacks here (the CLAUDE.md CF-3 B row absorbed):
 - **The one-way flags**: `kernel_attached`'s release/acquire pairing vs
   the userspace-close race (the close either sees the flag or the
   syscall has not yet returned the fd); `set_byte_mode` on a published
-  conn must extinct.
+  conn must extinct, and so must `set_cape` on a kernel-attached one (a
+  late mark would cape a session whose stats the Larder already holds
+  uncaped).
 - **Identity fail-closure**: every accessor revalidates magic — a freed
   conn must degrade to "no identity", never a stale tag.
 
@@ -460,7 +470,8 @@ this surface's blast radius but live there.
 pure transport), [[chg-2026-06-24-348-s2c-blocking]] (the s2c blocking
 send), [[chg-2026-06-24-349-flow-control]] (the EAGAIN contract on
 `send_frame`), [[chg-2026-07-08-cf3b-bulk-ring]] (heap rings + classes +
-the role park + the blocking client send).)
+the role park + the blocking client send), and (L) the Haul identity
+cape (`cape`).)
 
 ## Tests
 

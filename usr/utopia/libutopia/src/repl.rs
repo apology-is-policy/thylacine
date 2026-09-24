@@ -126,10 +126,6 @@ pub struct Repl {
     /// from `$home`. `None` keeps history in-memory only (a bare-spawned `ut`
     /// with no home, host tests) -- no append happens.
     history_path: Option<String>,
-    /// D4: whether a completion-menu candidate strip is currently drawn below
-    /// the prompt. Set on `MenuShow`; any other editor action first clears the
-    /// strip line, so a stale strip never lingers below the prompt.
-    menu_shown: bool,
     /// H-1c (BEACON.md 12.6): emit transcript zone frames. Set by the ut
     /// binary iff the resolved tier is Rich (the binary owns the consctl
     /// read + the fd-class probe + the /env/BEACON export -- Repl only ever
@@ -171,7 +167,6 @@ impl Repl {
             bin_commands: Vec::new(),
             completion_installed: false,
             history_path: None,
-            menu_shown: false,
             beacon_rich: false,
             prompt_roles: None,
             imperium: None,
@@ -470,13 +465,25 @@ impl Repl {
     /// `cd` with no argument resolves to, and the prompt abbreviates to `~` --
     /// and chdirs into it so a session `ut` starts in the user's home, syncing
     /// `$cwd` to the kernel cwd on success. A home that cannot be entered
-    /// (absent / no search permission) leaves `ut` at `/` rather than failing
-    /// startup; a bare-spawned `ut` (the boot check) is given no `--home` and
-    /// never calls this, so it runs unchanged at `/`.
+    /// (absent / no search permission) leaves `ut` where it started rather
+    /// than failing startup; a bare-spawned `ut` (the boot check) is given no
+    /// `--home` and never calls this.
     pub fn set_home(&mut self, path: String) {
         self.env.assign("home", Value::scalar(path.clone()));
         if libthyla_rs::env::set_current_dir(&path).is_ok() {
             self.env.cwd_set(path);
+        }
+    }
+
+    /// Take `$cwd` from the kernel: the directory this `ut` inherited from
+    /// whatever spawned it. `Env` starts `$cwd` at `/`, but `cd`, a relative
+    /// glob and the prompt all read `$cwd`, so a shell spawned elsewhere
+    /// without `--home` (imperium's sub-shell, haul's, a nested `ut`, a `#!`
+    /// script) would join a relative `cd` onto `/` and glob the root. Syncs
+    /// the variable only; it does not chdir. A failed read keeps `/`.
+    pub fn adopt_kernel_cwd(&mut self) {
+        if let Ok(cwd) = libthyla_rs::env::current_dir() {
+            self.env.cwd_set(cwd);
         }
     }
 
@@ -789,21 +796,18 @@ impl Repl {
     /// (`None`) means "read more input".
     pub fn feed(&mut self, input: &[u8], out: &mut dyn IoWrite) -> Option<i32> {
         for action in self.editor.feed_bytes(input) {
-            // D4: a completion-menu strip is drawn on the line BELOW the prompt.
-            // Any action that leaves the menu must clear that strip first, so it
-            // never lingers under a fresh prompt / accepted line. Save cursor
-            // (DECSC) -> down + clear line -> restore (DECRC), leaving the cursor
-            // on the prompt line. MenuShow redraws it in place; NoChange means
-            // the editor stayed in the menu (e.g. an unknown CSI byte) -- both
-            // keep the strip.
-            if self.menu_shown
-                && !matches!(
-                    action,
-                    EditorAction::MenuShow { .. } | EditorAction::NoChange
-                )
-            {
-                let _ = out.write_all(b"\x1b7\r\n\x1b[K\x1b8");
-                self.menu_shown = false;
+            // D4: the editor draws the completion-menu strip below its block
+            // and knows where it is. Any action that leaves the menu erases it
+            // first, before this loop moves the cursor itself (an accepted
+            // line's `\r\n`), so it never lingers under a fresh prompt.
+            // MenuShow redraws it in place; NoChange means the editor stayed in
+            // the menu (e.g. an unknown CSI byte) -- both keep the strip.
+            if !matches!(
+                action,
+                EditorAction::MenuShow { .. } | EditorAction::NoChange
+            ) {
+                let clear = self.editor.clear_menu();
+                let _ = out.write_all(clear.as_bytes());
             }
             match action {
                 EditorAction::NoChange => {}
@@ -899,23 +903,12 @@ impl Repl {
                     self.editor.reset_render_position();
                     self.emit_prompt(out);
                 }
-                EditorAction::MenuShow {
-                    candidates,
-                    selected,
-                } => {
+                EditorAction::MenuShow { .. } => {
                     // D4: the editor has applied candidates[selected] to the
-                    // buffer. Redraw the prompt+buffer line, then draw a
-                    // one-line candidate strip below it (selected highlighted),
-                    // restoring the cursor to the prompt line. On the next
-                    // MenuShow (cycle) this redraws in place; on any other
-                    // action the strip is cleared (above).
+                    // buffer, and in Menu mode its render draws the candidate
+                    // strip below the block (selected highlighted) and returns
+                    // the cursor to the prompt.
                     self.emit_prompt(out);
-                    let strip = render_menu_strip(&candidates, selected);
-                    let _ = out.write_all(b"\x1b7\r\n\x1b[K");
-                    let _ = out.write_all(strip.as_bytes());
-                    let _ = out.write_all(b"\x1b8");
-                    let _ = out.flush();
-                    self.menu_shown = true;
                 }
             }
         }
@@ -946,15 +939,8 @@ impl Repl {
     /// else 1). No line editor / prompt / notes loop -- a script reads no fd 0.
     pub fn run_script(&mut self, arg0: &str, args: &[String], src: &str) -> i32 {
         self.env.interactive = false;
-        // Sync `$cwd` to the real (inherited) kernel cwd. A script reads `$cwd`
-        // for its working directory, but unlike a login shell it gets no
-        // `--home` to seed it (a `#!` spawn passes none), so without this it
-        // would report the unset default `/` even though the spawned `ut`
-        // inherited the parent's cwd. This only syncs the shell variable; it
-        // does not chdir.
-        if let Ok(cwd) = libthyla_rs::env::current_dir() {
-            self.env.cwd_set(cwd);
-        }
+        // A `#!` spawn passes no `--home`, so nothing else seeds `$cwd`.
+        self.adopt_kernel_cwd();
         self.bind_positionals(arg0, args);
         if let Err(e) = eval_source(&mut self.env, src) {
             let mut msg = String::from("ut: ");
@@ -1126,6 +1112,9 @@ impl Repl {
             }
             return;
         }
+        // A menu strip below the prompt is erased while its place is known.
+        let clear = self.editor.clear_menu();
+        let _ = out.write_all(clear.as_bytes());
         let _ = out.write_all(b"\r\n");
         for line in &lines {
             self.env.emit_line(line); // PTY-4b: the session terminal, not the UART
@@ -1139,61 +1128,6 @@ impl Repl {
         self.editor.reset_render_position();
         self.emit_prompt(out);
     }
-}
-
-/// D4: render the completion-menu candidate strip (one line, below the prompt).
-/// The `selected` candidate is reverse-video highlighted. Candidates join with
-/// two spaces; if they would exceed a conservative column budget, a contiguous
-/// window AROUND `selected` is shown with `<`/`>` truncation markers so the
-/// current pick is always visible (the editor/REPL do not know the real
-/// terminal width -- 80-col is the safe assumption).
-fn render_menu_strip(cands: &[String], selected: usize) -> String {
-    const BUDGET: usize = 76;
-    if cands.is_empty() {
-        return String::new();
-    }
-    let sel = selected.min(cands.len() - 1);
-    let widths: Vec<usize> = cands.iter().map(|c| ansi::visible_width(c)).collect();
-    // Grow a window [lo, hi) outward from `sel` while it fits the budget.
-    let mut lo = sel;
-    let mut hi = sel + 1;
-    let mut used = widths[sel];
-    loop {
-        let mut grew = false;
-        if hi < cands.len() && used + 2 + widths[hi] <= BUDGET {
-            used += 2 + widths[hi];
-            hi += 1;
-            grew = true;
-        }
-        if lo > 0 && used + 2 + widths[lo - 1] <= BUDGET {
-            lo -= 1;
-            used += 2 + widths[lo];
-            grew = true;
-        }
-        if !grew {
-            break;
-        }
-    }
-    let mut out = String::new();
-    if lo > 0 {
-        out.push_str("< ");
-    }
-    for (n, i) in (lo..hi).enumerate() {
-        if n > 0 {
-            out.push_str("  ");
-        }
-        if i == sel {
-            out.push_str("\x1b[7m"); // reverse video
-            out.push_str(&cands[i]);
-            out.push_str("\x1b[0m"); // reset (self-contained so DECRC is clean)
-        } else {
-            out.push_str(&cands[i]);
-        }
-    }
-    if hi < cands.len() {
-        out.push_str(" >");
-    }
-    out
 }
 
 // DISPLAY-MODES.md section 3.4: pull the trailing `winsize <cols> <rows>` out
@@ -1566,45 +1500,5 @@ mod tests {
         let mut repl = Repl::new();
         let code = repl.run_script("/s.ut", &[], ")\n");
         assert_ne!(code, 0);
-    }
-
-    // ----- D4: the completion-menu candidate strip --------------------------
-
-    #[test]
-    fn menu_strip_highlights_selected() {
-        let c = [
-            String::from("apple"),
-            String::from("application"),
-            String::from("apparatus"),
-        ];
-        let r = render_menu_strip(&c, 1);
-        assert!(r.contains("\x1b[7mapplication\x1b[0m"), "highlight: {:?}", r);
-        assert!(r.contains("apple") && r.contains("apparatus"));
-        // All three fit the budget -> no truncation markers.
-        assert!(!r.starts_with("< ") && !r.ends_with(" >"));
-    }
-
-    #[test]
-    fn menu_strip_windows_around_selected_when_overflowing() {
-        // Many wide candidates: the selected one stays visible + markers appear.
-        let c: Vec<String> = (0..20)
-            .map(|i| {
-                let mut s = String::from("candidate-number-");
-                if i < 10 {
-                    s.push('0');
-                }
-                let mut n = String::new();
-                let _ = core::fmt::write(&mut FmtSink(&mut n), format_args!("{}", i));
-                s.push_str(&n);
-                s
-            })
-            .collect();
-        let r = render_menu_strip(&c, 15);
-        assert!(
-            r.contains("\x1b[7mcandidate-number-15\x1b[0m"),
-            "selected visible: {:?}",
-            r
-        );
-        assert!(r.starts_with("< "), "left truncation marker: {:?}", r);
     }
 }

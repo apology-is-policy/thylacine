@@ -130,7 +130,8 @@ image's stack, and it carries **no gate** — correctly. It projects a process's
 **own** environment onto its **own** new stack, reaching nothing that process
 could not reach by reading the environment device itself. The gate exists for
 the case where **reader and owner differ**, which is the introspection device's
-case and not exec's.
+case and not exec's. There the gate is `devproc_extract_authorized`: owner or
+`CAP_HOSTOWNER`, and not dump-sealed ([[sub-kernel-devproc]]).
 
 **A rule stated as a mechanism is violated correctly by its first legitimate
 exception.** "Carry the gate" names the remedy; the property is "reader and

@@ -5,12 +5,25 @@ edition.workspace = true
 publish.workspace = true
 license.workspace = true
 
+# `backend` is the bin's half: libthyla-rs (whose ELF-only `_start` cannot link
+# for a host) and libtapestry. It is ON by default, so the device build is what
+# it was; `--no-default-features` leaves the lib's pure modules, which is what
+# lets `cargo test` run them on the host at all.
+[features]
+default = ["backend"]
+backend = ["dep:libthyla-rs", "dep:libtapestry"]
+
+[lib]
+name = "aurora"
+path = "src/lib.rs"
+
 [[bin]]
 name = "aurora"
 path = "src/main.rs"
+required-features = ["backend"]
 
 [dependencies]
-libthyla-rs = { path = "../lib/libthyla-rs" }
-libtapestry = { path = "../lib/libtapestry" }
+libthyla-rs = { path = "../lib/libthyla-rs", optional = true }
+libtapestry = { path = "../lib/libtapestry", optional = true }
 cornucopia = { path = "../lib/cornucopia" }
 vt = { path = "../lib/vt" }

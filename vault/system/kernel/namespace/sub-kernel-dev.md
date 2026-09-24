@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.2"]
 created: 2026-08-03
-updated: 2026-09-21
+updated: 2026-09-23
 ---
 ## Purpose
 
@@ -32,6 +32,23 @@ be the interface's simplest possible instances. Each substantial Dev
 has its own dossier.
 
 ## Contract
+
+**`spoor_open_errno` (U, 2026-09-23).** A `Dev.open` returns a `Spoor *` with no
+room for an errno, so a Dev that wants to report a specific cause for a FAILED
+open stashes it on the Spoor and the two open call sites -- stalk's resolver
+tail and the single-hop `SYS_WALK_OPEN` -- read it back through this one
+dispatcher. It switches on the Spoor's Dev char: `dev9p` carries the server's
+bounded `Rlerror` ecode, `devsrv` carries a refused connect (`T_E_ACCES`, the
+connect gate -- [[sub-kernel-devsrv]]). Every other Dev has no channel and reads
+-1, which the call sites render as the generic EIO -- the pre-existing
+behaviour, unchanged.
+
+Dispatch is on `dc`, not on probing each Dev's `aux`, and that is deliberate:
+both channels hang off `aux`, so a Spoor of the wrong Dev must never be coerced
+into the wrong private struct. Each accessor re-checks its own Dev char and
+magic behind this. Read it ONLY after an open returned NULL, and BEFORE the
+Spoor is clunked -- a clunk frees the Dev-private struct holding the cause.
+
 
 ```c
 int          dev_register(struct Dev *d);       // appends; EXTINCTS on any rejection

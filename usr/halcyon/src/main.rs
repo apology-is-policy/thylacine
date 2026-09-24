@@ -1430,10 +1430,16 @@ fn physical_mib() -> Option<u64> {
     Some(pages * 4096 / (1024 * 1024))
 }
 
+/// This process's namespace listing. devproc has no `/proc/self`, so it is named
+/// by pid.
+fn own_ns_path() -> String {
+    format!("/proc/{}/ns", unsafe { libthyla_rs::t_getpid() })
+}
+
 /// What `/` is mounted from, per this process's own namespace listing
-/// (`mount / <src>` in /proc/self/ns).
+/// (`mount / <src>` in /proc/<pid>/ns -- devproc serves no `self`).
 fn root_source() -> Option<String> {
-    let bytes = read_capped("/proc/self/ns", 64 * 1024).ok()?;
+    let bytes = read_capped(&own_ns_path(), 64 * 1024).ok()?;
     let text = core::str::from_utf8(&bytes).ok()?;
     for line in text.lines() {
         let mut it = line.split_whitespace();
@@ -1569,7 +1575,8 @@ fn welcome() -> i64 {
              object -- a path, a process, a saved layout -- and every object offers verbs.\n",
         );
         s.text("Your territory is visible at ");
-        s.obj(ObjType::Path, "/proc/self/ns", "/proc/self/ns");
+        let ns = own_ns_path();
+        s.obj(ObjType::Path, &ns, &ns);
         s.text("; try ");
         s.em(Em::Code, "ls /dev");
         s.text(" to start, and ");

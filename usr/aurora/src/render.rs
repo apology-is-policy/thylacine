@@ -470,9 +470,8 @@ fn shade(px: &mut [u32], w: usize, x0: usize, y0: usize, cw: usize, ch: usize, b
     fill_rect(px, w, x0, y0, cw, ch, c);
 }
 
-// DORMANT host-harness tests (the G-4f named seam: aurora is no_std +
-// aarch64, so `cargo test` needs the netd-style cfg_attr refactor; these
-// document + pin the contract until then, alongside vt.rs's module).
+// Host tests (the lib split made them runnable; they were written dormant,
+// before aurora could build for a host).
 #[cfg(test)]
 mod tests {
     use super::blend;

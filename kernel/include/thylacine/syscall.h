@@ -128,19 +128,25 @@ enum {
     // (Plan 9 pipes from SYS_PIPE), userspace creates two pipe pairs
     // and passes the matching write-end and read-end.
     //
-    // SYS_ATTACH_9P(tx_fd, rx_fd, aname_va, aname_len, n_uname)
+    // SYS_ATTACH_9P(tx_fd, rx_fd, aname_va, aname_len, n_uname, flags)
     //   x0 = tx_fd (client→server byte pipe)
     //   x1 = rx_fd (server→client byte pipe)
     //   x2 = aname_va (user-VA pointer to the attach name string)
     //   x3 = aname_len
-    //   x4 = n_uname (u32; 0 for no-auth attach at v1.0)
+    //   x4 = n_uname (u32; vestigial -- the kernel asserts the caller's
+    //        principal, or no user under the cape)
+    //   x5 = flags (SYS_ATTACH_9P_CAPE, the identity cape -- IDENTITY-DESIGN
+    //        3.2; unknown bits reject, LOOSE included. The #112 ABI
+    //        discipline: EVERY caller sets x5 -- the libt/libthyla-rs
+    //        wrappers take it as an explicit parameter)
     // Returns: x0 = new fd (>=0) on success; -1 on:
     //   - invalid tx_fd or rx_fd (not KOBJ_SPOOR / out-of-range)
     //   - missing RIGHT_READ on rx_fd / RIGHT_WRITE on tx_fd
     //   - aname_va outside user-VA bound / aname_len > SYS_ATTACH_ANAME_MAX
+    //   - an unknown flags bit
     //   - kmalloc OOM for adapter / p9_attached_create handshake failure
     //   - handle table full
-    SYS_ATTACH_9P   = 13,   // arg: tx_fd, rx_fd, aname_va, aname_len, n_uname
+    SYS_ATTACH_9P   = 13,   // arg: tx_fd, rx_fd, aname_va, aname_len, n_uname, flags
 
     // P5-mount-syscall: graft a Spoor's tree at a target path in the
     // caller's Territory mount table. The source Spoor can be ANY
@@ -206,31 +212,44 @@ enum {
     // Pin all currently-mapped and future-mapped pages. Caller must
     // hold CAP_LOCK_PAGES. Sets PROC_FLAG_MLOCKED on the Proc. v1.0
     // has no swap; the flag is forward-compat scaffolding consumed by
-    // corvus + per-user stratumd at startup. Returns 0 on success, -1
+    // corvus at startup. Returns 0 on success, -1
     // on missing cap.
     SYS_MLOCKALL     = 16,   // arg: flags (x0)
 
     // SYS_SET_DUMPABLE(dumpable) → 0/-1
     //   x0 = dumpable (u32; 0 = disable core dump, 1 = enable [default])
     // One-way: setting to 0 sets PROC_FLAG_NODUMP. Setting to 1 from a
-    // Proc that already has PROC_FLAG_NODUMP set is REFUSED (-1). v1.0
-    // has no core dumps; the flag is forward-compat scaffolding.
+    // Proc that already has PROC_FLAG_NODUMP set is REFUSED (-1).
+    // NOT forward-compat scaffolding any more (2026-09-24): the flag is the
+    // EXTRACTION seal: while set, every /proc/<pid> file that hands out
+    // something the Proc holds -- environ, maps, ns, cwd, exe, cmdline, and
+    // reads of mem/regs/fpregs/kregs -- is refused to every other Proc including a
+    // CAP_HOSTOWNER holder (DEBUG-FS-DESIGN 3.2). Self still reads its own.
+    // status, sched and imperium are NOT sealed -- the kernel's record ABOUT a
+    // Proc. It does not refuse CONTROL (SYS_SET_TRACEABLE's), and a peer that
+    // may still drive a Proc can make it disclose itself. This call is UNGATED
+    // and IRREVERSIBLE: a caller is choosing permanent opacity of its image,
+    // not only future dumps.
     SYS_SET_DUMPABLE = 17,   // arg: dumpable (x0)
 
     // SYS_SET_TRACEABLE(traceable) → 0/-1
-    //   x0 = traceable (u32; 0 = refuse future debug-Spoor attach,
-    //                       1 = allow [default])
-    // One-way: setting to 0 sets PROC_FLAG_NOTRACE. Setting to 1 from
-    // a Proc that has PROC_FLAG_NOTRACE set is REFUSED. v1.0 has no
-    // debug Spoors; the flag is forward-compat scaffolding.
+    //   x0 = traceable (u32; 0 = seal against debugging, 1 = allow [default])
+    // The CONTROL seal (DEBUG-FS-DESIGN 3.2): 0 sets PROC_FLAG_NOTRACE, and
+    // devproc_debug_authorized then refuses every caller -- CAP_HOSTOWNER and
+    // CAP_DEBUG included -- at attach, step, breakpoints, wait, kregs, kstack
+    // and mem/regs/fpregs in both directions. A debugger attached BEFORE the
+    // seal keeps its slot's run-control verbs (stop/start/exitkill), so seal
+    // before the Proc is exposed. UNGATED and IRREVERSIBLE: setting to 1 from a
+    // Proc that has the flag is REFUSED. Guarding a secret takes
+    // SYS_SET_DUMPABLE(0) as well.
     SYS_SET_TRACEABLE = 18,  // arg: traceable (x0)
 
     // SYS_EXPLICIT_BZERO(buf_va, len) → 0/-1
     //   x0 = buf_va (user-VA; same bound checks as SYS_PUTS)
     //   x1 = len (bytes; ≤ SYS_RW_STACK = 4096 per call)
     // Compiler-barrier'd memset of the user-VA buffer to zero. Used by
-    // corvus + per-user stratumd to wipe secrets without the optimizer
-    // eliding the memset. Returns 0 on success, -1 on user-VA bound
+    // corvus to wipe secrets without the optimizer eliding the memset
+    // (ported code, stratumd included, uses its libc's explicit_bzero). Returns 0 on success, -1 on user-VA bound
     // violation. Length cap matches SYS_PUTS / SYS_RW_STACK (CF-3 A kept
     // the secret-scrub arm at the 4 KiB reject bound -- RW-3 R2-F1);
     // userspace loops for larger buffers.
@@ -1045,8 +1064,12 @@ enum {
     //                    asserts the single-writer premise for THIS attach
     //                    (docs/chase/B1-VOTE.md + the ARCH I-38 row); a
     //                    cached-open whose RPC-free hint fully hits then
-    //                    skips the per-open wire revalidation. Unknown
-    //                    bits reject. The #112 ABI discipline: EVERY
+    //                    skips the per-open wire revalidation.
+    //                    Unknown bits reject, SYS_ATTACH_9P_CAPE among
+    //                    them: over /srv the identity cape is the
+    //                    POSTER's, and a service posted DMSRVCAPE capes
+    //                    every attach over it (IDENTITY-DESIGN 3.2).
+    //                    The #112 ABI discipline: EVERY
     //                    caller sets x4 -- the libt/libthyla-rs wrappers
     //                    take it as an explicit parameter)
     //
@@ -2630,6 +2653,55 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, shm)         == 208, "t_pci
 #define SPAWN_PERM_SEAT_MANAGER      (1u << 6)
 #define SPAWN_PERM_SEAT_SERVICE      (1u << 7)
 #define SPAWN_PERM_SEAT_CLIENT       (1u << 8)
+// SPAWN_PERM_SEAL ((U) F1, widened by F5; STALK-DESIGN section 5.2 / D8, ARCH 28
+// I-39) seals the child against the two ways a same-principal peer could reach
+// what it holds: it stamps BOTH PROC_FLAG_NOTRACE (no debug attach) and
+// PROC_FLAG_NODUMP (no core dump) before the child's first EL0 instruction --
+// the same two bits proc_set_seat_service stamps on a seat service, for the same
+// stated reason. It was SPAWN_PERM_NOTRACE until audit round 2 (F5) showed the
+// seal covered trace but not dump; renamed and widened before the bit was ever
+// pushed. v1.0 has no core dumps, but a future owner-readable dump would reopen
+// the reach by another mechanism, and widening a published bit later would be a
+// format break.
+//
+// NOT "for the whole of its life" in the literal sense: rfork publishes the child
+// before the thunk runs, so a window exists in which proc_flags is still 0 and the
+// child reads as UNSEALED, its parent-copied image included (DEBUG-FS-DESIGN 3.2).
+// For a reader admitted by the child's NEW identity it is closed by the lock, not a
+// load order: the thunk stamps the seal through proc_seal, under g_proc_table_lock,
+// before it publishes that identity, and every /proc reader holds the same lock.
+// Stamping before rfork links the child (decision A's mechanism) closes the rest.
+//
+// What it is for: the /srv connect gate admits a TCB byte service only to a
+// CAP_TCB_DIAL holder, and in a login session the per-user home proxy is the
+// sole holder. But the proxy runs AS the user (login .identity()s it so the
+// coordinator attributes the user's home files to him), so the user's shell is
+// the SAME principal -- and devproc_debug_authorized's owner axis admitted an
+// owner outright when this seal was written. Without it the shell attached to the
+// proxy and drove its live coordinator transport, reaching the SYSTEM store with
+// no capability at all: the gate held at the front door and stood open at the
+// side one. Since 2026-09-24 the owner axis ALSO requires that the caller's caps
+// cover the target's (DEBUG-FS-DESIGN 3.1), which refuses that attach on its own
+// because the shell lacks CAP_TCB_DIAL -- so the seal is now the SECOND of two
+// independent answers, kept because it is the one that still holds between peers
+// of EQUAL authority (a caps-0 native fork of this proxy is covered by every
+// same-principal peer, and only the seal could speak to that).
+//
+// Why spawn-time and not a self-call to SYS_SET_TRACEABLE(0) / SYS_SET_DUMPABLE(0):
+// a self-call is racy. It leaves the child attachable between exec and the call,
+// and a same-principal Proc that could take that window really exists -- a
+// second login, or a backgrounded process left over from a prior session.
+// Stamping in the thunk closes the window rather than narrowing it.
+//
+// Why this bit alone is UNGATED in spawn_perm_grant_check, where every other
+// SPAWN_PERM_* is gated: it confers no authority the child does not already
+// have. ANY Proc may call SYS_SET_TRACEABLE(0) and SYS_SET_DUMPABLE(0) on itself
+// with no capability, so a gate here could only change WHEN the seal arrives,
+// never WHETHER it could. The bit strictly REDUCES what may be done to the
+// child, so there is nothing to escalate. COUPLING: if either self-call ever
+// acquires a gate, this bit needs the same one or it becomes a bypass. NOT a cap
+// (rfork does not propagate proc_flags).
+#define SPAWN_PERM_SEAL              (1u << 9)
 #define SPAWN_PERM_ALL               (SPAWN_PERM_MAY_POST_SERVICE | \
                                       SPAWN_PERM_CONSOLE_TRUSTED | \
                                       SPAWN_PERM_CONSOLE_OWNER | \
@@ -2638,7 +2710,8 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, shm)         == 208, "t_pci
                                       SPAWN_PERM_SESSION_HANGUP | \
                                       SPAWN_PERM_SEAT_MANAGER | \
                                       SPAWN_PERM_SEAT_SERVICE | \
-                                      SPAWN_PERM_SEAT_CLIENT)
+                                      SPAWN_PERM_SEAT_CLIENT | \
+                                      SPAWN_PERM_SEAL)
 
 // A-1a (docs/IDENTITY-DESIGN.md §9.1): sys_spawn_args.identity_flags bits.
 // SPAWN_IDENTITY_SET requests that the child be born with the principal_id
@@ -2951,6 +3024,12 @@ _Static_assert(__builtin_offsetof(struct t_user_fpregs, fpcr) == 516, "t_user_fp
 // omitted (a kernel pgtable PA + ASID -- an info-leak with no debug value). No
 // writable path (0400): the kernel-side frame is inspected, never edited.
 //
+// I-16: the kernel half (x[], fp, lr, sp) is raw slid kernel state -- a debug-parked
+// thread's lr minus its link address is the KASLR slide -- so it is filled only for a
+// CAP_DEBUG/CAP_HOSTOWNER reader; the owner axis reads those fields as zero and gets
+// tpidr_el0 alone. For the dump seal the file is image (tpidr_el0 is an EL0 register
+// the Proc holds): a NODUMP-sealed target refuses the read.
+//
 // The field offsets deliberately mirror struct Context's GP region (context.h:
 // fp@80, lr@88, sp@96, tpidr_el0@104) so the build is a verbatim copy.
 struct t_kernel_regs {
@@ -3037,6 +3116,14 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 // without the per-open wire revalidation (first touch / any hint miss
 // still wires; strict clients byte-unchanged). Unknown bits reject.
 #define SYS_ATTACH_9P_LOOSE   0x1u
+// SYS_ATTACH_9P (x5): the identity cape (IDENTITY-DESIGN 3.2, HAUL-DESIGN 4.7;
+// operator vote 2026-09-23, "mounter owns"). The session reports the ATTACHING
+// principal as every file's owner and its primary gid as the group, with the
+// server's per-file mode kept; the Tattach names no user, a create sends gid
+// (u32)-1, and chown/chgrp are refused. For a server whose ids are not
+// Thylacine principals. SYS_ATTACH_9P_SRV refuses the bit: over /srv the cape
+// is the poster's decision (DMSRVCAPE), never the attacher's.
+#define SYS_ATTACH_9P_CAPE    0x2u
 
 // Maximum bytes transferred per SYS_READ / SYS_WRITE / SYS_PREAD /
 // SYS_PWRITE call. Userspace still loops for larger transfers (short
@@ -3208,7 +3295,7 @@ _Static_assert(SYS_WALK_OPEN_OAPPEND == 0x40u &&
 // sys_walk_create_handler; that branch is the ONLY place it is meaningful -- a
 // regular (non-/srv) create rejects it (it must not leak into a dev9p Tlcreate
 // perm). For a service post the valid perm bits are {0, DMSRVBYTE} |
-// {0, DMSRVBULK}.
+// {0, DMSRVBULK} | {0, DMSRVCAPE}, DMSRVCAPE only with DMSRVBYTE.
 #define SYS_WALK_CREATE_DMSRVBYTE   0x02000000u
 // DMSRVBULK (Thylacine extension; CF-3 B, CONCURRENT-FS.md): on a /srv
 // service post, selects the BULK ring class -- every connection minted on
@@ -3223,9 +3310,24 @@ _Static_assert(SYS_WALK_OPEN_OAPPEND == 0x40u &&
 // setsockopt(SO_SNDBUF/SO_RCVBUF >= 128 KiB) to this bit (stratumd's
 // listener setup is the consumer).
 #define SYS_WALK_CREATE_DMSRVBULK   0x01000000u
+// DMSRVCAPE (Thylacine extension; IDENTITY-DESIGN 3.2, HAUL-DESIGN 4.7): on a
+// /srv service post, capes every SYS_ATTACH_9P_SRV over the service -- what
+// SYS_ATTACH_9P_CAPE does to a pipe attach, and the ONLY way a /srv attach is
+// caped (SYS_ATTACH_9P_SRV refuses the flag). Admitted ONLY beside DMSRVBYTE: a
+// byte-mode attacher holds the raw transport, so the cape grants it nothing;
+// a 9P-mode opener never does. Only the POSTER can set it, and the poster is
+// the server's own side. Part of the service IDENTITY on a tombstone rebind,
+// like the mode and the ring class. Bit 23 is the next free bit below
+// DMSRVBULK. Like the other DMSRV bits it is meaningful ONLY on the
+// devsrv-post branch; a regular create rejects it.
+#define SYS_WALK_CREATE_DMSRVCAPE   0x00800000u
+// Every service-post bit: the one set a regular create refuses, so a new
+// DMSRV bit joins every refusal by joining this.
+#define SYS_WALK_CREATE_DMSRV_BITS  (SYS_WALK_CREATE_DMSRVBYTE | \
+                                     SYS_WALK_CREATE_DMSRVBULK | \
+                                     SYS_WALK_CREATE_DMSRVCAPE)
 #define SYS_WALK_CREATE_PERM_VALID  (0x1FFu | SYS_WALK_CREATE_DMDIR | \
-                                     SYS_WALK_CREATE_DMSRVBYTE | \
-                                     SYS_WALK_CREATE_DMSRVBULK)
+                                     SYS_WALK_CREATE_DMSRV_BITS)
 _Static_assert((SYS_WALK_CREATE_DMSRVBYTE &
                 (0x1FFu | SYS_WALK_CREATE_DMDIR)) == 0,
                "DMSRVBYTE must not collide with the mode bits or DMDIR");
@@ -3234,6 +3336,11 @@ _Static_assert((SYS_WALK_CREATE_DMSRVBULK &
                  SYS_WALK_CREATE_DMSRVBYTE)) == 0,
                "DMSRVBULK must not collide with the mode bits, DMDIR, or "
                "DMSRVBYTE");
+_Static_assert((SYS_WALK_CREATE_DMSRVCAPE &
+                (0x1FFu | SYS_WALK_CREATE_DMDIR |
+                 SYS_WALK_CREATE_DMSRVBYTE | SYS_WALK_CREATE_DMSRVBULK)) == 0,
+               "DMSRVCAPE must not collide with the mode bits, DMDIR, "
+               "DMSRVBYTE, or DMSRVBULK");
 
 // SYS_UNLINK flags: the only permitted bit at v1.0 is SYS_UNLINK_REMOVEDIR
 // (rmdir an empty directory vs unlink a non-directory). Mirrors the wire
@@ -3462,5 +3569,14 @@ void syscall_dispatch(struct exception_context *ctx);
 // the ACTUAL predicate the handler gates on, not a re-derivation.
 struct Spoor;
 bool sys_attach_9p_ends_are_pipes(const struct Spoor *tx, const struct Spoor *rx);
+
+// The identity cape's two admission predicates (defined in syscall.c;
+// non-static so the regressions exercise the handlers' own rules):
+//   - the flags word: SYS_ATTACH_9P takes SYS_ATTACH_9P_CAPE only (`srv`
+//     false); SYS_ATTACH_9P_SRV takes SYS_ATTACH_9P_LOOSE only;
+//   - a /srv service post's perm (SYS_WALK_CREATE's devsrv branch): DMSRV
+//     bits only, and DMSRVCAPE only beside DMSRVBYTE.
+bool sys_attach_9p_flags_ok(u64 flags, bool srv);
+bool sys_srv_post_perm_ok(u32 perm);
 
 #endif // THYLACINE_SYSCALL_H

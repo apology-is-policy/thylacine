@@ -399,3 +399,9 @@ below the target/ledger granularity (no target-set change).
 [[chg-2026-09-06-9p-identity-absorb]] folds the A-3 bake-value pass absorbed from
 docs/reference/100: the `PRINCIPAL_SYSTEM` no-brick stamping (`stratum-mkfs
 --root-uid` + `stratumd --bake-owner-uid`).
+
+## Cleared Aux integration (2026-09-24)
+The native workspace and ramfs lists retain Lantern, the existing capacity and
+bus probes, and the optional Track-R r1hello fixture together. Corvus authority
+is a workspace library, not a staged executable. Merged CI build and production
+shape compile; no absent optional fixture is counted as coverage.

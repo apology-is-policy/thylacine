@@ -146,7 +146,7 @@ One line each. The authoritative text, with the full enforcement cells, is `ARCH
 | I-36 | File-backed demand-paged exec soundness (the 7 conditions) | prose + R-5 audit + tests |
 | I-37 | Weft capability network dataplane integrity | `weft.tla` + `weft_readiness.tla` |
 | I-38 | Larder cache coherence under close-to-open | `fs_cache.tla` |
-| I-39 | Debug authority bounded: two-axis gate; execution control stopped-only; no text writes; die-with-launcher (EXITKILL) | `debug_stop.tla` + `debug_step.tla` + tests |
+| I-39 | Debug authority bounded: two-axis gate, the owner axis only when the caller's caps COVER the target's; execution control stopped-only; no text writes; die-with-launcher (EXITKILL) | `debug_stop.tla` + `debug_step.tla` + tests |
 | I-40 | No torn scanout / surface-share integrity -- kernel share half ENFORCED | `tapestry_present.tla` |
 | I-41 | NOT ALLOCATED in section 28 (AG-2 reserves it in ADVANCED-GO-DESIGN.md only) | -- |
 | I-42 | JIT is a capability (`CAP_JIT`); W^X holds across the publish -- ENFORCED | prose + CL-7k audit |

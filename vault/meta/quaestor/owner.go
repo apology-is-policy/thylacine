@@ -83,7 +83,18 @@ type ownerAnswer struct {
 	AbiLead    []string   `json:"abi-literal-lead,omitempty"`
 	// NotCode marks a path this command should refuse rather than answer:
 	// a reference doc or a user-manual page. See notCodeSurface.
-	NotCode    bool       `json:"not-code-surface,omitempty"`
+	NotCode bool `json:"not-code-surface,omitempty"`
+	// Harness marks a program that exercises the system rather than being
+	// part of it -- the coverage view's `isHarness`, which excludes it from
+	// the dossier obligation the way tools/ is excluded. Unowned, it owes
+	// nothing; a dossier may still claim it as that surface's device witness.
+	Harness bool `json:"harness,omitempty"`
+	// OutsideCensus marks a file the coverage view does not count as a
+	// source at all (`srcRe`: kernel/ arch/ mm/ usr/ C, headers, asm, Rust)
+	// -- a tools/ script, the vault's own tooling. The census owes it no
+	// dossier; telling the caller otherwise contradicts the view that
+	// decides what is owed.
+	OutsideCensus bool `json:"outside-census,omitempty"`
 	Neighbours
 }
 
@@ -295,6 +306,8 @@ func answerOwner(root string, reg *Registry, idx map[string][]*Note,
 		a.NotCode = true
 		return a
 	}
+	a.Harness = isHarness(q)
+	a.OutsideCensus = !isDir && !a.Harness && !srcRe.MatchString(q)
 
 	add := func(ns []*Note, claim string) {
 		for _, n := range ns {
@@ -426,6 +439,10 @@ func printOwner(a ownerAnswer) {
 		verdict = "OWNED"
 	case a.Covered:
 		verdict = "COVERED (not swept under this path)"
+	case a.Harness:
+		verdict = "HARNESS (no dossier owed)"
+	case a.OutsideCensus:
+		verdict = "OUTSIDE THE CODE CENSUS (no dossier owed)"
 	}
 	fmt.Printf("%s  %s\n", a.Path, verdict)
 	for _, h := range a.Owners {
@@ -516,11 +533,29 @@ func printOwner(a ownerAnswer) {
 	switch {
 	case len(a.TwinOwner) > 0:
 		fmt.Println("  -> the surface IS swept: extend the twin's dossier, not a reference doc.")
+	case a.Harness:
+		// The coverage view excludes this path from its denominator; telling
+		// the caller to write it up anyway contradicts the view that decides
+		// what is owed -- the same self-contradiction as the directive above
+		// once had, and it cost a session a planning cycle (2026-09-23).
+		fmt.Println("  -> harness: it exercises the system rather than being part of it, and")
+		fmt.Println("     the coverage view excludes it (isHarness), as it does tools/. No")
+		fmt.Println("     dossier is owed. A dossier MAY claim it where it witnesses that")
+		fmt.Println("     dossier's surface on the device.")
+	case a.OutsideCensus:
+		fmt.Println("  -> the coverage census counts kernel/ arch/ mm/ usr/ sources only, so it")
+		fmt.Println("     owes this no dossier. tools/ is swept as harness prose by the")
+		fmt.Println("     substrate dossiers; the vault's own tooling by vault/meta/schema.md.")
+	// docs/reference is FROZEN (2026-09-06) and the vault agent RETIRED
+	// (2026-09-15); this directive said "write the reference doc as today, and
+	// file the sweep" until 2026-09-23, sending callers to both.
 	case len(a.RefBy) > 0:
-		fmt.Println("  -> no dossier: write the reference doc as today, file the sweep,")
+		fmt.Println("  -> no dossier: a NEW dossier is owed -- author it yourself under")
+		fmt.Println("     vault/system/ (never docs/reference, which is frozen),")
 		fmt.Println("     AND check the note above -- it may need the same change.")
 	default:
-		fmt.Println("  -> no dossier: write the reference doc as today, and file the sweep.")
+		fmt.Println("  -> no dossier: a NEW dossier is owed -- author it yourself under")
+		fmt.Println("     vault/system/ (never docs/reference, which is frozen).")
 	}
 }
 
@@ -605,7 +640,7 @@ func cmdOwner(root string, args []string) int {
 			continue // neither covered nor uncovered; it was not a question
 		}
 		codePaths++
-		if !a.Covered {
+		if !a.Covered && !a.Harness && !a.OutsideCensus {
 			allCovered = false
 		}
 	}
@@ -632,16 +667,22 @@ func cmdOwner(root string, args []string) int {
 		// actions are owed. Printed only for multi-path runs, where it is
 		// the whole point, and never for one path, where it would be noise.
 		if len(answers) > 1 {
-			var vault, refdoc, notcode []string
+			var vault, refdoc, notcode, harness []string
 			for _, a := range answers {
 				switch {
 				case a.NotCode:
 					notcode = append(notcode, a.Path)
 				case a.Covered:
 					vault = append(vault, a.Path)
+				case a.Harness || a.OutsideCensus:
+					harness = append(harness, a.Path)
 				default:
 					refdoc = append(refdoc, a.Path)
 				}
+			}
+			if len(harness) > 0 {
+				fmt.Printf("\nNO DOSSIER OWED (harness, or outside the code census): %s\n",
+					strings.Join(harness, " "))
 			}
 			if len(notcode) > 0 {
 				fmt.Printf("\nNOT ANSWERED (documents, not surfaces): %s\n",
@@ -650,16 +691,22 @@ func cmdOwner(root string, args []string) int {
 			}
 			fmt.Println()
 			switch {
+			case len(refdoc) == 0 && len(harness) > 0:
+				fmt.Printf("No dossier is owed: %d path(s) carried by the vault, %d owed none.\n",
+					len(vault), len(harness))
 			case len(refdoc) == 0:
-				fmt.Printf("ALL %d paths are carried by the vault -- no reference section is owed.\n",
+				fmt.Printf("ALL %d paths are carried by the vault -- no new dossier is owed.\n",
 					len(vault))
-			case len(vault) == 0:
-				fmt.Printf("NONE of the %d paths is carried by the vault -- reference section owed for all.\n",
+			case len(vault) == 0 && len(harness) == 0:
+				fmt.Printf("NONE of the %d paths is carried by the vault -- a new dossier is owed for all.\n",
 					len(refdoc))
+			case len(vault) == 0:
+				fmt.Printf("A new dossier is owed for: %s\n", strings.Join(refdoc, " "))
+				fmt.Printf("  and NOT for the paths owed none above.\n")
 			default:
 				fmt.Printf("MIXED -- BOTH actions are owed, and the exit status below says only that the first is:\n")
-				fmt.Printf("  reference section owed for: %s\n", strings.Join(refdoc, " "))
-				fmt.Printf("  the vault already carries:   %s  <- do NOT write these into a reference doc\n",
+				fmt.Printf("  a new dossier is owed for:   %s\n", strings.Join(refdoc, " "))
+				fmt.Printf("  the vault already carries:   %s  <- update THOSE dossiers, not a new one\n",
 					strings.Join(vault, " "))
 			}
 		}

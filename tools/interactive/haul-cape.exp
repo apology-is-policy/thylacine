@@ -1,0 +1,233 @@
+#!/usr/bin/expect -f
+# tools/interactive/haul-cape.exp -- a PRIVATE host tree over Haul: the
+# mounter owns every file (HAUL-DESIGN 4.7, IDENTITY-DESIGN 3.2).
+#
+# The operator's first Lantern-over-Haul run got EACCES on everything: the
+# guest checked permissions against the host's owner (the Mac's uid 501 and
+# group staff), no Thylacine principal is either, and a 0700 directory of 0600
+# files gives "other" nothing. Every earlier Haul gate exported 0755/0644, so
+# none of them could see it. This one exports only private modes.
+#
+# What it asserts, each against a server this scenario starts itself:
+#   1. The direct mount (SYS_ATTACH_9P with the cape): a 0600 file reads; stat
+#      shows the MOUNTER's uid and primary gid with the host's mode kept; a
+#      0600 file inside a 0700 directory reads (the search bit comes from the
+#      cape too).
+#   2. Writes cross the cape: a create lands on the host (the Tlcreate names
+#      no group, and npxf accepts that), mkdir too, and chmod reaches the host
+#      file -- the host's own view is checked, not the guest's.
+#   3. The posted service (--post, DMSRVCAPE): a plain `mount /srv/NAME` in
+#      the shell is caped with no option, and reads a 0600 file.
+#
+# chown is refused under the cape before the wire, but no guest program
+# issues a chown (coreutils has none), so that leg lives in the kernel suite
+# (dev9p.cape). The ids are compared with the host file's own, so a fixture
+# whose ids happened to coincide cannot pass by accident.
+#
+# Needs a built npxf-server: NPXF_SERVER, else
+# ~/projects/npxf/build/release/npxf-server (https://github.com/apology-is-policy/npxf).
+# Without one this SKIPs (exit 77): an absent fixture is neither a regression
+# nor coverage. Uses the --config ci image (a serial-console login).
+
+set ::env(THYLACINE_ACCEL) hvf
+source [file join [file dirname [info script]] lib.exp]
+
+set npxf [expr {[info exists ::env(NPXF_SERVER)] \
+    ? $::env(NPXF_SERVER) : "$::env(HOME)/projects/npxf/build/release/npxf-server"}]
+if {![file executable $npxf]} {
+    puts "LS-CI SKIP: no npxf-server at $npxf -- build npxf or set NPXF_SERVER (see this file's header)"
+    exit 77
+}
+# Not 5640 (an operator's own server) nor 5641 (the lantern-haul scenario).
+set port [expr {[info exists ::env(HAUL_CAPE_PORT)] ? $::env(HAUL_CAPE_PORT) : 5642}]
+if {![lc_port_bindable $port]} {
+    lc_fail "127.0.0.1:$port is already in use -- set HAUL_CAPE_PORT"
+}
+
+# The export: every mode private. The token lives outside it.
+set work [exec mktemp -d -t thyla-haul-cape]
+set export $work/export
+file mkdir $export/private
+set token "thylacine-haul-cape-token"
+proc write_file {path text} {
+    set fh [open $path w]
+    puts -nonewline $fh $text
+    close $fh
+}
+write_file $work/token "$token\n"
+file attributes $work/token -permissions 00600
+write_file $export/secret.txt "private bytes from the host\n"
+write_file $export/private/deep.txt "deeper still\n"
+write_file $export/posted.txt "read through the posted service\n"
+file attributes $export/secret.txt -permissions 00600
+file attributes $export/private/deep.txt -permissions 00600
+file attributes $export/posted.txt -permissions 00600
+file attributes $export/private -permissions 00700
+file attributes $export -permissions 00700
+set srvlog $lc_repo/build/haul-cape-npxf.log
+# The host's own ids for these files: the guest must report different ones.
+file stat $export/secret.txt hst
+set host_uid $hst(uid)
+set host_gid $hst(gid)
+
+set npxf_pid [exec $npxf -r $export -t $work/token -l 127.0.0.1:$port -v >& $srvlog &]
+exit -onexit {
+    catch {exec kill $::npxf_pid}
+    catch {file delete -force $::work}
+}
+set up 0
+for {set i 0} {$i < 50} {incr i} {
+    if {![catch {set probe [socket 127.0.0.1 $port]}]} {
+        close $probe
+        set up 1
+        break
+    }
+    after 100
+}
+if {!$up} {
+    lc_fail "npxf-server did not start listening on 127.0.0.1:$port (log: $srvlog)"
+}
+lc_step "npxf-server (pid $npxf_pid) serving $export read-write on 127.0.0.1:$port (host ids $host_uid:$host_gid)"
+
+# An error line from a tool in the checks fails the leg at once, naming it,
+# instead of leaving it to the timeout. Keying red on the failure text is the
+# safe direction: a spurious match turns a pass into a fail, never the reverse.
+# Not `haul:` -- haul reports its successes on that prefix too. The line end
+# anchors the match: unanchored, it fired on the first chunk of the line and
+# the failure named "cat: /tmp/cape" without the reason.
+proc expect_out_or_tool_error {want phase} {
+    global lc_cmd_timeout timeout
+    set timeout $lc_cmd_timeout
+    expect {
+        -ex $want { lc_step "saw: $phase" }
+        -re {(cat|stat|chmod|mkdir|mount|ut): [^\r\n]+[\r\n]} {
+            lc_fail "tool error \[[string trimright $expect_out(0,string)]\] while waiting for \[$want\] ($phase)"
+        }
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during '$phase'" }
+        timeout           { lc_fail "timeout (${lc_cmd_timeout}s) waiting for \[$want\] during '$phase'" }
+        eof               { lc_fail "unexpected EOF during '$phase'" }
+    }
+}
+
+# The SAK dance for `imperium post`, as haul-post.exp does it.
+proc sak_witness_within {secs phase} {
+    global timeout
+    set timeout $secs
+    expect {
+        -re {cons: SAK \(([a-z ]+)\)} {
+            set d $expect_out(1,string)
+            lc_step "saw: cons: SAK ($d) during '$phase'"
+            return $d
+        }
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during '$phase'" }
+        eof               { lc_fail "unexpected EOF during '$phase'" }
+        timeout           { return "" }
+    }
+}
+proc press_sak {phase} {
+    lc_raw_send "\001b" "monitor BREAK ($phase)"
+    set d [sak_witness_within 10 "the SAK witness ($phase)"]
+    if {$d eq ""} {
+        lc_fail "no `cons: SAK (...)` line within 10s of Ctrl-A b ($phase)"
+    }
+    if {$d ne "episode"} {
+        lc_fail "SAK decision was '$d', expected 'episode' ($phase) -- corvus not ARMED, or an episode already open"
+    }
+}
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+lc_send "echo $token > npxf.token"
+lc_send "chmod 600 npxf.token"
+lc_send "mkdir -p /tmp/cape /tmp/cape-post"
+
+# The mounter's ids, from the guest's own `id`.
+lc_send "id"
+set timeout $lc_cmd_timeout
+expect {
+    -re {uid=([0-9]+) gid=([0-9]+)} {
+        set uid $expect_out(1,string)
+        set gid $expect_out(2,string)
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during `id`" }
+    timeout           { lc_fail "no uid=/gid= line from `id`" }
+    eof               { lc_fail "unexpected EOF during `id`" }
+}
+if {$uid == $host_uid || $gid == $host_gid} {
+    lc_fail "the mounter's ids ($uid:$gid) share a value with the host's ($host_uid:$host_gid) -- this fixture cannot tell the cape from the server's ids"
+}
+lc_step "mounter michael = $uid:$gid; the host's files are $host_uid:$host_gid"
+
+# Leg 1 + 2: the direct mount. A mount lands in haul's own namespace, so the
+# checks run as ONE script in a ut that haul spawns beneath it. Colour and
+# Beacon both off keep stat's lines plain.
+set st "stat --color=never --beacon=never"
+lc_send "echo 'cat /tmp/cape/secret.txt | tr a-z A-Z' > /tmp/cape.ut"
+foreach line [list \
+    "$st /tmp/cape/secret.txt" \
+    "$st /tmp/cape/private" \
+    "cat /tmp/cape/private/deep.txt | tr a-z A-Z" \
+    "echo written-by-the-guest > /tmp/cape/guest.txt" \
+    "mkdir /tmp/cape/guestdir" \
+    "chmod 600 /tmp/cape/guest.txt" \
+    "$st /tmp/cape/guest.txt" \
+    "echo cape-script-done | tr a-z A-Z"] {
+    lc_send "echo '$line' >> /tmp/cape.ut"
+}
+lc_send "haul -t npxf.token 10.0.2.2!$port /tmp/cape /bin/ut /tmp/cape.ut"
+expect_out_or_tool_error "PRIVATE BYTES FROM THE HOST" "a 0600 host file read through the caped mount"
+lc_expect_re "Mode: \\(0600/\[^)\]*\\) +Uid: $uid +Gid: $gid" \
+    "the 0600 file: the mounter's uid + primary gid, the host's mode"
+lc_expect_re "Mode: \\(0700/\[^)\]*\\) +Uid: $uid +Gid: $gid" \
+    "the 0700 directory: likewise"
+expect_out_or_tool_error "DEEPER STILL" "a 0600 file under a 0700 directory"
+lc_expect_re "Mode: \\(0600/\[^)\]*\\) +Uid: $uid +Gid: $gid" \
+    "the guest's own file after chmod 600"
+lc_expect "CAPE-SCRIPT-DONE" "the caped script ran to its end"
+lc_pass "haul-cape: a private host tree reads, lists as the mounter's and takes writes through a caped mount"
+
+# The host's view of the guest's writes.
+set made $export/guest.txt
+if {![file exists $made]} { lc_fail "the guest's create never reached the host ($made)" }
+set fh [open $made r]; set body [read $fh]; close $fh
+if {$body ne "written-by-the-guest\n"} { lc_fail "the host file holds \[$body\]" }
+set perm [file attributes $made -permissions]
+if {$perm ne "00600"} { lc_fail "chmod 600 in the guest left the host file at $perm" }
+# A caped create sends no group (P9_NOGID), so the host file keeps the group the
+# export gives it -- the one its own files carry. npxf's try_set_gid only LOGS a
+# failure, so the wire assertion in the kernel tests cannot see a server that
+# took the sentinel literally; this is the host-side half of that contract.
+file stat $made mst
+if {$mst(gid) != $host_gid} { lc_fail "the guest's create left the host file in group $mst(gid), not the export's $host_gid" }
+if {![file isdirectory $export/guestdir]} { lc_fail "the guest's mkdir never reached the host" }
+file stat $export/guestdir dst
+if {$dst(gid) != $host_gid} { lc_fail "the guest's mkdir left the host directory in group $dst(gid), not the export's $host_gid" }
+lc_pass "haul-cape: the host saw the create, the mkdir and the chmod"
+
+# Leg 3: the posted service. Posting needs the post capability (imperium).
+lc_send "imperium post"
+lc_expect "as pid" "post request"
+press_sak "post"
+lc_expect "CONFERRING IMPERIUM" "trusted provincia"
+lc_expect "imperium key: " "trusted key prompt"
+lc_raw_send "imperium-key-michael-v1\r" "fixture key"
+lc_expect "imperium: conferred" "post capability conferred"
+lc_send "haul --post haul-cape -t npxf.token 10.0.2.2!$port &"
+lc_expect "/srv/haul-cape posted" "the caped service posted"
+lc_send "mount /srv/haul-cape /tmp/cape-post /"
+lc_expect "/srv/haul-cape serving one mount" "a plain mount of the posted service"
+lc_send "cat /tmp/cape-post/posted.txt | tr a-z A-Z"
+expect_out_or_tool_error "READ THROUGH THE POSTED SERVICE" "a 0600 file through the posted service"
+lc_send "$st /tmp/cape-post/posted.txt"
+lc_expect_re "Mode: \\(0600/\[^)\]*\\) +Uid: $uid +Gid: $gid" \
+    "the posted mount: the mounter's uid + primary gid"
+lc_send "unmount /tmp/cape-post"
+lc_send "wait; echo cape-post-reaped | tr a-z A-Z"
+lc_expect "CAPE-POST-REAPED" "unmount closed the transport and haul exited"
+lc_send "abdicate"
+lc_expect "imperium: relinquished" "scope teardown"
+lc_pass "haul-cape: a plain mount of a posted service is caped too"
+
+lc_quit
+lc_pass "haul-cape: the mounter owns a private host tree, direct and posted"
+exit 0

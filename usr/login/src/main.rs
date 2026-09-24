@@ -43,8 +43,9 @@ use libthyla_rs::process::{Child, Command, Stdio};
 use libthyla_rs::{
     t_attach_9p_srv, t_close, t_explicit_bzero, t_mount, t_open, t_poll, t_putstr, t_read,
     t_readdir, t_set_dumpable, t_set_traceable, t_torpor_wait, t_unmount, t_walk_create,
-    t_walk_open, t_write, TPollFd, T_CAP_CSPRNG_READ, T_CAP_LOCK_PAGES, T_MREPL, T_OPATH, T_ORDWR,
+    t_walk_open, t_write, TPollFd, T_CAP_CSPRNG_READ, T_CAP_LOCK_PAGES, T_CAP_TCB_DIAL, T_MREPL, T_OPATH, T_ORDWR,
     T_OREAD, T_OWRITE, T_POLLIN, T_SPAWN_PERM_CONSOLE_OWNER, T_SPAWN_PERM_MAY_POST_SERVICE,
+    T_SPAWN_PERM_SEAL,
     T_SPAWN_PERM_SESSION_HANGUP,
     T_WALK_CREATE_DMDIR, T_WALK_OPEN_FROM_ROOT,
 };
@@ -871,8 +872,17 @@ unsafe fn bind_home(user: &[u8], pid: u32, gid: u32, supp: &[u32]) -> Option<Hom
     // boot-log diagnostics; stdin/stdout inherit login's.
     let mut cmd = Command::new("/bin/stratumd"); // #58: post-pivot /bin bind
     cmd.identity(pid, gid, supp)
-        .caps(T_CAP_CSPRNG_READ)
-        .perm(T_SPAWN_PERM_MAY_POST_SERVICE)
+        // T_CAP_TCB_DIAL (U): the proxy dials the SYSTEM coordinator at
+        // COORD_FS_PATH, a TCB byte service. It runs as the USER (below), so
+        // identity cannot admit it -- only this capability can, and the user's
+        // own shell is spawned without it (SHELL_CAPS). STALK-DESIGN 5.2 / D8.
+        .caps(T_CAP_CSPRNG_READ | T_CAP_TCB_DIAL)
+        // T_SPAWN_PERM_SEAL ((U) F1/F5): the proxy holds CAP_TCB_DIAL and a live
+        // transport to the system coordinator, and it runs as the user -- so the
+        // user's own shell is the same principal and the /proc debug surface
+        // would admit it on the OWNER axis. Without this the connect gate above
+        // is bypassable by attaching to the holder instead of dialling directly.
+        .perm(T_SPAWN_PERM_MAY_POST_SERVICE | T_SPAWN_PERM_SEAL)
         .arg("--role")
         .arg("client")
         .arg("--listen")
@@ -997,7 +1007,7 @@ unsafe fn bind_home(user: &[u8], pid: u32, gid: u32, supp: &[u32]) -> Option<Hom
 // login's own per-Proc /env device -- open /env O_PATH, walk_create each KEY
 // O_WRITE, write the value (the joey go4c-probe pattern). The shell spawned
 // below inherits a deep copy (env_clone_into), and every session child
-// inherits transitively. HOME/USER/PATH only -- plain, non-secret values.
+// inherits transitively. The six keys below -- plain, non-secret values.
 // PATH mirrors ut's static $path list (/bin authoritative, /goroot/bin last);
 // the two are drift-guarded by the go6.exp `which go` leg. Best-effort by
 // design: a failure prints one marker and the session proceeds (Go toolchain
@@ -1034,6 +1044,9 @@ unsafe fn seed_session_env(user: &[u8]) {
     // an interactive `git clone https://` from a shell needs it in the
     // session env for exactly the same reason. OpenSSL's own documented
     // override: pure-C crypto paths, no probing.
+    // NEVER a credential, token or key here: every session child gets a copy that
+    // reads on its own owner axis, and login's seal does not follow a spawn's copy
+    // (DEBUG-FS-DESIGN 3.2).
     let pairs: [(&[u8], &[u8]); 6] = [
         (b"HOME", &home_val),
         (b"USER", user),
@@ -1376,7 +1389,22 @@ pub extern "C" fn rs_main() -> i64 {
             // (login holds the bit from joey, as it grants the home proxy) that
             // lets the session compositor post its per-user inline-media service
             // /srv/halcyon-<user>. A fork-grantable perm, never an elevation.
-            .perm(T_SPAWN_PERM_SESSION_HANGUP | T_SPAWN_PERM_MAY_POST_SERVICE)
+            // SEAL: and because of that perm, not despite it. A perm is authority
+            // the I-39 cover rule CANNOT SEE -- cover compares the caps word, and
+            // these bits live in proc_flags. halcyond runs AS the user with the
+            // SHELL's exact cap mask, and it masks its own tile children with
+            // !CAP_SET_IDENTITY, which spawn intersects against the parent's caps
+            // -- so a tile program's caps equal the compositor's EXACTLY and cover
+            // admits it. Unsealed, any tile could debug-attach halcyond and take
+            // the posting bit granted just above (impersonating
+            // /srv/halcyon-<user>), the hangup, and every other tile's surface
+            // share. This is the checklist the capability model already states:
+            // granting a bit to a process that shares a principal with an attacker
+            // grants it to the attacker unless something stops the attacker driving
+            // that process, so the bit and the seal are ONE step, not two. The home
+            // proxy above takes it for the same reason with CAP_TCB_DIAL.
+            .perm(T_SPAWN_PERM_SESSION_HANGUP | T_SPAWN_PERM_MAY_POST_SERVICE
+                  | T_SPAWN_PERM_SEAL)
             .stdin(Stdio::Inherit)
             .stdout(Stdio::Inherit)
             .stderr(Stdio::Inherit);

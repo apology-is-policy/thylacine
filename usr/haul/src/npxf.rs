@@ -923,7 +923,7 @@ mod tests {
     //       --target aarch64-apple-darwin -- --ignored --nocapture
 
     #[test]
-    #[ignore]
+    #[ignore = "needs a live npxf-server; run with --ignored and HAUL_NPXF_ADDR set"]
     fn interoperates_with_a_live_npxf_server() {
         use std::io::{Read, Write};
 

@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/POUNCE-DESIGN.md", "docs/FID-LIFECYCLE-DESIGN.md", "docs/DISTRO.md", "docs/VIVARIUM.md"]
 created: 2026-08-01
-updated: 2026-09-21
+updated: 2026-09-23
 ---
 ## Purpose
 
@@ -37,6 +37,16 @@ re-anchored inside the caller's own container), and the **phenotype accumulator*
 through an `MPHENO_LINUX` mount).
 
 ## Contract
+
+**The open-failure cause is now per-Dev (U, 2026-09-23).** The resolver tail
+read a failed `Dev.open`'s cause through `dev9p_open_errno`, which is gated on
+the dev9p Dev char and so returned -1 (the generic EIO) for every other Dev. It
+now reads through `spoor_open_errno` ([[sub-kernel-dev]]), which dispatches by
+Dev char, so a `/srv` connect refused by the (U) capability gate surfaces as
+EACCES -- "permission denied" -- rather than as EIO. Behaviour for dev9p and for
+Devs with no channel is unchanged. Read strictly after a NULL open and before
+the Spoor is clunked.
+
 
 ```c
 #define STALK_WALK   0  // resolve only (O_PATH / navigation base); quarry crossed

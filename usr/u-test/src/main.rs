@@ -1018,8 +1018,8 @@ fn flow_line_editor() -> Result<(), i64> {
     // ("apple", source order) and applies it to the buffer.
     let r = le.feed_byte(0x09);
     match r {
-        EditorAction::MenuShow { candidates, selected } => {
-            if candidates.len() != 3 || selected != 0 {
+        EditorAction::MenuShow { candidates, selected, unlisted } => {
+            if candidates.len() != 3 || selected != 0 || unlisted != 0 {
                 t_putstr("u-test: flow_line_editor: Tab MenuShow count/selected FAILED\n");
                 return Err(1);
             }

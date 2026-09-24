@@ -12,6 +12,7 @@ code:
   - usr/utopia/libutopia/src/path.rs
   - usr/utopia/libutopia/src/lib.rs
   - usr/utopia/shell/src/main.rs
+  - usr/u-repl-test/src/main.rs
 audit: light
 guarded-by: [inv-i9, inv-i19, inv-i20, inv-i27]
 validated-by: [prose, gate-interactive]
@@ -20,7 +21,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-03
-updated: 2026-09-21
+updated: 2026-09-23
 area: userspace
 ---
 ## Graphical elevation banner
@@ -71,6 +72,18 @@ captures only the shell's own painting.
 **`ut` owns the descriptors** and the startup order. It decides whether this is a
 session (a live fd 1) or the bare-spawn boot check, opens the note queue, runs the
 session dance, installs completion and history, and drives the poll loop.
+
+**`$cwd` starts as the kernel's cwd, in every mode.** `Env` initialises `$cwd`
+to `/`, and `cd`, a relative glob and the prompt all read that variable rather
+than the kernel. So the first thing `ut` does after `Repl::new()` is
+`Repl::adopt_kernel_cwd()`: a `SYS_GETCWD`, and the answer into `$cwd`. It syncs
+the variable only; it never chdirs. `--home` then overrides it on a login
+shell. A shell spawned without `--home` keeps the directory its parent was in:
+imperium's elevated shell, haul's sub-shell, a nested `ut`, and a `#!` script,
+through `run_script`. Before 2026-09-23 only script mode adopted it. An
+interactive shell started away from `/` joined `cd imcwd-dir` onto `/`, walked
+the root for `*`, and showed `/` in its prompt, while its children ran in the
+real directory. A failed read keeps `/`, as before.
 
 A nested foreground shell keeps the PTY's existing controlling session. The
 kernel-gated `TTY_GET_FG` proves membership; the caller must already be in the
@@ -149,16 +162,191 @@ so it is left default rather than mis-flagged. An empty index disables colouring
 entirely.
 
 **Completion.** Tab dispatches to a `CompletionSource`. `ShellCompletionSource`
-classifies from the buffer: a bare name in command position (start of line, or
-after `| ; & { (`) completes against the command index; anything else — a later
-argument, or a command-by-path — splits the token at its last `/` and reads the
-directory live. `cd` restricts to directories. Each candidate carries its
-terminator, a space for a command or file and `/` for a directory, so a unique pick
-lands ready for the next token and a directory can be drilled with a second Tab.
-The engine then extends to the longest common prefix; when the prefix is already
-exhausted it enters the zsh-style cycling menu — apply candidate 0, emit
-`MenuShow`, and let the REPL paint a one-line strip below the prompt. Tab cycles,
-Enter finalizes without submitting, any other key dismisses and is re-dispatched.
+reads the word under the cursor as the lexer will (below) and classifies it: a
+name with no `/` in command position — the first word of a command, after
+`| ; & { (`, a newline, or inside a `$(` — completes against the command index;
+anything else — a later argument, a redirect's target, or a command-by-path —
+splits the name at its last `/` and reads the directory live. `cd` restricts to
+directories, keyed on the command the word belongs to, so `ls; cd <TAB>`
+restricts and a quoted `'cd'` counts. Each candidate carries its terminator, a
+space for a command or file and `/` for a directory, so a unique pick lands ready
+for the next token and a directory can be drilled with a second Tab. The source,
+not the engine, supplies what every match shares (`extension`), already spelled
+for the line; the engine applies it, and when there is none it enters the
+zsh-style cycling menu — apply candidate 0, emit `MenuShow`, and the editor's
+own render paints a one-line strip below the block (below). Tab cycles, Enter
+finalizes without submitting, any other key dismisses and is re-dispatched.
+
+**The directory read is injected, not called (2026-09-23).** The source reads
+directories through a `ListDir` -- `fn(dir, visit)`, calling `visit(name,
+is_dir)` once per entry. `ShellCompletionSource::new` hands in the live
+`fs::read_dir` (the one `backend`-gated item left in the module); the unit tests
+hand in a fixed tree, so path completion -- routing, terminators, `cd`'s
+directories-only rule, dotfile hiding, the directory prefix -- is tested on the
+host rather than only at boot. It STREAMS rather than returning a listing so the
+source holds at most 256 names however large the directory is. The seam's first
+version let the visitor stop the read at the cap, and a test pinned that it did;
+that stop was the defect the next paragraph records, and the test now pins the
+opposite (`the_cap_bounds_what_is_held_not_what_is_read`: 300 entries read, 256
+held, 44 counted). The seam also exposed a test
+that could not fail: `command_token_with_slash_is_not_command_completion` asserted
+an EMPTY result for `./scr`, which is what BOTH routes return -- the index cannot
+hold a name with a `/` -- so a sabotage sending slash tokens to the index passed
+it. It now asserts `./script` from the tree, and that sabotage fails it.
+
+**The cap bounds what is held, never what is matched (2026-09-23).** Both
+completion paths used to stop collecting at 256 matches, and the engine extended
+the line to the longest common prefix of whatever it was handed -- so in a
+directory, or an index, of more than 256 matches, Tab could extend the line past
+matches the cap had dropped, leaving them unreachable. The path path collected in
+filesystem order and sorted afterwards; the command path's index is already
+sorted, and this dossier used to call it unaffected for that reason. It was not:
+the first 256 of a sorted set can share a longer prefix than the whole set does
+(`aa000`..`aa299` plus `ab`: the first 256 share `aa`, all of them only `a`).
+Deterministic is not correct. Both failing tests were written before the fix
+(`tab_never_extends_past_a_match_the_cap_left_out`,
+`a_sorted_command_index_is_not_safe_either`) and both reproduced it.
+
+The prior art is unanimous that the prefix must come from every match: bash,
+zsh and Plan 9's `libcomplete` all read the whole directory and extend to the
+common prefix of all of it. zsh's `LISTMAX`, the cap this one was modelled on,
+bounds only what is *listed*, and UT-NORA-ERGONOMICS.md specified exactly that
+for this menu: "show N + ... M more". The as-built capped the matching and dropped
+the count. Now:
+
+- A `Gather` (in `completion.rs`) sees every match, keeps the first 256
+  alphabetically in a max-heap, counts the rest, and tracks the least and the
+  greatest match. The longest common prefix of a set is that of its least and
+  greatest members, so the prefix every match shares costs two extra strings
+  rather than every match. Which entries are kept depends only on their names,
+  never on read order.
+- `Completions` carries that prefix, spelled, as `extension`, and the number of
+  matches it does not list as `unlisted`. (This first landed as an `extent` --
+  `Complete` or `Truncated { unlisted, shared }` -- with the engine computing the
+  prefix itself for a complete set; the quoting fix below moved all of it to the
+  source.) A lone listed candidate of a larger set is not taken as the unique
+  completion.
+- `MenuShow` carries `unlisted`, and `menu_strip` ends the strip with `+N more`
+  in the `Path` ink. The window's `<` / `>` mean "cycle to see more"; the count
+  means "no Tab reaches these", and without it a partial menu reads as the whole
+  set. The window gives way to the count, and the strip keeps to one row of
+  the terminal (below).
+
+The heap keeps the worst case at O(log 256) per entry even for a directory read in
+reverse order, and a candidate is copied only when it is kept. Ten sabotages were
+run against the change and all ten are caught; the first run caught nine, and the
+tenth -- not budgeting the count's columns -- exposed a test whose 19-column
+candidates left slack either way. It now also drives two-column candidates, which
+fill the window to within a column of its budget.
+
+**The editor draws the strip, below its block, and comes back relatively
+(2026-09-23).** The REPL used to paint it after the prompt with a save and restore
+of the ABSOLUTE cursor position (`ESC 7`, `\r\n`, the strip, `ESC 8`). Wherever
+the prompt sat on the bottom row -- where it lives once a session has filled the
+screen -- the `\r\n` scrolled the screen and the restore returned to the strip's
+row, not the prompt's: typing landed on the strip, every further Tab scrolled
+again and left a copy of the prompt behind, and a dismiss left the last strip on
+screen for good. Measured on `vt`, Halcyon's own terminal model, not argued: three
+Tabs left three prompts. Nothing had seen it, because every gate asserts on the
+bytes a render emits, never on the screen they leave. Two more faults sat in the
+same four lines: the strip went below the CURSOR's row, which a completion in the
+middle of a multi-line buffer leaves above other rows of the block, so it
+overwrote them; and it assumed 80 columns, so in a narrow tile it wrapped and the
+one-row erase left the rest.
+
+Now `render` draws the strip whenever the editor is in `Menu` mode: down to the
+block's last row, `\r\n` (scrolling if it must), the strip, then back up by a
+relative count and across to the cursor's column -- relative moves are unaffected
+by the scroll. The strip is clipped to one row short of the known width
+(`clip_visible` measures as `ansi::visible_width` does), so it is always one row.
+The editor records where it drew it (`strip: Option<StripAt>`) and erases it
+itself: the width-known render's erase-below takes it, the width-unknown render
+erases it first, and `clear_menu()` gives the REPL the bytes to erase it before
+the REPL moves the cursor on its own -- an accepted line's `\r\n`, a
+notification. `reset_render_position` and `reset` forget it, because after the
+caller has moved the cursor its recorded place names nothing. The REPL's
+`menu_shown` flag is gone; the editor is the one owner.
+
+`libutopia` takes `vt` as a dev-dependency, and eight tests drive it: the
+bottom-row scroll and its control with room below, a paste that ends in the menu,
+the strip below the block, a narrow tile, the erase before a notification, and a
+render that leaves the menu erasing it unaided assert on the screen; an eighth
+pins that a moved cursor forgets the strip. Eleven sabotages, all caught --
+and the first run of them proved the scroll test blind: it fed `app` and Tab as ONE
+read, so every action rendered the final state, and the erase before each redraw
+moved up one row from the wrong position and landed on the prompt by luck. It now
+feeds one byte per read, as typing arrives, and a separate test drives the paste.
+
+**Completion reads the word as the lexer does, and spells what it inserts
+(2026-09-23).** It used to find the word by the last blank before the cursor and
+insert names byte for byte, so a file called `my file` completed to two words; a
+name holding a quote, `$`, `;`, `|` or `#` broke the line, one holding `*`, `?`
+or `[` expanded as a glob, and one holding an ESC went raw into the line and the
+strip, and from there to the terminal -- under Halcyon, into a stream whose
+escape frames are parsed. Three failing tests came first: a name with a space
+completed to two words, and an ESC reached the line.
+
+`word_at` now reads the word with the lexer's own rules. It is a second scanner,
+because the lexer is built for complete input and completion is about the
+incomplete kind -- an open quote, an escape the cursor has not finished -- but it
+shares the lexer's character predicates (`is_word_char_byte` and the
+variable-name pair, made `pub(crate)` for this), and `word_at_agrees_with_the_lexer`
+checks that on complete input the two read the same word from the same byte.
+It removes escapes and quotes to give the text a name must begin with; tracks
+`$(`, `{`, `(`, `((`, `` `{ `` and process substitutions as nested levels; knows
+the command position, the command a word belongs to, and a redirect's target;
+and answers nothing where the lexer reads no standalone literal word -- a
+comment, a `$var`, a double quote that expands, a heredoc tag, a `/regex/`, and
+a word glued to what precedes it. That last is `$home/fo`, `~/fo`, `'a'b` and
+`a^b`: ut joins adjacent pieces only with `^`, `~` and `=`, so `$home/fo` is two
+words here (HAUL-DESIGN.md records the same fact for `$host!$port`), and
+completing its second half as a path would complete the wrong word. The one
+deliberate difference from the lexer: a `\` at the cursor is an escape not yet
+finished, where the lexer, at the end of its input, keeps a literal backslash.
+
+`quote_word` spells each match as rc and Plan 9's `%q` do: as it is when every
+character is a lexer word character and the glob matcher's own `has_meta` finds
+no meta; otherwise whole, in single quotes, with `''` for a quote. A double quote
+the user opened is continued with its escapes (`\\`, `\"`, `\$`, `\t`,
+`\n`), and a tab or newline, which only double quotes can spell, forces one. A
+directory is left open with its `/` inside (`'my dir/`), as bash leaves it:
+`'my dir'/` would be two words. A command named like a reserved word is quoted,
+because bare the parser reads the keyword. Single quotes rather than bash's
+backslashes for three reasons: they are the literal form scripture documents
+(UTOPIA-SHELL-DESIGN.md 6.4, where backslash-in-a-word does not appear at all);
+they are the heritage's; and when this was written a backslash-escaped glob
+character still globbed in ut, because the escape was gone by the time
+`glob_candidate` looked at the word. That was its own defect, found reading for
+this one and fixed the same day: a word now keeps its backslash for the
+evaluator ([[sub-utopia-parser]], [[sub-utopia-eval]]), so a backslash would
+work -- single quotes stay because the first two reasons do.
+
+The prefix every match shares is taken from the NAMES and then spelled --
+readline's order. The pre-fix design note said the reverse ("quote before the
+common prefix is taken, since quoting changes it") and it was wrong: spelled,
+`'abc 2' ` and `abc1 ` share nothing though both names begin `abc`, and a
+backslash-spelled prefix can end in half an escape, which would make the line a
+continuation. Working one example caught it before any code. So the engine no
+longer computes a prefix at all: `Extent` is gone, and the source hands over
+`extension` and `unlisted` (the cap paragraph above).
+
+A name holding a control character other than tab or newline has no spelling in
+ut -- a single-quoted string would carry the raw byte, and the editor draws its
+line verbatim. Such a match is counted among the unlisted but never listed or
+inserted; it still bounds the shared prefix, which stops before its first
+control character, so Tab never extends past a name it cannot write.
+
+**What runs where.** Since the `backend` split (2026-09-22) the crate builds for
+the host, and `line_editor`, `completion`, `palette`, `ansi` and `path` run their
+unit tests under `tools/test-rust.sh`. `repl` -- the syscall loop -- stays
+device-only, witnessed at boot by `u-repl-test`, whose step 8 also reads a REAL
+directory through `ShellCompletionSource::new`, the one thing the host tests
+cannot. The menu strip's renderer lived in `repl` too, so its two tests had never
+run -- while `u-repl-test` described it as "host-tested". It moved into the line
+editor (2026-09-23), where they run, and where `render` now draws the strip itself. The line editor's `ESC ESC` restarts the escape sequence (the VT rule)
+and consumes the next byte as `ESC <byte>`, the slot reserved for Alt bindings;
+its header documents the transition. That behaviour was once a failing test
+(UT-EDIT-1) and the test was the side that was wrong.
 
 **The command index is built once per accepted line** — builtins plus aliases plus
 functions plus a cached `/bin` and `/goroot/bin` scan, sorted and deduped — and the
@@ -194,7 +382,8 @@ all. It binds the positional parameters (`0`/`1`/`2`/`*`) at the script's global
 scope (mirroring a function call), sets `interactive = false` so a non-zero
 `$status` **fail-fast-propagates** (scripture §8.9 — the opposite of the
 interactive REPL, which suppresses it), evaluates the whole source in one
-`eval_source` multi-statement parse, and returns the exit code (an explicit
+`eval_source` multi-statement parse (after `adopt_kernel_cwd`, since a
+shebang spawn passes no `--home`), and returns the exit code (an explicit
 `exit N` wins, else the last statement's `$status`; a parse/eval error is
 reported to the UART and yields non-zero). The `ut` binary's `parse_script`
 picks the first non-flag operand as the script, and a `#!/bin/ut` spawn arrives
@@ -206,23 +395,35 @@ shebang ([[sub-utopia-eval]]) and script mode compose into a working `./s.ut`.
 `LineEditor` — the buffer plus a byte cursor always on a UTF-8 boundary, the kill
 buffer, in-memory history with a navigation position and a saved current line, the
 parser state, the mode, a desired column for vertical navigation, an optional
-boxed completion source, and the command index.
+boxed completion source, the command index, the known width, the row the last
+render left the cursor on, and where a drawn menu strip sits (`StripAt { down,
+col }`, relative to the cursor).
 
 `LineEditorMode` — `Normal`, `Search { query, match_index, saved_buffer,
-saved_cursor }`, and `Menu { candidates, selected, anchor }`. The saved buffer is
+saved_cursor }`, and `Menu { candidates, selected, anchor, unlisted }`. The saved buffer is
 how Ctrl-R cancels restore; the anchor is where the applied candidate begins.
 
 `BalanceState` — three signed depths, two quote flags, and the trailing-backslash
 flag.
 
 `EditorAction` — `NoChange`, `Redraw`, `Accept(String)`, `Cancel`, `Eof`,
-`ClearScreen`, `MenuShow { candidates, selected }`.
+`ClearScreen`, `MenuShow { candidates, selected, unlisted }`.
 
-`Completions` — a byte range to replace plus candidate full-replacement strings in
-source order.
+`Completions` — a byte range to replace; the listed matches, each as the text
+that replaces it; `extension`, what every match shares as that text, when it says
+more than the buffer does; and `unlisted`, the matches no Tab reaches.
+
+In `completion.rs`: `WordAt { start, text, quote, command_position, command }`,
+the word the cursor ends with its quoting removed; `Quote` -- `Bare`, `Single` or
+`Double`, how the user began the word and so how its completion is spelled;
+`Gather { kept, unlisted, least, greatest }`, the capped heap of `(name,
+is_dir)` plus the two names that bound the shared prefix; and the reader's
+`Level` (one open code level: its closer, whether the next word begins a command,
+the command's name, a pending redirect target) and `Dq` (a double quote being
+read), stacked as `Frame`s.
 
 `Repl` — the `Env`, the editor, the cached `/bin` scan, whether completion was
-installed, an optional history path, and whether a menu strip is currently drawn.
+installed, and an optional history path.
 
 `Role` and `Rgb` — nineteen semantic colour roles resolved by a `const fn` match.
 The role *names* are the stable interface; hex is not, so a retheme changes one
@@ -292,9 +493,12 @@ the last command's status) and a read returning EOF or an error.
 pass over the prefix before the cursor. `refresh_command_index` runs after every
 accepted line and is deliberately syscall-free — the `/bin` scan is cached at
 install and only the alias and function tables are re-walked, then sorted and
-deduped. Completion takes exactly one `read_dir` per Tab in argument position and
-none in command position. Candidates are capped at 256 per Tab, which bounds both
-the work and the menu strip.
+deduped. Completion reads the line once up to the cursor to find the word, then
+takes exactly one `read_dir` per Tab in argument position and none in command
+position. The read runs to the end of the directory, however
+large: the prefix every match shares cannot be known otherwise, and `ls` and glob
+expansion read whole directories too. What the 256 cap bounds is memory -- at most
+256 names held, each entry O(log 256) -- and the menu strip.
 
 The history cap is 10 000 entries in memory, with on-disk history appended
 line-by-line at `~/.ut_history`, mode 0600 — the encrypted home already gates
@@ -309,6 +513,12 @@ not.
 - **Is the startup order preserved?** `open_notes` before the pts dance is a real
   precondition, not a preference: seating the shell as foreground makes it a signal
   target, and an un-self-managing target is terminated by its first `^C`.
+- **Can `$cwd` and the kernel's cwd disagree?** The kernel's is where children run
+  and what relative opens resolve against; `$cwd` is what `cd`, globs and the
+  prompt use. Every mode adopts the kernel's at startup, before `--home`, and `cd`
+  sets both. A new startup path must adopt too: u-6-test flow 9 witnesses the
+  method from `/proc`, and ls-imperium arm (1b) the interactive call site. A
+  plain assignment to `cwd` still moves only the variable.
 - **Do the two console paths stay one grammar?** The console (`--consctl-fd`) and
   pts (`/dev/pts/<n>ctl`) paths must write the same mode vocabulary; the restore
   after a foreground child must be byte-identical to the prompt-mode apply.
@@ -318,9 +528,27 @@ not.
 - **Is the command index the same set the resolver searches?** Two consumers read
   it — completion and validity colouring — so a divergence produces both a missing
   completion and a wrong colour.
-- **Does the completion cap interact correctly with the prefix extension?** The
-  engine extends the buffer to the longest common prefix of whatever candidate set
-  it is handed.
+- **Does every path that moves the cursor itself erase the strip first?** The
+  editor knows where the strip is only relative to where its last render left
+  the cursor. The REPL erases it before any action that leaves the menu and
+  before a notification; a new path that writes `\r\n` without `clear_menu()`
+  strands a strip on screen.
+- **Does every source supply its own extension?** The engine takes no prefix
+  from the candidates -- it cannot, since they are spelled -- so a source that
+  leaves `extension` empty simply never extends, and one that computes it from
+  a capped subset reintroduces the 2026-09-23 defect. Every capping source should
+  go through `Gather`, which takes the prefix from every match's name.
+- **Does every name the source inserts read back as itself?** Plain, quoted or
+  double-quoted, the inserted word must lex to one token whose value is the name,
+  not glued to its neighbour, not a keyword, not a glob. `AWKWARD` in the tests
+  is the list of characters that have broken it; a new special character in the
+  lexer belongs there too.
+- **Do the two scanners still read one grammar?** `word_at` mirrors the lexer by
+  hand for incomplete input. A lexer change to what a word is -- a new word
+  character, a new quote or escape, a new gluing rule -- must change both, and
+  `word_at_agrees_with_the_lexer` only covers the forms on its list. It compares
+  `word_at`'s reading with the VALUE of the lexer's word (`lexer::unescape`),
+  since the lexer's text keeps its escapes for the evaluator.
 - **Are the editor's bounds defensive?** The buffer cap, the menu anchor's char
   boundaries, and the CSI parameter array are all fixed-size.
 
@@ -367,24 +595,40 @@ marked unresolvable while running fine. Currently latent: the session root holds
 only data files, and the shell that does run from a root-level namespace is the
 bare-spawn boot check, which never installs completion.
 
-**The 256-candidate cap is applied before the sort, so which candidates survive is
-filesystem-order-dependent.** Path completion iterates `read_dir` in FS order,
-breaks at the cap, and *then* sorts — and the comment on that sort says it exists
-so "the menu + LCP" are deterministic, which is the exact property the truncation
-undoes. The engine computes its longest common prefix over whatever subset
-survived, so in a directory with more than 256 matches Tab can extend the line to a
-prefix that excludes valid candidates. Command completion is unaffected (its source
-vector is already sorted, so the cap takes a deterministic first 256).
+**A name holding a control character is unreachable by Tab.** ut has no quoted
+form for one -- no `$'\e'` as zsh inserts -- so completion counts it among the
+`+N more` and stops the shared prefix short of it; a glob reaches it. The menu's
+count does not say why a name is unlisted, whether past the cap or unspellable.
 
-**A multi-line render that shrinks leaves stale lines on screen, and the fix was
-assigned to a chunk that shipped without it.** The comment describes the defect
-exactly and says the next chunk will track the previous render's line count and
-emit an erase-to-end-of-screen. That chunk landed — it is `repl.rs` — and neither
-the tracking nor the escape exists anywhere in the crate; the only screen clear is
-Ctrl-L's full-screen one. What is worth noting is the stated reason it was
-acceptable: "the boot probe only checks emitted bytes (not screen state) so this is
-invisible". Invisible to the probe. Visible to the user, and nothing ever forced
-the issue because the observer that would have complained cannot see screens.
+**Tab leaves a quote open where a word goes on.** A directory, or a shared
+prefix that needed quoting, is inserted with its quote open (`'my dir/`), as
+bash does, so Enter on such a line continues it rather than submitting. The
+alternative, closing the quote, would make anything typed next a separate word.
+
+**Completion expands neither `$var` nor `~`.** A word glued to either completes
+to nothing: in ut `$home/fo` is two words, and `~/fo` is one word whose leading
+`~` only eval expands. Variable-name completion after `$` (scripture 11.5) is
+unbuilt. The reader also does not track heredoc bodies, so Tab on a body line
+completes shell words there, as bash's does.
+
+**A line from the history file is drawn raw.** Completion no longer puts a
+control character into the buffer, but `install_history` loads `.ut_history`
+unfiltered and the editor still draws its buffer verbatim, so a line another
+program wrote with an ESC in it reaches the terminal on Up or Ctrl-R. Readline
+and zle draw control characters as `^X`, two columns wide. Owed as its own fix.
+
+**A multi-line render that shrinks leaves stale lines on screen -- when the width
+is unknown.** `render`'s doc comment still says the next chunk will track the
+previous render's rows and erase to the end of the screen. For a KNOWN width that
+landed: `render_wrapped` moves up `prev_cursor_row` rows to the block's top and
+erases below it. The width-unknown fallback (`render_unwrapped`, a dumb pipe or an
+unanswered probe) still rewrites only the rows it draws and starts from the
+cursor's row, so a shrinking multi-line buffer leaves rows behind and a cursor on
+a later row redraws the block one row low. The comment is stale for the one path
+and true for the other. Its stated reason is the part worth keeping: "the boot
+probe only checks emitted bytes (not screen state) so this is invisible".
+Invisible to the probe, visible to the user -- and on 2026-09-23 the menu strip
+proved the same point, until tests began asserting on `vt`'s screen.
 
 **Construction snapshots again, now outside the eval modules.** `lib.rs` lists
 `line_editor` under "modules deferred to later U-* chunks" four lines above the
@@ -402,12 +646,12 @@ supersedes the U-1 *Pale Fire* palette". Twelve descriptions of the palette as
 the banner in `main.rs`. Every colour is correct; every account of what the colours
 are called is stale in six of the seven files that give one.
 
-**`ansi.rs` asserts a discipline its sibling already breaks.** It documents that
+**`ansi.rs`'s CSI-only discipline now holds in the shell.** It documents that
 non-CSI escapes would be over-counted and rests on "disciplined Utopia programs
-emit only CSI 24-bit-color SGR + reset". The REPL's menu strip emits `ESC 7` and
-`ESC 8` — save and restore cursor, two-byte non-CSI escapes that `visible_width`
-would count as two columns each. Harmless today only because the strip is written
-straight to the sink and never measured.
+emit only CSI 24-bit-color SGR + reset". The menu strip's `ESC 7` / `ESC 8` were
+the shell's one exception, harmless only because the strip was never measured.
+The 2026-09-23 strip fix removed both; a search of `libutopia` and the shell for
+them finds none (the same search finds three lines in the old `repl.rs`).
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

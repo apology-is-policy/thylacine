@@ -1370,6 +1370,9 @@ int p9_client_init(struct p9_client *c,
     // client (destroy -> init, no re-alloc -- the test scaffolding's shape)
     // can never carry a stale loose/cacheable/wga latch across lives.
     c->loose           = false;
+    c->cape            = false;
+    c->cape_uid        = 0;
+    c->cape_gid        = 0;
     c->cacheable       = false;
     c->wga_unsupported = false;
     c->out_buf     = c->out_buf_inline;

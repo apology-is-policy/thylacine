@@ -25,6 +25,8 @@
 //   5. var -> heredoc-interp -> redirect -> spawn (var-fed heredoc to a sink)
 //   6. Repl::feed end-to-end                    (the loop: var/subst/pipe/Dq)
 //   7. Repl::feed parse-error survival + subst  (interactive recovery, 8.9)
+//   8. Repl::run_script                         (positionals, exit, cwd sync)
+//   9. adopt_kernel_cwd -> glob -> cd           (a shell spawned away from /)
 //
 // joey gates the boot on this binary's status==0.
 
@@ -37,7 +39,7 @@ use alloc::string::String;
 
 use libthyla_rs::alloc::ThylaAlloc;
 use libthyla_rs::t_putstr;
-use libutopia::eval::{eval_source, Env};
+use libutopia::eval::{eval_source, pathname, Env};
 use libutopia::repl::Repl;
 
 #[global_allocator]
@@ -70,6 +72,9 @@ pub extern "C" fn rs_main() -> i64 {
         return rc;
     }
     if let Err(rc) = flow_script_mode() {
+        return rc;
+    }
+    if let Err(rc) = flow_adopt_kernel_cwd() {
         return rc;
     }
 
@@ -252,15 +257,97 @@ fn flow_script_mode() -> Result<(), i64> {
     if rc != 0 || r2.env().get("b").as_scalar() != "2" {
         return fail("flow 8: a clean script did not evaluate + return 0");
     }
-    // run_script syncs $cwd to the real kernel cwd (so a `#!`-spawned script,
-    // which gets no --home, reports the inherited cwd, not the unset `/`).
-    if let Ok(cwd) = libthyla_rs::env::current_dir() {
-        if r2.env().cwd() != cwd {
-            return fail("flow 8: run_script did not sync $cwd to the kernel cwd");
+    // run_script syncs $cwd to the kernel cwd (a `#!`-spawned script gets no
+    // --home). Run away from "/", so a `$cwd` left at its default fails.
+    enter("/srv", "flow 8")?;
+    let mut r3 = Repl::new();
+    let _ = r3.run_script("/s.ut", &[], "let c = 1\n");
+    if r3.env().cwd() != "/srv" {
+        return fail("flow 8: run_script did not sync $cwd to the kernel cwd");
+    }
+    enter("/", "flow 8")?;
+    t_putstr("u-6-test: ut SCRIPT mode (positional + script-mode + exit + cwd) OK\n");
+    Ok(())
+}
+
+// Flow 9 -- an interactive shell takes its cwd from the kernel. imperium's
+// sub-shell, haul's and a nested `ut` get no --home; each inherits its
+// parent's cwd, and `$cwd` is what a relative glob and a relative `cd` read.
+// Each leg runs away from "/" and has a control one variable away (the same
+// input from "/"), so a `$cwd` left at its default fails it. The directories
+// are chosen by what they can do pre-pivot, where the ramfs root is flat:
+// /env is listable and this process can add an entry to it; /proc/<pid> is a
+// directory to enter, though /proc itself cannot be listed.
+fn flow_adopt_kernel_cwd() -> Result<(), i64> {
+    // The glob leg: a probe variable is an entry of /env that "/" lacks.
+    if write_env("U6CWDPROBE", "1").is_err() {
+        return fail("flow 9: cannot create /env/U6CWDPROBE");
+    }
+    enter("/env", "flow 9")?;
+    let mut repl = Repl::new();
+    repl.adopt_kernel_cwd();
+    if repl.env().cwd() != "/env" {
+        return fail("flow 9: $cwd is not the kernel's cwd");
+    }
+    if !list_has(&pathname::expand(repl.env(), "U6CWD*"), "U6CWDPROBE") {
+        return fail("flow 9: a relative glob did not walk the adopted cwd");
+    }
+    if list_has(&pathname::expand(&Env::new(), "U6CWD*"), "U6CWDPROBE") {
+        return fail("flow 9: the root matches the probe glob too -- the leg cannot discriminate");
+    }
+    let _ = libthyla_rs::fs::remove_file("/env/U6CWDPROBE");
+
+    // The cd leg: this process's own /proc entry, entered by its bare pid.
+    let pid = alloc::format!("{}", libthyla_rs::identity::pid());
+    let want = alloc::format!("/proc/{}", pid);
+    if !libthyla_rs::fs::is_dir(&want) {
+        return fail("flow 9: /proc/<pid> is not a directory -- the cd leg has no target");
+    }
+    enter("/proc", "flow 9")?;
+    let src = alloc::format!("cd {}\n", pid);
+    let mut from_root = Repl::new();
+    if eval_source(from_root.env_mut(), &src).is_ok() && from_root.env().status() == 0 {
+        return fail("flow 9: `cd <pid>` from $cwd=/ succeeded -- the leg cannot discriminate");
+    }
+    let mut repl = Repl::new();
+    repl.adopt_kernel_cwd();
+    if eval_source(repl.env_mut(), &src).is_err() || repl.env().status() != 0 {
+        return fail("flow 9: a relative cd did not resolve against the adopted cwd");
+    }
+    if repl.env().cwd() != want {
+        return fail("flow 9: a relative cd did not land in /proc/<pid>");
+    }
+    match libthyla_rs::env::current_dir() {
+        Ok(c) if c == want => {}
+        _ => return fail("flow 9: the kernel's cwd disagrees with $cwd after the cd"),
+    }
+    enter("/", "flow 9")?;
+    t_putstr("u-6-test: kernel cwd adopted (cwd + relative glob + relative cd) OK\n");
+    Ok(())
+}
+
+fn write_env(name: &str, value: &str) -> Result<(), ()> {
+    use libthyla_rs::io::Write;
+    let path = alloc::format!("/env/{}", name);
+    let mut f = libthyla_rs::fs::File::create(&path).map_err(|_| ())?;
+    f.write_all(value.as_bytes()).map_err(|_| ())
+}
+
+// chdir, then confirm the kernel reports `dir`: a flow's premise, measured.
+fn enter(dir: &str, flow: &str) -> Result<(), i64> {
+    if libthyla_rs::env::set_current_dir(dir).is_ok() {
+        if let Ok(c) = libthyla_rs::env::current_dir() {
+            if c == dir {
+                return Ok(());
+            }
         }
     }
-    t_putstr("u-6-test: ut SCRIPT mode (positional + script-mode + exit) OK\n");
-    Ok(())
+    t_putstr("u-6-test: FAILED -- ");
+    t_putstr(flow);
+    t_putstr(": could not enter ");
+    t_putstr(dir);
+    t_putstr("\n");
+    Err(1)
 }
 
 // Flow 5 -- a variable defined earlier in the SAME script feeds an

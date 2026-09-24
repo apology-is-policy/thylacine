@@ -25,10 +25,14 @@
 //    `_`, `.`, `/`, `-`, `+`, `:`, `@`, `,`, and the glob meta
 //    chars `*`, `[`, `]`). The `?` glyph is a word char when
 //    followed by another word char (preserves `*.?s`); otherwise
-//    a Question operator. `\<char>` inside a word includes
-//    `<char>` literally (escape for the surrounding shell).
-//    Reserved keywords are matched against the scanned word text;
-//    a match emits the keyword token instead of Word.
+//    a Question operator. `\<char>` inside a word makes `<char>` part
+//    of the word whatever it is, and the word KEEPS the backslash:
+//    the evaluator removes it from a value (`unescape`) and honours
+//    it in a glob or a pattern, where `\*` is a star rather than a
+//    wildcard (`eval::glob`). Resolving it here lost that difference,
+//    and `rm \*` removed every file.
+//    Reserved keywords are matched against the word as written, so
+//    an escaped one (`\if`) is an ordinary word, as in POSIX.
 //
 // 3. Quoted strings: `'literal'` (rc convention: `''` is the only
 //    escape -- a doubled quote produces a single `'`); `"interp"`
@@ -39,9 +43,10 @@
 //    `$"var` form is rc's clean answer to bash's `"$@"` mess
 //    (scripture section 6.8).
 //
-// 5. Substitutions: `$(cmd)` (POSIX-shape) and `` `{cmd}` `` (rc
-//    shape; requires the closing backtick). The body is stored
-//    raw and re-tokenized by the parser when it descends.
+// 5. Substitutions: `$(cmd)` (POSIX-shape) and `` `{cmd} `` (rc
+//    shape; the `}` ends it -- there is NO closing backtick, per
+//    scripture section 6.6 and rc). The body is stored raw and
+//    re-tokenized by the parser when it descends.
 //
 // 6. Process substitution: `<(cmd)`, `>(cmd)`. Same raw-body
 //    pattern.
@@ -207,7 +212,7 @@ impl<'a> Lexer<'a> {
             b'`' => self.scan_backtick(),
             // All other word chars start a word. Backslash-leading
             // (e.g. `\$` at top level) starts a word too -- the
-            // escaped char becomes the word's first char.
+            // escaped char is part of it.
             _ if is_word_char_byte(b) || b == b'\\' => self.scan_word(),
             // Anything else: control chars, DEL, etc. The legal
             // syntactic surface is fully covered above; anything
@@ -330,7 +335,7 @@ impl<'a> Lexer<'a> {
         while self.pos < self.bytes.len() {
             let b = self.bytes[self.pos];
             if b == b'\\' {
-                // \<char> includes <char> literally. \<nl> is line
+                // \<char> is kept as written (see the header). \<nl> is line
                 // continuation (consume both, continue scanning
                 // word).
                 if self.pos + 1 >= self.bytes.len() {
@@ -343,6 +348,7 @@ impl<'a> Lexer<'a> {
                     self.pos += 2;
                     continue;
                 }
+                text.push('\\');
                 self.pos += 1; // past the `\`
                 let char_len = self.peek_char_len();
                 text.push_str(&self.source[self.pos..self.pos + char_len]);
@@ -582,7 +588,13 @@ impl<'a> Lexer<'a> {
     fn scan_backtick(&mut self) -> ParseResult<()> {
         let start = self.pos;
         debug_assert_eq!(self.bytes[self.pos], b'`');
-        // Per scripture section 6.6: the form is `` `{cmd}` ``.
+        // Scripture section 6.6: the form is `` `{cmd} `` -- rc-traditional,
+        // and rc has NO closing backtick. This code used to require one, and
+        // the comment here claimed section 6.6 said so; it does not. The
+        // deviation defeated the form's only stated purpose, since an actual
+        // rc script's `` `{ls} `` failed to lex. Operator-ratified 2026-09-22:
+        // the code follows scripture.
+        //
         // Require `{` immediately after the opening backtick.
         if self.peek_byte_at(1) != Some(b'{') {
             return Err(ParseError {
@@ -598,14 +610,10 @@ impl<'a> Lexer<'a> {
                 span: Span::new(start, self.bytes.len()),
             })?;
         let body = String::from(&self.source[body_start..close_brace]);
-        // Closing backtick must follow the `}`.
-        if self.bytes.get(close_brace + 1) != Some(&b'`') {
-            return Err(ParseError {
-                kind: ParseErrorKind::UnterminatedBacktick,
-                span: Span::new(start, close_brace + 1),
-            });
-        }
-        self.pos = close_brace + 2; // past `}` `` ` ``
+        // The `}` ends it. A backtick immediately after is NOT a terminator --
+        // it opens the next substitution, which is why accepting both forms
+        // would make `` `{a}`{b} `` ambiguous and why only one is accepted.
+        self.pos = close_brace + 1; // past `}`
         let span = Span::new(start, self.pos);
         self.tokens.push(Token::new(TokenKind::Backtick(body), span));
         Ok(())
@@ -839,8 +847,10 @@ impl<'a> Lexer<'a> {
 ///
 /// Non-ASCII bytes (b >= 0x80) are always word chars; the lexer
 /// advances by whole UTF-8 chars so multibyte sequences are
-/// preserved verbatim into Word tokens.
-fn is_word_char_byte(b: u8) -> bool {
+/// preserved verbatim into Word tokens. Tab completion reads the word under
+/// the cursor with this same predicate, so the two cannot disagree on where a
+/// word ends.
+pub(crate) fn is_word_char_byte(b: u8) -> bool {
     // `%` is a word char in command context so a jobspec (`%1`) and a literal
     // `%` argument (`echo 100%`, `printf %d`) lex as words rather than erroring
     // as UnexpectedChar. Arith `%` (modulo) is unaffected: the expression
@@ -866,13 +876,28 @@ fn is_word_char_byte(b: u8) -> bool {
 
 /// True if `b` is a valid first char of a variable name. Names are
 /// `[a-zA-Z_][a-zA-Z0-9_]*`.
-fn is_var_name_start_byte(b: u8) -> bool {
+pub(crate) fn is_var_name_start_byte(b: u8) -> bool {
     matches!(b, b'a'..=b'z' | b'A'..=b'Z' | b'_')
 }
 
 /// True if `b` is a valid continuation char of a variable name.
-fn is_var_name_byte(b: u8) -> bool {
+pub(crate) fn is_var_name_byte(b: u8) -> bool {
     matches!(b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_')
+}
+
+/// The value a bare word stands for: its text with each `\x` read as `x`.
+/// A lone `\` at the end stands for itself, as the lexer always read it.
+pub fn unescape(word: &str) -> String {
+    let mut out = String::with_capacity(word.len());
+    let mut chars = word.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            out.push(chars.next().unwrap_or('\\'));
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Find the byte index of the `)` that closes a paren opened with
@@ -1568,11 +1593,33 @@ mod tests {
         }
     }
 
+    /// Scripture section 6.6's form, which is rc's: `` `{cmd} ``, no closing
+    /// backtick. Operator-ratified 2026-09-22 after the lexer was found
+    /// requiring one -- a deviation that made the form reject the very rc
+    /// scripts it exists to accept.
     #[test]
     fn backtick_braced_substitution() {
         assert_eq!(
-            kinds_no_eof("`{pwd}`"),
+            kinds_no_eof("`{pwd}"),
             vec![TokenKind::Backtick("pwd".into())]
+        );
+        // A backtick after the `}` opens the NEXT substitution rather than
+        // closing this one, which is what makes the single form unambiguous.
+        assert_eq!(
+            kinds_no_eof("`{a}`{b}"),
+            vec![
+                TokenKind::Backtick("a".into()),
+                TokenKind::Backtick("b".into()),
+            ]
+        );
+        // And it composes with ordinary words on both sides.
+        assert_eq!(
+            kinds_no_eof("echo `{pwd} done"),
+            vec![
+                TokenKind::Word("echo".into()),
+                TokenKind::Backtick("pwd".into()),
+                TokenKind::Word("done".into()),
+            ]
         );
     }
 
@@ -1788,11 +1835,88 @@ mod tests {
     }
 
     #[test]
-    fn backslash_inside_word_escapes() {
-        // \$ in a bare word is literal $
+    fn backslash_inside_word_is_kept_for_the_evaluator() {
+        // The word keeps its spelling; `unescape` gives the value `$path`.
         assert_eq!(
             kinds_no_eof("\\$path"),
-            vec![TokenKind::Word("$path".into())]
+            vec![TokenKind::Word("\\$path".into())]
+        );
+        assert_eq!(unescape("\\$path"), "$path");
+    }
+
+    #[test]
+    fn an_escaped_reserved_word_is_a_word() {
+        // POSIX: a reserved word with any part quoted is an ordinary word.
+        assert_eq!(kinds_no_eof("\\if"), vec![TokenKind::Word("\\if".into())]);
+        assert_eq!(kinds_no_eof("i\\f"), vec![TokenKind::Word("i\\f".into())]);
+        assert_eq!(kinds_no_eof("if"), vec![TokenKind::If]);
+    }
+
+    /// The text the lexer produced for a word before it kept escapes: each
+    /// `\<char>` resolved to the char, `\<newline>` dropped, a lone `\` at
+    /// the end kept. `unescape` of the word as it is kept now must equal it
+    /// for every word, or a value somewhere changed.
+    fn resolved_as_before(src: &str) -> String {
+        let mut out = String::new();
+        let mut chars = src.chars();
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                out.push(c);
+                continue;
+            }
+            match chars.next() {
+                Some('\n') => {}
+                Some(n) => out.push(n),
+                None => out.push('\\'),
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn unescape_gives_the_value_the_lexer_used_to_resolve() {
+        let mut words: Vec<String> = Vec::new();
+        for b in 0x21u8..0x7f {
+            let c = b as char;
+            words.push(alloc::format!("a\\{}c", c));
+            words.push(alloc::format!("\\{}", c));
+            words.push(alloc::format!("x\\{}", c));
+        }
+        for w in [
+            "a\\ b",
+            "\\\\",
+            "\\\\\\\\",
+            "a\\\\*",
+            "tail\\",
+            "\\\u{e9}t\u{e9}",
+            "caf\\\u{e9}",
+            "ab\\\ncd",
+            "\\\\\\",
+            "\\?x",
+            "a\\!=",
+        ] {
+            words.push(String::from(w));
+        }
+        let mut checked = 0;
+        for src in &words {
+            let toks = match tokenize(src) {
+                Ok(t) => t,
+                Err(e) => panic!("{:?}: {:?}", src, e),
+            };
+            for t in &toks {
+                if let TokenKind::Word(text) = &t.kind {
+                    let spelled = &src[t.span.start..t.span.end];
+                    assert_eq!(unescape(text), resolved_as_before(spelled), "{:?}", src);
+                    checked += 1;
+                }
+            }
+        }
+        // Every constructed word yields at least one Word token.
+        assert!(
+            checked >= words.len(),
+            "{} words, {} checked",
+            words.len(),
+            checked
         );
     }
 
@@ -1833,12 +1957,21 @@ mod tests {
                 TokenKind::Word("out".into()),
             ]
         );
+        // `in` after `<` is a FILENAME, and this lexer still emits the
+        // keyword -- correctly. The lexer is context-free by design, so the
+        // demotion back to a word lives in the parser, where a word is already
+        // what the grammar asks for (`Parser::demote_reserved_word`; POSIX
+        // rule 1). This assertion was written expecting the other design --
+        // a context-sensitive lexer -- and pinning the real one here is what
+        // keeps the two halves of the decision in the same file as each other.
+        // The behaviour a user sees is asserted in
+        // `parse::tests::reserved_words_are_ordinary_words_off_the_command_word`.
         assert_eq!(
             kinds_no_eof("cmd < in"),
             vec![
                 TokenKind::Word("cmd".into()),
                 TokenKind::Less,
-                TokenKind::Word("in".into()),
+                TokenKind::In,
             ]
         );
     }

@@ -1,0 +1,46 @@
+# `lantern` -- the Beacon deck presenter (docs/LANTERN-DESIGN.md).
+#
+# Shows a directory of Markdown slides one at a time as Beacon: rich under
+# Halcyon, the same payload without frames on serial, and a plain
+# concatenation down a pipe. A slide IS an Operator's-Manual section -- the
+# `manual` crate's format, checker and renderer, unchanged -- so the tree
+# carries ONE Markdown dialect and one Beacon realization, not a second
+# private to slides.
+#
+# lib + bin (the `manual` / `view` pattern): the LIB is the pure half -- the
+# manifest parser, the key -> action map, the navigation and the output
+# cooking -- host-tested via
+#   cargo test -p lantern --lib --no-default-features --target aarch64-apple-darwin
+# The BIN is the thin syscall body (the `backend` feature -> libthyla-rs).
+#
+# kaua is taken WITHOUT its default `backend` feature on purpose: that gates
+# `kaua::term`, the alt-screen owner. Alt-screen is the one mode that makes a
+# Halcyon tile paint its raw mono grid instead of the rich document
+# (halcyond `tile.rs` ScreenMode::AltScreen), so a presenter must never enter
+# it. lantern takes the pure VT INPUT parser and leaves the screen half alone.
+[package]
+name = "lantern"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[features]
+default = ["backend"]
+backend = ["dep:libthyla-rs"]
+
+[lib]
+name = "lantern"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lantern"
+path = "src/main.rs"
+required-features = ["backend"]
+
+[dependencies]
+libthyla-rs = { path = "../lib/libthyla-rs", optional = true }
+beacon = { path = "../lib/beacon" }
+manual = { path = "../manual", default-features = false }
+libhalcyon = { path = "../lib/libhalcyon" }
+kaua = { path = "../lib/kaua", default-features = false }

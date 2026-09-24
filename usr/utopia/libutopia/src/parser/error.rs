@@ -35,8 +35,8 @@ pub enum ParseErrorKind {
     UnterminatedDoubleQuote,
     /// `$(` opened but the matching `)` was not found before EOF.
     UnterminatedSubstitution,
-    /// `` `{ `` opened but the matching `}` and closing `` ` `` were
-    /// not found.
+    /// `` `{ `` opened but the matching `}` was not found. There is no
+    /// closing backtick in this form (scripture 6.6 / rc).
     UnterminatedBacktick,
     /// `<(` or `>(` opened but the matching `)` was not found.
     UnterminatedProcSub,

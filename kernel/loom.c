@@ -20,17 +20,20 @@
 #include <thylacine/9p_session.h>
 #include <thylacine/9p_wire.h>     // WEFT_DIR_* (the Tweftio direction)
 #include <thylacine/burrow.h>
+#include <thylacine/dev.h>        // Dev::perm_enforced (the 8.5.1 gate)
 #include <thylacine/dev9p.h>
 #include <thylacine/errno.h>
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
 #include <thylacine/page.h>
+#include <thylacine/perm.h>       // perm_check / perm_wstat_check (LOOM.md 8.5.1)
 #include <thylacine/poll.h>
 #include <thylacine/proc.h>       // kproc (the SQPOLL kthread parent)
 #include <thylacine/rendez.h>
 #include <thylacine/sched.h>      // ready / sched (the SQPOLL kthread lifecycle)
 #include <thylacine/spoor.h>
 #include <thylacine/spinlock.h>
+#include <thylacine/syscall.h>    // T_WSTAT_GID (the create-gid rule)
 #include <thylacine/thread.h>     // thread_create_with_arg / thread_free / THREAD_EXITING
 #include <thylacine/types.h>
 #include <thylacine/vma.h>        // vma_lookup / VMA_PROT_* (Loom-6 registered buffers)
@@ -127,6 +130,11 @@ struct loom_async_op {
     // lone completion.
     struct loom_chain_op  *chain;
     struct loom_async_op  *next;        // l->inflight_ops chain (under l->lock)
+    // LOOM.md 8.5.1: a child-mutation op's name bytes, copied out of the
+    // registered buffer and validated at submit. Its build thunk sends THIS
+    // copy, never the shared buffer, so the name on the wire is the one checked
+    // (the sync twins' sys_copy_component). Allocated only for those six ops.
+    u8                     names[];
 };
 
 _Static_assert(__builtin_offsetof(struct loom_async_op, rpc) == 0,
@@ -467,6 +475,7 @@ static void loom_free(struct Loom *l) {
     struct loom_async_op *op = l->inflight_ops;
     l->inflight_ops = NULL;
     l->async_inflight = 0;
+    l->admitting      = 0;
     spin_unlock(&l->lock);
     while (op) {
         struct loom_async_op *next = op->next;
@@ -858,10 +867,20 @@ static s32 loom_payload_result(struct loom_async_op *op, int status,
     }
     case LOOM_OP_GETATTR: {
         if (!dr) return 0;
+        // IDENTITY-DESIGN 3.2: userspace sees the owner the kernel's own stat
+        // reports -- on a caped session the cape's, marked valid like any
+        // server-filled field.
+        struct p9_attr a;
+        loom_bufcopy((u8 *)&a, (const u8 *)&dr->attr, (u32)sizeof(a));
+        if (op->client->cape) {
+            a.uid    = op->client->cape_uid;
+            a.gid    = op->client->cape_gid;
+            a.valid |= P9_GETATTR_UID | P9_GETATTR_GID;
+        }
         u32 got = (u32)sizeof(struct p9_attr);
         if (got > op->op_count) got = op->op_count;   // honor a short dest (no overrun)
         if (got != 0 && op->buf_kva)
-            loom_bufcopy(op->buf_kva, (const u8 *)&dr->attr, got);
+            loom_bufcopy(op->buf_kva, (const u8 *)&a, got);
         return loom_count_result(got);
     }
     case LOOM_OP_STATFS: {
@@ -1019,18 +1038,18 @@ static int loom_build_setattr(struct p9_session *s, u8 *out, size_t cap, void *c
 static int loom_build_unlinkat(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
     struct loom_async_op *op = (struct loom_async_op *)ctx;
     return p9_session_send_unlinkat(s, out, cap, op->op_fid,
-                                    op->buf_kva, op->op_count, (u32)op->sqe.offset);
+                                    op->names, op->op_count, (u32)op->sqe.offset);
 }
 static int loom_build_mkdir(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
     struct loom_async_op *op = (struct loom_async_op *)ctx;
     return p9_session_send_mkdir(s, out, cap, op->op_fid,
-                                 op->buf_kva, op->op_count,
+                                 op->names, op->op_count,
                                  (u32)op->sqe._resv1[1], (u32)op->sqe._resv1[2]);
 }
 static int loom_build_mknod(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
     struct loom_async_op *op = (struct loom_async_op *)ctx;
     return p9_session_send_mknod(s, out, cap, op->op_fid,
-                                 op->buf_kva, op->op_count,
+                                 op->names, op->op_count,
                                  (u32)op->sqe._resv1[1], (u32)op->sqe._resv1[2],
                                  (u32)op->sqe._resv1[3], (u32)op->sqe.offset);
 }
@@ -1038,7 +1057,7 @@ static int loom_build_symlink(struct p9_session *s, u8 *out, size_t cap, void *c
     struct loom_async_op *op = (struct loom_async_op *)ctx;
     u32 name_len = (u32)op->sqe._resv1[1];          // the split (<= op_count, submit-checked)
     return p9_session_send_symlink(s, out, cap, op->op_fid,
-                                   op->buf_kva, name_len,
+                                   op->names, name_len,
                                    op->buf_kva + name_len, op->op_count - name_len,
                                    (u32)op->sqe._resv1[2]);
 }
@@ -1046,15 +1065,15 @@ static int loom_build_renameat(struct p9_session *s, u8 *out, size_t cap, void *
     struct loom_async_op *op = (struct loom_async_op *)ctx;
     u32 oldname_len = (u32)op->sqe._resv1[1];       // the split (<= op_count, submit-checked)
     return p9_session_send_renameat(s, out, cap,
-                                    op->op_fid,  op->buf_kva, oldname_len,
-                                    op->op_fid2, op->buf_kva + oldname_len,
+                                    op->op_fid,  op->names, oldname_len,
+                                    op->op_fid2, op->names + oldname_len,
                                     op->op_count - oldname_len);
 }
 static int loom_build_link(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
     struct loom_async_op *op = (struct loom_async_op *)ctx;
     // dfid = op_fid (where the link lands); source inode = op_fid2; name = region.
     return p9_session_send_link(s, out, cap, op->op_fid, op->op_fid2,
-                                op->buf_kva, op->op_count);
+                                op->names, op->op_count);
 }
 
 // Post a terminal CQE inline (no engine round-trip): the NOP success (result 0)
@@ -1097,6 +1116,121 @@ static void loom_chain_done(struct Loom *l, struct loom_chain_op *chain, bool ok
 // (post-Loom graphics), so MULTISHOT here is rejected by the caller. Every
 // failure path routes through `fail` -> releases whatever it pinned + posts one
 // CQE.
+// LOOM.md 8.5.1 -- the directory-mutation authority. The rights snapshot is
+// necessary but NOT sufficient for these ops: their directory handle is normally
+// O_PATH, born R|W with no check on its target, so its RIGHT_WRITE is hollow. The
+// sync twins (spoor_unlink_in_dir, spoor_rename_in_dirs, SYS_WALK_CREATE's parent
+// gate) re-check the DAC at the operation; these did not, and since A-3b the
+// kernel is the only rwx enforcer (IDENTITY-DESIGN 3.7) -- Stratum checks dataset
+// scope, not file bits -- so any principal that could X-search to a directory
+// could create, unlink, rename, link or symlink entries in it.
+static bool loom_op_mutates_dir(u8 opcode) {
+    switch (opcode) {
+    case LOOM_OP_MKDIR:
+    case LOOM_OP_MKNOD:
+    case LOOM_OP_SYMLINK:
+    case LOOM_OP_UNLINKAT:
+    case LOOM_OP_RENAMEAT:
+    case LOOM_OP_LINK:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// One child name, shaped as the sync twins' sys_copy_component shapes it:
+// 1..SYS_WALK_OPEN_NAME_MAX bytes, no '/' or NUL, and not "." or "..".
+static bool loom_component_ok(const u8 *p, u32 n) {
+    if (n == 0 || n > SYS_WALK_OPEN_NAME_MAX)        return false;
+    for (u32 i = 0; i < n; i++)
+        if (p[i] == '/' || p[i] == '\0')             return false;
+    if (n == 1 && p[0] == '.')                       return false;
+    if (n == 2 && p[0] == '.' && p[1] == '.')        return false;
+    return true;
+}
+
+// How many leading region bytes are names: all of them, except SYMLINK's target
+// (a path, which stays in the buffer). 0 = a span no valid name set can have.
+static u32 loom_names_len(const struct loom_sqe *sqe, u32 count) {
+    u32 split = (u32)sqe->_resv1[1];
+    switch (sqe->opcode) {
+    case LOOM_OP_SYMLINK:  return split <= SYS_WALK_OPEN_NAME_MAX ? split : 0;
+    case LOOM_OP_RENAMEAT: return count <= 2u * SYS_WALK_OPEN_NAME_MAX ? count : 0;
+    default:               return count <= SYS_WALK_OPEN_NAME_MAX ? count : 0;
+    }
+}
+
+// The copied names: RENAMEAT's two halves split at _resv1[1] (0 < split < count,
+// checked at submit), SYMLINK's name before it, every other op's whole span.
+static bool loom_names_ok(const struct loom_sqe *sqe, const u8 *names, u32 count) {
+    u32 split = (u32)sqe->_resv1[1];
+    switch (sqe->opcode) {
+    case LOOM_OP_SYMLINK:  return loom_component_ok(names, split);
+    case LOOM_OP_RENAMEAT: return loom_component_ok(names, split) &&
+                                  loom_component_ok(names + split, count - split);
+    default:               return loom_component_ok(names, count);
+    }
+}
+
+// The creating Proc (l->ident), validated like loom_owner_live: a stale pointer
+// reads as absent, and absent fails the caller closed.
+static const struct Proc *loom_ident_live(const struct Loom *l) {
+    const struct Proc *who = l->ident;
+    if (!who)                                              return NULL;
+    if (who->magic != PROC_MAGIC || who->pid != l->ident_pid) return NULL;
+    return who;
+}
+
+// The sync twins' parent check, verbatim in shape: gated on perm_enforced, no
+// stat -> -EIO, no W|X -> -EACCES.
+static s32 loom_dir_writable(const struct Proc *who, struct Spoor *dir) {
+    if (!dir->dev)                                   return -(s32)T_E_IO;
+    if (!dir->dev->perm_enforced)                    return 0;
+    struct t_stat st;
+    if (spoor_stat_native(dir, &st) != 0)            return -(s32)T_E_IO;
+    if (perm_check(who, &st, PERM_W | PERM_X) != 0)  return -(s32)T_E_ACCES;
+    return 0;
+}
+
+// The gate. Runs in the submitter's syscall context only: the caller has refused
+// an SQPOLL ring already, because its kthread must never block on a wire RPC (a
+// hung server would keep it from its stop flag and loom_free's join would hang
+// the owner's exit). `dir2` is RENAMEAT's newdir; LINK's second handle is its
+// SOURCE, which POSIX link does not ask to be writable, so it is not checked.
+// For the create ops, *gid_out is the resolved group: SQE gid 0 (GID_INVALID) is
+// the creator's primary group, as the sync create always uses; any other must be
+// one the creator may chgrp a file it owns to (perm_wstat_check, cur_uid = the
+// creator: a member group, or chown-any authority). On a caped session
+// (IDENTITY-DESIGN 3.2) the group is the cape's and the wire carries P9_NOGID, so
+// the server leaves its own alone; naming a group there is a chgrp, which the cape
+// refuses.
+static s32 loom_dir_mutation_gate(const struct Loom *l, const struct loom_sqe *sqe,
+                                  const struct p9_client *cl,
+                                  struct Spoor *dir, struct Spoor *dir2,
+                                  u32 *gid_out, bool *gid_set) {
+    const struct Proc *who = loom_ident_live(l);
+    if (!who)                                        return -(s32)T_E_ACCES;
+    s32 e = loom_dir_writable(who, dir);
+    if (e == 0 && sqe->opcode == LOOM_OP_RENAMEAT)   e = loom_dir_writable(who, dir2);
+    if (e != 0)                                      return e;
+    if (sqe->opcode != LOOM_OP_MKDIR && sqe->opcode != LOOM_OP_MKNOD &&
+        sqe->opcode != LOOM_OP_SYMLINK)              return 0;
+    u64 raw = (sqe->opcode == LOOM_OP_MKNOD) ? sqe->offset : sqe->_resv1[2];
+    if (raw > (u64)0xFFFFFFFFu)                      return -(s32)T_E_INVAL;
+    u32 gid = (u32)raw;
+    if (cl->cape) {
+        if (gid != GID_INVALID)                      return -(s32)T_E_ACCES;
+        gid = P9_NOGID;
+    } else if (gid == GID_INVALID) {
+        gid = who->primary_gid;
+    } else if (perm_wstat_check(who, who->principal_id, T_WSTAT_GID, gid) != 0) {
+        return -(s32)T_E_ACCES;
+    }
+    *gid_out = gid;
+    *gid_set = true;
+    return 0;
+}
+
 static void loom_submit_payload(struct Loom *l, const struct loom_sqe *sqe,
                                 struct loom_chain_op *chain) {
     u64 ud = sqe->user_data;
@@ -1128,6 +1262,9 @@ static void loom_submit_payload(struct Loom *l, const struct loom_sqe *sqe,
     u32  buf_reg_len = 0;
     bool is_weft  = false;
     u32  weft_off = 0;
+    // LOOM.md 8.5.1: a create op's resolved group, written into the op's snapshot.
+    u32  cgid     = 0;
+    bool cgid_set = false;
 
     // Opcode -> (Tmsg builder, primary right, secondary right). need2 != 0 marks
     // a two-fid op (RENAMEAT / LINK) whose SECOND registered-handle index lives in
@@ -1221,7 +1358,9 @@ static void loom_submit_payload(struct Loom *l, const struct loom_sqe *sqe,
     // syscall-path gate. The metadata READ opcodes (GETATTR/STATFS/READLINK) are the
     // fstat-equivalent class, allowed on O_PATH; the CHILD-create opcodes (MKDIR/MKNOD/
     // SYMLINK/UNLINKAT) create/remove a child OF the O_PATH directory base -- the
-    // create-from-O_PATH-base pattern, legitimately allowed like SYS_WALK_CREATE.
+    // create-from-O_PATH-base pattern. Allowed like SYS_WALK_CREATE only because,
+    // like it, they then answer to the parent's W|X (loom_dir_mutation_gate, below):
+    // the handle's RIGHT_WRITE says nothing about the directory's bits.
     // Defense-in-depth: today an O_PATH dev9p fid is un-Tlopen'd so the server rejects
     // Tread/Treaddir, but this makes the block in-kernel.
     if ((sqe->opcode == LOOM_OP_READ || sqe->opcode == LOOM_OP_WRITE ||
@@ -1270,6 +1409,23 @@ static void loom_submit_payload(struct Loom *l, const struct loom_sqe *sqe,
         if (cl2 != cl)                             { err = -(s32)T_E_INVAL; goto fail; }
         fid2 = f2;
     }
+    // LOOM.md 8.5.1: the directory-mutation authority, after every rights and
+    // memory-safety gate above so those keep their answers, and before anything
+    // goes on the wire. An SQPOLL ring refuses first; then the names are copied
+    // into the op and validated like the sync twins' (the wire carries that copy,
+    // so the shared buffer cannot change them after the check); then the parent
+    // W|X and the create group.
+    if (loom_op_mutates_dir(sqe->opcode)) {
+        if (l->sqpoll)                                  { err = -(s32)T_E_OPNOTSUPP; goto fail; }
+        u32 nlen = loom_names_len(sqe, count);
+        if (nlen == 0)                                  { err = -(s32)T_E_INVAL;     goto fail; }
+        op = kmalloc(sizeof(*op) + nlen, KP_ZERO);
+        if (!op)                                        { err = -(s32)T_E_NOMEM;     goto fail; }
+        loom_bufcopy(op->names, buf_kva, nlen);
+        if (!loom_names_ok(sqe, op->names, count))      { err = -(s32)T_E_INVAL;     goto fail; }
+        err = loom_dir_mutation_gate(l, sqe, cl, sp, sp2, &cgid, &cgid_set);
+        if (err != 0) goto fail;
+    }
     // Weft-6c fast-path (NET-THROUGHPUT 6; I-37): a READ/WRITE whose pinned /net
     // data fid carries a weft binding AND whose registered buffer is that flow's
     // WHOLE shared ring goes zero-copy -- a Tweftio descriptor (off/len/dir) netd
@@ -1298,7 +1454,7 @@ static void loom_submit_payload(struct Loom *l, const struct loom_sqe *sqe,
             is_weft = true;
         }
     }
-    op = kmalloc(sizeof(*op), KP_ZERO);
+    if (!op) op = kmalloc(sizeof(*op), KP_ZERO);   // the six ops allocated theirs above
     if (!op) { err = -(s32)T_E_NOMEM; goto fail; }
     op->loom        = l;
     op->client      = cl;
@@ -1316,6 +1472,18 @@ static void loom_submit_payload(struct Loom *l, const struct loom_sqe *sqe,
     op->pinned_buf  = buf;                // adopt the buffer pin
     op->buf_kva     = buf_kva;
     op->sqe         = *sqe;               // TOCTOU snapshot (mutation build-thunk decode)
+    if (cgid_set) {                       // 8.5.1: the wire carries the RESOLVED group
+        if (sqe->opcode == LOOM_OP_MKNOD) op->sqe.offset    = cgid;
+        else                              op->sqe._resv1[2] = cgid;
+    }
+    // 8.5.1: a create mode carries the rwx bits only, as the sync create's
+    // `perm & 0777` does -- setuid/setgid/sticky are never honoured and SYS_WSTAT
+    // refuses them, so a create must not be the way to plant them. MKNOD keeps
+    // its file type.
+    if (sqe->opcode == LOOM_OP_MKDIR)
+        op->sqe._resv1[1] = (u32)sqe->_resv1[1] & 0777u;
+    else if (sqe->opcode == LOOM_OP_MKNOD)
+        op->sqe._resv1[1] = (u32)sqe->_resv1[1] & (T_S_IFMT | 0777u);
     op->opcode      = sqe->opcode;
     op->weft        = is_weft;            // Weft-6c: zero-copy completion (no bufcopy)
     op->terminal    = false;
@@ -1334,6 +1502,7 @@ static void loom_submit_payload(struct Loom *l, const struct loom_sqe *sqe,
     return;
 
 fail:
+    if (op)  kfree(op);                   // only a mutation op's name copy: nothing adopted yet
     if (buf) burrow_unref(buf);
     if (sp2) spoor_clunk(sp2);
     if (sp)  spoor_clunk(sp);
@@ -1532,6 +1701,26 @@ static u32 loom_cq_ready(struct Loom *l) {
     return (d > l->cq_entries) ? l->cq_entries : d;
 }
 
+// The CQ slots already spoken for: posted-unreaped + in flight + admitting (an
+// op between its consume/claim and its disposition). The admission gates compare
+// THIS with cq_entries; `lock` held.
+static u32 loom_cq_reserved(struct Loom *l) {
+    return loom_cq_ready(l) + l->async_inflight + l->admitting;
+}
+
+// Release one `admitting` reservation once the op's disposition landed: a posted
+// CQE (now in cq_ready), an in-flight op (now in async_inflight), or a HELD chain
+// entry (whose slot is re-reserved at admit).
+static void loom_admitted(struct Loom *l) {
+    spin_lock(&l->lock);
+    if (l->admitting > 0) l->admitting--;
+    spin_unlock(&l->lock);
+    // A waiter asleep only because this op could still post re-samples: the op
+    // posted (it was woken then too), went in flight (it may need to pump), or
+    // parked HELD. After the unlock, as loom_post_cqe wakes (I-9).
+    poll_waiter_list_wake(&l->cq_waiters);
+}
+
 // Loom-4 (KT-1.5): the KObj_Loom .poll hook -- fold a Loom ring into a poll(2)
 // set alongside pollable devs (pipes, /dev/consdrain). Register-then-observe on
 // the SAME l->cq_waiters list loom_wait_for_completions uses, under l->lock (the
@@ -1647,7 +1836,7 @@ static void loom_rearm_pending(struct Loom *l) {
         spin_lock(&l->lock);
         for (struct loom_async_op *o = l->inflight_ops; o; o = o->next) {
             if (!o->rearm) continue;
-            if (loom_cq_ready(l) + l->async_inflight >= l->cq_entries) continue; // back-pressure
+            if (loom_cq_reserved(l) >= l->cq_entries) continue;  // back-pressure
             o->rearm = false;
             __atomic_fetch_sub(&l->rearm_pending, 1u, __ATOMIC_RELEASE);  // claimed for re-arm
             l->async_inflight++;        // reserve the next shot's CQE slot
@@ -1694,8 +1883,13 @@ static bool loom_chain_drain_admits(struct Loom *l, struct loom_chain_op *e) {
     // the rearm_pending term a drain admitted via loom_enter's submit-phase
     // loom_admit_chain (which has no preceding loom_rearm_pending) could jump ahead
     // of a live FAST multishot stream (DrainOrdered violation; audit F1). The park
-    // cond reads rearm_pending the same way.
-    if (e_is_drain && (l->async_inflight != 0 ||
+    // cond reads rearm_pending the same way. `admitting` counts a prior op that a
+    // sibling driver consumed and has not disposed of yet -- neither posted nor in
+    // flight, and (LOOM.md 8.5.1) possibly a whole parent-stat RPC away from the
+    // wire. This walk precedes the admitter's own reservation, so it never waits on
+    // itself, and every release is followed by the releasing driver's own admit
+    // pass, which re-tries a drain held here.
+    if (e_is_drain && (l->async_inflight != 0 || l->admitting != 0 ||
                        __atomic_load_n(&l->rearm_pending, __ATOMIC_ACQUIRE) != 0u))
         return false;
     return true;
@@ -1762,21 +1956,17 @@ static void loom_reclaim_chain(struct Loom *l) {
 // single head->tail walk: a just-cancelled victim becomes the non-ok predecessor
 // of the next iteration's walk.
 //
-// CONCURRENCY CONTRACT (audit F4): the chain scheduler assumes EFFECTIVELY ONE
-// admitter per ring -- the SQPOLL kthread is the sole admitter on an SQPOLL ring,
-// and a non-SQPOLL ring follows the io_uring single-producer SQ contract (one
-// submitting thread). The INFLIGHT claim makes the chain memory-safe even under
-// concurrent non-SQPOLL drivers (no UAF / double-dispatch / double-CQE), but two
-// concurrent admitters can still over-reserve the CQ (the inherited Loom-3 over-
-// admit window: the room check at the top of this loop and the async_inflight bump
-// in loom_submit_one are not atomic). The cancel leg is hardened (revert-to-HELD +
-// retry below, so a cancel is never lost); the dispatch leg's amplified residual --
-// a dropped chain-op TERMINAL CQE under concurrent over-admission (the chain still
-// continues; only that op's completion notification is missed) -- is the SAME
-// accepted Loom-3 residual, whose exact-concurrent-admission coordination is OWED
-// to Loom-6 (with the deterministic two-thread-same-loom_fd SMP harness, carried
-// since #841). v1.0 has no userspace Loom consumer, so concurrent chained ENTERs
-// cannot fire it. See docs/reference/107-loom.md "Known caveats".
+// CONCURRENCY CONTRACT (audit F4): the chain scheduler's ORDERING assumes
+// EFFECTIVELY ONE admitter per ring -- the SQPOLL kthread is the sole admitter on
+// an SQPOLL ring, and a non-SQPOLL ring follows the io_uring single-producer SQ
+// contract (one submitting thread). The INFLIGHT claim makes the chain memory-safe
+// even under concurrent non-SQPOLL drivers (no UAF / double-dispatch / double-CQE),
+// and CQ admission is exact under them too: `admitting` (LOOM.md 8.5.1) holds a
+// consumed op's slot from this loop's claim until its disposition, and every room
+// check counts it, so the inherited Loom-3 over-admit window -- and the dispatch
+// leg's dropped-terminal-CQE residual it fed -- is closed. The cancel leg's
+// revert-to-HELD + retry below stays as the backstop (a cancel is never lost).
+// docs/reference/107-loom.md "Known caveats" (frozen) predates this.
 static void loom_admit_chain(struct Loom *l) {
     for (;;) {
         struct loom_chain_op *to_dispatch = NULL;
@@ -1784,7 +1974,7 @@ static void loom_admit_chain(struct Loom *l) {
         u64 cancel_ud = 0;
 
         spin_lock(&l->lock);
-        if (loom_cq_ready(l) + l->async_inflight >= l->cq_entries) {
+        if (loom_cq_reserved(l) >= l->cq_entries) {
             spin_unlock(&l->lock);      // CQ full -> hold (back-pressure)
             break;
         }
@@ -1815,10 +2005,13 @@ static void loom_admit_chain(struct Loom *l) {
             to_dispatch = e;
             break;
         }
+        if (to_cancel || to_dispatch) l->admitting++;   // reserve until disposition
         spin_unlock(&l->lock);
 
         if (to_cancel) {
-            if (loom_post_cqe(l, cancel_ud, -(s32)T_E_CANCELED, 0) != 0) {
+            int pr = loom_post_cqe(l, cancel_ud, -(s32)T_E_CANCELED, 0);
+            loom_admitted(l);
+            if (pr != 0) {
                 // The CQ filled between the top-of-loop room check and this post
                 // (a concurrent driver consumed the reserved slot -- the inherited
                 // Loom-3 over-admit window). Do NOT drop the -ECANCELED: revert the
@@ -1834,6 +2027,7 @@ static void loom_admit_chain(struct Loom *l) {
         }
         if (to_dispatch) {
             loom_submit_one(l, &to_dispatch->sqe, to_dispatch);
+            loom_admitted(l);
             continue;
         }
         break;                          // nothing actionable
@@ -1904,7 +2098,7 @@ static void loom_wait_for_completions(struct Loom *l, u32 min_complete,
         if (l->sqpoll) {
             spin_lock(&l->lock);
             u32 sq_ready    = loom_cq_ready(l);
-            bool sq_more    = (l->async_inflight > 0)
+            bool sq_more    = (l->async_inflight > 0) || l->admitting > 0
                               || __atomic_load_n(&l->rearm_pending, __ATOMIC_ACQUIRE) != 0u
                               || l->chain != NULL;
             spin_unlock(&l->lock);
@@ -1915,7 +2109,7 @@ static void loom_wait_for_completions(struct Loom *l, u32 min_complete,
             bool sq_sleep;
             spin_lock(&l->lock);
             poll_waiter_list_register(&l->cq_waiters, &pw);
-            sq_more  = (l->async_inflight > 0)
+            sq_more  = (l->async_inflight > 0) || l->admitting > 0
                        || __atomic_load_n(&l->rearm_pending, __ATOMIC_ACQUIRE) != 0u
                        || l->chain != NULL;
             sq_sleep = (loom_cq_ready(l) < min_complete) && sq_more;
@@ -1942,22 +2136,32 @@ static void loom_wait_for_completions(struct Loom *l, u32 min_complete,
         loom_admit_chain(l);
 
         // CqWaitCommitOrSleep (the give-up arms): enough completions, or nothing
-        // more can ever complete. Sampled under l->lock (cq_tail + async_inflight).
+        // more can ever complete -- in flight, or consumed by a sibling driver
+        // that has not reached its disposition yet (`admitting`: loom.tla's
+        // CanStillComplete counts that "snap" phase; LOOM.md 8.5.1 made it a
+        // wire RPC wide). Sampled under l->lock.
         spin_lock(&l->lock);
-        u32 ready    = loom_cq_ready(l);
-        u32 inflight = l->async_inflight;
+        u32 ready     = loom_cq_ready(l);
+        u32 inflight  = l->async_inflight;
+        u32 admitting = l->admitting;
         spin_unlock(&l->lock);
-        if (ready >= min_complete) break;
-        if (inflight == 0)         break;
+        if (ready >= min_complete)     break;
+        if (inflight + admitting == 0) break;
 
         // Try to become the elected reader and drive one frame. The borrow-guard
         // ref (F1) keeps the client alive across the pump even if a concurrent
         // reaper + a re-register drop the op's own pin + the registered-table ref.
+        // Nothing in flight means a sibling is mid-submit: there is no reply to
+        // pump, so sleep for its disposition below instead of spinning.
         struct Spoor *cl_pin = NULL;
-        struct p9_client *cl = loom_first_inflight_client(l, &cl_pin);
-        if (!cl) continue;                     // raced: the op completed/reaped -> re-check
-        int rc = p9_client_reader_pump_once(cl);
-        spoor_clunk(cl_pin);                   // cl not derefed below -> release the guard now
+        struct p9_client *cl = inflight ? loom_first_inflight_client(l, &cl_pin) : NULL;
+        if (!cl && inflight) continue;         // raced: the op completed/reaped -> re-check
+        bool only_admitting = (cl == NULL);
+        int rc = 0;
+        if (cl) {
+            rc = p9_client_reader_pump_once(cl);
+            spoor_clunk(cl_pin);               // cl not derefed below -> release the guard now
+        }
         if (rc == 1) {                         // demuxed a frame
             if (++pumps >= pump_budget) {
                 // Flood budget hit. Hand the reader baton to any sleeping sibling
@@ -1971,16 +2175,23 @@ static void loom_wait_for_completions(struct Loom *l, u32 min_complete,
         }
         if (rc < 0) break;                     // session dead / self-dying -> stop
 
-        // rc == 0: a sibling thread holds the reader role. Sleep on the CQ wait-
-        // list until it posts a CQE. CqWaitRegister: install the hook AND re-sample
-        // under l->lock, so a CQE posted just before the hook went live is caught
-        // (register-then-observe -- the live edge before register is the sample,
-        // the edge after register is the wake-flag the cond reads).
+        // rc == 0: a sibling thread holds the reader role, or (only_admitting)
+        // nothing is in flight yet. Sleep on the CQ wait-list until a CQE posts
+        // or a reservation is released. CqWaitRegister: install the hook AND
+        // re-sample under l->lock, so an edge just before the hook went live is
+        // caught (register-then-observe -- the live edge before register is the
+        // sample, the edge after register is the wake-flag the cond reads). The
+        // mid-submit sleep holds only while that is STILL the state: an op that
+        // went in flight meanwhile needs this thread to pump, not to sleep.
         pw.ready = false;   // safe: pw is off all lists here (never/last-unregistered)
         bool do_sleep;
         spin_lock(&l->lock);
         poll_waiter_list_register(&l->cq_waiters, &pw);
-        do_sleep = (loom_cq_ready(l) < min_complete) && (l->async_inflight > 0);
+        if (only_admitting)
+            do_sleep = (loom_cq_ready(l) < min_complete) &&
+                       l->async_inflight == 0 && l->admitting > 0;
+        else
+            do_sleep = (loom_cq_ready(l) < min_complete) && (l->async_inflight > 0);
         spin_unlock(&l->lock);
         if (!do_sleep) { poll_waiter_list_unregister(&pw); continue; }
         int s = sleep(&r, loom_cqw_cond, &pw);
@@ -2050,14 +2261,14 @@ static u32 loom_drain_sq(struct Loom *l, u32 budget) {
         // makes loom_post_cqe's full-CQ drop unreachable for a single consumer
         // (then `overflow` is the pure diagnostic the comment promises); a
         // non-reaping user back-pressures HERE (the SQE waits for the next enter)
-        // instead of losing a completion. (Concurrent enters can over-admit by at
-        // most a few -- async_inflight is bumped in loom_submit_one after this
-        // lock drops -- and loom_post_cqe's CqNeverOverfull guard is the backstop;
-        // exact concurrent admission is the Loom-4 coordination.) A chain op held
+        // instead of losing a completion. It is exact for concurrent enters too:
+        // a sibling driver between its consume and its disposition holds its slot
+        // in `admitting` (LOOM.md 8.5.1), so none can over-admit, and
+        // loom_post_cqe's CqNeverOverfull guard is a backstop only. A chain op held
         // here will need its CQ slot only when loom_admit_chain dispatches it (the
         // admit-time gate is the load-bearing one for held ops); the consume-time
         // gate is a conservative shared back-pressure for both paths.
-        if (loom_cq_ready(l) + l->async_inflight >= l->cq_entries) {
+        if (loom_cq_reserved(l) >= l->cq_entries) {
             spin_unlock(&l->lock);
             break;
         }
@@ -2072,6 +2283,7 @@ static u32 loom_drain_sq(struct Loom *l, u32 budget) {
         // the snapshot we just took (the chain only grows during this call).
         to_chain = have && ((ksqe.flags & (LOOM_SQE_LINK | LOOM_SQE_DRAIN)) != 0 ||
                             l->chain != NULL);
+        if (have) l->admitting++;                           // reserve until disposition
         spin_unlock(&l->lock);
         if (!have) continue;                                // bad indirection -> dropped
 
@@ -2085,6 +2297,7 @@ static u32 loom_drain_sq(struct Loom *l, u32 budget) {
             struct loom_chain_op *ce = kmalloc(sizeof(*ce), KP_ZERO);
             if (!ce) {
                 loom_complete_inline(l, ksqe.user_data, -(s32)T_E_NOMEM);
+                loom_admitted(l);
                 submitted++;
                 continue;
             }
@@ -2098,10 +2311,13 @@ static u32 loom_drain_sq(struct Loom *l, u32 budget) {
             else               l->chain = ce;
             l->chain_tail = ce;
             l->chain_len++;
+            if (l->admitting > 0) l->admitting--;           // HELD: re-reserved at admit
             spin_unlock(&l->lock);
+            poll_waiter_list_wake(&l->cq_waiters);          // as loom_admitted
             submitted++;
         } else {
             loom_submit_one(l, &ksqe, NULL);                // fast path (Loom-3)
+            loom_admitted(l);
             submitted++;
         }
     }

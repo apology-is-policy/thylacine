@@ -301,7 +301,21 @@ fn bi_mount(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
         )
     };
     if conn < 0 {
-        return fail(env, alloc::format!("mount: cannot connect {}", plan.service), 1);
+        // Name the CAUSE, not just the failure. Since (U) a connect can be
+        // refused on authority (a TCB byte service needs a capability the shell
+        // does not hold), and the kernel reports that as EACCES specifically so
+        // the operator can tell "denied" from "no such service" and from a
+        // broken transport. Discarding the errno here would have made that
+        // channel lead nowhere.
+        let why = match libthyla_rs::err::Error::from_syscall_return(conn) {
+            Err(e) => alloc::format!("{}", e),
+            Ok(_) => alloc::string::String::from("unknown error"),
+        };
+        return fail(
+            env,
+            alloc::format!("mount: cannot connect {}: {}", plan.service, why),
+            1,
+        );
     }
 
     // 2. ATTACH.
@@ -312,7 +326,15 @@ fn bi_mount(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
     let root = unsafe { libthyla_rs::t_attach_9p_srv(conn, ap, al, 0, 0) };
     let _ = unsafe { libthyla_rs::t_close(conn) };
     if root < 0 {
-        return fail(env, alloc::format!("mount: cannot attach {}", plan.service), 1);
+        let why = match libthyla_rs::err::Error::from_syscall_return(root) {
+            Err(e) => alloc::format!("{}", e),
+            Ok(_) => alloc::string::String::from("unknown error"),
+        };
+        return fail(
+            env,
+            alloc::format!("mount: cannot attach {}: {}", plan.service, why),
+            1,
+        );
     }
 
     // 3. MOUNT into THIS Proc's territory -- the whole reason this is a built-in.

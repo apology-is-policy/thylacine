@@ -12,7 +12,7 @@ Generated from note fields — do not edit between the markers
 <!-- generated:begin -->
 | surface | code | invariants | prosecution |
 |---|---|---|---|
-| [[sub-aurora]] | usr/aurora/src/main.rs, usr/aurora/src/render.rs, usr/aurora/src/osd.rs, usr/aurora/src/config.rs, usr/aurora/Cargo.toml | inv-i27 | - **The drain and feed opens must precede surface creation.** Without the |
+| [[sub-aurora]] | usr/aurora/src/lib.rs, usr/aurora/src/main.rs, usr/aurora/src/render.rs, usr/aurora/src/osd.rs, usr/aurora/src/config.rs, usr/aurora/Cargo.toml | inv-i27 | - **The drain and feed opens must precede surface creation.** Without the |
 | [[sub-corvus]] | usr/corvus/src/main.rs, usr/corvus/src/provincia.rs, usr/corvus/Cargo.toml | inv-i22, inv-i23 | - **The authority gates re-query.** Any new gated verb must ask the kernel |
 | [[sub-corvus-authority]] | usr/lib/corvus-authority/src/lib.rs, usr/lib/corvus-authority/src/tests.rs, usr/lib/corvus-authority/src/abi.rs, usr/lib/corvus-authority/src/codec.rs, usr/lib/corvus-authority/src/transaction.rs, kernel/include/thylacine/authority_wire.h, tools/check-authority-abi.py, usr/lib/corvus-authority/Cargo.toml | inv-i35 | 49 host tests pass, bare-target check passes, host Clippy -D warnings passes. |
 | [[sub-corvus-crypto]] | usr/lib/corvus-crypto/src/lib.rs, usr/lib/corvus-crypto/src/bip39_wordlist.rs, usr/lib/corvus-crypto/Cargo.toml |  | - **A new wrap kind needs a new associated-data prefix**, built through a |

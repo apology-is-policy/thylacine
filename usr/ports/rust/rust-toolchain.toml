@@ -1,0 +1,13 @@
+# Track R -- the pinned nightly for the Rust std port (RUST-STD-DESIGN section 7).
+#
+# SCOPED to usr/ports/rust/ ON PURPOSE. It must NOT sit at the repo root or in
+# usr/: rustup searches UPWARD from the cwd, so a rust-toolchain.toml above the
+# native no_std userspace (usr/, aarch64-unknown-none over libthyla-rs on STABLE)
+# would silently switch that build to nightly. The std-target build is invoked
+# from THIS directory (or below) so it -- and only it -- picks up the pin.
+#
+# Custom-target JSON fields are unstable, so the toolchain is pinned to one exact
+# nightly and advanced deliberately, never floated (RUST-STD-DESIGN section 7).
+[toolchain]
+channel = "nightly-2026-09-20"    # rustc 1.100.0-nightly (feaadeeac 2026-09-19, LLVM 23.1.1)
+components = ["rust-src"]           # -Z build-std rebuilds core/alloc/std from source

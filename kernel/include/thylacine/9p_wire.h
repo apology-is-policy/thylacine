@@ -205,6 +205,9 @@
 // Sentinels (canonical per 9P2000 + 9P2000.L).
 #define P9_NOFID       ((u32)0xFFFFFFFFu)
 #define P9_NOTAG       ((u16)0xFFFFu)
+// A create's gid of (u32)-1 is chown(2)'s "leave it": a POSIX server hands the
+// create's gid to its own set-group call, which then changes nothing.
+#define P9_NOGID       ((u32)0xFFFFFFFFu)
 
 // Walk caps (matches Stratum + Linux v9fs convention).
 #define P9_MAX_WALK    16u            // per-Twalk wname-count cap

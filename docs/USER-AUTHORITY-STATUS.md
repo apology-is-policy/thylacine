@@ -93,3 +93,25 @@ it; zero IDs are rejected at policy insertion too. MDTM v1 bytes unchanged.
 49 host tests, bare-target check and host Clippy pass; evidence
 work/ua-policy/provenance.log. Dense fixture now retains4,193,344 payload bytes
 (the provenance adds16bytes/record); closure13ms, host debug only.
+
+## Cleared seal integration and UA-P0 boundary
+
+Aux supplied cleared3fd54782 via Yip0121. Main agreed (Yip0123) to testing that
+prerequisite in Astra before the stable B-1c main merge. The local merge keeps
+both Loom resource accounting and Aux identity binding; seven new tests receive
+the third false argument. CI build passes,1691/1691 kernel tests pass, debug-probe
+passes, production shape builds. Logs: work/ua-p0/merge-{build,test,boot}.log.
+External Alpine/Clade gates are explicitly skipped. No UA-P0 code repair yet.
+
+Yip0124 confirms an additional precursor-integrity dependency: shared AddrSpace
+aliases must participate in control/seal checks and monotonic taint. Redemption
+must serialize with sharing publication under lifecycle-before-grant-table lock
+order. Astra owns the joined repair. Native/Linux fork, exec and alias controls
+need bounded regression tests; no security fix is claimed at this checkpoint.
+
+The operator reported a product security restriction while the agent was
+preparing verification. Continue defensive invariant tests and source review;
+do not construct a working elevation exploit or disguise work to bypass the
+restriction. No such fixture was written or executed. Record this narrower
+verification coverage honestly. The baseline VM exited and the mac lease was
+released after the interruption; there is no intentionally running process.

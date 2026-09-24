@@ -15,12 +15,17 @@ use crate::osd::{Mode, Settings};
 use vt::THEMES;
 use alloc::format;
 use alloc::string::String;
+#[cfg(feature = "backend")]
 use libthyla_rs::fs::{self, File};
+#[cfg(feature = "backend")]
 use libthyla_rs::io::{Read, Write};
+#[cfg(feature = "backend")]
 use libthyla_rs::t_fsync;
 
 pub const CONFIG_PATH: &str = "/lib/aurora/config";
+#[cfg(feature = "backend")]
 const CONFIG_TMP: &str = "/lib/aurora/config.tmp";
+#[cfg(feature = "backend")]
 const CONFIG_MAX: usize = 4096; // a handful of `key value` lines
 
 /// Fold `key value` lines into `s`. Unknown keys and malformed lines are
@@ -155,6 +160,7 @@ pub fn render(s: &Settings) -> String {
 
 /// Best-effort startup load (bounded read; no alloc proportional to the
 /// file -- /lib is SYSTEM-owned, but a bounded read costs nothing).
+#[cfg(feature = "backend")]
 pub fn load(s: &mut Settings) {
     let mut f = match File::open(CONFIG_PATH) {
         Ok(f) => f,
@@ -183,6 +189,7 @@ pub fn load(s: &mut Settings) {
 /// a crash mid-save leaves the OLD config intact, never a torn one; dev9p
 /// renameat replaces atomically). The tmp fid is dropped (clunked) before
 /// the rename. Returns false on any failure.
+#[cfg(feature = "backend")]
 pub fn save(s: &Settings) -> bool {
     let text = render(s);
     let mut f = match File::create(CONFIG_TMP) {
@@ -217,9 +224,9 @@ pub fn save(s: &Settings) -> bool {
     ok
 }
 
-// DORMANT host-harness tests (the G-4f named seam, like the sibling
-// modules): parse/render are pure -- the IO wrappers are proven by the
-// ls-gfx-osd-persist in-guest E2E (write-through + cross-reboot read).
+// parse/render are pure and tested here, on the host; the IO wrappers are
+// proven by the ls-gfx-osd-persist in-guest E2E (write-through + cross-reboot
+// read).
 #[cfg(test)]
 mod tests {
     use super::*;

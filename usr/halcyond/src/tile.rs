@@ -1557,6 +1557,77 @@ mod tests {
         );
     }
 
+    /// DECTCEM survives the whole seam: a child's `ESC[?25l` reaches
+    /// `paints_caret`, and `ESC[?25h` brings the caret back.
+    ///
+    /// Every link is real here -- the vt parses the escape, kaua-term's
+    /// Producer diffs it, the record is SERIALIZED AND PARSED BACK (the one
+    /// link with two independent sides, so a one-sided change to the cursor
+    /// byte fails here rather than in a guest), the Grid stores it and the
+    /// predicate the painter asks reads it. Written because a measurement that
+    /// claimed this chain was broken turned out to be an observation carried
+    /// over from a build that did not emit the escape: a screenshot only says
+    /// what it showed when it was TAKEN, and the caret blinks, so no single
+    /// frame can settle the question. This can, on every run, in milliseconds.
+    #[test]
+    fn dectcem_travels_the_whole_seam_to_the_caret_predicate() {
+        let mut v = vt::Vt::new(20, 4);
+        v.set_capture_events(true);
+        let mut p = kaua_term::Producer::new(&v);
+        let pal = libhalcyon::theme::daylight_palette();
+        let mut t = Tile::new(20, 4, pal);
+
+        // The chain, with the wire in the middle: feed bytes, ship every record
+        // through encode/parse, apply. Returns whether a record was produced at
+        // all -- a visibility-only change must produce one, or nothing the tile
+        // holds could ever learn of it.
+        let step = |t: &mut Tile, p: &mut kaua_term::Producer, v: &mut vt::Vt, bytes: &[u8]| {
+            let mut out = Vec::new();
+            p.feed(v, bytes, &mut out);
+            let produced = !out.is_empty();
+            for rec in out {
+                let mut buf = Vec::new();
+                kaua_term::wire::encode_record(&rec, &mut buf);
+                // tag, u32 length, payload -- the frame `encode_record` writes.
+                let back = kaua_term::wire::parse_record(buf[0], &buf[5..])
+                    .expect("the producer's own record must parse");
+                assert_eq!(back, rec, "the wire round-trip is lossless");
+                t.apply(back);
+            }
+            produced
+        };
+
+        assert!(t.paints_caret(true), "a fresh tile paints a caret");
+
+        // The hide, with NOTHING else in the chunk: no cell changes, so the
+        // record exists only because the cursor tuple moved.
+        assert!(
+            step(&mut t, &mut p, &mut v, b"\x1b[?25l"),
+            "a visibility-only change must still emit a record"
+        );
+        assert!(!v.cursor_visible, "the vt took the DEC-private 25");
+        assert!(
+            !t.paints_caret(true),
+            "the hidden caret reaches the predicate"
+        );
+        assert!(!t.paints_caret(false), "under either profile");
+
+        // What lantern writes next: its clear and a slide. The caret stays down
+        // across a repaint -- the escape is not consumed by the cells that follow.
+        step(&mut t, &mut p, &mut v, b"\x1b[0m\x1b[H\x1b[2Jslide one");
+        assert_eq!(t.grid.row(0)[0].ch, 's', "the slide landed");
+        assert!(!t.paints_caret(true), "and the caret is still down");
+
+        // SGR 25 is blink-off, NOT show-cursor: the `?` is what carries the
+        // DEC-private meaning, so the bare form must leave the caret hidden.
+        step(&mut t, &mut p, &mut v, b"\x1b[25m");
+        assert!(!t.paints_caret(true), "SGR 25 is not DECTCEM");
+
+        // And the way out, which lantern writes on every exit path.
+        step(&mut t, &mut p, &mut v, b"\x1b[?25h");
+        assert!(t.paints_caret(true), "the show brings the caret back");
+    }
+
     #[test]
     fn render_normal_tail_is_proportional_with_a_caret() {
         // PL-4b: the normal-mode tail renders PROPORTIONAL (via live_block, not

@@ -258,6 +258,26 @@ decides whether a dead child's tile is RETAINED, and `paints_caret` reads
 the `fate` retention sets. A caret judging itself by a different word than
 retention used could suppress on a tile the session never retained.
 
+**The first conjunct is the CHILD's, and it crosses the whole seam.**
+`grid.cursor().2` is DECTCEM -- the hosted program's `ESC[?25l` / `ESC[?25h`
+-- so a full-screen child that hides its cursor gets no caret here. The path
+is four hops and every one of them has to keep one bit: `vt` records DEC
+private `?25` into `cursor_visible` (**distinct from SGR 25, which is
+blink-off; the `?` carries the meaning**), kaua-term's `emit_celldiff`
+compares the whole `(row, col, visible)` tuple so a **visibility-only change
+still emits a record** with zero changed cells, the wire writes and reads
+that byte (`wire.rs` `encode_record` / `parse_record`), and `Grid::apply_celldiff`
+stores the tuple verbatim. Nothing in the normal stream puts it back: only
+RIS (`ESC c`) sets `cursor_visible` true again.
+
+`tile::tests::dectcem_travels_the_whole_seam_to_the_caret_predicate` drives
+that whole path, wire round-trip included, and ends on the predicate. It
+exists because the caret BLINKS, which makes a screenshot unable to settle
+the question in **either** direction -- a frame with no caret may be a frame
+caught mid-step, and one with a caret proves only that instant. A run that
+read a pre-fix capture as evidence about a post-fix build reported this seam
+broken when it was not; the host test is the reading that cannot drift.
+
 **The deadline is the STEP, not the frame.** `motion::caret_next_step_ms`
 gives the distance to the next edge (605 / 495 ms alternating, never zero,
 so the fold cannot spin) and it is folded into the session poll only while

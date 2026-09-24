@@ -65,7 +65,7 @@
 //
 // === Substitution body lifting ===
 //
-// `Subst($(cmd))`, `Backtick(\`{cmd}\`)`, `ProcSubIn(<(cmd))`,
+// `Subst($(cmd))`, `Backtick(\`{cmd})`, `ProcSubIn(<(cmd))`,
 // `ProcSubOut(>(cmd))` carry their bodies as raw `String` from the
 // lexer. The expression parser eagerly parses these bodies as
 // sub-scripts (recursive `parse(&body)` call) so the AST is fully
@@ -83,7 +83,7 @@ use super::ast::{
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use super::error::{ParseError, ParseErrorKind, ParseResult};
-use super::lexer::tokenize;
+use super::lexer::{tokenize, unescape};
 use super::parse::parse_tokens;
 use super::span::Span;
 use super::token::{Token, TokenKind};
@@ -1370,7 +1370,14 @@ fn parse_int(s: &str) -> Option<i64> {
 /// unchanged so the primary path sees them as integer literals.
 fn retokenize_arith_stream(tokens: Vec<Token>) -> Vec<Token> {
     let mut out: Vec<Token> = Vec::with_capacity(tokens.len());
-    for tok in tokens {
+    for mut tok in tokens {
+        // Arithmetic reads a word's value, so `2\*3` is still `2*3` now that
+        // words keep their escapes.
+        if let TokenKind::Word(text) = &mut tok.kind {
+            if text.contains('\\') {
+                *text = unescape(text);
+            }
+        }
         match &tok.kind {
             TokenKind::Word(text) if parse_int(text).is_none() => {
                 let text_clone = text.clone();
@@ -1570,8 +1577,21 @@ mod tests {
     use super::*;
     use alloc::vec;
 
+    /// The tokens of an expression BODY, which is what `parse_expr_tokens`
+    /// documents itself as taking -- so the lexer's synthetic trailing `Eof` is
+    /// dropped here, exactly as the statement parser drops it before handing
+    /// over a `cond_tokens` / `value_tokens` sub-slice (`parse.rs`). The
+    /// lexer's own test helper does the same thing for the same reason.
+    ///
+    /// Without this, every test in this module failed with
+    /// `TrailingTokensInExpr` pointing at the Eof's own span -- 42 of them,
+    /// undetected for as long as the crate could not be host-compiled.
     fn lex(s: &str) -> Vec<Token> {
-        tokenize(s).expect("lex ok")
+        let mut v = tokenize(s).expect("lex ok");
+        if matches!(v.last().map(|t| &t.kind), Some(TokenKind::Eof)) {
+            v.pop();
+        }
+        v
     }
 
     fn expr_ok(src: &str, ctx: ExprContext) -> Expr {
@@ -1802,6 +1822,26 @@ mod tests {
             },
             other => panic!("got {:?}", other),
         }
+    }
+
+    #[test]
+    fn arith_reads_an_escaped_operator_as_the_operator() {
+        // Words keep their `\` for the evaluator; arithmetic reads the value,
+        // so `2\*3` multiplies as it did when the lexer removed the escape.
+        for src in ["2\\*3", "2 \\* 3"] {
+            let e = expr_ok(src, ExprContext::Arith);
+            match &e.kind {
+                ExprKind::BinOp(BinOp::Mul, l, r) => {
+                    assert!(matches!(l.kind, ExprKind::Integer(2)), "{:?}: {:?}", src, l);
+                    assert!(matches!(r.kind, ExprKind::Integer(3)), "{:?}: {:?}", src, r);
+                }
+                other => panic!("{:?}: got {:?}", src, other),
+            }
+        }
+        assert!(matches!(
+            expr_ok("\\7", ExprContext::Arith).kind,
+            ExprKind::Integer(7)
+        ));
     }
 
     #[test]

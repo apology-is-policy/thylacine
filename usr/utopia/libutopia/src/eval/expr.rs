@@ -81,6 +81,7 @@ use alloc::vec::Vec;
 use core::fmt::Write as _;
 
 use crate::parser::ast::{BinOp, Expr, ExprKind, MatchOp, UnOp};
+use crate::parser::lexer::unescape;
 use crate::parser::token::DqPart;
 
 use super::env::Env;
@@ -95,7 +96,7 @@ use super::value::Value;
 pub fn eval_expr(env: &Env, expr: &Expr) -> EvalResult<Value> {
     match &expr.kind {
         // === Atoms ===
-        ExprKind::Word(s) => Ok(Value::scalar(s.clone())),
+        ExprKind::Word(s) => Ok(Value::scalar(unescape(s))),
         ExprKind::SingleQuoted(s) => Ok(Value::scalar(s.clone())),
         ExprKind::Integer(n) => Ok(Value::from(*n)),
         ExprKind::DoubleQuoted(parts) => eval_dq(env, parts, expr),
@@ -242,12 +243,23 @@ fn slice_inclusive(v: &Value, lo: i64, hi: i64) -> Value {
 /// they pick one of "concat to first element" or "error" depending
 /// on the option set. rc's cross-product is cleaner.)
 fn eval_concat(env: &Env, parts: &[Expr]) -> EvalResult<Value> {
+    concat_with(env, parts, eval_expr)
+}
+
+/// `^`'s cross product over `parts`, each evaluated by `part` -- a value
+/// (`eval_expr`) or a pattern (`pattern_value`), so the two cannot disagree
+/// about how a concatenation combines.
+fn concat_with(
+    env: &Env,
+    parts: &[Expr],
+    part: fn(&Env, &Expr) -> EvalResult<Value>,
+) -> EvalResult<Value> {
     if parts.is_empty() {
         return Ok(Value::empty());
     }
-    let mut acc: Vec<String> = eval_expr(env, &parts[0])?.0;
+    let mut acc: Vec<String> = part(env, &parts[0])?.0;
     for p in &parts[1..] {
-        let next = eval_expr(env, p)?.0;
+        let next = part(env, p)?.0;
         // Cross-product
         let mut new_acc = Vec::with_capacity(acc.len() * next.len());
         for a in &acc {
@@ -447,8 +459,7 @@ fn eval_match(
     let lv = eval_expr(env, l)?;
     match op {
         MatchOp::Glob => {
-            let rv = eval_expr(env, r)?;
-            let pat = rv.as_scalar();
+            let pat = eval_pattern(env, r)?;
             let input = lv.as_scalar();
             Ok(Value::scalar(if glob::matches(&pat, &input) { "1" } else { "0" }))
         }
@@ -465,6 +476,35 @@ fn eval_match(
     }
 }
 
+/// A `case` arm's or a `matches`'s pattern, in the matcher's syntax. A bare
+/// word gives its text as written, so a `\` it carries still escapes the
+/// next character (`a\*` matches only `a*`); every other part is a value,
+/// whose backslashes are made literal and whose glob metas stay live -- what
+/// patterns have always done with a quoted string or a variable.
+pub(super) fn eval_pattern(env: &Env, expr: &Expr) -> EvalResult<String> {
+    Ok(pattern_value(env, expr)?.as_scalar())
+}
+
+fn pattern_value(env: &Env, expr: &Expr) -> EvalResult<Value> {
+    match &expr.kind {
+        ExprKind::Word(s) => Ok(Value::scalar(s.clone())),
+        ExprKind::Concat(parts) => concat_with(env, parts, pattern_value),
+        ExprKind::List(parts) => {
+            let mut out = Value::empty();
+            for p in parts {
+                out.extend_from(pattern_value(env, p)?);
+            }
+            Ok(out)
+        }
+        _ => {
+            let v = eval_expr(env, expr)?;
+            Ok(Value::list(
+                v.0.iter().map(|e| glob::escape_backslashes(e)).collect(),
+            ))
+        }
+    }
+}
+
 // ---------------------------------------------------------------------
 // Case-as-expression
 // ---------------------------------------------------------------------
@@ -478,8 +518,7 @@ fn eval_case(
     let scrutinee_str = scrutinee.as_scalar();
     for arm in &case_expr.arms {
         for pat in &arm.patterns {
-            let pv = eval_expr(env, pat)?;
-            let pat_str = pv.as_scalar();
+            let pat_str = eval_pattern(env, pat)?;
             if glob::matches(&pat_str, &scrutinee_str) {
                 return eval_expr(env, &arm.value);
             }

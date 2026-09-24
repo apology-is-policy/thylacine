@@ -129,9 +129,25 @@ _Static_assert(__builtin_offsetof(struct loom_sqe, user_data) == 24, "user_data 
 // it. The per-op scalars ride the reserved tail; the two-fid ops name a SECOND
 // registered handle uniformly in LOOM_SQE_FID2 (= _resv1[3]). Each mirrors the
 // kernel-syscall handle-rights gate for the equivalent op (RIGHT_WRITE on a
-// mutated directory / file; the identity axis stays the dev9p server's, as for
-// the 6a data ops). All are single-shot + scalar-result (0 success / -errno);
-// the create ops drop the returned qid at v1.0.
+// mutated directory / file). All are single-shot + scalar-result (0 success /
+// -errno); the create ops drop the returned qid at v1.0.
+//
+// The six CHILD-mutation ops (MKDIR, MKNOD, SYMLINK, UNLINKAT, RENAMEAT, LINK)
+// also run the DAC at submit, LOOM.md 8.5.1. A directory handle's RIGHT_WRITE is
+// hollow when it is O_PATH, and the kernel is the only rwx enforcer, so:
+//   - each mutated directory must grant the ring's creator W|X (RENAMEAT: both;
+//     LINK: the one the link lands in); -EACCES otherwise, -EIO with no stat;
+//   - an SQPOLL ring refuses them, -EOPNOTSUPP (the kthread never blocks on a
+//     stat RPC);
+//   - a create's gid of 0 means the creator's primary group; any other must be
+//     a group the creator is in, or it must hold CAP_HOSTOWNER / CAP_CHOWN;
+//     -EACCES otherwise, -EINVAL above u32. The wire carries the resolved gid;
+//   - a create's mode crosses as its rwx bits only (MKNOD keeps its type), as
+//     the sync create's `perm & 0777`;
+//   - each child name follows sys_copy_component's rule (1..255 bytes, no '/'
+//     or NUL, not "." or ".."; SYMLINK's target is a path), -EINVAL before any
+//     stat, checked on a kernel copy the build then sends.
+// LCREATE joins them when it is dispatched (it creates a child too).
 //
 //   LOOM_OP_SETATTR:  handle_idx = file fid (RIGHT_WRITE); the pinned region is
 //                  a `struct p9_setattr` (len >= sizeof, 56 bytes) the build
@@ -397,6 +413,17 @@ struct Loom {
     struct Proc         *owner;
     int                  owner_pid;   // matches struct Proc.pid's type
     u32                  ring_pages;  // informational since #132 -- not a refund source
+    // LOOM.md 8.5.1: the identity the directory-mutation ops are perm_checked
+    // against -- the creating Proc, read LIVE at each submit (so a legate's caps
+    // count only while its scope holds them). Stamped by SYS_LOOM_SETUP right
+    // after loom_create, BEFORE the handle publishes, so no submit can precede
+    // it; `owner` cannot serve, since it binds LAST for the #130 ledger and a
+    // sibling thread may ENTER in between. Sound without a ref for the reason
+    // sqpoll_owner is: KObj_Loom is non-transferable, so every submitter is a
+    // thread of this Proc. Validated at use (magic + pid) like `owner`; NULL
+    // (a kernel-internal Loom) fails those ops closed.
+    struct Proc         *ident;
+    int                  ident_pid;
     // Geometry (immutable after loom_create). Mirrors loom_params.
     u32 sq_entries;
     u32 cq_entries;
@@ -427,6 +454,15 @@ struct Loom {
     // any still in flight (the #898 abandon-before-free).
     struct loom_async_op *inflight_ops;
     u32                   async_inflight;
+    // Exact concurrent admission (the Loom-5 audit F2 residual, closed with
+    // LOOM.md 8.5.1): SQEs a driver has CONSUMED (or a chain entry it has
+    // CLAIMED) whose CQE slot is reserved but not yet counted by cq_ready (posted)
+    // or async_inflight (in flight). Without it a driver between consume and
+    // dispatch is invisible to a sibling's admission, so the two over-admit and
+    // loom_post_cqe's full-CQ guard drops a completion (I-29) -- and the 8.5.1
+    // parent stat can hold a driver in that gap for a whole wire RPC. ++ in the
+    // same `lock` hold as the room check, -- once the op's disposition landed.
+    u32                   admitting;
     // Loom-5 (specs/loom_multishot.tla): count of ops in the MORE-pending re-arm
     // state (op->rearm == true) -- a multishot op that posted a MORE shot and is
     // awaiting re-issue. Mutated under `lock` (++ in loom_async_complete, -- in

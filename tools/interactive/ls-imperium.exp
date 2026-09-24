@@ -10,6 +10,9 @@
 #       a NEW `ut` opens; `imperium --list` inside it reports `elevated -- scope`
 #       with CAP_DAC_OVERRIDE (the /proc flag AND the NEW CLEARANCE_LIST_SELF
 #       verb's POSITIVE path -- the arm joey's PRINCIPAL_SYSTEM deny cannot reach).
+#   (1b) THE CWD: imperium passes the sub-shell no --home, so the kernel cwd it
+#       inherited is its only source for $cwd -- which a relative cd and a
+#       relative glob read. Both must resolve against /home/michael, not "/".
 #   (2) THE CAP WORKS: michael cannot create in SYSTEM-owned /home (arm 0 shows
 #       the plain shell DENIED), but under imperium CAP_DAC_OVERRIDE bypasses the
 #       parent-write check, so `mkdir /home/<x>` + a `touch` inside it succeed --
@@ -86,6 +89,8 @@ lc_login michael correct-horse-battery-staple-v1
 lc_send "mkdir /home/im-e2e-dac"
 lc_expect "im-e2e-dac: permission denied" "the plain shell cannot write SYSTEM-owned /home (0)"
 lc_pass "IM-5(0): baseline -- michael cannot create in /home without imperium"
+# Arm (1b)'s fixture: a directory under michael's home, where the login shell is.
+lc_send "mkdir -p imcwd-dir"
 
 # ---- (1) CONFER -> the elevated sub-shell ----------------------------------
 lc_send "imperium chown dac"
@@ -109,6 +114,19 @@ lc_send "imperium --list"
 lc_expect "elevated -- scope" "the sub-shell reads its /proc legate scope (1)"
 lc_expect "CAP_DAC_OVERRIDE" "--list names the imperium caps held (1)"
 lc_pass "IM-5(1): request -> SAK -> provincia -> key -> conferred -> elevated sub-shell (scope + --list)"
+
+# ---- (1b) the sub-shell starts where imperium was called --------------------
+# imperium spawns /bin/ut with no --home, so the new shell's only source for
+# $cwd is the kernel cwd it inherited (/home/michael). $cwd is what a relative
+# cd and a relative glob read: left at "/", `cd imcwd-dir` would try
+# /imcwd-dir, and the glob would walk the root and expand to nothing.
+lc_send {echo "imcwd1:$cwd:"}
+lc_expect "imcwd1:/home/michael:" "the elevated shell's \$cwd is the caller's directory (1b)"
+lc_send "echo imcwd-d*"
+lc_expect_re {\nimcwd-dir\r?\r?\n} "a relative glob walks the caller's directory (1b)"
+lc_send {cd imcwd-dir; echo "imcwd2:$cwd:"}
+lc_expect "imcwd2:/home/michael/imcwd-dir:" "a relative cd resolves against the caller's directory (1b)"
+lc_pass "IM-5(1b): the elevated sub-shell starts in the caller's directory -- \$cwd, a relative glob, a relative cd"
 
 # ---- (2) THE CAP WORKS under imperium --------------------------------------
 # Same path arm (0) was DENIED; under CAP_DAC_OVERRIDE the create succeeds, and a

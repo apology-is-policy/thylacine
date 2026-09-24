@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: [docs/HAUL-DESIGN.md]
 created: 2026-09-17
-updated: 2026-09-18
+updated: 2026-09-23
 ---
 ## Purpose
 
@@ -29,6 +29,10 @@ and publishes `/srv/NAME`. The existing shell runs `mount /srv/NAME PATH /`.
 ADDR accepts `host!port` or `host:port`, with dotted IPv4 and a bounded port.
 Post mode rejects a child command or `-a`; the shell supplies the attach name.
 No credential source means explicitly announced PLAIN 9P, not encryption.
+
+Every file on a Haul mount, private or posted, is owned by the principal that
+mounted it and that principal's primary group. The server's per-file mode is
+kept, and chown and chgrp there are refused (HAUL-DESIGN 4.7).
 
 The supported host-side example is [npxf](https://github.com/apology-is-policy/npxf),
 a separate C++20/CMake project targeting Linux and Darwin with OpenSSL 3 EVP
@@ -54,6 +58,19 @@ recycling. The main loop checks pump completion and listener readiness every
 50 ms; process exit tears down the transport. Unmount drops the last client
 reference and lets the relay exit. Abdication revokes every process in the
 scope, including a relay with an active mount.
+
+**Both paths cape the session** (HAUL-DESIGN 4.7). npxf reports the host's
+owners (uid 501 and group staff on a Mac). No Thylacine principal holds them,
+so the kernel's rwx check made every guest user "other", and a private
+0700/0600 export was unreadable to the user who mounted it. `run` therefore
+passes `T_ATTACH_9P_CAPE` on `SYS_ATTACH_9P`'s flags word, and `post_listener`
+creates the service with `T_WALK_CREATE_DMSRVCAPE` beside `DMSRVBYTE`. The
+service carries the mark, so every attach over one of its connections is caped
+and the shell's plain `mount /srv/NAME` needs no option. What a caped session
+reports and refuses is [[sub-kernel-ninep-dev9p]]'s; where the cape is decided
+is [[sub-kernel-ninep-attach]]'s. The mark grants nothing new. The token
+already gives the mounter everything the server serves, and the kernel admits
+the mark only on a byte-mode post, whose attacher holds the raw connection.
 
 ## Data structures
 
@@ -111,6 +128,19 @@ second-attach rejection, unmount/reap, repost and abdication. The added remote-F
 arm checks an authenticated server disconnect during a posted attach. `haul-npxf` and
 `haul-hangup` cover the private/child path and remote-close regression.
 
+`haul-cape` serves a writable 0700/0600 export from its own npxf and compares
+the guest's view with the host file's own ids, so a fixture whose ids happened
+to match cannot pass. On the private mount, a 0600 file reads, and so does one
+under a 0700 directory; `stat` reports the mounter's uid and primary gid with
+the host's mode; a create, a mkdir and a chmod land on the host, checked there.
+A plain mount of a `--post` service is caped too. Sabotage (2026-09-23): the
+private attach with flags 0 fails the first read with
+`cat: /tmp/cape/secret.txt: permission denied`, the operator's symptom; a post
+without `DMSRVCAPE` passes the private legs and fails the posted read with
+`cat: /tmp/cape-post/posted.txt: permission denied`. chown is not reachable
+from the guest's tools, so the refusal is held in the kernel suite
+(`dev9p.cape`).
+
 The OpenSSL host migration (npxf `cd35c64`, 2026-09-18) passes all 53 Haul
 host tests with live native macOS interoperability. The explicit CI-profile
 guest passes `haul-npxf` and `haul-post`, 56s each, against that same server.
@@ -133,3 +163,6 @@ this integration; self-review is not an independent adversarial audit. Trusted
 Imperium interaction currently uses the serial SAK path.
 
 ## Provenance
+
+- 2026-09-17/18: the relay, `--post`, and the npxf OpenSSL host migration.
+- 2026-09-23 (L): the identity cape on both paths; the `haul-cape` gate.

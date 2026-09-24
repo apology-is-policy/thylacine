@@ -1,0 +1,107 @@
+#!/usr/bin/expect -f
+# tools/interactive/srv-connect-gate.exp -- (U) an ordinary shell cannot dial a
+# TCB byte service in /srv, while the per-user home proxy still can
+# (STALK-DESIGN 5.2 / D8, ARCH 28 I-1, IDENTITY-DESIGN 3.2).
+#
+# The defect this pins: michael's shell could `mount /srv/stratum-fs` -- the
+# SYSTEM storage coordinator -- and list the system root. Status 0. Since A-3
+# the kernel is the only rwx enforcer and Stratum checks no per-file
+# permissions, so reaching that socket at all was the whole of the access
+# control. devsrv_open_connect ran no authority check, deferring to
+# per-territory /srv VISIBILITY -- which did not hold, because login never built
+# D7's per-session registry and a session inherits boot's immortal one.
+#
+# Why this scenario is the right shape, and why a kernel test alone is not
+# enough: the two subjects are THE SAME PRINCIPAL. login spawns the per-user
+# home proxy AS michael (so the coordinator attributes michael's home files to
+# him) and the shell is michael too. No identity rule can separate them -- only
+# the capability can. So the gate is only really proven by observing the two
+# outcomes DIVERGE on one boot, as one user:
+#
+#   1. POSITIVE CONTROL -- `pwd` prints /home/michael. That directory exists
+#      only because the home proxy, running as michael, successfully dialled
+#      the coordinator and login mounted what it served. If the gate refused
+#      too broadly this is what breaks, and it breaks the login, not just a
+#      test. Asserted FIRST so a scenario that cannot reach a shell can never
+#      be read as "the refusal below worked".
+#   2. THE REFUSAL -- the same michael, in his shell, is refused on the same
+#      service the proxy just used.
+#
+# Without leg 1 a gate that refused everyone would satisfy leg 2. Without leg 2
+# a gate that admitted everyone would satisfy leg 1. Neither alone discriminates.
+#
+# A shell `mount` failure sets $status and $errstr, so the refusal is asserted
+# on the CAUSE ("permission denied", the kernel's EACCES rendered through
+# libthyla-rs) and not merely on a non-zero status -- a wrong-reason failure
+# (no such service, a dead coordinator, a broken transport) would otherwise
+# read as a pass. That is also why bi_mount had to stop discarding the errno.
+#
+# Uses the --config ci image (a serial-console login).
+
+# HVF: nothing hardware-specific here -- a login + two mounts.
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# ---- leg 1: the POSITIVE CONTROL. The home proxy dialled the coordinator.
+lc_run_expect "pwd" "/home/michael"
+lc_pass "srv-connect-gate: the home proxy (running AS michael) reached the coordinator -- /home/michael is mounted"
+
+# Prove the home is actually usable, not just a name the shell is parked on: a
+# bare mountpoint would also print /home/michael. A write that reads back means
+# the 9P session the proxy serves is live end to end.
+lc_send "echo gate-control-bytes > /home/michael/.srv-gate-probe"
+lc_run_expect "cat /home/michael/.srv-gate-probe" "gate-control-bytes"
+lc_send "rm /home/michael/.srv-gate-probe"
+lc_pass "srv-connect-gate: the proxy-served home takes a write and reads it back"
+
+# ---- leg 2: THE REFUSAL. The same user, dialling the same service, in a shell.
+lc_send "mkdir -p /tmp/gate"
+lc_send "mount /srv/stratum-fs /tmp/gate /"
+
+# $status must be non-zero AND $errstr must name the cause. Printed on one line
+# with a unique token so neither can be satisfied by residue from an earlier
+# command (the one-unique-token-per-leg rule).
+# BRACES, not quotes: in Tcl a double-quoted $status substitutes a TCL variable
+# (and aborts with "can't read status: no such variable"). These must reach the
+# guest shell literally, for ut to expand from its own mount/unmount result.
+lc_send {echo GATE-VERDICT status=$status errstr=$errstr}
+set timeout $lc_cmd_timeout
+expect {
+    -re {GATE-VERDICT status=0 \r?\n} {
+        lc_fail "mount /srv/stratum-fs SUCCEEDED -- the (U) connect gate is not holding: an ordinary shell reached the SYSTEM store"
+    }
+    # ANCHORED on the line end. Without the trailing \r?\n, expect matches
+    # whatever has arrived so far: `[^\r\n]*` happily returns a PARTIAL errstr
+    # when the newline has not landed yet, and the string-match below then fails
+    # on a value that was merely incomplete. Attempt 1 of this gate died exactly
+    # that way, reporting errstr [mount: cann].
+    -re {GATE-VERDICT status=([1-9][0-9]*) errstr=([^\r\n]*)\r?\n} {
+        set st $expect_out(1,string)
+        set es [string trimright $expect_out(2,string)]
+        if {![string match "*permission denied*" $es]} {
+            lc_fail "mount /srv/stratum-fs failed (status $st) but NOT on authority -- errstr \[$es\]. A wrong-reason failure would pass a status-only check; the gate must refuse with EACCES"
+        }
+        lc_step "saw: status=$st errstr=\[$es\]"
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during the refusal leg" }
+    timeout           { lc_fail "timeout (${lc_cmd_timeout}s) waiting for the GATE-VERDICT line" }
+    eof               { lc_fail "unexpected EOF during the refusal leg" }
+}
+lc_pass "srv-connect-gate: michael's shell is REFUSED on /srv/stratum-fs, on authority (permission denied)"
+
+# Nothing was mounted, so the mountpoint is still empty. `ls` of a system root
+# would show the system tree; this catches a refusal that failed the syscall but
+# grafted the mount anyway.
+# One call, (command, expected) -- NOT a send plus a run_expect whose arguments
+# read backwards. "0" is unambiguous here because neither the echoed command nor
+# the prompt contains a digit, so the only 0 on the line is wc's answer.
+lc_run_expect "ls /tmp/gate | wc -l" "0"
+lc_pass "srv-connect-gate: the refused connect left the mountpoint untouched"
+
+lc_quit
+lc_pass "srv-connect-gate: one user, two outcomes -- the proxy dials the coordinator, the shell cannot"
+exit 0

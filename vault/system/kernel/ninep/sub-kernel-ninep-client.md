@@ -19,7 +19,7 @@ hazards: [haz-shared-stream-desync, haz-single-waiter-rendez, haz-death-path-wak
 abis: []
 design: ["docs/ARCHITECTURE.md sections 21 + 21.10 + 8.8.1.1"]
 created: 2026-07-31
-updated: 2026-09-06
+updated: 2026-09-23
 ---
 ## Purpose
 
@@ -206,6 +206,16 @@ test clients carry the counters unlisted.
   `inflight[]` (tag-indexed rpc pointers), `reader_active`,
   `send_progress` + `send_waiters` + `send_waiters_list`, `done_reply_buf`,
   `dead`. Magic `P9_CLIENT_MAGIC` (`_Static_assert`-pinned).
+- The per-session policy bits, all stamped on the still-private client
+  before the root Spoor publishes and never flipped: `loose` (the B1 I-38
+  opt-in) and the identity cape `cape` / `cape_uid` / `cape_gid`
+  (IDENTITY-DESIGN 3.2: on a caped session every stat reports `cape_uid` as
+  owner and `cape_gid` as group, keeping the server's mode).
+  `p9_client_set_cape(c, uid, gid)` is the one stamp; `p9_client_init`
+  resets all three (a reused client struct must not inherit a cape -- the
+  kernel tests reuse one). The client only HOLDS them: the attach layer
+  decides ([[sub-kernel-ninep-attach]]) and dev9p and Loom consult them
+  ([[sub-kernel-ninep-dev9p]], [[sub-kernel-loom]]).
 - `struct p9_rpc` (stack-allocated per op): tag, `done`/`dead`/`be_reader`
   flags, its OWN single-waiter rendez, `reply_buf`, `on_complete` (the
   async seam), `owner` (the submitting Proc — the handoff skip's key; NULL

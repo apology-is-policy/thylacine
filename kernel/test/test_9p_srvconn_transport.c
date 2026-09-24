@@ -28,13 +28,16 @@
 
 #include "test.h"
 
+#include <thylacine/9p_attach.h>
 #include <thylacine/9p_client.h>
 #include <thylacine/9p_session.h>
 #include <thylacine/9p_srvconn_transport.h>
 #include <thylacine/9p_transport.h>
 #include <thylacine/9p_wire.h>
+#include <thylacine/caps.h>
 #include <thylacine/dev.h>
 #include <thylacine/devsrv.h>
+#include <thylacine/errno.h>
 #include <thylacine/handle.h>
 #include <thylacine/loom.h>
 #include <thylacine/dev9p.h>
@@ -42,6 +45,7 @@
 #include <thylacine/pts.h>
 #include <thylacine/spoor.h>
 #include <thylacine/srvconn.h>
+#include <thylacine/syscall.h>
 #include <thylacine/types.h>
 
 // Test-support registry wipe (non-static; defined in kernel/devsrv.c).
@@ -69,6 +73,8 @@ void test_9p_srvconn_transport_devgone_posts_nodev_cqe(void);
 void test_9p_srvconn_transport_transport_err_posts_eio_cqe(void);
 void test_9p_srvconn_transport_pts_slave_spoor_classifies_t(void);
 void test_9p_srvconn_transport_large_frame_roundtrip(void);
+void test_9p_srvconn_transport_cape_attach(void);
+void test_9p_srvconn_transport_cape_attach_srv(void);
 
 // =============================================================================
 // Helpers (mirror test_srv_client.c's pattern).
@@ -100,16 +106,17 @@ static void drop_test_proc(struct Proc *p) {
 // SYS_POST_SERVICE_BYTE / SYS_SRV_CONNECT; this drives devsrv_post_listener +
 // devsrv_open_connect, the same machinery stalk's SYS_WALK_CREATE / SYS_OPEN
 // reach.)
-static struct SrvConn *open_byte_mode_pair(struct Proc **out_server,
-                                            struct Proc **out_client,
-                                            int *out_svc_h, int *out_conn_h) {
+static struct SrvConn *open_byte_mode_pair_cape(struct Proc **out_server,
+                                                 struct Proc **out_client,
+                                                 int *out_svc_h, int *out_conn_h,
+                                                 bool cape) {
     struct Proc *server = make_marked_test_proc();
     if (!server) return NULL;
 
     // create=post (byte mode) on a transient boot /srv root.
     struct Spoor *proot = devsrv_attach_registry(srv_boot_registry());
     if (!proot) { drop_test_proc(server); return NULL; }
-    int svc_h = devsrv_post_listener(server, proot, "btest", 5, SRV_MODE_BYTE, false);
+    int svc_h = devsrv_post_listener(server, proot, "btest", 5, SRV_MODE_BYTE, false, cape);
     spoor_clunk(proot);
     if (svc_h < 0) { drop_test_proc(server); return NULL; }
 
@@ -132,7 +139,13 @@ static struct SrvConn *open_byte_mode_pair(struct Proc **out_server,
         drop_test_proc(server); drop_test_proc(client); return NULL;
     }
     walkqid_free(w);
+    // (U) the connect gate: model a LEGITIMATE dialer (production: joey / login /
+    // the home proxy, all CAP_TCB_DIAL holders). Restored straight after, so no
+    // later assertion ABOUT client->caps sees the fixture's stamp (audit F2).
+    caps_t saved_caps = client->caps;
+    client->caps |= CAP_TCB_DIAL;
     struct Spoor *cs = devsrv_open_connect(client, sref, /*omode ORDWR*/ 2);
+    client->caps = saved_caps;
     spoor_clunk(sref);                 // the spent quarry (open-returns-new)
     spoor_clunk(root);
     if (!cs) { drop_test_proc(server); drop_test_proc(client); return NULL; }
@@ -152,6 +165,12 @@ static struct SrvConn *open_byte_mode_pair(struct Proc **out_server,
     *out_svc_h  = svc_h;
     *out_conn_h = conn_h;
     return cn;
+}
+
+static struct SrvConn *open_byte_mode_pair(struct Proc **out_server,
+                                            struct Proc **out_client,
+                                            int *out_svc_h, int *out_conn_h) {
+    return open_byte_mode_pair_cape(out_server, out_client, out_svc_h, out_conn_h, false);
 }
 
 static void cleanup_byte_mode_pair(struct Proc *server, struct Proc *client,
@@ -908,4 +927,217 @@ void test_9p_srvconn_transport_pts_slave_spoor_classifies_t(void) {
     (void)ops.close(ops.ctx);            // teardown (idempotent) + drop adapter ref
     p9_srvconn_transport_destroy(&st);
     cleanup_byte_mode_pair(server, client, conn_h);
+}
+
+// =============================================================================
+// 9p_srvconn_transport.cape_attach -- the identity cape (IDENTITY-DESIGN 3.2)
+// through srvconn_attach_dev9p_root, the helper both /srv attach paths share.
+// A conn from a DMSRVCAPE service capes the attach, and nothing else does. The
+// helper validates its own word (audit F5), so the cape bit is REFUSED here
+// rather than merely ignored, and SYS_ATTACH_9P_SRV refuses it a second time
+// (cape_attach_srv, a separate test so that a failure in one half cannot hide
+// the other's). That leaves {0, LOOSE} as the whole admissible domain, and both
+// members are asserted not to cape -- so "no flag word capes a /srv session" is
+// covered over the entire domain rather than sampled. A caped Tattach names no
+// user. The control leg (plain service, no flag) asserts the attacher's
+// principal and leaves the session uncaped. Replies are pre-staged.
+// =============================================================================
+
+static u32 sc_le32(const u8 *p) {
+    return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24);
+}
+
+// The n_uname of the Tattach the client sent (the c2s ring holds Tversion, then
+// Tattach); a 0xBADx sentinel when the frames are not there.
+static u32 sc_sent_n_uname(struct SrvConn *cn) {
+    u8 buf[256];
+    long n = srvconn_server_recv(cn, buf, (long)sizeof(buf));
+    if (n < (long)P9_HDR_LEN) return 0xBAD0u;
+    u32 vsz = sc_le32(buf);
+    if ((long)vsz + (long)P9_HDR_LEN + 12 > n) return 0xBAD1u;
+    const u8 *t = buf + vsz;
+    if (t[4] != P9_TATTACH) return 0xBAD2u;
+    size_t o = P9_HDR_LEN + 8;                          // fid, afid
+    o += 2 + ((u32)t[o] | ((u32)t[o + 1] << 8));        // uname
+    if ((long)(vsz + o + 2) > n) return 0xBAD3u;
+    o += 2 + ((u32)t[o] | ((u32)t[o + 1] << 8));        // aname
+    if ((long)(vsz + o + 4) > n) return 0xBAD4u;
+    return sc_le32(t + o);
+}
+
+// A refusal must be distinguishable from a fixture that never reached the call:
+// `attached == false` alone is satisfied by an unopenable pair, so the err the
+// helper returned is carried out too, and SC_ERR_UNSET means the call never ran.
+enum { SC_ERR_UNSET = 0x7F };
+
+struct sc_cape_seen {
+    bool attached, cape, loose;
+    u32  uid, gid, n_uname;
+    int  err;
+};
+
+static struct sc_cape_seen sc_cape_attach(bool service_cape, u32 flags) {
+    struct sc_cape_seen r = { false, false, false, 0, 0, 0, SC_ERR_UNSET };
+    srv_registry_reset();
+    struct Proc *server = NULL, *client = NULL;
+    int svc_h = -1, conn_h = -1;
+    struct SrvConn *cn = open_byte_mode_pair_cape(&server, &client, &svc_h, &conn_h,
+                                                  service_cape);
+    if (!cn) return r;
+    client->principal_id = 0x1234u;
+    client->primary_gid  = 0x5678u;
+    if (sc_stage_reply(cn, P9_TVERSION, P9_NOTAG) == 0 &&
+        sc_stage_reply(cn, P9_TATTACH, 0) == 0) {
+        int err = 0;
+        struct Spoor *root = srvconn_attach_dev9p_root(cn, NULL, 0, client, flags, &err);
+        r.err = err;
+        if (root) {
+            struct dev9p_priv *rp = dev9p_priv_of(root);
+            r.attached = rp != NULL;
+            if (rp) {
+                r.cape  = rp->client->cape;
+                r.loose = rp->client->loose;
+                r.uid   = rp->client->cape_uid;
+                r.gid   = rp->client->cape_gid;
+            }
+            r.n_uname = sc_sent_n_uname(cn);
+            srvconn_teardown(cn);      // the root's Tclunk then fails fast
+            spoor_clunk(root);
+        }
+    }
+    cleanup_byte_mode_pair(server, client, conn_h);
+    return r;
+}
+
+// A cape mark on a 9P-mode conn capes nothing. The /srv post refuses DMSRVCAPE
+// without DMSRVBYTE, so no service mints such a conn; this pins the helper's own
+// byte-mode gate on a raw conn marked by hand. `attached` stays false unless the
+// mark took, so the leg cannot pass on an unmarked conn.
+static struct sc_cape_seen sc_cape_attach_marked_9p_conn(void) {
+    struct sc_cape_seen r = { false, false, false, 0, 0, 0, SC_ERR_UNSET };
+    struct Proc *client = make_test_proc();
+    if (!client) return r;
+    client->principal_id = 0x1234u;
+    client->primary_gid  = 0x5678u;
+    struct SrvConn *cn = srvconn_create(0, client->pid, false, 0, SRVCONN_MSIZE);
+    if (cn) {
+        srvconn_set_cape(cn);
+        if (srvconn_cape(cn) &&
+            sc_stage_reply(cn, P9_TVERSION, P9_NOTAG) == 0 &&
+            sc_stage_reply(cn, P9_TATTACH, 0) == 0) {
+            int err = 0;
+            struct Spoor *root = srvconn_attach_dev9p_root(cn, NULL, 0, client, 0, &err);
+            if (root) {
+                struct dev9p_priv *rp = dev9p_priv_of(root);
+                r.attached = rp != NULL;
+                if (rp) r.cape = rp->client->cape;
+                r.n_uname = sc_sent_n_uname(cn);
+                srvconn_teardown(cn);
+                spoor_clunk(root);
+            }
+        }
+        srvconn_unref(cn);
+    }
+    drop_test_proc(client);
+    return r;
+}
+
+extern s64 sys_attach_9p_srv_for_proc(struct Proc *p, u64 srv_fd_raw,
+                                      const u8 *aname, u64 aname_len,
+                                      u64 n_uname, u64 flags);
+
+// SYS_ATTACH_9P_SRV's own half, through its inner: the flags word reaches the
+// helper, and a refused word sends nothing (n_uname stays the 0xBAD0 no-frame
+// sentinel). *ret is the syscall's answer.
+static struct sc_cape_seen sc_srv_syscall_attach(bool service_cape, u64 flags, s64 *ret) {
+    struct sc_cape_seen r = { false, false, false, 0, 0, 0, SC_ERR_UNSET };
+    *ret = 0x7BAD;
+    srv_registry_reset();
+    struct Proc *server = NULL, *client = NULL;
+    int svc_h = -1, conn_h = -1;
+    struct SrvConn *cn = open_byte_mode_pair_cape(&server, &client, &svc_h, &conn_h,
+                                                  service_cape);
+    if (!cn) return r;
+    client->principal_id = 0x1234u;
+    client->primary_gid  = 0x5678u;
+    if (sc_stage_reply(cn, P9_TVERSION, P9_NOTAG) == 0 &&
+        sc_stage_reply(cn, P9_TATTACH, 0) == 0) {
+        *ret = sys_attach_9p_srv_for_proc(client, (u64)conn_h, NULL, 0, 0, flags);
+        struct Handle h;
+        if (*ret >= 0 && handle_get(client, (hidx_t)*ret, &h) == 0) {
+            struct dev9p_priv *rp = h.kind == KOBJ_SPOOR
+                                        ? dev9p_priv_of((struct Spoor *)h.obj) : NULL;
+            r.attached = rp != NULL;
+            if (rp) {
+                r.cape  = rp->client->cape;
+                r.loose = rp->client->loose;
+                r.uid   = rp->client->cape_uid;
+                r.gid   = rp->client->cape_gid;
+            }
+            handle_put(&h);
+        }
+        r.n_uname = sc_sent_n_uname(cn);
+        srvconn_teardown(cn);          // the root's Tclunk then fails fast
+        if (*ret >= 0) handle_close(client, (hidx_t)*ret);
+    }
+    cleanup_byte_mode_pair(server, client, conn_h);
+    return r;
+}
+
+void test_9p_srvconn_transport_cape_attach(void) {
+    struct sc_cape_seen r = sc_cape_attach(/*service_cape=*/true, 0);
+    TEST_ASSERT(r.attached, "attach over a DMSRVCAPE service");
+    TEST_ASSERT(r.cape, "a DMSRVCAPE service capes the attach without a flag");
+    TEST_EXPECT_EQ((u64)r.uid, (u64)0x1234u, "the cape's owner is the attacher");
+    TEST_EXPECT_EQ((u64)r.gid, (u64)0x5678u, "the cape's group is the attacher's primary");
+    TEST_EXPECT_EQ((u64)r.n_uname, (u64)PRINCIPAL_NONE, "a caped Tattach names no user");
+
+    // The helper validates its own word (F5): the cape bit is the other attach
+    // handler's, so /srv refuses it outright. Asserted by ERRNO, not by absence
+    // -- a broken fixture would satisfy !attached on its own, and SC_ERR_UNSET
+    // would then say the helper was never reached at all.
+    r = sc_cape_attach(false, SYS_ATTACH_9P_CAPE);
+    TEST_ASSERT(!r.attached, "the helper refuses the cape flag: /srv capes by mark alone");
+    TEST_EXPECT_EQ((u64)(s64)r.err, (u64)(s64)-T_E_INVAL, "refused as invalid, and the call did run");
+
+    // An unknown bit is refused by the same gate -- the case F5 exists for, a
+    // future caller handing the helper a word it never validated.
+    r = sc_cape_attach(false, 0x4u);
+    TEST_ASSERT(!r.attached, "the helper refuses an unknown flag bit");
+    TEST_EXPECT_EQ((u64)(s64)r.err, (u64)(s64)-T_E_INVAL, "unknown bit: refused as invalid");
+
+    r = sc_cape_attach(false, 0);
+    TEST_ASSERT(r.attached, "plain attach (control)");
+    TEST_EXPECT_EQ((u64)(s64)r.err, (u64)0, "the admitted control returns no error");
+    TEST_ASSERT(!r.cape, "no flag, plain service: uncaped");
+    TEST_EXPECT_EQ((u64)r.n_uname, (u64)0x1234u, "uncaped: the attacher's principal (A-3 M4)");
+
+    r = sc_cape_attach(false, SYS_ATTACH_9P_LOOSE);
+    TEST_ASSERT(r.attached && r.loose && !r.cape, "LOOSE alone is not the cape");
+
+    r = sc_cape_attach_marked_9p_conn();
+    TEST_ASSERT(r.attached, "attach over a cape-marked 9P-mode conn");
+    TEST_ASSERT(!r.cape, "a cape mark on a 9P-mode conn capes nothing");
+    TEST_EXPECT_EQ((u64)r.n_uname, (u64)0x1234u, "9P-mode conn: the attacher's principal");
+}
+
+void test_9p_srvconn_transport_cape_attach_srv(void) {
+    s64 ret = 0;
+    struct sc_cape_seen r = sc_srv_syscall_attach(/*service_cape=*/true, 0, &ret);
+    TEST_ASSERT(ret >= 0 && r.attached, "SYS_ATTACH_9P_SRV over a DMSRVCAPE service attaches");
+    TEST_ASSERT(r.cape, "SYS_ATTACH_9P_SRV: the poster's mark capes with no flag");
+    TEST_EXPECT_EQ((u64)r.uid, (u64)0x1234u, "SYS_ATTACH_9P_SRV cape: the attacher owns it");
+    TEST_EXPECT_EQ((u64)r.n_uname, (u64)PRINCIPAL_NONE, "SYS_ATTACH_9P_SRV cape: no user named");
+    r = sc_srv_syscall_attach(false, SYS_ATTACH_9P_CAPE, &ret);
+    TEST_EXPECT_EQ((u64)ret, (u64)(s64)-1, "SYS_ATTACH_9P_SRV refuses the cape flag");
+    TEST_EXPECT_EQ((u64)r.n_uname, (u64)0xBAD0u, "the refused caped attach sent nothing");
+    r = sc_srv_syscall_attach(false, SYS_ATTACH_9P_LOOSE, &ret);
+    TEST_ASSERT(ret >= 0 && r.attached && r.loose && !r.cape,
+                "SYS_ATTACH_9P_SRV: LOOSE reaches the helper, uncaped");
+    r = sc_srv_syscall_attach(false, 0, &ret);
+    TEST_ASSERT(ret >= 0 && r.attached && !r.cape, "SYS_ATTACH_9P_SRV, no flag: uncaped (control)");
+    TEST_EXPECT_EQ((u64)r.n_uname, (u64)0x1234u, "SYS_ATTACH_9P_SRV, uncaped: the attacher's principal");
+    r = sc_srv_syscall_attach(false, 0x4u, &ret);
+    TEST_EXPECT_EQ((u64)ret, (u64)(s64)-1, "SYS_ATTACH_9P_SRV refuses an unknown flag bit");
+    TEST_EXPECT_EQ((u64)r.n_uname, (u64)0xBAD0u, "the refused attach sent nothing");
 }

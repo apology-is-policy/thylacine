@@ -1972,7 +1972,7 @@ per_component:
         // (open did not consume its ref) -> clunk it and adopt the replacement.
         struct Spoor *opened = quarry->dev->open(quarry, (int)omode);
         if (!opened) {
-            err = err_code((int)dev9p_open_errno(quarry));
+            err = err_code((int)spoor_open_errno(quarry));
             goto fail;
         }
         if (opened != quarry) {

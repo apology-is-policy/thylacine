@@ -50,6 +50,16 @@ sysctls. Under `sys`: `devices/system/cpu/{online,possible,present}`, one
 `cpuN` directory per CPU, and each one's
 `cache/index0/coherency_line_size`.
 
+**A dump-sealed native Proc answers the diorama as it answers anyone.** corvus,
+login, halcyond, the home proxy and any `SPAWN_PERM_SEAL` child refuse every reader
+but themselves their `exe`, `cmdline`, `cwd` and `maps` ([[sub-kernel-devproc]],
+DEBUG-FS-DESIGN 3.2). The diorama reads natively as itself, so it is refused too --
+no authority is added or lost. Two consequences: such a file renders EMPTY where
+Linux answers `EACCES` for a non-dumpable target (tracked: it needs an error channel
+through the render model), and `status`'s `Name:` is taken from the native `name:`
+ledger line -- the exe basename stamped at exec, which the seal leaves readable --
+so a sealed Proc is not nameless in a container's process list.
+
 **Read-only, refused at the protocol edge.** Every write is `EPERM`
 before any renderer is reached, and an open asking for write access is
 refused at open rather than at write, so a caller learns where it can act
