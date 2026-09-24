@@ -92,3 +92,17 @@ alternative of deferring terminal integration. Operator scope approval is
 pending because the original design excluded new kernel mechanisms. No kernel
 change or live clipboard endpoint is implied by the completed protocol/storage
 checkpoints (`6e596d19`, `cb02b748`).
+
+### Operator approval of the terminal correction
+
+The operator selected "Expand to kernel-backed ownership (recommended)" on
+September 24. The narrow pts ownership/admission extension and sealed host are
+now in scope. The preceding pending-decision paragraph is historical. Numeric
+ABI, process/pts ordering and bounded readiness/lifetime details must precede
+their consumers; ordinary PTY job control remains intact.
+
+The concrete observer contract is `docs/HALCYON-INTERACTION-PTY-ABI.md`: six
+suboperations on SYS_PTY_REGISTER, bounded pollable watchers, lifecycle-before-pts
+checks and no new syscall number. Aux reserved terminal Control tag 6 and agreed
+Astra tag 7. Lifecycle implementation waits for his announced cleared H3+C base;
+no raw kernel/terminal code is inferred from this design checkpoint.

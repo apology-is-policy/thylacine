@@ -194,3 +194,21 @@ Current source checkpoints are `6e596d19` (typed HIN1 protocol) and `cb02b748`
 (pure storage), both on `codex/astra`, with normal hooks passing. Neither is a
 Main landing or a live clipboard. No resource lease is held. The earlier pointer
 heartbeat remains paused; it is not a background worker for this new scope.
+
+### Scope approved
+
+The operator selected "Expand to kernel-backed ownership (recommended)".
+Continue with the narrow pts observation/admission seam, sealed terminal host
+and preserved ordinary job control. No further scope permission is needed for
+that direction. Pin the concrete ABI, process/pts lock order, readiness and
+revocation lifecycle before implementing its consumers; coordinate kernel
+surfaces with Main/Aux. The pending-decision paragraphs above describe the
+preceding checkpoint, not the current authorization.
+
+Concrete contract: `HALCYON-INTERACTION-PTY-ABI.md` reserves SYS_PTY_REGISTER
+suboperations 16..21, an 80-byte state record and 24-byte ACK/CHECK input. No
+new syscall number; Main's pending 126 remains his. Aux agreed Control subtag 7
+for the host binding announcement (his ScreenErased is 6). His Yip turn 20
+requires taking the newly cleared aux-3 tip after H3+C's sabotage/SMP evidence;
+that SHA is not announced yet. Main's stable tip is 13607e58 (docs only). Keep
+proc lifecycle changes pending that base; ABI/pure source preparation can proceed.

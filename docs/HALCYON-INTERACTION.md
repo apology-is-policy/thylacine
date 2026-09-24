@@ -527,3 +527,20 @@ updates the cursor before returning a zero-length used entry; implementations
 returning the documented OK_NODATA reply are accepted only with a complete,
 successful reply. These are backend obligations, not assumptions a future Pi
 display driver may inherit without qualification.
+
+## 15. Approved terminal-ownership scope correction (September 24)
+
+The operator approved extending HI-1 with kernel-backed terminal ownership and
+a sealed terminal host after reviewing HALCYON-INTERACTION-PTY-REVIEW. This
+is the explicit exception to section 1's no-new-kernel-mechanism scope. The
+implementation contract and suboperation reservation are in
+HALCYON-INTERACTION-PTY-ABI.md. Shell notifications alone cannot enforce section
+3: other controlling-session members can change foreground group directly.
+
+The kernel pts state remains authoritative, with lifetime-bound observation and
+a fresh check included in Tapestry admission. Acknowledgement gates enhanced
+modal/controller input and clipboard admission; it does not block or replace
+ordinary POSIX job control or retrospectively recall queued terminal bytes.
+Unknown/unacknowledged ownership uses APP and denies native clipboard actions.
+Existing owner/focus and SAK requirements remain; no live service is claimed by
+this design correction.

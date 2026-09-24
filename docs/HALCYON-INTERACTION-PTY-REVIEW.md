@@ -1,6 +1,7 @@
 # Terminal ownership gap in Halcyon interaction
 
-Status: design review, not approved and not implemented. September 24, 2026.
+Status: scope APPROVED by the operator on September 24, 2026: "Expand to
+kernel-backed ownership (recommended)". Not yet implemented.
 This is a scope correction to HALCYON-INTERACTION sections 3 and 9, whose
 foreground ownership guarantee cannot be implemented by shell notifications
 alone on the current kernel interfaces. The HIN1 ABI and pure clipboard store
@@ -110,8 +111,7 @@ The implementation contract should have these properties:
 
 This deliberately expands the original "no new kernel IPC mechanism" scope.
 It may be possible to extend existing syscall operations rather than allocate
-new syscall numbers; either way it is a kernel ownership/ABI change. This review
-requests approval of that scope, not approval of guessed numeric reservations.
+new syscall numbers; either way it is a kernel ownership/ABI change. The operator approved that scope, not guessed numeric reservations.
 The detailed ABI and lock/lifetime design would be recorded before its code,
 coordinated with Main and Aux's current kernel work.
 

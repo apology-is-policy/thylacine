@@ -168,3 +168,14 @@ status in `docs/USER-AUTHORITY-STATUS.md`; do not repeat design permission
 questions already resolved by that approval. Numeric ABI reservations and model
 validation precede their consumers. Yip 0117 transfers debug-taint repair to Astra, conditional on the Aux
 round-3-cleared seal SHA. Coordinate all shared kernel surfaces.
+
+## Halcyon interaction correction (operator-approved, 2026-09-24)
+
+The operator approved kernel-backed terminal ownership and a sealed terminal
+host for HI-1, preserving ordinary job control. Follow
+`docs/HALCYON-INTERACTION-PTY-ABI.md` and the review beside it. This is the
+explicit exception to the earlier no-new-kernel-mechanism scope. Keep existing
+single-agent/draft-preservation rules. Aux will announce the cleared H3+C base
+before lifecycle edits; kaua Control subtag 6 is his ScreenErased, and 7 is
+Astra's binding announcement (Yip 0108 turn 22). No live clipboard is delivered
+by the protocol/storage checkpoints alone.
