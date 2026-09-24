@@ -31,7 +31,8 @@ typedef u64 caps_t;
 // CAP_LOCK_PAGES — required to call SYS_MLOCKALL (P5-corvus-syscalls;
 // CORVUS-DESIGN.md §4.1.1). Holders can pin pages to prevent swap-out.
 // v1.0 has no swap; the cap + syscall are forward-looking scaffolding
-// consumed by corvus + per-user stratumd at startup. kproc + corvus
+// consumed by corvus at startup (per-user stratumd calls no hardening
+// syscall; it wipes secrets with its libc's explicit_bzero). kproc + corvus
 // + per-user stratumd hold this cap; ordinary user procs do not.
 #define CAP_LOCK_PAGES  (1ull << 1)
 
@@ -232,15 +233,14 @@ typedef u64 caps_t;
 // FUTURE surface that reads a target through an IDENTITY-only gate reopens it.
 // The PLANNED /proc/<pid>/fd/ surface (deferred at devproc.c:27) inherits whichever
 // gate it routes through: devproc_debug_authorized weighs caps AND the NOTRACE
-// seam, and since 2026-09-24 devproc_owner_or_hostowner weighs the NODUMP seal
-// (DEBUG-FS-DESIGN 3.2), so BOTH now honour a seal -- what separates them is that
-// only the debug predicate weighs CAPABILITY. A descriptor list is closer to
-// control than to disclosure, so route it through the debug predicate. (This clause
-// used to end "and NOT through devproc_owner_or_hostowner, which weighs neither --
-// the live instance of that hazard being /proc/<pid>/environ". The environ hazard is
-// the half that 3.2 closed; the sentence is kept in this shape as a reminder that a
-// WHY-comment naming a mechanism goes stale the moment the mechanism moves, and
-// nothing in the build fails when it does.)
+// seam; devproc_owner_or_hostowner weighs NEITHER capability nor any seal -- the
+// dump seal sits beside it, in devproc_kind_is_image + devproc_read_sealed
+// (DEBUG-FS-DESIGN 3.2). A descriptor list is closer to control than to disclosure,
+// so route it through the debug predicate; and because it hands out something the
+// Proc HOLDS, classify it in devproc_kind_is_image, ask devproc_read_sealed at its
+// read site, and give it a row in test_devproc_dump_seal_disclosure. (Keep this
+// clause in step with devproc.c: it has named the wrong gate before, and nothing in
+// the build fails when it does.)
 //
 // THE QUESTION TO ASK AT EVERY SUCH GRANT, because the next instance will not be a
 // capability at all: the I-39 cover rule compares the CAPS word, and SPAWN_PERM_* bits

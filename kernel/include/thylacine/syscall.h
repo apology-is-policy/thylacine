@@ -212,7 +212,7 @@ enum {
     // Pin all currently-mapped and future-mapped pages. Caller must
     // hold CAP_LOCK_PAGES. Sets PROC_FLAG_MLOCKED on the Proc. v1.0
     // has no swap; the flag is forward-compat scaffolding consumed by
-    // corvus + per-user stratumd at startup. Returns 0 on success, -1
+    // corvus at startup. Returns 0 on success, -1
     // on missing cap.
     SYS_MLOCKALL     = 16,   // arg: flags (x0)
 
@@ -223,7 +223,7 @@ enum {
     // NOT forward-compat scaffolding any more (2026-09-24): the flag is the
     // EXTRACTION seal: while set, every /proc/<pid> file that hands out
     // something the Proc holds -- environ, maps, ns, cwd, exe, cmdline, and
-    // reads of mem/regs/fpregs -- is refused to every other Proc including a
+    // reads of mem/regs/fpregs/kregs -- is refused to every other Proc including a
     // CAP_HOSTOWNER holder (DEBUG-FS-DESIGN 3.2). Self still reads its own.
     // status, sched and imperium are NOT sealed -- the kernel's record ABOUT a
     // Proc. It does not refuse CONTROL (SYS_SET_TRACEABLE's), and a peer that
@@ -233,19 +233,23 @@ enum {
     SYS_SET_DUMPABLE = 17,   // arg: dumpable (x0)
 
     // SYS_SET_TRACEABLE(traceable) → 0/-1
-    //   x0 = traceable (u32; 0 = refuse future debug-Spoor attach,
-    //                       1 = allow [default])
-    // One-way: setting to 0 sets PROC_FLAG_NOTRACE. Setting to 1 from
-    // a Proc that has PROC_FLAG_NOTRACE set is REFUSED. v1.0 has no
-    // debug Spoors; the flag is forward-compat scaffolding.
+    //   x0 = traceable (u32; 0 = seal against debugging, 1 = allow [default])
+    // The CONTROL seal (DEBUG-FS-DESIGN 3.2): 0 sets PROC_FLAG_NOTRACE, and
+    // devproc_debug_authorized then refuses every caller -- CAP_HOSTOWNER and
+    // CAP_DEBUG included -- at attach, step, breakpoints, wait, kregs, kstack
+    // and mem/regs/fpregs in both directions. A debugger attached BEFORE the
+    // seal keeps its slot's run-control verbs (stop/start/exitkill), so seal
+    // before the Proc is exposed. UNGATED and IRREVERSIBLE: setting to 1 from a
+    // Proc that has the flag is REFUSED. Guarding a secret takes
+    // SYS_SET_DUMPABLE(0) as well.
     SYS_SET_TRACEABLE = 18,  // arg: traceable (x0)
 
     // SYS_EXPLICIT_BZERO(buf_va, len) → 0/-1
     //   x0 = buf_va (user-VA; same bound checks as SYS_PUTS)
     //   x1 = len (bytes; ≤ SYS_RW_STACK = 4096 per call)
     // Compiler-barrier'd memset of the user-VA buffer to zero. Used by
-    // corvus + per-user stratumd to wipe secrets without the optimizer
-    // eliding the memset. Returns 0 on success, -1 on user-VA bound
+    // corvus to wipe secrets without the optimizer eliding the memset
+    // (ported code, stratumd included, uses its libc's explicit_bzero). Returns 0 on success, -1 on user-VA bound
     // violation. Length cap matches SYS_PUTS / SYS_RW_STACK (CF-3 A kept
     // the secret-scrub arm at the 4 KiB reject bound -- RW-3 R2-F1);
     // userspace loops for larger buffers.
@@ -2648,10 +2652,12 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, shm)         == 208, "t_pci
 // format break.
 //
 // NOT "for the whole of its life" in the literal sense: rfork publishes the child
-// before the thunk runs, so a window exists in which proc_flags is still 0 -- it
-// is closed for the case that matters because proc_apply_identity publishes
-// principal_id with RELEASE and devproc_debug_authorized ACQUIRE-loads it BEFORE
-// the seam, so observing the new identity implies observing the stamp.
+// before the thunk runs, so a window exists in which proc_flags is still 0 and the
+// child reads as UNSEALED, its parent-copied image included (DEBUG-FS-DESIGN 3.2).
+// For a reader admitted by the child's NEW identity it is closed by the lock, not a
+// load order: the thunk stamps the seal through proc_seal, under g_proc_table_lock,
+// before it publishes that identity, and every /proc reader holds the same lock.
+// Stamping before rfork links the child (decision A's mechanism) closes the rest.
 //
 // What it is for: the /srv connect gate admits a TCB byte service only to a
 // CAP_TCB_DIAL holder, and in a login session the per-user home proxy is the
@@ -3004,6 +3010,12 @@ _Static_assert(__builtin_offsetof(struct t_user_fpregs, fpcr) == 516, "t_user_fp
 // switch (the EL0-frame copies live in /proc/<pid>/regs). ttbr0 is DELIBERATELY
 // omitted (a kernel pgtable PA + ASID -- an info-leak with no debug value). No
 // writable path (0400): the kernel-side frame is inspected, never edited.
+//
+// I-16: the kernel half (x[], fp, lr, sp) is raw slid kernel state -- a debug-parked
+// thread's lr minus its link address is the KASLR slide -- so it is filled only for a
+// CAP_DEBUG/CAP_HOSTOWNER reader; the owner axis reads those fields as zero and gets
+// tpidr_el0 alone. For the dump seal the file is image (tpidr_el0 is an EL0 register
+// the Proc holds): a NODUMP-sealed target refuses the read.
 //
 // The field offsets deliberately mirror struct Context's GP region (context.h:
 // fp@80, lr@88, sp@96, tpidr_el0@104) so the build is a verbatim copy.

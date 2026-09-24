@@ -259,7 +259,8 @@ and turns the pure crate into acts: `layout save|restore|list|delete` and
 `welcome`. It is the crate's one driver, so it lives here; the authority it
 exercises is still adjudicated in [[sub-tapestryd]], not conferred by anything it
 holds (it takes no capability, no `SPAWN_PERM`, and adds no server verb -- the
-authority is the user's own principal).
+authority is the user's own principal). Its welcome transcript points at the tile's
+namespace listing by pid, `/proc/<pid>/ns`: devproc serves no `self`.
 
 - **`name_is_valid` closes traversal by construction.** A layout name is one path
   component, `[A-Za-z0-9._-]`, no leading `-` (so a name never reads as an option),

@@ -1007,7 +1007,7 @@ unsafe fn bind_home(user: &[u8], pid: u32, gid: u32, supp: &[u32]) -> Option<Hom
 // login's own per-Proc /env device -- open /env O_PATH, walk_create each KEY
 // O_WRITE, write the value (the joey go4c-probe pattern). The shell spawned
 // below inherits a deep copy (env_clone_into), and every session child
-// inherits transitively. HOME/USER/PATH only -- plain, non-secret values.
+// inherits transitively. The six keys below -- plain, non-secret values.
 // PATH mirrors ut's static $path list (/bin authoritative, /goroot/bin last);
 // the two are drift-guarded by the go6.exp `which go` leg. Best-effort by
 // design: a failure prints one marker and the session proceeds (Go toolchain
@@ -1044,6 +1044,9 @@ unsafe fn seed_session_env(user: &[u8]) {
     // an interactive `git clone https://` from a shell needs it in the
     // session env for exactly the same reason. OpenSSL's own documented
     // override: pure-C crypto paths, no probing.
+    // NEVER a credential, token or key here: every session child gets a copy that
+    // reads on its own owner axis, and login's seal does not follow a spawn's copy
+    // (DEBUG-FS-DESIGN 3.2).
     let pairs: [(&[u8], &[u8]); 6] = [
         (b"HOME", &home_val),
         (b"USER", user),

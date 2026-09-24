@@ -68,8 +68,8 @@ keeps the tree rooted and therefore keeps every Proc findable.
 2026-09-23).** Both halves matter. The gid fields are written first and the principal
 last, so a reader that observes the new principal also observes everything the spawn
 thunk wrote before it -- including the `SPAWN_PERM_*` marks. That was once what
-stopped [[sub-kernel-devproc]]'s gates admitting a reader to a Proc whose seal had
-landed but whose identity had not; the seal's round-2 re-audit (2026-09-24) showed it
+stopped [[sub-kernel-devproc]]'s gates admitting a reader, by the child's new identity,
+to a Proc whose seal it could not yet see; the seal's round-2 re-audit (2026-09-24) showed it
 held only for a reader admitted BY the new identity, so the seal now rests on
 `proc_seal`'s lock (`g_proc_table_lock`, which every `/proc` reader holds) and this
 ordering is kept for the record's own integrity. Publishing it last

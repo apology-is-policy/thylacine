@@ -2535,8 +2535,11 @@ void proc_mark_seat_manager(struct Proc *p) {
 // reader ever sees half a seal. The OR stays atomic: other bits of this word have
 // writers that do not hold this lock.
 static void proc_seal_locked(struct Proc *p, u32 bits) {
-    __atomic_fetch_or(&p->proc_flags,
-                      bits & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE), __ATOMIC_RELAXED);
+    // Only the two seal bits, and at least one. A caller passing a SPAWN_PERM_* value
+    // or some other flag would otherwise seal nothing and say nothing.
+    if (bits == 0 || (bits & ~(PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE)))
+        extinction("proc_seal: not a seal bit");
+    __atomic_fetch_or(&p->proc_flags, bits, __ATOMIC_RELAXED);
 }
 void proc_seal(struct Proc *p, u32 bits) {
     if (!p) return;

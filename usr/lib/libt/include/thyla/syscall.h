@@ -1166,9 +1166,13 @@ static inline long t_mlockall(unsigned long flags) {
     return x0;
 }
 
-// t_set_dumpable — control core-dump permission. One-way to 0:
-// t_set_dumpable(0) sets PROC_FLAG_NODUMP; t_set_dumpable(1) on a
-// Proc that has the flag set is REFUSED. Returns 0 / -1.
+// t_set_dumpable — the EXTRACTION seal (DEBUG-FS-DESIGN 3.2). t_set_dumpable(0)
+// sets PROC_FLAG_NODUMP: /proc refuses every other reader, CAP_HOSTOWNER
+// included, the image files (cmdline, ns, exe, cwd, maps, environ) and READS of
+// mem/regs/fpregs/kregs; status/sched/imperium stay readable. Ungated and
+// one-way: t_set_dumpable(1) on a sealed Proc is REFUSED. NODUMP alone does not
+// stop a peer that may still DRIVE the Proc -- guarding a secret takes
+// t_set_traceable(0) as well. Returns 0 / -1.
 __attribute__((always_inline))
 static inline long t_set_dumpable(unsigned long dumpable) {
     register long x0 __asm__("x0") = (long)dumpable;
@@ -1182,7 +1186,10 @@ static inline long t_set_dumpable(unsigned long dumpable) {
     return x0;
 }
 
-// t_set_traceable — control debug-Spoor attach permission. One-way to 0.
+// t_set_traceable — the CONTROL seal (DEBUG-FS-DESIGN 3.2). t_set_traceable(0)
+// sets PROC_FLAG_NOTRACE: every debugger is refused, CAP_HOSTOWNER and CAP_DEBUG
+// included; one attached before the call keeps its slot's run-control verbs.
+// Ungated and one-way. Returns 0 / -1.
 __attribute__((always_inline))
 static inline long t_set_traceable(unsigned long traceable) {
     register long x0 __asm__("x0") = (long)traceable;

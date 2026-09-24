@@ -78,8 +78,8 @@ void test_sys_spawn_with_perms_seat_roles(void);
 extern void proc_test_seat_reset(void);
 // (U) F1: the I-39 debug-authority predicate, so the NOTRACE arm can assert the
 // CONSEQUENCE of the stamp and not merely that a bit landed in a word.
-// The seal's one-way setters (kernel/syscall.c) -- the only runtime reader of
-// NODUMP today is the re-enable refusal, so the test drives it directly.
+// The seal's one-way setters (kernel/syscall.c); the test drives their re-enable
+// refusal directly (devproc's image gate is pinned in test_devproc.c).
 extern int sys_set_dumpable_for_proc(struct Proc *p, u32 dumpable);
 extern int sys_set_traceable_for_proc(struct Proc *p, u32 traceable);
 extern bool devproc_debug_authorized(const struct Proc *caller,
@@ -526,8 +526,7 @@ void test_sys_spawn_with_perms_seal_blocks_debug_and_dump(void) {
     TEST_ASSERT(!devproc_debug_authorized(shell, proxy),
         "the SEAL refuses a same-principal debug attach -- the side door is shut");
 
-    // The seal is one-way, and that is the only runtime reader of NODUMP today:
-    // the child cannot undo either half. The unsealed control, one variable
+    // The seal is one-way: the child cannot undo either half. The unsealed control, one variable
     // away, takes the same calls as harmless no-ops.
     TEST_EXPECT_EQ(sys_set_dumpable_for_proc(proxy, 1), -1,
         "a sealed child cannot make itself dumpable again");

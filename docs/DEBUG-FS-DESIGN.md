@@ -331,9 +331,15 @@ So the rule is: **the seal follows the image, not the ledger** — and the image
 its environment, its namespace, its working directory, the path of the image it runs,
 its arguments. The ledger is what the kernel *says about* it — `status`, `sched`,
 `imperium` — and the kernel does not keep secrets on a subject's behalf. The control
-files (`ctl`, `wait`) and the kernel's own execution state (`kregs`, `kstack`) are
-neither: they answer to NOTRACE. The set is one predicate, `devproc_kind_is_image`,
-consulted at every read site, so a new file is classified there or not at all.
+files (`ctl`, `wait`) and the kernel's own execution state (`kstack`) are neither:
+they answer to NOTRACE. `kregs` is in the set: beside the kernel's saved frame it
+carries `tpidr_el0`, an EL0 register the Proc holds. The set is one predicate,
+`devproc_kind_is_image`, which every read site asks through `devproc_read_sealed` with
+the kind it serves, so a file is classified there or not at all — and a new read path
+must make the same call (its row in `dump_seal_disclosure` is what catches one that
+does not). `name`, the exe path's basename stamped at exec, is ledger: `status`,
+`sched` and `/ctl/procs` carry it, as Linux keeps a non-dumpable process's `comm`
+public.
 (`cmdline` carries no argv yet; it is in the set so that argv arrives sealed.)
 
 **Two properties of the enforcement, both deliberate.**
@@ -383,7 +389,9 @@ consulted at every read site, so a new file is classified there or not at all.
   problem has so far earned.
 
 **How it is placed.** One predicate, `devproc_kind_is_image`, names the set, and every
-read site consults it. `devproc_read_cb` refuses an image kind on the seal **before any
+read site asks it through `devproc_read_sealed` with the kind it serves — the dispatch,
+and each walk with its own read path (`environ`, `mem`, `regs`/`fpregs`/`kregs`,
+`kstack`, `wait`). `devproc_read_cb` refuses an image kind on the seal **before any
 formatter runs**, so `cmdline`, `ns`, `exe`, `cwd` and `maps` keep their ambient
 all-pids visibility for an *unsealed* Proc — this section does not withdraw that Plan 9
 posture — and hand out nothing for a sealed one. `environ`, the one image file with an
@@ -392,7 +400,7 @@ regs paths refuse the read direction. `devproc_owner_or_hostowner` keeps its old
 meaning and no seal, and gates `sched` and `imperium`.
 
 **NODUMP alone does not make a Proc safe from a peer that may still DRIVE it.** The
-dump seal refuses every *read* of the image, `mem`/`regs`/`fpregs` included; it does
+dump seal refuses every *read* of the image, `mem`/`regs`/`fpregs`/`kregs` included; it does
 not refuse *control*, which is NOTRACE's. A debugger that may attach, stop and write
 registers can make the Proc disclose itself, so a Proc guarding a secret sets both
 bits — which `SPAWN_PERM_SEAL`, the seat bind and both live `SYS_SET_DUMPABLE(0)`
@@ -424,10 +432,14 @@ spawns the session shell `ut` unsealed, so `ut`'s `environ` is login's. And a ch
 spawned *with* `SPAWN_PERM_SEAL` is visible in `/proc` from the moment `rfork` links it
 until its thunk stamps the seal, a window in which its parent-copied image reads as
 unsealed. The seal refuses its Proc's image being **read**; it does not follow the
-image when spawn **copies** it. No secret travels that path today — login writes no
-environment variable at all (it hands the shell its home as an argument, and its own
-secrets are in memory, under NOTRACE) — but whoever puts one in a sealed Proc's
-environment must know. Stamping the seal *before* `rfork` links the child is the
+image when spawn **copies** it. No secret travels that path today, but the path is in use:
+login seeds six variables into its own environment before it spawns the session
+shell — `HOME`, `USER`, `PATH`, `GIT_EXEC_PATH`, `GIT_CONFIG_SYSTEM` and
+`OPENSSL_armcap`, all plain values (`seed_session_env`, `usr/login/src/main.rs`) — and
+every session child inherits a copy that reads on its own owner axis. Login's secrets
+are in memory, under NOTRACE. The guard is the comment on that key list: no
+credential, token or key may enter it, because the seal does not follow the copy.
+Whoever puts one in a sealed Proc's environment must know. Stamping the seal *before* `rfork` links the child is the
 mechanism decision A (the seal crossing `fork`) needs anyway, and it would close the
 window for `SPAWN_PERM_SEAL` children.
 
@@ -462,7 +474,12 @@ note already says so for the pre-existing both-ways version of this problem, and
 that problem wearing the seal. Currently unreachable, with both triggers named:
 `PR_SET_DUMPABLE` is not implemented in the vivarium, and no phenotype process is
 spawned with `SPAWN_PERM_SEAL`. It goes live the moment either changes, and whoever
-implements the first of them should read this paragraph.
+implements the first of them should read this paragraph. The diorama's view of OTHER
+sealed Procs is live today: a Linux program in a vivarium container reading
+`/proc/<corvus pid>/exe` (or `cmdline`, `cwd`, `maps`) gets an empty file where Linux
+answers `EACCES` for a non-dumpable target — the refusal holds, its errno does not
+(tracked). Its `status` takes `Name:` from the native ledger `name:` line, so a sealed
+Proc is not nameless there.
 
 **What the seal still owns.** `SPAWN_PERM_SEAL` (NOTRACE + NODUMP) is *not*
 made redundant: it protects secrets an **equal-authority** peer must not read —
@@ -503,7 +520,7 @@ files today: `status`, `cmdline`, `ctl`, `ns`. The debug surface adds flat files
 | `regs` | `0600` | RW the saved EL0 GPR frame (`x0..x30`, `SP_EL0`, `ELR_EL1`, `SPSR_EL1`); writes stopped-only |
 | `fpregs` | `0600` | RW the saved FP/SIMD frame; stopped-only writes |
 | `wait` | `0400` | read blocks until the target stops at a trap/checkpoint (the debugger's stop-notification channel) |
-| `kregs` | `0400` | RO the kernel-side saved frame (`t->ctx` callee-saved + the kstack PC) — feeds the unified stack (§4.6) |
+| `kregs` | `0400` | RO the kernel-side saved frame (`t->ctx` callee-saved + the kstack PC) + `tpidr_el0` — feeds the unified stack (§4.6). The kernel half goes only to the `CAP_DEBUG`/`CAP_HOSTOWNER` tier (I-16; the raw-address gate, §5b); the owner axis reads it as zero and gets `tpidr_el0` alone |
 
 Every readable debug file gates at the READ site on the I-39 two-axis check
 (modes are advisory — `devproc.perm_enforced==false`), following the
@@ -805,6 +822,16 @@ DWARF at 8c); the **owner axis** gets the KASLR-INDEPENDENT symbolic form
 diagnostic. Without this, an unprivileged owner reads its own `koff` off a settled
 head thread — 8b widened the pre-existing 8a owner-`attach`-and-`stop`-another-
 owned-Proc path (which reached the same raw kstack) to a no-attach self-read.
+
+**`kregs` takes the same gate (2026-09-24).** Its kernel half is the same secret in
+another form: a debug-parked thread's `ctx.lr` is the return into `sched`, so `lr`
+minus that site's link address is the slide, and `fp`, `sp` and `x19`–`x28` are kernel
+stack and heap addresses. It reached the owner axis unconditionally from 8a until the
+seal's round-3 self-audit found it; the kstack fix above never covered it.
+`devproc_build_regs` now fills the kernel half only for the `CAP_DEBUG`/`CAP_HOSTOWNER`
+tier. The owner axis reads those fields as zero and keeps `tpidr_el0`, the one field a
+debugger of its own program reads (Delve's `g` recovery). The in-guest `/debug-probe`
+runs on the owner axis and asserts the zeroes.
 
 ### 5b.3 v1.x seams
 

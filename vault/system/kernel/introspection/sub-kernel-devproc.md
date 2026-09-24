@@ -33,7 +33,7 @@ surface: the original P4-C Dev was `status`/`cmdline`/`ctl`/`ns`.
 ## Contract
 
 
-**The debug predicate's READ ORDER is load-bearing ((U) F1 round 2, 2026-09-23).**
+**The debug predicate's read order is for legibility, not safety ((U) F1 round 2, 2026-09-23; superseded by the seal's lock, 2026-09-24).**
 `devproc_debug_authorized` now ACQUIRE-loads the target's `principal_id` FIRST and
 tests the `PROC_FLAG_NOTRACE` seam LAST. The order once carried the safety: a spawn
 stamps the `SPAWN_PERM_*` marks and then applies the child's identity while `rfork` has
@@ -92,12 +92,14 @@ admission.
 **The EXTRACTION surfaces honour the DUMP seal (2026-09-24, DEBUG-FS-DESIGN 3.2).**
 One predicate, `devproc_kind_is_image`, names the IMAGE SET -- every file that hands out
 something the target HOLDS: `cmdline`, `ns`, `exe`, `cwd`, `maps`, `environ`, and the
-READ direction of `mem`, `regs` and `fpregs`. Every read site consults it:
+READ direction of `mem`, `regs`, `fpregs` and `kregs` (which carries `tpidr_el0`, an EL0
+register). Every read site asks it through `devproc_read_sealed` with the kind it serves:
 `devproc_read_cb` refuses an image kind on the seal before any formatter runs (so the
 0444 files keep their ambient all-pids visibility for an UNSEALED Proc); `environ`
 composes its owner-or-hostowner gate with the seal in `devproc_extract_authorized`; the
-mem and regs walks refuse reads (writes are control, NOTRACE's; `kregs` rides the regs
-path but is the KERNEL's frame and stays outside the set). `devproc_owner_or_hostowner`
+mem and regs walks refuse reads (writes are control, NOTRACE's); `kstack` and `wait` ask
+too and sit outside the set. `name`, the exe's basename, is ledger (`status`, `sched`,
+`/ctl/procs`), as Linux keeps a non-dumpable process's comm public. `devproc_owner_or_hostowner`
 keeps its old meaning with NO seal and gates `sched` and `imperium`; `status` is
 ungated.
 
@@ -115,7 +117,7 @@ NODUMP-only Proc handed a debugger every byte of `mem`. Each miss had one cause:
 instead of a property. The rule: **the seal follows the image, not the ledger** -- the
 image is everything the Proc holds; the ledger (`status`, `sched`, `imperium`) is what
 the kernel says about it; the control files (`ctl`, `wait`) and the kernel's own state
-(`kregs`, `kstack`) answer to NOTRACE. The two bits are NOT synonyms: `NOTRACE` forbids
+(`kstack`) answer to NOTRACE, and `kregs` is image for its `tpidr_el0`. The two bits are NOT synonyms: `NOTRACE` forbids
 CONTROL (read by `devproc_debug_authorized`), `NODUMP` forbids EXTRACTION (read through
 `devproc_kind_is_image`) -- Linux's division, where dumpability rather than the ptrace
 flag governs `/proc/<pid>` content. NODUMP alone does not stop a peer that may still
@@ -453,7 +455,11 @@ Its output then splits on capability: raw slid kernel addresses reveal the KASLR
 slide (an I-16 secret gated elsewhere behind `CAP_HOSTOWNER`), so the raw
 columns go only to the `CAP_DEBUG`/`CAP_HOSTOWNER` tier. The owner axis gets the
 symbolic `name+offset` form, which is link-relative and therefore
-slide-independent — and which *is* the "why is it hung" diagnostic.
+slide-independent — and which *is* the "why is it hung" diagnostic. `kregs` splits the
+same way: its kernel half (`x19`–`x28`, `fp`, `lr`, `sp`) is filled only for that tier,
+because a parked thread's `lr` is the return into `sched` and gives away the slide as
+surely as a raw frame; the owner axis reads those fields as zero and keeps `tpidr_el0`
+(2026-09-24 -- kregs had gone to the owner axis unconditionally since 8a).
 
 ## Data structures
 
@@ -515,7 +521,8 @@ resumes, a launched `exitkill`-marked one dies with its launcher (die-with-launc
 above). Modelled by [[spec-debug-stop]]; its composition with the second stop
 owner by [[spec-pty-stop]].
 
-**I-16** (the KASLR slide is a secret) — by the kstack raw/symbolic split.
+**I-16** (the KASLR slide is a secret) — by the kstack raw/symbolic split and kregs'
+CAP-tier kernel half.
 
 **I-22** (no identity carries ambient authority) — negatively, and deliberately:
 every gate is computed directly rather than through `perm_check`, so no identity

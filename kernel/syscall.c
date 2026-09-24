@@ -8206,9 +8206,10 @@ static s64 sys_unmount_handler(u64 path_va, u64 path_len_raw) {
 // =============================================================================
 //
 // Each syscall sets a one-way per-Proc flag (PROC_FLAG_*) or performs
-// a one-shot action. Consumed by corvus + per-user stratumd at startup
-// to satisfy CORVUS-DESIGN invariants C-2 (mlock + dumpable) and the
-// CSPRNG-seeded discipline C-15.
+// a one-shot action. Consumed by corvus at startup to satisfy CORVUS-DESIGN
+// invariants C-2 (mlock + dumpable) and the CSPRNG-seeded discipline C-15;
+// login calls SET_DUMPABLE(0) + SET_TRACEABLE(0) on itself. Per-user stratumd
+// calls none of them (it wipes secrets with its libc's explicit_bzero).
 
 // SYS_MLOCKALL — pin pages. CAP_LOCK_PAGES required. Sets PROC_FLAG_MLOCKED.
 // v1.0 has no swap; the flag is forward-compat scaffolding.

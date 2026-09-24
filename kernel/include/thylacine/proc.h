@@ -273,7 +273,7 @@ struct Proc {
     //                              refused to every OTHER Proc, CAP_HOSTOWNER
     //                              included -- environ, maps, ns, cwd, exe,
     //                              cmdline, and the READ direction of mem,
-    //                              regs and fpregs (devproc_kind_is_image).
+    //                              regs, fpregs and kregs (devproc_kind_is_image).
     //                              Self is exempt. It never gates status,
     //                              sched or imperium: those are the kernel's
     //                              record ABOUT a Proc, and an audited Proc
@@ -284,9 +284,11 @@ struct Proc {
     // PROC_FLAG_NOTRACE  (bit 1) — set by SYS_SET_TRACEABLE(0). The CONTROL
     //                              seal: devproc_debug_authorized refuses
     //                              every caller, CAP_HOSTOWNER included --
-    //                              attach, stop, step, breakpoints, wait,
-    //                              kregs, kstack, and mem/regs/fpregs in
-    //                              BOTH directions.
+    //                              attach, step, breakpoints, wait, kregs,
+    //                              kstack, and mem/regs/fpregs in BOTH
+    //                              directions. stop/start/exitkill answer to
+    //                              the attach SLOT, so a debugger attached
+    //                              before the seal keeps them.
     //                              NODUMP alone does not make a Proc safe
     //                              from a peer that may still DRIVE it (a
     //                              driver can make it disclose itself), so a
@@ -2313,10 +2315,12 @@ bool proc_peer_snapshot_by_stripes(u64 stripes, caps_t *caps_out,
 void proc_apply_identity(struct Proc *p, u32 principal_id, u32 primary_gid,
                          const u32 *supp_gids, u8 supp_gid_count);
 
-// Set seal bits (PROC_FLAG_NODUMP and/or PROC_FLAG_NOTRACE; any other bit is
-// ignored) under g_proc_table_lock, the lock every /proc reader holds -- so a read
-// of `p` happens wholly before the seal or wholly after it. The ONLY writer of the
-// two bits. One-way: it never clears.
+// Set seal bits (PROC_FLAG_NODUMP and/or PROC_FLAG_NOTRACE; zero bits, or any other
+// bit, extincts) under g_proc_table_lock, the lock every /proc reader holds -- so a
+// read of `p` happens wholly before the seal or wholly after it. The ONLY writer of
+// the two bits, and not a general proc_flags writer. It TAKES the lock, so it must
+// not be called with g_proc_table_lock held (a /proc walk callback, the seat bind);
+// a path that already holds it needs its own reviewed locked stamp. One-way.
 void proc_seal(struct Proc *p, u32 bits);
 
 // =============================================================================

@@ -1980,7 +1980,7 @@ pub unsafe fn t_mlockall(flags: u64) -> i64 {
 // scaffolding (changed 2026-09-24, DEBUG-FS-DESIGN 3.2). The flag is the
 // EXTRACTION seal: while set, every /proc/<pid> file that hands out something
 // you hold -- environ, maps, ns, cwd, exe, cmdline, and reads of
-// mem/regs/fpregs -- is refused to every OTHER Proc, a CAP_HOSTOWNER holder
+// mem/regs/fpregs/kregs -- is refused to every OTHER Proc, a CAP_HOSTOWNER holder
 // included. The calling Proc still reads its own. /proc/<pid>/status, sched and
 // imperium are NOT sealed, deliberately -- they are the kernel's record ABOUT a
 // Proc, and an audited Proc must not be able to switch off the audit.
@@ -2005,13 +2005,13 @@ pub unsafe fn t_set_dumpable(dumpable: u64) -> i64 {
     x0
 }
 
-// t_set_traceable — control debug-Spoor attach permission. Same
-// one-way-to-0 semantics as t_set_dumpable. Sets PROC_FLAG_NOTRACE.
-//
-// Debug Spoors don't exist at v1.0 — the flag is forward-compat
-// scaffolding. When debug-Spoor attach lands, the kernel-side attach
-// path must check this flag and refuse to attach to a Proc with
-// NOTRACE set.
+// t_set_traceable — the CONTROL seal (DEBUG-FS-DESIGN 3.2). t_set_traceable(0)
+// sets PROC_FLAG_NOTRACE: every debugger is refused -- CAP_HOSTOWNER and
+// CAP_DEBUG included -- at attach, step, breakpoints, wait, kregs, kstack and
+// mem/regs/fpregs in both directions. A debugger that attached BEFORE the call
+// keeps its slot's run-control verbs, so seal before the Proc is exposed.
+// Ungated and one-way: t_set_traceable(1) on a sealed Proc is REFUSED.
+// Guarding a secret takes t_set_dumpable(0) as well.
 #[inline(always)]
 pub unsafe fn t_set_traceable(traceable: u64) -> i64 {
     let mut x0: i64 = traceable as i64;

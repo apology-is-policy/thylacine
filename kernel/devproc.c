@@ -1041,11 +1041,13 @@ static void devproc_close(struct Spoor *c) {
 bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *target);
 bool devproc_owner_or_hostowner(const struct Proc *caller, const struct Proc *target);
 bool devproc_extract_authorized(const struct Proc *caller, const struct Proc *target);
-// Forward-declared STATIC: devproc_read_cb (below) applies the image set and the
-// seal, and sits above their definitions.
+// Forward-declared STATIC: devproc_read_cb (below) asks devproc_read_sealed, and
+// sits above the definitions.
 static bool devproc_kind_is_image(u32 kind);
 static bool devproc_dump_sealed_against(const struct Proc *caller,
                                         const struct Proc *target);
+static bool devproc_read_sealed(const struct Proc *caller, const struct Proc *target,
+                                u32 kind);
 size_t devproc_sched_read_gated(const struct Proc *caller, struct Proc *target,
                                 char *buf, size_t cap, bool *denied);
 size_t devproc_imperium_read_gated(const struct Proc *caller, struct Proc *target,
@@ -1152,7 +1154,7 @@ static int devproc_read_cb(struct Proc *p, void *arg) {
     // Only the SEAL here, not an owner axis: cmdline / ns / exe / cwd / maps stay
     // ambient all-pids-visible for an unsealed Proc, their long-standing Plan 9
     // posture. What changes is that a SEALED Proc no longer hands them out.
-    if (devproc_kind_is_image(r->kind) && devproc_dump_sealed_against(r->caller, p)) {
+    if (devproc_read_sealed(r->caller, p, r->kind)) {
         r->denied = true;
         return 1;                             // matched + refused -> stop
     }
@@ -1378,13 +1380,17 @@ static bool devproc_dump_sealed_against(const struct Proc *caller,
 // THE IMAGE SET -- which /proc/<pid> files the dump seal refuses. A file is in the
 // set iff it hands out something the target HOLDS: its arguments, its namespace, the
 // path of the image it runs, its working directory, the layout of its memory, its
-// environment, and the READ direction of its memory and user register state. What
+// environment, and the READ direction of its memory and register state -- kregs
+// included, because it carries tpidr_el0, an EL0 register the target holds. What
 // the kernel SAYS ABOUT the target is never in it -- status, sched, imperium -- so
 // an audited Proc cannot switch off the audit; the control files (ctl, wait) and the
-// kernel's own execution state (kregs, kstack) belong to NOTRACE, through
-// devproc_debug_authorized. One predicate, consulted at every read site, so a new
-// file is classified here or not at all. cmdline carries no argv yet; it is in the
-// set so that argv arrives sealed.
+// kernel's own execution state (kstack) belong to NOTRACE, through
+// devproc_debug_authorized. One predicate, asked through devproc_read_sealed at every
+// read site -- the dispatch and each walk with its own read path -- so a file is
+// classified here or not at all. cmdline carries no argv yet; it is in the set so
+// that argv arrives sealed. `name` -- the exe path's basename, stamped at exec -- is
+// ledger: status, sched and /ctl/procs carry it, as Linux keeps a non-dumpable
+// process's comm public.
 static bool devproc_kind_is_image(u32 kind) {
     switch (kind) {
     case PQS_CMDLINE:
@@ -1396,10 +1402,21 @@ static bool devproc_kind_is_image(u32 kind) {
     case PQS_MEM:
     case PQS_REGS:
     case PQS_FPREGS:
+    case PQS_KREGS:
         return true;
     default:
         return false;
     }
+}
+
+// The seal at a read site. Every read site -- the dispatch and each walk with its
+// own read path -- asks THIS with the kind of the file it serves, so a kind classified
+// in devproc_kind_is_image is sealed on every path that reads it. A NEW read path
+// that skips the call is the one gap the classification cannot close; its row in
+// test_devproc_dump_seal_disclosure is what catches it.
+static bool devproc_read_sealed(const struct Proc *caller, const struct Proc *target,
+                                u32 kind) {
+    return devproc_kind_is_image(kind) && devproc_dump_sealed_against(caller, target);
 }
 
 // Owner-or-hostowner AND not dump-sealed: the gate for environ, the one image file
@@ -1409,7 +1426,7 @@ static bool devproc_kind_is_image(u32 kind) {
 bool devproc_extract_authorized(const struct Proc *caller, const struct Proc *target) {
     if (!caller || !target)                            return false;
     if (!devproc_owner_or_hostowner(caller, target))   return false;   // authority
-    return !devproc_dump_sealed_against(caller, target);                // the seal
+    return !devproc_read_sealed(caller, target, PQS_ENVIRON);           // the seal
 }
 
 bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *target) {
@@ -1613,8 +1630,8 @@ static int devproc_mem_walk_cb(struct Proc *target, void *arg) {
     // The dump seal refuses EXTRACTION, and reading a target's memory is the largest
     // extraction there is (DEBUG-FS-DESIGN 3.2). A write is CONTROL -- NOTRACE's, via
     // the gate above -- so a NODUMP-only target's debugger may still write it.
-    if (!m->is_write && devproc_kind_is_image(PQS_MEM)
-        && devproc_dump_sealed_against(m->caller, target)) { m->result = -1; return 1; }
+    if (!m->is_write
+        && devproc_read_sealed(m->caller, target, PQS_MEM)) { m->result = -1; return 1; }
     if (!devproc_target_fully_stopped(target))          { m->result = -1; return 1; }  // stopped-only
 
     irq_state_t vs = spin_lock_irqsave(&target->as->lock);
@@ -1688,7 +1705,8 @@ struct Thread *devproc_focus_thread(struct Proc *target) {
 // memory (TTBR1) -- a plain deref, no cross-Proc walk. Caller holds
 // g_proc_table_lock + has gated I-39 + fully-stopped (so on_cpu==false: the
 // frame + ctx are settled, not being written by a live cpu_switch_context).
-static long devproc_build_regs(struct Proc *target, u32 kind, u8 *out) {
+// `raw` admits kregs's kernel half (the CAP_DEBUG/CAP_HOSTOWNER tier; see below).
+static long devproc_build_regs(struct Proc *target, u32 kind, u8 *out, bool raw) {
     struct Thread *th = devproc_focus_thread(target);   // 8c-2 #95: the M at the stop (else head)
     // 8a-1c holotype F1 (defense-in-depth): never read an EXITING head thread's
     // ctx/trapframe -- it is running its exit path (the final sched() writes
@@ -1702,16 +1720,25 @@ static long devproc_build_regs(struct Proc *target, u32 kind, u8 *out) {
     // (context.h), so this is a verbatim field copy. tpidr_el0 is the EL0 TLS
     // base dlv reads for the Go `g` (DEBUG-FS 4.5); ttbr0 is omitted (a kernel
     // pgtable PA -- info-leak, no debug value).
+    //
+    // I-16: the kernel half is raw slid state. ctx.lr is the return into sched, so
+    // lr minus its link address IS the KASLR slide, and fp/sp/x19..x28 are kernel
+    // stack and heap addresses. Like kstack's raw addresses it goes only to the
+    // CAP_DEBUG/CAP_HOSTOWNER tier (`raw`); the owner axis -- any user debugging its
+    // own program -- gets the TLS base alone, which is all Delve reads here.
     if (kind == PQS_KREGS) {
         struct t_kernel_regs *kr = (struct t_kernel_regs *)out;
-        kr->x[0] = th->ctx.x19; kr->x[1] = th->ctx.x20; kr->x[2] = th->ctx.x21;
-        kr->x[3] = th->ctx.x22; kr->x[4] = th->ctx.x23; kr->x[5] = th->ctx.x24;
-        kr->x[6] = th->ctx.x25; kr->x[7] = th->ctx.x26; kr->x[8] = th->ctx.x27;
-        kr->x[9] = th->ctx.x28;
-        kr->fp        = th->ctx.fp;
-        kr->lr        = th->ctx.lr;
-        kr->sp        = th->ctx.sp;
+        for (size_t i = 0; i < sizeof(*kr); i++) ((u8 *)kr)[i] = 0;
         kr->tpidr_el0 = th->ctx.tpidr_el0;
+        if (raw) {
+            kr->x[0] = th->ctx.x19; kr->x[1] = th->ctx.x20; kr->x[2] = th->ctx.x21;
+            kr->x[3] = th->ctx.x22; kr->x[4] = th->ctx.x23; kr->x[5] = th->ctx.x24;
+            kr->x[6] = th->ctx.x25; kr->x[7] = th->ctx.x26; kr->x[8] = th->ctx.x27;
+            kr->x[9] = th->ctx.x28;
+            kr->fp   = th->ctx.fp;
+            kr->lr   = th->ctx.lr;
+            kr->sp   = th->ctx.sp;
+        }
         return (long)sizeof(struct t_kernel_regs);
     }
 
@@ -1801,10 +1828,10 @@ static int devproc_regs_walk_cb(struct Proc *target, void *arg) {
     if (target->pid != r->target_pid) return 0;
     if (target == kproc())                              { r->result = -1; return 1; }
     if (!devproc_debug_authorized(r->caller, target))   { r->result = -1; return 1; }  // I-39
-    // regs/fpregs READS are extraction (the dump seal); kregs is the KERNEL's frame,
-    // outside the image set, so it answers to NOTRACE alone; writes are control.
-    if (!r->is_write && devproc_kind_is_image(r->kind)
-        && devproc_dump_sealed_against(r->caller, target)) { r->result = -1; return 1; }
+    // regs/fpregs/kregs READS are extraction (the dump seal; kregs carries tpidr_el0,
+    // an EL0 register); writes are control -- NOTRACE's, through the gate above.
+    if (!r->is_write
+        && devproc_read_sealed(r->caller, target, r->kind)) { r->result = -1; return 1; }
     if (!devproc_target_fully_stopped(target))          { r->result = -1; return 1; }  // stopped-only
 
     // Build the current struct, apply the [off,off+n) slice (write) or copy it
@@ -1812,7 +1839,11 @@ static int devproc_regs_walk_cb(struct Proc *target, void *arg) {
     // the current bytes for the untouched fields -- and the pstate guard holds
     // regardless of the write's offset (devproc_apply_regs never writes SPSR).
     u8 scratch[sizeof(struct t_user_fpregs)];   // the larger struct (520)
-    long size = devproc_build_regs(target, r->kind, scratch);
+    // I-16: only the CAP tier sees kregs's kernel half. Same acquire-load of caps as
+    // devproc_debug_authorized and the kstack reader.
+    bool raw = (__atomic_load_n(&r->caller->caps, __ATOMIC_ACQUIRE)
+                & (CAP_HOSTOWNER | CAP_DEBUG)) != 0;
+    long size = devproc_build_regs(target, r->kind, scratch, raw);
     if (size == 0)       { r->result = -1; return 1; }   // no head thread / no kstack
     if (r->off >= size)  { r->result = 0;  return 1; }   // off past EOF -> 0
     long avail = size - (long)r->off;
@@ -2499,6 +2530,7 @@ static int devproc_kstack_walk_cb(struct Proc *target, void *arg) {
     if (target->pid != k->target_pid) return 0;   // keep walking
     if (target == kproc())                            { k->result = -1; return 1; }
     if (!devproc_debug_authorized(k->caller, target)) { k->result = -1; return 1; }   // I-39
+    if (devproc_read_sealed(k->caller, target, PQS_KSTACK)) { k->result = -1; return 1; }
     // 8b: the SETTLED-thread inspect -- NO debug-stop required (unlike mem/regs/
     // kregs/wait, which keep the fully_stopped gate). devproc_format_kstack gates
     // the head on on_cpu==false; the walk is bounded to the thread's own kstack
@@ -2658,6 +2690,7 @@ static int devproc_waitscan_cb(struct Proc *target, void *arg) {
     if (target->pid != w->target_pid) return 0;   // keep walking -> not found -> stays -1
     if (target == kproc())                            { w->state = -2; return 1; }  // undebuggable
     if (!devproc_debug_authorized(w->caller, target)) { w->state = -2; return 1; }  // I-39
+    if (devproc_read_sealed(w->caller, target, PQS_WAIT)) { w->state = -2; return 1; }
     if (target->state != PROC_STATE_ALIVE)            { w->state = -1; return 1; }  // exiting/zombie -> "exited"
     w->state = devproc_target_fully_stopped(target) ? 1 : 0;   // debug_stop_req + all parked
     return 1;

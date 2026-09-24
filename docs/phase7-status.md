@@ -331,7 +331,9 @@ and `imperium`. Self is exempt and exempt first. Otherwise absolute, `CAP_HOSTOW
 included — a deliberate divergence from Linux, which lets `CAP_SYS_PTRACE` through.
 `devproc.dump_seal_scope` pins the split so it cannot silently regress.
 
-The round's P1 was a memory-ordering defect in the same four lines: the seal was read
+*(Superseded by the seal's round 2: the order argument below held only for a reader
+admitted by the new identity; the seal now rests on `proc_seal`'s lock.)* The round's P1
+was a memory-ordering defect in the same four lines: the seal was read
 BEFORE the principal comparison, the target's `principal_id` was read plainly, and the
 justifying comment asserted an ACQUIRE/RELEASE pairing that does not exist. The order
 now falls out of the composition — the authority predicate ACQUIRE-loads `principal_id`
@@ -402,6 +404,21 @@ where the seal stopped being a list of files. Closed list:
   unreachable end to end. It is reachable, and now tested.
 
 Verification: canonical **1662/1662 PASS**, 0 FAIL lines (default image, isolated worktree); final rebuild after the sabotage legs ELF `9418e7b48163ea01`, no source newer (270 compared). RED-first in three legs, each redding ONLY its own guard: the read-dispatch check + mem + regs read refusals removed together -> exactly `refuses cmdline` / `a mem READ` / `a regs READ` (1659); environ on the unsealed predicate -> exactly `refuses environ` (1661); imperium on the sealed predicate -> exactly the imperium I-25 leg (1661). Restores byte-identical. F5's lock is argued, not unit-tested.
+
+## The seal completed — round 3: the prose again, and a leak the seal work uncovered — 2026-09-24
+
+Round 3 re-audited `34d1f14a` (the dirty-close rule; Opus fallback, the third in a row on this surface). The reviewer found 0 P0 / 0 P1 / 3 P2 / 9 P3, and **cleared the round-2 restructure**: `proc_seal` is the only production writer of the seal bits, every other `proc_flags` writer is an atomic RMW that cannot touch them, every seal reader runs and renders inside `proc_for_each`, the lock order is clean at all four call contexts, and the ten-row call-site table reds in both directions. All three P2s were prose the tree contradicts — including this arc's own round-2 claim, "verified", that login writes no environment variable. It writes six (`HOME`, `USER`, `PATH`, `GIT_EXEC_PATH`, `GIT_CONFIG_SYSTEM`, `OPENSSL_armcap`); the search had keyed on an API name the code does not use.
+
+The self-audit found the round's only P1, and it predates the seal: **`/proc/<pid>/kregs` handed the unprivileged owner axis the KASLR slide** — the raw `ctx.lr` of a debug-parked thread is the return into `sched` — plus kernel stack and heap addresses. It is the class 8b-1d's F1 fixed for `kstack` and never applied to `kregs`; the in-guest `/debug-probe`, which runs on the owner axis, had been asserting the leak at every boot. The kernel half now goes only to the `CAP_DEBUG`/`CAP_HOSTOWNER` tier; the owner axis reads zeroes and keeps `tpidr_el0`, the one field Delve reads. `kregs` also joined the image set (it carries `tpidr_el0`, an EL0 register).
+
+- **Every read site asks one helper.** `devproc_read_sealed(caller, target, kind)` — dispatch, `environ`, `mem`, `regs`/`fpregs`/`kregs`, `kstack`, `wait` — so "classified in `devproc_kind_is_image`" means sealed on every path; `environ`'s entry had been dead code (F5).
+- **`proc_seal` extincts on a non-seal bit** instead of silently sealing nothing (F9), and says it must never be called under the lock — the trap decision C would have walked into.
+- **Tests (F8, F12).** `dump_seal_scope` gained a cross-principal `CAP_HOSTOWNER` leg (the ledger still answers it; extraction still refuses it); `debug_kregs_kstack_wait` gained the owner/CAP tier split and a NODUMP leg; `debug_regs`'s inline asserts moved into a helper so a failure can no longer leave a stack-local thread linked.
+- **Prose (F1-F4, F10).** caps.h's stale gate clause, the six login keys in 3.2, the CONTROL seal's ABI docs in all three userspace headers, the ACQUIRE-order survivors, the stratumd hardening claims, the NOTRACE comment's `stop` (run control is slot-gated).
+- **Userspace (F6, F11).** The diorama names a sealed Proc from the ledger `name:` line; halcyon reads and advertises `/proc/<pid>/ns` (devproc has no `self`).
+- **Tracked, not fixed:** the diorama's empty file where Linux answers `EACCES` (F6), and a seal refusal reading as "I/O error" (F7, an errno ABI question for the operator). The `kregs` fix is self-found and not independently reviewed; it is a named focus of the next devproc audit.
+
+Verification: canonical **1662/1662 PASS**, 0 FAIL lines (default image, isolated worktree), in-guest `/debug-probe` PASS on the owner axis; final rebuild after the sabotage legs **1662/1662**, ELF `0ef66f3df8964cd7`, no kernel source newer (276 compared). RED-first in two legs of two guards each, every pair in different tests, each FAIL naming its own guard: kregs' CAP tier forced open + environ dropped from the image set -> exactly `kregs (owner axis): x19..x28 withheld (I-16)` + the three environ-seal assertions (predicate, disclosure, scope) (1658); kregs dropped from the image set + imperium on the sealed predicate -> exactly `the dump seal refuses a kregs READ` + the owner AND the new cross-principal `CAP_HOSTOWNER` I-25 legs (1659). Restores byte-identical. In the sabotaged boots the kernel suite gates the boot, so the probe never ran there; its owner-axis zero check is proven by the canonical boots only. proc_seal's extinction is argued, not unit-tested (it halts).
 
 ## Haul completion integration — 2026-09-17
 

@@ -121,6 +121,15 @@ for a `CAP_HOSTOWNER` reader. It is now discharged by a lock: `proc_seal` stamps
 [[sub-kernel-devproc]]. Granting the bit, sealing the holder and ordering the two are
 still one obligation, not three; the third is now held by construction.
 
+**A new `/proc` surface picks its gates by what they weigh.** `devproc_debug_authorized`
+weighs capability cover and the NOTRACE seam; `devproc_owner_or_hostowner` weighs
+neither capability nor any seal; the dump seal sits beside both, in
+`devproc_kind_is_image` and `devproc_read_sealed`. So the planned `/proc/<pid>/fd/`
+routes through the debug predicate (a descriptor list is closer to control than to
+disclosure) and, because it hands out what the Proc holds, is classified as image and
+gets a `dump_seal_disclosure` row. `caps.h` once said the owner gate weighs NODUMP --
+written by the very commit that moved the seal out of it (seal round 3, F1).
+
 
 **Propagating Imperium and Haul (2026-09-17).** `CAP_GRANTABLE_IMPERIUM`
 is DAC_OVERRIDE | CHOWN | KILL | POST_SERVICE. The last bit is 13 (12 remains

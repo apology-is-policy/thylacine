@@ -282,7 +282,8 @@ against its own set -- so every tile program's caps equal the compositor's EXACT
 the I-39 cover rule admits all of them. Unsealed, any tile could have debug-attached the
 compositor and taken its `MAY_POST_SERVICE` (impersonating `/srv/halcyon-<user>`), its
 `SESSION_HANGUP`, and every other tile's surface share. Sealing it does NOT seal the
-tiles: they are SPAWNED, and the seal crosses fork only. The session shell `ut` is
+tiles: they are SPAWNED, and the seal crosses no spawn (nor, until decision A lands,
+any fork). The session shell `ut` is
 deliberately left unsealed -- see the census at `CAP_TCB_DIAL` in `caps.h`.
 
 ## login degrades to the console shell when the compositor cannot start (2026-09-07)
