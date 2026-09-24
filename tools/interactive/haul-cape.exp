@@ -193,7 +193,15 @@ set fh [open $made r]; set body [read $fh]; close $fh
 if {$body ne "written-by-the-guest\n"} { lc_fail "the host file holds \[$body\]" }
 set perm [file attributes $made -permissions]
 if {$perm ne "00600"} { lc_fail "chmod 600 in the guest left the host file at $perm" }
+# A caped create sends no group (P9_NOGID), so the host file keeps the group the
+# export gives it -- the one its own files carry. npxf's try_set_gid only LOGS a
+# failure, so the wire assertion in the kernel tests cannot see a server that
+# took the sentinel literally; this is the host-side half of that contract.
+file stat $made mst
+if {$mst(gid) != $host_gid} { lc_fail "the guest's create left the host file in group $mst(gid), not the export's $host_gid" }
 if {![file isdirectory $export/guestdir]} { lc_fail "the guest's mkdir never reached the host" }
+file stat $export/guestdir dst
+if {$dst(gid) != $host_gid} { lc_fail "the guest's mkdir left the host directory in group $dst(gid), not the export's $host_gid" }
 lc_pass "haul-cape: the host saw the create, the mkdir and the chmod"
 
 # Leg 3: the posted service. Posting needs the post capability (imperium).

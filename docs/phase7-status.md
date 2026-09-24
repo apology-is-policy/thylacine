@@ -182,9 +182,14 @@ caught by the test meant for it; device gate `haul-cape` (its own npxf, a
 0700/0600 export) PASS, and FAIL with the operator's EACCES under both device
 sabotages. Audit (Fable 5.1, max, no mid-run fallback): 0 P0 / 0 P1 / 0 P2 /
 3 P3, folded with the chunk into `797767f6`. F2 (the cape names the attacher)
-was closed by (U)'s scripture pass; F1 (Stratum stores a caped create's
-`(u32)-1` gid literally) and F3 (`haul-cape.exp` does not pin the host-side
-group) are open and tracked. Enqueued: (S), the "9p: op abandoned" line at the
+was closed by (U)'s scripture pass; **F3 (the gate did not pin the host-side
+group) closed 2026-09-24** -- `haul-cape.exp` now stats the guest's create and
+mkdir host-side for their group, and the discriminating sabotage is SERVER-side
+(npxf's `try_set_gid` forced to a concrete group: it reaches login and reddens
+that one line, where a kernel-side gid sabotage instead extincts the boot suite
+at `dev9p.cape`, never reaching the device script); F1 (Stratum stores a caped
+create's `(u32)-1` gid literally) is open and tracked, and lives in the Stratum
+tree. Enqueued: (S), the "9p: op abandoned" line at the
 end of every Haul session.
 
 ### B — the `/srv` attach stops taking the cape flag (2026-09-24, operator-approved, pre-push)
