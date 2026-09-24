@@ -173,3 +173,24 @@ Final storage validation: 335/335 Halcyon library tests pass on Linux/aarch64
 time 200; regressing time correctly expired the write. Reordering the fixture
 timestamps fixes the test without weakening expiry. Failure evidence remains
 `work/hi1b-pi-final.log`. Pi is released, no VM was started.
+
+## Terminal ownership scope decision pending
+
+Source tracing found that `pts_tty_set_fg` permits any controlling-session member
+to change foreground group. A shell-only notification can therefore leave the
+broker's controller record stale; independently sampling GET_FG does not make it
+current at Tapestry admission. The existing terminal host also does not request
+a seal at spawn. No terminal clipboard endpoint has been exposed.
+
+`HALCYON-INTERACTION-PTY-REVIEW.md` records the source-derived counterexample,
+Plan 9/POSIX/Wayland/Fuchsia/Genode prior art, and two viable directions: expand
+the kernel pts seam for lifetime-bound ownership observation/admission with a
+sealed host, or defer terminal clients and continue graphical clients first.
+The operator has been asked because the approved design excluded new kernel IPC
+mechanisms. This is a proposed scope change, not ratification or code. Main and
+Aux have been notified on Yip; no existing authority drafts were changed.
+
+Current source checkpoints are `6e596d19` (typed HIN1 protocol) and `cb02b748`
+(pure storage), both on `codex/astra`, with normal hooks passing. Neither is a
+Main landing or a live clipboard. No resource lease is held. The earlier pointer
+heartbeat remains paused; it is not a background worker for this new scope.

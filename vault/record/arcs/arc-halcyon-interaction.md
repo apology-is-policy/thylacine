@@ -80,3 +80,15 @@ HI-1b adds the pure bounded clipboard store and deferred read/commit admission.
 The endpoint is still absent; focus/controller authentication is explicitly left
 to the next broker integration. Atomic publication, snapshot isolation, stale
 owners, SAK cancellation, deadlines and payload limits have dedicated tests.
+
+## Terminal ownership design gap, September 24
+
+Before connecting terminal clients, source review found that kernel SET_FG can
+be called by other controlling-session members, so notifications from ut alone
+cannot maintain the approved authority record. GET_FG exposes no epoch and an
+independent sample races graphical admission. The proposed correction is in
+`docs/HALCYON-INTERACTION-PTY-REVIEW.md`, with primary-source prior art and the
+alternative of deferring terminal integration. Operator scope approval is
+pending because the original design excluded new kernel mechanisms. No kernel
+change or live clipboard endpoint is implied by the completed protocol/storage
+checkpoints (`6e596d19`, `cb02b748`).

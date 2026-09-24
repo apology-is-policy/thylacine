@@ -38,6 +38,14 @@ store correctly expired the transfer. Fixing the fixture's event order preserved
 the fail-closed clock rule. `next_deadline` supports timeout-driven expiry rather
 than a new polling loop. The Pi lease is released; no new guest UI is claimed.
 
+The next-layer trace exposed a design gap: SET_FG is available to any member of
+the controlling session, so a bridge fed only by ut cannot attest current
+terminal ownership. Sampling GET_FG separately from Tapestry admission leaves
+a race. Prior-art review and options are in HALCYON-INTERACTION-PTY-REVIEW; the
+operator's scope decision is pending before new kernel mechanisms. This is a
+source-derived counterexample, not an observed clipboard leak: no endpoint has
+been exposed. Main and Aux received the finding before edits to their surfaces.
+
 ---
 ## 2026-09-24 (Astra) -- typed interaction protocol before service admission
 
