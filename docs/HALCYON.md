@@ -2321,3 +2321,16 @@ output to scroll the caption into history, on resize, and with independent
 panes. Tests cover unavailable and evicted references, duplicate ids, invalid
 headers and quota reduction. No timing delay or forced terminal clear is an
 acceptable substitute for stream ordering.
+
+
+## Approved interaction extension (2026-09-24)
+
+`HALCYON-INTERACTION.md` specifies the next interaction tranche: a portable
+native pointer, per-session text clipboard, application-owned modal state
+reported in the Instrument status widget, and Nora-style transcript text
+selection/search. The operator approved the full specification and implementation on 2026-09-24;
+it is a binding extension, not yet as-built behavior.
+It proposes replacing transcript w/b object motions with text motions and
+explicit [o/]o object motions, preserving local y/p and adding Space y/p for
+shared clipboard access. Existing interfaces remain as documented until their
+implementation chunks land. Mycelium consolidation is a separate arc.
