@@ -22,6 +22,37 @@ needed the operator.
 
 
 ---
+## 2026-09-24, evening (main, Opus 5.5, effort max) -- the aux-3 merge: two conflicts no conflict marker showed, a journal the squash had re-dated, and a sabotage that tested nothing
+
+**The target moved twice before it landed.** The aux cleared d819d8f1 (yip 0106), then 3fd54782, the seal arc's round-3 close (0122), then 0a668bb8, which adds HN-1 (0129). Each clearance superseded the one before. Each was rehearsed in a scratch worktree against the tree main was about to become: B-1c's WIP tips b409f80b and 92a1f11c, then b65bedc7 once B-1c had landed. The real merge on main (fc234a44) hit exactly the rehearsal's ten conflicts, and the scripts written against the rehearsal resolved them. Each script asserts its hunk count before it writes.
+
+**Two compile errors behind no conflict marker.** Each came from a change on one side meeting a new use on the other:
+- `loom_create` took a third argument (`exempt`) in B-1a' 387ffcd8, and the aux's new tests called it with two.
+- B-1c removed `ThylaAllocN`, and the aux's new lantern declared it.
+
+The rehearsal's build found both. I then checked every kernel prototype main had changed against every call the aux added, and every public Rust item main had changed against every use the aux added; neither found a third. After the fix, the search for a two-argument call still matched 36 lines: all of them assertion messages that quote the call (`"loom_create(8,16) returned NULL"`). The count of all 101 call sites is what showed the search had real calls to find.
+
+**A journal the squash had re-dated.** The resolver interleaves both sides' entries by when each header was added. B-1c's squash gave every main entry of that arc a single time, so they sorted as one block above the aux's HN-1 entry. Dating main's side by the pre-squash tip (c995c98e) restored the real order: r4 13:51Z, the aux's HN-1 13:19Z, r3 11:41Z, and so on down.
+
+**Prose no build can check.** B-1c made "the fixed heap" false, and the aux's 73 commits were written while it was true. I searched the merge's 20,928 added lines for the old mechanism's vocabulary (`ThylaAllocN`, `HEAP_BYTES`, "fixed heap", "4 MiB heap"). The only hit was the lantern line this merge rewrote. The control was the 14 added lines that mention a heap at all; I read each, and none claims a fixed one.
+
+**A sabotage leg that tested nothing.** To save a boot, I put HN-1's netd sabotage in the same leg as the seal's first kernel sabotage. The kernel checks failed by name as intended, and a kernel check that fails ends the boot before userspace starts, so netd never ran. The report's netd section was empty. A verdict read only from the kernel FAIL lines would have counted the leg as proof. Run alone, with the kernel suite passing, the netd sabotage failed tools/test.sh on exactly the three dial-verdict legs the aux named. The lesson: a leg that sabotages two layers is evidence only for the layer the boot reaches, so give each layer its own leg.
+
+**Verified on the merged tree (41083444).**
+- The kernel suite at -smp 4: 1691/1691 (main's 1667 plus the aux's 24). Two builds from the tree gave the same ELF (506853ab9f128938).
+- At -smp 1: 1691/1691.
+- The seal legs failed exactly the aux's named checks: 1687/1691 with four, and 1688/1691 with three.
+- The netd leg failed exactly the three dial-verdict legs.
+- The CI image, baked from the merged tree: haul-unreachable (three legs), haul-hangup, haul-cape, srv-connect-gate, ls-imperium, lantern and rust-std-hello all passed on the first attempt. rust-std-hello ran `/r1hello`, built against main's B-1b musl. With haul's `tell()` forced to the console, haul-unreachable failed on the aux's own hard-fail line. The first bake died at populate: stratumd's socket lives under `build/fixtures`, and a worktree under the session scratchpad pushed its path past macOS's 104-byte `sun_path` limit. The worktree moved to a short path; the tooling fix is enqueued in OPEN-BUGS.
+- `tools/test-rust.sh` on the host: 28 crates and 1953 tests, 0 failing. libutopia's 69 stranded tests, an aux-side figure, are now an OPEN-BUGS item.
+
+**After the merge.**
+- a7e3b9ab: the kernel comment at proc.c's `proc_close_handles_at_exit` said a multi-thread Proc keeps its handles until reap, false since #68. The holotype record's R3-F1 fix note said the same, and now carries a note. Both were enqueued at B-1c's round-4 close.
+- 6fb09f3b: B-1b's round-1 audit and its finding, recorded in the vault. The landing had closed the round without them.
+
+**Decisions.** None were new. The operator gave H3 and C back to the aux (about 14:05Z); they will arrive in a later merge.
+
+---
 ## 2026-09-24, late afternoon (main, Opus 5.5, effort max) -- B-1c round 4: clean, and a sweep that needed the old mechanism's own words
 
 **Round 3's fixes verified, as WIP 12 (7c54ef71).** Host coreutils 42/42. Restoring the reap-first capture hung the boot at the first capture check. A capture that dropped a cut-off tool's pipes and reaped it for its own code, with tail and uniq at their round-2 code, failed exactly six checks by name ("got code=Some(0)" for `yes`). Both smp: 1667/1667, heap-probe ALL OK, smoke 101/101.
