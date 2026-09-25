@@ -126,3 +126,16 @@ when its buffer of 4 KiB fills, at some fifty to sixty processes; `ps` and
 `prowl` show what they received. `/ctl/procs`, `/ctl/memory` and `/proc/<pid>/status` are readable by
 every process. `/proc/<pid>/sched` is readable by the process's owner and by
 holders of `CAP_HOSTOWNER`.
+
+A program built with the C library can load a shared library while it runs.
+The library loader is `/lib/libc.so`, and a library named without a directory
+is looked for in the directories the program names and then in `/lib`. The
+loader does not read `LD_LIBRARY_PATH` or `LD_PRELOAD`, so neither variable
+changes which library a program loads. On Linux the loader ignores these two
+variables only when a program gains privilege as it starts. A Thylacine
+process gains authority after it starts, when it asks for elevation, and by
+then a library chosen through the environment would already be running inside
+it. A program linked statically has no loader, and it does read the locale,
+message-catalogue and time-zone variables (`MUSL_LOCPATH`, `NLSPATH`, a file
+named by `TZ`). A dynamically loaded program ignores those as well, because
+the C library applies one setting to all of them.

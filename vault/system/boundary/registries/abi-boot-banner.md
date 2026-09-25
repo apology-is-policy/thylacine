@@ -123,11 +123,13 @@ guard, not by `extinction()`). The comment directly above it says "Keep the
 case below in sync with this" — an instruction to a person, inside the file,
 which is the weakest form of the guarantee ([[dec-2026-08-15-cutover]]).
 Reword one of those messages for clarity and the corresponding
-fault-injection variant reports the protection did not fire. `CLAUDE.md` and
-`docs/agent/BOOT-BANNER.md` state a stricter rule than this paragraph: every
-`EXTINCTION:` string is tooling ABI, and rewording one is a format break to
-surface, not to sweep. Until the operator settles which rule stands
-([[fnd-b1d-r3-s2]]), the stricter one binds.
+fault-injection variant reports the protection did not fire. This paragraph's
+rule is the project's since the operator's vote of 2026-09-25
+([[dec-2026-09-25-extinction-bodies]]): `CLAUDE.md` and
+`docs/agent/BOOT-BANNER.md` had made every `EXTINCTION:` string ABI
+([[fnd-b1d-r3-s2]] is where the two readings met), and now state this one. A
+body that gains a consumer joins the set above, and rewording it is then a
+format break.
 
 ## Why it is frozen
 
