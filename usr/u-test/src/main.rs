@@ -1,4 +1,4 @@
-// /u-test -- cumulative integration smoke for the libthyla-rs uplift
+// /bin/u-test -- cumulative integration smoke for the libthyla-rs uplift
 // (U-2-test, closes the U-2 arc).
 //
 // Spawned by joey at boot AFTER /alloc-smoke. Where alloc-smoke
@@ -193,20 +193,20 @@ fn flow_bufreader_error_leg() -> Result<(), i64> {
 }
 
 // =============================================================================
-// Flow 1 -- alloc + fs + io: heap-backed read of /system.key
+// Flow 1 -- alloc + fs + io: heap-backed read of /bin/system.key
 // =============================================================================
 //
-// Open /system.key, read the full contents into a heap-backed Vec via
+// Open /bin/system.key, read the full contents into a heap-backed Vec via
 // the t::io::Read trait, sanity-check the size against the build-time
 // fixture (3656 bytes per the joey smoke). Validates: t::alloc (Vec
 // growth), t::handle (Drop closes the fd at flow exit), t::fs::File
 // (per-component SYS_WALK_OPEN), t::io::Read (read_to_end via the
 // trait impl).
 fn flow_fs_io() -> Result<(), i64> {
-    let mut f = match File::open("/system.key") {
+    let mut f = match File::open("/bin/system.key") {
         Ok(f) => f,
         Err(_) => {
-            t_putstr("u-test: flow_fs_io: File::open(/system.key) FAILED\n");
+            t_putstr("u-test: flow_fs_io: File::open(/bin/system.key) FAILED\n");
             return Err(1);
         }
     };
@@ -216,13 +216,13 @@ fn flow_fs_io() -> Result<(), i64> {
         return Err(1);
     }
     if buf.len() != 3656 {
-        t_putstr("u-test: flow_fs_io: unexpected /system.key size FAILED\n");
+        t_putstr("u-test: flow_fs_io: unexpected /bin/system.key size FAILED\n");
         return Err(1);
     }
     // First byte should be in the keyfile envelope; non-zero proves
     // the read landed on real bytes (not a zero-padded buffer).
     if buf[0] == 0 && buf[16] == 0 && buf[100] == 0 {
-        t_putstr("u-test: flow_fs_io: /system.key bytes appear all-zero FAILED\n");
+        t_putstr("u-test: flow_fs_io: /bin/system.key bytes appear all-zero FAILED\n");
         return Err(1);
     }
     t_putstr("u-test: alloc + fs + io OK\n");
@@ -3040,7 +3040,7 @@ fn flow_eval_exec() -> Result<(), i64> {
     // Probe 4: background `&` registers a job (U-7a; was NotImplemented
     // through U-6). `hello-rs &` spawns detached, registers one job, sets
     // $status 0. We then reap the bg child by pid -- a leaked bg child would
-    // reparent to joey on /u-test exit and trip joey's reap-any wrong-pid.
+    // reparent to joey on /bin/u-test exit and trip joey's reap-any wrong-pid.
     {
         let mut env = Env::new();
         env.interactive = true;

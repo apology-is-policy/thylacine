@@ -9,8 +9,8 @@
 // (the capstone) the whole stack driven through the real read-parse-eval
 // loop via libutopia::repl::Repl::feed.
 //
-// Runs PRE-pivot (flat devramfs root) where echo/seq/tr spawn by name and
-// the u-*/hello-rs/pipe-* fixtures + the /srv synthetic dir all resolve.
+// Runs PRE-pivot (devramfs root) where echo/seq/tr spawn by name, the
+// u-*/hello-rs/pipe-* fixtures sit in /bin and the /srv synthetic dir resolves.
 // At v1.0 a spawned command's stdout goes to a dropped pipe (no terminal-
 // backed fd 1 until U-PTY), so the only observables are $status, Env
 // state, and -- the key integration lever -- command substitution, which
@@ -116,12 +116,13 @@ fn flow_subst_for_case() -> Result<(), i64> {
 fn flow_glob_spawn_capture() -> Result<(), i64> {
     let mut env = Env::new();
     env.interactive = true;
+    env.cwd_set("/bin");
 
     if eval_source(&mut env, "let bins = $(echo u-*)").is_err() {
         return fail("flow 2: $(echo u-*) errored");
     }
     let bins = env.get("bins").0;
-    // The flat root holds the whole u-*-test family; assert on peers that
+    // bin/ holds the whole u-*-test family; assert on peers that
     // are unconditionally packed, plus this binary itself (the nice
     // self-reference: u-6-test is in the same ramfs the glob walks).
     if !list_has(&bins, "u-glob-test") || !list_has(&bins, "u-subst-test") {
@@ -275,7 +276,7 @@ fn flow_script_mode() -> Result<(), i64> {
 // parent's cwd, and `$cwd` is what a relative glob and a relative `cd` read.
 // Each leg runs away from "/" and has a control one variable away (the same
 // input from "/"), so a `$cwd` left at its default fails it. The directories
-// are chosen by what they can do pre-pivot, where the ramfs root is flat:
+// are chosen by what they can do pre-pivot, on the boot ramfs:
 // /env is listable and this process can add an entry to it; /proc/<pid> is a
 // directory to enter, though /proc itself cannot be listed.
 fn flow_adopt_kernel_cwd() -> Result<(), i64> {

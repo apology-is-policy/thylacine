@@ -2371,6 +2371,31 @@ enum {
     //   or a prot above the ceiling (-EACCES). Nothing changes on a refusal.
     SYS_BURROW_PROTECT = 125,  // arg: vaddr (x0), length (x1), prot (x2), flags (x3)
 
+    // SYS_BURROW_MAP_FILE(fd, offset, length, prot, flags, addr) -> vaddr /
+    //   -errno. B-1d (ARCH 6.5 "Dynamic loading"; the addr argument voted
+    //   2026-09-24): the native form of DISTRO D-3's three file-map arms, for
+    //   the dynamic loader. Without BURROW_MAP_FIXED: `length` bytes of the
+    //   file from `offset`, read-only (R) or executable (R|X), at an address
+    //   the kernel chooses in the burrow window, demand-paged through the
+    //   Image cache. With it: [addr, addr+length) in the burrow window is
+    //   mapped whatever it held (the caller's own mappings there are replaced;
+    //   a CODE alias or a cut shared-in mapping refuses, as munmap does) -- an
+    //   R or R|X file window through the Image cache, an RW file window as an
+    //   eager private copy (I-36: there is no writable file mapping), and fd -1
+    //   an anonymous demand-zero window (none, R or RW). Executable file bytes
+    //   need a may_back_exec Dev on a mount not marked MNOEXEC (-EACCES, the
+    //   vouching; the cores' EPERM is the Linux phenotype's, and returned
+    //   natively -T_E_PERM would decode as EIO, errno.h). Refused before any lookup: W|X, X on the anonymous window,
+    //   or W without BURROW_MAP_FIXED (-EACCES); unknown prot or flag bits,
+    //   W without R, a file map without R, a nonzero addr without
+    //   BURROW_MAP_FIXED, a nonzero offset on the anonymous window (-EINVAL).
+    //   Then the arms' own: an unaligned offset or addr, length 0 (-EINVAL), a
+    //   bad fd (-EBADF), a directory / symlink / append-only / O_PATH handle or
+    //   a Dev with no read (-EINVAL), an unknown file size (-EIO), a window
+    //   outside the burrow window or over the length cap, no gap, OOM, the VMA
+    //   cap (-ENOMEM).
+    SYS_BURROW_MAP_FILE = 126,  // arg: fd (x0), offset (x1), length (x2), prot (x3), flags (x4), addr (x5)
+
     // NOT A SYSCALL. One past the highest assigned number, so that
     // VIV_NATIVE_CEILING can be pinned to a value the compiler recomputes
     // rather than to a symbol a person must remember to re-point.
@@ -3389,6 +3414,10 @@ _Static_assert((SYS_WALK_CREATE_DMSRVCAPE &
 // SYS_BURROW_PROTECT flags (x3). SEAL lowers each affected mapping's ceiling to
 // the new prot; a guard page is a range sealed at none.
 #define BURROW_PROTECT_SEAL 1u
+
+// SYS_BURROW_MAP_FILE flags (x4). FIXED places the window at addr (x5), which
+// is read only under it.
+#define BURROW_MAP_FIXED    1u
 
 // SYS_BURROW_RESERVE align_log2 bounds: 0 means page alignment; otherwise the
 // exponent lies in [12, 30] -- a 4 KiB page up to 1 GiB. The alignment bound is

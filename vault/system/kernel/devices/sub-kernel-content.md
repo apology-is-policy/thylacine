@@ -5,6 +5,7 @@ parent: moc-kernel-devices
 title: "Three Devs that own their bytes"
 code:
   - kernel/devramfs.c
+  - kernel/include/thylacine/devramfs.h
   - kernel/devenv.c
   - kernel/env.c
   - kernel/include/thylacine/env.h
@@ -22,7 +23,7 @@ design:
   - "docs/ARCHITECTURE.md section 9.7"
   - "docs/PORTABILITY.md section 6"
 created: 2026-08-02
-updated: 2026-09-21
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -31,9 +32,12 @@ Devs that do not present anything — they *are* what they serve.
 
 ## Contract
 
-- **`/` (the boot ramfs)** — the files a cpio archive shipped in the initrd,
-  flat, read-only, every one system-owned. It is the root the machine starts in,
-  and the tree the first process is executed from.
+- **`/` (the boot ramfs)** — the files and directories a cpio archive shipped in
+  the initrd, a static tree, read-only, every entry system-owned. It is the root
+  the machine starts in, and the tree the first process is executed from. The
+  root holds directories only: the synthetic mount points, `bin/` (every program
+  and data file, joey among them) and `lib/` (the dynamic loader's)
+  ([[dec-2026-09-25-initrd-bin-directory]]).
 - **`/env`** — a directory of the calling process's environment variables. Read
   a name for its value, write or create to set, remove to unset, enumerate for
   the names. The mount is global; the contents are never anyone else's.
@@ -52,10 +56,33 @@ forced by what the content is.
 **The boot filesystem's content arrives from outside and can never leave.** A
 bootloader places a cpio archive in memory; the kernel parses it once and builds
 a table whose name and data fields are **pointers into that archive**. Nothing is
-copied. The consequence is not incidental: the archive can never be freed, and
-the long-standing intent to release it once the real filesystem mounts is blocked
-by the shape of the table that reads it, not by anyone's priorities. Identity is
-positional — a file's name in the protocol is its index in the table plus one.
+copied. The consequence is not incidental: the archive can never be freed. The
+old intent to release it once the real filesystem mounts is blocked twice over —
+by the shape of the table that reads it, and by the running system, which keeps
+the initrd bound at `/bin` and inside the `/lib` union after the pivot
+([[sub-stratum-boot]]). Identity is positional — an entry's name in the protocol
+is its index in the table plus one, a directory's as much as a file's.
+
+**The archive is a tree, and its order is part of its grammar**
+([[dec-2026-09-25-devramfs-directories]]). Each entry keeps its parent and its
+last component, and a directory must precede its contents: the load places an
+entry only under a directory it has already placed, the rule Linux's initramfs
+imposes by creating in archive order, and the order `mkcpio.py`'s sorted
+pre-order walk emits. It was flat until B-1d found the flatness the hard way: the
+build staged `lib/libc.so` in a subdirectory, the packer dropped it without a
+word, and the dlopen witness skipped while the suite passed. So what the load
+cannot place — a name that is absolute or has an empty, `.` or `..` component, a
+component past the walk's bound, an orphan, a second copy of a path, a root entry
+named like a mount point, a type other than file or directory — is **skipped and
+counted, never silently**, and a kernel test fails the suite on any skip.
+
+**A walk moves exactly as a 9P walk does.** A step looks among its own
+directory's children only; `..` climbs one level, and the root's `..` is the
+root. A step from a file fails, `..` included — the flat table answered `..` with
+the root from anywhere, which was right only while every entry's parent was the
+root. A listing emits one directory's children, and the resume cookie is the
+entry's ordinal in one global order, so a directory's cookies are sparse but a
+resumed read still neither repeats nor skips.
 
 **And because that content is real, system-owned files, the boot filesystem
 vouches that they may back executable pages.** Its Dev sets `may_back_exec =
@@ -149,11 +176,18 @@ needs somewhere to land — a graft onto a path that does not resolve is not a
 mount — and the boot root is a read-only archive, so a mount point cannot be
 created the ordinary way. The root therefore synthesizes six empty directories
 whose only purpose is to be mounted over. They are the reason the machine can
-assemble a namespace before it has a writable filesystem.
+assemble a namespace before it has a writable filesystem. They live at the root
+alone, and the load refuses an archive entry at the root with one of their
+names, so a mount point never shadows a file and is never listed twice. The
+refusal found the one collision the flat archive had carried since G15 added
+`/env`: the native `env` utility, shadowed by the mount point for three months,
+its `/bin/env` a directory. The archive now keeps every file in `bin/`, so no
+staged name can meet a mount point's; the refusal stays, and
+`devramfs.load_complete` names any entry it skips.
 
 **Each of the three names its own things in its own space, and two of them hide a
 sentinel inside it.** The ramfs separates its synthetic directories from real
-files **by magnitude** — a base so far above any possible index that the two
+entries **by magnitude** — a base so far above any possible index that the two
 ranges cannot meet — and the environment reserves zero as both the free-slot
 marker and the root directory, which is consistent only because real ids start at
 one. This is the third distinct sentinel style in the area, after a reserved
@@ -199,8 +233,12 @@ must never stall the caller that triggered it.
 
 ## Data structures
 
-A fixed table of 256 ramfs entries, each a name pointer, a data pointer, a size
-and a mode — all four pointing into the archive. A per-process environment holds
+A fixed table of 1024 ramfs entries, each a name pointer, a leaf pointer (the
+last component, a suffix of the name), a data pointer, a size, a mode (the file
+or directory type plus the permission bits; setuid, setgid and sticky are
+dropped) and the parent's index — the pointers all into the archive. The table
+is a `struct ramfs_table` the Dev serves one of; the tests load crafted archives
+into their own. A per-process environment holds
 64 slots, each an inline name of at most 64 bytes and a separately allocated
 value of at most 4096, plus the id counter and the minted device number. The
 random state is a cipher context, a 1024-byte output buffer, a count of bytes
@@ -240,11 +278,15 @@ derived from the same source must not be.
 
 **[[inv-i28]]** — the boot root's synthetic directories are world-searchable
 precisely so path resolution can traverse onto them and cross a mount; the
-execute bit there is load-bearing, not decorative.
+execute bit there is load-bearing, not decorative. An archive directory carries
+the archive's own mode, so its execute bit is the build's to set — `build.sh`
+pins `lib/` to 0755 whatever the host's umask, because every principal's search
+crosses it on the way to the loader.
 
 **[[inv-i32]]** — the environment's 64-variable and 4096-byte-per-value ceilings
 are this invariant in its smallest form, and the ramfs table cap is the same idea
-applied to a boot-time input.
+applied to a boot-time input; an overflow is now a failing test, not only a boot
+line.
 
 **[[inv-i33]]** — the boot root seeds its own name at birth, which is the one
 place in the tree where a Spoor's recorded path is a root rather than an
@@ -254,10 +296,13 @@ accumulation.
 
 Returning nothing and continuing: an absent or malformed archive (the filesystem
 is simply empty); an archive with more entries than the table holds (the load
-truncates — and **says so**); a random pull that finds no device, fails to
-negotiate, cannot allocate, times out, or returns only zeroes.
+truncates — and **says so**); an entry the load cannot place (skipped, counted
+and reported); a random pull that finds no device, fails to negotiate, cannot
+allocate, times out, or returns only zeroes. The last three are also failures
+of `devramfs.load_complete` on the boot archive.
 
-Returning failure to the caller: a byte read of any of the three directories; a
+Returning failure to the caller: a walk step from a file; a byte read of any of
+the three directories, or of an archive directory; a
 write to the read-only boot filesystem; an environment operation naming an id
 that no longer exists; a create anywhere but the environment root; a random read
 before the source is ready; a first directory entry too large for the caller's
@@ -295,13 +340,28 @@ round-trip every megabyte.
   encode rather than emitting them (below).
 - The ramfs table's pointers into the archive mean the archive can never be
   freed; anything that frees it must first copy the names and data out.
+- The ramfs load must keep placing an entry only under a directory already
+  placed, and keep counting every entry it refuses. A load that invented a
+  missing parent would hide a packer that dropped one; a load that dropped an
+  entry silently is the failure B-1d found.
+- A walk from a file must keep failing, `..` included, and `..` must keep
+  climbing one level — the flat table's "`..` is the root" survives only as the
+  root's own `..`.
+- The chain that keeps the loader on the device fails closed at three places:
+  `mkcpio.py --require` deletes an archive that lacks `lib/libc.so`,
+  `lib/libdlprobe.so` or the prover when the sysroot built `libc.so`;
+  `devramfs.live_lib_when_prover_ships` fails the suite when the prover ships
+  without its loader; and joey fails the boot on the same condition, before and
+  after the pivot ([[sub-stratum-boot]]).
 - Directory cursors must stay strictly increasing and never zero.
 
 ## Seams
 
 The boot archive is still never freed. Environment sharing across a fork is
-reserved but not built — a child always gets a copy. There are no directories
-inside either filesystem: the ramfs is flat, and the environment is one level.
+reserved but not built — a child always gets a copy. The environment is one
+level; the ramfs has been a tree since B-1d. Symlinks in the archive are still
+refused (`mkcpio.py` never emits one: a link to a file packs the file's bytes, a
+link to a directory is skipped).
 
 ## Caveats
 
@@ -337,17 +397,18 @@ inside either filesystem: the ramfs is flat, and the environment is one level.
 - **A stale restatement of the same constant, twice, in two places.** The ramfs
   table cap was raised from 32 to 64 to 128 to 256 over the project's life; the
   comment block explaining the raises is meticulous, and a second comment thirty
-  lines below still states the previous value. The reference document states the
+  lines below still stated the previous value. The reference document states the
   *original* value, and contradicts itself on the test count in two different
   sections. **The comment that gets corrected is the one the change was about;
   its restatement elsewhere is not** — the same failure in prose and in code, for
-  the same reason.
-- **A defensive fallback whose justification has expired.** The ramfs supplies a
-  default file mode when the archive's is absent, justified by the claim that the
-  archive generator always emits one fixed mode. It no longer does — it preserves
-  each source file's real permissions, deliberately, so that executables carry
-  their execute bit. The fallback is still unreachable, but the reason given for
-  believing so is void.
+  the same reason. At B-1d (cap 1024) the second comment was rewritten to name
+  the constant instead of restating its value.
+- **A defensive fallback whose justification had expired is gone.** The ramfs
+  supplied a default file mode when the archive's was absent, justified by the
+  claim that the archive generator always emits one fixed mode, which stopped
+  being true when it began preserving each source's permissions. Since B-1d the
+  load keeps only a regular file or a directory, so an entry with no type bits is
+  refused and counted, and the fallback was removed.
 - **An inherited environment handle reports its parent's device number.** The
   number is stamped onto the handle at walk time from the walking process; a
   child inheriting an open handle re-resolves its *contents* against its own
@@ -375,7 +436,9 @@ inside either filesystem: the ramfs is flat, and the environment is one level.
 - **The boot filesystem reports its truncation; the hardware enumeration next
   door does not** ([[sub-kernel-discovery]]). The difference is history: this
   one's comments record the cap silently truncating twice, once dropping files
-  the boot expected. It learned because it was bitten.
+  the boot expected. It learned because it was bitten — and since B-1d a
+  truncation or a skipped entry fails `devramfs.load_complete`, because a boot
+  line nobody asserts on is a report nobody reads.
 
 ## Provenance
 
@@ -393,3 +456,8 @@ generator's mode handling, and the 40 registered tests across the five files.
 the `PRINCIPAL_SYSTEM`/`GID_SYSTEM` `stat_native` stamp explicit (absorbed from
 docs/reference/99): the boot FS is the one enforced backing, and boot survives it
 because the traverser owns everything it touches.
+[[dec-2026-09-25-devramfs-directories]] (B-1d, 2026-09-25) makes the ramfs a
+tree: the table gains a leaf and a parent, the load its refusals, walk its
+per-directory lookup and climbing `..`, readdir its per-directory listing, and
+the suite seven tests (five over crafted archives, the boot archive's
+completeness, and the live `lib/`).

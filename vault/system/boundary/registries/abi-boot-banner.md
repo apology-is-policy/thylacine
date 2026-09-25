@@ -85,7 +85,7 @@ literal-mentions:
   - "tools/warp-host.sh (a usage comment)"
   - "tools/interactive/go8d.exp (a prose note)"
 created: 2026-08-01
-updated: 2026-09-23
+updated: 2026-09-25
 ---
 ## The surface
 
@@ -114,14 +114,20 @@ stalled). And `verify-kaslr.sh` is the ROADMAP §4.2 exit-criterion gate for
 take an invariant's only runtime witness with it.
 
 **The `EXTINCTION:` prefix is ABI; the message body after it is not — except
-that one gate depends on seven of them.** `tools/test-fault.sh`'s
-`expected_marker` case matches `EXTINCTION: stack canary mismatch`, `... PTE
-violates W^X`, `... BTI fault`, `... kernel stack overflow` (three provokers),
-and `... recursive kernel fault`. The comment directly above it says "Keep the
+that one gate depends on six of them.** `tools/test-fault.sh` runs eight
+variants (`ALL_VARIANTS`), and its `expected_for` case matches six bodies:
+`EXTINCTION: stack canary mismatch`, `... PTE violates W^X`, `... BTI fault`,
+`... kernel stack overflow` (three provokers), `... recursive kernel fault`,
+and `... el1-sync recursion` (printed by `arch/arm64/exception.c`'s recursion
+guard, not by `extinction()`). The comment directly above it says "Keep the
 case below in sync with this" — an instruction to a person, inside the file,
 which is the weakest form of the guarantee ([[dec-2026-08-15-cutover]]).
 Reword one of those messages for clarity and the corresponding
-fault-injection variant reports the protection did not fire.
+fault-injection variant reports the protection did not fire. `CLAUDE.md` and
+`docs/agent/BOOT-BANNER.md` state a stricter rule than this paragraph: every
+`EXTINCTION:` string is tooling ABI, and rewording one is a format break to
+surface, not to sweep. Until the operator settles which rule stands
+([[fnd-b1d-r3-s2]]), the stricter one binds.
 
 ## Why it is frozen
 
@@ -448,14 +454,17 @@ That is the implementation track's call.
   that this note called it informational for two weeks. `verify-kaslr.sh` is
   I-16's runtime witness.
 - A reworded extinction **message** is an ABI break for `test-fault.sh`'s
-  seven matched variants, which is not what "the prefix is the ABI" leads a
-  reader to expect.
-- **Owed** (deferred at the 2026-09 recount): whether the `el1_sync_runaway`
-  extinction-message body joins the pinned message-body set (as `test-fault.sh`'s
-  seven are) is an OPEN question tied to [[seam-extinction-line-unserialized]]
-  and #246. Its original context (yip 0026) is purged; deciding it needs the
-  #246 el1_sync_runaway test's ground truth, so it is left open rather than
-  guessed.
+  eight matched variants (six bodies), which is not what "the prefix is the
+  ABI" leads a reader to expect.
+- **Settled 2026-09-25** (the item the 2026-09 recount left open): the
+  `el1_sync_runaway` body is already in the pinned set. `test-fault.sh` lists
+  the variant in `ALL_VARIANTS` and expects `EXTINCTION: el1-sync recursion`
+  in `expected_for`, and a live run passed it: `tools/test-fault.sh` on
+  b1d-loader 44ef3a5d, 2026-09-25, 8 PASS and 0 FAIL, the `el1_sync_runaway`
+  line reading "saw 'EXTINCTION: el1-sync recursion'; 'console-ring: NOT held'
+  absent". The variant joined the gate on 2026-08-18 (5de6093f), two days
+  after this note counted seven; the 2026-09-05 recount kept the count and
+  left the question open.
 - Any new path that can print `Thylacine boot OK` outside
   `boot_mark_complete` breaks the one-shot console-attached gate, which is
   the only thing preventing a forged PASS.

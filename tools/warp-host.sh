@@ -178,8 +178,9 @@ sync_pool() {
     # the ramfs that will boot. A host that once baked locally keeps a coherent
     # PAIR of stale twins, so a sync that ships pool + ramfs and not the twins
     # boots the new ramfs on the OLD pool: stratumd rc=-201 (STM_EBADTAG) and
-    # `EXTINCTION: joey exited non-zero`, on every attempt, reading exactly like
-    # a guest defect. Two agents lost a run each to it (2026-09-18, 2026-09-21).
+    # `EXTINCTION: joey: /joey exited non-zero`, on every attempt, reading
+    # exactly like a guest defect. Two agents lost a run each to it
+    # (2026-09-18, 2026-09-21).
     # The key is already on the wire -- the ramfs bakes it.
     ssh "$HOST" "cp --sparse=always \"$rpool\" \"$rpool.baked-snapshot\""
     local rkey="$rhome/projects/thylacine/build/fixtures/system.key"

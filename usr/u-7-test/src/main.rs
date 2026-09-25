@@ -12,7 +12,7 @@
 // capstone) the whole stack driven through the real prompt cycle via
 // libutopia::repl::Repl::feed (run-line -> reap_jobs -> deliver_notes).
 //
-// Runs PRE-pivot (flat devramfs root, where echo/seq/tr spawn by name). The
+// Runs PRE-pivot (devramfs root, where echo/seq/tr spawn by name). The
 // harness cannot inject /dev/cons keystrokes (the A-4c constraint), so a
 // foreground Ctrl-C is exercised by self-posting the `interrupt` the kernel
 // console owner would post; the observables are $status, the JobTable, and the

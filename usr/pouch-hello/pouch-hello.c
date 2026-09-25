@@ -97,21 +97,20 @@ int main(void) {
 
     // #37: pread/pwrite ride SYS_PREAD/SYS_PWRITE (musl's pread64/pwrite64
     // seam numbers went 0xFFFF -> 85/86). Pre-#37 both short-circuited to
-    // ENOSYS, so a successful pread IS the wiring proof. /welcome is the
+    // ENOSYS, so a successful pread IS the wiring proof. /bin/welcome is the
     // read-only devramfs smoke file ("Welcome to Thylacine ramfs.\n",
-    // pinned by tools/build.sh) -- runs PRE-pivot like the stdio prover's
-    // /version read. The read()-pread()-read() sandwich proves the POSIX
-    // cursor contract end-to-end through musl: the positioned read must
-    // not move the fd cursor.
+    // pinned by tools/build.sh) -- runs PRE-pivot. The read()-pread()-read()
+    // sandwich proves the POSIX cursor contract end-to-end through musl: the
+    // positioned read must not move the fd cursor.
     {
-        int fd = open("/welcome", O_RDONLY);
+        int fd = open("/bin/welcome", O_RDONLY);
         if (fd < 0) {
-            (void)emit("pouch-hello: FAIL open /welcome\n");
+            (void)emit("pouch-hello: FAIL open /bin/welcome\n");
             return 1;
         }
         char a[4], b[4], c[3];
         if (read(fd, a, 4) != 4 || memcmp(a, "Welc", 4) != 0) {
-            (void)emit("pouch-hello: FAIL read /welcome head\n");
+            (void)emit("pouch-hello: FAIL read /bin/welcome head\n");
             return 1;
         }
         errno = 0;
@@ -162,15 +161,15 @@ int main(void) {
     {
         struct stat st, fst;
         errno = 0;
-        if (stat("/welcome", &st) != 0) {
+        if (stat("/bin/welcome", &st) != 0) {
             (void)emit(errno == ENOSYS
                        ? "pouch-hello: FAIL stat -> ENOSYS (0019 seam not wired)\n"
-                       : "pouch-hello: FAIL stat /welcome\n");
+                       : "pouch-hello: FAIL stat /bin/welcome\n");
             return 1;
         }
-        int fd = open("/welcome", O_RDONLY);
+        int fd = open("/bin/welcome", O_RDONLY);
         if (fd < 0 || fstat(fd, &fst) != 0) {
-            (void)emit("pouch-hello: FAIL fstat /welcome (stat probe)\n");
+            (void)emit("pouch-hello: FAIL fstat /bin/welcome (stat probe)\n");
             return 1;
         }
         (void)close(fd);

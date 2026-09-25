@@ -7,7 +7,7 @@
 // directly (which the irqfwd tests already cover at the kernel layer).
 //
 // Setup:
-//   1. devramfs_lookup("irq-probe", ...) — pre-built userspace ELF
+//   1. devramfs_lookup("bin/irq-probe", ...) — pre-built userspace ELF
 //      from the cpio. Graceful skip if not built (fresh checkout).
 //   2. gic_set_pending_spi(intid) — manually pend selected SPI
 //      at GICD_ISPENDR<n>.bit. The IRQ is now pending but not yet
@@ -164,9 +164,9 @@ void test_irq_probe_rfork_with_caps(void) {
     const void *cpio_blob = NULL;
     size_t size = 0;
 
-    int rc = devramfs_lookup("irq-probe", &cpio_blob, &size);
+    int rc = devramfs_lookup("bin/irq-probe", &cpio_blob, &size);
     if (rc != 0) {
-        uart_puts("    [skip] /irq-probe not in ramfs (build with: tools/build.sh all)\n");
+        uart_puts("    [skip] /bin/irq-probe not in ramfs (build with: tools/build.sh all)\n");
         return;
     }
 

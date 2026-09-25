@@ -1,7 +1,7 @@
 // #58 / REVENANT R-4 exec-from-namespace -- kernel-internal tests for
 // exec_resolve_from_namespace.
 //
-// The userspace happy path is the live boot: joey spawns /hello, /bin/corvus,
+// The userspace happy path is the live boot: joey spawns /bin/hello, /bin/corvus,
 // /bin/login, etc. through the SYS_SPAWN_* family, which routes every binary
 // lookup through exec_resolve_from_namespace -> stalk instead of the flat
 // boot-cpio devramfs_lookup. Since REVENANT R-4 the function RESOLVES + PINS the
@@ -9,15 +9,15 @@
 // text demand-paged) rather than slurping the whole ELF. These tests cover the
 // resolution mechanism + the two security gates directly:
 //
-//   exec_ns.resolve_absolute_ok    "/hello" -> a non-NULL pinned Spoor + size>0.
-//   exec_ns.resolve_relative_ok    "hello" (cwd-joined to "/hello") -> non-NULL.
+//   exec_ns.resolve_absolute_ok    "/bin/hello" -> a non-NULL pinned Spoor + size>0.
+//   exec_ns.resolve_relative_ok    "hello" (cwd-joined to "/bin/hello") -> non-NULL.
 //   exec_ns.miss_returns_null      a name the namespace cannot reach -> NULL.
 //                                  This is the reverse-leak closure: spawn
 //                                  resolves ONLY through the caller's namespace;
 //                                  there is no devramfs_lookup fallback, so a
 //                                  name a confined Proc cannot stalk cannot be
 //                                  spawned (I-1 / I-28 for the exec path).
-//   exec_ns.non_executable_denied  "/version" (a 0644 data file) -> NULL. The
+//   exec_ns.non_executable_denied  "/bin/version" (a 0644 data file) -> NULL. The
 //                                  OEXEC X-search gate (perm_want_for_omode =
 //                                  PERM_R|PERM_X) denies a file without the
 //                                  execute bit, even for the SYSTEM owner.
@@ -30,6 +30,8 @@
 
 #include "test.h"
 
+#include <thylacine/addrspace.h>   // B-1d: page_count (the eager copy's charge)
+#include <thylacine/burrow.h>      // B-1d: BURROW_TYPE_* (which arm built a window)
 #include <thylacine/dev.h>         // #217: devnone (the impersonating mount source)
 #include <thylacine/env.h>         // #217 F1: env_create/env_write/env_free
 #include <thylacine/errno.h>       // #217: T_E_PERM
@@ -53,6 +55,9 @@ extern s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
                                   bool exec, u64 offset);
 extern s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
                                         u64 length_raw, u32 pr, u64 offset);
+extern s64 sys_burrow_map_file_for_proc(struct Proc *p, u64 fd_raw, u64 offset,
+                                        u64 length_raw, u64 prot_raw, u64 flags_raw,
+                                        u64 addr_raw);
 
 void test_exec_ns_resolve_absolute_ok(void);
 void test_exec_ns_resolve_relative_ok(void);
@@ -61,14 +66,17 @@ void test_exec_ns_non_executable_denied(void);
 void test_exec_ns_noexec_mount_denied(void);      // #217
 void test_mmap_file_noexec_mount_denied(void);    // #217
 void test_mmap_file_devenv_never_exec_backs(void); // #217 F1
+void test_map_file_native_arms(void);              // B-1d
+void test_map_file_native_refusals(void);          // B-1d
+void test_map_file_native_noexec_denied(void);     // B-1d
 void test_exec_ns_pheno_mount_crossing(void);      // VIVARIUM section 13
 
 void test_exec_ns_resolve_absolute_ok(void) {
     struct Thread *t = current_thread();
     TEST_ASSERT(t && t->proc, "current thread has Proc");
     size_t size = 0;
-    struct Spoor *exe = exec_resolve_from_namespace(t->proc, "/hello", 6, &size);
-    TEST_ASSERT(exe != NULL, "exec_resolve_from_namespace(\"/hello\") resolves");
+    struct Spoor *exe = exec_resolve_from_namespace(t->proc, "/bin/hello", 10, &size);
+    TEST_ASSERT(exe != NULL, "exec_resolve_from_namespace(\"/bin/hello\") resolves");
     TEST_ASSERT(size > 0, "stat'd executable size is nonzero");
     if (exe) spoor_clunk(exe);     // contract transfers the ref to the caller
 }
@@ -76,7 +84,8 @@ void test_exec_ns_resolve_absolute_ok(void) {
 void test_exec_ns_resolve_relative_ok(void) {
     struct Thread *t = current_thread();
     TEST_ASSERT(t && t->proc, "current thread has Proc");
-    // Bare "hello" cwd-joins to "/hello" (kproc dot_path == "/") -- the same
+    // Bare "hello" cwd-joins to "/bin/hello": the kernel starts kproc's dot at
+    // the initrd's bin/ (joey_root_kproc_at_devramfs) -- the same
     // resolution SYS_SPAWN's bare-name callers get.
     size_t size = 0;
     struct Spoor *exe = exec_resolve_from_namespace(t->proc, "hello", 5, &size);
@@ -98,10 +107,10 @@ void test_exec_ns_miss_returns_null(void) {
 void test_exec_ns_non_executable_denied(void) {
     struct Thread *t = current_thread();
     TEST_ASSERT(t && t->proc, "current thread has Proc");
-    // /version is a 0644 data file (no execute bit). The OEXEC X-search gate
+    // /bin/version is a 0644 data file (no execute bit). The OEXEC X-search gate
     // denies it even for the SYSTEM owner (owner bits 0o6 = rw-, no x).
     size_t size = 9;
-    struct Spoor *exe = exec_resolve_from_namespace(t->proc, "/version", 8, &size);
+    struct Spoor *exe = exec_resolve_from_namespace(t->proc, "/bin/version", 12, &size);
     TEST_ASSERT(exe == NULL, "a 0644 non-executable file is X-denied (NULL)");
     TEST_ASSERT(size == 0, "size_out is 0 on an X-deny");
 }
@@ -132,8 +141,8 @@ void test_exec_ns_noexec_mount_denied(void) {
     TEST_ASSERT(t && t->proc && t->proc->territory, "current thread has a Territory");
 
     size_t size = 0;
-    struct Spoor *before = exec_resolve_from_namespace(t->proc, "/hello", 6, &size);
-    TEST_ASSERT(before != NULL, "CONTROL: /hello resolves before the mount");
+    struct Spoor *before = exec_resolve_from_namespace(t->proc, "/bin/hello", 10, &size);
+    TEST_ASSERT(before != NULL, "CONTROL: /bin/hello resolves before the mount");
     if (!before) return;
 
     struct Spoor *src = noexec_source_for(before);
@@ -150,11 +159,11 @@ void test_exec_ns_noexec_mount_denied(void) {
     // to leave the mount installed and turn one red test into a dead boot.
     size_t denied_size = 7;
     struct Spoor *during = (mrc == 0)
-        ? exec_resolve_from_namespace(t->proc, "/hello", 6, &denied_size)
+        ? exec_resolve_from_namespace(t->proc, "/bin/hello", 10, &denied_size)
         : NULL;
     if (mrc == 0) (void)unmount(t->proc->territory, mp);
     size_t after_size = 0;
-    struct Spoor *after = exec_resolve_from_namespace(t->proc, "/hello", 6, &after_size);
+    struct Spoor *after = exec_resolve_from_namespace(t->proc, "/bin/hello", 10, &after_size);
 
     TEST_EXPECT_EQ(mrc, 0, "mounting the MNOEXEC source succeeded");
     TEST_ASSERT(during == NULL,
@@ -163,7 +172,7 @@ void test_exec_ns_noexec_mount_denied(void) {
     TEST_ASSERT(denied_size == 0, "size_out stays 0 on the noexec deny");
     TEST_ASSERT(after != NULL,
         "CONTROL: the SAME resolve succeeds again once the mount is gone "
-        "(so the deny came from MNOEXEC, not from a broken /hello)");
+        "(so the deny came from MNOEXEC, not from a broken /bin/hello)");
 
     if (during) spoor_clunk(during);
     if (after)  spoor_clunk(after);
@@ -253,8 +262,8 @@ void test_mmap_file_noexec_mount_denied(void) {
     // whose Territory we own outright -- so the MNOEXEC entry never touches the
     // namespace the rest of the boot runs in.
     size_t size = 0;
-    struct Spoor *exe = exec_resolve_from_namespace(t->proc, "/hello", 6, &size);
-    TEST_ASSERT(exe != NULL && size > 0, "/hello resolves for the map");
+    struct Spoor *exe = exec_resolve_from_namespace(t->proc, "/bin/hello", 10, &size);
+    TEST_ASSERT(exe != NULL && size > 0, "/bin/hello resolves for the map");
     if (!exe) return;
 
     struct Proc *p = proc_alloc();
@@ -408,4 +417,195 @@ void test_mmap_file_devenv_never_exec_backs(void) {
     TEST_ASSERT(rmap != -(s64)T_E_PERM,
         "CONTROL: the same entry mapped NON-exec is not refused by the exec "
         "floor (devenv stays readable)");
+}
+
+// -----------------------------------------------------------------------------
+// B-1d: SYS_BURROW_MAP_FILE, the native entry to D-3's three arms (ARCH 6.5
+// "Dynamic loading"). Each test drives the NATIVE word, and each arm is told
+// apart by what it built rather than by the value it returned: an entry that
+// sent every call to one arm would return plausible addresses and still fail
+// here.
+// -----------------------------------------------------------------------------
+
+// A fresh Proc with its own Territory and `n` read handles on `exe`, so nothing
+// the test maps or mounts touches the namespace the boot runs in.
+static struct Proc *map_file_proc(struct Spoor *exe, hidx_t *fds, int n) {
+    struct Proc *p = proc_alloc();
+    if (!p) return NULL;
+    p->territory = territory_alloc();
+    for (int i = 0; i < n; i++) {
+        spoor_ref(exe);
+        fds[i] = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, exe);
+    }
+    return p;
+}
+
+static void map_file_proc_free(struct Proc *p) {
+    vma_drain(p);
+    p->state = 2;                       // PROC_STATE_ZOMBIE
+    proc_free(p);
+}
+
+void test_map_file_native_arms(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t && t->proc, "current thread has Proc");
+    size_t size = 0;
+    struct Spoor *exe = exec_resolve_from_namespace(t->proc, "/bin/hello", 10, &size);
+    TEST_ASSERT(exe != NULL && size > 2 * PAGE_SIZE,
+                "/bin/hello resolves and spans more than two pages");
+    if (!exe) return;
+    hidx_t fd[3] = { -1, -1, -1 };
+    struct Proc *p = map_file_proc(exe, fd, 3);
+    TEST_ASSERT(p && p->territory && fd[0] >= 0 && fd[1] >= 0 && fd[2] >= 0,
+                "a fresh Proc with three read handles on /bin/hello");
+    if (!p) { spoor_clunk(exe); return; }
+
+    // Measure first, assert last: TEST_ASSERT returns, and a stranded Proc
+    // would leave its images in the global cache for the image.* suite.
+    const u64 R = BURROW_PROT_READ, W = BURROW_PROT_WRITE, X = BURROW_PROT_EXEC;
+    s64 base = -1, text = -1, data = -1, tail = -1;
+    u32 prot_span = 0, prot_text = 0, prot_data = 0, prot_tail = 0;
+    int type_text = -1, type_data = -1, type_tail = -1;
+    s64 charged_data = -1, charged_tail = -1;
+    base = sys_burrow_map_file_for_proc(p, (u64)fd[0], 0, 4 * PAGE_SIZE, R, 0, 0);
+    if (base > 0) {
+        u64 b = (u64)base;
+        text = sys_burrow_map_file_for_proc(p, (u64)fd[1], PAGE_SIZE, PAGE_SIZE,
+                                            R | X, BURROW_MAP_FIXED, b + PAGE_SIZE);
+        u32 before = p->as->page_count;
+        data = sys_burrow_map_file_for_proc(p, (u64)fd[2], 2 * PAGE_SIZE, PAGE_SIZE,
+                                            R | W, BURROW_MAP_FIXED, b + 2 * PAGE_SIZE);
+        u32 mid = p->as->page_count;
+        tail = sys_burrow_map_file_for_proc(p, (u64)-1, 0, PAGE_SIZE,
+                                            R | W, BURROW_MAP_FIXED, b + 3 * PAGE_SIZE);
+        u32 after = p->as->page_count;
+        charged_data = (s64)mid - (s64)before;
+        charged_tail = (s64)after - (s64)mid;
+        spin_lock(&p->as->lock);
+        struct Vma *v;
+        if ((v = vma_lookup(p, b)))                 prot_span = v->prot;
+        if ((v = vma_lookup(p, b + PAGE_SIZE)))     { prot_text = v->prot; type_text = (int)v->burrow->type; }
+        if ((v = vma_lookup(p, b + 2 * PAGE_SIZE))) { prot_data = v->prot; type_data = (int)v->burrow->type; }
+        if ((v = vma_lookup(p, b + 3 * PAGE_SIZE))) { prot_tail = v->prot; type_tail = (int)v->burrow->type; }
+        spin_unlock(&p->as->lock);
+    }
+    map_file_proc_free(p);
+    spoor_clunk(exe);
+
+    TEST_ASSERT(base > 0, "the whole-span R map of /bin/hello succeeds at a kernel-chosen address");
+    TEST_EXPECT_EQ(prot_span, (u32)VMA_PROT_READ, "the span's head keeps the span's prot, R");
+    TEST_EXPECT_EQ(text, base + (s64)PAGE_SIZE, "the FIXED R|X window lands at addr");
+    TEST_EXPECT_EQ(prot_text, (u32)(VMA_PROT_READ | VMA_PROT_EXEC), "the text window is R|X");
+    TEST_EXPECT_EQ(type_text, (int)BURROW_TYPE_FILE,
+        "a non-writable FIXED window rides the Image cache (a FILE Burrow)");
+    TEST_EXPECT_EQ(data, base + 2 * (s64)PAGE_SIZE, "the FIXED RW window lands at addr");
+    TEST_EXPECT_EQ(prot_data, (u32)(VMA_PROT_READ | VMA_PROT_WRITE), "the data window is RW");
+    TEST_EXPECT_EQ(type_data, (int)BURROW_TYPE_ANON_LAZY,
+        "a writable FIXED file window is anonymous memory, never a writable file mapping (I-36)");
+    TEST_EXPECT_EQ(charged_data, 1,
+        "the RW window is an EAGER copy: its one page is charged at map time");
+    TEST_EXPECT_EQ(tail, base + 3 * (s64)PAGE_SIZE, "the anonymous FIXED tail lands at addr");
+    TEST_EXPECT_EQ(prot_tail, (u32)(VMA_PROT_READ | VMA_PROT_WRITE), "the tail is RW");
+    TEST_EXPECT_EQ(type_tail, (int)BURROW_TYPE_ANON_LAZY, "the tail is anonymous");
+    TEST_EXPECT_EQ(charged_tail, 0,
+        "the tail is demand-zero: nothing is charged until it is touched "
+        "(the control that makes the data window's charge mean 'copied')");
+}
+
+void test_map_file_native_refusals(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t && t->proc, "current thread has Proc");
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    if (!p) return;
+    p->territory = territory_alloc();
+
+    // An fd this Proc does not hold: a word check that ran AFTER the lookup
+    // would answer EBADF, so every answer below that is not EBADF was decided
+    // before any lookup.
+    const u64 bad = 0x7FFF, R = BURROW_PROT_READ, W = BURROW_PROT_WRITE,
+              X = BURROW_PROT_EXEC, F = BURROW_MAP_FIXED;
+    const u64 at = EXEC_USER_BURROW_BASE + 0x400000ull;
+    s64 wx       = sys_burrow_map_file_for_proc(p, bad, 0, PAGE_SIZE, R | W | X, F, at);
+    s64 badprot  = sys_burrow_map_file_for_proc(p, bad, 0, PAGE_SIZE, R | 8u, 0, 0);
+    s64 badflag  = sys_burrow_map_file_for_proc(p, bad, 0, PAGE_SIZE, R, 2u, 0);
+    s64 wonly    = sys_burrow_map_file_for_proc(p, bad, 0, PAGE_SIZE, W, F, at);
+    s64 hint     = sys_burrow_map_file_for_proc(p, bad, 0, PAGE_SIZE, R, 0, at);
+    s64 wspan    = sys_burrow_map_file_for_proc(p, bad, 0, PAGE_SIZE, R | W, 0, 0);
+    s64 xonly    = sys_burrow_map_file_for_proc(p, bad, 0, PAGE_SIZE, X, 0, 0);
+    s64 anonspan = sys_burrow_map_file_for_proc(p, (u64)-1, 0, PAGE_SIZE, R, 0, 0);
+    s64 anonx    = sys_burrow_map_file_for_proc(p, (u64)-1, 0, PAGE_SIZE, R | X, F, at);
+    s64 anonoff  = sys_burrow_map_file_for_proc(p, (u64)-1, PAGE_SIZE, PAGE_SIZE, R, F, at);
+    // CONTROL: a well-formed word on the same bad fd reaches the lookup.
+    s64 lookup   = sys_burrow_map_file_for_proc(p, bad, 0, PAGE_SIZE, R, 0, 0);
+    // CONTROL: the anonymous tail itself is admitted where its word is sound.
+    s64 anonok   = sys_burrow_map_file_for_proc(p, (u64)-1, 0, PAGE_SIZE, R | W, F, at);
+    map_file_proc_free(p);
+
+    TEST_EXPECT_EQ((int)wx, -(int)T_E_ACCES, "W|X is unspeakable: EACCES before any lookup");
+    TEST_EXPECT_EQ((int)badprot, -(int)T_E_INVAL, "an unknown prot bit: EINVAL");
+    TEST_EXPECT_EQ((int)badflag, -(int)T_E_INVAL, "an unknown flag bit: EINVAL");
+    TEST_EXPECT_EQ((int)wonly, -(int)T_E_INVAL, "W without R: EINVAL (no write-only AP)");
+    TEST_EXPECT_EQ((int)hint, -(int)T_E_INVAL,
+        "a nonzero addr without BURROW_MAP_FIXED is refused, never ignored as a hint");
+    TEST_EXPECT_EQ((int)wspan, -(int)T_E_ACCES,
+        "a writable span without FIXED would be a writable file mapping: EACCES (I-36)");
+    TEST_EXPECT_EQ((int)xonly, -(int)T_E_INVAL, "a file map without R: EINVAL");
+    TEST_EXPECT_EQ((int)anonspan, -(int)T_E_BADF, "fd -1 names a file only under FIXED: EBADF");
+    TEST_EXPECT_EQ((int)anonx, -(int)T_E_ACCES,
+        "anonymous bytes never become code here (I-42): EACCES");
+    TEST_EXPECT_EQ((int)anonoff, -(int)T_E_INVAL, "the anonymous window takes no offset: EINVAL");
+    TEST_EXPECT_EQ((int)lookup, -(int)T_E_BADF,
+        "CONTROL: a sound word on the unheld fd reaches the lookup and answers EBADF");
+    TEST_EXPECT_EQ(anonok, (s64)at, "CONTROL: a sound anonymous FIXED window is mapped at addr");
+}
+
+void test_map_file_native_noexec_denied(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t && t->proc, "current thread has Proc");
+    size_t size = 0;
+    struct Spoor *exe = exec_resolve_from_namespace(t->proc, "/bin/hello", 10, &size);
+    TEST_ASSERT(exe != NULL && size > 0, "/bin/hello resolves for the map");
+    if (!exe) return;
+    hidx_t fd[5] = { -1, -1, -1, -1, -1 };
+    struct Proc *p = map_file_proc(exe, fd, 5);
+    TEST_ASSERT(p && p->territory, "a fresh Proc with read handles on /bin/hello");
+    if (!p) { spoor_clunk(exe); return; }
+
+    struct Spoor *src = noexec_source_for(exe);
+    struct Spoor *mp  = spoor_alloc(&devnone);
+    if (src && mp) mp->qid.path = 0xB10CC0DE21Dull;
+
+    const u64 R = BURROW_PROT_READ, X = BURROW_PROT_EXEC;
+    s64 ctl = -1, span = -1, fixed = -1, ro = -1, anchor = -1;
+    int mrc = -1;
+    if (src && mp) {
+        ctl = sys_burrow_map_file_for_proc(p, (u64)fd[0], 0, PAGE_SIZE, R | X, 0, 0);
+        anchor = sys_burrow_map_file_for_proc(p, (u64)fd[1], 0, 2 * PAGE_SIZE, R, 0, 0);
+        mrc = mount(p->territory, src, mp, MNOEXEC);
+        if (mrc == 0) {
+            span = sys_burrow_map_file_for_proc(p, (u64)fd[2], 0, PAGE_SIZE, R | X, 0, 0);
+            if (anchor > 0)
+                fixed = sys_burrow_map_file_for_proc(p, (u64)fd[3], 0, PAGE_SIZE, R | X,
+                                                     BURROW_MAP_FIXED, (u64)anchor);
+            ro = sys_burrow_map_file_for_proc(p, (u64)fd[4], 0, PAGE_SIZE, R, 0, 0);
+        }
+    }
+    map_file_proc_free(p);
+    if (src) spoor_unref(src);
+    if (mp)  spoor_unref(mp);
+    spoor_clunk(exe);
+
+    TEST_ASSERT(ctl > 0, "CONTROL: the native R|X span is admitted with no MNOEXEC entry");
+    TEST_EXPECT_EQ(mrc, 0, "mounting the MNOEXEC source succeeded");
+    // EACCES, not the cores' EPERM: returned natively, -T_E_PERM is Pouch's
+    // flat -1 and decodes as EIO (errno.h). The device prover's noexec leg
+    // found it; this test had asserted T_E_PERM.
+    TEST_EXPECT_EQ((int)span, -(int)T_E_ACCES,
+        "DENY: the native R|X span is refused on an MNOEXEC device instance, EACCES");
+    TEST_EXPECT_EQ((int)fixed, -(int)T_E_ACCES,
+        "DENY: the native FIXED R|X overlay is refused there too, EACCES");
+    TEST_ASSERT(ro > 0,
+        "CONTROL: a read-only native map off the same MNOEXEC instance is admitted "
+        "(noexec bounds execute, not read)");
 }

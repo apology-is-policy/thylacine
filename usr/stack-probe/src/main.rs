@@ -1,11 +1,11 @@
-// /stack-probe -- the Stage-8b settled-thread kstack inspect E2E (DEBUG-FS 5b). It
+// /bin/stack-probe -- the Stage-8b settled-thread kstack inspect E2E (DEBUG-FS 5b). It
 // proves the 8b headline: reading the KERNEL stack of a thread blocked DEEP in a
 // syscall, WITHOUT a debug-stop (the Linux /proc/<pid>/stack tier). A kernel unit
 // test cannot produce this -- a kthread never EL0-returns, and the synthetic test
 // hand-builds a settled thread; only a real EL0 Proc blocked in torpor_wait does.
 //
 // Flow:
-//   1. spawn /stack-child (it blocks forever in torpor_wait -> sleep() on the
+//   1. spawn /bin/stack-child (it blocks forever in torpor_wait -> sleep() on the
 //      torpor rendez: settled, on_cpu==false, NOT debug-stopped),
 //   2. poll /proc/<pid>/kstack (OWNER-authorized -- same principal; NO attach, NO
 //      stop) until the child is settled with a STABLE symbolized kernel backtrace
@@ -63,7 +63,7 @@ pub extern "C" fn rs_main() -> i64 {
     // Root-anchored + Piped stdio (stack-probe is spawned fd-less; stack-child
     // prints nothing + never touches fd 0/1/2, so the pipes stay empty -> no
     // drain deadlock).
-    let child = match Command::new("/stack-child")
+    let child = match Command::new("/bin/stack-child")
         .stdin(Stdio::Piped)
         .stdout(Stdio::Piped)
         .stderr(Stdio::Piped)

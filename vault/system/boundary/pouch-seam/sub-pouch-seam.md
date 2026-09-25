@@ -22,7 +22,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-09-24
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -193,17 +193,21 @@ guard against an un-retargeted number is loud (ENOSYS); against a re-targeted
 one of a different shape it is silent. B-1b parks `__NR_mmap` back at the
 sentinel — the mapper's prot is exact now, and the 83 arm maps RW whatever
 prot is asked — which would have broken `__init_tls` again, so 0046 routes it
-through `__mmap` (CL-4's owed libc-side elimination) and the four memory
-numbers live in `src/internal/_pouch_mman.h` (the 0024 idiom); the sysroot's
+through `__mmap` (CL-4's owed libc-side elimination) and the memory numbers
+live in `src/internal/_pouch_mman.h` (the 0024 idiom: 0044's four and, since
+B-1d, 0047's `SYS_thyla_burrow_map_file` 126); the sysroot's
 SEAM verification (`tools/build.sh`), which had pinned `SYS_mmap 83` by
 literal — a guard that only ever checked that nobody changed the thing it
 named — now pins the sentinel and the header's numbers. The rule: when a seam
 renumbers a call onto a target of a different shape, census every RAW caller
-of that number (`grep -rn 'SYS_<name>' src`; the wrapper is the control) and
-route each through the wrapper — and read the kernel's arm for the number
-before calling a caller broken: B-1b first recorded this one as a live crash,
-from the libc side alone, and the holotype round read the arm that had been
-serving it for two months. [[sub-pouch-mem]] carries the seam.
+of that number in every tree a shipped artifact compiles (`grep -rn
+'SYS_<name>' src ldso`; the wrapper is the control) and route each through the
+wrapper — and read the kernel's arm for the number before calling a caller
+broken: B-1b first recorded this one as a live crash, from the libc side alone,
+and the holotype round read the arm that had been serving it for two months. A
+`src`-only census missed one: `ldso/` builds only into `libc.so`, and its RELRO
+call was a raw `SYS_mprotect` that 0044 had parked and the loader accepted
+ENOSYS from, until B-1d's 0048. [[sub-pouch-mem]] carries the seam.
 
 0034's parser is deliberately strict where 0032's is soft. The key is
 matched at a line start only (`free:` cannot match inside another word), a

@@ -1,4 +1,4 @@
-// /loom-smoke -- boot self-test for the native libthyla_rs::loom API (Loom-6d-1).
+// /bin/loom-smoke -- boot self-test for the native libthyla_rs::loom API (Loom-6d-1).
 //
 // Runs pre-pivot (joey's root is still devramfs), so it proves what is reachable
 // without the disk 9P FS: the ring mechanism end-to-end + the registered
@@ -8,7 +8,7 @@
 //                                 CQE post + reap, with no fid (inline-completed).
 //   2. register_buffers (heap) -- pin a ThylaAlloc-backed (anon VMA) buffer (the
 //                                 I-30 buffer-pin path, observed from userspace).
-//   3. register_handles (file) -- snapshot a /system.key fd into the fixed table
+//   3. register_handles (file) -- snapshot a /bin/system.key fd into the fixed table
 //                                 (the I-30 handle-pin path).
 //   4. FSYNC on the non-9P handle -> clean error CQE -- Loom payload ops are
 //                                 dev9p-only (the kernel 9P client drives them);
@@ -73,11 +73,11 @@ pub extern "C" fn rs_main() -> i64 {
         fail("loom-smoke: FAIL -- register_buffers\n");
     }
 
-    // 3. register a /system.key fd -- the I-30 handle pin. Hold `file` across the
+    // 3. register a /bin/system.key fd -- the I-30 handle pin. Hold `file` across the
     //    registration; the ring takes its own Spoor ref, decoupled from this fd.
-    let file = match File::open("/system.key") {
+    let file = match File::open("/bin/system.key") {
         Ok(f) => f,
-        Err(_) => fail("loom-smoke: FAIL -- File::open(/system.key)\n"),
+        Err(_) => fail("loom-smoke: FAIL -- File::open(/bin/system.key)\n"),
     };
     if ring.register_handles(&[file.as_raw_fd()]).is_err() {
         fail("loom-smoke: FAIL -- register_handles\n");

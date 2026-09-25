@@ -25,7 +25,7 @@ validated-by: [prose, gate-smp]
 locks: [lock-pouch-sock-table]
 design: ["docs/POUCH-DESIGN.md", "docs/NET-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-09-21
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -209,7 +209,7 @@ kernel-attached mount negotiates a 128 KiB msize (CF-3 B).
   dosbox-x) wrap FILE descriptors, and nobody wraps a socket.
   0038 maps the tag in read/write (`pouch_sock_kernel_fd`), routes close
   through `pouch_sock_close`, and answers `ESPIPE` to a seek.
-  `/pouch-hello-sockets` pins it: it wraps the connected client end in a
+  `/bin/pouch-hello-sockets` pins it: it wraps the connected client end in a
   `FILE`, writes and reads through it (including a `fscanf` pushback),
   requires `fseek` to fail with `ESPIPE`, `fclose`s it, and then requires
   the number of free slots — MEASURED by opening sockets until refusal,

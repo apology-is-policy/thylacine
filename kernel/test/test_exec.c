@@ -1162,7 +1162,7 @@ void test_execve_load_refuses_nomem_at_the_pool_edge(void) {
     TEST_ASSERT(room > 0, "the pool has room to park");
     capacity_pool_park_for_test(room);
     u64 entry = 0, sp = 0;
-    int rc = exec_load_into(nas, /*exempt=*/false, /*nsp=*/NULL, PHENO_NATIVE, exe, size, NULL, 0,
+    int rc = exec_load_into(nas, /*exempt=*/false, /*nsp=*/NULL, exe, size, NULL, 0,
                             NULL, 0, 0, NULL, 0, 0, &entry, &sp);
     capacity_pool_unpark_for_test(room);
     TEST_EXPECT_EQ(rc, -T_E_NOMEM, "the pool's refusal travels up as -T_E_NOMEM, not -1");
@@ -1197,7 +1197,7 @@ void test_execve_load_refuses_nomem_on_the_frame(void) {
     TEST_ASSERT(room > 0, "the pool has room to park");
     capacity_pool_park_for_test(room);
     u64 entry = 0, sp = 0;
-    int rc = exec_load_into(nas, /*exempt=*/false, /*nsp=*/NULL, PHENO_NATIVE, exe, size, NULL, 0,
+    int rc = exec_load_into(nas, /*exempt=*/false, /*nsp=*/NULL, exe, size, NULL, 0,
                             NULL, 0, 0, NULL, 0, 0, &entry, &sp);
     capacity_pool_unpark_for_test(room);
     TEST_EXPECT_EQ(rc, -T_E_NOMEM, "the frame's refused populate travels up as -T_E_NOMEM, not -1");
@@ -1232,7 +1232,7 @@ void test_execve_load_into_detached(void) {
     TEST_ASSERT(nas != p->as, "the target is a DIFFERENT address space");
 
     u64 entry = 0, sp = 0;
-    int rc = exec_load_into(nas, /*exempt=*/false, /*nsp=*/NULL, PHENO_NATIVE, exe, size, NULL, 0,
+    int rc = exec_load_into(nas, /*exempt=*/false, /*nsp=*/NULL, exe, size, NULL, 0,
                             NULL, 0, 0, NULL, 0, 0, &entry, &sp);
     TEST_EXPECT_EQ(rc, 0, "exec_load_into into a detached address space");
     TEST_EXPECT_EQ(entry, (u64)0x10000, "entry == e_entry");
@@ -1288,13 +1288,13 @@ void test_execve_load_into_rejects_dirty(void) {
 
     // Load once -- succeeds and leaves the target populated.
     u64 entry = 0, sp = 0;
-    TEST_EXPECT_EQ(exec_load_into(nas, false, NULL, PHENO_NATIVE, exe, size, NULL, 0, NULL, 0, 0, NULL, 0, 0,
+    TEST_EXPECT_EQ(exec_load_into(nas, false, NULL, exe, size, NULL, 0, NULL, 0, 0, NULL, 0, 0,
                                   &entry, &sp),
                    0, "first load into a clean target");
 
     // Loading again into the SAME (now dirty) target must refuse rather than
     // overlay a second image on top of the first.
-    TEST_EXPECT_EQ(exec_load_into(nas, false, NULL, PHENO_NATIVE, exe, size, NULL, 0, NULL, 0, 0, NULL, 0, 0,
+    TEST_EXPECT_EQ(exec_load_into(nas, false, NULL, exe, size, NULL, 0, NULL, 0, 0, NULL, 0, 0,
                                   &entry, &sp),
                    -1, "a second load into a dirty target is refused");
 
@@ -1334,7 +1334,7 @@ void test_execve_failed_load_leaves_target_drainable(void) {
     TEST_ASSERT(nas != NULL, "addrspace_alloc");
 
     u64 entry = 0, sp = 0;
-    TEST_EXPECT_EQ(exec_load_into(nas, false, NULL, PHENO_NATIVE, exe, size, NULL, 0, NULL, 0, 0, NULL, 0, 0,
+    TEST_EXPECT_EQ(exec_load_into(nas, false, NULL, exe, size, NULL, 0, NULL, 0, 0, NULL, 0, 0,
                                   &entry, &sp),
                    -1, "a mid-load failure is reported");
     TEST_ASSERT(nas->vmas != NULL, "the target really is partially populated");
@@ -1410,7 +1410,7 @@ void test_exec_native_rejects_dynamic_linux(void) {
     // The native exec rejects the dynamic binary (elf_load HAS_INTERP), and on
     // the way out exec_say runs the LINUX_LIKELY diagnostic. Reaching this
     // assertion means exec_say did not fault.
-    TEST_EXPECT_EQ(exec_load_into(nas, false, NULL, PHENO_NATIVE, exe, size, NULL, 0, NULL, 0, 0, NULL, 0, 0,
+    TEST_EXPECT_EQ(exec_load_into(nas, false, NULL, exe, size, NULL, 0, NULL, 0, 0, NULL, 0, 0,
                                   &entry, &sp),
                    -1, "a dynamic Linux binary is refused by a native exec");
     // Nothing was published into the address space.
@@ -1426,19 +1426,15 @@ void test_exec_native_rejects_dynamic_linux(void) {
 // Design D (VIVARIUM 13.10.4): the execve re-decision's three legs (A, B, C).
 // =============================================================================
 
-// Leg B -- a FAILED load leaves the Proc's phenotype untouched. The loader is
-// handed the DECIDED phenotype as a parameter and must never write the field:
-// execve stores it only in proc_exec_replace's infallible commit region, so a
-// failed exec_load_into returns the caller to its old image with its old ABI.
-// Reuses the PT_INTERP fixture of the reject test: with the decided phenotype
-// LINUX and no program name the loader takes the Linux arm and refuses (the
-// "rewrite needs the program's own name" branch -- the one the nameless
-// register-variant spawn entries also reach, 13.10.6), with NATIVE it takes
-// the native reject; both fail, and in both the field must still read what
-// the Proc started with. This is NOT Leg C: both arms refuse, so it cannot
-// tell a field-reading dispatch from a parameter-reading one -- it witnesses
-// only "the loader never writes the field". Leg C's discriminating fixture is
-// test_exec_interp_dispatch_follows_parameter below (audit F3).
+// Leg B -- a FAILED load leaves the Proc's phenotype untouched. execve stores
+// the decided phenotype only in proc_exec_replace's infallible commit region, so
+// a failed exec_load_into returns the caller to its old image with its old ABI;
+// the loader never writes the field. The fixture is a PT_INTERP binary loaded
+// with no program name, which fails in the rewrite's "needs the program's own
+// name" branch (the one the nameless register-variant spawn entries reach,
+// 13.10.6) -- under either field value, since B-1d took the phenotype out of the
+// load. Both field values are driven, so a loader that reset the field to either
+// one would fail the other leg.
 extern void proc_exec_drop_image_state_for_test(struct Proc *p, struct Thread *t,
                                                 u32 pheno);
 void test_exec_load_failure_leaves_phenotype(void);
@@ -1468,29 +1464,29 @@ void test_exec_load_failure_leaves_phenotype(void) {
     TEST_ASSERT(nas != NULL, "addrspace_alloc");
     u64 entry = 0, sp = 0;
 
-    // The decided phenotype says LINUX; the load fails (no program name for the
-    // PT_INTERP rewrite). The field must NOT have moved.
-    int rc_linux = exec_load_into(nas, false, p, PHENO_LINUX, exe, size, NULL, 0,
-                                  NULL, 0, 0, NULL, 0, 0, &entry, &sp);
-    u32 after_linux = p->phenotype;
-    u64 vmas_linux  = (u64)nas->vma_count;
-    // And the native arm, for symmetry: the same fixture, decided NATIVE.
-    int rc_native = exec_load_into(nas, false, p, PHENO_NATIVE, exe, size, NULL, 0,
+    int rc_native = exec_load_into(nas, false, p, exe, size, NULL, 0,
                                    NULL, 0, 0, NULL, 0, 0, &entry, &sp);
     u32 after_native = p->phenotype;
+    u64 vmas = (u64)nas->vma_count;
+    p->phenotype = PHENO_LINUX;
+    int rc_linux = exec_load_into(nas, false, p, exe, size, NULL, 0,
+                                  NULL, 0, 0, NULL, 0, 0, &entry, &sp);
+    u32 after_linux = p->phenotype;
+    p->phenotype = PHENO_NATIVE;
 
     vma_drain_in(nas);
     addrspace_unref(nas);
     spoor_clunk(exe);
     drop_proc(p);
 
-    TEST_EXPECT_EQ(rc_linux, -1, "a nameless PT_INTERP load refuses under the Linux arm");
-    TEST_EXPECT_EQ(vmas_linux, 0ull, "no segment mapped on the refusal");
-    TEST_EXPECT_EQ(rc_native, -1, "a dynamic binary refuses under the native arm");
-    TEST_ASSERT(after_linux == PHENO_NATIVE,
-        "Leg B: a FAILED load with the decided phenotype LINUX leaves the field NATIVE");
+    TEST_EXPECT_EQ(rc_native, -1,
+        "a nameless PT_INTERP load refuses (the rewrite needs the program's own name)");
+    TEST_EXPECT_EQ(vmas, 0ull, "no segment mapped on the refusal");
+    TEST_EXPECT_EQ(rc_linux, -1, "and refuses the same way whatever the field reads");
     TEST_ASSERT(after_native == PHENO_NATIVE,
-        "Leg B: a failed native-arm load leaves the field NATIVE");
+        "Leg B: a FAILED load leaves a NATIVE field NATIVE");
+    TEST_ASSERT(after_linux == PHENO_LINUX,
+        "Leg B: a FAILED load leaves a LINUX field LINUX");
 }
 
 // Leg A -- the phenotype-conditional exec signal reset follows the DECIDED
@@ -1565,29 +1561,26 @@ void test_exec_reset_follows_decided_phenotype(void) {
         "F1: exec into a NATIVE image clears it too (the mark is the image's)");
 }
 
-// Leg C -- the PT_INTERP dispatch follows the DECIDED phenotype (the
-// parameter), never the resolving Proc's FIELD. The impl commit claimed this
-// leg had no discriminating fixture in the tree; the audit (F3) refuted it: a
-// PT_INTERP naming `/hello` -- the static native ramfs binary kproc resolves
-// (exec_ns.resolve_absolute_ok) -- loaded with nsp = kproc, whose field is
-// NATIVE, is exactly the state Leg C describes (a native caller exec'ing a
-// dynamic pheno-mount binary: the resolve decided Linux while the field still
-// reads native). A loader dispatching on the field refuses the LINUX call; one
-// following the parameter loads the interpreter. The NATIVE call is the control
-// (a dynamic binary refuses under the native arm), and the field must not move
-// under either (Leg B).
-void test_exec_interp_dispatch_follows_parameter(void);
-void test_exec_interp_dispatch_follows_parameter(void) {
+// B-1d (ARCH 6.5 "Dynamic loading"; DISTRO D-4 amended): the PT_INTERP rewrite
+// runs for every exec that has a namespace, whatever phenotype the resolving
+// Proc carries. The fixture is Design D's Leg C one (audit F3): a PT_INTERP
+// naming `/bin/hello` -- the static native ramfs binary kproc resolves -- loaded
+// with nsp = kproc, whose field is native. Before B-1d a native load refused
+// it; now it loads the interpreter. The CONTROL is the same fixture with no
+// namespace, which disables the rewrite, so a pass cannot come from a loader
+// that ignores PT_INTERP altogether.
+void test_exec_interp_dispatch_every_phenotype(void);
+void test_exec_interp_dispatch_every_phenotype(void) {
     struct Thread *t = current_thread();
     TEST_ASSERT(t && t->proc, "current thread has Proc");
     struct Proc *kp = t->proc;
-    TEST_ASSERT(kp->phenotype == PHENO_NATIVE, "pre: the resolving Proc's FIELD is native");
+    TEST_ASSERT(kp->phenotype == PHENO_NATIVE, "pre: the resolving Proc's field is native");
 
     u32 flags[2] = { PF_R | PF_X, PF_R };
     size_t size = build_elf(flags, 2, /*filesz=*/0x1000);
     struct Elf64_Ehdr *eh = (struct Elf64_Ehdr *)g_elf_blob;
     struct Elf64_Phdr *ph = (struct Elf64_Phdr *)(g_elf_blob + eh->e_phoff);
-    static const char kInterp[] = "/hello";
+    static const char kInterp[] = "/bin/hello";
     ph[1].p_type   = PT_INTERP;
     ph[1].p_flags  = PF_R;
     for (size_t i = 0; i < sizeof(kInterp); i++)
@@ -1600,37 +1593,36 @@ void test_exec_interp_dispatch_follows_parameter(void) {
     exe->qid.path = 0x1D7A13ull;
     exe->qid.vers = 1;
 
-    // Decided LINUX: the dispatch must follow the parameter and load /hello.
     struct AddrSpace *nas = addrspace_alloc(proc_default_page_budget());
     TEST_ASSERT(nas != NULL, "addrspace_alloc");
     u64 entry = 0, sp = 0;
-    int rc_linux = exec_load_into(nas, false, kp, PHENO_LINUX, exe, size, "x", 1,
-                                  NULL, 0, 0, NULL, 0, 0, &entry, &sp);
-    u64 entry_linux = entry;
-    u64 vmas_linux  = (u64)nas->vma_count;
-    u32 field_linux = kp->phenotype;
+    int rc = exec_load_into(nas, false, kp, exe, size, "x", 1,
+                            NULL, 0, 0, NULL, 0, 0, &entry, &sp);
+    u64 entry_ns = entry;
+    u64 vmas_ns  = (u64)nas->vma_count;
+    u32 field    = kp->phenotype;
     vma_drain_in(nas);
     addrspace_unref(nas);
 
-    // Decided NATIVE, same fixture, same Proc: the control refuses.
+    // CONTROL: no namespace, so no rewrite.
     nas = addrspace_alloc(proc_default_page_budget());
     TEST_ASSERT(nas != NULL, "addrspace_alloc (control)");
     entry = 0; sp = 0;
-    int rc_native = exec_load_into(nas, false, kp, PHENO_NATIVE, exe, size, "x", 1,
-                                   NULL, 0, 0, NULL, 0, 0, &entry, &sp);
-    u64 vmas_native  = (u64)nas->vma_count;
-    u32 field_native = kp->phenotype;
+    int rc_nons = exec_load_into(nas, false, NULL, exe, size, "x", 1,
+                                 NULL, 0, 0, NULL, 0, 0, &entry, &sp);
+    u64 vmas_nons = (u64)nas->vma_count;
     vma_drain_in(nas);
     addrspace_unref(nas);
     spoor_clunk(exe);
 
-    TEST_EXPECT_EQ(rc_linux, 0,
-        "Leg C: decided LINUX loads the PT_INTERP interpreter although the FIELD is native");
-    TEST_ASSERT(entry_linux != 0, "the loaded image has an entry (the interpreter's)");
-    TEST_ASSERT(vmas_linux > 0, "the interpreter's segments were mapped");
-    TEST_EXPECT_EQ(rc_native, -1, "CONTROL: decided NATIVE refuses the dynamic binary");
-    TEST_EXPECT_EQ(vmas_native, 0ull, "no segment mapped on the refusal");
-    TEST_ASSERT(field_linux == PHENO_NATIVE && field_native == PHENO_NATIVE,
+    TEST_EXPECT_EQ(rc, 0,
+        "B-1d: a native Proc's load of a PT_INTERP binary loads the interpreter");
+    TEST_ASSERT(entry_ns != 0, "the loaded image has an entry (the interpreter's)");
+    TEST_ASSERT(vmas_ns > 0, "the interpreter's segments were mapped");
+    TEST_EXPECT_EQ(rc_nons, -1,
+        "CONTROL: with no namespace the rewrite is disabled and the binary refuses");
+    TEST_EXPECT_EQ(vmas_nons, 0ull, "no segment mapped on the refusal");
+    TEST_ASSERT(field == PHENO_NATIVE,
         "Leg B: the loader never writes the field (only execve's commit does)");
 }
 

@@ -133,12 +133,12 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-09-25 [[chg-2026-09-25-b1d-dlopen]] — B-1d (dlopen): SYS_BURROW_MAP_FILE, PT_INTERP for native execs, libc.so as the loader, the initrd's bin/ and lib/, /lib as a union, and the device witness
+- 2026-09-25 [[chg-2026-09-25-b1d-round2-close]] — B-1d holotype round 2 close: the bin/ move's four breakers, the escape leg walks its .., the initrd root guarded (4 P0-class closed in the round + 0 P0 / 0 P1 / 1 P2 / 5 P3)
+- 2026-09-25 [[chg-2026-09-25-b1d-round3-close]] — B-1d holotype round 3 close: the confined leg's second control, five EXTINCTION bodies restored, the stale-path sweep finished (0 P0 / 0 P1 / 1 P2 / 6 P3, the P2 self-found)
+- 2026-09-25 [[chg-2026-09-25-b1d-u-unions]] — B-1d-u (Plan 9 unions): an MBEFORE or MAFTER mount at a bare directory keeps the directory it covers as a member; the spec's covered-directory invariants; the Rust target leaves static-PIE
 - 2026-09-24 [[chg-2026-09-24-b1c-filters-stream]] — B-1c WIP 3: a direct block counted for as long as it is held; the six filters that do not need their whole input stream it (HT09.R4-F2 reopened by the uncapped slurp, closed)
 - 2026-09-24 [[chg-2026-09-24-b1c-native-heap]] — B-1c (the native heap): thyla-heap -- dlmalloc 0.2.14 over reservations the platform owns, a block of 256 KiB or more its own mapping -- under libthyla-rs's ThylaAlloc; the fixed heaps, ThylaAllocN and slurp's cap gone; the manual's bound under dlmalloc; /heap-probe
 - 2026-09-24 [[chg-2026-09-24-b1c-round1-close]] — B-1c holotype round 1 close: a line bound, filters that stop quietly when their reader leaves, small over-aligned blocks in dlmalloc, witness legs that can fail (0 P0 / 1 P1 / 1 P2 / 10 P3, four self-found)
 - 2026-09-24 [[chg-2026-09-24-b1c-round2-close]] — B-1c holotype round 2 close: nothing collected from a line, cat's transforms stream, every write can fail loudly (0 P0 / 0 P1 / 1 P2 / 8 P3, one P2 self-found)
-- 2026-09-24 [[chg-2026-09-24-b1c-round3-close]] — B-1c holotype round 3 close: a bounded capture, a run's line as it begins, tail +N (0 P0 / 0 P1 / 1 P2 / 9 P3)
-- 2026-09-24 [[chg-2026-09-24-b1c-round4-close]] — B-1c holotype round 4 close: tail's signed counts and --, a bounded end, the #54 docs' reach (0 P0 / 0 P1 / 0 P2 / 9 P3)
-- 2026-09-23 [[chg-2026-09-23-b1a-permission-ceiling]] — B-1a: the permission ceiling -- SYS_BURROW_RESERVE 124 / SYS_BURROW_PROTECT 125, the multi-mapping reprotect, the fork's per-Burrow clone dedupe, the phenotype mprotect row, the lazy-piece detach refund
-- 2026-09-23 [[chg-2026-09-23-b1a-prime-capacity]] — B-1a' (capacity): the range detach over one core (SYS_BURROW_DETACH 38 in the Linux form + the phenotype munmap), the charged sparse pagemap, the user pool + the I-32 default = RAM minus a reserve, the window-confined fixed arms -- LANDING, audit pending
 <!-- generated:end -->

@@ -20,7 +20,7 @@
 //     test_run_all()                       in-kernel tests (kproc context)
 //     fault_test_run()                     hardening proof
 //     joey_run()                           ← P5-joey-from-ramfs
-//       devramfs_lookup("joey")            obtain ELF bytes from initrd
+//       devramfs_lookup("bin/joey")        obtain ELF bytes from initrd
 //       rfork(RFPROC, joey_thunk, args)    child Proc on kthread kstack
 //         joey_thunk:
 //           exec_setup(p, blob, size)      populate child's address space
@@ -58,9 +58,9 @@
 #include "../arch/arm64/uart.h"
 #include "../mm/slub.h"          // #85: kmalloc/kfree for the transient init blob
 
-// File name in the initrd cpio. Built by usr/joey/CMakeLists.txt and
-// copied into the cpio root by tools/build.sh::build_ramfs.
-#define JOEY_RAMFS_NAME "joey"
+// Archive path in the initrd cpio. Built by usr/joey/CMakeLists.txt and
+// staged into the initrd's bin/ by tools/build.sh::build_ramfs.
+#define JOEY_RAMFS_NAME "bin/joey"
 
 // Cpio newc data is only 4-byte-aligned, but the ELF Ehdr cast in
 // elf_load (kernel/elf.c::elf_load — R5-G F61) requires 8-byte
@@ -190,18 +190,22 @@ static void joey_thunk(void *arg) {
 }
 
 // joey_root_kproc_at_devramfs -- stamp the boot Proc's Territory with a
-// root_spoor pointing at the devramfs root. The child Territory clone inherits
-// it (territory_clone deep-copies + spoor_refs), so joey + every descendant has
-// a sane FROM_ROOT base AND (post-#58) a namespace for SYS_SPAWN binary
-// resolution (exec_resolve_from_namespace -> stalk). Idempotent: an already-rooted
-// Territory is left as-is -- the kernel test harness calls this before the
-// spawn-resolution tests, so joey_run's later call finds it done. devramfs.
-// attach returns ref=1; territory_chroot takes its own ref; we unref to leave
-// the territory's ref only.
+// root_spoor pointing at the devramfs root, and its working directory at the
+// initrd's bin/. The child Territory clone inherits both (territory_clone
+// deep-copies + spoor_refs; the dot is a name, LS-4), so joey + every
+// descendant has a sane FROM_ROOT base, a namespace for SYS_SPAWN binary
+// resolution (exec_resolve_from_namespace -> stalk), and bare program names
+// that resolve where the programs live. Idempotent: an already-rooted
+// Territory keeps its root and has its dot re-stamped -- the kernel test
+// harness calls this before the spawn-resolution tests, so joey_run's later
+// call finds the root done. devramfs.attach returns ref=1; territory_chroot
+// takes its own ref; we unref to leave the territory's ref only.
 void joey_root_kproc_at_devramfs(void) {
     struct Thread *kt = current_thread();
     if (!kt || !kt->proc || !kt->proc->territory)
         extinction("joey: no kproc territory to root at devramfs");
+    if (territory_setdot(kt->proc->territory, "/bin") != 0)
+        extinction("joey: territory_setdot to the initrd's /bin failed");
     struct Spoor *existing = territory_root_ref(kt->proc->territory);
     if (existing) {                 // already rooted -- idempotent no-op
         spoor_clunk(existing);
@@ -259,9 +263,11 @@ void joey_run(void) {
     const void *cpio_blob = NULL;
     size_t blob_size = 0;
     if (devramfs_lookup(JOEY_RAMFS_NAME, &cpio_blob, &blob_size) != 0) {
-        // Missing /joey is unrecoverable at v1.0: boot path requires
+        // Missing bin/joey is unrecoverable at v1.0: boot path requires
         // it. Surfaces as EXTINCTION: in the boot log so tools/test.sh
-        // reports failure.
+        // reports failure. The EXTINCTION bodies in this file name the
+        // program "/joey", its path before the initrd kept programs in bin/:
+        // a body is tooling ABI (docs/agent/BOOT-BANNER.md).
         extinction("joey: /joey not found in initrd (devramfs_lookup failed)");
     }
     if (blob_size == 0) {
@@ -293,7 +299,7 @@ void joey_run(void) {
     // sane default for SYS_WALK_OPEN(FROM_ROOT, ...) walks. Without this,
     // joey's territory->root_spoor is NULL and FROM_ROOT walks return -1
     // until the Proc itself calls SYS_CHROOT. stratumd's keyfile load
-    // path (open("/system.key", O_RDONLY) via the pouch openat-over-
+    // path (open("/bin/system.key", O_RDONLY) via the pouch openat-over-
     // walk_open patch) needs FROM_ROOT to resolve, and stratumd has no
     // chroot of its own to issue.
     //
@@ -412,7 +418,7 @@ void joey_run(void) {
         uart_puts("  joey: /env mounted (per-Proc environment)\n");
     }
 
-    uart_puts("  joey: rforking child for /joey (");
+    uart_puts("  joey: rforking child for /bin/joey (");
     uart_putdec((u64)blob_size);
     uart_puts(" byte ELF from initrd)\n");
 
@@ -473,7 +479,7 @@ void joey_run(void) {
         extinction_with_addr("joey: /joey exited non-zero", (u64)status);
     }
 
-    uart_puts("  joey: /joey pid=");
+    uart_puts("  joey: /bin/joey pid=");
     uart_putdec((u64)pid);
     uart_puts(" exited cleanly (status=0)\n");
 }

@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-09-24
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -333,11 +333,13 @@ login's `/home/<user>`, ut's `/tmp` bind), so a container's eleven at most
 four to spare.
 
 **Order matters, and the text says which order.** Reachability is
-evaluated once, at the swap, over the table as it stands. joey binds the
+evaluated once, at the swap, over the table as it stands. joey bound the
 OLD devramfs root at `/bin` *after* its pivot, which before the shed
 revived the boot generation as aliases — `/bin/proc`, `/bin/srv`,
-`/bin/dev/cons` were live device trees. They are bare synthetic
-directories now. One alias had a real user: `/hw/pci` worked post-pivot
+`/bin/dev/cons` were live device trees. The shed left them bare synthetic
+directories, and since B-1d the bind's source is the initrd's `bin/`, so
+`/bin` holds no mount-point directory at all
+([[dec-2026-09-25-initrd-bin-directory]]). One alias had a real user: `/hw/pci` worked post-pivot
 only because the orphaned entry was keyed on devhw's `pci` child, which
 the `/hw` re-graft made reachable again — ARCH had recorded that re-graft
 as "a v1.x seam" the whole time it was working by accident. joey now
@@ -347,7 +349,8 @@ re-grafts it explicitly ([[sub-stratum-boot]]).
 walk from a directory fd opened BEFORE the swap, into a tree the new root
 cannot reach, no longer crosses the shed mounts and sees the underlying
 directory. (2) A ROOT-relative walk through joey's post-pivot `/bin` bind
-(the aliases above). (3) A union dirfd whose point's entries were shed is a
+(the aliases above), moot since B-1d: that `/bin` has no mount-point
+directory to walk. (3) A union dirfd whose point's entries were shed is a
 plain handle on member[0]: names only a later member held are `ENOENT`,
 and `"."` is member[0] — never a covered directory the handle did not
 name (below). Such an fd is

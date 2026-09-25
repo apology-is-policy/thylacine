@@ -173,15 +173,15 @@ void test_stratumd_stub_round_trip(void) {
     size_t stub_size = 0, client_size = 0;
     int rc;
 
-    rc = load_binary("stratumd-stub", g_stub_blob, STUB_BLOB_MAX, &stub_size);
+    rc = load_binary("bin/stratumd-stub", g_stub_blob, STUB_BLOB_MAX, &stub_size);
     if (rc != 0) {
-        uart_puts("    [skip] /stratumd-stub not in ramfs "
+        uart_puts("    [skip] /bin/stratumd-stub not in ramfs "
                   "(build with: tools/build.sh all)\n");
         return;
     }
-    rc = load_binary("attach-probe", g_client_blob, STUB_BLOB_MAX, &client_size);
+    rc = load_binary("bin/attach-probe", g_client_blob, STUB_BLOB_MAX, &client_size);
     if (rc != 0) {
-        uart_puts("    [skip] /attach-probe not in ramfs "
+        uart_puts("    [skip] /bin/attach-probe not in ramfs "
                   "(build with: tools/build.sh all)\n");
         return;
     }
@@ -277,15 +277,15 @@ void test_stratumd_stub_fs_round_trip(void) {
     size_t stub_size = 0, probe_size = 0;
     int rc;
 
-    rc = load_binary("stratumd-stub", g_stub_blob, STUB_BLOB_MAX, &stub_size);
+    rc = load_binary("bin/stratumd-stub", g_stub_blob, STUB_BLOB_MAX, &stub_size);
     if (rc != 0) {
-        uart_puts("    [skip] /stratumd-stub not in ramfs "
+        uart_puts("    [skip] /bin/stratumd-stub not in ramfs "
                   "(build with: tools/build.sh all)\n");
         return;
     }
-    rc = load_binary("stub-fs-probe", g_client_blob, STUB_BLOB_MAX, &probe_size);
+    rc = load_binary("bin/stub-fs-probe", g_client_blob, STUB_BLOB_MAX, &probe_size);
     if (rc != 0) {
-        uart_puts("    [skip] /stub-fs-probe not in ramfs "
+        uart_puts("    [skip] /bin/stub-fs-probe not in ramfs "
                   "(build with: tools/build.sh all)\n");
         return;
     }
@@ -364,15 +364,15 @@ void test_stratumd_stub_walk_round_trip(void) {
     size_t stub_size = 0, probe_size = 0;
     int rc;
 
-    rc = load_binary("stratumd-stub", g_stub_blob, STUB_BLOB_MAX, &stub_size);
+    rc = load_binary("bin/stratumd-stub", g_stub_blob, STUB_BLOB_MAX, &stub_size);
     if (rc != 0) {
-        uart_puts("    [skip] /stratumd-stub not in ramfs "
+        uart_puts("    [skip] /bin/stratumd-stub not in ramfs "
                   "(build with: tools/build.sh all)\n");
         return;
     }
-    rc = load_binary("stub-walk-probe", g_client_blob, STUB_BLOB_MAX, &probe_size);
+    rc = load_binary("bin/stub-walk-probe", g_client_blob, STUB_BLOB_MAX, &probe_size);
     if (rc != 0) {
-        uart_puts("    [skip] /stub-walk-probe not in ramfs "
+        uart_puts("    [skip] /bin/stub-walk-probe not in ramfs "
                   "(build with: tools/build.sh all)\n");
         return;
     }

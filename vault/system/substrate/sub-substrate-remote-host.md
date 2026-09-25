@@ -13,7 +13,7 @@ hazards: []
 abis: []
 design: ["docs/GPU-HOST-SETUP.md", "docs/GPU-DESIGN.md"]
 created: 2026-09-21
-updated: 2026-09-21
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -33,7 +33,7 @@ verb, and every hand-run remote gate, stands on -- and only lists the rest.
   fixed list of harness files `sync_all` scp's on top (run-vm.sh, lib.exp, the
   warp `.exp` set). A scenario edited but not committed runs at HEAD's version.
 - The pool and the ramfs are a cryptographic PAIR: the ramfs bakes
-  `/system.key`, the pool is sealed under it. A mismatch is `stratumd: run
+  `bin/system.key`, the pool is sealed under it. A mismatch is `stratumd: run
   failed (rc=-201)` (STM_EBADTAG) and then `EXTINCTION: joey: /joey exited
   non-zero` -- the designed refusal, reading exactly like a guest defect.
 - Every verb is fail-closed: no positive evidence line, non-zero exit.

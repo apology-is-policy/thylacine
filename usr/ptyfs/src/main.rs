@@ -1,4 +1,4 @@
-// /sbin/ptyfs -- the pseudoterminal 9P server (PTY-2, I-20).
+// /bin/ptyfs -- the pseudoterminal 9P server (PTY-2, I-20).
 //
 // A native libthyla-rs, device-less /srv server (the corvus precedent -- NOT the
 // warden, which is hardware-device-bind driven; ptyfs owns no hardware). joey

@@ -209,10 +209,10 @@ static void run_irq_latency_bench(bool force_failure) {
     TEST_ASSERT(intid != 0xffffffffu, "topology needs a synthetic test SPI");
     const void *cpio_blob = NULL;
     size_t size = 0;
-    int rc = devramfs_lookup("irq-bench", &cpio_blob, &size);
+    int rc = devramfs_lookup("bin/irq-bench", &cpio_blob, &size);
     if (rc != 0) {
         TEST_ASSERT(!force_failure, "forced failure control requires /irq-bench");
-        uart_puts("    [skip] /irq-bench not in ramfs (build with: tools/build.sh all)\n");
+        uart_puts("    [skip] /bin/irq-bench not in ramfs (build with: tools/build.sh all)\n");
         return;
     }
     TEST_ASSERT(size <= IRQ_BENCH_BLOB_MAX,

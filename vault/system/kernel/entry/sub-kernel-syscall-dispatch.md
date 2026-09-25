@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-09-24
+updated: 2026-09-25
 ---
 ## Trusted-seat and nonblocking entries
 
@@ -1252,3 +1252,46 @@ nothing, a hole or any mapping in the range that is not a plain ANON_LAZY one
 Deleted: `detach_one_locked` and `detach_args_check` (their bodies are the
 core's phases), and every `PROC_PAGE_MAX` / `PROC_PAGE_HARD_MAX` mention in
 this file's comments. The holotype audit of this surface is owed.
+
+## B-1d: SYS_BURROW_MAP_FILE over the three D-3 cores (2026-09-24)
+
+**`sys_burrow_map_file_for_proc(p, fd, offset, length, prot, flags, addr)`**
+is the native door onto the three cores the phenotype's file-backed `mmap`
+rows already used, so the vouching, the eager copy and the Image cache are each
+spelled once. It decides the native word and dispatches:
+
+- no `BURROW_MAP_FIXED` -> `sys_mmap_file_for_proc` (arm 1: a kernel-chosen
+  window, R or R|X, through the Image cache);
+- FIXED with fd -1 -> `sys_mmap_fixed_anon_for_proc` (arm 3: demand-zero at
+  none / R / RW);
+- FIXED with a file -> `sys_mmap_fixed_file_for_proc` (arm 2: R or R|X
+  through the Image cache, RW as `mmap_eager_copy`'s private copy).
+
+The order is fixed and observable: the prot and flag masks, W|X (`-EACCES`),
+W without R (`-EINVAL`, no write-only AP), then per arm -- a nonzero `addr`
+without FIXED (`-EINVAL`), fd -1 without FIXED (`-EBADF`), W without FIXED
+(`-EACCES`), X or a nonzero offset on the anonymous window, a file map without
+R -- and only then the cores, which own the lookups, the window check
+(`mmap_fixed_window`: `[EXEC_USER_BURROW_BASE, EXEC_USER_BURROW_TOP]`), the
+vouching (`exec_map_vouched`: a `may_back_exec` Dev AND a mount not marked
+`MNOEXEC`) and the replace (`burrow_map_fixed` -> `vma_replace_range_in`, the
+B-1a' range detach, whose refusal set is the munmap gate's). The prot word
+passes straight through: a `_Static_assert` pins `BURROW_PROT_*` equal to
+`VIV_PROT_*`. One answer does not: the cores refuse an unvouched exec map with
+the Linux phenotype's `-T_E_PERM`, which natively is Pouch's flat `-1` (EIO),
+so the native door returns `-T_E_ACCES` in its place (`errno.h`'s rule; the
+device prover's noexec leg saw the EIO first).
+
+**What changed for the cores is who reaches them.** They were
+phenotype-only ("Native scope: NONE", DISTRO D-3); a native Proc can now hold
+mappings a container never could -- JIT dual maps, MMIO / DMA allowances, Loom
+rings, weft shares, GPU contexts, tapestry surfaces, sealed ranges -- so the
+FIXED replace's refusal set is prosecuted against every such kind (the B-1d row
+in `docs/AUDIT-TRIGGERS.md`).
+
+Two smaller moves ride the same chunk. `exec_load_into` lost its `pheno`
+parameter, so `sys_execve_core` no longer threads the decided phenotype into
+the load ([[sub-kernel-exec]]). And `sys_mount_for_proc`'s comment now says
+what B-1d-u made true: `territory.c::mount` retains the mountpoint Spoor, with
+its own reference, only as the covered member of a union the mount starts
+([[sub-kernel-territory]]); the handler still releases its own.

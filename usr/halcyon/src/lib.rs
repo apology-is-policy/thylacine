@@ -707,12 +707,11 @@ mod tests {
 
     #[test]
     fn prog_candidates_mirror_the_shell() {
-        // A bare name expands to the three probe dirs, /bin first.
+        // A bare name expands to the two probe dirs, /bin first.
         assert_eq!(
             prog_candidates("tapestry-demo"),
             vec![
                 String::from("/bin/tapestry-demo"),
-                String::from("/tapestry-demo"),
                 String::from("/goroot/bin/tapestry-demo"),
             ]
         );

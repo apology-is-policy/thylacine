@@ -21,7 +21,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-09-24
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -106,7 +106,7 @@ option".
 
 **The pool and its key are coupled, and the coupling is the fix for a
 year-long ghost.** `system.key` is random per regeneration, so a pool
-re-bake without a ramfs re-bake leaves `/system.key` (baked into the initrd)
+re-bake without a ramfs re-bake leaves `/bin/system.key` (baked into the initrd)
 pointing at the wrong pool → `STM_EBADTAG` at mount. That mismatch is "the
 year-long 'AEGIS corruption' ghost." The `pool` target therefore couples the
 two, and the `kernel`/`all` chain regenerates both together so they always
@@ -118,6 +118,49 @@ before the pivot to the disk-backed FS. So after editing a userspace binary,
 `userspace` + `disk` boots the STALE pre-pivot binary and the change reaches
 only the post-pivot image. The tell is precise and worth memorizing: *a
 probe's self-reported count or output does not move though you "rebuilt"*.
+
+**`libc.so` is a second musl build, and a static program does not change**
+(B-1d, ARCH 6.5 "Dynamic loading"). `build_libc_shared` configures the patched
+musl tree again in its own object directory (`build/pouch/musl-obj-shared`),
+compiled AND linked by the LLVM fork's clang: it is the one compiler here whose
+driver links for aarch64-thylacine, so musl's link probes pass and
+`LDFLAGS_AUTO` carries `--no-undefined`, `--exclude-libs=ALL` and
+`--dynamic-list`, without which `libc.so` is unsound. (Homebrew clang fails
+every link probe silently, which is why the static build's `LDFLAGS_AUTO` is
+empty; `libc.a` and the CRT objects stay the static build's.) Its compiler
+runtime is a second builtins archive, `libclang_rt.builtins_pic.a`, built with
+compiler-rt's own `-fPIC -fvisibility=hidden -DVISIBILITY_HIDDEN`; the
+non-PIC archive is unchanged, and `sysroot_is_stale` rebuilds a sysroot that
+lacks either. The installed `libc.so` is verified by shape: `ET_DYN`, no
+`PT_INTERP`, no `DT_NEEDED`, no `TEXTREL`, entered at `_dlstart`, no undefined
+dynamic symbol, `dlopen` / `dlsym` / `dlerror` / `malloc` / `printf` exported
+and the compiler runtime (`__addtf3`, `__aarch64_cas8_acq_rel`) not. Without
+the fork's clang it is skipped, and so are the prover and `lib/`. Measured at
+B-1d against a snapshot: `crt1.o` and `Scrt1.o` identical, `libc.a` differs in
+`mmap.o` alone (0047), the builtins identical, program objects differ only in
+`.comment` (the clang revision), and relinking the new objects against the old
+`libc.a` reproduces 25 of 26 executables byte for byte. The Rust target
+(`usr/ports/rust/aarch64-unknown-thylacine.json`) sets
+`static-position-independent-executables` false, because the driver now
+refuses `-static-pie` where it used to drop it silently.
+
+**The initrd is a tree, and the bake names what it must hold.** `mkcpio.py`
+walks `ramfs-src` in sorted pre-order, emitting each directory (with its own
+permission bits) before its contents, so the archive is byte-deterministic and
+every parent precedes its children, which devramfs requires
+([[dec-2026-09-25-devramfs-directories]], [[sub-kernel-content]]). It packed the
+top level only until B-1d, and so dropped the staged `lib/` without a word.
+`build_ramfs` stages every program and data file into `ramfs-src/bin/` and the
+loader's files into `ramfs-src/lib/`; nothing else goes at the top, so no staged
+name can meet one of the kernel's synthetic mount points
+([[dec-2026-09-25-initrd-bin-directory]]; the flat layout had carried the
+native `env` under the `/env` mount point since G15). The bake always passes
+`--require bin/joey`, and when the sysroot has `libc.so` also `--require
+lib/libc.so --require lib/libdlprobe.so --require bin/pouch-hello-dlopen`:
+`mkcpio.py` re-reads the archive it wrote, and a missing entry deletes the
+archive and fails the build, so no stale `ramfs.cpio` survives for `test.sh` to
+boot. `bin/` and `lib/` are chmod 0755 whatever the host's umask, because every
+principal's path search crosses them.
 
 **The snapshot twins are minted at bake time.** `populate_stratum_pool`
 finishes by cloning `pool.img` and `system.key` to `.baked-snapshot`

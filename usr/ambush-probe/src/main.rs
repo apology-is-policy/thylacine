@@ -1,4 +1,4 @@
-// /ambush-probe -- the Stage-8c-1 Ambush (Delve port) in-guest E2E.
+// /bin/ambush-probe -- the Stage-8c-1 Ambush (Delve port) in-guest E2E.
 //
 // Stage A (version smoke, GATED): prove the cross-built Ambush binary EXECUTES
 // -- `ambush version` drives the whole Go runtime + the cobra command tree (710
@@ -6,8 +6,8 @@
 // failure pins "binary does not run" vs "backend is wrong".
 //
 // Stage B (attach E2E, SOFT -- iteration 1): the backend exercise. Spawn the
-// parking /ambush-child (a known global + a named park loop), attach Ambush
-// non-interactively (`ambush attach <pid> /ambush-child --init /ambush-init` ->
+// parking /bin/ambush-child (a known global + a named park loop), attach Ambush
+// non-interactively (`ambush attach <pid> /bin/ambush-child --init /bin/ambush-init` ->
 // goroutines/bt/print, then stdin EOF exits the REPL), bounded-wait it, and drain
 // + LOG its stdout/stderr verbatim. This is the first exercise of the
 // proc_thylacine backend against a real M-threaded Go target: the non-PIE
@@ -20,9 +20,9 @@
 // "kill? [Y/n]" prompt, a cosmetic artifact; the debug session succeeded).
 //
 // Ambush is OPTIONAL infra (baked only when both forks were present at build). An
-// unbaked /ambush makes stage A SKIP (exit 0) so a fork-absent build still boots;
+// unbaked /bin/ambush makes stage A SKIP (exit 0) so a fork-absent build still boots;
 // a present-but-broken `ambush version` FAILS the boot (the 8c regression
-// sentinel). joey spawns /ambush-probe boot-fatally.
+// sentinel). joey spawns /bin/ambush-probe boot-fatally.
 
 #![no_std]
 #![no_main]
@@ -98,7 +98,7 @@ fn echo_block(tag: &str, bytes: &[u8]) {
 
 // --- Stage A: version smoke (gated) ---
 fn version_smoke() -> Result<(), &'static str> {
-    let mut child = match Command::new("/ambush")
+    let mut child = match Command::new("/bin/ambush")
         .arg("version")
         .stdin(Stdio::Piped)
         .stdout(Stdio::Piped)
@@ -134,7 +134,7 @@ fn version_smoke() -> Result<(), &'static str> {
 // iteration loop. See docs/DELVE-PORT-DESIGN.md 17-18 + DEBUG-FS-DESIGN.md 5c.
 const ATTACH_ENABLED: bool = true;
 
-// Stage C (launch E2E) drives `ambush exec /ambush-child` -- Ambush SPAWNS the
+// Stage C (launch E2E) drives `ambush exec /bin/ambush-child` -- Ambush SPAWNS the
 // child, stops it before main.main, sets a HARDWARE breakpoint at main.parkLoop,
 // `continue`s into it, then inspects. This is the 8c-4 launch + the fork's 8c-2
 // HW-breakpoint routing (DELVE-PORT-DESIGN section 6: every bp routes to the
@@ -143,7 +143,7 @@ const ATTACH_ENABLED: bool = true;
 // not the head -- a Go bp fires on the migrated-goroutine's M).
 const LAUNCH_ENABLED: bool = true;
 
-// Stage D (DAP round-trip) drives `ambush dap-selftest /ambush-child` -- the
+// Stage D (DAP round-trip) drives `ambush dap-selftest /bin/ambush-child` -- the
 // hidden thylacine-only subcommand runs an IN-PROCESS DAP session (a dap.Server on
 // one end of a net.Pipe, a daptest.Client on the other) and drives the canonical
 // VS-Code sequence (initialize -> launch/exec -> setFunctionBreakpoints ->
@@ -166,7 +166,7 @@ fn attach_e2e() -> bool {
     }
     // The parking Go target. Piped stdio (it prints nothing, parks); Piped keeps
     // it from cloning this fd-less probe's absent 0/1/2.
-    let mut kid = match Command::new("/ambush-child")
+    let mut kid = match Command::new("/bin/ambush-child")
         .stdin(Stdio::Piped)
         .stdout(Stdio::Piped)
         .stderr(Stdio::Piped)
@@ -185,16 +185,16 @@ fn attach_e2e() -> bool {
     let _ = sleep(Duration::from_millis(400));
 
     let pid_s = format!("{}", pid);
-    let mut amb = match Command::new("/ambush")
+    let mut amb = match Command::new("/bin/ambush")
         // --allow-non-terminal-interactive: our isatty shim returns false
         // (Thylacine has no termios tty), so Delve's non-terminal guard fires
         // before attach; this flag drives it from a pipe (the init file + EOF).
         .args([
             "attach",
             pid_s.as_str(),
-            "/ambush-child",
+            "/bin/ambush-child",
             "--init",
-            "/ambush-init",
+            "/bin/ambush-init",
             "--allow-non-terminal-interactive=true",
         ])
         .stdin(Stdio::Piped)
@@ -272,7 +272,7 @@ fn attach_e2e() -> bool {
 }
 
 // --- Stage C: launch E2E (the 8c-4 + fork-8c-2 + kernel-#95 HW-breakpoint proof) ---
-// `ambush exec /ambush-child`: Ambush SPAWNS the child (attach-first Launch),
+// `ambush exec /bin/ambush-child`: Ambush SPAWNS the child (attach-first Launch),
 // stops it before main.main, sets a HARDWARE breakpoint at main.parkLoop, then
 // `continue` runs the target INTO the breakpoint (a HW code bp fires with PC ==
 // the bp'd instruction, on whichever M runs the migrated goroutine -- kernel #95
@@ -286,12 +286,12 @@ fn launch_e2e() -> bool {
         t_putstr("ambush-probe: stage C DISABLED (LAUNCH_ENABLED=false)\n");
         return true;
     }
-    let mut amb = match Command::new("/ambush")
+    let mut amb = match Command::new("/bin/ambush")
         .args([
             "exec",
-            "/ambush-child",
+            "/bin/ambush-child",
             "--init",
-            "/ambush-init-exec",
+            "/bin/ambush-init-exec",
             "--allow-non-terminal-interactive=true",
         ])
         .stdin(Stdio::Piped)
@@ -371,7 +371,7 @@ fn launch_e2e() -> bool {
 }
 
 // --- Stage D: DAP round-trip E2E (the 8c-4b in-process DAP-server proof) ---
-// `ambush dap-selftest /ambush-child` runs the whole DAP session in-process (no
+// `ambush dap-selftest /bin/ambush-child` runs the whole DAP session in-process (no
 // network -- a net.Pipe between a dap.Server and a daptest.Client) and prints a
 // `dap:` progress marker at each step. This proves the DAP protocol machinery +
 // the backend integration end-to-end: the same native.Launch + HW-breakpoint +
@@ -385,8 +385,8 @@ fn dap_e2e() -> bool {
         t_putstr("ambush-probe: stage D DISABLED (DAP_ENABLED=false)\n");
         return true;
     }
-    let mut amb = match Command::new("/ambush")
-        .args(["dap-selftest", "/ambush-child"])
+    let mut amb = match Command::new("/bin/ambush")
+        .args(["dap-selftest", "/bin/ambush-child"])
         .stdin(Stdio::Piped)
         .stdout(Stdio::Piped)
         .stderr(Stdio::Piped)

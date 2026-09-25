@@ -404,9 +404,12 @@ extern struct Dev devenv;         // dc='E'  — /env per-Proc environment (G15,
 bool spoor_is_console(struct Spoor *sp);
 
 // devramfs diagnostics (used by tests).
-int  devramfs_file_count(void);
-int  devramfs_synth_dir_count(void);   // count of synthetic mount-point dirs (srv/proc/ctl/dev/hw)
+int  devramfs_entry_count(void);       // loaded archive entries: files and directories
+int  devramfs_root_child_count(void);  // entries whose parent is the root
+int  devramfs_synth_dir_count(void);   // count of synthetic mount-point dirs (srv/proc/ctl/dev/hw/env)
 bool devramfs_initialized(void);
+int  devramfs_skipped_count(void);     // archive entries the load could not place
+bool devramfs_truncated(void);         // the archive overflowed the entry table
 
 // =============================================================================
 // Shared helpers for leaf-file Devs (P4-B).

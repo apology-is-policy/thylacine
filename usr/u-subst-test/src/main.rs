@@ -1,6 +1,6 @@
 // /u-subst-test -- U-6f command-substitution boot probe.
 //
-// Runs PRE-pivot (flat devramfs root, where echo/seq/tr/true/false all
+// Runs PRE-pivot (the initrd's bin/, where echo/seq/tr/true/false all
 // spawn by name). Drives command substitution through the public
 // libutopia::eval surface (eval_source + Env), since the in-process
 // CAPTURE is observable WITHOUT a terminal (unlike argv echo, which goes

@@ -408,7 +408,7 @@ pub extern "C" fn rs_main() -> i64 {
 
 const PAGE: u64 = 0x1000;
 const VIRTIO_MMIO_COMPATIBLE: &str = "virtio,mmio";
-const VIRTIO_MMIO_SOURCE_BIN: &str = "/virtio-mmio-source";
+const VIRTIO_MMIO_SOURCE_BIN: &str = "/bin/virtio-mmio-source";
 
 /// Is this a raw virtio-mmio transport node (a `virtio,mmio` DTB slot)? Such nodes
 /// are claimed by the virtio-mmio bus source, which re-emits typed `virtio:<id>`
@@ -683,7 +683,7 @@ fn start_compositor(grant: &BoundResources) -> bool {
     let Ok(desc) = normal.to_descriptor() else { return false; };
     let open_null = || OpenOptions::new().read(true).write(true).open("/dev/null");
     let (Ok(nin), Ok(nerr)) = (open_null(), open_null()) else { return false; };
-    let mut cmd = Command::new("/tapestryd");
+    let mut cmd = Command::new("/bin/tapestryd");
     cmd.arg(desc).caps(T_CAP_HW_CREATE | T_CAP_CSPRNG_READ)
         .allowance(to_allowance(&normal))
         .perm(T_SPAWN_PERM_MAY_POST_SERVICE | libthyla_rs::T_SPAWN_PERM_SEAT_CLIENT)
@@ -722,12 +722,12 @@ fn run_once(m: &Manifest, grant: &BoundResources) -> RunOutcome {
     };
     let allow = to_allowance(grant);
 
-    // The boot-probe warden runs PRE-pivot, where the driver binaries live at the
-    // devramfs root; spawn by ABSOLUTE path (resolved from root_spoor, the same
-    // base the warden's /hw reads use) rather than by bare name, so resolution
-    // does not depend on the per-Proc cwd. The post-pivot warden (5e) resolves
-    // /bin/<name>.
-    let bin = alloc::format!("/{}", m.name);
+    // The warden runs PRE-pivot, where the driver binaries live in the initrd's
+    // bin/; spawn by ABSOLUTE path (resolved from root_spoor, the same base the
+    // warden's /hw reads use) rather than by bare name, so resolution does not
+    // depend on the per-Proc cwd. /bin/<name> names the same binary after the
+    // pivot too.
+    let bin = alloc::format!("/bin/{}", m.name);
 
     // H-4b-1: the manifest's named caps ride beside CAP_HW_CREATE -- each a
     // fork-grantable bit the warden itself holds (joey confers the set it may

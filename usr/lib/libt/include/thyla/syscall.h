@@ -510,13 +510,17 @@ _Static_assert(__builtin_offsetof(struct t_allowance_desc, pci) == 180,
 #define T_SPAWN_MAX_FDS   16u
 
 // Mount flags — mirror kernel/include/thylacine/territory.h (Plan 9
-// MREPL / MBEFORE / MAFTER / MCREATE). At v1.0 only MREPL has
-// distinguished semantics (replace existing entry at the same target);
-// MBEFORE / MAFTER / MCREATE are stored for future union-mount work.
+// MREPL / MBEFORE / MAFTER / MCREATE). MREPL replaces the entry at the
+// target; MBEFORE / MAFTER add a member to a union there.
 #define T_MREPL    0x0001u
 #define T_MBEFORE  0x0002u
 #define T_MAFTER   0x0004u
 #define T_MCREATE  0x0008u
+
+// MNOEXEC: nothing on the mounted device instance may become executable
+// pages in this namespace -- exec refuses it and a file map asking for X is
+// EPERM (the vouching rule, I-12).
+#define T_MNOEXEC  0x0010u
 
 // MPHENO_LINUX (mirror kernel/include/thylacine/territory.h): a per-mount-point
 // declaration that a binary whose exec RESOLUTION crosses this mount is a Linux

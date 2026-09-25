@@ -3,9 +3,10 @@
 // A NAME containing '/' is treated as an explicit path (absolute, or
 // relative-to-cwd since LS-4) and probed for existence. A bare name searches
 // the $PATH environment variable (read from the per-Proc /env device -- login
-// seeds PATH=/bin:/goroot/bin:/clade/bin for a session, Stage 6), first hit wins. With
-// no PATH in the environment (a bare-spawned boot context), a bare name is
-// reported not-found (exit 1), the pre-Stage-6 behavior.
+// seeds PATH=/bin:/goroot/bin:/clade/bin:/viv/bin:/viv/abin for a session, Stage 6),
+// first hit wins. With no PATH in the environment (a bare-spawned boot
+// context), a bare name is reported not-found (exit 1), the pre-Stage-6
+// behavior.
 //
 // NOTE: ut resolves commands by its own static $path (eval/stmt.rs
 // resolve_command), not by $PATH -- login seeds the env var to MIRROR the
@@ -32,8 +33,8 @@ pub extern "C" fn rs_main() -> i64 {
 const USAGE: &str = "\
 usage: which NAME...
   Locate a command by printing its path. A bare NAME searches $PATH (from the
-  /env device; login seeds /bin:/goroot/bin:/clade/bin); a NAME containing '/' is probed
-  as a path. Exit 1 if any NAME is not found.
+  /env device; login seeds /bin:/goroot/bin:/clade/bin:/viv/bin:/viv/abin); a NAME
+  containing '/' is probed as a path. Exit 1 if any NAME is not found.
   --help  show this help
 
 Examples:

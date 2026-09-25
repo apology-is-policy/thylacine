@@ -434,13 +434,12 @@ int exec_setup_from_spoor(struct Proc *p, struct Spoor *exe, size_t exe_size,
 // commits only after everything failable has succeeded. `exec_stage_env`
 // projects a Proc's own /env into this shape for the callers that want it.
 // `nsp` is the DISTRO D-4 parameter and is READ-ONLY here, in the strict sense:
-// this function never writes a field of it. It supplies exactly two things --
-// the phenotype that gates the PT_INTERP rewrite, and the namespace the
-// interpreter path resolves through. NULL disables the rewrite entirely (the
-// kernel test entries pass it), which restores the pre-D-4 behaviour exactly:
-// a PT_INTERP binary is refused. Passing the Proc rather than a
-// `bool pheno_linux` + a Territory keeps the two halves of one decision from
-// being supplied by two arguments that a caller could disagree about.
+// this function never writes a field of it. It supplies one thing: the
+// namespace the interpreter path resolves through. NULL disables the rewrite
+// entirely (the kernel test entries pass it), which restores the pre-D-4
+// behaviour exactly: a PT_INTERP binary is refused. (It also supplied the
+// phenotype that gated the rewrite to PHENO_LINUX, until B-1d lifted the gate:
+// ARCH 6.5 "Dynamic loading".)
 //
 // It is deliberately NOT the "Proc being modified" -- that is `as`'s owner, and
 // on the execve path the two are the same Proc while `as` is still detached.
@@ -448,15 +447,13 @@ int exec_setup_from_spoor(struct Proc *p, struct Spoor *exe, size_t exe_size,
 // takes an AddrSpace is that the Proc-side mutations are the caller's.
 struct AddrSpace;
 struct Proc;
-// Design D (VIVARIUM 13.10.4): `pheno` is the phenotype the image being loaded
-// was DECIDED to have (phenotype_decide at the resolve). The loader consults
-// the parameter -- never nsp->phenotype -- wherever the phenotype shapes the
-// load (the PT_INTERP dispatch), because for execve the field is not updated
-// until the commit AFTER this returns: a native caller execve'ing a dynamic
-// /viv/bin binary decides Linux at the resolve while its field still says
-// native (review F1 Leg C). The loader never writes nsp->phenotype (Leg B).
+// Design D (VIVARIUM 13.10.4): the loader never writes nsp->phenotype (Leg B);
+// execve commits the decided phenotype only after this returns. Nothing in the
+// load depends on the phenotype since B-1d lifted the PT_INTERP gate, so the
+// `pheno` parameter that carried the decided value here went with it (Leg C's
+// hazard -- a dispatch reading the stale field -- has no dispatch left to
+// mislead).
 int exec_load_into(struct AddrSpace *as, bool exempt, struct Proc *nsp,
-                   u32 pheno,
                    struct Spoor *exe, size_t exe_size,
                    const char *prog_name, u32 prog_name_len,
                    const char *argv_data, u32 argv_data_len, u32 argc,

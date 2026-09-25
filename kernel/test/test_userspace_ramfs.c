@@ -9,7 +9,7 @@
 //   tools/mkcpio.py           → build/ramfs.cpio
 //   tools/run-vm.sh           → QEMU -initrd
 //   kernel boot               → devramfs parses cpio → g_ramfs_files
-//   this test                 → devramfs_lookup("hello", ...) → rfork →
+//   this test                 → devramfs_lookup("bin/hello", ...) → rfork →
 //                               exec_setup → userland_enter → /hello main →
 //                               t_putstr → SYS_PUTS → t_exits(0) →
 //                               SYS_EXITS → wait_pid reaps
@@ -144,12 +144,12 @@ static int run_ramfs_binary(const char *name) {
 
 // /hello — C-side runtime (libt) + first hello binary (P4-Ia1).
 void test_userspace_ramfs_hello(void) {
-    run_ramfs_binary("hello");
+    run_ramfs_binary("bin/hello");
 }
 
 // /hello-rs — Rust nostd userspace + first Rust hello binary (P4-Ia2).
 // Verifies the cargo + rust-lld + global_asm! _start path through the
 // same exec_setup pipeline. Different binary, same kernel-side machinery.
 void test_userspace_ramfs_hello_rs(void) {
-    run_ramfs_binary("hello-rs");
+    run_ramfs_binary("bin/hello-rs");
 }

@@ -24,7 +24,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-03
-updated: 2026-09-24
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -218,10 +218,10 @@ probes exist to close that gap against a real peer.
 - **`dap-probe` — the live Ambush round-trip.** The only prior end-to-end DAP
   proof (`ambush dap-selftest`) ran *in-process* over a Go `net.Pipe`, never
   crossing a real process boundary or framing a byte. `dap-probe` spawns the real
-  `/ambush dap-stdio` (a hidden thylacine-only Ambush mode wrapping stdin/stdout
+  `/bin/ambush dap-stdio` (a hidden thylacine-only Ambush mode wrapping stdin/stdout
   as a `net.Conn` into `dap.Server.RunWithClient`, so DAP rides the *same* stdio
   transport as LSP — no `/net`, no listener-up race) and drives the canonical
-  VS-Code launch sequence against `/ambush-child` **entirely through
+  VS-Code launch sequence against `/bin/ambush-child` **entirely through
   `parley::dapc`**, asserting the exact value Ambush reads back from the target's
   memory (`0x0AABB00DCAFE0001` = `768901734683508737`). That single assertion
   proves `dapc` classifies real Ambush frames, sequences the handshake against a

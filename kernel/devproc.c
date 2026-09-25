@@ -602,7 +602,7 @@ static size_t format_maps(struct Proc *p, char *buf, size_t cap) {
 // newline-terminated: a path is a byte string and Linux's readlink("/proc/self/
 // exe") yields the bare path, so a trailing newline here would land inside every
 // consumer's buffer. Empty (0 bytes) when the Proc has no recorded name -- kproc
-// and the blob-loaded init /joey, or a #66 Path alloc failure (I-33 fail-soft).
+// and the blob-loaded init bin/joey, or a #66 Path alloc failure (I-33 fail-soft).
 //
 // Runs under g_proc_table_lock (proc_for_each), which keeps `p` alive; the Path
 // itself is immutable + ref-held for p's whole life, so the string is stable for

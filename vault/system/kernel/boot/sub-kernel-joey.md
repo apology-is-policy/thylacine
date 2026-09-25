@@ -15,12 +15,12 @@ design:
   - "docs/ARCHITECTURE.md section 5.1"
   - "docs/CORVUS-DESIGN.md section 3"
 created: 2026-09-06
-updated: 2026-09-21
+updated: 2026-09-25
 ---
 ## Purpose
 
 The kernel side of init. `boot_main`'s last real step is `joey_run`, which
-builds the boot namespace, loads the first userspace binary (`/joey`) from the
+builds the boot namespace, loads the first userspace binary (`/bin/joey`) from the
 initrd, rforks it as the first user Proc, and waits on it. Everything a userspace
 Proc later inherits — a root to walk from, `/srv`, `/proc`, `/ctl`, `/dev`,
 `/hw`, `/env` — is grafted here, and the trust roots the whole login chain rests
@@ -35,12 +35,16 @@ it.
 ## Contract
 
 `joey_run` runs exactly once per boot (a static one-call guard extincts on a
-double call — the v1.0 single-use invariant). It reads `/joey` from the initrd
-cpio by name; a missing, zero-size, or over-`EXEC_FILE_MAX` blob is boot-fatal,
+double call — the v1.0 single-use invariant). It reads joey from the initrd
+cpio by its archive path, `bin/joey` (the initrd keeps its programs in `bin/`,
+[[dec-2026-09-25-initrd-bin-directory]]); a missing, zero-size, or
+over-`EXEC_FILE_MAX` blob is boot-fatal,
 as is any failure in the namespace construction or the rfork. There is no
 degraded mode — a boot that cannot build its namespace or start init is
 unrecoverable, and each failure extincts with a message a boot log can diagnose
-from.
+from. Those messages name the program `/joey`, its path before the initrd kept
+programs in `bin/`: an EXTINCTION body is tooling ABI
+(`docs/agent/BOOT-BANNER.md`).
 
 ## Mechanism
 
@@ -62,9 +66,12 @@ is content-independent rather than buddy-garbage-sensitive.
 ### The boot namespace is the /srv idiom, generalized
 
 `joey_root_kproc_at_devramfs` stamps the kproc Territory's root at the devramfs
-root (idempotent — the test harness roots it earlier), giving joey and every
-descendant a `FROM_ROOT` base and the namespace `SYS_SPAWN` binary resolution
-walks. Then `joey_mount_static_dev` grafts each kernel Dev's root onto its
+root and its working directory at `/bin`, the initrd's programs directory
+(idempotent — the test harness roots it earlier; the dot is re-stamped on every
+call). joey and every descendant inherit a `FROM_ROOT` base, the namespace
+`SYS_SPAWN` binary resolution walks, and a dot where bare program names resolve:
+the dot is a name (LS-4), so the kernel tests' bare-name spawns and joey's
+pre-pivot ones find `/bin/<name>` with no path of their own. Then `joey_mount_static_dev` grafts each kernel Dev's root onto its
 synthetic devramfs mount-point dir: the mount-point is resolved **without
 crossing** (`STALK_MOUNT`) so it keys on the synth dir's own identity, and
 `MREPL` lets a re-run replace. The set is `/srv` (devsrv over the boot service

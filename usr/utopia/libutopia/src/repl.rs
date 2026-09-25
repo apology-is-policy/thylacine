@@ -488,14 +488,14 @@ impl Repl {
     }
 
     /// #115a: install namespace-driven Tab completion. Scans the static `$path`
-    /// dirs ONCE (`/bin` + `/goroot/bin` + `/clade/bin` + `/viv/bin` -- the #58 exec
+    /// dirs ONCE (`/bin` + `/goroot/bin` + `/clade/bin` + `/viv/bin` + `/viv/abin` -- the #58 exec
     /// namespace, matching `resolve_command`'s search list so a resolvable command
     /// is a completable one; static for a session) and builds the initial command
     /// index, then installs the production `ShellCompletionSource` into the editor.
     /// Called by the consumer ON-TARGET (gated on a live console, like `open_notes`)
     /// -- `new()` stays syscall-free so host tests + the bare-spawn boot check
     /// pay nothing. A failed scan degrades to builtins + aliases + funcs only
-    /// (Tab still completes those; `/goroot/bin` + `/clade/bin` + `/viv/bin` are
+    /// (Tab still completes those; `/goroot/bin` + `/clade/bin` + `/viv/*` are
     /// absent on a non-bake / non-clade / non-viv image); it never fails startup.
     /// Idempotent (a re-call re-scans). `/viv/bin` is the shipped Linux binaries
     /// (git), run under the Linux phenotype by the MPHENO_LINUX mount (section 13).

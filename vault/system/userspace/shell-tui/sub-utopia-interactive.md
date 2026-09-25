@@ -21,7 +21,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-03
-updated: 2026-09-23
+updated: 2026-09-25
 area: userspace
 ---
 ## Graphical elevation banner
@@ -349,7 +349,8 @@ its header documents the transition. That behaviour was once a failing test
 (UT-EDIT-1) and the test was the side that was wrong.
 
 **The command index is built once per accepted line** — builtins plus aliases plus
-functions plus a cached `/bin` and `/goroot/bin` scan, sorted and deduped — and the
+functions plus a cached scan of the five `$path` directories (`/bin`, `/goroot/bin`,
+`/clade/bin`, `/viv/bin`, `/viv/abin`), sorted and deduped — and the
 *same* sorted vector is handed to both the completion source and the validity
 colouring. One index, two consumers, which is why a drift in it produces two
 symptoms at once.
@@ -585,15 +586,20 @@ own note fd together". The correction was written, and written by someone lookin
 at the same subject; it was simply written at the call site instead of at the claim.
 See the arc note in [[chg-2026-08-03-utopia-interactive-sweep]].
 
-**The completion index and the command resolver disagree by one directory, and the
-doc claims they agree.** `install_completion` scans `/bin` and `/goroot/bin`,
-describing itself as "matching `resolve_command`'s search list so a resolvable
-command is a completable one". The resolver searches three directories — `/bin`,
-`/`, and `/goroot/bin`. Because the same index also drives validity colouring, a
-command reachable only via `/` would both fail to complete *and* render cinnabar —
-marked unresolvable while running fine. Currently latent: the session root holds
-only data files, and the shell that does run from a root-level namespace is the
-bare-spawn boot check, which never installs completion.
+**The completion index and the command resolver search the same five directories,
+and nothing holds them together.** `install_completion` (`repl.rs`) scans `/bin`,
+`/goroot/bin`, `/clade/bin`, `/viv/bin` and `/viv/abin`, describing itself as
+"matching `resolve_command`'s search list so a resolvable command is a completable
+one", and `resolve_command` (`eval/stmt.rs`) searches that list in that order. They
+are two literals, and no test compares them. Until B-1d they disagreed by one
+directory: the resolver also searched `/`, the initrd root, where the programs lived
+until they moved to its `bin/`. Because the same index drives validity colouring, a
+command reachable only via `/` would have failed to complete *and* rendered cinnabar
+while running fine. That stayed latent (the session root held only data files, and
+the one shell running from a root-level namespace, the bare-spawn boot check, never
+installs completion), and B-1d removed `/` from the resolver. A later drift between
+the two lists would show the same pair of symptoms, or their inverse: a name that
+completes and colours as valid but does not run.
 
 **A name holding a control character is unreachable by Tab.** ut has no quoted
 form for one -- no `$'\e'` as zsh inserts -- so completion counts it among the

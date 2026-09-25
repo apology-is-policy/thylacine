@@ -324,8 +324,9 @@ int cwd_join(const char *dot, const char *input, u64 inlen,
     int absolute = (inlen > 0 && input[0] == '/');
     if (!absolute && dot && dot[0] == '/') {
         // The cwd is a cleaned absolute path by construction: territory_setdot
-        // is only ever handed a cwd_lexical_resolve output (SYS_CHDIR is its
-        // sole production caller), and territory_clone copies that string.
+        // is handed either a cwd_lexical_resolve output (SYS_CHDIR) or the
+        // boot's literal "/bin" (joey_root_kproc_at_devramfs), and
+        // territory_clone copies that string.
         while (dot[olen] != '\0') {
             if (olen + 1 >= outcap) return -1;
             out[olen] = dot[olen];

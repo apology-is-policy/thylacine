@@ -17,7 +17,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-09-24
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -118,6 +118,12 @@ unknown operations fail closed.
 runs to 125 with the same three holes (26, 30, 43), `syscall_dispatch` has
 exactly 123 arms, and both set differences are empty. The section at the end
 of this dossier carries the two records.
+
+**B-1d append (2026-09-24).** `SYS_BURROW_MAP_FILE` = 126; `SYS__NATIVE_TOP` is
+127 and `VIV_NATIVE_CEILING` 126. Re-measured on this tree (2026-09-25), not
+incremented: **124** live numbers, the span runs to 126 with the same three
+holes, `syscall_dispatch_body` has exactly 124 arms, and both set differences
+are empty.
 
 
 `x8` carries the syscall number, `x0..x5` the arguments, `x0` the result —
@@ -671,3 +677,47 @@ No number changed and no record grew; the operator voted the additive shape
   `sys_walk_create_kname_for_proc` and `sys_attach_9p_srv_for_proc`. Their
   checks repeat the handlers', so the syscall's answers and precedence are
   unchanged ([[sub-kernel-syscall-dispatch]]).
+
+## B-1d: SYS_BURROW_MAP_FILE 126 (2026-09-24)
+
+`SYS_BURROW_MAP_FILE(fd x0, offset x1, length x2, prot x3, flags x4, addr x5)
+-> vaddr / -errno`: the native form of DISTRO D-3's three file-map arms, for
+the dynamic loader (ARCH 6.5 "Dynamic loading"; the `addr` argument is the
+operator's second vote of 2026-09-24, [[dec-2026-09-24-b1d-loader-shape]]).
+One flag, `BURROW_MAP_FIXED` = 1; `addr` is read only under it.
+
+- **Without FIXED:** `length` bytes of the file from `offset`, R or R|X, at an
+  address the kernel chooses in the burrow window, demand-paged through the
+  Image cache. `addr` is not a hint: a nonzero one is `-EINVAL`, because a
+  quietly ignored hint is what lets musl ask for an `ET_EXEC` address and fail
+  later. fd -1 is `-EBADF`; W is `-EACCES` (there is no writable file
+  mapping, [[inv-i36]]).
+- **With FIXED:** `[addr, addr + length)` inside the burrow window is mapped
+  over whatever the caller held there (a CODE alias or a cut shared-in mapping
+  refuses, as munmap does). An R or R|X file window rides the Image cache; an
+  RW file window is an eager private copy; fd -1 is an anonymous demand-zero
+  window at none, R or RW (X is `-EACCES`: anonymous code comes only from the
+  JIT syscalls, I-42; a nonzero offset is `-EINVAL`).
+- **Refused before any lookup:** W|X and X on the anonymous window
+  (`-EACCES`); unknown prot or flag bits, W without R, a file map without R
+  (`-EINVAL`). Then the arms' own answers: an unaligned offset or addr and
+  length 0 (`-EINVAL`), a bad fd (`-EBADF`), a directory, symlink, append-only
+  or `O_PATH` handle or a Dev with no read (`-EINVAL`), an unknown file size
+  (`-EIO`), a window outside the burrow window or over the length cap, no gap,
+  OOM, the VMA cap (`-ENOMEM`), and executable bytes from a Dev that does not
+  vouch or a mount marked `MNOEXEC` (`-EACCES`, [[inv-i12]]). The phenotype's
+  cores answer Linux's `-EPERM` there; returned natively, `-T_E_PERM` is
+  Pouch's flat `-1` and decodes as `EIO` (the `errno.h` rule above), so the
+  native entry maps it to `-T_E_ACCES`, POSIX's `mmap` answer.
+
+The prot word is `BURROW_PROT_*` = Linux's `PROT_*`, and `kernel/syscall.c`
+pins it equal to `VIV_PROT_*` with a `_Static_assert`, which is what lets the
+native entry hand its word to the phenotype's cores unconverted.
+
+Mirrors: Pouch's `src/internal/_pouch_mman.h` (patch 0047) carries
+`SYS_thyla_burrow_map_file 126` and `POUCH_BURROW_MAP_FIXED`, pinned by the
+sysroot seam check in `tools/build.sh`. libt carries neither the number nor the
+flag (no native C consumer; the subset rule), and gains `T_MNOEXEC` (0x10), the
+mount flag the deny paths use. The Rust mirror is unchanged.
+Consumers: musl's loader through 0047 (`libc.so`), and the device prover
+`/pouch-hello-dlopen` ([[sub-pouch-seam]]).

@@ -3,7 +3,7 @@
 // Proves the persistent-child transport end to end in the guest, exercising
 // exactly the machinery nora's LSP/DAP loop will use (minus the LSP protocol):
 //
-//   1. spawn /parley-echo as a persistent server (piped stdin/stdout/stderr);
+//   1. spawn /bin/parley-echo as a persistent server (piped stdin/stdout/stderr);
 //   2. build a JSON-RPC request (parley::jsonrpc) and frame-send it to stdin;
 //   3. Mux-poll the echo's stdout+stderr in one poll(2) -- the multi-fd,
 //      tag-dispatched wait that will hold {fd0, gopls, ambush};
@@ -49,11 +49,11 @@ pub extern "C" fn rs_main() -> i64 {
     t_putstr("parley-probe: starting (8e-1c transport E2E)\n");
 
     // 1. Spawn the echo server. Root-anchored name (baked in the cpio, like
-    //    /stack-child); Server forces all three stdio slots to Piped.
-    let mut cmd = Command::new("/parley-echo");
+    //    /bin/stack-child); Server forces all three stdio slots to Piped.
+    let mut cmd = Command::new("/bin/parley-echo");
     let mut srv = match Server::spawn(&mut cmd) {
         Ok(s) => s,
-        Err(_) => fail("parley-probe: FAIL -- Server::spawn(/parley-echo)\n"),
+        Err(_) => fail("parley-probe: FAIL -- Server::spawn(/bin/parley-echo)\n"),
     };
 
     // 2. Build a JSON-RPC request and frame-send it. The echo returns the framed

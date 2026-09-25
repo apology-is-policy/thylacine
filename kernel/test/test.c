@@ -264,6 +264,9 @@ void test_exec_ns_noexec_mount_denied(void);
 void test_exec_ns_pheno_mount_crossing(void);
 void test_mmap_file_noexec_mount_denied(void);
 void test_mmap_file_devenv_never_exec_backs(void);
+void test_map_file_native_arms(void);
+void test_map_file_native_refusals(void);
+void test_map_file_native_noexec_denied(void);
 void test_territory_mount_rejects_cycle(void);
 void test_territory_mount_mp_path_lifecycle(void);
 void test_territory_mount_format_ns(void);
@@ -443,7 +446,7 @@ void test_execve_failed_load_leaves_target_drainable(void);
 void test_exec_native_rejects_dynamic_linux(void);
 void test_exec_load_failure_leaves_phenotype(void);    // Design D Leg B
 void test_exec_reset_follows_decided_phenotype(void);  // Design D Leg A (+ audit F1 leg)
-void test_exec_interp_dispatch_follows_parameter(void); // Design D Leg C (audit F3)
+void test_exec_interp_dispatch_every_phenotype(void);  // B-1d (was Design D Leg C)
 void test_syscall_dispatch_unknown(void);
 void test_syscall_dispatch_puts_smoke(void);
 void test_syscall_dispatch_exits_ok(void);
@@ -1021,6 +1024,14 @@ void test_devramfs_readdir_file_returns_neg1(void);
 void test_devramfs_readdir_buffer_too_small_errs(void);
 void test_devramfs_readdir_synth_dir_empty(void);
 void test_devramfs_readdir_paginates_no_dup_no_skip(void);
+void test_devramfs_tree_walk_and_dotdot(void);
+void test_devramfs_tree_readdir_per_directory(void);
+void test_devramfs_tree_stat_read_lookup(void);
+void test_devramfs_tree_load_refusals(void);
+void test_devramfs_tree_truncates_at_cap(void);
+void test_devramfs_load_complete(void);
+void test_devramfs_live_lib_when_prover_ships(void);
+void test_devramfs_live_bin_holds_the_programs(void);
 void test_perm_check_owner_group_other(void);
 void test_perm_check_owner_first_authoritative(void);
 void test_perm_check_hostowner_override(void);
@@ -2018,6 +2029,9 @@ struct test_case g_tests[] = {
     { "exec_ns.pheno_mount_crossing",                   test_exec_ns_pheno_mount_crossing,                    false, NULL },
     { "mmap_file.noexec_mount_denied", test_mmap_file_noexec_mount_denied, false, NULL },
     { "mmap_file.devenv_never_exec_backs", test_mmap_file_devenv_never_exec_backs, false, NULL },
+    { "map_file.native_arms", test_map_file_native_arms, false, NULL },
+    { "map_file.native_refusals", test_map_file_native_refusals, false, NULL },
+    { "map_file.native_noexec_denied", test_map_file_native_noexec_denied, false, NULL },
     { "namespace_layout.proc_ctl_cross", test_namespace_layout_proc_ctl_cross, false, NULL },
     { "resource.page_cap_attach_enforced",
                                        test_resource_page_cap_attach_enforced, false, NULL },
@@ -2309,7 +2323,7 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "exec.load_failure_leaves_phenotype", test_exec_load_failure_leaves_phenotype, false, NULL },
     { "exec.reset_follows_decided_phenotype", test_exec_reset_follows_decided_phenotype, false, NULL },
-    { "exec.interp_dispatch_follows_parameter", test_exec_interp_dispatch_follows_parameter, false, NULL },
+    { "exec.interp_dispatch_every_phenotype", test_exec_interp_dispatch_every_phenotype, false, NULL },
     { "exec.setup_multi_segment",      test_exec_setup_multi_segment,      false, NULL },
     { "exec.setup_lifecycle_round_trip",
                                        test_exec_setup_lifecycle_round_trip,
@@ -3000,6 +3014,19 @@ struct test_case g_tests[] = {
     { "devramfs.walk_attrs",           test_devramfs_walk_attrs,           false, NULL },
     { "devramfs.readdir_paginates_no_dup_no_skip",
                                        test_devramfs_readdir_paginates_no_dup_no_skip, false, NULL },
+    { "devramfs.tree_walk_and_dotdot", test_devramfs_tree_walk_and_dotdot, false, NULL },
+    { "devramfs.tree_readdir_per_directory",
+                                       test_devramfs_tree_readdir_per_directory, false, NULL },
+    { "devramfs.tree_stat_read_lookup",
+                                       test_devramfs_tree_stat_read_lookup, false, NULL },
+    { "devramfs.tree_load_refusals",   test_devramfs_tree_load_refusals,   false, NULL },
+    { "devramfs.tree_truncates_at_cap",
+                                       test_devramfs_tree_truncates_at_cap, false, NULL },
+    { "devramfs.load_complete",        test_devramfs_load_complete,        false, NULL },
+    { "devramfs.live_lib_when_prover_ships",
+                                       test_devramfs_live_lib_when_prover_ships, false, NULL },
+    { "devramfs.live_bin_holds_the_programs",
+                                       test_devramfs_live_bin_holds_the_programs, false, NULL },
     { "devsrv.registered",             test_devsrv_registered,             false, NULL },
     { "devsrv.open_root_dir",          test_devsrv_open_root_dir,          false, NULL },
     { "devsrv.stat_native_root",       test_devsrv_stat_native_root,       false, NULL },

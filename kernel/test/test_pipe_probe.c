@@ -4,7 +4,7 @@
 //   tools/build.sh userspace  → build/usr/pipe-probe/pipe-probe (ELF)
 //   build_ramfs                → cpio includes /pipe-probe
 //   boot                       → devramfs reads cpio
-//   this test                  → devramfs_lookup("pipe-probe") →
+//   this test                  → devramfs_lookup("bin/pipe-probe") →
 //                                rfork → exec_setup → userland_enter
 //                                → main → t_pipe + t_read + t_write +
 //                                  t_dup + t_close + t_putstr("PASS")
@@ -64,9 +64,9 @@ void test_pipe_probe_round_trip(void) {
     const void *cpio_blob = NULL;
     size_t size = 0;
 
-    int rc = devramfs_lookup("pipe-probe", &cpio_blob, &size);
+    int rc = devramfs_lookup("bin/pipe-probe", &cpio_blob, &size);
     if (rc != 0) {
-        uart_puts("    [skip] /pipe-probe not in ramfs (build with: tools/build.sh all)\n");
+        uart_puts("    [skip] /bin/pipe-probe not in ramfs (build with: tools/build.sh all)\n");
         return;
     }
 

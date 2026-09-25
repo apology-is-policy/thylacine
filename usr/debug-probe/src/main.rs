@@ -1,4 +1,4 @@
-// /debug-probe -- the Stage-8a debug-fs in-guest E2E (the 8a-1c owed proof).
+// /bin/debug-probe -- the Stage-8a debug-fs in-guest E2E (the 8a-1c owed proof).
 //
 // A kernel unit test can drive the devproc debug files against a SYNTHETIC
 // thread-less / hand-parked target, but it cannot produce the real thing: a
@@ -6,7 +6,7 @@
 // the stop checkpoint and carries no EL0 trapframe). This probe closes that gap
 // end to end:
 //
-//   1. spawn /debug-child (the target -- a yield loop with SENTINEL_REG pinned in
+//   1. spawn /bin/debug-child (the target -- a yield loop with SENTINEL_REG pinned in
 //      x20 and a 2-word stack region addressed by x21),
 //   2. open /proc/<pid>/{ctl,regs,mem,kregs,kstack,wait},
 //   3. `attach` then `stop` (retrying until x20 == SENTINEL_REG confirms the
@@ -489,7 +489,7 @@ pub extern "C" fn rs_main() -> i64 {
     // SYS_PUTS probes carry no stdin/out/err), so an Inherit child would try to
     // clone absent fds (-> EIO). debug-child prints via SYS_PUTS and never
     // touches fd 0/1/2, so the pipes stay empty -> no drain deadlock.
-    let mut child = match Command::new("/debug-child")
+    let mut child = match Command::new("/bin/debug-child")
         .stdin(Stdio::Piped)
         .stdout(Stdio::Piped)
         .stderr(Stdio::Piped)

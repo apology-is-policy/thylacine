@@ -37,7 +37,7 @@ lc_boot
 lc_login michael correct-horse-battery-staple-v1
 
 # Stage the DOS witness program into the dir we mount as C: (the /bin bind --
-# the devramfs root survives joey's pivot only under /bin).
+# the initrd's bin/ survives joey's pivot under /bin).
 lc_send "cp /bin/DX2C.COM /home/michael/DX2C.COM"
 after 1500
 

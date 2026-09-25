@@ -1,0 +1,129 @@
+pouch boundary-line patch 0047 - file maps through SYS_BURROW_MAP_FILE (B-1d).
+
+B-1d of the browser arc (ARCHITECTURE.md sec 6.5 "Dynamic loading";
+docs/browser-status.md "The B-1 decisions", rows 5, 6 and 14). libc.so is
+musl's own loader, and its map_library (ldso/dynlink.c) places an object
+with three map shapes: the whole span at an address the kernel chooses
+(:809), each later segment MAP_FIXED over it (:842), and the bss tail
+anonymously (:848). Until this patch every file-backed mmap was ENOSYS. The
+kernel serves the file shapes as SYS_BURROW_MAP_FILE (126), DISTRO D-3's
+arms under their native name, with the vouching rule on every executable
+window: a Dev that may back code, on a mount not marked MNOEXEC, else
+EACCES (POSIX's answer; Linux's EPERM is the phenotype's). Two files:
+
+  src/internal/_pouch_mman.h  SYS_thyla_burrow_map_file 126 and its one
+      flag, POUCH_BURROW_MAP_FIXED (`addr` is read only under it).
+
+  src/mman/mmap.c  A MAP_PRIVATE file map goes to 126. Without MAP_FIXED,
+      the span is mapped read-only or executable where the kernel chooses.
+      The address hint is dropped (the kernel refuses a nonzero one), so an
+      ET_EXEC run through the loader fails its exact-address check with
+      EBUSY and only a PIE or a .so loads -- the 2026-09-24 vote. With
+      MAP_FIXED, the window at `start` is replaced: a read-only or
+      executable window shares the file's pages through the Image cache,
+      and a writable one is an eager private copy, charged now. The bss
+      tail is not a file map: it is MAP_FIXED|MAP_ANON over the writable
+      segment's copy, which is plain anonymous memory, so 0044's discard +
+      reprotect serves it unchanged.
+      Answered before the kernel: a negative fd is EBADF, because the
+      kernel reads fd -1 under its FIXED flag as the anonymous window and a
+      request without MAP_ANON must never become one. MAP_SHARED and
+      MAP_SHARED_VALIDATE, a writable map without MAP_FIXED, a map without
+      read, and MAP_FIXED_NOREPLACE are ENOSYS, which is the domain the
+      Linux phenotype's two file arms admit (kernel/vivarium.c), so the
+      two substrates agree on what is served. len 0 (EINVAL) and len >=
+      PTRDIFF_MAX (ENOMEM) are checked for both halves, before the split.
+
+The witness is B-1d's dlopen probe on the device: a Pouch-built .so loaded
+by a Pouch host, whose four -z separate-loadable-segments segments drive
+every shape, and its MNOEXEC deny leg. The kernel half is the map_file.*
+unit tests.
+
+--- a/src/internal/_pouch_mman.h
++++ b/src/internal/_pouch_mman.h
+@@ -21,9 +21,12 @@
+ #define SYS_thyla_burrow_protect   125   /* (vaddr, length, prot, flags) -> 0 | -errno */
+ #define SYS_thyla_burrow_decommit   84   /* (vaddr, length) -> 0 | -1 */
+ #define SYS_thyla_burrow_detach     38   /* (vaddr, length) -> 0 | -1; = __NR_munmap */
++#define SYS_thyla_burrow_map_file  126   /* (fd, offset, length, prot, flags, addr) -> vaddr | -errno */
+ 
+ /* The prot word is Linux's PROT_* (the kernel pins BURROW_PROT_* to them). */
+ #define POUCH_BURROW_PROTECT_SEAL   1u
++/* SYS_thyla_burrow_map_file's flags: `addr` is read only under FIXED. */
++#define POUCH_BURROW_MAP_FIXED      1u
+ 
+ /* The auxiliary-vector tags the kernel writes for the initial thread's stack
+  * (elf.h AT_STACK_BASE / AT_STACK_SIZE; private tags above musl's AUX_CNT). */
+--- a/src/mman/mmap.c
++++ b/src/mman/mmap.c
+@@ -7,9 +7,10 @@
+ #include "_pouch_mman.h"
+ 
+ /* pouch: musl's __mmap targets Linux mmap(2) with six arguments; Thylacine
+-   has no file-backed mmap by design (a mapped file cannot be 9P-network-
++   has no shared file mapping by design (a mapped file cannot be 9P-network-
+    transparent, a Plan 9 conviction kept as a Thylacine conviction -
+-   ARCHITECTURE.md sec 6.5).
++   ARCHITECTURE.md sec 6.5). A private one serves the dynamic loader: see
++   map_file below.
+ 
+    B-1b (ARCHITECTURE.md sec 6.5 "The permission ceiling" / "Capacity"): the
+    anonymous subset is EXACT. A fresh mapping is SYS_BURROW_RESERVE at the
+@@ -40,15 +41,43 @@
+    DECOMMIT's flat -1 (the range is not wholly plain anonymous memory of
+    this process) is mapped to ENOMEM here, before __syscall_ret would make
+    it the generic EIO. */
+-void *__mmap(void *start, size_t len, int prot, int flags, int fd, off_t off)
+-{
+-	(void)fd; (void)off;
+ 
+-	/* File-backed mmap is refused. */
+-	if (!(flags & MAP_ANON)) {
++/* B-1d (ARCHITECTURE.md sec 6.5 "Dynamic loading"): a MAP_PRIVATE file map
++   is SYS_BURROW_MAP_FILE, the three shapes musl's loader asks for. Without
++   MAP_FIXED it maps the span read-only or executable where the kernel
++   chooses; the hint is dropped, so an ET_EXEC asking for its own address
++   fails in the loader (EBUSY) and only a position-independent object loads.
++   With MAP_FIXED it replaces the window at `start`: a read-only or
++   executable window shares the file's pages, a writable one is a private
++   copy made now, and no write ever reaches the file. Executable bytes need
++   a mount that may back them, EACCES otherwise, as W with X is. Not
++   served, ENOSYS: MAP_SHARED, whose coherence with the file no private page
++   gives; a writable map without MAP_FIXED; a map without read. A negative
++   descriptor is EBADF here, where the kernel would read it as the
++   anonymous window. */
++static void *map_file(void *start, size_t len, int prot, int flags, int fd,
++                      off_t off)
++{
++	if (fd < 0) {
++		errno = EBADF;
++		return MAP_FAILED;
++	}
++	unsigned pr = (unsigned)prot & (PROT_READ|PROT_WRITE|PROT_EXEC);
++	if (pr & PROT_WRITE) pr |= PROT_READ;
++	if ((flags & MAP_TYPE) != MAP_PRIVATE || (flags & MAP_FIXED_NOREPLACE)
++	    || !(pr & PROT_READ) || ((pr & PROT_WRITE) && !(flags & MAP_FIXED))) {
+ 		errno = ENOSYS;
+ 		return MAP_FAILED;
+ 	}
++	long rc = (flags & MAP_FIXED)
++		? __syscall(SYS_thyla_burrow_map_file, fd, off, len, pr,
++		            POUCH_BURROW_MAP_FIXED, start)
++		: __syscall(SYS_thyla_burrow_map_file, fd, off, len, pr, 0, 0);
++	return (void *)__syscall_ret(rc);
++}
++
++void *__mmap(void *start, size_t len, int prot, int flags, int fd, off_t off)
++{
+ 	if (len == 0) {
+ 		errno = EINVAL;
+ 		return MAP_FAILED;
+@@ -57,6 +86,8 @@ void *__mmap(void *start, size_t len, int prot, int flags, int fd, off_t off)
+ 		errno = ENOMEM;
+ 		return MAP_FAILED;
+ 	}
++	if (!(flags & MAP_ANON))
++		return map_file(start, len, prot, flags, fd, off);
+ 
+ 	/* The prot word the kernel takes: Linux's values, W implying R. X is
+ 	   the kernel's EACCES; answering it here keeps a MAP_FIXED request from

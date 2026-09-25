@@ -2333,7 +2333,7 @@ then handed unchanged to `exec_setup` -- the same shape the cpio path already us
 (it `memcpy`-d the whole binary into a kmalloc'd blob), so the audited ELF loader /
 W^X reject / segment map stay byte-identical. Resolution + read run in the **parent's**
 context (its Territory), like Unix `exec`. `devramfs_lookup` remains ONLY for the
-kernel-internal init load (kproc loads `/joey` before any namespace exists) and kernel
+kernel-internal init load (kproc loads `bin/joey` before any namespace exists) and kernel
 tests -- neither is EL0-reachable, so the reverse-leak surface (userspace spawn) is
 fully closed; a `stalk` miss returns `-1`, never a flat-table fallback.
 
@@ -2346,8 +2346,10 @@ idiom (the boot medium is *bound into* the namespace; Fuchsia/Genode's
 binary-from-namespace-mount agrees), reusing joey's existing pre-pivot-handle ->
 post-pivot-MREPL pattern (the one it already uses to re-graft `/srv`). The binaries
 live once, in the initrd's `bin/`; the disk pool stays for user data. Pre-pivot spawns
-keep their bare names, resolved through joey's working directory, which it sets to
-`/bin` (the initrd's `bin/`) before its first spawn and back to `/` after the pivot;
+keep their bare names, resolved through the working directory: the kernel starts the
+boot namespace at `/bin` (the initrd's `bin/`; it stamps the boot Proc's dot before
+joey is spawned, so joey and the kernel's own test spawns inherit it), and joey sets it
+there itself before its first spawn and back to `/` after the pivot;
 post-pivot spawns name `/bin/<prog>`, a path that works before the pivot too; the shell (`ut`) resolves a bare command through `$path` = `/bin` (a
 command containing `/` is used as-is) -- the Plan 9/Unix split where the kernel
 resolves a path and the shell does `$path`. A confined Proc that does NOT inherit the
