@@ -1109,6 +1109,26 @@ _Static_assert((PROC_FLAG_PIPE_TERMINATE_PENDING & PROC_FLAG_CAUGHT_NOTE_MASK) =
 _Static_assert((PROC_FLAG_SEAT_MANAGER & (PROC_FLAG_CAUGHT_NOTE_MASK |
     PROC_FLAG_SESSION_HANGUP | PROC_FLAG_PIPE_TERMINATE_PENDING)) == 0,
     "seat manager flag must not overlap note, session or pipe flags");
+// This Proc's image has been under debug CONTROL, so it may never gain authority
+// again (Linux's LSM_UNSAFE_PTRACE half of the ptrace model, which the
+// capability-cover rule alone does not supply). Set at the `attach` claim and at
+// every mem / regs WRITE, refused at the clearance redeem and at the legate stamp.
+//
+// MONOTONE IN EVERY DIRECTION, and each direction is necessary rather than merely
+// conservative. It crosses FORK because a forked child's memory IS the debugged
+// memory, byte for byte. It survives EXEC because the attacker that owned this
+// Proc chose what it execs, with what argv, environment and descriptors -- so a
+// fresh image under an attacker-chosen exec is not a fresh start. Both together
+// are what make "debug a peer, then have it elevate for you" unreachable; drop
+// either and the peer simply spawns a clean elevator instead.
+//
+// It is stamped across the whole ADDRESS SPACE, not one Proc: the image is the
+// asset, and every Proc mapping it is a door to the same bytes.
+#define PROC_FLAG_DEBUG_TAINTED      (1u << 21)
+_Static_assert((PROC_FLAG_DEBUG_TAINTED & (PROC_FLAG_CAUGHT_NOTE_MASK |
+    PROC_FLAG_SESSION_HANGUP | PROC_FLAG_PIPE_TERMINATE_PENDING |
+    PROC_FLAG_SEAT_MANAGER)) == 0,
+    "the debug taint must not overlap the caught-note field or the flags below it");
 _Static_assert((PROC_FLAG_SESSION_HANGUP & PROC_FLAG_CAUGHT_NOTE_MASK) == 0,
                "arm-6: the session-hangup flag must not overlap the caught-note "
                "sub-field; widening NOTE_MASK_SUPPORTED grows it upward -- "
@@ -2326,6 +2346,74 @@ void proc_apply_identity(struct Proc *p, u32 principal_id, u32 primary_gid,
 // not be called with g_proc_table_lock held (a /proc walk callback, the seat bind);
 // a path that already holds it needs its own reviewed locked stamp. One-way.
 void proc_seal(struct Proc *p, u32 bits);
+
+// =============================================================================
+// The image join: every guard on a Proc's IMAGE is evaluated over the whole set
+// of Procs that map it.
+// =============================================================================
+//
+// THE DEFECT THIS EXISTS FOR. The capability-cover rule (I-39), both seal bits
+// and the debug taint are per-PROC facts, but the thing they guard -- the image:
+// the memory, and the layout of it -- lives in the AddrSpace, which
+// rfork(RFPROC|RFMEM) SHARES between Procs. An elevated parent's vfork child is
+// born with the elevation-only caps carved away (the I-2 strip), so it is a
+// LOWER-authority Proc holding the SAME bytes: a peer that merely matches the
+// child covers it, attaches, and writes the parent's live image -- which the
+// parent then returns into out of vfork_await_release. The seals fail the same
+// way round: NOTRACE taken by the parent does not refuse an attach to the
+// unsealed child, and NODUMP on the parent does not refuse reading the child's
+// mem or maps. Neither needs a redeem; both are ordinary EL0 reach.
+// musl's posix_spawn is exactly this shape (CLONE_VM|CLONE_VFORK).
+//
+// So authority and seals are asked of the JOIN over every live mapper, and the
+// two facts that make that sound are both re-read per operation under
+// g_proc_table_lock: `->as` is swapped by exec only under that lock
+// (proc_exec_replace), and every debug gate already runs inside a proc walk
+// holding it. The join is therefore exact at the instant of the access, which is
+// what makes it immune to a fork racing alongside -- a child published after the
+// check cannot widen what the check admitted, because its caps are bounded by
+// the parent the check already weighed.
+struct ProcImageJoin {
+    // The union over every OTHER Proc in the table mapping this address space,
+    // ZOMBIES INCLUDED: a zombie holds its reference until it is reaped, so its
+    // bytes are still in the image and a seal it took must still refuse a read.
+    caps_t caps;
+    u32    flags;
+    // Whether another Proc could still USE this image -- which is the one
+    // question a zombie must NOT answer yes to, since a non-ALIVE Proc can be
+    // neither attached to nor stopped, so neither its memory nor its registers
+    // is reachable. Counted as "references, minus the zombies the traversal
+    // saw", which leaves an unlinked-but-unfreed Proc counted (the traversal
+    // cannot see it, so it falls in the difference) and fails safe.
+    bool   shared;
+};
+
+// Fill `out` with the join over `p`'s address space, EXCLUDING `p` itself (the
+// caller already holds p's own caps and flags and weighs them its own way).
+// Caller holds g_proc_table_lock.
+void proc_image_join_locked(const struct Proc *p, struct ProcImageJoin *out);
+
+// OR `bits` into `p` AND into every other mapper of its address space (zombies
+// included) -- a restriction on the image binds every door to it. Caller holds
+// g_proc_table_lock.
+void proc_image_stamp_locked(struct Proc *p, u32 bits);
+
+// Stamp PROC_FLAG_DEBUG_TAINTED across the image. Caller holds g_proc_table_lock.
+void proc_mark_debug_tainted_locked(struct Proc *p);
+
+// May `p` gain authority right now? False if its image is tainted (anywhere in
+// the join) or still SHARED -- not because caps spread to other mappers (they do
+// not), but because a mapper can drive this Proc's memory and so wield the new
+// authority indirectly. Caller holds g_proc_table_lock.
+bool proc_elevation_allowed_locked(const struct Proc *p);
+
+// proc_become_legate for a caller that ALREADY holds g_proc_table_lock. The lock
+// order is lifecycle BEFORE the grant table (the established edge: the seat
+// failure path calls cap_cancel_imperium_pending / cap_release_seat_grant while
+// holding g_proc_table_lock), so the clearance redeem takes them in that order
+// and reaches the stamp through this entry.
+int proc_become_legate_locked(struct Proc *p, u64 caps_to_or, u32 session_id,
+                              u64 valid_until, u32 legate_flags);
 
 // =============================================================================
 // A-4a: the legate stamp (the single audited legate-creation write site).

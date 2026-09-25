@@ -1430,7 +1430,26 @@ static bool devproc_kind_is_image(u32 kind) {
 // test_devproc_dump_seal_disclosure is what catches it.
 static bool devproc_read_sealed(const struct Proc *caller, const struct Proc *target,
                                 u32 kind) {
-    return devproc_kind_is_image(kind) && devproc_dump_sealed_against(caller, target);
+    if (!devproc_kind_is_image(kind)) return false;
+    if (devproc_dump_sealed_against(caller, target)) return true;
+    if (caller == target) return false;             // never sealed against itself
+    // mem and maps are the two image files served out of the ADDRESS SPACE
+    // rather than out of the Proc, so a NODUMP held by ANY Proc mapping it seals
+    // them here. Without this a sealed Proc's own vfork child -- which the seal
+    // never reached -- hands out the sealed image byte for byte. The rest
+    // (cmdline, ns, exe, cwd, environ and the register files) are per-Proc or
+    // per-Thread state that no sharer holds a copy of, so for those the target's
+    // own bit is the whole answer.
+    // PRECONDITION for the join below: g_proc_table_lock is held. Every caller
+    // satisfies it today -- the read dispatch and each walk with its own read
+    // path all run inside proc_for_each -- and devproc_extract_authorized, the
+    // one caller that does NOT obviously sit in a walk, asks only about
+    // PQS_ENVIRON and so returns above. A kind ADDED to the joined set would
+    // change that, and would need its callers re-checked first.
+    if (kind != PQS_MEM && kind != PQS_MAPS) return false;
+    struct ProcImageJoin j;
+    proc_image_join_locked(target, &j);
+    return (j.flags & PROC_FLAG_NODUMP) != 0;
 }
 
 // Owner-or-hostowner AND not dump-sealed: the gate for environ, the one image file
@@ -1473,7 +1492,8 @@ bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *targ
 // no-trace seam — e.g. the login session Proc, DEBUG-FS-DESIGN §8) are refused
 // BEFORE the authority axes: no cap holder can debug either. Non-static: the
 // kernel test suite exercises the predicate.
-bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *target) {
+static bool devproc_debug_authorized_locked(const struct Proc *caller,
+                                            const struct Proc *target) {
     if (!caller || !target)                            return false;
     if (target == kproc())                             return false;   // kernel: undebuggable
     // The target's principal is read with ACQUIRE (proc_apply_identity is a
@@ -1491,6 +1511,12 @@ bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *targ
     // cross-thread writer of a RUNNING Proc's caps, so a plain load is C11-racy.
     // That now covers the TARGET's set too, not just the caller's.
     caps_t caller_caps = __atomic_load_n(&caller->caps, __ATOMIC_ACQUIRE);
+    // ONE join for both questions below -- the cover set and the seam. Taken
+    // here so the two cannot drift apart: reading the image twice would let a
+    // sharer appear between them, and a gate that weighed one snapshot's caps
+    // against another's seals would be answering about no state that existed.
+    struct ProcImageJoin image;
+    proc_image_join_locked(target, &image);
     bool axis = false;
     if (caller == target) {
         // Reflexive BY CONSTRUCTION, and load-bearing as a short-circuit rather
@@ -1508,15 +1534,36 @@ bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *targ
         // elevation leaves the principal unchanged (I-22; IMPERIUM 11.6's
         // same-principal sub-shell). Caps only shrink at fork (I-2), so a spawner
         // always covers its own children and shell-spawned debugging is untouched.
+        // Over the whole IMAGE, not this Proc alone. Debugging the target is
+        // total control of every byte its address space holds, and under RFMEM
+        // those bytes are somebody else's too -- a Proc whose caps the I-2 carve
+        // stripped is a LOWER-authority door to a HIGHER-authority image, which
+        // is precisely the shape musl's posix_spawn creates on every call. So
+        // the caller must cover every mapper, not merely the one it named.
         caps_t target_caps = __atomic_load_n(&target->caps, __ATOMIC_ACQUIRE);
-        axis = (target_caps & ~caller_caps) == 0;
+        axis = ((target_caps | image.caps) & ~caller_caps) == 0;
     }
     if (!axis)
         axis = (caller_caps & (CAP_HOSTOWNER | CAP_DEBUG)) != 0;   // host owner OR debug-anyone
     if (!axis)                                         return false;
     if (__atomic_load_n(&target->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_NOTRACE)
         return false;                                                   // no-trace seam
+    // The seam over the image too, and ABSOLUTE like the target's own bit: no
+    // cap holder debugs a Proc that shares an address space with a NOTRACE one,
+    // because driving the sharer drives the sealed image. Read after the axes so
+    // the CAP_HOSTOWNER / CAP_DEBUG arms cannot buy through it either.
+    if (image.flags & PROC_FLAG_NOTRACE)               return false;
     return true;
+}
+
+// The public predicate: takes g_proc_table_lock, which the image join needs and
+// which every /proc gate site already holds (they run inside proc_for_each, and
+// call the _locked form directly). The kernel tests are the callers that do not.
+bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *target) {
+    irq_state_t s = proc_table_lock_acquire();
+    bool ok = devproc_debug_authorized_locked(caller, target);
+    proc_table_lock_release(s);
+    return ok;
 }
 
 // =============================================================================
@@ -1640,7 +1687,7 @@ static int devproc_mem_walk_cb(struct Proc *target, void *arg) {
     struct devproc_mem_ctx *m = (struct devproc_mem_ctx *)arg;
     if (target->pid != m->target_pid) return 0;   // keep walking
     if (target == kproc())                              { m->result = -1; return 1; }
-    if (!devproc_debug_authorized(m->caller, target))   { m->result = -1; return 1; }  // I-39
+    if (!devproc_debug_authorized_locked(m->caller, target))   { m->result = -1; return 1; }  // I-39
     // The dump seal refuses EXTRACTION, and reading a target's memory is the largest
     // extraction there is (DEBUG-FS-DESIGN 3.2). A write is CONTROL -- NOTRACE's, via
     // the gate above -- so a NODUMP-only target's debugger may still write it.
@@ -1653,6 +1700,10 @@ static int devproc_mem_walk_cb(struct Proc *target, void *arg) {
         ? mmu_cross_proc_write(target->as->pgtable_root, m->vaddr, m->kbuf, m->len)
         : mmu_cross_proc_read(target->as->pgtable_root,  m->vaddr, m->kbuf, m->len);
     spin_unlock_irqrestore(&target->as->lock, vs);
+    // Its own stamp rather than the attach's: this path requires authority and a
+    // stopped target, NOT the debug-owner slot, so a caller that never attached
+    // can reach it while somebody else holds the target stopped.
+    if (m->is_write && m->result > 0) proc_mark_debug_tainted_locked(target);
     return 1;
 }
 
@@ -1841,7 +1892,7 @@ static int devproc_regs_walk_cb(struct Proc *target, void *arg) {
     struct devproc_regs_ctx *r = (struct devproc_regs_ctx *)arg;
     if (target->pid != r->target_pid) return 0;
     if (target == kproc())                              { r->result = -1; return 1; }
-    if (!devproc_debug_authorized(r->caller, target))   { r->result = -1; return 1; }  // I-39
+    if (!devproc_debug_authorized_locked(r->caller, target))   { r->result = -1; return 1; }  // I-39
     // regs/fpregs/kregs READS are extraction (the dump seal; kregs carries tpidr_el0,
     // an EL0 register); writes are control -- NOTRACE's, through the gate above.
     if (!r->is_write
@@ -1865,6 +1916,10 @@ static int devproc_regs_walk_cb(struct Proc *target, void *arg) {
     if (r->is_write) {
         for (long i = 0; i < cnt; i++) scratch[r->off + i] = ((const u8 *)r->kbuf)[i];
         devproc_apply_regs(target, r->kind, scratch);
+        // Control of a sharer's REGISTERS is control of the shared image: point
+        // its pc at a store and it writes the bytes for you. So a register write
+        // taints exactly as a memory write does.
+        if (cnt > 0) proc_mark_debug_tainted_locked(target);
     } else {
         for (long i = 0; i < cnt; i++) ((u8 *)r->kbuf)[i] = scratch[r->off + i];
     }
@@ -2159,8 +2214,15 @@ static int devproc_debug_walk_cb(struct Proc *target, void *arg) {
         // Refuse a non-ALIVE target, then the I-39 gate (kproc / NOTRACE /
         // owner-or-CAP_DEBUG), then Einuse: a non-NULL slot is already claimed.
         if (target->state != PROC_STATE_ALIVE)            { d->result = -1; return 1; }
-        if (!devproc_debug_authorized(d->caller, target)) { d->result = -1; return 1; }
+        if (!devproc_debug_authorized_locked(d->caller, target)) { d->result = -1; return 1; }
         if (target->debug_owner != NULL)                  { d->result = -1; return 1; }  // Einuse
+        // The claim is what taints, not the first write, and the difference is
+        // the point: an attach IS the authority to stop, step and rewrite this
+        // image at will, so by the time a write appears the target has already
+        // been under someone else's control. Stamped across the image, before
+        // the slot is taken, so no window exists in which the target is owned
+        // but not yet marked.
+        proc_mark_debug_tainted_locked(target);
         target->debug_owner = d->ctl;              // claim (under g_proc_table_lock)
         target->debug_exitkill = false;            // 5d: a fresh slot starts unmarked (the debugger sends `exitkill` iff it LAUNCHED this target)
         spoor_flag_set(d->ctl, CDEBUGOWNER);       // gate the close-hook release (atomic: `flag` is RMW'd cross-domain -- fcntl CNONBLOCK under a table lock)
@@ -2258,7 +2320,7 @@ static int devproc_hwbp_walk_cb(struct Proc *target, void *arg) {
     struct devproc_hwbp_ctx *h = (struct devproc_hwbp_ctx *)arg;
     if (target->pid != h->target_pid) return 0;                                    // keep walking
     if (target == kproc())                            { h->result = -1; return 1; } // undebuggable
-    if (!devproc_debug_authorized(h->caller, target)) { h->result = -1; return 1; } // I-39
+    if (!devproc_debug_authorized_locked(h->caller, target)) { h->result = -1; return 1; } // I-39
     if (target->debug_owner != h->ctl)                { h->result = -1; return 1; } // slot owner
     if (!devproc_target_fully_stopped(target))        { h->result = -1; return 1; } // stopped-only (quiescent)
 
@@ -2301,7 +2363,7 @@ static int devproc_hwwatch_walk_cb(struct Proc *target, void *arg) {
     struct devproc_hwwatch_ctx *h = (struct devproc_hwwatch_ctx *)arg;
     if (target->pid != h->target_pid) return 0;                                    // keep walking
     if (target == kproc())                            { h->result = -1; return 1; } // undebuggable
-    if (!devproc_debug_authorized(h->caller, target)) { h->result = -1; return 1; } // I-39
+    if (!devproc_debug_authorized_locked(h->caller, target)) { h->result = -1; return 1; } // I-39
     if (target->debug_owner != h->ctl)                { h->result = -1; return 1; } // slot owner
     if (!devproc_target_fully_stopped(target))        { h->result = -1; return 1; } // stopped-only (quiescent)
 
@@ -2346,7 +2408,7 @@ static int devproc_step_walk_cb(struct Proc *target, void *arg) {
     struct devproc_step_ctx *s = (struct devproc_step_ctx *)arg;
     if (target->pid != s->target_pid) return 0;                                    // keep walking
     if (target == kproc())                            { s->result = -1; return 1; } // undebuggable
-    if (!devproc_debug_authorized(s->caller, target)) { s->result = -1; return 1; } // I-39
+    if (!devproc_debug_authorized_locked(s->caller, target)) { s->result = -1; return 1; } // I-39
     if (target->debug_owner != s->ctl)                { s->result = -1; return 1; } // slot owner
     if (!devproc_target_fully_stopped(target))        { s->result = -1; return 1; } // stopped-only
     struct Thread *head = devproc_focus_thread(target);   // 8c-2 #95: the M at the stop (step targets it), else head
@@ -2543,7 +2605,7 @@ static int devproc_kstack_walk_cb(struct Proc *target, void *arg) {
     struct devproc_kstack_ctx *k = (struct devproc_kstack_ctx *)arg;
     if (target->pid != k->target_pid) return 0;   // keep walking
     if (target == kproc())                            { k->result = -1; return 1; }
-    if (!devproc_debug_authorized(k->caller, target)) { k->result = -1; return 1; }   // I-39
+    if (!devproc_debug_authorized_locked(k->caller, target)) { k->result = -1; return 1; }   // I-39
     if (devproc_read_sealed(k->caller, target, PQS_KSTACK)) { k->result = -1; return 1; }
     // 8b: the SETTLED-thread inspect -- NO debug-stop required (unlike mem/regs/
     // kregs/wait, which keep the fully_stopped gate). devproc_format_kstack gates
@@ -2703,7 +2765,7 @@ static int devproc_waitscan_cb(struct Proc *target, void *arg) {
     struct devproc_waitscan_ctx *w = (struct devproc_waitscan_ctx *)arg;
     if (target->pid != w->target_pid) return 0;   // keep walking -> not found -> stays -1
     if (target == kproc())                            { w->state = -2; return 1; }  // undebuggable
-    if (!devproc_debug_authorized(w->caller, target)) { w->state = -2; return 1; }  // I-39
+    if (!devproc_debug_authorized_locked(w->caller, target)) { w->state = -2; return 1; }  // I-39
     if (devproc_read_sealed(w->caller, target, PQS_WAIT)) { w->state = -2; return 1; }
     if (target->state != PROC_STATE_ALIVE)            { w->state = -1; return 1; }  // exiting/zombie -> "exited"
     w->state = devproc_target_fully_stopped(target) ? 1 : 0;   // debug_stop_req + all parked

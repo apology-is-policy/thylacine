@@ -159,18 +159,16 @@ is the same principal"). Concretely, before this rule:
 **What this rule does NOT close, stated so the next reader does not over-trust it**
 (audit 2026-09-24, findings F1 and F8; the third bullet self-found at the close):
 
-- **The pre-elevation window.** Cover is evaluated at the instant of the call, and
-  nothing records that a target *was* debugged. A same-principal peer of EQUAL
-  authority may attach to `/bin/imperium` *before* it redeems — at that moment its
-  caps are a subset of the peer's, so cover admits — stop it while it blocks on the
-  deferred SAK reply, write its writable memory, and detach. The redeem then
-  proceeds and returns through the injected control flow, holding the clearance.
-  `cap_redeem_grant_for_writer` and `proc_become_legate` consult no debug state of
-  the writer. So the rule closes debugging *the result* of an elevation, never
-  debugging *its precursor*. The missing half is the other half of Linux's model —
-  a monotonic debug taint that refuses the privilege gain — tracked as its own
-  chunk; until then the trusted panel's correct-pid display is the only defense
-  inside that window, which is why it is load-bearing and not cosmetic.
+- ~~**The pre-elevation window.**~~ **CLOSED 2026-09-24 (the image-join chunk;
+  §3.3).** Cover was evaluated at the instant of the call and nothing recorded that
+  a target *had been* debugged, so a same-principal peer of EQUAL authority could
+  attach to `/bin/imperium` *before* it redeemed — at that moment its caps are a
+  subset of the peer's, so cover admits — stop it on the deferred SAK reply, write
+  its memory, and detach; the redeem then returned through the injected control
+  flow holding the clearance. `PROC_FLAG_DEBUG_TAINTED` is the missing half of
+  Linux's model and now refuses exactly that, at both `cap_redeem_grant_for_writer`
+  and `proc_become_legate`. The trusted panel's correct-pid display remains
+  load-bearing, but it is no longer the *only* defense inside the window.
 - **Disclosure through identity-only surfaces.** `environ` gates on
   owner-or-`CAP_HOSTOWNER` (`devproc_extract_authorized`), `sched` and `imperium` on
   the same two axes (`devproc_owner_or_hostowner`), and `cmdline`, `ns`, `exe`,
@@ -498,6 +496,104 @@ for that child, and the seal is the only mechanism that could. Decision A is
 load-bearing, not residual. (Corrected 2026-09-24, audit F3.)
 
 ---
+
+### 3.3 The image join, and the debug taint (2026-09-24)
+
+> **Every guard on a Proc's IMAGE is evaluated over the whole set of Procs that
+> MAP that image.** Cover must cover every mapper; `NOTRACE` on any mapper
+> refuses; `NODUMP` on any mapper seals `mem` and `maps`; a seal stamps every
+> mapper; and a Proc whose image was ever under debug control, or that is still
+> shared, never gains authority again.
+
+**The defect.** The cover rule, both seal bits and the taint are per-`Proc` facts.
+The thing they guard is not: the image — the memory, and the layout of it — lives
+in the `AddrSpace`, which `rfork(RFPROC|RFMEM)` SHARES. An elevated parent's vfork
+child is born with the elevation-only caps carved away (I-2), so it is a
+*lower-authority Proc holding the same bytes*. A peer that merely matches the
+child covers it, attaches, and writes the parent's live image; the parent returns
+into it out of `vfork_await_release`. No redeem is involved and nothing is
+elevated — it is ordinary EL0 reach, and musl's `posix_spawn` creates the shape on
+every call (`CLONE_VM|CLONE_VFORK`). The seals failed the same way round: `NOTRACE`
+on the parent did not refuse an attach to the unsealed child, and `NODUMP` on the
+parent did not refuse reading the child's `mem` or `maps`.
+
+**Why the join is the wall.** `proc_image_join_locked` is evaluated *per operation,
+under `g_proc_table_lock`*, which is also the lock `proc_exec_replace` swaps `->as`
+under and the lock every debug gate already holds. So it is exact at the instant of
+the access, and a fork racing alongside cannot defeat it: a child published after
+the check is bounded by the parent the check already weighed (I-2). The fast path
+is `addrspace_ref_count == 1` — no sharing, no walk — which is the overwhelmingly
+common case, so a per-operation join costs nothing in the ordinary one.
+
+**`shared` is "references, minus the zombies the traversal saw".** It asks whether
+another Proc could still *use* the image, and a ZOMBIE cannot: an attach refuses a
+non-`ALIVE` target and the stopped-only gate requires `ALIVE`, so neither its
+memory nor its registers is reachable. It keeps its address-space reference until
+it is reaped, though, so counting references alone would refuse every elevation
+its parent attempts — permanently, for a parent that never waits, which a vfork
+child that `_exit`s instead of exec'ing produces. Subtracting only the zombies the
+traversal *saw* keeps the reap window conservative: a Proc unlinked but not yet
+freed is invisible to the traversal while its reference still counts, so it lands
+in the difference and `shared` stays true. That is the direction that matters,
+since a missed sharer at the redeem is a privilege question rather than a cosmetic
+one. (The caps and flags union still includes zombies — their bytes are still in
+the image.)
+
+**The traversal is iterative, deliberately.** `proc_for_each_walk` descends one C
+frame per tree level, and the join runs *inside* a walk already doing that, so a
+recursive join would put two full-depth recursions on one 16 KiB kernel stack.
+Nothing bounds proc-tree *depth* — `PROC_CHILD_MAX` caps breadth — and the path is
+unprivileged-reachable, since `maps` is mode 0444 and its read asks the seal, which
+asks the join. The sibling and parent links already encode the return path, so the
+same traversal costs O(1) stack.
+
+**The taint is monotone in every direction, and each direction is necessary.** It
+crosses **fork** because the child's memory *is* the debugged memory. It survives
+**exec** because the attacker that owned the Proc chose what it execs, with what
+argv, environment and descriptors — so a fresh image under an attacker-chosen exec
+is not a fresh start. Drop either and the attack simply spawns a clean elevator
+instead of using the dirty one.
+
+**The cost, stated plainly.** A Proc that is *legitimately* debugged can never
+elevate afterwards, and neither can anything it forks. Debug a shell once and
+`imperium` is refused for the rest of that shell's life. That is the intended
+promise — if a peer can drive your shell it can drive your elevation, so the two
+must not both be available — but it is a real behavioural change, and an operator
+who debugs a login shell will meet it. The escape is to start a fresh shell, not a
+flag: a switch that cleared the taint would be the bypass.
+
+**Only the taint crosses fork; the seals deliberately do not, in either shape.**
+Under `RFMEM` the child maps the sealed bytes, so inheriting looks right — but the
+join already refuses every attach to it and every `mem`/`maps` read of it, by
+reading the parent's bit at the moment of the access (including for a child that
+was still mid-`rfork` when the parent sealed, which the stamp's traversal cannot
+see). Inheriting as well would buy nothing and cost something real: the bit is
+one-way, so it would outlive the sharing and leave the child permanently
+undebuggable after it execs onto an image the seal was never about. For a COW
+fork the child gets a private *copy*, and whether a copy of a secret is itself
+secret is **decision A** — still open, and inheriting here would settle it by
+accident. The taint is the opposite case and must cross: after the child execs
+there is no sharing left for the join to read, so only a copied bit still carries
+the history.
+
+**What this does NOT close.**
+
+- **Sealing is image-wide, and `set_dumpable`/`set_traceable` are UNGATED
+  self-calls.** So a vfork child that seals itself in its pre-exec window seals
+  its *parent* too, permanently and with no capability check anywhere in the path.
+  This is a restriction rather than an escalation — no caller gains anything, and
+  the affected set is one Proc plus its `RFMEM` descendants — but it is a new,
+  silent, unbounded-lifetime effect of an ungated syscall, and it is the price of
+  the seal binding every door. A sealed parent also can no longer read its own
+  vfork child's `mem`: surprising, harmless.
+- **A sealed Proc in the reap window** (unlinked, not yet freed) is missed by the
+  traversal, so its bit does not reach a live sharer's gate for those few
+  instructions. Closing it needs the unlink and the free to be one atom, which is
+  a lifecycle change and not this chunk.
+- **The non-capability authority axes.** The join unions `proc_flags` but reads
+  only the seal and taint bits from it, so §3.1's third bullet stands unchanged:
+  cover still weighs one `caps` word and not the spawn perms, the I-34 allowance,
+  or the handle table.
 
 ## 4. 8a-1 — the software-checkpoint tier
 
