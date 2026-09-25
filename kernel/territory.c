@@ -566,6 +566,10 @@ u64 territory_format_ns(struct Territory *p, char *buf, u64 cap) {
         // declaration that cannot be observed cannot be audited. An operator
         // asking "is /viv/bin actually a pheno-linux mount?" reads it here.
         if (ok && (m->flags & MPHENO_LINUX)) ok = ns_put_str(buf, cap, &off, " pheno-linux");
+        // The covered directory is a union member in its own right (its line
+        // reads "mount <pt> <pt> covered"): shown, so an operator can see that
+        // the point's own names are searched and in what order.
+        if (ok && (m->flags & MCOVERED)) ok = ns_put_str(buf, cap, &off, " covered");
         if (ok) ok = ns_put_str(buf, cap, &off, "\n");
 
         if (!ok) { off = line_start; truncated = true; break; }   // discard partial
@@ -743,6 +747,38 @@ static bool mkey_in(const struct mkey *arr, int n, struct mkey k) {
     return false;
 }
 
+// Does any entry key on `mp`? Caller holds ns_lock.
+static bool mount_point_hosts_member(const struct Territory *t,
+                                     const struct Spoor *mp) {
+    for (int i = 0; i < t->nmounts; i++)
+        if (mount_key_eq(&t->mounts[i], mp)) return true;
+    return false;
+}
+
+// Open slot `ins` (shifting [ins .. nmounts) right; each struct copy MOVES its
+// source + mp_path refs, no ref change) and fill it with an entry keyed on
+// `mountpoint`. The caller has already taken the entry's source ref and checked
+// capacity. Caller holds ns_lock.
+static void mount_install_at(struct Territory *t, int ins, struct Spoor *source,
+                             struct Spoor *mountpoint, u32 flags) {
+    for (int j = t->nmounts; j > ins; j--)
+        t->mounts[j] = t->mounts[j - 1];
+    struct PgrpMount *e = &t->mounts[ins];
+    e->source      = source;
+    // #66 (I-33): retain the mount-POINT's namespace name for /proc/<pid>/ns.
+    // path_ref is NULL-safe (a kernel-internal mountpoint with no retained name
+    // -> NULL mp_path -> rendered "?"). Introspection-only: the entry keys on
+    // the (dc, devno, qid.path) identity below, never on mp_path.
+    e->mp_path     = mountpoint->path;
+    path_ref(e->mp_path);
+    e->mp_qid_path = mountpoint->qid.path;
+    e->mp_dc       = mountpoint->dc;
+    e->mp_devno    = mountpoint->devno;
+    e->flags       = flags;
+    e->_pad        = 0;
+    t->nmounts++;
+}
+
 // would_create_mount_cycle(t, source, mountpoint): would adding the mount edge
 // `key(mountpoint) -> key(source)` (walking onto the mount point crosses to the
 // source's tree) create a cycle in `t`'s mount-identity graph? I-3 (mount points
@@ -755,7 +791,9 @@ static bool mkey_in(const struct mkey *arr, int n, struct mkey k) {
 // mount edges to a fixed point (an entry whose mount-point key is reachable adds
 // its source key); if `key(mountpoint)` is then reachable, the new edge closes a
 // cycle (mountpoint -> source -> ... -> mountpoint). The trivial self-mount
-// (source identity == mountpoint identity) is the degenerate case.
+// (source identity == mountpoint identity) is the degenerate case. A covered
+// entry (MCOVERED) is a self-edge -- its source IS its point -- so it can never
+// add a key to `reach` and needs no exemption here.
 static bool would_create_mount_cycle(const struct Territory *t,
                                      const struct Spoor *source,
                                      const struct Spoor *mountpoint) {
@@ -791,7 +829,8 @@ int mount(struct Territory *territory, struct Spoor *source,
 
     if (!source_is_valid(source))       return -1;
     // The mount point is a transient resolved Spoor; we copy its IDENTITY
-    // (dc, devno, qid.path), never retain the Spoor. Reject NULL / corrupted.
+    // (dc, devno, qid.path), and retain the Spoor only as the covered member of
+    // a union this mount starts (below). Reject NULL / corrupted.
     if (!mountpoint)                    return -1;
     if (mountpoint->magic != SPOOR_MAGIC) return -1;
 
@@ -815,6 +854,19 @@ int mount(struct Territory *territory, struct Spoor *source,
     // the DAG here rather than relying on cross_mounts' loop bound, so a
     // cyclic mount cannot be installed + then resolve to a wrong endpoint.
     if (would_create_mount_cycle(territory, source, mountpoint)) { rc = -3; goto out; }
+
+    // Plan 9 cmount: an MBEFORE / MAFTER mount at a point with NOTHING mounted
+    // there also makes the covered directory a member (MCOVERED). Judged here,
+    // before the reposition below can remove this pair: a point that hosted it
+    // was not fresh, and re-mounting the sole member of an MREPL group must not
+    // grow a covered member (territory.tla BUGGY_FRESH_AFTER_REMOVE).
+    // MREPL wins over the ordering flags (Plan 9 encodes the three as one
+    // field), so it never starts a union; SYS_MOUNT refuses the combinations.
+    // Only a directory can be searched as a member: at a file point the mount
+    // stays plain (territory.tla FilePaths; Plan 9 refuses it, Emount).
+    bool starts_union = !(flags & MREPL) && (flags & (MBEFORE | MAFTER)) &&
+                        (mountpoint->qid.type & QTDIR) &&
+                        !mount_point_hosts_member(territory, mountpoint);
 
     // Idempotency: (key(mountpoint), source) pair already in the table → no new
     // entry, no refcount bump. Spec: <<path, s>> \notin mounts[p] precondition
@@ -916,41 +968,37 @@ int mount(struct Territory *territory, struct Spoor *source,
         // fall through to install the one new member below.
     }
 
-    if (territory->nmounts >= PGRP_MAX_MOUNTS) { rc = -2; goto out; }
+    // A union's first mount installs two entries: the covered directory's and
+    // the new member's. (starts_union excludes the reposition above, so no slot
+    // was freed there that this refusal could strand.)
+    if (territory->nmounts + (starts_union ? 2 : 1) > PGRP_MAX_MOUNTS) { rc = -2; goto out; }
 
-    // Take the per-entry reference BEFORE installing the entry. The path
-    // below is infallible after the ref, so no rollback is needed.
+    // Take the per-entry references BEFORE installing the entries. The path
+    // below is infallible after the refs, so no rollback is needed. The covered
+    // entry's source is `mountpoint` itself, retained -- the one case where the
+    // table keeps the point's Spoor rather than copying its key.
     spoor_ref(source);
+    if (starts_union) spoor_ref(mountpoint);
 
     // Choose the insertion index. MBEFORE opens a slot at the point's first
     // existing member (so the new member is searched first); every other flag
-    // (MAFTER / flagless / post-MREPL) appends after the point's members.
+    // (MAFTER / flagless / post-MREPL) appends after the point's members. A
+    // union's first mount finds no member, so both entries append, in Plan 9's
+    // order: <new, covered> for MBEFORE, <covered, new> for MAFTER.
     int ins = territory->nmounts;
     if (flags & MBEFORE) {
         for (int i = 0; i < territory->nmounts; i++) {
             if (mount_key_eq(&territory->mounts[i], mountpoint)) { ins = i; break; }
         }
-        // Shift [ins .. nmounts-1] right by one to open slot `ins`. Each struct
-        // copy MOVES its source + mp_path refs along (no ref change); mounts[]
-        // has room (nmounts < PGRP_MAX_MOUNTS, checked above).
-        for (int j = territory->nmounts; j > ins; j--)
-            territory->mounts[j] = territory->mounts[j - 1];
     }
-
-    struct PgrpMount *e = &territory->mounts[ins];
-    e->source      = source;
-    // #66 (I-33): retain the mount-POINT's namespace name for /proc/<pid>/ns.
-    // path_ref is NULL-safe (a kernel-internal mountpoint with no retained name
-    // -> NULL mp_path -> rendered "?"). Introspection-only: the entry keys on
-    // the (dc, devno, qid.path) identity below, never on mp_path.
-    e->mp_path     = mountpoint->path;
-    path_ref(e->mp_path);
-    e->mp_qid_path = mountpoint->qid.path;
-    e->mp_dc       = mountpoint->dc;
-    e->mp_devno    = mountpoint->devno;
-    e->flags       = flags;
-    e->_pad        = 0;
-    territory->nmounts++;
+    bool before = (flags & MBEFORE) != 0;
+    if (starts_union && !before) {
+        mount_install_at(territory, ins, mountpoint, mountpoint, MCOVERED);
+        ins++;
+    }
+    mount_install_at(territory, ins, source, mountpoint, flags);
+    if (starts_union && before)
+        mount_install_at(territory, ins + 1, mountpoint, mountpoint, MCOVERED);
     rc = 0;
 
 out:
@@ -969,10 +1017,13 @@ int unmount(struct Territory *territory, struct Spoor *mountpoint) {
     // mount/unmount/clone; capture the removed source + clunk it OUTSIDE the lock
     // (its Dev close hook may sleep).
     struct Spoor *to_clunk = NULL;
+    struct Spoor *cov_clunk = NULL;
     int rc = -1;
     spin_lock(&territory->ns_lock);
     for (int i = 0; i < territory->nmounts; i++) {
-        if (mount_key_eq(&territory->mounts[i], mountpoint)) {
+        // The covered directory is never unmounted by itself (MCOVERED).
+        if (mount_key_eq(&territory->mounts[i], mountpoint) &&
+            !(territory->mounts[i].flags & MCOVERED)) {
             // spoor_clunk (not spoor_unref) so the Dev's close hook runs if this
             // is the last holder -- the ARCH 9.6.6 lifecycle where the user
             // already closed the attach_9p fd and the mount-table was the only
@@ -996,8 +1047,27 @@ int unmount(struct Territory *territory, struct Spoor *mountpoint) {
             break;
         }
     }
+    // The covered directory leaves with the last member mounted at the point,
+    // so the point is a plain directory again rather than a union of itself.
+    if (rc == 0) {
+        int cov = -1;
+        bool mounted = false;
+        for (int i = 0; i < territory->nmounts; i++) {
+            if (!mount_key_eq(&territory->mounts[i], mountpoint)) continue;
+            if (territory->mounts[i].flags & MCOVERED) cov = i;
+            else                                      mounted = true;
+        }
+        if (cov >= 0 && !mounted) {
+            cov_clunk = territory->mounts[cov].source;
+            path_unref(territory->mounts[cov].mp_path);
+            for (int j = cov; j < territory->nmounts - 1; j++)
+                territory->mounts[j] = territory->mounts[j + 1];
+            territory->nmounts--;
+        }
+    }
     spin_unlock(&territory->ns_lock);
     if (to_clunk) spoor_clunk(to_clunk);
+    if (cov_clunk) spoor_clunk(cov_clunk);
     return rc;
 }
 

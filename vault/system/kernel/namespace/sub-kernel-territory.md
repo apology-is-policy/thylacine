@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-09-21
+updated: 2026-09-24
 ---
 ## Purpose
 
@@ -66,7 +66,8 @@ Return codes (the C API; **the SVC layer collapses every failure to
 
 - `bind` — `0` / `-1` cycle / `-2` duplicate / `-3` table full / `-4` self-bind.
 - `mount` — `0` (added OR idempotent no-op) / `-1` bad arg / `-2` table
-  full / `-3` would create a mount cycle.
+  full (a union's first mount needs two free slots) / `-3` would create a
+  mount cycle.
 - `unmount` — `0` / `-1` no entry at that identity.
 - `territory_chroot` — `0` (stamped or idempotent) / `-1` NULL source.
 - `territory_pivot_root` — `0` / `-1` NULL source **or no current root**
@@ -76,8 +77,9 @@ Return codes (the C API; **the SVC layer collapses every failure to
 
 **Mount keying is the full Plan 9 `(type, dev, qid)` triple.** An entry
 records the mount POINT's `(mp_dc, mp_devno, mp_qid_path)`; the
-mountpoint Spoor itself is never retained (the caller stalks it, `mount`
-copies the key, the caller clunks it). All three components are
+mountpoint Spoor itself is retained only as the covered member of a union
+the mount starts (the covered directory, below); otherwise the caller stalks
+it, `mount` copies the key, and the caller clunks it. All three components are
 load-bearing: `qid.path` is unique only *within* a `(dc, devno)`
 instance, and every dev9p session shares `dc == '9'` with root
 `qid.path == 0` — so `(dc, qid.path)` alone collides corvus against a
@@ -105,8 +107,12 @@ graph (fixed-point reachability over `binds[]`) — it is what
 the MOUNT identity graph with the identical algorithm over `(dc, devno,
 qid.path)` keys, rejecting a self-mount or a cross-tree oscillation with
 `-3`. It exists because [[fnd-stalk2-r1-f1]] falsified the claim that
-I-3 held "by construction" on the mount table. It is **not modeled** —
-see [[spec-territory]] and [[seam-mount-graph-unmodeled]].
+I-3 held "by construction" on the mount table. Its cross-tree half is
+**not modeled** — see [[spec-territory]] and [[seam-mount-graph-unmodeled]]
+— and its self-mount half is, since B-1d-u (`NoSelfMount`). The covered
+member a union's first mount installs is a self-edge by construction (its
+source IS its point): it never adds a key to `reach`, and the resolver never
+crosses it (below).
 
 **chroot and pivot differ only in a precondition.** `territory_chroot`
 establishes or replaces a root; `territory_pivot_root` REQUIRES an
@@ -343,7 +349,8 @@ cannot reach, no longer crosses the shed mounts and sees the underlying
 directory. (2) A ROOT-relative walk through joey's post-pivot `/bin` bind
 (the aliases above). (3) A union dirfd whose point's entries were shed is a
 plain handle on member[0]: names only a later member held are `ENOENT`,
-and `"."` is member[0] — never the covered directory (below). Such an fd is
+and `"."` is member[0] — never a covered directory the handle did not
+name (below). Such an fd is
 a handle on a file tree, not on the old namespace.
 A peer thread's resolution already in flight across the swap is the same
 case: the lock makes each LOOKUP atomic with the swap, not each
@@ -367,8 +374,8 @@ which is why the device witnesses exist: `usr/symlink-probe`'s `union-a` /
 directory: point and member[0] in different instances — a same-session
 union passes on a kernel with no seed at all) through a real chroot.
 
-**A dissolved union degrades to member[0], never to the covered directory**
-(audit r2 F1; the rule is [[sub-kernel-stalk]]'s to enforce, stated here
+**A dissolved union degrades to member[0], never to a covered directory the
+handle did not name** (audit r2 F1; the rule is [[sub-kernel-stalk]]'s to enforce, stated here
 because the shed is one of the two ways to reach it). A union handle's
 `point` is the directory the union was mounted over. Round 1's correction
 ("a union dirfd whose point's entries were shed answers `ENOENT`") was true
@@ -378,7 +385,11 @@ with no shed at all — `unmount("/")` until the union is empty, then
 `open("/")` — so it predates #80; the shed added a second route (hold the
 dirfd, `chroot` into an instance that cannot reach the point's). A mount used as a MASK
 over a directory in an unreachable tree therefore stops masking for
-holders of such an fd; nothing in-tree relies on more.
+holders of such an fd; nothing in-tree relies on more. Since B-1d-u the
+covered directory can itself be a MEMBER — first in order under `MAFTER`
+(the covered-directory section below) — and then member[0] IS that
+directory: the handle named it when it was opened, so degrading to it
+reveals nothing (`stalk.union_covered_dissolved`).
 
 ## Concurrency
 
@@ -661,6 +672,59 @@ remove that consume them.
 The spec grew a SEQUENCE-valued `mounts` (the set-valued model could not express
 order) with `WalkFirstHit` / `ReaddirDedupFirstWins` / `CreateTargetCorrect` /
 `RemoveTargetCorrect` / `OrderCorrect` and their buggy cfgs.
+
+## The covered directory (B-1d-u; 2026-09-24) — Plan 9's `cmount`, exactly
+
+Until B-1d-u a union searched only its GRAFTED members (the section above):
+the directory mounted over was never one, a lone `MBEFORE` was a one-member
+mount, and `bind -b dir /lib` hid the disk's `/lib`. The operator chose Plan 9
+unions ([[dec-2026-09-24-union-covered-directory]]): an `MBEFORE` / `MAFTER`
+mount at a DIRECTORY point that hosts no member also installs the covered
+directory as a member.
+
+- **`MCOVERED` (0x40) is kernel-internal.** `SYS_MOUNT`'s valid mask excludes
+  it, so no EL0 caller can mint or clear one. The entry carries no other
+  flag: never `MCREATE` (Plan 9 adds it with flag 0), so a create in a union
+  whose mounted members lack `MCREATE` stays `-T_E_ACCES`; never `MNOEXEC`
+  (the restriction scopes to the instance that was mounted —
+  `territory_mount.covered_noexec_scoped`).
+- **When (`starts_union`).** `!(flags & MREPL) && (flags & (MBEFORE|MAFTER))
+  && (mountpoint->qid.type & QTDIR) && !mount_point_hosts_member(...)`,
+  judged BEFORE the UM-8 F6 reposition: re-mounting the sole member of an
+  `MREPL` group with `MBEFORE` finds the point hosting a member, so it grows
+  no covered one (`territory.tla` `BUGGY_FRESH_AFTER_REMOVE`). `MREPL` wins
+  over the ordering flags and replaces the whole group, covered entry
+  included; a flagless mount adds none. A file point stays a plain mount
+  (`NoCoveredFile`); Plan 9 refuses it (`Emount`), and whether `SYS_MOUNT`
+  should is owed to the operator.
+- **Order and slots.** Both entries append in Plan 9's order (`mount_install_at`):
+  `<new, covered>` for `MBEFORE`, `<covered, new>` for `MAFTER`. Later ordered
+  mounts place around the covered entry like any member. The first mount
+  needs two free slots (`-2` otherwise, nothing installed).
+- **The one retained point.** The covered entry's source IS the mount-point
+  Spoor, `spoor_ref`'d before install. `unmount`, `MREPL`, the shed and
+  `territory_destroy` drop it exactly once and `territory_clone` refs it, as
+  for any source.
+- **Never crossed.** [[sub-kernel-stalk]]'s `stalk_cross_src` answers
+  `MCOVERED` with a clone of the point, and a mount-over-mount chain stops at
+  a point whose member[0] is covered. It is therefore not an edge of the
+  mount graph (`would_create_mount_cycle` adds no key for it), and I-3 holds
+  over the edges that are crossed.
+- **Leaving.** `unmount` removes the first NON-covered entry at the point,
+  then the covered entry if no mounted member remains, so the point is a
+  plain directory again, never a union of itself (`NoOrphanCovered`).
+- **Rendering + the shed.** `territory_format_ns` prints the entry as
+  `mount <pt> <pt> covered`. The shed sees a self-edge: it adds nothing to
+  the closure and is kept or shed with the members at its point
+  (`territory.shed_covered_shares_fate`).
+
+The first consumer is joey's post-pivot `/lib`: the initrd's `lib/` `MBEFORE`
+the disk's `/lib` ([[sub-stratum-boot]]). Spec: `UnionHasCovered` /
+`CoveredOnlyInUnion` / `CoveredIsItsPoint` / `CoveredPlacement` /
+`NoOrphanCovered` / `NoSelfMount` / `NoCoveredFile`, each failed by its own
+buggy config ([[spec-territory]]). Tests: ten `territory_mount.*` cases
+(`union_keeps_covered`, `no_covered_unless_fresh`, the `covered_*` eight),
+seven `stalk.union_covered_*`, and `territory.shed_covered_shares_fate`.
 
 ## VIVARIUM Design D + the pheno-mount (2026-09-05) — the phenotype declaration
 

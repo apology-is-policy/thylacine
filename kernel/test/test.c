@@ -268,6 +268,16 @@ void test_territory_mount_rejects_cycle(void);
 void test_territory_mount_mp_path_lifecycle(void);
 void test_territory_mount_format_ns(void);
 void test_territory_mount_lookup_ref_survives_unmount(void);
+void test_territory_mount_union_keeps_covered(void);   // Plan 9 unions
+void test_territory_mount_no_covered_unless_fresh(void);   // Plan 9 unions
+void test_territory_mount_covered_file_point_stays_plain(void);   // Plan 9 unions
+void test_territory_mount_covered_reposition(void);   // Plan 9 unions
+void test_territory_mount_covered_leaves_with_last(void);   // Plan 9 unions
+void test_territory_mount_covered_needs_two_slots(void);   // Plan 9 unions
+void test_territory_mount_covered_self_mount_refused(void);   // Plan 9 unions
+void test_territory_mount_covered_clone(void);   // Plan 9 unions
+void test_territory_mount_covered_noexec_scoped(void);   // Plan 9 unions
+void test_territory_mount_covered_format_ns(void);   // Plan 9 unions
 void test_territory_root_ref_survives_pivot(void);
 void test_territory_chroot_smoke(void);
 void test_territory_chroot_idempotent_same_spoor(void);
@@ -1083,6 +1093,13 @@ void test_stalk_remove_parent_reports_union_point(void);
 void test_stalk_mount_names_crossed_base(void);
 void test_stalk_mount_names_crossed_union_base(void);
 void test_stalk_union_dissolved_helper(void);
+void test_stalk_union_covered_walk(void);
+void test_stalk_union_covered_after(void);
+void test_stalk_union_covered_readdir(void);
+void test_stalk_union_covered_create(void);
+void test_stalk_union_covered_unmount(void);
+void test_stalk_union_covered_dissolved(void);
+void test_stalk_union_covered_holder(void);
 void test_stalk_pheno_symlink_reanchor(void);
 void test_stalk_path_accumulate(void);
 void test_stalk_path_dotdot(void);
@@ -1570,6 +1587,7 @@ void test_territory_shed_drops_nested_orphan(void);
 void test_territory_shed_full_table_boundary(void);
 void test_territory_shed_releases_mp_path_once(void);
 void test_territory_shed_initial_chroot_and_root_as_source(void);
+void test_territory_shed_covered_shares_fate(void);
 void test_pipe_smoke(void);
 void test_pipe_read_on_empty_returns_zero(void);
 void test_pipe_write_to_full_returns_zero(void);
@@ -2059,6 +2077,16 @@ struct test_case g_tests[] = {
     { "territory_mount.mp_path_lifecycle",                test_territory_mount_mp_path_lifecycle,                false, NULL },
     { "territory_mount.format_ns",                        test_territory_mount_format_ns,                        false, NULL },
     { "territory_mount.lookup_ref_survives_unmount",      test_territory_mount_lookup_ref_survives_unmount,      false, NULL },
+    { "territory_mount.union_keeps_covered",              test_territory_mount_union_keeps_covered,              false, NULL },
+    { "territory_mount.no_covered_unless_fresh",          test_territory_mount_no_covered_unless_fresh,          false, NULL },
+    { "territory_mount.covered_file_point_stays_plain",   test_territory_mount_covered_file_point_stays_plain,   false, NULL },
+    { "territory_mount.covered_reposition",               test_territory_mount_covered_reposition,               false, NULL },
+    { "territory_mount.covered_leaves_with_last",         test_territory_mount_covered_leaves_with_last,         false, NULL },
+    { "territory_mount.covered_needs_two_slots",          test_territory_mount_covered_needs_two_slots,          false, NULL },
+    { "territory_mount.covered_self_mount_refused",       test_territory_mount_covered_self_mount_refused,       false, NULL },
+    { "territory_mount.covered_clone",                    test_territory_mount_covered_clone,                    false, NULL },
+    { "territory_mount.covered_noexec_scoped",            test_territory_mount_covered_noexec_scoped,            false, NULL },
+    { "territory_mount.covered_format_ns",                test_territory_mount_covered_format_ns,                false, NULL },
     { "territory_mount.root_ref_survives_pivot",          test_territory_root_ref_survives_pivot,                false, NULL },
     { "territory.chroot_smoke",                           test_territory_chroot_smoke,                           false, NULL },
     { "territory.chroot_idempotent_same_spoor",           test_territory_chroot_idempotent_same_spoor,           false, NULL },
@@ -2083,6 +2111,7 @@ struct test_case g_tests[] = {
     { "territory.shed_full_table_boundary",               test_territory_shed_full_table_boundary,               false, NULL },
     { "territory.shed_releases_mp_path_once",             test_territory_shed_releases_mp_path_once,             false, NULL },
     { "territory.shed_initial_chroot_and_root_as_source", test_territory_shed_initial_chroot_and_root_as_source, false, NULL },
+    { "territory.shed_covered_shares_fate", test_territory_shed_covered_shares_fate, false, NULL },
     { "handles.alloc_close_smoke",     test_handles_alloc_close_smoke,     false, NULL },
     { "handles.rights_monotonic",      test_handles_rights_monotonic,      false, NULL },
     { "handles.dup_lifecycle",         test_handles_dup_lifecycle,         false, NULL },
@@ -3990,6 +4019,13 @@ struct test_case g_tests[] = {
     { "stalk.mount_names_crossed_base", test_stalk_mount_names_crossed_base, false, NULL },
     { "stalk.mount_names_crossed_union_base", test_stalk_mount_names_crossed_union_base, false, NULL },
     { "stalk.union_dissolved_helper", test_stalk_union_dissolved_helper, false, NULL },
+    { "stalk.union_covered_walk",        test_stalk_union_covered_walk,     false, NULL },
+    { "stalk.union_covered_after",       test_stalk_union_covered_after,    false, NULL },
+    { "stalk.union_covered_readdir",     test_stalk_union_covered_readdir,  false, NULL },
+    { "stalk.union_covered_create",      test_stalk_union_covered_create,   false, NULL },
+    { "stalk.union_covered_unmount",     test_stalk_union_covered_unmount,  false, NULL },
+    { "stalk.union_covered_dissolved",   test_stalk_union_covered_dissolved, false, NULL },
+    { "stalk.union_covered_holder",      test_stalk_union_covered_holder,   false, NULL },
     { "stalk.pheno_symlink_reanchor",  test_stalk_pheno_symlink_reanchor,  false, NULL },
     { "stalk.path_accumulate",         test_stalk_path_accumulate,         false, NULL },
     { "stalk.path_dotdot",             test_stalk_path_dotdot,             false, NULL },

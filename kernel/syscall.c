@@ -7855,7 +7855,8 @@ static s64 sys_dup_handler(u64 hraw, u64 new_rights_raw) {
 // mount-point Spoor (stalk-2: the SVC wrapper stalk's the path; this inner
 // does the source rights gate + flags check + the mount-table op). The mount
 // table keys on the mount point's (dc, devno, qid.path) identity, extracted
-// inside territory.c::mount -- the mountpoint Spoor is NOT retained.
+// inside territory.c::mount, which retains the mountpoint Spoor (its own ref)
+// only as the covered member of a union the mount starts.
 int sys_mount_for_proc(struct Proc *p, hidx_t source_fd,
                        struct Spoor *mountpoint, u32 flags) {
     if (!p)                                          return -1;
@@ -7948,7 +7949,8 @@ static s64 sys_mount_handler(u64 path_va, u64 path_len_raw,
 
     s64 rc = (s64)sys_mount_for_proc(p, (hidx_t)source_fd_raw, mp,
                                      (u32)flags_raw);
-    // territory.c::mount copied mp's identity, not mp itself -- release it.
+    // territory.c::mount copied mp's identity (and took its own ref where it
+    // keeps mp as a union's covered member) -- release ours.
     spoor_clunk(mp);
     return rc;
 }
