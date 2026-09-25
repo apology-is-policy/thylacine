@@ -12,7 +12,7 @@ description: Use when actually STOPPING an autonomous run and handing back to th
 
 **FIRST, THE TRIGGER — because this section reads as "chunk done -> write this", and that instruction is what ends the run.** Emitting the full summary IS the yield: final text ends the turn, and in this harness nothing restarts you afterwards but the user. So a summary written at a completed chunk silently converts "running through checkpoints" into "handing back", no matter what §"The 600k checkpoint line" says. Measured 2026-08-16, on the first autonomous run: the chunk landed, the summary got written because scripture said to, and the run stopped at ~160k of a 600k budget. The concrete ritual beats the abstract rule every time.
 
-**So the full summary below belongs to STOPPING, not to finishing.** Write it when you are actually handing back: at the 600k line, on an item from §"Autonomy + escalation", when genuinely blocked, or when the user asks. At a checkpoint you are running THROUGH, the checkpoint contract is discharged in **three lines or fewer** — what landed (hash), what is running, what is next — and then you **open the next item in the same turn**, without final prose.
+**So the full summary below belongs to STOPPING, not to finishing.** Write it when you are actually handing back: at the compaction line, on an item from §"Autonomy + escalation", when genuinely blocked, or when the user asks. At a checkpoint you are running THROUGH, the checkpoint contract is discharged in **three lines or fewer** — what landed (hash), what is running, what is next — and then you **open the next item in the same turn**, without final prose.
 
 **The tell:** if you are writing a `Key` table, an `Arc state` field, or an `Ahead` line, you are writing a hand-back. Stop and ask whether you actually intend to stop. If you do not, delete it and make the next tool call instead.
 
@@ -24,7 +24,7 @@ because behaviour that is only as good as remembering it was not good enough.
 
 What it does, so you recognize it rather than argue with it: on a stop it
 computes the same budget `ctx-hook.sh` does, and if you are **between 120k and
-the 600k checkpoint line** and have taken **>= 6 assistant turns since the user
+the checkpoint line** (`CKPT` in `.claude/ctx-thresholds`) and have taken **>= 6 assistant turns since the user
 last spoke** -- i.e. an autonomous run, not a reply -- it blocks ONCE and asks
 which of four cases applies. Three of them (an §"Autonomy + escalation" item, a
 question you have now answered, a genuine block) make stopping CORRECT: name it
@@ -33,7 +33,7 @@ for -- **open the chunk you just named on your own `Next` line instead of
 yielding.**
 
 It is a question, not a veto, because only you can tell an earned yield from an
-unearned one. It stays silent below 120k (conversational), at/above 600k
+unearned one. It stays silent below 120k (conversational), at/above the checkpoint line
 (stopping is what scripture wants there, and a second voice contradicting
 `ctx-hook.sh` would be worse than silence), and whenever `stop_hook_active` is
 already set. **It fails OPEN on every error path** -- a Stop hook that failed
@@ -45,7 +45,7 @@ counter resets constantly and the hook goes quiet during exactly the runs it is
 for.
 
 It lives IN THE REPO rather than in `~/.claude/` (where `ctx-hook.sh` sits, and
-whose absence §"The 600k checkpoint line" already flags as leaving that rule
+whose absence CLAUDE.md's compaction rules already flag as leaving that rule
 with no brake). One copy, no sync obligation, and it survives a fresh clone;
 `~/.claude/settings.json` points its `Stop` event at this path. Install on a new
 machine is that one settings entry.

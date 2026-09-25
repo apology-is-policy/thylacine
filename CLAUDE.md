@@ -47,11 +47,11 @@ These documents are binding. Implementation deviations either update scripture f
 | `docs/VISION.md` | What we're building and why. Properties ranking. Latency budget. Invariants (first pass). Non-goals. |
 | `docs/COMPARISON.md` | Where we sit vs comparable systems. Feature matrix. Positioning. |
 | `docs/NOVEL.md` | The 9 lead positions. Per-angle scope, done definition, dependencies, complexity, risk. |
-| `docs/ARCHITECTURE.md` | How we're building it. Foundational decisions with rationale. 20 enumerated invariants. Audit-trigger surface table. |
+| `docs/ARCHITECTURE.md` | How we're building it. Foundational decisions with rationale. The section-28 enumerated invariants. Audit-trigger surface table. |
 | `docs/ROADMAP.md` | In what order. 8 phases with deliverables, exit criteria, risks, dependencies. Risk register. |
 | `docs/TOOLING.md` | Development tooling and agentic loop. QEMU + 9P host share + agent protocol. |
-| the vault (`vault/`, in-tree on `main`) + `docs/reference/NN-*.md` (LEGACY) | As-built technical reference. Per-subsystem; deep; binding. **Being retired into the vault (2026-09-06): `docs/reference` is frozen; new prose goes to a dossier.** The vault lives in-tree on `main`, so you edit it in your own worktree. See "Reference documentation discipline" Part A. |
-| `docs/OPERATORS-MANUAL.md` + `docs/manual/NN-*.md` | The Thylacine Operator's Manual (operator-facing; one section per facility; shipped in-OS at `/manual`). Written to `docs/thylacine-operators-manual-writing-guide.md`, which is binding; encoded, installed and read per `docs/MANUAL-DESIGN.md`, also binding. See Part B below. |
+| the vault (`vault/`, in-tree on `main`) + `docs/reference/NN-*.md` (LEGACY) | As-built technical reference. Per-subsystem; deep; binding. **Being retired into the vault (2026-09-06): `docs/reference` is frozen; new prose goes to a dossier.** The vault lives in-tree on `main`, so you edit it in your own worktree. See `docs/agent/DOC-DISCIPLINE.md` Part A. |
+| `docs/OPERATORS-MANUAL.md` + `docs/manual/NN-*.md` | The Thylacine Operator's Manual (operator-facing; one section per facility; shipped in-OS at `/manual`). Written to `docs/thylacine-operators-manual-writing-guide.md`, which is binding; encoded, installed and read per `docs/MANUAL-DESIGN.md`, also binding. See `docs/agent/DOC-DISCIPLINE.md` Part B. |
 | `docs/AUDIT-TRIGGERS.md` | The full audit-trigger surface table (moved verbatim from this file 2026-08-05). One row per audit-bearing surface: files + invariants + the per-chunk prosecution addenda. Cumulative; binding. |
 | `docs/ERRORS.md` | Error-code system. Errno registry (Thylacine-wide, POSIX-aligned values), `snare:*` fault-note family (thematic; replaces EL0-unhandled-fault extinction with per-Proc termination), exit-status semantics, boundary-line translation policy. ABI-bearing; updates require user signoff. |
 | `CLAUDE.md` (this) | Operational framework for Claude Code sessions. |
@@ -92,7 +92,7 @@ Implementation is bound by the scripture above. If implementation needs somethin
 
 ## Audit-triggering changes
 
-Any change to a surface in `docs/AUDIT-TRIGGERS.md` MUST get a focused adversarial soundness audit before merge -- each round has historically found bugs the tests did not. Run it with the `audit-round` skill (holotype-reviewer on the highest available Fable at max effort, else the highest Opus; **never skip a round for want of Fable**). Fix every P0/P1/P2 before merge; P3s are tracked or closed with a stated reason; silent drops are forbidden.
+Any change to a surface in `docs/AUDIT-TRIGGERS.md` MUST get a focused adversarial soundness audit before merge -- each round has historically found bugs the tests did not. Run it with the `audit-round` skill (holotype-reviewer at max effort on the family the implementer is NOT: Opus reviews Fable's work, Fable reviews Opus's; when Fable is unavailable, Opus reviewing Opus is valid -- **never skip a round**). Fix every P0/P1/P2 before merge; P3s are tracked or closed with a stated reason; silent drops are forbidden.
 
 The path-scoped rule `.claude/rules/audit-triggers.md` reminds you when you read a file on a trigger surface. To find a file's row: grep `docs/agent/AUDIT-TRIGGERS-INDEX.md` or `docs/AUDIT-TRIGGERS.md` for the path.
 
@@ -162,7 +162,7 @@ One line each. The authoritative text, with the full enforcement cells, is `ARCH
 
 - Every audit finding that can be made to fail without the fix lands a regression test that fails before the fix and passes after.
 - Every spec bug shown by a `{spec}_buggy.cfg` gets a runtime regression test where feasible; otherwise the buggy cfg is the durable regression.
-- Pre-commit: the full suite on the default build. Pre-merge for invariant-bearing changes: all sanitizer matrices + all affected specs.
+- Before merge to `main`: the full suite on the default build; for invariant-bearing changes also all sanitizer matrices + all affected specs.
 - Build + test commands: below, and `docs/agent/GATES.md`.
 
 ---
@@ -188,7 +188,7 @@ When an implementation chunk exceeds one commit's reasonable scope, split into s
 - Format breaks (on-disk version bumps, wire-protocol ABI changes, syscall interface changes).
 - Destructive operations (`git push --force`, branch/tag deletion, hard reset of shared branches, database drops).
 - Architectural deviations from `ARCHITECTURE.md` — either update ARCH first (with user approval) or revert the deviation.
-- Cross-phase scope pivots — pulling *unrelated* future scope into the current phase, OR **deferring an item the current chunk depends on** (see "Chunk completeness — pull dependencies forward"), must be confirmed. Pulling a genuine *dependency* forward to complete the current chunk to its fullest spec is preferred and does NOT need confirmation — note it and proceed.
+- Cross-phase scope pivots — pulling *unrelated* future scope into the current phase, OR **deferring an item the current chunk depends on** (see "Chunk completeness" under Implementation patterns), must be confirmed. Pulling a genuine *dependency* forward to complete the current chunk to its fullest spec is preferred and does NOT need confirmation — note it and proceed.
 - Anything unclear in ARCH / ROADMAP / NOVEL / VISION / TOOLING.
 - Anything visible to others (pushes to shared branches, PR creation, external API calls, Slack/email posting).
 - Spending significant compute or external budget.
@@ -211,7 +211,7 @@ When an implementation chunk exceeds one commit's reasonable scope, split into s
 - **Attribution footer**: use the lines the harness's attribution reminder gives for this session.
 - **Prefer new commits over `--amend`.** Never force-push main or shared branches. Never skip hooks unless the user asks.
 - **Plain ASCII** in commit messages: `--` not em-dash, `->` not arrows, no section sign, straight quotes, `>=`/`<=`/`!=`, no emoji. Pass bodies via a quoted HEREDOC (`<<'EOF'`).
-- **Before committing**, run the full suite on the default build; invariant-bearing changes run the full matrix + specs.
+- **Before anything reaches `main`**, run the full suite on the default build; invariant-bearing changes run the full matrix + specs. A WIP commit on a side branch may skip it when its subject says so.
 - Audit-bearing commit structure and the audit-close anatomy: the `audit-round` skill.
 
 ---
@@ -269,7 +269,7 @@ At every resting point, whether or not you yield (full text in `docs/agent/SESSI
 
 - **Comments explain non-obvious WHY, never WHAT.** A well-named identifier already tells you WHAT. Never reference the current task / fix / PR ("used by X", "added for Y flow", "issue #123") — those belong in the PR description and rot.
 - **No multi-paragraph docstrings.** One short line max where needed.
-- **Terse responses, direct statements.** State results and decisions; don't narrate deliberation.
+- **Direct statements.** State results and decisions plainly. During long work, give the user a one-line note when you start a long-running step, change direction, or find something that changes the plan.
 - **No backwards-compat shims** without explicit need. Delete dead code; don't leave re-exports with `// removed` comments.
 - **Avoid comments that reference the author's intent** ("I chose X because..."). The reason goes in the commit message; the code stands on its own.
 - **C99 idiomatic style** (kernel) — `struct Foo` not `Foo_t`; lowercase function names; explicit types; no `#define` magic; no GNU extensions. Plan 9 dialect tendencies are *not* used (no `auto`, no nested functions, no channel keywords).
