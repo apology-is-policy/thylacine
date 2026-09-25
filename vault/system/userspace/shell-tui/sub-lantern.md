@@ -21,7 +21,7 @@ hazards: []
 abis: []
 design: ["docs/LANTERN-DESIGN.md", "docs/MANUAL-DESIGN.md", "docs/BEACON.md"]
 created: 2026-09-22
-updated: 2026-09-23
+updated: 2026-09-25
 ---
 ## Purpose
 
@@ -77,22 +77,28 @@ move for unrelated reasons), `MANIFEST_MAX` 64 KiB, and each slide capped at
 
 ## Mechanism
 
-**The clear is a GRID operation, and that is the whole trick.** `lantern::CLEAR`
-is `ESC[0m ESC[H ESC[2J`. In a Halcyon tile the pts host's vt digests it:
-`vt::Screen::erase_display(2)` blanks every cell IN PLACE -- no scroll-off, so
-the transcript does not accumulate the slides already shown -- and `Cell::blank`
-sets `span: 0`, so the previous slide's Beacon span tags leave with its text.
-It is not a mode change, so the tile stays in `ScreenMode::Normal`, the mode
-that lays the document out richly.
+**The clear is a grid operation in the presenter and a view operation in the
+tile.** `lantern::CLEAR` is `ESC[0m ESC[H ESC[2J`. In a Halcyon tile the pts
+host's vt digests it: `erase_display(2)` blanks every cell, `Cell::blank` sets
+`span: 0` so the previous slide's Beacon span tags leave with its text, and it
+is not a mode change, so the tile stays in `ScreenMode::Normal`, the mode that
+lays the document out richly. The vt also REPORTS the erase (TC-1, HALCYON
+14.13): the erased screen moves into the tile's history first, and a
+`ScreenErased` record pins the tile's view, so each slide starts at the top of a
+clean view with the history above it.
 
-**KNOWN GAP (2026-09-24, operator-found; fix ratified, TC-1a):** "the whole trick"
-is not whole. It proves slide two carries no residue of slide one, and says nothing
-about history from BEFORE the deck: in a tile with scrollback, halcyond
-bottom-anchors the live tail (PL-4), so the slide sits at the bottom of the view
-with earlier output above it -- and `clear` misbehaves the same way. Fresh tiles
-hide it. The fix is in halcyond's view, not here: an explicit `ScreenErased` wire
-record and a view pin (HALCYON 14.13 AMENDED 2026-09-24; LANTERN-DESIGN 3's
-withdrawn conclusion).
+This paragraph used to call the grid operation "the whole trick". It was not:
+it proved that slide two carries no residue of slide one and said nothing about
+history from BEFORE the deck. In a tile with scrollback the view bottom-anchored
+the live tail, so the slide sat at the bottom under the earlier output -- the
+operator's run of 2026-09-24. Every capture of the arc was a fresh tile, which
+has no history, so none could show it. By the operator's vote (2026-09-25) the
+slides already shown now accumulate in the tile's history, in order: scrolling
+up after a talk shows the talk. `ls-halcyon-lantern` leg 5 measures the case:
+150 lines of history, then the deck, and the band below slide one must be
+ground, with slide one's fresh-tile capture as the control. Its recipe bakes
+the Instrument profile, whose top padding is what the pinned view has to keep
+history out of.
 
 **The alt screen is the one thing to avoid**, and the avoidance is structural
 rather than a convention: `ScreenMode::AltScreen` makes a tile paint its raw

@@ -86,6 +86,14 @@ top until output next scrolls (HALCYON 14.13, AMENDED 2026-09-24).
 §3.1 gives. So the rich mode did require a halcyond change: one, in the view, and
 nothing in the presenter.
 
+**AMENDED 2026-09-25 — property 1 no longer holds, by the operator's vote.** A
+clear now moves the erased screen into the tile's history before blanking it
+(HALCYON 14.13: a clear keeps the screen it erases, and no escape deletes the history), so the scrollback
+DOES accumulate the slides already shown, in the order they were shown. What
+property 1 was really protecting survives: the pin puts each slide at the top of
+a clean view, so no slide is ever seen beside its predecessor. Scrolling up after
+a talk shows the talk.
+
 ### 3.1 Never the alternate screen
 
 `ScreenMode::AltScreen` makes `Tile::render` paint the raw mono grid and return

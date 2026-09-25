@@ -22,6 +22,126 @@ needed the operator.
 
 
 ---
+## 2026-09-25, morning (aux, Opus 5.5 1M, effort max) -- the trigger I widened by effect was a proxy too
+
+**What this was.** The close of TC-1a: two KT-1 audit rounds on the tile clear, the device red and green, the squash.
+The entry below this one records the decision round 1 reversed; it stands as written, and this supersedes it.
+
+**The reversal.** I had keyed the clear on its EFFECT: ED 0 from the first cell erases every cell, so it counted,
+because terminfo entries like `linux` and `screen` spell `clear` as `ESC[H ESC[J`. Round 1 (Opus reviewing Opus;
+Fable was out of credits) found the P0 in it: ut redraws every keystroke with `\r ESC[J` from the prompt block's
+top (libutopia line_editor.rs render_wrapped), and after `clear` or Ctrl-L that top is (0,0) -- so every keystroke
+after a clear filed the prompt line into the history. The operator's first vote had rejected an INFERRED clear, a
+proxy for the signal, in favour of an explicit record. I then put a proxy back inside the trigger that produces the
+record. The lesson I took: before widening a trigger by effect, list the in-tree emitters of the sequence. Here that
+list is short: ut's line editor is the only ED 0 emitter, and every clear in the tree is ED 2 (repl Ctrl-L, clear.rs,
+lantern, kaua's CLEAR_SCREEN). No TERM is set and no terminfo ships, so nothing emits the curses form today. What
+"fixed" covers: a clear is ED 2, ED 3 (DECSED is ED here) or RIS; ED 0 and ED 1 never count. The price: a future port
+running under a TERM whose `clear` is `ESC[H ESC[J` will not pin, and the answer then is a terminfo whose `clear` is
+ED 2, not a wider trigger.
+
+**Round 1's other findings.** F2 [P1]: the pinned view showed the last pad_top pixels of history above the tail, a
+whole line on Instrument; the fix is a pad_top gap and a floor of viewh + total, only when there is history, carried
+through every consumer of the tail's y (both session hit-test sites lift by the GRID_KEY frame y, which is pushed
+after the gap). F3 [P2]: "a program cannot erase the record" was false as written (overwrites, partial erases, DL/IL,
+the budget); the scripture now says what holds: no escape deletes the transcript, and a clear keeps the screen it
+erases. F4: RIS stayed on the alt screen -- the note in the entry below, "check before calling it a defect", was
+right to hedge and the check said defect; a reset is how a user rescues a screen a crashed TUI left on the alt
+buffer. F5, pre-existing: a restarted row 0 glued to the fragment above it when both left in one ScrollOff; vt now
+reports the restart edge (TopRestart) and the producer ships on it.
+
+**The sweep miss, recorded as a miss.** tc1_sab2 leg V9 was predicted to red one test and redded two: the rescue
+test's exact history assertion also catches blank rows travelling. The prediction was wrong, not the code; 10/11 as
+written. tc1_sab3 (the fixes) 13/13.
+
+**Round 2.** Opus 5.5 reviewing Opus 5.5 again (Fable still out of credits; MODEL start == end): 0 P0 / 0 P1 / 0 P2 /
+5 P3, so the close is clean, and all five are fixed. F1 is the one my parallel self-audit also found: RIS leaves the
+alt screen and then erases within the same byte, and the producer's AltLeave arm read the vt's top flag when it
+processed the boundary -- the post-reset state -- so a soft-wrapped line held across a TUI split in two. AltLeave now
+carries the restored main as it stood at the leave (cells, wrap flags, cursor, top flag). F2 is the one I saw and
+misjudged. On a one-row tile, put_char's restart at (0,0) fired on its own autowrap's continuation. My self-audit
+called it "timing only": at the chunk's end the CellDiff carried top=false before the fix and after it. The reviewer
+looked inside the chunk. Before TopRestart, rows that left in one chunk were joined by their own wrap flags whatever
+the top flag said, so the old code coalesced its way past the bug, and the flush I added mid-chunk made the split
+deterministic. What I take from it: a flush added mid-chunk removes whatever coalescing used to mask, so the consumer's
+view has to be re-derived at every new flush point, not at the chunk's end. F3 is a hole in round 1's own fix: the
+TopRestart flush could ship no CellDiff at all (nothing else changed, and the last top flag sent was false because the
+true was never sent inside one chunk), so the glue F5 was meant to end survived; the flush now forces the CellDiff.
+F4: the order inside an ED 2/3 or RIS byte (the Scrolls before the TopRestart) had no test; a seam test now covers
+all three. F5: doc drift, including a HALCYON 14.13 line citing `reset`, which does not ship in-tree. tc1_sab4 swept
+the five fixes, 9 legs, each with its exact red set written before the run and no "at least" sets: 9/9.
+
+**Three tool traps, each caught by checking the check.** A scoped `rustfmt --check` scan reported zero hunks, which
+read as clean until I printed how many it had parsed: my regex expected "line N" and rustfmt prints
+`Diff in <path>:<line>:`, so it matched nothing; with the regex fixed it found 3 hunks, now applied. zsh read
+`git show $r:usr/...` as the `:u` modifier on `$r` (uppercase the value) and mangled the ref; `${r}:usr/...` is the
+spelling. And the red bake died at r1hello's link, not in my code: main's B-1d rebuilt the fork clang every worktree
+shares (~/projects/llvm-thylacine) to refuse `-static-pie`, and aux-3's Rust target still asked for it. A shared
+binary reaches every tree before the change that matches it. aux-3 took main's two target hunks byte-identically
+(67d30cb1); main lands them on main with B-1d, and astra's branch needs the same until then.
+
+**Device.** The red, with the TC-1a code reverted to 4f2b7797 on an Instrument + session image: legs 1-3 PASS and leg
+5 FAIL by name ("band below slide one is inked (312710)"), 3/3 attempts. The capture showed both pre-fix defects at
+once: slide one at the bottom of the view under the history, and the last screen before the deck (lines 101-150 and
+the `lantern` command) gone -- the loss the move vote exists for. The green, same levers, this tree: legs 1-5 PASS on
+the first attempt, leg 5 measuring 0 ink below slide one, equal to its fresh-tile control; the capture shows slide one
+at the top of a clean view, the scrollbar's thumb at the bottom of a longer track (the history above, hidden).
+`tools/test.sh` on the default image: 1669/1669 PASS, 0 FAIL lines, 0 EXTINCTION. One more check that could not fail
+properly, caught because it failed closed: my green script counted leg PASS lines in the gate's stdout, a pattern I
+had validated only against the red run -- and the harness copies a scenario's leg lines to stdout only when it FAILS.
+On the pass it counted 0 of 5 and stopped; build/ls-ci-ls-halcyon-lantern.log holds all five. A check validated only
+on a failing run cannot know what a passing run prints.
+
+**Still open.** TC-1b, the user's history-delete chord. No finding from either round is open. The device gate proves
+the slide starts at the top of a clean view; it cannot see the moved screen, which sits above the view's top edge,
+so the move is proven on the host (the seam tests) and not yet on the device: TC-1b's leg needs scroll-up captures
+anyway, and is designed to prove the move and the delete together. The dossier currency
+debt (sub-lib-vt, sub-kaua-term, sub-halcyond brought current for TC-1 only) stays with the vault backlog.
+
+---
+## 2026-09-25, early (aux, Opus 5.5 1M, effort max) -- the pin was right; the record was not
+
+**What this was.** TC-1a, the implementation of the tile clear the operator voted on the day before (an explicit
+`ScreenErased` wire record; the history is the user's). The design was "settled": pin the view after an erase.
+
+**The gap, found by reading the consumer before writing the producer.** Writing the vt half, I checked what
+reaches a tile's history at all. `transcript.rs` answers: `push_scrolled_rows`, and nothing else -- `live_block` is
+"a per-frame render, never history". So under the pin alone, whatever was ON screen at a clear was gone: after
+`seq 1 150; lantern deck.toml`, the `lantern` command line and the ~40 lines above it vanish. The scripture I had
+committed the day before (4f2b7797) said "a program cannot erase the record of what ran in a tile" -- true of the
+scrolled-off history, false of the last screen. Before calling it settled, I pulled the exact question the operator
+had answered out of the transcript: it asked about ESC[3J, not about the on-screen rows. Not settled, so a third
+question, with the heritage attached (Plan 9's rio has no clear at all; tmux's scroll-on-clear defaults on; VTE
+moves the screen; xterm and kitty erase in place, xterm's cdXtraScroll optional). The operator took "move it into
+history". Its cost, stated in the question and accepted: a deck's slides accumulate in the history, which reverses
+LANTERN-DESIGN 3's property 1 -- a property the design had listed as a virtue.
+
+**A decision taken on the way, by effect rather than spelling.** ED 0 from the first cell erases every cell, and
+it is the `clear` of terminals whose terminfo `clear` is `ESC[H ESC[J`. Keying the report on the mode number would
+have missed it; the vt now asks whether every cell went. RIS joins it, and keeps history (xterm's RIS drops saved
+lines).
+
+**The lever my own resume note got wrong.** The note said to bake the Lantern E2E with `THYLACINE_HALCYON=1
+THYLACINE_HALCYON_SESSION=0`. The scenario's header says `THYLACINE_HALCYON_SESSION=1 ... --config ci`, and the
+bake-lever memory confirms the note's lever is `ls-halcyon`'s. That image would have SKIPped the scenario (exit 77,
+which the harness reports as 0) and read as a pass. Caught by reading the scenario before baking.
+
+**The sweep, 22 legs, all as predicted -- and three that taught something.** V11 renumbers the subtag on BOTH sides:
+the round trip stays green, and only the byte-level test pinned to the literal 6 reds -- a symmetric check cannot see
+a symmetric fault, so the literal pin is the test. V12 drops the decoder arm, and a PRE-EXISTING test, the DECTCEM
+whole-seam test, reds too, because lantern's clear now yields a record it must decode: an old test gained coverage
+it never asked for, which is worth knowing before someone "simplifies" its bytes. V16 moves the floor by the top
+padding and the render test reds, so it measures the formula rather than the direction.
+
+**Currency, the vault's version of a category hiding a debt.** Lint requires a fresh `updated:` on an edited
+dossier, and a fresh date stops `quaestor stale` flagging it -- but sub-lib-vt, sub-kaua-term and sub-halcyond were
+already stale by hundreds of lines. Each now carries an in-vault caveat that it was brought current for TC-1 only.
+
+**Still open.** The E2E red (pre-fix image) and green, `tools/test.sh`, the full `tools/test-rust.sh`, the KT-1 audit
+round; then TC-1b, the user's chord. Unverified and noted: this vt's RIS does not leave the alt screen (xterm's does)
+-- check before calling it a defect.
+
+---
 ## 2026-09-24, late (aux, Opus 5 1M, effort max) -- the guard was on the Proc; the thing it guarded was not
 
 **What this was.** astra asked a narrow question on yip 0124 -- her debug taint stamped one `Proc`, and

@@ -147,10 +147,18 @@ kaua-term -> halcyond (ordered):
   OSC 0/2 title, the hosted child's exit code, and a winsize ack.
   AMENDED 2026-09-24: `osc7_raw` (tag 5, the OSC 7 cwd report) had been on the
   wire and absent from this list. `screen_erased` (tag 6, TC-1) is new: the VT
-  erased the WHOLE normal screen -- ED 2, or ED 3, which the VT treats identically
-  -- and it is emitted in stream order like `bell` (the pending CellDiff flushed
-  first), never on the alt screen, and only under event capture. It carries no
-  payload. halcyond pins its view on it (HALCYON 14.13, AMENDED 2026-09-24), and
+  cleared the normal screen -- ED 2 or ED 3 (which the VT treats identically;
+  DECSED is plain ED here) or RIS, and never ED 0 or ED 1 whatever they cover
+  (AMENDED 2026-09-25: a line editor redraws from its prompt's top with ED 0) --
+  and it is emitted in stream order like `bell` (the pending ScrollOff and CellDiff
+  flushed first), never on the alt screen, and only under event capture. RIS
+  leaves the alt screen first (AMENDED 2026-09-25, as xterm, kitty and VTE do), so
+  a RIS there ships `mode normal` and the restored screen, then the erase of that
+  screen. It carries no payload. The rows the erase removed, through the last one with
+  text, travel FIRST as an ordinary `ScrollOff` (AMENDED 2026-09-25, operator
+  vote: a clear moves the screen into the history rather than deleting it), and
+  the blank follows as a CellDiff, so the record always arrives after both and no
+  ScrollOff can land after it. halcyond pins its view on it (HALCYON 14.13), and
   it is the only way halcyond learns of a clear: blank cells are never read as one.
 - `Mode { normal | alt_screen }` -- the ?1049/47/1047 flip; `alt_screen` => a full
   live grid, NO ScrollOff; `normal` => ScrollOff appends to the transcript.

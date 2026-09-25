@@ -2214,10 +2214,37 @@ clean.
 - **The rule.** After a whole-screen erase on the normal screen, the tile's view
   pins the live tail's top to the view's top: the rest of the view is the cleared
   screen, and the history stays above it, reachable by scrolling up. The pin holds
-  until the next `ScrollOff` — by then output has filled the screen, so the
-  ordinary bottom-anchored flow resumes with nothing to jump. Implemented as a
-  floor on the content height (a full view is reserved below the live tail's
-  top), so it is exact whatever the typeface metrics.
+  until the next `ScrollOff` (output filled the screen, a program scrolled it up
+  with SU or a scroll region whose top is row 0, or a shrink of the tile pushed
+  rows off), and then the ordinary bottom-anchored flow resumes. While pinned, the
+  history ends exactly at the view's top edge and the tail sits under its own top
+  padding, as in a fresh tile. A floor on the content height reserves a full view
+  below the history, so this is exact whatever the typeface metrics or the
+  profile's padding. A tile with no history is already laid out that way and does
+  not move. AMENDED 2026-09-25 (audit F2): the first cut let the last `pad_top`
+  pixels of history show above the tail, which on Instrument (28 px at 100 %) is a
+  whole line.
+- **What counts as a clear.** ED 2 or ED 3; DECSED, which is plain ED here because
+  no cell is protected; and RIS (`ESC c`). ED parameters past 3 are ignored, as
+  xterm ignores them. ED 0 and ED 1 never count, whatever they cover. AMENDED
+  2026-09-25 (audit F1): the first cut counted ED 0 from the first cell as a clear
+  (it read the erase by its EFFECT), but ED 0 from a prompt's top is a line
+  editor's redraw primitive. ut redraws every keystroke with `\r ESC[J`, so after a
+  clear left the prompt at the top-left, every keystroke was filed into the
+  history. Reading the effect was a proxy for the program's intent, which is the
+  inference the explicit record below exists to avoid.
+- **What the erase removed is kept (operator-ratified 2026-09-25).** Before it
+  blanks the screen, the VT hands every row through the last one with text to the
+  transcript, exactly as if those rows had scrolled off. So the history above the
+  cleared view runs unbroken to the moment of the clear, the command that cleared
+  it included. The pin alone would have let a clear delete up to a screen of the
+  record, because the transcript receives nothing but scrolled-off rows. This was
+  found at implementation, where it made the history rule below false. Heritage:
+  Plan 9's rio has no clear at all; tmux's `scroll-on-clear` (default on) and VTE
+  keep the screen the same way; xterm and kitty erase it in place. The accepted
+  consequence: a deck's slides, and a program that redraws the normal screen with
+  a clear, accumulate in the history, bounded by the tile's transcript budget and
+  deleted by the user's chord (TC-1b).
 - **How halcyond learns of it: an explicit record, never an inference.** The
   producer's VT reports the erase and the kaua-term forwards it in stream order as
   `Control::ScreenErased` (KAUA-TERM §1b; §14.3's mirror). Inferring it from blank
@@ -2228,10 +2255,24 @@ clean.
   already renders full-tile, and the pin is a property of the NORMAL screen, so a
   pin set before an alt-screen excursion (`clear`, then `nora`) still holds when
   the normal screen returns.
+- **RIS returns to the normal screen first (2026-09-25).** As in xterm, kitty and
+  VTE, `ESC c` on the alt screen leaves it before it erases, so the erase acts on
+  the normal screen: a reset sent to a tile a crashed TUI left on the alt screen
+  brings the rich normal screen back, its text moves to the history, and the view
+  pins. RIS also restores autowrap and forgets a saved cursor. Before this, RIS
+  blanked the alt grid and stayed there, and a reset could not rescue the tile.
+  No in-tree tool sends RIS yet (there is no `reset` or `tput`); a ported one, or
+  any program that prints `ESC c`, reaches this path.
 - **The history belongs to the user.** ED 3 ("erase saved lines", which `clear`
   sends after ED 2) cleans the VIEW exactly as ED 2 does and **never deletes the
-  transcript**. A program cannot erase the record of what ran in a tile, Beacon
-  objects and their verbs included. Deleting a tile's history is a USER action: a
+  transcript**, and neither does RIS, which drops saved lines in xterm. No escape
+  a program sends deletes the transcript, Beacon objects and their verbs
+  included, and a clear keeps the screen it erases. NARROWED 2026-09-25 (audit
+  F3), that is the whole guarantee. The live screen stays the program's to
+  rewrite: an overwrite, a partial erase, DL/IL or a scroll region can remove
+  on-screen text without keeping it, as in any terminal. And the transcript is
+  bounded, so enough output evicts its oldest lines, as scrollback always has.
+  Deleting a tile's history is a USER action: a
   chrome chord (TC-1b). This follows Plan 9, where a window's text belongs to the
   user, and the Genera listener, whose Clear Output History is a command the user
   gives rather than an escape a program sends. xterm, VTE and kitty let ESC[3J

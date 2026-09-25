@@ -420,6 +420,63 @@ The self-audit found the round's only P1, and it predates the seal: **`/proc/<pi
 
 Verification: canonical **1662/1662 PASS**, 0 FAIL lines (default image, isolated worktree), in-guest `/debug-probe` PASS on the owner axis; final rebuild after the sabotage legs **1662/1662**, ELF `0ef66f3df8964cd7`, no kernel source newer (276 compared). RED-first in two legs of two guards each, every pair in different tests, each FAIL naming its own guard: kregs' CAP tier forced open + environ dropped from the image set -> exactly `kregs (owner axis): x19..x28 withheld (I-16)` + the three environ-seal assertions (predicate, disclosure, scope) (1658); kregs dropped from the image set + imperium on the sealed predicate -> exactly `the dump seal refuses a kregs READ` + the owner AND the new cross-principal `CAP_HOSTOWNER` I-25 legs (1659). Restores byte-identical. In the sabotaged boots the kernel suite gates the boot, so the probe never ran there; its owner-axis zero check is proven by the canonical boots only. proc_seal's extinction is argued, not unit-tested (it halts).
 
+## TC-1a: a clear in a tile keeps the record and pins the view — 2026-09-25
+
+From the operator's Lantern-over-Haul run: "lantern doesn't clear". halcyond's PL-4 view lays the live tail through
+its content rows and bottom-anchors it, so after an erase a tile with history showed that history filling the view
+above a short tail -- and `clear` was broken the same way. Fresh tiles hid it; every capture of the Lantern arc was
+one. Three operator votes: an EXPLICIT wire record (kaua `Control::ScreenErased`, subtag 6), never an inference; the
+HISTORY IS THE USER'S (ESC[3J never deletes it; TC-1b's chord does); and, found at implementation, a clear MOVES the
+erased screen into the history. The transcript receives only scrolled-off rows, so the pin alone would have let a
+clear delete up to a screenful of the record, which made the history vote's own rule false.
+
+- **vt.** A clear is ED 2/3 (DECSED is ED here) or RIS; ED 0/1 never count (audit F1: ut's per-keystroke `\r ESC[J`
+  redraw), and ED past 3 is ignored. On the
+  normal screen under capture, `screen_to_history` pushes a `Scroll` for every row through the last with text BEFORE
+  the blank (the last row's wrap flag cleared); `note_screen_erased` pushes `Boundary::ScreenErased` AFTER it.
+- **kaua-term.** `Control::ScreenErased`, mapped like `Bell` (flush first), so the wire order is ScrollOff (the
+  erased rows), CellDiff (the blank), the record. Wire subtag 6, no payload.
+- **halcyond.** A `pinned` latch on the tile: set by the record in Normal mode only, cleared by any ScrollOff,
+  untouched by a Mode flip. While pinned and with history, `render` puts a `pad_top` gap before the tail and floors
+  the content height at `viewh + total` inside the lane loop (audit F2), so the history ends at the view's top edge
+  and the tail starts where a fresh tile's does; with no history the tile lays out as a fresh one.
+- **RIS (audit r1 F4).** A reset returns to the main screen first (xterm, kitty, VTE), then resets DECAWM and
+  DECSC; it never drops history. No in-tree tool sends RIS yet.
+- **A restarted row 0 (r1 F5, pre-existing; r2 F2, F3).** vt reports restart_top's true->false edge as
+  `Boundary::TopRestart` (capture only, main screen only), and the producer ships on it with the CellDiff forced,
+  so a restarted row never glues to the fragment above it, even when the restart changes nothing else. An
+  autowrap onto (0,0), on a one-row screen, is the row's continuation and not a restart.
+- **Leaving the alt screen (r2 F1).** `Boundary::AltLeave` carries the restored main screen as it stood at the
+  leave (cells, wrap flags, cursor, top flag): RIS leaves and then erases within the same byte, so the producer
+  never reads the vt's post-byte state for it.
+- **Scripture + dossiers.** HALCYON 14.13 (the move, what counts as a clear, RIS), KAUA-TERM 1b, LANTERN-DESIGN 3
+  (property 1 no longer holds: the slides shown accumulate in the history). sub-lib-vt, sub-kaua-term, sub-halcyond
+  (each carries a currency caveat: edited for TC-1 only) and sub-lantern.
+- **Gate.** `ls-halcyon-lantern` leg 5: 150 lines of history, then the deck; the band below slide one must be ground,
+  with slide one's fresh-tile capture as its control. `gfx_ink.py --rect` counts ink in a fractional rectangle
+  against the WHOLE image's ground.
+
+Audit (KT-1), two rounds, both Opus 5.5 reviewing Opus 5.5 (Fable out of credits; MODEL start == end in each).
+Round 1: 1 P0 (ED 0 from the first cell counted as a clear, so after a clear every keystroke of ut's `\r ESC[J`
+redraw filed the prompt line into history) / 1 P1 (the pinned view showed pad_top px of history) / 1 P2 (the
+"cannot erase the record" claim) / 4 P3. Round 2: 0 / 0 / 0 / 5 P3. All fixed; the close is clean. Closed list:
+memory `audit_tc1_closed_list.md`; the KT-1 row's TC-1a addendum in `docs/AUDIT-TRIGGERS.md`.
+
+Verification: host, the final tree: `tools/test-rust.sh` (every crate) PASS, 27 crates / 1935 tests / 0 failing (the
+known posture: libutopia's 69 stranded tests, tracked in OPEN-BUGS, and haul's one live-server test, quarantined by
+design); the touched crates vt 75 / kaua-term 49 / halcyond 340 / coreutils 5. RED-first on the host: four sabotage
+sweeps, 55 legs, one mechanism per leg, each leg's exact red set written by name before the run, every file restored
+by sha256 -- 22/22 (the mechanism), 10/11 (the RIS fold-in and the legs it touched; V9 redded two tests where one was
+predicted, a wrong prediction, not wrong code), 13/13 (round-1 fixes), 9/9 (round-2 fixes). Device,
+`ls-halcyon-lantern` on an image baked `THYLACINE_HALCYON_SESSION=1 THYLACINE_HALCYON_PROFILE=instrument --config ci`:
+RED with the TC-1a code reverted to 4f2b7797 -- legs 1-3 PASS, leg 5 FAIL by name ("band below slide one is inked
+(312710)"), 3/3 attempts, the capture showing slide one at the bottom under the history and the last screen (101-150
+and the command) gone. GREEN on this tree, same levers: legs 1-5 PASS on the first attempt, leg 5 measuring 0 ink
+below slide one, equal to its fresh-tile control. `tools/test.sh` on the default image: 1669/1669 PASS, 0 FAIL lines,
+0 EXTINCTION. No leg-5 capture can see the moved screen (it sits above the view's top edge): the host seam tests prove
+the move, and TC-1b's device leg (scroll up after the clear, then after the chord) is designed to prove it with the
+delete.
+
 ## H3 + C: the image join, and the debug taint — 2026-09-24
 
 astra raised the shared-address-space question on yip 0124 while designing the debug taint; aux widened it
