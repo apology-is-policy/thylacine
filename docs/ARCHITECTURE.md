@@ -2351,7 +2351,9 @@ their bare names (cpio root, resolved via cwd=`/`); post-pivot spawns name
 command containing `/` is used as-is) -- the Plan 9/Unix split where the kernel
 resolves a path and the shell does `$path`. A confined Proc that does NOT inherit the
 `/bin` bind cannot name the system binaries (the leak stays closed); a container with
-its own root + binaries can exec them (the capability opens). v1.x seams: a
+its own root + binaries can exec them (the capability opens). The initrd root also
+holds `lib/` (§14.5), so `/bin` lists it as a directory, as it lists the mount-point
+directories; the loader reaches `/lib` through its own union (§6.5). v1.x seams: a
 disk-installed `/bin` (the "real installer", pulling the recorded host-bake
 corpus-populate forward) and spawn-from-fd.
 
@@ -3173,17 +3175,17 @@ What slate provides:
 
 ### 14.5 ramfs (early boot)
 
-Before Stratum mounts, the kernel uses a simple in-memory filesystem (`kernel/devramfs.c`):
-- Per-inode list of pages.
-- B-tree-keyed name → inode map per directory.
-- No persistence; entirely in RAM.
-- Mounted from cpio at boot.
+Before Stratum mounts, the kernel serves the initrd, a cpio newc archive, as a read-only in-memory filesystem (`kernel/devramfs.c`):
+- No persistence: each entry points into the initrd image, which stays in RAM.
+- A static tree, built when the archive loads. Each entry keeps its parent and its last name component, and walk, `..`, readdir and stat work per directory (operator vote 2026-09-25, `dec-2026-09-25-devramfs-directories`; the flat table it replaces was P4-E's scope).
+- Six empty synthetic directories at the root (`srv`, `proc`, `ctl`, `dev`, `hw`, `env`) exist only to be mounted on (§9.6).
+- The load skips, and counts, an entry it cannot place: a malformed name, a missing parent directory, a duplicate path, a mount-point name at the root, or a type other than a file or a directory.
 
-Unmounted and freed once Stratum is running.
+The initrd is never freed. After the pivot, joey binds its root onto `/bin` (§9.6.8) and its `lib/` `MBEFORE` the disk's `/lib` (§6.5), so the binaries and their loader live once, in the initrd.
 
 ### 14.6 tmpfs
 
-Same implementation as ramfs but persists for the system's lifetime. Mounted at `/tmp` and `/run`.
+A writable in-memory filesystem that persists for the system's lifetime: a per-inode list of pages, and a B-tree-keyed name → inode map per directory. Mounted at `/tmp` and `/run`.
 
 `/tmp` is typical user-tmp (lots of churn; cleared at boot — a fresh tmpfs is mounted).
 `/run` is system runtime state (sockets, pid files, daemon state); cleared at boot.
