@@ -4,7 +4,7 @@ type: chg
 title: "proc.c re-swept after LINEAGE: the address-space extraction, the second rfork shape, and the vfork park"
 date: 2026-08-15
 arc: arc-vault
-commits: ["*(pending)*"]
+commits: ["065e58b0"]
 touched: [sub-kernel-proc, sub-kernel-death, seam-rfork-flags-unimplemented]
 established: []
 closed: []

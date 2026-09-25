@@ -4,7 +4,7 @@ type: chg
 title: "exec re-swept after LINEAGE: a seam closed sideways, and a prediction that came true"
 date: 2026-08-15
 arc: arc-vault
-commits: ["*(pending)*"]
+commits: ["6acbde5c"]
 touched: [sub-kernel-exec]
 established: []
 closed: []

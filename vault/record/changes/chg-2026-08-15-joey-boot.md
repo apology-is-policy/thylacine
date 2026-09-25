@@ -4,7 +4,7 @@ type: chg
 title: "joey re-swept after Warp-2: a mount deliberately not made, and the scope of what this dossier owns"
 date: 2026-08-15
 arc: arc-vault
-commits: ["*(pending)*"]
+commits: ["bcaa6b0a"]
 touched: [sub-stratum-boot]
 established: []
 closed: []

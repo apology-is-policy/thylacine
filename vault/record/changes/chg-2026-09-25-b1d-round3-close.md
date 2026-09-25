@@ -4,7 +4,7 @@ type: chg
 title: "B-1d holotype round 3 close: the confined leg's second control, five EXTINCTION bodies restored, the stale-path sweep finished (0 P0 / 0 P1 / 1 P2 / 6 P3, the P2 self-found)"
 date: 2026-09-25
 arc: arc-boosty
-commits: ["*(pending)*"]
+commits: ["dfdd6344"]
 touched:
   - sub-pouch-mem
   - sub-stratum-boot

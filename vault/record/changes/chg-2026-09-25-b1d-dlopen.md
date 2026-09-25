@@ -4,7 +4,7 @@ type: chg
 title: "B-1d (dlopen): SYS_BURROW_MAP_FILE, PT_INTERP for native execs, libc.so as the loader, the initrd's bin/ and lib/, /lib as a union, and the device witness"
 date: 2026-09-25
 arc: arc-boosty
-commits: ["*(pending)*"]
+commits: ["dfdd6344"]
 touched:
   - sub-kernel-exec
   - sub-kernel-syscall-abi

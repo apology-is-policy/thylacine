@@ -4,7 +4,7 @@ type: chg
 title: "Two dossiers verified current without change: churn measured per file, not per surface"
 date: 2026-08-15
 arc: arc-vault
-commits: ["*(pending)*"]
+commits: ["ea6d23a3"]
 touched: [sub-kernel-caps, sub-kernel-jobctl]
 established: []
 closed: []

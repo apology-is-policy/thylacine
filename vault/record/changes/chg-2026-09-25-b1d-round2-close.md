@@ -4,7 +4,7 @@ type: chg
 title: "B-1d holotype round 2 close: the bin/ move's four breakers, the escape leg walks its .., the initrd root guarded (4 P0-class closed in the round + 0 P0 / 0 P1 / 1 P2 / 5 P3)"
 date: 2026-09-25
 arc: arc-boosty
-commits: ["*(pending)*"]
+commits: ["dfdd6344"]
 touched:
   - sub-kernel-joey
   - sub-pouch-mem
